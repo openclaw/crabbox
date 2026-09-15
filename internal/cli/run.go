@@ -403,6 +403,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	fs := newFlagSet("run", a.Stderr)
 	runFlags := registerRunFlags(fs, defaults, ordinaryLeaseCreateFlagRegistrationOptions())
 	gitSeedSource := fs.String("git-seed-source", "", "Git metadata source: origin or explicit offline local objects")
+	syncSource := fs.String("sync-source", "", "source owner: git, directory, or jj")
+	syncRevision := fs.String("sync-revision", "", "recorded native JJ revision; empty selects live working files")
 	var requiredArtifactChanges stringListFlag
 	fs.Var(&requiredArtifactChanges, "require-artifact-change", "require created or changed bytes at an exact relative file path after successful Linux SSH execution; identical rewrites fail; repeatable")
 	var failureDownloads stringListFlag
@@ -737,6 +739,14 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		cfg.Sync.Checksum = *checksumSync
 		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
+	if flagWasSet(fs, "sync-source") {
+		cfg.Sync.Source = *syncSource
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
+	}
+	if flagWasSet(fs, "sync-revision") {
+		cfg.Sync.Revision = *syncRevision
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
+	}
 	if flagWasSet(fs, "git-seed-source") {
 		cfg.Sync.GitSeedSource = *gitSeedSource
 		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
@@ -762,11 +772,27 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		cfg.Results.FailOnFailures = *failOnTestFailures
 		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
-	repo, err := findSyncRepo(cfg, !*noSync)
+	jjSync := !*noSync && effectiveSyncSource(cfg) == "jj"
+	if jjSync && (strings.TrimSpace(*freshPRValue) != "" || *applyLocalPatch || strings.TrimSpace(*readyPool) != "" || shouldAutoHydrateActions(cfg, *noHydrate, false, FreshPRSpec{}, *syncOnly)) {
+		return Exit(2, "sync.source=jj owns plain source files and cannot use fresh PR, ready pools or Actions hydration; use a raw workspace with --no-hydrate")
+	}
+	if jjSync && providerSelectionIsActionable(cfg) {
+		provider, providerErr := ProviderFor(cfg.Provider)
+		if providerErr != nil {
+			return providerErr
+		}
+		if err := validatePlainSourceProvider(provider.Spec(), "jj"); err != nil {
+			return err
+		}
+	}
+	repo, err := findSyncRepo(ctx, cfg, !*noSync)
 	if err != nil {
 		return err
 	}
 	directorySync := !*noSync && effectiveSyncSource(cfg) == "directory"
+	if jjSync {
+		cfg.Sync.GitSeed, cfg.Sync.Fingerprint = false, false
+	}
 	if directorySync {
 		if err := validateDirectorySyncConfig(cfg); err != nil {
 			return err
@@ -931,6 +957,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if localGitSeed && backend.Spec().Kind != ProviderKindSSHLease {
 		return Exit(2, "local Git seeding requires an SSH-backed provider that supports ordinary workspace sync")
+	}
+	if jjSync {
+		if err := validatePlainSourceProvider(backend.Spec(), "jj"); err != nil {
+			return err
+		}
 	}
 	if directorySync {
 		if err := validateDirectorySyncProvider(backend.Spec()); err != nil {
@@ -1225,6 +1256,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return Exit(2, "attest key: %v", err)
 		}
 	}
+	var jjSource preparedJJSync
+	if jjSync {
+		jjSource, err = prepareJJSync(ctx, repo, cfg, *forceSyncLarge, a.Stderr)
+		defer func() {
+			cleanupErr := jjSource.cleanup()
+			err = errors.Join(err, cleanupErr)
+			runFailure = errors.Join(runFailure, cleanupErr)
+		}()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(a.Stderr, "JJ source mode=%s recorded_commit=%s content_sha256=%s\n", jjSource.Mode, jjSource.Identity.Commit, jjSource.ContentDigest)
+	}
 	var localSeed preparedLocalGitSeed
 	if localGitSeed {
 		localSeed, err = prepareLocalGitSeed(ctx, repo, cfg, *forceSyncLarge, a.Stderr)
@@ -1237,7 +1281,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			runFailure = errors.Join(runFailure, cleanupErr)
 		}()
 	}
-	if !*noSync && freshPR.Empty() && !localGitSeed {
+	if !*noSync && freshPR.Empty() && !localGitSeed && !jjSync {
 		if directorySync {
 			excludes, err := syncExcludes(repo.Root, cfg)
 			if err != nil {
@@ -1693,8 +1737,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		workdir = remoteJoin(cfg, leaseID, freshPR.WorkdirName())
 	} else {
 		state, stateErr := readActionsHydrationState(ctx, target, leaseID)
-		if stateErr != nil && (directorySync || localGitSeed) {
+		if stateErr != nil && (directorySync || localGitSeed || jjSync) {
 			source := "directory sync"
+			if jjSync {
+				source = "native JJ sync"
+			}
 			if localGitSeed {
 				source = "local Git seed"
 			}
@@ -1704,6 +1751,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return recordFailure(Exit(7, "verify ready-pool Actions hydration marker: %v", stateErr))
 		}
 		if stateErr == nil && state.Workspace != "" {
+			if jjSync {
+				return recordFailure(Exit(2, "native JJ sync cannot modify an Actions-owned workspace; use a fresh raw workspace"))
+			}
 			if localGitSeed {
 				return recordFailure(Exit(2, "local Git seeding cannot modify an Actions-owned workspace; use a fresh raw workspace"))
 			}
@@ -1966,7 +2016,15 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	originDisposition := classifyGitOrigin(repo.RemoteURL)
 retrySync:
-	plainManifestMode := directorySync || (!localGitSeed && originDisposition != gitOriginRemoteAttemptSafe)
+	plainManifestMode := jjSync || directorySync || (!localGitSeed && originDisposition != gitOriginRemoteAttemptSafe)
+	if jjSync && isWindowsNativeTarget(target) {
+		return recordFailure(Exit(2, "native JJ sync does not yet support native-Windows archive replacement"))
+	}
+	if jjSync {
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteRequireNoSourceMetadata(workdir), idempotentSSHRetryDelay); err != nil {
+			return recordFailure(Exit(7, "native JJ receiver requires a raw workspace without Git or JJ metadata: %v", err))
+		}
+	}
 	if fullResyncRequested && hydratedByActions && !*syncOnly {
 		if !autoHydrateActions {
 			return recordFailure(Exit(2, "--full-resync would invalidate the adopted Actions workspace for %s, but this run cannot rehydrate it; configure actions.workflow and omit --no-hydrate, or use --sync-only", leaseID))
@@ -2079,7 +2137,11 @@ retrySync:
 		stepStart = time.Now()
 		var excludes SyncExcludeRules
 		var manifest SyncManifest
-		if localGitSeed {
+		if jjSync {
+			manifest, excludes = jjSource.Manifest, jjSource.Excludes
+			timings.syncMode = "jj-" + jjSource.Mode
+			timings.syncTransferFiles, timings.syncTransferBytes = len(manifest.Files), manifest.Bytes
+		} else if localGitSeed {
 			manifest, excludes = localSeed.Snapshot.Manifest, localSeed.Snapshot.Excludes
 			timings.syncMode = "git-local"
 			timings.syncTransferFiles, timings.syncTransferBytes = len(manifest.Files), manifest.Bytes
@@ -2110,6 +2172,9 @@ retrySync:
 			coherence = gitCoherencePlan{}
 		}
 		syncSourceRoot := repo.Root
+		if jjSync {
+			syncSourceRoot = jjSource.Root
+		}
 		if localGitSeed {
 			syncSourceRoot = localSeed.Snapshot.Root
 		}

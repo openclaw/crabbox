@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Sync native Jujutsu workspaces without converting them to Git: select live files or a recorded revision with `--sync-source jj` and `--sync-revision`, inspect native identities in `sync-plan`, and transfer through managed POSIX/WSL SSH sync. [Issue 1081](https://github.com/openclaw/crabbox/issues/1081). Thanks @atimmer.
 - Crownest status waits consistently preserve caller cancellation while sharing request deadlines and polling with other providers. [PR 2276](https://github.com/openclaw/crabbox/pull/2276).
 
 ## 0.60.0 - 2026-09-14

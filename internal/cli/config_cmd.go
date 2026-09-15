@@ -193,6 +193,7 @@ func configShowView(cfg Config) map[string]any {
 		"idleTimeout":                cfg.IdleTimeout.String(),
 		"sync": map[string]any{
 			"source":        effectiveSyncSource(cfg),
+			"revision":      cfg.Sync.Revision,
 			"exclude":       configuredExcludes(cfg).patterns(),
 			"include":       syncIncludes(cfg),
 			"delete":        cfg.Sync.Delete,
@@ -650,6 +651,9 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(w, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)
 	fmt.Fprintf(w, "sync source=%s\n", effectiveSyncSource(cfg))
+	if cfg.Sync.Revision != "" {
+		fmt.Fprintf(w, "sync revision=%s\n", cfg.Sync.Revision)
+	}
 	fmt.Fprintf(w, "sync delete=%t checksum=%t git_seed=%t git_seed_source=%s git_overlay=%t fingerprint=%t base_ref=%s excludes=%d includes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, effectiveGitSeedSource(cfg), cfg.Sync.GitOverlay, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg).rules), len(syncIncludes(cfg)), cfg.Sync.Timeout)
 	fmt.Fprintf(w, "env allow=%s\n", strings.Join(cfg.EnvAllow, ","))
 	fmt.Fprintf(w, "run preflight_tools=%s\n", blank(strings.Join(cfg.Run.PreflightTools, ","), "-"))

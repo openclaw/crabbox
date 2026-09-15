@@ -29,6 +29,50 @@ import (
 
 const powerShellEncodedCommandPrefix = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
 
+func TestRemoteRequireNoSourceMetadata(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX receiver command")
+	}
+	for _, kind := range []string{"raw", "new", "git", "nested-git", "bare-git", "jj"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			workdir := root
+			switch kind {
+			case "new":
+				workdir = filepath.Join(root, "not-created", "workspace")
+			case "git", "nested-git", "bare-git":
+				args := []string{"init", "--quiet"}
+				if kind == "bare-git" {
+					args = append(args, "--bare")
+				}
+				args = append(args, root)
+				if out, err := exec.CommandContext(t.Context(), "git", args...).CombinedOutput(); err != nil {
+					t.Fatalf("init fixture: %v: %s", err, out)
+				}
+				if kind == "nested-git" {
+					workdir = filepath.Join(root, "new-workspace")
+				}
+			case "jj":
+				if err := os.Mkdir(filepath.Join(root, ".jj"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			marker := filepath.Join(root, "keep.txt")
+			if err := os.WriteFile(marker, []byte("existing receiver data\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.CommandContext(t.Context(), "/bin/bash", "-c", remoteRequireNoSourceMetadata(workdir)).CombinedOutput()
+			wantReject := kind != "raw" && kind != "new"
+			if (err != nil) != wantReject {
+				t.Fatalf("receiver result=%v output=%s wantReject=%v", err, out, wantReject)
+			}
+			if got, err := os.ReadFile(marker); err != nil || string(got) != "existing receiver data\n" {
+				t.Fatalf("receiver data changed: %q, %v", got, err)
+			}
+		})
+	}
+}
+
 func TestSynchronizedBufferSnapshots(t *testing.T) {
 	for _, limit := range []int{-1, 0, 4} {
 		t.Run(strconv.Itoa(limit), func(t *testing.T) {

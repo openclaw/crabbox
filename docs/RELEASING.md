@@ -121,14 +121,30 @@ Run the credential-free producer first and capture its printed manifest digest:
 
 ```sh
 scripts/build-release-candidate.sh \
-  vX.Y.Z <tag-object> <source-commit> dist-release-unsigned
+  vX.Y.Z <tag-object> <source-commit> dist-release-unsigned /path/to/native-helper-inputs
 ```
 
 The producer atomically writes a private `.components/candidate-manifest.json`
 beside the unsigned inputs. It binds the signed tag identity, protected verifier
 commit and release configuration, exact SHA-256, size, and mode of all six
 archives and the raw VMD, plus the actual Go, GoReleaser, Swift, Xcode, macOS,
-and architecture facts. Treat the printed SHA-256 as a separate handoff value;
+and architecture facts. Native-component source tags use candidate/provenance
+schema 2 and additionally bind all six original helper binaries, their canonical
+build receipts, notice texts, and attribution reports under
+`.components/native-helpers/<os>_<arch>/`: thirty-one private inputs in total.
+The producer validates and stages the complete
+native set before building Go artifacts. Helper source identity comes from the
+verified tag's `tools/jj-source/manifest.json`, not from current-main defaults.
+
+Existing Go-only source tags without that manifest retain schema 1, seven
+private inputs and their original archive/signing contracts; their producer
+does not require the final native-input argument. A present invalid manifest
+fails instead of selecting legacy behavior. Protected tooling derives the
+expected schema from the recorded source commit; asset JSON cannot downgrade it.
+These schema versions are separate from release authorization and proof-envelope
+schemas, which are unchanged.
+
+Treat the printed SHA-256 as a separate handoff value;
 do not re-read or infer it from a replaceable candidate directory.
 
 Pass that exact digest as the required fourth argument to the local signing
@@ -187,16 +203,32 @@ verification before any GitHub token is used.
 
 For version `X.Y.Z`, the uploaded GitHub asset set is exactly these eight files:
 
-| Asset | Exact archive members or purpose |
-| --- | --- |
-| `crabbox_X.Y.Z_darwin_amd64.tar.gz` | `crabbox` |
-| `crabbox_X.Y.Z_darwin_arm64.tar.gz` | `crabbox`, `crabbox-apple-vm-helper` |
-| `crabbox_X.Y.Z_linux_amd64.tar.gz` | `crabbox` |
-| `crabbox_X.Y.Z_linux_arm64.tar.gz` | `crabbox` |
-| `crabbox_X.Y.Z_windows_amd64.zip` | `crabbox.exe` |
-| `crabbox_X.Y.Z_windows_arm64.zip` | `crabbox.exe` |
-| `checksums.txt` | Canonical SHA-256 records for the six platform archives and `provenance.json` |
-| `provenance.json` | Schema-pinned source, toolchain, signing, notarization, archive, and checksum provenance |
+| Asset | Schema 1 members | Schema 2 members |
+| --- | --- | --- |
+| `crabbox_X.Y.Z_darwin_amd64.tar.gz` | `crabbox` | `crabbox`, `crabbox-jj-source`, `crabbox-jj-source.json`, `crabbox-jj-source.NOTICES.txt`, `attribution.json` |
+| `crabbox_X.Y.Z_darwin_arm64.tar.gz` | `crabbox`, `crabbox-apple-vm-helper` | `crabbox`, `crabbox-apple-vm-helper`, `crabbox-jj-source`, `crabbox-jj-source.json`, `crabbox-jj-source.NOTICES.txt`, `attribution.json` |
+| `crabbox_X.Y.Z_linux_amd64.tar.gz` | `crabbox` | `crabbox`, `crabbox-jj-source`, `crabbox-jj-source.json`, `crabbox-jj-source.NOTICES.txt`, `attribution.json` |
+| `crabbox_X.Y.Z_linux_arm64.tar.gz` | `crabbox` | `crabbox`, `crabbox-jj-source`, `crabbox-jj-source.json`, `crabbox-jj-source.NOTICES.txt`, `attribution.json` |
+| `crabbox_X.Y.Z_windows_amd64.zip` | `crabbox.exe` | `crabbox.exe`, `crabbox-jj-source.exe`, `crabbox-jj-source.json`, `crabbox-jj-source.NOTICES.txt`, `attribution.json` |
+| `crabbox_X.Y.Z_windows_arm64.zip` | `crabbox.exe` | `crabbox.exe`, `crabbox-jj-source.exe`, `crabbox-jj-source.json`, `crabbox-jj-source.NOTICES.txt`, `attribution.json` |
+| `checksums.txt` | SHA-256 records for the six archives and `provenance.json` | Same role |
+| `provenance.json` | Source, toolchain, signing, notarization, archive and checksum provenance | Also binds original native inputs to final helper bytes and receipts |
+
+Schema-2 distribution is still being completed: unresolved dependency attribution
+and native platform qualification must be addressed before publication. The table
+describes the wired artifacts, not completed notice coverage or approval to publish
+this development integration. Notice/report hashes and sizes are retained in
+provenance, including explicitly unresolved attribution entries.
+
+Schema 2 signs both Darwin JJ helpers as `org.openclaw.crabbox.jj-source` through
+the same Foundation identity, hardened-runtime, timestamp and online-notarization
+policy. It records six distinct submissions instead of schema 1's four. Signing
+operates on copies; only afterward does the packager finalize the helper receipt
+digest. Notice artifacts remain byte-identical and identify the original unsigned
+build on every platform; verifiers use that original receipt for attribution.
+Other platforms retain their exact producer bundle. Static archive and
+installed-pair checks precede candidate execution; the native capability smoke
+runs before the existing final `crabbox --version` check.
 
 GitHub's generated source links are not uploaded assets and do not change the
 count. Reject missing, duplicate, renamed, zero-byte, or extra uploaded assets.
@@ -205,7 +237,7 @@ unlisted executables are allowed.
 
 `provenance.json` binds the repository, version, signed tag-object ID, peeled
 source commit, protected verifier commit, exact candidate-manifest digest and
-seven producer inputs, separate producer and packager toolchain facts, macOS
+producer inputs (seven for schema 1; thirty-one for native schema 2), separate producer and packager toolchain facts, macOS
 identifiers, Team ID and authority, native architectures, notarization
 submissions, archive members, and the name, size, and SHA-256 of each payload it
 describes. Its own
@@ -262,7 +294,7 @@ wrapper returns and removes its credentials before candidate execution:
 
 ```sh
 BUILD_OUTPUT=$(scripts/build-release-candidate.sh \
-  "$TAG" "$TAG_OBJECT" "$TAG_COMMIT" "$PWD/dist-release-unsigned"
+  "$TAG" "$TAG_OBJECT" "$TAG_COMMIT" "$PWD/dist-release-unsigned" "${JJ_NATIVE_INPUTS:-}"
 )
 printf '%s\n' "$BUILD_OUTPUT"
 CANDIDATE_MANIFEST_SHA256=$(printf '%s\n' "$BUILD_OUTPUT" | \

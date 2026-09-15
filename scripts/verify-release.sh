@@ -112,10 +112,13 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-release-verify.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 notes="$WORK/release-notes.md"
 tagged_changelog="$WORK/tagged-changelog.md"
+native_source_manifest="$WORK/native-source-manifest.json"
+crabbox_release_prepare_source_contract "$ROOT" "$TAG_COMMIT" "$native_source_manifest"
 git -C "$ROOT" show "$TAG_COMMIT:CHANGELOG.md" >"$tagged_changelog"
 "$ROOT/scripts/extract-release-notes.sh" "$TAG" \
   <"$tagged_changelog" >"$notes"
 node "$ROOT/scripts/release-provenance.mjs" verify \
+  "${CRABBOX_RELEASE_PROVENANCE_ARGS[@]}" \
   --dir "$ASSET_DIR" \
   --tag "$TAG" \
   --tag-object "$TAG_OBJECT" \
@@ -150,8 +153,7 @@ for platform in darwin linux windows; do
     [[ "$platform" == windows ]] && extension=zip binary=crabbox.exe
     name="crabbox_${version}_${platform}_${arch}.${extension}"
     destination="$WORK/${platform}-${arch}"
-    expected=$binary
-    [[ "$platform" == darwin && "$arch" == arm64 ]] && expected=$'crabbox\ncrabbox-apple-vm-helper'
+    expected=$(crabbox_release_archive_members "$CRABBOX_RELEASE_SOURCE_SCHEMA" "$platform" "$arch")
     extract_archive "$name" "$destination" "$expected"
     node "$ROOT/scripts/verify-go-release-binary.mjs" \
       "$destination/$binary" github.com/openclaw/crabbox/cmd/crabbox \
@@ -162,6 +164,11 @@ for platform in darwin linux windows; do
         github.com/openclaw/crabbox/cmd/crabbox-apple-vm-helper \
         "$TAG_COMMIT" darwin arm64 "$CRABBOX_RELEASE_GO_VERSION"
     fi
+    if [[ "$CRABBOX_RELEASE_SOURCE_SCHEMA" == 2 ]]; then
+      node "$ROOT/scripts/release-provenance.mjs" verify-native-payload \
+        "${CRABBOX_RELEASE_PROVENANCE_ARGS[@]}" --dir "$destination" \
+        --platform "$platform" --arch "$arch" --provenance "$ASSET_DIR/provenance.json"
+    fi
   done
 done
 
@@ -171,6 +178,11 @@ done
   "$CRABBOX_RELEASE_CLI_IDENTIFIER" arm64 "$WORK/darwin-arm64/crabbox"
 "$ROOT/scripts/verify-macos-binary.sh" \
   "$CRABBOX_RELEASE_HELPER_IDENTIFIER" arm64 "$WORK/darwin-arm64/crabbox-apple-vm-helper"
+if [[ "$CRABBOX_RELEASE_SOURCE_SCHEMA" == 2 ]]; then
+  for arch in amd64 arm64; do
+    "$ROOT/scripts/verify-macos-binary.sh" "$CRABBOX_RELEASE_JJ_IDENTIFIER" "$arch" "$WORK/darwin-$arch/crabbox-jj-source"
+  done
+fi
 
 embedded_vmd="$WORK/crabbox-apple-vm-vmd"
 node "$ROOT/scripts/extract-release-vmd.mjs" \
@@ -218,6 +230,13 @@ if [[ "$EXEC_ARCH" == arm64 ]]; then
   candidate="$WORK/darwin-arm64/crabbox"
 else
   candidate="$WORK/darwin-amd64/crabbox"
+fi
+if [[ "$CRABBOX_RELEASE_SOURCE_SCHEMA" == 2 ]]; then
+  env -i HOME="$execution_home" XDG_CONFIG_HOME="$execution_home" JJ_CONFIG=/dev/null \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="$WORK" \
+    "$(dirname "$candidate")/crabbox-jj-source" --no-pager --color=never source-version >"$WORK/jj-version.json"
+  node "$ROOT/tools/jj-source/artifacts.mjs" verify-version --input "$WORK/jj-version.json" \
+    --manifest "$native_source_manifest" >/dev/null
 fi
 actual_version=$(env -i \
   HOME="$execution_home" PATH=/usr/bin:/bin:/usr/sbin:/sbin TMPDIR="$WORK" \

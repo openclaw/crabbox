@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "repository": "https://github.com/madsmtm/objc2",
+      "commit": "757cd841d0293341dbefd9b99d7548dec244ffde",
+      "upstreamPath": "LICENSE.txt",
+      "kind": "historical-license",
+      "file": "notice-supplements/e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5.txt",
+      "sha256": "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5",
+      "packages": [
+        {
+          "name": "block2",
+          "version": "0.6.2",
+          "vcsPath": "crates/block2",
+          "commit": "b4167b582b2f75f9a1be75495c41b765344fd03c"
+        },
+        {
+          "name": "objc2",
+          "version": "0.6.4",
+          "vcsPath": "crates/objc2",
+          "commit": "8852b424193ca41602281b3d7540d7c8ed51e49a"
+        },
+        {
+          "name": "objc2-encode",
+          "version": "4.1.0",
+          "vcsPath": "crates/objc2-encode",
+          "commit": "8d214f5477365ffcbcbb7de058c86ed9a518efb7"
+        }
+      ]
+    },
+    {
+      "repository": "https://github.com/madsmtm/objc2",
+      "commit": "b4167b582b2f75f9a1be75495c41b765344fd03c",
+      "upstreamPath": "LICENSE.md",
+      "kind": "overview",
+      "file": "notice-supplements/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "packages": [
+        {
+          "name": "block2",
+          "version": "0.6.2",
+          "vcsPath": "crates/block2"
+        }
+      ]
+    },
+    {
+      "repository": "https://github.com/madsmtm/objc2",
+      "commit": "8852b424193ca41602281b3d7540d7c8ed51e49a",
+      "upstreamPath": "LICENSE.md",
+      "kind": "overview",
+      "file": "notice-supplements/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "packages": [
+        {
+          "name": "dispatch2",
+          "version": "0.3.1",
+          "vcsPath": "crates/dispatch2"
+        },
+        {
+          "name": "objc2",
+          "version": "0.6.4",
+          "vcsPath": "crates/objc2"
+        }
+      ]
+    },
+    {
+      "repository": "https://github.com/madsmtm/objc2",
+      "commit": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b",
+      "upstreamPath": "LICENSE.md",
+      "kind": "overview",
+      "file": "notice-supplements/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "packages": [
+        {
+          "name": "objc2-core-foundation",
+          "version": "0.3.2",
+          "vcsPath": "framework-crates/objc2-core-foundation"
+        },
+        {
+          "name": "objc2-system-configuration",
+          "version": "0.3.2",
+          "vcsPath": "framework-crates/objc2-system-configuration"
+        }
+      ]
+    },
+    {
+      "repository": "https://github.com/madsmtm/objc2",
+      "commit": "8d214f5477365ffcbcbb7de058c86ed9a518efb7",
+      "upstreamPath": "LICENSE.md",
+      "kind": "overview",
+      "file": "notice-supplements/7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54.txt",
+      "sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+      "packages": [
+        {
+          "name": "objc2-encode",
+          "version": "4.1.0",
+          "vcsPath": "crates/objc2-encode"
+        }
+      ]
+    },
+    {
+      "repository": "https://github.com/wez/wezterm",
+      "commit": "edeae72b5fc55c7fa4aa1d08bbefd08c5493f757",
+      "upstreamPath": "LICENSE.md",
+      "kind": "license",
+      "file": "notice-supplements/37db33bbbd7348969eda397b89a16f252d56c1ca7481b6ccaf56ccdcbab5dcca.txt",
+      "sha256": "37db33bbbd7348969eda397b89a16f252d56c1ca7481b6ccaf56ccdcbab5dcca",
+      "packages": [
+        {
+          "name": "vtparse",
+          "version": "0.6.2",
+          "vcsPath": "vtparse"
+        }
+      ]
+    },
+    {
+      "repository": "https://github.com/wez/wezterm",
+      "commit": "d5ca5509b95edc31291ba29bd1fcbf3f0b12c92d",
+      "upstreamPath": "LICENSE.md",
+      "kind": "license",
+      "file": "notice-supplements/37db33bbbd7348969eda397b89a16f252d56c1ca7481b6ccaf56ccdcbab5dcca.txt",
+      "sha256": "37db33bbbd7348969eda397b89a16f252d56c1ca7481b6ccaf56ccdcbab5dcca",
+      "packages": [
+        {
+          "name": "wezterm-input-types",
+          "version": "0.1.0",
+          "vcsPath": "wezterm-input-types"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,230 @@
+{
+  "protocol": "crabbox-jj-source",
+  "schema_version": 1,
+  "kind": "recorded_inventory",
+  "jj_version": "0.45.1",
+  "identity": {
+    "workspace_root": "/source",
+    "repository_path": "/source/.jj/repo",
+    "workspace": "default",
+    "operation": "154113ac13a22a0d8b425644dd6688ccf5bb3af4ec69b9299d6ba94573d9c4d7b70c00aa1f52c8d6cf38d9256948f9476f23ce0fe66b399602d0287162e4fb56",
+    "commit": "5d6b4e9a6652d192fd7fa1b0c27d578b911d49d3",
+    "change": "ade05506293934c3aa3df503784596f1",
+    "parents": [
+      "18886e6b8a25c572e5659514ad792e8b484073ad",
+      "334a155083780164ed2ba4e6cf1cd45516f346c9",
+      "9bcb47133f453a9c238e63d535c46c08c296773f"
+    ],
+    "tree_ids": [
+      "ff39162df72a33fda83599ba8682924d6cc6cc7b",
+      "50c5dc5d9eb2ffcd921b0ada4b565af257942120",
+      "3bb7a59cf2b45bbf47b46e5282edf68c0a7fbc59",
+      "50c5dc5d9eb2ffcd921b0ada4b565af257942120",
+      "7ec1cf813c35297d9389b2e3cb9e000840d02323"
+    ],
+    "tree_labels": [
+      "psvoxyqp 18886e6b \"a\"",
+      "tnzooynx f38ab6bb \"base\"",
+      "wsxkxxql 334a1550 \"b\"",
+      "tnzooynx f38ab6bb \"base\"",
+      "zzowqznv 9bcb4713 \"c\""
+    ],
+    "policy": {
+      "exec_policy": "auto",
+      "eol_conversion": "input",
+      "conflict_marker_style": "diff",
+      "merge_hunk_level": "line",
+      "same_change": "accept",
+      "materialization_host": "macos"
+    }
+  },
+  "entries": [
+    {
+      "path": "outside.txt",
+      "kind": "file",
+      "terms": [
+        {
+          "kind": "file",
+          "id": "2565f2edee19fe89d1ffc70d6230bae073a39ba0",
+          "executable": false,
+          "copy_id": ""
+        }
+      ],
+      "input_blob_ids": [
+        "2565f2edee19fe89d1ffc70d6230bae073a39ba0"
+      ],
+      "size_bytes": null
+    },
+    {
+      "path": "src/a.txt",
+      "kind": "file",
+      "terms": [
+        {
+          "kind": "file",
+          "id": "78981922613b2afb6025042ff6bd878ac1994e85",
+          "executable": false,
+          "copy_id": ""
+        }
+      ],
+      "input_blob_ids": [
+        "78981922613b2afb6025042ff6bd878ac1994e85"
+      ],
+      "size_bytes": null
+    },
+    {
+      "path": "src/b.txt",
+      "kind": "file",
+      "terms": [
+        {
+          "kind": "file",
+          "id": "61780798228d17af2d34fce4cfbdf35556832472",
+          "executable": false,
+          "copy_id": ""
+        }
+      ],
+      "input_blob_ids": [
+        "61780798228d17af2d34fce4cfbdf35556832472"
+      ],
+      "size_bytes": null
+    },
+    {
+      "path": "src/c.txt",
+      "kind": "file",
+      "terms": [
+        {
+          "kind": "file",
+          "id": "f2ad6c76f0115a6ba5b00456a849810e7ec0af20",
+          "executable": false,
+          "copy_id": ""
+        }
+      ],
+      "input_blob_ids": [
+        "f2ad6c76f0115a6ba5b00456a849810e7ec0af20"
+      ],
+      "size_bytes": null
+    },
+    {
+      "path": "src/dup-one.txt",
+      "kind": "file",
+      "terms": [
+        {
+          "kind": "file",
+          "id": "1275430f1765c63e539cb0452565563bd6aef6a6",
+          "executable": false,
+          "copy_id": ""
+        }
+      ],
+      "input_blob_ids": [
+        "1275430f1765c63e539cb0452565563bd6aef6a6"
+      ],
+      "size_bytes": null
+    },
+    {
+      "path": "src/dup-two.txt",
+      "kind": "file",
+      "terms": [
+        {
+          "kind": "file",
+          "id": "1275430f1765c63e539cb0452565563bd6aef6a6",
+          "executable": false,
+          "copy_id": ""
+        }
+      ],
+      "input_blob_ids": [
+        "1275430f1765c63e539cb0452565563bd6aef6a6"
+      ],
+      "size_bytes": null
+    },
+    {
+      "path": "src/line.txt",
+      "kind": "file",
+      "terms": [
+        {
+          "kind": "file",
+          "id": "cd3e90f76db5a1e24125baa153ffbad71d13a388",
+          "executable": false,
+          "copy_id": ""
+        }
+      ],
+      "input_blob_ids": [
+        "cd3e90f76db5a1e24125baa153ffbad71d13a388"
+      ],
+      "size_bytes": null
+    },
+    {
+      "path": "src/link",
+      "kind": "symlink",
+      "terms": [
+        {
+          "kind": "symlink",
+          "id": "973badbe5bef43a3a8a94253fb907169ac1c2df0"
+        }
+      ],
+      "input_blob_ids": [
+        "973badbe5bef43a3a8a94253fb907169ac1c2df0"
+      ],
+      "size_bytes": null
+    },
+    {
+      "path": "src/shared.txt",
+      "kind": "file_conflict",
+      "terms": [
+        {
+          "kind": "file",
+          "id": "78981922613b2afb6025042ff6bd878ac1994e85",
+          "executable": false,
+          "copy_id": ""
+        },
+        {
+          "kind": "file",
+          "id": "df967b96a579e45a18b8251732d16804b2e56a55",
+          "executable": false,
+          "copy_id": ""
+        },
+        {
+          "kind": "file",
+          "id": "61780798228d17af2d34fce4cfbdf35556832472",
+          "executable": false,
+          "copy_id": ""
+        },
+        {
+          "kind": "file",
+          "id": "df967b96a579e45a18b8251732d16804b2e56a55",
+          "executable": false,
+          "copy_id": ""
+        },
+        {
+          "kind": "file",
+          "id": "f2ad6c76f0115a6ba5b00456a849810e7ec0af20",
+          "executable": false,
+          "copy_id": ""
+        }
+      ],
+      "input_blob_ids": [
+        "78981922613b2afb6025042ff6bd878ac1994e85",
+        "df967b96a579e45a18b8251732d16804b2e56a55",
+        "61780798228d17af2d34fce4cfbdf35556832472",
+        "df967b96a579e45a18b8251732d16804b2e56a55",
+        "f2ad6c76f0115a6ba5b00456a849810e7ec0af20"
+      ],
+      "size_bytes": null
+    },
+    {
+      "path": "src/tool.sh",
+      "kind": "file",
+      "terms": [
+        {
+          "kind": "file",
+          "id": "8b1b46acd36f3100a8ffe408b463a032552b51af",
+          "executable": true,
+          "copy_id": ""
+        }
+      ],
+      "input_blob_ids": [
+        "8b1b46acd36f3100a8ffe408b463a032552b51af"
+      ],
+      "size_bytes": null
+    }
+  ],
+  "input_used_bytes": 0
+}

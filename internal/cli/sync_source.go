@@ -19,18 +19,42 @@ func effectiveSyncSource(cfg Config) string {
 
 func validateSyncSource(cfg Config) error {
 	switch effectiveSyncSource(cfg) {
-	case "git", "directory":
+	case "git", "directory", "jj":
 		return nil
 	default:
-		return Exit(2, "sync.source must be git or directory")
+		return Exit(2, "sync.source must be git, directory, or jj")
 	}
 }
 
-func findSyncRepo(cfg Config, syncEnabled bool) (Repo, error) {
+func findSyncRepo(ctx context.Context, cfg Config, syncEnabled bool) (Repo, error) {
 	if err := validateSyncSource(cfg); err != nil {
 		return Repo{}, err
 	}
-	if !syncEnabled || effectiveSyncSource(cfg) != "directory" {
+	if !syncEnabled {
+		return findRepo()
+	}
+	if err := validateSyncRevision(cfg); err != nil {
+		return Repo{}, err
+	}
+	if effectiveSyncSource(cfg) == "jj" {
+		if err := validateJJSyncConfig(cfg); err != nil {
+			return Repo{}, err
+		}
+		directory, err := os.Getwd()
+		if err != nil {
+			return Repo{}, err
+		}
+		process, err := newInstalledJJSourceProcess(ctx, directory, jjSyncProcessLimits(cfg), nil)
+		if err != nil {
+			return Repo{}, err
+		}
+		_, source, err := process.sourceContext(ctx)
+		if err != nil {
+			return Repo{}, err
+		}
+		return Repo{Root: source.WorkspaceRoot, Name: filepath.Base(source.WorkspaceRoot)}, nil
+	}
+	if effectiveSyncSource(cfg) != "directory" {
 		return findRepo()
 	}
 	root, err := os.Getwd()
@@ -65,8 +89,12 @@ func validateDirectorySyncConfig(cfg Config) error {
 }
 
 func validateDirectorySyncProvider(spec ProviderSpec) error {
+	return validatePlainSourceProvider(spec, "directory")
+}
+
+func validatePlainSourceProvider(spec ProviderSpec, source string) error {
 	if spec.Kind != ProviderKindSSHLease || !spec.Features.Has(FeatureCrabboxSync) {
-		return Exit(2, "provider=%s does not support directory sync: an ordinary SSH lease provider with crabbox-sync is required", spec.Name)
+		return Exit(2, "provider=%s does not support %s sync: an ordinary SSH lease provider with crabbox-sync is required", spec.Name, source)
 	}
 	return nil
 }
@@ -77,6 +105,9 @@ func syncManifestForSource(ctx context.Context, repo Repo, cfg Config, excludes 
 	}
 	if effectiveSyncSource(cfg) == "git" {
 		return syncManifestFilteredRules(repo.Root, excludes, syncIncludes(cfg))
+	}
+	if effectiveSyncSource(cfg) == "jj" {
+		return SyncManifest{}, fmt.Errorf("native JJ manifests require prepared immutable staging")
 	}
 	if err := validateDirectorySyncConfig(cfg); err != nil {
 		return SyncManifest{}, err

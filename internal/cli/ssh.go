@@ -2814,6 +2814,33 @@ func remotePlainManifestShellCommand(script string) string {
 	return "/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C BASH_ENV=/dev/null ENV=/dev/null /bin/bash --noprofile --norc -c " + shellQuote(script)
 }
 
+func remoteRequireNoSourceMetadata(workdir string) string {
+	return remotePlainManifestShellCommand(`set -eu
+source_root=` + shellQuote(workdir) + `
+while [ ! -d "$source_root" ]; do
+  source_parent=$(dirname -- "$source_root")
+  [ "$source_parent" != "$source_root" ] || exit 67
+  source_root=$source_parent
+done
+cd -P -- "$source_root"
+` + remotePlainManifestGitFunction() + `
+if plain_git rev-parse --git-dir >/dev/null 2>&1; then
+  echo "native JJ sync requires a workspace outside existing Git metadata" >&2
+  exit 67
+fi
+while :; do
+  for source_metadata in .git .jj; do
+    if [ -e "$source_metadata" ] || [ -L "$source_metadata" ]; then
+      echo "native JJ sync requires a workspace outside existing Git or JJ metadata" >&2
+      exit 67
+    fi
+  done
+  [ "$PWD" != / ] || break
+  cd -P ..
+done
+`)
+}
+
 func remotePlainManifestGitFunction() string {
 	return `plain_git() {
   /usr/bin/env -i HOME=/nonexistent XDG_CONFIG_HOME=/nonexistent PATH=/usr/bin:/bin LANG=C LC_ALL=C \

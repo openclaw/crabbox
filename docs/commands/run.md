@@ -321,13 +321,14 @@ common caches stay out. Default excludes also cover common generated churn such
 as `.ignored`, `.vite`, `playwright-report`, `test-results`, and local
 `.crabbox` log/capture directories.
 
-Jujutsu workspaces are supported for sync only when `.jj` is colocated with
-same-root `.git` metadata. Native Jujutsu revision mapping is not supported yet;
-`run` fails before lease acquisition or ready-pool borrowing instead of risking
-sync of an outer Git checkout's revision. Use a colocated Git workspace or pass
-`--no-sync` with a provider that supports it to run without transferring local
-files. See
-[sync](../features/sync.md#jujutsu-workspaces) for safe initialization guidance.
+The default Git source supports colocated Git/Jujutsu workspaces. Native
+Jujutsu workspaces use explicit `--sync-source jj` with the matching native
+companion: omit `--sync-revision` for live files or supply a native revision
+for recorded contents. This uses managed-manifest SSH sync on POSIX/WSL,
+without mapping native revisions to Git or falling back to an outer checkout.
+Pass `--no-sync` with a provider that supports it to run without transferring
+local files. See [sync](../features/sync.md#jujutsu-workspaces) for requirements
+and unsupported combinations.
 
 Before the first rsync into a Git checkout, Crabbox seeds the remote worktree
 from your `origin` remote so the first sync is a dirty-tree overlay instead of a
@@ -1163,3 +1164,11 @@ Run-specific flags:
 --timing-record default|off|path
 --record-local
 ```
+
+## Native JJ source
+
+`--sync-source jj` selects live JJ working files. Add `--sync-revision <revision>`
+for a recorded native tree. Preparation completes before acquisition and transfer
+uses immutable staging. `--no-sync` leaves these settings inactive. See
+[Sync](../features/sync.md#jujutsu-workspaces) for the required companion and current
+transport/metadata-owner restrictions.

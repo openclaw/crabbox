@@ -9675,3 +9675,108 @@ func TestRunDirectorySourcePreservesConfigRoot(t *testing.T) {
 		t.Fatalf("configured root=%q acquired source=%q", configuredRoot, acquiredRoot)
 	}
 }
+
+func TestRunJJSourcePreAcquire(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, diagnostic string
+		args                     []string
+	}{
+		{name: "overlay", config: "sync: {source: jj, gitOverlay: true}", diagnostic: "gitOverlay"},
+		{name: "base", config: "sync: {source: jj, baseRef: main}", diagnostic: "baseRef"},
+		{name: "native Windows", config: "sync: {source: jj}", args: []string{"--target", "windows"}, diagnostic: "native-Windows"},
+		{name: "delegated", config: "sync: {source: jj}", args: []string{"--provider", "module-runtime-test"}, diagnostic: "ordinary SSH lease"},
+		{name: "SSH without sync", config: "sync: {source: jj}", args: []string{"--provider", claimRoutingUnusableProvider}, diagnostic: "crabbox-sync"},
+		{name: "Actions", config: "sync: {source: jj}\nactions: {workflow: ci.yml}", diagnostic: "Actions hydration"},
+		{name: "revision on Git", config: "sync: {source: git, revision: top}", diagnostic: "sync.revision"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Chdir(t.TempDir())
+			config := filepath.Join(t.TempDir(), "config.yaml")
+			writeFile(t, config, tc.config+"\n")
+			t.Setenv("CRABBOX_CONFIG", config)
+			calls := 0
+			runEnvProfileTestAcquireHook = func(AcquireRequest) { calls++ }
+			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+			args := append([]string{"--provider", "run-env-profile-test"}, tc.args...)
+			args = append(args, "--", "true")
+			var out, stderr bytes.Buffer
+			err := (App{Stdout: &out, Stderr: &stderr}).runCommand(t.Context(), args)
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), tc.diagnostic) {
+				t.Fatalf("error=%v stderr=%s", err, &stderr)
+			}
+			if calls != 0 {
+				t.Fatalf("acquired unsupported source: %d", calls)
+			}
+		})
+	}
+}
+
+func TestRunJJNoSyncDoesNotPrepare(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	t.Setenv("TMPDIR", root)
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, config, "sync: {source: jj, revision: top, gitOverlay: true}\n")
+	t.Setenv("CRABBOX_CONFIG", config)
+	calls := 0
+	runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
+		calls++
+		return LeaseTarget{}, Exit(9, "ordinary acquisition control")
+	}
+	t.Cleanup(func() { runEnvProfileTestAcquireLease = nil })
+	var out, stderr bytes.Buffer
+	err := (App{Stdout: &out, Stderr: &stderr}).runCommand(t.Context(), []string{"--provider", "run-env-profile-test", "--no-sync", "--no-hydrate", "--", "true"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 9 || calls != 1 {
+		t.Fatalf("inactive native source error=%v calls=%d stderr=%s", err, calls, &stderr)
+	}
+}
+
+func TestRunJJPreparedBeforeAcquire(t *testing.T) {
+	fixture := os.Getenv("CRABBOX_TEST_JJ_COMMAND_FIXTURE")
+	if fixture == "" {
+		t.Skip("requires an owned native command fixture and installed companion")
+	}
+	clearConfigEnv(t)
+	root := filepath.Join(fixture, "fixture-source")
+	t.Chdir(root)
+	temp := t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, config, "sync: {source: jj, revision: top, include: [src/shared.txt, src/historical.txt, src/tree/child.txt]}\n")
+	t.Setenv("CRABBOX_CONFIG", config)
+	calls := 0
+	runEnvProfileTestAcquireLease = func(request AcquireRequest) (LeaseTarget, error) {
+		calls++
+		if request.Repo.Head != "" || request.Repo.RemoteURL != "" || request.Repo.Root != root {
+			t.Errorf("native request fabricated Git identity: %+v", request.Repo)
+		}
+		stages, err := filepath.Glob(filepath.Join(temp, "crabbox-git-overlay-*"))
+		if err != nil || len(stages) != 1 {
+			t.Errorf("accepted payload before acquisition=%q: %v", stages, err)
+		} else {
+			for _, name := range []string{"src/shared.txt", "src/historical.txt", "src/tree/child.txt"} {
+				expected, readErr := os.ReadFile(filepath.Join(fixture, "fixture-golden", name))
+				actual, stageErr := os.ReadFile(filepath.Join(stages[0], name))
+				if readErr != nil || stageErr != nil || !bytes.Equal(actual, expected) {
+					t.Errorf("prepared %s does not match recorded source: %v %v", name, readErr, stageErr)
+				}
+			}
+		}
+		return LeaseTarget{}, Exit(9, "ordinary acquisition control")
+	}
+	t.Cleanup(func() { runEnvProfileTestAcquireLease = nil })
+	var out, stderr bytes.Buffer
+	err := (App{Stdout: &out, Stderr: &stderr}).runCommand(t.Context(), []string{"--provider", "run-env-profile-test", "--no-hydrate", "--", "true"})
+	var exitErr ExitError
+	if !AsExitError(err, &exitErr) || exitErr.Code != 9 || calls != 1 {
+		t.Fatalf("run stopped outside acquisition control: %v calls=%d stderr=%s", err, calls, &stderr)
+	}
+	stages, globErr := filepath.Glob(filepath.Join(temp, "crabbox-git-overlay-*"))
+	if globErr != nil || len(stages) != 0 {
+		t.Fatalf("native preparation leaked: %q %v", stages, globErr)
+	}
+}

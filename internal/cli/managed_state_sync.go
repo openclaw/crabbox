@@ -166,6 +166,7 @@ type managedSyncParent struct {
 
 type managedSyncScope struct {
 	input, source, namespace string
+	inputNamespace           string
 	parents                  map[string]managedSyncParent
 }
 
@@ -177,7 +178,11 @@ func newManagedSyncScope(root string) (*managedSyncScope, error) {
 	if namespace != "" && managedPathContains(namespace, source) {
 		return nil, Exit(6, "sync source is inside the selected managed state namespace")
 	}
-	return &managedSyncScope{input: root, source: source, namespace: namespace, parents: map[string]managedSyncParent{}}, nil
+	inputNamespace := ""
+	if selected := os.Getenv("XDG_STATE_HOME"); selected != "" {
+		inputNamespace = filepath.Clean(filepath.Join(selected, "crabbox"))
+	}
+	return &managedSyncScope{input: root, source: source, namespace: namespace, inputNamespace: inputNamespace, parents: map[string]managedSyncParent{}}, nil
 }
 
 func (scope *managedSyncScope) contains(rel string) (bool, error) {
@@ -210,6 +215,25 @@ func (scope *managedSyncScope) contains(rel string) (bool, error) {
 	// Resolve the parent only: a symlink member is transported as a link,
 	// including a dangling link, never dereferenced into its target's data.
 	return managedPathContains(scope.namespace, filepath.Join(cached.path, filepath.Base(full))), nil
+}
+
+// Recorded tree members do not traverse today's live parent aliases. Protect
+// both the configured lexical namespace and its canonical source-relative name.
+func (scope *managedSyncScope) containsRecordedPath(rel string) (bool, error) {
+	if !safeRepoRel(filepath.ToSlash(rel)) {
+		return false, nil
+	}
+	for _, namespace := range []string{scope.inputNamespace, scope.namespace} {
+		if namespace == "" {
+			continue
+		}
+		for _, root := range []string{scope.input, scope.source} {
+			if managedPathContains(namespace, filepath.Join(root, filepath.FromSlash(rel))) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (scope *managedSyncScope) filter(paths []string) ([]string, error) {

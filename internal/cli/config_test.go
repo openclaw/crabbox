@@ -688,6 +688,7 @@ func clearConfigEnv(t *testing.T) {
 	isolateTestUserDirs(t)
 	for _, key := range []string{
 		"CRABBOX_SYNC_SOURCE",
+		"CRABBOX_SYNC_REVISION",
 		"CRABBOX_SYNC_GIT_SEED_SOURCE",
 		"CRABBOX_ENV_ALLOW",
 		"CRABBOX_RESULTS_JUNIT",
@@ -18022,5 +18023,24 @@ func TestSyncSourceConfig(t *testing.T) {
 	}
 	if err := validateSyncSource(cfg); err == nil {
 		t.Fatal("active invalid source accepted")
+	}
+}
+
+func TestJJRevisionConfig(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	revision := "top"
+	if err := applyFileConfig(&cfg, fileConfig{Sync: &fileSyncConfig{Source: "jj", Revision: &revision}}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sync.Source != "jj" || cfg.Sync.Revision != "top" {
+		t.Fatalf("native config=%+v", cfg.Sync)
+	}
+	t.Setenv("CRABBOX_SYNC_REVISION", "")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sync.Revision != "" {
+		t.Fatal("empty environment selector did not restore live source")
 	}
 }

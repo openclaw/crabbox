@@ -16,6 +16,25 @@ var errSourceSnapshotDrift = errors.New("local source changed during snapshot cr
 
 type sourceSnapshotHook func(phase string, attempt int, root string)
 
+type sourceSnapshotFile struct {
+	Path     string
+	Observed os.FileInfo
+}
+
+func copyObservedSourceSnapshotOwned(ctx context.Context, sourceRoot string, snapshot *sourceSnapshot, files []sourceSnapshotFile) error {
+	if snapshot == nil || snapshot.Root == "" || snapshot.cleanupRoot == nil {
+		return fmt.Errorf("missing source snapshot ownership")
+	}
+	for _, file := range files {
+		if file.Observed == nil || file.Observed.Size() < 0 {
+			return fmt.Errorf("missing accepted source observation for %q", file.Path)
+		}
+	}
+	return copySourceSnapshotFiles(ctx, sourceRoot, snapshot.Root, files, 0, nil, snapshot.cleanupRoot, func(parents *sourceSnapshotParents) error {
+		return parents.thaw()
+	})
+}
+
 func copySourceSnapshot(ctx context.Context, sourceRoot, snapshotRoot string, paths []string) error {
 	return copySourceSnapshotWithHook(ctx, sourceRoot, snapshotRoot, paths, 0, nil)
 }
@@ -38,6 +57,14 @@ func copySourceSnapshotContents(ctx context.Context, sourceRoot, snapshotRoot st
 }
 
 func copySourceSnapshotContentsWithThaw(ctx context.Context, sourceRoot, snapshotRoot string, paths []string, attempt int, hook sourceSnapshotHook, owner *sourceSnapshotRoot, thaw sourceSnapshotThaw) (result error) {
+	files := make([]sourceSnapshotFile, len(paths))
+	for i, path := range paths {
+		files[i].Path = path
+	}
+	return copySourceSnapshotFiles(ctx, sourceRoot, snapshotRoot, files, attempt, hook, owner, thaw)
+}
+
+func copySourceSnapshotFiles(ctx context.Context, sourceRoot, snapshotRoot string, files []sourceSnapshotFile, attempt int, hook sourceSnapshotHook, owner *sourceSnapshotRoot, thaw sourceSnapshotThaw) (result error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -60,7 +87,8 @@ func copySourceSnapshotContentsWithThaw(ctx context.Context, sourceRoot, snapsho
 		parents.close()
 		result = errors.Join(result, thawErr)
 	}()
-	for _, rel := range paths {
+	for _, file := range files {
+		rel := file.Path
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -75,6 +103,9 @@ func copySourceSnapshotContentsWithThaw(ctx context.Context, sourceRoot, snapsho
 				return fmt.Errorf("%w: snapshot overlay path %q disappeared", errSourceSnapshotDrift, rel)
 			}
 			return fmt.Errorf("snapshot overlay path %q: %w", rel, err)
+		}
+		if file.Observed != nil && !sameSourceSnapshotIdentity(file.Observed, info) {
+			return fmt.Errorf("%w: selected source observation changed at %q", errSourceSnapshotDrift, rel)
 		}
 		if hook != nil {
 			hook("after_lstat", attempt, snapshotRoot)

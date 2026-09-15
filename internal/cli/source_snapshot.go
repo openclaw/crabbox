@@ -89,7 +89,11 @@ func (snapshot *sourceSnapshot) closeCleanupRoot() {
 }
 
 func newSourceSnapshot() (sourceSnapshot, error) {
-	root, err := os.MkdirTemp("", "crabbox-git-overlay-")
+	return newSourceSnapshotAt("")
+}
+
+func newSourceSnapshotAt(tempBase string) (sourceSnapshot, error) {
+	root, err := os.MkdirTemp(tempBase, "crabbox-git-overlay-")
 	if err != nil {
 		return sourceSnapshot{}, err
 	}

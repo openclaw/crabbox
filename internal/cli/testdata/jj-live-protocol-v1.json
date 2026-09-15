@@ -1,0 +1,327 @@
+{
+  "context": {
+    "protocol": "crabbox-jj-source",
+    "schema_version": 1,
+    "kind": "context",
+    "jj_version": "0.45.1",
+    "workspace_root": "/source",
+    "repository_path": "/source/.jj/repo",
+    "workspace": "default",
+    "working_copy_operation": "7f0a32b9ef0ee3e8f87a9deaf22e21dd92ca5420771d2ea65783a935b052d5aeac8ac1babbdf2f7b1d0836e3e528c91968d2695d74452c43c8f020c169c2e856",
+    "operation_heads": [
+      "c399df50f073bf56f1d486d3bb71fb1c3e0aa63900dcb36c5332b6cad18fca0cff2e548cace2a76257e97ee08790cdbdb106f3938aa4c12056e9e7c9a8ac690c"
+    ],
+    "input_used_bytes": 0
+  },
+  "inventory": {
+    "protocol": "crabbox-jj-source",
+    "schema_version": 1,
+    "kind": "live_inventory",
+    "jj_version": "0.45.1",
+    "identity": {
+      "workspace_root": "/source",
+      "repository_path": "/source/.jj/repo",
+      "workspace": "default",
+      "operation": "c399df50f073bf56f1d486d3bb71fb1c3e0aa63900dcb36c5332b6cad18fca0cff2e548cace2a76257e97ee08790cdbdb106f3938aa4c12056e9e7c9a8ac690c",
+      "commit": "c7789c7333f91d15905bd0491ae38cbd94278a51",
+      "change": "42343c0083b2398c661368b2be1aa8e2",
+      "parents": [
+        "14f9644940ae8b2fbd2a4451bcc6a9308f659c95",
+        "905ac1954c29c9bd49b677072be13b28849ae14e",
+        "35943897f2c9e72e9328a6691262c78369e120ac"
+      ],
+      "tree_ids": [
+        "8a8171139796044a6821bb132f7b24dbfc835c98",
+        "7b3657e45f55742b2ed06c3c361ffc77d73d1d3d",
+        "7eff45da245887ba00e0a08dc13628bc0df6bbbe",
+        "7b3657e45f55742b2ed06c3c361ffc77d73d1d3d",
+        "ff2c73ce209453771d2ef6ffffe79c70f178900e"
+      ],
+      "tree_labels": [
+        "oyotrokz 14f96449 \"a\"",
+        "oqkzwlvo 86f35243 \"base\"",
+        "vwylrywr 905ac195 \"b\"",
+        "oqkzwlvo 86f35243 \"base\"",
+        "xupsvksp 35943897 \"c\""
+      ],
+      "policy": {
+        "exec_policy": "auto",
+        "eol_conversion": "input",
+        "conflict_marker_style": "diff",
+        "merge_hunk_level": "line",
+        "same_change": "accept",
+        "materialization_host": "macos"
+      }
+    },
+    "working_copy_operation": "7f0a32b9ef0ee3e8f87a9deaf22e21dd92ca5420771d2ea65783a935b052d5aeac8ac1babbdf2f7b1d0836e3e528c91968d2695d74452c43c8f020c169c2e856",
+    "working_copy_freshness": "fresh",
+    "working_copy_tree_ids": [
+      "8a8171139796044a6821bb132f7b24dbfc835c98",
+      "7b3657e45f55742b2ed06c3c361ffc77d73d1d3d",
+      "7eff45da245887ba00e0a08dc13628bc0df6bbbe",
+      "7b3657e45f55742b2ed06c3c361ffc77d73d1d3d",
+      "ff2c73ce209453771d2ef6ffffe79c70f178900e"
+    ],
+    "working_copy_tree_labels": [
+      "oyotrokz 14f96449 \"a\"",
+      "oqkzwlvo 86f35243 \"base\"",
+      "vwylrywr 905ac195 \"b\"",
+      "oqkzwlvo 86f35243 \"base\"",
+      "xupsvksp 35943897 \"c\""
+    ],
+    "pending_entries": [
+      {
+        "path": "outside.txt",
+        "kind": "file",
+        "covers_descendants": false,
+        "tracked_regular": true,
+        "in_sparse_scope": true,
+        "cached_materialization": "cached"
+      },
+      {
+        "path": "src/a.txt",
+        "kind": "file",
+        "covers_descendants": false,
+        "tracked_regular": true,
+        "in_sparse_scope": true,
+        "cached_materialization": "cached"
+      },
+      {
+        "path": "src/b.txt",
+        "kind": "file",
+        "covers_descendants": false,
+        "tracked_regular": true,
+        "in_sparse_scope": true,
+        "cached_materialization": "cached"
+      },
+      {
+        "path": "src/c.txt",
+        "kind": "file",
+        "covers_descendants": false,
+        "tracked_regular": true,
+        "in_sparse_scope": true,
+        "cached_materialization": "cached"
+      },
+      {
+        "path": "src/dup-one.txt",
+        "kind": "file",
+        "covers_descendants": false,
+        "tracked_regular": true,
+        "in_sparse_scope": true,
+        "cached_materialization": "cached"
+      },
+      {
+        "path": "src/dup-two.txt",
+        "kind": "file",
+        "covers_descendants": false,
+        "tracked_regular": true,
+        "in_sparse_scope": true,
+        "cached_materialization": "cached"
+      },
+      {
+        "path": "src/line.txt",
+        "kind": "file",
+        "covers_descendants": false,
+        "tracked_regular": true,
+        "in_sparse_scope": true,
+        "cached_materialization": "cached"
+      },
+      {
+        "path": "src/link",
+        "kind": "symlink",
+        "covers_descendants": false,
+        "tracked_regular": false,
+        "in_sparse_scope": true,
+        "cached_materialization": "cached"
+      },
+      {
+        "path": "src/shared.txt",
+        "kind": "file_conflict",
+        "covers_descendants": false,
+        "tracked_regular": true,
+        "in_sparse_scope": true,
+        "cached_materialization": "cached"
+      },
+      {
+        "path": "src/tool.sh",
+        "kind": "file",
+        "covers_descendants": false,
+        "tracked_regular": true,
+        "in_sparse_scope": true,
+        "cached_materialization": "cached"
+      },
+      {
+        "path": "state/crabbox/marker.txt",
+        "kind": "file",
+        "covers_descendants": false,
+        "tracked_regular": true,
+        "in_sparse_scope": true,
+        "cached_materialization": "cached"
+      }
+    ],
+    "sparse_prefixes": [
+      ""
+    ],
+    "tracked_entries": [
+      {
+        "path": "outside.txt",
+        "kind": "file",
+        "materialized_conflict": false
+      },
+      {
+        "path": "src/a.txt",
+        "kind": "file",
+        "materialized_conflict": false
+      },
+      {
+        "path": "src/b.txt",
+        "kind": "file",
+        "materialized_conflict": false
+      },
+      {
+        "path": "src/c.txt",
+        "kind": "file",
+        "materialized_conflict": false
+      },
+      {
+        "path": "src/dup-one.txt",
+        "kind": "file",
+        "materialized_conflict": false
+      },
+      {
+        "path": "src/dup-two.txt",
+        "kind": "file",
+        "materialized_conflict": false
+      },
+      {
+        "path": "src/line.txt",
+        "kind": "file",
+        "materialized_conflict": false
+      },
+      {
+        "path": "src/link",
+        "kind": "symlink",
+        "materialized_conflict": false
+      },
+      {
+        "path": "src/shared.txt",
+        "kind": "file",
+        "materialized_conflict": true
+      },
+      {
+        "path": "src/tool.sh",
+        "kind": "file",
+        "materialized_conflict": false
+      },
+      {
+        "path": "state/crabbox/marker.txt",
+        "kind": "file",
+        "materialized_conflict": false
+      }
+    ],
+    "auto_track": "all()",
+    "max_new_file_size": 1048576,
+    "admitted_entries": [
+      {
+        "path": "outside.txt",
+        "tracked_in_working_copy": true,
+        "kind": "file",
+        "executable": false,
+        "observed_size": 13,
+        "observed_mtime_ms": 1789445517995
+      },
+      {
+        "path": "src/a.txt",
+        "tracked_in_working_copy": true,
+        "kind": "file",
+        "executable": false,
+        "observed_size": 2,
+        "observed_mtime_ms": 1789445518814
+      },
+      {
+        "path": "src/b.txt",
+        "tracked_in_working_copy": true,
+        "kind": "file",
+        "executable": false,
+        "observed_size": 2,
+        "observed_mtime_ms": 1789445518814
+      },
+      {
+        "path": "src/c.txt",
+        "tracked_in_working_copy": true,
+        "kind": "file",
+        "executable": false,
+        "observed_size": 2,
+        "observed_mtime_ms": 1789445518676
+      },
+      {
+        "path": "src/dup-one.txt",
+        "tracked_in_working_copy": true,
+        "kind": "file",
+        "executable": false,
+        "observed_size": 5,
+        "observed_mtime_ms": 1789445517995
+      },
+      {
+        "path": "src/dup-two.txt",
+        "tracked_in_working_copy": true,
+        "kind": "file",
+        "executable": false,
+        "observed_size": 5,
+        "observed_mtime_ms": 1789445517996
+      },
+      {
+        "path": "src/line.txt",
+        "tracked_in_working_copy": true,
+        "kind": "file",
+        "executable": false,
+        "observed_size": 19,
+        "observed_mtime_ms": 1789445519009
+      },
+      {
+        "path": "src/link",
+        "tracked_in_working_copy": true,
+        "kind": "symlink",
+        "executable": null,
+        "observed_size": 8,
+        "observed_mtime_ms": 1789445517996
+      },
+      {
+        "path": "src/pending.txt",
+        "tracked_in_working_copy": false,
+        "kind": "file",
+        "executable": false,
+        "observed_size": 17,
+        "observed_mtime_ms": 1789445519009
+      },
+      {
+        "path": "src/shared.txt",
+        "tracked_in_working_copy": true,
+        "kind": "file",
+        "executable": false,
+        "observed_size": 30,
+        "observed_mtime_ms": 1789445519009
+      },
+      {
+        "path": "src/tool.sh",
+        "tracked_in_working_copy": true,
+        "kind": "file",
+        "executable": true,
+        "observed_size": 29,
+        "observed_mtime_ms": 1789445517995
+      },
+      {
+        "path": "state/crabbox/marker.txt",
+        "tracked_in_working_copy": true,
+        "kind": "file",
+        "executable": false,
+        "observed_size": 22,
+        "observed_mtime_ms": 1789445517996
+      }
+    ],
+    "observations": [],
+    "untracked": [],
+    "invalid_utf8_path_count": 0,
+    "input_used_bytes": 0
+  }
+}

@@ -900,6 +900,12 @@ func syncFingerprintForManifest(ctx context.Context, repo Repo, cfg Config, mani
 }
 
 func syncFingerprintPaths(ctx context.Context, h hash.Hash, root string, paths []string, requirePresent bool) error {
+	return fingerprintSourcePaths(ctx, h, root, paths, requirePresent, false)
+}
+
+// Native content checksums canonicalize symlink metadata, while existing sync
+// fingerprints retain their filesystem-specific encoding and cache identity.
+func fingerprintSourcePaths(ctx context.Context, h hash.Hash, root string, paths []string, requirePresent, canonicalLinks bool) error {
 	for _, rel := range paths {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -914,15 +920,22 @@ func syncFingerprintPaths(ctx context.Context, h hash.Hash, root string, paths [
 			fmt.Fprintf(h, "missing\n")
 			continue
 		}
-		fmt.Fprintf(h, "mode=%s size=%d\n", info.Mode().String(), info.Size())
+		mode, size := info.Mode(), info.Size()
+		var target string
+		if mode&os.ModeSymlink != 0 {
+			target, err = os.Readlink(full)
+			if err != nil {
+				return err
+			}
+			if canonicalLinks {
+				mode, size = os.ModeSymlink|0o777, int64(len(target))
+			}
+		}
+		fmt.Fprintf(h, "mode=%s size=%d\n", mode.String(), size)
 		if info.IsDir() {
 			continue
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			target, err := os.Readlink(full)
-			if err != nil {
-				return err
-			}
 			fmt.Fprintf(h, "symlink=%s\n", target)
 			h.Write([]byte{0})
 			continue
@@ -1106,21 +1119,24 @@ func prepareSyncManifestRoot(root string, excludes SyncExcludeRules) (*managedSy
 }
 
 func projectSyncManifest(root string, excludes SyncExcludeRules, includes, paths []string, scope syncManifestScope, managed *managedSyncScope) (SyncManifest, map[string]bool, error) {
-	trackedRegular, gitlinkPaths := scope.trackedRegular, scope.gitlinkPaths
+	return projectSyncManifestWithProtection(root, excludes, includes, paths, scope, managed.contains)
+}
+
+// Selection is shared; each source owner supplies its namespace interpretation.
+func projectSyncManifestWithProtection(root string, excludes SyncExcludeRules, includes, paths []string, scope syncManifestScope, protectedPath func(string) (bool, error)) (SyncManifest, map[string]bool, error) {
 	seen := map[string]bool{}
 	manifest := SyncManifest{}
 	for _, rel := range paths {
 		rel = filepath.ToSlash(rel)
-		protected, err := managed.contains(rel)
+		protected, err := protectedPath(rel)
 		if err != nil {
 			return SyncManifest{}, nil, err
 		}
 		if protected {
 			continue
 		}
-		_, isTrackedRegular := trackedRegular[rel]
-		excluded, protectedPattern := pathExcludeDecision(rel, excludes, isTrackedRegular)
-		if _, isGitlink := gitlinkPaths[rel]; isGitlink || !safeRepoRel(rel) || excluded || !pathIncluded(rel, includes) || seen[rel] {
+		selected, protectedPattern := syncManifestPathDecision(rel, excludes, includes, scope)
+		if !selected || seen[rel] {
 			continue
 		}
 		full := filepath.Join(root, filepath.FromSlash(rel))
@@ -1143,6 +1159,14 @@ func projectSyncManifest(root string, excludes SyncExcludeRules, includes, paths
 		return manifest.ProtectedTrackedExcludes[i].Path < manifest.ProtectedTrackedExcludes[j].Path
 	})
 	return manifest, seen, nil
+}
+
+// This step does not stat candidate paths. Recorded trees use it before export.
+func syncManifestPathDecision(rel string, excludes SyncExcludeRules, includes []string, scope syncManifestScope) (bool, string) {
+	_, tracked := scope.trackedRegular[rel]
+	excluded, protectedPattern := pathExcludeDecision(rel, excludes, tracked)
+	_, gitlink := scope.gitlinkPaths[rel]
+	return !gitlink && safeRepoRel(rel) && !excluded && pathIncluded(rel, includes), protectedPattern
 }
 
 type syncManifestScope struct {

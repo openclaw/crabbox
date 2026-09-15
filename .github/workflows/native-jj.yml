@@ -1,0 +1,123 @@
+name: Native JJ Qualification
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/native-jj.yml'
+      - 'tools/jj-source/**'
+      - 'internal/**'
+      - 'cmd/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'scripts/verify-native-binary/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-jj-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native JJ (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15-intel, target: darwin_amd64, nodeArch: x64, triple: x86_64-apple-darwin }
+          - { runner: macos-15, target: darwin_arm64, nodeArch: arm64, triple: aarch64-apple-darwin }
+          - { runner: ubuntu-22.04, target: linux_amd64, nodeArch: x64, triple: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-22.04-arm, target: linux_arm64, nodeArch: arm64, triple: aarch64-unknown-linux-gnu }
+          - { runner: windows-2022, target: windows_amd64, nodeArch: x64, triple: x86_64-pc-windows-msvc }
+          - { runner: windows-11-arm, target: windows_arm64, nodeArch: arm64, triple: aarch64-pc-windows-msvc }
+    steps:
+      - name: Preserve pinned source bytes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          git config --global core.autocrlf false
+          git config --global core.symlinks true
+
+      - name: Check out candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up native Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '24'
+          architecture: ${{ matrix.nodeArch }}
+          package-manager-cache: false
+
+      - name: Set up native Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          architecture: ${{ matrix.nodeArch }}
+          cache: false
+
+      - name: Build and exercise native tools
+        shell: pwsh
+        env:
+          NATIVE_TARGET: ${{ matrix.target }}
+          NATIVE_TRIPLE: ${{ matrix.triple }}
+          NATIVE_ARCH: ${{ matrix.nodeArch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($IsWindows) {
+            $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+            $vs = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+            if (!$vs) { throw 'Visual Studio C++ toolchain unavailable' }
+            $targetArch = if ($env:NATIVE_ARCH -eq 'arm64') { 'arm64' } else { 'amd64' }
+            & "$vs\Common7\Tools\Launch-VsDevShell.ps1" -Arch $targetArch -HostArch amd64 -SkipAutomaticLocation
+            $tools = if ($env:NATIVE_ARCH -eq 'arm64') { 'bin\HostARM64\ARM64' } else { 'bin\Hostx64\x64' }
+            $nativeTools = Join-Path $env:VCToolsInstallDir $tools
+            foreach ($tool in @('cl.exe', 'link.exe')) {
+              if (!(Test-Path (Join-Path $nativeTools $tool))) { throw "Native compiler tool unavailable: $tool" }
+            }
+            $env:PATH = "$nativeTools;$env:PATH"
+            foreach ($tool in @('cl.exe', 'link.exe')) {
+              if ((Get-Command $tool).Source -ne (Join-Path $nativeTools $tool)) { throw "Wrong native compiler: $tool" }
+            }
+          }
+          $toolchain = "1.98.1-$env:NATIVE_TRIPLE"
+          rustup toolchain install $toolchain --profile minimal --no-self-update
+          $rustc = (& rustup which --toolchain $toolchain rustc).Trim()
+          $env:PATH = "$(Split-Path $rustc)$([IO.Path]::PathSeparator)$env:PATH"
+          node tools/jj-source/qualify.mjs --target $env:NATIVE_TARGET --output "$env:RUNNER_TEMP/native-jj"
+
+      - name: Retain verified native bundle and bounded evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-jj-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/native-jj/native-bundle.tar
+            ${{ runner.temp }}/native-jj/qualification.json
+            ${{ runner.temp }}/native-jj/architecture.json
+            ${{ runner.temp }}/native-jj/source-inventory.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Retain failed preparation diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: native-jj-${{ matrix.target }}-diagnostics
+          path: |
+            ${{ runner.temp }}/native-jj/architecture.json
+            ${{ runner.temp }}/native-jj/source-inventory.json
+            ${{ runner.temp }}/native-jj/smoke/context.json
+            ${{ runner.temp }}/native-jj/smoke/export.json
+            ${{ runner.temp }}/native-jj/smoke/recorded-plan.json
+            ${{ runner.temp }}/native-jj/smoke/live-plan.json
+            ${{ runner.temp }}/native-jj/smoke/recorded-file-info.json
+            ${{ runner.temp }}/native-jj/smoke/live-file-info.json
+          if-no-files-found: warn
+          retention-days: 14

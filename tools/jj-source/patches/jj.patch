@@ -1,0 +1,3364 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1368,8 +1368,6 @@
+ [[package]]
+ name = "gix"
+ version = "0.87.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "fdefc1465d8631807deaf504dacdeff628b978de515653b47976ca7c28ab2a7a"
+ dependencies = [
+  "gix-actor",
+  "gix-attributes",
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,4 +1,7 @@
+ cargo-features = []
++
++[patch.crates-io]
++gix = { path = "vendor/gix" }
+ 
+ [workspace]
+ resolver = "3"
+diff --git a/cli/src/cli_util.rs b/cli/src/cli_util.rs
+--- a/cli/src/cli_util.rs
++++ b/cli/src/cli_util.rs
+@@ -533,11 +533,41 @@
+         &self,
+         ui: &Ui,
+         workspace: Workspace,
+-        mut env: WorkspaceCommandEnvironment,
++        env: WorkspaceCommandEnvironment,
+     ) -> Result<WorkspaceCommandHelper, CommandError> {
+         let op_head =
+             self.resolve_operation(ui, workspace.repo_loader(), workspace.workspace_name())?;
+-        let repo = workspace.repo_loader().load_at(&op_head).await?;
++        self.load_from_workspace_at_operation(
++            ui,
++            workspace,
++            env,
++            &op_head,
++            self.is_working_copy_writable(),
++        )
++        .await
++    }
++
++    /// Uses an already captured operation without resolving or updating heads.
++    pub async fn workspace_helper_at_operation(
++        &self,
++        ui: &Ui,
++        workspace: Workspace,
++        operation: &Operation,
++    ) -> Result<WorkspaceCommandHelper, CommandError> {
++        let env = self.workspace_environment(ui, &workspace)?;
++        self.load_from_workspace_at_operation(ui, workspace, env, operation, false)
++            .await
++    }
++
++    async fn load_from_workspace_at_operation(
++        &self,
++        ui: &Ui,
++        workspace: Workspace,
++        mut env: WorkspaceCommandEnvironment,
++        operation: &Operation,
++        may_snapshot_working_copy: bool,
++    ) -> Result<WorkspaceCommandHelper, CommandError> {
++        let repo = workspace.repo_loader().load_at(operation).await?;
+         if let Err(err) =
+             revset_util::try_resolve_trunk_alias(repo.as_ref(), &env.revset_parse_context())
+         {
+@@ -561,7 +591,6 @@
+                 .expect("valid syntax");
+             env.reload_revset_expressions(ui)?;
+         }
+-        let may_snapshot_working_copy = self.is_working_copy_writable();
+         WorkspaceCommandHelper::new(ui, workspace, repo, env, may_snapshot_working_copy)
+     }
+ 
+@@ -4389,6 +4418,8 @@
+ /// CLI command builder and runner.
+ #[must_use]
+ pub struct CliRunner<'a> {
++    readonly_secure_config: bool,
++    config_environment_matcher: Option<Arc<dyn jj_lib::config::ConfigEnvironmentMatcher>>,
+     tracing_subscription: TracingSubscription,
+     app: Command,
+     config_layers: Vec<ConfigLayer>,
+@@ -4414,6 +4445,8 @@
+         let tracing_subscription = TracingSubscription::init();
+         crate::cleanup_guard::init();
+         Self {
++            readonly_secure_config: false,
++            config_environment_matcher: None,
+             tracing_subscription,
+             app: crate::commands::default_app(),
+             config_layers: crate::config::default_config_layers(),
+@@ -4467,6 +4500,27 @@
+     /// Adds `StoreFactories` to be used.
+     pub fn add_store_factories(mut self, store_factories: StoreFactories) -> Self {
+         self.store_factories.merge(store_factories);
++        self
++    }
++
++    /// Replaces the factories for an isolated custom-command build.
++    pub fn with_store_factories(mut self, store_factories: StoreFactories) -> Self {
++        self.store_factories = store_factories;
++        self
++    }
++
++    /// Keeps secure config loading read-only from the initial alias reload.
++    pub fn with_readonly_secure_config(mut self) -> Self {
++        self.readonly_secure_config = true;
++        self
++    }
++
++    /// Installs an environment predicate owner before initial alias/config loading.
++    pub fn with_config_environment_matcher(
++        mut self,
++        matcher: Arc<dyn jj_lib::config::ConfigEnvironmentMatcher>,
++    ) -> Self {
++        self.config_environment_matcher = Some(matcher);
+         self
+     }
+ 
+@@ -4587,6 +4641,12 @@
+                 )
+             })?;
+         let mut config_env = ConfigEnv::from_environment();
++        if self.readonly_secure_config {
++            config_env = config_env.with_readonly_secure_config();
++        }
++        if let Some(matcher) = &self.config_environment_matcher {
++            config_env = config_env.with_environment_matcher(matcher.clone());
++        }
+         let mut last_config_migration_descriptions = Vec::new();
+         let mut migrate_config = |config: &mut StackedConfig| -> Result<(), CommandError> {
+             last_config_migration_descriptions =
+diff --git a/cli/src/config.rs b/cli/src/config.rs
+--- a/cli/src/config.rs
++++ b/cli/src/config.rs
+@@ -348,6 +348,8 @@
+ 
+ #[derive(Clone, Debug)]
+ pub struct ConfigEnv {
++    readonly_secure_config: bool,
++    environment_matcher: Option<Arc<dyn jj_lib::config::ConfigEnvironmentMatcher>>,
+     home_dir: Option<PathBuf>,
+     root_config_dir: Option<PathBuf>,
+     repo_path: Option<PathBuf>,
+@@ -396,6 +398,8 @@
+             })
+             .collect();
+         Self {
++            readonly_secure_config: false,
++            environment_matcher: None,
+             home_dir,
+             root_config_dir: env.root_config_dir(),
+             repo_path: None,
+@@ -445,6 +449,21 @@
+             .map(ConfigPath::as_path)
+     }
+ 
++    /// Select before the first repository/workspace config reload.
++    pub fn with_readonly_secure_config(mut self) -> Self {
++        self.readonly_secure_config = true;
++        self
++    }
++
++    /// Installs the predicate owner before any configuration resolution pass.
++    pub fn with_environment_matcher(
++        mut self,
++        matcher: Arc<dyn jj_lib::config::ConfigEnvironmentMatcher>,
++    ) -> Self {
++        self.environment_matcher = Some(matcher);
++        self
++    }
++
+     fn load_secure_config(
+         &self,
+         ui: &Ui,
+@@ -454,11 +473,20 @@
+     ) -> Result<Option<LoadedSecureConfig>, CommandError> {
+         Ok(match (config, self.root_config_dir.as_ref()) {
+             (Some(config), Some(root_config_dir)) => {
+-                let mut guard = self.rng.lock().unwrap();
+-                let loaded_config = if force {
+-                    config.load_config(&mut guard, &root_config_dir.join(kind))
++                let loaded_config = if self.readonly_secure_config {
++                    if force {
++                        return Err(user_error(
++                            "read-only secure config loading cannot create a configuration layer",
++                        ));
++                    }
++                    config.maybe_load_config_readonly(&root_config_dir.join(kind))
+                 } else {
+-                    config.maybe_load_config(&mut guard, &root_config_dir.join(kind))
++                    let mut guard = self.rng.lock().unwrap();
++                    if force {
++                        config.load_config(&mut guard, &root_config_dir.join(kind))
++                    } else {
++                        config.maybe_load_config(&mut guard, &root_config_dir.join(kind))
++                    }
+                 }?;
+                 for warning in &loaded_config.warnings {
+                     writeln!(ui.warning_default(), "{warning}")?;
+@@ -745,7 +773,15 @@
+             hostname: self.hostname.as_deref().unwrap_or(""),
+             environment: &self.environment,
+         };
+-        jj_lib::config::resolve(config.as_ref(), &context)
++        if let Some(matcher) = &self.environment_matcher {
++            jj_lib::config::resolve_with_environment_matcher(
++                config.as_ref(),
++                &context,
++                matcher.as_ref(),
++            )
++        } else {
++            jj_lib::config::resolve(config.as_ref(), &context)
++        }
+     }
+ }
+ 
+@@ -2061,6 +2097,8 @@
+             system_config_dir: env.system_config_dir.as_ref().map(|p| root.join(p)),
+         };
+         ConfigEnv {
++            readonly_secure_config: false,
++            environment_matcher: None,
+             home_dir,
+             root_config_dir: None,
+             repo_path: None,
+diff --git a/lib/src/backend.rs b/lib/src/backend.rs
+--- a/lib/src/backend.rs
++++ b/lib/src/backend.rs
+@@ -27,6 +27,7 @@
+ use async_trait::async_trait;
+ use chrono::TimeZone as _;
+ use futures::AsyncRead;
++use futures::AsyncReadExt as _;
+ use futures::stream::BoxStream;
+ use smallvec::SmallVec;
+ use thiserror::Error;
+@@ -741,6 +742,23 @@
+     }
+ }
+ 
++pub(crate) async fn read_file_bytes_from(
++    mut reader: impl AsyncRead + Send + Unpin,
++    path: &RepoPath,
++    id: &FileId,
++) -> BackendResult<Vec<u8>> {
++    let mut bytes = Vec::new();
++    reader
++        .read_to_end(&mut bytes)
++        .await
++        .map_err(|err| BackendError::ReadFile {
++            path: path.to_owned(),
++            id: id.clone(),
++            source: err.into(),
++        })?;
++    Ok(bytes)
++}
++
+ /// Defines the interface for commit backends.
+ #[async_trait]
+ pub trait Backend: Any + Send + Sync + Debug {
+@@ -784,6 +802,13 @@
+         path: &RepoPath,
+         id: &FileId,
+     ) -> BackendResult<Pin<Box<dyn AsyncRead + Send>>>;
++
++    /// Returns owned file bytes. Backends that already materialize files can
++    /// override this to transfer their buffer without an additional stream copy.
++    async fn read_file_bytes(&self, path: &RepoPath, id: &FileId) -> BackendResult<Vec<u8>> {
++        let reader = self.read_file(path, id).await?;
++        read_file_bytes_from(reader, path, id).await
++    }
+ 
+     /// Writes the contents of the writer to the backend. Returns the ID of the
+     /// written file.
+@@ -893,6 +918,35 @@
+ mod tests {
+     use super::*;
+ 
++    #[tokio::test]
++    async fn test_owned_file_bytes_preserves_stream_error_context() {
++        struct ErrorReader;
++        impl AsyncRead for ErrorReader {
++            fn poll_read(
++                self: Pin<&mut Self>,
++                _cx: &mut std::task::Context<'_>,
++                _buf: &mut [u8],
++            ) -> std::task::Poll<std::io::Result<usize>> {
++                std::task::Poll::Ready(Err(std::io::Error::other("ordinary fixture read failure")))
++            }
++        }
++        let path = RepoPath::from_internal_string("ordinary.txt").unwrap();
++        let id = FileId::new(vec![0; 20]);
++        let reader = futures::io::Cursor::new(b"partial bytes").chain(ErrorReader);
++        let error = read_file_bytes_from(reader, path, &id).await.unwrap_err();
++        let BackendError::ReadFile {
++            path: actual_path,
++            id: actual_id,
++            source,
++        } = error
++        else {
++            panic!("stream failures must retain the ReadFile variant");
++        };
++        assert_eq!(actual_path, path.to_owned());
++        assert_eq!(actual_id, id);
++        assert_eq!(source.to_string(), "ordinary fixture read failure");
++    }
++
+     #[test]
+     fn test_display_object_id() {
+         let commit_id = CommitId::from_hex("deadbeef0123");
+diff --git a/lib/src/byte_budget.rs b/lib/src/byte_budget.rs
+new file mode 100644
+--- /dev/null
++++ b/lib/src/byte_budget.rs
+@@ -0,0 +1,117 @@
++// Copyright 2026 The Jujutsu Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// https://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++//! Cumulative byte accounting, including reservations for operations in progress.
++use std::sync::atomic::{AtomicU64, Ordering};
++
++#[derive(Debug)]
++pub(crate) struct ByteBudget {
++    limit: u64,
++    used: AtomicU64,
++}
++
++#[derive(Debug)]
++pub(crate) struct Exceeded {
++    pub used: u64,
++    pub requested: u64,
++    pub limit: u64,
++}
++
++impl ByteBudget {
++    pub fn new(limit: u64) -> Self {
++        Self {
++            limit,
++            used: AtomicU64::new(0),
++        }
++    }
++
++    pub fn used(&self) -> u64 {
++        self.used.load(Ordering::Acquire)
++    }
++
++    pub fn reserve(&self, bytes: u64) -> Result<Reservation<'_>, Exceeded> {
++        self.used
++            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
++                used.checked_add(bytes).filter(|n| *n <= self.limit)
++            })
++            .map_err(|used| Exceeded {
++                used,
++                requested: bytes,
++                limit: self.limit,
++            })?;
++        Ok(Reservation {
++            budget: self,
++            bytes,
++        })
++    }
++}
++
++/// Uncommitted bytes are refunded on drop; committed bytes remain charged.
++pub(crate) struct Reservation<'a> {
++    budget: &'a ByteBudget,
++    bytes: u64,
++}
++
++impl Reservation<'_> {
++    pub fn bytes(&self) -> u64 {
++        self.bytes
++    }
++
++    pub fn commit(mut self, actual: u64) {
++        assert!(
++            actual <= self.bytes,
++            "cannot commit more bytes than reserved"
++        );
++        self.budget
++            .used
++            .fetch_sub(self.bytes - actual, Ordering::AcqRel);
++        self.bytes = 0;
++    }
++}
++
++impl Drop for Reservation<'_> {
++    fn drop(&mut self) {
++        self.budget.used.fetch_sub(self.bytes, Ordering::AcqRel);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn partial_commit_and_abandoned_operation() {
++        let budget = ByteBudget::new(8);
++        let first = budget.reserve(5).unwrap();
++        let pending = budget.reserve(3).unwrap();
++        assert!(budget.reserve(1).is_err());
++        first.commit(2);
++        assert_eq!(budget.used(), 5);
++        drop(pending);
++        assert_eq!(budget.used(), 2);
++        budget.reserve(6).unwrap().commit(6);
++        assert_eq!(budget.used(), 8);
++    }
++
++    #[test]
++    fn zero_and_overflow() {
++        let zero = ByteBudget::new(0);
++        zero.reserve(0).unwrap().commit(0);
++        assert!(zero.reserve(1).is_err());
++        let budget = ByteBudget::new(u64::MAX);
++        budget.reserve(u64::MAX).unwrap().commit(u64::MAX);
++        assert!(budget.reserve(1).is_err());
++        assert_eq!(budget.used(), u64::MAX);
++    }
++}
+diff --git a/lib/src/checkout_budget.rs b/lib/src/checkout_budget.rs
+new file mode 100644
+--- /dev/null
++++ b/lib/src/checkout_budget.rs
+@@ -0,0 +1,237 @@
++// Copyright 2026 The Jujutsu Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// https://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++//! Session-owned payload output accounting. This does not bound materialization memory.
++
++use crate::byte_budget::{ByteBudget, Reservation};
++use std::io::{self, Write};
++use std::path::{Path, PathBuf};
++
++/// A payload write exceeded its per-entry or session ceiling.
++#[derive(Debug, thiserror::Error)]
++#[error(
++    "{purpose} budget exceeded ({scope}) at {path}: used {used}, requested {requested}, limit {limit}"
++)]
++pub struct CheckoutBudgetExceeded {
++    /// The independently accounted output stream.
++    pub purpose: &'static str,
++    /// Which ceiling rejected the write.
++    pub scope: &'static str,
++    /// Destination entry associated with the attempted write.
++    pub path: PathBuf,
++    /// Bytes already charged to the ceiling.
++    pub used: u64,
++    /// Bytes requested by this write.
++    pub requested: u64,
++    /// Configured maximum bytes.
++    pub limit: u64,
++}
++
++/// Shared accounting for materialized payload bytes, including symlink targets.
++#[derive(Debug)]
++pub struct CheckoutOutputBudget {
++    purpose: &'static str,
++    per_entry: u64,
++    total: ByteBudget,
++}
++
++impl CheckoutOutputBudget {
++    /// Constructs one budget for an entire owned checkout.
++    pub fn new(per_entry: u64, total: u64) -> Self {
++        Self {
++            purpose: "checkout output",
++            per_entry,
++            total: ByteBudget::new(total),
++        }
++    }
++
++    /// Bounds cumulative conflict scratch writes, separately from final payload.
++    pub fn for_conflict_scratch(limit: u64) -> Self {
++        Self {
++            purpose: "conflict scratch output",
++            per_entry: limit,
++            total: ByteBudget::new(limit),
++        }
++    }
++
++    /// Returns payload bytes charged so far, including writes in progress.
++    pub fn used(&self) -> u64 {
++        self.total.used()
++    }
++
++    fn reserve(&self, path: &Path, entry_used: u64, amount: u64) -> io::Result<Reservation<'_>> {
++        if entry_used
++            .checked_add(amount)
++            .is_none_or(|n| n > self.per_entry)
++        {
++            return Err(io::Error::other(CheckoutBudgetExceeded {
++                purpose: self.purpose,
++                scope: "entry",
++                path: path.to_owned(),
++                used: entry_used,
++                requested: amount,
++                limit: self.per_entry,
++            }));
++        }
++        self.total.reserve(amount).map_err(|err| {
++            io::Error::other(CheckoutBudgetExceeded {
++                purpose: self.purpose,
++                scope: "total",
++                path: path.to_owned(),
++                used: err.used,
++                requested: err.requested,
++                limit: err.limit,
++            })
++        })
++    }
++
++    /// Runs one all-or-error payload operation, such as creating a symlink.
++    pub fn write_entry<T>(
++        &self,
++        path: &Path,
++        bytes: u64,
++        write: impl FnOnce() -> io::Result<T>,
++    ) -> io::Result<T> {
++        let reservation = self.reserve(path, 0, bytes)?;
++        let value = write()?;
++        reservation.commit(bytes);
++        Ok(value)
++    }
++
++    /// Wraps a writer for one payload entry, sharing the checkout total.
++    pub fn writer<'a, W: Write>(&'a self, path: &'a Path, inner: W) -> BudgetedWriter<'a, W> {
++        BudgetedWriter {
++            budget: self,
++            path,
++            inner,
++            written: 0,
++        }
++    }
++}
++
++/// A destination writer whose successful bytes count toward both ceilings.
++pub struct BudgetedWriter<'a, W> {
++    budget: &'a CheckoutOutputBudget,
++    path: &'a Path,
++    inner: W,
++    written: u64,
++}
++
++impl<W: Write> Write for BudgetedWriter<'_, W> {
++    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
++        let amount = u64::try_from(data.len()).map_err(io::Error::other)?;
++        let reservation = self.budget.reserve(self.path, self.written, amount)?;
++        match self.inner.write(data) {
++            Ok(n) if n <= data.len() => {
++                reservation.commit(n as u64);
++                self.written += n as u64;
++                Ok(n)
++            }
++            Ok(_) => {
++                reservation.commit(amount);
++                Err(io::Error::other("payload writer returned an invalid count"))
++            }
++            Err(err) => Err(err),
++        }
++    }
++    fn flush(&mut self) -> io::Result<()> {
++        self.inner.flush()
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::Arc;
++
++    #[test]
++    fn entry_total_and_short_writes() {
++        let budget = CheckoutOutputBudget::new(5, 7);
++        let mut bytes = Vec::new();
++        let mut writer = budget.writer(Path::new("first"), &mut bytes);
++        writer.write_all(b"abc").unwrap();
++        let err = writer.write(b"def").unwrap_err();
++        assert_eq!(
++            err.get_ref()
++                .unwrap()
++                .downcast_ref::<CheckoutBudgetExceeded>()
++                .unwrap()
++                .scope,
++            "entry"
++        );
++        assert_eq!(budget.used(), 3);
++        let mut short = [0; 2];
++        assert_eq!(
++            budget
++                .writer(Path::new("second"), &mut short[..])
++                .write(b"1234")
++                .unwrap(),
++            2
++        );
++        assert_eq!(budget.used(), 5);
++        let err = budget
++            .writer(Path::new("third"), Vec::new())
++            .write(b"123")
++            .unwrap_err();
++        assert_eq!(
++            err.get_ref()
++                .unwrap()
++                .downcast_ref::<CheckoutBudgetExceeded>()
++                .unwrap()
++                .scope,
++            "total"
++        );
++        assert_eq!(budget.used(), 5);
++    }
++
++    #[test]
++    fn concurrent_entries_share_one_ceiling() {
++        let budget = Arc::new(CheckoutOutputBudget::new(4, 8));
++        let threads: Vec<_> = (0..8)
++            .map(|_| {
++                let budget = budget.clone();
++                std::thread::spawn(move || {
++                    budget
++                        .writer(Path::new("entry"), Vec::new())
++                        .write_all(b"1234")
++                        .is_ok()
++                })
++            })
++            .collect();
++        assert_eq!(
++            threads
++                .into_iter()
++                .map(|thread| thread.join().unwrap())
++                .filter(|ok| *ok)
++                .count(),
++            2
++        );
++        assert_eq!(budget.used(), 8);
++    }
++
++    #[test]
++    fn failed_entry_releases_its_reservation() {
++        let budget = CheckoutOutputBudget::new(4, 4);
++        assert!(
++            budget
++                .write_entry(Path::new("link"), 4, || Err::<(), _>(io::Error::other(
++                    "write failed"
++                )))
++                .is_err()
++        );
++        assert_eq!(budget.used(), 0);
++        budget.write_entry(Path::new("link"), 4, || Ok(())).unwrap();
++        assert_eq!(budget.used(), 4);
++    }
++}
+diff --git a/lib/src/config.rs b/lib/src/config.rs
+--- a/lib/src/config.rs
++++ b/lib/src/config.rs
+@@ -35,12 +35,14 @@
+ use toml_edit::Document;
+ use toml_edit::DocumentMut;
+ 
++pub use crate::config_resolver::ConfigEnvironmentMatcher;
+ pub use crate::config_resolver::ConfigMigrateError;
+ pub use crate::config_resolver::ConfigMigrateLayerError;
+ pub use crate::config_resolver::ConfigMigrationRule;
+ pub use crate::config_resolver::ConfigResolutionContext;
+ pub use crate::config_resolver::migrate;
+ pub use crate::config_resolver::resolve;
++pub use crate::config_resolver::resolve_with_environment_matcher;
+ use crate::file_util::IoResultExt as _;
+ use crate::file_util::PathError;
+ 
+diff --git a/lib/src/config_resolver.rs b/lib/src/config_resolver.rs
+--- a/lib/src/config_resolver.rs
++++ b/lib/src/config_resolver.rs
+@@ -114,13 +114,34 @@
+         Ok(self)
+     }
+ 
++    #[cfg(test)]
+     fn matches(&self, context: &ConfigResolutionContext) -> bool {
+-        matches_path_prefix(self.repositories.as_deref(), context.repo_path)
++        self.matches_with_environment(context, &NativeEnvironmentMatcher(context.environment))
++            .expect("native environment lookup is infallible")
++    }
++
++    fn matches_with_environment(
++        &self,
++        context: &ConfigResolutionContext,
++        environment: &dyn ConfigEnvironmentMatcher,
++    ) -> Result<bool, ConfigGetError> {
++        let other_conditions = matches_path_prefix(self.repositories.as_deref(), context.repo_path)
+             && matches_path_prefix(self.workspaces.as_deref(), context.workspace_path)
+             && matches_platform(self.platforms.as_deref())
+             && matches_hostname(self.hostnames.as_deref(), context.hostname)
+-            && matches_command(self.commands.as_deref(), context.command)
+-            && matches_environments(self.environments.as_deref(), context.environment)
++            && matches_command(self.commands.as_deref(), context.command);
++        if !other_conditions {
++            return Ok(false);
++        }
++        let Some(candidates) = &self.environments else {
++            return Ok(true);
++        };
++        for predicate in candidates {
++            if environment.matches(predicate)? {
++                return Ok(true);
++            }
++        }
++        Ok(false)
+     }
+ }
+ 
+@@ -166,23 +187,25 @@
+     }
+ }
+ 
+-fn matches_environments(
+-    candidates: Option<&[String]>,
+-    environment: &HashMap<String, String>,
+-) -> bool {
+-    candidates.is_none_or(|candidates| {
+-        candidates.iter().any(|entry| {
+-            if let Some((name, expected)) = entry.split_once('=') {
+-                // "NAME=VALUE" format: match exact value
+-                environment
+-                    .get(name)
+-                    .is_some_and(|actual| actual == expected)
+-            } else {
+-                // "NAME" format: match if the variable is set (any value)
+-                environment.contains_key(entry.as_str())
+-            }
++/// Evaluates one native conditional-environment predicate. Resolution invokes
++/// this only after preceding conditions match and stops at the first true entry.
++pub trait ConfigEnvironmentMatcher: std::fmt::Debug + Send + Sync {
++    /// The predicate is either an exact variable name or NAME=VALUE, split once.
++    /// An unresolved decision must return an error rather than guessing false.
++    fn matches(&self, predicate: &str) -> Result<bool, ConfigGetError>;
++}
++
++#[derive(Debug)]
++struct NativeEnvironmentMatcher<'a>(&'a HashMap<String, String>);
++
++impl ConfigEnvironmentMatcher for NativeEnvironmentMatcher<'_> {
++    fn matches(&self, predicate: &str) -> Result<bool, ConfigGetError> {
++        Ok(if let Some((name, expected)) = predicate.split_once('=') {
++            self.0.get(name).is_some_and(|actual| actual == expected)
++        } else {
++            self.0.contains_key(predicate)
+         })
+-    })
++    }
+ }
+ 
+ /// Evaluates condition for each layer and scope, flattens scoped tables.
+@@ -190,6 +213,20 @@
+ pub fn resolve(
+     source_config: &StackedConfig,
+     context: &ConfigResolutionContext,
++) -> Result<StackedConfig, ConfigGetError> {
++    resolve_with_environment_matcher(
++        source_config,
++        context,
++        &NativeEnvironmentMatcher(context.environment),
++    )
++}
++
++/// Resolves with an explicit environment predicate owner while preserving native
++/// layer traversal, short-circuiting, and handling of disabled nested scopes.
++pub fn resolve_with_environment_matcher(
++    source_config: &StackedConfig,
++    context: &ConfigResolutionContext,
++    environment: &dyn ConfigEnvironmentMatcher,
+ ) -> Result<StackedConfig, ConfigGetError> {
+     let mut source_layers_stack: Vec<Arc<ConfigLayer>> =
+         source_config.layers().iter().rev().cloned().collect();
+@@ -204,7 +241,7 @@
+ 
+         let layer_mut = Arc::make_mut(&mut source_layer);
+         let condition = pop_scope_condition(layer_mut, context)?;
+-        if !condition.matches(context) {
++        if !condition.matches_with_environment(context, environment)? {
+             continue;
+         }
+         let tables = pop_scope_tables(layer_mut)?;
+@@ -1378,6 +1415,107 @@
+         insta::assert_snapshot!(resolved_config.layers()[1].data, @"a = 'a #0.2 env-yes|env-no'");
+         insta::assert_snapshot!(resolved_config.layers()[2].data, @"a = 'a #0.4 env-exists'");
+         Ok(())
++    }
++
++    #[derive(Debug, Default)]
++    struct RecordedEnvironmentMatcher {
++        answers: HashMap<String, bool>,
++        seen: std::sync::Mutex<Vec<String>>,
++    }
++
++    impl ConfigEnvironmentMatcher for RecordedEnvironmentMatcher {
++        fn matches(&self, predicate: &str) -> Result<bool, ConfigGetError> {
++            self.seen.lock().unwrap().push(predicate.to_owned());
++            self.answers
++                .get(predicate)
++                .copied()
++                .ok_or_else(|| ConfigGetError::Type {
++                    name: "--when.environments".to_owned(),
++                    error: "environment decision unresolved".into(),
++                    source_path: None,
++                })
++        }
++    }
++
++    #[test]
++    fn test_resolve_environment_matcher_preserves_native_traversal() -> TestResult {
++        let mut config = StackedConfig::empty();
++        config.add_layer(new_user_layer(indoc! {"
++            value = 'base'
++            [[--scope]]
++            --when.environments = ['MODE=fixture', 'unvisited-after-match']
++            value = 'selected'
++            [[--scope.--scope]]
++            --when.environments = ['EMPTY']
++            empty = true
++            [[--scope]]
++            --when.commands = ['different-command']
++            --when.environments = ['unvisited-command']
++            value = 'other'
++            [[--scope]]
++            --when.environments = []
++            value = 'empty-condition'
++            [[--scope.--scope]]
++            --when.environments = ['unvisited-parent']
++            value = 'disabled-child'
++        "}));
++        let env = HashMap::from([
++            ("MODE".to_owned(), "fixture".to_owned()),
++            ("EMPTY".to_owned(), String::new()),
++        ]);
++        let context = ConfigResolutionContext {
++            home_dir: None,
++            repo_path: None,
++            workspace_path: None,
++            command: Some("source-live-inventory"),
++            hostname: "",
++            environment: &env,
++        };
++        let expected = resolve(&config, &context)?;
++        let matcher = RecordedEnvironmentMatcher {
++            answers: HashMap::from([
++                ("MODE=fixture".to_owned(), true),
++                ("EMPTY".to_owned(), true),
++            ]),
++            ..Default::default()
++        };
++        let actual = resolve_with_environment_matcher(&config, &context, &matcher)?;
++        let layers = |config: &StackedConfig| {
++            config
++                .layers()
++                .iter()
++                .map(|layer| layer.data.to_string())
++                .collect::<Vec<_>>()
++        };
++        assert_eq!(layers(&actual), layers(&expected));
++        assert_eq!(*matcher.seen.lock().unwrap(), ["MODE=fixture", "EMPTY"]);
++        Ok(())
++    }
++
++    #[test]
++    fn test_resolve_environment_matcher_does_not_guess_unresolved() {
++        let condition = ScopeCondition {
++            environments: Some(vec!["FIRST".to_owned(), "SECOND".to_owned()]),
++            ..Default::default()
++        };
++        let context = ConfigResolutionContext {
++            home_dir: None,
++            repo_path: None,
++            workspace_path: None,
++            command: None,
++            hostname: "",
++            environment: &HashMap::new(),
++        };
++        let matcher = RecordedEnvironmentMatcher {
++            answers: HashMap::from([("SECOND".to_owned(), true)]),
++            ..Default::default()
++        };
++        assert!(
++            condition
++                .matches_with_environment(&context, &matcher)
++                .is_err()
++        );
++        assert_eq!(*matcher.seen.lock().unwrap(), ["FIRST"]);
+     }
+ 
+     #[test]
+diff --git a/lib/src/conflicts.rs b/lib/src/conflicts.rs
+--- a/lib/src/conflicts.rs
++++ b/lib/src/conflicts.rs
+@@ -14,6 +14,7 @@
+ 
+ #![expect(missing_docs)]
+ 
++use std::borrow::Cow;
+ use std::io;
+ use std::io::Write;
+ use std::iter::zip;
+@@ -24,7 +25,6 @@
+ use bstr::ByteSlice as _;
+ use bstr::ByteVec as _;
+ use futures::AsyncRead;
+-use futures::AsyncReadExt as _;
+ use futures::Stream;
+ use futures::StreamExt as _;
+ use futures::future::try_join_all;
+@@ -100,19 +100,7 @@
+     term: Option<&FileId>,
+ ) -> BackendResult<BString> {
+     match term {
+-        Some(id) => {
+-            let mut reader = store.read_file(path, id).await?;
+-            let mut content = vec![];
+-            reader
+-                .read_to_end(&mut content)
+-                .await
+-                .map_err(|err| BackendError::ReadFile {
+-                    path: path.to_owned(),
+-                    id: id.clone(),
+-                    source: err.into(),
+-                })?;
+-            Ok(BString::new(content))
+-        }
++        Some(id) => Ok(BString::new(store.read_file_bytes(path, id).await?)),
+         // If the conflict had removed the file on one side, we pretend that the file
+         // was empty there.
+         None => Ok(BString::new(vec![])),
+@@ -170,16 +158,7 @@
+     /// Reads file content until EOF. The provided `path` is used only for error
+     /// reporting purpose.
+     pub async fn read_all(&mut self, path: &RepoPath) -> BackendResult<Vec<u8>> {
+-        let mut buf = Vec::new();
+-        self.reader
+-            .read_to_end(&mut buf)
+-            .await
+-            .map_err(|err| BackendError::ReadFile {
+-                path: path.to_owned(),
+-                id: self.id.clone(),
+-                source: err.into(),
+-            })?;
+-        Ok(buf)
++        crate::backend::read_file_bytes_from(&mut self.reader, path, &self.id).await
+     }
+ }
+ 
+@@ -381,12 +360,18 @@
+     len: usize,
+     suffix_text: &str,
+ ) -> io::Result<()> {
+-    let conflict_marker = BString::new(vec![kind.to_byte(); len]);
++    let marker = [kind.to_byte(); 256];
++    let mut remaining = len;
++    while remaining > 0 {
++        let count = remaining.min(marker.len());
++        output.write_all(&marker[..count])?;
++        remaining -= count;
++    }
+ 
+     if suffix_text.is_empty() {
+-        write!(output, "{conflict_marker}")
++        Ok(())
+     } else {
+-        write!(output, "{conflict_marker} {suffix_text}")
++        write!(output, " {suffix_text}")
+     }
+ }
+ 
+@@ -454,23 +439,24 @@
+     output: &mut dyn Write,
+     options: &ConflictMaterializeOptions,
+ ) -> io::Result<()> {
+-    let merge_result = files::merge_hunks(single_hunk, &options.merge);
+-    match merge_result {
+-        MergeResult::Resolved(content) => output.write_all(&content),
+-        MergeResult::Conflict(hunks) => {
+-            let marker_len = options
+-                .marker_len
+-                .unwrap_or_else(|| choose_materialized_conflict_marker_len(single_hunk));
+-            materialize_conflict_hunks(
+-                hunks,
+-                options.marker_style,
+-                marker_len,
+-                labels,
+-                output,
+-                detect_eol(single_hunk),
+-            )
+-        }
+-    }
++    let hunks = files::merge_hunks_for_rendering(single_hunk, &options.merge);
++    if hunks.iter().all(|hunk| hunk.is_resolved()) {
++        for hunk in hunks {
++            output.write_all(hunk.as_resolved().unwrap())?;
++        }
++        return Ok(());
++    }
++    let marker_len = options
++        .marker_len
++        .unwrap_or_else(|| choose_materialized_conflict_marker_len(single_hunk));
++    materialize_conflict_hunks(
++        hunks,
++        options.marker_style,
++        marker_len,
++        labels,
++        output,
++        detect_eol(single_hunk),
++    )
+ }
+ 
+ pub fn materialize_merge_result_to_bytes<T: AsRef<[u8]>>(
+@@ -487,7 +473,10 @@
+                 .unwrap_or_else(|| choose_materialized_conflict_marker_len(single_hunk));
+             let mut output = Vec::new();
+             materialize_conflict_hunks(
+-                hunks,
++                hunks
++                    .into_iter()
++                    .map(|hunk| hunk.into_map(Cow::Owned))
++                    .collect(),
+                 options.marker_style,
+                 marker_len,
+                 labels,
+@@ -503,7 +492,7 @@
+ fn materialize_conflict_hunks(
+     // We may modify the conflict hunks when materialize the ending EOL conflict, so we take the
+     // ownership.
+-    hunks: Vec<Merge<BString>>,
++    hunks: Vec<Merge<Cow<'_, BStr>>>,
+     conflict_marker_style: ConflictMarkerStyle,
+     conflict_marker_len: usize,
+     labels: &ConflictLabels,
+@@ -532,7 +521,7 @@
+             let mut sides = build_hunk_sides(hunk, labels);
+             if !all_sides_have_ending_eol {
+                 for side in &mut sides {
+-                    side.contents.push_str(eol);
++                    side.contents.to_mut().push_str(eol);
+                 }
+             }
+ 
+@@ -569,12 +558,15 @@
+ }
+ 
+ #[derive(Debug)]
+-struct HunkTerm {
+-    contents: BString,
++struct HunkTerm<'input> {
++    contents: Cow<'input, BStr>,
+     label: String,
+ }
+ 
+-fn build_hunk_sides(hunk: Merge<BString>, labels: &ConflictLabels) -> Merge<HunkTerm> {
++fn build_hunk_sides<'input>(
++    hunk: Merge<Cow<'input, BStr>>,
++    labels: &ConflictLabels,
++) -> Merge<HunkTerm<'input>> {
+     let (removes, adds) = hunk.into_removes_adds();
+     let num_bases = removes.len();
+     let removes = removes.enumerate().map(|(base_index, contents)| {
+@@ -611,9 +603,9 @@
+ }
+ 
+ fn materialize_git_style_conflict(
+-    left: &HunkTerm,
+-    base: &HunkTerm,
+-    right: &HunkTerm,
++    left: &HunkTerm<'_>,
++    base: &HunkTerm<'_>,
++    right: &HunkTerm<'_>,
+     conflict_marker_len: usize,
+     output: &mut dyn Write,
+     eol: &BStr,
+@@ -660,7 +652,7 @@
+ }
+ 
+ fn materialize_jj_style_conflict(
+-    hunk: Merge<HunkTerm>,
++    hunk: Merge<HunkTerm<'_>>,
+     conflict_info: &str,
+     conflict_marker_style: ConflictMarkerStyle,
+     conflict_marker_len: usize,
+@@ -668,7 +660,7 @@
+     eol: &BStr,
+ ) -> io::Result<()> {
+     // Write a positive snapshot (side) of a conflict
+-    let write_side = |side: &HunkTerm, output: &mut dyn Write| {
++    let write_side = |side: &HunkTerm<'_>, output: &mut dyn Write| {
+         write_conflict_marker(
+             output,
+             ConflictMarkerLineChar::Add,
+@@ -680,7 +672,7 @@
+     };
+ 
+     // Write a negative snapshot (base) of a conflict
+-    let write_base = |side: &HunkTerm, output: &mut dyn Write| {
++    let write_base = |side: &HunkTerm<'_>, output: &mut dyn Write| {
+         write_conflict_marker(
+             output,
+             ConflictMarkerLineChar::Remove,
+@@ -693,7 +685,7 @@
+ 
+     // Write a diff from a negative term to a positive term
+     let write_diff =
+-        |base: &HunkTerm, add: &HunkTerm, diff: &[DiffHunk], output: &mut dyn Write| {
++        |base: &HunkTerm<'_>, add: &HunkTerm<'_>, diff: &[DiffHunk], output: &mut dyn Write| {
+             write_conflict_marker(
+                 output,
+                 ConflictMarkerLineChar::Diff,
+@@ -741,7 +733,7 @@
+             continue;
+         }
+ 
+-        let diff1 = ContentDiff::by_line([&left.contents, &right1.contents])
++        let diff1 = ContentDiff::by_line([left.contents.as_ref(), right1.contents.as_ref()])
+             .hunks()
+             .collect_vec();
+         // If we haven't written a snapshot yet, then we need to decide whether to
+@@ -749,7 +741,7 @@
+         // a diff unless the next side has a smaller diff compared to the current base.
+         if !snapshot_written {
+             let right2 = hunk.get_add(add_index + 1).unwrap();
+-            let diff2 = ContentDiff::by_line([&left.contents, &right2.contents])
++            let diff2 = ContentDiff::by_line([left.contents.as_ref(), right2.contents.as_ref()])
+                 .hunks()
+                 .collect_vec();
+             if diff_size(&diff2) < diff_size(&diff1) {
+@@ -1141,6 +1133,22 @@
+ 
+     use super::*;
+     use crate::files::FileMergeHunkLevel;
++
++    #[tokio::test]
++    async fn test_owned_file_bytes_drain_remaining_materialized_reader() {
++        use futures::AsyncReadExt as _;
++        let mut value = MaterializedFileValue {
++            id: FileId::new(vec![0; 20]),
++            executable: false,
++            copy_id: CopyId::placeholder(),
++            reader: Box::pin(futures::io::Cursor::new(b"prefix body")),
++        };
++        let mut prefix = [0; 7];
++        value.reader.read_exact(&mut prefix).await.unwrap();
++        let path = RepoPath::from_internal_string("ordinary.txt").unwrap();
++        assert_eq!(value.read_all(path).await.unwrap(), b"body");
++        assert!(value.read_all(path).await.unwrap().is_empty());
++    }
+ 
+     #[test]
+     fn test_resolve_file_executable() {
+@@ -1322,6 +1330,103 @@
+         assert_eq!(actual_result, expected_merge);
+     }
+ 
++    #[test]
++    fn test_materialize_conflict_marker_bounded_chunks() {
++        #[derive(Default)]
++        struct Probe {
++            bytes: Vec<u8>,
++            largest_write: usize,
++        }
++        impl Write for Probe {
++            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
++                self.largest_write = self.largest_write.max(bytes.len());
++                self.bytes.extend_from_slice(bytes);
++                Ok(bytes.len())
++            }
++            fn flush(&mut self) -> io::Result<()> {
++                Ok(())
++            }
++        }
++        for len in [0, 1, 7, 255, 256, 257, 513] {
++            for suffix in ["", "suffix"] {
++                let mut output = Probe::default();
++                write_conflict_marker(
++                    &mut output,
++                    ConflictMarkerLineChar::ConflictStart,
++                    len,
++                    suffix,
++                )
++                .unwrap();
++                let mut expected = vec![b'<'; len];
++                if !suffix.is_empty() {
++                    expected.extend_from_slice(b" suffix");
++                }
++                assert_eq!(output.bytes, expected);
++                assert!(output.largest_write <= 256);
++            }
++        }
++    }
++
++    #[test]
++    fn test_materialize_conflict_resolved_writer() {
++        let merge = Merge::resolved(b"ordinary resolved text\n".as_slice());
++        let options = ConflictMaterializeOptions {
++            marker_style: ConflictMarkerStyle::Diff,
++            marker_len: None,
++            merge: MergeOptions {
++                hunk_level: FileMergeHunkLevel::Line,
++                same_change: SameChange::Accept,
++            },
++        };
++        let labels = ConflictLabels::unlabeled();
++        let mut output = Vec::new();
++        materialize_merge_result(&merge, &labels, &mut output, &options).unwrap();
++        assert_eq!(output, b"ordinary resolved text\n");
++        assert_eq!(
++            output,
++            materialize_merge_result_to_bytes(&merge, &labels, &options).as_slice()
++        );
++    }
++
++    #[test]
++    fn test_materialize_conflict_borrowed_spans_and_word_parity() {
++        for (terms, level, expected) in [
++            (
++                [
++                    "left\nmiddle\nbase\n",
++                    "base\nmiddle\nbase\n",
++                    "base\nmiddle\nright\n",
++                ],
++                FileMergeHunkLevel::Line,
++                Some("left\nmiddle\nright\n"),
++            ),
++            (["a b", "a", "c a"], FileMergeHunkLevel::Word, Some("c a b")),
++            (["a b", "a", "a c"], FileMergeHunkLevel::Word, None),
++        ] {
++            let inputs = Merge::from_vec(terms.to_vec());
++            let options = ConflictMaterializeOptions {
++                marker_style: ConflictMarkerStyle::Diff,
++                marker_len: None,
++                merge: MergeOptions {
++                    hunk_level: level,
++                    same_change: SameChange::Accept,
++                },
++            };
++            let mut output = Vec::new();
++            materialize_merge_result(&inputs, &ConflictLabels::unlabeled(), &mut output, &options)
++                .unwrap();
++            assert_eq!(
++                output,
++                materialize_merge_result_to_bytes(&inputs, &ConflictLabels::unlabeled(), &options)
++                    .as_slice()
++            );
++            if let Some(expected) = expected {
++                assert_eq!(output, expected.as_bytes());
++            }
++            assert_eq!(inputs.as_slice(), terms);
++        }
++    }
++
+     const BASE: &str = "aa";
+     const SIDE1: &str = "bb";
+     const SIDE2: &str = "cc";
+@@ -1377,6 +1482,10 @@
+                 .into(),
+         )
+         .unwrap();
++        let mut written = Vec::new();
++        materialize_merge_result(&merge, &ConflictLabels::unlabeled(), &mut written, &options)
++            .unwrap();
++        assert_eq!(written, actual_contents.as_bytes());
+         // We expect the materialized conflict to keep the original EOL, LF or CRLF.
+         for line in actual_contents.as_bytes().lines_with_terminator() {
+             let line = line.as_bstr();
+diff --git a/lib/src/eol.rs b/lib/src/eol.rs
+--- a/lib/src/eol.rs
++++ b/lib/src/eol.rs
+@@ -12,9 +12,14 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
+-use bstr::ByteSlice as _;
++use std::io;
++use std::pin::Pin;
++use std::task::{Context, Poll};
++
++use futures::AsyncBufRead;
+ use futures::AsyncRead;
+ use futures::AsyncReadExt as _;
++use futures::io::BufReader;
+ use futures::io::Cursor;
+ 
+ use crate::config::ConfigGetError;
+@@ -153,45 +158,120 @@
+ }
+ 
+ async fn convert_eol<'a>(
+-    mut input: impl AsyncRead + Send + Unpin + 'a,
++    input: impl AsyncRead + Send + Unpin + 'a,
+     target_eol: TargetEol,
+ ) -> Result<Box<dyn AsyncRead + Send + Unpin + 'a>, std::io::Error> {
+-    let eol = match target_eol {
+-        TargetEol::PassThrough => {
+-            return Ok(Box::new(input));
+-        }
+-        TargetEol::Lf => b"\n".as_slice(),
+-        TargetEol::Crlf => b"\r\n".as_slice(),
+-    };
+-
+-    let mut contents = vec![];
+-    input.read_to_end(&mut contents).await?;
+-    let lines = contents.lines_with_terminator();
+-    let mut res = Vec::<u8>::with_capacity(contents.len());
+-    fn trim_last_eol(input: &[u8]) -> Option<&[u8]> {
+-        input
+-            .strip_suffix(b"\r\n")
+-            .or_else(|| input.strip_suffix(b"\n"))
+-    }
+-    for line in lines {
+-        if let Some(line) = trim_last_eol(line) {
+-            res.extend_from_slice(line);
+-            // If the line ends with an EOL, we should append the target EOL.
+-            res.extend_from_slice(eol);
+-        } else {
+-            // If the line doesn't end with an EOL, we don't append the EOL. This can happen
+-            // on the last line.
+-            res.extend_from_slice(line);
+-        }
+-    }
+-    Ok(Box::new(Cursor::new(res)))
++    if target_eol == TargetEol::PassThrough {
++        return Ok(Box::new(input));
++    }
++    Ok(Box::new(EolReader {
++        input: BufReader::with_capacity(8 << 10, input),
++        target_eol,
++        pending_cr: false,
++        pending_lf: false,
++        deferred_error: None,
++    }))
++}
++
++struct EolReader<R> {
++    input: BufReader<R>,
++    target_eol: TargetEol,
++    pending_cr: bool,
++    pending_lf: bool,
++    deferred_error: Option<io::Error>,
++}
++
++impl<R: AsyncRead + Unpin> AsyncRead for EolReader<R> {
++    fn poll_read(
++        self: Pin<&mut Self>,
++        cx: &mut Context<'_>,
++        output: &mut [u8],
++    ) -> Poll<io::Result<usize>> {
++        let this = self.get_mut();
++        if output.is_empty() {
++            return Poll::Ready(Ok(0));
++        }
++        if let Some(error) = this.deferred_error.take() {
++            return Poll::Ready(Err(error));
++        }
++        let mut written = 0;
++        while written < output.len() {
++            if this.pending_lf {
++                output[written] = b'\n';
++                written += 1;
++                this.pending_lf = false;
++                continue;
++            }
++            let bytes = match Pin::new(&mut this.input).poll_fill_buf(cx) {
++                Poll::Pending => {
++                    return if written == 0 {
++                        Poll::Pending
++                    } else {
++                        Poll::Ready(Ok(written))
++                    };
++                }
++                Poll::Ready(Err(error)) => {
++                    if written == 0 {
++                        return Poll::Ready(Err(error));
++                    }
++                    // An error is not EOF: retain a held CR if the caller resumes.
++                    this.deferred_error = Some(error);
++                    return Poll::Ready(Ok(written));
++                }
++                Poll::Ready(Ok(bytes)) => bytes,
++            };
++            let Some(&byte) = bytes.first() else {
++                if this.pending_cr {
++                    output[written] = b'\r';
++                    written += 1;
++                    this.pending_cr = false;
++                }
++                return Poll::Ready(Ok(written));
++            };
++            if this.pending_cr {
++                this.pending_cr = false;
++                if byte != b'\n' {
++                    output[written] = b'\r';
++                    written += 1;
++                    continue;
++                }
++            }
++            match byte {
++                b'\r' => {
++                    Pin::new(&mut this.input).consume(1);
++                    this.pending_cr = true;
++                }
++                b'\n' => {
++                    Pin::new(&mut this.input).consume(1);
++                    if this.target_eol == TargetEol::Crlf {
++                        output[written] = b'\r';
++                        this.pending_lf = true;
++                    } else {
++                        output[written] = b'\n';
++                    }
++                    written += 1;
++                }
++                _ => {
++                    let available = bytes.len().min(output.len() - written);
++                    let count = bytes[..available]
++                        .iter()
++                        .position(|byte| matches!(byte, b'\r' | b'\n'))
++                        .unwrap_or(available);
++                    output[written..written + count].copy_from_slice(&bytes[..count]);
++                    written += count;
++                    Pin::new(&mut this.input).consume(count);
++                }
++            }
++        }
++        Poll::Ready(Ok(written))
++    }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use std::error::Error;
+-    use std::pin::Pin;
+-    use std::task::Poll;
++
++    use bstr::ByteSlice as _;
+ 
+     use test_case::test_case;
+ 
+@@ -211,16 +291,181 @@
+     #[test_case(b"a", TargetEol::Lf, b"a"; "no EOL text with LF conversion")]
+     #[test_case(b"", TargetEol::Lf, b""; "empty text with LF EOL conversion")]
+     #[test_case(b"a\r\nb", TargetEol::Lf, b"a\nb"; "text ends without EOL with LF EOL conversion")]
++    #[test_case(b"a\r\nb\nc\rd\r", TargetEol::Lf, b"a\nb\nc\rd\r"; "mixed endings with LF conversion")]
++    #[test_case(b"a\r\nb\nc\rd\r", TargetEol::Crlf, b"a\r\nb\r\nc\rd\r"; "mixed endings with CRLF conversion")]
++    #[test_case(b"\r\r\n", TargetEol::Lf, b"\r\n"; "consecutive CR with LF conversion")]
++    #[test_case(b"\r\r\n", TargetEol::Crlf, b"\r\r\n"; "consecutive CR with CRLF conversion")]
++    #[test_case(b"\n\r\n\n", TargetEol::Lf, b"\n\n\n"; "consecutive newlines with LF conversion")]
++    #[test_case(b"\n\r\n\n", TargetEol::Crlf, b"\r\n\r\n\r\n"; "consecutive newlines with CRLF conversion")]
++    #[test_case(b"\r", TargetEol::Lf, b"\r"; "trailing CR with LF conversion")]
++    #[test_case(b"\r", TargetEol::Crlf, b"\r"; "trailing CR with CRLF conversion")]
+     async fn test_eol_conversion(input: &[u8], target_eol: TargetEol, expected_output: &[u8]) {
+-        let mut input = input;
+-        let mut output = vec![];
+-        convert_eol(&mut input, target_eol)
+-            .await
+-            .expect("Failed to call convert_eol")
+-            .read_to_end(&mut output)
+-            .await
+-            .expect("Failed to read from the result");
+-        assert_eq!(output, expected_output);
++        for input_chunk in [1, 2, 3, 7, 8192] {
++            for output_chunk in [1, 2, 7, 8192] {
++                let input = ChunkedReader {
++                    input,
++                    chunk: input_chunk,
++                    yield_now: true,
++                };
++                let mut reader = convert_eol(input, target_eol).await.unwrap();
++                let mut buffer = vec![0; output_chunk];
++                let mut output = Vec::new();
++                loop {
++                    let count = reader.read(&mut buffer).await.unwrap();
++                    if count == 0 {
++                        break;
++                    }
++                    output.extend_from_slice(&buffer[..count]);
++                }
++                assert_eq!(
++                    output, expected_output,
++                    "input chunk {input_chunk}, output chunk {output_chunk}"
++                );
++            }
++        }
++    }
++
++    struct ChunkedReader<R> {
++        input: R,
++        chunk: usize,
++        yield_now: bool,
++    }
++
++    impl<R: AsyncRead + Unpin> AsyncRead for ChunkedReader<R> {
++        fn poll_read(
++            self: Pin<&mut Self>,
++            cx: &mut Context<'_>,
++            output: &mut [u8],
++        ) -> Poll<io::Result<usize>> {
++            let this = self.get_mut();
++            if output.is_empty() {
++                return Poll::Ready(Ok(0));
++            }
++            if this.yield_now {
++                this.yield_now = false;
++                cx.waker().wake_by_ref();
++                return Poll::Pending;
++            }
++            let count = output.len().min(this.chunk);
++            let result = Pin::new(&mut this.input).poll_read(cx, &mut output[..count]);
++            if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
++                this.yield_now = true;
++            }
++            result
++        }
++    }
++
++    #[tokio::test]
++    async fn test_eol_streaming_preserves_progress_before_error() {
++        let input = Cursor::new(b"a\r\nb\r")
++            .chain(ErrorReader::new(io::Error::other("ordinary read failure")));
++        let input = ChunkedReader {
++            input,
++            chunk: 2,
++            yield_now: true,
++        };
++        let mut reader = convert_eol(input, TargetEol::Crlf).await.unwrap();
++        let mut output = Vec::new();
++        let error = reader.read_to_end(&mut output).await.unwrap_err();
++        assert_eq!(output, b"a\r\nb");
++        assert_eq!(error.to_string(), "ordinary read failure");
++    }
++
++    #[tokio::test]
++    async fn test_eol_empty_reads_preserve_pending_output_and_error() {
++        let input = Cursor::new(b"\na").chain(ErrorReader::new(io::Error::other("read failure")));
++        let mut reader = convert_eol(input, TargetEol::Crlf).await.unwrap();
++        let mut byte = [0];
++        reader.read_exact(&mut byte).await.unwrap();
++        assert_eq!(byte, [b'\r']);
++        assert_eq!(reader.read(&mut []).await.unwrap(), 0);
++        reader.read_exact(&mut byte).await.unwrap();
++        assert_eq!(byte, [b'\n']);
++        let mut rest = [0; 8];
++        assert_eq!(reader.read(&mut rest).await.unwrap(), 1);
++        assert_eq!(rest[0], b'a');
++        assert_eq!(reader.read(&mut []).await.unwrap(), 0);
++        assert_eq!(
++            reader.read(&mut rest).await.unwrap_err().to_string(),
++            "read failure"
++        );
++    }
++
++    #[tokio::test]
++    async fn test_eol_resuming_after_error_preserves_held_cr() {
++        let input = Cursor::new(b"a\r")
++            .chain(ErrorReader::new(io::Error::other(
++                "retryable fixture error",
++            )))
++            .chain(Cursor::new(b"\nb"));
++        let mut reader = convert_eol(input, TargetEol::Crlf).await.unwrap();
++        let mut output = Vec::new();
++        assert!(reader.read_to_end(&mut output).await.is_err());
++        assert_eq!(output, b"a");
++        reader.read_to_end(&mut output).await.unwrap();
++        assert_eq!(output, b"a\r\nb");
++    }
++
++    #[tokio::test]
++    async fn test_eol_streaming_does_not_read_whole_input() {
++        use std::sync::{
++            Arc,
++            atomic::{AtomicUsize, Ordering},
++        };
++        struct Counted<R> {
++            input: R,
++            count: Arc<AtomicUsize>,
++        }
++        impl<R: AsyncRead + Unpin> AsyncRead for Counted<R> {
++            fn poll_read(
++                self: Pin<&mut Self>,
++                cx: &mut Context<'_>,
++                output: &mut [u8],
++            ) -> Poll<io::Result<usize>> {
++                let this = self.get_mut();
++                let result = Pin::new(&mut this.input).poll_read(cx, output);
++                if let Poll::Ready(Ok(count)) = result {
++                    this.count.fetch_add(count, Ordering::Relaxed);
++                }
++                result
++            }
++        }
++        let count = Arc::new(AtomicUsize::new(0));
++        let input = Counted {
++            input: Cursor::new(vec![b'a'; 64 << 10]),
++            count: count.clone(),
++        };
++        let mut reader = convert_eol(input, TargetEol::Crlf).await.unwrap();
++        assert_eq!(count.load(Ordering::Relaxed), 0);
++        assert_eq!(reader.read(&mut []).await.unwrap(), 0);
++        assert_eq!(count.load(Ordering::Relaxed), 0);
++        let mut byte = [0];
++        reader.read_exact(&mut byte).await.unwrap();
++        assert_eq!(byte, [b'a']);
++        assert!(count.load(Ordering::Relaxed) <= 8 << 10);
++        for snapshot in [true, false] {
++            let count = Arc::new(AtomicUsize::new(0));
++            let input = Counted {
++                input: Cursor::new(vec![b'a'; 64 << 10]),
++                count: count.clone(),
++            };
++            let strategy = TargetEolStrategy::new(EolConversionMode::InputOutput);
++            let mut reader = if snapshot {
++                strategy.convert_eol_for_snapshot(input).await.unwrap()
++            } else {
++                strategy.convert_eol_for_update(input).await.unwrap()
++            };
++            assert_eq!(
++                count.load(Ordering::Relaxed),
++                TargetEolStrategy::PROBE_LIMIT as usize
++            );
++            reader.read_exact(&mut byte).await.unwrap();
++            assert_eq!(byte, [b'a']);
++            assert_eq!(
++                count.load(Ordering::Relaxed),
++                TargetEolStrategy::PROBE_LIMIT as usize
++            );
++        }
+     }
+ 
+     struct ErrorReader(Option<std::io::Error>);
+@@ -344,8 +589,11 @@
+           eol_conversion_mode: EolConversionMode::InputOutput,
+       }, b"\0\n", b"\0\n"; "input output settings binary input")]
+     #[test_case(TargetEolStrategy {
+-          eol_conversion_mode: EolConversionMode::Input,
++          eol_conversion_mode: EolConversionMode::InputOutput,
+       }, &[0; 20 << 10], &[0; 20 << 10]; "input output settings long binary input")]
++    #[test_case(TargetEolStrategy {
++          eol_conversion_mode: EolConversionMode::InputOutput,
++      }, &test_probe_limit_input_crlf(), &test_probe_limit_input_crlf(); "input output settings with CRLF on probe boundary")]
+     async fn test_eol_strategy_convert_eol_for_update(
+         strategy: TargetEolStrategy,
+         contents: &[u8],
+diff --git a/lib/src/file_input_budget.rs b/lib/src/file_input_budget.rs
+new file mode 100644
+--- /dev/null
++++ b/lib/src/file_input_budget.rs
+@@ -0,0 +1,68 @@
++// Copyright 2026 The Jujutsu Authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// https://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++//! Cumulative logical file and symlink input bytes, not decoder or live memory.
++use crate::byte_budget::{ByteBudget, Reservation};
++use crate::repo_path::RepoPath;
++
++/// A file or symlink read would exceed the session's logical input allowance.
++#[derive(Debug, thiserror::Error)]
++#[error(
++    "logical file input budget exceeded at {path}: used {used}, requested {requested}, limit {limit}"
++)]
++pub struct FileInputBudgetExceeded {
++    /// Native repository-relative path associated with the read.
++    pub path: String,
++    /// Committed bytes plus reservations already in progress.
++    pub used: u64,
++    /// Logical bytes requested by this read.
++    pub requested: u64,
++    /// Session limit.
++    pub limit: u64,
++}
++
++/// A shared cumulative allowance for successfully materialized file/symlink reads.
++#[derive(Debug)]
++pub struct FileInputBudget {
++    bytes: ByteBudget,
++}
++
++impl FileInputBudget {
++    /// Sets the total logical-byte allowance. Repeated reads are charged again.
++    pub fn new(limit: u64) -> Self {
++        Self {
++            bytes: ByteBudget::new(limit),
++        }
++    }
++
++    /// Returns successful bytes plus reservations for in-progress reads.
++    pub fn used(&self) -> u64 {
++        self.bytes.used()
++    }
++
++    pub(crate) fn reserve(
++        &self,
++        path: &RepoPath,
++        bytes: u64,
++    ) -> Result<Reservation<'_>, FileInputBudgetExceeded> {
++        self.bytes
++            .reserve(bytes)
++            .map_err(|err| FileInputBudgetExceeded {
++                path: path.as_internal_file_string().to_owned(),
++                used: err.used,
++                requested: err.requested,
++                limit: err.limit,
++            })
++    }
++}
+diff --git a/lib/src/files.rs b/lib/src/files.rs
+--- a/lib/src/files.rs
++++ b/lib/src/files.rs
+@@ -15,6 +15,7 @@
+ #![expect(missing_docs)]
+ 
+ use std::borrow::Borrow;
++use std::borrow::Cow;
+ use std::collections::VecDeque;
+ use std::iter;
+ use std::mem;
+@@ -289,6 +290,14 @@
+     merge_inner(inputs, options)
+ }
+ 
++/// Retains input spans for writers which do not need contiguous resolved buffers.
++pub(crate) fn merge_hunks_for_rendering<'input, T: AsRef<[u8]>>(
++    inputs: &'input Merge<T>,
++    options: &MergeOptions,
++) -> Vec<Merge<Cow<'input, BStr>>> {
++    merge_inner(inputs, options)
++}
++
+ /// Splits `inputs` into hunks, resolves trivial merge conflicts for each, then
+ /// concatenates the outcome back to single `Merge` object.
+ ///
+@@ -392,6 +401,18 @@
+     }
+ }
+ 
++impl<'input> FromMergeHunks<'input> for Vec<Merge<Cow<'input, BStr>>> {
++    fn from_hunks<I: IntoIterator<Item = MergeHunk<'input>>>(hunks: I) -> Self {
++        hunks
++            .into_iter()
++            .map(|hunk| match hunk {
++                MergeHunk::Borrowed(merge) => merge.into_map(Cow::Borrowed),
++                MergeHunk::Owned(merge) => merge.into_map(Cow::Owned),
++            })
++            .collect()
++    }
++}
++
+ impl<'input> FromMergeHunks<'input> for Merge<BString> {
+     fn from_hunks<I: IntoIterator<Item = MergeHunk<'input>>>(hunks: I) -> Self {
+         collect_merged(hunks)
+@@ -492,6 +513,76 @@
+     use indoc::indoc;
+ 
+     use super::*;
++
++    #[test]
++    fn test_render_hunks_borrow_line_spans() {
++        let inputs = Merge::from_vec(vec![
++            "header\nleft\nfooter\n",
++            "header\nbase\nfooter\n",
++            "header\nright\nfooter\n",
++        ]);
++        let options = MergeOptions {
++            hunk_level: FileMergeHunkLevel::Line,
++            same_change: SameChange::Accept,
++        };
++        let hunks = merge_hunks_for_rendering(&inputs, &options);
++        assert_eq!(hunks.iter().filter(|hunk| !hunk.is_resolved()).count(), 1);
++        for term in hunks.iter().flat_map(|hunk| hunk.iter()) {
++            let Cow::Borrowed(bytes) = term else {
++                panic!("line spans should borrow their inputs")
++            };
++            if !bytes.is_empty() {
++                let start = bytes.as_ptr() as usize;
++                assert!(inputs.iter().any(|input| {
++                    let input_start = input.as_ptr() as usize;
++                    start >= input_start && start + bytes.len() <= input_start + input.len()
++                }));
++            }
++        }
++    }
++
++    #[test]
++    fn test_render_hunks_preserve_owned_word_resolution() {
++        let options = MergeOptions {
++            hunk_level: FileMergeHunkLevel::Word,
++            same_change: SameChange::Accept,
++        };
++        let inputs = Merge::from_vec(vec!["a b", "a", "c a"]);
++        let hunks = merge_hunks_for_rendering(&inputs, &options);
++        assert_eq!(hunks.len(), 1);
++        let content = hunks[0].as_resolved().unwrap();
++        assert!(matches!(content, Cow::Owned(_)));
++        assert_eq!(content.as_ref(), BStr::new(b"c a b"));
++        let inputs = Merge::from_vec(vec!["a b", "a", "a c"]);
++        let hunks = merge_hunks_for_rendering(&inputs, &options);
++        assert!(hunks.iter().any(|hunk| !hunk.is_resolved()));
++        assert!(
++            hunks
++                .iter()
++                .flat_map(|hunk| hunk.iter())
++                .all(|term| matches!(term, Cow::Borrowed(_)))
++        );
++    }
++
++    #[test]
++    fn test_render_hunks_keep_resolved_spans() {
++        let inputs = Merge::from_vec(vec![
++            "left\nmiddle\nbase\n",
++            "base\nmiddle\nbase\n",
++            "base\nmiddle\nright\n",
++        ]);
++        let options = MergeOptions {
++            hunk_level: FileMergeHunkLevel::Line,
++            same_change: SameChange::Accept,
++        };
++        let hunks = merge_hunks_for_rendering(&inputs, &options);
++        assert!(hunks.len() > 1);
++        let bytes: Vec<u8> = hunks
++            .iter()
++            .flat_map(|hunk| hunk.as_resolved().unwrap().iter().copied())
++            .collect();
++        assert_eq!(bytes, b"left\nmiddle\nright\n");
++    }
+ 
+     fn conflict<const N: usize>(values: [&[u8]; N]) -> Merge<BString> {
+         Merge::from_vec(values.map(hunk).to_vec())
+diff --git a/lib/src/git_backend.rs b/lib/src/git_backend.rs
+--- a/lib/src/git_backend.rs
++++ b/lib/src/git_backend.rs
+@@ -75,6 +75,7 @@
+ use crate::backend::TreeValue;
+ use crate::backend::make_root_commit;
+ use crate::config::ConfigGetError;
++use crate::file_input_budget::FileInputBudget;
+ use crate::file_util;
+ use crate::file_util::BadPathEncoding;
+ use crate::file_util::IoResultExt as _;
+@@ -192,6 +193,8 @@
+     shallow_root_ids: OnceLock<Vec<CommitId>>,
+     extra_metadata_store: TableStore,
+     cached_extra_metadata: Mutex<Option<Arc<ReadonlyTable>>>,
++    read_only_extra_metadata: Option<Mutex<Option<MutableTable>>>,
++    file_input_budget: Option<Arc<FileInputBudget>>,
+     git_executable: PathBuf,
+     write_change_id_header: bool,
+ }
+@@ -220,9 +223,24 @@
+             shallow_root_ids: OnceLock::new(),
+             extra_metadata_store,
+             cached_extra_metadata: Mutex::new(None),
++            read_only_extra_metadata: None,
++            file_input_budget: None,
+             git_executable: git_settings.executable_path,
+             write_change_id_header: git_settings.write_change_id_header,
+         }
++    }
++
++    /// Uses an independent session table for commit reads. The caller must keep
++    /// this backend session read-only; explicit writer APIs remain unchanged.
++    pub fn with_readonly_commit_metadata(mut self) -> Self {
++        self.read_only_extra_metadata = Some(Mutex::new(None));
++        self
++    }
++
++    /// Shares a cumulative logical file/symlink read allowance for this session.
++    pub fn with_file_input_budget(mut self, budget: Arc<FileInputBudget>) -> Self {
++        self.file_input_budget = Some(budget);
++        self
+     }
+ 
+     pub fn init_internal(
+@@ -336,6 +354,24 @@
+         settings: &UserSettings,
+         store_path: &Path,
+     ) -> Result<Self, Box<GitBackendLoadError>> {
++        Self::load_with_ceiling(settings, store_path, None)
++    }
++
++    /// Loads an owned read session with a caller ceiling on native object allocations.
++    /// This preserves stricter Git limits and does not bound aggregate memory use.
++    pub fn load_with_object_allocation_ceiling(
++        settings: &UserSettings,
++        store_path: &Path,
++        bytes: usize,
++    ) -> Result<Self, Box<GitBackendLoadError>> {
++        Self::load_with_ceiling(settings, store_path, Some(bytes))
++    }
++
++    fn load_with_ceiling(
++        settings: &UserSettings,
++        store_path: &Path,
++        ceiling: Option<usize>,
++    ) -> Result<Self, Box<GitBackendLoadError>> {
+         let git_repo_path = {
+             let target_path = store_path.join("git_target");
+             let git_repo_path_bytes = fs::read(&target_path)
+@@ -348,11 +384,12 @@
+                 .context(&git_repo_path)
+                 .map_err(GitBackendLoadError::Path)?
+         };
+-        let repo = gix::ThreadSafeRepository::open_opts(
+-            git_repo_path,
+-            gix_open_opts_from_settings(settings),
+-        )
+-        .map_err(GitBackendLoadError::OpenRepository)?;
++        let mut options = gix_open_opts_from_settings(settings);
++        if let Some(bytes) = ceiling {
++            options = options.object_allocation_ceiling(bytes);
++        }
++        let repo = gix::ThreadSafeRepository::open_opts(git_repo_path, options)
++            .map_err(GitBackendLoadError::OpenRepository)?;
+         let extra_metadata_store = TableStore::load(
+             store_path.join("extra"),
+             repo.to_thread_local().object_hash().len_in_bytes(),
+@@ -515,15 +552,53 @@
+         self.save_extra_metadata_table(mut_table, &table_lock)
+     }
+ 
+-    fn read_file_sync(&self, id: &FileId) -> BackendResult<Vec<u8>> {
++    fn read_blob_sync<T>(
++        &self,
++        path: &RepoPath,
++        id: &impl ObjectId,
++        finish: impl FnOnce(Vec<u8>) -> BackendResult<T>,
++    ) -> BackendResult<T> {
+         let locked_repo = self.lock_git_repo();
+         let git_blob_id = validate_git_object_id(&locked_repo, id)?;
++        let reservation = if let Some(budget) = &self.file_input_budget {
++            let header = locked_repo
++                .find_header(git_blob_id)
++                .map_err(|err| map_not_found_err(err, id))?;
++            if header.kind() != gix::objs::Kind::Blob {
++                return Err(to_read_object_err(
++                    io::Error::other("expected a blob input header"),
++                    id,
++                ));
++            }
++            Some(
++                budget
++                    .reserve(path, header.size())
++                    .map_err(|err| to_read_object_err(err, id))?,
++            )
++        } else {
++            None
++        };
+         let mut blob = locked_repo
+             .find_object(git_blob_id)
+             .map_err(|err| map_not_found_err(err, id))?
+             .try_into_blob()
+             .map_err(|err| to_read_object_err(err, id))?;
+-        Ok(blob.take_data())
++        let data = blob.take_data();
++        let size = data.len() as u64;
++        if reservation
++            .as_ref()
++            .is_some_and(|reservation| reservation.bytes() != size)
++        {
++            return Err(to_read_object_err(
++                io::Error::other("decoded input size does not match reserved header size"),
++                id,
++            ));
++        }
++        let result = finish(data)?;
++        if let Some(reservation) = reservation {
++            reservation.commit(size);
++        }
++        Ok(result)
+     }
+ 
+     fn new_diff_platform(&self) -> BackendResult<gix::diff::blob::Platform> {
+@@ -1042,6 +1117,15 @@
+     head_ids: &HashSet<&CommitId>,
+     shallow_roots: &[CommitId],
+ ) -> BackendResult<()> {
++    compute_extra_metadata_entries_from_heads(git_repo, mut_table, head_ids, shallow_roots)
++}
++
++fn compute_extra_metadata_entries_from_heads(
++    git_repo: &gix::Repository,
++    mut_table: &mut MutableTable,
++    head_ids: &HashSet<&CommitId>,
++    shallow_roots: &[CommitId],
++) -> BackendResult<()> {
+     let mut work_ids = head_ids
+         .iter()
+         .filter(|&id| mut_table.get_value(id.as_bytes()).is_none())
+@@ -1107,11 +1191,15 @@
+ 
+     async fn read_file(
+         &self,
+-        _path: &RepoPath,
++        path: &RepoPath,
+         id: &FileId,
+     ) -> BackendResult<Pin<Box<dyn AsyncRead + Send>>> {
+-        let data = self.read_file_sync(id)?;
++        let data = self.read_blob_sync(path, id, Ok)?;
+         Ok(Box::pin(Cursor::new(data)))
++    }
++
++    async fn read_file_bytes(&self, path: &RepoPath, id: &FileId) -> BackendResult<Vec<u8>> {
++        self.read_blob_sync(path, id, Ok)
+     }
+ 
+     async fn write_file(
+@@ -1126,17 +1214,10 @@
+         Ok(FileId::new(oid.as_bytes().to_vec()))
+     }
+ 
+-    async fn read_symlink(&self, _path: &RepoPath, id: &SymlinkId) -> BackendResult<String> {
+-        let locked_repo = self.lock_git_repo();
+-        let git_blob_id = validate_git_object_id(&locked_repo, id)?;
+-        let mut blob = locked_repo
+-            .find_object(git_blob_id)
+-            .map_err(|err| map_not_found_err(err, id))?
+-            .try_into_blob()
+-            .map_err(|err| to_read_object_err(err, id))?;
+-        let target = String::from_utf8(blob.take_data())
+-            .map_err(|err| to_invalid_utf8_err(err.utf8_error(), id))?;
+-        Ok(target)
++    async fn read_symlink(&self, path: &RepoPath, id: &SymlinkId) -> BackendResult<String> {
++        self.read_blob_sync(path, id, |data| {
++            String::from_utf8(data).map_err(|err| to_invalid_utf8_err(err.utf8_error(), id))
++        })
+     }
+ 
+     async fn write_symlink(&self, _path: &RepoPath, target: &str) -> BackendResult<SymlinkId> {
+@@ -1300,6 +1381,31 @@
+             commit.parents.push(self.root_commit_id.clone());
+         }
+ 
++        if let Some(cache) = &self.read_only_extra_metadata {
++            // Match the ordinary import's Git-then-table lock order. Neither
++            // this session table nor its computed extras enter the writer cache.
++            let git_repo = self.lock_git_repo();
++            let mut owned = cache.lock().unwrap();
++            if owned.is_none() {
++                *owned = Some(
++                    self.extra_metadata_store
++                        .read_head_view()
++                        .map_err(GitBackendError::ReadMetadata)?,
++                );
++            }
++            let table = owned.as_mut().unwrap();
++            if table.get_value(id.as_bytes()).is_none() {
++                compute_extra_metadata_entries_from_heads(
++                    &git_repo,
++                    table,
++                    &HashSet::from([id]),
++                    self.shallow_root_ids(&git_repo)?,
++                )?;
++            }
++            deserialize_extras(&mut commit, table.get_value(id.as_bytes()).unwrap());
++            return Ok(commit);
++        }
++
+         let table = self.cached_extra_metadata_table()?;
+         if let Some(extras) = table.get_value(id.as_bytes()) {
+             deserialize_extras(&mut commit, extras);
+@@ -1675,6 +1781,77 @@
+     const GIT_USER: &str = "Someone";
+     const GIT_EMAIL: &str = "someone@example.com";
+ 
++    #[test_case(gix::hash::Kind::Sha1 ; "sha1")]
++    #[test_case(gix::hash::Kind::Sha256; "sha256")]
++    fn logical_input_budget_counts_repeated_files_and_symlinks(
++        object_hash: gix::hash::Kind,
++    ) -> TestResult {
++        let settings = user_settings();
++        let temp_dir = new_temp_dir();
++        let backend = GitBackend::init_internal(&settings, temp_dir.path(), object_hash)?;
++        let path = RepoPath::from_internal_string("first.txt")?;
++        let other = RepoPath::from_internal_string("other.txt")?;
++        let content = b"payload";
++        let target = "caf\u{e9}.txt";
++        let id = backend
++            .write_file(path, &mut Cursor::new(content))
++            .block_on()?;
++        let link = backend.write_symlink(path, target).block_on()?;
++        let exact = (3 * content.len() + target.len()) as u64;
++        for allowance in [exact, exact - 1] {
++            let budget = Arc::new(FileInputBudget::new(allowance));
++            let reader = GitBackend::load(&settings, temp_dir.path())?
++                .with_file_input_budget(budget.clone());
++            for (index, path) in [path, other, path].into_iter().enumerate() {
++                if index == 1 {
++                    let bytes = reader.read_file_bytes(path, &id).block_on()?;
++                    assert_eq!(bytes, content);
++                    drop(bytes);
++                } else {
++                    let cursor = reader.read_file(path, &id).block_on()?;
++                    drop(cursor);
++                }
++                assert_eq!(budget.used(), ((index + 1) * content.len()) as u64);
++            }
++            if allowance == exact {
++                assert_eq!(reader.read_symlink(path, &link).block_on()?, target);
++                assert_eq!(budget.used(), exact);
++            } else {
++                let error = reader.read_symlink(path, &link).block_on().unwrap_err();
++                let BackendError::ReadObject { source, .. } = error else {
++                    panic!("wrong error")
++                };
++                assert!(
++                    source
++                        .downcast_ref::<crate::file_input_budget::FileInputBudgetExceeded>()
++                        .is_some()
++                );
++                assert_eq!(budget.used(), (3 * content.len()) as u64);
++            }
++        }
++        Ok(())
++    }
++
++    #[test]
++    fn logical_input_budget_refunds_failed_native_decode() -> TestResult {
++        let settings = user_settings();
++        let temp_dir = new_temp_dir();
++        let backend = GitBackend::init_internal(&settings, temp_dir.path(), gix::hash::Kind::Sha1)?;
++        let path = RepoPath::from_internal_string("ordinary.txt")?;
++        let id = backend
++            .write_file(path, &mut Cursor::new(vec![b'x'; 8192]))
++            .block_on()?;
++        let budget = Arc::new(FileInputBudget::new(8192));
++        let limited =
++            GitBackend::load_with_object_allocation_ceiling(&settings, temp_dir.path(), 4096)?
++                .with_file_input_budget(budget.clone());
++        assert!(limited.read_file(path, &id).block_on().is_err());
++        assert_eq!(budget.used(), 0);
++        assert!(limited.read_file_bytes(path, &id).block_on().is_err());
++        assert_eq!(budget.used(), 0);
++        Ok(())
++    }
++
+     fn git_config() -> Vec<bstr::BString> {
+         vec![
+             format!("user.name = {GIT_USER}").into(),
+@@ -1934,16 +2111,40 @@
+             [] as [gix::ObjectId; 0],
+         )?;
+ 
++        let parent_id = git_commit_id;
++        let git_commit_id = git_repo.commit_as(
++            signature.to_ref(&mut TimeBuf::default()),
++            signature.to_ref(&mut TimeBuf::default()),
++            "refs/heads/main",
++            "child commit",
++            empty_tree_id,
++            [parent_id],
++        )?;
++
+         let backend = GitBackend::init_external(&settings, store_path, git_repo.path())?;
++        let reader = GitBackend::load(&settings, store_path)?.with_readonly_commit_metadata();
++        let before = crate::tests::disk_snapshot(store_path)?;
++        let id = CommitId::from_bytes(git_commit_id.as_bytes());
++        let observed = reader.read_commit(&id).block_on()?;
++        assert_eq!(reader.read_commit(&id).block_on()?, observed);
++        assert_eq!(crate::tests::disk_snapshot(store_path)?, before);
++        assert!(reader.cached_extra_metadata.lock().unwrap().is_none());
++        assert!(
++            reader
++                .read_only_extra_metadata
++                .as_ref()
++                .unwrap()
++                .lock()
++                .unwrap()
++                .as_ref()
++                .unwrap()
++                .get_value(parent_id.as_bytes())
++                .is_some()
++        );
+ 
+         // read_commit() without import_head_commits() works as of now. This might be
+         // changed later.
+-        assert!(
+-            backend
+-                .read_commit(&CommitId::from_bytes(git_commit_id.as_bytes()))
+-                .block_on()
+-                .is_ok()
+-        );
++        assert_eq!(backend.read_commit(&id).block_on()?, observed);
+         assert!(
+             backend
+                 .cached_extra_metadata_table()?
+diff --git a/lib/src/lib.rs b/lib/src/lib.rs
+--- a/lib/src/lib.rs
++++ b/lib/src/lib.rs
+@@ -22,6 +22,8 @@
+ pub mod annotate;
+ pub mod backend;
+ pub mod bisect;
++mod byte_budget;
++pub mod checkout_budget;
+ pub mod commit;
+ pub mod commit_builder;
+ pub mod config;
+@@ -42,6 +44,7 @@
+ pub(crate) mod eol;
+ pub mod evolution;
+ pub mod extensions_map;
++pub mod file_input_budget;
+ pub use jj_core::file_util;
+ pub mod files;
+ pub mod fileset;
+@@ -117,10 +120,32 @@
+ 
+ #[cfg(test)]
+ mod tests {
++    use std::collections::BTreeMap;
++    use std::path::{Path, PathBuf};
++    use std::time::SystemTime;
++
+     use tempfile::TempDir;
+ 
+     // Copied from `testutils::TestResult` to remove dependency cycle.
+     pub type TestResult<T = ()> = eyre::Result<T>;
++
++    /// Records owned regular-file fixtures without following directory links.
++    pub fn disk_snapshot(root: &Path) -> std::io::Result<BTreeMap<PathBuf, (SystemTime, bool, Vec<u8>)>> {
++        fn visit(root: &Path, path: &Path, entries: &mut BTreeMap<PathBuf, (SystemTime, bool, Vec<u8>)>) -> std::io::Result<()> {
++            let metadata = path.symlink_metadata()?;
++            let bytes = if metadata.is_file() { std::fs::read(path)? } else { vec![] };
++            entries.insert(path.strip_prefix(root).unwrap().to_owned(), (metadata.modified()?, metadata.is_dir(), bytes));
++            if metadata.is_dir() {
++                for entry in std::fs::read_dir(path)? {
++                    visit(root, &entry?.path(), entries)?;
++                }
++            }
++            Ok(())
++        }
++        let mut entries = BTreeMap::new();
++        visit(root, root, &mut entries)?;
++        Ok(entries)
++    }
+ 
+     /// Unlike `testutils::new_temp_dir()`, this function doesn't set up
+     /// hermetic Git environment.
+diff --git a/lib/src/local_working_copy.rs b/lib/src/local_working_copy.rs
+--- a/lib/src/local_working_copy.rs
++++ b/lib/src/local_working_copy.rs
+@@ -27,6 +27,7 @@
+ use std::fs::OpenOptions;
+ use std::io;
+ use std::io::Read as _;
++use std::io::Seek as _;
+ use std::io::Write as _;
+ use std::iter;
+ use std::mem;
+@@ -38,6 +39,7 @@
+ use std::slice;
+ use std::sync::Arc;
+ use std::sync::OnceLock;
++use std::sync::mpsc::Receiver;
+ use std::sync::mpsc::Sender;
+ use std::sync::mpsc::channel;
+ use std::time::SystemTime;
+@@ -70,6 +72,7 @@
+ use crate::backend::SymlinkId;
+ use crate::backend::TreeId;
+ use crate::backend::TreeValue;
++use crate::checkout_budget::CheckoutOutputBudget;
+ use crate::commit::Commit;
+ use crate::config::ConfigGetError;
+ use crate::conflict_labels::ConflictLabels;
+@@ -79,7 +82,7 @@
+ use crate::conflicts::MIN_CONFLICT_MARKER_LEN;
+ use crate::conflicts::MaterializedTreeValue;
+ use crate::conflicts::choose_materialized_conflict_marker_len;
+-use crate::conflicts::materialize_merge_result_to_bytes;
++use crate::conflicts::materialize_merge_result;
+ use crate::conflicts::materialize_tree_value;
+ pub use crate::eol::EolConversionMode;
+ use crate::eol::TargetEolStrategy;
+@@ -218,6 +221,11 @@
+ pub struct ExecBit(bool);
+ 
+ impl ExecBit {
++    /// Returns the observed on-disk bit, not a normalized tree-value mode.
++    pub fn on_disk(self) -> bool {
++        self.0
++    }
++
+     /// Get the executable bit for a tree value to write to the repo store.
+     ///
+     /// If we're ignoring the executable bit, then we fallback to the previous
+@@ -303,6 +311,12 @@
+ }
+ 
+ impl FileState {
++    /// This cache shape can be a checkout placeholder, not evidence of a
++    /// previously materialized file. A successful raw observation resolves it.
++    pub fn needs_materialization_observation(&self) -> bool {
++        self == &Self::placeholder()
++    }
++
+     /// Check whether a file state appears clean compared to a previous file
+     /// state, ignoring materialized conflict data.
+     pub fn is_clean(&self, old_file_state: &Self) -> bool {
+@@ -1009,6 +1023,16 @@
+     exec_policy: ExecChangePolicy,
+     fsmonitor_settings: FsmonitorSettings,
+     target_eol_strategy: TargetEolStrategy,
++    checkout_output_budget: Option<Arc<CheckoutOutputBudget>>,
++    conflict_scratch_budget: Option<Arc<CheckoutOutputBudget>>,
++}
++
++#[derive(Debug, Error)]
++#[error("conflict export failed and removing scratch output also failed: {cleanup}")]
++struct ConflictSpoolCleanupError {
++    #[source]
++    primary: CheckoutError,
++    cleanup: io::Error,
+ }
+ 
+ #[derive(Debug, Error)]
+@@ -1043,6 +1067,11 @@
+ 
+     pub fn sparse_patterns(&self) -> &Vec<RepoPathBuf> {
+         &self.sparse_patterns
++    }
++
++    /// Native sparse admission for a pending-tree file-like path.
++    pub fn is_in_sparse_scope(&self, path: &RepoPath) -> bool {
++        self.sparse_matcher().matches(path)
+     }
+ 
+     fn sparse_matcher(&self) -> Box<dyn Matcher> {
+@@ -1099,6 +1128,8 @@
+             exec_policy,
+             fsmonitor_settings: fsmonitor_settings.clone(),
+             target_eol_strategy: TargetEolStrategy::new(*eol_conversion_mode),
++            checkout_output_budget: None,
++            conflict_scratch_budget: None,
+         }
+     }
+ 
+@@ -1285,8 +1316,138 @@
+     }
+ }
+ 
++/// Observes files after native admission without normalizing or writing objects.
++pub type RawFileCapture<'a> = dyn Fn(&RepoPath, &Path, Option<&FileState>, &FileState) -> Result<(), SnapshotError>
++    + Sync
++    + 'a;
++
++/// Filesystem observations, not authorization to prune a remote manifest.
++#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
++pub struct RawPathObservation {
++    pub path: RepoPathBuf,
++    pub kind: RawPathObservationKind,
++    pub subtree: bool,
++}
++
++#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
++pub enum RawPathObservationKind {
++    RemovedAbsent,
++    RemovedKindReplacement,
++    OmittedUnsupportedKind,
++    OmittedSubmodule,
++    OmittedNestedRepository,
++    OmittedNotAdmitted,
++}
++
++struct SnapshotTraversal {
++    tree_entries_rx: Receiver<(RepoPathBuf, MergedTreeValue)>,
++    file_states_rx: Receiver<(RepoPathBuf, FileState)>,
++    untracked_paths_rx: Receiver<(RepoPathBuf, UntrackedReason)>,
++    invalid_utf8_paths_rx: Receiver<(RepoPathBuf, OsString)>,
++    deleted_files_rx: Receiver<RepoPathBuf>,
++    raw_observations_rx: Receiver<RawPathObservation>,
++}
++
+ /// Functions to snapshot local-disk files to the store.
+ impl TreeState {
++    /// Full native filesystem visit with a raw replacement visitor.
++    /// Observations distinguish physical absence from native policy omissions.
++    pub fn capture_raw(
++        &self,
++        options: &SnapshotOptions<'_>,
++        capture: &RawFileCapture<'_>,
++    ) -> Result<(SnapshotStats, Vec<RawPathObservation>), SnapshotError> {
++        let matcher = self.sparse_matcher();
++        let traversal =
++            self.traverse_snapshot_filesystem(options, matcher.as_ref(), Some(capture))?;
++        let stats = SnapshotStats {
++            untracked_paths: traversal.untracked_paths_rx.into_iter().collect(),
++            invalid_utf8_paths: traversal.invalid_utf8_paths_rx.into_iter().collect(),
++        };
++        let mut observations: Vec<_> = traversal.raw_observations_rx.into_iter().collect();
++        observations.sort();
++        observations.dedup();
++        let explicit_boundaries: Vec<_> = observations
++            .iter()
++            .filter(|item| {
++                item.subtree
++                    && matches!(
++                        item.kind,
++                        RawPathObservationKind::OmittedNestedRepository
++                            | RawPathObservationKind::OmittedSubmodule
++                    )
++            })
++            .map(|item| item.path.clone())
++            .collect();
++        observations.retain(|item| {
++            item.kind != RawPathObservationKind::OmittedNotAdmitted
++                || !explicit_boundaries
++                    .iter()
++                    .any(|prefix| item.path.starts_with(prefix))
++        });
++        Ok((stats, observations))
++    }
++
++    fn traverse_snapshot_filesystem(
++        &self,
++        options: &SnapshotOptions<'_>,
++        matcher: &dyn Matcher,
++        raw_capture: Option<&RawFileCapture<'_>>,
++    ) -> Result<SnapshotTraversal, SnapshotError> {
++        let SnapshotOptions {
++            base_ignores,
++            progress,
++            start_tracking_matcher,
++            force_tracking_matcher,
++            max_new_file_size,
++        } = options;
++        let (tree_entries_tx, tree_entries_rx) = channel();
++        let (file_states_tx, file_states_rx) = channel();
++        let (untracked_paths_tx, untracked_paths_rx) = channel();
++        let (invalid_utf8_paths_tx, invalid_utf8_paths_rx) = channel();
++        let (deleted_files_tx, deleted_files_rx) = channel();
++        let (raw_observations_tx, raw_observations_rx) = channel();
++        trace_span!("traverse filesystem").in_scope(|| -> Result<(), SnapshotError> {
++            let snapshotter = FileSnapshotter {
++                tree_state: self,
++                current_tree: &self.tree,
++                matcher,
++                start_tracking_matcher,
++                force_tracking_matcher,
++                tree_entries_tx,
++                file_states_tx,
++                untracked_paths_tx,
++                invalid_utf8_paths_tx,
++                deleted_files_tx,
++                raw_observations_tx,
++                error: OnceLock::new(),
++                progress: *progress,
++                max_new_file_size: *max_new_file_size,
++                raw_capture,
++            };
++            let directory_to_visit = DirectoryToVisit {
++                dir: RepoPathBuf::root(),
++                disk_dir: self.working_copy_path.clone(),
++                git_ignore: base_ignores.clone(),
++                file_states: self.file_states.all(),
++            };
++            rayon::scope(|scope| {
++                snapshotter.spawn_ok(scope, |scope| {
++                    snapshotter.visit_directory(directory_to_visit, scope)
++                });
++            });
++            snapshotter.into_result()
++        })?;
++        Ok(SnapshotTraversal {
++            tree_entries_rx,
++            file_states_rx,
++            untracked_paths_rx,
++            invalid_utf8_paths_rx,
++            deleted_files_rx,
++            raw_observations_rx,
++        })
++    }
++
+     /// Look for changes to the working copy. If there are any changes, create
+     /// a new tree from it.
+     #[instrument(skip_all)]
+@@ -1294,13 +1455,7 @@
+         &mut self,
+         options: &SnapshotOptions<'_>,
+     ) -> Result<(bool, SnapshotStats), SnapshotError> {
+-        let SnapshotOptions {
+-            base_ignores,
+-            progress,
+-            start_tracking_matcher,
+-            force_tracking_matcher,
+-            max_new_file_size,
+-        } = options;
++        let force_tracking_matcher = options.force_tracking_matcher;
+ 
+         let sparse_matcher = self.sparse_matcher();
+ 
+@@ -1327,43 +1482,14 @@
+             return Ok((is_dirty, SnapshotStats::default()));
+         }
+ 
+-        let (tree_entries_tx, tree_entries_rx) = channel();
+-        let (file_states_tx, file_states_rx) = channel();
+-        let (untracked_paths_tx, untracked_paths_rx) = channel();
+-        let (invalid_utf8_paths_tx, invalid_utf8_paths_rx) = channel();
+-        let (deleted_files_tx, deleted_files_rx) = channel();
+-
+-        trace_span!("traverse filesystem").in_scope(|| -> Result<(), SnapshotError> {
+-            let snapshotter = FileSnapshotter {
+-                tree_state: self,
+-                current_tree: &self.tree,
+-                matcher: &matcher,
+-                start_tracking_matcher,
+-                force_tracking_matcher,
+-                // Move tx sides so they'll be dropped at the end of the scope.
+-                tree_entries_tx,
+-                file_states_tx,
+-                untracked_paths_tx,
+-                invalid_utf8_paths_tx,
+-                deleted_files_tx,
+-                error: OnceLock::new(),
+-                progress: *progress,
+-                max_new_file_size: *max_new_file_size,
+-            };
+-            let directory_to_visit = DirectoryToVisit {
+-                dir: RepoPathBuf::root(),
+-                disk_dir: self.working_copy_path.clone(),
+-                git_ignore: base_ignores.clone(),
+-                file_states: self.file_states.all(),
+-            };
+-            // Here we use scope as a queue of per-directory jobs.
+-            rayon::scope(|scope| {
+-                snapshotter.spawn_ok(scope, |scope| {
+-                    snapshotter.visit_directory(directory_to_visit, scope)
+-                });
+-            });
+-            snapshotter.into_result()
+-        })?;
++        let SnapshotTraversal {
++            tree_entries_rx,
++            file_states_rx,
++            untracked_paths_rx,
++            invalid_utf8_paths_rx,
++            deleted_files_rx,
++            raw_observations_rx: _,
++        } = self.traverse_snapshot_filesystem(options, &matcher, None)?;
+ 
+         let stats = SnapshotStats {
+             untracked_paths: untracked_paths_rx.into_iter().collect(),
+@@ -1516,17 +1642,31 @@
+     matcher: &'a dyn Matcher,
+     start_tracking_matcher: &'a dyn Matcher,
+     force_tracking_matcher: &'a dyn Matcher,
++    raw_capture: Option<&'a RawFileCapture<'a>>,
+     tree_entries_tx: Sender<(RepoPathBuf, MergedTreeValue)>,
+     file_states_tx: Sender<(RepoPathBuf, FileState)>,
+     untracked_paths_tx: Sender<(RepoPathBuf, UntrackedReason)>,
+     invalid_utf8_paths_tx: Sender<(RepoPathBuf, OsString)>,
+     deleted_files_tx: Sender<RepoPathBuf>,
++    raw_observations_tx: Sender<RawPathObservation>,
+     error: OnceLock<SnapshotError>,
+     progress: Option<&'a SnapshotProgress<'a>>,
+     max_new_file_size: u64,
+ }
+ 
+ impl FileSnapshotter<'_> {
++    fn observe_raw(&self, path: &RepoPath, kind: RawPathObservationKind, subtree: bool) {
++        if self.raw_capture.is_some() {
++            self.raw_observations_tx
++                .send(RawPathObservation {
++                    path: path.to_owned(),
++                    kind,
++                    subtree,
++                })
++                .ok();
++        }
++    }
++
+     fn spawn_ok<'scope, F>(&'scope self, scope: &rayon::Scope<'scope>, body: F)
+     where
+         F: FnOnce(&rayon::Scope<'scope>) -> Result<(), SnapshotError> + Send + 'scope,
+@@ -1572,6 +1712,23 @@
+                 message: format!("Failed to read directory {}", disk_dir.display()),
+                 err: err.into(),
+             })?;
++        // Native present sets below are policy-filtered. Keep physical names
++        // separately so a skipped entry is never described as absent.
++        let observed_entries = if self.raw_capture.is_some() {
++            let mut observed = HashMap::new();
++            for entry in &dir_entries {
++                if let Ok(name) = entry.file_name().into_string() {
++                    let kind = entry.file_type().map_err(|err| SnapshotError::Other {
++                        message: format!("Failed to stat entry {}", entry.path().display()),
++                        err: err.into(),
++                    })?;
++                    observed.insert(name, kind);
++                }
++            }
++            Some(observed)
++        } else {
++            None
++        };
+         let (dirs, files) = dir_entries
+             .into_par_iter()
+             // Don't split into too many small jobs. For a small directory,
+@@ -1589,7 +1746,12 @@
+             })
+             .collect::<Result<_, _>>()?;
+         let present_entries = PresentDirEntries { dirs, files };
+-        self.emit_deleted_files(&dir, file_states, &present_entries);
++        self.emit_deleted_files(
++            &dir,
++            file_states,
++            &present_entries,
++            observed_entries.as_ref(),
++        );
+         Ok(())
+     }
+ 
+@@ -1623,6 +1785,7 @@
+         if let Some(file_state) = &maybe_current_file_state
+             && file_state.file_type == FileType::GitSubmodule
+         {
++            self.observe_raw(&path, RawPathObservationKind::OmittedSubmodule, true);
+             return Ok(None);
+         }
+ 
+@@ -1638,6 +1801,7 @@
+             let disk_dir = entry.path();
+             for &name in RESERVED_DIR_NAMES {
+                 if disk_dir.join(name).symlink_metadata().is_ok() {
++                    self.observe_raw(&path, RawPathObservationKind::OmittedNestedRepository, true);
+                     return Ok(None);
+                 }
+             }
+@@ -1714,6 +1878,7 @@
+                     Ok(Some((PresentDirEntryKind::File, name_string)))
+                 } else {
+                     // Special file is not considered present
++                    self.observe_raw(&path, RawPathObservationKind::OmittedUnsupportedKind, false);
+                     Ok(None)
+                 }
+             }
+@@ -1726,6 +1891,7 @@
+     async fn visit_tracked_files(&self, file_states: FileStates<'_>) -> Result<(), SnapshotError> {
+         for (tracked_path, current_file_state) in file_states {
+             if current_file_state.file_type == FileType::GitSubmodule {
++                self.observe_raw(tracked_path, RawPathObservationKind::OmittedSubmodule, true);
+                 continue;
+             }
+             if !self.matcher.matches(tracked_path) {
+@@ -1754,6 +1920,14 @@
+                 )
+                 .await?;
+             } else {
++                let kind = match &metadata {
++                    None => RawPathObservationKind::RemovedAbsent,
++                    Some(metadata) if metadata.is_dir() => {
++                        RawPathObservationKind::RemovedKindReplacement
++                    }
++                    Some(_) => RawPathObservationKind::OmittedUnsupportedKind,
++                };
++                self.observe_raw(tracked_path, kind, false);
+                 self.deleted_files_tx.send(tracked_path.to_owned()).ok();
+             }
+         }
+@@ -1767,6 +1941,9 @@
+         maybe_current_file_state: Option<&FileState>,
+         mut new_file_state: FileState,
+     ) -> Result<(), SnapshotError> {
++        if let Some(capture) = self.raw_capture {
++            return capture(&path, disk_path, maybe_current_file_state, &new_file_state);
++        }
+         let update = self
+             .get_updated_tree_value(&path, disk_path, maybe_current_file_state, &new_file_state)
+             .await?;
+@@ -1792,6 +1969,7 @@
+         dir: &RepoPath,
+         file_states: FileStates<'_>,
+         present_entries: &PresentDirEntries,
++        observed_entries: Option<&HashMap<String, fs::FileType>>,
+     ) {
+         let file_state_chunks = file_states.iter().chunk_by(|(path, _state)| {
+             // Extract <name> from <dir>, <dir>/<name>, or <dir>/<name>/**.
+@@ -1811,7 +1989,40 @@
+                 PresentDirEntryKind::Dir => !present_entries.dirs.contains(name),
+                 PresentDirEntryKind::File => !present_entries.files.contains(name),
+             })
+-            .flat_map(|(_, chunk)| chunk)
++            .flat_map(|((kind, name), chunk)| {
++                let observation = observed_entries.map(|observed| {
++                    // Empty name represents the old file at this now-directory.
++                    if name.is_empty() {
++                        RawPathObservationKind::RemovedKindReplacement
++                    } else {
++                        match observed.get(name) {
++                            None => RawPathObservationKind::RemovedAbsent,
++                            Some(actual)
++                                if !actual.is_dir()
++                                    && !actual.is_file()
++                                    && !actual.is_symlink() =>
++                            {
++                                RawPathObservationKind::OmittedUnsupportedKind
++                            }
++                            Some(actual)
++                                if actual.is_dir() != (kind == PresentDirEntryKind::Dir) =>
++                            {
++                                RawPathObservationKind::RemovedKindReplacement
++                            }
++                            // A same-kind entry skipped by policy is not absent.
++                            Some(_) => RawPathObservationKind::OmittedNotAdmitted,
++                        }
++                    }
++                });
++                chunk.map(move |(path, state)| {
++                    if let Some(observation) = observation {
++                        if state.file_type != FileType::GitSubmodule && self.matcher.matches(path) {
++                            self.observe_raw(path, observation, false);
++                        }
++                    }
++                    (path, state)
++                })
++            })
+             // Whether or not the entry exists, submodule should be ignored
+             .filter(|(_, state)| state.file_type != FileType::GitSubmodule)
+             .filter(|(path, _)| self.matcher.matches(path))
+@@ -2077,15 +2288,19 @@
+         } else {
+             Box::new(contents)
+         };
+-        let size = copy_async_to_sync(contents, &mut file)
+-            .await
+-            .map_err(|err| CheckoutError::Other {
+-                message: format!(
+-                    "Failed to write the content to the file {}",
+-                    disk_path.display()
+-                ),
+-                err: err.into(),
+-            })?;
++        let size = if let Some(budget) = &self.checkout_output_budget {
++            let mut writer = budget.writer(disk_path, &mut file);
++            copy_async_to_sync(contents, &mut writer).await
++        } else {
++            copy_async_to_sync(contents, &mut file).await
++        }
++        .map_err(|err| CheckoutError::Other {
++            message: format!(
++                "Failed to write the content to the file {}",
++                disk_path.display()
++            ),
++            err: err.into(),
++        })?;
+         set_executable(exec_bit, disk_path)
+             .map_err(|err| checkout_error_for_stat_error(err, disk_path))?;
+         // Read the file state from the file descriptor. That way, know that the file
+@@ -2100,6 +2315,7 @@
+     }
+ 
+     fn write_symlink(&self, disk_path: &Path, target: String) -> Result<FileState, CheckoutError> {
++        let target_bytes = target.len() as u64;
+         let target = symlink_target_convert_to_disk(&target);
+ 
+         if cfg!(windows) {
+@@ -2121,7 +2337,13 @@
+         // On Windows, this will create a nonfunctional link for directories,
+         // but at the moment we don't have enough information in the tree to
+         // determine whether the symlink target is a file or a directory.
+-        symlink_file(&target, disk_path).map_err(|err| CheckoutError::Other {
++        let create = || symlink_file(&target, disk_path);
++        let result = if let Some(budget) = &self.checkout_output_budget {
++            budget.write_entry(disk_path, target_bytes, create)
++        } else {
++            create()
++        };
++        result.map_err(|err| CheckoutError::Other {
+             message: format!(
+                 "Failed to create symlink from {} to {}",
+                 disk_path.display(),
+@@ -2139,7 +2361,7 @@
+     async fn write_conflict(
+         &self,
+         disk_path: &Path,
+-        contents: &[u8],
++        contents: impl AsyncRead + Send + Unpin,
+         exec_bit: ExecBit,
+     ) -> Result<FileState, CheckoutError> {
+         let contents = self
+@@ -2158,12 +2380,16 @@
+                 message: format!("Failed to open file {} for writing", disk_path.display()),
+                 err: err.into(),
+             })?;
+-        let size = copy_async_to_sync(contents, &mut file)
+-            .await
+-            .map_err(|err| CheckoutError::Other {
+-                message: format!("Failed to write conflict to file {}", disk_path.display()),
+-                err: err.into(),
+-            })? as u64;
++        let size = if let Some(budget) = &self.checkout_output_budget {
++            let mut writer = budget.writer(disk_path, &mut file);
++            copy_async_to_sync(contents, &mut writer).await
++        } else {
++            copy_async_to_sync(contents, &mut file).await
++        }
++        .map_err(|err| CheckoutError::Other {
++            message: format!("Failed to write conflict to file {}", disk_path.display()),
++            err: err.into(),
++        })? as u64;
+         set_executable(exec_bit, disk_path)
+             .map_err(|err| checkout_error_for_stat_error(err, disk_path))?;
+         let metadata = file
+@@ -2171,6 +2397,56 @@
+             .map_err(|err| checkout_error_for_stat_error(err, disk_path))?;
+         FileState::for_file(exec_bit, size, &metadata)
+             .map_err(|err| checkout_error_for_mtime_out_of_range(err, disk_path))
++    }
++
++    async fn write_spooled_conflict(
++        &self,
++        disk_path: &Path,
++        file: &conflicts::MaterializedFileConflictValue,
++        options: &ConflictMaterializeOptions,
++        exec_bit: ExecBit,
++    ) -> Result<FileState, CheckoutError> {
++        let wrap_render_error = |err: io::Error| CheckoutError::Other {
++            message: format!(
++                "Failed to render conflict scratch output for {}",
++                disk_path.display()
++            ),
++            err: err.into(),
++        };
++        let mut spool = tempfile::Builder::new()
++            .prefix("jj-conflict-render-")
++            .tempfile_in(&self.state_path)
++            .map_err(&wrap_render_error)?;
++        let result = async {
++            if let Some(budget) = &self.conflict_scratch_budget {
++                let mut writer = budget.writer(disk_path, spool.as_file_mut());
++                materialize_merge_result(&file.contents, &file.labels, &mut writer, options)
++                    .map_err(&wrap_render_error)?;
++            } else {
++                materialize_merge_result(
++                    &file.contents,
++                    &file.labels,
++                    spool.as_file_mut(),
++                    options,
++                )
++                .map_err(&wrap_render_error)?;
++            }
++            spool.as_file_mut().rewind().map_err(&wrap_render_error)?;
++            self.write_conflict(disk_path, AllowStdIo::new(spool.as_file_mut()), exec_bit)
++                .await
++        }
++        .await;
++        match (result, spool.close()) {
++            (result, Ok(())) => result,
++            (Ok(_), Err(err)) => Err(CheckoutError::Other {
++                message: "Failed to remove rendered conflict scratch output".to_owned(),
++                err: err.into(),
++            }),
++            (Err(primary), Err(cleanup)) => Err(CheckoutError::Other {
++                message: "Failed to export conflict and clean scratch output".to_owned(),
++                err: ConflictSpoolCleanupError { primary, cleanup }.into(),
++            }),
++        }
+     }
+ 
+     pub fn check_out(&mut self, new_tree: &MergedTree) -> Result<CheckoutStats, CheckoutError> {
+@@ -2404,10 +2680,9 @@
+                         self.exec_policy,
+                         get_prev_exec,
+                     );
+-                    let contents =
+-                        materialize_merge_result_to_bytes(&file.contents, &file.labels, &options);
+-                    let mut file_state =
+-                        self.write_conflict(&disk_path, &contents, exec_bit).await?;
++                    let mut file_state = self
++                        .write_spooled_conflict(&disk_path, &file, &options, exec_bit)
++                        .await?;
+                     file_state.materialized_conflict_data = Some(MaterializedConflictData {
+                         conflict_marker_len: conflict_marker_len.try_into().unwrap_or(u32::MAX),
+                     });
+@@ -2771,6 +3046,31 @@
+         Ok(self.tree_state()?.file_states())
+     }
+ 
++    /// Prototype: decode existing state without initialization or capability probes.
++    pub fn read_existing_state(&self) -> Result<TreeState, WorkingCopyStateError> {
++        let path = self.state_path.join("tree_state");
++        let file = File::open(&path).map_err(|err| WorkingCopyStateError {
++            message: "Read existing working-copy state".to_owned(),
++            err: err.into(),
++        })?;
++        let mut settings = self.tree_state_settings.clone();
++        // This read loads persisted modes; it does not apply a snapshot mode policy.
++        settings.exec_change_setting = ExecChangeSetting::Respect;
++        let mut state = TreeState::empty(
++            self.store.clone(),
++            self.working_copy_path.clone(),
++            self.state_path.clone(),
++            &settings,
++        );
++        state
++            .read(&path, file)
++            .map_err(|err| WorkingCopyStateError {
++                message: "Decode existing working-copy state".to_owned(),
++                err: err.into(),
++            })?;
++        Ok(state)
++    }
++
+     #[cfg(feature = "watchman")]
+     pub async fn query_watchman(
+         &self,
+@@ -2847,6 +3147,40 @@
+     tree_state_dirty: bool,
+     new_workspace_name: Option<WorkspaceNameBuf>,
+     _lock: FileLock,
++}
++
++/// Capabilities actually used by the initialized checkout state.
++#[derive(Clone, Copy, Debug)]
++pub struct CheckoutCapabilities {
++    pub executable_bits: bool,
++    pub symlinks: bool,
++}
++
++impl LockedLocalWorkingCopy {
++    pub fn checkout_capabilities(&mut self) -> Result<CheckoutCapabilities, WorkingCopyStateError> {
++        let state = self.wc.tree_state_mut()?;
++        Ok(CheckoutCapabilities {
++            executable_bits: matches!(state.exec_policy, ExecChangePolicy::Respect),
++            symlinks: state.symlink_support,
++        })
++    }
++    /// Installs a non-persisted output ceiling for this owned checkout session.
++    pub fn set_checkout_output_budget(
++        &mut self,
++        budget: Arc<CheckoutOutputBudget>,
++    ) -> Result<(), WorkingCopyStateError> {
++        self.wc.tree_state_mut()?.checkout_output_budget = Some(budget);
++        Ok(())
++    }
++
++    /// Installs a non-persisted cumulative scratch-write allowance for owned export.
++    pub fn set_conflict_scratch_budget(
++        &mut self,
++        budget: Arc<CheckoutOutputBudget>,
++    ) -> Result<(), WorkingCopyStateError> {
++        self.wc.tree_state_mut()?.conflict_scratch_budget = Some(budget);
++        Ok(())
++    }
+ }
+ 
+ #[async_trait]
+diff --git a/lib/src/secure_config.rs b/lib/src/secure_config.rs
+--- a/lib/src/secure_config.rs
++++ b/lib/src/secure_config.rs
+@@ -80,6 +80,13 @@
+     /// The config ID isn't CONFIG_ID_BYTES * 2 hex chars.
+     #[error("Found an invalid config ID")]
+     BadConfigIdError,
++
++    /// The native association needs a decision that normally mutates state.
++    #[error("Secure configuration requires mutable resolution: {reason}")]
++    RequiresMutableResolution {
++        /// The native migration or association step that would write state.
++        reason: &'static str,
++    },
+ }
+ 
+ /// The path to the config file for a secure config.
+@@ -354,6 +361,47 @@
+         })
+     }
+ 
++    fn read_config_id(&self) -> Result<Option<String>, SecureConfigError> {
++        let path = self.repo_dir.join(self.config_id_name);
++        match fs::read_to_string(&path).context(&path) {
++            Ok(id) if id.len() == CONFIG_ID_BYTES * 2 && id.chars().all(|c| c.is_ascii_hexdigit()) => Ok(Some(id)),
++            Ok(_) => Err(SecureConfigError::BadConfigIdError),
++            Err(err) if err.source.kind() == NotFound => Ok(None),
++            Err(err) => Err(err.into()),
++        }
++    }
++
++    /// Reads an established native association without migration, repair, probes
++    /// or mutable-loader cache reuse. It never silently drops an existing layer.
++    pub fn maybe_load_config_readonly(
++        &self,
++        root_config_dir: &Path,
++    ) -> Result<LoadedSecureConfig, SecureConfigError> {
++        let Some(id) = self.read_config_id()? else {
++            let legacy = self.repo_dir.join(self.legacy_config_name);
++            return match fs::read(&legacy).context(&legacy) {
++                Ok(_) => Err(SecureConfigError::RequiresMutableResolution { reason: "legacy configuration migration" }),
++                Err(err) if err.source.kind() == NotFound => Ok(LoadedSecureConfig::default()),
++                Err(err) => Err(err.into()),
++            };
++        };
++        let config_dir = root_config_dir.join(id);
++        let metadata = match read_metadata(&config_dir) {
++            Ok(metadata) => metadata,
++            Err(SecureConfigError::PathError(err)) if err.source.kind() == NotFound => {
++                return Err(SecureConfigError::RequiresMutableResolution { reason: "configuration association initialization" });
++            }
++            Err(err) => return Err(err),
++        };
++        let encoded = path_to_bytes(&self.repo_dir).ok();
++        if metadata_path(&metadata)? != encoded.is_some().then_some(self.repo_dir.as_path()) {
++            return Err(SecureConfigError::RequiresMutableResolution { reason: "configuration association reconciliation" });
++        }
++        Ok(LoadedSecureConfig {
++            config_file: Some(config_dir.join(CONFIG_FILE)), metadata, warnings: vec![],
++        })
++    }
++
+     /// Determines the path to the config, and any metadata associated with it.
+     /// If no config exists, the path will be None.
+     pub fn maybe_load_config(
+@@ -368,14 +416,8 @@
+                 warnings: vec![],
+             });
+         }
+-        let config_id_path = self.repo_dir.join(self.config_id_name);
+-        let loaded = match fs::read_to_string(&config_id_path).context(&config_id_path) {
+-            Ok(config_id) => {
+-                if config_id.len() != CONFIG_ID_BYTES * 2
+-                    || !config_id.chars().all(|c| c.is_ascii_hexdigit())
+-                {
+-                    return Err(SecureConfigError::BadConfigIdError);
+-                }
++        let loaded = match self.read_config_id()? {
++            Some(config_id) => {
+                 let config_dir = root_config_dir.join(&config_id);
+                 match read_metadata(&config_dir) {
+                     Ok(metadata) => {
+@@ -393,10 +435,9 @@
+                     Err(e) => return Err(e),
+                 }
+             }
+-            Err(e) if e.source.kind() == NotFound => {
++            None => {
+                 self.maybe_migrate_legacy_config(rng, root_config_dir)?
+             }
+-            Err(e) => return Err(SecureConfigError::PathError(e)),
+         };
+         *self.cache.borrow_mut() = Some((loaded.config_file.clone(), loaded.metadata.clone()));
+         Ok(loaded)
+diff --git a/lib/src/simple_backend.rs b/lib/src/simple_backend.rs
+--- a/lib/src/simple_backend.rs
++++ b/lib/src/simple_backend.rs
+@@ -512,6 +512,21 @@
+     use crate::tests::TestResult;
+     use crate::tests::new_temp_dir;
+ 
++    #[test]
++    fn test_owned_file_bytes_default_backend() -> TestResult {
++        let temp_dir = new_temp_dir();
++        let backend: Box<dyn Backend> = Box::new(SimpleBackend::init(temp_dir.path()));
++        let path = RepoPath::from_internal_string("ordinary.txt")?;
++        let payload = b"ordinary file contents\n";
++        let id = backend
++            .write_file(path, &mut Cursor::new(payload))
++            .block_on()?;
++        let bytes = backend.read_file_bytes(path, &id).block_on()?;
++        drop(backend);
++        assert_eq!(bytes, payload);
++        Ok(())
++    }
++
+     /// Test that parents get written correctly
+     #[test]
+     fn write_commit_parents() -> TestResult {
+diff --git a/lib/src/stacked_table.rs b/lib/src/stacked_table.rs
+--- a/lib/src/stacked_table.rs
++++ b/lib/src/stacked_table.rs
+@@ -539,6 +539,23 @@
+         }
+     }
+ 
++    /// Reads and merges the current heads into an owned in-memory view, without
++    /// creating a segment, changing head markers or taking a filesystem lock.
++    pub fn read_head_view(&self) -> TableStoreResult<MutableTable> {
++        Ok(self.merge_head_tables(&self.get_head_tables()?))
++    }
++
++    fn merge_head_tables(&self, tables: &[Arc<ReadonlyTable>]) -> MutableTable {
++        let Some(first) = tables.first() else {
++            return MutableTable::full(self.key_size);
++        };
++        let mut merged = MutableTable::incremental(first.clone());
++        for other in &tables[1..] {
++            merged.merge_in(other);
++        }
++        merged
++    }
++
+     pub fn get_head_locked(&self) -> TableStoreResult<(Arc<ReadonlyTable>, FileLock)> {
+         let lock = self.lock()?;
+         let mut tables = self.get_head_tables()?;
+@@ -556,10 +573,7 @@
+         tables: Vec<Arc<ReadonlyTable>>,
+     ) -> TableStoreResult<Arc<ReadonlyTable>> {
+         assert!(tables.len() >= 2);
+-        let mut merged_table = MutableTable::incremental(tables[0].clone());
+-        for other in &tables[1..] {
+-            merged_table.merge_in(other);
+-        }
++        let merged_table = self.merge_head_tables(&tables);
+         let merged_table = self.save_table(merged_table)?;
+         for table in &tables {
+             if table.name() != merged_table.name() {
+@@ -637,6 +651,40 @@
+     use crate::tests::TestResult;
+     use crate::tests::new_temp_dir;
+ 
++    #[test]
++    fn readonly_head_view() -> TestResult {
++        for branches in [0, 1, 2] {
++            let temp = new_temp_dir();
++            let store = TableStore::init(temp.path().to_owned(), 3);
++            if branches != 0 {
++                let mut base = MutableTable::full(3);
++                base.add_entry(b"abc".to_vec(), b"base".to_vec());
++                let base = store.save_table(base)?;
++                if branches == 2 {
++                    let mut left = base.start_mutation();
++                    left.add_entry(b"abd".to_vec(), b"left".to_vec());
++                    store.save_table(left)?;
++                    let mut right = base.start_mutation();
++                    right.add_entry(b"abe".to_vec(), b"right".to_vec());
++                    store.save_table(right)?;
++                }
++            }
++            let before = crate::tests::disk_snapshot(temp.path())?;
++            let view = store.read_head_view()?;
++            assert_eq!(crate::tests::disk_snapshot(temp.path())?, before);
++            assert_eq!(view.get_value(b"abc"), (branches != 0).then_some(b"base".as_slice()));
++            if branches == 2 {
++                assert_eq!(view.get_value(b"abd"), Some(b"left".as_slice()));
++                assert_eq!(view.get_value(b"abe"), Some(b"right".as_slice()));
++            }
++            let persisted = store.get_head()?;
++            for key in [b"abc", b"abd", b"abe"] {
++                assert_eq!(view.get_value(key), persisted.get_value(key));
++            }
++        }
++        Ok(())
++    }
++
+     #[test_case(false; "memory")]
+     #[test_case(true; "file")]
+     fn stacked_table_empty(on_disk: bool) -> TestResult {
+diff --git a/lib/src/store.rs b/lib/src/store.rs
+--- a/lib/src/store.rs
++++ b/lib/src/store.rs
+@@ -244,6 +244,10 @@
+         self.backend.write_file(path, contents).await
+     }
+ 
++    pub async fn read_file_bytes(&self, path: &RepoPath, id: &FileId) -> BackendResult<Vec<u8>> {
++        self.backend.read_file_bytes(path, id).await
++    }
++
+     pub async fn read_symlink(&self, path: &RepoPath, id: &SymlinkId) -> BackendResult<String> {
+         self.backend.read_symlink(path, id).await
+     }
+diff --git a/lib/src/working_copy.rs b/lib/src/working_copy.rs
+--- a/lib/src/working_copy.rs
++++ b/lib/src/working_copy.rs
+@@ -363,14 +363,25 @@
+         wc_commit: &Commit,
+         repo: &ReadonlyRepo,
+     ) -> Result<Self, OpStoreError> {
++        Self::check_at_operation(locked_wc.old_operation_id(), locked_wc.old_tree(), wc_commit, repo).await
++    }
++
++    /// Checks captured read-only working-copy state with the same native
++    /// freshness rules as the mutation-locked path.
++    pub async fn check_at_operation(
++        working_copy_operation: &OperationId,
++        working_copy_tree: &MergedTree,
++        wc_commit: &Commit,
++        repo: &ReadonlyRepo,
++    ) -> Result<Self, OpStoreError> {
+         // Check if the working copy's operation matches the repo's operation
+-        if locked_wc.old_operation_id() == repo.op_id() {
++        if working_copy_operation == repo.op_id() {
+             // The working copy isn't stale, and no need to reload the repo.
+             Ok(Self::Fresh)
+         } else {
+             let wc_operation = repo
+                 .loader()
+-                .load_operation(locked_wc.old_operation_id())
++                .load_operation(working_copy_operation)
+                 .await?;
+             let repo_operation = repo.operation();
+             let ancestor_ops =
+@@ -385,7 +396,7 @@
+             } else if ancestor_op.id() == wc_operation.id() {
+                 // The working copy was not updated when some repo operation committed,
+                 // meaning that it's stale compared to the repo view.
+-                if locked_wc.old_tree().tree_ids_and_labels()
++                if working_copy_tree.tree_ids_and_labels()
+                     == wc_commit.tree().tree_ids_and_labels()
+                 {
+                     // The working copy doesn't require any changes
+diff --git a/lib/tests/test_local_working_copy.rs b/lib/tests/test_local_working_copy.rs
+--- a/lib/tests/test_local_working_copy.rs
++++ b/lib/tests/test_local_working_copy.rs
+@@ -866,6 +866,98 @@
+     std::fs::write(to_ws_path(file2p_path), "2p")?;
+     let new_tree = test_workspace.snapshot()?;
+     assert_tree_eq!(new_tree, tree1);
++    Ok(())
++}
++
++#[test]
++fn test_spooled_conflict_scratch_budget_and_cleanup() -> TestResult {
++    use jj_lib::checkout_budget::CheckoutOutputBudget;
++    use jj_lib::conflicts::{
++        MaterializedTreeValue, materialize_merge_result_to_bytes, materialize_tree_value,
++    };
++    use jj_lib::local_working_copy::LockedLocalWorkingCopy;
++    use std::any::Any;
++
++    let test_workspace = TestWorkspace::init();
++    let repo = &test_workspace.repo;
++    let first = repo_path("first");
++    let second = repo_path("second");
++    let left = create_tree(repo, &[(first, "left\n"), (second, "left\n")]);
++    let base = create_tree(repo, &[(first, "base\n"), (second, "base\n")]);
++    let right = create_tree(repo, &[(first, "right\n"), (second, "right\n")]);
++    let tree = MergedTree::merge(Merge::from_vec(vec![
++        (left, "left".into()),
++        (base, "base".into()),
++        (right, "right".into()),
++    ]))
++    .block_on()?;
++    let value = tree.path_value(first).block_on()?;
++    let MaterializedTreeValue::FileConflict(file) =
++        materialize_tree_value(repo.store(), first, value, tree.labels()).block_on()?
++    else {
++        panic!("fixture must have a native file conflict");
++    };
++    let options = ConflictMaterializeOptions {
++        marker_style: repo.settings().get("ui.conflict-marker-style")?,
++        marker_len: None,
++        merge: repo.store().merge_options().clone(),
++    };
++    let expected = materialize_merge_result_to_bytes(&file.contents, &file.labels, &options);
++    let size = expected.len() as u64;
++    let commit = commit_with_tree(repo.store(), tree);
++    for (paths, limit, succeeds) in [
++        (vec![first], size, true),
++        (vec![first], size - 1, false),
++        (vec![first, second], size * 2, true),
++        (vec![first, second], size * 2 - 1, false),
++    ] {
++        let owner = tempfile::tempdir()?;
++        let payload = owner.path().join("payload");
++        let state = owner.path().join("state");
++        std::fs::create_dir(&payload)?;
++        std::fs::create_dir(&state)?;
++        let owned = LocalWorkingCopy::init(
++            repo.store().clone(),
++            payload.clone(),
++            state.clone(),
++            repo.op_id().clone(),
++            test_workspace.workspace.workspace_name().to_owned(),
++            repo.settings(),
++        )?;
++        let mut locked = owned.start_mutation().block_on()?;
++        let budget = Arc::new(CheckoutOutputBudget::for_conflict_scratch(limit));
++        (&mut *locked as &mut dyn Any)
++            .downcast_mut::<LockedLocalWorkingCopy>()
++            .unwrap()
++            .set_conflict_scratch_budget(budget.clone())?;
++        locked
++            .set_sparse_patterns(paths.iter().map(|path| (*path).to_owned()).collect())
++            .block_on()?;
++        let result = locked.check_out(&commit).block_on();
++        if succeeds {
++            result?;
++            drop(locked.finish(repo.op_id().clone()).block_on()?);
++            assert_eq!(budget.used(), size * paths.len() as u64);
++            for path in paths {
++                assert_eq!(
++                    std::fs::read(path.to_fs_path_unchecked(&payload))?,
++                    expected.as_slice()
++                );
++            }
++        } else {
++            let error = result.unwrap_err();
++            assert!(format!("{error:?}").contains("conflict scratch output"));
++            drop(locked);
++            assert!(budget.used() <= limit);
++        }
++        assert!(std::fs::read_dir(&state)?.all(|entry| {
++            !entry
++                .unwrap()
++                .file_name()
++                .to_string_lossy()
++                .starts_with("jj-conflict-render-")
++        }));
++    }
+     Ok(())
+ }
+ 
+diff --git a/cli/Cargo.toml b/cli/Cargo.toml
+--- a/cli/Cargo.toml
++++ b/cli/Cargo.toml
+@@ -29,6 +29,10 @@
+ [[bin]]
+ name = "jj"
+ path = "src/main.rs"
++
++[[bin]]
++name = "crabbox-jj-source"
++path = "src/bin/crabbox-jj-source/main.rs"
+ 
+ [[bin]]
+ name = "fake-bisector"
+@@ -104,7 +108,7 @@
+ slab = { workspace = true }
+ tempfile = { workspace = true }
+ textwrap = { workspace = true }
+-tokio = { workspace = true }
++tokio = { workspace = true, features = ["net"] }
+ thiserror = { workspace = true }
+ timeago = { workspace = true }
+ toml = { workspace = true }

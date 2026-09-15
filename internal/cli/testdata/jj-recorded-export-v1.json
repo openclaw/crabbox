@@ -1,0 +1,70 @@
+{
+  "protocol": "crabbox-jj-source",
+  "schema_version": 1,
+  "kind": "recorded_export",
+  "jj_version": "0.45.1",
+  "identity": {
+    "workspace_root": "/source",
+    "repository_path": "/source/.jj/repo",
+    "workspace": "default",
+    "operation": "154113ac13a22a0d8b425644dd6688ccf5bb3af4ec69b9299d6ba94573d9c4d7b70c00aa1f52c8d6cf38d9256948f9476f23ce0fe66b399602d0287162e4fb56",
+    "commit": "5d6b4e9a6652d192fd7fa1b0c27d578b911d49d3",
+    "change": "ade05506293934c3aa3df503784596f1",
+    "parents": [
+      "18886e6b8a25c572e5659514ad792e8b484073ad",
+      "334a155083780164ed2ba4e6cf1cd45516f346c9",
+      "9bcb47133f453a9c238e63d535c46c08c296773f"
+    ],
+    "tree_ids": [
+      "ff39162df72a33fda83599ba8682924d6cc6cc7b",
+      "50c5dc5d9eb2ffcd921b0ada4b565af257942120",
+      "3bb7a59cf2b45bbf47b46e5282edf68c0a7fbc59",
+      "50c5dc5d9eb2ffcd921b0ada4b565af257942120",
+      "7ec1cf813c35297d9389b2e3cb9e000840d02323"
+    ],
+    "tree_labels": [
+      "psvoxyqp 18886e6b \"a\"",
+      "tnzooynx f38ab6bb \"base\"",
+      "wsxkxxql 334a1550 \"b\"",
+      "tnzooynx f38ab6bb \"base\"",
+      "zzowqznv 9bcb4713 \"c\""
+    ],
+    "policy": {
+      "exec_policy": "auto",
+      "eol_conversion": "input",
+      "conflict_marker_style": "diff",
+      "merge_hunk_level": "line",
+      "same_change": "accept",
+      "materialization_host": "macos"
+    }
+  },
+  "entries": [
+    {
+      "path": "src/shared.txt",
+      "kind": "file",
+      "bytes": 273,
+      "unix_mode": 420
+    },
+    {
+      "path": "src/link",
+      "kind": "symlink",
+      "bytes": 8,
+      "unix_mode": 493
+    }
+  ],
+  "checkout_stats": {
+    "added_files": 2,
+    "updated_files": 0,
+    "removed_files": 0,
+    "skipped_files": 0
+  },
+  "capabilities": {
+    "executable_bits": true,
+    "symlinks": true
+  },
+  "output": "/owned/payload",
+  "owned_state": "/owned/state",
+  "input_used_bytes": 24,
+  "output_used_bytes": 281,
+  "scratch_used_bytes": 273
+}

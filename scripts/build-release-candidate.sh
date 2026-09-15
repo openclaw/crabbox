@@ -8,9 +8,10 @@ TAG=${1:-}
 TAG_OBJECT=${2:-}
 TAG_COMMIT=${3:-}
 OUT_DIR=${4:-"$ROOT/dist-release-unsigned"}
+NATIVE_INPUT_DIR=${5:-}
 
 if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "usage: $0 vX.Y.Z <tag-object> <tag-commit> [output-directory]" >&2
+  echo "usage: $0 vX.Y.Z <tag-object> <tag-commit> <output-directory> <six-target-native-input-directory>" >&2
   exit 2
 fi
 
@@ -107,6 +108,15 @@ git -C "$SOURCE" checkout --quiet --detach "$TAG_COMMIT"
 [[ "$(git -C "$SOURCE" rev-parse HEAD)" == "$TAG_COMMIT" ]]
 [[ -z "$(git -C "$SOURCE" status --porcelain --untracked-files=all)" ]]
 
+native_source_manifest="$WORK/native-source-manifest.json"
+crabbox_release_prepare_source_contract "$ROOT" "$TAG_COMMIT" "$native_source_manifest"
+if [[ "$CRABBOX_RELEASE_SOURCE_SCHEMA" == 2 ]]; then
+  [[ -n "$NATIVE_INPUT_DIR" ]] || { echo "native release requires all six helper build inputs" >&2; exit 2; }
+  node "$ROOT/tools/jj-source/artifacts.mjs" stage-set \
+    --input "$NATIVE_INPUT_DIR" --output "$WORK/native-helpers" \
+    --manifest "$native_source_manifest" >"$WORK/native-inputs.json"
+fi
+
 (
   cd "$SOURCE"
   run_goreleaser() {
@@ -171,8 +181,12 @@ unsigned_vmd_build=$(vtool -show-build "$unsigned_vmd")
 }
 mkdir -m 700 "$stage/.components"
 cp -p "$unsigned_vmd" "$stage/.components/crabbox-apple-vm-vmd"
+if [[ "$CRABBOX_RELEASE_SOURCE_SCHEMA" == 2 ]]; then
+  mv "$WORK/native-helpers" "$stage/.components/native-helpers"
+fi
 
 manifest_sha=$(node "$ROOT/scripts/release-provenance.mjs" candidate-write \
+  "${CRABBOX_RELEASE_PROVENANCE_ARGS[@]}" \
   --dir "$stage" \
   --tag "$TAG" \
   --tag-object "$TAG_OBJECT" \

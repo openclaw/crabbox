@@ -321,6 +321,7 @@ func providerSelectionSourceForConfigPath(trust configPathTrust) providerSelecti
 }
 
 type SyncConfig struct {
+	Revision      string
 	Source        string
 	Excludes      []string
 	Includes      []string
@@ -2606,6 +2607,7 @@ type fileSSHConfig struct {
 }
 
 type fileSyncConfig struct {
+	Revision      *string  `yaml:"revision,omitempty"`
 	Source        string   `yaml:"source,omitempty"`
 	Exclude       []string `yaml:"exclude,omitempty"`
 	Excludes      []string `yaml:"excludes,omitempty"`
@@ -4069,6 +4071,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyLeaseDuration(&cfg.IdleTimeout, file.Lease.IdleTimeout))
 	}
 	if file.Sync != nil {
+		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Sync.Revision, file.Sync.Revision))
 		if file.Sync.Source != "" {
 			cfg.Sync.Source = file.Sync.Source
 			recordConfigInput(cfg, configInputGeneric, inputSource, true)
@@ -7091,6 +7094,11 @@ func applyEnv(cfg *Config) error {
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
 	}
 	cfg.Sync.Source = configInputEnvString(cfg, configInputGeneric, cfg.Sync.Source, "CRABBOX_SYNC_SOURCE")
+	// An explicitly empty selector restores live native working files.
+	if revision, present := os.LookupEnv("CRABBOX_SYNC_REVISION"); present {
+		cfg.Sync.Revision = revision
+		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
+	}
 	if value, ok := getenvBool("CRABBOX_SYNC_CHECKSUM"); ok {
 		cfg.Sync.Checksum = value
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)

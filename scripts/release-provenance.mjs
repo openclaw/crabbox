@@ -3,6 +3,8 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { identityFromManifest, nativeTargets, nativeTarget, receiptName, validateReceipt, verifyReleaseInputs, verifyPair } from "../tools/jj-source/artifacts.mjs";
+import { verifyNoticeBundle, noticeName, attributionName } from "../tools/jj-source/notice-artifacts.mjs";
 
 const REPOSITORY = "openclaw/crabbox";
 const TEAM_ID = "FWJYW4S8P8";
@@ -10,10 +12,12 @@ const AUTHORITY = `Developer ID Application: OpenClaw Foundation (${TEAM_ID})`;
 const CLI_ID = "org.openclaw.crabbox";
 const HELPER_ID = "org.openclaw.crabbox.apple-vm-helper";
 const VMD_ID = "org.openclaw.crabbox.apple-vm-vmd";
+const JJ_ID = "org.openclaw.crabbox.jj-source";
 const GO_VERSION = "go1.26.4";
 const GORELEASER_VERSION = "2.17.0";
 const CANDIDATE_MANIFEST = ".components/candidate-manifest.json";
 const VMD_COMPONENT = ".components/crabbox-apple-vm-vmd";
+const NATIVE_COMPONENTS = ".components/native-helpers";
 const VMD_ENTITLEMENTS_SHA256 = crypto
   .createHash("sha256")
   .update(fs.readFileSync(new URL("../internal/applevmhelper/vmd-entitlements.plist", import.meta.url)))
@@ -38,6 +42,11 @@ function sha256(file) {
   return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
 
+function schemaVersion(args) {
+  if (!["1", "2"].includes(args["schema-version"])) throw new Error("--schema-version must be bound to the verified source tag (1 or 2)");
+  return Number(args["schema-version"]);
+}
+
 function fileMode(stat) {
   return (stat.mode & 0o7777).toString(8).padStart(4, "0");
 }
@@ -55,11 +64,56 @@ function candidateInput(directory, relativePath, kind) {
   return { path: relativePath, kind, size: stat.size, mode, sha256: sha256(file) };
 }
 
-function candidateInputs(directory, version) {
+function candidateInputs(directory, version, schema) {
+  return candidateInputSpecs(version, schema).map(({ path: file, kind }) => candidateInput(directory, file, kind));
+}
+
+function candidateInputSpecs(version, schema) {
   return [
-    ...expectedArchives(version).map((name) => candidateInput(directory, name, "archive")),
-    candidateInput(directory, VMD_COMPONENT, "embedded-vmd"),
+    ...expectedArchives(version).map((file) => ({ path: file, kind: "archive" })),
+    { path: VMD_COMPONENT, kind: "embedded-vmd" },
+    ...(schema === 2 ? nativeTargets.flatMap((target) => [
+      { path: `${NATIVE_COMPONENTS}/${target.key}/${target.binaryName}`, kind: "native-helper" },
+      { path: `${NATIVE_COMPONENTS}/${target.key}/${receiptName}`, kind: "native-receipt" },
+      { path: `${NATIVE_COMPONENTS}/${target.key}/${noticeName}`, kind: "native-notices" },
+      { path: `${NATIVE_COMPONENTS}/${target.key}/${attributionName}`, kind: "native-attribution" },
+    ]) : []),
   ];
+}
+
+function nativeIdentity(args) {
+  if (!args["native-source-manifest"]) throw new Error("missing --native-source-manifest from the verified source tag");
+  return identityFromManifest(JSON.parse(fs.readFileSync(args["native-source-manifest"], "utf8")));
+}
+
+function assertNativeRecords(records, identity, inputs) {
+  if (!Array.isArray(records) || records.length !== nativeTargets.length) throw new Error("native producer inventory must contain all six targets");
+  for (let i = 0; i < nativeTargets.length; i += 1) {
+    const target = nativeTargets[i];
+    const entry = records[i];
+    assertExactKeys(entry, ["target", "receipt", "receiptSHA256", "binarySize", "binaryMode", "format", "notices"], "native producer input");
+    validateReceipt(entry.receipt, identity);
+    const binary = inputs.find((item) => item.path === `${NATIVE_COMPONENTS}/${target.key}/${target.binaryName}`);
+    const receipt = inputs.find((item) => item.path === `${NATIVE_COMPONENTS}/${target.key}/${receiptName}`);
+    assertExactKeys(entry.notices, ["text", "attribution", "unresolved"], "native notice input");
+    for (const [field, name] of [["text", noticeName], ["attribution", attributionName]]) {
+      const record = entry.notices[field];
+      const input = inputs.find((item) => item.path === `${NATIVE_COMPONENTS}/${target.key}/${name}`);
+      assertExactKeys(record, ["name", "sha256", "size"], "native notice artifact");
+      if (record.name !== name || record.sha256 !== input?.sha256 || record.size !== input?.size) {
+        throw new Error("native notice facts do not bind the frozen attribution inputs");
+      }
+    }
+    if (!Array.isArray(entry.notices.unresolved)) throw new Error("native notice facts must retain unresolved attribution");
+    const expectedFormat = { format: { darwin: "mach-o", linux: "elf", windows: "pe" }[target.targetOS], architecture: target.targetArch, bits: 64 };
+    if (entry.target !== target.key || entry.receipt.targetOS !== target.targetOS || entry.receipt.targetArch !== target.targetArch ||
+        entry.receipt.profile !== "release" || entry.receipt.binarySHA256 !== binary?.sha256 || entry.binarySize !== binary?.size ||
+        entry.binaryMode !== Number.parseInt(binary?.mode, 8) || entry.receiptSHA256 !== receipt?.sha256 ||
+        entry.receiptSHA256 !== crypto.createHash("sha256").update(exactJson(entry.receipt)).digest("hex") ||
+        JSON.stringify(entry.format) !== JSON.stringify(expectedFormat)) {
+      throw new Error("native producer facts do not bind the frozen helper and receipt inputs");
+    }
+  }
 }
 
 function expectedArchives(version) {
@@ -83,7 +137,7 @@ function releaseNotes(notesFile) {
   return { bytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
 }
 
-function payloadFor(directory, name, version, embeddedVmd, notaryIds = {}) {
+function payloadFor(directory, name, version, embeddedVmd, notaryIds = {}, native) {
   const match = new RegExp(
     `^crabbox_${version.replaceAll(".", "\\.")}_(darwin|linux|windows)_(amd64|arm64)\\.(tar\\.gz|zip)$`,
   ).exec(name);
@@ -118,8 +172,46 @@ function payloadFor(directory, name, version, embeddedVmd, notaryIds = {}) {
       embeddedVmd,
     });
   }
+  if (native) {
+    binaries.push({
+      name: nativeTarget(platform, arch).binaryName,
+      nativeInput: native.target,
+      sha256: native.receipt.binarySHA256,
+      size: native.binarySize,
+      mode: native.binaryMode,
+      format: native.format,
+      receipt: { name: receiptName, sha256: native.receiptSHA256, contents: native.receipt },
+      notices: native.notices,
+      ...(platform === "darwin" ? {
+        identifier: JJ_ID, teamId: TEAM_ID, hardenedRuntime: true, timestamp: true,
+        notarized: true, notarizationSubmissionId: notaryIds[`jj-${arch}`],
+      } : {}),
+    });
+  }
   const file = path.join(directory, name);
   return { name, sha256: sha256(file), size: fs.statSync(file).size, platform, arch, format, binaries };
+}
+
+function nativeRecordFromPayload(entry, original, identity) {
+  const target = nativeTarget(original.receipt.targetOS, original.receipt.targetArch);
+  const receipt = entry?.receipt?.contents;
+  validateReceipt(receipt, identity);
+  const expectedReceipt = { ...original.receipt, binarySHA256: entry.sha256 };
+  if (entry.nativeInput !== original.target || entry.name !== target.binaryName || entry.receipt.name !== receiptName ||
+      JSON.stringify(receipt) !== JSON.stringify(expectedReceipt) ||
+      entry.receipt.sha256 !== crypto.createHash("sha256").update(exactJson(receipt)).digest("hex") ||
+      !Number.isSafeInteger(entry.size) || entry.size <= 0 || !Number.isSafeInteger(entry.mode) ||
+      entry.mode < 0 || entry.mode > 0o777 || (target.targetOS !== "windows" && (entry.mode & 0o111) === 0) ||
+      JSON.stringify(entry.format) !== JSON.stringify(original.format)) {
+    throw new Error("native final payload does not preserve its original build identity");
+  }
+  if (JSON.stringify(entry.notices) !== JSON.stringify(original.notices)) throw new Error("native final attribution changed after the producer handoff");
+  const final = { target: original.target, receipt, receiptSHA256: entry.receipt.sha256,
+    binarySize: entry.size, binaryMode: entry.mode, format: entry.format, notices: entry.notices };
+  if (target.targetOS !== "darwin" && JSON.stringify(final) !== JSON.stringify(original)) {
+    throw new Error("non-Darwin native payload changed after the producer handoff");
+  }
+  return final;
 }
 
 function exactJson(value) {
@@ -143,7 +235,7 @@ function assertExactKeys(value, expected, label) {
   }
 }
 
-function assertCandidateInventory(directory, version, manifestPresent) {
+function assertCandidateInventory(directory, version, manifestPresent, schema) {
   const top = fs.readdirSync(directory, { withFileTypes: true });
   const topNames = top.map((entry) => entry.name).sort();
   const expectedTop = [...expectedArchives(version), ".components"].sort();
@@ -158,14 +250,15 @@ function assertCandidateInventory(directory, version, manifestPresent) {
   const componentsDir = path.join(directory, ".components");
   const components = fs.readdirSync(componentsDir, { withFileTypes: true });
   const componentNames = components.map((entry) => entry.name).sort();
-  const expectedComponents = manifestPresent
-    ? [path.basename(CANDIDATE_MANIFEST), path.basename(VMD_COMPONENT)].sort()
-    : [path.basename(VMD_COMPONENT)];
+  const expectedComponents = [path.basename(VMD_COMPONENT),
+    ...(manifestPresent ? [path.basename(CANDIDATE_MANIFEST)] : []),
+    ...(schema === 2 ? ["native-helpers"] : []),
+  ].sort();
   if (JSON.stringify(componentNames) !== JSON.stringify(expectedComponents)) {
     throw new Error("candidate private-component inventory is not exact");
   }
-  if (components.some((entry) => !entry.isFile())) {
-    throw new Error("candidate private components must be regular files");
+  if (components.some((entry) => entry.name === "native-helpers" ? !entry.isDirectory() : !entry.isFile())) {
+    throw new Error("candidate private component types do not match the manifest");
   }
 }
 
@@ -222,39 +315,25 @@ function assertPackager(value) {
   }
 }
 
-function assertCandidateInputRecords(value, directory, version) {
-  if (!Array.isArray(value) || value.length !== 7) {
-    throw new Error("candidate input inventory must contain exactly seven files");
-  }
-  for (const entry of value) {
-    assertExactKeys(entry, ["kind", "mode", "path", "sha256", "size"], "candidate input");
-    if (
-      !["archive", "embedded-vmd"].includes(entry.kind) ||
-      !/^[0-7]{4}$/.test(entry.mode ?? "") ||
-      !/^[0-9a-f]{64}$/.test(entry.sha256 ?? "") ||
-      !Number.isSafeInteger(entry.size) ||
-      entry.size <= 0
-    ) {
-      throw new Error("candidate input metadata is invalid");
-    }
-  }
-  const actual = candidateInputs(directory, version);
+function assertCandidateInputRecords(value, directory, version, schema) {
+  assertRecordedCandidateInputs(value, version, schema);
+  const actual = candidateInputs(directory, version, schema);
   if (JSON.stringify(value) !== JSON.stringify(actual)) {
     throw new Error("candidate input bytes, sizes, or modes do not match their manifest");
   }
 }
 
-function assertRecordedCandidateInputs(value, version) {
-  const expectedPaths = [...expectedArchives(version), VMD_COMPONENT];
-  if (!Array.isArray(value) || value.length !== expectedPaths.length) {
+function assertRecordedCandidateInputs(value, version, schema) {
+  const expected = candidateInputSpecs(version, schema);
+  if (!Array.isArray(value) || value.length !== expected.length) {
     throw new Error("recorded candidate input inventory is not exact");
   }
   for (let index = 0; index < value.length; index += 1) {
     const entry = value[index];
     assertExactKeys(entry, ["kind", "mode", "path", "sha256", "size"], "candidate input");
-    const expectedKind = index === expectedPaths.length - 1 ? "embedded-vmd" : "archive";
+    const expectedKind = expected[index].kind;
     if (
-      entry.path !== expectedPaths[index] ||
+      entry.path !== expected[index].path ||
       entry.kind !== expectedKind ||
       !/^[0-7]{4}$/.test(entry.mode ?? "") ||
       !/^[0-9a-f]{64}$/.test(entry.sha256 ?? "") ||
@@ -267,7 +346,7 @@ function assertRecordedCandidateInputs(value, version) {
   }
 }
 
-function assertFinalProducer(value, releaseIdentity, version) {
+function assertFinalProducer(value, releaseIdentity, version, identity, schema) {
   assertExactKeys(
     value,
     [
@@ -275,6 +354,7 @@ function assertFinalProducer(value, releaseIdentity, version) {
       "go",
       "goreleaser",
       "inputs",
+      ...(schema === 2 ? ["nativeHelpers"] : []),
       "manifestSha256",
       "platform",
       "releaseConfigSha256",
@@ -284,14 +364,15 @@ function assertFinalProducer(value, releaseIdentity, version) {
     ],
     "release producer",
   );
-  const { inputs, manifestSha256, ...toolchain } = value;
+  const { inputs, nativeHelpers, manifestSha256, ...toolchain } = value;
   assertProducer(toolchain);
-  assertRecordedCandidateInputs(inputs, version);
+  assertRecordedCandidateInputs(inputs, version, schema);
+  if (schema === 2) assertNativeRecords(nativeHelpers, identity, inputs);
   if (!/^[0-9a-f]{64}$/.test(manifestSha256 ?? "")) {
     throw new Error("candidate manifest digest is invalid");
   }
   const originalManifest = {
-    schemaVersion: 1,
+    schemaVersion: schema,
     repository: REPOSITORY,
     tag: releaseIdentity.tag,
     tagObject: releaseIdentity.tagObject,
@@ -299,6 +380,7 @@ function assertFinalProducer(value, releaseIdentity, version) {
     verifierCommit: releaseIdentity.verifierCommit,
     producer: toolchain,
     inputs,
+    ...(schema === 2 ? { nativeHelpers } : {}),
   };
   const actualManifestSha256 = crypto.createHash("sha256").update(exactJson(originalManifest)).digest("hex");
   if (manifestSha256 !== actualManifestSha256) {
@@ -306,11 +388,13 @@ function assertFinalProducer(value, releaseIdentity, version) {
   }
 }
 
-function validateCandidateManifest(value, directory, args) {
+async function validateCandidateManifest(value, directory, args) {
+  const schema = schemaVersion(args);
   assertExactKeys(
     value,
     [
       "inputs",
+      ...(schema === 2 ? ["nativeHelpers"] : []),
       "producer",
       "repository",
       "schemaVersion",
@@ -323,7 +407,7 @@ function validateCandidateManifest(value, directory, args) {
   );
   const version = args.tag?.slice(1);
   if (
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== schema ||
     value.repository !== REPOSITORY ||
     value.tag !== args.tag ||
     value.tagObject !== args["tag-object"] ||
@@ -333,7 +417,14 @@ function validateCandidateManifest(value, directory, args) {
     throw new Error("candidate manifest does not match the pinned release identity");
   }
   assertProducer(value.producer);
-  assertCandidateInputRecords(value.inputs, directory, version);
+  assertCandidateInputRecords(value.inputs, directory, version, schema);
+  if (schema === 2) {
+    const identity = nativeIdentity(args);
+    assertNativeRecords(value.nativeHelpers, identity, value.inputs);
+    if (JSON.stringify(value.nativeHelpers) !== JSON.stringify(await verifyReleaseInputs(path.join(directory, NATIVE_COMPONENTS), { identity }))) {
+      throw new Error("native build inputs do not match the frozen candidate manifest");
+    }
+  }
   return value;
 }
 
@@ -347,8 +438,9 @@ function candidateRequired(args) {
   assertSha("verifier commit", args["verifier-commit"]);
 }
 
-function candidateWrite(args) {
+async function candidateWrite(args) {
   candidateRequired(args);
+  const schema = schemaVersion(args);
   for (const required of [
     "producer-os",
     "producer-arch",
@@ -361,9 +453,9 @@ function candidateWrite(args) {
     if (!args[required]) throw new Error(`missing --${required}`);
   }
   const version = args.tag.slice(1);
-  assertCandidateInventory(args.dir, version, false);
+  assertCandidateInventory(args.dir, version, false, schema);
   const value = {
-    schemaVersion: 1,
+    schemaVersion: schema,
     repository: REPOSITORY,
     tag: args.tag,
     tagObject: args["tag-object"],
@@ -379,31 +471,34 @@ function candidateWrite(args) {
       xcodeBuild: args["xcode-build"],
       releaseConfigSha256: RELEASE_CONFIG_SHA256,
     },
-    inputs: candidateInputs(args.dir, version),
+    inputs: candidateInputs(args.dir, version, schema),
+    ...(schema === 2 ? { nativeHelpers: await verifyReleaseInputs(path.join(args.dir, NATIVE_COMPONENTS), { identity: nativeIdentity(args) }) } : {}),
   };
   assertProducer(value.producer);
+  if (schema === 2) assertNativeRecords(value.nativeHelpers, nativeIdentity(args), value.inputs);
+  assertCandidateInputRecords(value.inputs, args.dir, version, schema);
   const file = path.join(args.dir, CANDIDATE_MANIFEST);
   fs.writeFileSync(file, exactJson(value), { flag: "wx", mode: 0o600 });
-  assertCandidateInventory(args.dir, version, true);
+  assertCandidateInventory(args.dir, version, true, schema);
   process.stdout.write(`${sha256(file)}\n`);
 }
 
-function loadCandidateManifest(args) {
+async function loadCandidateManifest(args) {
   candidateRequired(args);
   const version = args.tag.slice(1);
-  assertCandidateInventory(args.dir, version, true);
+  assertCandidateInventory(args.dir, version, true, schemaVersion(args));
   const file = path.join(args.dir, CANDIDATE_MANIFEST);
   const stat = fs.lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink()) {
     throw new Error("candidate manifest must be a regular file");
   }
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
-  validateCandidateManifest(value, args.dir, args);
+  await validateCandidateManifest(value, args.dir, args);
   return { value, sha256: sha256(file) };
 }
 
-function candidateVerify(args) {
-  const loaded = loadCandidateManifest(args);
+async function candidateVerify(args) {
+  const loaded = await loadCandidateManifest(args);
   process.stdout.write(`${loaded.sha256}\n`);
   return loaded.value;
 }
@@ -442,7 +537,8 @@ function assertEmbeddedVmd(value) {
   }
 }
 
-function write(args) {
+async function write(args) {
+  const schema = schemaVersion(args);
   for (const required of [
     "dir",
     "tag",
@@ -486,12 +582,13 @@ function write(args) {
     "cli-arm64": args["notary-cli-arm64"],
     "helper-arm64": args["notary-helper-arm64"],
     "vmd-arm64": args["notary-vmd-arm64"],
+    ...(schema === 2 ? { "jj-amd64": args["notary-jj-amd64"], "jj-arm64": args["notary-jj-arm64"] } : {}),
   };
   if (
     !Object.values(notaryIds).every(isNotaryId) ||
-    new Set(Object.values(notaryIds)).size !== 4
+    new Set(Object.values(notaryIds)).size !== (schema === 2 ? 6 : 4)
   ) {
-    throw new Error("notarization submission IDs must be four distinct UUIDs");
+    throw new Error(`notarization submission IDs must be ${schema === 2 ? 6 : 4} distinct UUIDs`);
   }
   const embeddedVmd = {
     sha256: args["embedded-vmd-sha256"],
@@ -509,12 +606,14 @@ function write(args) {
   const version = args.tag.slice(1);
   const archives = expectedArchives(version);
   const releaseAssets = [...archives, "checksums.txt", "provenance.json"].sort();
-  const candidate = loadCandidateManifest({
+  const candidate = await loadCandidateManifest({
     dir: args["candidate-dir"],
     tag: args.tag,
     "tag-object": args["tag-object"],
     "source-commit": args["source-commit"],
     "verifier-commit": args["verifier-commit"],
+    "native-source-manifest": args["native-source-manifest"],
+    "schema-version": args["schema-version"],
   });
   if (
     !/^[0-9a-f]{64}$/.test(args["candidate-manifest-sha256"]) ||
@@ -529,9 +628,19 @@ function write(args) {
     xcodeVersion: args["packager-xcode-version"],
     xcodeBuild: args["packager-xcode-build"],
   };
+  let nativeFinal;
+  if (schema === 2) {
+    if (!args["native-final-dir"]) throw new Error("missing --native-final-dir");
+    nativeFinal = await verifyReleaseInputs(args["native-final-dir"], { identity: nativeIdentity(args), originals: candidate.value.nativeHelpers });
+    for (let i = 0; i < nativeTargets.length; i += 1) {
+      const target = nativeTargets[i];
+      const entry = payloadFor(args.dir, archives[i], version, embeddedVmd, notaryIds, nativeFinal[i]).binaries.find((item) => item.name === target.binaryName);
+      nativeRecordFromPayload(entry, candidate.value.nativeHelpers[i], nativeIdentity(args));
+    }
+  }
   assertPackager(packager);
   const provenance = {
-    schemaVersion: 1,
+    schemaVersion: schema,
     repository: REPOSITORY,
     version,
     source: {
@@ -548,17 +657,18 @@ function write(args) {
       hardenedRuntime: true,
       timestamp: true,
       onlineNotarization: true,
-      identifiers: { crabbox: CLI_ID, appleVmHelper: HELPER_ID, appleVmVmd: VMD_ID },
+      identifiers: { crabbox: CLI_ID, appleVmHelper: HELPER_ID, appleVmVmd: VMD_ID, ...(schema === 2 ? { jjSource: JJ_ID } : {}) },
     },
     producer: {
       manifestSha256: candidate.sha256,
       ...candidate.value.producer,
       inputs: candidate.value.inputs,
+      ...(schema === 2 ? { nativeHelpers: candidate.value.nativeHelpers } : {}),
     },
     packager,
     releaseAssets,
-    payloads: archives.map((name) =>
-      payloadFor(args.dir, name, version, embeddedVmd, notaryIds),
+    payloads: archives.map((name, index) =>
+      payloadFor(args.dir, name, version, embeddedVmd, notaryIds, nativeFinal?.[index]),
     ),
   };
   fs.writeFileSync(path.join(args.dir, "provenance.json"), exactJson(provenance), {
@@ -568,6 +678,7 @@ function write(args) {
 }
 
 function verify(args) {
+  const schema = schemaVersion(args);
   for (const required of [
     "dir",
     "tag",
@@ -610,7 +721,7 @@ function verify(args) {
   );
   assertExactKeys(
     value.signaturePolicy.identifiers,
-    ["appleVmHelper", "appleVmVmd", "crabbox"],
+    ["appleVmHelper", "appleVmVmd", "crabbox", ...(schema === 2 ? ["jjSource"] : [])],
     "signature identifiers",
   );
   assertFinalProducer(
@@ -622,10 +733,12 @@ function verify(args) {
       verifierCommit: args["verifier-commit"],
     },
     version,
+    schema === 2 ? nativeIdentity(args) : undefined,
+    schema,
   );
   assertPackager(value.packager);
   if (
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== schema ||
     value.repository !== REPOSITORY ||
     value.version !== version ||
     value.source?.tag !== args.tag ||
@@ -642,6 +755,7 @@ function verify(args) {
     value.signaturePolicy?.identifiers?.crabbox !== CLI_ID ||
     value.signaturePolicy?.identifiers?.appleVmHelper !== HELPER_ID ||
     value.signaturePolicy?.identifiers?.appleVmVmd !== VMD_ID ||
+    (schema === 2 && value.signaturePolicy?.identifiers?.jjSource !== JJ_ID) ||
     JSON.stringify(value.releaseAssets) !== JSON.stringify(releaseAssets)
   ) {
     throw new Error("release provenance metadata does not match the pinned contract");
@@ -657,10 +771,14 @@ function verify(args) {
     if (!actual) throw new Error(`missing provenance payload ${name}`);
     const helperEntry = actual.binaries?.find((entry) => entry.name === "crabbox-apple-vm-helper");
     const cliEntry = actual.binaries?.find((entry) => entry.name === "crabbox");
+    const original = schema === 2 ? value.producer.nativeHelpers.find((entry) => entry.target === `${actual.platform}_${actual.arch}`) : undefined;
+    const nativeEntry = original ? actual.binaries?.find((entry) => entry.nativeInput === original.target) : undefined;
+    const native = original ? nativeRecordFromPayload(nativeEntry, original, nativeIdentity(args)) : undefined;
     const notaryIds = {
       [`cli-${actual.arch}`]: cliEntry?.notarizationSubmissionId,
       "helper-arm64": helperEntry?.notarizationSubmissionId,
       "vmd-arm64": helperEntry?.embeddedVmd?.notarizationSubmissionId,
+      [`jj-${actual.arch}`]: nativeEntry?.notarizationSubmissionId,
     };
     if (helperEntry) assertEmbeddedVmd(helperEntry.embeddedVmd);
     const expected = payloadFor(
@@ -669,6 +787,7 @@ function verify(args) {
       version,
       helperEntry?.embeddedVmd,
       notaryIds,
+      native,
     );
     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
       throw new Error(`provenance payload mismatch: ${name}`);
@@ -688,14 +807,30 @@ function verify(args) {
       if (helperEntry) verifiedNotaryIds.push(helperEntry.embeddedVmd.notarizationSubmissionId);
     }
   }
-  if (new Set(verifiedNotaryIds).size !== 4 || verifiedNotaryIds.length !== 4) {
-    throw new Error("notarization provenance must contain four distinct submissions");
+  const notaryCount = schema === 2 ? 6 : 4;
+  if (new Set(verifiedNotaryIds).size !== notaryCount || verifiedNotaryIds.length !== notaryCount) {
+    throw new Error(`notarization provenance must contain ${notaryCount} distinct submissions`);
   }
 }
 
+async function verifyNativePayload(args) {
+  if (schemaVersion(args) !== 2) throw new Error("native payload verification requires schema 2");
+  const target = nativeTarget(args.platform, args.arch);
+  const provenance = JSON.parse(fs.readFileSync(args.provenance, "utf8"));
+  const original = provenance.producer.nativeHelpers.find((entry) => entry.target === target.key);
+  const payload = provenance.payloads.find((entry) => entry.platform === target.targetOS && entry.arch === target.targetArch);
+  const entry = payload?.binaries.find((item) => item.name === target.binaryName);
+  const identity = nativeIdentity(args);
+  const expected = nativeRecordFromPayload(entry, original, identity);
+  const pair = await verifyPair(args.dir, { target, identity, release: true, coinstalled: true });
+  const actual = { ...pair, notices: await verifyNoticeBundle(args.dir, original.receipt, { coinstalled: true }) };
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("installed native helper bytes or receipt do not match release provenance");
+}
+
 const { command, args } = parseArgs(process.argv.slice(2));
-if (command === "candidate-write") candidateWrite(args);
-else if (command === "candidate-verify") candidateVerify(args);
-else if (command === "write") write(args);
+if (command === "candidate-write") await candidateWrite(args);
+else if (command === "candidate-verify") await candidateVerify(args);
+else if (command === "write") await write(args);
 else if (command === "verify") verify(args);
+else if (command === "verify-native-payload") await verifyNativePayload(args);
 else throw new Error("usage: release-provenance.mjs <candidate-write|candidate-verify|write|verify> --dir ...");

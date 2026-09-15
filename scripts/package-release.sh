@@ -103,6 +103,8 @@ BUILD_HOME="$WORK/build-home"
 BUILD_TMP="$WORK/build-tmp"
 CANDIDATE="$WORK/candidate"
 mkdir -m 700 "$PAYLOAD" "$BUILD_HOME" "$BUILD_TMP" "$CANDIDATE" "$CANDIDATE/.components"
+native_source_manifest="$WORK/native-source-manifest.json"
+crabbox_release_prepare_source_contract "$ROOT" "$TAG_COMMIT" "$native_source_manifest"
 
 version=${TAG#v}
 expected_unsigned=$(crabbox_release_archive_names "$version" | LC_ALL=C sort)
@@ -113,8 +115,10 @@ actual_unsigned=$(find "$INPUT_DIR" -mindepth 1 -maxdepth 1 -type f -exec basena
   exit 1
 }
 component_inventory=$(find "$INPUT_DIR/.components" -mindepth 1 -maxdepth 1 \
-  -type f -exec basename {} \; | LC_ALL=C sort)
-[[ "$component_inventory" == $'candidate-manifest.json\ncrabbox-apple-vm-vmd' ]] || {
+  -exec basename {} \; | LC_ALL=C sort)
+expected_components=$'candidate-manifest.json\ncrabbox-apple-vm-vmd'
+[[ "$CRABBOX_RELEASE_SOURCE_SCHEMA" != 2 ]] || expected_components+=$'\nnative-helpers'
+[[ "$component_inventory" == "$expected_components" ]] || {
   echo "private release-component inventory mismatch" >&2
   exit 1
 }
@@ -125,7 +129,14 @@ cp -p "$INPUT_DIR/.components/candidate-manifest.json" \
   "$CANDIDATE/.components/candidate-manifest.json"
 cp -p "$INPUT_DIR/.components/crabbox-apple-vm-vmd" \
   "$CANDIDATE/.components/crabbox-apple-vm-vmd"
+if [[ "$CRABBOX_RELEASE_SOURCE_SCHEMA" == 2 ]]; then
+  node "$ROOT/tools/jj-source/artifacts.mjs" stage-set \
+    --input "$INPUT_DIR/.components/native-helpers" \
+    --output "$CANDIDATE/.components/native-helpers" \
+    --manifest "$native_source_manifest" >"$WORK/native-inputs.json"
+fi
 candidate_manifest_sha=$(node "$ROOT/scripts/release-provenance.mjs" candidate-verify \
+  "${CRABBOX_RELEASE_PROVENANCE_ARGS[@]}" \
   --dir "$CANDIDATE" \
   --tag "$TAG" \
   --tag-object "$TAG_OBJECT" \
@@ -209,7 +220,7 @@ for name in \
   "crabbox_${version}_linux_arm64.tar.gz" \
   "crabbox_${version}_windows_amd64.zip" \
   "crabbox_${version}_windows_arm64.zip"; do
-  cp -p "$CANDIDATE/$name" "$PAYLOAD/$name"
+  if [[ "$CRABBOX_RELEASE_SOURCE_SCHEMA" == 1 ]]; then cp -p "$CANDIDATE/$name" "$PAYLOAD/$name"; fi
 done
 
 extract_exact_tar() {
@@ -315,10 +326,56 @@ notary_cli_arm64=$(sign_and_capture_notary_id \
 notary_helper_arm64=$(sign_and_capture_notary_id \
   "$CRABBOX_RELEASE_HELPER_IDENTIFIER" arm64 "$arm64_stage/crabbox-apple-vm-helper")
 
-COPYFILE_DISABLE=1 tar -czf "$PAYLOAD/crabbox_${version}_darwin_amd64.tar.gz" \
-  -C "$amd64_stage" crabbox
-COPYFILE_DISABLE=1 tar -czf "$PAYLOAD/crabbox_${version}_darwin_arm64.tar.gz" \
-  -C "$arm64_stage" crabbox crabbox-apple-vm-helper
+package_provenance_args=("${CRABBOX_RELEASE_PROVENANCE_ARGS[@]}")
+if [[ "$CRABBOX_RELEASE_SOURCE_SCHEMA" == 2 ]]; then
+  native_final="$WORK/native-final"
+  mkdir -m 700 "$native_final"
+  for platform in darwin linux windows; do
+    for arch in amd64 arm64; do
+      pair="$CANDIDATE/.components/native-helpers/${platform}_${arch}"
+      final_pair="$native_final/${platform}_${arch}"
+      native_binary=crabbox-jj-source
+      [[ "$platform" != windows ]] || native_binary+=.exe
+      if [[ "$platform" == darwin ]]; then
+        signed_native="$WORK/signed-jj-$arch"
+        cp -p "$pair/$native_binary" "$signed_native"
+        native_notary=$(sign_and_capture_notary_id "$CRABBOX_RELEASE_JJ_IDENTIFIER" "$arch" "$signed_native")
+        CRABBOX_VERIFY_EXECUTE=0 "$ROOT/scripts/verify-macos-binary.sh" "$CRABBOX_RELEASE_JJ_IDENTIFIER" "$arch" "$signed_native"
+        node "$ROOT/tools/jj-source/artifacts.mjs" finalize-darwin \
+          --input "$pair" --signed-binary "$signed_native" --output "$final_pair" \
+          --manifest "$native_source_manifest" >"$WORK/jj-final-$arch.json"
+        package_provenance_args+=("--notary-jj-$arch" "$native_notary")
+        destination="$WORK/darwin-$arch"
+      else
+        mkdir -m 700 "$final_pair"
+        cp -p "$pair/$native_binary" "$pair/crabbox-jj-source.json" "$pair/crabbox-jj-source.NOTICES.txt" "$pair/attribution.json" "$final_pair/"
+        destination="$WORK/$platform-$arch"
+        mkdir -m 700 "$destination"
+        if [[ "$platform" == windows ]]; then
+          archive="$CANDIDATE/crabbox_${version}_${platform}_${arch}.zip"
+          [[ "$(unzip -Z1 "$archive")" == crabbox.exe ]] || { echo "unexpected unsigned Windows archive members" >&2; exit 1; }
+          unzip -q "$archive" -d "$destination"
+        else
+          archive="$CANDIDATE/crabbox_${version}_${platform}_${arch}.tar.gz"
+          [[ "$(tar -tzf "$archive")" == crabbox ]] || { echo "unexpected unsigned Linux archive members" >&2; exit 1; }
+          tar -xzf "$archive" -C "$destination"
+        fi
+      fi
+      cp -p "$final_pair/$native_binary" "$final_pair/crabbox-jj-source.json" "$final_pair/crabbox-jj-source.NOTICES.txt" "$final_pair/attribution.json" "$destination/"
+    done
+  done
+  package_provenance_args+=(--native-final-dir "$native_final")
+fi
+
+for platform in darwin linux windows; do
+  for arch in amd64 arm64; do
+    if [[ "$CRABBOX_RELEASE_SOURCE_SCHEMA" == 1 && "$platform" != darwin ]]; then continue; fi
+    extension=tar.gz
+    [[ "$platform" != windows ]] || extension=zip
+    crabbox_release_pack_archive "$CRABBOX_RELEASE_SOURCE_SCHEMA" "$platform" "$arch" \
+      "$WORK/$platform-$arch" "$PAYLOAD/crabbox_${version}_${platform}_${arch}.$extension"
+  done
+done
 
 notes="$WORK/release-notes.md"
 tagged_changelog="$WORK/tagged-changelog.md"
@@ -327,6 +384,7 @@ git -C "$ROOT" show "$TAG_COMMIT:CHANGELOG.md" >"$tagged_changelog"
   <"$tagged_changelog" >"$notes"
 
 node "$ROOT/scripts/release-provenance.mjs" write \
+  "${package_provenance_args[@]}" \
   --dir "$PAYLOAD" \
   --tag "$TAG" \
   --tag-object "$TAG_OBJECT" \
@@ -355,6 +413,7 @@ while IFS= read -r name; do
 done < <({ crabbox_release_archive_names "$version"; printf '%s\n' provenance.json; } | LC_ALL=C sort)
 
 node "$ROOT/scripts/release-provenance.mjs" verify \
+  "${CRABBOX_RELEASE_PROVENANCE_ARGS[@]}" \
   --dir "$PAYLOAD" \
   --tag "$TAG" \
   --tag-object "$TAG_OBJECT" \

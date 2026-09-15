@@ -6,9 +6,72 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { writeExecutable } from "./test-support/smoke-fixtures.mjs";
+import { writeNativeInputs } from "./test-support/native-artifacts.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const read = (file) => fs.readFileSync(path.join(repoRoot, file), "utf8");
+
+test("native helper execution stays after static verification and before the final CLI smoke", () => {
+  const verifier = read("scripts/verify-release.sh");
+  const staticGate = verifier.indexOf('if [[ "$VERIFY_MODE" == static ]]');
+  const nativeSmoke = verifier.indexOf('source-version >"$WORK/jj-version.json"');
+  const cliSmoke = verifier.indexOf('actual_version=$(env -i');
+  assert.ok(staticGate > 0 && nativeSmoke > staticGate && cliSmoke > nativeSmoke);
+});
+
+test("release archive packing round-trips exact legacy and native members on all targets", (t) => {
+  const owned = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-archive-contract-"));
+  t.after(() => fs.rmSync(owned, { recursive: true, force: true }));
+  for (const schema of [1, 2]) for (const platform of ["darwin", "linux", "windows"]) for (const arch of ["amd64", "arm64"]) {
+    const key = `${schema}-${platform}-${arch}`;
+    const source = path.join(owned, key);
+    const unpacked = path.join(owned, `${key}-unpacked`);
+    fs.mkdirSync(source); fs.mkdirSync(unpacked);
+    const suffix = platform === "windows" ? ".exe" : "";
+    const names = [`crabbox${suffix}`, ...(platform === "darwin" && arch === "arm64" ? ["crabbox-apple-vm-helper"] : []),
+      ...(schema === 2 ? [`crabbox-jj-source${suffix}`, "crabbox-jj-source.json", "crabbox-jj-source.NOTICES.txt", "attribution.json"] : [])].sort();
+    for (const name of names) fs.writeFileSync(path.join(source, name), `${key}/${name}\n`);
+    const archive = path.join(owned, `${key}.${platform === "windows" ? "zip" : "tar.gz"}`);
+    execFileSync("/bin/bash", ["-c", 'source "$1"; shift; crabbox_release_pack_archive "$@"', "sh",
+      path.join(repoRoot, "scripts/release-config.sh"), String(schema), platform, arch, source, archive]);
+    if (platform === "windows") execFileSync("unzip", ["-q", archive, "-d", unpacked]);
+    else execFileSync("tar", ["-xzf", archive, "-C", unpacked]);
+    assert.deepEqual(fs.readdirSync(unpacked).sort(), names);
+    for (const name of names) assert.deepEqual(fs.readFileSync(path.join(unpacked, name)), fs.readFileSync(path.join(source, name)));
+  }
+});
+
+test("release schema follows the recorded source commit, not pending workspace files", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-source-schema-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const git = (...args) => execFileSync("git", args, { cwd: directory, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init", "-b", "main");
+  git("config", "user.name", "Release Fixture");
+  git("config", "user.email", "release@example.test");
+  fs.writeFileSync(path.join(directory, "README"), "ordinary legacy source\n");
+  git("add", "README");
+  git("commit", "-m", "chore: legacy source fixture");
+  const legacy = git("rev-parse", "HEAD");
+  const schema = (commit) => execFileSync("bash", ["-c", 'source "$1"; crabbox_release_source_schema "$2" "$3"', "sh",
+    path.join(repoRoot, "scripts/release-config.sh"), directory, commit], { encoding: "utf8" }).trim();
+  assert.equal(schema(legacy), "1");
+  fs.mkdirSync(path.join(directory, "tools/jj-source"), { recursive: true });
+  fs.copyFileSync(path.join(repoRoot, "tools/jj-source/manifest.json"), path.join(directory, "tools/jj-source/manifest.json"));
+  assert.equal(schema(legacy), "1");
+  git("add", "tools/jj-source/manifest.json");
+  git("commit", "-m", "feat: native component fixture");
+  const native = git("rev-parse", "HEAD");
+  assert.equal(schema(native), "2");
+  assert.equal(schema(legacy), "1");
+  const manifest = path.join(directory, "captured-manifest.json");
+  const contract = (commit) => execFileSync("/bin/bash", ["-c",
+    'source "$1"; crabbox_release_prepare_source_contract "$2" "$3" "$4"; printf "%s\\n" "${CRABBOX_RELEASE_PROVENANCE_ARGS[@]}"', "sh",
+    path.join(repoRoot, "scripts/release-config.sh"), directory, commit, manifest], { encoding: "utf8" }).trim().split("\n");
+  assert.deepEqual(contract(legacy), ["--schema-version", "1"]);
+  assert.equal(fs.existsSync(manifest), false);
+  assert.deepEqual(contract(native), ["--schema-version", "2", "--native-source-manifest", manifest]);
+  assert.equal(fs.readFileSync(manifest, "utf8"), git("show", `${native}:tools/jj-source/manifest.json`) + "\n");
+});
 
 test("release workflow is verifier-only, protected-default, dual-native, and token-bounded", () => {
   const workflow = read(".github/workflows/release-assets.yml");
@@ -657,7 +720,7 @@ test("release notes extraction ignores Unreleased, is exact, and rejects missing
   assert.notEqual(missing.status, 0);
 });
 
-test("provenance binds the explicit producer manifest, separate packager, notarization IDs, and archive bytes", () => {
+for (const schema of [1, 2]) test(`schema ${schema} provenance binds producer, packager, notarization and archive bytes`, () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-provenance-"));
   const candidate = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-candidate-"));
   const script = path.join(repoRoot, "scripts", "release-provenance.mjs");
@@ -678,6 +741,8 @@ test("provenance binds the explicit producer manifest, separate packager, notari
     "crabbox_1.2.3_windows_arm64.zip",
   ];
   fs.mkdirSync(path.join(candidate, ".components"), { mode: 0o700 });
+  const schemaArgs = ["--schema-version", String(schema), ...(schema === 2 ? ["--native-source-manifest", path.join(repoRoot, "tools/jj-source/manifest.json")] : [])];
+  if (schema === 2) writeNativeInputs(path.join(candidate, ".components/native-helpers"));
   for (const name of archives) fs.writeFileSync(path.join(candidate, name), `unsigned:${name}\n`);
   const rawVmd = path.join(candidate, ".components", "crabbox-apple-vm-vmd");
   fs.writeFileSync(rawVmd, "unsigned-vmd\n", { mode: 0o755 });
@@ -687,6 +752,7 @@ test("provenance binds the explicit producer manifest, separate packager, notari
     [
       script,
       "candidate-write",
+      ...schemaArgs,
       "--dir",
       candidate,
       "--tag",
@@ -716,6 +782,7 @@ test("provenance binds the explicit producer manifest, separate packager, notari
   ).trim();
   const writeArgs = [
     "write",
+    ...schemaArgs,
     "--dir",
     directory,
     "--tag",
@@ -759,6 +826,7 @@ test("provenance binds the explicit producer manifest, separate packager, notari
   ];
   const verifyArgs = [
     "verify",
+    ...schemaArgs,
     "--dir",
     directory,
     "--tag",
@@ -772,6 +840,13 @@ test("provenance binds the explicit producer manifest, separate packager, notari
     "--notes",
     notes,
   ];
+  const nativeFinal = path.join(directory, "native-final");
+  if (schema === 2) {
+    fs.cpSync(path.join(candidate, ".components/native-helpers"), nativeFinal, { recursive: true });
+    writeArgs.push("--native-final-dir", nativeFinal,
+      "--notary-jj-amd64", "55555555-5555-4555-8555-555555555555",
+      "--notary-jj-arm64", "66666666-6666-4666-8666-666666666666");
+  }
   try {
     fs.writeFileSync(notes, "## 1.2.3 - 2026-07-10\n\n- Release.\n");
     for (const name of archives) {
@@ -782,7 +857,14 @@ test("provenance binds the explicit producer manifest, separate packager, notari
     const provenance = JSON.parse(fs.readFileSync(path.join(directory, "provenance.json")));
     assert.equal(provenance.producer.manifestSha256, candidateManifestSha256);
     assert.equal(provenance.producer.swift, "Apple Swift version 6.1 (swiftlang-test)");
-    assert.equal(provenance.producer.inputs.length, 7);
+    assert.equal(provenance.producer.inputs.length, schema === 2 ? 31 : 7);
+    if (schema === 2) assert.equal(provenance.producer.nativeHelpers.length, 6);
+    if (schema === 2) {
+      const pair = path.join(nativeFinal, "darwin_arm64");
+      fs.writeFileSync(path.join(pair, "crabbox"), "independent installed CLI member\n");
+      assert.doesNotThrow(() => execFileSync(process.execPath, [script, "verify-native-payload", ...schemaArgs,
+        "--dir", pair, "--platform", "darwin", "--arch", "arm64", "--provenance", path.join(directory, "provenance.json")]));
+    }
     assert.equal(provenance.packager.go, "go1.26.4");
     assert.equal(
       provenance.payloads
@@ -815,6 +897,7 @@ test("candidate manifest rejects byte, mode, and pinned source drift before sign
   const verifyArgs = [
     script,
     "candidate-verify",
+    "--schema-version", "1",
     "--dir",
     directory,
     "--tag",
@@ -835,6 +918,7 @@ test("candidate manifest rejects byte, mode, and pinned source drift before sign
     execFileSync(process.execPath, [
       script,
       "candidate-write",
+      "--schema-version", "1",
       "--dir",
       directory,
       "--tag",

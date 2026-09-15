@@ -18,6 +18,7 @@ type syncPlanRow struct {
 }
 
 type syncPlanJSONOutput struct {
+	Jujutsu             *syncPlanJSONJujutsu      `json:"jujutsu,omitempty"`
 	Source              string                    `json:"source,omitempty"`
 	Root                string                    `json:"root,omitempty"`
 	Candidate           syncPlanJSONSize          `json:"candidate"`
@@ -28,6 +29,17 @@ type syncPlanJSONOutput struct {
 	TopFiles            []syncPlanJSONRow         `json:"topFiles"`
 	TopDirs             []syncPlanJSONRow         `json:"topDirs"`
 	LocalGitSeed        *syncPlanJSONLocalGitSeed `json:"localGitSeed,omitempty"`
+}
+
+type syncPlanJSONJujutsu struct {
+	Mode               string   `json:"mode"`
+	Operation          string   `json:"operation"`
+	RecordedCommit     string   `json:"recordedCommit"`
+	ChangeNormalHex    string   `json:"changeNormalHex"`
+	Parents            []string `json:"parents"`
+	RecordedTreeIDs    []string `json:"recordedTreeIds"`
+	WorkingCopyTreeIDs []string `json:"workingCopyTreeIds,omitempty"`
+	ContentSHA256      string   `json:"contentSha256"`
 }
 
 type syncPlanJSONLocalGitSeed struct {
@@ -90,6 +102,8 @@ func (a App) syncPlan(ctx context.Context, args []string) (err error) {
 	limit := fs.Int("limit", 20, "number of top files and directories to print")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	gitSeedSource := fs.String("git-seed-source", "", "Git metadata source: origin or explicit offline local objects")
+	syncSource := fs.String("sync-source", "", "source owner: git, directory, or jj")
+	syncRevision := fs.String("sync-revision", "", "recorded native JJ revision; empty selects live working files")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -98,6 +112,15 @@ func (a App) syncPlan(ctx context.Context, args []string) (err error) {
 	}
 	cfg, err := loadConfig()
 	if err != nil {
+		return err
+	}
+	if flagWasSet(fs, "sync-source") {
+		cfg.Sync.Source = *syncSource
+	}
+	if flagWasSet(fs, "sync-revision") {
+		cfg.Sync.Revision = *syncRevision
+	}
+	if err := validateSyncRevision(cfg); err != nil {
 		return err
 	}
 	if err := validateSyncSource(cfg); err != nil {
@@ -111,8 +134,18 @@ func (a App) syncPlan(ctx context.Context, args []string) (err error) {
 	}
 	var repo Repo
 	directory := effectiveSyncSource(cfg) == "directory"
-	if directory {
-		repo, err = findSyncRepo(cfg, true)
+	jj := effectiveSyncSource(cfg) == "jj"
+	if jj {
+		provider, providerErr := ProviderFor(cfg.Provider)
+		if providerErr != nil {
+			return providerErr
+		}
+		if err := validatePlainSourceProvider(provider.Spec(), "jj"); err != nil {
+			return err
+		}
+		repo, err = findSyncRepo(ctx, cfg, true)
+	} else if directory {
+		repo, err = findSyncRepo(ctx, cfg, true)
 		if err == nil {
 			err = validateDirectorySyncConfig(cfg)
 		}
@@ -131,6 +164,14 @@ func (a App) syncPlan(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	var jjSource preparedJJSync
+	if jj {
+		jjSource, err = prepareJJSync(ctx, repo, cfg, true, io.Discard)
+		defer func() { err = errors.Join(err, jjSource.cleanup()) }()
+		if err != nil {
+			return err
+		}
+	}
 	var localSeed preparedLocalGitSeed
 	local := effectiveGitSeedSource(cfg) == "local"
 	if local {
@@ -143,7 +184,9 @@ func (a App) syncPlan(ctx context.Context, args []string) (err error) {
 	}
 	var manifest SyncManifest
 	rowsRoot := repo.Root
-	if local {
+	if jj {
+		manifest, rowsRoot = jjSource.Manifest, jjSource.Root
+	} else if local {
 		manifest, rowsRoot = localSeed.Snapshot.Manifest, localSeed.Snapshot.Root
 	} else {
 		excludes, err := syncExcludes(repo.Root, cfg)
@@ -162,6 +205,14 @@ func (a App) syncPlan(ctx context.Context, args []string) (err error) {
 			return err
 		}
 		out := syncPlanJSON(manifest, files, dirs, cfg, provider.Spec().SyncGuardrailFullCandidate)
+		if jj {
+			out.Source, out.Root = "jj", repo.Root
+			out.Guardrail = syncPlanJSONGuardrailFor(FullSyncGuardrailManifest(manifest), cfg)
+			out.Jujutsu = &syncPlanJSONJujutsu{Mode: jjSource.Mode, Operation: jjSource.Identity.Operation, RecordedCommit: jjSource.Identity.Commit, ChangeNormalHex: jjSource.Identity.Change, Parents: jjSource.Identity.Parents, RecordedTreeIDs: jjSource.Identity.TreeIDs, ContentSHA256: jjSource.ContentDigest}
+			if jjSource.Mode == "live" {
+				out.Jujutsu.WorkingCopyTreeIDs = jjSource.live.Read.Inventory.WorkingCopyTreeIDs
+			}
+		}
 		if local {
 			guard := FullSyncGuardrailManifest(manifest)
 			guard.Bytes += localSeed.Artifact.ObjectBytes
@@ -181,6 +232,9 @@ func (a App) syncPlan(ctx context.Context, args []string) (err error) {
 			return err
 		}
 		return nil
+	}
+	if jj {
+		fmt.Fprintf(a.Stdout, "sync source=jj root=%s mode=%s recorded_commit=%s content_sha256=%s\n", repo.Root, jjSource.Mode, jjSource.Identity.Commit, jjSource.ContentDigest)
 	}
 	if directory {
 		fmt.Fprintf(a.Stdout, "sync source=directory root=%s\n", repo.Root)

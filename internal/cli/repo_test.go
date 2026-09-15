@@ -1,19 +1,28 @@
 package cli
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
+	"time"
+
+	jjsource "github.com/openclaw/crabbox/tools/jj-source"
 )
 
 func TestSyncFingerprintPathsPreservesContentEncoding(t *testing.T) {
@@ -55,6 +64,38 @@ func TestSyncFingerprintPathsCancellationDuringContent(t *testing.T) {
 		t.Fatalf("canceled=%t payload_chunks=%d payload_bytes=%d error=%v", errors.Is(err, context.Canceled), h.chunks, h.bytes, err)
 	}
 	t.Logf("canceled=true; payload_chunks=%d; payload_bytes=%d; total_bytes=%d", h.chunks, h.bytes, len(content))
+}
+
+func TestJJSourceContentDigestCanonicalizesSymlinkMetadata(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "source.txt"), "content\n")
+	link := filepath.Join(root, "link")
+	if err := os.Symlink("source.txt", link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink creation unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	got, err := jjSourceContentDigest(context.Background(), root, []string{"link"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.Sum256([]byte("path=link\nmode=Lrwxrwxrwx size=10\nsymlink=source.txt\n\x00"))
+	if got != fmt.Sprintf("%x", want) {
+		t.Fatalf("native symlink checksum=%s, want canonical %x", got, want)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyWant := sha256.Sum256([]byte(fmt.Sprintf("path=link\nmode=%s size=%d\nsymlink=source.txt\n\x00", info.Mode().String(), info.Size())))
+	legacy := sha256.New()
+	if err := syncFingerprintPaths(context.Background(), legacy, root, []string{"link"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(legacy.Sum(nil), legacyWant[:]) {
+		t.Fatal("filesystem sync fingerprint changed its existing symlink encoding")
+	}
 }
 
 type cancelSourceFingerprintHash struct {
@@ -2316,7 +2357,7 @@ func TestDirectorySyncEffectiveRoot(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Sync.Source = "directory"
 	cfg.Sync.Includes = []string{"README.txt"}
-	repo, err := findSyncRepo(cfg, true)
+	repo, err := findSyncRepo(context.Background(), cfg, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2326,7 +2367,7 @@ func TestDirectorySyncEffectiveRoot(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, ".jj"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := findSyncRepo(cfg, true); err == nil || !strings.Contains(err.Error(), "native Jujutsu") {
+	if _, err := findSyncRepo(context.Background(), cfg, true); err == nil || !strings.Contains(err.Error(), "native Jujutsu") {
 		t.Fatalf("error=%v", err)
 	}
 }
@@ -2346,5 +2387,1044 @@ func TestDirectorySyncMetadataCleanupOnGitFailure(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(root, ".git")); !os.IsNotExist(err) {
 		t.Fatalf("source Git metadata: %v", err)
+	}
+}
+
+func TestJJSyncScopeCompleteness(t *testing.T) {
+	hidden := jjPendingEntry{Path: "hidden/file.txt", Kind: "file", TrackedRegular: true, CachedMaterialization: "unestablished"}
+	missing := jjPendingEntry{Path: "src/old.txt", Kind: "file", TrackedRegular: true, InSparseScope: true, CachedMaterialization: "cached"}
+	uncertain := missing
+	uncertain.CachedMaterialization = "needs_observation"
+	structural := jjPendingEntry{Path: "src/mixed", Kind: "other_conflict", CoversDescendants: true, InSparseScope: true, CachedMaterialization: "cached"}
+	submodule := jjPendingEntry{Path: "vendor/module", Kind: "submodule", InSparseScope: true, CachedMaterialization: "cached"}
+	for _, tc := range []struct {
+		name         string
+		entry        jjPendingEntry
+		captures     []jjAdmittedFile
+		observations []jjPathObservation
+		includes     []string
+		excludes     []string
+		wantReason   string
+	}{
+		{name: "required sparse file", entry: hidden, wantReason: "outside native sparse scope"},
+		{name: "outside includes", entry: hidden, includes: []string{"src"}},
+		{name: "explicitly excluded", entry: hidden, excludes: []string{"hidden"}},
+		{name: "ordered reinclude", entry: hidden, excludes: []string{"hidden", "!hidden/file.txt"}, wantReason: "outside native sparse scope"},
+		{name: "sparse physical capture does not establish native admission", entry: hidden, captures: []jjAdmittedFile{{Path: hidden.Path}}, wantReason: "outside native sparse scope"},
+		{name: "ordinary deletion", entry: missing, observations: []jjPathObservation{{Path: missing.Path, Kind: "removed_absent"}}},
+		{name: "uncertain deletion", entry: uncertain, observations: []jjPathObservation{{Path: missing.Path, Kind: "removed_absent"}}, wantReason: "prior materialization is unestablished"},
+		{name: "captured placeholder", entry: uncertain, captures: []jjAdmittedFile{{Path: missing.Path}}},
+		{name: "uncaptured cached file", entry: missing, wantReason: "required path was not admitted"},
+		{name: "unsupported replacement", entry: missing, observations: []jjPathObservation{{Path: missing.Path, Kind: "omitted_unsupported_kind"}}, wantReason: "omitted_unsupported_kind"},
+		{name: "nested boundary", entry: missing, observations: []jjPathObservation{{Path: "src", Kind: "omitted_nested_repository", Subtree: true}}, wantReason: "omitted_nested_repository"},
+		{name: "excluded nested contents", entry: missing, observations: []jjPathObservation{{Path: "src", Kind: "omitted_nested_repository", Subtree: true}}, excludes: []string{"src/old.txt"}},
+		{name: "nested omission wins over inferred absence", entry: missing, observations: []jjPathObservation{{Path: missing.Path, Kind: "removed_absent"}, {Path: "src", Kind: "omitted_nested_repository", Subtree: true}}, wantReason: "omitted_nested_repository"},
+		{name: "kind replacement may be deletion only", entry: missing, observations: []jjPathObservation{{Path: missing.Path, Kind: "removed_kind_replacement"}}, includes: []string{missing.Path}},
+		{name: "structural marker selected", entry: structural, captures: []jjAdmittedFile{{Path: structural.Path}}},
+		{name: "structural child selected", entry: structural, captures: []jjAdmittedFile{{Path: structural.Path}}, includes: []string{"src/mixed/child.rs"}, wantReason: "selected descendants are not materialized"},
+		{name: "structural child excluded", entry: structural, includes: []string{"src/mixed/child.rs"}, excludes: []string{"src/mixed"}},
+		{name: "structural child reincluded", entry: structural, excludes: []string{"src/mixed", "!src/mixed/child.rs"}, wantReason: "selected descendants are not materialized"},
+		{name: "ordinary submodule boundary", entry: submodule},
+		{name: "submodule contents requested", entry: submodule, includes: []string{"vendor/module/child.rs"}, wantReason: "selected descendants are not materialized"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", "")
+			inventory := jjSourceInventory{Pending: []jjPendingEntry{tc.entry}, Admitted: tc.captures, Observations: tc.observations}
+			scope, err := validatedJJSyncManifestScope(t.TempDir(), newSyncExcludeRules(tc.excludes, syncExcludeConfigured), tc.includes, inventory)
+			if tc.wantReason != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantReason) {
+					t.Fatalf("error=%v want %q", err, tc.wantReason)
+				}
+				if scope.trackedRegular != nil || scope.gitlinkPaths != nil {
+					t.Fatal("incomplete source returned an accepted scope")
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestJJSyncScopeUsesTrackedArtifactAndManagedStateRules(t *testing.T) {
+	for _, tc := range []struct {
+		name, path string
+		excludes   []string
+		wantError  bool
+	}{
+		{name: "tracked artifact remains required", path: "target/pkg/main.go", wantError: true},
+		{name: "configured artifact exclusion", path: "target/pkg/main.go", excludes: []string{"target"}},
+		{name: "configured reinclude", path: "target/pkg/main.go", excludes: []string{"target", "!target/pkg/main.go"}, wantError: true},
+		{name: "dependency exclusion remains", path: "node_modules/pkg/main.js"},
+		{name: "protected runtime file", path: ".crabbox/env/synthetic", excludes: []string{"!**"}},
+		{name: "literal managed namespace", path: "state [cache]/crabbox/synthetic", excludes: []string{"!**"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state [cache]"))
+			cfg := baseConfig()
+			cfg.Sync.Excludes = tc.excludes
+			rules, err := syncExcludes(root, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inventory := jjSourceInventory{Pending: []jjPendingEntry{{Path: tc.path, Kind: "file", TrackedRegular: true, CachedMaterialization: "unestablished"}}}
+			_, err = validatedJJSyncManifestScope(root, rules, []string{tc.path}, inventory)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("error=%v wantError=%v", err, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestJJSourceReadRetainsNativeMetadataFacts(t *testing.T) {
+	root := t.TempDir()
+	header := jjProtocolHeader{Protocol: jjSourceProtocolName, SchemaVersion: jjSourceProtocolVersion, Kind: "context", JJVersion: jjSourceNativeVersion}
+	contextData, err := json.Marshal(jjSourceContext{
+		jjProtocolHeader: header, WorkspaceRoot: root,
+		RepositoryPath: filepath.Join(root, ".jj", "repo"), Workspace: "default",
+		WorkingCopyOperation: strings.Repeat("a", 128), OperationHeads: []string{strings.Repeat("a", 128)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	header.Kind = "live_inventory"
+	facts := jjSourceInventory{
+		jjProtocolHeader: header,
+		Identity: jjSourceIdentity{
+			WorkspaceRoot: root, RepositoryPath: filepath.Join(root, ".jj", "repo"), Workspace: "default",
+			Operation: strings.Repeat("a", 128), Commit: strings.Repeat("d", 40), Change: strings.Repeat("e", 32),
+			Parents: []string{strings.Repeat("b", 40), strings.Repeat("c", 40)},
+			TreeIDs: []string{strings.Repeat("f", 40), strings.Repeat("0", 40), strings.Repeat("1", 40)}, TreeLabels: []string{"left", "base", "right"},
+			Policy: jjMaterializationPolicy{ExecPolicy: "auto", EOLConversion: "none", ConflictMarkerStyle: "diff", MergeHunkLevel: "line", SameChange: "accept", MaterializationHost: "macos"},
+		},
+		WorkingCopyOperation: strings.Repeat("a", 128), WorkingCopyFreshness: "fresh",
+		WorkingCopyTreeIDs: []string{strings.Repeat("f", 40), strings.Repeat("0", 40), strings.Repeat("1", 40)}, WorkingCopyTreeLabels: []string{"left", "base", "right"},
+		MaxNewFileSize: 1048576, Pending: []jjPendingEntry{}, SparsePrefixes: []string{""},
+		Tracked: []jjTrackedEntry{}, Admitted: []jjAdmittedFile{}, Observations: []jjPathObservation{}, Untracked: []jjUntrackedEntry{},
+	}
+	data, err := json.Marshal(facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := decodeJJSourceRead(contextData, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, terms := range []int{1, 3} {
+		t.Run(fmt.Sprintf("unlabeled_%d_terms", terms), func(t *testing.T) {
+			unlabeled := facts
+			unlabeled.Identity.TreeIDs = facts.Identity.TreeIDs[:terms]
+			unlabeled.Identity.TreeLabels = []string{}
+			unlabeled.WorkingCopyTreeIDs = facts.WorkingCopyTreeIDs[:terms]
+			unlabeled.WorkingCopyTreeLabels = []string{}
+			encoded, err := json.Marshal(unlabeled)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := decodeJJSourceRead(contextData, encoded); err != nil {
+				t.Fatalf("native unlabeled tree rejected: %v", err)
+			}
+			recorded, err := json.Marshal(jjRecordedInventory{
+				jjProtocolHeader: jjProtocolHeader{Protocol: jjSourceProtocolName, SchemaVersion: jjSourceProtocolVersion, Kind: "recorded_inventory", JJVersion: jjSourceNativeVersion},
+				Identity:         unlabeled.Identity, Entries: []jjRecordedEntry{},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := decodeJJRecordedInventory(recorded); err != nil {
+				t.Fatalf("native recorded unlabeled tree rejected: %v", err)
+			}
+		})
+	}
+	pretty, err := json.MarshalIndent(facts, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	equivalent, err := decodeJJSourceRead(contextData, pretty)
+	if err != nil || equivalent.MetadataDigest != baseline.MetadataDigest {
+		t.Fatalf("formatting changed native metadata identity: %v", err)
+	}
+	for _, field := range []string{"max_new_file_size", "parents", "policy"} {
+		t.Run(field, func(t *testing.T) {
+			changed := facts
+			switch field {
+			case "parents":
+				changed.Identity.Parents = []string{strings.Repeat("c", 40), strings.Repeat("b", 40)}
+			case "policy":
+				changed.Identity.Policy.EOLConversion = "input"
+			default:
+				changed.MaxNewFileSize = 2097152
+			}
+			data, err := json.Marshal(changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			read, err := decodeJJSourceRead(contextData, data)
+			if err != nil || read.MetadataDigest == baseline.MetadataDigest {
+				t.Fatalf("native %s change was lost: %v", field, err)
+			}
+		})
+	}
+}
+
+func TestJJSyncSelectedObservationsAndStaging(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	const selected = "ordinary selected content\n"
+	payloads := map[string]string{
+		"selected.txt":             selected,
+		"excluded.txt":             "ordinary excluded content\n",
+		"state/crabbox/marker.txt": "ordinary state marker\n",
+	}
+	var inventory jjSourceInventory
+	for _, path := range []string{"selected.txt", "excluded.txt", "state/crabbox/marker.txt"} {
+		writeFile(t, filepath.Join(root, filepath.FromSlash(path)), payloads[path])
+		info, err := os.Lstat(filepath.Join(root, filepath.FromSlash(path)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		executable := info.Mode().Perm()&0o111 != 0
+		inventory.Admitted = append(inventory.Admitted, jjAdmittedFile{Path: path, Kind: "file", Executable: &executable, ObservedSize: uint64(info.Size()), ObservedMtimeMillis: info.ModTime().UnixMilli()})
+		inventory.Pending = append(inventory.Pending, jjPendingEntry{Path: path, Kind: "file", TrackedRegular: true, InSparseScope: true, CachedMaterialization: "cached"})
+	}
+	cfg := baseConfig()
+	cfg.Sync.Excludes = append(cfg.Sync.Excludes, "excluded.txt")
+	cfg.Sync.FailBytes = int64(len(selected)) + 1
+	selection, err := selectJJSourceFiles(context.Background(), root, cfg, inventory, false, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selection.Files) != 1 || selection.Files[0].Path != "selected.txt" || selection.Files[0].Observed.Size() != int64(len(selected)) || selection.Manifest.Bytes != int64(len(selected)) {
+		t.Fatalf("selected observations=%+v manifest=%+v", selection.Files, selection.Manifest)
+	}
+	cfg.Sync.FailBytes = int64(len(selected))
+	if _, err := selectJJSourceFiles(context.Background(), root, cfg, inventory, false, io.Discard); err == nil {
+		t.Fatal("selection bypassed the ordinary full-sync byte limit")
+	}
+	if _, err := selectJJSourceFiles(context.Background(), root, cfg, inventory, true, io.Discard); err != nil {
+		t.Fatalf("explicit ordinary size override failed: %v", err)
+	}
+	cfg.Sync.FailBytes = int64(len(selected)) + 1
+	metadata, err := json.Marshal(inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := jjSourceRead{
+		Context:   jjSourceContext{WorkspaceRoot: root, RepositoryPath: filepath.Join(root, ".jj", "repo")},
+		Inventory: inventory, MetadataDigest: sha256.Sum256(metadata),
+	}
+	reads, reconfigure := 0, false
+	reader := func(context.Context) (jjSourceRead, error) {
+		reads++
+		if reconfigure && reads == 2 {
+			t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state-b"))
+		}
+		return read, nil
+	}
+	snapshot, err := prepareJJSourceSnapshot(context.Background(), root, cfg, reader, false, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := snapshot.cleanup(); err != nil {
+			t.Error(err)
+		}
+	})
+	if reads != 3 || snapshot.ContentDigest == "" {
+		t.Fatalf("native reads=%d content digest=%q", reads, snapshot.ContentDigest)
+	}
+	entries, err := os.ReadDir(snapshot.Root)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "selected.txt" {
+		t.Fatalf("staged entries=%v error=%v", entries, err)
+	}
+	if content, err := os.ReadFile(filepath.Join(snapshot.Root, "selected.txt")); err != nil || string(content) != selected {
+		t.Fatalf("staged content=%q error=%v", content, err)
+	}
+	for _, state := range []string{"state-a", "state-b"} {
+		if err := os.MkdirAll(filepath.Join(root, state, "crabbox"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg.Sync.Excludes = append(cfg.Sync.Excludes, "state")
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state-a"))
+	reads, reconfigure = 0, true
+	recaptured, err := prepareJJSourceSnapshot(context.Background(), root, cfg, reader, false, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := recaptured.cleanup(); err != nil {
+			t.Error(err)
+		}
+	})
+	if reads != 5 || recaptured.Selection.Excludes.managedSubtree != "state-b/crabbox" || recaptured.ContentDigest != snapshot.ContentDigest {
+		t.Fatalf("recaptured reads=%d scope=%q digest=%q", reads, recaptured.Selection.Excludes.managedSubtree, recaptured.ContentDigest)
+	}
+}
+
+func TestJJSyncManifestNativeInventory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("recorded native fixture uses POSIX symlinks and executable modes")
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	data, err := os.ReadFile("testdata/jj-live-scope.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inventory jjSourceInventory
+	if err := json.Unmarshal(data, &inventory); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Files []struct {
+			Path string `json:"path"`
+			Raw  struct {
+				Kind, Target string
+				Bytes        []byte
+				Executable   bool
+			}
+		} `json:"payload_files"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for _, file := range payload.Files {
+		full := filepath.Join(root, filepath.FromSlash(file.Path))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if file.Raw.Kind == "symlink" {
+			if err := os.Symlink(file.Raw.Target, full); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		mode := os.FileMode(0o644)
+		if file.Raw.Executable {
+			mode = 0o755
+		}
+		if err := os.WriteFile(full, file.Raw.Bytes, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name                     string
+		includes, excludes       []string
+		wantOmissions, wantFiles []string
+		wantDeleted              []string
+	}{
+		{name: "default required omissions", wantOmissions: []string{"outside-known.txt", "src/nested/old.rs", "src/special.rs"}},
+		{name: "narrow source", includes: []string{"src/base.txt"}, wantFiles: []string{"src/base.txt"}},
+		{name: "excluded incomplete content", excludes: []string{"outside-known.txt", "src/nested", "src/special.rs"}, wantDeleted: []string{"src/delete.txt", "src/to-dir.rs", "src/to-file.rs/old.rs"}},
+		{name: "nested child reincluded", excludes: []string{"outside-known.txt", "src/nested", "src/special.rs", "!src/nested/old.rs"}, wantOmissions: []string{"src/nested/old.rs"}},
+		{name: "replacement child outside glob", includes: []string{"src/*.rs"}, excludes: []string{"src/special.rs"}, wantFiles: []string{"src/a.rs", "src/b.rs", "src/c.rs", "src/candidate.rs", "src/conflict.rs", "src/line-endings.rs", "src/to-file.rs"}, wantDeleted: []string{"src/to-dir.rs"}},
+		{name: "old descendant only", includes: []string{"src/to-file.rs/old.rs"}, wantFiles: []string{}, wantDeleted: []string{"src/to-file.rs/old.rs"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest, err := syncManifestFilteredRulesWithSource(root, newSyncExcludeRules(tc.excludes, syncExcludeConfigured), tc.includes, jjSyncManifestSource(inventory))
+			if tc.wantOmissions != nil {
+				incomplete, ok := err.(*jjIncompleteSourceError)
+				if !ok {
+					t.Fatalf("expected incomplete source: %v", err)
+				}
+				var paths []string
+				for _, omission := range incomplete.Omissions {
+					paths = append(paths, omission.Path)
+				}
+				if !slices.Equal(paths, tc.wantOmissions) || len(manifest.Files) != 0 || len(manifest.Deleted) != 0 {
+					t.Fatalf("omissions=%q manifest=%+v", paths, manifest)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(manifest.Deleted, tc.wantDeleted) {
+				t.Fatalf("deleted=%q want %q", manifest.Deleted, tc.wantDeleted)
+			}
+			if tc.wantFiles != nil && !slices.Equal(manifest.Files, tc.wantFiles) {
+				t.Fatalf("files=%q want %q", manifest.Files, tc.wantFiles)
+			}
+			if tc.wantFiles == nil && len(manifest.Files) != len(inventory.Admitted) {
+				t.Fatalf("accepted files=%d want %d", len(manifest.Files), len(inventory.Admitted))
+			}
+		})
+	}
+}
+
+func TestJJRecordedProtocolRoundTrip(t *testing.T) {
+	fixture := os.Getenv("CRABBOX_TEST_JJ_INVENTORY")
+	liveFixture := fixture != ""
+	if fixture == "" {
+		fixture = filepath.Join("testdata", "jj-recorded-protocol-v1.json")
+	}
+	data, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !liveFixture {
+		var portable jjRecordedInventory
+		if err := json.Unmarshal(data, &portable); err != nil {
+			t.Fatal(err)
+		}
+		portable.Identity.WorkspaceRoot = t.TempDir()
+		portable.Identity.RepositoryPath = filepath.Join(portable.Identity.WorkspaceRoot, ".jj", "repo")
+		data, err = json.Marshal(portable)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	inventory, err := decodeJJRecordedInventory(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Identity.Parents) != 3 {
+		t.Fatal("fixture lost its octopus parents")
+	}
+	paths := []string{"src/shared.txt", "src/link"}
+	encoded, err := encodeJJRecordedExportRequest(inventory, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request jjRecordedExportRequest
+	if err := json.Unmarshal(encoded, &request); err != nil {
+		t.Fatal(err)
+	}
+	original, err := json.Marshal(inventory.Identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	echoed, err := json.Marshal(request.Identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(original, echoed) || strings.Join(request.Paths, "\x00") != strings.Join(paths, "\x00") {
+		t.Fatal("request changed native identity, policy, ordered tree IDs or selected paths")
+	}
+	if output := os.Getenv("CRABBOX_TEST_JJ_EXPORT_REQUEST"); output != "" {
+		if err := os.WriteFile(output, encoded, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	empty, err := encodeJJRecordedExportRequest(inventory, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(empty, []byte(`"paths":[]`)) {
+		t.Fatal("empty selection must be an explicit array")
+	}
+	if _, err := encodeJJRecordedExportRequest(inventory, []string{paths[0], paths[0]}); err == nil {
+		t.Fatal("duplicate selected path accepted")
+	}
+	inventory.SchemaVersion++
+	otherVersion, err := json.Marshal(inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeJJRecordedInventory(otherVersion); err == nil {
+		t.Fatal("unsupported protocol version accepted")
+	}
+}
+
+func TestJJRecordedProtocolExportBinding(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "jj-recorded-export-v1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response jjRecordedExport
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatal(err)
+	}
+	source := t.TempDir()
+	response.Identity.WorkspaceRoot = source
+	response.Identity.RepositoryPath = filepath.Join(source, ".jj", "repo")
+	owner := t.TempDir()
+	response.Output = filepath.Join(owner, "payload")
+	response.OwnedState = filepath.Join(owner, "state")
+	request := jjRecordedExportRequest{Protocol: jjSourceProtocolName, SchemaVersion: jjSourceProtocolVersion, Identity: response.Identity}
+	for _, entry := range response.Entries {
+		request.Paths = append(request.Paths, entry.Path)
+	}
+	if fixture := os.Getenv("CRABBOX_TEST_JJ_EXPORT_RESPONSE"); fixture != "" {
+		data, err = os.ReadFile(fixture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &response); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(os.Getenv("CRABBOX_TEST_JJ_EXPORT_REQUEST"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &request); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := decodeJJRecordedExport(data, request, os.Getenv("CRABBOX_TEST_JJ_OUTPUT_ROOT"), os.Getenv("CRABBOX_TEST_JJ_STATE_ROOT")); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	encode := func(value jjRecordedExport) []byte {
+		t.Helper()
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	if _, err := decodeJJRecordedExport(encode(response), request, response.Output, response.OwnedState); err != nil {
+		t.Fatal(err)
+	}
+	changed := response
+	changed.Identity.Policy.EOLConversion = "input-output"
+	if _, err := decodeJJRecordedExport(encode(changed), request, response.Output, response.OwnedState); err == nil {
+		t.Fatal("changed policy accepted")
+	}
+	changed = response
+	changed.CheckoutStats.SkippedFiles = 1
+	if _, err := decodeJJRecordedExport(encode(changed), request, response.Output, response.OwnedState); err == nil {
+		t.Fatal("skipped path accepted")
+	}
+	if _, err := decodeJJRecordedExport(encode(response), request, filepath.Join(owner, "different"), response.OwnedState); err == nil {
+		t.Fatal("different output owner accepted")
+	}
+	changed = response
+	changed.Entries = append([]jjRecordedExportEntry{}, response.Entries...)
+	changed.Entries[1] = changed.Entries[0]
+	if _, err := decodeJJRecordedExport(encode(changed), request, response.Output, response.OwnedState); err == nil {
+		t.Fatal("duplicate output entry accepted")
+	}
+}
+
+func TestJJLiveProtocolStaging(t *testing.T) {
+	fixture, helper := os.Getenv("CRABBOX_TEST_JJ_LIVE_FIXTURE"), jjFixtureHelper(t)
+	if fixture == "" || helper == "" {
+		t.Skip("requires an owned native JJ fixture and helper")
+	}
+	root := filepath.Join(fixture, "fixture-source")
+	evidence := filepath.Join(fixture, "evidence")
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	runner := &jjProcessProofRunner{evidence: evidence}
+	process := jjFixtureProcess(t, root, runner)
+	reads := 0
+	reader := func(ctx context.Context) (jjSourceRead, error) { reads++; return process.readLive(ctx) }
+	cfg := baseConfig()
+	cfg.Sync.Includes = []string{"src/shared.txt", "src/line.txt", "src/tool.sh", "src/link", "src/pending.txt", "src/not-selected-by-native.txt", "state/crabbox/marker.txt"}
+	snapshot, err := prepareJJSourceSnapshot(context.Background(), root, cfg, reader, false, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := snapshot.cleanup(); err != nil {
+			t.Error(err)
+		}
+	})
+	want := []string{"src/line.txt", "src/link", "src/pending.txt", "src/shared.txt", "src/tool.sh"}
+	if reads != 3 || !slices.Equal(snapshot.Selection.Manifest.Files, want) || len(snapshot.Read.Inventory.Identity.Parents) != 3 {
+		t.Fatalf("reads=%d files=%q parents=%q", reads, snapshot.Selection.Manifest.Files, snapshot.Read.Inventory.Identity.Parents)
+	}
+	expected := map[string]string{"src/shared.txt": "live resolution, not recorded\n", "src/line.txt": "live line endings\r\n", "src/pending.txt": "pending new file\n", "src/tool.sh": "#!/bin/sh\nprintf \"fixture\\n\"\n"}
+	for path, want := range expected {
+		got, err := os.ReadFile(filepath.Join(snapshot.Root, path))
+		if err != nil || string(got) != want {
+			t.Fatalf("staged %s=%q: %v", path, got, err)
+		}
+	}
+	archive, err := CreateSyncArchive(context.Background(), Repo{Root: snapshot.Root}, snapshot.Selection.Manifest, "crabbox-jj-protocol-*.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivePath := archive.Name()
+	t.Cleanup(func() { archive.Close(); os.Remove(archivePath) })
+	gz, err := gzip.NewReader(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tar.NewReader(gz)
+	var members []string
+	for {
+		entry, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		members = append(members, entry.Name)
+		if entry.Name == "src/link" {
+			if entry.Typeflag != tar.TypeSymlink || entry.Linkname != "line.txt" {
+				t.Fatalf("archive link=%+v", entry)
+			}
+		} else {
+			contents, err := io.ReadAll(tr)
+			if err != nil || string(contents) != expected[entry.Name] {
+				t.Fatalf("archive %s=%q: %v", entry.Name, contents, err)
+			}
+			if entry.Name == "src/tool.sh" && entry.Mode&0111 == 0 {
+				t.Fatal("archive lost executable bit")
+			}
+		}
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(members, want) {
+		t.Fatalf("archive members=%q", members)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(archivePath); err != nil {
+		t.Fatal(err)
+	}
+	stage := snapshot.Root
+	if err := snapshot.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stage); !os.IsNotExist(err) {
+		t.Fatalf("staging retained: %v", err)
+	}
+	if os.Getenv("CRABBOX_JJ_FIXTURE_CONDITION") != "" {
+		if snapshot.Read.Inventory.MaxNewFileSize != 4<<20 || snapshot.Read.Inventory.Identity.Policy.ExecPolicy != "respect" {
+			t.Fatal("native conditional policy changed after environment isolation")
+		}
+		for _, predicate := range []string{"CRABBOX_JJ_FIXTURE_CONDITION", "CRABBOX_JJ_FIXTURE_MODE=active", "CRABBOX_JJ_FIXTURE_MODE=inactive"} {
+			if !slices.Contains(runner.conditions, predicate) {
+				t.Fatalf("native condition not negotiated: %s", predicate)
+			}
+		}
+	}
+	decisions, err := json.Marshal(runner.conditions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(evidence, "condition-queries.json"), decisions, 0600); err != nil {
+		t.Fatal(err)
+	}
+	result := map[string]any{"native_read_pairs": reads, "files": want, "bytes": snapshot.Selection.Manifest.Bytes, "source_commit": snapshot.Read.Inventory.Identity.Commit, "parents": snapshot.Read.Inventory.Identity.Parents, "content_digest": snapshot.ContentDigest, "pending_bytes_preserved": true, "archive_from_stage_verified": true, "owned_cleanup": true}
+	encoded, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(evidence, "go-live-result.json"), encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestJJLiveProtocolFixture(t *testing.T) {
+	data, err := os.ReadFile("testdata/jj-live-protocol-v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Context   jjSourceContext   `json:"context"`
+		Inventory jjSourceInventory `json:"inventory"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	fixture.Context.WorkspaceRoot = root
+	fixture.Context.RepositoryPath = filepath.Join(root, ".jj", "repo")
+	fixture.Inventory.Identity.WorkspaceRoot = root
+	fixture.Inventory.Identity.RepositoryPath = fixture.Context.RepositoryPath
+	contextData, err := json.Marshal(fixture.Context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventoryData, err := json.Marshal(fixture.Inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := decodeJJSourceRead(contextData, inventoryData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(read.Inventory.Identity.Parents) != 3 || len(read.Inventory.Identity.TreeIDs) != 5 || len(read.Inventory.WorkingCopyTreeIDs) != 5 {
+		t.Fatalf("octopus identity terms lost: %+v", read.Inventory.Identity)
+	}
+	pending := slices.ContainsFunc(read.Inventory.Pending, func(entry jjPendingEntry) bool {
+		return entry.Path == "src/shared.txt" && entry.Kind == "file_conflict"
+	})
+	admitted := slices.ContainsFunc(read.Inventory.Admitted, func(entry jjAdmittedFile) bool { return entry.Path == "src/pending.txt" && !entry.TrackedInWorkingCopy })
+	if !pending || !admitted {
+		t.Fatal("native recorded conflict or newly admitted file fact lost")
+	}
+}
+
+// Used only with explicitly controlled, synthetic native fixtures.
+type jjProcessProofRunner struct {
+	evidence   string
+	reads      int
+	conditions []string
+}
+
+func (r *jjProcessProofRunner) Run(ctx context.Context, request LocalCommandRequest) (LocalCommandResult, error) {
+	phase := ""
+	for _, arg := range request.Args {
+		if strings.HasPrefix(arg, "source-") {
+			phase = arg
+			break
+		}
+	}
+	for _, entry := range request.Env {
+		if strings.HasPrefix(entry, "CRABBOX_JJ_FIXTURE_CONDITION=") || strings.HasPrefix(entry, "CRABBOX_JJ_FIXTURE_MODE=") {
+			return LocalCommandResult{}, fmt.Errorf("fixture-only condition value entered child environment")
+		}
+	}
+	input, err := io.ReadAll(request.Stdin)
+	if err != nil {
+		return LocalCommandResult{}, err
+	}
+	if bytes.Contains(input, []byte("fixture-parent-only-content")) {
+		return LocalCommandResult{}, fmt.Errorf("parent-only condition value entered protocol")
+	}
+	request.Stdin = bytes.NewReader(input)
+	result, err := (execCommandRunner{}).Run(ctx, request)
+	if phase == "source-context" && result.ExitCode == 0 {
+		r.reads++
+	}
+	if result.ExitCode == jjConditionRequestExit {
+		var condition jjEnvironmentCondition
+		if decodeErr := decodeJJProtocolMessage([]byte(result.Stdout), "environment_condition", &condition); decodeErr != nil {
+			return result, decodeErr
+		}
+		r.conditions = append(r.conditions, condition.Predicate)
+	}
+	name := phase
+	switch phase {
+	case "source-context":
+		name = fmt.Sprintf("live-%d-context", r.reads)
+	case "source-live-inventory":
+		name = fmt.Sprintf("live-%d-inventory", r.reads)
+	}
+	if writeErr := os.WriteFile(filepath.Join(r.evidence, name+".json"), []byte(result.Stdout), 0600); writeErr != nil {
+		return result, writeErr
+	}
+	if writeErr := os.WriteFile(filepath.Join(r.evidence, name+".stderr"), []byte(result.Stderr), 0600); writeErr != nil {
+		return result, writeErr
+	}
+	return result, err
+}
+
+func TestJJRecordedProcessRoundTrip(t *testing.T) {
+	fixture, helper := os.Getenv("CRABBOX_TEST_JJ_LIVE_FIXTURE"), jjFixtureHelper(t)
+	if fixture == "" || helper == "" {
+		t.Skip("requires an owned native JJ fixture and helper")
+	}
+	root := filepath.Join(fixture, "fixture-source")
+	process := jjFixtureProcess(t, root, nil)
+	inventory, err := process.readRecorded(t.Context(), "top")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exact, err := process.readRecorded(t.Context(), inventory.Identity.Commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(inventory, exact) {
+		t.Fatal("bookmark and captured commit selected different native inventory")
+	}
+	changeRevision, err := os.ReadFile(filepath.Join(fixture, "evidence/native-change-revision.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	change, err := process.readRecorded(t.Context(), strings.TrimSpace(string(changeRevision)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(inventory, change) {
+		t.Fatal("native change revision selected a different inventory than bookmark/commit")
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	cfg := baseConfig()
+	paths := []string{"src/shared.txt", "src/line.txt", "src/tool.sh", "src/link", "src/historical.txt", "src/tree/child.txt", "coverage/recorded.txt"}
+	cfg.Sync.Includes = append(append([]string{}, paths...), "state/crabbox/marker.txt")
+	snapshot, err := prepareJJRecordedSnapshot(t.Context(), process, inventory.Identity.Commit, cfg, jjRecordedExportLimits{EntryBytes: 1048576, OutputBytes: 1048576}, false, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := snapshot.cleanup(); err != nil {
+			t.Error(err)
+		}
+	})
+	if snapshot.nativeState.Root != "" {
+		t.Fatal("native checkout state retained after acceptance")
+	}
+	sort.Strings(paths)
+	if !slices.Equal(snapshot.Manifest.Files, paths) || !reflect.DeepEqual(snapshot.Inventory.Identity, inventory.Identity) {
+		t.Fatalf("recorded manifest/identity mismatch: %+v", snapshot.Manifest)
+	}
+	if len(snapshot.Manifest.ProtectedTrackedExcludes) != 1 || snapshot.Manifest.ProtectedTrackedExcludes[0].Path != "coverage/recorded.txt" {
+		t.Fatalf("tracked protection lost: %+v", snapshot.Manifest.ProtectedTrackedExcludes)
+	}
+	for _, path := range paths {
+		expected := filepath.Join(fixture, "fixture-golden", path)
+		got := filepath.Join(snapshot.Root, path)
+		before, err := os.Lstat(expected)
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.Lstat(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if before.Mode() != after.Mode() {
+			t.Fatalf("%s mode changed", path)
+		}
+		if before.Mode()&os.ModeSymlink != 0 {
+			a, err := os.Readlink(expected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := os.Readlink(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a != b {
+				t.Fatalf("%s link changed", path)
+			}
+		} else {
+			a, err := os.ReadFile(expected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := os.ReadFile(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(a, b) {
+				t.Fatalf("%s recorded bytes changed", path)
+			}
+		}
+	}
+	archive, err := CreateSyncArchive(t.Context(), Repo{Root: snapshot.Root}, snapshot.Manifest, "crabbox-recorded-proof-*.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivePath := archive.Name()
+	t.Cleanup(func() { archive.Close(); os.Remove(archivePath) })
+	gz, err := gzip.NewReader(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tar.NewReader(gz)
+	var members []string
+	for {
+		entry, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		members = append(members, entry.Name)
+		if entry.Typeflag == tar.TypeReg {
+			expected, err := os.ReadFile(filepath.Join(fixture, "fixture-golden", entry.Name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := io.ReadAll(tr)
+			if err != nil || !bytes.Equal(data, expected) {
+				t.Fatalf("recorded archive bytes differ at %s: %v", entry.Name, err)
+			}
+		}
+	}
+	if !slices.Equal(members, paths) {
+		t.Fatalf("recorded archive members=%q", members)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(archivePath); err != nil {
+		t.Fatal(err)
+	}
+	emptyConfig := cfg
+	emptyConfig.Sync.Includes = []string{"no-selected-content/**"}
+	empty, err := prepareJJRecordedSnapshot(t.Context(), process, inventory.Identity.Commit, emptyConfig, jjRecordedExportLimits{}, false, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := empty.cleanup(); err != nil {
+			t.Error(err)
+		}
+	})
+	if len(empty.Manifest.Files) != 0 || empty.Manifest.Bytes != 0 || empty.ContentDigest == "" || empty.nativeState.Root != "" {
+		t.Fatalf("empty recorded snapshot=%+v", empty.Manifest)
+	}
+	if err := empty.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	result := map[string]any{"identity": snapshot.Inventory.Identity, "manifest": snapshot.Manifest, "content_digest": snapshot.ContentDigest, "native_state_removed_before_handoff": true, "archive_from_recorded_snapshot": true, "empty_zero_budget_selection": true}
+	stage := snapshot.Root
+	if err := snapshot.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stage); !os.IsNotExist(err) {
+		t.Fatalf("recorded staging retained: %v", err)
+	}
+	encoded, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture, "evidence/recorded-process-result.json"), encoded, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+}
+
+func TestJJEnvironmentPredicates(t *testing.T) {
+	env := jjConditionEnvironment([]string{"EMPTY=", "MODE=active", "TEXT=x=y", "UNICODE=日本語"})
+	for _, tc := range []struct {
+		predicate string
+		want      bool
+	}{
+		{"EMPTY", true}, {"EMPTY=", true}, {"EMPTY=x", false}, {"MODE", true}, {"MODE=active", true},
+		{"MODE=inactive", false}, {"mode", false}, {"TEXT=x=y", true}, {"TEXT=x", false}, {"UNICODE=日本語", true}, {"ABSENT", false},
+	} {
+		t.Run(tc.predicate, func(t *testing.T) {
+			if got := matchesJJEnvironmentCondition(env, tc.predicate); got != tc.want {
+				t.Fatalf("match=%v want=%v", got, tc.want)
+			}
+		})
+	}
+}
+
+func jjFixtureHelper(t *testing.T) string {
+	t.Helper()
+	if os.Getenv("CRABBOX_TEST_JJ_INSTALLED") == "1" {
+		helper, err := installedJJSourceHelper(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return helper
+	}
+	return os.Getenv("CRABBOX_TEST_JJ_HELPER")
+}
+
+func TestJJInstalledCompanion(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "crabbox")
+	writeFile(t, executable, "ordinary executable marker")
+	name := "crabbox-jj-source"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	helper := filepath.Join(directory, name)
+	payload := []byte("ordinary companion fixture")
+	if err := os.WriteFile(helper, payload, 0755); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := jjsource.ReadIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(payload)
+	receipt := jjInstalledReceipt{SchemaVersion: 1, NativeVersion: identity.NativeVersion, SourceTreeSHA256: identity.SourceTreeSHA256, BinarySHA256: fmt.Sprintf("%x", hash), TargetOS: runtime.GOOS, TargetArch: runtime.GOARCH}
+	data, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "crabbox-jj-source.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	helper, err = filepath.EvalSymlinks(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := installedJJSourceHelperForExecutable(t.Context(), executable, runtime.GOOS, runtime.GOARCH)
+	if err != nil || got != helper {
+		t.Fatalf("helper=%q: %v", got, err)
+	}
+	if runtime.GOOS != "windows" {
+		launcher := filepath.Join(t.TempDir(), "crabbox")
+		if err := os.Symlink(executable, launcher); err != nil {
+			t.Fatal(err)
+		}
+		got, err := installedJJSourceHelperForExecutable(t.Context(), launcher, runtime.GOOS, runtime.GOARCH)
+		if err != nil || got != helper {
+			t.Fatalf("linked launcher helper=%q: %v", got, err)
+		}
+	}
+}
+
+func jjFixtureProcess(t *testing.T, root string, runner CommandRunner) *jjSourceProcess {
+	t.Helper()
+	limits := jjSourceProcessLimits{ObjectBytes: 1048576, InputBytes: 1048576, ScratchBytes: 1048576, MetadataBytes: 1048576, Timeout: 30 * time.Second}
+	var process *jjSourceProcess
+	var err error
+	if os.Getenv("CRABBOX_TEST_JJ_INSTALLED") == "1" {
+		process, err = newInstalledJJSourceProcess(t.Context(), root, limits, runner)
+	} else {
+		parent := os.Environ()
+		process, err = newJJSourceProcess(t.Context(), jjSourceProcessOptions{BinaryPath: jjFixtureHelper(t), Directory: root, Environment: jjSourceChildEnvironment(parent), ConditionEnvironment: parent, Limits: limits, Runner: runner})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return process
+}
+
+func TestJJSourceChildEnvironment(t *testing.T) {
+	kept := []string{"HOME=/fixture/home", "JJ_CONFIG=/fixture/jj.toml", "JJ_EMAIL=fixture@example.com", "GIT_CONFIG_GLOBAL=/fixture/gitconfig", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.excludesFile", "GIT_CONFIG_VALUE_0=/fixture/ignore", "GIT_WORK_TREE=/fixture/work", "GIT_NO_REPLACE_OBJECTS=1", "GIT_ALLOC_LIMIT=8192", "GIX_OBJECT_CACHE_MEMORY=8192", "LC_CTYPE=C"}
+	omitted := []string{"CRABBOX_JJ_FIXTURE_CONDITION=parent-only", "AWS_SESSION_TOKEN=fixture-only", "GITHUB_TOKEN=fixture-only", "JJ_TRACE=fixture-trace", "JJ_PAGER=fixture-pager", "JJ_EDITOR=fixture-editor", "GIT_SSH_COMMAND=fixture-command", "GIT_ASKPASS=fixture-command", "HTTPS_PROXY=fixture-proxy", "LD_PRELOAD=fixture-loader", "GIT_CONFIG_VALUE_EXTRA=not-an-index"}
+	parent := append(append([]string{}, kept...), omitted...)
+	got := jjSourceChildEnvironment(parent)
+	if !slices.Equal(got, kept) {
+		t.Fatalf("unexpected native child keys: %v", got)
+	}
+	conditions := jjConditionEnvironment(parent)
+	if !matchesJJEnvironmentCondition(conditions, "CRABBOX_JJ_FIXTURE_CONDITION") {
+		t.Fatal("parent condition context lost")
+	}
+}
+
+func TestJJRecordedSelectionUsesTreeEntries(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	if err := os.MkdirAll(filepath.Join(root, "src", "historical.txt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "src", "parent"), "today this is a file\n")
+	inventory := jjRecordedInventory{Identity: jjSourceIdentity{WorkspaceRoot: root}, Entries: []jjRecordedEntry{
+		{Path: "src/absent.txt", Kind: "file"}, {Path: "src/historical.txt", Kind: "file"}, {Path: "src/parent/child.txt", Kind: "file"},
+		{Path: "state/crabbox/marker.txt", Kind: "file"}, {Path: "coverage/recorded.txt", Kind: "file"},
+	}}
+	selection, err := selectJJRecordedPaths(t.Context(), inventory, baseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"coverage/recorded.txt", "src/absent.txt", "src/historical.txt", "src/parent/child.txt"}
+	if !slices.Equal(selection.Paths, want) {
+		t.Fatalf("recorded paths=%q want=%q", selection.Paths, want)
+	}
+}
+
+func TestJJRecordedScopeRetainsTerminalBoundaries(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", "")
+	inventory := jjRecordedInventory{Identity: jjSourceIdentity{WorkspaceRoot: root}, Entries: []jjRecordedEntry{
+		{Path: "module", Kind: "submodule"},
+		{Path: "structural", Kind: "other_conflict", Terms: []*jjRecordedTreeTerm{{Kind: "tree"}, nil, {Kind: "file"}}},
+	}}
+	cfg := baseConfig()
+	selected, err := selectJJRecordedPaths(t.Context(), inventory, cfg)
+	if err != nil || !slices.Equal(selected.Paths, []string{"structural"}) {
+		t.Fatalf("terminal selection=%q: %v", selected.Paths, err)
+	}
+	for _, path := range []string{"module/child.txt", "structural/child.txt"} {
+		cfg.Sync.Includes = []string{path}
+		_, err := selectJJRecordedPaths(t.Context(), inventory, cfg)
+		var incomplete *jjIncompleteSourceError
+		if !errors.As(err, &incomplete) {
+			t.Fatalf("selected boundary descendants accepted for %s: %v", path, err)
+		}
 	}
 }

@@ -132,8 +132,8 @@ func (a App) watch(ctx context.Context, args []string) error {
 	if err := validateSyncSource(cfg); err != nil {
 		return err
 	}
-	if effectiveSyncSource(cfg) == "directory" {
-		return Exit(2, "watch does not support sync.source=directory; use run or sync-plan")
+	if effectiveSyncSource(cfg) != "git" {
+		return Exit(2, "watch does not support sync.source=%s; use run or sync-plan", effectiveSyncSource(cfg))
 	}
 	repo, err := findRepo()
 	if err != nil {

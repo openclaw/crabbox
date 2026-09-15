@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "jj": {
+    "version": "0.45.1",
+    "repository": "https://github.com/jj-vcs/jj",
+    "commit": "7c41cdeb16b6b321c64e789a966b6adf723816a5",
+    "archiveUrl": "https://codeload.github.com/jj-vcs/jj/tar.gz/7c41cdeb16b6b321c64e789a966b6adf723816a5",
+    "archiveSha256": "31455f6fd01d478b432767bf64258c429dac8b3a44790c1712fcaffecc605e3d"
+  },
+  "gix": {
+    "version": "0.87.1",
+    "archiveUrl": "https://static.crates.io/crates/gix/gix-0.87.1.crate",
+    "archiveSha256": "fdefc1465d8631807deaf504dacdeff628b978de515653b47976ca7c28ab2a7a"
+  },
+  "patches": {
+    "jj": {
+      "path": "patches/jj.patch",
+      "sha256": "8954a4e27807fab985d17bc6fa75ccb2b192167ffe8b7210ff45a66510fb7b81"
+    },
+    "gix": {
+      "path": "patches/gix.patch",
+      "sha256": "1e41453429ca2df1d032a17bb0cd6e010c7ccbff85cdc80fe6de3712c2ea606b"
+    }
+  },
+  "overlays": [
+    {
+      "path": "helper/conditions.rs",
+      "target": "cli/src/bin/crabbox-jj-source/conditions.rs",
+      "sha256": "5799b4458d7e25fd7e5b52ddd6b5f223a498341ddadc91287075e2f76fca4f5a"
+    },
+    {
+      "path": "helper/index_owner.rs",
+      "target": "cli/src/bin/crabbox-jj-source/index_owner.rs",
+      "sha256": "7ae30496914346c8b7a20a832a7bf5701d0fc1a7030385a6606509a53240b5e1"
+    },
+    {
+      "path": "helper/live.rs",
+      "target": "cli/src/bin/crabbox-jj-source/live.rs",
+      "sha256": "db54330ad6ece87371598ade09572814e98ac0f0f211690cb318d92f6e7f8309"
+    },
+    {
+      "path": "helper/main.rs",
+      "target": "cli/src/bin/crabbox-jj-source/main.rs",
+      "sha256": "ed50b20593dd90889bd02d8c9b968423647d0431ccce07c708ae077a083e119b"
+    },
+    {
+      "path": "helper/protocol.rs",
+      "target": "cli/src/bin/crabbox-jj-source/protocol.rs",
+      "sha256": "a21963fc6c371bf3ec577057d9e38970a4e6641da39604e985d95fd609da29d6"
+    }
+  ],
+  "sourceTree": {
+    "algorithm": "sha256-jsonl-files-v1",
+    "sha256": "c4f65bf3b4af6dcd1d60f68eb16c883a6975b86d25aa479ba2fbc1f45c6355df",
+    "entryCount": 924
+  }
+}

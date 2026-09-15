@@ -167,3 +167,11 @@ and rsync ships only changed bytes.
 - [run](run.md)
 - [Sync](../features/sync.md)
 - [Configuration](../features/configuration.md)
+
+## Native JJ selection
+
+Use `--sync-source jj` to plan an immutable live working set, or add
+`--sync-revision <native-revision>` for a recorded tree. JSON includes a `jujutsu`
+section with the captured native identity and selected content digest. See
+[Sync](../features/sync.md#jujutsu-workspaces) for companion installation,
+compatibility and resource limits.

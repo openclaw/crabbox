@@ -118,6 +118,8 @@ function runMockedHomebrewPhase({
   notarizationFailure = false,
   releaseTrust = true,
   versionOutput = "1.2.3",
+  nativeSource = false,
+  nativeFailure,
 } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-homebrew-phase-"));
   const assets = path.join(root, "assets");
@@ -148,6 +150,18 @@ function runMockedHomebrewPhase({
   ).join("\n") + "\n";
   const cli = path.join(payload, "crabbox");
   const helper = path.join(payload, "crabbox-apple-vm-helper");
+  const nativeHelper = path.join(payload, "crabbox-jj-source");
+  const nativeReceipt = path.join(payload, "crabbox-jj-source.json");
+  const nativeNotice = path.join(payload, "crabbox-jj-source.NOTICES.txt");
+  const nativeAttribution = path.join(payload, "attribution.json");
+  const nativeManifest = path.join(root, "native-source-manifest.json");
+  if (nativeSource) {
+    writeExecutable(nativeHelper, `#!/bin/sh\n${credentialCanary}exit 64\n`);
+    fs.writeFileSync(nativeReceipt, JSON.stringify({ schemaVersion: 1, fixture: true }, null, 2) + "\n");
+    fs.writeFileSync(nativeNotice, "Synthetic native attribution fixture.\n");
+    fs.writeFileSync(nativeAttribution, JSON.stringify({ fixture: true }) + "\n");
+    fs.copyFileSync(path.join(repoRoot, "tools/jj-source/manifest.json"), nativeManifest);
+  }
   writeExecutable(
     cli,
     `#!/bin/sh\n${credentialCanary}[ "\${1:-}" = --version ] || exit 64\nprintf '%s\\n' ${shellQuote(versionOutput)}\n`,
@@ -170,7 +184,8 @@ function runMockedHomebrewPhase({
     linuxAmd64: path.join(assets, "crabbox_1.2.3_linux_amd64.tar.gz"),
     linuxArm64: path.join(assets, "crabbox_1.2.3_linux_arm64.tar.gz"),
   };
-  execFileSync("tar", ["-czf", archivePaths.darwinAmd64, "-C", payload, "crabbox"]);
+  const nativeMembers = nativeSource ? ["crabbox-jj-source", "crabbox-jj-source.json", "crabbox-jj-source.NOTICES.txt", "attribution.json"] : [];
+  execFileSync("tar", ["-czf", archivePaths.darwinAmd64, "-C", payload, "crabbox", ...nativeMembers]);
   execFileSync("tar", [
     "-czf",
     archivePaths.darwinArm64,
@@ -178,6 +193,7 @@ function runMockedHomebrewPhase({
     payload,
     "crabbox",
     "crabbox-apple-vm-helper",
+    ...nativeMembers,
   ]);
   fs.writeFileSync(archivePaths.linuxAmd64, "mock linux amd64 archive\n");
   fs.writeFileSync(archivePaths.linuxArm64, "mock linux arm64 archive\n");
@@ -209,6 +225,19 @@ function runMockedHomebrewPhase({
     path.join(fakeScripts, "verify-release.sh"),
     `#!/bin/sh\n${credentialCanary}[ "$CRABBOX_VERIFY_MODE" = static ] || exit 96\nprintf 'verify-release:%s\\n' "$*" >>${shellQuote(log)}\n`,
   );
+  fs.writeFileSync(path.join(fakeScripts, "release-provenance.mjs"), `
+import fs from 'node:fs';
+const args=process.argv.slice(2);
+if (args.shift() !== 'verify-native-payload' || args.length !== 12) process.exit(98);
+const options=Object.fromEntries(Array.from({length:args.length/2},(_,i)=>[args[i*2],args[i*2+1]]));
+if (options['--schema-version'] !== '2' || options['--native-source-manifest'] !== ${JSON.stringify(nativeManifest)} ||
+    options['--dir'] !== ${JSON.stringify(path.join(prefix, "bin"))} || options['--platform'] !== 'darwin' ||
+    options['--arch'] !== ${JSON.stringify(nativeArch === "arm64" ? "arm64" : "amd64")} ||
+    !fs.readFileSync(options['--provenance']).equals(fs.readFileSync(${JSON.stringify(path.join(assets, "provenance.json"))}))) process.exit(98);
+for (const key of ${JSON.stringify([...forbiddenCredentials, "UNRELATED_SECRET"])}) if (key in process.env) process.exit(95);
+fs.appendFileSync(${JSON.stringify(log)},'verify-native-payload\\n');
+${nativeFailure === "metadata" ? "process.exit(75);" : ""}
+`);
   writeExecutable(
     path.join(fakeScripts, "verify-macos-binary.sh"),
     `#!/bin/sh\nprintf 'verify-macos:%s\\n' "$*" >>${shellQuote(log)}\n${
@@ -241,16 +270,19 @@ binary=\${!#}
 case "$binary" in
   */bin/crabbox) identifier=$CRABBOX_RELEASE_CLI_IDENTIFIER ;;
   */bin/crabbox-apple-vm-helper) identifier=$CRABBOX_RELEASE_HELPER_IDENTIFIER ;;
+  */bin/crabbox-jj-source) identifier=$CRABBOX_RELEASE_JJ_IDENTIFIER ;;
   *) exit 98 ;;
 esac
 case "$1" in
   --verify)
     if [[ "$*" == *--check-notarization* ]]; then
       [[ "$*" == "--verify --strict --check-notarization -R=notarized --verbose=2 $binary" ]] || exit 98
+      ${nativeFailure === "notarization" ? '[[ "$identifier" != "$CRABBOX_RELEASE_JJ_IDENTIFIER" ]] || exit 74' : ""}
       ${notarizationFailure ? "exit 74" : "exit 0"}
     fi
     requirement=$(crabbox_release_designated_requirement "$identifier")
     [[ "$*" == "--verify --strict -R=$requirement --verbose=2 $binary" ]] || exit 98
+    ${nativeFailure === "signature" ? '[[ "$identifier" != "$CRABBOX_RELEASE_JJ_IDENTIFIER" ]] || exit 73' : ""}
     ${signatureFailure ? "exit 73" : "exit 0"}
     ;;
   -dvvv)
@@ -305,6 +337,14 @@ case "\${1:-}" in
     /bin/mkdir -p ${shellQuote(path.join(prefix, "bin"))}
     /bin/cp ${shellQuote(cli)} ${shellQuote(installedCli)}
     ${(nativeArch === "arm64" && !helperMissing) || helperOnIntel ? `/bin/cp ${shellQuote(helper)} ${shellQuote(installedHelper)}` : ""}
+    ${nativeSource && nativeFailure !== "missing-helper" ? `/bin/cp ${shellQuote(nativeHelper)} ${shellQuote(path.join(prefix, "bin/crabbox-jj-source"))}` : ""}
+    ${nativeSource && nativeFailure !== "missing-receipt" ? `/bin/cp ${shellQuote(nativeReceipt)} ${shellQuote(path.join(prefix, "bin/crabbox-jj-source.json"))}` : ""}
+    ${nativeSource && nativeFailure !== "missing-notice" ? `/bin/cp ${shellQuote(nativeNotice)} ${shellQuote(path.join(prefix, "bin/crabbox-jj-source.NOTICES.txt"))}` : ""}
+    ${nativeSource && nativeFailure !== "missing-attribution" ? `/bin/cp ${shellQuote(nativeAttribution)} ${shellQuote(path.join(prefix, "bin/attribution.json"))}` : ""}
+    ${nativeFailure === "helper-bytes" ? `printf '# changed\\n' >>${shellQuote(path.join(prefix, "bin/crabbox-jj-source"))}` : ""}
+    ${nativeFailure === "receipt-bytes" ? `printf 'changed\\n' >>${shellQuote(path.join(prefix, "bin/crabbox-jj-source.json"))}` : ""}
+    ${nativeFailure === "notice-bytes" ? `printf 'changed\\n' >>${shellQuote(path.join(prefix, "bin/crabbox-jj-source.NOTICES.txt"))}` : ""}
+    ${nativeFailure === "attribution-bytes" ? `printf 'changed\\n' >>${shellQuote(path.join(prefix, "bin/attribution.json"))}` : ""}
     ${helperByteMismatch ? `printf '# changed\\n' >>${shellQuote(installedHelper)}` : ""}
     ${corruptInstall};;
   --prefix)
@@ -321,6 +361,8 @@ esac
 `,
   );
 
+  // Source-tag policy has its own real-Git tests. This phase fixture owns no Git checkout.
+  const mockSourceContract = `crabbox_release_prepare_source_contract() { CRABBOX_RELEASE_SOURCE_SCHEMA=${nativeSource ? 2 : 1}; CRABBOX_RELEASE_PROVENANCE_ARGS=(--schema-version ${nativeSource ? 2 : 1}${nativeSource ? ` --native-source-manifest ${shellQuote(nativeManifest)}` : ""}); }`;
   const command = `
 source "$1"
 ROOT=$2
@@ -328,6 +370,7 @@ MOCK_LOG=$3
 require_publishable_source() {
   printf 'verify-source:%s\\n' "$*" >>"$MOCK_LOG"
 }
+${mockSourceContract}
 homebrew_phase v1.2.3 "$4" "${"a".repeat(40)}" "${"b".repeat(40)}" "${"c".repeat(
     40,
   )}" ${nativeArch} "$5" "$6" "$7"
@@ -341,6 +384,7 @@ source ${shellQuote(verifier)}
 ROOT=${shellQuote(fakeRoot)}
 SCRIPT_PATH=${shellQuote(launcher)}
 require_publishable_source() { printf 'verify-source:%s\\n' "$*" >>${shellQuote(log)}; }
+${mockSourceContract}
 require_protected_homebrew_tooling() { :; }
 freeze_public_release() { mkdir -m 700 "$7/public-assets"; cp "$2/"* "$7/public-assets/"; }
 if [[ "\${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
@@ -791,6 +835,37 @@ test("six-argument launcher strips arbitrary credentials before all Homebrew and
   assert.match(result.calls, /brew:info --json=v2 --formula/);
   assert.match(result.calls, /brew:test/);
   assert.match(result.stdout, /Verified Homebrew/);
+  assert.doesNotMatch(result.stdout + result.stderr, /synthetic-secret-canary/);
+});
+
+for (const nativeArch of ["arm64", "x86_64"]) test(`mocked schema-2 Homebrew installs and verifies the native pair on ${nativeArch}`, () => {
+  const result = runMockedHomebrewPhase({ nativeSource: true, nativeArch, useNativeVerifier: true });
+  assert.equal(result.status, 0, result.stderr);
+  const metadata = result.calls.indexOf("verify-native-payload\n");
+  const signature = result.calls.indexOf(`verify-macos:org.openclaw.crabbox.jj-source ${nativeArch} `);
+  const brewTest = result.calls.indexOf("brew:test ");
+  assert.ok(metadata >= 0 && signature > metadata && brewTest > signature);
+  assert.match(result.calls, /codesign:--verify --strict --check-notarization[^\n]*\/bin\/crabbox-jj-source\n/);
+});
+
+for (const nativeFailure of ["missing-helper", "missing-receipt", "missing-notice", "missing-attribution", "helper-bytes", "receipt-bytes", "notice-bytes", "attribution-bytes", "metadata", "signature", "notarization"]) {
+  test(`mocked schema-2 Homebrew stops after native ${nativeFailure} failure`, () => {
+    const result = runMockedHomebrewPhase({ nativeSource: true, nativeFailure, useNativeVerifier: true });
+    assert.notEqual(result.status, 0);
+    assert.doesNotMatch(result.calls, /^brew:test /m);
+    if (["missing-helper", "missing-receipt", "missing-notice", "missing-attribution", "helper-bytes", "receipt-bytes", "notice-bytes", "attribution-bytes"].includes(nativeFailure)) {
+      assert.doesNotMatch(result.calls, /^verify-native-payload$/m);
+    }
+    if (!["signature", "notarization"].includes(nativeFailure)) {
+      assert.doesNotMatch(result.calls, /^verify-macos:org\.openclaw\.crabbox\.jj-source /m);
+    }
+  });
+}
+
+test("mocked schema-2 launcher retains credential isolation", () => {
+  const result = runMockedHomebrewPhase({ nativeSource: true, useLauncher: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.calls, /^verify-native-payload$/m);
   assert.doesNotMatch(result.stdout + result.stderr, /synthetic-secret-canary/);
 });
 

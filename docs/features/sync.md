@@ -139,7 +139,8 @@ Git-backed ready pools, Actions hydration/owned workspaces, `sync.gitOverlay`,
 unsupported selections fail before acquisition; an existing Actions-owned
 workspace is rejected after its marker is read, before sync changes it; lookup failures stop rather than assume a raw workspace. Default
 Git seeding and fingerprinting are inapplicable, and directory runs explicitly
-use plain-manifest mode. Native Jujutsu workspaces remain unsupported.
+use plain-manifest mode. Native Jujutsu workspaces require the explicit JJ source
+described below, not directory mode.
 
 With `--no-sync`, a valid directory selection is inactive: no include requirement,
 enumeration, or temporary Git metadata is needed. Existing provider-specific
@@ -148,46 +149,69 @@ enumeration, or temporary Git metadata is needed. Existing provider-specific
 
 ### Jujutsu workspaces
 
-Crabbox currently supports Jujutsu workspaces only when they are colocated with
-Git metadata: the workspace root must contain both `.jj` and `.git`. Native
-Jujutsu revision mapping is not supported yet. Because the sync manifest is
-Git-owned, Crabbox rejects a native `.jj` workspace before leasing or borrowing
-a runner rather than letting Git discover an outer checkout and sync the wrong
-revision. This also applies when the native workspace is nested inside an outer
-Git repository.
+The default `sync.source: git` keeps colocated Git/Jujutsu workspaces on the Git
+path. Native JJ is explicit; it never supplies a heuristic Git diff or falls
+back to an outer Git repository.
 
-If you are starting from an existing Git checkout and want a colocated Jujutsu
-workspace, `jj git init --git-repo=.` is one initialization example. It does not
-convert an existing native Jujutsu repository in place. Use `--no-sync` with a
-supporting provider when you intentionally want to run without transferring
-local files.
+```yaml
+sync:
+  source: jj
+  # Omit revision for current live files, including pending edits.
+  # revision: top
+```
 
-The built-in excludes are intentionally conservative. They cover common churn
-such as `node_modules`, `.git`, `dist`, `coverage`, `playwright-report`,
-`test-results`, `.next`, `.vite`, `.turbo`, `target`, `.venv`, `__pycache__`,
-`.gradle`, and Crabbox runtime state under `.crabbox/env`,
-`.crabbox/scripts`, `.crabbox/logs`, `.crabbox/captures`, and
-`.crabbox/runs`. Built-in rules for the ambiguous artifact names `dist`,
-`dist-runtime`, `coverage`, `playwright-report`, `test-results`, `.build`, and
-`target` still omit untracked output, but do not omit a Git-tracked regular file
-solely because one of those names appears in its path. Crabbox reports a bounded
-path-and-pattern summary when it protects such files. Unmistakable dependency
-and cache rules such as `node_modules`, `.cache`, `.venv`, and `__pycache__`
-remain component-wide, including for tracked files.
+`--sync-source jj` and `--sync-revision top` on `run` or `sync-plan` override
+configuration. `CRABBOX_SYNC_SOURCE` and `CRABBOX_SYNC_REVISION` provide environment
+overrides; an explicitly empty revision restores live mode. An explicit revision,
+including `@`, selects its recorded native tree, not unsnapshotted live edits.
+Bookmarks, native change IDs and commit IDs are resolved by the native library at
+a captured operation. The source workspace is not snapshotted or reconciled.
 
-Except for the protected Crabbox runtime state described below, rules from
-`sync.exclude` and `.crabboxignore` are authoritative, including bare
-component-wide patterns. They can deliberately exclude tracked artifact files
-or trees, and a later `!pattern` can re-include them. This keeps existing
-repository policy intact across upgrades while making Crabbox-owned ambiguous
-defaults safe. Crabbox also does not globally drop tracked source files just
-because a path segment happens to be named `build` or `out`. Put project-specific
-generated directories in `.crabboxignore` or `sync.exclude`.
+Native mode requires the matching `crabbox-jj-source` companion and its build
+receipt beside the actual Crabbox executable. Development builds use
+[the pinned helper tooling](../../tools/jj-source/README.md). Stock `jj` is not a
+substitute for this protocol companion. Checks bind the installed source package,
+host target and binary bytes; the trusted install/release owner still supplies the
+files. The receipt itself is not an authentication signature.
 
-`crabbox watch` observes only the ancestor chains needed by tracked protected
-files or explicit re-includes, so unrelated untracked artifact trees do not
-create watch churn. It also watches Git's resolved index and attaches the parent
-chain when an index-only transition makes an artifact path tracked.
+Both live and recorded sources are prepared locally before lease acquisition.
+Selection uses normal includes, ordered excludes and managed-state protection.
+Recorded membership comes from the selected native tree, even when a historical
+file is missing or has another kind today. Current Crabbox exclusion rules remain
+in force; historical `.crabboxignore` content does not replace them. Native conflict
+rendering, line endings, executable policy and symlink materialization apply to
+recorded export. Transfer reads only accepted staging, so later edits wait for the
+next run. Cleanup failures remain errors.
+
+`sync-plan --json` reports `source: "jj"` and a `jujutsu` identity/content section.
+The native content checksum uses the link target's bytes and canonical symlink
+metadata, so host-specific symlink permission bits do not change the checksum.
+Existing Git/filesystem sync fingerprints retain their previous encoding.
+`recordedCommit` anchors the recorded tree; live mode can contain pending bytes
+that differ from that commit. `changeNormalHex` is an opaque normal-hex identity,
+not the native change spelling to paste into a revset. Git metadata is not supplied
+to the runner; native runs use the existing plain-manifest receiver and deletion
+guardrails, including for empty selections.
+
+Current command integration requires an ordinary SSH provider with managed-manifest
+sync on POSIX/WSL. Native Windows archive replacement and `watch` are not yet wired.
+Git overlay, local Git seeding, fresh PRs, ready pools and Actions-owned workspaces
+have separate metadata owners and are rejected. A receiver inside an existing Git
+or JJ checkout is also rejected without deleting its metadata. Use a raw workspace and
+`--no-hydrate` when Actions hydration would otherwise run. These unsupported paths
+must not be interpreted as fallback permission.
+
+Normal sync size guards apply to the full native candidate. Recorded export also
+has separate 512 MiB logical ceilings for a single object, cumulative file inputs,
+rendered payload and conflict scratch; control output is limited to 64 MiB.
+`--force-sync-large` overrides the ordinary soft guards, not these native bounds.
+Preparation uses `sync.timeout` (five minutes when unset). These are not a total
+process-memory guarantee.
+
+With `--no-sync`, native source selection is inactive: no helper lookup, revision
+resolution, native-specific compatibility check or staging occurs. Existing Git/colocated and
+no-sync behavior stays unchanged. Release archive integration and independent
+native/platform acceptance are still required before publishing this capability.
 
 ## Excludes
 

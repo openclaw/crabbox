@@ -1,0 +1,75 @@
+diff --git a/src/open/mod.rs b/src/open/mod.rs
+--- a/src/open/mod.rs
++++ b/src/open/mod.rs
+@@ -25,6 +25,7 @@
+ #[derive(Clone)]
+ pub struct Options {
+     pub(crate) object_store_slots: gix_odb::store::init::Slots,
++    pub(crate) object_allocation_ceiling: Option<usize>,
+     /// Define what is allowed while opening a repository.
+     pub permissions: Permissions,
+     pub(crate) git_dir_trust: Option<gix_sec::Trust>,
+diff --git a/src/open/options.rs b/src/open/options.rs
+--- a/src/open/options.rs
++++ b/src/open/options.rs
+@@ -7,6 +7,7 @@
+     fn default() -> Self {
+         Options {
+             object_store_slots: Default::default(),
++            object_allocation_ceiling: None,
+             permissions: Default::default(),
+             git_dir_trust: None,
+             filter_config_section: None,
+@@ -41,6 +42,14 @@
+ 
+ /// Builder methods
+ impl Options {
++    /// Tighten the native object allocation limit before opening the object store.
++    /// Existing configuration and reduced-trust limits remain effective when stricter.
++    /// Zero is a literal zero ceiling. This is not a bound on aggregate memory use.
++    pub fn object_allocation_ceiling(mut self, bytes: usize) -> Self {
++        self.object_allocation_ceiling = Some(bytes);
++        self
++    }
++
+     /// Apply the given configuration `values` like `init.defaultBranch=special` or `core.bool-implicit-true` in memory to as early
+     /// as the configuration is initialized to allow affecting the repository instantiation phase, both on disk or when opening.
+     /// The configuration is marked with [source API][gix_config::Source::Api].
+@@ -172,6 +181,7 @@
+         match level {
+             gix_sec::Trust::Full => Options {
+                 object_store_slots: Default::default(),
++                object_allocation_ceiling: None,
+                 permissions: Permissions::default_for_level(level),
+                 git_dir_trust: gix_sec::Trust::Full.into(),
+                 filter_config_section: Some(config::section::is_trusted),
+@@ -186,6 +196,7 @@
+             },
+             gix_sec::Trust::Reduced => Options {
+                 object_store_slots: gix_odb::store::init::Slots::Given(32), // limit resource usage
++                object_allocation_ceiling: None,
+                 permissions: Permissions::default_for_level(level),
+                 git_dir_trust: gix_sec::Trust::Reduced.into(),
+                 filter_config_section: Some(config::section::is_trusted),
+diff --git a/src/open/repository.rs b/src/open/repository.rs
+--- a/src/open/repository.rs
++++ b/src/open/repository.rs
+@@ -167,6 +167,7 @@
+         let Options {
+             ref mut git_dir_trust,
+             object_store_slots,
++            object_allocation_ceiling,
+             filter_config_section,
+             lossy_config,
+             lenient_config,
+@@ -456,6 +457,10 @@
+             }
+         }
+ 
++        if let Some(ceiling) = object_allocation_ceiling {
++            config.alloc_limit_bytes = Some(config.alloc_limit_bytes.map_or(ceiling, |native| native.min(ceiling)));
++        }
++
+         let replacements = match prefix {
+             Some(prefix) => {
+                 let prefix: &RelativePath = prefix.as_bstr().try_into()?;

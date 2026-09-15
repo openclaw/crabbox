@@ -14,6 +14,10 @@ PROTECTED_HOMEBREW_TOOLING=(
   scripts/extract-release-vmd.mjs
   scripts/release-config.sh
   scripts/release-provenance.mjs
+  tools/jj-source/artifacts.mjs
+  tools/jj-source/notice-artifacts.mjs
+  tools/jj-source/manifest.json
+  scripts/verify-native-binary/main.go
   scripts/validate-release-publication.mjs
   scripts/verify-go-release-binary.mjs
   scripts/verify-homebrew-release.sh
@@ -334,8 +338,10 @@ homebrew_phase() {
   }
   local extracted="$work/extracted"
   mkdir -m 700 "$extracted"
-  local expected_members=crabbox
-  [[ "$native_arch" == arm64 ]] && expected_members=$'crabbox\ncrabbox-apple-vm-helper'
+  local native_source_manifest="$work/native-source-manifest.json"
+  crabbox_release_prepare_source_contract "$ROOT" "$source_commit" "$native_source_manifest"
+  local expected_members
+  expected_members=$(crabbox_release_archive_members "$CRABBOX_RELEASE_SOURCE_SCHEMA" darwin "$archive_arch")
   [[ "$(tar -tzf "$native_archive" | LC_ALL=C sort)" == "$expected_members" ]] || {
     echo "native release archive member inventory changed" >&2
     return 1
@@ -351,6 +357,22 @@ homebrew_phase() {
   }
   "$ROOT/scripts/verify-macos-binary.sh" \
     "$CRABBOX_RELEASE_CLI_IDENTIFIER" "$native_arch" "$installed_cli"
+
+  if [[ "$CRABBOX_RELEASE_SOURCE_SCHEMA" == 2 ]]; then
+    local native_member
+    for native_member in crabbox-jj-source crabbox-jj-source.json crabbox-jj-source.NOTICES.txt attribution.json; do
+      [[ -f "$prefix/bin/$native_member" && ! -L "$prefix/bin/$native_member" ]] || {
+        echo "Homebrew install is missing a native JJ companion member" >&2; return 1;
+      }
+      cmp -s "$extracted/$native_member" "$prefix/bin/$native_member" || {
+        echo "Homebrew-installed JJ companion differs from the frozen release archive" >&2; return 1;
+      }
+    done
+    "$node_bin" "$ROOT/scripts/release-provenance.mjs" verify-native-payload \
+      "${CRABBOX_RELEASE_PROVENANCE_ARGS[@]}" --dir "$prefix/bin" --platform darwin --arch "$archive_arch" \
+      --provenance "$asset_dir/provenance.json"
+    "$ROOT/scripts/verify-macos-binary.sh" "$CRABBOX_RELEASE_JJ_IDENTIFIER" "$native_arch" "$prefix/bin/crabbox-jj-source"
+  fi
 
   local installed_helper="$prefix/bin/crabbox-apple-vm-helper"
   if [[ "$native_arch" == arm64 ]]; then
