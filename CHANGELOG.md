@@ -1,24 +1,37 @@
 # Changelog
 
-## Unreleased
+## 0.60.0 - 2026-09-14
+
+### Highlights
+
+- **Bring Git history to runners without origin access.** Opt into local-object seeding to carry complete selected histories and reachable tags alongside your working files, enabling offline historical diffs and `git describe`.
+- **Run from a folder without creating a repository.** Explicit directory sync transfers an allowlisted working set through the existing POSIX/WSL SSH path, with source-tree ignore rules and normal sync safeguards.
+- **More reliable sync and WSL2 startup.** Cancel content hashing and snapshot copying promptly between filesystem operations, handle directory replacements with custom state roots, and give staged WSL2 architecture probes their full execution allowance.
+
+### Upgrade notes
+
+- Local Git seeding is opt-in through `--git-seed-source local`, `sync.gitSeedSource: local`, or `CRABBOX_SYNC_GIT_SEED_SOURCE=local`; `sync.gitSeed` must remain enabled. It supports ordinary SSH-backed Linux, macOS, WSL2, and native Windows targets with Git. Use a raw workspace and `--no-hydrate` when Actions hydration is configured; directory sync, Actions hydration, fresh PR checkouts, ready pools, and Git overlay cannot be combined with it. Replacing an existing origin-seeded checkout requires explicit `--full-resync`. [PR 2264](https://github.com/openclaw/crabbox/pull/2264).
+- Local seeding transfers complete selected Git histories: working-file excludes do not redact historical blobs. Selected objects must already be available locally, and preparation or verification failures do not fall back to origin or file-only sync. Full working files and uncompressed objects count toward sync size guardrails; separate hard limits cap the object total and bundle at 512 MiB each. Preview identities, sizes, and digest with `sync-plan --git-seed-source local --json`. [PR 2264](https://github.com/openclaw/crabbox/pull/2264).
+- Directory sync requires explicit `sync.source: directory` and a nonempty `sync.include`; Git remains required for isolated `.gitignore` matching. The effective current directory is the source root, including inside an outer checkout. It supports POSIX/WSL managed-manifest SSH sync; `watch`, delegated/native-source providers, native Windows archive sync, Actions workspaces, Git-backed ready pools, Git overlay/base refs, and PR/patch modes are unsupported. In-scope nested repositories must be excluded or selected as the source root. [PR 2253](https://github.com/openclaw/crabbox/pull/2253).
 
 ### Changes
 
-- Add explicit offline local-object Git seeding with complete selected histories and reachable tags, while retaining ordinary working-file and deletion sync. [PR 2264](https://github.com/openclaw/crabbox/pull/2264). Thanks @coygeek.
-- Add explicit include-only directory sync through the existing POSIX/WSL SSH manifest path, using isolated Git ignore matching without creating source Git metadata. [PR 2253](https://github.com/openclaw/crabbox/pull/2253). Thanks @coygeek.
-- Report the observed Multipass state when an instance is no longer running instead of retaining a stale ready label. [PR 2258](https://github.com/openclaw/crabbox/pull/2258).
-
-- Leave Freestyle status instance type empty instead of reporting the VM name, matching its type-less inventory metadata. [PR 2257](https://github.com/openclaw/crabbox/pull/2257).
+- Add offline local-object Git seeding with complete selected HEAD/base histories and reachable tags, preserving exact object identities without forwarding source remotes, hooks, or credentials. Freeze the accepted working-file snapshot with the bundle, import metadata without checking out historical files, and retain ordinary file and deletion sync. Expose seed evidence in `sync-plan` and timing JSON. [PR 2264](https://github.com/openclaw/crabbox/pull/2264). Thanks @coygeek.
+- Add explicit include-only directory sync and `sync-plan` previews without creating source Git metadata. Apply source-tree `.gitignore` rules through private temporary metadata, validate the complete manifest before acquisition and again before transfer, and preserve managed-state exclusions, size limits, and guarded deletion of previously synced files. [PR 2253](https://github.com/openclaw/crabbox/pull/2253). Thanks @coygeek.
 
 ### Fixes
 
-- Honor cancellation while hashing sync content and keep regular-file reads bounded to their observed size, without changing stable fingerprints. [PR 2269](https://github.com/openclaw/crabbox/pull/2269).
-- Honor cancellation during Git snapshot copying and preserve cancellation alongside cleanup errors instead of falling back to full sync. [PR 2268](https://github.com/openclaw/crabbox/pull/2268).
-- Revalidate managed-state exclusion scope during snapshot acceptance even when ordinary ignore rules are unchanged. [PR 2267](https://github.com/openclaw/crabbox/pull/2267).
-- Keep directory-to-file replacement sync working with a custom state root, preserving historical deletions and managed-state exclusions. [PR 2266](https://github.com/openclaw/crabbox/pull/2266).
-- Give WSL2 static SSH architecture probes a 15-second execution allowance plus the existing bounded transport setup and cleanup budgets, instead of exhausting a 15-second whole-call deadline during staging. [PR 2265](https://github.com/openclaw/crabbox/pull/2265).
-- Seed detached commits by their exact origin SHA before POSIX/WSL2 file sync, verifying the seed and retaining normal sync when the remote cannot serve the commit.
-- Warn when `--expose` cannot change an existing coordinator-managed lease's Pond ports and point to `crabbox tunnel` for forwarding an existing service. [PR 2256](https://github.com/openclaw/crabbox/pull/2256).
+- Honor cancellation while copying Git snapshots and hashing sync content, bound regular-file reads to their observed size, and preserve cancellation alongside cleanup errors instead of falling back to full sync. Keep stable fingerprint encoding unchanged. [PR 2268](https://github.com/openclaw/crabbox/pull/2268), [PR 2269](https://github.com/openclaw/crabbox/pull/2269).
+- Keep directory-to-file replacement sync working with custom state roots, preserving historical deletions and managed-state exclusions. Revalidate the effective protected subtree during snapshot acceptance even when ordinary ignore rules are unchanged. [PR 2266](https://github.com/openclaw/crabbox/pull/2266), [PR 2267](https://github.com/openclaw/crabbox/pull/2267).
+- Give WSL2 static SSH architecture probes a 15-second execution allowance plus the existing bounded transport setup and cleanup budgets, preventing staging from consuming the whole probe deadline while respecting earlier caller deadlines. [PR 2265](https://github.com/openclaw/crabbox/pull/2265).
+- Seed detached commits by their exact origin SHA before POSIX/WSL2 file sync when no containing origin tracking branch exists. Verify the commit and tree in private staging, retain ordinary file sync when the remote cannot serve the commit, and leave native Windows branch-only seeding unchanged. [PR 2261](https://github.com/openclaw/crabbox/pull/2261).
+- Warn when `--expose` cannot change an existing coordinator-managed lease's Pond ports, and point to `crabbox tunnel` for forwarding an existing service. Preserve normal command execution and direct/registered port refresh. [PR 2256](https://github.com/openclaw/crabbox/pull/2256).
+- Show the observed non-running Multipass state instead of a stale ready label, and leave Freestyle's absent instance type empty instead of reporting the VM name. [PR 2258](https://github.com/openclaw/crabbox/pull/2258), [PR 2257](https://github.com/openclaw/crabbox/pull/2257).
+
+### Maintenance
+
+- Make Cloudflare and OpenComputer cleanup-deadline tests deterministic while retaining cancellation, failed-result, and retained-session checks. [PR 2259](https://github.com/openclaw/crabbox/pull/2259), [PR 2262](https://github.com/openclaw/crabbox/pull/2262).
+- Bound staged Windows launcher test output draining and retain bounded architecture-probe failure diagnostics. [PR 2254](https://github.com/openclaw/crabbox/pull/2254), [PR 2260](https://github.com/openclaw/crabbox/pull/2260).
 
 ## 0.59.0 - 2026-09-13
 
