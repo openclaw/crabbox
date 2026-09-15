@@ -92,6 +92,38 @@ func TestStatusWaitNextUsesClockAndCancellation(t *testing.T) {
 	}
 }
 
+func TestContextStatusWaitNextClassifiesDeadlinesAndCancellation(t *testing.T) {
+	expired := errors.New("wait timeout")
+	for _, tc := range []struct {
+		name                              string
+		parentDeadline, cancelAfterExpiry bool
+		want                              error
+	}{
+		{name: "own timeout", want: expired},
+		{name: "parent deadline", parentDeadline: true, want: context.DeadlineExceeded},
+		{name: "parent cancellation after own timeout", cancelAfterExpiry: true, want: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.parentDeadline {
+				var stop context.CancelFunc
+				parent, stop = context.WithDeadline(parent, time.Now().Add(-time.Second))
+				defer stop()
+			}
+			wait := NewContextStatusWait(parent, core.StatusRequest{Wait: true, WaitTimeout: time.Millisecond}, func(string) error { return expired })
+			defer wait.Close()
+			<-wait.Context().Done()
+			if tc.cancelAfterExpiry {
+				cancel()
+			}
+			if err := wait.Next("sandbox", time.Hour); err != tc.want {
+				t.Fatalf("Next=%v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestStatusWaitPollPreservesObservedResults(t *testing.T) {
 	ownershipErr := errors.New("ownership mismatch")
 	for _, tc := range []struct {

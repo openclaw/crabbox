@@ -21,18 +21,30 @@ type StatusWait struct {
 }
 
 func NewStatusWait(ctx context.Context, req core.StatusRequest, clock core.Clock, timeout func(string) error) *StatusWait {
+	return newStatusWait(ctx, req, func() time.Time { return core.ClockNow(clock) }, timeout)
+}
+
+// NewContextStatusWait uses only context deadlines, with caller cancellation
+// taking precedence over the wait's timeout at request and sleep boundaries.
+func NewContextStatusWait(ctx context.Context, req core.StatusRequest, timeout func(string) error) *StatusWait {
+	return newStatusWait(ctx, req, nil, timeout)
+}
+
+func newStatusWait(ctx context.Context, req core.StatusRequest, now func() time.Time, timeout func(string) error) *StatusWait {
 	duration := req.WaitTimeout
 	if duration <= 0 {
 		duration = 5 * time.Minute
 	}
 	wait := &StatusWait{
-		parent:   ctx,
-		ctx:      ctx,
-		cancel:   func() {},
-		now:      func() time.Time { return core.ClockNow(clock) },
-		deadline: core.ClockNow(clock).Add(duration),
-		wait:     req.Wait,
-		timeout:  timeout,
+		parent:  ctx,
+		ctx:     ctx,
+		cancel:  func() {},
+		now:     now,
+		wait:    req.Wait,
+		timeout: timeout,
+	}
+	if now != nil {
+		wait.deadline = now().Add(duration)
 	}
 	if req.Wait {
 		wait.ctx, wait.cancel = context.WithTimeout(ctx, duration)
@@ -71,9 +83,9 @@ func (w *StatusWait) ContextError(id string) error {
 }
 
 // Next is called only after a waiting adapter has ruled out readiness and
-// terminal states. The adapter clock deadline takes precedence at this point.
+// terminal states. An adapter clock deadline, when present, takes precedence.
 func (w *StatusWait) Next(id string, interval time.Duration) error {
-	if w.now().After(w.deadline) {
+	if w.now != nil && w.now().After(w.deadline) {
 		return w.timeout(id)
 	}
 	if err := core.SleepContext(w.ctx, interval); err != nil {

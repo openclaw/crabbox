@@ -448,26 +448,17 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	waitTimeout := req.WaitTimeout
-	if waitTimeout <= 0 {
-		waitTimeout = 5 * time.Minute
-	}
-	pollCtx := ctx
-	cancel := func() {}
-	if req.Wait {
-		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
-	}
-	defer cancel()
-	for {
+	wait := shared.NewContextStatusWait(ctx, req, func(id string) error {
+		return core.Exit(5, "timed out waiting for crownest sandbox %s to become ready", id)
+	})
+	defer wait.Close()
+	return wait.Poll(sandboxID, statusPollInterval, func(pollCtx context.Context) (core.StatusView, bool, error) {
 		sb, getErr := api.GetSandbox(pollCtx, sandboxID)
 		if getErr != nil {
-			if req.Wait && ctx.Err() == nil && pollCtx.Err() != nil {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for crownest sandbox %s to become ready", sandboxID)
+			if contextErr := wait.ContextError(sandboxID); contextErr != nil {
+				return core.StatusView{}, false, contextErr
 			}
-			if ctx.Err() != nil {
-				return core.StatusView{}, ctx.Err()
-			}
-			return core.StatusView{}, getErr
+			return core.StatusView{}, false, getErr
 		}
 		state := normalizedSandboxState(sb)
 		view := core.StatusView{
@@ -485,21 +476,11 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 				"state":    state,
 			},
 		}
-		if !req.Wait || view.Ready {
-			return view, nil
+		if req.Wait && !view.Ready && isTerminalState(state) {
+			return core.StatusView{}, false, core.Exit(5, "crownest sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if isTerminalState(state) {
-			return core.StatusView{}, core.Exit(5, "crownest sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
-		}
-		select {
-		case <-pollCtx.Done():
-			if ctx.Err() == nil {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for crownest sandbox %s to become ready", sandboxID)
-			}
-			return core.StatusView{}, pollCtx.Err()
-		case <-time.After(statusPollInterval):
-		}
-	}
+		return view, false, nil
+	})
 }
 
 func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {

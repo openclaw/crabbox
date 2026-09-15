@@ -593,6 +593,70 @@ func TestStatusWaitPollsUntilSandboxReady(t *testing.T) {
 	}
 }
 
+func TestStatusWaitContextAndObservationResults(t *testing.T) {
+	apiError := errors.New("provider temporarily unavailable")
+	for _, tc := range []struct {
+		name    string
+		wait    bool
+		observe func(context.Context, context.CancelFunc) (sandbox, error)
+		want    error
+		message string
+		state   string
+	}{
+		{name: "nonwaiting terminal observation", state: "failed", observe: func(context.Context, context.CancelFunc) (sandbox, error) { return sandbox{Status: "failed"}, nil }},
+		{name: "waiting terminal observation", wait: true, message: `entered terminal state "failed"`, observe: func(context.Context, context.CancelFunc) (sandbox, error) { return sandbox{Status: "failed"}, nil }},
+		{name: "provider error unchanged", wait: true, want: apiError, observe: func(context.Context, context.CancelFunc) (sandbox, error) { return sandbox{}, apiError }},
+		{name: "blocked request timeout", wait: true, message: "timed out waiting for crownest sandbox sbx_123 to become ready", observe: func(ctx context.Context, _ context.CancelFunc) (sandbox, error) {
+			<-ctx.Done()
+			return sandbox{}, ctx.Err()
+		}},
+		{name: "parent cancels request", wait: true, want: context.Canceled, observe: func(ctx context.Context, cancel context.CancelFunc) (sandbox, error) {
+			cancel()
+			<-ctx.Done()
+			return sandbox{}, ctx.Err()
+		}},
+		{name: "parent cancels after child expiry before sleep", wait: true, want: context.Canceled, observe: func(ctx context.Context, cancel context.CancelFunc) (sandbox, error) {
+			<-ctx.Done()
+			cancel()
+			return sandbox{Status: "starting"}, nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repoRoot := tempGitRepo(t)
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := testConfig()
+			parent, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			api := &fakeCrownestClient{baseURL: "https://api.crownest.dev", getSandboxFunc: func(ctx context.Context, id string) (sandbox, error) {
+				if id != "sbx_123" {
+					t.Fatalf("resolved sandbox=%q", id)
+				}
+				return tc.observe(ctx, cancel)
+			}}
+			leaseID := leasePrefix + "sbx_123"
+			if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "status-result", providerName, claimScope(api.BaseURL(), cfg), cfg.Pond, repoRoot, cfg.IdleTimeout, false); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
+			b := &backend{spec: Provider{}.Spec(), cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, newClient: func(core.Config, core.Runtime) (client, error) { return api, nil }}
+			view, err := b.Status(parent, core.StatusRequest{ID: "status-result", Wait: tc.wait, WaitTimeout: time.Millisecond})
+			if tc.message != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.message) {
+					t.Fatalf("error=%v, want %q", err, tc.message)
+				}
+				if code := core.ExitCodeForError(err, 0); code != 5 {
+					t.Fatalf("exit code=%d, want 5", code)
+				}
+			} else if err != tc.want {
+				t.Fatalf("error=%v, want %v", err, tc.want)
+			}
+			if view.State != tc.state || api.getSandboxCalls != 1 {
+				t.Fatalf("view=%+v requests=%d", view, api.getSandboxCalls)
+			}
+		})
+	}
+}
+
 func TestStopHonorsOperationLock(t *testing.T) {
 	repoRoot := tempGitRepo(t)
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -965,6 +1029,7 @@ type fakeCrownestClient struct {
 	latestRun        workspaceRun
 	getSandboxStates []string
 	getSandboxCalls  int
+	getSandboxFunc   func(context.Context, string) (sandbox, error)
 	deletedSandboxID string
 	canceledRunID    string
 	deleteErr        error
@@ -980,8 +1045,11 @@ func (f *fakeCrownestClient) CreateSandbox(context.Context, createSandboxRequest
 	return sandbox{ID: core.Blank(f.createSandboxID, "sbx_123"), Status: "running"}, nil
 }
 
-func (f *fakeCrownestClient) GetSandbox(context.Context, string) (sandbox, error) {
+func (f *fakeCrownestClient) GetSandbox(ctx context.Context, id string) (sandbox, error) {
 	f.getSandboxCalls++
+	if f.getSandboxFunc != nil {
+		return f.getSandboxFunc(ctx, id)
+	}
 	if len(f.getSandboxStates) > 0 {
 		idx := f.getSandboxCalls - 1
 		if idx >= len(f.getSandboxStates) {

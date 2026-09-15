@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Crownest status waits consistently preserve caller cancellation while sharing request deadlines and polling with other providers.
+
 ## 0.60.0 - 2026-09-14
 
 ### Highlights
