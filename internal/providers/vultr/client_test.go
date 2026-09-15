@@ -104,6 +104,22 @@ func TestVultrClientCreateInstanceRequestShape(t *testing.T) {
 	}
 }
 
+func TestVultrClientDefaultSleepPreservesContextError(t *testing.T) {
+	t.Setenv("VULTR_API_KEY", "fixture-key")
+	client, err := newVultrClient(core.Runtime{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.sleep(t.Context(), 0); err != nil {
+		t.Fatalf("completed delay: %v", err)
+	}
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(errors.New("fixture cancellation cause"))
+	if err := client.sleep(ctx, time.Hour); err != context.Canceled {
+		t.Fatalf("canceled delay returned %v, want context.Canceled", err)
+	}
+}
+
 func TestVultrClientCursorPaginationAndRateLimit(t *testing.T) {
 	var slept []time.Duration
 	var firstPageCalls int

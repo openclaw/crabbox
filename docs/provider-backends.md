@@ -628,6 +628,10 @@ Acquisition and resolution share mechanics with provider-neutral contracts:
   `core.ProviderKeyForLease` names provider-side keys when applicable.
 - `shared.Poll` repeats observations while the adapter owns readiness predicates,
   identity checks, side effects, timeouts, and diagnostics.
+- `core.SleepContext` owns delays that return `ctx.Err()` on cancellation,
+  including Vultr retries and W&B provisioning backoff. Use
+  `shared.SleepContext` only when the caller's contract preserves a custom
+  `context.Cause` instead; neither helper owns retry eligibility or scheduling.
 - `core.SSHTargetFromConfig` constructs conventional SSH endpoints, and
   `core.WaitForSSHReady` proves the common SSH bootstrap contract.
 - `shared.DirectSSHBackend.ResolvedLeaseTarget` packages an adapter-built endpoint

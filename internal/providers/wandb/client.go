@@ -379,12 +379,8 @@ func (c *wandbClient) pollUntilRunning(ctx context.Context, id string) (wandbSan
 			sandboxv1.SandboxStatus_SANDBOX_STATUS_TERMINATING:
 			return wandbSandbox{}, fmt.Errorf("sandbox %s ended before reaching RUNNING (status=%s)", id, resp.SandboxStatus)
 		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return wandbSandbox{}, ctx.Err()
-		case <-timer.C:
+		if err := core.SleepContext(ctx, interval); err != nil {
+			return wandbSandbox{}, err
 		}
 		if interval < cap {
 			interval = interval * 3 / 2

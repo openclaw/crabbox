@@ -279,6 +279,52 @@ func TestWandbClientUsesPlaintextForHTTPOverride(t *testing.T) {
 	}
 }
 
+type pollGatewayClient struct {
+	sandboxv1.GatewayServiceClient
+	get func(context.Context, *sandboxv1.GetSandboxRequest) (*sandboxv1.GetSandboxResponse, error)
+}
+
+func (f pollGatewayClient) Get(ctx context.Context, req *sandboxv1.GetSandboxRequest, _ ...grpc.CallOption) (*sandboxv1.GetSandboxResponse, error) {
+	return f.get(ctx, req)
+}
+
+func TestPollUntilRunningDelay(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cancel bool
+	}{
+		{name: "pending then running"},
+		{name: "canceled after pending", cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			calls := 0
+			client := &wandbClient{gw: pollGatewayClient{get: func(_ context.Context, req *sandboxv1.GetSandboxRequest) (*sandboxv1.GetSandboxResponse, error) {
+				if req.SandboxId != "fixture-sandbox" {
+					t.Fatalf("sandbox ID=%q", req.SandboxId)
+				}
+				calls++
+				if calls == 1 {
+					if tc.cancel {
+						cancel(errors.New("fixture cancellation cause"))
+					}
+					return &sandboxv1.GetSandboxResponse{SandboxStatus: sandboxv1.SandboxStatus_SANDBOX_STATUS_PENDING}, nil
+				}
+				return &sandboxv1.GetSandboxResponse{SandboxStatus: sandboxv1.SandboxStatus_SANDBOX_STATUS_RUNNING}, nil
+			}}}
+			got, err := client.pollUntilRunning(ctx, "fixture-sandbox")
+			if tc.cancel {
+				if err != context.Canceled || calls != 1 {
+					t.Fatalf("canceled poll: err=%v calls=%d", err, calls)
+				}
+			} else if err != nil || calls != 2 || got.ID != "fixture-sandbox" || got.Status != "running" {
+				t.Fatalf("ready poll: sandbox=%+v err=%v calls=%d", got, err, calls)
+			}
+		})
+	}
+}
+
 func TestStartupTimeout(t *testing.T) {
 	if got := startupTimeout(0); got != defaultStartupTimeout {
 		t.Fatalf("startupTimeout(0) = %s, want %s", got, defaultStartupTimeout)
