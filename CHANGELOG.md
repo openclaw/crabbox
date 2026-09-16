@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Preserve ownership of previously synced files when attaching local Git metadata to a raw workspace, so later syncs can remove obsolete files without importing stale readiness markers.
+- Preserve ownership of previously synced files when attaching local Git metadata to a raw workspace, so later syncs can remove obsolete files without importing stale readiness markers. [PR 2285](https://github.com/openclaw/crabbox/pull/2285).
 
 - Bound retained POSIX preflight version output before extracting its first line, while draining excess output so verbose tools finish normally. [PR 2282](https://github.com/openclaw/crabbox/pull/2282).
 
