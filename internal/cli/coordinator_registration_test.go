@@ -969,7 +969,7 @@ func TestResolvedLeaseClaimAllowsUnclaimedResourceAdoption(t *testing.T) {
 		t.Fatal(err)
 	}
 	claim, ok, err := ResolveLeaseClaimForProvider(leaseID, "aws")
-	if err != nil || !ok || claim.RepoRoot != "/repo" || claim.CloudID != "i-adopt" {
+	if err != nil || !ok || claim.RepoRoot != "/repo" || claim.CloudID != "i-adopt" || claim.IdleTimeoutSeconds != 3600 {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
 }
@@ -1001,7 +1001,7 @@ func TestClaimRunLeaseTargetForRepoAndRegisterRetainsReplacementSnapshot(t *test
 	SetServerLeaseClaimSnapshot(&server, acquired, true)
 
 	if err := (App{}).claimRunLeaseTargetForRepoAndRegister(
-		context.Background(), leaseID, "replacement", cfg, &server, target, "/repo", false, false,
+		context.Background(), leaseID, "replacement", cfg, &server, target, "/repo", false, false, nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1015,6 +1015,54 @@ func TestClaimRunLeaseTargetForRepoAndRegisterRetainsReplacementSnapshot(t *test
 	}
 	if registered.Revision == acquired.Revision || registered.Revision != current.Revision {
 		t.Fatalf("acquired=%q registered=%q current=%q", acquired.Revision, registered.Revision, current.Revision)
+	}
+}
+
+func TestResolvedLeaseRegistrationPreservesRecordedIdlePolicy(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider = "local-container"
+	cfg.IdleTimeout = 5 * time.Minute
+	leaseID := "cbx_recorded_idle"
+	server := Server{
+		CloudID: "recorded-container", Provider: cfg.Provider,
+		Labels: DirectLeaseLabels(cfg, leaseID, "recorded", cfg.Provider, "", true, time.Now()),
+	}
+	target := SSHTarget{Host: "127.0.0.1", Port: "49152"}
+	repo := t.TempDir()
+	if err := ClaimLeaseTargetForRepoConfig(leaseID, "recorded", cfg, server, target, repo, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetServerLeaseClaimSnapshot(&server, before, true)
+	cfg.IdleTimeout = 30 * time.Minute
+	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(t.Context(), leaseID, "recorded", cfg, &server, target, repo, false); err != nil {
+		t.Fatal(err)
+	}
+	after, err := ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.IdleTimeoutSeconds != before.IdleTimeoutSeconds || after.Labels["idle_timeout_secs"] != "300" {
+		t.Fatalf("recorded idle changed during reuse: scalar=%d label=%q", after.IdleTimeoutSeconds, after.Labels["idle_timeout_secs"])
+	}
+	registered, exists, set := ServerLeaseClaimSnapshot(server)
+	if !set || !exists || registered.IdleTimeoutSeconds != after.IdleTimeoutSeconds || registered.Revision != after.Revision {
+		t.Fatalf("registered snapshot differs from saved policy: %#v", registered)
+	}
+	override := 10 * time.Minute
+	if err := (App{}).claimRunLeaseTargetForRepoAndRegister(t.Context(), leaseID, "recorded", cfg, &server, target, repo, false, true, &override); err != nil {
+		t.Fatal(err)
+	}
+	after, err = ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.IdleTimeoutSeconds != 600 || after.Labels["idle_timeout_secs"] != "600" || after.Labels["idle_timeout"] != "600" {
+		t.Fatalf("explicit run override was not applied consistently: scalar=%d labels=%v", after.IdleTimeoutSeconds, after.Labels)
 	}
 }
 
@@ -1047,7 +1095,7 @@ func TestClaimRunLeaseTargetForRepoAndRegisterRetainsSnapshotOnRegistrationError
 	}
 	target := SSHTarget{Host: "127.0.0.1", Port: "49153"}
 	err := (App{Stderr: &bytes.Buffer{}}).claimRunLeaseTargetForRepoAndRegister(
-		context.Background(), leaseID, "registration-error", cfg, &server, target, "/repo", false, false,
+		context.Background(), leaseID, "registration-error", cfg, &server, target, "/repo", false, false, nil,
 	)
 	if err == nil || !strings.Contains(err.Error(), "register macOS portal lease") {
 		t.Fatalf("registration error=%v", err)

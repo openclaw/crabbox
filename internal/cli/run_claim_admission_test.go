@@ -270,7 +270,7 @@ func TestRunClaimAdmissionPublishesOnlyValidatedCurrentOwner(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := (App{}).claimRunLeaseTargetForRepoAndRegister(ctx, result.LeaseID, ServerSlug(result.Server), cfg, &result.Server, result.SSH, repo.Root, false, true); err != nil {
+				if err := (App{}).claimRunLeaseTargetForRepoAndRegister(ctx, result.LeaseID, ServerSlug(result.Server), cfg, &result.Server, result.SSH, repo.Root, false, true, nil); err != nil {
 					t.Fatal(err)
 				}
 				after, readErr = ReadLeaseClaim(lease.LeaseID)

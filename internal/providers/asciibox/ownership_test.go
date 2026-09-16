@@ -347,7 +347,7 @@ func TestReleaseRejectsUnownedAndChangedClaims(t *testing.T) {
 			b, f, claim, lease := ownedFixture(t)
 			switch name {
 			case "missing snapshot":
-				lease.Server = boxToServer(testConfig(), f.box, claim.LeaseID, claim.Slug, true)
+				lease.Server = recordedBoxServer(testConfig(), f.box, claim)
 			case "wrong lease":
 				lease.LeaseID = "cbx_abcdefabcdef"
 			case "wrong cloud ID":
@@ -959,7 +959,7 @@ func TestEndpointRefreshCannotRetargetOwnership(t *testing.T) {
 			t.Fatalf("accepted changed %s", key)
 		}
 	}
-	server := boxToServer(testConfig(), f.box, claim.LeaseID, claim.Slug, true)
+	server := recordedBoxServer(testConfig(), f.box, claim)
 	delete(server.Labels, boxCreationLabel)
 	updated, err := (Provider{}).PrepareLeaseClaimEndpoint(claim, providerName, claim.Slug, server, false)
 	if err != nil || updated.Labels[boxCreationLabel] != claim.Labels[boxCreationLabel] {
@@ -980,7 +980,7 @@ func TestEndpointRefreshCannotRetargetOwnership(t *testing.T) {
 
 	t.Run("accepted deletion", func(t *testing.T) {
 		_, f, pending := pendingDeletionFixture(t)
-		server := boxToServer(testConfig(), f.box, pending.LeaseID, pending.Slug, true)
+		server := recordedBoxServer(testConfig(), f.box, pending)
 		updated, err := (Provider{}).PrepareLeaseClaimEndpoint(pending, providerName, pending.Slug, server, false)
 		for _, key := range []string{boxDeletionOperationLabel, boxDeletionOperationBindingLabel} {
 			if err != nil || updated.Labels[key] != pending.Labels[key] {
@@ -996,7 +996,7 @@ func TestEndpointRefreshCannotRetargetOwnership(t *testing.T) {
 
 	t.Run("completed deletion", func(t *testing.T) {
 		_, f, completed := completedDeletionFixture(t)
-		server := boxToServer(testConfig(), f.box, completed.LeaseID, completed.Slug, true)
+		server := recordedBoxServer(testConfig(), f.box, completed)
 		updated, err := (Provider{}).PrepareLeaseClaimEndpoint(completed, providerName, completed.Slug, server, false)
 		if err != nil || updated.Labels[boxDeletionLabel] != completed.Labels[boxDeletionLabel] {
 			t.Fatalf("refresh lost completed deletion witness: %v", err)

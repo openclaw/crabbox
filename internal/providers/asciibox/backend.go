@@ -51,6 +51,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if ttl <= 0 {
 		ttl = cfg.TTL
 	}
+	cfg.TTL = ttl
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s ttl=%s\n", providerName, leaseID, slug, core.Blank(ttl.String(), "-"))
 	box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl})
 	if !concreteBoxID(box.createdID) || box.ID != box.createdID {
@@ -86,7 +87,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		if err := client.PrepareSSH(ctx, box.ID); err != nil {
 			return err
 		}
-		lease, err = b.leaseFromBox(ctx, cfg, current, leaseID, slug, req.Keep, true)
+		lease, err = b.leaseFromBox(ctx, cfg, current, claim)
 		return err
 	})
 	if err != nil {
@@ -156,7 +157,8 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
-		return core.LeaseTarget{Server: boxToServer(cfg, box, leaseID, slug, true), LeaseID: leaseID}, nil
+		claim, _ := core.ReadLeaseClaim(leaseID)
+		return core.LeaseTarget{Server: observedBoxServer(cfg, box, leaseID, slug, observationClaim(cfg, box, claim)), LeaseID: leaseID}, nil
 	}
 	claim, err := resolveOwnedBox(cfg, req.ID)
 	if err != nil {
@@ -188,14 +190,14 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		if err := validateBoxIdentity(box, boxFromClaim(claim)); err != nil {
 			return err
 		}
-		lease = core.LeaseTarget{Server: boxToServer(cfg, box, claim.LeaseID, claim.Slug, true), LeaseID: claim.LeaseID}
+		lease = core.LeaseTarget{Server: recordedBoxServer(cfg, box, claim), LeaseID: claim.LeaseID}
 		if req.ReleaseOnly {
 			return nil
 		}
 		if err := client.PrepareSSH(ctx, box.ID); err != nil {
 			return err
 		}
-		lease, err = b.leaseFromBox(ctx, cfg, box, claim.LeaseID, claim.Slug, true, true)
+		lease, err = b.leaseFromBox(ctx, cfg, box, claim)
 		return err
 	})
 	if err != nil {
@@ -229,7 +231,7 @@ func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseV
 		if !ok {
 			continue
 		}
-		out = append(out, boxToServer(cfg, box, leaseID, slug, true))
+		out = append(out, observedBoxServer(cfg, box, leaseID, slug, observationClaim(cfg, box, claims[box.ID])))
 	}
 	return out, nil
 }
@@ -270,7 +272,8 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		if err != nil {
 			return core.StatusView{}, false, err
 		}
-		view := statusFromBox(cfg, box, leaseID, slug)
+		claim, _ := core.ReadLeaseClaim(leaseID)
+		view := statusFromBox(cfg, box, leaseID, slug, observationClaim(cfg, box, claim))
 		return view, boxStateFailed(view.State), nil
 	}, func() error {
 		return core.Exit(5, "timed out waiting for ascii-box %s to become ready", boxID)
@@ -304,7 +307,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	return releaseClaimedBox(ctx, client, claim, func(box boxData) {
 		if req.GuardedRemoteCleanup != nil {
 			lease := req.Lease
-			lease.Server = boxToServer(cfg, box, claim.LeaseID, claim.Slug, true)
+			lease.Server = recordedBoxServer(cfg, box, claim)
 			if target, err := boxSSHTarget(cfg, box); err == nil {
 				lease.SSH = target
 				req.GuardedRemoteCleanup(ctx, lease)
@@ -317,34 +320,53 @@ func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("released lease=%s box=%s", lease.LeaseID, core.Blank(lease.Server.CloudID, lease.Server.Labels["box_id"]))
 }
 
-func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
+func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	cfg, err := b.configForRun()
 	if err != nil {
 		return core.Server{}, err
 	}
-	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider: providerName,
+		Authorize: func(_ context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+			if _, err := boxClaimBinding(cfg, claim); err != nil {
+				return err
+			}
+			if lease.LeaseID != claim.LeaseID || lease.Server.CloudID != claim.CloudID || lease.Server.Labels["box_id"] != claim.CloudID {
+				return core.Exit(4, "ascii-box touch target differs from its original claim")
+			}
+			if claim.Labels[boxDeletionLabel] != "" || claim.Labels[boxDeletionOperationLabel] != "" {
+				return core.Exit(4, "ascii-box lease %s has deletion recovery pending; refusing touch", claim.LeaseID)
+			}
+			return validateBoxIdentity(boxData{ID: lease.Server.CloudID, CreatedAt: lease.Server.Labels[boxCreationLabel]}, boxFromClaim(claim))
+		},
+		Prepare: func(expected core.LeaseClaim) (map[string]string, time.Time) {
+			at := b.now().UTC()
+			labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(recordedBoxLabels(expected), cfg, req.State, at, req.IdleTimeoutOverride)
+			return labels, at
+		},
+	})
+	if err != nil {
+		return core.Server{}, err
 	}
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, time.Now().UTC())
-	server.Status = req.State
+	server := req.Lease.Server
+	server.Labels = updated.Labels
+	server.Status = core.Blank(req.State, server.Status)
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 
-func (b *backend) leaseFromBox(ctx context.Context, cfg core.Config, box boxData, leaseID, slug string, keep, waitSSH bool) (core.LeaseTarget, error) {
-	server := boxToServer(cfg, box, leaseID, slug, keep)
+func (b *backend) leaseFromBox(ctx context.Context, cfg core.Config, box boxData, claim core.LeaseClaim) (core.LeaseTarget, error) {
+	server := recordedBoxServer(cfg, box, claim)
 	target, err := boxSSHTarget(cfg, box)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if waitSSH {
-		if err := waitForSSHReadyFunc(ctx, &target, b.rt.Stderr, "ascii-box ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
-			return core.LeaseTarget{}, err
-		}
-		server.Labels["state"] = "ready"
-		server.Status = "ready"
+	if err := waitForSSHReadyFunc(ctx, &target, b.rt.Stderr, "ascii-box ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
+		return core.LeaseTarget{}, err
 	}
-	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	server.Labels["state"] = "ready"
+	server.Status = "ready"
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: claim.LeaseID}, nil
 }
 
 // resolveBoxID is discovery only. It must never create or update ownership.
@@ -447,18 +469,57 @@ func (b *backend) now() time.Time {
 	return now(b.rt)
 }
 
-func boxToServer(cfg core.Config, box boxData, leaseID, slug string, keep bool) core.Server {
-	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, time.Now().UTC())
+func observationClaim(cfg core.Config, box boxData, claim core.LeaseClaim) *core.LeaseClaim {
+	if _, err := boxClaimBinding(cfg, claim); err != nil || validateBoxIdentity(box, boxFromClaim(claim)) != nil {
+		return nil
+	}
+	return &claim
+}
+
+func observedBoxServer(cfg core.Config, box boxData, leaseID, slug string, claim *core.LeaseClaim) core.Server {
+	created, _ := time.Parse(time.RFC3339Nano, boxCreationTime(box))
+	updatedText, _ := box.UpdatedAt.(string)
+	updated, _ := time.Parse(time.RFC3339Nano, updatedText)
+	labels := (shared.SandboxObservation{
+		Provider: providerName, Target: targetLinux, LeaseID: leaseID, Slug: slug,
+		State: boxState(box), CreatedAt: created, UpdatedAt: updated,
+	}).Labels(claim)
+	if expiresAt := boxExpiresAt(box); expiresAt != "" {
+		labels["expires_at"] = expiresAt
+	}
+	return boxServerWithLabels(cfg, box, leaseID, slug, labels)
+}
+
+func recordedBoxServer(cfg core.Config, box boxData, claim core.LeaseClaim) core.Server {
+	return boxServerWithLabels(cfg, box, claim.LeaseID, claim.Slug, recordedBoxLabels(claim))
+}
+
+func recordedBoxLabels(claim core.LeaseClaim) map[string]string {
+	labels := shared.CloneLabels(claim.Labels)
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	if claim.IdleTimeoutSeconds > 0 {
+		labels["idle_timeout"] = fmt.Sprint(claim.IdleTimeoutSeconds)
+		labels["idle_timeout_secs"] = labels["idle_timeout"]
+	}
+	return labels
+}
+
+func seedBoxLeaseServer(cfg core.Config, box boxData, leaseID, slug string, keep bool, at time.Time) core.Server {
+	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, at)
+	return boxServerWithLabels(cfg, box, leaseID, slug, labels)
+}
+
+func boxServerWithLabels(cfg core.Config, box boxData, leaseID, slug string, labels map[string]string) core.Server {
 	labels["box_id"] = box.ID
 	labels["ascii_box_scope"] = (Provider{}).ClaimScope(cfg)
 	labels[boxCreationLabel] = boxCreationTime(box)
 	labels["box_name"] = box.Name
 	labels["box_state"] = boxState(box)
+	labels["state"] = boxState(box)
 	labels["ssh_user"] = boxSSHUser(box)
 	labels["work_root"] = cfg.WorkRoot
-	if expiresAt := boxExpiresAt(box); expiresAt != "" {
-		labels["expires_at"] = expiresAt
-	}
 	server := core.Server{
 		Provider: providerName,
 		CloudID:  box.ID,
@@ -471,8 +532,8 @@ func boxToServer(cfg core.Config, box boxData, leaseID, slug string, keep bool) 
 	return server
 }
 
-func statusFromBox(cfg core.Config, box boxData, leaseID, slug string) core.StatusView {
-	server := boxToServer(cfg, box, leaseID, slug, true)
+func statusFromBox(cfg core.Config, box boxData, leaseID, slug string, claim *core.LeaseClaim) core.StatusView {
+	server := observedBoxServer(cfg, box, leaseID, slug, claim)
 	host := boxHost(box)
 	sshHost := host
 	port := "22"

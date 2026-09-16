@@ -20,7 +20,7 @@ func (a App) claimLeaseTargetForRepoAndRegister(
 	repoRoot string,
 	reclaim bool,
 ) error {
-	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, false)
+	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, false, nil)
 }
 
 func (a App) claimResolvedLeaseTargetForRepoAndRegister(
@@ -32,7 +32,7 @@ func (a App) claimResolvedLeaseTargetForRepoAndRegister(
 	repoRoot string,
 	reclaim bool,
 ) error {
-	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, true)
+	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, true, nil)
 }
 
 func (a App) claimRunLeaseTargetForRepoAndRegister(
@@ -43,8 +43,9 @@ func (a App) claimRunLeaseTargetForRepoAndRegister(
 	target SSHTarget,
 	repoRoot string,
 	reclaim, resolved bool,
+	idleTimeoutOverride *time.Duration,
 ) error {
-	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, resolved)
+	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, resolved, idleTimeoutOverride)
 }
 
 func refreshRunLeaseClaimEndpoint(leaseID string, server *Server, target SSHTarget) {
@@ -69,6 +70,7 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 	target SSHTarget,
 	repoRoot string,
 	reclaim, resolved bool,
+	idleTimeoutOverride *time.Duration,
 ) error {
 	var expected leaseClaim
 	var expectedExists bool
@@ -82,6 +84,21 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 	}
 	if err != nil {
 		return err
+	}
+	// Reuse defaults do not replace recorded policy. The run command passes
+	// explicit replacement intent separately from its effective configuration.
+	if idleTimeoutOverride != nil {
+		cfg.IdleTimeout = *idleTimeoutOverride
+		if cfg.IdleTimeout > 0 {
+			server.Labels = cloneStringMap(server.Labels)
+			if server.Labels == nil {
+				server.Labels = make(map[string]string)
+			}
+			server.Labels["idle_timeout"] = durationSecondsLabel(cfg.IdleTimeout)
+			server.Labels["idle_timeout_secs"] = server.Labels["idle_timeout"]
+		}
+	} else if resolved && expectedExists && expected.IdleTimeoutSeconds > 0 {
+		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
 	}
 	claimed, err := ClaimLeaseTargetForRepoConfigIfUnchanged(
 		leaseID,
