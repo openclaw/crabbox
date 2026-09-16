@@ -601,6 +601,29 @@ inspect every accepted name, aliases, default membership, and target support
 from the installed binary. Discovery works offline without configuration or a
 provider and does not run probes.
 
+On macOS, the default `macos_platform` snapshot reports `macos_version`,
+`macos_build`, observed `architecture`, `developer_directory`, and
+`developer_tools=xcode|clt|unavailable`. It uses the workload's directory and
+child environment, including `DEVELOPER_DIR`, without changing global developer
+selection. Standalone `swift`, `xcodebuild`, and `brew` versions are macOS-only
+opt-ins; they invoke the literal commands, not aliases or alternate tools.
+
+These macOS probes run sequentially with a five-second execution allowance per
+native command and a fifteen-second cumulative execution budget for the subset. Transport,
+setup, and confirmed cleanup have separate bounded allowances; this is not a
+fifteen-second full-run deadline. Completed execution is charged conservatively
+at the native timer's centisecond precision. Missing, nonzero, empty, and timed-out
+version probes print `missing`; successful versions contain at most 512 characters
+from the first stdout line. A probe not attempted because the subset budget is
+exhausted includes `reason=budget-exhausted`. Diagnostics allow the workload to
+continue only after confirmed cleanup; transport or ownership failures still
+fail the run. Homebrew auto-update and analytics are disabled only for its probe.
+No probe installs tools, accepts licenses, or changes workload policy.
+The platform snapshot retains fields completed before a later command times out.
+Each command has its own supervised cleanup, including the normal five-second
+termination grace, so a full platform snapshot can take substantially longer
+than its command-execution time.
+
 Use `--preflight-tools` to replace the default tool list for one run:
 
 ```sh
@@ -609,6 +632,7 @@ crabbox run --preflight --preflight-tools default,uv -- node --test
 crabbox run --preflight --preflight-tools default,cmake -- cmake --build build
 crabbox run --preflight --preflight-tools python,python3 -- python3 -m pytest
 crabbox run --preflight --preflight-tools default,python3-venv -- python3 -m pytest
+crabbox run --target macos --preflight --preflight-tools default,swift,xcodebuild,brew -- swift test
 crabbox run --preflight --preflight-tools raw_socket -- ./packet-tests
 crabbox run --preflight --preflight-tools none -- ./smoke.sh
 ```

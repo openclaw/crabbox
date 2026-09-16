@@ -100,10 +100,9 @@ func functionalPreflightCleanupBudget(ctx context.Context) (context.Context, con
 }
 
 func functionalWSLPreflightHelper(budget time.Duration) string {
-	workload := strings.NewReplacer(
-		"@WORKLOAD_INIT@", fmt.Sprintf("deadline=$((SECONDS + %d))\n", max(1, int64((budget+time.Second-1)/time.Second))),
-		"@WORKLOAD_TICK@", "    if [ \"$SECONDS\" -ge \"$deadline\" ]; then : >\"$directory/.timed-out\"; break; fi\n",
-	).Replace(strings.TrimSuffix(guardedWorkload, "\n"))
+	workload := guardedWorkloadScript(
+		fmt.Sprintf("deadline=$((SECONDS + %d))\n", max(1, int64((budget+time.Second-1)/time.Second))),
+		"    if [ \"$SECONDS\" -ge \"$deadline\" ]; then : >\"$directory/.timed-out\"; break; fi\n", ".1")
 	completed := "    [ -f \"$directory/.completion\" ] && [ ! -e \"$directory/scratch\" ] && [ ! -L \"$directory/scratch\" ] && exit 0\n"
 	return strings.NewReplacer(
 		"@GUARDED_GROUP_FUNCTIONS@", strings.TrimSuffix(guardedGroupFunctions, "\n"),
@@ -117,30 +116,49 @@ func functionalWSLPreflightHelper(budget time.Duration) string {
 }
 
 func functionalPOSIXPreflightHelper(budget time.Duration) string {
-	workload := strings.NewReplacer(
-		"@WORKLOAD_INIT@", fmt.Sprintf("deadline=$((SECONDS + %d))\n", max(1, int64((budget+time.Second-1)/time.Second))),
-		"@WORKLOAD_TICK@", "    if [ \"$interrupted\" = 1 ]; then : >\"$directory/.cancel\"; break; fi\n"+
-			"    if [ \"$SECONDS\" -ge \"$deadline\" ]; then : >\"$directory/.timed-out\"; break; fi\n",
-	).Replace(strings.TrimSuffix(guardedWorkload, "\n"))
+	workload := guardedWorkloadScript(
+		fmt.Sprintf("deadline=$((SECONDS + %d))\n", max(1, int64((budget+time.Second-1)/time.Second))),
+		"    if [ \"$interrupted\" = 1 ]; then : >\"$directory/.cancel\"; break; fi\n"+
+			"    if [ \"$SECONDS\" -ge \"$deadline\" ]; then : >\"$directory/.timed-out\"; break; fi\n", ".1")
+	return posixPreflightHelper(workload, "    while :; do IFS= read -r -t 1 -u 8 ignored || :; done\n")
+}
+
+func posixPreflightHelper(workload, watch string) string {
 	return strings.NewReplacer(
 		"@GUARDED_GROUP_FUNCTIONS@", strings.TrimSuffix(guardedGroupFunctions, "\n"),
 		"@GUARDED_MEMBERS@", strings.TrimSuffix(guardedMembers, "\n"),
 		"@GUARDED_WORKLOAD@", workload,
 		"@FUNCTIONAL_PRELUDE@", strings.TrimSuffix(functionalPreflightCompletionScript, "\n"),
+		"@FUNCTIONAL_WATCH@", watch,
 	).Replace(functionalPreflightPOSIXTemplate)
 }
 
-func runPOSIXFunctionalPreflight(ctx context.Context, target SSHTarget, workdir string, env map[string]string, envFiles []string) (completion functionalPreflightCompletion, err error) {
+type posixPreflightResult struct {
+	completion functionalPreflightCompletion
+	nonce      string
+}
+
+func runPOSIXFunctionalPreflight(ctx context.Context, target SSHTarget, workdir string, env map[string]string, envFiles []string) (functionalPreflightCompletion, error) {
+	result, err := runPOSIXPreflight(ctx, target, functionalPOSIXPreflightHelper(pythonVenvPreflightExecutionTime), func(nonce string) string {
+		return remoteShellCommandWithEnvFiles(workdir, env, envFiles,
+			pythonVenvPreflightWorker("/tmp/crabbox-command-"+nonce+"/scratch"))
+	}, io.Discard, io.Discard)
+	return result.completion, err
+}
+
+// The stage, not its worker output, establishes quiescence and retirement.
+// Execution uses the native owner's clock; transport and cleanup retain their
+// independent allowances even for short diagnostic workers.
+func runPOSIXPreflight(ctx context.Context, target SSHTarget, helper string, worker func(string) string, stdout, stderr io.Writer) (result posixPreflightResult, err error) {
 	nonce, err := randomHex(16)
 	if err != nil {
-		return completion, err
+		return result, err
 	}
-	command := remoteShellCommandWithEnvFiles(workdir, env, envFiles,
-		pythonVenvPreflightWorker("/tmp/crabbox-command-"+nonce+"/scratch"))
+	result.nonce = nonce
+	command := worker(nonce)
 	if len(command) > wslStageMaxCommand {
-		return completion, errors.New("functional preflight command exceeds stage limit")
+		return result, errors.New("functional preflight command exceeds stage limit")
 	}
-	helper := functionalPOSIXPreflightHelper(pythonVenvPreflightExecutionTime)
 	remote := "export CBX_HELPER=" + shellQuote(helper) + "; exec bash -c \"$CBX_HELPER\" sh run " +
 		shellQuote("/tmp/crabbox-command-"+nonce) + " " + shellQuote(nonce) +
 		fmt.Sprintf(" %d 0 %d %d", len(command), wslStageIdleTimeout.Milliseconds(), wsl2SignalGrace.Milliseconds())
@@ -150,12 +168,12 @@ func runPOSIXFunctionalPreflight(ctx context.Context, target SSHTarget, workdir 
 	prepareCtx, cancelPrepare := context.WithTimeout(ctx, sshTransportPreparationTimeout)
 	defer cancelPrepare()
 	if err := resolveSSHPortNoInput(prepareCtx, &target, "2", "1", io.Discard); err != nil {
-		return completion, err
+		return result, err
 	}
 	size := int64(len(command))
 	prepared, err := prepareWorkspaceOwnerRemote(prepareCtx, target, remote, &size)
 	if err != nil {
-		return completion, err
+		return result, err
 	}
 	defer func() {
 		if err != nil {
@@ -164,17 +182,18 @@ func runPOSIXFunctionalPreflight(ctx context.Context, target SSHTarget, workdir 
 	}()
 	cleanupCtx, cancelCleanup := functionalPreflightCleanupBudget(ctx)
 	defer cancelCleanup()
-	// The helper owns the 90s worker deadline. Its transport wrapper must remain
+	// The helper owns the worker deadline. Its transport wrapper must remain
 	// available for supervised cleanup; collection uses this same remaining clock.
 	deadline, _ := cleanupCtx.Deadline()
 	execCtx, cancelExec := context.WithDeadline(ctx, deadline)
 	defer cancelExec()
 	transport := sshTransportPreparation{command: prepared.command, direct: strings.NewReader(command), setupMarker: prepared.setupMarker}
-	_, runErr := transport.runOnce(execCtx, target, "2", "1", io.Discard, io.Discard, false)
+	_, runErr := transport.runOnce(execCtx, target, "2", "1", stdout, stderr, false)
 	if runErr == nil {
 		runErr = context.Cause(execCtx)
 	}
-	return finishFunctionalPreflight(ctx, cleanupCtx, target, nonce, runErr)
+	result.completion, err = finishFunctionalPreflight(ctx, cleanupCtx, target, nonce, runErr)
+	return result, err
 }
 
 func runWSLFunctionalPreflight(ctx context.Context, target SSHTarget, workdir string, env map[string]string, envFiles []string) (completion functionalPreflightCompletion, err error) {

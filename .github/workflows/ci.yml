@@ -305,7 +305,7 @@ jobs:
         run: go test ./internal/cli/ -run '^(TestWindowsWSLNativeToolProbeUsesDirectCommandOutput|TestWindowsWSLNativeToolPathsRejectsWindowsShims|TestDirectSSHExecutableSelection|TestSSHCommandContextUsesNativeWindowsOpenSSHEvenWhenPATHSelectsMSYS2|TestResolveWindowsNativeRsyncPairUsesExactSibling|TestResolveWindowsNativeRsyncPairFailsClosedWithoutSibling|TestBindWindowsNativeRsyncSSHPreservesOwnedArguments|TestWindowsNativeRsyncCommandUsesSiblingPairAndEnvironment|TestResolvedSSHCopyCommandUsesNativeWindowsSiblingPair|TestResolvedSSHCopyCommandFailsClosedWithoutNativeWindowsSibling)$' -count=1 -v
 
       - name: Test native Windows Python and CMake preflight probes
-        run: go test ./internal/cli/ -run '^(TestPythonPreflightToolValidationAndTargetFiltering|TestPythonPreflightWindowsProbeUsesLiteralExecutableAndMissingContract|TestCMakePreflightNativeWindowsPresentAndMissing)$' -count=1 -v
+        run: go test ./internal/cli/ -run '^(TestPythonPreflightToolValidationAndTargetFiltering|TestPythonPreflightWindowsProbeUsesLiteralExecutableAndMissingContract|TestCMakePreflightNativeWindowsPresentAndMissing|TestMacOSPreflightSelection|TestPreflightCatalogMatchesRegistry)$' -count=1 -v
 
       - name: Test Git workspace coherence
         run: go test ./internal/cli/ -run '^(TestWindowsGitRootIdentityAcceptsShortAliasAndRejectsDistinctRoot|TestWindowsGitCoherenceRollbackRestoresIndexAfterSymbolicHeadFailure|TestWindowsGitSeedReplacesUnusableExactRootsAfterVerifiedClone|TestWindowsGitCoherenceSupportsDetachedSparseSplitAndLinkedIndexes|TestGitSeedFailurePhaseAndPreservation|TestGitSeedDiagnosticLabelsAndPrivacy|TestWorkspaceOwnerWindowsProtocolBehavior)$' -count=1 -v
@@ -396,6 +396,9 @@ jobs:
           }
           if (records.some(record => record.Action === 'skip')) throw new Error('required native root contract was skipped');
           NODE
+
+      - name: Test native macOS preflight and supervised cleanup
+        run: go test -race ./internal/cli -run '^(TestMacOSPreflight.*|TestMacOSPlatform.*|TestFunctionalPOSIXPreflightOwner)$' -count=1 -timeout=5m -v
 
       - name: Test native helper and provider
         run: go test -race ./internal/applevmhelper ./internal/providers/applevm

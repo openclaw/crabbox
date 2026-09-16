@@ -67,7 +67,7 @@ run)
     ;;
 @GUARDED_MEMBERS@
 watch)
-    while :; do IFS= read -r -t 1 -u 8 ignored || :; done
+@FUNCTIONAL_WATCH@
     ;;
 supervise) ;;
 *) exit 74;;

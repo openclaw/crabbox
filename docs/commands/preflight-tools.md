@@ -4,6 +4,10 @@ List the preflight names accepted by this installed Crabbox binary, their
 default membership, and supported targets. Discovery is offline: it does not
 load configuration, select a provider, run a probe, or acquire a lease.
 
+`macos_platform` is a macOS-only default snapshot. `swift`, `xcodebuild`, and
+`brew` are macOS-only opt-in version probes. See [run](run.md) for their execution
+budgets, effective developer selection, and diagnostic/cleanup behavior.
+
 ```sh
 crabbox preflight-tools
 crabbox preflight-tools --json

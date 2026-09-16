@@ -368,14 +368,21 @@ func TestFunctionalPOSIXPreflightOwner(t *testing.T) {
 		name, state     string
 		code            int
 		cancel, timeout bool
+		macOS           bool
 	}{
 		{name: "ready", state: "ready"},
 		{name: "capability unavailable", state: "venv-unavailable", code: 21},
 		{name: "worker failed", state: "worker-failed", code: 23},
 		{name: "caller cancellation", state: "canceled", cancel: true},
 		{name: "worker deadline", state: "timed-out", code: 74, timeout: true},
+		{name: "macOS ready", state: "ready", macOS: true},
+		{name: "macOS worker failed", state: "worker-failed", code: 23, macOS: true},
+		{name: "macOS fractional deadline", state: "timed-out", code: 74, timeout: true, macOS: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.macOS && runtime.GOOS != "darwin" {
+				t.Skip("macOS relative timer requires the base system zsh")
+			}
 			waitFile := func(path string, limit time.Duration) {
 				t.Helper()
 				deadline := time.Now().Add(limit)
@@ -421,9 +428,20 @@ func TestFunctionalPOSIXPreflightOwner(t *testing.T) {
 				command += "sleep .2\nexit " + strconv.Itoa(tc.code) + "\n"
 			}
 			helper := functionalPOSIXPreflightHelper(budget)
-			ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+			if tc.macOS {
+				budget = macOSPreflightCommandTime
+				if tc.timeout {
+					budget = 1250 * time.Millisecond
+				}
+				helper = macOSPreflightHelper(budget)
+			}
+			// Exercise production cleanup; a 100ms fixture grace is too short
+			// for ordinary BSD process-group retirement under scheduler load.
+			grace := wsl2SignalGrace
+			allowance := 60 * time.Second
+			ctx, cancel := context.WithTimeout(t.Context(), allowance)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, "/bin/bash", "-c", helper, "sh", "run", directory, nonce, strconv.Itoa(len(command)), "0", "15000", "100")
+			cmd := exec.CommandContext(ctx, "/bin/bash", "-c", helper, "sh", "run", directory, nonce, strconv.Itoa(len(command)), "0", "15000", strconv.FormatInt(grace.Milliseconds(), 10))
 			cmd.Env = []string{"PATH=" + tools, "HOME=" + root, "CBX_HELPER=" + helper}
 			cmd.Stdin = strings.NewReader(command)
 			var out synchronizedBuffer = newSynchronizedBuffer(16 << 10)
@@ -465,7 +483,7 @@ func TestFunctionalPOSIXPreflightOwner(t *testing.T) {
 			}
 			select {
 			case <-done:
-			case <-time.After(25 * time.Second):
+			case <-time.After(allowance):
 				t.Fatal("supervisor did not return")
 			}
 			if !tc.cancel && exitCode(processErr) != tc.code {

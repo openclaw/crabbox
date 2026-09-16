@@ -35,7 +35,7 @@ while valid_guard; do
         break
     fi
     kill -0 "$leader" 2>/dev/null || break
-    sleep .1
+    sleep @WORKLOAD_POLL@
 done
 kill "$watcher" 2>/dev/null || :
 wait "$watcher" 2>/dev/null || :

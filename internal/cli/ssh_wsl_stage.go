@@ -48,10 +48,18 @@ var guardedWorkload string
 //go:embed scripts/guarded-members.sh
 var guardedMembers string
 
+func guardedWorkloadScript(init, tick, poll string) string {
+	return strings.NewReplacer(
+		"@WORKLOAD_INIT@", init,
+		"@WORKLOAD_TICK@", tick,
+		"@WORKLOAD_POLL@", poll,
+	).Replace(strings.TrimSuffix(guardedWorkload, "\n"))
+}
+
 var wslLinuxHelper = strings.NewReplacer(
 	"@GUARDED_GROUP_FUNCTIONS@", strings.TrimSuffix(guardedGroupFunctions, "\n"),
 	"@GUARDED_MEMBERS@", strings.TrimSuffix(guardedMembers, "\n"),
-	"@GUARDED_WORKLOAD@", strings.NewReplacer("@WORKLOAD_INIT@", "", "@WORKLOAD_TICK@", "").Replace(strings.TrimSuffix(guardedWorkload, "\n")),
+	"@GUARDED_WORKLOAD@", guardedWorkloadScript("", "", ".1"),
 	"@FUNCTIONAL_PRELUDE@", "", "@FUNCTIONAL_CLEANUP@", "", "@FUNCTIONAL_CLEANUP_POLL@", "", "@FUNCTIONAL_SCRATCH@", "",
 ).Replace(wslLinuxTemplate)
 
