@@ -1050,6 +1050,9 @@ func parseBenchmarkSince(value string, now time.Time) (time.Time, string, error)
 		if err != nil || days < 0 {
 			return time.Time{}, "", Exit(2, "--since day duration must look like 7d")
 		}
+		if days > int((1<<63-1)/(24*time.Hour)) {
+			return time.Time{}, "", Exit(2, "--since day duration is too large")
+		}
 		return now.Add(-time.Duration(days) * 24 * time.Hour), value, nil
 	}
 	duration, err := time.ParseDuration(value)

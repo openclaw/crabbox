@@ -2273,6 +2273,9 @@ func parseCheckpointPruneDurationFlag(flagName, value string) (time.Duration, er
 		if err != nil || days <= 0 {
 			return 0, Exit(2, "%s day duration must be a positive integer", flagName)
 		}
+		if days > int((1<<63-1)/(24*time.Hour)) {
+			return 0, Exit(2, "%s day duration is too large", flagName)
+		}
 		return time.Duration(days) * 24 * time.Hour, nil
 	}
 	duration, err := time.ParseDuration(trimmed)
