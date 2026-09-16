@@ -108,6 +108,11 @@ are never destroyed by stop: finish or terminate the known remote workload on
 that host before reusing its workspace. Do not delete owner records to bypass
 the busy check.
 
+When a fresh disposable lease loses SSH after sync, Crabbox may replace it once.
+Replacement quiesces the old owner, confirms lease release, and finishes any
+remaining owner cleanup before acquiring fresh ownership and syncing again. Caller
+cancellation still applies throughout replacement acquisition.
+
 ## Remote workspace root
 
 Use `CRABBOX_WORK_ROOT` to change the portable base root for one run without

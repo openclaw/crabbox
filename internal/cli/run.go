@@ -1630,7 +1630,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 	}
 	var runnerConnectDuration time.Duration
-	if shouldAcquireWorkspaceOwner(target, acquired, acquiredRunMayRetainLease(*keep, *keepOnFailure, *stopAfter), sshBackend) {
+	acquireLifecycleOwner := func() error {
+		if !shouldAcquireWorkspaceOwner(target, acquired, acquiredRunMayRetainLease(*keep, *keepOnFailure, *stopAfter), sshBackend) {
+			return nil
+		}
 		target = bootstrapNetworkTarget(cfg, server, target)
 		connectStartedAt := time.Now()
 		waitErr := waitForSSHReady(ctx, &target, a.Stderr, "workspace owner", 2*time.Minute)
@@ -1649,6 +1652,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 			}
 		}
+		ownerParentCtx = ctx
 		if a.workspaceOwnerAcquirer != nil {
 			lifecycleOwner, err = a.workspaceOwnerAcquirer(ctx, target, leaseID, a.Stderr)
 		} else {
@@ -1658,6 +1662,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return recordFailure(err)
 		}
 		ctx = contextWithWorkspaceOwner(lifecycleOwner.Context(), lifecycleOwner)
+		return nil
+	}
+	if err := acquireLifecycleOwner(); err != nil {
+		return err
 	}
 
 	if cfg.Sync.BaseRef == "" {
@@ -1877,13 +1885,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			releaseApp.Stderr = io.Discard
 		}
 		oldLeaseCleanupStartedAt := time.Now()
-		oldLeaseCleanupErr := releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, oldLease)
+		oldLeaseCleanupErr := releaseReplacementLease(ownerParentCtx, &lifecycleOwner, &releaseResolvedLease, sshBackend, func(releaseCtx context.Context) (ReleaseLeaseOutcome, error) {
+			return releaseApp.releaseBackendLeaseWithOutcomeBestEffort(releaseCtx, sshBackend, cfg, oldLease)
+		})
 		oldLeaseCleanupDuration := time.Since(oldLeaseCleanupStartedAt)
 		if oldLeaseCleanupErr != nil {
 			recorder.Event("lease.replace.failed", "leasing", oldLeaseCleanupErr.Error())
 			return true, Exit(7, "replace stale lease %s: release failed: %v", oldLeaseID, oldLeaseCleanupErr)
 		}
 		acquired = false
+		ctx = ownerParentCtx
+		if cause := context.Cause(ctx); cause != nil {
+			return true, cause
+		}
 
 		replacementLeaseStartedAt := time.Now()
 		newLease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim})
@@ -1903,6 +1917,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		server, target, leaseID = newLease.Server, newLease.SSH, newLease.LeaseID
 		resetRunnerTimingsForReplacement(&timings, oldAttemptReport, oldLeaseCleanupDuration, replacementLeaseDuration, newLease.runnerTiming)
 		acquired = true
+		releaseResolvedLease = true
 		coord = newLease.Coordinator
 		useCoordinator = coord != nil
 		if err := recorder.UseCoordinator(coord); err != nil {
@@ -1944,6 +1959,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		runReq.Env = envSelection.Effective
 		if err := a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), &cfg, &server, target, repo.Root, *reclaim, false, nil); err != nil {
 			return true, err
+		}
+		ownerConnectBefore := runnerConnectDuration
+		ownerErr := acquireLifecycleOwner()
+		timings.connect += runnerConnectDuration - ownerConnectBefore
+		if ownerErr != nil {
+			return true, ownerErr
 		}
 		workdir = remoteJoin(cfg, leaseID, repo.Name)
 		if !freshPR.Empty() {
@@ -4146,6 +4167,40 @@ func isBootstrapWaitError(err error) bool {
 
 func IsBootstrapWaitError(err error) bool {
 	return isBootstrapWaitError(err)
+}
+
+// releaseReplacementLease finishes the previous lease before a replacement can
+// inherit its mutable run state. Unconfirmed releases retain diagnostic state.
+func releaseReplacementLease(parent context.Context, owner **workspaceOwner, resolved *bool, backend SSHLeaseBackend, release func(context.Context) (ReleaseLeaseOutcome, error)) error {
+	if *owner != nil {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), (*owner).quiesceTimeout())
+		err := (*owner).QuiesceForLeaseRelease(ctx)
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
+	outcome, err := release(context.WithoutCancel(parent))
+	policy, hasPolicy := backend.(ReleaseLeaseWorkspacePolicy)
+	preserves := hasPolicy && policy.PreservesSSHWorkspaceAfterRelease()
+	if !outcome.Terminal && (err != nil || !preserves) {
+		if err == nil {
+			err = errors.New("previous lease release did not confirm a terminal or preserved workspace")
+		}
+		return err
+	}
+	*resolved = false
+	if !preserves {
+		*owner = nil
+	} else if err == nil && *owner != nil {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), (*owner).quiesceTimeout())
+		err = (*owner).Close(ctx)
+		cancel()
+		if err == nil {
+			*owner = nil
+		}
+	}
+	return err
 }
 
 func shouldReplaceLeaseAfterBeforeCommandSSHFailure(err error, acquired, useCoordinator, explicitLeaseID, keep, keepOnFailure, noSync, syncOnly bool, stopAfter, requestedSlug string) bool {

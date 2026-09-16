@@ -631,3 +631,142 @@ func TestRunCommandFreshWindowsLeaseAcquiresInputOwner(t *testing.T) {
 		t.Fatalf("fresh Windows input bypassed owner or cleanup: err=%v owners=%d releases=%d\n%s", err, ownerCalls, releases, output.String())
 	}
 }
+
+func TestReleaseReplacementLeaseTransfersOwnerLifecycle(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		preserves bool
+		terminal  bool
+	}{
+		{name: "destroyed", terminal: true},
+		{name: "preserved", preserves: true},
+		{name: "terminal preserved", preserves: true, terminal: true},
+	} {
+		preserves := test.preserves
+		t.Run(test.name, func(t *testing.T) {
+			setupRunCleanupWorkspaceOwnerTest(t)
+			runEnvProfileTestPreservesSSHWorkspace = preserves
+			parent, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var owner *workspaceOwner
+			resolved := true
+			var events []string
+			for _, id := range []string{"lease-a", "lease-b"} {
+				if workspaceOwnerFromContext(parent) != nil || parent.Err() != nil {
+					t.Fatal("replacement acquisition inherited the previous owner or cancellation")
+				}
+				remote := newRunCleanupWorkspaceOwnerTransport(0, nil)
+				remote.unblockRenewal()
+				var err error
+				owner, err = remote.acquire(parent, SSHTarget{}, id, io.Discard)
+				if err != nil {
+					t.Fatal(err)
+				}
+				events = append(events, "acquire:"+id)
+				resolved = true
+				previous := owner
+				err = releaseReplacementLease(parent, &owner, &resolved, runEnvProfileTestBackend{}, func(ctx context.Context) (ReleaseLeaseOutcome, error) {
+					select {
+					case <-previous.done:
+					default:
+						t.Fatal("backend release preceded owner quiescence")
+					}
+					remote.mu.Lock()
+					inspections := remote.inspectCount
+					remote.mu.Unlock()
+					if inspections != 1 {
+						t.Fatalf("owner inspections=%d, want 1 before release", inspections)
+					}
+					events = append(events, "release:"+id)
+					remote.backendReturned.Store(true)
+					return ReleaseLeaseOutcome{Terminal: test.terminal}, nil
+				})
+				if err != nil || owner != nil || resolved {
+					t.Fatalf("release: err=%v owner=%p resolved=%t", err, owner, resolved)
+				}
+				select {
+				case <-remote.ownerReleased:
+					if !preserves || remote.ownerReleaseBeforeBackend.Load() {
+						t.Fatal("owner release occurred against destroyed or unreleased workspace")
+					}
+				default:
+					if preserves {
+						t.Fatal("preserved workspace owner was not closed")
+					}
+				}
+				previous.cancel()
+			}
+			if got := strings.Join(events, ","); got != "acquire:lease-a,release:lease-a,acquire:lease-b,release:lease-b" {
+				t.Fatalf("lifecycle order: %s", got)
+			}
+			cancel()
+			if parent.Err() != context.Canceled {
+				t.Fatal("replacement lost parent cancellation")
+			}
+		})
+	}
+}
+
+func TestReleaseReplacementLeaseReleaseFailure(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		name := "unconfirmed"
+		if terminal {
+			name = "terminal"
+		}
+		t.Run(name, func(t *testing.T) {
+			setupRunCleanupWorkspaceOwnerTest(t)
+			runEnvProfileTestPreservesSSHWorkspace = terminal
+			remote := newRunCleanupWorkspaceOwnerTransport(0, nil)
+			remote.unblockRenewal()
+			owner, err := remote.acquire(t.Context(), SSHTarget{}, "lease-a", io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer owner.cancel()
+			previous := owner
+			resolved := true
+			releaseErr := errors.New("release bookkeeping failed")
+			err = releaseReplacementLease(t.Context(), &owner, &resolved, runEnvProfileTestBackend{}, func(context.Context) (ReleaseLeaseOutcome, error) {
+				return ReleaseLeaseOutcome{Terminal: terminal}, releaseErr
+			})
+			if !errors.Is(err, releaseErr) {
+				t.Fatalf("release error lost: %v", err)
+			}
+			if terminal {
+				if owner != previous || resolved {
+					t.Fatal("terminal preserved lease lost diagnostic owner or retained automatic cleanup state")
+				}
+			} else if owner != previous || !resolved {
+				t.Fatal("unconfirmed release lost diagnostics or cleanup state")
+			}
+			select {
+			case <-remote.ownerReleased:
+				t.Fatal("failed release attempted guest owner writes")
+			default:
+			}
+		})
+	}
+}
+
+func TestReleaseReplacementLeaseRequiresConfirmedOutcome(t *testing.T) {
+	setupRunCleanupWorkspaceOwnerTest(t)
+	runEnvProfileTestPreservesSSHWorkspace = false
+	remote := newRunCleanupWorkspaceOwnerTransport(0, nil)
+	remote.unblockRenewal()
+	owner, err := remote.acquire(t.Context(), SSHTarget{}, "lease-a", io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.cancel()
+	previous := owner
+	resolved := true
+	err = releaseReplacementLease(t.Context(), &owner, &resolved, runEnvProfileTestBackend{}, func(context.Context) (ReleaseLeaseOutcome, error) { return ReleaseLeaseOutcome{}, nil })
+	if err == nil || owner != previous || !resolved {
+		t.Fatalf("unconfirmed outcome: err=%v owner=%p resolved=%t", err, owner, resolved)
+	}
+	select {
+	case <-remote.ownerReleased:
+		t.Fatal("unconfirmed outcome attempted guest cleanup")
+	default:
+	}
+}
