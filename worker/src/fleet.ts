@@ -7782,7 +7782,23 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
-      return structuredClone(await this.applyLeaseHeartbeatState(lease, input));
+      const updated = await this.applyLeaseHeartbeatState(lease, input);
+      const providerID = managedLeaseProvider(updated);
+      if (
+        providerID &&
+        requestCIDRs.length > 0 &&
+        leaseOwnsAWSSSHAccess(updated) &&
+        this.provider(
+          providerID,
+          updated.region,
+          updated.providerProject,
+        ).leaseAccessRefreshUnchanged?.(updated, requestCIDRs)
+      ) {
+        await this.markAWSIngressReconcilePending(updated);
+        await this.armAlarmNoLaterThan(Date.now() + awsIngressReconcileMinDelayMs);
+        return json({ lease: this.leaseForRequest(updated, request, admin) });
+      }
+      return structuredClone(updated);
     });
     if (committed instanceof Response) {
       return committed;
@@ -26539,6 +26555,7 @@ interface CloudProvider {
     lease: LeaseRecord,
     context: ProviderAccessContext,
   ): Promise<LeaseRecord | void>;
+  leaseAccessRefreshUnchanged?(lease: LeaseRecord, incomingCIDRs: string[]): boolean;
   refreshLeaseAccessForResolution?(lease: LeaseRecord): Promise<LeaseRecord | void>;
   reconcileLeaseAccess?(lease: LeaseRecord, context: ProviderAccessContext): Promise<void>;
   createServerWithFallback(
@@ -28804,6 +28821,13 @@ export class AWSProvider implements CloudProvider {
         publishAccessBeforeProvisioning: true,
       },
     };
+  }
+
+  leaseAccessRefreshUnchanged(lease: LeaseRecord, incomingCIDRs: string[]): boolean {
+    if (lease.network?.sshSourceCIDRsComplete !== true) return false;
+    const current = lease.network.sshSourceCIDRs ?? [];
+    const refreshed = refreshedAWSSSHSourceCIDRs(lease, validCIDRs(incomingCIDRs));
+    return JSON.stringify(current.toSorted()) === JSON.stringify(refreshed.toSorted());
   }
 
   async refreshLeaseAccess(

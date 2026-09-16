@@ -4,6 +4,8 @@
 
 - Scope Git-overlay cache preservation to each verified directory, so root-only ignore rules do not retain stale nested dependency caches. [PR 2291](https://github.com/openclaw/crabbox/pull/2291).
 
+- Keep concurrent AWS heartbeats responsive when SSH sources are unchanged, while retaining durable ingress repair, alarm arming, and normal access setup for changed sources. [PR 2290](https://github.com/openclaw/crabbox/pull/2290).
+
 - Preserve recorded direct-lease idle timeouts across provider preparation, reuse, and repository reclaim; honor explicit run and heartbeat replacements while keeping claim labels and coordinator registration consistent without overriding managed-coordinator policy. [PR 2288](https://github.com/openclaw/crabbox/pull/2288).
 
 - Preserve ownership of previously synced files when attaching local Git metadata to a raw workspace, so later syncs can remove obsolete files without importing stale readiness markers. Keep local Git pruning on the safe manifest path, rejecting directory symlinks before deleting files outside the workspace. [PR 2285](https://github.com/openclaw/crabbox/pull/2285).

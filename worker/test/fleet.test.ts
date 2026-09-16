@@ -29840,6 +29840,103 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
   });
 
+  it.each([true, false])(
+    "handles concurrent same-source heartbeats during pending AWS ingress (complete=%s)",
+    async (complete) => {
+      const storage = new MemoryStorage();
+      const reconcileStarted = deferred<void>();
+      const finishReconcile = deferred<void>();
+      const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+      const reconcile = vi.spyOn(provider, "reconcileLeaseAccess").mockImplementation(async () => {
+        if (reconcile.mock.calls.length === 1) {
+          reconcileStarted.resolve();
+          await finishReconcile.promise;
+        }
+      });
+      const fleet = testFleet(storage, { aws: provider });
+      const now = Date.now();
+      const source = "198.51.100.20";
+      const leases = Array.from({ length: 4 }, (_, index) => {
+        const pins =
+          index === 0 ? [source + "/32", "203.0.113.1/32", "203.0.113.2/32", "203.0.113.3/32"] : [];
+        const lease = testLease({
+          id: `cbx_${(index + 1).toString().padStart(12, "0")}`,
+          provider: "aws",
+          owner: "alice@example.com",
+          org: "example-org",
+          region: "eu-west-1",
+          providerScope: "aws:account:123456789012",
+          createdAt: new Date(now - 3600_000).toISOString(),
+          lastTouchedAt: new Date(now - 1800_000).toISOString(),
+          expiresAt: new Date(now + 9000_000).toISOString(),
+          ttlSeconds: 28800,
+          idleTimeoutSeconds: 10800,
+          network: {
+            awsSecurityGroupID: "sg-shared",
+            sshSourceCIDRs: pins.length > 0 ? pins : [source + "/32"],
+            sshPinnedSourceCIDRs: pins,
+            sshSourceCIDRsComplete: complete,
+          },
+        });
+        storage.seed(`lease:${lease.id}`, structuredClone(lease));
+        return lease;
+      });
+      storage.seed("aws-ingress-reconcile:pending", {
+        targets: [
+          {
+            anchor: leases[0],
+            attempts: 0,
+            generation: "older-reconciliation",
+            updatedAt: new Date(now).toISOString(),
+            retryAt: new Date(now).toISOString(),
+          },
+        ],
+      });
+
+      const alarm = fleet.alarm();
+      await reconcileStarted.promise;
+      const heartbeats = leases.map((lease) =>
+        fleet.fetch(
+          request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+            headers: {
+              "cf-connecting-ip": source,
+              "x-crabbox-owner": lease.owner,
+              "x-crabbox-org": "example-org",
+            },
+            body: { idleTimeoutSeconds: 10800 },
+          }),
+        ),
+      );
+      try {
+        const responses = await Promise.race([
+          Promise.all(heartbeats),
+          new Promise<undefined>((resolve) => setImmediate(() => resolve(undefined))),
+        ]);
+        expect(responses !== undefined).toBe(complete);
+        expect(reconcile).toHaveBeenCalledTimes(1);
+      } finally {
+        finishReconcile.resolve();
+        await Promise.allSettled([...heartbeats, alarm]);
+      }
+
+      const responses = await Promise.all(heartbeats);
+      expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200]);
+      const renewed = await Promise.all(
+        responses.map(async (response) => (await response.json()) as { lease: LeaseRecord }),
+      );
+      for (const [index, { lease }] of renewed.entries()) {
+        expect(Date.parse(lease.expiresAt)).toBeGreaterThan(Date.parse(leases[index].expiresAt));
+        expect(lease.network).toEqual({ ...leases[index].network, sshSourceCIDRsComplete: true });
+        expect(lease.idleTimeoutSeconds).toBe(10800);
+        expect(lease.ttlSeconds).toBe(28800);
+      }
+      expect(storage.value("aws-ingress-reconcile:pending")).toBeDefined();
+      await fleet.alarm();
+      expect(reconcile.mock.calls.length).toBeGreaterThan(1);
+      expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
+    },
+  );
+
   it("preserves active AWS lease SSH ingress CIDRs while creating another lease", async () => {
     const storage = new MemoryStorage();
     let awsCIDRs: string[] = [];
@@ -49622,6 +49719,57 @@ describe("synthetic acknowledgement reliability", () => {
         expect(storage.alarm()).toBe(previous);
         expect(storage.value(legacyAlarmKey)).toBe(previous);
         expect(storage.queuedAlarm).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["intent", "alarm"])(
+    "does not acknowledge unchanged-source renewal when ingress %s persistence fails",
+    async (failure) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const storage = new RetainedAlarmStorage();
+        const lease = {
+          ...seedLease(storage),
+          provider: "aws" as const,
+          region: "eu-west-1",
+          network: {
+            awsSecurityGroupID: "sg-heartbeat",
+            sshSourceCIDRs: ["198.51.100.44/32"],
+            sshSourceCIDRsComplete: true,
+          },
+        };
+        storage.seed(`lease:${lease.id}`, lease);
+        const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+        const reconcile = vi.spyOn(provider, "reconcileLeaseAccess").mockResolvedValue();
+        const fleet = testFleet(storage, { aws: provider });
+        await fleet.ready();
+        const previousAlarm = Date.parse(lease.expiresAt);
+        await alarmRuntime(storage).scheduleAlarm(previousAlarm);
+        if (failure === "intent") {
+          storage.beforePut = async (key) => {
+            if (key === "aws-ingress-reconcile:pending") {
+              throw new Error("synthetic ingress intent failure");
+            }
+          };
+        } else {
+          vi.spyOn(storage, "beforeAlarmWrite").mockRejectedValueOnce(
+            new Error("synthetic ingress alarm failure"),
+          );
+        }
+
+        const response = await fleet.fetch(
+          request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+            headers: { ...headers, "cf-connecting-ip": "198.51.100.44" },
+          }),
+        );
+        expect(response.status).toBe(500);
+        expect(storage.alarm()).toBe(previousAlarm);
+        expect(storage.queuedAlarm).toBe(previousAlarm);
+        expect(Boolean(storage.value("aws-ingress-reconcile:pending"))).toBe(failure === "alarm");
+        expect(reconcile).not.toHaveBeenCalled();
       } finally {
         vi.useRealTimers();
       }
