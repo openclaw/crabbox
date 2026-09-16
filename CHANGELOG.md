@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Reject overflowing day durations before checkpoint pruning or benchmark filtering, preventing very large retention ages from wrapping into short deletion windows or incorrect report cutoffs.
+- Reject overflowing day durations before checkpoint pruning or benchmark filtering, preventing very large retention ages from wrapping into short deletion windows or incorrect report cutoffs. [PR 2280](https://github.com/openclaw/crabbox/pull/2280).
 - Crownest status waits consistently preserve caller cancellation while sharing request deadlines and polling with other providers. [PR 2276](https://github.com/openclaw/crabbox/pull/2276).
 - Make first runs easier with a task-first README, tested Docker and Node examples, warm-reuse guidance, and responsive desktop/mobile banners. [PR 2275](https://github.com/openclaw/crabbox/pull/2275). Thanks @zozo123.
 
