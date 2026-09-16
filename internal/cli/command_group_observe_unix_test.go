@@ -208,7 +208,13 @@ func TestJoinedLocalCommandObserverHelper(t *testing.T) {
 	cmd := exec.CommandContext(ctx, os.Args[0], joinedObserverHelperArgs("fast", dir)...)
 	cmd.WaitDelay = controllerChildWaitDelay
 	owner, err := configureJoinedLocalCommand(ctx, cmd, time.Second, func(err error) {
-		_ = os.WriteFile(filepath.Join(dir, "pending"), []byte(err.Error()), 0o600)
+		pending := filepath.Join(dir, "pending")
+		if err := os.WriteFile(pending+".tmp", []byte(err.Error()), 0o600); err != nil {
+			os.Exit(97)
+		}
+		if err := os.Rename(pending+".tmp", pending); err != nil {
+			os.Exit(98)
+		}
 		cancel()
 	})
 	if err != nil {

@@ -56,6 +56,20 @@ func (e CoordinatorHTTPError) Error() string {
 	return fmt.Sprintf("coordinator %s %s: http %d", e.Method, e.Path, e.StatusCode)
 }
 
+func coordinatorResponseErrorCode(err error, status int) string {
+	var httpErr CoordinatorHTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != status {
+		return ""
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(httpErr.Message), &body) != nil {
+		return ""
+	}
+	return body.Error
+}
+
 type CoordinatorLease struct {
 	ID                           string                         `json:"id"`
 	Slug                         string                         `json:"slug,omitempty"`
@@ -179,6 +193,7 @@ type CoordinatorLeaseImage struct {
 	Region     string `json:"region,omitempty"`
 	SourceID   string `json:"sourceID,omitempty"`
 	PromotedAt string `json:"promotedAt,omitempty"`
+	Revision   string `json:"revision,omitempty"`
 }
 
 type CoordinatorProvisioningTiming struct {
@@ -1001,10 +1016,10 @@ func newCoordinatorClient(cfg Config) (*CoordinatorClient, bool, error) {
 	}
 	base, err := url.Parse(cfg.Coordinator)
 	if err != nil {
-		return nil, true, exit(2, "invalid CRABBOX_COORDINATOR: %v", err)
+		return nil, true, Exit(2, "invalid CRABBOX_COORDINATOR: %v", err)
 	}
 	if base.Scheme == "" || base.Host == "" {
-		return nil, true, exit(2, "CRABBOX_COORDINATOR must be an absolute URL")
+		return nil, true, Exit(2, "CRABBOX_COORDINATOR must be an absolute URL")
 	}
 	base.Path = strings.TrimRight(base.Path, "/")
 	return &CoordinatorClient{
@@ -1051,9 +1066,9 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 	if err != nil {
 		return CoordinatorLease{}, err
 	}
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	if slug == "" {
-		slug = newLeaseSlug(leaseID)
+		slug = NewLeaseSlug(leaseID)
 	}
 	capacity := map[string]any{}
 	if cfg.Capacity.Market != "" && cfg.Capacity.Market != "spot" {
@@ -1733,7 +1748,7 @@ func (c *CoordinatorClient) ProviderReadiness(ctx context.Context, cfg Config) (
 	values.Set("market", cfg.Capacity.Market)
 	values.Set("fallback", cfg.Capacity.Fallback)
 	values.Set("region", cfg.AWSRegion)
-	path := "/v1/providers/" + url.PathEscape(provider.Name()) + "/readiness"
+	path := "/v1/providers/" + url.PathEscape(provider.Spec().Name) + "/readiness"
 	if encoded := values.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
@@ -2320,7 +2335,7 @@ func (c *CoordinatorClient) CreateRun(ctx context.Context, runID, leaseID string
 				return CoordinatorRun{}, ctx.Err()
 			}
 			if res.Run.ID != runID || res.Run.State != "running" || res.Run.Phase != "starting" || !slices.Equal(res.Run.Command, command) {
-				return CoordinatorRun{}, exit(7, "coordinator returned a mismatched or already-started run admission for %s", runID)
+				return CoordinatorRun{}, Exit(7, "coordinator returned a mismatched or already-started run admission for %s", runID)
 			}
 			return res.Run, nil
 		}
@@ -2534,7 +2549,7 @@ func (c *CoordinatorClient) doHTTPWithHeaders(ctx context.Context, method, path 
 func (c *CoordinatorClient) secureHTTPClient() *http.Client {
 	trusted, _ := url.Parse(c.BaseURL)
 	return redirectCheckedHTTPClient(c.Client, func(req *http.Request) error {
-		if !sameHTTPOrigin(trusted, req.URL) {
+		if !SameHTTPOrigin(trusted, req.URL) {
 			return fmt.Errorf("coordinator refused cross-origin redirect to %s", req.URL.Redacted())
 		}
 		return nil
@@ -2854,7 +2869,7 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 	if market := strings.TrimSpace(lease.Market); market != "" {
 		server.Labels["market"] = market
 	}
-	if pond := normalizePondName(lease.Pond); pond != "" {
+	if pond := NormalizePondName(lease.Pond); pond != "" {
 		server.Labels[pondLabelKey] = pond
 	}
 	if exposedPorts := renderExposedPortsLabel(lease.ExposedPorts); exposedPorts != "" {
@@ -2882,8 +2897,6 @@ func leaseToServerTarget(lease CoordinatorLease, cfg Config) (Server, SSHTarget,
 		target.ReadyCheck = "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"
 		target.AuthSecret = true
 		target.NetworkKind = NetworkPublic
-	} else {
-		useStoredTestboxKey(&target, lease.ID)
 	}
 	return server, target, lease.ID
 }

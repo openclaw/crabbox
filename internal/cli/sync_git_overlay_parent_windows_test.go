@@ -15,7 +15,7 @@ func TestOpenGitOverlaySnapshotParentRejectsFilesAndReparsePoints(t *testing.T) 
 	if err := os.WriteFile(file, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if handle, err := openGitOverlaySnapshotParent(file); err == nil {
+	if handle, err := openSourceSnapshotParent(file); err == nil {
 		_ = handle.Close()
 		t.Fatal("regular file accepted as snapshot parent")
 	}
@@ -28,7 +28,7 @@ func TestOpenGitOverlaySnapshotParentRejectsFilesAndReparsePoints(t *testing.T) 
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("directory symlinks unavailable: %v", err)
 	}
-	if handle, err := openGitOverlaySnapshotParent(link); err == nil {
+	if handle, err := openSourceSnapshotParent(link); err == nil {
 		_ = handle.Close()
 		t.Fatal("reparse point accepted as snapshot parent")
 	}
@@ -39,14 +39,14 @@ func TestOpenGitOverlaySnapshotParentSupportsMetadataRestoration(t *testing.T) {
 	if err := os.Mkdir(parent, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	handle, err := openGitOverlaySnapshotParent(parent)
+	handle, err := openSourceSnapshotParent(parent)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer handle.Close()
 
-	wantTime := normalizedGitOverlayFileTime(time.Unix(1_700_000_000, 123_456_700))
-	if err := syncGitOverlayFileTimes(handle, wantTime); err != nil {
+	wantTime := normalizedSourceSnapshotFileTime(time.Unix(1_700_000_000, 123_456_700))
+	if err := syncSourceSnapshotFileTimes(handle, wantTime); err != nil {
 		t.Fatal(err)
 	}
 	if err := handle.Chmod(0o555); err != nil {
@@ -72,8 +72,8 @@ func TestOpenGitOverlaySnapshotParentSupportsMetadataRestoration(t *testing.T) {
 		if err := os.Symlink(target, link); err != nil {
 			t.Skipf("file symlinks unavailable: %v", err)
 		}
-		wantLinkTime := normalizedGitOverlayFileTime(time.Unix(1_650_000_000, 987_654_300))
-		if err := syncGitOverlaySymlinkTimes(link, wantLinkTime); err != nil {
+		wantLinkTime := normalizedSourceSnapshotFileTime(time.Unix(1_650_000_000, 987_654_300))
+		if err := syncSourceSnapshotSymlinkTimes(link, wantLinkTime); err != nil {
 			t.Fatal(err)
 		}
 		linkInfo, err := os.Lstat(link)

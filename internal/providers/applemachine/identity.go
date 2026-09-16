@@ -151,7 +151,7 @@ func machineClaimBinding(claim core.LeaseClaim) (shared.ClaimBinding, error) {
 		RequiredLabels: map[string]string{"apple_machine_storage": root},
 	}
 	if !core.IsCanonicalLeaseID(claim.LeaseID) || claim.Slug == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root || !validMachineIdentity(claim.CloudImmutableID) {
-		return want, exit(2, "apple-machine lease %q has no exact storage/ownership binding; retain the machine and inspect it with container machine inspect before manual cleanup or creating a new lease", claim.LeaseID)
+		return want, core.Exit(2, "apple-machine lease %q has no exact storage/ownership binding; retain the machine and inspect it with container machine inspect before manual cleanup or creating a new lease", claim.LeaseID)
 	}
 	return want, shared.ValidateClaimBinding(claim, want)
 }

@@ -46,7 +46,7 @@ All flags:
 		return err
 	}
 	if strings.TrimSpace(*id) == "" || fs.NArg() != 2 {
-		return exit(2, "usage: %s", copyUsage)
+		return Exit(2, "usage: %s", copyUsage)
 	}
 	if err := validateCopyArgs(fs.Arg(0), fs.Arg(1)); err != nil {
 		return err
@@ -70,7 +70,7 @@ All flags:
 		})
 	}
 	if _, ok := backend.(SSHLeaseBackend); !ok {
-		return exit(2, "provider=%s does not support cp; it has neither native copy nor an SSH lease transport", backend.Spec().Name)
+		return Exit(2, "provider=%s does not support cp; it has neither native copy nor an SSH lease transport", backend.Spec().Name)
 	}
 	lease, err := a.resolveSSHTransportLeaseTargetForRepo(ctx, &cfg, *id, true, false)
 	if err != nil {
@@ -91,7 +91,7 @@ func validateCopyArgs(src, dst string) error {
 	srcSandbox := isSandboxCopyArg(src)
 	dstSandbox := isSandboxCopyArg(dst)
 	if srcSandbox == dstSandbox {
-		return exit(2, "usage: %s (%s)", copyUsage, copyPathRule)
+		return Exit(2, "usage: %s (%s)", copyUsage, copyPathRule)
 	}
 	return nil
 }
@@ -106,7 +106,7 @@ func isSandboxCopyArg(value string) bool {
 
 func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string, followLink bool, stdout, stderr anyWriter) (err error) {
 	if isWindowsNativeTarget(target) {
-		return exit(2, "SSH cp over rsync is not available for native Windows targets; use a provider-native copy backend or a WSL2 target")
+		return Exit(2, "SSH cp over rsync is not available for native Windows targets; use a provider-native copy backend or a WSL2 target")
 	}
 	terminationCtx, stopTerminationSignals := pondMeshTerminationContext(ctx)
 	defer stopTerminationSignals()
@@ -121,7 +121,7 @@ func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string,
 	}
 	if !capabilities.safeTransport {
 		if runtime.GOOS == "windows" || isWindowsWSL2Target(target) {
-			return exit(2, "SSH cp archive fallback requires a POSIX operator host and native Linux or macOS lease (not WSL2); install rsync 3.4.3 or newer")
+			return Exit(2, "SSH cp archive fallback requires a POSIX operator host and native Linux or macOS lease (not WSL2); install rsync 3.4.3 or newer")
 		}
 		// The archive fallback is driven by native Go on the operator host, so it
 		// must use the native OpenSSH session even when Windows rsync probing chose
@@ -152,7 +152,7 @@ func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string,
 			if ctxErr := context.Cause(ctx); ctxErr != nil {
 				return ctxErr
 			}
-			return exit(2, "SSH cp to WSL2 requires remote rsync support for secluded arguments")
+			return Exit(2, "SSH cp to WSL2 requires remote rsync support for secluded arguments")
 		}
 	} else if probeErr := probeResolvedSSHRemoteSecludedArgs(ctx, session, target, wslExe); probeErr == nil {
 		secludedArgs = true
@@ -342,27 +342,27 @@ func resolvedSSHCopyArgs(session *sshTransportSession, target SSHTarget, src, ds
 	srcRemote, srcPath := sandboxCopyPath(src)
 	dstRemote, dstPath := sandboxCopyPath(dst)
 	if srcRemote == dstRemote {
-		return nil, exit(2, "copy requires exactly one SANDBOX:PATH")
+		return nil, Exit(2, "copy requires exactly one SANDBOX:PATH")
 	}
 	if strings.TrimSpace(srcPath) == "" || strings.TrimSpace(dstPath) == "" {
-		return nil, exit(2, "copy source and destination paths must not be empty")
+		return nil, Exit(2, "copy source and destination paths must not be empty")
 	}
 	remotePath := dstPath
 	if srcRemote {
 		remotePath = srcPath
 	}
 	if strings.ContainsAny(remotePath, "\x00\r\n") {
-		return nil, exit(2, "remote copy paths must not contain control characters")
+		return nil, Exit(2, "remote copy paths must not contain control characters")
 	}
 	// Tilde paths need remote-shell expansion. Keep that behavior when the
 	// encoded path avoids rsync 3.4.4's safe_arg() bug, and fail closed when a
 	// backslash-wildcard pair would re-enter the vulnerable transport path.
 	if secludedArgs && !isWindowsWSL2Target(target) && strings.HasPrefix(remotePath, "~") {
 		if srcRemote && !strings.Contains(remotePath, "/") {
-			return nil, exit(2, "remote downloads from bare ~ or ~user are unsupported; use a path under ~/ or an absolute path")
+			return nil, Exit(2, "remote downloads from bare ~ or ~user are unsupported; use a path under ~/ or an absolute path")
 		}
 		if rsyncRemoteCopyPathTriggersSafeArgBug(remotePath) {
-			return nil, exit(2, "remote copy paths using ~ must not require rsync wildcard escaping; use an absolute path")
+			return nil, Exit(2, "remote copy paths using ~ must not require rsync wildcard escaping; use an absolute path")
 		}
 		secludedArgs = false
 	}

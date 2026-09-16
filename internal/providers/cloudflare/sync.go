@@ -11,16 +11,17 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func (b *cloudflareBackend) prepareArchive(ctx context.Context, req RunRequest) (*core.PreparedArchive, error) {
+func (b *cloudflareBackend) prepareArchive(ctx context.Context, req core.RunRequest) (*core.PreparedArchive, error) {
 	return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
 		TempPattern: "crabbox-cloudflare-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
 	})
 }
 
-func (b *cloudflareBackend) syncWorkspace(ctx context.Context, client *cloudflareClient, sandboxID string, req RunRequest, workdir string, prepared *core.PreparedArchive) ([]timingPhase, time.Duration, error) {
+func (b *cloudflareBackend) syncWorkspace(ctx context.Context, client *cloudflareClient, sandboxID string, req core.RunRequest, workdir string, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
 	if prepared == nil {
 		var err error
 		prepared, err = b.prepareArchive(ctx, req)
@@ -29,7 +30,7 @@ func (b *cloudflareBackend) syncWorkspace(ctx context.Context, client *cloudflar
 		}
 	}
 	var diskDuration time.Duration
-	phases, total, err := core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
+	phases, total, err := (core.ArchiveWorkspace{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge, Workdir: workdir,
 		Provider: providerName, PhaseName: "cloudflare_sync", RemoteArchivePrefix: "crabbox-cloudflare-sync-",
 		Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
@@ -52,11 +53,11 @@ func (b *cloudflareBackend) syncWorkspace(ctx context.Context, client *cloudflar
 		Exec: func(execCtx context.Context, command string) error {
 			return b.execShell(execCtx, client, sandboxID, command, io.Discard)
 		},
-	}, prepared)
+	}).Sync(ctx, prepared)
 	for i := range phases {
 		if phases[i].Name == "upload" {
 			phases[i].Ms -= diskDuration.Milliseconds()
-			phases = slices.Insert(phases, i, timingPhase{Name: "disk", Ms: diskDuration.Milliseconds()})
+			phases = slices.Insert(phases, i, core.TimingPhase{Name: "disk", Ms: diskDuration.Milliseconds()})
 			break
 		}
 	}
@@ -73,13 +74,13 @@ func (b *cloudflareBackend) checkRemoteDiskForSync(ctx context.Context, client *
 		return err
 	}
 	if !ok {
-		return exit(6, "%s could not determine remote disk headroom for sync", providerName)
+		return core.Exit(6, "%s could not determine remote disk headroom for sync", providerName)
 	}
 	if available <= 0 {
-		return exit(6, "%s remote disk too small for sync: need %s for archive+extract, available %s; use a larger Cloudflare instance_type or reduce sync.exclude", providerName, byteCount(required), byteCount(available))
+		return core.Exit(6, "%s remote disk too small for sync: need %s for archive+extract, available %s; use a larger Cloudflare instance_type or reduce sync.exclude", providerName, byteCount(required), byteCount(available))
 	}
 	if available < required {
-		return exit(6, "%s remote disk too small for sync: need %s for archive+extract, available %s; use a larger Cloudflare instance_type or reduce sync.exclude", providerName, byteCount(required), byteCount(available))
+		return core.Exit(6, "%s remote disk too small for sync: need %s for archive+extract, available %s; use a larger Cloudflare instance_type or reduce sync.exclude", providerName, byteCount(required), byteCount(available))
 	}
 	const lowHeadroom = 1 << 30
 	if remaining := available - required; remaining < lowHeadroom {
@@ -89,7 +90,7 @@ func (b *cloudflareBackend) checkRemoteDiskForSync(ctx context.Context, client *
 }
 
 func (b *cloudflareBackend) remoteDiskAvailable(ctx context.Context, client *cloudflareClient, sandboxID, workdir string) (int64, bool, error) {
-	command := "set -o pipefail; df -B1 --output=avail,target /tmp " + shellQuote(workdir) + " | tail -n +2"
+	command := "set -o pipefail; df -B1 --output=avail,target /tmp " + core.ShellQuote(workdir) + " | tail -n +2"
 	var stdout bytes.Buffer
 	if err := b.execShell(ctx, client, sandboxID, command, &stdout); err != nil {
 		return 0, false, err
@@ -129,11 +130,11 @@ func byteCount(bytes int64) string {
 }
 
 func (b *cloudflareBackend) prepareWorkspace(ctx context.Context, client *cloudflareClient, sandboxID, workdir string) error {
-	return b.execShell(ctx, client, sandboxID, "mkdir -p "+shellQuote(workdir), io.Discard)
+	return b.execShell(ctx, client, sandboxID, "mkdir -p "+core.ShellQuote(workdir), io.Discard)
 }
 
 func (b *cloudflareBackend) execShell(ctx context.Context, client *cloudflareClient, sandboxID, command string, stdout io.Writer) error {
-	code, err := client.execStream(ctx, sandboxID, execStreamRequest{
+	code, err := client.execStream(ctx, sandboxID, shared.CommandStreamRequest{
 		Command:   command,
 		Cwd:       "/",
 		TimeoutMS: durationMillisecondsCeil(b.cfg.TTL),
@@ -142,7 +143,7 @@ func (b *cloudflareBackend) execShell(ctx context.Context, client *cloudflareCli
 		return fmt.Errorf("%s exec %q: %w", providerName, command, err)
 	}
 	if code != 0 {
-		return exit(code, "%s exec %q exited %d", providerName, command, code)
+		return core.Exit(code, "%s exec %q exited %d", providerName, command, code)
 	}
 	return nil
 }

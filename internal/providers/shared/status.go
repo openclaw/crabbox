@@ -7,36 +7,25 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type DelegatedStatusRequest struct {
-	Wait         bool
-	WaitTimeout  time.Duration
-	Now          func() time.Time
-	Observe      func(context.Context) (core.StatusView, bool, error)
-	TimeoutError func() error
-}
-
-// PollDelegatedStatus keeps complete views and terminal decisions with the
-// provider. Observe's stop result ends polling without changing view.Ready.
-func PollDelegatedStatus(ctx context.Context, req DelegatedStatusRequest) (core.StatusView, error) {
-	deadline := req.Now().Add(req.WaitTimeout)
+// PollStatus shares observation-only status waiting without bounding provider
+// requests. The adapter owns resolution, views, and terminal/error policy; done
+// returns a final observation even when it is not ready. Observations precede
+// deadline and cancellation checks, including the first observation.
+func PollStatus(
+	ctx context.Context,
+	req core.StatusRequest,
+	now func() time.Time,
+	observe func(context.Context) (view core.StatusView, done bool, err error),
+	timeout func() error,
+) (core.StatusView, error) {
+	deadline := now().Add(req.WaitTimeout)
 	if req.WaitTimeout <= 0 {
-		deadline = req.Now().Add(5 * time.Minute)
+		deadline = now().Add(5 * time.Minute)
 	}
-	for {
-		view, stop, err := req.Observe(ctx)
-		if err != nil {
-			return core.StatusView{}, err
-		}
-		if !req.Wait || view.Ready || stop {
-			return view, nil
-		}
-		if req.Now().After(deadline) {
-			return core.StatusView{}, req.TimeoutError()
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
+	wait := StatusWait{
+		parent: ctx, ctx: ctx, cancel: func() {},
+		now: now, deadline: deadline, wait: req.Wait,
+		timeout: func(string) error { return timeout() },
 	}
+	return wait.Poll("", 2*time.Second, observe)
 }

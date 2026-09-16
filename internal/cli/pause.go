@@ -26,7 +26,7 @@ func (a App) pauseResume(ctx context.Context, args []string, action string) erro
 	idFlagSet := flagWasSet(fs, "id")
 	setIDFromFirstArg(fs, id)
 	if strings.TrimSpace(*id) == "" || fs.NArg() > 1 || (idFlagSet && fs.NArg() > 0) {
-		return exit(2, "usage: crabbox %s --id <lease-or-server-id>", action)
+		return Exit(2, "usage: crabbox %s --id <lease-or-server-id>", action)
 	}
 	cfg, err := loadConfig()
 	if err != nil {
@@ -59,7 +59,7 @@ func (a App) pauseResume(ctx context.Context, args []string, action string) erro
 	}
 	pausable, ok := backend.(PausableBackend)
 	if !ok {
-		return exit(2, "provider=%s does not support %s", backend.Spec().Name, action)
+		return Exit(2, "provider=%s does not support %s", backend.Spec().Name, action)
 	}
 	opts := leaseOptionsFromConfig(cfg)
 	if action == "pause" {

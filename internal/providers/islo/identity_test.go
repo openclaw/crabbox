@@ -29,8 +29,7 @@ const (
 func claimIsloLeaseWithIdentity(t *testing.T, leaseID, slug, name, resourceID, scope string) core.LeaseClaim {
 	t.Helper()
 	identity := isloIdentity{ID: resourceID, Name: name, CreatedBy: isloTestKeyName, CreatedByEntity: "api_key"}
-	_, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, Config{Provider: isloProvider}, scope,
-		Server{Provider: isloProvider, CloudID: resourceID, ImmutableID: resourceID, Name: name, Labels: identity.labels()}, core.SSHTarget{}, t.TempDir(), time.Hour, false, core.LeaseClaim{}, false)
+	_, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, core.Config{Provider: isloProvider}, scope, core.Server{Provider: isloProvider, CloudID: resourceID, ImmutableID: resourceID, Name: name, Labels: identity.labels()}, core.SSHTarget{}, t.TempDir(), time.Hour, false, core.LeaseClaim{}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,11 +51,11 @@ func TestIsloCreateSandboxBindsImmutableProviderIdentity(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", BaseURL: "https://api.islo.dev/"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", BaseURL: "https://api.islo.dev/"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	leaseID, name, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	leaseID, name, _, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +118,7 @@ func TestIsloCreateDoesNotDeleteAConcurrentClaim(t *testing.T) {
 			}
 			backend := newIsloTeardownBackend(t, client, io.Discard)
 
-			if _, _, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, true, ""); err == nil {
+			if _, _, _, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, true, ""); err == nil {
 				t.Error("concurrent claim publication must prevent creation from taking ownership")
 			}
 			if client.deleteCalls != 0 {
@@ -141,7 +140,7 @@ func TestIsloCreateRollsBackAfterCanceledPublication(t *testing.T) {
 	client := &fakeIsloSyncClient{createName: isloTeardownName, createID: isloTestResourceID, createSandboxHook: cancel}
 	backend := newIsloTeardownBackend(t, client, io.Discard)
 
-	if _, _, _, _, err := backend.createSandbox(ctx, client, Repo{Root: t.TempDir(), Name: "repo"}, false, ""); !errors.Is(err, context.Canceled) {
+	if _, _, _, _, err := backend.createSandbox(ctx, client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, ""); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v, want the canceled publication reported", err)
 	}
 	if client.deleteCalls != 1 || !client.deletedIDs[isloTestResourceID] {
@@ -179,7 +178,7 @@ func TestIsloRunCleanupKeepsAcquiredOwnership(t *testing.T) {
 						t.Fatal(err)
 					}
 				case "metadata":
-					if err := updateLeaseClaimTailscale(isloTeardownLeaseID, "100.64.7.7", "lease.tailnet.example"); err != nil {
+					if err := core.UpdateLeaseClaimTailscale(isloTeardownLeaseID, "100.64.7.7", "lease.tailnet.example"); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -190,8 +189,8 @@ func TestIsloRunCleanupKeepsAcquiredOwnership(t *testing.T) {
 			}
 			backend := newIsloTeardownBackend(t, client, io.Discard)
 
-			_, err := backend.Run(context.Background(), RunRequest{
-				Repo: Repo{Root: t.TempDir(), Name: "repo"}, NoSync: true, Command: []string{"printf", "islo-cleanup-owner-probe"},
+			_, err := backend.Run(context.Background(), core.RunRequest{
+				Repo: core.Repo{Root: t.TempDir(), Name: "repo"}, NoSync: true, Command: []string{"printf", "islo-cleanup-owner-probe"},
 			})
 			if err == nil || !strings.Contains(err.Error(), "synthetic workload failure") {
 				t.Fatalf("err=%v, want the synthetic workload failure", err)
@@ -227,11 +226,11 @@ func TestIsloInspectJSONPinsAuthoritativeIdentity(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	view, err := backend.Status(context.Background(), StatusRequest{ID: leaseID})
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: leaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,11 +278,11 @@ func TestIsloStatusResolvesThroughImmutableID(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	view, err := backend.Status(context.Background(), StatusRequest{ID: leaseID})
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: leaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +390,7 @@ func TestIsloClaimScopeNormalizesBaseURL(t *testing.T) {
 		"https://user@api.islo.dev": isloTestClaimScope,
 		"https://other.example/":    "endpoint:https://other.example",
 	} {
-		if got := isloClaimScope(Config{Islo: IsloConfig{BaseURL: name}}); got != want {
+		if got := isloClaimScope(core.Config{Islo: core.IsloConfig{BaseURL: name}}); got != want {
 			t.Fatalf("scope(%q)=%q, want %q", name, got, want)
 		}
 	}
@@ -412,11 +411,11 @@ func TestIsloStatusReportsADeletedSandboxFromItsTombstone(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	view, err := backend.Status(context.Background(), StatusRequest{ID: leaseID})
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: leaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,17 +439,17 @@ func TestIsloStatusFlagsAResourceIDMismatch(t *testing.T) {
 	claimIsloLeaseWithIdentity(t, leaseID, "web", "crabbox-repo-abcdef", isloTestResourceID, isloTestClaimScope)
 	client := &fakeIsloSyncClient{byID: map[string]*gosdk.SandboxResponse{isloTestResourceID: nil}}
 	client.registerSandbox("crabbox-repo-abcdef", otherID)
-	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", "lease.tailnet.example"); err != nil {
+	if err := core.UpdateLeaseClaimTailscale(leaseID, "100.64.7.7", "lease.tailnet.example"); err != nil {
 		t.Fatal(err)
 	}
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	view, err := backend.Status(context.Background(), StatusRequest{ID: leaseID})
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: leaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +469,7 @@ func TestIsloStatusFlagsAResourceIDMismatch(t *testing.T) {
 	if len(client.execRequests) != 0 {
 		t.Errorf("executed %d remote commands against a mismatched resource", len(client.execRequests))
 	}
-	if _, err := backend.Status(context.Background(), StatusRequest{ID: leaseID, Wait: true, WaitTimeout: time.Millisecond}); err == nil {
+	if _, err := backend.Status(context.Background(), core.StatusRequest{ID: leaseID, Wait: true, WaitTimeout: time.Millisecond}); err == nil {
 		t.Error("waiting for a mismatched resource must fail")
 	}
 }
@@ -486,7 +485,7 @@ func TestIsloStatusRejectsUnboundByIDResponse(t *testing.T) {
 			}}
 			backend := newIsloTeardownBackend(t, client, io.Discard)
 
-			if _, err := backend.Status(context.Background(), StatusRequest{ID: isloTeardownLeaseID}); err == nil || !strings.Contains(err.Error(), "by-id response") {
+			if _, err := backend.Status(context.Background(), core.StatusRequest{ID: isloTeardownLeaseID}); err == nil || !strings.Contains(err.Error(), "by-id response") {
 				t.Fatalf("err=%v, want an invalid by-id response to fail closed", err)
 			}
 		})
@@ -497,7 +496,7 @@ func TestIsloStatusTailscaleUsesVerifiedCurrentName(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	isolateIsloTestHome(t)
 	claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
-	if err := updateLeaseClaimTailscale(isloTeardownLeaseID, "100.64.7.7", ""); err != nil {
+	if err := core.UpdateLeaseClaimTailscale(isloTeardownLeaseID, "100.64.7.7", ""); err != nil {
 		t.Fatal(err)
 	}
 	const currentName = "crabbox-repo-fedcba"
@@ -506,7 +505,7 @@ func TestIsloStatusTailscaleUsesVerifiedCurrentName(t *testing.T) {
 	client.registerSandbox(isloTeardownName, "0195f3d2-5c1a-7c39-9c1e-000000000000")
 	backend := newIsloTeardownBackend(t, client, io.Discard)
 
-	if _, err := backend.Status(context.Background(), StatusRequest{ID: isloTeardownLeaseID}); err != nil {
+	if _, err := backend.Status(context.Background(), core.StatusRequest{ID: isloTeardownLeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.getSandboxNames) != 1 || client.getSandboxNames[0] != currentName {
@@ -520,7 +519,7 @@ func TestIsloStatusRejectsIdentityChangeBeforeTailscaleCheck(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			isolateIsloTestHome(t)
 			claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
-			if err := updateLeaseClaimTailscale(isloTeardownLeaseID, "100.64.7.7", ""); err != nil {
+			if err := core.UpdateLeaseClaimTailscale(isloTeardownLeaseID, "100.64.7.7", ""); err != nil {
 				t.Fatal(err)
 			}
 			client := &fakeIsloSyncClient{
@@ -529,7 +528,7 @@ func TestIsloStatusRejectsIdentityChangeBeforeTailscaleCheck(t *testing.T) {
 			}
 			backend := newIsloTeardownBackend(t, client, io.Discard)
 
-			if _, err := backend.Status(context.Background(), StatusRequest{ID: isloTeardownLeaseID}); err == nil {
+			if _, err := backend.Status(context.Background(), core.StatusRequest{ID: isloTeardownLeaseID}); err == nil {
 				t.Error("status must refuse a changed identity before executing a Tailscale command")
 			}
 			if len(client.execRequests) != 0 {

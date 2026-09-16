@@ -1,8 +1,10 @@
 package hostinger
 
-import core "github.com/openclaw/crabbox/internal/cli"
+import (
+	"flag"
 
-import "flag"
+	core "github.com/openclaw/crabbox/internal/cli"
+)
 
 type hostingerFlagValues struct {
 	APIURL          *string
@@ -17,7 +19,7 @@ type hostingerFlagValues struct {
 	ReleaseAction   *string
 }
 
-func RegisterHostingerProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterHostingerProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return hostingerFlagValues{
 		APIURL:          fs.String("hostinger-url", defaults.Hostinger.APIURL, "Hostinger API URL"),
 		ItemID:          fs.String("hostinger-item-id", defaults.Hostinger.ItemID, "Hostinger priced item ID to purchase, e.g. hostingercom-vps-kvm2-usd-1m"),
@@ -32,7 +34,7 @@ func RegisterHostingerProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	}
 }
 
-func ApplyHostingerProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyHostingerProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	v, ok := values.(hostingerFlagValues)
 	if !ok {
 		return nil
@@ -65,12 +67,12 @@ func ApplyHostingerProviderFlags(cfg *Config, fs *flag.FlagSet, values any) erro
 		cfg.Hostinger.User = *v.User
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 		cfg.SSHUser = *v.User
-		markHostingerUserExplicit(cfg)
+		core.MarkHostingerUserExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "hostinger-work-root") {
 		cfg.Hostinger.WorkRoot = *v.WorkRoot
 		core.RecordProviderFlagInputs(cfg, true, providerName)
-		markHostingerWorkRootExplicit(cfg)
+		core.MarkHostingerWorkRootExplicit(cfg)
 	}
 	if core.FlagWasSet(fs, "hostinger-allow-purchase") {
 		cfg.Hostinger.AllowPurchase = *v.AllowPurchase

@@ -119,6 +119,10 @@ they grant broad local filesystem or network access.
 4. `warmup`, `status`, and `stop` return clear one-shot unsupported messages.
 
 The provider omits `run-session`, so `--lease-output` remains unsupported.
+Command cancellation and deadline causes are retained in run results and timing
+as `canceled` and `timed-out`, rather than being reduced to ordinary command
+failures. Numeric exit codes and diagnostic text remain unchanged; an ordinary
+nonzero command exit is still a `failed` run with `command-exit` error kind.
 Global SSH, sync, desktop, browser, code-server, Tailscale, pool, fresh-PR,
 script upload, downloads, capture stdout/stderr, and remote artifact flags are
 rejected through delegated-provider validation.

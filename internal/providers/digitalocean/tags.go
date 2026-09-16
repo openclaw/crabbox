@@ -2,7 +2,6 @@ package digitalocean
 
 import (
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -28,31 +27,15 @@ func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time
 	if cfg.Tailscale.Enabled && len(cfg.Tailscale.Tags) > 0 {
 		labels["tailscale_tags"] = strings.Join(cfg.Tailscale.Tags, ",")
 	}
-	tags := []string{
-		tagCrabbox,
-		"crabbox:provider:" + providerName,
-		"crabbox:target:" + core.TargetLinux,
-	}
-	for _, key := range tagSchema.Keys() {
-		if value := labels[key]; value != "" {
-			tags = append(tags, encodeTagKV(key, value))
-		}
-	}
-	return normalizeTags(tags)
+	return tagsFromLabels(labels)
 }
 
 func tagsFromLabels(labels map[string]string) []string {
-	tags := []string{
+	return tagSchema.EncodeTags(labels, []string{
 		tagCrabbox,
 		"crabbox:provider:" + providerName,
 		"crabbox:target:" + core.TargetLinux,
-	}
-	for _, key := range tagSchema.Keys() {
-		if value := labels[key]; value != "" {
-			tags = append(tags, encodeTagKV(key, value))
-		}
-	}
-	return normalizeTags(tags)
+	}, encodeTagKV)
 }
 
 func encodeTagKV(key, value string) string {
@@ -89,21 +72,6 @@ func legacyEncodedExactTagValueKey(key string) bool {
 	default:
 		return false
 	}
-}
-
-func normalizeTags(tags []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(tags))
-	for _, tag := range tags {
-		tag = strings.TrimSpace(tag)
-		if tag == "" || seen[tag] {
-			continue
-		}
-		seen[tag] = true
-		out = append(out, tag)
-	}
-	sort.Strings(out)
-	return out
 }
 
 func labelsFromTags(tags []string) map[string]string {

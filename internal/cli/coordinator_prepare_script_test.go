@@ -46,17 +46,17 @@ func TestCoordinatorPrepareRecoveryPrecedesScriptAndDoesNotReplayFailure(t *test
 		close(entered)
 		<-release
 		t.Logf("HTTP response=200 elapsed=%s", time.Since(started))
-		json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: b.lease.LeaseID, Provider: p.Name(), State: "active"}})
+		json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: b.lease.LeaseID, Provider: p.Spec().Name, State: "active"}})
 	}))
 	defer server.Close()
-	p.backend = &coordinatorPrepareScriptBackend{sshScriptTestBackend: b, observation: &coordinatorLeaseBackend{cfg: Config{Provider: p.Name()}, coord: &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}}}
+	p.backend = &coordinatorPrepareScriptBackend{sshScriptTestBackend: b, observation: &coordinatorLeaseBackend{cfg: Config{Provider: p.Spec().Name}, coord: &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}}}
 	marker := filepath.Join(dir, "script-executions")
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- (App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader("printf x >> " + shellQuote(marker) + "\nexit 23\n")}).runCommand(ctx, []string{"--provider", p.Name(), "--id", b.lease.LeaseID, "--no-sync", "--no-hydrate", "--keep", "--script-stdin"})
+		done <- (App{Stdout: &stdout, Stderr: &stderr, Stdin: strings.NewReader("printf x >> " + shellQuote(marker) + "\nexit 23\n")}).runCommand(ctx, []string{"--provider", p.Spec().Name, "--id", b.lease.LeaseID, "--no-sync", "--no-hydrate", "--keep", "--script-stdin"})
 	}()
 	joined, released := false, false
 	defer func() {

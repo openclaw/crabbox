@@ -25,7 +25,7 @@ func TestSpritesTransportUsesResolvedEnvironment(t *testing.T) {
 	t.Setenv("SPRITES_API_URL", "https://other.example")
 	t.Setenv("CRABBOX_SPRITES_TOKEN", "alias-token")
 	runner := &recordingRunner{}
-	b := &spritesBackend{cfg: Config{Provider: spritesProvider, Sprites: SpritesConfig{Token: " resolved-token ", APIURL: "https://API.SPRITES.DEV:443/"}}, rt: Runtime{Exec: runner, Stderr: io.Discard}}
+	b := &spritesBackend{cfg: core.Config{Provider: spritesProvider, Sprites: core.SpritesConfig{Token: " resolved-token ", APIURL: "https://API.SPRITES.DEV:443/"}}, rt: core.Runtime{Exec: runner, Stderr: io.Discard}}
 	if err := b.bootstrapSSH(t.Context(), "crabbox-test", "ssh-ed25519 AAAAtest"); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestSpritesTransportUsesResolvedEnvironment(t *testing.T) {
 	if strings.Contains(string(encoded), "resolved-token") || strings.Contains(string(encoded), `"ChildEnv":`) {
 		t.Fatal("transport credential serialized in lease target")
 	}
-	server := Server{Provider: spritesProvider, CloudID: "crabbox-test", Name: "crabbox-test", Labels: map[string]string{"name": "crabbox-test"}}
+	server := core.Server{Provider: spritesProvider, CloudID: "crabbox-test", Name: "crabbox-test", Labels: map[string]string{"name": "crabbox-test"}}
 	if err := core.ClaimLeaseTargetForRepoConfig("cbx_transport", "transport", b.cfg, server, target, t.TempDir(), 0, false); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestSpritesTransportUsesResolvedEnvironment(t *testing.T) {
 
 func TestSpritesTransportRejectsInvalidEndpointBeforeExec(t *testing.T) {
 	runner := &recordingRunner{}
-	b := &spritesBackend{cfg: Config{Sprites: SpritesConfig{APIURL: "http://not-loopback.example"}}, rt: Runtime{Exec: runner}}
+	b := &spritesBackend{cfg: core.Config{Sprites: core.SpritesConfig{APIURL: "http://not-loopback.example"}}, rt: core.Runtime{Exec: runner}}
 	if _, err := b.runSprite(t.Context(), []string{"--version"}, nil, nil); err == nil {
 		t.Fatal("expected URL validation error")
 	}
@@ -95,7 +95,7 @@ func TestSpritesTransportRejectsInvalidEndpointBeforeExec(t *testing.T) {
 
 type spritesRealCLIRunner struct{}
 
-func (spritesRealCLIRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (spritesRealCLIRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	cmd := exec.CommandContext(ctx, req.Name, req.Args...)
 	cmd.Env = req.Env
 	cmd.Dir = req.Dir
@@ -104,7 +104,7 @@ func (spritesRealCLIRunner) Run(ctx context.Context, req LocalCommandRequest) (L
 	if cmd.ProcessState != nil {
 		code = cmd.ProcessState.ExitCode()
 	}
-	return LocalCommandResult{ExitCode: code, Stderr: string(output)}, err
+	return core.LocalCommandResult{ExitCode: code, Stderr: string(output)}, err
 }
 
 // Optional, credential-free contract test against an installed sprite CLI.
@@ -149,15 +149,15 @@ func TestSpritesRealCLIUsesConfiguredEndpointAndToken(t *testing.T) {
 	t.Setenv("SPRITES_API_URL", wrong.URL)
 	t.Setenv("CRABBOX_SPRITES_TOKEN", "test-configured-token")
 	t.Setenv("CRABBOX_SPRITES_API_URL", api.URL)
-	cfg := Config{Sprites: SpritesConfig{Token: "test-configured-token", APIURL: api.URL}}
-	client, err := newSpritesClient(cfg, Runtime{HTTP: api.Client()})
+	cfg := core.Config{Sprites: core.SpritesConfig{Token: "test-configured-token", APIURL: api.URL}}
+	client, err := newSpritesClient(cfg, core.Runtime{HTTP: api.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.GetSprite(t.Context(), "crabbox-test"); err != nil {
 		t.Fatal(err)
 	}
-	b := &spritesBackend{cfg: cfg, rt: Runtime{Exec: spritesRealCLIRunner{}}}
+	b := &spritesBackend{cfg: cfg, rt: core.Runtime{Exec: spritesRealCLIRunner{}}}
 	for _, args := range [][]string{{"exec", "-s", "crabbox-test", "--", "true"}, {"proxy", "-s", "crabbox-test", "-W", "22"}} {
 		requests := &execRequests
 		if args[0] == "proxy" {

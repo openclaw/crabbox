@@ -1,4 +1,3 @@
-import { sha256Hex } from "./auth";
 import { azureWindowsBootstrapPowerShell, cloudInit } from "./bootstrap";
 import {
   azureSupportsEphemeralFullCaching,
@@ -11,6 +10,7 @@ import {
   validatedCIDRs,
   type LeaseConfig,
 } from "./config";
+import { sha256Hex } from "./encoding";
 import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
 import { leaseProviderLabels, providerLabelsOwnedByLease } from "./provider-labels";
 import {

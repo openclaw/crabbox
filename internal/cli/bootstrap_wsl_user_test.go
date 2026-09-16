@@ -21,7 +21,7 @@ func TestManagedWSLWorkerIdentity(t *testing.T) {
 			cfg.WorkRoot = "/work/custom root"
 			script := cloudInit(cfg, "ssh-ed25519 test")
 			if test.target == targetWindows {
-				script = windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+				script = WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 			}
 			steps := []string{
 				"useradd --create-home --user-group --shell /bin/bash crabbox",
@@ -63,7 +63,7 @@ func wslBootstrapHereDoc(t *testing.T, marker string) string {
 	t.Helper()
 	cfg := baseConfig()
 	cfg.TargetOS, cfg.WindowsMode = targetWindows, windowsModeWSL2
-	script := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	script := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 	_, body, ok := strings.Cut(script, "<<'"+marker+"'\n")
 	if !ok {
 		t.Fatalf("missing %s heredoc", marker)

@@ -8,6 +8,7 @@ import {
   uniqueProviderMachineCandidates,
   type LeaseConfig,
 } from "./config";
+import { base64URL } from "./encoding";
 import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
 import { redactDiagnosticSecrets } from "./http";
 import {
@@ -1904,9 +1905,7 @@ function utf8(value: string): Uint8Array {
 
 function base64url(value: string | ArrayBuffer): string {
   const bytes = typeof value === "string" ? utf8(value) : new Uint8Array(value);
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  return base64URL(bytes);
 }
 
 function sleep(ms: number): Promise<void> {

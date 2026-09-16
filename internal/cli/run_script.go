@@ -21,7 +21,7 @@ type RunScriptSpec struct {
 
 func loadRunScript(path string, stdin bool, input io.Reader) (*RunScriptSpec, error) {
 	if path != "" && stdin {
-		return nil, exit(2, "--script and --script-stdin are mutually exclusive")
+		return nil, Exit(2, "--script and --script-stdin are mutually exclusive")
 	}
 	if path == "" && !stdin {
 		return nil, nil
@@ -39,10 +39,10 @@ func loadRunScript(path string, stdin bool, input io.Reader) (*RunScriptSpec, er
 		data, err = os.ReadFile(path)
 	}
 	if err != nil {
-		return nil, exit(2, "read script %s: %v", source, err)
+		return nil, Exit(2, "read script %s: %v", source, err)
 	}
 	if len(data) == 0 {
-		return nil, exit(2, "script %s is empty", source)
+		return nil, Exit(2, "script %s is empty", source)
 	}
 	sum := sha256.Sum256(data)
 	name := safeScriptName(source, hex.EncodeToString(sum[:])[:12])
@@ -101,9 +101,9 @@ func uploadRunScript(ctx context.Context, target SSHTarget, workdir string, spec
 	if err := runSSHInput(ctx, target, remote, bytes.NewReader(spec.Data), &stdout, &stderr); err != nil {
 		detail := trimFailureDetail(strings.TrimSpace(stdout.String() + "\n" + stderr.String()))
 		if detail != "" {
-			return exit(7, "upload script %s: %v: %s", spec.RemotePath, err, detail)
+			return Exit(7, "upload script %s: %v: %s", spec.RemotePath, err, detail)
 		}
-		return exit(7, "upload script %s: %v", spec.RemotePath, err)
+		return Exit(7, "upload script %s: %v", spec.RemotePath, err)
 	}
 	return nil
 }
@@ -144,7 +144,7 @@ if ($hasBom) {
   [System.IO.File]::WriteAllBytes($fullPath, $out)
 }
 `
-	return powershellCommand(script)
+	return PowershellCommand(script)
 }
 
 func remoteRunScriptCommandWithEnvFile(workdir string, env map[string]string, envFile string, script *RunScriptSpec, args []string) string {
@@ -185,7 +185,7 @@ func windowsRemoteRunScriptCommandWithEnvFiles(workdir string, env map[string]st
 	b.WriteString(")\n")
 	b.WriteString("& powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $__crabboxScript @__crabboxArgs\n")
 	b.WriteString("exit $LASTEXITCODE\n")
-	return powershellCommand(b.String())
+	return PowershellCommand(b.String())
 }
 
 func runScriptDisplay(script *RunScriptSpec, args []string) string {

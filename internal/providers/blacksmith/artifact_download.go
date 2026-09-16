@@ -82,7 +82,7 @@ func (b *blacksmithBackend) downloadArtifact(ctx context.Context, repoRoot, leas
 	if err != nil {
 		return nil, err
 	}
-	_, writeErr := dispatcher.WriteString("#!/bin/sh\nexec " + shellQuote(scp) + " \"$@\"\n")
+	_, writeErr := dispatcher.WriteString("#!/bin/sh\nexec " + core.ShellQuote(scp) + " \"$@\"\n")
 	if err := errors.Join(writeErr, dispatcher.Close()); err != nil {
 		return nil, err
 	}
@@ -120,7 +120,7 @@ func (b *blacksmithBackend) downloadArtifact(ctx context.Context, repoRoot, leas
 	if err != nil {
 		return nil, fmt.Errorf("inspect installed artifact scp helper: %w", err)
 	}
-	result, runErr := b.rt.Exec.Run(ctx, LocalCommandRequest{
+	result, runErr := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name: "/bin/sh", Args: command, Dir: repoRoot, Env: env,
 		MaxCapturedOutputBytes: int(blacksmithArtifactDiagnosticCaptureBytes), CancelGracePeriod: time.Second,
 		RequireProcessGroupJoin: true,
@@ -189,7 +189,7 @@ func (b *blacksmithBackend) downloadArtifact(ctx context.Context, repoRoot, leas
 	return data, nil
 }
 
-func retainBlacksmithDownloadDiagnostics(stage string, owned os.FileInfo, result LocalCommandResult) (metadata string, err error) {
+func retainBlacksmithDownloadDiagnostics(stage string, owned os.FileInfo, result core.LocalCommandResult) (metadata string, err error) {
 	root, err := os.OpenRoot(stage)
 	if err != nil {
 		return "", fmt.Errorf("open native diagnostic staging: %w", err)

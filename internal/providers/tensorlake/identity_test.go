@@ -111,7 +111,7 @@ func TestBoundStopRejectsLegacyAndMismatchedAuthority(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := b.Stop(t.Context(), StopRequest{ID: claim.LeaseID}); err == nil {
+			if err := b.Stop(t.Context(), core.StopRequest{ID: claim.LeaseID}); err == nil {
 				t.Fatal("unsafe stop succeeded")
 			}
 			if len(callMutationVerbs(r)) != 0 {
@@ -133,13 +133,13 @@ func TestStopConfirmsExactTerminationAndCanRetry(t *testing.T) {
 		}
 		return core.LocalCommandResult{}, nil, false
 	}
-	if err := b.Stop(t.Context(), StopRequest{ID: claim.LeaseID}); err == nil {
+	if err := b.Stop(t.Context(), core.StopRequest{ID: claim.LeaseID}); err == nil {
 		t.Fatal("unconfirmed termination succeeded")
 	}
 	assertTensorlakeClaimUnchanged(t, claim)
 	confirmFails = false
 	r.calls = nil
-	if err := b.Stop(t.Context(), StopRequest{ID: claim.Slug}); err != nil {
+	if err := b.Stop(t.Context(), core.StopRequest{ID: claim.Slug}); err != nil {
 		t.Fatal(err)
 	}
 	if len(callMutationVerbs(r)) != 0 {
@@ -230,12 +230,12 @@ func assertTensorlakeClaimWaitDeadline(t *testing.T, operation string) {
 			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 			defer cancel()
 			done := make(chan error, 1)
-			var result RunResult
+			var result core.RunResult
 			go func() {
 				var err error
 				switch operation {
 				case "admission":
-					result, err = b.Run(ctx, RunRequest{ID: claim.LeaseID, NoSync: true, Command: []string{"user-workload"}})
+					result, err = b.Run(ctx, core.RunRequest{ID: claim.LeaseID, NoSync: true, Command: []string{"user-workload"}})
 				case "reclaim":
 					_, err = b.resolveLease(ctx, c, claim.LeaseID, repoRoot, true)
 				default:
@@ -291,7 +291,7 @@ func TestOneShotTeardownKeepsOriginalClaim(t *testing.T) {
 		return core.LocalCommandResult{}, nil, false
 	}
 	b := NewTensorlakeBackend(Provider{}.Spec(), newTestConfig(), newTestRuntime(r)).(*tensorlakeBackend)
-	result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, Command: []string{"user-workload"}})
+	result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir()}, NoSync: true, Command: []string{"user-workload"}})
 	if err == nil || result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider || result.Session == nil || !result.Session.Kept {
 		t.Fatal("expected retained session", err)
 	}
@@ -324,7 +324,7 @@ func TestRollbackRetainsAppearingClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := b.createSandbox(t.Context(), c, Repo{Root: t.TempDir()}, true, ""); err == nil {
+	if _, _, err := b.createSandbox(t.Context(), c, core.Repo{Root: t.TempDir()}, true, ""); err == nil {
 		t.Fatal("acquisition overwrote successor")
 	}
 	if findCall(r, "sbx terminate") != nil {
@@ -339,7 +339,7 @@ func TestCreatePublicationCancellationRetainsDeadlineAndSuccessor(t *testing.T) 
 		t.Fatal(err)
 	}
 	runner.defaults = map[string]scriptedReply{"sbx create": {stdout: claim.CloudID + "\n"}}
-	repo := Repo{Root: t.TempDir()}
+	repo := core.Repo{Root: t.TempDir()}
 	entered, release := make(chan struct{}), make(chan struct{})
 	holderDone := make(chan error, 1)
 	var successor core.LeaseClaim
@@ -404,7 +404,7 @@ func TestCreateRollbackDefaultBudgetIncludesClaimWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner.defaults = map[string]scriptedReply{"sbx create": {stdout: claim.CloudID + "\n"}}
-	repo := Repo{Root: t.TempDir()}
+	repo := core.Repo{Root: t.TempDir()}
 	entered, release := make(chan struct{}), make(chan struct{})
 	holderDone := make(chan error, 1)
 	go func() {
@@ -533,7 +533,7 @@ func claimBoundTensorlakeForTest(leaseID, slug, repo string, idle time.Duration,
 	scope, _ := json.Marshal(tensorlakeScope{"https://api.tensorlake.ai", "https://api.tensorlake.ai", "org_fixture", "project_fixture", "default"})
 	cfg := newTestConfig()
 	cfg.Provider = providerName
-	server := Server{Provider: providerName, CloudID: strings.TrimPrefix(leaseID, leasePrefix), Labels: map[string]string{"provider": providerName, "lease": leaseID, "slug": slug, "tensorlake_namespace": "sandbox_ns"}}
+	server := core.Server{Provider: providerName, CloudID: strings.TrimPrefix(leaseID, leasePrefix), Labels: map[string]string{"provider": providerName, "lease": leaseID, "slug": slug, "tensorlake_namespace": "sandbox_ns"}}
 	_, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, cfg, string(scope), server, core.SSHTarget{}, repo, idle, reclaim, core.LeaseClaim{}, false)
 	return err
 }
@@ -579,7 +579,7 @@ func TestAcquisitionRollbackRequiresFreshScopeAndConfirmsTermination(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, _, err = b.createSandbox(ctx, c, Repo{Root: t.TempDir()}, false, "rollback-sandbox")
+			_, _, err = b.createSandbox(ctx, c, core.Repo{Root: t.TempDir()}, false, "rollback-sandbox")
 			if err == nil || !errors.Is(err, context.Canceled) {
 				t.Fatal("publication cancellation not preserved", err)
 			}
@@ -622,7 +622,7 @@ func TestCancelledStopDoesNotInvokeNativeCLI(t *testing.T) {
 	b, _, r, claim := ownedTensorlakeFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := b.Stop(ctx, StopRequest{ID: claim.LeaseID}); !errors.Is(err, context.Canceled) {
+	if err := b.Stop(ctx, core.StopRequest{ID: claim.LeaseID}); !errors.Is(err, context.Canceled) {
 		t.Fatal("cancellation not preserved", err)
 	}
 	if len(r.calls) != 0 {

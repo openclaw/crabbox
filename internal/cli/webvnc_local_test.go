@@ -1170,7 +1170,7 @@ func TestLocalWebVNCListenerIdentityPinsCurrentProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantStarted, err := webVNCDaemonProcessStartIdentity(os.Getpid())
+	wantStarted, err := LocalProcessStartIdentity(os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}

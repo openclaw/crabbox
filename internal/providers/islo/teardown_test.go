@@ -22,8 +22,8 @@ func newIsloTeardownBackend(t *testing.T, client *fakeIsloSyncClient, stderr io.
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
 	return &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: stderr},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: stderr},
 	}
 }
 
@@ -45,7 +45,7 @@ func requireIsloClaimDropped(t *testing.T, leaseID string) {
 // binding existed: no resource id, no scope, no creator labels.
 func claimIsloLegacyLease(t *testing.T, leaseID string) core.LeaseClaim {
 	t.Helper()
-	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	claim, ok, err := resolveExactIsloLeaseClaim(leaseID)
@@ -66,7 +66,7 @@ func TestIsloStopConfirmsTeardownWithTombstone(t *testing.T) {
 	var stderr bytes.Buffer
 	backend := newIsloTeardownBackend(t, client, &stderr)
 
-	if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	if client.deleteCalls != 1 {
@@ -94,7 +94,7 @@ func TestIsloStopIsIdempotentOnAnAlreadyDeletedSandbox(t *testing.T) {
 	var stderr bytes.Buffer
 	backend := newIsloTeardownBackend(t, client, &stderr)
 
-	if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	if client.deleteCalls != 0 {
@@ -125,7 +125,7 @@ func TestIsloStopRejectsUnboundByIDTombstones(t *testing.T) {
 				})
 				backend := newIsloTeardownBackend(t, client, io.Discard)
 
-				if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err == nil || !strings.Contains(err.Error(), "by-id response") {
+				if err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID}); err == nil || !strings.Contains(err.Error(), "by-id response") {
 					t.Errorf("err=%v, want an invalid by-id response to fail closed", err)
 				}
 				if client.deleteCalls != wantDeletes {
@@ -152,7 +152,7 @@ func TestIsloStopDoesNotDeleteAStaleNameFromIncompleteByIDResponse(t *testing.T)
 			}
 			backend := newIsloTeardownBackend(t, client, io.Discard)
 
-			if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err == nil {
+			if err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID}); err == nil {
 				t.Error("expected the stale, unidentified name to be refused")
 			}
 			if client.deleteCalls != 0 {
@@ -174,7 +174,7 @@ func TestIsloStopRequiresTerminalDeletionState(t *testing.T) {
 			}}
 			backend := newIsloTeardownBackend(t, client, io.Discard)
 
-			if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err == nil {
+			if err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID}); err == nil {
 				t.Error("a deletion timestamp without terminal state must not confirm cleanup")
 			}
 			requireIsloClaimRetained(t, isloTeardownLeaseID)
@@ -211,7 +211,7 @@ func TestIsloStopConfirmsTeardownWithExactNameNotFound(t *testing.T) {
 			var stderr bytes.Buffer
 			backend := newIsloTeardownBackend(t, client, &stderr)
 
-			if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err != nil {
+			if err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID}); err != nil {
 				t.Fatal(err)
 			}
 			if client.deleteCalls != 1 {
@@ -241,7 +241,7 @@ func TestIsloTeardownDeletesTheNameTheClaimedIDResolvesTo(t *testing.T) {
 	var stderr bytes.Buffer
 	backend := newIsloTeardownBackend(t, client, &stderr)
 
-	if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.deletedNames) != 1 || client.deletedNames[0] != liveName {
@@ -303,7 +303,7 @@ func TestIsloTeardownRefusesABlindNameDeleteForAnIDBoundClaim(t *testing.T) {
 			var stderr bytes.Buffer
 			backend := newIsloTeardownBackend(t, client, &stderr)
 
-			err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID})
+			err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID})
 			if err == nil || !strings.Contains(err.Error(), "refused to delete sandbox") {
 				t.Fatalf("err=%v, want the delete refused because the target could not be identified", err)
 			}
@@ -341,7 +341,7 @@ func TestIsloTeardownDeletesByNameForAClaimWithNoRecordedID(t *testing.T) {
 	var stderr bytes.Buffer
 	backend := newIsloTeardownBackend(t, client, &stderr)
 
-	err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID})
 	if err == nil || !strings.Contains(err.Error(), "confirm sandbox deletion by name") {
 		t.Fatalf("err=%v, want an unproven teardown after the confirmation read failed", err)
 	}
@@ -370,7 +370,7 @@ func TestIsloTeardownToleratesACreatorAttributionDifference(t *testing.T) {
 	var stderr bytes.Buffer
 	backend := newIsloTeardownBackend(t, client, &stderr)
 
-	if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID}); err != nil {
 		t.Fatalf("err=%v, want the teardown to proceed despite the attribution difference", err)
 	}
 	if client.deleteCalls != 1 {
@@ -394,7 +394,7 @@ func TestIsloStopReleasesAClaimWithNoRecordedResourceID(t *testing.T) {
 	var stderr bytes.Buffer
 	backend := newIsloTeardownBackend(t, client, &stderr)
 
-	if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID}); err != nil {
 		t.Fatalf("err=%v, want a legacy claim with an already-absent name to be releasable", err)
 	}
 	if client.deleteCalls != 0 {
@@ -485,7 +485,7 @@ func TestIsloStopRetainsClaimWhenTeardownIsUncertain(t *testing.T) {
 			}
 			backend := newIsloTeardownBackend(t, client, io.Discard)
 
-			err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID})
+			err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID})
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("err=%v, want %q", err, tc.wantErr)
 			}
@@ -674,7 +674,7 @@ func TestIsloTeardownIgnoresEventuallyConsistentList(t *testing.T) {
 	client.registerSandbox(isloTeardownName, isloTestResourceID)
 	backend := newIsloTeardownBackend(t, client, io.Discard)
 
-	if err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	if client.listCalls != 0 {
@@ -683,7 +683,7 @@ func TestIsloTeardownIgnoresEventuallyConsistentList(t *testing.T) {
 	requireIsloClaimDropped(t, isloTeardownLeaseID)
 	// The listing still reports the deleted sandbox. That lag is exactly why the
 	// teardown proof above may not be derived from it.
-	servers, err := backend.List(context.Background(), ListRequest{})
+	servers, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +700,7 @@ func TestIsloStopRefusesTeardownOutsideTheClaimedScope(t *testing.T) {
 	client.registerSandbox(isloTeardownName, isloTestResourceID)
 	backend := newIsloTeardownBackend(t, client, io.Discard)
 
-	err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID})
 	if err == nil || !strings.Contains(err.Error(), "refusing to act") {
 		t.Fatalf("err=%v, want a foreign-scope refusal", err)
 	}
@@ -723,7 +723,7 @@ func TestIsloStopRefusesAForeignResourceUnderTheClaimedName(t *testing.T) {
 	client.registerSandbox(isloTeardownName, "0195f3d2-5c1a-7c39-9c1e-000000000000")
 	backend := newIsloTeardownBackend(t, client, io.Discard)
 
-	err := backend.Stop(context.Background(), StopRequest{ID: isloTeardownLeaseID})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: isloTeardownLeaseID})
 	if err == nil || !strings.Contains(err.Error(), "this lease does not own") {
 		t.Fatalf("err=%v, want a foreign-resource refusal", err)
 	}

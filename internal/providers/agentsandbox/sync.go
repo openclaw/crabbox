@@ -11,7 +11,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, ready sandboxReadiness, req RunRequest, workdir string) ([]timingPhase, time.Duration, error) {
+func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, ready sandboxReadiness, req core.RunRequest, workdir string) ([]core.TimingPhase, time.Duration, error) {
 	start := core.ClockNow(b.rt.Clock)
 	syncCtx := ctx
 	cancel := func() {}
@@ -20,14 +20,14 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 	}
 	defer cancel()
 
-	excludes, err := syncExcludes(req.Repo.Root, b.cfg)
+	excludes, err := core.SyncExcludes(req.Repo.Root, b.cfg)
 	if err != nil {
 		return nil, 0, err
 	}
 	manifestStart := core.ClockNow(b.rt.Clock)
-	manifest, err := syncManifest(req.Repo.Root, excludes, b.cfg.Sync.Includes)
+	manifest, err := core.BuildSyncManifestFiltered(req.Repo.Root, excludes, b.cfg.Sync.Includes)
 	if err != nil {
-		return nil, 0, exit(6, "build sync file list: %v", err)
+		return nil, 0, core.Exit(6, "build sync file list: %v", err)
 	}
 	manifestDuration := core.ClockNow(b.rt.Clock).Sub(manifestStart)
 
@@ -38,7 +38,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 	preflightDuration := core.ClockNow(b.rt.Clock).Sub(preflightStart)
 
 	archiveStart := core.ClockNow(b.rt.Clock)
-	archive, err := createPortableSyncArchive(syncCtx, req.Repo, manifest, "crabbox-agent-sandbox-sync-*.tgz")
+	archive, err := core.CreateSyncArchive(syncCtx, req.Repo, manifest, "crabbox-agent-sandbox-sync-*.tgz")
 	if err != nil {
 		return nil, 0, err
 	}
@@ -62,16 +62,16 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 		cleanupCtx, cleanupCancel := b.cleanupContext(ctx)
 		defer cleanupCancel()
 		if stagingDir != "" {
-			_ = b.execShell(cleanupCtx, client, ready, "rm -rf "+shellQuote(stagingDir)+" 2>/dev/null || true")
+			_ = b.execShell(cleanupCtx, client, ready, "rm -rf "+core.ShellQuote(stagingDir)+" 2>/dev/null || true")
 		}
 	}
 	defer cleanupRemote()
 
 	prepareStart := core.ClockNow(b.rt.Clock)
 	if stagingDir == "" {
-		err = b.execShell(syncCtx, client, ready, "mkdir -p "+shellQuote(workdir))
+		err = b.execShell(syncCtx, client, ready, "mkdir -p "+core.ShellQuote(workdir))
 	} else {
-		err = b.execShell(syncCtx, client, ready, "mkdir -p "+shellQuote(workdir)+" && rm -rf "+shellQuote(stagingDir)+" && mkdir -p "+shellQuote(stagingDir))
+		err = b.execShell(syncCtx, client, ready, "mkdir -p "+core.ShellQuote(workdir)+" && rm -rf "+core.ShellQuote(stagingDir)+" && mkdir -p "+core.ShellQuote(stagingDir))
 	}
 	if err != nil {
 		return nil, 0, err
@@ -80,7 +80,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 
 	uploadStart := core.ClockNow(b.rt.Clock)
 	if _, err := archive.Seek(0, 0); err != nil {
-		return nil, 0, exit(6, "rewind sync archive: %v", err)
+		return nil, 0, core.Exit(6, "rewind sync archive: %v", err)
 	}
 	if err := b.execPod(syncCtx, client, ready, podExecRequest{
 		Command: []string{"tar", "-xzf", "-", "-C", extractDir},
@@ -89,7 +89,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 		Stderr:  b.rt.Stderr,
 	}); err != nil {
 		if code, ok := remoteExitStatus(err); ok {
-			return nil, 0, exit(code, "agent-sandbox tar extract exited %d", code)
+			return nil, 0, core.Exit(code, "agent-sandbox tar extract exited %d", code)
 		}
 		return nil, 0, err
 	}
@@ -108,7 +108,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 	cleanupPending = false
 	cleanupDuration := core.ClockNow(b.rt.Clock).Sub(cleanupStart)
 	total := core.ClockNow(b.rt.Clock).Sub(start)
-	phases := []timingPhase{
+	phases := []core.TimingPhase{
 		{Name: "manifest", Ms: manifestDuration.Milliseconds()},
 		{Name: "preflight", Ms: preflightDuration.Milliseconds()},
 		{Name: "archive", Ms: archiveDuration.Milliseconds()},
@@ -116,27 +116,27 @@ func (b *backend) syncWorkspace(ctx context.Context, client kubernetesClient, re
 		{Name: "upload_extract", Ms: uploadDuration.Milliseconds()},
 	}
 	if stagingDir != "" {
-		phases = append(phases, timingPhase{Name: "replace", Ms: replaceDuration.Milliseconds()})
+		phases = append(phases, core.TimingPhase{Name: "replace", Ms: replaceDuration.Milliseconds()})
 	}
-	phases = append(phases, timingPhase{Name: "cleanup", Ms: cleanupDuration.Milliseconds()})
-	phases = append(phases, timingPhase{Name: "agent_sandbox_sync", Ms: total.Milliseconds()})
+	phases = append(phases, core.TimingPhase{Name: "cleanup", Ms: cleanupDuration.Milliseconds()})
+	phases = append(phases, core.TimingPhase{Name: "agent_sandbox_sync", Ms: total.Milliseconds()})
 	return phases, total, nil
 }
 
-func checkAgentSandboxSyncPreflight(manifest SyncManifest, cfg Config, force bool, stderr io.Writer) error {
+func checkAgentSandboxSyncPreflight(manifest core.SyncManifest, cfg core.Config, force bool, stderr io.Writer) error {
 	archiveManifest := core.FullSyncGuardrailManifest(manifest)
-	return checkSyncPreflight(archiveManifest, cfg, force, stderr)
+	return core.CheckSyncPreflight(archiveManifest, cfg, force, stderr)
 }
 
 func (b *backend) replaceWorkspace(ctx context.Context, client kubernetesClient, ready sandboxReadiness, stagingDir, workdir string) error {
 	command := agentSandboxMountReplaceCommand(stagingDir, workdir)
-	if err := b.execShell(ctx, client, ready, "bash -lc "+shellQuote(command)); err != nil {
+	if err := b.execShell(ctx, client, ready, "bash -lc "+core.ShellQuote(command)); err != nil {
 		return err
 	}
 	backupDir := agentSandboxBackupDir(stagingDir, workdir)
 	cleanupCtx, cleanupCancel := b.cleanupContext(ctx)
 	defer cleanupCancel()
-	if err := b.execShell(cleanupCtx, client, ready, "rm -rf "+shellQuote(backupDir)+" "+shellQuote(stagingDir)); err != nil {
+	if err := b.execShell(cleanupCtx, client, ready, "rm -rf "+core.ShellQuote(backupDir)+" "+core.ShellQuote(stagingDir)); err != nil {
 		return fmt.Errorf("agent-sandbox replaced workspace but could not remove backup %s: %w", backupDir, err)
 	}
 	return nil
@@ -144,25 +144,25 @@ func (b *backend) replaceWorkspace(ctx context.Context, client kubernetesClient,
 
 func agentSandboxMountReplaceCommand(stagingDir, workdir string) string {
 	backupDir := agentSandboxBackupDir(stagingDir, workdir)
-	workdirGlob := shellQuote(workdir) + "/*"
-	backupGlob := shellQuote(backupDir) + "/*"
-	stagingGlob := shellQuote(stagingDir) + "/*"
+	workdirGlob := core.ShellQuote(workdir) + "/*"
+	backupGlob := core.ShellQuote(backupDir) + "/*"
+	stagingGlob := core.ShellQuote(stagingDir) + "/*"
 	rollback := "rollback() { original_rc=$?; trap - EXIT HUP INT TERM; rollback_rc=0; " +
 		"if [ \"$copy_started\" -eq 1 ]; then for entry in " + workdirGlob + "; do " +
-		"if [ \"$entry\" != " + shellQuote(backupDir) + " ] && [ \"$entry\" != " + shellQuote(stagingDir) + " ]; then rm -rf -- \"$entry\" || rollback_rc=$?; fi; done; fi; " +
+		"if [ \"$entry\" != " + core.ShellQuote(backupDir) + " ] && [ \"$entry\" != " + core.ShellQuote(stagingDir) + " ]; then rm -rf -- \"$entry\" || rollback_rc=$?; fi; done; fi; " +
 		"if [ \"$rollback_rc\" -eq 0 ]; then for entry in " + backupGlob + "; do " +
-		"mv -- \"$entry\" " + shellQuote(workdir+"/") + " || { rollback_rc=$?; break; }; done; fi; " +
-		"if [ \"$rollback_rc\" -eq 0 ]; then rmdir " + shellQuote(backupDir) + " || rollback_rc=$?; fi; " +
+		"mv -- \"$entry\" " + core.ShellQuote(workdir+"/") + " || { rollback_rc=$?; break; }; done; fi; " +
+		"if [ \"$rollback_rc\" -eq 0 ]; then rmdir " + core.ShellQuote(backupDir) + " || rollback_rc=$?; fi; " +
 		"if [ \"$rollback_rc\" -ne 0 ]; then exit \"$rollback_rc\"; fi; exit \"$original_rc\"; }"
 	return "shopt -s dotglob nullglob; copy_started=0; " + rollback +
-		"; mkdir -p " + shellQuote(workdir) +
-		" && rm -rf " + shellQuote(backupDir) +
-		" && mkdir -p " + shellQuote(backupDir) +
+		"; mkdir -p " + core.ShellQuote(workdir) +
+		" && rm -rf " + core.ShellQuote(backupDir) +
+		" && mkdir -p " + core.ShellQuote(backupDir) +
 		" && trap rollback EXIT HUP INT TERM" +
 		" && for entry in " + workdirGlob + "; do " +
-		"if [ \"$entry\" != " + shellQuote(backupDir) + " ] && [ \"$entry\" != " + shellQuote(stagingDir) + " ]; then mv -- \"$entry\" " + shellQuote(backupDir+"/") + " || exit 1; fi; done" +
+		"if [ \"$entry\" != " + core.ShellQuote(backupDir) + " ] && [ \"$entry\" != " + core.ShellQuote(stagingDir) + " ]; then mv -- \"$entry\" " + core.ShellQuote(backupDir+"/") + " || exit 1; fi; done" +
 		" && copy_started=1" +
-		" && for entry in " + stagingGlob + "; do cp -a -- \"$entry\" " + shellQuote(workdir+"/") + " || exit 1; done" +
+		" && for entry in " + stagingGlob + "; do cp -a -- \"$entry\" " + core.ShellQuote(workdir+"/") + " || exit 1; done" +
 		" && trap - EXIT HUP INT TERM"
 }
 

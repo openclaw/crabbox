@@ -41,79 +41,14 @@ type MorphConfigApplied struct {
 
 func (cfg *MorphConfig) applyFile(file *fileMorphConfig) (MorphConfigApplied, error) {
 	var applied MorphConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.APIKey != "" {
-		cfg.APIKey = file.APIKey
-		applied.InputAccepted = true
-		applied.APIKey = true
-	}
-	if file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if file.Snapshot != "" {
-		cfg.Snapshot = file.Snapshot
-		applied.InputAccepted = true
-	}
-	if file.SSHGatewayHost != "" {
-		cfg.SSHGatewayHost = file.SSHGatewayHost
-		applied.InputAccepted = true
-		applied.SSHGatewayHost = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-	}
-	if file.DeleteOnRelease != nil {
-		cfg.DeleteOnRelease = *file.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	if file.WakeOnSSH != nil {
-		cfg.WakeOnSSH = *file.WakeOnSSH
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "morph")
+	return applied, err
 }
 
 func (cfg *MorphConfig) applyEnv() (MorphConfigApplied, error) {
 	var applied MorphConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_MORPH_API_KEY", "MORPH_API_KEY"); ok {
-		cfg.APIKey = value
-		applied.InputAccepted = true
-		applied.APIKey = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MORPH_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MORPH_SNAPSHOT"); ok {
-		cfg.Snapshot = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MORPH_SSH_GATEWAY_HOST"); ok {
-		cfg.SSHGatewayHost = value
-		applied.InputAccepted = true
-		applied.SSHGatewayHost = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MORPH_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_MORPH_DELETE_ON_RELEASE"); ok {
-		cfg.DeleteOnRelease = value
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	if value, ok := getenvBool("CRABBOX_MORPH_WAKE_ON_SSH"); ok {
-		cfg.WakeOnSSH = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 7)
+	return applied, err
 }
 
 // MorphConfigFlagValues holds parsed values; only visited flags are applied.
@@ -128,14 +63,9 @@ type MorphConfigFlagValues struct {
 
 // RegisterMorphConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterMorphConfigFlags(fs *flag.FlagSet, defaults MorphConfig) MorphConfigFlagValues {
-	return MorphConfigFlagValues{
-		APIURL:          fs.String("morph-api-url", defaults.APIURL, "Morph API URL"),
-		Snapshot:        fs.String("morph-snapshot", defaults.Snapshot, "Morph snapshot ID"),
-		SSHGatewayHost:  fs.String("morph-ssh-gateway-host", defaults.SSHGatewayHost, "Morph SSH gateway host"),
-		WorkRoot:        fs.String("morph-work-root", defaults.WorkRoot, "Morph remote Crabbox work root"),
-		DeleteOnRelease: fs.Bool("morph-delete-on-release", defaults.DeleteOnRelease, "Delete Morph instances instead of pausing them on release"),
-		WakeOnSSH:       fs.Bool("morph-wake-on-ssh", defaults.WakeOnSSH, "Enable Morph wake-on-ssh for paused instances"),
-	}
+	var values MorphConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // MorphConfigVisitedFlags records raw flag visits, independently of application.
@@ -147,43 +77,14 @@ type MorphConfigVisitedFlags struct {
 
 // MorphConfigFlagPresence reports visits for tracked flag bindings.
 func MorphConfigFlagPresence(fs *flag.FlagSet) MorphConfigVisitedFlags {
-	return MorphConfigVisitedFlags{
-		APIURL:          flagWasSet(fs, "morph-api-url"),
-		SSHGatewayHost:  flagWasSet(fs, "morph-ssh-gateway-host"),
-		DeleteOnRelease: flagWasSet(fs, "morph-delete-on-release"),
-	}
+	var visited MorphConfigVisitedFlags
+	recordConfigFlagVisits[MorphConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values MorphConfigFlagValues) Apply(cfg *MorphConfig, fs *flag.FlagSet) (MorphConfigApplied, error) {
 	var applied MorphConfigApplied
-	visited := MorphConfigFlagPresence(fs)
-	if visited.APIURL {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-		applied.APIURL = true
-	}
-	if flagWasSet(fs, "morph-snapshot") {
-		cfg.Snapshot = *values.Snapshot
-		applied.InputAccepted = true
-	}
-	if visited.SSHGatewayHost {
-		cfg.SSHGatewayHost = *values.SSHGatewayHost
-		applied.InputAccepted = true
-		applied.SSHGatewayHost = true
-	}
-	if flagWasSet(fs, "morph-work-root") {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-	}
-	if visited.DeleteOnRelease {
-		cfg.DeleteOnRelease = *values.DeleteOnRelease
-		applied.InputAccepted = true
-		applied.DeleteOnRelease = true
-	}
-	if flagWasSet(fs, "morph-wake-on-ssh") {
-		cfg.WakeOnSSH = *values.WakeOnSSH
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

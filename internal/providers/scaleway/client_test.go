@@ -230,13 +230,13 @@ func TestScalewayRedirectGuardUsesEffectiveOrigin(t *testing.T) {
 	same, _ := url.Parse("https://api.scaleway.example.test:443/redirected")
 	otherPort, _ := url.Parse("https://api.scaleway.example.test:444/redirected")
 	otherScheme, _ := url.Parse("http://api.scaleway.example.test:443/redirected")
-	if !sameScalewayOrigin(base, same) {
+	if !core.SameHTTPOrigin(base, same) {
 		t.Fatal("default HTTPS port should share origin")
 	}
-	if sameScalewayOrigin(base, otherPort) {
+	if core.SameHTTPOrigin(base, otherPort) {
 		t.Fatal("different effective port should be refused")
 	}
-	if sameScalewayOrigin(base, otherScheme) {
+	if core.SameHTTPOrigin(base, otherScheme) {
 		t.Fatal("different scheme should be refused")
 	}
 }
@@ -548,7 +548,7 @@ func TestScalewayBindingProfilePrecedence(t *testing.T) {
 		}
 	}
 	p := Provider{}
-	if p.ServerTypeForClass("standard") != "DEV1-S" || p.ServerTypeForClass("unknown") != "DEV1-S" {
+	if p.ServerTypeForConfig(core.Config{Class: "standard"}) != "DEV1-S" || p.ServerTypeForConfig(core.Config{Class: "unknown"}) != "DEV1-S" {
 		t.Fatal("fixed class fallback changed")
 	}
 	for _, raw := range []string{"", "  "} {

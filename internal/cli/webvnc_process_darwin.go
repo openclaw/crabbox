@@ -8,11 +8,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func processBootIdentity() (string, error) {
+func LocalProcessBootIdentity() (string, error) {
 	return "", nil
 }
 
-func processBootIdentityRequired() bool {
+func LocalProcessBootIdentityRequired() bool {
 	return false
 }
 

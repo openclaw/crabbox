@@ -1,18 +1,18 @@
 package namespace
 
-import core "github.com/openclaw/crabbox/internal/cli"
-
 import (
 	"flag"
 	"path"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func RegisterNamespaceProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterNamespaceProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return core.RegisterNamespaceConfigFlags(fs, defaults.Namespace)
 }
 
-func ApplyNamespaceProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyNamespaceProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	v, ok := values.(core.NamespaceConfigFlagValues)
 	if !ok {
 		return nil
@@ -37,22 +37,22 @@ func ApplyNamespaceProviderFlags(cfg *Config, fs *flag.FlagSet, values any) erro
 	return validateNamespaceConfig(*cfg)
 }
 
-func validateNamespaceConfig(cfg Config) error {
+func validateNamespaceConfig(cfg core.Config) error {
 	if strings.TrimSpace(cfg.Namespace.Size) != "" {
 		switch strings.ToUpper(strings.TrimSpace(cfg.Namespace.Size)) {
 		case "S", "M", "L", "XL":
 		default:
-			return exit(2, "namespace devbox size must be S, M, L, or XL")
+			return core.Exit(2, "namespace devbox size must be S, M, L, or XL")
 		}
 	}
 	size := namespaceSize(cfg)
 	switch size {
 	case "S", "M", "L", "XL":
 	default:
-		return exit(2, "namespace devbox size must be S, M, L, or XL")
+		return core.Exit(2, "namespace devbox size must be S, M, L, or XL")
 	}
 	if cfg.Namespace.VolumeSizeGB < 0 {
-		return exit(2, "namespace volume size must be non-negative")
+		return core.Exit(2, "namespace volume size must be non-negative")
 	}
 	if err := cleanNamespaceWorkRoot(namespaceWorkRoot(cfg)); err != nil {
 		return err
@@ -63,11 +63,11 @@ func validateNamespaceConfig(cfg Config) error {
 func cleanNamespaceWorkRoot(workRoot string) error {
 	clean := path.Clean(strings.TrimSpace(workRoot))
 	if clean == "" || !strings.HasPrefix(clean, "/") {
-		return exit(2, "namespace.workRoot %q must resolve to an absolute path", workRoot)
+		return core.Exit(2, "namespace.workRoot %q must resolve to an absolute path", workRoot)
 	}
 	switch clean {
 	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspaces":
-		return exit(2, "namespace.workRoot %q is too broad; choose a dedicated subdirectory", clean)
+		return core.Exit(2, "namespace.workRoot %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return nil
 }

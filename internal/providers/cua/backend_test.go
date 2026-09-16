@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type bridgeHarness struct {
@@ -20,7 +22,7 @@ func newBridgeHarness(t *testing.T) *bridgeHarness {
 	return &bridgeHarness{t: t, infos: make(map[string]bridgeSandboxSummary)}
 }
 
-func (h *bridgeHarness) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (h *bridgeHarness) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	var payload bridgeRequest
 	data, err := io.ReadAll(req.Stdin)
 	if err != nil {
@@ -50,7 +52,7 @@ func (h *bridgeHarness) Run(_ context.Context, req LocalCommandRequest) (LocalCo
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	return LocalCommandResult{ExitCode: 0, Stdout: string(encoded)}, nil
+	return core.LocalCommandResult{ExitCode: 0, Stdout: string(encoded)}, nil
 }
 
 func testBackend(t *testing.T, harness *bridgeHarness) backend {
@@ -58,7 +60,7 @@ func testBackend(t *testing.T, harness *bridgeHarness) backend {
 	return backend{
 		spec: Provider{}.Spec(),
 		cfg:  testConfig(),
-		rt: Runtime{
+		rt: core.Runtime{
 			Exec:   harness,
 			Stdout: io.Discard,
 			Stderr: io.Discard,
@@ -66,7 +68,7 @@ func testBackend(t *testing.T, harness *bridgeHarness) backend {
 	}
 }
 
-func seedClaimedSandbox(t *testing.T, h *bridgeHarness, b backend, slug string) LeaseClaim {
+func seedClaimedSandbox(t *testing.T, h *bridgeHarness, b backend, slug string) core.LeaseClaim {
 	t.Helper()
 	scope, err := cuaScope(b.cfg)
 	if err != nil {
@@ -75,7 +77,7 @@ func seedClaimedSandbox(t *testing.T, h *bridgeHarness, b backend, slug string) 
 	leaseID := leasePrefix + strings.ReplaceAll(slug, "-", "")
 	sandboxID := "existing-" + slug
 	createdAt := "2026-07-03T12:00:00Z"
-	claim := LeaseClaim{
+	claim := core.LeaseClaim{
 		LeaseID:       leaseID,
 		Slug:          slug,
 		Provider:      providerName,
@@ -93,12 +95,12 @@ func TestWarmupAndEveryRunFailClosedWithoutBridge(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	h := newBridgeHarness(t)
 	b := testBackend(t, h)
-	err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}})
+	err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}})
 	if err == nil || !strings.Contains(err.Error(), "idempotency key") || !strings.Contains(err.Error(), cuaTrackingIssue) {
 		t.Fatalf("Warmup err=%v, want actionable provisioning guard", err)
 	}
-	for _, req := range []RunRequest{
-		{Repo: Repo{Root: t.TempDir(), Name: "demo"}, NoSync: true, Command: []string{"echo", "hello"}},
+	for _, req := range []core.RunRequest{
+		{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}, NoSync: true, Command: []string{"echo", "hello"}},
 		{ID: "existing-claim", Command: []string{"true"}},
 	} {
 		if _, err := b.Run(context.Background(), req); err == nil || !strings.Contains(err.Error(), cuaTrackingIssue) {
@@ -115,8 +117,8 @@ func TestStopAndCleanupFailClosedWithoutBridge(t *testing.T) {
 	h := newBridgeHarness(t)
 	b := testBackend(t, h)
 	for name, err := range map[string]error{
-		"stop":    b.Stop(context.Background(), StopRequest{ID: "existing"}),
-		"cleanup": b.Cleanup(context.Background(), CleanupRequest{}),
+		"stop":    b.Stop(context.Background(), core.StopRequest{ID: "existing"}),
+		"cleanup": b.Cleanup(context.Background(), core.CleanupRequest{}),
 	} {
 		if err == nil || !strings.Contains(err.Error(), "read-only") || !strings.Contains(err.Error(), "atomically") || !strings.Contains(err.Error(), cuaTrackingIssue) {
 			t.Fatalf("%s err=%v, want actionable mutation guard", name, err)
@@ -132,14 +134,14 @@ func TestListAndStatusInspectUnclaimedExistingSandboxes(t *testing.T) {
 	h := newBridgeHarness(t)
 	h.infos["existing-unclaimed"] = bridgeSandboxSummary{ID: "existing-unclaimed", Name: "existing-unclaimed", Status: "running", OSType: "windows", Metadata: map[string]string{"createdAt": "2026-07-03T12:00:00Z"}}
 	b := testBackend(t, h)
-	views, err := b.List(context.Background(), ListRequest{})
+	views, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
 	if len(views) != 1 || views[0].CloudID != "existing-unclaimed" || views[0].Labels["claimed"] != "false" || views[0].Labels["experimental"] != "true" || views[0].Labels["target"] != "windows" {
 		t.Fatalf("views=%#v", views)
 	}
-	view, err := b.Status(context.Background(), StatusRequest{ID: "existing-unclaimed"})
+	view, err := b.Status(context.Background(), core.StatusRequest{ID: "existing-unclaimed"})
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
@@ -155,7 +157,7 @@ func TestListDoesNotClaimNameReusedSandbox(t *testing.T) {
 	claim := seedClaimedSandbox(t, h, b, "reused-name")
 	sandboxID := claimSandboxName(claim)
 	h.infos[sandboxID] = bridgeSandboxSummary{ID: sandboxID, Name: sandboxID, Status: "running", OSType: "linux", Metadata: map[string]string{"createdAt": "2026-07-17T12:00:00Z"}}
-	views, err := b.List(context.Background(), ListRequest{})
+	views, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}

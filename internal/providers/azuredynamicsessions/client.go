@@ -1,14 +1,10 @@
 package azuredynamicsessions
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,7 +18,7 @@ import (
 type azureDynamicSessionsAPI interface {
 	CheckRunner(context.Context, string) error
 	UploadFile(context.Context, string, string, string) error
-	ExecStream(context.Context, string, azureDynamicSessionsExecRequest, io.Writer, io.Writer) (int, error)
+	ExecStream(context.Context, string, shared.CommandStreamRequest, io.Writer, io.Writer) (int, error)
 	GetSession(context.Context, string) (azureDynamicSessionsSession, error)
 	ListSessions(context.Context) ([]azureDynamicSessionsSession, error)
 	DeleteSession(context.Context, string) error
@@ -37,20 +33,6 @@ type azureDynamicSessionsClient struct {
 }
 
 const azureDynamicSessionsControlTimeout = 60 * time.Second
-
-type azureDynamicSessionsExecRequest struct {
-	Command   string            `json:"command"`
-	Cwd       string            `json:"cwd,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-	TimeoutMS int64             `json:"timeoutMs,omitempty"`
-}
-
-type azureDynamicSessionsExecEvent struct {
-	Type     string `json:"type"`
-	Data     string `json:"data,omitempty"`
-	Error    string `json:"error,omitempty"`
-	ExitCode *int   `json:"exitCode,omitempty"`
-}
 
 type azureDynamicSessionsSession struct {
 	Identifier     string `json:"identifier"`
@@ -85,7 +67,7 @@ func (e *azureDynamicSessionsAPIError) Error() string {
 	return e.Status + ": " + e.Body
 }
 
-var newAzureDynamicSessionsClient = func(ctx context.Context, cfg Config, rt Runtime) (azureDynamicSessionsAPI, error) {
+var newAzureDynamicSessionsClient = func(ctx context.Context, cfg core.Config, rt core.Runtime) (azureDynamicSessionsAPI, error) {
 	if err := validateNativeCredentialDestination(cfg); err != nil {
 		return nil, err
 	}
@@ -107,35 +89,35 @@ var newAzureDynamicSessionsClient = func(ctx context.Context, cfg Config, rt Run
 	}, nil
 }
 
-func azureDynamicSessionsEndpoint(cfg Config) (string, error) {
+func azureDynamicSessionsEndpoint(cfg core.Config) (string, error) {
 	if strings.TrimSpace(cfg.AzureDynamicSessions.Pool) != "" {
-		return "", exit(2, "azureDynamicSessions.pool is not supported; set azureDynamicSessions.endpoint to the custom container poolManagementEndpoint")
+		return "", core.Exit(2, "azureDynamicSessions.pool is not supported; set azureDynamicSessions.endpoint to the custom container poolManagementEndpoint")
 	}
 	endpoint := strings.TrimSpace(cfg.AzureDynamicSessions.Endpoint)
 	if endpoint == "" {
-		return "", exit(2, "provider=%s requires azureDynamicSessions.endpoint set to the custom container poolManagementEndpoint", providerName)
+		return "", core.Exit(2, "provider=%s requires azureDynamicSessions.endpoint set to the custom container poolManagementEndpoint", providerName)
 	}
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", exit(2, "%s endpoint %q is invalid", providerName, endpoint)
+		return "", core.Exit(2, "%s endpoint %q is invalid", providerName, endpoint)
 	}
 	if parsed.User != nil {
-		return "", exit(2, "%s endpoint must not include userinfo", providerName)
+		return "", core.Exit(2, "%s endpoint must not include userinfo", providerName)
 	}
-	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return "", exit(2, "%s endpoint %q must use https unless it targets localhost", providerName, endpoint)
+	if parsed.Scheme != "https" && !shared.IsLoopbackHTTPURL(parsed) {
+		return "", core.Exit(2, "%s endpoint %q must use https unless it targets localhost", providerName, endpoint)
 	}
 	if !isAzureDynamicSessionsTrustedEndpointURL(parsed) {
-		return "", exit(2, "%s endpoint %q must target an Azure Container Apps Dynamic Sessions host", providerName, endpoint)
+		return "", core.Exit(2, "%s endpoint %q must target an Azure Container Apps Dynamic Sessions host", providerName, endpoint)
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", exit(2, "%s endpoint %q must not include query or fragment components", providerName, endpoint)
+		return "", core.Exit(2, "%s endpoint %q must not include query or fragment components", providerName, endpoint)
 	}
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
 func isAzureDynamicSessionsTrustedEndpointURL(parsed *url.URL) bool {
-	if isLoopbackHTTPURL(parsed) {
+	if shared.IsLoopbackHTTPURL(parsed) {
 		return true
 	}
 	if parsed.Scheme != "https" {
@@ -145,16 +127,12 @@ func isAzureDynamicSessionsTrustedEndpointURL(parsed *url.URL) bool {
 	return host == "azurecontainerapps.io" || strings.HasSuffix(host, ".azurecontainerapps.io")
 }
 
-func isLoopbackHTTPURL(parsed *url.URL) bool {
-	return shared.IsLoopbackHTTPURL(parsed)
-}
-
-func azureDynamicSessionsAccessToken(ctx context.Context, cfg Config, rt Runtime) (string, error) {
+func azureDynamicSessionsAccessToken(ctx context.Context, cfg core.Config, rt core.Runtime) (string, error) {
 	if token := strings.TrimSpace(os.Getenv(tokenEnvName)); token != "" {
 		return token, nil
 	}
 	if rt.Exec == nil {
-		return "", exit(2, "provider=%s requires %s or Azure CLI authentication", providerName, tokenEnvName)
+		return "", core.Exit(2, "provider=%s requires %s or Azure CLI authentication", providerName, tokenEnvName)
 	}
 	args := []string{
 		"account", "get-access-token",
@@ -168,20 +146,20 @@ func azureDynamicSessionsAccessToken(ctx context.Context, cfg Config, rt Runtime
 	if subscription := strings.TrimSpace(cfg.AzureSubscription); subscription != "" {
 		args = append(args, "--subscription", subscription)
 	}
-	result, err := rt.Exec.Run(ctx, LocalCommandRequest{Name: "az", Args: args})
+	result, err := rt.Exec.Run(ctx, core.LocalCommandRequest{Name: "az", Args: args})
 	if err != nil || result.ExitCode != 0 {
 		stderr := strings.TrimSpace(result.Stderr)
 		if stderr != "" {
-			return "", exit(2, "Azure CLI token request failed: %s", stderr)
+			return "", core.Exit(2, "Azure CLI token request failed: %s", stderr)
 		}
 		if err != nil {
-			return "", exit(2, "Azure CLI token request failed: %v", err)
+			return "", core.Exit(2, "Azure CLI token request failed: %v", err)
 		}
-		return "", exit(2, "Azure CLI token request failed with exit %d", result.ExitCode)
+		return "", core.Exit(2, "Azure CLI token request failed with exit %d", result.ExitCode)
 	}
 	token := strings.TrimSpace(result.Stdout)
 	if token == "" {
-		return "", exit(2, "Azure CLI token request returned an empty token")
+		return "", core.Exit(2, "Azure CLI token request returned an empty token")
 	}
 	return token, nil
 }
@@ -237,7 +215,7 @@ func (c *azureDynamicSessionsClient) UploadFile(ctx context.Context, identifier,
 	return nil
 }
 
-func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier string, execReq azureDynamicSessionsExecRequest, stdout, stderr io.Writer) (int, error) {
+func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier string, execReq shared.CommandStreamRequest, stdout, stderr io.Writer) (int, error) {
 	req, err := shared.NewJSONRequest(ctx, http.MethodPost, c.url("/v1/exec", c.sessionQuery(identifier)), execReq)
 	if err != nil {
 		return 0, err
@@ -252,57 +230,10 @@ func (c *azureDynamicSessionsClient) ExecStream(ctx context.Context, identifier 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return 0, c.responseError(resp)
 	}
-	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if mediaType != "" && mediaType != "application/x-ndjson" && mediaType != "application/jsonl" {
-		return 0, fmt.Errorf("unexpected %s stream content-type %q", providerName, resp.Header.Get("Content-Type"))
-	}
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	exitCode := 0
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var event azureDynamicSessionsExecEvent
-		if err := json.Unmarshal(line, &event); err != nil {
-			return exitCode, fmt.Errorf("decode %s stream event: %w", providerName, err)
-		}
-		switch event.Type {
-		case "stdout":
-			if stdout != nil {
-				if _, err := io.WriteString(stdout, event.Data); err != nil {
-					return exitCode, fmt.Errorf("write %s stdout: %w", providerName, err)
-				}
-			}
-		case "stderr":
-			if stderr != nil {
-				if _, err := io.WriteString(stderr, event.Data); err != nil {
-					return exitCode, fmt.Errorf("write %s stderr: %w", providerName, err)
-				}
-			}
-		case "complete":
-			if event.ExitCode != nil {
-				exitCode = *event.ExitCode
-			}
-			return exitCode, nil
-		case "error":
-			if event.Error == "" {
-				event.Error = "stream error"
-			}
-			return exitCode, errors.New(shared.RedactErrorSecrets(event.Error, c.token))
-		case "start", "heartbeat":
-		default:
-			return exitCode, fmt.Errorf("unknown %s stream event %q", providerName, event.Type)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return exitCode, err
-	}
-	if err := ctx.Err(); err != nil {
-		return exitCode, err
-	}
-	return exitCode, fmt.Errorf("%s stream ended before completion", providerName)
+	return (shared.CommandStream{
+		Provider:    providerName,
+		RedactError: func(message string) string { return shared.RedactErrorSecrets(message, c.token) },
+	}).Read(ctx, resp, stdout, stderr)
 }
 
 func (c *azureDynamicSessionsClient) GetSession(ctx context.Context, identifier string) (azureDynamicSessionsSession, error) {
@@ -383,13 +314,13 @@ func (c *azureDynamicSessionsClient) doJSONURL(ctx context.Context, method, endp
 	}
 	defer resp.Body.Close()
 	return shared.DecodeUnboundedJSONResponse(resp, out, func(statusCode int, status string, data []byte) error {
-		return &azureDynamicSessionsAPIError{StatusCode: statusCode, Status: status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.token)}
+		return &azureDynamicSessionsAPIError{StatusCode: statusCode, Status: status, Body: shared.RedactErrorSecrets(core.SummarizeJSON(data), c.token)}
 	})
 }
 
 func (c *azureDynamicSessionsClient) responseError(resp *http.Response) error {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return &azureDynamicSessionsAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.token)}
+	return &azureDynamicSessionsAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(core.SummarizeJSON(data), c.token)}
 }
 
 func (c *azureDynamicSessionsClient) controlPlaneHTTPClient() *http.Client {
@@ -417,7 +348,7 @@ func (c *azureDynamicSessionsClient) secureHTTPClient(source *http.Client) *http
 	trusted, _ := url.Parse(c.endpoint)
 	originalCheckRedirect := source.CheckRedirect
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if !sameOriginURL(trusted, req.URL) {
+		if !core.SameHTTPOrigin(trusted, req.URL) {
 			return fmt.Errorf("%s refused cross-origin redirect to %s", providerName, req.URL.Redacted())
 		}
 		if originalCheckRedirect != nil {
@@ -450,7 +381,7 @@ func (c *azureDynamicSessionsClient) nextURL(next string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !sameOriginURL(base, parsed) {
+	if !core.SameHTTPOrigin(base, parsed) {
 		return "", fmt.Errorf("%s nextLink points outside configured endpoint origin", providerName)
 	}
 	query := parsed.Query()
@@ -459,10 +390,6 @@ func (c *azureDynamicSessionsClient) nextURL(next string) (string, error) {
 		parsed.RawQuery = query.Encode()
 	}
 	return parsed.String(), nil
-}
-
-func sameOriginURL(a, b *url.URL) bool {
-	return shared.SameOrigin(a, b)
 }
 
 func (c *azureDynamicSessionsClient) url(path string, query url.Values) string {
@@ -507,11 +434,11 @@ func (s azureDynamicSessionsSession) normalized(fallback string) azureDynamicSes
 	return s
 }
 
-func azureDynamicSessionsTimeout(cfg Config) time.Duration {
+func azureDynamicSessionsTimeout(cfg core.Config) time.Duration {
 	return time.Duration(azureDynamicSessionsTimeoutSeconds(cfg)) * time.Second
 }
 
-func azureDynamicSessionsTimeoutSeconds(cfg Config) int {
+func azureDynamicSessionsTimeoutSeconds(cfg core.Config) int {
 	timeout := cfg.AzureDynamicSessions.TimeoutSecs
 	if timeout <= 0 {
 		if cfg.TTL > 0 {

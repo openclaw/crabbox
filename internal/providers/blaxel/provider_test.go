@@ -10,11 +10,11 @@ import (
 
 func TestProviderSpecAndRegistration(t *testing.T) {
 	p := Provider{}
-	if p.Name() != providerName {
-		t.Fatalf("Name=%q want %q", p.Name(), providerName)
+	if p.Spec().Name != providerName {
+		t.Fatalf("Name=%q want %q", p.Spec().Name, providerName)
 	}
-	if len(p.Aliases()) != 0 {
-		t.Fatalf("Aliases=%v, want none", p.Aliases())
+	if len(p.Spec().Aliases) != 0 {
+		t.Fatalf("Aliases=%v, want none", p.Spec().Aliases)
 	}
 	spec := p.Spec()
 	if spec.Name != providerName || spec.Family != providerName {
@@ -36,11 +36,11 @@ func TestProviderSpecAndRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProviderFor(blaxel): %v", err)
 	}
-	if got.Name() != providerName {
-		t.Fatalf("ProviderFor(blaxel).Name=%q", got.Name())
+	if got.Spec().Name != providerName {
+		t.Fatalf("ProviderFor(blaxel).Name=%q", got.Spec().Name)
 	}
 	for _, alias := range []string{"blx", "sandbox"} {
-		if got, err := core.ProviderFor(alias); err == nil && got.Name() == providerName {
+		if got, err := core.ProviderFor(alias); err == nil && got.Spec().Name == providerName {
 			t.Fatalf("alias %q unexpectedly resolves to blaxel", alias)
 		}
 	}
@@ -109,7 +109,7 @@ func TestBlaxelFlagPresenceAndValidationOrder(t *testing.T) {
 		t.Fatal("explicit zeros not copied")
 	}
 	for _, name := range []string{"blaxel", " Blaxel "} {
-		cfg := Config{Provider: name}
+		cfg := core.Config{Provider: name}
 		fs := flag.NewFlagSet("guard", flag.ContinueOnError)
 		fs.String("class", "", "")
 		fs.String("type", "", "")
@@ -130,7 +130,7 @@ func TestBlaxelFlagPresenceAndValidationOrder(t *testing.T) {
 			}
 		}
 	}
-	cfg = Config{Blaxel: BlaxelConfig{APIURL: " ", MemoryMB: -1, ExecTimeoutSecs: -1, Workdir: "relative"}}
+	cfg = core.Config{Blaxel: core.BlaxelConfig{APIURL: " ", MemoryMB: -1, ExecTimeoutSecs: -1, Workdir: "relative"}}
 	if err := ApplyBlaxelProviderFlags(&cfg, flag.NewFlagSet("foreign", flag.ContinueOnError), struct{}{}); err != nil {
 		t.Fatal("foreign values reached validation")
 	}

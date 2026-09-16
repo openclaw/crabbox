@@ -27,7 +27,7 @@ func TestManagedWSLConfigBeforeLaunch(t *testing.T) {
 			cfg.TargetOS, cfg.WindowsMode, cfg.Desktop, cfg.Browser = test.target, test.mode, test.desktop, test.browser
 			script := cloudInit(cfg, "ssh-ed25519 test")
 			if test.target == targetWindows {
-				script = windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+				script = WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 			}
 			if got := strings.Contains(script, "guiApplications=false"); got != test.want {
 				t.Fatalf("headless WSL policy present=%t, want %t", got, test.want)

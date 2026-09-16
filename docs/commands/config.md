@@ -26,6 +26,12 @@ report that override exactly as supplied, including a relative or symlink path.
 Without an override, they report the absolute OS user-config path. Reporting a
 path does not create the file or change its trust classification.
 
+`XDG_STATE_HOME` independently selects the local runtime-state root, including
+generated per-lease SSH keys and host trust. It must be an absolute operator-owned
+path; it is not a repository configuration option. Without it, existing OS
+default locations remain unchanged. See [SSH keys](../features/ssh-keys.md) for
+privacy requirements and why changing roots does not migrate or find old keys.
+
 ## config show
 
 Prints the merged effective configuration with secret values redacted:
@@ -80,6 +86,12 @@ credentials or read external CLI configuration. CUA's bridge command and SDK
 package/import names are configured references, not evidence that an executable
 or SDK is installed or working. Displaying them does not execute the bridge or
 enable CUA provisioning.
+
+Hyper-V's JSON `hyperv` section and text `hyperv` line expose loaded image,
+user, work-root, CPU, memory, switch and `initPassword` settings, even when
+unselected. Empty strings, zero values and false remain visible. The guest
+password and credential-presence information are omitted. This passive display
+does not invoke Hyper-V, inspect a guest, or establish runtime readiness.
 
 ### Offline provider status
 
@@ -279,6 +291,12 @@ permissions are broader than that.
 
 ## Repo-local config
 
+Private local run recording is off by default. Set `history.local.enabled: true`
+only in your user config to enable it for runs; repository files cannot change
+this policy. An explicit `run --record-local=false` overrides the user setting.
+See [local history](../features/history-logs.md#private-local-history) for storage
+bounds, output scope, and offline readers.
+
 User config holds machine-wide defaults and secrets; repo-local config holds
 project-specific, checkout-shareable settings. Keep sync rules, environment
 allow-lists, capacity policy, and Actions hydration settings in repo config so
@@ -304,6 +322,7 @@ actions:
 sync:
   checksum: false
   gitSeed: true
+  gitSeedSource: origin
   gitOverlay: false
   fingerprint: true
   timeout: 15m

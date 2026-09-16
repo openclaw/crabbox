@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { sha256Hex } from "../src/auth";
 import {
   CheckpointError,
   expireCheckpointClaims,
@@ -36,6 +35,7 @@ import type {
   CoordinatorStorageView,
   CoordinatorWebSocketUpgrade,
 } from "../src/coordinator-runtime";
+import { sha256Hex } from "../src/encoding";
 import { AWSProvider, AzureProvider, FleetCoordinator, GCPProvider } from "../src/fleet";
 import { orgKeyForLabel } from "../src/org-identity";
 import type {

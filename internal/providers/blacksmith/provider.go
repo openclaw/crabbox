@@ -4,7 +4,6 @@ import (
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -19,12 +18,9 @@ func (p Provider) ValidateRunOptions(req core.RunRequest) error {
 	return validateBlacksmithRunOptions(p.Spec(), req)
 }
 
-func (Provider) Name() string { return "blacksmith-testbox" }
-func (Provider) Aliases() []string {
-	return []string{"blacksmith"}
-}
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"blacksmith"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             "blacksmith-testbox",
 		Family:           "blacksmith",
@@ -43,8 +39,4 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 }
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewBlacksmithBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("blacksmith-testbox", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

@@ -152,7 +152,7 @@ func TestWarmupCreatesOwnedClaim(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, &stdout, &stderr)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.sandboxes) != 1 {
@@ -163,7 +163,7 @@ func TestWarmupCreatesOwnedClaim(t *testing.T) {
 		sb = value
 	}
 	leaseID := leasePrefix + sb.ID
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,12 +182,12 @@ func TestCreateMetadataRedactsRemoteURLCredentials(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
-	repo := Repo{
+	repo := core.Repo{
 		Name:      "my-app",
 		Root:      "/repo",
 		RemoteURL: "https://oauth2:secret-token@github.com/openclaw/crabbox.git",
 	}
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: repo, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.creates) != 1 {
@@ -206,7 +206,7 @@ func TestDoctorFailsUnhealthyBridgeResponse(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.healthOK = false
 	backend := testBackend(fake, io.Discard, io.Discard)
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestDoctorFailsWhenOpenAPIReadinessFails(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.openAPIErr = errors.New("401 Unauthorized")
 	backend := testBackend(fake, io.Discard, io.Discard)
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestWarmupAcceptsGeneratedSandboxIDWithEchoedMetadata(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.generateIDs = true
 	backend := testBackend(fake, &stdout, &stderr)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.creates) != 1 {
@@ -250,21 +250,21 @@ func TestWarmupAcceptsGeneratedSandboxIDWithEchoedMetadata(t *testing.T) {
 	if leaseID == "" {
 		t.Fatalf("request metadata=%#v", fake.creates[0].Metadata)
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if claim.CloudID != "cf-sandbox-a" {
 		t.Fatalf("claim CloudID=%q want generated sandbox id", claim.CloudID)
 	}
-	status, err := backend.Status(context.Background(), StatusRequest{ID: claim.Slug})
+	status, err := backend.Status(context.Background(), core.StatusRequest{ID: claim.Slug})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if status.ID != leaseID || status.ServerID != claim.CloudID {
 		t.Fatalf("status=%#v claim=%#v", status, claim)
 	}
-	views, err := backend.List(context.Background(), ListRequest{})
+	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,14 +278,14 @@ func TestWarmupVerifiesOwnershipMetadataWhenCreateOmitsIt(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.omitCreateMetadata = true
 	backend := testBackend(fake, io.Discard, io.Discard)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Contains(fake.calls, "get:"+fake.creates[0].Name) {
 		t.Fatalf("calls=%#v, want create metadata verification fetch", fake.calls)
 	}
 	leaseID := fake.creates[0].Metadata[metadataClaimKey]
-	if _, err := readLeaseClaim(leaseID); err != nil {
+	if _, err := core.ReadLeaseClaim(leaseID); err != nil {
 		t.Fatalf("claim not created after verified metadata fetch: %v", err)
 	}
 }
@@ -296,7 +296,7 @@ func TestWarmupRejectsCreateWhenRemoteMetadataMissing(t *testing.T) {
 	fake.omitCreateMetadata = true
 	fake.dropMetadata = true
 	backend := testBackend(fake, io.Discard, io.Discard)
-	err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true})
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true})
 	if err == nil || !strings.Contains(err.Error(), "ownership metadata") {
 		t.Fatalf("err=%v, want ownership metadata failure", err)
 	}
@@ -312,8 +312,8 @@ func TestRunOneShotSyncsExecutesAndDeletes(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.stdout = "ok\n"
 	backend := testBackend(fake, &stdout, &stderr)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:               Repo{Name: "my-app", Root: repo},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:               core.Repo{Name: "my-app", Root: repo},
 		Command:            []string{"echo", "ok", "&&"},
 		CommandLiteralArgs: map[int]bool{2: true},
 	})
@@ -353,8 +353,8 @@ func TestRunKeepPublishesReusableSessionAndCleanupStopsSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: tempRepo(t)},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Name: "my-app", Root: tempRepo(t)},
 		NoSync:  true,
 		Keep:    true,
 		Command: []string{"true"},
@@ -374,13 +374,13 @@ func TestRunKeepPublishesReusableSessionAndCleanupStopsSandbox(t *testing.T) {
 	if result.Session.CleanupCommand != cloudflareSandboxCleanupCommand(result.LeaseID) {
 		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
 	}
-	if err := backend.Stop(context.Background(), StopRequest{ID: result.Session.LeaseID}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: result.Session.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.sandboxes) != 0 {
 		t.Fatalf("cleanup left sandboxes: %#v", fake.sandboxes)
 	}
-	claim, err := readLeaseClaim(result.Session.LeaseID)
+	claim, err := core.ReadLeaseClaim(result.Session.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,15 +394,15 @@ func TestRetainedRunByIDVerifiesOwnershipAndKeepsClaim(t *testing.T) {
 	repo := tempRepo(t)
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: repo}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: repo}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	var leaseID string
 	for id := range fake.sandboxes {
 		leaseID = leasePrefix + id
 	}
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: repo},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Name: "my-app", Root: repo},
 		ID:      leaseID,
 		NoSync:  true,
 		Keep:    true,
@@ -417,7 +417,7 @@ func TestRetainedRunByIDVerifiesOwnershipAndKeepsClaim(t *testing.T) {
 	if result.Session == nil || !result.Session.Reused || !result.Session.Kept || result.Session.LeaseID != leaseID || result.Session.Slug != result.Slug {
 		t.Fatalf("session=%#v result=%#v", result.Session, result)
 	}
-	if _, err := readLeaseClaim(leaseID); err != nil {
+	if _, err := core.ReadLeaseClaim(leaseID); err != nil {
 		t.Fatalf("claim not retained: %v", err)
 	}
 	if len(fake.sandboxes) != 1 {
@@ -429,7 +429,7 @@ func TestStopRejectsOwnershipMismatch(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	var leaseID, sandboxID string
@@ -439,7 +439,7 @@ func TestStopRejectsOwnershipMismatch(t *testing.T) {
 		sb.Metadata[metadataProviderKey] = "foreign"
 		fake.sandboxes[id] = sb
 	}
-	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: leaseID})
 	if err == nil || !strings.Contains(err.Error(), "ownership metadata") {
 		t.Fatalf("err=%v", err)
 	}
@@ -452,7 +452,7 @@ func TestStopHonorsLeaseOperationLock(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	var leaseID string
@@ -467,7 +467,7 @@ func TestStopHonorsLeaseOperationLock(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
-	err = backend.Stop(ctx, StopRequest{ID: leaseID})
+	err = backend.Stop(ctx, core.StopRequest{ID: leaseID})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Stop err=%v, want context deadline", err)
 	}
@@ -480,7 +480,7 @@ func TestCleanupPreservesMissingClaimUnlessForgetMissing(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	var leaseID string
@@ -488,17 +488,17 @@ func TestCleanupPreservesMissingClaimUnlessForgetMissing(t *testing.T) {
 		leaseID = leasePrefix + id
 		delete(fake.sandboxes, id)
 	}
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readLeaseClaim(leaseID); err != nil {
+	if _, err := core.ReadLeaseClaim(leaseID); err != nil {
 		t.Fatalf("claim should be preserved without forget-missing: %v", err)
 	}
 	backend.cfg.CloudflareSandbox.ForgetMissing = true
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,8 +512,8 @@ func TestRunForwardsAllowedEnvOffArgvAndStripsProviderSecrets(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
 	secretValue := "secret-token-value"
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: tempRepo(t)},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Name: "my-app", Root: tempRepo(t)},
 		Keep:    true,
 		NoSync:  true,
 		Command: []string{"env"},
@@ -556,8 +556,8 @@ func TestSyncDeleteUsesStagingReplace(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
 	backend.cfg.Sync.Delete = true
-	if _, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: repo},
+	if _, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Name: "my-app", Root: repo},
 		Command: []string{"true"},
 	}); err != nil {
 		t.Fatal(err)
@@ -572,8 +572,8 @@ func TestRunKeepOnFailureRetainsClaim(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.exitCode = 7
 	backend := testBackend(fake, io.Discard, io.Discard)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:          Repo{Name: "my-app", Root: tempRepo(t)},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Name: "my-app", Root: tempRepo(t)},
 		NoSync:        true,
 		KeepOnFailure: true,
 		Command:       []string{"false"},
@@ -591,7 +591,7 @@ func TestRunKeepOnFailureRetainsClaim(t *testing.T) {
 	for id := range fake.sandboxes {
 		leaseID = leasePrefix + id
 	}
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID == "" {
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID == "" {
 		t.Fatalf("claim should be retained: claim=%#v err=%v", claim, err)
 	}
 }
@@ -600,8 +600,8 @@ func TestRunKeepOnFailureStillDeletesSuccessfulOneShot(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:          Repo{Name: "my-app", Root: tempRepo(t)},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Name: "my-app", Root: tempRepo(t)},
 		NoSync:        true,
 		KeepOnFailure: true,
 		Command:       []string{"true"},
@@ -622,8 +622,8 @@ func TestRunCleanupFailureReturnsRetainedSession(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.deleteErr = errors.New("bridge delete unavailable")
 	backend := testBackend(fake, io.Discard, io.Discard)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: tempRepo(t)},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Name: "my-app", Root: tempRepo(t)},
 		NoSync:  true,
 		Command: []string{"true"},
 	})
@@ -650,11 +650,11 @@ func TestListReturnsOwnedSandboxesOnly(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	fake.sandboxes["foreign"] = sandboxSummary{ID: "foreign", Status: "running"}
-	views, err := backend.List(context.Background(), ListRequest{})
+	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -676,7 +676,7 @@ func TestCloudflareSandboxCreateKeepsRawConfiguredWorkdir(t *testing.T) {
 		b := testBackend(fake, io.Discard, io.Discard)
 		b.cfg.CloudflareSandbox.Workdir = raw
 		root := t.TempDir()
-		_, _, _, release, err := b.createSandbox(context.Background(), fake, Repo{Name: "example", Root: root}, false, "")
+		_, _, _, release, err := b.createSandbox(context.Background(), fake, core.Repo{Name: "example", Root: root}, false, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -710,11 +710,11 @@ func testBackend(fake *lifecycleFakeClient, stdout, stderr io.Writer) *backend {
 	return &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt: Runtime{
+		rt: core.Runtime{
 			Stdout: stdout,
 			Stderr: stderr,
 		},
-		newClient: func(Config, Runtime) (bridgeClient, error) {
+		newClient: func(core.Config, core.Runtime) (bridgeClient, error) {
 			return fake, nil
 		},
 	}
@@ -760,8 +760,8 @@ func TestRunLifecycleArchiveGuardrailBeforeCreation(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
 	backend.cfg.Sync.FailFiles = 1
-	result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: tempRepo(t)}, Command: []string{"true"}})
-	var ee ExitError
+	result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Name: "repo", Root: tempRepo(t)}, Command: []string{"true"}})
+	var ee core.ExitError
 	if !errors.As(err, &ee) || ee.Code != 6 || result.ExitCode != 6 || len(fake.creates) != 0 || result.Session != nil {
 		t.Fatalf("result=%#v err=%v creates=%v", result, err, fake.creates)
 	}
@@ -775,12 +775,12 @@ func TestRunLifecycleCleanupOutcomeAndTiming(t *testing.T) {
 			fake.exitCode, fake.deleteErr = code, errors.New("delete unavailable")
 			var stderr bytes.Buffer
 			backend := testBackend(fake, io.Discard, &stderr)
-			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, TimingJSON: true})
+			result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true, TimingJSON: true})
 			wantCode, wantKind := code, core.RunErrorCommandExit
 			if code == 0 {
 				wantCode, wantKind = 1, core.RunErrorProvider
 			}
-			var ee ExitError
+			var ee core.ExitError
 			if !errors.As(err, &ee) || ee.Code != wantCode || result.ExitCode != wantCode || result.ErrorKind != wantKind || result.Session == nil || !result.Session.Kept {
 				t.Fatalf("result=%#v err=%v", result, err)
 			}
@@ -812,8 +812,8 @@ func TestRunLifecycleHonorsOperationLockAndReleasesOnOwnershipFailure(t *testing
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
-	repo := Repo{Name: "repo", Root: t.TempDir()}
-	kept, err := backend.Run(t.Context(), RunRequest{Repo: repo, NoSync: true, Keep: true, SyncOnly: true})
+	repo := core.Repo{Name: "repo", Root: t.TempDir()}
+	kept, err := backend.Run(t.Context(), core.RunRequest{Repo: repo, NoSync: true, Keep: true, SyncOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -823,7 +823,7 @@ func TestRunLifecycleHonorsOperationLockAndReleasesOnOwnershipFailure(t *testing
 	}
 	callsBefore := len(fake.calls)
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Millisecond)
-	result, err := backend.Run(ctx, RunRequest{Repo: repo, ID: kept.LeaseID, NoSync: true, Command: []string{"true"}})
+	result, err := backend.Run(ctx, core.RunRequest{Repo: repo, ID: kept.LeaseID, NoSync: true, Command: []string{"true"}})
 	cancel()
 	unlock()
 	if !errors.Is(err, context.DeadlineExceeded) || result.Session != nil || len(fake.calls) != callsBefore {
@@ -833,7 +833,7 @@ func TestRunLifecycleHonorsOperationLockAndReleasesOnOwnershipFailure(t *testing
 		sandbox.Metadata[metadataClaimKey] = "foreign"
 		fake.sandboxes[id] = sandbox
 	}
-	result, err = backend.Run(t.Context(), RunRequest{Repo: repo, ID: kept.LeaseID, NoSync: true, Command: []string{"true"}})
+	result, err = backend.Run(t.Context(), core.RunRequest{Repo: repo, ID: kept.LeaseID, NoSync: true, Command: []string{"true"}})
 	if err == nil || result.Session != nil || len(fake.execs) != 1 || len(fake.sandboxes) != 1 {
 		t.Fatalf("ownership check bypassed: result=%#v err=%v execs=%v", result, err, fake.execs)
 	}

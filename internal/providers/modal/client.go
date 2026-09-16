@@ -54,14 +54,14 @@ type modalSandbox struct {
 }
 
 type modalPythonClient struct {
-	cfg     Config
-	rt      Runtime
+	cfg     core.Config
+	rt      core.Runtime
 	binding *modalBinding
 }
 
-var newModalAPI = func(cfg Config, rt Runtime) (modalAPI, error) {
+var newModalAPI = func(cfg core.Config, rt core.Runtime) (modalAPI, error) {
 	if rt.Exec == nil {
-		return nil, exit(2, "provider=modal requires Runtime.Exec")
+		return nil, core.Exit(2, "provider=modal requires Runtime.Exec")
 	}
 	return &modalPythonClient{cfg: cfg, rt: rt}, nil
 }
@@ -177,7 +177,7 @@ func (c *modalPythonClient) Terminate(ctx context.Context, binding modalBinding)
 		return err
 	}
 	if sandbox.Status != "finished" {
-		return exit(5, "Modal termination did not confirm terminal state")
+		return core.Exit(5, "Modal termination did not confirm terminal state")
 	}
 	return nil
 }
@@ -188,7 +188,7 @@ func (c *modalPythonClient) runJSON(ctx context.Context, script string, payload 
 		return err
 	}
 	var stdout, stderr bytes.Buffer
-	res, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	res, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   c.python(),
 		Args:   []string{"-c", script, string(data)},
 		Env:    c.env(),
@@ -213,7 +213,7 @@ func (c *modalPythonClient) runStreamed(ctx context.Context, script string, payl
 	if err != nil {
 		return core.LocalCommandResult{}, err
 	}
-	return c.rt.Exec.Run(ctx, LocalCommandRequest{
+	return c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   c.python(),
 		Args:   []string{"-c", script, string(data)},
 		Env:    c.env(),

@@ -15,13 +15,13 @@ import (
 )
 
 type sbxCLI struct {
-	cfg Config
-	rt  Runtime
+	cfg core.Config
+	rt  core.Runtime
 }
 
-func newSBXCLI(cfg Config, rt Runtime) (*sbxCLI, error) {
+func newSBXCLI(cfg core.Config, rt core.Runtime) (*sbxCLI, error) {
 	if rt.Exec == nil {
-		return nil, exit(2, "provider=docker-sandbox requires Runtime.Exec")
+		return nil, core.Exit(2, "provider=docker-sandbox requires Runtime.Exec")
 	}
 	return &sbxCLI{cfg: cfg, rt: rt}, nil
 }
@@ -36,7 +36,7 @@ func (c *sbxCLI) env() []string {
 
 func (c *sbxCLI) runQuiet(ctx context.Context, args []string) (string, string, error) {
 	var stdout, stderr bytes.Buffer
-	res, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	res, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   c.binary(),
 		Args:   args,
 		Env:    c.env(),
@@ -53,7 +53,7 @@ func (c *sbxCLI) runQuiet(ctx context.Context, args []string) (string, string, e
 }
 
 func (c *sbxCLI) runStreamed(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error) {
-	res, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	res, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   c.binary(),
 		Args:   args,
 		Env:    c.env(),
@@ -87,7 +87,7 @@ func (c *sbxCLI) diagnose(ctx context.Context) (string, error) {
 	return out, err
 }
 
-func (c *sbxCLI) create(ctx context.Context, name string, repo Repo) error {
+func (c *sbxCLI) create(ctx context.Context, name string, repo core.Repo) error {
 	args := []string{"create", "--name", name}
 	if v := strings.TrimSpace(c.cfg.DockerSandbox.Template); v != "" {
 		args = append(args, "--template", v)
@@ -182,7 +182,7 @@ func parseSandboxList(data string) ([]sandboxRecord, error) {
 	}
 	var root any
 	if err := json.Unmarshal([]byte(data), &root); err != nil {
-		return nil, exit(2, "parse sbx ls --json output: %v", err)
+		return nil, core.Exit(2, "parse sbx ls --json output: %v", err)
 	}
 	var items []any
 	switch value := root.(type) {
@@ -199,7 +199,7 @@ func parseSandboxList(data string) ([]sandboxRecord, error) {
 			items = []any{value}
 		}
 	default:
-		return nil, exit(2, "parse sbx ls --json output: expected array or object, got %T", root)
+		return nil, core.Exit(2, "parse sbx ls --json output: expected array or object, got %T", root)
 	}
 	records := make([]sandboxRecord, 0, len(items))
 	for _, item := range items {

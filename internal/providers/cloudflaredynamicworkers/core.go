@@ -1,36 +1,10 @@
 package cloudflaredynamicworkers
 
 import (
-	"io"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
-
-type Config = core.Config
-type CloudflareDynamicWorkersConfig = core.CloudflareDynamicWorkersConfig
-type ProviderSpec = core.ProviderSpec
-type Runtime = core.Runtime
-type Backend = core.Backend
-type DoctorRequest = core.DoctorRequest
-type DoctorResult = core.DoctorResult
-type DoctorCheck = core.DoctorCheck
-type WarmupRequest = core.WarmupRequest
-type RunRequest = core.RunRequest
-type RunResult = core.RunResult
-type RunSessionHandle = core.RunSessionHandle
-type RunScriptSpec = core.RunScriptSpec
-type ListRequest = core.ListRequest
-type LeaseView = core.LeaseView
-type StatusRequest = core.StatusRequest
-type StatusView = core.StatusView
-type StopRequest = core.StopRequest
-type CleanupRequest = core.CleanupRequest
-type Server = core.Server
-type LeaseClaim = core.LeaseClaim
-type Repo = core.Repo
-type ExitError = core.ExitError
-type timingReport = core.TimingReport
 
 const (
 	providerName             = "cloudflare-dynamic-workers"
@@ -38,19 +12,7 @@ const (
 	defaultCompatibilityDate = core.DefaultCloudflareDynamicWorkersCompatibilityDate
 )
 
-func exit(code int, format string, args ...any) core.ExitError {
-	return core.Exit(code, format, args...)
-}
-
-func newLeaseSlug(leaseID string) string {
-	return core.NewLeaseSlug(leaseID)
-}
-
-func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
-	return core.AllocateClaimLeaseSlug(leaseID, requested)
-}
-
-func claimLease(leaseID, slug string, cfg Config, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server) error {
+func claimLease(leaseID, slug string, cfg core.Config, repoRoot string, idleTimeout time.Duration, reclaim bool, server core.Server) error {
 	scope, err := loaderClaimScope(cfg)
 	if err != nil {
 		return err
@@ -58,7 +20,7 @@ func claimLease(leaseID, slug string, cfg Config, repoRoot string, idleTimeout t
 	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, scope, cfg.Pond, repoRoot, idleTimeout, reclaim, server, core.SSHTarget{TargetOS: targetWorker})
 }
 
-func resolveLeaseClaim(identifier string, cfg Config) (core.LeaseClaim, bool, error) {
+func resolveLeaseClaim(identifier string, cfg core.Config) (core.LeaseClaim, bool, error) {
 	scope, err := loaderClaimScope(cfg)
 	if err != nil {
 		return core.LeaseClaim{}, false, err
@@ -73,7 +35,7 @@ func resolveLeaseClaim(identifier string, cfg Config) (core.LeaseClaim, bool, er
 				return exact, true, nil
 			}
 			if exact.Provider == providerName {
-				return core.LeaseClaim{}, false, exit(2, "%s claim %s belongs to a different loader endpoint", providerName, identifier)
+				return core.LeaseClaim{}, false, core.Exit(2, "%s claim %s belongs to a different loader endpoint", providerName, identifier)
 			}
 		}
 	}
@@ -96,32 +58,8 @@ func resolveLeaseClaim(identifier string, cfg Config) (core.LeaseClaim, bool, er
 	return matched, matched.LeaseID != "", nil
 }
 
-func listLeaseClaims() ([]core.LeaseClaim, error) {
-	return core.ListLeaseClaims()
-}
-
-func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
-	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
-}
-
-func timingReportWithRunResult(report timingReport, result RunResult, err error) timingReport {
-	return core.TimingReportWithRunResult(report, result, err)
-}
-
-func timingReportWithProviderError(report timingReport) timingReport {
+func timingReportWithProviderError(report core.TimingReport) core.TimingReport {
 	report.RunStatus = core.RunStatusFailed
 	report.ErrorKind = core.RunErrorProvider
 	return report
-}
-
-func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
-	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
-}
-
-func rejectDelegatedSyncOptions(spec ProviderSpec, req RunRequest) error {
-	return core.RejectDelegatedSyncOptionsForSpec(spec, req)
 }

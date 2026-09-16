@@ -18,51 +18,51 @@ import (
 )
 
 type backend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
-func NewBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	cfg.TargetOS = targetWorker
 	return &backend{spec: spec, cfg: cfg, rt: rt}
 }
 
-func (b *backend) Spec() ProviderSpec { return b.spec }
+func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	client, err := newLoaderAPI(b.cfg, b.rt)
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
 	readiness, err := client.Readiness(ctx)
 	if err != nil {
-		return DoctorResult{}, providerError("readiness", err)
+		return core.DoctorResult{}, providerError("readiness", err)
 	}
-	checks := []DoctorCheck{
+	checks := []core.DoctorCheck{
 		{Status: "pass", Check: "loader-api", Message: "readiness endpoint reachable"},
 	}
 	status := "pass"
 	if !readiness.OK || readiness.Runner != providerName || !readiness.LoaderBinding || !readiness.CoordinatorBinding || !readiness.DurableRunMetadata {
 		status = "fail"
 		if !readiness.OK {
-			checks = append(checks, DoctorCheck{Status: "fail", Check: "ok", Message: "readiness did not report ok=true"})
+			checks = append(checks, core.DoctorCheck{Status: "fail", Check: "ok", Message: "readiness did not report ok=true"})
 		}
 		if readiness.Runner != providerName {
-			checks = append(checks, DoctorCheck{Status: "fail", Check: "runner", Message: fmt.Sprintf("readiness runner=%s", core.Blank(readiness.Runner, "-"))})
+			checks = append(checks, core.DoctorCheck{Status: "fail", Check: "runner", Message: fmt.Sprintf("readiness runner=%s", core.Blank(readiness.Runner, "-"))})
 		}
 		if !readiness.LoaderBinding {
-			checks = append(checks, DoctorCheck{Status: "fail", Check: "loader-binding", Message: "Dynamic Workers binding unavailable"})
+			checks = append(checks, core.DoctorCheck{Status: "fail", Check: "loader-binding", Message: "Dynamic Workers binding unavailable"})
 		}
 		if !readiness.CoordinatorBinding {
-			checks = append(checks, DoctorCheck{Status: "fail", Check: "coordinator-binding", Message: "RUN_COORDINATOR Durable Object binding unavailable"})
+			checks = append(checks, core.DoctorCheck{Status: "fail", Check: "coordinator-binding", Message: "RUN_COORDINATOR Durable Object binding unavailable"})
 		}
 		if !readiness.DurableRunMetadata {
-			checks = append(checks, DoctorCheck{Status: "fail", Check: "run-metadata", Message: "RUNS KV binding unavailable"})
+			checks = append(checks, core.DoctorCheck{Status: "fail", Check: "run-metadata", Message: "RUNS KV binding unavailable"})
 		}
 	}
-	return DoctorResult{
+	return core.DoctorResult{
 		Provider: providerName,
 		Status:   status,
 		Message:  fmt.Sprintf("auth=ready control_plane=ready api=readiness mutation=false runner=%s loader_binding=%t coordinator_binding=%t durable_run_metadata=%t compatibility_date=%s egress=%s", core.Blank(readiness.Runner, "-"), readiness.LoaderBinding, readiness.CoordinatorBinding, readiness.DurableRunMetadata, core.Blank(readiness.CompatibilityDate, "-"), core.Blank(readiness.Egress, "-")),
@@ -70,44 +70,45 @@ func (b *backend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, er
 	}, nil
 }
 
-func (b *backend) Warmup(context.Context, WarmupRequest) error {
-	return exit(2, "provider=%s requires module source; use crabbox run --script <file>", providerName)
+func (b *backend) Warmup(context.Context, core.WarmupRequest) error {
+	return core.Exit(2, "provider=%s requires module source; use crabbox run --script <file>", providerName)
 }
 
-func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
-	if err := rejectDelegatedSyncOptions(b.spec, req); err != nil {
-		return RunResult{}, err
+func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
+	if err := core.RejectDelegatedSyncOptionsForSpec(b.spec, req); err != nil {
+		return core.RunResult{}, err
 	}
 	if req.Script == nil || len(req.Script.Data) == 0 {
-		return RunResult{}, exit(2, "%s requires --script or --script-stdin module source", providerName)
+		return core.RunResult{}, core.Exit(2, "%s requires --script or --script-stdin module source", providerName)
 	}
 	started := core.ClockNow(b.rt.Clock)
 	client, err := newLoaderAPI(b.cfg, b.rt)
 	if err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	cacheMode := normalizeCacheMode(b.cfg.CloudflareDynamicWorkers.CacheMode)
 	if cacheMode == "" {
 		cacheMode = "stable"
 	}
 	if normalizeEgress(b.cfg.CloudflareDynamicWorkers.Egress) == "intercept" && cacheMode != "one-shot" {
-		return RunResult{}, exit(2, "%s egress=intercept requires cache=one-shot because gateway context is run-scoped", providerName)
+		return core.RunResult{}, core.Exit(2, "%s egress=intercept requires cache=one-shot because gateway context is run-scoped", providerName)
 	}
 	leaseID, workerID, slug, reused, err := b.runIdentity(req, cacheMode)
 	if err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	loaderReq := b.buildRunRequest(req, leaseID, workerID, cacheMode)
 	if req.EnvSummary {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+		core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
 	commandStarted := core.ClockNow(b.rt.Clock)
+	req.Observation.Phase(core.RunPhaseCommand)
 	run, err := client.Run(ctx, loaderReq)
 	commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStarted)
 	if err != nil {
 		total := core.ClockNow(b.rt.Clock).Sub(started)
 		timingWritten := false
-		result := RunResult{
+		result := core.RunResult{
 			ExitCode:    1,
 			Command:     commandDuration,
 			Total:       total,
@@ -134,7 +135,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 				status.WorkerID = workerID
 			}
 			if strings.TrimSpace(slug) == "" {
-				slug = newLeaseSlug(leaseID)
+				slug = core.NewLeaseSlug(leaseID)
 				result.Slug = slug
 			}
 			server := runServer(leaseID, slug, status, mergeRunLabels(status.Metadata, map[string]string{
@@ -160,7 +161,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			total = core.ClockNow(b.rt.Clock).Sub(started)
 			result.Total = total
 			if req.TimingJSON {
-				report := timingReportWithProviderError(timingReportWithRunResult(timingReport{
+				report := timingReportWithProviderError(core.TimingReportWithRunResult(core.TimingReport{
 					Provider:  providerName,
 					LeaseID:   leaseID,
 					Slug:      slug,
@@ -169,7 +170,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 					ExitCode:  1,
 					Label:     strings.TrimSpace(req.Label),
 				}, result, err))
-				if timingErr := writeTimingJSON(b.rt.Stderr, report); timingErr != nil {
+				if timingErr := core.WriteTimingJSON(b.rt.Stderr, report); timingErr != nil {
 					return result, timingErr
 				}
 				timingWritten = true
@@ -188,7 +189,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			}
 		}
 		if req.TimingJSON && !timingWritten {
-			report := timingReportWithProviderError(timingReportWithRunResult(timingReport{
+			report := timingReportWithProviderError(core.TimingReportWithRunResult(core.TimingReport{
 				Provider:  providerName,
 				LeaseID:   leaseID,
 				Slug:      slug,
@@ -197,16 +198,16 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 				ExitCode:  result.ExitCode,
 				Label:     strings.TrimSpace(req.Label),
 			}, result, err))
-			if timingErr := writeTimingJSON(b.rt.Stderr, report); timingErr != nil {
+			if timingErr := core.WriteTimingJSON(b.rt.Stderr, report); timingErr != nil {
 				return result, timingErr
 			}
 		}
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("%s run failed: %v", providerName, err)}
+		return result, core.ExitError{Code: 1, Message: fmt.Sprintf("%s run failed: %v", providerName, err)}
 	}
 	if strings.TrimSpace(run.ID) != "" {
 		leaseID = run.ID
 		if strings.TrimSpace(slug) == "" {
-			slug = newLeaseSlug(leaseID)
+			slug = core.NewLeaseSlug(leaseID)
 		}
 	}
 	if strings.TrimSpace(run.WorkerID) == "" {
@@ -215,7 +216,8 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	if cacheMode == "explicit" {
 		fmt.Fprintf(b.rt.Stderr, "dynamic worker run=%s worker=%s\n", leaseID, run.WorkerID)
 	}
-	writeRunOutput(b.rt.Stdout, b.rt.Stderr, run)
+	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputWorkload)
+	writeRunOutput(stdout, stderr, run)
 	claimStatus := runStatus{
 		ID:       leaseID,
 		WorkerID: run.WorkerID,
@@ -250,11 +252,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	}
 	var runErr error
 	if exitCode != 0 {
-		runErr = ExitError{Code: exitCode, Message: fmt.Sprintf("%s run exited %d", providerName, exitCode)}
+		runErr = core.ExitError{Code: exitCode, Message: fmt.Sprintf("%s run exited %d", providerName, exitCode)}
 	}
 	total := core.ClockNow(b.rt.Clock).Sub(started)
 	keepRun := req.Keep || cacheMode == "explicit" || (req.KeepOnFailure && exitCode != 0) || run.LifecycleUncertain
-	result := RunResult{
+	result := core.RunResult{
 		ExitCode:    exitCode,
 		Command:     commandDuration,
 		Total:       total,
@@ -297,7 +299,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 		}
 	}
 	if req.TimingJSON {
-		if err := writeTimingJSON(b.rt.Stderr, timingReportWithRunResult(timingReport{
+		if err := core.WriteTimingJSON(b.rt.Stderr, core.TimingReportWithRunResult(core.TimingReport{
 			Provider:  providerName,
 			LeaseID:   leaseID,
 			Slug:      slug,
@@ -320,13 +322,13 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 	return result, nil
 }
 
-func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	claims, err := providerClaims(b.cfg)
 	if err != nil {
 		return nil, err
 	}
 	if !req.Refresh {
-		views := make([]LeaseView, 0, len(claims))
+		views := make([]core.LeaseView, 0, len(claims))
 		for _, claim := range claims {
 			views = append(views, claimServer(claim, "unknown"))
 		}
@@ -336,7 +338,7 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 	if err != nil {
 		return nil, err
 	}
-	views := make([]LeaseView, 0, len(claims))
+	views := make([]core.LeaseView, 0, len(claims))
 	for _, claim := range claims {
 		status, err := client.Status(ctx, claim.LeaseID)
 		if err != nil {
@@ -348,39 +350,36 @@ func (b *backend) List(ctx context.Context, req ListRequest) ([]LeaseView, error
 			views = append(views, claimServer(claim, "unknown"))
 			continue
 		}
-		views = append(views, runServer(claim.LeaseID, core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID)), status, mergeRunLabels(claim.Labels, status.Metadata)))
+		views = append(views, runServer(claim.LeaseID, core.Blank(claim.Slug, core.NewLeaseSlug(claim.LeaseID)), status, mergeRunLabels(claim.Labels, status.Metadata)))
 	}
 	return views, nil
 }
 
-func (b *backend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	client, err := newLoaderAPI(b.cfg, b.rt)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	leaseID, slug, _, _, err := b.resolveRunID(req.ID, "", false)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
-	return shared.PollDelegatedStatus(ctx, shared.DelegatedStatusRequest{
-		Wait: req.Wait, WaitTimeout: req.WaitTimeout,
-		Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-		Observe: func(ctx context.Context) (StatusView, bool, error) {
-			status, err := client.Status(ctx, leaseID)
-			if err != nil {
-				if notFoundError(err) {
-					return statusView(leaseID, slug, runStatus{ID: leaseID, Status: "missing"}), true, nil
-				}
-				return StatusView{}, false, providerError("status", err)
+	return shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
+		status, err := client.Status(ctx, leaseID)
+		if err != nil {
+			if notFoundError(err) {
+				return statusView(leaseID, slug, runStatus{ID: leaseID, Status: "missing"}), true, nil
 			}
-			view := statusView(leaseID, slug, status)
-			return view, req.Wait && !view.Ready && terminalState(view.State), nil
-		},
-		TimeoutError: func() error { return exit(5, "timed out waiting for %s run %s to become ready", providerName, leaseID) },
+			return core.StatusView{}, false, providerError("status", err)
+		}
+		view := statusView(leaseID, slug, status)
+		return view, terminalState(view.State), nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for %s run %s to become ready", providerName, leaseID)
 	})
 }
 
-func (b *backend) Stop(ctx context.Context, req StopRequest) error {
+func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
 	client, err := newLoaderAPI(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -390,11 +389,11 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 		return err
 	}
 	if !claimed {
-		return exit(2, "%s refusing to delete run %s without an exact local claim for the configured loader endpoint", providerName, leaseID)
+		return core.Exit(2, "%s refusing to delete run %s without an exact local claim for the configured loader endpoint", providerName, leaseID)
 	}
 	if err := client.Delete(ctx, leaseID); err != nil {
 		if notFoundError(err) {
-			if err := removeLeaseClaimIfUnchanged(leaseID, claim); err != nil {
+			if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
 				return err
 			}
 			fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s reason=not-found\n", providerName, leaseID)
@@ -402,14 +401,14 @@ func (b *backend) Stop(ctx context.Context, req StopRequest) error {
 		}
 		return providerError("delete metadata", err)
 	}
-	if err := removeLeaseClaimIfUnchanged(leaseID, claim); err != nil {
+	if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
 		return err
 	}
 	fmt.Fprintf(b.rt.Stdout, "stopped %s provider=%s loader_metadata=%s\n", leaseID, providerName, leaseID)
 	return nil
 }
 
-func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
+func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	client, err := newLoaderAPI(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -430,7 +429,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 				fmt.Fprintf(b.rt.Stdout, "would remove stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"))
 				continue
 			}
-			if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+			if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: %s claim removal failed for %s: %v\n", providerName, claim.LeaseID, err)
 				continue
 			}
@@ -449,7 +448,7 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stderr, "warning: %s metadata delete failed for %s: %v\n", providerName, claim.LeaseID, err)
 			continue
 		}
-		if err := removeLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: %s claim removal failed for %s: %v\n", providerName, claim.LeaseID, err)
 			continue
 		}
@@ -462,28 +461,28 @@ func (b *backend) Cleanup(ctx context.Context, req CleanupRequest) error {
 	return nil
 }
 
-func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string, string, bool, error) {
+func (b *backend) runIdentity(req core.RunRequest, cacheMode string) (string, string, string, bool, error) {
 	if cacheMode == "explicit" {
 		if strings.TrimSpace(req.ID) == "" {
-			return "", "", "", false, exit(2, "%s cache=explicit requires --id", providerName)
+			return "", "", "", false, core.Exit(2, "%s cache=explicit requires --id", providerName)
 		}
 		leaseID := core.NewLeaseID()
-		slug, err := allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
+		slug, err := core.AllocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 		if err != nil {
 			return "", "", "", false, err
 		}
 		return leaseID, strings.TrimSpace(req.ID), slug, true, nil
 	}
 	if strings.TrimSpace(req.ID) != "" {
-		return "", "", "", false, exit(2, "%s --id requires cache=explicit", providerName)
+		return "", "", "", false, core.Exit(2, "%s --id requires cache=explicit", providerName)
 	}
 	if cacheMode == "stable" {
 		leaseID := core.NewLeaseID()
 		workerID := stableRunID(workerModuleName(req.Script), req.Script.Data, b.cfg.CloudflareDynamicWorkers, req.Env)
-		slug := newLeaseSlug(leaseID)
+		slug := core.NewLeaseSlug(leaseID)
 		if req.Keep || req.KeepOnFailure {
 			var err error
-			slug, err = allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
+			slug, err = core.AllocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 			if err != nil {
 				return "", "", "", false, err
 			}
@@ -495,7 +494,7 @@ func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string,
 	if req.Keep || req.KeepOnFailure {
 		leaseID = core.NewLeaseID()
 		var err error
-		slug, err = allocateClaimLeaseSlug(leaseID, req.RequestedSlug)
+		slug, err = core.AllocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 		if err != nil {
 			return "", "", "", false, err
 		}
@@ -503,28 +502,28 @@ func (b *backend) runIdentity(req RunRequest, cacheMode string) (string, string,
 	return leaseID, "", slug, false, nil
 }
 
-func (b *backend) resolveRunID(identifier, repoRoot string, reclaim bool) (string, string, LeaseClaim, bool, error) {
+func (b *backend) resolveRunID(identifier, repoRoot string, reclaim bool) (string, string, core.LeaseClaim, bool, error) {
 	claim, ok, err := resolveLeaseClaim(identifier, b.cfg)
 	if err != nil {
-		return "", "", LeaseClaim{}, false, err
+		return "", "", core.LeaseClaim{}, false, err
 	}
 	if ok {
 		if repoRoot != "" {
 			server := claimServer(claim, core.Blank(claim.Labels["state"], "unknown"))
 			if err := claimLease(claim.LeaseID, claim.Slug, b.cfg, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim, server); err != nil {
-				return "", "", LeaseClaim{}, false, err
+				return "", "", core.LeaseClaim{}, false, err
 			}
 		}
-		return claim.LeaseID, core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID)), claim, true, nil
+		return claim.LeaseID, core.Blank(claim.Slug, core.NewLeaseSlug(claim.LeaseID)), claim, true, nil
 	}
 	value := strings.TrimSpace(identifier)
 	if value == "" {
-		return "", "", LeaseClaim{}, false, exit(2, "%s id is required", providerName)
+		return "", "", core.LeaseClaim{}, false, core.Exit(2, "%s id is required", providerName)
 	}
-	return value, newLeaseSlug(value), LeaseClaim{}, false, nil
+	return value, core.NewLeaseSlug(value), core.LeaseClaim{}, false, nil
 }
 
-func (b *backend) buildRunRequest(req RunRequest, leaseID, workerID, cacheMode string) runRequest {
+func (b *backend) buildRunRequest(req core.RunRequest, leaseID, workerID, cacheMode string) runRequest {
 	cfg := b.cfg.CloudflareDynamicWorkers
 	return runRequest{
 		ID:                 leaseID,
@@ -543,7 +542,7 @@ func (b *backend) buildRunRequest(req RunRequest, leaseID, workerID, cacheMode s
 	}
 }
 
-func runMetadata(configured map[string]string, req RunRequest) map[string]string {
+func runMetadata(configured map[string]string, req core.RunRequest) map[string]string {
 	out := map[string]string{
 		"provider": providerName,
 		"source":   workerModuleName(req.Script),
@@ -594,7 +593,7 @@ func writeStderrPart(stderr io.Writer, value string) {
 	}
 }
 
-func workerModuleName(script *RunScriptSpec) string {
+func workerModuleName(script *core.RunScriptSpec) string {
 	if script == nil {
 		return "index.js"
 	}
@@ -643,7 +642,7 @@ func workerModuleName(script *RunScriptSpec) string {
 	return result
 }
 
-func stableRunID(moduleName string, source []byte, cfg CloudflareDynamicWorkersConfig, env map[string]string) string {
+func stableRunID(moduleName string, source []byte, cfg core.CloudflareDynamicWorkersConfig, env map[string]string) string {
 	h := sha256.New()
 	_, _ = h.Write([]byte(strings.TrimSpace(moduleName)))
 	_, _ = h.Write([]byte{0})
@@ -693,16 +692,16 @@ func durationMillisecondsCeil(duration time.Duration) int64 {
 	return int64((duration + time.Millisecond - 1) / time.Millisecond)
 }
 
-func providerClaims(cfg Config) ([]LeaseClaim, error) {
+func providerClaims(cfg core.Config) ([]core.LeaseClaim, error) {
 	scope, err := loaderClaimScope(cfg)
 	if err != nil {
 		return nil, err
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return nil, err
 	}
-	out := make([]LeaseClaim, 0, len(claims))
+	out := make([]core.LeaseClaim, 0, len(claims))
 	for _, claim := range claims {
 		if claim.Provider == providerName && claim.ProviderScope == scope {
 			out = append(out, claim)
@@ -711,15 +710,15 @@ func providerClaims(cfg Config) ([]LeaseClaim, error) {
 	return out, nil
 }
 
-func claimServer(claim LeaseClaim, state string) Server {
-	return runServer(claim.LeaseID, core.Blank(claim.Slug, newLeaseSlug(claim.LeaseID)), runStatus{ID: claim.LeaseID, Status: state}, claim.Labels)
+func claimServer(claim core.LeaseClaim, state string) core.Server {
+	return runServer(claim.LeaseID, core.Blank(claim.Slug, core.NewLeaseSlug(claim.LeaseID)), runStatus{ID: claim.LeaseID, Status: state}, claim.Labels)
 }
 
-func runServer(leaseID, slug string, status runStatus, extra map[string]string) Server {
+func runServer(leaseID, slug string, status runStatus, extra map[string]string) core.Server {
 	labels := map[string]string{
 		"provider": providerName,
 		"lease":    leaseID,
-		"slug":     core.Blank(slug, newLeaseSlug(leaseID)),
+		"slug":     core.Blank(slug, core.NewLeaseSlug(leaseID)),
 		"target":   targetWorker,
 		"state":    core.Blank(status.Status, "unknown"),
 	}
@@ -733,7 +732,7 @@ func runServer(leaseID, slug string, status runStatus, extra map[string]string) 
 	}
 	labels["provider"] = providerName
 	labels["lease"] = leaseID
-	labels["slug"] = core.Blank(slug, newLeaseSlug(leaseID))
+	labels["slug"] = core.Blank(slug, core.NewLeaseSlug(leaseID))
 	labels["target"] = targetWorker
 	labels["state"] = core.Blank(status.Status, "unknown")
 	if strings.TrimSpace(status.WorkerID) != "" {
@@ -741,7 +740,7 @@ func runServer(leaseID, slug string, status runStatus, extra map[string]string) 
 	} else {
 		delete(labels, "worker_id")
 	}
-	server := Server{
+	server := core.Server{
 		Provider: providerName,
 		CloudID:  leaseID,
 		Name:     leaseID,
@@ -752,11 +751,11 @@ func runServer(leaseID, slug string, status runStatus, extra map[string]string) 
 	return server
 }
 
-func statusView(leaseID, slug string, status runStatus) StatusView {
+func statusView(leaseID, slug string, status runStatus) core.StatusView {
 	server := runServer(leaseID, slug, status, status.Metadata)
-	return StatusView{
+	return core.StatusView{
 		ID:         leaseID,
-		Slug:       core.Blank(slug, newLeaseSlug(leaseID)),
+		Slug:       core.Blank(slug, core.NewLeaseSlug(leaseID)),
 		Provider:   providerName,
 		TargetOS:   targetWorker,
 		State:      server.Status,
@@ -816,8 +815,8 @@ type coreRunSessionHandle struct {
 	CleanupCommand string
 }
 
-func (h *coreRunSessionHandle) toCore() *RunSessionHandle {
-	return &RunSessionHandle{
+func (h *coreRunSessionHandle) toCore() *core.RunSessionHandle {
+	return &core.RunSessionHandle{
 		Provider:       h.Provider,
 		LeaseID:        h.LeaseID,
 		Slug:           h.Slug,

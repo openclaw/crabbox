@@ -166,6 +166,10 @@ that a later stream trailer or sandbox deletion succeeded.
 The envd Connect wire codec is shared with E2B; this abnormal-end policy and
 CubeProxy routing remain CubeSandbox-owned.
 
+The compatible control plane also shares sandbox record types, returned-ID
+validation, and cursor pagination with E2B. Authentication, creation payloads,
+response-error decoding, and envd endpoint routing stay in each adapter.
+
 ## Gotchas
 
 - `--class` and `--type` are rejected; choose the template and CubeSandbox node

@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -19,11 +18,9 @@ var classProfiles = buildClassProfiles()
 
 var _ core.ProviderClassProfileProvider = Provider{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return []string{"phala-cloud", "dstack"} }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"phala-cloud", "dstack"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             providerName,
 		Family:           providerName,
@@ -100,10 +97,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return &backend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor(providerName, func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		return cfg.ServerType
@@ -132,8 +125,4 @@ func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 	instanceType := strings.TrimSpace(cfg.Phala.InstanceType)
 	selected := core.PhalaInstanceTypeWasExplicit(cfg) && core.PhalaInstanceTypeOverridesClass(cfg) && instanceType != ""
 	return instanceType, selected
-}
-
-func (Provider) ServerTypeForClass(class string) string {
-	return instanceTypeForClass(class)
 }

@@ -33,70 +33,14 @@ type CrownestConfigApplied struct {
 
 func (cfg *CrownestConfig) applyFile(file *fileCrownestConfig, trusted bool) (CrownestConfigApplied, error) {
 	var applied CrownestConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.APIURL != "" {
-		cfg.APIURL = file.APIURL
-		applied.InputAccepted = true
-	}
-	if file.ProjectID != nil {
-		cfg.ProjectID = *file.ProjectID
-		applied.InputAccepted = true
-	}
-	if file.Template != nil {
-		cfg.Template = *file.Template
-		applied.InputAccepted = true
-	}
-	if file.TimeoutSecs != nil {
-		if *file.TimeoutSecs < 0 {
-			return applied, exit(2, "crownest timeoutSecs must be non-negative")
-		}
-		cfg.TimeoutSecs = *file.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.ForgetMissing != nil {
-		cfg.ForgetMissing = *file.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "crownest")
+	return applied, err
 }
 
 func (cfg *CrownestConfig) applyEnv() (CrownestConfigApplied, error) {
 	var applied CrownestConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_CROWNEST_API_URL", "CROWNEST_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CROWNEST_PROJECT_ID", "CROWNEST_PROJECT_ID"); ok {
-		cfg.ProjectID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CROWNEST_TEMPLATE", "CROWNEST_TEMPLATE"); ok {
-		cfg.Template = value
-		applied.InputAccepted = true
-	}
-	{
-		value, accepted, err := getenvNonNegativeIntAliasAccepted("CRABBOX_CROWNEST_TIMEOUT_SECS", "CROWNEST_TIMEOUT_SECS", cfg.TimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			cfg.TimeoutSecs = value
-			applied.InputAccepted = true
-		}
-	}
-	{
-		value, accepted := getenvBool("CRABBOX_CROWNEST_FORGET_MISSING")
-		if !accepted {
-			value, accepted = getenvBool("CROWNEST_FORGET_MISSING")
-		}
-		if accepted {
-			cfg.ForgetMissing = value
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 5)
+	return applied, err
 }
 
 // CrownestConfigFlagValues holds parsed values; only visited flags are applied.
@@ -110,37 +54,14 @@ type CrownestConfigFlagValues struct {
 
 // RegisterCrownestConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterCrownestConfigFlags(fs *flag.FlagSet, defaults CrownestConfig) CrownestConfigFlagValues {
-	return CrownestConfigFlagValues{
-		APIURL:        fs.String("crownest-url", defaults.APIURL, "Trusted CrowNest API base URL"),
-		ProjectID:     fs.String("crownest-project-id", defaults.ProjectID, "CrowNest project ID"),
-		Template:      fs.String("crownest-template", defaults.Template, "CrowNest Workspace Run template"),
-		TimeoutSecs:   fs.Int("crownest-timeout-secs", defaults.TimeoutSecs, "CrowNest Workspace Run timeout in seconds"),
-		ForgetMissing: fs.Bool("crownest-forget-missing", defaults.ForgetMissing, "remove the local claim when stop gets 404"),
-	}
+	var values CrownestConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values CrownestConfigFlagValues) Apply(cfg *CrownestConfig, fs *flag.FlagSet) (CrownestConfigApplied, error) {
 	var applied CrownestConfigApplied
-	if flagWasSet(fs, "crownest-url") {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "crownest-project-id") {
-		cfg.ProjectID = *values.ProjectID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "crownest-template") {
-		cfg.Template = *values.Template
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "crownest-timeout-secs") {
-		cfg.TimeoutSecs = *values.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "crownest-forget-missing") {
-		cfg.ForgetMissing = *values.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

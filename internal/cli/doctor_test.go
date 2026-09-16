@@ -567,7 +567,7 @@ func TestDoctorIDUsesSharedLeaseIdentifierRouting(t *testing.T) {
 		if _, err := PersistExternalRouting(leaseID, ExternalConfig{Command: "doctor-external", WorkRoot: "/work/doctor"}); err != nil {
 			t.Fatal(err)
 		}
-		if err := claimLeaseForRepoProviderScope(leaseID, "doctor-external", "external", "doctor-scope", root, time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProviderScope(leaseID, "doctor-external", "external", "doctor-scope", root, time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		testExternalResolveHook = func(req ResolveRequest) (LeaseTarget, error) {
@@ -710,7 +710,7 @@ func TestDoctorFromRunProviderSurvivesUnrelatedIdentifierClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
 	t.Setenv("PATH", doctorTestToolPath(t, []string{"git", "ssh", "ssh-keygen", "rsync"}))
-	if err := claimLeaseForRepoProvider("cbx_recorded_doctor", "recorded-doctor", "external", "/repo", time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider("cbx_recorded_doctor", "recorded-doctor", "external", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

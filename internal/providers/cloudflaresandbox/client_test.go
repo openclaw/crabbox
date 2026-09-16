@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -74,7 +75,7 @@ func TestBridgeInjectedHTTPSettingsArePreservedForBothPlanes(t *testing.T) {
 	injected := &http.Client{Transport: transport, Timeout: 17 * time.Second}
 	cfg := testConfig()
 	cfg.CloudflareSandbox.BridgeURL = "http://127.0.0.1:8787"
-	api, err := newBridgeClient(cfg, Runtime{HTTP: injected})
+	api, err := newBridgeClient(cfg, core.Runtime{HTTP: injected})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,8 +120,8 @@ func TestBridgeClientHealthOpenAPIAuthAndNonMutatingDoctorRoutes(t *testing.T) {
 	cfg := testConfig()
 	cfg.CloudflareSandbox.BridgeURL = server.URL
 	cfg.CloudflareSandbox.Token = "cf_sandbox_test_token"
-	backend := NewBackend((Provider{}).Spec(), cfg, Runtime{HTTP: server.Client()}).(*backend)
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	backend := NewBackend((Provider{}).Spec(), cfg, core.Runtime{HTTP: server.Client()}).(*backend)
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +151,7 @@ func TestBridgeClientClassifiesOnlyHTTP404AsNotFound(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.CloudflareSandbox.BridgeURL = server.URL
-	api, err := newBridgeClient(cfg, Runtime{HTTP: server.Client()})
+	api, err := newBridgeClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +183,7 @@ func TestBridgeClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
 	cfg := testConfig()
 	cfg.CloudflareSandbox.BridgeURL = trusted.URL
 	cfg.CloudflareSandbox.Token = "cf_sandbox_test_token"
-	api, err := newBridgeClient(cfg, Runtime{HTTP: trusted.Client()})
+	api, err := newBridgeClient(cfg, core.Runtime{HTTP: trusted.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +221,7 @@ func TestBridgeClientFollowsSameOriginRedirect(t *testing.T) {
 	cfg := testConfig()
 	cfg.CloudflareSandbox.BridgeURL = server.URL
 	cfg.CloudflareSandbox.Token = "cf_sandbox_test_token"
-	api, err := newBridgeClient(cfg, Runtime{HTTP: server.Client()})
+	api, err := newBridgeClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +249,7 @@ func TestBridgeClientPreservesCallerRedirectPolicy(t *testing.T) {
 	}
 	cfg := testConfig()
 	cfg.CloudflareSandbox.BridgeURL = server.URL
-	api, err := newBridgeClient(cfg, Runtime{HTTP: httpClient})
+	api, err := newBridgeClient(cfg, core.Runtime{HTTP: httpClient})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +322,7 @@ func TestBridgeClientRuntimeEndpointShapeIsTypedForPlan02(t *testing.T) {
 	cfg := testConfig()
 	cfg.CloudflareSandbox.BridgeURL = server.URL
 	cfg.CloudflareSandbox.Token = "cf_sandbox_test_token"
-	api, err := newBridgeClient(cfg, Runtime{HTTP: server.Client()})
+	api, err := newBridgeClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +386,7 @@ func TestBridgeClientExecParsesSSEOutputBeforeExit(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.CloudflareSandbox.BridgeURL = server.URL
-	api, err := newBridgeClient(cfg, Runtime{HTTP: server.Client()})
+	api, err := newBridgeClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +417,7 @@ func TestBridgeClientExecLeavesPlainSSEChunksUntouched(t *testing.T) {
 
 	cfg := testConfig()
 	cfg.CloudflareSandbox.BridgeURL = server.URL
-	api, err := newBridgeClient(cfg, Runtime{HTTP: server.Client()})
+	api, err := newBridgeClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -440,7 +441,7 @@ func TestBridgeClientRedactsTokenFromErrors(t *testing.T) {
 	cfg := testConfig()
 	cfg.CloudflareSandbox.BridgeURL = server.URL
 	cfg.CloudflareSandbox.Token = "cf_sandbox_test_token"
-	api, err := newBridgeClient(cfg, Runtime{HTTP: server.Client()})
+	api, err := newBridgeClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,13 +18,29 @@ type syncPlanRow struct {
 }
 
 type syncPlanJSONOutput struct {
-	Candidate           syncPlanJSONSize      `json:"candidate"`
-	DirtyDelta          syncPlanJSONSize      `json:"dirtyDelta"`
-	DeletedTrackedPaths int                   `json:"deletedTrackedPaths"`
-	ProtectedTracked    syncPlanJSONProtected `json:"protectedTrackedFiles"`
-	Guardrail           syncPlanJSONGuardrail `json:"guardrail"`
-	TopFiles            []syncPlanJSONRow     `json:"topFiles"`
-	TopDirs             []syncPlanJSONRow     `json:"topDirs"`
+	Source              string                    `json:"source,omitempty"`
+	Root                string                    `json:"root,omitempty"`
+	Candidate           syncPlanJSONSize          `json:"candidate"`
+	DirtyDelta          syncPlanJSONSize          `json:"dirtyDelta"`
+	DeletedTrackedPaths int                       `json:"deletedTrackedPaths"`
+	ProtectedTracked    syncPlanJSONProtected     `json:"protectedTrackedFiles"`
+	Guardrail           syncPlanJSONGuardrail     `json:"guardrail"`
+	TopFiles            []syncPlanJSONRow         `json:"topFiles"`
+	TopDirs             []syncPlanJSONRow         `json:"topDirs"`
+	LocalGitSeed        *syncPlanJSONLocalGitSeed `json:"localGitSeed,omitempty"`
+}
+
+type syncPlanJSONLocalGitSeed struct {
+	Source                       string `json:"source"`
+	Head                         string `json:"head"`
+	Base                         string `json:"base,omitempty"`
+	BaseRef                      string `json:"baseRef,omitempty"`
+	ObjectFormat                 string `json:"objectFormat"`
+	Objects                      int    `json:"objects"`
+	ObjectBytes                  int64  `json:"objectBytes"`
+	SeedBytes                    int64  `json:"seedBytes"`
+	Digest                       string `json:"sha256"`
+	HistoryIncludesExcludedPaths bool   `json:"historyIncludesExcludedPaths"`
 }
 
 type syncPlanJSONProtected struct {
@@ -67,44 +85,109 @@ type syncPlanJSONGuardrailReason struct {
 	Limit  int64  `json:"limit"`
 }
 
-func (a App) syncPlan(ctx context.Context, args []string) error {
-	_ = ctx
+func (a App) syncPlan(ctx context.Context, args []string) (err error) {
 	fs := newFlagSet("sync-plan", a.Stderr)
 	limit := fs.Int("limit", 20, "number of top files and directories to print")
 	jsonOut := fs.Bool("json", false, "print JSON")
+	gitSeedSource := fs.String("git-seed-source", "", "Git metadata source: origin or explicit offline local objects")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if *limit <= 0 {
-		return exit(2, "sync-plan --limit must be positive")
+		return Exit(2, "sync-plan --limit must be positive")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
-	boundary, err := findRepositoryBoundary()
+	if err := validateSyncSource(cfg); err != nil {
+		return err
+	}
+	if flagWasSet(fs, "git-seed-source") {
+		cfg.Sync.GitSeedSource = *gitSeedSource
+	}
+	if err := validateGitSeedSource(cfg); err != nil {
+		return err
+	}
+	var repo Repo
+	directory := effectiveSyncSource(cfg) == "directory"
+	if directory {
+		repo, err = findSyncRepo(cfg, true)
+		if err == nil {
+			err = validateDirectorySyncConfig(cfg)
+		}
+		if err == nil {
+			provider, providerErr := ProviderFor(cfg.Provider)
+			if providerErr != nil {
+				return providerErr
+			}
+			err = validateDirectorySyncProvider(provider.Spec())
+		}
+	} else {
+		var boundary repositoryBoundary
+		boundary, err = findRepositoryBoundary()
+		repo.Root = boundary.root
+	}
 	if err != nil {
 		return err
 	}
-	excludes, err := syncExcludes(boundary.root, cfg)
-	if err != nil {
-		return err
+	var localSeed preparedLocalGitSeed
+	local := effectiveGitSeedSource(cfg) == "local"
+	if local {
+		repo.BaseRef = defaultBaseRef(repo.Root)
+		localSeed, err = prepareLocalGitSeed(ctx, repo, cfg, true, io.Discard)
+		if err != nil {
+			return err
+		}
+		defer func() { err = errors.Join(err, localSeed.cleanup()) }()
 	}
-	manifest, err := syncManifestFilteredRules(boundary.root, excludes, syncIncludes(cfg))
-	if err != nil {
-		return exit(6, "build sync file list: %v", err)
+	var manifest SyncManifest
+	rowsRoot := repo.Root
+	if local {
+		manifest, rowsRoot = localSeed.Snapshot.Manifest, localSeed.Snapshot.Root
+	} else {
+		excludes, err := syncExcludes(repo.Root, cfg)
+		if err != nil {
+			return err
+		}
+		manifest, err = syncManifestForSource(ctx, repo, cfg, excludes)
+		if err != nil {
+			return Exit(6, "build sync file list: %v", err)
+		}
 	}
-	files, dirs := syncPlanRows(boundary.root, manifest, *limit)
+	files, dirs := syncPlanRows(rowsRoot, manifest, *limit)
 	if *jsonOut {
 		provider, err := ProviderFor(cfg.Provider)
 		if err != nil {
 			return err
 		}
 		out := syncPlanJSON(manifest, files, dirs, cfg, provider.Spec().SyncGuardrailFullCandidate)
+		if local {
+			guard := FullSyncGuardrailManifest(manifest)
+			guard.Bytes += localSeed.Artifact.ObjectBytes
+			out.Guardrail = syncPlanJSONGuardrailFor(guard, cfg)
+			out.Guardrail.Scope = "candidate_and_git_objects"
+			out.LocalGitSeed = &syncPlanJSONLocalGitSeed{
+				Source: "local", Head: localSeed.Selection.Head, Base: localSeed.Selection.Base, BaseRef: localSeed.Selection.BaseRef,
+				ObjectFormat: localSeed.Artifact.ObjectFormat, Objects: localSeed.Artifact.ObjectCount,
+				ObjectBytes: localSeed.Artifact.ObjectBytes, SeedBytes: localSeed.Artifact.PackedBytes, Digest: localSeed.Artifact.Digest,
+				HistoryIncludesExcludedPaths: true,
+			}
+		}
+		if directory {
+			out.Source, out.Root = "directory", repo.Root
+		}
 		if err := json.NewEncoder(a.Stdout).Encode(out); err != nil {
 			return err
 		}
 		return nil
+	}
+	if directory {
+		fmt.Fprintf(a.Stdout, "sync source=directory root=%s\n", repo.Root)
+	}
+	if local {
+		fmt.Fprintf(a.Stdout, "Git seed source=local head=%s base=%s objects=%d object_bytes=%d seed_bytes=%d\n", localSeed.Selection.Head, blank(localSeed.Selection.Base, "absent"), localSeed.Artifact.ObjectCount, localSeed.Artifact.ObjectBytes, localSeed.Artifact.PackedBytes)
+		fmt.Fprintln(a.Stdout, "Exclusions govern materialized files; complete selected history can contain excluded paths.")
 	}
 	fmt.Fprintf(a.Stdout, "sync candidate: %d files, %s\n", len(manifest.Files), humanBytes(manifest.Bytes))
 	printProtectedTrackedExcludes(a.Stdout, manifest)

@@ -2,6 +2,7 @@ package shared
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -42,6 +43,29 @@ type PollResult[T any] struct {
 	Err       error
 	Attempt   int
 	Remaining time.Duration
+}
+
+// PollReady bounds acquisition observations and waits, stops on the first fetch
+// error, and returns a value only when ready. The adapter owns the readiness
+// predicate and timeout diagnostic; client deadlines and caller causes survive.
+func PollReady[T any](ctx context.Context, timeout, interval time.Duration, fetch func(context.Context) (T, error), ready func(T) bool, timeoutError error) (T, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := Poll(waitCtx, 0, interval, SleepContext, fetch,
+		func(_ context.Context, value T, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			return ready(value), nil
+		}, nil)
+	if err != nil {
+		var zero T
+		if context.Cause(ctx) == nil && errors.Is(context.Cause(waitCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
+			return zero, timeoutError
+		}
+		return zero, err
+	}
+	return result.Value, nil
 }
 
 func Poll[T any](

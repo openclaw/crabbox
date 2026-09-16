@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -15,9 +14,6 @@ func init() {
 }
 
 type Provider struct{}
-
-func (Provider) Name() string      { return "semaphore" }
-func (Provider) Aliases() []string { return []string{"sem"} }
 
 func (Provider) ClaimScope(cfg core.Config) string {
 	host, err := normalizeSemaphoreHost(cfg.Semaphore.Host)
@@ -30,6 +26,7 @@ func (Provider) ClaimScope(cfg core.Config) string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"sem"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIToken),
 		Name:             "semaphore",
 		Family:           "semaphore",
@@ -58,8 +55,4 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return newBackend(p.Spec(), cfg, rt)
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("semaphore", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

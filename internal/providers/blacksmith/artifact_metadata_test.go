@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const (
@@ -159,7 +161,7 @@ func TestBlacksmithArtifactMetadataCollectorFailure(t *testing.T) {
 				t.Fatal("collector failure corrupted the workload receipt")
 			}
 			err := r.validateArchiveReceipt()
-			var ee ExitError
+			var ee core.ExitError
 			if !errors.As(err, &ee) || ee.Code != 7 || !strings.Contains(err.Error(), fmt.Sprintf("collection exited %d", tt.collectorCode)) {
 				t.Fatal("collector failure was replaced by missing-metadata validation")
 			}

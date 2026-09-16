@@ -1,3 +1,4 @@
+import { base64ToBytes, sha256Hex } from "./encoding";
 import type { RunRecord, TerminalRunReceipt } from "./types";
 
 const terminalReceiptMaxBytes = 16 * 1024;
@@ -238,13 +239,12 @@ function lengthPrefixedPayload(prefix: string, values: string[]): Uint8Array {
 }
 
 async function sha256Digest(value: BufferSource): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", value));
-  return `sha256:${[...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+  return `sha256:${await sha256Hex(value)}`;
 }
 
 function decodeBase64(value: string, length: number, field: string): Uint8Array {
   try {
-    const decoded = Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+    const decoded = base64ToBytes(value);
     if (decoded.byteLength === length) return decoded;
   } catch {
     // Report one stable validation error below.

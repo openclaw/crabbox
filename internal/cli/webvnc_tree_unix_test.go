@@ -42,7 +42,7 @@ func TestWebVNCDaemonStopRefusesOrphanedProcessGroupWithoutSupervisorIdentity(t 
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	started, err := webVNCDaemonProcessStartIdentity(cmd.Process.Pid)
+	started, err := LocalProcessStartIdentity(cmd.Process.Pid)
 	if err != nil {
 		t.Fatal(err)
 	}

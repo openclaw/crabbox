@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -14,12 +13,6 @@ func init() {
 }
 
 type Provider struct{}
-
-func (Provider) Name() string { return providerName }
-
-func (Provider) Aliases() []string {
-	return []string{"gcrun-sandbox", "google-cloud-run-sandbox", "cloudrun-sandbox"}
-}
 
 func (Provider) DiagnosticSecrets(core.Config) []string {
 	return []string{
@@ -33,10 +26,9 @@ func (Provider) DiagnosticSecrets(core.Config) []string {
 // ServerTypeForConfig / ServerTypeForClass: Cloud Run sandboxes share the
 // parent service resources; there is no Crabbox class/type surface.
 func (Provider) ServerTypeForConfig(core.Config) string { return "" }
-func (Provider) ServerTypeForClass(string) string       { return "" }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases: []string{"gcrun-sandbox", "google-cloud-run-sandbox", "cloudrun-sandbox"},
 		Authentication: core.ProviderAuthentication{
 			{Route: "gateway", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationSharedSecret, core.ProviderAuthenticationIdentityToken}, Description: "The gateway uses a shared secret; a private IAM-protected gateway additionally uses an identity token."},
 			{Route: "embedded-launcher", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationLocalContext}, Description: "The mounted CLI runs in an already provisioned sandbox-launcher service context."},
@@ -71,16 +63,12 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return NewBackend(p.Spec(), cfg, rt), nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("cloud-run-sandbox", func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
-func validateConfig(cfg Config) error {
+func validateConfig(cfg core.Config) error {
 	if workdir := strings.TrimSpace(cfg.CloudRunSandbox.Workdir); workdir != "" && !strings.HasPrefix(workdir, "/") {
-		return exit(2, "cloudRunSandbox.workdir must be an absolute path")
+		return core.Exit(2, "cloudRunSandbox.workdir must be an absolute path")
 	}
 	if cli := strings.TrimSpace(cfg.CloudRunSandbox.CLIPath); cli == "" {
-		return exit(2, "cloudRunSandbox.cliPath must not be empty")
+		return core.Exit(2, "cloudRunSandbox.cliPath must not be empty")
 	}
 	return nil
 }

@@ -68,7 +68,7 @@ func (a App) adminLeaseAudit(ctx context.Context, args []string) error {
 	if *failOnLive {
 		for _, audit := range audits {
 			if audit.CloudStatus == "found" || audit.CloudStatus == "error" {
-				return exit(1, "lease audit found unreconciled cloud instances or audit errors")
+				return Exit(1, "lease audit found unreconciled cloud instances or audit errors")
 			}
 		}
 	}
@@ -92,7 +92,7 @@ func (a App) adminAWSIdentity(ctx context.Context, args []string) error {
 func (a App) adminProviders(ctx context.Context, args []string) error {
 	args = stripKongCommandPath(args, "admin", "providers")
 	if len(args) == 0 || isHelpArg(args[0]) {
-		return exit(2, "usage: crabbox admin providers <identity|policy> --provider <provider> [flags]")
+		return Exit(2, "usage: crabbox admin providers <identity|policy> --provider <provider> [flags]")
 	}
 	switch args[0] {
 	case "identity":
@@ -100,7 +100,7 @@ func (a App) adminProviders(ctx context.Context, args []string) error {
 	case "policy":
 		return a.adminProviderPolicy("admin providers policy", "", args[1:])
 	default:
-		return exit(2, "usage: crabbox admin providers <identity|policy> --provider <provider> [flags]")
+		return Exit(2, "usage: crabbox admin providers <identity|policy> --provider <provider> [flags]")
 	}
 }
 
@@ -113,10 +113,10 @@ func (a App) adminProviderIdentity(ctx context.Context, commandName, defaultProv
 		return err
 	}
 	if fs.NArg() > 0 {
-		return exit(2, "usage: crabbox %s --provider aws [--region <region>] [--json]", commandName)
+		return Exit(2, "usage: crabbox %s --provider aws [--region <region>] [--json]", commandName)
 	}
 	if strings.ToLower(strings.TrimSpace(*provider)) != "aws" {
-		return exit(2, "admin provider identity currently supports --provider aws")
+		return Exit(2, "admin provider identity currently supports --provider aws")
 	}
 	coord, err := configuredAdminCoordinator()
 	if err != nil {
@@ -198,10 +198,10 @@ func (a App) adminProviderPolicy(commandName, defaultProvider string, args []str
 		return err
 	}
 	if fs.NArg() > 0 {
-		return exit(2, "usage: crabbox %s --provider aws [--target macos|--host-lifecycle|--mac-hosts]", commandName)
+		return Exit(2, "usage: crabbox %s --provider aws [--target macos|--host-lifecycle|--mac-hosts]", commandName)
 	}
 	if strings.ToLower(strings.TrimSpace(*provider)) != "aws" {
-		return exit(2, "admin provider policy currently supports --provider aws")
+		return Exit(2, "admin provider policy currently supports --provider aws")
 	}
 	if strings.EqualFold(strings.TrimSpace(*target), targetMacOS) {
 		*hostLifecycle = true
@@ -254,7 +254,7 @@ func (a App) adminHosts(ctx context.Context, args []string) error {
 
 func (a App) adminHostsWithCommand(ctx context.Context, commandName string, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
-		return exit(2, "usage: crabbox %s <list|offerings|quota|allocate|release|reservation|clear|policy> [--provider aws] [--target macos] [flags]", commandName)
+		return Exit(2, "usage: crabbox %s <list|offerings|quota|allocate|release|reservation|clear|policy> [--provider aws] [--target macos] [flags]", commandName)
 	}
 	switch args[0] {
 	case "list":
@@ -272,7 +272,7 @@ func (a App) adminHostsWithCommand(ctx context.Context, commandName string, args
 	case "policy":
 		return a.adminMacHostsPolicy(args[1:])
 	default:
-		return exit(2, "usage: crabbox %s <list|offerings|quota|allocate|release|reservation|clear|policy> [--provider aws] [--target macos] [flags]", commandName)
+		return Exit(2, "usage: crabbox %s <list|offerings|quota|allocate|release|reservation|clear|policy> [--provider aws] [--target macos] [flags]", commandName)
 	}
 }
 
@@ -290,7 +290,7 @@ func (a App) adminHostReservation(ctx context.Context, action string, args []str
 		return err
 	}
 	if hostID == "" || fs.NArg() != 0 || (action == "reservation" && force) {
-		return exit(2, "usage: crabbox admin hosts %s <host-id> [--region <region>] [--json]%s", action, map[bool]string{true: " [--force]"}[action == "clear"])
+		return Exit(2, "usage: crabbox admin hosts %s <host-id> [--region <region>] [--json]%s", action, map[bool]string{true: " [--force]"}[action == "clear"])
 	}
 	coord, err := configuredAdminCoordinator()
 	if err != nil {
@@ -328,7 +328,7 @@ func validateAdminHostScope(provider, target string) error {
 		target = targetMacOS
 	}
 	if provider != "aws" || target != targetMacOS {
-		return exit(2, "admin hosts currently supports --provider aws --target macos")
+		return Exit(2, "admin hosts currently supports --provider aws --target macos")
 	}
 	return nil
 }
@@ -380,7 +380,7 @@ func (a App) adminMacHostsPolicy(args []string) error {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return exit(2, "usage: crabbox admin mac-hosts policy")
+		return Exit(2, "usage: crabbox admin mac-hosts policy")
 	}
 	if err := validateAdminHostScope(*provider, *target); err != nil {
 		return err
@@ -513,7 +513,7 @@ func (a App) adminMacHostsAllocate(ctx context.Context, args []string) error {
 		*dryRun = true
 	}
 	if !*dryRun && !*force {
-		return exit(2, "admin mac-hosts allocate requires --force")
+		return Exit(2, "admin mac-hosts allocate requires --force")
 	}
 	coord, err := configuredAdminCoordinator()
 	if err != nil {
@@ -630,10 +630,10 @@ func (a App) adminMacHostsRelease(ctx context.Context, args []string) error {
 		*jsonOut = true
 	}
 	if *id == "" {
-		return exit(2, "usage: crabbox admin mac-hosts release <host-id> [--region <region>] --force")
+		return Exit(2, "usage: crabbox admin mac-hosts release <host-id> [--region <region>] --force")
 	}
 	if !*force {
-		return exit(2, "admin mac-hosts release requires --force")
+		return Exit(2, "admin mac-hosts release requires --force")
 	}
 	coord, err := configuredAdminCoordinator()
 	if err != nil {
@@ -664,7 +664,7 @@ func (a App) adminRelease(ctx context.Context, args []string) error {
 		*id = fs.Arg(0)
 	}
 	if *id == "" {
-		return exit(2, "usage: crabbox admin release --id <lease-id-or-slug>")
+		return Exit(2, "usage: crabbox admin release --id <lease-id-or-slug>")
 	}
 	if deleteAnywhere {
 		*deleteServer = true
@@ -712,7 +712,7 @@ func (a App) adminDelete(ctx context.Context, args []string) error {
 		*id = fs.Arg(0)
 	}
 	if *id == "" {
-		return exit(2, "usage: crabbox admin delete --id <lease-id-or-slug> --force")
+		return Exit(2, "usage: crabbox admin delete --id <lease-id-or-slug> --force")
 	}
 	if forceAnywhere {
 		*force = true
@@ -721,7 +721,7 @@ func (a App) adminDelete(ctx context.Context, args []string) error {
 		*jsonOut = true
 	}
 	if !*force {
-		return exit(2, "admin delete requires --force")
+		return Exit(2, "admin delete requires --force")
 	}
 	coord, err := configuredAdminCoordinator()
 	if err != nil {
@@ -748,7 +748,7 @@ func configuredCoordinator() (*CoordinatorClient, error) {
 		return nil, err
 	}
 	if !ok {
-		return nil, exit(2, "command requires a configured coordinator")
+		return nil, Exit(2, "command requires a configured coordinator")
 	}
 	return coord, nil
 }
@@ -759,7 +759,7 @@ func configuredAdminCoordinator() (*CoordinatorClient, error) {
 		return nil, err
 	}
 	if cfg.CoordAdminToken == "" {
-		return nil, exit(2, "admin command requires broker.adminToken or CRABBOX_COORDINATOR_ADMIN_TOKEN")
+		return nil, Exit(2, "admin command requires broker.adminToken or CRABBOX_COORDINATOR_ADMIN_TOKEN")
 	}
 	cfg.CoordToken = cfg.CoordAdminToken
 	cfg.CoordTokenCommand = nil
@@ -768,7 +768,7 @@ func configuredAdminCoordinator() (*CoordinatorClient, error) {
 		return nil, err
 	}
 	if !ok {
-		return nil, exit(2, "admin command requires a configured coordinator")
+		return nil, Exit(2, "admin command requires a configured coordinator")
 	}
 	return coord, nil
 }

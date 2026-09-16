@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestModalSecretFlagsReplaceConfiguredDefaults(t *testing.T) {
@@ -53,7 +55,7 @@ func TestModalConfigFlagContract(t *testing.T) {
 			t.Fatalf("flag %s=%#v", tc.name, f)
 		}
 	}
-	cfg.Modal = ModalConfig{App: "layered-app", Image: "layered-image", Workdir: "/workspace/layered", Python: "layered-python", Environment: "layered-env", Secrets: []string{"layered"}}
+	cfg.Modal = core.ModalConfig{App: "layered-app", Image: "layered-image", Workdir: "/workspace/layered", Python: "layered-python", Environment: "layered-env", Secrets: []string{"layered"}}
 	want := cfg.Modal
 	if err := ApplyModalProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
@@ -73,7 +75,7 @@ func TestModalConfigFlagContract(t *testing.T) {
 	if err := ApplyModalProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	want = ModalConfig{Image: "  ", Workdir: "/workspace/flag", Python: "flag-python", Environment: "flag-env", Secrets: []string{"alpha", "beta", "alpha"}}
+	want = core.ModalConfig{Image: "  ", Workdir: "/workspace/flag", Python: "flag-python", Environment: "flag-env", Secrets: []string{"alpha", "beta", "alpha"}}
 	if !reflect.DeepEqual(cfg.Modal, want) {
 		t.Fatalf("flags=%#v want=%#v", cfg.Modal, want)
 	}
@@ -142,7 +144,7 @@ func TestModalConfigListFlagCopies(t *testing.T) {
 func TestModalConfigFlagGuardOrder(t *testing.T) {
 	for _, provider := range []string{"modal", " MODAL ", "aws"} {
 		for _, args := range [][]string{{"--class=large", "--type=machine"}, {"--type=machine"}} {
-			cfg := Config{Provider: provider}
+			cfg := core.Config{Provider: provider}
 			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
 			fs.String("class", "", "")
 			fs.String("type", "", "")

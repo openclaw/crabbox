@@ -51,7 +51,7 @@ func TestMachine0FixedEmptyLegacyRecordRemainsHeld(t *testing.T) {
 			if _, err := b.Acquire(context.Background(), req); err == nil {
 				t.Error("empty legacy record authorized another create")
 			}
-			if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: req.RequestedLeaseID}}); err == nil {
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: req.RequestedLeaseID}}); err == nil {
 				t.Error("empty legacy record was canceled as never started")
 			}
 			if after := readFixedMachine0Claim(t, req.RequestedLeaseID); !reflect.DeepEqual(before, after) {
@@ -84,9 +84,9 @@ func TestMachine0FixedReadinessRejectsFreshReplacementBeforeStart(t *testing.T) 
 			if operation == "acquire" {
 				_, err = b.Acquire(context.Background(), req)
 			} else if operation == "resume" {
-				err = b.Resume(context.Background(), ResumeRequest{ID: req.RequestedLeaseID})
+				err = b.Resume(context.Background(), core.ResumeRequest{ID: req.RequestedLeaseID})
 			} else {
-				_, err = b.Resolve(context.Background(), ResolveRequest{ID: req.RequestedLeaseID, Prepare: true})
+				_, err = b.Resolve(context.Background(), core.ResolveRequest{ID: req.RequestedLeaseID, Prepare: true})
 			}
 			if err == nil || len(api.started)+len(api.removed) != 0 {
 				t.Fatalf("observed replacement reached mutation: err=%v starts=%v removes=%v", err, api.started, api.removed)
@@ -132,13 +132,13 @@ func TestMachine0FixedPreparedDetailMustAttestBeforeBinding(t *testing.T) {
 			} else {
 				api.getFn = func(context.Context, string) (machine, error) { return machine{}, errors.New("detail failed") }
 			}
-			if _, err := b.Resolve(context.Background(), ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true}); err == nil {
+			if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true}); err == nil {
 				t.Error("unattested preparation resolved")
 			}
 			if _, err := b.Acquire(context.Background(), req); err == nil {
 				t.Error("unattested preparation acquired")
 			}
-			if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: req.RequestedLeaseID}}); err == nil {
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: req.RequestedLeaseID}}); err == nil {
 				t.Error("unattested preparation released")
 			}
 			if !reflect.DeepEqual(before, readFixedMachine0Claim(t, req.RequestedLeaseID)) || len(api.created)+len(api.started)+len(api.removed)+len(api.primed) != 0 {
@@ -155,7 +155,7 @@ func TestMachine0OrdinaryReleaseByLeaseIDUsesResolvedName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: lease.LeaseID}}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.removed) != 1 || api.removed[0] != lease.Server.Name {
@@ -168,7 +168,7 @@ func TestMachine0FixedReadyResolutionPublishesCurrentSnapshot(t *testing.T) {
 	if _, err := b.Acquire(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: req.RequestedLeaseID, Prepare: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: req.RequestedLeaseID, Prepare: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,25 +177,25 @@ func TestMachine0FixedReadyResolutionPublishesCurrentSnapshot(t *testing.T) {
 	if !set || !exists || !reflect.DeepEqual(current, snapshot) {
 		t.Fatal("ready resolution returned a stale claim generation")
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil || len(api.removed) != 1 {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || len(api.removed) != 1 {
 		t.Fatalf("current readiness snapshot could not release: %v", err)
 	}
 }
 
 func TestMachine0FixedReleaseRacingCreateRejectsStaleSnapshot(t *testing.T) {
 	b, api, req := fixedMachine0TestFixture(t)
-	creating, finishCreate := make(chan LeaseTarget, 1), make(chan struct{})
+	creating, finishCreate := make(chan core.LeaseTarget, 1), make(chan struct{})
 	create := api.createFn
 	api.createFn = func(ctx context.Context, request createMachineRequest) error {
 		data, err := os.ReadFile(filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", req.RequestedLeaseID+".json"))
 		if err != nil {
 			return err
 		}
-		var claim LeaseClaim
+		var claim core.LeaseClaim
 		if err := json.Unmarshal(data, &claim); err != nil {
 			return err
 		}
-		lease := LeaseTarget{LeaseID: claim.LeaseID}
+		lease := core.LeaseTarget{LeaseID: claim.LeaseID}
 		core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 		creating <- lease
 		<-finishCreate
@@ -203,13 +203,13 @@ func TestMachine0FixedReleaseRacingCreateRejectsStaleSnapshot(t *testing.T) {
 	}
 	acquired, released := make(chan error, 1), make(chan error, 1)
 	go func() { _, err := b.Acquire(context.Background(), req); acquired <- err }()
-	var lease LeaseTarget
+	var lease core.LeaseTarget
 	select {
 	case lease = <-creating: // Current producer persisted the attempt under lock.
 	case err := <-acquired:
 		t.Fatalf("create callback did not observe the durable attempt: %v", err)
 	}
-	go func() { released <- b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}) }()
+	go func() { released <- b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}) }()
 	close(finishCreate)
 	if err := <-acquired; err != nil {
 		t.Fatal(err)
@@ -247,11 +247,11 @@ func TestMachine0FixedEarlyBindingAllowsCleanupAfterLostReadiness(t *testing.T) 
 	summary := api.machine
 	summary.ImageVersion = 0 // Real native inventory omits the pinned version.
 	api.machines = []machine{summary}
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
 	assertFixedMachine0Tombstone(t, readFixedMachine0Claim(t, req.RequestedLeaseID))
@@ -291,7 +291,7 @@ func TestMachine0FixedFinalReleaseObservationRejectsReplacement(t *testing.T) {
 					}
 					return item, nil
 				}
-				if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil {
+				if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil {
 					t.Fatal("release accepted changed final detail")
 				}
 				if reads != 2 || len(api.removed)+len(api.suspended) != 0 || !reflect.DeepEqual(before, readFixedMachine0Claim(t, req.RequestedLeaseID)) {
@@ -308,7 +308,7 @@ func TestMachine0FixedCaptureHoldBlocksCanonicalDestroy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = core.WithDurableLeaseClaimLock(lease.LeaseID, func(claim *LeaseClaim, _ bool, persist func() error) error {
+	err = core.WithDurableLeaseClaimLock(lease.LeaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
 		claim.CheckpointCapture = &core.CheckpointCaptureBinding{ID: "chk_capture", Revision: claim.Revision, BoundRevision: claim.Revision}
 		return persist()
 	})
@@ -316,10 +316,10 @@ func TestMachine0FixedCaptureHoldBlocksCanonicalDestroy(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := readFixedMachine0Claim(t, lease.LeaseID)
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil {
 		t.Fatal("ordinary stop cut through capture hold")
 	}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.removed)+len(api.started) != 0 || !reflect.DeepEqual(before, readFixedMachine0Claim(t, lease.LeaseID)) {

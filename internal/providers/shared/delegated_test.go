@@ -161,10 +161,16 @@ func TestDelegatedSandboxSecondaryDiagnosticsKeepSafeMessages(t *testing.T) {
 	result, err := RunDelegatedSandbox(t.Context(), core.RunRequest{NoSync: true, Keep: true}, DelegatedSandboxLifecycle{
 		Provider: "test",
 		Acquire:  func(context.Context) (DelegatedSandbox, error) { return DelegatedSandbox{LeaseID: "lease"}, nil },
-		NoSync:   func(context.Context) error { return nil },
+		Workspace: func() SandboxWorkspace {
+			return WorkspaceOperations{
+				EnsureFunc: func(context.Context) error { return nil },
+			}
+		},
 		Command: func(context.Context) (DelegatedSandboxCommand, error) {
 			return DelegatedSandboxCommand{
-				Run:   func(context.Context) (int, error) { return 1, ExitErrorWithCause(1, "safe execution", primary) },
+				Run: func(context.Context, io.Writer, io.Writer) (int, error) {
+					return 1, ExitErrorWithCause(1, "safe execution", primary)
+				},
 				Close: func(context.Context) error { return ExitErrorWithCause(5, "safe cleanup", secondary) },
 			}, nil
 		},
@@ -289,29 +295,34 @@ func TestDelegatedSandboxLifecycle(t *testing.T) {
 			lifecycle := DelegatedSandboxLifecycle{
 				Provider: "test", Runtime: core.Runtime{Stdout: &stdout, Stderr: &stderr, Clock: clock}, Workdir: "/workspace/repo", CleanupTimeout: 2 * time.Second,
 				Preflight: func(context.Context) error { return step("preflight") },
-				PrepareArchive: func(context.Context) (*core.PreparedArchive, error) {
-					if err := step("archive"); err != nil {
-						return nil, err
+				Workspace: func() SandboxWorkspace {
+					return WorkspaceOperations{
+						PrepareArchiveFunc: func(context.Context) (*core.PreparedArchive, error) {
+							if err := step("archive"); err != nil {
+								return nil, err
+							}
+							file, err := os.CreateTemp(t.TempDir(), "archive-")
+							if err != nil {
+								t.Fatal(err)
+							}
+							archivePath = file.Name()
+							return &core.PreparedArchive{File: file}, nil
+						},
+						SyncFunc: func(_ context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+							if (archive == nil) != tc.reuse {
+								t.Fatalf("prepared archive=%v reused=%t", archive, tc.reuse)
+							}
+							return []core.TimingPhase{{Name: "test_sync", Ms: 1}}, time.Millisecond, step("sync")
+						},
+						EnsureFunc: func(context.Context) error { return step("workspace") },
 					}
-					file, err := os.CreateTemp(t.TempDir(), "archive-")
-					if err != nil {
-						t.Fatal(err)
-					}
-					archivePath = file.Name()
-					return &core.PreparedArchive{File: file}, nil
 				},
 				Acquire: func(context.Context) (DelegatedSandbox, error) { return sandbox("acquire") },
 				Resolve: func(context.Context) (DelegatedSandbox, error) { return sandbox("resolve") },
 				Setup:   func(context.Context) error { return step("setup") },
-				Sync: func(_ context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-					if (archive == nil) != tc.reuse {
-						t.Fatalf("prepared archive=%v reused=%t", archive, tc.reuse)
-					}
-					return []core.TimingPhase{{Name: "test_sync", Ms: 1}}, time.Millisecond, step("sync")
-				},
-				NoSync: func(context.Context) error { return step("workspace") },
+
 				Command: func(context.Context) (DelegatedSandboxCommand, error) {
-					return DelegatedSandboxCommand{Text: "true", Run: func(context.Context) (int, error) {
+					return DelegatedSandboxCommand{Text: "true", Run: func(context.Context, io.Writer, io.Writer) (int, error) {
 						if !locked {
 							t.Fatal("command without lock")
 						}
@@ -444,20 +455,25 @@ func TestDelegatedSandboxSequence(t *testing.T) {
 	add := func(name string) { calls = append(calls, name) }
 	lifecycle := DelegatedSandboxLifecycle{
 		Provider: "test", Runtime: core.Runtime{}, Workdir: "/repo",
-		Preflight:      func(context.Context) error { add("preflight"); return nil },
-		PrepareArchive: func(context.Context) (*core.PreparedArchive, error) { add("archive"); return nil, nil },
+		Preflight: func(context.Context) error { add("preflight"); return nil },
+		Workspace: func() SandboxWorkspace {
+			return WorkspaceOperations{
+				PrepareArchiveFunc: func(context.Context) (*core.PreparedArchive, error) { add("archive"); return nil, nil },
+				SyncFunc: func(context.Context, *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					add("sync")
+					return nil, 0, nil
+				},
+			}
+		},
 		Acquire: func(context.Context) (DelegatedSandbox, error) {
 			add("acquire")
 			return DelegatedSandbox{Unlock: func() { add("unlock") }}, nil
 		},
 		Setup: func(context.Context) error { add("setup"); return nil },
-		Sync: func(context.Context, *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			add("sync")
-			return nil, 0, nil
-		},
+
 		Command: func(context.Context) (DelegatedSandboxCommand, error) {
 			add("command")
-			return DelegatedSandboxCommand{Run: func(context.Context) (int, error) { add("exec"); return 0, nil }, Close: func(context.Context) error { add("close-command"); return nil }}, nil
+			return DelegatedSandboxCommand{Run: func(context.Context, io.Writer, io.Writer) (int, error) { add("exec"); return 0, nil }, Close: func(context.Context) error { add("close-command"); return nil }}, nil
 		},
 		Cleanup: func(context.Context) error { add("cleanup"); return nil },
 	}
@@ -482,7 +498,11 @@ func TestDelegatedSandboxCleanupDeadline(t *testing.T) {
 	result, err := RunDelegatedSandbox(t.Context(), core.RunRequest{NoSync: true, SyncOnly: true}, DelegatedSandboxLifecycle{
 		Provider: "test", CleanupTimeout: time.Millisecond,
 		Acquire: func(context.Context) (DelegatedSandbox, error) { return DelegatedSandbox{LeaseID: "lease"}, nil },
-		NoSync:  func(context.Context) error { return nil },
+		Workspace: func() SandboxWorkspace {
+			return WorkspaceOperations{
+				EnsureFunc: func(context.Context) error { return nil },
+			}
+		},
 		Cleanup: func(ctx context.Context) error { calls++; <-ctx.Done(); return ctx.Err() },
 	})
 	if calls != 1 || !errors.Is(err, context.DeadlineExceeded) || result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider || !result.Session.Kept {
@@ -538,10 +558,14 @@ func TestDelegatedSandboxAcquisitionRecovery(t *testing.T) {
 			}
 			result, err := RunDelegatedSandbox(t.Context(), req, DelegatedSandboxLifecycle{
 				Provider: "fixture", Runtime: core.Runtime{Stderr: &stderr, Clock: clock},
-				Acquire: acquire, Resolve: acquire, Setup: step("setup"), NoSync: step("workspace"),
+				Acquire: acquire, Resolve: acquire, Setup: step("setup"), Workspace: func() SandboxWorkspace {
+					return WorkspaceOperations{
+						EnsureFunc: step("workspace"),
+					}
+				},
 				Command: func(context.Context) (DelegatedSandboxCommand, error) {
 					calls = append(calls, "command")
-					return DelegatedSandboxCommand{Run: func(context.Context) (int, error) { calls = append(calls, "run"); return 0, nil }}, nil
+					return DelegatedSandboxCommand{Run: func(context.Context, io.Writer, io.Writer) (int, error) { calls = append(calls, "run"); return 0, nil }}, nil
 				},
 				Cleanup: step("cleanup"), Retained: step("retained"),
 			})
@@ -597,7 +621,11 @@ func TestDelegatedSandboxAcquisitionRecoveryTimingFailureReleasesResources(t *te
 	unlocks := 0
 	result, err := RunDelegatedSandbox(t.Context(), core.RunRequest{TimingJSON: true, Keep: true}, DelegatedSandboxLifecycle{
 		Provider: "fixture", Runtime: core.Runtime{Stderr: sandboxFailingTimingWriter{}},
-		PrepareArchive: func(context.Context) (*core.PreparedArchive, error) { return &core.PreparedArchive{File: file}, nil },
+		Workspace: func() SandboxWorkspace {
+			return WorkspaceOperations{
+				PrepareArchiveFunc: func(context.Context) (*core.PreparedArchive, error) { return &core.PreparedArchive{File: file}, nil },
+			}
+		},
 		Acquire: func(context.Context) (DelegatedSandbox, error) {
 			return DelegatedSandbox{Recovery: &DelegatedSandboxRecovery{LeaseID: "pending"}, Unlock: func() {
 				unlocks++
@@ -627,9 +655,13 @@ func TestDelegatedSandboxTimingWriterFailureDoesNotSkipCleanupOrMaskExit(t *test
 			result, err := RunDelegatedSandbox(t.Context(), core.RunRequest{NoSync: true, TimingJSON: true, KeepOnFailure: true}, DelegatedSandboxLifecycle{
 				Provider: "test", Runtime: core.Runtime{Stderr: sandboxFailingTimingWriter{}},
 				Acquire: func(context.Context) (DelegatedSandbox, error) { return DelegatedSandbox{LeaseID: "lease"}, nil },
-				NoSync:  func(context.Context) error { return nil },
+				Workspace: func() SandboxWorkspace {
+					return WorkspaceOperations{
+						EnsureFunc: func(context.Context) error { return nil },
+					}
+				},
 				Command: func(context.Context) (DelegatedSandboxCommand, error) {
-					return DelegatedSandboxCommand{Run: func(context.Context) (int, error) { return code, nil }}, nil
+					return DelegatedSandboxCommand{Run: func(context.Context, io.Writer, io.Writer) (int, error) { return code, nil }}, nil
 				},
 				Cleanup: func(context.Context) error { calls++; return nil },
 			})
@@ -665,21 +697,29 @@ func TestDelegatedSandboxCancellationBetweenPhases(t *testing.T) {
 			}
 			cleanups := 0
 			result, err := RunDelegatedSandbox(ctx, core.RunRequest{}, DelegatedSandboxLifecycle{
-				Provider:       "test",
-				Preflight:      func(context.Context) error { step("preflight"); return nil },
-				PrepareArchive: func(context.Context) (*core.PreparedArchive, error) { step("archive"); return nil, nil },
+				Provider:  "test",
+				Preflight: func(context.Context) error { step("preflight"); return nil },
+				Workspace: func() SandboxWorkspace {
+					return WorkspaceOperations{
+						PrepareArchiveFunc: func(context.Context) (*core.PreparedArchive, error) { step("archive"); return nil, nil },
+						SyncFunc: func(context.Context, *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+							step("sync")
+							return nil, 0, nil
+						},
+					}
+				},
 				Acquire: func(context.Context) (DelegatedSandbox, error) {
 					step("acquire")
 					return DelegatedSandbox{LeaseID: "lease"}, nil
 				},
 				Setup: func(context.Context) error { step("setup"); return nil },
-				Sync: func(context.Context, *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-					step("sync")
-					return nil, 0, nil
-				},
+
 				Command: func(context.Context) (DelegatedSandboxCommand, error) {
 					step("command")
-					return DelegatedSandboxCommand{Run: func(context.Context) (int, error) { t.Fatal("command ran after cancellation"); return 0, nil }}, nil
+					return DelegatedSandboxCommand{Run: func(context.Context, io.Writer, io.Writer) (int, error) {
+						t.Fatal("command ran after cancellation")
+						return 0, nil
+					}}, nil
 				},
 				Cleanup: func(ctx context.Context) error {
 					if ctx.Err() != nil {

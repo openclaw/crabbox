@@ -166,7 +166,7 @@ func (b *isloBackend) teardownIsloSandbox(ctx context.Context, client isloAPI, c
 	defer cancel()
 	bound := isloClaimIdentity(claim)
 	target := isloTeardownTarget{
-		name:       blank(bound.Name, name),
+		name:       core.Blank(bound.Name, name),
 		resourceID: bound.ID,
 	}
 	if target.resourceID != "" {
@@ -214,7 +214,7 @@ func requireIsloVerifiedTarget(claim core.LeaseClaim, target isloTeardownTarget)
 	if target.observed || isloClaimIdentity(claim).ID == "" {
 		return nil
 	}
-	return exit(5, "islo refused to delete sandbox %q for lease %q (%s): the sandbox could not be read under these credentials during this teardown, so the recorded name could not be shown to still be the resource this lease owns, and an islo sandbox name is reusable once its sandbox is deleted; deleting it blind could destroy a different sandbox. The sandbox may still be running and billable: the claim is retained, so run `%s` to retry the delete once the islo API answers reads again", target.name, claim.LeaseID, isloIdentityString(target.identity()), isloCleanupCommand(claim.LeaseID))
+	return core.Exit(5, "islo refused to delete sandbox %q for lease %q (%s): the sandbox could not be read under these credentials during this teardown, so the recorded name could not be shown to still be the resource this lease owns, and an islo sandbox name is reusable once its sandbox is deleted; deleting it blind could destroy a different sandbox. The sandbox may still be running and billable: the claim is retained, so run `%s` to retry the delete once the islo API answers reads again", target.name, claim.LeaseID, isloIdentityString(target.identity()), isloCleanupCommand(claim.LeaseID))
 }
 
 // locateIsloTargetByID resolves the claimed resource id. It reports done=true
@@ -324,7 +324,7 @@ func (b *isloBackend) confirmIsloTeardown(ctx context.Context, client isloAPI, c
 		b.warnf("warning: islo released lease %s on a name-only 404: the claim records no resource id, so the delete could not be confirmed against a specific resource. Re-create the lease to get an id-anchored claim.\n", claim.LeaseID)
 		return isloProofNameAbsentUnbound, nil
 	default:
-		return "", exit(5, "islo cannot prove lease %q (%s) is deleted: no by-id tombstone, and the sandbox was never observed under these credentials during this teardown, which is indistinguishable from a resource they cannot address (%s); retaining the claim so `%s` can retry with the owning credentials", claim.LeaseID, isloIdentityString(target.identity()), target.deleteNarrative(), isloCleanupCommand(claim.LeaseID))
+		return "", core.Exit(5, "islo cannot prove lease %q (%s) is deleted: no by-id tombstone, and the sandbox was never observed under these credentials during this teardown, which is indistinguishable from a resource they cannot address (%s); retaining the claim so `%s` can retry with the owning credentials", claim.LeaseID, isloIdentityString(target.identity()), target.deleteNarrative(), isloCleanupCommand(claim.LeaseID))
 	}
 }
 
@@ -332,7 +332,7 @@ func (b *isloBackend) confirmIsloTeardown(ctx context.Context, client isloAPI, c
 // whether a delete was actually issued, so it can never describe an action that
 // did not happen.
 func isloTeardownUnproven(claim core.LeaseClaim, target isloTeardownTarget, detail string) error {
-	return exit(5, "islo teardown of lease %q (%s) is unproven: %s (%s); retaining the claim so `%s` can retry", claim.LeaseID, isloIdentityString(target.identity()), detail, target.deleteNarrative(), isloCleanupCommand(claim.LeaseID))
+	return core.Exit(5, "islo teardown of lease %q (%s) is unproven: %s (%s); retaining the claim so `%s` can retry", claim.LeaseID, isloIdentityString(target.identity()), detail, target.deleteNarrative(), isloCleanupCommand(claim.LeaseID))
 }
 
 func (b *isloBackend) warnIsloAdvisory(advisory string) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"strings"
@@ -102,12 +103,7 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			client, err = b.client()
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-nomad-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-			})
-		},
+		Workspace: func() shared.SandboxWorkspace { return b.workspace(client, ready, req, workdir) },
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
 			var recovery *shared.DelegatedSandboxRecovery
@@ -183,17 +179,11 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s job=%s allocation=%s task=%s workdir=%s\n", providerName, claim.LeaseID, ready.JobID, ready.AllocationID, ready.Task, workdir)
 			return nil
 		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, ready, req, workdir, prepared)
-		},
-		NoSync: func(ctx context.Context) error {
-			return b.execShell(ctx, client, ready, "mkdir -p "+shellQuote(workdir))
-		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			return shared.DelegatedSandboxCommand{
 				Text: strings.Join(req.Command, " "),
-				Run: func(ctx context.Context) (int, error) {
-					return b.runCommand(ctx, client, ready, req, workdir)
+				Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
+					return b.runCommand(ctx, client, ready, req, workdir, stdout, stderr)
 				},
 			}, nil
 		},

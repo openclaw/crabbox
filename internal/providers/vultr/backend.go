@@ -622,7 +622,9 @@ func (b *backend) targetFromInstance(item vultrInstance, req core.ResolveRequest
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
-	core.UseStoredTestboxKey(&ssh, leaseID)
+	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if req.Repo.Root != "" && !req.NoLocalStateMutations {
 		updatedClaim, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim, claim, claimExists)
 		if err != nil {
@@ -717,20 +719,9 @@ func validateVultrClaimIdentity(claim core.LeaseClaim, leaseID, slug string) err
 }
 
 func (b *backend) waitForInstanceReady(ctx context.Context, client vultrAPI, id string, timeout time.Duration) (vultrInstance, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	result, err := shared.Poll(waitCtx, 0, 3*time.Second, shared.SleepContext,
+	return shared.PollReady(ctx, timeout, 3*time.Second,
 		func(ctx context.Context) (vultrInstance, error) { return client.GetInstance(ctx, id) },
-		func(_ context.Context, item vultrInstance, fetchErr error) (bool, error) {
-			return instanceReady(item), fetchErr
-		}, nil)
-	if err != nil {
-		if context.Cause(ctx) == nil && errors.Is(context.Cause(waitCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
-			return vultrInstance{}, core.Exit(5, "timed out waiting for Vultr instance IP")
-		}
-		result.Value = vultrInstance{}
-	}
-	return result.Value, err
+		instanceReady, core.Exit(5, "timed out waiting for Vultr instance IP"))
 }
 
 func instanceReady(item vultrInstance) bool {
@@ -789,7 +780,7 @@ func serverFromInstance(item vultrInstance, cfg core.Config) core.Server {
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = item.MainIP
-	server.ServerType.Name = firstNonBlank(item.Plan, cfg.ServerType)
+	server.ServerType.Name = shared.FirstNonBlank(item.Plan, cfg.ServerType)
 	return server
 }
 
@@ -907,8 +898,4 @@ func applyVultrDefaults(cfg *core.Config) {
 func isVultrInstanceID(value string) bool {
 	value = strings.TrimSpace(value)
 	return vultrInstanceIDRe.MatchString(value)
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }

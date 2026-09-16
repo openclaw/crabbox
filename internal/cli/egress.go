@@ -68,7 +68,7 @@ func (a App) egress(ctx context.Context, args []string) error {
 	if len(args) == 0 || isHelpArg(args[0]) {
 		a.printEgressHelp()
 		if len(args) == 0 {
-			return exit(2, "missing egress subcommand")
+			return Exit(2, "missing egress subcommand")
 		}
 		return nil
 	}
@@ -85,7 +85,7 @@ func (a App) egress(ctx context.Context, args []string) error {
 		return a.egressStop(ctx, args[1:])
 	default:
 		a.printEgressHelp()
-		return exit(2, "unknown egress subcommand %q", args[0])
+		return Exit(2, "unknown egress subcommand %q", args[0])
 	}
 }
 
@@ -122,10 +122,10 @@ func (a App) egressHostWithConnectHook(ctx context.Context, args []string, onCon
 	setIDFromFirstArg(fs, id)
 	allow := egressAllowlist(*profile, splitCSV(*allowCSV))
 	if *id == "" {
-		return exit(2, "usage: crabbox egress host --id <lease-id-or-slug> --profile <name>|--allow <hosts>")
+		return Exit(2, "usage: crabbox egress host --id <lease-id-or-slug> --profile <name>|--allow <hosts>")
 	}
 	if len(allow) == 0 {
-		return exit(2, "egress host requires --profile or --allow; refusing to start an open proxy")
+		return Exit(2, "egress host requires --profile or --allow; refusing to start an open proxy")
 	}
 	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, *ticket, flagWasSet(fs, "coordinator"))
 	if err != nil {
@@ -134,7 +134,7 @@ func (a App) egressHostWithConnectHook(ctx context.Context, args []string, onCon
 	bridge, err := connectEgressBridge(ctx, coord, leaseID, "host", *ticket, *sessionID, *profile, allow)
 	if err != nil {
 		if fatalEgressBridgeSetupError(err) {
-			return exit(egressDaemonFatalCode, "egress lease unavailable: %v", err)
+			return Exit(egressDaemonFatalCode, "egress lease unavailable: %v", err)
 		}
 		return err
 	}
@@ -144,7 +144,7 @@ func (a App) egressHostWithConnectHook(ctx context.Context, args []string, onCon
 	}
 	err = bridge.serveHost(ctx, allow)
 	if replacedEgressSessionClose(err) {
-		return exit(egressDaemonFatalCode, "egress session replaced: %v", err)
+		return Exit(egressDaemonFatalCode, "egress session replaced: %v", err)
 	}
 	return err
 }
@@ -170,10 +170,10 @@ func (a App) egressClient(ctx context.Context, args []string) error {
 	}
 	if stdinTicket {
 		if flagWasSet(fs, "ticket") {
-			return exit(2, "internal egress ticket input cannot be combined with --ticket")
+			return Exit(2, "internal egress ticket input cannot be combined with --ticket")
 		}
 		if fs.NArg() != 0 {
-			return exit(2, "unexpected positional arguments for internal egress ticket input")
+			return Exit(2, "unexpected positional arguments for internal egress ticket input")
 		}
 		value, err := readEgressTicketStdin(a.input())
 		if err != nil {
@@ -183,7 +183,7 @@ func (a App) egressClient(ctx context.Context, args []string) error {
 	}
 	setIDFromFirstArg(fs, id)
 	if *id == "" {
-		return exit(2, "usage: crabbox egress client --id <lease-id-or-slug> [--listen 127.0.0.1:3128]")
+		return Exit(2, "usage: crabbox egress client --id <lease-id-or-slug> [--listen 127.0.0.1:3128]")
 	}
 	if err := validateEgressListen(*listen); err != nil {
 		return err
@@ -198,14 +198,14 @@ func (a App) egressClient(ctx context.Context, args []string) error {
 	bridge, err := connectEgressBridge(ctx, coord, leaseID, "client", *ticket, *sessionID, "", nil)
 	if err != nil {
 		if fatalEgressBridgeSetupError(err) {
-			return exit(egressDaemonFatalCode, "egress lease unavailable: %v", err)
+			return Exit(egressDaemonFatalCode, "egress lease unavailable: %v", err)
 		}
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "egress client: connected lease=%s session=%s listen=%s\n", leaseID, bridge.sessionID, *listen)
 	err = bridge.serveClient(ctx, *listen)
 	if replacedEgressSessionClose(err) {
-		return exit(egressDaemonFatalCode, "egress session replaced: %v", err)
+		return Exit(egressDaemonFatalCode, "egress session replaced: %v", err)
 	}
 	return err
 }
@@ -214,21 +214,21 @@ func readEgressTicketStdin(r io.Reader) (string, error) {
 	value, err := readCredentialInput(r)
 	if closer, ok := r.(io.Closer); ok {
 		if closeErr := closer.Close(); closeErr != nil {
-			return "", exit(2, "close egress ticket input failed")
+			return "", Exit(2, "close egress ticket input failed")
 		}
 	}
 	switch err {
 	case errCredentialInputTooLarge:
-		return "", exit(2, "egress ticket input exceeds %d bytes", credentialInputMaxBytes)
+		return "", Exit(2, "egress ticket input exceeds %d bytes", credentialInputMaxBytes)
 	case errCredentialInputEmpty:
-		return "", exit(2, "egress ticket input is empty")
+		return "", Exit(2, "egress ticket input is empty")
 	case nil:
 	default:
 		// Reader errors can contain input bytes. Never echo them into helper logs.
-		return "", exit(2, "read egress ticket input failed")
+		return "", Exit(2, "read egress ticket input failed")
 	}
 	if len(value) != len("egress_")+32 || !strings.HasPrefix(value, "egress_") || strings.Trim(value[len("egress_"):], "0123456789abcdef") != "" {
-		return "", exit(2, "malformed egress ticket input")
+		return "", Exit(2, "malformed egress ticket input")
 	}
 	return value, nil
 }
@@ -240,17 +240,17 @@ func (a App) startEgressClientProcess(args []string, ticket string) error {
 	for _, output := range []io.Writer{a.Stdout, a.Stderr} {
 		file, ok := output.(*os.File)
 		if !ok {
-			return exit(2, "egress client bootstrap requires regular log files")
+			return Exit(2, "egress client bootstrap requires regular log files")
 		}
 		info, err := file.Stat()
 		if err != nil || !info.Mode().IsRegular() {
-			return exit(2, "egress client bootstrap requires regular log files")
+			return Exit(2, "egress client bootstrap requires regular log files")
 		}
 		logs = append(logs, file)
 	}
 	exe, err := os.Executable()
 	if err != nil {
-		return exit(2, "resolve egress client executable failed")
+		return Exit(2, "resolve egress client executable failed")
 	}
 	cmd := exec.Command(exe, append([]string{"egress", "client", egressTicketChildArg}, args...)...)
 	cmd.Stdout, cmd.Stderr = logs[0], logs[1]
@@ -260,19 +260,19 @@ func (a App) startEgressClientProcess(args []string, ticket string) error {
 func launchEgressClientProcess(cmd *exec.Cmd, ticket string) error {
 	reader, writer, err := os.Pipe()
 	if err != nil {
-		return exit(2, "create egress client input pipe failed")
+		return Exit(2, "create egress client input pipe failed")
 	}
 	defer reader.Close()
 	defer writer.Close()
 	cmd.Stdin = reader
 	configureDaemonCommand(cmd)
 	if err := cmd.Start(); err != nil {
-		return exit(5, "start detached egress client failed")
+		return Exit(5, "start detached egress client failed")
 	}
 	if err := reader.Close(); err != nil {
 		_ = stopDaemonProcess(cmd.Process, cmd.Process.Pid)
 		_ = cmd.Wait()
-		return exit(5, "close egress client input reader failed")
+		return Exit(5, "close egress client input reader failed")
 	}
 	return completeEgressClientLaunch(cmd, writer, ticket)
 }
@@ -284,19 +284,19 @@ func completeEgressClientLaunch(cmd *exec.Cmd, input io.WriteCloser, ticket stri
 		if err != nil {
 			// Kill and reap even if EOF has already let the bridge start.
 			if stopErr := stopDaemonProcess(cmd.Process, pid); stopErr != nil {
-				err = errors.Join(err, exit(5, "cleanup detached egress client failed"))
+				err = errors.Join(err, Exit(5, "cleanup detached egress client failed"))
 			}
 			_ = cmd.Wait()
 		}
 	}()
 	if n, writeErr := io.WriteString(input, ticket); writeErr != nil || n != len(ticket) {
-		return exit(5, "write egress client ticket input failed")
+		return Exit(5, "write egress client ticket input failed")
 	}
 	if err := input.Close(); err != nil {
-		return exit(5, "close egress client ticket input failed")
+		return Exit(5, "close egress client ticket input failed")
 	}
 	if err := cmd.Process.Release(); err != nil {
-		return exit(5, "release detached egress client failed")
+		return Exit(5, "release detached egress client failed")
 	}
 	return nil
 }
@@ -318,11 +318,11 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	}
 	setIDFromFirstArg(fs, id)
 	if *id == "" {
-		return exit(2, "usage: crabbox egress start --id <lease-id-or-slug> --profile <name>|--allow <hosts>")
+		return Exit(2, "usage: crabbox egress start --id <lease-id-or-slug> --profile <name>|--allow <hosts>")
 	}
 	allow := egressAllowlist(*profile, splitCSV(*allowCSV))
 	if len(allow) == 0 {
-		return exit(2, "egress start requires --profile or --allow; refusing to start an open proxy")
+		return Exit(2, "egress start requires --profile or --allow; refusing to start an open proxy")
 	}
 	if err := validateEgressListen(*listen); err != nil {
 		return err
@@ -341,7 +341,7 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 		return err
 	}
 	if !useCoordinator || !coord.hasConfiguredAuth() {
-		return exit(2, "egress start requires a configured coordinator login; run crabbox login --url <broker-url> first")
+		return Exit(2, "egress start requires a configured coordinator login; run crabbox login --url <broker-url> first")
 	}
 	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
 	if err != nil {
@@ -352,7 +352,7 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	}
 	unlockDaemon, err := acquireEgressDaemonLock(ctx, leaseID)
 	if err != nil {
-		return exit(2, "acquire egress daemon lock: %v", err)
+		return Exit(2, "acquire egress daemon lock: %v", err)
 	}
 	daemonLockHeld := true
 	releaseDaemonLock := func() {
@@ -372,7 +372,7 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 	}
 	remote := remoteEgressClientCommand(coord.BaseURL, leaseID, sessionID, *listen)
 	if err := runSSHInputQuiet(ctx, target, remote, clientTicket.Ticket); err != nil {
-		return exit(5, "start remote egress client: %v", err)
+		return Exit(5, "start remote egress client: %v", err)
 	}
 	if err := waitRemoteEgressClient(ctx, target, *listen); err != nil {
 		return err
@@ -440,7 +440,7 @@ func (a App) egressStatus(ctx context.Context, args []string) error {
 	}
 	setIDFromFirstArg(fs, id)
 	if *id == "" {
-		return exit(2, "usage: crabbox egress status --id <lease-id-or-slug>")
+		return Exit(2, "usage: crabbox egress status --id <lease-id-or-slug>")
 	}
 	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, "", flagWasSet(fs, "coordinator"))
 	if err != nil {
@@ -473,7 +473,7 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 	}
 	setIDFromFirstArg(fs, id)
 	if *id == "" {
-		return exit(2, "usage: crabbox egress stop --id <lease-id-or-slug>")
+		return Exit(2, "usage: crabbox egress stop --id <lease-id-or-slug>")
 	}
 	cfg, cfgErr := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id})
 	leaseID := *id
@@ -488,7 +488,7 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 	}
 	unlock, err := acquireEgressDaemonLocks(ctx, *id, leaseID)
 	if err != nil {
-		return exit(2, "acquire egress daemon locks: %v", err)
+		return Exit(2, "acquire egress daemon locks: %v", err)
 	}
 	defer unlock()
 	stoppedLocal := false
@@ -531,13 +531,13 @@ func (a App) egressCoordinatorAndLease(ctx context.Context, provider, coordinato
 		return nil, "", err
 	}
 	if !useCoordinator || coord == nil || coord.BaseURL == "" {
-		return nil, "", exit(2, "egress requires a configured coordinator")
+		return nil, "", Exit(2, "egress requires a configured coordinator")
 	}
 	if strings.TrimSpace(ticket) != "" {
 		return coord, id, nil
 	}
 	if !coord.hasConfiguredAuth() {
-		return nil, "", exit(2, "egress requires a configured coordinator login; run crabbox login --url <broker-url> first")
+		return nil, "", Exit(2, "egress requires a configured coordinator login; run crabbox login --url <broker-url> first")
 	}
 	lease, err := coord.GetLease(ctx, id)
 	if err != nil {
@@ -1294,7 +1294,7 @@ func egressHostAllowed(host string, allow []string) bool {
 func validateEgressListen(listen string) error {
 	host, port, err := net.SplitHostPort(strings.TrimSpace(listen))
 	if err != nil || strings.TrimSpace(port) == "" {
-		return exit(2, "invalid egress listen address %q; use 127.0.0.1:<port>", listen)
+		return Exit(2, "invalid egress listen address %q; use 127.0.0.1:<port>", listen)
 	}
 	host = strings.Trim(strings.ToLower(strings.TrimSpace(host)), "[]")
 	if host == "localhost" {
@@ -1302,7 +1302,7 @@ func validateEgressListen(listen string) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return exit(2, "egress listen address must be loopback-only; use 127.0.0.1:<port>")
+		return Exit(2, "egress listen address must be loopback-only; use 127.0.0.1:<port>")
 	}
 	return nil
 }
@@ -1335,7 +1335,7 @@ func egressStartCoordinatorConfig(cfg Config, coordinatorURL string) (Config, er
 		return cfg, nil
 	}
 	if egressCoordinatorNeedsAccess(cfg.Access) {
-		return cfg, exit(2, "egress start cannot install a remote client when coordinator Access credentials are configured; use --coordinator with a public coordinator route or run egress client manually with safe credentials")
+		return cfg, Exit(2, "egress start cannot install a remote client when coordinator Access credentials are configured; use --coordinator with a public coordinator route or run egress client manually with safe credentials")
 	}
 	return cfg, nil
 }
@@ -1372,7 +1372,7 @@ func installRemoteEgressClient(ctx context.Context, target SSHTarget) error {
 	defer cleanup()
 	uploadNonce, err := randomHex(8)
 	if err != nil {
-		return exit(2, "create egress client upload path: %v", err)
+		return Exit(2, "create egress client upload path: %v", err)
 	}
 	uploadPath := egressRemoteBinary + ".tmp-" + uploadNonce
 	promoted := false
@@ -1385,10 +1385,10 @@ func installRemoteEgressClient(ctx context.Context, target SSHTarget) error {
 		_ = runSSHQuiet(cleanupCtx, target, "rm -f "+shellQuote(uploadPath))
 	}()
 	if err := copyLocalFileToTarget(ctx, target, exe, uploadPath); err != nil {
-		return exit(5, "copy egress client: %v", err)
+		return Exit(5, "copy egress client: %v", err)
 	}
 	if err := runSSHQuiet(ctx, target, "chmod 700 "+shellQuote(uploadPath)+" && mv -f "+shellQuote(uploadPath)+" "+shellQuote(egressRemoteBinary)); err != nil {
-		return exit(5, "install egress client: %v", err)
+		return Exit(5, "install egress client: %v", err)
 	}
 	promoted = true
 	return nil
@@ -1397,17 +1397,17 @@ func installRemoteEgressClient(ctx context.Context, target SSHTarget) error {
 func egressClientBinaryForTarget(ctx context.Context, target SSHTarget) (string, func(), error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return "", func() {}, exit(2, "resolve crabbox executable: %v", err)
+		return "", func() {}, Exit(2, "resolve crabbox executable: %v", err)
 	}
 	if target.TargetOS != "" && target.TargetOS != targetLinux {
-		return "", func() {}, exit(2, "egress start only supports Linux lease targets; target=%s is not supported", target.TargetOS)
+		return "", func() {}, Exit(2, "egress start only supports Linux lease targets; target=%s is not supported", target.TargetOS)
 	}
 	if runtime.GOOS == "linux" {
 		return exe, func() {}, nil
 	}
 	boundary, err := findRepositoryBoundary()
 	if err != nil {
-		return "", func() {}, exit(2, "cross-build egress client: %v", err)
+		return "", func() {}, Exit(2, "cross-build egress client: %v", err)
 	}
 	out := filepath.Join(os.TempDir(), "crabbox-egress-client-linux-amd64-"+strconv.FormatInt(time.Now().UnixNano(), 36))
 	if err := crossBuildEgressClient(ctx, target, boundary.root, out); err != nil {
@@ -1425,7 +1425,7 @@ func crossBuildEgressClient(ctx context.Context, target SSHTarget, repoRoot, out
 	}
 	cmd.Env = append(buildEnv, "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
 	if data, err := cmd.CombinedOutput(); err != nil {
-		return exit(5, "cross-build linux egress client: %v: %s", err, strings.TrimSpace(string(data)))
+		return Exit(5, "cross-build linux egress client: %v: %s", err, strings.TrimSpace(string(data)))
 	}
 	return nil
 }
@@ -1463,7 +1463,7 @@ func remoteStopEgressClientCommand() string {
 func waitRemoteEgressClient(ctx context.Context, target SSHTarget, listen string) error {
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
-		return exit(2, "invalid egress listen address %q", listen)
+		return Exit(2, "invalid egress listen address %q", listen)
 	}
 	deadline := time.Now().Add(egressRemoteReadyWait)
 	for time.Now().Before(deadline) {
@@ -1475,7 +1475,7 @@ func waitRemoteEgressClient(ctx context.Context, target SSHTarget, listen string
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	return exit(5, "remote egress client did not listen on %s; inspect %s", listen, egressRemoteLog)
+	return Exit(5, "remote egress client did not listen on %s; inspect %s", listen, egressRemoteLog)
 }
 
 func egressRemoteProbeCommand(host, port string) string {
@@ -1533,7 +1533,7 @@ func acquireEgressDaemonLocks(ctx context.Context, leaseIDs ...string) (func(), 
 func (a App) startEgressHostDaemon(ctx context.Context, leaseID string, args, childEnvDenylist []string) error {
 	unlock, err := acquireEgressDaemonLock(ctx, leaseID)
 	if err != nil {
-		return exit(2, "acquire egress daemon lock: %v", err)
+		return Exit(2, "acquire egress daemon lock: %v", err)
 	}
 	defer unlock()
 	return a.startEgressHostDaemonLocked(leaseID, args, childEnvDenylist)
@@ -1542,7 +1542,7 @@ func (a App) startEgressHostDaemon(ctx context.Context, leaseID string, args, ch
 func (a App) startEgressHostDaemonLocked(leaseID string, args, childEnvDenylist []string) error {
 	exe, err := os.Executable()
 	if err != nil {
-		return exit(2, "resolve crabbox executable: %v", err)
+		return Exit(2, "resolve crabbox executable: %v", err)
 	}
 	if stopped, err := a.stopEgressHostDaemonLocked(leaseID); err != nil {
 		return err
@@ -1554,11 +1554,11 @@ func (a App) startEgressHostDaemonLocked(leaseID string, args, childEnvDenylist 
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		return exit(2, "create egress daemon directory: %v", err)
+		return Exit(2, "create egress daemon directory: %v", err)
 	}
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		return exit(2, "open egress daemon log: %v", err)
+		return Exit(2, "open egress daemon log: %v", err)
 	}
 	childArgs := append([]string{"egress"}, args...)
 	cmd := egressDaemonSupervisorCommand(exe, childArgs, childEnvDenylist)
@@ -1567,18 +1567,18 @@ func (a App) startEgressHostDaemonLocked(leaseID string, args, childEnvDenylist 
 	cmd.Stderr = logFile
 	configureDaemonCommand(cmd)
 	if err := cmd.Start(); err != nil {
-		return errors.Join(exit(5, "start egress daemon: %v", err), logFile.Close())
+		return errors.Join(Exit(5, "start egress daemon: %v", err), logFile.Close())
 	}
 	pid := cmd.Process.Pid
 	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", pid)), 0o600); err != nil {
 		_ = cmd.Process.Kill()
-		return errors.Join(exit(2, "write egress daemon pid: %v", err), logFile.Close())
+		return errors.Join(Exit(2, "write egress daemon pid: %v", err), logFile.Close())
 	}
 	if err := cmd.Process.Release(); err != nil {
-		return errors.Join(exit(5, "release egress daemon process: %v", err), logFile.Close())
+		return errors.Join(Exit(5, "release egress daemon process: %v", err), logFile.Close())
 	}
 	if err := logFile.Close(); err != nil {
-		return exit(2, "close egress daemon log: %v", err)
+		return Exit(2, "close egress daemon log: %v", err)
 	}
 	fmt.Fprintf(a.Stdout, "egress host daemon: pid=%d log=%s\n", pid, logPath)
 	return nil
@@ -1595,7 +1595,7 @@ func egressDaemonSupervisorCommand(exe string, args, childEnvDenylist []string) 
 func (a App) stopEgressHostDaemon(ctx context.Context, leaseID string) (bool, error) {
 	unlock, err := acquireEgressDaemonLock(ctx, leaseID)
 	if err != nil {
-		return false, exit(2, "acquire egress daemon lock: %v", err)
+		return false, Exit(2, "acquire egress daemon lock: %v", err)
 	}
 	defer unlock()
 	return a.stopEgressHostDaemonLocked(leaseID)
@@ -1613,21 +1613,21 @@ func (a App) stopEgressHostDaemonLocked(leaseID string) (bool, error) {
 		}
 		return false, err
 	}
-	command, alive := webVNCDaemonProcessCommand(pid)
+	command, alive := LocalProcessCommand(pid)
 	if !alive {
 		_ = os.Remove(pidPath)
 		fmt.Fprintf(a.Stdout, "egress host daemon: removed stale pid=%d\n", pid)
 		return true, nil
 	}
 	if !isEgressDaemonCommand(command) {
-		return false, exit(5, "refusing to stop pid %d; command does not look like crabbox egress: %s", pid, strings.TrimSpace(command))
+		return false, Exit(5, "refusing to stop pid %d; command does not look like crabbox egress: %s", pid, strings.TrimSpace(command))
 	}
 	process, err := os.FindProcess(pid)
 	if err != nil {
-		return false, exit(5, "find egress daemon pid %d: %v", pid, err)
+		return false, Exit(5, "find egress daemon pid %d: %v", pid, err)
 	}
 	if err := stopDaemonProcess(process, pid); err != nil {
-		return false, exit(5, "stop egress daemon pid %d: %v", pid, err)
+		return false, Exit(5, "stop egress daemon pid %d: %v", pid, err)
 	}
 	_ = os.Remove(pidPath)
 	fmt.Fprintf(a.Stdout, "egress host daemon: stopped pid=%d\n", pid)
@@ -1677,7 +1677,7 @@ func egressDaemonSupervisorScript(exe string, args []string) string {
 }
 
 func egressDaemonPaths(leaseID string) (string, string, error) {
-	dir, err := crabboxStateDir()
+	dir, err := CrabboxStateDir()
 	if err != nil {
 		return "", "", err
 	}

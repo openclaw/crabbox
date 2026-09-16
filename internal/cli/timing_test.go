@@ -8,6 +8,41 @@ import (
 	"time"
 )
 
+func TestImageEvidenceGenericRecords(t *testing.T) {
+	evidence := &ImageEvidence{ConfiguredReference: "created:tag", RuntimeImageID: "runtime-id", RepositoryDigests: []string{"example.invalid/base@sha256:" + strings.Repeat("a", 64)}, RepositoryDigestStatus: "available"}
+	server := Server{ImageEvidence: evidence, ServerType: ServerTypeInfo{Name: "created_tag"}}
+	var report TimingReport
+	populateRunTimingMetadata(&report, Config{}, Repo{}, server, "lease", "run", "/work", nil)
+	var context strings.Builder
+	printRunContextSummary(&context, nil, Config{Provider: "fixture"}, server, SSHTarget{}, "lease", "run", "", "/work", false, "")
+	if !strings.Contains(context.String(), `runtime_image_id="runtime-id"`) || !strings.Contains(context.String(), "type=created_tag") {
+		t.Fatalf("context=%q", context.String())
+	}
+	claim := cloneLeaseClaim(leaseClaim{ImageEvidence: evidence})
+	evidence.RepositoryDigests[0] = "mutated-after-capture"
+	if report.MachineType != "created_tag" || report.ImageEvidence.RepositoryDigests[0] == evidence.RepositoryDigests[0] || claim.ImageEvidence.RepositoryDigests[0] == evidence.RepositoryDigests[0] {
+		t.Fatal("image evidence changed machineType or shares mutable digest storage")
+	}
+	data, err := json.Marshal(finalizeTimingReport(report))
+	if err != nil || !strings.Contains(string(data), `"imageEvidence":{"configuredReference":"created:tag","runtimeImageId":"runtime-id"`) {
+		t.Fatalf("timing image evidence missing: %s %v", data, err)
+	}
+	proof, err := renderRunProof(proofRenderInput{ImageEvidence: report.ImageEvidence, Command: "true"})
+	if err != nil || !strings.Contains(proof, `runtime_image_id="runtime-id"`) {
+		t.Fatalf("proof image evidence missing: %v", err)
+	}
+	data, err = json.Marshal(TimingReport{Provider: "other"})
+	if err != nil || strings.Contains(string(data), "imageEvidence") {
+		t.Fatal("other provider gained an image observation")
+	}
+	for _, status := range []string{"unavailable", "unknown"} {
+		data, err = json.Marshal(CloneImageEvidence(&ImageEvidence{RepositoryDigestStatus: status}))
+		if err != nil || !strings.Contains(string(data), `"repositoryDigests":[]`) {
+			t.Fatalf("%s digest collection must be an explicit empty array", status)
+		}
+	}
+}
+
 func TestFinalizeRunnerPhasesNeverInflatesTotal(t *testing.T) {
 	report := finalizeTimingReport(TimingReport{
 		Provider:      "aws",

@@ -60,6 +60,10 @@ Config keys under `linode:`:
 | `firewall` | `cfg.Linode.FirewallID` | empty | Optional numeric existing Linode firewall id to attach at create time. |
 | `sshCIDRs` | `cfg.Linode.SSHCIDRs` | empty | Reserved for firewall-aware follow-up work; Phase 1 does not create firewall rules. |
 
+Acquisition trims the selected native type. A blank explicit `--type` falls back
+to `linode.type`, then the class default. The create request, lease metadata, and
+recovery records use that same resolved type.
+
 The portable `--os ubuntu:24.04` selector maps to `linode/ubuntu24.04`. Linode
 does not currently offer the portable default Ubuntu 26.04 image in this
 provider, so provisioning with an explicit `--os ubuntu:26.04` is rejected

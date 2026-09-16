@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 // TestLiveIsloStatusClassification is an end-to-end check against the real Islo
@@ -35,11 +37,11 @@ func TestLiveIsloStatusClassification(t *testing.T) {
 		t.Skip("ISLO_API_KEY not set; skipping live Islo e2e")
 	}
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Islo.APIKey = apiKey
 	cfg.Islo.BaseURL = "https://api.islo.dev"
 
-	rt := Runtime{HTTP: &http.Client{Timeout: 30 * time.Second}}
+	rt := core.Runtime{HTTP: &http.Client{Timeout: 30 * time.Second}}
 	client, err := newIsloClient(cfg, rt)
 	if err != nil {
 		t.Fatalf("new islo client: %v", err)
@@ -110,26 +112,26 @@ func TestLiveIsloPauseResumeLifecycle(t *testing.T) {
 	}
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Islo.APIKey = apiKey
-	cfg.Islo.BaseURL = blank(strings.TrimSpace(os.Getenv("ISLO_BASE_URL")), "https://api.islo.dev")
-	cfg.Islo.Image = blank(strings.TrimSpace(os.Getenv("CRABBOX_LIVE_ISLO_IMAGE")), "docker.io/library/ubuntu:26.04")
+	cfg.Islo.BaseURL = core.Blank(strings.TrimSpace(os.Getenv("ISLO_BASE_URL")), "https://api.islo.dev")
+	cfg.Islo.Image = core.Blank(strings.TrimSpace(os.Getenv("CRABBOX_LIVE_ISLO_IMAGE")), "docker.io/library/ubuntu:26.04")
 	cfg.Islo.Workdir = "crabbox-live"
 	cfg.Islo.VCPUs = 1
 	cfg.Islo.MemoryMB = 1024
 	cfg.Islo.DiskGB = 10
 
 	var stdout, stderr bytes.Buffer
-	backend := NewIsloBackend(Provider{}.Spec(), cfg, Runtime{
+	backend := NewIsloBackend(Provider{}.Spec(), cfg, core.Runtime{
 		HTTP:   &http.Client{Timeout: 30 * time.Second},
 		Stdout: &stdout,
 		Stderr: &stderr,
 	}).(*isloBackend)
-	repo := Repo{Name: "pause-resume-live", Root: t.TempDir()}
+	repo := core.Repo{Name: "pause-resume-live", Root: t.TempDir()}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	if err := backend.Warmup(ctx, WarmupRequest{Repo: repo, Keep: true}); err != nil {
+	if err := backend.Warmup(ctx, core.WarmupRequest{Repo: repo, Keep: true}); err != nil {
 		t.Fatalf("warmup: %v\n%s", err, stderr.String())
 	}
 	match := regexp.MustCompile(`(?m)^leased ([^ ]+) `).FindStringSubmatch(stdout.String())
@@ -144,7 +146,7 @@ func TestLiveIsloPauseResumeLifecycle(t *testing.T) {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cleanupCancel()
 		if !stopCompleted {
-			if err := backend.Stop(cleanupCtx, StopRequest{ID: leaseID}); err != nil {
+			if err := backend.Stop(cleanupCtx, core.StopRequest{ID: leaseID}); err != nil {
 				return fmt.Errorf("stop lease %s: %w", leaseID, err)
 			}
 			stopCompleted = true
@@ -189,18 +191,18 @@ func TestLiveIsloPauseResumeLifecycle(t *testing.T) {
 		t.Fatalf("incomplete sandbox identity for lease %s", leaseID)
 	}
 
-	if err := backend.Pause(ctx, PauseRequest{ID: leaseID}); err != nil {
+	if err := backend.Pause(ctx, core.PauseRequest{ID: leaseID}); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
 	waitForLiveIsloState(t, ctx, backend, leaseID, "paused")
-	if _, ok, err := resolveLeaseClaim(leaseID); err != nil || !ok {
+	if _, ok, err := core.ResolveLeaseClaim(leaseID); err != nil || !ok {
 		t.Fatalf("claim after pause ok=%v err=%v", ok, err)
 	}
 
-	if err := backend.Resume(ctx, ResumeRequest{ID: leaseID}); err != nil {
+	if err := backend.Resume(ctx, core.ResumeRequest{ID: leaseID}); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	status, err := backend.Status(ctx, StatusRequest{ID: leaseID, Wait: true, WaitTimeout: 2 * time.Minute})
+	status, err := backend.Status(ctx, core.StatusRequest{ID: leaseID, Wait: true, WaitTimeout: 2 * time.Minute})
 	if err != nil {
 		t.Fatalf("status after resume: %v", err)
 	}
@@ -209,7 +211,7 @@ func TestLiveIsloPauseResumeLifecycle(t *testing.T) {
 	}
 
 	stdout.Reset()
-	result, err := backend.Run(ctx, RunRequest{
+	result, err := backend.Run(ctx, core.RunRequest{
 		Repo:    repo,
 		ID:      leaseID,
 		Keep:    true,
@@ -233,7 +235,7 @@ func waitForLiveIsloState(t *testing.T, ctx context.Context, backend *isloBacken
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
-		status, err := backend.Status(ctx, StatusRequest{ID: leaseID})
+		status, err := backend.Status(ctx, core.StatusRequest{ID: leaseID})
 		if err != nil {
 			t.Fatalf("status waiting for %s: %v", want, err)
 		}

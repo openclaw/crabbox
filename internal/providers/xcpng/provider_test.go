@@ -12,10 +12,10 @@ import (
 
 func TestProviderSpec(t *testing.T) {
 	provider := Provider{}
-	if provider.Name() != "xcp-ng" {
-		t.Fatalf("Name=%q", provider.Name())
+	if provider.Spec().Name != "xcp-ng" {
+		t.Fatalf("Name=%q", provider.Spec().Name)
 	}
-	if aliases := provider.Aliases(); len(aliases) != 0 {
+	if aliases := provider.Spec().Aliases; len(aliases) != 0 {
 		t.Fatalf("Aliases=%v want none", aliases)
 	}
 	spec := provider.Spec()
@@ -37,8 +37,8 @@ func TestProviderForResolvesCanonicalOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.Name() != "xcp-ng" {
-		t.Fatalf("provider=%s", provider.Name())
+	if provider.Spec().Name != "xcp-ng" {
+		t.Fatalf("provider=%s", provider.Spec().Name)
 	}
 	if _, err := core.ProviderFor("xcpng"); err == nil {
 		t.Fatal("xcpng alias must not resolve")
@@ -62,9 +62,6 @@ func TestProviderServerTypeUsesTemplateIdentity(t *testing.T) {
 				t.Fatalf("ServerTypeForConfig=%q want %q", got, tt.want)
 			}
 		})
-	}
-	if got := provider.ServerTypeForClass("linux-small"); got != "template" {
-		t.Fatalf("ServerTypeForClass=%q want template", got)
 	}
 }
 
@@ -207,7 +204,7 @@ func TestConfigureDoctorReturnsNonMutatingBackend(t *testing.T) {
 		return fake, nil
 	}
 	t.Cleanup(func() { newLifecycleClient = old })
-	doctor, err := Provider{}.ConfigureDoctor(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := core.ConfigureProviderDoctor(Provider{}, cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +226,7 @@ func TestConfigureDoctorReturnsNonMutatingBackend(t *testing.T) {
 func TestDoctorReportsIncompleteConfigWithoutSecretValues(t *testing.T) {
 	cfg := core.Config{}
 	cfg.XCPNg.Password = "secret"
-	doctor, err := Provider{}.ConfigureDoctor(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := core.ConfigureProviderDoctor(Provider{}, cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}

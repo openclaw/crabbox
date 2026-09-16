@@ -46,8 +46,8 @@ func (r *fakeRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.
 
 func TestProviderContract(t *testing.T) {
 	provider := Provider{}
-	if provider.Name() != providerName || !reflect.DeepEqual(provider.Aliases(), []string{"phala-cloud", "dstack"}) {
-		t.Fatalf("provider identity=%q aliases=%v", provider.Name(), provider.Aliases())
+	if provider.Spec().Name != providerName || !reflect.DeepEqual(provider.Spec().Aliases, []string{"phala-cloud", "dstack"}) {
+		t.Fatalf("provider identity=%q aliases=%v", provider.Spec().Name, provider.Spec().Aliases)
 	}
 	spec := provider.Spec()
 	if spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever ||
@@ -1713,7 +1713,7 @@ func TestPhalaLeaseReadyCheckDropsGit(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
-	lease, err := b.lease(instance{ID: "appid123", Labels: map[string]string{"lease": "cbx_test"}}, cfg, "cbx_test")
+	lease, err := b.lease(instance{ID: "appid123", Labels: map[string]string{"lease": "cbx_test"}}, cfg, "cbx_test", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1735,7 +1735,7 @@ func TestPhalaLeasePinsProxyHostKeyPerLease(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
-	lease, err := (&backend{}).lease(instance{ID: "cvm-id", Labels: map[string]string{"lease": leaseID}}, cfg, leaseID)
+	lease, err := (&backend{}).lease(instance{ID: "cvm-id", Labels: map[string]string{"lease": leaseID}}, cfg, leaseID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2210,7 +2210,7 @@ func TestGatewayHostRoundTripsThroughClaimToProxyCommand(t *testing.T) {
 		t.Fatalf("gateway_host not surfaced from claim: labels=%v", item.Labels)
 	}
 	b := &backend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	lease, err := b.lease(item, cfg, leaseID)
+	lease, err := b.lease(item, cfg, leaseID, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -703,7 +703,7 @@ func (c *digitalOceanClient) resolveCreateTagConflict(ctx context.Context, tags 
 		}
 		canonical = append(canonical, name)
 	}
-	return normalizeTags(canonical), leaseTag, changed, nil
+	return shared.NormalizeTags(canonical), leaseTag, changed, nil
 }
 
 func (c *digitalOceanClient) resolveCanonicalLeaseTag(ctx context.Context, leaseID string) (string, error) {
@@ -790,8 +790,8 @@ func (c *digitalOceanClient) EnsureTag(ctx context.Context, tag string, known ma
 }
 
 func (c *digitalOceanClient) ReplaceDropletTags(ctx context.Context, id int64, currentTags, desiredTags []string) error {
-	currentTags = normalizeTags(currentTags)
-	desiredTags = normalizeTags(desiredTags)
+	currentTags = shared.NormalizeTags(currentTags)
+	desiredTags = shared.NormalizeTags(desiredTags)
 	current := make(map[string]bool, len(currentTags))
 	for _, tag := range currentTags {
 		current[strings.ToLower(tag)] = true

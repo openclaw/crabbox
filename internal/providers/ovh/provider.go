@@ -19,8 +19,6 @@ var _ core.ProviderClassProfileProvider = Provider{}
 
 var classProfiles = core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: "b3-8"})
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPICredentials),
@@ -76,15 +74,7 @@ func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 	return flavor, flavor != ""
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return ovhServerTypeForClass(class)
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
-	return NewBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
 	return NewBackend(p.Spec(), cfg, rt), nil
 }
 

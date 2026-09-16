@@ -15,10 +15,10 @@ import (
 
 func TestProviderSpecMatchesFoundationContract(t *testing.T) {
 	provider := Provider{}
-	if provider.Name() != providerName {
-		t.Fatalf("Name=%q", provider.Name())
+	if provider.Spec().Name != providerName {
+		t.Fatalf("Name=%q", provider.Spec().Name)
 	}
-	if aliases := provider.Aliases(); len(aliases) != 0 {
+	if aliases := provider.Spec().Aliases; len(aliases) != 0 {
 		t.Fatalf("aliases=%v, want none", aliases)
 	}
 	spec := provider.Spec()

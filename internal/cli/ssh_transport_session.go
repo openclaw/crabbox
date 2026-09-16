@@ -102,7 +102,7 @@ func newWSLSSHTransportSession(ctx context.Context, target SSHTarget, wslExe, mo
 	// user's config and authentication paths. newResolvedSSHCopySession keeps
 	// those targets out of WSL; enforce the same boundary for direct callers.
 	if target.SSHConfigProxy {
-		return nil, exit(2, "SSH config proxy routes require native OpenSSH")
+		return nil, Exit(2, "SSH config proxy routes require native OpenSSH")
 	}
 	dir, err := os.MkdirTemp("", "crabbox-ssh-transport-*")
 	if err != nil {
@@ -852,7 +852,7 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 	if target.AuthSecret && !target.SSHConfigProxy && target.User != "" &&
 		(strings.Contains(proxyCommand, target.User) || strings.Contains(strings.ReplaceAll(proxyCommand, "%%", ""), "%r")) {
 		// A private config must not move the username into a proxy child's argv.
-		return "", exit(2, "managed SSH proxy command must not contain or expand the secret SSH user")
+		return "", Exit(2, "managed SSH proxy command must not contain or expand the secret SSH user")
 	}
 	proxyUseFDPass := route.proxyUseFDPass
 	if proxyCommand != "" {
@@ -909,7 +909,7 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 		"proxy command":    proxyCommand,
 	} {
 		if strings.ContainsAny(value, "\x00\r\n") {
-			return "", exit(2, "resolved SSH %s contains an unsupported control character", name)
+			return "", Exit(2, "resolved SSH %s contains an unsupported control character", name)
 		}
 		if name != "proxy command" {
 			if err := validateSSHTransportLiteralValue(name, value); err != nil {
@@ -931,7 +931,7 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 		}
 	}
 	if strings.TrimSpace(target.Host) == "" || strings.TrimSpace(target.User) == "" || strings.TrimSpace(target.Port) == "" {
-		return "", exit(2, "resolved SSH transport requires host, user, and port")
+		return "", Exit(2, "resolved SSH transport requires host, user, and port")
 	}
 
 	var b strings.Builder
@@ -1040,23 +1040,23 @@ func sshTransportDirectiveExpandsPercent(name string) bool {
 
 func validateSSHTransportLiteralValue(name, value string) error {
 	if strings.ContainsAny(value, "\x00\r\n") {
-		return exit(2, "resolved SSH %s contains an unsupported control character", name)
+		return Exit(2, "resolved SSH %s contains an unsupported control character", name)
 	}
 	if strings.Contains(value, "${") {
-		return exit(2, "resolved SSH %s contains unsupported OpenSSH environment expansion syntax", name)
+		return Exit(2, "resolved SSH %s contains unsupported OpenSSH environment expansion syntax", name)
 	}
 	if strings.Contains(value, `"`) {
-		return exit(2, "resolved SSH %s contains an unsupported double quote", name)
+		return Exit(2, "resolved SSH %s contains an unsupported double quote", name)
 	}
 	return nil
 }
 
 func validateSSHTransportRoutedAuthenticationPath(name, value string) error {
 	if strings.ContainsAny(value, "\x00\r\n") {
-		return exit(2, "resolved SSH %s contains an unsupported control character", name)
+		return Exit(2, "resolved SSH %s contains an unsupported control character", name)
 	}
 	if strings.Contains(value, `"`) {
-		return exit(2, "resolved SSH %s contains an unsupported double quote", name)
+		return Exit(2, "resolved SSH %s contains an unsupported double quote", name)
 	}
 	return nil
 }
@@ -1073,7 +1073,7 @@ func validateSSHCommandTokenValue(name, value string) error {
 		case '.', '_', '-', ':', '@', '+', '=', ',', '/', '\\', '%':
 			continue
 		}
-		return exit(2, "resolved SSH %s contains a character unsafe for ProxyCommand expansion", name)
+		return Exit(2, "resolved SSH %s contains a character unsafe for ProxyCommand expansion", name)
 	}
 	return nil
 }
@@ -1119,7 +1119,7 @@ func (a App) probeSSHTransportLeaseAfterClaim(ctx context.Context, cfg Config, l
 	if err != nil {
 		return err
 	}
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, lease.LeaseID, serverSlug(lease.Server), cfg, &lease.Server, lease.SSH, boundary.root, reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, lease.LeaseID, ServerSlug(lease.Server), cfg, &lease.Server, lease.SSH, boundary.root, reclaim); err != nil {
 		return err
 	}
 	lease.Server = a.touchLeaseTargetBestEffort(ctx, cfg, *lease, "")

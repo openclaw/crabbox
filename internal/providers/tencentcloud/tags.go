@@ -6,7 +6,6 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -180,8 +179,4 @@ func truncateTagValue(value string) string {
 
 func ownedLabels(labels map[string]string) bool {
 	return labels["crabbox"] == "true" && labels["provider"] == providerName
-}
-
-func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {
-	shared.ApplyTailscaleMetadata(labels, meta)
 }

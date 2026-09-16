@@ -13,8 +13,8 @@ import (
 
 func TestProviderSpecAndServerType(t *testing.T) {
 	p := Provider{}
-	if p.Name() != providerName || p.Aliases() != nil {
-		t.Fatalf("provider name/aliases=%q/%v", p.Name(), p.Aliases())
+	if p.Spec().Name != providerName || p.Spec().Aliases != nil {
+		t.Fatalf("provider name/aliases=%q/%v", p.Spec().Name, p.Spec().Aliases)
 	}
 	spec := p.Spec()
 	if spec.Kind != core.ProviderKindSSHLease || spec.Family != providerName || spec.Coordinator != core.CoordinatorNever {

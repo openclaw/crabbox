@@ -260,7 +260,7 @@ exit 0
 		runEnvProfileTestPreservesSSHWorkspace = false
 		runEnvProfileTestRetainsLease = false
 		runEnvProfileTestTerminalReleaseError = false
-		removeLeaseClaim("cbx_env_profile_test")
+		RemoveLeaseClaim("cbx_env_profile_test")
 	})
 	return dir
 }
@@ -325,7 +325,7 @@ func TestRunCommandLeaseCleanupQuiescesWorkspaceOwner(t *testing.T) {
 
 			downloadPath := filepath.Join(dir, "proof.txt")
 			args := []string{
-				"--provider", runEnvProfileTestProvider{}.Name(),
+				"--provider", runEnvProfileTestProvider{}.Spec().Name,
 				"--id", "cbx_env_profile_test",
 				"--no-sync",
 				"--no-hydrate",
@@ -464,7 +464,7 @@ func TestRunCommandRetainedLeaseRetainsFailClosedRenewal(t *testing.T) {
 			}}
 			downloadPath := filepath.Join(dir, "proof.txt")
 			args := []string{
-				"--provider", runEnvProfileTestProvider{}.Name(),
+				"--provider", runEnvProfileTestProvider{}.Spec().Name,
 				"--no-sync",
 				"--no-hydrate",
 				"--junit", "report.xml",
@@ -562,7 +562,7 @@ func TestRunFailureDigestCleanupOutcomes(t *testing.T) {
 				}
 				return test.stopErr
 			}
-			args := []string{"--provider", runEnvProfileTestProvider{}.Name(), "--no-sync", "--no-hydrate", "--timing-json"}
+			args := []string{"--provider", runEnvProfileTestProvider{}.Spec().Name, "--no-sync", "--no-hydrate", "--timing-json"}
 			args = append(args, test.flags...)
 			args = append(args, "--", "renewal-cleanup-exit-23")
 			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args)
@@ -607,7 +607,7 @@ func TestRunCommandFreshWindowsLeaseAcquiresInputOwner(t *testing.T) {
 	runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
 		return LeaseTarget{
 			LeaseID: leaseID,
-			Server:  Server{Provider: runEnvProfileTestProvider{}.Name()},
+			Server:  Server{Provider: runEnvProfileTestProvider{}.Spec().Name},
 			SSH:     SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeNormal, SSHConfigProxy: true},
 		}, nil
 	}
@@ -626,7 +626,7 @@ func TestRunCommandFreshWindowsLeaseAcquiresInputOwner(t *testing.T) {
 			return nil, ownerBoundary
 		},
 	}
-	err := app.runCommand(t.Context(), []string{"--provider", runEnvProfileTestProvider{}.Name(), "--target", targetWindows, "--windows-mode", windowsModeNormal, "--no-sync", "--no-hydrate", "--", "Write-Output", "must-not-run"})
+	err := app.runCommand(t.Context(), []string{"--provider", runEnvProfileTestProvider{}.Spec().Name, "--target", targetWindows, "--windows-mode", windowsModeNormal, "--no-sync", "--no-hydrate", "--", "Write-Output", "must-not-run"})
 	if !errors.Is(err, ownerBoundary) || ownerCalls != 1 || releases != 1 {
 		t.Fatalf("fresh Windows input bypassed owner or cleanup: err=%v owners=%d releases=%d\n%s", err, ownerCalls, releases, output.String())
 	}

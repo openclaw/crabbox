@@ -1,90 +1,41 @@
 package githubcodespaces
 
 import (
-	"bufio"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type sshConfigEntry struct {
-	Aliases        []string
-	HostName       string
-	Port           string
-	User           string
-	IdentityFile   string
-	KnownHostsFile string
-	ProxyCommand   string
+func parseSSHConfig(data string) ([]shared.GeneratedSSHConfigEntry, error) {
+	return shared.ParseGeneratedSSHConfig(data, func(line string) (string, string) {
+		return splitSSHConfigDirective(stripSSHConfigComment(line))
+	})
 }
 
-func parseSSHConfig(data string) ([]sshConfigEntry, error) {
-	var entries []sshConfigEntry
-	var current *sshConfigEntry
-	scanner := bufio.NewScanner(strings.NewReader(data))
-	for scanner.Scan() {
-		line := stripSSHConfigComment(scanner.Text())
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		key, value := splitSSHConfigDirective(line)
-		if key == "" {
-			continue
-		}
-		if strings.EqualFold(key, "Host") {
-			aliases := splitSSHConfigFields(value)
-			if len(aliases) == 0 {
-				current = nil
-				continue
-			}
-			entries = append(entries, sshConfigEntry{Aliases: aliases})
-			current = &entries[len(entries)-1]
-			continue
-		}
-		if current == nil {
-			continue
-		}
-		switch strings.ToLower(key) {
-		case "hostname":
-			current.HostName = unquoteSSHConfigValue(value)
-		case "port":
-			current.Port = unquoteSSHConfigValue(value)
-		case "user":
-			current.User = unquoteSSHConfigValue(value)
-		case "identityfile":
-			current.IdentityFile = unquoteSSHConfigValue(value)
-		case "userknownhostsfile":
-			current.KnownHostsFile = unquoteSSHConfigValue(value)
-		case "proxycommand":
-			current.ProxyCommand = strings.TrimSpace(value)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	return entries, nil
-}
-
-func selectSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
+func selectSSHTarget(cfg core.Config, data, alias string) (core.SSHTarget, error) {
 	entry, selectedAlias, err := selectSSHConfigEntry(data, alias)
 	if err != nil {
-		return SSHTarget{}, err
+		return core.SSHTarget{}, err
 	}
-	user := firstNonEmpty(entry.User, cfg.SSHUser)
+	user := shared.FirstNonBlankTrimmed(entry.User, cfg.SSHUser)
 	if user == "" {
-		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q is missing User", selectedAlias)
+		return core.SSHTarget{}, core.Exit(2, "github-codespaces SSH config entry %q is missing User", selectedAlias)
 	}
-	if !validSSHUser(user) {
-		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q has invalid User %q", selectedAlias, user)
+	if !shared.ValidSSHConfigUser(user) {
+		return core.SSHTarget{}, core.Exit(2, "github-codespaces SSH config entry %q has invalid User %q", selectedAlias, user)
 	}
 	if strings.TrimSpace(entry.IdentityFile) == "" {
-		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q is missing IdentityFile", selectedAlias)
+		return core.SSHTarget{}, core.Exit(2, "github-codespaces SSH config entry %q is missing IdentityFile", selectedAlias)
 	}
 	host := strings.TrimSpace(entry.HostName)
 	proxy := strings.TrimSpace(entry.ProxyCommand)
 	if host == "" && proxy == "" {
-		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q is missing HostName or ProxyCommand", selectedAlias)
+		return core.SSHTarget{}, core.Exit(2, "github-codespaces SSH config entry %q is missing HostName or ProxyCommand", selectedAlias)
 	}
 	if host == "" {
 		host = selectedAlias
@@ -94,9 +45,9 @@ func selectSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 		port = defaultSSHPort
 	}
 	if _, err := strconv.Atoi(port); err != nil {
-		return SSHTarget{}, exit(2, "github-codespaces SSH config entry %q has invalid Port %q", selectedAlias, port)
+		return core.SSHTarget{}, core.Exit(2, "github-codespaces SSH config entry %q has invalid Port %q", selectedAlias, port)
 	}
-	target := SSHTarget{
+	target := core.SSHTarget{
 		User:           user,
 		Host:           host,
 		Key:            entry.IdentityFile,
@@ -114,7 +65,7 @@ func selectSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 		)
 		host, err := (ghRunner{cfg: cfg.GitHubCodespaces}).apiHostname()
 		if err != nil {
-			return SSHTarget{}, err
+			return core.SSHTarget{}, err
 		}
 		target.ProxyCommand = command
 		target.ChildEnv = map[string]string{"GH_HOST": host}
@@ -122,16 +73,16 @@ func selectSSHTarget(cfg Config, data, alias string) (SSHTarget, error) {
 	return target, nil
 }
 
-func selectSSHConfigEntry(data, alias string) (sshConfigEntry, string, error) {
+func selectSSHConfigEntry(data, alias string) (shared.GeneratedSSHConfigEntry, string, error) {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
-		return sshConfigEntry{}, "", exit(2, "github-codespaces SSH config host alias is required")
+		return shared.GeneratedSSHConfigEntry{}, "", core.Exit(2, "github-codespaces SSH config host alias is required")
 	}
 	entries, err := parseSSHConfig(data)
 	if err != nil {
-		return sshConfigEntry{}, "", err
+		return shared.GeneratedSSHConfigEntry{}, "", err
 	}
-	matches := make([]sshConfigEntry, 0, 1)
+	matches := make([]shared.GeneratedSSHConfigEntry, 0, 1)
 	matchAliases := make([]string, 0, 1)
 	for _, entry := range entries {
 		for _, candidate := range entry.Aliases {
@@ -148,19 +99,19 @@ func selectSSHConfigEntry(data, alias string) (sshConfigEntry, string, error) {
 				continue
 			}
 			matches = append(matches, entry)
-			matchAliases = append(matchAliases, firstNonEmpty(firstSSHConfigAlias(entry), alias))
+			matchAliases = append(matchAliases, shared.FirstNonBlankTrimmed(firstSSHConfigAlias(entry), alias))
 		}
 	}
 	if len(matches) == 0 {
-		return sshConfigEntry{}, "", exit(4, "github-codespaces SSH config entry not found for host %q", alias)
+		return shared.GeneratedSSHConfigEntry{}, "", core.Exit(4, "github-codespaces SSH config entry not found for host %q", alias)
 	}
 	if len(matches) > 1 {
-		return sshConfigEntry{}, "", exit(2, "github-codespaces SSH config entry for host %q is ambiguous", alias)
+		return shared.GeneratedSSHConfigEntry{}, "", core.Exit(2, "github-codespaces SSH config entry for host %q is ambiguous", alias)
 	}
 	return matches[0], matchAliases[0], nil
 }
 
-func firstSSHConfigAlias(entry sshConfigEntry) string {
+func firstSSHConfigAlias(entry shared.GeneratedSSHConfigEntry) string {
 	for _, alias := range entry.Aliases {
 		if strings.TrimSpace(alias) != "" {
 			return strings.TrimSpace(alias)
@@ -174,7 +125,7 @@ func proxyCommandReferencesCodespace(command, name string) bool {
 	if name == "" {
 		return false
 	}
-	fields := splitSSHConfigFields(command)
+	fields := shared.SplitSSHConfigFields(command)
 	for i, field := range fields {
 		switch {
 		case field == "-c" || field == "--codespace":
@@ -199,7 +150,7 @@ func rewriteProxyCommandGHPath(command, ghPath string) string {
 	if executableEnd < 0 {
 		return command
 	}
-	executable := unquoteSSHConfigValue(strings.TrimSpace(body[:executableEnd]))
+	executable := shared.UnquoteSSHConfigValue(strings.TrimSpace(body[:executableEnd]))
 	if executable == defaultGHPath {
 		if ghPath == "" || ghPath == defaultGHPath {
 			return command
@@ -251,7 +202,7 @@ func rewriteProxyCommandIdentityFile(command, identityFile string) string {
 		return command
 	}
 	valueStart := index + len(marker)
-	if unquoteSSHConfigValue(command[valueStart:]) != identityFile {
+	if shared.UnquoteSSHConfigValue(command[valueStart:]) != identityFile {
 		return command
 	}
 	return command[:valueStart] + quoteSSHProxyExecutable(identityFile)
@@ -263,7 +214,7 @@ func validatePrivateSSHConfigFile(path string) error {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return exit(2, "github-codespaces SSH config path %q must be a regular non-symlink file", path)
+		return core.Exit(2, "github-codespaces SSH config path %q must be a regular non-symlink file", path)
 	}
 	return validatePrivateSSHConfigPermissions(path, info)
 }
@@ -271,7 +222,7 @@ func validatePrivateSSHConfigFile(path string) error {
 func storeSSHConfig(leaseID, data string) (string, error) {
 	leaseID = strings.TrimSpace(leaseID)
 	if leaseID == "" {
-		return "", exit(2, "github-codespaces lease id is required for SSH config storage")
+		return "", core.Exit(2, "github-codespaces lease id is required for SSH config storage")
 	}
 	dir, err := sshConfigDir()
 	if err != nil {
@@ -283,7 +234,7 @@ func storeSSHConfig(leaseID, data string) (string, error) {
 	path := filepath.Join(dir, leaseID+".ssh_config")
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return "", exit(2, "refusing to replace non-regular github-codespaces SSH config path %q", path)
+			return "", core.Exit(2, "refusing to replace non-regular github-codespaces SSH config path %q", path)
 		}
 	} else if !os.IsNotExist(err) {
 		return "", err
@@ -343,14 +294,14 @@ func removeStoredSSHConfig(leaseID string) error {
 }
 
 func sshConfigDir() (string, error) {
-	stateDir, err := crabboxStateDir()
+	stateDir, err := core.CrabboxStateDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(stateDir, "github-codespaces"), nil
 }
 
-func githubCodespacesReadyCheck(cfg Config) string {
+func githubCodespacesReadyCheck(cfg core.Config) string {
 	workRoot := strings.TrimSpace(cfg.GitHubCodespaces.WorkRoot)
 	if workRoot == "" {
 		workRoot = strings.TrimSpace(cfg.WorkRoot)
@@ -358,7 +309,7 @@ func githubCodespacesReadyCheck(cfg Config) string {
 	if workRoot == "" {
 		workRoot = defaultWorkRoot
 	}
-	return "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && test -d " + shellQuote(workRoot)
+	return "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null && test -d " + core.ShellQuote(workRoot)
 }
 
 func stripSSHConfigComment(line string) string {
@@ -402,47 +353,4 @@ func splitSSHConfigDirective(line string) (string, string) {
 		}
 	}
 	return line, ""
-}
-
-func splitSSHConfigFields(value string) []string {
-	var out []string
-	for _, field := range strings.Fields(value) {
-		field = unquoteSSHConfigValue(field)
-		if field != "" {
-			out = append(out, field)
-		}
-	}
-	return out
-}
-
-func unquoteSSHConfigValue(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) >= 2 {
-		if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
-			return value[1 : len(value)-1]
-		}
-	}
-	return value
-}
-
-func validSSHUser(user string) bool {
-	if user == "" || strings.HasPrefix(user, "-") || strings.Contains(user, "@") {
-		return false
-	}
-	return strings.IndexFunc(user, func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.IsControl(r)
-	}) == -1
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }

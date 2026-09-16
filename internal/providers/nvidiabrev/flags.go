@@ -9,11 +9,11 @@ import (
 
 // RegisterNvidiaBrevProviderFlags exposes only non-secret Brev settings.
 // Authentication is owned by the Brev CLI credential store, not Crabbox argv.
-func RegisterNvidiaBrevProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterNvidiaBrevProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return core.RegisterNvidiaBrevConfigFlags(fs, defaults.NvidiaBrev)
 }
 
-func ApplyNvidiaBrevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyNvidiaBrevProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --nvidia-brev-gpu-name", "use --nvidia-brev-type"); err != nil {
 			return err
@@ -29,7 +29,7 @@ func ApplyNvidiaBrevProviderFlags(cfg *Config, fs *flag.FlagSet, values any) err
 		markReleaseActionExplicit(cfg)
 	}
 	if applied.WorkRoot {
-		markNvidiaBrevWorkRootExplicit(cfg)
+		core.MarkNvidiaBrevWorkRootExplicit(cfg)
 	}
 	if err != nil {
 		return err

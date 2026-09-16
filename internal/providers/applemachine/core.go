@@ -1,52 +1,10 @@
 package applemachine
 
 import (
-	"io"
-
 	core "github.com/openclaw/crabbox/internal/cli"
 )
-
-type Config = core.Config
-type ProviderSpec = core.ProviderSpec
-type Runtime = core.Runtime
-type Backend = core.Backend
-type DoctorRequest = core.DoctorRequest
-type DoctorResult = core.DoctorResult
-type WarmupRequest = core.WarmupRequest
-type RunRequest = core.RunRequest
-type RunResult = core.RunResult
-type RunSessionHandle = core.RunSessionHandle
-type ListRequest = core.ListRequest
-type LeaseView = core.LeaseView
-type StatusRequest = core.StatusRequest
-type StatusView = core.StatusView
-type StopRequest = core.StopRequest
-type Server = core.Server
-type Repo = core.Repo
-type LocalCommandRequest = core.LocalCommandRequest
-type LocalCommandResult = core.LocalCommandResult
-type timingReport = core.TimingReport
 
 const (
 	providerName = "apple-machine"
 	targetLinux  = core.TargetLinux
 )
-
-func exit(code int, format string, args ...any) core.ExitError {
-	return core.Exit(code, format, args...)
-}
-
-func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
-	return core.AllocateClaimLeaseSlug(leaseID, requested)
-}
-
-func writeTimingJSON(w io.Writer, report timingReport) error {
-	return core.WriteTimingJSON(w, report)
-}
-
-func timingReportWithRunResult(report timingReport, result RunResult, err error) timingReport {
-	return core.TimingReportWithRunResult(report, result, err)
-}
-
-func shellScriptFromArgv(command []string) string { return core.ShellScriptFromArgv(command) }
-func shellQuote(s string) string                  { return core.ShellQuote(s) }

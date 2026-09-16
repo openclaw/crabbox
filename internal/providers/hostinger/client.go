@@ -155,18 +155,18 @@ type hostingerSetupPublicKey struct {
 	Key  string `json:"key"`
 }
 
-func newClient(cfg Config, rt Runtime) (hostingerAPI, error) {
+func newClient(cfg core.Config, rt core.Runtime) (hostingerAPI, error) {
 	token := strings.TrimSpace(cfg.Hostinger.APIToken)
 	if token == "" {
-		return nil, exit(2, "provider=%s requires HOSTINGER_API_TOKEN (CRABBOX_HOSTINGER_API_TOKEN also accepted)", providerName)
+		return nil, core.Exit(2, "provider=%s requires HOSTINGER_API_TOKEN (CRABBOX_HOSTINGER_API_TOKEN also accepted)", providerName)
 	}
 	apiURL := strings.TrimRight(strings.TrimSpace(core.Blank(cfg.Hostinger.APIURL, "https://developers.hostinger.com")), "/")
 	parsed, err := url.Parse(apiURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return nil, exit(2, "%s url %q is invalid", providerName, apiURL)
+		return nil, core.Exit(2, "%s url %q is invalid", providerName, apiURL)
 	}
 	if parsed.Scheme != "https" && !isLoopbackHTTPURL(parsed) {
-		return nil, exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
+		return nil, core.Exit(2, "%s url %q must use https unless it targets localhost", providerName, apiURL)
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
@@ -305,7 +305,7 @@ func hostingerIntegerID(name, value string) (int64, error) {
 	trimmed := strings.TrimSpace(value)
 	parsed, err := strconv.ParseInt(trimmed, 10, 64)
 	if err != nil || parsed <= 0 {
-		return 0, exit(2, "provider=%s requires numeric hostinger %s, got %q", providerName, name, value)
+		return 0, core.Exit(2, "provider=%s requires numeric hostinger %s, got %q", providerName, name, value)
 	}
 	return parsed, nil
 }

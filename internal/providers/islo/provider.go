@@ -4,7 +4,6 @@ import (
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -13,10 +12,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return "islo" }
-func (Provider) Aliases() []string {
-	return nil
-}
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Authentication:      core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
@@ -24,7 +19,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:              "islo",
 		Kind:                core.ProviderKindDelegatedRun,
 		Targets:             []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:            core.FeatureSet{core.FeatureSSH, core.FeatureURLBridge, core.FeatureRunSession, core.FeatureTailscale, core.FeaturePauseResume, core.FeatureRunDownloads},
+		Features:            core.FeatureSet{core.FeatureSSH, core.FeatureURLBridge, core.FeatureRunSession, core.FeatureTailscale, core.FeaturePauseResume, core.FeatureRunDownloads, core.FeatureLeaseHeartbeat},
 		Coordinator:         core.CoordinatorNever,
 		ClassDisposition:    core.ProviderClassDispositionUnmapped,
 		TailscaleEgressOnly: true,
@@ -44,8 +39,4 @@ func (Provider) ClaimScope(cfg core.Config) string { return isloClaimScope(cfg) 
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewIsloBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("islo", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

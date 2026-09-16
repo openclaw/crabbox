@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestBlacksmithArtifactCapabilityProbeCancellation(t *testing.T) {
@@ -29,17 +31,17 @@ func TestBlacksmithArtifactCapabilityProbeCancellation(t *testing.T) {
 				cause = errors.New("synthetic caller cancellation cause")
 			}
 			calls := 0
-			backend := newTestBlacksmithBackend(baseConfig(), ownershipRunner(func(runCtx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(core.BaseConfig(), ownershipRunner(func(runCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				calls++
 				if req.Name != "blacksmith" || !slices.Equal(req.Args, []string{"testbox", "download", "--help"}) {
 					t.Errorf("unexpected request after capability cancellation: %s", req.Name)
-					return LocalCommandResult{ExitCode: 2}, errors.New("unexpected request")
+					return core.LocalCommandResult{ExitCode: 2}, errors.New("unexpected request")
 				}
 				cancel(cause)
-				return LocalCommandResult{ExitCode: -1}, runCtx.Err()
+				return core.LocalCommandResult{ExitCode: -1}, runCtx.Err()
 			}))
-			_, ended, artifacts, err := backend.runArtifactTestbox(ctx, RunRequest{
-				Repo: Repo{Root: t.TempDir()}, Command: []string{"true"}, ArtifactGlobs: []string{"report"},
+			_, ended, artifacts, err := backend.runArtifactTestbox(ctx, core.RunRequest{
+				Repo: core.Repo{Root: t.TempDir()}, Command: []string{"true"}, ArtifactGlobs: []string{"report"},
 			}, "tbx_capability_cancel", nil, nil, nil, time.Second)
 			if !errors.Is(err, context.Canceled) || !errors.Is(err, cause) {
 				t.Errorf("capability cancellation lost its classification or cause: %v", err)

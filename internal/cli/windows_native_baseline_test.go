@@ -11,7 +11,7 @@ import (
 
 func TestWindowsNativeBaselineBootstrap(t *testing.T) {
 	for name, render := range map[string]func(Config, string) string{
-		"aws":            windowsBootstrapPowerShell,
+		"aws":            WindowsBootstrapPowerShell,
 		"azure":          azureWindowsBootstrapPowerShell,
 		"azure-snapshot": azureWindowsSnapshotRehydratePowerShell,
 	} {

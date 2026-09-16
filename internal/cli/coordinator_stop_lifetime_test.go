@@ -264,7 +264,7 @@ func managedStopLocalState(t *testing.T, id string) (string, string) {
 	if err := os.WriteFile(keyPath, []byte("private"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseTargetForConfig(id, "stop-lifetime-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
+	if err := ClaimLeaseTargetForConfig(id, "stop-lifetime-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	claimPath, err := leaseClaimPath(id)

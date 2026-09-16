@@ -7,10 +7,11 @@ func ProviderNameMatches(name string, provider Provider) bool {
 	if name == "" {
 		return false
 	}
-	if name == normalizeProviderName(provider.Name()) {
+	spec := provider.Spec()
+	if name == normalizeProviderName(spec.Name) {
 		return true
 	}
-	for _, alias := range provider.Aliases() {
+	for _, alias := range spec.Aliases {
 		if name == normalizeProviderName(alias) {
 			return true
 		}
@@ -21,10 +22,11 @@ func ProviderNameMatches(name string, provider Provider) bool {
 // ProviderNameMatchesExact compares raw names with provider metadata without
 // normalization, registry lookup, or backend configuration.
 func ProviderNameMatchesExact(name string, provider Provider) bool {
-	if name == provider.Name() {
+	spec := provider.Spec()
+	if name == spec.Name {
 		return true
 	}
-	for _, alias := range provider.Aliases() {
+	for _, alias := range spec.Aliases {
 		if name == alias {
 			return true
 		}

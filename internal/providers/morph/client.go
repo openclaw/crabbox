@@ -30,14 +30,14 @@ type morphAPI interface {
 	DeleteInstance(ctx context.Context, instanceID string) error
 }
 
-var newMorphClient = func(cfg Config, rt Runtime) (morphAPI, error) {
+var newMorphClient = func(cfg core.Config, rt core.Runtime) (morphAPI, error) {
 	apiURL, err := normalizeMorphAPIURL(cfg.Morph.APIURL)
 	if err != nil {
-		return nil, exit(2, "provider=morph has invalid apiUrl %q: %v", cfg.Morph.APIURL, err)
+		return nil, core.Exit(2, "provider=morph has invalid apiUrl %q: %v", cfg.Morph.APIURL, err)
 	}
 	apiKey := strings.TrimSpace(cfg.Morph.APIKey)
 	if apiKey == "" {
-		return nil, exit(2, "provider=morph requires CRABBOX_MORPH_API_KEY, MORPH_API_KEY, or morph.apiKey")
+		return nil, core.Exit(2, "provider=morph requires CRABBOX_MORPH_API_KEY, MORPH_API_KEY, or morph.apiKey")
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {

@@ -63,8 +63,6 @@ func init() {
 
 type testAWSLambdaMicroVMProvider struct{}
 
-func (testAWSLambdaMicroVMProvider) Name() string      { return "aws-lambda-microvm" }
-func (testAWSLambdaMicroVMProvider) Aliases() []string { return nil }
 func (testAWSLambdaMicroVMProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "aws-lambda-microvm",
@@ -86,8 +84,6 @@ type testExternalProvider struct{}
 
 var testExternalResolveHook func(ResolveRequest) (LeaseTarget, error)
 
-func (testExternalProvider) Name() string      { return "external" }
-func (testExternalProvider) Aliases() []string { return nil }
 func (testExternalProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:   "external",
@@ -118,7 +114,7 @@ func (testExternalProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any
 		}
 	}
 	if strings.TrimSpace(cfg.External.Command) == "" {
-		return exit(2, "external command is required")
+		return Exit(2, "external command is required")
 	}
 	return nil
 }
@@ -156,8 +152,6 @@ type testAzureFlagValues struct {
 	SnapshotSKU *string
 }
 
-func (testAzureProvider) Name() string      { return "azure" }
-func (testAzureProvider) Aliases() []string { return nil }
 func (testAzureProvider) RoutingFlagNames() []string {
 	return []string{"azure-backend"}
 }
@@ -192,7 +186,7 @@ func (testAzureProvider) RouteConfig(cfg *Config, fs *flag.FlagSet, values any) 
 	}
 	normalized, err := NormalizeAzureBackend(backend)
 	if err != nil {
-		return exit(2, "%s", err)
+		return Exit(2, "%s", err)
 	}
 	cfg.AzureBackend = normalized
 	if normalized == AzureBackendDynamicSessions {
@@ -204,12 +198,12 @@ func (testAzureProvider) RouteConfig(cfg *Config, fs *flag.FlagSet, values any) 
 }
 func (p testAzureProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	backendExplicit := fs != nil && flagWasSet(fs, "azure-backend")
-	if !providerSelectionIsAuthoritativeRoute(*cfg) || backendExplicit {
+	if !ProviderSelectionIsAuthoritativeRoute(*cfg) || backendExplicit {
 		if err := p.RouteConfig(cfg, fs, values); err != nil {
 			return err
 		}
 	}
-	if cfg.Provider != p.Name() {
+	if cfg.Provider != p.Spec().Name {
 		return nil
 	}
 	flags, _ := values.(testAzureFlagValues)
@@ -223,14 +217,11 @@ func (p testAzureProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any)
 	return nil
 }
 func (testAzureProvider) ServerTypeForConfig(cfg Config) string {
-	candidates := azureVMSizeCandidatesForConfig(cfg)
+	candidates := AzureVMSizeCandidatesForConfig(cfg)
 	if len(candidates) == 0 {
 		return ""
 	}
 	return candidates[0]
-}
-func (testAzureProvider) ServerTypeForClass(class string) string {
-	return azureVMSizeCandidatesForClass(class)[0]
 }
 func (p testAzureProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
@@ -239,7 +230,7 @@ func (testAzureProvider) NativeCheckpointCapability(req NativeCheckpointRequest)
 	if req.Config.Coordinator == "" || req.Server.CloudID == "" || firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != targetLinux {
 		return NativeCheckpointCapability{}, false
 	}
-	if normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+	if NormalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
 		return NativeCheckpointCapability{
 			Kind:              checkpointKindAzure,
 			CreateUnsupported: "Azure managed images require a stopped/generalized source VM; use --strategy disk-snapshot for active Azure leases",
@@ -254,7 +245,7 @@ func (testAzureProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointFor
 	case checkpointKindAzureOS:
 		req.Config.AzureSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
 	default:
-		return exit(2, "provider=azure does not support checkpoint kind=%s", req.Record.Kind)
+		return Exit(2, "provider=azure does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	if req.Record.Region != "" {
 		req.Config.AzureLocation = req.Record.Region
@@ -272,8 +263,6 @@ func (testAzureProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointFor
 
 type testAzureDynamicSessionsProvider struct{}
 
-func (testAzureDynamicSessionsProvider) Name() string      { return "azure-dynamic-sessions" }
-func (testAzureDynamicSessionsProvider) Aliases() []string { return nil }
 func (testAzureDynamicSessionsProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "azure-dynamic-sessions",
@@ -295,15 +284,12 @@ func (testAzureDynamicSessionsProvider) ApplyFlags(*Config, *flag.FlagSet, any) 
 	return nil
 }
 func (testAzureDynamicSessionsProvider) ServerTypeForConfig(Config) string { return "" }
-func (testAzureDynamicSessionsProvider) ServerTypeForClass(string) string  { return "" }
 func (p testAzureDynamicSessionsProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testDelegatedBackend{spec: p.Spec()}, nil
 }
 
 type testBlaxelProvider struct{}
 
-func (testBlaxelProvider) Name() string      { return "blaxel" }
-func (testBlaxelProvider) Aliases() []string { return nil }
 func (testBlaxelProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "blaxel",
@@ -324,8 +310,6 @@ func (p testBlaxelProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 
 type testWandbProvider struct{}
 
-func (testWandbProvider) Name() string      { return "wandb" }
-func (testWandbProvider) Aliases() []string { return nil }
 func (testWandbProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "wandb",
@@ -367,12 +351,9 @@ func (b testWandbDoctorBackend) Doctor(context.Context, DoctorRequest) (DoctorRe
 
 type testWindowsSandboxProvider struct{}
 
-func (testWindowsSandboxProvider) Name() string { return "windows-sandbox" }
-func (testWindowsSandboxProvider) Aliases() []string {
-	return []string{"wsb", "windows-sandbox-provider"}
-}
 func (testWindowsSandboxProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:     []string{"wsb", "windows-sandbox-provider"},
 		Name:        "windows-sandbox",
 		Family:      "local-sandbox",
 		Kind:        ProviderKindDelegatedRun,
@@ -393,8 +374,6 @@ func (p testWindowsSandboxProvider) Configure(cfg Config, rt Runtime) (Backend, 
 
 type testHetznerProvider struct{}
 
-func (testHetznerProvider) Name() string      { return "hetzner" }
-func (testHetznerProvider) Aliases() []string { return nil }
 func (testHetznerProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:             "hetzner",
@@ -410,14 +389,11 @@ func (testHetznerProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (testHetznerProvider) ServerTypeForConfig(cfg Config) string {
-	candidates := hetznerServerTypeCandidatesForConfig(cfg)
+	candidates := HetznerServerTypeCandidatesForConfig(cfg)
 	if len(candidates) == 0 {
 		return ""
 	}
 	return candidates[0]
-}
-func (testHetznerProvider) ServerTypeForClass(class string) string {
-	return serverTypeCandidatesForClass(class)[0]
 }
 func (p testHetznerProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testHetznerBackend{testSSHBackend{spec: p.Spec()}}, nil
@@ -442,8 +418,6 @@ func (b testHetznerBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 
 type testDigitalOceanProvider struct{}
 
-func (testDigitalOceanProvider) Name() string      { return "digitalocean" }
-func (testDigitalOceanProvider) Aliases() []string { return nil }
 func (testDigitalOceanProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "digitalocean",
@@ -459,15 +433,12 @@ func (testDigitalOceanProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (testDigitalOceanProvider) ServerTypeForConfig(Config) string { return "s-1vcpu-1gb" }
-func (testDigitalOceanProvider) ServerTypeForClass(string) string  { return "s-1vcpu-1gb" }
 func (p testDigitalOceanProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
 type testVultrProvider struct{}
 
-func (testVultrProvider) Name() string      { return "vultr" }
-func (testVultrProvider) Aliases() []string { return nil }
 func (testVultrProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "vultr",
@@ -483,15 +454,12 @@ func (testVultrProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (testVultrProvider) ServerTypeForConfig(Config) string { return "vc2-1c-1gb" }
-func (testVultrProvider) ServerTypeForClass(string) string  { return "vc2-1c-1gb" }
 func (p testVultrProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
 type testLinodeProvider struct{}
 
-func (testLinodeProvider) Name() string      { return "linode" }
-func (testLinodeProvider) Aliases() []string { return nil }
 func (testLinodeProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "linode",
@@ -515,15 +483,12 @@ func (testLinodeProvider) ServerTypeForConfig(cfg Config) string {
 	}
 	return "g6-standard-1"
 }
-func (testLinodeProvider) ServerTypeForClass(string) string { return "g6-standard-1" }
 func (p testLinodeProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
 type testLambdaProvider struct{}
 
-func (testLambdaProvider) Name() string      { return "lambda" }
-func (testLambdaProvider) Aliases() []string { return nil }
 func (testLambdaProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "lambda",
@@ -547,15 +512,12 @@ func (testLambdaProvider) ServerTypeForConfig(cfg Config) string {
 	}
 	return "gpu_1x_a10"
 }
-func (testLambdaProvider) ServerTypeForClass(string) string { return "gpu_1x_a10" }
 func (p testLambdaProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
 type testNebiusProvider struct{}
 
-func (testNebiusProvider) Name() string      { return "nebius" }
-func (testNebiusProvider) Aliases() []string { return nil }
 func (testNebiusProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "nebius",
@@ -576,8 +538,6 @@ func (p testNebiusProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 
 type testScalewayProvider struct{}
 
-func (testScalewayProvider) Name() string      { return "scaleway" }
-func (testScalewayProvider) Aliases() []string { return nil }
 func (testScalewayProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "scaleway",
@@ -601,19 +561,15 @@ func (testScalewayProvider) ServerTypeForConfig(cfg Config) string {
 	}
 	return "DEV1-S"
 }
-func (testScalewayProvider) ServerTypeForClass(string) string { return "DEV1-S" }
 func (p testScalewayProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
 type testGCPProvider struct{}
 
-func (testGCPProvider) Name() string { return "gcp" }
-func (testGCPProvider) Aliases() []string {
-	return []string{"google", "google-cloud"}
-}
 func (testGCPProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:          []string{"google", "google-cloud"},
 		Name:             "gcp",
 		Kind:             ProviderKindSSHLease,
 		Targets:          []TargetSpec{{OS: targetLinux}},
@@ -657,14 +613,11 @@ func (testGCPProvider) ReadyPoolImageIdentityMatchesLease(req ProviderReadyPoolI
 		fmt.Sprintf("projects/%s/global/%s", parts[1], collection) == req.Identity.Scope
 }
 func (testGCPProvider) ServerTypeForConfig(cfg Config) string {
-	candidates := gcpMachineTypeCandidatesForConfig(cfg)
+	candidates := GCPMachineTypeCandidatesForConfig(cfg)
 	if len(candidates) == 0 {
 		return ""
 	}
 	return candidates[0]
-}
-func (testGCPProvider) ServerTypeForClass(class string) string {
-	return gcpMachineTypeCandidatesForClass(class)[0]
 }
 func (p testGCPProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
@@ -673,7 +626,7 @@ func (testGCPProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (
 	if req.Config.Coordinator == "" || req.Server.CloudID == "" || firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != targetLinux {
 		return NativeCheckpointCapability{}, false
 	}
-	if normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+	if NormalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
 		return NativeCheckpointCapability{Kind: checkpointKindGCP}, true
 	}
 	return NativeCheckpointCapability{Kind: checkpointKindGCPDisk}, true
@@ -685,7 +638,7 @@ func (testGCPProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkR
 	case checkpointKindGCPDisk:
 		req.Config.GCPSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
 	default:
-		return exit(2, "provider=gcp does not support checkpoint kind=%s", req.Record.Kind)
+		return Exit(2, "provider=gcp does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	if req.Record.Region != "" {
 		req.Config.GCPZone = req.Record.Region
@@ -701,8 +654,6 @@ type testAWSProvider struct{}
 
 var testAWSBackendOverride SSHLeaseBackend
 
-func (testAWSProvider) Name() string      { return "aws" }
-func (testAWSProvider) Aliases() []string { return nil }
 func (testAWSProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name: "aws",
@@ -713,7 +664,7 @@ func (testAWSProvider) Spec() ProviderSpec {
 			{OS: targetWindows, WindowsMode: windowsModeWSL2},
 			{OS: targetMacOS},
 		},
-		Features:         FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode, FeatureRunSession},
+		Features:         FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCode, FeatureRunSession, FeatureTailscale},
 		Coordinator:      CoordinatorSupported,
 		ClassDisposition: ProviderClassDispositionMapped,
 	}
@@ -745,9 +696,6 @@ func (testAWSProvider) ServerTypeForConfig(cfg Config) string {
 	}
 	return candidates[0]
 }
-func (testAWSProvider) ServerTypeForClass(class string) string {
-	return awsInstanceTypeCandidatesForClass(class)[0]
-}
 func (p testAWSProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	if testAWSBackendOverride != nil {
 		return testAWSBackendOverride, nil
@@ -759,7 +707,7 @@ func (testAWSProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (
 		return NativeCheckpointCapability{}, false
 	}
 	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
-	strategy := normalizeCheckpointStrategy(req.Strategy)
+	strategy := NormalizeCheckpointStrategy(req.Strategy)
 	if isWindowsNativeTarget(req.Target) {
 		if req.StrategyExplicit && strategy != checkpointStrategyImage {
 			return NativeCheckpointCapability{}, false
@@ -790,7 +738,7 @@ func (testAWSProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkR
 	case checkpointKindAWSEBS:
 		req.Config.AWSSnapshot = req.Record.ImageID
 	default:
-		return exit(2, "provider=aws does not support checkpoint kind=%s", req.Record.Kind)
+		return Exit(2, "provider=aws does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	if req.Record.Region != "" {
 		req.Config.AWSRegion = req.Record.Region
@@ -810,8 +758,6 @@ func (testAWSProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkR
 
 type testParallelsProvider struct{}
 
-func (testParallelsProvider) Name() string      { return "parallels" }
-func (testParallelsProvider) Aliases() []string { return nil }
 func (testParallelsProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name: "parallels",
@@ -834,21 +780,21 @@ func (p testParallelsProvider) Configure(cfg Config, rt Runtime) (Backend, error
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 func (testParallelsProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (NativeCheckpointCapability, bool) {
-	if req.Server.CloudID == "" || normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+	if req.Server.CloudID == "" || NormalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
 		return NativeCheckpointCapability{}, false
 	}
 	return NativeCheckpointCapability{Kind: checkpointKindParallels, Direct: true}, true
 }
 func (testParallelsProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
 	if req.Record.Kind != checkpointKindParallels {
-		return exit(2, "provider=parallels does not support checkpoint kind=%s", req.Record.Kind)
+		return Exit(2, "provider=parallels does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	req.Config.Provider = "parallels"
 	req.Config.Coordinator = ""
 	req.Config.CoordToken = ""
 	req.Config.Parallels.SourceID = req.Record.Resource
 	req.Config.Parallels.SourceSnapshotID = req.Record.ImageID
-	applyParallelsHostRefConfig(req.Config, req.Record.Region)
+	ApplyParallelsHostRefConfig(req.Config, req.Record.Region)
 	return nil
 }
 
@@ -858,8 +804,6 @@ type testFirecrackerProvider struct{}
 
 type testIncusProvider struct{}
 
-func (testFirecrackerProvider) Name() string      { return "firecracker" }
-func (testFirecrackerProvider) Aliases() []string { return nil }
 func (testFirecrackerProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "firecracker",
@@ -878,8 +822,6 @@ func (p testFirecrackerProvider) Configure(cfg Config, rt Runtime) (Backend, err
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
-func (testIncusProvider) Name() string      { return "incus" }
-func (testIncusProvider) Aliases() []string { return nil }
 func (testIncusProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "incus",
@@ -943,8 +885,6 @@ type testIncusFlagValues struct {
 	ProxyListenPort *string
 }
 
-func (testProxmoxProvider) Name() string      { return "proxmox" }
-func (testProxmoxProvider) Aliases() []string { return nil }
 func (testProxmoxProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "proxmox",
@@ -1007,8 +947,6 @@ type testProxmoxFlagValues struct {
 
 type testXCPNgProvider struct{}
 
-func (testXCPNgProvider) Name() string      { return "xcp-ng" }
-func (testXCPNgProvider) Aliases() []string { return nil }
 func (testXCPNgProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "xcp-ng",
@@ -1085,7 +1023,6 @@ func (testXCPNgProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) e
 func (testXCPNgProvider) ServerTypeForConfig(cfg Config) string {
 	return xcpNgTestServerTypeForConfig(cfg)
 }
-func (testXCPNgProvider) ServerTypeForClass(string) string { return "template" }
 func (p testXCPNgProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
@@ -1110,21 +1047,18 @@ func xcpNgTestServerTypeForConfig(cfg Config) string {
 		return "template-" + cfg.XCPNg.TemplateUUID
 	}
 	if cfg.XCPNg.Template != "" {
-		return "template-" + normalizeLeaseSlug(cfg.XCPNg.Template)
+		return "template-" + NormalizeLeaseSlug(cfg.XCPNg.Template)
 	}
 	return "template"
 }
 
 type testStaticSSHProvider struct{}
 
-func (testStaticSSHProvider) Name() string { return staticProvider }
-func (testStaticSSHProvider) Aliases() []string {
-	return []string{"static", "static-ssh"}
-}
 func (testStaticSSHProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name: staticProvider,
-		Kind: ProviderKindSSHLease,
+		Aliases: []string{"static", "static-ssh"},
+		Name:    staticProvider,
+		Kind:    ProviderKindSSHLease,
 		Targets: []TargetSpec{
 			{OS: targetLinux},
 			{OS: targetWindows, WindowsMode: windowsModeNormal},
@@ -1162,12 +1096,9 @@ func (b testStaticSSHBackend) Resolve(context.Context, ResolveRequest) (LeaseTar
 
 type testExeDevProvider struct{}
 
-func (testExeDevProvider) Name() string { return "exe-dev" }
-func (testExeDevProvider) Aliases() []string {
-	return []string{"exe", "exedev"}
-}
 func (testExeDevProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:     []string{"exe", "exedev"},
 		Name:        "exe-dev",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
@@ -1217,8 +1148,6 @@ type testExeDevFlagValues struct {
 
 type testRunPodProvider struct{}
 
-func (testRunPodProvider) Name() string      { return "runpod" }
-func (testRunPodProvider) Aliases() []string { return nil }
 func (testRunPodProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "runpod",
@@ -1238,12 +1167,9 @@ func (p testRunPodProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 
 type testVastProvider struct{}
 
-func (testVastProvider) Name() string { return "vast" }
-func (testVastProvider) Aliases() []string {
-	return []string{"vast-ai", "vastai"}
-}
 func (testVastProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:     []string{"vast-ai", "vastai"},
 		Name:        "vast",
 		Family:      "vast",
 		Kind:        ProviderKindSSHLease,
@@ -1270,12 +1196,9 @@ func (p testVastProvider) Configure(Config, Runtime) (Backend, error) {
 
 type testNvidiaBrevProvider struct{}
 
-func (testNvidiaBrevProvider) Name() string { return "nvidia-brev" }
-func (testNvidiaBrevProvider) Aliases() []string {
-	return []string{"brev", "nvidia"}
-}
 func (testNvidiaBrevProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:     []string{"brev", "nvidia"},
 		Name:        "nvidia-brev",
 		Family:      "nvidia-brev",
 		Kind:        ProviderKindSSHLease,
@@ -1294,12 +1217,9 @@ func (p testNvidiaBrevProvider) Configure(Config, Runtime) (Backend, error) {
 
 type testBlacksmithProvider struct{}
 
-func (testBlacksmithProvider) Name() string { return "blacksmith-testbox" }
-func (testBlacksmithProvider) Aliases() []string {
-	return []string{"blacksmith"}
-}
 func (testBlacksmithProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:     []string{"blacksmith"},
 		Name:        "blacksmith-testbox",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetLinux}},
@@ -1348,7 +1268,7 @@ func (p testBlacksmithProvider) Configure(cfg Config, rt Runtime) (Backend, erro
 
 func (testBlacksmithProvider) ValidateRunOptions(req RunRequest) error {
 	if req.NoSync {
-		return exit(2, "blacksmith-testbox delegates sync; --no-sync is not supported")
+		return Exit(2, "blacksmith-testbox delegates sync; --no-sync is not supported")
 	}
 	return nil
 }
@@ -1357,12 +1277,9 @@ type testDaytonaProvider struct{}
 
 type testNamespaceProvider struct{}
 
-func (testNamespaceProvider) Name() string { return "namespace-devbox" }
-func (testNamespaceProvider) Aliases() []string {
-	return []string{"namespace", "namespace-devboxes"}
-}
 func (testNamespaceProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:          []string{"namespace", "namespace-devboxes"},
 		Name:             "namespace-devbox",
 		Kind:             ProviderKindSSHLease,
 		Targets:          []TargetSpec{{OS: targetLinux}},
@@ -1412,16 +1329,6 @@ func (testNamespaceProvider) ServerTypeForConfig(cfg Config) string {
 	}
 	return strings.ToUpper(strings.TrimSpace(cfg.Class))
 }
-func (testNamespaceProvider) ServerTypeForClass(class string) string {
-	cfg := Config{Provider: "namespace-devbox", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class}
-	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
-		return candidates[0]
-	}
-	if class == "" {
-		return "M"
-	}
-	return strings.ToUpper(strings.TrimSpace(class))
-}
 func (p testNamespaceProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
@@ -1434,8 +1341,6 @@ type testNamespaceFlagValues struct {
 
 type testMorphProvider struct{}
 
-func (testMorphProvider) Name() string      { return "morph" }
-func (testMorphProvider) Aliases() []string { return nil }
 func (testMorphProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "morph",
@@ -1467,13 +1372,13 @@ func (testMorphProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
 func (testMorphProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == "morph" {
 		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=morph")
+			return Exit(2, "--class is not supported for provider=morph")
 		}
 		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=morph; use --morph-snapshot")
+			return Exit(2, "--type is not supported for provider=morph; use --morph-snapshot")
 		}
 		if cfg.TargetOS != "" && cfg.TargetOS != targetLinux {
-			return exit(2, "provider=morph supports target=linux only")
+			return Exit(2, "provider=morph supports target=linux only")
 		}
 	}
 	v, ok := values.(testMorphFlagValues)
@@ -1503,14 +1408,10 @@ func (testMorphProvider) ServerTypeForConfig(cfg Config) string {
 	return firstNonBlank(cfg.Morph.Snapshot, "snapshot")
 }
 
-func (testMorphProvider) ServerTypeForClass(string) string { return "snapshot" }
-
 func (p testMorphProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
-func (testDaytonaProvider) Name() string      { return "daytona" }
-func (testDaytonaProvider) Aliases() []string { return nil }
 func (testDaytonaProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "daytona",
@@ -1537,7 +1438,7 @@ func (testDaytonaProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any 
 func (testDaytonaProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == "daytona" {
 		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=daytona")
+			return Exit(2, "--type is not supported for provider=daytona")
 		}
 	}
 	v, ok := values.(testDaytonaFlagValues)
@@ -1561,8 +1462,6 @@ func (p testDaytonaProvider) Configure(cfg Config, rt Runtime) (Backend, error) 
 
 type testIsloProvider struct{}
 
-func (testIsloProvider) Name() string      { return "islo" }
-func (testIsloProvider) Aliases() []string { return nil }
 func (testIsloProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:                "islo",
@@ -1613,8 +1512,6 @@ func (p testIsloProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 
 type testFreestyleProvider struct{}
 
-func (testFreestyleProvider) Name() string      { return "freestyle" }
-func (testFreestyleProvider) Aliases() []string { return nil }
 func (testFreestyleProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "freestyle",
@@ -1665,8 +1562,6 @@ func (p testFreestyleProvider) Configure(cfg Config, rt Runtime) (Backend, error
 
 type testE2BProvider struct{}
 
-func (testE2BProvider) Name() string      { return "e2b" }
-func (testE2BProvider) Aliases() []string { return nil }
 func (testE2BProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "e2b",
@@ -1691,10 +1586,10 @@ func (testE2BProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
 func (testE2BProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == "e2b" {
 		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=e2b")
+			return Exit(2, "--class is not supported for provider=e2b")
 		}
 		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=e2b")
+			return Exit(2, "--type is not supported for provider=e2b")
 		}
 	}
 	v, ok := values.(testE2BFlagValues)
@@ -1732,8 +1627,6 @@ func (b testE2BBackend) Run(ctx context.Context, req RunRequest) (RunResult, err
 
 type testModalProvider struct{}
 
-func (testModalProvider) Name() string      { return "modal" }
-func (testModalProvider) Aliases() []string { return nil }
 func (testModalProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "modal",
@@ -1760,10 +1653,10 @@ func (testModalProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
 func (testModalProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == "modal" {
 		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=modal")
+			return Exit(2, "--class is not supported for provider=modal")
 		}
 		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=modal")
+			return Exit(2, "--type is not supported for provider=modal")
 		}
 	}
 	v, ok := values.(testModalFlagValues)
@@ -1789,12 +1682,9 @@ type testCloudflareProvider struct{}
 
 var testCloudflareDoctorResult *DoctorResult
 
-func (testCloudflareProvider) Name() string { return "cloudflare" }
-func (testCloudflareProvider) Aliases() []string {
-	return []string{"cf"}
-}
 func (testCloudflareProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:          []string{"cf"},
 		Name:             "cloudflare",
 		Kind:             ProviderKindDelegatedRun,
 		Targets:          []TargetSpec{{OS: targetLinux}},
@@ -1816,14 +1706,11 @@ func (testCloudflareProvider) ServerTypeForConfig(cfg Config) string {
 	if IsCanonicalProviderClass(cfg.Class) {
 		return ""
 	}
-	return cloudflareContainerInstanceTypeForClass(cfg.Class)
-}
-func (testCloudflareProvider) ServerTypeForClass(class string) string {
-	normalized := strings.ToLower(strings.TrimSpace(class))
-	if normalized == "" {
-		normalized = "standard"
+	class := cfg.Class
+	cfg.Class = strings.ToLower(strings.TrimSpace(class))
+	if cfg.Class == "" {
+		cfg.Class = "standard"
 	}
-	cfg := Config{Provider: "cloudflare", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: normalized}
 	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
 		return candidates[0]
 	}
@@ -1852,12 +1739,9 @@ type testCloudflareDynamicWorkersFlagValues struct {
 	TimeoutSecs *int
 }
 
-func (testCloudflareDynamicWorkersProvider) Name() string { return "cloudflare-dynamic-workers" }
-func (testCloudflareDynamicWorkersProvider) Aliases() []string {
-	return []string{"cf-dynamic", "cfdw"}
-}
 func (testCloudflareDynamicWorkersProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:     []string{"cf-dynamic", "cfdw"},
 		Name:        "cloudflare-dynamic-workers",
 		Kind:        ProviderKindDelegatedRun,
 		Targets:     []TargetSpec{{OS: targetWorkerRuntime}},
@@ -1894,7 +1778,7 @@ func (testCloudflareDynamicWorkersProvider) ApplyFlags(
 }
 func (p testCloudflareDynamicWorkersProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != targetWorkerRuntime && cfg.TargetOS != targetLinux {
-		return nil, exit(2, "%s supports target=worker-runtime only", p.Name())
+		return nil, Exit(2, "%s supports target=worker-runtime only", p.Spec().Name)
 	}
 	return testCloudflareDynamicWorkersBackend{
 		testDelegatedBackend: testDelegatedBackend{spec: p.Spec()},
@@ -1911,8 +1795,6 @@ func (testCloudflareDynamicWorkersBackend) Cleanup(context.Context, CleanupReque
 
 type testAgentSandboxProvider struct{}
 
-func (testAgentSandboxProvider) Name() string      { return "agent-sandbox" }
-func (testAgentSandboxProvider) Aliases() []string { return nil }
 func (testAgentSandboxProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "agent-sandbox",
@@ -1984,8 +1866,6 @@ func (p testAgentSandboxProvider) ConfigureDoctor(cfg Config, rt Runtime) (Docto
 
 type testSpritesProvider struct{}
 
-func (testSpritesProvider) Name() string      { return "sprites" }
-func (testSpritesProvider) Aliases() []string { return nil }
 func (testSpritesProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "sprites",
@@ -2010,10 +1890,10 @@ func (testSpritesProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any 
 func (testSpritesProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == "sprites" {
 		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=sprites")
+			return Exit(2, "--class is not supported for provider=sprites")
 		}
 		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=sprites")
+			return Exit(2, "--type is not supported for provider=sprites")
 		}
 	}
 	v, ok := values.(testSpritesFlagValues)
@@ -2034,20 +1914,19 @@ func (p testSpritesProvider) Configure(cfg Config, rt Runtime) (Backend, error) 
 
 type testLocalContainerProvider struct{}
 
-func (testLocalContainerProvider) Name() string { return "local-container" }
-func (testLocalContainerProvider) Aliases() []string {
-	return []string{"docker", "container", "local-docker"}
-}
 func (testLocalContainerProvider) CreationOnlyFlagNames() []string {
 	return []string{"local-container-volume"}
 }
 func (testLocalContainerProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:     []string{"docker", "container", "local-docker"},
 		Name:        "local-container",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
 		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureDesktop, FeatureBrowser, FeatureCacheVolume, FeatureCheckpoint, FeatureFork, FeatureRunSession},
 		Coordinator: CoordinatorNever,
+
+		ActionsRunnerUnsupported: true,
 	}
 }
 
@@ -2129,7 +2008,7 @@ func (testLocalContainerProvider) NativeCheckpointCapability(req NativeCheckpoin
 }
 func (testLocalContainerProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
 	if req.Record.Kind != checkpointKindDockerCommit {
-		return exit(2, "provider=local-container does not support checkpoint kind=%s", req.Record.Kind)
+		return Exit(2, "provider=local-container does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	req.Config.LocalContainer.Image = req.Record.ImageID
 	req.Config.LocalContainer.Runtime = req.Record.Metadata["runtime"]
@@ -2149,12 +2028,9 @@ func (testLocalContainerProvider) ApplyNativeCheckpointForkFlags(cfg *Config, _ 
 
 type testAppleVMProvider struct{}
 
-func (testAppleVMProvider) Name() string { return "apple-vm" }
-func (testAppleVMProvider) Aliases() []string {
-	return []string{"applevm"}
-}
 func (testAppleVMProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:     []string{"applevm"},
 		Name:        "apple-vm",
 		Family:      "local-vm",
 		Kind:        ProviderKindSSHLease,
@@ -2245,18 +2121,17 @@ func (p testAppleVMProvider) Configure(cfg Config, rt Runtime) (Backend, error) 
 
 type testMultipassProvider struct{}
 
-func (testMultipassProvider) Name() string { return "multipass" }
-func (testMultipassProvider) Aliases() []string {
-	return []string{"mp", "canonical-multipass"}
-}
 func (testMultipassProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:     []string{"mp", "canonical-multipass"},
 		Name:        "multipass",
 		Family:      "local-vm",
 		Kind:        ProviderKindSSHLease,
 		Targets:     []TargetSpec{{OS: targetLinux}},
 		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureCacheVolume},
 		Coordinator: CoordinatorNever,
+
+		ActionsRunnerUnsupported: true,
 	}
 }
 
@@ -2328,12 +2203,9 @@ func (p testMultipassProvider) Configure(cfg Config, rt Runtime) (Backend, error
 
 type testTartProvider struct{}
 
-func (testTartProvider) Name() string { return "tart" }
-func (testTartProvider) Aliases() []string {
-	return []string{"local-tart", "macos-vm"}
-}
 func (testTartProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:     []string{"local-tart", "macos-vm"},
 		Name:        "tart",
 		Family:      "local-vm",
 		Kind:        ProviderKindSSHLease,
@@ -2387,12 +2259,9 @@ func (p testTartProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 
 type testLumeProvider struct{}
 
-func (testLumeProvider) Name() string { return "lume" }
-func (testLumeProvider) Aliases() []string {
-	return []string{"local-lume", "lume-macos"}
-}
 func (testLumeProvider) Spec() ProviderSpec {
 	return ProviderSpec{
+		Aliases:     []string{"local-lume", "lume-macos"},
 		Name:        "lume",
 		Family:      "local-vm",
 		Kind:        ProviderKindSSHLease,
@@ -2450,8 +2319,6 @@ func (p testLumeProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 
 type testHyperVProvider struct{}
 
-func (testHyperVProvider) Name() string      { return "hyperv" }
-func (testHyperVProvider) Aliases() []string { return nil }
 func (testHyperVProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "hyperv",
@@ -2503,8 +2370,6 @@ func (p testHyperVProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 
 type testDockerSandboxProvider struct{}
 
-func (testDockerSandboxProvider) Name() string      { return "docker-sandbox" }
-func (testDockerSandboxProvider) Aliases() []string { return nil }
 func (testDockerSandboxProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "docker-sandbox",
@@ -2526,7 +2391,7 @@ func (testDockerSandboxProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, value
 }
 func (testDockerSandboxProvider) ValidateConfig(cfg Config) error {
 	if cfg.DockerSandbox.CPUs != math.Trunc(cfg.DockerSandbox.CPUs) {
-		return exit(2, "docker-sandbox cpus must be a whole number")
+		return Exit(2, "docker-sandbox cpus must be a whole number")
 	}
 	return nil
 }
@@ -2545,8 +2410,6 @@ type testDelegatedBackend struct {
 
 type testStopReclaimProvider struct{}
 
-func (testStopReclaimProvider) Name() string      { return "stop-reclaim-test" }
-func (testStopReclaimProvider) Aliases() []string { return nil }
 func (testStopReclaimProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "stop-reclaim-test",
@@ -2604,8 +2467,6 @@ func (b testIsloBackend) Resume(_ context.Context, req ResumeRequest) error {
 
 type testServiceControlProvider struct{}
 
-func (testServiceControlProvider) Name() string      { return "service-control-test" }
-func (testServiceControlProvider) Aliases() []string { return nil }
 func (testServiceControlProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "service-control-test",
@@ -2635,7 +2496,7 @@ func (b testServiceControlBackend) Status(_ context.Context, req StatusRequest) 
 	if testServiceControlStatusHook != nil {
 		return testServiceControlStatusHook(req)
 	}
-	return StatusView{}, exit(2, "service-control-test status unavailable")
+	return StatusView{}, Exit(2, "service-control-test status unavailable")
 }
 
 func (b testDelegatedBackend) Spec() ProviderSpec { return b.spec }

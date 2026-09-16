@@ -5,7 +5,6 @@ import (
 	"os"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -13,9 +12,6 @@ func init() {
 }
 
 type Provider struct{}
-
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return []string{"weights-and-biases"} }
 
 func (Provider) DiagnosticSecrets(cfg core.Config) []string {
 	return []string{
@@ -28,6 +24,7 @@ func (Provider) DiagnosticSecrets(cfg core.Config) []string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"weights-and-biases"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		Name:             providerName,
 		Family:           "wandb",
@@ -49,8 +46,4 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewWandbBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("wandb", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

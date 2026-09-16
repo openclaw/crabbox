@@ -193,7 +193,7 @@ func decodeInstanceTypes(raw json.RawMessage) ([]InstanceType, error) {
 		item := keyed[key]
 		instanceType := item.InstanceType
 		if instanceType.Name == "" {
-			instanceType.Name = firstNonBlank(item.Name, key)
+			instanceType.Name = shared.FirstNonBlankTrimmed(item.Name, key)
 		}
 		if instanceType.Description == "" {
 			instanceType.Description = item.Description

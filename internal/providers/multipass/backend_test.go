@@ -16,6 +16,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type recordingRunner struct {
@@ -131,16 +132,16 @@ func TestMultipassConfigShowSection(t *testing.T) {
 
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
-	if p.Name() != providerName {
-		t.Fatalf("Name=%q want %s", p.Name(), providerName)
+	if p.Spec().Name != providerName {
+		t.Fatalf("Name=%q want %s", p.Spec().Name, providerName)
 	}
 	for _, alias := range []string{"multipass", "mp", "canonical-multipass"} {
 		got, err := core.ProviderFor(alias)
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)
 		}
-		if got.Name() != providerName {
-			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Name())
+		if got.Spec().Name != providerName {
+			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Spec().Name)
 		}
 	}
 	spec := p.Spec()
@@ -267,7 +268,7 @@ func TestCreateInstanceBuildsLaunchArgsAndCloudInit(t *testing.T) {
 		t.Fatalf("darwin qemu launch should not include --mount:\n%s", args)
 	}
 	mountArgs := recordedArgsForCommand(t, runner, "mount")
-	for _, want := range []string{"mount\n--type\nnative", filepath.Join(root, multipassCacheVolumeName("my-app/linux node24 lock")), "crabbox-blue-1234abcd:/var/cache/crabbox/pnpm"} {
+	for _, want := range []string{"mount\n--type\nnative", filepath.Join(root, shared.CacheVolumeName("my-app/linux node24 lock")), "crabbox-blue-1234abcd:/var/cache/crabbox/pnpm"} {
 		if !strings.Contains(mountArgs, want) {
 			t.Fatalf("native mount args missing %q:\n%s", want, mountArgs)
 		}
@@ -308,7 +309,7 @@ func TestCreateInstanceFallsBackToClassicMountsForDarwinVirtualBox(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mountArg := filepath.Join(root, multipassCacheVolumeName("gomod")) + ":/var/cache/crabbox/go"
+	mountArg := filepath.Join(root, shared.CacheVolumeName("gomod")) + ":/var/cache/crabbox/go"
 	if !strings.Contains(args, "--mount\n"+mountArg) {
 		t.Fatalf("virtualbox launch args missing classic mount %q:\n%s", mountArg, args)
 	}
@@ -536,7 +537,7 @@ func findStoredTestboxKeys(root string) ([]string, error) {
 func TestAcquireRemovesClaimAfterEndpointUpdateFailure(t *testing.T) {
 	runner, b := setupAcquireMetadataFailureTest(t)
 	oldUpdate := updateLeaseClaimEndpoint
-	updateLeaseClaimEndpoint = func(string, Server, SSHTarget) error {
+	updateLeaseClaimEndpoint = func(string, core.Server, core.SSHTarget) error {
 		return errors.New("endpoint boom")
 	}
 	t.Cleanup(func() { updateLeaseClaimEndpoint = oldUpdate })
@@ -564,7 +565,7 @@ func TestAcquireRemovesClaimAfterCacheVolumeUpdateFailure(t *testing.T) {
 func TestAcquireKeepsClaimWhenMetadataRollbackDeleteFails(t *testing.T) {
 	runner, b := setupAcquireMetadataFailureTest(t)
 	oldUpdate := updateLeaseClaimEndpoint
-	updateLeaseClaimEndpoint = func(string, Server, SSHTarget) error {
+	updateLeaseClaimEndpoint = func(string, core.Server, core.SSHTarget) error {
 		return errors.New("endpoint boom")
 	}
 	t.Cleanup(func() { updateLeaseClaimEndpoint = oldUpdate })
@@ -574,7 +575,7 @@ func TestAcquireKeepsClaimWhenMetadataRollbackDeleteFails(t *testing.T) {
 		t.Fatalf("Acquire error=%v, want metadata and cleanup errors", err)
 	}
 	_ = recordedArgsForCommand(t, runner, "delete")
-	claims, claimErr := listLeaseClaims()
+	claims, claimErr := core.ListLeaseClaims()
 	if claimErr != nil {
 		t.Fatal(claimErr)
 	}
@@ -591,7 +592,7 @@ func setupAcquireMetadataFailureTest(t *testing.T) (*recordingRunner, *backend) 
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 	oldWait := waitForSSHReady
-	waitForSSHReady = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error {
+	waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
 		return nil
 	}
 	t.Cleanup(func() { waitForSSHReady = oldWait })
@@ -609,7 +610,7 @@ func assertAcquireRollbackRemovedInstanceAndClaim(t *testing.T, runner *recordin
 	if !strings.Contains(deleteArgs, "delete\n--purge\ncrabbox-") {
 		t.Fatalf("delete not recorded after metadata failure:\n%s", deleteArgs)
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,8 +643,8 @@ func TestDurationSecondsCeil(t *testing.T) {
 }
 
 func TestCacheVolumeNameIsStableAndFilesystemSafe(t *testing.T) {
-	got := multipassCacheVolumeName("My App/linux node24 lock")
-	again := multipassCacheVolumeName("My App/linux node24 lock")
+	got := shared.CacheVolumeName("My App/linux node24 lock")
+	again := shared.CacheVolumeName("My App/linux node24 lock")
 	if got != again {
 		t.Fatalf("cache volume name unstable: %q then %q", got, again)
 	}
@@ -752,23 +753,48 @@ func TestLaunchTimeoutArgumentRoundsUp(t *testing.T) {
 	}
 }
 
-func TestServerFromUnclaimedCrabboxNamedInstance(t *testing.T) {
-	b := testBackend(&recordingRunner{})
-	server := b.serverFromInstance(multipassInstance{Name: "crabbox-blue-1234abcd", State: "Running", IPv4: []string{"192.168.64.7"}, Release: "Ubuntu 24.04 LTS"}, core.LeaseClaim{}, b.configForRun())
-	if server.CloudID != "crabbox-blue-1234abcd" || server.Labels["provider"] != providerName || server.Labels["instance"] != "crabbox-blue-1234abcd" {
-		t.Fatalf("server=%#v", server)
+func TestServerFromInstanceMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name, observed, saved, want string
+	}{
+		{name: "unclaimed running", observed: "Running", want: "running"},
+		{name: "stopped overrides saved ready", observed: " Stopped ", saved: "ready", want: "stopped"},
+		{name: "running preserves saved ready", observed: "Running", saved: "ready", want: "ready"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := testBackend(&recordingRunner{})
+			cfg := b.configForRun()
+			claim := core.LeaseClaim{}
+			if tc.saved != "" {
+				claim.Labels = map[string]string{"state": tc.saved, "custom": "retained", "ssh_user": "saved-user"}
+			}
+			before := shared.CloneLabels(claim.Labels)
+			server := b.serverFromInstance(multipassInstance{Name: "crabbox-blue-1234abcd", State: tc.observed, IPv4: []string{"192.168.64.7"}, Release: "Ubuntu 24.04 LTS"}, claim, cfg)
+			if server.Status != tc.want || server.Labels["state"] != tc.want {
+				t.Fatalf("status=%q label=%q want %q", server.Status, server.Labels["state"], tc.want)
+			}
+			if server.CloudID != "crabbox-blue-1234abcd" || server.Name != "crabbox-blue-1234abcd" || server.Provider != providerName || server.Labels["provider"] != providerName || server.Labels["instance"] != "crabbox-blue-1234abcd" || server.PublicNet.IPv4.IP != "192.168.64.7" || server.ServerType.Name != "Ubuntu 24.04 LTS" {
+				t.Fatalf("unrelated resource metadata changed: %#v", server)
+			}
+			if tc.saved != "" && (server.Labels["custom"] != "retained" || server.Labels["ssh_user"] != "saved-user") {
+				t.Fatalf("saved metadata changed: %#v", server.Labels)
+			}
+			if !reflect.DeepEqual(shared.CloneLabels(claim.Labels), before) {
+				t.Fatal("projection mutated input labels")
+			}
+		})
 	}
 }
 
 func TestShouldCleanupRespectsKeepLabel(t *testing.T) {
-	server := Server{Status: "stopped", Labels: map[string]string{"keep": "true"}}
+	server := core.Server{Status: "stopped", Labels: map[string]string{"keep": "true"}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, true, time.Now()); ok || reason != "keep=true" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
 }
 
 func TestShouldCleanupExpiredClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	claim := core.LeaseClaim{LeaseID: "cbx_123", LastUsedAt: time.Now().Add(-48 * time.Hour).Format(time.RFC3339), IdleTimeoutSeconds: int((30 * time.Minute).Seconds())}
 	if ok, reason := shouldCleanup(server, claim, true, time.Now()); !ok || reason != "claim expired" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
@@ -776,14 +802,14 @@ func TestShouldCleanupExpiredClaim(t *testing.T) {
 }
 
 func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
 }
 
 func TestShouldCleanupSkipsStoppedMissingClaim(t *testing.T) {
-	server := Server{Status: "stopped", Labels: map[string]string{}}
+	server := core.Server{Status: "stopped", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
@@ -795,20 +821,20 @@ func TestReleaseRequiresExactClaim(t *testing.T) {
 	const name = "crabbox-release-1234"
 	runner := &recordingRunner{}
 	b := testBackend(runner)
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: leaseID,
-		Server:  Server{CloudID: name, Labels: map[string]string{"lease": leaseID, "instance": name}},
+		Server:  core.Server{CloudID: name, Labels: map[string]string{"lease": leaseID, "instance": name}},
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
 		t.Fatalf("ReleaseLease unclaimed err=%v", err)
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("unclaimed release mutated provider: %#v", runner.calls)
 	}
-	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "release", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, lease.Server, SSHTarget{}); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "release", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, lease.Server, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatalf("ReleaseLease exact claim: %v", err)
 	}
 	if got := recordedArgsForCommand(t, runner, "delete"); !strings.Contains(got, "--purge\n"+name) {
@@ -843,7 +869,7 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 		{"/provider/root", "/srv/custom", "/provider/root"},
 	} {
 		for _, explicit := range []bool{false, true} {
-			cfg := Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			cfg := core.Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
 			if explicit {
 				core.MarkWorkRootExplicit(&cfg)
 				cfg.TargetOS = "existing-target"
@@ -874,6 +900,87 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 			if !reflect.DeepEqual(cfg, want) {
 				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
 			}
+		}
+	}
+}
+
+func TestMultipassDecodedCPUSizing(t *testing.T) {
+	for _, cpus := range []int{-2, -1, 0, 1, 3, 4} {
+		t.Run(strconv.Itoa(cpus), func(t *testing.T) {
+			runner := &recordingRunner{}
+			cfg := testBackend(runner).cfg
+			cfg.TargetOS = core.TargetLinux
+			cfg.Multipass.CPUs = cpus
+			before := cfg.Multipass
+			got, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+			if err != nil {
+				t.Fatalf("Configure: %v", err)
+			}
+			if got.(*backend).cfg.Multipass.CPUs != cpus {
+				t.Fatalf("Configure changed CPU count %d", cpus)
+			}
+			if cpus < 0 {
+				_, err = got.(*backend).Acquire(context.Background(), core.AcquireRequest{})
+				var exitErr core.ExitError
+				if !errors.As(err, &exitErr) || exitErr.Code != 2 || err.Error() != "multipass.cpus must be zero or greater" {
+					t.Fatalf("Acquire error = %v", err)
+				}
+				if len(runner.calls) != 0 {
+					t.Fatalf("invalid sizing reached provider: %#v", runner.calls)
+				}
+			}
+			if cfg.Multipass != before {
+				t.Fatal("validation changed caller configuration")
+			}
+		})
+	}
+}
+
+func TestMultipassExistingLeaseIgnoresCreationCPUs(t *testing.T) {
+	for _, operation := range []string{"stop", "cleanup"} {
+		for _, cpus := range []int{-2, 0} {
+			t.Run(operation+"/"+strconv.Itoa(cpus), func(t *testing.T) {
+				t.Setenv("HOME", t.TempDir())
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				const leaseID = "cbx_123"
+				const name = "crabbox-blue-1234abcd"
+				server := core.Server{CloudID: name, Labels: map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": "blue-lobster", "instance": name, "ssh_user": "runner", "ssh_port": "22", "work_root": "/workspace/crabbox"}}
+				if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "blue-lobster", providerName, instanceScope(name), "", t.TempDir(), time.Minute, false, server, core.SSHTarget{Host: "192.168.64.7", Port: "22"}); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { core.RemoveLeaseClaim(leaseID) })
+				runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
+					commandKey([]string{"list", "--format", "json"}):       {Stdout: strings.ReplaceAll(sampleListJSON(), "Running", "Stopped")},
+					commandKey([]string{"info", "--format", "json", name}): {Stdout: sampleInfoJSON(name)},
+				}}
+				cfg := testBackend(runner).cfg
+				cfg.TargetOS = core.TargetLinux
+				cfg.Multipass.CPUs = cpus
+				configured, err := (Provider{}).Configure(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+				if err != nil {
+					t.Fatalf("Configure existing lease: %v", err)
+				}
+				b := configured.(*backend)
+				if operation == "stop" {
+					lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				if args := recordedArgsForCommand(t, runner, "delete"); args != "delete\n--purge\n"+name {
+					t.Fatalf("delete args=%q", args)
+				}
+				for _, call := range runner.calls {
+					if len(call.Args) > 0 && call.Args[0] == "launch" {
+						t.Fatal("existing operation launched VM")
+					}
+				}
+			})
 		}
 	}
 }

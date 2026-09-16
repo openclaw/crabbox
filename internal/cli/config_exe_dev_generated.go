@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"strconv"
 )
 
 type fileExeDevConfig struct {
@@ -43,89 +42,14 @@ type ExeDevConfigApplied struct {
 
 func (cfg *ExeDevConfig) applyFile(file *fileExeDevConfig) (ExeDevConfigApplied, error) {
 	var applied ExeDevConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.ControlHost != "" {
-		cfg.ControlHost = file.ControlHost
-		applied.InputAccepted = true
-		applied.ControlHost = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.CPUs > 0 {
-		cfg.CPUs = file.CPUs
-		applied.InputAccepted = true
-	}
-	if file.Memory != "" {
-		cfg.Memory = file.Memory
-		applied.InputAccepted = true
-	}
-	if file.Disk != "" {
-		cfg.Disk = file.Disk
-		applied.InputAccepted = true
-	}
-	if file.Command != "" {
-		cfg.Command = file.Command
-		applied.InputAccepted = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-	}
-	if file.NoEmail != nil {
-		cfg.NoEmail = *file.NoEmail
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "exe-dev")
+	return applied, err
 }
 
 func (cfg *ExeDevConfig) applyEnv() (ExeDevConfigApplied, error) {
 	var applied ExeDevConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_CONTROL_HOST", "EXE_DEV_CONTROL_HOST"); ok {
-		cfg.ControlHost = value
-		applied.InputAccepted = true
-		applied.ControlHost = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_IMAGE", "EXE_DEV_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_EXE_DEV_CPUS", strconv.IntSize); ok {
-		cfg.CPUs = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_MEMORY", "EXE_DEV_MEMORY"); ok {
-		cfg.Memory = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_DISK", "EXE_DEV_DISK"); ok {
-		cfg.Disk = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_COMMAND"); ok {
-		cfg.Command = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_EXE_DEV_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_EXE_DEV_NO_EMAIL"); ok {
-		cfg.NoEmail = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 9)
+	return applied, err
 }
 
 // ExeDevConfigFlagValues holds parsed values; only visited flags are applied.
@@ -143,17 +67,9 @@ type ExeDevConfigFlagValues struct {
 
 // RegisterExeDevConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterExeDevConfigFlags(fs *flag.FlagSet, defaults ExeDevConfig) ExeDevConfigFlagValues {
-	return ExeDevConfigFlagValues{
-		ControlHost: fs.String("exe-dev-control-host", defaults.ControlHost, "exe.dev SSH API host"),
-		Image:       fs.String("exe-dev-image", defaults.Image, "exe.dev VM image"),
-		CPUs:        fs.Int("exe-dev-cpus", defaults.CPUs, "exe.dev VM CPUs"),
-		Memory:      fs.String("exe-dev-memory", defaults.Memory, "exe.dev VM memory, for example 4GB"),
-		Disk:        fs.String("exe-dev-disk", defaults.Disk, "exe.dev VM disk, for example 10GB"),
-		Command:     fs.String("exe-dev-command", defaults.Command, "exe.dev container command"),
-		User:        fs.String("exe-dev-user", defaults.User, "SSH user for exe.dev VMs"),
-		WorkRoot:    fs.String("exe-dev-work-root", defaults.WorkRoot, "remote Crabbox work root on exe.dev VMs"),
-		NoEmail:     fs.Bool("exe-dev-no-email", defaults.NoEmail, "suppress exe.dev VM notification email"),
-	}
+	var values ExeDevConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // ExeDevConfigVisitedFlags records raw flag visits, independently of application.
@@ -163,51 +79,14 @@ type ExeDevConfigVisitedFlags struct {
 
 // ExeDevConfigFlagPresence reports visits for tracked flag bindings.
 func ExeDevConfigFlagPresence(fs *flag.FlagSet) ExeDevConfigVisitedFlags {
-	return ExeDevConfigVisitedFlags{
-		ControlHost: flagWasSet(fs, "exe-dev-control-host"),
-	}
+	var visited ExeDevConfigVisitedFlags
+	recordConfigFlagVisits[ExeDevConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values ExeDevConfigFlagValues) Apply(cfg *ExeDevConfig, fs *flag.FlagSet) (ExeDevConfigApplied, error) {
 	var applied ExeDevConfigApplied
-	visited := ExeDevConfigFlagPresence(fs)
-	if visited.ControlHost {
-		cfg.ControlHost = *values.ControlHost
-		applied.InputAccepted = true
-		applied.ControlHost = true
-	}
-	if flagWasSet(fs, "exe-dev-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-cpus") {
-		cfg.CPUs = *values.CPUs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-memory") {
-		cfg.Memory = *values.Memory
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-disk") {
-		cfg.Disk = *values.Disk
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-command") {
-		cfg.Command = *values.Command
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-user") {
-		cfg.User = *values.User
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-work-root") {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "exe-dev-no-email") {
-		cfg.NoEmail = *values.NoEmail
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

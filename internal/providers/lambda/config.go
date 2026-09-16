@@ -31,21 +31,21 @@ func requireToken() (string, error) {
 }
 
 func regionForConfig(cfg core.Config) string {
-	return firstNonBlank(cfg.Lambda.Region, core.LambdaConfiguredRegionDefault)
+	return shared.FirstNonBlankTrimmed(cfg.Lambda.Region, core.LambdaConfiguredRegionDefault)
 }
 
 func typeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && strings.TrimSpace(cfg.ServerType) != "" {
 		return strings.TrimSpace(cfg.ServerType)
 	}
-	return firstNonBlank(cfg.Lambda.Type, core.LambdaConfiguredTypeDefault)
+	return shared.FirstNonBlankTrimmed(cfg.Lambda.Type, core.LambdaConfiguredTypeDefault)
 }
 
 func imageFamilyForConfig(cfg core.Config) string {
 	if strings.TrimSpace(cfg.Lambda.Image) != "" {
 		return ""
 	}
-	return firstNonBlank(cfg.Lambda.ImageFamily, core.LambdaImageFamilyFallback)
+	return shared.FirstNonBlankTrimmed(cfg.Lambda.ImageFamily, core.LambdaImageFamilyFallback)
 }
 
 func imageForConfig(cfg core.Config) string {
@@ -75,8 +75,4 @@ func validateConfig(cfg core.Config) error {
 		return core.Exit(2, "lambda image and imageFamily are mutually exclusive")
 	}
 	return nil
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlankTrimmed(values...)
 }

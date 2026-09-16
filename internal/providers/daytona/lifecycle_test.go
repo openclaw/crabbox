@@ -50,7 +50,7 @@ type daytonaLifecycleFixture struct {
 	currentKeyIdentity    func(map[string]any)
 }
 
-func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLeaseBackend, Repo) {
+func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLeaseBackend, core.Repo) {
 	t.Helper()
 	testutil.IsolateUserDirs(t)
 	f := &daytonaLifecycleFixture{createState: api.SANDBOXSTATE_STARTED}
@@ -149,7 +149,7 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 			f.sandbox.SetState(f.createState)
 			f.sandbox.SetToolboxProxyUrl(f.server.URL + "/toolbox")
 			f.sandbox.SetAutoStopInterval(float32(f.create.GetAutoStopInterval()))
-			f.sandbox.SetTarget(blank(f.responseTarget, blank(f.create.GetTarget(), "us")))
+			f.sandbox.SetTarget(core.Blank(f.responseTarget, core.Blank(f.create.GetTarget(), "us")))
 			if f.classSnapshot != nil {
 				f.sandbox.SetSnapshot(f.classSnapshot.GetId())
 				f.sandbox.SetCpu(f.classSnapshot.GetCpu())
@@ -289,21 +289,21 @@ func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *dayton
 		}
 	}))
 	t.Cleanup(f.server.Close)
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Provider = daytonaProvider
 	cfg.Daytona.APIKey = "test-credential"
 	cfg.Daytona.APIURL = f.server.URL
 	cfg.Daytona.Snapshot = "test-snapshot"
 	cfg.Daytona.WorkRoot = t.TempDir()
-	repo := Repo{Root: t.TempDir(), Name: "fixture"}
+	repo := core.Repo{Root: t.TempDir(), Name: "fixture"}
 	if out, err := exec.Command("git", "init", "-q", repo.Root).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v %s", err, out)
 	}
-	backend := &daytonaLeaseBackend{cfg: cfg, rt: Runtime{HTTP: f.server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
+	backend := &daytonaLeaseBackend{cfg: cfg, rt: core.Runtime{HTTP: f.server.Client(), Stdout: io.Discard, Stderr: io.Discard}}
 	return f, backend, repo
 }
 
-func runDaytonaClassWarmup(t *testing.T, cfg Config, repo Repo) error {
+func runDaytonaClassWarmup(t *testing.T, cfg core.Config, repo core.Repo) error {
 	t.Helper()
 	t.Chdir(repo.Root)
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
@@ -375,7 +375,7 @@ func TestDaytonaClassSelectsSnapshotWithoutResourceOverrides(t *testing.T) {
 
 func TestDaytonaClassPreservesCustomSnapshotAndRejectsMismatches(t *testing.T) {
 	for _, mismatch := range []string{"", "snapshot-name", "missing-class", "cpu", "memory", "disk", "gpu", "container", "state", "class", "architecture", "response", "response-class", "empty-class"} {
-		t.Run(blank(mismatch, "matching"), func(t *testing.T) {
+		t.Run(core.Blank(mismatch, "matching"), func(t *testing.T) {
 			f, b, repo := newDaytonaLifecycleFixture(t)
 			b.cfg.Class, b.cfg.Daytona.Snapshot, b.cfg.Daytona.Target = "standard", "custom-exact-id", "us"
 			f.classSnapshot = &api.SnapshotDto{Id: "custom-exact-id", Name: "my-prepared-project", State: api.SNAPSHOTSTATE_ACTIVE, Cpu: 2, Mem: 4, Disk: 8, RegionIds: []string{"us"}, Entrypoint: []string{}}
@@ -410,7 +410,7 @@ func TestDaytonaClassPreservesCustomSnapshotAndRejectsMismatches(t *testing.T) {
 				if err == nil || f.sandboxCreates != 1 || f.deletes != 1 {
 					t.Fatalf("mismatched allocation must be cleaned: creates=%d deletes=%d err=%v", f.sandboxCreates, f.deletes, err)
 				}
-				if _, exists, claimErr := resolveLeaseClaimForProvider(leaseID, daytonaProvider); exists || claimErr != nil {
+				if _, exists, claimErr := core.ResolveLeaseClaimForProvider(leaseID, daytonaProvider); exists || claimErr != nil {
 					t.Fatalf("cleaned allocation retained claim: %v %v", exists, claimErr)
 				}
 			} else if err == nil || f.sandboxCreates != 0 {
@@ -451,7 +451,7 @@ func TestDaytonaClassKeepsNativeTargetResolution(t *testing.T) {
 				if err == nil || f.sandboxCreates != 1 || f.deletes != 1 {
 					t.Fatalf("target mismatch not rolled back: creates=%d deletes=%d err=%v", f.sandboxCreates, f.deletes, err)
 				}
-				if _, exists, claimErr := resolveLeaseClaimForProvider(leaseID, daytonaProvider); exists || claimErr != nil {
+				if _, exists, claimErr := core.ResolveLeaseClaimForProvider(leaseID, daytonaProvider); exists || claimErr != nil {
 					t.Fatalf("rollback retained ownership: exists=%v err=%v", exists, claimErr)
 				}
 			} else if err != nil || f.sandboxCreates != 1 {
@@ -519,7 +519,7 @@ func TestDaytonaAllocationFailureRollsBack(t *testing.T) {
 			if failure == "create response timeout" && (f.recoveryReads != 1 || f.sandbox.GetId() != "sandbox-test" || f.sandbox.GetLabels()["lease"] != leaseID || f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED) {
 				t.Fatalf("accepted allocation was not recovered and deleted exactly: reads=%d sandbox=%s lease=%s state=%s", f.recoveryReads, f.sandbox.GetId(), f.sandbox.GetLabels()["lease"], f.sandbox.GetState())
 			}
-			if _, exists, err := resolveLeaseClaimForProvider(leaseID, daytonaProvider); err != nil || exists {
+			if _, exists, err := core.ResolveLeaseClaimForProvider(leaseID, daytonaProvider); err != nil || exists {
 				t.Fatalf("claim retained after confirmed cleanup: %v %v", exists, err)
 			}
 		})
@@ -646,7 +646,7 @@ func TestDaytonaHeartbeatUpdatesProviderAndLabels(t *testing.T) {
 		sandbox.GetLabels()[key] = value
 	}
 	idle := 90 * time.Minute
-	touched, err := b.Touch(t.Context(), TouchRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox)}, State: "ready", IdleTimeoutOverride: &idle})
+	touched, err := b.Touch(t.Context(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox)}, State: "ready", IdleTimeoutOverride: &idle})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -668,7 +668,7 @@ func TestDaytonaHeartbeatPolicyFailureDoesNotPublishNewTimeout(t *testing.T) {
 	}
 	f.autoStopError = true
 	idle := 90 * time.Minute
-	_, err = b.Touch(t.Context(), TouchRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox)}, State: "ready", IdleTimeoutOverride: &idle})
+	_, err = b.Touch(t.Context(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox)}, State: "ready", IdleTimeoutOverride: &idle})
 	if err == nil || !strings.Contains(err.Error(), "auto-stop") {
 		t.Fatalf("error=%v", err)
 	}
@@ -684,7 +684,7 @@ func TestDaytonaStatusWaitFailsOnTerminalProviderState(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.sandbox.SetState(api.SANDBOXSTATE_ERROR)
-	view, err := b.Status(t.Context(), StatusRequest{ID: leaseID, Wait: true, WaitTimeout: time.Second})
+	view, err := b.Status(t.Context(), core.StatusRequest{ID: leaseID, Wait: true, WaitTimeout: time.Second})
 	if err == nil || view.Ready || !strings.Contains(err.Error(), "terminal state=error") {
 		t.Fatalf("view=%+v error=%v", view, err)
 	}
@@ -707,7 +707,7 @@ func TestDaytonaActivityRefreshStopsWithRun(t *testing.T) {
 			defer cancel()
 			var stop func()
 			if sshRun {
-				stop, err = b.BeginSSHRunActivity(ctx, LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox)})
+				stop, err = b.BeginSSHRunActivity(ctx, core.LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox)})
 			} else {
 				stop, err = b.startDaytonaActivity(ctx, sandbox)
 			}
@@ -757,7 +757,7 @@ func TestDaytonaRunPreservesDependenciesAndPrunesDeletedSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := RunRequest{ID: leaseID, Repo: repo, ShellMode: true, Command: []string{"mkdir -p node_modules/example && printf installed > node_modules/example/index.js && test -f source.txt"}}
+	req := core.RunRequest{ID: leaseID, Repo: repo, ShellMode: true, Command: []string{"mkdir -p node_modules/example && printf installed > node_modules/example/index.js && test -f source.txt"}}
 	if _, err := b.Run(t.Context(), req); err != nil {
 		t.Fatal(err)
 	}
@@ -810,13 +810,13 @@ func TestDaytonaHTTPRedirectPolicy(t *testing.T) {
 				http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
 			}))
 			defer source.Close()
-			cfg := baseConfig()
+			cfg := core.BaseConfig()
 			cfg.Daytona.APIURL = source.URL
 			cfg.Daytona.APIKey = "test-credential"
 			var err error
 			switch surface {
 			case "api":
-				client, e := newDaytonaClient(cfg, Runtime{})
+				client, e := newDaytonaClient(cfg, core.Runtime{})
 				if e != nil {
 					t.Fatal(e)
 				}
@@ -825,7 +825,7 @@ func TestDaytonaHTTPRedirectPolicy(t *testing.T) {
 				dto := &api.Sandbox{}
 				dto.SetId("sandbox-test")
 				dto.SetToolboxProxyUrl(source.URL)
-				sandbox, e := newDaytonaToolboxSandbox(cfg, Runtime{}, dto)
+				sandbox, e := newDaytonaToolboxSandbox(cfg, core.Runtime{}, dto)
 				if e != nil {
 					t.Fatal(e)
 				}

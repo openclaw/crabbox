@@ -43,9 +43,9 @@ printf 'probed' > "$CRABBOX_TEST_STATUS_PROBE"
 	t.Setenv("CRABBOX_TEST_STATUS_REMOTE_PATH", remoteBin)
 	t.Setenv("SPRITE_TOKEN", "ambient-token")
 	t.Setenv("SPRITE_URL", "https://ambient.example")
-	cfg := Config{Provider: spritesProvider, Sprites: SpritesConfig{Token: "test-token", WorkRoot: "/home/sprite/crabbox"}}
+	cfg := core.Config{Provider: spritesProvider, Sprites: core.SpritesConfig{Token: "test-token", WorkRoot: "/home/sprite/crabbox"}}
 	lease, claim, _ := spritesTestClaim(t, cfg, "crabbox-test", "original-id", "test-org")
-	key, _, err := ensureTestboxKey(lease.LeaseID)
+	key, _, err := core.EnsureTestboxKey(lease.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}

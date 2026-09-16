@@ -2,11 +2,11 @@ package localcontainer
 
 import (
 	"flag"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"path/filepath"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -15,14 +15,9 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return providerName }
-
-func (Provider) Aliases() []string {
-	return []string{"docker", "container", "local-docker"}
-}
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"docker", "container", "local-docker"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
 		Name:             providerName,
 		Family:           "container",
@@ -31,6 +26,8 @@ func (Provider) Spec() core.ProviderSpec {
 		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCacheVolume, core.FeatureCheckpoint, core.FeatureFork, core.FeatureRunSession},
 		Coordinator:      core.CoordinatorNever,
 		ClassDisposition: core.ProviderClassDispositionUnmapped,
+
+		ActionsRunnerUnsupported: true,
 	}
 }
 
@@ -68,7 +65,7 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 	if existing.CloudID != "" && server.CloudID != "" && existing.CloudID != server.CloudID {
 		return core.Server{}, core.Exit(2, "local-container lease %s is bound to container %s; refusing endpoint rewrite to %s", existing.LeaseID, shortID(existing.CloudID), shortID(server.CloudID))
 	}
-	labels := cloneLabels(server.Labels)
+	labels := shared.CloneLabels(server.Labels)
 	for _, key := range append([]string{
 		"bootstrap_dir", "bootstrap_owned", "docker_socket", "host_work_root", "keep", "runtime", "runtime_context", "ssh_key_owned", "ssh_user", "work_root",
 	}, checkpointScopeMetadataKeys...) {
@@ -196,8 +193,4 @@ func (Provider) ApplyNativeCheckpointForkFlags(cfg *core.Config, fs *flag.FlagSe
 		cfg.LocalContainer.Volumes = append([]string(nil), (*v.Volumes)...)
 	}
 	return nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor(providerName, func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

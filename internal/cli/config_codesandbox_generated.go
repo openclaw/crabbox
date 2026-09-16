@@ -47,133 +47,14 @@ type CodeSandboxConfigApplied struct {
 
 func (cfg *CodeSandboxConfig) applyFile(file *fileCodeSandboxConfig, trusted bool) (CodeSandboxConfigApplied, error) {
 	var applied CodeSandboxConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.TemplateID != nil {
-		cfg.TemplateID = *file.TemplateID
-		applied.InputAccepted = true
-	}
-	if file.Workdir != nil {
-		cfg.Workdir = *file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.VMTier != nil {
-		cfg.VMTier = *file.VMTier
-		applied.InputAccepted = true
-	}
-	if file.Privacy != nil {
-		cfg.Privacy = *file.Privacy
-		applied.InputAccepted = true
-	}
-	if file.HibernationTimeoutSecs != nil {
-		if *file.HibernationTimeoutSecs < 0 {
-			return applied, exit(2, "codesandbox hibernationTimeoutSecs must be non-negative")
-		}
-		cfg.HibernationTimeoutSecs = *file.HibernationTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.AutomaticWakeupHTTP != nil {
-		cfg.AutomaticWakeupHTTP = *file.AutomaticWakeupHTTP
-		applied.InputAccepted = true
-	}
-	if file.AutomaticWakeupWebSocket != nil {
-		cfg.AutomaticWakeupWebSocket = *file.AutomaticWakeupWebSocket
-		applied.InputAccepted = true
-	}
-	if trusted && file.BridgeCommand != nil {
-		cfg.BridgeCommand = *file.BridgeCommand
-		applied.InputAccepted = true
-	}
-	if trusted && file.SDKPackage != nil {
-		cfg.SDKPackage = *file.SDKPackage
-		applied.InputAccepted = true
-	}
-	if file.DoctorListLimit != nil {
-		if *file.DoctorListLimit < 0 {
-			return applied, exit(2, "codesandbox doctorListLimit must be non-negative")
-		}
-		cfg.DoctorListLimit = *file.DoctorListLimit
-		applied.InputAccepted = true
-	}
-	if file.OperationTimeoutSecs != nil {
-		if *file.OperationTimeoutSecs < 0 {
-			return applied, exit(2, "codesandbox operationTimeoutSecs must be non-negative")
-		}
-		cfg.OperationTimeoutSecs = *file.OperationTimeoutSecs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "codesandbox")
+	return applied, err
 }
 
 func (cfg *CodeSandboxConfig) applyEnv() (CodeSandboxConfigApplied, error) {
 	var applied CodeSandboxConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODESANDBOX_TEMPLATE_ID"); ok {
-		cfg.TemplateID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODESANDBOX_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODESANDBOX_VM_TIER"); ok {
-		cfg.VMTier = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODESANDBOX_PRIVACY"); ok {
-		cfg.Privacy = value
-		applied.InputAccepted = true
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.HibernationTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CODESANDBOX_HIBERNATION_TIMEOUT_SECS", cfg.HibernationTimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := getenvBool("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_HTTP"); ok {
-		cfg.AutomaticWakeupHTTP = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_WEBSOCKET"); ok {
-		cfg.AutomaticWakeupWebSocket = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODESANDBOX_BRIDGE_COMMAND"); ok {
-		cfg.BridgeCommand = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CODESANDBOX_SDK_PACKAGE"); ok {
-		cfg.SDKPackage = value
-		applied.InputAccepted = true
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.DoctorListLimit, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CODESANDBOX_DOCTOR_LIST_LIMIT", cfg.DoctorListLimit)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.OperationTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CODESANDBOX_OPERATION_TIMEOUT_SECS", cfg.OperationTimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 11)
+	return applied, err
 }
 
 // CodeSandboxConfigFlagValues holds parsed values; only visited flags are applied.
@@ -193,67 +74,14 @@ type CodeSandboxConfigFlagValues struct {
 
 // RegisterCodeSandboxConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterCodeSandboxConfigFlags(fs *flag.FlagSet, defaults CodeSandboxConfig) CodeSandboxConfigFlagValues {
-	return CodeSandboxConfigFlagValues{
-		TemplateID:               fs.String("codesandbox-template-id", defaults.TemplateID, "CodeSandbox template ID used by later lifecycle operations"),
-		Workdir:                  fs.String("codesandbox-workdir", defaults.Workdir, "Absolute working directory inside the sandbox; must be under /project/workspace"),
-		VMTier:                   fs.String("codesandbox-vm-tier", defaults.VMTier, "CodeSandbox VM tier for later create operations (empty = workspace default)"),
-		Privacy:                  fs.String("codesandbox-privacy", defaults.Privacy, "CodeSandbox sandbox privacy for later create operations"),
-		HibernationTimeoutSecs:   fs.Int("codesandbox-hibernation-timeout-secs", defaults.HibernationTimeoutSecs, "CodeSandbox hibernation timeout in seconds (0 = service default)"),
-		AutomaticWakeupHTTP:      fs.Bool("codesandbox-automatic-wakeup-http", defaults.AutomaticWakeupHTTP, "allow automatic wakeup on HTTP requests"),
-		AutomaticWakeupWebSocket: fs.Bool("codesandbox-automatic-wakeup-websocket", defaults.AutomaticWakeupWebSocket, "allow automatic wakeup on WebSocket connections"),
-		BridgeCommand:            fs.String("codesandbox-bridge-command", defaults.BridgeCommand, "local Node-compatible command used for the CodeSandbox SDK bridge"),
-		SDKPackage:               fs.String("codesandbox-sdk-package", defaults.SDKPackage, "Node package spec imported by the CodeSandbox SDK bridge"),
-		DoctorListLimit:          fs.Int("codesandbox-doctor-list-limit", defaults.DoctorListLimit, "maximum sandboxes read by non-mutating doctor readiness"),
-		OperationTimeoutSecs:     fs.Int("codesandbox-operation-timeout-secs", defaults.OperationTimeoutSecs, "SDK bridge operation timeout in seconds"),
-	}
+	var values CodeSandboxConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values CodeSandboxConfigFlagValues) Apply(cfg *CodeSandboxConfig, fs *flag.FlagSet) (CodeSandboxConfigApplied, error) {
 	var applied CodeSandboxConfigApplied
-	if flagWasSet(fs, "codesandbox-template-id") {
-		cfg.TemplateID = *values.TemplateID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-vm-tier") {
-		cfg.VMTier = *values.VMTier
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-privacy") {
-		cfg.Privacy = *values.Privacy
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-hibernation-timeout-secs") {
-		cfg.HibernationTimeoutSecs = *values.HibernationTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-automatic-wakeup-http") {
-		cfg.AutomaticWakeupHTTP = *values.AutomaticWakeupHTTP
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-automatic-wakeup-websocket") {
-		cfg.AutomaticWakeupWebSocket = *values.AutomaticWakeupWebSocket
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-bridge-command") {
-		cfg.BridgeCommand = *values.BridgeCommand
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-sdk-package") {
-		cfg.SDKPackage = *values.SDKPackage
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-doctor-list-limit") {
-		cfg.DoctorListLimit = *values.DoctorListLimit
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "codesandbox-operation-timeout-secs") {
-		cfg.OperationTimeoutSecs = *values.OperationTimeoutSecs
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

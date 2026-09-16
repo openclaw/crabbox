@@ -13,15 +13,15 @@ import (
 type coderClient struct {
 	cliPath string
 	runner  interface {
-		Run(context.Context, LocalCommandRequest) (LocalCommandResult, error)
+		Run(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)
 	}
 	stdout io.Writer
 	stderr io.Writer
 }
 
-func newCoderClient(cfg Config, rt Runtime) (*coderClient, error) {
+func newCoderClient(cfg core.Config, rt core.Runtime) (*coderClient, error) {
 	if rt.Exec == nil {
-		return nil, exit(2, "coder provider requires command runner")
+		return nil, core.Exit(2, "coder provider requires command runner")
 	}
 	cliPath := strings.TrimSpace(cfg.Coder.CLIPath)
 	if cliPath == "" {
@@ -30,8 +30,8 @@ func newCoderClient(cfg Config, rt Runtime) (*coderClient, error) {
 	return &coderClient{cliPath: cliPath, runner: rt.Exec, stdout: rt.Stdout, stderr: rt.Stderr}, nil
 }
 
-func (c *coderClient) run(ctx context.Context, args []string, stdout, stderr io.Writer) (LocalCommandResult, error) {
-	return c.runner.Run(ctx, LocalCommandRequest{Name: c.cliPath, Args: args, Stdout: stdout, Stderr: stderr})
+func (c *coderClient) run(ctx context.Context, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
+	return c.runner.Run(ctx, core.LocalCommandRequest{Name: c.cliPath, Args: args, Stdout: stdout, Stderr: stderr})
 }
 
 func (c *coderClient) output(ctx context.Context, args []string) (string, error) {
@@ -41,7 +41,7 @@ func (c *coderClient) output(ctx context.Context, args []string) (string, error)
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", ExitError{Code: result.ExitCode, Message: fmt.Sprintf("coder %s failed: %s", strings.Join(args, " "), msg)}
+		return "", core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("coder %s failed: %s", strings.Join(args, " "), msg)}
 	}
 	return result.Stdout, nil
 }
@@ -53,7 +53,7 @@ func (c *coderClient) version(ctx context.Context) error {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return ExitError{Code: result.ExitCode, Message: "coder cli unavailable: " + msg}
+		return core.ExitError{Code: result.ExitCode, Message: "coder cli unavailable: " + msg}
 	}
 	return nil
 }
@@ -66,9 +66,9 @@ func (c *coderClient) whoami(ctx context.Context) error {
 			msg = err.Error()
 		}
 		if coderWhoamiMissingLogin(msg) {
-			return ExitError{Code: result.ExitCode, Message: "coder credential unavailable: run `coder login <url>`; mutation=false detail=" + msg}
+			return core.ExitError{Code: result.ExitCode, Message: "coder credential unavailable: run `coder login <url>`; mutation=false detail=" + msg}
 		}
-		return ExitError{Code: result.ExitCode, Message: "coder credential check failed: mutation=false detail=" + msg}
+		return core.ExitError{Code: result.ExitCode, Message: "coder credential check failed: mutation=false detail=" + msg}
 	}
 	return nil
 }
@@ -89,7 +89,7 @@ func (c *coderClient) listAll(ctx context.Context) ([]coderWorkspace, error) {
 	return parseCoderWorkspaces(out)
 }
 
-func (c *coderClient) create(ctx context.Context, cfg Config, name string) error {
+func (c *coderClient) create(ctx context.Context, cfg core.Config, name string) error {
 	args := []string{"create", "--yes", "--template", strings.TrimSpace(cfg.Coder.Template)}
 	if preset := strings.TrimSpace(cfg.Coder.Preset); preset != "" {
 		args = append(args, "--preset", preset)
@@ -109,7 +109,7 @@ func (c *coderClient) create(ctx context.Context, cfg Config, name string) error
 	args = append(args, name)
 	result, err := c.run(ctx, args, c.stdout, c.stderr)
 	if err != nil {
-		return ExitError{Code: result.ExitCode, Message: fmt.Sprintf("coder create workspace %s failed: %s", name, strings.TrimSpace(result.Stdout+result.Stderr))}
+		return core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("coder create workspace %s failed: %s", name, strings.TrimSpace(result.Stdout+result.Stderr))}
 	}
 	return nil
 }
@@ -117,7 +117,7 @@ func (c *coderClient) create(ctx context.Context, cfg Config, name string) error
 func (c *coderClient) start(ctx context.Context, name string) error {
 	result, err := c.run(ctx, []string{"start", "--yes", name}, c.stdout, c.stderr)
 	if err != nil {
-		return ExitError{Code: result.ExitCode, Message: fmt.Sprintf("coder start workspace %s failed: %s", name, strings.TrimSpace(result.Stdout+result.Stderr))}
+		return core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("coder start workspace %s failed: %s", name, strings.TrimSpace(result.Stdout+result.Stderr))}
 	}
 	return nil
 }
@@ -125,7 +125,7 @@ func (c *coderClient) start(ctx context.Context, name string) error {
 func (c *coderClient) stop(ctx context.Context, name string) error {
 	result, err := c.run(ctx, []string{"stop", "--yes", name}, c.stdout, c.stderr)
 	if err != nil {
-		return ExitError{Code: result.ExitCode, Message: fmt.Sprintf("coder stop workspace %s failed: %s", name, strings.TrimSpace(result.Stdout+result.Stderr))}
+		return core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("coder stop workspace %s failed: %s", name, strings.TrimSpace(result.Stdout+result.Stderr))}
 	}
 	return nil
 }
@@ -133,7 +133,7 @@ func (c *coderClient) stop(ctx context.Context, name string) error {
 func (c *coderClient) delete(ctx context.Context, name string) error {
 	result, err := c.run(ctx, []string{"delete", "--yes", name}, c.stdout, c.stderr)
 	if err != nil {
-		return ExitError{Code: result.ExitCode, Message: fmt.Sprintf("coder delete workspace %s failed: %s", name, strings.TrimSpace(result.Stdout+result.Stderr))}
+		return core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("coder delete workspace %s failed: %s", name, strings.TrimSpace(result.Stdout+result.Stderr))}
 	}
 	return nil
 }
@@ -165,7 +165,7 @@ func parseCoderWorkspaces(out string) ([]coderWorkspace, error) {
 	}
 	var raw any
 	if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
-		return nil, exit(5, "coder list returned invalid JSON: %v", err)
+		return nil, core.Exit(5, "coder list returned invalid JSON: %v", err)
 	}
 	switch value := raw.(type) {
 	case []any:
@@ -178,7 +178,7 @@ func parseCoderWorkspaces(out string) ([]coderWorkspace, error) {
 		}
 		return parseCoderWorkspaceArray([]any{value})
 	default:
-		return nil, exit(5, "coder list returned unsupported JSON shape")
+		return nil, core.Exit(5, "coder list returned unsupported JSON shape")
 	}
 }
 
@@ -187,7 +187,7 @@ func parseCoderWorkspaceArray(items []any) ([]coderWorkspace, error) {
 	for _, item := range items {
 		obj, ok := item.(map[string]any)
 		if !ok {
-			return nil, exit(5, "coder list workspace entry is not an object")
+			return nil, core.Exit(5, "coder list workspace entry is not an object")
 		}
 		workspaces = append(workspaces, parseCoderWorkspaceObject(obj))
 	}

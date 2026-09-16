@@ -36,8 +36,7 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) (core.
 func (b *semaphoreBackend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *semaphoreBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 // Acquire creates a Semaphore job and returns SSH connection info.
@@ -53,6 +52,9 @@ func (b *semaphoreBackend) Acquire(ctx context.Context, req core.AcquireRequest)
 	timeout, err := idleTimeout(b.cfg)
 	if err != nil {
 		return core.LeaseTarget{}, core.Exit(2, "%v", err)
+	}
+	if err := core.PreflightLeaseSSHStorage(); err != nil {
+		return core.LeaseTarget{}, err
 	}
 
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=semaphore project=%s machine=%s os=%s\n", project, machine, osImage)
@@ -72,6 +74,10 @@ func (b *semaphoreBackend) Acquire(ctx context.Context, req core.AcquireRequest)
 	}
 
 	leaseID := "sem_" + jobID
+	if _, err := core.PrepareStoredTestboxKeyPath(leaseID); err != nil {
+		_ = cleanup()
+		return core.LeaseTarget{}, err
+	}
 	slug := core.NewLeaseSlug(leaseID)
 	fmt.Fprintf(b.rt.Stderr, "created job=%s lease=%s slug=%s\n", jobID, leaseID, slug)
 
@@ -204,6 +210,9 @@ func (b *semaphoreBackend) resolveByJobID(ctx context.Context, jobID string, rel
 	}
 	if !endpointReady {
 		return core.LeaseTarget{}, core.Exit(4, "semaphore job %s is running but SSH endpoint is not ready (ip=%q ssh_port=%d)", jobID, status.IP, status.SSHPort)
+	}
+	if _, err := core.PrepareStoredTestboxKeyPath(leaseID); err != nil {
+		return core.LeaseTarget{}, err
 	}
 
 	sshKey, err := b.client.GetSSHKey(ctx, jobID)
@@ -353,14 +362,14 @@ func (b *semaphoreBackend) Touch(ctx context.Context, req core.TouchRequest) (co
 }
 
 func storeSSHKey(leaseID, keyContent string) (string, error) {
-	path, err := core.TestboxKeyPath(leaseID)
+	path, err := core.PrepareStoredTestboxKeyPath(leaseID)
 	if err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, []byte(keyContent), 0600); err != nil {
+	if err := core.WritePreparedLeaseSSHKeyFile(path, []byte(keyContent)); err != nil {
 		return "", err
 	}
 	return path, nil

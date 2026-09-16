@@ -24,9 +24,9 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	return validateConfig(*cfg)
 }
 
-func validateConfig(cfg Config) error {
+func validateConfig(cfg core.Config) error {
 	if strings.TrimSpace(cfg.AnthropicSRT.CLIPath) == "" {
-		return exit(2, "anthropicSandboxRuntime cliPath must not be empty")
+		return core.Exit(2, "anthropicSandboxRuntime cliPath must not be empty")
 	}
 	return nil
 }

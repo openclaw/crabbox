@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestClientRefusesCrossOriginRedirectBeforeSignedHeaderReplay(t *testing.T) {
@@ -135,13 +137,13 @@ func TestClientRedirectGuardUsesEffectiveOrigin(t *testing.T) {
 	same, _ := url.Parse("https://api.ovh.example.test:443/redirected")
 	otherPort, _ := url.Parse("https://api.ovh.example.test:444/redirected")
 	otherScheme, _ := url.Parse("http://api.ovh.example.test:443/redirected")
-	if !sameOVHOrigin(base, same) {
+	if !core.SameHTTPOrigin(base, same) {
 		t.Fatal("default HTTPS port should share origin")
 	}
-	if sameOVHOrigin(base, otherPort) {
+	if core.SameHTTPOrigin(base, otherPort) {
 		t.Fatal("different effective port should be refused")
 	}
-	if sameOVHOrigin(base, otherScheme) {
+	if core.SameHTTPOrigin(base, otherScheme) {
 		t.Fatal("different scheme should be refused")
 	}
 }

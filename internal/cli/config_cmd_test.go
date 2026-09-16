@@ -107,11 +107,11 @@ func TestProviderStatusSelectionAndOfflineContract(t *testing.T) {
 		}
 	}
 	for _, provider := range registeredProviders() {
-		for _, alias := range append([]string{provider.Name()}, provider.Aliases()...) {
+		for _, alias := range append([]string{provider.Spec().Name}, provider.Spec().Aliases...) {
 			cfg := Config{Provider: alias, providerSelectionSource: providerSelectionFlag}
 			selected := providerConfigStatus(cfg)
 			for name, entry := range selected.Providers {
-				want := name == provider.Name()
+				want := name == provider.Spec().Name
 				if entry.Selection.Selected != want || (entry.Selection.Source != nil) != want {
 					t.Fatalf("alias %s selection incorrectly attributed to %s", alias, name)
 				}
@@ -197,7 +197,11 @@ type configArchitectureTestProvider struct {
 	architectureCapabilityTestProvider
 }
 
-func (configArchitectureTestProvider) Name() string { return "config-architecture-test" }
+func (p configArchitectureTestProvider) Spec() ProviderSpec {
+	spec := p.architectureCapabilityTestProvider.Spec()
+	spec.Name = "config-architecture-test"
+	return spec
+}
 func (configArchitectureTestProvider) DescribeImplicitArchitecture(Config) string {
 	return "native"
 }
@@ -216,14 +220,14 @@ func isolatedConfigPath(t *testing.T) string {
 func TestConfigShowUsesProviderImplicitArchitecture(t *testing.T) {
 	provider := configArchitectureTestProvider{}
 	RegisterProvider(provider)
-	t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
+	t.Cleanup(func() { delete(providerRegistry, provider.Spec().Name) })
 	for _, tc := range []struct {
 		name, provider, architecture, want string
 		explicit                           bool
 	}{
-		{"implicit", provider.Name(), ArchitectureAMD64, "native", false},
-		{"explicit amd64", provider.Name(), ArchitectureAMD64, ArchitectureAMD64, true},
-		{"explicit arm64", provider.Name(), ArchitectureARM64, ArchitectureARM64, true},
+		{"implicit", provider.Spec().Name, ArchitectureAMD64, "native", false},
+		{"explicit amd64", provider.Spec().Name, ArchitectureAMD64, ArchitectureAMD64, true},
+		{"explicit arm64", provider.Spec().Name, ArchitectureARM64, ArchitectureARM64, true},
 		{"no descriptor", "unknown-config-provider", ArchitectureAMD64, ArchitectureAMD64, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

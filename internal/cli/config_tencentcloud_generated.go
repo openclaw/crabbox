@@ -4,7 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
 )
 
 type fileTencentCloudConfig struct {
@@ -37,119 +36,14 @@ type TencentCloudConfigApplied struct {
 
 func (cfg *TencentCloudConfig) applyFile(file *fileTencentCloudConfig, trusted bool) (TencentCloudConfigApplied, error) {
 	var applied TencentCloudConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Region != "" {
-		cfg.Region = file.Region
-		applied.InputAccepted = true
-		applied.Region = true
-	}
-	if file.Zone != "" {
-		cfg.Zone = file.Zone
-		applied.InputAccepted = true
-		applied.Zone = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if file.Type != "" {
-		cfg.Type = file.Type
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if file.VPCID != "" {
-		cfg.VPCID = file.VPCID
-		applied.InputAccepted = true
-	}
-	if file.SubnetID != "" {
-		cfg.SubnetID = file.SubnetID
-		applied.InputAccepted = true
-	}
-	if file.SecurityGroupID != "" {
-		cfg.SecurityGroupID = file.SecurityGroupID
-		applied.InputAccepted = true
-	}
-	if len(file.SSHCIDRs) > 0 {
-		cfg.SSHCIDRs = file.SSHCIDRs
-		applied.InputAccepted = true
-	}
-	if file.RootGB > 0 {
-		cfg.RootGB = file.RootGB
-		applied.InputAccepted = true
-	}
-	if file.InternetChargeType != "" {
-		cfg.InternetChargeType = file.InternetChargeType
-		applied.InputAccepted = true
-	}
-	if file.InternetMaxBandwidthOut > 0 {
-		cfg.InternetMaxBandwidthOut = file.InternetMaxBandwidthOut
-		applied.InputAccepted = true
-	}
-	if trusted && file.APIEndpoint != "" {
-		cfg.APIEndpoint = file.APIEndpoint
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "tencentcloud")
+	return applied, err
 }
 
 func (cfg *TencentCloudConfig) applyEnv() (TencentCloudConfigApplied, error) {
 	var applied TencentCloudConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_REGION"); ok {
-		cfg.Region = value
-		applied.InputAccepted = true
-		applied.Region = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_ZONE"); ok {
-		cfg.Zone = value
-		applied.InputAccepted = true
-		applied.Zone = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_TYPE"); ok {
-		cfg.Type = value
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_VPC_ID"); ok {
-		cfg.VPCID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_SUBNET_ID"); ok {
-		cfg.SubnetID = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_SECURITY_GROUP_ID"); ok {
-		cfg.SecurityGroupID = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_TENCENTCLOUD_SSH_CIDRS"); value != "" {
-		cfg.SSHCIDRs = splitCommaList(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_TENCENTCLOUD_ROOT_GB", 64); ok {
-		cfg.RootGB = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_INTERNET_CHARGE_TYPE"); ok {
-		cfg.InternetChargeType = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_TENCENTCLOUD_INTERNET_MAX_BANDWIDTH_OUT", 64); ok {
-		cfg.InternetMaxBandwidthOut = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENCENTCLOUD_API_ENDPOINT"); ok {
-		cfg.APIEndpoint = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 12)
+	return applied, err
 }
 
 // TencentCloudConfigFlagValues holds parsed values; only visited flags are applied.
@@ -170,20 +64,9 @@ type TencentCloudConfigFlagValues struct {
 
 // RegisterTencentCloudConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterTencentCloudConfigFlags(fs *flag.FlagSet, defaults TencentCloudConfig) TencentCloudConfigFlagValues {
-	return TencentCloudConfigFlagValues{
-		Region:                  fs.String("tencentcloud-region", defaults.Region, "Tencent Cloud CVM region"),
-		Zone:                    fs.String("tencentcloud-zone", defaults.Zone, "Tencent Cloud CVM availability zone"),
-		Image:                   fs.String("tencentcloud-image", defaults.Image, "Tencent Cloud CVM image ID"),
-		Type:                    fs.String("tencentcloud-type", defaults.Type, "Tencent Cloud CVM instance type"),
-		VPCID:                   fs.String("tencentcloud-vpc-id", defaults.VPCID, "Tencent Cloud VPC ID"),
-		SubnetID:                fs.String("tencentcloud-subnet-id", defaults.SubnetID, "Tencent Cloud subnet ID"),
-		SecurityGroupID:         fs.String("tencentcloud-security-group-id", defaults.SecurityGroupID, "Tencent Cloud security group ID"),
-		SSHCIDRs:                fs.String("tencentcloud-ssh-cidrs", "", "comma-separated Tencent Cloud SSH source CIDRs; reserved for managed security-group support"),
-		RootGB:                  fs.Int64("tencentcloud-root-gb", defaults.RootGB, "Tencent Cloud CVM system disk size in GiB"),
-		InternetChargeType:      fs.String("tencentcloud-internet-charge-type", defaults.InternetChargeType, "Tencent Cloud public bandwidth charge type"),
-		InternetMaxBandwidthOut: fs.Int64("tencentcloud-internet-max-bandwidth-out", defaults.InternetMaxBandwidthOut, "Tencent Cloud public outbound bandwidth in Mbps"),
-		APIEndpoint:             fs.String("tencentcloud-api-endpoint", defaults.APIEndpoint, "Tencent Cloud CVM API endpoint"),
-	}
+	var values TencentCloudConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // TencentCloudConfigVisitedFlags records raw flag visits, independently of application.
@@ -196,72 +79,14 @@ type TencentCloudConfigVisitedFlags struct {
 
 // TencentCloudConfigFlagPresence reports visits for tracked flag bindings.
 func TencentCloudConfigFlagPresence(fs *flag.FlagSet) TencentCloudConfigVisitedFlags {
-	return TencentCloudConfigVisitedFlags{
-		Region: flagWasSet(fs, "tencentcloud-region"),
-		Zone:   flagWasSet(fs, "tencentcloud-zone"),
-		Image:  flagWasSet(fs, "tencentcloud-image"),
-		Type:   flagWasSet(fs, "tencentcloud-type"),
-	}
+	var visited TencentCloudConfigVisitedFlags
+	recordConfigFlagVisits[TencentCloudConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values TencentCloudConfigFlagValues) Apply(cfg *TencentCloudConfig, fs *flag.FlagSet) (TencentCloudConfigApplied, error) {
 	var applied TencentCloudConfigApplied
-	visited := TencentCloudConfigFlagPresence(fs)
-	if visited.Region {
-		cfg.Region = *values.Region
-		applied.InputAccepted = true
-		applied.Region = true
-	}
-	if visited.Zone {
-		cfg.Zone = *values.Zone
-		applied.InputAccepted = true
-		applied.Zone = true
-	}
-	if visited.Image {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-		applied.Image = true
-	}
-	if visited.Type {
-		cfg.Type = *values.Type
-		applied.InputAccepted = true
-		applied.Type = true
-	}
-	if flagWasSet(fs, "tencentcloud-vpc-id") {
-		cfg.VPCID = *values.VPCID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-subnet-id") {
-		cfg.SubnetID = *values.SubnetID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-security-group-id") {
-		cfg.SecurityGroupID = *values.SecurityGroupID
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-ssh-cidrs") {
-		cfg.SSHCIDRs = splitCommaList(*values.SSHCIDRs)
-		if len(cfg.SSHCIDRs) == 0 {
-			cfg.SSHCIDRs = nil
-		}
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-root-gb") {
-		cfg.RootGB = *values.RootGB
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-internet-charge-type") {
-		cfg.InternetChargeType = *values.InternetChargeType
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-internet-max-bandwidth-out") {
-		cfg.InternetMaxBandwidthOut = *values.InternetMaxBandwidthOut
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "tencentcloud-api-endpoint") {
-		cfg.APIEndpoint = *values.APIEndpoint
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

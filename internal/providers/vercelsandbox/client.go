@@ -49,15 +49,15 @@ type commandSpec struct {
 }
 
 type bridgeClient struct {
-	cfg      Config
-	rt       Runtime
+	cfg      core.Config
+	rt       core.Runtime
 	lookup   func(string) (string, error)
 	run      func(context.Context, commandSpec) error
 	call     func(context.Context, bridgeRequest, any) error
 	execCall func(context.Context, commandSpec, bridgeRequest, io.Writer, io.Writer) (execResult, error)
 }
 
-func newBridgeClient(cfg Config, rt Runtime) (vercelSandboxClient, error) {
+func newBridgeClient(cfg core.Config, rt core.Runtime) (vercelSandboxClient, error) {
 	return &bridgeClient{
 		cfg:    cfg,
 		rt:     rt,
@@ -204,7 +204,7 @@ func (c *bridgeClient) CreateSandbox(ctx context.Context, req createSandboxReque
 		return sandboxSummary{}, err
 	}
 	if out.ID == "" {
-		return sandboxSummary{}, exit(5, "vercel-sandbox create returned no sandbox id")
+		return sandboxSummary{}, core.Exit(5, "vercel-sandbox create returned no sandbox id")
 	}
 	return out, nil
 }

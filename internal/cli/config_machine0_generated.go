@@ -4,8 +4,6 @@ package cli
 
 import (
 	"flag"
-	"os"
-	"strconv"
 	"time"
 )
 
@@ -52,111 +50,14 @@ type Machine0ConfigApplied struct {
 
 func (cfg *Machine0Config) applyFile(file *fileMachine0Config) (Machine0ConfigApplied, error) {
 	var applied Machine0ConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.CLIPath != "" {
-		cfg.CLIPath = file.CLIPath
-		applied.InputAccepted = true
-	}
-	if file.Image != "" {
-		cfg.Image = file.Image
-		applied.InputAccepted = true
-	}
-	if file.ImageVersion != nil {
-		cfg.ImageVersion = *file.ImageVersion
-		applied.InputAccepted = true
-	}
-	if file.DesktopImage != "" {
-		cfg.DesktopImage = file.DesktopImage
-		applied.InputAccepted = true
-	}
-	if file.Size != "" {
-		cfg.Size = file.Size
-		applied.InputAccepted = true
-		applied.Size = true
-	}
-	if file.Region != "" {
-		cfg.Region = file.Region
-		applied.InputAccepted = true
-	}
-	if file.Key != "" {
-		cfg.Key = file.Key
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if file.ReleasePolicy != "" {
-		cfg.ReleasePolicy = file.ReleasePolicy
-		applied.InputAccepted = true
-	}
-	if file.CreateTimeout != "" {
-		if applyLeaseDuration(&cfg.CreateTimeout, file.CreateTimeout) {
-			applied.InputAccepted = true
-		}
-	}
-	if file.PollInterval != "" {
-		if applyLeaseDuration(&cfg.PollInterval, file.PollInterval) {
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "machine0")
+	return applied, err
 }
 
 func (cfg *Machine0Config) applyEnv() (Machine0ConfigApplied, error) {
 	var applied Machine0ConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_CLI"); ok {
-		cfg.CLIPath = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := lookupEnvInteger("CRABBOX_MACHINE0_IMAGE_VERSION", strconv.IntSize); ok {
-		cfg.ImageVersion = int(value)
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_DESKTOP_IMAGE"); ok {
-		cfg.DesktopImage = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_SIZE"); ok {
-		cfg.Size = value
-		applied.InputAccepted = true
-		applied.Size = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_REGION"); ok {
-		cfg.Region = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_KEY"); ok {
-		cfg.Key = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_MACHINE0_RELEASE_POLICY"); ok {
-		cfg.ReleasePolicy = value
-		applied.InputAccepted = true
-	}
-	if value := os.Getenv("CRABBOX_MACHINE0_CREATE_TIMEOUT"); value != "" {
-		if applyLeaseDuration(&cfg.CreateTimeout, value) {
-			applied.InputAccepted = true
-		}
-	}
-	if value := os.Getenv("CRABBOX_MACHINE0_POLL_INTERVAL"); value != "" {
-		if applyLeaseDuration(&cfg.PollInterval, value) {
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 11)
+	return applied, err
 }
 
 // Machine0ConfigFlagValues holds parsed values; only visited flags are applied.
@@ -176,19 +77,9 @@ type Machine0ConfigFlagValues struct {
 
 // RegisterMachine0ConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterMachine0ConfigFlags(fs *flag.FlagSet, defaults Machine0Config) Machine0ConfigFlagValues {
-	return Machine0ConfigFlagValues{
-		CLIPath:       fs.String("machine0-cli", defaults.CLIPath, "Machine0 CLI path"),
-		Image:         fs.String("machine0-image", defaults.Image, "Machine0 image name"),
-		ImageVersion:  fs.Int("machine0-image-version", defaults.ImageVersion, "Machine0 image version; 0 uses the active version"),
-		DesktopImage:  fs.String("machine0-desktop-image", defaults.DesktopImage, "optional prepared Machine0 image for --desktop leases"),
-		Size:          fs.String("machine0-size", defaults.Size, "Machine0 live-catalog size slug"),
-		Region:        fs.String("machine0-region", defaults.Region, "Machine0 region"),
-		Key:           fs.String("machine0-key", defaults.Key, "Machine0 registered SSH key name; empty uses the Machine0 default"),
-		WorkRoot:      fs.String("machine0-work-root", defaults.WorkRoot, "remote Crabbox work root"),
-		ReleasePolicy: fs.String("machine0-release-policy", defaults.ReleasePolicy, "release policy: destroy or explicit suspend"),
-		CreateTimeout: fs.String("machine0-create-timeout", defaults.CreateTimeout.String(), "Machine0 creation timeout"),
-		PollInterval:  fs.String("machine0-poll-interval", defaults.PollInterval.String(), "Machine0 status polling interval"),
-	}
+	var values Machine0ConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Machine0ConfigVisitedFlags records raw flag visits, independently of application.
@@ -199,67 +90,14 @@ type Machine0ConfigVisitedFlags struct {
 
 // Machine0ConfigFlagPresence reports visits for tracked flag bindings.
 func Machine0ConfigFlagPresence(fs *flag.FlagSet) Machine0ConfigVisitedFlags {
-	return Machine0ConfigVisitedFlags{
-		Size:     flagWasSet(fs, "machine0-size"),
-		WorkRoot: flagWasSet(fs, "machine0-work-root"),
-	}
+	var visited Machine0ConfigVisitedFlags
+	recordConfigFlagVisits[Machine0Config](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values Machine0ConfigFlagValues) Apply(cfg *Machine0Config, fs *flag.FlagSet) (Machine0ConfigApplied, error) {
 	var applied Machine0ConfigApplied
-	visited := Machine0ConfigFlagPresence(fs)
-	if flagWasSet(fs, "machine0-cli") {
-		cfg.CLIPath = *values.CLIPath
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "machine0-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "machine0-image-version") {
-		cfg.ImageVersion = *values.ImageVersion
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "machine0-desktop-image") {
-		cfg.DesktopImage = *values.DesktopImage
-		applied.InputAccepted = true
-	}
-	if visited.Size {
-		cfg.Size = *values.Size
-		applied.InputAccepted = true
-		applied.Size = true
-	}
-	if flagWasSet(fs, "machine0-region") {
-		cfg.Region = *values.Region
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "machine0-key") {
-		cfg.Key = *values.Key
-		applied.InputAccepted = true
-	}
-	if visited.WorkRoot {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	if flagWasSet(fs, "machine0-release-policy") {
-		cfg.ReleasePolicy = *values.ReleasePolicy
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "machine0-create-timeout") {
-		if err := ApplyLeaseDuration(&cfg.CreateTimeout, *values.CreateTimeout); err != nil {
-			return applied, err
-		} else if *values.CreateTimeout != "" {
-			applied.InputAccepted = true
-		}
-	}
-	if flagWasSet(fs, "machine0-poll-interval") {
-		if err := ApplyLeaseDuration(&cfg.PollInterval, *values.PollInterval); err != nil {
-			return applied, err
-		} else if *values.PollInterval != "" {
-			applied.InputAccepted = true
-		}
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/atomicfile"
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -34,7 +36,7 @@ type client struct {
 	org                 string
 	cliPath             string
 	home                string
-	runner              CommandRunner
+	runner              core.CommandRunner
 	releasePollInterval time.Duration
 }
 
@@ -72,17 +74,17 @@ type boxData struct {
 	UpdatedAt           any    `json:"updatedAt,omitempty"`
 }
 
-var newAPI = func(cfg Config, rt Runtime) (api, error) {
+var newAPI = func(cfg core.Config, rt core.Runtime) (api, error) {
 	apiKey := strings.TrimSpace(cfg.AsciiBox.APIKey)
 	if apiKey == "" {
-		return nil, exit(2, "provider=%s requires ASCII_BOX_API_KEY", providerName)
+		return nil, core.Exit(2, "provider=%s requires ASCII_BOX_API_KEY", providerName)
 	}
-	apiURL, err := validateAsciiBoxBaseURL(blank(strings.TrimSpace(cfg.AsciiBox.BaseURL), "https://ascii.dev"))
+	apiURL, err := validateAsciiBoxBaseURL(core.Blank(strings.TrimSpace(cfg.AsciiBox.BaseURL), "https://ascii.dev"))
 	if err != nil {
 		return nil, err
 	}
 	if rt.Exec == nil {
-		return nil, exit(2, "provider=%s requires a local command runner", providerName)
+		return nil, core.Exit(2, "provider=%s requires a local command runner", providerName)
 	}
 	cliPath := strings.TrimSpace(cfg.AsciiBox.CLIPath)
 	if cliPath == "" {
@@ -94,21 +96,21 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 func validateAsciiBoxBaseURL(raw string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
-		return "", exit(2, "provider=%s API base URL must be an absolute HTTP(S) URL", providerName)
+		return "", core.Exit(2, "provider=%s API base URL must be an absolute HTTP(S) URL", providerName)
 	}
 	if parsed.User != nil {
-		return "", exit(2, "provider=%s API base URL must not contain userinfo", providerName)
+		return "", core.Exit(2, "provider=%s API base URL must not contain userinfo", providerName)
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery {
-		return "", exit(2, "provider=%s API base URL must not contain a query", providerName)
+		return "", core.Exit(2, "provider=%s API base URL must not contain a query", providerName)
 	}
 	if parsed.Fragment != "" {
-		return "", exit(2, "provider=%s API base URL must not contain a fragment", providerName)
+		return "", core.Exit(2, "provider=%s API base URL must not contain a fragment", providerName)
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	hostname := canonicalAsciiBoxHostname(parsed.Hostname())
 	if parsed.Scheme != "https" && (parsed.Scheme != "http" || !isAsciiBoxLoopbackHost(hostname)) {
-		return "", exit(2, "provider=%s API base URL must use HTTPS except for loopback HTTP", providerName)
+		return "", core.Exit(2, "provider=%s API base URL must use HTTPS except for loopback HTTP", providerName)
 	}
 	port := parsed.Port()
 	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
@@ -238,9 +240,9 @@ func (c *client) ReleaseBox(ctx context.Context, id string, validate func(contex
 func (c *client) releaseAfterSnapshotGuard(
 	ctx context.Context,
 	id string,
-	stopResult LocalCommandResult,
+	stopResult core.LocalCommandResult,
 	stopErr error,
-	deleteResult LocalCommandResult,
+	deleteResult core.LocalCommandResult,
 	deleteErr error,
 	validate func(context.Context) error,
 ) error {
@@ -451,16 +453,16 @@ func boxReadyForDelete(box boxData) bool {
 	}
 }
 
-func (c *client) snapshotGuardConflict(result LocalCommandResult, err error) bool {
+func (c *client) snapshotGuardConflict(result core.LocalCommandResult, err error) bool {
 	message := strings.ToLower(c.formatError(result, err))
 	return strings.Contains(message, "no successful snapshot") &&
 		strings.Contains(message, "last 30 minutes")
 }
 
 func (c *client) releaseError(
-	stopResult LocalCommandResult,
+	stopResult core.LocalCommandResult,
 	stopErr error,
-	deleteResult LocalCommandResult,
+	deleteResult core.LocalCommandResult,
 	deleteErr error,
 	recovery string,
 ) error {
@@ -478,33 +480,33 @@ func (c *client) releaseError(
 	return fmt.Errorf("ascii-box CLI release failed: %s", strings.Join(parts, "; "))
 }
 
-func (c *client) run(ctx context.Context, args ...string) (LocalCommandResult, error) {
+func (c *client) run(ctx context.Context, args ...string) (core.LocalCommandResult, error) {
 	return c.runWithEnv(ctx, c.env(), args...)
 }
 
-func (c *client) runWithEnv(ctx context.Context, env []string, args ...string) (LocalCommandResult, error) {
+func (c *client) runWithEnv(ctx context.Context, env []string, args ...string) (core.LocalCommandResult, error) {
 	if err := c.ensureConfig(ctx); err != nil {
-		return LocalCommandResult{}, err
+		return core.LocalCommandResult{}, err
 	}
 	return c.runPreparedWithEnv(ctx, env, args...)
 }
 
-func (c *client) runPrepared(ctx context.Context, args ...string) (LocalCommandResult, error) {
+func (c *client) runPrepared(ctx context.Context, args ...string) (core.LocalCommandResult, error) {
 	return c.runPreparedWithEnv(ctx, c.env(), args...)
 }
 
-func (c *client) runPreparedWithEnv(ctx context.Context, env []string, args ...string) (LocalCommandResult, error) {
+func (c *client) runPreparedWithEnv(ctx context.Context, env []string, args ...string) (core.LocalCommandResult, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, cliTimeout(args))
 		defer cancel()
 	}
-	argv := []string{"--no-update", "--json", "--org", blank(c.org, "personal")}
+	argv := []string{"--no-update", "--json", "--org", core.Blank(c.org, "personal")}
 	if c.apiURL != "" {
 		argv = append(argv, "--api-url", c.apiURL)
 	}
 	argv = append(argv, args...)
-	return c.runner.Run(ctx, LocalCommandRequest{
+	return c.runner.Run(ctx, core.LocalCommandRequest{
 		Name: c.cliPath,
 		Args: argv,
 		Env:  env,
@@ -531,9 +533,9 @@ func (c *client) ensureConfig(ctx context.Context) error {
 		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 	}
-	result, err := c.runner.Run(ctx, LocalCommandRequest{
+	result, err := c.runner.Run(ctx, core.LocalCommandRequest{
 		Name: c.cliPath,
-		Args: []string{"--no-update", "--json", "--org", blank(c.org, "personal"), "--api-url", c.apiURL, "status"},
+		Args: []string{"--no-update", "--json", "--org", core.Blank(c.org, "personal"), "--api-url", c.apiURL, "status"},
 		Env:  c.env(),
 	})
 	if err != nil {
@@ -581,38 +583,7 @@ func writePrivateFileAtomic(path string, data []byte) error {
 		return err
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	keep := false
-	defer func() {
-		if !keep {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	keep = true
-	return nil
+	return atomicfile.WritePrivate(path, "."+filepath.Base(path)+".tmp-", data, os.Rename)
 }
 
 func (c *client) waitForBoxReady(ctx context.Context, box boxData) (boxData, error) {
@@ -666,7 +637,7 @@ func (c *client) sshEnv() []string {
 	return setEnv(c.env(), "SSH_AUTH_SOCK", "")
 }
 
-func (c *client) formatError(result LocalCommandResult, err error) string {
+func (c *client) formatError(result core.LocalCommandResult, err error) string {
 	message := strings.TrimSpace(result.Stderr)
 	if message == "" {
 		message = strings.TrimSpace(result.Stdout)
@@ -674,7 +645,7 @@ func (c *client) formatError(result LocalCommandResult, err error) string {
 	if message == "" && err != nil {
 		message = err.Error()
 	}
-	return redactBoxSecrets(blank(message, "unknown error"))
+	return redactBoxSecrets(core.Blank(message, "unknown error"))
 }
 
 var (
@@ -689,7 +660,7 @@ func redactBoxSecrets(value string) string {
 
 func asciiBoxCLIHome() string {
 	if configured := strings.TrimSpace(os.Getenv("CRABBOX_ASCII_BOX_HOME")); configured != "" {
-		return expandUserPath(configured)
+		return core.ExpandUserPath(configured)
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		return filepath.Join(home, ".local", "state", "crabbox", "ascii-box")

@@ -228,7 +228,11 @@ func TestWorkspaceOwnerSerializesIndependentClientsAndRevisions(t *testing.T) {
 		if active.Add(1) != 1 {
 			overlap.Store(true)
 		}
-		defer active.Add(-1)
+		var result error
+		defer func() {
+			active.Add(-1)
+			done <- result
+		}()
 		workspace.Lock()
 		workspace.revision = revision
 		workspace.Unlock()
@@ -242,10 +246,8 @@ func TestWorkspaceOwnerSerializesIndependentClientsAndRevisions(t *testing.T) {
 		executed := workspace.revision
 		workspace.Unlock()
 		if executed != revision {
-			done <- fmt.Errorf("executed revision %s, want %s", executed, revision)
-			return
+			result = fmt.Errorf("executed revision %s, want %s", executed, revision)
 		}
-		done <- nil
 	}
 	go run(ownerA, "revision-a", startedA, releaseA)
 	<-startedA

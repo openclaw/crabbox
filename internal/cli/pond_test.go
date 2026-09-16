@@ -26,7 +26,7 @@ func TestNormalizePondName(t *testing.T) {
 		{"123-abc", "123-abc"},
 	}
 	for _, tc := range cases {
-		if got := normalizePondName(tc.in); got != tc.want {
+		if got := NormalizePondName(tc.in); got != tc.want {
 			t.Fatalf("normalizePondName(%q)=%q want %q", tc.in, got, tc.want)
 		}
 		if got := NormalizePondName(tc.in); got != tc.want {
@@ -66,7 +66,7 @@ func TestDirectLeaseLabelsRecordPond(t *testing.T) {
 		TTL:         15 * time.Minute,
 		IdleTimeout: 4 * time.Minute,
 	}
-	labels := directLeaseLabels(cfg, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, now)
+	labels := DirectLeaseLabels(cfg, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, now)
 	if labels["pond"] != "alpha" {
 		t.Fatalf("pond label=%q want alpha; full=%#v", labels["pond"], labels)
 	}
@@ -82,7 +82,7 @@ func TestDirectLeaseLabelsOmitPondWhenEmpty(t *testing.T) {
 		TTL:         15 * time.Minute,
 		IdleTimeout: 4 * time.Minute,
 	}
-	labels := directLeaseLabels(cfg, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, now)
+	labels := DirectLeaseLabels(cfg, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, now)
 	if _, ok := labels["pond"]; ok {
 		t.Fatalf("pond label should be omitted when cfg.Pond is empty; got %#v", labels)
 	}
@@ -515,7 +515,7 @@ func TestDoctorPondSummaryChecksTailnetIsloClaims(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "isb_islo1", Provider: "islo", Pond: "alpha", Slug: "api", RepoRoot: "/r"},
 	})
-	if err := updateLeaseClaimTailscale("isb_islo1", "100.64.7.7", ""); err != nil {
+	if err := UpdateLeaseClaimTailscale("isb_islo1", "100.64.7.7", ""); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("TS_API_KEY", "tskey-api-stub")

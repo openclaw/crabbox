@@ -59,8 +59,10 @@ to own replay, and caller cancellation never releases them.
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
 direct AWS, direct Machine0, direct Daytona, direct local-container, and managed coordinator
 leases, that ID is an immutable create identity: an identical semantic replay
-returns the same lease, while intent drift returns `lease_id_conflict`. External
-providers also accept requested IDs when their protocol explicitly advertises
+returns the same live lease, while intent drift returns `lease_id_conflict`.
+Managed coordinator replay of the same terminal intent returns
+`fixed_lease_terminal`. External providers also accept requested IDs when their
+protocol explicitly advertises
 idempotent lease identity support. The coordinator durably stores a versioned
 normalized request hash. Direct AWS durably stores the intent and current
 resolved EC2 attempt in the normal lease claim before `RunInstances`, then uses
@@ -149,7 +151,7 @@ crabbox checkpoint fork chk_abc123def456 --slug update-flow-smoke
 Crabbox is creating a new lease; existing leases keep their assigned slug.
 It is never an operation or idempotency key.
 
-Slugs are normalized everywhere they are accepted. `normalizeLeaseSlug`
+Slugs are normalized everywhere they are accepted. `NormalizeLeaseSlug`
 lowercases, keeps only `[a-z0-9]`, collapses every other run of characters into
 a single `-`, and trims leading and trailing dashes — so `Blue_Lobster` and
 `BLUE-LOBSTER` both resolve to `blue-lobster`. A requested slug must contain at

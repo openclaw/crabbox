@@ -3,7 +3,6 @@ package linode
 import (
 	"fmt"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -46,7 +45,7 @@ func tagsFromLabels(labels map[string]string) []string {
 			tags = append(tags, encodeTagKV(key, value)...)
 		}
 	}
-	return normalizeTags(tags)
+	return shared.NormalizeTags(tags)
 }
 
 func encodeTagKV(key, value string) []string {
@@ -117,21 +116,6 @@ func legacyEncodedExactTagValueKey(key string) bool {
 	default:
 		return false
 	}
-}
-
-func normalizeTags(tags []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(tags))
-	for _, tag := range tags {
-		tag = strings.TrimSpace(tag)
-		if tag == "" || seen[tag] {
-			continue
-		}
-		seen[tag] = true
-		out = append(out, tag)
-	}
-	sort.Strings(out)
-	return out
 }
 
 type tagChunkSet struct {
@@ -242,7 +226,7 @@ func replaceCrabboxTags(existing, desired []string) []string {
 		}
 		tags = append(tags, tag)
 	}
-	return normalizeTags(tags)
+	return shared.NormalizeTags(tags)
 }
 
 func isOwnedLinode(item linodeInstance) bool {

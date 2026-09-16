@@ -19,9 +19,9 @@ import (
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
-type ownershipRunner func(context.Context, LocalCommandRequest) (LocalCommandResult, error)
+type ownershipRunner func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)
 
-func (f ownershipRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (f ownershipRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	return f(ctx, req)
 }
 
@@ -111,13 +111,13 @@ func TestBlacksmithStopRejectsUnownedIdentity(t *testing.T) {
 				}
 			}
 			calls := 0
-			cfg := baseConfig()
+			cfg := core.BaseConfig()
 			cfg.Blacksmith.Org = "example-org"
-			backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(context.Context, LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				calls++
-				return LocalCommandResult{}, nil
+				return core.LocalCommandResult{}, nil
 			}))
-			if err := backend.Stop(t.Context(), StopRequest{ID: id}); err == nil {
+			if err := backend.Stop(t.Context(), core.StopRequest{ID: id}); err == nil {
 				t.Fatal("unowned stop succeeded")
 			}
 			if calls != 0 {
@@ -133,14 +133,14 @@ func TestBlacksmithStopRequiresTerminalConfirmation(t *testing.T) {
 			isolateBlacksmithOwnership(t)
 			const id = "tbx_terminal123"
 			claim := testOwnedBlacksmithClaim(t, id, "jade-krill", "/repo")
-			key, _, err := ensureTestboxKey(id)
+			key, _, err := core.EnsureTestboxKey(id)
 			if err != nil {
 				t.Fatal(err)
 			}
 			statusCalls, stopCalls := 0, 0
-			cfg := baseConfig()
+			cfg := core.BaseConfig()
 			cfg.Blacksmith.Org = "example-org"
-			backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				if testBlacksmithFlag(req.Args, "--org") != "example-org" || testBlacksmithFlag(req.Args, "--api-url") != "https://backend.blacksmith.sh" {
 					t.Fatalf("unbound route: %v", req.Args)
 				}
@@ -151,9 +151,9 @@ func TestBlacksmithStopRequiresTerminalConfirmation(t *testing.T) {
 				if args[1] == "stop" {
 					stopCalls++
 					if mode == "stop-error" {
-						return LocalCommandResult{ExitCode: 1}, errors.New("uncertain stop")
+						return core.LocalCommandResult{ExitCode: 1}, errors.New("uncertain stop")
 					}
-					return LocalCommandResult{}, nil
+					return core.LocalCommandResult{}, nil
 				}
 				if args[1] != "status" {
 					t.Fatalf("unexpected action: %v", req.Args)
@@ -176,15 +176,15 @@ func TestBlacksmithStopRequiresTerminalConfirmation(t *testing.T) {
 					output = strings.ReplaceAll(output, "testbox.yml", "foreign.yml")
 				case "post-status-error":
 					if stopCalls > 0 {
-						return LocalCommandResult{ExitCode: 1}, errors.New("status unavailable")
+						return core.LocalCommandResult{ExitCode: 1}, errors.New("status unavailable")
 					}
 				}
-				return LocalCommandResult{Stdout: output}, nil
+				return core.LocalCommandResult{Stdout: output}, nil
 			}))
 			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 			defer cancel()
-			err = backend.Stop(ctx, StopRequest{ID: id})
-			got, readErr := readLeaseClaim(id)
+			err = backend.Stop(ctx, core.StopRequest{ID: id})
+			got, readErr := core.ReadLeaseClaim(id)
 			if readErr != nil {
 				t.Fatal(readErr)
 			}
@@ -212,7 +212,7 @@ func TestBlacksmithRollbackPreservesAppearingClaimAndExistingKey(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			isolateBlacksmithOwnership(t)
 			const id = "tbx_rollback123"
-			pending, _, err := ensureTestboxKey("tbx_pending_owned")
+			pending, _, err := core.EnsureTestboxKey("tbx_pending_owned")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -233,15 +233,15 @@ func TestBlacksmithRollbackPreservesAppearingClaimAndExistingKey(t *testing.T) {
 			}
 			var existing string
 			if mode == "key" {
-				existing, _, err = ensureTestboxKey(id)
+				existing, _, err = core.EnsureTestboxKey(id)
 				if err != nil {
 					t.Fatal(err)
 				}
 			}
 			calls := 0
-			backend := newTestBlacksmithBackend(baseConfig(), ownershipRunner(func(context.Context, LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(core.BaseConfig(), ownershipRunner(func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				calls++
-				return LocalCommandResult{}, nil
+				return core.LocalCommandResult{}, nil
 			}))
 			backend.route = &blacksmithRoute{API: blacksmithDefaultAPI, Org: "example-org"}
 			backend.rollbackTestbox(id, "tbx_pending_owned", "/repo")
@@ -273,22 +273,22 @@ func TestBlacksmithUncertainReceiptRetainsRecoveryKey(t *testing.T) {
 		for _, failed := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%q/failed=%t", output, failed), func(t *testing.T) {
 				isolateBlacksmithOwnership(t)
-				runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+				runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 					if req.Args[1] != "warmup" {
 						t.Error("uncertain receipt selected a provider resource")
 					}
 					if failed {
-						return LocalCommandResult{ExitCode: 1, Stdout: output}, errors.New("allocation acknowledgement lost")
+						return core.LocalCommandResult{ExitCode: 1, Stdout: output}, errors.New("allocation acknowledgement lost")
 					}
-					return LocalCommandResult{Stdout: output}, nil
+					return core.LocalCommandResult{Stdout: output}, nil
 				}}
-				cfg := baseConfig()
+				cfg := core.BaseConfig()
 				cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
-				_, err := newTestBlacksmithBackend(cfg, runner).warmupLease(t.Context(), Repo{Root: t.TempDir()}, false, "")
+				_, err := newTestBlacksmithBackend(cfg, runner).warmupLease(t.Context(), core.Repo{Root: t.TempDir()}, false, "")
 				if err == nil || !strings.Contains(err.Error(), "retained pending_key=tbx_pending_") {
 					t.Fatalf("missing recovery diagnostic: %v", err)
 				}
-				path, pathErr := testboxKeyPath("tbx_placeholder")
+				path, pathErr := core.TestboxKeyPath("tbx_placeholder")
 				if pathErr != nil {
 					t.Fatal(pathErr)
 				}
@@ -316,27 +316,27 @@ func TestBlacksmithOneShotUncertainCleanupReportsRetention(t *testing.T) {
 	for _, commandExit := range []int{0, 7} {
 		t.Run(fmt.Sprint(commandExit), func(t *testing.T) {
 			isolateBlacksmithOwnership(t)
-			runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+			runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				switch req.Args[1] {
 				case "warmup":
-					return LocalCommandResult{Stdout: "tbx_retained123\n"}, nil
+					return core.LocalCommandResult{Stdout: "tbx_retained123\n"}, nil
 				case "run":
 					if commandExit != 0 {
-						return LocalCommandResult{ExitCode: commandExit}, errors.New("command failed")
+						return core.LocalCommandResult{ExitCode: commandExit}, errors.New("command failed")
 					}
-					return LocalCommandResult{}, nil
+					return core.LocalCommandResult{}, nil
 				case "stop":
-					return LocalCommandResult{ExitCode: 1}, errors.New("stop uncertain")
+					return core.LocalCommandResult{ExitCode: 1}, errors.New("stop uncertain")
 				}
-				return LocalCommandResult{}, nil
+				return core.LocalCommandResult{}, nil
 			}}
-			cfg := baseConfig()
+			cfg := core.BaseConfig()
 			cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 			var stderr bytes.Buffer
 			backend := newTestBlacksmithBackend(cfg, runner)
 			backend.rt.Stderr = &stderr
 			repo := t.TempDir()
-			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Root: repo}, Command: []string{"true"}, TimingJSON: true, EmitProof: filepath.Join(repo, "proof.md")})
+			result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: repo}, Command: []string{"true"}, TimingJSON: true, EmitProof: filepath.Join(repo, "proof.md")})
 			if err == nil || result.Session == nil || !result.Session.Kept {
 				t.Fatalf("false cleanup success result=%+v err=%v", result, err)
 			}
@@ -381,11 +381,11 @@ func TestBlacksmithOneShotUncertainCleanupReportsRetention(t *testing.T) {
 					t.Fatalf("%s falsely reports success: %s", name, data)
 				}
 			}
-			claim, err := readLeaseClaim("tbx_retained123")
+			claim, err := core.ReadLeaseClaim("tbx_retained123")
 			if err != nil || claim.LeaseID == "" {
 				t.Fatal("claim lost", err)
 			}
-			key, err := testboxKeyPath(claim.LeaseID)
+			key, err := core.TestboxKeyPath(claim.LeaseID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -404,7 +404,7 @@ func testBlacksmithClaimPath(id string) (string, error) {
 func TestBlacksmithWarmupPreservesExistingKey(t *testing.T) {
 	isolateBlacksmithOwnership(t)
 	const id = "tbx_existingkey123"
-	path, _, err := ensureTestboxKey(id)
+	path, _, err := core.EnsureTestboxKey(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,25 +413,25 @@ func TestBlacksmithWarmupPreservesExistingKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopped := false
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if req.Args[1] == "warmup" {
-			return LocalCommandResult{Stdout: id + "\n"}, nil
+			return core.LocalCommandResult{Stdout: id + "\n"}, nil
 		}
 		if req.Args[1] == "stop" {
 			stopped = true
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}}
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
-	if _, err := newTestBlacksmithBackend(cfg, runner).warmupLease(t.Context(), Repo{Root: "/repo"}, false, ""); err == nil {
+	if _, err := newTestBlacksmithBackend(cfg, runner).warmupLease(t.Context(), core.Repo{Root: "/repo"}, false, ""); err == nil {
 		t.Fatal("acquisition replaced existing key")
 	}
 	after, err := os.ReadFile(path)
 	if err != nil || string(after) != string(before) || stopped {
 		t.Fatalf("existing key/resource changed: err=%v stopped=%t", err, stopped)
 	}
-	claim, err := readLeaseClaim(id)
+	claim, err := core.ReadLeaseClaim(id)
 	if err != nil || claim.LeaseID != "" {
 		t.Fatalf("conflict claimed: %+v err=%v", claim, err)
 	}
@@ -443,9 +443,9 @@ func TestBlacksmithStopFencesConcurrentWriter(t *testing.T) {
 	claim := testOwnedBlacksmithClaim(t, id, "jade-krill", "/repo")
 	entered, release := make(chan struct{}), make(chan struct{})
 	stopped := false
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Org = "example-org"
-	backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		args := req.Args
 		if args[0] == "--org" {
 			args = args[2:]
@@ -455,21 +455,21 @@ func TestBlacksmithStopFencesConcurrentWriter(t *testing.T) {
 			select {
 			case <-release:
 			case <-ctx.Done():
-				return LocalCommandResult{ExitCode: 1}, ctx.Err()
+				return core.LocalCommandResult{ExitCode: 1}, ctx.Err()
 			}
 			stopped = true
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}
 		state := "ready"
 		if stopped {
 			state = "completed"
 		}
-		return LocalCommandResult{Stdout: testBlacksmithStatus(id, state)}, nil
+		return core.LocalCommandResult{Stdout: testBlacksmithStatus(id, state)}, nil
 	}))
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- backend.Stop(ctx, StopRequest{ID: id}) }()
+	go func() { done <- backend.Stop(ctx, core.StopRequest{ID: id}) }()
 	select {
 	case <-entered:
 	case <-ctx.Done():
@@ -487,7 +487,7 @@ func TestBlacksmithStopFencesConcurrentWriter(t *testing.T) {
 	}
 	close(release)
 	stopErr, writerErr := <-done, <-writer
-	current, err := readLeaseClaim(id)
+	current, err := core.ReadLeaseClaim(id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +507,7 @@ func TestBlacksmithStopCancelsActiveRun(t *testing.T) {
 			const id = "tbx_cancel123"
 			repo := t.TempDir()
 			testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
-			key, _, err := ensureTestboxKey(id)
+			key, _, err := core.EnsureTestboxKey(id)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -515,9 +515,9 @@ func TestBlacksmithStopCancelsActiveRun(t *testing.T) {
 			var stopped atomic.Bool
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			cfg := baseConfig()
+			cfg := core.BaseConfig()
 			cfg.Blacksmith.Org = "example-org"
-			backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(runCtx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(runCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				args := req.Args
 				if args[0] == "--org" {
 					args = args[2:]
@@ -528,7 +528,7 @@ func TestBlacksmithStopCancelsActiveRun(t *testing.T) {
 					if stopped.Load() {
 						state = "completed"
 					}
-					return LocalCommandResult{Stdout: testBlacksmithStatus(id, state)}, nil
+					return core.LocalCommandResult{Stdout: testBlacksmithStatus(id, state)}, nil
 				case "run":
 					close(entered)
 					if hung {
@@ -539,19 +539,19 @@ func TestBlacksmithStopCancelsActiveRun(t *testing.T) {
 						case <-runCtx.Done():
 						}
 					}
-					return LocalCommandResult{ExitCode: 7}, errors.New("remote workload cancelled")
+					return core.LocalCommandResult{ExitCode: 7}, errors.New("remote workload cancelled")
 				case "stop":
 					stopped.Store(true)
 					close(remoteStopped)
-					return LocalCommandResult{}, nil
+					return core.LocalCommandResult{}, nil
 				default:
-					return LocalCommandResult{}, fmt.Errorf("unexpected native operation: %v", args)
+					return core.LocalCommandResult{}, fmt.Errorf("unexpected native operation: %v", args)
 				}
 			}))
 			backend.rt.Stdout, backend.rt.Stderr = io.Discard, io.Discard
 			runDone := make(chan error, 1)
 			go func() {
-				_, err := backend.Run(ctx, RunRequest{ID: id, Repo: Repo{Root: repo}, Command: []string{"long-running"}})
+				_, err := backend.Run(ctx, core.RunRequest{ID: id, Repo: core.Repo{Root: repo}, Command: []string{"long-running"}})
 				runDone <- err
 			}()
 			select {
@@ -568,13 +568,13 @@ func TestBlacksmithStopCancelsActiveRun(t *testing.T) {
 			case <-time.After(30 * time.Millisecond):
 			}
 			stopCtx, cancelStop := context.WithTimeout(ctx, 250*time.Millisecond)
-			stopErr := backend.Stop(stopCtx, StopRequest{ID: id})
+			stopErr := backend.Stop(stopCtx, core.StopRequest{ID: id})
 			cancelStop()
 			if !stopped.Load() {
 				t.Fatal("stop could not reach active workload")
 			}
 			if hung {
-				claim, err := readLeaseClaim(id)
+				claim, err := core.ReadLeaseClaim(id)
 				_, keyErr := os.Stat(key)
 				if !errors.Is(stopErr, context.DeadlineExceeded) || err != nil || claim.LeaseID != id || keyErr != nil {
 					t.Fatalf("hung command cleanup lost state: stop=%v claim=%+v err=%v key=%v", stopErr, claim, err, keyErr)
@@ -597,16 +597,16 @@ func TestBlacksmithRejectsHydrationFailedReuse(t *testing.T) {
 	isolateBlacksmithOwnership(t)
 	const id = "tbx_hydration123"
 	claim := testOwnedBlacksmithClaim(t, id, "jade-krill", "/repo")
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Org = "example-org"
-	backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if req.Args[1] != "status" {
 			t.Error("hydration failure reached mutation")
 		}
-		return LocalCommandResult{Stdout: testBlacksmithStatus(id, "hydration_failed")}, nil
+		return core.LocalCommandResult{Stdout: testBlacksmithStatus(id, "hydration_failed")}, nil
 	}))
 	_, _, err := backend.ownedTestbox(t.Context(), id, "/repo", false)
-	after, readErr := readLeaseClaim(id)
+	after, readErr := core.ReadLeaseClaim(id)
 	if err == nil || !strings.Contains(err.Error(), "hydration failed") || readErr != nil || after.Revision != claim.Revision {
 		t.Fatalf("hydration failure admitted or changed claim: err=%v read=%v claim=%+v", err, readErr, after)
 	}

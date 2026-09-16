@@ -80,15 +80,9 @@ func UploadEnvdFile(ctx context.Context, upload EnvdUploadFileRequest) error {
 }
 
 type EnvdProcessRequest struct {
+	EnvdSandboxProcessRequest
 	Provider      string
 	Endpoint      string
-	Command       string
-	CWD           string
-	Env           map[string]string
-	User          string
-	Timeout       time.Duration
-	Stdout        io.Writer
-	Stderr        io.Writer
 	AccessToken   string
 	HTTPClient    *http.Client
 	SetHeaders    func(*http.Request)

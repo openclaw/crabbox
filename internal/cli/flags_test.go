@@ -62,8 +62,8 @@ func TestGenericFlagInputAcceptance(t *testing.T) {
 
 func TestGenericLeaseFlagInputAcceptance(t *testing.T) {
 	p := architectureCapabilityTestProvider{}
-	providerRegistry[p.Name()] = p
-	t.Cleanup(func() { delete(providerRegistry, p.Name()) })
+	providerRegistry[p.Spec().Name] = p
+	t.Cleanup(func() { delete(providerRegistry, p.Spec().Name) })
 	for _, args := range [][]string{
 		nil, {"--profile=default"}, {"--class=standard"}, {"--ssh-port=22"},
 		{"--arch=amd64"}, {"--pond="}, {"--desktop=false"}, {"--browser=false"}, {"--code=false"},
@@ -77,7 +77,7 @@ func TestGenericLeaseFlagInputAcceptance(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			clearConfigEnv(t)
 			cfg := baseConfig()
-			cfg.Provider = p.Name()
+			cfg.Provider = p.Spec().Name
 			fs := newFlagSet("lease inputs", io.Discard)
 			values := registerLeaseCreateFlags(fs, cfg)
 			if err := fs.Parse(args); err != nil {

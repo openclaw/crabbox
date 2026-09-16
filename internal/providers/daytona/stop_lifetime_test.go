@@ -26,7 +26,7 @@ func (a *observingDaytonaContextAPI) GetSandbox(ctx context.Context, id string) 
 func observeDaytonaDeletionContext(t *testing.T, beforeGet func(context.Context) error) {
 	t.Helper()
 	original := newDaytonaClient
-	newDaytonaClient = func(cfg Config, rt Runtime) (daytonaAPI, error) {
+	newDaytonaClient = func(cfg core.Config, rt core.Runtime) (daytonaAPI, error) {
 		client, err := original(cfg, rt)
 		if err != nil {
 			return nil, err
@@ -79,9 +79,9 @@ func TestDaytonaStopAndCleanupContextOwnership(t *testing.T) {
 						return nil
 					})
 					if operation != "release" {
-						err = b.Stop(ctx, StopRequest{ID: lease.LeaseID})
+						err = b.Stop(ctx, core.StopRequest{ID: lease.LeaseID})
 					} else {
-						err = b.ReleaseLease(ctx, ReleaseLeaseRequest{Lease: lease})
+						err = b.ReleaseLease(ctx, core.ReleaseLeaseRequest{Lease: lease})
 					}
 					if err != nil || reads == 0 {
 						t.Fatalf("explicit %s did not finish confirmed cleanup: reads=%d err=%v", operation, reads, err)
@@ -122,7 +122,7 @@ func TestDaytonaInterruptedExplicitStopRetainsAcknowledgment(t *testing.T) {
 				<-actual.Done()
 				return actual.Err()
 			})
-			err = b.Stop(ctx, StopRequest{ID: lease.LeaseID})
+			err = b.Stop(ctx, core.StopRequest{ID: lease.LeaseID})
 			if !errors.Is(err, wantErr) {
 				t.Fatalf("stop did not honor caller termination: %v", err)
 			}

@@ -6,7 +6,6 @@ import (
 
 	"github.com/openclaw/crabbox/internal/applevmhelper"
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const providerName = "apple-vm"
@@ -17,14 +16,12 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return providerName }
-
 // The provider was named apple-vz before the vz library was replaced with
 // the native VM daemon; the old names stay routable for existing configs.
-func (Provider) Aliases() []string { return []string{"applevm", "apple-vz", "applevz"} }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"applevm", "apple-vz", "applevz"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
 		Name:             providerName,
 		Family:           "local-vm",
@@ -47,8 +44,6 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return applevmhelper.ImageIdentity(strings.TrimSpace(cfg.AppleVM.Image), cfg.AppleVM.ImageSHA256)
 }
-
-func (Provider) ServerTypeForClass(string) string { return "" }
 
 func (Provider) ValidateConfig(cfg core.Config) error {
 	if err := validateConfigBeforeDefaults(cfg); err != nil {
@@ -73,10 +68,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 		return nil, core.Exit(2, "--tailscale is not supported for provider=%s; use a remote SSH provider when tailnet reachability is required", providerName)
 	}
 	return newBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor(providerName, func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }
 
 func validateConfigBeforeDefaults(cfg core.Config) error {

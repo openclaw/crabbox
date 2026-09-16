@@ -7,19 +7,21 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func testClientConfig(apiURL string) Config {
-	cfg := Config{}
+func testClientConfig(apiURL string) core.Config {
+	cfg := core.Config{}
 	cfg.UnikraftCloud.APIKey = "ukc-test-key"
 	cfg.UnikraftCloud.APIURL = apiURL
 	return cfg
 }
 
 func TestUnikraftCloudClientRequiresAPIKey(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.UnikraftCloud.Metro = "fra"
-	if _, err := newUnikraftCloudClient(cfg, Runtime{}); err == nil {
+	if _, err := newUnikraftCloudClient(cfg, core.Runtime{}); err == nil {
 		t.Fatal("newUnikraftCloudClient accepted empty API key")
 	}
 }
@@ -41,7 +43,7 @@ func TestUnikraftCloudBaseURLFromMetro(t *testing.T) {
 		{name: "explicit URL trailing slash", metro: "fra", apiURL: "https://ukc.example.com/", want: "https://ukc.example.com"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			cfg := Config{}
+			cfg := core.Config{}
 			cfg.UnikraftCloud.Metro = test.metro
 			cfg.UnikraftCloud.APIURL = test.apiURL
 			got, err := unikraftCloudBaseURL(cfg)
@@ -76,7 +78,7 @@ func TestUnikraftCloudClientRejectsUnsafeAPIURLs(t *testing.T) {
 		{name: "encoded non-root path", apiURL: "https://api.fra.unikraft.cloud/%2e"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := newUnikraftCloudClient(testClientConfig(test.apiURL), Runtime{})
+			_, err := newUnikraftCloudClient(testClientConfig(test.apiURL), core.Runtime{})
 			if err == nil {
 				t.Fatalf("newUnikraftCloudClient accepted unsafe URL %q", test.apiURL)
 			}
@@ -158,7 +160,7 @@ func TestUnikraftCloudClientLifecycleEndpoints(t *testing.T) {
 	}))
 	defer server.Close()
 
-	api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+	api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatalf("newUnikraftCloudClient: %v", err)
 	}
@@ -224,7 +226,7 @@ func TestUnikraftCloudDeleteRejectsNameBeforeRequest(t *testing.T) {
 	}))
 	defer server.Close()
 
-	api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+	api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatalf("newUnikraftCloudClient: %v", err)
 	}
@@ -262,7 +264,7 @@ func TestUnikraftCloudDeleteNormalizesUUIDAndMatchesResponseCase(t *testing.T) {
 	}))
 	defer server.Close()
 
-	api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+	api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatalf("newUnikraftCloudClient: %v", err)
 	}
@@ -361,7 +363,7 @@ func TestUnikraftCloudClientErrorClassification(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(test.handler)
 			defer server.Close()
-			api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+			api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 			if err != nil {
 				t.Fatalf("newUnikraftCloudClient: %v", err)
 			}
@@ -389,7 +391,7 @@ func TestUnikraftCloudClientDoesNotLeakAPIKeyInErrors(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "error", "message": "bad key ukc-test-key rejected"})
 	}))
 	defer server.Close()
-	api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+	api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatalf("newUnikraftCloudClient: %v", err)
 	}
@@ -421,7 +423,7 @@ func TestUnikraftCloudDeleteRejectsMalformedSuccessEnvelope(t *testing.T) {
 				_, _ = w.Write([]byte(test.body))
 			}))
 			defer server.Close()
-			api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+			api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 			if err != nil {
 				t.Fatalf("newUnikraftCloudClient: %v", err)
 			}
@@ -449,7 +451,7 @@ func TestUnikraftCloudClientRefusesCrossOriginRedirect(t *testing.T) {
 		http.Redirect(w, r, other.URL+"/v1/instances", http.StatusFound)
 	}))
 	defer server.Close()
-	api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+	api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatalf("newUnikraftCloudClient: %v", err)
 	}
@@ -519,7 +521,7 @@ func TestUnikraftCloudUserUUID(t *testing.T) {
 				_, _ = w.Write([]byte(test.body))
 			}))
 			defer server.Close()
-			api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+			api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 			if err != nil {
 				t.Fatalf("newUnikraftCloudClient: %v", err)
 			}
@@ -573,7 +575,7 @@ func TestUnikraftCloudClientRejectsPartialInstanceResults(t *testing.T) {
 				_, _ = w.Write([]byte(test.body))
 			}))
 			defer server.Close()
-			api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+			api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 			if err != nil {
 				t.Fatalf("newUnikraftCloudClient: %v", err)
 			}
@@ -684,7 +686,7 @@ func TestUnikraftCloudSingleInstanceOperationsRequireExactResult(t *testing.T) {
 				_, _ = w.Write([]byte(test.body))
 			}))
 			defer server.Close()
-			api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+			api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 			if err != nil {
 				t.Fatalf("newUnikraftCloudClient: %v", err)
 			}
@@ -708,7 +710,7 @@ func TestUnikraftCloudClientRefusesSameOriginRedirectOutsideAPIPath(t *testing.T
 		http.Redirect(w, r, "/login", http.StatusTemporaryRedirect)
 	}))
 	defer server.Close()
-	api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+	api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatalf("newUnikraftCloudClient: %v", err)
 	}
@@ -734,7 +736,7 @@ func TestUnikraftCloudClientRefusesEncodedRedirectTraversal(t *testing.T) {
 		w.WriteHeader(http.StatusTemporaryRedirect)
 	}))
 	defer server.Close()
-	api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+	api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatalf("newUnikraftCloudClient: %v", err)
 	}
@@ -759,7 +761,7 @@ func TestUnikraftCloudClientRefusesRedirectMutationMethodChange(t *testing.T) {
 		http.Redirect(w, r, "/v1/instances/delete-result", http.StatusFound)
 	}))
 	defer server.Close()
-	api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+	api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatalf("newUnikraftCloudClient: %v", err)
 	}
@@ -802,7 +804,7 @@ func TestUnikraftCloudClientAllowsMethodPreservingMutationRedirect(t *testing.T)
 		})
 	}))
 	defer server.Close()
-	api, err := newUnikraftCloudClient(testClientConfig(server.URL), Runtime{HTTP: server.Client()})
+	api, err := newUnikraftCloudClient(testClientConfig(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatalf("newUnikraftCloudClient: %v", err)
 	}

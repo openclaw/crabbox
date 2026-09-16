@@ -2,11 +2,126 @@
 
 ## Unreleased
 
-- Bound Nomad's finite control-plane requests while retaining durable recovery identity for uncertain registration, preserving caller cancellation and keeping established exec streams outside the request ceiling. [PR 1916](https://github.com/openclaw/crabbox/pull/1916). Thanks @SebTardif.
-- Preserve GCP capacity fallback when a bounded error summary omits retry evidence, while keeping user-visible diagnostics redacted and bounded. [PR 1987](https://github.com/openclaw/crabbox/pull/1987). Thanks @steipete.
-- AWS: add administrator-only legacy cleanup recovery backed by authenticated original CloudTrail allocation evidence, preserving remaining key and access cleanup and recording an atomic scope-recovery audit without force-success. [PR 1975](https://github.com/openclaw/crabbox/pull/1975).
-- AWS: complete cleanup after a verified empty instance response without skipping owned keys, bind new leases to the original account and Region, and retain unresolved historical cleanup when that authority is missing. [PR 1904](https://github.com/openclaw/crabbox/pull/1904). Thanks @vincentkoc.
-- Add a credential-free local-container quickstart skill and publish both Crabbox skills through installer discovery, with validated catalog metadata and a responsive installation guide. [PR 1911](https://github.com/openclaw/crabbox/pull/1911). Thanks @zozo123.
+- Keep delegated leases active through a provider-owned heartbeat capability, with Islo sending a bounded no-op only after observing a running sandbox and reporting its live idle policy. [PR 1707](https://github.com/openclaw/crabbox/pull/1707). Thanks @zozo123.
+- Show macOS platform and effective developer-tool selection during preflight, with opt-in Swift, Xcode, and Homebrew versions, bounded execution, and confirmed cleanup before workload continuation. [PR 2281](https://github.com/openclaw/crabbox/pull/2281). Thanks @coygeek.
+- Reject overflowing day durations before checkpoint pruning or benchmark filtering, preventing very large retention ages from wrapping into short deletion windows or incorrect report cutoffs. [PR 2280](https://github.com/openclaw/crabbox/pull/2280).
+- Crownest status waits consistently preserve caller cancellation while sharing request deadlines and polling with other providers. [PR 2276](https://github.com/openclaw/crabbox/pull/2276).
+- Make first runs easier with a task-first README, tested Docker and Node examples, warm-reuse guidance, and responsive desktop/mobile banners. [PR 2275](https://github.com/openclaw/crabbox/pull/2275). Thanks @zozo123.
+- Keep CodeSandbox runtime fallback defaults aligned with declared configuration while preserving the fixed SDK workspace boundary and operation-specific budgets. [PR 1991](https://github.com/openclaw/crabbox/pull/1991). Thanks @steipete.
+
+## 0.60.0 - 2026-09-14
+
+### Highlights
+
+- **Bring Git history to runners without origin access.** Opt into local-object seeding to carry complete selected histories and reachable tags alongside your working files, enabling offline historical diffs and `git describe`.
+- **Run from a folder without creating a repository.** Explicit directory sync transfers an allowlisted working set through the existing POSIX/WSL SSH path, with source-tree ignore rules and normal sync safeguards.
+- **More reliable sync and WSL2 startup.** Cancel content hashing and snapshot copying promptly between filesystem operations, handle directory replacements with custom state roots, and give staged WSL2 architecture probes their full execution allowance.
+
+### Upgrade notes
+
+- Local Git seeding is opt-in through `--git-seed-source local`, `sync.gitSeedSource: local`, or `CRABBOX_SYNC_GIT_SEED_SOURCE=local`; `sync.gitSeed` must remain enabled. It supports ordinary SSH-backed Linux, macOS, WSL2, and native Windows targets with Git. Use a raw workspace and `--no-hydrate` when Actions hydration is configured; directory sync, Actions hydration, fresh PR checkouts, ready pools, and Git overlay cannot be combined with it. Replacing an existing origin-seeded checkout requires explicit `--full-resync`. [PR 2264](https://github.com/openclaw/crabbox/pull/2264).
+- Local seeding transfers complete selected Git histories: working-file excludes do not redact historical blobs. Selected objects must already be available locally, and preparation or verification failures do not fall back to origin or file-only sync. Full working files and uncompressed objects count toward sync size guardrails; separate hard limits cap the object total and bundle at 512 MiB each. Preview identities, sizes, and digest with `sync-plan --git-seed-source local --json`. [PR 2264](https://github.com/openclaw/crabbox/pull/2264).
+- Directory sync requires explicit `sync.source: directory` and a nonempty `sync.include`; Git remains required for isolated `.gitignore` matching. The effective current directory is the source root, including inside an outer checkout. It supports POSIX/WSL managed-manifest SSH sync; `watch`, delegated/native-source providers, native Windows archive sync, Actions workspaces, Git-backed ready pools, Git overlay/base refs, and PR/patch modes are unsupported. In-scope nested repositories must be excluded or selected as the source root. [PR 2253](https://github.com/openclaw/crabbox/pull/2253).
+
+### Changes
+
+- Add offline local-object Git seeding with complete selected HEAD/base histories and reachable tags, preserving exact object identities without forwarding source remotes, hooks, or credentials. Freeze the accepted working-file snapshot with the bundle, import metadata without checking out historical files, and retain ordinary file and deletion sync. Expose seed evidence in `sync-plan` and timing JSON. [PR 2264](https://github.com/openclaw/crabbox/pull/2264). Thanks @coygeek.
+- Add explicit include-only directory sync and `sync-plan` previews without creating source Git metadata. Apply source-tree `.gitignore` rules through private temporary metadata, validate the complete manifest before acquisition and again before transfer, and preserve managed-state exclusions, size limits, and guarded deletion of previously synced files. [PR 2253](https://github.com/openclaw/crabbox/pull/2253). Thanks @coygeek.
+
+### Fixes
+
+- Honor cancellation while copying Git snapshots and hashing sync content, bound regular-file reads to their observed size, and preserve cancellation alongside cleanup errors instead of falling back to full sync. Keep stable fingerprint encoding unchanged. [PR 2268](https://github.com/openclaw/crabbox/pull/2268), [PR 2269](https://github.com/openclaw/crabbox/pull/2269).
+- Keep directory-to-file replacement sync working with custom state roots, preserving historical deletions and managed-state exclusions. Revalidate the effective protected subtree during snapshot acceptance even when ordinary ignore rules are unchanged. [PR 2266](https://github.com/openclaw/crabbox/pull/2266), [PR 2267](https://github.com/openclaw/crabbox/pull/2267).
+- Give WSL2 static SSH architecture probes a 15-second execution allowance plus the existing bounded transport setup and cleanup budgets, preventing staging from consuming the whole probe deadline while respecting earlier caller deadlines. [PR 2265](https://github.com/openclaw/crabbox/pull/2265).
+- Seed detached commits by their exact origin SHA before POSIX/WSL2 file sync when no containing origin tracking branch exists. Verify the commit and tree in private staging, retain ordinary file sync when the remote cannot serve the commit, and leave native Windows branch-only seeding unchanged. [PR 2261](https://github.com/openclaw/crabbox/pull/2261).
+- Warn when `--expose` cannot change an existing coordinator-managed lease's Pond ports, and point to `crabbox tunnel` for forwarding an existing service. Preserve normal command execution and direct/registered port refresh. [PR 2256](https://github.com/openclaw/crabbox/pull/2256).
+- Show the observed non-running Multipass state instead of a stale ready label, and leave Freestyle's absent instance type empty instead of reporting the VM name. [PR 2258](https://github.com/openclaw/crabbox/pull/2258), [PR 2257](https://github.com/openclaw/crabbox/pull/2257).
+
+### Maintenance
+
+- Make Cloudflare and OpenComputer cleanup-deadline tests deterministic while retaining cancellation, failed-result, and retained-session checks. [PR 2259](https://github.com/openclaw/crabbox/pull/2259), [PR 2262](https://github.com/openclaw/crabbox/pull/2262).
+- Bound staged Windows launcher test output draining and retain bounded architecture-probe failure diagnostics. [PR 2254](https://github.com/openclaw/crabbox/pull/2254), [PR 2260](https://github.com/openclaw/crabbox/pull/2260).
+
+## 0.59.0 - 2026-09-13
+
+### Highlights
+
+- **Linux desktops follow the browser window.** The portal controller can match the desktop resolution to the viewer, with Fit desktop available for local scaling and resize-capable TigerVNC on new local-container desktops.
+- **Pause idle Islo sandboxes and resume them for reuse.** Opt into an idle-pause policy when creating a sandbox; `run --id` and `ssh` resume paused sandboxes before using them.
+- **Check that Python environments actually work.** The new opt-in `python3-venv` preflight creates a disposable environment, checks Python and pip, and reports confirmed cleanup before the workload starts.
+- **Qualify an existing AWS image without rebuilding it.** Protected retained-image qualification verifies source inputs, normal catalog selection, runtime smoke, and receipt rollback while preserving the borrowed AMI and snapshot.
+
+### Upgrade notes
+
+- Islo idle pausing is off by default. Enable `--islo-idle-pause` or `islo.idlePause: true` and choose an `--idle-timeout` longer than the expected workload: provider activity accounting is not established for long-running commands, shares, or tailnet traffic. Reuse does not rewrite the policy, and no provider deletion deadline is added. [PR 1706](https://github.com/openclaw/crabbox/pull/1706).
+- Linux portal viewers now default to Match window when the server supports resizing. Recreate existing Xvfb/x11vnc local-container leases to gain resizing; explicit 8-bit desktops remain fixed-size. Direct SSH viewers retain Local scaling, and Wayland resizing depends on the installed WayVNC version and current sizing client. [PR 2075](https://github.com/openclaw/crabbox/pull/2075), [PR 2222](https://github.com/openclaw/crabbox/pull/2222).
+- Select `--preflight-tools default,python3-venv` with `--preflight` on Linux, macOS, or WSL2; native Windows does not run this probe. Missing Python, venv, or pip remains diagnostic when cleanup is confirmed. Transport, ownership, or cleanup failures stop the workload, and the probe never installs host tools or reuses a project environment. [PR 2217](https://github.com/openclaw/crabbox/pull/2217).
+
+### Changes
+
+- Match Linux portal desktops to the viewer window with controller-only resize requests, bounded collaboration requests, and a Fit opt-out. Use TigerVNC for new local-container and public-installer XFCE desktops, and retire the stopped legacy exporter's failure marker during installer upgrades. [PR 2075](https://github.com/openclaw/crabbox/pull/2075). Thanks @vincentkoc.
+- Add opt-in Islo idle pausing and explicitly resume paused sandboxes before reused runs or SSH access, preserving default creation behavior and existing retention and Stop semantics. [PR 1706](https://github.com/openclaw/crabbox/pull/1706). Thanks @zozo123.
+- Add a functional `python3-venv` preflight with separate capability and cleanup results, checks of the disposable environment's Python and pip, and confirmed process, scratch-directory, and transport-stage retirement. [PR 2217](https://github.com/openclaw/crabbox/pull/2217). Thanks @coygeek.
+- Qualify retained AWS images through an isolated protected catalog without reminting: admit the source and archive helpers before deployment, verify one normal-selection lease against the exact promotion revision, run the full runtime smoke, and exercise receipt rollback with borrowed-image-safe cleanup. Accept instance-store mappings beside the single verified EBS root. [PR 2225](https://github.com/openclaw/crabbox/pull/2225), [PR 2238](https://github.com/openclaw/crabbox/pull/2238). Thanks @vincentkoc.
+- Add a protected image-publisher authentication check that verifies administrator access without creating leases or publishing images. [PR 2219](https://github.com/openclaw/crabbox/pull/2219). Thanks @vincentkoc.
+- Show loaded Hyper-V configuration in offline text and JSON output, preserving nonsecret values without invoking Hyper-V or displaying guest credentials. [PR 2243](https://github.com/openclaw/crabbox/pull/2243).
+
+### Fixes
+
+- Prepare immutable image-qualification identity and deadlines before credential-dependent deployment, reject delayed admission after the work cutoff, and preserve independent cleanup ownership. [PR 2250](https://github.com/openclaw/crabbox/pull/2250). Thanks @vincentkoc.
+- Recognize AWS Tailscale endpoints in Pond peers and policy diagnostics while preserving SSH discovery for leases without Tailscale enrollment. Honor help before Pond release or disconnect can act, reject malformed lifecycle arguments, and preserve literal names and the `--` separator. [PR 2246](https://github.com/openclaw/crabbox/pull/2246), [PR 2245](https://github.com/openclaw/crabbox/pull/2245).
+- Return confirmed brokered Tailscale preparation failures promptly instead of replaying them, while preserving exact-attempt cancellation and recovery when provider creation is uncertain. [PR 2247](https://github.com/openclaw/crabbox/pull/2247).
+- Finish reusable-workspace sync and cleanup when a witnessed child exits between liveness probes, retaining ownership whenever process absence cannot be confirmed. [PR 2248](https://github.com/openclaw/crabbox/pull/2248).
+- Reject stale administrator grants before committing legacy AWS cleanup recovery, preserving the lease, audit, and cleanup wake when authorization changes. [PR 2239](https://github.com/openclaw/crabbox/pull/2239).
+- Share delegated command parsing so single shell strings execute correctly and literal operator arguments remain quoted across provider transports. [PR 2233](https://github.com/openclaw/crabbox/pull/2233).
+- Reject decoded negative creation sizes for Hyper-V, Multipass, Freestyle, and OpenComputer instead of silently omitting them, while preserving defaults and supported positive sizing. Keep existing-lease operations available when creation-only sizing is invalid. [PR 2242](https://github.com/openclaw/crabbox/pull/2242), [PR 2241](https://github.com/openclaw/crabbox/pull/2241), [PR 2235](https://github.com/openclaw/crabbox/pull/2235), [PR 2237](https://github.com/openclaw/crabbox/pull/2237), [PR 2244](https://github.com/openclaw/crabbox/pull/2244).
+- Reject non-finite Vercel Sandbox vCPU settings during configuration validation, preserving service defaults and supported fractional values. [PR 2230](https://github.com/openclaw/crabbox/pull/2230).
+- Preserve precommand cancellation and operational failure classifications in saved timing and local history, and retain Anthropic Sandbox Runtime cancellation and deadline causes without changing numeric exit codes. [PR 2217](https://github.com/openclaw/crabbox/pull/2217), [PR 2229](https://github.com/openclaw/crabbox/pull/2229).
+- Prevent Corepack downloads and automatic project pinning during preflight version probes, and suppress supported pnpm secondary version and lockfile management while preserving project selection and the workload's original environment. [PR 2224](https://github.com/openclaw/crabbox/pull/2224).
+- Render XFCE clients in explicitly requested 8-bit desktops by selecting an 8-bit TrueColor visual, preserving the requested depth and fixed-size Xvfb/x11vnc backend. [PR 2222](https://github.com/openclaw/crabbox/pull/2222). Thanks @vincentkoc.
+- Restore native Windows architecture checks under Windows PowerShell 5.1 by using supported unsigned 16-bit types. [PR 2240](https://github.com/openclaw/crabbox/pull/2240). Thanks @vincentkoc.
+- Limit artifact discovery to the possible match depth for canonical non-recursive wildcard patterns, preserving selection and recursive glob behavior. [PR 2214](https://github.com/openclaw/crabbox/pull/2214). Thanks @vincentkoc.
+
+### Maintenance
+
+- Consolidate provider workspace operations, command-stream handling, and sandbox lease views while retaining provider-specific behavior. [PR 2232](https://github.com/openclaw/crabbox/pull/2232), [PR 2234](https://github.com/openclaw/crabbox/pull/2234), [PR 2236](https://github.com/openclaw/crabbox/pull/2236). Thanks @steipete.
+- Use a private stdin pipe for WSL2 Python preflight completion and retirement checks, preserving program bytes without staging another workload. [PR 2217](https://github.com/openclaw/crabbox/pull/2217).
+- Validate documentation-site heading links against the renderer's shared heading identities, excluding fenced and commented pseudoheadings while preserving published IDs and repository-only anchor rules. [PR 2231](https://github.com/openclaw/crabbox/pull/2231).
+
+## 0.58.0 - 2026-09-12
+
+### Highlights
+
+- **Keep run history after a lease is gone.** Opt into private local logs and parsed results with `--record-local`, then read them offline without a coordinator.
+- **See which container image actually ran.** Docker and Podman evidence now distinguishes the requested image reference from the runtime image ID and reported repository digests, and keeps that snapshot after cleanup.
+- **More reliable cleanup and lease recovery.** Finish AWS cleanup when an instance has already disappeared, recover eligible legacy cleanup from original allocation evidence, and recognize repeated fixed-ID coordinator requests without creating another machine.
+- **Smoother sync and artifact collection on macOS.** Avoid scanning unrelated files in crowded directories, handle socket and FIFO state paths safely, and keep artifact matching consistent with the stock shell.
+
+### Upgrade notes
+
+- Local recording is off by default. Use `crabbox run --record-local -- <command>` or enable `history.local.enabled` in trusted user configuration; repository configuration cannot opt you in. Retained command output is not automatically secret-redacted. Read it with `history`, `logs`, or `results --source local`; default retention is 100 inactive records, 256 MiB, and 30 days. [PR 2141](https://github.com/openclaw/crabbox/pull/2141).
+- Setting `XDG_STATE_HOME` now also selects the root for generated lease SSH keys and host trust. Keep the same root through acquisition, reuse, and cleanup; switching roots does not migrate existing keys or discover leases from the old root. Unset defaults and user-supplied keys keep their existing paths. [PR 2164](https://github.com/openclaw/crabbox/pull/2164).
+- AWS legacy cleanup recovery is administrator-only and requires authenticated evidence of the original allocation. Missing account or Region authority leaves cleanup unresolved; an absent instance alone does not prove that owned keys and access resources are cleaned up. [PR 1904](https://github.com/openclaw/crabbox/pull/1904), [PR 1975](https://github.com/openclaw/crabbox/pull/1975).
+
+### Changes
+
+- Add private local run history with bounded logs, parsed results, explicit source provenance, and offline readback after lease cleanup. Support `--source local|coordinator|all`, bounded pruning, and deletion of inactive records while preserving existing coordinator defaults. [PR 2141](https://github.com/openclaw/crabbox/pull/2141). Thanks @coygeek.
+- Record Docker and Podman creation references, runtime image IDs, and reported repository digests in run evidence, timing JSON, retained inspection, and opt-in local history. Preserve the initial snapshot through bootstrap and cleanup; unavailable digests remain explicit, and the observation is not a signed filesystem attestation. [PR 2202](https://github.com/openclaw/crabbox/pull/2202). Thanks @coygeek.
+- Add a credential-free local-container quickstart skill and make both Crabbox skills discoverable by installers, with validated catalog metadata and an installation guide that works on narrow screens. [PR 1911](https://github.com/openclaw/crabbox/pull/1911). Thanks @zozo123.
+- AWS: complete cleanup after a verified empty instance response without skipping owned keys, bind new leases to their original account and Region, and recover eligible legacy cleanup using original CloudTrail allocation evidence with an atomic recovery audit. [PR 1904](https://github.com/openclaw/crabbox/pull/1904), [PR 1975](https://github.com/openclaw/crabbox/pull/1975). Thanks @vincentkoc.
+- Keep portable workspace ownership exclusive when a runner reports successful directory creation after losing a creation race. [PR 2201](https://github.com/openclaw/crabbox/pull/2201).
+- Recognize identical fixed-ID coordinator replays of terminal leases separately from conflicting create requests, without repeating provider creation. [PR 1925](https://github.com/openclaw/crabbox/pull/1925). Thanks @Melbourneandrew.
+- Honor an explicit `XDG_STATE_HOME` for generated lease SSH keys and host trust, including isolated-root reuse and cleanup, while retaining private storage permissions. [PR 2164](https://github.com/openclaw/crabbox/pull/2164). Thanks @coygeek.
+- Resolve macOS managed-state path spelling with bounded metadata queries instead of scanning sibling files. Handle Unix sockets and FIFOs without opening them, so crowded temporary directories do not block sync preparation. [PR 2187](https://github.com/openclaw/crabbox/pull/2187), [PR 2207](https://github.com/openclaw/crabbox/pull/2207).
+- Collect nested artifact globs from safe literal directory prefixes without traversing unrelated siblings. Keep matching case-sensitive on macOS when `nocaseglob` is enabled, while preserving explicit `nocasematch` behavior, archive membership, and collection limits. [PR 2162](https://github.com/openclaw/crabbox/pull/2162), [PR 2208](https://github.com/openclaw/crabbox/pull/2208). Thanks @vincentkoc.
+- Nomad: bound finite control-plane requests, retain durable recovery identity when registration is uncertain, and preserve caller cancellation and established execution streams. [PR 1916](https://github.com/openclaw/crabbox/pull/1916). Thanks @SebTardif.
+- GCP: preserve capacity fallback when a bounded error summary omits retry evidence, while keeping displayed diagnostics redacted and bounded. [PR 1987](https://github.com/openclaw/crabbox/pull/1987). Thanks @steipete.
+- Linode: record the actual selected instance type when an explicit type contains only whitespace. [PR 2186](https://github.com/openclaw/crabbox/pull/2186).
+
+### Maintenance
+
+- Consolidate shared provider configuration, SSH access, cleanup, storage, and coordinator helpers, preserving provider-owned behavior and existing CLI, configuration, and wire formats. [PR 2171](https://github.com/openclaw/crabbox/pull/2171), [PR 2205](https://github.com/openclaw/crabbox/pull/2205). Thanks @steipete.
+- Remove obsolete provider and checkpoint forwarding layers and strengthen cross-platform fixtures, lifecycle checks, and coordinator storage tests. [PR 2204](https://github.com/openclaw/crabbox/pull/2204), [PR 2206](https://github.com/openclaw/crabbox/pull/2206). Thanks @steipete.
 
 ## 0.57.0 - 2026-09-11
 

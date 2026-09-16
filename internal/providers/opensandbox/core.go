@@ -1,32 +1,10 @@
 package opensandbox
 
 import (
-	"io"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
-
-type Config = core.Config
-type ProviderSpec = core.ProviderSpec
-type Runtime = core.Runtime
-type Backend = core.Backend
-type DoctorRequest = core.DoctorRequest
-type DoctorResult = core.DoctorResult
-type WarmupRequest = core.WarmupRequest
-type RunRequest = core.RunRequest
-type RunResult = core.RunResult
-type ListRequest = core.ListRequest
-type LeaseView = core.LeaseView
-type StatusRequest = core.StatusRequest
-type StatusView = core.StatusView
-type StopRequest = core.StopRequest
-type CleanupRequest = core.CleanupRequest
-type Server = core.Server
-type Repo = core.Repo
-type LeaseClaim = core.LeaseClaim
-type ExitError = core.ExitError
-type timingPhase = core.TimingPhase
 
 const (
 	providerName    = "opensandbox"
@@ -52,30 +30,6 @@ const (
 	openSandboxNameKey          = "crabbox.name"
 )
 
-func exit(code int, format string, args ...any) core.ExitError {
-	return core.Exit(code, format, args...)
-}
-
-func newLeaseSlug(leaseID string) string {
-	return core.NewLeaseSlug(leaseID)
-}
-
-func normalizeLeaseSlug(value string) string {
-	return core.NormalizeLeaseSlug(value)
-}
-
-func allocateClaimLeaseSlug(leaseID, requested string) (string, error) {
-	return core.AllocateClaimLeaseSlug(leaseID, requested)
-}
-
-func claimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim)
-}
-
-func readLeaseClaim(leaseID string) (core.LeaseClaim, error) {
-	return core.ReadLeaseClaim(leaseID)
-}
-
 func listOpenSandboxLeaseClaims() ([]core.LeaseClaim, error) {
 	return core.ListLeaseClaimsWithPrefix(leasePrefix)
 }
@@ -92,26 +46,6 @@ func listOpenSandboxCleanupClaims() ([]core.LeaseClaim, error) {
 	return append(claims, recoveries...), nil
 }
 
-func removeLeaseClaim(leaseID string) {
-	core.RemoveLeaseClaim(leaseID)
-}
-
-func removeLeaseClaimIfUnchanged(leaseID string, expected LeaseClaim) error {
-	return core.RemoveLeaseClaimIfUnchanged(leaseID, expected)
-}
-
-func printEnvForwardingSummary(w io.Writer, provider, behavior string, allow []string, env map[string]string) {
-	core.PrintEnvForwardingSummary(w, provider, behavior, allow, env)
-}
-
-func shellQuote(s string) string {
-	return core.ShellQuote(s)
-}
-
 func openSandboxCleanupCommand(leaseID string) string {
-	return "crabbox stop --provider " + providerName + " " + shellQuote(leaseID)
-}
-
-func inventoryDoctorResult(provider string, leases int) DoctorResult {
-	return core.InventoryDoctorResult(provider, leases)
+	return "crabbox stop --provider " + providerName + " " + core.ShellQuote(leaseID)
 }

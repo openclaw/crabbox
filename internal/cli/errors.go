@@ -25,6 +25,6 @@ func ExitCodeForError(err error, fallback int) int {
 	return fallback
 }
 
-func exit(code int, format string, args ...any) ExitError {
+func Exit(code int, format string, args ...any) ExitError {
 	return ExitError{Code: code, Message: sprintf(format, args...)}
 }

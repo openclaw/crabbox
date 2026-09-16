@@ -154,16 +154,7 @@ func newVultrClient(rt core.Runtime) (*vultrClient, error) {
 		token:   token,
 		client:  httpClient,
 		baseURL: vultrAPIBaseURL,
-		sleep: func(ctx context.Context, d time.Duration) error {
-			timer := time.NewTimer(d)
-			defer timer.Stop()
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-timer.C:
-				return nil
-			}
-		},
+		sleep:   core.SleepContext,
 	}, nil
 }
 
@@ -579,7 +570,7 @@ func (c *vultrClient) DeleteSSHKey(ctx context.Context, id string) error {
 }
 
 func (c *vultrClient) UpdateInstanceTags(ctx context.Context, id string, tags []string) error {
-	body := map[string]any{"tags": normalizeTags(tags)}
+	body := map[string]any{"tags": shared.NormalizeTags(tags)}
 	return c.do(ctx, http.MethodPatch, "/instances/"+url.PathEscape(id), body, nil)
 }
 

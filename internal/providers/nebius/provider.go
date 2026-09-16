@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -13,9 +12,6 @@ func init() {
 }
 
 type Provider struct{}
-
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
@@ -40,10 +36,10 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
-		return nil, exit(2, "provider=%s supports target=linux only", providerName)
+		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
 	}
 	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
-		return nil, exit(2, "--tailscale is not supported for provider=%s in the Nebius provider foundation", providerName)
+		return nil, core.Exit(2, "--tailscale is not supported for provider=%s in the Nebius provider foundation", providerName)
 	}
 	if err := p.ValidateConfig(cfg); err != nil {
 		return nil, err
@@ -51,30 +47,26 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return NewBackend(p.Spec(), cfg, rt), nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("nebius", func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
 func (Provider) ValidateConfig(cfg core.Config) error {
 	neb := cfg.Nebius
 	if strings.TrimSpace(neb.CLI) == "" {
-		return exit(2, "nebius.cli is required")
+		return core.Exit(2, "nebius.cli is required")
 	}
 	if err := validateNebiusUser(neb.User); err != nil {
 		return err
 	}
 	if neb.DiskSizeGiB <= 0 {
-		return exit(2, "nebius.diskSizeGiB must be positive")
+		return core.Exit(2, "nebius.diskSizeGiB must be positive")
 	}
 	switch strings.ToLower(strings.TrimSpace(neb.PublicIP)) {
 	case "", "dynamic", "none":
 	default:
-		return exit(2, "nebius.publicIP must be dynamic or none")
+		return core.Exit(2, "nebius.publicIP must be dynamic or none")
 	}
 	switch strings.ToLower(strings.TrimSpace(neb.RecoveryPolicy)) {
 	case "", "fail":
 	default:
-		return exit(2, "nebius.recoveryPolicy must be fail")
+		return core.Exit(2, "nebius.recoveryPolicy must be fail")
 	}
 	return nil
 }

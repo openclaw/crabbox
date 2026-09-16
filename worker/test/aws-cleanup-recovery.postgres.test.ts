@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 
 import { NodeCoordinatorRuntime } from "../node/node-runtime";
-import { AsyncMutex } from "../node/server-support";
+import { AsyncMutex } from "../src/async-mutex";
 import type { AWSLegacyCleanupAudit } from "../src/aws-cleanup-recovery";
 import type { CoordinatorStorageView } from "../src/coordinator-runtime";
 import { AWSProvider, FleetCoordinator } from "../src/fleet";
@@ -20,6 +20,7 @@ const headers = {
   "x-crabbox-owner": "alice@example.com",
   "x-crabbox-org": "example-org",
   "x-crabbox-admin": "true",
+  "x-crabbox-admin-grant-version": "a".repeat(64),
 };
 
 const env = {

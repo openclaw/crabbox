@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const providerName = "external"
@@ -17,8 +16,6 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return []string{"exec-provider"} }
 func (Provider) DiagnosticSecrets(cfg core.Config) []string {
 	passwordEnv := strings.TrimSpace(cfg.External.Connection.Desktop.PasswordEnv)
 	if password, ok := core.LookupExternalDesktopPassword(cfg, passwordEnv); ok {
@@ -28,6 +25,7 @@ func (Provider) DiagnosticSecrets(cfg core.Config) []string {
 }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"exec-provider"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationExternalContract),
 		Name:             providerName,
 		Family:           "external",
@@ -181,8 +179,4 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	core.SetExternalRoutingTarget(&cfg.External, cfg.TargetOS, cfg.WindowsMode)
 	core.SetExternalRoutingArchitecture(&cfg.External, cfg.Architecture)
 	return &leaseBackend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor(providerName, func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

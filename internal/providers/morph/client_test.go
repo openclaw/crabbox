@@ -11,7 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/openclaw/crabbox/internal/providers/shared"
+	core "github.com/openclaw/crabbox/internal/cli"
+
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -79,10 +80,7 @@ func TestMorphClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
 	}))
 	defer trusted.Close()
 
-	client, err := newMorphClient(
-		Config{Morph: MorphConfig{APIKey: "test-key", APIURL: trusted.URL}},
-		Runtime{HTTP: trusted.Client()},
-	)
+	client, err := newMorphClient(core.Config{Morph: core.MorphConfig{APIKey: "test-key", APIURL: trusted.URL}}, core.Runtime{HTTP: trusted.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,10 +111,7 @@ func TestMorphClientFollowsSameOriginRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := newMorphClient(
-		Config{Morph: MorphConfig{APIKey: "test-key", APIURL: server.URL}},
-		Runtime{HTTP: server.Client()},
-	)
+	client, err := newMorphClient(core.Config{Morph: core.MorphConfig{APIKey: "test-key", APIURL: server.URL}}, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,10 +136,7 @@ func TestMorphClientPreservesCallerRedirectPolicy(t *testing.T) {
 		callerChecks++
 		return callerErr
 	}
-	client, err := newMorphClient(
-		Config{Morph: MorphConfig{APIKey: "test-key", APIURL: server.URL}},
-		Runtime{HTTP: httpClient},
-	)
+	client, err := newMorphClient(core.Config{Morph: core.MorphConfig{APIKey: "test-key", APIURL: server.URL}}, core.Runtime{HTTP: httpClient})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,8 +162,8 @@ func TestSameMorphOrigin(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			candidate, _ := url.Parse(test.raw)
-			if got := shared.SameOrigin(trusted, candidate); got != test.want {
-				t.Fatalf("shared.SameOrigin(%q)=%v, want %v", test.raw, got, test.want)
+			if got := core.SameHTTPOrigin(trusted, candidate); got != test.want {
+				t.Fatalf("core.SameHTTPOrigin(%q)=%v, want %v", test.raw, got, test.want)
 			}
 		})
 	}

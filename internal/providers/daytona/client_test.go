@@ -11,6 +11,7 @@ import (
 	"time"
 
 	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const daytonaControlTestTimeout = 40 * time.Millisecond
@@ -59,9 +60,9 @@ func TestDaytonaControlRequestsUseDefaultOrCallerDeadline(t *testing.T) {
 			if test.injected {
 				supplied = &http.Client{Transport: transport, Timeout: test.clientTimeout}
 			}
-			cfg := Config{}
+			cfg := core.Config{}
 			cfg.Daytona.APIKey, cfg.Daytona.APIURL = "daytona-test", "http://127.0.0.1"
-			api, err := newDaytonaClient(cfg, Runtime{HTTP: supplied})
+			api, err := newDaytonaClient(cfg, core.Runtime{HTTP: supplied})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -99,9 +100,9 @@ func TestDaytonaControlClientBoundsStalledResponses(t *testing.T) {
 				<-req.Context().Done()
 			}))
 			defer server.Close()
-			cfg := Config{}
+			cfg := core.Config{}
 			cfg.Daytona.APIKey, cfg.Daytona.APIURL = "daytona-test", server.URL
-			api, err := newDaytonaClient(cfg, Runtime{})
+			api, err := newDaytonaClient(cfg, core.Runtime{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -169,7 +170,7 @@ func TestDaytonaListCrabboxSandboxesUsesCursorPagination(t *testing.T) {
 	if got[1].GetId() != "sandbox-two" || got[1].GetLabels()["slug"] != "slug-two" {
 		t.Fatalf("second sandbox=%#v labels=%#v", got[1], got[1].GetLabels())
 	}
-	resolved, leaseID, err := resolveDaytonaSandbox(context.Background(), client, Config{}, "slug-two")
+	resolved, leaseID, err := resolveDaytonaSandbox(context.Background(), client, core.Config{}, "slug-two")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +208,7 @@ func TestResolveDaytonaSandboxDirectLookupErrorHandling(t *testing.T) {
 	apiCfg.HTTPClient = srv.Client()
 	client := &daytonaSDKClient{api: apidaytona.NewAPIClient(apiCfg), token: "api-token"}
 
-	got, leaseID, err := resolveDaytonaSandbox(context.Background(), client, Config{}, "direct-one")
+	got, leaseID, err := resolveDaytonaSandbox(context.Background(), client, core.Config{}, "direct-one")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,13 +216,13 @@ func TestResolveDaytonaSandboxDirectLookupErrorHandling(t *testing.T) {
 		t.Fatalf("direct lookup=%s lease=%s, want direct-one cbx_111111111111", got.GetId(), leaseID)
 	}
 
-	_, _, err = resolveDaytonaSandbox(context.Background(), client, Config{}, "missing")
-	var exitErr ExitError
+	_, _, err = resolveDaytonaSandbox(context.Background(), client, core.Config{}, "missing")
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 4 || !strings.Contains(err.Error(), "daytona sandbox not found: missing") {
 		t.Fatalf("missing err=%v, want local not-found exit", err)
 	}
 
-	_, _, err = resolveDaytonaSandbox(context.Background(), client, Config{}, "denied")
+	_, _, err = resolveDaytonaSandbox(context.Background(), client, core.Config{}, "denied")
 	if err == nil || !strings.Contains(err.Error(), "daytona get sandbox: 401 Unauthorized") {
 		t.Fatalf("denied err=%v, want preserved get-sandbox failure", err)
 	}
@@ -232,7 +233,7 @@ func TestResolveDaytonaSandboxDirectLookupErrorHandling(t *testing.T) {
 		t.Fatalf("denied err=%v, want no not-found rewrite", err)
 	}
 
-	_, _, err = resolveDaytonaSandbox(context.Background(), client, Config{}, "unowned")
+	_, _, err = resolveDaytonaSandbox(context.Background(), client, core.Config{}, "unowned")
 	if !errors.As(err, &exitErr) || exitErr.Code != 4 || !strings.Contains(err.Error(), "is not owned by Crabbox") {
 		t.Fatalf("unowned err=%v, want ownership refusal", err)
 	}

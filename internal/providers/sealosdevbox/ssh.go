@@ -167,7 +167,7 @@ func (b *backend) waitForSSH(ctx context.Context, target *core.SSHTarget, phase 
 	if waiter == nil {
 		waiter = core.WaitForSSHReady
 	}
-	return waiter(ctx, target, b.rt.Stderr, phase, bootstrapWaitTimeout(b.cfg))
+	return waiter(ctx, target, b.rt.Stderr, phase, core.BootstrapWaitTimeout(b.cfg))
 }
 
 func (b *backend) prepareSSH(ctx context.Context, target *core.SSHTarget, phase string) error {

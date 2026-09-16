@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path"
+	"io"
 	"strings"
 	"time"
 
@@ -12,15 +12,15 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func NewModalBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewModalBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	return &modalBackend{spec: spec, cfg: cfg, rt: rt}
 }
 
 type modalBackend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
 const (
@@ -28,9 +28,9 @@ const (
 	modalCleanupTimeout    = 2 * time.Minute
 )
 
-func (b *modalBackend) Spec() ProviderSpec { return b.spec }
+func (b *modalBackend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *modalBackend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *modalBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	started := core.ClockNow(b.rt.Clock)
 	client, err := newModalAPI(b.cfg, b.rt)
 	if err != nil {
@@ -54,7 +54,7 @@ func (b *modalBackend) Warmup(ctx context.Context, req WarmupRequest) error {
 	})
 }
 
-func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *modalBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
 	workdir, workdirErr := cleanModalWorkdir(modalWorkdir(b.cfg))
 	var client modalAPI
 	var claim core.LeaseClaim
@@ -88,11 +88,22 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 			client, err = newModalAPI(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-modal-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-			})
+		Workspace: func() shared.SandboxWorkspace {
+			workspace := b.workspace(client, sandboxID, req, workdir)
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: workspace.PrepareArchive,
+				SyncFunc: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					var phases []core.TimingPhase
+					var elapsed time.Duration
+					err := fenced(func() error {
+						var err error
+						phases, elapsed, err = workspace.Sync(ctx, prepared)
+						return err
+					})
+					return phases, elapsed, err
+				},
+				EnsureFunc: func(ctx context.Context) error { return fenced(func() error { return workspace.Ensure(ctx) }) },
+			}
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
@@ -113,26 +124,13 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 			}
 			return handle(), err
 		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			var phases []core.TimingPhase
-			var elapsed time.Duration
-			err := fenced(func() error {
-				var err error
-				phases, elapsed, err = b.syncWorkspace(ctx, client, sandboxID, req, workdir, prepared)
-				return err
-			})
-			return phases, elapsed, err
-		},
-		NoSync: func(ctx context.Context) error {
-			return fenced(func() error { return b.prepareWorkspace(ctx, client, sandboxID, workdir) })
-		},
 		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
-			command, err := buildModalCommand(req.Command, req.ShellMode, workdir)
+			command, err := buildModalCommand(req, workdir)
 			if err != nil {
 				return shared.DelegatedSandboxCommand{}, err
 			}
 			if req.EnvSummary {
-				printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			var cleanup func(context.Context)
 			var closeCommand func(context.Context) error
@@ -154,13 +152,13 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 				}
 				command = shared.WrapCommandWithShellEnvProfile(command, envPath)
 			}
-			return shared.DelegatedSandboxCommand{Close: closeCommand, Run: func(ctx context.Context) (int, error) {
+			return shared.DelegatedSandboxCommand{OutputScope: core.RunOutputProvider, Close: closeCommand, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 				var code int
 				err := fenced(func() error {
 					var err error
 					code, err = client.Exec(ctx, modalExecRequest{
 						SandboxID: sandboxID, Command: command,
-						Timeout: durationSecondsCeil(modalTimeoutDuration(b.cfg.TTL)), Stdout: b.rt.Stdout, Stderr: b.rt.Stderr,
+						Timeout: durationSecondsCeil(modalTimeoutDuration(b.cfg.TTL)), Stdout: stdout, Stderr: stderr,
 					})
 					return err
 				})
@@ -173,7 +171,7 @@ func (b *modalBackend) Run(ctx context.Context, req RunRequest) (RunResult, erro
 	})
 }
 
-func (b *modalBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *modalBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	_ = req
 	client, err := newModalAPI(b.cfg, b.rt)
 	if err != nil {
@@ -183,46 +181,42 @@ func (b *modalBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, 
 	if err != nil {
 		return nil, modalError("list sandboxes", err)
 	}
-	servers := make([]Server, 0, len(sandboxes))
+	servers := make([]core.Server, 0, len(sandboxes))
 	for _, sandbox := range sandboxes {
 		servers = append(servers, modalSandboxToServer(sandbox))
 	}
 	return servers, nil
 }
 
-func (b *modalBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
-	servers, err := b.List(ctx, ListRequest{})
+func (b *modalBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	servers, err := b.List(ctx, core.ListRequest{})
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	return inventoryDoctorResult(providerName, len(servers)), nil
+	return core.InventoryDoctorResult(providerName, len(servers)), nil
 }
 
-func (b *modalBackend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *modalBackend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	client, err := newModalAPI(b.cfg, b.rt)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	leaseID, sandboxID, slug, err := b.resolveSandboxID(ctx, client, req.ID)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
-	return shared.PollDelegatedStatus(ctx, shared.DelegatedStatusRequest{
-		Wait: req.Wait, WaitTimeout: req.WaitTimeout,
-		Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-		Observe: func(ctx context.Context) (StatusView, bool, error) {
-			sandbox, err := client.GetSandbox(ctx, sandboxID)
-			if err != nil {
-				return StatusView{}, false, modalError("get sandbox", err)
-			}
-			view := modalStatusView(leaseID, slug, sandbox)
-			return view, false, nil
-		},
-		TimeoutError: func() error { return exit(5, "timed out waiting for modal sandbox %s to become ready", sandboxID) },
+	return shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
+		sandbox, err := client.GetSandbox(ctx, sandboxID)
+		if err != nil {
+			return core.StatusView{}, false, modalError("get sandbox", err)
+		}
+		return modalStatusView(leaseID, slug, sandbox), false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for modal sandbox %s to become ready", sandboxID)
 	})
 }
 
-func (b *modalBackend) Stop(ctx context.Context, req StopRequest) error {
+func (b *modalBackend) Stop(ctx context.Context, req core.StopRequest) error {
 	claim, err := resolveModalClaim(req.ID)
 	if err != nil {
 		return err
@@ -238,16 +232,16 @@ func (b *modalBackend) Stop(ctx context.Context, req StopRequest) error {
 	return nil
 }
 
-func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo Repo, keep, reclaim bool, requestedSlug string) (core.LeaseClaim, modalSandbox, error) {
+func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo core.Repo, keep, reclaim bool, requestedSlug string) (core.LeaseClaim, modalSandbox, error) {
 	if strings.TrimSpace(repo.Root) == "" {
-		return core.LeaseClaim{}, modalSandbox{}, exit(2, "Modal acquisition requires a repository root for durable ownership")
+		return core.LeaseClaim{}, modalSandbox{}, core.Exit(2, "Modal acquisition requires a repository root for durable ownership")
 	}
 	workspace, err := cleanModalWorkdir(modalWorkdir(b.cfg))
 	if err != nil {
 		return core.LeaseClaim{}, modalSandbox{}, err
 	}
 	leaseID := core.NewLeaseID()
-	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
+	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
 		return core.LeaseClaim{}, modalSandbox{}, err
 	}
@@ -270,7 +264,7 @@ func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo 
 		return core.LeaseClaim{}, modalSandbox{}, fmt.Errorf("%w; inspect Modal app=%s lease=%s before native cleanup of an uncertain creation", modalError("create sandbox", err), modalApp(cfg), leaseID)
 	}
 	if sandbox.ID == "" {
-		return core.LeaseClaim{}, modalSandbox{}, exit(5, "modal create sandbox returned no sandbox id; inspect Modal app=%s lease=%s", modalApp(cfg), leaseID)
+		return core.LeaseClaim{}, modalSandbox{}, core.Exit(5, "modal create sandbox returned no sandbox id; inspect Modal app=%s lease=%s", modalApp(cfg), leaseID)
 	}
 	binding := modalBinding{ID: sandbox.ID, LeaseID: leaseID, Slug: slug, Scope: sandbox.Scope}
 	if err := binding.validate(sandbox); err != nil {
@@ -292,11 +286,11 @@ func (b *modalBackend) createSandbox(ctx context.Context, client modalAPI, repo 
 }
 
 func modalCleanupCommand(leaseID string) string {
-	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, shellQuote(leaseID))
+	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, core.ShellQuote(leaseID))
 }
 
-func modalSandboxTags(cfg Config, leaseID, slug, repoName string, keep bool, now time.Time) map[string]string {
-	base := directLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
+func modalSandboxTags(cfg core.Config, leaseID, slug, repoName string, keep bool, now time.Time) map[string]string {
+	base := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
 	tags := map[string]string{
 		"crabbox":    "true",
 		"provider":   providerName,
@@ -317,9 +311,9 @@ func modalSandboxTags(cfg Config, leaseID, slug, repoName string, keep bool, now
 func (b *modalBackend) resolveSandboxID(ctx context.Context, client modalAPI, id string) (string, string, string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return "", "", "", exit(2, "provider=modal requires a Crabbox lease id, slug, or Modal sandbox id")
+		return "", "", "", core.Exit(2, "provider=modal requires a Crabbox lease id, slug, or Modal sandbox id")
 	}
-	if claim, ok, err := resolveLeaseClaim(id); err != nil {
+	if claim, ok, err := core.ResolveLeaseClaim(id); err != nil {
 		return "", "", "", err
 	} else if ok && claim.Provider == providerName {
 		if claim.CloudID != "" {
@@ -348,7 +342,7 @@ func (b *modalBackend) resolveSandboxID(ctx context.Context, client modalAPI, id
 	if err != nil && !isModalNotFoundError(err) {
 		return "", "", "", modalError("get sandbox", err)
 	}
-	return "", "", "", exit(4, "modal sandbox or claim %q was not found", id)
+	return "", "", "", core.Exit(4, "modal sandbox or claim %q was not found", id)
 }
 
 func resolveModalSandboxByLease(ctx context.Context, client modalAPI, leaseID string) (modalSandbox, error) {
@@ -361,10 +355,10 @@ func resolveModalSandboxByLease(ctx context.Context, client modalAPI, leaseID st
 			return sandbox, nil
 		}
 	}
-	return modalSandbox{}, exit(4, "modal lease %q was not found", leaseID)
+	return modalSandbox{}, core.Exit(4, "modal lease %q was not found", leaseID)
 }
 
-func modalSandboxToServer(sandbox modalSandbox) Server {
+func modalSandboxToServer(sandbox modalSandbox) core.Server {
 	labels := map[string]string{}
 	for k, v := range sandbox.Tags {
 		labels[k] = v
@@ -372,13 +366,13 @@ func modalSandboxToServer(sandbox modalSandbox) Server {
 	labels["provider"] = providerName
 	labels["lease"] = modalLeaseID(sandbox)
 	if labels["slug"] == "" {
-		labels["slug"] = newLeaseSlug(labels["lease"])
+		labels["slug"] = core.NewLeaseSlug(labels["lease"])
 	}
 	labels["target"] = targetLinux
 	if labels["state"] == "" {
 		labels["state"] = sandbox.Status
 	}
-	server := Server{
+	server := core.Server{
 		Provider: providerName,
 		CloudID:  sandbox.ID,
 		Name:     core.Blank(sandbox.Name, sandbox.ID),
@@ -389,9 +383,9 @@ func modalSandboxToServer(sandbox modalSandbox) Server {
 	return server
 }
 
-func modalStatusView(leaseID, slug string, sandbox modalSandbox) StatusView {
+func modalStatusView(leaseID, slug string, sandbox modalSandbox) core.StatusView {
 	server := modalSandboxToServer(sandbox)
-	return StatusView{
+	return core.StatusView{
 		ID:         leaseID,
 		Slug:       core.Blank(slug, modalSlug(leaseID, sandbox)),
 		Provider:   providerName,
@@ -425,39 +419,27 @@ func modalSlug(leaseID string, sandbox modalSandbox) string {
 	if slug := strings.TrimSpace(sandbox.Tags["slug"]); slug != "" {
 		return slug
 	}
-	return newLeaseSlug(leaseID)
+	return core.NewLeaseSlug(leaseID)
 }
 
 func isCrabboxModalSandbox(sandbox modalSandbox) bool {
 	return sandbox.Tags["provider"] == providerName && sandbox.Tags["crabbox"] == "true"
 }
 
-func modalApp(cfg Config) string {
+func modalApp(cfg core.Config) string {
 	return core.Blank(strings.TrimSpace(cfg.Modal.App), core.ModalConfigDefaultApp)
 }
 
-func modalImage(cfg Config) string {
+func modalImage(cfg core.Config) string {
 	return core.Blank(strings.TrimSpace(cfg.Modal.Image), core.ModalConfigDefaultImage)
 }
 
-func modalWorkdir(cfg Config) string {
+func modalWorkdir(cfg core.Config) string {
 	return core.Blank(strings.TrimSpace(cfg.Modal.Workdir), core.ModalConfigDefaultWorkdir)
 }
 
 func cleanModalWorkdir(workdir string) (string, error) {
-	trimmed := strings.TrimSpace(workdir)
-	if trimmed == "" {
-		return "", exit(2, "modal workdir is empty")
-	}
-	clean := path.Clean(trimmed)
-	if !strings.HasPrefix(clean, "/") {
-		return "", exit(2, "modal workdir %q must resolve to an absolute path", workdir)
-	}
-	switch clean {
-	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace":
-		return "", exit(2, "modal workdir %q is too broad; choose a dedicated subdirectory", clean)
-	}
-	return clean, nil
+	return shared.CleanPOSIXWorkspacePath("modal workdir", workdir, "/workspace")
 }
 
 func modalTimeoutDuration(ttl time.Duration) time.Duration {
@@ -477,27 +459,21 @@ func durationSecondsCeil(duration time.Duration) int {
 	return int((duration + time.Second - 1) / time.Second)
 }
 
-func buildModalCommand(command []string, shellMode bool, workdir string) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
+func buildModalCommand(req core.RunRequest, workdir string) ([]string, error) {
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+	if err != nil {
+		return nil, err
 	}
-	var script string
-	if shellMode {
-		script = strings.Join(command, " ")
-	} else if shouldUseShell(command) || leadingEnvAssignment(command) {
-		script = shellScriptFromArgv(command)
-	} else {
-		script = "exec " + strings.Join(shellWords(command), " ")
-	}
+	script := intent.ShellSource()
 	if strings.TrimSpace(workdir) != "" {
-		script = "cd " + shellQuote(workdir) + " && " + script
+		script = "cd " + core.ShellQuote(workdir) + " && " + script
 	}
 	return []string{"bash", "-lc", script}, nil
 }
 
-func rejectModalSyncOptions(req RunRequest) error {
+func rejectModalSyncOptions(req core.RunRequest) error {
 	if req.ChecksumSync {
-		return exit(2, "%s uses Modal archive sync; --checksum is not supported", providerName)
+		return core.Exit(2, "%s uses Modal archive sync; --checksum is not supported", providerName)
 	}
 	return nil
 }

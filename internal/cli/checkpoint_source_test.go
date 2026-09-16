@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"github.com/gofrs/flock"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 func TestCheckpointSourceCoordinatorAbsenceRequiresExactReleaseReceipt(t *testing.T) {
@@ -61,7 +62,7 @@ func TestCheckpointCoordinatorReleaseHoldsClaimFenceThroughMutation(t *testing.T
 		t.Run(map[bool]string{false: "confirmed", true: "retained"}[retained], func(t *testing.T) {
 			isolateTestUserDirs(t)
 			const id = "cbx_abcdef123456"
-			if err := claimLeaseTargetForConfig(id, "capture-fence", Config{Provider: "aws"}, Server{Provider: "aws", CloudID: "i-fixture"}, SSHTarget{}, time.Hour); err != nil {
+			if err := ClaimLeaseTargetForConfig(id, "capture-fence", Config{Provider: "aws"}, Server{Provider: "aws", CloudID: "i-fixture"}, SSHTarget{}, time.Hour); err != nil {
 				t.Fatal(err)
 			}
 			path, err := leaseClaimPath(id)

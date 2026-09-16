@@ -7,11 +7,11 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func RegisterCodeSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterCodeSandboxProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return core.RegisterCodeSandboxConfigFlags(fs, defaults.CodeSandbox)
 }
 
-func ApplyCodeSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyCodeSandboxProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	v, ok := values.(core.CodeSandboxConfigFlagValues)
 	if !ok {
 		return nil

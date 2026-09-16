@@ -48,7 +48,7 @@ adopted workspace when it cannot safely rebuild that path. See
 
 ## What gets synced
 
-Sync transfers the Git-managed working set, not the whole directory tree. The
+By default (`sync.source: git`), sync transfers the Git-managed working set, not the whole directory tree. The
 file list comes from `git ls-files --cached --others --exclude-standard -z`,
 which is:
 
@@ -83,6 +83,68 @@ letting you test uncommitted local edits.
 
 Filesystem Git origins are resolved on the runner during Git seeding and must
 be readable from that runner; otherwise Crabbox falls back to a full manifest sync.
+
+### Explicit directory source
+
+Use `sync.source: directory` to sync an include-only working set from a directory
+without creating a repository. There is no automatic fallback when Git discovery
+fails. The source root is the effective current working directory, including when
+that directory is inside an outer Git checkout; `run --workdir` selects that
+current directory before loading configuration. A nonempty `sync.include`
+allowlist is required:
+
+```yaml
+sync:
+  source: directory
+  include: [README.md, src]
+```
+
+`CRABBOX_SYNC_SOURCE=git|directory` overrides the YAML selection. Installed Git
+is still required: Crabbox creates private, temporary bare metadata **outside**
+the source and uses an empty index to ask Git for nonignored files. Only
+`.gitignore` files in the selected source tree participate, not the outer
+repository's ignores, `.git/info/exclude`, or global Git excludes. Crabbox does
+not create `.git`, stage files, or change source Git configuration. Temporary
+metadata is removed after enumeration; the system temporary directory must be
+outside the selected source.
+
+The resulting paths pass through the same include, ordered exclude, filesystem,
+managed-state, and size checks as ordinary sync. All directory-source files are
+untracked for built-in artifact filtering; no tracked-file exemption or Git
+dirty delta is manufactured. Git-ignored files are absent before Crabbox exclude
+negations run, so those negations cannot restore them. Includes keep their
+existing prefix/ordinary-glob syntax, not recursive globstar syntax. For example,
+`src` selects descendants, while `src/*` only matches direct paths under `src`.
+An in-scope nested repository is rejected rather than silently omitting its
+contents; exclude that subtree or run from it as the selected source. A nested
+repository outside the include scope, a fully excluded literal include prefix,
+or an identically excluded include pattern does not block the plan unless later
+rules can reinclude descendants. Nested repositories are not traversed to resolve
+other overlapping wildcard rules. For example, include `src/nested/file?.txt`
+and exclude `src/nested/*.txt` still require an explicit `src/nested` subtree
+exclude: when the whole nested scope cannot be established by these bounded
+checks, Crabbox stops with guidance rather than silently dropping contents.
+Ordinary files continue to use the existing ordered matching rules.
+
+Directory mode uses the existing managed-manifest SSH transport on POSIX and
+WSL targets. The complete candidate list and size limits are checked before
+acquisition, then rebuilt and checked again before transfer. An empty admitted
+list is allowed without widening the allowlist: ordinary managed-manifest
+pruning removes previously synced files, subject to the existing deletion
+settings and guards, while unrelated remote files remain outside that manifest.
+
+`watch`, delegated/native-source providers, native-Windows archive replacement,
+Git-backed ready pools, Actions hydration/owned workspaces, `sync.gitOverlay`,
+`sync.baseRef`, `--fresh-pr`, and `--apply-local-patch` are unsupported. Explicit
+unsupported selections fail before acquisition; an existing Actions-owned
+workspace is rejected after its marker is read, before sync changes it; lookup failures stop rather than assume a raw workspace. Default
+Git seeding and fingerprinting are inapplicable, and directory runs explicitly
+use plain-manifest mode. Native Jujutsu workspaces remain unsupported.
+
+With `--no-sync`, a valid directory selection is inactive: no include requirement,
+enumeration, or temporary Git metadata is needed. Existing provider-specific
+`--no-sync` restrictions still apply. Unrelated sync settings do not prevent
+`stop` from cleaning up an existing lease.
 
 ### Jujutsu workspaces
 
@@ -159,6 +221,39 @@ If a project stores source files in one of these reserved directories, move
 them elsewhere before upgrading; reserved runtime paths are no longer eligible
 for sync even when they are tracked or explicitly re-included.
 
+An explicit `XDG_STATE_HOME` adds its exact `crabbox` subtree to protected
+runtime state. The path is literal, not a glob, and includes or negations cannot
+re-enable it. Other files beneath the selected state base remain eligible for
+sync. Crabbox rejects a source root inside the managed namespace instead of
+silently uploading an empty checkout. When this namespace overlaps a checkout,
+Git seeding is disabled so a seeded tree cannot materialize excluded paths.
+These protections do not remove state already committed upstream or previously
+shared with a runner.
+Snapshot acceptance compares the effective protected subtree alongside ordinary
+ignore rules, so a changed managed-state exclusion scope requires revalidation.
+
+Managed-state filtering also applies to historical deletion paths. Replacing a
+tracked directory with a regular file still syncs the replacement and removes
+the previously managed descendants, even though their old parent directories
+no longer exist.
+
+On macOS, managed-state path spelling uses entry-name and identity attributes
+relative to a retained parent descriptor, rather than opening the leaf or
+enumerating sibling files. This also supports Unix socket and FIFO entries
+without opening them, while preserving object-identity and namespace checks.
+Crowded temporary directories do not block sync preparation.
+
+Native transports without subtree filtering require the selected managed
+namespace to be outside their shared source scope. This includes Blacksmith's
+native repository sync, Docker Sandbox's repository and extra workspaces, Apple
+Machine's home mount, and Local Container's host volumes and Docker-socket-mode
+host work root.
+Crabbox rejects an overlapping source before transferring or mounting it.
+`--no-sync` does not disable native mounts. Choose a state root outside those
+shared directories; do not rely on `.gitignore` to protect a host mount.
+Explicit file copies, scripts, and arbitrary native arguments are separate
+user-directed operations, not covered by repository filtering.
+
 Repo-local config should hold project-specific excludes and env allowlists.
 Secrets must never be passed as command-line arguments or via broad env globs.
 
@@ -195,6 +290,8 @@ waiting child from running the workload. After handoff, the existing witnessed
 child and recovery rules continue to apply. A denied `kill -0` is never proof
 that a recorded child is dead: cleanup and recovery require independent PID
 absence evidence, and retain authority when observation is ambiguous.
+If a child exits between the signal and start-time probes, the same PID absence
+check allows the completed phase to settle without retrying an ambiguous result.
 
 Once ownership is established, sync runs these steps:
 
@@ -207,8 +304,8 @@ Once ownership is established, sync runs these steps:
    the remote one. If they match, print
    `No changes detected, skipping sync` and skip the rest.
 5. On `--full-resync` / `--fresh-sync`, reset the remote workdir first.
-6. Seed the remote Git tree from `origin` at the local `HEAD` when that commit
-   is reachable from a remote ref, so rsync only ships the diff.
+6. Seed the remote Git tree from `origin` at the local `HEAD` when the runner
+   can fetch that commit, so rsync only ships the diff.
 7. Write the manifest (and the deletion list) to the remote workdir.
 8. When delete-sync is enabled, prune previously synced remote files that are no
    longer in the manifest.
@@ -241,8 +338,7 @@ already carries that fingerprint, the sync is skipped entirely. `--full-resync`
 ignores the remote fingerprint and forces a clean transfer.
 
 Git seeding (`sync.gitSeed`, default on) clones or fetches the base tree on the
-runner before rsync, so only your diff travels over the wire. It activates only
-when the local `HEAD` commit is reachable from a remote ref.
+runner before rsync, so only your diff travels over the wire.
 Among local origin tracking branches that contain the selected commit, Crabbox
 prefers the explicit `sync.baseRef` (or the inferred repository base when unset),
 then origin's symbolic default branch, then
@@ -251,6 +347,20 @@ commits; the selected commit and tree remain unchanged. Planning does not contac
 origin or prune tracking refs, so a local candidate may still be stale. On the
 runner, Git coherence fetches the chosen advertised branch and verifies target
 ancestry and tree before aligning metadata.
+
+Without a containing origin tracking branch, POSIX/WSL2 delete-sync attempts an exact
+commit fetch from the same origin. This supports detached CI merge commits and
+other commits the remote serves by SHA without creating local tracking refs.
+The runner verifies the commit and tree in a private directory before publishing
+the seed, then ordinary manifest pruning and rsync apply local edits, additions,
+deletions, and excludes. Missing runner Git and a refused or unavailable exact
+commit fetch fall back to plain file sync; commit or tree verification failures
+abort before transfer. With `sync.delete: false`, this optimization stays off so
+the seed cannot introduce excluded files that sync would then retain.
+These seeds do not enable branch-based coherence, reusable fingerprints, or Git
+overlay. Native Windows retains branch-only seeding because it transfers the
+complete archive. Submodules and filter-managed trees retain file sync when no
+containing branch is available.
 
 Crabbox disables Git seeding when the origin is an HTTP(S) URL with embedded
 userinfo, warns without printing the URL, and uses the normal file sync instead.
@@ -272,7 +382,7 @@ Fallback warnings contain only a fixed reason. The plain manifest path clears
 reusable fingerprints and Git hydration markers and does not forward local
 credentials.
 
-Local Actions hydration keeps unclassified seeding failures fatal, including
+For branch-based seeds, local Actions hydration keeps unclassified seeding failures fatal, including
 missing refs, verification failures, and HTTP 5xx or other server failures,
 and aborts before file sync. Seed failure diagnostics report a fixed phase,
 advisory category, and command exit status. Raw Git/SSH output, URLs, paths,
@@ -280,6 +390,80 @@ and credential-helper messages are never replayed in warnings. Capture is
 limited to 16 KiB in memory; oversized or unrecognized output produces an
 `unknown` diagnosis instead of guessing. Existing Git metadata may still be
 present; a failed seed has not established that it is current or usable.
+
+### Opt-in local Git metadata
+
+Use `sync.gitSeedSource: local`, `CRABBOX_SYNC_GIT_SEED_SOURCE=local`, or
+`--git-seed-source local` on `run` and `sync-plan` when the runner cannot fetch
+your origin. The default remains `origin`; local mode is never an automatic
+authentication fallback. `sync.gitSeed` must remain enabled.
+
+```sh
+crabbox sync-plan --git-seed-source local --json
+crabbox run --git-seed-source local --no-hydrate -- git describe --tags
+```
+
+Local mode freezes the complete ordinary file manifest and a self-contained Git
+bundle before acquiring a lease. The receiver imports only fresh metadata and
+an index at the selected `HEAD`; it does not check out historical files. Normal
+file transfer and deletion rules then apply the accepted working files, including
+dirty, staged, untracked, renamed, executable, and symlink paths. Local staging
+state is not copied: remote modifications are compared against the selected HEAD.
+Edits made after snapshot acceptance wait for the next sync.
+
+Snapshot file copying and content fingerprinting honor cancellation between
+reads and writes. Cancellation stops preparation and cleans owned staging; it
+does not fall back to another sync method. An already-blocked filesystem
+operation must return before cancellation can be observed. Cleanup failures
+retain their diagnostic path and error cause.
+Both operations read regular files within their observed sizes and verify that
+the file identity and metadata still match. Stable fingerprint encoding is unchanged.
+
+The bundle contains the complete selected HEAD and base histories, plus locally
+present tags that peel to those histories. An explicit `sync.baseRef` must resolve
+locally; short names prefer the corresponding origin tracking ref. An inferred
+base is optional, so detached repositories without an origin work too. Selected
+ref names are recreated without remote URLs; the bundle's internal HEAD anchor
+is not installed as a receiver ref. Exact commit, tree, blob, and tag identities
+are preserved, allowing offline parent queries, historical diffs, and ordinary
+`git describe`/`git describe --tags`. Root commits still have no parent, unrelated
+histories still have no merge base, and unrelated descendant tags are not copied.
+Abbreviated object IDs can differ when unrelated objects are omitted.
+
+**Exclusions do not redact Git history.** They control materialized working files,
+not blobs committed in selected history. That history can contain excluded paths
+or previously committed sensitive content. Use local seeding only when transferring
+the complete selected histories is appropriate. Source configuration, hooks,
+credential helpers, remotes, reflogs, worktree registrations, and alternate paths
+are not transferred. Linked worktrees and readable local alternate object stores
+are supported; the resulting bundle has no dependency on those stores.
+
+Preparation does not fetch missing objects. Incomplete selected histories,
+unreadable tag targets, conflicts, hidden sparse paths, assume-unchanged entries,
+and submodules fail with a local diagnostic instead of silently dropping metadata.
+The combined full file payload and uncompressed Git objects count against ordinary
+sync size guardrails, even when the dirty delta is small. The existing allow-large
+override affects those soft limits only. Separate hard bounds limit each of the
+uncompressed object total and bundle to 512 MiB, control output to 16 MiB, and
+selected objects to one million; a control-output limit may be reached first.
+Metadata preparation and import each have a five-minute deadline. `sync-plan`
+reports selected identities, object count, object bytes, bundle bytes, and digest;
+timing JSON adds `syncMode: "git-local"` and `syncSeedBytes`.
+
+Local metadata is supported on ordinary SSH-backed Linux, macOS, WSL2, and native
+Windows targets with a compatible Git version. Existing workspaces must either
+have no `.git` or contain metadata previously created by local mode. Switching an
+existing origin checkout requires an explicit `--full-resync`; otherwise Crabbox
+refuses to replace it. POSIX fingerprint reuse verifies local metadata identity
+and completeness; native Windows retains full archive transfer. Failed preparation
+or verification never falls back to origin or file-only sync. Cleanup failures
+report retained temporary state instead of declaring a successful transfer.
+
+Actions hydration, fresh PR checkouts, ready pools, directory sync, and Git overlay
+have different metadata owners and cannot be combined with local seeding. Use a
+raw workspace and `--no-hydrate` when Actions hydration is configured. `--no-sync`
+does not prepare or transfer a local seed. Existing mass-deletion guardrails still
+apply, including when many tracked paths are intentionally excluded.
 
 ### Opt-in Git overlay
 
@@ -302,6 +486,7 @@ fingerprint. Rsync reads the accepted snapshot, so edits made after acceptance
 wait for the next sync. If preparation cannot produce a stable supported
 snapshot, Crabbox falls back to ordinary full-manifest sync after successful
 cleanup. Cleanup failures stop the run and report the retained snapshot path.
+Cancellation stops preparation rather than triggering this fallback.
 
 The optimization is off by default and requires `sync.gitSeed: true`,
 `sync.delete: true`, an unrestricted, complete, conflict-free Git checkout

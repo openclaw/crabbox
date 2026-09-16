@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const hostingerRecoveryFile = "hostinger-recovery.json"
@@ -18,7 +20,7 @@ type hostingerRecoveryRecord struct {
 }
 
 func hostingerRecoveryRecordPath(leaseID string) (string, error) {
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := core.TestboxKeyPath(leaseID)
 	if err != nil {
 		return "", err
 	}
@@ -59,7 +61,7 @@ func removeHostingerRecoveryRecord(leaseID string) {
 }
 
 func findHostingerRecoveryRecord(vm hostingerVM) (hostingerRecoveryRecord, bool, error) {
-	probe, err := testboxKeyPath("cbx_hostinger_recovery_probe")
+	probe, err := core.TestboxKeyPath("cbx_hostinger_recovery_probe")
 	if err != nil {
 		return hostingerRecoveryRecord{}, false, err
 	}

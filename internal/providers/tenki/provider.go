@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -13,9 +12,6 @@ func init() {
 }
 
 type Provider struct{}
-
-func (Provider) Name() string      { return tenkiProvider }
-func (Provider) Aliases() []string { return nil }
 
 func (Provider) ClaimScope(cfg core.Config) string {
 	// Workspace and project no longer select Tenki CLI inventory. Keep them in
@@ -53,10 +49,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return NewTenkiBackend(p.Spec(), cfg, rt)
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("tenki", func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.Tenki.Image != "" {
 		return cfg.Tenki.Image
@@ -64,9 +56,5 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.Tenki.Snapshot != "" {
 		return "snapshot"
 	}
-	return "sandbox"
-}
-
-func (Provider) ServerTypeForClass(string) string {
 	return "sandbox"
 }

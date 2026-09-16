@@ -22,6 +22,15 @@ func RunSSHOutputBounded(ctx context.Context, target SSHTarget, remote string, m
 	return runSSHOutputBoundedWithOptions(ctx, target, remote, maxBytes, 0, "10", "1")
 }
 
+// RunSSHOutputBoundedWithExecutionTimeout lets the transport account for setup
+// and cleanup around a positive execution allowance. Caller deadlines still win.
+func RunSSHOutputBoundedWithExecutionTimeout(ctx context.Context, target SSHTarget, remote string, maxBytes int, executionTimeout time.Duration) (string, error) {
+	if executionTimeout <= 0 {
+		return "", errors.New("SSH execution timeout must be positive")
+	}
+	return runSSHOutputBoundedWithOptions(ctx, target, remote, maxBytes, executionTimeout, "10", "1")
+}
+
 func runSSHOutputBoundedWithOptions(ctx context.Context, target SSHTarget, remote string, maxBytes int, waitTimeout time.Duration, connectTimeout, attempts string) (string, error) {
 	if maxBytes <= 0 {
 		return "", fmt.Errorf("SSH output limit must be positive")

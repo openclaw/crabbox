@@ -27,7 +27,7 @@ type cleanupClient struct {
 	stopCalls  int
 }
 
-func (c *cleanupClient) ListCrabboxServersCluster(context.Context) ([]Server, error) {
+func (c *cleanupClient) ListCrabboxServersCluster(context.Context) ([]core.Server, error) {
 	c.listCalls++
 	if c.listHook != nil {
 		if err := c.listHook(c.listCalls); err != nil {
@@ -37,19 +37,19 @@ func (c *cleanupClient) ListCrabboxServersCluster(context.Context) ([]Server, er
 	if c.listErr != nil {
 		return nil, c.listErr
 	}
-	result := append([]Server(nil), c.servers...)
+	result := append([]core.Server(nil), c.servers...)
 	for i := range result {
 		result[i].Labels = maps.Clone(result[i].Labels)
 	}
 	return result, nil
 }
 
-func (c *cleanupClient) DeleteServerOnNodeChecked(ctx context.Context, node, id string, check func(Server) error) error {
+func (c *cleanupClient) DeleteServerOnNodeChecked(ctx context.Context, node, id string, check func(core.Server) error) error {
 	for step := range 2 {
 		if c.checkHook != nil {
 			c.checkHook(step)
 		}
-		var live Server
+		var live core.Server
 		for _, server := range c.servers {
 			if server.CloudID == id && server.HostID == node {
 				live = server
@@ -82,25 +82,25 @@ func cleanupFixture(t *testing.T) (*leaseBackend, *cleanupClient, core.LeaseClai
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_proxmox_cleanup"
-	cfg := Config{Provider: "proxmox", Proxmox: core.ProxmoxConfig{APIURL: "https://pve.example.test:8006", Node: "pve1"}}
+	cfg := core.Config{Provider: "proxmox", Proxmox: core.ProxmoxConfig{APIURL: "https://pve.example.test:8006", Node: "pve1"}}
 	server := expiredProxmoxServer("101", leaseID)
 	server.Provider, server.HostID, server.ImmutableID = "proxmox", "pve1", cleanupGeneration
 	server.Labels["provider"], server.Labels["crabbox"] = "proxmox", "true"
 	server.Labels["provider_key"] = core.ProviderKeyForLease(leaseID)
 	server.Labels["node"] = "pve1"
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", cfg, server, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "old", cfg, server, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, leaseID); err != nil {
 		t.Fatal(err)
 	}
 	claim := readCleanupClaim(t, leaseID)
-	client := &cleanupClient{fakeProxmoxDoctorClient: &fakeProxmoxDoctorClient{servers: []Server{server}}}
+	client := &cleanupClient{fakeProxmoxDoctorClient: &fakeProxmoxDoctorClient{servers: []core.Server{server}}}
 	previous := newClient
-	newClient = func(Config) (proxmoxClient, error) { return client, nil }
+	newClient = func(core.Config) (proxmoxClient, error) { return client, nil }
 	t.Cleanup(func() { newClient = previous })
 	output := &strings.Builder{}
-	backend := NewLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stdout: io.Discard, Stderr: output}).(*leaseBackend)
+	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: output}).(*leaseBackend)
 	return backend, client, claim, output
 }
 
@@ -126,7 +126,7 @@ func TestProxmoxCleanupPreservesVMAndStoredKeyWhenClaimIsMissing(t *testing.T) {
 	if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if c.stopCalls != 0 || c.deleteCalls != 0 || !strings.Contains(output.String(), "skip server") {
@@ -142,7 +142,7 @@ func TestProxmoxCleanupRejectsUnboundOrAmbiguousOwnership(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		claim func(*core.LeaseClaim)
-		vm    func(*Server)
+		vm    func(*core.Server)
 	}{
 		{name: "legacy scope", claim: func(c *core.LeaseClaim) { c.ProviderScope = "" }},
 		{name: "legacy VMID", claim: func(c *core.LeaseClaim) { c.CloudID = "" }},
@@ -155,17 +155,17 @@ func TestProxmoxCleanupRejectsUnboundOrAmbiguousOwnership(t *testing.T) {
 		{name: "claim lease label", claim: func(c *core.LeaseClaim) { c.Labels["lease"] = "cbx_other" }},
 		{name: "claim provider label", claim: func(c *core.LeaseClaim) { c.Labels["provider"] = "tart" }},
 		{name: "claim key namespace", claim: func(c *core.LeaseClaim) { c.Labels["provider_key"] = "other" }},
-		{name: "missing live generation", vm: func(s *Server) { s.ImmutableID = "" }},
-		{name: "recreated VMID", vm: func(s *Server) { s.ImmutableID = replacementGeneration }},
-		{name: "live provider", vm: func(s *Server) { s.Provider = "other" }},
-		{name: "live provider label", vm: func(s *Server) { delete(s.Labels, "provider") }},
-		{name: "live key namespace", vm: func(s *Server) { s.Labels["provider_key"] = "other" }},
-		{name: "live ownership label", vm: func(s *Server) { delete(s.Labels, "crabbox") }},
-		{name: "live slug", vm: func(s *Server) { s.Labels["slug"] = "other" }},
-		{name: "invalid lease label", vm: func(s *Server) { s.Labels["lease"] = "../target" }},
-		{name: "no lease label", vm: func(s *Server) { delete(s.Labels, "lease") }},
-		{name: "no node", vm: func(s *Server) { s.HostID = "" }},
-		{name: "neutral name", vm: func(s *Server) { s.Name = "my-vm" }},
+		{name: "missing live generation", vm: func(s *core.Server) { s.ImmutableID = "" }},
+		{name: "recreated VMID", vm: func(s *core.Server) { s.ImmutableID = replacementGeneration }},
+		{name: "live provider", vm: func(s *core.Server) { s.Provider = "other" }},
+		{name: "live provider label", vm: func(s *core.Server) { delete(s.Labels, "provider") }},
+		{name: "live key namespace", vm: func(s *core.Server) { s.Labels["provider_key"] = "other" }},
+		{name: "live ownership label", vm: func(s *core.Server) { delete(s.Labels, "crabbox") }},
+		{name: "live slug", vm: func(s *core.Server) { s.Labels["slug"] = "other" }},
+		{name: "invalid lease label", vm: func(s *core.Server) { s.Labels["lease"] = "../target" }},
+		{name: "no lease label", vm: func(s *core.Server) { delete(s.Labels, "lease") }},
+		{name: "no node", vm: func(s *core.Server) { s.HostID = "" }},
+		{name: "neutral name", vm: func(s *core.Server) { s.Name = "my-vm" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, c, claim, _ := cleanupFixture(t)
@@ -181,7 +181,7 @@ func TestProxmoxCleanupRejectsUnboundOrAmbiguousOwnership(t *testing.T) {
 			if tc.vm != nil {
 				tc.vm(&c.servers[0])
 			}
-			if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+			if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 				t.Fatal(err)
 			}
 			if c.stopCalls != 0 || c.deleteCalls != 0 {
@@ -201,14 +201,14 @@ func TestProxmoxCleanupRejectsDuplicateBindings(t *testing.T) {
 			if local {
 				duplicate.Labels["lease"] = "cbx_duplicate"
 				duplicate.Labels["provider_key"] = core.ProviderKeyForLease("cbx_duplicate")
-				if err := core.ClaimLeaseTargetForRepoConfig("cbx_duplicate", "old", b.Cfg, duplicate, SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+				if err := core.ClaimLeaseTargetForRepoConfig("cbx_duplicate", "old", b.Cfg, duplicate, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
 					t.Fatal(err)
 				}
 			} else {
 				duplicate.CloudID, duplicate.ImmutableID = "202", replacementGeneration
 				c.servers = append(c.servers, duplicate)
 			}
-			if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+			if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 				t.Fatal(err)
 			}
 			if c.stopCalls != 0 || c.deleteCalls != 0 {
@@ -224,7 +224,7 @@ func TestProxmoxCleanupExactClaimAndMigration(t *testing.T) {
 		t.Run(node, func(t *testing.T) {
 			b, c, claim, output := cleanupFixture(t)
 			c.servers[0].HostID = node
-			if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+			if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 				t.Fatal(err)
 			}
 			if c.stopCalls != 1 || c.deleteCalls != 1 || c.deletedNodes[0] != node || len(c.servers) != 0 {
@@ -248,7 +248,7 @@ func TestProxmoxCleanupDryRunAndKeptLease(t *testing.T) {
 			if !dry {
 				c.servers[0].Labels["keep"] = "true"
 			}
-			if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: dry}); err != nil {
+			if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: dry}); err != nil {
 				t.Fatal(err)
 			}
 			if c.stopCalls != 0 || c.deleteCalls != 0 {
@@ -266,14 +266,14 @@ func TestProxmoxCleanupRevalidatesLiveState(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		step int
-		edit func(*Server)
+		edit func(*core.Server)
 	}{
-		{"generation before stop", 0, func(s *Server) { s.ImmutableID = replacementGeneration }},
-		{"generation after stop", 1, func(s *Server) { s.ImmutableID = replacementGeneration }},
-		{"keep before stop", 0, func(s *Server) { s.Labels["keep"] = "true" }},
-		{"keep after stop", 1, func(s *Server) { s.Labels["keep"] = "true" }},
-		{"ownership after stop", 1, func(s *Server) { s.Labels["lease"] = "cbx_other" }},
-		{"node changed", 0, func(s *Server) { s.HostID = "pve2" }},
+		{"generation before stop", 0, func(s *core.Server) { s.ImmutableID = replacementGeneration }},
+		{"generation after stop", 1, func(s *core.Server) { s.ImmutableID = replacementGeneration }},
+		{"keep before stop", 0, func(s *core.Server) { s.Labels["keep"] = "true" }},
+		{"keep after stop", 1, func(s *core.Server) { s.Labels["keep"] = "true" }},
+		{"ownership after stop", 1, func(s *core.Server) { s.Labels["lease"] = "cbx_other" }},
+		{"node changed", 0, func(s *core.Server) { s.HostID = "pve2" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, c, claim, _ := cleanupFixture(t)
@@ -282,7 +282,7 @@ func TestProxmoxCleanupRevalidatesLiveState(t *testing.T) {
 					tc.edit(&c.servers[0])
 				}
 			}
-			if err := b.Cleanup(context.Background(), CleanupRequest{}); err == nil {
+			if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err == nil {
 				t.Fatal("expected changed live state rejection")
 			}
 			if c.deleteCalls != 0 || c.stopCalls != tc.step {
@@ -306,7 +306,7 @@ func TestProxmoxCleanupPreservesChangedClaim(t *testing.T) {
 		}
 		return nil
 	}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err == nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err == nil {
 		t.Fatal("changed claim must reject cleanup")
 	}
 	if c.stopCalls != 0 || c.deleteCalls != 0 {
@@ -333,7 +333,7 @@ func TestProxmoxCleanupFencesClaimWriterThroughAbsence(t *testing.T) {
 			return false, nil
 		}
 	}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -370,7 +370,7 @@ func TestProxmoxCleanupFailurePreservesClaim(t *testing.T) {
 			case "VM exists elsewhere":
 				c.existsHook = func() (bool, error) { return true, nil }
 			}
-			if err := b.Cleanup(context.Background(), CleanupRequest{}); err == nil {
+			if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err == nil {
 				t.Fatal("expected cleanup failure")
 			}
 			if (stage == "initial inventory" || stage == "fresh inventory" || stage == "stop") && c.deleteCalls != 0 {
@@ -389,7 +389,7 @@ func TestProxmoxCleanupReconcilesAmbiguousPurgeAcrossCluster(t *testing.T) {
 	previous := proxmoxDeleteVerifyPollInterval
 	proxmoxDeleteVerifyPollInterval = time.Millisecond
 	t.Cleanup(func() { proxmoxDeleteVerifyPollInterval = previous })
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "task polling unavailable") {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err == nil || !strings.Contains(err.Error(), "task polling unavailable") {
 		t.Fatalf("cleanup err=%v", err)
 	}
 	if reads != 3 {
@@ -415,10 +415,10 @@ func TestProxmoxEndpointUpdatesCannotRebindOwnership(t *testing.T) {
 			default:
 				server.Labels[field] = "other"
 			}
-			if err := core.UpdateLeaseClaimEndpoint(claim.LeaseID, server, SSHTarget{}); err == nil {
+			if err := core.UpdateLeaseClaimEndpoint(claim.LeaseID, server, core.SSHTarget{}); err == nil {
 				t.Fatal("endpoint update rebound exact claim")
 			}
-			if err := core.ClaimLeaseTargetForRepoConfig(claim.LeaseID, claim.Slug, b.Cfg, server, SSHTarget{}, claim.RepoRoot, time.Minute, false); err == nil {
+			if err := core.ClaimLeaseTargetForRepoConfig(claim.LeaseID, claim.Slug, b.Cfg, server, core.SSHTarget{}, claim.RepoRoot, time.Minute, false); err == nil {
 				t.Fatal("claim publication rebound exact claim")
 			}
 			assertCleanupClaimPreserved(t, claim)
@@ -433,16 +433,16 @@ func TestProxmoxEndpointRefreshDoesNotPromoteLegacyGeneration(t *testing.T) {
 	if err := core.ReplaceLeaseClaimIfUnchanged(claim.LeaseID, claim, legacy); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.UpdateLeaseClaimEndpoint(claim.LeaseID, c.servers[0], SSHTarget{Host: "192.0.2.4"}); err != nil {
+	if err := core.UpdateLeaseClaimEndpoint(claim.LeaseID, c.servers[0], core.SSHTarget{Host: "192.0.2.4"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := core.ClaimLeaseTargetForRepoConfig(claim.LeaseID, claim.Slug, b.Cfg, c.servers[0], SSHTarget{}, claim.RepoRoot, time.Minute, false); err != nil {
+	if err := core.ClaimLeaseTargetForRepoConfig(claim.LeaseID, claim.Slug, b.Cfg, c.servers[0], core.SSHTarget{}, claim.RepoRoot, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	if current := readCleanupClaim(t, claim.LeaseID); current.CloudImmutableID != "" {
 		t.Fatal("legacy generation silently promoted")
 	}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if c.deleteCalls != 0 || c.stopCalls != 0 {
@@ -452,11 +452,11 @@ func TestProxmoxEndpointRefreshDoesNotPromoteLegacyGeneration(t *testing.T) {
 
 func TestProxmoxTouchPreservesGenerationBinding(t *testing.T) {
 	b, c, claim, _ := cleanupFixture(t)
-	server, err := b.Touch(context.Background(), TouchRequest{Lease: LeaseTarget{LeaseID: claim.LeaseID, Server: c.servers[0]}, State: "ready"})
+	server, err := b.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: claim.LeaseID, Server: c.servers[0]}, State: "ready"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := core.UpdateLeaseClaimEndpoint(claim.LeaseID, server, SSHTarget{Host: "192.0.2.4"}); err != nil {
+	if err := core.UpdateLeaseClaimEndpoint(claim.LeaseID, server, core.SSHTarget{Host: "192.0.2.4"}); err != nil {
 		t.Fatal(err)
 	}
 	current := readCleanupClaim(t, claim.LeaseID)

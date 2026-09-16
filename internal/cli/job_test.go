@@ -61,13 +61,13 @@ func TestSynthesizedConfigFlagInputs(t *testing.T) {
 func TestJobSynthesizedLeaseFlagInputs(t *testing.T) {
 	clearConfigEnv(t)
 	p := architectureCapabilityTestProvider{}
-	providerRegistry[p.Name()] = p
-	t.Cleanup(func() { delete(providerRegistry, p.Name()) })
+	providerRegistry[p.Spec().Name] = p
+	t.Cleanup(func() { delete(providerRegistry, p.Spec().Name) })
 	cfg := baseConfig()
-	cfg.Provider = p.Name()
+	cfg.Provider = p.Spec().Name
 	recordConfigInput(&cfg, configInputGeneric, configInputRepo, true)
 	cfg.inputProvenance = cfg.inputProvenance.withCoverage(configInputGeneric, true)
-	job := JobConfig{Provider: p.Name(), Target: targetLinux, Class: "standard"}
+	job := JobConfig{Provider: p.Spec().Name, Target: targetLinux, Class: "standard"}
 	fs := newFlagSet("job projected flags", io.Discard)
 	values := registerLeaseCreateFlags(fs, cfg)
 	if err := fs.Parse(jobLeaseCreateArgsFor(cfg, job, false)); err != nil {

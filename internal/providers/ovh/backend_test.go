@@ -1179,7 +1179,7 @@ func TestAcquireRetainsAmbiguousSSHKeyClaimUntilExactKeyAppears(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake.sshKeys = []SSHKey{{ID: "key-recovered", Name: providerKeyForLease(claims[0].LeaseID), PublicKey: strings.TrimSpace(string(publicKey))}}
+	fake.sshKeys = []SSHKey{{ID: "key-recovered", Name: core.ProviderKeyForLease(claims[0].LeaseID), PublicKey: strings.TrimSpace(string(publicKey))}}
 	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: claims[0].Slug, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)

@@ -10,10 +10,41 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestLinodeAcquisitionReadinessHTTP(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/linode/instances/42" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) == 1 {
+			_, _ = io.WriteString(w, `{"id":42,"status":"provisioning","ipv4":[]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":42,"status":"offline","ipv4":["203.0.113.42"]}`)
+	}))
+	defer server.Close()
+	t.Setenv(tokenEnv, "fixture-token")
+	client, err := newLinodeClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	got, err := new(linodeLeaseBackend).waitForLinodeIP(context.Background(), client, 42, time.Minute)
+	if err != nil || got.ID != 42 || publicIPv4(got) != "203.0.113.42" || calls.Load() != 2 {
+		t.Fatalf("instance=%#v err=%v requests=%d", got, err, calls.Load())
+	}
+	t.Log("production HTTP client: two observations, pending to IP while offline")
+}
 
 func TestLinodeClientCreateRequestShape(t *testing.T) {
 	var captured struct {

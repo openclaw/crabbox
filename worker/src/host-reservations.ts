@@ -1,6 +1,8 @@
 import type { CoordinatorStorageView } from "./coordinator-runtime";
 import { leaseProviderCleanupConfirmed } from "./lease-cleanup";
+import { leaseIsLive } from "./lease-state";
 import { publicLeaseRecord } from "./org-records";
+import { coordinatorStorageEntries } from "./storage-scan";
 import type { LeaseRecord, Provider } from "./types";
 
 export interface HostScope {
@@ -36,7 +38,7 @@ export function hostReservationStaleReason(
   if (!lease) return "lease_missing";
   if (!matchesHost(lease, scope)) return "host_changed";
   // A create owns its host before a provider instance ID has been committed.
-  if (lease.state === "active" || lease.state === "provisioning") return undefined;
+  if (leaseIsLive(lease)) return undefined;
   if (leaseProviderCleanupConfirmed(lease)) return "cleanup_complete";
   if (
     lease.state === "expired" &&
@@ -57,30 +59,20 @@ export async function readHostReservations(
 ): Promise<HostReservation[]> {
   const reservations: HostReservation[] = [];
   for (const prefix of ["lease:", "provider-access:"]) {
-    let startAfter: string | undefined;
-    for (;;) {
-      // oxlint-disable-next-line eslint/no-await-in-loop -- bounded pages must advance in key order.
-      const page = await storage.list<LeaseRecord>({
-        prefix,
-        limit: 256,
-        noCache: true,
-        ...(startAfter ? { startAfter } : {}),
+    // oxlint-disable-next-line eslint/no-await-in-loop -- finish one association namespace before reading the next.
+    for await (const [storageKey, record] of coordinatorStorageEntries<LeaseRecord>(storage, {
+      prefix,
+      limit: 256,
+      noCache: true,
+    })) {
+      if (!matchesHost(record, scope)) continue;
+      const lease = await storage.get<LeaseRecord>(`lease:${record.id}`, { noCache: true });
+      reservations.push({
+        storageKey,
+        record,
+        ...(lease ? { lease } : {}),
+        staleReason: hostReservationStaleReason(lease, scope),
       });
-      for (const [storageKey, record] of page) {
-        if (!matchesHost(record, scope)) continue;
-        // oxlint-disable-next-line eslint/no-await-in-loop -- resolve only matching host associations.
-        const lease = await storage.get<LeaseRecord>(`lease:${record.id}`, { noCache: true });
-        reservations.push({
-          storageKey,
-          record,
-          ...(lease ? { lease } : {}),
-          staleReason: hostReservationStaleReason(lease, scope),
-        });
-      }
-      if (page.size < 256) break;
-      const next = [...page.keys()].at(-1);
-      if (!next || next === startAfter) throw new Error("host reservation scan did not advance");
-      startAfter = next;
     }
   }
   return reservations;

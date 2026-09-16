@@ -49,8 +49,8 @@ func superviseWebVNCDaemonCleanup(ctx context.Context, nonce, workspaceID string
 	if err != nil {
 		return err
 	}
-	started, err := webVNCDaemonProcessStartIdentity(os.Getpid())
-	command, alive := webVNCDaemonProcessCommand(os.Getpid())
+	started, err := LocalProcessStartIdentity(os.Getpid())
+	command, alive := LocalProcessCommand(os.Getpid())
 	if err != nil || !alive || identity.PID != os.Getpid() || identity.Nonce != nonce || !identity.CleanupTracked ||
 		identity.WorkspaceID != workspaceID || !webVNCDaemonIdentityMatchesProcess(identity, command, started) {
 		return fmt.Errorf("WebVNC supervisor cleanup identity does not match its launch")

@@ -687,6 +687,8 @@ func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	isolateTestUserDirs(t)
 	for _, key := range []string{
+		"CRABBOX_SYNC_SOURCE",
+		"CRABBOX_SYNC_GIT_SEED_SOURCE",
 		"CRABBOX_ENV_ALLOW",
 		"CRABBOX_RESULTS_JUNIT",
 		"CRABBOX_RESULTS_AUTO",
@@ -970,6 +972,7 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_ISLO_VCPUS",
 		"CRABBOX_ISLO_MEMORY_MB",
 		"CRABBOX_ISLO_DISK_GB",
+		"CRABBOX_ISLO_IDLE_PAUSE",
 		"CRABBOX_FREESTYLE_API_KEY",
 		"FREESTYLE_API_KEY",
 		"CRABBOX_FREESTYLE_API_URL",
@@ -1312,6 +1315,63 @@ func TestIsloCreateDefaultsTrackExplicitConfigAndEnvironment(t *testing.T) {
 	}
 	if !IsloImageExplicit(fromEnv) || !IsloVCPUsExplicit(fromEnv) || !IsloMemoryMBExplicit(fromEnv) || !IsloDiskGBExplicit(fromEnv) {
 		t.Fatalf("environment explicit markers missing: %#v", fromEnv)
+	}
+}
+
+// TestIsloIdlePauseDefaultsOffAndOptsInExplicitly pins the opt-in: the shipped
+// config leaves the Islo idle pause off despite a positive default idle timeout,
+// and only an explicit config-file or environment opt-in turns it on.
+func TestIsloIdlePauseDefaultsOffAndOptsInExplicitly(t *testing.T) {
+	base := baseConfig()
+	if base.IdleTimeout <= 0 {
+		t.Fatalf("base idle timeout=%s want the positive shipped default", base.IdleTimeout)
+	}
+	if base.Islo.IdlePause {
+		t.Fatal("islo idle pause must ship off")
+	}
+
+	untouched := base
+	if err := applyFileConfig(&untouched, fileConfig{Islo: &fileIsloConfig{Workdir: "crabbox"}}); err != nil {
+		t.Fatal(err)
+	}
+	if untouched.Islo.IdlePause {
+		t.Fatal("an islo config block without idlePause must not opt in")
+	}
+
+	optIn := true
+	fromFile := base
+	if err := applyFileConfig(&fromFile, fileConfig{Islo: &fileIsloConfig{IdlePause: &optIn}}); err != nil {
+		t.Fatal(err)
+	}
+	if !fromFile.Islo.IdlePause {
+		t.Fatal("islo.idlePause: true did not opt in")
+	}
+
+	clearConfigEnv(t)
+	sealed := base
+	if err := applyEnv(&sealed); err != nil {
+		t.Fatal(err)
+	}
+	if sealed.Islo.IdlePause {
+		t.Fatal("clearConfigEnv must unset CRABBOX_ISLO_IDLE_PAUSE; a value exported in the developer's shell must not opt in")
+	}
+
+	t.Setenv("CRABBOX_ISLO_IDLE_PAUSE", "1")
+	fromEnv := base
+	if err := applyEnv(&fromEnv); err != nil {
+		t.Fatal(err)
+	}
+	if !fromEnv.Islo.IdlePause {
+		t.Fatal("CRABBOX_ISLO_IDLE_PAUSE=1 did not opt in")
+	}
+
+	t.Setenv("CRABBOX_ISLO_IDLE_PAUSE", "0")
+	envOff := fromFile
+	if err := applyEnv(&envOff); err != nil {
+		t.Fatal(err)
+	}
+	if envOff.Islo.IdlePause {
+		t.Fatal("CRABBOX_ISLO_IDLE_PAUSE=0 did not override a config-file opt-in")
 	}
 }
 
@@ -12488,6 +12548,9 @@ func TestAccessAuthState(t *testing.T) {
 
 func TestRepoConfigIsYamlOnly(t *testing.T) {
 	clearConfigEnv(t)
+	dirs := isolateTestUserDirs(t)
+	selectedState := dirs.StateHome
+	repositorySelectedState := filepath.Join(dirs.Root, "repository-selected-state")
 	dir := t.TempDir()
 	oldwd, err := os.Getwd()
 	if err != nil {
@@ -12507,7 +12570,7 @@ func TestRepoConfigIsYamlOnly(t *testing.T) {
 	if err := os.WriteFile(".crabbox.json", []byte(`{"profile":"json-profile","provider":"aws"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(".crabbox.yaml", []byte("profile: yaml-profile\nprovider: aws\n"), 0o600); err != nil {
+	if err := os.WriteFile(".crabbox.yaml", []byte("profile: yaml-profile\nprovider: aws\nXDG_STATE_HOME: "+strconv.Quote(repositorySelectedState)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -12517,6 +12580,14 @@ func TestRepoConfigIsYamlOnly(t *testing.T) {
 	}
 	if cfg.Profile != "yaml-profile" || cfg.Provider != "aws" {
 		t.Fatalf("unexpected config: profile=%s provider=%s", cfg.Profile, cfg.Provider)
+	}
+	keyPath, err := testboxKeyPath("cbx_1516")
+	wantKeyPath := filepath.Join(selectedState, "crabbox", "testboxes", "cbx_1516", "id_ed25519")
+	if err != nil || keyPath != wantKeyPath || os.Getenv("XDG_STATE_HOME") != selectedState {
+		t.Fatalf("repository YAML changed generated-key root: path=%q env=%q err=%v", keyPath, os.Getenv("XDG_STATE_HOME"), err)
+	}
+	if _, err := os.Lstat(repositorySelectedState); !os.IsNotExist(err) {
+		t.Fatalf("repository-selected root was materialized: %v", err)
 	}
 }
 
@@ -17909,5 +17980,47 @@ func TestManualBatchCRepoAndZeroInputs(t *testing.T) {
 				t.Fatalf("repo summary=%#v", got)
 			}
 		})
+	}
+}
+
+func TestSyncSourceConfig(t *testing.T) {
+	clearConfigEnv(t)
+	cfg := baseConfig()
+	if effectiveSyncSource(cfg) != "git" {
+		t.Fatal("default source changed")
+	}
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("sync: {source: directory, include: [README.txt]}\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFileConfig(&cfg, file); err != nil {
+		t.Fatal(err)
+	}
+	if effectiveSyncSource(cfg) != "directory" || len(syncIncludes(cfg)) != 1 {
+		t.Fatalf("sync=%+v", cfg.Sync)
+	}
+	if got := configShowView(cfg)["sync"].(map[string]any)["source"]; got != "directory" {
+		t.Fatalf("source projection=%v", got)
+	}
+	var text bytes.Buffer
+	if err := writeConfigShowText(&text, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "sync source=directory") {
+		t.Fatal("source missing from text configuration")
+	}
+	t.Setenv("CRABBOX_SYNC_SOURCE", "git")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if effectiveSyncSource(cfg) != "git" {
+		t.Fatal("environment did not override YAML")
+	}
+	t.Setenv("CRABBOX_SYNC_SOURCE", "unsupported")
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatal("inactive sync configuration blocked config loading", err)
+	}
+	if err := validateSyncSource(cfg); err == nil {
+		t.Fatal("active invalid source accepted")
 	}
 }

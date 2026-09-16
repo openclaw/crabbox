@@ -81,10 +81,10 @@ func (a App) phalaProxyWithTunnel(ctx context.Context, args []string, tunnel fun
 	nodeID := fs.String("node-id", "", "Phala node id")
 	gatewayHost := fs.String("gateway-host", "", "pre-resolved TLS SSH gateway host (skips the per-connection cvms-get lookup)")
 	if err := fs.Parse(args); err != nil {
-		return exit(2, "%v", err)
+		return Exit(2, "%v", err)
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "phala proxy requires a CVM id")
+		return Exit(2, "phala proxy requires a CVM id")
 	}
 	cvmID := fs.Arg(0)
 	_ = nodeID // reserved for future node-scoped gateway resolution
@@ -112,24 +112,24 @@ func resolvePhalaProxyHost(ctx context.Context, phala, cvmID string, stderr io.W
 	cmd.Stderr = stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", exit(exitCode(err), "phala cvms get: %v", err)
+		return "", Exit(exitCode(err), "phala cvms get: %v", err)
 	}
 	payload := phalaJSONObjectPrefix(string(out))
 	if payload == "" {
-		return "", exit(5, "phala cvms get produced no JSON output")
+		return "", Exit(5, "phala cvms get produced no JSON output")
 	}
 	var parsed phalaCVMGetOutput
 	if err := json.Unmarshal([]byte(payload), &parsed); err != nil {
-		return "", exit(5, "parse phala cvms get output: %v", err)
+		return "", Exit(5, "parse phala cvms get output: %v", err)
 	}
 	cvm := parsed.phalaCVM
 	appID := firstNonBlank(cvm.appID(), cvmGetAppID(parsed.CVM))
 	domain := firstNonBlank(cvm.gatewayDomain(), cvmGetGatewayDomain(parsed.CVM))
 	if appID == "" {
-		return "", exit(5, "phala cvms get output omitted the CVM app id")
+		return "", Exit(5, "phala cvms get output omitted the CVM app id")
 	}
 	if domain == "" {
-		return "", exit(5, "phala cvms get output omitted the gateway domain")
+		return "", Exit(5, "phala cvms get output omitted the gateway domain")
 	}
 	return appID + "-22." + domain, nil
 }
@@ -173,7 +173,7 @@ func tunnelPhalaProxyWithDialer(ctx context.Context, host string, input io.Reade
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return exit(1, "connect Phala SSH TLS gateway %s: %v", host, err)
+		return Exit(1, "connect Phala SSH TLS gateway %s: %v", host, err)
 	}
 	defer conn.Close()
 
@@ -205,7 +205,7 @@ func tunnelPhalaProxyWithDialer(ctx context.Context, host string, input io.Reade
 				continue
 			}
 			if result.err != nil && !errors.Is(result.err, net.ErrClosed) {
-				return exit(1, "tunnel Phala SSH gateway %s %s: %v", host, result.direction, result.err)
+				return Exit(1, "tunnel Phala SSH gateway %s %s: %v", host, result.direction, result.err)
 			}
 			if result.direction == "download" || uploadDone {
 				return nil

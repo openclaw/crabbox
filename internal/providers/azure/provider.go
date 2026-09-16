@@ -28,8 +28,6 @@ type flagValues struct {
 
 var classProfiles = buildClassProfiles()
 
-func (Provider) Name() string      { return "azure" }
-func (Provider) Aliases() []string { return nil }
 func (Provider) RoutingFlagNames() []string {
 	return []string{"azure-backend"}
 }
@@ -92,7 +90,7 @@ func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 			return err
 		}
 	}
-	if cfg.Provider != p.Name() {
+	if cfg.Provider != p.Spec().Name {
 		return nil
 	}
 	flags, _ := values.(flagValues)
@@ -181,10 +179,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 		return ""
 	}
 	return candidates[0]
-}
-
-func (Provider) ServerTypeForClass(class string) string {
-	return azureVMSizeCandidatesForClass(class)[0]
 }
 
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
@@ -309,16 +303,12 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return NewAzureLeaseBackend(p.Spec(), cfg, rt), nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("azure", func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
 func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
 	if req.Server.CloudID == "" {
 		return core.NativeCheckpointCapability{}, false
 	}
-	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
-	if targetOS == core.TargetWindows && firstNonBlank(req.Target.WindowsMode, req.Config.WindowsMode) == core.WindowsModeNormal {
+	targetOS := shared.FirstNonEmpty(req.Target.TargetOS, req.Config.TargetOS)
+	if targetOS == core.TargetWindows && shared.FirstNonEmpty(req.Target.WindowsMode, req.Config.WindowsMode) == core.WindowsModeNormal {
 		if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
 			return core.NativeCheckpointCapability{}, false
 		}
@@ -336,27 +326,23 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	return core.NativeCheckpointCapability{Kind: core.CheckpointKindAzureOS, RetireSource: true}, true
 }
 
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonEmpty(values...)
-}
-
 func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {
 	cfg := req.Config
 	switch req.Record.Kind {
 	case core.CheckpointKindAzure:
-		cfg.AzureImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+		cfg.AzureImage = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
 	case core.CheckpointKindAzureOS:
-		cfg.AzureSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+		cfg.AzureSnapshot = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
 	default:
 		return core.Exit(2, "provider=azure does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	if req.Record.Region != "" {
 		cfg.AzureLocation = req.Record.Region
 	}
-	if resourceGroup := azureResourceGroup(firstNonBlank(req.Record.Resource, req.Record.ImageID)); resourceGroup != "" {
+	if resourceGroup := azureResourceGroup(shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)); resourceGroup != "" {
 		cfg.AzureResourceGroup = resourceGroup
 	}
-	if subscription := azureSubscription(firstNonBlank(req.Record.Resource, req.Record.ImageID)); subscription != "" {
+	if subscription := azureSubscription(shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)); subscription != "" {
 		cfg.AzureSubscription = subscription
 	}
 	if req.AzureOSDiskExplicit {

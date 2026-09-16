@@ -32,10 +32,10 @@ func TestClaimMetadataOpenReaderAllowsReplacementAndCleanup(t *testing.T) {
 	// including reuse of the deterministic .deleted namespace.
 	for cycle := range 3 {
 		if cycle > 0 {
-			if err := claimLeaseForRepoProvider(before.LeaseID, "contract", "aws", fmt.Sprintf("/repo/%d", cycle), time.Minute, false); err != nil {
+			if err := ClaimLeaseForRepoProvider(before.LeaseID, "contract", "aws", fmt.Sprintf("/repo/%d", cycle), time.Minute, false); err != nil {
 				t.Fatalf("recreate with prior readers open: %v", err)
 			}
-			before, err = readLeaseClaim(before.LeaseID)
+			before, err = ReadLeaseClaim(before.LeaseID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -48,7 +48,7 @@ func TestClaimMetadataOpenReaderAllowsReplacementAndCleanup(t *testing.T) {
 		defer oldFile.Close()
 		replacement := cloneLeaseClaim(before)
 		replacement.RepoRoot = fmt.Sprintf("/repo/replacement/%d", cycle)
-		updated, err := replaceLeaseClaimIfUnchangedDurableReturning(before.LeaseID, before, replacement)
+		updated, err := ReplaceLeaseClaimIfUnchangedDurableReturning(before.LeaseID, before, replacement)
 		if err != nil {
 			t.Fatalf("replace with old reader open: %v", err)
 		}
@@ -58,15 +58,15 @@ func TestClaimMetadataOpenReaderAllowsReplacementAndCleanup(t *testing.T) {
 		}
 		defer currentFile.Close()
 		called := false
-		err = removeLeaseClaimIfUnchangedAfter(before.LeaseID, before, func() error { called = true; return nil })
+		err = RemoveLeaseClaimIfUnchangedAfter(before.LeaseID, before, func() error { called = true; return nil })
 		if err == nil || !strings.Contains(err.Error(), "claim changed") || called {
 			t.Fatalf("stale cleanup passed exact guard: called=%t err=%v", called, err)
 		}
 		assertClaimContractStored(t, updated.LeaseID, updated)
-		if err := removeLeaseClaimIfUnchanged(updated.LeaseID, updated); err != nil {
+		if err := RemoveLeaseClaimIfUnchanged(updated.LeaseID, updated); err != nil {
 			t.Fatalf("guarded cleanup with current reader open: %v", err)
 		}
-		if _, exists, err := readLeaseClaimWithPresence(updated.LeaseID); err != nil || exists {
+		if _, exists, err := ReadLeaseClaimWithPresence(updated.LeaseID); err != nil || exists {
 			t.Fatalf("claim remains after cleanup: exists=%t err=%v", exists, err)
 		}
 		if _, err := os.Lstat(path + ".deleted"); !os.IsNotExist(err) {

@@ -5,7 +5,6 @@ import (
 	"os"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -13,9 +12,6 @@ func init() {
 }
 
 type Provider struct{}
-
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return []string{"oc", "open-computer"} }
 
 func (Provider) DiagnosticSecrets(core.Config) []string {
 	fileConfig := readOCFileConfig()
@@ -27,10 +23,9 @@ func (Provider) DiagnosticSecrets(core.Config) []string {
 }
 
 func (Provider) ServerTypeForConfig(core.Config) string { return "" }
-func (Provider) ServerTypeForClass(string) string       { return "" }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:                    []string{"oc", "open-computer"},
 		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		SyncGuardrailFullCandidate: true,
 		Name:                       providerName,
@@ -53,8 +48,4 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewOpenComputerBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("opencomputer", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

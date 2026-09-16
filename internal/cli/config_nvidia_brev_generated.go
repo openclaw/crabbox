@@ -48,115 +48,14 @@ type NvidiaBrevConfigApplied struct {
 
 func (cfg *NvidiaBrevConfig) applyFile(file *fileNvidiaBrevConfig, trusted bool) (NvidiaBrevConfigApplied, error) {
 	var applied NvidiaBrevConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.CLI != "" {
-		cfg.CLI = file.CLI
-		applied.InputAccepted = true
-	}
-	if file.Org != "" {
-		cfg.Org = file.Org
-		applied.InputAccepted = true
-	}
-	if file.Type != "" {
-		cfg.Type = file.Type
-		applied.InputAccepted = true
-	}
-	if file.GPUName != "" {
-		cfg.GPUName = file.GPUName
-		applied.InputAccepted = true
-	}
-	if file.Provider != "" {
-		cfg.Provider = file.Provider
-		applied.InputAccepted = true
-	}
-	if file.Mode != "" {
-		cfg.Mode = file.Mode
-		applied.InputAccepted = true
-	}
-	if file.Launchable != "" {
-		cfg.Launchable = file.Launchable
-		applied.InputAccepted = true
-	}
-	if file.StartupScript != "" {
-		cfg.StartupScript = file.StartupScript
-		applied.InputAccepted = true
-	}
-	if file.ReleaseAction != "" {
-		cfg.ReleaseAction = file.ReleaseAction
-		applied.InputAccepted = true
-		applied.ReleaseAction = true
-	}
-	if file.Target != "" {
-		cfg.Target = file.Target
-		applied.InputAccepted = true
-	}
-	if file.User != "" {
-		cfg.User = file.User
-		applied.InputAccepted = true
-	}
-	if file.WorkRoot != "" {
-		cfg.WorkRoot = file.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "nvidia-brev")
+	return applied, err
 }
 
 func (cfg *NvidiaBrevConfig) applyEnv() (NvidiaBrevConfigApplied, error) {
 	var applied NvidiaBrevConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_CLI"); ok {
-		cfg.CLI = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_ORG"); ok {
-		cfg.Org = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_TYPE"); ok {
-		cfg.Type = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_GPU_NAME"); ok {
-		cfg.GPUName = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_PROVIDER"); ok {
-		cfg.Provider = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_MODE"); ok {
-		cfg.Mode = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_LAUNCHABLE"); ok {
-		cfg.Launchable = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_STARTUP_SCRIPT"); ok {
-		cfg.StartupScript = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_RELEASE_ACTION"); ok {
-		cfg.ReleaseAction = value
-		applied.InputAccepted = true
-		applied.ReleaseAction = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_TARGET"); ok {
-		cfg.Target = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_USER"); ok {
-		cfg.User = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_NVIDIA_BREV_WORK_ROOT"); ok {
-		cfg.WorkRoot = value
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 12)
+	return applied, err
 }
 
 // NvidiaBrevConfigFlagValues holds parsed values; only visited flags are applied.
@@ -177,20 +76,9 @@ type NvidiaBrevConfigFlagValues struct {
 
 // RegisterNvidiaBrevConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterNvidiaBrevConfigFlags(fs *flag.FlagSet, defaults NvidiaBrevConfig) NvidiaBrevConfigFlagValues {
-	return NvidiaBrevConfigFlagValues{
-		CLI:           fs.String("nvidia-brev-cli", defaults.CLI, "NVIDIA Brev CLI path"),
-		Org:           fs.String("nvidia-brev-org", defaults.Org, "NVIDIA Brev organization selector"),
-		Type:          fs.String("nvidia-brev-type", defaults.Type, "NVIDIA Brev instance type selector"),
-		GPUName:       fs.String("nvidia-brev-gpu-name", defaults.GPUName, "NVIDIA Brev GPU name selector"),
-		Provider:      fs.String("nvidia-brev-provider", defaults.Provider, "NVIDIA Brev cloud provider selector"),
-		Mode:          fs.String("nvidia-brev-mode", defaults.Mode, "NVIDIA Brev mode: vm"),
-		Launchable:    fs.String("nvidia-brev-launchable", defaults.Launchable, "NVIDIA Brev launchable selector"),
-		StartupScript: fs.String("nvidia-brev-startup-script", defaults.StartupScript, "NVIDIA Brev startup script inline command or @file path"),
-		ReleaseAction: fs.String("nvidia-brev-release-action", defaults.ReleaseAction, "NVIDIA Brev release action: delete or stop"),
-		Target:        fs.String("nvidia-brev-target", defaults.Target, "NVIDIA Brev SSH target: container or host"),
-		User:          fs.String("nvidia-brev-user", defaults.User, "SSH user for NVIDIA Brev workspaces"),
-		WorkRoot:      fs.String("nvidia-brev-work-root", defaults.WorkRoot, "remote Crabbox work root on NVIDIA Brev workspaces"),
-	}
+	var values NvidiaBrevConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // NvidiaBrevConfigVisitedFlags records raw flag visits, independently of application.
@@ -201,65 +89,14 @@ type NvidiaBrevConfigVisitedFlags struct {
 
 // NvidiaBrevConfigFlagPresence reports visits for tracked flag bindings.
 func NvidiaBrevConfigFlagPresence(fs *flag.FlagSet) NvidiaBrevConfigVisitedFlags {
-	return NvidiaBrevConfigVisitedFlags{
-		ReleaseAction: flagWasSet(fs, "nvidia-brev-release-action"),
-		WorkRoot:      flagWasSet(fs, "nvidia-brev-work-root"),
-	}
+	var visited NvidiaBrevConfigVisitedFlags
+	recordConfigFlagVisits[NvidiaBrevConfig](fs, &visited)
+	return visited
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values NvidiaBrevConfigFlagValues) Apply(cfg *NvidiaBrevConfig, fs *flag.FlagSet) (NvidiaBrevConfigApplied, error) {
 	var applied NvidiaBrevConfigApplied
-	visited := NvidiaBrevConfigFlagPresence(fs)
-	if flagWasSet(fs, "nvidia-brev-cli") {
-		cfg.CLI = *values.CLI
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-org") {
-		cfg.Org = *values.Org
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-type") {
-		cfg.Type = *values.Type
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-gpu-name") {
-		cfg.GPUName = *values.GPUName
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-provider") {
-		cfg.Provider = *values.Provider
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-mode") {
-		cfg.Mode = *values.Mode
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-launchable") {
-		cfg.Launchable = *values.Launchable
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-startup-script") {
-		cfg.StartupScript = *values.StartupScript
-		applied.InputAccepted = true
-	}
-	if visited.ReleaseAction {
-		cfg.ReleaseAction = *values.ReleaseAction
-		applied.InputAccepted = true
-		applied.ReleaseAction = true
-	}
-	if flagWasSet(fs, "nvidia-brev-target") {
-		cfg.Target = *values.Target
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "nvidia-brev-user") {
-		cfg.User = *values.User
-		applied.InputAccepted = true
-	}
-	if visited.WorkRoot {
-		cfg.WorkRoot = *values.WorkRoot
-		applied.InputAccepted = true
-		applied.WorkRoot = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

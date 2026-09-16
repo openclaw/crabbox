@@ -2096,9 +2096,6 @@ export class EC2SpotClient {
     snapshotIDs: string[],
     availabilityZones: string[],
   ): Promise<ProviderFastSnapshotRestore[]> {
-    if (this.env.CRABBOX_AWS_QUALIFICATION_TRANSPORT) {
-      throw new Error("AWS qualification fast snapshot restore is disabled");
-    }
     const snapshots = uniqueStrings(snapshotIDs);
     const zones = uniqueStrings(availabilityZones);
     if (snapshots.length === 0 || zones.length === 0) {
@@ -3448,7 +3445,12 @@ export function awsLeaseImageIdentity(
     };
   }
   if (config.selectedImage?.id === imageID) {
-    return { ...config.selectedImage, region };
+    const { revision, ...selected } = config.selectedImage;
+    return {
+      ...selected,
+      region,
+      ...(selected.region === region && revision ? { revision } : {}),
+    };
   }
   if (Object.values(config.awsPromotedAMIs).includes(imageID)) {
     return { id: imageID, source: "promoted", provider: "aws", kind: "aws-ami", region };

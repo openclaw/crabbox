@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -24,11 +23,9 @@ var (
 
 var classProfiles = buildClassProfiles()
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return []string{"namespace-compute"} }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"namespace-compute"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             providerName,
 		Family:           providerName,
@@ -124,10 +121,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return &backend{spec: p.Spec(), cfg: cfg, rt: rt}, nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor(providerName, func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		return cfg.ServerType
@@ -147,10 +140,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 	machineType := strings.TrimSpace(cfg.NamespaceInstance.MachineType)
 	return machineType, machineType != ""
-}
-
-func (Provider) ServerTypeForClass(class string) string {
-	return machineTypeForClass(class)
 }
 
 func (Provider) ClassProfiles() []core.ProviderClassProfile {

@@ -24,7 +24,7 @@ func TestStaticSSHTouchPersistsExplicitIdleTimeoutForFreshResolve(t *testing.T) 
 	touchedAt := unixLabelTime(t, initialTouchedAt).Add(2 * time.Minute)
 
 	backend := newStaticLifecycleBackend(cfg, touchedAt)
-	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: initial.Slug})
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: initial.Slug})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestStaticSSHTouchPersistsExplicitIdleTimeoutForFreshResolve(t *testing.T) 
 	}
 
 	override := 45 * time.Minute
-	touched, err := backend.Touch(context.Background(), TouchRequest{
+	touched, err := backend.Touch(context.Background(), core.TouchRequest{
 		Lease:               resolved,
 		State:               "busy",
 		IdleTimeout:         override,
@@ -74,7 +74,7 @@ func TestStaticSSHTouchPersistsExplicitIdleTimeoutForFreshResolve(t *testing.T) 
 
 	freshCfg := cfg
 	freshCfg.IdleTimeout = 7 * time.Minute
-	fresh, err := newStaticLifecycleBackend(freshCfg, touchedAt.Add(time.Minute)).Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID})
+	fresh, err := newStaticLifecycleBackend(freshCfg, touchedAt.Add(time.Minute)).Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestStaticSSHTouchRefreshesAcquiredLeaseCache(t *testing.T) {
 	backend.rememberAcquiredLease(lease)
 
 	override := 45 * time.Minute
-	touched, err := backend.Touch(context.Background(), TouchRequest{
+	touched, err := backend.Touch(context.Background(), core.TouchRequest{
 		Lease:               lease,
 		State:               "busy",
 		IdleTimeoutOverride: &override,
@@ -102,14 +102,14 @@ func TestStaticSSHTouchRefreshesAcquiredLeaseCache(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID})
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resolved.Server.Labels["idle_timeout_secs"] != "2700" || !reflect.DeepEqual(resolved.Server.Labels, touched.Labels) {
 		t.Fatalf("cached resolve did not observe touch: resolved=%#v touched=%#v", resolved.Server.Labels, touched.Labels)
 	}
-	listed, err := backend.List(context.Background(), ListRequest{})
+	listed, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestStaticSSHTouchRefreshesAcquiredLeaseCache(t *testing.T) {
 	}
 
 	backend.RT.Clock = staticLifecycleClock{now: touchedAt.Add(time.Minute)}
-	if _, err := backend.Touch(context.Background(), TouchRequest{Lease: resolved, State: "ready"}); err != nil {
+	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: resolved, State: "ready"}); err != nil {
 		t.Fatalf("touch using cached refreshed snapshot: %v", err)
 	}
 }
@@ -129,11 +129,11 @@ func TestStaticSSHTouchWithoutOverridePreservesPersistedIdleTimeout(t *testing.T
 	backendCfg := cfg
 	backendCfg.IdleTimeout = 5 * time.Minute
 	backend := newStaticLifecycleBackend(backendCfg, touchedAt)
-	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID})
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	touched, err := backend.Touch(context.Background(), TouchRequest{
+	touched, err := backend.Touch(context.Background(), core.TouchRequest{
 		Lease:       resolved,
 		State:       "ready",
 		IdleTimeout: 5 * time.Minute,
@@ -148,7 +148,7 @@ func TestStaticSSHTouchWithoutOverridePreservesPersistedIdleTimeout(t *testing.T
 	if committed.IdleTimeoutSeconds != 2220 || touched.Labels["idle_timeout_secs"] != "2220" {
 		t.Fatalf("omitted override replaced timeout: response=%q claim=%d", touched.Labels["idle_timeout_secs"], committed.IdleTimeoutSeconds)
 	}
-	fresh, err := newStaticLifecycleBackend(backendCfg, touchedAt.Add(time.Minute)).Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID})
+	fresh, err := newStaticLifecycleBackend(backendCfg, touchedAt.Add(time.Minute)).Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,11 +160,11 @@ func TestStaticSSHTouchWithoutOverridePreservesPersistedIdleTimeout(t *testing.T
 func TestStaticSSHTouchRejectsMismatchedIdentity(t *testing.T) {
 	for _, test := range []struct {
 		name   string
-		mutate func(*testing.T, *LeaseTarget)
+		mutate func(*testing.T, *core.LeaseTarget)
 	}{
-		{name: "canonical lease ID", mutate: func(_ *testing.T, lease *LeaseTarget) { lease.LeaseID = lease.Server.Labels["slug"] }},
-		{name: "provider", mutate: func(_ *testing.T, lease *LeaseTarget) { lease.Server.Provider = "aws" }},
-		{name: "scope", mutate: func(t *testing.T, lease *LeaseTarget) {
+		{name: "canonical lease ID", mutate: func(_ *testing.T, lease *core.LeaseTarget) { lease.LeaseID = lease.Server.Labels["slug"] }},
+		{name: "provider", mutate: func(_ *testing.T, lease *core.LeaseTarget) { lease.Server.Provider = "aws" }},
+		{name: "scope", mutate: func(t *testing.T, lease *core.LeaseTarget) {
 			claim, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
 			if !exists || !set {
 				t.Fatal("resolved lease has no claim snapshot")
@@ -172,18 +172,18 @@ func TestStaticSSHTouchRejectsMismatchedIdentity(t *testing.T) {
 			claim.ProviderScope = "other-scope"
 			core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
 		}},
-		{name: "resource", mutate: func(_ *testing.T, lease *LeaseTarget) { lease.Server.CloudID = "static_replacement" }},
-		{name: "host", mutate: func(_ *testing.T, lease *LeaseTarget) { lease.SSH.Host = "replacement.example.test" }},
+		{name: "resource", mutate: func(_ *testing.T, lease *core.LeaseTarget) { lease.Server.CloudID = "static_replacement" }},
+		{name: "host", mutate: func(_ *testing.T, lease *core.LeaseTarget) { lease.SSH.Host = "replacement.example.test" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg, lease, initial := acquireStaticLifecycleLease(t, 30*time.Minute)
 			backend := newStaticLifecycleBackend(cfg, unixLabelTime(t, initial.Labels["last_touched_at"]).Add(time.Minute))
-			resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID})
+			resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
 			if err != nil {
 				t.Fatal(err)
 			}
 			test.mutate(t, &resolved)
-			if _, err := backend.Touch(context.Background(), TouchRequest{Lease: resolved, State: "ready"}); err == nil || !strings.Contains(err.Error(), "mismatch") {
+			if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: resolved, State: "ready"}); err == nil || !strings.Contains(err.Error(), "mismatch") {
 				t.Fatalf("touch error=%v want identity mismatch", err)
 			}
 			after, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
@@ -197,7 +197,7 @@ func TestStaticSSHTouchRejectsMismatchedIdentity(t *testing.T) {
 func TestStaticSSHTouchRejectsConcurrentClaimReplacement(t *testing.T) {
 	cfg, lease, initial := acquireStaticLifecycleLease(t, 30*time.Minute)
 	backend := newStaticLifecycleBackend(cfg, unixLabelTime(t, initial.Labels["last_touched_at"]).Add(time.Minute))
-	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID})
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestStaticSSHTouchRejectsConcurrentClaimReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := backend.Touch(context.Background(), TouchRequest{Lease: resolved, State: "ready"}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: resolved, State: "ready"}); err == nil || !strings.Contains(err.Error(), "claim changed") {
 		t.Fatalf("touch error=%v want claim changed", err)
 	}
 	after, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
@@ -223,7 +223,7 @@ func TestStaticSSHTouchRejectsConcurrentClaimReplacement(t *testing.T) {
 func TestStaticSSHProviderReplacementFailsClosed(t *testing.T) {
 	cfg, lease, initial := acquireStaticLifecycleLease(t, 30*time.Minute)
 	backend := newStaticLifecycleBackend(cfg, unixLabelTime(t, initial.Labels["last_touched_at"]).Add(time.Minute))
-	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID})
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestStaticSSHProviderReplacementFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := backend.Touch(context.Background(), TouchRequest{Lease: resolved, State: "ready"}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: resolved, State: "ready"}); err == nil || !strings.Contains(err.Error(), "claim changed") {
 		t.Fatalf("touch error=%v want claim changed", err)
 	}
 	after, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
@@ -254,7 +254,7 @@ func TestStaticSSHProviderReplacementFailsClosed(t *testing.T) {
 	}
 
 	fresh := newStaticLifecycleBackend(cfg, time.Now().UTC())
-	unclaimed, err := fresh.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID})
+	unclaimed, err := fresh.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,13 +266,13 @@ func TestStaticSSHProviderReplacementFailsClosed(t *testing.T) {
 func TestStaticSSHTouchDoesNotRecreateRacedAwayClaim(t *testing.T) {
 	cfg, lease, initial := acquireStaticLifecycleLease(t, 30*time.Minute)
 	backend := newStaticLifecycleBackend(cfg, unixLabelTime(t, initial.Labels["last_touched_at"]).Add(time.Minute))
-	resolved, err := backend.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID})
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	core.RemoveLeaseClaim(lease.LeaseID)
 
-	if _, err := backend.Touch(context.Background(), TouchRequest{Lease: resolved, State: "ready"}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: resolved, State: "ready"}); err == nil || !strings.Contains(err.Error(), "claim changed") {
 		t.Fatalf("touch error=%v want claim changed", err)
 	}
 	if claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
@@ -280,13 +280,13 @@ func TestStaticSSHTouchDoesNotRecreateRacedAwayClaim(t *testing.T) {
 	}
 }
 
-func acquireStaticLifecycleLease(t *testing.T, idleTimeout time.Duration) (Config, LeaseTarget, core.LeaseClaim) {
+func acquireStaticLifecycleLease(t *testing.T, idleTimeout time.Duration) (core.Config, core.LeaseTarget, core.LeaseClaim) {
 	t.Helper()
 	stubStaticArchitecture(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	oldWait := waitForSSH
-	waitForSSH = func(context.Context, *SSHTarget, io.Writer) error { return nil }
+	waitForSSH = func(context.Context, *core.SSHTarget, io.Writer) error { return nil }
 	t.Cleanup(func() { waitForSSH = oldWait })
 
 	cfg := core.BaseConfig()
@@ -296,8 +296,8 @@ func acquireStaticLifecycleLease(t *testing.T, idleTimeout time.Duration) (Confi
 	cfg.Static.ID = "static_heartbeat"
 	cfg.Static.Name = "heartbeat-static"
 	cfg.IdleTimeout = idleTimeout
-	backend := NewStaticSSHLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: io.Discard}).(*staticLeaseBackend)
-	lease, err := backend.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true})
+	backend := NewStaticSSHLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*staticLeaseBackend)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,8 +308,8 @@ func acquireStaticLifecycleLease(t *testing.T, idleTimeout time.Duration) (Confi
 	return cfg, lease, claim
 }
 
-func newStaticLifecycleBackend(cfg Config, now time.Time) *staticLeaseBackend {
-	return NewStaticSSHLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: io.Discard, Clock: staticLifecycleClock{now: now}}).(*staticLeaseBackend)
+func newStaticLifecycleBackend(cfg core.Config, now time.Time) *staticLeaseBackend {
+	return NewStaticSSHLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard, Clock: staticLifecycleClock{now: now}}).(*staticLeaseBackend)
 }
 
 func unixLabelTime(t *testing.T, value string) time.Time {

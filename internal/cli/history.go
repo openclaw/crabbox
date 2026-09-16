@@ -10,7 +10,11 @@ import (
 )
 
 func (a App) history(ctx context.Context, args []string) error {
+	if len(args) > 0 && (args[0] == "prune" || args[0] == "delete") {
+		return a.localHistoryMaintenance(args)
+	}
 	fs := newFlagSet("history", a.Stderr)
+	source := fs.String("source", "", "record source: local, coordinator, or all")
 	leaseID := fs.String("lease", "", "filter by lease id")
 	owner := fs.String("owner", "", "filter by owner")
 	org := fs.String("org", "", "filter by org")
@@ -20,9 +24,12 @@ func (a App) history(ctx context.Context, args []string) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	coord, err := configuredCoordinator()
-	if err != nil {
+	sourceName, coord, err := resolveHistorySource(*source)
+	if err != nil && sourceName != "all" {
 		return err
+	}
+	if sourceName != "" {
+		return a.historyFromSources(ctx, sourceName, coord, localHistoryFilter{LeaseID: *leaseID, State: *state, Limit: *limit}, *owner, *org, *jsonOut, err)
 	}
 	runs, err := coord.Runs(ctx, *leaseID, *owner, *org, *state, *limit)
 	if err != nil {
@@ -45,6 +52,7 @@ func (a App) history(ctx context.Context, args []string) error {
 func (a App) logs(ctx context.Context, args []string) error {
 	args, jsonAnywhere := extractBoolFlag(args, "json")
 	fs := newFlagSet("logs", a.Stderr)
+	source := fs.String("source", "", "record source: local, coordinator, or all")
 	runIDValue, args := popLeadingRunID(args)
 	runID := fs.String("id", runIDValue, "run id")
 	tail := fs.Int("tail", 0, "print only the last N log lines")
@@ -56,17 +64,20 @@ func (a App) logs(ctx context.Context, args []string) error {
 		*runID = fs.Arg(0)
 	}
 	if *runID == "" {
-		return exit(2, "usage: crabbox logs <run-id>")
+		return Exit(2, "usage: crabbox logs <run-id>")
 	}
 	if jsonAnywhere {
 		*jsonOut = true
 	}
 	if *tail < 0 {
-		return exit(2, "tail must be >= 0")
+		return Exit(2, "tail must be >= 0")
 	}
-	coord, err := configuredCoordinator()
-	if err != nil {
+	sourceName, coord, err := resolveHistorySource(*source)
+	if err != nil && sourceName != "all" {
 		return err
+	}
+	if sourceName != "" {
+		return a.localHistoryRead(ctx, sourceName, coord, *runID, "logs", *tail, false, *jsonOut, err)
 	}
 	logText, err := coord.RunLogs(ctx, *runID)
 	if err != nil {
@@ -103,16 +114,16 @@ func (a App) events(ctx context.Context, args []string) error {
 		*runID = fs.Arg(0)
 	}
 	if *runID == "" {
-		return exit(2, "usage: crabbox events <run-id>")
+		return Exit(2, "usage: crabbox events <run-id>")
 	}
 	if jsonAnywhere {
 		*jsonOut = true
 	}
 	if *after < 0 {
-		return exit(2, "after must be >= 0")
+		return Exit(2, "after must be >= 0")
 	}
 	if *limit <= 0 {
-		return exit(2, "limit must be positive")
+		return Exit(2, "limit must be positive")
 	}
 	coord, err := configuredCoordinator()
 	if err != nil {
@@ -151,13 +162,13 @@ func (a App) attach(ctx context.Context, args []string) error {
 		*runID = fs.Arg(0)
 	}
 	if *runID == "" {
-		return exit(2, "usage: crabbox attach <run-id>")
+		return Exit(2, "usage: crabbox attach <run-id>")
 	}
 	if *after < 0 {
-		return exit(2, "after must be >= 0")
+		return Exit(2, "after must be >= 0")
 	}
 	if *poll <= 0 {
-		return exit(2, "poll must be positive")
+		return Exit(2, "poll must be positive")
 	}
 	coord, err := configuredCoordinator()
 	if err != nil {

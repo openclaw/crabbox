@@ -130,6 +130,12 @@ An unknown WOW64 process-machine value alone is not proof of native execution.
 Unavailable APIs or process queries remain unknown; no environment variable or
 older `.NET OSArchitecture` value substitutes for native-host evidence.
 
+WSL2 architecture probes declare a 15-second execution allowance to the staged
+transport. Core adds its existing bounded preparation, upload, launch, and cleanup
+allowances, so the complete WSL2 probe may take longer than 15 seconds. An earlier
+caller deadline still limits the whole operation. Linux, macOS, and native Windows
+retain the existing 15-second whole-call architecture deadline.
+
 Without an assertion, supported measured architecture is published even when it
 differs from the configured default. Unknown measurements produce a bounded
 warning and permit unconstrained use. SSH authentication, identity, transport,

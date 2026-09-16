@@ -59,7 +59,7 @@ func validateBaseConfig(cfg core.Config) error {
 			return core.Exit(2, "sealos-devbox SSH gateway port must be between 1 and 65535")
 		}
 	}
-	clean := path.Clean(sealosWorkRoot(cfg))
+	clean := path.Clean(core.EffectiveSealosDevboxWorkRoot(cfg))
 	if !strings.HasPrefix(clean, "/") {
 		return core.Exit(2, "sealosDevbox.workRoot %q must resolve to an absolute path", values.WorkRoot)
 	}
@@ -102,8 +102,4 @@ func normalizeNetwork(value string) string {
 	default:
 		return strings.TrimSpace(value)
 	}
-}
-
-func sealosWorkRoot(cfg core.Config) string {
-	return core.EffectiveSealosDevboxWorkRoot(cfg)
 }

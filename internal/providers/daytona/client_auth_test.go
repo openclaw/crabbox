@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -41,7 +42,7 @@ func TestDaytonaCLIAuthUsesOAuthProfileForAPIAndToolbox(t *testing.T) {
 	if err := os.WriteFile(path, profile, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	client, err := newDaytonaClient(Config{}, Runtime{HTTP: server.Client()})
+	client, err := newDaytonaClient(core.Config{}, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +52,7 @@ func TestDaytonaCLIAuthUsesOAuthProfileForAPIAndToolbox(t *testing.T) {
 	if requests != 1 {
 		t.Fatalf("requests=%d, want 1", requests)
 	}
-	headers, err := daytonaToolboxHeaders(Config{})
+	headers, err := daytonaToolboxHeaders(core.Config{})
 	if err != nil || headers["Authorization"] != "Bearer synthetic-access" || headers["X-Daytona-Organization-ID"] != "org-browser" {
 		t.Fatalf("toolbox did not use the active OAuth profile: %v", err)
 	}
@@ -104,12 +105,12 @@ func TestDaytonaCLIConfigDirectoryDoesNotFallBackToAnotherProfile(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Setenv("DAYTONA_CONFIG_DIR", t.TempDir())
-	if _, err := daytonaAuthConfig(Config{}); err == nil {
+	if _, err := daytonaAuthConfig(core.Config{}); err == nil {
 		t.Fatal("missing selected config directory fell back to another account")
 	}
 	for _, tokenKind := range []string{"API key", "JWT"} {
 		t.Run(tokenKind, func(t *testing.T) {
-			cfg := Config{}
+			cfg := core.Config{}
 			cfg.Daytona.OrganizationID = "explicit-org"
 			if tokenKind == "API key" {
 				cfg.Daytona.APIKey = "explicit-token"

@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestBlacksmithDownloadFailureDiagnostics(t *testing.T) {
@@ -41,7 +43,7 @@ func TestBlacksmithDownloadFailureDiagnostics(t *testing.T) {
 			var console bytes.Buffer
 			preserved := map[string]string{}
 			calls := 0
-			backend := newTestBlacksmithBackend(baseConfig(), ownershipRunner(func(runCtx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+			backend := newTestBlacksmithBackend(core.BaseConfig(), ownershipRunner(func(runCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 				calls++
 				if runCtx != ctx || req.Dir != repo || !req.RequireProcessGroupJoin || req.MaxCapturedOutputBytes != int(blacksmithArtifactDiagnosticCaptureBytes) || req.Stdout != nil || req.Stderr != nil {
 					t.Fatal("download changed its context, closure, capture bounds or stream privacy")
@@ -84,7 +86,7 @@ func TestBlacksmithDownloadFailureDiagnostics(t *testing.T) {
 				if kind == "cancellation" {
 					cancel(cause)
 				}
-				return LocalCommandResult{ExitCode: 23, Stdout: streams["stdout"], Stderr: streams["stderr"]}, nativeFailure
+				return core.LocalCommandResult{ExitCode: 23, Stdout: streams["stdout"], Stderr: streams["stderr"]}, nativeFailure
 			}))
 			backend.rt.Stdout, backend.rt.Stderr = &console, &console
 			remote := ".crabbox/blacksmith-artifact-" + strings.Repeat("a", 64) + "/archive.tgz"

@@ -29,6 +29,7 @@ import {
   googleLinuxSigningKeyFingerprint,
 } from "./bootstrap.generated";
 import { sshPorts, type LeaseConfig } from "./config";
+import { bytesToBase64 } from "./encoding";
 import { linuxMinimalReadinessBootstrap } from "./linux-readiness.generated";
 
 export function awsUserData(config: LeaseConfig): string {
@@ -62,21 +63,12 @@ export async function awsRunInstancesUserData(config: LeaseConfig): Promise<stri
   const userData = awsUserData(config);
   const bytes =
     config.target === "linux" ? await gzip(userData) : new TextEncoder().encode(userData);
-  return base64Encode(bytes);
+  return bytesToBase64(bytes);
 }
 
 async function gzip(value: string): Promise<Uint8Array> {
   const stream = new Blob([value]).stream().pipeThrough(new CompressionStream("gzip"));
   return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-function base64Encode(bytes: Uint8Array): string {
-  const chunks: string[] = [];
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + chunkSize)));
-  }
-  return btoa(chunks.join(""));
 }
 
 export function cloudInit(

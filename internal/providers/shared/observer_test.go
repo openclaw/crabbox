@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -76,6 +77,68 @@ func TestPollTerminationErrorPreservesDiagnosticAndTerminalClassification(t *tes
 			if tc.name == "stale attempt deadline" && !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatal("classification hid the observation deadline from ordinary errors.Is")
 			}
+		})
+	}
+}
+
+func TestPollReadyAcquisitionLifecycle(t *testing.T) {
+	readError := errors.New("read failed")
+	callerCause := errors.New("caller stopped acquisition")
+	timeoutError := core.Exit(5, "acquisition timed out")
+	for _, tc := range []struct {
+		name      string
+		wantError error
+		wantValue int
+		wantCalls int
+	}{
+		{name: "ready", wantValue: 7, wantCalls: 1},
+		{name: "owned timeout", wantError: timeoutError, wantCalls: 1},
+		{name: "caller cancellation", wantError: callerCause, wantCalls: 1},
+		{name: "client deadline", wantError: context.DeadlineExceeded, wantCalls: 1},
+		{name: "read error", wantError: readError, wantCalls: 1},
+		{name: "read error after deadline", wantError: readError, wantCalls: 1},
+		{name: "pending then error", wantError: readError, wantCalls: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				parent, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				var child context.Context
+				calls := 0
+				got, err := PollReady(parent, time.Minute, time.Second,
+					func(ctx context.Context) (int, error) {
+						child = ctx
+						calls++
+						switch tc.name {
+						case "owned timeout":
+							<-ctx.Done()
+							return 7, ctx.Err()
+						case "caller cancellation":
+							cancel(callerCause)
+						case "client deadline":
+							return 7, context.DeadlineExceeded
+						case "read error":
+							return 7, readError
+						case "read error after deadline":
+							<-ctx.Done()
+							return 7, readError
+						case "pending then error":
+							if calls == 2 {
+								return 8, readError
+							}
+						}
+						return 7, nil
+					}, func(value int) bool { return tc.name == "ready" && value == 7 }, timeoutError)
+				if got != tc.wantValue || err != tc.wantError || calls != tc.wantCalls {
+					t.Fatalf("value=%d err=%v calls=%d; want value=%d err=%v calls=%d", got, err, calls, tc.wantValue, tc.wantError, tc.wantCalls)
+				}
+				if _, bounded := child.Deadline(); !bounded || child.Err() == nil {
+					t.Fatalf("acquisition child was not bounded and released: %v", child.Err())
+				}
+				if tc.name != "caller cancellation" && context.Cause(parent) != nil {
+					t.Fatalf("acquisition changed parent: %v", context.Cause(parent))
+				}
+			})
 		})
 	}
 }

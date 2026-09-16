@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -15,9 +14,6 @@ func init() {
 }
 
 type Provider struct{}
-
-func (Provider) Name() string      { return "xcp-ng" }
-func (Provider) Aliases() []string { return nil }
 
 func (Provider) ClaimScope(cfg core.Config) string {
 	endpoint, err := xapiEndpoint(cfg.XCPNg.APIURL)
@@ -168,12 +164,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return xcpNgServerTypeForConfig(cfg)
 }
 
-func (Provider) ServerTypeForClass(string) string { return "template" }
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewLeaseBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("xcp-ng", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

@@ -23,7 +23,7 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	}
 	return capability, true
 }
-func (Provider) NativeCheckpointSourceStatusOnly(Config) bool { return true }
+func (Provider) NativeCheckpointSourceStatusOnly(core.Config) bool { return true }
 func (Provider) NativeCheckpointWorkdir(req core.NativeCheckpointWorkdirRequest) string {
 	if req.Override != "" {
 		return req.Override
@@ -322,7 +322,7 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 	return nil
 }
 
-func validateForkImage(client instanceClient, cfg Config) error {
+func validateForkImage(client instanceClient, cfg core.Config) error {
 	if err := verifyConnection(client, cfg.Incus.CheckpointMetadata[identityLabel]); err != nil {
 		return err
 	}

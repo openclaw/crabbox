@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const providerName = "incus"
@@ -15,9 +14,6 @@ func init() {
 }
 
 type Provider struct{}
-
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
@@ -44,11 +40,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return core.IncusServerTypeForConfig(cfg)
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	_ = class
-	return "container"
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
@@ -60,10 +51,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 		return nil, err
 	}
 	return newBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor(providerName, func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }
 
 func validateConfig(cfg core.Config) error {

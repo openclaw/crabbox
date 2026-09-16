@@ -9,38 +9,38 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func NewFastAPICloudBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewFastAPICloudBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	return &fastAPICloudBackend{spec: spec, cfg: cfg, rt: rt}
 }
 
 type fastAPICloudBackend struct {
-	spec   ProviderSpec
-	cfg    Config
-	rt     Runtime
+	spec   core.ProviderSpec
+	cfg    core.Config
+	rt     core.Runtime
 	client fastAPICloudAPI
 }
 
-func (b *fastAPICloudBackend) Spec() ProviderSpec { return b.spec }
+func (b *fastAPICloudBackend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *fastAPICloudBackend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *fastAPICloudBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	_ = ctx
 	_ = req
-	return exit(2, "provider=%s does not support warmup; create and deploy the FastAPI Cloud app out-of-band", providerName)
+	return core.Exit(2, "provider=%s does not support warmup; create and deploy the FastAPI Cloud app out-of-band", providerName)
 }
 
-func (b *fastAPICloudBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
+func (b *fastAPICloudBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
 	_ = ctx
 	if err := shared.RejectServiceRunOptions(req, providerName, "lifecycle is owned by FastAPI Cloud", "cannot open an interactive shell"); err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
 	if len(req.Command) == 0 {
-		return RunResult{}, exit(2, "missing command")
+		return core.RunResult{}, core.Exit(2, "missing command")
 	}
-	return RunResult{}, exit(2, "provider=%s cannot execute arbitrary run commands; deploy with fastapi deploy or FastAPI Cloud CI", providerName)
+	return core.RunResult{}, core.Exit(2, "provider=%s cannot execute arbitrary run commands; deploy with fastapi deploy or FastAPI Cloud CI", providerName)
 }
 
-func (b *fastAPICloudBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *fastAPICloudBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	_ = req
 	client, err := b.api()
 	if err != nil {
@@ -51,7 +51,7 @@ func (b *fastAPICloudBackend) List(ctx context.Context, req ListRequest) ([]Leas
 		if err != nil {
 			return nil, err
 		}
-		servers := make([]Server, 0, len(apps))
+		servers := make([]core.Server, 0, len(apps))
 		for _, app := range apps {
 			servers = append(servers, fastAPICloudServer(app))
 		}
@@ -62,44 +62,44 @@ func (b *fastAPICloudBackend) List(ctx context.Context, req ListRequest) ([]Leas
 		if err != nil {
 			return nil, err
 		}
-		return []LeaseView{fastAPICloudServer(app)}, nil
+		return []core.LeaseView{fastAPICloudServer(app)}, nil
 	}
-	return nil, exit(2, "provider=%s list requires --fastapi-cloud-team-id or --fastapi-cloud-app-id", providerName)
+	return nil, core.Exit(2, "provider=%s list requires --fastapi-cloud-team-id or --fastapi-cloud-app-id", providerName)
 }
 
-func (b *fastAPICloudBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *fastAPICloudBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	if strings.TrimSpace(b.cfg.FastAPICloud.AppID) != "" {
-		if _, err := b.Status(ctx, StatusRequest{}); err != nil {
-			return DoctorResult{}, err
+		if _, err := b.Status(ctx, core.StatusRequest{}); err != nil {
+			return core.DoctorResult{}, err
 		}
-		return inventoryDoctorResult(providerName, 1), nil
+		return core.InventoryDoctorResult(providerName, 1), nil
 	}
-	servers, err := b.List(ctx, ListRequest{})
+	servers, err := b.List(ctx, core.ListRequest{})
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	return inventoryDoctorResult(providerName, len(servers)), nil
+	return core.InventoryDoctorResult(providerName, len(servers)), nil
 }
 
-func (b *fastAPICloudBackend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *fastAPICloudBackend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	appID := strings.TrimSpace(req.ID)
 	if appID == "" {
 		appID = strings.TrimSpace(b.cfg.FastAPICloud.AppID)
 	}
 	if appID == "" {
-		return StatusView{}, exit(2, "provider=%s status requires --id <fastapi-cloud-app-id> or --fastapi-cloud-app-id", providerName)
+		return core.StatusView{}, core.Exit(2, "provider=%s status requires --id <fastapi-cloud-app-id> or --fastapi-cloud-app-id", providerName)
 	}
 	client, err := b.api()
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	app, err := client.GetApp(ctx, appID)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	deployment, ok, err := client.LatestDeployment(ctx, appID)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
 	state := "no-deployment"
 	ready := false
@@ -107,7 +107,7 @@ func (b *fastAPICloudBackend) Status(ctx context.Context, req StatusRequest) (St
 		state = deployment.Status.State()
 		ready = deployment.Status.IsReady()
 	}
-	view := StatusView{
+	view := core.StatusView{
 		ID:         app.ID,
 		Slug:       app.Slug,
 		Provider:   providerName,
@@ -123,10 +123,10 @@ func (b *fastAPICloudBackend) Status(ctx context.Context, req StatusRequest) (St
 	return view, nil
 }
 
-func (b *fastAPICloudBackend) Stop(ctx context.Context, req StopRequest) error {
+func (b *fastAPICloudBackend) Stop(ctx context.Context, req core.StopRequest) error {
 	_ = ctx
 	_ = req
-	return exit(2, "provider=%s does not support stop; FastAPI Cloud does not expose app stop/delete through this provider", providerName)
+	return core.Exit(2, "provider=%s does not support stop; FastAPI Cloud does not expose app stop/delete through this provider", providerName)
 }
 
 func (b *fastAPICloudBackend) api() (fastAPICloudAPI, error) {
@@ -136,8 +136,8 @@ func (b *fastAPICloudBackend) api() (fastAPICloudAPI, error) {
 	return newFastAPICloudClient(b.cfg, b.rt)
 }
 
-func fastAPICloudServer(app fastAPICloudApp) Server {
-	return Server{
+func fastAPICloudServer(app fastAPICloudApp) core.Server {
+	return core.Server{
 		CloudID:  app.ID,
 		Provider: providerName,
 		Name:     core.Blank(app.Name, app.Slug),

@@ -625,7 +625,9 @@ func TestAcquireOnAcquiredErrorRollsBackBeforeLocalState(t *testing.T) {
 				t.Fatalf("claim exists during OnAcquired=%v err=%v", exists, err)
 			}
 			target := core.SSHTarget{}
-			core.UseStoredTestboxKey(&target, leaseID)
+			if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+				t.Fatal(err)
+			}
 			if target.Key != "" {
 				t.Fatalf("stored key exists during OnAcquired: %s", target.Key)
 			}
@@ -740,7 +742,9 @@ func TestAcquireRollsBackUnkeptDevboxAfterSSHReadinessFailure(t *testing.T) {
 		t.Fatalf("claim exists=%v err=%v after rollback", exists, err)
 	}
 	target := core.SSHTarget{}
-	core.UseStoredTestboxKey(&target, leaseID)
+	if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
 	if target.Key != "" {
 		t.Fatalf("stored key still exists after rollback: %s", target.Key)
 	}
@@ -889,7 +893,9 @@ func TestResolveReadOnlyDoesNotPersistSecretKey(t *testing.T) {
 		t.Fatalf("read-only resolve fetched Secret: %s", got)
 	}
 	target := core.SSHTarget{}
-	core.UseStoredTestboxKey(&target, leaseID)
+	if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
 	if target.Key != "" {
 		t.Fatalf("read-only resolve persisted key: %s", target.Key)
 	}
@@ -972,7 +978,9 @@ func TestResolveChecksRepoClaimBeforeResumeOrSecretRead(t *testing.T) {
 		t.Fatalf("claim rejection mutated resource or read Secret: %s", commands)
 	}
 	target := core.SSHTarget{}
-	core.UseStoredTestboxKey(&target, leaseID)
+	if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
 	if target.Key != "" {
 		t.Fatalf("claim rejection persisted SSH key: %s", target.Key)
 	}
@@ -1135,7 +1143,9 @@ func TestResolveRejectsSecretOwnedByAnotherDevbox(t *testing.T) {
 		t.Fatalf("Resolve error=%v", err)
 	}
 	target := core.SSHTarget{}
-	core.UseStoredTestboxKey(&target, leaseID)
+	if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
 	if target.Key != "" {
 		t.Fatalf("unowned Secret key persisted: %s", target.Key)
 	}

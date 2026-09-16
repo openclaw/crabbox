@@ -3,9 +3,10 @@ package tensorlake
 import (
 	"context"
 	"fmt"
+	"time"
+
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
-	"time"
 )
 
 const envProfileCleanupTimeout = 30 * time.Second
@@ -26,14 +27,14 @@ func (b *tensorlakeBackend) uploadEnvProfile(ctx context.Context, cli *tensorlak
 				return err
 			}
 			if item.State == "terminated" {
-				return exit(2, "Tensorlake sandbox has terminated")
+				return core.Exit(2, "Tensorlake sandbox has terminated")
 			}
 			return action()
 		})
 	}
 	cleanup := func(cleanupCtx context.Context) {
 		err := profile.Close(cleanupCtx, func(removeCtx context.Context, remotePath string) error {
-			return authorized(removeCtx, func() error { return cli.execShell(removeCtx, claim.CloudID, "rm -f "+shellQuote(remotePath)) })
+			return authorized(removeCtx, func() error { return cli.execShell(removeCtx, claim.CloudID, "rm -f "+core.ShellQuote(remotePath)) })
 		})
 		if err != nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: tensorlake env profile cleanup failed for %s: %v\n", claim.CloudID, err)

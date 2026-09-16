@@ -32,69 +32,14 @@ type CloudflareSandboxConfigApplied struct {
 
 func (cfg *CloudflareSandboxConfig) applyFile(file *fileCloudflareSandboxConfig, trusted bool) (CloudflareSandboxConfigApplied, error) {
 	var applied CloudflareSandboxConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if trusted && file.BridgeURL != nil {
-		cfg.BridgeURL = *file.BridgeURL
-		applied.InputAccepted = true
-	}
-	if trusted && file.BridgeURLConfigAlias != nil {
-		cfg.BridgeURL = *file.BridgeURLConfigAlias
-		applied.InputAccepted = true
-	}
-	if trusted && file.Token != nil {
-		cfg.Token = *file.Token
-		applied.InputAccepted = true
-	}
-	if file.Workdir != nil {
-		cfg.Workdir = *file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.ExecTimeoutSecs != nil {
-		if *file.ExecTimeoutSecs < 0 {
-			return applied, exit(2, "cloudflare-sandbox execTimeoutSecs must be non-negative")
-		}
-		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.ForgetMissing != nil {
-		cfg.ForgetMissing = *file.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "cloudflare-sandbox")
+	return applied, err
 }
 
 func (cfg *CloudflareSandboxConfig) applyEnv() (CloudflareSandboxConfigApplied, error) {
 	var applied CloudflareSandboxConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_SANDBOX_URL"); ok {
-		cfg.BridgeURL = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_SANDBOX_TOKEN"); ok {
-		cfg.Token = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CLOUDFLARE_SANDBOX_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.ExecTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := getenvBool("CRABBOX_CLOUDFLARE_SANDBOX_FORGET_MISSING"); ok {
-		cfg.ForgetMissing = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 5)
+	return applied, err
 }
 
 // CloudflareSandboxConfigFlagValues holds parsed values; only visited flags are applied.
@@ -107,32 +52,14 @@ type CloudflareSandboxConfigFlagValues struct {
 
 // RegisterCloudflareSandboxConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterCloudflareSandboxConfigFlags(fs *flag.FlagSet, defaults CloudflareSandboxConfig) CloudflareSandboxConfigFlagValues {
-	return CloudflareSandboxConfigFlagValues{
-		BridgeURL:       fs.String("cloudflare-sandbox-url", defaults.BridgeURL, "Cloudflare Sandbox bridge URL"),
-		Workdir:         fs.String("cloudflare-sandbox-workdir", defaults.Workdir, "Absolute working directory inside the sandbox"),
-		ExecTimeoutSecs: fs.Int("cloudflare-sandbox-exec-timeout-secs", defaults.ExecTimeoutSecs, "command timeout in seconds (0 = bridge default)"),
-		ForgetMissing:   fs.Bool("cloudflare-sandbox-forget-missing", defaults.ForgetMissing, "remove the local claim when stop gets 404 (explicit stale-claim cleanup)"),
-	}
+	var values CloudflareSandboxConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values CloudflareSandboxConfigFlagValues) Apply(cfg *CloudflareSandboxConfig, fs *flag.FlagSet) (CloudflareSandboxConfigApplied, error) {
 	var applied CloudflareSandboxConfigApplied
-	if flagWasSet(fs, "cloudflare-sandbox-url") {
-		cfg.BridgeURL = *values.BridgeURL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloudflare-sandbox-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloudflare-sandbox-exec-timeout-secs") {
-		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "cloudflare-sandbox-forget-missing") {
-		cfg.ForgetMissing = *values.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

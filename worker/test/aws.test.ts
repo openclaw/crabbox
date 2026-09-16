@@ -435,6 +435,7 @@ describe("aws provider", () => {
       provider: "aws",
       kind: "aws-ami",
       region: "eu-west-1",
+      revision: "selected-revision",
     };
     config.awsPromotedAMIs[awsPromotedAMIConfigKey("us-east-1", config.serverType)] =
       "ami-fallback";
@@ -444,6 +445,15 @@ describe("aws provider", () => {
       source: "promoted",
       region: "us-east-1",
     });
+    expect(awsLeaseImageIdentity(config, "ami-fallback", "us-east-1")).not.toHaveProperty(
+      "revision",
+    );
+    expect(awsLeaseImageIdentity(config, "ami-primary", "eu-west-1").revision).toBe(
+      "selected-revision",
+    );
+    expect(awsLeaseImageIdentity(config, "ami-primary", "us-east-1")).not.toHaveProperty(
+      "revision",
+    );
   });
 
   it("rejects a canonical SSH key name reserved for another lease", async () => {

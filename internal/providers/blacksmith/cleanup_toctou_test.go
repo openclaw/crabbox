@@ -5,6 +5,8 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestFailedWarmupDoesNotStopConcurrentUnclaimedTestbox(t *testing.T) {
@@ -16,22 +18,22 @@ func TestFailedWarmupDoesNotStopConcurrentUnclaimedTestbox(t *testing.T) {
 	boxExists := false
 	listCalls := 0
 	stopped := ""
-	runner := &blacksmithFuncRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		if len(req.Args) < 2 || req.Args[0] != "testbox" {
-			return LocalCommandResult{}, nil
+			return core.LocalCommandResult{}, nil
 		}
 		switch req.Args[1] {
 		case "list":
 			listCalls++
 			if boxExists {
-				return LocalCommandResult{Stdout: "tbx_bee123 running example-org .github/workflows/testbox.yml check main 2026-07-14T10:00:00.000000Z\n"}, nil
+				return core.LocalCommandResult{Stdout: "tbx_bee123 running example-org .github/workflows/testbox.yml check main 2026-07-14T10:00:00.000000Z\n"}, nil
 			}
-			return LocalCommandResult{Stdout: "ID STATUS REPO WORKFLOW JOB REF CREATED\n"}, nil
+			return core.LocalCommandResult{Stdout: "ID STATUS REPO WORKFLOW JOB REF CREATED\n"}, nil
 		case "warmup":
 			// Another invocation can create its testbox before warmup returns
 			// and before that invocation publishes a local lease claim.
 			boxExists = true
-			return LocalCommandResult{ExitCode: 1, Stdout: "error: delegated queue unavailable\n"}, errors.New("exit status 1")
+			return core.LocalCommandResult{ExitCode: 1, Stdout: "error: delegated queue unavailable\n"}, errors.New("exit status 1")
 		case "stop":
 			for i, arg := range req.Args {
 				if arg == "--id" && i+1 < len(req.Args) {
@@ -40,16 +42,16 @@ func TestFailedWarmupDoesNotStopConcurrentUnclaimedTestbox(t *testing.T) {
 			}
 			boxExists = false
 		}
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	}}
 
-	cfg := baseConfig()
+	cfg := core.BaseConfig()
 	cfg.Blacksmith.Workflow = ".github/workflows/testbox.yml"
 	cfg.Blacksmith.Job = "check"
 	cfg.Blacksmith.Ref = "main"
 	backend := newTestBlacksmithBackend(cfg, runner)
 
-	if _, err := backend.warmupLease(context.Background(), Repo{Root: "/repo-a"}, false, ""); err == nil {
+	if _, err := backend.warmupLease(context.Background(), core.Repo{Root: "/repo-a"}, false, ""); err == nil {
 		t.Fatal("expected warmup failure")
 	}
 	if stopped != "" || !boxExists {

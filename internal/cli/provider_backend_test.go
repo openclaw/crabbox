@@ -68,7 +68,7 @@ func TestFastAPICloudFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.fastAPICloudAPIURL }}
 		fs := newFlagSet("test", io.Discard)
@@ -101,7 +101,7 @@ func TestRailwayFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.railwayAPIURL }}
 		fs := newFlagSet("test", io.Discard)
@@ -134,7 +134,7 @@ func TestUpstashBoxFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.upstashBoxBaseURL }}
 		fs := newFlagSet("test", io.Discard)
@@ -167,7 +167,7 @@ func TestCloudflareFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.cloudflareAPIURL }}
 		fs := newFlagSet("test", io.Discard)
@@ -200,7 +200,7 @@ func TestAzureDynamicSessionsFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.azSessionsEndpoint }}
 		fs := newFlagSet("test", io.Discard)
@@ -233,7 +233,7 @@ func TestSmolvmFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.smolvmBaseURL }}
 		fs := newFlagSet("test", io.Discard)
@@ -266,7 +266,7 @@ func TestSemaphoreFlagSourceCentralPhase(t *testing.T) {
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
-			applyErr = exit(2, "synthetic invalid configuration")
+			applyErr = Exit(2, "synthetic invalid configuration")
 		}
 		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.semaphoreHost }}
 		fs := newFlagSet("test", io.Discard)
@@ -300,7 +300,7 @@ func TestE2BFlagSourcesCentralPhase(t *testing.T) {
 			seenURL, seenDomain := credentialSourceUnknown, credentialSourceUnknown
 			var applyErr error
 			if fail {
-				applyErr = exit(2, "synthetic invalid configuration")
+				applyErr = Exit(2, "synthetic invalid configuration")
 			}
 			providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(c Config) {
 				seenURL, seenDomain = c.credentialProvenance.e2bAPIURL, c.credentialProvenance.e2bDomain
@@ -672,8 +672,8 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", tc.name, err)
 		}
-		if provider.Name() != tc.canonical {
-			t.Fatalf("ProviderFor(%q).Name() = %q, want %q", tc.name, provider.Name(), tc.canonical)
+		if provider.Spec().Name != tc.canonical {
+			t.Fatalf("ProviderFor(%q).Spec().Name = %q, want %q", tc.name, provider.Spec().Name, tc.canonical)
 		}
 	}
 	if _, err := ProviderFor("missing"); err == nil {
@@ -1336,10 +1336,10 @@ func TestConfiguredCacheVolumeAllowsExistingLeaseReuse(t *testing.T) {
 		Path:     "/var/cache/crabbox/pnpm",
 		Required: true,
 	}}
-	if err := claimLeaseForRepoProvider("tbx_existing", "existing", "blacksmith-testbox", "/repo", time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider("tbx_existing", "existing", "blacksmith-testbox", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateLeaseClaimCacheVolumes("tbx_existing", CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
+	if err := UpdateLeaseClaimCacheVolumes("tbx_existing", CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
 		t.Fatal(err)
 	}
 	if err := applyLeaseCreateFlagsForLease(&cfg, fs, values, "tbx_existing"); err != nil {
@@ -1362,7 +1362,7 @@ func TestConfiguredCacheVolumeRejectsExistingLeaseWithoutClaimedVolume(t *testin
 		Path:     "/var/cache/crabbox/pnpm",
 		Required: true,
 	}}
-	if err := claimLeaseForRepoProvider("tbx_existing", "existing", "blacksmith-testbox", "/repo", time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider("tbx_existing", "existing", "blacksmith-testbox", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	err := applyLeaseCreateFlagsForLease(&cfg, fs, values, "tbx_existing")
@@ -1978,13 +1978,41 @@ func TestServerLeaseClaimSnapshotIsExplicitAndCloned(t *testing.T) {
 // The nil embedded provider makes any non-metadata method call fail this test.
 type nameMetadataOnlyTestProvider struct {
 	Provider
-	nameCalls, aliasCalls *int
+	specCalls *int
 }
 
-func (p nameMetadataOnlyTestProvider) Name() string { *p.nameCalls++; return " Metadata-Only " }
-func (p nameMetadataOnlyTestProvider) Aliases() []string {
-	*p.aliasCalls++
-	return []string{" Alias-One ", "SECOND"}
+func (p nameMetadataOnlyTestProvider) Spec() ProviderSpec {
+	*p.specCalls++
+	return ProviderSpec{Name: " Metadata-Only ", Aliases: []string{" Alias-One ", "SECOND"}}
+}
+
+func TestProviderRegistrationUsesSpecIdentity(t *testing.T) {
+	specCalls := 0
+	p := nameMetadataOnlyTestProvider{specCalls: &specCalls}
+	RegisterProvider(p)
+	t.Cleanup(func() {
+		for _, name := range []string{"metadata-only", "alias-one", "second"} {
+			delete(providerRegistry, name)
+		}
+	})
+	if specCalls != 1 {
+		t.Fatalf("registration read metadata %d times, want once", specCalls)
+	}
+	for _, name := range []string{"metadata-only", " METADATA-ONLY ", "alias-one", " ALIAS-ONE ", "second", "SECOND"} {
+		got, err := ProviderFor(name)
+		if err != nil || got != p {
+			t.Fatalf("ProviderFor(%q) = %v, %v; want the registered adapter", name, got, err)
+		}
+	}
+	count := 0
+	for _, name := range RegisteredProviderNames() {
+		if name == " Metadata-Only " {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("canonical metadata name appeared %d times, want once", count)
+	}
 }
 
 func TestProviderNameMatchesMetadataOnly(t *testing.T) {
@@ -1992,8 +2020,8 @@ func TestProviderNameMatchesMetadataOnly(t *testing.T) {
 		t.Fatal("fixture must not be registered")
 	}
 	registrySize := len(providerRegistry)
-	nameCalls, aliasCalls := 0, 0
-	p := nameMetadataOnlyTestProvider{nameCalls: &nameCalls, aliasCalls: &aliasCalls}
+	specCalls := 0
+	p := nameMetadataOnlyTestProvider{specCalls: &specCalls}
 	for _, tc := range []struct {
 		name string
 		want bool
@@ -2002,7 +2030,7 @@ func TestProviderNameMatchesMetadataOnly(t *testing.T) {
 			t.Fatalf("name=%q got=%t want=%t", tc.name, got, tc.want)
 		}
 	}
-	if nameCalls == 0 || aliasCalls == 0 || len(providerRegistry) != registrySize {
+	if specCalls == 0 || len(providerRegistry) != registrySize {
 		t.Fatal("metadata consultation or registry boundary changed")
 	}
 }
@@ -2012,8 +2040,8 @@ func TestProviderNameMatchesExactMetadataOnly(t *testing.T) {
 		t.Fatal("fixture must not be registered")
 	}
 	registrySize := len(providerRegistry)
-	nameCalls, aliasCalls := 0, 0
-	p := nameMetadataOnlyTestProvider{nameCalls: &nameCalls, aliasCalls: &aliasCalls}
+	specCalls := 0
+	p := nameMetadataOnlyTestProvider{specCalls: &specCalls}
 	for _, tc := range []struct {
 		name string
 		want bool
@@ -2022,7 +2050,7 @@ func TestProviderNameMatchesExactMetadataOnly(t *testing.T) {
 			t.Fatalf("exact name=%q got=%t want=%t", tc.name, got, tc.want)
 		}
 	}
-	if nameCalls == 0 || aliasCalls == 0 || len(providerRegistry) != registrySize {
+	if specCalls == 0 || len(providerRegistry) != registrySize {
 		t.Fatal("metadata consultation or registry boundary changed")
 	}
 }

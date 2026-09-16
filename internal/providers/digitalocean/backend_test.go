@@ -1339,6 +1339,10 @@ func TestResolveVisibleDropletIgnoresUnrelatedCorruptClaim(t *testing.T) {
 	item := droplet{ID: 108, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
 	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
 	backend := newTestBackend(t, api)
+	// Prepare this owned synthetic namespace before manually inserting a corrupt claim.
+	if err := core.PreflightLeaseSSHStorage(); err != nil {
+		t.Fatal(err)
+	}
 	stateDir, err := core.CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
@@ -1821,6 +1825,10 @@ func TestUnreadableExactClaimBlocksResolveAndRelease(t *testing.T) {
 	item := droplet{ID: 112, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
 	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
 	backend := newTestBackend(t, api)
+	// Prepare this owned synthetic namespace before manually inserting a corrupt claim.
+	if err := core.PreflightLeaseSSHStorage(); err != nil {
+		t.Fatal(err)
+	}
 	stateDir, err := core.CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
@@ -2850,17 +2858,15 @@ func claimedDigitalOceanTarget(t *testing.T, server core.Server) core.LeaseTarge
 
 func writeStoredTestboxKey(t *testing.T, leaseID string) string {
 	t.Helper()
-	keyPath, err := core.TestboxKeyPath(leaseID)
+	// Fresh synthetic files need the same owner/privacy preparation as generated keys.
+	keyPath, err := core.PrepareStoredTestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+	if err := core.WritePreparedLeaseSSHKeyFile(keyPath, []byte("test-key")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(keyPath, []byte("test-key"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(keyPath+".pub", []byte("ssh-ed25519 test-key"), 0o644); err != nil {
+	if err := core.WritePreparedLeaseSSHKeyFile(keyPath+".pub", []byte("ssh-ed25519 test-key")); err != nil {
 		t.Fatal(err)
 	}
 	return keyPath

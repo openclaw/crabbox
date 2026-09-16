@@ -18,7 +18,7 @@ var checkpointRecoveryTimeout = 3 * time.Minute
 var checkpointIDPattern = regexp.MustCompile(`^chk_[a-f0-9]{16}$`)
 var checkpointNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
-func (Provider) NativeCheckpointSourceStatusOnly(cfg Config) bool {
+func (Provider) NativeCheckpointSourceStatusOnly(cfg core.Config) bool {
 	return !core.ShouldUseCoordinator(cfg, (Provider{}).Spec()) && cfg.TargetOS == core.TargetLinux
 }
 
@@ -38,7 +38,7 @@ func (Provider) NativeCheckpointWorkdir(req core.NativeCheckpointWorkdirRequest)
 	return core.RemoteJoin(cfg, req.LeaseID, req.RepoName)
 }
 
-func snapshotClient(cfg Config, rt Runtime) (daytonaSnapshotAPI, error) {
+func snapshotClient(cfg core.Config, rt core.Runtime) (daytonaSnapshotAPI, error) {
 	client, err := newDaytonaClient(cfg, rt)
 	if err != nil {
 		return nil, err
@@ -52,15 +52,15 @@ func snapshotClient(cfg Config, rt Runtime) (daytonaSnapshotAPI, error) {
 
 func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheckpointCreateRequest) (result core.NativeCheckpointCreateResult, err error) {
 	if _, ok := (Provider{}).NativeCheckpointCapability(core.NativeCheckpointRequest{Config: req.Config, Server: req.Server}); !ok {
-		return result, exit(2, "Daytona native checkpoints require a direct Linux lease")
+		return result, core.Exit(2, "Daytona native checkpoints require a direct Linux lease")
 	}
 	if !checkpointIDPattern.MatchString(req.CheckpointID) {
-		return result, exit(2, "Daytona snapshot requires a canonical checkpoint ID")
+		return result, core.Exit(2, "Daytona snapshot requires a canonical checkpoint ID")
 	}
 	name := "crabbox-" + req.CheckpointID
 	if req.Name != "" {
 		if len(req.Name) > 64 || !checkpointNamePattern.MatchString(req.Name) {
-			return result, exit(2, "Daytona checkpoint name must be 1-64 letters, digits, dots, underscores, or hyphens, starting with a letter or digit")
+			return result, core.Exit(2, "Daytona checkpoint name must be 1-64 letters, digits, dots, underscores, or hyphens, starting with a letter or digit")
 		}
 		name = req.Name + "-" + req.CheckpointID
 	}
@@ -73,12 +73,12 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 	if err != nil {
 		return result, err
 	}
-	claim, claimed, err := resolveLeaseClaimForProvider(req.LeaseID, daytonaProvider)
+	claim, claimed, err := core.ResolveLeaseClaimForProvider(req.LeaseID, daytonaProvider)
 	if err != nil {
 		return result, err
 	}
 	if !claimed || claim.CloudID != req.Server.CloudID {
-		return result, exit(4, "Daytona checkpoint requires an exact source lease claim")
+		return result, core.Exit(4, "Daytona checkpoint requires an exact source lease claim")
 	}
 	timeout := req.WaitTimeout
 	if timeout <= 0 {
@@ -92,7 +92,7 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 			return err
 		}
 		if lease, owned := daytonaSandboxOwnership(source); !owned || lease != req.LeaseID || source.GetId() != claim.CloudID {
-			return exit(4, "Daytona checkpoint source ownership mismatch")
+			return core.Exit(4, "Daytona checkpoint source ownership mismatch")
 		}
 		if claim.FixedCreateIntent != nil {
 			if _, err := loadFixedDaytonaSandbox(waitCtx, client, claim); err != nil {
@@ -101,17 +101,17 @@ func (Provider) CreateNativeCheckpoint(ctx context.Context, req core.NativeCheck
 		}
 		org := source.GetOrganizationId()
 		if org == "" || auth.OrganizationID != "" && auth.OrganizationID != org {
-			return exit(4, "Daytona source organization is missing or mismatched")
+			return core.Exit(4, "Daytona source organization is missing or mismatched")
 		}
 		state := daytonaSandboxState(source)
 		if state != "started" && state != "stopped" {
-			return exit(2, "Daytona snapshot source must be started or stopped; state=%s", state)
+			return core.Exit(2, "Daytona snapshot source must be started or stopped; state=%s", state)
 		}
 		if state == "started" && req.NoReboot {
-			return exit(2, "Daytona filesystem snapshots require a stopped source; rerun with --no-reboot=false")
+			return core.Exit(2, "Daytona filesystem snapshots require a stopped source; rerun with --no-reboot=false")
 		}
 		if _, err := client.GetSnapshot(waitCtx, name); err == nil {
-			return exit(2, "Daytona snapshot %s already exists", name)
+			return core.Exit(2, "Daytona snapshot %s already exists", name)
 		} else if !daytonaIsNotFoundError(err) {
 			return err
 		}
@@ -218,10 +218,10 @@ func waitDaytonaSnapshot(ctx context.Context, client daytonaSnapshotAPI, name, o
 		}
 		if err == nil {
 			if snap == nil || snap.GetId() == "" || snap.GetName() != name || snap.GetOrganizationId() != org || snap.GetGeneral() {
-				return last, exit(4, "Daytona snapshot identity or organization mismatch")
+				return last, core.Exit(4, "Daytona snapshot identity or organization mismatch")
 			}
 			if expectedID != "" && expectedID != snap.GetId() {
-				return last, exit(4, "Daytona snapshot identity changed while waiting")
+				return last, core.Exit(4, "Daytona snapshot identity changed while waiting")
 			}
 			expectedID = snap.GetId()
 			last = snap
@@ -229,7 +229,7 @@ func waitDaytonaSnapshot(ctx context.Context, client daytonaSnapshotAPI, name, o
 				return snap, nil
 			}
 			if daytonaSnapshotFailed(snap.GetState()) {
-				return snap, exit(5, "Daytona snapshot %s failed: state=%s", name, snap.GetState())
+				return snap, core.Exit(5, "Daytona snapshot %s failed: state=%s", name, snap.GetState())
 			}
 		}
 		if err := shared.SleepContext(ctx, checkpointPollInterval); err != nil {
@@ -249,7 +249,7 @@ func waitDaytonaStopped(ctx context.Context, client daytonaAPI, id string) error
 			return nil
 		}
 		if daytonaStateFailed(state) {
-			return exit(5, "Daytona source %s entered state=%s", id, state)
+			return core.Exit(5, "Daytona source %s entered state=%s", id, state)
 		}
 		if err := shared.SleepContext(ctx, checkpointPollInterval); err != nil {
 			return err
@@ -257,24 +257,24 @@ func waitDaytonaStopped(ctx context.Context, client daytonaAPI, id string) error
 	}
 }
 
-func daytonaCheckpointConfig(req core.NativeCheckpointResourceRequest) (Config, error) {
+func daytonaCheckpointConfig(req core.NativeCheckpointResourceRequest) (core.Config, error) {
 	cfg, err := req.LoadConfig()
 	if err != nil {
 		return cfg, err
 	}
 	cfg.Provider, cfg.Coordinator = daytonaProvider, ""
 	if req.Image.Provider != daytonaProvider || req.Image.Kind != core.CheckpointKindDaytona || !req.Image.Direct || req.Image.ID == "" || req.Image.Name == "" || req.Metadata["organization"] == "" || !checkpointIDPattern.MatchString(req.Metadata["checkpoint"]) || req.Metadata["source"] == "" {
-		return cfg, exit(4, "Daytona checkpoint is missing exact ownership metadata")
+		return cfg, core.Exit(4, "Daytona checkpoint is missing exact ownership metadata")
 	}
 	if req.Metadata["snapshot_id"] != req.Image.ID {
-		return cfg, exit(4, "Daytona snapshot ID is unconfirmed; inspect snapshot %s and retain the recovery record", req.Image.Name)
+		return cfg, core.Exit(4, "Daytona snapshot ID is unconfirmed; inspect snapshot %s and retain the recovery record", req.Image.Name)
 	}
 	auth, err := daytonaAuthConfig(cfg)
 	if err != nil {
 		return cfg, err
 	}
 	if req.Metadata["api_url"] != daytonaAPIURL(cfg, auth) || auth.OrganizationID != "" && auth.OrganizationID != req.Metadata["organization"] {
-		return cfg, exit(4, "Daytona checkpoint API or organization scope mismatch")
+		return cfg, core.Exit(4, "Daytona checkpoint API or organization scope mismatch")
 	}
 	cfg.Daytona.OrganizationID = req.Metadata["organization"]
 	return cfg, nil
@@ -286,7 +286,7 @@ func loadDaytonaCheckpoint(ctx context.Context, client daytonaSnapshotAPI, req c
 		return nil, err
 	}
 	if snap == nil || snap.GetId() != req.Image.ID || snap.GetName() != req.Image.Name || snap.GetOrganizationId() != req.Metadata["organization"] || snap.GetGeneral() {
-		return nil, exit(4, "Daytona snapshot ownership mismatch")
+		return nil, core.Exit(4, "Daytona snapshot ownership mismatch")
 	}
 	return snap, nil
 }
@@ -343,7 +343,7 @@ func (Provider) DeleteNativeCheckpoint(ctx context.Context, req core.NativeCheck
 }
 
 func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {
-	resource := core.NativeCheckpointResourceRequest{LoadConfig: func() (Config, error) { return *req.Config, nil }, Image: core.NativeCheckpointImage{ID: req.Record.ImageID, Name: req.Record.Name, Provider: daytonaProvider, Kind: req.Record.Kind, Direct: req.Record.Direct}, Metadata: req.Record.Metadata}
+	resource := core.NativeCheckpointResourceRequest{LoadConfig: func() (core.Config, error) { return *req.Config, nil }, Image: core.NativeCheckpointImage{ID: req.Record.ImageID, Name: req.Record.Name, Provider: daytonaProvider, Kind: req.Record.Kind, Direct: req.Record.Direct}, Metadata: req.Record.Metadata}
 	cfg, err := daytonaCheckpointConfig(resource)
 	if err != nil {
 		return err
@@ -362,7 +362,7 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 func validateDaytonaForkSnapshot(snapshot *api.SnapshotDto, source *core.NativeCheckpointForkRecord) error {
 	if snapshot == nil || snapshot.GetId() != source.ImageID || snapshot.GetName() != source.Name ||
 		snapshot.GetOrganizationId() != source.Metadata["organization"] || snapshot.GetGeneral() || snapshot.GetState() != api.SNAPSHOTSTATE_ACTIVE {
-		return exit(4, "Daytona checkpoint source does not match its exact native snapshot")
+		return core.Exit(4, "Daytona checkpoint source does not match its exact native snapshot")
 	}
 	return nil
 }

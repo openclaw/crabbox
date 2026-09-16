@@ -46,119 +46,14 @@ type OpenSandboxConfigApplied struct {
 
 func (cfg *OpenSandboxConfig) applyFile(file *fileOpenSandboxConfig) (OpenSandboxConfigApplied, error) {
 	var applied OpenSandboxConfigApplied
-	if file == nil {
-		return applied, nil
-	}
-	if file.Image != nil {
-		cfg.Image = *file.Image
-		applied.InputAccepted = true
-	}
-	if file.Workdir != nil {
-		cfg.Workdir = *file.Workdir
-		applied.InputAccepted = true
-	}
-	if file.CPU != nil {
-		cfg.CPU = *file.CPU
-		applied.InputAccepted = true
-	}
-	if file.Memory != nil {
-		cfg.Memory = *file.Memory
-		applied.InputAccepted = true
-	}
-	if file.TimeoutSecs != nil {
-		if *file.TimeoutSecs < 0 {
-			return applied, exit(2, "opensandbox timeoutSecs must be non-negative")
-		}
-		cfg.TimeoutSecs = *file.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.ExecTimeoutSecs != nil {
-		if *file.ExecTimeoutSecs < 0 {
-			return applied, exit(2, "opensandbox execTimeoutSecs must be non-negative")
-		}
-		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if file.PlatformOS != nil {
-		cfg.PlatformOS = *file.PlatformOS
-		applied.InputAccepted = true
-	}
-	if file.PlatformArch != nil {
-		cfg.PlatformArch = *file.PlatformArch
-		applied.InputAccepted = true
-	}
-	if file.SecureAccess != nil {
-		cfg.SecureAccess = *file.SecureAccess
-		applied.InputAccepted = true
-	}
-	if file.UseServerProxy != nil {
-		cfg.UseServerProxy = *file.UseServerProxy
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFileOverlay(cfg, file, &applied, true, "opensandbox")
+	return applied, err
 }
 
 func (cfg *OpenSandboxConfig) applyEnv() (OpenSandboxConfigApplied, error) {
 	var applied OpenSandboxConfigApplied
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_API_URL", "OPEN_SANDBOX_API_URL"); ok {
-		cfg.APIURL = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_IMAGE"); ok {
-		cfg.Image = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_WORKDIR"); ok {
-		cfg.Workdir = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_CPU"); ok {
-		cfg.CPU = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_MEMORY"); ok {
-		cfg.Memory = value
-		applied.InputAccepted = true
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.TimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_OPENSANDBOX_TIMEOUT_SECS", cfg.TimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	{
-		var accepted bool
-		var err error
-		cfg.ExecTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_OPENSANDBOX_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
-		if err != nil {
-			return applied, err
-		}
-		if accepted {
-			applied.InputAccepted = true
-		}
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_PLATFORM_OS"); ok {
-		cfg.PlatformOS = value
-		applied.InputAccepted = true
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_OPENSANDBOX_PLATFORM_ARCH"); ok {
-		cfg.PlatformArch = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_OPENSANDBOX_SECURE_ACCESS"); ok {
-		cfg.SecureAccess = value
-		applied.InputAccepted = true
-	}
-	if value, ok := getenvBool("CRABBOX_OPENSANDBOX_USE_SERVER_PROXY"); ok {
-		cfg.UseServerProxy = value
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigEnvironment(cfg, &applied, 0, 12)
+	return applied, err
 }
 
 // OpenSandboxConfigFlagValues holds parsed values; only visited flags are applied.
@@ -179,72 +74,14 @@ type OpenSandboxConfigFlagValues struct {
 
 // RegisterOpenSandboxConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterOpenSandboxConfigFlags(fs *flag.FlagSet, defaults OpenSandboxConfig) OpenSandboxConfigFlagValues {
-	return OpenSandboxConfigFlagValues{
-		APIURL:          fs.String("opensandbox-api-url", defaults.APIURL, "Trusted OpenSandbox API base URL; not accepted from repository config"),
-		Image:           fs.String("opensandbox-image", defaults.Image, "OpenSandbox container image URI"),
-		Workdir:         fs.String("opensandbox-workdir", defaults.Workdir, "Absolute working directory inside the sandbox (also used as sync target)"),
-		CPU:             fs.String("opensandbox-cpu", defaults.CPU, "OpenSandbox CPU resource limit string (empty = service default)"),
-		Memory:          fs.String("opensandbox-memory", defaults.Memory, "OpenSandbox memory resource limit string (empty = service default)"),
-		TimeoutSecs:     fs.Int("opensandbox-timeout-secs", defaults.TimeoutSecs, "OpenSandbox sandbox lifetime cap and readiness budget in seconds (0 = Crabbox TTL)"),
-		ExecTimeoutSecs: fs.Int("opensandbox-exec-timeout-secs", defaults.ExecTimeoutSecs, "OpenSandbox command timeout in seconds (0 = Crabbox default 600)"),
-		PlatformOS:      fs.String("opensandbox-platform-os", defaults.PlatformOS, "OpenSandbox platform OS constraint (set with --opensandbox-platform-arch; both empty = service default)"),
-		PlatformArch:    fs.String("opensandbox-platform-arch", defaults.PlatformArch, "OpenSandbox platform architecture constraint (set with --opensandbox-platform-os; both empty = service default)"),
-		SecureAccess:    fs.Bool("opensandbox-secure-access", defaults.SecureAccess, "request secured sandbox endpoints"),
-		UseServerProxy:  fs.Bool("opensandbox-use-server-proxy", defaults.UseServerProxy, "route execd requests through the OpenSandbox server proxy"),
-		ForgetMissing:   fs.Bool("opensandbox-forget-missing", defaults.ForgetMissing, "remove the local claim when stop gets 404 (explicit stale-claim cleanup)"),
-	}
+	var values OpenSandboxConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
 func (values OpenSandboxConfigFlagValues) Apply(cfg *OpenSandboxConfig, fs *flag.FlagSet) (OpenSandboxConfigApplied, error) {
 	var applied OpenSandboxConfigApplied
-	if flagWasSet(fs, "opensandbox-api-url") {
-		cfg.APIURL = *values.APIURL
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-image") {
-		cfg.Image = *values.Image
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-workdir") {
-		cfg.Workdir = *values.Workdir
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-cpu") {
-		cfg.CPU = *values.CPU
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-memory") {
-		cfg.Memory = *values.Memory
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-timeout-secs") {
-		cfg.TimeoutSecs = *values.TimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-exec-timeout-secs") {
-		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-platform-os") {
-		cfg.PlatformOS = *values.PlatformOS
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-platform-arch") {
-		cfg.PlatformArch = *values.PlatformArch
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-secure-access") {
-		cfg.SecureAccess = *values.SecureAccess
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-use-server-proxy") {
-		cfg.UseServerProxy = *values.UseServerProxy
-		applied.InputAccepted = true
-	}
-	if flagWasSet(fs, "opensandbox-forget-missing") {
-		cfg.ForgetMissing = *values.ForgetMissing
-		applied.InputAccepted = true
-	}
-	return applied, nil
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }
