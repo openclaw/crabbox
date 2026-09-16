@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
@@ -124,6 +125,45 @@ func TestSpritesReadOnlyResolutionAndStatusDoNotBootstrap(t *testing.T) {
 				t.Fatalf("unexpected key file: %v", err)
 			}
 		})
+	}
+}
+
+func TestSpritesReadOnlyViewsUseSavedPolicy(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	cfg := core.BaseConfig()
+	cfg.Provider, cfg.TTL, cfg.IdleTimeout = spritesProvider, 10*time.Minute, 5*time.Minute
+	cfg.Sprites.WorkRoot = "/home/sprite/crabbox"
+	lease, _, repo := spritesTestClaim(t, cfg, "crabbox-test", "original-id", "test-org")
+	sprite := spritesInfo{ID: "original-id", Name: "crabbox-test", Organization: "test-org", Status: "cold", Labels: spritesAPILabels(lease.LeaseID, "test-identity")}
+	b := &spritesBackend{cfg: cfg, client: &fakeSpritesAPI{get: sprite, list: []spritesInfo{sprite}}}
+	policy := core.DirectLeaseLabels(cfg, lease.LeaseID, "test-identity", spritesProvider, "", false, time.Now().Add(-time.Minute))
+	seed := b.claimServer(sprite, policy)
+	if err := core.ClaimLeaseTargetForRepoConfig(lease.LeaseID, "test-identity", cfg, seed, core.SSHTarget{}, repo, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.TTL, b.cfg.IdleTimeout = 2*time.Hour, 45*time.Minute
+	for range 2 {
+		status, err := b.Status(t.Context(), core.StatusRequest{ID: lease.LeaseID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		list, err := b.List(t.Context(), core.ListRequest{})
+		if err != nil || len(list) != 1 {
+			t.Fatalf("list=%#v err=%v", list, err)
+		}
+		for _, labels := range []map[string]string{status.Labels, list[0].Labels} {
+			if labels["idle_timeout_secs"] != "300" || labels["ttl_secs"] != "600" || labels["keep"] != "false" || labels["created_at"] != "" || labels["expires_at"] != "" {
+				t.Fatalf("read projected reader defaults or local deadlines: %v", labels)
+			}
+		}
+	}
+	after, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("read-only views changed saved policy: before=%#v after=%#v err=%v", before, after, err)
 	}
 }
 
