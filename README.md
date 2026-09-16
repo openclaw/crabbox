@@ -416,8 +416,8 @@ lint/typecheck/tests/build) on every push and PR. The required `Go` check aggreg
 three independent 30-minute jobs: `Go test` (formatting, vet, deadcode, full race
 suite, Linux supervision proof, and build), `Go modules` (normal tests in every
 module, including the root), and `Go coverage` (90% core coverage threshold).
-The race suite, all-module normal tests, and coverage collection use a 15-minute
-package timeout.
+The race suite uses a 20-minute package timeout; all-module normal tests and
+coverage collection use a 15-minute package timeout.
 Use the explicit timeout locally too: the CLI race suite can exceed Go's default
 10-minute package deadline even when its individual tests pass.
 Production releases use a serialized, draft-first process: preserve and verify
