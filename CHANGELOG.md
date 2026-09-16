@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep delegated leases active through a provider-owned heartbeat capability, with Islo sending a bounded no-op only after observing a running sandbox and reporting its live idle policy. [PR 1707](https://github.com/openclaw/crabbox/pull/1707). Thanks @zozo123.
 - Show macOS platform and effective developer-tool selection during preflight, with opt-in Swift, Xcode, and Homebrew versions, bounded execution, and confirmed cleanup before workload continuation. [PR 2281](https://github.com/openclaw/crabbox/pull/2281). Thanks @coygeek.
 - Reject overflowing day durations before checkpoint pruning or benchmark filtering, preventing very large retention ages from wrapping into short deletion windows or incorrect report cutoffs. [PR 2280](https://github.com/openclaw/crabbox/pull/2280).
 - Crownest status waits consistently preserve caller cancellation while sharing request deadlines and polling with other providers. [PR 2276](https://github.com/openclaw/crabbox/pull/2276).

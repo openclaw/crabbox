@@ -87,6 +87,7 @@ crabbox run --provider islo -- pnpm test
 crabbox status --provider islo --id blue-lobster
 crabbox pause --provider islo blue-lobster
 crabbox resume --provider islo blue-lobster
+crabbox heartbeat --provider islo blue-lobster
 crabbox stop --provider islo blue-lobster
 ```
 
@@ -158,6 +159,13 @@ for the operational tradeoffs and recovery behavior.
   cleaning up that sandbox; it may remain running and billable.
 - **pause** snapshots the sandbox and releases its active compute while
   preserving the local lease claim; **resume** restores the sandbox to running.
+- **heartbeat** runs one no-op `true` exec against a running sandbox, which is
+  what registers activity, and reports the sandbox's echoed
+  `lifecycle.pause_after_idle` when it has one. It writes no lifecycle policy,
+  so it cannot change a sandbox's absolute deadline, and persists nothing
+  locally. A sandbox observed as paused or terminal is refused; heartbeat does
+  not call the resume API. See
+  [providers/islo.md](../providers/islo.md).
 - The sandbox is deleted on release unless kept. `--keep-on-failure` keeps a
   newly created failed sandbox until an explicit `stop` or provider-side expiry.
 

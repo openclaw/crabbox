@@ -366,9 +366,8 @@ func (b *isloBackend) admitLeaseTailscale(ctx context.Context, client isloAPI, s
 		return nil, fmt.Errorf("%w: get sandbox: %v", core.ErrTailnetPeerValidationUnavailable, sandboxErr)
 	}
 	if sandbox != nil {
-		live := isloIdentityFromSandbox(sandbox)
-		if bound := isloClaimIdentity(claim).ID; bound != "" && (live.ID != bound || live.Name != sandboxName) {
-			return nil, core.Exit(4, "islo sandbox %q did not identify claimed resource %s before the Tailscale check; refusing remote execution", sandboxName, bound)
+		if err := requireIsloExecIdentity(claim, sandboxName, isloIdentityFromSandbox(sandbox), "the Tailscale check"); err != nil {
+			return nil, err
 		}
 	}
 	if sandbox == nil || isloStatusTerminal(sandbox.GetStatus()) {

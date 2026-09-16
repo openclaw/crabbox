@@ -34,6 +34,7 @@ crabbox run --provider islo --id swift-crab --shell 'pnpm install && pnpm test'
 crabbox status --provider islo --id swift-crab --wait
 crabbox pause --provider islo swift-crab
 crabbox resume --provider islo swift-crab
+crabbox heartbeat --provider islo swift-crab
 crabbox stop --provider islo swift-crab
 crabbox list --provider islo --json
 ```
@@ -276,6 +277,34 @@ running and billable.
 - Pause / resume: yes. `crabbox pause` snapshots the sandbox to disk and frees
   its CPU/memory via Islo's pause API; `crabbox resume` restores it. The lease
   claim is preserved across a pause.
+- Heartbeat: yes. `crabbox heartbeat` runs one no-op exec (`true`) against the
+  sandbox, because Islo exposes no dedicated heartbeat endpoint. An exec is what
+  registers sandbox activity and can defer `lifecycle.pause_after_idle`.
+  The exec touches no filesystem state; its output is discarded, while the CLI
+  prints the heartbeat result.
+
+  The command makes exactly two calls, a `GET` and the exec, and writes no
+  lifecycle policy at all, so it cannot move the absolute deadline
+  (`pause_after` or `delete_after`) in either direction. It also persists
+  nothing: the reported `lastTouchedAt` is when the sandbox was observed, so
+  `crabbox claims` keeps showing the claim's previous `lastUsed`.
+
+  Heartbeat checks the claim's API endpoint before the lookup. For an ID-bound
+  claim, the observed resource ID and name must match before exec; it shares
+  that admission check with the provider's existing execution path. This is a
+  pre-dispatch check, not atomic generation binding for the name-addressed API.
+
+  The reported idle window is read from the live sandbox: `GET /sandboxes/{name}`
+  echoes `lifecycle` back, so `pause_after_idle` is reported when the sandbox
+  carries one, including a policy created with `--islo-idle-pause`. When
+  the echoed lifecycle has no `pause_after_idle`, the command reports no idle
+  timeout and warns that it has no idle deadline to defer. `--idle-timeout` is
+  refused: Islo exposes no endpoint that changes a live sandbox's lifecycle.
+
+  A sandbox observed as paused or terminal is refused before exec. Heartbeat
+  does not call the resume API or change `auto_resume`; explicit resume remains
+  a separate operation. Crabbox-created idle-pause policies use
+  `auto_resume=never`, as described above.
 - Bounded run downloads: yes. Safe relative single-file `--require-artifact`
   and `--download` requests are retrieved through Islo exec after command
   success and capped at 64 KiB per file.
