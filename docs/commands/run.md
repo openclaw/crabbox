@@ -582,6 +582,11 @@ host tools, or fail just because a tool is missing. Install logic
 belongs in Actions hydration, a prebaked image, a devcontainer, Nix/mise/asdf,
 or the command/script you run.
 
+On POSIX targets (including WSL2), ordinary version probes retain at most
+4096 bytes of combined stdout/stderr and display its first line. Additional
+output is drained so a verbose tool can finish normally; the retained-output
+limit is not a new execution timeout. Native Windows probes are unchanged.
+
 The `npm`, `pnpm`, and `yarn` version probes disable Corepack networking,
 latest-version lookup, automatic project pinning, and download prompts for that
 probe only. An uncached Corepack-managed version may therefore be unavailable;

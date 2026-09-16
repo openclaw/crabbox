@@ -425,7 +425,8 @@ preflight_cmd() {
   label="$1"; shift
   exe="$1"; shift
   if command -v "$exe" >/dev/null 2>&1; then
-    out="$("$@" 2>&1 | sed -n '1p')"
+    # Bound retained bytes before line parsing, but drain so verbose tools can finish.
+    out="$("$@" 2>&1 | { head -c 4096; cat >/dev/null; } | sed -n '1p')"
     if [ -z "$out" ]; then out=present; fi
     printf '%s=%s\n' "$label" "$out"
   else

@@ -6443,7 +6443,7 @@ func TestPackageManagerPreflightEnvironment(t *testing.T) {
 	for _, exitCode := range []int{0, 12} {
 		t.Run(fmt.Sprintf("posix_exit_%d", exitCode), func(t *testing.T) {
 			bin := t.TempDir()
-			for name, path := range map[string]string{"id": "/usr/bin/id", "sed": "/usr/bin/sed", "whoami": "/usr/bin/whoami"} {
+			for name, path := range map[string]string{"id": "/usr/bin/id", "sed": "/usr/bin/sed", "whoami": "/usr/bin/whoami", "head": "/usr/bin/head", "cat": "/bin/cat"} {
 				if err := os.Symlink(path, filepath.Join(bin, name)); err != nil {
 					t.Fatal(err)
 				}
@@ -7076,41 +7076,64 @@ func TestCMakePreflightPOSIXPresentFirstLineAndMissing(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell behavior is covered on non-Windows CI")
 	}
-
-	run := func(t *testing.T, installCMake bool) string {
-		t.Helper()
-		binDir := t.TempDir()
-		bash := "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then exec /bin/bash --noprofile --norc -c \"$2\"; fi\nexec /bin/bash \"$@\"\n"
-		if err := os.WriteFile(filepath.Join(binDir, "bash"), []byte(bash), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		for name, path := range map[string]string{"id": "/usr/bin/id", "sed": "/usr/bin/sed", "whoami": "/usr/bin/whoami"} {
-			if err := os.Symlink(path, filepath.Join(binDir, name)); err != nil {
+	for _, tc := range []struct {
+		name, output, want string
+		missing, stderr    bool
+	}{
+		{name: "first line", output: "cmake version 9.8.7\nignored second line\n", want: "cmake version 9.8.7"},
+		{name: "missing", missing: true, want: "missing"},
+		{name: "empty", want: "present"},
+		{name: "blank first line", output: "\nignored second line\n", want: "present"},
+		{name: "exact limit", output: strings.Repeat("v", 4096), want: strings.Repeat("v", 4096)},
+		{name: "long first line", output: strings.Repeat("v", 2<<20) + "\n", want: strings.Repeat("v", 4096)},
+		{name: "long later line", output: "version 1\n" + strings.Repeat("v", 2<<20), want: "version 1"},
+		{name: "stderr", output: strings.Repeat("e", 2<<20), want: strings.Repeat("e", 4096), stderr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			bash := "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then exec /bin/bash --noprofile --norc -c \"$2\"; fi\nexec /bin/bash \"$@\"\n"
+			if err := os.WriteFile(filepath.Join(binDir, "bash"), []byte(bash), 0o700); err != nil {
 				t.Fatal(err)
 			}
-		}
-		if installCMake {
-			cmake := "#!/bin/sh\nprintf 'cmake version 9.8.7\\nignored second line\\n'\n"
-			if err := os.WriteFile(filepath.Join(binDir, "cmake"), []byte(cmake), 0o700); err != nil {
-				t.Fatal(err)
+			for name, path := range map[string]string{"id": "/usr/bin/id", "sed": "/usr/bin/sed", "whoami": "/usr/bin/whoami", "head": "/usr/bin/head", "cat": "/bin/cat"} {
+				if err := os.Symlink(path, filepath.Join(binDir, name)); err != nil {
+					t.Fatal(err)
+				}
 			}
-		}
-		command := remoteCapabilityPreflightCommand(t.TempDir(), map[string]string{"PATH": binDir}, nil, []string{"cmake"})
-		cmd := exec.Command("/bin/sh", "-c", command)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("run POSIX preflight: %v\n%s", err, out)
-		}
-		return string(out)
-	}
-
-	present := run(t, true)
-	if !strings.Contains(present, "cmake=cmake version 9.8.7\n") || strings.Contains(present, "ignored second line") {
-		t.Fatalf("present output did not preserve first-line contract: %q", present)
-	}
-	missing := run(t, false)
-	if !strings.Contains(missing, "cmake=missing\n") {
-		t.Fatalf("missing output did not preserve diagnostic-only contract: %q", missing)
+			repo := t.TempDir()
+			completed := filepath.Join(repo, "probe-completed")
+			if !tc.missing {
+				payload := filepath.Join(repo, "version-output")
+				if err := os.WriteFile(payload, []byte(tc.output), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				redirect := ""
+				if tc.stderr {
+					redirect = " >&2"
+				}
+				cmake := "#!/bin/sh\nset -e\ncat " + shellQuote(payload) + redirect + "\nprintf completed >" + shellQuote(completed) + "\n"
+				if err := os.WriteFile(filepath.Join(binDir, "cmake"), []byte(cmake), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command := remoteCapabilityPreflightCommand(repo, map[string]string{"PATH": binDir}, nil, []string{"cmake"})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("run POSIX preflight: %v\n%s", err, out)
+			}
+			_, got, ok := strings.Cut(string(out), "cmake=")
+			if !ok || got != tc.want+"\n" {
+				t.Fatalf("probe output length=%d, want=%d; prefix=%.80q", len(got), len(tc.want)+1, got)
+			}
+			if !tc.missing {
+				if value, err := os.ReadFile(completed); err != nil || string(value) != "completed" {
+					t.Fatalf("probe must finish after excess output is drained: %q, %v", value, err)
+				}
+			}
+		})
 	}
 }
 
