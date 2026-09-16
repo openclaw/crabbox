@@ -1993,7 +1993,7 @@ case "$decoded" in
         ;;
     esac
     ;;
-  *"/bin/rm -f --"*sync-fingerprint*)
+  "$CRABBOX_FAKE_GIT_INVALIDATE"|"$CRABBOX_FAKE_PLAIN_INVALIDATE")
     count=0
     if [ -f "$CRABBOX_INVALIDATION_COUNT" ]; then
       count=$(/bin/cat "$CRABBOX_INVALIDATION_COUNT")
@@ -2103,6 +2103,8 @@ exit 0
 				script:  "echo ok\n",
 			}
 			target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22"}
+			t.Setenv("CRABBOX_FAKE_GIT_INVALIDATE", remoteInvalidateSyncFingerprintForTarget(target, workdir, false))
+			t.Setenv("CRABBOX_FAKE_PLAIN_INVALIDATE", remoteInvalidateSyncFingerprintForTarget(target, workdir, true))
 			var stderr bytes.Buffer
 			app := App{Stdout: io.Discard, Stderr: &stderr}
 			plainManifest := classifyGitOrigin(repo.RemoteURL) != gitOriginRemoteAttemptSafe

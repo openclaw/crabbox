@@ -175,6 +175,8 @@ if (Test-UsableGitWorkspace $workdir) {
   Repair-Origin $workdir
   exit 0
 }
+# Production callers hold the canonical workspace owner or a certified exclusive one-shot lease.
+# Directory.Move fails if the destination appears, so no persistent seed gate is needed.
 $tmp = Join-Path $parent (".seed-" + [System.Guid]::NewGuid().ToString("N"))
 try {
   Write-Output 'crabbox-git-seed phase=clone'
@@ -194,11 +196,49 @@ try {
   Write-Output 'crabbox-git-seed phase=origin'
   Repair-Origin $tmp
   Write-Output 'crabbox-git-seed phase=publish'
-  if (Test-Path -LiteralPath $workdir) {
-    Remove-Item -LiteralPath $workdir -Recurse -Force
+  $workspaceEmpty = -not (Test-Path -LiteralPath $workdir)
+  if (-not $workspaceEmpty) {
+    if (-not (Test-Path -LiteralPath $workdir -PathType Container)) { throw 'workspace is not a directory' }
+    $workspaceEmpty = @((Get-ChildItem -Force -LiteralPath $workdir)).Count -eq 0
   }
-  Move-Item -LiteralPath $tmp -Destination $workdir
-  $tmp = $null
+  $null = New-Item -ItemType Directory -Force -Path $workdir
+  $metadata = Join-Path $workdir '.git'
+  if (Test-Path -LiteralPath $metadata) { throw 'workspace has unexpected Git metadata' }
+  if ($workspaceEmpty) {
+    Remove-Item -LiteralPath $workdir -Force
+    [IO.Directory]::Move($tmp, $workdir)
+    $tmp = $null
+  } else {
+    # Keep the raw workspace authoritative for runtime files. Only Crabbox's
+    # committed sync bookkeeping moves with metadata when the selector changes.
+    # A candidate manifest describes its checkout, never the raw workspace.
+    $seedManifest = Join-Path $tmp '.git/crabbox/sync-manifest'
+    $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $seedManifest)
+    Set-Content -LiteralPath $seedManifest -Value $null -NoNewline
+    $legacyMetadata = Join-Path $workdir '.crabbox'
+    if (Test-Path -LiteralPath $legacyMetadata) {
+      $legacyParent = Get-Item -Force -LiteralPath $legacyMetadata
+      if (-not $legacyParent.PSIsContainer -or ($legacyParent.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'raw metadata is not a canonical directory'
+      }
+      $expectedMetadata = Join-Path (Get-CrabboxFinalDirectoryPath $workdir) '.crabbox'
+      if (-not [string]::Equals((Get-CrabboxFinalDirectoryPath $legacyMetadata), $expectedMetadata, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'raw metadata is not a canonical directory'
+      }
+    }
+    foreach ($name in @('sync-manifest', 'sync-fingerprint', 'git-hydrate-base')) {
+      $legacy = Join-Path $legacyMetadata $name
+      $destination = Join-Path (Join-Path $tmp '.git/crabbox') $name
+      if (Test-Path -LiteralPath $legacy -PathType Leaf) {
+        $item = Get-Item -Force -LiteralPath $legacy
+        if (-not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+          $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination)
+          Copy-Item -LiteralPath $legacy -Destination $destination
+        }
+      }
+    }
+    [IO.Directory]::Move((Join-Path $tmp '.git'), $metadata)
+  }
 } finally {
   if ($tmp -and (Test-Path -LiteralPath $tmp)) {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue

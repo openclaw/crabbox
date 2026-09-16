@@ -26,6 +26,8 @@ func TestGitSeedFailurePhaseAndPreservation(t *testing.T) {
 			}
 			marker := filepath.Join(workdir, "preserve.txt")
 			mustWriteTestFile(t, marker, "existing workspace\n")
+			rawSentinel := filepath.Join(workdir, "node_modules", "failed-seed-sentinel.txt")
+			mustWriteTestFile(t, rawSentinel, "preserve raw workspace\n")
 			plan := f.plan(t, f.b)
 			switch phase {
 			case "clone":
@@ -52,6 +54,9 @@ func TestGitSeedFailurePhaseAndPreservation(t *testing.T) {
 			}
 			if data, err := os.ReadFile(marker); err != nil || string(data) != "existing workspace\n" {
 				t.Fatalf("failed seed changed existing workspace: data=%q err=%v", data, err)
+			}
+			if data, err := os.ReadFile(rawSentinel); err != nil || string(data) != "preserve raw workspace\n" {
+				t.Fatalf("failed seed changed raw workspace sentinel: data=%q err=%v", data, err)
 			}
 			leftovers, err := filepath.Glob(filepath.Join(root, ".seed*"))
 			if err != nil || len(leftovers) != 0 {

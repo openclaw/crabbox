@@ -1728,6 +1728,37 @@ func TestPathExcludedUsesOrderedNegation(t *testing.T) {
 	}
 }
 
+func TestGitTargetExcludedPathsUsesTargetTreeAndOrderedRules(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init")
+	runGit(t, root, "config", "user.email", "test@example.com")
+	runGit(t, root, "config", "user.name", "Test")
+	paths := []string{"target/drop.txt", "target/keep.txt", "src/keep.txt"}
+	if runtime.GOOS != "windows" {
+		paths = append(paths, "target/drop\nname.txt")
+	}
+	for _, rel := range paths {
+		writeFile(t, filepath.Join(root, rel), "tracked\n")
+	}
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "target paths")
+	target := gitOutput(root, "rev-parse", "HEAD")
+	// The index no longer names this target path; selection must use target's tree.
+	runGit(t, root, "rm", "--cached", "-q", "target/drop.txt")
+	rules := newSyncExcludeRules([]string{"target", "!target/keep.txt"}, syncExcludeConfigured)
+	got, err := gitTargetExcludedPaths(root, target, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"target/drop.txt"}
+	if runtime.GOOS != "windows" {
+		want = append([]string{"target/drop\nname.txt"}, want...)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("target exclusions=%q want %q", got, want)
+	}
+}
+
 func TestSyncExcludesPreservesRepeatedRuleOrder(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, ".crabboxignore"), "!target\ntarget\n!apps/backend/target\n")

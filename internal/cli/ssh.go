@@ -2028,7 +2028,8 @@ func remoteGitSeed(workdir string, plan gitCoherencePlan) string {
 	if !plan.seedEnabled() {
 		return "true"
 	}
-	parent := filepath.ToSlash(filepath.Dir(workdir))
+	// Callers hold the canonical workspace owner or a certified exclusive one-shot lease.
+	// Stage outside the workspace so a failed publish leaves no persistent seed gate.
 	seed := `origin_git clone --quiet --filter=blob:none --no-checkout --single-branch --branch ` + shellQuote(plan.Branch) + ` "$expected_origin" "$tmp"`
 	prepare, seedManifest := "", ""
 	checkoutGit := "git"
@@ -2056,18 +2057,28 @@ expected_tree=` + shellQuote(plan.Tree) + `
 ` + remoteGitOriginTransportFunctions() + `
 ` + remoteGitWorkspaceFunctions() + `
 if [ -d "$workdir" ]; then
+  # Inspect and publish through the physical directory, not a root symlink
+  # which find would otherwise mistake for an empty workspace.
+  workdir="$(cd -P -- "$workdir" && pwd -P)"
   cd "$workdir"
   if usable_git_workspace; then
     printf 'crabbox-git-seed phase=origin\n'
     repair_origin
+    ` + remoteSyncMetaDirScript() + `
+` + remoteOriginSeedProvenanceScript() + `
     exit 0
   fi
 fi
-mkdir -p ` + shellQuote(parent) + `
-tmp="$(mktemp -d ` + shellQuote(parent+"/.seed.XXXXXX") + `)"
-transport_error="$tmp.transport-error"
-cleanup_seed() { rm -rf -- "$tmp"; rm -f -- "$transport_error"; }
+parent="$(dirname -- "$workdir")"
+mkdir -p "$parent"
+seed_root="$(mktemp -d "$parent/.seed.XXXXXX")"
+tmp="$seed_root/candidate"
+transport_error="$seed_root/transport-error"
+cleanup_seed() {
+  rm -rf -- "$seed_root"
+}
 trap cleanup_seed EXIT
+umask 077
 ` + prepare + `
 printf 'crabbox-git-seed phase=clone\n'
 if ! { ` + seed + `; } >/dev/null 2>"$transport_error"; then
@@ -2087,11 +2098,76 @@ printf 'crabbox-git-seed phase=origin\n'
 repair_origin
 ` + seedManifest + `
 printf 'crabbox-git-seed phase=publish\n'
-cd /
-rm -rf -- "$workdir"
-mv -- "$tmp" "$workdir"
 rm -f -- "$transport_error"
-trap - EXIT
+published_tmp="$seed_root/$(basename "$workdir")"
+if [ "$tmp" != "$published_tmp" ]; then
+  mv "$tmp" "$published_tmp"
+  tmp="$published_tmp"
+fi
+workspace_mode=metadata
+if [ ! -e "$workdir" ]; then
+  workspace_mode=checkout
+elif [ ! -d "$workdir" ]; then
+  echo 'crabbox-git-seed phase=publish: workspace is not a directory' >&2
+  exit 67
+elif [ -z "$(find "$workdir" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+  workspace_mode=checkout
+fi
+mkdir -p -- "$workdir"
+if [ -e "$workdir/.git" ] || [ -L "$workdir/.git" ]; then
+  echo 'crabbox-git-seed phase=publish: workspace has unexpected Git metadata' >&2
+  exit 67
+fi
+# GNU mv 9.2-9.4 can fail on a skipped target. Inspect the source before
+# returning the native status so both publication paths report collisions.
+if [ "$workspace_mode" = checkout ]; then
+  rmdir -- "$workdir"
+  publish_status=0
+  mv -n "$tmp" "$parent" || publish_status=$?
+  if [ "$publish_status" -ne 0 ] && [ ! -e "$workdir" ] && [ ! -L "$workdir" ]; then exit "$publish_status"; fi
+  if [ -e "$tmp" ] || [ -L "$tmp" ]; then
+    echo 'crabbox-git-seed phase=publish: workspace appeared during publication' >&2
+    exit 67
+  fi
+  [ "$publish_status" -eq 0 ] || exit "$publish_status"
+else
+  # Keep the raw workspace authoritative for runtime files. Only Crabbox's
+  # committed sync bookkeeping moves with metadata when the selector changes.
+  # A candidate manifest describes its checkout, never the raw workspace.
+  mkdir -p -- "$tmp/.git/crabbox"
+  : > "$tmp/.git/crabbox/sync-manifest"
+  legacy_metadata="$workdir/.crabbox"
+  if [ -e "$legacy_metadata" ] || [ -L "$legacy_metadata" ]; then
+    raw_root="$(cd -P -- "$workdir" && pwd -P)"
+    if [ -L "$legacy_metadata" ] || [ ! -d "$legacy_metadata" ] ||
+       [ "$(cd -P -- "$legacy_metadata" && pwd -P)" != "$raw_root/.crabbox" ]; then
+      echo "raw metadata is not a canonical directory" >&2; exit 67
+    fi
+  fi
+  for name in sync-manifest sync-fingerprint git-hydrate-base; do
+    legacy="$legacy_metadata/$name"
+    destination="$tmp/.git/crabbox/$name"
+    if [ -f "$legacy" ] && [ ! -L "$legacy" ]; then
+      mkdir -p -- "$tmp/.git/crabbox"
+      cp -- "$legacy" "$destination"
+    fi
+  done
+  # Compare the verified candidate index with the raw workspace before publication.
+  # This immutable membership survives reuse, independently of each sync selector.
+` + remoteCaptureInitialOriginAbsences() + `
+  publish_status=0
+  mv -n "$tmp/.git" "$workdir" || publish_status=$?
+  if [ "$publish_status" -ne 0 ] && [ ! -e "$workdir/.git" ] && [ ! -L "$workdir/.git" ]; then exit "$publish_status"; fi
+  if [ -e "$tmp/.git" ] || [ -L "$tmp/.git" ]; then
+    echo 'crabbox-git-seed phase=publish: Git metadata appeared during publication' >&2
+    exit 67
+  fi
+  [ "$publish_status" -eq 0 ] || exit "$publish_status"
+  printf 'crabbox-git-seed raw-workspace\n'
+fi
+rm -rf -- "$seed_root"
+seed_root=
+tmp=
 `
 	return remoteGitControlShellCommand(script)
 }
@@ -2159,6 +2235,7 @@ cd ` + shellQuote(workdir) + `
 
 type remoteSyncFinalizeOptions struct {
 	AllowMassDeletions bool
+	CoherenceOmissions bool
 	HydrateGit         bool
 	GitOverlay         bool
 	PlainManifest      bool
@@ -2175,6 +2252,213 @@ func remoteSyncPendingManifestName(token string) string {
 
 func remoteSyncPendingDeletedName(token string) string {
 	return "sync-deleted." + token + ".new"
+}
+
+func remoteCoherenceOmissionsName(token string) string {
+	return "sync-coherence-omissions." + token + ".new"
+}
+
+// The verified seed records initial absences once, before attaching its metadata.
+// Reuse must not turn a later deletion into a preexisting omission.
+func remoteOriginSeedInitialAbsencesName() string { return "origin-seed-initial-absences" }
+
+// A regular provenance file is authoritative only inside owned metadata.
+func remoteOriginSeedMetadataDirectoryScript() string {
+	return `if [ ! -d "$meta_dir" ] || [ -L "$meta_dir" ] ||
+   [ "$(cd -P -- "$meta_dir" && pwd -P)" != "$(cd -P -- "$(dirname -- "$meta_dir")" && pwd -P)/$(basename -- "$meta_dir")" ]; then
+  echo "remote sync origin metadata is not a canonical directory" >&2; exit 67
+fi
+`
+}
+
+// Report the persistent seed fact during staging as well as seeding: a changed
+// selector can skip seeding on reuse, but must still choose the safe pruner.
+func remoteOriginSeedProvenanceScript() string {
+	return `
+if [ -e "$meta_dir" ] || [ -L "$meta_dir" ]; then
+` + remoteOriginSeedMetadataDirectoryScript() + `
+fi
+initial="$meta_dir/` + remoteOriginSeedInitialAbsencesName() + `"
+if [ -e "$initial" ] || [ -L "$initial" ]; then
+  if [ ! -f "$initial" ] || [ -L "$initial" ]; then
+    echo "remote sync invalid initial origin absences" >&2; exit 67
+  fi
+  printf 'crabbox-git-seed raw-workspace\n'
+fi
+`
+}
+
+func remoteCoherencePathReaders() (string, string) {
+	return `import sys
+def paths(path):
+    with open(path, "rb") as handle:
+        data = handle.read()
+    if data and not data.endswith(b"\0"):
+        raise SystemExit("malformed coherence path record")
+    entries = data.split(b"\0")[:-1]
+    for entry in entries:
+        if entry.startswith(b"/") or any(part in (b"", b".", b"..") for part in entry.split(b"/")):
+            raise SystemExit("invalid coherence path")
+    return entries
+`, `use strict; use warnings;
+sub paths {
+    open my $fh, "<", $_[0] or die "open coherence paths: $!\n";
+    binmode $fh;
+    my $data = "";
+    while (1) {
+        my $read = read($fh, my $chunk, 8192);
+        defined $read or die "read coherence paths: $!\n";
+        last if $read == 0;
+        $data .= $chunk;
+    }
+    close $fh or die "close coherence paths: $!\n";
+    die "malformed coherence path record\n" if length($data) && substr($data, -1) ne "\0";
+    my @entries = split /\0/, $data, -1; pop @entries if @entries;
+    for my $entry (@entries) {
+        die "invalid coherence path\n" if $entry =~ m{^/} || grep { $_ eq "" || $_ eq "." || $_ eq ".." } split m{/}, $entry, -1;
+    }
+    return @entries;
+}
+`
+}
+
+// Git's D candidate set includes directories and obstructed paths. Only an
+// actual absence may become an exemption, both initially and for this token.
+func remoteCoherenceAbsenceReaders() (string, string) {
+	python, perl := remoteCoherencePathReaders()
+	python += `import errno, os
+def absent(entry):
+    try:
+        os.lstat(entry)
+    except OSError as error:
+        if error.errno == errno.ENOENT:
+            return True
+        if error.errno != errno.ENOTDIR:
+            raise
+    return False
+`
+	perl += `use Errno qw(ENOENT ENOTDIR);
+sub absent {
+    return 0 if lstat $_[0];
+    my $error = 0 + $!;
+    die "stat omission path: $!\n" if $error != ENOENT && $error != ENOTDIR;
+    return $error == ENOENT;
+}
+`
+	return python, perl
+}
+
+func remoteCaptureInitialOriginAbsences() string {
+	python, perl := remoteCoherenceAbsenceReaders()
+	python += `with open(sys.argv[2], "wb") as output:
+    for entry in paths(sys.argv[1]):
+        if absent(entry):
+            output.write(entry + b"\0")
+`
+	perl += `open my $output, ">", $ARGV[1] or die "open output: $!\n";
+binmode $output;
+for my $entry (paths($ARGV[0])) { print $output $entry, "\0" if absent($entry); }
+close $output or die "close output: $!\n";
+`
+	return `initial="$tmp/.git/crabbox/` + remoteOriginSeedInitialAbsencesName() + `"
+GIT_INDEX_FILE="$tmp/.git/index" git --git-dir="$tmp/.git" --work-tree="$workdir" diff-files --diff-filter=D --name-only -z > "$initial.candidates"
+(
+  cd "$workdir"
+  ` + remoteSyncInterpreterCommand(python, perl, `"$initial.candidates" "$initial"`) + `
+)
+rm -f -- "$initial.candidates"
+`
+}
+
+func remoteOriginSeedDeletionGuard(allowMassDeletions string, requireOmissions bool, diffCommand string) string {
+	if !requireOmissions {
+		return diffCommand + ` >"$git_status" 2>/dev/null || {
+  echo "remote sync sanity failed: candidate Git index inspection failed" >&2; exit 67
+}
+deletions=$(awk '$1 == "D" { n++ } END { print n+0 }' "$git_status")
+if [ ` + shellQuote(allowMassDeletions) + ` != '1' ] && [ "$deletions" -ge 200 ]; then
+  echo "remote sync sanity failed: $deletions tracked deletions" >&2; exit 66
+fi
+`
+	}
+	python, perl := remoteCoherencePathReaders()
+	python += `omissions = set(paths(sys.argv[1]))
+print(len(set(paths(sys.argv[2])) - omissions))
+`
+	perl += `my %omissions = map { $_ => 1 } paths($ARGV[0]);
+my %deleted = map { $_ => 1 } paths($ARGV[1]);
+print scalar(grep { !$omissions{$_} } keys %deleted), "\n";
+`
+	return `omissions="$meta_dir/` + remoteCoherenceOmissionsName(`$expected_token`) + `"
+if [ ! -f "$omissions" ] || [ -L "$omissions" ]; then
+  echo "remote sync sanity failed: missing origin omission record" >&2; exit 67
+fi
+` + diffCommand + ` >"$git_status" 2>/dev/null || {
+  echo "remote sync sanity failed: candidate Git index inspection failed" >&2; exit 67
+}
+deletions=$(` + remoteSyncInterpreterCommand(python, perl, `"$omissions" "$git_status"`) + `)
+if [ ` + shellQuote(allowMassDeletions) + ` != '1' ] && [ "$deletions" -ge 200 ]; then
+  echo "remote sync sanity failed: $deletions tracked deletions" >&2; exit 66
+fi
+`
+}
+
+func remoteCaptureCoherenceOmissions(workdir, finalizeToken string) string {
+	omissions := remoteCoherenceOmissionsName(finalizeToken)
+	python, perl := remoteCoherenceAbsenceReaders()
+	python += `expected = paths(sys.argv[1])
+initial = set(paths(sys.argv[2]))
+try:
+    owned = set(paths(sys.argv[3]))
+except IOError as error:
+    if error.errno != errno.ENOENT:
+        raise
+    owned = set()
+with open(sys.argv[4], "wb") as output:
+    for entry in dict.fromkeys(expected):
+        if entry not in initial or entry in owned:
+            continue
+        if absent(entry):
+            output.write(entry + b"\0")
+`
+	perl += `my %initial = map { $_ => 1 } paths($ARGV[1]);
+my %owned;
+if (lstat $ARGV[2]) { %owned = map { $_ => 1 } paths($ARGV[2]); }
+elsif ($! != ENOENT) { die "stat old manifest: $!\n"; }
+open my $output, ">", $ARGV[3] or die "open output: $!\n";
+binmode $output;
+my %seen;
+for my $entry (paths($ARGV[0])) {
+    next if $seen{$entry}++ || !$initial{$entry} || $owned{$entry};
+    print $output $entry, "\0" if absent($entry);
+}
+close $output or die "close output: $!\n";
+`
+	script := `set -e
+cd ` + shellQuote(workdir) + `
+` + remoteSyncMetaDirScript() + remoteOriginSeedMetadataDirectoryScript() + `
+initial="$meta_dir/` + remoteOriginSeedInitialAbsencesName() + `"
+if [ ! -f "$initial" ] || [ -L "$initial" ]; then
+  echo "remote sync missing initial origin absences" >&2; exit 67
+fi
+expected="$meta_dir/` + omissions + `.input.$$"
+observed="$meta_dir/` + omissions + `"
+tmp="$observed.tmp.$$"
+trap 'rm -f -- "$expected" "$tmp"' EXIT
+cat > "$expected"
+` + remoteSyncInterpreterCommand(python, perl, `"$expected" "$initial" "$meta_dir/sync-manifest" "$tmp"`) + `
+if [ -e "$observed" ] || [ -L "$observed" ]; then
+  if [ ! -f "$observed" ] || [ -L "$observed" ]; then
+    echo "remote sync omission record is not a regular file" >&2; exit 67
+  fi
+  rm -f -- "$tmp"
+else
+  mv "$tmp" "$observed"
+fi
+rm -f -- "$expected"
+trap - EXIT
+`
+	return remoteGitControlShellCommand(script)
 }
 
 func remoteWriteSyncManifestNew(workdir string) string {
@@ -2223,7 +2507,7 @@ func remoteWriteSyncManifestsNewWithMetadataMode(workdir, finalizeToken, metadat
 	if hermetic {
 		metadataScript = gitOverlayHermeticFunctions() + metadataScript
 	}
-	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + metadataScript + `mkdir -p "$meta_dir"
+	script := "set -e\nmkdir -p " + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + metadataScript + remoteOriginSeedProvenanceScript() + `mkdir -p "$meta_dir"
 ` + remoteSyncAbandonedMetadataCleanup() + `
 if ! IFS= read -r manifest_len; then
   echo "invalid sync manifest length" >&2
@@ -2291,7 +2575,7 @@ func remoteDiscardSyncPendingMetadata(workdir, finalizeToken string, plainManife
 	script := `set -e
 cd ` + shellQuote(workdir) + `
 ` + metadataScript + `
-/bin/rm -f -- "$meta_dir/` + remoteSyncPendingManifestName(finalizeToken) + `" "$meta_dir/` + remoteSyncPendingDeletedName(finalizeToken) + `"
+/bin/rm -f -- "$meta_dir/` + remoteSyncPendingManifestName(finalizeToken) + `" "$meta_dir/` + remoteSyncPendingDeletedName(finalizeToken) + `" "$meta_dir/` + remoteCoherenceOmissionsName(finalizeToken) + `"
 `
 	return shellCommand(script)
 }
@@ -2338,18 +2622,18 @@ with open(sys.argv[2], "wb") as handle:
 		cleanup = remotePlainSyncAbandonedMetadataCleanup()
 		shellCommand = remotePlainManifestShellCommand
 	}
-	script := "set -e\n" + mkdir + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + metadataScript + mkdir + "\"$meta_dir\"\n" +
+	script := "set -e\n" + mkdir + shellQuote(workdir) + "\ncd " + shellQuote(workdir) + "\n" + metadataScript + remoteOriginSeedProvenanceScript() + mkdir + "\"$meta_dir\"\n" +
 		cleanup + "\n" +
 		pythonCommand + shellQuote(python) + " \"$meta_dir/" + manifestName + "\" \"$meta_dir/" + deletedName + "\"\n"
 	return shellCommand(script)
 }
 
 func remotePlainSyncAbandonedMetadataCleanup() string {
-	return `/usr/bin/find "$meta_dir" -type f \( -name 'sync-manifest.new' -o -name 'sync-deleted.new' -o -name 'sync-manifest.*.new' -o -name 'sync-deleted.*.new' -o -name 'sync-manifest.*.sorted' -o -name 'sync-finalize-token.tmp.*' -o -name 'sync-finalize-complete-token.tmp.*' -o -name 'sync-git-status.*' \) -mtime +7 -exec /bin/rm -f -- {} \; 2>/dev/null || true`
+	return `/usr/bin/find "$meta_dir" -type f \( -name 'sync-manifest.new' -o -name 'sync-deleted.new' -o -name 'sync-manifest.*.new' -o -name 'sync-deleted.*.new' -o -name 'sync-manifest.*.sorted' -o -name 'sync-coherence-omissions.*.new' -o -name 'sync-coherence-omissions.*.tmp.*' -o -name 'sync-coherence-omissions.*.input.*' -o -name 'sync-finalize-token.tmp.*' -o -name 'sync-finalize-complete-token.tmp.*' -o -name 'sync-git-status.*' \) -mtime +7 -exec /bin/rm -f -- {} \; 2>/dev/null || true`
 }
 
 func remoteSyncAbandonedMetadataCleanup() string {
-	return `find "$meta_dir" -type f \( -name 'sync-manifest.new' -o -name 'sync-deleted.new' -o -name 'sync-manifest.*.new' -o -name 'sync-deleted.*.new' -o -name 'sync-manifest.*.sorted' -o -name 'sync-finalize-token.tmp.*' -o -name 'sync-finalize-complete-token.tmp.*' -o -name 'sync-git-status.*' \) -mtime +7 -exec rm -f -- {} \; 2>/dev/null || true`
+	return `find "$meta_dir" -type f \( -name 'sync-manifest.new' -o -name 'sync-deleted.new' -o -name 'sync-manifest.*.new' -o -name 'sync-deleted.*.new' -o -name 'sync-manifest.*.sorted' -o -name 'sync-coherence-omissions.*.new' -o -name 'sync-coherence-omissions.*.tmp.*' -o -name 'sync-coherence-omissions.*.input.*' -o -name 'sync-finalize-token.tmp.*' -o -name 'sync-finalize-complete-token.tmp.*' -o -name 'sync-git-status.*' \) -mtime +7 -exec rm -f -- {} \; 2>/dev/null || true`
 }
 
 func remoteSeedSyncManifestFromGit(workdir string) string {
@@ -2502,6 +2786,9 @@ func remoteFinalizeSync(workdir string, opts remoteSyncFinalizeOptions) string {
 		gitFunctions = remotePlainManifestGitFunction()
 		metadataScript = remotePlainManifestSyncMetaDirScript()
 	}
+	if opts.CoherenceOmissions {
+		metadataScript += remoteOriginSeedMetadataDirectoryScript()
+	}
 	script := `set -e
 cd ` + shellQuote(workdir) + `
 ` + gitFunctions + `
@@ -2523,16 +2810,12 @@ rm -f "$git_status"
 if [ -f "$manifest" ] &&
    [ -f "$committed_token" ] && [ "$(cat "$committed_token")" = "$expected_token" ] &&
    [ -f "$complete_token" ] && [ "$(cat "$complete_token")" = "$expected_token" ]; then
+  rm -f "$new" "$deleted" "$meta_dir/` + remoteCoherenceOmissionsName(opts.Token) + `"
   exit 0
 fi
 rm -f "$complete_token"
-if [ -f "$new" ]; then
-  committed_tmp="$committed_token.tmp.$$"
-  printf %s "$expected_token" > "$committed_tmp"
-  mv "$committed_tmp" "$committed_token"
-  rm -f "$deleted"
-  mv "$new" "$manifest"
-elif [ ! -f "$manifest" ] || [ ! -f "$committed_token" ] || [ "$(cat "$committed_token")" != "$expected_token" ]; then
+` + remoteSyncFinalizeMetadataScript() + `
+if [ ! -f "$new" ] && { [ ! -f "$manifest" ] || [ ! -f "$committed_token" ] || [ "$(cat "$committed_token")" != "$expected_token" ]; }; then
   echo "remote sync finalize failed: no committed manifest for this sync" >&2
   exit 67
 fi
@@ -2543,6 +2826,11 @@ fi
 		script += remoteGitOverlayRecoveryFinalizeScript(opts.Coherence, opts.BaseRef, opts.BaseSHA, allowValue)
 	} else if opts.PlainManifest {
 		script += `publish_fingerprint=
+	`
+		if opts.CoherenceOmissions {
+			script += remoteOriginSeedDeletionGuard(allowValue, true, `{ plain_git diff --cached --diff-filter=D --name-only -z && plain_git diff-files --diff-filter=D --name-only -z; }`)
+		} else {
+			script += `
 git_root=
 if git_root="$(plain_git rev-parse --show-toplevel 2>/dev/null)" &&
    git_root="$(cd -P -- "$git_root" 2>/dev/null && pwd -P)" &&
@@ -2555,10 +2843,15 @@ if git_root="$(plain_git rev-parse --show-toplevel 2>/dev/null)" &&
     exit 66
   fi
 fi
-rm -f "$meta_dir/git-hydrate-base"
+`
+		}
+		script += `rm -f "$meta_dir/git-hydrate-base"
 `
 	} else if opts.Coherence.enabled() {
-		script += remoteGitCoherenceFinalizeScript(opts.Coherence, allowValue)
+		script += remoteGitCoherenceFinalizeScript(opts.Coherence, allowValue, opts.CoherenceOmissions)
+	} else if opts.CoherenceOmissions {
+		script += `publish_fingerprint=
+` + remoteOriginSeedDeletionGuard(allowValue, true, `{ git diff --cached --diff-filter=D --name-only -z && git diff-files --diff-filter=D --name-only -z; }`)
 	} else {
 		script += `publish_fingerprint=
 if exact_git_root && git status --short >"$git_status" 2>/dev/null; then
@@ -2571,6 +2864,16 @@ if exact_git_root && git status --short >"$git_status" 2>/dev/null; then
 fi
 `
 	}
+	script += `# Keep the committed manifest until the deletion guard admits this token. A retry must retain old ownership.
+if [ -f "$new" ]; then
+  committed_tmp="$committed_token.tmp.$$"
+  printf %s "$expected_token" > "$committed_tmp"
+  mv "$committed_tmp" "$committed_token"
+  manifest_tmp="$manifest.tmp.$$"
+  cp "$new" "$manifest_tmp"
+  mv "$manifest_tmp" "$manifest"
+fi
+`
 	if !opts.GitOverlay && !opts.PlainManifest && opts.HydrateGit && opts.BaseRef != "" {
 		refspec := "+refs/heads/" + opts.BaseRef + ":refs/remotes/origin/" + opts.BaseRef
 		script += `if exact_git_root && git remote get-url origin >/dev/null 2>&1; then
@@ -2599,6 +2902,8 @@ complete_tmp="$complete_token.tmp.$$"
 printf %s "$expected_token" > "$complete_tmp"
 mv "$complete_tmp" "$complete_token"
 coherence_committed=1
+rm -f "$new" "$deleted"
+rm -f "$meta_dir/` + remoteCoherenceOmissionsName(opts.Token) + `"
 `
 	if opts.GitOverlay || plainManifestRecovery {
 		return remoteGitOverlayShellCommand(script)
@@ -2668,10 +2973,10 @@ fi
 fi
 `
 	}
-	return script + remoteGitCoherenceFinalizeScript(plan, allowMassDeletions)
+	return script + remoteGitCoherenceFinalizeScript(plan, allowMassDeletions, false)
 }
 
-func remoteGitCoherenceFinalizeScript(plan gitCoherencePlan, allowMassDeletions string) string {
+func remoteGitCoherenceFinalizeScript(plan gitCoherencePlan, allowMassDeletions string, omissions bool) string {
 	return `
 coherence_committed=; coherence_mutated=; head_changed=; index_changed=
 tmp_ref="refs/crabbox/sync-$expected_token"; advertised_branch=` + shellQuote(plan.Branch) + `; expected_origin=` + shellQuote(plan.RemoteURL) + `
@@ -2708,7 +3013,7 @@ else
     git update-ref -d "$tmp_ref" "$fetched_head" >/dev/null 2>&1 || true; rm -f "${index_backup:-}" "${index_candidate:-}" "${index_verify:-}" "${index_restore:-}"
     if [ -n "${index_lock:-}" ] && [ "$(cat "$index_lock" 2>/dev/null || true)" = "${index_marker:-}" ]; then rm -f "$index_lock"; fi
     # Bash 5.2 can corrupt function context when a successful EXIT handler re-exits.
-    cleanup_finalize_lock; trap - EXIT; if [ "$status" -ne 0 ]; then exit "$status"; fi
+    cleanup_finalize_lock || status=67; trap - EXIT; if [ "$status" -ne 0 ]; then exit "$status"; fi
   }
   trap coherence_cleanup EXIT
   fetched_head="$(git rev-parse --verify "$tmp_ref^{commit}")"; old_head="$(git rev-parse --verify HEAD^{commit})"
@@ -2719,9 +3024,12 @@ else
   index_backup="$index_path.crabbox.$$.backup"; index_candidate="$index_path.crabbox.$$.new"; index_verify="$index_path.crabbox.$$.verify"; index_restore="$index_path.crabbox.$$.restore"
   cp -p "$index_path" "$index_backup"; git read-tree --reset --index-output="$index_candidate" ` + shellQuote(plan.Target) + `
   [ "$(GIT_INDEX_FILE="$index_candidate" git write-tree)" = ` + shellQuote(plan.Tree) + ` ]
-  GIT_INDEX_FILE="$index_candidate" git diff-files --name-status >"$git_status" 2>/dev/null ||
-    { echo "remote sync sanity failed: candidate Git index inspection failed" >&2; exit 67; }
-  deletions=$(awk '$1 == "D" { n++ } END { print n+0 }' "$git_status"); [ ` + shellQuote(allowMassDeletions) + ` = '1' ] || [ "$deletions" -lt 200 ]
+  ` + func() string {
+		if omissions {
+			return remoteOriginSeedDeletionGuard(allowMassDeletions, true, `GIT_INDEX_FILE="$index_candidate" git diff-files --diff-filter=D --name-only -z`)
+		}
+		return remoteOriginSeedDeletionGuard(allowMassDeletions, false, `GIT_INDEX_FILE="$index_candidate" git diff-files --name-status`)
+	}() + `
   (set -C; printf %s "$index_marker" > "$index_lock") || { echo "remote sync finalize failed: Git index is busy" >&2; exit 67; }
   cmp -s "$index_path" "$index_backup" || { echo "remote sync finalize failed: Git index changed concurrently" >&2; exit 67; }
   cp -p "$index_candidate" "$index_verify"; mv "$index_candidate" "$index_path"; index_changed=1; coherence_mutated=1
@@ -2729,6 +3037,40 @@ else
   git update-ref --no-deref HEAD ` + shellQuote(plan.Target) + ` "$old_head"; head_changed=1
   [ "$(git rev-parse --verify HEAD^{commit})" = ` + shellQuote(plan.Target) + ` ]
 fi
+`
+}
+
+// Preserve prior ownership and pending inputs across handled finalization
+// failures. A failed publication must not make its candidate manifest canonical
+// for a retry; an untrappable interruption retains the private backup.
+func remoteSyncFinalizeMetadataScript() string {
+	return `metadata_backup=$(mktemp -d "$meta_dir/sync-finalize-backup.$expected_token.XXXXXX")
+metadata_saved=
+restore_finalize_metadata() {
+  if [ -n "$metadata_saved" ] && [ -z "$coherence_committed" ]; then
+    for name in sync-manifest sync-finalize-token git-hydrate-base; do
+      if [ -f "$metadata_backup/$name" ]; then
+        cp -- "$metadata_backup/$name" "$metadata_backup/$name.restore" &&
+          /bin/mv -f -- "$metadata_backup/$name.restore" "$meta_dir/$name" || return 67
+      else
+        /bin/rm -f -- "$meta_dir/$name" || return 67
+      fi
+    done
+    /bin/rm -f -- "$complete_token" "$meta_dir/sync-fingerprint" || return 67
+  fi
+  /bin/rm -rf -- "$metadata_backup"
+  metadata_saved=
+}
+for name in sync-manifest sync-finalize-token git-hydrate-base; do
+  path="$meta_dir/$name"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    if [ ! -f "$path" ] || [ -L "$path" ]; then
+      echo "remote sync invalid committed metadata: $name" >&2; exit 67
+    fi
+    cp -- "$path" "$metadata_backup/$name"
+  fi
+done
+metadata_saved=1
 `
 }
 
@@ -2777,6 +3119,9 @@ while ! ln -s "$$" "$lock_path" 2>/dev/null; do
   fi
 done
 cleanup_finalize_lock() {
+  if declare -F restore_finalize_metadata >/dev/null; then
+    restore_finalize_metadata || return 67
+  fi
   if [ -n "${git_status:-}" ]; then
     rm -f -- "$git_status"
   fi

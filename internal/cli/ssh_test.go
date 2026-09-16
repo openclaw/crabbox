@@ -3439,12 +3439,22 @@ func TestRemoteFinalizeSyncCompletedRetryPreservesNewerPendingState(t *testing.T
 	if err := os.WriteFile(filepath.Join(metaDir, remoteSyncPendingDeletedName(completedToken)), []byte("completed-old.txt\x00"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	mustWriteTestFile(t, filepath.Join(metaDir, remoteCoherenceOmissionsName(completedToken)), "omitted\x00")
 	completedRemote := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: completedToken})
 	if out, err := exec.Command("bash", "-lc", completedRemote).CombinedOutput(); err != nil {
 		t.Fatalf("initial finalize: %v\n%s", err, out)
 	}
 
+	if _, err := os.Stat(filepath.Join(metaDir, remoteCoherenceOmissionsName(completedToken))); !os.IsNotExist(err) {
+		t.Fatalf("completed token omissions retained: %v", err)
+	}
+	// Simulate transport loss after completion but before token cleanup.
+	completedFiles := []string{remoteSyncPendingManifestName(completedToken), remoteSyncPendingDeletedName(completedToken), remoteCoherenceOmissionsName(completedToken)}
+	for _, name := range completedFiles {
+		mustWriteTestFile(t, filepath.Join(metaDir, name), "left after completion\x00")
+	}
 	newerFiles := map[string]string{
+		remoteCoherenceOmissionsName(newerToken):  "newer-omitted\x00",
 		remoteSyncPendingManifestName(newerToken): "newer.txt\x00",
 		remoteSyncPendingDeletedName(newerToken):  "newer-old.txt\x00",
 	}
@@ -3455,6 +3465,11 @@ func TestRemoteFinalizeSyncCompletedRetryPreservesNewerPendingState(t *testing.T
 	}
 	if out, err := exec.Command("bash", "-lc", completedRemote).CombinedOutput(); err != nil {
 		t.Fatalf("completed retry: %v\n%s", err, out)
+	}
+	for _, name := range completedFiles {
+		if _, err := os.Stat(filepath.Join(metaDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("completed token input survived retry: %s: %v", name, err)
+		}
 	}
 	for name, want := range newerFiles {
 		got, err := os.ReadFile(filepath.Join(metaDir, name))
@@ -3799,10 +3814,29 @@ func TestRemoteSyncAbandonedMetadataCleanupRemovesStatusFile(t *testing.T) {
 	if err := os.Chtimes(statusPath, old, old); err != nil {
 		t.Fatal(err)
 	}
+	stale := filepath.Join(metaDir, remoteCoherenceOmissionsName("abandoned"))
+	fresh := filepath.Join(metaDir, remoteCoherenceOmissionsName("current"))
+	input := filepath.Join(metaDir, remoteCoherenceOmissionsName("abandoned")+".input.123")
+	mustWriteTestFile(t, input, "abandoned input")
+	if err := os.Chtimes(input, old, old); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTestFile(t, stale, "old\x00")
+	mustWriteTestFile(t, fresh, "fresh\x00")
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
 	script := "set -e\nmeta_dir=" + shellQuote(metaDir) + "\n" + remoteSyncAbandonedMetadataCleanup()
 	if out, err := exec.Command("bash", "-c", script).CombinedOutput(); err != nil {
 		t.Fatalf("cleanup abandoned status: %v\n%s", err, out)
 	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale omissions survived: %v", err)
+	}
+	if _, err := os.Stat(input); !os.IsNotExist(err) {
+		t.Fatalf("stale omission input survived: %v", err)
+	}
+	requireOriginFile(t, fresh, "fresh\x00")
 	if _, err := os.Stat(statusPath); !os.IsNotExist(err) {
 		t.Fatalf("abandoned status file survived cleanup: %v", err)
 	}
@@ -4331,6 +4365,18 @@ func TestRemoteGitCoherenceRollsBackFailuresAndRetries(t *testing.T) {
 			mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
 			token := fmt.Sprintf("%032x", len(failure)+100)
 			stageCoherenceFinalize(t, workdir, token)
+			meta := coherenceMetaDir(t, workdir)
+			prior := map[string]string{
+				"sync-manifest":       "old-owned.txt\x00",
+				"sync-finalize-token": "000000000000000000000000000000aa",
+				"git-hydrate-base":    "old-base",
+			}
+			mustWriteTestFile(t, filepath.Join(meta, "sync-finalize-complete-token"), "000000000000000000000000000000aa")
+			mustWriteTestFile(t, filepath.Join(meta, "sync-fingerprint"), "old-fingerprint")
+			for name, data := range prior {
+				mustWriteTestFile(t, filepath.Join(meta, name), data)
+			}
+			mustWriteTestFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), "excluded\x00")
 			beforeIndex := coherenceIndexBytes(t, workdir)
 			tools := coherenceFailureTools(t, plan.Target)
 			env := []string{"PATH=" + tools + string(os.PathListSeparator) + os.Getenv("PATH")}
@@ -4350,6 +4396,16 @@ func TestRemoteGitCoherenceRollsBackFailuresAndRetries(t *testing.T) {
 			if got := readCoherentFingerprint(t, workdir, plan); got != "" {
 				t.Fatalf("failed finalization certified fingerprint %q", got)
 			}
+			for name, want := range prior {
+				requireOriginFile(t, filepath.Join(meta, name), want)
+			}
+			for _, name := range []string{"sync-finalize-complete-token", "sync-fingerprint"} {
+				if _, err := os.Stat(filepath.Join(meta, name)); !os.IsNotExist(err) {
+					t.Fatalf("failed sync retained certificate %s: %v", name, err)
+				}
+			}
+			requireOriginFile(t, filepath.Join(meta, remoteSyncPendingManifestName(token)), "tracked.txt\x00")
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), "excluded\x00")
 			if out, err := runCoherenceFinalize(workdir, plan, token, "fp-"+failure); err != nil {
 				t.Fatalf("retry: %v\n%s", err, out)
 			}
@@ -4548,11 +4604,10 @@ func TestWindowsGitSeedChecksGitBeforeInstallingClone(t *testing.T) {
 	cloneCheck := strings.Index(decoded, `if ($LASTEXITCODE -ne 0) { throw "Git seed clone failed" }`)
 	checkout := strings.Index(decoded, "& git -C $tmp checkout")
 	checkoutCheck := strings.Index(decoded, `if ($LASTEXITCODE -ne 0) { throw "Git seed checkout failed" }`)
-	removeWorkdir := strings.Index(decoded, "Remove-Item -LiteralPath $workdir -Recurse -Force")
-	moveClone := strings.Index(decoded, "Move-Item -LiteralPath $tmp -Destination $workdir")
+	moveMetadata := strings.Index(decoded, "[IO.Directory]::Move((Join-Path $tmp '.git'), $metadata)")
 	if clone < 0 || cloneCheck <= clone || checkout <= cloneCheck || checkoutCheck <= checkout ||
-		removeWorkdir <= checkoutCheck || moveClone <= removeWorkdir {
-		t.Fatalf("Windows seed can install before clone and checkout verification:\n%s", decoded)
+		moveMetadata <= checkoutCheck {
+		t.Fatalf("Windows seed can attach metadata before clone and checkout verification:\n%s", decoded)
 	}
 	for _, want := range []string{
 		"rev-parse --show-toplevel",
@@ -4565,6 +4620,9 @@ func TestWindowsGitSeedChecksGitBeforeInstallingClone(t *testing.T) {
 		"Test-Path -LiteralPath $index -PathType Leaf",
 		"git -C $Path write-tree",
 		"remote set-url origin",
+		"workspace has unexpected Git metadata",
+		"$workspaceEmpty = -not (Test-Path -LiteralPath $workdir)",
+		"sync-manifest', 'sync-fingerprint', 'git-hydrate-base'",
 		`if ($tmp -and (Test-Path -LiteralPath $tmp))`,
 	} {
 		if !strings.Contains(decoded, want) {
@@ -4590,8 +4648,16 @@ func TestWindowsGitSeedChecksGitBeforeInstallingClone(t *testing.T) {
 	}
 	verifyWorkspace := strings.Index(decoded, "if (-not (Test-UsableGitWorkspace $tmp))")
 	verifyTree := strings.Index(decoded, "if ($expectedTree) {")
-	if verifyWorkspace <= checkoutCheck || verifyTree <= verifyWorkspace || removeWorkdir <= verifyTree {
-		t.Fatalf("Windows seed can replace a workspace before the candidate index and tree are verified:\n%s", decoded)
+	if verifyWorkspace <= checkoutCheck || verifyTree <= verifyWorkspace || moveMetadata <= verifyTree {
+		t.Fatalf("Windows seed can attach metadata before the candidate index and tree are verified:\n%s", decoded)
+	}
+	if strings.Contains(decoded, "Remove-Item -LiteralPath $workdir -Recurse -Force") {
+		t.Fatalf("Windows seed must preserve raw workspace files:\n%s", decoded)
+	}
+	emptyWorkspace := strings.Index(decoded, "if ($workspaceEmpty) {")
+	moveWorkspace := strings.Index(decoded, "[IO.Directory]::Move($tmp, $workdir)")
+	if emptyWorkspace <= verifyTree || moveWorkspace <= emptyWorkspace || moveMetadata <= moveWorkspace {
+		t.Fatalf("Windows seed does not distinguish an empty checkout from raw workspace metadata:\n%s", decoded)
 	}
 }
 
@@ -4699,7 +4765,7 @@ func requireWindowsGitWorkspaceState(t *testing.T, workdir string, plan gitCoher
 	}
 }
 
-func TestWindowsGitSeedReplacesUnusableExactRootsAfterVerifiedClone(t *testing.T) {
+func TestWindowsGitSeedPreservesUnusableExactRootsAfterVerifiedClone(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("native Windows PowerShell execution is covered by Windows CI")
 	}
@@ -4747,15 +4813,68 @@ func TestWindowsGitSeedReplacesUnusableExactRootsAfterVerifiedClone(t *testing.T
 				}
 			}
 
-			if out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, plan)); err != nil {
-				t.Fatalf("verified seed failed: %v\n%s", err, out)
+			if out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, plan)); err == nil || !strings.Contains(string(out), "workspace has unexpected Git metadata") {
+				t.Fatalf("verified seed did not refuse unusable root: %v\n%s", err, out)
 			}
-			requireWindowsGitWorkspaceState(t, workdir, plan)
-			if _, err := os.Stat(marker); !os.IsNotExist(err) {
-				t.Fatalf("verified seed did not replace unusable root: %v", err)
+			if got, readErr := os.ReadFile(marker); readErr != nil || string(got) != "preserve\n" {
+				t.Fatalf("refused seed changed existing root: data=%q err=%v", got, readErr)
 			}
 		})
 	}
+}
+
+func TestWindowsGitSeedPreservesRawWorkspaceMetadataOwnership(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows PowerShell execution is covered by Windows CI")
+	}
+	f := newGitCoherenceFixture(t)
+	plan := f.plan(t, f.b)
+
+	t.Run("raw manifest", func(t *testing.T) {
+		workdir := filepath.Join(t.TempDir(), "raw-workspace")
+		mustWriteTestFile(t, filepath.Join(workdir, "node_modules", "fixture.txt"), "dependency\n")
+		mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest"), "managed.txt\x00")
+		if out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, plan)); err != nil {
+			t.Fatalf("attach raw workspace metadata: %v\n%s", err, out)
+		}
+		requireWindowsGitWorkspaceState(t, workdir, plan)
+		for name, want := range map[string]string{
+			"node_modules/fixture.txt":   "dependency\n",
+			".git/crabbox/sync-manifest": "managed.txt\x00",
+		} {
+			if got, err := os.ReadFile(filepath.Join(workdir, name)); err != nil || string(got) != want {
+				t.Fatalf("raw workspace did not preserve %s: data=%q err=%v", name, got, err)
+			}
+		}
+	})
+
+	t.Run("raw no manifest", func(t *testing.T) {
+		workdir := filepath.Join(t.TempDir(), "raw-no-manifest")
+		mustWriteTestFile(t, filepath.Join(workdir, "preserve.txt"), "workspace\n")
+		if out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, plan)); err != nil {
+			t.Fatalf("attach raw workspace metadata without manifest: %v\n%s", err, out)
+		}
+		if got, err := os.ReadFile(filepath.Join(workdir, ".git", "crabbox", "sync-manifest")); err != nil || len(got) != 0 {
+			t.Fatalf("raw workspace inherited candidate manifest: data=%q err=%v", got, err)
+		}
+		if got, err := os.ReadFile(filepath.Join(workdir, "preserve.txt")); err != nil || string(got) != "workspace\n" {
+			t.Fatalf("raw workspace changed: data=%q err=%v", got, err)
+		}
+	})
+
+	t.Run("abandoned private staging", func(t *testing.T) {
+		parent := t.TempDir()
+		staging := filepath.Join(parent, ".seed-abandoned")
+		mustWriteTestFile(t, filepath.Join(staging, "prepublication-marker"), "interrupted\n")
+		workdir := filepath.Join(parent, "raw-workspace")
+		if out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, plan)); err != nil {
+			t.Fatalf("seed after abandoned private staging: %v\n%s", err, out)
+		}
+		requireWindowsGitWorkspaceState(t, workdir, plan)
+		if got, err := os.ReadFile(filepath.Join(staging, "prepublication-marker")); err != nil || string(got) != "interrupted\n" {
+			t.Fatalf("seed touched abandoned private staging: data=%q err=%v", got, err)
+		}
+	})
 }
 
 func TestWindowsGitCoherenceSupportsDetachedSparseSplitAndLinkedIndexes(t *testing.T) {
@@ -5002,11 +5121,12 @@ func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
 	got := remoteGitSeed("/work/repo", gitCoherencePlan{RemoteURL: "https://github.com/openclaw/crabbox.git", Target: "missing-sha", Tree: "tree", Branch: "main"})
 	for _, want := range []string{
 		"git -C \"$tmp\" checkout --quiet --detach",
-		"cleanup_seed() { rm -rf -- \"$tmp\"; rm -f -- \"$transport_error\"; }",
+		"seed_root=",
+		"workspace has unexpected Git metadata",
+		"mv -n \"$tmp/.git\" \"$workdir\"",
 		"trap cleanup_seed EXIT",
 		"cat \"$transport_error\" >&2",
 		"exit 78",
-		"mv -- \"$tmp\" \"$workdir\"",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteGitSeed missing %q in %q", want, got)
@@ -5019,6 +5139,9 @@ func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("remoteGitSeed retained origin policy %q in %q", forbidden, got)
 		}
+	}
+	if strings.Contains(got, "rm -rf -- \"$workdir\"") {
+		t.Fatalf("remoteGitSeed must not replace a raw workspace: %q", got)
 	}
 }
 
@@ -5535,6 +5658,7 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 	runGit(t, source, "config", "user.email", "test@example.com")
 	runGit(t, source, "config", "user.name", "Test")
 	mustWriteTestFile(t, filepath.Join(source, "proof.txt"), "safe seed\n")
+	mustWriteTestFile(t, filepath.Join(source, "preserved-upstream.txt"), "upstream managed\n")
 	runGit(t, source, "add", ".")
 	runGit(t, source, "commit", "-m", "seed")
 	head := gitOutput(source, "rev-parse", "HEAD")
@@ -5558,6 +5682,13 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 		}
 		if len(staging) != 0 {
 			t.Fatalf("%s left seed staging files: %v", label, staging)
+		}
+	}
+	failSeed := func(label, workdir string) {
+		t.Helper()
+		seed := exec.Command("bash", "-lc", remoteGitSeed(workdir, plan))
+		if out, err := seed.CombinedOutput(); err == nil || !strings.Contains(string(out), "crabbox-git-seed phase=publish") {
+			t.Fatalf("%s: expected protected publish failure, err=%v output=%s", label, err, out)
 		}
 	}
 	requireSeeded := func(workdir string) {
@@ -5599,16 +5730,285 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 		t.Fatalf("valid reusable workspace was replaced: data=%q err=%v", got, err)
 	}
 
+	rawWorkdir := filepath.Join(root, "raw-workdir")
+	mustWriteTestFile(t, filepath.Join(rawWorkdir, "node_modules", "fixture.txt"), "dependency\n")
+	mustWriteTestFile(t, filepath.Join(rawWorkdir, "dist", "proof.txt"), "evidence\n")
+	mustWriteTestFile(t, filepath.Join(rawWorkdir, ".crabbox", "sync-manifest"), "tracked.txt\x00")
+	mustWriteTestFile(t, filepath.Join(rawWorkdir, ".crabbox", "sync-fingerprint"), "raw-fingerprint")
+	runSeed("attach metadata to raw workspace", rawWorkdir)
+	requireSeeded(rawWorkdir)
+	for name, want := range map[string]string{
+		"node_modules/fixture.txt":      "dependency\n",
+		"dist/proof.txt":                "evidence\n",
+		".git/crabbox/sync-manifest":    "tracked.txt\x00",
+		".git/crabbox/sync-fingerprint": "raw-fingerprint",
+	} {
+		if got, err := os.ReadFile(filepath.Join(rawWorkdir, name)); err != nil || string(got) != want {
+			t.Fatalf("raw workspace did not preserve %s: data=%q err=%v", name, got, err)
+		}
+	}
+
+	branchlessWorkdir := filepath.Join(root, "branchless-raw-workdir")
+	mustWriteTestFile(t, filepath.Join(branchlessWorkdir, "stale.txt"), "managed\n")
+	mustWriteTestFile(t, filepath.Join(branchlessWorkdir, "node_modules", "fixture.txt"), "dependency\n")
+	mustWriteTestFile(t, filepath.Join(branchlessWorkdir, ".crabbox", "sync-manifest"), "stale.txt\x00")
+	branchless := plan
+	branchless.Branch = ""
+	if out, err := exec.Command("bash", "-lc", remoteGitSeed(branchlessWorkdir, branchless)).CombinedOutput(); err != nil {
+		t.Fatalf("attach branchless metadata to raw workspace: %v\n%s", err, out)
+	}
+	if manifest, err := os.ReadFile(filepath.Join(branchlessWorkdir, ".git", "crabbox", "sync-manifest")); err != nil || string(manifest) != "stale.txt\x00" {
+		t.Fatalf("raw manifest did not retain authority: data=%q err=%v", manifest, err)
+	}
+	token := strings.Repeat("0", 32)
+	write := exec.Command("bash", "-lc", remoteWriteSyncManifestsNew(branchlessWorkdir, token))
+	write.Stdin = strings.NewReader("0\n0\n")
+	if out, err := write.CombinedOutput(); err != nil {
+		t.Fatalf("write branchless manifest: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("bash", "-lc", remotePruneSyncManifest(branchlessWorkdir, token)).CombinedOutput(); err != nil {
+		t.Fatalf("prune branchless manifest: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(branchlessWorkdir, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("branchless prune retained managed stale file: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(branchlessWorkdir, "node_modules", "fixture.txt")); err != nil || string(got) != "dependency\n" {
+		t.Fatalf("branchless prune touched unmanaged dependency: data=%q err=%v", got, err)
+	}
+
+	rawNoManifestWorkdir := filepath.Join(root, "raw-no-manifest-workdir")
+	mustWriteTestFile(t, filepath.Join(rawNoManifestWorkdir, "preserved-upstream.txt"), "raw workspace\n")
+	if out, err := exec.Command("bash", "-lc", remoteGitSeed(rawNoManifestWorkdir, branchless)).CombinedOutput(); err != nil {
+		t.Fatalf("attach branchless metadata without a raw manifest: %v\n%s", err, out)
+	}
+	write = exec.Command("bash", "-lc", remoteWriteSyncManifestsNew(rawNoManifestWorkdir, token))
+	write.Stdin = strings.NewReader("0\n0\n")
+	if out, err := write.CombinedOutput(); err != nil {
+		t.Fatalf("write raw-no-manifest branchless manifest: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("bash", "-lc", remoteSeedSyncManifestFromGit(rawNoManifestWorkdir)).CombinedOutput(); err != nil {
+		t.Fatalf("seed raw-no-manifest branchless prune manifest: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("bash", "-lc", remotePruneSyncManifest(rawNoManifestWorkdir, token)).CombinedOutput(); err != nil {
+		t.Fatalf("prune raw-no-manifest branchless manifest: %v\n%s", err, out)
+	}
+	if got, err := os.ReadFile(filepath.Join(rawNoManifestWorkdir, "preserved-upstream.txt")); err != nil || string(got) != "raw workspace\n" {
+		t.Fatalf("candidate manifest claimed raw workspace file: data=%q err=%v", got, err)
+	}
+
+	interruptedWorkdir := filepath.Join(root, "interrupted-before-publish")
+	mustWriteTestFile(t, filepath.Join(interruptedWorkdir, "preserve.txt"), "workspace\n")
+	barrierBin := filepath.Join(root, "barrier-bin")
+	if err := os.Mkdir(barrierBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	barrierReady := filepath.Join(root, "barrier-ready")
+	barrierRelease := filepath.Join(root, "barrier-release")
+	barrierDone := filepath.Join(root, "barrier-done")
+	barrierScript := "#!/bin/sh\n: > " + shellQuote(barrierReady) + "\nwhile [ ! -f " + shellQuote(barrierRelease) + " ]; do sleep 0.01; done\n/usr/bin/find \"$@\"\n: > " + shellQuote(barrierDone) + "\n"
+	if err := os.WriteFile(filepath.Join(barrierBin, "find"), []byte(barrierScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	interruptedSeed := exec.Command("bash", "-c", remoteGitSeed(interruptedWorkdir, plan))
+	interruptedEnv := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "PATH=") {
+			interruptedEnv = append(interruptedEnv, entry)
+		}
+	}
+	interruptedSeed.Env = append(interruptedEnv, "PATH="+barrierBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := interruptedSeed.Start(); err != nil {
+		t.Fatal(err)
+	}
+	interruptedCleaned := false
+	releaseInterrupted := func() {
+		if err := os.WriteFile(barrierRelease, nil, 0o644); err != nil {
+			t.Errorf("release interrupted seed barrier: %v", err)
+			return
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if _, err := os.Stat(barrierDone); err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("interrupted seed barrier descendant did not drain")
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	defer func() {
+		if interruptedCleaned {
+			return
+		}
+		if interruptedSeed.ProcessState == nil {
+			_ = interruptedSeed.Process.Kill()
+			_ = interruptedSeed.Wait()
+		}
+		releaseInterrupted()
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(barrierReady); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("seed did not reach prepublication barrier")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := interruptedSeed.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := interruptedSeed.Wait(); err == nil {
+		t.Fatal("killed seed completed successfully")
+	}
+	releaseInterrupted()
+	interruptedCleaned = true
+	abandonedStaging, err := filepath.Glob(filepath.Join(root, ".seed.*"))
+	if err != nil || len(abandonedStaging) != 1 {
+		t.Fatalf("killed seed did not leave one private staging root: paths=%v err=%v", abandonedStaging, err)
+	}
+	if out, err := exec.Command("bash", "-lc", remoteGitSeed(interruptedWorkdir, plan)).CombinedOutput(); err != nil {
+		t.Fatalf("seed after interrupted private staging: %v\n%s", err, out)
+	}
+	requireSeeded(interruptedWorkdir)
+	if got, err := os.ReadFile(filepath.Join(interruptedWorkdir, "preserve.txt")); err != nil || string(got) != "workspace\n" {
+		t.Fatalf("next seed changed interrupted workspace: data=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(abandonedStaging[0]); err != nil {
+		t.Fatalf("next seed changed interrupted private staging: %v", err)
+	}
+	if err := os.RemoveAll(abandonedStaging[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	appearingMetadataWorkdir := filepath.Join(root, "appearing-metadata-workdir")
+	mustWriteTestFile(t, filepath.Join(appearingMetadataWorkdir, "preserve.txt"), "workspace\n")
+	findBin := filepath.Join(root, "find-bin")
+	if err := os.Mkdir(findBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	findReady := filepath.Join(root, "find-ready")
+	findRelease := filepath.Join(root, "find-release")
+	findScript := "#!/bin/sh\n: > " + shellQuote(findReady) + "\nwhile [ ! -f " + shellQuote(findRelease) + " ]; do sleep 0.01; done\nexec /usr/bin/find \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(findBin, "find"), []byte(findScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seed := exec.Command("bash", "-c", remoteGitSeed(appearingMetadataWorkdir, plan))
+	seedEnv := make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "PATH=") {
+			seedEnv = append(seedEnv, entry)
+		}
+	}
+	seed.Env = append(seedEnv, "PATH="+findBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var seedOutput bytes.Buffer
+	seed.Stdout = &seedOutput
+	seed.Stderr = &seedOutput
+	if err := seed.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = os.WriteFile(findRelease, nil, 0o644)
+		_ = seed.Wait()
+	}()
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(findReady); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("seed did not reach post-verification workspace check")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mustWriteTestFile(t, filepath.Join(appearingMetadataWorkdir, ".git", "late-sentinel"), "preserve\n")
+	if err := os.WriteFile(findRelease, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Wait(); err == nil || !strings.Contains(seedOutput.String(), "workspace has unexpected Git metadata") {
+		t.Fatalf("seed did not refuse metadata appearing after candidate verification: err=%v output=%s", err, seedOutput.String())
+	}
+	if got, err := os.ReadFile(filepath.Join(appearingMetadataWorkdir, ".git", "late-sentinel")); err != nil || string(got) != "preserve\n" {
+		t.Fatalf("refused seed changed late metadata: data=%q err=%v", got, err)
+	}
+
+	for _, metadata := range []bool{false, true} {
+		for _, moveCase := range []struct {
+			name    string
+			status  int
+			collide bool
+		}{{"skip-success", 0, true}, {"skip-failure", 1, true}, {"native-failure", 73, false}} {
+			t.Run(fmt.Sprintf("publication-metadata-%v-%s", metadata, moveCase.name), func(t *testing.T) {
+				physicalRoot, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				appearingTargetWorkdir := filepath.Join(physicalRoot, "appearing-target")
+				moveTarget := filepath.Dir(appearingTargetWorkdir)
+				collisionPath := appearingTargetWorkdir
+				wantError := "workspace appeared during publication"
+				if metadata {
+					mustWriteTestFile(t, filepath.Join(appearingTargetWorkdir, "preserve.txt"), "workspace\n")
+					moveTarget = appearingTargetWorkdir
+					collisionPath = filepath.Join(appearingTargetWorkdir, ".git")
+					wantError = "Git metadata appeared during publication"
+				}
+				moveBin := t.TempDir()
+				// mv -n has reported both success and failure when it skips a target.
+				// A native failure without a collision must keep its own exit status.
+				injectedMove := "exit " + strconv.Itoa(moveCase.status)
+				if moveCase.collide {
+					injectedMove = "mkdir -p " + shellQuote(collisionPath) + "; printf 'preserve\\n' > " + shellQuote(filepath.Join(collisionPath, "late-sentinel")) + "; /bin/mv \"$@\"; " + injectedMove
+				}
+				moveScript := "#!/bin/sh\nfor last; do :; done\nif [ \"$last\" = " + shellQuote(moveTarget) + " ]; then " + injectedMove + "; fi\nexec /bin/mv \"$@\"\n"
+				if err := os.WriteFile(filepath.Join(moveBin, "mv"), []byte(moveScript), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				seed := exec.Command("bash", "-c", remoteGitSeed(appearingTargetWorkdir, plan))
+				seed.Env = append(os.Environ(), "PATH="+moveBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				out, err := seed.CombinedOutput()
+				if moveCase.collide {
+					if exitCode(err) != 67 || !strings.Contains(string(out), wantError) {
+						t.Fatalf("seed did not refuse publication collision: err=%v output=%s", err, out)
+					}
+					requireOriginFile(t, filepath.Join(collisionPath, "late-sentinel"), "preserve\n")
+				} else {
+					if exitCode(err) != moveCase.status || strings.Contains(string(out), "appeared during publication") {
+						t.Fatalf("seed hid native move failure: err=%v output=%s", err, out)
+					}
+					if _, err := os.Lstat(collisionPath); !os.IsNotExist(err) {
+						t.Fatalf("failed move published a destination: %v", err)
+					}
+				}
+				if metadata {
+					requireOriginFile(t, filepath.Join(appearingTargetWorkdir, "preserve.txt"), "workspace\n")
+				}
+				if nested, err := filepath.Glob(filepath.Join(appearingTargetWorkdir, ".seed.*")); err != nil || len(nested) != 0 {
+					t.Fatalf("refused seed nested staging under appeared target: paths=%v err=%v", nested, err)
+				}
+				if staging, err := filepath.Glob(filepath.Join(filepath.Dir(appearingTargetWorkdir), ".seed.*")); err != nil || len(staging) != 0 {
+					t.Fatalf("refused seed retained staging: paths=%v err=%v", staging, err)
+				}
+			})
+		}
+	}
+
 	unbornWorkdir := filepath.Join(root, "unborn-workdir")
 	if err := os.Mkdir(unbornWorkdir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	runGit(t, unbornWorkdir, "init")
 	mustWriteTestFile(t, filepath.Join(unbornWorkdir, "stale-unborn.txt"), "stale\n")
-	runSeed("replace unborn workspace", unbornWorkdir)
-	requireSeeded(unbornWorkdir)
-	if _, err := os.Stat(filepath.Join(unbornWorkdir, "stale-unborn.txt")); !os.IsNotExist(err) {
-		t.Fatalf("unborn workspace was reused instead of reseeded: %v", err)
+	mustWriteTestFile(t, filepath.Join(unbornWorkdir, "node_modules", "failed-sentinel.txt"), "preserve\n")
+	failSeed("preserve unborn workspace", unbornWorkdir)
+	if got, err := os.ReadFile(filepath.Join(unbornWorkdir, "stale-unborn.txt")); err != nil || string(got) != "stale\n" {
+		t.Fatalf("unborn workspace changed after refused seed: data=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(unbornWorkdir, "node_modules", "failed-sentinel.txt")); err != nil || string(got) != "preserve\n" {
+		t.Fatalf("failed seed changed raw sentinel: data=%q err=%v", got, err)
 	}
 
 	missingIndexWorkdir := filepath.Join(root, "missing-index-workdir")
@@ -5623,10 +6023,9 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustWriteTestFile(t, filepath.Join(missingIndexWorkdir, "stale-missing-index.txt"), "stale\n")
-	runSeed("replace missing-index workspace", missingIndexWorkdir)
-	requireSeeded(missingIndexWorkdir)
-	if _, err := os.Stat(filepath.Join(missingIndexWorkdir, "stale-missing-index.txt")); !os.IsNotExist(err) {
-		t.Fatalf("missing-index workspace was reused instead of reseeded: %v", err)
+	failSeed("preserve missing-index workspace", missingIndexWorkdir)
+	if got, err := os.ReadFile(filepath.Join(missingIndexWorkdir, "stale-missing-index.txt")); err != nil || string(got) != "stale\n" {
+		t.Fatalf("missing-index workspace changed after refused seed: data=%q err=%v", got, err)
 	}
 
 	nestedWorkdir := filepath.Join(source, "nested-workdir")
@@ -6617,5 +7016,588 @@ func TestCommandIntentShellSourceKeepsExistingShell(t *testing.T) {
 		if got := intent.ShellSource(); got != tc.want {
 			t.Fatalf("empty source shell=%t got=%q want=%q", tc.shell, got, tc.want)
 		}
+	}
+}
+
+func TestOriginSeedInitialAbsencesSurviveReuse(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX origin seed fixture")
+	}
+	for _, mode := range []string{"branch", "branchless", "plain"} {
+		t.Run(mode, func(t *testing.T) {
+			plan, workdir, absent, present := newOriginAbsenceFixture(t)
+			if mode == "branchless" {
+				plan.Branch = ""
+			}
+			runOriginScript(t, remoteGitSeed(workdir, plan), "")
+			meta := coherenceMetaDir(t, workdir)
+			initial := strings.Join(absent, "\x00") + "\x00"
+			requireOriginFile(t, filepath.Join(meta, remoteOriginSeedInitialAbsencesName()), initial)
+			selector := append(append([]string{}, absent...), present...)
+			for i := 1; i <= 2; i++ {
+				token := fmt.Sprintf("%032x", i)
+				out := runOriginScript(t, remoteWriteSyncManifestsNew(workdir, token), syncManifestInputForTarget(SSHTarget{}, []byte("keep.txt\x00"), nil))
+				if !strings.Contains(out, "crabbox-git-seed raw-workspace\n") {
+					t.Fatalf("staging lost raw provenance: %q", out)
+				}
+				runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, token), strings.Join(selector, "\x00")+"\x00")
+				requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), initial)
+				runOriginScript(t, remotePruneSyncManifestForTargetMode(SSHTarget{}, workdir, token, true), "")
+				opts := remoteSyncFinalizeOptions{Token: token, Coherence: plan, CoherenceOmissions: true}
+				if mode == "plain" {
+					opts.Coherence = gitCoherencePlan{}
+					opts.PlainManifest = true
+				}
+				runOriginScript(t, remoteFinalizeSync(workdir, opts), "")
+				if _, err := os.Stat(filepath.Join(meta, remoteCoherenceOmissionsName(token))); !os.IsNotExist(err) {
+					t.Fatalf("completed omissions survived: %v", err)
+				}
+				runOriginScript(t, remoteGitSeed(workdir, plan), "")
+				requireOriginFile(t, filepath.Join(meta, remoteOriginSeedInitialAbsencesName()), initial)
+			}
+			// A later selector uses the immutable initial set, not a fresh diff.
+			const changed = "00000000000000000000000000000003"
+			runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, changed), absent[0]+"\x00")
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(changed)), absent[0]+"\x00")
+			// Reusing one token cannot widen the observation after its first capture.
+			runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, changed), strings.Join(selector, "\x00")+"\x00")
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(changed)), absent[0]+"\x00")
+			runOriginScript(t, remoteDiscardSyncPendingMetadata(workdir, changed, false), "")
+			for _, path := range present {
+				if err := os.Remove(filepath.Join(workdir, path)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, token := range []string{"00000000000000000000000000000004", "00000000000000000000000000000005"} {
+				stageCoherenceFinalize(t, workdir, token)
+				runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, token), strings.Join(selector, "\x00")+"\x00")
+				requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), initial)
+				opts := remoteSyncFinalizeOptions{Token: token, Coherence: plan, CoherenceOmissions: true}
+				if mode == "plain" {
+					opts.Coherence = gitCoherencePlan{}
+					opts.PlainManifest = true
+				}
+				for attempt := 0; attempt < 2; attempt++ {
+					out, err := exec.Command("/bin/sh", "-c", remoteFinalizeSync(workdir, opts)).CombinedOutput()
+					if exitCode(err) != 66 || !strings.Contains(string(out), "200 tracked deletions") {
+						t.Fatalf("later deletion admitted: err=%v output=%s", err, out)
+					}
+					requireOriginFile(t, filepath.Join(meta, "sync-manifest"), "keep.txt\x00")
+					if _, err := os.Stat(filepath.Join(meta, "sync-finalize-complete-token")); !os.IsNotExist(err) {
+						t.Fatalf("failed sync retained completion: %v", err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func newOriginAbsenceFixture(t *testing.T) (gitCoherencePlan, string, []string, []string) {
+	t.Helper()
+	source, workdir := filepath.Join(t.TempDir(), "source"), filepath.Join(t.TempDir(), "raw")
+	mustWriteTestFile(t, filepath.Join(source, "keep.txt"), "keep\n")
+	mustWriteTestFile(t, filepath.Join(workdir, "keep.txt"), "keep\n")
+	var absent, present []string
+	for i := 0; i < 200; i++ {
+		a, p := fmt.Sprintf("absent/%03d.txt", i), fmt.Sprintf("present/%03d.txt", i)
+		if i == 0 {
+			a = "absent/000\nline.txt"
+		}
+		absent, present = append(absent, a), append(present, p)
+		mustWriteTestFile(t, filepath.Join(source, a), "absent\n")
+		mustWriteTestFile(t, filepath.Join(source, p), "present\n")
+		mustWriteTestFile(t, filepath.Join(workdir, p), "present\n")
+	}
+	runGit(t, source, "init")
+	runGit(t, source, "config", "user.email", "test@example.com")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "branch", "-M", "main")
+	runGit(t, source, "add", ".")
+	runGit(t, source, "commit", "-m", "seed")
+	return gitCoherencePlan{RemoteURL: source, Target: gitOutput(source, "rev-parse", "HEAD"), Tree: gitOutput(source, "rev-parse", "HEAD^{tree}"), Branch: "main"}, workdir, absent, present
+}
+
+func runOriginScript(t *testing.T, script, input string) string {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("origin script: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+func requireOriginFile(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != want {
+		t.Fatalf("%s: got %q err=%v want %q", filepath.Base(path), got, err, want)
+	}
+}
+
+func TestOriginSeedPriorManifestOwnsAbsentPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX origin seed fixture")
+	}
+	plan, workdir, absent, _ := newOriginAbsenceFixture(t)
+	prior := strings.Join(absent, "\x00") + "\x00"
+	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest"), prior)
+	runOriginScript(t, remoteGitSeed(workdir, plan), "")
+	const token = "00000000000000000000000000000006"
+	stageCoherenceFinalize(t, workdir, token)
+	runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, token), prior)
+	meta := coherenceMetaDir(t, workdir)
+	requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), "")
+	out, err := exec.Command("/bin/sh", "-c", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Coherence: plan, CoherenceOmissions: true})).CombinedOutput()
+	if exitCode(err) != 66 {
+		t.Fatalf("owned deletion admitted: %v\n%s", err, out)
+	}
+	requireOriginFile(t, filepath.Join(meta, "sync-manifest"), prior)
+	// A fresh token after failure must still observe canonical old ownership.
+	const next = "00000000000000000000000000000007"
+	runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, next), prior)
+	requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(next)), "")
+}
+
+func TestOriginSeedCaptureInterpretersAndInvalidRecords(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX interpreter fixture")
+	}
+	for _, interpreter := range []string{"python3", "perl"} {
+		t.Run(interpreter, func(t *testing.T) {
+			tools := t.TempDir()
+			for _, name := range []string{"git", "cat", "rm", "mv", "mkdir", "dirname", "basename", interpreter} {
+				mustWriteTestCommandWrapper(t, tools, name)
+			}
+			mustWriteTestBashNoProfileWrapper(t, tools)
+			workdir := t.TempDir()
+			meta := filepath.Join(workdir, ".crabbox")
+			initial := "absent\nfile\x00owned\x00present\x00"
+			mustWriteTestFile(t, filepath.Join(meta, remoteOriginSeedInitialAbsencesName()), initial)
+			mustWriteTestFile(t, filepath.Join(meta, "sync-manifest"), "owned\x00")
+			mustWriteTestFile(t, filepath.Join(workdir, "present"), "present")
+			const token = "00000000000000000000000000000008"
+			run := func(input string) ([]byte, error) {
+				cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", remoteCaptureCoherenceOmissions(workdir, token))
+				cmd.Env = append(os.Environ(), "PATH="+tools)
+				cmd.Stdin = strings.NewReader(input)
+				return cmd.CombinedOutput()
+			}
+			if out, err := run(initial + "absent\nfile\x00"); err != nil {
+				t.Fatalf("capture: %v\n%s", err, out)
+			}
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), "absent\nfile\x00")
+			for _, invalid := range []string{"unterminated", "../escape\x00", "empty//part\x00"} {
+				if out, err := run(invalid); err == nil {
+					t.Fatalf("accepted invalid %q: %s", invalid, out)
+				}
+			}
+			// Opening a directory can succeed in Perl; a failed read must not
+			// turn canonical ownership into an empty manifest.
+			if err := os.Remove(filepath.Join(meta, "sync-manifest")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(meta, "sync-manifest"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(meta, remoteCoherenceOmissionsName(token))); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := run(initial); err == nil {
+				t.Fatalf("old manifest read error became empty ownership: %s", out)
+			}
+			if _, err := os.Stat(filepath.Join(meta, remoteCoherenceOmissionsName(token))); !os.IsNotExist(err) {
+				t.Fatalf("read error published omissions: %v", err)
+			}
+			if err := os.Remove(filepath.Join(meta, remoteOriginSeedInitialAbsencesName())); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := run(initial); exitCode(err) != 67 {
+				t.Fatalf("missing provenance admitted: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestOriginSeedRawMetadataRejectsParentAliases(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX alias fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	plan := f.plan(t, f.b)
+	for _, alias := range []bool{false, true} {
+		t.Run(fmt.Sprintf("metadata-alias-%v", alias), func(t *testing.T) {
+			workdir := filepath.Join(t.TempDir(), "raw")
+			mustWriteTestFile(t, filepath.Join(workdir, "keep"), "keep")
+			external := t.TempDir()
+			mustWriteTestFile(t, filepath.Join(external, "sync-manifest"), "external\x00")
+			if alias {
+				if err := os.Symlink(external, filepath.Join(workdir, ".crabbox")); err != nil {
+					t.Fatal(err)
+				}
+				out, err := exec.Command("/bin/sh", "-c", remoteGitSeed(workdir, plan)).CombinedOutput()
+				if err == nil || !strings.Contains(string(out), "canonical directory") {
+					t.Fatalf("alias admitted: %v\n%s", err, out)
+				}
+				if _, err := os.Lstat(filepath.Join(workdir, ".git")); !os.IsNotExist(err) {
+					t.Fatalf("published metadata despite alias: %v", err)
+				}
+				requireOriginFile(t, filepath.Join(external, "sync-manifest"), "external\x00")
+			} else {
+				mustWriteTestFile(t, filepath.Join(workdir, ".crabbox", "sync-manifest"), "keep\x00")
+				path := filepath.Join(t.TempDir(), "alias")
+				if err := os.Symlink(workdir, path); err != nil {
+					t.Fatal(err)
+				}
+				runOriginScript(t, remoteGitSeed(path, plan), "")
+				requireOriginFile(t, filepath.Join(workdir, ".git", "crabbox", "sync-manifest"), "keep\x00")
+			}
+		})
+	}
+}
+
+func TestOriginSeedReusePrunerRejectsSymlinkAncestors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX/WSL selected script fixture")
+	}
+	for _, target := range []SSHTarget{{}, {TargetOS: targetWindows, WindowsMode: windowsModeWSL2}} {
+		t.Run(fmt.Sprintf("target-%s", target.WindowsMode), func(t *testing.T) {
+			f := newGitCoherenceFixture(t)
+			workdir := filepath.Join(t.TempDir(), "raw")
+			mustWriteTestFile(t, filepath.Join(workdir, "keep"), "keep")
+			runOriginScript(t, remoteGitSeed(workdir, f.plan(t, f.b)), "")
+			meta := coherenceMetaDir(t, workdir)
+			external := t.TempDir()
+			mustWriteTestFile(t, filepath.Join(external, "sentinel"), "outside")
+			if err := os.Symlink(external, filepath.Join(workdir, "escape")); err != nil {
+				t.Fatal(err)
+			}
+			mustWriteTestFile(t, filepath.Join(meta, "sync-manifest"), "escape/sentinel\x00")
+			const token = "00000000000000000000000000000009"
+			out := runOriginScript(t, remoteWriteSyncManifestsNewForTarget(target, workdir, token), syncManifestInputForTarget(target, nil, nil))
+			raw := strings.Contains(out, "crabbox-git-seed raw-workspace\n")
+			if !raw {
+				t.Fatal("reuse staging lost raw origin")
+			}
+			output, err := exec.Command("/bin/sh", "-c", remotePruneSyncManifestForTargetMode(target, workdir, token, raw)).CombinedOutput()
+			if err == nil {
+				t.Fatalf("symlink ancestor admitted: %s", output)
+			}
+			requireOriginFile(t, filepath.Join(external, "sentinel"), "outside")
+		})
+	}
+}
+
+func TestWindowsOriginSeedRejectsRawMetadataJunction(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native junction execution requires Windows")
+	}
+	f := newGitCoherenceFixture(t)
+	workdir := filepath.Join(t.TempDir(), "raw")
+	mustWriteTestFile(t, filepath.Join(workdir, "keep"), "keep")
+	external := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(external, "sync-manifest"), "outside\x00")
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(workdir, ".crabbox"), external).CombinedOutput(); err != nil {
+		t.Fatalf("junction: %v\n%s", err, out)
+	}
+	out, err := runDecodedWindowsPowerShell(t, windowsGitSeed(workdir, f.plan(t, f.b)))
+	if err == nil || !strings.Contains(string(out), "raw metadata") {
+		t.Fatalf("junction admitted: %v\n%s", err, out)
+	}
+	requireOriginFile(t, filepath.Join(external, "sync-manifest"), "outside\x00")
+	if _, err := os.Lstat(filepath.Join(workdir, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("published metadata despite junction: %v", err)
+	}
+}
+
+func TestOriginSeedDeletionGuardDeduplicatesNULPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX interpreter fixture")
+	}
+	for _, interpreter := range []string{"python3", "perl"} {
+		t.Run(interpreter, func(t *testing.T) {
+			tools := t.TempDir()
+			for _, name := range []string{"cat", interpreter} {
+				mustWriteTestCommandWrapper(t, tools, name)
+			}
+			meta := t.TempDir()
+			const token = "00000000000000000000000000000010"
+			var omissions, deletions strings.Builder
+			for i := 0; i < 200; i++ {
+				fmt.Fprintf(&omissions, "absent/%03d\nline\x00", i)
+				fmt.Fprintf(&deletions, "absent/%03d\nline\x00", i)
+				if i < 199 {
+					fmt.Fprintf(&deletions, "deleted/%03d\x00deleted/%03d\x00", i, i)
+				}
+			}
+			record := filepath.Join(meta, remoteCoherenceOmissionsName(token))
+			mustWriteTestFile(t, record, omissions.String())
+			deleted := filepath.Join(meta, "deleted")
+			mustWriteTestFile(t, deleted, deletions.String())
+			script := "set -e\nmeta_dir=" + shellQuote(meta) + "\nexpected_token=" + shellQuote(token) + "\ngit_status=" + shellQuote(filepath.Join(meta, "status")) + "\n" +
+				remoteOriginSeedDeletionGuard("", true, "cat "+shellQuote(deleted))
+			run := func() ([]byte, error) {
+				cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", script)
+				cmd.Env = append(os.Environ(), "PATH="+tools)
+				return cmd.CombinedOutput()
+			}
+			if out, err := run(); err != nil {
+				t.Fatalf("duplicate paths counted twice: %v\n%s", err, out)
+			}
+			mustWriteTestFile(t, deleted, deletions.String()+"deleted/199\x00")
+			if out, err := run(); exitCode(err) != 66 || !strings.Contains(string(out), "200 tracked deletions") {
+				t.Fatalf("real deletion guard: %v\n%s", err, out)
+			}
+			mustWriteTestFile(t, record, "unterminated")
+			if out, err := run(); err == nil {
+				t.Fatalf("malformed omission record admitted: %s", out)
+			}
+			if err := os.Remove(record); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := run(); exitCode(err) != 67 {
+				t.Fatalf("missing omission record admitted: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestRemoteGitCoherenceLateFailurePreservesOwnershipForNewToken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX finalize fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	for _, failure := range []string{"fingerprint", "complete"} {
+		t.Run(failure, func(t *testing.T) {
+			workdir := f.workspace(t, f.a, true)
+			plan := f.plan(t, f.b)
+			mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+			meta := coherenceMetaDir(t, workdir)
+			mustWriteTestFile(t, filepath.Join(meta, "sync-manifest"), "old-owned\x00")
+			const first = "00000000000000000000000000000011"
+			const next = "00000000000000000000000000000012"
+			stageCoherenceFinalize(t, workdir, first)
+			stageCoherenceFinalize(t, workdir, next)
+			mustWriteTestFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(first)), "first\x00")
+			mustWriteTestFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(next)), "next\x00")
+			env := []string{"PATH=" + coherenceFailureTools(t, plan.Target) + string(os.PathListSeparator) + os.Getenv("PATH"), "CRABBOX_FAIL_MV=" + failure}
+			if out, err := runCoherenceFinalize(workdir, plan, first, "first", env...); err == nil {
+				t.Fatalf("failure not injected: %s", out)
+			}
+			requireOriginFile(t, filepath.Join(meta, "sync-manifest"), "old-owned\x00")
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(next)), "next\x00")
+			if out, err := runCoherenceFinalize(workdir, plan, next, "next"); err != nil {
+				t.Fatalf("new token retry: %v\n%s", err, out)
+			}
+			requireOriginFile(t, filepath.Join(meta, "sync-finalize-complete-token"), next)
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(first)), "first\x00")
+			if _, err := os.Stat(filepath.Join(meta, remoteCoherenceOmissionsName(next))); !os.IsNotExist(err) {
+				t.Fatalf("completed next omissions: %v", err)
+			}
+			backups, err := filepath.Glob(filepath.Join(meta, "sync-finalize-backup.*"))
+			if err != nil || len(backups) != 0 {
+				t.Fatalf("settled backups remain: %v %v", backups, err)
+			}
+		})
+	}
+}
+
+func TestOriginSeedMetadataReplacementClearsProvenance(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX seed metadata fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	workdir := filepath.Join(t.TempDir(), "raw")
+	mustWriteTestFile(t, filepath.Join(workdir, "keep"), "keep")
+	runOriginScript(t, remoteGitSeed(workdir, f.plan(t, f.b)), "")
+	fresh := f.workspace(t, f.b, false)
+	if err := os.Rename(filepath.Join(workdir, ".git"), filepath.Join(workdir, "retained-old-metadata")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(fresh, ".git"), filepath.Join(workdir, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	out := runOriginScript(t, remoteWriteSyncManifestsNew(workdir, "00000000000000000000000000000013"), syncManifestInputForTarget(SSHTarget{}, nil, nil))
+	if strings.Contains(out, "crabbox-git-seed raw-workspace") {
+		t.Fatalf("new metadata inherited old provenance: %q", out)
+	}
+}
+
+func TestOriginSeedInitialAbsencesRejectObstructions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX origin seed fixture")
+	}
+	for _, obstruction := range []string{"directories", "parent-file", "symlink-parent"} {
+		t.Run(obstruction, func(t *testing.T) {
+			plan, workdir, absent, _ := newOriginAbsenceFixture(t)
+			parent := filepath.Join(workdir, "absent")
+			switch obstruction {
+			case "directories":
+				for _, path := range absent {
+					if err := os.MkdirAll(filepath.Join(workdir, path), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "parent-file":
+				mustWriteTestFile(t, parent, "obstructed")
+			case "symlink-parent":
+				external := t.TempDir()
+				for _, path := range absent {
+					mustWriteTestFile(t, filepath.Join(external, filepath.Base(path)), "external")
+				}
+				if err := os.Symlink(external, parent); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runOriginScript(t, remoteGitSeed(workdir, plan), "")
+			meta := coherenceMetaDir(t, workdir)
+			requireOriginFile(t, filepath.Join(meta, remoteOriginSeedInitialAbsencesName()), "")
+			if obstruction == "directories" {
+				for _, path := range absent {
+					if err := os.Remove(filepath.Join(workdir, path)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else if err := os.Remove(parent); err != nil {
+				t.Fatal(err)
+			}
+			const token = "00000000000000000000000000000014"
+			stageCoherenceFinalize(t, workdir, token)
+			runOriginScript(t, remoteCaptureCoherenceOmissions(workdir, token), strings.Join(absent, "\x00")+"\x00")
+			requireOriginFile(t, filepath.Join(meta, remoteCoherenceOmissionsName(token)), "")
+			out, err := exec.Command("/bin/sh", "-c", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Coherence: plan, CoherenceOmissions: true})).CombinedOutput()
+			if exitCode(err) != 66 {
+				t.Fatalf("later removal of obstruction was excused: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestRemoteGitCoherenceFailedSyncInvalidatesOldFingerprint(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX finalize fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	workdir := f.workspace(t, f.a, true)
+	plan := f.plan(t, f.a)
+	meta := coherenceMetaDir(t, workdir)
+	const old = "00000000000000000000000000000015"
+	const next = "00000000000000000000000000000016"
+	stageCoherenceFinalize(t, workdir, old)
+	if out, err := runCoherenceFinalize(workdir, plan, old, "old-fingerprint"); err != nil {
+		t.Fatalf("initial: %v\n%s", err, out)
+	}
+	mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "changed by failed sync\n")
+	stageCoherenceFinalize(t, workdir, next)
+	env := []string{"PATH=" + coherenceFailureTools(t, plan.Target) + string(os.PathListSeparator) + os.Getenv("PATH"), "CRABBOX_FAIL_MV=complete"}
+	if out, err := runCoherenceFinalize(workdir, plan, next, "next", env...); err == nil {
+		t.Fatalf("failure not injected: %s", out)
+	}
+	requireOriginFile(t, filepath.Join(meta, "sync-manifest"), "tracked.txt\x00")
+	requireOriginFile(t, filepath.Join(meta, "sync-finalize-token"), old)
+	if got := readCoherentFingerprint(t, workdir, plan); got != "" {
+		t.Fatalf("failed transfer certified old fingerprint: %q", got)
+	}
+}
+
+func TestOriginSeedInitialFilterUsesPerlAndCandidateIndex(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX interpreter fixture")
+	}
+	plan, workdir, absent, _ := newOriginAbsenceFixture(t)
+	candidate := plan.RemoteURL
+	meta := filepath.Join(candidate, ".git", "crabbox")
+	if err := os.MkdirAll(meta, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tools := t.TempDir()
+	for _, name := range []string{"git", "rm"} {
+		mustWriteTestCommandWrapper(t, tools, name)
+	}
+	marker := filepath.Join(t.TempDir(), "perl-used")
+	mustWriteTestCommandWrapperWithMarker(t, tools, "perl", marker)
+	script := "set -e\n" + "tmp=" + shellQuote(candidate) + "\nworkdir=" + shellQuote(workdir) + "\n" + remoteCaptureInitialOriginAbsences()
+	cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", script)
+	cmd.Env = append(os.Environ(), "PATH="+tools, "GIT_INDEX_FILE="+filepath.Join(t.TempDir(), "unrelated-index"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("initial Perl filter: %v\n%s", err, out)
+	}
+	requireOriginFile(t, filepath.Join(meta, remoteOriginSeedInitialAbsencesName()), strings.Join(absent, "\x00")+"\x00")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("Perl not used: %v", err)
+	}
+}
+
+func TestRemoteFinalizeSyncSnapshotFailureInvalidatesCompletion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX finalize fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	workdir := f.workspace(t, f.a, true)
+	plan := f.plan(t, f.a)
+	meta := coherenceMetaDir(t, workdir)
+	const old = "00000000000000000000000000000017"
+	const next = "00000000000000000000000000000018"
+	stageCoherenceFinalize(t, workdir, old)
+	if out, err := runCoherenceFinalize(workdir, plan, old, "old"); err != nil {
+		t.Fatalf("initial: %v\n%s", err, out)
+	}
+	mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "changed by failed sync\n")
+	stageCoherenceFinalize(t, workdir, next)
+	tools := t.TempDir()
+	mustWriteTestFailingCommand(t, tools, "mktemp", 95)
+	out, err := runCoherenceFinalize(workdir, plan, next, "next", "PATH="+tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if exitCode(err) != 95 {
+		t.Fatalf("snapshot failure not injected: %v\n%s", err, out)
+	}
+	requireOriginFile(t, filepath.Join(meta, "sync-manifest"), "tracked.txt\x00")
+	requireOriginFile(t, filepath.Join(meta, "sync-finalize-token"), old)
+	if got := readCoherentFingerprint(t, workdir, plan); got != "" {
+		t.Fatalf("snapshot failure retained old certificate: %q", got)
+	}
+}
+
+func TestOriginSeedProvenanceRejectsMetadataParentAlias(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX metadata alias fixture")
+	}
+	f := newGitCoherenceFixture(t)
+	workdir := filepath.Join(t.TempDir(), "raw")
+	mustWriteTestFile(t, filepath.Join(workdir, "keep"), "keep")
+	runOriginScript(t, remoteGitSeed(workdir, f.plan(t, f.b)), "")
+	meta := coherenceMetaDir(t, workdir)
+	if err := os.Rename(meta, meta+"-retained"); err != nil {
+		t.Fatal(err)
+	}
+	external := t.TempDir()
+	mustWriteTestFile(t, filepath.Join(external, remoteOriginSeedInitialAbsencesName()), "excluded\x00")
+	mustWriteTestFile(t, filepath.Join(external, "sync-manifest"), "outside\x00")
+	if err := os.Symlink(external, meta); err != nil {
+		t.Fatal(err)
+	}
+	const token = "00000000000000000000000000000019"
+	cases := []struct{ name, script, input string }{
+		{"reuse", remoteGitSeed(workdir, f.plan(t, f.b)), ""},
+		{"stage-posix", remoteWriteSyncManifestsNew(workdir, token), syncManifestInputForTarget(SSHTarget{}, nil, nil)},
+		{"stage-wsl", remoteWriteSyncManifestsNewForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, workdir, token), syncManifestInputForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, nil, nil)},
+		{"capture", remoteCaptureCoherenceOmissions(workdir, token), "excluded\x00"},
+		{"finalize", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, CoherenceOmissions: true}), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("/bin/sh", "-c", tc.script)
+			cmd.Stdin = strings.NewReader(tc.input)
+			out, err := cmd.CombinedOutput()
+			if exitCode(err) != 67 || !strings.Contains(string(out), "not a canonical directory") {
+				t.Fatalf("parent alias admitted: %v\n%s", err, out)
+			}
+			requireOriginFile(t, filepath.Join(external, "sync-manifest"), "outside\x00")
+			for _, name := range []string{remoteSyncPendingManifestName(token), remoteSyncPendingDeletedName(token), remoteCoherenceOmissionsName(token)} {
+				if _, err := os.Stat(filepath.Join(external, name)); !os.IsNotExist(err) {
+					t.Fatalf("alias wrote external metadata %s: %v", name, err)
+				}
+			}
+		})
 	}
 }

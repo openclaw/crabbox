@@ -5698,7 +5698,7 @@ jobs:
 EOF
     fi
     ;;
-  *"rm -rf --"*)
+  *"$CRABBOX_FAKE_RESET_PAYLOAD"*)
     printf 'reset\n' >> "$CRABBOX_FAKE_EVENTS"
     printf '%s\n' "$remote" > "$CRABBOX_FAKE_RESET_COMMAND"
     ;;
@@ -5760,6 +5760,7 @@ exit 0
 	}
 	t.Setenv("CRABBOX_FAKE_CANONICAL_WORKSPACE", canonicalWorkspace)
 	t.Setenv("CRABBOX_FAKE_ADOPTED_WORKSPACE", adoptedWorkspace)
+	t.Setenv("CRABBOX_FAKE_RESET_PAYLOAD", shellQuote(remoteResetWorkdir(adoptedWorkspace)))
 	if opts.failInvalidation {
 		t.Setenv("CRABBOX_FAKE_INVALIDATE_FAIL", "1")
 	}

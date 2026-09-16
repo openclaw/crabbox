@@ -2307,14 +2307,14 @@ retrySync:
 		}
 		if !overlayDecision.Enabled && !plainManifestMode && coherence.seedEnabled() {
 			stepStart = time.Now()
-			if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
-				if reason, fallback := gitSeedRuntimeFallbackResult(coherence, out, err); fallback {
+			if out, seedErr := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); seedErr != nil {
+				if reason, fallback := gitSeedRuntimeFallbackResult(coherence, out, seedErr); fallback {
 					usePlainManifestForOrigin(reason)
 				} else if coherence.Branch == "" {
-					reportRemoteGitSeedFailure(a.Stderr, out, err, "aborting before file sync")
-					return recordFailure(Exit(6, "remote git seed failed: %v", err))
+					reportRemoteGitSeedFailure(a.Stderr, out, seedErr, "aborting before file sync")
+					return recordFailure(Exit(6, "remote git seed failed: %v", seedErr))
 				} else {
-					warnRemoteGitSeedFailure(a.Stderr, out, err)
+					warnRemoteGitSeedFailure(a.Stderr, out, seedErr)
 				}
 			}
 			timings.syncSteps.gitSeed += time.Since(stepStart)
@@ -2382,7 +2382,8 @@ retrySync:
 		} else if plainManifestMode {
 			manifestCommand = remoteWriteSyncManifestsNewForTargetMode(target, workdir, finalizeToken, true)
 		}
-		manifestErr := runSSHInput(manifestCtx, target, manifestCommand, strings.NewReader(manifestInput), io.Discard, a.Stderr)
+		var manifestOutput strings.Builder
+		manifestErr := runSSHInput(manifestCtx, target, manifestCommand, strings.NewReader(manifestInput), &manifestOutput, a.Stderr)
 		stopManifestHeartbeat()
 		if cancelManifest != nil {
 			cancelManifest()
@@ -2392,6 +2393,34 @@ retrySync:
 		}
 		if manifestErr != nil {
 			return recordFailure(Exit(7, "write sync manifests: %v", manifestErr))
+		}
+		rawOriginWorkspace := strings.Contains(manifestOutput.String(), "crabbox-git-seed raw-workspace\n")
+		var excludedTargetPaths []string
+		if rawOriginWorkspace && coherence.seedEnabled() {
+			excluded, exclusionErr := gitTargetExcludedPaths(repo.Root, coherence.Target, excludes)
+			if exclusionErr != nil {
+				return recordFailure(Exit(6, "list Git seed exclusions: %v", exclusionErr))
+			}
+			excludedTargetPaths = excluded
+		}
+		coherenceOmissions := len(excludedTargetPaths) != 0
+		if coherenceOmissions {
+			// Intersect immutable initial absences with this selector and prior ownership.
+			captureCtx := ctx
+			var cancelCapture context.CancelFunc
+			if cfg.Sync.Timeout > 0 {
+				captureCtx, cancelCapture = context.WithTimeout(ctx, cfg.Sync.Timeout)
+			}
+			err := runSSHInput(captureCtx, target, remoteCaptureCoherenceOmissions(workdir, finalizeToken), strings.NewReader(strings.Join(excludedTargetPaths, "\x00")+"\x00"), io.Discard, a.Stderr)
+			if cancelCapture != nil {
+				cancelCapture()
+			}
+			if captureCtx.Err() == context.DeadlineExceeded {
+				return recordFailure(Exit(6, "record origin seed omissions timed out after %s", cfg.Sync.Timeout))
+			}
+			if err != nil {
+				return recordFailure(Exit(6, "record origin seed omissions: %v", err))
+			}
 		}
 		timings.syncSteps.manifestWrite = time.Since(stepStart)
 		if shouldPruneRemoteSync(cfg.Sync.Delete, fullResyncRequested) {
@@ -2406,8 +2435,8 @@ retrySync:
 			pruneCommand := remotePruneSyncManifestForTarget(target, workdir, finalizeToken)
 			if overlayDecision.Enabled {
 				pruneCommand = remotePruneGitOverlaySyncManifest(workdir, finalizeToken, allowRemoteSyncMassDeletions(cfg, hydratedByActions))
-			} else if plainManifestMode || localGitSeed {
-				// Local metadata does not make prior raw paths safe to follow through symlink ancestors.
+			} else if plainManifestMode || localGitSeed || rawOriginWorkspace {
+				// Attaching Git metadata does not make prior raw paths safe to follow through symlink ancestors.
 				pruneCommand = remotePruneSyncManifestForTargetMode(target, workdir, finalizeToken, true, allowRemoteSyncMassDeletions(cfg, hydratedByActions))
 			}
 			if _, err := runIdempotentSSHCombinedOutput(ctx, target, pruneCommand, idempotentSSHRetryDelay); err != nil {
@@ -2452,6 +2481,7 @@ retrySync:
 			Fingerprint:        fingerprint,
 			Token:              finalizeToken,
 			Coherence:          coherence,
+			CoherenceOmissions: coherenceOmissions,
 		})
 		if fallback {
 			usePlainManifestForOrigin(reason)

@@ -316,7 +316,7 @@ jobs:
         run: go test ./internal/cli/ -run '^(TestPythonPreflightToolValidationAndTargetFiltering|TestPythonPreflightWindowsProbeUsesLiteralExecutableAndMissingContract|TestCMakePreflightNativeWindowsPresentAndMissing|TestMacOSPreflightSelection|TestPreflightCatalogMatchesRegistry)$' -count=1 -v
 
       - name: Test Git workspace coherence
-        run: go test ./internal/cli/ -run '^(TestWindowsGitRootIdentityAcceptsShortAliasAndRejectsDistinctRoot|TestWindowsGitCoherenceRollbackRestoresIndexAfterSymbolicHeadFailure|TestWindowsGitSeedReplacesUnusableExactRootsAfterVerifiedClone|TestWindowsGitCoherenceSupportsDetachedSparseSplitAndLinkedIndexes|TestGitSeedFailurePhaseAndPreservation|TestGitSeedDiagnosticLabelsAndPrivacy|TestWorkspaceOwnerWindowsProtocolBehavior)$' -count=1 -v
+        run: go test ./internal/cli/ -run '^(TestWindowsGitRootIdentityAcceptsShortAliasAndRejectsDistinctRoot|TestWindowsGitCoherenceRollbackRestoresIndexAfterSymbolicHeadFailure|TestWindowsGitSeedPreservesUnusableExactRootsAfterVerifiedClone|TestWindowsGitSeedPreservesRawWorkspaceMetadataOwnership|TestWindowsOriginSeedRejectsRawMetadataJunction|TestWindowsGitCoherenceSupportsDetachedSparseSplitAndLinkedIndexes|TestGitSeedFailurePhaseAndPreservation|TestGitSeedDiagnosticLabelsAndPrivacy|TestWorkspaceOwnerWindowsProtocolBehavior)$' -count=1 -v
 
       - name: Test Git overlay snapshot capabilities
         run: go test ./internal/cli/ -run '^(TestOpenGitOverlaySnapshotParentRejectsFilesAndReparsePoints|TestOpenGitOverlaySnapshotParentSupportsMetadataRestoration|TestGitOverlaySnapshotCleanupThawsReadOnlyFiles|TestGitOverlaySnapshotCopiesThroughNestedReadOnlyParents|TestGitOverlaySnapshotCleanupRejectsRootReplacementAndRetriesOriginal)$' -count=1 -v

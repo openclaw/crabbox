@@ -754,6 +754,36 @@ func gitTargetRequiresOverlayOnly(root, target string) (bool, error) {
 	return false, nil
 }
 
+// gitTargetExcludedPaths records only paths intentionally outside the file-sync
+// scope for the exact tree which an origin seed will install.
+func gitTargetExcludedPaths(root, target string, excludes SyncExcludeRules) ([]string, error) {
+	cmd := exec.Command("git", "ls-tree", "-r", "-z", "--full-tree", target)
+	cmd.Dir = root
+	cmd.Env = repositoryGitEnvironment()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list target tree: %w", err)
+	}
+	paths := make([]string, 0)
+	for _, entry := range bytes.Split(out, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		metadata, name, ok := bytes.Cut(entry, []byte{'\t'})
+		fields := bytes.Fields(metadata)
+		if !ok || len(fields) != 3 {
+			return nil, fmt.Errorf("parse target tree")
+		}
+		rel, mode := filepath.ToSlash(string(name)), string(fields[0])
+		if mode == "160000" || !safeRepoRel(rel) || !pathExcludedByRules(rel, excludes, gitModeIsRegular(mode)) {
+			continue
+		}
+		paths = append(paths, rel)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
 func warnCredentialBearingGitSeed(w io.Writer) {
 	fmt.Fprintln(w, "warning: git seed disabled because origin URL contains embedded credentials; continuing with file sync without forwarding the remote URL")
 }

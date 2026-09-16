@@ -979,6 +979,8 @@ rm -f "$child"`
   exec /bin/sh -c "$1"' owner-command "$owner_command"` + inputRedirect + `
 fi
 `
+	// Pass the payload once as a positional argument. Quoting it inside the
+	// registrar again can exceed the Windows SSH command limit.
 	registrar := diagnostic + `set -u
 trap '' HUP
 trap 'rm -rf "$run_dir" 2>/dev/null' 0
@@ -993,7 +995,7 @@ run_owner_gate ` + shellQuote(installBody) + ` || setup_failed registration "$?"
 printf '%s\n%s\n' "$child_pid" "$child_identity" >&3 || setup_failed handoff
 exec 3>&-
 umask "$command_umask"
-` + started + `owner_command=` + shellQuote(remote) + `
+` + started + `owner_command=$1
 ` + macExec + `exec sh -c "$owner_command"` + inputRedirect + `
 `
 	return diagnostic + `set -u
@@ -1010,10 +1012,11 @@ owner_gate_function=` + shellQuote(gateFunction) + `
 eval "$owner_gate_function"
 mkdir -m 700 "$run_dir" 2>/dev/null || setup_failed staging
 ` + inputSetup + `export state child gate token command_umask run_dir owner_gate_function
+owner_command=` + shellQuote(remote) + `
 exec 4>&1
 trap : INT QUIT
 set +e
-identity=$(exec /bin/sh -c ` + shellQuote(registrar) + ` 3>&1 1>&4 4>&-)
+identity=$(exec /bin/sh -c ` + shellQuote(registrar) + ` owner-command "$owner_command" 3>&1 1>&4 4>&-)
 code=$?
 trap - INT QUIT
 exec 4>&-
