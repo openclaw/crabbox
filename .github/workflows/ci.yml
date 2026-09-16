@@ -7,6 +7,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  # Unique non-PR groups also preserve pending main and manual runs.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
