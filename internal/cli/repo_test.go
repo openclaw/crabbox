@@ -2,14 +2,251 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
+	"hash"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestSyncFingerprintPathsPreservesContentEncoding(t *testing.T) {
+	root := t.TempDir()
+	const content = "ordinary fingerprint content\n"
+	path := filepath.Join(root, "source.txt")
+	writeFile(t, path, content)
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.New()
+	fmt.Fprintf(want, "path=source.txt\nmode=%s size=%d\n", info.Mode().String(), info.Size())
+	want.Write([]byte(content))
+	want.Write([]byte{0})
+	got := sha256.New()
+	if err := syncFingerprintPaths(context.Background(), got, root, []string{"source.txt"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Sum(nil), want.Sum(nil)) {
+		t.Fatal("stable fingerprint encoding changed")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := syncFingerprintPaths(ctx, sha256.New(), root, []string{"source.txt"}, true); !errors.Is(err, context.Canceled) {
+		t.Fatalf("fingerprint ignored cancellation: %v", err)
+	}
+}
+
+func TestSyncFingerprintPathsCancellationDuringContent(t *testing.T) {
+	root := t.TempDir()
+	content := strings.Repeat("x", 256*1024)
+	writeFile(t, filepath.Join(root, "source.txt"), content)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h := &cancelSourceFingerprintHash{Hash: sha256.New(), cancel: cancel}
+	err := syncFingerprintPaths(ctx, h, root, []string{"source.txt"}, true)
+	if !errors.Is(err, context.Canceled) || h.chunks != 1 || h.bytes <= 0 || h.bytes >= len(content) {
+		t.Fatalf("canceled=%t payload_chunks=%d payload_bytes=%d error=%v", errors.Is(err, context.Canceled), h.chunks, h.bytes, err)
+	}
+	t.Logf("canceled=true; payload_chunks=%d; payload_bytes=%d; total_bytes=%d", h.chunks, h.bytes, len(content))
+}
+
+type cancelSourceFingerprintHash struct {
+	hash.Hash
+	cancel        func()
+	chunks, bytes int
+}
+
+func (h *cancelSourceFingerprintHash) Write(data []byte) (int, error) {
+	n, err := h.Hash.Write(data)
+	if len(data) > 1024 && data[0] == 'x' {
+		h.chunks++
+		h.bytes += n
+		h.cancel()
+	}
+	return n, err
+}
+
+func TestManagedStateSyncExclusionIsLiteralAndProtected(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init")
+	runGit(t, root, "config", "user.email", "test@example.com")
+	runGit(t, root, "config", "user.name", "Test")
+	base := "state [cache]"
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, base))
+	managed := base + "/crabbox/marker.txt"
+	deleted := base + "/crabbox/old-marker.txt"
+	for _, path := range []string{managed, deleted, base + "/source.txt", base + "/old-source.txt", "source.txt"} {
+		writeFile(t, filepath.Join(root, filepath.FromSlash(path)), "benign marker\n")
+	}
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "markers")
+	writeFile(t, filepath.Join(root, filepath.FromSlash(managed)), "updated marker\n")
+	writeFile(t, filepath.Join(root, base, "crabbox", "new-marker.txt"), "new marker\n")
+	writeFile(t, filepath.Join(root, base, "source.txt"), "updated source marker\n")
+	if err := os.Remove(filepath.Join(root, filepath.FromSlash(deleted))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, base, "old-source.txt")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig()
+	cfg.Sync.Excludes = []string{"!**"}
+	writeFile(t, filepath.Join(root, ".crabboxignore"), "!**\n")
+	rules, err := syncExcludes(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	includes := []string{base, "source.txt"}
+	if !pathIncluded(managed, includes) {
+		t.Fatal("include control must admit the entire managed subtree before protection")
+	}
+	manifest, err := syncManifestFilteredRules(root, rules, includes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, paths := range [][]string{manifest.Files, manifest.Changed, manifest.Deleted, manifest.OverlayFiles} {
+		for _, path := range paths {
+			if strings.HasPrefix(path, base+"/crabbox/") {
+				t.Fatalf("managed marker remained in manifest: %q", path)
+			}
+		}
+	}
+	for _, wanted := range []string{base + "/source.txt", "source.txt"} {
+		if !slices.Contains(manifest.Files, wanted) {
+			t.Fatalf("ordinary source omitted: %q", wanted)
+		}
+	}
+	if !slices.Contains(manifest.Changed, base+"/source.txt") || !slices.Contains(manifest.OverlayFiles, base+"/source.txt") || !slices.Contains(manifest.Deleted, base+"/old-source.txt") {
+		t.Fatal("ordinary changed/overlay/deleted controls were lost")
+	}
+	if newWatchPathScope(rules, nil).traverseExcludedDir(base + "/crabbox") {
+		t.Fatal("negation reopened protected watch subtree")
+	}
+	cfg.Sync.GitSeed = true
+	cfg.Sync.BaseRef = "main"
+	head := gitOutput(root, "rev-parse", "HEAD")
+	if head == "" {
+		t.Fatal("fixture HEAD unavailable")
+	}
+	runGit(t, root, "remote", "add", "origin", "https://example.invalid/repository")
+	runGit(t, root, "update-ref", "refs/remotes/origin/main", head)
+	repo := Repo{Root: root, Head: head, BaseRef: "main", RemoteURL: "https://example.invalid/repository"}
+	for _, state := range []string{"", t.TempDir()} {
+		t.Setenv("XDG_STATE_HOME", state)
+		plan, _ := syncGitCoherencePlan(cfg, repo)
+		if !plan.seedEnabled() || !plan.enabled() {
+			t.Fatal("ordinary metadata-only seed control is not eligible")
+		}
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, base))
+	plan, _ := syncGitCoherencePlan(cfg, repo)
+	if plan.seedEnabled() || plan.enabled() {
+		t.Fatal("nested state retained whole-tree seeding")
+	}
+}
+
+func TestManagedStateTransferScopeBoundaries(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	for _, scope := range []string{root, filepath.Join(root, "state", "crabbox"), filepath.Join(root, "state", "crabbox", "marker.txt")} {
+		if err := ValidateManagedStateTransferScope("fixture native scope", scope); err == nil {
+			t.Fatalf("overlap accepted: %q", scope)
+		}
+	}
+	if err := ValidateManagedStateTransferScope("fixture native scope", filepath.Join(root, "state", "source")); err != nil {
+		t.Fatal(err)
+	}
+	volumeRoot := filepath.VolumeName(root) + string(filepath.Separator)
+	if !managedPathContains(volumeRoot, root) {
+		t.Fatal("filesystem root containment failed")
+	}
+	if _, err := managedStateSyncSubtree(filepath.Join(root, "state", "crabbox", "repo")); err == nil {
+		t.Fatal("source inside managed namespace accepted")
+	}
+	t.Setenv("XDG_STATE_HOME", "")
+	if err := ValidateManagedStateTransferScope("fixture", "relative-default-scope"); err != nil {
+		t.Fatal("unset default changed")
+	}
+}
+
+func TestManagedStateSyncDirectoryReplacedByFile(t *testing.T) {
+	for _, location := range []string{"unset", "outside", "nested"} {
+		t.Run(location, func(t *testing.T) {
+			root := t.TempDir()
+			state := ""
+			if location == "outside" {
+				state = t.TempDir()
+			} else if location == "nested" {
+				state = filepath.Join(root, "state")
+			}
+			t.Setenv("XDG_STATE_HOME", state)
+			runGit(t, root, "init")
+			runGit(t, root, "config", "user.email", "test@example.com")
+			runGit(t, root, "config", "user.name", "Test")
+			old := "src/replaced/deep/old.txt"
+			writeFile(t, filepath.Join(root, filepath.FromSlash(old)), "old source\n")
+			runGit(t, root, "add", ".")
+			runGit(t, root, "commit", "-m", "original directory")
+			for _, rel := range []string{old, "src/replaced/deep", "src/replaced"} {
+				if err := os.Remove(filepath.Join(root, filepath.FromSlash(rel))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeFile(t, filepath.Join(root, "src", "replaced"), "replacement file\n")
+			rules, err := syncExcludes(root, baseConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := syncManifestFilteredRules(root, rules, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(manifest.Files, []string{"src/replaced"}) || !slices.Equal(manifest.Deleted, []string{old}) {
+				t.Fatalf("replacement manifest files=%q deleted=%q", manifest.Files, manifest.Deleted)
+			}
+		})
+	}
+}
+
+func TestManagedStateTransferCaseSpelling(t *testing.T) {
+	parent := t.TempDir()
+	original := filepath.Join(parent, "MixedCase")
+	if err := os.Mkdir(original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := NormalizeManagedStateTransferRoot(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variant := filepath.Join(parent, "mixedcase")
+	got, err := NormalizeManagedStateTransferRoot(variant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalInfo, err := os.Stat(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	variantInfo, statErr := os.Stat(variant)
+	if statErr == nil {
+		if !os.SameFile(originalInfo, variantInfo) || got != canonical {
+			t.Fatal("case alias did not resolve to its actual directory")
+		}
+	} else if os.IsNotExist(statErr) {
+		if got != filepath.Join(filepath.Dir(canonical), "mixedcase") {
+			t.Fatal("case-sensitive missing sibling was conflated")
+		}
+	} else {
+		t.Fatal(statErr)
+	}
+}
 
 func TestRepositoryGitEnvironmentExcludesSecretsAndPreservesSafeGitRouting(t *testing.T) {
 	t.Setenv("SCREEN_SHARING_PASSWORD", "operator-secret")
@@ -539,6 +776,53 @@ func TestGitCheckoutHasHiddenOmissionsThroughSymlinkAncestor(t *testing.T) {
 	}
 	if omitted, err := GitCheckoutHasHiddenOmissions(dir); err != nil || !omitted {
 		t.Fatalf("symlink-shadowed omission=%v err=%v", omitted, err)
+	}
+}
+
+func setupOrdinaryHiddenSyncRepo(t *testing.T, skipWorktree bool) string {
+	t.Helper()
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	isolateRunTestUserDirs(t, t.TempDir())
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	writeFile(t, filepath.Join(dir, "visible", "keep.txt"), "keep\n")
+	writeFile(t, filepath.Join(dir, "hidden", "drop.txt"), "drop\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-m", "init")
+	if skipWorktree {
+		runGit(t, dir, "update-index", "--skip-worktree", "hidden/drop.txt")
+		if err := os.Remove(filepath.Join(dir, "hidden", "drop.txt")); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		runGit(t, dir, "sparse-checkout", "set", "visible")
+	}
+	return dir
+}
+
+func assertOrdinaryHiddenSyncGuidance(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected hidden in-scope path error")
+	}
+	for _, text := range []string{`tracked path "hidden/drop.txt"`, "materialize", "sync.include", "sync.exclude", ".crabboxignore"} {
+		if !strings.Contains(err.Error(), text) {
+			t.Errorf("diagnostic missing %q: %v", text, err)
+		}
+	}
+}
+
+func TestSyncManifestOrdinaryHiddenPathRecovery(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		t.Run(fmt.Sprintf("skip=%t", skip), func(t *testing.T) {
+			dir := setupOrdinaryHiddenSyncRepo(t, skip)
+			_, err := syncManifestFiltered(dir, nil, nil)
+			assertOrdinaryHiddenSyncGuidance(t, err)
+		})
 	}
 }
 
@@ -1164,11 +1448,11 @@ func TestSyncFingerprintIncludesExcludeRuleProvenance(t *testing.T) {
 	plan := gitCoherencePlan{RemoteURL: "https://example.test/repo.git", Target: "target", Tree: "tree", Branch: "main"}
 	builtIn := newSyncExcludeRules([]string{"target"}, syncExcludeBuiltIn)
 	configured := newSyncExcludeRules([]string{"target"}, syncExcludeConfigured)
-	a, err := syncFingerprintForManifest(Repo{Root: t.TempDir()}, baseConfig(), SyncManifest{}, builtIn, plan)
+	a, err := syncFingerprintForManifest(context.Background(), Repo{Root: t.TempDir()}, baseConfig(), SyncManifest{}, builtIn, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := syncFingerprintForManifest(Repo{Root: t.TempDir()}, baseConfig(), SyncManifest{}, configured, plan)
+	b, err := syncFingerprintForManifest(context.Background(), Repo{Root: t.TempDir()}, baseConfig(), SyncManifest{}, configured, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1205,7 +1489,7 @@ func TestSyncFingerprintHashesChangedSymlinkIdentity(t *testing.T) {
 				plan := gitCoherencePlan{RemoteURL: "https://example.test/repo.git", Target: "target", Tree: "tree", Branch: "main"}
 				fingerprint := func() string {
 					t.Helper()
-					value, err := syncFingerprintForManifest(Repo{Root: root}, cfg, manifest, SyncExcludeRules{}, plan)
+					value, err := syncFingerprintForManifest(context.Background(), Repo{Root: root}, cfg, manifest, SyncExcludeRules{}, plan)
 					if err != nil {
 						t.Fatalf("fingerprint changed %s symlink: %v", targetKind, err)
 					}
@@ -1632,7 +1916,7 @@ func TestSyncManifestDoesNotDeleteStagedGitlink(t *testing.T) {
 	}
 }
 
-func TestRemoteGitSeedCandidateRequiresRemoteTrackingRef(t *testing.T) {
+func TestGitCoherenceRequiresRemoteTrackingRef(t *testing.T) {
 	dir := t.TempDir()
 	runGit(t, dir, "init")
 	runGit(t, dir, "config", "user.email", "test@example.com")
@@ -1644,11 +1928,11 @@ func TestRemoteGitSeedCandidateRequiresRemoteTrackingRef(t *testing.T) {
 
 	repo := Repo{Root: dir, RemoteURL: "https://github.com/openclaw/crabbox.git", Head: head}
 	if plan, _ := syncGitCoherencePlan(baseConfig(), repo); plan.enabled() {
-		t.Fatal("unpublished head should not be a seed candidate")
+		t.Fatal("head without a containing branch should not enable coherence")
 	}
 	runGit(t, dir, "update-ref", "refs/remotes/origin/main", head)
 	if plan, _ := syncGitCoherencePlan(baseConfig(), repo); !plan.enabled() {
-		t.Fatal("head in a remote-tracking ref should be a seed candidate")
+		t.Fatal("head in a remote-tracking ref should enable coherence")
 	}
 }
 
@@ -1679,7 +1963,7 @@ func TestSyncGitCoherencePlanSelectsEligibleOriginBranch(t *testing.T) {
 		if !plan.seedEnabled() || plan.enabled() {
 			t.Fatalf("plan should seed without coherence: %#v", plan)
 		}
-		fingerprint, _ := syncFingerprintForManifest(Repo{}, baseConfig(), SyncManifest{}, SyncExcludeRules{}, plan)
+		fingerprint, _ := syncFingerprintForManifest(context.Background(), Repo{}, baseConfig(), SyncManifest{}, SyncExcludeRules{}, plan)
 		if fingerprint != "" {
 			t.Fatalf("ineligible coherence published fingerprint %q", fingerprint)
 		}
@@ -1881,5 +2165,186 @@ func writeFile(t *testing.T, path, value string) {
 	}
 	if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDirectorySyncManifest(t *testing.T) {
+	clearConfigEnv(t)
+	root, scratch := t.TempDir(), t.TempDir()
+	t.Setenv("TMPDIR", scratch)
+	files := map[string]string{
+		".gitignore": "*.tmp\n!keep.tmp\n",
+		"README.txt": "readme\n", "src/a.txt": "a\n", "src/drop.tmp": "drop\n",
+		"src/nested/.gitignore": "local.txt\n", "src/nested/local.txt": "local\n",
+		"src/nested/keep.tmp": "keep\n", "src/nested/b.txt": "b\n",
+		".crabboxignore": "src/a.txt\n!src/a.txt\nsrc/nested/b.txt\n",
+		"outside.txt":    "outside\n",
+	}
+	before := map[string]os.FileInfo{}
+	for name, data := range files {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		writeFile(t, path, data)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[name] = info
+	}
+	// Ambient Git excludes must not participate in a directory-source manifest.
+	ambient := filepath.Join(t.TempDir(), "global-ignore")
+	writeFile(t, ambient, "README.txt\n")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.excludesFile")
+	t.Setenv("GIT_CONFIG_VALUE_0", ambient)
+	cfg := baseConfig()
+	cfg.Sync.Source = "directory"
+	cfg.Sync.Includes = []string{"README.txt", "src"}
+	rules, err := syncExcludes(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"README.txt", "src/a.txt", "src/nested/.gitignore", "src/nested/keep.tmp"}
+	for i := 0; i < 2; i++ {
+		got, err := syncManifestForSource(context.Background(), Repo{Root: root}, cfg, rules)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got.Files, want) {
+			t.Fatalf("files=%q want=%q", got.Files, want)
+		}
+		if len(got.Changed) != 0 || len(got.Deleted) != 0 || len(got.OverlayFiles) != 0 {
+			t.Fatalf("manufactured Git delta: %+v", got)
+		}
+		count, size, _, _ := syncGuardrailScope(got)
+		if count != len(want) || size != got.Bytes {
+			t.Fatalf("guardrail=%d/%d manifest=%+v", count, size, got)
+		}
+	}
+	for name, data := range files {
+		path := filepath.Join(root, filepath.FromSlash(name))
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != data || info.Mode() != before[name].Mode() || !info.ModTime().Equal(before[name].ModTime()) {
+			t.Fatalf("source changed: %s", name)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("source metadata: %v", err)
+	}
+	entries, err := os.ReadDir(scratch)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("temporary metadata retained: %v %v", entries, err)
+	}
+	cfg.Sync.Includes = []string{"absent.txt"}
+	got, err := syncManifestForSource(context.Background(), Repo{Root: root}, cfg, rules)
+	if err != nil || len(got.Files) != 0 {
+		t.Fatalf("empty admitted manifest=%+v err=%v", got, err)
+	}
+	cfg.Sync.Includes = []string{" ", ""}
+	if _, err := syncManifestForSource(context.Background(), Repo{Root: root}, cfg, rules); err == nil {
+		t.Fatal("empty include accepted")
+	}
+}
+
+func TestDirectorySyncNestedRepositoryScope(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	t.Setenv("TMPDIR", t.TempDir())
+	writeFile(t, filepath.Join(root, "src/plain.txt"), "plain\n")
+	nested := filepath.Join(root, "src/nested")
+	writeFile(t, filepath.Join(nested, "file.txt"), "nested\n")
+	runGit(t, nested, "init")
+	for _, tc := range []struct {
+		name               string
+		includes, excludes []string
+		reject             bool
+	}{
+		{"literal ancestor", []string{"src"}, nil, true},
+		{"literal repository", []string{"src/nested"}, nil, true},
+		{"literal child", []string{"src/nested/file.txt"}, nil, true},
+		{"child glob", []string{"src/nested/*.txt"}, nil, true},
+		{"component glob", []string{"src/*/*.txt"}, nil, true},
+		{"nonrecursive glob", []string{"src/*"}, nil, false},
+		{"identical glob excluded", []string{"src/nested/*.txt"}, []string{"src/nested/*.txt"}, false},
+		{"normalized identical glob", []string{"/src/nested/*.txt/"}, []string{"src/nested/*.txt"}, false},
+		{"identical glob reopened", []string{"src/nested/*.txt"}, []string{"src/nested/*.txt", "!src/nested/file.txt"}, true},
+		{"identical glob final exclusion", []string{"src/nested/*.txt"}, []string{"src/nested/*.txt", "!src/nested/file.txt", "src/nested/*.txt"}, false},
+		{"overlapping wildcard unresolved", []string{"src/nested/file?.txt"}, []string{"src/nested/*.txt"}, true},
+
+		{"outside include", []string{"src/plain.txt"}, nil, false},
+		{"excluded", []string{"src"}, []string{"src/nested"}, false},
+		{"excluded literal grant", []string{"src/nested/file.txt"}, []string{"src/nested/file.txt"}, false},
+		{"excluded literal prefix grant", []string{"src/nested/subdir"}, []string{"src/nested/subdir"}, false},
+		{"literal grant reopened", []string{"src/nested/subdir"}, []string{"src/nested/subdir", "!src/nested/subdir/file.txt"}, true},
+		{"later reinclude", []string{"src"}, []string{"src/nested", "!src/nested/file.txt"}, true},
+		{"final subtree exclusion", []string{"src"}, []string{"src/nested", "!src/nested/file.txt", "src/nested"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Sync.Source = "directory"
+			cfg.Sync.Includes = tc.includes
+			cfg.Sync.Excludes = tc.excludes
+			rules, err := syncExcludes(root, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = syncManifestForSource(context.Background(), Repo{Root: root}, cfg, rules)
+			if tc.reject {
+				if err == nil || !strings.Contains(err.Error(), "nested repository") {
+					t.Fatalf("error=%v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestDirectorySyncEffectiveRoot(t *testing.T) {
+	clearConfigEnv(t)
+	outer := t.TempDir()
+	runGit(t, outer, "init")
+	root := filepath.Join(outer, "inner")
+	writeFile(t, filepath.Join(root, "README.txt"), "inner\n")
+	t.Chdir(root)
+	cfg := baseConfig()
+	cfg.Sync.Source = "directory"
+	cfg.Sync.Includes = []string{"README.txt"}
+	repo, err := findSyncRepo(cfg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repo.Root != canonicalRepositoryPath(root) || repo.Head != "" || repo.RemoteURL != "" {
+		t.Fatalf("repo=%+v", repo)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".jj"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findSyncRepo(cfg, true); err == nil || !strings.Contains(err.Error(), "native Jujutsu") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestDirectorySyncMetadataCleanupOnGitFailure(t *testing.T) {
+	clearConfigEnv(t)
+	root, scratch := t.TempDir(), t.TempDir()
+	t.Setenv("TMPDIR", scratch)
+	t.Setenv("PATH", t.TempDir())
+	_, err := directorySyncFileList(context.Background(), root)
+	if err == nil || !strings.Contains(err.Error(), "installed Git required") {
+		t.Fatalf("error=%v", err)
+	}
+	entries, readErr := os.ReadDir(scratch)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("temporary metadata=%v error=%v", entries, readErr)
+	}
+	if _, err := os.Lstat(filepath.Join(root, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("source Git metadata: %v", err)
 	}
 }

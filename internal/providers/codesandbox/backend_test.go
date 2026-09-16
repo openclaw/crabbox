@@ -16,6 +16,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestWarmupCreatesSandboxClaim(t *testing.T) {
@@ -23,8 +24,8 @@ func TestWarmupCreatesSandboxClaim(t *testing.T) {
 	fake := newFakeCodeSandboxAPI()
 	backend, stdout, stderr := newFakeBackend(t, fake)
 
-	if err := backend.Warmup(context.Background(), WarmupRequest{
-		Repo:          Repo{Name: "my-app", Root: "/repo"},
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{
+		Repo:          core.Repo{Name: "my-app", Root: "/repo"},
 		RequestedSlug: "codesandbox-blue",
 		TimingJSON:    true,
 	}); err != nil {
@@ -37,7 +38,7 @@ func TestWarmupCreatesSandboxClaim(t *testing.T) {
 		t.Fatalf("create tags=%v missing ownership tags", got)
 	}
 	leaseID := leasePrefix + fake.sandboxID
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatalf("read claim: %v", err)
 	}
@@ -75,12 +76,12 @@ func TestStopRejectsOwnershipMismatchBeforeDelete(t *testing.T) {
 	fake := newFakeCodeSandboxAPI()
 	backend, _, _ := newFakeBackend(t, fake)
 	leaseID := leasePrefix + fake.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, codeSandboxClaimScopePrefix+"local", "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, codeSandboxClaimScopePrefix+"local", "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	fake.sandbox.Tags = []string{codeSandboxClaimTag, codeSandboxScopeTag(codeSandboxClaimScopePrefix + "remote")}
 
-	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: leaseID})
 	if err == nil || !strings.Contains(err.Error(), "ownership tag") {
 		t.Fatalf("Stop err=%v, want ownership rejection", err)
 	}
@@ -94,12 +95,12 @@ func TestStopRejectsMissingOwnershipTagBeforeDelete(t *testing.T) {
 	fake := newFakeCodeSandboxAPI()
 	backend, _, _ := newFakeBackend(t, fake)
 	leaseID := leasePrefix + fake.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	fake.sandbox.Tags = []string{codeSandboxClaimTag}
 
-	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: leaseID})
 	if err == nil || !strings.Contains(err.Error(), "missing its Crabbox ownership tag") {
 		t.Fatalf("Stop err=%v, want missing ownership tag rejection", err)
 	}
@@ -114,17 +115,17 @@ func TestCleanupDeletesDueOwnedClaims(t *testing.T) {
 	backend, stdout, _ := newFakeBackend(t, fake)
 	backend.rt.Clock = fixedClock{t: time.Now().UTC().Add(2 * time.Second)}
 	leaseID := leasePrefix + fake.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "old", providerName, fake.scope, "", "/repo", time.Second, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "old", providerName, fake.scope, "", "/repo", time.Second, false); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatalf("Cleanup err=%v", err)
 	}
 	if !reflect.DeepEqual(fake.deleted, []string{fake.sandboxID}) {
 		t.Fatalf("deleted=%v, want sandbox delete", fake.deleted)
 	}
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
 		t.Fatalf("claim after cleanup=%#v err=%v, want removed", claim, err)
 	}
 	if got := stdout.String(); !strings.Contains(got, "delete sandbox="+fake.sandboxID+" lease="+leaseID+" reason=idle timeout") ||
@@ -139,17 +140,17 @@ func TestCleanupDryRunKeepsDueOwnedClaims(t *testing.T) {
 	backend, stdout, _ := newFakeBackend(t, fake)
 	backend.rt.Clock = fixedClock{t: time.Now().UTC().Add(2 * time.Second)}
 	leaseID := leasePrefix + fake.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "old", providerName, fake.scope, "", "/repo", time.Second, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "old", providerName, fake.scope, "", "/repo", time.Second, false); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := backend.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatalf("Cleanup dry-run err=%v", err)
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted=%v, want dry-run to skip delete", fake.deleted)
 	}
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
 		t.Fatalf("claim after dry-run=%#v err=%v, want retained", claim, err)
 	}
 	if got := stdout.String(); !strings.Contains(got, "would delete sandbox="+fake.sandboxID+" lease="+leaseID+" reason=idle timeout") {
@@ -162,17 +163,17 @@ func TestCleanupSkipsClaimsBeforeIdleDeadline(t *testing.T) {
 	fake := newFakeCodeSandboxAPI()
 	backend, _, stderr := newFakeBackend(t, fake)
 	leaseID := leasePrefix + fake.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "fresh", providerName, fake.scope, "", "/repo", time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "fresh", providerName, fake.scope, "", "/repo", time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatalf("Cleanup err=%v", err)
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted=%v, want not-due claim retained", fake.deleted)
 	}
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
 		t.Fatalf("claim after cleanup=%#v err=%v, want retained", claim, err)
 	}
 	if got := stderr.String(); !strings.Contains(got, "skip sandbox="+fake.sandboxID+" lease="+leaseID+" reason=idle timeout not reached") {
@@ -185,14 +186,14 @@ func TestPauseResumeUseSDKLifecycleAndKeepClaim(t *testing.T) {
 	fake := newFakeCodeSandboxAPI()
 	backend, _, stderr := newFakeBackend(t, fake)
 	leaseID := leasePrefix + fake.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "nap", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "nap", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := backend.Pause(context.Background(), PauseRequest{ID: "nap"}); err != nil {
+	if err := backend.Pause(context.Background(), core.PauseRequest{ID: "nap"}); err != nil {
 		t.Fatalf("Pause err=%v", err)
 	}
-	if err := backend.Resume(context.Background(), ResumeRequest{ID: leaseID}); err != nil {
+	if err := backend.Resume(context.Background(), core.ResumeRequest{ID: leaseID}); err != nil {
 		t.Fatalf("Resume err=%v", err)
 	}
 	if !reflect.DeepEqual(fake.hibernated, []string{fake.sandboxID}) || !reflect.DeepEqual(fake.resumed, []string{fake.sandboxID}) {
@@ -211,12 +212,12 @@ func TestPauseRejectsOwnershipMismatchBeforeHibernate(t *testing.T) {
 	fake := newFakeCodeSandboxAPI()
 	backend, _, _ := newFakeBackend(t, fake)
 	leaseID := leasePrefix + fake.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, codeSandboxClaimScopePrefix+"local", "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "mine", providerName, codeSandboxClaimScopePrefix+"local", "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	fake.sandbox.Tags = []string{codeSandboxClaimTag, codeSandboxScopeTag(codeSandboxClaimScopePrefix + "remote")}
 
-	err := backend.Pause(context.Background(), PauseRequest{ID: leaseID})
+	err := backend.Pause(context.Background(), core.PauseRequest{ID: leaseID})
 	if err == nil || !strings.Contains(err.Error(), "ownership tag") {
 		t.Fatalf("Pause err=%v, want ownership rejection", err)
 	}
@@ -231,18 +232,18 @@ func TestPortsListPublishAndRejectUnsupportedUnpublish(t *testing.T) {
 	fake.ports = []PortInfo{{Port: 3000, Host: "https://sb-test01-3000.csb.app"}}
 	backend, _, _ := newFakeBackend(t, fake)
 	leaseID := leasePrefix + fake.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "web", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "web", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 
-	out, err := backend.Ports(context.Background(), PortsRequest{ID: "web"})
+	out, err := backend.Ports(context.Background(), core.PortsRequest{ID: "web"})
 	if err != nil {
 		t.Fatalf("Ports list err=%v", err)
 	}
 	if out != "3000 https://sb-test01-3000.csb.app" {
 		t.Fatalf("list output=%q", out)
 	}
-	out, err = backend.Ports(context.Background(), PortsRequest{ID: leaseID, JSON: true, Publish: []string{"5173"}})
+	out, err = backend.Ports(context.Background(), core.PortsRequest{ID: leaseID, JSON: true, Publish: []string{"5173"}})
 	if err != nil {
 		t.Fatalf("Ports publish err=%v", err)
 	}
@@ -257,11 +258,11 @@ func TestPortsListPublishAndRejectUnsupportedUnpublish(t *testing.T) {
 		t.Fatalf("waited ports=%v", fake.waitedPorts)
 	}
 
-	_, err = backend.Ports(context.Background(), PortsRequest{ID: "web", Publish: []string{"127.0.0.1:41000:3000"}})
+	_, err = backend.Ports(context.Background(), core.PortsRequest{ID: "web", Publish: []string{"127.0.0.1:41000:3000"}})
 	if err == nil || !strings.Contains(err.Error(), "only support a sandbox port number") {
 		t.Fatalf("complex port spec err=%v", err)
 	}
-	_, err = backend.Ports(context.Background(), PortsRequest{ID: "web", Unpublish: []string{"3000"}})
+	_, err = backend.Ports(context.Background(), core.PortsRequest{ID: "web", Unpublish: []string{"3000"}})
 	if err == nil || !strings.Contains(err.Error(), "does not support ports --unpublish") {
 		t.Fatalf("unpublish err=%v", err)
 	}
@@ -272,21 +273,21 @@ func TestListAndStatusUseOwnedClaims(t *testing.T) {
 	fake := newFakeCodeSandboxAPI()
 	backend, _, _ := newFakeBackend(t, fake)
 	leaseID := leasePrefix + fake.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "listed", providerName, fake.scope, "pond-a", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "listed", providerName, fake.scope, "pond-a", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProviderScopePond("csbx_other", "other", "other-provider", fake.scope, "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond("csbx_other", "other", "other-provider", fake.scope, "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 
-	leases, err := backend.List(context.Background(), ListRequest{})
+	leases, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("List err=%v", err)
 	}
 	if len(leases) != 1 || leases[0].CloudID != fake.sandboxID || leases[0].Labels["slug"] != "listed" {
 		t.Fatalf("leases=%#v", leases)
 	}
-	status, err := backend.Status(context.Background(), StatusRequest{ID: "listed"})
+	status, err := backend.Status(context.Background(), core.StatusRequest{ID: "listed"})
 	if err != nil {
 		t.Fatalf("Status err=%v", err)
 	}
@@ -301,18 +302,18 @@ func TestListAndStatusDoNotTreatMissingStateAsReady(t *testing.T) {
 	fake.sandbox.State = ""
 	backend, _, _ := newFakeBackend(t, fake)
 	leaseID := leasePrefix + fake.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "unknown-state", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "unknown-state", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 
-	leases, err := backend.List(context.Background(), ListRequest{})
+	leases, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(leases) != 1 || leases[0].Status != "unknown" {
 		t.Fatalf("leases=%#v", leases)
 	}
-	status, err := backend.Status(context.Background(), StatusRequest{ID: "unknown-state"})
+	status, err := backend.Status(context.Background(), core.StatusRequest{ID: "unknown-state"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,8 +331,8 @@ func TestRunStreamsOutputAndCleansUpOneShot(t *testing.T) {
 	}
 	backend, stdout, stderr := newFakeBackend(t, fake)
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:       Repo{Name: "my-app", Root: "/repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Name: "my-app", Root: "/repo"},
 		NoSync:     true,
 		Command:    []string{"echo", "hello"},
 		Env:        map[string]string{"SECRET_TOKEN": "super-secret"},
@@ -369,8 +370,8 @@ func TestRunPropagatesExitAndKeepOnFailureRetainsSandbox(t *testing.T) {
 	}
 	backend, _, stderr := newFakeBackend(t, fake)
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:          Repo{Name: "my-app", Root: "/repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Name: "my-app", Root: "/repo"},
 		NoSync:        true,
 		Command:       []string{"false"},
 		KeepOnFailure: true,
@@ -379,7 +380,7 @@ func TestRunPropagatesExitAndKeepOnFailureRetainsSandbox(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected non-zero exit error")
 	}
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 || result.ExitCode != 7 {
 		t.Fatalf("err=%v result=%#v", err, result)
 	}
@@ -416,12 +417,12 @@ func TestRunByIDReturnsReusedSessionHandle(t *testing.T) {
 	}
 	backend, stdout, _ := newFakeBackend(t, fake)
 	leaseID := leasePrefix + fake.sandboxID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "reused", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "reused", providerName, fake.scope, "", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: "/repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Name: "my-app", Root: "/repo"},
 		ID:      "reused",
 		NoSync:  true,
 		Command: []string{"echo", "reused"},
@@ -491,8 +492,8 @@ func TestRunLifecycleFinalization(t *testing.T) {
 				}
 				return CommandResult{ExitCode: tc.code}, tc.commandErr
 			}
-			result, err := backend.Run(ctx, RunRequest{Repo: Repo{Root: t.TempDir()}, NoSync: true, SyncOnly: tc.syncOnly, Command: []string{"true"}, KeepOnFailure: tc.keepOnFailure, TimingJSON: true})
-			var exitErr ExitError
+			result, err := backend.Run(ctx, core.RunRequest{Repo: core.Repo{Root: t.TempDir()}, NoSync: true, SyncOnly: tc.syncOnly, Command: []string{"true"}, KeepOnFailure: tc.keepOnFailure, TimingJSON: true})
+			var exitErr core.ExitError
 			if !errors.As(err, &exitErr) || exitErr.Code != tc.wantCode || result.ExitCode != tc.wantCode || result.ErrorKind != tc.wantKind {
 				t.Errorf("result=%#v error=%v, want %d/%s", result, err, tc.wantCode, tc.wantKind)
 			}
@@ -539,8 +540,8 @@ func TestRunCancellationPropagates(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := backend.Run(ctx, RunRequest{
-		Repo:    Repo{Name: "my-app", Root: "/repo"},
+	_, err := backend.Run(ctx, core.RunRequest{
+		Repo:    core.Repo{Name: "my-app", Root: "/repo"},
 		NoSync:  true,
 		Command: []string{"sleep", "10"},
 	})
@@ -564,8 +565,8 @@ func TestRunSyncOnlyUploadsArchiveAndExtracts(t *testing.T) {
 	backend, stdout, _ := newFakeBackend(t, fake)
 	backend.cfg.CodeSandbox.Workdir = "/project/workspace/my-app"
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:           Repo{Name: "my-app", Root: repoRoot},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:           core.Repo{Name: "my-app", Root: repoRoot},
 		SyncOnly:       true,
 		ForceSyncLarge: true,
 	})
@@ -593,8 +594,8 @@ func TestRunSyncOnlyReplacesDefaultWorkspaceMountContents(t *testing.T) {
 	fake := newFakeCodeSandboxAPI()
 	backend, _, _ := newFakeBackend(t, fake)
 
-	if _, err := backend.Run(context.Background(), RunRequest{
-		Repo:           Repo{Name: "my-app", Root: repoRoot},
+	if _, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:           core.Repo{Name: "my-app", Root: repoRoot},
 		SyncOnly:       true,
 		ForceSyncLarge: true,
 	}); err != nil {
@@ -613,14 +614,14 @@ func newFakeBackend(t *testing.T, api *fakeCodeSandboxAPI) (*codeSandboxBackend,
 	t.Helper()
 	cfg := newTestConfig()
 	var stdout, stderr bytes.Buffer
-	restore := replaceClientFactory(func(Config, Runtime) (codeSandboxAPI, error) {
+	restore := replaceClientFactory(func(core.Config, core.Runtime) (codeSandboxAPI, error) {
 		return api, nil
 	})
 	t.Cleanup(restore)
 	return &codeSandboxBackend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt: Runtime{
+		rt: core.Runtime{
 			Stdout: &stdout,
 			Stderr: &stderr,
 		},
@@ -794,40 +795,25 @@ func initGitRepo(t *testing.T, dir string) {
 }
 
 func TestRunCommandIntentReachesNativeRequest(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		command []string
-		literal map[int]bool
-		shell   bool
-		want    []string
-	}{
-		{"ordinary", []string{"printf", "%s", "hello"}, nil, false, []string{"printf", "%s", "hello"}},
-		{"literal separator", []string{"printf", "%s", ";", "touch", "sentinel"}, map[int]bool{2: true}, false, []string{"printf", "%s", ";", "touch", "sentinel"}},
-		{"literal assignment executable", []string{"FOO=x", "argument"}, map[int]bool{0: true}, false, []string{"FOO=x", "argument"}},
-		{"literal singleton", []string{"literal command $(echo x)"}, map[int]bool{0: true}, false, []string{"literal command $(echo x)"}},
-		{"invalid assignment executable", []string{"bad-name=x", "argument"}, nil, false, []string{"bad-name=x", "argument"}},
-		{"mixed operators", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, map[int]bool{2: true}, false, []string{"bash", "-lc", "'printf' '%s' ';' && 'printf' '%s' 'done'"}},
-		{"inferred source", []string{"printf one && printf two"}, nil, false, []string{"bash", "-lc", "printf one && printf two"}},
-		{"explicit source", []string{"printf one; exit 7"}, nil, true, []string{"bash", "-lc", "printf one; exit 7"}},
-		{"leading assignment", []string{"GREETING=hello world", "printf", "%s", "$GREETING"}, nil, false, []string{"bash", "-lc", "GREETING='hello world' 'printf' '%s' '$GREETING'"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			fake := newFakeCodeSandboxAPI()
-			backend, _, _ := newFakeBackend(t, fake)
-			_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, NoSync: true, Command: tc.command, ShellMode: tc.shell, CommandLiteralArgs: tc.literal})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(fake.commands) != 2 {
-				t.Fatalf("commands=%#v", fake.commands)
-			}
-			got := fake.commands[1].Command
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("native command=%#v want %#v", got, tc.want)
-			}
+	testutil.VerifyNativeCommandIntent(t, "bash", false, func(t *testing.T, intent testutil.CommandIntent) []string {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		fake := newFakeCodeSandboxAPI()
+		backend, _, _ := newFakeBackend(t, fake)
+		_, err := backend.Run(t.Context(), core.RunRequest{
+			Repo:               core.Repo{Name: "my-app", Root: t.TempDir()},
+			NoSync:             true,
+			Command:            intent.Command,
+			ShellMode:          intent.ShellMode,
+			CommandLiteralArgs: intent.LiteralArgs,
 		})
-	}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(fake.commands) != 2 {
+			t.Fatalf("commands=%#v", fake.commands)
+		}
+		return fake.commands[1].Command
+	})
 }
 
 func TestRunRejectsEmptyCommandBeforeCreate(t *testing.T) {
@@ -835,7 +821,7 @@ func TestRunRejectsEmptyCommandBeforeCreate(t *testing.T) {
 		for _, command := range [][]string{nil, {""}, {"  "}} {
 			fake := newFakeCodeSandboxAPI()
 			backend, _, _ := newFakeBackend(t, fake)
-			_, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Name: "my-app", Root: t.TempDir()}, NoSync: true, ShellMode: shellMode, Command: command})
+			_, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Name: "my-app", Root: t.TempDir()}, NoSync: true, ShellMode: shellMode, Command: command})
 			if err == nil || !strings.Contains(err.Error(), "missing command") {
 				t.Fatalf("command=%#v shell=%v err=%v", command, shellMode, err)
 			}

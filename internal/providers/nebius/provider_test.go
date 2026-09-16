@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -14,26 +15,26 @@ import (
 
 type recordingRunner struct {
 	calls [][]string
-	fn    func(LocalCommandRequest) (LocalCommandResult, error)
+	fn    func(core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
-func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	call := append([]string{req.Name}, req.Args...)
 	r.calls = append(r.calls, call)
 	if r.fn != nil {
 		return r.fn(req)
 	}
-	return LocalCommandResult{}, nil
+	return core.LocalCommandResult{}, nil
 }
 
-func testConfig() Config {
-	return Config{
+func testConfig() core.Config {
+	return core.Config{
 		Provider: providerName,
 		TargetOS: targetLinux,
 		SSHUser:  "crabbox",
 		SSHPort:  "22",
 		WorkRoot: "/tmp/crabbox",
-		Nebius: NebiusConfig{
+		Nebius: core.NebiusConfig{
 			CLI:            "nebius",
 			Profile:        "sandbox",
 			ParentID:       "project-123",
@@ -63,8 +64,95 @@ func TestProviderSpec(t *testing.T) {
 			t.Fatalf("features=%v missing %s", spec.Features, feature)
 		}
 	}
-	if aliases := (Provider{}).Aliases(); len(aliases) != 0 {
+	if aliases := (Provider{}).Spec().Aliases; len(aliases) != 0 {
 		t.Fatalf("aliases=%v, want none", aliases)
+	}
+}
+
+func TestNebiusOrdinaryFlagMetadata(t *testing.T) {
+	initial := core.NebiusConfig{CLI: "nebius", Profile: "profile", ParentID: "parent", SubnetID: "subnet", Platform: "cpu-d3", Preset: "4vcpu-16gb", ImageFamily: "ubuntu24.04-driverless", DiskType: "network_ssd", DiskSizeGiB: 50, User: "crabbox", PublicIP: "dynamic", SecurityGroupIDs: []string{"prior"}, ServiceAccountID: "account", RecoveryPolicy: "fail"}
+	for _, tc := range []struct {
+		raw    string
+		groups []string
+		disk   int
+	}{{"", nil, 0}, {", ,", nil, -2}, {"none", []string{"none"}, 50}, {" a, ,b,a ", []string{"a", "b", "a"}, 50}} {
+		t.Run(fmt.Sprintf("%q", tc.raw), func(t *testing.T) {
+			cfg := core.Config{Provider: "other", SSHUser: "generic", WorkRoot: "/workspace/generic", ServerType: "generic", Nebius: initial}
+			before := cfg
+			fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
+			values := (Provider{}).RegisterFlags(fs, cfg)
+			if fs.Lookup("nebius-security-group-ids").DefValue != "" {
+				t.Fatal("group scalar inherited nonempty default")
+			}
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("unvisited fields changed")
+			}
+			if err := fs.Parse([]string{"--nebius-cli=~/literal", "--nebius-profile= profile ", "--nebius-parent-id=parent", "--nebius-subnet-id=subnet", "--nebius-platform=cpu-d3", "--nebius-preset=4vcpu-16gb", "--nebius-image-family=ubuntu24.04-driverless", "--nebius-disk-type=network_ssd", fmt.Sprintf("--nebius-disk-size-gib=%d", tc.disk), "--nebius-user=crabbox", "--nebius-public-ip=dynamic", "--nebius-security-group-ids=first", "--nebius-security-group-ids=" + tc.raw, "--nebius-service-account-id=account", "--nebius-recovery-policy=fail"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			want := before
+			want.Nebius.CLI = "~/literal"
+			want.Nebius.Profile = " profile "
+			want.Nebius.DiskSizeGiB = tc.disk
+			want.Nebius.SecurityGroupIDs = tc.groups
+			core.RecordProviderFlagInputs(&want, true, "nebius")
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("all-field raw/equal/repeated/list/ledger application changed generic state")
+			}
+		})
+	}
+	for _, name := range []string{"nebius", "Nebius", " nebius ", "other"} {
+		cfg := core.Config{Provider: name, Nebius: initial}
+		fs := flag.NewFlagSet("validation", flag.ContinueOnError)
+		values := (Provider{}).RegisterFlags(fs, cfg)
+		if err := fs.Parse([]string{"--nebius-disk-size-gib=-1"}); err != nil {
+			t.Fatal(err)
+		}
+		before := cfg
+		for _, foreign := range []any{nil, struct{}{}} {
+			if err := (Provider{}).ApplyFlags(&cfg, fs, foreign); err != nil || !reflect.DeepEqual(cfg, before) {
+				t.Fatal("foreign values reached validation or mutation")
+			}
+		}
+		err := (Provider{}).ApplyFlags(&cfg, fs, values)
+		if name == "nebius" {
+			if err == nil || err.Error() != "nebius.diskSizeGiB must be positive" {
+				t.Fatalf("selected validation=%v", err)
+			}
+		} else if err != nil {
+			t.Fatalf("other spelling unexpectedly validated: %v", err)
+		}
+		want := before
+		want.Nebius.DiskSizeGiB = -1
+		core.RecordProviderFlagInputs(&want, true, "nebius")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("assignment before selected validation changed")
+		}
+	}
+	cfg := core.Config{Provider: "other", Nebius: initial}
+	fs := flag.NewFlagSet("empty", flag.ContinueOnError)
+	values := (Provider{}).RegisterFlags(fs, cfg)
+	var args []string
+	for _, name := range []string{"cli", "profile", "parent-id", "subnet-id", "platform", "preset", "image-family", "disk-type", "user", "public-ip", "security-group-ids", "service-account-id", "recovery-policy"} {
+		args = append(args, "--nebius-"+name+"=")
+	}
+	args = append(args, "--nebius-disk-size-gib=0")
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := core.Config{Provider: "other"}
+	core.RecordProviderFlagInputs(&want, true, "nebius")
+	if !reflect.DeepEqual(cfg, want) {
+		t.Fatal("empty visited fields did not clear without extra validation")
 	}
 }
 
@@ -115,7 +203,7 @@ func TestValidateConfigRejectsReservedUsers(t *testing.T) {
 func TestCLIRunnerAddsProfileBeforeCommand(t *testing.T) {
 	runner := &recordingRunner{}
 	cfg := testConfig()
-	client := newCLIRunner(cfg.Nebius, Runtime{Exec: runner})
+	client := newCLIRunner(cfg.Nebius, core.Runtime{Exec: runner})
 	if _, err := client.run(context.Background(), "compute", "platform", "list", "--format", "json"); err != nil {
 		t.Fatal(err)
 	}
@@ -160,34 +248,34 @@ func TestRedactNebiusText(t *testing.T) {
 }
 
 func TestDoctorUsesReadOnlyCLICommands(t *testing.T) {
-	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		joined := strings.Join(req.Args, " ")
 		for _, forbidden := range []string{" create", " delete", " update", " disk create", " disk delete", " allocation create", " allocation delete"} {
 			if strings.Contains(" "+joined, forbidden) {
-				return LocalCommandResult{}, errors.New("mutating command invoked: " + joined)
+				return core.LocalCommandResult{}, errors.New("mutating command invoked: " + joined)
 			}
 		}
 		switch joined {
 		case "--profile sandbox version":
-			return LocalCommandResult{Stdout: "nebius version 1.0.0\n"}, nil
+			return core.LocalCommandResult{Stdout: "nebius version 1.0.0\n"}, nil
 		case "--profile sandbox profile list":
-			return LocalCommandResult{Stdout: "sandbox [default]\n"}, nil
+			return core.LocalCommandResult{Stdout: "sandbox [default]\n"}, nil
 		case "--profile sandbox iam project get project-123 --format json":
-			return LocalCommandResult{Stdout: `{"id":"project-123"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"id":"project-123"}`}, nil
 		case "--profile sandbox vpc subnet list --parent-id project-123 --format json":
-			return LocalCommandResult{Stdout: `[{"id":"subnet-123"}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"subnet-123"}]`}, nil
 		case "--profile sandbox compute platform list --parent-id project-123 --format json":
-			return LocalCommandResult{Stdout: `[{"id":"cpu-d3"}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"id":"cpu-d3"}]`}, nil
 		case "--profile sandbox compute image get-latest-by-family --image-family ubuntu24.04-driverless --format json":
-			return LocalCommandResult{Stdout: `{"metadata":{"id":"image-123"}}`}, nil
+			return core.LocalCommandResult{Stdout: `{"metadata":{"id":"image-123"}}`}, nil
 		case "--profile sandbox compute instance list --parent-id project-123 --format json":
-			return LocalCommandResult{Stdout: `{"items":[]}`}, nil
+			return core.LocalCommandResult{Stdout: `{"items":[]}`}, nil
 		default:
-			return LocalCommandResult{}, errors.New("unexpected command: " + joined)
+			return core.LocalCommandResult{}, errors.New("unexpected command: " + joined)
 		}
 	}}
-	backend := NewBackend(Provider{}.Spec(), testConfig(), Runtime{Exec: runner}).(*backend)
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	backend := NewBackend(Provider{}.Spec(), testConfig(), core.Runtime{Exec: runner}).(*backend)
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,29 +291,29 @@ func TestDoctorUsesReadOnlyCLICommands(t *testing.T) {
 }
 
 func TestDoctorRejectsMissingImageFamily(t *testing.T) {
-	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		joined := strings.Join(req.Args, " ")
 		switch joined {
 		case "--profile sandbox version":
-			return LocalCommandResult{Stdout: "nebius version 1.0.0\n"}, nil
+			return core.LocalCommandResult{Stdout: "nebius version 1.0.0\n"}, nil
 		case "--profile sandbox profile list":
-			return LocalCommandResult{Stdout: "sandbox [default]\n"}, nil
+			return core.LocalCommandResult{Stdout: "sandbox [default]\n"}, nil
 		case "--profile sandbox iam project get project-123 --format json":
-			return LocalCommandResult{Stdout: `{"id":"project-123"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"id":"project-123"}`}, nil
 		case "--profile sandbox vpc subnet list --parent-id project-123 --format json":
-			return LocalCommandResult{Stdout: `[{"metadata":{"id":"subnet-123"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"metadata":{"id":"subnet-123"}}]`}, nil
 		case "--profile sandbox compute platform list --parent-id project-123 --format json":
-			return LocalCommandResult{Stdout: `[{"metadata":{"id":"cpu-d3"}}]`}, nil
+			return core.LocalCommandResult{Stdout: `[{"metadata":{"id":"cpu-d3"}}]`}, nil
 		case "--profile sandbox compute image get-latest-by-family --image-family ubuntu24.04-driverless --format json":
-			return LocalCommandResult{Stdout: `{}`}, nil
+			return core.LocalCommandResult{Stdout: `{}`}, nil
 		case "--profile sandbox compute instance list --parent-id project-123 --format json":
-			return LocalCommandResult{Stdout: `{"items":[]}`}, nil
+			return core.LocalCommandResult{Stdout: `{"items":[]}`}, nil
 		default:
-			return LocalCommandResult{}, errors.New("unexpected command: " + joined)
+			return core.LocalCommandResult{}, errors.New("unexpected command: " + joined)
 		}
 	}}
-	backend := NewBackend(Provider{}.Spec(), testConfig(), Runtime{Exec: runner}).(*backend)
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	backend := NewBackend(Provider{}.Spec(), testConfig(), core.Runtime{Exec: runner}).(*backend)
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,33 @@ import (
 	"testing"
 )
 
+func TestProviderStaticStatusProjection(t *testing.T) {
+	spec := ProviderSpec{Authentication: ProviderAuthentication{
+		{Route: "direct", Methods: []ProviderAuthenticationMethod{ProviderAuthenticationCLI, ProviderAuthenticationAPIKey}, Description: "Possible direct interfaces"},
+		{Route: "broker", Methods: []ProviderAuthenticationMethod{ProviderAuthenticationCoordinator, ProviderAuthenticationCLI}, Description: "Possible broker interfaces"},
+	}}
+	status := providerStaticStatusFor(spec)
+	if status.MetadataKind != "static" || status.Authentication.Scope != "provider_access" || status.Authentication.Status != "unchecked" || status.Readiness != "unchecked" {
+		t.Fatal("metadata projected as a live result")
+	}
+	if !reflect.DeepEqual(status.Authentication.Methods, []ProviderAuthenticationMethod{ProviderAuthenticationAPIKey, ProviderAuthenticationCLI, ProviderAuthenticationCoordinator}) {
+		t.Fatal("possible interfaces must be sorted and unique")
+	}
+	copy := status.clone()
+	status.Authentication.Routes[0].Methods[0] = ProviderAuthenticationNone
+	status.Authentication.Methods[0] = ProviderAuthenticationNone
+	if spec.Authentication[0].Methods[0] != ProviderAuthenticationCLI || copy.Authentication.Routes[0].Methods[0] != ProviderAuthenticationCLI || copy.Authentication.Methods[0] != ProviderAuthenticationAPIKey {
+		t.Fatal("static view shares mutable source storage")
+	}
+	encoded, err := json.Marshal([]providerMatrixEntry{{Provider: "example", providerStaticStatus: copy}})
+	if err != nil || !bytes.HasPrefix(encoded, []byte("[")) || !bytes.Contains(encoded, []byte(`"metadataKind":"static"`)) || !bytes.Contains(encoded, []byte(`"readiness":"unchecked"`)) {
+		t.Fatal("catalog array/static status contract changed")
+	}
+	if bytes.Contains(encoded, []byte(`"selection"`)) || bytes.Contains(encoded, []byte(`"configuration"`)) {
+		t.Fatal("static catalog must not invent loaded configuration")
+	}
+}
+
 func recommendAliasForTest(t *testing.T, alias string) []providerRecommendationEntry {
 	t.Helper()
 	var stdout, stderr bytes.Buffer

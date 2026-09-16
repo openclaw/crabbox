@@ -47,11 +47,8 @@ func newCoordinatorAsyncFixture(t *testing.T, fixed bool) *coordinatorAsyncFixtu
 	t.Setenv("CRABBOX_OWNER", "alice@example.com")
 	f := &coordinatorAsyncFixture{
 		t: t, fixed: fixed, started: time.Now(),
-		requested: "cbx_abcdef123456", canonical: "cbx_abcdef123457",
+		requested: "cbx_abcdef123456", canonical: "cbx_abcdef123456",
 		cfg: Config{Provider: "azure", TargetOS: targetWindows, WindowsMode: windowsModeNormal},
-	}
-	if fixed {
-		f.canonical = f.requested
 	}
 	f.backend = &coordinatorLeaseBackend{
 		cfg: f.cfg, rt: Runtime{Stderr: &f.stderr},
@@ -326,9 +323,6 @@ func TestCoordinatorAsyncRejectsIdentityMismatchBeforeFurtherPolling(t *testing.
 		for _, replay := range []bool{false, true} {
 			for _, stage := range []string{"accepted", "poll"} {
 				for _, field := range []string{"id", "empty id", "provider", "unknown provider", "target", "windows mode"} {
-					if !fixed && stage == "accepted" && field == "id" {
-						continue // Ordinary POST is authoritative for canonical remapping.
-					}
 					t.Run(fmt.Sprintf("fixed=%t/replay=%t/%s/%s", fixed, replay, stage, field), func(t *testing.T) {
 						synctest.Test(t, func(t *testing.T) {
 							f := newCoordinatorAsyncFixture(t, fixed)
@@ -369,7 +363,7 @@ func TestCoordinatorAsyncRejectsIdentityMismatchBeforeFurtherPolling(t *testing.
 							if stage == "poll" {
 								wantGets = 1
 							}
-							if fixed {
+							if fixed || field == "id" || field == "empty id" {
 								wantCancels = 0
 							}
 							if replay {
@@ -511,6 +505,46 @@ func TestCoordinatorAsyncReplayedActiveLeaseRequiresEndpoint(t *testing.T) {
 			t.Fatalf("lease=%#v err=%v creates=%d gets=%d cancels=%d", lease, err, f.creates, f.gets, f.cancels)
 		}
 	})
+}
+
+func TestCoordinatorAsyncTerminalProvisioningCause(t *testing.T) {
+	for _, stage := range []string{"initial", "poll"} {
+		for _, tc := range []struct {
+			name    string
+			failure string
+			cleanup string
+			want    string
+		}{
+			{name: "pending cleanup", cleanup: "provider SSH readiness timed out", want: "error=provider SSH readiness timed out"},
+			{name: "primary failure", failure: "provider allocation failed", cleanup: "provider cleanup retry failed", want: "error=provider allocation failed"},
+			{name: "no cause"},
+		} {
+			t.Run(stage+"/"+tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					f := newCoordinatorAsyncFixture(t, false)
+					terminal := f.lease("failed")
+					terminal.FailureError, terminal.CleanupError = tc.failure, tc.cleanup
+					resourceMayExist := true
+					terminal.ProvisioningResourceMayExist = &resourceMayExist
+					f.onCreate = func(*http.Request) (*http.Response, error) {
+						if stage == "initial" {
+							return f.reply(terminal)
+						}
+						return f.reply(f.lease("provisioning"))
+					}
+					f.onGet = func(*http.Request) (*http.Response, error) { return f.reply(terminal) }
+					lease, err := f.acquire(context.Background())
+					want := "coordinator lease " + f.canonical + " ended while provisioning: state=failed"
+					if tc.want != "" {
+						want += " " + tc.want
+					}
+					if err == nil || err.Error() != want || lease.ID != "" || f.creates != 1 || f.cancels != 1 {
+						t.Fatalf("lease=%#v err=%v want=%q creates=%d cancels=%d", lease, err, want, f.creates, f.cancels)
+					}
+				})
+			})
+		}
+	}
 }
 
 func TestCoordinatorAsyncTerminalDiagnosticDoesNotAuthorizeFreshAllocation(t *testing.T) {

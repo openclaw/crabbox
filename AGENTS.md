@@ -1,8 +1,21 @@
 # Repository Guidelines
 
+`CLAUDE.md` is a symlink to this file. Edit `AGENTS.md` and preserve the link so agent instructions stay in sync.
+
 ## Project Structure & Module Organization
 
-Crabbox is a Go CLI plus a Cloudflare Worker coordinator. The CLI entrypoint is `cmd/crabbox`, with implementation and Go tests in `internal/cli`. Worker source lives in `worker/src`, with Vitest tests in `worker/test`. Documentation lives in `docs/`; command docs are under `docs/commands`, and feature notes under `docs/features`. Release configuration is in `.goreleaser.yaml`; GitHub Actions live in `.github/workflows`. Generated outputs such as `bin/`, `dist/`, `worker/dist/`, and `worker/node_modules/` should not be edited by hand.
+Crabbox is a Go CLI with an optional coordinator on Cloudflare Workers or Node.js with PostgreSQL.
+
+| Area | Location |
+| --- | --- |
+| CLI entrypoint and command behavior | `cmd/crabbox`, `internal/cli` |
+| Go provider adapters | `internal/providers/<name>` |
+| Shared coordinator and Node.js runtime | `worker/src`, `worker/node` |
+| Coordinator tests | `worker/test` |
+| Command and feature documentation | `docs/commands`, `docs/features` |
+| CI and release configuration | `.github/workflows`, `.goreleaser.yaml` |
+
+Use `docs/source-map.md` for the detailed code map. Generated outputs such as `bin/`, `dist/`, `worker/dist/`, and `worker/node_modules/` should not be edited by hand.
 
 ## Product Positioning
 
@@ -12,18 +25,24 @@ Crabbox is a generic remote software testing and execution tool. New code, docs,
 
 Keep core provider-neutral. Core may pass generic request/lease context and call provider capabilities for defaults, access, provision, images, release, cleanup, and diagnostics. Provider-specific reconciliation, firewall/security-group semantics, labels, snapshots, hosts, regions, rollout compatibility, and resource naming live behind provider adapters. No `provider == aws/gcp/...` logic in core unless it is unavoidable routing/config glue and no provider hook fits.
 
+Provider contracts and extension points are documented in `docs/features/provider-authoring.md` and `docs/provider-backends.md`; coordinator runtime boundaries are described in `docs/architecture.md`.
+
 ## Build, Test, and Development Commands
+
+Run from the repository root. Use the Go toolchain declared in `go.mod` and the Node version in `.node-version`.
 
 - `go build -trimpath -o bin/crabbox ./cmd/crabbox`: build the local CLI.
 - `go vet ./...`: run Go static checks.
 - `go test -race -timeout=20m ./...`: run the Go test suite with the race detector and CI's race-test package timeout.
-- `gofmt -w $(git ls-files '*.go')`: format Go files.
-- `npm ci --prefix worker`: install Worker dependencies.
+- `gofmt -w path/to/changed.go`: format changed Go files; substitute their actual paths.
+- `npm ci --prefix worker`: install coordinator dependencies.
 - `npm run format:check --prefix worker`: verify TypeScript formatting.
 - `npm run lint --prefix worker`: run `oxlint`.
 - `npm run check --prefix worker`: run TypeScript typechecking.
+- `npm run check:node --prefix worker`: typecheck the Node.js coordinator.
 - `npm test --prefix worker`: run Vitest tests.
 - `npm run build --prefix worker`: dry-run the Worker build through Wrangler.
+- `npm run build:node --prefix worker`: build the Node.js coordinator.
 - `node scripts/build-docs-site.mjs`: generate the docs site into `dist/docs-site`.
 
 ## Coding Style & Naming Conventions
@@ -51,6 +70,8 @@ Follow `docs/RELEASING.md` exactly. One explicit full release/publish request au
 - The producer is credential-free and refuses to run if any release credential is present; unset every variable in the check at the top of `scripts/build-release-candidate.sh` (the GitHub, Homebrew-tap, and Actions tokens plus the codesign identity and notary profile), not just `GH_TOKEN`/`GITHUB_TOKEN`.
 
 ## Security & Configuration Tips
+
+The authentication and isolation model is documented in `SECURITY.md` and `docs/security.md`.
 
 Keep provider and broker tokens out of the repository. Do not pass secrets as command-line arguments. Local config belongs in `~/.config/crabbox/config.yaml`, `~/Library/Application Support/crabbox/config.yaml`, `crabbox.yaml`, or `.crabbox.yaml` as documented.
 Tenki provider SSH uses `tenki sandbox ssh-proxy` with Tenki-managed key/cert files under `~/.config/tenki`; do not use Crabbox per-lease keys for gateway auth.

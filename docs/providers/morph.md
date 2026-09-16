@@ -80,6 +80,18 @@ Defaults:
 
 `snapshot` is required to create a new instance.
 
+Nonempty YAML strings replace their prior values; omitted, `null`, or empty
+strings keep the previous value. Whitespace is retained until the existing
+runtime normalization. Boolean inputs preserve explicit `false`, including
+`wakeOnSSH: false`. An omitted deletion policy is distinct from an explicitly
+supplied `deleteOnRelease: false` when forwarding command configuration.
+
+A nonblank Morph work root takes precedence over the generic work root. If the
+Morph value is blank, a non-default generic root is inherited; otherwise the
+fallback is `/tmp/crabbox`. API endpoint, gateway, and work-root defaults share
+their configuration definitions without combining API routing, SSH target,
+display, or work-root classification rules.
+
 Flags:
 
 ```text

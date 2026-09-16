@@ -42,19 +42,19 @@ type fakeKubernetesClient struct {
 }
 
 type recordingCommandRunner struct {
-	requests []LocalCommandRequest
+	requests []core.LocalCommandRequest
 	inputs   [][]byte
-	results  []LocalCommandResult
+	results  []core.LocalCommandResult
 	errors   []error
 }
 
-func (r *recordingCommandRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *recordingCommandRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.requests = append(r.requests, req)
 	if req.Stdin != nil {
 		input, _ := io.ReadAll(req.Stdin)
 		r.inputs = append(r.inputs, input)
 	}
-	var result LocalCommandResult
+	var result core.LocalCommandResult
 	if len(r.results) > 0 {
 		result = r.results[0]
 		r.results = r.results[1:]
@@ -271,10 +271,10 @@ func TestDoctorChecksAreNonMutating(t *testing.T) {
 	cfg.AgentSandbox.Namespace = "sandboxes"
 	cfg.AgentSandbox.WarmPool = "linux-pool"
 	fake := readyFakeClient(cfg)
-	backend := &backend{spec: Provider{}.Spec(), cfg: cfg, newClient: func(context.Context, Config, Runtime) (kubernetesClient, error) {
+	backend := &backend{spec: Provider{}.Spec(), cfg: cfg, newClient: func(context.Context, core.Config, core.Runtime) (kubernetesClient, error) {
 		return fake, nil
 	}}
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,10 +296,10 @@ func TestDoctorReportsMissingCRDAndWarmPool(t *testing.T) {
 	cfg.AgentSandbox.WarmPool = "linux-pool"
 	fake := readyFakeClient(cfg)
 	fake.resources[agentSandboxExtensionsGroupVersion][warmPoolResource] = false
-	backend := &backend{spec: Provider{}.Spec(), cfg: cfg, newClient: func(context.Context, Config, Runtime) (kubernetesClient, error) {
+	backend := &backend{spec: Provider{}.Spec(), cfg: cfg, newClient: func(context.Context, core.Config, core.Runtime) (kubernetesClient, error) {
 		return fake, nil
 	}}
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil {
 		t.Fatal("missing CRD was accepted")
 	}
@@ -309,8 +309,8 @@ func TestDoctorReportsMissingCRDAndWarmPool(t *testing.T) {
 
 	fake = readyFakeClient(cfg)
 	delete(fake.objects, warmPoolResource+"/sandboxes/linux-pool")
-	backend.newClient = func(context.Context, Config, Runtime) (kubernetesClient, error) { return fake, nil }
-	result, err = backend.Doctor(context.Background(), DoctorRequest{})
+	backend.newClient = func(context.Context, core.Config, core.Runtime) (kubernetesClient, error) { return fake, nil }
+	result, err = backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil {
 		t.Fatal("missing warm pool was accepted")
 	}
@@ -379,7 +379,7 @@ func TestClaimIdentityMigratesLegacyImplicitContainerSentinel(t *testing.T) {
 	cfg.AgentSandbox.Context = "agent-context"
 	cfg.AgentSandbox.Namespace = "sandboxes"
 	cfg.AgentSandbox.WarmPool = "linux-pool"
-	claim := LeaseClaim{
+	claim := core.LeaseClaim{
 		LeaseID:       "asbx_legacy",
 		ProviderScope: claimScope(cfg),
 		Labels: map[string]string{
@@ -421,7 +421,7 @@ func TestAuthorizeClaimScopeFailsClosed(t *testing.T) {
 	cfg.AgentSandbox.Context = "agent-context"
 	cfg.AgentSandbox.Namespace = "sandboxes"
 	cfg.AgentSandbox.WarmPool = "linux-pool"
-	claim := LeaseClaim{LeaseID: "asbx_test", Provider: providerName, ProviderScope: "kubeconfig:/other|context:agent-context|namespace:sandboxes|warmPool:linux-pool|container:default"}
+	claim := core.LeaseClaim{LeaseID: "asbx_test", Provider: providerName, ProviderScope: "kubeconfig:/other|context:agent-context|namespace:sandboxes|warmPool:linux-pool|container:default"}
 	if err := authorizeClaimScope(cfg, claim); err == nil {
 		t.Fatal("wrong scope was accepted")
 	}
@@ -841,14 +841,14 @@ func TestRetainMissingClaimRequiresExplicitForget(t *testing.T) {
 	cfg.AgentSandbox.Context = "agent-context"
 	cfg.AgentSandbox.Namespace = "sandboxes"
 	cfg.AgentSandbox.WarmPool = "linux-pool"
-	claim := LeaseClaim{LeaseID: "asbx_missing"}
+	claim := core.LeaseClaim{LeaseID: "asbx_missing"}
 	if err := retainMissingClaim(cfg, claim); err == nil {
 		t.Fatal("missing claim was forgotten without explicit setting")
 	}
-	if err := claimLeaseForRepo(cfg, claim.LeaseID, "missing", Repo{Root: t.TempDir()}, false); err != nil {
+	if err := claimLeaseForRepo(cfg, claim.LeaseID, "missing", core.Repo{Root: t.TempDir()}, false); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := readLeaseClaim(claim.LeaseID)
+	claim, err := core.ReadLeaseClaim(claim.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -922,12 +922,12 @@ func TestKubectlClientUsesConfiguredBinaryContextAndStdinManifest(t *testing.T) 
 	cfg.AgentSandbox.Kubeconfig = "/tmp/cluster.yaml"
 	cfg.AgentSandbox.Context = "agent-context"
 	runner := &recordingCommandRunner{
-		results: []LocalCommandResult{
+		results: []core.LocalCommandResult{
 			{Stdout: `{"resources":[{"name":"sandboxclaims"}]}`},
 			{Stdout: `{"apiVersion":"extensions.agents.x-k8s.io/v1beta1","kind":"SandboxClaim","metadata":{"name":"claim-a","namespace":"sandboxes"}}`},
 		},
 	}
-	clientRaw, err := newKubernetesClient(context.Background(), cfg, Runtime{Exec: runner})
+	clientRaw, err := newKubernetesClient(context.Background(), cfg, core.Runtime{Exec: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -973,13 +973,13 @@ func TestKubectlClientUsesConfiguredBinaryContextAndStdinManifest(t *testing.T) 
 func TestKubectlCreateFailureClassification(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
-		result    LocalCommandResult
+		result    core.LocalCommandResult
 		err       error
 		ambiguous bool
 	}{
 		{
 			name:      "forbidden",
-			result:    LocalCommandResult{Stderr: `Error from server (Forbidden): sandboxclaims is forbidden`},
+			result:    core.LocalCommandResult{Stderr: `Error from server (Forbidden): sandboxclaims is forbidden`},
 			err:       errors.New("exit status 1"),
 			ambiguous: false,
 		},
@@ -990,13 +990,13 @@ func TestKubectlCreateFailureClassification(t *testing.T) {
 		},
 		{
 			name:      "already exists",
-			result:    LocalCommandResult{Stderr: `Error from server (AlreadyExists): sandboxclaims already exists`},
+			result:    core.LocalCommandResult{Stderr: `Error from server (AlreadyExists): sandboxclaims already exists`},
 			err:       errors.New("exit status 1"),
 			ambiguous: true,
 		},
 		{
 			name:      "transport interruption",
-			result:    LocalCommandResult{Stderr: "unexpected EOF"},
+			result:    core.LocalCommandResult{Stderr: "unexpected EOF"},
 			err:       errors.New("exit status 1"),
 			ambiguous: true,
 		},
@@ -1011,7 +1011,7 @@ func TestKubectlCreateFailureClassification(t *testing.T) {
 
 func TestKubectlExecStreamsStdinWithoutPuttingItOnArgv(t *testing.T) {
 	secret := "stdin-only-secret"
-	runner := &recordingCommandRunner{results: []LocalCommandResult{{ExitCode: 0}}}
+	runner := &recordingCommandRunner{results: []core.LocalCommandResult{{ExitCode: 0}}}
 	client := &kubectlKubernetesClient{runner: runner, kubectl: "kubectl"}
 	if err := client.Exec(context.Background(), podExecRequest{
 		Namespace: "sandboxes",
@@ -1051,7 +1051,7 @@ func TestKubectlClientRejectsOptionLikeClusterNamesBeforeExec(t *testing.T) {
 }
 
 func TestKubectlClientUsesUIDPreconditionForAsyncDelete(t *testing.T) {
-	runner := &recordingCommandRunner{results: []LocalCommandResult{{Stdout: `{"kind":"Status","status":"Success"}`}}}
+	runner := &recordingCommandRunner{results: []core.LocalCommandResult{{Stdout: `{"kind":"Status","status":"Success"}`}}}
 	client := &kubectlKubernetesClient{runner: runner, kubectl: "kubectl"}
 	if err := client.Delete(context.Background(), sandboxClaimGVR(), "sandboxes", "claim-a", "uid-claim-a"); err != nil {
 		t.Fatal(err)
@@ -1087,24 +1087,24 @@ func TestSandboxReadinessRejectsReplacedClaimUID(t *testing.T) {
 func TestKubectlCanIDenialUsesExitOneContract(t *testing.T) {
 	tests := []struct {
 		name        string
-		result      LocalCommandResult
+		result      core.LocalCommandResult
 		err         error
 		wantAllowed bool
 		wantErr     bool
 	}{
 		{
 			name:        "allowed",
-			result:      LocalCommandResult{Stdout: "yes\n"},
+			result:      core.LocalCommandResult{Stdout: "yes\n"},
 			wantAllowed: true,
 		},
 		{
 			name:   "denied",
-			result: LocalCommandResult{ExitCode: 1, Stdout: "no - RBAC: access denied\n"},
+			result: core.LocalCommandResult{ExitCode: 1, Stdout: "no - RBAC: access denied\n"},
 			err:    errors.New("exit status 1"),
 		},
 		{
 			name:    "transport failure",
-			result:  LocalCommandResult{ExitCode: 2, Stderr: "connection refused\n"},
+			result:  core.LocalCommandResult{ExitCode: 2, Stderr: "connection refused\n"},
 			err:     errors.New("exit status 2"),
 			wantErr: true,
 		},
@@ -1112,7 +1112,7 @@ func TestKubectlCanIDenialUsesExitOneContract(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := &recordingCommandRunner{
-				results: []LocalCommandResult{tt.result},
+				results: []core.LocalCommandResult{tt.result},
 				errors:  []error{tt.err},
 			}
 			client := &kubectlKubernetesClient{runner: runner, kubectl: "kubectl"}
@@ -1134,32 +1134,32 @@ func TestKubectlCanIDenialUsesExitOneContract(t *testing.T) {
 func TestKubectlExecOnlyMapsProvenRemoteExitStatus(t *testing.T) {
 	tests := []struct {
 		name       string
-		result     LocalCommandResult
+		result     core.LocalCommandResult
 		wantRemote bool
 	}{
 		{
 			name:       "remote command",
-			result:     LocalCommandResult{ExitCode: 42, Stderr: "command terminated with exit code 42\n"},
+			result:     core.LocalCommandResult{ExitCode: 42, Stderr: "command terminated with exit code 42\n"},
 			wantRemote: true,
 		},
 		{
 			name:       "remote stderr without newline",
-			result:     LocalCommandResult{ExitCode: 42, Stderr: "failurecommand terminated with exit code 42\n"},
+			result:     core.LocalCommandResult{ExitCode: 42, Stderr: "failurecommand terminated with exit code 42\n"},
 			wantRemote: true,
 		},
 		{
 			name:   "transport failure",
-			result: LocalCommandResult{ExitCode: 1, Stderr: "Unable to connect to the server: dial tcp: connection refused\n"},
+			result: core.LocalCommandResult{ExitCode: 1, Stderr: "Unable to connect to the server: dial tcp: connection refused\n"},
 		},
 		{
 			name:   "mismatched diagnostic",
-			result: LocalCommandResult{ExitCode: 1, Stderr: "command terminated with exit code 42\n"},
+			result: core.LocalCommandResult{ExitCode: 1, Stderr: "command terminated with exit code 42\n"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := &recordingCommandRunner{
-				results: []LocalCommandResult{tt.result},
+				results: []core.LocalCommandResult{tt.result},
 				errors:  []error{errors.New("kubectl failed")},
 			}
 			client := &kubectlKubernetesClient{runner: runner, kubectl: "kubectl"}
@@ -1187,7 +1187,7 @@ func TestKubectlExecOnlyMapsProvenRemoteExitStatus(t *testing.T) {
 	}
 }
 
-func readyFakeClient(cfg Config) *fakeKubernetesClient {
+func readyFakeClient(cfg core.Config) *fakeKubernetesClient {
 	identity := fakeClaimIdentity(cfg)
 	claim := &kubernetesObject{Metadata: objectMeta{
 		Name:        "claim-a",
@@ -1252,7 +1252,7 @@ func readyFakeClient(cfg Config) *fakeKubernetesClient {
 	return fake
 }
 
-func fakeClaimIdentity(cfg Config) claimIdentity {
+func fakeClaimIdentity(cfg core.Config) claimIdentity {
 	return claimIdentity{LeaseID: "asbx_test", ProviderScope: claimScope(cfg), UID: "uid-claim-a", WarmPool: cfg.AgentSandbox.WarmPool, Container: strings.TrimSpace(cfg.AgentSandbox.Container)}
 }
 

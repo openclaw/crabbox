@@ -17,8 +17,7 @@ import (
 )
 
 type Provider interface {
-	Name() string
-	Aliases() []string
+	// Spec returns stable metadata without runtime configuration or side effects.
 	Spec() ProviderSpec
 	RegisterFlags(fs *flag.FlagSet, defaults Config) any
 	ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error
@@ -95,6 +94,14 @@ type RunLeaseClaimResolver interface {
 	ResolveRunLeaseUnderClaim(context.Context, ResolveRequest, LeaseClaim) (LeaseTarget, error)
 }
 
+// ExecLeaseClaimResolver admits only lease kinds whose release paths honor the
+// same claim fence as exec. Core holds a shared fence through execution; the
+// resolver must reject incompatible claims before native effects and must not
+// reenter or publish claims while preparing fresh access.
+type ExecLeaseClaimResolver interface {
+	ResolveExecLeaseUnderClaim(context.Context, ResolveRequest, LeaseClaim) (LeaseTarget, error)
+}
+
 // ProviderDiagnosticSecretSource contributes runtime-only credentials to the
 // final diagnostic redaction pass. Providers should include every credential
 // source that is intentionally absent from Config, including local CLI stores.
@@ -169,7 +176,6 @@ type DesktopCredentialResolver interface {
 
 type ProviderServerTypeProvider interface {
 	ServerTypeForConfig(cfg Config) string
-	ServerTypeForClass(class string) string
 }
 
 // ClassSpec reports the concrete machine one class resolves to on this
@@ -197,6 +203,8 @@ type Backend interface {
 	Spec() ProviderSpec
 }
 
+// DoctorProvider overrides diagnostic configuration when the ordinary backend
+// requires acquisition-only inputs. Otherwise core uses Configure and DoctorBackend.
 type DoctorProvider interface {
 	Provider
 	ConfigureDoctor(cfg Config, rt Runtime) (DoctorBackend, error)
@@ -273,6 +281,7 @@ type SSHLeaseBackend interface {
 
 // SSHRunActivityBackend keeps provider-owned idle activity alive after lease
 // admission, including setup and sync. Stop must cancel and join its work.
+// Calls may hold a shared claim fence and must not reenter or mutate claims.
 type SSHRunActivityBackend interface {
 	BeginSSHRunActivity(context.Context, LeaseTarget) (stop func(), err error)
 }
@@ -656,7 +665,9 @@ type CheckpointLeaseIDBackend interface {
 }
 
 type ProviderSpec struct {
+	Authentication   ProviderAuthentication
 	Name             string
+	Aliases          []string
 	Family           string
 	Kind             ProviderKind
 	Targets          []TargetSpec
@@ -670,6 +681,8 @@ type ProviderSpec struct {
 	// TailscaleEgressOnly marks FeatureTailscale as outbound userspace access,
 	// not a bidirectional peer endpoint.
 	TailscaleEgressOnly bool
+	// ActionsRunnerUnsupported rejects --actions-runner, not ordinary Actions hydration.
+	ActionsRunnerUnsupported bool
 }
 
 type ProviderKind string
@@ -717,8 +730,13 @@ const (
 	// FeatureSSHScriptRun routes explicit scripts through the core SSH owner,
 	// while a hybrid backend may delegate ordinary commands.
 	FeatureSSHScriptRun Feature = "ssh-script-run"
-	FeaturePauseResume  Feature = "pause-resume"
-	FeatureMCP          Feature = "mcp-attachments"
+	// FeatureClaimExec requires ExecLeaseClaimResolver, private POSIX SSH execution,
+	// and provider-owned idle activity that does not require exclusive claim writes.
+	FeatureClaimExec Feature = "claim-exec"
+	// FeatureFixedCurrentRepoStop requires RepositoryScopedStopBackend for fixed IDs.
+	FeatureFixedCurrentRepoStop Feature = "fixed-current-repo-stop"
+	FeaturePauseResume          Feature = "pause-resume"
+	FeatureMCP                  Feature = "mcp-attachments"
 )
 
 const FeaturePreparedArtifactWorkspace Feature = "prepared-artifact-workspace"
@@ -771,6 +789,11 @@ type LocalCommandRequest struct {
 	// child cannot block forever after the capture buffer fills.
 	MaxCapturedOutputBytes int
 	CancelGracePeriod      time.Duration
+	// RequireProcessGroupJoin keeps this call active until its owned standalone
+	// process group closes, including after cancellation or cleanup grace expiry.
+	RequireProcessGroupJoin bool
+	// OnCleanupPending reports grace expiry once while the command still joins.
+	OnCleanupPending func(error) `json:"-"`
 }
 
 type LocalCommandResult struct {
@@ -866,7 +889,7 @@ func TrackLocalCommandCancellation(ctx context.Context, cmd *exec.Cmd) func(erro
 	}
 }
 
-func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (result LocalCommandResult, err error) {
 	if req.CaptureOutputToFiles && (req.DisableOutputCapture || req.MaxCapturedOutputBytes <= 0 || req.Stdout != nil || req.Stderr != nil) {
 		return LocalCommandResult{ExitCode: 1}, errors.New("file output capture requires a positive limit and no streaming writers")
 	}
@@ -889,6 +912,13 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	}
 	if req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
 		configureBoundedCommandCancellation(cmd)
+	}
+	var group *localCommandGroupOwner
+	if req.RequireProcessGroupJoin {
+		group, err = configureJoinedLocalCommand(ctx, cmd, req.CancelGracePeriod, req.OnCleanupPending)
+		if err != nil {
+			return LocalCommandResult{ExitCode: 1}, err
+		}
 	}
 	stopCommand := cmd.Cancel
 	withCancellationCause := TrackLocalCommandCancellation(ctx, cmd)
@@ -916,12 +946,26 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 		cmd.Stdout, cmd.Stderr = files.streams[0].writer, files.streams[1].writer
 	}
 	var observedFileOverflow bool
-	err := cmd.Start()
+	err = cmd.Start()
 	if err == nil {
 		var finishCapture func() commandFileCaptureOutcome
 		if files != nil {
 			files.closeWriters()
 			finishCapture = files.watch(cancel, stopCommand, cmd.WaitDelay)
+		}
+		if group != nil {
+			// This owner is the sole reaper. Retain the leader's PID until
+			// every group signal and join is complete, including cancellation.
+			groupErr := group.beforeWait()
+			defer func() {
+				if groupErr != nil && !errors.Is(err, groupErr) {
+					err = errors.Join(err, groupErr)
+					if result.ExitCode == 0 {
+						result.ExitCode = 1
+					}
+				}
+			}()
+			close(group.waitReady)
 		}
 		err = withCancellationCause(cmd.Wait())
 		if finishCapture != nil {
@@ -944,7 +988,7 @@ func (execCommandRunner) Run(ctx context.Context, req LocalCommandRequest) (Loca
 	if errors.Is(err, exec.ErrWaitDelay) && req.MaxCapturedOutputBytes > 0 && !req.DisableOutputCapture {
 		_ = stopCommand()
 	}
-	result := LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
+	result = LocalCommandResult{ExitCode: exitCode(err), Stdout: stdout.String(), Stderr: stderr.String()}
 	if stdout.buffer.Exceeded() || stderr.buffer.Exceeded() || observedFileOverflow {
 		err = fmt.Errorf("captured command output exceeded %d-byte limit", req.MaxCapturedOutputBytes)
 		result.ExitCode = 5
@@ -1041,7 +1085,10 @@ type AcquireRequest struct {
 	Reclaim               bool
 	RequestedLeaseID      string
 	RequestedCheckpointID string
-	RequestedSlug         string
+	// Native source identity remains available at the allocation owner, which can
+	// distinguish a fresh fork from replay of an already allocated resource.
+	CheckpointSource *NativeCheckpointForkRecord
+	RequestedSlug    string
 	// OnAcquired observes a fully validated raw provider identity before local
 	// routing, readiness, or claim side effects. Returning an error requires the
 	// provider adapter to roll back the acquired resource.
@@ -1123,17 +1170,17 @@ func ValidateProviderIdentityExpectation(i ProviderIdentityExpectation) error {
 	}{{"lease ID", i.LeaseID}, {"attempt lease ID", i.AttemptLeaseID}} {
 		name, value := identity.name, identity.value
 		if value != "" && (value != strings.TrimSpace(value) || !validLeaseClaimID(value)) {
-			return exit(2, "invalid expected provider %s", name)
+			return Exit(2, "invalid expected provider %s", name)
 		}
 	}
-	if i.Slug != "" && (i.Slug != strings.TrimSpace(i.Slug) || normalizeLeaseSlug(i.Slug) != i.Slug) {
-		return exit(2, "invalid expected provider slug")
+	if i.Slug != "" && (i.Slug != strings.TrimSpace(i.Slug) || NormalizeLeaseSlug(i.Slug) != i.Slug) {
+		return Exit(2, "invalid expected provider slug")
 	}
 	if i.ResourceID != "" && (i.ResourceID != strings.TrimSpace(i.ResourceID) || !validControllerInventoryIdentity(i.ResourceID)) {
-		return exit(2, "invalid expected provider resource ID")
+		return Exit(2, "invalid expected provider resource ID")
 	}
 	if i.LeaseID == "" && i.AttemptLeaseID == "" {
-		return exit(2, "expected provider identity requires a lease or attempt lease ID")
+		return Exit(2, "expected provider identity requires a lease or attempt lease ID")
 	}
 	return nil
 }
@@ -1154,19 +1201,19 @@ func ValidateLeaseTargetProviderIdentity(lease LeaseTarget, expected ProviderIde
 	}{{"lease ID", expected.LeaseID}, {"attempt lease ID", expected.AttemptLeaseID}} {
 		name, value := identity.name, identity.value
 		if value != "" && actualLeaseID != value {
-			return exit(4, "provider %s mismatch before release: expected %s, found %s", name, value, blank(actualLeaseID, "<empty>"))
+			return Exit(4, "provider %s mismatch before release: expected %s, found %s", name, value, blank(actualLeaseID, "<empty>"))
 		}
 	}
 	if expected.Slug != "" {
-		actualSlug := serverSlug(lease.Server)
+		actualSlug := ServerSlug(lease.Server)
 		if actualSlug != expected.Slug {
-			return exit(4, "provider slug mismatch before release: expected %s, found %s", expected.Slug, blank(actualSlug, "<empty>"))
+			return Exit(4, "provider slug mismatch before release: expected %s, found %s", expected.Slug, blank(actualSlug, "<empty>"))
 		}
 	}
 	if expected.ResourceID != "" {
 		actualResourceID := lease.Server.DisplayID()
 		if actualResourceID != expected.ResourceID {
-			return exit(4, "provider resource ID mismatch before release: expected %s, found %s", expected.ResourceID, blank(actualResourceID, "<empty>"))
+			return Exit(4, "provider resource ID mismatch before release: expected %s, found %s", expected.ResourceID, blank(actualResourceID, "<empty>"))
 		}
 	}
 	return nil
@@ -1186,6 +1233,7 @@ type ListRequest struct {
 }
 
 type RunRequest struct {
+	Observation           *RunObservation `json:"-" yaml:"-"`
 	Repo                  Repo
 	ID                    string
 	ReuseLease            bool // Planned reuse without an ID; a nonempty ID also implies reuse.
@@ -1252,6 +1300,13 @@ type StatusRequest struct {
 type StopRequest struct {
 	Options LeaseOptions
 	ID      string
+}
+
+// RepositoryScopedStopBackend validates the calling repository under its
+// existing exclusive release fence before native or connection cleanup. It
+// must reject unsupported claim kinds; validated terminal replay may be a no-op.
+type RepositoryScopedStopBackend interface {
+	StopForRepository(context.Context, StopRequest, string) error
 }
 
 type PauseRequest struct {
@@ -1390,7 +1445,7 @@ type RunSessionHandle struct {
 }
 
 func ValidateRunSessionFeatureSpec(spec ProviderSpec) error {
-	if !featureSetHas(spec.Features, FeatureRunSession) {
+	if !spec.Features.Has(FeatureRunSession) {
 		return nil
 	}
 	provider := blank(strings.TrimSpace(spec.Name), "provider")
@@ -1398,15 +1453,15 @@ func ValidateRunSessionFeatureSpec(spec ProviderSpec) error {
 	case ProviderKindDelegatedRun:
 		return nil
 	case ProviderKindSSHLease:
-		if !featureSetHas(spec.Features, FeatureSSH) {
-			return exit(2, "%s advertises %s as an SSH lease provider without %s", provider, FeatureRunSession, FeatureSSH)
+		if !spec.Features.Has(FeatureSSH) {
+			return Exit(2, "%s advertises %s as an SSH lease provider without %s", provider, FeatureRunSession, FeatureSSH)
 		}
-		if !featureSetHas(spec.Features, FeatureCleanup) {
-			return exit(2, "%s advertises %s as an SSH lease provider without %s", provider, FeatureRunSession, FeatureCleanup)
+		if !spec.Features.Has(FeatureCleanup) {
+			return Exit(2, "%s advertises %s as an SSH lease provider without %s", provider, FeatureRunSession, FeatureCleanup)
 		}
 		return nil
 	default:
-		return exit(2, "%s advertises %s with unsupported provider kind %s", provider, FeatureRunSession, spec.Kind)
+		return Exit(2, "%s advertises %s with unsupported provider kind %s", provider, FeatureRunSession, spec.Kind)
 	}
 }
 
@@ -1416,20 +1471,20 @@ func ValidateRunSessionForSpec(spec ProviderSpec, result RunResult) error {
 		return nil
 	}
 	provider := blank(strings.TrimSpace(spec.Name), "provider")
-	if !featureSetHas(spec.Features, FeatureRunSession) {
-		return exit(2, "%s returned a run session but does not advertise %s", provider, FeatureRunSession)
+	if !spec.Features.Has(FeatureRunSession) {
+		return Exit(2, "%s returned a run session but does not advertise %s", provider, FeatureRunSession)
 	}
 	if err := ValidateRunSessionFeatureSpec(spec); err != nil {
 		return err
 	}
 	if strings.TrimSpace(session.Provider) == "" {
-		return exit(2, "%s returned a run session without provider", provider)
+		return Exit(2, "%s returned a run session without provider", provider)
 	}
 	if strings.TrimSpace(session.LeaseID) == "" {
-		return exit(2, "%s returned a run session without lease id", provider)
+		return Exit(2, "%s returned a run session without lease id", provider)
 	}
 	if strings.TrimSpace(session.CleanupCommand) == "" {
-		return exit(2, "%s returned a run session without cleanup command", provider)
+		return Exit(2, "%s returned a run session without cleanup command", provider)
 	}
 	return nil
 }
@@ -1458,7 +1513,8 @@ type LeaseView = Server
 var providerRegistry = map[string]Provider{}
 
 func RegisterProvider(provider Provider) {
-	names := append([]string{provider.Name()}, provider.Aliases()...)
+	spec := provider.Spec()
+	names := append([]string{spec.Name}, spec.Aliases...)
 	for _, name := range names {
 		key := normalizeProviderName(name)
 		if key == "" {
@@ -1474,7 +1530,7 @@ func RegisterProvider(provider Provider) {
 func ProviderFor(name string) (Provider, error) {
 	provider := providerRegistry[normalizeProviderName(name)]
 	if provider == nil {
-		return nil, exit(2, "unknown provider %q", name)
+		return nil, Exit(2, "unknown provider %q", name)
 	}
 	return provider, nil
 }
@@ -1483,7 +1539,7 @@ func registeredProviders() []Provider {
 	seen := map[string]struct{}{}
 	providers := make([]Provider, 0, len(providerRegistry))
 	for _, provider := range providerRegistry {
-		name := normalizeProviderName(provider.Name())
+		name := normalizeProviderName(provider.Spec().Name)
 		if _, ok := seen[name]; ok {
 			continue
 		}
@@ -1491,7 +1547,7 @@ func registeredProviders() []Provider {
 		providers = append(providers, provider)
 	}
 	sort.Slice(providers, func(i, j int) bool {
-		return providers[i].Name() < providers[j].Name()
+		return providers[i].Spec().Name < providers[j].Spec().Name
 	})
 	return providers
 }
@@ -1501,7 +1557,7 @@ func RegisteredProviderNames() []string {
 	providers := registeredProviders()
 	names := make([]string, 0, len(providers))
 	for _, provider := range providers {
-		names = append(names, provider.Name())
+		names = append(names, provider.Spec().Name)
 	}
 	return names
 }
@@ -1561,7 +1617,7 @@ func registerProviderFlagsObserved(fs *flag.FlagSet, defaults Config, observe pr
 			before = map[string]bool{}
 			fs.VisitAll(func(item *flag.Flag) { before[item.Name] = true })
 		}
-		values[provider.Name()] = provider.RegisterFlags(fs, defaults)
+		values[provider.Spec().Name] = provider.RegisterFlags(fs, defaults)
 		if observe != nil {
 			var added []*flag.Flag
 			fs.VisitAll(func(item *flag.Flag) {
@@ -1586,7 +1642,7 @@ func providerNamesForHelp(include func(ProviderSpec) bool) []string {
 		if include != nil && !include(spec) {
 			continue
 		}
-		names = append(names, provider.Name())
+		names = append(names, spec.Name)
 	}
 	return names
 }
@@ -1599,16 +1655,16 @@ func applyProviderRoutingFlags(cfg *Config, fs *flag.FlagSet, values providerFla
 	if err != nil {
 		return err
 	}
-	cfg.Provider = provider.Name()
-	if providerSelectionIsAuthoritativeRoute(*cfg) {
+	cfg.Provider = provider.Spec().Name
+	if ProviderSelectionIsAuthoritativeRoute(*cfg) {
 		return nil
 	}
 	if router, ok := provider.(ProviderRouter); ok {
-		if err := router.RouteConfig(cfg, fs, values[provider.Name()]); err != nil {
+		if err := router.RouteConfig(cfg, fs, values[provider.Spec().Name]); err != nil {
 			return err
 		}
 		if resolved, err := ProviderFor(cfg.Provider); err == nil {
-			cfg.Provider = resolved.Name()
+			cfg.Provider = resolved.Spec().Name
 		}
 	}
 	return nil
@@ -1626,20 +1682,20 @@ func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues
 	if err != nil {
 		return err
 	}
-	before := provider.Name()
-	if err := provider.ApplyFlags(cfg, fs, values[provider.Name()]); err != nil {
+	before := provider.Spec().Name
+	if err := provider.ApplyFlags(cfg, fs, values[before]); err != nil {
 		return err
 	}
 	after, err := ProviderFor(cfg.Provider)
-	if err != nil || after.Name() == before {
+	if err != nil || after.Spec().Name == before {
 		if err == nil {
 			markCredentialDestinationFlagSources(cfg, fs)
 			applyCloudflareDynamicWorkersRepositoryCaps(cfg)
 		}
 		return err
 	}
-	cfg.Provider = after.Name()
-	if err := after.ApplyFlags(cfg, fs, values[after.Name()]); err != nil {
+	cfg.Provider = after.Spec().Name
+	if err := after.ApplyFlags(cfg, fs, values[after.Spec().Name]); err != nil {
 		return err
 	}
 	markCredentialDestinationFlagSources(cfg, fs)
@@ -1681,12 +1737,12 @@ func routeProviderFlagOverride(cfg *Config, fs *flag.FlagSet, values providerFla
 		if !ok {
 			continue
 		}
-		setProviderSelection(cfg, candidate.Name(), providerSelectionFlag)
-		if err := router.RouteConfig(cfg, fs, values[candidate.Name()]); err != nil {
+		setProviderSelection(cfg, candidate.Spec().Name, providerSelectionFlag)
+		if err := router.RouteConfig(cfg, fs, values[candidate.Spec().Name]); err != nil {
 			return true, err
 		}
 		if resolved, err := ProviderFor(cfg.Provider); err == nil {
-			cfg.Provider = resolved.Name()
+			cfg.Provider = resolved.Spec().Name
 		}
 		return true, nil
 	}
@@ -1695,7 +1751,7 @@ func routeProviderFlagOverride(cfg *Config, fs *flag.FlagSet, values providerFla
 
 func providerFamily(provider Provider) string {
 	spec := provider.Spec()
-	return firstNonBlank(spec.Family, provider.Name())
+	return firstNonBlank(spec.Family, spec.Name)
 }
 
 func anyFlagWasSet(fs *flag.FlagSet, names []string) bool {
@@ -1712,8 +1768,8 @@ func routeConfiguredProvider(cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	cfg.Provider = provider.Name()
-	if providerSelectionIsAuthoritativeRoute(*cfg) {
+	cfg.Provider = provider.Spec().Name
+	if ProviderSelectionIsAuthoritativeRoute(*cfg) {
 		return nil
 	}
 	if router, ok := provider.(ProviderRouter); ok {
@@ -1722,7 +1778,7 @@ func routeConfiguredProvider(cfg *Config) error {
 		}
 	}
 	if resolved, err := ProviderFor(cfg.Provider); err == nil {
-		cfg.Provider = resolved.Name()
+		cfg.Provider = resolved.Spec().Name
 	}
 	return nil
 }
@@ -1743,10 +1799,10 @@ func controllerProviderIdentityForConfig(cfg Config) (string, string, bool, erro
 	if err != nil {
 		return "", "", false, err
 	}
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	contract, ok := provider.(ControllerProviderContract)
 	if !ok {
-		return "", "", false, fmt.Errorf("provider=%s does not expose a controller routing scope", provider.Name())
+		return "", "", false, fmt.Errorf("provider=%s does not expose a controller routing scope", provider.Spec().Name)
 	}
 	scope, err := contract.ControllerProviderScope(cfg)
 	if err != nil {
@@ -1754,9 +1810,9 @@ func controllerProviderIdentityForConfig(cfg Config) (string, string, bool, erro
 	}
 	scope = strings.TrimSpace(scope)
 	if scope == "" {
-		return "", "", false, fmt.Errorf("provider=%s returned an empty controller routing scope", provider.Name())
+		return "", "", false, fmt.Errorf("provider=%s returned an empty controller routing scope", provider.Spec().Name)
 	}
-	return provider.Name(), scope, contract.SupportsControllerFixedLeaseID(cfg), nil
+	return provider.Spec().Name, scope, contract.SupportsControllerFixedLeaseID(cfg), nil
 }
 
 func validateControllerProviderScope(cfg Config) error {
@@ -1769,7 +1825,7 @@ func validateControllerProviderScope(cfg Config) error {
 		return err
 	}
 	if actual != expected {
-		return exit(2, "provider=%s controller routing scope changed; refusing lifecycle operation", provider)
+		return Exit(2, "provider=%s controller routing scope changed; refusing lifecycle operation", provider)
 	}
 	return nil
 }
@@ -1787,14 +1843,14 @@ func validateControllerCoordinatorRegistrationBinding(cfg Config) error {
 		return err
 	}
 	if actual != expected {
-		return exit(4, "coordinator registration binding changed before provider acquisition")
+		return Exit(4, "coordinator registration binding changed before provider acquisition")
 	}
 	return nil
 }
 
 func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if !providerSelectionIsActionable(cfg) {
-		return nil, exit(2, "%s", providerSelectionRequiredDiagnostic)
+		return nil, Exit(2, "%s", providerSelectionRequiredDiagnostic)
 	}
 	if rt.Stdout == nil {
 		rt.Stdout = io.Discard
@@ -1819,7 +1875,7 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	if err := validateControllerProviderScope(cfg); err != nil {
 		return nil, err
 	}
@@ -1841,7 +1897,7 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 }
 
 func configureProviderBackend(provider Provider, cfg *Config, rt Runtime) (Backend, error) {
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	applySingleProviderTargetDefault(cfg)
 	if err := validateProviderConfig(*cfg); err != nil {
 		return nil, err
@@ -1872,7 +1928,7 @@ func leaseOptionsFromConfig(cfg Config) LeaseOptions {
 		TargetOS:      cfg.TargetOS,
 		WindowsMode:   cfg.WindowsMode,
 		Class:         cfg.Class,
-		Pond:          normalizePondName(cfg.Pond),
+		Pond:          NormalizePondName(cfg.Pond),
 		ProviderScope: providerClaimScope(canonicalClaimProvider(cfg.Provider), cfg),
 		ServerType:    cfg.ServerType,
 		IdleTimeout:   cfg.IdleTimeout,
@@ -1895,65 +1951,56 @@ func leaseOptionsFromConfig(cfg Config) LeaseOptions {
 
 func validateActionsRunnerCapability(backend Backend, cfg Config) error {
 	if _, ok := backend.(SSHLeaseBackend); !ok {
-		return exit(2, "--actions-runner requires an SSH lease provider")
+		return Exit(2, "--actions-runner requires an SSH lease provider")
 	}
-	if name := backend.Spec().Name; name == "local-container" || name == "apple-container" || name == "multipass" {
-		return exit(2, "--actions-runner is not supported for provider=%s; use normal crabbox run or a remote SSH provider", name)
+	if spec := backend.Spec(); spec.ActionsRunnerUnsupported {
+		return Exit(2, "--actions-runner is not supported for provider=%s; use normal crabbox run or a remote SSH provider", spec.Name)
 	}
 	if !supportsGitHubActionsRunnerTarget(SSHTarget{TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode}) {
-		return exit(2, "--actions-runner requires target=linux or target=windows")
+		return Exit(2, "--actions-runner requires target=linux or target=windows")
 	}
 	return nil
-}
-
-func featureSetHas(features FeatureSet, feature Feature) bool {
-	for _, candidate := range features {
-		if candidate == feature {
-			return true
-		}
-	}
-	return false
 }
 
 func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error {
 	// NoSync is adapter-owned: SDK/CLI transports can skip sync without archive sync.
 	provider := spec.Name
-	archiveSync := featureSetHas(spec.Features, FeatureArchiveSync)
-	moduleRun := featureSetHas(spec.Features, FeatureModuleRun)
+	archiveSync := spec.Features.Has(FeatureArchiveSync)
+	moduleRun := spec.Features.Has(FeatureModuleRun)
 	if req.SyncOnly && !archiveSync {
-		return exit(2, "%s delegates sync; --sync-only is not supported", provider)
+		return Exit(2, "%s delegates sync; --sync-only is not supported", provider)
 	}
 	if req.ChecksumSync {
-		return exit(2, "%s delegates sync; --checksum is not supported", provider)
+		return Exit(2, "%s delegates sync; --checksum is not supported", provider)
 	}
 	if req.ForceSyncLarge && !archiveSync {
-		return exit(2, "%s delegates sync; --force-sync-large is not supported", provider)
+		return Exit(2, "%s delegates sync; --force-sync-large is not supported", provider)
 	}
 	if req.FullResync {
-		return exit(2, "%s delegates sync; --full-resync is not supported", provider)
+		return Exit(2, "%s delegates sync; --full-resync is not supported", provider)
 	}
 	if req.EnvHelper != "" {
-		return exit(2, "%s delegates run execution; --env-helper is not supported", provider)
+		return Exit(2, "%s delegates run execution; --env-helper is not supported", provider)
 	}
 	if req.CaptureStdout != "" {
-		return exit(2, "%s delegates run execution; --capture-stdout is not supported", provider)
+		return Exit(2, "%s delegates run execution; --capture-stdout is not supported", provider)
 	}
 	if req.CaptureStderr != "" {
-		return exit(2, "%s delegates run execution; --capture-stderr is not supported", provider)
+		return Exit(2, "%s delegates run execution; --capture-stderr is not supported", provider)
 	}
 	if req.CaptureOnFail {
-		return exit(2, "%s delegates run execution; --capture-on-fail is not supported", provider)
+		return Exit(2, "%s delegates run execution; --capture-on-fail is not supported", provider)
 	}
-	runArtifacts := featureSetHas(spec.Features, FeatureRunArtifacts)
-	runDownloads := featureSetHas(spec.Features, FeatureRunDownloads)
+	runArtifacts := spec.Features.Has(FeatureRunArtifacts)
+	runDownloads := spec.Features.Has(FeatureRunDownloads)
 	if len(req.Downloads) > 0 && !runDownloads {
-		return exit(2, "%s delegates run execution; --download is not supported", provider)
+		return Exit(2, "%s delegates run execution; --download is not supported", provider)
 	}
 	if len(req.ArtifactGlobs) > 0 && !runArtifacts {
-		return exit(2, "%s delegates run execution; --artifact-glob is not supported", provider)
+		return Exit(2, "%s delegates run execution; --artifact-glob is not supported", provider)
 	}
 	if len(req.RequiredArtifactGlobs) > 0 && !runArtifacts && !runDownloads {
-		return exit(2, "%s delegates run execution; --require-artifact is not supported", provider)
+		return Exit(2, "%s delegates run execution; --require-artifact is not supported", provider)
 	}
 	if runDownloads {
 		if err := validateDelegatedDownloads(req.Downloads); err != nil {
@@ -1965,23 +2012,23 @@ func rejectDelegatedSyncOptionsForSpec(spec ProviderSpec, req RunRequest) error 
 			return err
 		}
 	}
-	if req.EmitProof != "" && !featureSetHas(spec.Features, FeatureRunProof) {
-		return exit(2, "%s delegates run execution; --emit-proof is not supported", provider)
+	if req.EmitProof != "" && !spec.Features.Has(FeatureRunProof) {
+		return Exit(2, "%s delegates run execution; --emit-proof is not supported", provider)
 	}
 	if req.StopAfter != "" {
-		return exit(2, "%s delegates run execution; --stop-after is not supported", provider)
+		return Exit(2, "%s delegates run execution; --stop-after is not supported", provider)
 	}
 	if (req.Script != nil || req.ScriptRequested) && !moduleRun {
-		return exit(2, "%s delegates run execution; --script is not supported", provider)
+		return Exit(2, "%s delegates run execution; --script is not supported", provider)
 	}
 	if moduleRun && len(req.Command) > 0 {
-		return exit(2, "%s executes module source; trailing shell commands are not supported", provider)
+		return Exit(2, "%s executes module source; trailing shell commands are not supported", provider)
 	}
 	if moduleRun && req.ShellMode {
-		return exit(2, "%s executes module source; --shell is not supported", provider)
+		return Exit(2, "%s executes module source; --shell is not supported", provider)
 	}
 	if !req.FreshPR.Empty() {
-		return exit(2, "%s delegates sync; --fresh-pr is not supported", provider)
+		return Exit(2, "%s delegates sync; --fresh-pr is not supported", provider)
 	}
 	return nil
 }
@@ -1997,7 +2044,7 @@ func renderServerList(stdout io.Writer, servers []Server) {
 			extra = " " + orphan
 		}
 		fmt.Fprintf(stdout, "%-20s %-28s %-12s %-14s %-15s lease=%s slug=%s keep=%s target=%s%s\n",
-			s.DisplayID(), s.Name, s.Status, s.ServerType.Name, s.PublicNet.IPv4.IP, s.Labels["lease"], blank(serverSlug(s), "-"), s.Labels["keep"], s.Labels["target"], extra)
+			s.DisplayID(), s.Name, s.Status, s.ServerType.Name, s.PublicNet.IPv4.IP, s.Labels["lease"], blank(ServerSlug(s), "-"), s.Labels["keep"], s.Labels["target"], extra)
 	}
 }
 
@@ -2025,4 +2072,14 @@ func (a App) touchLeaseTargetBestEffort(ctx context.Context, cfg Config, lease L
 		return lease.Server
 	}
 	return server
+}
+
+// RuntimeForProviderOperation supplies the standard local command runner for
+// provider lifecycle capabilities that are invoked on Provider rather than an
+// already-configured Backend.
+func RuntimeForProviderOperation(stderr io.Writer) Runtime {
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	return Runtime{Stdout: io.Discard, Stderr: stderr, Clock: realClock{}, Exec: execCommandRunner{}}
 }

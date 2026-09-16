@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
-import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -14,11 +14,28 @@ const runIdPattern = /^image-qualification-[0-9]+-[0-9]+$/;
 const workerNamePattern = /^crabbox-image-qualification-[0-9]+-[0-9]+$/;
 const relayNamePattern = /^crabbox-image-qualification-relay-[0-9]+-[0-9]+$/;
 const maxRunMs = 120 * 60 * 1000;
+const retainedRunMs = 38 * 60 * 1000;
+const retainedCleanupMs = 8 * 60 * 1000;
 const controllerName = "crabbox-image-qualification-controller";
 const authorityName = "crabbox-aws-qualification-authority";
 const qualificationWorkflowPath = ".github/workflows/image-qualification.yml";
 const controllerSource = path.join(root, "scripts/image-qualification-controller-worker.mjs");
 const relaySource = path.join(root, "scripts/image-qualification-relay-worker.mjs");
+const imageCapsulePaths = [
+  "internal/cli/actions.go",
+  "recipes/devtools/v1/linux-x86_64.json",
+  "recipes/devtools/v1/recipe.schema.json",
+  "recipes/linux/v1/linux-builder.json",
+  "recipes/linux/v1/linux-minimal.json",
+  "recipes/linux/v1/manifest.schema.json",
+  "recipes/linux/v1/profile.schema.json",
+  "scripts/devtools-image-contract.mjs",
+  "scripts/devtools-image-smoke-linux.sh",
+  "scripts/generate-linux-readiness.mjs",
+  "scripts/install-linux-developer-tools.sh",
+  "scripts/linux-readiness.generated.sh",
+  "scripts/mint-aws-devtools-image.sh",
+];
 
 function relayNameForRun(runId) {
   const match = runId.match(/^image-qualification-([0-9]+-[0-9]+)$/);
@@ -84,6 +101,29 @@ function objectAt(value, name) {
     throw new Error(`${name} is invalid`);
   }
   return value;
+}
+
+export function retainedImageFromEnv() {
+  const mode = process.env.QUALIFICATION_MODE || "mint";
+  const names = [
+    "QUALIFICATION_RETAINED_IMAGE_ID",
+    "QUALIFICATION_RETAINED_SNAPSHOT_ID",
+    "QUALIFICATION_RETAINED_SOURCE_SHA",
+    "QUALIFICATION_RETAINED_CAPSULE_SHA256",
+  ];
+  if (mode === "mint") {
+    if (names.some((name) => process.env[name])) {
+      throw new Error("mint mode cannot accept retained-image inputs");
+    }
+    return undefined;
+  }
+  if (mode !== "retained") throw new Error("qualification mode is invalid");
+  return {
+    imageId: required(names[0], /^ami-[0-9a-f]+$/),
+    snapshotId: required(names[1], /^snap-[0-9a-f]+$/),
+    sourceSha: required(names[2], sha40),
+    capsuleSha256: required(names[3], sha64),
+  };
 }
 
 function imageRecord(value, name) {
@@ -204,6 +244,33 @@ export function verifyCatalogRollbackEvidence({
   };
 }
 
+export function verifyRetainedSelection(lease, promotion, region) {
+  const image = imageRecord(objectAt(promotion, "promotion receipt").image, "promotion image");
+  if (
+    !/^cbx_[A-Za-z0-9_-]+$/.test(lease?.id ?? "") ||
+    lease.provider !== "aws" ||
+    lease.target !== "linux" ||
+    lease.region !== region ||
+    lease.serverType !== "t3.small" ||
+    !/^i-[0-9a-f]+$/.test(lease.cloudID ?? "") ||
+    lease.image?.id !== image.id ||
+    lease.image?.source !== "promoted" ||
+    lease.image?.kind !== "aws-ami" ||
+    lease.image?.region !== region ||
+    lease.image?.revision !== image.revision
+  ) {
+    throw new Error("lease did not record the exact normally selected promotion revision");
+  }
+  return {
+    normalSelection: true,
+    exactPromotedRevision: true,
+    leaseDigest: digest(lease.id),
+    instanceDigest: digest(lease.cloudID),
+    selectedImageDigest: digest(image.id),
+    selectedRevisionDigest: digest(image.revision),
+  };
+}
+
 async function github(pathname) {
   const token = required("GH_TOKEN");
   const response = await fetch(`https://api.github.com${pathname}`, {
@@ -224,7 +291,9 @@ export function workflowRunPathMatches(value, expected, branch) {
 }
 
 export function normalizeArtifactDigest(value) {
-  const digest = String(value ?? "").trim().toLowerCase();
+  const digest = String(value ?? "")
+    .trim()
+    .toLowerCase();
   if (/^[0-9a-f]{64}$/.test(digest)) return `sha256:${digest}`;
   if (/^sha256:[0-9a-f]{64}$/.test(digest)) return digest;
   throw new Error("candidate artifact digest is absent or invalid");
@@ -267,6 +336,7 @@ async function candidateArtifact(repository, workflowSha, defaultBranch) {
 }
 
 export async function verifyCandidateIdentity({ artifact = false, cleanup = false } = {}) {
+  retainedImageFromEnv();
   const repository = required("GITHUB_REPOSITORY", /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
   const number = required("QUALIFICATION_PULL_REQUEST", /^[1-9][0-9]*$/);
   const candidateSha = required("QUALIFICATION_CANDIDATE_SHA", sha40);
@@ -320,18 +390,110 @@ function checkoutSha(directory) {
   }).trim();
 }
 
+function imageCapsuleRecords(directory) {
+  const entries = execFileSync("git", ["ls-tree", "-z", "HEAD", "--", ...imageCapsulePaths], {
+    cwd: directory,
+    encoding: "utf8",
+  })
+    .split("\0")
+    .filter(Boolean);
+  const records = entries
+    .map((entry) => {
+      const match = entry.match(/^(100644|100755) blob ([0-9a-f]{40})\t(.+)$/);
+      if (!match || !imageCapsulePaths.includes(match[3])) {
+        throw new Error("retained capsule contains an invalid Git entry");
+      }
+      const file = path.join(directory, match[3]);
+      const stat = fs.lstatSync(file);
+      if (
+        !stat.isFile() ||
+        stat.size > 1024 * 1024 ||
+        Boolean(stat.mode & 0o111) !== (match[1] === "100755")
+      ) {
+        throw new Error("retained capsule input is not a bounded regular file");
+      }
+      const data = fs.readFileSync(file);
+      const blob = crypto
+        .createHash("sha1")
+        .update(`blob ${data.length}\0`)
+        .update(data)
+        .digest("hex");
+      if (blob !== match[2])
+        throw new Error("retained capsule input differs from its exact checkout");
+      return { path: match[3], mode: match[1], blob, bytes: data.length, sha256: digest(data) };
+    })
+    .sort((left, right) => left.path.localeCompare(right.path));
+  if (canonical(records.map((record) => record.path)) !== canonical(imageCapsulePaths)) {
+    throw new Error("retained capsule requires all 13 source inputs");
+  }
+  return records;
+}
+
+export function createRetainedCapsule(sourceDir, candidateDir, receiptFile) {
+  const retained = retainedImageFromEnv();
+  if (!retained) throw new Error("retained capsule requires retained mode");
+  const candidateSha = required("QUALIFICATION_CANDIDATE_SHA", sha40);
+  if (checkoutSha(sourceDir) !== retained.sourceSha || checkoutSha(candidateDir) !== candidateSha) {
+    throw new Error("retained capsule checkout SHA mismatch");
+  }
+  const sourceFiles = imageCapsuleRecords(sourceDir);
+  const candidateFiles = imageCapsuleRecords(candidateDir);
+  const sourceCapsuleSha256 = digest(canonical(sourceFiles));
+  if (sourceCapsuleSha256 !== retained.capsuleSha256) {
+    throw new Error("retained source capsule differs from the reviewed receipt");
+  }
+  // actions.go is the CLI proof identity, not a baked input. Preserve both
+  // records without pretending a newly built CLI equals the historical binary.
+  const baked = (records) => records.filter((record) => record.path !== "internal/cli/actions.go");
+  if (canonical(baked(sourceFiles)) !== canonical(baked(candidateFiles))) {
+    throw new Error("candidate changed a retained image recipe, runtime, or proof input");
+  }
+  const receipt = {
+    version: 1,
+    sourceSha: retained.sourceSha,
+    candidateSha,
+    sourceCapsuleSha256,
+    sourceFiles,
+    candidateFiles,
+    bakedInputsIdentical: true,
+  };
+  writeJSON(receiptFile, receipt);
+  return receipt;
+}
+
+function verifyRetainedCapsule(artifactDir, candidateSha) {
+  const retained = retainedImageFromEnv();
+  if (!retained) return;
+  const receipt = readJSON(path.join(artifactDir, "retained-capsule.json"));
+  if (
+    receipt.version !== 1 ||
+    receipt.sourceSha !== retained.sourceSha ||
+    receipt.candidateSha !== candidateSha ||
+    receipt.sourceCapsuleSha256 !== retained.capsuleSha256 ||
+    digest(canonical(receipt.sourceFiles)) !== retained.capsuleSha256 ||
+    canonical(receipt.sourceFiles?.map((entry) => entry.path)) !== canonical(imageCapsulePaths) ||
+    canonical(receipt.candidateFiles?.map((entry) => entry.path)) !==
+      canonical(imageCapsulePaths) ||
+    canonical(receipt.sourceFiles.slice(1)) !== canonical(receipt.candidateFiles.slice(1)) ||
+    receipt.bakedInputsIdentical !== true
+  ) {
+    throw new Error("retained capsule identity mismatch");
+  }
+  for (const record of receipt.candidateFiles) {
+    const file = path.join(artifactDir, "candidate", record.path);
+    if (fs.existsSync(file) && digest(fs.readFileSync(file)) !== record.sha256) {
+      throw new Error("candidate runtime differs from retained capsule");
+    }
+  }
+}
+
 function trackedWorkerBuildInputs(directory) {
   return execFileSync("git", ["ls-files", "-z", "--", "worker"], {
     cwd: directory,
     encoding: "utf8",
   })
     .split("\0")
-    .filter(
-      (file) =>
-        file &&
-        !file.startsWith("worker/src/") &&
-        !file.startsWith("worker/test/"),
-    )
+    .filter((file) => file && !file.startsWith("worker/src/") && !file.startsWith("worker/test/"))
     .sort();
 }
 
@@ -377,10 +539,7 @@ export function prepareCandidateBuild(
   if (!sha40.test(candidateSha) || !sha40.test(workflowSha)) {
     throw new Error("invalid protected build SHA");
   }
-  if (
-    checkoutSha(harnessDir) !== workflowSha ||
-    checkoutSha(candidateDir) !== candidateSha
-  ) {
+  if (checkoutSha(harnessDir) !== workflowSha || checkoutSha(candidateDir) !== candidateSha) {
     throw new Error("protected build checkout SHA mismatch");
   }
   // Candidate source remains data: every executable build control comes from
@@ -442,6 +601,7 @@ export function createManifest(candidateDir, artifactDir, candidateSha, workflow
   const actualSha = checkoutSha(candidateDir);
   if (actualSha !== candidateSha) throw new Error("candidate checkout SHA mismatch");
   verifyBuildReceipt(candidateDir, artifactDir, candidateSha, workflowSha);
+  verifyRetainedCapsule(artifactDir, candidateSha);
   const files = filesUnder(artifactDir)
     .filter((file) => path.basename(file) !== "manifest.json")
     .map((file) => ({
@@ -514,6 +674,25 @@ export function verifyManifest(artifactDir, expectedCandidate, expectedWorkflow)
   );
   if (actual.some((file) => !expected.has(file)))
     throw new Error("candidate artifact has extra files");
+  verifyRetainedCapsule(artifactDir, expectedCandidate);
+  if (retainedImageFromEnv()) {
+    const installer = path.join(artifactDir, "candidate/scripts/install-linux-developer-tools.sh");
+    if (fs.statSync(installer).size > 256 * 1024) {
+      throw new Error("candidate retained installer exceeds the source byte limit");
+    }
+    const source = fs.readFileSync(installer, "utf8");
+    // Match the reviewed multiline generator layout without sourcing candidate
+    // code in credentialed admission. This checks compatibility, not shell safety.
+    for (const name of ["node_pnpm", "go", "bun", "rust", "uv"]) {
+      const declaration = new RegExp(
+        `^${name}_smoke_script\\(\\) \\{\\r?\\n(?:[ \\t]+[^\\r\\n]*\\r?\\n)+\\}\\r?$`,
+        "m",
+      );
+      if (!declaration.test(source)) {
+        throw new Error(`candidate retained installer lacks ${name}_smoke_script generator`);
+      }
+    }
+  }
   return manifest;
 }
 
@@ -533,22 +712,84 @@ export function verifyPublisherContract(source) {
   if (requiredPatterns.some((pattern) => !pattern.test(source))) {
     throw new Error("candidate publisher lacks the transactional rollback contract");
   }
-  const ordered = [
+  // Admission checks the audited publisher layout, not arbitrary shell semantics.
+  // Keep failure handling inside cleanup: promotion stays armed through teardown.
+  const cleanup = source.match(/^cleanup\(\) \{\n([\s\S]*?)^\}\ntrap cleanup EXIT$/m);
+  if (!cleanup) {
+    throw new Error("candidate publisher cleanup contract is missing");
+  }
+  const main = source.slice(cleanup.index + cleanup[0].length);
+  const rollback = `  if [[ "$rollback_pending" == "1" && "$exit_status" != "0" ]]; then
+    rollback_pending=0
+    if rollback_promoted_image "$promotion_log"; then
+      rollback_status="succeeded"
+    else
+      rollback_status="failed"
+      finalizer_status=1
+    fi
+  fi`;
+  const cleanupOrdered = [
+    "  local exit_status=$?\n  trap - EXIT",
+    rollback,
+    '  if [[ "$keep_lease" != "1" ]]; then',
+    '    cleanup_leases=("$measurement_lease" "$promoted_lease" "$candidate_lease" "$source_lease")',
+    `      if ! "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease"; then
+        cleanup_status="failed"
+        finalizer_status=1
+      fi`,
+    `  if [[ "$exit_status" == "0" && "$finalizer_status" != "0" ]]; then
+    exit_status="$finalizer_status"
+  fi`,
+    rollback,
+    '  if [[ "$measured" == "1" && -n "$measurement_dir" && -n "$public_outcome" ]]; then',
+    '    outcome_candidate="$(mktemp "${public_outcome}.candidate.XXXXXX")" || proof_status=$?',
+    `    node "$ROOT/scripts/devtools-image-proof.mjs" finalize \\
+      "$outcome_candidate" "$measurement_dir/policy.json" "$measurement_dir" \\
+      "$outcome_stage" "$exit_status" "$rollback_status" "$cleanup_status" "$receipt_path" ||
+      proof_status=$?`,
+    '      mv -f "$outcome_candidate" "$public_outcome" || proof_status=$?',
+    '    if [[ "$proof_status" != "0" ]]; then',
+    `      if [[ "$exit_status" == "0" ]]; then
+        exit_status="$proof_status"
+      fi`,
+    `      if [[ "$rollback_pending" == "1" ]]; then
+        rollback_pending=0
+        if rollback_promoted_image "$promotion_log"; then
+          rollback_status="succeeded"
+        else
+          rollback_status="failed"
+          finalizer_status=1
+        fi
+      fi`,
+    '    elif [[ "$exit_status" == "0" ]]; then\n      rollback_pending=0',
+    '  exit "$exit_status"\n',
+  ];
+  const mainOrdered = [
     'run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$candidate_lease"',
     'candidate_lease=""',
     "rollback_pending=1",
     'run_json_tee "$promotion_log" "$CRABBOX_BIN" "${promote_args[@]}"',
     'promoted_lease="$(warmup promoted)"',
     'smoke "$promoted_lease"',
-    "rollback_pending=0",
   ];
-  let cursor = 0;
-  for (const marker of ordered) {
-    const next = source.indexOf(marker, cursor);
-    if (next === -1) {
-      throw new Error("candidate publisher rollback ordering is not admissible");
+  for (const [text, ordered] of [
+    [cleanup[1], cleanupOrdered],
+    [main, mainOrdered],
+  ]) {
+    let cursor = 0;
+    for (const marker of ordered) {
+      const next = text.indexOf(marker, cursor);
+      if (next === -1) {
+        throw new Error("candidate publisher rollback ordering is not admissible");
+      }
+      cursor = next + marker.length;
     }
-    cursor = next + marker.length;
+  }
+  if (
+    (cleanup[1].match(/^\s*rollback_pending=0$/gm) ?? []).length !== 4 ||
+    /^\s*rollback_pending=0$/m.test(main.slice(main.indexOf("rollback_pending=1")))
+  ) {
+    throw new Error("candidate publisher disarms rollback outside cleanup outcomes");
   }
 }
 
@@ -650,7 +891,10 @@ class Cloudflare {
 }
 
 function qualificationConfig() {
-  const rootGB = Number(required("QUALIFICATION_ROOT_GB", /^(?:[89]|1[0-9]|20)$/));
+  const retainedImage = retainedImageFromEnv();
+  const rootGB = retainedImage
+    ? 400
+    : Number(required("QUALIFICATION_ROOT_GB", /^(?:[89]|1[0-9]|20)$/));
   return {
     region: required("QUALIFICATION_AWS_REGION", /^[a-z]{2}-[a-z]+-[0-9]+$/),
     subnetId: required("QUALIFICATION_SUBNET_ID", /^subnet-[0-9a-f]+$/),
@@ -658,12 +902,148 @@ function qualificationConfig() {
     baseAmiId: required("QUALIFICATION_BASE_AMI_ID", /^ami-[0-9a-f]+$/),
     rootGB,
     instanceTypes: ["t3.small", "t3a.small"],
-    maxMinutes: 120,
+    maxMinutes: retainedImage ? 38 : 120,
     maxMonthlyUSD: 10,
     maxConcurrentInstances: 1,
-    maxLaunches: 3,
+    maxLaunches: retainedImage ? 1 : 3,
     fastSnapshotRestore: false,
+    ...(retainedImage ? { retainedImage } : {}),
   };
+}
+
+function qualificationHandoff(identityCheck, manifestSha256, startsAt) {
+  const config = qualificationConfig();
+  const runId = `image-qualification-${identityCheck.runId}-${required("GITHUB_RUN_ATTEMPT")}`;
+  const expiresAt = new Date(
+    Date.parse(startsAt) + (config.retainedImage ? retainedRunMs : maxRunMs),
+  ).toISOString();
+  return {
+    version: 1,
+    repository: identityCheck.repository,
+    workflowSha: identityCheck.workflowSha,
+    candidateSha: identityCheck.candidateSha,
+    runId,
+    attempt: 1,
+    owner: `${runId}@example.invalid`,
+    candidateWorker: `crabbox-${runId}`,
+    relayWorker: relayNameForRun(runId),
+    candidateArtifactId: identityCheck.artifactId,
+    candidateArtifactDigest: identityCheck.artifactDigest,
+    manifestSha256,
+    authoritySha: required("QUALIFICATION_AUTHORITY_SHA", sha40),
+    authorityVersion: boundedString("QUALIFICATION_AUTHORITY_VERSION", 64),
+    policyHash: required("QUALIFICATION_EXPECTED_POLICY_HASH", sha64),
+    // Private deployment coordinates are inputs, never published handoff fields.
+    configurationSha256: digest(
+      canonical({
+        account: required("CLOUDFLARE_ACCOUNT_ID", /^[0-9a-f]{32}$/),
+        config,
+      }),
+    ),
+    mode: config.retainedImage ? "retained" : "mint",
+    ...(config.retainedImage ? { retainedCapsuleSha256: config.retainedImage.capsuleSha256 } : {}),
+    startsAt,
+    workExpiresAt: new Date(
+      Date.parse(expiresAt) - (config.retainedImage ? retainedCleanupMs : 0),
+    ).toISOString(),
+    expiresAt,
+  };
+}
+
+function assertHandoffWindow(handoff) {
+  const now = Date.now();
+  if (
+    !Number.isFinite(Date.parse(handoff.startsAt)) ||
+    Date.parse(handoff.startsAt) > now ||
+    now >= Date.parse(handoff.workExpiresAt)
+  ) {
+    throw new Error("qualification handoff work window is not active");
+  }
+}
+
+function publishHandoff(identityCheck, manifest) {
+  for (const name of [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "CLOUDFLARE_API_TOKEN",
+    "QUALIFICATION_CONTROLLER_TOKEN",
+  ]) {
+    if (Object.hasOwn(process.env, name)) throw new Error(`${name} must be absent from preparation`);
+  }
+  const handoff = qualificationHandoff(
+    identityCheck,
+    manifest.manifestSha256,
+    new Date(Date.now()).toISOString(),
+  );
+  const directory = path.resolve(required("QUALIFICATION_HANDOFF_DIR"));
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  // Never replace a prepared identity, even when a caller repeats admission locally.
+  fs.writeFileSync(path.join(directory, "handoff.json"), `${canonical(handoff)}\n`, {
+    flag: "wx",
+    mode: 0o600,
+  });
+  let projection;
+  if (handoff.mode === "retained") {
+    projection = {
+      authority_owner: handoff.owner,
+      run_id: handoff.runId,
+      source_sha: handoff.candidateSha,
+      starts_at: handoff.startsAt,
+      creation_expires_at: handoff.workExpiresAt,
+      cleanup_expires_at: handoff.expiresAt,
+    };
+    fs.writeFileSync(path.join(directory, "iam-inputs.json"), `${canonical(projection)}\n`, {
+      flag: "wx",
+      mode: 0o600,
+    });
+  }
+  appendOutput("handoff_sha256", digest(canonical(handoff)));
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    fs.appendFileSync(
+      process.env.GITHUB_STEP_SUMMARY,
+      `## Qualification handoff\n\nRun: \`${handoff.runId}\`\n\n` +
+        `Work cutoff: ${handoff.workExpiresAt}; absolute expiry: ${handoff.expiresAt}.\n\n` +
+        "Preparation, credential delivery, approvals and deployment consume this window. " +
+        "Approve deployment only after the exact binding and cleanup custody are verified. " +
+        "Expired preparation requires a newly authorized run; it cannot be extended.\n\n" +
+        (projection ? `\`\`\`json\n${JSON.stringify(projection, null, 2)}\n\`\`\`\n` : ""),
+      { mode: 0o600 },
+    );
+  }
+}
+
+async function verifyHandoff(identityCheck, manifestSha256) {
+  const handoff = readJSON(path.join(required("QUALIFICATION_HANDOFF_DIR"), "handoff.json"));
+  const startsAt = handoff.startsAt;
+  if (
+    typeof startsAt !== "string" ||
+    !Number.isFinite(Date.parse(startsAt)) ||
+    new Date(startsAt).toISOString() !== startsAt
+  ) {
+    throw new Error("qualification handoff start is invalid");
+  }
+  const expected = qualificationHandoff(identityCheck, manifestSha256, startsAt);
+  if (
+    canonical(handoff) !== canonical(expected) ||
+    digest(canonical(handoff)) !== required("QUALIFICATION_HANDOFF_SHA256", sha64)
+  ) {
+    throw new Error("qualification handoff identity changed");
+  }
+  const artifactId = required("QUALIFICATION_HANDOFF_ARTIFACT_ID", /^[1-9][0-9]*$/);
+  const artifact = await github(`/repos/${identityCheck.repository}/actions/artifacts/${artifactId}`);
+  if (
+    String(artifact.id) !== artifactId ||
+    artifact.name !== `image-qualification-handoff-${identityCheck.runId}-1` ||
+    artifact.expired !== false ||
+    artifact.digest !== normalizeArtifactDigest(required("QUALIFICATION_HANDOFF_ARTIFACT_DIGEST")) ||
+    String(artifact.workflow_run?.id) !== identityCheck.runId ||
+    artifact.workflow_run?.head_sha !== identityCheck.workflowSha
+  ) {
+    throw new Error("qualification handoff artifact changed");
+  }
+  assertHandoffWindow(handoff);
+  return handoff;
 }
 
 function candidateBindings(identity, adminToken, sharedToken, config) {
@@ -675,7 +1055,7 @@ function candidateBindings(identity, adminToken, sharedToken, config) {
     CRABBOX_WORKSPACE_PREWARM_COUNT: "0",
     CRABBOX_AWS_REGION: config.region,
     CRABBOX_CAPACITY_REGIONS: config.region,
-    CRABBOX_AWS_AMI: config.baseAmiId,
+    CRABBOX_AWS_AMI: config.retainedImage ? "" : config.baseAmiId,
     CRABBOX_AWS_SUBNET_ID: config.subnetId,
     CRABBOX_AWS_SECURITY_GROUP_ID: config.securityGroupId,
     CRABBOX_AWS_ROOT_GB: String(config.rootGB),
@@ -757,6 +1137,9 @@ function relayMetadata(
       { name: "QUALIFICATION_OWNER", type: "plain_text", text: owner },
       { name: "QUALIFICATION_ORG", type: "plain_text", text: "image-qualification" },
       { name: "QUALIFICATION_EXPIRES_AT", type: "plain_text", text: expiresAt },
+      ...(config.retainedImage
+        ? [{ name: "QUALIFICATION_MODE", type: "plain_text", text: "retained" }]
+        : []),
       { name: "CANDIDATE", type: "service", service: candidateWorker },
     ],
   };
@@ -796,6 +1179,7 @@ function executionManifest(identity) {
     policyHash: identity.policyHash,
     enrolledAt: identity.enrolledAt,
     expiresAt: identity.expiresAt,
+    ...(identity.retainedImage ? { retainedImage: identity.retainedImage } : {}),
   };
 }
 
@@ -806,6 +1190,7 @@ export function executionManifestDigest(identity) {
 function qualificationExpectedFromEnv({ optional = false } = {}) {
   const runId = process.env.QUALIFICATION_EXPECTED_RUN_ID?.trim() ?? "";
   if (optional && !runId) return undefined;
+  const retainedImage = retainedImageFromEnv();
   return {
     runId: required("QUALIFICATION_EXPECTED_RUN_ID", runIdPattern),
     candidateSha: required("QUALIFICATION_EXPECTED_CANDIDATE_SHA", sha40),
@@ -823,6 +1208,7 @@ function qualificationExpectedFromEnv({ optional = false } = {}) {
     enrolledAt: required("QUALIFICATION_EXPECTED_ENROLLED_AT"),
     expiresAt: required("QUALIFICATION_EXPECTED_EXPIRES_AT"),
     executionManifestDigest: required("QUALIFICATION_EXPECTED_EXECUTION_MANIFEST_DIGEST", sha64),
+    ...(retainedImage ? { retainedImage } : {}),
   };
 }
 
@@ -900,6 +1286,8 @@ async function verifyExecutionDeployment(cf, expected) {
     transport?.props?.candidateWorker !== expected.candidateWorker ||
     transport?.props?.deploymentHash !== expected.deploymentHash ||
     transport?.props?.expiresAt !== expected.expiresAt ||
+    canonical(transport?.props?.retainedImage ?? null) !==
+      canonical(expected.retainedImage ?? null) ||
     relayExpiry?.text !== expected.expiresAt ||
     digest(canonical(relayBindings)) !== expected.relayBindingDigest ||
     relayBindings.some(
@@ -997,13 +1385,10 @@ async function deploy() {
   verifyPublisherContract(
     fs.readFileSync(path.join(artifactDir, "candidate/scripts/mint-aws-devtools-image.sh"), "utf8"),
   );
-  const runId = `image-qualification-${required("GITHUB_RUN_ID", /^[1-9][0-9]*$/)}-${required("GITHUB_RUN_ATTEMPT", /^[1-9][0-9]*$/)}`;
-  const candidateWorker = `crabbox-${runId}`;
+  const handoff = await verifyHandoff(identityCheck, manifest.manifestSha256);
+  const { runId, candidateWorker, relayWorker, owner, expiresAt } = handoff;
   if (!workerNamePattern.test(candidateWorker)) throw new Error("candidate Worker name is invalid");
-  const relayWorker = relayNameForRun(runId);
   if (!relayNamePattern.test(relayWorker)) throw new Error("relay Worker name is invalid");
-  const expiresAt = new Date(Date.now() + maxRunMs).toISOString();
-  const owner = `${runId}@example.invalid`;
   const config = qualificationConfig();
   const authoritySha = required("QUALIFICATION_AUTHORITY_SHA", sha40);
   const authorityVersion = boundedString("QUALIFICATION_AUTHORITY_VERSION", 64);
@@ -1014,6 +1399,7 @@ async function deploy() {
     candidateSha: identityCheck.candidateSha,
     candidateWorker,
     expiresAt,
+    ...(config.retainedImage ? { retainedImage: config.retainedImage } : {}),
   };
   const adminToken = crypto.randomBytes(32).toString("hex");
   const sharedToken = crypto.randomBytes(32).toString("hex");
@@ -1144,6 +1530,7 @@ async function deploy() {
     assertWorkerIsolation(cf, controllerName, 0, true),
   ]);
   await verifyCandidateIdentity({ artifact: true });
+  assertHandoffWindow(handoff);
   const record = await controllerCall(controllerURL, controllerToken, "claim", { identity });
   if (record.runId !== runId || record.cleanupState !== "claimed")
     throw new Error("authority claim readback mismatch");
@@ -1166,6 +1553,7 @@ async function deploy() {
   const proofDir = path.resolve(required("QUALIFICATION_PROOF_DIR"));
   writeJSON(path.join(proofDir, "deployment.json"), {
     version: 1,
+    handoffSha256: digest(canonical(handoff)),
     runId,
     candidateSha: identity.candidateSha,
     workflowSha: identityCheck.workflowSha,
@@ -1239,7 +1627,20 @@ async function deploy() {
 
 async function arm() {
   const expected = qualificationExpectedFromEnv();
-  await verifyCandidateIdentity({ artifact: true });
+  const identityCheck = await verifyCandidateIdentity({ artifact: true });
+  const handoff = await verifyHandoff(identityCheck, expected.manifestSha256);
+  for (const field of [
+    "runId",
+    "candidateSha",
+    "candidateWorker",
+    "relayWorker",
+    "expiresAt",
+    "authoritySha",
+    "authorityVersion",
+    "policyHash",
+  ]) {
+    if (expected[field] !== handoff[field]) throw new Error("deployment differs from prepared handoff");
+  }
   const cf = cloudflareFromEnv();
   await verifyExecutionDeployment(cf, expected);
   const token = required("QUALIFICATION_CONTROLLER_TOKEN");
@@ -1259,10 +1660,8 @@ async function arm() {
     runId: expected.runId,
   });
   verifyAttestationIdentity(attestation, expected, { finalized: false });
+  assertHandoffWindow(handoff);
   const armedAt = new Date().toISOString();
-  if (Date.parse(armedAt) >= Date.parse(expected.expiresAt)) {
-    throw new Error("qualification expired before protected execution admission");
-  }
   const proofDir = path.resolve(required("QUALIFICATION_PROOF_DIR"));
   writeJSON(path.join(proofDir, "execution-manifest.json"), {
     version: 1,
@@ -1327,11 +1726,7 @@ async function deleteCandidate(cf, worker) {
 
 async function deleteRelay(cf, worker) {
   if (!relayNamePattern.test(worker)) throw new Error("refusing to delete an unexpected relay");
-  const existing = await cf.request(
-    `/workers/scripts/${worker}/settings`,
-    {},
-    { allow404: true },
-  );
+  const existing = await cf.request(`/workers/scripts/${worker}/settings`, {}, { allow404: true });
   if (existing === undefined) {
     if ((await namespaceResidue(cf, worker)) !== 0) {
       throw new Error("qualification relay Durable Object residue remains");
@@ -1557,7 +1952,9 @@ async function cleanupRun({
       const message = `idle cleanup: ${error instanceof Error ? error.message : String(error)}`;
       return {
         result: "failed",
-        failure: initialQualificationFailure ? `${initialQualificationFailure}; ${message}` : message,
+        failure: initialQualificationFailure
+          ? `${initialQualificationFailure}; ${message}`
+          : message,
       };
     }
     if (initialQualificationFailure || requireProof) {
@@ -1608,7 +2005,11 @@ async function cleanupRun({
     if (requireProof) {
       try {
         verifyAttestationIdentity(firstAttestation, expected, { finalized: true });
-        verifyQualificationEvidence(firstAttestation, readExecutionProof());
+        verifyQualificationEvidence(
+          firstAttestation,
+          readExecutionProof(),
+          expected?.retainedImage,
+        );
       } catch (error) {
         recordQualificationFailure(error);
       }
@@ -1686,7 +2087,7 @@ function readExecutionProof() {
   };
 }
 
-export function verifyQualificationEvidence(attestation, proof) {
+export function verifyQualificationEvidence(attestation, proof, retainedImage) {
   const operations = attestation?.operations ?? [];
   const millisecondTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
   const probeStarted = proof?.spoof?.startedAt ?? "";
@@ -1708,9 +2109,7 @@ export function verifyQualificationEvidence(attestation, proof) {
     }
     return timestamps.some((timestamp) => {
       const parsed = Date.parse(timestamp);
-      return (
-        !Number.isFinite(parsed) || (parsed >= probeStartedAt && parsed <= probeCompletedAt)
-      );
+      return !Number.isFinite(parsed) || (parsed >= probeStartedAt && parsed <= probeCompletedAt);
     });
   });
   if (
@@ -1741,7 +2140,32 @@ export function verifyQualificationEvidence(attestation, proof) {
       );
   const launches = accepted("RunInstances");
   const images = accepted("CreateImage");
-  if (
+  const launchDispatches = operations
+    .filter((operation) => operation.action === "RunInstances")
+    .flatMap((operation) => operation.signerDispatches ?? []);
+  if (retainedImage) {
+    if (
+      launches.length !== 1 ||
+      launchDispatches.length !== 1 ||
+      operations.some(
+        (operation) => operation.action === "CreateImage" && operation.signerDispatches?.length,
+      ) ||
+      proof?.execution?.normalSelection !== true ||
+      proof?.execution?.exactPromotedRevision !== true ||
+      proof?.execution?.selectedImageDigest !== digest(retainedImage.imageId) ||
+      proof?.execution?.selectedRevisionDigest !== proof?.catalog?.failedRevisionDigest ||
+      !attestation.finalReceipt?.verification?.some(
+        (entry) => entry.action === "RetainedImagePreserved" && entry.outcome === "accepted",
+      ) ||
+      attestation.finalReceipt?.cleanupAttempts?.some(
+        (entry) => entry.action === "DeregisterImage" || entry.action === "DeleteSnapshot",
+      )
+    ) {
+      throw new Error(
+        "attestation does not prove one retained launch and borrowed-image preservation",
+      );
+    }
+  } else if (
     launches.length !== 3 ||
     images.length !== 1 ||
     !(
@@ -1757,7 +2181,10 @@ export function verifyQualificationEvidence(attestation, proof) {
     !attestation.finalized ||
     !receipt ||
     receipt.failureCodes?.length !== 0 ||
-    (receipt.resourcesAtStart?.images ?? 0) < 1 ||
+    (retainedImage
+      ? (receipt.resourcesAtStart?.images ?? 0) !== 0 ||
+        (receipt.resourcesAtStart?.snapshots ?? 0) !== 0
+      : (receipt.resourcesAtStart?.images ?? 0) < 1) ||
     proof?.fsr?.rejected !== true ||
     proof?.catalog?.seededDefaultReadback !== true ||
     proof?.catalog?.priorDefaultImageRestored !== true ||
@@ -1772,8 +2199,8 @@ export function verifyQualificationEvidence(attestation, proof) {
     !sha64.test(proof?.catalog?.restoredRevisionDigest ?? "") ||
     proof?.execution?.mintExit !== 86 ||
     proof?.execution?.injectedAfterPromotedSmoke !== true ||
-    proof?.execution?.launchCount !== 3 ||
-    proof?.execution?.smokeCount < 3 ||
+    proof?.execution?.launchCount !== (retainedImage ? 1 : 3) ||
+    proof?.execution?.smokeCount < (retainedImage ? 1 : 3) ||
     proof?.hardKill?.executorKilled !== true ||
     proof?.hardKill?.cloudCredentialsPresent !== false
   ) {
@@ -1822,6 +2249,21 @@ function writeEvidence(result) {
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
+  if (command === "retained-capsule") {
+    createRetainedCapsule(path.resolve(args[0]), path.resolve(args[1]), path.resolve(args[2]));
+    return;
+  }
+  if (command === "retained-selection") {
+    writeJSON(
+      args[2],
+      verifyRetainedSelection(
+        readJSON(args[0]).lease,
+        readJSON(args[1]),
+        required("QUALIFICATION_AWS_REGION"),
+      ),
+    );
+    return;
+  }
   if (command === "authorize") {
     const result = await verifyCandidateIdentity();
     appendOutput("candidate_sha", result.candidateSha);
@@ -1830,13 +2272,14 @@ async function main() {
   if (command === "admit") {
     const result = await verifyCandidateIdentity({ artifact: true });
     const artifactDir = path.resolve(required("QUALIFICATION_ARTIFACT_DIR"));
-    verifyManifest(artifactDir, result.candidateSha, result.workflowSha);
+    const manifest = verifyManifest(artifactDir, result.candidateSha, result.workflowSha);
     verifyPublisherContract(
       fs.readFileSync(
         path.join(artifactDir, "candidate/scripts/mint-aws-devtools-image.sh"),
         "utf8",
       ),
     );
+    publishHandoff(result, manifest);
     return;
   }
   if (command === "manifest") {

@@ -5,67 +5,41 @@ import (
 	"net/url"
 	"strings"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type flagValues struct {
-	APIURL        *string
-	ProjectID     *string
-	Template      *string
-	TimeoutSecs   *int
-	ForgetMissing *bool
+func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
+	return core.RegisterCrownestConfigFlags(fs, defaults.Crownest)
 }
 
-func registerFlags(fs *flag.FlagSet, defaults Config) any {
-	return flagValues{
-		APIURL:        fs.String("crownest-url", defaults.Crownest.APIURL, "Trusted CrowNest API base URL"),
-		ProjectID:     fs.String("crownest-project-id", defaults.Crownest.ProjectID, "CrowNest project ID"),
-		Template:      fs.String("crownest-template", defaults.Crownest.Template, "CrowNest Workspace Run template"),
-		TimeoutSecs:   fs.Int("crownest-timeout-secs", defaults.Crownest.TimeoutSecs, "CrowNest Workspace Run timeout in seconds"),
-		ForgetMissing: fs.Bool("crownest-forget-missing", defaults.Crownest.ForgetMissing, "remove the local claim when stop gets 404"),
-	}
-}
-
-func applyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if strings.EqualFold(strings.TrimSpace(cfg.Provider), providerName) {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=crownest; use --crownest-template")
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=crownest; use --crownest-template")
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --crownest-template", "use --crownest-template"); err != nil {
+			return err
 		}
 	}
-	v, ok := values.(flagValues)
+	v, ok := values.(core.CrownestConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "crownest-url") {
-		cfg.Crownest.APIURL = *v.APIURL
-	}
-	if flagWasSet(fs, "crownest-project-id") {
-		cfg.Crownest.ProjectID = *v.ProjectID
-	}
-	if flagWasSet(fs, "crownest-template") {
-		cfg.Crownest.Template = *v.Template
-	}
-	if flagWasSet(fs, "crownest-timeout-secs") {
-		cfg.Crownest.TimeoutSecs = *v.TimeoutSecs
-	}
-	if flagWasSet(fs, "crownest-forget-missing") {
-		cfg.Crownest.ForgetMissing = *v.ForgetMissing
+	applied, err := v.Apply(&cfg.Crownest, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "crownest")
+	if err != nil {
+		return err
 	}
 	return validateConfig(*cfg)
 }
 
-func validateConfig(cfg Config) error {
+func validateConfig(cfg core.Config) error {
 	if _, err := validateBaseURL(cfg.Crownest.APIURL); err != nil {
 		return err
 	}
 	if cfg.Crownest.TimeoutSecs < 0 {
-		return exit(2, "crownest timeoutSecs must be non-negative")
+		return core.Exit(2, "crownest timeoutSecs must be non-negative")
 	}
 	if strings.TrimSpace(cfg.Crownest.Template) == "" {
-		return exit(2, "crownest template must not be empty")
+		return core.Exit(2, "crownest template must not be empty")
 	}
 	return nil
 }
@@ -73,26 +47,22 @@ func validateConfig(cfg Config) error {
 func validateBaseURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		raw = "https://api.crownest.dev"
+		raw = core.CrownestConfigDefaultAPIURL
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", exit(2, "provider=crownest base URL must be an absolute URL")
+		return "", core.Exit(2, "provider=crownest base URL must be an absolute URL")
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", exit(2, "provider=crownest base URL must not contain userinfo, query parameters, or a fragment")
+		return "", core.Exit(2, "provider=crownest base URL must not contain userinfo, query parameters, or a fragment")
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
-		return "", exit(2, "provider=crownest base URL must use HTTPS except for loopback development endpoints")
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
+		return "", core.Exit(2, "provider=crownest base URL must use HTTPS except for loopback development endpoints")
 	}
 	parsed.Host = canonicalHostPort(parsed)
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	return parsed.String(), nil
-}
-
-func isLoopbackHost(host string) bool {
-	return shared.IsLoopbackHost(host)
 }
 
 func canonicalHostPort(parsed *url.URL) string {

@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 
 	"golang.org/x/sys/windows"
@@ -17,5 +18,10 @@ func openArtifactBundleTemp(root *os.Root, name string, perm os.FileMode, privat
 		return nil, err
 	}
 	defer directory.Close()
-	return createPrivateWindowsFileAt(windows.Handle(directory.Fd()), name)
+	file, err := createPrivateWindowsFileAt(windows.Handle(directory.Fd()), name)
+	if errors.Is(err, windows.STATUS_OBJECT_NAME_COLLISION) {
+		// Match OpenFile's exclusive-create contract for callers opening existing locks.
+		return nil, &os.PathError{Op: "open", Path: name, Err: os.ErrExist}
+	}
+	return file, err
 }

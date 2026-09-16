@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { writeExecutable } from "./test-support/smoke-fixtures.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const read = (file) => fs.readFileSync(path.join(repoRoot, file), "utf8");
@@ -304,6 +305,204 @@ test("GoReleaser is credential-free build-only with exact binary archives", () =
   assert.match(build, /else\s+run_goreleaser\s+fi/);
   assert.match(build, /chmod -R u\+w "\$path"[\s\S]*rm -rf "\$path"/);
   assert.doesNotMatch(build, /gh release|HOMEBREW_TAP_GITHUB_TOKEN=.*\$\{/);
+});
+
+function runSeedDownloadFixture(attempts, escapeToolFailure = false) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-seed-retry-"));
+  try {
+    const bin = path.join(root, "bin");
+    const scripts = path.join(root, "repo", "scripts");
+    const source = path.join(root, "archive-source");
+    const tmp = path.join(root, "tmp");
+    for (const directory of [bin, scripts, source, tmp, path.join(root, "home")]) fs.mkdirSync(directory, { recursive: true });
+    const entrypoint = path.join(scripts, "verify-go-install.sh");
+    fs.copyFileSync(path.join(repoRoot, "scripts/verify-go-install.sh"), entrypoint);
+    fs.writeFileSync(path.join(source, "go.mod"), "module github.com/openclaw/crabbox\n");
+    const archive = path.join(root, "source.tar");
+    execFileSync("/usr/bin/tar", ["-cf", archive, "-C", source, "."]);
+    const callsFile = path.join(root, "calls.jsonl");
+    const driver = path.join(root, "fixture.mjs");
+    const quote = (value) => `'${value.replaceAll("'", `'"'"'`)}'`;
+    const wrapper = (tool) => `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(driver)} ${quote(tool)} "$@"\n`;
+    fs.writeFileSync(driver, `
+import fs from "node:fs";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+const root = ${JSON.stringify(root)};
+const attempts = ${JSON.stringify(attempts)};
+const [tool, ...args] = process.argv.slice(2);
+const envNames = ["HOME", "PATH", "TMPDIR", "GOCACHE", "GOMODCACHE", "GOENV", "GOPROXY", "GOSUMDB", "GOTOOLCHAIN", "GOWORK", "GOPATH", "GOBIN", "GONOSUMDB", "GOPRIVATE", "GONOPROXY", "GODEBUG", "GOFLAGS"];
+const call = { tool, args, cwd: process.cwd(), env: Object.fromEntries(envNames.map(name => [name, process.env[name] ?? null])) };
+fs.appendFileSync(${JSON.stringify(callsFile)}, JSON.stringify(call) + "\\n");
+function unexpected() { console.error("unexpected inert fixture command", tool, args); process.exit(99); }
+if (tool === "git") {
+  if (args[2] === "rev-parse") console.log("a".repeat(40));
+  else if (args[2] === "archive") process.stdout.write(fs.readFileSync(${JSON.stringify(archive)}));
+  else if (args[2] === "show") console.log("2026-09-01T00:00:00Z");
+  else unexpected();
+} else if (tool === "sleep") {
+  // Record the requested delay without sleeping.
+} else if (tool === "sed") {
+  // TEST ONLY: fail the encoder pipeline without changing the Go command's status.
+  process.exit(42);
+} else if (tool === "cp") {
+  execFileSync("/bin/cp", args);
+} else if (tool === "zip") {
+  if (args.slice(0, 3).join(" ") !== "-q -X -r") unexpected();
+  fs.writeFileSync(args[3], "inert zip placeholder");
+} else if (tool === "binary") {
+  if (args.join(" ") === "--version") console.log("1.2.3");
+  else if (!["--help", "run --help"].includes(args.join(" "))) unexpected();
+} else if (tool === "go") {
+  if (args.join(" ") === "mod edit -json") console.log("{}");
+  else if (args[0] === "run" && ["source", "sanitize-zip", "binary"].includes(args[2])) {
+    // TEST ONLY: accept metadata and zip preparation to reach the shell's
+    // retry/install boundary. This is not a test of the embedded Go verifier.
+  } else if (args.join(" ") === "mod download all") {
+    const counter = path.join(root, "attempt-count");
+    const index = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;
+    fs.writeFileSync(counter, String(index + 1));
+    // Even failed attempts leave metadata, so its existence cannot mask an
+    // accidental copy/install after a failed seed command.
+    const download = path.join(process.env.GOMODCACHE, "cache", "download");
+    if (index > 0 && !fs.existsSync(path.join(download, "fixture-seed"))) unexpected();
+    fs.mkdirSync(download, { recursive: true });
+    fs.writeFileSync(path.join(download, "fixture-seed"), "inert dependency metadata");
+    const attempt = attempts[index];
+    if (!attempt) unexpected();
+    process.stderr.write(attempt.output);
+    process.exit(attempt.code);
+  } else if (args[0] === "install") {
+    const proxy = process.env.GOPROXY.slice("file://".length);
+    if (!fs.existsSync(path.join(proxy, "fixture-seed"))) unexpected();
+    if ((fs.statSync(path.join(proxy, "fixture-seed")).mode & 0o222) !== 0) unexpected();
+    fs.writeFileSync(path.join(process.env.GOBIN, "crabbox"), ${JSON.stringify(wrapper("binary"))}, { mode: 0o755 });
+  } else if (args.slice(0, 3).join(" ") === "version -m -json") console.log("{}");
+  else unexpected();
+} else unexpected();
+`);
+    for (const tool of ["git", "go", "zip", "sleep", "cp"]) writeExecutable(path.join(bin, tool), wrapper(tool));
+    if (escapeToolFailure) writeExecutable(path.join(bin, "sed"), wrapper("sed"));
+    const result = spawnSync("/bin/bash", [entrypoint, "v1.2.3", "fixture-source"], {
+      encoding: "utf8", timeout: 20_000,
+      env: { PATH: `${bin}:/usr/bin:/bin`, HOME: path.join(root, "home"), TMPDIR: tmp },
+    });
+    assert.equal(result.error, undefined, result.error?.message);
+    const calls = fs.readFileSync(callsFile, "utf8").trim().split("\n").map(JSON.parse);
+    assert.deepEqual(fs.readdirSync(tmp), [], "entrypoint must clean its private WORK directory");
+    return { result, calls };
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("Go install seed retry preserves bounded verified download and offline phases", async (t) => {
+  const transport = "go: github.com/openfga/go-sdk@v0.8.1: verifying go.mod: github.com/openfga/go-sdk@v0.8.1/go.mod: reading https://sum.golang.org/tile/8/0/x212/602: stream error: stream ID 885; INTERNAL_ERROR; received from peer\n";
+  const progress = "go: downloading example.com/dependency v1.0.0\n\n";
+  const mismatch = "verifying example.com/dependency@v1.0.0: checksum mismatch\nSECURITY ERROR\n";
+  const ok = { code: 0, output: "" };
+  const transient = { code: 1, output: progress + transport };
+  const zip = 'go: github.com/gobuffalo/attrs@v0.0.0-20190224210810-a9411de4debd: read "https://proxy.golang.org/github.com/gobuffalo/attrs/@v/v0.0.0-20190224210810-a9411de4debd.zip": stream error: stream ID 5057; INTERNAL_ERROR; received from peer\n';
+  const zipURL = "https://proxy.golang.org/github.com/gobuffalo/attrs/@v/v0.0.0-20190224210810-a9411de4debd.zip";
+  const uppercasePath = 'go: example.com/Example/Module@v1.2.3: read "https://proxy.golang.org/example.com/!example/!module/@v/v1.2.3.zip": stream error: stream ID 12; INTERNAL_ERROR; received from peer\n';
+  const uppercaseVersion = 'go: example.com/dependency@v1.2.3-RC1: read "https://proxy.golang.org/example.com/dependency/@v/v1.2.3-!r!c1.zip": stream error: stream ID 13; INTERNAL_ERROR; received from peer\n';
+  const zipFailure = { code: 1, output: progress + zip };
+  const mixedTransport = { code: 1, output: transport + zip };
+  for (const tc of [
+    { name: "success-once", attempts: [ok], downloads: 1, delay: 0, code: 0 },
+    { name: "tile-error-then-success", attempts: [transient, ok], downloads: 2, delay: 1, code: 0 },
+    { name: "tile-error-twice", attempts: [transient, transient], downloads: 2, delay: 1, code: 1 },
+    { name: "second-error-status", attempts: [transient, { code: 7, output: "second attempt stopped\n" }], downloads: 2, delay: 1, code: 7 },
+    { name: "checksum-mismatch", attempts: [{ code: 1, output: mismatch }], downloads: 1, delay: 0, code: 1 },
+    { name: "mixed-errors", attempts: [{ code: 1, output: transport + mismatch }], downloads: 1, delay: 0, code: 1 },
+    { name: "mixed-unknown", attempts: [{ code: 1, output: transport + "go: module lookup failed\n" }], downloads: 1, delay: 0, code: 1 },
+    { name: "non-tile-endpoint", attempts: [{ code: 1, output: transport.replace("/tile/", "/lookup/") }], downloads: 1, delay: 0, code: 1 },
+    { name: "unknown-error", attempts: [{ code: 1, output: "go: module lookup failed\n" }], downloads: 1, delay: 0, code: 1 },
+    { name: "empty-error", attempts: [{ code: 1, output: "" }], downloads: 1, delay: 0, code: 1 },
+    { name: "progress-only-error", attempts: [{ code: 1, output: progress }], downloads: 1, delay: 0, code: 1 },
+    { name: "non-one-status", attempts: [{ code: 23, output: transport }], downloads: 1, delay: 0, code: 23 },
+    { name: "different-module-error", attempts: [{ code: 1, output: transport.replace("verifying go.mod: github.com/openfga", "verifying go.mod: example.com/other") }], downloads: 1, delay: 0, code: 1 },
+    { name: "observed-zip-then-success", attempts: [zipFailure, ok], downloads: 2, delay: 1, code: 0 },
+    { name: "observed-zip-exhausted", attempts: [zipFailure, zipFailure], downloads: 2, delay: 1, code: 1 },
+    { name: "zip-uppercase-path", attempts: [{ code: 1, output: uppercasePath }, ok], downloads: 2, delay: 1, code: 0 },
+    { name: "zip-uppercase-version", attempts: [{ code: 1, output: uppercaseVersion }, ok], downloads: 2, delay: 1, code: 0 },
+    { name: "tile-and-zip-then-success", attempts: [mixedTransport, ok], downloads: 2, delay: 1, code: 0 },
+    { name: "tile-and-zip-share-retry-budget", attempts: [mixedTransport, mixedTransport], downloads: 2, delay: 1, code: 1 },
+    { name: "zip-second-error-status", attempts: [zipFailure, { code: 7, output: "second attempt stopped\n" }], downloads: 2, delay: 1, code: 7 },
+    { name: "zip-mixed-checksum", attempts: [{ code: 1, output: zip + mismatch }], downloads: 1, delay: 0, code: 1 },
+    { name: "zip-mixed-unknown", attempts: [{ code: 1, output: zip + "go: module lookup failed\n" }], downloads: 1, delay: 0, code: 1 },
+    { name: "zip-non-one-status", attempts: [{ code: 23, output: zip }], downloads: 1, delay: 0, code: 23 },
+    { name: "zip-encoder-failure-keeps-download-status", attempts: [zipFailure], downloads: 1, delay: 0, code: 1, escapeToolFailure: true },
+    ...[
+      ["module", zip.replace(zipURL, zipURL.replace("gobuffalo/attrs", "gobuffalo/other"))],
+      ["version", zip.replace(zipURL, zipURL.replace("v0.0.0-20190224210810-a9411de4debd", "v1.2.3"))],
+      ["escaped-other-module", uppercasePath.replace("/!module/", "/!other/")],
+      ["escaped-other-version", uppercaseVersion.replace("-!r!c1.zip", "-!r!c2.zip")],
+      ["lowercase-without-bangs", uppercasePath.replace("/!example/!module/", "/example/module/")],
+      ["raw-uppercase-url", uppercasePath.replace("/!example/!module/", "/Example/Module/")],
+      ["raw-uppercase-version-url", uppercaseVersion.replace("-!r!c1.zip", "-RC1.zip")],
+      ["host", zip.replace("https://proxy.golang.org/", "https://proxy.example.com/")],
+      ["host-suffix", zip.replace("https://proxy.golang.org/", "https://proxy.golang.org.example.com/")],
+      ["scheme", zip.replace("https://", "http://")],
+      ["port", zip.replace("proxy.golang.org/", "proxy.golang.org:443/")],
+      ["suffix", zip.replace('.zip"', '.mod"')],
+      ["query", zip.replace('.zip"', '.zip?download=1"')],
+      ["fragment", zip.replace('.zip"', '.zip#archive"')],
+      ["extra-path", zip.replace('/@v/', '/extra/@v/')],
+      ["encoded-url", uppercasePath.replace("/!example/", "/%21example/")],
+      ["encoded-module", zip.replace("go: github.com/", "go: github%2ecom/")],
+      ["raw-bang-module", uppercasePath.replace("go: example.com/Example/", "go: example.com/!example/")],
+      ["extra-delimiter", zip.replace("attrs@v", "attrs@other@v")],
+      ["missing-quotes", zip.replaceAll('"', "")],
+      ["extra-text", zip.replace("received from peer", "received from peer trailing text")],
+    ].map(([name, output]) => ({ name: `zip-rejects-${name}`, attempts: [{ code: 1, output }], downloads: 1, delay: 0, code: 1 })),
+  ]) {
+    await t.test(tc.name, () => {
+      const { result, calls } = runSeedDownloadFixture(tc.attempts, tc.escapeToolFailure);
+      assert.equal(result.status, tc.code, result.stderr);
+      if (tc.escapeToolFailure) assert.equal(calls.filter(c => c.tool === "sed").length, 1, "encoder failure fixture was not reached");
+      const downloads = calls.filter(c => c.tool === "go" && c.args.join(" ") === "mod download all");
+      const delays = calls.filter(c => c.tool === "sleep");
+      const installs = calls.filter(c => c.tool === "go" && c.args[0] === "install");
+      const copies = calls.filter(c => c.tool === "cp" && c.args.some(arg => arg.endsWith("seed-modcache/cache/download/.")));
+      assert.equal(downloads.length, tc.downloads);
+      assert.equal(delays.length, tc.delay);
+      for (const delay of delays) assert.deepEqual(delay.args, ["5"]);
+      for (const download of downloads) {
+        assert.deepEqual(download, downloads[0], "retry changed argv/environment/cwd/cache");
+        assert.equal(download.env.GOPROXY, "https://proxy.golang.org");
+        assert.equal(download.env.GOSUMDB, "sum.golang.org");
+        assert.equal(download.env.GOENV, "off");
+        assert.equal(download.env.GOTOOLCHAIN, "local");
+        assert.equal(download.env.GOWORK, "off");
+        assert.equal(path.basename(download.cwd), "source");
+        assert.equal(path.basename(download.env.GOMODCACHE), "seed-modcache");
+        assert.equal(path.basename(download.env.HOME), "seed-home");
+        assert.equal(path.basename(download.env.GOCACHE), "seed-gocache");
+        assert.equal(path.basename(download.env.TMPDIR), "seed-tmp");
+        for (const key of ["GONOSUMDB", "GOPRIVATE", "GONOPROXY", "GODEBUG", "GOFLAGS"]) assert.equal(download.env[key], null);
+      }
+      for (const output of new Set(tc.attempts.map(a => a.output).filter(Boolean))) {
+        assert.equal(result.stderr.split(output).length - 1, tc.attempts.filter(a => a.output === output).length, "original diagnostics were lost");
+      }
+      assert.equal(installs.length, tc.code === 0 ? 1 : 0);
+      assert.equal(copies.length, tc.code === 0 ? 1 : 0, "failed seed reached proxy copy");
+      if (tc.code === 0) {
+        const install = installs[0];
+        assert.deepEqual(install.args, ["install", "github.com/openclaw/crabbox/cmd/crabbox@v1.2.3"]);
+        assert.match(install.env.GOPROXY, /^file:\/\//);
+        assert.equal(install.env.GOSUMDB, "off");
+        for (const key of ["GOENV", "GOTOOLCHAIN", "GOWORK"]) assert.equal(install.env[key], downloads[0].env[key]);
+        for (const key of ["HOME", "GOCACHE", "GOMODCACHE", "TMPDIR"]) assert.notEqual(install.env[key], downloads[0].env[key]);
+        assert.notEqual(install.cwd, downloads[0].cwd);
+        assert.equal(path.basename(install.env.GOPATH), "gopath");
+        assert.equal(path.basename(install.env.GOBIN), "bin");
+        assert.ok(calls.indexOf(copies[0]) > calls.indexOf(downloads.at(-1)));
+        assert.ok(calls.indexOf(install) > calls.indexOf(copies[0]));
+        assert.deepEqual(calls.filter(c => c.tool === "binary").map(c => c.args), [["--version"], ["--help"], ["run", "--help"]]);
+      }
+    });
+  }
 });
 
 test("versioned Go installation is hermetic and precedes release builds", () => {

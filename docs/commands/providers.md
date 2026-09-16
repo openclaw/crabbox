@@ -25,6 +25,35 @@ crabbox providers sizes machine0 --all --refresh --json
 crabbox providers sizes machine0 --with-context --class fast --json
 ```
 
+## Offline status versus live checks
+
+The matrix, `providers describe`, and `providers recommend` share additive
+static status fields: `metadataKind: "static"`, `authentication`, and
+`readiness: "unchecked"`. Matrix JSON **remains an array**; these fields belong
+to each entry, not a new enclosing object. Recommendation results remain a
+ranked array, and describe retains its existing description schema and object
+shape. Text identifies the metadata as static and authentication/readiness as
+unchecked.
+
+`authentication.scope` is `provider_access`, and `authentication.status` is
+`unchecked`. `authentication.methods` lists possible interfaces;
+`authentication.routes` contains `route`, `methods`, and `description` for each
+qualified route. These describe provider access, not currently selected or
+usable credentials. Guest SSH, desktop, bootstrap, registry, and deployment
+authentication remain separate. Methods are neither a
+checklist of requirements nor a promise that any one method suffices; route
+descriptions supply the conditions. The static report does not inspect config,
+login state, executables, quota, or live capacity. Compiled support and a
+recommendation score do not establish availability or readiness.
+
+Use [`config show`](config.md#offline-provider-status) for accepted-input and
+provider-selection status in the current configuration load, and
+`crabbox doctor --provider <name>` for that provider's diagnostic checks.
+`providers sizes` is deliberately different: it remains a **live**,
+configuration-dependent catalog operation and may invoke authenticated clients.
+The new offline metadata does not change its behavior or JSON shape.
+Capability examples below omit the additive offline status fields for brevity.
+
 ## Flags
 
 - `--json`: emit the matrix as a JSON array instead of grouped text.
@@ -554,7 +583,7 @@ Direct self-hosted SSH-lease providers such as `firecracker`, `proxmox`, and
 `xcp-ng` report `coordinator: never`, `targets: linux`, and features including
 `ssh`, `crabbox-sync`, and `cleanup`.
 
-`--json` returns one object per provider. The compatibility `classes` summary
+`--json` returns an array with one object per provider. The compatibility `classes` summary
 is complete; the authoritative AWS `classCatalog` below is abbreviated to one
 profile and one fallback to show the richer record shape:
 

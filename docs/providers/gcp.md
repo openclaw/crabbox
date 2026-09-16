@@ -284,6 +284,10 @@ Spot-to-on-demand fallback still apply to the exact requested type when GCP
 returns a quota, capacity, rate-limit, or unavailable-type error. See
 [Capacity and fallback](../features/capacity-fallback.md).
 
+The coordinator classifies retry eligibility from complete API error evidence;
+displayed diagnostics remain bounded and redacted. Shortening a diagnostic does
+not change which configured zone or market candidates may be attempted.
+
 ## Networking
 
 The provider uses `gcp.network` and optional `gcp.subnet`.

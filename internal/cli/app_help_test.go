@@ -9,6 +9,39 @@ import (
 	"testing"
 )
 
+func TestPreflightToolsHelp(t *testing.T) {
+	clearConfigEnv(t)
+	t.Chdir(t.TempDir())
+	config := filepath.Join(t.TempDir(), "invalid.yaml")
+	if err := os.WriteFile(config, []byte("broker: [invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", config)
+	for _, args := range [][]string{{"preflight-tools", "--help"}, {"preflight-tools", "-h"}, {"help", "preflight-tools"}, {"preflight-tools", "--unknown", "--help"}} {
+		var out, stderr bytes.Buffer
+		err := (App{Stdout: &out, Stderr: &stderr}).Run(t.Context(), args)
+		var exitErr ExitError
+		if err != nil && (!AsExitError(err, &exitErr) || exitErr.Code != 0) {
+			t.Fatalf("help %v: %v", args, err)
+		}
+		if !strings.Contains(out.String()+stderr.String(), "crabbox preflight-tools") || !strings.Contains(out.String()+stderr.String(), "--json") {
+			t.Fatalf("help contract missing: %s%s", &out, &stderr)
+		}
+	}
+	var out, stderr bytes.Buffer
+	app := App{Stdout: &out, Stderr: &stderr}
+	if err := app.Run(t.Context(), []string{"--help"}); err != nil || !strings.Contains(out.String(), "preflight-tools") {
+		t.Fatalf("root help omitted command: %v", err)
+	}
+	var exitErr ExitError
+	if err := app.Run(t.Context(), []string{"run", "--help"}); err != nil && (!AsExitError(err, &exitErr) || exitErr.Code != 0) {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "list names with 'crabbox preflight-tools'") {
+		t.Fatal("run help omitted discovery hint")
+	}
+}
+
 func TestDoctorHelpIncludesCommandContract(t *testing.T) {
 	for _, flag := range []string{"--help", "-h"} {
 		t.Run(flag, func(t *testing.T) {
@@ -90,6 +123,54 @@ func TestCopyHelpIncludesCommandContract(t *testing.T) {
 				t.Fatal("copy help lost the provider reference or changed its output stream")
 			}
 		})
+	}
+}
+
+func TestPondLifecycleHelpDoesNotReadState(t *testing.T) {
+	clearConfigEnv(t)
+	t.Chdir(t.TempDir())
+	config := filepath.Join(t.TempDir(), "invalid.yaml")
+	if err := os.WriteFile(config, []byte("broker: [invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", config)
+	state, err := CrabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "claims"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	daemonDir := filepath.Join(os.Getenv("HOME"), ".crabbox", "pond", "alpha")
+	if err := os.MkdirAll(daemonDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(daemonDir, "daemon.json"), []byte("invalid json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"release", "disconnect"} {
+		for _, args := range [][]string{
+			{"pond", command, "--help"},
+			{"pond", command, "-h"},
+			{"pond", command, "alpha", "--help"},
+			{"pond", command, "alpha", "-h"},
+			{"help", "pond", command},
+		} {
+			t.Run(strings.Join(args, " "), func(t *testing.T) {
+				var stdout, stderr bytes.Buffer
+				err := (App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args)
+				var exitErr ExitError
+				if err != nil && (!AsExitError(err, &exitErr) || exitErr.Code != 0) {
+					t.Fatalf("help reached operational state: %v", err)
+				}
+				if !strings.Contains(stderr.String(), "crabbox pond "+command+" <name>") || stdout.Len() != 0 {
+					t.Fatalf("expected command help, stdout=%q stderr=%q", &stdout, &stderr)
+				}
+			})
+		}
 	}
 }
 

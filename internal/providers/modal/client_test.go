@@ -16,7 +16,7 @@ import (
 
 func TestModalExecPreservesRemoteExit125(t *testing.T) {
 	runner := &modalClientRunner{writeResult: "125"}
-	client := &modalPythonClient{cfg: newTestConfig(), rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	client := &modalPythonClient{cfg: newTestConfig(), rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
 
 	code, err := client.Exec(context.Background(), modalExecRequest{
 		SandboxID: "sb-123",
@@ -40,7 +40,7 @@ func TestModalTransportErrorsPreserveCauses(t *testing.T) {
 		for _, operation := range []string{"exec", "upload", "json"} {
 			t.Run(operation+"/"+cause.Error(), func(t *testing.T) {
 				runner := &modalClientRunner{result: core.LocalCommandResult{ExitCode: 1}, err: cause}
-				client := &modalPythonClient{cfg: newTestConfig(), rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+				client := &modalPythonClient{cfg: newTestConfig(), rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
 				var err error
 				switch operation {
 				case "exec":
@@ -176,7 +176,7 @@ func TestModalListCarriesConfiguredEnvironment(t *testing.T) {
 	runner := &modalClientRunner{stdout: "[]\n"}
 	cfg := newTestConfig()
 	cfg.Modal.Environment = "my-app-dev"
-	client := &modalPythonClient{cfg: cfg, rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	client := &modalPythonClient{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
 
 	if _, err := client.ListSandboxes(context.Background(), map[string]string{"crabbox": "true"}); err != nil {
 		t.Fatal(err)
@@ -229,7 +229,7 @@ class Sandbox:
 
 func TestModalExecReportsTransportExit125(t *testing.T) {
 	runner := &modalClientRunner{result: core.LocalCommandResult{ExitCode: modalTransportExitCode}}
-	client := &modalPythonClient{cfg: newTestConfig(), rt: Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+	client := &modalPythonClient{cfg: newTestConfig(), rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
 
 	code, err := client.Exec(context.Background(), modalExecRequest{
 		SandboxID: "sb-123",
@@ -314,7 +314,7 @@ type modalClientRunner struct {
 	err         error
 }
 
-func (r *modalClientRunner) Run(_ context.Context, req LocalCommandRequest) (core.LocalCommandResult, error) {
+func (r *modalClientRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	if len(req.Args) >= 3 {
 		if err := json.Unmarshal([]byte(req.Args[2]), &r.payload); err == nil {
 			r.resultPath, _ = r.payload["result_path"].(string)

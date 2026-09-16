@@ -29,7 +29,7 @@ func TestCacheTargetRoutesOrdinaryLeaseClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := claimLeaseForRepoProvider("cbx_1335_cache01", "Cache Claimed", "run-prepare-test", repo.Root, time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider("cbx_1335_cache01", "Cache Claimed", "run-prepare-test", repo.Root, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	runPrepareTestResolveRequests = nil

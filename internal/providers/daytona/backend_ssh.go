@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -27,7 +28,7 @@ type daytonaFlagValues struct {
 	SSHAccessMinutes *int
 }
 
-func RegisterDaytonaProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterDaytonaProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return daytonaFlagValues{
 		APIURL:           fs.String("daytona-api-url", defaults.Daytona.APIURL, "Daytona API URL"),
 		Snapshot:         fs.String("daytona-snapshot", defaults.Daytona.Snapshot, "Daytona snapshot name"),
@@ -39,98 +40,148 @@ func RegisterDaytonaProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	}
 }
 
-func ApplyDaytonaProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyDaytonaProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == daytonaProvider {
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=daytona; choose CPU, memory, and disk in the Daytona snapshot")
+		if core.FlagWasSet(fs, "type") {
+			return core.Exit(2, "--type is not supported for provider=daytona; choose CPU, memory, and disk in the Daytona snapshot")
 		}
 	}
 	v, ok := values.(daytonaFlagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "daytona-api-url") {
+	if core.FlagWasSet(fs, "daytona-api-url") {
 		cfg.Daytona.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
-	if flagWasSet(fs, "daytona-snapshot") {
+	if core.FlagWasSet(fs, "daytona-snapshot") {
 		cfg.Daytona.Snapshot = *v.Snapshot
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
-	if flagWasSet(fs, "daytona-target") {
+	if core.FlagWasSet(fs, "daytona-target") {
 		cfg.Daytona.Target = *v.Target
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
-	if flagWasSet(fs, "daytona-user") {
+	if core.FlagWasSet(fs, "daytona-user") {
 		cfg.Daytona.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
-	if flagWasSet(fs, "daytona-work-root") {
+	if core.FlagWasSet(fs, "daytona-work-root") {
 		cfg.Daytona.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
-	if flagWasSet(fs, "daytona-ssh-gateway-host") {
+	if core.FlagWasSet(fs, "daytona-ssh-gateway-host") {
 		cfg.Daytona.SSHGatewayHost = *v.SSHGatewayHost
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
-	if flagWasSet(fs, "daytona-ssh-access-minutes") {
+	if core.FlagWasSet(fs, "daytona-ssh-access-minutes") {
 		cfg.Daytona.SSHAccessMinutes = *v.SSHAccessMinutes
+		core.RecordProviderFlagInputs(cfg, true, "daytona")
 	}
 	return nil
 }
 
-func NewDaytonaLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewDaytonaLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = daytonaProvider
 	return &daytonaLeaseBackend{spec: spec, cfg: cfg, rt: rt}
 }
 
 type daytonaLeaseBackend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
-func (b *daytonaLeaseBackend) Spec() ProviderSpec { return b.spec }
+func (b *daytonaLeaseBackend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *daytonaLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
-	sandbox, leaseID, slug, err := b.createDaytonaSandbox(ctx, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug)
+func (b *daytonaLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if req.RequestedLeaseID != "" {
+		return b.acquireFixed(ctx, req)
+	}
+	sandbox, leaseID, slug, err := b.createDaytonaSandbox(ctx, req.Repo, req.Keep, req.Reclaim, req.RequestedSlug, req.CheckpointSource)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
-		return LeaseTarget{}, b.rollbackDaytonaSandbox(sandbox.GetId(), leaseID, err)
+		return core.LeaseTarget{}, b.rollbackDaytonaSandbox(sandbox.GetId(), leaseID, err)
 	}
 	cfg := b.cfg
 	cfg.WorkRoot = daytonaWorkRoot(cfg)
 	server := daytonaSandboxToServer(sandbox)
 	target, err := daytonaSSHTargetFor(ctx, client, cfg, server)
 	if err != nil {
-		return LeaseTarget{}, b.rollbackDaytonaSandbox(server.CloudID, leaseID, err)
+		return core.LeaseTarget{}, b.rollbackDaytonaSandbox(server.CloudID, leaseID, err)
 	}
-	if err := waitForSSHReady(ctx, &target, b.rt.Stderr, "daytona ssh", bootstrapWaitTimeout(cfg)); err != nil {
-		return LeaseTarget{}, b.rollbackDaytonaSandbox(server.CloudID, leaseID, err)
+	if err := core.WaitForSSHReady(ctx, &target, b.rt.Stderr, "daytona ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
+		return core.LeaseTarget{}, b.rollbackDaytonaSandbox(server.CloudID, leaseID, err)
 	}
-	if err := claimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
-		return LeaseTarget{}, b.rollbackDaytonaSandbox(server.CloudID, leaseID, err)
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+		return core.LeaseTarget{}, b.rollbackDaytonaSandbox(server.CloudID, leaseID, err)
 	}
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s sandbox=%s state=%s\n", leaseID, server.CloudID, server.Status)
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *daytonaLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *daytonaLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	return b.resolve(ctx, req, nil)
 }
 
-func (b *daytonaLeaseBackend) ResolveRunLeaseUnderClaim(ctx context.Context, req ResolveRequest, original core.LeaseClaim) (LeaseTarget, error) {
+func (b *daytonaLeaseBackend) ResolveRunLeaseUnderClaim(ctx context.Context, req core.ResolveRequest, original core.LeaseClaim) (core.LeaseTarget, error) {
 	return b.resolve(ctx, req, &original)
 }
 
-func (b *daytonaLeaseBackend) resolve(ctx context.Context, req ResolveRequest, original *LeaseClaim) (LeaseTarget, error) {
-	if req.RejectAuthSecret {
-		return LeaseTarget{}, exit(2, "crabbox connect does not support token-as-username SSH targets; use crabbox ssh --show-secret in a trusted terminal")
+func (b *daytonaLeaseBackend) ResolveExecLeaseUnderClaim(ctx context.Context, req core.ResolveRequest, original core.LeaseClaim) (core.LeaseTarget, error) {
+	// Only fixed-ID release holds the same exclusive fence through deletion.
+	if !fixedDaytonaLeaseKind.IsFixedClaim(original) || original.FixedCreateIntent.State != "acquired" {
+		return core.LeaseTarget{}, core.Exit(4, "exec requires a completed fixed-ID Daytona lease; use run for ordinary leases")
 	}
+	return b.resolve(ctx, req, &original)
+}
+
+func (b *daytonaLeaseBackend) resolve(ctx context.Context, req core.ResolveRequest, original *core.LeaseClaim) (core.LeaseTarget, error) {
+	if req.RejectAuthSecret {
+		return core.LeaseTarget{}, core.Exit(2, "crabbox connect does not support token-as-username SSH targets; use crabbox ssh --show-secret in a trusted terminal")
+	}
+	if original == nil {
+		claim, exists, err := core.ResolveLeaseClaimForProvider(req.ID, daytonaProvider)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if exists && claim.FixedCreateIntent != nil {
+			claim, err = b.reclaimFixed(ctx, claim, req.Repo.Root, req.Reclaim && !req.NoLocalStateMutations)
+			if err != nil {
+				return core.LeaseTarget{}, err
+			}
+			var lease core.LeaseTarget
+			err := core.WithLeaseClaimUnchangedShared(ctx, claim.LeaseID, claim, func() error {
+				var err error
+				lease, err = b.resolve(ctx, req, &claim)
+				return err
+			})
+			core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+			return lease, err
+		}
+	}
+	if original != nil && original.FixedCreateIntent != nil && original.FixedCreateIntent.State == "released" {
+		if err := fixedDaytonaLeaseKind.ValidateTerminalClaim(*original, core.LeaseClaim{}, original.LeaseID, nil); err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if !req.StatusOnly {
+			return core.LeaseTarget{}, core.Exit(4, "Daytona fixed lease %s is released and cannot be reused", original.LeaseID)
+		}
+		server := core.Server{Provider: daytonaProvider, Status: "released", Labels: map[string]string{"lease": original.LeaseID, "slug": original.Slug, "state": "released"}}
+		core.SetServerLeaseClaimSnapshot(&server, *original, true)
+		return core.LeaseTarget{LeaseID: original.LeaseID, Server: server}, nil
+	}
+
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	sandbox, leaseID, err := resolveDaytonaSandbox(ctx, client, b.cfg, req.ID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	server := daytonaSandboxToServer(sandbox)
 	if req.StatusOnly {
@@ -140,54 +191,58 @@ func (b *daytonaLeaseBackend) resolve(ctx context.Context, req ResolveRequest, o
 		// Core owns publication for run admission. Preserve the repository and
 		// resource checks before Start or creating token-bearing SSH access.
 		if err := validateExactDaytonaResourceClaim(leaseID, server.CloudID, *original, true); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
-		if err := core.CheckLeaseClaimRepositoryOwner(leaseID, *original, req.Repo.Root, false); err != nil {
-			return LeaseTarget{}, err
+		// Status/heartbeat resolves native identity without an execution repo.
+		// Only command/SSH resolution grants use of the repository workspace.
+		if !req.StatusOnly {
+			if err := core.CheckLeaseClaimRepositoryOwner(leaseID, *original, req.Repo.Root, false); err != nil {
+				return core.LeaseTarget{}, err
+			}
 		}
 		if err := core.AuthorizeCheckpointRelease(*original, ""); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	} else {
 		if req.Reclaim && !req.NoLocalStateMutations {
-			if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, true); err != nil {
-				return LeaseTarget{}, err
+			if err := core.ClaimLeaseTargetForRepoConfig(leaseID, core.ServerSlug(server), b.cfg, server, core.SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, true); err != nil {
+				return core.LeaseTarget{}, err
 			}
 		}
 		if err := requireExactDaytonaClaim(leaseID, sandbox); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		if !req.Reclaim && !req.NoLocalStateMutations {
-			if err := claimLeaseTargetForRepoConfig(leaseID, serverSlug(server), b.cfg, server, SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, false); err != nil {
-				return LeaseTarget{}, err
+			if err := core.ClaimLeaseTargetForRepoConfig(leaseID, core.ServerSlug(server), b.cfg, server, core.SSHTarget{}, req.Repo.Root, b.cfg.IdleTimeout, false); err != nil {
+				return core.LeaseTarget{}, err
 			}
 		}
 	}
 	if req.StatusOnly {
-		return LeaseTarget{Server: server, LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	if !daytonaStateReady(daytonaSandboxState(sandbox)) {
 		if daytonaStateFailed(daytonaSandboxState(sandbox)) {
-			return LeaseTarget{}, exit(5, "daytona sandbox %s entered terminal state=%s", sandbox.GetId(), daytonaSandboxState(sandbox))
+			return core.LeaseTarget{}, core.Exit(5, "daytona sandbox %s entered terminal state=%s", sandbox.GetId(), daytonaSandboxState(sandbox))
 		}
 		sandbox, err = client.StartSandbox(ctx, sandbox.GetId())
 		if err != nil {
-			return LeaseTarget{}, daytonaError("start sandbox", err)
+			return core.LeaseTarget{}, daytonaError("start sandbox", err)
 		}
 		sandbox, err = waitForDaytonaReady(ctx, client, sandbox.GetId(), 5*time.Minute)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	}
 	server = daytonaSandboxToServer(sandbox)
 	target, err := daytonaSSHTargetFor(ctx, client, b.cfg, server)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
-func (b *daytonaLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *daytonaLeaseBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	_ = req
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
@@ -197,7 +252,7 @@ func (b *daytonaLeaseBackend) List(ctx context.Context, req ListRequest) ([]Leas
 	if err != nil {
 		return nil, daytonaError("list sandboxes", err)
 	}
-	servers := make([]Server, 0, len(sandboxes))
+	servers := make([]core.Server, 0, len(sandboxes))
 	for i := range sandboxes {
 		if _, owned := daytonaSandboxOwnership(&sandboxes[i]); !owned {
 			continue
@@ -207,20 +262,31 @@ func (b *daytonaLeaseBackend) List(ctx context.Context, req ListRequest) ([]Leas
 	return servers, nil
 }
 
-func (b *daytonaLeaseBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
-	servers, err := b.List(ctx, ListRequest{})
+func (b *daytonaLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
+	servers, err := b.List(ctx, core.ListRequest{})
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	return DoctorResult{
+	return core.DoctorResult{
 		Provider: daytonaProvider,
 		Message:  fmt.Sprintf("auth=ready control_plane=ready inventory=ready api=list mutation=false leases=%d runtime=unchecked", len(servers)),
 	}, nil
 }
 
-func (b *daytonaLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+func (b *daytonaLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	ctx, cancel := context.WithTimeout(ctx, daytonaCleanupTimeout)
 	defer cancel()
+	if claim, exists, err := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID); err != nil {
+		return err
+	} else if exists && claim.FixedCreateIntent != nil {
+		if snapshot, snapshotExists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server); set && (!snapshotExists || !reflect.DeepEqual(snapshot, claim)) {
+			return core.Exit(4, "Daytona fixed lease claim changed after resolution; retry release")
+		}
+		if req.Lease.Server.CloudID != "" && claim.CloudID != "" && req.Lease.Server.CloudID != claim.CloudID {
+			return core.Exit(4, "Daytona fixed release resource identity mismatch")
+		}
+		return b.releaseFixed(ctx, claim, req.CheckpointID, false, "")
+	}
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -233,16 +299,47 @@ func (b *daytonaLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLease
 			return daytonaError("delete sandbox", err)
 		}
 	}
-	removeLeaseClaim(req.Lease.LeaseID)
+	core.RemoveLeaseClaim(req.Lease.LeaseID)
 	return nil
 }
 
-func (b *daytonaLeaseBackend) Touch(ctx context.Context, req TouchRequest) (Server, error) {
+func (b *daytonaLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	client, err := newDaytonaClient(b.cfg, b.rt)
 	if err != nil {
 		return req.Lease.Server, err
 	}
-	server := req.Lease.Server
+	claim, exists, err := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID)
+	if err != nil {
+		return req.Lease.Server, err
+	}
+	if exists && claim.FixedCreateIntent != nil {
+		if snapshot, snapshotExists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server); set && (!snapshotExists || !reflect.DeepEqual(snapshot, claim)) {
+			return req.Lease.Server, core.Exit(4, "Daytona fixed lease claim changed after resolution; retry touch")
+		}
+		var server core.Server
+		err := core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
+			if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
+				return err
+			}
+			sandbox, err := loadFixedDaytonaSandbox(ctx, client, claim)
+			if err != nil {
+				return err
+			}
+			if req.Lease.Server.CloudID != sandbox.GetId() {
+				return core.Exit(4, "Daytona fixed touch resource identity mismatch")
+			}
+			server, err = b.touchSandbox(ctx, client, req, daytonaSandboxToServer(sandbox))
+			return err
+		})
+		return server, err
+	}
+	if hasFixedDaytonaOwnershipLabels(req.Lease.Server.Labels) {
+		return req.Lease.Server, core.Exit(4, "Daytona fixed sandbox requires its durable claim before touch")
+	}
+	return b.touchSandbox(ctx, client, req, req.Lease.Server)
+}
+
+func (b *daytonaLeaseBackend) touchSandbox(ctx context.Context, client daytonaAPI, req core.TouchRequest, server core.Server) (core.Server, error) {
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	}
@@ -284,10 +381,10 @@ func waitForDaytonaReady(ctx context.Context, client daytonaAPI, id string, time
 				return true, nil
 			}
 			if daytonaStateFailed(state) {
-				return false, exit(5, "daytona sandbox %s entered terminal state=%s", id, state)
+				return false, core.Exit(5, "daytona sandbox %s entered terminal state=%s", id, state)
 			}
 			if time.Now().After(deadline) {
-				return false, exit(5, "timed out waiting for daytona sandbox %s (state=%s)", id, state)
+				return false, core.Exit(5, "timed out waiting for daytona sandbox %s (state=%s)", id, state)
 			}
 			return false, nil
 		}, nil)
@@ -297,30 +394,61 @@ func waitForDaytonaReady(ctx context.Context, client daytonaAPI, id string, time
 	return result.Value, nil
 }
 
-func resolveDaytonaSandbox(ctx context.Context, client daytonaAPI, cfg Config, id string) (*daytona.Sandbox, string, error) {
+func resolveDaytonaSandbox(ctx context.Context, client daytonaAPI, cfg core.Config, id string) (*daytona.Sandbox, string, error) {
+	if claim, exists, err := core.ResolveLeaseClaimForProvider(id, daytonaProvider); err != nil {
+		return nil, "", err
+	} else if exists && claim.FixedCreateIntent != nil {
+		sandbox, err := loadFixedDaytonaSandbox(ctx, client, claim)
+		return sandbox, claim.LeaseID, err
+	}
+	sandbox, leaseID, err := lookupDaytonaSandbox(ctx, client, cfg, id)
+	if err != nil {
+		return nil, "", err
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return nil, "", err
+	}
+	if exists && claim.FixedCreateIntent != nil {
+		exact, err := loadFixedDaytonaSandbox(ctx, client, claim)
+		if err != nil {
+			return nil, "", err
+		}
+		if exact.GetId() != sandbox.GetId() {
+			return nil, "", core.Exit(4, "Daytona inventory resource does not match the fixed claim")
+		}
+		return exact, leaseID, nil
+	}
+	if hasFixedDaytonaOwnershipLabels(sandbox.GetLabels()) {
+		return nil, "", core.Exit(4, "Daytona fixed sandbox requires its durable claim; refusing ordinary reclaim")
+	}
+	return sandbox, leaseID, nil
+}
+
+func lookupDaytonaSandbox(ctx context.Context, client daytonaAPI, cfg core.Config, id string) (*daytona.Sandbox, string, error) {
 	if id == "" {
-		return nil, "", exit(2, "provider=daytona requires --id <sandbox-id-or-slug>")
+		return nil, "", core.Exit(2, "provider=daytona requires --id <sandbox-id-or-slug>")
 	}
 	sandboxes, err := client.ListCrabboxSandboxes(ctx)
 	if err != nil {
 		return nil, "", daytonaError("list sandboxes", err)
 	}
-	if isCanonicalLeaseID(id) {
+	if core.IsCanonicalLeaseID(id) {
 		for i := range sandboxes {
 			if leaseID, owned := daytonaSandboxOwnership(&sandboxes[i]); owned && leaseID == id {
 				return &sandboxes[i], id, nil
 			}
 		}
 	}
-	slug := normalizeLeaseSlug(id)
+	slug := core.NormalizeLeaseSlug(id)
 	var matches []*daytona.Sandbox
 	for i := range sandboxes {
-		if _, owned := daytonaSandboxOwnership(&sandboxes[i]); owned && slug != "" && normalizeLeaseSlug(sandboxes[i].Labels["slug"]) == slug {
+		if _, owned := daytonaSandboxOwnership(&sandboxes[i]); owned && slug != "" && core.NormalizeLeaseSlug(sandboxes[i].Labels["slug"]) == slug {
 			matches = append(matches, &sandboxes[i])
 		}
 	}
 	if len(matches) > 1 {
-		return nil, "", exit(4, "daytona slug %q matches multiple sandboxes", id)
+		return nil, "", core.Exit(4, "daytona slug %q matches multiple sandboxes", id)
 	}
 	if len(matches) == 1 {
 		return matches[0], matches[0].Labels["lease"], nil
@@ -330,7 +458,7 @@ func resolveDaytonaSandbox(ctx context.Context, client daytonaAPI, cfg Config, i
 			return &sandboxes[i], leaseID, nil
 		}
 	}
-	if claim, ok, err := resolveLeaseClaimForProvider(id, daytonaProvider); err != nil {
+	if claim, ok, err := core.ResolveLeaseClaimForProvider(id, daytonaProvider); err != nil {
 		return nil, "", err
 	} else if ok {
 		for i := range sandboxes {
@@ -343,16 +471,16 @@ func resolveDaytonaSandbox(ctx context.Context, client daytonaAPI, cfg Config, i
 			sandbox, getErr := client.GetSandbox(ctx, cloudID)
 			if getErr != nil {
 				if daytonaIsNotFoundError(getErr) {
-					return nil, "", exit(4, "daytona claim %s is bound to missing sandbox %s", claim.LeaseID, cloudID)
+					return nil, "", core.Exit(4, "daytona claim %s is bound to missing sandbox %s", claim.LeaseID, cloudID)
 				}
 				return nil, "", daytonaError("get claimed sandbox", getErr)
 			}
 			if sandbox == nil || strings.TrimSpace(sandbox.GetId()) == "" {
-				return nil, "", exit(4, "daytona claim %s is bound to missing sandbox %s", claim.LeaseID, cloudID)
+				return nil, "", core.Exit(4, "daytona claim %s is bound to missing sandbox %s", claim.LeaseID, cloudID)
 			}
 			leaseID, owned := daytonaSandboxOwnership(sandbox)
 			if strings.TrimSpace(sandbox.GetId()) != cloudID || !owned || leaseID != claim.LeaseID {
-				return nil, "", exit(4, "daytona sandbox %s does not match exact local claim for lease %s", cloudID, claim.LeaseID)
+				return nil, "", core.Exit(4, "daytona sandbox %s does not match exact local claim for lease %s", cloudID, claim.LeaseID)
 			}
 			return sandbox, claim.LeaseID, nil
 		}
@@ -362,13 +490,13 @@ func resolveDaytonaSandbox(ctx context.Context, client daytonaAPI, cfg Config, i
 		if leaseID, owned := daytonaSandboxOwnership(sandbox); owned {
 			return sandbox, leaseID, nil
 		}
-		return nil, "", exit(4, "daytona sandbox %s is not owned by Crabbox", id)
+		return nil, "", core.Exit(4, "daytona sandbox %s is not owned by Crabbox", id)
 	}
 	if err != nil && !daytonaIsNotFoundError(err) {
 		return nil, "", daytonaError("get sandbox", err)
 	}
 	_ = cfg
-	return nil, "", exit(4, "daytona sandbox not found: %s", id)
+	return nil, "", core.Exit(4, "daytona sandbox not found: %s", id)
 }
 
 func daytonaSandboxOwnership(sandbox *daytona.Sandbox) (string, bool) {
@@ -378,8 +506,7 @@ func daytonaSandboxOwnership(sandbox *daytona.Sandbox) (string, bool) {
 	labels := sandbox.GetLabels()
 	leaseID := strings.TrimSpace(labels["lease"])
 	return leaseID, strings.EqualFold(strings.TrimSpace(labels["crabbox"]), "true") &&
-		strings.EqualFold(strings.TrimSpace(labels["provider"]), daytonaProvider) &&
-		isCanonicalLeaseID(leaseID)
+		strings.EqualFold(strings.TrimSpace(labels["provider"]), daytonaProvider) && core.IsCanonicalLeaseID(leaseID)
 }
 
 func establishDaytonaSandboxOwnership(ctx context.Context, client daytonaAPI, resourceID, leaseID string, labels map[string]string) (*daytona.Sandbox, error) {
@@ -392,7 +519,7 @@ func establishDaytonaSandboxOwnership(ctx context.Context, client daytonaAPI, re
 	}
 	verifiedLeaseID, owned := daytonaSandboxOwnership(sandbox)
 	if sandbox == nil || strings.TrimSpace(sandbox.GetId()) != strings.TrimSpace(resourceID) || !owned || verifiedLeaseID != strings.TrimSpace(leaseID) {
-		return nil, exit(4, "daytona sandbox %s did not persist exact Crabbox ownership labels for lease %s", blank(resourceID, "-"), blank(leaseID, "-"))
+		return nil, core.Exit(4, "daytona sandbox %s did not persist exact Crabbox ownership labels for lease %s", core.Blank(resourceID, "-"), core.Blank(leaseID, "-"))
 	}
 	return sandbox, nil
 }
@@ -407,45 +534,48 @@ func requireExactDaytonaClaim(leaseID string, sandbox *daytona.Sandbox) error {
 
 func requireExactDaytonaResourceClaim(leaseID, resourceID string) error {
 	resourceID = strings.TrimSpace(resourceID)
-	claim, ok, err := resolveLeaseClaimForProvider(leaseID, daytonaProvider)
+	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, daytonaProvider)
 	if err != nil {
 		return err
 	}
 	return validateExactDaytonaResourceClaim(leaseID, resourceID, claim, ok)
 }
 
-func validateExactDaytonaResourceClaim(leaseID, resourceID string, claim LeaseClaim, exists bool) error {
+func validateExactDaytonaResourceClaim(leaseID, resourceID string, claim core.LeaseClaim, exists bool) error {
 	if !exists || strings.TrimSpace(claim.LeaseID) != strings.TrimSpace(leaseID) || strings.TrimSpace(claim.CloudID) != resourceID {
-		return exit(4, "daytona sandbox %s has no exact local claim for lease %s; use --reclaim from the owning repository before reuse or deletion", blank(resourceID, "-"), blank(leaseID, "-"))
+		return core.Exit(4, "daytona sandbox %s has no exact local claim for lease %s; use --reclaim from the owning repository before reuse or deletion", core.Blank(resourceID, "-"), core.Blank(leaseID, "-"))
+	}
+	if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State != "acquired" {
+		return core.Exit(4, "Daytona fixed acquisition is incomplete; replay its original request or stop it")
 	}
 	return nil
 }
 
-func daytonaSSHTargetFor(ctx context.Context, client daytonaAPI, cfg Config, server Server) (SSHTarget, error) {
+func daytonaSSHTargetFor(ctx context.Context, client daytonaAPI, cfg core.Config, server core.Server) (core.SSHTarget, error) {
 	access, err := client.CreateSSHAccess(ctx, server.CloudID, time.Duration(daytonaSSHAccessMinutes(cfg))*time.Minute)
 	if err != nil {
-		return SSHTarget{}, daytonaError("create ssh access", err)
+		return core.SSHTarget{}, daytonaError("create ssh access", err)
 	}
 	return daytonaSSHTargetFromAccess(cfg, access)
 }
 
-func daytonaSSHTargetFromAccess(cfg Config, access daytonaSSHAccess) (SSHTarget, error) {
+func daytonaSSHTargetFromAccess(cfg core.Config, access daytonaSSHAccess) (core.SSHTarget, error) {
 	user := strings.TrimSpace(access.Token)
 	host := daytonaSSHGatewayHost(cfg)
 	port := "22"
 	if command := strings.TrimSpace(access.Command); command != "" {
 		parsedUser, parsedHost, parsedPort, err := parseDaytonaSSHCommand(command)
 		if err != nil {
-			return SSHTarget{}, err
+			return core.SSHTarget{}, err
 		}
 		user = parsedUser
 		host = parsedHost
 		port = parsedPort
 	}
 	if user == "" {
-		return SSHTarget{}, fmt.Errorf("daytona ssh access response missing token")
+		return core.SSHTarget{}, fmt.Errorf("daytona ssh access response missing token")
 	}
-	return SSHTarget{
+	return core.SSHTarget{
 		User:        user,
 		Host:        host,
 		Port:        port,
@@ -492,31 +622,31 @@ func parseDaytonaSSHCommand(command string) (string, string, string, error) {
 	return user, host, port, nil
 }
 
-func daytonaSandboxesToServers(sandboxes []daytona.Sandbox) []Server {
-	servers := make([]Server, 0, len(sandboxes))
+func daytonaSandboxesToServers(sandboxes []daytona.Sandbox) []core.Server {
+	servers := make([]core.Server, 0, len(sandboxes))
 	for i := range sandboxes {
 		servers = append(servers, daytonaSandboxToServer(&sandboxes[i]))
 	}
 	return servers
 }
 
-func daytonaSandboxToServer(sandbox *daytona.Sandbox) Server {
+func daytonaSandboxToServer(sandbox *daytona.Sandbox) core.Server {
 	labels := map[string]string{}
 	if sandbox != nil && sandbox.Labels != nil {
 		for k, v := range sandbox.Labels {
 			labels[k] = v
 		}
 	}
-	server := Server{Provider: daytonaProvider, Labels: labels}
+	server := core.Server{Provider: daytonaProvider, Labels: labels}
 	if sandbox != nil {
 		server.CloudID = sandbox.GetId()
 		server.Name = sandbox.GetName()
 		server.Status = daytonaSandboxState(sandbox)
 	}
 	if server.Name == "" {
-		server.Name = blank(labels["lease_name"], server.CloudID)
+		server.Name = core.Blank(labels["lease_name"], server.CloudID)
 	}
-	server.ServerType.Name = blank(labels["server_type"], "snapshot")
+	server.ServerType.Name = core.Blank(labels["server_type"], "snapshot")
 	return server
 }
 
@@ -545,19 +675,19 @@ func daytonaStateFailed(state string) bool {
 	}
 }
 
-func daytonaUser(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Daytona.User), "daytona")
+func daytonaUser(cfg core.Config) string {
+	return core.Blank(strings.TrimSpace(cfg.Daytona.User), "daytona")
 }
 
-func daytonaWorkRoot(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Daytona.WorkRoot), "/home/"+daytonaUser(cfg)+"/crabbox")
+func daytonaWorkRoot(cfg core.Config) string {
+	return core.Blank(strings.TrimSpace(cfg.Daytona.WorkRoot), "/home/"+daytonaUser(cfg)+"/crabbox")
 }
 
-func daytonaSSHGatewayHost(cfg Config) string {
-	return blank(strings.TrimSpace(cfg.Daytona.SSHGatewayHost), "ssh.app.daytona.io")
+func daytonaSSHGatewayHost(cfg core.Config) string {
+	return core.Blank(strings.TrimSpace(cfg.Daytona.SSHGatewayHost), "ssh.app.daytona.io")
 }
 
-func daytonaSSHAccessMinutes(cfg Config) int {
+func daytonaSSHAccessMinutes(cfg core.Config) int {
 	if cfg.Daytona.SSHAccessMinutes > 0 {
 		return cfg.Daytona.SSHAccessMinutes
 	}

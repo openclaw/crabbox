@@ -165,6 +165,38 @@ export async function loadSources(root = repoRoot) {
     fragmentTokens(loaded, constants);
     fragments.push(loaded);
   }
+  // Ship the canonical installer with its Node-only entrypoint; never fetch mutable script bytes at boot.
+  const installer = await readFile(resolve(root, "scripts/install-linux-developer-tools.sh"), "utf8");
+  const delimiter = "CRABBOX_LINUX_DEVELOPER_TOOLS";
+  if (!installer.endsWith("\n") || installer.includes("\r") || installer.includes("\0") ||
+      installer.split("\n").some((line) => line === delimiter || line === "'@")) {
+    throw new Error("Linux developer-tools installer must be LF text safe for the bootstrap heredocs");
+  }
+  fragments.push({
+    name: "linuxNodeInstall", file: "scripts/install-linux-developer-tools.sh", literal: true, parameters: {},
+    source: `cat >/var/lib/crabbox/install-linux-developer-tools.sh <<'${delimiter}'\n${installer}${delimiter}\nbash /var/lib/crabbox/install-linux-developer-tools.sh --node-only\n`,
+  });
+  const detached = await readFile(resolve(root, "scripts/start-windows-detached-process.ps1"), "utf8");
+  if (!detached.endsWith("\n") || detached.includes("\r") || detached.includes("\0") ||
+      detached.split("\n").some((line) => line === "'@")) {
+    throw new Error("Windows detached launcher must be LF text safe for a PowerShell here-string");
+  }
+  fragments.push({
+    name: "windowsDetachInstall", file: "scripts/start-windows-detached-process.ps1", literal: true, parameters: {},
+    source: `
+$detachBin = Join-Path $env:ProgramFiles "Crabbox\\bin"
+New-Item -ItemType Directory -Force -Path $detachBin | Out-Null
+$detachSource = @'
+${detached}'@
+[IO.File]::WriteAllText((Join-Path $detachBin "Start-CrabboxDetachedProcess.ps1"), $detachSource, [Text.UTF8Encoding]::new($true))
+$machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+if (@($machinePath -split ";") -notcontains $detachBin) {
+  $machinePath = $machinePath + ";" + $detachBin
+  [Environment]::SetEnvironmentVariable("Path", $machinePath, "Machine")
+}
+$env:Path = $machinePath + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+`,
+  });
   return { constants, catalog, fragments };
 }
 function gofmt(source) {

@@ -17,11 +17,9 @@ func init() {
 // Provider uses the HTTPS console for lifecycle and authenticated guest bootstrap.
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationSessionToken),
 		Name:             providerName,
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
@@ -76,14 +74,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return newBackend(p.Spec(), cfg, rt), nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	backend, err := p.Configure(cfg, rt)
-	if err != nil {
-		return nil, err
-	}
-	return backend.(core.DoctorBackend), nil
-}
-
 // ClaimScope binds routing; the authenticated user is independently fenced in each claim.
 func (Provider) ClaimScope(cfg core.Config) string {
 	u, err := consoleURL(cfg.Boxd.APIURL)
@@ -104,10 +94,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		return cfg.ServerType
 	}
-	return "machine"
-}
-
-func (Provider) ServerTypeForClass(string) string {
 	return "machine"
 }
 

@@ -40,90 +40,21 @@ func defaultCodeSandboxConfig() CodeSandboxConfig {
 	}
 }
 
-func (cfg *CodeSandboxConfig) applyFile(file *fileCodeSandboxConfig, trusted bool) error {
-	if file == nil {
-		return nil
-	}
-	if file.TemplateID != nil {
-		cfg.TemplateID = *file.TemplateID
-	}
-	if file.Workdir != nil {
-		cfg.Workdir = *file.Workdir
-	}
-	if file.VMTier != nil {
-		cfg.VMTier = *file.VMTier
-	}
-	if file.Privacy != nil {
-		cfg.Privacy = *file.Privacy
-	}
-	if file.HibernationTimeoutSecs != nil {
-		if *file.HibernationTimeoutSecs < 0 {
-			return exit(2, "codesandbox hibernationTimeoutSecs must be non-negative")
-		}
-		cfg.HibernationTimeoutSecs = *file.HibernationTimeoutSecs
-	}
-	if file.AutomaticWakeupHTTP != nil {
-		cfg.AutomaticWakeupHTTP = *file.AutomaticWakeupHTTP
-	}
-	if file.AutomaticWakeupWebSocket != nil {
-		cfg.AutomaticWakeupWebSocket = *file.AutomaticWakeupWebSocket
-	}
-	if trusted && file.BridgeCommand != nil {
-		cfg.BridgeCommand = *file.BridgeCommand
-	}
-	if trusted && file.SDKPackage != nil {
-		cfg.SDKPackage = *file.SDKPackage
-	}
-	if file.DoctorListLimit != nil {
-		if *file.DoctorListLimit < 0 {
-			return exit(2, "codesandbox doctorListLimit must be non-negative")
-		}
-		cfg.DoctorListLimit = *file.DoctorListLimit
-	}
-	if file.OperationTimeoutSecs != nil {
-		if *file.OperationTimeoutSecs < 0 {
-			return exit(2, "codesandbox operationTimeoutSecs must be non-negative")
-		}
-		cfg.OperationTimeoutSecs = *file.OperationTimeoutSecs
-	}
-	return nil
+// CodeSandboxConfigApplied records accepted assignments during one application.
+type CodeSandboxConfigApplied struct {
+	InputAccepted bool
 }
 
-func (cfg *CodeSandboxConfig) applyEnv() error {
-	cfg.TemplateID = getenv("CRABBOX_CODESANDBOX_TEMPLATE_ID", cfg.TemplateID)
-	cfg.Workdir = getenv("CRABBOX_CODESANDBOX_WORKDIR", cfg.Workdir)
-	cfg.VMTier = getenv("CRABBOX_CODESANDBOX_VM_TIER", cfg.VMTier)
-	cfg.Privacy = getenv("CRABBOX_CODESANDBOX_PRIVACY", cfg.Privacy)
-	{
-		var err error
-		cfg.HibernationTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CODESANDBOX_HIBERNATION_TIMEOUT_SECS", cfg.HibernationTimeoutSecs)
-		if err != nil {
-			return err
-		}
-	}
-	if value, ok := getenvBool("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_HTTP"); ok {
-		cfg.AutomaticWakeupHTTP = value
-	}
-	if value, ok := getenvBool("CRABBOX_CODESANDBOX_AUTOMATIC_WAKEUP_WEBSOCKET"); ok {
-		cfg.AutomaticWakeupWebSocket = value
-	}
-	cfg.BridgeCommand = getenv("CRABBOX_CODESANDBOX_BRIDGE_COMMAND", cfg.BridgeCommand)
-	cfg.SDKPackage = getenv("CRABBOX_CODESANDBOX_SDK_PACKAGE", cfg.SDKPackage)
-	{
-		var err error
-		cfg.DoctorListLimit, err = getenvNonNegativeInt("CRABBOX_CODESANDBOX_DOCTOR_LIST_LIMIT", cfg.DoctorListLimit)
-		if err != nil {
-			return err
-		}
-	}
-	{
-		var err error
-		cfg.OperationTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CODESANDBOX_OPERATION_TIMEOUT_SECS", cfg.OperationTimeoutSecs)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+func (cfg *CodeSandboxConfig) applyFile(file *fileCodeSandboxConfig, trusted bool) (CodeSandboxConfigApplied, error) {
+	var applied CodeSandboxConfigApplied
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "codesandbox")
+	return applied, err
+}
+
+func (cfg *CodeSandboxConfig) applyEnv() (CodeSandboxConfigApplied, error) {
+	var applied CodeSandboxConfigApplied
+	err := applyConfigEnvironment(cfg, &applied, 0, 11)
+	return applied, err
 }
 
 // CodeSandboxConfigFlagValues holds parsed values; only visited flags are applied.
@@ -143,54 +74,14 @@ type CodeSandboxConfigFlagValues struct {
 
 // RegisterCodeSandboxConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterCodeSandboxConfigFlags(fs *flag.FlagSet, defaults CodeSandboxConfig) CodeSandboxConfigFlagValues {
-	return CodeSandboxConfigFlagValues{
-		TemplateID:               fs.String("codesandbox-template-id", defaults.TemplateID, "CodeSandbox template ID used by later lifecycle operations"),
-		Workdir:                  fs.String("codesandbox-workdir", defaults.Workdir, "Absolute working directory inside the sandbox; must be under /project/workspace"),
-		VMTier:                   fs.String("codesandbox-vm-tier", defaults.VMTier, "CodeSandbox VM tier for later create operations (empty = workspace default)"),
-		Privacy:                  fs.String("codesandbox-privacy", defaults.Privacy, "CodeSandbox sandbox privacy for later create operations"),
-		HibernationTimeoutSecs:   fs.Int("codesandbox-hibernation-timeout-secs", defaults.HibernationTimeoutSecs, "CodeSandbox hibernation timeout in seconds (0 = service default)"),
-		AutomaticWakeupHTTP:      fs.Bool("codesandbox-automatic-wakeup-http", defaults.AutomaticWakeupHTTP, "allow automatic wakeup on HTTP requests"),
-		AutomaticWakeupWebSocket: fs.Bool("codesandbox-automatic-wakeup-websocket", defaults.AutomaticWakeupWebSocket, "allow automatic wakeup on WebSocket connections"),
-		BridgeCommand:            fs.String("codesandbox-bridge-command", defaults.BridgeCommand, "local Node-compatible command used for the CodeSandbox SDK bridge"),
-		SDKPackage:               fs.String("codesandbox-sdk-package", defaults.SDKPackage, "Node package spec imported by the CodeSandbox SDK bridge"),
-		DoctorListLimit:          fs.Int("codesandbox-doctor-list-limit", defaults.DoctorListLimit, "maximum sandboxes read by non-mutating doctor readiness"),
-		OperationTimeoutSecs:     fs.Int("codesandbox-operation-timeout-secs", defaults.OperationTimeoutSecs, "SDK bridge operation timeout in seconds"),
-	}
+	var values CodeSandboxConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values CodeSandboxConfigFlagValues) Apply(cfg *CodeSandboxConfig, fs *flag.FlagSet) {
-	if flagWasSet(fs, "codesandbox-template-id") {
-		cfg.TemplateID = *values.TemplateID
-	}
-	if flagWasSet(fs, "codesandbox-workdir") {
-		cfg.Workdir = *values.Workdir
-	}
-	if flagWasSet(fs, "codesandbox-vm-tier") {
-		cfg.VMTier = *values.VMTier
-	}
-	if flagWasSet(fs, "codesandbox-privacy") {
-		cfg.Privacy = *values.Privacy
-	}
-	if flagWasSet(fs, "codesandbox-hibernation-timeout-secs") {
-		cfg.HibernationTimeoutSecs = *values.HibernationTimeoutSecs
-	}
-	if flagWasSet(fs, "codesandbox-automatic-wakeup-http") {
-		cfg.AutomaticWakeupHTTP = *values.AutomaticWakeupHTTP
-	}
-	if flagWasSet(fs, "codesandbox-automatic-wakeup-websocket") {
-		cfg.AutomaticWakeupWebSocket = *values.AutomaticWakeupWebSocket
-	}
-	if flagWasSet(fs, "codesandbox-bridge-command") {
-		cfg.BridgeCommand = *values.BridgeCommand
-	}
-	if flagWasSet(fs, "codesandbox-sdk-package") {
-		cfg.SDKPackage = *values.SDKPackage
-	}
-	if flagWasSet(fs, "codesandbox-doctor-list-limit") {
-		cfg.DoctorListLimit = *values.DoctorListLimit
-	}
-	if flagWasSet(fs, "codesandbox-operation-timeout-secs") {
-		cfg.OperationTimeoutSecs = *values.OperationTimeoutSecs
-	}
+func (values CodeSandboxConfigFlagValues) Apply(cfg *CodeSandboxConfig, fs *flag.FlagSet) (CodeSandboxConfigApplied, error) {
+	var applied CodeSandboxConfigApplied
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

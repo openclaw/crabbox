@@ -6,6 +6,9 @@ import (
 	"math"
 	"path"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type stringListFlag []string
@@ -40,7 +43,7 @@ type flagValues struct {
 	Kit             *stringListFlag
 }
 
-func RegisterDockerSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterDockerSandboxProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	extraWorkspaces := stringListFlag(append([]string(nil), defaults.DockerSandbox.ExtraWorkspaces...))
 	mcp := stringListFlag(append([]string(nil), defaults.DockerSandbox.MCP...))
 	kit := stringListFlag(append([]string(nil), defaults.DockerSandbox.Kit...))
@@ -61,76 +64,83 @@ func RegisterDockerSandboxProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	}
 }
 
-func ApplyDockerSandboxProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
+func ApplyDockerSandboxProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if cfg.Provider == providerName {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s; use --docker-sandbox-cpus or --docker-sandbox-memory", providerName)
-		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s; use --docker-sandbox-template", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "use --docker-sandbox-cpus or --docker-sandbox-memory", "use --docker-sandbox-template"); err != nil {
+			return err
 		}
 	}
 	v, ok := values.(flagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "docker-sandbox-cli") {
+	if core.FlagWasSet(fs, "docker-sandbox-cli") {
 		cfg.DockerSandbox.CLIPath = *v.CLIPath
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
-	if flagWasSet(fs, "docker-sandbox-agent") {
+	if core.FlagWasSet(fs, "docker-sandbox-agent") {
 		cfg.DockerSandbox.Agent = *v.Agent
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
-	if flagWasSet(fs, "docker-sandbox-template") {
+	if core.FlagWasSet(fs, "docker-sandbox-template") {
 		cfg.DockerSandbox.Template = *v.Template
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
-	if flagWasSet(fs, "docker-sandbox-cpus") {
+	if core.FlagWasSet(fs, "docker-sandbox-cpus") {
 		cfg.DockerSandbox.CPUs = *v.CPUs
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
-	if flagWasSet(fs, "docker-sandbox-memory") {
+	if core.FlagWasSet(fs, "docker-sandbox-memory") {
 		cfg.DockerSandbox.Memory = *v.Memory
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
-	if flagWasSet(fs, "docker-sandbox-clone") {
+	if core.FlagWasSet(fs, "docker-sandbox-clone") {
 		cfg.DockerSandbox.Clone = *v.Clone
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
-	if flagWasSet(fs, "docker-sandbox-workdir") {
+	if core.FlagWasSet(fs, "docker-sandbox-workdir") {
 		cfg.DockerSandbox.Workdir = *v.Workdir
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
-	if flagWasSet(fs, "docker-sandbox-extra-workspace") {
+	if core.FlagWasSet(fs, "docker-sandbox-extra-workspace") {
 		cfg.DockerSandbox.ExtraWorkspaces = append([]string(nil), (*v.ExtraWorkspaces)...)
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
-	if flagWasSet(fs, "docker-sandbox-mcp") {
+	if core.FlagWasSet(fs, "docker-sandbox-mcp") {
 		cfg.DockerSandbox.MCP = append([]string(nil), (*v.MCP)...)
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
-	if flagWasSet(fs, "docker-sandbox-kit") {
+	if core.FlagWasSet(fs, "docker-sandbox-kit") {
 		cfg.DockerSandbox.Kit = append([]string(nil), (*v.Kit)...)
+		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
 	}
 	return validateConfig(*cfg)
 }
 
-func validateConfig(cfg Config) error {
+func validateConfig(cfg core.Config) error {
 	agent := strings.TrimSpace(cfg.DockerSandbox.Agent)
 	if agent == "" {
 		agent = defaultAgent
 	}
 	if agent != defaultAgent {
-		return exit(2, "docker-sandbox agent %q is not supported yet; v1 supports shell only", agent)
+		return core.Exit(2, "docker-sandbox agent %q is not supported yet; v1 supports shell only", agent)
 	}
 	if math.IsNaN(cfg.DockerSandbox.CPUs) || math.IsInf(cfg.DockerSandbox.CPUs, 0) {
-		return exit(2, "docker-sandbox cpus must be finite")
+		return core.Exit(2, "docker-sandbox cpus must be finite")
 	}
 	if cfg.DockerSandbox.CPUs < 0 {
-		return exit(2, "docker-sandbox cpus must be greater than zero")
+		return core.Exit(2, "docker-sandbox cpus must be greater than zero")
 	}
 	if cfg.DockerSandbox.CPUs != math.Trunc(cfg.DockerSandbox.CPUs) {
-		return exit(2, "docker-sandbox cpus must be a whole number")
+		return core.Exit(2, "docker-sandbox cpus must be a whole number")
 	}
 	if workdir := strings.TrimSpace(cfg.DockerSandbox.Workdir); workdir != "" {
 		clean := path.Clean(workdir)
 		if !strings.HasPrefix(clean, "/") {
-			return exit(2, "docker-sandbox workdir %q must be an absolute path", workdir)
+			return core.Exit(2, "docker-sandbox workdir %q must be an absolute path", workdir)
 		}
 		if clean == "/" {
-			return exit(2, "docker-sandbox workdir %q is too broad; choose a dedicated workspace path", workdir)
+			return core.Exit(2, "docker-sandbox workdir %q is too broad; choose a dedicated workspace path", workdir)
 		}
 	}
 	for _, field := range []struct {

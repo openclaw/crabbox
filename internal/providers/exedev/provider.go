@@ -4,7 +4,6 @@ import (
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -13,14 +12,10 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return providerName }
-
-func (Provider) Aliases() []string {
-	return []string{"exe", "exedev"}
-}
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"exe", "exedev"},
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationSSH),
 		Name:             providerName,
 		Family:           "exe-dev",
 		Kind:             core.ProviderKindSSHLease,
@@ -41,14 +36,10 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
-		return nil, exit(2, "provider=%s managed provisioning supports target=linux only", providerName)
+		return nil, core.Exit(2, "provider=%s managed provisioning supports target=linux only", providerName)
 	}
 	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
-		return nil, exit(2, "--tailscale is not supported for provider=%s; exe.dev VMs expose public SSH only", providerName)
+		return nil, core.Exit(2, "--tailscale is not supported for provider=%s; exe.dev VMs expose public SSH only", providerName)
 	}
 	return NewExeDevLeaseBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("exe.dev", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

@@ -35,6 +35,52 @@ func TestSortSyncPlanRows(t *testing.T) {
 	}
 }
 
+func TestSyncPlanOrdinarySparseScope(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, ignore    string
+		wantError, materialized bool
+	}{
+		{name: "in scope", wantError: true},
+		{name: "outside include", config: "sync: {include: [visible]}\n"},
+		{name: "excluded", config: "sync: {exclude: [hidden]}\n"},
+		{name: "ignore file", ignore: "hidden\n"},
+		{name: "ordered reinclude", config: "sync: {exclude: [hidden, '!hidden/drop.txt']}\n", wantError: true},
+		{name: "materialized", materialized: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupOrdinaryHiddenSyncRepo(t, false)
+			if tc.materialized {
+				runGit(t, dir, "sparse-checkout", "set", "visible", "hidden")
+			}
+			if tc.config != "" {
+				writeFile(t, os.Getenv("CRABBOX_CONFIG"), tc.config)
+			}
+			if tc.ignore != "" {
+				writeFile(t, filepath.Join(dir, ".crabboxignore"), tc.ignore)
+			}
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).syncPlan(context.Background(), nil)
+			if tc.wantError {
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 6 {
+					t.Fatalf("error=%v want exit6", err)
+				}
+				assertOrdinaryHiddenSyncGuidance(t, err)
+				return
+			}
+			if err != nil {
+				t.Fatalf("scope control: %v", err)
+			}
+			if !strings.Contains(stdout.String(), "visible/keep.txt") {
+				t.Fatalf("visible path missing: %s", stdout.String())
+			}
+			if tc.materialized && !strings.Contains(stdout.String(), "hidden/drop.txt") {
+				t.Fatal("materialized path missing")
+			}
+		})
+	}
+}
+
 func TestSyncPlanJSONOutput(t *testing.T) {
 	clearConfigEnv(t)
 	home := t.TempDir()
@@ -71,6 +117,9 @@ func TestSyncPlanJSONOutput(t *testing.T) {
 		t.Fatalf("decode sync-plan JSON: %v\n%s", err, stdout.String())
 	}
 
+	if got.Source != "" || got.Root != "" {
+		t.Fatal("Git sync-plan acquired directory metadata")
+	}
 	if got.Candidate.Files != 2 || got.Candidate.Bytes != 25 || got.Candidate.HumanBytes != "25 B" {
 		t.Fatalf("candidate=%+v", got.Candidate)
 	}
@@ -122,8 +171,8 @@ func TestSyncPlanProviderGuardrailMatchesArchivePreflight(t *testing.T) {
 				provider.spec.SyncGuardrailFullCandidate = true
 			}
 			RegisterProvider(provider)
-			t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
-			config := fmt.Sprintf("provider: %s\nsync:\n  failFiles: %d\n  failBytes: %d\n  allowLarge: %t\n", provider.Name(), tc.failFiles, tc.failBytes, tc.allow)
+			t.Cleanup(func() { delete(providerRegistry, provider.Spec().Name) })
+			config := fmt.Sprintf("provider: %s\nsync:\n  failFiles: %d\n  failBytes: %d\n  allowLarge: %t\n", provider.Spec().Name, tc.failFiles, tc.failBytes, tc.allow)
 			if tc.exclude {
 				config += "  exclude: [b.txt]\n"
 			}
@@ -227,4 +276,30 @@ func syncPlanHasReason(got []syncPlanJSONGuardrailReason, want syncPlanJSONGuard
 		}
 	}
 	return false
+}
+
+func TestSyncPlanDirectorySource(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Chdir(root)
+	writeFile(t, filepath.Join(root, "README.txt"), "readme\n")
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, config, "provider: run-env-profile-test\nsync: {source: directory, include: [README.txt]}\n")
+	t.Setenv("CRABBOX_CONFIG", config)
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).syncPlan(context.Background(), []string{"--json"})
+	if err != nil {
+		t.Fatalf("error=%v stderr=%s", err, &stderr)
+	}
+	var got syncPlanJSONOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != "directory" || got.Root != canonicalRepositoryPath(root) || got.Candidate.Files != 1 || got.Guardrail.Scope != "candidate" {
+		t.Fatalf("output=%+v", got)
+	}
+	if got.DirtyDelta.Files != 0 || got.DeletedTrackedPaths != 0 {
+		t.Fatalf("Git delta=%+v", got)
+	}
 }

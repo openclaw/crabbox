@@ -196,6 +196,77 @@ for lifetime, key-rotation, and recovery behavior.
 
 ## Direct lifecycle
 
+### Fixed operation IDs
+
+Direct `warmup --lease-id cbx_<12 lowercase hex>` and checkpoint forks with the
+same flag bind one operation to its exact sandbox. A durable create intent is
+written before submission; an uncertain response can be reconciled by replaying
+the original request without submitting another create. The binding includes the
+API endpoint, native organization, snapshot selection, project repository and
+checkpoint, sizing, user, target, and lifetime. Credential rotation within that
+same organization does not change the binding. A released ID cannot be reused.
+
+Keep the source snapshot until acquisition completes successfully. Incomplete
+retries revalidate the exact pinned snapshot and sandbox sizing, even if the
+resource UUID is already known. If the source is retired first, the incomplete
+lease remains held for explicit cleanup; no replacement is created. Successfully
+acquired children can replay after their source snapshot is retired.
+
+Fixed acquisition must establish the organization before allocation. OAuth uses
+the selected organization from the existing CLI profile. API-key mode reads the
+authenticated `organizationId` from `/api-keys/current`, including empty accounts.
+The deployed API returns this field although the pinned Go SDK retains it only
+as an additional property. Invalid or conflicting identity is rejected.
+Older servers matching the public Daytona 0.190.0 contract omit this field;
+acquisition retains their existing child, private-checkpoint, or visible-sandbox
+identity path. That compatibility path remains until those servers are no longer
+supported, and never authorizes cleanup of an absent resource. API-key cleanup
+requires the current-key organization field; older servers require an OAuth
+organization profile instead. Ordinary warmup without a fixed ID retains its
+existing API-key behavior. No credentials or token-derived identifiers are stored
+in fixed claims.
+
+Fixed claims use a distinct provider marker so older clients cannot treat them
+as ordinary Daytona claims and erase terminal replay protection. Failed or
+uncertain cleanup retains the claim. An unqualified 404 is not deletion proof:
+the provider's resource-access layer can also use that response for failed access.
+Fixed cleanup durably binds the native UUID, verifies that UUID through the
+existing `/sandbox/paginated` database-backed inventory, and records an
+identity-validated deletion acknowledgment before reconciling removal. The query
+uses only the UUID and `includeErroredDeleted`, without mutable label filters;
+it reads the sandbox table directly rather than the ordinary search index.
+
+Once cleanup durably records its entry before DELETE, replay and execution are
+blocked even if the DELETE response is lost and the sandbox still appears ready;
+retry `stop` to reconcile it. Acknowledgment only means destruction was requested.
+Cleanup then requires an exact UUID lookup returning 404, fresh authenticated
+access to the original organization, and complete database inventory showing no
+exact UUID. Required pagination metadata must be present, integral, and
+consistent; failed-deletion rows, malformed responses, and incomplete pages
+retain custody. No timed sampling or search-index fallback establishes absence.
+This confirms that the provider has no remaining nonterminal record for that
+resource, including failed destruction, not independent proof of physical storage
+reclamation.
+
+This works after deletion of the last live sandbox and accommodates the native
+rename during deletion. The durable acknowledgment survives interruption and
+same-organization credential rotation. Native TTL or external deletion can remove
+a successfully acquired sandbox before Crabbox requests deletion. In that case,
+`stop`, `inspect`, and `status` reconcile the recorded exact UUID against fresh
+authenticated organization identity and complete failure-inclusive database
+absence, then persist the same terminal claim. Inspection never issues DELETE.
+Neither a bare 404 nor an elapsed deadline establishes removal. Incomplete creates
+without a deletion witness, including attempts whose UUID was never observed,
+remain explicit operator reconciliation obligations. No second create is submitted.
+A valid released claim remains available through `inspect` and
+`status` as `released`, never ready, with no provider request or remote access.
+`status --wait` reports that terminal state instead of waiting for readiness.
+
+The fixed producer also labels its native sandbox with `fixed_claim_provider`
+and an attempt nonce. The fingerprint alone remains opaque metadata on ordinary
+leases; it does not identify a fixed owner or grant recovery authority. Native
+labels never replace the matching durable claim.
+
 Direct control-plane HTTP requests have a 60-second default whole-request
 timeout, including response-body reads. Earlier caller cancellation or deadlines
 still apply. Toolbox execution and archive uploads keep their caller-controlled
@@ -240,8 +311,13 @@ Daytona lifetime settings use whole minutes, so positive durations are rounded
 up. Idle auto-stop preserves the sandbox filesystem; native TTL ultimately
 deletes the sandbox. `heartbeat --idle-timeout` changes the provider's auto-stop
 policy as well as Crabbox metadata. Status readiness comes from Daytona's live
-state, never a previously stored `ready` label. Explicit stop and rollback wait
-for confirmed provider deletion, with a bounded cleanup deadline.
+state, never a previously stored `ready` label. Explicit `crabbox stop` (and its
+`release` alias) waits for confirmed provider deletion under the caller's
+cancellation and deadline. The CLI remains interruptible by signal; a supervising
+process owns its command budget. Non-cancelable callers, including detached job
+cleanup, retain the 30-second fallback. Individual control-plane requests retain
+their 60-second limit. Automatic run/watch cleanup and detached rollback keep
+their separate 30-second budget.
 If `stop` cannot resolve the claimed sandbox, it returns the lookup error and
 preserves the local recovery claim. A missing sandbox in the current account or
 API endpoint does not prove deletion in the original scope, even after native TTL.

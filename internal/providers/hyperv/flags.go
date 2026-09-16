@@ -2,7 +2,6 @@ package hyperv
 
 import (
 	"flag"
-	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -34,45 +33,43 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "hyperv-image") {
+	if core.FlagWasSet(fs, "hyperv-image") {
 		cfg.HyperV.Image = *v.Image
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "hyperv-user") {
+	if core.FlagWasSet(fs, "hyperv-user") {
 		cfg.HyperV.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "hyperv-work-root") {
+	if core.FlagWasSet(fs, "hyperv-work-root") {
 		cfg.HyperV.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "hyperv-cpu") {
+	if core.FlagWasSet(fs, "hyperv-cpu") {
 		cfg.HyperV.CPUs = *v.CPUs
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "hyperv-memory") {
+	if core.FlagWasSet(fs, "hyperv-memory") {
 		cfg.HyperV.Memory = *v.Memory
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "hyperv-switch") {
+	if core.FlagWasSet(fs, "hyperv-switch") {
 		cfg.HyperV.Switch = *v.Switch
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if flagWasSet(fs, "hyperv-init-password") {
+	if core.FlagWasSet(fs, "hyperv-init-password") {
 		cfg.HyperV.InitPassword = *v.InitPassword
+		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if isHyperVProviderName(cfg.Provider) {
+	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		// Target flags are applied after provider flags on several lifecycle
 		// commands. Leave target validation to the centralized provider-target
 		// check after all flag sources have been applied. When no target source
 		// is explicit, adopt the provider's Windows default here.
-		if !core.IsTargetExplicit(cfg) && !flagWasSet(fs, "target") {
+		if !core.IsTargetExplicit(cfg) && !core.FlagWasSet(fs, "target") {
 			cfg.TargetOS = targetWindows
 		}
 		applyDefaults(cfg)
 	}
 	return nil
-}
-
-func isHyperVProviderName(provider string) bool {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case providerName:
-		return true
-	default:
-		return false
-	}
 }

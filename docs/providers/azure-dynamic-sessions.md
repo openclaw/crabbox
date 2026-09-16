@@ -156,7 +156,7 @@ azureDynamicSessions:
 | `endpoint` | `--azure-dynamic-sessions-endpoint` | `CRABBOX_AZURE_DYNAMIC_SESSIONS_ENDPOINT` | (required) |
 | `apiVersion` | `--azure-dynamic-sessions-api-version` | `CRABBOX_AZURE_DYNAMIC_SESSIONS_API_VERSION` | `2025-02-02-preview` |
 | `workdir` | `--azure-dynamic-sessions-workdir` | `CRABBOX_AZURE_DYNAMIC_SESSIONS_WORKDIR` | `/workspace/crabbox` |
-| `timeoutSecs` | `--azure-dynamic-sessions-timeout-secs` | `CRABBOX_AZURE_DYNAMIC_SESSIONS_TIMEOUT_SECS` | `1800` (falls back to `--ttl` when unset) |
+| `timeoutSecs` | `--azure-dynamic-sessions-timeout-secs` | `CRABBOX_AZURE_DYNAMIC_SESSIONS_TIMEOUT_SECS` | `1800` |
 
 The token uses `CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN` (see
 [Authentication](#authentication)).
@@ -164,6 +164,24 @@ The token uses `CRABBOX_AZURE_DYNAMIC_SESSIONS_TOKEN` (see
 Legacy `azureDynamicSessions.pool` and
 `CRABBOX_AZURE_DYNAMIC_SESSIONS_POOL` values are rejected. The
 `endpoint` setting is already the pool-specific management endpoint.
+
+All five bindings share one typed declaration, including the legacy `pool`
+field so its existing client-time rejection is preserved. It gains no flag, and
+token discovery remains outside these bindings. Nonempty YAML strings override
+earlier values without trimming; omitted, null, and empty strings preserve them.
+Accepted endpoint inputs retain their source classification, with explicit
+endpoint flag visits recorded in the existing later phase.
+
+YAML `timeoutSecs` applies only when positive: zero and negative values leave the
+earlier value unchanged. Its environment parser keeps the earlier value on
+malformed input but accepts parsed zero/negative values, as do explicit flags.
+The effective timeout uses a positive configured value first, otherwise a
+positive `--ttl` rounded up to seconds, otherwise 1800 seconds. This does not
+replace nonpositive values with 1800 before checking TTL.
+
+API-version, workdir, and final timeout fallbacks share the compiled defaults.
+Azure backend routing, Linux-only handling, endpoint/legacy-pool validation,
+authentication and session lifecycle remain unchanged.
 
 `workdir` must be an absolute path and may not be a broad system directory such
 as `/`, `/tmp`, `/usr`, or bare `/workspace`; pick a dedicated subdirectory.

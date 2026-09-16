@@ -1,5 +1,4 @@
 $ErrorActionPreference = "Stop"
-Write-Output "devtools-smoke-ok"
 Get-ComputerInfo | Select-Object OsName, OsVersion, OsBuildNumber | Format-List
 git --version
 gh --version | Select-Object -First 1
@@ -17,3 +16,5 @@ trufflehog --no-update --version
 docker --version
 docker version
 docker image inspect mcr.microsoft.com/windows/servercore:ltsc2022 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Docker image smoke failed: $LASTEXITCODE" }
+Write-Output "devtools-smoke-ok"

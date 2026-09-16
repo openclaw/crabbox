@@ -488,6 +488,48 @@ func assertSSHLogContains(t *testing.T, logPath, want string) {
 	}
 }
 
+func TestRunExposeOnExistingManagedLeaseDiagnostic(t *testing.T) {
+	clearConfigEnv(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+	const leaseID = "cbx_abcdef123456"
+	var leaseReads atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/control":
+			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID:
+			leaseReads.Add(1)
+			http.Error(w, "expose run reached coordinator", http.StatusNotFound)
+		default:
+			t.Errorf("unexpected coordinator request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+
+	var stdout, stderr bytes.Buffer
+	err := (App{Stdout: &stdout, Stderr: &stderr}).Run(context.Background(), []string{
+		"run", "--provider", "run-ready-pool-preflight-test", "--id", leaseID,
+		"--expose", "8080", "--no-sync", "--no-hydrate", "--", "true",
+	})
+	var httpErr CoordinatorHTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound || !strings.Contains(httpErr.Message, "expose run reached coordinator") {
+		t.Fatalf("run error=%v, want coordinator lookup failure; stderr=%s", err, stderr.String())
+	}
+	if got := leaseReads.Load(); got != 1 {
+		t.Fatalf("lease reads=%d, want 1 after the warning", got)
+	}
+	for _, want := range []string{"warning: --expose", leaseID, "port declarations are unchanged", "crabbox tunnel --id"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q: %s", want, stderr.String())
+		}
+	}
+}
+
 func TestRunCommandInjectsReservedMetadataAcrossSSHCommandModes(t *testing.T) {
 	tests := []struct {
 		name string
@@ -620,10 +662,6 @@ exit 0
 
 type windowsEnvHelperTestProvider struct{}
 
-func (windowsEnvHelperTestProvider) Name() string { return "windows-env-helper-test" }
-func (windowsEnvHelperTestProvider) Aliases() []string {
-	return nil
-}
 func (windowsEnvHelperTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name: "windows-env-helper-test",
@@ -681,10 +719,6 @@ func (b windowsEnvHelperTestBackend) Touch(context.Context, TouchRequest) (Serve
 
 type runEnvProfileTestProvider struct{}
 
-func (runEnvProfileTestProvider) Name() string { return "run-env-profile-test" }
-func (runEnvProfileTestProvider) Aliases() []string {
-	return nil
-}
 func (runEnvProfileTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-env-profile-test",
@@ -700,16 +734,15 @@ func (runEnvProfileTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
 func (runEnvProfileTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
-func (p runEnvProfileTestProvider) Configure(Config, Runtime) (Backend, error) {
+func (p runEnvProfileTestProvider) Configure(cfg Config, _ Runtime) (Backend, error) {
+	if runEnvProfileTestConfigureHook != nil {
+		runEnvProfileTestConfigureHook(cfg)
+	}
 	return runEnvProfileTestBackend{spec: p.Spec()}, nil
 }
 
 type runReadyPoolPreflightTestProvider struct{}
 
-func (runReadyPoolPreflightTestProvider) Name() string { return "run-ready-pool-preflight-test" }
-func (runReadyPoolPreflightTestProvider) Aliases() []string {
-	return nil
-}
 func (runReadyPoolPreflightTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-ready-pool-preflight-test",
@@ -743,6 +776,7 @@ var runEnvProfileTestPreservesSSHWorkspace bool
 var runEnvProfileTestRetainsLease bool
 var runEnvProfileTestTerminalReleaseError bool
 var runEnvProfileTestAcquireHook func(AcquireRequest)
+var runEnvProfileTestConfigureHook func(Config)
 var runEnvProfileTestAcquireLease func(AcquireRequest) (LeaseTarget, error)
 var runEnvProfileTestTouchHook func(TouchRequest) error
 var runEnvProfileTestEvidenceHook func(context.Context, RunFailureEvidenceRequest) (RunFailureEvidenceCollector, error)
@@ -822,7 +856,7 @@ func setupRunClaimSnapshotTest(t *testing.T) (LeaseTarget, leaseClaim) {
 		t.Fatal(err)
 	}
 	cfg := baseConfig()
-	cfg.Provider = runEnvProfileTestProvider{}.Name()
+	cfg.Provider = runEnvProfileTestProvider{}.Spec().Name
 	lease := LeaseTarget{
 		LeaseID: "cbx_env_profile_test",
 		Server: Server{
@@ -843,10 +877,10 @@ func setupRunClaimSnapshotTest(t *testing.T) (LeaseTarget, leaseClaim) {
 			SSHConfigProxy: true,
 		},
 	}
-	if err := claimLeaseTargetForRepoConfig(lease.LeaseID, "claim-snapshot", cfg, lease.Server, lease.SSH, repo.Root, cfg.IdleTimeout, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig(lease.LeaseID, "claim-snapshot", cfg, lease.Server, lease.SSH, repo.Root, cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	initial, err := readLeaseClaim(lease.LeaseID)
+	initial, err := ReadLeaseClaim(lease.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -855,7 +889,7 @@ func setupRunClaimSnapshotTest(t *testing.T) (LeaseTarget, leaseClaim) {
 	t.Cleanup(func() {
 		runEnvProfileTestAcquireLease = nil
 		runEnvProfileTestReleaseRequestHook = nil
-		removeLeaseClaim(lease.LeaseID)
+		RemoveLeaseClaim(lease.LeaseID)
 	})
 	return lease, initial
 }
@@ -871,7 +905,7 @@ func TestRunCommandOneShotCleanupUsesUpdatedClaimSnapshot(t *testing.T) {
 		if claim.Revision == initial.Revision {
 			return errors.New("release received the pre-registration claim snapshot")
 		}
-		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
+		return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
 			resourceDeleted = true
 			return nil
 		})
@@ -879,7 +913,7 @@ func TestRunCommandOneShotCleanupUsesUpdatedClaimSnapshot(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", runEnvProfileTestProvider{}.Name(),
+		"--provider", runEnvProfileTestProvider{}.Spec().Name,
 		"--no-sync",
 		"--",
 		"true",
@@ -890,7 +924,7 @@ func TestRunCommandOneShotCleanupUsesUpdatedClaimSnapshot(t *testing.T) {
 	if !resourceDeleted {
 		t.Fatal("task-owned resource was not deleted")
 	}
-	if _, exists, err := readLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v after successful cleanup", exists, err)
 	}
 }
@@ -904,15 +938,15 @@ func TestWarmupFailureAfterRegistrationReleasesNewestClaimSnapshot(t *testing.T)
 		if !set || !exists || snapshot.Revision == initial.Revision {
 			return fmt.Errorf("release received stale claim snapshot: %#v", snapshot)
 		}
-		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, nil)
+		return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, snapshot, nil)
 	}
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).warmup(context.Background(), []string{
-		"--provider", runEnvProfileTestProvider{}.Name(), "--network", "tailscale",
+		"--provider", runEnvProfileTestProvider{}.Spec().Name, "--network", "tailscale",
 	})
 	if err == nil || !strings.Contains(err.Error(), "no tailnet address") || releases != 1 {
 		t.Fatalf("warmup error=%v releases=%d", err, releases)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+	if _, exists, err := ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%t err=%v", exists, err)
 	}
 }
@@ -920,12 +954,12 @@ func TestWarmupFailureAfterRegistrationReleasesNewestClaimSnapshot(t *testing.T)
 func TestResolvedRegistrationTouchReceivesNewestClaimSnapshot(t *testing.T) {
 	lease, initial := setupRunClaimSnapshotTest(t)
 	cfg := baseConfig()
-	setProviderSelection(&cfg, runEnvProfileTestProvider{}.Name(), providerSelectionFlag)
+	setProviderSelection(&cfg, runEnvProfileTestProvider{}.Spec().Name, providerSelectionFlag)
 	touches := 0
 	runEnvProfileTestTouchHook = func(req TouchRequest) error {
 		touches++
 		snapshot, exists, set := ServerLeaseClaimSnapshot(req.Lease.Server)
-		current, err := readLeaseClaim(req.Lease.LeaseID)
+		current, err := ReadLeaseClaim(req.Lease.LeaseID)
 		if err != nil || !set || !exists || snapshot.Revision == initial.Revision || !reflect.DeepEqual(snapshot, current) {
 			return fmt.Errorf("touch received stale snapshot: snapshot=%#v current=%#v exists=%t set=%t err=%v", snapshot, current, exists, set, err)
 		}
@@ -951,10 +985,10 @@ func TestRunCommandCleanupRejectsClaimReplacedAfterRegistration(t *testing.T) {
 		}
 		labels := cloneStringMap(claim.Labels)
 		labels["owner"] = "replacement-process"
-		if _, err := updateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, labels); err != nil {
+		if _, err := UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, labels); err != nil {
 			return err
 		}
-		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
+		return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, func() error {
 			resourceDeleted = true
 			return nil
 		})
@@ -962,7 +996,7 @@ func TestRunCommandCleanupRejectsClaimReplacedAfterRegistration(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", runEnvProfileTestProvider{}.Name(),
+		"--provider", runEnvProfileTestProvider{}.Spec().Name,
 		"--no-sync",
 		"--",
 		"true",
@@ -973,7 +1007,7 @@ func TestRunCommandCleanupRejectsClaimReplacedAfterRegistration(t *testing.T) {
 	if resourceDeleted {
 		t.Fatal("replacement-owned resource was deleted")
 	}
-	replacement, readErr := readLeaseClaim(lease.LeaseID)
+	replacement, readErr := ReadLeaseClaim(lease.LeaseID)
 	if readErr != nil || replacement.Labels["owner"] != "replacement-process" {
 		t.Fatalf("replacement claim=%#v err=%v", replacement, readErr)
 	}
@@ -1004,10 +1038,6 @@ type runWorkdirCase struct {
 
 type runArchiveSyncPreflightTestProvider struct{}
 
-func (runArchiveSyncPreflightTestProvider) Name() string { return "run-archive-sync-preflight-test" }
-func (runArchiveSyncPreflightTestProvider) Aliases() []string {
-	return nil
-}
 func (runArchiveSyncPreflightTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-archive-sync-preflight-test",
@@ -1081,7 +1111,7 @@ func setupDelegatedArchiveSyncPreflightWorkspace(t *testing.T, colocatedGit, inv
 }
 
 func TestRunDelegatedArchiveSyncValidatesSourceBeforeProviderCall(t *testing.T) {
-	provider := runArchiveSyncPreflightTestProvider{}.Name()
+	provider := runArchiveSyncPreflightTestProvider{}.Spec().Name
 
 	t.Run("native Jujutsu", func(t *testing.T) {
 		root := setupDelegatedArchiveSyncPreflightWorkspace(t, false, false)
@@ -1198,6 +1228,96 @@ func setupRunWorkdirCase(t *testing.T, tc runWorkdirCase) string {
 	return dir
 }
 
+func TestRunOrdinarySparseScopeBeforeLeaseWork(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		for _, existing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("skip=%t/existing=%t", skip, existing), func(t *testing.T) {
+				setupOrdinaryHiddenSyncRepo(t, skip)
+				acquires := 0
+				runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
+					acquires++
+					return LeaseTarget{}, Exit(9, "acquire captured")
+				}
+				t.Cleanup(func() { runEnvProfileTestAcquireLease = nil })
+				runPrepareTestResolveRequests = nil
+				args := []string{"--provider", "run-env-profile-test"}
+				if existing {
+					args = []string{"--provider", "run-prepare-test", "--id", "cbx_existing"}
+				}
+				args = append(args, "--", "true")
+				err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), args)
+				if acquires != 0 || len(runPrepareTestResolveRequests) != 0 {
+					t.Errorf("lease calls before scope failure: Acquire=%d Resolve/Prepare=%d", acquires, len(runPrepareTestResolveRequests))
+				}
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 6 {
+					t.Errorf("error=%v want exit6", err)
+				}
+				assertOrdinaryHiddenSyncGuidance(t, err)
+			})
+		}
+	}
+}
+
+func TestRunOrdinarySparseScopeBeforePoolRequest(t *testing.T) {
+	for _, skip := range []bool{false, true} {
+		t.Run(fmt.Sprintf("skip=%t", skip), func(t *testing.T) {
+			setupOrdinaryHiddenSyncRepo(t, skip)
+			var requests atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				http.Error(w, "recorded unit-test request", http.StatusBadRequest)
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-token")
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), []string{"--provider", "run-ready-pool-preflight-test", "--pool", "shared-linux", "--pool-return", "drain", "--", "true"})
+			if n := requests.Load(); n != 0 {
+				t.Errorf("ready-pool requests before scope failure=%d", n)
+			}
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 6 {
+				t.Errorf("error=%v want exit6", err)
+			}
+			assertOrdinaryHiddenSyncGuidance(t, err)
+		})
+	}
+}
+
+func TestRunOrdinarySparseScopeControls(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, ignore string
+		materialized         bool
+	}{
+		{name: "outside include", config: "sync: {include: [visible]}\n"},
+		{name: "excluded", config: "sync: {exclude: [hidden]}\n"},
+		{name: "ignore file", ignore: "hidden\n"},
+		{name: "materialized", materialized: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupOrdinaryHiddenSyncRepo(t, false)
+			if tc.materialized {
+				runGit(t, dir, "sparse-checkout", "set", "visible", "hidden")
+			}
+			if tc.config != "" {
+				writeFile(t, os.Getenv("CRABBOX_CONFIG"), tc.config)
+			}
+			if tc.ignore != "" {
+				writeFile(t, filepath.Join(dir, ".crabboxignore"), tc.ignore)
+			}
+			runPrepareTestResolveRequests = nil
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(context.Background(), []string{"--provider", "run-prepare-test", "--id", "cbx_existing", "--", "true"})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 9 || !strings.Contains(exitErr.Message, "resolve captured") {
+				t.Fatalf("scope control error=%v", err)
+			}
+			if len(runPrepareTestResolveRequests) != 1 || !runPrepareTestResolveRequests[0].Prepare {
+				t.Fatalf("Resolve/Prepare=%#v", runPrepareTestResolveRequests)
+			}
+		})
+	}
+}
+
 func TestRunWorkdirFailsBeforeAcquire(t *testing.T) {
 	for _, tc := range runWorkdirCases() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1261,71 +1381,93 @@ func TestRunWorkdirFailsBeforeReadyPoolBorrow(t *testing.T) {
 }
 
 func TestRunBuildsSyncManifestAfterAcquire(t *testing.T) {
-	clearConfigEnv(t)
-	dir := t.TempDir()
-	isolateRunTestUserDirs(t, dir)
-	t.Chdir(dir)
-	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
-	runGit(t, dir, "init")
-	runGit(t, dir, "config", "user.email", "test@example.com")
-	runGit(t, dir, "config", "user.name", "Test")
-	writeFile(t, filepath.Join(dir, "before-acquire.txt"), "before\n")
-	runGit(t, dir, "add", ".")
-	runGit(t, dir, "commit", "-m", "init")
+	for _, source := range []string{"git", "directory", "directory-size-growth"} {
+		t.Run(source, func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, t.TempDir())
+			t.Setenv("TMPDIR", t.TempDir())
+			t.Chdir(dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			if source == "git" {
+				runGit(t, dir, "init")
+				runGit(t, dir, "config", "user.email", "test@example.com")
+				runGit(t, dir, "config", "user.name", "Test")
+			}
+			writeFile(t, filepath.Join(dir, "before-acquire.txt"), "before\n")
+			if source == "git" {
+				runGit(t, dir, "add", ".")
+				runGit(t, dir, "commit", "-m", "init")
+			} else {
+				config := filepath.Join(t.TempDir(), "config.yaml")
+				writeFile(t, config, "sync: {source: directory, include: ['*.txt']}\n")
+				if source == "directory-size-growth" {
+					writeFile(t, config, "sync: {source: directory, include: ['*.txt'], failBytes: 12}\n")
+				}
+				t.Setenv("CRABBOX_CONFIG", config)
+			}
 
-	binDir := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	sshPath := filepath.Join(binDir, "ssh")
-	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\n/bin/cat >/dev/null || true\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rsyncLog := filepath.Join(dir, "rsync-manifest.log")
-	rsyncPath := filepath.Join(binDir, "rsync")
-	if err := os.WriteFile(rsyncPath, []byte("#!/bin/sh\n/bin/cat > \"$CRABBOX_FAKE_RSYNC_STDIN_LOG\"\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("CRABBOX_FAKE_RSYNC_STDIN_LOG", rsyncLog)
-	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
-	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
-	acquireCalls := 0
-	runEnvProfileTestAcquireHook = func(req AcquireRequest) {
-		acquireCalls++
-		writeFile(t, filepath.Join(req.Repo.Root, "after-acquire.txt"), "after\n")
-	}
-	t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+			binDir := filepath.Join(dir, "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sshPath := filepath.Join(binDir, "ssh")
+			if err := os.WriteFile(sshPath, []byte("#!/bin/sh\n/bin/cat >/dev/null || true\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			rsyncLog := filepath.Join(dir, "rsync-manifest.log")
+			rsyncPath := filepath.Join(binDir, "rsync")
+			if err := os.WriteFile(rsyncPath, []byte("#!/bin/sh\n/bin/cat > \"$CRABBOX_FAKE_RSYNC_STDIN_LOG\"\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_RSYNC_STDIN_LOG", rsyncLog)
+			t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+			t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+			acquireCalls := 0
+			runEnvProfileTestAcquireHook = func(req AcquireRequest) {
+				acquireCalls++
+				writeFile(t, filepath.Join(req.Repo.Root, "after-acquire.txt"), "after\n")
+			}
+			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
 
-	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
-		"--provider", "run-env-profile-test",
-		"--", "true",
-	})
-	if err != nil {
-		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
-	}
-	if acquireCalls != 1 {
-		t.Fatalf("Acquire calls=%d, want 1", acquireCalls)
-	}
-	manifest, err := os.ReadFile(rsyncLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(manifest, []byte("before-acquire.txt\x00")) {
-		t.Fatalf("ordinary sync omitted initial file: %q", manifest)
-	}
-	if !bytes.Contains(manifest, []byte("after-acquire.txt\x00")) {
-		t.Fatalf("ordinary sync reused the pre-acquisition file list: %q", manifest)
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), []string{
+				"--provider", "run-env-profile-test",
+				"--", "true",
+			})
+			if source == "directory-size-growth" {
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 6 || acquireCalls != 1 {
+					t.Fatalf("calls=%d error=%v stderr=%s", acquireCalls, err, &stderr)
+				}
+				if _, statErr := os.Stat(rsyncLog); !os.IsNotExist(statErr) {
+					t.Fatalf("transfer ran before final guardrail: %v", statErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", err, stdout.String(), stderr.String())
+			}
+			if acquireCalls != 1 {
+				t.Fatalf("Acquire calls=%d, want 1", acquireCalls)
+			}
+			manifest, err := os.ReadFile(rsyncLog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(manifest, []byte("before-acquire.txt\x00")) {
+				t.Fatalf("ordinary sync omitted initial file: %q", manifest)
+			}
+			if !bytes.Contains(manifest, []byte("after-acquire.txt\x00")) {
+				t.Fatalf("ordinary sync reused the pre-acquisition file list: %q", manifest)
+			}
+		})
 	}
 }
 
 type runPrepareTestProvider struct{}
 
-func (runPrepareTestProvider) Name() string { return "run-prepare-test" }
-func (runPrepareTestProvider) Aliases() []string {
-	return nil
-}
 func (runPrepareTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-prepare-test",
@@ -1353,11 +1495,11 @@ var runPrepareTestResolveRequests []ResolveRequest
 
 func (b runPrepareTestBackend) Spec() ProviderSpec { return b.spec }
 func (b runPrepareTestBackend) Acquire(context.Context, AcquireRequest) (LeaseTarget, error) {
-	return LeaseTarget{}, exit(9, "unexpected acquire")
+	return LeaseTarget{}, Exit(9, "unexpected acquire")
 }
 func (b runPrepareTestBackend) Resolve(_ context.Context, req ResolveRequest) (LeaseTarget, error) {
 	runPrepareTestResolveRequests = append(runPrepareTestResolveRequests, req)
-	return LeaseTarget{}, exit(9, "resolve captured")
+	return LeaseTarget{}, Exit(9, "resolve captured")
 }
 func (b runPrepareTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
 	return nil, nil
@@ -1371,10 +1513,6 @@ func (b runPrepareTestBackend) Touch(context.Context, TouchRequest) (Server, err
 
 type runModuleRuntimeTestProvider struct{}
 
-func (runModuleRuntimeTestProvider) Name() string { return "module-runtime-test" }
-func (runModuleRuntimeTestProvider) Aliases() []string {
-	return nil
-}
 func (runModuleRuntimeTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "module-runtime-test",
@@ -1390,12 +1528,13 @@ func (runModuleRuntimeTestProvider) RegisterFlags(*flag.FlagSet, Config) any {
 func (runModuleRuntimeTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
-func (p runModuleRuntimeTestProvider) Configure(Config, Runtime) (Backend, error) {
-	return runModuleRuntimeTestBackend{spec: p.Spec()}, nil
+func (p runModuleRuntimeTestProvider) Configure(_ Config, rt Runtime) (Backend, error) {
+	return runModuleRuntimeTestBackend{spec: p.Spec(), rt: rt}, nil
 }
 
 type runModuleRuntimeTestBackend struct {
 	spec ProviderSpec
+	rt   Runtime
 }
 
 var runModuleRuntimeTestRequests []RunRequest
@@ -1421,6 +1560,13 @@ func (b runModuleRuntimeTestBackend) Warmup(context.Context, WarmupRequest) erro
 }
 func (b runModuleRuntimeTestBackend) Run(_ context.Context, req RunRequest) (RunResult, error) {
 	runModuleRuntimeTestRequests = append(runModuleRuntimeTestRequests, req)
+	if req.Observation != nil {
+		fmt.Fprintln(b.rt.Stderr, "fixture provider planning")
+		req.Observation.Phase(RunPhaseCommand)
+		stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, RunOutputProvider)
+		fmt.Fprintln(stdout, "fixture command stdout")
+		fmt.Fprintln(stderr, "fixture command stderr")
+	}
 	return RunResult{Provider: b.spec.Name, LeaseID: "mod_test", Slug: "module-runtime-test"}, nil
 }
 func (b runModuleRuntimeTestBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
@@ -1519,7 +1665,7 @@ func TestRunWithExistingLeaseRoutesProviderFromClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	const leaseID = "cbx_1257abcdefff"
-	if err := claimLeaseForRepoProvider(leaseID, "claim-routed", "run-prepare-test", repo.Root, time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider(leaseID, "claim-routed", "run-prepare-test", repo.Root, time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1602,8 +1748,8 @@ func TestFormatRunSummaryNoSync(t *testing.T) {
 }
 
 func TestShouldReplaceLeaseAfterBeforeCommandSSHFailure(t *testing.T) {
-	waitErr := exit(5, "timed out waiting for SSH on 203.0.113.10 during before command")
-	otherErr := exit(6, "rsync failed")
+	waitErr := Exit(5, "timed out waiting for SSH on 203.0.113.10 during before command")
+	otherErr := Exit(6, "rsync failed")
 	tests := []struct {
 		name            string
 		err             error
@@ -1912,7 +2058,7 @@ func setupLocalContainerRunSessionTest(t *testing.T, commandScript string) (stri
 		runEnvProfileTestReleaseRequestHook = nil
 		runEnvProfileTestTouchHook = nil
 		runEnvProfileTestReleaseErr = nil
-		removeLeaseClaim(localContainerRunSessionTestLeaseID)
+		RemoveLeaseClaim(localContainerRunSessionTestLeaseID)
 	})
 	return dir, lease
 }
@@ -1969,7 +2115,7 @@ func TestRunCommandWritesFreshLocalContainerLeaseOutputAfterClaim(t *testing.T) 
 	}
 	touchObserved := false
 	runEnvProfileTestTouchHook = func(req TouchRequest) error {
-		if _, exists, err := readLeaseClaimWithPresence(req.Lease.LeaseID); err != nil || !exists {
+		if _, exists, err := ReadLeaseClaimWithPresence(req.Lease.LeaseID); err != nil || !exists {
 			return fmt.Errorf("touch observed before exact claim: exists=%t err=%v", exists, err)
 		}
 		if _, err := os.Stat(path); err != nil {
@@ -2188,7 +2334,7 @@ exit 0
 			testAWSBackendOverride = testSSHBackend{spec: testAWSProvider{}.Spec()}
 			t.Cleanup(func() {
 				testAWSBackendOverride = nil
-				removeLeaseClaim(leaseID)
+				RemoveLeaseClaim(leaseID)
 			})
 
 			var stdout, stderr bytes.Buffer
@@ -2321,7 +2467,7 @@ profiles:
 				t.Fatalf("fresh unreported lease released %d time(s), want 1", releases)
 			}
 			assertRunSessionValidationStoppedBeforeWork(t, path, commandMarker, syncMarker)
-			if _, exists, readErr := readLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
+			if _, exists, readErr := ReadLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
 				t.Fatalf("claim after validation failure exists=%t err=%v", exists, readErr)
 			}
 		})
@@ -2514,7 +2660,7 @@ func TestRunCommandLocalContainerLeaseOutputClaimFailureReleasesFreshLease(t *te
 	marker := filepath.Join(dir, "command-ran")
 	t.Setenv("CRABBOX_COMMAND_MARKER", marker)
 	runEnvProfileTestAcquireHook = func(AcquireRequest) {
-		if err := claimLeaseForRepoProvider(
+		if err := ClaimLeaseForRepoProvider(
 			localContainerRunSessionTestLeaseID,
 			"session-slug",
 			"local-container",
@@ -2571,7 +2717,7 @@ func TestRunCommandLocalContainerLeaseOutputWriteFailureReleasesFreshLease(t *te
 		if !set || !exists {
 			return errors.New("release did not receive the exact recorded claim")
 		}
-		return removeLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, nil)
+		return RemoveLeaseClaimIfUnchangedAfter(req.Lease.LeaseID, claim, nil)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -2589,7 +2735,7 @@ func TestRunCommandLocalContainerLeaseOutputWriteFailureReleasesFreshLease(t *te
 	if releasedID != localContainerRunSessionTestLeaseID {
 		t.Fatalf("released lease=%q want %q", releasedID, localContainerRunSessionTestLeaseID)
 	}
-	if _, exists, readErr := readLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
+	if _, exists, readErr := ReadLeaseClaimWithPresence(localContainerRunSessionTestLeaseID); readErr != nil || exists {
 		t.Fatalf("claim residue exists=%t err=%v", exists, readErr)
 	}
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
@@ -6227,6 +6373,123 @@ func TestWindowsRemoteCapabilityPreflightCommandUsesCommandEnvironment(t *testin
 	}
 }
 
+func TestPackageManagerPreflightWindowsEnvironment(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows process environment restoration")
+	}
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failure_%t", fail), func(t *testing.T) {
+			env := map[string]string{"COREPACK_ENABLE_NETWORK": "1", "COREPACK_DEFAULT_TO_LATEST": "1", "COREPACK_ENABLE_AUTO_PIN": "1", "COREPACK_ENABLE_PROJECT_SPEC": "1", "PNPM_CONFIG_PM_ON_FAIL": "error"}
+			body := `Write-Output (($args -join ',') + '|' + $env:COREPACK_ENABLE_NETWORK + '|' + $env:COREPACK_DEFAULT_TO_LATEST + '|' + $env:COREPACK_ENABLE_AUTO_PIN + '|' + $env:COREPACK_ENABLE_DOWNLOAD_PROMPT + '|' + $env:COREPACK_ENABLE_PROJECT_SPEC + '|' + $env:PNPM_CONFIG_PM_ON_FAIL)`
+			if fail {
+				body = `throw 'ordinary probe error'`
+			}
+			script := "function npm { " + body + " }\nfunction pnpm { " + body + " }\nfunction yarn { " + body + " }\n"
+			script += windowsRemoteCapabilityPreflightScript(t.TempDir(), env, nil, []string{"npm", "pnpm", "yarn"})
+			script += `Write-Output ('after=' + $env:COREPACK_ENABLE_NETWORK + '|' + $env:COREPACK_DEFAULT_TO_LATEST + '|' + $env:COREPACK_ENABLE_AUTO_PIN + '|' + [string](Test-Path Env:COREPACK_ENABLE_DOWNLOAD_PROMPT) + '|' + $env:COREPACK_ENABLE_PROJECT_SPEC + '|' + $env:PNPM_CONFIG_PM_ON_FAIL)`
+			path := filepath.Join(t.TempDir(), "probe.ps1")
+			if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path)
+			for _, value := range os.Environ() {
+				if !strings.HasPrefix(strings.ToUpper(value), "COREPACK_") {
+					cmd.Env = append(cmd.Env, value)
+				}
+			}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("Windows probe: %v\n%s", err, out)
+			}
+			for _, tool := range []string{"npm", "pnpm", "yarn"} {
+				want := "--version|0|0|0|0|1|error"
+				if tool == "pnpm" {
+					want = "--version|0|0|0|0|1|ignore"
+				}
+				if fail {
+					want = "error:ordinary probe error"
+				}
+				if !strings.Contains(string(out), tool+"="+want) {
+					t.Fatalf("%s probe output: %s", tool, out)
+				}
+			}
+			if !strings.Contains(string(out), "after=1|1|1|False|1|error") {
+				t.Fatalf("Windows environment not restored: %s", out)
+			}
+		})
+	}
+}
+
+func TestPackageManagerPreflightEnvironment(t *testing.T) {
+	for _, tool := range []string{"npm", "pnpm", "yarn"} {
+		t.Run(tool, func(t *testing.T) {
+			windows := windowsPreflightProbe(tool)
+			for _, setting := range preflightProbeEnvironment(tool) {
+				if !strings.Contains(windows, psQuote(setting.name)+"="+psQuote(setting.value)) {
+					t.Fatalf("Windows probe missing %s: %s", setting.name, windows)
+				}
+			}
+			if !strings.Contains(windows, "@('--version')") {
+				t.Fatalf("literal arguments changed: %s", windows)
+			}
+		})
+	}
+	if len(preflightProbeEnvironment("python")) != 0 || len(preflightProbeEnvironment("python3")) != 0 || len(preflightProbeEnvironment("corepack")) != 0 {
+		t.Fatal("unrelated version probes must keep their environment")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX execution; Windows renderer assertions above remain active")
+	}
+	for _, exitCode := range []int{0, 12} {
+		t.Run(fmt.Sprintf("posix_exit_%d", exitCode), func(t *testing.T) {
+			bin := t.TempDir()
+			for name, path := range map[string]string{"id": "/usr/bin/id", "sed": "/usr/bin/sed", "whoami": "/usr/bin/whoami"} {
+				if err := os.Symlink(path, filepath.Join(bin, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			files := map[string]string{
+				"bash":    "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then exec /bin/bash --noprofile --norc -c \"$2\"; fi\nexec /bin/bash \"$@\"\n",
+				"python3": "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s|%s\\n' \"$COREPACK_ENABLE_NETWORK\" \"$COREPACK_DEFAULT_TO_LATEST\" \"$COREPACK_ENABLE_AUTO_PIN\" \"${COREPACK_ENABLE_DOWNLOAD_PROMPT-unset}\" \"$COREPACK_ENABLE_PROJECT_SPEC\" \"$PNPM_CONFIG_PM_ON_FAIL\" \"$pnpm_config_pm_on_fail\"\n",
+			}
+			for _, tool := range []string{"npm", "pnpm", "yarn"} {
+				files[tool] = "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s|%s|%s\\n' \"$*\" \"$COREPACK_ENABLE_NETWORK\" \"$COREPACK_DEFAULT_TO_LATEST\" \"$COREPACK_ENABLE_AUTO_PIN\" \"$COREPACK_ENABLE_DOWNLOAD_PROMPT\" \"$COREPACK_ENABLE_PROJECT_SPEC\" \"$PNPM_CONFIG_PM_ON_FAIL\" \"$pnpm_config_pm_on_fail\"\n" + fmt.Sprintf("exit %d\n", exitCode)
+			}
+			for name, body := range files {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			repo := t.TempDir()
+			profile := filepath.Join(repo, "profile.env")
+			if err := os.WriteFile(profile, []byte("export COREPACK_ENABLE_AUTO_PIN=1\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			env := map[string]string{"PATH": bin, "COREPACK_ENABLE_NETWORK": "1", "COREPACK_DEFAULT_TO_LATEST": "1", "COREPACK_ENABLE_PROJECT_SPEC": "1", "PNPM_CONFIG_PM_ON_FAIL": "error", "pnpm_config_pm_on_fail": "download"}
+			command := remoteCapabilityPreflightCommand(repo, env, []string{profile}, []string{"npm", "pnpm", "yarn", "python3"})
+			command += "; " + remoteShellCommandWithEnvFiles(repo, env, []string{profile}, "python3")
+			cmd := exec.Command("/bin/sh", "-c", command)
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + t.TempDir()}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("probe/workload: %v\n%s", err, out)
+			}
+			for _, tool := range []string{"npm", "pnpm", "yarn"} {
+				want := "error"
+				if tool == "pnpm" {
+					want = "ignore"
+				}
+				if !strings.Contains(string(out), tool+"=--version|0|0|0|0|1|"+want+"|download\n") {
+					t.Fatalf("probe policy missing for %s: %s", tool, out)
+				}
+			}
+			if !strings.Contains(string(out), "python3=1|1|1|unset|1|error|download\n") || !strings.HasSuffix(string(out), "1|1|1|unset|1|error|download\n") {
+				t.Fatalf("later probe/workload environment changed: %s", out)
+			}
+		})
+	}
+}
+
 func TestWindowsRemoteCapabilityPreflightUploadsScriptBeforeRunning(t *testing.T) {
 	dir := t.TempDir()
 	logPath := installRecordingSSH(t, dir)
@@ -6441,8 +6704,8 @@ func TestRemotePreflightOmitsUnassertedArchitectureLabel(t *testing.T) {
 }
 
 func TestValidatePreflightToolsRejectsUnknown(t *testing.T) {
-	if err := validatePreflightTools([]string{"node", "bogus"}); err == nil {
-		t.Fatal("expected unknown preflight tool error")
+	if err := validatePreflightTools([]string{"node", "bogus"}); ExitCodeForError(err, 1) != 2 || !strings.Contains(err.Error(), "crabbox preflight-tools") {
+		t.Fatalf("expected unknown preflight tool error with discovery hint: %v", err)
 	}
 	if err := validatePreflightTools([]string{"default", "bun"}); err != nil {
 		t.Fatalf("default tools should validate: %v", err)
@@ -6569,6 +6832,246 @@ func TestCMakePreflightLiteralCommandGeneration(t *testing.T) {
 	}
 }
 
+func TestFunctionalPreflightProcessExit(t *testing.T) {
+	value := os.Getenv("CRABBOX_TEST_PREFLIGHT_EXIT")
+	if value == "" {
+		return
+	}
+	code, err := strconv.Atoi(value)
+	if err != nil || code < 1 || code > 255 {
+		t.Fatal("invalid synthetic exit")
+	}
+	os.Exit(code)
+}
+
+func TestFunctionalPreflightCompletionLifecycle(t *testing.T) {
+	const nonce = "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name, state                                                                 string
+		code                                                                        int
+		canceled, partial, retireFailure, joinedFailure, ownerWrapped, ownerFailure bool
+	}{
+		{name: "ready", state: "ready"},
+		{name: "missing", state: "missing-python3", code: 20},
+		{name: "venv", state: "venv-unavailable", code: 21},
+		{name: "pip", state: "pip-unavailable", code: 22},
+		{name: "timeout", state: "timed-out", code: 74},
+		{name: "cleaned worker failure", state: "worker-failed", code: 23},
+		{name: "caller cancellation", state: "canceled", code: 74, canceled: true},
+		{name: "owner canceled with successful transport", state: "canceled"},
+		{name: "missing completion", code: 255, partial: true},
+		{name: "retirement failed", state: "ready", retireFailure: true},
+		{name: "transport failure is not readiness", state: "ready", code: 255},
+		{name: "capability exit with envelope cleanup failure", state: "missing-python3", code: 20, joinedFailure: true},
+		{name: "ordinary workspace owner wrapper", state: "venv-unavailable", code: 21, ownerWrapped: true},
+		{name: "workspace setup error is retained", state: "venv-unavailable", code: 21, ownerFailure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := runFunctionalPreflightControl
+			t.Cleanup(func() { runFunctionalPreflightControl = old })
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tc.canceled {
+				cancel()
+			}
+			var runErr error
+			if tc.code != 0 {
+				childCtx, childCancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer childCancel()
+				child := exec.CommandContext(childCtx, os.Args[0], "-test.run=^TestFunctionalPreflightProcessExit$")
+				child.Env = append(os.Environ(), "CRABBOX_TEST_PREFLIGHT_EXIT="+strconv.Itoa(tc.code))
+				runErr = child.Run()
+				if exitCode(runErr) != tc.code {
+					t.Fatalf("synthetic process exit=%v", runErr)
+				}
+				if tc.joinedFailure {
+					runErr = errors.Join(runErr, errors.New("synthetic envelope cleanup failure"))
+				}
+				if tc.ownerWrapped {
+					_, _, finish := workspaceOwnerSetupStreams("synthetic-marker", io.Discard, io.Discard)
+					runErr = finish(runErr)
+				}
+				if tc.ownerFailure {
+					runErr = &workspaceOwnerSetupError{phase: "synthetic", cause: runErr}
+				}
+			}
+			calls := []string{}
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), pythonVenvPreflightCleanupTime)
+			defer cleanupCancel()
+			sharedCleanup := cleanupCtx
+			runFunctionalPreflightControl = func(cleanupCtx context.Context, _ SSHTarget, gotNonce, action string) ([]byte, error) {
+				deadline, ok := cleanupCtx.Deadline()
+				if cleanupCtx != sharedCleanup || gotNonce != nonce || cleanupCtx.Err() != nil || !ok || time.Until(deadline) > pythonVenvPreflightCleanupTime {
+					t.Fatal("cleanup lost its independent bounded operation identity")
+				}
+				calls = append(calls, action)
+				if action == "retire" {
+					if tc.retireFailure {
+						return nil, errors.New("synthetic retirement failure")
+					}
+					return nil, nil
+				}
+				if tc.partial {
+					return []byte("CBX-PREFLIGHT-1\n"), nil
+				}
+				return []byte("CBX-PREFLIGHT-1\n" + nonce + "\n" + tc.state + "\nworker-quiesced\nscratch-removed\ncomplete\n"), nil
+			}
+			got, err := finishFunctionalPreflight(ctx, cleanupCtx, SSHTarget{}, nonce, runErr)
+			wantAction := "observe"
+			if tc.code != 0 || tc.canceled {
+				wantAction = "cancel"
+			}
+			wantCalls := []string{wantAction, "retire"}
+			if tc.partial {
+				wantCalls = wantCalls[:1]
+			}
+			if !reflect.DeepEqual(calls, wantCalls) {
+				t.Fatalf("calls=%v want=%v", calls, wantCalls)
+			}
+			failure := tc.canceled || tc.state == "canceled" || tc.partial || tc.retireFailure || tc.code == 255 || tc.joinedFailure || tc.ownerFailure
+			if (err != nil) != failure {
+				t.Fatalf("completion=%+v error=%v", got, err)
+			}
+			if failure {
+				if got.State != "" {
+					t.Fatalf("failed completion claimed capability: %+v", got)
+				}
+			} else if got.State != tc.state || !got.WorkerQuiesced || !got.ScratchRemoved || !got.StageRetired {
+				t.Fatalf("completion=%+v", got)
+			}
+			if tc.canceled && !errors.Is(err, context.Canceled) {
+				t.Fatal("caller cancellation lost")
+			}
+			if tc.state == "canceled" && !tc.canceled && errors.Is(err, context.Canceled) {
+				t.Fatal("invented caller cancellation")
+			}
+			if (tc.code == 255 || tc.joinedFailure || tc.ownerFailure) && !errors.Is(err, runErr) {
+				t.Fatal("original transport outcome lost")
+			}
+			wantState, wantCleanup := tc.state, "confirmed"
+			if failure {
+				wantState = "unavailable"
+			}
+			if tc.canceled {
+				wantState = "canceled"
+			}
+			if tc.partial || tc.retireFailure {
+				wantCleanup = "unconfirmed"
+			}
+			wantDiagnostic := "python3-venv=" + wantState + " cleanup=" + wantCleanup
+			if got := functionalPreflightDiagnostic(ctx, got, err); got != wantDiagnostic {
+				t.Fatalf("diagnostic=%q want=%q", got, wantDiagnostic)
+			}
+		})
+	}
+}
+
+func TestFunctionalPreflightCompletion(t *testing.T) {
+	const nonce = "0123456789abcdef0123456789abcdef"
+	record := func(state string) string {
+		return "CBX-PREFLIGHT-1\n" + nonce + "\n" + state + "\nworker-quiesced\nscratch-removed\ncomplete\n"
+	}
+	for _, state := range []string{"ready", "missing-python3", "venv-unavailable", "pip-unavailable", "worker-failed", "timed-out", "canceled"} {
+		t.Run(state, func(t *testing.T) {
+			got, err := parseFunctionalPreflightCompletion([]byte(record(state)), nonce)
+			if err != nil || got.State != state || !got.WorkerQuiesced || !got.ScratchRemoved {
+				t.Fatalf("completion=%+v error=%v", got, err)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, value, nonce string }{
+		{"missing", "", nonce},
+		{"partial", strings.TrimSuffix(record("ready"), "complete\n"), nonce},
+		{"other-operation", record("ready"), "abcdef0123456789abcdef0123456789"},
+		{"unknown-protocol", strings.Replace(record("ready"), "CBX-PREFLIGHT-1", "CBX-PREFLIGHT-2", 1), nonce},
+		{"unknown-state", record("finished"), nonce},
+		{"scratch-retained", strings.Replace(record("ready"), "scratch-removed", "scratch-retained", 1), nonce},
+		{"worker-only", "ready\n", nonce},
+		{"trailing-output", record("ready") + "extra\n", nonce},
+		{"oversized", strings.Repeat("x", functionalPreflightCompletionLimit+1), nonce},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseFunctionalPreflightCompletion([]byte(tc.value), tc.nonce)
+			if err == nil || err.Error() != "functional preflight cleanup unconfirmed" || got != (functionalPreflightCompletion{}) {
+				t.Fatalf("completion=%+v error=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestPythonVenvWorkerTemporaryEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX interpreter environment fixture")
+	}
+	root := t.TempDir()
+	tools := filepath.Join(root, "tools")
+	scratch := filepath.Join(root, "scratch")
+	ambient := filepath.Join(root, "ambient")
+	for _, dir := range []string{tools, scratch, ambient} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record, parent := filepath.Join(root, "child"), filepath.Join(root, "parent")
+	// Capture only the literal interpreter's environment/flags; real ensurepip
+	// containment is a separate runtime qualification, not simulated here.
+	writeExecutable(t, filepath.Join(tools, "python3"), "#!/bin/sh\nprintf '%s\\n' \"$TMPDIR\" \"$TMP\" \"$TEMP\" \"$1\" \"$2\" >"+shellQuote(record)+"\n")
+	script := pythonVenvPreflightWorker(scratch) + "\ncode=$?\nprintf '%s\\n' \"$TMPDIR\" \"$TMP\" \"$TEMP\" >" + shellQuote(parent) + "\nexit \"$code\"\n"
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/bash", "-c", script)
+	cmd.Env = []string{"PATH=" + tools, "HOME=" + root, "TMPDIR=" + ambient, "TMP=" + ambient, "TEMP=" + ambient}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("worker environment: %v %s", err, out)
+	}
+	child, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(child) != strings.Repeat(scratch+"\n", 3)+"-I\n-B\n" {
+		t.Fatalf("child environment/flags=%q", child)
+	}
+	after, err := os.ReadFile(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != strings.Repeat(ambient+"\n", 3) {
+		t.Fatalf("caller temporary environment changed: %q", after)
+	}
+}
+
+func TestPythonVenvPreflightSelection(t *testing.T) {
+	if err := validatePreflightTools([]string{"python3-venv"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		target SSHTarget
+		want   string
+	}{
+		{"linux", SSHTarget{TargetOS: targetLinux}, "python3-venv"},
+		{"macos", SSHTarget{TargetOS: targetMacOS}, "python3-venv"},
+		{"wsl2", SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, "python3-venv"},
+		{"native windows", SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strings.Join(preflightToolsForTarget(tc.target, []string{"python3-venv"}), ","); got != tc.want {
+				t.Fatalf("tools=%q want %q", got, tc.want)
+			}
+		})
+	}
+	for _, tool := range defaultPreflightToolNames {
+		if tool == "python3-venv" {
+			t.Fatal("functional probe became a default")
+		}
+	}
+	got := normalizePreflightToolNames([]string{"default,python3-venv,python3-venv"})
+	want := append(append([]string(nil), defaultPreflightToolNames...), "python3-venv")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("deduplicated tools=%v want %v", got, want)
+	}
+}
+
 func TestCMakePreflightPOSIXPresentFirstLineAndMissing(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell behavior is covered on non-Windows CI")
@@ -6644,6 +7147,15 @@ func TestCMakePreflightNativeWindowsPresentAndMissing(t *testing.T) {
 }
 
 func TestCMakePreflightUserAndRepositoryConfig(t *testing.T) {
+	testPreflightToolUserAndRepositoryConfig(t, "cmake")
+}
+
+func TestPythonVenvPreflightUserAndRepositoryConfig(t *testing.T) {
+	testPreflightToolUserAndRepositoryConfig(t, "python3-venv")
+}
+
+func testPreflightToolUserAndRepositoryConfig(t *testing.T, tool string) {
+	t.Helper()
 	for _, source := range []string{"user", "repository"} {
 		t.Run(source, func(t *testing.T) {
 			clearConfigEnv(t)
@@ -6665,18 +7177,43 @@ func TestCMakePreflightUserAndRepositoryConfig(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if err := os.WriteFile(path, []byte("run:\n  preflightTools: [cmake]\n"), 0o600); err != nil {
+			if err := os.WriteFile(path, []byte("run:\n  preflightTools: ["+tool+"]\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			cfg, err := loadConfig()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := strings.Join(cfg.Run.PreflightTools, ","); got != "cmake" {
+			if got := strings.Join(cfg.Run.PreflightTools, ","); got != tool {
 				t.Fatalf("%s run.preflightTools=%q", source, got)
 			}
 			if err := validatePreflightTools(cfg.Run.PreflightTools); err != nil {
-				t.Fatalf("%s cmake config should validate: %v", source, err)
+				t.Fatalf("%s %s config should validate: %v", source, tool, err)
+			}
+		})
+	}
+}
+
+func TestPreflightRawEmptyFlagKeepsConfiguredTools(t *testing.T) {
+	for _, supplied := range []bool{false, true} {
+		t.Run(fmt.Sprintf("supplied-%t", supplied), func(t *testing.T) {
+			clearConfigEnv(t)
+			dir := t.TempDir()
+			isolateRunTestUserDirs(t, dir)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
+			t.Setenv("CRABBOX_PREFLIGHT_TOOLS", "unknown-inherited-tool")
+			acquireCalls := 0
+			runEnvProfileTestAcquireHook = func(AcquireRequest) { acquireCalls++ }
+			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+			args := []string{"--provider", runEnvProfileTestProvider{}.Spec().Name, "--preflight", "--no-sync", "--no-hydrate"}
+			if supplied {
+				args = append(args, "--preflight-tools", "")
+			}
+			args = append(args, "--", "true")
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(t.Context(), args)
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, `unknown preflight tool "unknown-inherited-tool"`) || acquireCalls != 0 {
+				t.Fatalf("resolved tools changed or acquired: %v; calls=%d", err, acquireCalls)
 			}
 		})
 	}
@@ -6692,7 +7229,7 @@ func TestCMakeUnknownPreflightToolFailsBeforeAcquire(t *testing.T) {
 	t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
 
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).runCommand(t.Context(), []string{
-		"--provider", runEnvProfileTestProvider{}.Name(),
+		"--provider", runEnvProfileTestProvider{}.Spec().Name,
 		"--preflight",
 		"--preflight-tools", "cmake,cmake3",
 		"--no-sync",
@@ -6705,6 +7242,9 @@ func TestCMakeUnknownPreflightToolFailsBeforeAcquire(t *testing.T) {
 	}
 	if acquireCalls != 0 {
 		t.Fatalf("Acquire called %d time(s) before unknown preflight tool rejection", acquireCalls)
+	}
+	if !strings.Contains(exitErr.Message, "crabbox preflight-tools") {
+		t.Fatal("pre-acquisition error omitted offline discovery hint")
 	}
 }
 
@@ -8134,7 +8674,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 	t.Run("exact id canonicalizes fixed AWS marker", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		const leaseID = "cbx_1257aaaa0001"
-		if err := claimLeaseForRepoProvider(leaseID, "fixed", FixedAWSClaimProvider, "/repo", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider(leaseID, "fixed", FixedAWSClaimProvider, "/repo", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner")
@@ -8153,10 +8693,10 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 	t.Run("exact id wins over slug collision", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		const leaseID = "cbx_1257aaaa0002"
-		if err := claimLeaseForRepoProvider(leaseID, "exact-owner", "run-prepare-test", "/repo-a", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider(leaseID, "exact-owner", "run-prepare-test", "/repo-a", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
-		if err := claimLeaseForRepoProvider("cbx_1257bbbb0002", leaseID, "local-container", "/repo-b", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("cbx_1257bbbb0002", leaseID, "local-container", "/repo-b", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner")
@@ -8171,7 +8711,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 
 	t.Run("unique slug routes provider", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
-		if err := claimLeaseForRepoProvider("cbx_1257aaaa0003", "Blue Lobster", "local-container", "/repo", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("cbx_1257aaaa0003", "Blue Lobster", "local-container", "/repo", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner")
@@ -8190,7 +8730,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 	t.Run("duplicate slug within one provider defers scope resolution", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		for _, leaseID := range []string{"cbx_1257aaaa0007", "cbx_1257bbbb0007"} {
-			if err := claimLeaseForRepoProviderScope(leaseID, "Scoped Slug", "local-container", leaseID, "/repo", time.Minute, false); err != nil {
+			if err := ClaimLeaseForRepoProviderScope(leaseID, "Scoped Slug", "local-container", leaseID, "/repo", time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -8208,7 +8748,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		for i, providerName := range []string{"external", "exec-provider"} {
 			leaseID := fmt.Sprintf("cbx_1257eeee000%d", i)
-			if err := claimLeaseForRepoProviderScope(leaseID, "External Alias", providerName, leaseID, "/repo", time.Minute, false); err != nil {
+			if err := ClaimLeaseForRepoProviderScope(leaseID, "External Alias", providerName, leaseID, "/repo", time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -8224,10 +8764,10 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 
 	t.Run("ambiguous slug fails with guidance", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
-		if err := claimLeaseForRepoProvider("cbx_1257aaaa0004", "Shared Slug", "local-container", "/repo-a", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("cbx_1257aaaa0004", "Shared Slug", "local-container", "/repo-a", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
-		if err := claimLeaseForRepoProvider("cbx_1257bbbb0004", "Shared Slug", "run-prepare-test", "/repo-b", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider("cbx_1257bbbb0004", "Shared Slug", "run-prepare-test", "/repo-b", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner")
@@ -8241,7 +8781,7 @@ func TestAutoRouteClaimLeaseProvider(t *testing.T) {
 	t.Run("explicit provider remains authoritative", func(t *testing.T) {
 		t.Setenv("XDG_STATE_HOME", t.TempDir())
 		const leaseID = "cbx_1257aaaa0005"
-		if err := claimLeaseForRepoProvider(leaseID, "explicit", "local-container", "/repo", time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProvider(leaseID, "explicit", "local-container", "/repo", time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		fs, provider := newFlags(t, "hetzner", "--provider", "run-prepare-test")
@@ -8958,5 +9498,180 @@ func TestLoadRunConfigBindsReadyPoolIdentityBeforeProviderDefaults(t *testing.T)
 	}
 	if cfg.ServerType == defaults.ServerType || cfg.ServerType != serverTypeForConfig(cfg) {
 		t.Fatalf("server type=%q, compiled hetzner=%q, projected aws=%q", cfg.ServerType, defaults.ServerType, serverTypeForConfig(cfg))
+	}
+}
+
+func TestRunDirectorySourcePreAcquire(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, diagnostic string
+		args                     []string
+		code                     int
+	}{
+		{name: "missing include", config: "sync: {source: directory}", diagnostic: "nonempty sync.include", code: 2},
+		{name: "unknown source", config: "sync: {source: other}", diagnostic: "sync.source", code: 2},
+		{name: "size", config: "sync: {source: directory, include: [README.txt], failBytes: 2}", diagnostic: "sync", code: 6},
+		{name: "overlay", config: "sync: {source: directory, include: [README.txt], gitOverlay: true}", diagnostic: "gitOverlay", code: 2},
+		{name: "base ref", config: "sync: {source: directory, include: [README.txt], baseRef: main}", diagnostic: "baseRef", code: 2},
+		{name: "fresh PR", config: "sync: {source: directory, include: [README.txt]}", args: []string{"--fresh-pr", "1"}, diagnostic: "--fresh-pr", code: 2},
+		{name: "local patch", config: "sync: {source: directory, include: [README.txt]}", args: []string{"--apply-local-patch"}, diagnostic: "--apply-local-patch", code: 2},
+		{name: "Actions", config: "sync: {source: directory, include: [README.txt]}\nactions: {workflow: ci.yml}", diagnostic: "Actions hydration", code: 2},
+		{name: "native Windows", config: "sync: {source: directory, include: [README.txt]}", args: []string{"--target", "windows"}, diagnostic: "native-Windows", code: 2},
+		{name: "delegated", config: "sync: {source: directory, include: [README.txt]}", args: []string{"--provider", "module-runtime-test"}, diagnostic: "ordinary SSH lease", code: 2},
+		{name: "SSH without manifest sync", config: "sync: {source: directory, include: [README.txt]}", args: []string{"--provider", claimRoutingUnusableProvider}, diagnostic: "ordinary SSH lease provider with crabbox-sync is required", code: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			root := t.TempDir()
+			t.Chdir(root)
+			t.Setenv("TMPDIR", t.TempDir())
+			writeFile(t, filepath.Join(root, "README.txt"), "ordinary readme\n")
+			config := filepath.Join(t.TempDir(), "config.yaml")
+			writeFile(t, config, tc.config+"\n")
+			t.Setenv("CRABBOX_CONFIG", config)
+			calls := 0
+			runEnvProfileTestAcquireHook = func(AcquireRequest) { calls++ }
+			t.Cleanup(func() { runEnvProfileTestAcquireHook = nil })
+			args := append([]string{"--provider", "run-env-profile-test"}, tc.args...)
+			args = append(args, "--", "true")
+			var out, stderr bytes.Buffer
+			err := (App{Stdout: &out, Stderr: &stderr}).runCommand(context.Background(), args)
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != tc.code || !strings.Contains(err.Error(), tc.diagnostic) {
+				t.Fatalf("error=%v want=%d/%s stderr=%s", err, tc.code, tc.diagnostic, &stderr)
+			}
+			if calls != 0 {
+				t.Fatalf("Acquire calls=%d", calls)
+			}
+		})
+	}
+}
+
+func TestRunDirectorySourceNoSyncDoesNotEnumerate(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	// If active enumeration ran, an in-source temporary root would reject it.
+	t.Setenv("TMPDIR", root)
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, config, "sync: {source: directory}\n")
+	t.Setenv("CRABBOX_CONFIG", config)
+	calls := 0
+	runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
+		calls++
+		return LeaseTarget{}, Exit(9, "ordinary acquisition control")
+	}
+	t.Cleanup(func() { runEnvProfileTestAcquireLease = nil })
+	var out, stderr bytes.Buffer
+	err := (App{Stdout: &out, Stderr: &stderr}).runCommand(context.Background(), []string{"--provider", "run-env-profile-test", "--no-sync", "--", "true"})
+	if calls != 1 || err == nil || !strings.Contains(err.Error(), "ordinary acquisition control") {
+		t.Fatalf("calls=%d error=%v stderr=%s", calls, err, &stderr)
+	}
+	matches, err := filepath.Glob(filepath.Join(root, "crabbox-directory-sync-*"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("metadata=%v err=%v", matches, err)
+	}
+}
+
+func TestRunDirectorySourceActionsWorkspaceRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name, response, diagnostic string
+		code                       int
+	}{
+		{"owned workspace", "printf 'WORKSPACE=/work/prepared-actions\\n'", "Actions-owned workspace", 2},
+		{"lookup error", "exit 1", "verify directory sync workspace", 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			root := t.TempDir()
+			t.Chdir(root)
+			t.Setenv("TMPDIR", t.TempDir())
+			writeFile(t, filepath.Join(root, "README.txt"), "ordinary readme\n")
+			config := filepath.Join(t.TempDir(), "config.yaml")
+			writeFile(t, config, "sync: {source: directory, include: [README.txt]}\n")
+			t.Setenv("CRABBOX_CONFIG", config)
+			bin := t.TempDir()
+			events := filepath.Join(t.TempDir(), "events")
+			script := "#!/bin/sh\ncase \"$1\" in\n *'cat '*'.crabbox/actions/cbx_env_profile_test.env'*) printf 'marker\\n' >> " + shellQuote(events) + "; " + tc.response + "; exit 0 ;;\n *'invalid sync manifest length'*) printf 'unexpected-sync\\n' >> " + shellQuote(events) + " ;;\nesac\n/bin/cat >/dev/null || true\nexit 0\n"
+			installWorkspaceOwnerAwareSSH(t, filepath.Join(bin, "ssh"), script)
+			if err := os.WriteFile(filepath.Join(bin, "rsync"), []byte("#!/bin/sh\nprintf 'unexpected-sync\\n' >> "+shellQuote(events)+"\nexit 0\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+			t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+			releases := 0
+			runEnvProfileTestReleaseHook = func() error { releases++; return nil }
+			t.Cleanup(func() { runEnvProfileTestReleaseHook = nil })
+			var out, stderr bytes.Buffer
+			err := (App{Stdout: &out, Stderr: &stderr}).runCommand(context.Background(), []string{"--provider", "run-env-profile-test", "--", "true"})
+			var exitErr ExitError
+			if !AsExitError(err, &exitErr) || exitErr.Code != tc.code || !strings.Contains(err.Error(), tc.diagnostic) {
+				t.Fatalf("error=%v stderr=%s", err, &stderr)
+			}
+			data, readErr := os.ReadFile(events)
+			if readErr != nil || !bytes.Contains(data, []byte("marker\n")) || bytes.Contains(data, []byte("unexpected-sync")) {
+				t.Fatalf("events=%q error=%v", data, readErr)
+			}
+			if releases != 1 {
+				t.Fatalf("release calls=%d", releases)
+			}
+		})
+	}
+}
+
+func TestStopIgnoresInactiveSyncSource(t *testing.T) {
+	clearConfigEnv(t)
+	root := t.TempDir()
+	t.Chdir(root)
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, config, "sync: {source: unsupported, gitOverlay: true, baseRef: unused}\n")
+	t.Setenv("CRABBOX_CONFIG", config)
+	bin := t.TempDir()
+	installWorkspaceOwnerAwareSSH(t, filepath.Join(bin, "ssh"), "#!/bin/sh\n/bin/cat >/dev/null || true\nexit 0\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+	t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+	releases := 0
+	runEnvProfileTestReleaseHook = func() error { releases++; return nil }
+	t.Cleanup(func() { runEnvProfileTestReleaseHook = nil })
+	var out, stderr bytes.Buffer
+	err := (App{Stdout: &out, Stderr: &stderr}).stop(context.Background(), []string{"--provider", "run-env-profile-test", "--id", "cbx_env_profile_test"})
+	if err != nil || releases != 1 {
+		t.Fatalf("releases=%d error=%v stderr=%s", releases, err, &stderr)
+	}
+}
+
+func TestRunDirectorySourcePreservesConfigRoot(t *testing.T) {
+	clearConfigEnv(t)
+	outer := t.TempDir()
+	runGit(t, outer, "init")
+	root := filepath.Join(outer, "inner")
+	writeFile(t, filepath.Join(root, "README.txt"), "inner\n")
+	t.Chdir(root)
+	t.Setenv("TMPDIR", t.TempDir())
+	config := filepath.Join(root, "crabbox.yaml")
+	writeFile(t, config, "sync: {source: directory, include: [README.txt]}\n")
+	t.Setenv("CRABBOX_CONFIG", config)
+	before, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.credentialProvenance.repositoryRoot != canonicalRepositoryPath(outer) {
+		t.Fatalf("configuration root=%q", before.credentialProvenance.repositoryRoot)
+	}
+	var configuredRoot, acquiredRoot string
+	runEnvProfileTestConfigureHook = func(cfg Config) { configuredRoot = cfg.credentialProvenance.repositoryRoot }
+	runEnvProfileTestAcquireLease = func(req AcquireRequest) (LeaseTarget, error) {
+		acquiredRoot = req.Repo.Root
+		return LeaseTarget{}, Exit(9, "ordinary acquisition control")
+	}
+	t.Cleanup(func() { runEnvProfileTestConfigureHook = nil; runEnvProfileTestAcquireLease = nil })
+	var out, stderr bytes.Buffer
+	err = (App{Stdout: &out, Stderr: &stderr}).runCommand(context.Background(), []string{"--provider", "run-env-profile-test", "--", "true"})
+	if err == nil || !strings.Contains(err.Error(), "ordinary acquisition control") {
+		t.Fatalf("error=%v stderr=%s", err, &stderr)
+	}
+	if configuredRoot != before.credentialProvenance.repositoryRoot || acquiredRoot != canonicalRepositoryPath(root) {
+		t.Fatalf("configured root=%q acquired source=%q", configuredRoot, acquiredRoot)
 	}
 }

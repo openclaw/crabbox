@@ -42,6 +42,11 @@ export CRABBOX_UPSTASH_BOX_API_KEY=...
 Crabbox redacts the configured API key from Upstash Box HTTP error bodies and
 exec-stream error events before displaying diagnostics.
 
+The first raw nonempty value of `CRABBOX_UPSTASH_BOX_API_KEY` and
+`UPSTASH_BOX_API_KEY` wins. Neither user nor repository YAML accepts an API key
+field, and no key flag is registered. Programmatic callers can still supply
+the runtime config's API key.
+
 Rotate the key if it was ever pasted into a chat, shell history, issue, or log.
 
 ## Commands
@@ -90,6 +95,20 @@ CRABBOX_UPSTASH_BOX_KEEP_ALIVE
 
 Defaults: base URL `https://us-east-1.box.upstash.com`, runtime `node`, size
 `small`, workdir `/workspace/home/crabbox`, `keepAlive` false.
+
+All six bindings share one typed declaration. Nonempty YAML strings override
+earlier values without trimming; omitted, null, or empty strings preserve them.
+Explicit `keepAlive: false` still applies. Environment strings use their first
+raw nonempty primary or alias value; empty values fall through, while whitespace
+is retained for the existing later normalization. Visited empty/false flags
+still override earlier layers.
+
+Accepted API-key/base-URL sources retain their existing provenance. A
+repository-selected endpoint is still subject to credential-destination checks;
+the binding does not grant it permission to use inherited credentials. The
+client, diagnostics, claim scope, runtime, size, and workdir helpers share the
+compiled defaults while retaining their own normalization. The fixed workspace
+root and the separate `keepAlive`/`--keep` behaviors are unchanged.
 
 Accepted values, validated before the API is called:
 

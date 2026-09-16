@@ -44,113 +44,21 @@ func defaultCuaConfig() CuaConfig {
 	}
 }
 
-func (cfg *CuaConfig) applyFile(file *fileCuaConfig, trusted bool) error {
-	if file == nil {
-		return nil
-	}
-	if file.Image != nil {
-		cfg.Image = *file.Image
-	}
-	if file.Kind != nil {
-		cfg.Kind = *file.Kind
-	}
-	if file.Region != nil {
-		cfg.Region = *file.Region
-	}
-	if file.Workdir != nil {
-		cfg.Workdir = *file.Workdir
-	}
-	if file.VCPUs != nil {
-		if *file.VCPUs < 0 {
-			return exit(2, "cua vcpus must be non-negative")
-		}
-		cfg.VCPUs = *file.VCPUs
-	}
-	if file.MemoryMB != nil {
-		if *file.MemoryMB < 0 {
-			return exit(2, "cua memoryMB must be non-negative")
-		}
-		cfg.MemoryMB = *file.MemoryMB
-	}
-	if file.DiskGB != nil {
-		if *file.DiskGB < 0 {
-			return exit(2, "cua diskGB must be non-negative")
-		}
-		cfg.DiskGB = *file.DiskGB
-	}
-	if file.StartupTimeoutSecs != nil {
-		if *file.StartupTimeoutSecs < 0 {
-			return exit(2, "cua startupTimeoutSecs must be non-negative")
-		}
-		cfg.StartupTimeoutSecs = *file.StartupTimeoutSecs
-	}
-	if file.ExecTimeoutSecs != nil {
-		if *file.ExecTimeoutSecs < 0 {
-			return exit(2, "cua execTimeoutSecs must be non-negative")
-		}
-		cfg.ExecTimeoutSecs = *file.ExecTimeoutSecs
-	}
-	if trusted && file.BridgeCommand != nil {
-		cfg.BridgeCommand = *file.BridgeCommand
-	}
-	if trusted && file.SDKPackage != nil {
-		cfg.SDKPackage = *file.SDKPackage
-	}
-	if trusted && file.SDKImport != nil {
-		cfg.SDKImport = *file.SDKImport
-	}
-	if trusted && file.SDKFallbackImport != nil {
-		cfg.SDKFallbackImport = *file.SDKFallbackImport
-	}
-	return nil
+// CuaConfigApplied records accepted assignments during one application.
+type CuaConfigApplied struct {
+	InputAccepted bool
 }
 
-func (cfg *CuaConfig) applyEnv() error {
-	cfg.APIURL = getenv("CRABBOX_CUA_API_URL", getenv("CUA_BASE_URL", cfg.APIURL))
-	cfg.Image = getenv("CRABBOX_CUA_IMAGE", cfg.Image)
-	cfg.Kind = getenv("CRABBOX_CUA_KIND", cfg.Kind)
-	cfg.Region = getenv("CRABBOX_CUA_REGION", cfg.Region)
-	cfg.Workdir = getenv("CRABBOX_CUA_WORKDIR", cfg.Workdir)
-	{
-		var err error
-		cfg.VCPUs, err = getenvNonNegativeInt("CRABBOX_CUA_VCPUS", cfg.VCPUs)
-		if err != nil {
-			return err
-		}
-	}
-	{
-		var err error
-		cfg.MemoryMB, err = getenvNonNegativeInt("CRABBOX_CUA_MEMORY_MB", cfg.MemoryMB)
-		if err != nil {
-			return err
-		}
-	}
-	{
-		var err error
-		cfg.DiskGB, err = getenvNonNegativeInt("CRABBOX_CUA_DISK_GB", cfg.DiskGB)
-		if err != nil {
-			return err
-		}
-	}
-	{
-		var err error
-		cfg.StartupTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CUA_STARTUP_TIMEOUT_SECS", cfg.StartupTimeoutSecs)
-		if err != nil {
-			return err
-		}
-	}
-	{
-		var err error
-		cfg.ExecTimeoutSecs, err = getenvNonNegativeInt("CRABBOX_CUA_EXEC_TIMEOUT_SECS", cfg.ExecTimeoutSecs)
-		if err != nil {
-			return err
-		}
-	}
-	cfg.BridgeCommand = getenv("CRABBOX_CUA_BRIDGE_COMMAND", cfg.BridgeCommand)
-	cfg.SDKPackage = getenv("CRABBOX_CUA_SDK_PACKAGE", cfg.SDKPackage)
-	cfg.SDKImport = getenv("CRABBOX_CUA_SDK_IMPORT", cfg.SDKImport)
-	cfg.SDKFallbackImport = getenv("CRABBOX_CUA_SDK_FALLBACK_IMPORT", cfg.SDKFallbackImport)
-	return nil
+func (cfg *CuaConfig) applyFile(file *fileCuaConfig, trusted bool) (CuaConfigApplied, error) {
+	var applied CuaConfigApplied
+	err := applyConfigFileOverlay(cfg, file, &applied, trusted, "cua")
+	return applied, err
+}
+
+func (cfg *CuaConfig) applyEnv() (CuaConfigApplied, error) {
+	var applied CuaConfigApplied
+	err := applyConfigEnvironment(cfg, &applied, 0, 14)
+	return applied, err
 }
 
 // CuaConfigFlagValues holds parsed values; only visited flags are applied.
@@ -173,66 +81,14 @@ type CuaConfigFlagValues struct {
 
 // RegisterCuaConfigFlags registers mechanical bindings without selecting a provider.
 func RegisterCuaConfigFlags(fs *flag.FlagSet, defaults CuaConfig) CuaConfigFlagValues {
-	return CuaConfigFlagValues{
-		APIURL:             fs.String("cua-api-url", defaults.APIURL, "Trusted CUA API base URL; not accepted from repository config"),
-		Image:              fs.String("cua-image", defaults.Image, "CUA Linux sandbox image"),
-		Kind:               fs.String("cua-kind", defaults.Kind, "CUA sandbox kind: container or vm"),
-		Region:             fs.String("cua-region", defaults.Region, "CUA deployment region (empty = service default/policy)"),
-		Workdir:            fs.String("cua-workdir", defaults.Workdir, "Absolute working directory inside the sandbox"),
-		VCPUs:              fs.Int("cua-vcpus", defaults.VCPUs, "CUA sandbox vCPU count (0 = service default)"),
-		MemoryMB:           fs.Int("cua-memory-mb", defaults.MemoryMB, "CUA sandbox memory in MB (0 = service default)"),
-		DiskGB:             fs.Int("cua-disk-gb", defaults.DiskGB, "CUA sandbox disk in GB (0 = service default)"),
-		StartupTimeoutSecs: fs.Int("cua-startup-timeout-secs", defaults.StartupTimeoutSecs, "CUA sandbox startup timeout in seconds (0 = Crabbox default)"),
-		ExecTimeoutSecs:    fs.Int("cua-exec-timeout-secs", defaults.ExecTimeoutSecs, "CUA command timeout in seconds (0 = Crabbox default 600)"),
-		BridgeCommand:      fs.String("cua-bridge-command", defaults.BridgeCommand, "trusted local Python command for the future CUA SDK bridge"),
-		SDKPackage:         fs.String("cua-sdk-package", defaults.SDKPackage, "trusted local Python package name for CUA SDK diagnostics"),
-		SDKImport:          fs.String("cua-sdk-import", defaults.SDKImport, "trusted local Python import path for CUA SDK diagnostics"),
-		SDKFallbackImport:  fs.String("cua-sdk-fallback-import", defaults.SDKFallbackImport, "trusted local fallback import path for CUA SDK diagnostics"),
-	}
+	var values CuaConfigFlagValues
+	registerConfigFlags(fs, defaults, &values)
+	return values
 }
 
 // Apply copies explicit flag values. Provider validation must run afterward.
-func (values CuaConfigFlagValues) Apply(cfg *CuaConfig, fs *flag.FlagSet) {
-	if flagWasSet(fs, "cua-api-url") {
-		cfg.APIURL = *values.APIURL
-	}
-	if flagWasSet(fs, "cua-image") {
-		cfg.Image = *values.Image
-	}
-	if flagWasSet(fs, "cua-kind") {
-		cfg.Kind = *values.Kind
-	}
-	if flagWasSet(fs, "cua-region") {
-		cfg.Region = *values.Region
-	}
-	if flagWasSet(fs, "cua-workdir") {
-		cfg.Workdir = *values.Workdir
-	}
-	if flagWasSet(fs, "cua-vcpus") {
-		cfg.VCPUs = *values.VCPUs
-	}
-	if flagWasSet(fs, "cua-memory-mb") {
-		cfg.MemoryMB = *values.MemoryMB
-	}
-	if flagWasSet(fs, "cua-disk-gb") {
-		cfg.DiskGB = *values.DiskGB
-	}
-	if flagWasSet(fs, "cua-startup-timeout-secs") {
-		cfg.StartupTimeoutSecs = *values.StartupTimeoutSecs
-	}
-	if flagWasSet(fs, "cua-exec-timeout-secs") {
-		cfg.ExecTimeoutSecs = *values.ExecTimeoutSecs
-	}
-	if flagWasSet(fs, "cua-bridge-command") {
-		cfg.BridgeCommand = *values.BridgeCommand
-	}
-	if flagWasSet(fs, "cua-sdk-package") {
-		cfg.SDKPackage = *values.SDKPackage
-	}
-	if flagWasSet(fs, "cua-sdk-import") {
-		cfg.SDKImport = *values.SDKImport
-	}
-	if flagWasSet(fs, "cua-sdk-fallback-import") {
-		cfg.SDKFallbackImport = *values.SDKFallbackImport
-	}
+func (values CuaConfigFlagValues) Apply(cfg *CuaConfig, fs *flag.FlagSet) (CuaConfigApplied, error) {
+	var applied CuaConfigApplied
+	err := applyConfigFlags(cfg, values, &applied, fs)
+	return applied, err
 }

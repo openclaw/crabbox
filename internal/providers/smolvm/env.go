@@ -36,7 +36,7 @@ func (b *backend) uploadEnvProfile(ctx context.Context, client api, claim core.L
 	cleanup := func(cleanupCtx context.Context) {
 		err := profile.Close(cleanupCtx, func(removeCtx context.Context, remotePath string) error {
 			return authorized(removeCtx, func() error {
-				return b.execShell(removeCtx, client, claim.CloudID, "rm -f "+shellQuote(remotePath), io.Discard)
+				return b.execShell(removeCtx, client, claim.CloudID, "rm -f "+core.ShellQuote(remotePath), io.Discard)
 			})
 		})
 		if err != nil {

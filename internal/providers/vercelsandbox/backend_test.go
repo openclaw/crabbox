@@ -138,7 +138,7 @@ func TestWarmupCreatesOwnedClaim(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, &stdout, &stderr)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.sandboxes) != 1 {
@@ -149,7 +149,7 @@ func TestWarmupCreatesOwnedClaim(t *testing.T) {
 		sb = value
 	}
 	leaseID := leasePrefix + sb.ID
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestWarmupStampsClaimMetadataAtCreateWhenNameIsRemoteID(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.useNameID = true
 	backend := testBackend(fake, io.Discard, io.Discard)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	if slices.ContainsFunc(fake.calls, func(call string) bool { return strings.HasPrefix(call, "metadata:") }) {
@@ -193,8 +193,8 @@ func TestRunOneShotSyncsExecutesAndDeletes(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.stdout = "ok\n"
 	backend := testBackend(fake, &stdout, &stderr)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:               Repo{Name: "my-app", Root: repo},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:               core.Repo{Name: "my-app", Root: repo},
 		Command:            []string{"echo", "ok", "&&"},
 		CommandLiteralArgs: map[int]bool{2: true},
 	})
@@ -234,8 +234,8 @@ func TestRunRejectsOversizedWorkspaceBeforeProviderCalls(t *testing.T) {
 	backend.cfg.Sync.FailFiles = 2
 	backend.cfg.Sync.FailBytes = 0
 
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "my-app", Root: tempRepo(t)}, Command: []string{"true"},
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Name: "my-app", Root: tempRepo(t)}, Command: []string{"true"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "sync candidate too large: 2 files >= limit 2") {
 		t.Fatalf("err=%v", err)
@@ -250,15 +250,15 @@ func TestRetainedRunByIDVerifiesOwnershipAndKeepsClaim(t *testing.T) {
 	repo := tempRepo(t)
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: repo}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: repo}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	var leaseID string
 	for id := range fake.sandboxes {
 		leaseID = leasePrefix + id
 	}
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: repo},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Name: "my-app", Root: repo},
 		ID:      leaseID,
 		NoSync:  true,
 		Keep:    true,
@@ -273,7 +273,7 @@ func TestRetainedRunByIDVerifiesOwnershipAndKeepsClaim(t *testing.T) {
 	if result.Session == nil || result.Session.LeaseID != leaseID || !result.Session.Reused || !result.Session.Kept {
 		t.Fatalf("unexpected retained session handle: %#v", result.Session)
 	}
-	if _, err := readLeaseClaim(leaseID); err != nil {
+	if _, err := core.ReadLeaseClaim(leaseID); err != nil {
 		t.Fatalf("claim not retained: %v", err)
 	}
 	if len(fake.sandboxes) != 1 {
@@ -285,7 +285,7 @@ func TestListHydratesClaimOnlyInventoryBeforeOwnershipFilter(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	var leaseID string
@@ -298,10 +298,10 @@ func TestListHydratesClaimOnlyInventoryBeforeOwnershipFilter(t *testing.T) {
 	}
 	fakeList := []sandboxSummary{{ID: leaseID}}
 	listingFake := &claimOnlyListFakeClient{lifecycleFakeClient: fake, list: fakeList}
-	backend.newClient = func(Config, Runtime) (vercelSandboxClient, error) {
+	backend.newClient = func(core.Config, core.Runtime) (vercelSandboxClient, error) {
 		return listingFake, nil
 	}
-	views, err := backend.List(context.Background(), ListRequest{})
+	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestListSkipsMissingClaimAndReturnsRemainingSandbox(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
 	for _, name := range []string{"first", "second"} {
-		if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: name, Root: "/repo"}, Keep: true}); err != nil {
+		if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: name, Root: "/repo"}, Keep: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -334,10 +334,10 @@ func TestListSkipsMissingClaimAndReturnsRemainingSandbox(t *testing.T) {
 			{ID: leaseIDs[1]},
 		},
 	}
-	backend.newClient = func(Config, Runtime) (vercelSandboxClient, error) {
+	backend.newClient = func(core.Config, core.Runtime) (vercelSandboxClient, error) {
 		return listingFake, nil
 	}
-	views, err := backend.List(context.Background(), ListRequest{})
+	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,10 +351,10 @@ func TestEmptyListAndCleanupDoNotResolveProjectScope(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.scope = projectScope{}
 	backend := testBackend(fake, io.Discard, io.Discard)
-	if views, err := backend.List(context.Background(), ListRequest{}); err != nil || views == nil || len(views) != 0 {
+	if views, err := backend.List(context.Background(), core.ListRequest{}); err != nil || views == nil || len(views) != 0 {
 		t.Fatalf("views=%#v err=%v", views, err)
 	}
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -370,7 +370,7 @@ func TestLegacyScopeClaimRemainsManageableAfterBinding(t *testing.T) {
 	legacyScope := backend.providerScopeBase() + "/ownership:legacy"
 	leaseID := leasePrefix + "legacy"
 	slug := "legacy-box"
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, legacyScope, "", "/repo", time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, legacyScope, "", "/repo", time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	fake.sandboxes["legacy"] = sandboxSummary{
@@ -383,20 +383,20 @@ func TestLegacyScopeClaimRemainsManageableAfterBinding(t *testing.T) {
 			metadataSlugKey:     slug,
 		},
 	}
-	views, err := backend.List(context.Background(), ListRequest{})
+	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(views) != 1 || views[0].Labels["lease"] != leaseID {
 		t.Fatalf("views=%#v", views)
 	}
-	if err := backend.Stop(context.Background(), StopRequest{ID: slug}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: slug}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.sandboxes) != 0 {
 		t.Fatalf("legacy sandbox was not deleted: %#v", fake.sandboxes)
 	}
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
 		t.Fatalf("legacy claim was not removed: claim=%#v err=%v", claim, err)
 	}
 }
@@ -405,7 +405,7 @@ func TestStopRejectsOwnershipMismatch(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	var leaseID, sandboxID string
@@ -415,7 +415,7 @@ func TestStopRejectsOwnershipMismatch(t *testing.T) {
 		sb.Metadata[metadataProviderKey] = "foreign"
 		fake.sandboxes[id] = sb
 	}
-	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: leaseID})
 	if err == nil || !strings.Contains(err.Error(), "ownership metadata") {
 		t.Fatalf("err=%v", err)
 	}
@@ -438,7 +438,7 @@ func TestCleanupPreservesMissingClaimUnlessForgetMissing(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	var leaseID string
@@ -446,17 +446,17 @@ func TestCleanupPreservesMissingClaimUnlessForgetMissing(t *testing.T) {
 		leaseID = leasePrefix + id
 		delete(fake.sandboxes, id)
 	}
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readLeaseClaim(leaseID); err != nil {
+	if _, err := core.ReadLeaseClaim(leaseID); err != nil {
 		t.Fatalf("claim should be preserved without forget-missing: %v", err)
 	}
 	backend.cfg.VercelSandbox.ForgetMissing = true
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,8 +470,8 @@ func TestRunForwardsAllowedEnvOffArgvAndStripsProviderSecrets(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
 	secretValue := "secret-token-value"
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: tempRepo(t)},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Name: "my-app", Root: tempRepo(t)},
 		Keep:    true,
 		NoSync:  true,
 		Command: []string{"env"},
@@ -505,8 +505,8 @@ func TestSyncDeleteUsesStagingReplace(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	backend := testBackend(fake, io.Discard, io.Discard)
 	backend.cfg.Sync.Delete = true
-	if _, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: repo},
+	if _, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Name: "my-app", Root: repo},
 		Command: []string{"true"},
 	}); err != nil {
 		t.Fatal(err)
@@ -522,8 +522,8 @@ func TestRunKeepOnFailureRetainsClaim(t *testing.T) {
 	fake.exitCode = 7
 	var stderr bytes.Buffer
 	backend := testBackend(fake, io.Discard, &stderr)
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:          Repo{Name: "my-app", Root: tempRepo(t)},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Name: "my-app", Root: tempRepo(t)},
 		NoSync:        true,
 		KeepOnFailure: true,
 		Command:       []string{"false"},
@@ -545,7 +545,7 @@ func TestRunKeepOnFailureRetainsClaim(t *testing.T) {
 	for id := range fake.sandboxes {
 		leaseID = leasePrefix + id
 	}
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID == "" {
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID == "" {
 		t.Fatalf("claim should be retained: claim=%#v err=%v", claim, err)
 	}
 	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
@@ -571,7 +571,7 @@ func TestRunEarlyFailureKeepsAccurateRecoveryState(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			fake := newLifecycleFakeClient()
 			primary, cleanup := errors.New("workspace failed"), errors.New("delete unavailable")
-			req := RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: tc.keep, TimingJSON: true}
+			req := core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: tc.keep, TimingJSON: true}
 			if tc.workspace {
 				fake.execErr = primary
 				req.Command = []string{"true"}
@@ -597,7 +597,7 @@ func TestRunEarlyFailureKeepsAccurateRecoveryState(t *testing.T) {
 			if (deletes == 1) != tc.deleteFails || len(fake.sandboxes) != 1 {
 				t.Fatalf("cleanup calls=%v sandboxes=%v", fake.calls, fake.sandboxes)
 			}
-			if claim, err := readLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != result.LeaseID {
+			if claim, err := core.ReadLeaseClaim(result.LeaseID); err != nil || claim.LeaseID != result.LeaseID {
 				t.Fatalf("recovery claim=%#v err=%v", claim, err)
 			}
 			var report core.TimingReport
@@ -629,8 +629,8 @@ func TestRunTimingFailurePreservesPrimaryExit(t *testing.T) {
 			}
 			writeFailure := errors.New("timing output unavailable")
 			b := testBackend(fake, io.Discard, failingTimingWriter{writeFailure})
-			result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: keep, TimingJSON: true, Command: []string{"false"}})
-			var exitErr ExitError
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: keep, TimingJSON: true, Command: []string{"false"}})
+			var exitErr core.ExitError
 			if !errors.Is(err, writeFailure) || !errors.As(err, &exitErr) || exitErr.Code != 23 || result.ExitCode != 23 || result.ErrorKind != core.RunErrorCommandExit || result.Session == nil || !result.Session.Kept {
 				t.Fatalf("timing masked outcome: result=%#v err=%v", result, err)
 			}
@@ -645,13 +645,13 @@ func TestRunRejectedReuseReleasesOperationLock(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newLifecycleFakeClient()
 	b := testBackend(fake, io.Discard, io.Discard)
-	repo := Repo{Root: t.TempDir(), Name: "fixture"}
-	if err := b.Warmup(t.Context(), WarmupRequest{Repo: repo, Keep: true}); err != nil {
+	repo := core.Repo{Root: t.TempDir(), Name: "fixture"}
+	if err := b.Warmup(t.Context(), core.WarmupRequest{Repo: repo, Keep: true}); err != nil {
 		t.Fatal(err)
 	}
 	leaseID := leasePrefix + "sbx_a"
 	fake.sandboxes["sbx_a"].Metadata[metadataClaimKey] = "changed"
-	result, err := b.Run(t.Context(), RunRequest{ID: leaseID, Repo: repo, NoSync: true, Command: []string{"true"}})
+	result, err := b.Run(t.Context(), core.RunRequest{ID: leaseID, Repo: repo, NoSync: true, Command: []string{"true"}})
 	if err == nil || result.Session != nil {
 		t.Fatalf("rejected reuse result=%#v err=%v", result, err)
 	}
@@ -662,7 +662,7 @@ func TestRunRejectedReuseReleasesOperationLock(t *testing.T) {
 		t.Fatalf("failed reuse leaked operation lock: %v", err)
 	}
 	unlock()
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.RepoRoot != repo.Root || len(fake.sandboxes) != 1 {
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.RepoRoot != repo.Root || len(fake.sandboxes) != 1 {
 		t.Fatalf("rejected reuse changed custody: claim=%#v err=%v", claim, err)
 	}
 }
@@ -674,7 +674,7 @@ func TestRunRedactsProviderTokenAndPreservesCause(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.workloadErr = errors.Join(errors.New("backend rejected "+token), context.DeadlineExceeded)
 	b := testBackend(fake, io.Discard, io.Discard)
-	result, err := b.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: true, Command: []string{"true"}})
+	result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: true, Command: []string{"true"}})
 	if err == nil || strings.Contains(err.Error(), token) || !strings.Contains(err.Error(), "[REDACTED]") {
 		t.Fatalf("provider display redaction lost: %v", err)
 	}
@@ -700,11 +700,11 @@ func testBackend(fake *lifecycleFakeClient, stdout, stderr io.Writer) *backend {
 	return &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt: Runtime{
+		rt: core.Runtime{
 			Stdout: stdout,
 			Stderr: stderr,
 		},
-		newClient: func(Config, Runtime) (vercelSandboxClient, error) {
+		newClient: func(core.Config, core.Runtime) (vercelSandboxClient, error) {
 			return fake, nil
 		},
 	}

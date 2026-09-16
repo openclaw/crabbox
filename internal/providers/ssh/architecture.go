@@ -17,7 +17,12 @@ import (
 const architectureProbeTimeout = 15 * time.Second
 const architectureProbeLimit = 256
 
-var runArchitectureProbe = core.RunSSHOutputBounded
+var runArchitectureProbe = func(ctx context.Context, target core.SSHTarget, command string, maxBytes int) (string, error) {
+	if target.TargetOS == core.TargetWindows && target.WindowsMode == "wsl2" {
+		return core.RunSSHOutputBoundedWithExecutionTimeout(ctx, target, command, maxBytes, architectureProbeTimeout)
+	}
+	return core.RunSSHOutputBounded(ctx, target, command, maxBytes)
+}
 
 // uname describes the SSH execution environment, not bare-metal provenance.
 const posixArchitectureProbe = `machine=$(uname -m 2>/dev/null) || machine=unknown
@@ -68,10 +73,10 @@ public static class CrabboxArchitecture {
  public static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
 }
 '@
- [ushort]$processMachine = 0
- [ushort]$nativeMachine = 0
+ [System.UInt16]$processMachine = 0
+ [System.UInt16]$nativeMachine = 0
  if (-not [CrabboxArchitecture]::IsWow64Process2([IntPtr]::new(-1), [ref]$processMachine, [ref]$nativeMachine)) { throw 'query failed' }
- function MachineName([ushort]$machine) {
+ function MachineName([System.UInt16]$machine) {
   switch ($machine) { 34404 { 'amd64' } 43620 { 'arm64' } 332 { '386' } default { 'unknown' } }
  }
  $native = MachineName $nativeMachine
@@ -99,7 +104,7 @@ type architectureObservation struct {
 	architecture, host, process, translated string
 }
 
-func architectureProbe(target SSHTarget) (command, source, scope string) {
+func architectureProbe(target core.SSHTarget) (command, source, scope string) {
 	if target.TargetOS == core.TargetWindows && target.WindowsMode == "normal" {
 		return windowsArchitectureProbe, "ssh-iswow64process2", "powershell-process"
 	}
@@ -142,8 +147,11 @@ func parseArchitectureObservation(output string, detailed bool) (architectureObs
 	return architectureObservation{fields[1], fields[2], fields[3], fields[4]}, nil
 }
 
-func (b *staticLeaseBackend) observeArchitecture(ctx context.Context, lease *LeaseTarget) error {
-	probeCtx, cancel := context.WithTimeout(ctx, architectureProbeTimeout)
+func (b *staticLeaseBackend) observeArchitecture(ctx context.Context, lease *core.LeaseTarget) error {
+	probeCtx, cancel := ctx, func() {}
+	if lease.SSH.TargetOS != core.TargetWindows || lease.SSH.WindowsMode != "wsl2" {
+		probeCtx, cancel = context.WithTimeout(ctx, architectureProbeTimeout)
+	}
 	defer cancel()
 	// Readiness selected this exact port. nil would silently re-enable port 22.
 	lease.SSH.FallbackPorts = []string{}
@@ -205,7 +213,7 @@ func (b *staticLeaseBackend) observeArchitecture(ctx context.Context, lease *Lea
 	return nil
 }
 
-func architectureEndpoint(target SSHTarget) string {
+func architectureEndpoint(target core.SSHTarget) string {
 	// No credential material is persisted. Bind observations to the resolved route,
 	// including user/port/target and transport selectors, not just a lease name.
 	data, _ := json.Marshal([]string{target.Host, target.User, target.Port, target.TargetOS, target.WindowsMode, target.Key, target.CertificateFile, target.ProxyCommand, fmt.Sprint(target.SSHConfigProxy), target.HostKeyAlias, target.KnownHostsFile})
@@ -214,7 +222,7 @@ func architectureEndpoint(target SSHTarget) string {
 	return fmt.Sprintf("%x", digest[:24])
 }
 
-func clearArchitecture(server *Server) {
+func clearArchitecture(server *core.Server) {
 	server.Labels = shared.CloneLabels(server.Labels)
 	delete(server.Labels, "architecture")
 	for key := range server.Labels {
@@ -225,7 +233,7 @@ func clearArchitecture(server *Server) {
 	server.ServerType.Architecture = ""
 }
 
-func historicalArchitecture(server *Server, target SSHTarget) {
+func historicalArchitecture(server *core.Server, target core.SSHTarget) {
 	labels := server.Labels
 	_, source, scope := architectureProbe(target)
 	observedAt, timeErr := strconv.ParseInt(labels["architecture_observed_at"], 10, 64)
@@ -238,7 +246,7 @@ func historicalArchitecture(server *Server, target SSHTarget) {
 	}
 }
 
-func (b *staticLeaseBackend) reportHistoricalArchitecture(server Server) {
+func (b *staticLeaseBackend) reportHistoricalArchitecture(server core.Server) {
 	labels := server.Labels
 	if labels["architecture_observed_at"] == "" {
 		fmt.Fprintln(b.RT.Stderr, "static SSH architecture unknown (offline; no evidence for this endpoint)")

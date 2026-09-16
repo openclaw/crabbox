@@ -113,6 +113,25 @@ CRABBOX_SEMAPHORE_IDLE_TIMEOUT
 config-file values. Generate a token at `https://<host>/me/api-tokens`. For
 machine types see the [Semaphore machine types reference](https://docs.semaphore.io/reference/machine-types).
 
+Empty environment values fall through to the next alias or earlier setting;
+nonempty values are not trimmed during loading. All six YAML strings also
+preserve earlier values when omitted, null, or empty. A token can be loaded
+from user or repository configuration, but keeping it in the environment or
+user configuration avoids committing it. There is no token flag.
+
+All six bindings share one typed declaration. The raw machine, OS-image, and
+idle-timeout settings remain empty when omitted: their effective defaults are
+`f1-standard-2`, `ubuntu2204`, and `30m`, applied by flag registration and the
+existing runtime helpers. Registering an unvisited flag does not populate the
+raw setting, and an explicitly empty flag still writes an empty value. These
+loaded settings remain empty even though execution uses a fallback.
+`config show` does not expose a Semaphore section.
+
+Host/token source tracking and the later explicit-host flag phase are unchanged.
+Host, token, project, and duration validation still happens at the existing
+provider stages. Job creation, SSH setup, claims, and release behavior do not
+move into configuration generation.
+
 ## Lifecycle
 
 1. Resolve the project name to an ID (`GET /api/v1alpha/projects/<name>`, with a

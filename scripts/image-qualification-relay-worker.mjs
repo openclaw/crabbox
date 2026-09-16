@@ -50,7 +50,15 @@ function requireLeaseReadQuery(url) {
 }
 
 function requireImageQuery(url, env) {
-  const allowed = new Set(["provider", "target", "region", "serverType", "kind", "architecture"]);
+  const allowed = new Set([
+    "provider",
+    "target",
+    "region",
+    "serverType",
+    "kind",
+    "architecture",
+    "os",
+  ]);
   const keys = [...url.searchParams.keys()];
   if (
     keys.some((key) => !allowed.has(key)) ||
@@ -64,10 +72,12 @@ function requireImageQuery(url, env) {
   const serverType = url.searchParams.get("serverType");
   const kind = url.searchParams.get("kind");
   const architecture = url.searchParams.get("architecture");
+  const os = url.searchParams.get("os");
   return (
     (serverType === null || serverType === "t3.small") &&
     (kind === null || kind === "aws-ami") &&
-    (architecture === null || architecture === "x86_64")
+    (architecture === null || architecture === "x86_64") &&
+    (os === null || os === "ubuntu:24.04")
   );
 }
 
@@ -81,7 +91,7 @@ function canonicalQuery(url, query, env) {
       region: env.AWS_REGION,
       target: "linux",
     });
-    for (const key of ["architecture", "kind", "serverType"]) {
+    for (const key of ["architecture", "kind", "serverType", "os"]) {
       const value = url.searchParams.get(key);
       if (value !== null) values.set(key, value);
     }
@@ -110,6 +120,13 @@ function routeFor(request, env) {
       payload: "lease-create",
     },
     {
+      method: "PUT",
+      pattern: new RegExp(`^/v1/leases/${leaseId}$`),
+      maxBody: 32 * 1024,
+      preferAsync: true,
+      payload: "lease-create",
+    },
+    {
       method: "GET",
       pattern: new RegExp(`^/v1/leases/${leaseId}$`),
       maxBody: 0,
@@ -117,7 +134,7 @@ function routeFor(request, env) {
     },
     {
       method: "POST",
-      pattern: new RegExp(`^/v1/leases/${leaseId}/(?:release|heartbeat)$`),
+      pattern: new RegExp(`^/v1/leases/${leaseId}/(?:release|heartbeat|cancel-create)$`),
       maxBody: 16 * 1024,
     },
     { method: "POST", pattern: /^\/v1\/images$/, maxBody: 16 * 1024 },
@@ -129,15 +146,20 @@ function routeFor(request, env) {
     },
     {
       method: "POST",
-      pattern: new RegExp(`^/v1/images/${imageId}/(?:promote|promote-cas|fast-snapshot-restore)$`),
+      pattern: new RegExp(`^/v1/images/${imageId}/(?:promote|promote-cas)$`),
       maxBody: 16 * 1024,
       query: requireImageQuery,
     },
     {
-      method: "POST",
-      pattern: /^\/v1\/runs$/,
+      method: "PUT",
+      pattern: new RegExp(`^/v1/runs/${runId}$`),
       maxBody: 64 * 1024,
       payload: "run-create",
+    },
+    {
+      method: "GET",
+      pattern: new RegExp(`^/v1/runs/${runId}$`),
+      maxBody: 0,
     },
     {
       method: "POST",
@@ -158,6 +180,13 @@ function routeFor(request, env) {
   const rule = rules.find(
     (candidate) => candidate.method === request.method && candidate.pattern.test(pathname),
   );
+  if (
+    env.QUALIFICATION_MODE === "retained" &&
+    request.method === "POST" &&
+    pathname === "/v1/images"
+  ) {
+    return undefined;
+  }
   if (!rule || !(rule.query ? rule.query(url, env) : requireNoQuery(url))) return undefined;
   if (
     principal === "shared" &&
@@ -176,10 +205,16 @@ function validTargetPayload(value, route, env) {
       value?.class === "standard" &&
       value?.serverType === "t3.small" &&
       value?.awsRegion === env.AWS_REGION &&
-      value?.desktop === false &&
-      value?.browser === false &&
+      value?.desktop === (env.QUALIFICATION_MODE === "retained") &&
+      value?.browser === (env.QUALIFICATION_MODE === "retained") &&
       value?.tailscale === false &&
-      value?.capacity?.market === "on-demand"
+      value?.capacity?.market === "on-demand" &&
+      (env.QUALIFICATION_MODE !== "retained" ||
+        (value?.os === "ubuntu:24.04" &&
+          value?.architecture === "x86_64" &&
+          !value.awsAMI &&
+          !value.awsSnapshot &&
+          !value.awsUseStockImage))
     );
   }
   if (route.payload === "run-create") {

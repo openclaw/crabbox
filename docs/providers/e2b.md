@@ -50,6 +50,10 @@ export E2B_API_KEY=e2b_...
 `CRABBOX_E2B_API_KEY` is also accepted and takes precedence over `E2B_API_KEY`.
 Do not pass the key as a command-line argument.
 
+The key remains environment-only for CLI configuration: neither user nor
+repository YAML has an API-key field, and no key flag is registered. The first
+raw nonempty primary or alias value wins; an empty value falls through.
+
 Endpoint overrides:
 
 - `CRABBOX_E2B_API_URL` / `E2B_API_URL` or `e2b.apiUrl` override the default API
@@ -83,6 +87,20 @@ Provider flags (each overrides the matching `e2b.*` config key):
 
 `template` also reads `CRABBOX_E2B_TEMPLATE`, `workdir` reads
 `CRABBOX_E2B_WORKDIR`, and `user` reads `CRABBOX_E2B_USER`.
+
+All six bindings share one typed declaration. Nonempty YAML strings override
+earlier values without trimming; omitted, null, and empty values preserve them.
+Environment strings retain raw nonempty precedence, including the three existing
+key/URL/domain alias chains. Visited empty flags still apply. Accepted key, API
+URL, and domain inputs keep their existing source classification; URL/domain
+flag visits remain a separate central post-success step. Source admission does
+not grant a repository destination authority to use inherited credentials.
+
+The client, configured claim defaults, bridge/preview domains, template, display,
+and workdir helpers share the compiled defaults while retaining their existing
+normalization. Raw claim scope and command routing do not gain a new fallback.
+The fixed display fallback for missing remote template metadata remains separate
+from the configured template, as do user-home and platform-root rules.
 
 ### Workdir and user resolution
 

@@ -23,6 +23,7 @@ type TimingReport struct {
 	SyncMode           string                   `json:"syncMode,omitempty"`
 	SyncTransferFiles  int                      `json:"syncTransferFiles,omitempty"`
 	SyncTransferBytes  int64                    `json:"syncTransferBytes,omitempty"`
+	SyncSeedBytes      int64                    `json:"syncSeedBytes,omitempty"`
 	SyncFallbackReason string                   `json:"syncFallbackReason,omitempty"`
 	HydrateMs          int64                    `json:"hydrateMs,omitempty"`
 	ProbeMs            int64                    `json:"probeMs,omitempty"`
@@ -37,6 +38,7 @@ type TimingReport struct {
 	RunID              string                   `json:"runId,omitempty"`
 	Label              string                   `json:"label,omitempty"`
 	MachineType        string                   `json:"machineType,omitempty"`
+	ImageEvidence      *ImageEvidence           `json:"imageEvidence,omitempty"`
 	RepoPath           string                   `json:"repoPath,omitempty"`
 	Workdir            string                   `json:"workdir,omitempty"`
 	StopCommand        string                   `json:"stopCommand,omitempty"`
@@ -96,6 +98,7 @@ func writeTimingJSON(w io.Writer, report TimingReport) error {
 }
 
 func finalizeTimingReport(report TimingReport) TimingReport {
+	report.ImageEvidence = CloneImageEvidence(report.ImageEvidence)
 	if report.FailureEvidence != nil {
 		report.FailureEvidence = runFailureEvidenceSnapshot(*report.FailureEvidence)
 	}
@@ -162,6 +165,7 @@ func timingReportFromRun(provider, leaseID, slug string, timings runTimings, tot
 		SyncMode:           timings.syncMode,
 		SyncTransferFiles:  timings.syncTransferFiles,
 		SyncTransferBytes:  timings.syncTransferBytes,
+		SyncSeedBytes:      timings.syncSeedBytes,
 		SyncFallbackReason: timings.syncFallbackReason,
 		CommandMs:          timings.command.Milliseconds(),
 		CommandPhases:      timings.commandPhases,

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="240" viewBox="0 0 720 240" role="img" aria-labelledby="title desc">
+  <title id="title">Crabbox</title>
+  <desc id="desc">Warm a box, sync the diff, run the suite.</desc>
+  <rect width="720" height="240" rx="24" fill="#0e1929"/>
+  <path d="M40 35h32" stroke="#ff927d" stroke-width="4" stroke-linecap="round"/>
+  <g font-family="Geist, system-ui, sans-serif">
+    <text x="38" y="108" fill="#f2f6fc" font-size="66" font-weight="700" letter-spacing="-3">Crabbox</text>
+    <text x="40" y="158" fill="#c1cedd" font-size="27">Warm a box, sync the diff,</text>
+    <text x="40" y="195" fill="#c1cedd" font-size="27">run the suite.</text>
+  </g>
+  <g transform="translate(-257 -38)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="752" y="60" width="182" height="182" rx="34" fill="#ff9077" fill-opacity=".045" stroke="#f48a74" stroke-opacity=".15"/>
+    <path d="m843 80 72 40v80l-72 40-72-40v-80z" fill="#172233" stroke="#ff927d" stroke-width="2"/>
+    <path d="m771 120 72 40 72-40m-72 40v80" stroke="#f58a75" stroke-opacity=".4" stroke-width="2"/>
+    <ellipse cx="843" cy="156" rx="23" ry="17" fill="#ff927d"/>
+    <path d="m823 149-15-13m55 13 15-13m-55 24-17 9m17-2-12 17m50-24 17 9m-17-2 12 17" stroke="#ff927d" stroke-width="5"/>
+    <path d="M808 137c-16-1-22-16-15-29l11 13 11-12c7 13 4 25-7 28m70 0c16-1 22-16 15-29l-11 13-11-12c-7 13-4 25 7 28" fill="#ff927d"/>
+    <path d="M836 140v-6m14 6v-6" stroke="#ff927d" stroke-width="5"/>
+  </g>
+</svg>

@@ -271,46 +271,99 @@ keeps a failed one-shot Testbox inspectable until its idle timeout or an explici
 
 `--artifact-glob` and `--require-artifact` opt into an adapter-owned supervisor
 inside the **original** native run. It executes the command in an isolated,
-non-login `bash -c` child, observes its normal terminal exit, then validates
-required globs and collects from the original remote working directory by default.
-CI may prepare a separate artifact workspace as described below. A child `cd`,
-`exit`, `exec`, or trap does not change the supervisor's collection directory.
-Stdout and stderr remain streaming; stdin forwarding remains unsupported.
-There is no second native run, retry, or re-sync, including after success.
+non-login `bash -c` child, observes its normal terminal exit, and collects from
+the original physical working directory or the optional prepared workspace.
+A child `cd`, `exit`, `exec`, or trap does not retarget collection. Stdout and
+stderr remain streaming; stdin forwarding remains unsupported.
 
-Collection runs after exit 0 or normal nonzero exits below 128. Signal-like
-codes 128 and above skip collection. Crabbox accepts the tarball only after a
-fresh, complete, ordered invocation receipt **and** clean native CLI completion,
-with no caller cancellation or sync timeout, under the original unchanged
-claim fence. Missing/malformed receipts, transport failures (even after a full
-payload), and stopped leases cannot authorize retrieval. Generic log markers
-or a native CLI exit 1 do not establish a remote workload exit.
+The supervisor finalizes one private compressed archive, then sends bounded,
+ordered invocation receipts containing its size and SHA-256. After clean native
+completion, the same adapter downloads that exact file through the native
+`blacksmith testbox download` command. There is no second workload, native run,
+re-sync, or transfer fallback. The original organization, API, key and shared
+claim remain bound across collection, transfer and validation.
 
-The remote Linux environment must provide `timeout` with `--kill-after` support,
-in addition to Bash and the existing `find`, `tar`, `base64`, and temporary-file
-utilities. The required timeout option and duration syntax are checked with a
-harmless command before starting the child. Collection has an independent
-30-second budget, with a one-second forced-kill grace;
-the local wait is also bounded from the workload exit receipt. Caller
-cancellation takes precedence. This is not a 30-second workload deadline.
+Native download support is checked before the workload. It is present in the
+published Blacksmith 0.4.57 client and verified 0.4.58 interface; no minimum is
+inferred for older releases. Unsupported command interfaces fail with update
+advice. Bounded file transfer requires a macOS or Linux client and an OpenSSH
+`scp` executable. Artifact operations disable the native CLI's automatic update
+so their metadata and execution phases use a stable interface.
+The client also needs `ps` supporting `-axo pgid=,stat=` (`procps` on Linux).
+A bounded startup check rejects missing or incompatible inspection before the
+workload launches.
 
-The private local archive is
-`.crabbox/runs/<lease>/blacksmith-artifacts.tgz`. The defaults remain 256 files
-and 10 MiB compressed; `.git` and `.crabbox` paths remain excluded and existing
-symlink rules apply. Required globs are all-or-nothing, including on failed
-workloads. Collection, decoding, local write, or cleanup failure never replaces
-an observed nonzero workload exit. Collection failure after a successful
-workload still fails the run (missing required artifacts return exit 7).
-Command timing ends at the exit receipt; collection and cleanup count toward total.
+Keep the installed tools stable throughout the operation. Native transfer invokes
+the resolved installed `scp` path through a private dispatcher, preserving its
+installation context. Checks before and after transfer reject observed changes
+to its file identity, permissions or contents. They are finite observations,
+not atomic executable pinning; a change restored between checks can go undetected.
+The installed helper is also resolved and inspected before workload launch.
+Missing, non-executable, unreadable, set-id and Linux file-capability helpers
+are rejected at startup.
 
-Reserved receipt frames and archive bytes are removed before
-console/proof/failure-log capture; unrelated workload control bytes remain
-streaming. Malformed or overflowing collection output is discarded and cancels
-the local runner. `--keep`, `--keep-on-failure`, reused leases, and failure bundles retain
-their existing policy. Downloaded evidence does **not** mean the workload
-succeeded; proof rendering remains success-only. The nonce binds the local
-invocation, not remote source authenticity or exact Git bytes: native Blacksmith
-still owns the selected source and sync.
+Collection runs after exit 0 or normal nonzero exits below 128; signal-like
+codes skip collection. The Linux environment needs Bash, `find`, `tar`,
+`sha256sum`, temporary-file utilities and `timeout --kill-after`. One 30-second
+collection deadline starts at the observed workload exit and covers collection,
+native completion, download and validation. The deadline is subordinate to
+caller cancellation and is never reset for transfer. It is not a workload
+limit. Clean receipts, native completion and downloaded bytes are cumulative
+requirements; none alone establishes success or remote source attestation.
+
+The defaults remain 256 selected files and 10 MiB compressed. Required globs
+are all-or-nothing; protected `.git` and `.crabbox` paths and existing leaf-link
+semantics remain unchanged. Downloads use a precreated private regular file,
+a child-only hard file limit, exact size/hash/identity checks and archive
+validation without extraction. The size limit applies to compressed bytes,
+not expanded file contents. Failed transfers are withheld and preserve bounded
+private staging as evidence.
+Native command failures and observed helper drift retain up to 64 KiB each of
+stdout and stderr in exclusive private diagnostic files. The error reports their paths, byte counts
+and SHA-256 values; raw contents remain private and are not accepted artifacts.
+
+Native artifact commands use a standalone process group. The adapter refuses
+an inherited controller-owned group before workload execution rather than
+changing that controller's recovery scope. The command owner completes group
+cleanup before reaping its direct child, so a recycled process ID cannot retarget
+cleanup signals. A natural command exit with live group members fails even when
+cleanup succeeds. Cancellation stops the owned group,
+and the original claim remains held until its live members close. If cleanup
+grace expires, the command reports failure with cleanup pending and keeps
+joining inline; this never permits success after the collection deadline.
+Cleanup reuses the selected `ps` path with bounded observations. If inspection
+fails after launch, the owner reports cleanup pending and retains the claim
+until compatible observation is restored and the group has closed.
+If the original child reservation is contradicted, the same owner reports
+cleanup pending and retains the claim without further signals or reaping.
+Existing pipe-wait limits are unchanged. This is an owned-process-group
+contract: forced termination of the owner releases its file locks, and processes
+that deliberately escape the group are outside this guarantee.
+
+Finalized remote transfer archives are intentionally retained under their
+nonce-owned `.crabbox/blacksmith-artifact-<nonce>/` directory until the original
+ephemeral lease is cleaned up. Their locator and retention policy are recorded
+in the run output. Each finalized archive is bounded by the same 10 MiB cap;
+there is no detached cleanup holder or extra cleanup run. Do not place the
+transfer directory on a sticky disk. Canonical `crabbox stop` owns lease disposal.
+
+Local accepted archives use separate invocation directories:
+`.crabbox/runs/<lease>/<nonce>/blacksmith-artifacts.tgz`. Follow the returned
+artifact path; concurrent same-claim actions must not overwrite one another's
+evidence. Collection, validation, local publication or cleanup failures never
+replace an observed nonzero workload exit. After a successful workload they
+still fail the run. Command timing ends at the workload receipt; collection
+and cleanup count toward total. Proof rendering remains success-only.
+
+Local publication uses exclusive rename, retaining hard links only when the
+platform reports that the exclusive primitive is unsupported. The output
+filesystem must support at least one of these atomic operations. Existing
+targets and ordinary permission failures never permit an overwrite fallback.
+
+Reserved receipts are removed before console/proof/failure capture. Malformed
+or excessive collection diagnostics cancel the operation. `--keep`,
+`--keep-on-failure`, lease reuse and failure bundles retain their existing
+policy. An accepted artifact from a failed workload is not successful proof.
 
 #### Prepared artifact workspace
 

@@ -49,15 +49,15 @@ type commandSpec struct {
 }
 
 type bridgeClient struct {
-	cfg      Config
-	rt       Runtime
+	cfg      core.Config
+	rt       core.Runtime
 	lookup   func(string) (string, error)
 	run      func(context.Context, commandSpec) error
 	call     func(context.Context, bridgeRequest, any) error
 	execCall func(context.Context, commandSpec, bridgeRequest, io.Writer, io.Writer) (execResult, error)
 }
 
-func newBridgeClient(cfg Config, rt Runtime) (vercelSandboxClient, error) {
+func newBridgeClient(cfg core.Config, rt core.Runtime) (vercelSandboxClient, error) {
 	return &bridgeClient{
 		cfg:    cfg,
 		rt:     rt,
@@ -186,10 +186,10 @@ type bridgeConfig struct {
 }
 
 func (c *bridgeClient) CreateSandbox(ctx context.Context, req createSandboxRequest) (sandboxSummary, error) {
-	req.Runtime = blank(req.Runtime, vercelSandboxRuntime(c.cfg))
-	req.ProjectID = blank(req.ProjectID, strings.TrimSpace(c.cfg.VercelSandbox.ProjectID))
-	req.TeamID = blank(req.TeamID, strings.TrimSpace(c.cfg.VercelSandbox.TeamID))
-	req.Scope = blank(req.Scope, strings.TrimSpace(c.cfg.VercelSandbox.Scope))
+	req.Runtime = core.Blank(req.Runtime, vercelSandboxRuntime(c.cfg))
+	req.ProjectID = core.Blank(req.ProjectID, strings.TrimSpace(c.cfg.VercelSandbox.ProjectID))
+	req.TeamID = core.Blank(req.TeamID, strings.TrimSpace(c.cfg.VercelSandbox.TeamID))
+	req.Scope = core.Blank(req.Scope, strings.TrimSpace(c.cfg.VercelSandbox.Scope))
 	req.VCPUs = c.cfg.VercelSandbox.VCPUs
 	req.TimeoutSeconds = c.cfg.VercelSandbox.TimeoutSecs
 	req.Persistent = c.cfg.VercelSandbox.Persistent || req.Persistent
@@ -204,7 +204,7 @@ func (c *bridgeClient) CreateSandbox(ctx context.Context, req createSandboxReque
 		return sandboxSummary{}, err
 	}
 	if out.ID == "" {
-		return sandboxSummary{}, exit(5, "vercel-sandbox create returned no sandbox id")
+		return sandboxSummary{}, core.Exit(5, "vercel-sandbox create returned no sandbox id")
 	}
 	return out, nil
 }

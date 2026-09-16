@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -35,6 +36,32 @@ func TestCoordinatorMachineIDAcceptsStringOrNumber(t *testing.T) {
 			}
 			if machine.ID == "" {
 				t.Fatalf("machine ID was empty")
+			}
+		})
+	}
+}
+
+func TestCoordinatorLeasePreservesSelectedImageRevision(t *testing.T) {
+	for _, revision := range []string{"", "selected-revision"} {
+		t.Run(revision, func(t *testing.T) {
+			input := `{"id":"cbx_test","image":{"id":"ami-11111111","source":"promoted","region":"us-east-1","promotedAt":"2026-09-01T00:00:00Z"`
+			if revision != "" {
+				input += `,"revision":"` + revision + `"`
+			}
+			input += `}}`
+			var lease CoordinatorLease
+			if err := json.Unmarshal([]byte(input), &lease); err != nil {
+				t.Fatal(err)
+			}
+			if lease.Image == nil || lease.Image.Revision != revision {
+				t.Fatalf("image revision was not preserved: %#v", lease.Image)
+			}
+			encoded, err := json.Marshal(lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), `"revision"`) != (revision != "") {
+				t.Fatalf("optional image revision changed on encoding: %s", encoded)
 			}
 		})
 	}
@@ -1408,17 +1435,38 @@ func TestCoordinatorLeaseWatchCancelsWhenLeaseReleased(t *testing.T) {
 	}
 }
 
-func TestCoordinatorCurlFallbackSkipsNonIdempotentAndTimeouts(t *testing.T) {
-	transportErr := &url.Error{Op: "Get", URL: "https://broker.example.test/v1/leases", Err: io.ErrUnexpectedEOF}
-	if !shouldUseCoordinatorCurlFallback(http.MethodGet, false, transportErr) {
-		t.Fatal("GET transport error should use curl fallback")
-	}
-	if shouldUseCoordinatorCurlFallback(http.MethodPost, true, transportErr) {
-		t.Fatal("POST with body should not use curl fallback")
-	}
-	timeoutErr := &url.Error{Op: "Get", URL: "https://broker.example.test/v1/leases", Err: context.DeadlineExceeded}
-	if shouldUseCoordinatorCurlFallback(http.MethodGet, false, timeoutErr) {
-		t.Fatal("deadline exceeded should not use curl fallback")
+func TestCoordinatorCurlFallbackEligibility(t *testing.T) {
+	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: context.DeadlineExceeded}
+	for _, test := range []struct {
+		name      string
+		err       error
+		wrapped   bool
+		fallback  bool
+		transport bool
+	}{
+		{"unexpected EOF", io.ErrUnexpectedEOF, true, true, true},
+		{"dial deadline", dialErr, true, true, false},
+		{"unwrapped dial deadline", dialErr, false, false, false},
+		{"request deadline", context.DeadlineExceeded, true, false, false},
+		{"read deadline", &net.OpError{Op: "read", Net: "tcp", Err: context.DeadlineExceeded}, true, false, false},
+		{"cancellation", context.Canceled, true, false, false},
+		{"dial cancellation", &net.OpError{Op: "dial", Net: "tcp", Err: context.Canceled}, true, false, false},
+		{"no error", nil, false, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.err
+			if test.wrapped {
+				err = &url.Error{Op: "Get", URL: "https://broker.example.test/v1/leases", Err: err}
+			}
+			for _, method := range []string{http.MethodGet, http.MethodHead} {
+				if got := shouldUseCoordinatorCurlFallback(t.Context(), method, false, err); got != test.fallback {
+					t.Errorf("%s fallback=%t, want %t", method, got, test.fallback)
+				}
+			}
+			if got := isCoordinatorTransportError(err); got != test.transport {
+				t.Errorf("shared transport classification=%t, want unchanged %t", got, test.transport)
+			}
+		})
 	}
 }
 
@@ -2542,6 +2590,52 @@ func TestImagePromoteOrdinaryOutputCompatibility(t *testing.T) {
 	}
 	if _, ok := decoded["variantSelectors"]; ok {
 		t.Fatalf("ordinary JSON gained variantSelectors: %s", jsonOut.String())
+	}
+}
+
+func TestImagePromoteRetainedQualificationScope(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	var requests []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query(); got.Get("provider") != "aws" ||
+			got.Get("target") != "linux" || got.Get("region") != "us-east-1" ||
+			got.Get("serverType") != "t3.small" || got.Get("architecture") != "x86_64" ||
+			got.Get("os") != "ubuntu:24.04" {
+			t.Errorf("retained qualification promotion scope=%v", got)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, body)
+		_, _ = w.Write([]byte(`{"image":{"id":"ami-11111111","revision":"candidate"},"previous":{"state":"absent","aliases":[{"alias":"regional","state":"absent"}]}}`))
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "admin-token")
+
+	scope := []string{"--provider", "aws", "--target", "linux", "--region", "us-east-1",
+		"--type", "t3.small", "--architecture", "x86_64", "--os", "ubuntu:24.04"}
+	var out bytes.Buffer
+	app := App{Stdout: &out, Stderr: io.Discard}
+	args := append([]string{"ami-11111111"}, scope...)
+	args = append(args, "--json", "--expected-current-image", "capture")
+	if err := app.imagePromote(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := filepath.Join(t.TempDir(), "promotion.json")
+	if err := os.WriteFile(receiptPath, out.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args = append(append([]string{}, scope...), "--json", "--restore-receipt", receiptPath, "ami-11111111")
+	if err := app.imagePromote(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 || requests[1]["restorePrevious"] == nil ||
+		requests[1]["retireExpectedCatalog"] != true {
+		t.Fatalf("retained promotion/restore requests=%#v", requests)
 	}
 }
 

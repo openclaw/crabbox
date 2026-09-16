@@ -78,14 +78,7 @@ func (p *PreparedShellEnvProfile) Close(ctx context.Context, remove func(context
 func sortedShellEnvNames(env map[string]string) []string {
 	keys := make([]string, 0, len(env))
 	for key := range env {
-		valid := key != ""
-		for i, r := range key {
-			if !(r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9') {
-				valid = false
-				break
-			}
-		}
-		if valid {
+		if core.ValidShellEnvName(key) {
 			keys = append(keys, key)
 		}
 	}

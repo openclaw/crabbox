@@ -1,13 +1,95 @@
 package shared
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestDecodeUnboundedJSONResponse(t *testing.T) {
+	readErr := errors.New("ordinary read failure")
+	apiErr := errors.New("original adapter error")
+	for _, tc := range []struct {
+		name, body string
+		code       int
+		nilOutput  bool
+		readErr    error
+	}{
+		{name: "json", body: `{"value":"new","extra":true}`},
+		{name: "raw empty"},
+		{name: "ASCII whitespace", body: " \t\r\n"},
+		{name: "Unicode whitespace", body: "\u2003"},
+		{name: "null", body: "null"},
+		{name: "nil output empty", nilOutput: true},
+		{name: "nil output consumes non JSON", body: strings.Repeat("ordinary text ", 400), nilOutput: true},
+		{name: "last success status", code: 299, body: `{"value":"new"}`},
+		{name: "malformed", body: "{"},
+		{name: "trailing JSON", body: "{} {}"},
+		{name: "wrong field type", body: `{"value":7}`},
+		{name: "read error before status", code: 400, body: "partial ordinary text", readErr: readErr},
+		{name: "read error with nil output", body: "ordinary text", nilOutput: true, readErr: readErr},
+		{name: "below success", code: 199, body: " raw status body \n"},
+		{name: "above success", code: 300, body: "\u2003raw status body\n", nilOutput: true},
+		{name: "empty failure", code: 400},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.code == 0 {
+				tc.code = http.StatusOK
+			}
+			body := &responseBodyProbe{Reader: strings.NewReader(tc.body), readErr: tc.readErr}
+			resp := &http.Response{StatusCode: tc.code, Status: "original status text", Body: body}
+			value := struct{ Value string }{Value: "old"}
+			wantValue := value
+			var out any = &value
+			if tc.nilOutput {
+				out = nil
+			}
+			var wantErr error
+			wantCalls := 0
+			switch {
+			case tc.readErr != nil:
+				wantErr = tc.readErr
+			case tc.code < 200 || tc.code >= 300:
+				wantErr, wantCalls = apiErr, 1
+			case !tc.nilOutput && len(tc.body) != 0:
+				wantErr = json.Unmarshal([]byte(tc.body), &wantValue)
+			}
+			calls := 0
+			err := DecodeUnboundedJSONResponse(resp, out, func(code int, status string, data []byte) error {
+				calls++
+				if code != tc.code || status != resp.Status || !bytes.Equal(data, []byte(tc.body)) {
+					t.Fatalf("factory arguments changed: code=%d status=%q data=%q", code, status, data)
+				}
+				if body.closed != 0 {
+					t.Fatal("borrowed body closed before adapter factory")
+				}
+				return apiErr
+			})
+			if tc.readErr != nil || wantCalls != 0 {
+				if err != wantErr {
+					t.Fatalf("original error not returned directly: got %T %v, want %v", err, err, wantErr)
+				}
+			} else if reflect.TypeOf(err) != reflect.TypeOf(wantErr) || !reflect.DeepEqual(err, wantErr) {
+				t.Fatalf("unmarshal result changed or wrapped: got %T %v, want %T %v", err, err, wantErr, wantErr)
+			}
+			if value != wantValue || calls != wantCalls {
+				t.Fatalf("value=%#v calls=%d, want %#v calls=%d", value, calls, wantValue, wantCalls)
+			}
+			if body.read != len(tc.body) || body.closed != 0 {
+				t.Fatalf("borrowed body read=%d close=%d, want read=%d close=0", body.read, body.closed, len(tc.body))
+			}
+			_ = body.Close()
+			if body.closed != 1 {
+				t.Fatal("caller did not retain body-close ownership")
+			}
+		})
+	}
+}
 
 type responseBodyProbe struct {
 	io.Reader

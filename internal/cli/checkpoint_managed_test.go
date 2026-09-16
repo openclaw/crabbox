@@ -50,7 +50,11 @@ func configureManagedCheckpointTest(t *testing.T, handler http.HandlerFunc) (*ht
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stateRoot := t.TempDir()
+	if err := os.Chmod(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", stateRoot)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
 	t.Setenv("CRABBOX_COORDINATOR", server.URL)
 	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "test-user-session")
@@ -73,7 +77,7 @@ func TestCheckpointManagedListMergesRemoteInventoryAndKeepsJSONArray(t *testing.
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"checkpoints": []coordinatorCheckpoint{checkpoint}})
 	})
-	if _, err := store.Create(checkpointRecord{
+	if _, _, err := store.Reserve(checkpointRecord{
 		ID:        "chk_local_archive",
 		Kind:      checkpointKindArchive,
 		CreatedAt: "2026-08-19T12:00:00Z",
@@ -106,7 +110,7 @@ func TestCheckpointManagedListLocalOnlyDoesNotContactCoordinator(t *testing.T) {
 		calls++
 		http.Error(w, "coordinator must not be contacted", http.StatusInternalServerError)
 	})
-	if _, err := store.Create(checkpointRecord{
+	if _, _, err := store.Reserve(checkpointRecord{
 		ID:        "chk_offline",
 		Kind:      checkpointKindArchive,
 		CreatedAt: "2026-08-20T12:00:00Z",
@@ -126,7 +130,7 @@ func TestCheckpointManagedListPreservesLegacyCoordinatorCompatibility(t *testing
 	_, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	})
-	if _, err := store.Create(checkpointRecord{
+	if _, _, err := store.Reserve(checkpointRecord{
 		ID:        "chk_legacy",
 		Kind:      checkpointKindAWSEBS,
 		CreatedAt: "2026-08-20T12:00:00Z",
@@ -397,7 +401,7 @@ func TestCheckpointManagedRejectsInvalidRetentionAndOperatorOwnedPolicies(t *tes
 	_, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Fatalf("operator-owned checkpoint unexpectedly contacted coordinator: %s", r.URL.Path)
 	})
-	if _, err := store.Create(checkpointRecord{ID: "chk_operator", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+	if _, _, err := store.Reserve(checkpointRecord{ID: "chk_operator", Kind: checkpointKindArchive, CreatedAt: time.Now().UTC().Format(time.RFC3339)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointPolicy(context.Background(), []string{"chk_operator", "--manual"}); err == nil || !strings.Contains(err.Error(), "operator-managed") {
@@ -605,7 +609,7 @@ func TestCheckpointManagedListRejectsArchiveIdentityCollision(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"checkpoints": []coordinatorCheckpoint{checkpoint}})
 	})
-	if _, err := store.Create(checkpointRecord{ID: checkpoint.ID, Kind: checkpointKindArchive}); err != nil {
+	if _, _, err := store.Reserve(checkpointRecord{ID: checkpoint.ID, Kind: checkpointKindArchive}); err != nil {
 		t.Fatal(err)
 	}
 	err := (App{Stdout: io.Discard, Stderr: io.Discard}).checkpointList(context.Background(), []string{"--json"})
@@ -831,7 +835,7 @@ func testCheckpointManagedInspectAbsence(t *testing.T, binary string) {
 				}
 			case "capture", "corrupt claim":
 				const leaseID = "cbx_abcdef123456"
-				if err := withDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
+				if err := WithDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
 					*claim = leaseClaim{LeaseID: leaseID, Provider: "aws", CheckpointCapture: &CheckpointCaptureBinding{ID: id}}
 					return persist()
 				}); err != nil {
@@ -1465,7 +1469,7 @@ func TestCheckpointManagedRenewalCompletionRace(t *testing.T) {
 func TestCheckpointManagedSafeCacheWriteRejectsOperatorOwnership(t *testing.T) {
 	checkpoint := managedCheckpointFixture("chk_safe_cache_collision")
 	server, store := configureManagedCheckpointTest(t, func(w http.ResponseWriter, r *http.Request) {})
-	if _, err := store.Create(checkpointRecord{ID: checkpoint.ID, Kind: checkpointKindArchive}); err != nil {
+	if _, _, err := store.Reserve(checkpointRecord{ID: checkpoint.ID, Kind: checkpointKindArchive}); err != nil {
 		t.Fatal(err)
 	}
 	managed, err := checkpointRecordFromCoordinator(checkpoint, checkpointCoordinatorOrigin(server.URL))
@@ -1563,7 +1567,7 @@ func TestCheckpointManagedListFallsBackWithoutChangingLocalCache(t *testing.T) {
 			if err := store.Write(cached); err != nil {
 				t.Fatal(err)
 			}
-			local, err := store.Create(checkpointRecord{ID: "chk_local_offline", Kind: checkpointKindArchive})
+			local, _, err := store.Reserve(checkpointRecord{ID: "chk_local_offline", Kind: checkpointKindArchive})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1900,7 +1904,7 @@ func TestCheckpointListKeepsLocalRecordsWhenConfigurationCannotLoad(t *testing.T
 				t.Setenv("CRABBOX_PROVIDER", "missing-provider")
 			}
 			record := checkpointRecord{ID: "chk_local_config", Kind: checkpointKindArchive, CreatedAt: "2026-08-19T12:00:00Z"}
-			if _, err := store.Create(record); err != nil {
+			if _, _, err := store.Reserve(record); err != nil {
 				t.Fatal(err)
 			}
 			paths, err := store.Paths(record.ID)

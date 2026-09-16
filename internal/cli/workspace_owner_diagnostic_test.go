@@ -64,7 +64,7 @@ func TestWorkspaceOwnerSetupDiagnosticPreservesWriteFailures(t *testing.T) {
 }
 
 func TestWorkspaceOwnerSetupFailureDoesNotRetrySSHPort(t *testing.T) {
-	err := &workspaceOwnerSetupError{phase: "handoff", cause: exit(255, "connection closed")}
+	err := &workspaceOwnerSetupError{phase: "handoff", cause: Exit(255, "connection closed")}
 	if shouldRetrySSHPort(err) {
 		t.Fatal("proven setup failure was retried as transport failure")
 	}

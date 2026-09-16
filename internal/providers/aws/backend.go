@@ -17,42 +17,27 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type Config = core.Config
-type Runtime = core.Runtime
-type ProviderSpec = core.ProviderSpec
-type Backend = core.Backend
-type AcquireRequest = core.AcquireRequest
-type ResolveRequest = core.ResolveRequest
-type ListRequest = core.ListRequest
-type LeaseView = core.LeaseView
-type ReleaseLeaseRequest = core.ReleaseLeaseRequest
-type TouchRequest = core.TouchRequest
-type CleanupRequest = core.CleanupRequest
-type LeaseTarget = core.LeaseTarget
-type Server = core.Server
-type SSHTarget = core.SSHTarget
-
 type awsLeaseBackend struct{ shared.DirectSSHBackend }
 
 const awsAcquireRollbackTimeout = 2 * time.Minute
 
 type awsClient interface {
-	ListCrabboxServers(context.Context) ([]Server, error)
-	CreateServerWithFallback(context.Context, Config, string, string, string, bool, func(string, ...any)) (Server, Config, error)
-	CreateServerWithFallbackControl(context.Context, Config, string, string, string, bool, func(string, ...any), *core.AWSFixedCreateControl) (Server, Config, error)
-	WaitForServerIP(context.Context, string) (Server, error)
-	GetServer(context.Context, string) (Server, error)
+	ListCrabboxServers(context.Context) ([]core.Server, error)
+	CreateServerWithFallback(context.Context, core.Config, string, string, string, bool, func(string, ...any)) (core.Server, core.Config, error)
+	CreateServerWithFallbackControl(context.Context, core.Config, string, string, string, bool, func(string, ...any), *core.AWSFixedCreateControl) (core.Server, core.Config, error)
+	WaitForServerIP(context.Context, string) (core.Server, error)
+	GetServer(context.Context, string) (core.Server, error)
 	DeleteServer(context.Context, string) error
 	DeleteSSHKey(context.Context, string) error
 	ResolveCleanupSSHKeyID(context.Context, string) (string, error)
 	DeleteCleanupSSHKeyID(context.Context, string) error
 	CallerAccountID(context.Context) (string, error)
 	SetTags(context.Context, string, map[string]string) error
-	CapacityDoctorChecks(context.Context, Config) []core.DoctorCheck
-	SpotPlacementScores(context.Context, Config) ([]ec2types.SpotPlacementScore, error)
+	CapacityDoctorChecks(context.Context, core.Config) []core.DoctorCheck
+	SpotPlacementScores(context.Context, core.Config) ([]ec2types.SpotPlacementScore, error)
 }
 
-func NewAWSLeaseBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewAWSLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = "aws"
 	return &awsLeaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, Delete: deleteServer, StoredLeaseKeys: true}}
 }
@@ -61,46 +46,46 @@ func (b *awsLeaseBackend) SupportsRequestedLeaseID() bool { return true }
 
 func (b *awsLeaseBackend) SupportsRequestedCheckpointID() bool { return true }
 
-func (b *awsLeaseBackend) Acquire(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+func (b *awsLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	if strings.TrimSpace(req.RequestedLeaseID) != "" {
 		return b.acquireFixed(ctx, req)
 	}
-	return acquireAttemptsRetry(b.RT, req.Keep, func() (LeaseTarget, error) {
+	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
 	})
 }
 
-func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (result LeaseTarget, retErr error) {
+func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug string) (result core.LeaseTarget, retErr error) {
 	if b.Cfg.Tailscale.Enabled && b.Cfg.Tailscale.AuthKey == "" {
-		return LeaseTarget{}, exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", b.Cfg.Tailscale.AuthKeyEnv)
+		return core.LeaseTarget{}, core.Exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", b.Cfg.Tailscale.AuthKeyEnv)
 	}
 	cfg := chooseAWSRegion(ctx, b.Cfg, b.RT.Stderr)
 	client, err := newAWSClient(ctx, cfg)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	leaseID := newLeaseID()
+	leaseID := core.NewLeaseID()
 	servers, err := b.listAcrossRegions(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	slug, err := allocateDirectLeaseSlug(leaseID, requestedSlug, servers)
+	slug, err := core.AllocateDirectLeaseSlug(leaseID, requestedSlug, servers)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
-	keyPath, publicKey, err := ensureTestboxKeyForConfig(cfg, leaseID)
+	keyPath, publicKey, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	cfg.SSHKey = keyPath
-	cfg.ProviderKey = providerKeyForLease(leaseID)
+	cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
 	ensureAWSSSHCIDRs(ctx, &cfg)
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=aws lease=%s slug=%s class=%s preferred_type=%s region=%s keep=%v market=%s strategy=%s\n", leaseID, slug, cfg.Class, cfg.ServerType, cfg.AWSRegion, keep, cfg.Capacity.Market, cfg.Capacity.Strategy)
 	server, resolvedCfg, err := client.CreateServerWithFallback(ctx, cfg, publicKey, leaseID, slug, keep, func(format string, args ...any) {
 		fmt.Fprintf(b.RT.Stderr, format, args...)
 	})
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	cfg = resolvedCfg
 	rollback := true
@@ -116,12 +101,12 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	}()
 	client, err = newAWSClient(ctx, cfg)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s type=%s\n", leaseID, server.DisplayID(), cfg.ServerType)
 	server, err = client.WaitForServerIP(ctx, server.CloudID)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	server = annotateAWSServerRegion(server, cfg.AWSRegion)
 	if rollbackKeyID != "" {
@@ -129,7 +114,7 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	}
 	accountID, err := client.CallerAccountID(ctx)
 	if err != nil {
-		return LeaseTarget{}, fmt.Errorf("bind AWS caller account: %w", err)
+		return core.LeaseTarget{}, fmt.Errorf("bind AWS caller account: %w", err)
 	}
 	server.Labels["aws_account_id"] = accountID
 	if cfg.Network == core.NetworkTailscale && cfg.Tailscale.Enabled && strings.TrimSpace(cfg.Tailscale.Hostname) == "" {
@@ -137,14 +122,14 @@ func (b *awsLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	}
 	target := sshTargetForBootstrap(cfg, server.PublicNet.IPv4.IP, leaseID, slug)
 	if err := bootstrapAWSWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr); err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	server.Labels["state"] = "ready"
 	if err := client.SetTags(ctx, server.CloudID, server.Labels); err != nil {
-		return LeaseTarget{}, fmt.Errorf("persist AWS lease identity tags: %w", err)
+		return core.LeaseTarget{}, fmt.Errorf("persist AWS lease identity tags: %w", err)
 	}
 	rollback = false
-	return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
 const (
@@ -164,10 +149,10 @@ var fixedAWSLeaseKind = core.FixedLeaseKind{
 	},
 }
 
-func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) (LeaseTarget, error) {
+func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	leaseID := strings.TrimSpace(req.RequestedLeaseID)
 	if b.Cfg.Tailscale.Enabled && b.Cfg.Tailscale.AuthKey == "" {
-		return LeaseTarget{}, exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", b.Cfg.Tailscale.AuthKeyEnv)
+		return core.LeaseTarget{}, core.Exit(2, "direct --tailscale requires %s to contain a Tailscale auth key; brokered mode uses coordinator OAuth secrets", b.Cfg.Tailscale.AuthKeyEnv)
 	}
 	cfg := b.Cfg
 	var client awsClient
@@ -193,13 +178,13 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 			return core.FixedLeaseBinding{}, fmt.Errorf("bind fixed AWS lease account: %w", err)
 		}
 		providerScope = "account:" + accountID
-		keyPath, key, err := ensureTestboxKeyForConfig(cfg, leaseID)
+		keyPath, key, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}
 		publicKey = key
 		cfg.SSHKey = keyPath
-		cfg.ProviderKey = providerKeyForLease(leaseID)
+		cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
 		cfg.AWSSSHCIDRsPinned = len(cfg.AWSSSHCIDRs) > 0
 		ensureAWSSSHCIDRs(ctx, &cfg)
 		requestedSlug := core.NormalizeLeaseSlug(req.RequestedSlug)
@@ -215,16 +200,16 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 			if err != nil {
 				return core.FixedLeaseBinding{}, err
 			}
-			slug, err := allocateDirectLeaseSlug(leaseID, requestedSlug, servers)
+			slug, err := core.AllocateDirectLeaseSlug(leaseID, requestedSlug, servers)
 			if err != nil {
 				return core.FixedLeaseBinding{}, err
 			}
 			binding.Slug = slug
 		}
 		return binding, nil
-	}, func(ctx context.Context, claim *core.LeaseClaim, intent *core.FixedCreateIntent, persist func() error) (LeaseTarget, error) {
+	}, func(ctx context.Context, claim *core.LeaseClaim, intent *core.FixedCreateIntent, persist func() error) (core.LeaseTarget, error) {
 		createdAt, _ := time.Parse(time.RFC3339Nano, intent.CreatedAt)
-		var lease LeaseTarget
+		var lease core.LeaseTarget
 		err := func() error {
 			servers, err := b.listAcrossRegions(ctx)
 			if err != nil {
@@ -232,28 +217,28 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 			}
 			matching := fixedAWSLeaseMatches(servers, leaseID)
 			if len(matching) > 1 {
-				return exit(4, "lease_id_conflict: multiple AWS resources match fixed lease %s", leaseID)
+				return core.Exit(4, "lease_id_conflict: multiple AWS resources match fixed lease %s", leaseID)
 			}
 			pinned, err := fixedAWSAttemptFromIntent(intent)
 			if err != nil {
-				return exit(4, "lease_id_conflict: invalid fixed AWS attempt for lease %s: %v", leaseID, err)
+				return core.Exit(4, "lease_id_conflict: invalid fixed AWS attempt for lease %s: %v", leaseID, err)
 			}
-			var server Server
+			var server core.Server
 			resolvedCfg := cfg
 			if len(matching) == 1 {
 				server = matching[0]
 				if intent.State == fixedAWSIntentAcquired || claim.CloudID != "" {
 					if claim.CloudID == "" || server.CloudID != claim.CloudID {
-						return exit(4, "lease_id_conflict: fixed lease %s resource %s does not match acquired CloudID %s", leaseID, blank(server.CloudID, "<empty>"), blank(claim.CloudID, "<empty>"))
+						return core.Exit(4, "lease_id_conflict: fixed lease %s resource %s does not match acquired CloudID %s", leaseID, core.Blank(server.CloudID, "<empty>"), core.Blank(claim.CloudID, "<empty>"))
 					}
 				}
 				resolvedCfg = awsConfigForServer(cfg, server)
 			} else {
 				if intent.State == fixedAWSIntentAcquired || claim.CloudID != "" {
-					return exit(4, "lease_id_conflict: acquired fixed lease %s is missing its bound AWS instance", leaseID)
+					return core.Exit(4, "lease_id_conflict: acquired fixed lease %s is missing its bound AWS instance", leaseID)
 				}
 				if pinned != nil {
-					return exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt; retry after provider inventory converges", leaseID)
+					return core.Exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt; retry after provider inventory converges", leaseID)
 				}
 				failed := make(map[string]bool, len(intent.FailedAttempts))
 				for _, token := range intent.FailedAttempts {
@@ -295,7 +280,7 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 				}, control)
 				if err != nil {
 					if control.TerminalRejection && control.PinnedAttempt == nil {
-						return exit(4, "lease_id_conflict: fixed AWS lease %s terminated after %v", leaseID, err)
+						return core.Exit(4, "lease_id_conflict: fixed AWS lease %s terminated after %v", leaseID, err)
 					}
 					return err
 				}
@@ -308,7 +293,7 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 			}
 			pinned, err = fixedAWSAttemptFromIntent(intent)
 			if err != nil || pinned == nil {
-				return exit(4, "lease_id_conflict: fixed AWS lease %s has no valid durable launch attempt after provisioning", leaseID)
+				return core.Exit(4, "lease_id_conflict: fixed AWS lease %s has no valid durable launch attempt after provisioning", leaseID)
 			}
 			if err := validateFixedAWSAttemptServer(server, leaseID, *pinned); err != nil {
 				return err
@@ -352,24 +337,24 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req AcquireRequest) 
 				return fmt.Errorf("persist AWS fixed lease identity tags: %w", err)
 			}
 			claim.ProviderScope = providerScope
-			lease = LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+			lease = core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
 			return nil
 		}()
 		return lease, err
 	}, ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if req.OnAcquired != nil {
 		if err := req.OnAcquired(acquired); err != nil {
-			return LeaseTarget{}, fmt.Errorf("acknowledge fixed AWS acquisition: %w", err)
+			return core.LeaseTarget{}, fmt.Errorf("acknowledge fixed AWS acquisition: %w", err)
 		}
 	}
 	return acquired, nil
 }
 
-func fixedAWSLeaseMatches(servers []LeaseView, leaseID string) []Server {
-	var matching []Server
+func fixedAWSLeaseMatches(servers []core.LeaseView, leaseID string) []core.Server {
+	var matching []core.Server
 	for _, server := range servers {
 		if server.Labels["lease"] == leaseID {
 			matching = append(matching, server)
@@ -378,34 +363,34 @@ func fixedAWSLeaseMatches(servers []LeaseView, leaseID string) []Server {
 	return matching
 }
 
-func validateFixedAWSServer(server Server, leaseID, slug, fingerprint, accountID string) error {
+func validateFixedAWSServer(server core.Server, leaseID, slug, fingerprint, accountID string) error {
 	if server.CloudID == "" || !isCrabboxAWSLease(server) || server.Labels["lease"] != leaseID ||
 		core.NormalizeLeaseSlug(server.Labels["slug"]) != slug ||
 		server.Labels["fixed_intent_sha256"] != fingerprint ||
 		server.Labels["aws_account_id"] != accountID {
-		return exit(4, "lease_id_conflict: AWS resource for lease %s does not match its fixed create intent", leaseID)
+		return core.Exit(4, "lease_id_conflict: AWS resource for lease %s does not match its fixed create intent", leaseID)
 	}
 	return nil
 }
 
-func validateFixedAWSAttemptServer(server Server, leaseID string, attempt core.AWSLaunchAttempt) error {
+func validateFixedAWSAttemptServer(server core.Server, leaseID string, attempt core.AWSLaunchAttempt) error {
 	if err := core.ValidateAWSFixedAttemptAttestation(server.Labels, attempt); err != nil {
-		return exit(4, "lease_id_conflict: AWS resource for lease %s does not match its durable launch attempt: %v", leaseID, err)
+		return core.Exit(4, "lease_id_conflict: AWS resource for lease %s does not match its durable launch attempt: %v", leaseID, err)
 	}
 	if strings.TrimSpace(server.ServerType.Name) != strings.TrimSpace(attempt.ServerType) ||
 		awsServerRegion(server) != strings.TrimSpace(attempt.Region) ||
 		strings.TrimSpace(server.Labels["provider_key"]) != core.ProviderKeyForLease(leaseID) ||
 		strings.TrimSpace(server.Labels["aws_key_pair_id"]) != strings.TrimSpace(attempt.KeyPairID) ||
 		strings.TrimSpace(server.HostID) != strings.TrimSpace(attempt.HostID) {
-		return exit(4, "lease_id_conflict: AWS resource for lease %s provider identity does not match its durable launch attempt", leaseID)
+		return core.Exit(4, "lease_id_conflict: AWS resource for lease %s provider identity does not match its durable launch attempt", leaseID)
 	}
 	if err := validateFixedAWSAttemptProviderMetadata(server, attempt); err != nil {
-		return exit(4, "lease_id_conflict: AWS resource for lease %s provider metadata does not match its durable launch attempt: %v", leaseID, err)
+		return core.Exit(4, "lease_id_conflict: AWS resource for lease %s provider metadata does not match its durable launch attempt: %v", leaseID, err)
 	}
 	return nil
 }
 
-func validateFixedAWSAttemptProviderMetadata(server Server, attempt core.AWSLaunchAttempt) error {
+func validateFixedAWSAttemptProviderMetadata(server core.Server, attempt core.AWSLaunchAttempt) error {
 	metadata := server.ProviderMetadata
 	require := func(key, expected string) error {
 		if strings.TrimSpace(expected) == "" {
@@ -458,13 +443,13 @@ func fixedAWSAttemptFromIntent(intent *core.FixedCreateIntent) (*core.AWSLaunchA
 	return &attempt, nil
 }
 
-func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
+func (b *awsLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
 	if strings.HasPrefix(req.ID, "i-") {
 		var lastErr error
 		for _, cfg := range awsRegionConfigs(b.Cfg) {
 			client, err := newAWSClient(ctx, cfg)
 			if err != nil {
-				return LeaseTarget{}, err
+				return core.LeaseTarget{}, err
 			}
 			server, err := client.GetServer(ctx, req.ID)
 			if err != nil {
@@ -472,67 +457,65 @@ func (b *awsLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (Leas
 				if isAWSResolveNotFound(err) {
 					continue
 				}
-				return LeaseTarget{}, err
+				return core.LeaseTarget{}, err
 			}
 			server = annotateAWSServerRegion(server, cfg.AWSRegion)
 			if !isCrabboxAWSLease(server) {
-				return LeaseTarget{}, exit(4, "lease/server not found: %s (instance exists but is not Crabbox-managed)", req.ID)
+				return core.LeaseTarget{}, core.Exit(4, "lease/server not found: %s (instance exists but is not Crabbox-managed)", req.ID)
 			}
-			leaseID := blank(server.Labels["lease"], req.ID)
-			target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-			useStoredTestboxKey(&target, leaseID)
-			return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+			leaseID := core.Blank(server.Labels["lease"], req.ID)
+			target := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+			return b.ResolvedLeaseTarget(server, target, leaseID, req.ReleaseOnly)
 		}
 		if lastErr != nil {
-			return LeaseTarget{}, lastErr
+			return core.LeaseTarget{}, lastErr
 		}
 	}
 	servers, err := b.listAcrossRegions(ctx)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	if req.ReleaseOnly && core.IsCanonicalLeaseID(req.ID) {
 		claim, exists, err := core.ReadLeaseClaimWithPresence(req.ID)
 		if err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 		if exists && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedAWSIntentReleased {
 			return b.resolveTerminalRelease(ctx, req, claim, servers)
 		}
 	}
-	if server, leaseID, err := findServerByAlias(servers, req.ID); err != nil {
-		return LeaseTarget{}, err
+	if server, leaseID, err := core.FindServerByAlias(servers, req.ID); err != nil {
+		return core.LeaseTarget{}, err
 	} else if leaseID != "" {
 		cfg := awsConfigForServer(b.Cfg, server)
-		target := sshTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
-		useStoredTestboxKey(&target, leaseID)
-		return LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+		target := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+		return b.ResolvedLeaseTarget(server, target, leaseID, req.ReleaseOnly)
 	}
-	return LeaseTarget{}, exit(4, "lease/server not found: %s", req.ID)
+	return core.LeaseTarget{}, core.Exit(4, "lease/server not found: %s", req.ID)
 }
 
-func (b *awsLeaseBackend) ResolveRunLeaseUnderClaim(ctx context.Context, req ResolveRequest, original core.LeaseClaim) (LeaseTarget, error) {
+func (b *awsLeaseBackend) ResolveRunLeaseUnderClaim(ctx context.Context, req core.ResolveRequest, original core.LeaseClaim) (core.LeaseTarget, error) {
 	// The held claim already identifies the instance and region. Reuse the
 	// direct resolver without inventory discovery or cross-region fallback.
 	bound := *b
-	bound.Cfg = awsConfigForServer(b.Cfg, Server{Labels: original.Labels})
+	bound.Cfg = awsConfigForServer(b.Cfg, core.Server{Labels: original.Labels})
 	bound.Cfg.Capacity.Regions = nil
 	req.ID = original.CloudID
 	lease, err := bound.Resolve(ctx, req)
 	if err != nil {
-		return LeaseTarget{}, err
+		return core.LeaseTarget{}, err
 	}
 	// Fixed leases retain their acquired/account fence. Ordinary run admission
 	// uses the endpoint policy, which preserves absent historical cleanup identity.
 	if original.Provider == core.FixedAWSClaimProvider || original.FixedCreateIntent != nil {
 		if err := bound.AuthorizeStatusTouchClaim(ctx, lease, original); err != nil {
-			return LeaseTarget{}, err
+			return core.LeaseTarget{}, err
 		}
 	}
 	return lease, nil
 }
 
-func isCrabboxAWSLease(server Server) bool {
+func isCrabboxAWSLease(server core.Server) bool {
 	labels := server.Labels
 	return labels != nil &&
 		labels["crabbox"] == "true" &&
@@ -542,7 +525,7 @@ func isCrabboxAWSLease(server Server) bool {
 		strings.TrimSpace(labels["slug"]) != ""
 }
 
-func (b *awsLeaseBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *awsLeaseBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	_ = req
 	return b.listAcrossRegions(ctx)
 }
@@ -551,7 +534,7 @@ func (b *awsLeaseBackend) CheckpointSourceAbsent(ctx context.Context, req core.C
 	cfg := b.Cfg
 	cfg.AWSRegion = req.Resource.Image.Region
 	if cfg.AWSRegion == "" || req.AccountID == "" {
-		return false, exit(2, "checkpoint source account or region is missing; retain operation")
+		return false, core.Exit(2, "checkpoint source account or region is missing; retain operation")
 	}
 	client, err := newAWSClient(ctx, cfg)
 	if err != nil {
@@ -562,7 +545,7 @@ func (b *awsLeaseBackend) CheckpointSourceAbsent(ctx context.Context, req core.C
 		return false, err
 	}
 	if account != req.AccountID {
-		return false, exit(2, "checkpoint source account changed")
+		return false, core.Exit(2, "checkpoint source account changed")
 	}
 	source, err := client.GetServer(ctx, req.Capture.SourceID)
 	if err != nil {
@@ -574,7 +557,7 @@ func (b *awsLeaseBackend) CheckpointSourceAbsent(ctx context.Context, req core.C
 		return false, err
 	}
 	if source.CloudID != req.Capture.SourceID {
-		return false, exit(2, "checkpoint source identity changed")
+		return false, core.Exit(2, "checkpoint source identity changed")
 	}
 	return source.Status == "terminated", nil
 }
@@ -604,20 +587,20 @@ func (b *awsLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (cor
 	return result, nil
 }
 
-func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req ReleaseLeaseRequest) error {
+func (b *awsLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
 	return err
 }
 
-func (b *awsLeaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+func (b *awsLeaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
 	var outcome core.ReleaseLeaseOutcome
 	err := b.releaseLease(ctx, req, &outcome)
 	return outcome, err
 }
 
-func (b *awsLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
+func (b *awsLeaseBackend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	if !isCrabboxAWSLease(req.Lease.Server) || req.Lease.LeaseID != req.Lease.Server.Labels["lease"] {
-		return exit(4, "refusing to release AWS instance %s without matching canonical Crabbox ownership tags", req.Lease.Server.DisplayID())
+		return core.Exit(4, "refusing to release AWS instance %s without matching canonical Crabbox ownership tags", req.Lease.Server.DisplayID())
 	}
 	claim, exists, err := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID)
 	if err != nil {
@@ -630,7 +613,7 @@ func (b *awsLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRequ
 		return b.releaseTerminalReceipt(ctx, req, outcome)
 	}
 	if strings.TrimSpace(req.Lease.Server.Labels["fixed_intent_sha256"]) != "" && (!exists || !fixedAWSLeaseKind.IsFixedClaim(claim)) {
-		return exit(4, "refusing to release fixed AWS lease %s without its durable create intent", req.Lease.LeaseID)
+		return core.Exit(4, "refusing to release fixed AWS lease %s without its durable create intent", req.Lease.LeaseID)
 	}
 	exact, err := requireExactAWSClaim(req.Lease.Server, req.Lease.LeaseID)
 	if err != nil {
@@ -672,33 +655,33 @@ func (b *awsLeaseBackend) releaseLease(ctx context.Context, req ReleaseLeaseRequ
 	return providerKeyErr
 }
 
-func (b *awsLeaseBackend) ReleaseLeaseMessage(lease LeaseTarget) string {
+func (b *awsLeaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("deleted lease=%s server=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
-func (b *awsLeaseBackend) RetainLeaseClaimAfterRelease(lease LeaseTarget) bool {
+func (b *awsLeaseBackend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool {
 	retained, err := b.retainLeaseClaimAfterRelease(lease, core.LeaseClaim{})
 	return retained || err != nil
 }
 
-func (b *awsLeaseBackend) RetainLeaseClaimAfterReleaseWithClaim(lease LeaseTarget, previous core.LeaseClaim) (bool, error) {
+func (b *awsLeaseBackend) RetainLeaseClaimAfterReleaseWithClaim(lease core.LeaseTarget, previous core.LeaseClaim) (bool, error) {
 	return b.retainLeaseClaimAfterRelease(lease, previous)
 }
 
-func (b *awsLeaseBackend) retainLeaseClaimAfterRelease(lease LeaseTarget, previous core.LeaseClaim) (bool, error) {
+func (b *awsLeaseBackend) retainLeaseClaimAfterRelease(lease core.LeaseTarget, previous core.LeaseClaim) (bool, error) {
 	serverFingerprint := strings.TrimSpace(lease.Server.Labels["fixed_intent_sha256"])
 	return fixedAWSLeaseKind.RetainClaimAfterRelease(lease.LeaseID, previous, serverFingerprint != "", func(claim core.LeaseClaim) error {
 		return validateAWSTerminalReceipt(claim, lease.LeaseID)
 	}, func(claim core.LeaseClaim) error {
 		if serverFingerprint != "" && serverFingerprint != claim.FixedCreateIntent.Fingerprint {
-			return exit(4, "lease_id_conflict: fixed AWS lease %s server tag differs from its terminal tombstone", lease.LeaseID)
+			return core.Exit(4, "lease_id_conflict: fixed AWS lease %s server tag differs from its terminal tombstone", lease.LeaseID)
 		}
 		return nil
 	})
 }
 
-func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
-	servers, err := b.List(ctx, ListRequest{Options: req.Options})
+func (b *awsLeaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
+	servers, err := b.List(ctx, core.ListRequest{Options: req.Options})
 	if err != nil {
 		return err
 	}
@@ -776,8 +759,8 @@ func (b *awsLeaseBackend) Cleanup(ctx context.Context, req CleanupRequest) error
 	return b.cleanupOrphanedAWSClaims(ctx, req.DryRun)
 }
 
-func (b *awsLeaseBackend) listAcrossRegions(ctx context.Context) ([]LeaseView, error) {
-	var all []LeaseView
+func (b *awsLeaseBackend) listAcrossRegions(ctx context.Context) ([]core.LeaseView, error) {
+	var all []core.LeaseView
 	for _, cfg := range awsRegionConfigs(b.Cfg) {
 		client, err := newAWSClient(ctx, cfg)
 		if err != nil {
@@ -794,15 +777,7 @@ func (b *awsLeaseBackend) listAcrossRegions(ctx context.Context) ([]LeaseView, e
 	return all, nil
 }
 
-func acquireAttemptsRetry(rt Runtime, keep bool, acquire func() (LeaseTarget, error)) (LeaseTarget, error) {
-	return shared.AcquireAttemptsRetry(rt, keep, acquire)
-}
-
-func exit(code int, format string, args ...any) core.ExitError {
-	return core.Exit(code, format, args...)
-}
-
-func chooseAWSRegion(ctx context.Context, cfg Config, stderr io.Writer) Config {
+func chooseAWSRegion(ctx context.Context, cfg core.Config, stderr io.Writer) core.Config {
 	if cfg.Provider != "aws" || cfg.Capacity.Market != "spot" || len(cfg.Capacity.Regions) < 2 {
 		return cfg
 	}
@@ -834,29 +809,16 @@ func chooseAWSRegion(ctx context.Context, cfg Config, stderr io.Writer) Config {
 	return cfg
 }
 
-var newAWSClient = func(ctx context.Context, cfg Config) (awsClient, error) {
+var newAWSClient = func(ctx context.Context, cfg core.Config) (awsClient, error) {
 	return core.NewAWSClient(ctx, cfg)
 }
 
-func newLeaseID() string { return core.NewLeaseID() }
-func allocateDirectLeaseSlug(id, requested string, servers []Server) (string, error) {
-	return core.AllocateDirectLeaseSlug(id, requested, servers)
-}
-func ensureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {
-	return core.EnsureTestboxKeyForConfig(cfg, leaseID)
-}
-func providerKeyForLease(leaseID string) string { return core.ProviderKeyForLease(leaseID) }
-
-var ensureAWSSSHCIDRs = func(ctx context.Context, cfg *Config) { core.EnsureAWSSSHCIDRs(ctx, cfg) }
-
-func sshTargetFromConfig(cfg Config, host string) SSHTarget {
-	return core.SSHTargetFromConfig(cfg, host)
-}
+var ensureAWSSSHCIDRs = core.EnsureAWSSSHCIDRs
 
 // bootstrapSSHHost returns the address used for the acquisition readiness probe.
 // Strict Tailscale mode cannot fall back to the public address, which can be
 // unreachable from same-account EC2 operators even after cloud-init succeeds.
-func bootstrapSSHHost(cfg Config, publicIP, leaseID, slug string) string {
+func bootstrapSSHHost(cfg core.Config, publicIP, leaseID, slug string) string {
 	if cfg.Network != core.NetworkTailscale || !cfg.Tailscale.Enabled {
 		return publicIP
 	}
@@ -870,22 +832,15 @@ func bootstrapSSHHost(cfg Config, publicIP, leaseID, slug string) string {
 	return hostname
 }
 
-func sshTargetForBootstrap(cfg Config, publicIP, leaseID, slug string) SSHTarget {
-	return sshTargetFromConfig(cfg, bootstrapSSHHost(cfg, publicIP, leaseID, slug))
+func sshTargetForBootstrap(cfg core.Config, publicIP, leaseID, slug string) core.SSHTarget {
+	return core.SSHTargetFromConfig(cfg, bootstrapSSHHost(cfg, publicIP, leaseID, slug))
 }
 
 var bootstrapAWSWindowsDesktop = core.BootstrapAWSWindowsDesktop
 
-func blank(value, fallback string) string { return core.Blank(value, fallback) }
-func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	shared.UseStoredTestboxKey(target, leaseID)
-}
-func findServerByAlias(servers []Server, id string) (Server, string, error) {
-	return core.FindServerByAlias(servers, id)
-}
-func deleteServer(ctx context.Context, cfg Config, server Server) error {
+func deleteServer(ctx context.Context, cfg core.Config, server core.Server) error {
 	if !isCrabboxAWSLease(server) {
-		return exit(4, "refusing to delete AWS instance %s without canonical Crabbox ownership tags", server.DisplayID())
+		return core.Exit(4, "refusing to delete AWS instance %s without canonical Crabbox ownership tags", server.DisplayID())
 	}
 	client, err := newAWSClient(ctx, cfg)
 	if err != nil {
@@ -894,7 +849,7 @@ func deleteServer(ctx context.Context, cfg Config, server Server) error {
 	return deleteAWSServerWithClient(ctx, client, server)
 }
 
-func deleteAWSServerWithClient(ctx context.Context, client awsClient, server Server) error {
+func deleteAWSServerWithClient(ctx context.Context, client awsClient, server core.Server) error {
 	if err := client.DeleteServer(ctx, server.CloudID); err != nil {
 		return err
 	}
@@ -906,20 +861,20 @@ func deleteAWSServerWithClient(ctx context.Context, client awsClient, server Ser
 	return nil
 }
 
-func requireExactAWSClaim(server Server, expectedLeaseID string) (core.LeaseClaim, error) {
+func requireExactAWSClaim(server core.Server, expectedLeaseID string) (core.LeaseClaim, error) {
 	claim, exists, err := core.ReadLeaseClaimWithPresence(expectedLeaseID)
 	if err != nil {
 		return core.LeaseClaim{}, err
 	}
 	if !exists {
-		return core.LeaseClaim{}, exit(2, "aws lease=%s has no exact local claim; refusing destructive operation", expectedLeaseID)
+		return core.LeaseClaim{}, core.Exit(2, "aws lease=%s has no exact local claim; refusing destructive operation", expectedLeaseID)
 	}
 	return claim, validateExactAWSClaim(server, expectedLeaseID, claim)
 }
 
-func validateExactAWSClaim(server Server, expectedLeaseID string, claim core.LeaseClaim) error {
+func validateExactAWSClaim(server core.Server, expectedLeaseID string, claim core.LeaseClaim) error {
 	if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == fixedAWSIntentReleased {
-		return exit(4, "lease_id_conflict: AWS lease %s is terminal; refusing another operation", expectedLeaseID)
+		return core.Exit(4, "lease_id_conflict: AWS lease %s is terminal; refusing another operation", expectedLeaseID)
 	}
 	if server.Provider != "aws" || !isCrabboxAWSLease(server) ||
 		claim.LeaseID != expectedLeaseID ||
@@ -931,19 +886,19 @@ func validateExactAWSClaim(server Server, expectedLeaseID string, claim core.Lea
 		server.Labels["lease"] != expectedLeaseID ||
 		awsServerRegion(server) == "" ||
 		strings.TrimSpace(claim.Labels["aws_region"]) != awsServerRegion(server) {
-		return exit(2, "refusing to operate on AWS instance %s from a missing or stale exact local claim", server.DisplayID())
+		return core.Exit(2, "refusing to operate on AWS instance %s from a missing or stale exact local claim", server.DisplayID())
 	}
 	expectedProviderKey := strings.TrimSpace(claim.Labels["provider_key"])
 	if expectedProviderKey == "" {
 		expectedProviderKey = core.ProviderKeyForLease(expectedLeaseID)
 	}
 	if strings.TrimSpace(core.ServerProviderKey(server)) != expectedProviderKey {
-		return exit(2, "refusing to operate on AWS instance %s whose provider key differs from its exact local claim", server.DisplayID())
+		return core.Exit(2, "refusing to operate on AWS instance %s whose provider key differs from its exact local claim", server.DisplayID())
 	}
 	return nil
 }
 
-func deleteClaimedAWSServerWithClient(ctx context.Context, client awsClient, server Server, claim core.LeaseClaim, cleanupKeyID string) error {
+func deleteClaimedAWSServerWithClient(ctx context.Context, client awsClient, server core.Server, claim core.LeaseClaim, cleanupKeyID string) error {
 	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
 		return err
 	}
@@ -955,7 +910,7 @@ func deleteClaimedAWSServerWithClient(ctx context.Context, client awsClient, ser
 	})
 }
 
-func resolveAWSCleanupKeyID(ctx context.Context, client awsClient, server Server, claim core.LeaseClaim) (string, error) {
+func resolveAWSCleanupKeyID(ctx context.Context, client awsClient, server core.Server, claim core.LeaseClaim) (string, error) {
 	keyName := core.ServerProviderKey(server)
 	expectedKeyID := strings.TrimSpace(claim.Labels["aws_key_pair_id"])
 	if !core.ValidCrabboxProviderKey(keyName) || expectedKeyID == "" {
@@ -983,7 +938,7 @@ func awsClaimMatchesCurrentAccount(ctx context.Context, client awsClient, claim 
 	return accountID == expectedAccountID, nil
 }
 
-func isAWSTerminalServer(server Server) bool {
+func isAWSTerminalServer(server core.Server) bool {
 	switch strings.ToLower(strings.TrimSpace(server.Status)) {
 	case "shutting-down", "terminated":
 		return true
@@ -1008,11 +963,11 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 		}
 		labels := claim.Labels
 		if labels == nil || labels["lease"] != claim.LeaseID || labels["provider"] != "aws" || strings.TrimSpace(labels["aws_region"]) == "" ||
-			!strings.HasPrefix(claim.CloudID, "i-") || !core.ValidCrabboxProviderKey(core.ServerProviderKey(Server{Labels: labels})) ||
+			!strings.HasPrefix(claim.CloudID, "i-") || !core.ValidCrabboxProviderKey(core.ServerProviderKey(core.Server{Labels: labels})) ||
 			strings.TrimSpace(labels["aws_key_pair_id"]) == "" || strings.TrimSpace(labels["aws_account_id"]) == "" {
 			continue
 		}
-		server := Server{CloudID: claim.CloudID, Provider: "aws", Name: claim.Slug, Labels: labels}
+		server := core.Server{CloudID: claim.CloudID, Provider: "aws", Name: claim.Slug, Labels: labels}
 		client, err := newAWSClient(ctx, awsConfigForServer(b.Cfg, server))
 		if err != nil {
 			return err
@@ -1025,7 +980,7 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 			fmt.Fprintf(b.RT.Stderr, "skip orphaned AWS claim lease=%s reason=current AWS account differs from exact local claim\n", claim.LeaseID)
 			continue
 		}
-		var terminal *Server
+		var terminal *core.Server
 		if live, err := client.GetServer(ctx, claim.CloudID); err == nil {
 			if !isAWSTerminalServer(live) {
 				continue
@@ -1054,10 +1009,10 @@ func (b *awsLeaseBackend) cleanupOrphanedAWSClaims(ctx context.Context, dryRun b
 	return nil
 }
 
-func finalizeAWSKeyRecovery(ctx context.Context, client awsClient, claim core.LeaseClaim, cleanupKeyID string, terminal *Server) error {
+func finalizeAWSKeyRecovery(ctx context.Context, client awsClient, claim core.LeaseClaim, cleanupKeyID string, terminal *core.Server) error {
 	if terminal != nil {
 		if !isAWSTerminalServer(*terminal) {
-			return exit(4, "AWS lease %s has no observed terminal instance", claim.LeaseID)
+			return core.Exit(4, "AWS lease %s has no observed terminal instance", claim.LeaseID)
 		}
 		if err := validateExactAWSClaim(*terminal, claim.LeaseID, claim); err != nil {
 			return err
@@ -1065,7 +1020,7 @@ func finalizeAWSKeyRecovery(ctx context.Context, client awsClient, claim core.Le
 	} else if fixedAWSLeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State == fixedAWSIntentPrepared {
 		// A new allocation can be temporarily invisible. Keep its cleanup authority
 		// until full release succeeds or the exact instance is observed terminal.
-		return exit(4, "AWS lease %s instance visibility is unresolved; retaining its claim and key; retry when the exact instance is visible, or arrange operator recovery if it remains absent", claim.LeaseID)
+		return core.Exit(4, "AWS lease %s instance visibility is unresolved; retaining its claim and key; retry when the exact instance is visible, or arrange operator recovery if it remains absent", claim.LeaseID)
 	}
 	if err := core.AuthorizeCheckpointRelease(claim, ""); err != nil {
 		return err
@@ -1082,7 +1037,7 @@ func isAWSClaimProvider(provider string) bool {
 	return provider == "aws" || provider == core.FixedAWSClaimProvider
 }
 
-func deleteAWSCleanupServerWithClient(ctx context.Context, client awsClient, server Server, cleanupKeyID string) error {
+func deleteAWSCleanupServerWithClient(ctx context.Context, client awsClient, server core.Server, cleanupKeyID string) error {
 	if err := client.DeleteServer(ctx, server.CloudID); err != nil {
 		return err
 	}
@@ -1094,7 +1049,7 @@ func deleteAWSCleanupServerWithClient(ctx context.Context, client awsClient, ser
 	return nil
 }
 
-func validateAWSCleanupLiveServer(expected, live Server) error {
+func validateAWSCleanupLiveServer(expected, live core.Server) error {
 	cloudID := strings.TrimSpace(expected.CloudID)
 	if cloudID == "" || strings.TrimSpace(live.CloudID) != cloudID {
 		return fmt.Errorf("live cloud id %q does not match cleanup candidate %q", live.CloudID, expected.CloudID)
@@ -1124,7 +1079,7 @@ func (e *awsProviderKeyCleanupError) Error() string {
 
 func (e *awsProviderKeyCleanupError) Unwrap() error { return e.err }
 
-func cleanupAWSCreatedResources(ctx context.Context, stderr io.Writer, cfg Config, cloudID, keyPairID string) error {
+func cleanupAWSCreatedResources(ctx context.Context, stderr io.Writer, cfg core.Config, cloudID, keyPairID string) error {
 	client, err := newAWSClient(ctx, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: create aws cleanup client for %s region=%s: %v\n", cloudID, cfg.AWSRegion, err)
@@ -1146,12 +1101,12 @@ func cleanupAWSCreatedResources(ctx context.Context, stderr io.Writer, cfg Confi
 	return nil
 }
 
-func awsRegionConfigs(cfg Config) []Config {
+func awsRegionConfigs(cfg core.Config) []core.Config {
 	regions := uniqueAWSRegions(append([]string{cfg.AWSRegion}, cfg.Capacity.Regions...))
 	if len(regions) == 0 {
 		regions = []string{cfg.AWSRegion}
 	}
-	configs := make([]Config, 0, len(regions))
+	configs := make([]core.Config, 0, len(regions))
 	for _, region := range regions {
 		next := cfg
 		next.AWSRegion = region
@@ -1177,14 +1132,14 @@ func uniqueAWSRegions(regions []string) []string {
 	return out
 }
 
-func awsServerRegion(server Server) string {
+func awsServerRegion(server core.Server) string {
 	if server.Labels == nil {
 		return ""
 	}
 	return strings.TrimSpace(server.Labels["aws_region"])
 }
 
-func annotateAWSServerRegion(server Server, region string) Server {
+func annotateAWSServerRegion(server core.Server, region string) core.Server {
 	region = strings.TrimSpace(region)
 	if region == "" {
 		return server
@@ -1202,7 +1157,7 @@ func annotateAWSServerRegion(server Server, region string) Server {
 	return server
 }
 
-func awsConfigForServer(cfg Config, server Server) Config {
+func awsConfigForServer(cfg core.Config, server core.Server) core.Config {
 	if region := awsServerRegion(server); region != "" {
 		cfg.AWSRegion = region
 	}

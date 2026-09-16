@@ -11,7 +11,7 @@ import (
 
 func TestCheckpointStoreCreateReadList(t *testing.T) {
 	store := checkpointStore{root: t.TempDir()}
-	first, err := store.Create(checkpointRecord{
+	first, _, err := store.Reserve(checkpointRecord{
 		ID:        "chk_first",
 		Name:      "first",
 		Kind:      checkpointKindArchive,
@@ -27,7 +27,7 @@ func TestCheckpointStoreCreateReadList(t *testing.T) {
 	if first.LastUsedAt != first.CreatedAt {
 		t.Fatalf("lastUsedAt=%q, want createdAt=%q", first.LastUsedAt, first.CreatedAt)
 	}
-	second, err := store.Create(checkpointRecord{
+	second, _, err := store.Reserve(checkpointRecord{
 		ID:        "chk_second",
 		Name:      "second",
 		Kind:      checkpointKindArchive,
@@ -72,7 +72,7 @@ func TestCheckpointStoreCreateReadList(t *testing.T) {
 
 func TestCheckpointStoreListRequiresPublishedMetadata(t *testing.T) {
 	store := checkpointStore{root: t.TempDir()}
-	published, err := store.Create(checkpointRecord{ID: "chk_published"})
+	published, _, err := store.Reserve(checkpointRecord{ID: "chk_published"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,23 +141,23 @@ func TestCheckpointStoreReserveWritesMetadata(t *testing.T) {
 
 func TestCheckpointStoreRejectsDuplicatesAndUnsafeIDs(t *testing.T) {
 	store := checkpointStore{root: t.TempDir()}
-	if _, err := store.Create(checkpointRecord{ID: "chk_ok", CreatedAt: "2026-05-09T10:00:00Z"}); err != nil {
+	if _, _, err := store.Reserve(checkpointRecord{ID: "chk_ok", CreatedAt: "2026-05-09T10:00:00Z"}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := store.Create(checkpointRecord{ID: "chk_ok", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
+	if _, _, err := store.Reserve(checkpointRecord{ID: "chk_ok", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
 		t.Fatal("duplicate checkpoint succeeded")
 	}
-	if _, err := store.Create(checkpointRecord{ID: "../bad", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
+	if _, _, err := store.Reserve(checkpointRecord{ID: "../bad", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
 		t.Fatal("unsafe checkpoint id succeeded")
 	}
-	if _, err := store.Create(checkpointRecord{ID: "chk_bad/slash", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
+	if _, _, err := store.Reserve(checkpointRecord{ID: "chk_bad/slash", CreatedAt: "2026-05-09T10:01:00Z"}); err == nil {
 		t.Fatal("slash checkpoint id succeeded")
 	}
 }
 
 func TestCheckpointStoreRejectsMetadataIDMismatch(t *testing.T) {
 	store := checkpointStore{root: t.TempDir()}
-	record, err := store.Create(checkpointRecord{
+	record, _, err := store.Reserve(checkpointRecord{
 		ID:        "chk_source",
 		Kind:      checkpointKindArchive,
 		CreatedAt: "2026-05-09T10:00:00Z",
@@ -203,7 +203,7 @@ func TestCheckpointStoreConcurrentSameIDAllowsOneWriter(t *testing.T) {
 	for i := 0; i < workers; i++ {
 		go func(i int) {
 			<-start
-			_, err := store.Create(checkpointRecord{
+			_, _, err := store.Reserve(checkpointRecord{
 				ID:        "chk_race",
 				Name:      fmt.Sprintf("worker-%d", i),
 				CreatedAt: "2026-05-09T10:00:00Z",
@@ -233,7 +233,7 @@ func TestCheckpointStoreConcurrentSameIDAllowsOneWriter(t *testing.T) {
 
 func TestCheckpointStoreFillsIDAndCreatedAt(t *testing.T) {
 	store := checkpointStore{root: t.TempDir()}
-	record, err := store.Create(checkpointRecord{Name: "generated"})
+	record, _, err := store.Reserve(checkpointRecord{Name: "generated"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

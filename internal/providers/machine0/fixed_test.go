@@ -63,7 +63,7 @@ func TestMachine0FixedCreateRejectsSubstitutedSizeAndPinsReplay(t *testing.T) {
 	}
 	_, err = b.Acquire(context.Background(), req)
 	assertMachine0Exit(t, err, 4, "durable create attempt")
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: req.RequestedLeaseID}}); err == nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: req.RequestedLeaseID}}); err == nil {
 		t.Fatal("release authorized a mismatched VM without an attested resource ID")
 	}
 	if len(api.created) != 1 || len(api.removed) != 0 {
@@ -199,7 +199,7 @@ func TestMachine0FixedAcquireReplayAdoptsExactMachine(t *testing.T) {
 				return detail, nil
 			}
 			var readinessKey string
-			b.waitSSH = func(_ context.Context, target *SSHTarget, _ time.Duration) error {
+			b.waitSSH = func(_ context.Context, target *core.SSHTarget, _ time.Duration) error {
 				readinessKey = target.Key
 				return nil
 			}
@@ -293,15 +293,15 @@ func TestMachine0FixedAcquireRejectsMachineAppearingAfterSlugBinding(t *testing.
 func TestMachine0FixedAcquireRejectsIntentDrift(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*backend, *AcquireRequest)
+		mutate func(*backend, *core.AcquireRequest)
 	}{
-		{name: "size", mutate: func(b *backend, _ *AcquireRequest) { b.cfg.Machine0.Size = "xlarge" }},
-		{name: "region", mutate: func(b *backend, _ *AcquireRequest) { b.cfg.Machine0.Region = "us-east" }},
-		{name: "image", mutate: func(b *backend, _ *AcquireRequest) { b.cfg.Machine0.Image = "nixos-loaded" }},
-		{name: "keep", mutate: func(_ *backend, req *AcquireRequest) { req.Keep = true }},
-		{name: "requested slug", mutate: func(_ *backend, req *AcquireRequest) { req.RequestedSlug = "other" }},
-		{name: "idle timeout", mutate: func(b *backend, _ *AcquireRequest) { b.cfg.IdleTimeout = 2 * time.Hour }},
-		{name: "cache volume", mutate: func(b *backend, _ *AcquireRequest) {
+		{name: "size", mutate: func(b *backend, _ *core.AcquireRequest) { b.cfg.Machine0.Size = "xlarge" }},
+		{name: "region", mutate: func(b *backend, _ *core.AcquireRequest) { b.cfg.Machine0.Region = "us-east" }},
+		{name: "image", mutate: func(b *backend, _ *core.AcquireRequest) { b.cfg.Machine0.Image = "nixos-loaded" }},
+		{name: "keep", mutate: func(_ *backend, req *core.AcquireRequest) { req.Keep = true }},
+		{name: "requested slug", mutate: func(_ *backend, req *core.AcquireRequest) { req.RequestedSlug = "other" }},
+		{name: "idle timeout", mutate: func(b *backend, _ *core.AcquireRequest) { b.cfg.IdleTimeout = 2 * time.Hour }},
+		{name: "cache volume", mutate: func(b *backend, _ *core.AcquireRequest) {
 			b.cfg.Cache.Volumes = []core.CacheVolumeConfig{{Name: "npm", Key: "npm-fixed", Path: "/var/cache/npm"}}
 		}},
 	}
@@ -328,7 +328,7 @@ func TestMachine0FixedReleasedTombstoneRefusesReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	previous := readFixedMachine0Claim(t, lease.LeaseID)
-	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil || !outcome.Terminal {
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || !outcome.Terminal {
 		t.Fatalf("fixed deletion outcome=%+v err=%v", outcome, err)
 	}
 	if len(api.removed) != 1 {
@@ -341,7 +341,7 @@ func TestMachine0FixedReleasedTombstoneRefusesReplay(t *testing.T) {
 		t.Fatalf("retained=%v err=%v", retained, err)
 	}
 	b.cfg.Machine0.ReleasePolicy = "suspend"
-	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: lease.LeaseID}}); err != nil || !outcome.Terminal || len(api.removed) != 1 {
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID}}); err != nil || !outcome.Terminal || len(api.removed) != 1 {
 		t.Fatalf("terminal receipt under suspend policy: outcome=%+v err=%v removed=%v", outcome, err, api.removed)
 	}
 	_, err = b.Acquire(context.Background(), req)
@@ -351,11 +351,11 @@ func TestMachine0FixedReleasedTombstoneRefusesReplay(t *testing.T) {
 func TestMachine0FixedClaimBindingMismatchesRefuse(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*LeaseClaim)
+		mutate func(*core.LeaseClaim)
 		want   string
 	}{
-		{name: "claim provider", mutate: func(claim *LeaseClaim) { claim.Provider = providerName }, want: "bound to provider=machine0"},
-		{name: "name scope", mutate: func(claim *LeaseClaim) {
+		{name: "claim provider", mutate: func(claim *core.LeaseClaim) { claim.Provider = providerName }, want: "bound to provider=machine0"},
+		{name: "name scope", mutate: func(claim *core.LeaseClaim) {
 			intent := *claim.FixedCreateIntent
 			intent.ProviderScope = machine0NameScope("crabbox-impostor")
 			claim.FixedCreateIntent = &intent
@@ -386,7 +386,7 @@ func TestMachine0FixedAdoptionRequiresDurableAttempt(t *testing.T) {
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, machines: []machine{}}
 	b := testBackendWithAPI(api)
-	req := AcquireRequest{RequestedLeaseID: fixedMachine0TestLeaseID, RequestedSlug: "fixed", Repo: core.Repo{Root: repo}}
+	req := core.AcquireRequest{RequestedLeaseID: fixedMachine0TestLeaseID, RequestedSlug: "fixed", Repo: core.Repo{Root: repo}}
 	seedFixedMachine0PreparedClaim(t, b, req, nil)
 	name := machine0MachineName(req.RequestedLeaseID, req.RequestedSlug)
 	item := fixedMachine0TestMachine(createMachineRequest{Name: name, Size: b.configForRun().Machine0.Size, Region: b.configForRun().Machine0.Region, Image: b.configForRun().Machine0.Image})
@@ -447,7 +447,7 @@ func TestMachine0FixedAdoptionValidatesPinnedMachineShape(t *testing.T) {
 			} else {
 				api.getFn = func(context.Context, string) (machine, error) { return machine{}, readErr }
 			}
-			b.waitSSH = func(context.Context, *SSHTarget, time.Duration) error {
+			b.waitSSH = func(context.Context, *core.SSHTarget, time.Duration) error {
 				t.Fatal("unattested detail reached SSH readiness")
 				return nil
 			}
@@ -570,7 +570,7 @@ func TestMachine0FixedCreateErrorReconcilesVisibleMachine(t *testing.T) {
 		api.machines = []machine{item}
 		return responseErr
 	}
-	req := AcquireRequest{RequestedLeaseID: fixedMachine0TestLeaseID, RequestedSlug: "fixed", Repo: core.Repo{Root: repo}}
+	req := core.AcquireRequest{RequestedLeaseID: fixedMachine0TestLeaseID, RequestedSlug: "fixed", Repo: core.Repo{Root: repo}}
 
 	lease, err := b.Acquire(context.Background(), req)
 	if err != nil {
@@ -609,7 +609,7 @@ func TestMachine0FixedSuspendReleaseKeepsLiveClaimAndReplayStartsMachine(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil || outcome.Terminal {
+	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || outcome.Terminal {
 		t.Fatalf("suspend outcome=%+v err=%v", outcome, err)
 	}
 	claim := readFixedMachine0Claim(t, lease.LeaseID)
@@ -662,22 +662,22 @@ func TestMachine0FixedAcquireClaimDoesNotPersistSecrets(t *testing.T) {
 func TestMachine0FixedUnboundClaimsFailClosed(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		mutate func(*LeaseClaim)
+		mutate func(*core.LeaseClaim)
 	}{
-		{"durable attempt", func(c *LeaseClaim) { c.FixedCreateIntent.Attempt = map[string]string{"machine0": "unresolved"} }},
-		{"failed attempts", func(c *LeaseClaim) { c.FixedCreateIntent.FailedAttempts = []string{"unresolved"} }},
-		{"missing intent", func(c *LeaseClaim) { c.FixedCreateIntent = nil }},
-		{"prepared invalid timestamp", func(c *LeaseClaim) { c.FixedCreateIntent.CreatedAt = "invalid" }},
-		{"prepared wrong scope", func(c *LeaseClaim) { c.ProviderScope = "machine0:name:other" }},
-		{"released wrong version", func(c *LeaseClaim) { c.FixedCreateIntent.Version++ }},
-		{"released wrong scope", func(c *LeaseClaim) {
+		{"durable attempt", func(c *core.LeaseClaim) { c.FixedCreateIntent.Attempt = map[string]string{"machine0": "unresolved"} }},
+		{"failed attempts", func(c *core.LeaseClaim) { c.FixedCreateIntent.FailedAttempts = []string{"unresolved"} }},
+		{"missing intent", func(c *core.LeaseClaim) { c.FixedCreateIntent = nil }},
+		{"prepared invalid timestamp", func(c *core.LeaseClaim) { c.FixedCreateIntent.CreatedAt = "invalid" }},
+		{"prepared wrong scope", func(c *core.LeaseClaim) { c.ProviderScope = "machine0:name:other" }},
+		{"released wrong version", func(c *core.LeaseClaim) { c.FixedCreateIntent.Version++ }},
+		{"released wrong scope", func(c *core.LeaseClaim) {
 			c.FixedCreateIntent.ProviderScope = "machine0:name:other"
 			c.ProviderScope = c.FixedCreateIntent.ProviderScope
 		}},
-		{"released wrong provider", func(c *LeaseClaim) { c.Provider = providerName; c.CloudID = "vm-other" }},
-		{"released resource", func(c *LeaseClaim) { c.CloudID = "vm-other" }},
-		{"released immutable identity", func(c *LeaseClaim) { c.CloudImmutableID = "vm-other" }},
-		{"released attempt", func(c *LeaseClaim) { c.FixedCreateIntent.Attempt = map[string]string{"machine0": "unresolved"} }},
+		{"released wrong provider", func(c *core.LeaseClaim) { c.Provider = providerName; c.CloudID = "vm-other" }},
+		{"released resource", func(c *core.LeaseClaim) { c.CloudID = "vm-other" }},
+		{"released immutable identity", func(c *core.LeaseClaim) { c.CloudImmutableID = "vm-other" }},
+		{"released attempt", func(c *core.LeaseClaim) { c.FixedCreateIntent.Attempt = map[string]string{"machine0": "unresolved"} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, api, req := fixedMachine0TestFixture(t)
@@ -702,21 +702,21 @@ func TestMachine0FixedUnboundClaimsFailClosed(t *testing.T) {
 				t.Fatal("unbound claim reached native lookup")
 				return machine{}, nil
 			}
-			for _, request := range []ResolveRequest{{StatusOnly: true}, {ReleaseOnly: true}, {StatusOnly: true, ReadyProbe: true}, {Reclaim: true}} {
+			for _, request := range []core.ResolveRequest{{StatusOnly: true}, {ReleaseOnly: true}, {StatusOnly: true, ReadyProbe: true}, {Reclaim: true}} {
 				request.ID = req.RequestedLeaseID
 				_, err := b.Resolve(context.Background(), request)
 				if err == nil || strings.Contains(err.Error(), "not found") {
 					t.Fatalf("invalid or unresolved claim became absence/success: %v", err)
 				}
 			}
-			err = b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: req.RequestedLeaseID}})
+			err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: req.RequestedLeaseID}})
 			if err == nil || strings.Contains(err.Error(), "not found") {
 				t.Fatalf("invalid or unresolved release became absence/success: %v", err)
 			}
 			if strings.HasPrefix(tc.name, "released") {
 				for _, policy := range []string{"destroy", "suspend"} {
 					b.cfg.Machine0.ReleasePolicy = policy
-					if _, err := b.RetainLeaseClaimAfterReleaseWithClaim(LeaseTarget{LeaseID: req.RequestedLeaseID}, before); err == nil {
+					if _, err := b.RetainLeaseClaimAfterReleaseWithClaim(core.LeaseTarget{LeaseID: req.RequestedLeaseID}, before); err == nil {
 						t.Fatal("invalid terminal passed shared retention")
 					}
 				}
@@ -737,17 +737,17 @@ func TestMachine0FixedCleanupSkipsReleasedTombstone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
 	b.api.(*fakeAPI).machines = []machine{}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	assertFixedMachine0Tombstone(t, readFixedMachine0Claim(t, req.RequestedLeaseID))
 }
 
-func fixedMachine0TestFixture(t *testing.T) (*backend, *fakeAPI, AcquireRequest) {
+func fixedMachine0TestFixture(t *testing.T) (*backend, *fakeAPI, core.AcquireRequest) {
 	t.Helper()
 	repo := setupState(t)
 	xlarge := testSize()
@@ -760,7 +760,7 @@ func fixedMachine0TestFixture(t *testing.T) (*backend, *fakeAPI, AcquireRequest)
 		api.machines = []machine{item}
 		return nil
 	}
-	req := AcquireRequest{RequestedLeaseID: fixedMachine0TestLeaseID, RequestedSlug: "fixed", Repo: core.Repo{Root: repo}}
+	req := core.AcquireRequest{RequestedLeaseID: fixedMachine0TestLeaseID, RequestedSlug: "fixed", Repo: core.Repo{Root: repo}}
 	return b, api, req
 }
 
@@ -775,7 +775,7 @@ func fixedMachine0TestMachine(req createMachineRequest) machine {
 	return item
 }
 
-func seedFixedMachine0PreparedClaim(t *testing.T, b *backend, req AcquireRequest, attempt *machine0CreateAttempt) {
+func seedFixedMachine0PreparedClaim(t *testing.T, b *backend, req core.AcquireRequest, attempt *machine0CreateAttempt) {
 	t.Helper()
 	cfg := b.configForRun()
 	fingerprint, err := core.FixedMachine0CreateIntentFingerprint(cfg, core.FixedMachine0CreateIntentRequest{RequestedSlug: core.NormalizeLeaseSlug(req.RequestedSlug), Keep: req.Keep})
@@ -809,7 +809,7 @@ func seedFixedMachine0PreparedClaim(t *testing.T, b *backend, req AcquireRequest
 	}
 }
 
-func readFixedMachine0Claim(t *testing.T, leaseID string) LeaseClaim {
+func readFixedMachine0Claim(t *testing.T, leaseID string) core.LeaseClaim {
 	t.Helper()
 	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil || !exists {
@@ -826,7 +826,7 @@ func assertMachine0Exit(t *testing.T, err error, code int, contains string) {
 	}
 }
 
-func assertFixedMachine0Tombstone(t *testing.T, claim LeaseClaim) {
+func assertFixedMachine0Tombstone(t *testing.T, claim core.LeaseClaim) {
 	t.Helper()
 	if claim.Provider != core.FixedMachine0ClaimProvider || claim.FixedCreateIntent == nil ||
 		claim.FixedCreateIntent.State != fixedMachine0IntentReleased || claim.ProviderScope != claim.FixedCreateIntent.ProviderScope || claim.Slug != claim.FixedCreateIntent.Slug ||

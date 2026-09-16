@@ -97,6 +97,14 @@ Provider flags:
 --freestyle-memory-gb
 ```
 
+When Freestyle is selected, decoded negative `vcpus` or `memoryGB` values,
+including explicit negative sizing flags, fail with exit 2 before fresh sandbox
+creation instead of silently omitting sizing. Existing lease reuse, inspection,
+and stop do not consume creation sizing. Zero still omits that sizing
+field, and positive values are passed through for service-side validation.
+This check does not change the existing YAML/environment decoding rules; it
+does not make every raw negative YAML or environment value an error.
+
 `--freestyle-workdir` / `freestyle.workdir` is interpreted as a relative
 directory below `/workspace`. Crabbox rejects absolute paths and `..` escapes
 before workspace preparation and sync.
@@ -156,6 +164,9 @@ shared sync owns extraction and workspace replacement. Failed publication is
 reported, and bounded cleanup preserves the primary error. An unknown remote
 write completing after cleanup can still leave its isolated attempt file; it
 cannot overwrite the archive consumed by the fallback.
+
+Freestyle does not report an instance type. Status leaves `serverType` empty,
+matching the inventory type; the VM name remains available in `crabbox list`.
 
 The raw VM ID, Crabbox VM name, and generated slug shown by `crabbox list` can
 identify a VM after local claim state is lost. Read-only status recovery still

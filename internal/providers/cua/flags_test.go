@@ -11,14 +11,14 @@ import (
 
 func TestProviderFlagsApplyAndValidate(t *testing.T) {
 	cfg := core.Config{Provider: providerName, Cua: core.CuaConfig{
-		Image:             defaultImage,
-		Kind:              defaultKind,
-		Workdir:           defaultWorkdir,
+		Image:             core.CuaConfigDefaultImage,
+		Kind:              core.CuaConfigDefaultKind,
+		Workdir:           core.CuaConfigDefaultWorkdir,
 		ExecTimeoutSecs:   600,
-		BridgeCommand:     defaultBridgeCommand,
-		SDKPackage:        defaultSDKPackage,
-		SDKImport:         defaultSDKImport,
-		SDKFallbackImport: defaultSDKFallbackImport,
+		BridgeCommand:     core.CuaConfigDefaultBridgeCommand,
+		SDKPackage:        core.CuaConfigDefaultSDKPackage,
+		SDKImport:         core.CuaConfigDefaultSDKImport,
+		SDKFallbackImport: core.CuaConfigDefaultSDKFallbackImport,
 	}}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := Provider{}.RegisterFlags(fs, cfg)
@@ -63,13 +63,13 @@ func TestProviderFlagsApplyAndValidate(t *testing.T) {
 
 func TestValidateProviderConfigRejectsUnsafeValues(t *testing.T) {
 	base := core.CuaConfig{
-		Image:             defaultImage,
-		Kind:              defaultKind,
-		Workdir:           defaultWorkdir,
-		BridgeCommand:     defaultBridgeCommand,
-		SDKPackage:        defaultSDKPackage,
-		SDKImport:         defaultSDKImport,
-		SDKFallbackImport: defaultSDKFallbackImport,
+		Image:             core.CuaConfigDefaultImage,
+		Kind:              core.CuaConfigDefaultKind,
+		Workdir:           core.CuaConfigDefaultWorkdir,
+		BridgeCommand:     core.CuaConfigDefaultBridgeCommand,
+		SDKPackage:        core.CuaConfigDefaultSDKPackage,
+		SDKImport:         core.CuaConfigDefaultSDKImport,
+		SDKFallbackImport: core.CuaConfigDefaultSDKFallbackImport,
 	}
 	tests := []struct {
 		name string
@@ -122,13 +122,13 @@ func TestValidateProviderConfigRejectsOverflowingExecTimeout(t *testing.T) {
 func TestValidateProviderConfigAllowsLoopbackAPIURL(t *testing.T) {
 	cfg := core.Config{Cua: core.CuaConfig{
 		APIURL:            "http://localhost:8080/v1/",
-		Image:             defaultImage,
-		Kind:              defaultKind,
-		Workdir:           defaultWorkdir,
-		BridgeCommand:     defaultBridgeCommand,
-		SDKPackage:        defaultSDKPackage,
-		SDKImport:         defaultSDKImport,
-		SDKFallbackImport: defaultSDKFallbackImport,
+		Image:             core.CuaConfigDefaultImage,
+		Kind:              core.CuaConfigDefaultKind,
+		Workdir:           core.CuaConfigDefaultWorkdir,
+		BridgeCommand:     core.CuaConfigDefaultBridgeCommand,
+		SDKPackage:        core.CuaConfigDefaultSDKPackage,
+		SDKImport:         core.CuaConfigDefaultSDKImport,
+		SDKFallbackImport: core.CuaConfigDefaultSDKFallbackImport,
 	}}
 	if err := validateProviderConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -156,13 +156,13 @@ func TestCUAAPIURLStripsSDKVersionPrefix(t *testing.T) {
 func TestProviderRejectsGenericClassAndTypeFlags(t *testing.T) {
 	for _, args := range [][]string{{"--class", "large"}, {"--type", "gpu"}} {
 		cfg := core.Config{Provider: providerName, Cua: core.CuaConfig{
-			Image:             defaultImage,
-			Kind:              defaultKind,
-			Workdir:           defaultWorkdir,
-			BridgeCommand:     defaultBridgeCommand,
-			SDKPackage:        defaultSDKPackage,
-			SDKImport:         defaultSDKImport,
-			SDKFallbackImport: defaultSDKFallbackImport,
+			Image:             core.CuaConfigDefaultImage,
+			Kind:              core.CuaConfigDefaultKind,
+			Workdir:           core.CuaConfigDefaultWorkdir,
+			BridgeCommand:     core.CuaConfigDefaultBridgeCommand,
+			SDKPackage:        core.CuaConfigDefaultSDKPackage,
+			SDKImport:         core.CuaConfigDefaultSDKImport,
+			SDKFallbackImport: core.CuaConfigDefaultSDKFallbackImport,
 		}}
 		fs := flag.NewFlagSet("test", flag.ContinueOnError)
 		fs.String("class", "", "")

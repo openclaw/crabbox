@@ -3,6 +3,7 @@ import { BlockList, isIP } from "node:net";
 import type { Writable } from "node:stream";
 import { finished } from "node:stream/promises";
 
+import type { AsyncMutex } from "../src/async-mutex";
 import { coordinatorRequestQueue, type CoordinatorRequestQueue } from "../src/coordinator-runtime";
 import { runtimeAdapterRelayBodyLimit } from "../src/runtime-adapter-relay";
 
@@ -10,7 +11,6 @@ export const unauthenticatedRequestBodyBytes = 1024 * 1024;
 export const authenticatedRequestBodyBytes = 16 * 1024 * 1024;
 export const runFinishRequestBodyBytes = 64 * 1024 * 1024;
 
-const noop = () => {};
 const untrustedForwardingWarningIntervalMs = 60_000;
 
 export class RequestBodyTooLargeError extends Error {}
@@ -36,28 +36,6 @@ export function nodeRequestAbortSignal(
       response.off("close", abortResponse);
     },
   };
-}
-
-export class AsyncMutex {
-  private tail: Promise<void> = Promise.resolve();
-
-  async run<T>(callback: () => Promise<T>): Promise<T> {
-    const previous = this.tail;
-    let release = noop;
-    this.tail = new Promise<void>((resolvePromise) => {
-      release = resolvePromise;
-    });
-    await previous;
-    try {
-      return await callback();
-    } finally {
-      release();
-    }
-  }
-
-  async drain(): Promise<void> {
-    await this.tail;
-  }
 }
 
 export class AsyncOperationTracker {

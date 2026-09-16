@@ -15,7 +15,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/openclaw/crabbox/internal/providers/shared"
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestRailwayProviderSpec(t *testing.T) {
@@ -26,31 +27,141 @@ func TestRailwayProviderSpec(t *testing.T) {
 	if spec.Kind != "service-control" {
 		t.Fatalf("spec.Kind = %q, want service-control", spec.Kind)
 	}
-	aliases := Provider{}.Aliases()
+	aliases := Provider{}.Spec().Aliases
 	if len(aliases) != 2 || aliases[0] != "rail" || aliases[1] != "railwayapp" {
 		t.Fatalf("aliases = %#v, want [rail railwayapp]", aliases)
 	}
 }
 
+func TestRailwayBindingFlagsRemainDeferredAndLocal(t *testing.T) {
+	for _, name := range []string{"railway", "rail", "railwayapp", " Railway "} {
+		cfg := core.Config{Provider: name, Railway: core.RailwayConfig{APIURL: "https://example.invalid/prior", ProjectID: "prior-app", EnvironmentID: "prior-team"}}
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		values := RegisterRailwayProviderFlags(fs, cfg)
+		fs.VisitAll(func(f *flag.Flag) {
+			if strings.Contains(f.Name, "token") {
+				t.Fatal("token flag registered")
+			}
+		})
+		cfg.Railway.ProjectID = "later-app"
+		before := cfg
+		if err := ApplyRailwayProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("unvisited flags changed config")
+		}
+		if err := fs.Parse([]string{"--railway-url=", "--railway-project=", "--railway-environment="}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyRailwayProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatalf("wrapper performed deferred client validation: %v", err)
+		}
+		before.Railway.APIURL, before.Railway.ProjectID, before.Railway.EnvironmentID = "", "", ""
+		core.RecordProviderFlagInputs(&before, true, "railway")
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("wrapper copies or global provenance side effects changed")
+		}
+		if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err != nil {
+			t.Fatalf("Configure performed client validation: %v", err)
+		}
+		if err := ApplyRailwayProviderFlags(&cfg, fs, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+		for _, args := range [][]string{{"--type=vm"}, {"--type=vm", "--class=large"}} {
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			want := "--type"
+			if len(args) == 2 {
+				want = "--class"
+			}
+			for _, v := range []any{nil, struct{}{}, values} {
+				before := cfg
+				err := ApplyRailwayProviderFlags(&cfg, fs, v)
+				if err == nil || err.Error() != want+" is not supported for provider=railway" {
+					t.Fatalf("alias %q guard=%v", name, err)
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("guard applied values or provenance")
+				}
+			}
+		}
+	}
+}
+
+func TestRailwayClientDefaultAndValidationOrder(t *testing.T) {
+	for _, rawToken := range []string{"", "  "} {
+		cfg := core.Config{Railway: core.RailwayConfig{APIToken: rawToken, APIURL: "relative"}}
+		if _, err := newRailwayClient(cfg, core.Runtime{}); err == nil || err.Error() != "provider=railway requires RAILWAY_API_TOKEN" {
+			t.Fatalf("token validation order=%v", err)
+		}
+	}
+	for _, tc := range []struct {
+		raw, want string
+		invalid   bool
+	}{
+		{raw: "", want: "https://backboard.railway.com/graphql/v2"},
+		{raw: "  ", invalid: true},
+		{raw: " https://example.invalid/api/ ", want: "https://example.invalid/api"},
+	} {
+		cfg := core.Config{Railway: core.RailwayConfig{APIToken: "inert-constructor-only", APIURL: tc.raw}}
+		before := cfg.Railway
+		api, err := newRailwayClient(cfg, core.Runtime{})
+		if tc.invalid {
+			if err == nil || err.Error() != `railway url "" is invalid` {
+				t.Fatalf("whitespace endpoint=%v", err)
+			}
+		} else {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if api.(*railwayClient).apiURL != tc.want {
+				t.Fatalf("endpoint=%q want=%q", api.(*railwayClient).apiURL, tc.want)
+			}
+		}
+		if cfg.Railway != before {
+			t.Fatal("constructor changed raw config")
+		}
+	}
+}
+
+func TestRailwayClaimScopeKeepsRawEndpointContract(t *testing.T) {
+	cfg := core.Config{Railway: core.RailwayConfig{ProjectID: " project ", EnvironmentID: " environment "}}
+	if got := (Provider{}).ClaimScope(cfg); got != "" {
+		t.Fatalf("empty endpoint must not gain client default scope: %q", got)
+	}
+	cfg.Railway.APIURL = " https://example.invalid/api/ "
+	if got := (Provider{}).ClaimScope(cfg); got != "endpoint:https://example.invalid/api|project:project|environment:environment" {
+		t.Fatalf("legacy scope=%q", got)
+	}
+	cfg.Railway.EnvironmentID = ""
+	if got := (Provider{}).ClaimScope(cfg); got != "" {
+		t.Fatalf("incomplete scope=%q", got)
+	}
+}
+
 func TestRailwayClientRequiresAPIToken(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
-	if _, err := newRailwayClient(cfg, Runtime{}); err == nil {
+	if _, err := newRailwayClient(cfg, core.Runtime{}); err == nil {
 		t.Fatal("newRailwayClient accepted empty API token")
 	}
 }
 
 func TestRailwayClientRejectsBareHTTPURL(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = "http://backboard.railway.com/graphql/v2"
-	if _, err := newRailwayClient(cfg, Runtime{}); err == nil {
+	if _, err := newRailwayClient(cfg, core.Runtime{}); err == nil {
 		t.Fatal("newRailwayClient accepted plaintext http URL")
 	}
 }
 
 func TestRailwayTokenFlagIsNotRegistered(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Railway.APIToken = "secret-token"
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	RegisterRailwayProviderFlags(fs, cfg)
@@ -98,10 +209,10 @@ func TestRailwayClientSendsBearerAndGraphQLBody(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = server.URL
-	client, err := newRailwayClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newRailwayClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,10 +259,7 @@ func TestRailwayClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) {
 	}))
 	defer trusted.Close()
 
-	api, err := newRailwayClient(
-		Config{Railway: RailwayConfig{APIToken: "test-token", APIURL: trusted.URL}},
-		Runtime{HTTP: trusted.Client()},
-	)
+	api, err := newRailwayClient(core.Config{Railway: core.RailwayConfig{APIToken: "test-token", APIURL: trusted.URL}}, core.Runtime{HTTP: trusted.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,10 +290,7 @@ func TestRailwayClientFollowsSameOriginRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 
-	api, err := newRailwayClient(
-		Config{Railway: RailwayConfig{APIToken: "test-token", APIURL: server.URL + "/graphql"}},
-		Runtime{HTTP: server.Client()},
-	)
+	api, err := newRailwayClient(core.Config{Railway: core.RailwayConfig{APIToken: "test-token", APIURL: server.URL + "/graphql"}}, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,10 +319,7 @@ func TestRailwayClientPreservesCallerRedirectPolicy(t *testing.T) {
 		callerChecks++
 		return callerErr
 	}
-	api, err := newRailwayClient(
-		Config{Railway: RailwayConfig{APIToken: "test-token", APIURL: server.URL}},
-		Runtime{HTTP: httpClient},
-	)
+	api, err := newRailwayClient(core.Config{Railway: core.RailwayConfig{APIToken: "test-token", APIURL: server.URL}}, core.Runtime{HTTP: httpClient})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,8 +345,8 @@ func TestSameRailwayOrigin(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			candidate, _ := url.Parse(test.raw)
-			if got := shared.SameOrigin(trusted, candidate); got != test.want {
-				t.Fatalf("shared.SameOrigin(%q)=%v, want %v", test.raw, got, test.want)
+			if got := core.SameHTTPOrigin(trusted, candidate); got != test.want {
+				t.Fatalf("core.SameHTTPOrigin(%q)=%v, want %v", test.raw, got, test.want)
 			}
 		})
 	}
@@ -256,10 +358,10 @@ func TestRailwayClientRequiresLatestDeploymentBeforeRedeploy(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = server.URL
-	client, err := newRailwayClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newRailwayClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,10 +382,10 @@ func TestRailwayClientRejectsEmptyRedeployResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = server.URL
-	client, err := newRailwayClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newRailwayClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,10 +401,10 @@ func TestRailwayClientSurfacesNon2xxAsAPIError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Railway.APIToken = "wrong-token"
 	cfg.Railway.APIURL = server.URL
-	client, err := newRailwayClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newRailwayClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,10 +430,10 @@ func TestRailwayClientSurfacesGraphQLErrorsAsAPIError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = server.URL
-	client, err := newRailwayClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newRailwayClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,10 +527,10 @@ func TestRailwayClientListServicesPaginatesProjectsAndServices(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = server.URL
-	client, err := newRailwayClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newRailwayClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,10 +587,10 @@ func TestRailwayClientDecodesLargeLogResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = server.URL
-	client, err := newRailwayClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newRailwayClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,8 +607,8 @@ func TestRailwayClientDecodesLargeLogResponse(t *testing.T) {
 }
 
 func TestRailwayRunRequiresNoSync(t *testing.T) {
-	backend := &railwayBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	_, err := backend.Run(context.Background(), RunRequest{ID: "svc-1", Command: []string{"pnpm", "test"}})
+	backend := &railwayBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	_, err := backend.Run(context.Background(), core.RunRequest{ID: "svc-1", Command: []string{"pnpm", "test"}})
 	if err == nil {
 		t.Fatal("Run accepted request without --no-sync")
 	}
@@ -516,8 +618,8 @@ func TestRailwayRunRequiresNoSync(t *testing.T) {
 }
 
 func TestRailwayRunRequiresServiceID(t *testing.T) {
-	backend := &railwayBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	_, err := backend.Run(context.Background(), RunRequest{NoSync: true})
+	backend := &railwayBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	_, err := backend.Run(context.Background(), core.RunRequest{NoSync: true})
 	if err == nil || !strings.Contains(err.Error(), "--id") {
 		t.Fatalf("err = %v, want --id rejection", err)
 	}
@@ -525,17 +627,17 @@ func TestRailwayRunRequiresServiceID(t *testing.T) {
 
 func TestRailwayRunRejectsArbitraryCommandBeforeDeploy(t *testing.T) {
 	api := &fakeRailwayAPI{}
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Railway.ProjectID = "proj-1"
 	cfg.Railway.EnvironmentID = "env-1"
-	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
-	result, err := backend.Run(context.Background(), RunRequest{NoSync: true, ID: "svc-1", Command: []string{"false"}})
-	var exitErr ExitError
+	backend := &railwayBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
+	result, err := backend.Run(context.Background(), core.RunRequest{NoSync: true, ID: "svc-1", Command: []string{"false"}})
+	var exitErr core.ExitError
 	wantMessage := "provider=railway cannot execute arbitrary run commands; Railway only runs the service's configured start command"
 	if !errors.As(err, &exitErr) || exitErr.Code != 2 || exitErr.Message != wantMessage {
 		t.Fatalf("err = %v, want unsupported command rejection", err)
 	}
-	if !reflect.DeepEqual(result, RunResult{}) {
+	if !reflect.DeepEqual(result, core.RunResult{}) {
 		t.Fatalf("result = %#v, want zero result", result)
 	}
 	if len(api.calls) != 0 {
@@ -546,12 +648,12 @@ func TestRailwayRunRejectsArbitraryCommandBeforeDeploy(t *testing.T) {
 func TestRailwayRunRequiresCommand(t *testing.T) {
 	api := &fakeRailwayAPI{}
 	backend := newRailwayBackendForTest(api)
-	result, err := backend.Run(context.Background(), RunRequest{NoSync: true, ID: "svc-1"})
-	var exitErr ExitError
+	result, err := backend.Run(context.Background(), core.RunRequest{NoSync: true, ID: "svc-1"})
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 2 || exitErr.Message != "missing command" {
 		t.Fatalf("err = %v, want missing command rejection", err)
 	}
-	if !reflect.DeepEqual(result, RunResult{}) {
+	if !reflect.DeepEqual(result, core.RunResult{}) {
 		t.Fatalf("result = %#v, want zero result", result)
 	}
 	if len(api.calls) != 0 {
@@ -562,27 +664,27 @@ func TestRailwayRunRequiresCommand(t *testing.T) {
 func TestRailwayRunRejectsLeaseFlags(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		req  RunRequest
+		req  core.RunRequest
 		want string
 	}{
-		{name: "keep first", req: RunRequest{Keep: true, Reclaim: true}, want: "provider=railway lifecycle is owned by Railway; --keep is not supported"},
-		{name: "reclaim", req: RunRequest{Reclaim: true}, want: "provider=railway lifecycle is owned by Railway; --reclaim is not supported"},
-		{name: "sync only", req: RunRequest{NoSync: true, SyncOnly: true}, want: "provider=railway does not support sync; --sync-only is rejected"},
-		{name: "checksum", req: RunRequest{NoSync: true, ChecksumSync: true}, want: "provider=railway does not support sync; --checksum is rejected"},
-		{name: "force large", req: RunRequest{NoSync: true, ForceSyncLarge: true}, want: "provider=railway does not support sync; --force-sync-large is rejected"},
-		{name: "full resync", req: RunRequest{NoSync: true, FullResync: true}, want: "provider=railway does not support sync; --full-resync is rejected"},
-		{name: "shell before ID", req: RunRequest{NoSync: true, ShellMode: true}, want: "provider=railway runs the Railway service start command; --shell is not supported"},
-		{name: "env summary without env", req: RunRequest{NoSync: true, EnvSummary: true}, want: "provider=railway cannot forward per-run environment variables"},
+		{name: "keep first", req: core.RunRequest{Keep: true, Reclaim: true}, want: "provider=railway lifecycle is owned by Railway; --keep is not supported"},
+		{name: "reclaim", req: core.RunRequest{Reclaim: true}, want: "provider=railway lifecycle is owned by Railway; --reclaim is not supported"},
+		{name: "sync only", req: core.RunRequest{NoSync: true, SyncOnly: true}, want: "provider=railway does not support sync; --sync-only is rejected"},
+		{name: "checksum", req: core.RunRequest{NoSync: true, ChecksumSync: true}, want: "provider=railway does not support sync; --checksum is rejected"},
+		{name: "force large", req: core.RunRequest{NoSync: true, ForceSyncLarge: true}, want: "provider=railway does not support sync; --force-sync-large is rejected"},
+		{name: "full resync", req: core.RunRequest{NoSync: true, FullResync: true}, want: "provider=railway does not support sync; --full-resync is rejected"},
+		{name: "shell before ID", req: core.RunRequest{NoSync: true, ShellMode: true}, want: "provider=railway runs the Railway service start command; --shell is not supported"},
+		{name: "env summary without env", req: core.RunRequest{NoSync: true, EnvSummary: true}, want: "provider=railway cannot forward per-run environment variables"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api := &fakeRailwayAPI{}
 			backend := newRailwayBackendForTest(api)
 			result, err := backend.Run(context.Background(), tc.req)
-			var public ExitError
+			var public core.ExitError
 			if !errors.As(err, &public) || public.Code != 2 || public.Message != tc.want {
 				t.Fatalf("err=%v, want exit2 %q", err, tc.want)
 			}
-			if !reflect.DeepEqual(result, RunResult{}) || len(api.calls) != 0 {
+			if !reflect.DeepEqual(result, core.RunResult{}) || len(api.calls) != 0 {
 				t.Fatalf("result=%#v API calls=%v", result, api.calls)
 			}
 		})
@@ -592,15 +694,15 @@ func TestRailwayRunRejectsLeaseFlags(t *testing.T) {
 func TestRailwayRunAllowsImplicitDefaultEnv(t *testing.T) {
 	api := &fakeRailwayAPI{}
 	backend := newRailwayBackendForTest(api)
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		ID: "svc-1", NoSync: true, Env: map[string]string{"CI": "true"}, Command: []string{"pnpm", "test"},
 	})
-	var public ExitError
+	var public core.ExitError
 	want := "provider=railway cannot execute arbitrary run commands; Railway only runs the service's configured start command"
 	if !errors.As(err, &public) || public.Code != 2 || public.Message != want {
 		t.Fatalf("err=%v, want command rejection after option admission", err)
 	}
-	if !reflect.DeepEqual(result, RunResult{}) || len(api.calls) != 0 {
+	if !reflect.DeepEqual(result, core.RunResult{}) || len(api.calls) != 0 {
 		t.Fatalf("result=%#v API calls=%v", result, api.calls)
 	}
 }
@@ -611,10 +713,10 @@ func TestRailwayClientRejectsFalseStopDeploymentResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = server.URL
-	client, err := newRailwayClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newRailwayClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -703,12 +805,12 @@ func (f *fakeRailwayAPI) GetService(_ context.Context, _ string) (railwayService
 }
 
 func newRailwayBackendForTest(api *fakeRailwayAPI) *railwayBackend {
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	cfg.Railway.ProjectID = "proj-1"
 	cfg.Railway.EnvironmentID = "env-1"
-	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard}
+	rt := core.Runtime{Stdout: io.Discard, Stderr: io.Discard}
 	return &railwayBackend{
 		spec:   Provider{}.Spec(),
 		cfg:    cfg,
@@ -773,16 +875,16 @@ func TestRailwayDeploymentStatusNormalizesOnUnmarshal(t *testing.T) {
 }
 
 func TestRailwayWarmupRejected(t *testing.T) {
-	backend := &railwayBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	err := backend.Warmup(context.Background(), WarmupRequest{})
+	backend := &railwayBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	err := backend.Warmup(context.Background(), core.WarmupRequest{})
 	if err == nil || !strings.Contains(err.Error(), "warmup") {
 		t.Fatalf("Warmup err = %v, want warmup rejection", err)
 	}
 }
 
 func TestRailwayStopRequiresID(t *testing.T) {
-	backend := &railwayBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	if err := backend.Stop(context.Background(), StopRequest{}); err == nil {
+	backend := &railwayBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	if err := backend.Stop(context.Background(), core.StopRequest{}); err == nil {
 		t.Fatal("Stop accepted empty service id")
 	}
 }
@@ -793,13 +895,13 @@ func TestRailwayStopRejectsUnclaimedServiceBeforeRemoteReads(t *testing.T) {
 		service:    railwayService{ID: "svc-1", Name: "api", ProjectID: "proj-1"},
 		deployment: railwayDeployment{ID: "dep-1", Status: "BUILDING"},
 	}
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	cfg.Railway.ProjectID = "proj-1"
 	cfg.Railway.EnvironmentID = "env-1"
-	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
-	err := backend.Stop(context.Background(), StopRequest{ID: "svc-1"})
+	backend := &railwayBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "svc-1"})
 	if err == nil || !strings.Contains(err.Error(), "not claimed") {
 		t.Fatalf("Stop err=%v, want unclaimed rejection", err)
 	}
@@ -815,7 +917,7 @@ func TestRailwayReclaimAndStopBindsExactDeployment(t *testing.T) {
 		deployment: railwayDeployment{ID: "dep-1", Status: "BUILDING"},
 	}
 	backend := newRailwayBackendForTest(api)
-	if err := backend.ReclaimAndStop(context.Background(), StopRequest{ID: "svc-1"}); err != nil {
+	if err := backend.ReclaimAndStop(context.Background(), core.StopRequest{ID: "svc-1"}); err != nil {
 		t.Fatalf("ReclaimAndStop err: %v", err)
 	}
 	if api.stopID != "dep-1" {
@@ -834,7 +936,7 @@ func TestRailwayFailedStopPreservesClaimForExactRetry(t *testing.T) {
 		stopErr:    errors.New("stop unavailable"),
 	}
 	backend := newRailwayBackendForTest(api)
-	err := backend.ReclaimAndStop(context.Background(), StopRequest{ID: "svc-1"})
+	err := backend.ReclaimAndStop(context.Background(), core.StopRequest{ID: "svc-1"})
 	if err == nil || !strings.Contains(err.Error(), "stop unavailable") {
 		t.Fatalf("ReclaimAndStop err=%v, want provider failure", err)
 	}
@@ -847,7 +949,7 @@ func TestRailwayFailedStopPreservesClaimForExactRetry(t *testing.T) {
 	}
 	api.stopErr = nil
 	api.stopID = ""
-	if err := backend.Stop(context.Background(), StopRequest{ID: "svc-1"}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: "svc-1"}); err != nil {
 		t.Fatalf("claimed retry err: %v", err)
 	}
 	if api.stopID != "dep-1" {
@@ -863,13 +965,13 @@ func TestRailwayStopRejectsChangedDeployment(t *testing.T) {
 		stopErr:    errors.New("retain claim"),
 	}
 	backend := newRailwayBackendForTest(api)
-	if err := backend.ReclaimAndStop(context.Background(), StopRequest{ID: "svc-1"}); err == nil {
+	if err := backend.ReclaimAndStop(context.Background(), core.StopRequest{ID: "svc-1"}); err == nil {
 		t.Fatal("ReclaimAndStop unexpectedly succeeded")
 	}
 	api.stopErr = nil
 	api.stopID = ""
 	api.deployment = railwayDeployment{ID: "dep-2", Status: "BUILDING"}
-	err := backend.Stop(context.Background(), StopRequest{ID: "svc-1"})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "svc-1"})
 	if err == nil || !strings.Contains(err.Error(), "latest deployment changed") {
 		t.Fatalf("Stop err=%v, want changed deployment rejection", err)
 	}
@@ -886,7 +988,7 @@ func TestRailwayStopRejectsClaimFromDifferentEnvironmentBeforeRemoteReads(t *tes
 		stopErr:    errors.New("retain claim"),
 	}
 	backend := newRailwayBackendForTest(api)
-	if err := backend.ReclaimAndStop(context.Background(), StopRequest{ID: "svc-1"}); err == nil {
+	if err := backend.ReclaimAndStop(context.Background(), core.StopRequest{ID: "svc-1"}); err == nil {
 		t.Fatal("ReclaimAndStop unexpectedly succeeded")
 	}
 	api.getServiceCalls = 0
@@ -894,7 +996,7 @@ func TestRailwayStopRejectsClaimFromDifferentEnvironmentBeforeRemoteReads(t *tes
 	api.stopErr = nil
 	api.stopID = ""
 	backend.cfg.Railway.EnvironmentID = "env-other"
-	err := backend.Stop(context.Background(), StopRequest{ID: "svc-1"})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "svc-1"})
 	if err == nil || !strings.Contains(err.Error(), "does not match the configured endpoint") {
 		t.Fatalf("Stop err=%v, want scope rejection", err)
 	}
@@ -910,7 +1012,7 @@ func TestRailwayReclaimRejectsServiceFromDifferentProject(t *testing.T) {
 		deployment: railwayDeployment{ID: "dep-1", Status: "BUILDING"},
 	}
 	backend := newRailwayBackendForTest(api)
-	err := backend.ReclaimAndStop(context.Background(), StopRequest{ID: "svc-1"})
+	err := backend.ReclaimAndStop(context.Background(), core.StopRequest{ID: "svc-1"})
 	if err == nil || !strings.Contains(err.Error(), "does not belong") {
 		t.Fatalf("ReclaimAndStop err=%v, want project rejection", err)
 	}
@@ -924,13 +1026,13 @@ func TestRailwayStatusReturnsView(t *testing.T) {
 		service:    railwayService{ID: "svc-1", Name: "api", ProjectID: "proj-1"},
 		deployment: railwayDeployment{ID: "dep-1", Status: "SUCCESS"},
 	}
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	cfg.Railway.ProjectID = "proj-1"
 	cfg.Railway.EnvironmentID = "env-1"
-	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
-	view, err := backend.Status(context.Background(), StatusRequest{ID: "svc-1"})
+	backend := &railwayBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "svc-1"})
 	if err != nil {
 		t.Fatalf("Status err: %v", err)
 	}
@@ -947,13 +1049,13 @@ func TestRailwayStatusMapsTerminalFailureState(t *testing.T) {
 		service:    railwayService{ID: "svc-1", Name: "api", ProjectID: "proj-1"},
 		deployment: railwayDeployment{ID: "dep-1", Status: railwayStatusCrashed},
 	}
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	cfg.Railway.ProjectID = "proj-1"
 	cfg.Railway.EnvironmentID = "env-1"
-	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
-	view, err := backend.Status(context.Background(), StatusRequest{ID: "svc-1"})
+	backend := &railwayBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "svc-1"})
 	if err != nil {
 		t.Fatalf("Status err: %v", err)
 	}
@@ -970,11 +1072,11 @@ func TestRailwayListEnumeratesServices(t *testing.T) {
 		{ID: "svc-1", Name: "api", ProjectID: "proj-1"},
 		{ID: "svc-2", Name: "worker", ProjectID: "proj-1"},
 	}}
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
-	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
-	servers, err := backend.List(context.Background(), ListRequest{})
+	backend := &railwayBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
+	servers, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("List err: %v", err)
 	}
@@ -987,23 +1089,23 @@ func TestRailwayListEnumeratesServices(t *testing.T) {
 }
 
 func TestRailwayDoctorRequiresProjectEnvironment(t *testing.T) {
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
-	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: &fakeRailwayAPI{}}
-	_, err := backend.Doctor(context.Background(), DoctorRequest{})
+	backend := &railwayBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: &fakeRailwayAPI{}}
+	_, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil || !strings.Contains(err.Error(), "--railway-project") {
 		t.Fatalf("err = %v, want missing project rejection", err)
 	}
 }
 
 func TestRailwayDoctorRequiresToken(t *testing.T) {
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	cfg.Railway.ProjectID = "proj-1"
 	cfg.Railway.EnvironmentID = "env-1"
-	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	_, err := backend.Doctor(context.Background(), DoctorRequest{})
+	backend := &railwayBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	_, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err == nil || !strings.Contains(err.Error(), "RAILWAY_API_TOKEN") {
 		t.Fatalf("err = %v, want missing token rejection", err)
 	}
@@ -1013,13 +1115,13 @@ func TestRailwayDoctorListsServices(t *testing.T) {
 	api := &fakeRailwayAPI{services: []railwayService{
 		{ID: "svc-1", Name: "api", ProjectID: "proj-1"},
 	}}
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Railway.APIToken = "test-token"
 	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	cfg.Railway.ProjectID = "proj-1"
 	cfg.Railway.EnvironmentID = "env-1"
-	backend := &railwayBackend{cfg: cfg, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	backend := &railwayBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: api}
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatalf("Doctor err: %v", err)
 	}
@@ -1029,7 +1131,7 @@ func TestRailwayDoctorListsServices(t *testing.T) {
 }
 
 func TestRailwayFlagsApply(t *testing.T) {
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	cfg.Railway.APIURL = "https://backboard.railway.com/graphql/v2"
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := RegisterRailwayProviderFlags(fs, cfg)
@@ -1050,7 +1152,7 @@ func TestRailwayFlagsApply(t *testing.T) {
 func TestRailwayFlagsRejectUnsupportedSizingForAliases(t *testing.T) {
 	for _, provider := range []string{providerName, "rail", "railwayapp"} {
 		t.Run(provider, func(t *testing.T) {
-			cfg := Config{Provider: provider}
+			cfg := core.Config{Provider: provider}
 			fs := flag.NewFlagSet("test", flag.ContinueOnError)
 			fs.String("class", "", "class")
 			values := RegisterRailwayProviderFlags(fs, cfg)
@@ -1060,6 +1162,35 @@ func TestRailwayFlagsRejectUnsupportedSizingForAliases(t *testing.T) {
 			err := ApplyRailwayProviderFlags(&cfg, fs, values)
 			if err == nil || !strings.Contains(err.Error(), "--class is not supported") {
 				t.Fatalf("err = %v, want class rejection", err)
+			}
+		})
+	}
+}
+
+func TestCompactJSONGraphQLEnvelope(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		vars map[string]any
+		want string
+	}{
+		{"nil variables", nil, `{"query":"\u003c\u0026\u003e"}`},
+		{"variables", map[string]any{"name": "<&>"}, `{"query":"\u003c\u0026\u003e","variables":{"name":"\u003c\u0026\u003e"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			headers := http.Header{}
+			headers.Set("Authorization", "Bearer synthetic-token")
+			headers.Set("Content-Type", "application/json")
+			headers.Set("Accept", "application/json")
+			c := &railwayClient{apiURL: "https://api.example.test/graphql", apiToken: "synthetic-token", httpClient: &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				testutil.RequireRequestEnvelope(t, req, ctx, http.MethodPost, "https://api.example.test/graphql", tc.want, headers)
+				return nil, errors.New("synthetic-transport-stop")
+			})}}
+			err := c.do(ctx, "<&>", tc.vars, nil)
+			if err == nil || !strings.Contains(err.Error(), "synthetic-transport-stop") || calls != 1 {
+				t.Fatalf("error=%v calls=%d", err, calls)
 			}
 		})
 	}

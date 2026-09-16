@@ -10,11 +10,10 @@ import (
 
 type purposeRoutingTestProvider struct{ testAWSProvider }
 
-func (purposeRoutingTestProvider) Name() string      { return "purpose-routing-test" }
-func (purposeRoutingTestProvider) Aliases() []string { return []string{"purpose-routing-alias"} }
 func (p purposeRoutingTestProvider) Spec() ProviderSpec {
 	spec := p.testAWSProvider.Spec()
-	spec.Name = p.Name()
+	spec.Name = "purpose-routing-test"
+	spec.Aliases = []string{"purpose-routing-alias"}
 	spec.Family = "routing-test"
 	return spec
 }

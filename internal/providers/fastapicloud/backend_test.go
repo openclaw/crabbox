@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -27,26 +28,121 @@ func TestFastAPICloudProviderSpec(t *testing.T) {
 	if spec.Kind != "service-control" {
 		t.Fatalf("spec.Kind = %q, want service-control", spec.Kind)
 	}
-	aliases := Provider{}.Aliases()
+	aliases := Provider{}.Spec().Aliases
 	if len(aliases) != 2 || aliases[0] != "fastapicloud" || aliases[1] != "fastapi" {
 		t.Fatalf("aliases = %#v, want [fastapicloud fastapi]", aliases)
 	}
 }
 
+func TestFastAPICloudBindingFlagsRemainDeferredAndLocal(t *testing.T) {
+	for _, name := range []string{"fastapi-cloud", "fastapicloud", "fastapi", " FastAPI "} {
+		cfg := core.Config{Provider: name, FastAPICloud: core.FastAPICloudConfig{APIURL: "https://example.invalid/prior", AppID: "prior-app", TeamID: "prior-team"}}
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		values := RegisterFastAPICloudProviderFlags(fs, cfg)
+		fs.VisitAll(func(f *flag.Flag) {
+			if strings.Contains(f.Name, "token") {
+				t.Fatal("token flag registered")
+			}
+		})
+		cfg.FastAPICloud.AppID = "later-app"
+		before := cfg
+		if err := ApplyFastAPICloudProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("unvisited flags changed config")
+		}
+		if err := fs.Parse([]string{"--fastapi-cloud-url=", "--fastapi-cloud-app-id=", "--fastapi-cloud-team-id="}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyFastAPICloudProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatalf("wrapper performed deferred client validation: %v", err)
+		}
+		before.FastAPICloud.APIURL, before.FastAPICloud.AppID, before.FastAPICloud.TeamID = "", "", ""
+		core.RecordProviderFlagInputs(&before, true, "fastapi-cloud")
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("wrapper copies or global provenance side effects changed")
+		}
+		if _, err := (Provider{}).Configure(cfg, core.Runtime{}); err != nil {
+			t.Fatalf("Configure performed client validation: %v", err)
+		}
+		if err := ApplyFastAPICloudProviderFlags(&cfg, fs, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+		for _, args := range [][]string{{"--type=vm"}, {"--type=vm", "--class=large"}} {
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			want := "--type"
+			if len(args) == 2 {
+				want = "--class"
+			}
+			for _, v := range []any{nil, struct{}{}, values} {
+				before := cfg
+				err := ApplyFastAPICloudProviderFlags(&cfg, fs, v)
+				if err == nil || err.Error() != want+" is not supported for provider=fastapi-cloud" {
+					t.Fatalf("alias %q guard=%v", name, err)
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("guard applied values or provenance")
+				}
+			}
+		}
+	}
+}
+
+func TestFastAPICloudClientDefaultAndValidationOrder(t *testing.T) {
+	for _, rawToken := range []string{"", "  "} {
+		cfg := core.Config{FastAPICloud: core.FastAPICloudConfig{Token: rawToken, APIURL: "relative"}}
+		if _, err := newFastAPICloudClient(cfg, core.Runtime{}); err == nil || err.Error() != "provider=fastapi-cloud requires FASTAPI_CLOUD_TOKEN" {
+			t.Fatalf("token validation order=%v", err)
+		}
+	}
+	for _, tc := range []struct {
+		raw, want string
+		invalid   bool
+	}{
+		{raw: "", want: "https://api.fastapicloud.com/api/v1"},
+		{raw: "  ", invalid: true},
+		{raw: " https://example.invalid/api/ ", want: "https://example.invalid/api"},
+	} {
+		cfg := core.Config{FastAPICloud: core.FastAPICloudConfig{Token: "inert-constructor-only", APIURL: tc.raw}}
+		before := cfg.FastAPICloud
+		api, err := newFastAPICloudClient(cfg, core.Runtime{})
+		if tc.invalid {
+			if err == nil || err.Error() != "provider=fastapi-cloud API URL must be an absolute HTTPS URL" {
+				t.Fatalf("whitespace endpoint=%v", err)
+			}
+		} else {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if api.(*fastAPICloudClient).apiURL != tc.want {
+				t.Fatalf("endpoint=%q want=%q", api.(*fastAPICloudClient).apiURL, tc.want)
+			}
+		}
+		if cfg.FastAPICloud != before {
+			t.Fatal("constructor changed raw config")
+		}
+	}
+}
+
 func TestFastAPICloudClientRequiresToken(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.APIURL = "https://api.fastapicloud.com/api/v1"
-	if _, err := newFastAPICloudClient(cfg, Runtime{}); err == nil {
+	if _, err := newFastAPICloudClient(cfg, core.Runtime{}); err == nil {
 		t.Fatal("newFastAPICloudClient accepted empty token")
 	}
 }
 
 func TestFastAPICloudFallbackHTTPClientIsBounded(t *testing.T) {
-	cfg := Config{FastAPICloud: FastAPICloudConfig{
+	cfg := core.Config{FastAPICloud: core.FastAPICloudConfig{
 		Token:  "test-token",
 		APIURL: "http://127.0.0.1:8000/api/v1",
 	}}
-	api, err := newFastAPICloudClient(cfg, Runtime{})
+	api, err := newFastAPICloudClient(cfg, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,10 +176,10 @@ func TestFastAPICloudFallbackHTTPClientTimesOutStalledControlResponse(t *testing
 }
 
 func TestFastAPICloudClientRejectsBareHTTPURL(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.Token = "test-token"
 	cfg.FastAPICloud.APIURL = "http://api.fastapicloud.com/api/v1"
-	if _, err := newFastAPICloudClient(cfg, Runtime{}); err == nil {
+	if _, err := newFastAPICloudClient(cfg, core.Runtime{}); err == nil {
 		t.Fatal("newFastAPICloudClient accepted plaintext http URL")
 	}
 }
@@ -100,8 +196,8 @@ func TestFastAPICloudClientRejectsUnsafeAPIURLComponents(t *testing.T) {
 		{name: "fragment", apiURL: "https://api.fastapicloud.com/api/v1#fragment-secret", secret: "fragment-secret"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			cfg := Config{FastAPICloud: FastAPICloudConfig{Token: "test-token", APIURL: test.apiURL}}
-			_, err := newFastAPICloudClient(cfg, Runtime{})
+			cfg := core.Config{FastAPICloud: core.FastAPICloudConfig{Token: "test-token", APIURL: test.apiURL}}
+			_, err := newFastAPICloudClient(cfg, core.Runtime{})
 			if err == nil || !strings.Contains(err.Error(), "must not contain userinfo, query parameters, or a fragment") {
 				t.Fatalf("newFastAPICloudClient error = %v, want unsafe URL rejection", err)
 			}
@@ -113,7 +209,7 @@ func TestFastAPICloudClientRejectsUnsafeAPIURLComponents(t *testing.T) {
 }
 
 func TestFastAPICloudTokenFlagIsNotRegistered(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.Token = "secret-token"
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	RegisterFastAPICloudProviderFlags(fs, cfg)
@@ -181,10 +277,10 @@ func TestFastAPICloudClientSendsBearerAndUsesRESTPaths(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.Token = "test-token"
 	cfg.FastAPICloud.APIURL = server.URL + "/api/v1"
-	client, err := newFastAPICloudClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newFastAPICloudClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,10 +316,7 @@ func TestFastAPICloudClientRefusesCrossOriginRedirectBeforeReplay(t *testing.T) 
 	}))
 	defer trusted.Close()
 
-	api, err := newFastAPICloudClient(
-		Config{FastAPICloud: FastAPICloudConfig{Token: "test-token", APIURL: trusted.URL}},
-		Runtime{HTTP: trusted.Client()},
-	)
+	api, err := newFastAPICloudClient(core.Config{FastAPICloud: core.FastAPICloudConfig{Token: "test-token", APIURL: trusted.URL}}, core.Runtime{HTTP: trusted.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,10 +350,7 @@ func TestFastAPICloudClientFollowsSameOriginRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 
-	api, err := newFastAPICloudClient(
-		Config{FastAPICloud: FastAPICloudConfig{Token: "test-token", APIURL: server.URL + "/api/v1"}},
-		Runtime{HTTP: server.Client()},
-	)
+	api, err := newFastAPICloudClient(core.Config{FastAPICloud: core.FastAPICloudConfig{Token: "test-token", APIURL: server.URL + "/api/v1"}}, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,10 +375,7 @@ func TestFastAPICloudClientPreservesCallerRedirectPolicy(t *testing.T) {
 		callerChecks++
 		return callerErr
 	}
-	api, err := newFastAPICloudClient(
-		Config{FastAPICloud: FastAPICloudConfig{Token: "test-token", APIURL: server.URL}},
-		Runtime{HTTP: httpClient},
-	)
+	api, err := newFastAPICloudClient(core.Config{FastAPICloud: core.FastAPICloudConfig{Token: "test-token", APIURL: server.URL}}, core.Runtime{HTTP: httpClient})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,10 +392,10 @@ func TestFastAPICloudClientSurfacesNon2xxAsAPIError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.Token = "wrong-token"
 	cfg.FastAPICloud.APIURL = server.URL
-	client, err := newFastAPICloudClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newFastAPICloudClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,26 +418,26 @@ func TestFastAPICloudClientSurfacesNon2xxAsAPIError(t *testing.T) {
 func TestFastAPICloudRunRejectsBeforeAPI(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		req  RunRequest
+		req  core.RunRequest
 		want string
 	}{
-		{name: "keep first", req: RunRequest{Keep: true, Reclaim: true}, want: "provider=fastapi-cloud lifecycle is owned by FastAPI Cloud; --keep is not supported"},
-		{name: "reclaim", req: RunRequest{Reclaim: true}, want: "provider=fastapi-cloud lifecycle is owned by FastAPI Cloud; --reclaim is not supported"},
-		{name: "no sync", req: RunRequest{}, want: "provider=fastapi-cloud does not support workspace sync; pass --no-sync"},
-		{name: "shell", req: RunRequest{NoSync: true, ShellMode: true}, want: "provider=fastapi-cloud cannot open an interactive shell; --shell is not supported"},
-		{name: "env summary without env", req: RunRequest{NoSync: true, EnvSummary: true}, want: "provider=fastapi-cloud cannot forward per-run environment variables"},
-		{name: "missing command", req: RunRequest{NoSync: true}, want: "missing command"},
-		{name: "command", req: RunRequest{NoSync: true, Command: []string{"pytest"}}, want: "provider=fastapi-cloud cannot execute arbitrary run commands; deploy with fastapi deploy or FastAPI Cloud CI"},
-		{name: "implicit env", req: RunRequest{NoSync: true, Env: map[string]string{"CI": "true"}, Command: []string{"pytest"}}, want: "provider=fastapi-cloud cannot execute arbitrary run commands; deploy with fastapi deploy or FastAPI Cloud CI"},
+		{name: "keep first", req: core.RunRequest{Keep: true, Reclaim: true}, want: "provider=fastapi-cloud lifecycle is owned by FastAPI Cloud; --keep is not supported"},
+		{name: "reclaim", req: core.RunRequest{Reclaim: true}, want: "provider=fastapi-cloud lifecycle is owned by FastAPI Cloud; --reclaim is not supported"},
+		{name: "no sync", req: core.RunRequest{}, want: "provider=fastapi-cloud does not support workspace sync; pass --no-sync"},
+		{name: "shell", req: core.RunRequest{NoSync: true, ShellMode: true}, want: "provider=fastapi-cloud cannot open an interactive shell; --shell is not supported"},
+		{name: "env summary without env", req: core.RunRequest{NoSync: true, EnvSummary: true}, want: "provider=fastapi-cloud cannot forward per-run environment variables"},
+		{name: "missing command", req: core.RunRequest{NoSync: true}, want: "missing command"},
+		{name: "command", req: core.RunRequest{NoSync: true, Command: []string{"pytest"}}, want: "provider=fastapi-cloud cannot execute arbitrary run commands; deploy with fastapi deploy or FastAPI Cloud CI"},
+		{name: "implicit env", req: core.RunRequest{NoSync: true, Env: map[string]string{"CI": "true"}, Command: []string{"pytest"}}, want: "provider=fastapi-cloud cannot execute arbitrary run commands; deploy with fastapi deploy or FastAPI Cloud CI"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			backend := &fastAPICloudBackend{spec: Provider{}.Spec(), client: panicFastAPICloudAPI{}}
 			result, err := backend.Run(context.Background(), tc.req)
-			var public ExitError
+			var public core.ExitError
 			if !errors.As(err, &public) || public.Code != 2 || public.Message != tc.want {
 				t.Fatalf("err=%v, want exit2 %q", err, tc.want)
 			}
-			if !reflect.DeepEqual(result, RunResult{}) {
+			if !reflect.DeepEqual(result, core.RunResult{}) {
 				t.Fatalf("result=%#v, want zero result", result)
 			}
 		})
@@ -360,10 +447,10 @@ func TestFastAPICloudRunRejectsBeforeAPI(t *testing.T) {
 func TestFastAPICloudListRequiresAppOrTeam(t *testing.T) {
 	backend := &fastAPICloudBackend{
 		spec:   Provider{}.Spec(),
-		cfg:    Config{},
+		cfg:    core.Config{},
 		client: &fakeFastAPICloudAPI{},
 	}
-	_, err := backend.List(context.Background(), ListRequest{})
+	_, err := backend.List(context.Background(), core.ListRequest{})
 	if err == nil || !strings.Contains(err.Error(), "requires --fastapi-cloud-team-id or --fastapi-cloud-app-id") {
 		t.Fatalf("err = %v, want app/team requirement", err)
 	}
@@ -373,10 +460,10 @@ func TestFastAPICloudListWithAppID(t *testing.T) {
 	fake := &fakeFastAPICloudAPI{
 		app: fastAPICloudApp{ID: "app-1", TeamID: "team-1", Slug: "my-app", Name: "My App", URL: "https://my-app.fastapicloud.app"},
 	}
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.AppID = "app-1"
 	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: cfg, client: fake}
-	views, err := backend.List(context.Background(), ListRequest{})
+	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,10 +481,10 @@ func TestFastAPICloudStatusMapsDeploymentReadiness(t *testing.T) {
 		deployment:    fastAPICloudDeployment{ID: "dep-1", AppID: "app-1", Slug: "my-app-abc", Status: fastAPICloudStatusSuccess, URL: "https://deployment.example"},
 		hasDeployment: true,
 	}
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.AppID = "app-1"
 	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: cfg, client: fake}
-	view, err := backend.Status(context.Background(), StatusRequest{})
+	view, err := backend.Status(context.Background(), core.StatusRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,10 +502,10 @@ func TestFastAPICloudStatusMapsFailure(t *testing.T) {
 		deployment:    fastAPICloudDeployment{ID: "dep-1", AppID: "app-1", Status: fastAPICloudStatusVerifyingFailed},
 		hasDeployment: true,
 	}
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.AppID = "app-1"
 	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: cfg, client: fake}
-	view, err := backend.Status(context.Background(), StatusRequest{})
+	view, err := backend.Status(context.Background(), core.StatusRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,9 +515,9 @@ func TestFastAPICloudStatusMapsFailure(t *testing.T) {
 }
 
 func TestApplyFastAPICloudProviderFlags(t *testing.T) {
-	cfg := Config{Provider: providerName}
+	cfg := core.Config{Provider: providerName}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	values := RegisterFastAPICloudProviderFlags(fs, Config{})
+	values := RegisterFastAPICloudProviderFlags(fs, core.Config{})
 	if err := fs.Parse([]string{
 		"--fastapi-cloud-url", "http://localhost:8000/api/v1",
 		"--fastapi-cloud-app-id", "app-1",
@@ -448,11 +535,11 @@ func TestApplyFastAPICloudProviderFlags(t *testing.T) {
 
 func TestApplyFastAPICloudProviderFlagsRejectsClassAndType(t *testing.T) {
 	for _, flagName := range []string{"class", "type"} {
-		cfg := Config{Provider: providerName}
+		cfg := core.Config{Provider: providerName}
 		fs := flag.NewFlagSet("test", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		fs.String(flagName, "", "")
-		values := RegisterFastAPICloudProviderFlags(fs, Config{})
+		values := RegisterFastAPICloudProviderFlags(fs, core.Config{})
 		if err := fs.Parse([]string{"--" + flagName, "small"}); err != nil {
 			t.Fatal(err)
 		}
@@ -464,16 +551,16 @@ func TestApplyFastAPICloudProviderFlagsRejectsClassAndType(t *testing.T) {
 }
 
 func TestFastAPICloudWarmupRejected(t *testing.T) {
-	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: Config{}, client: panicFastAPICloudAPI{}}
-	err := backend.Warmup(context.Background(), WarmupRequest{})
+	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: core.Config{}, client: panicFastAPICloudAPI{}}
+	err := backend.Warmup(context.Background(), core.WarmupRequest{})
 	if err == nil || !strings.Contains(err.Error(), "does not support warmup") {
 		t.Fatalf("err = %v, want warmup rejection", err)
 	}
 }
 
 func TestFastAPICloudStopRejected(t *testing.T) {
-	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: Config{}, client: panicFastAPICloudAPI{}}
-	err := backend.Stop(context.Background(), StopRequest{})
+	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: core.Config{}, client: panicFastAPICloudAPI{}}
+	err := backend.Stop(context.Background(), core.StopRequest{})
 	if err == nil || !strings.Contains(err.Error(), "does not support stop") {
 		t.Fatalf("err = %v, want stop rejection", err)
 	}
@@ -486,10 +573,10 @@ func TestFastAPICloudListWithTeamID(t *testing.T) {
 			{ID: "app-2", TeamID: "team-1", Slug: "two", Name: "Two", URL: "https://two.fastapicloud.app"},
 		},
 	}
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.TeamID = "team-1"
 	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: cfg, client: fake}
-	views, err := backend.List(context.Background(), ListRequest{})
+	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,10 +615,10 @@ func TestFastAPICloudClientListAppsPaginatesWithoutCount(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(fastAPICloudListResponse[fastAPICloudApp]{Data: data})
 	}))
 	defer server.Close()
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.Token = "test-token"
 	cfg.FastAPICloud.APIURL = server.URL + "/api/v1"
-	client, err := newFastAPICloudClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newFastAPICloudClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,10 +650,10 @@ func TestFastAPICloudClientLatestDeploymentPicksNewest(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.Token = "test-token"
 	cfg.FastAPICloud.APIURL = server.URL + "/api/v1"
-	client, err := newFastAPICloudClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newFastAPICloudClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -581,10 +668,10 @@ func TestFastAPICloudClientLatestDeploymentPicksNewest(t *testing.T) {
 
 func newTestFastAPICloudClient(t *testing.T, server *httptest.Server) fastAPICloudAPI {
 	t.Helper()
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.Token = "secret-tok"
 	cfg.FastAPICloud.APIURL = server.URL + "/api/v1"
-	client, err := newFastAPICloudClient(cfg, Runtime{HTTP: server.Client()})
+	client, err := newFastAPICloudClient(cfg, core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -789,10 +876,10 @@ func TestFastAPICloudClientLoopbackHTTPAccepted(t *testing.T) {
 		"http://[::1]:8000/api/v1",
 		"http://LOCALHOST:8000/api/v1",
 	} {
-		cfg := Config{}
+		cfg := core.Config{}
 		cfg.FastAPICloud.Token = "t"
 		cfg.FastAPICloud.APIURL = u
-		if _, err := newFastAPICloudClient(cfg, Runtime{}); err != nil {
+		if _, err := newFastAPICloudClient(cfg, core.Runtime{}); err != nil {
 			t.Fatalf("loopback %q rejected: %v", u, err)
 		}
 	}
@@ -808,10 +895,10 @@ func TestFastAPICloudClientLoopbackSpoofRejected(t *testing.T) {
 		{apiURL: "http://localhost.evil.com/api/v1", want: "must use HTTPS"},
 		{apiURL: "http://0x7f000001/api/v1", want: "must use HTTPS"},
 	} {
-		cfg := Config{}
+		cfg := core.Config{}
 		cfg.FastAPICloud.Token = "t"
 		cfg.FastAPICloud.APIURL = test.apiURL
-		_, err := newFastAPICloudClient(cfg, Runtime{})
+		_, err := newFastAPICloudClient(cfg, core.Runtime{})
 		if err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Fatalf("spoofed loopback %q: err = %v, want %q", test.apiURL, err, test.want)
 		}
@@ -820,10 +907,10 @@ func TestFastAPICloudClientLoopbackSpoofRejected(t *testing.T) {
 
 func TestFastAPICloudClientInvalidURL(t *testing.T) {
 	for _, u := range []string{"://nohost", "https://", "not a url"} {
-		cfg := Config{}
+		cfg := core.Config{}
 		cfg.FastAPICloud.Token = "t"
 		cfg.FastAPICloud.APIURL = u
-		_, err := newFastAPICloudClient(cfg, Runtime{})
+		_, err := newFastAPICloudClient(cfg, core.Runtime{})
 		if err == nil || !strings.Contains(err.Error(), "must be an absolute HTTPS URL") {
 			t.Fatalf("invalid url %q: err = %v, want absolute HTTPS URL rejection", u, err)
 		}
@@ -878,10 +965,10 @@ func TestFastAPICloudStatusNoDeployment(t *testing.T) {
 		},
 		hasDeployment: false,
 	}
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.AppID = "app-1"
 	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: cfg, client: fake}
-	view, err := backend.Status(context.Background(), StatusRequest{})
+	view, err := backend.Status(context.Background(), core.StatusRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -946,10 +1033,10 @@ func TestFastAPICloudClientRejectsNonJSONContentType(t *testing.T) {
 
 func TestFastAPICloudStatusAppNotFound(t *testing.T) {
 	fake := &fakeFastAPICloudAPI{getErr: errors.New("app not found")}
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.FastAPICloud.AppID = "missing"
 	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: cfg, client: fake}
-	_, err := backend.Status(context.Background(), StatusRequest{})
+	_, err := backend.Status(context.Background(), core.StatusRequest{})
 	if err == nil || !strings.Contains(err.Error(), "app not found") {
 		t.Fatalf("err = %v, want propagated app lookup error", err)
 	}
@@ -959,8 +1046,8 @@ func TestFastAPICloudStatusAppNotFound(t *testing.T) {
 }
 
 func TestFastAPICloudStatusRequiresAppID(t *testing.T) {
-	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: Config{}, client: panicFastAPICloudAPI{}}
-	_, err := backend.Status(context.Background(), StatusRequest{})
+	backend := &fastAPICloudBackend{spec: Provider{}.Spec(), cfg: core.Config{}, client: panicFastAPICloudAPI{}}
+	_, err := backend.Status(context.Background(), core.StatusRequest{})
 	if err == nil || !strings.Contains(err.Error(), "status requires") {
 		t.Fatalf("err = %v, want app-id requirement before any API call", err)
 	}

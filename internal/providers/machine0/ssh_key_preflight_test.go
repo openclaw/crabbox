@@ -23,7 +23,7 @@ func TestDoctorRejectsMissingSSHKeyPrerequisites(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			setupState(t)
 			api := &fakeAPI{selectedKey: tc.key, noDefaultKey: tc.key == nil, sizes: []machineSize{testSize()}}
-			_, err := testBackendWithAPI(api).Doctor(context.Background(), DoctorRequest{})
+			_, err := testBackendWithAPI(api).Doctor(context.Background(), core.DoctorRequest{})
 			if err == nil || !strings.Contains(err.Error(), "key") {
 				t.Fatalf("doctor accepted missing SSH prerequisites: %v", err)
 			}
@@ -69,9 +69,9 @@ func TestLegacySSHKeyPrerequisitesBeforeDoctorAndCreate(t *testing.T) {
 				}
 				var err error
 				if mode == "doctor" {
-					_, err = b.Doctor(context.Background(), DoctorRequest{})
+					_, err = b.Doctor(context.Background(), core.DoctorRequest{})
 				} else {
-					req := AcquireRequest{Repo: core.Repo{Root: repo}}
+					req := core.AcquireRequest{Repo: core.Repo{Root: repo}}
 					if mode == "fixed" {
 						req.RequestedLeaseID = fixedMachine0TestLeaseID
 					}
@@ -110,7 +110,7 @@ func TestDoctorLegacyPairIsOnlyAPrerequisite(t *testing.T) {
 				}
 			}
 			api := &fakeAPI{noDefaultKey: true, sizes: []machineSize{testSize()}}
-			result, err := testBackendWithAPI(api).Doctor(context.Background(), DoctorRequest{})
+			result, err := testBackendWithAPI(api).Doctor(context.Background(), core.DoctorRequest{})
 			if err != nil || !strings.Contains(result.Message, "ssh_key_prerequisites=checked") || !strings.Contains(result.Message, "runtime=unchecked") {
 				t.Fatalf("doctor result=%#v err=%v", result, err)
 			}
@@ -131,7 +131,7 @@ func TestDoctorKeyFailureCancelsSiblingProbes(t *testing.T) {
 	api := &fakeAPI{selectedKeyErr: want, doctorDelay: time.Hour}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := testBackendWithAPI(api).Doctor(ctx, DoctorRequest{})
+	_, err := testBackendWithAPI(api).Doctor(ctx, core.DoctorRequest{})
 	if !errors.Is(err, want) || ctx.Err() != nil {
 		t.Fatalf("doctor did not cancel siblings after key failure: err=%v ctx=%v", err, ctx.Err())
 	}

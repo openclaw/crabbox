@@ -26,8 +26,6 @@ func init() {
 
 type benchmarkTimingTestProvider struct{}
 
-func (benchmarkTimingTestProvider) Name() string      { return "benchmark-timing-test" }
-func (benchmarkTimingTestProvider) Aliases() []string { return nil }
 func (benchmarkTimingTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "benchmark-timing-test",

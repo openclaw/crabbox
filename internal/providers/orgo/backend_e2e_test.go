@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 // TestOrgoBackendEndToEndCreateRunDelete drives the real *orgoHTTPClient through
@@ -89,12 +91,12 @@ func TestOrgoBackendEndToEndCreateRunDelete(t *testing.T) {
 	t.Setenv("CRABBOX_ORGO_API_KEY", dummyKey)
 
 	var out, errBuf bytes.Buffer
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIBase: server.URL}}, Runtime{
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIBase: server.URL}}, core.Runtime{
 		Stdout: &out, Stderr: &errBuf, HTTP: server.Client(),
 	}).(*orgoBackend)
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: t.TempDir()},
 		NoSync:  true,
 		Command: []string{"echo", "crabbox-orgo-ok"},
 	})

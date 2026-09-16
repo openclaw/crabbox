@@ -49,7 +49,7 @@ func egressDaemonTestPID(t *testing.T, output *bytes.Buffer) int {
 }
 
 func egressDaemonTestAlive(pid int) bool {
-	command, running := webVNCDaemonProcessCommand(pid)
+	command, running := LocalProcessCommand(pid)
 	return running && !strings.Contains(strings.ToLower(command), "<defunct>")
 }
 

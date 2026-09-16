@@ -4,18 +4,16 @@ import (
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() { core.RegisterProvider(Provider{}) }
 
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return []string{"applemachine"} }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"applemachine"},
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationLocalContext),
 		Name:             providerName,
 		Family:           "container",
 		Kind:             core.ProviderKindDelegatedRun,
@@ -27,11 +25,7 @@ func (Provider) Spec() core.ProviderSpec {
 }
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return registerFlags(fs, defaults)
-}
-
-func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	return applyFlags(cfg, fs, values)
+	return core.RegisterAppleMachineConfigFlags(fs, defaults.AppleContainer)
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
@@ -45,8 +39,4 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 		cfg.AppleContainer.Image = "alpine:latest"
 	}
 	return newBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor(providerName, func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

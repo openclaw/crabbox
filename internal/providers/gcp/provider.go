@@ -44,12 +44,13 @@ var (
 	)
 )
 
-func (Provider) Name() string { return "gcp" }
-func (Provider) Aliases() []string {
-	return []string{"google", "google-cloud"}
-}
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases: []string{"google", "google-cloud"},
+		Authentication: core.ProviderAuthentication{
+			{Route: "direct", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationSDKCredentials}, Description: "Direct access uses Google Application Default Credentials."},
+			{Route: "brokered", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationCoordinator}, Description: "The client authenticates to the coordinator; cloud credentials remain server-side."},
+		},
 		Name:   "gcp",
 		Family: "gcp",
 		Kind:   core.ProviderKindSSHLease,
@@ -161,10 +162,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return gcpMachineTypeCandidatesForClass(cfg.Class)[0]
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return gcpMachineTypeCandidatesForClass(class)[0]
-}
-
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
 	return classProfiles
 }
@@ -240,15 +237,11 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return NewGCPLeaseBackend(p.Spec(), cfg, rt), nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("gcp", func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
 func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
 	if req.Config.Coordinator == "" || req.Server.CloudID == "" {
 		return core.NativeCheckpointCapability{}, false
 	}
-	if firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
+	if shared.FirstNonEmpty(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
 		return core.NativeCheckpointCapability{}, false
 	}
 	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
@@ -257,17 +250,13 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	return core.NativeCheckpointCapability{Kind: core.CheckpointKindGCPDisk, RetireSource: true}, true
 }
 
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonEmpty(values...)
-}
-
 func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {
 	cfg := req.Config
 	switch req.Record.Kind {
 	case core.CheckpointKindGCP:
-		cfg.GCPMachineImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+		cfg.GCPMachineImage = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
 	case core.CheckpointKindGCPDisk:
-		cfg.GCPSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+		cfg.GCPSnapshot = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
 	default:
 		return core.Exit(2, "provider=gcp does not support checkpoint kind=%s", req.Record.Kind)
 	}

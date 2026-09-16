@@ -4,7 +4,6 @@ import (
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -13,14 +12,10 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) ServerTypeForConfig(core.Config) string { return "" }
-func (Provider) ServerTypeForClass(string) string       { return "" }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		SyncGuardrailFullCandidate: true,
 		Name:                       providerName,
 		Family:                     providerName,
@@ -52,15 +47,11 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return &backend{spec: p.Spec(), cfg: cfg, rt: rt, clientFactory: newBlaxelClient}, nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("blaxel", func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
 type backend struct {
-	spec          ProviderSpec
-	cfg           Config
-	rt            Runtime
-	clientFactory func(Config, Runtime) (Client, error)
+	spec          core.ProviderSpec
+	cfg           core.Config
+	rt            core.Runtime
+	clientFactory func(core.Config, core.Runtime) (Client, error)
 }
 
-func (b *backend) Spec() ProviderSpec { return b.spec }
+func (b *backend) Spec() core.ProviderSpec { return b.spec }

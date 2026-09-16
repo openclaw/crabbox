@@ -35,6 +35,8 @@ for (const artifact of [
   "home-desktop-light.png",
   "home-desktop-dark.png",
   "home-mobile.png",
+  "skills-desktop.png",
+  "skills-mobile.png",
   "interaction-proof.json",
   "SHA256SUMS",
 ]) {
@@ -115,6 +117,7 @@ try {
   await openHome(desktopLight.page);
   await assertHomeShell(desktopLight.page, "desktop light restored");
   await screenshot(desktopLight.page, "home-desktop-light.png");
+  await proveSkillGuide(desktopLight.page, "desktop");
   await assertNoPageErrors(desktopLight);
   await desktopLight.context.close();
   activeProofPage = undefined;
@@ -150,6 +153,7 @@ try {
   await assertTheme(mobile.page, "light");
   await assertHomeShell(mobile.page, "mobile light");
   await screenshot(mobile.page, "home-mobile.png");
+  await proveSkillGuide(mobile.page, "mobile");
   await assertNoPageErrors(mobile);
   await mobile.context.close();
   activeProofPage = undefined;
@@ -847,9 +851,9 @@ async function featureState(page) {
   });
 }
 
-async function screenshot(page, file) {
+async function screenshot(page, file, fullPage = true) {
   const target = path.join(outDir, file);
-  await page.screenshot({ path: target, fullPage: true, animations: "disabled", caret: "hide", scale: "css" });
+  await page.screenshot({ path: target, fullPage, animations: "disabled", caret: "hide", scale: "css" });
   const buffer = fs.readFileSync(target);
   const dimensions = pngDimensions(buffer);
   const artifact = {
@@ -921,4 +925,40 @@ function pngDimensions(buffer) {
     width: buffer.readUInt32BE(16),
     height: buffer.readUInt32BE(20),
   };
+}
+
+
+async function proveSkillGuide(page, viewport) {
+  await page.goto(`${baseURL}/integrations/agents.html`, { waitUntil: "domcontentloaded" });
+  const guide = page.locator("#install-through-ecosystem-skill-managers");
+  await guide.waitFor({ state: "visible" });
+  const layout = await guide.evaluate((heading) => {
+    const article = heading.closest("article");
+    const bounds = article.getBoundingClientRect();
+    const items = [];
+    for (let node = heading.nextElementSibling; node && !/^H[1-3]$/.test(node.tagName); node = node.nextElementSibling) {
+      if (node.tagName === "UL") {
+        for (const item of node.querySelectorAll("li")) {
+          const rect = item.getBoundingClientRect();
+          items.push({ text: item.textContent, left: rect.left, right: rect.right,
+            width: item.clientWidth, scrollWidth: item.scrollWidth });
+        }
+      }
+    }
+    return { left: bounds.left, right: bounds.right, items };
+  });
+  record(`${viewport}: both skill choices fit the article without horizontal scrolling`,
+    layout.items.length === 2 && layout.items.every((item) =>
+      item.left >= layout.left && item.right <= layout.right + 1 && item.scrollWidth <= item.width + 1), layout);
+  await guide.evaluate((heading) => heading.scrollIntoView({ block: "start" }));
+  await screenshot(page, `skills-${viewport}.png`, false);
+  const response = await page.request.get(`${baseURL}/.well-known/agent-skills/index.json`);
+  const index = await response.json();
+  record(`${viewport}: both installable skills are discoverable`,
+    response.ok() && ["crabbox", "crabbox-quickstart"].every((name) => index.skills.some((skill) => skill.name === name)));
+  for (const skill of index.skills) {
+    const published = await page.request.get(`${baseURL}${skill.url}`);
+    record(`${viewport}: ${skill.name} download matches its discovery digest`,
+      published.ok() && `sha256:${sha256(await published.body())}` === skill.digest);
+  }
 }

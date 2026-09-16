@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() { core.RegisterProvider(Provider{}) }
@@ -14,11 +13,9 @@ type Provider struct{}
 
 var machine0ClassProfiles = buildClassProfiles()
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             providerName,
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
@@ -67,16 +64,12 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 		return nil, err
 	}
 	if cfg.TargetOS != targetLinux {
-		return nil, exit(2, "provider=%s supports target=linux only", providerName)
+		return nil, core.Exit(2, "provider=%s supports target=linux only", providerName)
 	}
 	if cfg.Tailscale.Enabled || string(cfg.Network) == "tailscale" {
-		return nil, exit(2, "--tailscale is not supported for provider=%s; use the Machine0 public IP or authenticated HTTPS URL", providerName)
+		return nil, core.Exit(2, "--tailscale is not supported for provider=%s; use the Machine0 public IP or authenticated HTTPS URL", providerName)
 	}
 	return newBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor(providerName, func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }
 
 func (Provider) ValidateConfig(cfg core.Config) error {
@@ -88,22 +81,22 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 		"machine0.region":  m.Region,
 	} {
 		if strings.TrimSpace(value) == "" {
-			return exit(2, "%s is required", name)
+			return core.Exit(2, "%s is required", name)
 		}
 	}
 	switch strings.ToLower(strings.TrimSpace(m.ReleasePolicy)) {
 	case "", "destroy", "suspend":
 	default:
-		return exit(2, "machine0.releasePolicy must be destroy or suspend")
+		return core.Exit(2, "machine0.releasePolicy must be destroy or suspend")
 	}
 	if m.CreateTimeout <= 0 {
-		return exit(2, "machine0.createTimeout must be positive")
+		return core.Exit(2, "machine0.createTimeout must be positive")
 	}
 	if m.ImageVersion < 0 {
-		return exit(2, "machine0.imageVersion must not be negative")
+		return core.Exit(2, "machine0.imageVersion must not be negative")
 	}
 	if m.PollInterval <= 0 {
-		return exit(2, "machine0.pollInterval must be positive")
+		return core.Exit(2, "machine0.pollInterval must be positive")
 	}
 	return nil
 }
@@ -126,15 +119,6 @@ func (p Provider) ServerTypeForConfig(cfg core.Config) string {
 func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 	size := strings.TrimSpace(cfg.Machine0.Size)
 	return size, cfg.Machine0.SizeExplicit && size != ""
-}
-
-func (Provider) ServerTypeForClass(class string) string {
-	for _, profile := range machine0ClassProfiles {
-		if profile.Class == class {
-			return profile.Primary.Type
-		}
-	}
-	return core.BaseConfig().Machine0.Size
 }
 
 func (Provider) ClassProfiles() []core.ProviderClassProfile { return machine0ClassProfiles }

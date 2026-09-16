@@ -37,7 +37,7 @@ process.exit(0);
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	c := &client{cfg: Machine0Config{CLIPath: path}, rt: core.RuntimeForProviderOperation(io.Discard)}
+	c := &client{cfg: core.Machine0Config{CLIPath: path}, rt: core.RuntimeForProviderOperation(io.Discard)}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	t.Run("account identity", func(t *testing.T) {

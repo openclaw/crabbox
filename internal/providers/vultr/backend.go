@@ -481,7 +481,7 @@ func (b *backend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.Doctor
 		return core.DoctorResult{}, err
 	}
 	result := core.InventoryDoctorResult(providerName, len(instances))
-	result.Message += fmt.Sprintf(" default_type=%s region=%s user_scheme=%s", b.Cfg.ServerType, vultrRegion(b.Cfg), vultrUserScheme(b.Cfg))
+	result.Message += fmt.Sprintf(" default_type=%s region=%s user_scheme=%s", b.Cfg.ServerType, vultrRegion(b.Cfg), b.Cfg.Vultr.WithRuntimeDefaults().UserScheme)
 	return result, nil
 }
 
@@ -622,7 +622,9 @@ func (b *backend) targetFromInstance(item vultrInstance, req core.ResolveRequest
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
-	core.UseStoredTestboxKey(&ssh, leaseID)
+	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if req.Repo.Root != "" && !req.NoLocalStateMutations {
 		updatedClaim, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim, claim, claimExists)
 		if err != nil {
@@ -717,20 +719,9 @@ func validateVultrClaimIdentity(claim core.LeaseClaim, leaseID, slug string) err
 }
 
 func (b *backend) waitForInstanceReady(ctx context.Context, client vultrAPI, id string, timeout time.Duration) (vultrInstance, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	result, err := shared.Poll(waitCtx, 0, 3*time.Second, shared.SleepContext,
+	return shared.PollReady(ctx, timeout, 3*time.Second,
 		func(ctx context.Context) (vultrInstance, error) { return client.GetInstance(ctx, id) },
-		func(_ context.Context, item vultrInstance, fetchErr error) (bool, error) {
-			return instanceReady(item), fetchErr
-		}, nil)
-	if err != nil {
-		if context.Cause(ctx) == nil && errors.Is(context.Cause(waitCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
-			return vultrInstance{}, core.Exit(5, "timed out waiting for Vultr instance IP")
-		}
-		result.Value = vultrInstance{}
-	}
-	return result.Value, err
+		instanceReady, core.Exit(5, "timed out waiting for Vultr instance IP"))
 }
 
 func instanceReady(item vultrInstance) bool {
@@ -789,7 +780,7 @@ func serverFromInstance(item vultrInstance, cfg core.Config) core.Server {
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = item.MainIP
-	server.ServerType.Name = firstNonBlank(item.Plan, cfg.ServerType)
+	server.ServerType.Name = shared.FirstNonBlank(item.Plan, cfg.ServerType)
 	return server
 }
 
@@ -873,7 +864,7 @@ func authorizeVultrSSHKeyDelete(ctx context.Context, client vultrAPI, leaseID, k
 }
 
 func validateVultrUserScheme(cfg core.Config) error {
-	switch strings.ToLower(strings.TrimSpace(vultrUserScheme(cfg))) {
+	switch strings.ToLower(strings.TrimSpace(cfg.Vultr.WithRuntimeDefaults().UserScheme)) {
 	case "root", "limited":
 		return nil
 	default:
@@ -883,12 +874,7 @@ func validateVultrUserScheme(cfg core.Config) error {
 
 func applyVultrDefaults(cfg *core.Config) {
 	cfg.Provider = providerName
-	if cfg.Vultr.Region == "" {
-		cfg.Vultr.Region = "ewr"
-	}
-	if cfg.Vultr.UserScheme == "" {
-		cfg.Vultr.UserScheme = "root"
-	}
+	cfg.Vultr = cfg.Vultr.WithRuntimeDefaults()
 	if !core.IsSSHUserExplicit(cfg) && strings.EqualFold(cfg.Vultr.UserScheme, "limited") {
 		cfg.SSHUser = "limited"
 	} else if cfg.SSHUser == "" {
@@ -912,8 +898,4 @@ func applyVultrDefaults(cfg *core.Config) {
 func isVultrInstanceID(value string) bool {
 	value = strings.TrimSpace(value)
 	return vultrInstanceIDRe.MatchString(value)
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }

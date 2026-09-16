@@ -4,18 +4,131 @@ import (
 	"context"
 	"flag"
 	"io"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestCrownestConfigShowSection(t *testing.T) {
+	for _, selected := range []string{"", "crownest"} {
+		for _, forget := range []bool{false, true} {
+			cfg := core.Config{Provider: selected, Crownest: core.CrownestConfig{APIURL: "https://api.example.test/path?debug=1#hint", ProjectID: "", Template: " raw-template ", TimeoutSecs: 0, ForgetMissing: forget}}
+			before := cfg.Crownest
+			section := (Provider{}).ConfigShowSection(cfg)
+			values := map[string]any{}
+			var fields []string
+			for _, field := range section.Fields {
+				values[field.JSONName] = field.JSONValue
+				fields = append(fields, field.TextName+"="+field.TextValue)
+			}
+			want := map[string]any{"apiUrl": "https://api.example.test/path", "projectId": "", "template": " raw-template ", "timeoutSecs": 0, "forgetMissing": forget}
+			if section.JSONKey != "crownest" || section.TextLabel != "crownest" || !reflect.DeepEqual(section.Providers, []string{"crownest"}) || !reflect.DeepEqual(values, want) {
+				t.Fatal("unexpected Crownest display projection")
+			}
+			if strings.Join(fields, " ") != "api_url=https://api.example.test/path project_id=- template= raw-template  timeout_secs=0 forget_missing="+strconv.FormatBool(forget) {
+				t.Fatal("text projection changed raw values or field order")
+			}
+			if cfg.Crownest != before {
+				t.Fatal("display mutated configuration")
+			}
+		}
+	}
+}
+
+func TestCrownestOrdinaryFlagOrdering(t *testing.T) {
+	for _, provider := range []string{" CROWNEST ", "other"} {
+		for _, sizing := range []string{"", "class", "type"} {
+			cfg := core.Config{Provider: provider}
+			before := cfg
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			if sizing != "" {
+				if err := fs.Parse([]string{"--" + sizing + "=ordinary"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, values := range []any{nil, struct{}{}} {
+				err := (Provider{}).ApplyFlags(&cfg, fs, values)
+				if (err != nil) != (provider != "other" && sizing != "") || !reflect.DeepEqual(cfg, before) {
+					t.Fatalf("early guard %q/%q: %v", provider, sizing, err)
+				}
+			}
+		}
+	}
+	for _, provider := range []string{"crownest", "other"} {
+		for _, tc := range []struct {
+			url, template string
+			timeout       int
+			diagnostic    string
+		}{{" https://example.invalid ", "same", 0, ""}, {"", "same", 7, ""}, {"ordinary", "", -1, "provider=crownest base URL must be an absolute URL"}, {"https://example.invalid", "", -1, "crownest timeoutSecs must be non-negative"}, {"https://example.invalid", "", 0, "crownest template must not be empty"}} {
+			cfg := core.Config{Provider: provider, Crownest: core.CrownestConfig{APIURL: "https://example.invalid", ProjectID: "same", Template: "same", TimeoutSecs: 7}}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := (Provider{}).RegisterFlags(fs, cfg)
+			before := cfg
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, before) {
+				t.Fatal("unvisited values changed")
+			}
+			if err := fs.Parse([]string{"--crownest-url=" + tc.url, "--crownest-project-id=first", "--crownest-project-id=", "--crownest-template=" + tc.template, "--crownest-timeout-secs=" + strconv.Itoa(tc.timeout), "--crownest-forget-missing=true"}); err != nil {
+				t.Fatal(err)
+			}
+			err := (Provider{}).ApplyFlags(&cfg, fs, values)
+			if (err != nil) != (tc.diagnostic != "") || (err != nil && err.Error() != tc.diagnostic) {
+				t.Fatalf("validation %v", err)
+			}
+			want := before
+			want.Crownest = core.CrownestConfig{APIURL: tc.url, ProjectID: "", Template: tc.template, TimeoutSecs: tc.timeout, ForgetMissing: true}
+			core.RecordProviderFlagInputs(&want, true, "crownest")
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("all flags must precede validation: %#v", cfg)
+			}
+		}
+	}
+}
+
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	cfg.Crownest.APIURL = "https://fixture.invalid"
+	cfg.Crownest.Template = "fixture"
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := (Provider{}).RegisterFlags(fs, cfg)
+	before := cfg
+	if err := (Provider{}).ApplyFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "crownest")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("crownest-project-id", "fixture"); err != nil {
+			t.Fatal(err)
+		}
+		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "crownest")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
+	}
+}
+
 func TestProviderSpecIsDelegatedLinuxAliasFree(t *testing.T) {
 	provider := Provider{}
-	if provider.Name() != providerName {
-		t.Fatalf("Name=%q want %q", provider.Name(), providerName)
+	if provider.Spec().Name != providerName {
+		t.Fatalf("Name=%q want %q", provider.Spec().Name, providerName)
 	}
-	if aliases := provider.Aliases(); len(aliases) != 0 {
+	if aliases := provider.Spec().Aliases; len(aliases) != 0 {
 		t.Fatalf("aliases=%v want none", aliases)
 	}
 	spec := provider.Spec()
@@ -100,7 +213,7 @@ func TestConfigureReturnsDelegatedCleanupAndDoctor(t *testing.T) {
 	t.Setenv("CRABBOX_CROWNEST_API_KEY", "")
 	t.Setenv("CROWNEST_API_KEY", "")
 	provider := Provider{}
-	configured, err := provider.Configure(testConfig(), Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	configured, err := provider.Configure(testConfig(), core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatalf("Configure err=%v", err)
 	}
@@ -108,22 +221,22 @@ func TestConfigureReturnsDelegatedCleanupAndDoctor(t *testing.T) {
 	if !ok {
 		t.Fatalf("configured backend does not implement DelegatedRunBackend: %T", configured)
 	}
-	if _, err := delegated.Run(context.Background(), RunRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
+	if _, err := delegated.Run(context.Background(), core.RunRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Fatalf("Run err=%v, want API key requirement", err)
 	}
 	if _, ok := configured.(core.CleanupBackend); !ok {
 		t.Fatalf("configured backend does not implement CleanupBackend: %T", configured)
 	}
-	doctor, err := provider.ConfigureDoctor(testConfig(), Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := core.ConfigureProviderDoctor(provider, testConfig(), core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatalf("ConfigureDoctor err=%v", err)
 	}
-	if _, err := doctor.Doctor(context.Background(), DoctorRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
+	if _, err := doctor.Doctor(context.Background(), core.DoctorRequest{}); err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Fatalf("Doctor err=%v, want API key requirement", err)
 	}
 }
 
-func testConfig() Config {
+func testConfig() core.Config {
 	cfg := core.BaseConfig()
 	cfg.Crownest.APIURL = "https://api.crownest.dev"
 	cfg.Crownest.Template = "python-node"

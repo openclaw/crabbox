@@ -10,14 +10,14 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *backend) prepareArchive(ctx context.Context, req RunRequest) (*core.PreparedArchive, error) {
+func (b *backend) prepareArchive(ctx context.Context, req core.RunRequest) (*core.PreparedArchive, error) {
 	return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
 		TempPattern: "crabbox-smolvm-sync-*.tgz", Stderr: b.rt.Stderr, Now: b.now,
 	})
 }
 
-func (b *backend) syncWorkspace(ctx context.Context, client api, machineID string, req RunRequest, folder string, prepared *core.PreparedArchive) ([]timingPhase, time.Duration, error) {
+func (b *backend) syncWorkspace(ctx context.Context, client api, machineID string, req core.RunRequest, folder string, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
 	start := b.now()
 	preparedExternally := prepared != nil
 	if prepared == nil {
@@ -49,7 +49,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client api, machineID strin
 	if preparedExternally {
 		total += prepared.ManifestDuration + prepared.PreflightDuration + prepared.ArchiveDuration
 	}
-	return []timingPhase{
+	return []core.TimingPhase{
 		{Name: "manifest", Ms: prepared.ManifestDuration.Milliseconds()},
 		{Name: "preflight", Ms: prepared.PreflightDuration.Milliseconds()},
 		{Name: "archive", Ms: prepared.ArchiveDuration.Milliseconds()},
@@ -69,13 +69,13 @@ func (b *backend) prepareWorkspace(ctx context.Context, client api, machineID, f
 	if absFolder == "/" {
 		absFolder = "/workspace"
 	}
-	command := "mkdir -p " + shellQuote(absFolder)
+	command := "mkdir -p " + core.ShellQuote(absFolder)
 	if delete {
 		if absFolder == "/workspace" {
 			// safe clean for workdir root
 			command = "find /workspace -mindepth 1 -exec rm -rf {} + 2>/dev/null || rm -rf -- /workspace/* 2>/dev/null || true; mkdir -p /workspace"
 		} else {
-			command = "rm -rf " + shellQuote(absFolder) + " && " + command
+			command = "rm -rf " + core.ShellQuote(absFolder) + " && " + command
 		}
 	}
 	return b.execShell(ctx, client, machineID, command, io.Discard)

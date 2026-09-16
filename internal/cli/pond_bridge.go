@@ -134,10 +134,10 @@ func (a App) pondPeers(ctx context.Context, args []string) error {
 		return err
 	}
 	if pondName == "" {
-		return exit(2, "--pond is required")
+		return Exit(2, "--pond is required")
 	}
 	if flags.SharePort != 0 && (flags.SharePort < 1 || flags.SharePort > 65535) {
-		return exit(2, "--share-port must be between 1 and 65535")
+		return Exit(2, "--share-port must be between 1 and 65535")
 	}
 	// Empty --provider means "every provider represented in the pond"; the
 	// resolver fans out per provider and concatenates the result. Non-empty
@@ -164,14 +164,22 @@ func (a App) pondPeers(ctx context.Context, args []string) error {
 // and do not block the remaining peers; the function returns the first error
 // encountered so callers can decide whether the release was clean.
 func (a App) pondRelease(ctx context.Context, args []string) error {
-	pond, err := requestedPondName(strings.Join(args, " "))
+	fs := newFlagSet("pond release", a.Stderr)
+	fs.Usage = func() { fmt.Fprintln(a.Stderr, "Usage:\n  crabbox pond release <name>") }
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return Exit(2, "usage: crabbox pond release <name>")
+	}
+	pond, err := requestedPondName(fs.Arg(0))
 	if err != nil {
 		return err
 	}
 	if pond == "" {
-		return exit(2, "usage: crabbox pond release <name>")
+		return Exit(2, "usage: crabbox pond release <name>")
 	}
-	claims, err := listLeaseClaims()
+	claims, err := ListLeaseClaims()
 	if err != nil {
 		return err
 	}
@@ -274,7 +282,7 @@ func finalizePondReleaseClaim(backend Backend, lease LeaseTarget, claim leaseCla
 		retained = retainer.RetainLeaseClaimAfterRelease(lease)
 	}
 	if !retained {
-		removeLeaseClaim(claim.LeaseID)
+		RemoveLeaseClaim(claim.LeaseID)
 	}
 	return retained, nil
 }
@@ -298,7 +306,7 @@ type pondPeersJSON struct {
 // gives `crabbox pond peers --pond <name>` honest cross-provider output without
 // making the caller enumerate providers by hand.
 func resolvePondPeers(ctx context.Context, rt Runtime, pond, provider string, flags pondPeersFlags) ([]BridgePeer, error) {
-	claims, err := listLeaseClaims()
+	claims, err := ListLeaseClaims()
 	if err != nil {
 		return nil, err
 	}
@@ -537,6 +545,10 @@ func bridgePeerFromClaim(claim leaseClaim, class string) BridgePeer {
 	if caps.TailscaleEgress && claimHasTailscaleMetadata(claim) {
 		peer.Note = "tailnet available for outbound proxy traffic only"
 	}
+	// Tailscale is optional on SSH leases; capability alone does not enroll a peer.
+	if class == TransportTailnet && caps.SSHMesh && !claimHasTailscaleMetadata(claim) {
+		class = TransportSSH
+	}
 	switch class {
 	case TransportTailnet:
 		endpoint := firstNonEmpty(claim.TailscaleIPv4, claim.TailscaleFQDN)
@@ -619,7 +631,7 @@ func cloneStringMap(in map[string]string) map[string]string {
 // pond and (when provider is non-empty) the named provider. Empty pond
 // returns no matches — ponds are never implicit.
 func filterClaimsForPond(claims []leaseClaim, pond, provider string) []leaseClaim {
-	pond = normalizePondName(pond)
+	pond = NormalizePondName(pond)
 	if pond == "" {
 		return nil
 	}
@@ -627,7 +639,7 @@ func filterClaimsForPond(claims []leaseClaim, pond, provider string) []leaseClai
 	canonProvider := canonicalClaimProvider(provider)
 	out := make([]leaseClaim, 0, len(claims))
 	for _, claim := range claims {
-		if normalizePondName(claim.Pond) != pond {
+		if NormalizePondName(claim.Pond) != pond {
 			continue
 		}
 		if provider != "" && canonicalClaimProvider(claim.Provider) != canonProvider {
@@ -658,7 +670,7 @@ func realLoadBridgeProvider(provider string, rt Runtime) (BridgeProvider, error)
 	cfg.Provider = provider
 	resolved, err := ProviderFor(provider)
 	if err != nil {
-		return nil, exit(2, "unknown provider %q for pond bridge", provider)
+		return nil, Exit(2, "unknown provider %q for pond bridge", provider)
 	}
 	backend, err := configureProviderBackend(resolved, &cfg, rt)
 	if err != nil {

@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { adminGrantVersion, issueUserToken, sha256Hex } from "../src/auth";
+import { adminGrantVersion, issueUserToken } from "../src/auth";
 import type { BridgeTicketKind, LeaseBridgeTicketRecord } from "../src/bridge-tickets";
 import { CloudflareCoordinatorRuntime } from "../src/coordinator-runtime";
+import { sha256Hex } from "../src/encoding";
 import { FleetCoordinator } from "../src/fleet";
 import { orgKeyForLabel } from "../src/org-identity";
 import type { Env, LeaseRecord } from "../src/types";

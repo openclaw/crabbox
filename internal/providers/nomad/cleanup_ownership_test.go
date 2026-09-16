@@ -64,11 +64,8 @@ func TestNomadDestructionFencesValidationPurgeAndAbsence(t *testing.T) {
 				expireClaim(t, claim, core.ClockNow(b.rt.Clock).Add(-time.Hour))
 				claim, _ = readLeaseClaim(claim.LeaseID)
 			}
-			expectedJob := cloneJob(fake.jobs[claim.Labels[claimLabelJobID]])
 			if operation == "rollback" {
-				if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
-					t.Fatal(err)
-				}
+				claim = markRegistrationClaim(t, claim, fake.jobs[claim.Labels[claimLabelJobID]], registrationConfirmed)
 			}
 			lockPath := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claim-locks", claim.LeaseID+".json.lock")
 			if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
@@ -111,9 +108,9 @@ func TestNomadDestructionFencesValidationPurgeAndAbsence(t *testing.T) {
 				err = b.deleteOwnedRunJob(context.Background(), client, claim)
 			case "rollback":
 				cause := errors.New("setup failed")
-				err = b.cleanupUnclaimedJob(context.Background(), client, expectedJob, cause)
-				if err == cause {
-					err = nil
+				recovery, failure := b.rollbackRegistration(context.Background(), client, claim, cause)
+				if recovery != nil || !errors.Is(failure, cause) || !strings.Contains(failure.Error(), "rolled back") {
+					t.Fatalf("rollback result recovery=%#v err=%v", recovery, failure)
 				}
 			}
 			if err != nil || purges != 1 || reads < 2 {
@@ -320,23 +317,26 @@ func TestNomadKeptRunRefreshFencesClaimChangedDuringExecution(t *testing.T) {
 	}
 }
 
-func TestNomadSetupRollbackRetainsPublishedClaim(t *testing.T) {
+func TestNomadSetupRollbackRetainsChangedClaim(t *testing.T) {
 	for _, partial := range []bool{false, true} {
 		t.Run(strconv.FormatBool(partial), func(t *testing.T) {
 			fake := newLifecycleFakeClient()
 			b, _, _ := testBackend(t, fake)
 			claim := createClaim(t, b, "cbx_a44444444444", "setup-crab", "crabbox-a44444444444", "alloc-a")
-			expected := cloneJob(fake.jobs[claim.Labels[claimLabelJobID]])
+			claim = markRegistrationClaim(t, claim, fake.jobs[claim.Labels[claimLabelJobID]], registrationConfirmed)
+			expected := claim
+			labels := maps.Clone(claim.Labels)
+			labels["owner_revision"] = "replacement"
 			if partial {
-				var err error
-				claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, nil)
-				if err != nil {
-					t.Fatal(err)
-				}
+				labels = nil
+			}
+			claim, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+			if err != nil {
+				t.Fatal(err)
 			}
 			cause := errors.New("publication failed")
-			err := b.cleanupUnclaimedJob(context.Background(), fake, expected, cause)
-			if !errors.Is(err, cause) || err == cause || len(fake.deregisters) != 0 {
+			recovery, err := b.rollbackRegistration(context.Background(), fake, expected, cause)
+			if recovery != nil || !errors.Is(err, cause) || err == cause || len(fake.deregisters) != 0 {
 				t.Fatalf("err=%v purges=%v", err, fake.deregisters)
 			}
 			assertNomadClaimRetained(t, claim)

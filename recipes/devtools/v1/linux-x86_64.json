@@ -13,7 +13,7 @@
   "inputs": [
     {
       "path": "scripts/install-linux-developer-tools.sh",
-      "sha256": "sha256:2c2c2adc415c6fd866eb396f0907f44ec13192a68f85b9e6e2843f9e1c963b36"
+      "sha256": "sha256:1970a1954c57d1fe81a05892125910d19143e245e03fe82387a415904f591e6a"
     },
     {
       "path": "scripts/linux-readiness.generated.sh",

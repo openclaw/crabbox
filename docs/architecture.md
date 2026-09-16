@@ -162,6 +162,10 @@ One logical `FleetCoordinator` (`worker/src/fleet.ts`) owns:
   `cost_limit_exceeded`. Cost = hourly rate × TTL, where the rate comes from a
   `CRABBOX_COST_RATES_JSON` override, then a provider live price, then built-in
   defaults.
+  Shared predicates in `worker/src/lease-state.ts` keep accounting, host
+  reservations, and lifecycle handling aligned: active/provisioning rows remain
+  live until a terminal transition, even after a heartbeat deadline, and
+  registered inventory stays outside managed usage.
 - **Usage accounting** — `usageSummary` aggregates leases per
   owner/org/provider/server type for the month; served at `GET /v1/usage`.
 - **Cleanup and expiry** — runtime alarms/jobs and reconciliation run maintenance:
@@ -187,7 +191,19 @@ later request can retry. Token acquisition, refresh margins, expiry calculation,
 and metadata-server trust/retry rules remain adapter-owned. Caches are neither
 global nor persisted, and do not fall back to expired credentials.
 
+Binary hex/base64 encoding and SHA-256 formatting live in `worker/src/encoding.ts`,
+independent of authentication. Text digests use UTF-8; binary digests preserve
+the supplied view and byte offsets. Token formats, validation, signing, and
+encryption key derivation remain with the protocols that own them.
+
 Runtime-specific persistence and scheduling stay behind `CoordinatorRuntime`:
+
+Fleet, host-reservation, and checkpoint scans share the ordered, bounded
+`coordinatorStorageEntries` iterator in `worker/src/storage-scan.ts`. It fetches
+the next page only after the current page is consumed. Callers retain their
+page sizes, cache policy, transaction scope, and early-exit conditions;
+checkpoint claim expiry still applies each transition sequentially. Destructive
+first-page draining and maintenance with persisted cursors remain separate.
 
 | Runtime    | Durable state               | Scheduling                                     | WebSockets                               |
 | ---------- | --------------------------- | ---------------------------------------------- | ---------------------------------------- |
@@ -198,6 +214,15 @@ The Node runtime currently requires one service replica because lifecycle
 serialization and live bridge ownership are process-local. PostgreSQL and
 pg-boss are durable, but horizontal replicas need distributed locking and
 bridge routing first.
+
+Maintenance selects bridge cleanup from live bridge owners and existing persisted
+egress records, so ended leases with no bridge state require no repeated deletes,
+including after coordinator restarts. Failed deletes retain their cleanup evidence.
+Ready-pool maintenance reads only the leases referenced by its entries, and
+interrupted-provisioning checks read journals only for recovery candidates.
+Each maintenance pass collects candidate lease IDs once, then rereads their
+current records at the owning phase. Final alarm selection still scans current
+state so work admitted during provider I/O keeps its wakeup.
 
 ## Coordinator HTTP API
 

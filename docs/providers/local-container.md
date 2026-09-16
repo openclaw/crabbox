@@ -87,6 +87,45 @@ If the command supplies stderr, Crabbox includes its bounded diagnostic in the
 error so daemon startup failures are not hidden behind an empty-identity message.
 These failures stop acquisition before a lease or container is created.
 
+### Initial image evidence
+
+Docker and Podman runs record the configured creation reference separately from
+the actual container's full runtime image ID. The optional `imageEvidence`
+object appears in timing JSON and retained `inspect --json` output; the context
+block, emitted Markdown proof, and opt-in local history expose the same snapshot.
+Saved timing, proof, and local-history records remain readable after cleanup.
+`machineType` and `serverType` keep their existing display-image meanings.
+
+`configuredReference` is the creation reference, not a later invocation's image
+override. `runtimeImageId` is the runtime-reported container image ID, or an empty
+string when unavailable. `repositoryDigests` is a sorted, deduplicated array of
+repository digest references reported by local image inspection using that ID.
+It is never inferred from a tag, a bare digest, or a registry lookup. A pinned
+input digest and the runtime image ID may identify different image objects.
+
+`repositoryDigestStatus` is `available` for a nonempty reported list,
+`unavailable` for a successful empty or null list, and `unknown` when observation
+fails or the image ID is absent. Empty lists serialize as `[]`. An optional
+metadata query is bounded to two seconds; failure warns without changing the
+workload or cleanup result. Caller cancellation still cancels the operation.
+Locally built or tagged images can have repository digests: only observed
+metadata determines availability.
+
+The first validated container inspection is captured into the existing pending
+claim publication before SSH bootstrap completes. During the brief initial
+pending phase before that durable observation, inspection omits `imageEvidence`
+rather than returning a temporary live digest list. Once published, inspection
+and the completed run retain that same snapshot throughout bootstrap, even if
+the runtime's repository-digest list changes in the meantime.
+
+Retained claims keep the snapshot bound to the container and image IDs. Reuse
+preserves it; readiness and cleanup do not perform extra image queries. Older
+claims can be observed when resolved for use. Other providers and old saved run
+records without an observation omit the whole object. This is unsigned evidence
+of the initial image, not an attestation of the container's writable filesystem;
+signed receipts and checkpoint identities are unchanged. Image selection,
+pull policy, architecture, and lifecycle behavior are unchanged.
+
 ### Fixed-ID replay
 
 ```sh
@@ -246,6 +285,18 @@ CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET
 CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME
 ```
 
+File strings only replace earlier values when nonempty, and file CPU values
+apply only when positive. Environment CPU parsing preserves the earlier value
+on malformed input; an explicit environment zero still applies. The two boolean
+settings distinguish omission/null from explicit `false`, so false can override
+an earlier true value. Source overlays keep string text unchanged; later
+provider defaults and runtime normalization remain separate.
+
+Explicit runtime, image and work-root input remains explicit even when it equals
+the existing value. The raw initial work root is empty; the effective
+`/work/crabbox` default is applied later. `noHostname` has no provider CLI flag,
+and volumes and checkpoint metadata are not file/environment settings.
+
 Set `localContainer.noHostname: true` or
 `CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME=1` when the runtime rejects an explicit
 hostname, such as when it shares the host UTS namespace. By default Crabbox
@@ -319,7 +370,7 @@ state; the original removal failure is not converted into success.
    login profile. Profiles added after bootstrap can prepend to or intentionally
    replace that baseline; the profile selected during bootstrap keeps its final
    managed restore block.
-4. With `--desktop`, the container installs and starts Xvfb, XFCE, x11vnc,
+4. With `--desktop`, the container installs and starts resize-capable TigerVNC, XFCE,
    xdotool, screenshot tools, ffmpeg, noVNC, and websockify — no systemd
    required.
 5. With `--browser`, the container preserves a working Chrome, Chromium, Firefox

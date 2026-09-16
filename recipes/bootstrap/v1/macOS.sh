@@ -2,6 +2,7 @@
 # User-data stdout/stderr are logged; never trace generated account credentials.
 set +x
 set -euo pipefail
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 crabbox_user={{user}}
 crabbox_work_root={{workRoot}}
 crabbox_public_key={{publicKey}}
@@ -65,8 +66,11 @@ launchctl kickstart -k system/com.apple.screensharing || true
 cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/bin/bash
 set -euo pipefail
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 rsync --version >/dev/null
 curl --version >/dev/null
+node --version >/dev/null
+npm --version >/dev/null
 test -w {{workRoot}}
 ssh_ready=0
 for port in {{ports}}; do

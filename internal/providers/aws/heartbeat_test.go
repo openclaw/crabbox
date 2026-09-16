@@ -23,7 +23,7 @@ import (
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
-func awsHeartbeatFixture(t *testing.T, fixed bool) (*awsLeaseBackend, *fakeAWSClient, LeaseTarget) {
+func awsHeartbeatFixture(t *testing.T, fixed bool) (*awsLeaseBackend, *fakeAWSClient, core.LeaseTarget) {
 	t.Helper()
 	testutil.IsolateUserDirs(t)
 	fake := &fakeAWSClient{}
@@ -31,8 +31,8 @@ func awsHeartbeatFixture(t *testing.T, fixed bool) (*awsLeaseBackend, *fakeAWSCl
 	cfg := fixedAWSTestConfig()
 	cfg.AWSSSHCIDRs = []string{"198.51.100.10/32"}
 	cfg.IdleTimeout = 45 * time.Minute
-	backend := NewAWSLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
-	request := AcquireRequest{RequestedSlug: "heartbeat"}
+	backend := NewAWSLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	request := core.AcquireRequest{RequestedSlug: "heartbeat"}
 	if fixed {
 		request.RequestedLeaseID = "cbx_abcdef123499"
 	}
@@ -41,7 +41,7 @@ func awsHeartbeatFixture(t *testing.T, fixed bool) (*awsLeaseBackend, *fakeAWSCl
 		t.Fatal(err)
 	}
 	if !fixed {
-		fake.servers = []Server{lease.Server}
+		fake.servers = []core.Server{lease.Server}
 		if err := core.ClaimLeaseTargetForConfig(lease.LeaseID, "heartbeat", cfg, lease.Server, lease.SSH, cfg.IdleTimeout); err != nil {
 			t.Fatal(err)
 		}
@@ -126,7 +126,7 @@ func TestAWSTouchCancelsWhileRunOwnsClaim(t *testing.T) {
 	}()
 	fake.getIDs = nil
 	go func() {
-		_, err := b.Touch(ctx, TouchRequest{Lease: lease, State: "running"})
+		_, err := b.Touch(ctx, core.TouchRequest{Lease: lease, State: "running"})
 		touchDone <- err
 	}()
 	cancel()
@@ -149,7 +149,7 @@ type runResolutionAWSClient struct {
 	listCalls int
 }
 
-func (c *runResolutionAWSClient) ListCrabboxServers(ctx context.Context) ([]Server, error) {
+func (c *runResolutionAWSClient) ListCrabboxServers(ctx context.Context) ([]core.Server, error) {
 	c.listCalls++
 	return c.fakeAWSClient.ListCrabboxServers(ctx)
 }
@@ -193,7 +193,7 @@ func TestAWSRunResolutionPreservesClaimAndExactAuthority(t *testing.T) {
 				}
 				lookup := &runResolutionAWSClient{fakeAWSClient: fake}
 				oldClient := newAWSClient
-				newAWSClient = func(_ context.Context, cfg Config) (awsClient, error) {
+				newAWSClient = func(_ context.Context, cfg core.Config) (awsClient, error) {
 					if cfg.AWSRegion != before.Labels["aws_region"] || len(cfg.Capacity.Regions) != 0 {
 						t.Errorf("run lookup escaped claim region: region=%s alternatives=%v", cfg.AWSRegion, cfg.Capacity.Regions)
 					}
@@ -204,7 +204,7 @@ func TestAWSRunResolutionPreservesClaimAndExactAuthority(t *testing.T) {
 				b.Cfg.Capacity.Regions = []string{"eu-west-1", before.Labels["aws_region"]}
 				fake.getIDs = nil
 				creates := fake.createCalls
-				resolved, resolveErr := b.ResolveRunLeaseUnderClaim(t.Context(), ResolveRequest{ID: lease.LeaseID, Prepare: true}, before)
+				resolved, resolveErr := b.ResolveRunLeaseUnderClaim(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Prepare: true}, before)
 				if lookup.listCalls != 0 || len(fake.getIDs) != 1 || fake.getIDs[0] != before.CloudID {
 					t.Fatalf("run lookup must read only the bound instance: lists=%d gets=%v", lookup.listCalls, fake.getIDs)
 				}
@@ -281,7 +281,7 @@ func TestAWSTouchRejectsChangedAuthorityBeforeMutation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			touch := TouchRequest{Lease: lease, State: "running"}
+			touch := core.TouchRequest{Lease: lease, State: "running"}
 			live := fake.servers[0]
 			live.Labels = maps.Clone(live.Labels)
 			live.ProviderMetadata = maps.Clone(live.ProviderMetadata)
@@ -325,7 +325,7 @@ func TestAWSTouchRejectsChangedAuthorityBeforeMutation(t *testing.T) {
 			case "failed tag write":
 				fake.setTagsErr = errors.New("CreateTags rejected")
 			}
-			fake.get = map[string]Server{lease.Server.CloudID: live}
+			fake.get = map[string]core.Server{lease.Server.CloudID: live}
 			before, existed, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
 			if err != nil {
 				t.Fatal(err)
@@ -358,7 +358,7 @@ func TestAWSStatusWaitAndConnectRenewOrdinaryAndFixedClaims(t *testing.T) {
 	}
 }
 
-func runAWSLifecycleCommandFixture(t *testing.T, fake *fakeAWSClient, lease LeaseTarget) {
+func runAWSLifecycleCommandFixture(t *testing.T, fake *fakeAWSClient, lease core.LeaseTarget) {
 	t.Helper()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {

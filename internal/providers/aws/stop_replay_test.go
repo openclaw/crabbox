@@ -26,7 +26,7 @@ type stopReplayAWSClient struct {
 	listErr error
 }
 
-func (c *stopReplayAWSClient) ListCrabboxServers(ctx context.Context) ([]Server, error) {
+func (c *stopReplayAWSClient) ListCrabboxServers(ctx context.Context) ([]core.Server, error) {
 	c.lists++
 	if c.listErr != nil {
 		return nil, c.listErr
@@ -51,7 +51,7 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 		expectedExact    bool
 		lookup           string
 		inspect          bool
-		conflict         func(Server) Server
+		conflict         func(core.Server) core.Server
 		inventoryError   bool
 		malformedVersion bool
 		mutate           func(*core.LeaseClaim)
@@ -74,17 +74,17 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 		{name: "slug", lookup: "stop-replay"},
 		{name: "raw_instance", lookup: "i-fixed"},
 		{name: "inventory_error", inventoryError: true},
-		{name: "visible_original", conflict: func(s Server) Server { return s }},
-		{name: "visible_same_lease_wrong_owner", conflict: func(s Server) Server {
+		{name: "visible_original", conflict: func(s core.Server) core.Server { return s }},
+		{name: "visible_same_lease_wrong_owner", conflict: func(s core.Server) core.Server {
 			s.CloudID = "i-conflict"
 			s.Labels["provider"] = "other"
 			return s
 		}},
-		{name: "visible_original_wrong_lease", conflict: func(s Server) Server {
+		{name: "visible_original_wrong_lease", conflict: func(s core.Server) core.Server {
 			s.Labels["lease"] = "cbx_000000000001"
 			return s
 		}},
-		{name: "visible_terminal_word", conflict: func(s Server) Server { s.Status = "terminated"; return s }},
+		{name: "visible_terminal_word", conflict: func(s core.Server) core.Server { s.Status = "terminated"; return s }},
 		{name: "wrong_provider_discriminator", mutate: func(c *core.LeaseClaim) { c.Provider = "aws" }},
 		{name: "non_fixed", mutate: func(c *core.LeaseClaim) { c.Provider = "aws"; c.FixedCreateIntent = nil }},
 		{name: "wrong_stored_lease", mutate: func(c *core.LeaseClaim) { c.LeaseID = "cbx_000000000002" }},
@@ -138,12 +138,12 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 			fake := &fakeAWSClient{}
 			t.Cleanup(installFixedAWSTestClient(t, fake))
 			client := &stopReplayAWSClient{fakeAWSClient: fake}
-			newAWSClient = func(context.Context, Config) (awsClient, error) { return client, nil }
+			newAWSClient = func(context.Context, core.Config) (awsClient, error) { return client, nil }
 			cfg := fixedAWSTestConfig()
 			// Prevent public-IP discovery during the real fixed acquisition setup.
 			cfg.AWSSSHCIDRs = []string{"127.0.0.1/32"}
-			req := AcquireRequest{Repo: core.Repo{Root: repo}, Keep: true, RequestedLeaseID: "cbx_abcdef123490", RequestedSlug: "stop-replay"}
-			backend := NewAWSLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+			req := core.AcquireRequest{Repo: core.Repo{Root: repo}, Keep: true, RequestedLeaseID: "cbx_abcdef123490", RequestedSlug: "stop-replay"}
+			backend := NewAWSLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
 			lease, err := backend.Acquire(t.Context(), req)
 			if err != nil {
 				t.Fatal(err)
@@ -216,11 +216,8 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 				t.Fatal(err)
 			}
 			// Model local files left by an older stop or interrupted cleanup.
-			key, err := core.TestboxKeyPath(lease.LeaseID)
+			key, err := core.PrepareStoredTestboxKeyPath(lease.LeaseID)
 			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.MkdirAll(filepath.Dir(key), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			trust := filepath.Join(filepath.Dir(key), "known_hosts")
@@ -236,7 +233,7 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 			if tc.conflict != nil {
 				server := lease.Server
 				server.Labels = maps.Clone(server.Labels)
-				reloaded.servers = []Server{tc.conflict(server)}
+				reloaded.servers = []core.Server{tc.conflict(server)}
 			}
 			if tc.active {
 				// A future owner reconciliation may try the remaining key, but it
@@ -246,7 +243,7 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 			if tc.inventoryError {
 				reloaded.listErr = errors.New("synthetic inventory unavailable")
 			}
-			newAWSClient = func(context.Context, Config) (awsClient, error) { return reloaded, nil }
+			newAWSClient = func(context.Context, core.Config) (awsClient, error) { return reloaded, nil }
 			if tc.region != "" {
 				t.Setenv("CRABBOX_AWS_REGION", tc.region)
 			}
@@ -265,10 +262,10 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 			}
 			if tc.expectedLease != "" || tc.expectedAttempt != "" || tc.expectedSlug != "" || tc.expectedCloud != "" || tc.expectedExact {
 				args = append(args,
-					"--expected-provider-lease-id", blank(tc.expectedLease, lease.LeaseID),
-					"--expected-provider-attempt-lease-id", blank(tc.expectedAttempt, lease.LeaseID),
-					"--expected-provider-slug", blank(tc.expectedSlug, req.RequestedSlug),
-					"--expected-provider-resource-id", blank(tc.expectedCloud, lease.Server.CloudID),
+					"--expected-provider-lease-id", core.Blank(tc.expectedLease, lease.LeaseID),
+					"--expected-provider-attempt-lease-id", core.Blank(tc.expectedAttempt, lease.LeaseID),
+					"--expected-provider-slug", core.Blank(tc.expectedSlug, req.RequestedSlug),
+					"--expected-provider-resource-id", core.Blank(tc.expectedCloud, lease.Server.CloudID),
 				)
 			}
 			var output bytes.Buffer
@@ -304,7 +301,7 @@ func TestAWSFixedStopReplayAfterInventoryDisappears(t *testing.T) {
 				}
 				// A second fresh client/App must still use only the durable receipt.
 				again := &stopReplayAWSClient{fakeAWSClient: &fakeAWSClient{}}
-				newAWSClient = func(context.Context, Config) (awsClient, error) { return again, nil }
+				newAWSClient = func(context.Context, core.Config) (awsClient, error) { return again, nil }
 				output.Reset()
 				if err := (core.App{Stdout: &output, Stderr: &output}).Run(t.Context(), args); err != nil {
 					t.Fatal(err)
@@ -348,20 +345,20 @@ func assertAWSReceiptIdentity(t *testing.T, receipt, acquired core.LeaseClaim) {
 	}
 }
 
-func setupAWSReplayClaim(t *testing.T) (*awsLeaseBackend, *fakeAWSClient, AcquireRequest, LeaseTarget, string) {
+func setupAWSReplayClaim(t *testing.T) (*awsLeaseBackend, *fakeAWSClient, core.AcquireRequest, core.LeaseTarget, string) {
 	t.Helper()
 	dirs := testutil.IsolateUserDirs(t)
 	fake := &fakeAWSClient{}
 	t.Cleanup(installFixedAWSTestClient(t, fake))
 	cfg := fixedAWSTestConfig()
 	cfg.AWSSSHCIDRs = []string{"127.0.0.1/32"}
-	req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedLeaseID: "cbx_abcdef123491", RequestedSlug: "receipt-fence"}
-	backend := NewAWSLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	req := core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedLeaseID: "cbx_abcdef123491", RequestedSlug: "receipt-fence"}
+	backend := NewAWSLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
 	lease, err := backend.Acquire(t.Context(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease.SSH = SSHTarget{}
+	lease.SSH = core.SSHTarget{}
 	lease.Server.PublicNet.IPv4.IP = ""
 	fake.servers[0].PublicNet.IPv4.IP = ""
 	return backend, fake, req, lease, filepath.Join(dirs.StateHome, "crabbox", "claims", lease.LeaseID+".json")
@@ -385,7 +382,7 @@ func TestAWSFixedStopRetriesLocalSSHCleanup(t *testing.T) {
 	if err := os.WriteFile(dir, []byte("synthetic cleanup obstacle"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	outcome, err := backend.ReleaseLeaseWithOutcome(t.Context(), ReleaseLeaseRequest{Lease: lease})
+	outcome, err := backend.ReleaseLeaseWithOutcome(t.Context(), core.ReleaseLeaseRequest{Lease: lease})
 	if err == nil || !outcome.Terminal || !strings.Contains(err.Error(), "local SSH cleanup") {
 		t.Fatalf("confirmed remote deletion must report pending local cleanup: outcome=%+v err=%v", outcome, err)
 	}
@@ -403,13 +400,13 @@ func TestAWSFixedStopRetriesLocalSSHCleanup(t *testing.T) {
 		t.Fatal("local cleanup failure did not follow exact provider cleanup")
 	}
 	fresh := &fakeAWSClient{}
-	newAWSClient = func(context.Context, Config) (awsClient, error) { return fresh, nil }
-	backend = NewAWSLeaseBackend(Provider{}.Spec(), backend.Cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
-	target, err := backend.Resolve(t.Context(), ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
+	newAWSClient = func(context.Context, core.Config) (awsClient, error) { return fresh, nil }
+	backend = NewAWSLeaseBackend(Provider{}.Spec(), backend.Cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	target, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	outcome, err = backend.ReleaseLeaseWithOutcome(t.Context(), ReleaseLeaseRequest{Lease: target})
+	outcome, err = backend.ReleaseLeaseWithOutcome(t.Context(), core.ReleaseLeaseRequest{Lease: target})
 	if err == nil || !outcome.Terminal || !strings.Contains(err.Error(), "local SSH cleanup") {
 		t.Fatalf("terminal replay must report pending local cleanup: outcome=%+v err=%v", outcome, err)
 	}
@@ -444,7 +441,7 @@ func TestAWSFixedStopRetriesLocalSSHCleanup(t *testing.T) {
 
 func TestAWSFixedStopReleaseOwnerFence(t *testing.T) {
 	backend, _, _, lease, path := setupAWSReplayClaim(t)
-	if err := backend.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
 	original, err := os.ReadFile(path)
@@ -454,7 +451,7 @@ func TestAWSFixedStopReleaseOwnerFence(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		claim       func(*core.LeaseClaim)
-		target      func(*LeaseTarget)
+		target      func(*core.LeaseTarget)
 		client      func(*stopReplayAWSClient)
 		expected    core.ProviderIdentityExpectation
 		remove      bool
@@ -494,15 +491,15 @@ func TestAWSFixedStopReleaseOwnerFence(t *testing.T) {
 			s.CloudID = "i-conflict"
 			s.Labels = maps.Clone(s.Labels)
 			s.Labels["provider"] = "other"
-			c.servers = []Server{s}
+			c.servers = []core.Server{s}
 		}},
-		{name: "forged_terminal_word_without_snapshot", target: func(l *LeaseTarget) {
-			l.Server = Server{Provider: "aws", CloudID: l.Server.CloudID, Name: l.Server.Name, Status: "released", Labels: l.Server.Labels}
+		{name: "forged_terminal_word_without_snapshot", target: func(l *core.LeaseTarget) {
+			l.Server = core.Server{Provider: "aws", CloudID: l.Server.CloudID, Name: l.Server.Name, Status: "released", Labels: l.Server.Labels}
 		}},
-		{name: "forged_target_resource", target: func(l *LeaseTarget) { l.Server.CloudID = "i-forged" }},
-		{name: "forged_target_slug", target: func(l *LeaseTarget) { l.Server.Labels["slug"] = "forged-slug" }},
-		{name: "forged_target_ssh", target: func(l *LeaseTarget) { l.SSH.Host = "127.0.0.1" }},
-		{name: "forged_matching_snapshot_invalid_receipt", claim: func(c *core.LeaseClaim) { c.FixedCreateIntent.Fingerprint = strings.Repeat("c", 64) }, target: func(l *LeaseTarget) {
+		{name: "forged_target_resource", target: func(l *core.LeaseTarget) { l.Server.CloudID = "i-forged" }},
+		{name: "forged_target_slug", target: func(l *core.LeaseTarget) { l.Server.Labels["slug"] = "forged-slug" }},
+		{name: "forged_target_ssh", target: func(l *core.LeaseTarget) { l.SSH.Host = "127.0.0.1" }},
+		{name: "forged_matching_snapshot_invalid_receipt", claim: func(c *core.LeaseClaim) { c.FixedCreateIntent.Fingerprint = strings.Repeat("c", 64) }, target: func(l *core.LeaseTarget) {
 			claim, err := core.ReadLeaseClaim(l.LeaseID)
 			if err != nil {
 				t.Fatal(err)
@@ -519,11 +516,11 @@ func TestAWSFixedStopReleaseOwnerFence(t *testing.T) {
 				t.Fatal(err)
 			}
 			client := &stopReplayAWSClient{fakeAWSClient: &fakeAWSClient{}}
-			newAWSClient = func(context.Context, Config) (awsClient, error) { return client, nil }
+			newAWSClient = func(context.Context, core.Config) (awsClient, error) { return client, nil }
 			cfg := backend.Cfg
 			cfg.Capacity.Regions = []string{"us-west-2"}
-			fresh := NewAWSLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
-			target, err := fresh.Resolve(t.Context(), ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
+			fresh := NewAWSLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+			target, err := fresh.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -548,7 +545,7 @@ func TestAWSFixedStopReleaseOwnerFence(t *testing.T) {
 				fresh.Cfg.Capacity.Regions = nil
 			}
 			before, _ := os.ReadFile(path)
-			outcome, err := fresh.ReleaseLeaseWithOutcome(t.Context(), ReleaseLeaseRequest{Lease: target, ExpectedProviderIdentity: tc.expected})
+			outcome, err := fresh.ReleaseLeaseWithOutcome(t.Context(), core.ReleaseLeaseRequest{Lease: target, ExpectedProviderIdentity: tc.expected})
 			if outcome.Terminal != (tc.name == "unchanged") {
 				t.Errorf("terminal receipt outcome=%+v case=%s", outcome, tc.name)
 			}
@@ -582,7 +579,7 @@ func TestAWSFixedCleanupFailureThenStopReplay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			visible := append([]Server(nil), fake.servers...)
+			visible := append([]core.Server(nil), fake.servers...)
 			if mode == "orphan" {
 				fake.servers = nil
 			}
@@ -595,7 +592,7 @@ func TestAWSFixedCleanupFailureThenStopReplay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := backend.Cleanup(t.Context(), CleanupRequest{}); !errors.Is(err, keyErr) {
+			if err := backend.Cleanup(t.Context(), core.CleanupRequest{}); !errors.Is(err, keyErr) {
 				t.Fatalf("cleanup error=%v, want key failure", err)
 			}
 			after, err := os.ReadFile(path)
@@ -606,14 +603,14 @@ func TestAWSFixedCleanupFailureThenStopReplay(t *testing.T) {
 				t.Fatalf("wrong exact key cleanup: %v", fake.deletedKeys)
 			}
 			fake.servers = nil
-			if _, err := backend.Resolve(t.Context(), ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true}); err == nil {
+			if _, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true}); err == nil {
 				t.Fatal("missing acquired inventory acknowledged outstanding cleanup")
 			}
 			if mode != "orphan" {
 				fake.servers = visible
 			}
 			fake.deleteKeyErr = nil
-			if err := backend.Cleanup(t.Context(), CleanupRequest{}); err != nil {
+			if err := backend.Cleanup(t.Context(), core.CleanupRequest{}); err != nil {
 				t.Fatal(err)
 			}
 			key, err := core.TestboxKeyPath(lease.LeaseID)
@@ -636,7 +633,7 @@ func TestAWSFixedCleanupFailureThenStopReplay(t *testing.T) {
 				t.Fatal(err)
 			}
 			fresh := &fakeAWSClient{}
-			newAWSClient = func(context.Context, Config) (awsClient, error) { return fresh, nil }
+			newAWSClient = func(context.Context, core.Config) (awsClient, error) { return fresh, nil }
 			t.Chdir(req.Repo.Root)
 			configPath := filepath.Join(req.Repo.Root, "config.yaml")
 			if err := os.WriteFile(configPath, []byte("provider: aws\naws:\n  region: us-east-1\n"), 0o600); err != nil {
@@ -657,7 +654,7 @@ func TestAWSFixedCleanupFailureThenStopReplay(t *testing.T) {
 
 func TestAWSFixedOldCompactReceiptRemainsSingleUse(t *testing.T) {
 	backend, fake, req, lease, path := setupAWSReplayClaim(t)
-	if err := backend.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
 	claim, err := core.ReadLeaseClaim(lease.LeaseID)
@@ -676,13 +673,13 @@ func TestAWSFixedOldCompactReceiptRemainsSingleUse(t *testing.T) {
 	}
 	fake.servers = nil
 	creates, deletes, keys := fake.createCalls, len(fake.deletedInstances), len(fake.deletedKeys)
-	if _, err := backend.Resolve(t.Context(), ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true}); err == nil {
+	if _, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true}); err == nil {
 		t.Fatal("old compact receipt acknowledged scope it cannot prove")
 	}
 	if _, err := backend.Acquire(t.Context(), req); err == nil {
 		t.Fatal("old compact receipt allowed fixed-ID reallocation")
 	}
-	if err := backend.Cleanup(t.Context(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(t.Context(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(path)

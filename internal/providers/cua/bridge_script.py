@@ -226,8 +226,8 @@ def main():
     try:
         req = json.load(sys.stdin)
         cfg = req.get("config") or {}
-        preferred = cfg.get("sdkImport") or os.environ.get("CRABBOX_CUA_SDK_IMPORT") or "cua"
-        fallback = cfg.get("fallbackImport") or os.environ.get("CRABBOX_CUA_SDK_FALLBACK_IMPORT") or "cua_sandbox"
+        preferred = cfg.get("sdkImport") or os.environ.get("CRABBOX_CUA_SDK_IMPORT")
+        fallback = cfg.get("fallbackImport") or os.environ.get("CRABBOX_CUA_SDK_FALLBACK_IMPORT")
         mod, import_path, import_error = import_sdk(preferred, fallback)
         if mod is not None:
             sdk_configure(mod, cfg)

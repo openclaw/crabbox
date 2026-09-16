@@ -103,6 +103,7 @@ See [history](commands/history.md), [logs](commands/logs.md),
 
 ```text
 crabbox connect <id>                          open an interactive SSH session
+crabbox exec --id <id> -- <command>            execute without syncing under the current claim
 crabbox ssh --id <id>                          print the SSH command
 crabbox open --editor=zed --id <id>             prepare an editor handoff
 crabbox vnc --id <id> [--open]                 print/open SSH-tunneled VNC details
@@ -114,7 +115,7 @@ crabbox screenshot --id <id> [--output <png>]  capture a PNG from a desktop leas
 crabbox desktop launch|terminal|record|proof|doctor|click|paste|type|key
 ```
 
-See [connect](commands/connect.md), [ssh](commands/ssh.md), [open](commands/open.md),
+See [exec](commands/exec.md), [connect](commands/connect.md), [ssh](commands/ssh.md), [open](commands/open.md),
 [vnc](commands/vnc.md), [webvnc](commands/webvnc.md), [code](commands/code.md),
 [egress](commands/egress.md), [ports](commands/ports.md),
 [screenshot](commands/screenshot.md), [desktop](commands/desktop.md).
@@ -171,6 +172,7 @@ See [pond](commands/pond.md) and the [pond feature](features/pond.md).
 ```text
 crabbox providers                             show provider capabilities
 crabbox providers describe <provider>         show compiled run flags for one runnable provider
+crabbox preflight-tools [--json]              list accepted preflight names and target support offline
 crabbox usage [--scope user|org|all]          cost and usage estimates
 crabbox capacity [--json]                   self-owner admission count and limit
 crabbox marketplace status|quote              preview the credits gateway and smart-routing quotes
@@ -178,7 +180,7 @@ crabbox admin leases|lease-audit|providers|hosts|release|delete
 crabbox admin aws-identity|aws-policy|mac-hosts
 ```
 
-See [providers](commands/providers.md), [usage](commands/usage.md),
+See [providers](commands/providers.md), [preflight-tools](commands/preflight-tools.md), [usage](commands/usage.md),
 [capacity](commands/capacity.md),
 [marketplace](commands/marketplace.md), [admin](commands/admin.md).
 

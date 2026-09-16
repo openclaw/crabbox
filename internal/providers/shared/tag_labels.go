@@ -6,6 +6,23 @@ import (
 	"strings"
 )
 
+// NormalizeTags returns a sorted, case-sensitive set of trimmed nonempty tags.
+// It does not validate wire formats or interpret ownership metadata.
+func NormalizeTags(tags []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		out = append(out, tag)
+	}
+	sort.Strings(out)
+	return out
+}
+
 type tagMerge uint8
 
 const (
@@ -69,6 +86,16 @@ func TailscaleTagFields() []TagLabelField {
 func (s TagLabelSchema) Keys() []string { return slices.Clone(s.keys) }
 
 func (s TagLabelSchema) Exact(key string) bool { return s.fields[key].Exact }
+
+// EncodeTags emits nonempty schema fields using the adapter's wire encoder.
+func (s TagLabelSchema) EncodeTags(labels map[string]string, tags []string, encode func(string, string) string) []string {
+	for _, key := range s.keys {
+		if value := labels[key]; value != "" {
+			tags = append(tags, encode(key, value))
+		}
+	}
+	return NormalizeTags(tags)
+}
 
 type TagLabelReducer struct {
 	schema    TagLabelSchema

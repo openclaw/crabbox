@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { AsyncMutex, fleetRequestQueue } from "../node/server-support";
+import { fleetRequestQueue } from "../node/server-support";
+import { AsyncMutex } from "../src/async-mutex";
 import { issueUserToken } from "../src/auth";
 import { routeCoordinatorRequest } from "../src/coordinator-entry";
 import {

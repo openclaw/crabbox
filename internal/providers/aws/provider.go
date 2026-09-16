@@ -44,10 +44,12 @@ var memoryGiBPerVCPU = map[string]int{
 
 var classProfiles = buildClassProfiles()
 
-func (Provider) Name() string      { return "aws" }
-func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication: core.ProviderAuthentication{
+			{Route: "direct", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationSDKCredentials}, Description: "Direct access uses the AWS SDK credential chain."},
+			{Route: "brokered", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationCoordinator}, Description: "The client authenticates to the coordinator; cloud credentials remain server-side."},
+		},
 		Name:   "aws",
 		Family: "aws",
 		Kind:   core.ProviderKindSSHLease,
@@ -57,7 +59,7 @@ func (Provider) Spec() core.ProviderSpec {
 			{OS: core.TargetWindows, WindowsMode: "wsl2"},
 			{OS: core.TargetMacOS},
 		},
-		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode, core.FeatureRunSession},
+		Features:         core.FeatureSet{core.FeatureSSH, core.FeatureCrabboxSync, core.FeatureCleanup, core.FeatureDesktop, core.FeatureBrowser, core.FeatureCode, core.FeatureRunSession, core.FeatureTailscale},
 		Coordinator:      core.CoordinatorSupported,
 		ClassDisposition: core.ProviderClassDispositionMapped,
 	}
@@ -121,10 +123,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 		return ""
 	}
 	return candidates[0]
-}
-
-func (Provider) ServerTypeForClass(class string) string {
-	return awsInstanceTypeCandidatesForClass(class)[0]
 }
 
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
@@ -301,15 +299,11 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return NewAWSLeaseBackend(p.Spec(), cfg, rt), nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("aws", func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
 func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
 	if req.Server.CloudID == "" {
 		return core.NativeCheckpointCapability{}, false
 	}
-	targetOS := firstNonBlank(req.Target.TargetOS, req.Config.TargetOS)
+	targetOS := shared.FirstNonEmpty(req.Target.TargetOS, req.Config.TargetOS)
 	strategy := core.NormalizeCheckpointStrategy(req.Strategy)
 	if isWindowsNativeTarget(req) {
 		if req.StrategyExplicit && strategy != core.CheckpointStrategyImage {
@@ -336,13 +330,8 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	return core.NativeCheckpointCapability{Kind: core.CheckpointKindAWSEBS, RetireSource: true}, true
 }
 
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonEmpty(values...)
-}
-
 func isWindowsNativeTarget(req core.NativeCheckpointRequest) bool {
-	return firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) == core.TargetWindows &&
-		firstNonBlank(req.Target.WindowsMode, req.Config.WindowsMode) == core.WindowsModeNormal
+	return shared.FirstNonEmpty(req.Target.TargetOS, req.Config.TargetOS) == core.TargetWindows && shared.FirstNonEmpty(req.Target.WindowsMode, req.Config.WindowsMode) == core.WindowsModeNormal
 }
 
 func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {

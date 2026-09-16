@@ -38,18 +38,18 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	if inheritedWebVNCDaemonPortReservation(webPort) {
 		webListener, err = inheritedWebVNCDaemonListener(webPort)
 		if err != nil {
-			return exit(5, "adopt local macOS WebVNC listener: %v", err)
+			return Exit(5, "adopt local macOS WebVNC listener: %v", err)
 		}
 	} else {
 		webReservation, reserveErr := reserveWebVNCDaemonPort(webPort)
 		if reserveErr != nil {
-			return exit(5, "reserve local macOS WebVNC port: %v", reserveErr)
+			return Exit(5, "reserve local macOS WebVNC port: %v", reserveErr)
 		}
 		webPort = webReservation.port
 		webListener, err = webReservation.listener()
 		if err != nil {
 			webReservation.release()
-			return exit(5, "open local macOS WebVNC listener: %v", err)
+			return Exit(5, "open local macOS WebVNC listener: %v", err)
 		}
 	}
 	defer webListener.Close()
@@ -74,7 +74,7 @@ func (a App) macOSWebVNCBridge(ctx context.Context, cfg Config, id, webPort stri
 	}
 	fmt.Fprintln(a.Stdout, "preflight: macOS Screen Sharing RFB authentication ok")
 
-	fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=macos\n", leaseID, blank(serverSlug(server), "-"), blank(server.Provider, cfg.Provider))
+	fmt.Fprintf(a.Stdout, "lease: %s slug=%s provider=%s target=macos\n", leaseID, blank(ServerSlug(server), "-"), blank(server.Provider, cfg.Provider))
 	fmt.Fprintf(a.Stdout, "bridge: serving noVNC locally; SSH tunnel -> guest 127.0.0.1:%s; keep this running while viewing\n", managedVNCPort)
 	return a.serveLocalWebVNCBridge(
 		bridgeCtx,
@@ -175,14 +175,14 @@ func resolveMacOSWebVNCCredentials(ctx context.Context, cfg Config, target SSHTa
 	}
 	password, err := readPassword(ctx, target, remoteVNCCredentialReadCommand(target))
 	if err != nil {
-		return rfbCredentials{}, localWebVNCAuthAuto, exit(5, "read managed macOS desktop credentials: %v", err)
+		return rfbCredentials{}, localWebVNCAuthAuto, Exit(5, "read managed macOS desktop credentials: %v", err)
 	}
 	password = strings.TrimSpace(password)
 	if password == "" {
-		return rfbCredentials{}, localWebVNCAuthAuto, exit(5, "managed macOS desktop password is empty")
+		return rfbCredentials{}, localWebVNCAuthAuto, Exit(5, "managed macOS desktop password is empty")
 	}
 	authMode := localWebVNCAuthARD
-	if provider, providerErr := ProviderFor(cfg.Provider); providerErr == nil && provider.Name() == parallelsProvider {
+	if provider, providerErr := ProviderFor(cfg.Provider); providerErr == nil && provider.Spec().Name == parallelsProvider {
 		authMode = localWebVNCAuthVNC
 	}
 	return rfbCredentials{
@@ -196,10 +196,10 @@ func requireMacOSWebVNCCredentials(credentials rfbCredentials, authMode localWeb
 		return requireMacOSScreenSharingCredentials(credentials)
 	}
 	if authMode != localWebVNCAuthVNC {
-		return exit(2, "unsupported macOS WebVNC authentication mode")
+		return Exit(2, "unsupported macOS WebVNC authentication mode")
 	}
 	if strings.TrimSpace(credentials.Password) == "" {
-		return exit(2, "managed macOS desktop password is required for WebVNC preflight")
+		return Exit(2, "managed macOS desktop password is required for WebVNC preflight")
 	}
 	return nil
 }
@@ -210,11 +210,11 @@ func preflightMacOSWebVNCTunnel(ctx context.Context, tunnel *vncForegroundTunnel
 	}
 	conn, err := dialVNCForegroundTunnel(ctx, tunnel, port)
 	if err != nil {
-		return exit(5, "macOS Screen Sharing preflight failed: %v", err)
+		return Exit(5, "macOS Screen Sharing preflight failed: %v", err)
 	}
 	defer conn.Close()
 	if err := preflightRFBAuthenticationFromConnWithMode(ctx, conn, credentials, authMode); err != nil {
-		return exit(5, "macOS Screen Sharing preflight failed: %v", err)
+		return Exit(5, "macOS Screen Sharing preflight failed: %v", err)
 	}
 	return nil
 }
@@ -279,7 +279,7 @@ func newMacOSWebVNCSession() (macOSWebVNCSession, error) {
 func createMacOSWebVNCHandoff(webPort string, session macOSWebVNCSession, viewerNeedsCredentials bool) (macOSWebVNCHandoff, error) {
 	file, err := os.CreateTemp("", "crabbox-webvnc-*.html")
 	if err != nil {
-		return macOSWebVNCHandoff{}, exit(5, "create WebVNC browser handoff: %v", err)
+		return macOSWebVNCHandoff{}, Exit(5, "create WebVNC browser handoff: %v", err)
 	}
 	path := file.Name()
 	ok := false
@@ -291,11 +291,11 @@ func createMacOSWebVNCHandoff(webPort string, session macOSWebVNCSession, viewer
 	}()
 	rfbSource, err := fs.ReadFile(webVNCAssets(), "rfb.js")
 	if err != nil {
-		return macOSWebVNCHandoff{}, exit(5, "read embedded WebVNC viewer: %v", err)
+		return macOSWebVNCHandoff{}, Exit(5, "read embedded WebVNC viewer: %v", err)
 	}
 	rfbJSON, err := json.Marshal(string(rfbSource))
 	if err != nil {
-		return macOSWebVNCHandoff{}, exit(5, "encode embedded WebVNC viewer: %v", err)
+		return macOSWebVNCHandoff{}, Exit(5, "encode embedded WebVNC viewer: %v", err)
 	}
 	config := map[string]string{
 		"protocol":     session.Protocol,
@@ -307,31 +307,32 @@ func createMacOSWebVNCHandoff(webPort string, session macOSWebVNCSession, viewer
 	}
 	configJSON, err := json.Marshal(config)
 	if err != nil {
-		return macOSWebVNCHandoff{}, exit(5, "encode WebVNC viewer config: %v", err)
+		return macOSWebVNCHandoff{}, Exit(5, "encode WebVNC viewer config: %v", err)
 	}
 	credentialsScript := `let creds={};`
 	if viewerNeedsCredentials {
 		credentialsScript += `try{const body=new URLSearchParams({token:config.token});const response=await fetch(config.credentialsURL,{method:"POST",body});` +
 			`if(response.ok)creds=await response.json();else status.textContent="could not load VNC credentials"}catch(error){status.textContent="could not load VNC credentials"}`
 	}
-	content := `<!doctype html><html><head><meta charset="utf-8"><title>Crabbox WebVNC</title><style>` +
+	content := `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Crabbox WebVNC</title><style>` +
 		// Palette: carapace ink tokens (v0.6.1); backdrop stays dark by design behind the VNC canvas.
-		`html,body{margin:0;height:100%;background:#0d0b0b;overflow:hidden}#screen{width:100%;height:100%}` +
-		`#status{position:fixed;top:0;left:0;right:0;color:#f4f1ef;font:12px/1.6 ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,monospace;padding:4px 8px;background:rgba(13,11,11,.72);z-index:10}` +
-		`</style></head><body><div id="status">connecting...</div><div id="screen"></div><script type="module">` +
+		`html,body{margin:0;height:100%;background:#0d0b0b;overflow:hidden}body{display:flex;flex-direction:column}#screen{width:100%;flex:1;min-height:0}` +
+		`header{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:36px;padding:0 8px;color:#f4f1ef;font:12px/1.6 ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,monospace}#status{overflow-wrap:anywhere}select{width:142px;height:28px;flex-shrink:0}` +
+		`</style></head><body><header><span id="status">connecting...</span><select id="sizing" aria-label="desktop sizing" title="Match requests the window size from a supported server; Fit scales without resizing. Wayland sizing stays with the first resizing viewer until it disconnects."><option value="fit">Fit desktop</option><option value="match">Match window</option></select></header><div id="screen"></div><script type="module">` +
 		`const source=` + string(rfbJSON) + `;const moduleURL=URL.createObjectURL(new Blob([source],{type:"text/javascript"}));` +
 		`const{default:RFB}=await import(moduleURL);const config=` + string(configJSON) + `;const status=document.getElementById("status");` +
 		credentialsScript +
 		`const rfb=new RFB(document.getElementById("screen"),config.websocketURL,{credentials:creds,wsProtocols:[config.protocol]});` +
-		`rfb.scaleViewport=true;rfb.focusOnClick=true;rfb.addEventListener("connect",()=>{status.textContent="connected";setTimeout(()=>{status.style.display="none"},1500)});` +
-		`rfb.addEventListener("disconnect",event=>{status.style.display="block";status.textContent="disconnected"+(event.detail&&event.detail.clean?"":" (connection error)")});` +
+		`const sizing=document.getElementById("sizing");let connected=false;function applySizing(){const resize=connected&&sizing.value==="match";if(rfb.resizeSession!==resize)rfb.resizeSession=resize} ` +
+		`rfb.scaleViewport=true;rfb.focusOnClick=true;sizing.addEventListener("change",applySizing);rfb.addEventListener("connect",()=>{connected=true;applySizing();status.textContent="connected"});` +
+		`rfb.addEventListener("disconnect",event=>{connected=false;applySizing();status.textContent="disconnected"+(event.detail&&event.detail.clean?"":" (connection error)")});` +
 		`rfb.addEventListener("credentialsrequired",()=>{status.style.display="block";status.textContent="VNC credentials required"});` +
 		`</script></body></html>`
 	if _, err := file.WriteString(content); err != nil {
-		return macOSWebVNCHandoff{}, exit(5, "write WebVNC browser handoff: %v", err)
+		return macOSWebVNCHandoff{}, Exit(5, "write WebVNC browser handoff: %v", err)
 	}
 	if err := file.Close(); err != nil {
-		return macOSWebVNCHandoff{}, exit(5, "close WebVNC browser handoff: %v", err)
+		return macOSWebVNCHandoff{}, Exit(5, "close WebVNC browser handoff: %v", err)
 	}
 	ok = true
 	return macOSWebVNCHandoff{

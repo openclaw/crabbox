@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { sha256Hex } from "../src/auth";
 import {
   AzureClient,
   azureCleanupRecoveryAuditKey,
@@ -25,6 +24,7 @@ import {
   type AzureDeferredCleanupRequest,
 } from "../src/azure";
 import type { LeaseConfig } from "../src/config";
+import { sha256Hex } from "../src/encoding";
 import { providerProvisioningCleanupClaim } from "../src/provider-provisioning";
 import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
 

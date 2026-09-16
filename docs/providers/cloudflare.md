@@ -78,6 +78,15 @@ export CRABBOX_CLOUDFLARE_RUNNER_TOKEN=...
 
 The token is intentionally **not** exposed as a command-line flag, because
 command-line arguments can be captured in shell history and process listings.
+
+All three bindings share one typed declaration. The loader retains its existing
+user/repository YAML handling, including nonempty `token` input; this does not
+change the advice to keep tokens out of repository files. Omitted, null, and empty
+YAML strings preserve earlier values, while whitespace is accepted for later
+validation. Environment overrides use raw nonempty values. Accepted URL/token
+inputs keep their existing source classification; an explicit URL flag visit is
+still recorded separately after successful provider flag application.
+
 Runner redirects are followed only when they keep the configured scheme, host,
 and effective port. Cross-origin redirects fail before command, environment, or
 upload bodies can be replayed to another destination.
@@ -87,6 +96,12 @@ bearer-shaped credentials before they reach CLI diagnostics.
 The workdir defaults to `/workspace/crabbox` and must resolve to an absolute
 path. Broad system paths (`/`, `/workspace`, `/usr`, `/var`, and similar) are
 rejected; pick a dedicated subdirectory.
+
+The CLI's configured workdir and runtime fallback share that default. The bundled
+Worker keeps a separate HTTP-protocol fallback for requests that omit workdir;
+the Go client sends its resolved workdir explicitly. Instance-type mapping,
+URL-first client validation, authentication, and Worker lifecycle remain outside
+the generated bindings.
 
 Check the configured runner URL and token without creating a container:
 

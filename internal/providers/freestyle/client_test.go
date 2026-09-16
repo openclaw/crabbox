@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -76,10 +77,10 @@ func TestFreestyleInjectedHTTPSettingsArePreservedForBothPlanes(t *testing.T) {
 		redirectCalls++
 		return redirectErr
 	}}
-	api, err := newFreestyleClient(Config{Freestyle: FreestyleConfig{
+	api, err := newFreestyleClient(core.Config{Freestyle: core.FreestyleConfig{
 		APIKey: "test-key",
 		APIURL: "http://127.0.0.1:8787",
-	}}, Runtime{HTTP: injected})
+	}}, core.Runtime{HTTP: injected})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,12 +217,12 @@ func TestFreestyleClientRefusesCrossOriginRedirect(t *testing.T) {
 	}))
 	defer trusted.Close()
 
-	api, err := newFreestyleClient(Config{
-		Freestyle: FreestyleConfig{
+	api, err := newFreestyleClient(core.Config{
+		Freestyle: core.FreestyleConfig{
 			APIKey: "test-key",
 			APIURL: trusted.URL,
 		},
-	}, Runtime{HTTP: trusted.Client()})
+	}, core.Runtime{HTTP: trusted.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}

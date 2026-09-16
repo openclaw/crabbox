@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"strconv"
 	"strings"
 
@@ -107,10 +108,10 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			return
 		}
 		pendingClaim = *claim
-		pendingClaim.Labels = cloneLabels(claim.Labels)
+		pendingClaim.Labels = shared.CloneLabels(claim.Labels)
 		if claim.FixedCreateIntent != nil {
 			intent := *claim.FixedCreateIntent
-			intent.Attempt = cloneLabels(claim.FixedCreateIntent.Attempt)
+			intent.Attempt = shared.CloneLabels(claim.FixedCreateIntent.Attempt)
 			intent.FailedAttempts = append([]string(nil), claim.FixedCreateIntent.FailedAttempts...)
 			pendingClaim.FixedCreateIntent = &intent
 		}
@@ -185,6 +186,11 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			if err := validateFixedLocalContainer(container, cfg, leaseID, intent.Slug, fingerprint); err != nil {
 				return core.LeaseTarget{}, err
 			}
+			if container.State.Running {
+				if err := validateLocalContainerInspectedMounts(container); err != nil {
+					return core.LeaseTarget{}, err
+				}
+			}
 		} else {
 			if intent.State == "acquired" || claim.CloudID != "" {
 				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: acquired fixed local-container lease %s is missing its bound container", leaseID)
@@ -203,8 +209,8 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			}
 			pending := createdPendingLease(cfg, containerID, leaseID, intent.Slug, bootstrapDir, req.Keep)
 			pending.Server.Labels["fixed_intent_sha256"] = fingerprint
-			claim.CloudID = containerID
-			claim.Labels = cloneLabels(pending.Server.Labels)
+			core.SetLeaseClaimResourceIdentity(claim, containerID, claim.CloudNumericID, claim.CloudImmutableID, nil)
+			claim.Labels = shared.CloneLabels(pending.Server.Labels)
 			intent.Attempt["container_id"] = containerID
 			if err := persist(); err != nil {
 				return core.LeaseTarget{}, err
@@ -228,15 +234,20 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		if claim.CloudID == "" {
 			pending := createdPendingLease(cfg, container.ID, leaseID, intent.Slug, container.Config.Labels["bootstrap_dir"], req.Keep)
 			pending.Server.Labels["fixed_intent_sha256"] = fingerprint
-			claim.CloudID = container.ID
-			claim.Labels = cloneLabels(pending.Server.Labels)
+			core.SetLeaseClaimResourceIdentity(claim, container.ID, claim.CloudNumericID, claim.CloudImmutableID, nil)
+			claim.Labels = shared.CloneLabels(pending.Server.Labels)
 			intent.Attempt["container_id"] = container.ID
 			if err := persist(); err != nil {
 				return core.LeaseTarget{}, err
 			}
 		}
 		if isPendingLocalContainerClaim(*claim) {
-			rememberPending(claim, b.pendingLease(cfg, container, leaseID, intent.Slug))
+			pending, err := b.pendingLease(cfg, container, leaseID, intent.Slug)
+			// Keep the observed identity for reconciliation even when key admission fails.
+			rememberPending(claim, pending)
+			if err != nil {
+				return core.LeaseTarget{}, err
+			}
 		}
 		containerID := strings.TrimSpace(claim.CloudID)
 		if !container.State.Running {
@@ -249,11 +260,17 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			}
 			return core.LeaseTarget{}, notRunning
 		}
+		imageEvidence, err := b.observeImageEvidence(ctx, cfg, container, *claim)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
 		lease, err := b.waitForContainerEndpoint(ctx, cfg, containerID, leaseID, intent.Slug)
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		lease.Server.ImageEvidence = imageEvidence
 		if isPendingLocalContainerClaim(*claim) {
+			claim.ImageEvidence = core.CloneImageEvidence(imageEvidence)
 			claim.SSHHost = lease.SSH.Host
 			if port, parseErr := strconv.Atoi(strings.TrimSpace(lease.SSH.Port)); parseErr == nil && port > 0 {
 				claim.SSHPort = port
@@ -267,7 +284,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			return core.LeaseTarget{}, err
 		}
 		lease.Server.Status = "ready"
-		lease.Server.Labels = cloneLabels(lease.Server.Labels)
+		lease.Server.Labels = shared.CloneLabels(lease.Server.Labels)
 		lease.Server.Labels["state"] = "ready"
 		delete(lease.Server.Labels, "recovery")
 		for _, key := range checkpointScopeMetadataKeys {

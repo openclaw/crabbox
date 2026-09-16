@@ -38,10 +38,12 @@ var serverShapes = map[string]struct {
 
 var classProfiles = buildClassProfiles()
 
-func (Provider) Name() string      { return "hetzner" }
-func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication: core.ProviderAuthentication{
+			{Route: "direct", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationAPIToken}, Description: "Direct access uses a Hetzner Cloud API token."},
+			{Route: "brokered", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationCoordinator}, Description: "The client authenticates to the coordinator; cloud credentials remain server-side."},
+		},
 		Name:             "hetzner",
 		Family:           "hetzner",
 		Kind:             core.ProviderKindSSHLease,
@@ -53,7 +55,7 @@ func (Provider) Spec() core.ProviderSpec {
 }
 
 func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
-	if strings.TrimSpace(req.Config.Coordinator) != "" || firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
+	if strings.TrimSpace(req.Config.Coordinator) != "" || shared.FirstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
 		return core.NativeCheckpointCapability{}, false
 	}
 	serverID, err := strconv.ParseInt(strings.TrimSpace(req.Server.CloudID), 10, 64)
@@ -122,14 +124,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return cfg.Class
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	cfg := core.Config{Provider: "hetzner", TargetOS: core.TargetLinux, Architecture: core.ArchitectureAMD64, Class: class}
-	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
-		return candidates[0]
-	}
-	return class
-}
-
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
 	return classProfiles
 }
@@ -194,8 +188,4 @@ func serverTypeCandidatesForClass(class string) []string {
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewHetznerLeaseBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("hetzner", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

@@ -5,17 +5,18 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	core "github.com/openclaw/crabbox/internal/cli"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/hashicorp/go-cleanhttp"
 	nomadapi "github.com/hashicorp/nomad/api"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type Client interface {
@@ -35,11 +36,28 @@ type liveClient struct {
 	cfg    Config
 }
 
+const (
+	defaultNomadControlRequestTimeout = 2 * time.Minute
+	nomadDefaultResponseHeaderTimeout = 30 * time.Second
+)
+
 var (
 	errNomadCrossOriginRedirect = errors.New("nomad refused cross-origin redirect")
 	errNomadInvalidRedirect     = errors.New("nomad refused invalid redirect")
 	errNomadRedirectLimit       = errors.New("nomad redirect stopped after 10 redirects")
+	nomadControlRequestTimeout  = defaultNomadControlRequestTimeout
 )
+
+// controlRequestContext bounds finite JSON calls, not allocation exec.
+func controlRequestContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if nomadControlRequestTimeout <= 0 {
+		return ctx, func() {}
+	}
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= nomadControlRequestTimeout {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, nomadControlRequestTimeout)
+}
 
 func newNomadClient(cfg Config, rt Runtime) (Client, error) {
 	apiConfig, err := newNomadAPIConfig(cfg, os.Getenv)
@@ -76,6 +94,7 @@ func configureNomadHTTPClient(apiConfig *nomadapi.Config, source *http.Client) e
 			source = cleanhttp.DefaultPooledClient()
 			transport = source.Transport.(*http.Transport)
 		}
+		transport.ResponseHeaderTimeout = nomadDefaultResponseHeaderTimeout
 		transport.TLSHandshakeTimeout = 10 * time.Second
 		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 		transport.ForceAttemptHTTP2 = false
@@ -113,7 +132,7 @@ func secureNomadHTTPClient(source *http.Client, trusted *url.URL) *http.Client {
 }
 
 func sameNomadOrigin(a, b *url.URL) bool {
-	return shared.SameOrigin(a, b)
+	return core.SameHTTPOrigin(a, b)
 }
 
 func sanitizeNomadClientError(err error) error {
@@ -160,6 +179,8 @@ func newNomadAPIConfig(cfg Config, lookup func(string) string) (*nomadapi.Config
 }
 
 func (c liveClient) AgentSelf(ctx context.Context) (*nomadapi.AgentSelf, error) {
+	ctx, cancel := controlRequestContext(ctx)
+	defer cancel()
 	var value nomadapi.AgentSelf
 	query := (&nomadapi.QueryOptions{}).WithContext(ctx)
 	if _, err := c.client.Raw().Query("/v1/agent/self", &value, query); err != nil {
@@ -168,17 +189,28 @@ func (c liveClient) AgentSelf(ctx context.Context) (*nomadapi.AgentSelf, error) 
 	return &value, nil
 }
 
-func (c liveClient) Regions(context.Context) ([]string, error) {
-	value, err := c.client.Regions().List()
-	return value, sanitizeNomadClientError(err)
+func (c liveClient) Regions(ctx context.Context) ([]string, error) {
+	ctx, cancel := controlRequestContext(ctx)
+	defer cancel()
+	var value []string
+	query := (&nomadapi.QueryOptions{}).WithContext(ctx)
+	if _, err := c.client.Raw().Query("/v1/regions", &value, query); err != nil {
+		return nil, sanitizeNomadClientError(err)
+	}
+	sort.Strings(value)
+	return value, nil
 }
 
 func (c liveClient) NamespaceInfo(ctx context.Context, namespace string) (*nomadapi.Namespace, error) {
+	ctx, cancel := controlRequestContext(ctx)
+	defer cancel()
 	ns, _, err := c.client.Namespaces().Info(namespace, c.queryOptions(ctx))
 	return ns, sanitizeNomadClientError(err)
 }
 
 func (c liveClient) RegisterJob(ctx context.Context, job *nomadapi.Job) (string, error) {
+	ctx, cancel := controlRequestContext(ctx)
+	defer cancel()
 	resp, _, err := c.client.Jobs().RegisterOpts(job, &nomadapi.RegisterOptions{
 		EnforceIndex: true,
 		ModifyIndex:  0,
@@ -193,21 +225,29 @@ func (c liveClient) RegisterJob(ctx context.Context, job *nomadapi.Job) (string,
 }
 
 func (c liveClient) JobInfo(ctx context.Context, jobID string) (*nomadapi.Job, error) {
+	ctx, cancel := controlRequestContext(ctx)
+	defer cancel()
 	job, _, err := c.client.Jobs().Info(jobID, c.queryOptions(ctx))
 	return job, sanitizeNomadClientError(err)
 }
 
 func (c liveClient) JobAllocations(ctx context.Context, jobID string, all bool) ([]*nomadapi.AllocationListStub, error) {
+	ctx, cancel := controlRequestContext(ctx)
+	defer cancel()
 	allocs, _, err := c.client.Jobs().Allocations(jobID, all, c.queryOptions(ctx))
 	return allocs, sanitizeNomadClientError(err)
 }
 
 func (c liveClient) EvaluationInfo(ctx context.Context, evalID string) (*nomadapi.Evaluation, error) {
+	ctx, cancel := controlRequestContext(ctx)
+	defer cancel()
 	eval, _, err := c.client.Evaluations().Info(evalID, c.queryOptions(ctx))
 	return eval, sanitizeNomadClientError(err)
 }
 
 func (c liveClient) DeregisterJob(ctx context.Context, jobID string, purge bool) (string, error) {
+	ctx, cancel := controlRequestContext(ctx)
+	defer cancel()
 	evalID, _, err := c.client.Jobs().Deregister(jobID, purge, c.writeOptions(ctx))
 	return evalID, sanitizeNomadClientError(err)
 }

@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const (
@@ -46,8 +48,8 @@ type machine0API interface {
 }
 
 type client struct {
-	cfg   Machine0Config
-	rt    Runtime
+	cfg   core.Machine0Config
+	rt    core.Runtime
 	sleep func(context.Context, time.Duration) error
 }
 
@@ -133,9 +135,9 @@ func (s *machineSize) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func (c *client) run(ctx context.Context, args ...string) (LocalCommandResult, error) {
+func (c *client) run(ctx context.Context, args ...string) (core.LocalCommandResult, error) {
 	started := time.Now()
-	result, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	result, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:                   c.cfg.CLIPath,
 		Args:                   args,
 		MaxCapturedOutputBytes: maxCLIOutput,
@@ -147,7 +149,7 @@ func (c *client) run(ctx context.Context, args ...string) (LocalCommandResult, e
 		return result, nil
 	}
 	if errors.Is(err, exec.ErrNotFound) || strings.Contains(strings.ToLower(fmt.Sprint(err)), "executable file not found") || strings.Contains(strings.ToLower(fmt.Sprint(err)), "no such file or directory") {
-		return result, exit(3, "Machine0 CLI %q was not found; install @machine0/cli and ensure machine0 is on PATH (for example: npm install -g @machine0/cli)", c.cfg.CLIPath)
+		return result, core.Exit(3, "Machine0 CLI %q was not found; install @machine0/cli and ensure machine0 is on PATH (for example: npm install -g @machine0/cli)", c.cfg.CLIPath)
 	}
 	detail := strings.TrimSpace(result.Stderr)
 	if detail == "" {
@@ -171,21 +173,21 @@ func (c *client) run(ctx context.Context, args ...string) (LocalCommandResult, e
 	}
 	lower := strings.ToLower(detail)
 	if strings.Contains(lower, "not logged in") || strings.Contains(lower, "not authenticated") || strings.Contains(lower, "unauthorized") {
-		return result, exit(3, "Machine0 authentication is required; run `machine0 login` or set MACHINE0_API_TOKEN: %s", detail)
+		return result, core.Exit(3, "Machine0 authentication is required; run `machine0 login` or set MACHINE0_API_TOKEN: %s", detail)
 	}
-	return result, exit(5, "machine0 %s failed: %s", strings.Join(args, " "), blank(detail, "unknown error"))
+	return result, core.Exit(5, "machine0 %s failed: %s", strings.Join(args, " "), core.Blank(detail, "unknown error"))
 }
 
-func (c *client) runRead(ctx context.Context, args ...string) (LocalCommandResult, error) {
+func (c *client) runRead(ctx context.Context, args ...string) (core.LocalCommandResult, error) {
 	delay := machine0ReadRetryDelay(c.cfg.PollInterval)
 	sleep := c.sleep
 	if sleep == nil {
-		sleep = sleepContext
+		sleep = core.SleepContext
 	}
 	warned := false
 	for {
 		if err := context.Cause(ctx); err != nil {
-			return LocalCommandResult{}, err
+			return core.LocalCommandResult{}, err
 		}
 		result, err := c.run(ctx, args...)
 		if err == nil {
@@ -222,7 +224,7 @@ func machine0ReadRetryDelay(configured time.Duration) time.Duration {
 	return configured
 }
 
-func machine0ReadUnavailable(result LocalCommandResult, err error) bool {
+func machine0ReadUnavailable(result core.LocalCommandResult, err error) bool {
 	detail := strings.ToLower(strings.Join([]string{result.Stdout, result.Stderr, fmt.Sprint(err)}, "\n"))
 	return strings.Contains(detail, machine0RateLimitMessage) || strings.Contains(detail, machine0UnavailableMessage)
 }
@@ -258,7 +260,7 @@ func (c *client) AccountID(ctx context.Context) (string, error) {
 			return "", cause
 		}
 		// Native output includes personal and billing details; never echo it.
-		return "", exit(5, "machine0 account identity lookup failed; retain checkpoint and source")
+		return "", core.Exit(5, "machine0 account identity lookup failed; retain checkpoint and source")
 	}
 	var account struct {
 		User struct {
@@ -266,7 +268,7 @@ func (c *client) AccountID(ctx context.Context) (string, error) {
 		} `json:"user"`
 	}
 	if err := decodeJSON(result.Stdout, &account); err != nil || strings.TrimSpace(account.User.ID) == "" || account.User.ID != strings.TrimSpace(account.User.ID) {
-		return "", exit(5, "machine0 whoami --json omitted a valid user.id; retain checkpoint and source")
+		return "", core.Exit(5, "machine0 whoami --json omitted a valid user.id; retain checkpoint and source")
 	}
 	return account.User.ID, nil
 }
@@ -278,11 +280,11 @@ func (c *client) List(ctx context.Context) ([]machine, error) {
 	}
 	var machines []machine
 	if err := decodeJSON(result.Stdout, &machines); err != nil {
-		return nil, exit(5, "parse machine0 ls --json: %v", err)
+		return nil, core.Exit(5, "parse machine0 ls --json: %v", err)
 	}
 	for i := range machines {
 		if err := validateMachine(machines[i], false); err != nil {
-			return nil, exit(5, "parse machine0 ls --json item %d: %v", i, err)
+			return nil, core.Exit(5, "parse machine0 ls --json item %d: %v", i, err)
 		}
 	}
 	return machines, nil
@@ -299,24 +301,24 @@ func (c *client) Get(ctx context.Context, name string) (machine, error) {
 			return machine{}, err
 		}
 		if machines == nil {
-			return machine{}, exit(5, "invalid machine0 ls --json for UUID lookup: expected an array")
+			return machine{}, core.Exit(5, "invalid machine0 ls --json for UUID lookup: expected an array")
 		}
 		for i, candidate := range machines {
 			if !machine0UUIDPattern.MatchString(candidate.ID) {
-				return machine{}, exit(5, "invalid machine0 ls --json item %d: missing or malformed UUID", i)
+				return machine{}, core.Exit(5, "invalid machine0 ls --json item %d: missing or malformed UUID", i)
 			}
 			if strings.EqualFold(candidate.ID, id) {
 				if name != "" {
-					return machine{}, exit(5, "multiple Machine0 inventory entries match UUID %s", id)
+					return machine{}, core.Exit(5, "multiple Machine0 inventory entries match UUID %s", id)
 				}
 				name = candidate.Name
 			}
 		}
 		if name == "" {
-			return machine{}, exit(4, "Machine0 UUID %s is absent from current authorized inventory", id)
+			return machine{}, core.Exit(4, "Machine0 UUID %s is absent from current authorized inventory", id)
 		}
 		if machine0UUIDPattern.MatchString(name) {
-			return machine{}, exit(5, "invalid machine name in Machine0 inventory for UUID %s: %q", id, name)
+			return machine{}, core.Exit(5, "invalid machine name in Machine0 inventory for UUID %s: %q", id, name)
 		}
 	}
 	result, err := c.runRead(ctx, "get", name, "--json")
@@ -325,13 +327,13 @@ func (c *client) Get(ctx context.Context, name string) (machine, error) {
 	}
 	var item machine
 	if err := decodeJSON(result.Stdout, &item); err != nil {
-		return machine{}, exit(5, "parse machine0 get %s --json: %v", name, err)
+		return machine{}, core.Exit(5, "parse machine0 get %s --json: %v", name, err)
 	}
 	if err := validateMachine(item, true); err != nil {
-		return machine{}, exit(5, "invalid machine0 get %s --json: %v", name, err)
+		return machine{}, core.Exit(5, "invalid machine0 get %s --json: %v", name, err)
 	}
 	if id != "" && (!strings.EqualFold(item.ID, id) || item.Name != name) {
-		return machine{}, exit(5, "Machine0 lookup identity changed: expected id=%s name=%q, found id=%s name=%q", id, name, item.ID, item.Name)
+		return machine{}, core.Exit(5, "Machine0 lookup identity changed: expected id=%s name=%q, found id=%s name=%q", id, name, item.ID, item.Name)
 	}
 	return item, nil
 }
@@ -344,13 +346,13 @@ func (c *client) SelectedKey(ctx context.Context, name string) (*machineKey, err
 		}
 		var keys []machineKey
 		if err := decodeJSON(result.Stdout, &keys); err != nil {
-			return nil, exit(5, "parse machine0 keys ls --json: %v", err)
+			return nil, core.Exit(5, "parse machine0 keys ls --json: %v", err)
 		}
 		for _, key := range keys {
 			if key.IsDefault {
 				name = strings.TrimSpace(key.Name)
 				if name == "" {
-					return nil, exit(5, "machine0 default SSH key has no name")
+					return nil, core.Exit(5, "machine0 default SSH key has no name")
 				}
 				break
 			}
@@ -366,10 +368,10 @@ func (c *client) SelectedKey(ctx context.Context, name string) (*machineKey, err
 	}
 	var key machineKey
 	if err := decodeJSON(result.Stdout, &key); err != nil {
-		return nil, exit(5, "parse machine0 keys get %s --json: %v", name, err)
+		return nil, core.Exit(5, "parse machine0 keys get %s --json: %v", name, err)
 	}
 	if strings.TrimSpace(key.Name) != name {
-		return nil, exit(5, "machine0 key lookup returned mismatched key name: expected %s, found %s", name, blank(key.Name, "<empty>"))
+		return nil, core.Exit(5, "machine0 key lookup returned mismatched key name: expected %s, found %s", name, core.Blank(key.Name, "<empty>"))
 	}
 	return &key, nil
 }
@@ -431,14 +433,14 @@ func (c *client) Sizes(ctx context.Context) ([]machineSize, error) {
 	}
 	var sizes []machineSize
 	if err := decodeJSON(result.Stdout, &sizes); err != nil {
-		return nil, exit(5, "parse machine0 sizes --json: %v", err)
+		return nil, core.Exit(5, "parse machine0 sizes --json: %v", err)
 	}
 	for i, size := range sizes {
 		if strings.TrimSpace(size.Size) == "" || size.VCPU <= 0 || size.RAMGB <= 0 || size.DiskGB <= 0 || size.PricePerHourMicro < 0 {
-			return nil, exit(5, "invalid machine0 size catalog item %d", i)
+			return nil, core.Exit(5, "invalid machine0 size catalog item %d", i)
 		}
 		if size.GPU != nil && (strings.TrimSpace(size.GPU.Label) == "" || size.GPU.VRAMGB <= 0 || size.GPU.ScratchDiskGB < 0) {
-			return nil, exit(5, "invalid machine0 GPU metadata for size %s", size.Size)
+			return nil, core.Exit(5, "invalid machine0 GPU metadata for size %s", size.Size)
 		}
 	}
 	return sizes, nil

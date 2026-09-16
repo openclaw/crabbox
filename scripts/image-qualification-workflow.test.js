@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { execFileSync, spawnSync } from "node:child_process";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
@@ -66,7 +66,10 @@ test("workflow isolates candidate execution from protected credentials", () => {
     "Upload immutable candidate bundle",
   ].map((marker) => buildJob.indexOf(marker));
   assert.ok(buildOrder.every((offset) => offset >= 0));
-  assert.deepEqual(buildOrder, [...buildOrder].sort((left, right) => left - right));
+  assert.deepEqual(
+    buildOrder,
+    [...buildOrder].sort((left, right) => left - right),
+  );
   assert.match(workflow, /candidate_artifact_id/);
   assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/image-qualification-candidate/);
   const admitJob = workflow.slice(
@@ -103,14 +106,22 @@ test("workflow isolates candidate execution from protected credentials", () => {
 });
 
 test("candidate downloads extract the artifact at the canonical path", () => {
-  const downloadSteps = [...workflow.matchAll(
-    /^      - name: [^\n]+\n        uses: actions\/download-artifact@[^\n]+\n        with:\n((?:          .+\n)+)/gm,
-  )];
+  const downloadSteps = [
+    ...workflow.matchAll(
+      /^      - name: [^\n]+\n        uses: actions\/download-artifact@[^\n]+\n        with:\n((?:          .+\n)+)/gm,
+    ),
+  ];
   const candidateDownloads = downloadSteps.filter(([, inputs]) =>
-    inputs.includes("artifact-ids:"),
+    inputs.includes("needs.build-candidate.outputs.candidate_artifact_id"),
   );
 
   assert.equal(candidateDownloads.length, 3);
+  assert.equal(
+    downloadSteps.filter(([, inputs]) =>
+      inputs.includes("needs.admit.outputs.handoff_artifact_id"),
+    ).length,
+    2,
+  );
   for (const [, inputs] of candidateDownloads) {
     assert.match(
       inputs,
@@ -133,6 +144,29 @@ test("finalization skips protected approval when deployment never started", () =
   );
 });
 
+test("protected preparation exports immutable identity before the separate deployment approval", () => {
+  const admitJob = workflow.slice(workflow.indexOf("  admit:"), workflow.indexOf("  deploy-enroll:"));
+  assert.match(admitJob, /environment: image-qualification/);
+  assert.match(admitJob, /QUALIFICATION_HANDOFF_DIR:/);
+  assert.match(admitJob, /CLOUDFLARE_ACCOUNT_ID: \$\{\{ vars\.CLOUDFLARE_ACCOUNT_ID \}\}/);
+  assert.match(admitJob, /QUALIFICATION_SUBNET_ID: \$\{\{ vars\./);
+  assert.match(admitJob, /QUALIFICATION_SECURITY_GROUP_ID: \$\{\{ vars\./);
+  assert.match(admitJob, /QUALIFICATION_AUTHORITY_SHA: \$\{\{ vars\./);
+  assert.doesNotMatch(admitJob, /secrets\.|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN/);
+  assert.match(admitJob, /image-qualification-handoff-\$\{\{ github\.run_id \}\}-1/);
+  assert.match(admitJob, /overwrite: false/);
+  assert.match(admitJob, /handoff_sha256: \$\{\{ steps\.admit\.outputs\.handoff_sha256 \}\}/);
+  assert.ok(admitJob.indexOf("image-qualification-control.mjs admit") < admitJob.indexOf("id: handoff"));
+  const deployJob = workflow.slice(workflow.indexOf("  deploy-enroll:"), workflow.indexOf("  arm:"));
+  const armJob = workflow.slice(workflow.indexOf("  arm:"), workflow.indexOf("  execute:"));
+  for (const job of [deployJob, armJob]) {
+    assert.match(job, /environment: image-qualification/);
+    assert.match(job, /artifact-ids: \$\{\{ needs\.admit\.outputs\.handoff_artifact_id \}\}/);
+    assert.match(job, /QUALIFICATION_HANDOFF_SHA256: \$\{\{ needs\.admit\.outputs\.handoff_sha256 \}\}/);
+    assert.match(job, /QUALIFICATION_HANDOFF_ARTIFACT_DIGEST:/);
+  }
+});
+
 test("all workflow actions use immutable repository-standard pins", () => {
   for (const source of [workflow, reaper]) {
     for (const line of source.matchAll(/uses:\s+([^@\s]+)@([^\s]+)/g)) {
@@ -152,10 +186,10 @@ test("reaper is protected, serialized, and artifact-independent", () => {
 
 test("control tool fixes the reviewed policy and recovery boundary", () => {
   assert.match(control, /instanceTypes: \["t3\.small", "t3a\.small"\]/);
-  assert.match(control, /maxMinutes: 120/);
+  assert.match(control, /maxMinutes: retainedImage \? 38 : 120/);
   assert.match(control, /maxMonthlyUSD: 10/);
   assert.match(control, /maxConcurrentInstances: 1/);
-  assert.match(control, /maxLaunches: 3/);
+  assert.match(control, /maxLaunches: retainedImage \? 1 : 3/);
   assert.match(control, /fastSnapshotRestore: false/);
   assert.match(control, /CRABBOX_AWS_QUALIFICATION_TRANSPORT/);
   assert.match(control, /AWSQualificationController/);
@@ -195,9 +229,10 @@ test("executor proves auth denial, FSR denial, three launches, rollback, and har
   assert.match(executor, /\[\[ "\$spoof_status" == 403 \]\]/);
   assert.match(executor, /\[\[ "\$stale_status" == 409 \]\]/);
   assert.match(executor, /stale-cas-response\.json/);
-  assert.match(executor, /fast-snapshot-restore/);
-  assert.match(executor, /mint_status" -eq 86/);
-  assert.match(executor, /launch-count.*-eq 3/);
+  assert.match(executor, /"fastSnapshotRestore":true/);
+  assert.match(executor, /mint_status" -ne 86/);
+  assert.match(executor, /expected_launches=3/);
+  assert.match(executor, /launch-count.*-eq "\$expected_launches"/);
   assert.match(executor, /kill -KILL "\$\$"/);
   assert.match(executor, /catalog-rollback\.json/);
   assert.match(executor, /execution-state\.json/);
@@ -205,6 +240,9 @@ test("executor proves auth denial, FSR denial, three launches, rollback, and har
   assert.match(executor, /QUALIFICATION_EXECUTOR_TOKEN/);
   assert.doesNotMatch(executor, /QUALIFICATION_CANDIDATE_URL/);
   assert.doesNotMatch(executor, /v1\/images\?provider/);
+  assert.doesNotMatch(executor, /node -[^\n]*<</);
+  assert.match(executor, /scope_args\+=\(--architecture x86_64 --os ubuntu:24\.04\)/);
+  assert.doesNotMatch(executor, /scope_args\+=\(--arch /);
   assert.match(adapter, /QUALIFICATION_REAL_CRABBOX/);
   assert.match(adapter, /promotion-receipt\.json/);
   assert.match(adapter, /rollback-receipt\.json/);
@@ -319,45 +357,88 @@ test("protected build prep binds source, rejects substitution, and seals exact b
   }
 });
 
-test("publisher admission requires transactional rollback before paid deployment", async () => {
+test("publisher admission accepts the actual transactional publisher before paid deployment", async () => {
   const module = await import(
     `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?admit=${Date.now()}`
   );
-  const admissible = `
-CRABBOX_BIN="\${CRABBOX_BIN:-$ROOT/bin/crabbox}"
-cleanup() {
-  rollback_promoted_image "$promotion_log"
-}
-trap cleanup EXIT
-rollback_promoted_image() {
-  args+=(--restore-receipt "$receipt" "$current_id")
-  printf 'promoted-image smoke failed; restored previous default image=%s\\n' "$rollback_image"
-}
-run_cmd "$CRABBOX_BIN" stop --provider aws --target "$target" "$candidate_lease"
-candidate_lease=""
-promote_args=(image promote --target "$target" --json --expected-current-image capture)
-rollback_pending=1
-run_json_tee "$promotion_log" "$CRABBOX_BIN" "\${promote_args[@]}"
-jq -e '.previous.aliases | length > 0' "$promotion_log"
-promoted_lease="$(warmup promoted)"
-smoke "$promoted_lease"
-rollback_pending=0
+  assert.doesNotThrow(() =>
+    module.verifyPublisherContract(read("scripts/mint-aws-devtools-image.sh")),
+  );
+});
+
+test("publisher admission rejects broken transaction and cleanup boundaries", async (t) => {
+  const { verifyPublisherContract } = await import(
+    pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))
+  );
+  const source = read("scripts/mint-aws-devtools-image.sh");
+  const propagation = `  if [[ "$exit_status" == "0" && "$finalizer_status" != "0" ]]; then
+    exit_status="$finalizer_status"
+  fi
 `;
-  assert.doesNotThrow(() => module.verifyPublisherContract(admissible));
-  assert.throws(
-    () =>
-      module.verifyPublisherContract(
-        admissible.replace("--expected-current-image capture", "ami-candidate"),
-      ),
-    /transactional rollback contract/,
-  );
-  assert.throws(
-    () =>
-      module.verifyPublisherContract(
-        admissible.replace('candidate_lease=""', 'candidate_lease="still-running"'),
-      ),
-    /rollback ordering/,
-  );
+  const rollback = `  if [[ "$rollback_pending" == "1" && "$exit_status" != "0" ]]; then
+    rollback_pending=0
+    if rollback_promoted_image "$promotion_log"; then
+      rollback_status="succeeded"
+    else
+      rollback_status="failed"
+      finalizer_status=1
+    fi
+  fi
+`;
+  const stop = `      if ! "$CRABBOX_BIN" stop --provider aws --target "$target" "$lease"; then
+        cleanup_status="failed"
+        finalizer_status=1
+      fi`;
+  const proofRollback = `      if [[ "$rollback_pending" == "1" ]]; then
+        rollback_pending=0
+        if rollback_promoted_image "$promotion_log"; then
+          rollback_status="succeeded"
+        else
+          rollback_status="failed"
+          finalizer_status=1
+        fi
+      fi`;
+  const armAndPromote =
+    'rollback_pending=1\nrun_json_tee "$promotion_log" "$CRABBOX_BIN" "${promote_args[@]}"';
+  for (const [name, before, after] of [
+    ["CAS removed", "--expected-current-image capture", "ami-candidate"],
+    ["receipt restore removed", '--restore-receipt "$receipt" "$current_id"', '"$current_id"'],
+    ["EXIT trap removed", "trap cleanup EXIT", "trap : EXIT"],
+    [
+      "candidate still owned",
+      'clear_warmup_handle candidate\n  candidate_lease=""',
+      'clear_warmup_handle candidate\n  candidate_lease="still-running"',
+    ],
+    [
+      "arm after promotion",
+      armAndPromote,
+      'run_json_tee "$promotion_log" "$CRABBOX_BIN" "${promote_args[@]}"\nrollback_pending=1',
+    ],
+    [
+      "early main disarm",
+      'smoke "$promoted_lease"\n',
+      'smoke "$promoted_lease"\nrollback_pending=0\n',
+    ],
+    ["original failure rollback removed", rollback, ""],
+    ["cleanup failure rollback removed", propagation + rollback, propagation],
+    ["cleanup failure rollback reordered", propagation + rollback, rollback + propagation],
+    ["lease cleanup removed", stop, ":"],
+    ["lease cleanup error ignored", stop, stop.replace("finalizer_status=1", ":")],
+    ["proof failure swallowed", 'exit_status="$proof_status"', "exit_status=0"],
+    ["proof rollback removed", proofRollback, ""],
+    [
+      "proof publication error ignored",
+      'mv -f "$outcome_candidate" "$public_outcome" || proof_status=$?',
+      'mv -f "$outcome_candidate" "$public_outcome" || true',
+    ],
+    ["final status swallowed", '  exit "$exit_status"\n}', "  exit 0\n}"],
+  ]) {
+    await t.test(name, () => {
+      const changed = source.replace(before, after);
+      assert.ok(changed !== source, `mutation did not apply: ${name}`);
+      assert.throws(() => verifyPublisherContract(changed), /candidate publisher/);
+    });
+  }
 });
 
 test("authorization selects one exact same-PR candidate artifact and detects replacement", async () => {
@@ -472,7 +553,10 @@ test("protected producer identity accepts only the default-branch workflow path"
   );
   const expected = ".github/workflows/image-qualification.yml";
   assert.equal(module.workflowRunPathMatches(expected, expected, "main"), true);
-  assert.equal(module.workflowRunPathMatches(`${expected}@refs/heads/main`, expected, "main"), true);
+  assert.equal(
+    module.workflowRunPathMatches(`${expected}@refs/heads/main`, expected, "main"),
+    true,
+  );
   assert.equal(
     module.workflowRunPathMatches(`${expected}@refs/heads/feature/test`, expected, "main"),
     false,
@@ -484,7 +568,7 @@ test("protected producer identity accepts only the default-branch workflow path"
   assert.equal(module.workflowRunPathMatches(`${expected}@main`, expected, "main"), false);
 });
 
-test("attestation gate requires FSR denial and exact sequential launch order", async () => {
+test("attestation gate requires FSR denial and exact mint or retained launch evidence", async () => {
   const module = await import(
     `${pathToFileURL(path.join(root, "scripts/image-qualification-control.mjs"))}?evidence=${Date.now()}`
   );
@@ -621,6 +705,62 @@ test("attestation gate requires FSR denial and exact sequential launch order", a
       ),
     /spoofed admin probe/,
   );
+  const retained = { imageId: "ami-11111111" };
+  const retainedProof = structuredClone(proof);
+  retainedProof.execution = {
+    ...retainedProof.execution,
+    launchCount: 1,
+    smokeCount: 1,
+    normalSelection: true,
+    exactPromotedRevision: true,
+    selectedImageDigest: module.digest(retained.imageId),
+    selectedRevisionDigest: retainedProof.catalog.failedRevisionDigest,
+  };
+  const retainedAttestation = {
+    ...attestation,
+    operations: attestation.operations.slice(0, 4),
+    finalReceipt: {
+      ...attestation.finalReceipt,
+      resourcesAtStart: { images: 0, instances: 0, keyPairs: 0, snapshots: 0, volumes: 0 },
+      cleanupAttempts: [],
+      verification: [{ action: "RetainedImagePreserved", outcome: "accepted" }],
+    },
+  };
+  assert.doesNotThrow(() =>
+    module.verifyQualificationEvidence(retainedAttestation, retainedProof, retained),
+  );
+  for (const mutate of [
+    (a) => a.operations.push(operation("RunInstances", "2026-09-04T00:00:07.000Z")),
+    (a) => a.operations.push(operation("CreateImage", "2026-09-04T00:00:07.000Z")),
+    (a) => a.operations[3].signerDispatches.push({ ...a.operations[3].signerDispatches[0] }),
+    (a) => {
+      a.finalReceipt.verification = [];
+    },
+    (a) => a.finalReceipt.cleanupAttempts.push({ action: "DeleteSnapshot" }),
+    (a) => {
+      a.finalReceipt.resourcesAtStart.images = 1;
+    },
+    (_a, p) => {
+      p.execution.normalSelection = false;
+    },
+    (_a, p) => {
+      p.execution.selectedRevisionDigest = "0".repeat(64);
+    },
+    (_a, p) => {
+      p.execution.smokeCount = 0;
+    },
+    (_a, p) => {
+      p.catalog.staleReadbackUnchanged = false;
+    },
+  ]) {
+    const a = structuredClone(retainedAttestation);
+    const p = structuredClone(retainedProof);
+    mutate(a, p);
+    assert.throws(
+      () => module.verifyQualificationEvidence(a, p, retained),
+      /attestation does not prove/,
+    );
+  }
 });
 
 test("catalog proof requires exact default restoration and rejects stale CAS mutation", async () => {
@@ -1093,7 +1233,7 @@ test("adapter delegates and injects exit 86 only after the third launch smoke", 
       fake,
       `#!/usr/bin/env bash
 if [[ "\${1:-}" == image && "\${2:-}" == promote ]]; then
-  printf '{"image":{"id":"ami-11111111","revision":"revision"},"previous":{"state":"present","imageId":"ami-22222222","revision":"previous"}}\\n'
+  printf '{"image":{"id":"ami-11111111","revision":"revision"},"previous":{"state":"present","imageId":"ami-22222222","revision":"previous","aliases":[{"alias":"regional","state":"present","image":{"id":"ami-22222222","name":"prior","state":"available","promotedAt":"before","revision":"previous"}}]}}\\n'
 else
   printf 'delegated %s\\n' "\${1:-}"
 fi
@@ -1115,7 +1255,7 @@ fi
     }
     const smoke = spawnSync(
       path.join(root, "scripts/image-qualification-crabbox-adapter.sh"),
-      ["run"],
+      ["run", "--shell", "--", "echo devtools-smoke-ok"],
       { env, encoding: "utf8" },
     );
     assert.equal(smoke.status, 86);
@@ -1137,7 +1277,13 @@ fi
     assert.equal(
       spawnSync(
         path.join(root, "scripts/image-qualification-crabbox-adapter.sh"),
-        ["image", "promote", "--restore-receipt", path.join(temp, "promotion.json"), "ami-11111111"],
+        [
+          "image",
+          "promote",
+          "--restore-receipt",
+          path.join(temp, "promotion.json"),
+          "ami-11111111",
+        ],
         { env },
       ).status,
       0,

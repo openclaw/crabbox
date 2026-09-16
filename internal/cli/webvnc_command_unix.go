@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-func webVNCDaemonProcessCommand(pid int) (string, bool) {
+func LocalProcessCommand(pid int) (string, bool) {
 	if pid <= 0 {
 		return "", false
 	}

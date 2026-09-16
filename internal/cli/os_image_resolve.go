@@ -40,19 +40,19 @@ func normalizeOSImage(value string) (string, error) {
 		normalized = alias
 	}
 	if _, ok := osImageSpecs[normalized]; !ok {
-		return "", exit(2, "unsupported os %q; supported: %s", value, supportedOSImages)
+		return "", Exit(2, "unsupported os %q; supported: %s", value, supportedOSImages)
 	}
 	return normalized, nil
 }
 
-func normalizeArchitecture(value string) (string, error) {
+func NormalizeArchitecture(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", ArchitectureAMD64, "x86_64", "x64":
 		return ArchitectureAMD64, nil
 	case ArchitectureARM64, "aarch64":
 		return ArchitectureARM64, nil
 	default:
-		return "", exit(2, "architecture must be amd64 or arm64")
+		return "", Exit(2, "architecture must be amd64 or arm64")
 	}
 }
 

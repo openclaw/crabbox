@@ -4,7 +4,6 @@ import (
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -13,12 +12,9 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string { return providerName }
-
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             providerName,
 		Family:           "docker-sandbox",
 		Kind:             core.ProviderKindDelegatedRun,
@@ -46,8 +42,4 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 		return nil, err
 	}
 	return NewBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("docker-sandbox", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

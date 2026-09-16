@@ -119,6 +119,13 @@ CROWNEST_FORGET_MISSING
 Defaults: API URL `https://api.crownest.dev`, template `python-node`, and
 command timeout `600` seconds.
 
+`status --wait` bounds both status requests and polling delays with its wait
+deadline (five minutes by default). At request-error and polling-delay boundaries,
+caller cancellation takes precedence even when the wait deadline has also expired;
+only the wait's own timeout produces Crownest's readiness-timeout error. Readiness
+and terminal observations retain their existing precedence. Nonwaiting status
+returns one observation, including a terminal state.
+
 The API URL must be absolute, must not include userinfo, query parameters, or a
 fragment, and must use HTTPS except for loopback development endpoints.
 

@@ -27,6 +27,8 @@ macOS, the remote needs stock `/bin/bash`, `find` with `-print0`, `tar`,
 
 Literal artifact paths limit discovery to their parent directory, so unrelated
 subdirectories do not consume the artifact-discovery budget.
+Artifact matching ignores shell `nocaseglob` settings, including on stock macOS
+Bash; an explicitly enabled `nocasematch` still permits case-insensitive matching.
 
 Repeat `--require-artifact <glob>` when the run should fail unless a proof file,
 manifest, or report exists after the command exits successfully. Required

@@ -127,7 +127,7 @@ func TestClaimMetadataObservationDuringReplacementFencesCleanup(t *testing.T) {
 	var replaceErr error
 	go func() {
 		defer close(finished)
-		updated, replaceErr = replaceLeaseClaimIfUnchangedDurableAfter(before.LeaseID, before, replacement, func() error {
+		updated, replaceErr = ReplaceLeaseClaimIfUnchangedDurableAfter(before.LeaseID, before, replacement, func() error {
 			close(entered)
 			<-proceed
 			return nil
@@ -142,7 +142,7 @@ func TestClaimMetadataObservationDuringReplacementFencesCleanup(t *testing.T) {
 	var observed leaseClaim
 	requireClaimMetadataProgress(t, release, func() error {
 		var err error
-		observed, err = readLeaseClaim(before.LeaseID)
+		observed, err = ReadLeaseClaim(before.LeaseID)
 		return err
 	})
 	if !reflect.DeepEqual(observed, before) {
@@ -152,7 +152,7 @@ func TestClaimMetadataObservationDuringReplacementFencesCleanup(t *testing.T) {
 	called := make(chan struct{}, 1)
 	go func() {
 		close(started)
-		cleaned <- removeLeaseClaimIfUnchangedAfter(before.LeaseID, observed, func() error {
+		cleaned <- RemoveLeaseClaimIfUnchangedAfter(before.LeaseID, observed, func() error {
 			called <- struct{}{}
 			return nil
 		})
@@ -192,7 +192,7 @@ func TestClaimMetadataDiscoveryUnderExternalOwner(t *testing.T) {
 		t.Run(operation, func(t *testing.T) {
 			isolateTestUserDirs(t)
 			const nextID = "tbx_independent"
-			owner := leaseClaim{LeaseID: "cbx_metadata_owner", Revision: "initial", Provider: "aws", Slug: newLeaseSlug(nextID), RepoRoot: "/repo/owner"}
+			owner := leaseClaim{LeaseID: "cbx_metadata_owner", Revision: "initial", Provider: "aws", Slug: NewLeaseSlug(nextID), RepoRoot: "/repo/owner"}
 			writeClaimsListFixture(t, owner.LeaseID+".json", owner)
 			release, assertOwned := holdClaimMetadataOwner(t, owner)
 			requireClaimMetadataProgress(t, release, func() error {
@@ -201,9 +201,9 @@ func TestClaimMetadataDiscoveryUnderExternalOwner(t *testing.T) {
 					var got leaseClaim
 					var err error
 					if operation == "read" {
-						got, err = readLeaseClaim(owner.LeaseID)
+						got, err = ReadLeaseClaim(owner.LeaseID)
 					} else {
-						got, _, err = resolveLeaseClaim(owner.Slug)
+						got, _, err = ResolveLeaseClaim(owner.Slug)
 					}
 					if err != nil || !reflect.DeepEqual(got, owner) {
 						return fmt.Errorf("active claim missing: got=%#v err=%v", got, err)
@@ -212,7 +212,7 @@ func TestClaimMetadataDiscoveryUnderExternalOwner(t *testing.T) {
 					var claims []leaseClaim
 					var err error
 					if operation == "list" {
-						claims, err = listLeaseClaims()
+						claims, err = ListLeaseClaims()
 					} else {
 						var snapshot leaseClaimsSnapshot
 						snapshot, err = snapshotLeaseClaims()
@@ -226,11 +226,11 @@ func TestClaimMetadataDiscoveryUnderExternalOwner(t *testing.T) {
 					var err error
 					switch operation {
 					case "requested slug":
-						slug, err = allocateClaimLeaseSlug(nextID, owner.Slug)
+						slug, err = AllocateClaimLeaseSlug(nextID, owner.Slug)
 					case "generated slug":
-						slug, err = allocateClaimLeaseSlug(nextID, "")
+						slug, err = AllocateClaimLeaseSlug(nextID, "")
 					case "direct slug":
-						slug, err = allocateDirectLeaseSlug(nextID, owner.Slug, nil)
+						slug, err = AllocateDirectLeaseSlug(nextID, owner.Slug, nil)
 					}
 					if err != nil || slug == owner.Slug || !strings.HasPrefix(slug, owner.Slug+"-") {
 						return fmt.Errorf("busy slug was not reserved: slug=%q err=%v", slug, err)
@@ -263,11 +263,11 @@ func TestClaimMetadataSSHResolveUnderExternalOwner(t *testing.T) {
 		}
 		replacement := cloneLeaseClaim(want)
 		replacement.RepoRoot = "/repo/replacement"
-		if err := replaceLeaseClaimIfUnchanged(want.LeaseID, want, replacement); err != nil {
+		if err := ReplaceLeaseClaimIfUnchanged(want.LeaseID, want, replacement); err != nil {
 			return err
 		}
 		called := false
-		err = withLeaseClaimUnchanged(want.LeaseID, lease.Server.claimSnapshot, func() error { called = true; return nil })
+		err = WithLeaseClaimUnchanged(want.LeaseID, lease.Server.claimSnapshot, func() error { called = true; return nil })
 		if called || err == nil || !strings.Contains(err.Error(), "claim changed") {
 			return fmt.Errorf("stale SSH snapshot authorized action: called=%t err=%v", called, err)
 		}

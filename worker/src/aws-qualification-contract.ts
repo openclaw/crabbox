@@ -1,10 +1,20 @@
 export const awsQualificationMaxRunMs = 120 * 60 * 1000;
+export const awsQualificationRetainedRunMs = 38 * 60 * 1000;
+export const awsQualificationCleanupReserveMs = 8 * 60 * 1000;
+export const awsQualificationRetainedRootGB = 400;
 
 export const awsQualificationInstanceTypes = ["t3.small", "t3a.small"] as const;
 
 export const awsQualificationAttestationVersion = 1;
 
 export type AWSQualificationService = "ec2" | "servicequotas" | "sts";
+
+export interface AWSQualificationRetainedImage {
+  imageId: string;
+  snapshotId: string;
+  sourceSha: string;
+  capsuleSha256: string;
+}
 
 export interface AWSQualificationRunIdentity {
   runId: string;
@@ -13,6 +23,7 @@ export interface AWSQualificationRunIdentity {
   candidateWorker: string;
   deploymentHash: string;
   expiresAt: string;
+  retainedImage?: AWSQualificationRetainedImage;
 }
 
 export interface AWSQualificationControllerProps {

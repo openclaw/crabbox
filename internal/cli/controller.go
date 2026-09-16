@@ -16,7 +16,7 @@ import (
 
 func (a App) controllerServe(ctx context.Context, args []string) error {
 	if err := controllerHostSupported(); err != nil {
-		return exit(2, "%v", err)
+		return Exit(2, "%v", err)
 	}
 	stateFile, err := controllerDefaultStateFile()
 	if err != nil {
@@ -24,7 +24,7 @@ func (a App) controllerServe(ctx context.Context, args []string) error {
 	}
 	defaultBinary, err := os.Executable()
 	if err != nil {
-		return exit(2, "resolve crabbox executable: %v", err)
+		return Exit(2, "resolve crabbox executable: %v", err)
 	}
 	fs := newFlagSet("adapter serve", a.Stderr)
 	listen := fs.String("listen", getenv("CRABBOX_ADAPTER_LISTEN", "127.0.0.1:8787"), "HTTP listen address")
@@ -56,19 +56,19 @@ func (a App) controllerServe(ctx context.Context, args []string) error {
 		return err
 	}
 	if err := controllerPolicyEnvDefault(fs, "required-ttl", "CRABBOX_ADAPTER_REQUIRED_TTL", requiredTTL); err != nil {
-		return exit(2, "%v", err)
+		return Exit(2, "%v", err)
 	}
 	if err := controllerPolicyEnvDefault(fs, "required-idle-timeout", "CRABBOX_ADAPTER_REQUIRED_IDLE_TIMEOUT", requiredIdleTimeout); err != nil {
-		return exit(2, "%v", err)
+		return Exit(2, "%v", err)
 	}
 	if fs.NArg() != 0 {
-		return exit(2, "usage: crabbox adapter serve [flags]")
+		return Exit(2, "usage: crabbox adapter serve [flags]")
 	}
 	if strings.TrimSpace(*tokenFile) == "" {
-		return exit(2, "--token-file is required")
+		return Exit(2, "--token-file is required")
 	}
 	if *maxConcurrent < 1 || *maxConcurrent > 64 {
-		return exit(2, "--max-concurrent must be between 1 and 64")
+		return Exit(2, "--max-concurrent must be between 1 and 64")
 	}
 	for name, value := range map[string]time.Duration{
 		"create-timeout":           *createTimeout,
@@ -78,15 +78,15 @@ func (a App) controllerServe(ctx context.Context, args []string) error {
 		"ready-reconcile-interval": *readyReconcileInterval,
 	} {
 		if value <= 0 {
-			return exit(2, "--%s must be greater than zero", name)
+			return Exit(2, "--%s must be greater than zero", name)
 		}
 	}
 	if strings.TrimSpace(*vncURLTemplate) != "" && !*allowDesktop {
-		return exit(2, "--vnc-url-template requires --allow-desktop")
+		return Exit(2, "--vnc-url-template requires --allow-desktop")
 	}
 	requiredTTLSeconds, requiredIdleSeconds, err := controllerPolicyLeaseValues(*requiredTTL, *requiredIdleTimeout)
 	if err != nil {
-		return exit(2, "%v", err)
+		return Exit(2, "%v", err)
 	}
 	if strings.TrimSpace(*provider) != "" {
 		if _, err := ProviderFor(*provider); err != nil {
@@ -94,7 +94,7 @@ func (a App) controllerServe(ctx context.Context, args []string) error {
 		}
 	}
 	if strings.TrimSpace(*adapterID) != "" && !validControllerWorkspaceID(strings.TrimSpace(*adapterID)) {
-		return exit(2, "--id must be a lowercase DNS-style name of at most 63 characters")
+		return Exit(2, "--id must be a lowercase DNS-style name of at most 63 characters")
 	}
 	token, err := readAdapterToken(*tokenFile)
 	if err != nil {
@@ -122,7 +122,7 @@ func (a App) controllerServe(ctx context.Context, args []string) error {
 	runnerWorkDir := expandUserPath(strings.TrimSpace(*workDir))
 	credentialBoundary, err := controllerRunnerCredentialBoundary(runnerConfig, runnerProvider, runnerWorkDir)
 	if err != nil {
-		return exit(2, "resolve controller child credential boundary: %v", err)
+		return Exit(2, "resolve controller child credential boundary: %v", err)
 	}
 	runner := &execControllerWorkspaceRunner{opts: execControllerRunnerOptions{
 		Binary:                      expandUserPath(strings.TrimSpace(*binary)),
@@ -140,13 +140,13 @@ func (a App) controllerServe(ctx context.Context, args []string) error {
 	defer cancelService()
 	service, err := newControllerService(serviceCtx, opts, runner, token, a.Stderr)
 	if err != nil {
-		return exit(2, "%v", err)
+		return Exit(2, "%v", err)
 	}
 	listener, err := net.Listen("tcp", strings.TrimSpace(*listen))
 	if err != nil {
 		cancelService()
 		service.waitForShutdown()
-		return exit(5, "listen on %s: %v", *listen, err)
+		return Exit(5, "listen on %s: %v", *listen, err)
 	}
 	defer listener.Close()
 	listeners := []net.Listener{listener}
@@ -156,7 +156,7 @@ func (a App) controllerServe(ctx context.Context, args []string) error {
 		if listenErr != nil {
 			cancelService()
 			service.waitForShutdown()
-			return exit(5, "--unix-socket: %v", listenErr)
+			return Exit(5, "--unix-socket: %v", listenErr)
 		}
 		defer cleanupSocket()
 		defer unixListener.Close()
@@ -210,15 +210,15 @@ func (a App) controllerStateValidate(args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 || strings.TrimSpace(*statePath) == "" {
-		return exit(2, "usage: crabbox adapter state validate --state-file <path>")
+		return Exit(2, "usage: crabbox adapter state validate --state-file <path>")
 	}
 	path := expandUserPath(strings.TrimSpace(*statePath))
 	if _, err := os.Lstat(path); err != nil {
-		return exit(2, "stat adapter state: %v", err)
+		return Exit(2, "stat adapter state: %v", err)
 	}
 	state, err := loadControllerState(path)
 	if err != nil {
-		return exit(2, "validate adapter state: %v", err)
+		return Exit(2, "validate adapter state: %v", err)
 	}
 	fmt.Fprintf(a.Stdout, "adapter state valid version=%d workspaces=%d\n", state.Version, len(state.Workspaces))
 	return nil
@@ -288,7 +288,7 @@ func controllerPolicyEnvDefault(fs *flag.FlagSet, flagName, envName string, valu
 }
 
 func controllerDefaultStateFile() (string, error) {
-	dir, err := crabboxStateDir()
+	dir, err := CrabboxStateDir()
 	if err != nil {
 		return "", err
 	}
@@ -303,35 +303,35 @@ func readPrivateAdapterToken(path, label string) (string, error) {
 	path = expandUserPath(strings.TrimSpace(path))
 	file, err := openControllerTokenFile(path)
 	if err != nil {
-		return "", exit(2, "read %s token file: %v", label, err)
+		return "", Exit(2, "read %s token file: %v", label, err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return "", exit(2, "stat %s token file: %v", label, err)
+		return "", Exit(2, "stat %s token file: %v", label, err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", exit(2, "%s token file must be a regular file", label)
+		return "", Exit(2, "%s token file must be a regular file", label)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
-		return "", exit(2, "%s token file %s must not be accessible by group or others", label, path)
+		return "", Exit(2, "%s token file %s must not be accessible by group or others", label, path)
 	}
 	if info.Size() > 8<<10 {
-		return "", exit(2, "%s token file is too large", label)
+		return "", Exit(2, "%s token file is too large", label)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, (8<<10)+1))
 	if err != nil {
-		return "", exit(2, "read %s token file: %v", label, err)
+		return "", Exit(2, "read %s token file: %v", label, err)
 	}
 	if len(data) > 8<<10 {
-		return "", exit(2, "%s token file is too large", label)
+		return "", Exit(2, "%s token file is too large", label)
 	}
 	token := strings.TrimSpace(string(data))
 	if token == "" {
-		return "", exit(2, "%s token file is empty", label)
+		return "", Exit(2, "%s token file is empty", label)
 	}
 	if strings.ContainsAny(token, "\r\n") {
-		return "", exit(2, "%s token file must contain one token", label)
+		return "", Exit(2, "%s token file must contain one token", label)
 	}
 	return token, nil
 }

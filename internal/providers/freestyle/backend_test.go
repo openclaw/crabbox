@@ -15,12 +15,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestFreestyleProviderSpec(t *testing.T) {
@@ -35,37 +38,50 @@ func TestFreestyleProviderSpec(t *testing.T) {
 	}
 }
 
-func TestFreestyleExecCommandPreservesShellString(t *testing.T) {
-	got := freestyleExecCommand([]string{"pnpm install && pnpm test"}, true)
-	want := "pnpm install && pnpm test"
-	if got != want {
-		t.Fatalf("command=%q want %q", got, want)
-	}
-}
-
-func TestFreestyleExecCommandQuotesImplicitShellArgv(t *testing.T) {
-	if got := freestyleExecCommand([]string{"go", "test", "./..."}, false); got != "'go' 'test' './...'" {
-		t.Fatalf("command=%q", got)
-	}
-	got := freestyleExecCommand([]string{"FOO=bar", "pnpm", "test"}, false)
-	if !strings.Contains(got, "FOO=") || !strings.Contains(got, "'pnpm'") {
-		t.Fatalf("command=%q", got)
-	}
-}
-
-func TestFreestyleExecCommandPreservesSpacedArguments(t *testing.T) {
-	got := freestyleExecCommand([]string{"echo", "hello world"}, false)
-	want := "'echo' 'hello world'"
-	if got != want {
-		t.Fatalf("command=%q want %q", got, want)
-	}
-}
-
-func TestFreestyleExecCommandPreservesSingleShellString(t *testing.T) {
-	got := freestyleExecCommand([]string{"echo hello from freestyle"}, false)
-	want := "echo hello from freestyle"
-	if got != want {
-		t.Fatalf("command=%q want %q", got, want)
+func TestFreestyleConfigureSizing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		vcpus   int
+		memory  int
+		wantErr string
+	}{
+		{name: "defaults"},
+		{name: "cpu only", vcpus: 7},
+		{name: "memory only", memory: 7},
+		{name: "positive", vcpus: 7, memory: 3},
+		{name: "negative cpu", vcpus: -2, wantErr: "freestyle vcpus must be non-negative"},
+		{name: "negative memory", memory: -2, wantErr: "freestyle memoryGB must be non-negative"},
+		{name: "both negative", vcpus: -2, memory: -2, wantErr: "freestyle vcpus must be non-negative"},
+		{name: "negative cpu with memory", vcpus: -2, memory: 7, wantErr: "freestyle vcpus must be non-negative"},
+		{name: "negative memory with cpu", vcpus: 7, memory: -2, wantErr: "freestyle memoryGB must be non-negative"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "freestyle", Freestyle: core.FreestyleConfig{VCPUs: tc.vcpus, MemoryGB: tc.memory}}
+			backend, err := (Provider{}).Configure(cfg, core.Runtime{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := backend.(*freestyleBackend).cfg.Freestyle; got != cfg.Freestyle {
+				t.Fatalf("sizing changed: %#v want %#v", got, cfg.Freestyle)
+			}
+			if tc.wantErr != "" {
+				b := backend.(*freestyleBackend)
+				checks := map[string]func() error{
+					"warmup": func() error { return b.Warmup(t.Context(), core.WarmupRequest{}) },
+					"run":    func() error { _, err := b.Run(t.Context(), core.RunRequest{}); return err },
+					"create": func() error { _, _, _, err := b.createSandbox(t.Context(), nil, core.Repo{}, false, ""); return err },
+				}
+				for name, check := range checks {
+					t.Run(name, func(t *testing.T) {
+						err := check()
+						var exitErr core.ExitError
+						if !errors.As(err, &exitErr) || exitErr.Code != 2 || err.Error() != tc.wantErr {
+							t.Fatalf("creation err=%v, want exit 2: %s", err, tc.wantErr)
+						}
+					})
+				}
+			}
+		})
 	}
 }
 
@@ -86,10 +102,10 @@ func TestFreestyleEnvExportCommandQuotesValuesOnly(t *testing.T) {
 
 func TestFreestyleExecForwardsEnvAfterWorkdir(t *testing.T) {
 	client := &fakeFreestyleClient{}
-	backend := &freestyleBackend{rt: Runtime{Stderr: io.Discard}}
-	code, err := backend.exec(context.Background(), client, "vm123", "/workspace/repo", []string{`echo "$GREETING"`}, false, map[string]string{
-		"GREETING": "hello world",
-	})
+	backend := &freestyleBackend{rt: core.Runtime{Stderr: io.Discard}}
+	code, err := backend.exec(context.Background(), client, "vm123", "/workspace/repo", core.RunRequest{
+		Command: []string{`echo "$GREETING"`}, Env: map[string]string{"GREETING": "hello world"},
+	}, backend.rt.Stdout, backend.rt.Stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,8 +125,79 @@ func TestFreestyleExecForwardsEnvAfterWorkdir(t *testing.T) {
 	}
 }
 
+func TestFreestyleConfigShowSection(t *testing.T) {
+	for _, selected := range []string{"", "freestyle"} {
+		for _, key := range []string{"", "synthetic-test-key"} {
+			cfg := core.Config{Provider: selected, Freestyle: core.FreestyleConfig{APIURL: "https://api.example.test/path?debug=1#hint", APIKey: key, Workdir: " raw-workdir ", VCPUs: 0, MemoryGB: -2}}
+			before := cfg.Freestyle
+			section := (Provider{}).ConfigShowSection(cfg)
+			values := map[string]any{}
+			var fields []string
+			for _, field := range section.Fields {
+				values[field.JSONName] = field.JSONValue
+				fields = append(fields, field.TextName+"="+field.TextValue)
+			}
+			auth := "missing"
+			if key != "" {
+				auth = "configured"
+			}
+			want := map[string]any{"apiUrl": "https://api.example.test/path", "workdir": " raw-workdir ", "vcpus": 0, "memoryGB": -2, "auth": auth}
+			if section.JSONKey != "freestyle" || section.TextLabel != "freestyle" || !reflect.DeepEqual(section.Providers, []string{"freestyle"}) || !reflect.DeepEqual(values, want) {
+				t.Fatal("unexpected Freestyle display projection")
+			}
+			if strings.Join(fields, " ") != "api_url=https://api.example.test/path workdir= raw-workdir  vcpus=0 memory_gb=-2 auth="+auth {
+				t.Fatal("text projection changed raw values or field order")
+			}
+			if cfg.Freestyle != before {
+				t.Fatal("display mutated configuration")
+			}
+		}
+	}
+}
+
+func TestFreestyleOrdinaryFlagBindings(t *testing.T) {
+	for _, provider := range []string{"other", "freestyle"} {
+		for _, value := range []string{"", "same", " padded "} {
+			for _, number := range []int{0, -2, 7} {
+				cfg := core.Config{Provider: provider, Freestyle: core.FreestyleConfig{APIURL: "same", Workdir: "same", VCPUs: 7, MemoryGB: 7}}
+				before := cfg
+				fs := flag.NewFlagSet("test", flag.ContinueOnError)
+				values := (Provider{}).RegisterFlags(fs, cfg)
+				if fs.Lookup("freestyle-api-key") != nil {
+					t.Fatal("API key flag appeared")
+				}
+				var names []string
+				fs.VisitAll(func(f *flag.Flag) { names = append(names, f.Name) })
+				if len(names) != 4 {
+					t.Fatalf("flag count %v", names)
+				}
+				for _, foreign := range []any{nil, struct{}{}} {
+					if err := (Provider{}).ApplyFlags(&cfg, fs, foreign); err != nil || !reflect.DeepEqual(cfg, before) {
+						t.Fatal("foreign values mutated config")
+					}
+				}
+				if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, before) {
+					t.Fatal("unvisited changed config")
+				}
+				if err := fs.Parse([]string{"--freestyle-api-url=first", "--freestyle-api-url=" + value, "--freestyle-workdir=" + value, "--freestyle-vcpus=" + strconv.Itoa(number), "--freestyle-memory-gb=" + strconv.Itoa(number)}); err != nil {
+					t.Fatal(err)
+				}
+				if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+					t.Fatal(err)
+				}
+				want := before
+				want.Freestyle.APIURL, want.Freestyle.Workdir, want.Freestyle.VCPUs, want.Freestyle.MemoryGB = value, value, number, number
+				core.RecordProviderFlagInputs(&want, true, "freestyle")
+				if !reflect.DeepEqual(cfg, want) {
+					t.Fatalf("flags %#v want %#v", cfg, want)
+				}
+			}
+		}
+	}
+}
+
 func TestFreestyleAPIKeyFlagIsNotRegistered(t *testing.T) {
-	cfg := Config{}
+	cfg := core.Config{}
 	cfg.Freestyle.APIKey = "secret-key"
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	RegisterFreestyleProviderFlags(fs, cfg)
@@ -127,8 +214,8 @@ func TestFreestyleAPIKeyFlagIsNotRegistered(t *testing.T) {
 }
 
 func TestFreestyleWarmupRejectsActionsRunner(t *testing.T) {
-	backend := &freestyleBackend{rt: Runtime{Stderr: io.Discard}}
-	err := backend.Warmup(context.Background(), WarmupRequest{ActionsRunner: true})
+	backend := &freestyleBackend{rt: core.Runtime{Stderr: io.Discard}}
+	err := backend.Warmup(context.Background(), core.WarmupRequest{ActionsRunner: true})
 	if err == nil || !strings.Contains(err.Error(), "--actions-runner") {
 		t.Fatalf("Warmup err=%v, want actions-runner rejection", err)
 	}
@@ -162,13 +249,13 @@ func TestFreestyleStatusWaitFailsOnTerminalState(t *testing.T) {
 		State: "stopped",
 	}}
 	oldClient := newFreestyleClient
-	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) {
+	newFreestyleClient = func(core.Config, core.Runtime) (freestyleAPI, error) {
 		return client, nil
 	}
 	t.Cleanup(func() { newFreestyleClient = oldClient })
 
-	backend := &freestyleBackend{cfg: Config{}, rt: Runtime{Stderr: io.Discard}}
-	_, err := backend.Status(context.Background(), StatusRequest{
+	backend := &freestyleBackend{cfg: core.Config{}, rt: core.Runtime{Stderr: io.Discard}}
+	_, err := backend.Status(context.Background(), core.StatusRequest{
 		ID:          "fsb_vm123",
 		Wait:        true,
 		WaitTimeout: time.Minute,
@@ -234,11 +321,11 @@ func TestFreestyleStopRejectsMalformedCrabboxNameWithoutDelete(t *testing.T) {
 		State: "running",
 	}}
 	oldClient := newFreestyleClient
-	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) { return client, nil }
+	newFreestyleClient = func(core.Config, core.Runtime) (freestyleAPI, error) { return client, nil }
 	t.Cleanup(func() { newFreestyleClient = oldClient })
-	backend := &freestyleBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	backend := &freestyleBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
 
-	err := backend.Stop(context.Background(), StopRequest{ID: "fsb_vm123"})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "fsb_vm123"})
 	if err == nil || !strings.Contains(err.Error(), "not claimed by Crabbox") {
 		t.Fatalf("Stop error = %v, want ownership refusal", err)
 	}
@@ -255,11 +342,11 @@ func TestFreestyleStopRejectsCanonicalSandboxWithoutExactClaim(t *testing.T) {
 		State: "running",
 	}}
 	oldClient := newFreestyleClient
-	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) { return client, nil }
+	newFreestyleClient = func(core.Config, core.Runtime) (freestyleAPI, error) { return client, nil }
 	t.Cleanup(func() { newFreestyleClient = oldClient })
-	backend := &freestyleBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	backend := &freestyleBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
 
-	err := backend.Stop(context.Background(), StopRequest{ID: "fsb_vm123"})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "fsb_vm123"})
 	if err == nil || !strings.Contains(err.Error(), "no exact local claim") {
 		t.Fatalf("Stop error = %v, want exact-claim refusal", err)
 	}
@@ -276,11 +363,15 @@ func TestFreestyleStopDeletesExactlyClaimedSandbox(t *testing.T) {
 	}
 	client := &fakeFreestyleClient{}
 	oldClient := newFreestyleClient
-	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) { return client, nil }
+	newFreestyleClient = func(core.Config, core.Runtime) (freestyleAPI, error) { return client, nil }
 	t.Cleanup(func() { newFreestyleClient = oldClient })
-	backend := &freestyleBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	configured, err := (Provider{}).Configure(core.Config{Freestyle: core.FreestyleConfig{VCPUs: -2, MemoryGB: -2}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := configured.(*freestyleBackend)
 
-	if err := backend.Stop(context.Background(), StopRequest{ID: "web"}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: "web"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.deleteIDs) != 1 || client.deleteIDs[0] != "vm123" {
@@ -306,7 +397,7 @@ func TestResolveFreestyleLeaseIDClaimsRawSandboxForRepo(t *testing.T) {
 	t.Cleanup(func() { claimLeaseForRepoProviderPond = oldClaim })
 
 	repoRoot := t.TempDir()
-	backend := &freestyleBackend{cfg: Config{Pond: "demo", IdleTimeout: 7 * time.Minute}}
+	backend := &freestyleBackend{cfg: core.Config{Pond: "demo", IdleTimeout: 7 * time.Minute}}
 	if _, _, err := backend.resolveLeaseID(context.Background(), client, "fsb_vm123", repoRoot, true); err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +418,7 @@ func TestResolveFreestyleLeaseIDRequiresExplicitReclaimForUnclaimedReuse(t *test
 	if _, _, err := backend.resolveLeaseID(context.Background(), client, "fsb_vm123", t.TempDir(), false); err == nil || !strings.Contains(err.Error(), "--reclaim") {
 		t.Fatalf("resolve error = %v, want explicit reclaim refusal", err)
 	}
-	if _, ok, err := resolveLeaseClaim("fsb_vm123"); err != nil || ok {
+	if _, ok, err := core.ResolveLeaseClaim("fsb_vm123"); err != nil || ok {
 		t.Fatalf("claim created without reclaim: ok=%t err=%v", ok, err)
 	}
 }
@@ -363,7 +454,7 @@ func TestResolveFreestyleLeaseIDAcceptsListedIdentifiers(t *testing.T) {
 	client := &fakeFreestyleClient{listVMs: []freestyleVM{vm}}
 	backend := &freestyleBackend{}
 	leaseID := freestyleLeasePrefix + vm.ID
-	for _, id := range []string{vm.ID, vm.Name, newLeaseSlug(leaseID)} {
+	for _, id := range []string{vm.ID, vm.Name, core.NewLeaseSlug(leaseID)} {
 		t.Run(id, func(t *testing.T) {
 			gotLeaseID, gotVMID, err := backend.resolveLeaseID(context.Background(), client, id, "", false)
 			if err != nil {
@@ -377,15 +468,15 @@ func TestResolveFreestyleLeaseIDAcceptsListedIdentifiers(t *testing.T) {
 }
 
 func TestFreestyleWorkspacePathDefaultsUnderWorkspace(t *testing.T) {
-	cfg := Config{Freestyle: FreestyleConfig{}}
+	cfg := core.Config{Freestyle: core.FreestyleConfig{}}
 	if got, err := freestyleWorkspacePath(cfg); err != nil || got != "/workspace/crabbox" {
 		t.Fatalf("workspace=%q err=%v", got, err)
 	}
-	cfg = Config{Freestyle: FreestyleConfig{Workdir: "repo"}}
+	cfg = core.Config{Freestyle: core.FreestyleConfig{Workdir: "repo"}}
 	if got, err := freestyleWorkspacePath(cfg); err != nil || got != "/workspace/repo" {
 		t.Fatalf("workspace=%q err=%v", got, err)
 	}
-	cfg = Config{Freestyle: FreestyleConfig{Workdir: "team/repo"}}
+	cfg = core.Config{Freestyle: core.FreestyleConfig{Workdir: "team/repo"}}
 	if got, err := freestyleWorkspacePath(cfg); err != nil || got != "/workspace/team/repo" {
 		t.Fatalf("workspace=%q err=%v", got, err)
 	}
@@ -394,7 +485,7 @@ func TestFreestyleWorkspacePathDefaultsUnderWorkspace(t *testing.T) {
 func TestFreestyleWorkspacePathRejectsEscapes(t *testing.T) {
 	for _, workdir := range []string{"/work/repo", "/etc", "../etc", "repo/../../../etc", ".", "./.."} {
 		t.Run(workdir, func(t *testing.T) {
-			if got, err := freestyleWorkspacePath(Config{Freestyle: FreestyleConfig{Workdir: workdir}}); err == nil {
+			if got, err := freestyleWorkspacePath(core.Config{Freestyle: core.FreestyleConfig{Workdir: workdir}}); err == nil {
 				t.Fatalf("workspace=%q, want error for workdir %q", got, workdir)
 			}
 		})
@@ -404,10 +495,10 @@ func TestFreestyleWorkspacePathRejectsEscapes(t *testing.T) {
 func TestFreestyleRunRejectsUnsafeWorkdirBeforeProviderClient(t *testing.T) {
 	backend := &freestyleBackend{
 		spec: Provider{}.Spec(),
-		cfg:  Config{Freestyle: FreestyleConfig{Workdir: "../etc"}},
-		rt:   Runtime{Stderr: io.Discard},
+		cfg:  core.Config{Freestyle: core.FreestyleConfig{Workdir: "../etc"}},
+		rt:   core.Runtime{Stderr: io.Discard},
 	}
-	_, err := backend.Run(context.Background(), RunRequest{NoSync: true})
+	_, err := backend.Run(context.Background(), core.RunRequest{NoSync: true})
 	if err == nil || !strings.Contains(err.Error(), "escapes /workspace") {
 		t.Fatalf("Run err=%v, want workdir containment error", err)
 	}
@@ -417,17 +508,17 @@ func TestFreestyleRunRejectsMissingCommand(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeFreestyleClient{createID: "vm123"}
 	oldClient := newFreestyleClient
-	newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
+	newFreestyleClient = func(cfg core.Config, rt core.Runtime) (freestyleAPI, error) {
 		return client, nil
 	}
 	defer func() { newFreestyleClient = oldClient }()
 	backend := &freestyleBackend{
 		spec: Provider{}.Spec(),
-		cfg:  Config{Freestyle: FreestyleConfig{}},
-		rt:   Runtime{Stderr: io.Discard},
+		cfg:  core.Config{Freestyle: core.FreestyleConfig{}},
+		rt:   core.Runtime{Stderr: io.Discard},
 	}
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:  true,
 		Command: nil,
 	})
@@ -443,18 +534,18 @@ func TestFreestyleRunCleansNewSandboxAfterPrepareFailure(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeFreestyleClient{createID: "vm123", execErrAt: 1}
 	oldClient := newFreestyleClient
-	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) {
+	newFreestyleClient = func(core.Config, core.Runtime) (freestyleAPI, error) {
 		return client, nil
 	}
 	t.Cleanup(func() { newFreestyleClient = oldClient })
 
 	backend := &freestyleBackend{
 		spec: Provider{}.Spec(),
-		cfg:  Config{Freestyle: FreestyleConfig{}},
-		rt:   Runtime{Stderr: io.Discard},
+		cfg:  core.Config{Freestyle: core.FreestyleConfig{}},
+		rt:   core.Runtime{Stderr: io.Discard},
 	}
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:  true,
 		Command: []string{"true"},
 	})
@@ -479,7 +570,7 @@ func TestFreestyleRunKeepsNewSandboxAfterPrepareFailureWhenRequested(t *testing.
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeFreestyleClient{createID: "vm123", execErrAt: 1}
 	oldClient := newFreestyleClient
-	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) {
+	newFreestyleClient = func(core.Config, core.Runtime) (freestyleAPI, error) {
 		return client, nil
 	}
 	t.Cleanup(func() { newFreestyleClient = oldClient })
@@ -487,15 +578,15 @@ func TestFreestyleRunKeepsNewSandboxAfterPrepareFailureWhenRequested(t *testing.
 	var stderr bytes.Buffer
 	backend := &freestyleBackend{
 		spec: Provider{}.Spec(),
-		cfg: Config{
+		cfg: core.Config{
 			IdleTimeout: 5 * time.Minute,
 			TTL:         time.Hour,
-			Freestyle:   FreestyleConfig{},
+			Freestyle:   core.FreestyleConfig{},
 		},
-		rt: Runtime{Stderr: &stderr},
+		rt: core.Runtime{Stderr: &stderr},
 	}
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:          Repo{Root: t.TempDir(), Name: "repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:        true,
 		KeepOnFailure: true,
 		TimingJSON:    true,
@@ -544,7 +635,7 @@ func TestFreestyleRunSyncOnlySkipsUserExec(t *testing.T) {
 	}
 	client := &fakeFreestyleClient{createID: "vm-sync"}
 	oldClient := newFreestyleClient
-	newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
+	newFreestyleClient = func(cfg core.Config, rt core.Runtime) (freestyleAPI, error) {
 		return client, nil
 	}
 	defer func() { newFreestyleClient = oldClient }()
@@ -552,11 +643,11 @@ func TestFreestyleRunSyncOnlySkipsUserExec(t *testing.T) {
 	var stderr bytes.Buffer
 	backend := &freestyleBackend{
 		spec: Provider{}.Spec(),
-		cfg:  Config{Freestyle: FreestyleConfig{}},
-		rt:   Runtime{Stdout: &stdout, Stderr: &stderr},
+		cfg:  core.Config{Freestyle: core.FreestyleConfig{}},
+		rt:   core.Runtime{Stdout: &stdout, Stderr: &stderr},
 	}
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:       Repo{Root: root, Name: "repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Root: root, Name: "repo"},
 		SyncOnly:   true,
 		TimingJSON: true,
 		Command:    []string{"printf", "unexpected-user-command"},
@@ -589,21 +680,21 @@ func TestFreestyleRunNoSyncDoesNotDeleteExistingWorkspace(t *testing.T) {
 		State: "running",
 	}}
 	oldClient := newFreestyleClient
-	newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
+	newFreestyleClient = func(cfg core.Config, rt core.Runtime) (freestyleAPI, error) {
 		return client, nil
 	}
 	defer func() { newFreestyleClient = oldClient }()
 	backend := &freestyleBackend{
 		spec: Provider{}.Spec(),
-		cfg: Config{
-			Freestyle: FreestyleConfig{},
-			Sync:      SyncConfig{Delete: true},
+		cfg: core.Config{
+			Freestyle: core.FreestyleConfig{},
+			Sync:      core.SyncConfig{Delete: true},
 		},
-		rt: Runtime{Stderr: io.Discard},
+		rt: core.Runtime{Stderr: io.Discard},
 	}
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		ID:      "fsb_vm123",
-		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+		Repo:    core.Repo{Root: t.TempDir(), Name: "repo"},
 		Reclaim: true,
 		NoSync:  true,
 		Command: []string{"test", "-f", "kept.txt"},
@@ -639,7 +730,7 @@ func TestFreestyleRunCleanupFailureReportsRetainedSession(t *testing.T) {
 		deleteErr: errors.New("delete failed"),
 	}
 	oldClient := newFreestyleClient
-	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) {
+	newFreestyleClient = func(core.Config, core.Runtime) (freestyleAPI, error) {
 		return client, nil
 	}
 	t.Cleanup(func() { newFreestyleClient = oldClient })
@@ -647,16 +738,16 @@ func TestFreestyleRunCleanupFailureReportsRetainedSession(t *testing.T) {
 	var stderr bytes.Buffer
 	backend := &freestyleBackend{
 		spec: Provider{}.Spec(),
-		cfg:  Config{Freestyle: FreestyleConfig{}},
-		rt:   Runtime{Stderr: &stderr},
+		cfg:  core.Config{Freestyle: core.FreestyleConfig{}},
+		rt:   core.Runtime{Stderr: &stderr},
 	}
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:       Repo{Root: t.TempDir(), Name: "repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:     true,
 		TimingJSON: true,
 		Command:    []string{"true"},
 	})
-	var public ExitError
+	var public core.ExitError
 	if !errors.Is(err, client.deleteErr) || !errors.As(err, &public) || public.Code != 1 || result.ExitCode != 1 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
 		t.Errorf("cleanup failure result=%#v err=%v", result, err)
 	}
@@ -685,12 +776,12 @@ func freestyleLifecycleBackend(t *testing.T, client *fakeFreestyleClient, stderr
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	original := newFreestyleClient
-	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) { return client, nil }
+	newFreestyleClient = func(core.Config, core.Runtime) (freestyleAPI, error) { return client, nil }
 	t.Cleanup(func() { newFreestyleClient = original })
-	return &freestyleBackend{spec: Provider{}.Spec(), cfg: Config{Freestyle: FreestyleConfig{}}, rt: Runtime{Stdout: io.Discard, Stderr: stderr}}
+	return &freestyleBackend{spec: Provider{}.Spec(), cfg: core.Config{Freestyle: core.FreestyleConfig{}}, rt: core.Runtime{Stdout: io.Discard, Stderr: stderr}}
 }
 
-func assertFreestyleLifecycleTiming(t *testing.T, diagnostics string, result RunResult, runErr error) {
+func assertFreestyleLifecycleTiming(t *testing.T, diagnostics string, result core.RunResult, runErr error) {
 	t.Helper()
 	result = core.FinalizeRunResult(result, runErr)
 	lines := strings.Split(strings.TrimSpace(diagnostics), "\n")
@@ -754,12 +845,12 @@ func TestFreestyleRunFinalizationPreservesPrimaryOutcome(t *testing.T) {
 				diagnostics = &freestyleTimingFailureWriter{cause: writerErr}
 			}
 			backend := freestyleLifecycleBackend(t, client, diagnostics)
-			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: tc.keep, TimingJSON: true, Command: []string{"__lifecycle_workload__"}})
+			result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: tc.keep, TimingJSON: true, Command: []string{"__lifecycle_workload__"}})
 			wantCode, wantKind := tc.commandCode, core.RunErrorCommandExit
 			if wantCode == 0 {
 				wantCode, wantKind = 1, core.RunErrorProvider
 			}
-			var public ExitError
+			var public core.ExitError
 			if !errors.As(err, &public) || public.Code != wantCode || result.ExitCode != wantCode || result.Status != core.RunStatusFailed || result.ErrorKind != wantKind || workloads != 1 {
 				t.Errorf("primary outcome lost: result=%#v err=%v public=%#v workloads=%d", result, err, public, workloads)
 			}
@@ -807,8 +898,8 @@ func TestFreestyleRunPreservesTransportCauses(t *testing.T) {
 			}
 			var stderr bytes.Buffer
 			backend := freestyleLifecycleBackend(t, client, &stderr)
-			result, err := backend.Run(t.Context(), RunRequest{Repo: Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: true, TimingJSON: true, Command: []string{"__lifecycle_workload__"}})
-			var public ExitError
+			result, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: true, TimingJSON: true, Command: []string{"__lifecycle_workload__"}})
+			var public core.ExitError
 			if !errors.Is(err, tc.cause) || !errors.As(err, &public) || public.Code != 1 || result.ExitCode != 1 || result.Status != tc.status || result.ErrorKind != tc.kind || workloads != 1 || t.Context().Err() != nil {
 				t.Errorf("transport cause/outcome lost: result=%#v err=%v workloads=%d", result, err, workloads)
 			}
@@ -845,7 +936,14 @@ func TestFreestyleRunReusedLifecycleControls(t *testing.T) {
 			}
 			var stderr bytes.Buffer
 			backend := freestyleLifecycleBackend(t, client, &stderr)
-			repo := Repo{Root: t.TempDir(), Name: "fixture"}
+			backend.cfg.Freestyle.VCPUs = -2
+			backend.cfg.Freestyle.MemoryGB = -2
+			configured, err := (Provider{}).Configure(backend.cfg, backend.rt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend = configured.(*freestyleBackend)
+			repo := core.Repo{Root: t.TempDir(), Name: "fixture"}
 			if tc.syncOnly {
 				repo = freestyleArchiveRepo(t)
 			}
@@ -853,7 +951,7 @@ func TestFreestyleRunReusedLifecycleControls(t *testing.T) {
 			if err := claimLeaseForRepoProviderPond(leaseID, "reused", freestyleProvider, "", repo.Root, time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
-			result, err := backend.Run(t.Context(), RunRequest{ID: leaseID, Repo: repo, NoSync: !tc.syncOnly, SyncOnly: tc.syncOnly, TimingJSON: true, Command: []string{"__lifecycle_workload__"}})
+			result, err := backend.Run(t.Context(), core.RunRequest{ID: leaseID, Repo: repo, NoSync: !tc.syncOnly, SyncOnly: tc.syncOnly, TimingJSON: true, Command: []string{"__lifecycle_workload__"}})
 			if result.ExitCode != tc.commandCode || (err != nil) != (tc.commandCode != 0) || result.Session == nil || !result.Session.Kept || !result.Session.Reused || client.createReq != nil || len(client.deleteIDs) != 0 {
 				t.Fatalf("reused disposition: result=%#v err=%v creates=%#v deletes=%v", result, err, client.createReq, client.deleteIDs)
 			}
@@ -880,19 +978,19 @@ func TestFreestyleRunPrintsRedactedEnvSummary(t *testing.T) {
 		State: "running",
 	}}
 	oldClient := newFreestyleClient
-	newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
+	newFreestyleClient = func(cfg core.Config, rt core.Runtime) (freestyleAPI, error) {
 		return client, nil
 	}
 	defer func() { newFreestyleClient = oldClient }()
 	var stderr bytes.Buffer
 	backend := &freestyleBackend{
 		spec: Provider{}.Spec(),
-		cfg:  Config{Freestyle: FreestyleConfig{}},
-		rt:   Runtime{Stdout: io.Discard, Stderr: &stderr},
+		cfg:  core.Config{Freestyle: core.FreestyleConfig{}},
+		rt:   core.Runtime{Stdout: io.Discard, Stderr: &stderr},
 	}
-	_, err := backend.Run(context.Background(), RunRequest{
+	_, err := backend.Run(context.Background(), core.RunRequest{
 		ID:         "fsb_vm123",
-		Repo:       Repo{Root: t.TempDir(), Name: "repo"},
+		Repo:       core.Repo{Root: t.TempDir(), Name: "repo"},
 		Reclaim:    true,
 		NoSync:     true,
 		Command:    []string{"printenv", "SECRET_TOKEN"},
@@ -914,10 +1012,10 @@ func TestFreestyleCreateSandboxWorksWithoutWorkdir(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeFreestyleClient{createID: "vm123"}
 	backend := &freestyleBackend{
-		cfg: Config{Freestyle: FreestyleConfig{}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Freestyle: core.FreestyleConfig{}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	leaseID, id, slug, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	leaseID, id, slug, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -945,10 +1043,10 @@ func TestFreestyleCreateSandboxPassesNameWithoutWorkdir(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeFreestyleClient{createID: "vm456"}
 	backend := &freestyleBackend{
-		cfg: Config{Freestyle: FreestyleConfig{VCPUs: 4, MemoryGB: 8}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Freestyle: core.FreestyleConfig{VCPUs: 4, MemoryGB: 8}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	_, _, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -970,14 +1068,14 @@ func TestFreestyleCreateSandboxStoresClaimForList(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeFreestyleClient{createID: "vm789"}
 	backend := &freestyleBackend{
-		cfg: Config{Pond: "Alpha Pond", Freestyle: FreestyleConfig{}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Pond: "Alpha Pond", Freestyle: core.FreestyleConfig{}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	_, _, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, ok, err := resolveLeaseClaim("fsb_vm789")
+	claim, ok, err := core.ResolveLeaseClaim("fsb_vm789")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -996,10 +1094,10 @@ func TestFreestyleListAndStatusUseStoredClaimSlug(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeFreestyleClient{createID: "vm789"}
 	backend := &freestyleBackend{
-		cfg: Config{Pond: "demo", Freestyle: FreestyleConfig{}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Pond: "demo", Freestyle: core.FreestyleConfig{}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	leaseID, id, slug, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "blue-lobster")
+	leaseID, id, slug, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "blue-lobster")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1014,6 +1112,9 @@ func TestFreestyleListAndStatusUseStoredClaimSlug(t *testing.T) {
 	status := freestyleStatusView(leaseID, vm)
 	if status.Slug != "blue-lobster" || status.Labels["slug"] != "blue-lobster" || status.Labels["pond"] != "demo" {
 		t.Fatalf("status=%#v labels=%v", status, status.Labels)
+	}
+	if server.ServerType.Name != "" || status.ServerType != "" {
+		t.Fatalf("Freestyle has no server type: list=%q status=%q", server.ServerType.Name, status.ServerType)
 	}
 }
 
@@ -1030,10 +1131,10 @@ func TestFreestyleCreateSandboxReportsBoundedCleanupFailure(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	backend := &freestyleBackend{
-		cfg: Config{Freestyle: FreestyleConfig{}},
-		rt:  Runtime{Stderr: &stderr},
+		cfg: core.Config{Freestyle: core.FreestyleConfig{}},
+		rt:  core.Runtime{Stderr: &stderr},
 	}
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	_, _, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err == nil {
 		t.Fatal("expected claim failure")
 	}
@@ -1077,11 +1178,11 @@ func TestFreestyleSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	}
 	client := &fakeFreestyleClient{}
 	backend := &freestyleBackend{
-		cfg: Config{Freestyle: FreestyleConfig{Workdir: "repo"}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Freestyle: core.FreestyleConfig{Workdir: "repo"}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", RunRequest{
-		Repo: Repo{Root: root, Name: "repo"},
+	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", core.RunRequest{
+		Repo: core.Repo{Root: root, Name: "repo"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1121,11 +1222,11 @@ func TestFreestyleSyncWorkspaceValidatesArchiveBeforeDeletingWorkspace(t *testin
 	calls := 0
 	client := &fakeFreestyleClient{}
 	backend := &freestyleBackend{
-		cfg: Config{
-			Freestyle: FreestyleConfig{Workdir: "repo"},
-			Sync:      SyncConfig{Delete: true},
+		cfg: core.Config{
+			Freestyle: core.FreestyleConfig{Workdir: "repo"},
+			Sync:      core.SyncConfig{Delete: true},
 		},
-		rt: Runtime{Stderr: io.Discard, Clock: freestyleArchiveClock(func() time.Time {
+		rt: core.Runtime{Stderr: io.Discard, Clock: freestyleArchiveClock(func() time.Time {
 			calls++
 			if calls == 5 {
 				if err := os.Remove(trackedPath); err != nil {
@@ -1136,8 +1237,8 @@ func TestFreestyleSyncWorkspaceValidatesArchiveBeforeDeletingWorkspace(t *testin
 		})},
 	}
 
-	if _, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", RunRequest{
-		Repo: Repo{Root: root, Name: "repo"},
+	if _, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", core.RunRequest{
+		Repo: core.Repo{Root: root, Name: "repo"},
 	}, nil); err == nil {
 		t.Fatal("syncWorkspace err=nil, want local archive failure")
 	}
@@ -1178,14 +1279,14 @@ func TestFreestyleSyncWorkspaceHonorsIncludes(t *testing.T) {
 	}
 	client := &fakeFreestyleClient{}
 	backend := &freestyleBackend{
-		cfg: Config{
-			Freestyle: FreestyleConfig{Workdir: "repo"},
-			Sync:      SyncConfig{Includes: []string{"keep/**"}},
+		cfg: core.Config{
+			Freestyle: core.FreestyleConfig{Workdir: "repo"},
+			Sync:      core.SyncConfig{Includes: []string{"keep/**"}},
 		},
-		rt: Runtime{Stderr: io.Discard},
+		rt: core.Runtime{Stderr: io.Discard},
 	}
-	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", RunRequest{
-		Repo: Repo{Root: root, Name: "repo"},
+	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", core.RunRequest{
+		Repo: core.Repo{Root: root, Name: "repo"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1194,10 +1295,10 @@ func TestFreestyleSyncWorkspaceHonorsIncludes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !tarGzipContains(t, archive, "keep/file.txt") {
+	if !testutil.TarGzipContains(t, archive, "keep/file.txt") {
 		t.Fatal("archive missing included file")
 	}
-	if tarGzipContains(t, archive, "skip/file.txt") {
+	if testutil.TarGzipContains(t, archive, "skip/file.txt") {
 		t.Fatal("archive contains file outside sync.include")
 	}
 }
@@ -1220,11 +1321,11 @@ func TestFreestyleSyncWorkspaceFallsBackToExecUpload(t *testing.T) {
 	}
 	client := &fakeFreestyleClient{writeFileErr: errors.New("file api upload failed")}
 	backend := &freestyleBackend{
-		cfg: Config{Freestyle: FreestyleConfig{Workdir: "repo"}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Freestyle: core.FreestyleConfig{Workdir: "repo"}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", RunRequest{
-		Repo: Repo{Root: root, Name: "repo"},
+	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", core.RunRequest{
+		Repo: core.Repo{Root: root, Name: "repo"},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1249,14 +1350,14 @@ func TestFreestyleSyncDeleteStagesBeforeReplacingWorkspace(t *testing.T) {
 	}
 	client := &fakeFreestyleClient{}
 	backend := &freestyleBackend{
-		cfg: Config{
-			Freestyle: FreestyleConfig{Workdir: "repo"},
-			Sync:      SyncConfig{Delete: true},
+		cfg: core.Config{
+			Freestyle: core.FreestyleConfig{Workdir: "repo"},
+			Sync:      core.SyncConfig{Delete: true},
 		},
-		rt: Runtime{Stderr: io.Discard},
+		rt: core.Runtime{Stderr: io.Discard},
 	}
-	if _, _, err := backend.syncWorkspace(context.Background(), client, "vm123", RunRequest{
-		Repo: Repo{Root: root, Name: "repo"},
+	if _, _, err := backend.syncWorkspace(context.Background(), client, "vm123", core.RunRequest{
+		Repo: core.Repo{Root: root, Name: "repo"},
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -1300,14 +1401,14 @@ func TestFreestyleSyncDeletePreservesWorkspaceWhenFallbackUploadFails(t *testing
 		},
 	}
 	backend := &freestyleBackend{
-		cfg: Config{
-			Freestyle: FreestyleConfig{Workdir: "repo"},
-			Sync:      SyncConfig{Delete: true},
+		cfg: core.Config{
+			Freestyle: core.FreestyleConfig{Workdir: "repo"},
+			Sync:      core.SyncConfig{Delete: true},
 		},
-		rt: Runtime{Stderr: io.Discard},
+		rt: core.Runtime{Stderr: io.Discard},
 	}
-	if _, _, err := backend.syncWorkspace(context.Background(), client, "vm123", RunRequest{
-		Repo: Repo{Root: root, Name: "repo"},
+	if _, _, err := backend.syncWorkspace(context.Background(), client, "vm123", core.RunRequest{
+		Repo: core.Repo{Root: root, Name: "repo"},
 	}, nil); err == nil || !strings.Contains(err.Error(), "exec failed") {
 		t.Fatalf("syncWorkspace err=%v, want fallback upload failure", err)
 	}
@@ -1332,11 +1433,11 @@ func TestFreestyleSyncHonorsConfiguredTimeout(t *testing.T) {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 	backend := &freestyleBackend{
-		cfg: Config{
-			Freestyle: FreestyleConfig{Workdir: "repo"},
-			Sync:      SyncConfig{Timeout: 100 * time.Millisecond},
+		cfg: core.Config{
+			Freestyle: core.FreestyleConfig{Workdir: "repo"},
+			Sync:      core.SyncConfig{Timeout: 100 * time.Millisecond},
 		},
-		rt: Runtime{Stderr: io.Discard},
+		rt: core.Runtime{Stderr: io.Discard},
 	}
 	// Local Git manifest queries and archive I/O finish before the fake transfer
 	// blocks. Measure cancellation in virtual time, independent of their wall time.
@@ -1371,8 +1472,8 @@ func TestFreestyleSyncHonorsConfiguredTimeout(t *testing.T) {
 			}
 			return ctx.Err()
 		}}
-		if _, _, err := backend.syncWorkspace(context.Background(), client, "vm123", RunRequest{
-			Repo: Repo{Root: root, Name: "repo"},
+		if _, _, err := backend.syncWorkspace(context.Background(), client, "vm123", core.RunRequest{
+			Repo: core.Repo{Root: root, Name: "repo"},
 		}, nil); !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("syncWorkspace err=%v, want timeout", err)
 		}
@@ -1393,7 +1494,7 @@ func TestFreestyleUploadCleansAttemptFilesAfterFailure(t *testing.T) {
 				client.writeFileErr = errors.New("file api upload failed")
 				client.execErrAt = 2
 			}
-			backend := &freestyleBackend{rt: Runtime{Stderr: io.Discard}}
+			backend := &freestyleBackend{rt: core.Runtime{Stderr: io.Discard}}
 			payload := []byte("synthetic payload")
 			err := backend.uploadArchive(t.Context(), client, "vm123", "/tmp/archive.tgz", bytes.NewReader(payload))
 			if err == nil || !strings.Contains(err.Error(), "exec failed") {
@@ -1424,19 +1525,19 @@ func TestReadFreestyleArchiveForUploadRejectsOversize(t *testing.T) {
 
 func TestRejectFreestyleSyncOptionsAllowsForceSyncLarge(t *testing.T) {
 	spec := Provider{}.Spec()
-	if err := delegatedSyncOptionsError(spec, RunRequest{ForceSyncLarge: true}); err != nil {
+	if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{ForceSyncLarge: true}); err != nil {
 		t.Fatalf("force sync large should be honored by Freestyle archive sync: %v", err)
 	}
-	if err := delegatedSyncOptionsError(spec, RunRequest{SyncOnly: true}); err != nil {
+	if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{SyncOnly: true}); err != nil {
 		t.Fatalf("sync-only should be supported: %v", err)
 	}
-	if err := delegatedSyncOptionsError(spec, RunRequest{ChecksumSync: true}); err == nil || !strings.Contains(err.Error(), "--checksum") {
+	if err := core.RejectDelegatedSyncOptionsForSpec(spec, core.RunRequest{ChecksumSync: true}); err == nil || !strings.Contains(err.Error(), "--checksum") {
 		t.Fatalf("checksum err=%v", err)
 	}
 }
 
 func TestNewFreestyleSandboxNameUsesCrabboxPrefix(t *testing.T) {
-	name := newFreestyleSandboxName(Repo{Name: "repo"})
+	name := newFreestyleSandboxName(core.Repo{Name: "repo"})
 	if !strings.HasPrefix(name, "crabbox-repo-") {
 		t.Fatalf("name=%q", name)
 	}
@@ -1552,29 +1653,7 @@ func (f *fakeFreestyleClient) commandContains(value string) bool {
 	return false
 }
 
-func tarGzipContains(t *testing.T, data []byte, name string) bool {
-	t.Helper()
-	gz, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			return false
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if header.Name == name {
-			return true
-		}
-	}
-}
-
-func freestyleArchiveRepo(t *testing.T) Repo {
+func freestyleArchiveRepo(t *testing.T) core.Repo {
 	t.Helper()
 	root := t.TempDir()
 	for _, name := range []string{"tracked.txt", "other.txt"} {
@@ -1589,7 +1668,7 @@ func freestyleArchiveRepo(t *testing.T) Repo {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}
-	return Repo{Root: root, Name: "repo"}
+	return core.Repo{Root: root, Name: "repo"}
 }
 
 func TestFreestyleRunBoundsFullArchiveBeforeMutation(t *testing.T) {
@@ -1607,10 +1686,10 @@ func TestFreestyleRunBoundsFullArchiveBeforeMutation(t *testing.T) {
 				}
 				client := &fakeFreestyleClient{getVM: freestyleVM{ID: "vm123", Name: "crabbox-repo-abc123", State: "running"}}
 				old := newFreestyleClient
-				newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) { return client, nil }
+				newFreestyleClient = func(core.Config, core.Runtime) (freestyleAPI, error) { return client, nil }
 				t.Cleanup(func() { newFreestyleClient = old })
-				b := &freestyleBackend{spec: Provider{}.Spec(), cfg: Config{Sync: SyncConfig{FailFiles: 2, Delete: true}}, rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-				req := RunRequest{Repo: repo, SyncOnly: true, ForceSyncLarge: force}
+				b := &freestyleBackend{spec: Provider{}.Spec(), cfg: core.Config{Sync: core.SyncConfig{FailFiles: 2, Delete: true}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+				req := core.RunRequest{Repo: repo, SyncOnly: true, ForceSyncLarge: force}
 				if reused {
 					req.ID = "fsb_vm123"
 					req.Reclaim = true
@@ -1655,10 +1734,10 @@ func TestFreestyleRunCompressedCapPrecedesCreateEvenWhenForced(t *testing.T) {
 	}
 	client := &fakeFreestyleClient{}
 	old := newFreestyleClient
-	newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) { return client, nil }
+	newFreestyleClient = func(core.Config, core.Runtime) (freestyleAPI, error) { return client, nil }
 	t.Cleanup(func() { newFreestyleClient = old })
-	b := &freestyleBackend{spec: Provider{}.Spec(), rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	_, err = b.Run(t.Context(), RunRequest{Repo: repo, SyncOnly: true, ForceSyncLarge: true})
+	b := &freestyleBackend{spec: Provider{}.Spec(), rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	_, err = b.Run(t.Context(), core.RunRequest{Repo: repo, SyncOnly: true, ForceSyncLarge: true})
 	if err == nil || !strings.Contains(err.Error(), "after compression") {
 		t.Fatalf("compressed cap failure=%v", err)
 	}
@@ -1697,10 +1776,10 @@ func TestFreestyleRunPreparesSnapshotBeforeCreate(t *testing.T) {
 				return os.WriteFile(filepath.Join(repo.Root, "tracked.txt"), []byte("changed during create"), 0600)
 			}}
 			old := newFreestyleClient
-			newFreestyleClient = func(Config, Runtime) (freestyleAPI, error) { return client, nil }
+			newFreestyleClient = func(core.Config, core.Runtime) (freestyleAPI, error) { return client, nil }
 			t.Cleanup(func() { newFreestyleClient = old })
-			b := &freestyleBackend{spec: Provider{}.Spec(), rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-			_, err := b.Run(t.Context(), RunRequest{Repo: repo, SyncOnly: true})
+			b := &freestyleBackend{spec: Provider{}.Spec(), rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			_, err := b.Run(t.Context(), core.RunRequest{Repo: repo, SyncOnly: true})
 			if createFails {
 				if err == nil || !strings.Contains(err.Error(), "synthetic create failure") || client.writeFileContent != "" {
 					t.Fatalf("create failure err=%v uploaded=%t", err, client.writeFileContent != "")
@@ -1787,7 +1866,7 @@ func TestFreestyleUploadNativeAttemptIsolation(t *testing.T) {
 				}
 				return 0, nil
 			}
-			b := &freestyleBackend{rt: Runtime{Stderr: io.Discard}}
+			b := &freestyleBackend{rt: core.Runtime{Stderr: io.Discard}}
 			err := b.uploadArchive(t.Context(), client, "fixture", archive, bytes.NewReader(payload))
 			if decodeFails {
 				var exitErr core.ExitError

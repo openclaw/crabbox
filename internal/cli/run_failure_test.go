@@ -425,7 +425,7 @@ func TestRunFailureEvidenceFinalization(t *testing.T) {
 				return nil
 			}
 			t.Cleanup(func() { runEnvProfileTestEvidenceHook = nil })
-			args := []string{"--provider", runEnvProfileTestProvider{}.Name(), "--no-sync", "--no-hydrate", "--timing-json"}
+			args := []string{"--provider", runEnvProfileTestProvider{}.Spec().Name, "--no-sync", "--no-hydrate", "--timing-json"}
 			if keep {
 				args = append(args, "--id", lease.LeaseID, "--keep")
 			}
@@ -1066,11 +1066,11 @@ func TestApplyArtifactFailureOutcome(t *testing.T) {
 		wantKind                 RunErrorKind
 	}{
 		{name: "not artifact failure", wantStatus: RunStatusFailed, wantKind: RunErrorCommandExit},
-		{name: "validation", failure: exit(7, "missing proof"), wantStatus: RunStatusFailed, wantKind: RunErrorProvider},
-		{name: "observed cancellation", failure: exit(7, "flattened fetch failure"), observedContext: context.Canceled, wantStatus: RunStatusCanceled, wantKind: RunErrorCanceled},
-		{name: "observed deadline", failure: exit(7, "flattened fetch failure"), observedContext: context.DeadlineExceeded, wantStatus: RunStatusTimedOut, wantKind: RunErrorTimeout},
+		{name: "validation", failure: Exit(7, "missing proof"), wantStatus: RunStatusFailed, wantKind: RunErrorProvider},
+		{name: "observed cancellation", failure: Exit(7, "flattened fetch failure"), observedContext: context.Canceled, wantStatus: RunStatusCanceled, wantKind: RunErrorCanceled},
+		{name: "observed deadline", failure: Exit(7, "flattened fetch failure"), observedContext: context.DeadlineExceeded, wantStatus: RunStatusTimedOut, wantKind: RunErrorTimeout},
 		{name: "wrapped cancellation", failure: fmt.Errorf("fetch: %w", context.Canceled), wantStatus: RunStatusCanceled, wantKind: RunErrorCanceled},
-		{name: "memory outranks secondary validation", failure: exit(7, "missing proof"), memory: ResourceExhaustionMemory, wantStatus: RunStatusFailed, wantKind: RunErrorCommandExit},
+		{name: "memory outranks secondary validation", failure: Exit(7, "missing proof"), memory: ResourceExhaustionMemory, wantStatus: RunStatusFailed, wantKind: RunErrorCommandExit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			report := TimingReport{ExitCode: 7, RunStatus: RunStatusFailed, ErrorKind: RunErrorCommandExit, ResourceExhaustion: tc.memory}

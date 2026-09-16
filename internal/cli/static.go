@@ -34,6 +34,7 @@ func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagVa
 		cfg.targetExplicit = true
 		cfg.targetFlagExplicit = true
 		cfg.credentialProvenance.externalDesktopTarget = credentialSourceFlag
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 		if normalizeTargetOS(cfg.TargetOS) != targetWindows && !flagWasSet(fs, "windows-mode") {
 			cfg.WindowsMode = windowsModeNormal
 			cfg.explicitWindowsMode = ""
@@ -44,20 +45,25 @@ func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagVa
 		cfg.WindowsMode = *values.WindowsMode
 		cfg.explicitWindowsMode = *values.WindowsMode
 		cfg.windowsModeFlagExplicit = true
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 		cfg.credentialProvenance.externalDesktopMode = credentialSourceFlag
 	}
 	if flagWasSet(fs, "static-host") {
 		cfg.Static.Host = *values.StaticHost
+		recordConfigInput(cfg, "ssh", configInputFlag, true)
 		cfg.credentialProvenance.staticHost = credentialSourceFlag
 	}
 	if flagWasSet(fs, "static-user") {
 		cfg.Static.User = *values.StaticUser
+		recordConfigInput(cfg, "ssh", configInputFlag, true)
 	}
 	if flagWasSet(fs, "static-port") {
 		cfg.Static.Port = *values.StaticPort
+		recordConfigInput(cfg, "ssh", configInputFlag, true)
 	}
 	if flagWasSet(fs, "static-work-root") {
 		cfg.Static.WorkRoot = *values.StaticRoot
+		recordConfigInput(cfg, "ssh", configInputFlag, true)
 	}
 	normalizeTargetConfig(cfg)
 	return validateTargetConfig(*cfg)
@@ -65,15 +71,15 @@ func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagVa
 
 func staticLease(cfg Config) (Server, SSHTarget, string, error) {
 	if cfg.Static.Host == "" {
-		return Server{}, SSHTarget{}, "", exit(2, "provider=%s requires static.host or CRABBOX_STATIC_HOST", cfg.Provider)
+		return Server{}, SSHTarget{}, "", Exit(2, "provider=%s requires static.host or CRABBOX_STATIC_HOST", cfg.Provider)
 	}
 	leaseID := strings.TrimSpace(cfg.Static.ID)
 	if leaseID == "" {
-		leaseID = "static_" + normalizeLeaseSlug(cfg.Static.Host)
+		leaseID = "static_" + NormalizeLeaseSlug(cfg.Static.Host)
 	}
-	slug := normalizeLeaseSlug(cfg.Static.Name)
+	slug := NormalizeLeaseSlug(cfg.Static.Name)
 	if slug == "" {
-		slug = normalizeLeaseSlug(cfg.Static.Host)
+		slug = NormalizeLeaseSlug(cfg.Static.Host)
 	}
 	name := cfg.Static.Name
 	if name == "" {
@@ -82,7 +88,7 @@ func staticLease(cfg Config) (Server, SSHTarget, string, error) {
 	now := time.Now().UTC()
 	labelCfg := cfg
 	labelCfg.ServerType = staticServerType(cfg)
-	labels := directLeaseLabels(labelCfg, leaseID, slug, staticProvider, "", true, now)
+	labels := DirectLeaseLabels(labelCfg, leaseID, slug, staticProvider, "", true, now)
 	labels["target"] = cfg.TargetOS
 	if cfg.TargetOS == targetWindows {
 		labels["windows_mode"] = cfg.WindowsMode

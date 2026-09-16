@@ -609,7 +609,7 @@ socket from `DOCKER_HOST` or the Docker context and rejects remote TCP contexts.
 With the socket enabled and no explicit work root, Crabbox chooses a host-visible
 cache work root so nested bind mounts can see the synced checkout.
 
-Use `--desktop --browser` to bootstrap Xvfb, XFCE, x11vnc, noVNC/websockify,
+Use `--desktop --browser` to bootstrap TigerVNC, XFCE, noVNC/websockify,
 desktop input tools, screenshot tools, ffmpeg, and a packaged browser inside
 the container.
 
@@ -960,6 +960,7 @@ than YAML. See [Provider Reference](../providers/README.md) for the per-provider
 
 ```yaml
 sync:
+  source: git # git (default) or explicit include-only directory
   delete: true
   checksum: false
   gitSeed: true
@@ -977,6 +978,13 @@ sync:
     - .turbo
     - dist
 ```
+
+`sync.source` selects `git` (default) or explicit `directory` mode;
+`CRABBOX_SYNC_SOURCE` overrides it. Directory mode requires a nonempty effective
+`sync.include`, uses the current directory as its root, and still requires Git
+for isolated source-tree ignore matching. See
+[directory source](sync.md#explicit-directory-source) for supported transports,
+Git-only restrictions, and inactive `--no-sync` behavior.
 
 A `.crabboxignore` file at the repo root appends to `sync.exclude`.
 `sync.gitOverlay` is an opt-in, credential-free Git transfer optimization for
@@ -1013,16 +1021,37 @@ run:
 
 `run.preflightTools` configures which built-in probes `crabbox run --preflight`
 executes before the remote command. The CLI flag
-`--preflight-tools default,cmake` overrides this list for one run. Opt-in probes
-include `go`, `cargo`, `cmake`, `uv`, `python`, and `python3` on POSIX, WSL2,
-and native Windows, plus `make` on POSIX and WSL2. The CMake probe invokes only
+`--preflight-tools default,cmake` overrides this list for one run. Inspect the
+same accepted names, aliases, defaults, and target support offline with
+[`crabbox preflight-tools [--json]`](../commands/preflight-tools.md). The CMake probe invokes only
 the literal `cmake --version` command and reports its first output line or
-`cmake=missing`. Use `default` to include Crabbox's default built-ins and `none`
-to print only the workspace summary. An omitted `run.preflightTools` inherits
+`cmake=missing`. Use `default` (alias `defaults`) to include Crabbox's default built-ins
+and `none` alone to print only the workspace summary; mixed `none,git` still
+selects `git`. An omitted `run.preflightTools` inherits
 the lower layer (built-in probes by default); `preflightTools: []` clears the
 list and prints only the workspace summary, without restoring default probes.
 Preflight probes are diagnostic only: a missing tool does not block the
 workload, and Crabbox does not install or upgrade toolchains.
+
+Add `python3-venv` to this list in repository or user configuration to opt into a
+functional disposable-venv check on Linux, macOS or WSL2. For example,
+`preflightTools: [default, python3-venv, python3-venv]` retains the ordered defaults
+and runs the added probe once; unsupported native Windows targets filter it out.
+The CLI equivalent is `--preflight-tools default,python3-venv`. It does not change
+literal `python`/`python3` probes or make the functional probe default-on.
+
+The probe creates a fresh environment, seeds pip only there, and checks its own
+Python and pip without installing host or project packages or reusing a project
+environment. Its diagnostic `ready` result requires confirmed cleanup, not just
+successful creation. Caller cancellation prevents the later workload; unavailable
+capability alone does not. A worker failure or probe timeout with confirmed
+cleanup is also diagnostic only. An unresolved owned stage, reported as
+`unavailable cleanup=unconfirmed`, fails the run before the workload. Cleanup status
+is independent: a transport, setup or envelope error can still fail the run after
+cleanup succeeds (`unavailable cleanup=confirmed`).
+See [run preflight](../commands/run.md#preflight) for
+the complete state/cleanup output and separate probe, cleanup and transport
+budgets. `python3-venv` is not a profile-doctor version-only tool requirement.
 
 ### Actions
 

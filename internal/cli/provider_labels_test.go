@@ -20,7 +20,7 @@ func TestDirectLeaseLabelsAreProviderSafe(t *testing.T) {
 		TTL:         15 * time.Minute,
 		IdleTimeout: 4 * time.Minute,
 	}
-	labels := directLeaseLabels(cfg, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, now)
+	labels := DirectLeaseLabels(cfg, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, now)
 	safe := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$`)
 	for key, value := range labels {
 		if !safe.MatchString(value) {
@@ -52,7 +52,7 @@ func TestDirectLeaseLabelsIncludeNonSecretTailscaleMetadata(t *testing.T) {
 	cfg.Tailscale.AuthKey = "tskey-secret"
 	cfg.Tailscale.ExitNode = "mac-studio.tailnet.ts.net"
 	cfg.Tailscale.ExitNodeAllowLANAccess = true
-	labels := directLeaseLabels(cfg, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, time.Now())
+	labels := DirectLeaseLabels(cfg, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, time.Now())
 	if labels["tailscale"] != "true" || labels["tailscale_state"] != "requested" {
 		t.Fatalf("tailscale labels missing: %#v", labels)
 	}
@@ -73,7 +73,7 @@ func TestTouchDirectLeaseLabelsMovesExpiryForwardToTTLCap(t *testing.T) {
 	created := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	touched := created.Add(3 * time.Minute)
 	cfg := Config{TTL: 15 * time.Minute, IdleTimeout: 30 * time.Minute}
-	labels := directLeaseLabels(Config{
+	labels := DirectLeaseLabels(Config{
 		Class:       "standard",
 		Profile:     "default",
 		ProviderKey: "crabbox-cbx-abcdef123456",
@@ -82,7 +82,7 @@ func TestTouchDirectLeaseLabelsMovesExpiryForwardToTTLCap(t *testing.T) {
 		IdleTimeout: 4 * time.Minute,
 	}, "cbx_abcdef123456", "blue-lobster", "hetzner", "", true, created)
 
-	got := touchDirectLeaseLabels(labels, cfg, "running", touched)
+	got := TouchDirectLeaseLabels(labels, cfg, "running", touched)
 	if got["state"] != "running" {
 		t.Fatalf("state=%q want running", got["state"])
 	}
@@ -96,7 +96,7 @@ func TestTouchDirectLeaseLabelsMovesExpiryForwardToTTLCap(t *testing.T) {
 		t.Fatalf("expires_at=%q want touched+idle", got["expires_at"])
 	}
 
-	got = touchDirectLeaseLabels(got, cfg, "ready", created.Add(14*time.Minute))
+	got = TouchDirectLeaseLabels(got, cfg, "ready", created.Add(14*time.Minute))
 	if got["expires_at"] != "1777637700" {
 		t.Fatalf("expires_at=%q want ttl cap", got["expires_at"])
 	}
@@ -109,7 +109,7 @@ func TestTouchDirectLeaseLabelsPreservesProviderMetadata(t *testing.T) {
 		"provider_endpoint":   "https://api.example.test/org:team/",
 		"provider_document":   `{"scope":"exact"}`,
 	}
-	got := touchDirectLeaseLabels(labels, Config{TTL: time.Hour, IdleTimeout: time.Minute}, "worker busy", time.Now())
+	got := TouchDirectLeaseLabels(labels, Config{TTL: time.Hour, IdleTimeout: time.Minute}, "worker busy", time.Now())
 	for key, value := range labels {
 		if got[key] != value {
 			t.Errorf("touch changed admitted provider metadata %s: got %q want %q", key, got[key], value)
@@ -123,21 +123,21 @@ func TestTouchDirectLeaseLabelsPreservesProviderMetadata(t *testing.T) {
 func TestTouchDirectLeaseLabelsExplicitIdleTimeoutOverridesStoredValue(t *testing.T) {
 	created := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	touched := created.Add(time.Minute)
-	labels := directLeaseLabels(Config{
+	labels := DirectLeaseLabels(Config{
 		TTL:         2 * time.Hour,
 		IdleTimeout: 30 * time.Minute,
 	}, "cbx_abcdef123456", "blue-lobster", "ssh", "", true, created)
 	override := 45 * time.Minute
 
-	got := touchDirectLeaseLabelsWithIdleTimeoutOverride(labels, Config{
+	got := TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, Config{
 		TTL:         2 * time.Hour,
 		IdleTimeout: 5 * time.Minute,
 	}, "ready", touched, &override)
 	if got["idle_timeout"] != "2700" || got["idle_timeout_secs"] != "2700" {
 		t.Fatalf("idle timeout labels=%#v want explicit 2700", got)
 	}
-	if got["expires_at"] != leaseLabelTime(touched.Add(override)) {
-		t.Fatalf("expires_at=%q want=%q", got["expires_at"], leaseLabelTime(touched.Add(override)))
+	if got["expires_at"] != LeaseLabelTime(touched.Add(override)) {
+		t.Fatalf("expires_at=%q want=%q", got["expires_at"], LeaseLabelTime(touched.Add(override)))
 	}
 }
 
@@ -150,10 +150,10 @@ func TestParseLeaseLabelTimeAcceptsLegacyRFC3339(t *testing.T) {
 }
 
 func TestProviderLabelDisplayAndDurationHelpers(t *testing.T) {
-	if got := leaseLabelTimeDisplay("1777636800"); got != "2026-05-01T12:00:00Z" {
+	if got := LeaseLabelTimeDisplay("1777636800"); got != "2026-05-01T12:00:00Z" {
 		t.Fatalf("leaseLabelTimeDisplay=%q", got)
 	}
-	if got := leaseLabelTimeDisplay("not-a-time"); got != "" {
+	if got := LeaseLabelTimeDisplay("not-a-time"); got != "" {
 		t.Fatalf("invalid leaseLabelTimeDisplay=%q", got)
 	}
 	for _, tc := range []struct {
@@ -175,13 +175,13 @@ func TestProviderLabelDisplayAndDurationHelpers(t *testing.T) {
 	if got := durationSecondsLabel(0); got != "" {
 		t.Fatalf("zero duration label=%q", got)
 	}
-	if got := leaseLabelDurationDisplay("240", "5m"); got != "4m0s" {
+	if got := LeaseLabelDurationDisplay("240", "5m"); got != "4m0s" {
 		t.Fatalf("duration display primary=%q", got)
 	}
-	if got := leaseLabelDurationDisplay("bad", "5m"); got != "5m0s" {
+	if got := LeaseLabelDurationDisplay("bad", "5m"); got != "5m0s" {
 		t.Fatalf("duration display fallback=%q", got)
 	}
-	if got := leaseLabelDurationDisplay("bad", "also-bad"); got != "" {
+	if got := LeaseLabelDurationDisplay("bad", "also-bad"); got != "" {
 		t.Fatalf("invalid duration display=%q", got)
 	}
 }
@@ -189,7 +189,7 @@ func TestProviderLabelDisplayAndDurationHelpers(t *testing.T) {
 func TestTouchDirectLeaseLabelsRepairsLifecycleWithoutRewritingProviderMetadata(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	cfg := Config{TTL: 10 * time.Minute, IdleTimeout: 2 * time.Minute}
-	got := touchDirectLeaseLabels(map[string]string{
+	got := TouchDirectLeaseLabels(map[string]string{
 		"created_at":        "bad",
 		"idle_timeout_secs": "bad",
 		"ttl_secs":          "bad",

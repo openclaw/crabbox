@@ -8,6 +8,7 @@ import {
   uniqueProviderMachineCandidates,
   type LeaseConfig,
 } from "./config";
+import { base64URL } from "./encoding";
 import { ExpiringTokenCache, type ExpiringToken } from "./expiring-token-cache";
 import { redactDiagnosticSecrets } from "./http";
 import {
@@ -492,17 +493,18 @@ export class GCPClient {
             throw error;
           }
           const message = errorMessage(error);
+          const fallback = isFallbackProvisioningError(error);
           history.record(
             {
               region: zone,
               serverType: machineType,
               market: config.capacityMarket,
-              category: isFallbackProvisioningError(message) ? "capacity" : "fatal",
+              category: fallback ? "capacity" : "fatal",
               message,
             },
             `${zone}/${machineType}: ${message}`,
           );
-          if (!isFallbackProvisioningError(message)) {
+          if (!fallback) {
             throw history.error("", { cause: error });
           }
         }
@@ -544,17 +546,18 @@ export class GCPClient {
               throw error;
             }
             const message = errorMessage(error);
+            const fallback = isFallbackProvisioningError(error);
             history.record(
               {
                 region: zone,
                 serverType: machineType,
                 market: "on-demand",
-                category: isFallbackProvisioningError(message) ? "capacity" : "fatal",
+                category: fallback ? "capacity" : "fatal",
                 message,
               },
               `on-demand ${zone}/${machineType}: ${message}`,
             );
-            if (!isFallbackProvisioningError(message)) {
+            if (!fallback) {
               throw history.error("", { cause: error });
             }
           }
@@ -1494,7 +1497,12 @@ export function gcpProviderLabelValue(value: string): string {
   return gcpLabelValue(providerLabelValue(value));
 }
 
-export function isFallbackProvisioningError(message: string): boolean {
+export function isFallbackProvisioningError(error: unknown): boolean {
+  // Display summaries are lossy; keep complete HTTP evidence inside retry classification.
+  const message =
+    error instanceof GCPHTTPError
+      ? `gcp ${error.method} ${error.path}: http ${error.status}: ${error.body}`
+      : errorMessage(error);
   const value = message.toLowerCase();
   return (
     value.includes("quota") ||
@@ -1897,9 +1905,7 @@ function utf8(value: string): Uint8Array {
 
 function base64url(value: string | ArrayBuffer): string {
   const bytes = typeof value === "string" ? utf8(value) : new Uint8Array(value);
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  return base64URL(bytes);
 }
 
 function sleep(ms: number): Promise<void> {

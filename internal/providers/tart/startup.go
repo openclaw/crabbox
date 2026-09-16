@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const startupDiagnosticLimit = 64 << 10
@@ -39,7 +41,7 @@ type startupProcess struct {
 
 func (b *backend) startVM(ctx context.Context, name string, keep bool) (*startupProcess, error) {
 	if err := context.Cause(ctx); err != nil {
-		return nil, errors.Join(exit(2, "tart run %s: context already cancelled: %v", name, err), err)
+		return nil, errors.Join(core.Exit(2, "tart run %s: context already cancelled: %v", name, err), err)
 	}
 	env, err := tartEnvironment()
 	if err != nil {
@@ -47,7 +49,7 @@ func (b *backend) startVM(ctx context.Context, name string, keep bool) (*startup
 	}
 	log, err := os.CreateTemp("", "crabbox-tart-run-*.log")
 	if err != nil {
-		return nil, exit(2, "tart run %s: create startup log: %v", name, err)
+		return nil, core.Exit(2, "tart run %s: create startup log: %v", name, err)
 	}
 	// Files (including nil's /dev/null) avoid exec's copy pipes. A kept VM must
 	// not depend on a reader in Crabbox after a successful acquisition.
@@ -60,7 +62,7 @@ func (b *backend) startVM(ctx context.Context, name string, keep bool) (*startup
 	p := &startupProcess{cmd: cmd, name: name, keep: keep, caller: ctx, ctx: startupCtx, cancel: cancel, log: log, done: make(chan struct{})}
 	if err := cmd.Start(); err != nil {
 		cancel(nil)
-		return nil, errors.Join(exit(2, "tart run %s: %v", name, err), p.closeLog())
+		return nil, errors.Join(core.Exit(2, "tart run %s: %v", name, err), p.closeLog())
 	}
 	go p.reap()
 	if err := p.observe(b.startupObserveTimeout); err != nil {
@@ -81,11 +83,11 @@ func (p *startupProcess) reap() {
 		p.capture()
 		switch {
 		case p.detail != "":
-			p.failure = exit(2, "tart run %s failed during startup: %s", p.name, p.detail)
+			p.failure = core.Exit(2, "tart run %s failed during startup: %s", p.name, p.detail)
 		case err != nil:
-			p.failure = exit(2, "tart run %s failed during startup: %v", p.name, err)
+			p.failure = core.Exit(2, "tart run %s failed during startup: %v", p.name, err)
 		default:
-			p.failure = exit(2, "tart run %s exited unexpectedly during startup", p.name)
+			p.failure = core.Exit(2, "tart run %s exited unexpectedly during startup", p.name)
 		}
 		if !p.stopping {
 			p.cancel(p.failure)
@@ -167,15 +169,15 @@ func (p *startupProcess) abort(readinessErr error) error {
 		killErr = nil
 	}
 	if callerErr := context.Cause(p.caller); callerErr != nil && errors.Is(cause, callerErr) {
-		readinessErr = errors.Join(exit(2, "tart run %s: context cancelled during startup: %v", p.name, callerErr), callerErr)
+		readinessErr = errors.Join(core.Exit(2, "tart run %s: context cancelled during startup: %v", p.name, callerErr), callerErr)
 	}
 	if stoppedByCleanup && p.detail != "" {
 		// The CLI displays ExitError.Message, so a joined diagnostic alone
 		// would disappear there. Preserve both its exit code and original cause.
-		display := exit(1, "%v", readinessErr)
+		display := core.Exit(1, "%v", readinessErr)
 		_ = errors.As(readinessErr, &display)
 		readinessErr = startupStderrError{
-			error: exit(display.Code, "%s\ntart run %s startup stderr: %s", display.Message, p.name, p.detail),
+			error: core.Exit(display.Code, "%s\ntart run %s startup stderr: %s", display.Message, p.name, p.detail),
 			cause: readinessErr,
 		}
 	}

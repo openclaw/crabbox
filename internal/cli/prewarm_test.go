@@ -40,8 +40,6 @@ type prewarmOptionsTestProvider struct {
 	configured *int
 }
 
-func (p prewarmOptionsTestProvider) Name() string      { return p.backend.Spec().Name }
-func (p prewarmOptionsTestProvider) Aliases() []string { return nil }
 func (p prewarmOptionsTestProvider) Spec() ProviderSpec {
 	spec := p.backend.Spec()
 	spec.Targets = []TargetSpec{{OS: targetLinux}}
@@ -101,8 +99,8 @@ func TestPrewarmRunOptionsValidation(t *testing.T) {
 				}}
 			}
 			RegisterProvider(provider)
-			t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
-			args := []string{"prewarm", "--provider", provider.Name(), "--probe-command", tc.probe}
+			t.Cleanup(func() { delete(providerRegistry, provider.Spec().Name) })
+			args := []string{"prewarm", "--provider", provider.Spec().Name, "--probe-command", tc.probe}
 			if tc.dryRun {
 				args = append(args, "--dry-run")
 			}

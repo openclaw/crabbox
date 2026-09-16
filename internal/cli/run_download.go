@@ -47,7 +47,7 @@ func parseRunDownloadSpec(value string) (runDownloadSpec, error) {
 	remote = strings.TrimSpace(remote)
 	local = strings.TrimSpace(local)
 	if !ok || remote == "" || local == "" {
-		return runDownloadSpec{}, exit(2, "--download expects remote=local")
+		return runDownloadSpec{}, Exit(2, "--download expects remote=local")
 	}
 	return runDownloadSpec{Remote: remote, Local: local}, nil
 }
@@ -59,7 +59,7 @@ func preflightRunLocalOutputs(captureStdout, captureStderr string, downloads []s
 			return err
 		}
 		if same {
-			return exit(2, "capture stdout/stderr: paths must be different")
+			return Exit(2, "capture stdout/stderr: paths must be different")
 		}
 	}
 	parsedDownloads := make([]runDownloadSpec, 0, len(downloads))
@@ -85,7 +85,7 @@ func preflightRunLocalOutputs(captureStdout, captureStderr string, downloads []s
 				return err
 			}
 			if same {
-				return exit(2, "download %s/download %s: paths must be different", parsedDownloads[i].Remote, parsedDownloads[j].Remote)
+				return Exit(2, "download %s/download %s: paths must be different", parsedDownloads[i].Remote, parsedDownloads[j].Remote)
 			}
 		}
 	}
@@ -116,7 +116,7 @@ func rejectCaptureDownloadCollision(label, capturePath string, download runDownl
 		return err
 	}
 	if same {
-		return exit(2, "%s/download %s: paths must be different", label, download.Remote)
+		return Exit(2, "%s/download %s: paths must be different", label, download.Remote)
 	}
 	return nil
 }
@@ -135,7 +135,7 @@ func preflightRunOutputCollisions(label, path, captureStdout, captureStderr stri
 			return err
 		}
 		if same {
-			return exit(2, "%s/capture stdout: paths must be different", label)
+			return Exit(2, "%s/capture stdout: paths must be different", label)
 		}
 	}
 	if captureStderr != "" {
@@ -144,7 +144,7 @@ func preflightRunOutputCollisions(label, path, captureStdout, captureStderr stri
 			return err
 		}
 		if same {
-			return exit(2, "%s/capture stderr: paths must be different", label)
+			return Exit(2, "%s/capture stderr: paths must be different", label)
 		}
 	}
 	for _, spec := range downloads {
@@ -157,7 +157,7 @@ func preflightRunOutputCollisions(label, path, captureStdout, captureStderr stri
 			return err
 		}
 		if same {
-			return exit(2, "%s/download %s: paths must be different", label, download.Remote)
+			return Exit(2, "%s/download %s: paths must be different", label, download.Remote)
 		}
 	}
 	return nil
@@ -166,11 +166,11 @@ func preflightRunOutputCollisions(label, path, captureStdout, captureStderr stri
 func sameLocalOutputPath(left, right string) (bool, error) {
 	leftCanonical, err := canonicalLocalOutputPath(left)
 	if err != nil {
-		return false, exit(2, "local output path: %v", err)
+		return false, Exit(2, "local output path: %v", err)
 	}
 	rightCanonical, err := canonicalLocalOutputPath(right)
 	if err != nil {
-		return false, exit(2, "local output path: %v", err)
+		return false, Exit(2, "local output path: %v", err)
 	}
 	if leftCanonical == rightCanonical {
 		return true, nil
@@ -182,13 +182,13 @@ func sameLocalOutputPath(left, right string) (bool, error) {
 	}
 	for _, statErr := range []error{leftErr, rightErr} {
 		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-			return false, exit(2, "local output path: %v", statErr)
+			return false, Exit(2, "local output path: %v", statErr)
 		}
 	}
 	if strings.EqualFold(leftCanonical, rightCanonical) {
 		caseInsensitive, err := localPathCaseInsensitive(leftCanonical)
 		if err != nil {
-			return false, exit(2, "local output path case probe: %v", err)
+			return false, Exit(2, "local output path case probe: %v", err)
 		}
 		if caseInsensitive {
 			return true, nil
@@ -312,7 +312,7 @@ func preflightLocalOutputPath(label, path string, allowMissingDirs, replaceExist
 	}
 	if err == nil {
 		if info.IsDir() {
-			return exit(2, "%s: %s is a directory", label, path)
+			return Exit(2, "%s: %s is a directory", label, path)
 		}
 		if replaceExisting {
 			if err := checkWritableDir(label, firstNonBlank(dir, ".")); err != nil {
@@ -323,7 +323,7 @@ func preflightLocalOutputPath(label, path string, allowMissingDirs, replaceExist
 		return checkWritableFile(label, path)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		return exit(2, "%s: %v", label, err)
+		return Exit(2, "%s: %v", label, err)
 	}
 	if dir == "." || dir == "" {
 		return checkWritableDir(label, ".")
@@ -336,16 +336,16 @@ func preflightLocalOutputPath(label, path string, allowMissingDirs, replaceExist
 		info, err := os.Stat(existing)
 		if err == nil {
 			if !info.IsDir() {
-				return exit(2, "%s: %s is not a directory", label, existing)
+				return Exit(2, "%s: %s is not a directory", label, existing)
 			}
 			return checkWritableDir(label, existing)
 		}
 		if !errors.Is(err, os.ErrNotExist) {
-			return exit(2, "%s: %v", label, err)
+			return Exit(2, "%s: %v", label, err)
 		}
 		parent := filepath.Dir(existing)
 		if parent == existing {
-			return exit(2, "%s: %v", label, err)
+			return Exit(2, "%s: %v", label, err)
 		}
 		existing = parent
 	}
@@ -354,10 +354,10 @@ func preflightLocalOutputPath(label, path string, allowMissingDirs, replaceExist
 func checkWritableFile(label, path string) error {
 	file, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
-		return exit(2, "%s: %v", label, err)
+		return Exit(2, "%s: %v", label, err)
 	}
 	if err := file.Close(); err != nil {
-		return exit(2, "%s close: %v", label, err)
+		return Exit(2, "%s close: %v", label, err)
 	}
 	return nil
 }
@@ -365,16 +365,16 @@ func checkWritableFile(label, path string) error {
 func checkWritableDir(label, dir string) error {
 	temp, err := os.CreateTemp(dir, ".crabbox-output-*")
 	if err != nil {
-		return exit(2, "%s: %v", label, err)
+		return Exit(2, "%s: %v", label, err)
 	}
 	name := temp.Name()
 	closeErr := temp.Close()
 	removeErr := os.Remove(name)
 	if closeErr != nil {
-		return exit(2, "%s close: %v", label, closeErr)
+		return Exit(2, "%s close: %v", label, closeErr)
 	}
 	if removeErr != nil {
-		return exit(2, "%s cleanup: %v", label, removeErr)
+		return Exit(2, "%s cleanup: %v", label, removeErr)
 	}
 	return nil
 }
@@ -412,20 +412,20 @@ func downloadRemoteFileWithLimits(ctx context.Context, target SSHTarget, workdir
 	if staged.err != nil {
 		var localErr runDownloadLocalError
 		if errors.As(staged.err, &localErr) {
-			return 0, spec.Local, exit(2, "download %s: write %s: %v", spec.Remote, spec.Local, localErr)
+			return 0, spec.Local, Exit(2, "download %s: write %s: %v", spec.Remote, spec.Local, localErr)
 		}
-		return 0, spec.Local, exit(7, "download %s: %v", spec.Remote, staged.err)
+		return 0, spec.Local, Exit(7, "download %s: %v", spec.Remote, staged.err)
 	}
 	if streamErr != nil || code != 0 {
 		staged.stage.remove()
 		remoteErr := firstNonNil(streamErr, fmt.Errorf("remote command exited %d", code))
 		if detail := strings.TrimSpace(diagnostic.String()); detail != "" {
-			return 0, spec.Local, exit(7, "download %s: %v: %s", spec.Remote, remoteErr, detail)
+			return 0, spec.Local, Exit(7, "download %s: %v: %s", spec.Remote, remoteErr, detail)
 		}
-		return 0, spec.Local, exit(7, "download %s: %v", spec.Remote, remoteErr)
+		return 0, spec.Local, Exit(7, "download %s: %v", spec.Remote, remoteErr)
 	}
 	if err := staged.stage.publish(); err != nil {
-		return 0, spec.Local, exit(2, "download %s: write %s: %v", spec.Remote, spec.Local, err)
+		return 0, spec.Local, Exit(2, "download %s: write %s: %v", spec.Remote, spec.Local, err)
 	}
 	return int(staged.stage.bytes), spec.Local, nil
 }
@@ -592,7 +592,7 @@ func firstNonNil(primary, fallback error) error {
 
 func remoteDownloadBase64Command(target SSHTarget, workdir, remotePath string) string {
 	if isWindowsNativeTarget(target) {
-		return powershellCommand(`$ErrorActionPreference = "Stop"
+		return PowershellCommand(`$ErrorActionPreference = "Stop"
 Set-Location -LiteralPath ` + psQuote(workdir) + `
 $path = ` + psQuote(remotePath) + `
 if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "download file not found: $path" }

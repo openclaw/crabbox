@@ -2,13 +2,75 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
+
+func TestLocalWebVNCHandoffSizingScript(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is required to execute the browser handoff")
+	}
+	for _, credentials := range []bool{false, true} {
+		t.Run(fmt.Sprintf("credentials=%t", credentials), func(t *testing.T) {
+			handoff, err := createMacOSWebVNCHandoff("6080", macOSWebVNCSession{Token: "test-token", Protocol: "crabbox.test-token"}, credentials)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.Remove(handoff.Path)
+			cmd := exec.Command(node, "--input-type=module", "-e", `
+import assert from "node:assert/strict";
+import fs from "node:fs";
+const html = fs.readFileSync(process.argv[1], "utf8");
+const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
+  .replace(/const source=[\s\S]*?const\{default:RFB\}=await import\(moduleURL\);/, "const RFB = globalThis.FakeRFB;");
+let client;
+globalThis.FakeRFB = class {
+  resize = false;
+  writes = [];
+  events = {};
+  constructor() { client = this; }
+  addEventListener(name, callback) { this.events[name] = callback; }
+  get resizeSession() { return this.resize; }
+  set resizeSession(value) { this.resize = value; this.writes.push(value); }
+};
+const sizing = {value:"fit", addEventListener(name, callback) { this[name] = callback; }};
+const status = {style:{}};
+globalThis.document = {getElementById(id) { return id === "sizing" ? sizing : status; }};
+globalThis.fetch = async () => ({ok:true, json:async () => ({password:"test-password"})});
+await import("data:text/javascript," + encodeURIComponent(script));
+assert.equal(client.scaleViewport, true);
+client.events.connect();
+assert.equal(client.resizeSession, false);
+assert.deepEqual(client.writes, []);
+sizing.value = "match";
+sizing.change();
+assert.equal(client.resizeSession, true);
+sizing.change();
+assert.deepEqual(client.writes, [true]);
+sizing.value = "fit";
+sizing.change();
+assert.equal(client.resizeSession, false);
+client.events.disconnect({detail:{clean:true}});
+sizing.value = "match";
+sizing.change();
+assert.equal(client.resizeSession, false);
+assert.equal(status.textContent, "disconnected");
+client.events.connect();
+assert.equal(client.resizeSession, true);
+`, handoff.Path)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("emitted handoff script: %v\n%s", err, out)
+			}
+		})
+	}
+}
 
 func TestResolveMacOSWebVNCCredentialsFallsBackToManagedPassword(t *testing.T) {
 	target := SSHTarget{TargetOS: targetMacOS, User: "steipete"}

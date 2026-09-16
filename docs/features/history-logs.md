@@ -6,12 +6,73 @@ Read when:
 - debugging a failed remote command after the fact;
 - deciding what belongs in coordinator-stored run history.
 
-History and logs are a **brokered-mode** feature. When `crabbox run` executes
+Shared history and logs are a **brokered-mode** feature. When `crabbox run` executes
 against a brokered provider (`aws`, `azure`, `daytona`, `gcp`, `hetzner` with a
 coordinator configured), the CLI mirrors the run into coordinator storage as a
 durable, queryable record. Direct-provider runs and delegated runs do not produce
 central history — there you have only the live terminal output and any local
-captures you ask for.
+captures you ask for, unless you explicitly enable private local history.
+
+## Private local history
+
+`crabbox run --record-local -- <command>` retains a bounded local record keyed
+by the same printed `run_...` ID. The record survives normal lease removal and
+does not require or upload to a coordinator. The default is off. Enable it for
+future runs in trusted user configuration with `history.local.enabled: true`;
+repository configuration cannot enable or disable that policy. An explicit
+`--record-local=false` overrides the user policy.
+
+```sh
+crabbox run --provider local-container --record-local -- printf 'example\n'
+crabbox history --source local
+crabbox logs run_<id> --source local
+crabbox results run_<id> --source local --json
+crabbox history prune --source local
+crabbox history delete run_<id> --source local
+```
+
+Local history lives under the existing state directory's `history` directory,
+separate from lease claims. Files and directories are private to their owner.
+An explicit `XDG_STATE_HOME` places it at `$XDG_STATE_HOME/crabbox/history`, beside
+the separate claim and generated lease-key namespaces; the unset default remains
+unchanged. Root switching does not migrate records or credentials.
+It retains up to 100 inactive records, 256 MiB overall, and 30 days; abandoned
+incomplete records are included. Active writers hold a lock and reserve bounded
+space. Admission fails before acquisition if private storage cannot be reserved.
+An unavailable final write warns without changing the command's existing exit,
+timing, or receipt. An interrupted or uncommitted record is marked incomplete,
+not successful; its output may be unavailable.
+
+When a provider supplies initial image evidence, the local record includes its
+`imageEvidence` snapshot, including after the lease is removed. Local history
+text and JSON expose it without querying a runtime. See
+[local-container image evidence](../providers/local-container.md#initial-image-evidence)
+for the image ID, digest availability, and unsigned-observation contract.
+
+The log uses the same 8 MiB UTF-8 tail and capture-omission policy described
+below. Metadata is capped at 256 KiB and serialized parsed results at 1 MiB.
+Result totals remain intact when detailed entries are omitted or clipped; local
+readback exposes those limits. Raw JUnit XML and arbitrary remote files are not
+retained. Caller output is not automatically secret-redacted: opt in only when
+private retention is appropriate. Command/display diagnostics use the existing
+diagnostic redactor.
+
+Workload writers are observed separately from Crabbox's own diagnostic output.
+Direct SSH transports and some delegated native CLIs mix command and provider
+messages; those retained streams are labelled `provider-run`, not a pure workload
+transcript. Streams a
+provider does not expose and streams directed exclusively to captures remain
+explicitly unavailable or omitted. Unsupported delegated JUnit collection is
+not fabricated into a passing result.
+
+`history`, `logs`, and `results` accept `--source local|coordinator|all`.
+With a coordinator configured, the existing default broker route and JSON stay
+unchanged. Without one, existing local history is readable, including after
+retention is disabled. Explicit local reads stay offline. Source-qualified
+output distinguishes local-only data, acknowledged coordinator records, and
+both; correlation includes a noncredential endpoint reference, not just an ID.
+A local self-record is never coordinator-attested evidence. `events`, `attach`,
+and `receipt` retain their coordinator-only contract.
 
 ## What a recorded run contains
 

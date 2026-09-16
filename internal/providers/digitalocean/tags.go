@@ -2,7 +2,6 @@ package digitalocean
 
 import (
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -28,38 +27,22 @@ func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time
 	if cfg.Tailscale.Enabled && len(cfg.Tailscale.Tags) > 0 {
 		labels["tailscale_tags"] = strings.Join(cfg.Tailscale.Tags, ",")
 	}
-	tags := []string{
-		tagCrabbox,
-		"crabbox:provider:" + providerName,
-		"crabbox:target:" + core.TargetLinux,
-	}
-	for _, key := range tagSchema.Keys() {
-		if value := labels[key]; value != "" {
-			tags = append(tags, encodeTagKV(key, value))
-		}
-	}
-	return normalizeTags(tags)
+	return tagsFromLabels(labels)
 }
 
 func tagsFromLabels(labels map[string]string) []string {
-	tags := []string{
+	return tagSchema.EncodeTags(labels, []string{
 		tagCrabbox,
 		"crabbox:provider:" + providerName,
 		"crabbox:target:" + core.TargetLinux,
-	}
-	for _, key := range tagSchema.Keys() {
-		if value := labels[key]; value != "" {
-			tags = append(tags, encodeTagKV(key, value))
-		}
-	}
-	return normalizeTags(tags)
+	}, encodeTagKV)
 }
 
 func encodeTagKV(key, value string) string {
 	key = sanitizeTagPart(key)
 	if tagSchema.Exact(key) {
 		key += "_v1"
-		return tagPrefix + key + ":" + encodeExactTagValue(value, 255-len(tagPrefix)-len(key)-1)
+		return tagPrefix + key + ":" + shared.EncodeExactTagValue(value, 255-len(tagPrefix)-len(key)-1)
 	}
 	return tagPrefix + key + ":" + sanitizeTagPart(value)
 }
@@ -91,29 +74,6 @@ func legacyEncodedExactTagValueKey(key string) bool {
 	}
 }
 
-func encodeExactTagValue(value string, maxLen int) string {
-	return shared.EncodeExactTagValue(value, maxLen)
-}
-
-func decodeExactTagValue(value string) string {
-	return shared.DecodeExactTagValue(value)
-}
-
-func normalizeTags(tags []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(tags))
-	for _, tag := range tags {
-		tag = strings.TrimSpace(tag)
-		if tag == "" || seen[tag] {
-			continue
-		}
-		seen[tag] = true
-		out = append(out, tag)
-	}
-	sort.Strings(out)
-	return out
-}
-
 func labelsFromTags(tags []string) map[string]string {
 	reducer := tagSchema.Reducer()
 	var versionedExact, legacyExact shared.TagValueSet
@@ -129,13 +89,13 @@ func labelsFromTags(tags []string) map[string]string {
 			}
 			key := strings.ToLower(parts[0])
 			if logical, ok := versionedExactTagValueKey(key); ok {
-				versionedExact.Record(logical, decodeExactTagValue(parts[1]))
+				versionedExact.Record(logical, shared.DecodeExactTagValue(parts[1]))
 				continue
 			}
 			if tagSchema.Exact(key) {
 				value := parts[1]
 				if legacyEncodedExactTagValueKey(key) {
-					value = decodeExactTagValue(value)
+					value = shared.DecodeExactTagValue(value)
 				}
 				legacyExact.Record(key, value)
 				continue
