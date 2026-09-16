@@ -1253,9 +1253,8 @@ func TestSyncPreparedArchiveSharesRemainingBudget(t *testing.T) {
 }
 
 func TestStatusMapsMachineName(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := &fakeAPI{machine: machineData{
-		ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running", CreatedAt: "2026-08-30T00:00:00Z", UpdatedAt: "2026-08-30T00:00:10Z",
+		ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running", CreatedAt: "2026-08-30T00:00:00Z",
 		Source:    smolvmMachineSource{Type: "image", Reference: "alpine"},
 		Resources: smolvmMachineResources{CPUs: 4, MemoryMB: 8192},
 	}}
@@ -1273,76 +1272,9 @@ func TestStatusMapsMachineName(t *testing.T) {
 	if view.Labels["image"] != "alpine" {
 		t.Fatalf("labels=%v", view.Labels)
 	}
-	created, _ := time.Parse(time.RFC3339, fake.machine.CreatedAt)
-	updated, _ := time.Parse(time.RFC3339, fake.machine.UpdatedAt)
-	if view.Labels["created_at"] != core.LeaseLabelTime(created) || view.Labels["updated_at"] != core.LeaseLabelTime(updated) || view.ServerType != "smolvm-4-8192" {
-		t.Fatalf("native facts lost: %#v", view)
-	}
-	for _, key := range []string{"last_touched_at", "ttl_secs", "idle_timeout", "expires_at", "keep"} {
-		if _, ok := view.Labels[key]; ok {
-			t.Fatalf("unclaimed observation invented %s: %v", key, view.Labels)
-		}
-	}
-	server := machineToServer(cfg, fake.machine, nil)
+	server := machineToServer(cfg, fake.machine)
 	if server.PublicNet.IPv4.IP != "eu.smolmachines.com" {
 		t.Fatalf("host=%q", server.PublicNet.IPv4.IP)
-	}
-}
-
-func TestObservationUsesRecordedMachineHistory(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	fake := &fakeAPI{machine: machineData{ID: "mach_1", Name: "crabbox-blue-123456789abc", State: "running", CreatedAt: "2026-08-30T00:00:00Z", UpdatedAt: "2026-08-30T00:00:10Z"}}
-	withFakeAPI(t, fake)
-	cfg := testConfig()
-	cfg.IdleTimeout, cfg.TTL = 5*time.Minute, 10*time.Minute
-	b := NewBackend(Provider{}.Spec(), cfg, testRuntime()).(*backend)
-	claim, err := b.publishMachineClaim(t.Context(), "cbx_123456789abc", "blue", fake.machine, core.Repo{Root: t.TempDir(), Name: "fixture"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b.cfg.IdleTimeout, b.cfg.TTL = 30*time.Minute, 90*time.Minute
-	view, err := b.Status(t.Context(), core.StatusRequest{ID: claim.LeaseID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	servers, err := b.List(t.Context(), core.ListRequest{})
-	if err != nil || len(servers) != 1 {
-		t.Fatalf("list=%v err=%v", servers, err)
-	}
-	used, err := time.Parse(time.RFC3339, claim.LastUsedAt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, labels := range []map[string]string{view.Labels, servers[0].Labels} {
-		if labels["idle_timeout_secs"] != "300" || labels["last_touched_at"] != core.LeaseLabelTime(used) {
-			t.Fatalf("recorded history lost: %v", labels)
-		}
-		for _, key := range []string{"ttl_secs", "expires_at", "keep"} {
-			if _, ok := labels[key]; ok {
-				t.Fatalf("invented unknown %s: %v", key, labels)
-			}
-		}
-	}
-	after, err := core.ReadLeaseClaim(claim.LeaseID)
-	if err != nil || !reflect.DeepEqual(after, claim) {
-		t.Fatalf("observation mutated history: %v", err)
-	}
-	b.cfg.Smolvm.BaseURL = "https://other.example.test"
-	if b.observationClaim(fake.machine) != nil {
-		t.Fatal("observation borrowed history from another endpoint")
-	}
-}
-
-func TestMachineObservationMissingFacts(t *testing.T) {
-	m := machineData{ID: "machine", Name: "crabbox-blue-123456789abc", CreatedAt: "invalid", UpdatedAt: ""}
-	server := machineToServer(testConfig(), m, nil)
-	for _, key := range []string{"created_at", "updated_at", "image", "server_type", "ttl_secs", "last_touched_at"} {
-		if _, ok := server.Labels[key]; ok {
-			t.Fatalf("invented %s: %v", key, server.Labels)
-		}
-	}
-	if server.ServerType.Name != "" {
-		t.Fatalf("invented resources: %s", server.ServerType.Name)
 	}
 }
 

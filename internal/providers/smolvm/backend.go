@@ -166,7 +166,7 @@ func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseV
 	servers := make([]core.Server, 0, len(machines))
 	for _, m := range machines {
 		if isCrabboxMachine(m) {
-			servers = append(servers, machineToServer(b.cfg, m, b.observationClaim(m)))
+			servers = append(servers, machineToServer(b.cfg, m))
 		}
 	}
 	return servers, nil
@@ -194,7 +194,7 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		if err != nil {
 			return core.StatusView{}, false, err
 		}
-		server := machineToServer(b.cfg, machine, b.observationClaim(machine))
+		server := machineToServer(b.cfg, machine)
 		return core.StatusView{
 			ID:         leaseID,
 			Slug:       core.Blank(slug, server.Labels["slug"]),
@@ -401,36 +401,19 @@ func (b *backend) now() time.Time {
 	return now(b.rt)
 }
 
-func (b *backend) observationClaim(machine machineData) *core.LeaseClaim {
-	claim, exists, err := core.ReadLeaseClaimWithPresence(machineLeaseID(machine))
-	if err != nil || !exists {
-		return nil
-	}
-	if _, err := b.claimBinding(claim); err != nil || validateMachineIdentity(machine, machineFromClaim(claim)) != nil {
-		return nil
-	}
-	return &claim
-}
-
-func machineToServer(cfg core.Config, m machineData, claim *core.LeaseClaim) core.Server {
+func machineToServer(cfg core.Config, m machineData) core.Server {
 	leaseID := machineLeaseID(m)
-	created, _ := time.Parse(time.RFC3339Nano, m.CreatedAt)
-	updated, _ := time.Parse(time.RFC3339Nano, m.UpdatedAt)
-	labels := (shared.SandboxObservation{
-		Provider: providerName, Target: targetLinux, LeaseID: leaseID,
-		Slug: machineSlug(leaseID, m), State: m.State, CreatedAt: created, UpdatedAt: updated,
-	}).Labels(claim)
+	labels := core.DirectLeaseLabels(cfg, leaseID, machineSlug(leaseID, m), providerName, "", cfg.Smolvm.Keep, time.Now().UTC())
 	labels["machine_id"] = m.ID
 	labels["machine_name"] = m.Name
-	if m.Source.Reference != "" {
-		labels["image"] = m.Source.Reference
-	}
+	labels["image"] = core.Blank(m.Source.Reference, imageName(cfg))
 	if m.Resources.CPUs > 0 {
 		labels["cpus"] = fmt.Sprintf("%d", m.Resources.CPUs)
 	}
 	if m.Resources.MemoryMB > 0 {
 		labels["memory_mb"] = fmt.Sprintf("%d", m.Resources.MemoryMB)
 	}
+	labels["state"] = m.State
 	server := core.Server{
 		Provider: providerName,
 		CloudID:  m.ID,
@@ -438,10 +421,7 @@ func machineToServer(cfg core.Config, m machineData, claim *core.LeaseClaim) cor
 		Status:   m.State,
 		Labels:   labels,
 	}
-	if m.Resources.CPUs > 0 && m.Resources.MemoryMB > 0 {
-		server.ServerType.Name = fmt.Sprintf("smolvm-%d-%d", m.Resources.CPUs, m.Resources.MemoryMB)
-		labels["server_type"] = server.ServerType.Name
-	}
+	server.ServerType.Name = fmt.Sprintf("smolvm-%d-%d", cpusValue(cfg), memoryValue(cfg))
 	server.PublicNet.IPv4.IP = machineBaseHost(cfg)
 	return server
 }

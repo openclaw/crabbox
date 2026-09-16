@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Keep Upstash Box and SmolVM status age and hardware metadata tied to native observations, preserve recorded local lease policy across Upstash reuse, and omit unknown policy instead of inventing current defaults or expiry. [PR 2283](https://github.com/openclaw/crabbox/pull/2283).
+- Keep Upstash Box status age and runtime metadata tied to native observations, preserve recorded local lease policy across reuse, and omit unknown policy instead of inventing current defaults or expiry. [PR 2283](https://github.com/openclaw/crabbox/pull/2283).
 
 - Bound retained POSIX preflight version output before extracting its first line, while draining excess output so verbose tools finish normally. [PR 2282](https://github.com/openclaw/crabbox/pull/2282).
 

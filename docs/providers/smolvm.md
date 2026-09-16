@@ -112,20 +112,6 @@ blocked behavior; they do not acquire the normal configuration's open default.
 The fixed `/workspace` mount and upload roots remain separate from the configured
 workdir. Endpoint trust, credential forwarding, and lifecycle rules are unchanged.
 
-## Status and inventory metadata
-
-`status` and `list` use native creation/update times, image, CPU, and memory
-observations rather than current configuration defaults. Invalid or missing
-native timestamps and attributes stay unknown. Native update time is not a
-Crabbox activity timestamp.
-
-A matching local claim can contribute its recorded idle policy and
-`last_touched_at` usage time without changing either during the read. SmolVM
-claims do not record a Crabbox TTL, so no TTL or derived `expires_at` is invented.
-Unclaimed observations omit local policy and activity fields. These fields are
-local bookkeeping, not a promise of a native deletion timer; the existing
-provider ephemeral-machine policy and explicit-stop behavior are unchanged.
-
 ## Lifecycle
 
 1. `warmup` / `run` without `--id` creates a microVM sandbox from the configured `--smolvm-image`. A syncing `run` first validates the complete archive candidate and builds its local snapshot; preparation failure does not allocate a machine.
