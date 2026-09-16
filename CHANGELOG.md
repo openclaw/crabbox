@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve recorded direct-lease idle timeouts across reuse and repository reclaim, honor explicit replacement through both admission paths, and keep claim labels and coordinator registration consistent without overriding managed-coordinator policy.
+
 - Preserve ownership of previously synced files when attaching local Git metadata to a raw workspace, so later syncs can remove obsolete files without importing stale readiness markers. Keep local Git pruning on the safe manifest path, rejecting directory symlinks before deleting files outside the workspace. [PR 2285](https://github.com/openclaw/crabbox/pull/2285).
 
 - Keep Upstash Box status age and runtime metadata tied to native observations, preserve recorded local lease policy across reuse, and omit unknown policy instead of inventing current defaults or expiry. [PR 2283](https://github.com/openclaw/crabbox/pull/2283).

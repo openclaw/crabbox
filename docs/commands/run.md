@@ -228,7 +228,13 @@ Aliases, explicit reclaim, and coordinator-managed leases retain their existing
 resolution paths; stale heartbeat snapshots still fail the exact-claim check.
 
 `--idle-timeout` controls inactivity expiry (default `30m`); `--ttl` is the
-maximum wall-clock lifetime (default `90m`). Use `--stop-after
+maximum wall-clock lifetime (default `90m`). Reusing a claimed direct lease keeps
+its recorded idle timeout unless `--idle-timeout` is explicitly supplied; reader
+defaults and transferring the repository claim with `--reclaim` do not replace
+that policy. This applies to direct allocation even in registered broker mode;
+managed leases continue to use the coordinator's policy. An explicit replacement
+on an existing direct lease is stored in whole seconds, rounded to the nearest
+second with a minimum of one second for a positive value. Use `--stop-after
 success|always|failure|never` to make lease cleanup explicit. Without it, a
 newly acquired one-shot lease is released after the command and an existing
 `--id` lease is left alone. The run details always print the exact `crabbox

@@ -969,7 +969,7 @@ func TestResolvedLeaseClaimAllowsUnclaimedResourceAdoption(t *testing.T) {
 		t.Fatal(err)
 	}
 	claim, ok, err := ResolveLeaseClaimForProvider(leaseID, "aws")
-	if err != nil || !ok || claim.RepoRoot != "/repo" || claim.CloudID != "i-adopt" {
+	if err != nil || !ok || claim.RepoRoot != "/repo" || claim.CloudID != "i-adopt" || claim.IdleTimeoutSeconds != 3600 {
 		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
 	}
 }
@@ -1001,7 +1001,7 @@ func TestClaimRunLeaseTargetForRepoAndRegisterRetainsReplacementSnapshot(t *test
 	SetServerLeaseClaimSnapshot(&server, acquired, true)
 
 	if err := (App{}).claimRunLeaseTargetForRepoAndRegister(
-		context.Background(), leaseID, "replacement", cfg, &server, target, "/repo", false, false,
+		context.Background(), leaseID, "replacement", &cfg, &server, target, "/repo", false, false, nil,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -1015,6 +1015,148 @@ func TestClaimRunLeaseTargetForRepoAndRegisterRetainsReplacementSnapshot(t *test
 	}
 	if registered.Revision == acquired.Revision || registered.Revision != current.Revision {
 		t.Fatalf("acquired=%q registered=%q current=%q", acquired.Revision, registered.Revision, current.Revision)
+	}
+}
+
+func TestResolvedLeaseRegistrationPreservesRecordedIdlePolicy(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("CRABBOX_ADAPTER_ID", "")
+	t.Setenv(controllerWorkspaceIDEnv, "")
+	requests := make(chan CoordinatorLeaseRegistration, 3)
+	checkRegistration := func(want int) {
+		t.Helper()
+		select {
+		case registration := <-requests:
+			if registration.IdleTimeoutSeconds != want {
+				t.Fatalf("coordinator idle=%d want=%d", registration.IdleTimeoutSeconds, want)
+			}
+		default:
+			t.Fatal("coordinator registration was not sent")
+		}
+	}
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var registration CoordinatorLeaseRegistration
+		if err := json.NewDecoder(r.Body).Decode(&registration); err != nil {
+			t.Error(err)
+			http.Error(w, "invalid fixture request", http.StatusBadRequest)
+			return
+		}
+		requests <- registration
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": map[string]any{
+			"id": "cbx_recorded_idle", "provider": "local-container", "lifecycle": "registered", "state": "active",
+		}})
+	}))
+	defer coordinator.Close()
+	cfg := baseConfig()
+	cfg.Provider = "local-container"
+	cfg.IdleTimeout = 5 * time.Minute
+	cfg.Coordinator, cfg.CoordToken, cfg.BrokerMode = coordinator.URL, "fixture-token", BrokerModeRegistered
+	leaseID := "cbx_recorded_idle"
+	server := Server{
+		CloudID: "recorded-container", Provider: cfg.Provider,
+		Labels: DirectLeaseLabels(cfg, leaseID, "recorded", cfg.Provider, "", true, time.Now()),
+	}
+	target := SSHTarget{Host: "127.0.0.1", Port: "49152"}
+	repo := t.TempDir()
+	if err := ClaimLeaseTargetForRepoConfig(leaseID, "recorded", cfg, server, target, repo, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetServerLeaseClaimSnapshot(&server, before, true)
+	server.Labels["idle_timeout"] = "1800"
+	server.Labels["idle_timeout_secs"] = "1800"
+	cfg.IdleTimeout = 30 * time.Minute
+	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(t.Context(), leaseID, "recorded", cfg, &server, target, repo, false); err != nil {
+		t.Fatal(err)
+	}
+	checkRegistration(300)
+	after, err := ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.IdleTimeoutSeconds != before.IdleTimeoutSeconds || after.Labels["idle_timeout_secs"] != "300" {
+		t.Fatalf("recorded idle changed during reuse: scalar=%d label=%q", after.IdleTimeoutSeconds, after.Labels["idle_timeout_secs"])
+	}
+	registered, exists, set := ServerLeaseClaimSnapshot(server)
+	if !set || !exists || registered.IdleTimeoutSeconds != after.IdleTimeoutSeconds || registered.Revision != after.Revision {
+		t.Fatalf("registered snapshot differs from saved policy: %#v", registered)
+	}
+	override := 10 * time.Minute
+	if err := (App{}).claimRunLeaseTargetForRepoAndRegister(t.Context(), leaseID, "recorded", &cfg, &server, target, repo, false, true, &override); err != nil {
+		t.Fatal(err)
+	}
+	checkRegistration(600)
+	after, err = ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.IdleTimeoutSeconds != 600 || after.Labels["idle_timeout_secs"] != "600" || after.Labels["idle_timeout"] != "600" {
+		t.Fatalf("explicit run override was not applied consistently: scalar=%d labels=%v", after.IdleTimeoutSeconds, after.Labels)
+	}
+	cfg.IdleTimeout = 30 * time.Minute
+	server.Labels["idle_timeout"], server.Labels["idle_timeout_secs"] = "1800", "1800"
+	newRepo := t.TempDir()
+	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(t.Context(), leaseID, "recorded", cfg, &server, target, newRepo, true); err != nil {
+		t.Fatal(err)
+	}
+	checkRegistration(600)
+	after, err = ReadLeaseClaim(leaseID)
+	if err != nil || after.RepoRoot != newRepo || after.IdleTimeoutSeconds != 600 || after.Labels["idle_timeout_secs"] != "600" {
+		t.Fatalf("repository transfer reset idle policy: claim=%#v err=%v", after, err)
+	}
+}
+
+func TestResolvedIdlePolicySourceSelection(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		managed    bool
+		registered bool
+		exists     bool
+		resolved   bool
+		recorded   int
+		override   time.Duration
+		want       time.Duration
+		labels     string
+	}{
+		{name: "stored beats projection", exists: true, resolved: true, recorded: 300, want: 5 * time.Minute, labels: "300"},
+		{name: "registered remains direct", registered: true, exists: true, resolved: true, recorded: 300, want: 5 * time.Minute, labels: "300"},
+		{name: "coordinator remains authoritative", managed: true, exists: true, resolved: true, recorded: 300, want: 30 * time.Minute, labels: "1800"},
+		{name: "fresh initialization unchanged", exists: true, recorded: 300, want: 30 * time.Minute, labels: "1800"},
+		{name: "adoption unchanged", resolved: true, want: 30 * time.Minute, labels: "1800"},
+		{name: "missing policy unchanged", exists: true, resolved: true, want: 30 * time.Minute, labels: "1800"},
+		{name: "explicit fraction rounds once", exists: true, resolved: true, recorded: 300, override: 1500 * time.Millisecond, want: 2 * time.Second, labels: "2"},
+		{name: "explicit positive subsecond", exists: true, resolved: true, recorded: 300, override: 100 * time.Millisecond, want: time.Second, labels: "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider, cfg.IdleTimeout = "aws", 30*time.Minute
+			cfg.Coordinator = ""
+			if tc.managed || tc.registered {
+				cfg.Coordinator = "https://coordinator.example.test"
+			}
+			if tc.registered {
+				cfg.BrokerMode = BrokerModeRegistered
+			}
+			labels := map[string]string{"idle_timeout": "1800", "idle_timeout_secs": "1800", "unrelated": "preserved"}
+			server := Server{Labels: labels}
+			var override *time.Duration
+			if tc.override != 0 {
+				override = &tc.override
+			}
+			if err := applyResolvedLeaseIdlePolicy(&cfg, &server, LeaseClaim{IdleTimeoutSeconds: tc.recorded}, tc.exists, tc.resolved, override); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.IdleTimeout != tc.want || server.Labels["idle_timeout"] != tc.labels || server.Labels["idle_timeout_secs"] != tc.labels || server.Labels["unrelated"] != "preserved" {
+				t.Fatalf("idle=%s labels=%v", cfg.IdleTimeout, server.Labels)
+			}
+			if labels["idle_timeout"] != "1800" || labels["idle_timeout_secs"] != "1800" {
+				t.Fatal("policy selection mutated the provider's input map")
+			}
+		})
 	}
 }
 
@@ -1047,7 +1189,7 @@ func TestClaimRunLeaseTargetForRepoAndRegisterRetainsSnapshotOnRegistrationError
 	}
 	target := SSHTarget{Host: "127.0.0.1", Port: "49153"}
 	err := (App{Stderr: &bytes.Buffer{}}).claimRunLeaseTargetForRepoAndRegister(
-		context.Background(), leaseID, "registration-error", cfg, &server, target, "/repo", false, false,
+		context.Background(), leaseID, "registration-error", &cfg, &server, target, "/repo", false, false, nil,
 	)
 	if err == nil || !strings.Contains(err.Error(), "register macOS portal lease") {
 		t.Fatalf("registration error=%v", err)
