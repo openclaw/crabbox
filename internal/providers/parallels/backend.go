@@ -113,13 +113,9 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	if vm.IPSource != "" {
 		server.Labels["ip_source"] = vm.IPSource
 	}
-	target := parallelsSSHTarget(cfg, vm.IP)
+	target := parallelsLeaseSSHTarget(cfg, vm.IP)
 	if cfg.TargetOS == core.TargetWindows && cfg.WindowsMode == core.WindowsModeNormal {
 		target.ReadyCheck = core.PowershellCommand(`$PSVersionTable.PSVersion | Out-Null`)
-	}
-	if cfg.Parallels.Host != "" {
-		target.ProxyCommand = parallelsProxyCommand(cfg, vm.IP)
-		target.SSHConfigProxy = true
 	}
 	if err := core.WaitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 		cleanupVM(server.CloudID)
@@ -203,6 +199,13 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 				if err != nil {
 					return core.LeaseTarget{}, err
 				}
+				claim, claimOK, claimExact, claimErr := core.ResolveLeaseClaimForProviderWithExact(leaseID, "parallels")
+				if claimErr != nil {
+					return core.LeaseTarget{}, claimErr
+				}
+				if claimOK && claimExact && applyParallelsClaimSSHPortToConfig(&candidate, claim, leaseID, vm.ID, parallelsHostName(candidate)) {
+					client = core.NewParallelsClient(candidate, b.RT.Exec)
+				}
 				if vm.IP == "" && strings.EqualFold(vm.State, "running") {
 					discovered, err := client.WaitForIP(ctx, vm.ID, 30*time.Second)
 					if err != nil {
@@ -214,6 +217,9 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 					}
 				}
 				server.PublicNet.IPv4.IP = vm.IP
+				if vm.IPSource != "" {
+					server.Labels["ip_source"] = vm.IPSource
+				}
 				if strings.TrimSpace(candidate.SSHUser) == core.BaseConfig().SSHUser {
 					var user string
 					var err error
@@ -226,22 +232,14 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 						candidate.SSHUser = strings.TrimSpace(user)
 					}
 				}
-				target := parallelsSSHTarget(candidate, vm.IP)
+				target := parallelsLeaseSSHTarget(candidate, vm.IP)
 				if !req.ReleaseOnly {
 					if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
 						return core.LeaseTarget{}, err
 					}
 				}
-				claim, claimOK, claimExact, claimErr := core.ResolveLeaseClaimForProviderWithExact(leaseID, "parallels")
-				if claimErr != nil {
-					return core.LeaseTarget{}, claimErr
-				}
 				if claimOK && claimExact {
 					applyParallelsClaimSSHPort(&target, claim, leaseID, vm.ID, parallelsHostName(candidate))
-				}
-				if candidate.Parallels.Host != "" {
-					target.ProxyCommand = parallelsProxyCommand(candidate, vm.IP)
-					target.SSHConfigProxy = true
 				}
 				if adopt {
 					if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, candidate, server, target, req.Repo.Root, candidate.IdleTimeout, true); err != nil {
@@ -266,14 +264,45 @@ func parallelsSSHTarget(cfg core.Config, host string) core.SSHTarget {
 	return target
 }
 
-func applyParallelsClaimSSHPort(target *core.SSHTarget, claim core.LeaseClaim, leaseID, _, _ string) bool {
-	// Resolve already ownership-fences the exact lease/VM/host binding before
-	// this point. Reuse the transport endpoint that acquisition actually proved
-	// instead of replacing it with the command's generic SSH default.
-	if target == nil || claim.LeaseID != strings.TrimSpace(leaseID) || claim.SSHPort <= 0 || claim.SSHPort > 65535 {
+func parallelsLeaseSSHTarget(cfg core.Config, host string) core.SSHTarget {
+	target := parallelsSSHTarget(cfg, host)
+	if cfg.Parallels.Host != "" {
+		target.ProxyCommand = parallelsProxyCommand(cfg, host)
+		target.SSHConfigProxy = true
+	}
+	return target
+}
+
+func parallelsClaimSSHPort(claim core.LeaseClaim, leaseID, vmID, host string) (string, bool) {
+	if claim.LeaseID != strings.TrimSpace(leaseID) ||
+		claim.CloudID != strings.TrimSpace(vmID) ||
+		strings.TrimSpace(claim.Labels["host"]) != strings.TrimSpace(host) ||
+		claim.SSHPort <= 0 || claim.SSHPort > 65535 {
+		return "", false
+	}
+	return strconv.Itoa(claim.SSHPort), true
+}
+
+func applyParallelsClaimSSHPortToConfig(cfg *core.Config, claim core.LeaseClaim, leaseID, vmID, host string) bool {
+	port, ok := parallelsClaimSSHPort(claim, leaseID, vmID, host)
+	if !ok || cfg == nil {
 		return false
 	}
-	target.Port = strconv.Itoa(claim.SSHPort)
+	cfg.SSHPort = port
+	cfg.SSHFallbackPorts = []string{}
+	return true
+}
+
+func applyParallelsClaimSSHPort(target *core.SSHTarget, claim core.LeaseClaim, leaseID, vmID, host string) bool {
+	// Resolve already ownership-fences the exact lease/VM/host binding before
+	// this point. Reuse the transport endpoint that acquisition actually proved
+	// instead of replacing it with the command's generic SSH default. The same
+	// port is applied to the client config before DHCP/IP discovery.
+	port, ok := parallelsClaimSSHPort(claim, leaseID, vmID, host)
+	if !ok || target == nil {
+		return false
+	}
+	target.Port = port
 	target.FallbackPorts = []string{}
 	return true
 }
@@ -342,11 +371,7 @@ func (b *leaseBackend) Doctor(ctx context.Context, req core.DoctorRequest) (core
 			return core.DoctorResult{}, err
 		}
 		if vm.IP != "" {
-			target := core.SSHTargetFromConfig(selected, vm.IP)
-			if selected.Parallels.Host != "" {
-				target.ProxyCommand = parallelsProxyCommand(selected, vm.IP)
-				target.SSHConfigProxy = true
-			}
+			target := parallelsLeaseSSHTarget(selected, vm.IP)
 			if err := core.WaitForSSHReady(ctx, &target, io.Discard, "doctor", 10*time.Second); err != nil {
 				return core.DoctorResult{}, err
 			}

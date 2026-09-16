@@ -682,6 +682,125 @@ func TestParallelsEnsureGuestReadySkipsWindows(t *testing.T) {
 	}
 }
 
+func TestParallelsHostAndBootstrapCommandsOmitPasswordFromChildEnvironment(t *testing.T) {
+	const password = "synthetic-parallels-password"
+	t.Setenv("CRABBOX_PARALLELS_PASSWORD", password)
+	tests := []struct {
+		name string
+		cfg  Config
+		run  func(*testing.T, *ParallelsClient)
+	}{
+		{
+			name: "prlctl local",
+			cfg:  Config{TargetOS: targetMacOS},
+			run: func(t *testing.T, client *ParallelsClient) {
+				t.Helper()
+				if _, err := client.Version(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "prlctl remote",
+			cfg:  Config{TargetOS: targetMacOS, Parallels: ParallelsConfig{Host: "mac.example", HostUser: "build"}},
+			run: func(t *testing.T, client *ParallelsClient) {
+				t.Helper()
+				if _, err := client.Version(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "bootstrap local",
+			cfg: Config{
+				TargetOS: targetMacOS,
+				SSHUser:  "parallels-01",
+				SSHPort:  "22",
+				WorkRoot: "/Users/parallels-01/crabbox",
+				Parallels: ParallelsConfig{
+					BootstrapKey: "/Users/aiworker/.ssh/id_ed25519",
+				},
+			},
+			run: func(t *testing.T, client *ParallelsClient) {
+				t.Helper()
+				if err := client.BootstrapMacOSOverSSH(context.Background(), "10.211.55.9", client.Cfg, "ssh-ed25519 AAAAlease"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "bootstrap remote",
+			cfg: Config{
+				TargetOS: targetMacOS,
+				SSHUser:  "parallels-01",
+				SSHPort:  "22",
+				WorkRoot: "/Users/parallels-01/crabbox",
+				Parallels: ParallelsConfig{
+					Host:         "mac.example",
+					HostUser:     "build",
+					BootstrapKey: "/Users/build/.ssh/bootstrap",
+				},
+			},
+			run: func(t *testing.T, client *ParallelsClient) {
+				t.Helper()
+				if err := client.BootstrapMacOSOverSSH(context.Background(), "10.211.55.9", client.Cfg, "ssh-ed25519 AAAAlease"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &parallelsDHCPRunner{}
+			test.run(t, NewParallelsClient(test.cfg, runner))
+			if len(runner.requests) == 0 {
+				t.Fatal("expected host or bootstrap command")
+			}
+			for _, req := range runner.requests {
+				assertParallelsChildOmitsPassword(t, req, password)
+			}
+		})
+	}
+}
+
+func assertParallelsChildOmitsPassword(t *testing.T, req LocalCommandRequest, password string) {
+	t.Helper()
+	if req.Env == nil {
+		t.Fatal("Parallels host command inherited the process environment")
+	}
+	if commandRequestHasEnvName(req, parallelsPasswordEnvName) {
+		t.Fatal("CRABBOX_PARALLELS_PASSWORD was present in the child environment")
+	}
+	if commandRequestPlacesValueOnArgv(req, password) {
+		t.Fatal("password value was placed on argv")
+	}
+}
+
+func commandRequestHasEnvName(req LocalCommandRequest, name string) bool {
+	prefix := strings.ToUpper(name) + "="
+	for _, entry := range req.Env {
+		if strings.HasPrefix(strings.ToUpper(entry), prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandRequestPlacesValueOnArgv(req LocalCommandRequest, value string) bool {
+	if value == "" {
+		return false
+	}
+	if strings.Contains(req.Name, value) {
+		return true
+	}
+	for _, arg := range req.Args {
+		if strings.Contains(arg, value) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestParallelsBootstrapMacOSOverSSHUsesHostIdentityAndStreamsLeaseKey(t *testing.T) {
 	runner := &parallelsDHCPRunner{}
 	cfg := Config{

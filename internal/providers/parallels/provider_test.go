@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -219,6 +220,10 @@ func TestParallelsSSHTargetScrubsDesktopPasswordEnvironment(t *testing.T) {
 	if len(target.ChildEnvDenylist) != 1 || target.ChildEnvDenylist[0] != "CRABBOX_PARALLELS_PASSWORD" {
 		t.Fatalf("child environment denylist=%v", target.ChildEnvDenylist)
 	}
+	leaseTarget := parallelsLeaseSSHTarget(core.BaseConfig(), "192.0.2.10")
+	if len(leaseTarget.ChildEnvDenylist) != 1 || leaseTarget.ChildEnvDenylist[0] != "CRABBOX_PARALLELS_PASSWORD" {
+		t.Fatalf("lease child environment denylist=%v", leaseTarget.ChildEnvDenylist)
+	}
 }
 
 func TestApplyParallelsClaimSSHPort(t *testing.T) {
@@ -242,6 +247,104 @@ func TestApplyParallelsClaimSSHPort(t *testing.T) {
 	}
 	if wrong.Port != "2222" || len(wrong.FallbackPorts) != 1 {
 		t.Fatalf("mismatched target was mutated: %#v", wrong)
+	}
+
+	cfg := core.BaseConfig()
+	if cfg.SSHPort != "2222" {
+		t.Fatalf("base SSHPort=%q, want generic 2222 default", cfg.SSHPort)
+	}
+	if !applyParallelsClaimSSHPortToConfig(&cfg, claim, "cbx_example", "vm-id", "mac.example") {
+		t.Fatal("exact Parallels claim port was not applied to config")
+	}
+	if cfg.SSHPort != "22" || len(cfg.SSHFallbackPorts) != 0 {
+		t.Fatalf("config endpoint port=%q fallback=%v", cfg.SSHPort, cfg.SSHFallbackPorts)
+	}
+	if applyParallelsClaimSSHPortToConfig(&cfg, claim, "cbx_other", "vm-id", "mac.example") {
+		t.Fatal("mismatched claim port was applied to config")
+	}
+	if applyParallelsClaimSSHPortToConfig(&cfg, claim, "cbx_example", "other-vm", "mac.example") {
+		t.Fatal("claim port from a different VM was applied to config")
+	}
+	if applyParallelsClaimSSHPortToConfig(&cfg, claim, "cbx_example", "vm-id", "other.example") {
+		t.Fatal("claim port from a different Parallels host was applied to config")
+	}
+}
+
+func TestResolveReusesSavedSSHPortWhenToolsReportsNoIP(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+
+	leaseID := "cbx_good"
+	server := core.Server{
+		CloudID:  "vm-good",
+		Provider: "parallels",
+		Name:     "crabbox-cbx-good-blue",
+		Labels:   map[string]string{"provider": "parallels", "lease": leaseID, "slug": "blue", "host": "local"},
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "blue", "parallels", "", "", "/repo", time.Minute, false, server, core.SSHTarget{Port: "22"}); err != nil {
+		t.Fatal(err)
+	}
+
+	expiry := time.Now().Add(time.Hour).Unix()
+	runner := &parallelsReuseDHCPRunner{
+		vmJSON: `[{
+			"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"running",
+			"Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}},
+			"Network":{"ipAddresses":[]}
+		}]`,
+		leases: "[vnic0]\n10.211.55.9=\"" + strconv.FormatInt(expiry, 10) + ",1800,001c4233eedd,01001c4233eedd\"\n",
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = "parallels"
+	cfg.TargetOS = core.TargetMacOS
+	cfg.SSHPort = "2222"
+	cfg.Parallels.BootstrapKey = "/Users/build/.ssh/bootstrap"
+	backend := &leaseBackend{DirectSSHBackend: sharedBackend(cfg, runner)}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "blue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.PublicNet.IPv4.IP != "10.211.55.9" || lease.SSH.Port != "22" {
+		t.Fatalf("reuse lease=%#v ssh=%#v", lease.Server, lease.SSH)
+	}
+	if !reflect.DeepEqual(runner.probedPorts, []string{"22"}) {
+		t.Fatalf("probed ports=%v, want saved port 22 only", runner.probedPorts)
+	}
+}
+
+func TestDoctorHostAndProbePathsOmitPasswordFromChildEnvironment(t *testing.T) {
+	const password = "synthetic-parallels-password"
+	t.Setenv("CRABBOX_PARALLELS_PASSWORD", password)
+	runner := &parallelsReuseDHCPRunner{
+		vmJSON: `[{"ID":"source-vm","Name":"source-vm","State":"running"}]`,
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = "parallels"
+	cfg.TargetOS = core.TargetMacOS
+	cfg.Parallels.Source = "source-vm"
+	backend := &leaseBackend{DirectSSHBackend: sharedBackend(cfg, runner)}
+
+	_, _ = backend.Doctor(context.Background(), core.DoctorRequest{ProbeSSH: true})
+	if len(runner.requests) == 0 {
+		t.Fatal("doctor issued no host commands")
+	}
+	for _, req := range runner.requests {
+		if req.Env == nil {
+			t.Fatal("doctor host command inherited the process environment")
+		}
+		if commandRequestHasEnvName(req, "CRABBOX_PARALLELS_PASSWORD") {
+			t.Fatal("CRABBOX_PARALLELS_PASSWORD was present in a doctor child environment")
+		}
+		if commandRequestPlacesValueOnArgv(req, password) {
+			t.Fatal("password value was placed on argv")
+		}
+	}
+	target := parallelsLeaseSSHTarget(cfg, "192.0.2.10")
+	if len(target.ChildEnvDenylist) != 1 || target.ChildEnvDenylist[0] != "CRABBOX_PARALLELS_PASSWORD" {
+		t.Fatalf("doctor SSH target denylist=%v", target.ChildEnvDenylist)
 	}
 }
 
@@ -943,4 +1046,59 @@ func TestConfigShowRedactsParallelsSSHKeys(t *testing.T) {
 	if redactedParallelsTemplateConfigs(nil) != nil || redactedParallelsHostConfigs(nil) != nil {
 		t.Fatal("config-show redaction changed nil Parallels collections")
 	}
+}
+
+type parallelsReuseDHCPRunner struct {
+	vmJSON      string
+	leases      string
+	requests    []core.LocalCommandRequest
+	probedPorts []string
+}
+
+func (r *parallelsReuseDHCPRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	r.requests = append(r.requests, req)
+	rendered := req.Name + " " + strings.Join(req.Args, " ")
+	switch {
+	case strings.Contains(rendered, "prlctl") && strings.Contains(rendered, "list"):
+		return core.LocalCommandResult{Stdout: r.vmJSON}, nil
+	case strings.Contains(rendered, "parallels_dhcp_leases"):
+		return core.LocalCommandResult{Stdout: r.leases}, nil
+	case req.Name == "/usr/bin/nc" || strings.Contains(rendered, "/usr/bin/nc"):
+		port := ""
+		if len(req.Args) > 0 {
+			port = req.Args[len(req.Args)-1]
+		}
+		r.probedPorts = append(r.probedPorts, port)
+		if port != "22" {
+			return core.LocalCommandResult{Stderr: "connection refused"}, errors.New("connection refused")
+		}
+		return core.LocalCommandResult{}, nil
+	default:
+		return core.LocalCommandResult{}, nil
+	}
+}
+
+func commandRequestHasEnvName(req core.LocalCommandRequest, name string) bool {
+	prefix := strings.ToUpper(name) + "="
+	for _, entry := range req.Env {
+		if strings.HasPrefix(strings.ToUpper(entry), prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandRequestPlacesValueOnArgv(req core.LocalCommandRequest, value string) bool {
+	if value == "" {
+		return false
+	}
+	if strings.Contains(req.Name, value) {
+		return true
+	}
+	for _, arg := range req.Args {
+		if strings.Contains(arg, value) {
+			return true
+		}
+	}
+	return false
 }

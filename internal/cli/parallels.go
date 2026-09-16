@@ -18,6 +18,7 @@ import (
 
 const parallelsProvider = "parallels"
 const parallelsDHCPLeasesPath = "/Library/Preferences/Parallels/parallels_dhcp_leases"
+const parallelsPasswordEnvName = "CRABBOX_PARALLELS_PASSWORD"
 
 var errParallelsDHCPLeaseAmbiguous = errors.New("ambiguous Parallels DHCP lease")
 
@@ -58,7 +59,10 @@ func NewParallelsClient(cfg Config, runner CommandRunner) *ParallelsClient {
 	if runner == nil {
 		runner = execCommandRunner{}
 	}
-	return &ParallelsClient{Cfg: cfg, Runner: runner}
+	return &ParallelsClient{
+		Cfg:    cfg,
+		Runner: commandRunnerWithChildCredentialBoundary(runner, []string{parallelsPasswordEnvName}),
+	}
 }
 
 func (c *ParallelsClient) Version(ctx context.Context) (string, error) {
@@ -874,7 +878,16 @@ touch /var/lib/crabbox/bootstrapped 2>/dev/null || true
 `, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, parallelsMacOSDesktopReadyTest(macOSAccountCredentials), parallelsMacOSDesktopSetupScript(macOSAccountCredentials), shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0])
 }
 
+func parallelsChildCommandEnv(extraEnv []string) []string {
+	env := extraEnv
+	if env == nil {
+		env = os.Environ()
+	}
+	return childEnvironmentWithout(env, parallelsPasswordEnvName)
+}
+
 func (c *ParallelsClient) prlctl(ctx context.Context, extraEnv []string, args ...string) (LocalCommandResult, error) {
+	env := parallelsChildCommandEnv(extraEnv)
 	if c.Cfg.Parallels.Host != "" {
 		remote := "PATH=/usr/local/bin:/opt/homebrew/bin:$PATH " + strings.Join(shellWords(append([]string{"prlctl"}, args...)), " ")
 		sshArgs := []string{}
@@ -886,15 +899,16 @@ func (c *ParallelsClient) prlctl(ctx context.Context, extraEnv []string, args ..
 			host = c.Cfg.Parallels.HostUser + "@" + host
 		}
 		sshArgs = append(sshArgs, host, remote)
-		return c.Runner.Run(ctx, LocalCommandRequest{Name: directSSHExecutable(), Args: sshArgs, Env: extraEnv})
+		return c.Runner.Run(ctx, LocalCommandRequest{Name: directSSHExecutable(), Args: sshArgs, Env: env})
 	}
-	return c.Runner.Run(ctx, LocalCommandRequest{Name: "prlctl", Args: args, Env: extraEnv})
+	return c.Runner.Run(ctx, LocalCommandRequest{Name: "prlctl", Args: args, Env: env})
 }
 
 func (c *ParallelsClient) hostCommand(ctx context.Context, stdin io.Reader, args ...string) (LocalCommandResult, error) {
 	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
 		return LocalCommandResult{}, Exit(2, "Parallels host command is empty")
 	}
+	env := parallelsChildCommandEnv(nil)
 	if c.Cfg.Parallels.Host != "" {
 		sshArgs := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=10"}
 		if c.Cfg.Parallels.HostKey != "" {
@@ -905,9 +919,9 @@ func (c *ParallelsClient) hostCommand(ctx context.Context, stdin io.Reader, args
 			host = c.Cfg.Parallels.HostUser + "@" + host
 		}
 		sshArgs = append(sshArgs, host, strings.Join(shellWords(args), " "))
-		return c.Runner.Run(ctx, LocalCommandRequest{Name: directSSHExecutable(), Args: sshArgs, Stdin: stdin})
+		return c.Runner.Run(ctx, LocalCommandRequest{Name: directSSHExecutable(), Args: sshArgs, Stdin: stdin, Env: env})
 	}
-	return c.Runner.Run(ctx, LocalCommandRequest{Name: args[0], Args: args[1:], Stdin: stdin})
+	return c.Runner.Run(ctx, LocalCommandRequest{Name: args[0], Args: args[1:], Stdin: stdin, Env: env})
 }
 
 func validateParallelsSnapshotCloneMode(snapshot ParallelsSnapshot, cloneMode string) error {
