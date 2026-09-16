@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Keep concurrent AWS heartbeats responsive when SSH sources are unchanged, while retaining durable ingress repair, alarm arming, and normal access setup for changed sources.
+- Keep concurrent AWS heartbeats responsive when SSH sources are unchanged, while retaining durable ingress repair, alarm arming, and normal access setup for changed sources. [PR 2290](https://github.com/openclaw/crabbox/pull/2290).
 
 - Preserve recorded direct-lease idle timeouts across provider preparation, reuse, and repository reclaim; honor explicit run and heartbeat replacements while keeping claim labels and coordinator registration consistent without overriding managed-coordinator policy. [PR 2288](https://github.com/openclaw/crabbox/pull/2288).
 
