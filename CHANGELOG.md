@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Bound retained POSIX preflight version output before extracting its first line, while draining excess output so verbose tools finish normally.
+- Bound retained POSIX preflight version output before extracting its first line, while draining excess output so verbose tools finish normally. [PR 2282](https://github.com/openclaw/crabbox/pull/2282).
 
 - Keep delegated leases active through a provider-owned heartbeat capability, with Islo sending a bounded no-op only after observing a running sandbox and reporting its live idle policy. [PR 1707](https://github.com/openclaw/crabbox/pull/1707). Thanks @zozo123.
 - Show macOS platform and effective developer-tool selection during preflight, with opt-in Swift, Xcode, and Homebrew versions, bounded execution, and confirmed cleanup before workload continuation. [PR 2281](https://github.com/openclaw/crabbox/pull/2281). Thanks @coygeek.
