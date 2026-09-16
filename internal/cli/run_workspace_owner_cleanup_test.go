@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +25,7 @@ type runCleanupWorkspaceOwnerTransport struct {
 	blockInspectAt            int
 	inspectCount              int
 	inspectReply              string
+	childMarker               string
 	inspectErr                error
 	renewReply                string
 	renewErr                  error
@@ -95,6 +98,11 @@ func (r *runCleanupWorkspaceOwnerTransport) Do(ctx context.Context, req workspac
 		}
 		if r.inspectErr != nil {
 			return r.inspectReply, r.inspectErr
+		}
+		if r.childMarker != "" {
+			if _, err := os.Stat(r.childMarker); err == nil {
+				return "CHILD", nil
+			}
 		}
 		return firstNonBlank(r.inspectReply, "OWNED"), nil
 	case workspaceOwnerRelease:
@@ -768,5 +776,266 @@ func TestReleaseReplacementLeaseRequiresConfirmedOutcome(t *testing.T) {
 	case <-remote.ownerReleased:
 		t.Fatal("unconfirmed outcome attempted guest cleanup")
 	default:
+	}
+}
+
+// Real run and coordinator adapter; simulated provider HTTP, SSH commands, and
+// rsync. The listener only admits readiness TCP probes, not SSH handshakes.
+type replacementRunProvider struct {
+	runEnvProfileTestProvider
+	coord *CoordinatorClient
+}
+
+func (p replacementRunProvider) Spec() ProviderSpec {
+	spec := p.runEnvProfileTestProvider.Spec()
+	spec.Name = "run-replacement-test"
+	return spec
+}
+func (p replacementRunProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
+	return &coordinatorLeaseBackend{spec: p.Spec(), cfg: cfg, rt: rt, coord: p.coord, direct: runEnvProfileTestBackend{spec: p.Spec()}}, nil
+}
+
+func TestRunCommandReplacesLeaseWithFreshWorkspaceOwner(t *testing.T) {
+	for _, scenario := range []string{"success", "command failure", "caller cancellation", "retained release"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir := setupRunCleanupWorkspaceOwnerTest(t)
+			source := filepath.Join(dir, "source")
+			if err := os.Mkdir(source, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(source, "input.txt"), "replacement fixture\n")
+			t.Chdir(source)
+			configPath := filepath.Join(source, "crabbox.yaml")
+			writeFile(t, configPath, "sync:\n  source: directory\n  include: [input.txt]\n  fingerprint: false\n")
+			t.Setenv("CRABBOX_CONFIG", configPath)
+			syncLog := filepath.Join(dir, "sync.log")
+			t.Setenv("CRABBOX_REPLACEMENT_SYNC_LOG", syncLog)
+			if err := os.WriteFile(filepath.Join(dir, "rsync"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CRABBOX_REPLACEMENT_SYNC_LOG\"\n/bin/cat >/dev/null\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			installWorkspaceOwnerAwareSSH(t, filepath.Join(dir, "ssh"), `#!/bin/sh
+printf '%s\n---\n' "$1" >> "$CRABBOX_FAKE_SSH_LOG"
+case "$1" in
+  *replacement-workload-fail*) printf 'replacement workload completed\n'; exit 23 ;;
+  *replacement-workload*) printf 'replacement workload completed\n' ;;
+esac
+/bin/cat >/dev/null
+exit 0
+`)
+			listener, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { listener.Close() })
+			_, port, _ := net.SplitHostPort(listener.Addr().String())
+			callerKey := new(int)
+			parent, cancel := context.WithCancel(context.WithValue(t.Context(), callerKey, "caller"))
+			defer cancel()
+			var mu sync.Mutex
+			var events []string
+			addEvent := func(event string) { mu.Lock(); events = append(events, event); mu.Unlock() }
+			owners := map[string]*workspaceOwner{}
+			remotes := map[string]*runCleanupWorkspaceOwnerTransport{}
+			leases := map[string]CoordinatorLease{}
+			var ids []string
+			var receipt terminalRunReceipt
+			var stdout, stderr bytes.Buffer
+			provider := replacementRunProvider{}
+			coord := &CoordinatorClient{BaseURL: "http://replacement.invalid", Token: "fixture"}
+			coord.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				var response any
+				code := http.StatusOK
+				parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases":
+					if workspaceOwnerFromContext(r.Context()) != nil || r.Context().Err() != nil || parent.Err() != nil || r.Context().Value(callerKey) != "caller" {
+						t.Error("allocation inherited stale owner/cancellation")
+					}
+					var body struct {
+						LeaseID string `json:"leaseID"`
+						Slug    string `json:"slug"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						return nil, err
+					}
+					ids = append(ids, body.LeaseID)
+					events = append(events, "acquire:"+body.LeaseID)
+					lease := CoordinatorLease{ID: body.LeaseID, Slug: body.Slug, Provider: provider.Spec().Name, TargetOS: targetLinux, Host: "127.0.0.1", SSHUser: "crabbox", SSHPort: port, SSHHostKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICFNHmH+uXzuQadD4Pg9JhPQvl5fkM4L9spUDQ/mI+pc", WorkRoot: "/work", State: "active"}
+					leases[lease.ID] = lease
+					response = map[string]any{"lease": lease}
+				case len(parts) >= 3 && parts[1] == "leases":
+					id := parts[2]
+					lease := leases[id]
+					if len(parts) == 4 && parts[3] == "release" {
+						owner := owners[id]
+						if owner == nil {
+							t.Error("release lacks workspace owner")
+						} else {
+							select {
+							case <-owner.done:
+							default:
+								t.Error("release precedes quiescence")
+							}
+						}
+						events = append(events, "release:"+id)
+						if scenario == "retained release" {
+							retained := false
+							lease.State, lease.CleanupStatus, lease.ReleaseDeletesServer = "released", "retained", &retained
+							leases[id] = lease
+							remotes[id].backendReturned.Store(true)
+							response = map[string]any{"lease": lease}
+							break
+						}
+						remotes[id].backendReturned.Store(true)
+						owner.cancel()
+						lease.State, lease.CleanupStatus, lease.CleanupCompletedAt = "released", "complete", "2026-09-16T00:00:00Z"
+						lease.Host, lease.SSHHostKey = "", ""
+						leases[id] = lease
+						if scenario == "caller cancellation" {
+							cancel()
+						}
+					}
+					response = map[string]any{"lease": lease}
+				case len(parts) >= 3 && parts[1] == "runs":
+					if len(parts) == 4 && parts[3] == "receipt" {
+						response = map[string]any{"receipt": receipt}
+					} else if len(parts) == 4 && parts[3] == "finish" {
+						var body struct {
+							Receipt terminalRunReceipt `json:"receipt"`
+						}
+						if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+							return nil, err
+						}
+						receipt = body.Receipt
+						response = map[string]any{"run": CoordinatorRun{ID: parts[2], State: "succeeded"}}
+					} else if len(parts) == 4 && parts[3] == "events" {
+						response = map[string]any{"event": CoordinatorRunEvent{RunID: parts[2], Seq: 1}}
+					} else {
+						var body struct {
+							Command []string `json:"command"`
+						}
+						if r.Method == http.MethodPut {
+							if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+								return nil, err
+							}
+						}
+						response = map[string]any{"run": CoordinatorRun{ID: parts[2], Provider: provider.Spec().Name, State: "running", Phase: "starting", Command: body.Command}}
+					}
+				default:
+					code = http.StatusNotFound
+					response = map[string]any{"error": "not found"}
+				}
+				data, err := json.Marshal(response)
+				return &http.Response{StatusCode: code, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(data))}, err
+			})}
+			provider.coord = coord
+			RegisterProvider(provider)
+			t.Cleanup(func() { delete(providerRegistry, provider.Spec().Name) })
+			app := App{Stdout: &stdout, Stderr: &stderr}
+			app.workspaceOwnerAcquirer = func(ctx context.Context, target SSHTarget, id string, out io.Writer) (*workspaceOwner, error) {
+				if workspaceOwnerFromContext(ctx) != nil || ctx.Err() != nil {
+					t.Fatal("owner acquisition inherited old owner")
+				}
+				remote := newRunCleanupWorkspaceOwnerTransport(0, nil)
+				remote.childMarker = filepath.Join(dir, "owner-child")
+				remote.unblockRenewal()
+				owner, err := remote.acquire(ctx, target, id, out)
+				mu.Lock()
+				owners[id], remotes[id] = owner, remote
+				mu.Unlock()
+				addEvent("owner:" + id)
+				return owner, err
+			}
+			app.sshReadinessWaiter = func(ctx context.Context, target *SSHTarget, out io.Writer, phase string, timeout time.Duration) error {
+				if phase == "before sync" || phase == "before command" {
+					owner := workspaceOwnerFromContext(ctx)
+					mu.Lock()
+					id := ids[len(ids)-1]
+					expected := owners[id]
+					first := len(ids) == 1
+					mu.Unlock()
+					if owner == nil || owner != expected {
+						t.Fatalf("%s lacks current owner", phase)
+					}
+					addEvent(phase + ":" + id)
+					if phase == "before command" && first {
+						return Exit(5, "timed out waiting for SSH during before command")
+					}
+				}
+				return waitForSSHReady(ctx, target, out, phase, timeout)
+			}
+			command := "replacement-workload"
+			if scenario == "command failure" {
+				command += "-fail"
+			}
+			// Coordinator acquisitions are exclusive: failure retention requests an owner.
+			// Success closes retained B's owner; command failure destroys B.
+			err = app.runCommand(parent, []string{"--provider", provider.Spec().Name, "--no-hydrate", "--stop-after", "failure", "--", command})
+			for _, owner := range owners {
+				owner.stopRenewal()
+				owner.cancel()
+			}
+			if scenario == "caller cancellation" || scenario == "retained release" {
+				if err == nil || len(ids) != 1 || strings.Contains(stdout.String(), "replacement workload completed") {
+					t.Fatalf("unsafe continuation: err=%v ids=%v\n%s", err, ids, stderr.String())
+				}
+				if !strings.Contains(strings.Join(events, ","), "release:"+ids[0]) {
+					t.Fatalf("did not reach A release: %v", events)
+				}
+				if scenario == "caller cancellation" && !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancellation error lost: %v", err)
+				}
+				if scenario == "retained release" && !strings.Contains(err.Error(), "did not confirm a terminal or preserved workspace") {
+					t.Fatalf("release error lost: %v", err)
+				}
+				return
+			}
+			wantExit := 0
+			if scenario == "command failure" {
+				wantExit = 23
+			}
+			assertRunCleanupExitCode(t, err, wantExit, stdout.String(), stderr.String())
+			if len(ids) != 2 {
+				t.Fatalf("acquisitions=%v events=%v", ids, events)
+			}
+			a, b := ids[0], ids[1]
+			if receipt.LeaseID != b {
+				t.Fatalf("workload receipt bound to %s, want B %s", receipt.LeaseID, b)
+			}
+			want := "acquire:" + a + ",owner:" + a + ",before sync:" + a + ",before command:" + a + ",release:" + a + ",acquire:" + b + ",owner:" + b + ",before sync:" + b + ",before command:" + b
+			if scenario == "command failure" {
+				want += ",release:" + b
+			}
+			if got := strings.Join(events, ","); got != want {
+				t.Fatalf("events=%s want=%s", got, want)
+			}
+			if owners[a] == owners[b] {
+				t.Fatal("replacement reused owner")
+			}
+			if !strings.Contains(stdout.String(), "replacement workload completed") {
+				t.Fatalf("workload missing: %s", stdout.String())
+			}
+			data, readErr := os.ReadFile(syncLog)
+			if readErr != nil || !strings.Contains(string(data), a) || !strings.Contains(string(data), b) {
+				t.Fatalf("sync targets=%s err=%v", data, readErr)
+			}
+			select {
+			case <-remotes[a].ownerReleased:
+				t.Fatal("destroyed A received owner release")
+			default:
+			}
+			select {
+			case <-remotes[b].ownerReleased:
+				if wantExit != 0 {
+					t.Fatal("destroyed B received owner release")
+				}
+			default:
+				if wantExit == 0 {
+					t.Fatal("retained B owner was not closed")
+				}
+			}
+		})
 	}
 }

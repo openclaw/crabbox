@@ -1636,7 +1636,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		target = bootstrapNetworkTarget(cfg, server, target)
 		connectStartedAt := time.Now()
-		waitErr := waitForSSHReady(ctx, &target, a.Stderr, "workspace owner", 2*time.Minute)
+		waitErr := a.waitForSSHReady(ctx, &target, "workspace owner", 2*time.Minute)
 		runnerConnectDuration += time.Since(connectStartedAt)
 		if waitErr != nil {
 			return recordFailure(waitErr)
@@ -2019,7 +2019,7 @@ retrySync:
 		stepStart := time.Now()
 		recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before sync")
 		target = bootstrapNetworkTarget(cfg, server, target)
-		bootstrapErr := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute)
+		bootstrapErr := a.waitForSSHReady(ctx, &target, "before sync", 2*time.Minute)
 		connectDuration := time.Since(stepStart)
 		timings.bootstrap += connectDuration
 		timings.connect += connectDuration
@@ -2062,7 +2062,7 @@ retrySync:
 				target.FallbackPorts = cfg.SSHFallbackPorts
 				target = bootstrapNetworkTarget(cfg, server, target)
 				connectStartedAt := time.Now()
-				waitErr := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute)
+				waitErr := a.waitForSSHReady(ctx, &target, "before sync", 2*time.Minute)
 				connectDuration := time.Since(connectStartedAt)
 				timings.connect += connectDuration
 				timings.syncConnect += connectDuration
@@ -2552,7 +2552,7 @@ afterSync:
 	recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before command")
 	target = bootstrapNetworkTarget(cfg, server, target)
 	bootstrapStartedAt := time.Now()
-	bootstrapErr := waitForSSHReady(ctx, &target, a.Stderr, "before command", runBeforeCommandSSHReadyTimeout)
+	bootstrapErr := a.waitForSSHReady(ctx, &target, "before command", runBeforeCommandSSHReadyTimeout)
 	connectDuration := time.Since(bootstrapStartedAt)
 	timings.bootstrap += connectDuration
 	timings.connect += connectDuration
