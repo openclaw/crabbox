@@ -218,13 +218,21 @@ phase=verify-metadata
 verify_metadata || fail
 metadata="$workdir/.git"
 phase=publish
+# Attaching Git changes the manifest location. Carry prior file ownership into
+# the new metadata so ordinary prune still removes files from earlier raw syncs.
+manifest_dir="$workdir/.crabbox"
 if [ -e "$metadata" ] || [ -L "$metadata" ]; then
   owned_metadata || ownership_fail
-  if [ -e "$metadata/crabbox/sync-manifest" ]; then
-    [ -f "$metadata/crabbox/sync-manifest" ] || fail
-    mkdir -- "$fresh/crabbox" || fail
-    cp -- "$metadata/crabbox/sync-manifest" "$fresh/crabbox/sync-manifest" || fail
-  fi
+  manifest_dir="$metadata/crabbox"
+fi
+manifest="$manifest_dir/sync-manifest"
+if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+  [ -d "$manifest_dir" ] && [ ! -L "$manifest_dir" ] || fail
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || fail
+  mkdir -- "$fresh/crabbox" || fail
+  cp -- "$manifest" "$fresh/crabbox/sync-manifest" || fail
+fi
+if [ -e "$metadata" ] || [ -L "$metadata" ]; then
   previous="$stage/previous.git"
   mv -- "$metadata" "$previous" || fail
   backup="$previous"
@@ -431,13 +439,22 @@ try {
   Assert-LocalMetadata
   $metadata = Join-Path $workdir '.git'
   $phase = 'publish'
+  # Match the POSIX handoff: raw ownership is used only on the first attachment.
+  $manifestDirectory = Join-Path $workdir '.crabbox'
   if (Test-Path -LiteralPath $metadata) {
     Assert-ImportOwnership
-    $manifest = Join-Path $metadata 'crabbox/sync-manifest'
-    if (Test-Path -LiteralPath $manifest) {
-      $null = New-Item -ItemType Directory -Path (Join-Path $fresh 'crabbox')
-      [IO.File]::Copy($manifest, (Join-Path $fresh 'crabbox/sync-manifest'))
-    }
+    $manifestDirectory = Join-Path $metadata 'crabbox'
+  }
+  $manifest = Join-Path $manifestDirectory 'sync-manifest'
+  if (Test-Path -LiteralPath $manifest) {
+    $directory = Get-Item -Force -LiteralPath $manifestDirectory
+    if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'invalid manifest directory' }
+    $item = Get-Item -Force -LiteralPath $manifest
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'invalid sync manifest' }
+    $null = New-Item -ItemType Directory -Path (Join-Path $fresh 'crabbox')
+    [IO.File]::Copy($manifest, (Join-Path $fresh 'crabbox/sync-manifest'))
+  }
+  if (Test-Path -LiteralPath $metadata) {
     $previous = Join-Path $stage 'previous.git'
     [IO.Directory]::Move($metadata, $previous)
     $backup = $previous
