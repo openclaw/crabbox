@@ -364,7 +364,12 @@ func TestGitLocalReceiverWindowsManifestHandoff(t *testing.T) {
 	}
 	receive := func(command string, input []byte) ([]byte, error) {
 		script := filepath.Join(t.TempDir(), "receiver.ps1")
-		mustWriteTestFile(t, script, decodePowerShellCommand(t, command))
+		// Keep production errors private while exposing native failures in this fixture.
+		body := strings.Replace(decodePowerShellCommand(t, command),
+			`[Console]::Error.WriteLine("local Git seed: $phase failed")`,
+			`[Console]::Error.WriteLine($_.Exception.GetType().FullName + ": " + $_.Exception.Message)
+  [Console]::Error.WriteLine("local Git seed: $phase failed")`, 1)
+		mustWriteTestFile(t, script, body)
 		cmd := exec.Command(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script)
 		cmd.Stdin = bytes.NewReader(input)
 		return cmd.CombinedOutput()
