@@ -26,6 +26,12 @@ the existing lease heartbeat endpoint. The configured owner credentials and
 provider binding are unchanged, so unknown, unowned, expired, released, or
 otherwise terminal leases retain the coordinator's normal failure response.
 
+For AWS leases whose recorded SSH source policy is complete and unchanged,
+the command acknowledges renewal after persisting the deadline and scheduling
+ingress maintenance. It does not wait for AWS security-group reconciliation. Changed or
+incomplete source policy retains the normal access-refresh attempt before the
+response; pinned source ranges remain authoritative.
+
 `broker.mode: registered` has both coordinator and direct-provider expiry
 state. The command therefore requires the exact direct claim, sends one
 coordinator heartbeat, and calls the provider's existing `Touch` capability

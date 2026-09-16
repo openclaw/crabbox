@@ -505,15 +505,18 @@ retries preserve that wakeup, including after coordinator reconstruction.
 An already-due stored alarm time is rearmed at the earlier of that time and the
 requested deadline: a consumed runtime job can leave its timestamp behind.
 An earlier future alarm is preserved without another scheduling write.
-AWS heartbeat access refresh also arms its recorded ingress reconciliation at the
-existing one-second minimum delay instead of rescanning unrelated fleet metadata
-while holding the ingress lock. Earlier alarms remain scheduled.
+AWS heartbeats with complete, unchanged SSH source policy record ingress
+reconciliation and arm its existing one-second wakeup before acknowledging the
+renewal. They do not wait behind other AWS ingress work. The AWS provider compares
+the current policy using the same pinned-range and address-family rules as an
+access refresh. Changed sources or incomplete source metadata still finish the
+normal refresh attempt before the response. Earlier alarms remain scheduled.
 Alarm storage errors still fail the request and do not certify cleanup success.
 The existing full scheduler shares the lifecycle mutex with this arming, so a
 scan cannot race an acknowledgement's earlier wakeup. Full maintenance scans,
-slug resolution, provider access refresh, and provider ingress locking retain
-their existing behavior; their work and other shared-queue stalls are not
-bounded by this acknowledgement path.
+slug resolution, access refreshes that change sources, and provider ingress locking
+retain their existing behavior. An acknowledgement confirms the renewal and its
+scheduled maintenance, not successful installation of security-group rules.
 
 **Expiry and cleanup.** A DO alarm and the cron both run maintenance:
 `expireLeases` deletes cloud servers for active leases past `expiresAt`
