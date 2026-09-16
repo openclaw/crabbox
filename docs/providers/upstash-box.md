@@ -161,6 +161,21 @@ Stream errors retain their cancellation or timeout cause for run status.
 Crabbox checks cancellation immediately before submitting the command, including
 after a successful environment upload; existing profile cleanup still runs.
 
+## Status and inventory metadata
+
+`status` and `list` report native creation/update times, runtime, and size;
+missing native values remain unknown instead of using the reader's configuration.
+`keep_alive` is the native Box option, separate from recorded Crabbox `keep`.
+A matching local claim can contribute recorded TTL, idle policy, and
+`last_touched_at` (local Crabbox usage, not native resource modification).
+Reads do not update that history or publish a synthetic `expires_at`: local
+policy is not a promise of provider-enforced deletion. Without matching local
+history, these local fields are omitted.
+
+New acquisitions record requested policy once, and reuse preserves it even when
+the next command has different defaults. Older versions could overwrite stored
+policy during reuse; the original TTL cannot be reconstructed for those claims.
+
 ## Capabilities
 
 - SSH: no.
