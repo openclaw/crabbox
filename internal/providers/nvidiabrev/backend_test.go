@@ -1950,7 +1950,8 @@ func TestNvidiaBrevTouchRefreshesClaimBeforeCleanup(t *testing.T) {
 	}}
 	var stderr strings.Builder
 	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
-	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server, SSH: core.SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}}, State: "ready", IdleTimeout: 3 * time.Hour}); err != nil {
+	override := 3 * time.Hour
+	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server, SSH: core.SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}}, State: "ready", IdleTimeout: override, IdleTimeoutOverride: &override}); err != nil {
 		t.Fatal(err)
 	}
 	claim, ok, err := resolveLeaseClaimForProvider(leaseID)
@@ -1959,6 +1960,14 @@ func TestNvidiaBrevTouchRefreshesClaimBeforeCleanup(t *testing.T) {
 	}
 	if claim.IdleTimeoutSeconds != int((3 * time.Hour).Seconds()) {
 		t.Fatalf("idle timeout seconds=%d", claim.IdleTimeoutSeconds)
+	}
+	touched, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}, State: "ready", IdleTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, _, err = resolveLeaseClaimForProvider(leaseID)
+	if err != nil || claim.IdleTimeoutSeconds != 10800 || claim.Labels["idle_timeout_secs"] != "10800" || touched.Labels["idle_timeout_secs"] != "10800" {
+		t.Fatalf("ordinary touch changed idle: claim=%#v server=%#v err=%v", claim, touched, err)
 	}
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)

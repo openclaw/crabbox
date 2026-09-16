@@ -48,39 +48,27 @@ func (a App) claimRunLeaseTargetForRepoAndRegister(
 	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, resolved, idleTimeoutOverride)
 }
 
-// Resolved direct leases own their recorded idle policy. Managed leases instead
+// Initialized direct leases own their recorded idle policy. Managed leases instead
 // use the coordinator's projection; a registration URL alone does not make a
 // registered direct lease coordinator-managed.
-func applyResolvedLeaseIdlePolicy(cfg *Config, server *Server, recorded LeaseClaim, exists, resolved bool, override *time.Duration) error {
-	if !resolved || !exists {
+func applyClaimIdlePolicy(cfg *Config, server *Server, recorded LeaseClaim, exists bool, override *time.Duration) error {
+	if !exists {
 		return nil
 	}
-	provider, err := ProviderFor(cfg.Provider)
-	if err != nil {
+	policy := claimIdlePolicyForConfig(*cfg)
+	if policy == claimIdleCoordinatorProjection {
+		return nil
+	}
+	proposed := cfg.IdleTimeout
+	if override != nil {
+		policy, proposed = claimIdleReplaceExplicitly, *override
+	}
+	idle, normalize, err := selectClaimIdleTimeout(recorded.IdleTimeoutSeconds, proposed, policy)
+	if err != nil || !normalize {
 		return err
 	}
-	if ShouldUseCoordinator(*cfg, provider.Spec()) {
-		return nil
-	}
-	seconds := int64(recorded.IdleTimeoutSeconds)
-	if override != nil {
-		if *override <= 0 {
-			return Exit(2, "idle timeout override must be positive")
-		}
-		seconds = int64(override.Round(time.Second) / time.Second)
-		if seconds < 1 {
-			seconds = 1
-		}
-	} else if seconds <= 0 {
-		return nil
-	}
-	cfg.IdleTimeout = time.Duration(seconds) * time.Second
-	server.Labels = cloneStringMap(server.Labels)
-	if server.Labels == nil {
-		server.Labels = make(map[string]string)
-	}
-	server.Labels["idle_timeout"] = durationSecondsLabel(cfg.IdleTimeout)
-	server.Labels["idle_timeout_secs"] = server.Labels["idle_timeout"]
+	cfg.IdleTimeout = idle
+	server.Labels = claimLabelsWithIdleTimeout(server.Labels, idle)
 	return nil
 }
 
@@ -121,13 +109,19 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 	if err != nil {
 		return err
 	}
-	if err := applyResolvedLeaseIdlePolicy(cfg, server, expected, expectedExists, resolved, idleTimeoutOverride); err != nil {
+	if err := applyClaimIdlePolicy(cfg, server, expected, expectedExists, idleTimeoutOverride); err != nil {
 		return err
 	}
-	claimed, err := ClaimLeaseTargetForRepoConfigIfUnchanged(
+	idlePolicy := claimIdlePolicyForConfig(*cfg)
+	if idlePolicy == claimIdlePreserveRecorded && resolved && expectedExists && idleTimeoutOverride != nil {
+		idlePolicy = claimIdleReplaceExplicitly
+	}
+	provider, _ := claimProviderDetailsForConfig(*cfg)
+	claimed, err := claimLeaseTargetForRepoConfigScopeIfUnchangedMode(
 		leaseID,
 		slug,
 		*cfg,
+		providerClaimScope(provider, *cfg),
 		*server,
 		target,
 		repoRoot,
@@ -135,6 +129,7 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 		reclaim,
 		expected,
 		expectedExists,
+		leaseClaimTargetOptions{idle: idlePolicy},
 	)
 	if err != nil {
 		return err

@@ -455,14 +455,8 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		return core.Server{}, err
 	}
 	cfg := b.cfgForRun()
-	labels := live.Labels
-	if req.IdleTimeout > 0 {
-		cfg.IdleTimeout = req.IdleTimeout
-		labels = shared.CloneLabels(live.Labels)
-		delete(labels, "idle_timeout")
-		delete(labels, "idle_timeout_secs")
-	}
-	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.clockNow())
+	now := b.clockNow()
+	labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(live.Labels, cfg, req.State, now, req.IdleTimeoutOverride)
 	updateResp, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{
 		Zone:     scw.Zone(client.Zone()),
 		ServerID: item.Server.ID,
@@ -480,7 +474,7 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		return core.Server{}, claimErr
 	}
 	if ok {
-		if _, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(req.Lease.LeaseID, labels["slug"], cfg, live, req.Lease.SSH, claim.RepoRoot, req.IdleTimeout, false, claim, true); err != nil {
+		if _, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, req.Lease.LeaseID, claim, labels, now, req.IdleTimeoutOverride); err != nil {
 			return core.Server{}, err
 		}
 	}

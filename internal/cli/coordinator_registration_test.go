@@ -1070,6 +1070,18 @@ func TestResolvedLeaseRegistrationPreservesRecordedIdlePolicy(t *testing.T) {
 	server.Labels["idle_timeout"] = "1800"
 	server.Labels["idle_timeout_secs"] = "1800"
 	cfg.IdleTimeout = 30 * time.Minute
+	prepared, err := ClaimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, "recorded", cfg, before.ProviderScope, server, target, repo, cfg.IdleTimeout, false, before, true)
+	if err != nil || prepared.IdleTimeoutSeconds != 300 || prepared.Labels["idle_timeout_secs"] != "300" {
+		t.Fatalf("provider preparation replaced policy before registration: claim=%#v err=%v", prepared, err)
+	}
+	if err := ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "recorded", cfg.Provider, prepared.ProviderScope, "", repo, cfg.IdleTimeout, false, server, target); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err = ReadLeaseClaim(leaseID)
+	if err != nil || prepared.IdleTimeoutSeconds != 300 || prepared.Labels["idle_timeout_secs"] != "300" {
+		t.Fatalf("raw provider publication replaced recorded policy: claim=%#v err=%v", prepared, err)
+	}
+	SetServerLeaseClaimSnapshot(&server, prepared, true)
 	if err := (App{}).claimResolvedLeaseTargetForRepoAndRegister(t.Context(), leaseID, "recorded", cfg, &server, target, repo, false); err != nil {
 		t.Fatal(err)
 	}
@@ -1116,20 +1128,19 @@ func TestResolvedIdlePolicySourceSelection(t *testing.T) {
 		managed    bool
 		registered bool
 		exists     bool
-		resolved   bool
 		recorded   int
 		override   time.Duration
 		want       time.Duration
 		labels     string
 	}{
-		{name: "stored beats projection", exists: true, resolved: true, recorded: 300, want: 5 * time.Minute, labels: "300"},
-		{name: "registered remains direct", registered: true, exists: true, resolved: true, recorded: 300, want: 5 * time.Minute, labels: "300"},
-		{name: "coordinator remains authoritative", managed: true, exists: true, resolved: true, recorded: 300, want: 30 * time.Minute, labels: "1800"},
-		{name: "fresh initialization unchanged", exists: true, recorded: 300, want: 30 * time.Minute, labels: "1800"},
-		{name: "adoption unchanged", resolved: true, want: 30 * time.Minute, labels: "1800"},
-		{name: "missing policy unchanged", exists: true, resolved: true, want: 30 * time.Minute, labels: "1800"},
-		{name: "explicit fraction rounds once", exists: true, resolved: true, recorded: 300, override: 1500 * time.Millisecond, want: 2 * time.Second, labels: "2"},
-		{name: "explicit positive subsecond", exists: true, resolved: true, recorded: 300, override: 100 * time.Millisecond, want: time.Second, labels: "1"},
+		{name: "stored beats projection", exists: true, recorded: 300, want: 5 * time.Minute, labels: "300"},
+		{name: "registered remains direct", registered: true, exists: true, recorded: 300, want: 5 * time.Minute, labels: "300"},
+		{name: "coordinator remains authoritative", managed: true, exists: true, recorded: 300, want: 30 * time.Minute, labels: "1800"},
+		{name: "fresh initialization unchanged", want: 30 * time.Minute, labels: "1800"},
+		{name: "prepublished acquisition seed", exists: true, recorded: 300, want: 5 * time.Minute, labels: "300"},
+		{name: "missing policy unchanged", exists: true, want: 30 * time.Minute, labels: "1800"},
+		{name: "explicit fraction rounds once", exists: true, recorded: 300, override: 1500 * time.Millisecond, want: 2 * time.Second, labels: "2"},
+		{name: "explicit positive subsecond", exists: true, recorded: 300, override: 100 * time.Millisecond, want: time.Second, labels: "1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := baseConfig()
@@ -1147,7 +1158,7 @@ func TestResolvedIdlePolicySourceSelection(t *testing.T) {
 			if tc.override != 0 {
 				override = &tc.override
 			}
-			if err := applyResolvedLeaseIdlePolicy(&cfg, &server, LeaseClaim{IdleTimeoutSeconds: tc.recorded}, tc.exists, tc.resolved, override); err != nil {
+			if err := applyClaimIdlePolicy(&cfg, &server, LeaseClaim{IdleTimeoutSeconds: tc.recorded}, tc.exists, override); err != nil {
 				t.Fatal(err)
 			}
 			if cfg.IdleTimeout != tc.want || server.Labels["idle_timeout"] != tc.labels || server.Labels["idle_timeout_secs"] != tc.labels || server.Labels["unrelated"] != "preserved" {
@@ -1157,6 +1168,29 @@ func TestResolvedIdlePolicySourceSelection(t *testing.T) {
 				t.Fatal("policy selection mutated the provider's input map")
 			}
 		})
+	}
+}
+
+func TestClaimPublicationKeepsCoordinatorIdleAuthority(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	cfg := baseConfig()
+	cfg.Provider, cfg.Coordinator, cfg.IdleTimeout = "aws", "https://coordinator.example.test", 5*time.Minute
+	id, slug := "cbx_123456789abc", "managed"
+	repo := t.TempDir()
+	server := Server{Provider: cfg.Provider, CloudID: "i-managed", Labels: DirectLeaseLabels(cfg, id, slug, cfg.Provider, "", true, time.Now())}
+	target := SSHTarget{Host: "192.0.2.30", Port: "22"}
+	if err := ClaimLeaseTargetForRepoConfig(id, slug, cfg, server, target, repo, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	before, err := ReadLeaseClaim(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.IdleTimeout = 30 * time.Minute
+	server.Labels["idle_timeout"], server.Labels["idle_timeout_secs"] = "1800", "1800"
+	after, err := ClaimLeaseTargetForRepoConfigIfUnchanged(id, slug, cfg, server, target, repo, cfg.IdleTimeout, false, before, true)
+	if err != nil || after.IdleTimeoutSeconds != 1800 || after.Labels["idle_timeout_secs"] != "1800" {
+		t.Fatalf("cached policy overrode coordinator projection: claim=%#v err=%v", after, err)
 	}
 }
 

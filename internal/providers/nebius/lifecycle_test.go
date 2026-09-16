@@ -404,7 +404,8 @@ func TestTouchUpdatesLabelsWithoutLosingOwnership(t *testing.T) {
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "demo", b.Cfg, claimedServer, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	server, err := b.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: claimedServer}, State: "ready", IdleTimeout: 30 * time.Minute})
+	override := 30 * time.Minute
+	server, err := b.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: claimedServer}, State: "ready", IdleTimeout: override, IdleTimeoutOverride: &override})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,6 +427,15 @@ func TestTouchUpdatesLabelsWithoutLosingOwnership(t *testing.T) {
 	}
 	if claim.IdleTimeoutSeconds != 1800 {
 		t.Fatalf("claim idle timeout=%d", claim.IdleTimeoutSeconds)
+	}
+	api.items[0].Labels = server.Labels
+	server, err = b.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}, State: "ready", IdleTimeout: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, _, err = core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || claim.IdleTimeoutSeconds != 1800 || claim.Labels["idle_timeout_secs"] != "1800" || server.Labels["idle_timeout_secs"] != "1800" || api.updatedLabels["idle_timeout_secs"] != "1800" {
+		t.Fatalf("ordinary touch changed idle: claim=%#v server=%#v err=%v", claim, server, err)
 	}
 }
 

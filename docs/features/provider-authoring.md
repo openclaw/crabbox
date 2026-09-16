@@ -373,6 +373,14 @@ resource validation, and every deletion decision remain adapter-owned.
 `List` returns `[]LeaseView` (a type alias for `Server`). Do not print from
 `List` — core renders the table.
 
+Claim-publication helpers initialize a missing idle policy, but preserve an
+already-recorded positive idle duration during ordinary direct-lease preparation,
+repository reclaim, and endpoint publication. Their duration argument is not
+implicit replacement intent. Explicit idle changes belong to the run/Touch
+policy path; managed coordinator projections remain authoritative. This also
+keeps acquisition finalization from reinitializing a policy already published
+by the provider's first acquisition step.
+
 `Touch` updates idle/state metadata on the provider when possible. Use the
 `internal/cli/provider_labels.go` helpers for safe label encoding. The optional
 `TouchRequest.IdleTimeoutOverride` carries replacement intent: `nil` preserves

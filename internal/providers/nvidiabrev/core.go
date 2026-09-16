@@ -27,10 +27,6 @@ func directLeaseLabels(cfg core.Config, leaseID, slug, provider, market string, 
 	return core.DirectLeaseLabels(cfg, leaseID, slug, provider, market, keep, time.Now().UTC())
 }
 
-func touchDirectLeaseLabels(labels map[string]string, cfg core.Config, state string) map[string]string {
-	return core.TouchDirectLeaseLabels(labels, cfg, state, time.Now().UTC())
-}
-
 func claimLeaseTargetForRepoConfig(leaseID, slug string, cfg core.Config, server core.Server, target core.SSHTarget, repoRoot string, reclaim bool) error {
 	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, target, repoRoot, cfg.IdleTimeout, reclaim)
 }

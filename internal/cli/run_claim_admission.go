@@ -54,11 +54,16 @@ func admitRunLeaseUnderClaim(ctx context.Context, backend SSHLoginBackend, req R
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if err := applyResolvedLeaseIdlePolicy(cfg, &lease.Server, *current, true, true, idleTimeoutOverride); err != nil {
+			if err := applyClaimIdlePolicy(cfg, &lease.Server, *current, true, idleTimeoutOverride); err != nil {
 				return err
 			}
 			provider, details := claimProviderDetailsForConfig(*cfg)
+			idlePolicy := claimIdlePolicyForConfig(*cfg)
+			if idlePolicy == claimIdlePreserveRecorded && idleTimeoutOverride != nil {
+				idlePolicy = claimIdleReplaceExplicitly
+			}
 			return transformLeaseClaimForRepo(current, req.ID, ServerSlug(lease.Server), provider, providerClaimScope(provider, *cfg), cfg.Pond, details, req.Repo.Root, cfg.IdleTimeout, false, claimMetadata{
+				idlePolicy:      idlePolicy,
 				setCacheVolumes: true,
 				cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
 				setEndpoint:     true,

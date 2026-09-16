@@ -225,6 +225,7 @@ func claimLeaseForRepo(leaseID, slug, repoRoot string, idleTimeout time.Duration
 func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+		idlePolicy:      claimIdlePolicyForConfig(cfg),
 		setCacheVolumes: true,
 		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
 	})
@@ -233,6 +234,7 @@ func claimLeaseForRepoConfig(leaseID, slug string, cfg Config, repoRoot string, 
 func ClaimLeaseTargetForRepoConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+		idlePolicy:      claimIdlePolicyForConfig(cfg),
 		setCacheVolumes: true,
 		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
 		setEndpoint:     true,
@@ -337,6 +339,51 @@ type staticClaimDetails struct {
 	WindowsMode string
 }
 
+type claimIdlePolicy uint8
+
+const (
+	claimIdlePreserveRecorded claimIdlePolicy = iota
+	claimIdleReplaceExplicitly
+	claimIdleCoordinatorProjection
+)
+
+func claimIdlePolicyForConfig(cfg Config) claimIdlePolicy {
+	provider, err := ProviderFor(cfg.Provider)
+	if err == nil && ShouldUseCoordinator(cfg, provider.Spec()) {
+		return claimIdleCoordinatorProjection
+	}
+	return claimIdlePreserveRecorded
+}
+
+func selectClaimIdleTimeout(recorded int, proposed time.Duration, policy claimIdlePolicy) (time.Duration, bool, error) {
+	switch policy {
+	case claimIdleReplaceExplicitly:
+		if proposed <= 0 {
+			return 0, false, Exit(2, "idle timeout override must be positive")
+		}
+		seconds := proposed.Round(time.Second) / time.Second
+		if seconds < 1 {
+			seconds = 1
+		}
+		return seconds * time.Second, true, nil
+	case claimIdlePreserveRecorded:
+		if recorded > 0 {
+			return time.Duration(recorded) * time.Second, true, nil
+		}
+	}
+	return proposed, false, nil
+}
+
+func claimLabelsWithIdleTimeout(labels map[string]string, idle time.Duration) map[string]string {
+	labels = cloneStringMap(labels)
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	labels["idle_timeout"] = durationSecondsLabel(idle)
+	labels["idle_timeout_secs"] = labels["idle_timeout"]
+	return labels
+}
+
 type claimMetadata struct {
 	context             context.Context
 	setCacheVolumes     bool
@@ -355,6 +402,7 @@ type claimMetadata struct {
 	action              func() error
 	setLabels           bool
 	labels              map[string]string
+	idlePolicy          claimIdlePolicy
 }
 
 func claimLeaseForRepoProviderScopePondDetails(leaseID, slug, provider, providerScope, pond string, staticDetails staticClaimDetails, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
@@ -422,6 +470,14 @@ func transformLeaseClaimForRepo(existing *leaseClaim, leaseID, slug, provider, p
 	}
 	existing.RepoRoot = repoRoot
 	existing.LastUsedAt = now
+	recordedIdle := 0
+	if hadExisting {
+		recordedIdle = original.IdleTimeoutSeconds
+	}
+	idleTimeout, normalizeIdle, err := selectClaimIdleTimeout(recordedIdle, idleTimeout, metadata.idlePolicy)
+	if err != nil {
+		return err
+	}
 	if idleTimeout > 0 {
 		existing.IdleTimeoutSeconds = int(idleTimeout.Seconds())
 	}
@@ -439,6 +495,9 @@ func transformLeaseClaimForRepo(existing *leaseClaim, leaseID, slug, provider, p
 			}
 			existing.Labels[metadata.reservationLabel] = LeaseLabelTime(time.Now().UTC().Add(metadata.reservationDuration))
 		}
+	}
+	if normalizeIdle {
+		existing.Labels = claimLabelsWithIdleTimeout(existing.Labels, idleTimeout)
 	}
 	return nil
 }
@@ -478,6 +537,7 @@ func claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, 
 func ClaimLeaseTargetForConfig(leaseID, slug string, cfg Config, server Server, target SSHTarget, idleTimeout time.Duration) error {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	return claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, "", idleTimeout, false, claimMetadata{
+		idlePolicy:         claimIdlePolicyForConfig(cfg),
 		setCacheVolumes:    true,
 		cacheVolumes:       CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
 		setEndpoint:        true,
@@ -498,6 +558,7 @@ func ClaimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug string, cfg Config,
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	var updated leaseClaim
 	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, cfg.Pond, staticDetails, "", idleTimeout, false, claimMetadata{
+		idlePolicy:         claimIdlePolicyForConfig(cfg),
 		setCacheVolumes:    true,
 		cacheVolumes:       CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
 		setEndpoint:        true,
@@ -541,8 +602,12 @@ func ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slu
 
 func claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug string, cfg Config, providerScope string, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool, options leaseClaimTargetOptions) (leaseClaim, error) {
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
+	if options.idle == claimIdlePreserveRecorded {
+		options.idle = claimIdlePolicyForConfig(cfg)
+	}
 	var updated leaseClaim
 	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+		idlePolicy:      options.idle,
 		context:         options.context,
 		setCacheVolumes: true,
 		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
@@ -562,6 +627,7 @@ func claimLeaseForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, repoRo
 	provider, staticDetails := claimProviderDetailsForConfig(cfg)
 	var updated leaseClaim
 	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerClaimScope(provider, cfg), cfg.Pond, staticDetails, repoRoot, idleTimeout, reclaim, claimMetadata{
+		idlePolicy:      claimIdlePolicyForConfig(cfg),
 		setCacheVolumes: true,
 		cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
 		guard:           unchangedLeaseClaimGuard(leaseID, expected, expectedExists),
