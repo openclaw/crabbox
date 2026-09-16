@@ -20,7 +20,11 @@ func lockSlugReservation(path string) (func(), bool, error) {
 	}
 	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if errors.Is(err, os.ErrExist) {
-		reclaimed, err := reclaimStaleWindowsSlugLock(lockPath)
+		// Bind the reclaim result to the outer err. A shadowed err here would
+		// strand the first ErrExist and discard the reopen outcome below, so a
+		// reclaimed lock would report "not acquired" while leaking its handle.
+		var reclaimed bool
+		reclaimed, err = reclaimStaleWindowsSlugLock(lockPath)
 		if err != nil {
 			return nil, false, err
 		}
