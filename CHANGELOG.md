@@ -13,7 +13,7 @@
 - Make first runs easier with a task-first README, tested Docker and Node examples, warm-reuse guidance, and responsive desktop/mobile banners. [PR 2275](https://github.com/openclaw/crabbox/pull/2275). Thanks @zozo123.
 - Keep CodeSandbox runtime fallback defaults aligned with declared configuration while preserving the fixed SDK workspace boundary and operation-specific budgets. [PR 1991](https://github.com/openclaw/crabbox/pull/1991). Thanks @steipete.
 
-- Cancel superseded pull-request CI runs while preserving independent main-branch and manual runs.
+- Cancel superseded pull-request CI runs while preserving independent main-branch and manual runs. [PR 2286](https://github.com/openclaw/crabbox/pull/2286).
 
 ## 0.60.0 - 2026-09-14
 
