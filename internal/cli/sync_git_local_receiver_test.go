@@ -183,7 +183,7 @@ func TestGitLocalReceiverRawManifestHandoffPrunesPriorFiles(t *testing.T) {
 	newManifest := []byte("accepted.txt\x00")
 	requireLocalReceiver(t, remoteWriteSyncManifestsNew(workdir, localToken),
 		[]byte(syncManifestInputForTarget(SSHTarget{}, newManifest, nil)))
-	requireLocalReceiver(t, remotePruneSyncManifest(workdir, localToken), nil)
+	requireLocalReceiver(t, remotePruneSyncManifestForTargetMode(SSHTarget{}, workdir, localToken, true), nil)
 	mustWriteTestFile(t, filepath.Join(workdir, "accepted.txt"), "new content\n")
 	requireLocalReceiver(t, remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: localToken}), nil)
 	requireLocalReceiver(t, remoteGitLocalSeedFinalize(workdir, plan), nil)
@@ -199,6 +199,58 @@ func TestGitLocalReceiverRawManifestHandoffPrunesPriorFiles(t *testing.T) {
 	}
 	if gitOutput(workdir, "rev-parse", "HEAD") != plan.Head || gitOutput(workdir, "write-tree") != plan.Tree {
 		t.Fatal("local metadata identity changed")
+	}
+}
+
+func TestGitLocalReceiverPruneRejectsSymlinkAncestors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX and WSL shell pruning behavior")
+	}
+	plan, data, _ := localReceiverFixture(t)
+	for _, mode := range []string{"posix", "wsl2"} {
+		t.Run(mode, func(t *testing.T) {
+			target := SSHTarget{}
+			if mode == "wsl2" {
+				target = SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+			}
+			for _, attachment := range []string{"raw", "owned-reuse"} {
+				t.Run(attachment, func(t *testing.T) {
+					workdir := t.TempDir()
+					const oldPath = "generated/old.txt"
+					const rawToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+					const token = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+					mustWriteTestFile(t, filepath.Join(workdir, oldPath), "prior synced file\n")
+					requireLocalReceiver(t, remoteWriteSyncManifestsNewMode(workdir, rawToken, true),
+						[]byte(syncManifestInputForTarget(SSHTarget{}, []byte(oldPath+"\x00"), nil)))
+					requireLocalReceiver(t, remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: rawToken, PlainManifest: true}), nil)
+					if attachment == "owned-reuse" {
+						requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+					}
+					outside := t.TempDir()
+					protected := filepath.Join(outside, "old.txt")
+					mustWriteTestFile(t, protected, "outside workspace\n")
+					if err := os.RemoveAll(filepath.Join(workdir, "generated")); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(outside, filepath.Join(workdir, "generated")); err != nil {
+						t.Fatal(err)
+					}
+					requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+					requireLocalReceiver(t, remoteWriteSyncManifestsNewForTarget(target, workdir, token),
+						[]byte(syncManifestInputForTarget(target, []byte("accepted.txt\x00"), nil)))
+					out, err := runLocalReceiver(t, remotePruneSyncManifestForTargetMode(target, workdir, token, true), nil)
+					if got, readErr := os.ReadFile(protected); readErr != nil || string(got) != "outside workspace\n" {
+						t.Fatalf("prune escaped workspace: %q %v", got, readErr)
+					}
+					if err == nil || !bytes.Contains(out, []byte("refuses symlink ancestor")) {
+						t.Fatalf("unsafe prune was not rejected: %q %v", out, err)
+					}
+					if gitOutput(workdir, "rev-parse", "HEAD") != plan.Head || gitOutput(workdir, "write-tree") != plan.Tree {
+						t.Fatal("rejected prune changed Git identity")
+					}
+				})
+			}
+		})
 	}
 }
 
