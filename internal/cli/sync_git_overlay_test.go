@@ -2353,6 +2353,18 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 	for _, reuse := range []bool{false, true} {
 		t.Run(fmt.Sprintf("reuse=%t", reuse), func(t *testing.T) {
 			fixture := newGitOverlayFixture(t)
+			// A root-only rule must not retain same-named, unselected caches.
+			mustWriteTestFile(t, filepath.Join(fixture.root, ".gitignore"), "/node_modules/\n/selected/node_modules/\n.yarn/cache/\n")
+			runGit(t, fixture.root, "add", ".gitignore")
+			runGit(t, fixture.root, "commit", "-qm", "root cache selection")
+			runGit(t, fixture.root, "push", "-q", "origin", "main")
+			runGit(t, fixture.root, "fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*")
+			fixture.repo.Head = gitOutput(fixture.root, "rev-parse", "HEAD")
+			var blocked bool
+			fixture.plan, blocked = syncGitCoherencePlan(fixture.cfg, fixture.repo)
+			if blocked || !fixture.plan.enabled() {
+				t.Fatal("updated fixture has no coherence plan")
+			}
 			mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "staged payload\n")
 			runGit(t, fixture.root, "add", "staged.txt")
 			mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "unstaged payload\n")
@@ -2381,6 +2393,8 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 					t.Fatalf("clone existing workspace: %v\n%s", err, out)
 				}
 				mustWriteTestFile(t, filepath.Join(workdir, "node_modules", "cached.txt"), "trusted cache\n")
+				mustWriteTestFile(t, filepath.Join(workdir, "selected", "node_modules", "cached.txt"), "trusted nested cache\n")
+				mustWriteTestFile(t, filepath.Join(workdir, "unselected", "node_modules", "cached.txt"), "stale nested cache\n")
 				mustWriteTestFile(t, filepath.Join(workdir, ".pnpm-store", "stale.txt"), "untrusted cache\n")
 				mustWriteTestFile(t, filepath.Join(workdir, ".git", "info", "exclude"), ".pnpm-store/\n")
 				mustWriteTestFile(t, filepath.Join(workdir, "previous.txt"), "previous managed file\n")
@@ -2406,6 +2420,12 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 			} else {
 				if content, err := os.ReadFile(filepath.Join(workdir, "node_modules", "cached.txt")); err != nil || string(content) != "trusted cache\n" {
 					t.Fatalf("trusted dependency cache=%q err=%v", content, err)
+				}
+				if _, err := os.Stat(filepath.Join(workdir, "unselected", "node_modules", "cached.txt")); !os.IsNotExist(err) {
+					t.Fatalf("root cache exclusion retained an unselected nested cache: %v", err)
+				}
+				if content, err := os.ReadFile(filepath.Join(workdir, "selected", "node_modules", "cached.txt")); err != nil || string(content) != "trusted nested cache\n" {
+					t.Fatalf("selected nested cache lost during preparation: %q err=%v", content, err)
 				}
 				if _, err := os.Stat(filepath.Join(workdir, ".pnpm-store")); !os.IsNotExist(err) {
 					t.Fatalf("mutable .git/info/exclude authorized a stale cache: %v", err)
@@ -2436,6 +2456,17 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 			finalize := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Coherence: fixture.plan, Fingerprint: fingerprint, GitOverlay: true})
 			if out, err := runOverlayCommand(t, finalize, nil); err != nil {
 				t.Fatalf("finalize overlay: %v\n%s", err, out)
+			}
+			if reuse {
+				if content, err := os.ReadFile(filepath.Join(workdir, "node_modules", "cached.txt")); err != nil || string(content) != "trusted cache\n" {
+					t.Fatalf("selected cache lost after transfer/finalize: %q err=%v", content, err)
+				}
+				if _, err := os.Stat(filepath.Join(workdir, "unselected", "node_modules", "cached.txt")); !os.IsNotExist(err) {
+					t.Fatalf("unselected cache returned after finalize: %v", err)
+				}
+				if content, err := os.ReadFile(filepath.Join(workdir, "selected", "node_modules", "cached.txt")); err != nil || string(content) != "trusted nested cache\n" {
+					t.Fatalf("selected nested cache lost after finalize: %q err=%v", content, err)
+				}
 			}
 			for _, name := range []string{"staged.txt", "unstaged.txt", "untracked.txt", "renamed-new.txt"} {
 				local, _ := os.ReadFile(filepath.Join(fixture.root, name))

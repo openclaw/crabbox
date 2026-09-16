@@ -1225,7 +1225,8 @@ while IFS= read -r -d '' cache_path; do
   cache_pattern="${cache_pattern//\]/\\]}"
   cache_pattern="${cache_pattern//!/\\!}"
   cache_pattern="${cache_pattern//#/\\#}"
-  clean_args+=(-e "$cache_pattern/")
+  # Anchor preservation to this verified directory, not same-named caches elsewhere.
+  clean_args+=(-e "/$cache_pattern/")
 done <"$git_runtime_root/cache-paths"
 git clean "${clean_args[@]}" || overlay_fallback clean_failed
 [ "$(git rev-parse --verify HEAD^{commit})" = "$expected_target" ] || overlay_fallback head_mismatch
