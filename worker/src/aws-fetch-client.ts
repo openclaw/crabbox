@@ -70,6 +70,7 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
     private readonly credentials: AWSCredentialProvider,
     private readonly service: string,
     private readonly region: string,
+    private readonly signal?: AbortSignal,
   ) {}
 
   async fetch(
@@ -77,6 +78,7 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
     init?: RequestInit,
     stopRetrying?: StopAWSResponseRetry,
   ): Promise<Response> {
+    this.signal?.throwIfAborted();
     const observe = currentAWSTransportObserver();
     const observation: AWSTransportObservation = {
       requests: 1,
@@ -92,7 +94,9 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
     const startedAt = Date.now();
     let requestStartedAt: number | undefined;
     try {
-      const credentials = resolvedAWSCredentials(await this.credentials());
+      const providedCredentials = await this.credentials();
+      this.signal?.throwIfAborted();
+      const credentials = resolvedAWSCredentials(providedCredentials);
       if (credentials.expirationMs !== undefined && credentials.expirationMs <= Date.now()) {
         throw new Error("AWS credential snapshot expired");
       }
@@ -101,6 +105,7 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
         secretAccessKey: credentials.secretAccessKey,
         service: this.service,
         region: this.region,
+        ...(this.signal ? { retries: 0 } : {}),
       };
       const session = credentials.sessionToken?.trim();
       if (session) options.sessionToken = session;
@@ -108,6 +113,12 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
       const client = observe ? new ObservedAwsClient(options, observation) : new AwsClient(options);
       requestStartedAt = Date.now();
       observation.credentialsMs = Math.max(0, requestStartedAt - startedAt);
+      if (this.signal) {
+        const request = await client.sign(input, { ...init, signal: this.signal });
+        this.signal.throwIfAborted();
+        // Keep the quote's owning signal through signing and response-body consumption.
+        return await fetch(request, { signal: this.signal });
+      }
       if (!stopRetrying) return await client.fetch(input, init);
       // aws4fetch has no response-policy hook. Preserve its budget, jitter, signing and
       // thrown errors while allowing the operation owner to handle a definitive rejection.
@@ -142,7 +153,12 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
 // Regional operations must retain the exact identity verified before their first mutation.
 // Reuse the transport owner so fixed credentials preserve diagnostics and response retry policy.
 export class FixedAWSFetchClient extends RefreshingAWSFetchClient {
-  constructor(credentials: ResolvedAWSCredentials, service: string, region: string) {
+  constructor(
+    credentials: ResolvedAWSCredentials,
+    service: string,
+    region: string,
+    signal?: AbortSignal,
+  ) {
     super(
       async () => ({
         accessKeyId: credentials.accessKeyId,
@@ -154,6 +170,7 @@ export class FixedAWSFetchClient extends RefreshingAWSFetchClient {
       }),
       service,
       region,
+      signal,
     );
   }
 }

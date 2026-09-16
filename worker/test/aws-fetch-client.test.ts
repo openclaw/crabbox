@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
+import { AwsClient } from "aws4fetch";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { EC2SpotClient } from "../src/aws";
@@ -726,3 +727,69 @@ it("attributes interleaved shared-client requests to their deepest operation and
   expect(await (await client.fetch(url)).text()).toBe("fast");
   expect(log.mock.calls).toHaveLength(count);
 });
+
+it.each([false, true])("passes the quote's owning signal to fetch (fixed=%s)", async (fixed) => {
+  const controller = new AbortController();
+  const response = new Response("unavailable", { status: 503 });
+  const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response);
+  vi.stubGlobal("fetch", fetchImpl);
+  const client = fixed
+    ? new FixedAWSFetchClient(
+        resolvedAWSCredentials(await credentials()),
+        "ec2",
+        "eu-west-1",
+        controller.signal,
+      )
+    : new RefreshingAWSFetchClient(credentials, "ec2", "eu-west-1", controller.signal);
+  await expect(
+    client.fetch("https://ec2.eu-west-1.amazonaws.com/", { method: "POST", body: "quote=fixture" }),
+  ).resolves.toBe(response);
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+  const [input, init] = fetchImpl.mock.calls[0]!;
+  expect(init?.signal).toBe(controller.signal);
+  expect(input).toBeInstanceOf(Request);
+  const request = input as Request;
+  expect(request.method).toBe("POST");
+  expect(await request.text()).toBe("quote=fixture");
+  expect(request.headers.has("authorization")).toBe(true);
+});
+
+it.each([false, true])(
+  "does not dispatch a quote after delayed signing and abort (fixed=%s)",
+  async (fixed) => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const originalSign = AwsClient.prototype.sign;
+    vi.spyOn(AwsClient.prototype, "sign").mockImplementation(async function (
+      this: AwsClient,
+      ...args: Parameters<AwsClient["sign"]>
+    ) {
+      started.resolve();
+      await release.promise;
+      return await originalSign.apply(this, args);
+    });
+    const fetchImpl = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchImpl);
+    const client = fixed
+      ? new FixedAWSFetchClient(
+          resolvedAWSCredentials(await credentials()),
+          "ec2",
+          "eu-west-1",
+          controller.signal,
+        )
+      : new RefreshingAWSFetchClient(credentials, "ec2", "eu-west-1", controller.signal);
+    const failure = new DOMException("quote deadline", "TimeoutError");
+    const pending = client
+      .fetch("https://ec2.eu-west-1.amazonaws.com/", { method: "POST", body: "quote=fixture" })
+      .catch((error) => error);
+    try {
+      await started.promise;
+      controller.abort(failure);
+    } finally {
+      release.resolve();
+    }
+    await expect(pending).resolves.toBe(failure);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  },
+);

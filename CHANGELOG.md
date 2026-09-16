@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Bound optional AWS and Hetzner pricing lookups to five seconds, including stalled credential and identity resolution, so admission can use existing fallback estimates without later quote requests or retries. [PR 1630](https://github.com/openclaw/crabbox/pull/1630). Thanks @steipete.
 - Crownest status waits consistently preserve caller cancellation while sharing request deadlines and polling with other providers. [PR 2276](https://github.com/openclaw/crabbox/pull/2276).
 - Make first runs easier with a task-first README, tested Docker and Node examples, warm-reuse guidance, and responsive desktop/mobile banners. [PR 2275](https://github.com/openclaw/crabbox/pull/2275). Thanks @zozo123.
 
