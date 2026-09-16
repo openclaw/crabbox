@@ -371,6 +371,14 @@ func TestGitLocalReceiverWindowsManifestHandoff(t *testing.T) {
   [Console]::Error.WriteLine("local Git seed: $phase failed")`, 1)
 		mustWriteTestFile(t, script, body)
 		cmd := exec.Command(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script)
+		// The CI host starts Go from PowerShell 7, whose module paths break 5.1
+		// cmdlet discovery through intermediary processes. Let 5.1 build its own paths.
+		for _, entry := range os.Environ() {
+			name, _, _ := strings.Cut(entry, "=")
+			if !strings.EqualFold(name, "PSModulePath") {
+				cmd.Env = append(cmd.Env, entry)
+			}
+		}
 		cmd.Stdin = bytes.NewReader(input)
 		return cmd.CombinedOutput()
 	}
