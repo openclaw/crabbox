@@ -427,7 +427,7 @@ func startupDiagnostics(stateRoot, name string) error {
 		{label: HelperLogFileName, path: HelperLogPath(stateRoot, name)},
 		{label: ConsoleLogFileName, path: ConsoleLogPath(stateRoot, name)},
 	} {
-		data, err := readTail(log.path, 8*1024)
+		data, err := ReadDiagnosticTail(log.path, 8*1024)
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
 				parts = append(parts, fmt.Sprintf("%s unavailable: %v", log.label, err))
@@ -442,30 +442,6 @@ func startupDiagnostics(stateRoot, name string) error {
 		return nil
 	}
 	return fmt.Errorf("startup diagnostics for %s:\n%s", name, strings.Join(parts, "\n"))
-}
-
-func readTail(path string, limit int64) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return "", err
-	}
-	offset := info.Size() - limit
-	if offset < 0 {
-		offset = 0
-	}
-	if _, err := file.Seek(offset, io.SeekStart); err != nil {
-		return "", err
-	}
-	data, err := io.ReadAll(io.LimitReader(file, limit))
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(data)), nil
 }
 
 func cleanupStartedHelper(ctx context.Context, inst Instance, instanceRoot string) error {

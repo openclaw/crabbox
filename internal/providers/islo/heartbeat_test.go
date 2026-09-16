@@ -19,7 +19,7 @@ func TestIsloProviderDeclaresHeartbeat(t *testing.T) {
 	if !(Provider{}).Spec().Features.Has(core.FeatureLeaseHeartbeat) {
 		t.Fatal("islo provider must declare lease-heartbeat")
 	}
-	backend := NewIsloBackend((Provider{}).Spec(), Config{}, Runtime{})
+	backend := NewIsloBackend((Provider{}).Spec(), core.Config{}, core.Runtime{})
 	if _, ok := backend.(core.LeaseHeartbeatBackend); !ok {
 		t.Fatalf("backend=%T does not implement the heartbeat capability", backend)
 	}
@@ -237,8 +237,8 @@ func TestIsloHeartbeatRequiresExactClaim(t *testing.T) {
 	client := &fakeIsloSyncClient{}
 	defer swapNewIsloClient(client)()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}},
 	}
 	_, err := backend.Heartbeat(context.Background(), core.LeaseHeartbeatRequest{ID: heartbeatSandboxName})
 	assertIsloHeartbeatExit(t, err, 4, "has no exact local claim")
@@ -250,9 +250,32 @@ func TestIsloHeartbeatRequiresExactClaim(t *testing.T) {
 	}
 }
 
+func TestIsloHeartbeatValidatesClaimBeforeExec(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		change   func(*fakeIsloSyncClient, *isloBackend)
+		wantRead bool
+	}{
+		{"different endpoint", func(_ *fakeIsloSyncClient, b *isloBackend) { b.cfg.Islo.BaseURL = "https://other.example" }, false},
+		{"missing resource ID", func(c *fakeIsloSyncClient, _ *isloBackend) { c.getSandbox.ID = "" }, true},
+		{"different resource ID", func(c *fakeIsloSyncClient, _ *isloBackend) { c.getSandbox.ID = "different-resource" }, true},
+		{"missing name", func(c *fakeIsloSyncClient, _ *isloBackend) { c.getSandbox.Name = "" }, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client, backend, _, _ := newIsloHeartbeatTest(t, "running")
+			test.change(client, backend)
+			_, err := backend.Heartbeat(context.Background(), core.LeaseHeartbeatRequest{ID: heartbeatSandboxName})
+			assertIsloHeartbeatExit(t, err, 4, "refusing")
+			if (len(client.getSandboxNames) > 0) != test.wantRead || len(client.execRequests) != 0 {
+				t.Fatalf("reads=%v execs=%d", client.getSandboxNames, len(client.execRequests))
+			}
+		})
+	}
+}
+
 func assertIsloHeartbeatExit(t *testing.T, err error, code int, want string) {
 	t.Helper()
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !core.AsExitError(err, &exitErr) {
 		t.Fatalf("error=%v, want an ExitError containing %q", err, want)
 	}
@@ -266,16 +289,14 @@ func int64Value(v int64) *int64 { return &v }
 func newIsloHeartbeatTest(t *testing.T, status string) (*fakeIsloSyncClient, *isloBackend, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProvider(isloLeasePrefix+heartbeatSandboxName, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
-		t.Fatal(err)
-	}
-	client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{Name: heartbeatSandboxName, Status: status}}
+	claimIsloLeaseWithIdentity(t, isloLeasePrefix+heartbeatSandboxName, "web", heartbeatSandboxName, isloTestResourceID, isloTestClaimScope)
+	client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{ID: isloTestResourceID, Name: heartbeatSandboxName, Status: status}}
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
 	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stdout: stdout, Stderr: stderr},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stdout: stdout, Stderr: stderr},
 	}
 	return client, backend, stdout, stderr
 }

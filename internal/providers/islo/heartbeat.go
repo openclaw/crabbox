@@ -27,26 +27,9 @@ const isloHeartbeatTimeout = 30 * time.Second
 
 var _ core.LeaseHeartbeatBackend = (*isloBackend)(nil)
 
-// Heartbeat runs one no-op exec against the sandbox and reports the sandbox's
-// own idle policy as Islo echoes it back.
-//
-// An exec is what registers sandbox activity: observed against a live tenant, a
-// sandbox with lifecycle.pause_after_idle=60s and auto_resume=on_activity
-// paused once its idle window elapsed, and an exec against that paused sandbox
-// was accepted and left it running again. So an exec both counts as activity
-// and resumes a paused sandbox.
-//
-// The reported idle window is read from the live sandbox rather than from
-// Crabbox config: GET /sandboxes/{name} echoes lifecycle verbatim, so
-// `pause_after_idle` is the only idle number that describes this lease. When the
-// sandbox carries no such policy the result reports no idle timeout at all and
-// the user is warned, because then there is no observable idle deadline for a
-// heartbeat to defer.
-//
-// This path performs exactly two calls, a GET and an exec: it issues no create
-// and no lifecycle write of any kind, so it cannot move any deadline
-// (pause_after or delete_after) in either direction. It persists nothing
-// either - LastTouchedAt below is the observation time, not a claim touch.
+// Heartbeat registers activity with a bounded no-op exec after observing a
+// running sandbox. It reports the server's idle policy without rewriting it,
+// changing absolute lifetime limits, updating the local claim, or calling resume.
 func (b *isloBackend) Heartbeat(ctx context.Context, req core.LeaseHeartbeatRequest) (core.LeaseHeartbeatResult, error) {
 	client, err := newIsloClient(b.cfg, b.rt)
 	if err != nil {
@@ -56,7 +39,11 @@ func (b *isloBackend) Heartbeat(ctx context.Context, req core.LeaseHeartbeatRequ
 	if err != nil {
 		return core.LeaseHeartbeatResult{}, err
 	}
-	if err := requireIsloLeaseClaim(leaseID, "heartbeat"); err != nil {
+	claim, err := requireIsloLeaseClaim(leaseID, "heartbeat")
+	if err != nil {
+		return core.LeaseHeartbeatResult{}, err
+	}
+	if err := requireIsloClaimScope(claim, b.claimScope()); err != nil {
 		return core.LeaseHeartbeatResult{}, err
 	}
 	getCtx, cancelGet := context.WithTimeout(ctx, isloHeartbeatTimeout)
@@ -66,25 +53,22 @@ func (b *isloBackend) Heartbeat(ctx context.Context, req core.LeaseHeartbeatRequ
 		return core.LeaseHeartbeatResult{}, isloError("get sandbox", err)
 	}
 	if sandbox == nil {
-		return core.LeaseHeartbeatResult{}, exit(4, "islo sandbox %s not found", name)
+		return core.LeaseHeartbeatResult{}, core.Exit(4, "islo sandbox %s not found", name)
+	}
+	if err := requireIsloExecIdentity(claim, name, isloIdentityFromSandbox(sandbox), "heartbeat"); err != nil {
+		return core.LeaseHeartbeatResult{}, err
 	}
 	state := sandbox.GetStatus()
 	if isloStatusTerminal(state) {
-		return core.LeaseHeartbeatResult{}, exit(5, "islo sandbox %s is in terminal state=%s", name, state)
+		return core.LeaseHeartbeatResult{}, core.Exit(5, "islo sandbox %s is in terminal state=%s", name, state)
 	}
 	if !isloStatusReady(state) {
-		// A paused sandbox is refused rather than exec'd: an exec against a
-		// paused sandbox resumes it, and the resume is billed - on a tenant
-		// with no credit the same call is rejected with HTTP 402
-		// BILLING_NOT_ALLOWED "Insufficient credit balance to resume a
-		// sandbox". Refusing here means a heartbeat can never be the thing
-		// that starts billing compute. Anything else that is not yet running
-		// has nothing to resume, so do not advise resuming it.
+		// Do not turn an observed paused lease into a request to resume it.
 		hint := ""
 		if strings.EqualFold(strings.TrimSpace(state), "paused") {
 			hint = "; resume it before heartbeat"
 		}
-		return core.LeaseHeartbeatResult{}, exit(5, "islo sandbox %s is not running (state=%s)%s", name, blank(state, "unknown"), hint)
+		return core.LeaseHeartbeatResult{}, core.Exit(5, "islo sandbox %s is not running (state=%s)%s", name, core.Blank(state, "unknown"), hint)
 	}
 	idleTimeout := isloPauseAfterIdle(sandbox)
 	if idleTimeout <= 0 {
@@ -104,7 +88,7 @@ func (b *isloBackend) Heartbeat(ctx context.Context, req core.LeaseHeartbeatRequ
 		return core.LeaseHeartbeatResult{}, isloError("heartbeat exec", err)
 	}
 	if code != 0 {
-		return core.LeaseHeartbeatResult{}, exit(5, "islo heartbeat exec on sandbox %s exited %d", name, code)
+		return core.LeaseHeartbeatResult{}, core.Exit(5, "islo heartbeat exec on sandbox %s exited %d", name, code)
 	}
 	return core.LeaseHeartbeatResult{
 		LeaseID:       leaseID,

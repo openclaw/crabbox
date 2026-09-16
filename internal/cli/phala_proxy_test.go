@@ -42,14 +42,14 @@ func fakePhalaCLI(t *testing.T, stdout string, exitCode int) (binary, argvPath s
 	if runtime.GOOS == "windows" {
 		wrapper := filepath.Join(dir, "phala.bat")
 		// %* forwards the cvms-get arguments to the helper after the run filter.
-		body := "@echo off\r\n\"%" + phalaHelperBin + "%\" " + phalaHelperRunFlag + " %*\r\n"
+		body := "@echo off\r\n" + synchronousHelperRacePrefix() + "\"%" + phalaHelperBin + "%\" " + phalaHelperRunFlag + " %*\r\n"
 		if err := os.WriteFile(wrapper, []byte(body), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		return wrapper, argvPath
 	}
 	wrapper := filepath.Join(dir, "phala")
-	body := "#!/bin/sh\nexec \"$" + phalaHelperBin + "\" " + phalaHelperRunFlag + " \"$@\"\n"
+	body := "#!/bin/sh\n" + synchronousHelperRacePrefix() + "exec \"$" + phalaHelperBin + "\" " + phalaHelperRunFlag + " \"$@\"\n"
 	if err := os.WriteFile(wrapper, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}

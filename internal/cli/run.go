@@ -7,12 +7,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 )
+
+var runBeforeCommandSSHReadyTimeout = 2 * time.Minute
 
 func applyCapacityMarketFlag(cfg *Config, fs *flag.FlagSet, market string) error {
 	if !flagWasSet(fs, "market") {
@@ -22,9 +24,10 @@ func applyCapacityMarketFlag(cfg *Config, fs *flag.FlagSet, market string) error
 	case "spot", "on-demand":
 		cfg.Capacity.Market = market
 		MarkCapacityMarketExplicit(cfg)
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 		return nil
 	default:
-		return exit(2, "--market must be spot or on-demand")
+		return Exit(2, "--market must be spot or on-demand")
 	}
 }
 
@@ -32,6 +35,7 @@ func applyServerTypeFlagOverrides(cfg *Config, fs *flag.FlagSet, serverType stri
 	if flagWasSet(fs, "type") {
 		cfg.ServerType = serverType
 		cfg.ServerTypeExplicit = true
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 		return
 	}
 	if cfg.ServerTypeExplicit {
@@ -67,6 +71,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	if err != nil {
 		return err
 	}
+	markSynthesizedFlagInputs(&cfg, a.synthesizedFlagInputs)
 	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
 		return err
 	}
@@ -80,11 +85,11 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	}
 	if strings.TrimSpace(*requestedLeaseID) != "" {
 		if !canonicalLeaseIDPattern.MatchString(strings.TrimSpace(*requestedLeaseID)) {
-			return exit(2, "--lease-id must match cbx_<12 lowercase hex characters>")
+			return Exit(2, "--lease-id must match cbx_<12 lowercase hex characters>")
 		}
 		capable, ok := backend.(IdempotentLeaseIDBackend)
 		if !ok || !capable.SupportsRequestedLeaseID() {
-			return exit(2, "provider=%s does not support fixed idempotent lease IDs", backend.Spec().Name)
+			return Exit(2, "provider=%s does not support fixed idempotent lease IDs", backend.Spec().Name)
 		}
 		unlock, err := lockFixedLeaseAcquisition(ctx, strings.TrimSpace(*requestedLeaseID))
 		if err != nil {
@@ -93,7 +98,8 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		defer unlock()
 	}
 	options := leaseOptionsFromConfig(cfg)
-	if delegated, ok := backend.(DelegatedRunBackend); ok {
+	// Fixed IDs must reach Acquire; delegated warmup has no durable-ID request.
+	if delegated, ok := backend.(DelegatedRunBackend); ok && strings.TrimSpace(*requestedLeaseID) == "" {
 		return delegated.Warmup(ctx, WarmupRequest{
 			Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim,
 			ActionsRunner: *actionsRunner, RequestedSlug: requestedSlug, TimingJSON: *timingJSON,
@@ -102,7 +108,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
-		return exit(2, "provider=%s does not support warmup", backend.Spec().Name)
+		return Exit(2, "provider=%s does not support warmup", backend.Spec().Name)
 	}
 	if *actionsRunner {
 		if err := validateActionsRunnerCapability(backend, cfg); err != nil {
@@ -130,7 +136,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	// identity remains replayable after orchestration failure, just like a fork.
 	retainOnFailure := strings.TrimSpace(*requestedLeaseID) != "" || controllerOwnsCleanup.Load()
 	applyResolvedServerConfig(&cfg, server)
-	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
+	if err := a.claimLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), cfg, &server, target, repo.Root, *reclaim); err != nil {
 		a.releaseWarmupLeaseAfterFailure(ctx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: lease.Coordinator}, retainOnFailure)
 		return err
 	}
@@ -162,15 +168,15 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	if meta.Enabled {
 		tailscaleSummary = " tailscale=" + blank(tailscaleTargetHost(meta), blank(meta.State, "requested"))
 	}
-	fmt.Fprintf(a.Stdout, "leased %s slug=%s provider=%s server=%s type=%s ip=%s%s idle_timeout=%s expires=%s\n", leaseID, blank(serverSlug(server), "-"), cfg.Provider, server.DisplayID(), server.ServerType.Name, server.PublicNet.IPv4.IP, tailscaleSummary, cfg.IdleTimeout, blank(leaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]))
+	fmt.Fprintf(a.Stdout, "leased %s slug=%s provider=%s server=%s type=%s ip=%s%s idle_timeout=%s expires=%s\n", leaseID, blank(ServerSlug(server), "-"), cfg.Provider, server.DisplayID(), server.ServerType.Name, server.PublicNet.IPv4.IP, tailscaleSummary, cfg.IdleTimeout, blank(LeaseLabelTimeDisplay(server.Labels["expires_at"]), server.Labels["expires_at"]))
 	fmt.Fprintf(a.Stdout, "ready ssh=%s@%s:%s network=%s workroot=%s\n", redactedSSHUser(cfg, server, target), target.Host, target.Port, network, cfg.WorkRoot)
-	a.startRegisteredWebVNCDaemonBestEffort(cfg, target, leaseID, *keep)
+	a.startRegisteredWebVNCDaemonBestEffort(ctx, cfg, target, leaseID, *keep)
 	if *actionsRunner {
 		ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo)
 		if err != nil {
 			return err
 		}
-		if err := a.registerGitHubActionsRunner(ctx, cfg, target, leaseID, serverSlug(server), ghRepo, "", nil); err != nil {
+		if err := a.registerGitHubActionsRunner(ctx, cfg, target, leaseID, ServerSlug(server), ghRepo, "", nil); err != nil {
 			return err
 		}
 	}
@@ -180,7 +186,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		if err := writeTimingJSON(a.Stderr, timingReport{
 			Provider: cfg.Provider,
 			LeaseID:  leaseID,
-			Slug:     serverSlug(server),
+			Slug:     ServerSlug(server),
 			TotalMs:  total.Milliseconds(),
 			ExitCode: 0,
 		}); err != nil {
@@ -254,6 +260,7 @@ type runFlagValues struct {
 	Reclaim                *bool
 	TimingJSON             *bool
 	TimingRecord           *string
+	RecordLocal            *bool
 }
 
 func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlagRegistrationOptions) runFlagValues {
@@ -279,7 +286,7 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 		CaptureStderr:          fs.String("capture-stderr", "", "write remote stderr to a local file instead of the terminal"),
 		CaptureOnFail:          fs.Bool("capture-on-fail", false, "compatibility alias; failure bundles are saved by default on non-zero exit"),
 		Preflight:              fs.Bool("preflight", false, "print remote capability preflight before running the command"),
-		PreflightTools:         fs.String("preflight-tools", "", "comma-separated preflight tools to probe; overrides run.preflightTools"),
+		PreflightTools:         fs.String("preflight-tools", "", "comma-separated preflight tools to probe; overrides run.preflightTools; list names with 'crabbox preflight-tools'"),
 		ScriptPath:             fs.String("script", "", "on POSIX SSH leases, upload and run a standalone content-hashed copy under .crabbox/scripts/; delegated module runtimes use source input"),
 		ScriptStdin:            fs.Bool("script-stdin", false, "read a script from stdin, upload it, and run it"),
 		FreshPR:                fs.String("fresh-pr", "", "run from a fresh remote checkout of a GitHub PR: owner/repo#123, URL, or number"),
@@ -316,20 +323,36 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 	values.Reclaim = fs.Bool("reclaim", false, "claim this lease for the current repo")
 	values.TimingJSON = fs.Bool("timing-json", false, "print final timing as JSON")
 	values.TimingRecord = fs.String("timing-record", "", "append final timing to benchmark JSONL store: default, off, or path")
+	values.RecordLocal = fs.Bool("record-local", false, "retain private bounded local run history")
 	return values
 }
 
-func loadRunConfig(fs *flag.FlagSet, flags runFlagValues, target leaseFlagTarget, mutateExternal bool) (Config, error) {
+func loadRunConfig(fs *flag.FlagSet, flags runFlagValues, target leaseFlagTarget, mutateExternal bool, identity *CoordinatorReadyPoolIdentityV1) (Config, error) {
 	cfg, err := loadConfig()
 	if err != nil {
 		return Config{}, err
 	}
+	markSynthesizedFlagInputs(&cfg, target.SynthesizedInputs)
 	cfg.Profile = *flags.Lease.Profile
+	recordConfigInput(&cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "profile"))
 	if err := applySelectedProfileConfig(&cfg); err != nil {
 		return Config{}, err
 	}
+	if identity != nil {
+		if err := bindReadyPoolIdentityProviderConfig(&cfg, fs, flags.Lease.Provider, *identity); err != nil {
+			return Config{}, err
+		}
+	}
 	if err := applyLeaseCreateFlagsForTarget(&cfg, fs, flags.Lease, target, mutateExternal); err != nil {
 		return Config{}, err
+	}
+	if identity != nil {
+		if err := validateReadyPoolIdentityProviderConfig(cfg, *identity); err != nil {
+			return Config{}, err
+		}
+	}
+	if flagWasSet(fs, "record-local") {
+		cfg.RecordLocal = *flags.RecordLocal
 	}
 	return cfg, nil
 }
@@ -379,6 +402,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	defaults := defaultConfig()
 	fs := newFlagSet("run", a.Stderr)
 	runFlags := registerRunFlags(fs, defaults, ordinaryLeaseCreateFlagRegistrationOptions())
+	gitSeedSource := fs.String("git-seed-source", "", "Git metadata source: origin or explicit offline local objects")
 	var requiredArtifactChanges stringListFlag
 	fs.Var(&requiredArtifactChanges, "require-artifact-change", "require created or changed bytes at an exact relative file path after successful Linux SSH execution; identical rewrites fail; repeatable")
 	var failureDownloads stringListFlag
@@ -386,16 +410,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	var readyPoolIdentity *CoordinatorReadyPoolIdentityV1
-	if flagWasSet(fs, "pool-identity-file") {
-		if strings.TrimSpace(*runFlags.ReadyPool) == "" {
-			return exit(2, "--pool-identity-file requires --pool")
-		}
-		identity, identityErr := loadReadyPoolIdentity(*runFlags.ReadyPoolIdentity)
-		if identityErr != nil {
-			return identityErr
-		}
-		readyPoolIdentity = &identity
+	if flagWasSet(fs, "pool-identity-file") && strings.TrimSpace(*runFlags.ReadyPool) == "" {
+		return Exit(2, "--pool-identity-file requires --pool")
 	}
 	leaseFlags := runFlags.Lease
 	leaseIDFlag := runFlags.LeaseID
@@ -439,7 +455,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	allDownloads := append(append([]string{}, downloads...), failureDownloads...)
 	for _, spec := range failureDownloads {
 		if _, err := parseRunDownloadSpec(spec); err != nil {
-			return exit(2, "--download-on-failure expects remote=local")
+			return Exit(2, "--download-on-failure expects remote=local")
 		}
 	}
 	allowEnvFlags := append(stringListFlag(nil), (*runFlags.AllowEnv)...)
@@ -471,41 +487,70 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var cleanup leaseCleanupResult
 	var finalizeFailureDigest func()
 	var runFailure error
+	returnedRunError := &err
 	recorder := &runRecorder{}
+	var observation *RunObservation
+	var prepareTerminalRun func()
 	var finalizeTerminalRun func()
-	defer func() {
-		recorder.Failed(runFailure)
-	}()
-	defer func() {
-		if finalizeTerminalRun != nil {
-			finalizeTerminalRun()
-		}
-	}()
 	var finalTimingReport *timingReport
 	var artifactChangeResults []ArtifactChangeResult
 	var timingRecordRepo Repo
 	var timingRecordCommand []string
 	var timingRecordColdRun *bool
 	var delegatedTimingCapture *capturedTimingReportWriter
-	defer func() {
+	var runnerObservedStartedAt time.Time
+	var delegatedProviderEndedAt time.Time
+	delegatedRoute := false
+	snapshotFinalTimingReport := func(frozenAt time.Time) (timingReport, bool) {
 		if finalTimingReport == nil {
-			return
+			return timingReport{}, false
 		}
 		report := *finalTimingReport
 		report.ArtifactChanges = artifactChangeResults
+		report.Artifacts = append([]runArtifact(nil), report.Artifacts...)
+		if !runnerObservedStartedAt.IsZero() && !frozenAt.Before(runnerObservedStartedAt) {
+			report.RunnerTotalMs = durationMillisecondsCeil(frozenAt.Sub(runnerObservedStartedAt))
+		}
+		if delegatedRoute && !delegatedProviderEndedAt.IsZero() && report.RunnerTotalMs > 0 {
+			providerMs := durationMillisecondsCeil(delegatedProviderEndedAt.Sub(runnerObservedStartedAt))
+			clientMs := report.RunnerTotalMs - providerMs - cleanup.Duration.Milliseconds()
+			if clientMs > 0 {
+				report.RunnerPhases = append(report.RunnerPhases, RunnerPhase{Name: "unattributed", Ms: clientMs})
+			}
+		}
 		cleanup.apply(&report)
-		if timingRecordEnabled {
+		if err != nil && report.ExitCode == 0 {
+			report.ExitCode = ExitCodeForError(err, 7)
+			report.RunStatus = ""
+			report.ErrorKind = ""
+		}
+		return finalizeTimingReport(report), true
+	}
+	defer func() {
+		if finalizeFailureDigest != nil {
+			finalizeFailureDigest()
+		}
+		if prepareTerminalRun != nil {
+			prepareTerminalRun()
+		}
+		frozenAt := time.Now()
+		report, hasReport := snapshotFinalTimingReport(frozenAt)
+		if hasReport && timingRecordEnabled {
 			recordColdRun := timingRecordColdRun
 			if benchmarkCtx.ColdRun != nil {
 				recordColdRun = benchmarkCtx.ColdRun
 			}
 			record := newBenchmarkTimingRecord(time.Now().UTC(), firstNonBlank(strings.TrimSpace(benchmarkCtx.Source), "run"), report, timingRecordRepo, timingRecordCommand, recordColdRun, benchmarkCtx.RepeatIndex)
 			if writeErr := appendBenchmarkTimingRecord(timingRecordPath, record); writeErr != nil {
-				if err == nil {
-					err = writeErr
-				} else {
+				if err != nil {
 					fmt.Fprintf(a.Stderr, "warning: benchmark timing record skipped: %v\n", writeErr)
 				}
+				err = errors.Join(err, writeErr)
+				runFailure = errors.Join(runFailure, writeErr)
+				if prepareTerminalRun != nil {
+					prepareTerminalRun()
+				}
+				report, _ = snapshotFinalTimingReport(frozenAt)
 			} else {
 				if benchmarkCtx.OnRecord != nil {
 					benchmarkCtx.OnRecord()
@@ -513,17 +558,23 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				fmt.Fprintf(a.Stderr, "benchmark timing record appended path=%s observations=1\n", timingRecordPath)
 			}
 		}
-		if !*timingJSON {
-			return
+		if hasReport && *timingJSON {
+			if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil {
+				timingErr := Exit(7, "write timing JSON: %v", writeErr)
+				err = errors.Join(err, timingErr)
+				runFailure = errors.Join(runFailure, timingErr)
+				if prepareTerminalRun != nil {
+					prepareTerminalRun()
+				}
+			}
 		}
-		if writeErr := writeTimingJSON(a.Stderr, report); writeErr != nil && err == nil {
-			err = writeErr
+		if finalizeTerminalRun != nil {
+			finalizeTerminalRun()
 		}
-	}()
-	// Cleanup runs first; the final timing JSON must still be the last line.
-	defer func() {
-		if finalizeFailureDigest != nil {
-			finalizeFailureDigest()
+		recorder.Failed(runFailure)
+		if observation != nil {
+			localReport, localHasReport := snapshotFinalTimingReport(frozenAt)
+			observation.finish(localReport, localHasReport, err, recorder)
 		}
 	}()
 	command := fs.Args()
@@ -536,29 +587,37 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return err
 	}
 	if requestedSlug != "" && strings.TrimSpace(*leaseIDFlag) != "" {
-		return exit(2, "--slug only applies when creating a new lease; omit --id or use the existing slug")
+		return Exit(2, "--slug only applies when creating a new lease; omit --id or use the existing slug")
 	}
 	if strings.TrimSpace(*readyPool) != "" && strings.TrimSpace(*leaseIDFlag) != "" {
-		return exit(2, "--pool borrows the lease id; omit --id")
+		return Exit(2, "--pool borrows the lease id; omit --id")
 	}
 	if strings.TrimSpace(*readyPoolCompatibilityKey) != "" && strings.TrimSpace(*readyPool) == "" {
-		return exit(2, "--pool-compatibility-key requires --pool")
+		return Exit(2, "--pool-compatibility-key requires --pool")
 	}
 	if strings.TrimSpace(*readyPool) != "" && strings.TrimSpace(*stopAfter) != "" {
-		return exit(2, "--pool uses --pool-return for cleanup policy; omit --stop-after")
+		return Exit(2, "--pool uses --pool-return for cleanup policy; omit --stop-after")
 	}
 	if strings.TrimSpace(*readyPool) != "" && (*keep || *keepOnFailure) {
-		return exit(2, "--pool uses --pool-return for lifecycle; omit --keep and --keep-on-failure")
+		return Exit(2, "--pool uses --pool-return for lifecycle; omit --keep and --keep-on-failure")
 	}
 	if err := validateReadyPoolRunReturnPolicy(*readyPoolReturn); err != nil {
 		return err
 	}
 	fullResyncRequested := *fullResync || *freshSync
 	if strings.TrimSpace(*readyPool) != "" && fullResyncRequested {
-		return exit(2, "--pool cannot be combined with --full-resync or --fresh-sync")
+		return Exit(2, "--pool cannot be combined with --full-resync or --fresh-sync")
 	}
 
-	cfg, err := loadRunConfig(fs, runFlags, leaseFlagTarget{ID: *leaseIDFlag, Reuse: *leaseIDFlag != ""}, true)
+	var readyPoolIdentity *CoordinatorReadyPoolIdentityV1
+	if flagWasSet(fs, "pool-identity-file") {
+		identity, identityErr := loadReadyPoolIdentity(*runFlags.ReadyPoolIdentity)
+		if identityErr != nil {
+			return identityErr
+		}
+		readyPoolIdentity = &identity
+	}
+	cfg, err := loadRunConfig(fs, runFlags, leaseFlagTarget{ID: *leaseIDFlag, Reuse: *leaseIDFlag != "", SynthesizedInputs: a.synthesizedFlagInputs}, true, readyPoolIdentity)
 	if err != nil {
 		return err
 	}
@@ -579,7 +638,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		fmt.Fprintln(a.Stderr, formatExpandedPresetCommand(expansion.PresetName, command, *shellMode, expansion.Env, expansion.LiteralArgs))
 	}
 	if len(command) == 0 && *scriptPath == "" && !*scriptStdin && !*syncOnly {
-		return exit(2, "usage: crabbox run [flags] -- <command...>")
+		return Exit(2, "usage: crabbox run [flags] -- <command...>")
 	}
 	if err := validateRunStopAfterPolicy(*stopAfter); err != nil {
 		return err
@@ -604,25 +663,25 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	runArtifactGlobs := appendUniqueStrings(append([]string{}, expansion.ArtifactGlobs...), requiredArtifactGlobs...)
 	if *syncOnly {
 		if len(requiredArtifactChanges) > 0 {
-			return exit(2, "--require-artifact-change cannot be combined with --sync-only")
+			return Exit(2, "--require-artifact-change cannot be combined with --sync-only")
 		}
 		if len(failureDownloads) > 0 {
-			return exit(2, "--download-on-failure cannot be combined with --sync-only")
+			return Exit(2, "--download-on-failure cannot be combined with --sync-only")
 		}
 		if len(expansion.ArtifactGlobs) > 0 {
-			return exit(2, "--artifact-glob cannot be combined with --sync-only")
+			return Exit(2, "--artifact-glob cannot be combined with --sync-only")
 		}
 		if len(requiredArtifactGlobs) > 0 {
-			return exit(2, "--require-artifact cannot be combined with --sync-only")
+			return Exit(2, "--require-artifact cannot be combined with --sync-only")
 		}
 		if len(requiredArtifactSchemas) > 0 {
-			return exit(2, "--require-artifact-schema cannot be combined with --sync-only")
+			return Exit(2, "--require-artifact-schema cannot be combined with --sync-only")
 		}
 		if strings.TrimSpace(*emitProof) != "" {
-			return exit(2, "--emit-proof cannot be combined with --sync-only")
+			return Exit(2, "--emit-proof cannot be combined with --sync-only")
 		}
 		if strings.TrimSpace(*attestOut) != "" {
-			return exit(2, "--attest cannot be combined with --sync-only")
+			return Exit(2, "--attest cannot be combined with --sync-only")
 		}
 	}
 	if err := preflightRunOutputCollisions("lease output", strings.TrimSpace(*leaseOutput), *captureStdout, *captureStderr, allDownloads); err != nil {
@@ -643,7 +702,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				return err
 			}
 			if samePath {
-				return exit(2, "lease output and emit proof paths must be different")
+				return Exit(2, "lease output and emit proof paths must be different")
 			}
 		}
 		if err := preflightProofOutputPath(strings.TrimSpace(*emitProof), *captureStdout, *captureStderr, allDownloads); err != nil {
@@ -651,7 +710,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if strings.TrimSpace(*proofTemplate) != "" {
 			if _, ok := cfg.ProofTemplates[strings.TrimSpace(*proofTemplate)]; !ok {
-				return exit(2, "proof template %q is not configured for profile %q", strings.TrimSpace(*proofTemplate), cfg.Profile)
+				return Exit(2, "proof template %q is not configured for profile %q", strings.TrimSpace(*proofTemplate), cfg.Profile)
 			}
 		}
 		if err := preflightLocalOutputPath("emit proof", strings.TrimSpace(*emitProof), true, true); err != nil {
@@ -666,7 +725,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	applyRunEnvAllowFlags(&cfg, allowEnvFlags)
 	if *preflightTools != "" {
-		cfg.Run.PreflightTools = normalizePreflightToolNames(splitCommaList(*preflightTools))
+		cfg.Run.PreflightTools = parsePreflightToolsOverride(*preflightTools)
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *preflight {
 		if err := validatePreflightTools(cfg.Run.PreflightTools); err != nil {
@@ -675,25 +735,52 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if flagWasSet(fs, "checksum") {
 		cfg.Sync.Checksum = *checksumSync
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
+	}
+	if flagWasSet(fs, "git-seed-source") {
+		cfg.Sync.GitSeedSource = *gitSeedSource
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
+	}
+	if !*noSync {
+		if err := validateGitSeedSource(cfg); err != nil {
+			return err
+		}
+	}
+	localGitSeed := !*noSync && effectiveGitSeedSource(cfg) == "local"
+	if localGitSeed && (strings.TrimSpace(*freshPRValue) != "" || *applyLocalPatch || strings.TrimSpace(*readyPool) != "" || shouldAutoHydrateActions(cfg, *noHydrate, false, FreshPRSpec{}, *syncOnly)) {
+		return Exit(2, "local Git seeding owns metadata and cannot use fresh PR, ready-pool or Actions hydration; use a raw workspace with --no-hydrate")
 	}
 	if *junitResults != "" {
 		cfg.Results.JUnit = splitCommaList(*junitResults)
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "results-auto") {
 		cfg.Results.Auto = *resultsAuto
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if flagWasSet(fs, "fail-on-test-failures") {
 		cfg.Results.FailOnFailures = *failOnTestFailures
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
-	repo, err := findRepo()
+	repo, err := findSyncRepo(cfg, !*noSync)
 	if err != nil {
 		return err
+	}
+	directorySync := !*noSync && effectiveSyncSource(cfg) == "directory"
+	if directorySync {
+		if err := validateDirectorySyncConfig(cfg); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*freshPRValue) != "" || *applyLocalPatch || strings.TrimSpace(*readyPool) != "" {
+			return Exit(2, "sync.source=directory cannot use --fresh-pr, --apply-local-patch or Git-backed ready pools")
+		}
+		cfg.Sync.GitSeed, cfg.Sync.Fingerprint = false, false
 	}
 	trustedPoolRemoteURL := ""
 	if strings.TrimSpace(*readyPool) != "" && readyPoolRunNeedsTrustedRemote(*readyPoolReturn) {
 		poolBranch, branchErr := readyPoolScrubBranch(firstNonBlank(cfg.Actions.Ref, repo.BaseRef))
 		if branchErr != nil {
-			return exit(2, "reusable ready-pool runs require a branch ref; use --pool-return drain or release for exact SHA and tag refs")
+			return Exit(2, "reusable ready-pool runs require a branch ref; use --pool-return drain or release for exact SHA and tag refs")
 		}
 		trustedPoolRemoteURL, err = trustedReadyPoolRemoteURL(repo.RemoteURL)
 		if err != nil {
@@ -710,25 +797,25 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	if !freshPR.Empty() {
 		if strings.TrimSpace(*readyPool) != "" && readyPoolRunNeedsTrustedRemote(*readyPoolReturn) {
-			return exit(2, "reusable ready-pool runs cannot use --fresh-pr; use --pool-return drain or release")
+			return Exit(2, "reusable ready-pool runs cannot use --fresh-pr; use --pool-return drain or release")
 		}
 		if *noSync {
-			return exit(2, "--fresh-pr cannot be combined with --no-sync")
+			return Exit(2, "--fresh-pr cannot be combined with --no-sync")
 		}
 		if *syncOnly {
-			return exit(2, "--fresh-pr cannot be combined with --sync-only")
+			return Exit(2, "--fresh-pr cannot be combined with --sync-only")
 		}
 		if fullResyncRequested {
-			return exit(2, "--full-resync is redundant with --fresh-pr")
+			return Exit(2, "--full-resync is redundant with --fresh-pr")
 		}
 	} else if *applyLocalPatch {
-		return exit(2, "--apply-local-patch requires --fresh-pr")
+		return Exit(2, "--apply-local-patch requires --fresh-pr")
 	}
 	if fullResyncRequested && *noSync {
-		return exit(2, "--full-resync cannot be combined with --no-sync")
+		return Exit(2, "--full-resync cannot be combined with --no-sync")
 	}
 	if (*scriptPath != "" || *scriptStdin) && *syncOnly {
-		return exit(2, "--script cannot be combined with --sync-only")
+		return Exit(2, "--script cannot be combined with --sync-only")
 	}
 	envSelection, err := selectRunEnv(cfg.EnvAllow, envProfileFlags, len(allowEnvFlags) > 0)
 	if err != nil {
@@ -737,15 +824,18 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	envSelection.Inline = mergeEnv(envSelection.Inline, expansion.Env)
 	envSelection.Effective = mergeEnv(envSelection.Effective, expansion.Env)
 	stripExternalDesktopPasswordFromRunEnv(cfg, &envSelection)
-	executionRunID := newRunID()
+	executionRunID, err := newRunID()
+	if err != nil {
+		return Exit(7, "create run identity: %v", err)
+	}
 	applyRunExecutionMetadata(&envSelection, strings.TrimSpace(*leaseIDFlag), executionRunID, requestedSlug)
 	envHelperName := strings.TrimSpace(*envHelper)
 	if envHelperName != "" && len(envSelection.Profile) == 0 {
-		return exit(2, "--env-helper requires --env-from-profile values selected by --allow-env")
+		return Exit(2, "--env-helper requires --env-from-profile values selected by --allow-env")
 	}
 	if envHelperName != "" {
 		if *syncOnly {
-			return exit(2, "--env-helper cannot be combined with --sync-only")
+			return Exit(2, "--env-helper cannot be combined with --sync-only")
 		}
 		if _, err := safeEnvHelperName(envHelperName); err != nil {
 			return err
@@ -770,13 +860,14 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			}
 		}
 		if expansion.Profile.Doctor.Enabled && cfg.TargetOS == targetWindows && cfg.WindowsMode == windowsModeNormal {
-			return exit(2, "profile doctor is not supported for native Windows targets")
+			return Exit(2, "profile doctor is not supported for native Windows targets")
 		}
 	}
 	options := leaseOptionsFromConfig(cfg)
 	scriptRequested := *scriptPath != "" || *scriptStdin
 	var script *RunScriptSpec
 	runReq := runRequestFromFlags(cfg, runFlags, command)
+	runReq.CommandLiteralArgs = maps.Clone(expansion.LiteralArgs)
 	runReq.Repo = repo
 	runReq.RunID = executionRunID
 	runReq.Env = envSelection.Effective
@@ -794,11 +885,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 		providerSpec := provider.Spec()
+		if localGitSeed && providerSpec.Kind != ProviderKindSSHLease {
+			return Exit(2, "local Git seeding requires an SSH-backed provider that supports ordinary workspace sync")
+		}
+		if directorySync {
+			if err := validateDirectorySyncProvider(providerSpec); err != nil {
+				return err
+			}
+		}
 		if len(requiredArtifactChanges) > 0 && providerSpec.Kind != ProviderKindSSHLease {
-			return exit(2, "--require-artifact-change requires an ordinary SSH-backed Linux provider")
+			return Exit(2, "--require-artifact-change requires an ordinary SSH-backed Linux provider")
 		}
 		if len(failureDownloads) > 0 && providerSpec.Kind != ProviderKindSSHLease {
-			return exit(2, "--download-on-failure requires an ordinary SSH-backed Linux provider")
+			return Exit(2, "--download-on-failure requires an ordinary SSH-backed Linux provider")
 		}
 		if err := validateProviderRun(provider, runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
 			return err
@@ -812,8 +911,17 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			delegatedRoutePreflighted = true
 		}
 	}
+	if strings.TrimSpace(*readyPool) != "" {
+		// The borrowed pool owns its proven endpoint, including before Resolve.
+		cfg.explicitSSHPort = ""
+	}
+	observation, err = beginRunObservation(cfg, executionRunID, runScriptRecordCommand(script, command), a.Stderr)
+	if err != nil {
+		return err
+	}
+	runReq.Observation = observation
 	backendRuntime := runtimeForApp(a)
-	if timingRecordEnabled {
+	if timingRecordEnabled || *timingJSON {
 		delegatedTimingCapture = &capturedTimingReportWriter{writer: a.Stderr}
 		backendRuntime.Stderr = delegatedTimingCapture
 	}
@@ -821,11 +929,28 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if err != nil {
 		return err
 	}
+	if localGitSeed && backend.Spec().Kind != ProviderKindSSHLease {
+		return Exit(2, "local Git seeding requires an SSH-backed provider that supports ordinary workspace sync")
+	}
+	if directorySync {
+		if err := validateDirectorySyncProvider(backend.Spec()); err != nil {
+			return err
+		}
+	}
+	sshScriptRun, err := selectSSHScriptRun(backend.Spec(), runReq)
+	if err != nil {
+		return err
+	}
+	if sshScriptRun {
+		if _, ok := backend.(SSHLeaseBackend); !ok {
+			return Exit(2, "provider=%s declares SSH script execution without an SSH lease backend", backend.Spec().Name)
+		}
+	}
 	if len(requiredArtifactChanges) > 0 && backend.Spec().Kind != ProviderKindSSHLease {
-		return exit(2, "--require-artifact-change requires an ordinary SSH-backed Linux provider")
+		return Exit(2, "--require-artifact-change requires an ordinary SSH-backed Linux provider")
 	}
 	if len(failureDownloads) > 0 && backend.Spec().Kind != ProviderKindSSHLease {
-		return exit(2, "--download-on-failure requires an ordinary SSH-backed Linux provider")
+		return Exit(2, "--download-on-failure requires an ordinary SSH-backed Linux provider")
 	}
 	var server Server
 	var target SSHTarget
@@ -840,6 +965,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if lifecycleOwner == nil {
 			return
 		}
+		cleanupStartedAt := time.Now()
+		observation.Phase(RunPhaseCleanup)
+		defer func() {
+			cleanup.Duration += time.Since(cleanupStartedAt)
+		}()
 		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), lifecycleOwner.quiesceTimeout())
 		closeErr := lifecycleOwner.Close(releaseCtx)
 		cancel()
@@ -855,6 +985,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if borrowedPool == nil {
 			return
 		}
+		cleanupStartedAt := time.Now()
+		defer func() {
+			cleanup.Duration += time.Since(cleanupStartedAt)
+		}()
 		defer func() {
 			if stopReadyPoolHeartbeat != nil {
 				stopReadyPoolHeartbeat()
@@ -942,7 +1076,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	leaseOutputPath := strings.TrimSpace(*leaseOutput)
 	if leaseOutputPath != "" {
 		if !backend.Spec().Features.Has(FeatureRunSession) {
-			return exit(2, "--lease-output is not supported for provider=%s yet", backend.Spec().Name)
+			return Exit(2, "--lease-output is not supported for provider=%s yet", backend.Spec().Name)
 		}
 		if err := ValidateRunSessionFeatureSpec(backend.Spec()); err != nil {
 			return err
@@ -951,15 +1085,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 	}
-	if delegated, ok := backend.(DelegatedRunBackend); ok {
+	if delegated, ok := backend.(DelegatedRunBackend); ok && !sshScriptRun {
+		delegatedRoute = true
+		if cfg.Results.Auto || len(cfg.Results.JUnit) > 0 {
+			observation.Results(nil, "unsupported")
+		}
 		if err := validateDelegatedRunRouting(backend.Spec(), runReq, *readyPool, len(requiredArtifactSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
 			return err
 		}
 		if len(requiredArtifactChanges) > 0 {
-			return exit(2, "--require-artifact-change requires an ordinary SSH-backed Linux provider")
+			return Exit(2, "--require-artifact-change requires an ordinary SSH-backed Linux provider")
 		}
 		if len(failureDownloads) > 0 {
-			return exit(2, "--download-on-failure requires an ordinary SSH-backed Linux provider")
+			return Exit(2, "--download-on-failure requires an ordinary SSH-backed Linux provider")
 		}
 		if !delegatedRoutePreflighted && delegatedRunNeedsLocalWorkspaceSync(backend.Spec(), runReq) {
 			if err := validateLocalWorkspaceSyncSource(repo); err != nil {
@@ -977,7 +1115,71 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if runReq.Preflight {
 			printDelegatedPreflightUnsupported(a.Stderr, backend.Spec().Name)
 		}
+		attestPath := strings.TrimSpace(*attestOut)
+		var delegatedReceiptKey ed25519.PrivateKey
+		if attestPath != "" {
+			delegatedReceiptKey, err = resolveAttestKey(strings.TrimSpace(*attestKeyOverride))
+			if err != nil {
+				return Exit(2, "attest key: %v", err)
+			}
+		}
+		runnerObservedStartedAt = time.Now()
+		observation.Phase(RunPhaseOpaque)
 		result, runErr := delegated.Run(ctx, runReq)
+		observation.BindLease(result.LeaseID, result.Slug)
+		delegatedProviderEndedAt = time.Now()
+		if *timingJSON || timingRecordEnabled || observation != nil {
+			report := timingReportFromDelegatedRunResult(runReq, result, backend.Spec().Name, runErr)
+			if delegatedTimingCapture != nil && delegatedTimingCapture.report != nil {
+				report = *delegatedTimingCapture.report
+			}
+			providerMs := durationMillisecondsCeil(delegatedProviderEndedAt.Sub(runnerObservedStartedAt))
+			report.RunnerTotalMs = providerMs
+			report.RunnerPhases = runnerPhasesFromLegacyReport(report, providerMs)
+			finalTimingReport = &report
+		}
+		delegatedReceiptEligible := runErr == nil || FinalizeRunResult(result, runErr).ErrorKind == RunErrorCommandExit
+		var preparedDelegatedReceipt *preparedRunReceipt
+		preparedDelegatedExitCode := -1
+		delegatedPreparationAttempted := false
+		prepareTerminalRun = func() {
+			if attestPath == "" || !delegatedReceiptEligible {
+				return
+			}
+			finalResult := result
+			finalFailure := runFailure
+			if finalFailure == nil {
+				finalFailure = err
+			}
+			if finalResult.ExitCode == 0 && finalFailure != nil {
+				finalResult.ExitCode = ExitCodeForError(finalFailure, 7)
+			}
+			if delegatedPreparationAttempted && preparedDelegatedExitCode == finalResult.ExitCode {
+				return
+			}
+			delegatedPreparationAttempted = true
+			preparedDelegatedExitCode = finalResult.ExitCode
+			preparedDelegatedReceipt = nil
+			prepared, receiptErr := prepareDelegatedRunReceipt(attestPath, delegatedReceiptKey, cfg, finalResult, runReq)
+			if receiptErr != nil {
+				err = errors.Join(err, receiptErr)
+				runFailure = errors.Join(runFailure, receiptErr)
+				return
+			}
+			preparedDelegatedReceipt = &prepared
+		}
+		finalizeTerminalRun = func() {
+			if preparedDelegatedReceipt == nil {
+				return
+			}
+			receipt, receiptErr := persistPreparedRunReceipt(*preparedDelegatedReceipt)
+			if receiptErr != nil {
+				err = errors.Join(err, receiptErr)
+				runFailure = errors.Join(runFailure, receiptErr)
+				return
+			}
+			fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", receipt.Path, receipt.Bytes)
+		}
 		if runErr == nil || result.Command > 0 || result.Total > 0 {
 			a.syncExternalRunnersBestEffort(ctx, cfg, backend)
 		}
@@ -1002,38 +1204,56 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			result.Artifacts = append(result.Artifacts, proof)
 			fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
 		}
-		if strings.TrimSpace(*attestOut) != "" && (runErr == nil || RunErrorKindForResult(result, runErr) == RunErrorCommandExit) {
-			receipt, err := writeDelegatedRunReceipt(strings.TrimSpace(*attestOut), strings.TrimSpace(*attestKeyOverride), cfg, result, runReq)
-			if err != nil {
-				return err
-			}
-			result.Artifacts = append(result.Artifacts, receipt)
-			fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", receipt.Path, receipt.Bytes)
-		}
 		if result.Session != nil {
 			coldRun := !result.Session.Reused
 			timingRecordColdRun = &coldRun
 		}
-		if timingRecordEnabled {
-			report := timingReportFromDelegatedRunResult(runReq, result, backend.Spec().Name, runErr)
-			if delegatedTimingCapture != nil && delegatedTimingCapture.report != nil {
-				report = *delegatedTimingCapture.report
-			}
-			report.Artifacts = result.Artifacts
-			finalTimingReport = &report
+		if finalTimingReport != nil {
+			finalTimingReport.Artifacts = result.Artifacts
 		}
 		return runErr
 	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
-		return exit(2, "provider=%s does not support run", backend.Spec().Name)
+		return Exit(2, "provider=%s does not support run", backend.Spec().Name)
 	}
-	if !*noSync && freshPR.Empty() {
-		if err := validateLocalWorkspaceSyncSource(repo); err != nil {
+	coord := backendCoordinator(backend)
+	var terminalReceiptKey ed25519.PrivateKey
+	if strings.TrimSpace(*attestOut) != "" || (coord != nil && !*syncOnly) {
+		terminalReceiptKey, err = resolveAttestKey(strings.TrimSpace(*attestKeyOverride))
+		if err != nil {
+			return Exit(2, "attest key: %v", err)
+		}
+	}
+	var localSeed preparedLocalGitSeed
+	if localGitSeed {
+		localSeed, err = prepareLocalGitSeed(ctx, repo, cfg, *forceSyncLarge, a.Stderr)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			cleanupErr := localSeed.cleanup()
+			err = errors.Join(err, cleanupErr)
+			runFailure = errors.Join(runFailure, cleanupErr)
+		}()
+	}
+	if !*noSync && freshPR.Empty() && !localGitSeed {
+		if directorySync {
+			excludes, err := syncExcludes(repo.Root, cfg)
+			if err != nil {
+				return err
+			}
+			manifest, err := syncManifestForSource(ctx, repo, cfg, excludes)
+			if err != nil {
+				return Exit(6, "build sync file list: %v", err)
+			}
+			if err := checkSyncPreflight(manifest, cfg, *forceSyncLarge, io.Discard); err != nil {
+				return err
+			}
+		} else if err := validateLocalWorkspaceSyncScope(repo, cfg); err != nil {
 			return err
 		}
 	}
-	coord := backendCoordinator(backend)
 	var registrationCoord *CoordinatorClient
 	if shouldRegisterCoordinatorLease(cfg) {
 		if client, configured, coordErr := newCoordinatorClient(cfg); coordErr != nil {
@@ -1049,9 +1269,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		runReq.Script = script
 	}
+	runnerObservedStartedAt = time.Now()
+	var runnerBorrowDuration time.Duration
 	if strings.TrimSpace(*readyPool) != "" {
 		if coord == nil {
-			return exit(2, "--pool requires a coordinator-backed SSH lease provider")
+			return Exit(2, "--pool requires a coordinator-backed SSH lease provider")
 		}
 		repoSlug := cfg.Actions.Repo
 		if repoSlug == "" {
@@ -1062,7 +1284,13 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 		addStringInput(borrowInput, "compatibilityKey", *readyPoolCompatibilityKey)
+		if readyPoolIdentity != nil {
+			if providerErr := bindReadyPoolIdentityProvider(borrowInput, *readyPoolIdentity); providerErr != nil {
+				return providerErr
+			}
+		}
 		var res CoordinatorReadyPoolResponse
+		borrowStartedAt := time.Now()
 		if readyPoolIdentity != nil {
 			delete(borrowInput, "allowMissingCommit")
 			borrowInput["identity"] = *readyPoolIdentity
@@ -1070,6 +1298,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		} else {
 			res, err = coord.BorrowReadyPoolLease(ctx, strings.TrimSpace(*readyPool), borrowInput)
 		}
+		runnerBorrowDuration = time.Since(borrowStartedAt)
 		if err != nil {
 			return err
 		}
@@ -1094,65 +1323,32 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	recordCommand := runScriptRecordCommand(script, command)
 	timingRecordCommand = recordCommand
-	recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr, strings.TrimSpace(*leaseIDFlag) != "")
+	recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr, strings.TrimSpace(*leaseIDFlag) != "", executionRunID)
+	if recorder.createErr != nil && !recorder.createPending && !*syncOnly {
+		return recorder.requireHandle()
+	}
 	if useCoordinator {
 		recorder.Event("leasing.started", "leasing", "")
 	}
 	endToEndStartedAt := time.Now()
 	leaseStartedAt := endToEndStartedAt
-	if *leaseIDFlag != "" {
-		var lease LeaseTarget
-		lease, err = resolveSSHLeaseTarget(ctx, sshBackend, ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true})
-		if err == nil {
-			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
-			if lease.Coordinator != nil {
-				coord = lease.Coordinator
-				useCoordinator = true
-				recorder.UseCoordinator(coord)
-			}
-			applyResolvedLeaseConfig(&cfg, server, &target)
-			if borrowedPool != nil {
-				target = applyReadyPoolEndpoint(target, borrowedPool.Entry)
-			}
-			if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
-				err = resolveErr
-			} else {
-				target = resolved.Target
-				if resolved.FallbackReason != "" {
-					fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
-				}
-			}
-		}
-		if err == nil && !flagWasSet(fs, "idle-timeout") {
-			if useCoordinator {
-				if duration, ok := parseDurationSecondsLabel(server.Labels["idle_timeout_secs"]); ok {
-					cfg.IdleTimeout = duration
-				}
-			} else if duration, ok := parseDurationSecondsLabel(server.Labels["idle_timeout_secs"]); ok {
-				cfg.IdleTimeout = duration
-			} else if duration, ok := parseDurationSecondsLabel(server.Labels["idle_timeout"]); ok {
-				cfg.IdleTimeout = duration
-			}
-		}
-	} else {
-		var lease LeaseTarget
-		lease, err = sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim, RequestedSlug: requestedSlug})
-		if err == nil {
-			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
-		}
-		acquired = true
-	}
-	if err != nil {
-		return recordFailure(err)
-	}
+	var runnerProviderTiming *runnerProviderTiming
+	leasePhase := "provider.acquire"
+	claimAdmitted := false
+	releaseResolvedLease := false
 	keepFailedLease := false
 	// A newly acquired retained lease is not safe to keep until its requested
 	// cleanup handle has been written successfully.
-	releaseUnreportedLease := acquired && leaseOutputPath != ""
+	releaseUnreportedLease := false
 	defer func() {
-		if !releaseUnreportedLease && !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure) {
+		if !releaseResolvedLease || (!releaseUnreportedLease && !shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, runFailure)) {
 			return
 		}
+		observation.Phase(RunPhaseCleanup)
+		cleanupStartedAt := time.Now()
+		defer func() {
+			cleanup.Duration += time.Since(cleanupStartedAt)
+		}()
 		if lifecycleOwner != nil {
 			inspectCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), lifecycleOwner.quiesceTimeout())
 			ownerErr := lifecycleOwner.QuiesceForLeaseRelease(inspectCtx)
@@ -1170,77 +1366,193 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			releaseApp.Stderr = io.Discard
 		}
 		cleanup.Attempted = true
-		cleanup.Err = releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
-		cleanup.Stopped = cleanup.Err == nil
-		if cleanup.Err == nil {
+		outcome, releaseErr := releaseApp.releaseBackendLeaseWithOutcomeBestEffort(context.Background(), sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
+		cleanup.Err = releaseErr
+		cleanup.Stopped = outcome.Terminal
+		if cleanup.Err == nil || cleanup.Stopped {
 			policy, ok := sshBackend.(ReleaseLeaseWorkspacePolicy)
 			if !ok || !policy.PreservesSSHWorkspaceAfterRelease() {
 				// Destructive cleanup owns the quiesced owner once the lease is gone.
 				lifecycleOwner = nil
 			}
+		}
+		if cleanup.Err == nil {
 			recorder.Event("lease.released", "released", "")
 		}
 		if !*timingJSON {
 			if cleanup.Err != nil {
-				fmt.Fprintf(a.Stderr, "lease cleanup stopped=false policy=%s lease=%s slug=%s error=%q\n", blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"), cleanup.Err.Error())
+				fmt.Fprintf(a.Stderr, "lease cleanup stopped=%t policy=%s lease=%s slug=%s error=%q\n", cleanup.Stopped, blank(*stopAfter, "auto"), leaseID, blank(ServerSlug(server), "-"), cleanup.Err.Error())
 				if err == nil {
-					err = exit(7, "lease cleanup failed for %s: %v", leaseID, cleanup.Err)
+					err = Exit(7, "lease cleanup failed for %s: %v", leaseID, cleanup.Err)
 				}
 				return
 			}
-			fmt.Fprintf(a.Stderr, "lease cleanup stopped=true policy=%s lease=%s slug=%s\n", blank(*stopAfter, "auto"), leaseID, blank(serverSlug(server), "-"))
+			fmt.Fprintf(a.Stderr, "lease cleanup stopped=%t policy=%s lease=%s slug=%s\n", cleanup.Stopped, blank(*stopAfter, "auto"), leaseID, blank(ServerSlug(server), "-"))
 		}
 	}()
+	admitLease := func(lease *LeaseTarget) error {
+		server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+		observation.BindLease(leaseID, ServerSlug(server))
+		applyResolvedServerConfig(&cfg, server)
+		stripTargetCredentialsFromRunEnv(&envSelection, target)
+		if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
+			cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
+		}
+		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
+			return err
+		}
+		if err := validateRunArtifactGlobTarget(target, expansion.ArtifactGlobs); err != nil {
+			return err
+		}
+		if err := validateRequiredRunArtifactGlobTarget(target, requiredArtifactGlobs); err != nil {
+			return err
+		}
+		if err := validateArtifactChangeTarget(target, requiredArtifactChanges); err != nil {
+			return err
+		}
+		if err := validateFailureDownloadTarget(target, failureDownloads); err != nil {
+			return err
+		}
+		if expansion.Profile.Doctor.Enabled && isWindowsNativeTarget(target) {
+			return Exit(2, "profile doctor is not supported for native Windows targets")
+		}
+		if useCoordinator {
+			if err := recorder.AttachLease(ctx, leaseID, ServerSlug(server), cfg); err != nil {
+				if !*syncOnly {
+					return err
+				}
+				// Sync-only has no signed command receipt and permits unavailable history.
+				recorder.warnRunHistory("sync-only run history binding unavailable: %v", err)
+			}
+		}
+		if recorder.runID != "" {
+			executionRunID = recorder.runID
+		}
+		if !*syncOnly {
+			if err := recorder.requireHandle(); err != nil {
+				return err
+			}
+		}
+		applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, ServerSlug(server))
+		runReq.RunID = executionRunID
+		runReq.Env = envSelection.Effective
+		lease.Server, lease.SSH = server, target
+		return nil
+	}
+	prepareResolvedLease := func(lease *LeaseTarget) error {
+		server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+		if lease.Coordinator != nil {
+			coord = lease.Coordinator
+			useCoordinator = true
+			if err := recorder.UseCoordinator(coord); err != nil {
+				return err
+			}
+		}
+		applyResolvedLeaseConfig(&cfg, server, &target)
+		if borrowedPool != nil {
+			target = applyReadyPoolEndpoint(target, borrowedPool.Entry)
+		}
+		if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
+			return resolveErr
+		} else {
+			target = resolved.Target
+			if resolved.FallbackReason != "" {
+				fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
+			}
+		}
+		if !flagWasSet(fs, "idle-timeout") {
+			if useCoordinator {
+				if duration, ok := parseDurationSecondsLabel(server.Labels["idle_timeout_secs"]); ok {
+					cfg.IdleTimeout = duration
+				}
+			} else if duration, ok := parseDurationSecondsLabel(server.Labels["idle_timeout_secs"]); ok {
+				cfg.IdleTimeout = duration
+			} else if duration, ok := parseDurationSecondsLabel(server.Labels["idle_timeout"]); ok {
+				cfg.IdleTimeout = duration
+			}
+		}
+		lease.Server, lease.SSH = server, target
+		return nil
+	}
+	if *leaseIDFlag != "" {
+		leasePhase = "provider.resolve"
+		observation.Phase(RunPhaseResolve)
+		var lease LeaseTarget
+		req := ResolveRequest{Repo: repo, Options: options, ID: *leaseIDFlag, Reclaim: *reclaim, Prepare: true}
+		if borrowedPool == nil {
+			lease, claimAdmitted, err = admitRunLeaseUnderClaim(ctx, sshBackend, req, &cfg, func(lease *LeaseTarget) error {
+				if err := prepareResolvedLease(lease); err != nil {
+					return err
+				}
+				releaseResolvedLease = true
+				return admitLease(lease)
+			})
+		}
+		if err == nil && !claimAdmitted {
+			lease, err = resolveSSHLeaseTarget(ctx, sshBackend, req)
+		}
+		if err == nil && !claimAdmitted {
+			err = prepareResolvedLease(&lease)
+		}
+		if err == nil {
+			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+			runnerProviderTiming = lease.runnerTiming
+		}
+
+	} else {
+		var lease LeaseTarget
+		observation.Phase(RunPhaseAcquire)
+		lease, err = sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim, RequestedSlug: requestedSlug})
+		if err == nil {
+			server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+			runnerProviderTiming = lease.runnerTiming
+		}
+		acquired = true
+	}
+	if err != nil {
+		return recordFailure(err)
+	}
+	releaseResolvedLease = true
+	releaseUnreportedLease = acquired && leaseOutputPath != ""
+	observation.BindLease(leaseID, ServerSlug(server))
+	observation.Phase(RunPhaseSetup)
+
 	leaseDuration := time.Since(leaseStartedAt)
 	if timingRecordEnabled {
 		coldRun := acquired && strings.TrimSpace(*leaseIDFlag) == "" && borrowedPool == nil
 		timingRecordColdRun = &coldRun
 	}
-	applyResolvedServerConfig(&cfg, server)
-	stripTargetCredentialsFromRunEnv(&envSelection, target)
-	if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
-		cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
-	}
-	if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
-		return recordFailure(err)
-	}
-	if err := validateRunArtifactGlobTarget(target, expansion.ArtifactGlobs); err != nil {
-		return recordFailure(err)
-	}
-	if err := validateRequiredRunArtifactGlobTarget(target, requiredArtifactGlobs); err != nil {
-		return recordFailure(err)
-	}
-	if err := validateArtifactChangeTarget(target, requiredArtifactChanges); err != nil {
-		return recordFailure(err)
-	}
-	if err := validateFailureDownloadTarget(target, failureDownloads); err != nil {
-		return recordFailure(err)
-	}
-	if expansion.Profile.Doctor.Enabled && isWindowsNativeTarget(target) {
-		return recordFailure(exit(2, "profile doctor is not supported for native Windows targets"))
-	}
-	if useCoordinator {
-		recorder.AttachLease(leaseID, serverSlug(server), cfg)
-	}
-	if recorder.runID != "" {
-		executionRunID = recorder.runID
-	}
-	if !*syncOnly {
-		if err := recorder.requireHandle(); err != nil {
+	if !claimAdmitted {
+		lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+		if err := admitLease(&lease); err != nil {
 			return recordFailure(err)
 		}
 	}
-	applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, serverSlug(server))
-	runReq.RunID = executionRunID
-	runReq.Env = envSelection.Effective
-	if err := a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim || borrowedPool != nil, *leaseIDFlag != ""); err != nil {
+
+	if claimAdmitted {
+		// Registration publishes its own adapter/portal stages; it runs after the
+		// admission lock is released and retains the committed claim snapshot.
+		lease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+		err = a.registerCoordinatorLeaseBestEffort(ctx, cfg, &lease)
+		server = lease.Server
+	} else {
+		err = a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), cfg, &server, target, repo.Root, *reclaim || borrowedPool != nil, *leaseIDFlag != "")
+	}
+	if err != nil {
 		return recordFailure(err)
+	}
+	if activity, ok := sshBackend.(SSHRunActivityBackend); ok {
+		stopActivity, activityErr := activity.BeginSSHRunActivity(ctx, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
+		if activityErr != nil {
+			return recordFailure(activityErr)
+		}
+		defer stopActivity()
 	}
 	if leaseOutputPath != "" {
 		session := &RunSessionHandle{
 			Provider:       backend.Spec().Name,
 			LeaseID:        leaseID,
-			Slug:           serverSlug(server),
+			Slug:           ServerSlug(server),
 			Reused:         !acquired,
 			Kept:           true,
 			RunID:          executionRunID,
@@ -1255,7 +1567,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		releaseUnreportedLease = false
 	}
-	a.startRegisteredWebVNCDaemonBestEffort(cfg, target, leaseID, acquired && *keep)
+	a.startRegisteredWebVNCDaemonBestEffort(ctx, cfg, target, leaseID, acquired && *keep)
 	if !useCoordinator && leaseID != "" {
 		if touched, touchErr := sshBackend.Touch(ctx, TouchRequest{Lease: LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, State: blank(server.Labels["state"], "ready"), IdleTimeout: cfg.IdleTimeout}); touchErr == nil {
 			server = touched
@@ -1312,9 +1624,13 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return recordFailure(err)
 		}
 	}
-	if shouldAcquireWorkspaceOwner(acquired, acquiredRunMayRetainLease(*keep, *keepOnFailure, *stopAfter), sshBackend) {
+	var runnerConnectDuration time.Duration
+	if shouldAcquireWorkspaceOwner(target, acquired, acquiredRunMayRetainLease(*keep, *keepOnFailure, *stopAfter), sshBackend) {
 		target = bootstrapNetworkTarget(cfg, server, target)
-		if waitErr := waitForSSHReady(ctx, &target, a.Stderr, "workspace owner", 2*time.Minute); waitErr != nil {
+		connectStartedAt := time.Now()
+		waitErr := waitForSSHReady(ctx, &target, a.Stderr, "workspace owner", 2*time.Minute)
+		runnerConnectDuration += time.Since(connectStartedAt)
+		if waitErr != nil {
 			return recordFailure(waitErr)
 		}
 		a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID)
@@ -1345,7 +1661,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	timings := runTimings{
 		started:           time.Now(),
 		endToEndStartedAt: endToEndStartedAt,
+		borrow:            runnerBorrowDuration,
 		lease:             leaseDuration,
+		leasePhase:        leasePhase,
+		providerTiming:    runnerProviderTiming,
+		connect:           runnerConnectDuration,
 	}
 	exitNodeEgressChecked := false
 	workdir = remoteJoin(cfg, leaseID, repo.Name)
@@ -1353,10 +1673,15 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	profileEnvFile := ""
 	actionsURL := ""
 	defer func() {
-		if len(requiredArtifactChanges) == 0 || finalTimingReport != nil || (!*timingJSON && !timingRecordEnabled) {
+		if finalTimingReport != nil || (!*timingJSON && !timingRecordEnabled && observation == nil) {
 			return
 		}
-		report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, time.Since(timings.started), exitCodeForError(err, 7), actionsURL)
+		report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, ServerSlug(server), timings, time.Since(timings.started), ExitCodeForError(err, 7), actionsURL)
+		// This fallback has no recorded workload outcome; its synthetic exit code
+		// must not classify an operational failure as a workload command exit.
+		if err != nil {
+			report = TimingReportWithRunResult(report, RunResult{}, err)
+		}
 		populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, nil)
 		report.Label = runLabelValue
 		finalTimingReport = &report
@@ -1368,10 +1693,23 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		workdir = remoteJoin(cfg, leaseID, freshPR.WorkdirName())
 	} else {
 		state, stateErr := readActionsHydrationState(ctx, target, leaseID)
+		if stateErr != nil && (directorySync || localGitSeed) {
+			source := "directory sync"
+			if localGitSeed {
+				source = "local Git seed"
+			}
+			return recordFailure(Exit(7, "verify %s workspace has no Actions hydration marker: %v", source, stateErr))
+		}
 		if stateErr != nil && borrowedPool != nil && readyPoolRunNeedsTrustedRemote(*readyPoolReturn) {
-			return recordFailure(exit(7, "verify ready-pool Actions hydration marker: %v", stateErr))
+			return recordFailure(Exit(7, "verify ready-pool Actions hydration marker: %v", stateErr))
 		}
 		if stateErr == nil && state.Workspace != "" {
+			if localGitSeed {
+				return recordFailure(Exit(2, "local Git seeding cannot modify an Actions-owned workspace; use a fresh raw workspace"))
+			}
+			if directorySync {
+				return recordFailure(Exit(2, "directory sync cannot modify an Actions-owned workspace; use a fresh raw workspace"))
+			}
 			workdir = state.Workspace
 			actionsEnvFile = state.EnvFile
 			if state.RunID != "" {
@@ -1395,9 +1733,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		printRunContextSummary(a.Stderr, coord, cfg, server, currentTarget, leaseID, executionRunID, recorder.runID, workdir, hydratedByActions, actionsURL)
 		contextPrinted = true
 	}
-	printPreflight := func(currentTarget SSHTarget) {
+	printPreflight := func(currentTarget SSHTarget) error {
 		if !*preflight || preflightPrinted {
-			return
+			return nil
 		}
 		hydrateTarget := currentTarget
 		if hydrateTarget.TargetOS == "" {
@@ -1407,8 +1745,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			hydrateTarget.WindowsMode = cfg.WindowsMode
 		}
 		hydrateSupported := supportsLocalActionsHydrateTarget(hydrateTarget) || supportsGitHubActionsRunnerTarget(hydrateTarget)
-		printRemoteCapabilityPreflight(ctx, a.Stderr, cfg, server, currentTarget, leaseID, workdir, remoteRunEnvFiles(actionsEnvFile, profileEnvFile), hydratedByActions, actionsURL, hydrateSupported, envSelection.Inline)
+		preflightErr := printRemoteCapabilityPreflight(ctx, a.Stderr, cfg, server, currentTarget, leaseID, workdir, remoteRunEnvFiles(actionsEnvFile, profileEnvFile), hydratedByActions, actionsURL, hydrateSupported, envSelection.Inline)
 		preflightPrinted = true
+		if preflightErr != nil {
+			return preflightErr
+		}
+		return context.Cause(ctx)
 	}
 	preflightRawJSRuntime := func(currentTarget SSHTarget) error {
 		if rawJSRuntimePreflightDone {
@@ -1440,7 +1782,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		missing, err := probeMissingRemoteTools(ctx, currentTarget, tools)
 		if err != nil {
-			return exit(5, "remote JS runtime preflight failed before sync: %v", err)
+			return Exit(5, "remote JS runtime preflight failed before sync: %v", err)
 		}
 		if len(missing) == 0 {
 			rawJSRuntimePreflightDone = true
@@ -1464,7 +1806,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		return failure
 	}
-	autoHydrateActionsIfNeeded := func(currentTarget SSHTarget) error {
+	autoHydrateActionsIfNeeded := func(currentTarget SSHTarget, plainManifest bool) error {
 		if !autoHydrateActions || hydratedByActions {
 			return nil
 		}
@@ -1491,10 +1833,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				plan = &prepared
 			}
 		} else if plan.leaseID != leaseID || plan.workdir != workdir {
-			err = exit(7, "prepared local Actions hydration no longer matches lease=%s workspace=%s", leaseID, workdir)
+			err = Exit(7, "prepared local Actions hydration no longer matches lease=%s workspace=%s", leaseID, workdir)
 		}
 		if err == nil {
-			state, err = a.executeLocalActionsHydration(ctx, cfg, repo, currentTarget, *plan, 20*time.Minute, false, false, lifecycleOwner)
+			state, err = a.executeLocalActionsHydration(ctx, cfg, repo, currentTarget, *plan, 20*time.Minute, false, false, plainManifest, lifecycleOwner)
 		}
 		if err != nil {
 			recorder.Event("actions.hydrate.failed", "hydrate", err.Error())
@@ -1518,7 +1860,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		beforeCommandLeaseReplacementAttempted = true
 		oldLease := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}
 		oldLeaseID := leaseID
-		oldSlug := serverSlug(server)
+		oldSlug := ServerSlug(server)
+		oldMachineType := server.ServerType.Name
 		fmt.Fprintf(a.Stderr, "warning: SSH became unavailable after sync on lease=%s slug=%s; replacing lease once and retrying sync\n", oldLeaseID, blank(oldSlug, "-"))
 		recorder.Event("lease.replace.started", "leasing", fmt.Sprintf("old_lease=%s old_slug=%s reason=ssh_before_command", oldLeaseID, blank(oldSlug, "-")))
 
@@ -1528,25 +1871,38 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if *timingJSON {
 			releaseApp.Stderr = io.Discard
 		}
-		if err := releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, oldLease); err != nil {
-			recorder.Event("lease.replace.failed", "leasing", err.Error())
-			return true, exit(7, "replace stale lease %s: release failed: %v", oldLeaseID, err)
+		oldLeaseCleanupStartedAt := time.Now()
+		oldLeaseCleanupErr := releaseApp.releaseBackendLeaseBestEffort(context.Background(), sshBackend, cfg, oldLease)
+		oldLeaseCleanupDuration := time.Since(oldLeaseCleanupStartedAt)
+		if oldLeaseCleanupErr != nil {
+			recorder.Event("lease.replace.failed", "leasing", oldLeaseCleanupErr.Error())
+			return true, Exit(7, "replace stale lease %s: release failed: %v", oldLeaseID, oldLeaseCleanupErr)
 		}
 		acquired = false
 
 		replacementLeaseStartedAt := time.Now()
 		newLease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim})
-		timings.lease += time.Since(replacementLeaseStartedAt)
+		replacementLeaseDuration := time.Since(replacementLeaseStartedAt)
 		if err != nil {
+			recordFailedReplacementLeaseDuration(&timings, replacementLeaseDuration)
 			recorder.Event("lease.replace.failed", "leasing", err.Error())
 			return true, err
 		}
 
+		oldAttemptReport := TimingReport{
+			Provider:    cfg.Provider,
+			LeaseID:     oldLeaseID,
+			Slug:        oldSlug,
+			MachineType: oldMachineType,
+		}
 		server, target, leaseID = newLease.Server, newLease.SSH, newLease.LeaseID
+		resetRunnerTimingsForReplacement(&timings, oldAttemptReport, oldLeaseCleanupDuration, replacementLeaseDuration, newLease.runnerTiming)
 		acquired = true
 		coord = newLease.Coordinator
 		useCoordinator = coord != nil
-		recorder.UseCoordinator(coord)
+		if err := recorder.UseCoordinator(coord); err != nil {
+			return true, err
+		}
 		applyResolvedServerConfig(&cfg, server)
 		removeEnvironmentKeys(runReq.Env, target.ChildEnvDenylist...)
 		if err := enforceManagedLeaseCapabilities(cfg, server, leaseID); err != nil {
@@ -1559,19 +1915,29 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return true, err
 		}
 		if expansion.Profile.Doctor.Enabled && isWindowsNativeTarget(target) {
-			return true, exit(2, "profile doctor is not supported for native Windows targets")
+			return true, Exit(2, "profile doctor is not supported for native Windows targets")
 		}
 		if useCoordinator {
-			recorder.AttachLease(leaseID, serverSlug(server), cfg)
+			if err := recorder.AttachLease(ctx, leaseID, ServerSlug(server), cfg); err != nil {
+				if !*syncOnly {
+					return true, err
+				}
+				recorder.warnRunHistory("sync-only run history binding unavailable: %v", err)
+			}
 			startRunHeartbeat(nil)
+		}
+		if !*syncOnly {
+			if err := recorder.requireHandle(); err != nil {
+				return true, err
+			}
 		}
 		if recorder.runID != "" {
 			executionRunID = recorder.runID
 		}
-		applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, serverSlug(server))
+		applyRunExecutionMetadata(&envSelection, leaseID, executionRunID, ServerSlug(server))
 		runReq.RunID = executionRunID
 		runReq.Env = envSelection.Effective
-		if err := a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, serverSlug(server), cfg, &server, target, repo.Root, *reclaim, false); err != nil {
+		if err := a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), cfg, &server, target, repo.Root, *reclaim, false); err != nil {
 			return true, err
 		}
 		workdir = remoteJoin(cfg, leaseID, repo.Name)
@@ -1594,18 +1960,20 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		timings.syncTransferFiles = 0
 		timings.syncTransferBytes = 0
 		timings.syncFallbackReason = ""
-		fmt.Fprintf(a.Stderr, "retrying sync on replacement lease=%s slug=%s\n", leaseID, blank(serverSlug(server), "-"))
-		recorder.Event("lease.replace.finished", "leasing", fmt.Sprintf("lease=%s slug=%s", leaseID, blank(serverSlug(server), "-")))
+		fmt.Fprintf(a.Stderr, "retrying sync on replacement lease=%s slug=%s\n", leaseID, blank(ServerSlug(server), "-"))
+		recorder.Event("lease.replace.finished", "leasing", fmt.Sprintf("lease=%s slug=%s", leaseID, blank(ServerSlug(server), "-")))
 		return true, nil
 	}
+	originDisposition := classifyGitOrigin(repo.RemoteURL)
 retrySync:
+	plainManifestMode := directorySync || (!localGitSeed && originDisposition != gitOriginRemoteAttemptSafe)
 	if fullResyncRequested && hydratedByActions && !*syncOnly {
 		if !autoHydrateActions {
-			return recordFailure(exit(2, "--full-resync would invalidate the adopted Actions workspace for %s, but this run cannot rehydrate it; configure actions.workflow and omit --no-hydrate, or use --sync-only", leaseID))
+			return recordFailure(Exit(2, "--full-resync would invalidate the adopted Actions workspace for %s, but this run cannot rehydrate it; configure actions.workflow and omit --no-hydrate, or use --sync-only", leaseID))
 		}
 		localHydrateWorkdir := remoteJoin(cfg, leaseID, repo.Name)
 		if workdir != localHydrateWorkdir {
-			return recordFailure(exit(2, "--full-resync cannot rehydrate adopted Actions workspace %s because local hydration uses %s; use --sync-only or hydrate the canonical workspace first", workdir, localHydrateWorkdir))
+			return recordFailure(Exit(2, "--full-resync cannot rehydrate adopted Actions workspace %s because local hydration uses %s; use --sync-only or hydrate the canonical workspace first", workdir, localHydrateWorkdir))
 		}
 		fields := actionsHydrateFields(leaseID, githubActionsLeaseLabel(leaseID), cfg.Actions.Job, 0, cfg.Actions.Fields)
 		plan, err := prepareLocalActionsHydration(cfg, repo, target, leaseID, cfg.Actions.Job, fields)
@@ -1616,6 +1984,7 @@ retrySync:
 	}
 	if !*noSync {
 		syncStart := time.Now()
+		observation.Phase(RunPhaseSync)
 		if freshPR.Empty() {
 			fmt.Fprintf(a.Stderr, "syncing %s -> %s:%s\n", repo.Root, target.Host, workdir)
 		} else {
@@ -1625,7 +1994,10 @@ retrySync:
 		recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before sync")
 		target = bootstrapNetworkTarget(cfg, server, target)
 		bootstrapErr := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute)
-		timings.bootstrap += time.Since(stepStart)
+		connectDuration := time.Since(stepStart)
+		timings.bootstrap += connectDuration
+		timings.connect += connectDuration
+		timings.syncConnect += connectDuration
 		if bootstrapErr != nil {
 			return recordFailure(bootstrapErr)
 		}
@@ -1663,7 +2035,12 @@ retrySync:
 				target.Port = cfg.SSHPort
 				target.FallbackPorts = cfg.SSHFallbackPorts
 				target = bootstrapNetworkTarget(cfg, server, target)
-				if waitErr := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute); waitErr != nil {
+				connectStartedAt := time.Now()
+				waitErr := waitForSSHReady(ctx, &target, a.Stderr, "before sync", 2*time.Minute)
+				connectDuration := time.Since(connectStartedAt)
+				timings.connect += connectDuration
+				timings.syncConnect += connectDuration
+				if waitErr != nil {
 					return recordFailure(waitErr)
 				}
 				if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
@@ -1678,7 +2055,7 @@ retrySync:
 				out, err = runSSHCombinedOutput(ctx, target, checkoutCommand)
 			}
 			if err != nil {
-				return recordFailure(exit(6, "fresh-pr checkout failed: %v: %s", err, strings.TrimSpace(out)))
+				return recordFailure(Exit(6, "fresh-pr checkout failed: %v: %s", err, strings.TrimSpace(out)))
 			}
 			timings.syncSteps.gitSeed = time.Since(stepStart)
 			if *applyLocalPatch {
@@ -1699,14 +2076,24 @@ retrySync:
 			recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s fresh_pr=%s", timings.sync.Round(time.Millisecond), freshPR.Slug()))
 			goto afterSync
 		}
-		excludes, err := syncExcludes(repo.Root, cfg)
-		if err != nil {
-			return recordFailure(err)
-		}
 		stepStart = time.Now()
-		manifest, err := syncManifestFilteredRules(repo.Root, excludes, syncIncludes(cfg))
-		if err != nil {
-			return recordFailure(exit(6, "build sync file list: %v", err))
+		var excludes SyncExcludeRules
+		var manifest SyncManifest
+		if localGitSeed {
+			manifest, excludes = localSeed.Snapshot.Manifest, localSeed.Snapshot.Excludes
+			timings.syncMode = "git-local"
+			timings.syncTransferFiles, timings.syncTransferBytes = len(manifest.Files), manifest.Bytes
+			timings.syncSeedBytes = localSeed.Artifact.PackedBytes
+			fmt.Fprintf(a.Stderr, "Git seed source=local head=%s objects=%d object_bytes=%d seed_bytes=%d; exclusions apply to files, not committed history\n", localSeed.Selection.Head, localSeed.Artifact.ObjectCount, localSeed.Artifact.ObjectBytes, localSeed.Artifact.PackedBytes)
+		} else {
+			excludes, err = syncExcludes(repo.Root, cfg)
+			if err != nil {
+				return recordFailure(err)
+			}
+			manifest, err = syncManifestForSource(ctx, repo, cfg, excludes)
+			if err != nil {
+				return recordFailure(Exit(6, "build sync file list: %v", err))
+			}
 		}
 		timings.syncSteps.manifest = time.Since(stepStart)
 		stepStart = time.Now()
@@ -1719,13 +2106,49 @@ retrySync:
 			warnCredentialBearingGitSeed(a.Stderr)
 		}
 		overlayDecision := decideGitOverlay(cfg, repo, target, manifest, coherence, credentialBlocked, fullResyncRequested, hydratedByActions)
-		plainManifestFallback := false
-		overlaySnapshot := ""
+		if plainManifestMode {
+			coherence = gitCoherencePlan{}
+		}
+		syncSourceRoot := repo.Root
+		if localGitSeed {
+			syncSourceRoot = localSeed.Snapshot.Root
+		}
+		var overlaySnapshot gitOverlaySnapshot
 		if overlayDecision.Enabled {
-			overlaySnapshot, err = gitOverlayLocalSnapshot(repo, manifest)
+			overlaySnapshot, err = prepareGitOverlaySnapshot(ctx, repo, cfg, excludes, syncIncludes(cfg), coherence)
+			defer finalizeGitOverlaySnapshotCleanup(returnedRunError, &runFailure, func() error {
+				return terminalGitOverlaySnapshotCleanup(&overlaySnapshot, func(snapshot *gitOverlaySnapshot) error {
+					return snapshot.cleanup()
+				})
+			})
 			if err != nil {
+				if terminalErr := terminalGitOverlayPreparationError(err, overlaySnapshot.Root != "", ctx.Err()); terminalErr != nil {
+					return recordFailure(terminalErr)
+				}
 				overlayDecision.Enabled = false
 				overlayDecision.Reason = gitOverlayLocalFallbackReason(err)
+				plainManifestMode = true
+				coherence = gitCoherencePlan{}
+				err = nil
+				excludes, err = syncExcludes(repo.Root, cfg)
+				if err != nil {
+					return recordFailure(err)
+				}
+				manifest, err = syncManifestForSource(ctx, repo, cfg, excludes)
+				if err != nil {
+					return recordFailure(Exit(6, "rebuild full sync file list after git overlay snapshot fallback: %v", err))
+				}
+				if err := checkSyncPreflight(manifest, cfg, *forceSyncLarge, a.Stderr); err != nil {
+					return recordFailure(err)
+				}
+			}
+			if overlayDecision.Enabled {
+				manifest = overlaySnapshot.Manifest
+				excludes = overlaySnapshot.Excludes
+				syncSourceRoot = overlaySnapshot.Root
+				if err := checkSyncPreflight(manifest, cfg, *forceSyncLarge, a.Stderr); err != nil {
+					return recordFailure(err)
+				}
 			}
 		}
 		if overlayDecision.Requested && !overlayDecision.Enabled {
@@ -1736,11 +2159,24 @@ retrySync:
 			timings.syncFallbackReason = overlayDecision.Reason
 		}
 		fingerprint := ""
-		if cfg.Sync.Fingerprint && !isWindowsNativeTarget(target) && !plainManifestFallback {
+		if localGitSeed && cfg.Sync.Fingerprint && !fullResyncRequested && !isWindowsNativeTarget(target) {
+			remoteFingerprint, fingerprintErr := runSSHOutput(ctx, target, remoteGitLocalSeedFingerprint(workdir, localSeed.Plan))
+			if fingerprintErr == nil && remoteFingerprint == localSeed.Plan.Fingerprint {
+				timings.sync, timings.syncSkipped = time.Since(syncStart), true
+				fmt.Fprintln(a.Stderr, "No changes detected, skipping sync (verified local Git metadata)")
+				goto afterSync
+			}
+		}
+		fingerprintUnsafe := cfg.Sync.Fingerprint && overlayDecision.Requested && !overlayDecision.Enabled && gitOverlayLocalFingerprintUnsafe(repo.Root)
+		if !localGitSeed && cfg.Sync.Fingerprint && !fingerprintUnsafe && !isWindowsNativeTarget(target) && !plainManifestMode {
 			stepStart = time.Now()
-			fingerprintConfig := cfg
-			fingerprintConfig.Sync.GitOverlay = overlayDecision.Enabled
-			fingerprint, err = syncFingerprintForManifest(repo, fingerprintConfig, manifest, excludes, coherence)
+			if overlayDecision.Enabled {
+				fingerprint = overlaySnapshot.Fingerprint
+			} else {
+				fingerprintConfig := cfg
+				fingerprintConfig.Sync.GitOverlay = false
+				fingerprint, err = syncFingerprintForManifest(ctx, repo, fingerprintConfig, manifest, excludes, coherence)
+			}
 			timings.syncSteps.fingerprintLocal = time.Since(stepStart)
 			if err != nil {
 				fmt.Fprintf(a.Stderr, "warning: sync fingerprint failed: %v\n", err)
@@ -1776,20 +2212,34 @@ retrySync:
 				resetCommand = windowsRemoteResetWorkdir(workdir)
 			}
 			if err := runSSHQuiet(ctx, target, resetCommand); err != nil {
-				return recordFailure(exit(7, "reset remote workdir: %v", err))
+				return recordFailure(Exit(7, "reset remote workdir: %v", err))
 			}
 			timings.syncSteps.reset = time.Since(stepStart)
 		} else if isWindowsNativeTarget(target) {
 			stepStart = time.Now()
 			if _, err := runIdempotentSSHCombinedOutput(ctx, target, windowsRemoteMkdir(workdir), idempotentSSHRetryDelay); err != nil {
-				return recordFailure(exit(7, "create remote workdir: %v", err))
+				return recordFailure(Exit(7, "create remote workdir: %v", err))
 			}
 			timings.syncSteps.mkdir = time.Since(stepStart)
 		}
+		if localGitSeed {
+			stepStart = time.Now()
+			if err := transferLocalGitSeed(ctx, target, workdir, localSeed, cfg.Sync.Timeout, a.Stderr); err != nil {
+				return recordFailure(err)
+			}
+			timings.syncSteps.gitSeed += time.Since(stepStart)
+		}
 		if isWindowsNativeTarget(target) {
 			stepStart = time.Now()
-			if err := syncWindowsNative(ctx, target, repo, cfg, coherence, workdir, manifest, a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, FullResync: fullResyncRequested, Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+			transferRepo := repo
+			transferRepo.Root = syncSourceRoot
+			if err := syncWindowsNative(ctx, target, transferRepo, cfg, coherence, workdir, manifest, a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, FullResync: fullResyncRequested, Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
 				return recordFailure(err)
+			}
+			if localGitSeed {
+				if err := runSSHQuiet(ctx, target, windowsGitLocalSeedFinalize(workdir, localSeed.Plan)); err != nil {
+					return recordFailure(Exit(6, "verify local Git seed after Windows file sync: %v", err))
+				}
 			}
 			timings.syncSteps.rsync = time.Since(stepStart)
 			timings.sync = time.Since(syncStart)
@@ -1799,74 +2249,82 @@ retrySync:
 		}
 		if overlayDecision.Enabled {
 			stepStart = time.Now()
-			output, overlayErr := runIdempotentSSHCombinedOutput(ctx, target, remotePrepareGitOverlayWithBase(workdir, coherence, cfg.Sync.BaseRef, gitHydrateBaseSHA(repo, cfg.Sync.BaseRef)), idempotentSSHRetryDelay)
+			output, overlayErr := runIdempotentSSHCombinedOutput(ctx, target, remotePrepareGitOverlayWithHint(workdir, coherence, cfg.Sync.BaseRef, gitHydrateBaseSHA(repo, cfg.Sync.BaseRef), fingerprint), idempotentSSHRetryDelay)
 			timings.syncSteps.gitSeed += time.Since(stepStart)
 			if overlayErr != nil {
 				if reason, fallback, mutated := gitOverlayFallbackOutcome(output, overlayErr); fallback {
 					if gitOverlayBoundaryViolation(reason) {
-						return recordFailure(exit(6, "remote git overlay preparation rejected unsafe workspace state: %s", reason))
+						return recordFailure(Exit(6, "remote git overlay preparation rejected unsafe workspace state: %s", reason))
 					}
 					overlayDecision.Enabled = false
 					overlayDecision.Reason = reason
-					plainManifestFallback = mutated
+					plainManifestMode = mutated || reason == "origin_unavailable" || reason == "origin_auth_required"
 					timings.syncMode = "manifest"
+					timings.syncFallbackReason = reason
+					refreshedExcludes, refreshErr := syncExcludes(repo.Root, cfg)
+					if refreshErr != nil {
+						return recordFailure(refreshErr)
+					}
+					refreshedManifest, refreshErr := syncManifestForSource(ctx, repo, cfg, refreshedExcludes)
+					if refreshErr != nil {
+						return recordFailure(Exit(6, "rebuild full sync file list after git overlay fallback: %v", refreshErr))
+					}
+					excludes = refreshedExcludes
+					manifest = refreshedManifest
+					syncSourceRoot = repo.Root
 					timings.syncTransferFiles = len(manifest.Files)
 					timings.syncTransferBytes = manifest.Bytes
-					timings.syncFallbackReason = reason
-					if mutated {
-						fingerprint = ""
-					} else if cfg.Sync.Fingerprint {
-						fingerprintConfig := cfg
-						fingerprintConfig.Sync.GitOverlay = false
-						fingerprint, err = syncFingerprintForManifest(repo, fingerprintConfig, manifest, excludes, coherence)
-						if err != nil {
-							fmt.Fprintf(a.Stderr, "warning: sync fingerprint failed: %v\n", err)
-						} else if fingerprint != "" {
-							remoteFingerprint, readErr := runSSHOutput(ctx, target, remoteReadSyncFingerprint(workdir, coherence))
-							if readErr == nil && remoteFingerprint == fingerprint {
-								timings.sync = time.Since(syncStart)
-								timings.syncSkipped = true
-								fmt.Fprintf(a.Stderr, "No changes detected, skipping sync (%s)\n", timings.sync.Round(time.Millisecond))
-								recorder.Event("sync.finished", "synced", fmt.Sprintf("duration=%s skipped=true", timings.sync.Round(time.Millisecond)))
-								goto afterSync
-							}
+					if plainManifestMode {
+						if reason == "origin_unavailable" || reason == "origin_auth_required" {
+							coherence = gitCoherencePlan{}
 						}
+					}
+					fingerprint = ""
+					if cleanupErr := overlaySnapshot.cleanup(); cleanupErr != nil {
+						return recordFailure(Exit(6, "clean up immutable git overlay snapshot: %v", cleanupErr))
+					}
+					if err := checkSyncPreflight(manifest, cfg, *forceSyncLarge, a.Stderr); err != nil {
+						return recordFailure(err)
 					}
 					fmt.Fprintf(a.Stderr, "git overlay fallback reason=%s; using full manifest sync\n", reason)
 				} else {
-					return recordFailure(exit(6, "remote git overlay preparation failed: %v", overlayErr))
+					return recordFailure(Exit(6, "remote git overlay preparation failed: %v", overlayErr))
 				}
 			}
 		}
-		if overlayDecision.Enabled {
-			refreshedExcludes, refreshErr := syncExcludes(repo.Root, cfg)
-			if refreshErr != nil {
-				return recordFailure(refreshErr)
+		usePlainManifestForOrigin := func(reason string) {
+			plainManifestMode = true
+			coherence = gitCoherencePlan{}
+			fingerprint = ""
+			if overlayDecision.Requested {
+				overlayDecision.Reason = reason
+				timings.syncMode = "manifest"
+				timings.syncTransferFiles = len(manifest.Files)
+				timings.syncTransferBytes = manifest.Bytes
+				timings.syncFallbackReason = reason
 			}
-			refreshedManifest, refreshErr := syncManifestFilteredRules(repo.Root, refreshedExcludes, syncIncludes(cfg))
-			if refreshErr != nil {
-				return recordFailure(exit(6, "rebuild git overlay sync file list: %v", refreshErr))
-			}
-			refreshedSnapshot, snapshotErr := gitOverlayLocalSnapshot(repo, refreshedManifest)
-			if snapshotErr != nil || overlaySnapshot != refreshedSnapshot || !sameSyncManifest(manifest, refreshedManifest) || !slices.Equal(excludes.rules, refreshedExcludes.rules) {
-				manifest = refreshedManifest
-				excludes = refreshedExcludes
-				overlayDecision.Enabled = false
-				overlayDecision.Reason = "local_checkout_changed"
-				plainManifestFallback = true
-				fingerprint = ""
-				fmt.Fprintf(a.Stderr, "git overlay fallback reason=%s; using full manifest sync\n", overlayDecision.Reason)
-				if err := checkSyncPreflight(manifest, cfg, *forceSyncLarge, a.Stderr); err != nil {
-					return recordFailure(err)
-				}
-			}
+			fmt.Fprintf(a.Stderr, "git origin fallback reason=%s; using plain manifest sync\n", reason)
 		}
-		if !overlayDecision.Enabled && !plainManifestFallback && coherence.seedEnabled() {
+		if !overlayDecision.Enabled && !plainManifestMode && coherence.seedEnabled() {
 			stepStart = time.Now()
-			if out, err := runIdempotentSSHCombinedOutputLimit(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay, gitSeedDiagnosticLimit); err != nil {
-				warnRemoteGitSeedFailure(a.Stderr, out, err)
+			if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
+				if reason, fallback := gitSeedRuntimeFallbackResult(coherence, out, err); fallback {
+					usePlainManifestForOrigin(reason)
+				} else if coherence.Branch == "" {
+					reportRemoteGitSeedFailure(a.Stderr, out, err, "aborting before file sync")
+					return recordFailure(Exit(6, "remote git seed failed: %v", err))
+				} else {
+					warnRemoteGitSeedFailure(a.Stderr, out, err)
+				}
 			}
 			timings.syncSteps.gitSeed += time.Since(stepStart)
+		}
+		if plainManifestMode {
+			stepStart = time.Now()
+			if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteMkdir(workdir), idempotentSSHRetryDelay); err != nil {
+				return recordFailure(Exit(7, "create remote workdir after git overlay fallback: %v", err))
+			}
+			timings.syncSteps.mkdir = time.Since(stepStart)
 		}
 		manifestData := manifest.NUL()
 		deletedData := manifest.DeletedNUL()
@@ -1884,7 +2342,7 @@ retrySync:
 		}
 		finalizeToken, err := randomHex(16)
 		if err != nil {
-			return recordFailure(exit(6, "create sync finalize token: %v", err))
+			return recordFailure(Exit(6, "create sync finalize token: %v", err))
 		}
 		stepStart = time.Now()
 		manifestInput := syncManifestInputForTarget(target, manifestData, deletedData)
@@ -1893,10 +2351,36 @@ retrySync:
 		if cfg.Sync.Timeout > 0 {
 			manifestCtx, cancelManifest = context.WithTimeout(ctx, cfg.Sync.Timeout)
 		}
+		pendingSyncMetadata := true
+		cleanupTarget := target
+		cleanupWorkdir := workdir
+		cleanupGitOverlay := overlayDecision.Enabled
+		cleanupPlainManifest := plainManifestMode
+		defer func() {
+			if !pendingSyncMetadata {
+				return
+			}
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancelCleanup()
+			cleanupCommand := remoteDiscardSyncPendingMetadata(cleanupWorkdir, finalizeToken, cleanupPlainManifest)
+			if cleanupGitOverlay {
+				cleanupCommand = remoteDiscardGitOverlaySyncPendingMetadata(cleanupWorkdir, finalizeToken)
+			}
+			if _, cleanupErr := runIdempotentSSHCombinedOutput(
+				cleanupCtx,
+				cleanupTarget,
+				cleanupCommand,
+				idempotentSSHRetryDelay,
+			); cleanupErr != nil {
+				fmt.Fprintf(a.Stderr, "warning: discard pending sync metadata failed: %v\n", cleanupErr)
+			}
+		}()
 		stopManifestHeartbeat := startSyncHeartbeat(a.Stderr, stepStart, 15*time.Second)
 		manifestCommand := remoteWriteSyncManifestsNewForTarget(target, workdir, finalizeToken)
-		if overlayDecision.Enabled || plainManifestFallback {
+		if overlayDecision.Enabled {
 			manifestCommand = remoteWriteSyncManifestsNewWithMetadata(workdir, finalizeToken, remotePlainSyncMetaDirScript())
+		} else if plainManifestMode {
+			manifestCommand = remoteWriteSyncManifestsNewForTargetMode(target, workdir, finalizeToken, true)
 		}
 		manifestErr := runSSHInput(manifestCtx, target, manifestCommand, strings.NewReader(manifestInput), io.Discard, a.Stderr)
 		stopManifestHeartbeat()
@@ -1904,42 +2388,50 @@ retrySync:
 			cancelManifest()
 		}
 		if manifestCtx.Err() == context.DeadlineExceeded {
-			return recordFailure(exit(6, "write sync manifests timed out after %s", cfg.Sync.Timeout))
+			return recordFailure(Exit(6, "write sync manifests timed out after %s", cfg.Sync.Timeout))
 		}
 		if manifestErr != nil {
-			return recordFailure(exit(7, "write sync manifests: %v", manifestErr))
+			return recordFailure(Exit(7, "write sync manifests: %v", manifestErr))
 		}
 		timings.syncSteps.manifestWrite = time.Since(stepStart)
 		if shouldPruneRemoteSync(cfg.Sync.Delete, fullResyncRequested) {
 			// Full resync can git-seed files that are absent from the local manifest.
 			// Seed the old manifest from git so prune removes those resurrected paths.
-			if !overlayDecision.Enabled && !plainManifestFallback && shouldSeedRemotePruneManifest(hydratedByActions, fullResyncRequested) {
+			if !localGitSeed && !overlayDecision.Enabled && !plainManifestMode && shouldSeedRemotePruneManifest(hydratedByActions, fullResyncRequested) {
 				if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteSeedSyncManifestFromGit(workdir), idempotentSSHRetryDelay); err != nil {
-					return recordFailure(exit(6, "remote sync seed manifest failed: %v", err))
+					return recordFailure(Exit(6, "remote sync seed manifest failed: %v", err))
 				}
 			}
 			stepStart = time.Now()
 			pruneCommand := remotePruneSyncManifestForTarget(target, workdir, finalizeToken)
 			if overlayDecision.Enabled {
 				pruneCommand = remotePruneGitOverlaySyncManifest(workdir, finalizeToken, allowRemoteSyncMassDeletions(cfg, hydratedByActions))
-			} else if plainManifestFallback {
-				pruneCommand = remotePruneSafeSyncManifest(workdir, finalizeToken, remotePlainSyncMetaDirScript(), allowRemoteSyncMassDeletions(cfg, hydratedByActions))
+			} else if plainManifestMode {
+				pruneCommand = remotePruneSyncManifestForTargetMode(target, workdir, finalizeToken, true, allowRemoteSyncMassDeletions(cfg, hydratedByActions))
 			}
 			if _, err := runIdempotentSSHCombinedOutput(ctx, target, pruneCommand, idempotentSSHRetryDelay); err != nil {
-				return recordFailure(exit(6, "remote sync prune failed: %v", err))
+				return recordFailure(Exit(6, "remote sync prune failed: %v", err))
 			}
 			timings.syncSteps.prune = time.Since(stepStart)
 		}
 		if !overlayDecision.Enabled || len(transferData) != 0 {
 			stepStart = time.Now()
-			if err := rsync(ctx, target, repo.Root, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: transferData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
-				return recordFailure(exit(6, "rsync failed: %v", err))
+			// The explicit file list also prevents rsync from applying snapshot-root metadata to the workspace.
+			if err := rsync(ctx, target, syncSourceRoot, workdir, excludes.patterns(), a.Stdout, a.Stderr, rsyncOptions{Debug: *debugSync, Delete: cfg.Sync.Delete, Checksum: cfg.Sync.Checksum, UseFilesFrom: true, FilesFrom: transferData, NoTimes: localContainerDockerSocketSync(cfg, server), Timeout: cfg.Sync.Timeout, HeartbeatInterval: 15 * time.Second}); err != nil {
+				return recordFailure(Exit(6, "rsync failed: %v", err))
 			}
 			timings.syncSteps.rsync = time.Since(stepStart)
 		}
+		if cleanupErr := overlaySnapshot.cleanup(); cleanupErr != nil {
+			return recordFailure(Exit(6, "clean up immutable git overlay snapshot: %v", cleanupErr))
+		}
 		baseSHA := gitHydrateBaseSHA(repo, cfg.Sync.BaseRef)
 		hydrateGit := true
-		if hydratedByActions {
+		finalizeBaseRef := cfg.Sync.BaseRef
+		if localGitSeed {
+			hydrateGit, finalizeBaseRef, baseSHA = false, "", ""
+		}
+		if !plainManifestMode && hydratedByActions {
 			reason, err := runSSHOutput(ctx, target, remoteGitHydrateStatus(workdir, cfg.Sync.BaseRef, baseSHA))
 			if err == nil && reason != "" {
 				timings.syncSteps.gitHydrateSkipped = true
@@ -1949,22 +2441,31 @@ retrySync:
 			}
 		}
 		stepStart = time.Now()
-		finalizeCommand := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+		out, finalizeErr, reason, fallback := runRemoteFinalizeSync(ctx, target, workdir, remoteSyncFinalizeOptions{
 			AllowMassDeletions: allowRemoteSyncMassDeletions(cfg, hydratedByActions),
-			HydrateGit:         hydrateGit && !overlayDecision.Enabled && !plainManifestFallback,
+			HydrateGit:         hydrateGit && !overlayDecision.Enabled && !plainManifestMode,
 			GitOverlay:         overlayDecision.Enabled,
-			PlainManifest:      plainManifestFallback,
-			BaseRef:            cfg.Sync.BaseRef,
+			PlainManifest:      plainManifestMode,
+			BaseRef:            finalizeBaseRef,
 			BaseSHA:            baseSHA,
 			Fingerprint:        fingerprint,
 			Token:              finalizeToken,
 			Coherence:          coherence,
 		})
-		if out, err := runIdempotentSSHCombinedOutput(ctx, target, finalizeCommand, idempotentSSHRetryDelay); err != nil {
+		if fallback {
+			usePlainManifestForOrigin(reason)
+		}
+		if finalizeErr != nil {
 			if out != "" {
-				return recordFailure(exit(6, "remote sync finalize failed: %s: %v", out, err))
+				return recordFailure(Exit(6, "remote sync finalize failed: %s: %v", out, finalizeErr))
 			}
-			return recordFailure(exit(6, "remote sync finalize failed: %v", err))
+			return recordFailure(Exit(6, "remote sync finalize failed: %v", finalizeErr))
+		}
+		pendingSyncMetadata = false
+		if localGitSeed {
+			if err := runSSHQuiet(ctx, target, remoteGitLocalSeedFinalize(workdir, localSeed.Plan)); err != nil {
+				return recordFailure(Exit(6, "verify local Git seed after file sync: %v", err))
+			}
 		}
 		timings.syncSteps.finalize = time.Since(stepStart)
 		timings.sync = time.Since(syncStart)
@@ -1975,37 +2476,59 @@ retrySync:
 		recorder.Event("sync.finished", "synced", "skipped by --no-sync")
 	}
 afterSync:
+	if localGitSeed {
+		if cleanupErr := localSeed.cleanup(); cleanupErr != nil {
+			return recordFailure(Exit(6, "clean up local Git seed before workload: %v", cleanupErr))
+		}
+	}
 	if !*syncOnly && !*noSync {
-		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir), idempotentSSHRetryDelay); err != nil {
-			return recordFailure(exit(7, "invalidate reusable sync fingerprint before execution: %v", err))
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir, plainManifestMode), idempotentSSHRetryDelay); err != nil {
+			return recordFailure(Exit(7, "invalidate reusable sync fingerprint before execution: %v", err))
 		}
 	}
 	if !*noSync {
-		if err := autoHydrateActionsIfNeeded(target); err != nil {
+		if err := autoHydrateActionsIfNeeded(target, plainManifestMode); err != nil {
 			return recordFailure(err)
 		}
 	}
 	if *syncOnly {
-		printPreflight(target)
+		if err := printPreflight(target); err != nil {
+			return recordFailure(err)
+		}
 		fmt.Fprintf(a.Stdout, "synced %s\n", workdir)
 		fmt.Fprintln(a.Stderr, formatRunSummary(timings, time.Since(timings.started), 0))
-		if *timingJSON || timingRecordEnabled {
+		if *timingJSON || timingRecordEnabled || observation != nil {
 			total := time.Since(timings.started)
-			report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, 0, actionsURL)
+			report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, ServerSlug(server), timings, total, 0, actionsURL)
 			populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, nil)
 			report.Label = runLabelValue
 			finalTimingReport = &report
 		}
-		if finishErr := recorder.Finish(ctx, target, 0, timings.sync, 0, "", false, nil, FailureClassification{}, nil); finishErr != nil {
-			return recordFailure(finishErr)
+		finalizeTerminalRun = func() {
+			finalFailure := runFailure
+			if finalFailure == nil {
+				finalFailure = err
+			}
+			finalCode := 0
+			classification := FailureClassification{}
+			if finalFailure != nil {
+				finalCode = ExitCodeForError(finalFailure, 7)
+				classification = ClassifyRunFailure(finalCode, finalFailure.Error(), nil)
+			}
+			if finishErr := recorder.Finish(ctx, target, finalCode, timings.sync, 0, "", false, nil, classification, nil); finishErr != nil {
+				err = errors.Join(err, finishErr)
+				runFailure = errors.Join(runFailure, finishErr)
+			}
 		}
 		return nil
 	}
 	recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before command")
 	target = bootstrapNetworkTarget(cfg, server, target)
 	bootstrapStartedAt := time.Now()
-	bootstrapErr := waitForSSHReady(ctx, &target, a.Stderr, "before command", 2*time.Minute)
-	timings.bootstrap += time.Since(bootstrapStartedAt)
+	bootstrapErr := waitForSSHReady(ctx, &target, a.Stderr, "before command", runBeforeCommandSSHReadyTimeout)
+	connectDuration := time.Since(bootstrapStartedAt)
+	timings.bootstrap += connectDuration
+	timings.connect += connectDuration
 	if bootstrapErr != nil {
 		replaced, replaceErr := replaceLeaseAfterBeforeCommandSSHFailure(bootstrapErr)
 		if replaceErr != nil {
@@ -2043,10 +2566,10 @@ afterSync:
 			mkdirCommand = windowsRemoteMkdir(workdir)
 		}
 		if _, err := runIdempotentSSHCombinedOutput(ctx, target, mkdirCommand, idempotentSSHRetryDelay); err != nil {
-			return recordFailure(exit(7, "create remote workdir: %v", err))
+			return recordFailure(Exit(7, "create remote workdir: %v", err))
 		}
-		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir), idempotentSSHRetryDelay); err != nil {
-			return recordFailure(exit(7, "invalidate reusable sync fingerprint before execution: %v", err))
+		if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, workdir, plainManifestMode), idempotentSSHRetryDelay); err != nil {
+			return recordFailure(Exit(7, "invalidate reusable sync fingerprint before execution: %v", err))
 		}
 	}
 	if err := preflightRawJSRuntime(target); err != nil {
@@ -2087,7 +2610,9 @@ afterSync:
 			fmt.Fprintf(a.Stderr, "env helper remote=%s usage=%s\n", envHelperPath, shellQuote("./"+envHelperPath+" <command>"))
 		}
 	}
-	printPreflight(target)
+	if err := printPreflight(target); err != nil {
+		return recordFailure(err)
+	}
 	if expansion.Profile.Doctor.Enabled {
 		fmt.Fprintf(a.Stderr, "profile doctor profile=%s\n", cfg.Profile)
 		out, err := runSSHCombinedOutput(ctx, target, remoteProfileDoctorCommand(cfg.Profile, expansion.Profile.Doctor, workdir))
@@ -2095,11 +2620,11 @@ afterSync:
 			fmt.Fprintln(a.Stderr, strings.TrimSpace(out))
 		}
 		if err != nil {
-			failure := exit(7, "profile doctor failed for %s: image_prereq_missing", cfg.Profile)
+			failure := Exit(7, "profile doctor failed for %s: image_prereq_missing", cfg.Profile)
 			if shouldReleaseRunLease(acquired, *keep, keepFailedLease, *stopAfter, failure) {
-				return recordFailure(exit(7, "%s; fix the profile image prerequisites, then rerun the command; use --keep or --stop-after never to inspect the failed lease", failure.Error()))
+				return recordFailure(Exit(7, "%s; fix the profile image prerequisites, then rerun the command; use --keep or --stop-after never to inspect the failed lease", failure.Error()))
 			}
-			return recordFailure(exit(7, "%s; rerun crabbox doctor --profile %s --id %s", failure.Error(), cfg.Profile, firstNonBlank(serverSlug(server), leaseID)))
+			return recordFailure(Exit(7, "%s; rerun crabbox doctor --profile %s --id %s", failure.Error(), cfg.Profile, firstNonBlank(ServerSlug(server), leaseID)))
 		}
 	}
 	if !useCoordinator {
@@ -2138,7 +2663,7 @@ afterSync:
 		maybePrintEnvForwardingSummary(a.Stderr, cfg.Provider, "forwarded", cfg.EnvAllow, envSelection.Effective)
 	}
 	runEnv := mergeEnv(envSelection.Inline, capabilityEnv)
-	runEnv = mergeEnv(runEnv, runExecutionMetadata(leaseID, executionRunID, serverSlug(server)))
+	runEnv = mergeEnv(runEnv, runExecutionMetadata(leaseID, executionRunID, ServerSlug(server)))
 	envFiles := remoteRunEnvFiles(actionsEnvFile, profileEnvFile)
 	useShell := shouldUseShellWithLiteralArgs(command, expansion.LiteralArgs)
 	remote := remoteCommandWithEnvFiles(workdir, runEnv, envFiles, command)
@@ -2180,6 +2705,7 @@ afterSync:
 	}
 	if stdoutCaptured {
 		stdoutEvents = nil
+		stdout = io.MultiWriter(stdout, capturedRunLogWriter{&logBuffer})
 	}
 	stderr, stderrCaptured, err := streamCaptures.stderr.writer(stderr, stderrPhaseWriter, a.Stderr)
 	if err != nil {
@@ -2187,19 +2713,10 @@ afterSync:
 	}
 	if stderrCaptured {
 		stderrEvents = nil
+		stderr = io.MultiWriter(stderr, capturedRunLogWriter{&logBuffer})
 	}
-	var terminalReceiptKey ed25519.PrivateKey
-	if recorder.runID != "" || strings.TrimSpace(*attestOut) != "" {
-		terminalReceiptKey, err = resolveAttestKey(strings.TrimSpace(*attestKeyOverride))
-		if err != nil {
-			return recordFailure(exit(2, "attest key: %v", err))
-		}
-	}
-	attestDigest := newAttestDigestWriter()
-	if strings.TrimSpace(*attestOut) != "" || recorder.runID != "" {
-		stdout = io.MultiWriter(stdout, attestDigest)
-		stderr = io.MultiWriter(stderr, attestDigest)
-	}
+	observation.adoptDirectLog(&logBuffer, stdoutCaptured, stderrCaptured)
+	observation.Phase(RunPhaseCommand)
 	resultsMarker := ""
 	if cfg.Results.Auto {
 		resultsMarker = remoteResultsMarker
@@ -2208,7 +2725,7 @@ afterSync:
 			markerCommand = windowsRemoteTouchResultsMarker(workdir)
 		}
 		if err := runSSHQuiet(ctx, target, markerCommand); err != nil {
-			return recordFailure(exit(7, "prepare test result freshness marker: %v", err))
+			return recordFailure(Exit(7, "prepare test result freshness marker: %v", err))
 		}
 	}
 	leaseForEvidence := LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord}
@@ -2244,21 +2761,20 @@ afterSync:
 		code, streamErr, failureDownloadEligible = witness.finish(ctx, code, streamErr)
 	}
 	failureEvidence := RunFailureEvidence{}
+	var commandFailurePhases []TimingPhase
+	commandFailureLog := ""
+	if code != 0 {
+		commandFailureLog = logBuffer.String()
+	}
 	var results *TestResultSummary
 	classification := FailureClassification{}
 	attestPath := strings.TrimSpace(*attestOut)
-	var writtenAttestReceipt terminalRunReceipt
-	attestReceiptWritten := false
+	var preparedTerminalReceipt terminalRunReceipt
+	var preparedTerminalReceiptFile *preparedRunReceipt
+	preparedTerminalExitCode := -1
+	terminalPreparationAttempted := false
+	terminalLog := logBuffer.Snapshot()
 	buildTerminalReceipt := func(finalCode int) (terminalRunReceipt, error) {
-		retainedLog := logBuffer.String()
-		logTruncated := logBuffer.Truncated()
-		retainedLogDigest := sha256Digest([]byte(retainedLog))
-		fullLogDigest := attestDigest.sum()
-		if !logTruncated {
-			// The retained buffer owns stdout/stderr ordering. For complete logs its
-			// digest is also the independently verifiable full-stream digest.
-			fullLogDigest = retainedLogDigest
-		}
 		startedAt := recorder.startedAt
 		endedAt := time.Time{}
 		if !startedAt.IsZero() && !recorder.attachedAt.IsZero() {
@@ -2273,7 +2789,7 @@ afterSync:
 		return buildTerminalRunReceiptWithKey(terminalReceiptKey, terminalRunReceiptInput{
 			Provider:          cfg.Provider,
 			LeaseID:           leaseID,
-			Slug:              serverSlug(server),
+			Slug:              ServerSlug(server),
 			RunID:             executionRunID,
 			Command:           recordCommand,
 			CommandDisplay:    commandDisplay,
@@ -2282,12 +2798,12 @@ afterSync:
 			CommandMs:         timings.command.Milliseconds(),
 			StartedAt:         startedAt,
 			EndedAt:           endedAt,
-			LogSHA256:         fullLogDigest,
-			RetainedLogSHA256: retainedLogDigest,
-			LogTruncated:      logTruncated,
+			LogSHA256:         terminalLog.FullSHA256,
+			RetainedLogSHA256: sha256Digest([]byte(terminalLog.Log)),
+			LogTruncated:      terminalLog.Truncated,
 		})
 	}
-	finalizeTerminalRun = func() {
+	prepareTerminalRun = func() {
 		if timings.command == 0 {
 			timings.command = time.Since(commandStart)
 		}
@@ -2297,68 +2813,91 @@ afterSync:
 			finalFailure = err
 		}
 		if finalCode == 0 && finalFailure != nil {
-			finalCode = exitCodeForError(finalFailure, 7)
+			finalCode = ExitCodeForError(finalFailure, 7)
 		}
 		if recorder.runID == "" && attestPath == "" {
 			return
 		}
 		if finalCode != 0 && classification.BlockedStage == "" {
-			classificationLog := logBuffer.String()
+			classificationLog := commandFailureLog
 			if finalFailure != nil {
 				classificationLog = strings.TrimSpace(classificationLog + "\n" + finalFailure.Error())
 			}
-			classification = classifyRunOutcomeFailure(finalCode, classificationLog, timings.commandPhases, failureEvidence, false)
+			classification = classifyRunOutcomeFailure(finalCode, classificationLog, commandFailurePhases, failureEvidence, false, false)
 		}
-
-		retainedLog := logBuffer.String()
-		logTruncated := logBuffer.Truncated()
-		receipt := writtenAttestReceipt
-		var receiptErr error
-		if !attestReceiptWritten || receipt.ExitCode != finalCode {
-			receipt, receiptErr = buildTerminalReceipt(finalCode)
+		if terminalPreparationAttempted && preparedTerminalExitCode == finalCode {
+			return
 		}
+		terminalPreparationAttempted = true
+		preparedTerminalExitCode = finalCode
+		preparedTerminalReceiptFile = nil
+		receipt, receiptErr := buildTerminalReceipt(finalCode)
 		if receiptErr != nil {
 			err = errors.Join(err, receiptErr)
 			recordRunFailure(&runFailure, receiptErr)
 			return
 		}
-		if attestPath != "" && (!attestReceiptWritten || writtenAttestReceipt.ExitCode != finalCode) {
-			artifact, writeErr := writeTerminalRunReceipt(attestPath, receipt)
+		prepared, receiptErr := prepareTerminalRunReceipt(attestPath, receipt)
+		if receiptErr != nil {
+			err = errors.Join(err, receiptErr)
+			recordRunFailure(&runFailure, receiptErr)
+			return
+		}
+		preparedTerminalReceipt = receipt
+		preparedTerminalReceiptFile = &prepared
+	}
+	finalizeTerminalRun = func() {
+		if preparedTerminalReceiptFile == nil {
+			return
+		}
+		localReceiptPersisted := attestPath == ""
+		if attestPath != "" {
+			artifact, writeErr := persistPreparedRunReceipt(*preparedTerminalReceiptFile)
 			if writeErr != nil {
 				err = errors.Join(err, writeErr)
 				recordRunFailure(&runFailure, writeErr)
+				prepareTerminalRun()
+				if preparedTerminalReceiptFile == nil || preparedTerminalReceipt.ExitCode == 0 {
+					return
+				}
 			} else {
-				writtenAttestReceipt = receipt
-				attestReceiptWritten = true
+				localReceiptPersisted = true
 				fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
 			}
 		}
-		if finishErr := recorder.Finish(ctx, target, finalCode, timings.sync, timings.command, retainedLog, logTruncated, results, classification, &receipt); finishErr != nil {
+		if finishErr := recorder.Finish(ctx, target, preparedTerminalReceipt.ExitCode, timings.sync, timings.command, terminalLog.Log, terminalLog.Truncated, results, classification, &preparedTerminalReceipt); finishErr != nil {
 			err = errors.Join(err, finishErr)
 			recordRunFailure(&runFailure, finishErr)
-			if attestPath != "" && receipt.ExitCode == 0 {
+			if localReceiptPersisted && attestPath != "" && preparedTerminalReceipt.ExitCode == 0 {
 				// The coordinator commit is now ambiguous. Preserve the exact receipt
 				// sent remotely, but make the local CLI failure impossible to miss.
-				failedReceipt, receiptErr := buildTerminalReceipt(exitCodeForError(finishErr, 7))
+				failedReceipt, receiptErr := buildTerminalReceipt(ExitCodeForError(finishErr, 7))
 				if receiptErr != nil {
 					err = errors.Join(err, receiptErr)
 					recordRunFailure(&runFailure, receiptErr)
-				} else if artifact, writeErr := writeTerminalRunReceipt(attestPath, failedReceipt); writeErr != nil {
-					err = errors.Join(err, writeErr)
-					recordRunFailure(&runFailure, writeErr)
 				} else {
-					writtenAttestReceipt = failedReceipt
-					attestReceiptWritten = true
-					fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
+					failedPrepared, prepareErr := prepareTerminalRunReceipt(attestPath, failedReceipt)
+					if prepareErr != nil {
+						err = errors.Join(err, prepareErr)
+						recordRunFailure(&runFailure, prepareErr)
+					} else if artifact, writeErr := persistPreparedRunReceipt(failedPrepared); writeErr != nil {
+						err = errors.Join(err, writeErr)
+						recordRunFailure(&runFailure, writeErr)
+					} else {
+						fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
+					}
 				}
 			}
 			if a.runOutcome != nil {
 				a.runOutcome.Recorded = false
 			}
+		} else if a.runOutcome != nil {
+			a.runOutcome.ExitCode = preparedTerminalReceipt.ExitCode
 		}
 	}
 	if code != 0 || streamErr != nil {
 		failureEvidence = collectRunFailureEvidence(ctx, failureEvidenceCollector, a.Stderr)
+		timings.failureEvidence = failureEvidence
 	}
 	streamCaptureErr := streamCaptures.closeAfterStream(streamErr, code, a.Stderr)
 	if streamCaptureErr != nil && failureEvidence.ResourceExhaustion == "" {
@@ -2374,9 +2913,23 @@ afterSync:
 	stderrPhaseWriter.Flush()
 	timings.command = time.Since(commandStart)
 	timings.commandPhases = phaseTracker.Finish(time.Now())
-	if err := waitWorkspaceOwnerNoChild(ctx, lifecycleOwner, lifecycleOwner.callTimeout()); err != nil {
-		return recordFailure(exit(7, "remote command child ownership remains active; refusing collection and cleanup: %v", err))
+	// Later collection failures must not inherit a successful workload's phase.
+	if code != 0 {
+		commandFailurePhases = timings.commandPhases
 	}
+	if err := waitWorkspaceOwnerNoChild(ctx, lifecycleOwner, lifecycleOwner.callTimeout()); err != nil {
+		return recordFailure(Exit(7, "remote command child ownership remains active; refusing collection and cleanup: %v", err))
+	}
+	artifactStartedAt := time.Now()
+	artifactTimingDone := false
+	finishArtifactTiming := func() {
+		if artifactTimingDone {
+			return
+		}
+		timings.artifacts = time.Since(artifactStartedAt)
+		artifactTimingDone = true
+	}
+	defer finishArtifactTiming()
 	if failureDownloadEligible && ctx.Err() == nil {
 		collectFailureDownloads(ctx, target, workdir, failureDownloads, a.Stderr)
 	} else if len(failureDownloads) > 0 && code != 0 {
@@ -2384,6 +2937,11 @@ afterSync:
 	}
 	if cfg.Results.Auto || len(cfg.Results.JUnit) > 0 {
 		results, err = collectRemoteJUnitResults(ctx, target, workdir, cfg.Results, resultsMarker)
+		if results != nil {
+			observation.Results(results, "collected")
+		} else if err != nil {
+			observation.Results(nil, "unavailable")
+		}
 		if err != nil {
 			fmt.Fprintf(a.Stderr, "warning: collect test results incomplete: %v\n", err)
 		}
@@ -2392,6 +2950,8 @@ afterSync:
 		}
 	}
 	var artifactFailure error
+	// Artifact helpers flatten transport errors; snapshot context before cleanup.
+	var artifactFailureContextErr error
 	var schemaValidationResults []SchemaValidationResult
 	var afterArtifacts []artifactChangeSnapshot
 	if len(requiredArtifactChanges) > 0 && code == 0 && (streamErr != nil || ctx.Err() != nil) {
@@ -2402,17 +2962,19 @@ afterSync:
 		if artifactFailure == nil {
 			artifactChangeResults, artifactFailure = compareArtifactChanges(requiredArtifactChanges, beforeArtifacts, afterArtifacts)
 		}
+		if artifactFailure != nil {
+			artifactFailureContextErr = ctx.Err()
+			code = 7
+		}
 		for _, result := range artifactChangeResults {
 			fmt.Fprintf(a.Stderr, "required artifact change path=%s status=%s\n", result.Path, result.Status)
-		}
-		if artifactFailure != nil {
-			code = 7
 		}
 	}
 	if code == 0 && len(requiredArtifactGlobs) > 0 {
 		requireOutput, err := requireRunArtifactGlobs(ctx, target, workdir, requiredArtifactGlobs)
 		if err != nil {
 			artifactFailure = err
+			artifactFailureContextErr = ctx.Err()
 			code = 7
 		}
 		if strings.TrimSpace(requireOutput) != "" {
@@ -2422,12 +2984,13 @@ afterSync:
 	if code == 0 && len(loadedArtifactSchemas) > 0 {
 		results, schemaOutput, schemaErr := validateRemoteArtifactSchemas(ctx, target, workdir, loadedArtifactSchemas)
 		schemaValidationResults = results
-		if strings.TrimSpace(schemaOutput) != "" {
-			fmt.Fprintln(a.Stderr, strings.TrimSpace(schemaOutput))
-		}
 		if schemaErr != nil {
 			artifactFailure = schemaErr
+			artifactFailureContextErr = ctx.Err()
 			code = 7
+		}
+		if strings.TrimSpace(schemaOutput) != "" {
+			fmt.Fprintln(a.Stderr, strings.TrimSpace(schemaOutput))
 		}
 	}
 	if code == 0 {
@@ -2436,6 +2999,8 @@ afterSync:
 			if err != nil {
 				return recordFailure(err)
 			}
+			timings.artifactTransferCount++
+			timings.artifactTransferBytes += int64(bytes)
 			fmt.Fprintf(a.Stderr, "downloaded %s bytes=%d\n", local, bytes)
 		}
 	}
@@ -2446,6 +3011,8 @@ afterSync:
 			return recordFailure(err)
 		}
 		runArtifacts = append(runArtifacts, collected...)
+		timings.artifactTransferCount += len(collected)
+		timings.artifactTransferBytes += runArtifactBytes(collected)
 		for _, artifact := range collected {
 			fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
 		}
@@ -2459,12 +3026,15 @@ afterSync:
 			fmt.Fprintln(a.Stderr, strings.TrimSpace(artifactOutput))
 		}
 		runArtifacts = append(runArtifacts, collected...)
+		timings.artifactTransferCount += len(collected)
+		timings.artifactTransferBytes += runArtifactBytes(collected)
 		for _, artifact := range collected {
 			fmt.Fprintf(a.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
 		}
 	}
 	// JUnit policy follows workload evidence collection; it must neither suppress
 	// fresh artifacts nor authorize failure downloads after a zero workload exit.
+	finishArtifactTiming()
 	var testResultsFailure error
 	if failRunForTestResults(code, cfg.Results, results) {
 		code = 1
@@ -2473,17 +3043,18 @@ afterSync:
 	}
 	total := time.Since(timings.started)
 	if code != 0 {
-		classificationLog := logBuffer.String()
+		classificationLog := commandFailureLog
 		if artifactFailure != nil {
 			classificationLog = strings.TrimSpace(classificationLog + "\n" + artifactFailure.Error())
 		}
-		classification = classifyRunOutcomeFailure(code, classificationLog, timings.commandPhases, failureEvidence, testResultsFailure != nil)
+		classification = classifyRunOutcomeFailure(code, classificationLog, commandFailurePhases, failureEvidence, testResultsFailure != nil, artifactFailure != nil)
 		timings.blockedStage = classification.BlockedStage
 		timings.resourceExhaustion = classification.ResourceExhaustion
 		timings.retryLikely = classification.RetryLikely
 		failureClassificationPrinted = true
 	}
-	report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, serverSlug(server), timings, total, code, actionsURL)
+	report := timingReportFromRunWithActionsURL(cfg.Provider, leaseID, ServerSlug(server), timings, total, code, actionsURL)
+	applyArtifactFailureOutcome(&report, artifactFailure, artifactFailureContextErr)
 	populateRunTimingMetadata(&report, cfg, repo, server, leaseID, executionRunID, workdir, runArtifacts)
 	report.Label = runLabelValue
 	report.SchemaValidations = schemaValidationResults
@@ -2491,20 +3062,21 @@ afterSync:
 	if strings.TrimSpace(*emitProof) != "" && code == 0 {
 		template := cfg.ProofTemplates[strings.TrimSpace(*proofTemplate)]
 		proof, err := writeRunProof(strings.TrimSpace(*emitProof), strings.TrimSpace(*proofTemplate), proofRenderInput{
-			Template:    template,
-			Provider:    cfg.Provider,
-			LeaseID:     leaseID,
-			Slug:        serverSlug(server),
-			RunID:       executionRunID,
-			Command:     commandDisplay,
-			LogExcerpt:  selectProofLogExcerpt(logBuffer.String()),
-			Captures:    streamCaptures.metadata(),
-			ActionsURL:  actionsURL,
-			Artifacts:   runArtifacts,
-			Variables:   expansion.Variables,
-			CommandMs:   report.CommandMs,
-			ExitCode:    code,
-			GeneratedAt: time.Now(),
+			Template:      template,
+			ImageEvidence: CloneImageEvidence(server.ImageEvidence),
+			Provider:      cfg.Provider,
+			LeaseID:       leaseID,
+			Slug:          ServerSlug(server),
+			RunID:         executionRunID,
+			Command:       commandDisplay,
+			LogExcerpt:    selectProofLogExcerpt(logBuffer.String()),
+			Captures:      streamCaptures.metadata(),
+			ActionsURL:    actionsURL,
+			Artifacts:     runArtifacts,
+			Variables:     expansion.Variables,
+			CommandMs:     report.CommandMs,
+			ExitCode:      code,
+			GeneratedAt:   time.Now(),
 		})
 		if err != nil {
 			return recordFailure(err)
@@ -2512,22 +3084,6 @@ afterSync:
 		runArtifacts = append(runArtifacts, proof)
 		report.Artifacts = runArtifacts
 		fmt.Fprintf(a.Stderr, "artifact kind=proof path=%s bytes=%d template=%s\n", proof.Path, proof.Bytes, blank(proof.Template, "default"))
-	}
-	if attestPath != "" && code == 0 {
-		receipt, err := buildTerminalReceipt(code)
-		if err != nil {
-			return recordFailure(err)
-		}
-		artifact, err := writeTerminalRunReceipt(attestPath, receipt)
-		if err != nil {
-			return recordFailure(err)
-		} else {
-			writtenAttestReceipt = receipt
-			attestReceiptWritten = true
-			runArtifacts = append(runArtifacts, artifact)
-			report.Artifacts = runArtifacts
-			fmt.Fprintf(a.Stderr, "artifact kind=receipt path=%s bytes=%d\n", artifact.Path, artifact.Bytes)
-		}
 	}
 	if a.runOutcome != nil {
 		a.runOutcome.Recorded = true
@@ -2541,8 +3097,8 @@ afterSync:
 	if runLabelValue != "" {
 		labelField = fmt.Sprintf(" label=%q", runLabelValue)
 	}
-	fmt.Fprintf(a.Stderr, "run details provider=%s lease=%s slug=%s run=%s%s type=%s repo=%s workdir=%s actions=%s stop_command=%q idle_timeout=%s\n", cfg.Provider, leaseID, blank(serverSlug(server), "-"), executionRunID, labelField, blank(server.ServerType.Name, "-"), repo.Root, workdir, blank(actionsURL, "-"), report.StopCommand, cfg.IdleTimeout)
-	if *timingJSON || timingRecordEnabled {
+	fmt.Fprintf(a.Stderr, "run details provider=%s lease=%s slug=%s run=%s%s type=%s repo=%s workdir=%s actions=%s stop_command=%q idle_timeout=%s\n", cfg.Provider, leaseID, blank(ServerSlug(server), "-"), executionRunID, labelField, blank(server.ServerType.Name, "-"), repo.Root, workdir, blank(actionsURL, "-"), report.StopCommand, cfg.IdleTimeout)
+	if *timingJSON || timingRecordEnabled || observation != nil {
 		finalTimingReport = &report
 	}
 	if code != 0 {
@@ -2551,18 +3107,21 @@ afterSync:
 			TargetOS:              cfg.TargetOS,
 			WindowsMode:           cfg.WindowsMode,
 			LeaseID:               leaseID,
-			Slug:                  serverSlug(server),
+			Slug:                  ServerSlug(server),
 			RunID:                 executionRunID,
 			RunHistoryUnavailable: recorder.historyIsUnavailable(),
 			CommandDisplay:        commandDisplay,
 			ShellMode:             *shellMode || useShell,
 			ScriptMode:            script != nil,
+			NoSync:                *noSync,
+			RequiredArtifactGlobs: append([]string(nil), requiredArtifactGlobs...),
 			Routing:               CommandRoutingFor(cfg, leaseID, CommandRoutingRetry),
 			SSHRouting:            CommandRoutingFor(cfg, leaseID, CommandRoutingRetry),
 			StopRouting:           CommandRoutingFor(cfg, leaseID, CommandRoutingStop),
 			StopCommand:           report.StopCommand,
 			Classification:        classification,
-			Phases:                timings.commandPhases,
+			Evidence:              sanitizeRunFailureEvidence(failureEvidence),
+			Phases:                commandFailurePhases,
 			Results:               results,
 		}
 		finalizeFailureDigest = func() {
@@ -2574,7 +3133,7 @@ afterSync:
 		capture := FailureCaptureMetadata{
 			Provider:       cfg.Provider,
 			LeaseID:        leaseID,
-			Slug:           serverSlug(server),
+			Slug:           ServerSlug(server),
 			RunID:          executionRunID,
 			CommandDisplay: commandDisplay,
 			Workdir:        workdir,
@@ -2587,6 +3146,9 @@ afterSync:
 			StdoutPath:     streamCaptures.stdout.path(),
 			StderrPath:     streamCaptures.stderr.path(),
 			CaptureFlagSet: *captureOnFail,
+		}
+		if script != nil {
+			capture.RemoteScriptPath = script.RemotePath
 		}
 		if local, bytes, captureErr := captureFailureBundle(ctx, target, workdir, leaseID, executionRunID, capture); captureErr != nil {
 			fmt.Fprintf(a.Stderr, "warning: failure bundle failed: %v\n", captureErr)
@@ -2635,7 +3197,9 @@ func returnReadyPoolAfterWorkspaceOwner(ctx context.Context, owner **workspaceOw
 
 func applyRunEnvAllowFlags(cfg *Config, values []string) {
 	for _, value := range values {
-		cfg.EnvAllow = appendUniqueStrings(cfg.EnvAllow, splitCommaList(value)...)
+		extra := splitCommaList(value)
+		cfg.EnvAllow = appendUniqueStrings(cfg.EnvAllow, extra...)
+		recordConfigInput(cfg, configInputGeneric, configInputFlag, len(extra) > 0)
 	}
 }
 
@@ -2644,7 +3208,7 @@ func writeRunLeaseOutput(path string, session *RunSessionHandle) error {
 		return nil
 	}
 	if session == nil {
-		return exit(2, "--lease-output was requested but provider did not return a session handle")
+		return Exit(2, "--lease-output was requested but provider did not return a session handle")
 	}
 	return writePrivateArtifactJSONFile(path, session)
 }
@@ -2660,6 +3224,31 @@ func (w *countingWriteCloser) Write(p []byte) (int, error) {
 	return n, err
 }
 
+func finalizeGitOverlaySnapshotCleanup(runErr, runFailure *error, cleanup func() error) {
+	cleanupErr := cleanup()
+	if cleanupErr == nil {
+		return
+	}
+	cleanupFailure := Exit(6, "clean up immutable git overlay snapshot: %v", cleanupErr)
+	if runErr != nil {
+		*runErr = errors.Join(*runErr, cleanupFailure)
+	}
+	if runFailure != nil {
+		*runFailure = errors.Join(*runFailure, cleanupFailure)
+	}
+}
+
+func terminalGitOverlaySnapshotCleanup(snapshot *gitOverlaySnapshot, cleanup func(*gitOverlaySnapshot) error) error {
+	if snapshot == nil || snapshot.Root == "" {
+		return nil
+	}
+	cleanupErr := cleanup(snapshot)
+	if cleanupErr != nil {
+		snapshot.closeCleanupRoot()
+	}
+	return cleanupErr
+}
+
 func recordRunFailure(dst *error, failure error) error {
 	if dst != nil && failure != nil {
 		*dst = failure
@@ -2672,7 +3261,7 @@ func validateRunStopAfterPolicy(policy string) error {
 	case "", "success", "always", "failure", "never":
 		return nil
 	default:
-		return exit(2, "--stop-after must be success, always, failure, or never")
+		return Exit(2, "--stop-after must be success, always, failure, or never")
 	}
 }
 
@@ -2684,10 +3273,10 @@ func validateSSHRunLeaseOutputPolicy(spec ProviderSpec, leaseID string, keep, ke
 	reused := strings.TrimSpace(leaseID) != ""
 	acquired := !reused
 	if acquired && !keep {
-		return exit(2, "--lease-output for provider=%s requires --keep when creating a new lease", provider)
+		return Exit(2, "--lease-output for provider=%s requires --keep when creating a new lease", provider)
 	}
 	if runStopPolicyMayRelease(acquired, keep, keepOnFailure, stopAfter) {
-		return exit(2, "--lease-output for provider=%s requires a final stop policy that cannot release the lease; --stop-after=%s may release it", provider, blank(strings.ToLower(strings.TrimSpace(stopAfter)), "auto"))
+		return Exit(2, "--lease-output for provider=%s requires a final stop policy that cannot release the lease; --stop-after=%s may release it", provider, blank(strings.ToLower(strings.TrimSpace(stopAfter)), "auto"))
 	}
 	return nil
 }
@@ -2714,10 +3303,11 @@ func shouldReleaseRunLease(acquired, keep, keepFailedLease bool, stopAfter strin
 
 func populateRunTimingMetadata(report *timingReport, cfg Config, repo Repo, server Server, leaseID, runID, workdir string, artifacts []runArtifact) {
 	report.RunID = runID
+	report.ImageEvidence = CloneImageEvidence(server.ImageEvidence)
 	report.MachineType = server.ServerType.Name
 	report.RepoPath = repo.Root
 	report.Workdir = workdir
-	stopID := firstNonBlank(serverSlug(server), leaseID)
+	stopID := firstNonBlank(ServerSlug(server), leaseID)
 	if normalizeProviderName(cfg.Provider) == "external" {
 		stopID = leaseID
 	}
@@ -2757,6 +3347,18 @@ func writeDelegatedRunProof(path, templateName string, cfg Config, result RunRes
 }
 
 func writeDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult, req RunRequest) (runArtifact, error) {
+	key, err := resolveAttestKey(keyPath)
+	if err != nil {
+		return runArtifact{}, Exit(2, "attest key: %v", err)
+	}
+	prepared, err := prepareDelegatedRunReceipt(path, key, cfg, result, req)
+	if err != nil {
+		return runArtifact{}, err
+	}
+	return persistPreparedRunReceipt(prepared)
+}
+
+func prepareDelegatedRunReceipt(path string, key ed25519.PrivateKey, cfg Config, result RunResult, req RunRequest) (preparedRunReceipt, error) {
 	command := strings.TrimSpace(result.CommandText)
 	if command == "" {
 		command = runCommandDisplay(req.Command, req.ShellMode)
@@ -2778,7 +3380,7 @@ func writeDelegatedRunReceipt(path, keyPath string, cfg Config, result RunResult
 		receipt.ActionsURL = firstNonBlank(receipt.ActionsURL, session.ActionsURL)
 	}
 	receipt.Provider = firstNonBlank(receipt.Provider, cfg.Provider)
-	return writeRunReceipt(path, keyPath, receipt)
+	return prepareRunReceipt(path, key, receipt)
 }
 
 func delegatedRunID(req RunRequest, result RunResult) string {
@@ -2826,22 +3428,35 @@ func runStopCommand(cfg Config, id string) string {
 }
 
 type runTimings struct {
-	started            time.Time
-	endToEndStartedAt  time.Time
-	lease              time.Duration
-	bootstrap          time.Duration
-	sync               time.Duration
-	command            time.Duration
-	syncSteps          syncStepTimings
-	commandPhases      []timingPhase
-	syncSkipped        bool
-	syncMode           string
-	syncTransferFiles  int
-	syncTransferBytes  int64
-	syncFallbackReason string
-	blockedStage       string
-	resourceExhaustion ResourceExhaustionReason
-	retryLikely        string
+	started               time.Time
+	endToEndStartedAt     time.Time
+	borrow                time.Duration
+	lease                 time.Duration
+	legacyLease           time.Duration
+	leasePhase            string
+	connect               time.Duration
+	syncConnect           time.Duration
+	bootstrap             time.Duration
+	legacyBootstrap       time.Duration
+	sync                  time.Duration
+	command               time.Duration
+	artifacts             time.Duration
+	artifactTransferCount int
+	artifactTransferBytes int64
+	providerTiming        *runnerProviderTiming
+	priorRunnerPhases     []RunnerPhase
+	syncSteps             syncStepTimings
+	commandPhases         []timingPhase
+	syncSkipped           bool
+	syncMode              string
+	syncTransferFiles     int
+	syncTransferBytes     int64
+	syncSeedBytes         int64
+	syncFallbackReason    string
+	blockedStage          string
+	resourceExhaustion    ResourceExhaustionReason
+	failureEvidence       RunFailureEvidence
+	retryLikely           string
 }
 
 type syncStepTimings struct {
@@ -2867,8 +3482,8 @@ type syncStepTimings struct {
 
 func formatRunSummary(timings runTimings, total time.Duration, exitCode int) string {
 	summary := fmt.Sprintf("run summary lease=%s bootstrap=%s sync=%s command=%s total=%s end_to_end=%s sync_skipped=%t exit=%d",
-		timings.lease.Round(time.Millisecond),
-		timings.bootstrap.Round(time.Millisecond),
+		legacyLeaseDuration(timings).Round(time.Millisecond),
+		legacyBootstrapDuration(timings).Round(time.Millisecond),
 		timings.sync.Round(time.Millisecond),
 		timings.command.Round(time.Millisecond),
 		total.Round(time.Millisecond),
@@ -2953,27 +3568,41 @@ func delegatedRunNeedsLocalWorkspaceSync(spec ProviderSpec, req RunRequest) bool
 
 func validateDelegatedRunRouting(spec ProviderSpec, req RunRequest, readyPool string, hasArtifactSchemas, profileDoctor bool) error {
 	if strings.TrimSpace(readyPool) != "" {
-		return exit(2, "--pool requires a brokered SSH lease provider")
+		return Exit(2, "--pool requires a brokered SSH lease provider")
 	}
 	if hasArtifactSchemas {
-		return exit(2, "--require-artifact-schema is not supported for provider=%s yet; use an SSH-backed provider", spec.Name)
+		return Exit(2, "--require-artifact-schema is not supported for provider=%s yet; use an SSH-backed provider", spec.Name)
 	}
 	if profileDoctor {
-		return exit(2, "%s delegates run execution; profile doctor is not supported", spec.Name)
+		return Exit(2, "%s delegates run execution; profile doctor is not supported", spec.Name)
 	}
 	return RejectDelegatedSyncOptionsForSpec(spec, req)
 }
 
 func validateProviderRun(provider Provider, req RunRequest, readyPool string, hasArtifactSchemas, profileDoctor bool) error {
+	sshScriptRun, err := selectSSHScriptRun(provider.Spec(), req)
+	if err != nil {
+		return err
+	}
 	if validator, ok := provider.(RunOptionsValidator); ok {
 		if err := validator.ValidateRunOptions(req); err != nil {
 			return err
 		}
 	}
-	if spec := provider.Spec(); spec.Kind == ProviderKindDelegatedRun {
+	if spec := provider.Spec(); spec.Kind == ProviderKindDelegatedRun && !sshScriptRun {
 		return validateDelegatedRunRouting(spec, req, readyPool, hasArtifactSchemas, profileDoctor)
 	}
 	return nil
+}
+
+func selectSSHScriptRun(spec ProviderSpec, req RunRequest) (bool, error) {
+	if !spec.Features.Has(FeatureSSHScriptRun) || (!req.ScriptRequested && req.Script == nil) {
+		return false, nil
+	}
+	if !spec.Features.Has(FeatureSSH) || spec.Features.Has(FeatureModuleRun) {
+		return false, Exit(2, "provider=%s SSH script execution requires SSH support and cannot execute modules", spec.Name)
+	}
+	return true, nil
 }
 
 func rawJSRuntimeHydrateSuggestion(cfg Config, target SSHTarget, leaseID string, acquired, keep, keepOnFailure bool) string {
@@ -2981,7 +3610,7 @@ func rawJSRuntimeHydrateSuggestion(cfg Config, target SSHTarget, leaseID string,
 		return ""
 	}
 	if !acquired || keep || keepOnFailure {
-		return hydrateCommandSuggestion(cfg, target, leaseID, supportsActionsRunnerTarget(target))
+		return hydrateCommandSuggestion(cfg, target, leaseID, supportsGitHubActionsRunnerTarget(target))
 	}
 	return "rerun with --keep and then hydrate the kept lease"
 }
@@ -3343,7 +3972,7 @@ func shouldUseShellWithLiteralArgs(command []string, literalArgs map[int]bool) b
 		}
 		return strings.ContainsAny(command[0], " \t\r\n&|;<>*$`()")
 	}
-	if leadingEnvAssignment(command) {
+	if !literalArgs[0] && leadingEnvAssignment(command) {
 		return true
 	}
 	for idx, word := range command {
@@ -3357,16 +3986,8 @@ func shouldUseShellWithLiteralArgs(command []string, literalArgs map[int]bool) b
 	return false
 }
 
-func ShouldUseShell(command []string) bool {
-	return shouldUseShell(command)
-}
-
 func leadingEnvAssignment(command []string) bool {
-	return len(command) > 1 && isShellEnvAssignment(command[0])
-}
-
-func LeadingEnvAssignment(command []string) bool {
-	return leadingEnvAssignment(command)
+	return len(command) > 1 && IsShellEnvAssignment(command[0])
 }
 
 func shellScriptFromArgvWithLiteralArgs(command []string, literalArgs map[int]bool) string {
@@ -3380,7 +4001,7 @@ func shellScriptFromArgvWithLiteralArgs(command []string, literalArgs map[int]bo
 			}
 			continue
 		}
-		if !literalArgs[idx] && !seenCommand && isShellEnvAssignment(word) {
+		if !literalArgs[idx] && !seenCommand && IsShellEnvAssignment(word) {
 			key, value, _ := strings.Cut(word, "=")
 			parts = append(parts, key+"="+shellQuote(value))
 			continue
@@ -3393,22 +4014,22 @@ func shellScriptFromArgvWithLiteralArgs(command []string, literalArgs map[int]bo
 
 func validateCoordinatorLeaseCapabilities(cfg Config, lease CoordinatorLease) error {
 	if cfg.Desktop && !lease.Desktop {
-		return exit(5, "coordinator did not provision desktop=true for lease %s; deploy the coordinator with desktop/VNC support", blank(lease.ID, "-"))
+		return Exit(5, "coordinator did not provision desktop=true for lease %s; deploy the coordinator with desktop/VNC support", blank(lease.ID, "-"))
 	}
 	if cfg.Desktop {
 		requestedDesktopEnv := normalizedDesktopEnv(cfg.DesktopEnv)
 		if requestedDesktopEnv != desktopEnvXFCE && normalizedDesktopEnv(lease.DesktopEnv) != requestedDesktopEnv {
-			return exit(5, "coordinator did not provision desktopEnv=%s for lease %s; deploy the coordinator with desktop environment support", requestedDesktopEnv, blank(lease.ID, "-"))
+			return Exit(5, "coordinator did not provision desktopEnv=%s for lease %s; deploy the coordinator with desktop environment support", requestedDesktopEnv, blank(lease.ID, "-"))
 		}
 	}
 	if cfg.Browser && !lease.Browser {
-		return exit(5, "coordinator did not provision browser=true for lease %s; deploy the coordinator with browser support", blank(lease.ID, "-"))
+		return Exit(5, "coordinator did not provision browser=true for lease %s; deploy the coordinator with browser support", blank(lease.ID, "-"))
 	}
 	if cfg.Code && !lease.Code {
-		return exit(5, "coordinator did not provision code=true for lease %s; deploy the coordinator with web code support", blank(lease.ID, "-"))
+		return Exit(5, "coordinator did not provision code=true for lease %s; deploy the coordinator with web code support", blank(lease.ID, "-"))
 	}
 	if cfg.Tailscale.Enabled && (lease.Tailscale == nil || !lease.Tailscale.Enabled) {
-		return exit(5, "coordinator did not provision tailscale=true for lease %s; deploy the coordinator with Tailscale support", blank(lease.ID, "-"))
+		return Exit(5, "coordinator did not provision tailscale=true for lease %s; deploy the coordinator with Tailscale support", blank(lease.ID, "-"))
 	}
 	return nil
 }
@@ -3578,7 +4199,7 @@ func releaseCoordinatorLeaseMutation(
 	return lastLease, lastErr
 }
 
-var coordinatorReleaseObservationTimeout = 5 * time.Minute
+var coordinatorReleaseCompletionTimeout = 5 * time.Minute
 
 var coordinatorReleaseObservationCadence = func(int) time.Duration {
 	return 2 * time.Second
@@ -3590,23 +4211,22 @@ func observeCoordinatorReleaseCompletion(
 	lease CoordinatorLease,
 	leaseID, expectedProvider string,
 ) (CoordinatorLease, error) {
-	if retainedCoordinatorRelease(lease) || coordinatorProviderReleaseConfirmed(lease) {
-		return lease, nil
-	}
-	if coordinatorReleaseCleanupFailed(lease) {
-		return lease, coordinatorReleaseObservationError(leaseID, "reported a cleanup failure or scheduled retry")
-	}
-	if lease.State != "released" || lease.CleanupStartedAt == "" {
-		return lease, coordinatorReleaseObservationError(leaseID, "returned an unexpected non-final state")
-	}
-
-	timeout := coordinatorReleaseObservationTimeout
-	if timeout <= 0 {
-		return lease, coordinatorReleaseObservationError(leaseID, "is still pending")
-	}
+	timeout := coordinatorReleaseCompletionTimeout
 	observeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	for observation := 1; ; observation++ {
+		if retainedCoordinatorRelease(lease) || coordinatorProviderReleaseConfirmed(lease) {
+			return lease, nil
+		}
+		if coordinatorReleaseCleanupFailed(lease) {
+			return lease, coordinatorReleaseObservationError(leaseID, "reported a cleanup failure or scheduled retry")
+		}
+		if !coordinatorReleaseCleanupPending(lease) {
+			return lease, coordinatorReleaseObservationError(leaseID, "returned an unexpected non-final state")
+		}
+		if timeout <= 0 {
+			return lease, coordinatorReleaseObservationError(leaseID, "is still pending")
+		}
 		if err := sleepContext(observeCtx, coordinatorReleaseObservationCadence(observation)); err != nil {
 			if cause := context.Cause(ctx); cause != nil {
 				return lease, errors.Join(cause, coordinatorReleaseObservationError(leaseID, "observation was canceled"))
@@ -3630,41 +4250,53 @@ func observeCoordinatorReleaseCompletion(
 			return lease, err
 		}
 		lease = observed
-		if retainedCoordinatorRelease(lease) || coordinatorProviderReleaseConfirmed(lease) {
-			return lease, nil
-		}
-		if coordinatorReleaseCleanupFailed(lease) {
-			return lease, coordinatorReleaseObservationError(leaseID, "reported a cleanup failure or scheduled retry")
-		}
-		if lease.State != "released" || lease.CleanupStartedAt == "" {
-			return lease, coordinatorReleaseObservationError(leaseID, "returned an unexpected non-final state")
-		}
 	}
 }
 
 func retainedCoordinatorRelease(lease CoordinatorLease) bool {
-	return lease.ReleaseDeletesServer != nil && !*lease.ReleaseDeletesServer
+	return lease.ReleaseDeletesServer != nil && !*lease.ReleaseDeletesServer &&
+		(lease.CleanupStatus == "" || lease.CleanupStatus == "retained" && lease.State == "released")
 }
 
 func coordinatorReleaseCleanupFailed(lease CoordinatorLease) bool {
+	if lease.CleanupStatus != "" {
+		return lease.CleanupStatus != "pending" && lease.CleanupStatus != "complete" && lease.CleanupStatus != "retained"
+	}
+	// Older brokers do not distinguish pending creation from cleanup failure.
 	return lease.CleanupError != "" || lease.CleanupRetryAt != ""
 }
 
+func coordinatorReleaseCleanupPending(lease CoordinatorLease) bool {
+	return lease.State == "released" &&
+		(lease.ReleaseDeletesServer == nil || *lease.ReleaseDeletesServer) &&
+		(lease.CleanupStatus == "pending" || lease.CleanupStatus == "" && lease.CleanupStartedAt != "")
+}
+
 func coordinatorReleaseObservationError(leaseID, state string) error {
-	return exit(5, "coordinator accepted release for %s, but remote cleanup %s; local claim and SSH artifacts were preserved; retry crabbox stop after coordinator cleanup advances", leaseID, state)
+	return Exit(5, "coordinator accepted release for %s, but remote cleanup %s; local claim and SSH artifacts were preserved; retry crabbox stop after coordinator cleanup advances", leaseID, state)
 }
 
 func coordinatorProviderReleaseConfirmed(lease CoordinatorLease) bool {
+	_, completionErr := time.Parse(time.RFC3339, lease.CleanupCompletedAt)
 	return lease.State == "released" &&
+		lease.CleanupStatus == "complete" &&
+		completionErr == nil &&
+		lease.Host == "" &&
+		lease.Tailscale == nil &&
+		lease.SSHHostKey == "" &&
+		lease.ProviderAccessExpiresAt == "" &&
 		lease.CleanupStartedAt == "" &&
 		lease.CleanupError == "" &&
 		lease.CleanupRetryAt == "" &&
+		(lease.ProvisioningResourceMayExist == nil || !*lease.ProvisioningResourceMayExist) &&
+		(lease.ProvisioningFailureRetryable == nil || !*lease.ProvisioningFailureRetryable) &&
 		(lease.ReleaseDeletesServer == nil || *lease.ReleaseDeletesServer)
 }
 
-func cleanupReleasedCoordinatorLeaseArtifacts(stderr io.Writer, leaseID string) error {
-	if err := removeStoredTestboxConnectionArtifacts(leaseID); err != nil {
-		fmt.Fprintf(stderr, "warning: released lease %s but local SSH artifact cleanup failed: %v\n", leaseID, err)
+func cleanupReleasedCoordinatorLeaseArtifacts(ctx context.Context, stderr io.Writer, leaseID string) error {
+	if err := removeStoredTestboxConnectionArtifacts(ctx, leaseID); err != nil {
+		err = fmt.Errorf("lease %s remote deletion is confirmed; local SSH artifact cleanup failed: %w; retry crabbox stop to finish local cleanup", leaseID, err)
+		fmt.Fprintf(stderr, "warning: %v\n", err)
 		return err
 	}
 	return nil
@@ -3674,26 +4306,43 @@ type leaseCleanupResult struct {
 	Attempted bool
 	Stopped   bool
 	Err       error
+	Duration  time.Duration
 }
 
 func (result leaseCleanupResult) apply(report *timingReport) {
-	if !result.Attempted || report == nil {
+	if report == nil {
 		return
 	}
-	stopped := result.Stopped
-	report.LeaseStopped = &stopped
-	if result.Err != nil {
-		report.LeaseStopErr = result.Err.Error()
+	if result.Duration > 0 {
+		report.RunnerPhases = append(report.RunnerPhases, RunnerPhase{
+			Name:     "cleanup",
+			Ms:       result.Duration.Milliseconds(),
+			Provider: report.Provider,
+			LeaseID:  report.LeaseID,
+			Slug:     report.Slug,
+		})
+	}
+	if result.Attempted {
+		stopped := result.Stopped
+		report.LeaseStopped = &stopped
+		if result.Err != nil {
+			report.LeaseStopErr = result.Err.Error()
+		}
 	}
 }
 
 func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
+	_, err := a.releaseBackendLeaseWithOutcomeBestEffort(ctx, backend, cfg, lease)
+	return err
+}
+
+func (a App) releaseBackendLeaseWithOutcomeBestEffort(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) (ReleaseLeaseOutcome, error) {
 	connectionCleanupSafe := releaseLeaseConnectionCleanupSafe(backend)
 	if refresher, ok := backend.(ReleaseLeaseTargetRefresher); ok {
 		refreshed, err := refresher.RefreshReleaseLeaseTarget(ctx, lease)
 		if err != nil {
 			if errors.Is(err, ErrReleaseLeaseOwnershipChanged) {
-				return err
+				return ReleaseLeaseOutcome{}, err
 			}
 			fmt.Fprintf(a.Stderr, "warning: could not refresh lease %s before cleanup: %v; attempting release with acquired target\n", lease.LeaseID, err)
 		} else {
@@ -3709,13 +4358,14 @@ func (a App) releaseBackendLeaseBestEffort(ctx context.Context, backend SSHLease
 	if connectionCleanupSafe {
 		a.cleanupBackendLeaseConnectionsBestEffort(ctx, lease)
 	}
-	if err := a.releaseBackendLease(ctx, backend, cfg, lease); err != nil {
-		return err
+	outcome, err := a.releaseBackendLease(ctx, backend, cfg, lease)
+	if err != nil {
+		return outcome, err
 	}
 	if !connectionCleanupSafe {
-		a.cleanupBackendLeaseLocalConnectionsBestEffort(lease.LeaseID)
+		a.cleanupBackendLeaseLocalConnectionsBestEffort(ctx, lease.LeaseID)
 	}
-	return nil
+	return outcome, nil
 }
 
 func releaseLeaseConnectionCleanupSafe(backend SSHLeaseBackend) bool {
@@ -3723,7 +4373,7 @@ func releaseLeaseConnectionCleanupSafe(backend SSHLeaseBackend) bool {
 	return !ok || policy.ReleaseLeaseConnectionCleanupSafe()
 }
 
-func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(leaseIDs ...string) {
+func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(ctx context.Context, leaseIDs ...string) {
 	seen := map[string]bool{}
 	for _, leaseID := range leaseIDs {
 		leaseID = strings.TrimSpace(leaseID)
@@ -3731,7 +4381,7 @@ func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(leaseIDs ...string) {
 			continue
 		}
 		seen[leaseID] = true
-		if _, err := a.stopEgressHostDaemon(leaseID); err != nil {
+		if _, err := a.stopEgressHostDaemon(ctx, leaseID); err != nil {
 			fmt.Fprintf(a.Stderr, "warning: egress host daemon cleanup failed for %s: %v\n", leaseID, err)
 		}
 	}
@@ -3740,7 +4390,7 @@ func (a App) cleanupBackendLeaseLocalConnectionsBestEffort(leaseIDs ...string) {
 func (a App) cleanupBackendLeaseConnectionsBestEffort(ctx context.Context, lease LeaseTarget) {
 	// Keep mediated outbound connections alive while the guest winds down.
 	a.cleanupBackendLeaseRemoteConnectionsBestEffort(ctx, lease)
-	a.cleanupBackendLeaseLocalConnectionsBestEffort(lease.LeaseID)
+	a.cleanupBackendLeaseLocalConnectionsBestEffort(ctx, lease.LeaseID)
 }
 
 const remoteConnectionCleanupTimeout = 35 * time.Second
@@ -3761,18 +4411,26 @@ func (a App) cleanupBackendLeaseRemoteConnectionsBestEffort(ctx context.Context,
 	a.logoutRemoteTailscaleBestEffort(cleanupCtx, lease)
 }
 
-func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) error {
+func (a App) releaseBackendLease(ctx context.Context, backend SSHLeaseBackend, cfg Config, lease LeaseTarget) (ReleaseLeaseOutcome, error) {
 	fmt.Fprintf(a.Stderr, "releasing %s server=%s\n", lease.LeaseID, lease.Server.DisplayID())
 	request := ReleaseLeaseRequest{Lease: lease, Force: true, DeferProviderCleanupObservation: true}
 	if !releaseLeaseConnectionCleanupSafe(backend) {
 		request.GuardedRemoteCleanup = a.cleanupBackendLeaseRemoteConnectionsBestEffort
 	}
-	if err := backend.ReleaseLease(ctx, request); err != nil {
+	var outcome ReleaseLeaseOutcome
+	var err error
+	if reporter, ok := backend.(ReleaseLeaseOutcomeBackend); ok {
+		outcome, err = reporter.ReleaseLeaseWithOutcome(ctx, request)
+	} else {
+		err = backend.ReleaseLease(ctx, request)
+		outcome.Terminal = err == nil
+	}
+	if err != nil {
 		fmt.Fprintf(a.Stderr, "warning: release failed for %s: %v\n", lease.LeaseID, err)
-		return err
+		return outcome, err
 	}
 	a.releaseRegisteredCoordinatorLeaseBestEffort(ctx, cfg, lease.LeaseID)
-	return nil
+	return outcome, nil
 }
 
 func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, leaseID, expectedProvider string, idleTimeout time.Duration, updateIdleTimeout *time.Duration, telemetryCollector leaseTelemetryCollector, stderr io.Writer) (func(), error) {
@@ -3797,28 +4455,26 @@ func startCoordinatorHeartbeat(ctx context.Context, coord *CoordinatorClient, le
 			telemetry := collectLeaseTelemetryBestEffort(rootCtx, telemetryCollector)
 			callCtx, heartbeatCancel := context.WithTimeout(rootCtx, 20*time.Second)
 			var err error
-			var idleTimeoutOverride *time.Duration
-			if updateIdleTimeout != nil {
-				idleTimeoutOverride = updateIdleTimeout
-			}
 			if control == nil {
-				control, _ = dialCoordinatorControl(callCtx, coord)
+				control, err = dialCoordinatorControl(callCtx, coord)
 			}
 			if control != nil {
-				err = control.heartbeat(callCtx, leaseID, expectedProvider, idleTimeoutOverride, telemetry)
+				err = control.heartbeat(callCtx, leaseID, expectedProvider, updateIdleTimeout, telemetry)
 				if err != nil {
 					control.close()
 					control = nil
 				}
 			}
-			if control == nil {
-				if updateIdleTimeout != nil {
-					_, err = coord.UpdateLeaseIdleTimeoutWithTelemetryForProvider(callCtx, leaseID, expectedProvider, *updateIdleTimeout, telemetry)
+			if err != nil {
+				err = fmt.Errorf("control heartbeat: %w", err)
+			}
+			// A spent shared budget cannot send HTTP; preserve the failed control stage.
+			if control == nil && callCtx.Err() == nil {
+				if _, fallbackErr := coord.heartbeatLease(callCtx, leaseID, expectedProvider, updateIdleTimeout, telemetry); fallbackErr != nil {
+					err = errors.Join(err, fallbackErr)
 				} else {
-					_, err = coord.TouchLeaseWithTelemetryForProvider(callCtx, leaseID, expectedProvider, telemetry)
+					err = nil
 				}
-			} else {
-				err = nil
 			}
 			heartbeatCancel()
 			if err != nil && rootCtx.Err() == nil {
@@ -3910,7 +4566,7 @@ func coordinatorLeaseStillActive(ctx context.Context, coord *CoordinatorClient, 
 	callCancel()
 	if err != nil {
 		if isCoordinatorNotFoundError(err) {
-			cancel(exit(5, "lease %s disappeared while waiting for SSH; another process may have released it", leaseID))
+			cancel(Exit(5, "lease %s disappeared while waiting for SSH; another process may have released it", leaseID))
 			return false
 		}
 		if ctx.Err() == nil {
@@ -3919,7 +4575,7 @@ func coordinatorLeaseStillActive(ctx context.Context, coord *CoordinatorClient, 
 		return true
 	}
 	if lease.State != "" && lease.State != "active" {
-		cancel(exit(5, "lease %s became %s while waiting for SSH; another process may have released it", leaseID, lease.State))
+		cancel(Exit(5, "lease %s became %s while waiting for SSH; another process may have released it", leaseID, lease.State))
 		return false
 	}
 	return true
@@ -3955,7 +4611,7 @@ func waitForServerIP(ctx context.Context, client *HetznerClient, id int64) (Serv
 			return server, nil
 		}
 		if time.Now().After(deadline) {
-			return Server{}, exit(5, "timed out waiting for server IP")
+			return Server{}, Exit(5, "timed out waiting for server IP")
 		}
 		if err := sleepContext(ctx, 3*time.Second); err != nil {
 			return Server{}, err
@@ -3968,7 +4624,7 @@ func WaitForServerIP(ctx context.Context, client *HetznerClient, id int64) (Serv
 }
 
 func findServerByAlias(servers []Server, id string) (Server, string, error) {
-	if isCanonicalLeaseID(id) {
+	if IsCanonicalLeaseID(id) {
 		for _, server := range servers {
 			if server.Labels["lease"] == id {
 				return server, server.Labels["lease"], nil
@@ -3979,9 +4635,9 @@ func findServerByAlias(servers []Server, id string) (Server, string, error) {
 		return Server{}, "", nil
 	}
 	matches := make([]Server, 0, 2)
-	slug := normalizeLeaseSlug(id)
+	slug := NormalizeLeaseSlug(id)
 	for _, server := range servers {
-		if serverSlug(server) == slug {
+		if ServerSlug(server) == slug {
 			matches = append(matches, server)
 		}
 	}
@@ -3989,9 +4645,9 @@ func findServerByAlias(servers []Server, id string) (Server, string, error) {
 		var b strings.Builder
 		fmt.Fprintf(&b, "slug %q matches multiple active leases:\n", id)
 		for _, server := range matches {
-			fmt.Fprintf(&b, "  lease=%s slug=%s server=%s host=%s\n", blank(server.Labels["lease"], "-"), blank(serverSlug(server), "-"), server.DisplayID(), server.PublicNet.IPv4.IP)
+			fmt.Fprintf(&b, "  lease=%s slug=%s server=%s host=%s\n", blank(server.Labels["lease"], "-"), blank(ServerSlug(server), "-"), server.DisplayID(), server.PublicNet.IPv4.IP)
 		}
-		return Server{}, "", exit(4, "%s", strings.TrimSpace(b.String()))
+		return Server{}, "", Exit(4, "%s", strings.TrimSpace(b.String()))
 	}
 	if len(matches) == 1 {
 		return matches[0], matches[0].Labels["lease"], nil
@@ -4015,6 +4671,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 	id := fs.String("id", "", "lease id or slug")
 	reclaim := fs.Bool("reclaim", false, "adopt an unclaimed provider resource before stopping it")
 	forceRecovery := fs.Bool("force", false, "recover and stop one exactly identified provider resource")
+	currentRepo := fs.Bool("current-repo", false, "stop a fixed-ID lease only while its claim belongs to the current repository")
 	expectedLeaseID := fs.String("expected-provider-lease-id", "", "internal: immutable provider lease identity")
 	expectedAttemptLeaseID := fs.String("expected-provider-attempt-lease-id", "", "internal: immutable provider attempt identity")
 	expectedSlug := fs.String("expected-provider-slug", "", "internal: immutable provider slug identity")
@@ -4030,17 +4687,17 @@ func (a App) stop(ctx context.Context, args []string) error {
 	idFlagSet := flagWasSet(fs, "id")
 	setIDFromFirstArg(fs, id)
 	if strings.TrimSpace(*id) == "" || fs.NArg() > 1 || (idFlagSet && fs.NArg() > 0) {
-		return exit(2, "usage: crabbox stop --id <lease-or-server-id>")
+		return Exit(2, "usage: crabbox stop --id <lease-or-server-id>")
 	}
 	if *forceRecovery {
 		if !flagWasSet(fs, "provider") {
-			return exit(2, "stop --force requires an explicit --provider")
+			return Exit(2, "stop --force requires an explicit --provider")
 		}
 		if !idFlagSet {
-			return exit(2, "stop --force requires an exact --id")
+			return Exit(2, "stop --force requires an exact --id")
 		}
 		if *reclaim {
-			return exit(2, "stop --force cannot be combined with --reclaim")
+			return Exit(2, "stop --force cannot be combined with --reclaim")
 		}
 	}
 	expectedFlagNames := []string{
@@ -4056,26 +4713,29 @@ func (a App) stop(ctx context.Context, args []string) error {
 		}
 	}
 	if *forceRecovery && (expectedFlagCount != 0 || *confirmedAbsentLocalCleanup || flagWasSet(fs, "expected-provider-scope") || flagWasSet(fs, "expected-coordinator-registration-url")) {
-		return exit(2, "stop --force cannot be combined with controller-owned release identity")
+		return Exit(2, "stop --force cannot be combined with controller-owned release identity")
 	}
 	if expectedFlagCount != 0 && expectedFlagCount != len(expectedFlagNames) {
-		return exit(2, "internal provider release requires the complete expected identity set")
+		return Exit(2, "internal provider release requires the complete expected identity set")
+	}
+	if *currentRepo && (!IsCanonicalLeaseID(*id) || *forceRecovery || *reclaim || expectedFlagCount != 0 || *confirmedAbsentLocalCleanup || flagWasSet(fs, "expected-provider-scope") || flagWasSet(fs, "expected-coordinator-registration-url")) {
+		return Exit(2, "stop --current-repo requires a canonical lease ID and cannot combine recovery or controller identity flags")
 	}
 	if *confirmedAbsentLocalCleanup && (expectedFlagCount != len(expectedFlagNames) || !flagWasSet(fs, "expected-provider-scope") || !flagWasSet(fs, "expected-coordinator-registration-url") || !flagWasSet(fs, "provider")) {
-		return exit(2, "confirmed-absence local cleanup requires explicit provider, scope, coordinator binding, and complete expected identity set")
+		return Exit(2, "confirmed-absence local cleanup requires explicit provider, scope, coordinator binding, and complete expected identity set")
 	}
 	if flagWasSet(fs, "expected-coordinator-registration-url") {
 		if !*confirmedAbsentLocalCleanup {
-			return exit(2, "expected coordinator registration binding is only valid for confirmed-absence cleanup")
+			return Exit(2, "expected coordinator registration binding is only valid for confirmed-absence cleanup")
 		}
 		if err := validateControllerCoordinatorRegistrationURL(*expectedCoordinatorRegistrationURL); err != nil {
-			return exit(2, "invalid expected coordinator registration binding: %v", err)
+			return Exit(2, "invalid expected coordinator registration binding: %v", err)
 		}
 	}
 	if flagWasSet(fs, "expected-provider-scope") {
 		scope := strings.TrimSpace(*expectedProviderScope)
 		if scope == "" || scope != *expectedProviderScope || !validControllerInventoryIdentity(scope) {
-			return exit(2, "invalid expected provider scope")
+			return Exit(2, "invalid expected provider scope")
 		}
 	}
 	expectedIdentity := ProviderIdentityExpectation{
@@ -4096,12 +4756,13 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if err := prepareProviderSelection(&cfg, *provider); err != nil {
 		return err
 	}
+	markSynthesizedFlagInputs(&cfg, a.synthesizedFlagInputs)
 	if *confirmedAbsentLocalCleanup {
 		resolvedProvider, err := ProviderFor(cfg.Provider)
 		if err != nil {
 			return err
 		}
-		if resolvedProvider.Name() == "external" {
+		if resolvedProvider.Spec().Name == "external" {
 			leaseID := firstNonBlank(expectedIdentity.LeaseID, expectedIdentity.AttemptLeaseID)
 			path, err := ExternalRoutingPath(leaseID)
 			if err != nil {
@@ -4139,7 +4800,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 			return err
 		}
 		if actualScope != *expectedProviderScope {
-			return exit(4, "provider configuration scope changed before lifecycle operation")
+			return Exit(4, "provider configuration scope changed before lifecycle operation")
 		}
 	}
 	if *confirmedAbsentLocalCleanup {
@@ -4148,12 +4809,32 @@ func (a App) stop(ctx context.Context, args []string) error {
 			return err
 		}
 		if actualCoordinatorRegistrationURL != *expectedCoordinatorRegistrationURL {
-			return exit(4, "coordinator registration binding changed before confirmed-absence cleanup")
+			return Exit(4, "coordinator registration binding changed before confirmed-absence cleanup")
+		}
+	}
+	if *currentRepo {
+		capabilities, err := execCapabilitiesForConfig(cfg)
+		if err != nil {
+			return err
+		}
+		if !capabilities.CurrentRepoStop {
+			return Exit(2, "provider=%s does not support stop --current-repo", capabilities.Provider)
 		}
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
+	}
+	if *currentRepo {
+		scoped, ok := backend.(RepositoryScopedStopBackend)
+		if !ok {
+			return Exit(2, "provider=%s does not support stop --current-repo", backend.Spec().Name)
+		}
+		boundary, err := findRepositoryBoundary()
+		if err != nil {
+			return err
+		}
+		return scoped.StopForRepository(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id}, boundary.root)
 	}
 	if *confirmedAbsentLocalCleanup {
 		// Validate the immutable local identity before the network mutation, but
@@ -4175,31 +4856,38 @@ func (a App) stop(ctx context.Context, args []string) error {
 			return reclaimer.ReclaimAndStop(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id})
 		}
 		if backendCoordinator(backend) == nil {
-			return exit(2, "provider=%s does not support verified forced recovery; inspect the resource and use its provider CLI", backend.Spec().Name)
+			return Exit(2, "provider=%s does not support verified forced recovery; inspect the resource and use its provider CLI", backend.Spec().Name)
 		}
-		if !isCanonicalLeaseID(*id) {
-			return exit(2, "provider=%s stop --force requires an exact coordinator lease id", backend.Spec().Name)
+		if !IsCanonicalLeaseID(*id) {
+			return Exit(2, "provider=%s stop --force requires an exact coordinator lease id", backend.Spec().Name)
 		}
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		if !expectedIdentity.empty() {
-			return exit(2, "provider=%s cannot validate an expected release identity", backend.Spec().Name)
+			return Exit(2, "provider=%s cannot validate an expected release identity", backend.Spec().Name)
 		}
 		if *reclaim {
 			reclaimer, ok := backend.(StopReclaimBackend)
 			if !ok {
-				return exit(2, "provider=%s does not support stop --reclaim", backend.Spec().Name)
+				return Exit(2, "provider=%s does not support stop --reclaim", backend.Spec().Name)
 			}
 			return reclaimer.ReclaimAndStop(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id})
 		}
 		return delegated.Stop(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id})
 	}
 	if *reclaim {
-		return exit(2, "provider=%s does not support stop --reclaim", backend.Spec().Name)
+		return Exit(2, "provider=%s does not support stop --reclaim", backend.Spec().Name)
 	}
 	sshBackend, ok := backend.(SSHLeaseBackend)
 	if !ok {
-		return exit(2, "provider=%s does not support stop", backend.Spec().Name)
+		return Exit(2, "provider=%s does not support stop", backend.Spec().Name)
+	}
+	if backendCoordinator(backend) != nil {
+		// Inspection, claim acquisition, release and observation share one budget;
+		// starting a fresh observation window would outlive the stop operation.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, coordinatorReleaseCompletionTimeout)
+		defer cancel()
 	}
 	lease, err := sshBackend.Resolve(ctx, ResolveRequest{
 		Options:                  leaseOptionsFromConfig(cfg),
@@ -4238,7 +4926,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 	connectionCleanupSafe := releaseLeaseConnectionCleanupSafe(sshBackend)
 	if connectionCleanupSafe {
 		a.cleanupBackendLeaseRemoteConnectionsBestEffort(ctx, lease)
-		a.cleanupBackendLeaseLocalConnectionsBestEffort(*id, lease.LeaseID)
+		a.cleanupBackendLeaseLocalConnectionsBestEffort(ctx, *id, lease.LeaseID)
 	}
 	request := ReleaseLeaseRequest{
 		Lease:                    lease,
@@ -4252,11 +4940,11 @@ func (a App) stop(ctx context.Context, args []string) error {
 		return err
 	}
 	if !connectionCleanupSafe {
-		a.cleanupBackendLeaseLocalConnectionsBestEffort(*id, lease.LeaseID)
+		a.cleanupBackendLeaseLocalConnectionsBestEffort(ctx, *id, lease.LeaseID)
 	}
 	if isMacOSDesktopProvider(coordinatorCleanupCfg) && supportsDirectSSHWebVNC(cfg.Provider) {
-		for _, daemonID := range uniqueNonBlankStrings(*id, lease.LeaseID, serverSlug(lease.Server)) {
-			if _, stopErr := a.stopWebVNCDaemonIfRunning(daemonID); stopErr != nil {
+		for _, daemonID := range uniqueNonBlankStrings(*id, lease.LeaseID, ServerSlug(lease.Server)) {
+			if _, stopErr := a.stopWebVNCDaemonIfRunning(ctx, daemonID); stopErr != nil {
 				fmt.Fprintf(a.Stderr, "warning: could not stop macOS WebVNC daemon for %s: %v\n", daemonID, stopErr)
 			}
 		}
@@ -4289,30 +4977,30 @@ func confirmedAbsentLocalStateSnapshot(ctx context.Context, backend Backend, exp
 	}
 	leaseID := firstNonBlank(expected.LeaseID, expected.AttemptLeaseID)
 	if expected.LeaseID != "" && expected.AttemptLeaseID != "" && expected.LeaseID != expected.AttemptLeaseID {
-		return confirmedAbsentLocalState{}, exit(4, "provider lease identity changed before confirmed-absence cleanup")
+		return confirmedAbsentLocalState{}, Exit(4, "provider lease identity changed before confirmed-absence cleanup")
 	}
 	provider := backend.Spec().Name
-	claim, claimExists, err := readLeaseClaimWithPresence(leaseID)
+	claim, claimExists, err := ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return confirmedAbsentLocalState{}, err
 	}
 	if claimExists {
 		if claim.Provider != provider {
-			return confirmedAbsentLocalState{}, exit(4, "lease claim provider changed before confirmed-absence cleanup")
+			return confirmedAbsentLocalState{}, Exit(4, "lease claim provider changed before confirmed-absence cleanup")
 		}
 		if claim.ProviderScope != providerScope {
-			return confirmedAbsentLocalState{}, exit(4, "lease claim provider scope changed before confirmed-absence cleanup")
+			return confirmedAbsentLocalState{}, Exit(4, "lease claim provider scope changed before confirmed-absence cleanup")
 		}
 		for _, identity := range []string{expected.LeaseID, expected.AttemptLeaseID} {
 			if identity != "" && claim.LeaseID != identity {
-				return confirmedAbsentLocalState{}, exit(4, "lease claim identity changed before confirmed-absence cleanup")
+				return confirmedAbsentLocalState{}, Exit(4, "lease claim identity changed before confirmed-absence cleanup")
 			}
 		}
 		if expected.Slug != "" && claim.Slug != expected.Slug {
-			return confirmedAbsentLocalState{}, exit(4, "lease claim slug changed before confirmed-absence cleanup")
+			return confirmedAbsentLocalState{}, Exit(4, "lease claim slug changed before confirmed-absence cleanup")
 		}
 		if expected.ResourceID != "" && claim.CloudID != expected.ResourceID {
-			return confirmedAbsentLocalState{}, exit(4, "lease claim resource identity changed before confirmed-absence cleanup")
+			return confirmedAbsentLocalState{}, Exit(4, "lease claim resource identity changed before confirmed-absence cleanup")
 		}
 	}
 	return confirmedAbsentLocalState{leaseID: leaseID, claim: claim, claimExists: claimExists}, nil
@@ -4333,7 +5021,7 @@ func cleanupConfirmedAbsentLocalState(ctx context.Context, backend Backend, expe
 			ProviderScope:            providerScope,
 		})
 	}
-	return cleanupLeaseClaimIfUnchangedAfter(state.leaseID, state.claim, state.claimExists, cleanupSidecars)
+	return CleanupLeaseClaimIfUnchangedAfter(state.leaseID, state.claim, state.claimExists, cleanupSidecars)
 }
 
 func (a App) writeActionsHydrationStopBestEffort(ctx context.Context, target SSHTarget, leaseID string) {
@@ -4382,7 +5070,7 @@ func localContainerDockerSocketConfig(cfg Config) bool {
 	return cfg.Provider == "local-container" && cfg.LocalContainer.DockerSocket
 }
 
-func serverProviderKey(server Server) string {
+func ServerProviderKey(server Server) string {
 	if server.Labels != nil && server.Labels["provider_key"] != "" {
 		return server.Labels["provider_key"]
 	}
@@ -4392,7 +5080,7 @@ func serverProviderKey(server Server) string {
 	return ""
 }
 
-func validCrabboxProviderKey(name string) bool {
+func ValidCrabboxProviderKey(name string) bool {
 	const prefix = "crabbox-cbx-"
 	if !strings.HasPrefix(name, prefix) || len(name) != len(prefix)+12 {
 		return false

@@ -204,13 +204,13 @@ func (a App) capsuleFromActions(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox capsule from-actions <run-url> --replay '<command>'")
+		return Exit(2, "usage: crabbox capsule from-actions <run-url> --replay '<command>'")
 	}
 	if strings.TrimSpace(*replayCommand) == "" {
-		return exit(2, "capsule from-actions requires --replay")
+		return Exit(2, "capsule from-actions requires --replay")
 	}
 	if *maxLogBytes <= 0 {
-		return exit(2, "--max-log-bytes must be greater than 0")
+		return Exit(2, "--max-log-bytes must be greater than 0")
 	}
 	runRef, err := parseActionsRunRef(fs.Arg(0), *repoFlag)
 	if err != nil {
@@ -239,13 +239,13 @@ func (a App) capsuleFromActions(ctx context.Context, args []string) error {
 	}
 	job, step, jobMatched := selectCapsuleFailure(view.Jobs, *jobName)
 	if !jobMatched {
-		return exit(2, "capsule from-actions --job %q did not match any job in the run", *jobName)
+		return Exit(2, "capsule from-actions --job %q did not match any job in the run", *jobName)
 	}
 	if !isFailureConclusion(job.Conclusion) {
 		if job.Name != "" {
-			return exit(2, "capsule from-actions selected job %q but its conclusion is %q, not a failure", job.Name, blank(job.Conclusion, "-"))
+			return Exit(2, "capsule from-actions selected job %q but its conclusion is %q, not a failure", job.Name, blank(job.Conclusion, "-"))
 		}
-		return exit(2, "capsule from-actions requires a failed GitHub Actions job")
+		return Exit(2, "capsule from-actions requires a failed GitHub Actions job")
 	}
 	if *scenario == "" {
 		*scenario = defaultCapsuleScenario(view, job, step)
@@ -302,7 +302,7 @@ func (a App) capsuleReplay(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox capsule replay <capsule.yaml> [--keep]")
+		return Exit(2, "usage: crabbox capsule replay <capsule.yaml> [--keep]")
 	}
 	path := capsuleManifestPath(fs.Arg(0))
 	manifest, err := readCapsuleManifest(path)
@@ -310,7 +310,7 @@ func (a App) capsuleReplay(ctx context.Context, args []string) error {
 		return err
 	}
 	if strings.TrimSpace(manifest.Replay.Command) == "" {
-		return exit(2, "capsule %s has no replay.command", path)
+		return Exit(2, "capsule %s has no replay.command", path)
 	}
 	runArgs := []string{"--shell"}
 	if *leaseID != "" {
@@ -350,7 +350,7 @@ func (a App) capsuleReplay(ctx context.Context, args []string) error {
 		record.Note = "replay command exited 0; original failure was not reproduced"
 		manifest.Replays = append(manifest.Replays, record)
 		_ = writeCapsuleManifest(path, manifest)
-		return exit(1, "capsule replay did not reproduce the failure; command exited 0 after %s", time.Since(started).Round(time.Millisecond))
+		return Exit(1, "capsule replay did not reproduce the failure; command exited 0 after %s", time.Since(started).Round(time.Millisecond))
 	}
 	if code, ok := remoteReplayExitCode(err); ok {
 		record.DurationMs = time.Since(started).Milliseconds()
@@ -363,7 +363,7 @@ func (a App) capsuleReplay(ctx context.Context, args []string) error {
 			return writeErr
 		}
 		if !reproduced {
-			return exit(1, "capsule replay found a new failure; exit=%d did not contain failure_signature %q in the last %d bytes of replay output", code, strings.TrimSpace(manifest.Oracle.FailureSignature), capsuleReplayOutputMaxBytes)
+			return Exit(1, "capsule replay found a new failure; exit=%d did not contain failure_signature %q in the last %d bytes of replay output", code, strings.TrimSpace(manifest.Oracle.FailureSignature), capsuleReplayOutputMaxBytes)
 		}
 		fmt.Fprintf(a.Stdout, "capsule replay outcome=%s exit=%d quality=%s total=%s\n", record.Outcome, code, record.ReplayQuality, time.Since(started).Round(time.Millisecond))
 		if *keep {
@@ -389,7 +389,7 @@ func (a App) capsuleInspect(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox capsule inspect <capsule.yaml>")
+		return Exit(2, "usage: crabbox capsule inspect <capsule.yaml>")
 	}
 	if jsonAnywhere {
 		*jsonOut = true
@@ -424,10 +424,10 @@ func (a App) capsulePromote(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "usage: crabbox capsule promote <capsule.yaml> --regression")
+		return Exit(2, "usage: crabbox capsule promote <capsule.yaml> --regression")
 	}
 	if !*regression {
-		return exit(2, "capsule promote currently requires --regression")
+		return Exit(2, "capsule promote currently requires --regression")
 	}
 	path := capsuleManifestPath(fs.Arg(0))
 	manifest, err := readCapsuleManifest(path)
@@ -455,14 +455,14 @@ type actionsRunRef struct {
 func parseActionsRunRef(value, repoOverride string) (actionsRunRef, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return actionsRunRef{}, exit(2, "empty GitHub Actions run URL")
+		return actionsRunRef{}, Exit(2, "empty GitHub Actions run URL")
 	}
 	if _, err := strconv.ParseInt(value, 10, 64); err == nil || strings.HasPrefix(value, "-") || strings.HasPrefix(value, "+") {
 		if _, err := parsePositiveActionsInt(value, "run id"); err != nil {
 			return actionsRunRef{}, err
 		}
 		if repoOverride == "" {
-			return actionsRunRef{}, exit(2, "run id requires --repo owner/name")
+			return actionsRunRef{}, Exit(2, "run id requires --repo owner/name")
 		}
 		repo, err := parseGitHubRepo(repoOverride)
 		if err != nil {
@@ -472,11 +472,11 @@ func parseActionsRunRef(value, repoOverride string) (actionsRunRef, error) {
 	}
 	u, err := url.Parse(value)
 	if err != nil || !strings.EqualFold(u.Host, "github.com") {
-		return actionsRunRef{}, exit(2, "expected GitHub Actions run URL or numeric run id with --repo")
+		return actionsRunRef{}, Exit(2, "expected GitHub Actions run URL or numeric run id with --repo")
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if len(parts) < 5 || parts[2] != "actions" || parts[3] != "runs" {
-		return actionsRunRef{}, exit(2, "expected GitHub Actions run URL like https://github.com/owner/repo/actions/runs/123")
+		return actionsRunRef{}, Exit(2, "expected GitHub Actions run URL like https://github.com/owner/repo/actions/runs/123")
 	}
 	repo, err := cleanGitHubRepo(parts[0], parts[1])
 	if err != nil {
@@ -488,7 +488,7 @@ func parseActionsRunRef(value, repoOverride string) (actionsRunRef, error) {
 	ref := actionsRunRef{Repo: repo, RunID: parts[4]}
 	if len(parts) >= 6 && parts[5] == "attempts" {
 		if len(parts) < 7 {
-			return actionsRunRef{}, exit(2, "expected GitHub Actions attempt URL like https://github.com/owner/repo/actions/runs/123/attempts/2")
+			return actionsRunRef{}, Exit(2, "expected GitHub Actions attempt URL like https://github.com/owner/repo/actions/runs/123/attempts/2")
 		}
 		attempt, err := parsePositiveActionsInt(parts[6], "attempt")
 		if err != nil {
@@ -509,7 +509,7 @@ func parseActionsRunRef(value, repoOverride string) (actionsRunRef, error) {
 func parsePositiveActionsInt(value, label string) (int, error) {
 	n, err := strconv.Atoi(value)
 	if err != nil || n <= 0 {
-		return 0, exit(2, "invalid GitHub Actions %s %q", label, value)
+		return 0, Exit(2, "invalid GitHub Actions %s %q", label, value)
 	}
 	return n, nil
 }
@@ -958,10 +958,10 @@ func readCapsuleManifest(path string) (capsuleManifest, error) {
 		return capsuleManifest{}, err
 	}
 	if manifest.CapsuleVersion != capsuleVersion {
-		return capsuleManifest{}, exit(2, "unsupported capsule_version=%d in %s", manifest.CapsuleVersion, path)
+		return capsuleManifest{}, Exit(2, "unsupported capsule_version=%d in %s", manifest.CapsuleVersion, path)
 	}
 	if manifest.Class == "" {
-		return capsuleManifest{}, exit(2, "capsule %s is missing class", path)
+		return capsuleManifest{}, Exit(2, "capsule %s is missing class", path)
 	}
 	return manifest, nil
 }
@@ -1012,26 +1012,7 @@ func capsuleReplayFailureOutcome(failureSignature, replayOutput string, code int
 }
 
 func safePathComponent(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	var b strings.Builder
-	lastDash := false
-	for _, r := range value {
-		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
-		if ok {
-			b.WriteRune(r)
-			lastDash = false
-			continue
-		}
-		if !lastDash {
-			b.WriteByte('-')
-			lastDash = true
-		}
-	}
-	out := strings.Trim(b.String(), "-")
-	if out == "" {
-		return "capsule"
-	}
-	return out
+	return blank(NormalizeLeaseSlug(value), "capsule")
 }
 
 func sha256String(value string) string {

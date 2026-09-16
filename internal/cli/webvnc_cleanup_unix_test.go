@@ -86,11 +86,11 @@ func runWebVNCCleanupBridge(ctx context.Context, root string) error {
 		// Written only after the actual owner's Stop/Wait path completed.
 		_ = os.WriteFile(filepath.Join(root, fmt.Sprintf("reaped-%d", os.Getpid())), nil, 0o600)
 	}()
-	started, err := webVNCDaemonProcessStartIdentity(tunnel.PID())
+	started, err := LocalProcessStartIdentity(tunnel.PID())
 	if err != nil {
 		return err
 	}
-	childStarted, err := webVNCDaemonProcessStartIdentity(os.Getpid())
+	childStarted, err := LocalProcessStartIdentity(os.Getpid())
 	if err != nil {
 		return err
 	}
@@ -148,7 +148,7 @@ func TestWebVNCDaemonCleanupRealSSHAfterRestart(t *testing.T) {
 			assertForwardPayload(t, port)
 			started := time.Now()
 			if shutdown == "stop" {
-				stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(identity.WorkspaceID)
+				stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(t.Context(), identity.WorkspaceID)
 				if err != nil || !stopped {
 					t.Fatalf("stop=%t err=%v", stopped, err)
 				}
@@ -266,7 +266,7 @@ func startWebVNCCleanupFixture(t *testing.T, mode string) (string, string, *exec
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	started, err := webVNCDaemonProcessStartIdentity(cmd.Process.Pid)
+	started, err := LocalProcessStartIdentity(cmd.Process.Pid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,10 +301,10 @@ func waitWebVNCCleanupRecord(t *testing.T, root string, previousChild int) webVN
 		return false
 	})
 	t.Cleanup(func() {
-		if current, err := webVNCDaemonProcessStartIdentity(record.Child); err == nil && current == record.ChildStarted {
+		if current, err := LocalProcessStartIdentity(record.Child); err == nil && current == record.ChildStarted {
 			_ = syscall.Kill(record.Child, syscall.SIGKILL)
 		}
-		if current, err := webVNCDaemonProcessStartIdentity(record.Tunnel); err == nil && current == record.Started {
+		if current, err := LocalProcessStartIdentity(record.Tunnel); err == nil && current == record.Started {
 			_ = syscall.Kill(-record.Tunnel, syscall.SIGKILL)
 		}
 	})
@@ -342,7 +342,7 @@ func TestWebVNCDaemonCleanupRefusesUnconfirmedRealSSH(t *testing.T) {
 			}
 			started := time.Now()
 			app := App{Stdout: io.Discard, Stderr: io.Discard}
-			stopped, err := app.stopWebVNCDaemonIfRunning(identity.WorkspaceID)
+			stopped, err := app.stopWebVNCDaemonIfRunning(t.Context(), identity.WorkspaceID)
 			if err == nil || stopped {
 				t.Fatalf("unconfirmed cleanup reported success: stopped=%t err=%v", stopped, err)
 			}
@@ -364,7 +364,7 @@ func TestWebVNCDaemonCleanupRefusesUnconfirmedRealSSH(t *testing.T) {
 			if err != nil || retained != identity {
 				t.Fatalf("exact cleanup identity lost: %v", err)
 			}
-			if stopped, err := app.stopWebVNCDaemonIfRunning(identity.WorkspaceID); stopped || err == nil {
+			if stopped, err := app.stopWebVNCDaemonIfRunning(t.Context(), identity.WorkspaceID); stopped || err == nil {
 				t.Fatalf("retry blessed the orphan: stopped=%t err=%v", stopped, err)
 			}
 			paths, _ := filepath.Glob(filepath.Join(root, "ready-*.json"))
@@ -383,7 +383,7 @@ func TestWebVNCDaemonCleanupPreservesMismatchedIdentity(t *testing.T) {
 	if err := writeWebVNCDaemonIdentity(pidPath, mismatch); err != nil {
 		t.Fatal(err)
 	}
-	if stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(identity.WorkspaceID); stopped || err == nil {
+	if stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(t.Context(), identity.WorkspaceID); stopped || err == nil {
 		t.Fatalf("mismatched identity signaled: stopped=%t err=%v", stopped, err)
 	}
 	assertForwardPayload(t, port)
@@ -399,7 +399,7 @@ func TestWebVNCDaemonCleanupPreservesMismatchedIdentity(t *testing.T) {
 	if err := writeWebVNCDaemonIdentity(pidPath+".cleanup", mismatch); err != nil {
 		t.Fatal(err)
 	}
-	if stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(identity.WorkspaceID); stopped || err == nil {
+	if stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(t.Context(), identity.WorkspaceID); stopped || err == nil {
 		t.Fatalf("copied receipt accepted: stopped=%t err=%v", stopped, err)
 	}
 	if _, err := os.Stat(pidPath); err != nil {
@@ -414,7 +414,7 @@ func TestWebVNCDaemonCleanupDuringSSHStartup(t *testing.T) {
 	case <-time.After(8 * time.Second):
 		t.Fatal("SSH did not reach the authentication gate")
 	}
-	stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(identity.WorkspaceID)
+	stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(t.Context(), identity.WorkspaceID)
 	if err != nil || !stopped {
 		t.Fatalf("startup stop=%t err=%v", stopped, err)
 	}
@@ -451,7 +451,7 @@ func TestWebVNCDaemonCleanupSurvivesRepeatedSignals(t *testing.T) {
 	}
 	waitWebVNCCleanupSupervisor(t, cmd)
 	assertWebVNCCleanupReaped(t, root, record)
-	if stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(identity.WorkspaceID); !stopped || err != nil {
+	if stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(t.Context(), identity.WorkspaceID); !stopped || err != nil {
 		t.Fatalf("repeated signals lost cleanup: stopped=%t err=%v", stopped, err)
 	}
 }
@@ -471,7 +471,7 @@ func TestWebVNCDaemonCleanupDuringRestartBackoff(t *testing.T) {
 	}
 	waitWebVNCCleanupSupervisor(t, cmd)
 	assertWebVNCCleanupReaped(t, root, record)
-	if stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(identity.WorkspaceID); !stopped || err != nil {
+	if stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(t.Context(), identity.WorkspaceID); !stopped || err != nil {
 		t.Fatalf("backoff cancellation lost cleanup: stopped=%t err=%v", stopped, err)
 	}
 	paths, _ := filepath.Glob(filepath.Join(root, "ready-*.json"))
@@ -491,7 +491,7 @@ func TestWebVNCDaemonCleanupReceiptPublicationFailure(t *testing.T) {
 	}
 	waitWebVNCCleanupSupervisor(t, cmd)
 	assertWebVNCCleanupReaped(t, root, record)
-	if stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(identity.WorkspaceID); stopped || err == nil {
+	if stopped, err := (App{Stdout: io.Discard, Stderr: io.Discard}).stopWebVNCDaemonIfRunning(t.Context(), identity.WorkspaceID); stopped || err == nil {
 		t.Fatalf("receipt publication failure was hidden: stopped=%t err=%v", stopped, err)
 	}
 	retained, err := readWebVNCDaemonIdentity(pidPath)
@@ -505,7 +505,7 @@ func assertWebVNCCleanupReaped(t *testing.T, root string, record webVNCCleanupRe
 	if _, err := os.Stat(filepath.Join(root, fmt.Sprintf("reaped-%d", record.Child))); err != nil {
 		t.Fatalf("foreground child exited without reaping its real SSH tunnel: %v", err)
 	}
-	if current, err := webVNCDaemonProcessStartIdentity(record.Tunnel); err == nil && current == record.Started {
+	if current, err := LocalProcessStartIdentity(record.Tunnel); err == nil && current == record.Started {
 		t.Fatal("recorded SSH process survived foreground cleanup")
 	}
 }

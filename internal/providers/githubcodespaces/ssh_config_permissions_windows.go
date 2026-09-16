@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"golang.org/x/sys/windows"
 )
 
@@ -76,11 +77,11 @@ func validatePrivateSSHConfigPermissions(path string, _ os.FileInfo) error {
 	}
 	owner, _, err := descriptor.Owner()
 	if err != nil || owner == nil || !owner.Equals(user) {
-		return exit(2, "github-codespaces SSH config path %q is not owned by the current user", path)
+		return core.Exit(2, "github-codespaces SSH config path %q is not owned by the current user", path)
 	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil || dacl == nil || dacl.AceCount != 2 {
-		return exit(2, "github-codespaces SSH config path %q does not have a private DACL", path)
+		return core.Exit(2, "github-codespaces SSH config path %q does not have a private DACL", path)
 	}
 	seenUser, seenSystem := false, false
 	for i := uint16(0); i < dacl.AceCount; i++ {
@@ -89,7 +90,7 @@ func validatePrivateSSHConfigPermissions(path string, _ os.FileInfo) error {
 			return err
 		}
 		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask&windows.ACCESS_MASK(windows.GENERIC_ALL) == 0 {
-			return exit(2, "github-codespaces SSH config path %q has a non-private DACL entry", path)
+			return core.Exit(2, "github-codespaces SSH config path %q has a non-private DACL entry", path)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		switch {
@@ -98,11 +99,11 @@ func validatePrivateSSHConfigPermissions(path string, _ os.FileInfo) error {
 		case sid.Equals(system):
 			seenSystem = true
 		default:
-			return exit(2, "github-codespaces SSH config path %q grants access to another principal", path)
+			return core.Exit(2, "github-codespaces SSH config path %q grants access to another principal", path)
 		}
 	}
 	if !seenUser || !seenSystem {
-		return exit(2, "github-codespaces SSH config path %q does not have the required private DACL", path)
+		return core.Exit(2, "github-codespaces SSH config path %q does not have the required private DACL", path)
 	}
 	return nil
 }

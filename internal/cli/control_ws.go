@@ -50,9 +50,7 @@ func dialCoordinatorControl(ctx context.Context, coord *CoordinatorClient) (*coo
 	}
 	opts := &websocket.DialOptions{
 		HTTPHeader: headers,
-	}
-	if coord.Client != nil {
-		opts.HTTPClient = coord.Client
+		HTTPClient: coord.secureHTTPClient(),
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, coordinatorControlDialTimeout)
 	defer cancel()
@@ -90,7 +88,9 @@ func (c *coordinatorControlConn) close() {
 	if c == nil || c.conn == nil {
 		return
 	}
-	_ = c.conn.Close(websocket.StatusNormalClosure, "")
+	// Control has no terminal message to flush. Join local I/O without making
+	// a finished or canceled owner wait for the peer's close handshake.
+	_ = c.conn.CloseNow()
 }
 
 func (c *coordinatorControlConn) write(ctx context.Context, payload any) error {

@@ -127,7 +127,7 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 	if err != nil {
 		return core.LeaseTarget{}, fmt.Errorf("generate linode root password: %w", err)
 	}
-	now := b.now()
+	now := core.ClockNow(b.RT.Clock).UTC()
 	created := linodeInstance{}
 	committed := false
 	defer func() {
@@ -155,15 +155,13 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 	}()
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = providerKeyForLease(leaseID)
-	if !cfg.ServerTypeExplicit || cfg.ServerType == "" {
-		cfg.ServerType = linodeServerTypeForConfig(cfg)
-	}
+	cfg.ServerType = linodeServerTypeForConfig(cfg)
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
 	createReq := createLinodeRequest{
 		Region:         linodeRegionForConfig(cfg),
-		Type:           linodeServerTypeForConfig(cfg),
+		Type:           cfg.ServerType,
 		Image:          linodeImageForConfig(cfg),
 		Label:          core.LeaseProviderName(leaseID, slug),
 		Tags:           leaseTags(cfg, leaseID, slug, "provisioning", req.Keep, now),
@@ -365,7 +363,7 @@ func (b *linodeLeaseBackend) releaseTargetFromClaim(ctx context.Context, client 
 			grace = ambiguousCreateRecoveryGrace
 		}
 		createdAt, _ := strconv.ParseInt(claim.Labels["created_at"], 10, 64)
-		if createdAt <= 0 || b.now().Before(time.Unix(createdAt, 0).Add(grace)) {
+		if createdAt <= 0 || core.ClockNow(b.RT.Clock).UTC().Before(time.Unix(createdAt, 0).Add(grace)) {
 			return core.LeaseTarget{}, core.Exit(4, "linode ambiguous-create recovery is still pending for lease=%s; retry stop later", claim.LeaseID)
 		}
 		if target, found, err := b.reconcilePendingRecovery(ctx, client, claim, accountID); err != nil {
@@ -469,7 +467,7 @@ func (b *linodeLeaseBackend) targetFromLinode(item linodeInstance, req core.Reso
 		if expectedAccountID != accountID {
 			return core.LeaseTarget{}, core.Exit(3, "linode account mismatch: current account %s does not match lease account %s", accountID, expectedAccountID)
 		}
-		liveCloudID := firstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
+		liveCloudID := shared.FirstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
 		if claim.CloudID != "" && claim.CloudID != liveCloudID {
 			return core.LeaseTarget{}, core.Exit(2, "refusing to resolve Linode instance %d from stale local claim", server.ID)
 		}
@@ -496,10 +494,8 @@ func (b *linodeLeaseBackend) targetFromLinode(item linodeInstance, req core.Reso
 		return target, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
-	if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
-		if _, statErr := os.Stat(keyPath); statErr == nil {
-			ssh.Key = keyPath
-		}
+	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
+		return core.LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" && !req.NoLocalStateMutations {
 		updatedClaim, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim, claim, claimExists)
@@ -603,7 +599,7 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 	}
 	providerCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	now := b.now()
+	now := core.ClockNow(b.RT.Clock).UTC()
 	action := func() (core.Server, core.SSHTarget, bool, error) {
 		if err := providerCtx.Err(); err != nil {
 			return core.Server{}, core.SSHTarget{}, false, err
@@ -633,8 +629,8 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 		labels := normalizedLinodeLabels(item.Tags)
 		if touch != nil {
 			exactLabels := map[string]string{}
-			for _, key := range tagLabelKeys() {
-				if value, ok := labels[key]; ok && exactTagValueKey(key) {
+			for _, key := range tagSchema.Keys() {
+				if value, ok := labels[key]; ok && tagSchema.Exact(key) {
 					exactLabels[key] = value
 				}
 			}
@@ -649,7 +645,7 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 				labels[key] = value
 			}
 		} else {
-			applyTailscaleMetadata(labels, *meta)
+			shared.ApplyTailscaleMetadata(labels, *meta)
 		}
 		labels[linodeAccountLabel] = accountID
 		if err := client.UpdateLinodeTags(providerCtx, server.ID, replaceCrabboxTags(item.Tags, tagsFromLabels(labels))); err != nil {
@@ -661,7 +657,7 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 	}
 	var updated core.LeaseClaim
 	if touch != nil {
-		updated, server, _, err = core.UpdateLeaseClaimTouchIfUnchangedAction(lease.LeaseID, expected, now, touch.IdleTimeoutOverride, action)
+		updated, server, _, err = core.UpdateLeaseClaimTouchIfUnchangedAction(providerCtx, lease.LeaseID, expected, now, touch.IdleTimeoutOverride, action)
 	} else {
 		updated, server, _, err = core.UpdateLeaseClaimEndpointIfUnchangedAction(lease.LeaseID, expected, action)
 	}
@@ -821,7 +817,7 @@ func validateCleanupClaim(server core.Server, claim core.LeaseClaim, liveLinodeV
 	if claim.LeaseID != leaseID || claim.Provider == "" {
 		return core.Exit(2, "linode lease claim is incomplete for lease=%s", leaseID)
 	}
-	cloudID := firstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
+	cloudID := shared.FirstNonBlank(server.CloudID, strconv.FormatInt(server.ID, 10))
 	if claim.Provider == providerName && claim.CloudID != "" && claim.CloudID != cloudID {
 		return core.Exit(2, "refusing to release Linode instance %d from stale local claim", server.ID)
 	}
@@ -929,32 +925,11 @@ func appendLinodeIfMissing(linodes []linodeInstance, item linodeInstance) []lino
 	return append(linodes, item)
 }
 
-func applyTailscaleMetadata(labels map[string]string, meta core.TailscaleMetadata) {
-	shared.ApplyTailscaleMetadata(labels, meta)
-}
-
 func (b *linodeLeaseBackend) waitForLinodeIP(ctx context.Context, client linodeAPI, id int64, timeout time.Duration) (linodeInstance, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	result, err := shared.Poll(waitCtx, 0, 3*time.Second, shared.SleepContext,
+	return shared.PollReady(ctx, timeout, 3*time.Second,
 		func(ctx context.Context) (linodeInstance, error) { return client.GetLinode(ctx, id) },
-		func(_ context.Context, item linodeInstance, fetchErr error) (bool, error) {
-			return publicIPv4(item) != "", fetchErr
-		}, nil)
-	if err != nil {
-		if context.Cause(ctx) == nil && errors.Is(context.Cause(waitCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
-			return linodeInstance{}, core.Exit(5, "timed out waiting for Linode instance IP")
-		}
-		result.Value = linodeInstance{}
-	}
-	return result.Value, err
-}
-
-func (b *linodeLeaseBackend) now() time.Time {
-	if b.RT.Clock != nil {
-		return b.RT.Clock.Now().UTC()
-	}
-	return time.Now().UTC()
+		func(item linodeInstance) bool { return publicIPv4(item) != "" },
+		core.Exit(5, "timed out waiting for Linode instance IP"))
 }
 
 func rollbackLinodeAcquire(client linodeAPI, linodeID int64) error {
@@ -996,7 +971,7 @@ func serverFromLinode(item linodeInstance, cfg core.Config) core.Server {
 		Labels:   labels,
 	}
 	server.PublicNet.IPv4.IP = publicIPv4(item)
-	server.ServerType.Name = firstNonBlank(item.Type, cfg.ServerType)
+	server.ServerType.Name = shared.FirstNonBlank(item.Type, cfg.ServerType)
 	return server
 }
 
@@ -1084,10 +1059,10 @@ func applyLinodeDefaults(cfg *core.Config) {
 		cfg.TargetOS = core.TargetLinux
 	}
 	if cfg.Linode.Region == "" {
-		cfg.Linode.Region = defaultRegion
+		cfg.Linode.Region = core.LinodeConfiguredRegionDefault
 	}
 	if cfg.Linode.Image == "" {
-		cfg.Linode.Image = defaultImage
+		cfg.Linode.Image = core.LinodeImageFallback
 	}
 	if cfg.Linode.Type == "" {
 		cfg.Linode.Type = linodeServerTypeForClass(cfg.Class)
@@ -1102,10 +1077,6 @@ func applyLinodeDefaults(cfg *core.Config) {
 		cfg.SSHPort = "22"
 	}
 	cfg.SSHFallbackPorts = nil
-}
-
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
 }
 
 func isLinodeNotFound(err error) bool {

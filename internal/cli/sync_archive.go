@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -13,6 +12,19 @@ import (
 )
 
 func CreateSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, tempPattern string) (*os.File, error) {
+	managed, err := newManagedSyncScope(repo.Root)
+	if err != nil {
+		return nil, err
+	}
+	for _, rel := range manifest.Files {
+		protected, err := managed.contains(rel)
+		if err != nil {
+			return nil, err
+		}
+		if protected {
+			return nil, Exit(6, "sync archive contains a protected managed-state member")
+		}
+	}
 	archive, err := os.CreateTemp("", tempPattern)
 	if err != nil {
 		return nil, fmt.Errorf("create sync archive temp file: %w", err)
@@ -28,18 +40,24 @@ func CreateSyncArchive(ctx context.Context, repo Repo, manifest SyncManifest, te
 	gz := gzip.NewWriter(archive)
 	tw := tar.NewWriter(gz)
 	for _, rel := range manifest.Files {
+		protected, scopeErr := managed.contains(rel)
+		if scopeErr != nil || protected {
+			_ = tw.Close()
+			_ = gz.Close()
+			return nil, Exit(6, "sync archive managed-state scope changed before member read: %v", scopeErr)
+		}
 		if err := appendSyncArchiveMember(ctx, tw, repo.Root, rel); err != nil {
 			_ = tw.Close()
 			_ = gz.Close()
-			return nil, exit(6, "create sync archive: %v", err)
+			return nil, Exit(6, "create sync archive: %v", err)
 		}
 	}
 	if err := tw.Close(); err != nil {
 		_ = gz.Close()
-		return nil, exit(6, "create sync archive: %v", err)
+		return nil, Exit(6, "create sync archive: %v", err)
 	}
 	if err := gz.Close(); err != nil {
-		return nil, exit(6, "create sync archive: %v", err)
+		return nil, Exit(6, "create sync archive: %v", err)
 	}
 	if _, err := archive.Seek(0, 0); err != nil {
 		return nil, fmt.Errorf("rewind sync archive: %w", err)
@@ -89,32 +107,8 @@ func appendSyncArchiveMember(ctx context.Context, tw *tar.Writer, root, rel stri
 		return fmt.Errorf("open sync path %s: %w", rel, err)
 	}
 	defer file.Close()
-	if err := copySyncArchiveMember(ctx, tw, file); err != nil {
+	if _, err := copySourceBytes(ctx, tw, file, -1); err != nil {
 		return fmt.Errorf("archive path %s: %w", rel, err)
 	}
 	return nil
-}
-
-func copySyncArchiveMember(ctx context.Context, dst io.Writer, src io.Reader) error {
-	buf := make([]byte, 128*1024)
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		n, readErr := src.Read(buf)
-		if n > 0 {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if _, err := dst.Write(buf[:n]); err != nil {
-				return err
-			}
-		}
-		if readErr == io.EOF {
-			return nil
-		}
-		if readErr != nil {
-			return readErr
-		}
-	}
 }

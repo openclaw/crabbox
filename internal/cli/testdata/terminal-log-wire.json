@@ -1,0 +1,578 @@
+[
+  {
+    "name": "ascii",
+    "raw": [
+      {
+        "hex": "6f6b0a",
+        "count": 1
+      }
+    ],
+    "finish": {
+      "commandMs": 1000,
+      "exitCode": 0,
+      "log": [
+        {
+          "text": "o",
+          "count": 1
+        },
+        {
+          "text": "k",
+          "count": 1
+        },
+        {
+          "text": "\n",
+          "count": 1
+        }
+      ],
+      "logChunks": [
+        {
+          "parts": [
+            {
+              "text": "o",
+              "count": 1
+            },
+            {
+              "text": "k",
+              "count": 1
+            },
+            {
+              "text": "\n",
+              "count": 1
+            }
+          ],
+          "count": 1
+        }
+      ],
+      "logTruncated": false,
+      "receipt": {
+        "command": "synthetic-output",
+        "command_ms": 1000,
+        "command_sha256": "sha256:50ffd368afd57d6caf3f56ee3066877f3ec5ea231113ec4201f55a797386104f",
+        "duration_ms": 1000,
+        "ended_at": "2026-08-23T10:00:01Z",
+        "exit_code": 0,
+        "log_sha256": "sha256:dc51b8c96c2d745df3bd5590d990230a482fd247123599548e0632fdbf97fc22",
+        "log_truncated": false,
+        "provider": "aws",
+        "public_key": "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=",
+        "receipt_type": "terminal",
+        "retained_log_sha256": "sha256:dc51b8c96c2d745df3bd5590d990230a482fd247123599548e0632fdbf97fc22",
+        "run_id": "run_unicode",
+        "schema_version": 2,
+        "signature": "931ValZuIckgCS+L/U/khID6zAZqwap9dRMzEoXFog6BkcKGmsYZYtNcTgQos8yWJTNjdklJ9AV74qKv0rdgCw==",
+        "signer": "sha256:139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070",
+        "started_at": "2026-08-23T10:00:00Z",
+        "sync_ms": 0
+      },
+      "results": null,
+      "syncMs": 0
+    }
+  },
+  {
+    "name": "unicode",
+    "raw": [
+      {
+        "hex": "636166c3a920e282ac20f09f98800a",
+        "count": 1
+      }
+    ],
+    "finish": {
+      "commandMs": 1000,
+      "exitCode": 0,
+      "log": [
+        {
+          "text": "c",
+          "count": 1
+        },
+        {
+          "text": "a",
+          "count": 1
+        },
+        {
+          "text": "f",
+          "count": 1
+        },
+        {
+          "text": "é",
+          "count": 1
+        },
+        {
+          "text": " ",
+          "count": 1
+        },
+        {
+          "text": "€",
+          "count": 1
+        },
+        {
+          "text": " ",
+          "count": 1
+        },
+        {
+          "text": "😀",
+          "count": 1
+        },
+        {
+          "text": "\n",
+          "count": 1
+        }
+      ],
+      "logChunks": [
+        {
+          "parts": [
+            {
+              "text": "c",
+              "count": 1
+            },
+            {
+              "text": "a",
+              "count": 1
+            },
+            {
+              "text": "f",
+              "count": 1
+            },
+            {
+              "text": "é",
+              "count": 1
+            },
+            {
+              "text": " ",
+              "count": 1
+            },
+            {
+              "text": "€",
+              "count": 1
+            },
+            {
+              "text": " ",
+              "count": 1
+            },
+            {
+              "text": "😀",
+              "count": 1
+            },
+            {
+              "text": "\n",
+              "count": 1
+            }
+          ],
+          "count": 1
+        }
+      ],
+      "logTruncated": false,
+      "receipt": {
+        "command": "synthetic-output",
+        "command_ms": 1000,
+        "command_sha256": "sha256:50ffd368afd57d6caf3f56ee3066877f3ec5ea231113ec4201f55a797386104f",
+        "duration_ms": 1000,
+        "ended_at": "2026-08-23T10:00:01Z",
+        "exit_code": 0,
+        "log_sha256": "sha256:5c213e386bb4db98c54a9230c72964516394e22ec4fb24f2e00d42ffea07bbc0",
+        "log_truncated": false,
+        "provider": "aws",
+        "public_key": "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=",
+        "receipt_type": "terminal",
+        "retained_log_sha256": "sha256:5c213e386bb4db98c54a9230c72964516394e22ec4fb24f2e00d42ffea07bbc0",
+        "run_id": "run_unicode",
+        "schema_version": 2,
+        "signature": "pGHn5qi4YxGcy9UKDe+GkEntpfAVC5ljdU2YSF849W/C/QhHfrZijFun4HNc2iG4+VaSxKzbkm1vNCTGNdxjCg==",
+        "signer": "sha256:139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070",
+        "started_at": "2026-08-23T10:00:00Z",
+        "sync_ms": 0
+      },
+      "results": null,
+      "syncMs": 0
+    }
+  },
+  {
+    "name": "malformed",
+    "raw": [
+      {
+        "hex": "6f6bfffec0afeda0800a",
+        "count": 1
+      }
+    ],
+    "finish": {
+      "commandMs": 1000,
+      "exitCode": 0,
+      "log": [
+        {
+          "text": "o",
+          "count": 1
+        },
+        {
+          "text": "k",
+          "count": 1
+        },
+        {
+          "text": "�",
+          "count": 7
+        },
+        {
+          "text": "\n",
+          "count": 1
+        }
+      ],
+      "logChunks": [
+        {
+          "parts": [
+            {
+              "text": "o",
+              "count": 1
+            },
+            {
+              "text": "k",
+              "count": 1
+            },
+            {
+              "text": "�",
+              "count": 7
+            },
+            {
+              "text": "\n",
+              "count": 1
+            }
+          ],
+          "count": 1
+        }
+      ],
+      "logTruncated": true,
+      "receipt": {
+        "command": "synthetic-output",
+        "command_ms": 1000,
+        "command_sha256": "sha256:50ffd368afd57d6caf3f56ee3066877f3ec5ea231113ec4201f55a797386104f",
+        "duration_ms": 1000,
+        "ended_at": "2026-08-23T10:00:01Z",
+        "exit_code": 0,
+        "log_sha256": "sha256:49962f708477261eeb7dfcf2831db348e903a7c89989d6b76706593ffb924604",
+        "log_truncated": true,
+        "provider": "aws",
+        "public_key": "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=",
+        "receipt_type": "terminal",
+        "retained_log_sha256": "sha256:c581250c1dbcd1f0d4dadbdd0cb1863b6b39a0d2db5a3a2a971ccec1462ca0a8",
+        "run_id": "run_unicode",
+        "schema_version": 2,
+        "signature": "6DePSWOWFSO7hcwXk/5Flps8jFbUsEKM1gcAm48dxJgILzZbrewo+ZdlwIPSYfdefSZJkdjRv8zK5xj9ktTCBA==",
+        "signer": "sha256:139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070",
+        "started_at": "2026-08-23T10:00:00Z",
+        "sync_ms": 0
+      },
+      "results": null,
+      "syncMs": 0
+    }
+  },
+  {
+    "name": "two-byte-tail",
+    "raw": [
+      {
+        "hex": "c3a9",
+        "count": 1
+      },
+      {
+        "hex": "61",
+        "count": 8388607
+      }
+    ],
+    "finish": {
+      "commandMs": 1000,
+      "exitCode": 0,
+      "log": [
+        {
+          "text": "a",
+          "count": 65536
+        }
+      ],
+      "logChunks": [
+        {
+          "parts": [
+            {
+              "text": "a",
+              "count": 65536
+            }
+          ],
+          "count": 127
+        },
+        {
+          "parts": [
+            {
+              "text": "a",
+              "count": 65535
+            }
+          ],
+          "count": 1
+        }
+      ],
+      "logTruncated": true,
+      "receipt": {
+        "command": "synthetic-output",
+        "command_ms": 1000,
+        "command_sha256": "sha256:50ffd368afd57d6caf3f56ee3066877f3ec5ea231113ec4201f55a797386104f",
+        "duration_ms": 1000,
+        "ended_at": "2026-08-23T10:00:01Z",
+        "exit_code": 0,
+        "log_sha256": "sha256:d32194d74893b4c91cbd7d36a5beb1a8ea145626ce32e1f180b2fb72fae44553",
+        "log_truncated": true,
+        "provider": "aws",
+        "public_key": "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=",
+        "receipt_type": "terminal",
+        "retained_log_sha256": "sha256:79a53244b621a64deaed1f4e3a3a2a2b1d4e076a4815deea451ca3c1ab170e60",
+        "run_id": "run_unicode",
+        "schema_version": 2,
+        "signature": "JmlwHz4iGD7MuQDGHkkWm3EQHK2p0rpCI+uSgN8r9Jm6h80S3RCbzlyrJuvRct8TE6QV9hhRCSxO6+EPtpJNCg==",
+        "signer": "sha256:139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070",
+        "started_at": "2026-08-23T10:00:00Z",
+        "sync_ms": 0
+      },
+      "results": null,
+      "syncMs": 0
+    }
+  },
+  {
+    "name": "three-byte-tail",
+    "raw": [
+      {
+        "hex": "e282ac",
+        "count": 1
+      },
+      {
+        "hex": "61",
+        "count": 8388607
+      }
+    ],
+    "finish": {
+      "commandMs": 1000,
+      "exitCode": 0,
+      "log": [
+        {
+          "text": "a",
+          "count": 65536
+        }
+      ],
+      "logChunks": [
+        {
+          "parts": [
+            {
+              "text": "a",
+              "count": 65536
+            }
+          ],
+          "count": 127
+        },
+        {
+          "parts": [
+            {
+              "text": "a",
+              "count": 65535
+            }
+          ],
+          "count": 1
+        }
+      ],
+      "logTruncated": true,
+      "receipt": {
+        "command": "synthetic-output",
+        "command_ms": 1000,
+        "command_sha256": "sha256:50ffd368afd57d6caf3f56ee3066877f3ec5ea231113ec4201f55a797386104f",
+        "duration_ms": 1000,
+        "ended_at": "2026-08-23T10:00:01Z",
+        "exit_code": 0,
+        "log_sha256": "sha256:d98652c81208a6fa2f6940ddd8c223af05751cac8e6fbe923fa8c1c2e7233353",
+        "log_truncated": true,
+        "provider": "aws",
+        "public_key": "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=",
+        "receipt_type": "terminal",
+        "retained_log_sha256": "sha256:79a53244b621a64deaed1f4e3a3a2a2b1d4e076a4815deea451ca3c1ab170e60",
+        "run_id": "run_unicode",
+        "schema_version": 2,
+        "signature": "ije6uLuNjUvwlwCHIHQY4M60/x6ONgk2QidnC2aUmLAZlTNGLkV5MqnLs3+AE0QG3tHEOIjgZRNRCxI/86yXCA==",
+        "signer": "sha256:139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070",
+        "started_at": "2026-08-23T10:00:00Z",
+        "sync_ms": 0
+      },
+      "results": null,
+      "syncMs": 0
+    }
+  },
+  {
+    "name": "four-byte-tail",
+    "raw": [
+      {
+        "hex": "f09f9880",
+        "count": 1
+      },
+      {
+        "hex": "61",
+        "count": 8388606
+      }
+    ],
+    "finish": {
+      "commandMs": 1000,
+      "exitCode": 0,
+      "log": [
+        {
+          "text": "a",
+          "count": 65536
+        }
+      ],
+      "logChunks": [
+        {
+          "parts": [
+            {
+              "text": "a",
+              "count": 65536
+            }
+          ],
+          "count": 127
+        },
+        {
+          "parts": [
+            {
+              "text": "a",
+              "count": 65534
+            }
+          ],
+          "count": 1
+        }
+      ],
+      "logTruncated": true,
+      "receipt": {
+        "command": "synthetic-output",
+        "command_ms": 1000,
+        "command_sha256": "sha256:50ffd368afd57d6caf3f56ee3066877f3ec5ea231113ec4201f55a797386104f",
+        "duration_ms": 1000,
+        "ended_at": "2026-08-23T10:00:01Z",
+        "exit_code": 0,
+        "log_sha256": "sha256:c410dd2f1ee23f9d15958a6d43f0d4b54c005d7e9e5dea7c0dd96529245b8be6",
+        "log_truncated": true,
+        "provider": "aws",
+        "public_key": "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=",
+        "receipt_type": "terminal",
+        "retained_log_sha256": "sha256:cbfb413ce4b8083807def53cd07de2f80439ae887cbb5c12dc4a58df18c45b94",
+        "run_id": "run_unicode",
+        "schema_version": 2,
+        "signature": "uryvqBoHkocgW6JZYqTv3wA5zEVYydXrDPbHMQCA2g547j8bBKZ8louX/n1VTuFuek90odXAU0mFR+2S/9BxBQ==",
+        "signer": "sha256:139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070",
+        "started_at": "2026-08-23T10:00:00Z",
+        "sync_ms": 0
+      },
+      "results": null,
+      "syncMs": 0
+    }
+  },
+  {
+    "name": "replacement-expansion",
+    "raw": [
+      {
+        "hex": "ff",
+        "count": 2796203
+      }
+    ],
+    "finish": {
+      "commandMs": 1000,
+      "exitCode": 0,
+      "log": [
+        {
+          "text": "�",
+          "count": 21845
+        }
+      ],
+      "logChunks": [
+        {
+          "parts": [
+            {
+              "text": "�",
+              "count": 21845
+            }
+          ],
+          "count": 128
+        },
+        {
+          "parts": [
+            {
+              "text": "�",
+              "count": 42
+            }
+          ],
+          "count": 1
+        }
+      ],
+      "logTruncated": true,
+      "receipt": {
+        "command": "synthetic-output",
+        "command_ms": 1000,
+        "command_sha256": "sha256:50ffd368afd57d6caf3f56ee3066877f3ec5ea231113ec4201f55a797386104f",
+        "duration_ms": 1000,
+        "ended_at": "2026-08-23T10:00:01Z",
+        "exit_code": 0,
+        "log_sha256": "sha256:9bdbbc163cde613fc041d9680166d4b2376ee95944f8a7225d2d8110611c9c21",
+        "log_truncated": true,
+        "provider": "aws",
+        "public_key": "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=",
+        "receipt_type": "terminal",
+        "retained_log_sha256": "sha256:9cd1cce6646757a102bdb74762b422772bdcfd2c234678890a1aa4647d183c5c",
+        "run_id": "run_unicode",
+        "schema_version": 2,
+        "signature": "/eMcQRMKTPGvs5G2YAQ2D4vakg+IfzPFJGiqu3Uvb5x0BCFmidhHppTEvCyx7ZuNbRgf/+/oxz2DzQc2kEWBCw==",
+        "signer": "sha256:139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070",
+        "started_at": "2026-08-23T10:00:00Z",
+        "sync_ms": 0
+      },
+      "results": null,
+      "syncMs": 0
+    }
+  },
+  {
+    "name": "exact-cap",
+    "raw": [
+      {
+        "hex": "61",
+        "count": 8388608
+      }
+    ],
+    "finish": {
+      "commandMs": 1000,
+      "exitCode": 0,
+      "log": [
+        {
+          "text": "a",
+          "count": 65536
+        }
+      ],
+      "logChunks": [
+        {
+          "parts": [
+            {
+              "text": "a",
+              "count": 65536
+            }
+          ],
+          "count": 128
+        }
+      ],
+      "logTruncated": false,
+      "receipt": {
+        "command": "synthetic-output",
+        "command_ms": 1000,
+        "command_sha256": "sha256:50ffd368afd57d6caf3f56ee3066877f3ec5ea231113ec4201f55a797386104f",
+        "duration_ms": 1000,
+        "ended_at": "2026-08-23T10:00:01Z",
+        "exit_code": 0,
+        "log_sha256": "sha256:ad97f87076920684e2ca66fc44e5d322797dc9d64706b174e51b5d0828937043",
+        "log_truncated": false,
+        "provider": "aws",
+        "public_key": "O2onvM62pC1io6jQKm8Nc2UyFXcd4kOmOsBIoYtZ2ik=",
+        "receipt_type": "terminal",
+        "retained_log_sha256": "sha256:ad97f87076920684e2ca66fc44e5d322797dc9d64706b174e51b5d0828937043",
+        "run_id": "run_unicode",
+        "schema_version": 2,
+        "signature": "L2ivL0asjrxSdK/s+6KXgiD/vEf7yniEFqTTPWAIAdEOG5vF/3ge9UXJYxe84LgxfHDUOKImXipCx48L4RKRDQ==",
+        "signer": "sha256:139e3940e64b5491722088d9a0d741628fc826e09475d341a780acde3c4b8070",
+        "started_at": "2026-08-23T10:00:00Z",
+        "sync_ms": 0
+      },
+      "results": null,
+      "syncMs": 0
+    }
+  }
+]

@@ -151,7 +151,7 @@ func machineClaimBinding(claim core.LeaseClaim) (shared.ClaimBinding, error) {
 		RequiredLabels: map[string]string{"apple_machine_storage": root},
 	}
 	if !core.IsCanonicalLeaseID(claim.LeaseID) || claim.Slug == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root || !validMachineIdentity(claim.CloudImmutableID) {
-		return want, exit(2, "apple-machine lease %q has no exact storage/ownership binding; retain the machine and inspect it with container machine inspect before manual cleanup or creating a new lease", claim.LeaseID)
+		return want, core.Exit(2, "apple-machine lease %q has no exact storage/ownership binding; retain the machine and inspect it with container machine inspect before manual cleanup or creating a new lease", claim.LeaseID)
 	}
 	return want, shared.ValidateClaimBinding(claim, want)
 }
@@ -182,8 +182,6 @@ func (b *backend) verifyMachineIdentity(ctx context.Context, claim core.LeaseCla
 }
 
 func (b *backend) deleteBoundMachine(ctx context.Context, claim core.LeaseClaim) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 	// A prior delete may have succeeded before confirmation failed. Absence can
 	// retire the unchanged claim, but must never authorize another name-only rm.
 	present, err := b.boundMachinePresent(ctx, claim)
@@ -234,10 +232,14 @@ func (b *backend) boundMachinePresent(ctx context.Context, claim core.LeaseClaim
 	return false, nil
 }
 
+const machineCleanupTimeout = 30 * time.Second
+
 func (b *backend) removeBoundLease(ctx context.Context, claim core.LeaseClaim) error {
+	ctx, cancel := context.WithTimeout(ctx, machineCleanupTimeout)
+	defer cancel()
 	want, err := machineClaimBinding(claim)
 	if err != nil {
 		return err
 	}
-	return shared.RemoveExactClaimAfter(claim, want, func() error { return b.deleteBoundMachine(ctx, claim) })
+	return shared.RemoveExactClaimAfterContext(ctx, claim, want, func() error { return b.deleteBoundMachine(ctx, claim) })
 }

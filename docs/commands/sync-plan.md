@@ -11,7 +11,7 @@ crabbox sync-plan --limit 10
 crabbox sync-plan --json
 ```
 
-The command reads only your local Git checkout. It does not require a
+The command reads only your selected local sync source. It does not require a
 lease, does not call the broker, and does not call any provider API.
 
 ## What it reads
@@ -39,8 +39,37 @@ The same preflight rejects tracked non-gitlink paths hidden by sparse-checkout
 or `skip-worktree` state only when they remain in the effective manifest after
 `sync.include` and ordered excludes. On Git older than 2.41, an ambiguous
 missing in-scope path fails closed; out-of-scope paths do not affect the plan.
+Materialize the checkout, or intentionally adjust `sync.include`, ordered
+`sync.exclude`, or `.crabboxignore`; later reinclusion rules still determine
+effective scope. Ordinary SSH runs perform this scope check before lease work
+and independently rebuild the final manifest after acquisition.
+
+### Directory source
+
+With `sync.source: directory` and a nonempty `sync.include`, `sync-plan` uses the
+effective current directory, even below an outer Git checkout. Installed Git
+interprets source-tree `.gitignore` files using temporary metadata outside the
+source; no source repository is created or modified. The same shared manifest
+checks apply, and size guardrails cover the full candidate rather than a Git
+dirty delta. In-scope nested repositories are rejected, not silently traversed
+or omitted. See [directory source](../features/sync.md#explicit-directory-source)
+for ignore semantics and supported transports.
+
+Directory text output starts with `sync source=directory root=<absolute-path>`.
+JSON adds `"source": "directory"` and `"root": "<absolute-path>"`; Git-mode output
+is unchanged. Deleted tracked paths and the dirty delta remain empty because
+there is no source index or history.
 
 ## Output
+
+With `--git-seed-source local` (or `sync.gitSeedSource: local`), the preview also
+prepares and verifies the offline Git bundle in temporary local storage, then
+cleans it up. JSON adds `localGitSeed` with the selected HEAD/base, object format,
+object count, uncompressed object bytes, packed seed bytes, and SHA-256 digest.
+`guardrail.scope` becomes `candidate_and_git_objects`; a small dirty delta does
+not hide the complete-history transfer. Exclusions govern working files, not
+historical blobs. See [local Git metadata](../features/sync.md#opt-in-local-git-metadata)
+for scope, fixed preparation limits, and unsupported combinations.
 
 The first line reports the candidate file count and total size. If the
 checkout has tracked files that were deleted locally (and would be pruned
@@ -92,20 +121,29 @@ machine-readable shape for CI checks and agent preflights:
 ```
 
 `candidate` is the full manifest that would be present on the remote after
-sync. `dirtyDelta` is the locally changed/untracked/deleted path set that
-`crabbox run` uses for large-sync guardrails when it is non-empty.
+sync. `dirtyDelta` is the locally changed/untracked/deleted path set. Ordinary
+SSH sync uses this delta for large-sync guardrails when it is non-empty;
+providers that enforce full-archive limits use the complete candidate even
+when only one file changed. Both size summaries remain visible.
 `protectedTrackedFiles` counts tracked regular files kept despite an ambiguous
 built-in exclude and includes up to five path-and-pattern examples.
 `guardrail.scope` is therefore either `dirty_delta` or `candidate`, matching
-the sync preflight path. `guardrail.status` is `ok`, `warning`, or `failed`;
+the configured provider's ordinary workspace-sync preflight. This selection
+uses provider metadata locally; it does not configure or contact the provider.
+`guardrail.status` is `ok`, `warning`, or `failed`;
 warnings and failures are listed in `guardrail.reasons` when configured
 `sync.warn*` or `sync.fail*` thresholds are reached.
+
+The preview does not predict compressed upload limits, native service limits,
+authentication, or command-specific routes such as module execution. A later
+`run --no-sync` does not transfer the previewed workspace.
 
 ## Flags
 
 ```text
 --limit <n>   number of top files and directories to print (default 20)
 --json        print machine-readable JSON
+--git-seed-source <origin|local>  choose origin or explicit offline local objects
 ```
 
 `--limit` must be positive; `--limit 0` (or any non-positive value) is

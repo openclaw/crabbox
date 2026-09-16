@@ -32,8 +32,6 @@ type claimRoutingCommandProvider struct {
 	configureErr error
 }
 
-func (p claimRoutingCommandProvider) Name() string      { return p.name }
-func (p claimRoutingCommandProvider) Aliases() []string { return nil }
 func (p claimRoutingCommandProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        p.name,
@@ -126,6 +124,17 @@ func TestStatusAndInspectRouteImplicitIdentifiersThroughLocalClaims(t *testing.T
 					t.Fatalf("%s exact id: %v", command.name, err)
 				}
 				assertClaimRoutingProvider(t, output, claimRoutingUsableProvider)
+			})
+
+			t.Run("missing canonical id does not select slug provider", func(t *testing.T) {
+				setupClaimRoutingCommandTest(t, claimRoutingConfiguredProvider)
+				mustWriteClaimRoutingTestClaim(t, "cbx_1293aa000002", "cbx-1293aa000001", claimRoutingUsableProvider)
+
+				output, err := runClaimRoutingCommand(command.run, []string{"--id", "cbx_1293aa000001"})
+				if err != nil {
+					t.Fatalf("%s missing canonical id: %v", command.name, err)
+				}
+				assertClaimRoutingProvider(t, output, claimRoutingConfiguredProvider)
 			})
 
 			t.Run("implicit unambiguous slug", func(t *testing.T) {
@@ -275,7 +284,7 @@ func setupClaimRoutingCommandTest(t *testing.T, configuredProvider string) {
 
 func mustWriteClaimRoutingTestClaim(t *testing.T, leaseID, slug, provider string) {
 	t.Helper()
-	if err := claimLeaseForRepoProvider(leaseID, slug, provider, "/repo", time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider(leaseID, slug, provider, "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 }

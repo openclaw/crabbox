@@ -28,7 +28,6 @@ type api interface {
 	Exec(context.Context, string, string, string) (execResult, error)
 	ExecStream(context.Context, string, string, string, io.Writer) (int, error)
 	UploadFile(context.Context, string, string, string) error
-	WriteFile(context.Context, string, string, string) error
 }
 
 type client struct {
@@ -66,10 +65,10 @@ const upstashBoxDefaultResponseHeaderTimeout = 30 * time.Second
 
 var upstashBoxCleanupTimeout = 15 * time.Second
 
-var newAPI = func(cfg Config, rt Runtime) (api, error) {
+var newAPI = func(cfg core.Config, rt core.Runtime) (api, error) {
 	apiKey := strings.TrimSpace(cfg.UpstashBox.APIKey)
 	if apiKey == "" {
-		return nil, exit(2, "provider=%s requires UPSTASH_BOX_API_KEY", providerName)
+		return nil, core.Exit(2, "provider=%s requires UPSTASH_BOX_API_KEY", providerName)
 	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
@@ -79,7 +78,7 @@ var newAPI = func(cfg Config, rt Runtime) (api, error) {
 			return nil, fmt.Errorf("%s HTTP client setup: %w", providerName, err)
 		}
 	}
-	base := strings.TrimRight(blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), "https://us-east-1.box.upstash.com"), "/")
+	base := strings.TrimRight(core.Blank(strings.TrimSpace(cfg.UpstashBox.BaseURL), core.UpstashBoxConfigDefaultBaseURL), "/")
 	trusted, _ := url.Parse(base)
 	return &client{apiKey: apiKey, base: base, http: shared.SecureHTTPClient(httpClient, trusted, upstashBoxRedirectError)}, nil
 }
@@ -129,10 +128,10 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 			return box, nil
 		}
 		if status == "error" || status == "failed" {
-			return boxData{}, c.cleanupCreatedBox(box.ID, exit(5, "upstash-box creation failed for %s", box.ID))
+			return boxData{}, c.cleanupCreatedBox(box.ID, core.Exit(5, "upstash-box creation failed for %s", box.ID))
 		}
 		if time.Now().After(deadline) {
-			return boxData{}, c.cleanupCreatedBox(box.ID, exit(5, "upstash-box creation timed out for %s status=%s", box.ID, blank(box.Status, "unknown")))
+			return boxData{}, c.cleanupCreatedBox(box.ID, core.Exit(5, "upstash-box creation timed out for %s status=%s", box.ID, core.Blank(box.Status, "unknown")))
 		}
 		select {
 		case <-ctx.Done():
@@ -204,11 +203,7 @@ func (c *client) ExecStream(ctx context.Context, boxID, command, folder string, 
 	if strings.TrimSpace(folder) != "" {
 		body["folder"] = strings.TrimSpace(folder)
 	}
-	data, err := json.Marshal(body)
-	if err != nil {
-		return 0, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/v2/box/"+url.PathEscape(boxID)+"/exec-stream", bytes.NewReader(data))
+	req, err := shared.NewCompactJSONRequest(ctx, http.MethodPost, c.base+"/v2/box/"+url.PathEscape(boxID)+"/exec-stream", body)
 	if err != nil {
 		return 0, err
 	}
@@ -282,25 +277,12 @@ func (c *client) UploadFile(ctx context.Context, boxID, localPath, remotePath st
 	return finishProducer(nil)
 }
 
-func (c *client) WriteFile(ctx context.Context, boxID, remotePath, content string) error {
-	body := map[string]any{"path": remotePath, "content": content}
-	return c.doJSON(ctx, http.MethodPost, "/v2/box/"+url.PathEscape(boxID)+"/files/write", nil, body, nil)
-}
-
 func (c *client) doJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {
-	var input io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		input = bytes.NewReader(data)
-	}
 	u := c.base + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u, input)
+	req, err := shared.NewCompactJSONRequest(ctx, method, u, body)
 	if err != nil {
 		return err
 	}
@@ -474,5 +456,5 @@ func commandExitError(prefix string, result execResult) error {
 	if msg == "" {
 		msg = "exit " + strconv.Itoa(result.ExitCode)
 	}
-	return exit(result.ExitCode, "%s: %s", prefix, msg)
+	return core.Exit(result.ExitCode, "%s: %s", prefix, msg)
 }

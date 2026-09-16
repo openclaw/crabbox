@@ -1,6 +1,7 @@
-import { sha256Hex } from "./auth";
 import type { CoordinatorStorage, CoordinatorStorageView } from "./coordinator-runtime";
+import { sha256Hex } from "./encoding";
 import { orgMatchesForAccounting, sameOrgIdentityKey } from "./org-identity";
+import { coordinatorStorageEntries } from "./storage-scan";
 import type {
   CoordinatorCheckpointCreateClaim,
   CoordinatorCheckpointDeleteClaim,
@@ -443,20 +444,12 @@ async function scanCheckpointRecords(
   batchSize: number,
   visit: (record: CoordinatorCheckpointRecord) => boolean,
 ): Promise<void> {
-  const scan = async (startAfter?: string): Promise<void> => {
-    const records = await transaction.list<CoordinatorCheckpointRecord>({
-      prefix: "checkpoint:",
-      limit: batchSize,
-      ...(startAfter ? { startAfter } : {}),
-    });
-    let lastKey: string | undefined;
-    for (const [key, record] of records) {
-      if (visit(record)) return;
-      lastKey = key;
-    }
-    if (records.size === batchSize && lastKey) await scan(lastKey);
-  };
-  await scan();
+  for await (const [, record] of coordinatorStorageEntries<CoordinatorCheckpointRecord>(
+    transaction,
+    { prefix: "checkpoint:", limit: batchSize },
+  )) {
+    if (visit(record)) return;
+  }
 }
 
 export async function backfillFailedCheckpointCreateRecovery(
@@ -1146,31 +1139,22 @@ async function expireAvailableCheckpointClaims(
   limits: CheckpointLimits,
 ): Promise<CoordinatorCheckpointRecord> {
   const batchSize = Math.min(limits.useClaimsPerCheckpoint, limits.useClaimsTotal);
-  const expirePage = async (
-    current: CoordinatorCheckpointRecord,
-    startAfter?: string,
-  ): Promise<CoordinatorCheckpointRecord> => {
-    const claims = await transaction.list<CoordinatorCheckpointUseClaim>({
-      prefix: `checkpoint-use:${checkpoint.id}:`,
-      limit: batchSize,
-      ...(startAfter ? { startAfter } : {}),
-    });
-    const updated = await [...claims].reduce(async (pending, [key, claim]) => {
-      const record = await pending;
-      if (claim.state === "provisioning" || Date.parse(claim.expiresAt) > now) return record;
-      await transaction.delete(key);
-      return await writeCheckpointTransition(
-        transaction,
-        record,
-        { ...record, activeUseCount: Math.max(0, record.activeUseCount - 1) },
-        "checkpoint.use.expired",
-        "system",
-      );
-    }, Promise.resolve(current));
-    const lastKey = [...claims.keys()].at(-1);
-    return claims.size === batchSize && lastKey ? await expirePage(updated, lastKey) : updated;
-  };
-  return await expirePage(checkpoint);
+  let current = checkpoint;
+  for await (const [key, claim] of coordinatorStorageEntries<CoordinatorCheckpointUseClaim>(
+    transaction,
+    { prefix: `checkpoint-use:${checkpoint.id}:`, limit: batchSize },
+  )) {
+    if (claim.state === "provisioning" || Date.parse(claim.expiresAt) > now) continue;
+    await transaction.delete(key);
+    current = await writeCheckpointTransition(
+      transaction,
+      current,
+      { ...current, activeUseCount: Math.max(0, current.activeUseCount - 1) },
+      "checkpoint.use.expired",
+      "system",
+    );
+  }
+  return current;
 }
 
 async function validatedUseClaim(
@@ -1215,68 +1199,94 @@ export async function validateCheckpointUse(
   });
 }
 
-export async function bindCheckpointUseProvisioning(
-  storage: CoordinatorStorage,
+export function checkpointLeaseSourceIdentity(checkpoint: CoordinatorCheckpointRecord): string {
+  const { scope, image } = checkpoint;
+  // Deletion changes generation, but does not change a completed fork's source.
+  return JSON.stringify([
+    checkpoint.id,
+    checkpoint.createdAt,
+    checkpoint.provider,
+    checkpoint.target,
+    scope.region,
+    scope.accountID,
+    scope.subscriptionID,
+    scope.resourceGroup,
+    scope.project,
+    image?.kind,
+    image?.resourceID,
+    image?.immutableID,
+  ]);
+}
+
+export async function bindCheckpointUseProvisioningInTransaction(
+  transaction: CoordinatorStorageView,
   checkpointID: string,
-  token: string,
+  tokenHash: string,
   principal: CheckpointPrincipal,
   attemptID: string,
   leaseID: string,
+  sourceIdentity?: string,
 ): Promise<CoordinatorCheckpointRecord> {
-  const tokenHash = await sha256Hex(token);
-  return storage.transaction(async (transaction) => {
-    const { checkpoint, claim } = await validatedUseClaim(
-      transaction,
-      checkpointID,
-      tokenHash,
-      principal,
+  const { checkpoint, claim } = await validatedUseClaim(
+    transaction,
+    checkpointID,
+    tokenHash,
+    principal,
+  );
+  if (
+    sourceIdentity !== undefined &&
+    checkpointLeaseSourceIdentity(checkpoint) !== sourceIdentity
+  ) {
+    throw new CheckpointError(
+      "checkpoint_source_mismatch",
+      "checkpoint changed during lease admission",
     );
-    const attemptKey = `create-attempt:${leaseID}`;
-    const attempt = await transaction.get<CreateAttemptRecord>(attemptKey);
-    if (
-      !attempt ||
-      attempt.version !== 1 ||
-      attempt.requestedLeaseID !== leaseID ||
-      attempt.token !== attemptID ||
-      attempt.owner !== principal.owner ||
-      attempt.org !== principal.org
-    ) {
-      throw new CheckpointError("create_attempt_conflict", "checkpoint lease attempt is invalid");
-    }
-    if (attempt.state === "canceled") {
-      throw new CheckpointError("create_canceled", "checkpoint lease attempt was canceled");
-    }
-    if (attempt.state !== "pending") {
-      throw new CheckpointError("create_attempt_conflict", "checkpoint lease attempt is invalid");
-    }
-    if (attempt.checkpointID !== checkpointID || attempt.checkpointUseClaimHash !== tokenHash) {
-      throw new CheckpointError(
-        "create_attempt_binding_conflict",
-        "create attempt is not bound to the exact checkpoint claim",
-      );
-    }
-    if (claim.state === "provisioning") {
-      throw new CheckpointError(
-        "checkpoint_in_use",
-        claim.attemptID === attemptID && claim.leaseID === leaseID
-          ? "checkpoint lease attempt is already provisioning"
-          : "checkpoint claim already owns a lease attempt",
-      );
-    }
-    await transaction.put(checkpointUseKey(checkpointID, tokenHash), {
-      ...claim,
-      state: "provisioning",
-      attemptID,
-      leaseID,
-    } satisfies CoordinatorCheckpointUseClaim);
-    return writeCheckpointTransition(
-      transaction,
-      checkpoint,
-      checkpoint,
-      "checkpoint.use.provisioning",
-      principal.owner,
+  }
+  const attemptKey = `create-attempt:${leaseID}`;
+  const attempt = await transaction.get<CreateAttemptRecord>(attemptKey);
+  if (
+    !attempt ||
+    (attempt.version !== 1 && attempt.version !== 2) ||
+    attempt.requestedLeaseID !== leaseID ||
+    attempt.token !== attemptID ||
+    attempt.owner !== principal.owner ||
+    attempt.org !== principal.org
+  ) {
+    throw new CheckpointError("create_attempt_conflict", "checkpoint lease attempt is invalid");
+  }
+  if (attempt.state === "canceled") {
+    throw new CheckpointError("create_canceled", "checkpoint lease attempt was canceled");
+  }
+  if (attempt.state !== "pending") {
+    throw new CheckpointError("create_attempt_conflict", "checkpoint lease attempt is invalid");
+  }
+  if (attempt.checkpointID !== checkpointID || attempt.checkpointUseClaimHash !== tokenHash) {
+    throw new CheckpointError(
+      "create_attempt_binding_conflict",
+      "create attempt is not bound to the exact checkpoint claim",
     );
-  });
+  }
+  if (claim.state === "provisioning") {
+    throw new CheckpointError(
+      "checkpoint_in_use",
+      claim.attemptID === attemptID && claim.leaseID === leaseID
+        ? "checkpoint lease attempt is already provisioning"
+        : "checkpoint claim already owns a lease attempt",
+    );
+  }
+  await transaction.put(checkpointUseKey(checkpointID, tokenHash), {
+    ...claim,
+    state: "provisioning",
+    attemptID,
+    leaseID,
+  } satisfies CoordinatorCheckpointUseClaim);
+  return writeCheckpointTransition(
+    transaction,
+    checkpoint,
+    checkpoint,
+    "checkpoint.use.provisioning",
+    principal.owner,
+  );
 }
 
 export async function abortCheckpointProvisioningForLease(
@@ -1356,7 +1366,7 @@ export async function resolveRejectedCheckpointProvisioning(
       claim.owner !== principal.owner ||
       !sameOrgIdentityKey(claim.org, principal.org) ||
       !attempt ||
-      attempt.version !== 1 ||
+      (attempt.version !== 1 && attempt.version !== 2) ||
       attempt.requestedLeaseID !== leaseID ||
       attempt.token !== attemptID ||
       attempt.owner !== principal.owner ||
@@ -1473,7 +1483,7 @@ async function completedCheckpointUse(
         ["deleting", "delete-pending", "deleted"].includes(checkpoint.state)
       )) ||
     !attempt ||
-    attempt.version !== 1 ||
+    (attempt.version !== 1 && attempt.version !== 2) ||
     attempt.requestedLeaseID !== completion.requestedLeaseID ||
     attempt.token !== attemptID ||
     attempt.state === "canceled" ||

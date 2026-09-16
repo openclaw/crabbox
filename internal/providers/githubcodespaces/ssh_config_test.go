@@ -5,10 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestSSHConfigParsesProxyTarget(t *testing.T) {
-	target, err := selectSSHTarget(Config{GitHubCodespaces: GitHubCodespacesConfig{WorkRoot: "/workspaces/my-app"}}, `Host sturdy-space
+	target, err := selectSSHTarget(core.Config{GitHubCodespaces: core.GitHubCodespacesConfig{WorkRoot: "/workspaces/my-app"}}, `Host sturdy-space
   User vscode
   IdentityFile "/tmp/codespaces/key"
   UserKnownHostsFile=/dev/null
@@ -34,7 +36,7 @@ func TestSSHConfigParsesProxyTarget(t *testing.T) {
 }
 
 func TestSSHConfigSelectsGeneratedGitHubCLIAliasByProxyCodespace(t *testing.T) {
-	target, err := selectSSHTarget(Config{GitHubCodespaces: GitHubCodespacesConfig{GHPath: "/opt/github/bin/gh"}}, `Host cs.sturdy-space.main
+	target, err := selectSSHTarget(core.Config{GitHubCodespaces: core.GitHubCodespacesConfig{GHPath: "/opt/github/bin/gh"}}, `Host cs.sturdy-space.main
   User vscode
   IdentityFile "/tmp/codespaces/key"
   UserKnownHostsFile /dev/null
@@ -52,7 +54,7 @@ func TestSSHConfigSelectsGeneratedGitHubCLIAliasByProxyCodespace(t *testing.T) {
 }
 
 func TestSSHConfigProxyPinsConfiguredGitHubHost(t *testing.T) {
-	target, err := selectSSHTarget(Config{GitHubCodespaces: GitHubCodespacesConfig{APIURL: "https://api.octocorp.ghe.com"}}, `Host sturdy-space
+	target, err := selectSSHTarget(core.Config{GitHubCodespaces: core.GitHubCodespacesConfig{APIURL: "https://api.octocorp.ghe.com"}}, `Host sturdy-space
   User vscode
   IdentityFile /tmp/codespaces/key
   ProxyCommand gh codespace ssh -c sturdy-space --stdio
@@ -81,7 +83,7 @@ Host sturdy-space
 }
 
 func TestSSHConfigParsesDirectTarget(t *testing.T) {
-	target, err := selectSSHTarget(Config{}, `Host sturdy-space
+	target, err := selectSSHTarget(core.Config{}, `Host sturdy-space
   HostName 127.0.0.1
   User vscode
   Port 2222
@@ -131,7 +133,7 @@ Host sturdy
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := selectSSHTarget(Config{}, tt.data, "sturdy")
+			_, err := selectSSHTarget(core.Config{}, tt.data, "sturdy")
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err=%v want %q", err, tt.want)
 			}
@@ -141,7 +143,7 @@ Host sturdy
 
 func TestSSHConfigRejectsInvalidUsers(t *testing.T) {
 	for _, user := range []string{"-oProxyCommand=sh", "alice@example.com", "alice bob", "alice\tbob"} {
-		_, err := selectSSHTarget(Config{}, `Host sturdy
+		_, err := selectSSHTarget(core.Config{}, `Host sturdy
   User `+user+`
   IdentityFile "/tmp/key"
   ProxyCommand gh codespace ssh -c sturdy --stdio

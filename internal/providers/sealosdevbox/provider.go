@@ -27,11 +27,10 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return []string{"sealos", "sealos-dev"} }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases:          []string{"sealos", "sealos-dev"},
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationNativeConfig),
 		Name:             providerName,
 		Family:           familyName,
 		Kind:             core.ProviderKindSSHLease,
@@ -43,7 +42,7 @@ func (Provider) Spec() core.ProviderSpec {
 }
 
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return registerFlags(fs, defaults)
+	return core.RegisterSealosDevboxConfigFlags(fs, defaults.SealosDevbox)
 }
 
 func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
@@ -59,7 +58,7 @@ func (Provider) CommandRouting(cfg core.Config, _ core.CommandRoutingRequest) co
 		"--sealos-devbox-network", normalizeNetwork(values.Network),
 		"--sealos-devbox-ssh-gateway-port", values.SSHGatewayPort,
 		"--sealos-devbox-ssh-user", values.SSHUser,
-		"--sealos-devbox-work-root", sealosWorkRoot(cfg),
+		"--sealos-devbox-work-root", core.EffectiveSealosDevboxWorkRoot(cfg),
 	}
 	for _, optional := range []struct {
 		flagName string
@@ -106,7 +105,7 @@ func prepareBackendConfig(cfg core.Config) core.Config {
 	cfg.SSHUser = cfg.SealosDevbox.SSHUser
 	cfg.SSHPort = cfg.SealosDevbox.SSHGatewayPort
 	cfg.SSHFallbackPorts = nil
-	cfg.WorkRoot = sealosWorkRoot(cfg)
+	cfg.WorkRoot = core.EffectiveSealosDevboxWorkRoot(cfg)
 	if strings.EqualFold(cfg.SealosDevbox.Network, networkNodePort) {
 		cfg.SSHPort = "22"
 	}

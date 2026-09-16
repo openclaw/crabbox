@@ -32,7 +32,7 @@ func (a App) tunnel(ctx context.Context, args []string) error {
 		return err
 	}
 	if strings.TrimSpace(*id) == "" || fs.NArg() != 1 {
-		return exit(2, "usage: crabbox tunnel --id <lease-id-or-slug> [--local-port <port>] <remote-port>")
+		return Exit(2, "usage: crabbox tunnel --id <lease-id-or-slug> [--local-port <port>] <remote-port>")
 	}
 	remotePort, err := parseTunnelPort(fs.Arg(0), "remote port", false)
 	if err != nil {
@@ -71,7 +71,7 @@ func parseTunnelPort(value, label string, allowAuto bool) (string, error) {
 	}
 	port, err := strconv.Atoi(value)
 	if err != nil || port < 1 || port > 65535 {
-		return "", exit(2, "%s must be a TCP port in 1..65535", label)
+		return "", Exit(2, "%s must be a TCP port in 1..65535", label)
 	}
 	return strconv.Itoa(port), nil
 }
@@ -81,7 +81,7 @@ func runSSHLocalForward(ctx context.Context, target SSHTarget, requestedLocalPor
 	defer stopTerminationSignals()
 	ctx = terminationCtx
 
-	reservation, err := reserveSSHLocalForwardPort(requestedLocalPort)
+	reservation, err := reserveSSHLocalForwardPort(ctx, requestedLocalPort)
 	if err != nil {
 		return err
 	}
@@ -99,6 +99,7 @@ func runSSHLocalForward(ctx context.Context, target SSHTarget, requestedLocalPor
 	handle := pondMeshExecCommand(forwardCtx, target.ChildEnvDenylist, directSSHExecutable(), args...)
 	output := newSynchronizedTailBuffer(failureTailLines)
 	if execHandle, ok := handle.(*pondMeshExecHandle); ok {
+		applyTargetChildEnvironment(execHandle.cmd, target)
 		execHandle.cmd.Stdout = output
 		execHandle.cmd.Stderr = output
 	}
@@ -138,9 +139,9 @@ func runSSHLocalForward(ctx context.Context, target SSHTarget, requestedLocalPor
 			}
 			detail := strings.TrimSpace(redactSSHTransportDiagnostic(target, output.String()))
 			if detail != "" {
-				return exit(5, "SSH tunnel did not become ready on %s:%s: %s", sshTunnelLoopbackHost, reservation.port, tailForError(detail))
+				return Exit(5, "SSH tunnel did not become ready on %s:%s: %s", sshTunnelLoopbackHost, reservation.port, tailForError(detail))
 			}
-			return exit(5, "SSH tunnel did not become ready on %s:%s: %v", sshTunnelLoopbackHost, reservation.port, readinessErr)
+			return Exit(5, "SSH tunnel did not become ready on %s:%s: %v", sshTunnelLoopbackHost, reservation.port, readinessErr)
 		case <-ticker.C:
 			ready, probeErr := sshLocalForwardReady(forwardCtx, reservation.port, handle.PID(), target.ChildEnvDenylist...)
 			if !ready {
@@ -213,12 +214,12 @@ func unexpectedSSHForwardExit(result struct {
 	}
 	detail := strings.TrimSpace(output)
 	if detail != "" {
-		return exit(5, "SSH tunnel exited before cancellation: %s", tailForError(detail))
+		return Exit(5, "SSH tunnel exited before cancellation: %s", tailForError(detail))
 	}
 	if result.err != nil {
 		return fmt.Errorf("SSH tunnel exited before cancellation: %w", result.err)
 	}
-	return exit(5, "SSH tunnel exited before cancellation")
+	return Exit(5, "SSH tunnel exited before cancellation")
 }
 
 func cancelledSSHForwardResult(result struct {
@@ -231,7 +232,7 @@ func cancelledSSHForwardResult(result struct {
 	if result.err != nil {
 		return result.err
 	}
-	return exit(5, "SSH tunnel exited unexpectedly during cancellation")
+	return Exit(5, "SSH tunnel exited unexpectedly during cancellation")
 }
 
 type sshLocalForwardPortReservation struct {
@@ -239,31 +240,34 @@ type sshLocalForwardPortReservation struct {
 	unlock func()
 }
 
-func reserveSSHLocalForwardPort(requested string) (*sshLocalForwardPortReservation, error) {
+func reserveSSHLocalForwardPort(ctx context.Context, requested string) (*sshLocalForwardPortReservation, error) {
 	if requested != "" {
-		return reserveSpecificSSHLocalForwardPort(requested)
+		return reserveSpecificSSHLocalForwardPort(ctx, requested)
 	}
 	for attempt := 0; attempt < 32; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		listener, err := net.Listen("tcp4", net.JoinHostPort(sshTunnelLoopbackHost, "0"))
 		if err != nil {
 			return nil, fmt.Errorf("choose local SSH tunnel port: %w", err)
 		}
 		port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 		_ = listener.Close()
-		reservation, err := reserveSpecificSSHLocalForwardPort(port)
+		reservation, err := reserveSpecificSSHLocalForwardPort(ctx, port)
 		if err == nil {
 			return reservation, nil
 		}
 	}
-	return nil, exit(5, "no available IPv4 loopback port found for SSH tunnel")
+	return nil, Exit(5, "no available IPv4 loopback port found for SSH tunnel")
 }
 
-func reserveSpecificSSHLocalForwardPort(port string) (*sshLocalForwardPortReservation, error) {
+func reserveSpecificSSHLocalForwardPort(ctx context.Context, port string) (*sshLocalForwardPortReservation, error) {
 	portNumber, err := strconv.Atoi(port)
 	if err != nil || portNumber < 1 || portNumber > 65535 {
-		return nil, exit(2, "local port must be a TCP port in 1..65535")
+		return nil, Exit(2, "local port must be a TCP port in 1..65535")
 	}
-	stateDir, err := crabboxStateDir()
+	stateDir, err := CrabboxStateDir()
 	if err != nil {
 		return nil, err
 	}
@@ -274,14 +278,14 @@ func reserveSpecificSSHLocalForwardPort(port string) (*sshLocalForwardPortReserv
 	if err := os.Chmod(lockDir, 0o700); err != nil {
 		return nil, fmt.Errorf("secure local tunnel port lock directory: %w", err)
 	}
-	unlock, err := acquireDaemonFileLock(filepath.Join(lockDir, port+".lock"))
+	unlock, err := acquireDaemonFileLock(ctx, filepath.Join(lockDir, port+".lock"))
 	if err != nil {
 		return nil, fmt.Errorf("reserve local tunnel port %s: %w", port, err)
 	}
 	probe, err := net.Listen("tcp4", net.JoinHostPort(sshTunnelLoopbackHost, port))
 	if err != nil {
 		unlock()
-		return nil, exit(5, "local tunnel port %s is already in use", port)
+		return nil, Exit(5, "local tunnel port %s is already in use", port)
 	}
 	_ = probe.Close()
 	return &sshLocalForwardPortReservation{port: strconv.Itoa(portNumber), unlock: unlock}, nil

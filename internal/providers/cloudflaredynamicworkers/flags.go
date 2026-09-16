@@ -3,6 +3,9 @@ package cloudflaredynamicworkers
 import (
 	"flag"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type flagValues struct {
@@ -16,7 +19,7 @@ type flagValues struct {
 	TimeoutSecs        *int
 }
 
-func RegisterProviderFlags(fs *flag.FlagSet, defaults Config) any {
+func RegisterProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
 	cfg := defaults.CloudflareDynamicWorkers
 	return flagValues{
 		URL:                fs.String("cloudflare-dynamic-workers-url", cfg.LoaderURL, "Cloudflare Dynamic Workers loader URL"),
@@ -30,68 +33,73 @@ func RegisterProviderFlags(fs *flag.FlagSet, defaults Config) any {
 	}
 }
 
-func ApplyProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	if cfg.Provider == providerName || cfg.Provider == "cf-dynamic" || cfg.Provider == "cfdw" {
-		if flagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s", providerName)
+func ApplyProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
+	if core.ProviderNameMatchesExact(cfg.Provider, Provider{}) {
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "", ""); err != nil {
+			return err
 		}
-		if flagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s", providerName)
-		}
-		if flagWasSet(fs, "expose") {
-			return exit(2, "--expose is not supported for provider=%s", providerName)
+		if core.FlagWasSet(fs, "expose") {
+			return core.Exit(2, "--expose is not supported for provider=%s", providerName)
 		}
 	}
 	v, ok := values.(flagValues)
 	if !ok {
 		return nil
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-url") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-url") {
 		cfg.CloudflareDynamicWorkers.LoaderURL = *v.URL
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-compatibility-date") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-compatibility-date") {
 		cfg.CloudflareDynamicWorkers.CompatibilityDate = *v.CompatibilityDate
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-compatibility-flags") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-compatibility-flags") {
 		cfg.CloudflareDynamicWorkers.CompatibilityFlags = splitCommaList(*v.CompatibilityFlags)
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-cache") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-cache") {
 		cfg.CloudflareDynamicWorkers.CacheMode = *v.CacheMode
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-egress") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-egress") {
 		cfg.CloudflareDynamicWorkers.Egress = *v.Egress
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-cpu-ms") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-cpu-ms") {
 		cfg.CloudflareDynamicWorkers.CPUMs = *v.CPUMs
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-subrequests") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-subrequests") {
 		cfg.CloudflareDynamicWorkers.Subrequests = *v.Subrequests
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
-	if flagWasSet(fs, "cloudflare-dynamic-workers-timeout-secs") {
+	if core.FlagWasSet(fs, "cloudflare-dynamic-workers-timeout-secs") {
 		cfg.CloudflareDynamicWorkers.TimeoutSecs = *v.TimeoutSecs
+		core.RecordProviderFlagInputs(cfg, true, "cloudflare-dynamic-workers")
 	}
 	return validateProviderConfig(*cfg)
 }
 
-func validateProviderConfig(cfg Config) error {
+func validateProviderConfig(cfg core.Config) error {
 	switch normalizeCacheMode(cfg.CloudflareDynamicWorkers.CacheMode) {
 	case "one-shot", "stable", "explicit":
 	default:
-		return exit(2, "invalid %s cache mode %q", providerName, cfg.CloudflareDynamicWorkers.CacheMode)
+		return core.Exit(2, "invalid %s cache mode %q", providerName, cfg.CloudflareDynamicWorkers.CacheMode)
 	}
 	switch normalizeEgress(cfg.CloudflareDynamicWorkers.Egress) {
 	case "blocked", "intercept":
 	default:
-		return exit(2, "invalid %s egress mode %q", providerName, cfg.CloudflareDynamicWorkers.Egress)
+		return core.Exit(2, "invalid %s egress mode %q", providerName, cfg.CloudflareDynamicWorkers.Egress)
 	}
 	if cfg.CloudflareDynamicWorkers.CPUMs < 0 {
-		return exit(2, "%s cpu-ms must be non-negative", providerName)
+		return core.Exit(2, "%s cpu-ms must be non-negative", providerName)
 	}
 	if cfg.CloudflareDynamicWorkers.Subrequests < 0 {
-		return exit(2, "%s subrequests must be non-negative", providerName)
+		return core.Exit(2, "%s subrequests must be non-negative", providerName)
 	}
 	if cfg.CloudflareDynamicWorkers.TimeoutSecs < 0 {
-		return exit(2, "%s timeout-secs must be non-negative", providerName)
+		return core.Exit(2, "%s timeout-secs must be non-negative", providerName)
 	}
 	return nil
 }

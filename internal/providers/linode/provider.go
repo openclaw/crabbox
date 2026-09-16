@@ -19,10 +19,9 @@ var _ core.ProviderClassProfileProvider = Provider{}
 
 var classProfiles = core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: defaultType})
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIToken),
 		Name:             providerName,
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
@@ -63,14 +62,6 @@ func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 	return serverType, serverType != ""
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return linodeServerTypeForClass(class)
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewLinodeLeaseBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return newLinodeLeaseBackend(p.Spec(), cfg, rt), nil
 }

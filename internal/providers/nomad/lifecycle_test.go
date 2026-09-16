@@ -3,12 +3,16 @@ package nomad
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -393,7 +397,7 @@ func TestWarmupTimingJSONIncludesNomadLease(t *testing.T) {
 	}
 }
 
-func TestWarmupCleansRegisteredJobWhenReadinessFailsBeforeClaim(t *testing.T) {
+func TestWarmupCleansRegisteredJobWhenReadinessFails(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.evalStatus = nomadapi.EvalStatusFailed
 	b, _, _ := testBackend(t, fake)
@@ -404,6 +408,10 @@ func TestWarmupCleansRegisteredJobWhenReadinessFailsBeforeClaim(t *testing.T) {
 	}
 	if len(fake.deregisters) != 1 {
 		t.Fatalf("deregisters=%v, want one cleanup", fake.deregisters)
+	}
+	var displayed core.ExitError
+	if !core.AsExitError(err, &displayed) || !strings.Contains(displayed.Message, fake.deregisters[0]) || !strings.Contains(displayed.Message, "lease=") || !strings.Contains(displayed.Message, "rolled back") || strings.Contains(displayed.Message, "recover with") {
+		t.Fatalf("warmup rollback diagnostic lost identity or implied retention: %v", err)
 	}
 	claims, err := listNomadLeaseClaims()
 	if err != nil {
@@ -524,20 +532,61 @@ func TestStopRetainsClaimWhenRemovalCannotBeConfirmed(t *testing.T) {
 func TestSetupFailureRefusesCleanupAfterRemoteOwnershipChanges(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	b, _, _ := testBackend(t, fake)
-	expected, err := buildJobSpec(b.cfg, jobSpecInput{LeaseID: "cbx_474747474747", Slug: "changed-crab", JobID: "crabbox-474747474747"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	fake.jobs[stringValue(expected.ID)] = cloneJob(expected)
-	fake.jobs[stringValue(expected.ID)].Meta[metadataLeaseID] = "cbx_someone_else"
+	claim := createClaim(t, b, "cbx_474747474747", "changed-crab", "crabbox-474747474747", "alloc-47")
+	claim = markRegistrationClaim(t, claim, fake.jobs[claim.Labels[claimLabelJobID]], registrationConfirmed)
+	fake.jobs[claim.Labels[claimLabelJobID]].Meta[metadataLeaseID] = "cbx_someone_else"
 
-	err = b.cleanupUnclaimedJob(context.Background(), fake, expected, errors.New("readiness failed"))
+	_, err := b.rollbackRegistration(context.Background(), fake, claim, errors.New("readiness failed"))
 	if err == nil || !strings.Contains(err.Error(), "ownership changed") {
 		t.Fatalf("err=%v, want ownership refusal", err)
 	}
 	if len(fake.deregisters) != 0 {
 		t.Fatalf("deregisters=%v", fake.deregisters)
 	}
+}
+
+// Legacy fixture construction intentionally has no registration-attempt markers.
+func writeNomadClaim(cfg Config, leaseID, slug string, repo Repo, reclaim bool, ready allocationReadiness, expiresAt time.Time) (LeaseClaim, error) {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+		return LeaseClaim{}, err
+	}
+	claim, err := readLeaseClaim(leaseID)
+	if err != nil {
+		return LeaseClaim{}, err
+	}
+	return updateLeaseClaimLabelsIfUnchanged(leaseID, claim, claimLabels(cfg, leaseID, slug, ready, expiresAt))
+}
+
+func markRegistrationClaim(t *testing.T, claim LeaseClaim, job *nomadapi.Job, state string) LeaseClaim {
+	t.Helper()
+	metadata, err := json.Marshal(job.Meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := make(map[string]string, len(claim.Labels)+3)
+	for key, value := range claim.Labels {
+		labels[key] = value
+	}
+	labels[registrationVersionLabel] = "1"
+	labels[registrationStateLabel] = state
+	delete(labels, claimLabelAllocationID)
+	keys := make([]string, 0, len(job.Meta))
+	for key := range job.Meta {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	keyJSON, err := json.Marshal(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(metadata)
+	labels[registrationMetaKeysLabel] = string(keyJSON)
+	labels[registrationMetaHashLabel] = hex.EncodeToString(digest[:])
+	updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return updated
 }
 
 func TestCleanupDryRunAndLiveOwnedExpiredClaims(t *testing.T) {
@@ -625,7 +674,7 @@ func TestSyncWorkspaceStreamsArchiveThroughAllocationExec(t *testing.T) {
 	b, _, stderr := testBackend(t, fake)
 	repo := newNomadRunRepo(t)
 	ready := allocationReadiness{JobID: "job-sync", AllocationID: "alloc-sync", NodeID: "node-1", NodeName: "worker-1", Task: "crabbox"}
-	phases, _, err := b.syncWorkspace(context.Background(), fake, ready, RunRequest{Repo: repo}, b.cfg.Nomad.Workdir)
+	phases, _, err := b.workspace(fake, ready, RunRequest{Repo: repo}, b.cfg.Nomad.Workdir).Sync(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,6 +696,16 @@ func TestSyncWorkspaceStreamsArchiveThroughAllocationExec(t *testing.T) {
 	}
 }
 
+func assertNomadRunSession(t *testing.T, result RunResult, reused, kept bool) {
+	t.Helper()
+	if err := core.ValidateRunSessionForSpec(Provider{}.Spec(), result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Session == nil || result.Session.LeaseID != result.LeaseID || result.Session.Slug != result.Slug || result.Session.Reused != reused || result.Session.Kept != kept || result.Session.CleanupCommand != "crabbox stop --provider nomad "+shellQuote(result.LeaseID) {
+		t.Fatalf("session=%#v result=%#v", result.Session, result)
+	}
+}
+
 func TestRunNoSyncPropagatesRemoteExitAndCleansNewJob(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	fake.execResults = []fakeNomadExecResult{
@@ -655,16 +714,19 @@ func TestRunNoSyncPropagatesRemoteExitAndCleansNewJob(t *testing.T) {
 	}
 	b, stdout, stderr := testBackend(t, fake)
 	result, err := b.Run(context.Background(), RunRequest{
-		Repo:    newNomadRunRepo(t),
-		NoSync:  true,
-		Env:     map[string]string{"TOKEN": "secret", "BAD-NAME": "skip"},
-		Command: []string{"go", "test", "./..."},
+		ID:                 " \t ",
+		Repo:               newNomadRunRepo(t),
+		NoSync:             true,
+		Env:                map[string]string{"TOKEN": "secret", "BAD-NAME": "skip"},
+		Command:            []string{"go", "test", "./...", "&&"},
+		CommandLiteralArgs: map[int]bool{3: true},
 	})
 	var exitErr ExitError
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 23 {
 		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
 	}
-	if result.ExitCode != 23 || result.Provider != providerName || result.Session != nil {
+	assertNomadRunSession(t, result, false, false)
+	if result.ExitCode != 23 || result.Provider != providerName {
 		t.Fatalf("result=%#v", result)
 	}
 	if len(fake.deregisters) != 1 {
@@ -677,35 +739,51 @@ func TestRunNoSyncPropagatesRemoteExitAndCleansNewJob(t *testing.T) {
 		strings.Contains(fake.execs[1].Stdin, "BAD-NAME") {
 		t.Fatalf("execs=%#v", fake.execs)
 	}
+	if !strings.HasSuffix(fake.execs[1].Stdin, " && exec 'go' 'test' './...' '&&'") {
+		t.Fatalf("literal intent lost in final stdin: %q", fake.execs[1].Stdin)
+	}
 }
 
-func TestRunNoSyncPropagatesCleanupFailureAfterSuccessfulCommand(t *testing.T) {
-	fake := newLifecycleFakeClient()
-	fake.execResults = []fakeNomadExecResult{
-		{ExitCode: 0},
-		{ExitCode: 0, Stdout: "out\n"},
-	}
-	fake.deregisterErr = errors.New("nomad deregister unavailable")
-	b, stdout, stderr := testBackend(t, fake)
-	result, err := b.Run(context.Background(), RunRequest{
-		Repo:    newNomadRunRepo(t),
-		NoSync:  true,
-		Command: []string{"true"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "nomad stop failed") || !strings.Contains(err.Error(), "nomad deregister unavailable") {
-		t.Fatalf("err=%v, want cleanup failure", err)
-	}
-	if result.ExitCode != 1 || result.Provider != providerName || result.Session != nil {
-		t.Fatalf("result=%#v", result)
-	}
-	if len(fake.deregisters) != 1 {
-		t.Fatalf("deregisters=%v", fake.deregisters)
-	}
-	if stdout.String() != "out\n" {
-		t.Fatalf("stdout=%q", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "nomad run summary") {
-		t.Fatalf("stderr=%q", stderr.String())
+func TestRunCleanupFailurePreservesFinalOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		commandCode int
+		commandErr  error
+		wantCode    int
+		wantStatus  core.RunStatus
+	}{
+		{name: "cleanup only", wantCode: 1, wantStatus: core.RunStatusFailed},
+		{name: "command exit", commandCode: 42, wantCode: 42, wantStatus: core.RunStatusFailed},
+		{name: "cancellation", commandErr: context.Canceled, wantCode: 1, wantStatus: core.RunStatusCanceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newLifecycleFakeClient()
+			fake.execResults = []fakeNomadExecResult{{}, {ExitCode: tc.commandCode, Err: tc.commandErr, Stdout: "out\n"}}
+			cleanupErr := errors.New("nomad deregister unavailable")
+			fake.deregisterErr = cleanupErr
+			b, stdout, stderr := testBackend(t, fake)
+			result, err := b.Run(context.Background(), RunRequest{Repo: newNomadRunRepo(t), NoSync: true, TimingJSON: true, Command: []string{"true"}})
+			var ee ExitError
+			if !errors.Is(err, cleanupErr) || !core.AsExitError(err, &ee) || ee.Code != tc.wantCode || tc.commandErr != nil && !errors.Is(err, tc.commandErr) {
+				t.Fatalf("err=%v exit=%#v", err, ee)
+			}
+			assertNomadRunSession(t, result, false, true)
+			if result.ExitCode != tc.wantCode || result.Status != tc.wantStatus || len(fake.deregisters) != 1 || stdout.String() != "out\n" {
+				t.Fatalf("result=%#v purges=%v stdout=%q", result, fake.deregisters, stdout.String())
+			}
+			claim, err := readLeaseClaim(result.LeaseID)
+			if err != nil || claim.LeaseID != result.LeaseID {
+				t.Fatalf("recovery claim lost: %#v %v", claim, err)
+			}
+			lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+			var report core.TimingReport
+			if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+				t.Fatalf("final diagnostic is not timing JSON: %v\n%s", err, stderr.String())
+			}
+			if report.ExitCode != result.ExitCode || report.RunStatus != result.Status || report.ErrorKind != result.ErrorKind || report.Workdir != b.cfg.Nomad.Workdir || strings.Count(stderr.String(), `"provider":"nomad"`) != 1 {
+				t.Fatalf("final timing=%#v result=%#v", report, result)
+			}
+		})
 	}
 }
 
@@ -725,7 +803,8 @@ func TestRunNoSyncTransportFailureUsesNonZeroResultExitCode(t *testing.T) {
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 1 || !strings.Contains(err.Error(), "websocket closed") {
 		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
 	}
-	if result.ExitCode != 1 || result.Provider != providerName || result.Session != nil {
+	assertNomadRunSession(t, result, false, false)
+	if result.ExitCode != 1 || result.Provider != providerName {
 		t.Fatalf("result=%#v", result)
 	}
 	if len(fake.deregisters) != 1 {
@@ -747,7 +826,8 @@ func TestRunKeepOnFailureRetainsNewJob(t *testing.T) {
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
 	}
-	if len(fake.deregisters) != 0 || result.Session != nil {
+	assertNomadRunSession(t, result, false, true)
+	if len(fake.deregisters) != 0 {
 		t.Fatalf("deregisters=%v result=%#v", fake.deregisters, result)
 	}
 	if !strings.Contains(stderr.String(), "rerun: crabbox run --provider nomad") {
@@ -770,7 +850,7 @@ func TestRunRejectsReusedLeaseWithDifferentWorkdir(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "requested workdir") {
 		t.Fatalf("err=%v, want workdir mismatch", err)
 	}
-	if result.Provider != "" || len(fake.execs) != 0 {
+	if result.Provider != providerName || result.Session != nil || len(fake.execs) != 0 {
 		t.Fatalf("result=%#v execs=%#v", result, fake.execs)
 	}
 	retained, err := readLeaseClaim(claim.LeaseID)
@@ -789,7 +869,8 @@ func TestRunSyncOnlyUsesArchiveSyncAndCleansOneShot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ExitCode != 0 || !result.SyncDelegated || result.Session != nil {
+	assertNomadRunSession(t, result, false, false)
+	if result.ExitCode != 0 || !result.SyncDelegated {
 		t.Fatalf("result=%#v", result)
 	}
 	if len(fake.deregisters) != 1 || !strings.Contains(stdout.String(), "synced /workspace/crabbox") {
@@ -809,9 +890,7 @@ func TestRunSyncFailureCleansNewJob(t *testing.T) {
 	if !core.AsExitError(err, &exitErr) || exitErr.Code != 19 {
 		t.Fatalf("err=%v exitErr=%#v", err, exitErr)
 	}
-	if result.Session != nil {
-		t.Fatalf("result=%#v", result)
-	}
+	assertNomadRunSession(t, result, false, false)
 	if len(fake.deregisters) != 1 {
 		t.Fatalf("deregisters=%v", fake.deregisters)
 	}
@@ -965,7 +1044,7 @@ func createClaim(t *testing.T, b *backend, leaseID, slug, jobID, allocID string)
 		DesiredStatus: nomadapi.AllocDesiredStatusRun,
 		TaskState:     "running",
 	}
-	expiresAt := b.now().Add(time.Hour)
+	expiresAt := core.ClockNow(b.rt.Clock).Add(time.Hour)
 	claim, err := writeNomadClaim(b.cfg, leaseID, slug, Repo{Root: filepath.Join(t.TempDir(), "repo"), Name: "repo"}, false, ready, expiresAt)
 	if err != nil {
 		t.Fatal(err)
@@ -1073,4 +1152,35 @@ func mapValues(values map[string]string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+func TestRunLiteralArgumentsSurviveNativeStdinTransport(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("POSIX stdin transport")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh unavailable")
+	}
+	fake := newLifecycleFakeClient()
+	b, _, _ := testBackend(t, fake)
+	workdir := t.TempDir()
+	marker := filepath.Join(workdir, "must-not-exist")
+	_, err = b.runCommand(context.Background(), fake, allocationReadiness{JobID: "job", AllocationID: "alloc", Task: "task"}, RunRequest{Command: []string{"printf", "%s", ";", "touch", marker}, CommandLiteralArgs: map[int]bool{2: true}}, workdir, b.rt.Stdout, b.rt.Stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.execs) != 1 {
+		t.Fatalf("execs=%+v", fake.execs)
+	}
+	cmd := exec.Command(sh, "-s")
+	cmd.Stdin = strings.NewReader(fake.execs[0].Stdin)
+	cmd.Env = []string{"HOME=" + workdir, "PATH=/usr/bin:/bin", "ENV=" + os.DevNull}
+	out, err := cmd.CombinedOutput()
+	if err != nil || string(out) != ";touch"+marker {
+		t.Fatalf("stdin=%q output=%q err=%v", fake.execs[0].Stdin, out, err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("literal semicolon created marker: %v", err)
+	}
 }

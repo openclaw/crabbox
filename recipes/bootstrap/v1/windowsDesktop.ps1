@@ -45,7 +45,9 @@ Set-ItemProperty -Path $winlogon -Name DefaultUserName -Value $user -Type String
 Set-ItemProperty -Path $winlogon -Name DefaultPassword -Value $userPassword -Type String
 if (-not (Test-Path -LiteralPath $setupCompletePath)) {
   Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath -Value (Get-Date).ToString("o")
-	  Restart-Computer -Force
-	  exit 0
-	}
+  if (-not $crabboxSetupWasComplete) {
+    Restart-Computer -Force
+    exit 0
+  }
+}
 Restart-Service sshd

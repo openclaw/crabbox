@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -12,24 +11,7 @@ import (
 )
 
 func TestVNCPasswordSSHProductionDeadline(t *testing.T) {
-	const childEnvironment = "CRABBOX_TEST_VNC_DEADLINE_CHILD"
-	if os.Getenv(childEnvironment) != "1" {
-		// Isolate PATH in a child so the real deadline overlaps other parallel
-		// timing proofs without mutating their process-wide environment.
-		t.Parallel()
-		ctx, cancel := context.WithTimeout(t.Context(), 55*time.Second)
-		defer cancel()
-		owner := pondMeshExecCommand(ctx, nil, os.Args[0], "-test.run=^TestVNCPasswordSSHProductionDeadline$", "-test.v", "-test.timeout=50s").(*pondMeshExecHandle)
-		owner.cmd.Env = append(os.Environ(), childEnvironment+"=1")
-		var output bytes.Buffer
-		owner.cmd.Stdout, owner.cmd.Stderr = &output, &output
-		if err := owner.Start(); err != nil {
-			t.Fatal(err)
-		}
-		if err := owner.Wait(); err != nil {
-			t.Fatalf("deadline proof subprocess: %v\n%s", err, output.String())
-		}
-		t.Log(output.String())
+	if runParallelCLIContract(t, 50*time.Second) {
 		return
 	}
 

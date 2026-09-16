@@ -17,6 +17,13 @@ accounted for.
 
 ## Reading `crabbox usage`
 
+For a self-owner admission snapshot across all months and organizations, use
+[`crabbox capacity`](../commands/capacity.md). It reports only resolved owner,
+existing admission count, effective owner limit, and observation time. It does
+not add a candidate lease or expose capacity-admin membership. A successful
+snapshot is not a reservation or approval to allocate: fleet, org, budget, and
+provider gates may still reject. Monthly usage below keeps its existing scope.
+
 `crabbox usage` requires a configured coordinator and prints the current month by default.
 
 ```bash

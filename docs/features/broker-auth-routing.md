@@ -74,6 +74,16 @@ headers; the coordinator strips the secret before routing the request.
 
 ## How The Coordinator Authenticates A Request
 
+[`GET /v1/capacity`](../commands/capacity.md) uses this same normal authentication
+path, and `crabbox capacity` uses the normal coordinator client and token. It
+has no admin-client routing or credential retry. It accepts no query parameters
+and always uses the resolved request owner, even for admins. Only the self-owner
+admission count spans all months and orgs; monthly usage and lease visibility
+remain unchanged. Both runtimes hold their existing lifecycle request queue
+across reservation selection and the complete canonical record scan, matching
+the admission boundary without nesting another lock. Capacity dispatch bypasses
+bridge maintenance so reading it cannot trigger reconciliation or cleanup.
+
 Every authenticated route normally requires an `Authorization: Bearer <token>`
 header. The coordinator
 matches the token in this precedence (`worker/src/auth.ts`):

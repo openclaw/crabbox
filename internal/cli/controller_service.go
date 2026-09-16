@@ -2573,7 +2573,7 @@ func newControllerProvisioningSlug(id string) (string, error) {
 	}
 	const prefix = "cbx-ctl-"
 	suffix := "-" + hex.EncodeToString(entropy[:])
-	id = normalizeLeaseSlug(id)
+	id = NormalizeLeaseSlug(id)
 	maxID := maxRequestedLeaseSlugLength - len(prefix) - len(suffix)
 	if len(id) > maxID {
 		id = strings.TrimRight(id[:maxID], "-")
@@ -2691,7 +2691,7 @@ func validateControllerStateRecords(state controllerState) error {
 				return fmt.Errorf("controller state workspace %s has invalid %s", id, name)
 			}
 		}
-		if record.Slug != "" && (record.Slug != strings.TrimSpace(record.Slug) || normalizeLeaseSlug(record.Slug) != record.Slug) {
+		if record.Slug != "" && (record.Slug != strings.TrimSpace(record.Slug) || NormalizeLeaseSlug(record.Slug) != record.Slug) {
 			return fmt.Errorf("controller state workspace %s has invalid slug", id)
 		}
 		if record.ProviderResourceID != "" && (record.ProviderResourceID != strings.TrimSpace(record.ProviderResourceID) || !validControllerInventoryIdentity(record.ProviderResourceID)) {

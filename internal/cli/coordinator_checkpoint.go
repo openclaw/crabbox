@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -45,6 +46,8 @@ type coordinatorCheckpoint struct {
 	NoReboot       bool                           `json:"noReboot"`
 	Image          *coordinatorCheckpointImage    `json:"image,omitempty"`
 	State          string                         `json:"state"`
+	RetryAt        string                         `json:"retryAt,omitempty"`
+	LastError      string                         `json:"lastError,omitempty"`
 	Retention      coordinatorCheckpointRetention `json:"retention"`
 	Generation     int64                          `json:"generation"`
 	CreatedAt      string                         `json:"createdAt"`
@@ -136,7 +139,7 @@ func configuredCheckpointCoordinatorFor(ctx context.Context) (*CoordinatorClient
 	admin, _ := ctx.Value(checkpointAdminContextKey{}).(bool)
 	if admin {
 		if cfg.CoordAdminToken == "" {
-			return nil, exit(2, "checkpoint --admin requires a configured coordinator admin token")
+			return nil, Exit(2, "checkpoint --admin requires a configured coordinator admin token")
 		}
 		cfg.CoordToken = cfg.CoordAdminToken
 		cfg.CoordTokenCommand = nil
@@ -148,7 +151,7 @@ func configuredCheckpointCoordinatorFor(ctx context.Context) (*CoordinatorClient
 		return nil, err
 	}
 	if !ok {
-		return nil, exit(2, "checkpoint operation requires a configured coordinator")
+		return nil, Exit(2, "checkpoint operation requires a configured coordinator")
 	}
 	return coord, nil
 }
@@ -201,6 +204,18 @@ func checkpointRouteUnsupported(err error) bool {
 	var httpErr CoordinatorHTTPError
 	return errors.As(err, &httpErr) &&
 		(httpErr.StatusCode == http.StatusNotFound || httpErr.StatusCode == http.StatusMethodNotAllowed)
+}
+
+func checkpointPendingResponse(err error, statusCode int) (string, bool) {
+	var httpErr CoordinatorHTTPError
+	var response struct {
+		Error        string `json:"error"`
+		CheckpointID string `json:"checkpointID"`
+	}
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != statusCode || json.Unmarshal([]byte(httpErr.Message), &response) != nil {
+		return "", false
+	}
+	return response.CheckpointID, response.Error == "checkpoint_pending"
 }
 
 func (c *CoordinatorClient) CreateCheckpoint(ctx context.Context, record checkpointRecord, name, strategy string, noReboot bool, retention coordinatorCheckpointRetention) (coordinatorCheckpoint, CoordinatorImage, error) {
@@ -260,9 +275,14 @@ func (c *CoordinatorClient) Checkpoint(ctx context.Context, id string) (coordina
 
 func (c *CoordinatorClient) CheckpointImage(ctx context.Context, id string) (CoordinatorImage, error) {
 	var response struct {
-		Image CoordinatorImage `json:"image"`
+		Checkpoint coordinatorCheckpoint `json:"checkpoint"`
+		Image      CoordinatorImage      `json:"image"`
 	}
 	err := c.do(ctx, http.MethodGet, checkpointCoordinatorPath(id, "")+"?verify=true", nil, &response)
+	if err == nil {
+		err = validateCoordinatorCheckpointResponse(id, response.Checkpoint)
+		response.Image.managedCheckpoint = &response.Checkpoint
+	}
 	return response.Image, c.checkpointOperationError(ctx, err)
 }
 
@@ -357,10 +377,10 @@ func checkpointRecordFromCoordinator(checkpoint coordinatorCheckpoint, origin st
 		return checkpointRecord{}, err
 	}
 	if checkpoint.Image == nil && checkpoint.State != "creating" && checkpoint.State != "failed" {
-		return checkpointRecord{}, exit(2, "coordinator checkpoint %s has no verified provider resource", checkpoint.ID)
+		return checkpointRecord{}, Exit(2, "coordinator checkpoint %s has no verified provider resource", checkpoint.ID)
 	}
 	if checkpoint.Image != nil && (checkpoint.Image.ID == "" || checkpoint.Image.ResourceID == "" || checkpoint.Image.ImmutableID == "") {
-		return checkpointRecord{}, exit(2, "coordinator checkpoint %s has no verified provider resource", checkpoint.ID)
+		return checkpointRecord{}, Exit(2, "coordinator checkpoint %s has no verified provider resource", checkpoint.ID)
 	}
 	kind := checkpoint.State
 	if checkpoint.Image != nil {

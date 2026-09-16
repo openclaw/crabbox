@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
@@ -35,7 +36,7 @@ type ProxmoxReadinessCheck struct {
 
 var (
 	proxmoxRunSSHQuietWithOptions = runSSHQuietWithOptions
-	proxmoxRunSSHInputQuiet       = runSSHInputQuiet
+	proxmoxRunSSHInput            = runSSHInput
 	proxmoxAPITokenPattern        = regexp.MustCompile(`PVEAPIToken=[A-Za-z0-9@._!%+=:/~-]+`)
 )
 
@@ -74,15 +75,15 @@ func (e *proxmoxTaskWaitError) Unwrap() error { return e.err }
 func NewProxmoxClient(cfg Config) (*ProxmoxClient, error) {
 	apiURL := strings.TrimSpace(cfg.Proxmox.APIURL)
 	if apiURL == "" {
-		return nil, exit(3, "proxmox apiUrl is required (set proxmox.apiUrl or CRABBOX_PROXMOX_API_URL)")
+		return nil, Exit(3, "proxmox apiUrl is required (set proxmox.apiUrl or CRABBOX_PROXMOX_API_URL)")
 	}
 	apiURL = strings.TrimRight(apiURL, "/")
 	apiURL = strings.TrimSuffix(apiURL, "/api2/json")
 	if cfg.Proxmox.TokenID == "" || cfg.Proxmox.TokenSecret == "" {
-		return nil, exit(3, "proxmox tokenId/tokenSecret are required (set proxmox.tokenId/tokenSecret or CRABBOX_PROXMOX_TOKEN_ID/CRABBOX_PROXMOX_TOKEN_SECRET)")
+		return nil, Exit(3, "proxmox tokenId/tokenSecret are required (set proxmox.tokenId/tokenSecret or CRABBOX_PROXMOX_TOKEN_ID/CRABBOX_PROXMOX_TOKEN_SECRET)")
 	}
 	if cfg.Proxmox.Node == "" {
-		return nil, exit(3, "proxmox node is required (set proxmox.node or CRABBOX_PROXMOX_NODE)")
+		return nil, Exit(3, "proxmox node is required (set proxmox.node or CRABBOX_PROXMOX_NODE)")
 	}
 	client := &http.Client{Timeout: 60 * time.Second}
 	if cfg.Proxmox.InsecureTLS {
@@ -999,16 +1000,16 @@ func (c *ProxmoxClient) VMExistsInCluster(ctx context.Context, id string) (bool,
 
 func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool) (Server, error) {
 	if cfg.TargetOS != targetLinux {
-		return Server{}, exit(2, "proxmox provider currently supports target=linux only")
+		return Server{}, Exit(2, "proxmox provider currently supports target=linux only")
 	}
 	if cfg.Proxmox.TemplateID <= 0 {
-		return Server{}, exit(3, "proxmox templateId is required (set proxmox.templateId or CRABBOX_PROXMOX_TEMPLATE_ID)")
+		return Server{}, Exit(3, "proxmox templateId is required (set proxmox.templateId or CRABBOX_PROXMOX_TEMPLATE_ID)")
 	}
 	vmid, err := c.nextID(ctx)
 	if err != nil {
 		return Server{}, err
 	}
-	name := leaseProviderName(leaseID, slug)
+	name := LeaseProviderName(leaseID, slug)
 	full := "1"
 	if !cfg.Proxmox.FullClone {
 		full = "0"
@@ -1040,7 +1041,7 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 	}
 
 	now := time.Now().UTC()
-	labels := directLeaseLabels(cfg, leaseID, slug, "proxmox", "", keep, now)
+	labels := DirectLeaseLabels(cfg, leaseID, slug, "proxmox", "", keep, now)
 	labels["node"] = cfg.Proxmox.Node
 	labels["template_id"] = strconv.Itoa(cfg.Proxmox.TemplateID)
 	description := proxmoxDescription(labels)
@@ -1101,12 +1102,45 @@ func (c *ProxmoxClient) waitServerIP(ctx context.Context, vmid int) (Server, err
 	}
 }
 
+const proxmoxBootstrapDiagnosticLimit = 16 << 10
+
+// Display only the safe diagnostic; keep the native cause without promoting its
+// status to the CLI's separate ExitError contract.
+type proxmoxBootstrapError struct {
+	message string
+	cause   error
+}
+
+func (e *proxmoxBootstrapError) Error() string { return e.message }
+func (e *proxmoxBootstrapError) Unwrap() error { return e.cause }
+
 func (c *ProxmoxClient) bootstrapSSH(ctx context.Context, host string, cfg Config) error {
 	target := SSHTargetFromConfig(cfg, host)
 	deadline := time.Now().Add(10 * time.Minute)
 	for {
 		if proxmoxRunSSHQuietWithOptions(ctx, target, sshTransportProbeCommand(target), "5", "1") == nil {
-			return proxmoxRunSSHInputQuiet(ctx, target, "sudo /bin/bash -s", proxmoxBootstrapScript(cfg))
+			out := newSynchronizedBuffer(proxmoxBootstrapDiagnosticLimit)
+			err := proxmoxRunSSHInput(ctx, target, "sudo /bin/bash -s", strings.NewReader(proxmoxBootstrapScript(cfg)), &out, &out)
+			if err == nil {
+				return nil
+			}
+			status := "unknown"
+			var native *exec.ExitError
+			if errors.As(err, &native) && native.ExitCode() >= 0 {
+				status = strconv.Itoa(native.ExitCode())
+			}
+			diagnostic, truncated := out.boundedString()
+			if truncated {
+				// A cut credential cannot be reliably redacted from a partial capture.
+				diagnostic = "diagnostics truncated; captured output omitted"
+			}
+			message := fmt.Sprintf("proxmox guest bootstrap exit=%s: %v", status, err)
+			if diagnostic = strings.TrimSpace(diagnostic); diagnostic != "" {
+				message += ": " + diagnostic
+			}
+			message = RedactDiagnosticSecrets(message, c.TokenID, c.TokenSecret, cfg.Proxmox.TokenID, cfg.Proxmox.TokenSecret)
+			message = proxmoxAPITokenPattern.ReplaceAllString(message, "PVEAPIToken=<redacted>")
+			return &proxmoxBootstrapError{message: message, cause: err}
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timeout waiting for proxmox ssh bootstrap transport")
@@ -1363,19 +1397,6 @@ func (c *ProxmoxClient) waitTask(ctx context.Context, upid string) error {
 		}
 	}
 }
-
-type proxmoxAgentExecStart struct {
-	PID int `json:"pid"`
-}
-
-type proxmoxAgentExecStatus struct {
-	Exited   proxmoxBool `json:"exited"`
-	ExitCode int         `json:"exitcode"`
-	OutData  string      `json:"out-data"`
-	ErrData  string      `json:"err-data"`
-}
-
-type proxmoxBool bool
 
 type proxmoxAgentInterface struct {
 	Name        string `json:"name"`

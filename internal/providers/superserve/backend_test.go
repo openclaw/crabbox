@@ -33,11 +33,13 @@ type fakeSuperserveClient struct {
 	execResults []execResult
 	execErr     error
 	activateErr error
+	onActivate  func()
 	onExec      func(count int, req execRequest)
 	probes      int
 	getErr      error
 	deleteErr   error
 	updateErr   error
+	updateID    string
 }
 
 type fakeSuperserveUpload struct {
@@ -92,6 +94,9 @@ func (f *fakeSuperserveClient) ActivateSandbox(context.Context, string) (sandbox
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.activated = append(f.activated, f.sandbox.ID)
+	if f.onActivate != nil {
+		f.onActivate()
+	}
 	if f.activateErr != nil {
 		return sandboxAccess{}, f.activateErr
 	}
@@ -106,7 +111,11 @@ func (f *fakeSuperserveClient) UpdateSandboxMetadata(_ context.Context, _ string
 	}
 	f.updates = append(f.updates, cloneMap(metadata))
 	f.sandbox.Metadata = cloneMap(metadata)
-	return cloneSandbox(f.sandbox), nil
+	result := cloneSandbox(f.sandbox)
+	if f.updateID != "" {
+		result.ID = f.updateID
+	}
+	return result, nil
 }
 
 func (f *fakeSuperserveClient) PauseSandbox(context.Context, string) (superserveSandbox, error) {
@@ -120,12 +129,89 @@ func (f *fakeSuperserveClient) ResumeSandbox(context.Context, string) (sandboxAc
 func (f *fakeSuperserveClient) DeleteSandbox(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.deleted = append(f.deleted, id)
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
-	f.deleted = append(f.deleted, id)
 	return nil
 }
+
+func TestCreateMetadataFailureKeepsOriginalRollbackIdentity(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		t.Run(map[bool]string{false: "update error", true: "changed identity"}[mismatch], func(t *testing.T) {
+			fake := newFakeSuperserveClient()
+			originalID := fake.sandbox.ID
+			primary := errors.New("synthetic metadata failure")
+			if mismatch {
+				fake.updateID = "sb_replacement"
+			} else {
+				fake.updateErr = primary
+			}
+			b := newSuperserveTestBackend(t, fake)
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Command: []string{"true"}})
+			if err == nil || (!mismatch && !errors.Is(err, primary)) {
+				t.Fatalf("metadata error lost: %v", err)
+			}
+			if len(fake.deleted) != 1 || fake.deleted[0] != originalID {
+				t.Fatalf("rollback targets=%v want original %s", fake.deleted, originalID)
+			}
+			if result.Session != nil || len(fake.activated) != 0 {
+				t.Fatalf("failed acquisition admitted: session=%#v activations=%v", result.Session, fake.activated)
+			}
+			leaseID := leasePrefix + originalID
+			if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+				t.Fatalf("failed acquisition published claim: exists=%v err=%v", exists, err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			unlock, err := lockSuperserveLeaseOperation(ctx, leaseID)
+			if err != nil {
+				t.Fatalf("acquisition lock leaked: %v", err)
+			}
+			unlock()
+		})
+	}
+}
+
+func TestRunPreservesPrimaryFailureWhenTimingWriterFails(t *testing.T) {
+	for _, transport := range []bool{false, true} {
+		t.Run(map[bool]string{false: "command", true: "transport"}[transport], func(t *testing.T) {
+			fake := newFakeSuperserveClient()
+			fake.execResults = []execResult{{}, {ExitCode: 23}}
+			wantExit := 23
+			if transport {
+				wantExit = 1
+				fake.onExec = func(count int, _ execRequest) {
+					if count == 1 {
+						fake.execErr = context.Canceled
+					}
+				}
+			}
+			fake.deleteErr = errors.New("synthetic delete failure")
+			writerErr := errors.New("synthetic timing writer failure")
+			b := newSuperserveTestBackend(t, fake)
+			b.rt.Stderr = superserveLifecycleFailingWriter{writerErr}
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Command: []string{"false"}, TimingJSON: true})
+			var exitErr core.ExitError
+			if !errors.As(err, &exitErr) || exitErr.Code != wantExit || result.ExitCode != wantExit {
+				t.Fatalf("primary exit lost: result=%#v err=%v", result, err)
+			}
+			if !errors.Is(err, fake.deleteErr) || !errors.Is(err, writerErr) {
+				t.Fatalf("secondary errors lost: %v", err)
+			}
+			if transport && (!errors.Is(err, context.Canceled) || result.ErrorKind != core.RunErrorCanceled) {
+				t.Fatalf("cancellation cause lost: result=%#v err=%v", result, err)
+			}
+			if len(fake.deleted) != 1 || result.Session == nil || !result.Session.Kept {
+				t.Fatalf("cleanup/session=%v/%#v", fake.deleted, result.Session)
+			}
+		})
+	}
+}
+
+type superserveLifecycleFailingWriter struct{ err error }
+
+func (w superserveLifecycleFailingWriter) Write([]byte) (int, error) { return 0, w.err }
 
 func (f *fakeSuperserveClient) UploadFile(_ context.Context, access *sandboxAccess, remotePath string, content io.Reader) error {
 	f.mu.Lock()
@@ -176,11 +262,11 @@ func TestWarmupCreatesClaimAndOwnershipMetadataWithoutToken(t *testing.T) {
 	var stdout bytes.Buffer
 	backend.rt.Stdout = &stdout
 
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatalf("Warmup err=%v", err)
 	}
 	leaseID := leasePrefix + fake.sandbox.ID
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +296,7 @@ func TestWarmupSnapshotClearsDefaultTemplate(t *testing.T) {
 	backend.cfg.Superserve.Template = "superserve/base"
 	backend.cfg.Superserve.Snapshot = "snap-123"
 
-	if err := backend.Warmup(context.Background(), WarmupRequest{Repo: Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Name: "my-app", Root: "/repo"}, Keep: true}); err != nil {
 		t.Fatalf("Warmup err=%v", err)
 	}
 	if len(fake.created) != 1 {
@@ -227,7 +313,7 @@ func TestListRequiresLocalClaimAndMatchingRemoteMetadata(t *testing.T) {
 	leaseID, scope := createSuperserveClaim(t, backend, fake, "listed")
 	fake.sandbox.Metadata = ownedMetadata(fake.baseURL, scope, leaseID, "listed")
 
-	views, err := backend.List(context.Background(), ListRequest{})
+	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatalf("List err=%v", err)
 	}
@@ -239,7 +325,7 @@ func TestListRequiresLocalClaimAndMatchingRemoteMetadata(t *testing.T) {
 	}
 
 	fake.sandbox.Metadata[metadataScopeKey] = "different"
-	if _, err := backend.List(context.Background(), ListRequest{}); err == nil || !strings.Contains(err.Error(), "ownership metadata") {
+	if _, err := backend.List(context.Background(), core.ListRequest{}); err == nil || !strings.Contains(err.Error(), "ownership metadata") {
 		t.Fatalf("List err=%v, want ownership mismatch", err)
 	}
 }
@@ -250,7 +336,7 @@ func TestStatusAndStopRequireOwnershipBeforeDelete(t *testing.T) {
 	leaseID, scope := createSuperserveClaim(t, backend, fake, "owned")
 	fake.sandbox.Metadata = ownedMetadata(fake.baseURL, scope, leaseID, "owned")
 
-	status, err := backend.Status(context.Background(), StatusRequest{ID: "owned"})
+	status, err := backend.Status(context.Background(), core.StatusRequest{ID: "owned"})
 	if err != nil {
 		t.Fatalf("Status err=%v", err)
 	}
@@ -259,7 +345,7 @@ func TestStatusAndStopRequireOwnershipBeforeDelete(t *testing.T) {
 	}
 
 	fake.sandbox.Metadata[metadataScopeKey] = "foreign"
-	if err := backend.Stop(context.Background(), StopRequest{ID: leaseID}); err == nil || !strings.Contains(err.Error(), "ownership metadata") {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: leaseID}); err == nil || !strings.Contains(err.Error(), "ownership metadata") {
 		t.Fatalf("Stop err=%v, want ownership mismatch", err)
 	}
 	if len(fake.deleted) != 0 {
@@ -275,7 +361,7 @@ func TestStatusMissingRemoteStateIsUnknownAndNotReady(t *testing.T) {
 	fake.sandbox.Status = ""
 	fake.sandbox.State = ""
 
-	status, err := backend.Status(context.Background(), StatusRequest{ID: "unknown"})
+	status, err := backend.Status(context.Background(), core.StatusRequest{ID: "unknown"})
 	if err != nil {
 		t.Fatalf("Status err=%v", err)
 	}
@@ -291,19 +377,19 @@ func TestStopForgetMissingRequiresExplicitFlag(t *testing.T) {
 	fake.sandbox.Metadata = ownedMetadata(fake.baseURL, scope, leaseID, "missing")
 	fake.getErr = notFoundErr()
 
-	err := backend.Stop(context.Background(), StopRequest{ID: leaseID})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: leaseID})
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("Stop err=%v, want missing error", err)
 	}
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
 		t.Fatalf("claim should remain: %#v err=%v", claim, err)
 	}
 
 	backend.cfg.Superserve.ForgetMissing = true
-	if err := backend.Stop(context.Background(), StopRequest{ID: leaseID}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: leaseID}); err != nil {
 		t.Fatalf("Stop forget missing err=%v", err)
 	}
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
 		t.Fatalf("claim should be removed: %#v err=%v", claim, err)
 	}
 }
@@ -314,7 +400,7 @@ func TestCleanupDryRunSkipsFreshAndDeletesExpiredOwnedOnly(t *testing.T) {
 	backend.cfg.IdleTimeout = time.Minute
 	leaseID, scope := createSuperserveClaim(t, backend, fake, "expired")
 	fake.sandbox.Metadata = ownedMetadata(fake.baseURL, scope, leaseID, "expired")
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +410,7 @@ func TestCleanupDryRunSkipsFreshAndDeletesExpiredOwnedOnly(t *testing.T) {
 	var stdout bytes.Buffer
 	backend.rt.Stdout = &stdout
 
-	if err := backend.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatalf("Cleanup dry-run err=%v", err)
 	}
 	if !strings.Contains(stdout.String(), "would delete sandbox="+fake.sandbox.ID) {
@@ -335,13 +421,13 @@ func TestCleanupDryRunSkipsFreshAndDeletesExpiredOwnedOnly(t *testing.T) {
 	}
 
 	stdout.Reset()
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatalf("Cleanup err=%v", err)
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != fake.sandbox.ID {
 		t.Fatalf("deleted=%#v", fake.deleted)
 	}
-	if claim, err := readLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != "" {
 		t.Fatalf("claim should be gone: %#v err=%v", claim, err)
 	}
 }
@@ -352,7 +438,7 @@ func TestCleanupRejectsNonOwnedRemote(t *testing.T) {
 	leaseID, scope := createSuperserveClaim(t, backend, fake, "foreign")
 	fake.sandbox.Metadata = ownedMetadata(fake.baseURL, scope, leaseID, "foreign")
 	fake.sandbox.Metadata[metadataClaimKey] = leasePrefix + "other"
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +446,7 @@ func TestCleanupRejectsNonOwnedRemote(t *testing.T) {
 	claim.IdleTimeoutSeconds = 60
 	writeClaimFixture(t, claim)
 
-	err = backend.Cleanup(context.Background(), CleanupRequest{})
+	err = backend.Cleanup(context.Background(), core.CleanupRequest{})
 	if err == nil || !strings.Contains(err.Error(), "ownership metadata") {
 		t.Fatalf("Cleanup err=%v, want ownership mismatch", err)
 	}
@@ -372,7 +458,7 @@ func TestCleanupRejectsNonOwnedRemote(t *testing.T) {
 func TestDoctorIsNonMutating(t *testing.T) {
 	fake := newFakeSuperserveClient()
 	backend := newSuperserveTestBackend(t, fake)
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatalf("Doctor err=%v", err)
 	}
@@ -395,10 +481,11 @@ func TestRunNoSyncExecForwardsEnvInRequestBodyAndMirrorsOutput(t *testing.T) {
 	backend.rt.Stdout = &stdout
 	backend.rt.Stderr = &stderr
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: t.TempDir()},
-		NoSync:  true,
-		Command: []string{"go", "test", "./..."},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:               core.Repo{Name: "my-app", Root: t.TempDir()},
+		NoSync:             true,
+		Command:            []string{"go", "test", "./...", "&&"},
+		CommandLiteralArgs: map[int]bool{3: true},
 		Env: map[string]string{
 			"CRABBOX_SUPERSERVE_API_KEY": "crabbox_ss_test_not_real",
 			"SUPERSERVE_API_KEY":         "ss_test_not_real",
@@ -419,7 +506,7 @@ func TestRunNoSyncExecForwardsEnvInRequestBodyAndMirrorsOutput(t *testing.T) {
 	if result.Session.Provider != providerName || result.Session.LeaseID != result.LeaseID || result.Session.Reused || result.Session.Kept {
 		t.Fatalf("session=%#v result=%#v", result.Session, result)
 	}
-	if result.Session.CleanupCommand != "crabbox stop --provider superserve --id "+shellQuote(result.LeaseID) {
+	if result.Session.CleanupCommand != "crabbox stop --provider superserve --id "+core.ShellQuote(result.LeaseID) {
 		t.Fatalf("cleanup command=%q", result.Session.CleanupCommand)
 	}
 	if stdout.String() != "ok\n" || !strings.Contains(stderr.String(), "warn\n") {
@@ -435,7 +522,7 @@ func TestRunNoSyncExecForwardsEnvInRequestBodyAndMirrorsOutput(t *testing.T) {
 		t.Fatalf("execs=%#v", fake.execs)
 	}
 	commandReq := fake.execs[1]
-	if commandReq.Command != "'go' 'test' './...'" || commandReq.WorkingDir != defaultWorkdir || commandReq.TimeoutSecs != backend.cfg.Superserve.ExecTimeoutSecs {
+	if commandReq.Command != "'go' 'test' './...' '&&'" || commandReq.WorkingDir != defaultWorkdir || commandReq.TimeoutSecs != backend.cfg.Superserve.ExecTimeoutSecs {
 		t.Fatalf("command req=%#v", commandReq)
 	}
 	if commandReq.Env["PROJECT_TOKEN"] != "project_test_not_real" || commandReq.Env["CI"] != "1" {
@@ -465,8 +552,8 @@ func TestRunKeepOnFailureRetainsCreatedSandboxAndExitCode(t *testing.T) {
 	var stderr bytes.Buffer
 	backend.rt.Stderr = &stderr
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:          Repo{Name: "my-app", Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Name: "my-app", Root: t.TempDir()},
 		NoSync:        true,
 		Command:       []string{"false"},
 		KeepOnFailure: true,
@@ -475,7 +562,7 @@ func TestRunKeepOnFailureRetainsCreatedSandboxAndExitCode(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected nonzero run error")
 	}
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 7 {
 		t.Fatalf("err=%T %[1]v, want ExitError 7", err)
 	}
@@ -528,8 +615,8 @@ func TestRunActivationFailureHonorsRetentionFlags(t *testing.T) {
 			var stderr bytes.Buffer
 			backend.rt.Stderr = &stderr
 
-			_, err := backend.Run(context.Background(), RunRequest{
-				Repo:          Repo{Name: "my-app", Root: t.TempDir()},
+			_, err := backend.Run(context.Background(), core.RunRequest{
+				Repo:          core.Repo{Name: "my-app", Root: t.TempDir()},
 				NoSync:        true,
 				Command:       []string{"true"},
 				Keep:          tt.keep,
@@ -542,7 +629,7 @@ func TestRunActivationFailureHonorsRetentionFlags(t *testing.T) {
 				t.Fatalf("deleted=%#v, wantDeleted=%t", fake.deleted, tt.wantDeleted)
 			}
 			leaseID := leasePrefix + fake.sandbox.ID
-			claim, claimErr := readLeaseClaim(leaseID)
+			claim, claimErr := core.ReadLeaseClaim(leaseID)
 			if tt.wantDeleted {
 				if claimErr != nil || claim.LeaseID != "" {
 					t.Fatalf("claim=%#v err=%v, want removed claim", claim, claimErr)
@@ -565,8 +652,8 @@ func TestRunPropagatesOneShotDeleteFailureAndPreservesClaim(t *testing.T) {
 	var stderr bytes.Buffer
 	backend.rt.Stderr = &stderr
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:       Repo{Name: "my-app", Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Name: "my-app", Root: t.TempDir()},
 		NoSync:     true,
 		Command:    []string{"true"},
 		TimingJSON: true,
@@ -584,7 +671,7 @@ func TestRunPropagatesOneShotDeleteFailureAndPreservesClaim(t *testing.T) {
 		t.Fatalf("session=%#v result=%#v", result.Session, result)
 	}
 	leaseID := leasePrefix + fake.sandbox.ID
-	if claim, claimErr := readLeaseClaim(leaseID); claimErr != nil || claim.LeaseID != leaseID {
+	if claim, claimErr := core.ReadLeaseClaim(leaseID); claimErr != nil || claim.LeaseID != leaseID {
 		t.Fatalf("claim should remain for cleanup retry: %#v err=%v", claim, claimErr)
 	}
 	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
@@ -606,12 +693,12 @@ func TestRunPreservesCommandExitCodeWhenDeleteFails(t *testing.T) {
 	fake.deleteErr = errors.New("delete denied")
 	backend := newSuperserveTestBackend(t, fake)
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Name: "my-app", Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Name: "my-app", Root: t.TempDir()},
 		NoSync:  true,
 		Command: []string{"false"},
 	})
-	var exitErr ExitError
+	var exitErr core.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 23 {
 		t.Fatalf("Run err=%T %[1]v, want wrapped ExitError 23", err)
 	}
@@ -634,7 +721,7 @@ func TestRunRefreshesRetainedClaimActivityAfterSuccessfulCommand(t *testing.T) {
 		if count != 2 {
 			return
 		}
-		claim, err := readLeaseClaim(leaseID)
+		claim, err := core.ReadLeaseClaim(leaseID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -642,9 +729,9 @@ func TestRunRefreshesRetainedClaimActivityAfterSuccessfulCommand(t *testing.T) {
 		writeClaimFixture(t, claim)
 	}
 
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		ID:      "retained",
-		Repo:    Repo{Name: "my-app", Root: "/repo"},
+		Repo:    core.Repo{Name: "my-app", Root: "/repo"},
 		NoSync:  true,
 		Keep:    true,
 		Command: []string{"true"},
@@ -661,7 +748,7 @@ func TestRunRefreshesRetainedClaimActivityAfterSuccessfulCommand(t *testing.T) {
 	if result.Session.Provider != providerName || result.Session.LeaseID != leaseID || result.Session.Slug != "retained" || !result.Session.Reused || !result.Session.Kept {
 		t.Fatalf("session=%#v", result.Session)
 	}
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +776,7 @@ func TestCleanupSerializesAndRechecksLeaseActivity(t *testing.T) {
 	backend := newSuperserveTestBackend(t, fake)
 	leaseID, scope := createSuperserveClaim(t, backend, fake, "active")
 	fake.sandbox.Metadata = ownedMetadata(fake.baseURL, scope, leaseID, "active")
-	claim, err := readLeaseClaim(leaseID)
+	claim, err := core.ReadLeaseClaim(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -703,7 +790,7 @@ func TestCleanupSerializesAndRechecksLeaseActivity(t *testing.T) {
 	}
 	cleanupDone := make(chan error, 1)
 	go func() {
-		cleanupDone <- backend.Cleanup(context.Background(), CleanupRequest{})
+		cleanupDone <- backend.Cleanup(context.Background(), core.CleanupRequest{})
 	}()
 	select {
 	case err := <-cleanupDone:
@@ -744,8 +831,8 @@ func TestRunSyncOnlyUploadsArchiveExtractsAndCleansRemoteArchive(t *testing.T) {
 	var stdout bytes.Buffer
 	backend.rt.Stdout = &stdout
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:     Repo{Name: "my-app", Root: repo},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:     core.Repo{Name: "my-app", Root: repo},
 		SyncOnly: true,
 		Keep:     true,
 	})
@@ -782,8 +869,8 @@ func TestRunSyncOnlyUploadsArchiveExtractsAndCleansRemoteArchive(t *testing.T) {
 func TestRunRejectsTailscaleBeforeCreate(t *testing.T) {
 	fake := newFakeSuperserveClient()
 	backend := newSuperserveTestBackend(t, fake)
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo: Repo{Name: "my-app", Root: "/repo"},
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Name: "my-app", Root: "/repo"},
 		Options: core.LeaseOptions{
 			Tailscale: core.TailscaleConfig{Enabled: true},
 		},
@@ -812,9 +899,9 @@ func newSuperserveTestBackend(t *testing.T, fake *fakeSuperserveClient) *backend
 	cfg := testConfig()
 	cfg.Superserve.BaseURL = fake.baseURL
 	cfg.IdleTimeout = time.Minute
-	rt := Runtime{Stdout: io.Discard, Stderr: io.Discard}
+	rt := core.Runtime{Stdout: io.Discard, Stderr: io.Discard}
 	b := NewSuperserveBackend((Provider{}).Spec(), cfg, rt).(*backend)
-	b.newClient = func(Config, Runtime) (superserveClient, error) { return fake, nil }
+	b.newClient = func(core.Config, core.Runtime) (superserveClient, error) { return fake, nil }
 	return b
 }
 
@@ -825,7 +912,7 @@ func createSuperserveClaim(t *testing.T, b *backend, fake *fakeSuperserveClient,
 		t.Fatal(err)
 	}
 	leaseID := leasePrefix + fake.sandbox.ID
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, scope, "", "/repo", b.cfg.IdleTimeout, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, scope, "", "/repo", b.cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
 	return leaseID, scope
@@ -854,7 +941,7 @@ func mustReadClaimJSON(t *testing.T, leaseID string) string {
 	return string(data)
 }
 
-func writeClaimFixture(t *testing.T, claim LeaseClaim) {
+func writeClaimFixture(t *testing.T, claim core.LeaseClaim) {
 	t.Helper()
 	data, err := json.MarshalIndent(claim, "", "  ")
 	if err != nil {
@@ -935,4 +1022,190 @@ func cloneMap(in map[string]string) map[string]string {
 func cloneSandbox(in superserveSandbox) superserveSandbox {
 	in.Metadata = cloneMap(in.Metadata)
 	return in
+}
+
+func TestRunLiteralExecutableSurvivesFinalShellTransport(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("POSIX shell transport")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh unavailable")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "FOO=x"), []byte("#!/bin/sh\nprintf literal-executable\nexit 42\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	fake := newFakeSuperserveClient()
+	backend := newSuperserveTestBackend(t, fake)
+	result, err := backend.Run(context.Background(), core.RunRequest{Repo: core.Repo{Name: "repo", Root: t.TempDir()}, NoSync: true, Command: []string{"FOO=x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.execs) < 2 || fake.execs[len(fake.execs)-1].Command != result.CommandText {
+		t.Fatalf("missing final request: %+v", fake.execs)
+	}
+	cmd := exec.Command(sh, "-c", fake.execs[len(fake.execs)-1].Command)
+	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "ENV=" + os.DevNull}
+	out, err := cmd.CombinedOutput()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 42 || string(out) != "literal-executable" {
+		t.Fatalf("payload=%q output=%q error=%v, want executable/42", result.CommandText, out, err)
+	}
+}
+
+func TestCreateWithoutIdentityDoesNotInferCleanupAuthority(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	fake.sandbox.ID = ""
+	b := newSuperserveTestBackend(t, fake)
+	result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, Command: []string{"true"}})
+	if err == nil || result.Session != nil || len(fake.deleted) != 0 || len(fake.updates) != 0 || len(fake.activated) != 0 {
+		t.Fatalf("unidentified acquisition continued: result=%#v err=%v deletes=%v updates=%v activation=%v", result, err, fake.deleted, fake.updates, fake.activated)
+	}
+}
+
+func TestRunReleasesOperationLockAfterResolutionFailure(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ownership lookup", true: "repository mismatch"}[mismatch], func(t *testing.T) {
+			fake := newFakeSuperserveClient()
+			b := newSuperserveTestBackend(t, fake)
+			leaseID, scope := createSuperserveClaim(t, b, fake, "fixture")
+			fake.sandbox.Metadata = ownedMetadata(fake.baseURL, scope, leaseID, "fixture")
+			repo := "/repo"
+			if mismatch {
+				repo = t.TempDir()
+			} else {
+				fake.getErr = errors.New("synthetic lookup failure")
+			}
+			result, err := b.Run(t.Context(), core.RunRequest{ID: leaseID, Repo: core.Repo{Root: repo}, NoSync: true, Command: []string{"true"}})
+			if err == nil || result.Session != nil || len(fake.deleted) != 0 || len(fake.activated) != 0 {
+				t.Fatalf("failed resolution admitted: result=%#v err=%v", result, err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			unlock, err := lockSuperserveLeaseOperation(ctx, leaseID)
+			if err != nil {
+				t.Fatalf("resolution lock leaked: %v", err)
+			}
+			unlock()
+		})
+	}
+}
+
+func TestRunFailedReuseAdmissionDoesNotRefreshActivity(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	b := newSuperserveTestBackend(t, fake)
+	leaseID, scope := createSuperserveClaim(t, b, fake, "fixture")
+	fake.sandbox.Metadata = ownedMetadata(fake.baseURL, scope, leaseID, "fixture")
+	stale := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	fake.onActivate = func() {
+		claim, err := core.ReadLeaseClaim(leaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim.LastUsedAt = stale
+		writeClaimFixture(t, claim)
+	}
+	fake.activateErr = errors.New("synthetic unavailable sandbox")
+	var stderr bytes.Buffer
+	b.rt.Stderr = &stderr
+	result, err := b.Run(t.Context(), core.RunRequest{ID: leaseID, Repo: core.Repo{Root: "/repo"}, NoSync: true, Command: []string{"true"}, TimingJSON: true})
+	if !errors.Is(err, fake.activateErr) || result.Session == nil || !result.Session.Reused || !result.Session.Kept {
+		t.Fatalf("admission failure lost recoverable session: result=%#v err=%v", result, err)
+	}
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil || claim.LastUsedAt != stale || len(fake.deleted) != 0 || len(fake.execs) != 0 || strings.Contains(stderr.String(), "rerun") {
+		t.Fatalf("failed admission performed run finalization: claim=%#v err=%v stderr=%q", claim, err, stderr.String())
+	}
+}
+
+func TestRunCommandPreparationFailureHonorsKeepOnFailure(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	b := newSuperserveTestBackend(t, fake)
+	leaseID := leasePrefix + fake.sandbox.ID
+	stale := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	fake.onExec = func(_ int, _ execRequest) {
+		claim, err := core.ReadLeaseClaim(leaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim.LastUsedAt = stale
+		writeClaimFixture(t, claim)
+	}
+	result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: "fixture"}, NoSync: true, KeepOnFailure: true})
+	if err == nil || result.Session == nil || !result.Session.Kept || len(fake.deleted) != 0 || len(fake.execs) != 1 {
+		t.Fatalf("command preparation failure did not retain: result=%#v err=%v", result, err)
+	}
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil || claim.LastUsedAt == stale {
+		t.Fatalf("retained activity not refreshed: claim=%#v err=%v", claim, err)
+	}
+}
+
+type superserveTimingGate struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (w *superserveTimingGate) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(`"totalMs"`)) {
+		w.once.Do(func() { close(w.entered) })
+		select {
+		case <-w.release:
+		case <-time.After(5 * time.Second):
+			return 0, errors.New("synthetic timing gate deadline")
+		}
+	}
+	return len(p), nil
+}
+
+func TestRunHoldsOperationLockThroughFinalTiming(t *testing.T) {
+	fake := newFakeSuperserveClient()
+	b := newSuperserveTestBackend(t, fake)
+	gate := &superserveTimingGate{entered: make(chan struct{}), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gate.release) }) }
+	defer release()
+	b.rt.Stderr = gate
+	repo := t.TempDir()
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: repo, Name: "fixture"}, NoSync: true, Command: []string{"true"}, TimingJSON: true})
+		done <- err
+	}()
+	select {
+	case <-gate.entered:
+	case err := <-done:
+		t.Fatalf("run ended before timing gate: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("run did not reach timing gate")
+	}
+	leaseID := leasePrefix + fake.sandbox.ID
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	unlock, err := lockSuperserveLeaseOperation(ctx, leaseID)
+	if err == nil {
+		unlock()
+		t.Fatal("operation lock released before final timing")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("run did not finish after timing release")
+	}
+	ctx2, cancel2 := context.WithTimeout(t.Context(), time.Second)
+	defer cancel2()
+	unlock, err = lockSuperserveLeaseOperation(ctx2, leaseID)
+	if err != nil {
+		t.Fatalf("finalized run leaked lock: %v", err)
+	}
+	unlock()
 }

@@ -63,7 +63,7 @@ PY
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var stdout synchronizedBuffer
+	stdout := newSynchronizedBuffer(0)
 	done := make(chan error, 1)
 	go func() {
 		done <- runSSHLocalForward(ctx, SSHTarget{User: "alice", Host: "example.test", Port: "22", DisableHostKeyChecking: true}, "", "3000", &stdout)

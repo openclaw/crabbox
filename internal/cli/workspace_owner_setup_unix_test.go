@@ -156,40 +156,118 @@ func testWorkspaceOwnerClosedDiagnosticPipe(t *testing.T, shell string) {
 	}
 }
 
-func TestWorkspaceOwnerPOSIXSignalDenialPreservesLiveWitness(t *testing.T) {
+func TestWorkspaceOwnerPOSIXObservationFailurePreservesLiveWitness(t *testing.T) {
 	for _, action := range []workspaceOwnerAction{workspaceOwnerAcquire, workspaceOwnerInspect, workspaceOwnerRelease} {
-		t.Run(string(action), func(t *testing.T) {
+		for _, observation := range []string{"signal denied", "identity unavailable", "process listing unavailable"} {
+			t.Run(string(action)+"/"+observation, func(t *testing.T) {
+				home, owner := workspaceOwnerSetupFixture(t)
+				root := filepath.Join(home, ".crabbox", "workspace-owners")
+				statePath := filepath.Join(root, owner.key+".owner")
+				if action == workspaceOwnerAcquire {
+					if err := os.WriteFile(statePath, []byte("v1\n"+owner.token+"\n1\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				identity, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(os.Getpid())).Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				childPath := filepath.Join(root, owner.key+".child")
+				child := []byte(fmt.Sprintf("%d\n%s\n", os.Getpid(), strings.Join(strings.Fields(string(identity)), " ")))
+				if err := os.WriteFile(childPath, child, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				before, err := os.ReadFile(statePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req := workspaceOwnerRemoteRequest{Action: action, Key: owner.key, Token: owner.token, TTL: time.Minute}
+				path := os.Getenv("PATH")
+				if observation == "signal denied" {
+					path = workspaceOwnerDenySignals(t)
+				} else {
+					realPS, err := exec.LookPath("ps")
+					if err != nil {
+						t.Fatal(err)
+					}
+					tools := t.TempDir()
+					probe := "#!/bin/sh\nexit 1\n"
+					if observation == "identity unavailable" {
+						probe = "#!/bin/sh\n[ \"$1\" != -o ] || exit 1\nexec " + shellQuote(realPS) + " \"$@\"\n"
+					}
+					writeExecutable(t, filepath.Join(tools, "ps"), probe)
+					path = tools + string(os.PathListSeparator) + path
+				}
+				cmd, ctx := boundedWorkspaceOwnerCommand(t, home, path, remoteWorkspaceOwnerPOSIX(req))
+				out, err := cmd.CombinedOutput()
+				if ctx.Err() != nil || exitCode(err) != 74 || string(out) != "AMBIGUOUS" {
+					t.Fatalf("uncertain liveness did not fail closed: exit=%d", exitCode(err))
+				}
+				after, stateErr := os.ReadFile(statePath)
+				retained, childErr := os.ReadFile(childPath)
+				if stateErr != nil || childErr != nil || !bytes.Equal(before, after) || !bytes.Equal(child, retained) {
+					t.Fatal("uncertain liveness changed owner or child authority")
+				}
+			})
+		}
+	}
+}
+
+func TestWorkspaceOwnerPOSIXChildExitBetweenLivenessProbes(t *testing.T) {
+	for _, action := range []string{"acquire", "inspect", "release", "replace"} {
+		t.Run(action, func(t *testing.T) {
 			home, owner := workspaceOwnerSetupFixture(t)
 			root := filepath.Join(home, ".crabbox", "workspace-owners")
 			statePath := filepath.Join(root, owner.key+".owner")
-			if action == workspaceOwnerAcquire {
-				if err := os.WriteFile(statePath, []byte("v1\n"+owner.token+"\n1\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
+			if action == "acquire" {
+				mustWriteTestFile(t, statePath, "v1\n"+owner.token+"\n1\n")
 			}
-			identity, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(os.Getpid())).Output()
+			child, _ := boundedWorkspaceOwnerCommand(t, home, os.Getenv("PATH"), "exec sleep 30")
+			if err := child.Start(); err != nil {
+				t.Fatal(err)
+			}
+			pid := strconv.Itoa(child.Process.Pid)
+			realPS, err := exec.LookPath("ps")
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity, err := exec.Command(realPS, "-o", "lstart=", "-p", pid).Output()
 			if err != nil {
 				t.Fatal(err)
 			}
 			childPath := filepath.Join(root, owner.key+".child")
-			child := []byte(fmt.Sprintf("%d\n%s\n", os.Getpid(), strings.Join(strings.Fields(string(identity)), " ")))
-			if err := os.WriteFile(childPath, child, 0o600); err != nil {
+			mustWriteTestFile(t, childPath, pid+"\n"+strings.Join(strings.Fields(string(identity)), " ")+"\n")
+			tools := t.TempDir()
+			probe, reaped := filepath.Join(home, "identity-probe"), filepath.Join(home, "child-reaped")
+			// The real kill probe succeeds; let the real PID disappear before ps.
+			writeExecutable(t, filepath.Join(tools, "ps"), "#!/bin/sh\n"+
+				"if [ \"$1\" = -o ] && [ \"$2\" = lstart= ] && [ \"$4\" = "+shellQuote(pid)+" ]; then\n"+
+				"  touch "+shellQuote(probe)+"\n"+
+				"  while [ ! -f "+shellQuote(reaped)+" ]; do sleep .01; done\nfi\n"+
+				"exec "+shellQuote(realPS)+" \"$@\"\n")
+			req := workspaceOwnerRemoteRequest{Action: workspaceOwnerAction(action), Key: owner.key, Token: owner.token, TTL: time.Minute}
+			script := remoteWorkspaceOwnerPOSIX(req)
+			want := map[string]string{"acquire": "RECOVERED", "inspect": "OWNED", "release": "RELEASED", "replace": "replacement-ran"}[action]
+			if action == "replace" {
+				script = remoteWorkspaceOwnerPOSIXWitness(owner.key, owner.token, "printf replacement-ran")
+			}
+			cmd, ctx := boundedWorkspaceOwnerCommand(t, home, tools+string(os.PathListSeparator)+os.Getenv("PATH"), script)
+			var output bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &output, &output
+			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
-			before, err := os.ReadFile(statePath)
-			if err != nil {
+			waitForWorkspaceOwnerTestFile(t, probe)
+			if err := child.Process.Kill(); err != nil {
 				t.Fatal(err)
 			}
-			req := workspaceOwnerRemoteRequest{Action: action, Key: owner.key, Token: owner.token, TTL: time.Minute}
-			cmd, ctx := boundedWorkspaceOwnerCommand(t, home, workspaceOwnerDenySignals(t), remoteWorkspaceOwnerPOSIX(req))
-			out, err := cmd.CombinedOutput()
-			if ctx.Err() != nil || err == nil || string(out) != "AMBIGUOUS" {
-				t.Fatalf("denied liveness did not fail closed: exit=%d", exitCode(err))
+			_ = child.Wait()
+			mustWriteTestFile(t, reaped, "")
+			if err := cmd.Wait(); err != nil || ctx.Err() != nil || output.String() != want {
+				t.Fatalf("exited child remained ambiguous: output=%q err=%v context=%v", &output, err, ctx.Err())
 			}
-			after, stateErr := os.ReadFile(statePath)
-			retained, childErr := os.ReadFile(childPath)
-			if stateErr != nil || childErr != nil || !bytes.Equal(before, after) || !bytes.Equal(child, retained) {
-				t.Fatal("denied liveness changed owner or child authority")
+			if _, err := os.Stat(childPath); !os.IsNotExist(err) {
+				t.Fatalf("completed operation retained dead child witness: %v", err)
 			}
 		})
 	}
@@ -224,7 +302,7 @@ func TestWorkspaceOwnerPOSIXSetupStagesAreCredentialFree(t *testing.T) {
 }
 
 func TestWaitForSSHReadyWorkspaceOwnerSetupFailure(t *testing.T) {
-	for _, scenario := range []string{"direct", "proxy", "bootstrap", "identity"} {
+	for _, scenario := range []string{"direct", "proxy", "diagnostic", "identity"} {
 		t.Run(scenario, func(t *testing.T) {
 			home, owner := workspaceOwnerSetupFixture(t)
 			tools := t.TempDir()
@@ -237,8 +315,8 @@ func TestWaitForSSHReadyWorkspaceOwnerSetupFailure(t *testing.T) {
 			}
 			// Execute the generated remote script, without recording subprocess argv.
 			fakeSSH := "#!/bin/sh\nfor arg; do remote=\"$arg\"; done\n"
-			if scenario == "bootstrap" {
-				fakeSSH += "if [ ! -f " + shellQuote(filepath.Join(home, "transport-done")) + " ]; then touch " + shellQuote(filepath.Join(home, "transport-done")) + "; exit 0; fi\n"
+			if scenario == "diagnostic" {
+				fakeSSH += "if [ ! -f " + shellQuote(filepath.Join(home, "readiness-failed")) + " ]; then touch " + shellQuote(filepath.Join(home, "readiness-failed")) + "; exit 1; fi\n"
 			}
 			fakeSSH += "HOME=" + shellQuote(home) + "\nPATH=" + shellQuote(path) + "\nexport HOME PATH\nexec /bin/sh -c \"$remote\"\n"
 			writeExecutable(t, filepath.Join(tools, "ssh"), fakeSSH)
@@ -294,6 +372,50 @@ wait`
 	code, err := runSSHStreamResult(ctx, target, payload, &combined, &combined)
 	if err != nil || code != 0 || strings.Count(combined.String(), "stdout\n") != 2000 || strings.Count(combined.String(), "stderr\n") != 2000 {
 		t.Fatal("owner protocol lost shared stdout/stderr output")
+	}
+}
+
+func TestWorkspaceOwnerGitSeedPreservesOriginFailure(t *testing.T) {
+	for _, kind := range []string{"missing filesystem", "HTTP transport"} {
+		t.Run(kind, func(t *testing.T) {
+			home, owner := workspaceOwnerSetupFixture(t)
+			tools := t.TempDir()
+			writeExecutable(t, filepath.Join(tools, "ssh"), "#!/bin/sh\nfor arg; do remote=\"$arg\"; done\nHOME="+shellQuote(home)+"\nexport HOME\nexec /bin/sh -c \"$remote\"\n")
+			t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+			target := SSHTarget{Host: "127.0.0.1", User: "runner", Port: "22", FallbackPorts: []string{}, TargetOS: targetLinux}
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			ctx = contextWithWorkspaceOwner(ctx, owner)
+			plan := gitCoherencePlan{
+				RemoteURL: filepath.Join(home, "absent-origin.git"),
+				Target:    strings.Repeat("a", 40),
+				Tree:      strings.Repeat("b", 40),
+				Branch:    "main",
+			}
+			diagnostic := gitOriginFilesystemError
+			if kind == "HTTP transport" {
+				plan.RemoteURL = newGitTransportFailureHTTPServer(t) + "/repo.git"
+				diagnostic = gitOriginTransportError
+			}
+			workdir := filepath.Join(home, "workspace")
+			if err := os.Mkdir(workdir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, plan), 0)
+			t.Logf("owned Git seed exit=%d combined diagnostics:\n%s", exitCode(err), out)
+			if got := exitCode(err); got != gitOriginRuntimeFallbackExitCode {
+				t.Fatalf("owned Git seed exit=%d want=%d diagnostic-bytes=%d", got, gitOriginRuntimeFallbackExitCode, len(out))
+			}
+			if len(out) > gitSeedDiagnosticLimit || !strings.Contains(out, "crabbox-git-seed phase=clone") || !diagnostic.MatchString(out) {
+				t.Fatalf("owned Git seed lost bounded clone diagnostics: diagnostic-bytes=%d", len(out))
+			}
+			if reason, fallback := gitOriginRuntimeFallbackResult(plan.RemoteURL, out, err); !fallback || reason != "origin_unavailable" {
+				t.Fatalf("owned Git seed fallback=%t reason=%q", fallback, reason)
+			}
+			if strings.Contains(out, owner.token) || strings.Contains(out, "CRABBOX_OWNER_SETUP_V1") {
+				t.Fatal("owned Git seed exposed workspace-owner protocol diagnostics")
+			}
+		})
 	}
 }
 

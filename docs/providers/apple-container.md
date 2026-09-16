@@ -144,6 +144,19 @@ CRABBOX_APPLE_CONTAINER_MEMORY
 CRABBOX_APPLE_CONTAINER_EXTRA_RUN_ARGS
 ```
 
+File `extraRunArgs` entries retain their text, order, and duplicates; a nonempty
+list is copied, while an omitted or empty list leaves prior values intact.
+Environment and flag strings split on whitespace, without interpreting shell
+quotes or commas. A blank environment value leaves prior arguments intact; an
+explicitly visited blank flag clears them. Use a YAML list when an individual
+argument must contain spaces.
+
+Empty file strings leave prior values intact. File CPU values apply only when
+positive; environment and flag input retain their existing zero/negative-value
+behavior. Saving configuration omits zero and empty values without changing the
+original input that was ignored during application. Image explicitness records
+accepted input, including a value equal to the current default.
+
 No secrets are passed as CLI arguments. The only key material handed to the
 container is the per-lease SSH public key, supplied through an environment
 variable consumed by the bootstrap script.

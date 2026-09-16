@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -16,7 +17,13 @@ type checkpointNativeCreateDriver interface {
 
 type directAWSAMICheckpointDriver struct{}
 
-func (directAWSAMICheckpointDriver) Create(ctx context.Context, req NativeCheckpointCreateRequest) (CoordinatorImage, error) {
+func (directAWSAMICheckpointDriver) Create(ctx context.Context, req NativeCheckpointCreateRequest) (_ CoordinatorImage, err error) {
+	requestStarted := false
+	defer func() {
+		if err != nil && !requestStarted {
+			err = NativeCheckpointNotSubmittedError{Cause: err}
+		}
+	}()
 	name := req.Name
 	if name == "" {
 		name = defaultNativeImageName(req.LeaseID, req.RepoName)
@@ -29,13 +36,26 @@ func (directAWSAMICheckpointDriver) Create(ctx context.Context, req NativeCheckp
 		return CoordinatorImage{}, err
 	}
 	if !isWindowsNativeTarget(req.Target) {
-		if err := prepareNativeImageSource(ctx, req.Target); err != nil {
+		if err := PrepareNativeImageSource(ctx, req.Target); err != nil {
 			return CoordinatorImage{}, err
 		}
 	}
+	// The request owner still attests a failed account lookup before its API call.
+	requestStarted = true
 	image, err := client.CreateImageCheckpoint(ctx, req.Server.CloudID, name, req.NoReboot)
 	if err != nil {
 		return CoordinatorImage{}, err
+	}
+	// Readiness can take minutes. Record the accepted AMI before another
+	// network call so interruption cannot lose its account-scoped cleanup identity.
+	if req.Persist != nil {
+		if err := req.Persist(NativeCheckpointCreateResult{Image: NativeCheckpointImage{
+			ID: image.ID, Name: image.Name, State: image.State, Provider: image.Provider,
+			Kind: image.Kind, Region: image.Region, AccountID: image.AccountID,
+			ResourceID: image.ResourceID, SnapshotIDs: image.SnapshotIDs, Direct: image.Direct,
+		}}); err != nil {
+			return image, err
+		}
 	}
 	if req.Wait {
 		waited, err := waitForDirectAWSImage(ctx, client, image.ID, image.AccountID, req.WaitTimeout, req.Stderr)
@@ -54,7 +74,7 @@ const azureSnapshotNameMaxLength = 80
 func azureOSDiskSnapshotName(requested, leaseID, repoName string) (string, error) {
 	if requested != "" {
 		if len(requested) > azureSnapshotNameMaxLength || safeCaptureName(requested) != requested {
-			return "", exit(2, "Azure snapshot name must be at most %d characters using only letters, digits, underscores, and hyphens", azureSnapshotNameMaxLength)
+			return "", Exit(2, "Azure snapshot name must be at most %d characters using only letters, digits, underscores, and hyphens", azureSnapshotNameMaxLength)
 		}
 		return requested, nil
 	}
@@ -72,11 +92,11 @@ func azureOSDiskSnapshotName(requested, leaseID, repoName string) (string, error
 }
 
 func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req NativeCheckpointCreateRequest) (CoordinatorImage, error) {
-	if normalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
-		return CoordinatorImage{}, exit(2, "Azure Windows checkpoints require --strategy disk-snapshot")
+	if NormalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
+		return CoordinatorImage{}, Exit(2, "Azure Windows checkpoints require --strategy disk-snapshot")
 	}
 	if req.NoReboot {
-		return CoordinatorImage{}, exit(2, "Azure Windows checkpoints require a deallocated source VM for a consistent OS-disk snapshot; rerun with --no-reboot=false")
+		return CoordinatorImage{}, Exit(2, "Azure Windows checkpoints require a deallocated source VM for a consistent OS-disk snapshot; rerun with --no-reboot=false")
 	}
 	name, err := azureOSDiskSnapshotName(req.Name, req.LeaseID, req.RepoName)
 	if err != nil {
@@ -102,15 +122,15 @@ type coordinatorCheckpointDriver struct{}
 
 func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpointCreateRequest) (CoordinatorImage, error) {
 	if req.Config.Coordinator == "" {
-		return CoordinatorImage{}, exit(2, "native checkpoints require a configured coordinator")
+		return CoordinatorImage{}, Exit(2, "native checkpoints require a configured coordinator")
 	}
-	strategy := normalizeCheckpointStrategy(req.Strategy)
+	strategy := NormalizeCheckpointStrategy(req.Strategy)
 	capability, ok := providerNativeCheckpointCapability(req.Config, req.Server, req.Target, req.Strategy)
 	if !ok || capability.Direct || capability.Kind == "" {
-		return CoordinatorImage{}, exit(2, "native checkpoints support brokered AWS Linux/macOS leases and brokered Azure/GCP Linux leases only")
+		return CoordinatorImage{}, Exit(2, "native checkpoints support brokered AWS Linux/macOS leases and brokered Azure/GCP Linux leases only")
 	}
 	if capability.CreateUnsupported != "" {
-		return CoordinatorImage{}, exit(2, "%s", capability.CreateUnsupported)
+		return CoordinatorImage{}, Exit(2, "%s", capability.CreateUnsupported)
 	}
 	name := req.Name
 	if name == "" {
@@ -132,7 +152,7 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpo
 	if managedCreate {
 		createContext, ok := checkpointCreateContextFrom(ctx)
 		if !ok || createContext.Record.ID != req.CheckpointID {
-			return CoordinatorImage{}, exit(2, "checkpoint creation metadata is unavailable")
+			return CoordinatorImage{}, Exit(2, "checkpoint creation metadata is unavailable")
 		}
 		if createContext.Retention.Mode != "manual" {
 			if _, probeErr := coord.Checkpoints(ctx); probeErr != nil {
@@ -144,8 +164,8 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpo
 		}
 	}
 	if !isWindowsNativeTarget(req.Target) {
-		if err := prepareNativeImageSource(ctx, req.Target); err != nil {
-			return CoordinatorImage{}, err
+		if err := PrepareNativeImageSource(ctx, req.Target); err != nil {
+			return CoordinatorImage{}, NativeCheckpointNotSubmittedError{Cause: err}
 		}
 	}
 	var image CoordinatorImage
@@ -153,7 +173,7 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpo
 	if managedCreate {
 		createContext, ok := checkpointCreateContextFrom(ctx)
 		if !ok || createContext.Record.ID != req.CheckpointID {
-			return CoordinatorImage{}, exit(2, "checkpoint creation metadata is unavailable")
+			return CoordinatorImage{}, Exit(2, "checkpoint creation metadata is unavailable")
 		}
 		if createContext.PersistOwnership != nil {
 			if err := createContext.PersistOwnership(true); err != nil {
@@ -162,6 +182,11 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpo
 		}
 		checkpoint, created, createErr := coord.CreateCheckpoint(ctx, createContext.Record, name, strategy, req.NoReboot, createContext.Retention)
 		if createErr != nil {
+			// A retained capture already owns its provider mutation; observe that exact
+			// operation instead of submitting another capture after an uncertain result.
+			if id, pending := checkpointPendingResponse(createErr, http.StatusServiceUnavailable); req.Wait && pending && id == req.CheckpointID {
+				return waitForCheckpointImage(ctx, coord, id, "", req.WaitTimeout, req.Stderr)
+			}
 			if checkpointRouteUnsupported(createErr) {
 				_, probeErr := coord.Checkpoints(ctx)
 				if checkpointRouteUnsupported(probeErr) && createContext.Retention.Mode == "manual" {
@@ -199,7 +224,6 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpo
 		var waited CoordinatorImage
 		if managed != nil {
 			waited, err = waitForCheckpointImage(ctx, coord, managed.ID, image.ID, req.WaitTimeout, req.Stderr)
-			waited.managedCheckpoint = managed
 		} else {
 			waited, err = waitForImage(ctx, coord, image.ID, imageRefFromCoordinatorImage(image), req.WaitTimeout, req.Stderr)
 		}
@@ -211,26 +235,61 @@ func (coordinatorCheckpointDriver) Create(ctx context.Context, req NativeCheckpo
 	return image, nil
 }
 
-func waitForCheckpointImage(ctx context.Context, coord *CoordinatorClient, checkpointID, imageID string, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
-	deadline := time.Now().Add(timeout)
+func waitForCheckpointImage(ctx context.Context, coord *CoordinatorClient, checkpointID, imageID string, timeout time.Duration, stderr io.Writer) (result CoordinatorImage, err error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("waiting for checkpoint %s; inspect retained capture with crabbox checkpoint inspect %s --verify: %w", checkpointID, checkpointID, err)
+			var failure ExitError
+			if errors.As(err, &failure) {
+				err = errors.Join(Exit(failure.Code, "%s", err), err)
+			} else if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) && errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				err = errors.Join(Exit(5, "%s", err), err)
+			}
+		}
+	}()
 	for {
-		image, err := coord.CheckpointImage(ctx, checkpointID)
+		checkpoint, err := coord.Checkpoint(waitCtx, checkpointID)
 		if err != nil {
 			return CoordinatorImage{}, err
 		}
-		switch strings.ToLower(image.State) {
-		case "available", "ready", "succeeded", "completed":
-			return image, nil
-		case "failed", "invalid":
-			return CoordinatorImage{}, exit(5, "image %s failed", imageID)
+		state := checkpoint.State
+		switch state {
+		case "creating":
+		case "failed":
+			// Exhausted attempts retain a scheduled recovery while the provider
+			// mutation remains uncertain. Only a failure without a retry is terminal.
+			if checkpoint.RetryAt == "" {
+				return CoordinatorImage{}, Exit(5, "checkpoint %s failed: %s", checkpointID, blank(checkpoint.LastError, "provider capture failed"))
+			}
+		case "ready":
+			if checkpoint.Image == nil || checkpoint.Image.ID == "" || (imageID != "" && checkpoint.Image.ID != imageID) {
+				return CoordinatorImage{}, Exit(5, "checkpoint %s provider image identity changed or is missing", checkpointID)
+			}
+			imageID = checkpoint.Image.ID
+			image, err := coord.CheckpointImage(waitCtx, checkpointID)
+			if _, pending := checkpointPendingResponse(err, http.StatusConflict); err != nil && !pending {
+				return CoordinatorImage{}, err
+			} else if err == nil {
+				if image.ID != imageID || image.managedCheckpoint.CreatedAt != checkpoint.CreatedAt {
+					return CoordinatorImage{}, Exit(5, "checkpoint %s provider image identity changed", checkpointID)
+				}
+				state = image.State
+				switch strings.ToLower(state) {
+				case "available", "ready", "succeeded", "completed":
+					return image, nil
+				case "failed", "invalid":
+					return CoordinatorImage{}, Exit(5, "image %s failed", imageID)
+				}
+			}
+		default:
+			return CoordinatorImage{}, Exit(5, "checkpoint %s cannot become ready in state %s", checkpointID, state)
 		}
-		if time.Now().After(deadline) {
-			return CoordinatorImage{}, exit(5, "timed out waiting for image %s; last state=%s", imageID, image.State)
-		}
-		_, _ = fmt.Fprintf(stderr, "waiting image=%s state=%s\n", imageID, blank(image.State, "pending"))
+		_, _ = fmt.Fprintf(stderr, "waiting checkpoint=%s image=%s state=%s\n", checkpointID, blank(imageID, "pending"), state)
 		select {
-		case <-ctx.Done():
-			return CoordinatorImage{}, ctx.Err()
+		case <-waitCtx.Done():
+			return CoordinatorImage{}, waitCtx.Err()
 		case <-time.After(15 * time.Second):
 		}
 	}
@@ -246,7 +305,7 @@ func (d directParallelsCheckpointDriver) Create(ctx context.Context, req NativeC
 		name = defaultNativeImageName(req.LeaseID, req.RepoName)
 	}
 	cfg := req.Config
-	applyParallelsHostRefConfig(&cfg, firstNonBlank(req.Server.Labels["host"], req.Config.Parallels.Host))
+	ApplyParallelsHostRefConfig(&cfg, firstNonBlank(req.Server.Labels["host"], req.Config.Parallels.Host))
 	client := NewParallelsClient(cfg, d.Runner)
 	vm, err := client.GetVM(ctx, req.Server.CloudID)
 	if err != nil {
@@ -254,7 +313,7 @@ func (d directParallelsCheckpointDriver) Create(ctx context.Context, req NativeC
 	}
 	if !parallelsPowerOffState(vm.State) {
 		if req.NoReboot {
-			return CoordinatorImage{}, exit(2, "Parallels native checkpoints require a powered-off VM for forkable linked clones; stop the VM first or rerun with --no-reboot=false")
+			return CoordinatorImage{}, Exit(2, "Parallels native checkpoints require a powered-off VM for forkable linked clones; stop the VM first or rerun with --no-reboot=false")
 		}
 		restartAfter := parallelsRunningState(vm.State)
 		if err := client.Stop(ctx, req.Server.CloudID); err != nil {
@@ -274,7 +333,7 @@ func (d directParallelsCheckpointDriver) Create(ctx context.Context, req NativeC
 	}
 	if !parallelsPowerOffState(snapshot.State) {
 		_ = client.DeleteSnapshot(ctx, req.Server.CloudID, snapshot.ID, false)
-		return CoordinatorImage{}, exit(5, "Parallels snapshot %q state=%s is not forkable; expected poweroff", snapshot.Name, blank(snapshot.State, "unknown"))
+		return CoordinatorImage{}, Exit(5, "Parallels snapshot %q state=%s is not forkable; expected poweroff", snapshot.Name, blank(snapshot.State, "unknown"))
 	}
 	return CoordinatorImage{
 		ID:         snapshot.ID,
@@ -327,9 +386,9 @@ func (a App) createNativeCheckpointRequest(ctx context.Context, req NativeCheckp
 	driver, ok := nativeCheckpointCreateDriver(req.Config, req.Server, req.Target, req.Strategy)
 	if !ok {
 		if req.Config.Coordinator == "" {
-			return CoordinatorImage{}, nil, exit(2, "native checkpoints require a configured coordinator")
+			return CoordinatorImage{}, nil, Exit(2, "native checkpoints require a configured coordinator")
 		}
-		return CoordinatorImage{}, nil, exit(2, "native checkpoints support brokered AWS Linux/macOS leases and brokered Azure/GCP Linux leases only")
+		return CoordinatorImage{}, nil, Exit(2, "native checkpoints support brokered AWS Linux/macOS leases and brokered Azure/GCP Linux leases only")
 	}
 	var image CoordinatorImage
 	create := func() error {
@@ -339,27 +398,18 @@ func (a App) createNativeCheckpointRequest(ctx context.Context, req NativeCheckp
 	}
 	var err error
 	if req.Capture != nil {
-		claim, _, readErr := readLeaseClaimWithPresence(req.LeaseID)
+		claim, _, readErr := ReadLeaseClaimWithPresence(req.LeaseID)
 		if readErr != nil {
 			return image, nil, readErr
 		}
 		if err := ValidateCheckpointCaptureClaim(claim, req.CheckpointID, req.Capture); err != nil {
 			return image, nil, err
 		}
-		err = withLeaseClaimUnchanged(req.LeaseID, claim, create)
+		err = WithLeaseClaimUnchanged(req.LeaseID, claim, create)
 	} else {
 		err = create()
 	}
 	return image, nil, err
-}
-
-func (a App) createAWSAMICheckpoint(ctx context.Context, cfg Config, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
-	image, _, err := a.createNativeCheckpointRequest(ctx, NativeCheckpointCreateRequest{
-		Config: cfg, Server: Server{Provider: "aws", CloudID: leaseID}, Target: target,
-		LeaseID: leaseID, Name: name, RepoName: repoName, Strategy: checkpointStrategyImage,
-		NoReboot: noReboot, Wait: wait, WaitTimeout: waitTimeout, Stderr: a.Stderr,
-	})
-	return image, err
 }
 
 func coordinatorImageFromNativeCheckpoint(image NativeCheckpointImage) CoordinatorImage {
@@ -370,7 +420,9 @@ func coordinatorImageFromNativeCheckpoint(image NativeCheckpointImage) Coordinat
 		Provider:     image.Provider,
 		Kind:         image.Kind,
 		Region:       image.Region,
+		AccountID:    image.AccountID,
 		ResourceID:   image.ResourceID,
+		SnapshotIDs:  image.SnapshotIDs,
 		Architecture: image.Architecture,
 		Direct:       image.Direct,
 	}
@@ -384,21 +436,6 @@ func nativeCheckpointLifecycleProvider(cfg Config, server Server) (NativeCheckpo
 	}
 	lifecycle, ok := provider.(NativeCheckpointLifecycleProvider)
 	return lifecycle, ok
-}
-
-func (a App) createDirectAWSAMICheckpoint(ctx context.Context, cfg Config, server Server, target SSHTarget, leaseID, name, repoName string, noReboot, wait bool, waitTimeout time.Duration) (CoordinatorImage, error) {
-	return directAWSAMICheckpointDriver{}.Create(ctx, NativeCheckpointCreateRequest{
-		Config:      cfg,
-		Server:      server,
-		Target:      target,
-		LeaseID:     leaseID,
-		Name:        name,
-		RepoName:    repoName,
-		NoReboot:    noReboot,
-		Wait:        wait,
-		WaitTimeout: waitTimeout,
-		Stderr:      a.Stderr,
-	})
 }
 
 func waitForDirectAWSImage(ctx context.Context, client *AWSClient, imageID, accountID string, timeout time.Duration, stderr io.Writer) (CoordinatorImage, error) {
@@ -418,10 +455,10 @@ func waitForDirectAWSImage(ctx context.Context, client *AWSClient, imageID, acco
 			return image, nil
 		}
 		if state == "failed" || state == "invalid" {
-			return CoordinatorImage{}, exit(5, "image %s failed", imageID)
+			return CoordinatorImage{}, Exit(5, "image %s failed", imageID)
 		}
 		if time.Now().After(deadline) {
-			return CoordinatorImage{}, exit(5, "timed out waiting for image %s; last state=%s", imageID, last.State)
+			return CoordinatorImage{}, Exit(5, "timed out waiting for image %s; last state=%s", imageID, last.State)
 		}
 		_, _ = fmt.Fprintf(stderr, "waiting image=%s state=%s\n", imageID, blank(image.State, "pending"))
 		select {
@@ -444,16 +481,68 @@ func defaultNativeImageName(leaseID, repoName string) string {
 	return base
 }
 
-func prepareNativeImageSource(ctx context.Context, target SSHTarget) error {
+func PrepareNativeImageSource(ctx context.Context, target SSHTarget) error {
 	command := remotePrepareNativeImageCommand()
 	if out, err := runSSHCombinedOutput(ctx, target, "bash -lc "+shellQuote(command)); err != nil {
-		return exit(7, "prepare native checkpoint source: %v: %s", err, trimFailureDetail(out))
+		return Exit(7, "prepare native checkpoint source: %v: %s", err, trimFailureDetail(out))
 	}
 	return nil
 }
 
 func remotePrepareNativeImageCommand() string {
-	return "if command -v cloud-init >/dev/null 2>&1; then sudo cloud-init clean --logs; fi; sync"
+	// The distro interpreter owns cloud-init; project Python environments must not
+	// change its paths. Keep real completion facts in tmpfs before cleaning their
+	// disk targets, so the source stays ready without admitting an unbooted clone.
+	return `set -e
+if command -v cloud-init >/dev/null 2>&1; then
+sudo /usr/bin/python3 -I -c ` + shellQuote(`import json, os, pathlib, shutil, subprocess, sys, tempfile
+from cloudinit.cmd.devel import read_cfg_paths
+
+cloud_init = [sys.executable, "-I", "-m", "cloudinit.cmd.main"]
+def require_done(stage, wait=False):
+    try:
+        result = subprocess.run(cloud_init + ["status", "--format=json"] + (["--wait"] if wait else []), capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("native checkpoint cloud-init " + stage + ": status=unknown timeout=30s") from None
+    try:
+        status = json.loads(result.stdout)["status"]
+    except (ValueError, KeyError, TypeError):
+        raise RuntimeError("native checkpoint cloud-init " + stage + ": status=invalid-response exit=" + str(result.returncode)) from None
+    if result.returncode != 0 or status != "done":
+        raise RuntimeError("native checkpoint cloud-init " + stage + ": status=" + repr(status)[:64] + " exit=" + str(result.returncode))
+
+require_done("pre-clean", wait=True)
+paths = read_cfg_paths()
+runtime = pathlib.Path(paths.run_dir).absolute()
+cache = pathlib.Path(paths.cloud_dir).resolve()
+for ancestor in (runtime, *runtime.parents):
+    resolved = ancestor.resolve()
+    if resolved == cache or cache in resolved.parents:
+        raise RuntimeError("cloud-init runtime directory must be outside its cleaned disk cache")
+runtime = runtime.resolve()
+filesystem = subprocess.check_output(["stat", "-f", "-c", "%T", str(runtime)], text=True).strip()
+if filesystem != "tmpfs":
+    raise RuntimeError("cloud-init runtime directory must use tmpfs to exclude completion state from the image")
+files = [runtime / "status.json", runtime / "result.json"]
+for path in files:
+    if not path.is_file():
+        raise RuntimeError("cloud-init completion file is missing: " + str(path))
+for path in files:
+    fd, temporary = tempfile.mkstemp(prefix="." + path.name + "-", dir=runtime)
+    os.close(fd)
+    try:
+        original = path.stat()
+        shutil.copy2(path, temporary)
+        os.chown(temporary, original.st_uid, original.st_gid)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+subprocess.run(cloud_init + ["clean", "--logs"], check=True)
+require_done("post-clean")
+`) + `
+fi
+sync`
 }
 
 func nativeCheckpointKind(cfg Config, server Server, target SSHTarget, strategy string) (string, bool) {
@@ -493,14 +582,14 @@ func directNativeCheckpointKind(cfg Config, server Server, target SSHTarget, str
 func providerNativeCheckpointCapability(cfg Config, server Server, target SSHTarget, strategy string) (NativeCheckpointCapability, bool) {
 	return nativeCheckpointCapability(NativeCheckpointRequest{
 		Config: cfg, Server: server, Target: target,
-		Strategy: normalizeCheckpointStrategy(strategy), StrategyExplicit: !isAutoCheckpointStrategy(strategy),
+		Strategy: NormalizeCheckpointStrategy(strategy), StrategyExplicit: !isAutoCheckpointStrategy(strategy),
 	})
 }
 
 // Native mode may use a direct image when the provider has no default disk
 // snapshot. Selection changes the requested strategy, not user explicitness.
 func nativeModeCheckpointCapability(cfg Config, server Server, target SSHTarget, strategy string) (NativeCheckpointCapability, bool) {
-	req := NativeCheckpointRequest{Config: cfg, Server: server, Target: target, Strategy: normalizeCheckpointStrategy(strategy), StrategyExplicit: !isAutoCheckpointStrategy(strategy)}
+	req := NativeCheckpointRequest{Config: cfg, Server: server, Target: target, Strategy: NormalizeCheckpointStrategy(strategy), StrategyExplicit: !isAutoCheckpointStrategy(strategy)}
 	if capability, ok := nativeCheckpointCapability(req); ok && capability.Kind != "" {
 		return capability, true
 	}
@@ -573,22 +662,6 @@ func (record *checkpointRecord) applyNativeImage(image CoordinatorImage, noReboo
 	record.Native.NoReboot = noReboot
 }
 
-func applyNativeImageCheckpointRecord(record *checkpointRecord, image CoordinatorImage, noReboot bool) {
-	record.applyNativeImage(image, noReboot)
-}
-
-func applyAWSAMIImageCheckpointRecord(record *checkpointRecord, image CoordinatorImage, noReboot bool) {
-	record.applyNativeImage(image, noReboot)
-}
-
-func nativeCheckpointResourceID(record checkpointRecord) string {
-	return record.nativeResourceID()
-}
-
-func nativeCheckpointDeleteID(record checkpointRecord) string {
-	return record.nativeDeleteID()
-}
-
 func nativeCheckpointResourceRequest(record checkpointRecord) NativeCheckpointResourceRequest {
 	return NativeCheckpointResourceRequest{
 		LoadConfig: loadConfig,
@@ -604,6 +677,7 @@ func nativeCheckpointResourceRequest(record checkpointRecord) NativeCheckpointRe
 			Direct:       record.Native.Direct,
 		},
 		Metadata: record.Native.Metadata,
+		Capture:  record.Capture,
 	}
 }
 
@@ -682,7 +756,7 @@ func directAzureCheckpointConfig(record checkpointRecord) (Config, bool) {
 	if record.Native.Region != "" {
 		cfg.AzureLocation = record.Native.Region
 	}
-	resourceID := nativeCheckpointResourceID(record)
+	resourceID := record.nativeResourceID()
 	parts := strings.Split(strings.Trim(resourceID, "/"), "/")
 	for index := 0; index+1 < len(parts); index += 1 {
 		switch {
@@ -830,7 +904,7 @@ func applyNativeCheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record check
 	}
 	forkProvider, ok := provider.(NativeCheckpointForkProvider)
 	if !ok {
-		return exit(2, "provider=%s does not support native checkpoint fork config", cfg.Provider)
+		return Exit(2, "provider=%s does not support native checkpoint fork config", cfg.Provider)
 	}
 	azureOSDisk := ""
 	azureOSDiskExplicit := flagWasSet(fs, "azure-os-disk")
@@ -870,9 +944,5 @@ func applyNativeCheckpointForkConfigAndFlags(cfg *Config, fs *flag.FlagSet, reco
 	if !ok {
 		return nil
 	}
-	return flagProvider.ApplyNativeCheckpointForkFlags(cfg, fs, providerFlags[provider.Name()])
-}
-
-func applyAWSAMICheckpointForkConfig(cfg *Config, fs *flag.FlagSet, record checkpointRecord) error {
-	return applyNativeCheckpointForkConfig(cfg, fs, record)
+	return flagProvider.ApplyNativeCheckpointForkFlags(cfg, fs, providerFlags[provider.Spec().Name])
 }

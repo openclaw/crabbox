@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestClientCreateCodespaceRequestShape(t *testing.T) {
@@ -34,7 +36,7 @@ func TestClientCreateCodespaceRequestShape(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newClient(GitHubCodespacesConfig{APIURL: server.URL}, Runtime{HTTP: server.Client()}, "ghp_this_token_value_is_redacted")
+	c := newClient(core.GitHubCodespacesConfig{APIURL: server.URL}, core.Runtime{HTTP: server.Client()}, "ghp_this_token_value_is_redacted")
 	created, err := c.createCodespace(context.Background(), createCodespaceRequest{
 		Repo:             "example-org/my-app",
 		Ref:              "main",
@@ -91,7 +93,7 @@ func TestClientCreateCodespaceIncludesExplicitZeroRetention(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newClient(GitHubCodespacesConfig{APIURL: server.URL}, Runtime{HTTP: server.Client()}, "redacted")
+	c := newClient(core.GitHubCodespacesConfig{APIURL: server.URL}, core.Runtime{HTTP: server.Client()}, "redacted")
 	if _, err := c.createCodespace(context.Background(), createCodespaceRequest{
 		Repo:            "example-org/my-app",
 		RetentionPeriod: 0,
@@ -119,7 +121,7 @@ func TestClientListAcceptsResponseAboveLegacyOneMiBLimit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newClient(GitHubCodespacesConfig{APIURL: server.URL}, Runtime{HTTP: server.Client()}, "redacted")
+	c := newClient(core.GitHubCodespacesConfig{APIURL: server.URL}, core.Runtime{HTTP: server.Client()}, "redacted")
 	items, err := c.listCodespaces(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +143,7 @@ func TestClientCurrentUserUsesConfiguredAPIBase(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newClient(GitHubCodespacesConfig{APIURL: server.URL + "/api/v3"}, Runtime{HTTP: server.Client()}, "ghp_this_token_value_is_redacted")
+	c := newClient(core.GitHubCodespacesConfig{APIURL: server.URL + "/api/v3"}, core.Runtime{HTTP: server.Client()}, "ghp_this_token_value_is_redacted")
 	user, err := c.currentUser(context.Background())
 	if err != nil || user.ID != 42 || user.Login != "alice" {
 		t.Fatalf("user=%#v err=%v", user, err)
@@ -228,7 +230,7 @@ func TestClientLifecycleOperationsRequestShape(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newClient(GitHubCodespacesConfig{APIURL: server.URL + "/api/v3"}, Runtime{HTTP: server.Client()}, "token")
+	c := newClient(core.GitHubCodespacesConfig{APIURL: server.URL + "/api/v3"}, core.Runtime{HTTP: server.Client()}, "token")
 	listed, err := c.listCodespaces(context.Background())
 	if err != nil || len(listed) != 2 || listed[0].Name != "space-1" || listed[1].Name != "space-2" {
 		t.Fatalf("listed=%#v err=%v", listed, err)
@@ -291,7 +293,7 @@ func TestClientListCodespacesRejectsCrossOriginPagination(t *testing.T) {
 	}))
 	defer server.Close()
 
-	c := newClient(GitHubCodespacesConfig{APIURL: server.URL + "/api/v3"}, Runtime{HTTP: server.Client()}, "token")
+	c := newClient(core.GitHubCodespacesConfig{APIURL: server.URL + "/api/v3"}, core.Runtime{HTTP: server.Client()}, "token")
 	_, err := c.listCodespaces(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "outside configured API base") {
 		t.Fatalf("err=%v", err)
@@ -323,7 +325,7 @@ func TestClientRejectsRedirectWithoutForwardingAuthorization(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	c := newClient(GitHubCodespacesConfig{APIURL: origin.URL}, Runtime{HTTP: origin.Client()}, "ghp_this_token_value_is_redacted")
+	c := newClient(core.GitHubCodespacesConfig{APIURL: origin.URL}, core.Runtime{HTTP: origin.Client()}, "ghp_this_token_value_is_redacted")
 	_, err := c.listCodespaces(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "status=302") {
 		t.Fatalf("err=%v", err)

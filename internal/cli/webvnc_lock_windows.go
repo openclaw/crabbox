@@ -66,9 +66,13 @@ func forwardInheritedWebVNCDaemonPortReservation(cmd *exec.Cmd) (func(), error) 
 	return func() {}, nil
 }
 
-func lockWebVNCDaemonFile(file *os.File) error {
+func tryLockWebVNCDaemonFile(file *os.File) (bool, error) {
 	var overlapped windows.Overlapped
-	return windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped)
+	err := windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &overlapped)
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func unlockWebVNCDaemonFile(file *os.File) error {

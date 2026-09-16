@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"github.com/gofrs/flock"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,12 +10,15 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 func TestCheckpointSourceCoordinatorAbsenceRequiresExactReleaseReceipt(t *testing.T) {
 	for _, state := range []string{"released", "stopped", "pending", "retained", "replacement", "missing"} {
 		t.Run(state, func(t *testing.T) {
-			lease := CoordinatorLease{ID: "cbx_abcdef123456", Provider: "aws", CloudID: "i-fixture", State: "released"}
+			lease := confirmedCoordinatorRelease("cbx_abcdef123456", "aws")
+			lease.CloudID = "i-fixture"
 			switch state {
 			case "stopped":
 				lease.State = "stopped"
@@ -60,7 +62,7 @@ func TestCheckpointCoordinatorReleaseHoldsClaimFenceThroughMutation(t *testing.T
 		t.Run(map[bool]string{false: "confirmed", true: "retained"}[retained], func(t *testing.T) {
 			isolateTestUserDirs(t)
 			const id = "cbx_abcdef123456"
-			if err := claimLeaseTargetForConfig(id, "capture-fence", Config{Provider: "aws"}, Server{Provider: "aws", CloudID: "i-fixture"}, SSHTarget{}, time.Hour); err != nil {
+			if err := ClaimLeaseTargetForConfig(id, "capture-fence", Config{Provider: "aws"}, Server{Provider: "aws", CloudID: "i-fixture"}, SSHTarget{}, time.Hour); err != nil {
 				t.Fatal(err)
 			}
 			path, err := leaseClaimPath(id)
@@ -86,8 +88,15 @@ func TestCheckpointCoordinatorReleaseHoldsClaimFenceThroughMutation(t *testing.T
 				if err != nil || acquired {
 					t.Errorf("release POST did not hold durable claim fence: acquired=%t err=%v", acquired, err)
 				}
-				deletes := !retained
-				_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: id, Provider: "aws", CloudID: "i-fixture", State: "released", ReleaseDeletesServer: &deletes}})
+				lease := confirmedCoordinatorRelease(id, "aws")
+				lease.CloudID = "i-fixture"
+				if retained {
+					deletes := false
+					lease.CleanupStatus = ""
+					lease.CleanupCompletedAt = ""
+					lease.ReleaseDeletesServer = &deletes
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 			}))
 			defer server.Close()
 			b := coordinatorReleaseTestBackend(server, io.Discard)
@@ -129,7 +138,9 @@ func TestCheckpointSourceCoordinatorUsesAdminReceiptFallback(t *testing.T) {
 					return
 				}
 				adminReads++
-				_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: id, Provider: "aws", CloudID: "i-fixture", State: "released"}})
+				lease := confirmedCoordinatorRelease(id, "aws")
+				lease.CloudID = "i-fixture"
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
 			}))
 			defer server.Close()
 			cfg := Config{Provider: "aws", Coordinator: server.URL, CoordToken: "fixture-user", CoordAdminToken: "fixture-admin"}

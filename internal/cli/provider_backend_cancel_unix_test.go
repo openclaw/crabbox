@@ -5,11 +5,43 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestExecCommandRunnerPreservesKilledContext(t *testing.T) {
+	for _, limit := range []int{0, 1024} {
+		t.Run(fmt.Sprintf("capture-limit=%d", limit), func(t *testing.T) {
+			dir := t.TempDir()
+			ready := filepath.Join(dir, "ready")
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				_, err := (execCommandRunner{}).Run(ctx, LocalCommandRequest{
+					Name: "sh", Args: []string{"-c", `printf ready > "$1"; exec sleep 30`, "sh", ready},
+					MaxCapturedOutputBytes: limit,
+				})
+				done <- err
+			}()
+			awaitCaptureMarker(t, ready)
+			cancel()
+			select {
+			case err := <-done:
+				var processErr *exec.ExitError
+				if !errors.Is(err, context.Canceled) || !errors.As(err, &processErr) || processErr.ExitCode() != -1 {
+					t.Fatalf("expected both cancellation and signaled process cause, got %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("interrupted command did not return")
+			}
+		})
+	}
+}
 
 func TestExecCommandRunnerAllowsGracefulCancellation(t *testing.T) {
 	dir := t.TempDir()

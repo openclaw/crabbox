@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type machine struct {
@@ -16,9 +19,9 @@ type machine struct {
 	Memory    uint64 `json:"memory,omitempty"`
 }
 
-func (b *backend) command(ctx context.Context, args []string, dir string) (LocalCommandResult, error) {
-	return b.rt.Exec.Run(ctx, LocalCommandRequest{
-		Name:   blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"),
+func (b *backend) command(ctx context.Context, args []string, dir string) (core.LocalCommandResult, error) {
+	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{
+		Name:   core.Blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"),
 		Args:   args,
 		Dir:    dir,
 		Stdout: b.rt.Stdout,
@@ -27,6 +30,9 @@ func (b *backend) command(ctx context.Context, args []string, dir string) (Local
 }
 
 func (b *backend) createMachine(ctx context.Context, name string) error {
+	if err := validateRepoMount(""); err != nil {
+		return err
+	}
 	args := []string{"machine", "create", "--name", name, "--home-mount", "rw"}
 	if b.cfg.AppleContainer.CPUs > 0 {
 		args = append(args, "--cpus", fmt.Sprintf("%d", b.cfg.AppleContainer.CPUs))
@@ -34,10 +40,10 @@ func (b *backend) createMachine(ctx context.Context, name string) error {
 	if memory := strings.TrimSpace(b.cfg.AppleContainer.Memory); memory != "" {
 		args = append(args, "--memory", memory)
 	}
-	args = append(args, blank(strings.TrimSpace(b.cfg.AppleContainer.Image), "ubuntu:26.04"))
+	args = append(args, core.Blank(strings.TrimSpace(b.cfg.AppleContainer.Image), "ubuntu:26.04"))
 	result, err := b.command(ctx, args, "")
 	if err != nil {
-		return exit(5, "create Apple container machine: %s", failureDetail(result, err))
+		return shared.ExitErrorWithCause(5, fmt.Sprintf("create Apple container machine: %s", failureDetail(result, err)), err)
 	}
 	return nil
 }
@@ -45,11 +51,11 @@ func (b *backend) createMachine(ctx context.Context, name string) error {
 func (b *backend) inspectMachine(ctx context.Context, name string) (machine, error) {
 	result, err := b.control(ctx, []string{"machine", "inspect", name})
 	if err != nil {
-		return machine{}, exit(4, "Apple container machine %q not found: %s", name, failureDetail(result, err))
+		return machine{}, shared.ExitErrorWithCause(4, fmt.Sprintf("Apple container machine %q not found: %s", name, failureDetail(result, err)), err)
 	}
 	var machines []machine
 	if err := json.Unmarshal([]byte(result.Stdout), &machines); err != nil || len(machines) != 1 || machines[0].ID != name || machines[0].Status == "" {
-		return machine{}, exit(5, "invalid Apple container machine inspection for %q", name)
+		return machine{}, core.Exit(5, "invalid Apple container machine inspection for %q", name)
 	}
 	return machines[0], nil
 }
@@ -57,19 +63,19 @@ func (b *backend) inspectMachine(ctx context.Context, name string) (machine, err
 func (b *backend) listMachines(ctx context.Context) ([]machine, error) {
 	result, err := b.control(ctx, []string{"machine", "list", "--format", "json"})
 	if err != nil {
-		return nil, exit(5, "list Apple container machines: %s", failureDetail(result, err))
+		return nil, shared.ExitErrorWithCause(5, fmt.Sprintf("list Apple container machines: %s", failureDetail(result, err)), err)
 	}
 	var machines []machine
 	if err := json.Unmarshal([]byte(result.Stdout), &machines); err != nil {
-		return nil, exit(5, "decode Apple container machine list: %v", err)
+		return nil, core.Exit(5, "decode Apple container machine list: %v", err)
 	}
 	if machines == nil {
-		return nil, exit(5, "Apple container machine list must be a JSON array")
+		return nil, core.Exit(5, "Apple container machine list must be a JSON array")
 	}
 	seen := map[string]bool{}
 	for _, item := range machines {
 		if !validMachineName(item.ID) || item.Status == "" || seen[item.ID] {
-			return nil, exit(5, "invalid or duplicate Apple container machine inventory entry")
+			return nil, core.Exit(5, "invalid or duplicate Apple container machine inventory entry")
 		}
 		seen[item.ID] = true
 	}
@@ -79,25 +85,25 @@ func (b *backend) listMachines(ctx context.Context) ([]machine, error) {
 func (b *backend) removeMachine(ctx context.Context, name string) error {
 	result, err := b.control(ctx, []string{"machine", "rm", name})
 	if err != nil {
-		return exit(5, "delete Apple container machine %q: %s", name, failureDetail(result, err))
+		return shared.ExitErrorWithCause(5, fmt.Sprintf("delete Apple container machine %q: %s", name, failureDetail(result, err)), err)
 	}
 	return nil
 }
 
 // Control responses are private, bounded, and never accepted after a partial failure.
-func (b *backend) control(ctx context.Context, args []string) (LocalCommandResult, error) {
+func (b *backend) control(ctx context.Context, args []string) (core.LocalCommandResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	const limit = 1024 * 1024
-	result, err := b.rt.Exec.Run(ctx, LocalCommandRequest{
-		Name: blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"), Args: args,
+	result, err := b.rt.Exec.Run(ctx, core.LocalCommandRequest{
+		Name: core.Blank(strings.TrimSpace(b.cfg.AppleContainer.CLIPath), "container"), Args: args,
 		MaxCapturedOutputBytes: limit, CancelGracePeriod: time.Second,
 	})
 	if ctx.Err() != nil {
 		return result, ctx.Err()
 	}
 	if len(result.Stdout) > limit || len(result.Stderr) > limit {
-		return LocalCommandResult{}, fmt.Errorf("Apple container control output exceeded its limit")
+		return core.LocalCommandResult{}, fmt.Errorf("Apple container control output exceeded its limit")
 	}
 	if err == nil && result.ExitCode != 0 {
 		err = fmt.Errorf("Apple container exited with code %d", result.ExitCode)
@@ -105,7 +111,7 @@ func (b *backend) control(ctx context.Context, args []string) (LocalCommandResul
 	return result, err
 }
 
-func failureDetail(result LocalCommandResult, err error) string {
+func failureDetail(result core.LocalCommandResult, err error) string {
 	if detail := strings.TrimSpace(result.Stderr); detail != "" {
 		return detail
 	}

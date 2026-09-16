@@ -83,8 +83,8 @@ func newTestBackend(t *testing.T, api *fakeNebiusAPI) *backend {
 	cfg.TTL = 2 * time.Hour
 	cfg.Nebius.SecurityGroupIDs = []string{"sg-a", "sg-b"}
 	cfg.Nebius.ServiceAccountID = "sa-a"
-	b := NewBackend(Provider{}.Spec(), cfg, Runtime{Stderr: io.Discard}).(*backend)
-	b.clientFactory = func(Runtime) nebiusAPI { return api }
+	b := NewBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*backend)
+	b.clientFactory = func(core.Runtime) nebiusAPI { return api }
 	b.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error { return nil }
 	b.now = func() time.Time { return time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC) }
 	return b
@@ -137,38 +137,38 @@ func TestLabelOwnershipRequiresCompleteMatchingScope(t *testing.T) {
 }
 
 func TestCommandConstructionUsesManagedDiskPublicIPLabelsAndNoSecrets(t *testing.T) {
-	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		joined := strings.Join(req.Args, " ")
 		if !strings.Contains(joined, "compute instance create") {
-			return LocalCommandResult{}, errors.New("unexpected command: " + joined)
+			return core.LocalCommandResult{}, errors.New("unexpected command: " + joined)
 		}
 		if strings.Contains(joined, "osb_") || strings.Contains(joined, "private_key") {
-			return LocalCommandResult{}, errors.New("secret-like value passed on argv")
+			return core.LocalCommandResult{}, errors.New("secret-like value passed on argv")
 		}
 		if !strings.Contains(joined, "--network-interfaces") || !strings.Contains(joined, `"name":"eth0"`) || !strings.Contains(joined, `"subnet_id":"subnet-123"`) || !strings.Contains(joined, `"ip_address":{}`) || !strings.Contains(joined, `"public_ip_address":{}`) {
-			return LocalCommandResult{}, errors.New("missing dynamic public IP network interface: " + joined)
+			return core.LocalCommandResult{}, errors.New("missing dynamic public IP network interface: " + joined)
 		}
 		if !strings.Contains(joined, "--boot-disk-managed-disk-name cbx-demo") ||
 			!strings.Contains(joined, "--boot-disk-managed-disk-source-image-family-image-family ubuntu24.04-driverless") ||
 			!strings.Contains(joined, "--boot-disk-managed-disk-type network_ssd") ||
 			!strings.Contains(joined, "--boot-disk-managed-disk-size-gibibytes 50") ||
 			!strings.Contains(joined, "--boot-disk-attach-mode read_write") {
-			return LocalCommandResult{}, errors.New("missing managed boot disk args: " + joined)
+			return core.LocalCommandResult{}, errors.New("missing managed boot disk args: " + joined)
 		}
 		if strings.Contains(joined, "--boot-disk-managed-disk-source-image-family-parent-id") {
-			return LocalCommandResult{}, errors.New("public image family incorrectly scoped to the lease project: " + joined)
+			return core.LocalCommandResult{}, errors.New("public image family incorrectly scoped to the lease project: " + joined)
 		}
 		for i, arg := range req.Args {
 			if arg == "--cloud-init-user-data" && i+1 < len(req.Args) && req.Args[i+1] != "#cloud-config\n" {
-				return LocalCommandResult{}, errors.New("cloud-init content was not passed as a raw string")
+				return core.LocalCommandResult{}, errors.New("cloud-init content was not passed as a raw string")
 			}
 		}
 		if !strings.Contains(joined, "--labels ") || !strings.Contains(joined, "crabbox_provider=nebius") || !strings.Contains(joined, "crabbox_scope=") {
-			return LocalCommandResult{}, errors.New("missing ownership labels: " + joined)
+			return core.LocalCommandResult{}, errors.New("missing ownership labels: " + joined)
 		}
-		return LocalCommandResult{Stdout: `{"metadata":{"id":"vm-1","name":"cbx-demo","labels":{"crabbox":"true"}},"status":{"state":"RUNNING","network_interfaces":[{"public_ip_address":{"address":"203.0.113.10/32"}}]}}`}, nil
+		return core.LocalCommandResult{Stdout: `{"metadata":{"id":"vm-1","name":"cbx-demo","labels":{"crabbox":"true"}},"status":{"state":"RUNNING","network_interfaces":[{"public_ip_address":{"address":"203.0.113.10/32"}}]}}`}, nil
 	}}
-	client := newNebiusClient(testConfig().Nebius, Runtime{Exec: runner})
+	client := newNebiusClient(testConfig().Nebius, core.Runtime{Exec: runner})
 	labels := nebiusLeaseLabels(testConfig(), "cbx_123456789abc", "demo", "ready", false, time.Unix(1000, 0))
 	item, err := client.CreateInstance(context.Background(), nebiusCreateRequest{Name: "cbx-demo", Labels: labels, UserData: "#cloud-config\n"})
 	if err != nil {
@@ -180,10 +180,10 @@ func TestCommandConstructionUsesManagedDiskPublicIPLabelsAndNoSecrets(t *testing
 }
 
 func TestCLIErrorRedactsCloudInitAndDeleteUsesSupportedFlags(t *testing.T) {
-	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{Stderr: "request failed"}, errors.New("request failed")
+	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{Stderr: "request failed"}, errors.New("request failed")
 	}}
-	client := newNebiusClient(testConfig().Nebius, Runtime{Exec: runner})
+	client := newNebiusClient(testConfig().Nebius, core.Runtime{Exec: runner})
 	secretMarker := "ssh-ed25519 AAAA-marker"
 	_, err := client.CreateInstance(context.Background(), nebiusCreateRequest{Name: "cbx-demo", UserData: "#cloud-config\n" + secretMarker})
 	if err == nil || strings.Contains(err.Error(), secretMarker) || !strings.Contains(err.Error(), "[REDACTED]") {
@@ -201,7 +201,7 @@ func TestCLIErrorRedactsCloudInitAndDeleteUsesSupportedFlags(t *testing.T) {
 
 func TestUpdateLabelsIncludesParentScope(t *testing.T) {
 	runner := &recordingRunner{}
-	client := newNebiusClient(testConfig().Nebius, Runtime{Exec: runner})
+	client := newNebiusClient(testConfig().Nebius, core.Runtime{Exec: runner})
 	if err := client.UpdateLabels(context.Background(), "vm-1", map[string]string{"state": "ready"}); err != nil {
 		t.Fatal(err)
 	}
@@ -212,10 +212,10 @@ func TestUpdateLabelsIncludesParentScope(t *testing.T) {
 }
 
 func TestListInstancesRequestsAllPages(t *testing.T) {
-	runner := &recordingRunner{fn: func(LocalCommandRequest) (LocalCommandResult, error) {
-		return LocalCommandResult{Stdout: `{"items":[]}`}, nil
+	runner := &recordingRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{Stdout: `{"items":[]}`}, nil
 	}}
-	client := newNebiusClient(testConfig().Nebius, Runtime{Exec: runner})
+	client := newNebiusClient(testConfig().Nebius, core.Runtime{Exec: runner})
 	if _, err := client.ListInstances(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestAcquirePersistsClaimAndSSHReadyTarget(t *testing.T) {
 		waited:  nebiusInstance{ID: "vm-new", Name: "ready", Status: "RUNNING", Labels: labels, PublicIP: "203.0.113.20"},
 	}
 	b := newTestBackend(t, api)
-	lease, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "demo"})
+	lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "demo"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestResolveListStatusByAliases(t *testing.T) {
 		{ID: "foreign", Name: "foreign", Status: "RUNNING", Labels: map[string]string{"crabbox": "true"}, PublicIP: "203.0.113.11"},
 	}}
 	b := newTestBackend(t, api)
-	list, err := b.List(context.Background(), ListRequest{})
+	list, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestResolveListStatusByAliases(t *testing.T) {
 		t.Fatalf("list=%#v", list)
 	}
 	for _, id := range []string{"cbx_123456789abc", "demo", "vm-1", core.LeaseProviderName("cbx_123456789abc", "demo")} {
-		got, err := b.Resolve(context.Background(), ResolveRequest{ID: id})
+		got, err := b.Resolve(context.Background(), core.ResolveRequest{ID: id})
 		if err != nil {
 			t.Fatalf("Resolve(%q): %v", id, err)
 		}
@@ -296,7 +296,7 @@ func TestResolveAssociatesLiveInstanceWithRepoUnlessMutationsDisabled(t *testing
 	api := &fakeNebiusAPI{items: []nebiusInstance{{ID: "vm-1", Name: "demo", Status: "RUNNING", Labels: labels, PublicIP: "203.0.113.10"}}}
 	b := newTestBackend(t, api)
 	repo := t.TempDir()
-	if _, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, Repo: core.Repo{Root: repo}}); err != nil {
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: repo}}); err != nil {
 		t.Fatal(err)
 	}
 	claim, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName)
@@ -310,7 +310,7 @@ func TestResolveAssociatesLiveInstanceWithRepoUnlessMutationsDisabled(t *testing
 	otherLeaseID := "cbx_b123456789ab"
 	otherLabels := nebiusLeaseLabels(cfg, otherLeaseID, "no-mutate", "ready", false, time.Unix(1000, 0))
 	api.items = append(api.items, nebiusInstance{ID: "vm-2", Name: "no-mutate", Status: "RUNNING", Labels: otherLabels, PublicIP: "203.0.113.11"})
-	if _, err := b.Resolve(context.Background(), ResolveRequest{ID: otherLeaseID, Repo: core.Repo{Root: repo}, NoLocalStateMutations: true}); err != nil {
+	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: otherLeaseID, Repo: core.Repo{Root: repo}, NoLocalStateMutations: true}); err != nil {
 		t.Fatal(err)
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence(otherLeaseID); err != nil || exists {
@@ -333,19 +333,19 @@ func TestReleaseAndCleanupRefuseForeignOrAmbiguousResources(t *testing.T) {
 	if err := core.ClaimLeaseTargetForRepoConfig(ownedServer.Labels["lease"], ownedServer.Labels["slug"], b.Cfg, ownedServer, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.deletedIDs) != 0 {
 		t.Fatalf("dry-run deleted: %v", api.deletedIDs)
 	}
-	if err := b.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(api.deletedIDs, ",") != "vm-owned" {
 		t.Fatalf("deletedIDs=%v", api.deletedIDs)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_deadbeef1234", Server: Server{CloudID: "vm-foreign", Labels: foreign}}}); err == nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_deadbeef1234", Server: core.Server{CloudID: "vm-foreign", Labels: foreign}}}); err == nil {
 		t.Fatal("ReleaseLease accepted foreign ownership")
 	}
 }
@@ -377,7 +377,7 @@ func TestNebiusReleaseRejectsMissingOrStaleExactOwnership(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+			err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
 			if test.seedClaim && !test.staleID {
 				if err != nil || strings.Join(api.deletedIDs, ",") != item.ID {
 					t.Fatalf("owned release err=%v deleted=%v", err, api.deletedIDs)
@@ -400,11 +400,11 @@ func TestTouchUpdatesLabelsWithoutLosingOwnership(t *testing.T) {
 	api := &fakeNebiusAPI{items: []nebiusInstance{{ID: "vm-1", Name: "demo", Status: "RUNNING", Labels: labels, PublicIP: "203.0.113.10"}}}
 	b := newTestBackend(t, api)
 	leaseID := "cbx_123456789abc"
-	claimedServer := Server{Provider: providerName, CloudID: "vm-1", Name: "demo", Labels: labels}
+	claimedServer := core.Server{Provider: providerName, CloudID: "vm-1", Name: "demo", Labels: labels}
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "demo", b.Cfg, claimedServer, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	server, err := b.Touch(context.Background(), TouchRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: claimedServer}, State: "ready", IdleTimeout: 30 * time.Minute})
+	server, err := b.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: claimedServer}, State: "ready", IdleTimeout: 30 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +437,7 @@ func TestTouchRefusesLiveOwnershipMismatch(t *testing.T) {
 	liveLabels[nebiusLeaseLabel] = "cbx_other123456"
 	api := &fakeNebiusAPI{items: []nebiusInstance{{ID: "vm-1", Name: "demo", Status: "RUNNING", Labels: liveLabels, PublicIP: "203.0.113.10"}}}
 	b := newTestBackend(t, api)
-	_, err := b.Touch(context.Background(), TouchRequest{Lease: LeaseTarget{LeaseID: "cbx_123456789abc", Server: Server{CloudID: "vm-1", Labels: labels}}, State: "ready"})
+	_, err := b.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: "cbx_123456789abc", Server: core.Server{CloudID: "vm-1", Labels: labels}}, State: "ready"})
 	if err == nil {
 		t.Fatal("Touch accepted changed live ownership")
 	}
@@ -457,7 +457,7 @@ func TestManagedDiskAcquireRejectsPublicIPNone(t *testing.T) {
 func TestAcquireRecoveryRetainsClaimOnIndeterminateCreate(t *testing.T) {
 	api := &fakeNebiusAPI{createErr: errors.New("connection reset after create")}
 	b := newTestBackend(t, api)
-	_, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "recover"})
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "recover"})
 	if err == nil {
 		t.Fatal("Acquire succeeded unexpectedly")
 	}
@@ -473,7 +473,7 @@ func TestAcquireRecoveryRetainsClaimOnIndeterminateCreate(t *testing.T) {
 func TestAcquireQuotaFailureWithTimeoutLabelDoesNotRetainRecoveryClaim(t *testing.T) {
 	api := &fakeNebiusAPI{createErr: errors.New("create --labels idle_timeout=300 failed: quota limit exceeded")}
 	b := newTestBackend(t, api)
-	_, err := b.Acquire(context.Background(), AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "quota-failure"})
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "quota-failure"})
 	if err == nil {
 		t.Fatal("Acquire succeeded unexpectedly")
 	}
@@ -488,10 +488,10 @@ func TestAcquireRollsBackCreatedInstanceWhenOnAcquiredFails(t *testing.T) {
 		waited:  nebiusInstance{ID: "vm-new", Name: "ready", Status: "RUNNING", Labels: map[string]string{}, PublicIP: "203.0.113.20"},
 	}
 	b := newTestBackend(t, api)
-	_, err := b.Acquire(context.Background(), AcquireRequest{
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},
 		RequestedSlug: "rollback",
-		OnAcquired: func(LeaseTarget) error {
+		OnAcquired: func(core.LeaseTarget) error {
 			return errors.New("controller rejected identity")
 		},
 	})
@@ -509,11 +509,11 @@ func TestAcquireRollsBackCreatedInstanceWhenOnAcquiredFails(t *testing.T) {
 func TestAcquireKeepRetainsCreatedInstanceClaimAndKeyAfterFailure(t *testing.T) {
 	api := &fakeNebiusAPI{created: nebiusInstance{ID: "vm-kept", Name: "pending", Status: "CREATING"}}
 	b := newTestBackend(t, api)
-	_, err := b.Acquire(context.Background(), AcquireRequest{
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},
 		RequestedSlug: "kept-failure",
 		Keep:          true,
-		OnAcquired: func(LeaseTarget) error {
+		OnAcquired: func(core.LeaseTarget) error {
 			return errors.New("controller rejected identity")
 		},
 	})
@@ -544,10 +544,10 @@ func TestAcquireRollbackUsesBoundedContextIndependentOfCaller(t *testing.T) {
 	b := newTestBackend(t, api)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := b.Acquire(ctx, AcquireRequest{
+	_, err := b.Acquire(ctx, core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},
 		RequestedSlug: "rollback-context",
-		OnAcquired: func(LeaseTarget) error {
+		OnAcquired: func(core.LeaseTarget) error {
 			return errors.New("controller rejected identity")
 		},
 	})
@@ -567,12 +567,12 @@ func TestReleaseCleansLocalClaimWhenInstanceAlreadyAbsent(t *testing.T) {
 	labels := nebiusLeaseLabels(cfg, leaseID, slug, "ready", false, time.Unix(1000, 0))
 	api := &fakeNebiusAPI{getErr: errors.New("instance " + cloudID + " not found")}
 	b := newTestBackend(t, api)
-	server := Server{Provider: providerName, CloudID: cloudID, Name: slug, Labels: labels}
+	server := core.Server{Provider: providerName, CloudID: cloudID, Name: slug, Labels: labels}
 	server.PublicNet.IPv4.IP = "203.0.113.10"
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.deletedIDs) != 0 {
@@ -591,7 +591,7 @@ func TestReleaseFencesClaimMutationDuringDelete(t *testing.T) {
 	labels := nebiusLeaseLabels(cfg, leaseID, slug, "ready", false, time.Unix(1000, 0))
 	api := &fakeNebiusAPI{items: []nebiusInstance{{ID: cloudID, Name: slug, Status: "RUNNING", Labels: labels, PublicIP: "203.0.113.10"}}}
 	b := newTestBackend(t, api)
-	server := Server{Provider: providerName, CloudID: cloudID, Name: slug, Labels: labels}
+	server := core.Server{Provider: providerName, CloudID: cloudID, Name: slug, Labels: labels}
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
@@ -616,7 +616,7 @@ func TestReleaseFencesClaimMutationDuringDelete(t *testing.T) {
 		default:
 		}
 	}
-	err = b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}})
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
 	if err != nil {
 		t.Fatalf("ReleaseLease err=%v", err)
 	}
@@ -638,11 +638,11 @@ func TestReleaseRetainsIdentitylessRecoveryClaim(t *testing.T) {
 	if err := b.persistRecoveryClaim(leaseID, slug, "", b.Cfg, t.TempDir(), labels, false); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease})
+	err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
 	if err == nil || !strings.Contains(err.Error(), "no instance identity") {
 		t.Fatalf("ReleaseLease err=%v", err)
 	}
@@ -662,11 +662,11 @@ func TestReleaseDoesNotCleanClaimOnUnrelatedNotFound(t *testing.T) {
 	labels := nebiusLeaseLabels(cfg, leaseID, slug, "ready", false, time.Unix(1000, 0))
 	api := &fakeNebiusAPI{getErr: errors.New("profile production not found")}
 	b := newTestBackend(t, api)
-	server := Server{Provider: providerName, CloudID: cloudID, Name: slug, Labels: labels}
+	server := core.Server{Provider: providerName, CloudID: cloudID, Name: slug, Labels: labels}
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: leaseID, Server: server}}); err == nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err == nil {
 		t.Fatal("ReleaseLease cleaned state after unrelated not-found error")
 	}
 	if _, ok, err := core.ResolveLeaseClaimForProvider(slug, providerName); err != nil || !ok {
@@ -682,11 +682,11 @@ func TestResolveReleaseOnlyFindsClaimByCloudID(t *testing.T) {
 	labels := nebiusLeaseLabels(cfg, leaseID, slug, "ready", false, time.Unix(1000, 0))
 	api := &fakeNebiusAPI{}
 	b := newTestBackend(t, api)
-	server := Server{Provider: providerName, CloudID: cloudID, Name: slug, Labels: labels}
+	server := core.Server{Provider: providerName, CloudID: cloudID, Name: slug, Labels: labels}
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, b.Cfg, server, core.SSHTarget{}, t.TempDir(), b.Cfg.IdleTimeout, false); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := b.Resolve(context.Background(), ResolveRequest{ID: cloudID, ReleaseOnly: true})
+	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: cloudID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -703,7 +703,7 @@ func TestReleaseRefusesLiveOwnershipMismatch(t *testing.T) {
 	liveLabels[nebiusLeaseLabel] = "cbx_other123456"
 	api := &fakeNebiusAPI{items: []nebiusInstance{{ID: "vm-1", Name: "other", Status: "RUNNING", Labels: liveLabels, PublicIP: "203.0.113.10"}}}
 	b := newTestBackend(t, api)
-	err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: LeaseTarget{LeaseID: "cbx_deadbeef1234", Server: Server{CloudID: "vm-1", Labels: labels}}})
+	err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_deadbeef1234", Server: core.Server{CloudID: "vm-1", Labels: labels}}})
 	if err == nil {
 		t.Fatal("ReleaseLease accepted changed live ownership")
 	}
@@ -718,10 +718,10 @@ func TestAcquireRollbackFailureRetainsCreatedInstanceIDClaim(t *testing.T) {
 		deleteErr: errors.New("lost delete response"),
 	}
 	b := newTestBackend(t, api)
-	_, err := b.Acquire(context.Background(), AcquireRequest{
+	_, err := b.Acquire(context.Background(), core.AcquireRequest{
 		Repo:          core.Repo{Root: t.TempDir()},
 		RequestedSlug: "rollback-failed",
-		OnAcquired: func(LeaseTarget) error {
+		OnAcquired: func(core.LeaseTarget) error {
 			return errors.New("controller rejected identity")
 		},
 	})

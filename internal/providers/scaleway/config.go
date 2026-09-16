@@ -6,32 +6,25 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-const (
-	defaultRegion = "fr-par"
-	defaultZone   = "fr-par-1"
-	defaultImage  = "ubuntu_noble"
-	defaultType   = "DEV1-S"
-)
-
 func regionForConfig(cfg core.Config) string {
 	if value := strings.TrimSpace(cfg.Scaleway.Region); value != "" {
 		return value
 	}
-	return defaultRegion
+	return core.ScalewayConfigDefaultRegion
 }
 
 func zoneForConfig(cfg core.Config) string {
 	if value := strings.TrimSpace(cfg.Scaleway.Zone); value != "" {
 		return value
 	}
-	return defaultZone
+	return core.ScalewayConfigDefaultZone
 }
 
 func imageForConfig(cfg core.Config) string {
 	if value := strings.TrimSpace(cfg.Scaleway.Image); value != "" {
 		return value
 	}
-	return defaultImage
+	return core.ScalewayConfigDefaultImage
 }
 
 func serverTypeForConfig(cfg core.Config) string {

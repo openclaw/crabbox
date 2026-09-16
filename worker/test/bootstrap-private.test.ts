@@ -14,6 +14,7 @@ describe("private AWS cloud-init", () => {
     expect(got).not.toContain("ssh_host_");
     expect(got).not.toContain("/etc/ssh");
     expect(got).not.toContain("openssh-server");
+    expect(got).not.toContain("\napt:\n");
     expect(got).not.toContain("NOPASSWD");
     expect(got).not.toMatch(/systemctl (?:enable|restart|start).*\bssh\b/);
     expect(got).toContain("systemctl disable --now ssh.service ssh.socket");
@@ -42,11 +43,12 @@ describe("private AWS cloud-init", () => {
     expect(got).not.toContain("ssh_authorized_keys");
     expect(got).not.toContain("ssh-ed25519 must-not-appear");
     expect(got).not.toContain("openssh-server");
+    expect(got).not.toContain("\napt:\n");
   });
 });
 
 function privateLeaseConfig(): LeaseConfig {
-  return leaseConfig({
+  const config = leaseConfig({
     provider: "aws",
     target: "linux",
     class: "standard",
@@ -67,6 +69,10 @@ function privateLeaseConfig(): LeaseConfig {
     sshUser: "crabbox",
     sshPublicKey: "ssh-ed25519 must-not-appear",
   });
+  return {
+    ...config,
+    selectedImage: { id: "ami-stock", source: "stock", provider: "aws", kind: "aws-ami" },
+  };
 }
 
 async function gunzipBase64(value: string): Promise<string> {

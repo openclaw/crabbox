@@ -11,6 +11,7 @@ import (
 )
 
 type providerMatrixEntry struct {
+	providerStaticStatus
 	Provider      string               `json:"provider"`
 	Family        string               `json:"family"`
 	Aliases       []string             `json:"aliases,omitempty"`
@@ -30,6 +31,7 @@ type providerMatrixEntry struct {
 }
 
 type providerRecommendationEntry struct {
+	providerStaticStatus
 	Provider     string       `json:"provider"`
 	Kind         ProviderKind `json:"kind"`
 	Category     string       `json:"category,omitempty"`
@@ -100,7 +102,7 @@ func (a App) providers(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return exit(2, "usage: crabbox providers [--json] [--kind KIND] [--category CATEGORY] [--target TARGET] [--feature FEATURE] [--runtime CAPABILITY] [--reachability CAPABILITY] [--workspace CAPABILITY] [--evidence CAPABILITY] [--lifecycle CAPABILITY] OR crabbox providers filters [--json] OR crabbox providers recommend <use-case> [--limit N] [--json]")
+		return Exit(2, "usage: crabbox providers [--json] [--kind KIND] [--category CATEGORY] [--target TARGET] [--feature FEATURE] [--runtime CAPABILITY] [--reachability CAPABILITY] [--workspace CAPABILITY] [--evidence CAPABILITY] [--lifecycle CAPABILITY] OR crabbox providers filters [--json] OR crabbox providers recommend <use-case> [--limit N] [--json]")
 	}
 	entries := providerMatrix()
 	filters := filterFlags.filters()
@@ -122,7 +124,7 @@ func (a App) providerFilters(args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return exit(2, "usage: crabbox providers filters [--json]")
+		return Exit(2, "usage: crabbox providers filters [--json]")
 	}
 	values := providerMatrixFilterValues(providerMatrix())
 	if *jsonOut {
@@ -147,12 +149,12 @@ func (a App) providerRecommendations(args []string) error {
 		return err
 	}
 	if *limit <= 0 {
-		return exit(2, "--limit must be greater than 0")
+		return Exit(2, "--limit must be greater than 0")
 	}
 	useCase := strings.TrimSpace(*useCaseFlag)
 	if positionalUseCase != "" {
 		if useCase != "" {
-			return exit(2, "pass the use case either positionally or with --use-case, not both")
+			return Exit(2, "pass the use case either positionally or with --use-case, not both")
 		}
 		useCase = strings.TrimSpace(positionalUseCase)
 	}
@@ -160,15 +162,15 @@ func (a App) providerRecommendations(args []string) error {
 	case 0:
 	case 1:
 		if useCase != "" {
-			return exit(2, "pass the use case either positionally or with --use-case, not both")
+			return Exit(2, "pass the use case either positionally or with --use-case, not both")
 		}
 		useCase = strings.TrimSpace(fs.Arg(0))
 	default:
-		return exit(2, "usage: crabbox providers recommend <use-case> [--limit N] [--json]")
+		return Exit(2, "usage: crabbox providers recommend <use-case> [--limit N] [--json]")
 	}
 	if useCase == "" {
 		if !providerMatrixFiltersEmpty(filterFlags.filters()) {
-			return exit(2, "provider recommendation filters require a use case")
+			return Exit(2, "provider recommendation filters require a use case")
 		}
 		if *jsonOut {
 			return json.NewEncoder(a.Stdout).Encode(providerRecommendationUseCases())
@@ -178,7 +180,7 @@ func (a App) providerRecommendations(args []string) error {
 	}
 	canonical, ok := normalizeProviderRecommendationUseCase(useCase)
 	if !ok {
-		return exit(2, "unknown provider recommendation use case %q; try one of: %s", useCase, strings.Join(providerRecommendationUseCases(), ", "))
+		return Exit(2, "unknown provider recommendation use case %q; try one of: %s", useCase, strings.Join(providerRecommendationUseCases(), ", "))
 	}
 	entries := providerMatrix()
 	filters := filterFlags.filters()
@@ -189,9 +191,9 @@ func (a App) providerRecommendations(args []string) error {
 	recommendations := recommendProvidersForUseCase(entries, canonical, *limit)
 	if len(recommendations) == 0 {
 		if providerMatrixFiltersEmpty(filters) {
-			return exit(1, "no providers matched use case %q", canonical)
+			return Exit(1, "no providers matched use case %q", canonical)
 		}
-		return exit(1, "no providers matched use case %q with the requested filters", canonical)
+		return Exit(1, "no providers matched use case %q with the requested filters", canonical)
 	}
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(recommendations)
@@ -211,25 +213,26 @@ func providerMatrix() []providerMatrixEntry {
 
 func providerMatrixEntryFor(provider Provider) providerMatrixEntry {
 	spec := provider.Spec()
-	name := firstNonBlank(spec.Name, provider.Name())
+	name := spec.Name
 	category := benchmarkProviderCategories[name]
 	targets := formatProviderTargets(spec.Targets)
 	entry := providerMatrixEntry{
-		Provider:      name,
-		Family:        firstNonBlank(spec.Family, provider.Name()),
-		Aliases:       append([]string(nil), provider.Aliases()...),
-		Kind:          spec.Kind,
-		Category:      category,
-		Targets:       targets,
-		Features:      append(FeatureSet{}, spec.Features...),
-		Runtime:       runtimeCapabilitiesForProvider(name, spec.Kind, category, targets, spec.Features),
-		Reachability:  reachabilityCapabilitiesForProvider(name),
-		Workspace:     workspaceCapabilitiesForFeatures(spec.Features),
-		Evidence:      evidenceCapabilitiesForFeatures(spec.Features),
-		Lifecycle:     lifecycleCapabilitiesForProvider(spec.Coordinator, spec.Features),
-		Coordinator:   string(spec.Coordinator),
-		ClassCatalog:  providerClassCatalogFor(provider),
-		SizeSelection: spec.SizeSelection,
+		providerStaticStatus: providerStaticStatusFor(spec),
+		Provider:             name,
+		Family:               firstNonBlank(spec.Family, spec.Name),
+		Aliases:              append([]string(nil), spec.Aliases...),
+		Kind:                 spec.Kind,
+		Category:             category,
+		Targets:              targets,
+		Features:             append(FeatureSet{}, spec.Features...),
+		Runtime:              runtimeCapabilitiesForProvider(name, spec.Kind, category, targets, spec.Features),
+		Reachability:         reachabilityCapabilitiesForProvider(name),
+		Workspace:            workspaceCapabilitiesForFeatures(spec.Features),
+		Evidence:             evidenceCapabilitiesForFeatures(spec.Features),
+		Lifecycle:            lifecycleCapabilitiesForProvider(spec.Coordinator, spec.Features),
+		Coordinator:          string(spec.Coordinator),
+		ClassCatalog:         ProviderClassCatalogFor(provider),
+		SizeSelection:        spec.SizeSelection,
 	}
 	if classProvider, ok := provider.(ProviderClassSpecProvider); ok {
 		entry.Classes = append([]ClassSpec(nil), classProvider.ClassSpecs()...)
@@ -322,7 +325,7 @@ func validateProviderMatrixFilters(filters providerMatrixFilters, entries []prov
 	check := func(name string, values []string) error {
 		for _, value := range values {
 			if !allowed[name][value] {
-				return exit(2, "unknown provider %s filter %q; try one of: %s", name, value, strings.Join(sortedProviderFilterValues(allowed[name]), ", "))
+				return Exit(2, "unknown provider %s filter %q; try one of: %s", name, value, strings.Join(sortedProviderFilterValues(allowed[name]), ", "))
 			}
 		}
 		return nil
@@ -624,18 +627,19 @@ func recommendProvidersForUseCase(entries []providerMatrixEntry, useCase string,
 			continue
 		}
 		recommendations = append(recommendations, providerRecommendationEntry{
-			Provider:     entry.Provider,
-			Kind:         entry.Kind,
-			Category:     benchmarkProviderCategories[entry.Provider],
-			Targets:      append([]string(nil), entry.Targets...),
-			Features:     append([]Feature(nil), entry.Features...),
-			Runtime:      append([]string(nil), entry.Runtime...),
-			Reachability: append([]string(nil), entry.Reachability...),
-			Workspace:    append([]string(nil), entry.Workspace...),
-			Evidence:     append([]string(nil), entry.Evidence...),
-			Lifecycle:    append([]string(nil), entry.Lifecycle...),
-			Score:        score,
-			Reasons:      reasons,
+			providerStaticStatus: entry.providerStaticStatus.clone(),
+			Provider:             entry.Provider,
+			Kind:                 entry.Kind,
+			Category:             benchmarkProviderCategories[entry.Provider],
+			Targets:              append([]string(nil), entry.Targets...),
+			Features:             append([]Feature(nil), entry.Features...),
+			Runtime:              append([]string(nil), entry.Runtime...),
+			Reachability:         append([]string(nil), entry.Reachability...),
+			Workspace:            append([]string(nil), entry.Workspace...),
+			Evidence:             append([]string(nil), entry.Evidence...),
+			Lifecycle:            append([]string(nil), entry.Lifecycle...),
+			Score:                score,
+			Reasons:              reasons,
 		})
 	}
 	sort.SliceStable(recommendations, func(i, j int) bool {
@@ -1635,6 +1639,7 @@ func printProviderRecommendations(out io.Writer, useCase string, entries []provi
 	fmt.Fprintf(out, "recommended providers for %s:\n", useCase)
 	for _, entry := range entries {
 		fmt.Fprintf(out, "%s\n", entry.Provider)
+		writeProviderStaticStatus(out, entry.providerStaticStatus)
 		fmt.Fprintf(out, "  score: %d\n", entry.Score)
 		fmt.Fprintf(out, "  kind: %s\n", entry.Kind)
 		fmt.Fprintf(out, "  category: %s\n", blank(entry.Category, "-"))
@@ -1662,6 +1667,7 @@ func printProviderRecommendations(out io.Writer, useCase string, entries []provi
 func printProviderMatrix(out io.Writer, entries []providerMatrixEntry) {
 	for _, entry := range entries {
 		fmt.Fprintf(out, "%s\n", entry.Provider)
+		writeProviderStaticStatus(out, entry.providerStaticStatus)
 		fmt.Fprintf(out, "  family: %s\n", entry.Family)
 		fmt.Fprintf(out, "  kind: %s\n", entry.Kind)
 		fmt.Fprintf(out, "  category: %s\n", blank(entry.Category, "-"))

@@ -143,6 +143,26 @@ CRABBOX_SCALEWAY_SECURITY_GROUP     Override the security group ID
 CRABBOX_SCALEWAY_SSH_CIDRS          Comma-separated SSH CIDRs; currently fails fast when non-empty
 ```
 
+### Input semantics
+
+The eight Crabbox settings use shared typed bindings. Nonempty file/environment
+strings retain their raw spelling until the provider's existing normalization
+phases. Accepted region, zone, image, and type inputs remain explicit even when
+equal to the default; visited empty flags also remain explicit. This preserves
+the SDK location precedence described above rather than inferring explicitness
+from the final value.
+
+The list sources intentionally differ. A nonempty YAML `sshCIDRs` list replaces
+the prior list without trimming; an omitted, null, or empty list leaves it alone.
+Environment input trims comma-separated items and drops blanks only when the
+environment text is nonempty. A visited `--scaleway-ssh-cidrs` flag uses its last
+scalar value, with an empty registration default independent of configured CIDRs.
+Its empty result is nil, whereas applied comma-only environment input produces
+an empty nonnil list (`null` versus `[]` in JSON). Order and duplicates are retained;
+`none` is an ordinary item, not a clearing token. Nonempty CIDR lists remain
+unsupported and are rejected before allocation; this refactor adds no ingress-rule
+management.
+
 ## Credentials
 
 Crabbox uses the official Scaleway SDK config surfaces and environment profile.

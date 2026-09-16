@@ -68,7 +68,7 @@ codeSandbox:
   vmTier: ""                      # pico, nano, micro, small, medium, large, xlarge
   privacy: private                # public, unlisted, private, or public-hosts
   hibernationTimeoutSecs: 0       # 0 uses CodeSandbox default
-  automaticWakeupHttp: true       # allow host URL access to wake hibernated sandboxes
+  automaticWakeupHTTP: true       # allow host URL access to wake hibernated sandboxes
   automaticWakeupWebSocket: false
   bridgeCommand: node
   sdkPackage: "@codesandbox/sdk@2.4.2"
@@ -125,6 +125,14 @@ Crabbox rejects broad paths such as `/` and `/project`.
 5. `stop` deletes the sandbox through the SDK and removes the local claim.
    `pause` hibernates the sandbox and keeps the local claim so `resume`, `run`,
    `status`, and `stop` can target it later.
+
+Run outcomes and timing are finalized after automatic cleanup. A failed deletion
+returns a failure and a retained recovery session instead of success with a
+stopped session. An existing command failure keeps its exit code when cleanup or
+timing output also fails. `--keep-on-failure` includes canceled and timed-out
+commands; their original causes remain available for outcome classification.
+Reused sandboxes are never automatically deleted. Ownership checks and the SDK's
+command, environment-file, and deletion transports remain provider-specific.
 
 ## Ports And Preview URLs
 

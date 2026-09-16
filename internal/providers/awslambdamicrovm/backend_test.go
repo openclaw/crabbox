@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -35,6 +36,7 @@ type fakeControlPlane struct {
 	terminateErr        error
 	terminateDeadline   bool
 	terminateContextErr error
+	onTerminate         func()
 }
 
 func (f *fakeControlPlane) Run(_ context.Context, req runMicroVMRequest) (microVM, error) {
@@ -62,6 +64,9 @@ func (f *fakeControlPlane) Probe(context.Context, string, string) error {
 
 func (f *fakeControlPlane) Terminate(ctx context.Context, id string) error {
 	f.calls = append(f.calls, "terminate:"+id)
+	if f.onTerminate != nil {
+		f.onTerminate()
+	}
 	_, f.terminateDeadline = ctx.Deadline()
 	f.terminateContextErr = ctx.Err()
 	if f.terminateErr != nil {
@@ -92,6 +97,7 @@ type fakeRunner struct {
 	execErr     error
 	commands    []string
 	uploads     []string
+	onExec      func(context.Context, string, string) (int, error)
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -111,12 +117,35 @@ func (f *fakeRunner) Upload(_ context.Context, _ microVM, path string, body io.R
 	return nil
 }
 
-func (f *fakeRunner) Exec(_ context.Context, _ microVM, command, _ string, _ map[string]string, stdout, _ io.Writer) (int, error) {
+func (f *fakeRunner) Exec(ctx context.Context, _ microVM, command, workdir string, _ map[string]string, stdout, _ io.Writer) (int, error) {
 	f.commands = append(f.commands, command)
+	if f.onExec != nil {
+		return f.onExec(ctx, command, workdir)
+	}
 	if strings.Contains(command, "runner-ok") {
 		_, _ = io.WriteString(stdout, "runner-ok")
 	}
 	return f.exitCode, f.execErr
+}
+
+func TestAWSLambdaSharedRegionInputTracking(t *testing.T) {
+	for _, raw := range []string{"eu-west-1", " eu-west-1 ", ""} {
+		cfg := core.Config{AWSRegion: "eu-west-1"}
+		fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
+		values := (Provider{}).RegisterFlags(fs, cfg)
+		if err := fs.Parse([]string{"--aws-lambda-microvm-region=" + raw}); err != nil {
+			t.Fatal(err)
+		}
+		// Missing image keeps this at ordinary validation after the region copy.
+		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err == nil {
+			t.Fatal("expected incomplete metadata validation")
+		}
+		want := core.Config{AWSRegion: strings.TrimSpace(raw)}
+		core.RecordProviderFlagInputs(&want, true, "aws", "aws-lambda-microvm")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("region was not attributed to both actual owners")
+		}
+	}
 }
 
 func TestRunSyncsExecutesAndTerminatesOneShot(t *testing.T) {
@@ -126,7 +155,7 @@ func TestRunSyncsExecutesAndTerminatesOneShot(t *testing.T) {
 	runner := &fakeRunner{}
 	var stdout bytes.Buffer
 	b := testBackend(control, runner, &stdout)
-	result, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: repo, Name: "my-app"}, Command: []string{"printf", "runner-ok"}})
+	result, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: repo, Name: "my-app"}, Command: []string{"printf", "runner-ok"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,8 +180,8 @@ func TestRunRejectsOversizedWorkspaceBeforeProviderCalls(t *testing.T) {
 	b := testBackend(control, runner, io.Discard)
 	b.cfg.Sync.FailBytes = 1
 
-	_, err := b.Run(context.Background(), RunRequest{
-		Repo: Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"true"},
+	_, err := b.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"true"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "sync candidate too large:") || !strings.Contains(err.Error(), "limit 1 B") {
 		t.Fatalf("err=%v", err)
@@ -170,8 +199,8 @@ func TestRunCleansPreparedArchiveWhenResourceCreationFails(t *testing.T) {
 	control := &fakeControlPlane{runErr: errors.New("creation denied")}
 	b := testBackend(control, &fakeRunner{}, io.Discard)
 
-	_, err := b.Run(context.Background(), RunRequest{
-		Repo: Repo{Root: repo, Name: "my-app"}, Command: []string{"true"},
+	_, err := b.Run(context.Background(), core.RunRequest{
+		Repo: core.Repo{Root: repo, Name: "my-app"}, Command: []string{"true"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "creation denied") {
 		t.Fatalf("err=%v", err)
@@ -190,20 +219,20 @@ func TestRetainedLifecyclePauseResumeStop(t *testing.T) {
 	control := &fakeControlPlane{}
 	runner := &fakeRunner{}
 	b := testBackend(control, runner, io.Discard)
-	result, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"true"}, Keep: true})
+	result, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"true"}, Keep: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Session == nil || !result.Session.Kept {
 		t.Fatalf("session=%#v", result.Session)
 	}
-	if err := b.Pause(context.Background(), PauseRequest{ID: result.LeaseID}); err != nil {
+	if err := b.Pause(context.Background(), core.PauseRequest{ID: result.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Resume(context.Background(), ResumeRequest{ID: result.LeaseID}); err != nil {
+	if err := b.Resume(context.Background(), core.ResumeRequest{ID: result.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Stop(context.Background(), StopRequest{ID: result.LeaseID}); err != nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: result.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"suspend:mvm-test", "resume:mvm-test", "terminate:mvm-test"}
@@ -222,22 +251,22 @@ func TestImageRotationKeepsOldLeaseManageableButBlocksReuse(t *testing.T) {
 	control := &fakeControlPlane{}
 	runner := &fakeRunner{}
 	b := testBackend(control, runner, io.Discard)
-	result, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"true"}, Keep: true})
+	result, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"true"}, Keep: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	b.cfg.AWSLambdaMicroVM.Image = "arn:aws:lambda:eu-west-1:123456789012:microvm-image:new-runner"
-	if _, err := b.Status(context.Background(), StatusRequest{ID: result.LeaseID}); err != nil {
+	if _, err := b.Status(context.Background(), core.StatusRequest{ID: result.LeaseID}); err != nil {
 		t.Fatalf("status after image rotation: %v", err)
 	}
-	servers, err := b.List(context.Background(), ListRequest{})
+	servers, err := b.List(context.Background(), core.ListRequest{})
 	if err != nil || len(servers) != 1 {
 		t.Fatalf("list after image rotation: servers=%#v err=%v", servers, err)
 	}
-	if _, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: "/repo", Name: "my-app"}, ID: result.LeaseID, Command: []string{"true"}, NoSync: true}); err == nil || !strings.Contains(err.Error(), "image identity mismatch") {
+	if _, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: "/repo", Name: "my-app"}, ID: result.LeaseID, Command: []string{"true"}, NoSync: true}); err == nil || !strings.Contains(err.Error(), "image identity mismatch") {
 		t.Fatalf("reuse after image rotation err=%v", err)
 	}
-	if err := b.Stop(context.Background(), StopRequest{ID: result.LeaseID}); err != nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: result.LeaseID}); err != nil {
 		t.Fatalf("stop after image rotation: %v", err)
 	}
 }
@@ -247,8 +276,8 @@ func TestNoSyncWorkspaceFailureStopsBeforeCommand(t *testing.T) {
 	control := &fakeControlPlane{}
 	runner := &fakeRunner{exitCode: 9}
 	b := testBackend(control, runner, io.Discard)
-	result, err := b.Run(context.Background(), RunRequest{Repo: Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"must-not-run"}, NoSync: true})
-	if err == nil || result.ExitCode != 0 {
+	result, err := b.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, Command: []string{"must-not-run"}, NoSync: true})
+	if err == nil || result.ExitCode != 9 || result.ErrorKind != core.RunErrorProvider {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
 	if len(runner.commands) != 1 || !strings.Contains(runner.commands[0], "mkdir -p") {
@@ -266,7 +295,7 @@ func TestCreateRollsBackWhenRunnerIsUnhealthy(t *testing.T) {
 	b := testBackend(control, runner, io.Discard)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := b.Warmup(ctx, WarmupRequest{Repo: Repo{Root: "/repo", Name: "my-app"}, Keep: true}); err == nil {
+	if err := b.Warmup(ctx, core.WarmupRequest{Repo: core.Repo{Root: "/repo", Name: "my-app"}, Keep: true}); err == nil {
 		t.Fatal("unhealthy runner unexpectedly became ready")
 	}
 	if !slices.Contains(control.calls, "terminate:mvm-test") {
@@ -285,7 +314,7 @@ func TestCreateRollbackFailurePersistsExactRecoveryClaim(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := b.Warmup(ctx, WarmupRequest{Repo: Repo{Root: "/repo", Name: "my-app"}, Keep: true})
+	err := b.Warmup(ctx, core.WarmupRequest{Repo: core.Repo{Root: "/repo", Name: "my-app"}, Keep: true})
 	if !errors.Is(err, context.Canceled) || !errors.Is(err, terminateErr) {
 		t.Fatalf("Warmup err=%v, want joined cancellation and termination failure", err)
 	}
@@ -298,7 +327,7 @@ func TestCreateRollbackFailurePersistsExactRecoveryClaim(t *testing.T) {
 	if !control.terminateDeadline || control.terminateContextErr != nil {
 		t.Fatalf("rollback context deadline=%t err=%v", control.terminateDeadline, control.terminateContextErr)
 	}
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil || len(claims) != 1 {
 		t.Fatalf("claims=%#v err=%v, want one recovery claim", claims, err)
 	}
@@ -307,7 +336,7 @@ func TestCreateRollbackFailurePersistsExactRecoveryClaim(t *testing.T) {
 		t.Fatalf("recovery claim=%#v", claim)
 	}
 	control.terminateErr = nil
-	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err != nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID}); err != nil {
 		t.Fatalf("recovery stop: %v", err)
 	}
 	if _, ok, err := resolveLeaseClaim(claim.LeaseID); err != nil || ok {
@@ -327,7 +356,7 @@ func TestCreateRollbackFailureReportsRecoveryClaimPersistenceFailure(t *testing.
 	var stderr bytes.Buffer
 	b.rt.Stderr = &stderr
 
-	err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: "/repo", Name: "my-app"}, Keep: true})
+	err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: "/repo", Name: "my-app"}, Keep: true})
 	if !errors.Is(err, terminateErr) || !strings.Contains(err.Error(), "mvm-test") || !strings.Contains(err.Error(), "could not be persisted") {
 		t.Fatalf("Warmup err=%v, want termination and recovery persistence failures", err)
 	}
@@ -346,7 +375,7 @@ func TestWarmupWarnsWhenKeepIsFalse(t *testing.T) {
 	b := testBackend(control, runner, io.Discard)
 	var stderr bytes.Buffer
 	b.rt.Stderr = &stderr
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: "/repo", Name: "my-app"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: "/repo", Name: "my-app"}}); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(stderr.String(), "warmup keeps the MicroVM until explicit stop") {
@@ -750,6 +779,65 @@ func TestProviderFlagsAndEndpointValidation(t *testing.T) {
 	}
 }
 
+func TestProviderConfigFlagBindings(t *testing.T) {
+	const connector = "arn:aws:lambda:eu-west-1:aws:network-connector:synthetic"
+	const role = "arn:aws:iam::123456789012:role/Synthetic"
+	newConfig := func() core.Config {
+		cfg := core.BaseConfig()
+		cfg.AWSRegion = "eu-west-1"
+		cfg.AWSLambdaMicroVM = core.AWSLambdaMicroVMConfig{
+			Image: " " + testImageARN + " ", ImageVersion: " 2 ", ExecutionRoleARN: " " + role + " ",
+			Workdir: " /workspace/synthetic ", IngressConnectors: []string{connector}, EgressConnectors: []string{connector}, ForgetMissing: true,
+		}
+		return cfg
+	}
+	for _, raw := range []string{"", " , , ", " " + connector + " , " + connector + " "} {
+		t.Run("connectors-"+raw, func(t *testing.T) {
+			cfg := newConfig()
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			for _, name := range []string{"ingress-connectors", "egress-connectors"} {
+				if got := fs.Lookup("aws-lambda-microvm-" + name).DefValue; got != connector {
+					t.Fatalf("joined default=%q", got)
+				}
+			}
+			if err := applyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AWSLambdaMicroVM.Image != " "+testImageARN+" " || cfg.AWSLambdaMicroVM.Workdir != " /workspace/synthetic " {
+				t.Fatal("unvisited strings were normalized")
+			}
+			if err := fs.Parse([]string{"--aws-lambda-microvm-ingress-connectors=" + connector, "--aws-lambda-microvm-ingress-connectors=" + raw, "--aws-lambda-microvm-egress-connectors=" + raw}); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			for _, got := range [][]string{cfg.AWSLambdaMicroVM.IngressConnectors, cfg.AWSLambdaMicroVM.EgressConnectors} {
+				if strings.Contains(raw, connector) {
+					if !slices.Equal(got, []string{connector, connector}) {
+						t.Fatalf("items=%#v", got)
+					}
+				} else if got != nil {
+					t.Fatalf("empty flag must yield nil, got %#v", got)
+				}
+			}
+		})
+	}
+	cfg := newConfig()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--aws-lambda-microvm-region= eu-west-1 ", "--aws-lambda-microvm-image= " + testImageARN + " ", "--aws-lambda-microvm-image-version= 3 ", "--aws-lambda-microvm-execution-role-arn= " + role + " ", "--aws-lambda-microvm-workdir= /workspace/changed ", "--aws-lambda-microvm-forget-missing=false"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AWSRegion != "eu-west-1" || cfg.AWSLambdaMicroVM.Image != testImageARN || cfg.AWSLambdaMicroVM.ImageVersion != "3" || cfg.AWSLambdaMicroVM.ExecutionRoleARN != role || cfg.AWSLambdaMicroVM.Workdir != "/workspace/changed" || cfg.AWSLambdaMicroVM.ForgetMissing {
+		t.Fatalf("visited bindings=%#v, region=%q", cfg.AWSLambdaMicroVM, cfg.AWSRegion)
+	}
+}
+
 func TestProviderRejectsBroadWorkdirs(t *testing.T) {
 	for _, workdir := range []string{"/", "/tmp", "/work", "/workspace", "/home", "/root", "/usr", "/var", "/etc"} {
 		cfg := core.BaseConfig()
@@ -834,11 +922,11 @@ func testBackend(control *fakeControlPlane, runner *fakeRunner, stdout io.Writer
 	return &backend{
 		spec: Provider{}.Spec(),
 		cfg:  cfg,
-		rt:   Runtime{Stdout: stdout, Stderr: io.Discard},
-		newControl: func(context.Context, Config) (controlPlane, error) {
+		rt:   core.Runtime{Stdout: stdout, Stderr: io.Discard},
+		newControl: func(context.Context, core.Config) (controlPlane, error) {
 			return control, nil
 		},
-		newRunner: func(controlPlane, Config, Runtime) (runnerAPI, error) { return runner, nil },
+		newRunner: func(controlPlane, core.Config, core.Runtime) (runnerAPI, error) { return runner, nil },
 	}
 }
 
@@ -876,4 +964,268 @@ func testRepo(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+type runClock struct{ at time.Time }
+
+func (c *runClock) Now() time.Time { return c.at }
+
+type failingTimingWriter struct {
+	bytes.Buffer
+	err error
+}
+
+func (w *failingTimingWriter) Write(p []byte) (int, error) {
+	if bytes.HasPrefix(p, []byte("{")) {
+		return 0, w.err
+	}
+	return w.Buffer.Write(p)
+}
+
+func TestRunFinalOutcomeIncludesCleanupAndTiming(t *testing.T) {
+	transportErr := errors.New("synthetic runner transport failure")
+	cleanupErr := errors.New("synthetic termination failure")
+	for _, tc := range []struct {
+		name           string
+		commandCode    int
+		commandErr     error
+		setupCode      int
+		cleanupErr     error
+		keep, syncOnly bool
+		wantCode       int
+		wantKind       core.RunErrorKind
+	}{
+		{name: "cleanup-only", cleanupErr: cleanupErr, wantCode: 1, wantKind: core.RunErrorProvider},
+		{name: "command-and-cleanup", commandCode: 7, cleanupErr: cleanupErr, wantCode: 7, wantKind: core.RunErrorCommandExit},
+		{name: "transport", commandCode: 1, commandErr: transportErr, keep: true, wantCode: 1, wantKind: core.RunErrorProvider},
+		{name: "setup", setupCode: 9, keep: true, wantCode: 9, wantKind: core.RunErrorProvider},
+		{name: "sync-only-cleanup", syncOnly: true, cleanupErr: cleanupErr, wantCode: 1, wantKind: core.RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			clock := &runClock{at: time.Unix(1000, 0)}
+			control := &fakeControlPlane{terminateErr: tc.cleanupErr, onTerminate: func() { clock.at = clock.at.Add(2 * time.Second) }}
+			runner := &fakeRunner{onExec: func(_ context.Context, _ string, workdir string) (int, error) {
+				if workdir == "/" {
+					return tc.setupCode, nil
+				}
+				clock.at = clock.at.Add(time.Second)
+				return tc.commandCode, tc.commandErr
+			}}
+			b := testBackend(control, runner, io.Discard)
+			var stderr bytes.Buffer
+			b.rt.Stderr = &stderr
+			b.rt.Clock = clock
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, NoSync: true, KeepOnFailure: tc.keep, SyncOnly: tc.syncOnly, TimingJSON: true, Command: []string{"fixture-user"}})
+			if err == nil || result.ExitCode != tc.wantCode || result.Status != core.RunStatusFailed || result.ErrorKind != tc.wantKind {
+				t.Errorf("result=%+v err=%v", result, err)
+			}
+			if tc.commandErr != nil && !errors.Is(err, tc.commandErr) {
+				t.Errorf("lost command cause: %v", err)
+			}
+			if tc.cleanupErr != nil && !errors.Is(err, tc.cleanupErr) {
+				t.Errorf("lost cleanup cause: %v", err)
+			}
+			var public core.ExitError
+			if !errors.As(err, &public) || public.Code != tc.wantCode {
+				t.Errorf("public error=%v", err)
+			}
+			if tc.cleanupErr != nil && !strings.Contains(public.Message, tc.cleanupErr.Error()) {
+				t.Errorf("cleanup diagnostic missing from public error: %v", err)
+			}
+			if result.Session == nil || !result.Session.Kept {
+				t.Errorf("session=%+v", result.Session)
+			}
+			if _, ok, claimErr := resolveLeaseClaim(result.LeaseID); claimErr != nil || !ok {
+				t.Errorf("claim ok=%t err=%v", ok, claimErr)
+			}
+			var report core.TimingReport
+			count := 0
+			for _, line := range strings.Split(stderr.String(), "\n") {
+				if strings.HasPrefix(line, "{") {
+					if err := json.Unmarshal([]byte(line), &report); err != nil {
+						t.Fatal(err)
+					}
+					count++
+				}
+			}
+			if count != 1 || report.ExitCode != tc.wantCode || report.RunStatus != core.RunStatusFailed || report.ErrorKind != tc.wantKind || report.TotalMs != result.Total.Milliseconds() {
+				t.Errorf("timing=%+v count=%d stderr=%s", report, count, stderr.String())
+			}
+			if result.Total != clock.at.Sub(time.Unix(1000, 0)) {
+				t.Errorf("total=%s excludes finalization time %s", result.Total, clock.at.Sub(time.Unix(1000, 0)))
+			}
+			if tc.cleanupErr != nil && (!control.terminateDeadline || control.terminateContextErr != nil) {
+				t.Errorf("cleanup deadline=%t ctx=%v", control.terminateDeadline, control.terminateContextErr)
+			}
+		})
+	}
+}
+
+func TestRunTimingWriterCannotReplaceCommandFailure(t *testing.T) {
+	for _, cause := range []error{nil, context.Canceled} {
+		t.Run(fmt.Sprint(cause), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			control := &fakeControlPlane{}
+			runner := &fakeRunner{onExec: func(_ context.Context, _ string, workdir string) (int, error) {
+				if workdir == "/" {
+					return 0, nil
+				}
+				return 7, cause
+			}}
+			b := testBackend(control, runner, io.Discard)
+			writerErr := errors.New("synthetic timing writer failure")
+			b.rt.Stderr = &failingTimingWriter{err: writerErr}
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, NoSync: true, KeepOnFailure: true, TimingJSON: true, Command: []string{"fixture-user"}})
+			wantCode := 7
+			if cause != nil {
+				wantCode = 1
+			}
+			var public core.ExitError
+			if !errors.Is(err, writerErr) || !errors.As(err, &public) || public.Code != wantCode || result.ExitCode != wantCode {
+				t.Errorf("result=%+v err=%v", result, err)
+			}
+			if cause != nil && !errors.Is(err, cause) {
+				t.Errorf("lost primary cause: %v", err)
+			}
+			if cause == nil && !strings.Contains(err.Error(), "run exited 7") {
+				t.Errorf("lost primary exit: %v", err)
+			}
+			if result.Session == nil || !result.Session.Kept || slices.Contains(control.calls, "terminate:mvm-test") {
+				t.Errorf("session=%+v calls=%v", result.Session, control.calls)
+			}
+		})
+	}
+}
+
+func TestRunPreservesSuccessOnlyClaimRefresh(t *testing.T) {
+	for _, reuse := range []bool{false, true} {
+		for _, mode := range []string{"kept-success", "one-shot-success", "command-failure", "transport-failure", "sync-only"} {
+			t.Run(fmt.Sprintf("reuse=%t/%s", reuse, mode), func(t *testing.T) {
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				control := &fakeControlPlane{}
+				runner := &fakeRunner{}
+				b := testBackend(control, runner, io.Discard)
+				repo := core.Repo{Root: testRepo(t), Name: "my-app"}
+				id := ""
+				if reuse {
+					first, err := b.Run(t.Context(), core.RunRequest{Repo: repo, NoSync: true, Keep: true, Command: []string{"true"}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					id = first.LeaseID
+				}
+				// Retain an otherwise deleted one-shot so its final refresh can be inspected.
+				control.terminateErr = errors.New("synthetic termination refusal")
+				var before core.LeaseClaim
+				runner.onExec = func(_ context.Context, _ string, workdir string) (int, error) {
+					claims, err := core.ListLeaseClaims()
+					if err != nil || len(claims) != 1 {
+						t.Fatalf("claims=%v err=%v", claims, err)
+					}
+					before = claims[0]
+					if workdir == "/" {
+						return 0, nil
+					}
+					switch mode {
+					case "command-failure":
+						return 7, nil
+					case "transport-failure":
+						return 1, errors.New("synthetic transport failure")
+					}
+					return 0, nil
+				}
+				result, _ := b.Run(t.Context(), core.RunRequest{Repo: repo, ID: id, NoSync: true, Keep: mode == "kept-success", KeepOnFailure: true, SyncOnly: mode == "sync-only", Command: []string{"fixture-user"}})
+				after, ok, err := resolveLeaseClaim(result.LeaseID)
+				if err != nil || !ok {
+					t.Fatalf("claim ok=%t err=%v", ok, err)
+				}
+				wantRefresh := mode == "kept-success" || mode == "one-shot-success"
+				if (after.Revision != before.Revision) != wantRefresh {
+					t.Errorf("refresh=%t want=%t before=%s after=%s", after.Revision != before.Revision, wantRefresh, before.Revision, after.Revision)
+				}
+			})
+		}
+	}
+}
+
+type runWriteFunc func([]byte) (int, error)
+
+func (f runWriteFunc) Write(p []byte) (int, error) { return f(p) }
+
+func TestReusedRunHoldsOperationLockThroughFinalReporting(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	b := testBackend(&fakeControlPlane{}, &fakeRunner{}, io.Discard)
+	repo := core.Repo{Root: testRepo(t), Name: "my-app"}
+	first, err := b.Run(t.Context(), core.RunRequest{Repo: repo, NoSync: true, Keep: true, Command: []string{"true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := false
+	b.rt.Stderr = runWriteFunc(func(p []byte) (int, error) {
+		if bytes.HasPrefix(p, []byte("{")) {
+			observed = true
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+			defer cancel()
+			unlock, err := lockAWSLambdaMicroVMLeaseOperation(ctx, first.LeaseID)
+			if unlock != nil {
+				unlock()
+			}
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("reporting released operation lock: %v", err)
+			}
+		}
+		return len(p), nil
+	})
+	if _, err := b.Run(t.Context(), core.RunRequest{Repo: repo, ID: first.LeaseID, NoSync: true, TimingJSON: true, Command: []string{"true"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !observed {
+		t.Fatal("timing writer not invoked")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	unlock, err := lockAWSLambdaMicroVMLeaseOperation(ctx, first.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+}
+
+func TestRunSuccessRefreshPreservesPublicClaimError(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		t.Run(fmt.Sprintf("keep=%t", keep), func(t *testing.T) {
+			state := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", state)
+			control := &fakeControlPlane{}
+			runner := &fakeRunner{onExec: func(_ context.Context, _ string, workdir string) (int, error) {
+				if workdir == "/" {
+					return 0, nil
+				}
+				claims, err := core.ListLeaseClaims()
+				if err != nil || len(claims) != 1 {
+					t.Fatalf("claims=%v err=%v", claims, err)
+				}
+				// A damaged local claim must keep the public parse-error code
+				// when the successful command's final activity refresh reads it.
+				claimPath := filepath.Join(state, "crabbox", "claims", claims[0].LeaseID+".json")
+				if err := os.WriteFile(claimPath, []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return 0, nil
+			}}
+			b := testBackend(control, runner, io.Discard)
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, NoSync: true, Keep: keep, KeepOnFailure: true, Command: []string{"fixture-user"}})
+			var public core.ExitError
+			if !core.AsExitError(err, &public) || public.Code != 2 || !strings.Contains(public.Message, "parse claim") {
+				t.Errorf("public code=%d want=2 error=%v", public.Code, err)
+			}
+			if result.Session == nil || result.Session.Kept != keep {
+				t.Errorf("refresh changed retention: %+v", result.Session)
+			}
+			if slices.Contains(control.calls, "terminate:mvm-test") == keep {
+				t.Errorf("refresh changed cleanup: %v", control.calls)
+			}
+		})
+	}
 }

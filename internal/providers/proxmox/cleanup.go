@@ -9,7 +9,7 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func (b *leaseBackend) cleanupClaim(server Server, inventory []Server, claims []core.LeaseClaim) (core.LeaseClaim, shared.ClaimBinding, error) {
+func (b *leaseBackend) cleanupClaim(server core.Server, inventory []core.Server, claims []core.LeaseClaim) (core.LeaseClaim, shared.ClaimBinding, error) {
 	leaseID := proxmoxClaimLabelLeaseID(server)
 	scope := (Provider{}).ClaimScope(b.Cfg)
 	binding := shared.ClaimBinding{
@@ -48,7 +48,7 @@ func (b *leaseBackend) cleanupClaim(server Server, inventory []Server, claims []
 	return claim, binding, validateCleanupServer(server, claim, binding)
 }
 
-func validateCleanupServer(server Server, claim core.LeaseClaim, binding shared.ClaimBinding) error {
+func validateCleanupServer(server core.Server, claim core.LeaseClaim, binding shared.ClaimBinding) error {
 	vmid, err := strconv.Atoi(server.CloudID)
 	if err != nil || vmid <= 0 || strconv.Itoa(vmid) != server.CloudID || server.CloudID != binding.CloudID || server.Provider != "proxmox" || server.HostID == "" || !strings.HasPrefix(server.Name, "crabbox-") {
 		return fmt.Errorf("Proxmox VM identity or node mismatch")

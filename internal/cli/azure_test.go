@@ -103,7 +103,7 @@ func TestValidateAzureCleanupVM(t *testing.T) {
 			"lease":        "cbx_123456abcdef",
 			"slug":         "live",
 			"provider_key": providerKeyForLease("cbx_123456abcdef"),
-			"expires_at":   leaseLabelTime(now.Add(-time.Hour)),
+			"expires_at":   LeaseLabelTime(now.Add(-time.Hour)),
 		},
 	}
 	if err := validateAzureCleanupVM(expected, expected, now); err != nil {
@@ -124,7 +124,7 @@ func TestValidateAzureCleanupVM(t *testing.T) {
 
 	renewed := expected
 	renewed.Labels = maps.Clone(expected.Labels)
-	renewed.Labels["expires_at"] = leaseLabelTime(now.Add(time.Hour))
+	renewed.Labels["expires_at"] = LeaseLabelTime(now.Add(time.Hour))
 	if err := validateAzureCleanupVM(expected, renewed, now); err == nil || !strings.Contains(err.Error(), "no longer cleanup eligible") {
 		t.Fatalf("renewed VM error=%v", err)
 	}
@@ -143,18 +143,18 @@ func TestValidateAzureOwnedVMDoesNotRequireExpiry(t *testing.T) {
 			"provider_key": providerKeyForLease("cbx_123456abcdef"),
 		},
 	}
-	if err := validateAzureOwnedVM(expected, expected); err != nil {
+	if err := ValidateAzureOwnedVM(expected, expected); err != nil {
 		t.Fatalf("valid release VM rejected: %v", err)
 	}
 	replacement := expected
 	replacement.ImmutableID = "vmid-replacement"
-	if err := validateAzureOwnedVM(expected, replacement); err == nil || !strings.Contains(err.Error(), "identity") {
+	if err := ValidateAzureOwnedVM(expected, replacement); err == nil || !strings.Contains(err.Error(), "identity") {
 		t.Fatalf("replacement VM error=%v", err)
 	}
 	changedKey := expected
 	changedKey.Labels = maps.Clone(expected.Labels)
 	changedKey.Labels["provider_key"] = "replacement"
-	if err := validateAzureOwnedVM(expected, changedKey); err == nil || !strings.Contains(err.Error(), "provider key") {
+	if err := ValidateAzureOwnedVM(expected, changedKey); err == nil || !strings.Contains(err.Error(), "provider key") {
 		t.Fatalf("changed provider key error=%v", err)
 	}
 }
@@ -298,12 +298,12 @@ func TestAzureVMSizeCandidatesForConfigHonorsARM64(t *testing.T) {
 	cfg.TargetOS = targetLinux
 	cfg.Architecture = ArchitectureARM64
 	cfg.architectureExplicit = true
-	if got := azureVMSizeCandidatesForConfig(cfg)[0]; got != "Standard_D96pds_v6" {
+	if got := AzureVMSizeCandidatesForConfig(cfg)[0]; got != "Standard_D96pds_v6" {
 		t.Fatalf("first arm64 size=%q", got)
 	}
 	cfg.TargetOS = targetWindows
 	cfg.WindowsMode = windowsModeNormal
-	if got := azureVMSizeCandidatesForConfig(cfg)[0]; got != "Standard_D96pds_v6" {
+	if got := AzureVMSizeCandidatesForConfig(cfg)[0]; got != "Standard_D96pds_v6" {
 		t.Fatalf("first windows arm64 size=%q", got)
 	}
 	cfg.architectureExplicit = false
@@ -324,7 +324,7 @@ func TestAzureVMSizeCandidatesForConfigFiltersEphemeralPreview(t *testing.T) {
 	arm.architectureExplicit = true
 	arm.Class = "standard"
 	arm.AzureOSDisk = AzureOSDiskEphemeralPreview
-	if got := azureVMSizeCandidatesForConfig(arm); !reflect.DeepEqual(got, []string{"Standard_D32pds_v6", "Standard_D16pds_v6"}) {
+	if got := AzureVMSizeCandidatesForConfig(arm); !reflect.DeepEqual(got, []string{"Standard_D32pds_v6", "Standard_D16pds_v6"}) {
 		t.Fatalf("arm preview candidates=%v", got)
 	}
 	windows := baseConfig()
@@ -333,12 +333,12 @@ func TestAzureVMSizeCandidatesForConfigFiltersEphemeralPreview(t *testing.T) {
 	windows.WindowsMode = windowsModeNormal
 	windows.Class = "standard"
 	windows.AzureOSDisk = AzureOSDiskEphemeralPreview
-	if got := azureVMSizeCandidatesForConfig(windows); !reflect.DeepEqual(got, []string{"Standard_D8ads_v6", "Standard_D8ds_v6", "Standard_D8ads_v5", "Standard_D8ds_v5", "Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_D16ads_v5", "Standard_D16ds_v5"}) {
+	if got := AzureVMSizeCandidatesForConfig(windows); !reflect.DeepEqual(got, []string{"Standard_D8ads_v6", "Standard_D8ds_v6", "Standard_D8ads_v5", "Standard_D8ds_v5", "Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_D16ads_v5", "Standard_D16ds_v5"}) {
 		t.Fatalf("windows preview candidates=%v", got)
 	}
 	windows.Architecture = ArchitectureARM64
 	windows.architectureExplicit = true
-	if got := azureVMSizeCandidatesForConfig(windows); !reflect.DeepEqual(got, []string{"Standard_D32pds_v6", "Standard_D16pds_v6"}) {
+	if got := AzureVMSizeCandidatesForConfig(windows); !reflect.DeepEqual(got, []string{"Standard_D32pds_v6", "Standard_D16pds_v6"}) {
 		t.Fatalf("windows arm64 preview candidates=%v", got)
 	}
 }

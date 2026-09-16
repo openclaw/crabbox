@@ -33,7 +33,7 @@ var doctorTailscaleACLClientFactory = newDoctorTailscaleACLClient
 // intentionally bounded to a few seconds so doctor stays fast even on
 // degraded tailnets.
 func doctorPondSummary(ctx context.Context, cfg Config) (string, string, map[string]string) {
-	pond := normalizePondName(cfg.Pond)
+	pond := NormalizePondName(cfg.Pond)
 	if pond == "" {
 		return "", "", nil
 	}

@@ -17,7 +17,7 @@ func TestCheckpointUsagePreservesCurrentRecord(t *testing.T) {
 	for _, deleted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("deleted=%t", deleted), func(t *testing.T) {
 			store := checkpointStore{root: t.TempDir()}
-			stale, err := store.Create(checkpointRecord{ID: "chk_usage", Kind: checkpointKindIncus})
+			stale, _, err := store.Reserve(checkpointRecord{ID: "chk_usage", Kind: checkpointKindIncus})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -65,7 +65,7 @@ func TestCheckpointRecordOperationHelper(t *testing.T) {
 
 func TestCheckpointDeletionRejectsAnotherProcessCapture(t *testing.T) {
 	store := checkpointStore{root: t.TempDir()}
-	if _, err := store.Create(checkpointRecord{ID: "chk_locked", Kind: checkpointKindArchive}); err != nil {
+	if _, _, err := store.Reserve(checkpointRecord{ID: "chk_locked", Kind: checkpointKindArchive}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

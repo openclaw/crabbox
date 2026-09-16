@@ -3,9 +3,145 @@ package shared
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestPollTerminationErrorPreservesDiagnosticAndTerminalClassification(t *testing.T) {
+	observation := errors.New("not ready")
+	customTerminal := core.ExitError{Code: 7, Message: "private terminal detail"}
+	for _, tc := range []struct {
+		name       string
+		diagnostic error
+		deadline   bool
+		custom     bool
+		code       int
+	}{
+		{name: "stale attempt deadline", diagnostic: errors.Join(observation, context.DeadlineExceeded), code: 1},
+		{name: "public code", diagnostic: ExitErrorWithCause(23, "safe readiness", observation), code: 23},
+		{name: "nested public diagnostic", diagnostic: fmt.Errorf("readiness timed out: %w", ExitErrorWithCause(23, "safe probe detail", observation)), code: 23},
+		{name: "signed code", diagnostic: ExitErrorWithCause(-1, "safe readiness", observation), code: -1},
+		{name: "zero code", diagnostic: ExitErrorWithCause(0, "safe readiness", observation), code: 1},
+		{name: "custom cancellation ordinary diagnostic", diagnostic: fmt.Errorf("safe readiness: %w", observation), custom: true, code: 1},
+		{name: "custom cancellation typed diagnostic", diagnostic: ExitErrorWithCause(23, "safe readiness", observation), custom: true, code: 23},
+		{name: "custom deadline", diagnostic: fmt.Errorf("safe readiness: %w", observation), deadline: true, custom: true, code: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var ctx context.Context
+			var cancel context.CancelFunc
+			if tc.deadline {
+				ctx, cancel = context.WithDeadlineCause(context.Background(), time.Now().Add(-time.Second), customTerminal)
+			} else {
+				var stop context.CancelCauseFunc
+				ctx, stop = context.WithCancelCause(context.Background())
+				cancel = func() { stop(nil) }
+				if tc.custom {
+					stop(customTerminal)
+				} else {
+					stop(nil)
+				}
+			}
+			defer cancel()
+			terminal := context.Cause(ctx)
+			err := PollTerminationError(ctx, terminal, tc.diagnostic)
+			var oldPublic, public core.ExitError
+			if !core.AsExitError(tc.diagnostic, &oldPublic) {
+				oldPublic = core.ExitError{Code: 1, Message: tc.diagnostic.Error()}
+			}
+			if !core.AsExitError(err, &public) || public != oldPublic {
+				t.Fatalf("public CLI error=%#v want original=%#v", public, oldPublic)
+			}
+			if err.Error() != tc.diagnostic.Error() || !errors.Is(err, observation) || !errors.Is(err, terminal) {
+				t.Fatalf("diagnostic or ordinary causes lost: %v", err)
+			}
+			if !errors.Is(err, ctx.Err()) {
+				t.Fatalf("canonical context identity %v lost: %v", ctx.Err(), err)
+			}
+			if code := core.ExitCodeForError(err, 1); code != tc.code {
+				t.Fatalf("code=%d want=%d", code, tc.code)
+			}
+			if !errors.Is(err, tc.diagnostic) {
+				t.Fatal("original diagnostic is not discoverable")
+			}
+			want := core.FinalizeRunResult(core.RunResult{}, ctx.Err())
+			for _, wrapped := range []error{err, fmt.Errorf("resume: %w", err), ExitErrorWithCause(42, "safe outer", err), errors.Join(err, context.DeadlineExceeded)} {
+				got := core.FinalizeRunResult(core.RunResult{}, wrapped)
+				if got.Status != want.Status || got.ErrorKind != want.ErrorKind {
+					t.Fatalf("outcome=%s/%s want=%s/%s", got.Status, got.ErrorKind, want.Status, want.ErrorKind)
+				}
+			}
+			if tc.name == "stale attempt deadline" && !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatal("classification hid the observation deadline from ordinary errors.Is")
+			}
+		})
+	}
+}
+
+func TestPollReadyAcquisitionLifecycle(t *testing.T) {
+	readError := errors.New("read failed")
+	callerCause := errors.New("caller stopped acquisition")
+	timeoutError := core.Exit(5, "acquisition timed out")
+	for _, tc := range []struct {
+		name      string
+		wantError error
+		wantValue int
+		wantCalls int
+	}{
+		{name: "ready", wantValue: 7, wantCalls: 1},
+		{name: "owned timeout", wantError: timeoutError, wantCalls: 1},
+		{name: "caller cancellation", wantError: callerCause, wantCalls: 1},
+		{name: "client deadline", wantError: context.DeadlineExceeded, wantCalls: 1},
+		{name: "read error", wantError: readError, wantCalls: 1},
+		{name: "read error after deadline", wantError: readError, wantCalls: 1},
+		{name: "pending then error", wantError: readError, wantCalls: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				parent, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				var child context.Context
+				calls := 0
+				got, err := PollReady(parent, time.Minute, time.Second,
+					func(ctx context.Context) (int, error) {
+						child = ctx
+						calls++
+						switch tc.name {
+						case "owned timeout":
+							<-ctx.Done()
+							return 7, ctx.Err()
+						case "caller cancellation":
+							cancel(callerCause)
+						case "client deadline":
+							return 7, context.DeadlineExceeded
+						case "read error":
+							return 7, readError
+						case "read error after deadline":
+							<-ctx.Done()
+							return 7, readError
+						case "pending then error":
+							if calls == 2 {
+								return 8, readError
+							}
+						}
+						return 7, nil
+					}, func(value int) bool { return tc.name == "ready" && value == 7 }, timeoutError)
+				if got != tc.wantValue || err != tc.wantError || calls != tc.wantCalls {
+					t.Fatalf("value=%d err=%v calls=%d; want value=%d err=%v calls=%d", got, err, calls, tc.wantValue, tc.wantError, tc.wantCalls)
+				}
+				if _, bounded := child.Deadline(); !bounded || child.Err() == nil {
+					t.Fatalf("acquisition child was not bounded and released: %v", child.Err())
+				}
+				if tc.name != "caller cancellation" && context.Cause(parent) != nil {
+					t.Fatalf("acquisition changed parent: %v", context.Cause(parent))
+				}
+			})
+		})
+	}
+}
 
 func TestPollImmediateSuccessSkipsSleepAndProgress(t *testing.T) {
 	sleeps, progress := 0, 0

@@ -23,7 +23,7 @@ type doctorAllJSONOutput struct {
 func (a App) doctorAll(ctx context.Context, opts doctorAllOptions) error {
 	providers := normalizeDoctorAllProviders(opts.Providers)
 	if len(providers) == 0 {
-		return exit(2, "doctor --all requires at least one provider")
+		return Exit(2, "doctor --all requires at least one provider")
 	}
 	results := make([]doctorJSONOutput, 0, len(providers))
 	ok := true
@@ -76,7 +76,7 @@ func (a App) doctorAll(ctx context.Context, opts doctorAllOptions) error {
 		}
 	}
 	if !ok {
-		return exit(1, "doctor found problems")
+		return Exit(1, "doctor found problems")
 	}
 	return nil
 }
@@ -91,7 +91,7 @@ func normalizeDoctorAllProviders(values []string) []string {
 				continue
 			}
 			if provider, err := ProviderFor(name); err == nil {
-				name = provider.Name()
+				name = provider.Spec().Name
 			}
 			key := normalizeProviderName(name)
 			if _, ok := seen[key]; ok {
@@ -112,7 +112,7 @@ func doctorPrepareCheck(provider string) []doctorJSONCheck {
 	configuredProvider := cfg.Provider
 	cfg.Provider = provider
 	if resolved, err := ProviderFor(provider); err == nil {
-		cfg.Provider = resolved.Name()
+		cfg.Provider = resolved.Spec().Name
 	}
 	if !cfg.ServerTypeExplicit || normalizeProviderName(configuredProvider) != normalizeProviderName(cfg.Provider) {
 		cfg.ServerType = ""

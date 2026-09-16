@@ -20,25 +20,383 @@ import {
   awsReleaseHostsResult,
   crabboxSSHIngressRules,
   createSecurityGroupParams,
-  isAWSInstanceCleanedAfterReadinessFailure,
   isAWSInvalidHostIDError,
   isAWSInstanceNotFoundError,
   isAWSMarketFallbackError,
   isRetryableAWSProvisioningError,
   staleCrabboxSSHIngressRules,
 } from "../src/aws";
+import { createAWSProvisioningDiagnostics } from "../src/aws-provisioning-diagnostics";
 import {
   awsMacOSInstanceTypeCandidates,
   awsPromotedAMIConfigKey,
   leaseConfig,
+  type LeaseConfig,
 } from "../src/config";
 
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("aws provider", () => {
+  it("bounds repeated diagnostic buckets and records failures without error payloads", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const diagnostics = createAWSProvisioningDiagnostics("x".repeat(10_000), "r".repeat(10_000));
+    for (let index = 0; index < 10_000; index += 1) diagnostics.record("authorize_duplicate", 0);
+    const failure = new Error("private-error-canary");
+    await expect(
+      diagnostics.measure("instance_create", async () => {
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    diagnostics.finish("failure");
+    const encoded = String(log.mock.calls[0]![0]);
+    const result = JSON.parse(encoded);
+    expect(result).toMatchObject({
+      outcome: "failure",
+      leaseId: "x".repeat(64),
+      region: "r".repeat(32),
+    });
+    expect(result.steps).toHaveLength(2);
+    expect(result.steps).toEqual(
+      expect.arrayContaining([
+        { name: "authorize_duplicate", count: 10_000, totalMs: 0, errors: 0 },
+        expect.objectContaining({ name: "instance_create", count: 1, errors: 1 }),
+      ]),
+    );
+    expect(encoded).not.toContain("private-error-canary");
+    expect(encoded.length).toBeLessThan(8192);
+  });
+
+  it("keeps overlapping creates on a shared client in separate diagnostic records", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { client, config } = awsMarketFallbackHarness("");
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = client.createServerWithFallback(
+      config,
+      "cbx_000000000001",
+      "first",
+      "alice@example.com",
+      {
+        withIngress: async (apply) => {
+          entered();
+          await gate;
+          return apply(["198.51.100.1/32"]);
+        },
+      },
+    );
+    try {
+      await waiting;
+      await client.createServerWithFallback(
+        config,
+        "cbx_000000000002",
+        "second",
+        "alice@example.com",
+      );
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(log.mock.calls[0]![0])).leaseId).toBe("cbx_000000000002");
+    } finally {
+      release();
+      await first;
+    }
+    const records = log.mock.calls.map(([value]) => JSON.parse(String(value)));
+    expect(records.map((value) => value.leaseId)).toEqual(["cbx_000000000002", "cbx_000000000001"]);
+    expect(
+      records.map(
+        (value) =>
+          value.steps.find((step: { name: string }) => step.name === "authorize_ingress").count,
+      ),
+    ).toEqual([2, 4]);
+  });
+
+  it.each([
+    { cidrs: [" 203.0.113.7/32 ", "2001:db8::1/128"] },
+    { cidrs: ["203.0.113.7/32", "2001:db8::1/128", " 2001:db8::1/128 "] },
+  ])(
+    "reports request step costs and deduplicates desired ingress without logging payloads ($cidrs)",
+    async ({ cidrs }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-05-02T00:00:00Z"));
+      const log = vi.spyOn(console, "info").mockImplementation(() => {});
+      const { client, config } = awsMarketFallbackHarness("");
+      const baseFetch = globalThis.fetch;
+      const actions: string[] = [];
+      const authorized: Array<[string | null, string | null]> = [];
+      const authorizationGates = new Map<
+        string,
+        { arrived: number; gate: ReturnType<typeof Promise.withResolvers<void>> }
+      >();
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const params = new URLSearchParams(await request.clone().text());
+        const action = params.get("Action") ?? "";
+        if (action === "AuthorizeSecurityGroupIngress") {
+          authorized.push([
+            params.get("IpPermissions.1.FromPort"),
+            params.get("IpPermissions.1.IpRanges.1.CidrIp") ??
+              params.get("IpPermissions.1.Ipv6Ranges.1.CidrIpv6"),
+          ]);
+        }
+        if (action) actions.push(action);
+        if (action === "AuthorizeSecurityGroupIngress" || action === "RevokeSecurityGroupIngress") {
+          const authorize = action === "AuthorizeSecurityGroupIngress";
+          if (authorize) {
+            const port = params.get("IpPermissions.1.FromPort")!;
+            const batch = authorizationGates.get(port) ?? {
+              arrived: 0,
+              gate: Promise.withResolvers<void>(),
+            };
+            authorizationGates.set(port, batch);
+            if (++batch.arrived === 2) {
+              vi.setSystemTime(Date.now() + 7);
+              batch.gate.resolve();
+            }
+            await batch.gate.promise;
+          } else {
+            vi.setSystemTime(Date.now() + 3);
+          }
+          return ec2XMLResponse(
+            `<Response><Errors><Error><Code>${authorize ? "InvalidPermission.Duplicate" : "InvalidPermission.NotFound"}</Code><Message>private-rule-canary</Message></Error></Errors></Response>`,
+            400,
+          );
+        }
+        return baseFetch(request);
+      });
+      const result = await client.createServerWithFallback(
+        { ...config, sshPort: "22", sshFallbackPorts: ["443"] },
+        "cbx_abcdef123456",
+        "violet-prawn",
+        "alice@example.com",
+        { withIngress: (apply) => apply(cidrs) },
+      );
+      expect(result.server.id).toBeDefined();
+      expect(actions.filter((action) => action === "AuthorizeSecurityGroupIngress")).toHaveLength(
+        4,
+      );
+      expect(authorized.toSorted()).toEqual(
+        [
+          ["22", "203.0.113.7/32"],
+          ["22", "2001:db8::1/128"],
+          ["443", "203.0.113.7/32"],
+          ["443", "2001:db8::1/128"],
+        ].toSorted(),
+      );
+      expect(actions.filter((action) => action === "RevokeSecurityGroupIngress")).toHaveLength(2);
+      expect(log).toHaveBeenCalledTimes(1);
+      const encoded = String(log.mock.calls[0]![0]);
+      const diagnostic = JSON.parse(encoded);
+      expect(diagnostic).toMatchObject({
+        component: "crabbox_aws_provisioning",
+        leaseId: "cbx_abcdef123456",
+        region: "eu-west-1",
+        outcome: "success",
+      });
+      expect(diagnostic.steps).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: "authorize_ingress",
+            count: 4,
+            totalMs: 28,
+            errors: 4,
+            transport: expect.objectContaining({
+              requests: 4,
+              requestMs: 28,
+              signInvocations: 4,
+              signCompletions: 4,
+              signFailures: 0,
+              requestFailures: 0,
+            }),
+          }),
+          { name: "authorize_duplicate", count: 4, totalMs: 0, errors: 0 },
+          expect.objectContaining({
+            name: "revoke_world",
+            count: 2,
+            totalMs: 6,
+            errors: 2,
+            transport: expect.objectContaining({
+              requests: 2,
+              requestMs: 6,
+              signInvocations: 2,
+              signCompletions: 2,
+              signFailures: 0,
+              requestFailures: 0,
+            }),
+          }),
+          { name: "revoke_world_absent", count: 2, totalMs: 0, errors: 0 },
+        ]),
+      );
+      for (const privateValue of [
+        "private-rule-canary",
+        "alice@example.com",
+        "203.0.113.7",
+        "2001:db8",
+        "ssh-ed25519",
+      ])
+        expect(encoded).not.toContain(privateValue);
+      expect(encoded.length).toBeLessThan(8192);
+      log.mockRestore();
+    },
+  );
+
+  it.each([
+    { first: "quota", ingressFails: false },
+    { first: "ingress", ingressFails: false },
+    { first: "quota", ingressFails: true },
+    { first: "ingress", ingressFails: true },
+  ])(
+    "overlaps quota and ingress, joining both before launch or failure ($first first, failure=$ingressFails)",
+    async ({ first, ingressFails }) => {
+      const log = vi.spyOn(console, "info").mockImplementation(() => {});
+      const { client, config, markets } = awsMarketFallbackHarness("");
+      const baseFetch = globalThis.fetch;
+      const quotaGate = Promise.withResolvers<void>();
+      const ingressGate = Promise.withResolvers<void>();
+      const entered = new Set<string>();
+      const completed = new Set<string>();
+      let quotaReads = 0;
+      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = input instanceof Request ? input : new Request(input, init);
+        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+          quotaReads += 1;
+          entered.add("quota");
+          await quotaGate.promise;
+          const response = await baseFetch(request);
+          completed.add("quota");
+          return response;
+        }
+        return baseFetch(request);
+      });
+      const failure = new Error("ingress preparation failed");
+      let settled = false;
+      const creating = client
+        .createServerWithFallback(config, "cbx_abcdef123456", "violet-prawn", "alice@example.com", {
+          withIngress: async (apply) => {
+            entered.add("ingress");
+            await ingressGate.promise;
+            try {
+              if (ingressFails) throw failure;
+              return await apply(["198.51.100.1/32"]);
+            } finally {
+              completed.add("ingress");
+            }
+          },
+        })
+        .then(
+          (value) => {
+            settled = true;
+            return { value };
+          },
+          (error: unknown) => {
+            settled = true;
+            return { error };
+          },
+        );
+      try {
+        await vi.waitFor(() => expect(entered).toEqual(new Set(["quota", "ingress"])));
+        expect(markets).toEqual([]);
+        (first === "quota" ? quotaGate : ingressGate).resolve();
+        await vi.waitFor(() => expect(completed.has(first)).toBe(true));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+        expect(markets).toEqual([]);
+        expect(log).not.toHaveBeenCalled();
+        (first === "quota" ? ingressGate : quotaGate).resolve();
+        const result = await creating;
+        expect(result.error ?? result.value?.server.cloudID).toBe(
+          ingressFails ? failure : "i-fallback",
+        );
+        expect(markets).toEqual(ingressFails ? [] : ["spot"]);
+        expect(quotaReads).toBe(1);
+        expect(log).toHaveBeenCalledTimes(1);
+        const diagnostic = JSON.parse(String(log.mock.calls[0]![0]));
+        expect(diagnostic.outcome).toBe(ingressFails ? "failure" : "success");
+        expect(diagnostic.steps).toContainEqual(
+          expect.objectContaining({ name: "quota", count: 1, errors: 0 }),
+        );
+      } finally {
+        quotaGate.resolve();
+        ingressGate.resolve();
+        await creating;
+      }
+    },
+  );
+
+  it.each([
+    {
+      market: "spot" as const,
+      quota: 32,
+      types: ["c7a.48xlarge", "t3.small"],
+      attempted: ["spot:t3.small"],
+      reads: ["spot"],
+    },
+    {
+      market: "spot" as const,
+      quota: 1,
+      types: ["t3.small"],
+      attempted: ["on-demand:t3.small"],
+      reads: ["spot", "on-demand"],
+    },
+    {
+      market: "on-demand" as const,
+      quota: 1,
+      types: ["t3.small"],
+      attempted: [],
+      reads: ["on-demand"],
+    },
+    {
+      market: "spot" as const,
+      quota: undefined,
+      types: ["t3.small"],
+      attempted: ["spot:t3.small"],
+      reads: ["spot"],
+    },
+  ])("keeps quota admission and market-scoped reuse ($market, quota=$quota)", async (scenario) => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { client, config, attempted } = awsMarketFallbackHarness(
+      "",
+      scenario.market,
+      scenario.types,
+    );
+    const baseFetch = globalThis.fetch;
+    const reads: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (!new URL(request.url).hostname.startsWith("servicequotas.")) return baseFetch(request);
+      const body = (await request.json()) as { QuotaCode: string };
+      const market = body.QuotaCode === awsQuotaCodeForMarket("spot") ? "spot" : "on-demand";
+      reads.push(market);
+      return scenario.quota === undefined
+        ? new Response("quota unavailable", { status: 403 })
+        : Response.json({ Quota: { Value: market === scenario.market ? scenario.quota : 999 } });
+    });
+    const creating = client.createServerWithFallback(
+      config,
+      "cbx_abcdef123456",
+      "violet-prawn",
+      "alice@example.com",
+    );
+    const outcome = await creating.then(
+      () => "created",
+      (error: unknown) => String(error),
+    );
+    expect(outcome).toMatch(scenario.attempted.length ? /^created$/ : /quota/);
+    expect(attempted).toEqual(scenario.attempted);
+    expect(reads).toEqual(scenario.reads);
+    const diagnostic = JSON.parse(String(log.mock.calls[0]![0]));
+    expect(diagnostic.steps).toContainEqual(
+      expect.objectContaining({ name: "quota", count: reads.length }),
+    );
+  });
+
   it("tags every checkpoint AMI backing snapshot with its exact ownership claim", async () => {
     let submitted: URLSearchParams | undefined;
     vi.stubGlobal(
@@ -77,6 +435,7 @@ describe("aws provider", () => {
       provider: "aws",
       kind: "aws-ami",
       region: "eu-west-1",
+      revision: "selected-revision",
     };
     config.awsPromotedAMIs[awsPromotedAMIConfigKey("us-east-1", config.serverType)] =
       "ami-fallback";
@@ -86,6 +445,15 @@ describe("aws provider", () => {
       source: "promoted",
       region: "us-east-1",
     });
+    expect(awsLeaseImageIdentity(config, "ami-fallback", "us-east-1")).not.toHaveProperty(
+      "revision",
+    );
+    expect(awsLeaseImageIdentity(config, "ami-primary", "eu-west-1").revision).toBe(
+      "selected-revision",
+    );
+    expect(awsLeaseImageIdentity(config, "ami-primary", "us-east-1")).not.toHaveProperty(
+      "revision",
+    );
   });
 
   it("rejects a canonical SSH key name reserved for another lease", async () => {
@@ -156,7 +524,9 @@ describe("aws provider", () => {
     ).resolves.toBeUndefined();
 
     owned = false;
-    await client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456");
+    await expect(
+      client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456"),
+    ).rejects.toThrow("ownership does not match lease cbx_abcdef123456");
     owned = true;
     await client.deleteSSHKey("crabbox-cbx-abcdef123456", "cbx_abcdef123456");
     expect(actions).toEqual([
@@ -316,9 +686,9 @@ describe("aws provider", () => {
         }
         if (action === "DescribeSecurityGroups") {
           describedGroupID = params.get("GroupId.1") ?? "";
-          describedGroupName = params.get("Filter.1.Value.1") ?? "";
+          describedGroupName = params.get("GroupName.1") ?? "";
           return ec2XMLResponse(
-            "<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-workspaces</groupId><groupName>crabbox-workspaces</groupName><ipPermissions /></item></securityGroupInfo></DescribeSecurityGroupsResponse>",
+            "<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-workspaces</groupId><groupName>crabbox-workspaces</groupName><vpcId>vpc-default</vpcId><ipPermissions /></item></securityGroupInfo></DescribeSecurityGroupsResponse>",
           );
         }
         if (action === "RevokeSecurityGroupIngress") {
@@ -377,8 +747,9 @@ describe("aws provider", () => {
           describeSecurityGroups += 1;
           return ec2XMLResponse(
             describeSecurityGroups === 1
-              ? "<DescribeSecurityGroupsResponse><securityGroupInfo /></DescribeSecurityGroupsResponse>"
+              ? "<Response><Errors><Error><Code>InvalidGroup.NotFound</Code><Message>not yet visible</Message></Error></Errors></Response>"
               : "<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-raced</groupId><ipPermissions /></item></securityGroupInfo></DescribeSecurityGroupsResponse>",
+            describeSecurityGroups === 1 ? 400 : 200,
           );
         }
         if (action === "CreateSecurityGroup") {
@@ -568,6 +939,183 @@ describe("aws provider", () => {
     await expect(client.findServer("i-abcdef123456")).rejects.toThrow("AuthFailure");
   });
 
+  it("treats an empty successful DescribeInstances response as an absent optional lookup", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        ec2XMLResponse(
+          "<DescribeInstancesResponse><requestId>req-empty</requestId><reservationSet /></DescribeInstancesResponse>",
+        ),
+      ),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.findServer("i-abcdef123456")).resolves.toBeUndefined();
+    await expect(client.getServer("i-abcdef123456")).rejects.toThrow(
+      "aws instance not found: i-abcdef123456",
+    );
+  });
+
+  it("preserves a leading-zero AWS account ID", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        ec2XMLResponse(`<GetCallerIdentityResponse><GetCallerIdentityResult>
+          <Account>001234567890</Account>
+          <Arn>arn:aws:iam::001234567890:user/crabbox</Arn>
+          <UserId>AIDAEXAMPLE</UserId>
+        </GetCallerIdentityResult></GetCallerIdentityResponse>`),
+      ),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.identity()).resolves.toMatchObject({ account: "001234567890" });
+  });
+
+  it.each([
+    {
+      name: "generic Response envelope",
+      response: "<Response><requestId>req-generic</requestId><reservationSet /></Response>",
+    },
+    {
+      name: "missing requestId",
+      response: "<DescribeInstancesResponse><reservationSet /></DescribeInstancesResponse>",
+    },
+    {
+      name: "empty requestId",
+      response:
+        "<DescribeInstancesResponse><requestId> </requestId><reservationSet /></DescribeInstancesResponse>",
+    },
+    {
+      name: "sibling fallback root",
+      response:
+        "<DescribeInstancesResponse><requestId>req-extra</requestId><reservationSet /></DescribeInstancesResponse><Response />",
+    },
+    { name: "HTML", response: "<html><body>ok</body></html>" },
+    { name: "empty body", response: "" },
+    { name: "malformed XML", response: "<DescribeInstancesResponse>" },
+    {
+      name: "mismatched closing tag",
+      response:
+        "<DescribeInstancesResponse><requestId>req-mismatch</requestId><reservationSet /></Response>",
+    },
+  ])(
+    "rejects a noncanonical successful DescribeInstances response: $name",
+    async ({ response }) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () => ec2XMLResponse(response)),
+      );
+      const client = new EC2SpotClient(
+        { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+        "us-east-1",
+      );
+
+      await expect(client.findServer("i-abcdef123456")).rejects.toThrow(
+        "malformed AWS DescribeInstances response",
+      );
+    },
+  );
+
+  it("rejects a malformed optional DescribeInstances ownerId", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        ec2XMLResponse(`<DescribeInstancesResponse><requestId>req-owner</requestId>
+          <reservationSet><item><ownerId>not-an-account</ownerId><instancesSet><item>
+            <instanceId>i-abcdef123456</instanceId>
+            <instanceState><name>running</name></instanceState>
+          </item></instancesSet></item></reservationSet>
+        </DescribeInstancesResponse>`),
+      ),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.findServer("i-abcdef123456")).rejects.toThrow(
+      "malformed AWS DescribeInstances response: ownerId is invalid",
+    );
+  });
+
+  it.each([
+    {
+      name: "missing reservationSet",
+      response:
+        "<DescribeInstancesResponse><requestId>req-missing</requestId></DescribeInstancesResponse>",
+    },
+    {
+      name: "reservationSet without items",
+      response:
+        "<DescribeInstancesResponse><requestId>req-items</requestId><reservationSet><nextToken>next</nextToken></reservationSet></DescribeInstancesResponse>",
+    },
+    {
+      name: "empty reservation item",
+      response:
+        "<DescribeInstancesResponse><requestId>req-reservation</requestId><reservationSet><item /></reservationSet></DescribeInstancesResponse>",
+    },
+    {
+      name: "reservation without instancesSet",
+      response:
+        "<DescribeInstancesResponse><requestId>req-instances</requestId><reservationSet><item><ownerId>123456789012</ownerId></item></reservationSet></DescribeInstancesResponse>",
+    },
+    {
+      name: "empty instancesSet",
+      response:
+        "<DescribeInstancesResponse><requestId>req-empty-instances</requestId><reservationSet><item><instancesSet /></item></reservationSet></DescribeInstancesResponse>",
+    },
+    {
+      name: "instancesSet without items",
+      response:
+        "<DescribeInstancesResponse><requestId>req-instance-items</requestId><reservationSet><item><instancesSet><nextToken>next</nextToken></instancesSet></item></reservationSet></DescribeInstancesResponse>",
+    },
+    {
+      name: "empty instance item",
+      response:
+        "<DescribeInstancesResponse><requestId>req-instance</requestId><reservationSet><item><instancesSet><item /></instancesSet></item></reservationSet></DescribeInstancesResponse>",
+    },
+  ])("rejects malformed successful DescribeInstances XML: $name", async ({ response }) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ec2XMLResponse(response)),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.findServer("i-abcdef123456")).rejects.toThrow(
+      "malformed AWS DescribeInstances response",
+    );
+  });
+
+  it("rejects a successful DescribeInstances response for a different instance", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        ec2XMLResponse(`<DescribeInstancesResponse><requestId>req-wrong</requestId>
+          <reservationSet><item><instancesSet><item>
+          <instanceId>i-different123456</instanceId><instanceState><name>running</name></instanceState>
+        </item></instancesSet></item></reservationSet></DescribeInstancesResponse>`),
+      ),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.findServer("i-abcdef123456")).rejects.toThrow(
+      "returned instance i-different123456 for i-abcdef123456",
+    );
+  });
+
   it.each([
     { attached: false, profileXML: "" },
     {
@@ -581,7 +1129,8 @@ describe("aws provider", () => {
       vi.stubGlobal(
         "fetch",
         vi.fn(async () =>
-          ec2XMLResponse(`<DescribeInstancesResponse><reservationSet><item><instancesSet><item>
+          ec2XMLResponse(`<DescribeInstancesResponse><requestId>req-profile</requestId>
+          <reservationSet><item><instancesSet><item>
           <instanceId>i-abcdef123456</instanceId>
           <instanceState><name>running</name></instanceState>
           <instanceType>c7a.8xlarge</instanceType>
@@ -600,14 +1149,16 @@ describe("aws provider", () => {
     },
   );
 
-  it("rejects invalid configured AWS SSH CIDRs before changing ingress", async () => {
-    const calls: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        calls.push(typeof init?.body === "string" ? init.body : String(input));
-        return new Response(
-          `<DescribeSecurityGroupsResponse>
+  it.each(["999.999.999.999/32", "2001:db8::1/129", " 203.0.113.7/32 ,203.0.113.7/32,invalid"])(
+    "rejects invalid configured AWS SSH CIDRs before changing ingress: %s",
+    async (cidrs) => {
+      const calls: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          calls.push(typeof init?.body === "string" ? init.body : String(input));
+          return new Response(
+            `<DescribeSecurityGroupsResponse>
   <securityGroupInfo>
     <item>
       <groupId>sg-123</groupId>
@@ -615,55 +1166,41 @@ describe("aws provider", () => {
     </item>
   </securityGroupInfo>
 </DescribeSecurityGroupsResponse>`,
-        );
-      }),
-    );
-    const client = new EC2SpotClient(
-      {
-        AWS_ACCESS_KEY_ID: "test",
-        AWS_SECRET_ACCESS_KEY: "secret",
-        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
-        CRABBOX_AWS_SSH_CIDRS: "999.999.999.999/32",
-      } as never,
-      "us-east-1",
-    );
-
-    await expect(
-      client.refreshSSHIngress(
-        leaseConfig({
-          provider: "aws",
-          sshPublicKey: "ssh-ed25519 test",
+          );
         }),
-      ),
-    ).rejects.toThrow("CRABBOX_AWS_SSH_CIDRS entries must be valid");
-    expect(calls).toHaveLength(1);
-  });
+      );
+      const client = new EC2SpotClient(
+        {
+          AWS_ACCESS_KEY_ID: "test",
+          AWS_SECRET_ACCESS_KEY: "secret",
+          CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+          CRABBOX_AWS_SSH_CIDRS: cidrs,
+        } as never,
+        "us-east-1",
+      );
+
+      await expect(
+        client.refreshSSHIngress(
+          leaseConfig({
+            provider: "aws",
+            sshPublicKey: "ssh-ed25519 test",
+          }),
+        ),
+      ).rejects.toThrow("CRABBOX_AWS_SSH_CIDRS entries must be valid");
+      expect(calls).toHaveLength(1);
+    },
+  );
 
   it("waits through transient EC2 instance visibility after RunInstances", async () => {
     vi.useFakeTimers();
     const client = new EC2SpotClient(
       { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
       "us-east-1",
-    ) as EC2SpotClient & {
-      getServer: (instanceID: string) => Promise<{
-        id: string;
-        name: string;
-        provider: "aws";
-        cloudID: string;
-        host: string;
-        status: string;
-        serverType: string;
-      }>;
-    };
-    let calls = 0;
-    client.getServer = async () => {
-      calls += 1;
-      if (calls === 1) {
-        throw new Error(
-          "aws DescribeInstances: http 400: InvalidInstanceID.NotFound: The instance ID 'i-1' does not exist",
-        );
-      }
-      return {
+    );
+    const findServer = vi
+      .spyOn(client, "findServer")
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
         id: "i-1",
         name: "blue-lobster",
         provider: "aws",
@@ -671,13 +1208,38 @@ describe("aws provider", () => {
         host: "203.0.113.10",
         status: "running",
         serverType: "m7i.large",
-      };
-    };
+        labels: {},
+      });
 
     const resultPromise = client.waitForServerIP("i-1");
     await vi.advanceTimersByTimeAsync(5_000);
     await expect(resultPromise).resolves.toMatchObject({ host: "203.0.113.10" });
-    expect(calls).toBe(2);
+    expect(findServer).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps empty visibility reads bounded and fails closed", async () => {
+    const delays: number[] = [];
+    const fetchMock = vi.fn<() => Promise<Response>>(async () =>
+      ec2XMLResponse(
+        "<DescribeInstancesResponse><requestId>req-visibility</requestId><reservationSet /></DescribeInstancesResponse>",
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("setTimeout", ((callback: () => void, delay?: number) => {
+      delays.push(delay ?? 0);
+      queueMicrotask(callback);
+      return 0;
+    }) as typeof setTimeout);
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
+      "us-east-1",
+    );
+
+    await expect(client.waitForServerVisibility("i-abcdef123456")).rejects.toThrow(
+      "aws instance not found: i-abcdef123456",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+    expect(delays).toEqual([1_000, 2_000, 4_000, 8_000, 15_000, 30_000]);
   });
 
   it("turns low AWS vCPU quota into a doctor readiness warning", () => {
@@ -1332,6 +1894,7 @@ describe("aws provider", () => {
   });
 
   it("falls back from unfulfillable spot capacity to on-demand", async () => {
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
     const { client, config, markets } = awsMarketFallbackHarness("UnfulfillableCapacity");
 
     const result = await client.createServerWithFallback(
@@ -1341,6 +1904,9 @@ describe("aws provider", () => {
       "alice@example.com",
     );
 
+    expect(JSON.parse(String(log.mock.calls[0]![0])).steps).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "image", count: 3, errors: 0 })]),
+    );
     expect(markets).toEqual(["spot", "on-demand"]);
     expect(result.market).toBe("on-demand");
     expect(result.attempts?.[0]).toMatchObject({ market: "spot", category: "capacity" });
@@ -1548,27 +2114,6 @@ describe("aws provider", () => {
     ]);
   });
 
-  it("treats missing stale AWS instance cleanup as cleaned", () => {
-    expect(
-      isAWSInstanceCleanedAfterReadinessFailure(
-        "InvalidInstanceID.NotFound: instance disappeared",
-        "InvalidInstanceID.NotFound: instance disappeared",
-      ),
-    ).toBe(true);
-    expect(
-      isAWSInstanceCleanedAfterReadinessFailure(
-        "InvalidInstanceID.NotFound: instance disappeared",
-        "",
-      ),
-    ).toBe(true);
-    expect(
-      isAWSInstanceCleanedAfterReadinessFailure(
-        "timed out waiting for AWS instance public IP",
-        "UnauthorizedOperation: denied",
-      ),
-    ).toBe(false);
-  });
-
   it("adds a small policy fallback for class requests but not exact types", () => {
     expect(
       awsLaunchCandidates({
@@ -1683,31 +2228,74 @@ describe("aws provider", () => {
     expect(isRetryableAWSProvisioningError(imageMiss)).toBe(true);
   });
 
-  it("sends compressed Linux cloud-init user data to RunInstances", async () => {
-    let userData = "";
-    let runImage = "";
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const request = input instanceof Request ? input : new Request(input, init);
-        if (new URL(request.url).hostname.startsWith("servicequotas.")) {
-          return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
-            headers: { "content-type": "application/json" },
-          });
-        }
-        const params = new URLSearchParams(await request.clone().text());
-        const action = params.get("Action") ?? "";
-        const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
-        if (securityGroupResponse) {
-          return securityGroupResponse;
-        }
-        if (action === "DescribeKeyPairs") {
-          return ec2XMLResponse(
-            `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-rsa ${"a".repeat(724)}</publicKey></item></keySet></DescribeKeyPairsResponse>`,
-          );
-        }
-        if (action === "DescribeImages") {
-          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+  it.each<[string, Partial<LeaseConfig>, string, string, string, boolean]>([
+    ["stock", {}, "", "ami-linux", "stock", true],
+    ["forced stock", { awsUseStockImage: true }, "ami-env", "ami-linux", "stock", true],
+    ["environment AMI", {}, "ami-env", "ami-env", "explicit", false],
+    ["request AMI", { awsAMI: "ami-request" }, "", "ami-request", "explicit", false],
+    [
+      "request before environment AMI",
+      { awsAMI: "ami-request" },
+      "ami-env",
+      "ami-request",
+      "explicit",
+      false,
+    ],
+    ["explicit stock AMI", { awsAMI: "ami-linux" }, "", "ami-linux", "explicit", false],
+    [
+      "promoted AMI",
+      {
+        awsAMI: "ami-promoted",
+        selectedImage: {
+          id: "ami-promoted",
+          source: "promoted",
+          provider: "aws",
+          kind: "aws-ami",
+          region: "us-east-1",
+        },
+      },
+      "",
+      "ami-promoted",
+      "promoted",
+      false,
+    ],
+    [
+      "ARM stock",
+      { architecture: "arm64", serverType: "c7g.8xlarge" },
+      "",
+      "ami-linux",
+      "stock",
+      false,
+    ],
+    ["Ubuntu 24.04 stock", { os: "ubuntu:24.04" }, "", "ami-linux", "stock", false],
+  ])(
+    "sends image-owned Linux cloud-init for %s",
+    async (_name, overrides, envAMI, imageID, source, aptOverride) => {
+      let userData = "";
+      let runImage = "";
+      let runLabels: Record<string, string> = {};
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = input instanceof Request ? input : new Request(input, init);
+          if (new URL(request.url).hostname.startsWith("servicequotas.")) {
+            return new Response(JSON.stringify({ Quota: { Value: 999 } }), {
+              headers: { "content-type": "application/json" },
+            });
+          }
+          const params = new URLSearchParams(await request.clone().text());
+          const action = params.get("Action") ?? "";
+          const securityGroupResponse = ec2ConfiguredSecurityGroupResponse(action, params);
+          if (securityGroupResponse) {
+            return securityGroupResponse;
+          }
+          if (action === "DescribeKeyPairs") {
+            return ec2XMLResponse(
+              `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-rsa ${"a".repeat(724)}</publicKey></item></keySet></DescribeKeyPairsResponse>`,
+            );
+          }
+          if (action === "DescribeImages") {
+            return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
 <DescribeImagesResponse>
   <imagesSet>
     <item>
@@ -1718,11 +2306,16 @@ describe("aws provider", () => {
     </item>
   </imagesSet>
 </DescribeImagesResponse>`);
-        }
-        if (action === "RunInstances") {
-          userData = params.get("UserData") ?? "";
-          runImage = params.get("ImageId") ?? "";
-          return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
+          }
+          if (action === "RunInstances") {
+            userData = params.get("UserData") ?? "";
+            runImage = params.get("ImageId") ?? "";
+            runLabels = Object.fromEntries(
+              [...params.entries()]
+                .filter(([key]) => /^TagSpecification\.1\.Tag\.\d+\.Key$/.test(key))
+                .map(([key, value]) => [value, params.get(key.replace(/\.Key$/, ".Value")) ?? ""]),
+            );
+            return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
 <RunInstancesResponse>
   <instancesSet>
     <item>
@@ -1733,49 +2326,66 @@ describe("aws provider", () => {
     </item>
   </instancesSet>
 </RunInstancesResponse>`);
-        }
-        return ec2XMLResponse(
-          `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
-          500,
-        );
-      }),
-    );
-
-    const client = new EC2SpotClient(
-      {
-        AWS_ACCESS_KEY_ID: "test",
-        AWS_SECRET_ACCESS_KEY: "secret",
-        CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
-        CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
-        CRABBOX_AWS_AMI: "ami-custom",
-      } as never,
-      "us-east-1",
-    );
-    await client.createServerWithFallback(
-      {
-        ...leaseConfig({
-          provider: "aws",
-          target: "linux",
-          class: "standard",
-          desktop: true,
-          browser: true,
-          sshPublicKey: `ssh-rsa ${"a".repeat(724)}`,
+          }
+          return ec2XMLResponse(
+            `<Response><Errors><Error><Code>Unexpected</Code><Message>${action}</Message></Error></Errors></Response>`,
+            500,
+          );
         }),
-        awsUseStockImage: true,
-      },
-      "cbx_abcdef123456",
-      "violet-prawn",
-      "alice@example.com",
-    );
+      );
 
-    expect(runImage).toBe("ami-linux");
-    expect(atob(userData).length).toBeLessThan(16 * 1024);
-    expect(await gunzipBase64(userData)).toContain("crabbox-configure-desktop-theme");
-  });
+      const client = new EC2SpotClient(
+        {
+          AWS_ACCESS_KEY_ID: "test",
+          AWS_SECRET_ACCESS_KEY: "secret",
+          CRABBOX_AWS_SECURITY_GROUP_ID: "sg-123",
+          CRABBOX_AWS_SSH_CIDRS: "203.0.113.7/32",
+          CRABBOX_AWS_AMI: envAMI,
+        } as never,
+        "us-east-1",
+      );
+      await client.createServerWithFallback(
+        {
+          ...leaseConfig({
+            provider: "aws",
+            target: "linux",
+            class: "standard",
+            desktop: true,
+            browser: true,
+            sshPublicKey: `ssh-rsa ${"a".repeat(724)}`,
+          }),
+          ...overrides,
+        },
+        "cbx_abcdef123456",
+        "violet-prawn",
+        "alice@example.com",
+      );
+
+      expect(runImage).toBe(imageID);
+      expect(runLabels["image_id"]).toBe(imageID);
+      expect(runLabels["image_source"]).toBe(source);
+      expect(atob(userData).length).toBeLessThan(16 * 1024);
+      const decoded = await gunzipBase64(userData);
+      expect(decoded).toContain("crabbox-configure-desktop-theme");
+      expect(decoded.includes("\napt:\n")).toBe(aptOverride);
+      expect(
+        decoded.includes(
+          "primary:\n    - arches: [amd64]\n      uri: https://archive.ubuntu.com/ubuntu/",
+        ),
+      ).toBe(aptOverride);
+      expect(
+        decoded.includes(
+          "security:\n    - arches: [amd64]\n      uri: http://security.ubuntu.com/ubuntu/",
+        ),
+      ).toBe(aptOverride);
+      expect(decoded).not.toContain("preserve_sources_list:");
+    },
+  );
 
   it("uses the capability-selected AMI for a Linux region", async () => {
     let imageQueries = 0;
     let runImage = "";
+    let userData = "";
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1800,6 +2410,7 @@ describe("aws provider", () => {
         }
         if (action === "RunInstances") {
           runImage = params.get("ImageId") ?? "";
+          userData = params.get("UserData") ?? "";
           return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
 <RunInstancesResponse><instancesSet><item>
   <instanceId>i-linux</instanceId><instanceType>t3.small</instanceType>
@@ -1840,9 +2451,13 @@ describe("aws provider", () => {
 
     expect(runImage).toBe("ami-capable");
     expect(imageQueries).toBe(0);
+    expect(await gunzipBase64(userData)).not.toContain("\napt:\n");
   });
 
-  it("resolves macOS AMIs per fallback instance type", async () => {
+  it.each([false, true])("times macOS fallback AMI discovery (failure: %s)", async (failImage) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-05-02T00:00:00Z"));
+    const log = vi.spyOn(console, "info").mockImplementation(() => {});
     const imageQueries: string[] = [];
     const hostTypes: string[] = [];
     const runImages: string[] = [];
@@ -1869,6 +2484,13 @@ describe("aws provider", () => {
           );
         }
         if (action === "DescribeImages") {
+          vi.setSystemTime(Date.now() + 37);
+          if (failImage) {
+            return ec2XMLResponse(
+              "<Response><Errors><Error><Code>UnauthorizedOperation</Code><Message>private-image-canary</Message></Error></Errors></Response>",
+              403,
+            );
+          }
           const architecture = params.get("Filter.1.Value.1") ?? "";
           const name = params.get("Filter.2.Value.1") ?? "";
           imageQueries.push(`${name}:${architecture}`);
@@ -1939,7 +2561,7 @@ describe("aws provider", () => {
       } as never,
       "eu-west-1",
     );
-    const result = await client.createServerWithFallback(
+    const creating = client.createServerWithFallback(
       leaseConfig({
         provider: "aws",
         target: "macos",
@@ -1951,16 +2573,46 @@ describe("aws provider", () => {
       "alice@example.com",
     );
 
-    expect(imageQueries).toEqual([
-      "amzn-ec2-macos-14.*-arm64:arm64_mac",
-      "amzn-ec2-macos-15.*-arm64:arm64_mac",
-      "amzn-ec2-macos-14.*:x86_64_mac",
-    ]);
-    expect(hostTypes).toEqual(awsMacOSInstanceTypeCandidates);
-    expect(runTypes).toEqual(["mac1.metal"]);
-    expect(runImages).toEqual(["ami-x86-mac"]);
-    expect(result.serverType).toBe("mac1.metal");
-    expect(result.server.hostID).toBe("h-mac1");
+    const outcome = await creating.then(
+      (result) => ({ result, error: "" }),
+      (error: unknown) => ({ result: undefined, error: String(error) }),
+    );
+    expect(outcome.error).toMatch(failImage ? /UnauthorizedOperation/ : /^$/);
+    const encoded = String(log.mock.calls[0]![0]);
+    expect(JSON.parse(encoded)).toMatchObject({
+      outcome: failImage ? "failure" : "success",
+      steps: expect.arrayContaining([
+        expect.objectContaining({
+          name: "image",
+          count: failImage ? 2 : 1 + awsMacOSInstanceTypeCandidates.length,
+          totalMs: failImage ? 37 : 111,
+          errors: failImage ? 1 : 0,
+          transport: expect.objectContaining({
+            requests: failImage ? 1 : 3,
+            requestMs: failImage ? 37 : 111,
+            signInvocations: failImage ? 1 : 3,
+            signCompletions: failImage ? 1 : 3,
+            signFailures: 0,
+            requestFailures: 0,
+          }),
+        }),
+      ]),
+    });
+    expect(encoded).not.toContain("private-image-canary");
+    expect(imageQueries).toEqual(
+      failImage
+        ? []
+        : [
+            "amzn-ec2-macos-14.*-arm64:arm64_mac",
+            "amzn-ec2-macos-15.*-arm64:arm64_mac",
+            "amzn-ec2-macos-14.*:x86_64_mac",
+          ],
+    );
+    expect(hostTypes).toEqual(failImage ? [] : awsMacOSInstanceTypeCandidates);
+    expect(runTypes).toEqual(failImage ? [] : ["mac1.metal"]);
+    expect(runImages).toEqual(failImage ? [] : ["ami-x86-mac"]);
+    expect(outcome.result?.serverType).toBe(failImage ? undefined : "mac1.metal");
+    expect(outcome.result?.server.hostID).toBe(failImage ? undefined : "h-mac1");
   });
 
   it("retries macOS launch on another discovered host after host capacity is exhausted", async () => {
@@ -2692,6 +3344,11 @@ describe("aws provider", () => {
   });
 
   it("waits for transient AMIs before launching from EBS snapshots", async () => {
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      expect(new URL(request.url).hostname).toBe("servicequotas.eu-west-1.amazonaws.com");
+      return Response.json({ Quota: { Value: 999 } });
+    });
     const client = new EC2SpotClient(
       { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as never,
       "eu-west-1",
@@ -2700,20 +3357,10 @@ describe("aws provider", () => {
       registerSnapshotImage: () => Promise<string>;
       waitForImageAvailable: (imageID: string) => Promise<string>;
       ensureSecurityGroup: () => Promise<string>;
-      quotaPreflightAttempt: () => Promise<undefined>;
       ec2: (action: string, params?: Record<string, string>) => Promise<unknown>;
-      createServer: (...args: unknown[]) => Promise<{
-        provider: "aws";
-        id: number;
-        cloudID: string;
-        name: string;
-        status: string;
-        serverType: string;
-        host: string;
-        labels: Record<string, string>;
-      }>;
     };
     const calls: string[] = [];
+    let userData = "";
     client.ensureSSHKey = async () => {
       calls.push("ensure-key");
     };
@@ -2729,23 +3376,21 @@ describe("aws provider", () => {
       calls.push("security-group");
       return "sg-123";
     };
-    client.quotaPreflightAttempt = async () => undefined;
     client.ec2 = async (action, params) => {
       calls.push(`${action}:${params?.ImageId ?? ""}`);
+      if (action === "RunInstances") {
+        userData = params?.UserData ?? "";
+        return {
+          instancesSet: {
+            item: {
+              instanceId: "i-123",
+              instanceType: "t3.small",
+              instanceState: { name: "running" },
+            },
+          },
+        };
+      }
       return {};
-    };
-    client.createServer = async (...args: unknown[]) => {
-      calls.push(`launch:${String(args[4])}`);
-      return {
-        provider: "aws",
-        id: 1,
-        cloudID: "i-123",
-        name: "crabbox-blue-lobster",
-        status: "running",
-        serverType: "t3.small",
-        host: "192.0.2.10",
-        labels: {},
-      };
     };
 
     await client.createServerWithFallback(
@@ -2767,9 +3412,10 @@ describe("aws provider", () => {
       "register-snapshot",
       "wait:ami-transient",
       "security-group",
-      "launch:ami-transient",
+      "RunInstances:ami-transient",
       "DeregisterImage:ami-transient",
     ]);
+    expect(await gunzipBase64(userData)).not.toContain("\napt:\n");
   });
 
   it("deregisters transient AMIs when snapshot image waiting fails", async () => {
@@ -2780,7 +3426,6 @@ describe("aws provider", () => {
       ensureSSHKey: () => Promise<void>;
       registerSnapshotImage: () => Promise<string>;
       waitForImageAvailable: (imageID: string) => Promise<string>;
-      quotaPreflightAttempt: () => Promise<undefined>;
       ec2: (action: string, params?: Record<string, string>) => Promise<unknown>;
     };
     const calls: string[] = [];
@@ -2795,7 +3440,6 @@ describe("aws provider", () => {
       calls.push(`wait:${imageID}`);
       throw new Error("timed out waiting");
     };
-    client.quotaPreflightAttempt = async () => undefined;
     client.ec2 = async (action, params) => {
       calls.push(`${action}:${params?.ImageId ?? ""}`);
       return {};
@@ -2879,10 +3523,12 @@ describe("aws provider", () => {
     client.ec2 = async (action, params = {}) => {
       if (action === "DescribeInstances") {
         return {
+          requestId: "req-snapshot-source",
           reservationSet: {
             item: {
               instancesSet: {
                 item: {
+                  instanceId: "i-000000000001",
                   rootDeviceName: "/dev/xvda",
                   architecture: "arm64",
                   blockDeviceMapping: {

@@ -90,6 +90,17 @@ example `--sealos-devbox-context`, `--sealos-devbox-template-id`, and
 Local path expansion applies to host-side path fields such as `kubectl` and
 `kubeconfig`. `workRoot` is a guest path and is not shell-expanded.
 
+Put string settings in trusted user configuration or use their environment and
+flag overrides; repository configuration does not apply these string settings.
+The `deleteOnRelease` boolean also accepts repository configuration, including
+an explicit `false`. Empty file strings leave prior values intact and are omitted
+when saving configuration; an explicit boolean `false` remains stored.
+
+File and flag inputs expand `kubectl` and `kubeconfig` only when that input is
+accepted. Environment processing also expands a retained home-relative value
+when its override is absent. Work-root and release-policy explicitness tracks
+accepted input even when it equals the default; guest paths remain unchanged.
+
 ## Lifecycle
 
 `warmup` and one-shot `run` create a Crabbox-owned DevBox CR in the configured

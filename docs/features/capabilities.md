@@ -120,6 +120,13 @@ On managed Linux, bootstrap installs:
 - a managed Chrome policy and a launcher wrapper, whose path is written to
   `/var/lib/crabbox/browser.env` as `BROWSER` and `CHROME_BIN`.
 
+Restored images retain their installed desktop and browser prerequisite packages.
+When a package-installed Chrome or Chromium passes `--version`, bootstrap reuses
+it without downloading signing keys, refreshing browser repositories, or upgrading
+the browser. Missing packages and absent or unusable browsers take the normal
+installation path. Per-lease policies, wrappers, environment files, services, and
+readiness checks still run. Update browsers when maintaining or rebaking the image.
+
 On static and macOS/Windows targets, Crabbox probes for an existing browser
 (`probeBrowserEnv`) and aborts before the command runs if none is found:
 

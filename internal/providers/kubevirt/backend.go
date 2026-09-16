@@ -24,7 +24,9 @@ func (b *leaseBackend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *leaseBackend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
 	if strings.TrimSpace(b.cfg.KubeVirt.SSHKey) == "" {
-		core.UseStoredTestboxKey(&target.SSH, leaseID)
+		if err := core.UseStoredTestboxKey(&target.SSH, leaseID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -142,7 +144,7 @@ func (b *leaseBackend) Status(ctx context.Context, req core.StatusRequest) (core
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	return b.statusView(ctx, item, name, leaseID, slug), nil
+	return b.statusView(ctx, item, name, leaseID, slug)
 }
 
 func (b *leaseBackend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseView, error) {
@@ -172,6 +174,17 @@ func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.D
 }
 
 func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *leaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *leaseBackend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	name := strings.TrimSpace(req.Lease.Server.Name)
 	if name == "" {
 		name, _, _, _ = b.resolveName(req.Lease.LeaseID)
@@ -194,6 +207,7 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRe
 	if deleteVM {
 		err = b.deleteVM(ctx, name)
 		if err == nil {
+			outcome.Terminal = true
 			b.removeLeaseClaim(req.Lease.LeaseID)
 			b.removeGeneratedKey(req.Lease.LeaseID)
 		}
@@ -605,11 +619,14 @@ func (b *leaseBackend) resolveSSHKey(leaseID string) (string, error) {
 	if keyPath := strings.TrimSpace(b.cfg.KubeVirt.SSHKey); keyPath != "" {
 		return keyPath, nil
 	}
-	keyPath, err := core.TestboxKeyPath(leaseID)
-	if err != nil {
+	keyPath, err := core.StoredTestboxKeyPath(leaseID)
+	if err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
-	if _, err := os.Stat(keyPath); err != nil {
+	if err == nil {
+		_, err = os.Stat(keyPath)
+	}
+	if err != nil {
 		if os.IsNotExist(err) {
 			return "", core.Exit(4, "stored SSH key for KubeVirt lease %s is missing; configure kubevirt.sshKey or recreate the VM", leaseID)
 		}
@@ -713,7 +730,7 @@ func (b *leaseBackend) itemToServer(item kubeVirtItem) core.Server {
 	return server
 }
 
-func (b *leaseBackend) statusView(ctx context.Context, item kubeVirtItem, name, leaseID, slug string) core.StatusView {
+func (b *leaseBackend) statusView(ctx context.Context, item kubeVirtItem, name, leaseID, slug string) (core.StatusView, error) {
 	server := b.itemToServer(item)
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
@@ -722,7 +739,11 @@ func (b *leaseBackend) statusView(ctx context.Context, item kubeVirtItem, name, 
 	server.Status = state
 	server.Labels["state"] = state
 	server.PublicNet.IPv4.IP = name
-	target := b.sshTarget(name, b.statusSSHKey(leaseID))
+	keyPath, err := b.statusSSHKey(leaseID)
+	if err != nil {
+		return core.StatusView{}, err
+	}
+	target := b.sshTarget(name, keyPath)
 	ready := false
 	if kubeVirtStatusReady(state) {
 		allowProbe := true
@@ -754,21 +775,24 @@ func (b *leaseBackend) statusView(ctx context.Context, item kubeVirtItem, name, 
 		Labels:           server.Labels,
 		HasHost:          target.Host != "",
 		Ready:            ready,
-	}
+	}, nil
 }
 
-func (b *leaseBackend) statusSSHKey(leaseID string) string {
+func (b *leaseBackend) statusSSHKey(leaseID string) (string, error) {
 	if keyPath := strings.TrimSpace(b.cfg.KubeVirt.SSHKey); keyPath != "" {
-		return keyPath
+		return keyPath, nil
 	}
-	keyPath, err := core.TestboxKeyPath(leaseID)
+	keyPath, err := core.OptionalStoredTestboxKeyPath(leaseID)
 	if err != nil {
-		return ""
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
 	}
 	if _, err := os.Stat(keyPath); err == nil {
-		return keyPath
+		return keyPath, nil
 	}
-	return ""
+	return "", nil
 }
 
 func kubeVirtVMState(item kubeVirtItem, server core.Server) string {

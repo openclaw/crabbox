@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	sandboxv1 "github.com/openclaw/crabbox/internal/providers/wandb/gen/coreweave/sandbox/v1beta2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -84,7 +86,7 @@ func TestMapRPCErrorRedactsOpaqueAPIKey(t *testing.T) {
 
 func TestWandbAPIErrorAsExitError(t *testing.T) {
 	err := &wandbAPIError{ExitCode: 77, Stderr: "auth failed", Code: codes.Unauthenticated}
-	var ee ExitError
+	var ee core.ExitError
 	if !errors.As(err, &ee) {
 		t.Fatal("errors.As failed for *wandbAPIError -> ExitError")
 	}
@@ -104,24 +106,24 @@ func TestResolveAuthPrecedence(t *testing.T) {
 	t.Setenv("WANDB_API_KEY", "wandb-key")
 	t.Setenv("WANDB_ENTITY_NAME", "team")
 
-	auth, err := resolveAuth(Config{Wandb: WandbConfig{APIKey: "cfg-key"}})
+	auth, err := resolveAuth(core.Config{Wandb: core.WandbConfig{APIKey: "cfg-key"}})
 	if err != nil || auth.APIKey != "crabbox-key" || auth.Entity != "team" {
 		t.Fatalf("CRABBOX precedence: auth=%#v err=%v", auth, err)
 	}
 
 	t.Setenv("CRABBOX_WANDB_API_KEY", "")
-	auth, err = resolveAuth(Config{Wandb: WandbConfig{APIKey: "cfg-key"}})
+	auth, err = resolveAuth(core.Config{Wandb: core.WandbConfig{APIKey: "cfg-key"}})
 	if err != nil || auth.APIKey != "cfg-key" {
 		t.Fatalf("cfg precedence: auth=%#v err=%v", auth, err)
 	}
 
-	auth, err = resolveAuth(Config{})
+	auth, err = resolveAuth(core.Config{})
 	if err != nil || auth.APIKey != "wandb-key" {
 		t.Fatalf("WANDB precedence: auth=%#v err=%v", auth, err)
 	}
 
 	t.Setenv("WANDB_API_KEY", "")
-	auth, err = resolveAuth(Config{})
+	auth, err = resolveAuth(core.Config{})
 	if err != nil || auth.APIKey != "netrc-key" {
 		t.Fatalf("netrc precedence: auth=%#v err=%v", auth, err)
 	}
@@ -230,13 +232,14 @@ func (versionGatewayServer) List(_ context.Context, req *sandboxv1.ListSandboxes
 	return &sandboxv1.ListSandboxesResponse{}, nil
 }
 
-func TestWandbClientUsesPlaintextForHTTPOverride(t *testing.T) {
+func newWandbTestGRPCClient(t *testing.T, service sandboxv1.GatewayServiceServer) *wandbClient {
+	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := grpc.NewServer()
-	sandboxv1.RegisterGatewayServiceServer(server, versionGatewayServer{})
+	sandboxv1.RegisterGatewayServiceServer(server, service)
 	go func() {
 		_ = server.Serve(lis)
 	}()
@@ -245,7 +248,7 @@ func TestWandbClientUsesPlaintextForHTTPOverride(t *testing.T) {
 	t.Setenv("CRABBOX_WANDB_API_KEY", "test-key")
 	t.Setenv("WANDB_ENTITY_NAME", "test-entity")
 	t.Setenv("CWSANDBOX_BASE_URL", "http://"+lis.Addr().String())
-	api, err := newWandbClient(Config{}, Runtime{})
+	api, err := newWandbClient(core.Config{}, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,16 +256,15 @@ func TestWandbClientUsesPlaintextForHTTPOverride(t *testing.T) {
 	if !ok {
 		t.Fatalf("api = %T, want *wandbClient", api)
 	}
-	closed := false
-	t.Cleanup(func() {
-		if !closed {
-			_ = client.Close()
-		}
-	})
+	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
 
+func TestWandbClientUsesPlaintextForHTTPOverride(t *testing.T) {
+	client := newWandbTestGRPCClient(t, versionGatewayServer{})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	version, err := api.Version(ctx)
+	version, err := client.Version(ctx)
 	if err != nil {
 		t.Fatalf("Version with http override err: %v", err)
 	}
@@ -272,9 +274,72 @@ func TestWandbClientUsesPlaintextForHTTPOverride(t *testing.T) {
 	if err := client.Close(); err != nil {
 		t.Fatalf("Close err: %v", err)
 	}
-	closed = true
 	if got := client.conn.GetState(); got != connectivity.Shutdown {
 		t.Fatalf("conn state = %s, want %s", got, connectivity.Shutdown)
+	}
+}
+
+type pollGatewayServer struct {
+	sandboxv1.UnimplementedGatewayServiceServer
+	calls atomic.Int32
+}
+
+func (s *pollGatewayServer) Get(_ context.Context, req *sandboxv1.GetSandboxRequest) (*sandboxv1.GetSandboxResponse, error) {
+	if req.SandboxId != "fixture-sandbox" {
+		return nil, status.Error(codes.InvalidArgument, "unexpected fixture sandbox")
+	}
+	state := sandboxv1.SandboxStatus_SANDBOX_STATUS_RUNNING
+	if s.calls.Add(1) == 1 {
+		state = sandboxv1.SandboxStatus_SANDBOX_STATUS_PENDING
+	}
+	return &sandboxv1.GetSandboxResponse{SandboxStatus: state}, nil
+}
+
+type observedPollGatewayClient struct {
+	sandboxv1.GatewayServiceClient
+	afterPending func()
+}
+
+func (f observedPollGatewayClient) Get(ctx context.Context, req *sandboxv1.GetSandboxRequest, options ...grpc.CallOption) (*sandboxv1.GetSandboxResponse, error) {
+	// Cancellation follows a real RPC response, not a substituted gateway result.
+	response, err := f.GatewayServiceClient.Get(ctx, req, options...)
+	if err == nil && response.SandboxStatus == sandboxv1.SandboxStatus_SANDBOX_STATUS_PENDING {
+		f.afterPending()
+	}
+	return response, err
+}
+
+func TestPollUntilRunningDelay(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cancel bool
+	}{
+		{name: "pending then running"},
+		{name: "canceled after pending", cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			server := &pollGatewayServer{}
+			client := newWandbTestGRPCClient(t, server)
+			if tc.cancel {
+				client.gw = observedPollGatewayClient{GatewayServiceClient: client.gw, afterPending: func() {
+					cancel(errors.New("fixture cancellation cause"))
+				}}
+			}
+			started := time.Now()
+			got, err := client.pollUntilRunning(ctx, "fixture-sandbox")
+			elapsed := time.Since(started)
+			calls := server.calls.Load()
+			if tc.cancel {
+				if err != context.Canceled || calls != 1 {
+					t.Fatalf("canceled poll: err=%v calls=%d", err, calls)
+				}
+			} else if err != nil || calls != 2 || got.ID != "fixture-sandbox" || got.Status != "running" || elapsed < 200*time.Millisecond {
+				t.Fatalf("ready poll: sandbox=%+v err=%v calls=%d", got, err, calls)
+			}
+			t.Logf("real gRPC requests=%d elapsed=%s canceled=%v result=%v", calls, elapsed, tc.cancel, err)
+		})
 	}
 }
 
@@ -292,7 +357,7 @@ func TestResolveAuthMissingKey(t *testing.T) {
 	t.Setenv("CRABBOX_WANDB_API_KEY", "")
 	t.Setenv("WANDB_API_KEY", "")
 	t.Setenv("WANDB_ENTITY_NAME", "team")
-	_, err := resolveAuth(Config{})
+	_, err := resolveAuth(core.Config{})
 	if err == nil || !strings.Contains(err.Error(), "W&B API key") {
 		t.Fatalf("err = %v, want missing-key error", err)
 	}
@@ -302,7 +367,7 @@ func TestResolveAuthRequiresEntity(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CRABBOX_WANDB_API_KEY", "crabbox-key")
 	t.Setenv("WANDB_ENTITY_NAME", "")
-	_, err := resolveAuth(Config{})
+	_, err := resolveAuth(core.Config{})
 	if err == nil || !strings.Contains(err.Error(), "WANDB_ENTITY_NAME") {
 		t.Fatalf("err = %v, want missing entity error", err)
 	}

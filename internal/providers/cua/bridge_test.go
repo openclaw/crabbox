@@ -18,14 +18,12 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type LocalCommandResult = core.LocalCommandResult
-
 type recordingRunner struct {
-	calls []LocalCommandRequest
-	fn    func(LocalCommandRequest) (LocalCommandResult, error)
+	calls []core.LocalCommandRequest
+	fn    func(core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
-func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
 	if r.fn != nil {
 		var stdout, stderr bytes.Buffer
@@ -39,10 +37,10 @@ func (r *recordingRunner) Run(_ context.Context, req LocalCommandRequest) (Local
 		}
 		return result, err
 	}
-	return LocalCommandResult{ExitCode: 0}, nil
+	return core.LocalCommandResult{ExitCode: 0}, nil
 }
 
-func (r *recordingRunner) onlyCall(t *testing.T) LocalCommandRequest {
+func (r *recordingRunner) onlyCall(t *testing.T) core.LocalCommandRequest {
 	t.Helper()
 	if len(r.calls) != 1 {
 		t.Fatalf("calls=%d want 1", len(r.calls))
@@ -50,21 +48,21 @@ func (r *recordingRunner) onlyCall(t *testing.T) LocalCommandRequest {
 	return r.calls[0]
 }
 
-func testConfig() Config {
-	return Config{Provider: providerName, Cua: core.CuaConfig{
+func testConfig() core.Config {
+	return core.Config{Provider: providerName, Cua: core.CuaConfig{
 		APIURL:            "https://api.cua.example/v1/",
-		Image:             defaultImage,
-		Kind:              defaultKind,
-		Workdir:           defaultWorkdir,
+		Image:             core.CuaConfigDefaultImage,
+		Kind:              core.CuaConfigDefaultKind,
+		Workdir:           core.CuaConfigDefaultWorkdir,
 		ExecTimeoutSecs:   60,
-		BridgeCommand:     defaultBridgeCommand,
-		SDKPackage:        defaultSDKPackage,
-		SDKImport:         defaultSDKImport,
-		SDKFallbackImport: defaultSDKFallbackImport,
+		BridgeCommand:     core.CuaConfigDefaultBridgeCommand,
+		SDKPackage:        core.CuaConfigDefaultSDKPackage,
+		SDKImport:         core.CuaConfigDefaultSDKImport,
+		SDKFallbackImport: core.CuaConfigDefaultSDKFallbackImport,
 	}}
 }
 
-func requestBody(t *testing.T, req LocalCommandRequest) string {
+func requestBody(t *testing.T, req core.LocalCommandRequest) string {
 	t.Helper()
 	data, err := io.ReadAll(req.Stdin)
 	if err != nil {
@@ -90,7 +88,7 @@ func TestBridgeSendsJSONOnStdinAndMapsSecretOnlyToSDKEnv(t *testing.T) {
 	t.Setenv("NO_PROXY", "localhost,127.0.0.1")
 	t.Setenv("SSL_CERT_FILE", "/etc/example-ca.pem")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "placeholder")
-	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		for _, arg := range req.Args {
 			if strings.Contains(arg, secret) {
 				t.Fatalf("secret leaked into argv: %#v", req.Args)
@@ -135,9 +133,9 @@ func TestBridgeSendsJSONOnStdinAndMapsSecretOnlyToSDKEnv(t *testing.T) {
 			t.Fatalf("payload=%#v", payload)
 		}
 		_, _ = io.WriteString(req.Stdout, `{"ok":true,"doctor":{"importPath":"cua","auth":"env","checks":[{"status":"ok","check":"sdk"}]}}`)
-		return LocalCommandResult{ExitCode: 0}, nil
+		return core.LocalCommandResult{ExitCode: 0}, nil
 	}}
-	client := newBridgeClient(testConfig(), Runtime{Exec: runner})
+	client := newBridgeClient(testConfig(), core.Runtime{Exec: runner})
 	resp, err := client.RoundTrip(context.Background(), bridgeRequest{Action: "doctor"})
 	if err != nil {
 		t.Fatalf("RoundTrip: %v", err)
@@ -146,7 +144,7 @@ func TestBridgeSendsJSONOnStdinAndMapsSecretOnlyToSDKEnv(t *testing.T) {
 		t.Fatalf("resp=%#v", resp)
 	}
 	call := runner.onlyCall(t)
-	if call.Name != defaultBridgeCommand {
+	if call.Name != core.CuaConfigDefaultBridgeCommand {
 		t.Fatalf("command=%q", call.Name)
 	}
 	if !reflect.DeepEqual(call.Args[:2], []string{"-I", "-c"}) {
@@ -160,37 +158,16 @@ func TestBridgeSendsJSONOnStdinAndMapsSecretOnlyToSDKEnv(t *testing.T) {
 	}
 }
 
-func TestNotFoundClassificationRequiresStructuredSignal(t *testing.T) {
-	for _, err := range []error{
-		&bridgeActionError{class: "not_found", code: "HTTPStatusError", msg: "missing"},
-		&bridgeActionError{class: "cleanup_failed", code: "SandboxNotFoundError", msg: "missing"},
-	} {
-		if !isCUANotFound(err) {
-			t.Fatalf("isCUANotFound(%v)=false, want true", err)
-		}
-	}
-	for _, err := range []error{
-		&bridgeActionError{class: "cleanup_failed", code: "RuntimeError", msg: "request to sandbox-404 timed out"},
-		&bridgeActionError{class: "cleanup_failed", code: "RuntimeError", msg: "not found in response text"},
-		&bridgeActionError{class: "cleanup_failed", code: "FileNotFoundError", msg: "local file missing"},
-		&bridgeActionError{class: "cleanup_failed", code: "ModuleNotFoundError", msg: "SDK module missing"},
-	} {
-		if isCUANotFound(err) {
-			t.Fatalf("isCUANotFound(%v)=true for unstructured message", err)
-		}
-	}
-}
-
 func TestBridgeRedactsSecretFromCommandFailure(t *testing.T) {
 	secret := "placeholder"
 	t.Setenv("CRABBOX_CUA_API_KEY", secret)
 	proxy := "https://proxy.example.test:8443"
 	t.Setenv("HTTPS_PROXY", proxy)
-	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stderr, "denied "+secret+" via "+proxy)
-		return LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
+		return core.LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
 	}}
-	client := newBridgeClient(testConfig(), Runtime{Exec: runner})
+	client := newBridgeClient(testConfig(), core.Runtime{Exec: runner})
 	_, err := client.RoundTrip(context.Background(), bridgeRequest{Action: "doctor"})
 	if err == nil {
 		t.Fatal("expected bridge failure")
@@ -203,11 +180,11 @@ func TestBridgeRedactsSecretFromCommandFailure(t *testing.T) {
 func TestBridgeRedactsSecretBeforeTruncatingFailure(t *testing.T) {
 	secret := strings.Repeat("s", 40)
 	t.Setenv("CRABBOX_CUA_API_KEY", secret)
-	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stderr, strings.Repeat("x", 500)+secret)
-		return LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
+		return core.LocalCommandResult{ExitCode: 1}, errors.New("exit status 1")
 	}}
-	client := newBridgeClient(testConfig(), Runtime{Exec: runner})
+	client := newBridgeClient(testConfig(), core.Runtime{Exec: runner})
 	_, err := client.RoundTrip(context.Background(), bridgeRequest{Action: "doctor"})
 	if err == nil {
 		t.Fatal("expected bridge failure")
@@ -219,11 +196,8 @@ func TestBridgeRedactsSecretBeforeTruncatingFailure(t *testing.T) {
 
 func TestBridgeMutationsFailClosedBeforeRunner(t *testing.T) {
 	runner := &recordingRunner{}
-	client := newBridgeClient(testConfig(), Runtime{Exec: runner})
-	if _, err := client.CreateSandbox(context.Background(), map[string]string{"lease": "test"}); err == nil || !strings.Contains(err.Error(), "idempotency key") || !strings.Contains(err.Error(), cuaTrackingIssue) {
-		t.Fatalf("CreateSandbox err=%v, want actionable provisioning guard", err)
-	}
-	if _, err := client.RoundTrip(context.Background(), bridgeRequest{Action: "create"}); err == nil || !strings.Contains(err.Error(), "idempotency key") {
+	client := newBridgeClient(testConfig(), core.Runtime{Exec: runner})
+	if _, err := client.RoundTrip(context.Background(), bridgeRequest{Action: "create"}); err == nil || !strings.Contains(err.Error(), "idempotency key") || !strings.Contains(err.Error(), cuaTrackingIssue) {
 		t.Fatalf("RoundTrip(create) err=%v, want provisioning guard", err)
 	}
 	if _, err := client.RoundTrip(context.Background(), bridgeRequest{Action: "delete"}); err == nil || !strings.Contains(err.Error(), "atomically") {
@@ -235,11 +209,184 @@ func TestBridgeMutationsFailClosedBeforeRunner(t *testing.T) {
 }
 
 func TestBridgeRequiresRunner(t *testing.T) {
-	var exitErr ExitError
-	_, err := newBridgeClient(testConfig(), Runtime{}).RoundTrip(context.Background(), bridgeRequest{Action: "doctor"})
+	var exitErr core.ExitError
+	_, err := newBridgeClient(testConfig(), core.Runtime{}).RoundTrip(context.Background(), bridgeRequest{Action: "doctor"})
 	if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "requires Runtime.Exec") {
 		t.Fatalf("RoundTrip error=%v", err)
 	}
+}
+
+func TestCUABridgeDefaultValuesAndRawConfig(t *testing.T) {
+	defaults := core.BaseConfig().Cua
+	if defaults.Image != "ubuntu:24.04" || defaults.Kind != "container" || defaults.Workdir != "/workspace/crabbox" || defaults.BridgeCommand != "python3" || defaults.SDKPackage != "cua" || defaults.SDKImport != "cua" || defaults.SDKFallbackImport != "cua_sandbox" || defaults.ExecTimeoutSecs != 600 {
+		t.Fatalf("generated defaults changed: %#v", defaults)
+	}
+	for _, raw := range []string{"", " \t", "custom"} {
+		cfg := testConfig()
+		cfg.Cua.Image, cfg.Cua.Kind, cfg.Cua.SDKPackage, cfg.Cua.SDKImport = raw, raw, raw, raw
+		cfg.Cua.ExecTimeoutSecs = 0
+		before := cfg.Cua
+		got := bridgeConfigForConfig(cfg)
+		wantImage, wantKind, wantPackage, wantImport := "ubuntu:24.04", "container", "cua", "cua"
+		if raw != "" {
+			wantImage, wantKind, wantPackage, wantImport = strings.TrimSpace(raw), strings.TrimSpace(raw), strings.TrimSpace(raw), strings.TrimSpace(raw)
+		}
+		if got.Image != wantImage || got.Kind != wantKind || got.SDKPackage != wantPackage || got.SDKImport != wantImport || got.ExecTimeout != 0 {
+			t.Fatalf("raw=%q bridge config=%#v", raw, got)
+		}
+		if cfg.Cua != before {
+			t.Fatal("bridge config changed raw input")
+		}
+	}
+	for _, seconds := range []int{-1, 0, 60} {
+		cfg := testConfig()
+		cfg.Cua.ExecTimeoutSecs = seconds
+		want := 600 * time.Second
+		if seconds > 0 {
+			want = time.Duration(seconds) * time.Second
+		}
+		if bridgeTimeout(cfg, bridgeRequest{Action: "list"}) != want || bridgeTimeout(cfg, bridgeRequest{Action: "doctor"}) != 15*time.Second {
+			t.Fatalf("unexpected budget for %d", seconds)
+		}
+	}
+}
+
+func TestCUABridgeLauncherAndWorkdirNormalization(t *testing.T) {
+	t.Setenv("CRABBOX_CUA_API_KEY", "")
+	t.Setenv("CUA_API_KEY", "")
+	for _, tc := range []struct{ name, command, workdir, kind, wantCommand, wantWorkdir, wantKind string }{
+		{"empty", "", "", "", "python3", "/workspace/crabbox", "container"},
+		{"whitespace", " \t", " \t", " \t", "", "", ""},
+		{"custom", " /opt/example-python ", " /workspace/app/ ", " VM ", "/opt/example-python", "/workspace/app", "vm"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.Cua.BridgeCommand, cfg.Cua.Workdir, cfg.Cua.Kind = tc.command, tc.workdir, tc.kind
+			before := cfg.Cua
+			runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				var payload bridgeRequest
+				if err := json.Unmarshal([]byte(requestBody(t, req)), &payload); err != nil {
+					t.Fatal(err)
+				}
+				if req.Name != tc.wantCommand || payload.Config.Workdir != tc.wantWorkdir || payload.Config.Kind != tc.wantKind {
+					t.Fatalf("command=%q workdir=%q kind=%q", req.Name, payload.Config.Workdir, payload.Config.Kind)
+				}
+				_, _ = io.WriteString(req.Stdout, `{"ok":true}`)
+				return core.LocalCommandResult{ExitCode: 0}, nil
+			}}
+			if _, err := newBridgeClient(cfg, core.Runtime{Exec: runner}).RoundTrip(context.Background(), bridgeRequest{Action: "list"}); err != nil {
+				t.Fatal(err)
+			}
+			_, err := cuaWorkdir(cfg)
+			if (err != nil) != (tc.name == "whitespace") {
+				t.Fatalf("workdir error=%v", err)
+			}
+			if cfg.Cua != before {
+				t.Fatal("bridge changed raw config")
+			}
+		})
+	}
+}
+
+func TestCUAEffectiveImportSelectionAcrossBridge(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	t.Setenv("CRABBOX_CUA_API_KEY", "")
+	t.Setenv("CUA_API_KEY", "")
+	for _, tc := range []struct{ name, preferred, fallback, wantPreferred, wantFallback string }{
+		{"default", "cua", "", "cua", "cua_sandbox"},
+		{"whitespace fallback", "cua", " \t", "cua", "cua_sandbox"},
+		{"custom", " example_sdk ", " example_fallback ", "example_sdk", "example_fallback"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.Cua.SDKImport, cfg.Cua.SDKFallbackImport = tc.preferred, tc.fallback
+			if err := validateProviderConfig(cfg); err != nil {
+				t.Fatal(err)
+			}
+			before := cfg.Cua
+			runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				var payload bridgeRequest
+				if err := json.Unmarshal([]byte(requestBody(t, req)), &payload); err != nil {
+					t.Fatal(err)
+				}
+				selection := cuaScriptImportSelection(t, python, req.Args[2], payload, req.Env)
+				if selection[0] != tc.wantPreferred || selection[1] != tc.wantFallback {
+					t.Fatalf("effective imports=%v, want [%s %s]", selection, tc.wantPreferred, tc.wantFallback)
+				}
+				_, _ = io.WriteString(req.Stdout, `{"ok":true}`)
+				return core.LocalCommandResult{ExitCode: 0}, nil
+			}}
+			if _, err := newBridgeClient(cfg, core.Runtime{Exec: runner}).RoundTrip(context.Background(), bridgeRequest{Action: "list"}); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Cua != before {
+				t.Fatal("bridge changed raw config")
+			}
+		})
+	}
+	for _, fromRequest := range []bool{true, false} {
+		payload := bridgeRequest{Config: bridgeConfig{SDKImport: "request_sdk", FallbackImport: "request_fallback"}}
+		want := []string{"request_sdk", "request_fallback"}
+		if !fromRequest {
+			payload.Config.SDKImport, payload.Config.FallbackImport = "", ""
+			want = []string{"env_sdk", "env_fallback"}
+		}
+		got := cuaScriptImportSelection(t, python, bridgeScript, payload, []string{"CRABBOX_CUA_SDK_IMPORT=env_sdk", "CRABBOX_CUA_SDK_FALLBACK_IMPORT=env_fallback"})
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("request precedence=%t got=%v want=%v", fromRequest, got, want)
+		}
+	}
+}
+
+func TestCUAFallbackImportResolvedBeforeTransport(t *testing.T) {
+	t.Setenv("CRABBOX_CUA_API_KEY", "")
+	t.Setenv("CUA_API_KEY", "")
+	for _, raw := range []string{"", " \t", " example_fallback "} {
+		cfg := testConfig()
+		cfg.Cua.SDKFallbackImport = raw
+		want := "cua_sandbox"
+		if strings.TrimSpace(raw) != "" {
+			want = "example_fallback"
+		}
+		if got := bridgeConfigForConfig(cfg).FallbackImport; got != want {
+			t.Fatalf("fallback request=%q, want %q", got, want)
+		}
+		if !envContains(bridgeEnv(cfg, t.TempDir()), "CRABBOX_CUA_SDK_FALLBACK_IMPORT="+want) {
+			t.Fatal("fallback environment differs from request")
+		}
+		if cfg.Cua.SDKFallbackImport != raw {
+			t.Fatal("raw fallback config changed")
+		}
+	}
+}
+
+// Stop at import selection: this fixture never imports an SDK or contacts a provider.
+func cuaScriptImportSelection(t *testing.T, python, script string, payload bridgeRequest, env []string) []string {
+	t.Helper()
+	encodedScript, err := json.Marshal(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootstrap := "import json\nns = {'__name__': 'contract'}\nexec(" + string(encodedScript) + ", ns)\ndef capture(preferred, fallback):\n    print(json.dumps([preferred, fallback]))\n    raise SystemExit(0)\nns['import_sdk'] = capture\nns['main']()\n"
+	encodedPayload, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(python, "-I", "-c", bootstrap)
+	cmd.Env = env
+	cmd.Stdin = bytes.NewReader(encodedPayload)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("local Python selection: %v: %s", err, output)
+	}
+	var selected []string
+	if err := json.Unmarshal(output, &selected); err != nil || len(selected) != 2 {
+		t.Fatalf("selection=%s error=%v", output, err)
+	}
+	return selected
 }
 
 func TestBridgeTimeoutBoundsDoctorAndInventory(t *testing.T) {
@@ -254,11 +401,11 @@ func TestBridgeTimeoutBoundsDoctorAndInventory(t *testing.T) {
 }
 
 func TestBridgeRejectsMalformedJSON(t *testing.T) {
-	runner := &recordingRunner{fn: func(req LocalCommandRequest) (LocalCommandResult, error) {
+	runner := &recordingRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 		_, _ = io.WriteString(req.Stdout, `not-json`)
-		return LocalCommandResult{ExitCode: 0}, nil
+		return core.LocalCommandResult{ExitCode: 0}, nil
 	}}
-	client := newBridgeClient(testConfig(), Runtime{Exec: runner})
+	client := newBridgeClient(testConfig(), core.Runtime{Exec: runner})
 	if _, err := client.RoundTrip(context.Background(), bridgeRequest{Action: "doctor"}); err == nil {
 		t.Fatal("expected malformed JSON error")
 	}

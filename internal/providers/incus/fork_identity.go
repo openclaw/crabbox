@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lxc/incus/v7/shared/api"
+	core "github.com/openclaw/crabbox/internal/cli"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -20,7 +21,7 @@ var forkUserPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]*[$]?$`)
 
 // Only the stopped clone is changed. Incus regenerates its own UUID and network
 // identity; cloud-init's per-instance user module would append inherited keys.
-func prepareForkIdentity(client instanceClient, cfg Config, inst api.Instance, publicKey string) error {
+func prepareForkIdentity(client instanceClient, cfg core.Config, inst api.Instance, publicKey string) error {
 	if inst.IsActive() || inst.Type != "container" {
 		return fmt.Errorf("fork identity replacement requires a stopped container")
 	}

@@ -123,8 +123,6 @@ For the up-to-date provider/capability matrix, run `crabbox providers` or
 
 ```go
 type Provider interface {
-	Name() string
-	Aliases() []string
 	Spec() ProviderSpec
 
 	RegisterFlags(fs *flag.FlagSet, defaults Config) any
@@ -219,6 +217,16 @@ type JSONListBackend interface {
 	ListJSON(ctx context.Context, req ListRequest) (any, error)
 }
 ```
+
+For Doctor aggregates, use `core.DoctorChecksStatus(checks)`: after trimming and
+lowercasing statuses, literal `failed` or `missing` yields `failed`; otherwise
+`warning` yields `warning`, and all other values (including empty, unknown, and
+`skip`) are nonfailures. Nil or empty checks yield `ok`. The helper preserves
+the input checks and their detail maps. Map severity to provider-local vocabulary
+locally, as Sealos Devbox does with `failed` → `blocked` and everything else →
+`ready`, using that same mapped status in its summary. The CLI continues to
+render and classify nonempty `Checks` in preference to aggregate `Status` and
+`Message`; consolidating internal aggregates does not change that precedence.
 
 `FeatureRunSession` is also an explicit capability contract. Delegated
 providers return their handle in `RunResult`; opted-in SSH providers such as AWS
@@ -449,7 +457,8 @@ Built-in providers register at init time:
 var providerRegistry = map[string]Provider{}
 
 func RegisterProvider(provider Provider) {
-	names := append([]string{provider.Name()}, provider.Aliases()...)
+	spec := provider.Spec()
+	names := append([]string{spec.Name}, spec.Aliases...)
 	for _, name := range names {
 		key := normalizeProviderName(name)
 		if key == "" {
@@ -474,7 +483,7 @@ func ProviderFor(name string) (Provider, error) {
 Each provider package registers itself in its `init`, and
 `internal/providers/all` blank-imports every package so a single import of `all`
 wires the whole registry. Canonical names and compatibility aliases come from
-`Name()`/`Aliases()`, for example:
+`ProviderSpec.Name`/`ProviderSpec.Aliases`, for example:
 
 ```text
 ssh                 # aliases: static, static-ssh
@@ -560,12 +569,12 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	backend, err := provider.Configure(cfg, rt)
 	if err != nil {
 		return nil, err
 	}
-	if ssh, ok := backend.(SSHLeaseBackend); ok && shouldUseCoordinator(cfg, provider.Spec()) {
+	if ssh, ok := backend.(SSHLeaseBackend); ok && ShouldUseCoordinator(cfg, provider.Spec()) {
 		coord, _, err := newCoordinatorClient(cfg)
 		if err != nil {
 			return nil, err
@@ -590,8 +599,9 @@ Coordinator (broker) routing is a wrapper around `SSHLeaseBackend`, not a specia
 provider path inside every command.
 
 ```go
-func shouldUseCoordinator(cfg Config, spec ProviderSpec) bool {
-	return spec.Coordinator == CoordinatorSupported && strings.TrimSpace(cfg.Coordinator) != ""
+func ShouldUseCoordinator(cfg Config, spec ProviderSpec) bool {
+	return cfg.BrokerMode != BrokerModeRegistered &&
+		spec.Coordinator == CoordinatorSupported && strings.TrimSpace(cfg.Coordinator) != ""
 }
 ```
 

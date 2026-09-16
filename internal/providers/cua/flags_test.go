@@ -11,14 +11,14 @@ import (
 
 func TestProviderFlagsApplyAndValidate(t *testing.T) {
 	cfg := core.Config{Provider: providerName, Cua: core.CuaConfig{
-		Image:             defaultImage,
-		Kind:              defaultKind,
-		Workdir:           defaultWorkdir,
+		Image:             core.CuaConfigDefaultImage,
+		Kind:              core.CuaConfigDefaultKind,
+		Workdir:           core.CuaConfigDefaultWorkdir,
 		ExecTimeoutSecs:   600,
-		BridgeCommand:     defaultBridgeCommand,
-		SDKPackage:        defaultSDKPackage,
-		SDKImport:         defaultSDKImport,
-		SDKFallbackImport: defaultSDKFallbackImport,
+		BridgeCommand:     core.CuaConfigDefaultBridgeCommand,
+		SDKPackage:        core.CuaConfigDefaultSDKPackage,
+		SDKImport:         core.CuaConfigDefaultSDKImport,
+		SDKFallbackImport: core.CuaConfigDefaultSDKFallbackImport,
 	}}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := Provider{}.RegisterFlags(fs, cfg)
@@ -63,13 +63,13 @@ func TestProviderFlagsApplyAndValidate(t *testing.T) {
 
 func TestValidateProviderConfigRejectsUnsafeValues(t *testing.T) {
 	base := core.CuaConfig{
-		Image:             defaultImage,
-		Kind:              defaultKind,
-		Workdir:           defaultWorkdir,
-		BridgeCommand:     defaultBridgeCommand,
-		SDKPackage:        defaultSDKPackage,
-		SDKImport:         defaultSDKImport,
-		SDKFallbackImport: defaultSDKFallbackImport,
+		Image:             core.CuaConfigDefaultImage,
+		Kind:              core.CuaConfigDefaultKind,
+		Workdir:           core.CuaConfigDefaultWorkdir,
+		BridgeCommand:     core.CuaConfigDefaultBridgeCommand,
+		SDKPackage:        core.CuaConfigDefaultSDKPackage,
+		SDKImport:         core.CuaConfigDefaultSDKImport,
+		SDKFallbackImport: core.CuaConfigDefaultSDKFallbackImport,
 	}
 	tests := []struct {
 		name string
@@ -122,13 +122,13 @@ func TestValidateProviderConfigRejectsOverflowingExecTimeout(t *testing.T) {
 func TestValidateProviderConfigAllowsLoopbackAPIURL(t *testing.T) {
 	cfg := core.Config{Cua: core.CuaConfig{
 		APIURL:            "http://localhost:8080/v1/",
-		Image:             defaultImage,
-		Kind:              defaultKind,
-		Workdir:           defaultWorkdir,
-		BridgeCommand:     defaultBridgeCommand,
-		SDKPackage:        defaultSDKPackage,
-		SDKImport:         defaultSDKImport,
-		SDKFallbackImport: defaultSDKFallbackImport,
+		Image:             core.CuaConfigDefaultImage,
+		Kind:              core.CuaConfigDefaultKind,
+		Workdir:           core.CuaConfigDefaultWorkdir,
+		BridgeCommand:     core.CuaConfigDefaultBridgeCommand,
+		SDKPackage:        core.CuaConfigDefaultSDKPackage,
+		SDKImport:         core.CuaConfigDefaultSDKImport,
+		SDKFallbackImport: core.CuaConfigDefaultSDKFallbackImport,
 	}}
 	if err := validateProviderConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -156,13 +156,13 @@ func TestCUAAPIURLStripsSDKVersionPrefix(t *testing.T) {
 func TestProviderRejectsGenericClassAndTypeFlags(t *testing.T) {
 	for _, args := range [][]string{{"--class", "large"}, {"--type", "gpu"}} {
 		cfg := core.Config{Provider: providerName, Cua: core.CuaConfig{
-			Image:             defaultImage,
-			Kind:              defaultKind,
-			Workdir:           defaultWorkdir,
-			BridgeCommand:     defaultBridgeCommand,
-			SDKPackage:        defaultSDKPackage,
-			SDKImport:         defaultSDKImport,
-			SDKFallbackImport: defaultSDKFallbackImport,
+			Image:             core.CuaConfigDefaultImage,
+			Kind:              core.CuaConfigDefaultKind,
+			Workdir:           core.CuaConfigDefaultWorkdir,
+			BridgeCommand:     core.CuaConfigDefaultBridgeCommand,
+			SDKPackage:        core.CuaConfigDefaultSDKPackage,
+			SDKImport:         core.CuaConfigDefaultSDKImport,
+			SDKFallbackImport: core.CuaConfigDefaultSDKFallbackImport,
 		}}
 		fs := flag.NewFlagSet("test", flag.ContinueOnError)
 		fs.String("class", "", "")
@@ -173,6 +173,68 @@ func TestProviderRejectsGenericClassAndTypeFlags(t *testing.T) {
 		}
 		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err == nil {
 			t.Fatalf("ApplyFlags(%v) succeeded", args)
+		}
+	}
+}
+
+func TestProviderFlagPresenceBeforeValidation(t *testing.T) {
+	cfg := testConfig()
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterProviderFlags(fs, cfg)
+	cfg.Cua = core.CuaConfig{APIURL: "https://example.invalid/later", Image: "later", Kind: "vm", Region: "later", Workdir: "/workspace/later", VCPUs: 1, MemoryMB: 2, DiskGB: 3, StartupTimeoutSecs: 4, ExecTimeoutSecs: 5, BridgeCommand: "python3", SDKPackage: "cua", SDKImport: "cua", SDKFallbackImport: "fallback"}
+	before := cfg.Cua
+	if err := ApplyProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Cua != before {
+		t.Fatalf("unvisited flags changed config: %#v", cfg.Cua)
+	}
+	if err := fs.Parse([]string{"--cua-api-url=", "--cua-image=", "--cua-kind=", "--cua-region=", "--cua-workdir=", "--cua-vcpus=0", "--cua-memory-mb=0", "--cua-disk-gb=0", "--cua-startup-timeout-secs=0", "--cua-exec-timeout-secs=0", "--cua-bridge-command=", "--cua-sdk-package=", "--cua-sdk-import=", "--cua-sdk-fallback-import="}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyProviderFlags(&cfg, fs, values); err == nil {
+		t.Fatal("expected empty bridge validation failure")
+	}
+	if cfg.Cua != (core.CuaConfig{}) {
+		t.Fatalf("explicit zero values not copied before validation: %#v", cfg.Cua)
+	}
+}
+
+func TestProviderSizingGuardPrecedesValuesAssertion(t *testing.T) {
+	for _, provider := range []string{"cua", " CUA "} {
+		for _, args := range [][]string{nil, {"--class=large"}, {"--type=vm"}, {"--type=vm", "--class=large"}} {
+			cfg := testConfig()
+			cfg.Provider = provider
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			registered := RegisterProviderFlags(fs, cfg)
+			if err := fs.Parse(append(args, "--cua-image=changed")); err != nil {
+				t.Fatal(err)
+			}
+			for _, values := range []any{nil, struct{}{}, registered} {
+				if len(args) == 0 && values == registered {
+					continue
+				}
+				before := cfg.Cua
+				err := ApplyProviderFlags(&cfg, fs, values)
+				if len(args) == 0 {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					want := "--class is not supported for provider=cua; use --cua-vcpus and --cua-memory-mb"
+					if len(args) == 1 && args[0] == "--type=vm" {
+						want = "--type is not supported for provider=cua; use --cua-image and --cua-kind"
+					}
+					if err == nil || err.Error() != want {
+						t.Fatalf("provider=%q args=%v values=%T error=%v, want %q", provider, args, values, err, want)
+					}
+				}
+				if cfg.Cua != before {
+					t.Fatal("guard or wrong values copied flags")
+				}
+			}
 		}
 	}
 }

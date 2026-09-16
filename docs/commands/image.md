@@ -129,6 +129,12 @@ Flags:
 --catalog-only           publish an AWS capability variant without changing the default image
 --fast-snapshot-restore  enable AWS Fast Snapshot Restore for the backing snapshots
 --fsr-az <az>            availability zone for Fast Snapshot Restore (repeatable)
+--expected-current-image <id|none|capture>
+                         require or atomically capture the current AWS default
+--expected-current-revision <revision>
+                         revision required with an expected current image id
+--restore-receipt <path>
+                         restore exact AWS default aliases from a promotion receipt
 --json                   print the promoted image record as JSON
 ```
 
@@ -159,7 +165,18 @@ toolkit=2.0 --runtime node=24` is activated by an exactly matching `--image-sdk
 toolkit=2.0` request, not by a Node-only request. After activation, every
 requested capability must still match. Catalog-only promotion uses the
 dedicated `POST /v1/images/<id>/promote-catalog` route and fails closed against
-older coordinators.
+older coordinators. Catalog-only promotion does not accept transactional
+expected-current or rollback-retirement flags.
+
+AWS publishers can use `--expected-current-image capture --json` to receive the
+exact prior default aliases and the new promotion revision in one transaction.
+To restore that state after a failed smoke, pass the receipt back with
+`image promote <failed-image-id> --restore-receipt <path>`. The coordinator
+restores only aliases still owned by that failed revision, preserves any
+concurrent newer alias, and retires the exact failed catalog revision. Generic
+stale compare-and-swap requests do not mutate the catalog.
+Transactional promotion requires an updated coordinator and fails before
+changing the default when that route is unavailable.
 
 Add `--fast-snapshot-restore` plus one or more `--fsr-az` values when the
 promoted image backs hot lanes that need immediate EBS snapshot reads:

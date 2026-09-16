@@ -42,6 +42,12 @@ claim is never recreated or overwritten. Terminal leases are rejected before
 touch. Providers without lease-touch support fail with
 `provider=<name> does not support lease heartbeat`.
 
+AWS fixed leases bind their scope to the caller account recorded at creation.
+Heartbeat validates that account and the exact live instance before writing
+tags, while holding the unchanged local claim. Renewals preserve native
+ownership tags, including the full fixed-create fingerprint.
+Waiting for the mutation lock honors request cancellation.
+
 ## Delegated providers
 
 A delegated-run provider has no Crabbox-managed SSH lease to touch. Providers
@@ -59,8 +65,8 @@ configuration, which does not describe such a lease. For the same reason
 `provider=<name> does not support replacing the lease idle timeout while heartbeating`,
 rather than accepted and silently ignored.
 
-This path writes no lease deadline of any kind, so nothing it does can move a
-lease's expiry in either direction, and it persists nothing locally: the
+This path does not rewrite lifecycle policy or absolute lifetime limits.
+Provider activity may defer idle pausing. It persists nothing locally: the
 reported `lastTouchedAt` is when the provider observed the lease, so `crabbox
 claims` keeps showing the claim's previous `lastUsed`. What the provider's call
 defers on its own side is the provider's business; see the provider's own page.
@@ -82,6 +88,8 @@ current direct-provider timeout when it is available in lease metadata and
 omits the coordinator heartbeat override. Direct static and local-runtime
 providers persist the refreshed timestamps, expiry, and any explicit timeout
 replacement in the exact claim so a fresh CLI process observes the same state.
+Heartbeat preserves existing provider metadata, including ownership fingerprints
+and empty attestation fields; it changes only lifecycle values.
 
 ## Output
 

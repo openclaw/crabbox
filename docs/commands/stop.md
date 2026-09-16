@@ -17,12 +17,44 @@ crabbox stop --provider ssh --static-host mac-studio.local mac-studio.local
 
 `crabbox release` is a compatibility alias for `crabbox stop`.
 
+## Repository-scoped cleanup
+
+Ordinary `stop` is an administrative lease operation: changing the current
+directory does not restrict it to that repository's claims. Integrations that
+must not clean up a lease after another checkout reclaims it use:
+
+```sh
+crabbox stop --current-repo --id cbx_0a1b2c3d4e5f
+```
+
+This mode requires a canonical fixed-ID lease and a supported provider. The
+release owner validates the current repository under the same exclusive claim
+fence used for deletion, before provider or connection cleanup. A transfer that
+finishes first makes the previous repository's cleanup fail. A running
+[`exec`](exec.md) keeps this release waiting until its transport has finished.
+Validated terminal tombstones are safe, side-effect-free successes even when a
+compact tombstone no longer retains a repository path.
+
+Direct Daytona fixed-ID leases initially support this mode. Other providers,
+ordinary non-fixed claims, coordinator routes, and recovery/controller identity
+flag combinations are rejected. Query `crabbox exec --check` before allocation
+and require `currentRepoStop: true` when integrating fixed-ID lifecycle cleanup.
+Ordinary administrative `stop` remains unchanged.
+
 For coordinator-backed leases, the preliminary lookup has a ten-second budget.
 If it stalls, ordinary stop warns and proceeds through the existing
 provider-scoped release request. Provider identity mismatches still block
 release; `--force` still requires successful inspection. Canceling the command
 does not start a release fallback. Cleanup must still be confirmed before local
 claim and SSH artifacts are removed.
+
+If a fixed-ID create was admitted by the coordinator but never allocated a
+machine, `stop` cancels that intent and confirms the cancellation even when
+the preliminary lease lookup returns 404. This includes a create rejected by
+a quota check. The owner, organization, and selected provider must match.
+Delayed creates cannot allocate after this confirmation; a genuinely unknown
+ID still fails, and an allocation already in progress must finish cleanup
+before Stop reports success.
 
 ## Identifying the lease
 
@@ -89,7 +121,10 @@ Crabbox lease ID and local slug:
   fresh matching session ownership metadata before terminating the sandbox.
   Failed termination keeps the claim; claimless sessions require explicit
   `--reclaim` reuse.
-- `daytona` — deletes the Daytona sandbox.
+- `daytona` — deletes the Daytona sandbox and waits for confirmed deletion under
+  the caller's cancellation and deadline. The CLI remains signal-cancelable;
+  the automatic-cleanup timeout does not shorten that lifetime. Non-cancelable
+  callers, including detached job cleanup, retain the 30-second fallback.
 - `coder` — stops the Coder workspace by default and removes the local claim.
   Set `coder.deleteOnRelease` or pass `--coder-delete-on-release` to delete the
   workspace instead.
@@ -177,9 +212,17 @@ non-destructive post-create workflows on a running sandbox. The separate
 and are not supported by Docker Sandbox.
 
 Coordinator-backed stops refresh guest connection state inside the release owner.
-A confirmed deletion skips guest SSH cleanup but still sends the provider-scoped
-release request and verifies its result. Retained machines and pending or failed
-provider cleanup do not count as confirmed deletion.
+A confirmed deletion skips guest SSH cleanup and repeats only local connection
+cleanup, without another provider release request. Retained machines and pending
+or failed provider cleanup do not count as confirmed deletion. Confirmation
+requires the coordinator's `cleanupCompletedAt` fact and a hostless public record;
+`released` state or an accepted provider DELETE alone is insufficient.
+
+An explicit stop of a historical managed lease that still has provider identity
+but lacks `cleanupCompletedAt` asks the coordinator to re-observe and clean that
+exact owned resource. Local claims and SSH artifacts remain until the retry
+publishes completion. During rollout, deploy the coordinator Worker before using
+a CLI version that requires this completion fact.
 
 For SSH leases, shared connection cleanup makes best-effort attempts to signal
 [Actions hydration](../features/actions-hydration.md) shutdown, stop local
@@ -190,9 +233,25 @@ chain has a 35-second budget, including coordinator guest network selection and
 reserving five-second windows for later egress
 and Tailscale cleanup. Responsive hydrated jobs keep their normal 20-second
 stop-marker grace; cancellation or the phase deadline ends that wait early.
-The local egress daemon stays alive through guest cleanup. Provider release uses
-the original caller context; this budget does not guarantee that provider deletion
-finishes before the caller's deadline. Static SSH attempts cleanup
+The local egress daemon stays alive through guest cleanup. Coordinator-backed
+explicit stops share one five-minute cancellation budget from the first lease
+inspection through claim acquisition, guest cleanup, release requests, and cleanup
+observation; an earlier caller deadline wins. Phase limits cannot restart this
+budget. Pending or failed provider cleanup still returns an error and preserves
+the local claim and SSH artifacts for a later retry.
+
+After confirmed coordinator-backed deletion, SSH masters created with canonical
+lease credentials are explicitly closed and observed to exit before local
+artifacts are removed. If that step fails, Stop reports that remote deletion is
+confirmed but local cleanup remains pending;
+the retained claim permits a local-only retry.
+
+Local daemon lock waits also honor the operation context. Once provider deletion
+is confirmed, a canceled local daemon cleanup warns without undoing that result.
+Already-started local process teardown remains joined. Synchronous filesystem
+operations and existing process-inspection and termination helpers are not
+interrupted by this context, so this is not a strict wall-clock limit.
+Direct and delegated providers retain their existing caller lifetime. Static SSH attempts cleanup
 before local unclaiming, even without hydration state; remote failures warn
 but do not block unclaiming. See the [static provider details](../providers/ssh.md#connection-cleanup)
 for marker paths, Linux egress process-matching scope, and Tailscale limits.
@@ -204,6 +263,7 @@ for marker paths, Linux egress process-matching scope, and Tailscale limits.
 ```text
 --provider <name>          provider to act against (see crabbox providers)
 --id <lease-or-slug>        lease ID or slug (equivalent to the positional arg)
+--current-repo              restrict fixed-ID cleanup to its current repository owner
 --reclaim                   explicitly adopt a provider resource when that provider supports safe stop adoption
 --force                     recover one exact resource through verified provider adoption or an inspected coordinator lease
 --target linux|macos|windows

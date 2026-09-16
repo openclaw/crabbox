@@ -69,7 +69,21 @@ Config keys under `lambda:`:
 | `firewallRuleset` | `cfg.Lambda.FirewallRuleset` | empty | Optional existing Lambda firewall ruleset name. |
 | `sshCIDRs` | `cfg.Lambda.SSHCIDRs` | empty | Reserved for firewall-aware follow-up work; this phase does not create firewall rules. |
 | `filesystemNames` | `cfg.Lambda.FilesystemNames` | empty | Optional existing Lambda filesystem names to attach. |
-| `filesystemMounts` | `cfg.Lambda.FilesystemMounts` | empty | Optional existing Lambda filesystems with mount paths, e.g. `cache:/mnt/cache`. |
+| `filesystemMounts` | `cfg.Lambda.FilesystemMounts` | empty | Optional existing Lambda filesystems with mount paths; YAML entries use `name` and `mountPath` mappings. |
+
+YAML mount entries are mappings, not `name:/path` strings:
+
+```yaml
+lambda:
+  filesystemMounts:
+    - name: cache
+      mountPath: /mnt/cache
+```
+
+The environment form is comma-separated text, for example
+`CRABBOX_LAMBDA_FILESYSTEM_MOUNTS=cache:/mnt/cache,shared`. A name without a
+colon has no explicit mount path. Parsing preserves entry order and duplicates;
+native filesystem lookup remains separate.
 
 The portable `--os ubuntu:24.04` selector maps to the default
 `lambda-stack-24-04` image family. Other explicit portable OS selectors are
@@ -96,6 +110,20 @@ CRABBOX_LAMBDA_FILESYSTEM_MOUNTS       Comma-separated name[:mountPath] entries
 
 Do not pass the Lambda API key as a command-line argument. Keep it in the
 environment or in a local secret manager.
+
+### Input precedence
+
+All eight settings are owned together in `internal/cli/config_lambda.go`, with
+no provider-specific flags. Empty scalar input and omitted/null/empty file lists
+leave prior values intact. Nonempty YAML lists retain their raw entries;
+environment lists trim comma-separated entries and discard blanks.
+
+An image-only file override clears an inherited image family. A file specifying
+both keeps both for later validation; a family-only file override does not clear
+an existing image. Environment overrides apply image first and family second,
+clearing the other choice each time, so a nonempty environment family wins when
+both are set. Accepted type/image/family values remain explicit even when equal
+to a default. File decoding stays zero-valued; runtime initialization remains separate.
 
 ## Token Scope
 

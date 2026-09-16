@@ -144,6 +144,15 @@ See the [Tencent Cloud provider guide](../providers/tencentcloud.md#capacity-mar
 
 ## AWS Capacity Hints
 
+Successfully provisioned brokered AWS, Azure, and GCP leases retain ordered `provisioningAttempts`, including
+failed candidates from earlier markets and regions or zones. Each record describes
+the actual attempted type, market, location, and provider-classified failure; AWS
+quota preflight rejections are recorded even when no instance launch was needed.
+These diagnostics do not authorize retry or cleanup: each provider still owns
+those decisions and its durable allocation claims.
+Failed brokered leases still report their terminal failure separately; this history
+is not a durable journal of unresolved provisioning or cleanup work.
+
 The brokered AWS path can preflight large requests against Service Quotas:
 
 ```yaml

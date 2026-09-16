@@ -28,17 +28,21 @@ type wslLinuxFixture struct {
 }
 
 func startWSLLinuxFixture(t *testing.T, command string, payload []byte, declared int, helper string, grace int) *wslLinuxFixture {
+	return startWSLLinuxFixtureWithNonce(t, command, payload, declared, helper, grace, "nonce")
+}
+
+func startWSLLinuxFixtureWithNonce(t *testing.T, command string, payload []byte, declared int, helper string, grace int, nonce string) *wslLinuxFixture {
 	t.Helper()
 	if _, err := exec.LookPath("setsid"); err != nil {
 		t.Fatal("native fixture requires the documented setsid prerequisite")
 	}
-	f := &wslLinuxFixture{directory: filepath.Join(t.TempDir(), "owned"), done: make(chan error, 1)}
+	f := &wslLinuxFixture{directory: filepath.Join(t.TempDir(), "owned"), output: newSynchronizedBuffer(0), done: make(chan error, 1)}
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.control = writer
-	f.command = exec.Command("sh", "-c", wslHelperBootstrap, "sh", strconv.Itoa(len(helper)), "0", "run", f.directory, "nonce", strconv.Itoa(declared), strconv.Itoa(len(payload)), "300", strconv.Itoa(grace))
+	f.command = exec.Command("sh", "-c", wslHelperBootstrap, "sh", strconv.Itoa(len(helper)), "0", "run", f.directory, nonce, strconv.Itoa(declared), strconv.Itoa(len(payload)), "300", strconv.Itoa(grace))
 	f.command.Stdin = reader
 	f.command.Stdout = &f.output
 	f.command.Stderr = &f.output
@@ -145,6 +149,64 @@ func assertWSLLinuxAbsent(t *testing.T, f *wslLinuxFixture) {
 	}
 	if _, err := os.Stat(f.directory); !os.IsNotExist(err) {
 		t.Fatalf("evidence remains after successful cleanup: %v", err)
+	}
+}
+
+func TestFunctionalWSLPreflightOwnerCompletion(t *testing.T) {
+	const nonce = "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name, state     string
+		code            int
+		cancel, timeout bool
+	}{
+		{name: "ready", state: "ready"},
+		{name: "missing interpreter", state: "missing-python3", code: 20},
+		{name: "venv unavailable", state: "venv-unavailable", code: 21},
+		{name: "pip unavailable", state: "pip-unavailable", code: 22},
+		{name: "worker failed", state: "worker-failed", code: 23},
+		{name: "caller channel closed", state: "canceled", code: 74, cancel: true},
+		{name: "worker deadline", state: "timed-out", code: 74, timeout: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := `scratch=$(dirname "$0")/scratch
+test -d "$scratch" || exit 23
+printf marker >"$scratch/marker"
+`
+			budget := 10 * time.Second
+			if tc.cancel || tc.timeout {
+				command += `mkfifo "$scratch/wait"
+exec 7<>"$scratch/wait"
+trap 'exit 0' TERM
+while :; do read -r -t 1 -u 7 ignored || :; done
+`
+				if tc.timeout {
+					budget = time.Second
+				}
+			} else {
+				command += "sleep .2\nexit " + strconv.Itoa(tc.code) + "\n"
+			}
+			f := startWSLLinuxFixtureWithNonce(t, command, nil, len(command), functionalWSLPreflightHelper(budget), 100, nonce)
+			f.guard(t)
+			waitForTestFile(t, filepath.Join(f.directory, "scratch", "marker"), 5*time.Second)
+			if tc.cancel {
+				_ = f.control.Close()
+			}
+			f.wait(t, tc.code)
+			if err := syscall.Kill(-f.group, 0); err != syscall.ESRCH {
+				t.Fatalf("acknowledging live group: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(f.directory, "scratch")); !os.IsNotExist(err) {
+				t.Fatalf("scratch was not removed: %v", err)
+			}
+			record, err := os.ReadFile(filepath.Join(f.directory, ".completion"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := parseFunctionalPreflightCompletion(record, nonce)
+			if err != nil || got.State != tc.state || !got.WorkerQuiesced || !got.ScratchRemoved {
+				t.Fatalf("completion=%+v error=%v", got, err)
+			}
+		})
 	}
 }
 
@@ -365,15 +427,17 @@ func TestWSL2ProductionCleanupKillsEntireStagingGroup(t *testing.T) {
 	}
 	t.Run("foreground child cancellation", func(t *testing.T) {
 		childPath := filepath.Join(t.TempDir(), "child")
+		readyPath := childPath + ".ready"
 		command := `sleep 60 &
 child=$!
 trap 'kill "$child" 2>/dev/null || :; wait "$child" 2>/dev/null || :; exit 74' TERM
-printf '%s' "$child" >` + shellQuote(childPath) + `
+printf '%s' "$child" >` + shellQuote(childPath) + ` && : >` + shellQuote(readyPath) + `
 wait "$child"
 `
 		f := startWSLLinuxFixture(t, command, nil, len(command), wslLinuxHelper, 500)
 		f.guard(t)
-		waitForTestFile(t, childPath, 5*time.Second)
+		// Redirection creates childPath before printf has published its PID.
+		waitForTestFile(t, readyPath, 5*time.Second)
 		data, err := os.ReadFile(childPath)
 		if err != nil {
 			t.Fatal(err)

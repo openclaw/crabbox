@@ -89,7 +89,7 @@ func fixedMachine0CreateIntentForConfig(cfg Config, req FixedMachine0CreateInten
 	}
 	return fixedMachine0CreateIntent{
 		Version:       FixedMachine0CreateIntentVersion,
-		RequestedSlug: normalizeLeaseSlug(req.RequestedSlug),
+		RequestedSlug: NormalizeLeaseSlug(req.RequestedSlug),
 		Provider:      strings.TrimSpace(cfg.Provider),
 		Profile:       strings.TrimSpace(cfg.Profile),
 		Machine: fixedMachine0CreateIntentMachine{
@@ -129,7 +129,7 @@ func fixedMachine0CreateIntentForConfig(cfg Config, req FixedMachine0CreateInten
 			IdleNanoseconds: fixedCanonicalDuration(cfg.IdleTimeout),
 		},
 		Workload: fixedCreateIntentWorkload{
-			Pond:         normalizePondName(cfg.Pond),
+			Pond:         NormalizePondName(cfg.Pond),
 			ExposedPorts: exposedPorts,
 			WorkRoot:     strings.TrimSpace(cfg.WorkRoot),
 		},

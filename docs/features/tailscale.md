@@ -207,8 +207,15 @@ trusted authorization for a privileged tailnet operation. One-off nodes are
 ephemeral and age out in Tailscale if remote logout is unavailable.
 
 If Tailscale rejects a requested subset or unowned tag, the coordinator returns
-`invalid_tailscale_tags` with exact-match/`tagOwners` guidance and preserves the raw
-Tailscale HTTP status and response body for diagnosis.
+`invalid_tailscale_tags` with exact-match/`tagOwners` guidance, the failed
+operation, and the HTTP status. Raw Tailscale response bodies are withheld from
+coordinator responses.
+
+Other Tailscale preparation failures return `tailscale_unavailable` before VM
+allocation. The CLI reports the error without repeating creation and cancels its
+ordinary create attempt. For an OAuth HTTP 401, repair the coordinator's Tailscale
+OAuth credentials before retrying the command. A temporary Tailscale API outage
+can be retried after the service recovers.
 
 Preflight the coordinator without leasing a machine:
 

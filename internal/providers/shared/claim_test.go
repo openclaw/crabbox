@@ -1,9 +1,11 @@
 package shared
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +29,62 @@ func TestCloneLabels(t *testing.T) {
 	if original["state"] != "ready" {
 		t.Fatalf("clone aliases original: %#v", original)
 	}
+}
+
+func TestIndexProviderClaimsPreservesFilteringAndLastKeyWinner(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	ids := []string{"cbx_000000000001", "cbx_000000000002", "cbx_000000000003", "cbx_000000000004"}
+	for index, id := range ids {
+		provider, native := "example", "same"
+		if index == 2 {
+			native = ""
+		}
+		if index == 3 {
+			provider = "other"
+		}
+		server := core.Server{Provider: provider, CloudID: id, Labels: map[string]string{"native": native}}
+		if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(id, "fixture", provider, "scope", "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var visited []string
+	indexed, err := IndexProviderClaims("example", func(claim core.LeaseClaim) string {
+		if claim.Provider != "example" {
+			t.Fatal("key projection ran for a foreign provider")
+		}
+		visited = append(visited, claim.LeaseID)
+		return claim.Labels["native"]
+	})
+	if err != nil || len(indexed) != 1 || indexed["same"].LeaseID != ids[1] || !reflect.DeepEqual(visited, ids[:3]) {
+		t.Fatalf("index=%v visited=%v error=%v", indexed, visited, err)
+	}
+	empty, err := IndexProviderClaims("absent", func(core.LeaseClaim) string {
+		t.Fatal("key projection ran for an absent provider")
+		return ""
+	})
+	if err != nil || empty == nil || len(empty) != 0 {
+		t.Fatalf("empty index=%v error=%v", empty, err)
+	}
+	empty["writable"] = core.LeaseClaim{}
+}
+
+func TestLabelsWithDefaultsPreservesStoredValuesAndCopies(t *testing.T) {
+	stored := map[string]string{"provider": "stored", "state": "", "space": " ", "extra": "kept"}
+	defaults := map[string]string{"provider": "fallback", "state": "running", "space": "fallback", "empty": ""}
+	got := LabelsWithDefaults(stored, defaults)
+	want := map[string]string{"provider": "stored", "state": "running", "space": " ", "extra": "kept", "empty": ""}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("labels=%#v, want %#v", got, want)
+	}
+	got["provider"] = "changed"
+	if stored["provider"] != "stored" || stored["state"] != "" || defaults["provider"] != "fallback" {
+		t.Fatal("label projection mutated its inputs")
+	}
+	fromNil := LabelsWithDefaults(nil, map[string]string{"lease": ""})
+	if value, exists := fromNil["lease"]; !exists || value != "" {
+		t.Fatalf("empty default not materialized: %#v", fromNil)
+	}
+	LabelsWithDefaults(nil, nil)["new"] = "writable"
 }
 
 func TestValidateClaimBindingFields(t *testing.T) {
@@ -127,6 +185,13 @@ func TestResolveProviderClaimStrict(t *testing.T) {
 	if _, ok, err := ResolveProviderClaimStrict(leaseID, "other", scope); ok || !errors.Is(err, ErrStrictClaimMismatch) {
 		t.Fatalf("provider mismatch ok=%v err=%v", ok, err)
 	}
+	if claim, ok, err := ResolveProviderClaimStrict(leaseID, provider, scope); err != nil || !ok || claim.LeaseID != leaseID {
+		t.Fatalf("lookalike slug displaced exact claim: claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	core.RemoveLeaseClaim(leaseID)
+	if _, ok, err := ResolveProviderClaimStrict(leaseID, provider, scope); ok || !errors.Is(err, ErrStrictClaimMismatch) {
+		t.Fatalf("missing canonical ID matched another claim's slug: ok=%v err=%v", ok, err)
+	}
 }
 
 func TestExactClaimOwnershipRejectsMissingAndStaleBindings(t *testing.T) {
@@ -182,6 +247,66 @@ func TestResolveProviderClaimStrictRejectsMalformedExactClaim(t *testing.T) {
 	}
 }
 
+func TestRemoveExactClaimAfterContext(t *testing.T) {
+	for _, scenario := range []string{"canceled", "binding mismatch", "stale snapshot", "callback failure", "completed action"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			want := ClaimBinding{Provider: "example", ProviderScope: "account:one", LeaseID: "cbx_aaaaaaaaaaaa", Slug: "alpha", CloudID: "resource-1"}
+			labels := map[string]string{"lease": want.LeaseID, "slug": want.Slug, "provider": want.Provider}
+			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(want.LeaseID, want.Slug, want.Provider, want.ProviderScope, "", t.TempDir(), time.Minute, false, core.Server{Provider: want.Provider, CloudID: want.CloudID, Labels: labels}, core.SSHTarget{}); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := RequireExactClaim(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := claim
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			switch scenario {
+			case "canceled":
+				cancel()
+			case "binding mismatch":
+				want.CloudID = "resource-2"
+			case "stale snapshot":
+				expected, err = core.ReplaceLeaseClaimIfUnchangedDurableReturning(claim.LeaseID, claim, claim)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			called := false
+			failed := errors.New("provider cleanup failed")
+			err = RemoveExactClaimAfterContext(ctx, claim, want, func() error {
+				called = true
+				if scenario == "callback failure" {
+					return failed
+				}
+				cancel()
+				return nil
+			})
+			if scenario == "completed action" {
+				if err != nil || !called {
+					t.Fatalf("confirmed action err=%v called=%t", err, called)
+				}
+				if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); exists || err != nil {
+					t.Fatalf("confirmed cleanup retained claim: exists=%t err=%v", exists, err)
+				}
+				return
+			}
+			if err == nil || called != (scenario == "callback failure") {
+				t.Fatalf("rejected cleanup err=%v called=%t", err, called)
+			}
+			if scenario == "canceled" && !errors.Is(err, context.Canceled) || scenario == "callback failure" && !errors.Is(err, failed) {
+				t.Fatalf("cleanup cause lost: %v", err)
+			}
+			got, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
+			if readErr != nil || !exists || !reflect.DeepEqual(got, expected) {
+				t.Fatalf("rejected cleanup changed ownership: claim=%#v err=%v", got, readErr)
+			}
+		})
+	}
+}
+
 func TestRequireClaimSnapshot(t *testing.T) {
 	claim := core.LeaseClaim{LeaseID: "cbx_aaaaaaaaaaaa", Provider: "example", Revision: "revision-1"}
 	server := core.Server{Labels: map[string]string{"lease": claim.LeaseID}}
@@ -213,6 +338,88 @@ func TestRequireClaimSnapshot(t *testing.T) {
 			core.SetServerLeaseClaimSnapshot(&candidateServer, candidateClaim, true)
 			if _, err := RequireClaimSnapshot(candidateServer, claim.Provider); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("err=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCommitClaimTouchOrdersAuthorizationAndPublication(t *testing.T) {
+	for _, scenario := range []string{"snapshot missing", "snapshot absent", "authorization denied", "invalid override", "changed during preparation", "committed"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const leaseID = "static_claim_touch"
+			server := core.Server{Provider: "ssh", CloudID: "fixture-host", Labels: map[string]string{"lease": leaseID, "state": "ready"}}
+			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "fixture", "ssh", "fixture-scope", "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}); err != nil {
+				t.Fatal(err)
+			}
+			expected, err := core.ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "snapshot missing" {
+				core.SetServerLeaseClaimSnapshot(&server, expected, scenario != "snapshot absent")
+			}
+			override := 95 * time.Second
+			if scenario == "invalid override" {
+				override = 0
+			}
+			req := core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}, IdleTimeoutOverride: &override}
+			now := time.Now().UTC().Truncate(time.Second)
+			var calls []string
+			updated, touchErr := CommitClaimTouch(t.Context(), req, ClaimTouchPolicy{
+				Provider: "static",
+				Authorize: func(_ context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+					calls = append(calls, "authorize")
+					if lease.LeaseID != leaseID || !reflect.DeepEqual(claim, expected) {
+						t.Fatal("authorization lost exact snapshot")
+					}
+					if scenario == "authorization denied" {
+						return errors.New("identity mismatch")
+					}
+					return nil
+				},
+				Prepare: func(claim core.LeaseClaim) (map[string]string, time.Time) {
+					if len(calls) != 1 || calls[0] != "authorize" {
+						t.Fatal("preparation ran before authorization")
+					}
+					calls = append(calls, "prepare")
+					if scenario == "changed during preparation" {
+						if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, map[string]string{"state": "other-writer"}); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return map[string]string{"state": "touched"}, now
+				},
+			})
+			wantCalls := []string{"authorize"}
+			switch scenario {
+			case "snapshot missing", "snapshot absent":
+				wantCalls = nil
+			case "changed during preparation", "committed":
+				wantCalls = []string{"authorize", "prepare"}
+			}
+			if !reflect.DeepEqual(calls, wantCalls) {
+				t.Fatalf("calls=%v want=%v", calls, wantCalls)
+			}
+			actual, err := core.ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "committed" {
+				if touchErr != nil || updated.Revision == expected.Revision || !reflect.DeepEqual(actual, updated) || updated.Labels["state"] != "touched" || updated.LastUsedAt != now.Format(time.RFC3339) || updated.IdleTimeoutSeconds != 95 {
+					t.Fatalf("touch=%#v persisted=%#v err=%v", updated, actual, touchErr)
+				}
+			} else {
+				if touchErr == nil {
+					t.Fatal("expected refusal")
+				}
+				if scenario == "changed during preparation" {
+					if !strings.Contains(touchErr.Error(), "claim changed") || actual.Labels["state"] != "other-writer" {
+						t.Fatalf("raced touch=%#v err=%v", actual, touchErr)
+					}
+				} else if !reflect.DeepEqual(actual, expected) {
+					t.Fatal("refused touch changed durable claim")
+				}
 			}
 		})
 	}

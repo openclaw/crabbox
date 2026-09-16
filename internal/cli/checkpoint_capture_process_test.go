@@ -18,6 +18,7 @@ import (
 )
 
 func runCheckpointNativeLifetimeContract(t *testing.T, repo, binary string) {
+	t.Parallel()
 	t.Run("paused native helper exits when invocation lifetime closes", func(t *testing.T) {
 		f := newCheckpointCaptureFixture(t, repo, binary)
 		state := f.state()

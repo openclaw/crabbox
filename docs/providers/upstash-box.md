@@ -42,6 +42,11 @@ export CRABBOX_UPSTASH_BOX_API_KEY=...
 Crabbox redacts the configured API key from Upstash Box HTTP error bodies and
 exec-stream error events before displaying diagnostics.
 
+The first raw nonempty value of `CRABBOX_UPSTASH_BOX_API_KEY` and
+`UPSTASH_BOX_API_KEY` wins. Neither user nor repository YAML accepts an API key
+field, and no key flag is registered. Programmatic callers can still supply
+the runtime config's API key.
+
 Rotate the key if it was ever pasted into a chat, shell history, issue, or log.
 
 ## Commands
@@ -91,6 +96,20 @@ CRABBOX_UPSTASH_BOX_KEEP_ALIVE
 Defaults: base URL `https://us-east-1.box.upstash.com`, runtime `node`, size
 `small`, workdir `/workspace/home/crabbox`, `keepAlive` false.
 
+All six bindings share one typed declaration. Nonempty YAML strings override
+earlier values without trimming; omitted, null, or empty strings preserve them.
+Explicit `keepAlive: false` still applies. Environment strings use their first
+raw nonempty primary or alias value; empty values fall through, while whitespace
+is retained for the existing later normalization. Visited empty/false flags
+still override earlier layers.
+
+Accepted API-key/base-URL sources retain their existing provenance. A
+repository-selected endpoint is still subject to credential-destination checks;
+the binding does not grant it permission to use inherited credentials. The
+client, diagnostics, claim scope, runtime, size, and workdir helpers share the
+compiled defaults while retaining their own normalization. The fixed workspace
+root and the separate `keepAlive`/`--keep` behaviors are unchanged.
+
 Accepted values, validated before the API is called:
 
 - `runtime`: `node`, `python`, `golang`, `ruby`, `rust`, or the Alpine variants
@@ -108,15 +127,39 @@ Accepted values, validated before the API is called:
 2. By default `run` archive-syncs the working tree: Git manifest → local
    `tar -czf` → upload into the Box workspace as
    `.crabbox-upstash-box-sync-*.tgz` → in-Box `tar -xzf` into the workdir
-   (the temp archive is removed afterward).
+   (the temp archive is removed afterward). The full archive is checked and built
+   before fresh allocation. With delete-sync enabled, extraction completes in a
+   sibling staging directory before replacing the existing workdir; failed upload
+   or extraction leaves the previous workspace intact. Temporary archive/staging
+   cleanup is attempted even after a partial upload or cancellation. Cleanup
+   failures warn without replacing the original sync outcome.
 3. The user command runs through the Box exec-stream endpoint wrapped in
    `sh -c`, with the workspace folder set as the working directory, streaming
    output back through Crabbox.
 4. One-shot Boxes are deleted after a `run` that did not pass `--keep`. `--keep`
-   and `--keep-on-failure` retain the Box until `crabbox stop`.
+   retains the Box until `crabbox stop`; `--keep-on-failure` also retains it after
+   workspace setup, sync, command preparation, execution, or mandatory profile
+   cleanup fails. Reused Boxes are never automatically deleted.
+
+Run sequencing and finalization use the shared delegated-sandbox lifecycle.
+The adapter still owns Box identity and deletion authority, file-profile custody,
+workspace paths, uploads, and native command transport. Local configuration/auth
+validation precedes archive preparation; fresh archives are prepared before
+allocation, while reused archives are prepared after the Box is resolved.
+
+A failed Box deletion returns exit code 1 and a kept recovery session instead
+of a successful run. An earlier command or provider failure retains its exit code
+and status; later profile cleanup, Box deletion, and timing-write failures add
+diagnostics without replacing it. Failure retention is decided before timing
+output, so a failed timing writer cannot delete a Box already retained for a
+failed command. Profile-cleanup-only failures retain their documented code 5.
 
 Note: `warmup` always keeps the Box until an explicit `crabbox stop`. If you
 pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
+
+Stream errors retain their cancellation or timeout cause for run status.
+Crabbox checks cancellation immediately before submitting the command, including
+after a successful environment upload; existing profile cleanup still runs.
 
 ## Capabilities
 
@@ -152,12 +195,33 @@ pass `--keep=false` to `warmup`, Crabbox prints a warning and still keeps it.
   `--env-helper`, `--capture-stdout` / `--capture-stderr`, `--capture-on-fail`,
   `--download`, `--artifact-glob`, `--require-artifact`, `--emit-proof`, and
   `--stop-after`.
-- Forwarded environment values are written to a temporary shell profile in the
-  Box workspace, sourced (`set -a`) for the command, and removed best-effort
-  afterward. They are never placed on the local process argv.
+- Forwarded environment values use a private local profile and a unique remote
+  profile under `/workspace/home`, uploaded through the normal multipart file
+  transport. The command sources it (`set -a`) in its existing shell; failed
+  sourcing stops the whole script, and an explicitly empty script is valid.
+  Values are never placed on the local process argv. Removal is attempted after
+  command completion or a failed/canceled upload, with a separate 15-second
+  budget. A cleanup-only failure is reported as exit code 5; cleanup diagnostics
+  do not replace an existing command exit or upload/cancellation error.
+- Profile upload/removal requires an unchanged Box ID, name, positive creation
+  timestamp, and the originally observed local claim (or continued absence of
+  one). Discovery-only runs remain supported without creating a claim. This
+  file-only receipt cannot authorize Box deletion. Changed/uncertain identity
+  refuses file mutation; it does not promise an atomic remote check-and-remove,
+  cancellation of a delayed server upload, or whole-run concurrency isolation.
 - `upstashBox.keepAlive` maps to the Box create `keep_alive` option. Crabbox
   `--keep` independently controls whether a one-shot `run` deletes the Box
   afterward.
+
+## Command interpretation
+
+Quoted and interpolated profile arguments remain literal through the source-only
+command transport. Unmarked single-string commands follow the shared shell-source
+inference, while explicit `--shell` remains source in the provider's existing
+shell. Literal argv retains terminal `exec`; Crabbox does not introduce another
+shell or a Bash dependency for this interpretation. Environment-profile and
+working-directory handling remain provider-specific.
+
 
 ## Related docs
 

@@ -60,8 +60,6 @@ type routingFixtureProvider struct {
 	route func(Config) CommandRouting
 }
 
-func (p routingFixtureProvider) Name() string                                 { return p.name }
-func (p routingFixtureProvider) Aliases() []string                            { return nil }
 func (p routingFixtureProvider) Spec() ProviderSpec                           { return ProviderSpec{Name: p.name} }
 func (p routingFixtureProvider) RegisterFlags(*flag.FlagSet, Config) any      { return nil }
 func (p routingFixtureProvider) ApplyFlags(*Config, *flag.FlagSet, any) error { return nil }

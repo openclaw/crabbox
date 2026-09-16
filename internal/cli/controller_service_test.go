@@ -1756,6 +1756,8 @@ func TestControllerInventoryFailureDoesNotRepeatSuccessfulProviderRelease(t *tes
 	runner.confirmAbsentErr = errors.New("controller provider inventory exceeded 1048576-byte output limit")
 	service, cancel := testControllerService(t, runner, 1)
 	defer cancel()
+	// This fixture drives retries manually; keep the automatic timer out of the assertions.
+	service.opts.RetryDelay = time.Hour
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	record := controllerWorkspaceRecord{
 		Request: controllerWorkspaceRequest{ID: "inventory-overflow-box"}, ProviderRoute: "external", ProviderScope: "test-provider-scope",

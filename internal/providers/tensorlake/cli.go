@@ -8,34 +8,36 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type tensorlakeCLI struct {
-	cfg Config
-	rt  Runtime
+	cfg core.Config
+	rt  core.Runtime
 }
 
-func newTensorlakeCLI(cfg Config, rt Runtime) (*tensorlakeCLI, error) {
+func newTensorlakeCLI(cfg core.Config, rt core.Runtime) (*tensorlakeCLI, error) {
 	if strings.TrimSpace(cfg.Tensorlake.APIKey) == "" {
-		return nil, exit(2, "provider=tensorlake requires TENSORLAKE_API_KEY")
+		return nil, core.Exit(2, "provider=tensorlake requires TENSORLAKE_API_KEY")
 	}
 	if rt.Exec == nil {
-		return nil, exit(2, "provider=tensorlake requires Runtime.Exec")
+		return nil, core.Exit(2, "provider=tensorlake requires Runtime.Exec")
 	}
-	apiURL, err := canonicalTensorlakeURL(blank(cfg.Tensorlake.APIURL, defaultAPIURL))
+	apiURL, err := canonicalTensorlakeURL(core.Blank(cfg.Tensorlake.APIURL, core.TensorlakeConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}
 	cfg.Tensorlake.APIURL = apiURL
-	cfg.Tensorlake.Namespace = blank(strings.TrimSpace(cfg.Tensorlake.Namespace), "default")
+	cfg.Tensorlake.Namespace = core.Blank(strings.TrimSpace(cfg.Tensorlake.Namespace), "default")
 	if !validScopeValue(cfg.Tensorlake.Namespace) {
-		return nil, exit(2, "invalid Tensorlake namespace")
+		return nil, core.Exit(2, "invalid Tensorlake namespace")
 	}
 	return &tensorlakeCLI{cfg: cfg, rt: rt}, nil
 }
 
 func (c *tensorlakeCLI) binary() string {
-	return blank(strings.TrimSpace(c.cfg.Tensorlake.CLIPath), defaultCLIPath)
+	return core.Blank(strings.TrimSpace(c.cfg.Tensorlake.CLIPath), core.TensorlakeConfigDefaultCLIPath)
 }
 
 func (c *tensorlakeCLI) globalArgs() []string {
@@ -79,7 +81,7 @@ func (c *tensorlakeCLI) runQuiet(ctx context.Context, sub []string, args []strin
 	full = append(full, sub...)
 	full = append(full, args...)
 	var stdout, stderr bytes.Buffer
-	res, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	res, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   c.binary(),
 		Args:   full,
 		Env:    c.env(),
@@ -96,22 +98,24 @@ func (c *tensorlakeCLI) runQuiet(ctx context.Context, sub []string, args []strin
 }
 
 // runStreamed runs a tensorlake CLI subcommand and streams output to the
-// provided writers. Non-zero exit codes are reported via the int return,
-// not as an error — callers must propagate them as the wrapped command's
-// exit. Errors are reserved for transport-level failures (binary missing,
-// I/O errors).
+// provided writers. Ordinary native exits are reported via the int return.
+// Other returned errors retain transport/cancellation/I/O evidence regardless
+// of the numeric result; that result is a command exit only when err is nil.
 func (c *tensorlakeCLI) runStreamed(ctx context.Context, sub []string, args []string, stdout, stderr io.Writer) (int, error) {
 	full := append([]string{}, c.globalArgs()...)
 	full = append(full, sub...)
 	full = append(full, args...)
-	res, err := c.rt.Exec.Run(ctx, LocalCommandRequest{
+	res, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name:   c.binary(),
 		Args:   full,
 		Env:    c.env(),
 		Stdout: stdout,
 		Stderr: stderr,
 	})
-	if err != nil && res.ExitCode == 0 {
+	if err != nil {
+		if core.IsPlainLocalCommandExit(res, err) {
+			return res.ExitCode, nil
+		}
 		return res.ExitCode, fmt.Errorf("tensorlake %s: %w", strings.Join(sub, " "), err)
 	}
 	return res.ExitCode, nil
@@ -204,7 +208,7 @@ func (c *tensorlakeCLI) execShell(ctx context.Context, name, command string) err
 		return fmt.Errorf("tensorlake exec %q: %w", command, err)
 	}
 	if code != 0 {
-		return exit(code, "tensorlake exec %q exited %d", command, code)
+		return core.Exit(code, "tensorlake exec %q exited %d", command, code)
 	}
 	return nil
 }
@@ -245,7 +249,7 @@ func tensorlakeError(action string, exitCode int, stdout, stderr *bytes.Buffer, 
 		tail = tail[:4096]
 	}
 	if runErr != nil {
-		return fmt.Errorf("tensorlake %s (exit=%d): %v: %s", action, exitCode, runErr, tail)
+		return fmt.Errorf("tensorlake %s (exit=%d): %w: %s", action, exitCode, runErr, tail)
 	}
 	return fmt.Errorf("tensorlake %s exited %d: %s", action, exitCode, tail)
 }

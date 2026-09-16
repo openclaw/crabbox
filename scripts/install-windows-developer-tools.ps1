@@ -2,8 +2,8 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$DefaultNodeVersion = "24.11.1"
-$DefaultNodeSHA256 = "208ba5ca1dab0b330f457909e0797de340c40b34ddf2edf40d26f382f733297e"
+$DefaultNodeVersion = "24.19.0"
+$DefaultNodeSHA256 = "f0f66c2a80c08a30a5ab5179ee9ea9e45f9b46289436a8cc87ff833b852db351"
 $NodeVersion = $env:CRABBOX_WINDOWS_NODE_VERSION
 if (-not $NodeVersion) { $NodeVersion = $DefaultNodeVersion }
 $NodeSHA256 = $env:CRABBOX_WINDOWS_NODE_SHA256

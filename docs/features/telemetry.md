@@ -81,10 +81,13 @@ without a sample. Sampling happens in two contexts, both during a run:
    fresh sample, attaches it to the heartbeat body, and lets the coordinator
    update the lease record's `telemetry` snapshot and append to the
    `telemetryHistory` ring.
-2. **Run telemetry.** During the same run the recorder captures a `start`
-   snapshot, then samples on a 15-second ticker and posts each to
-   `POST /v1/runs/{run-id}/telemetry`. The summary is finalized on
-   `POST /v1/runs/{run-id}/finish`, which also records the `end` snapshot.
+2. **Run telemetry.** The recorder captures a `start` snapshot before work.
+   Its sampler publishes that snapshot without blocking command admission,
+   then samples and posts on a 15-second ticker through
+   `POST /v1/runs/{run-id}/telemetry`. Finish, failure, and lease replacement
+   cancel and join the sampler, including an in-flight upload. The summary is
+   finalized on `POST /v1/runs/{run-id}/finish`, which retains the captured
+   baseline even if its upload was cancelled and also records the `end` snapshot.
 
 `crabbox status` does not collect a fresh sample itself — it displays the
 `telemetry` snapshot already stored on the lease record (most recently written

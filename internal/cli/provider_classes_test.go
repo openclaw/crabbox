@@ -16,7 +16,6 @@ type selectorOverrideProvider struct {
 }
 
 func (p selectorOverrideProvider) ServerTypeForConfig(cfg Config) string { return p.resolve(cfg) }
-func (selectorOverrideProvider) ServerTypeForClass(class string) string  { return class }
 func (p selectorOverrideProvider) ServerTypeOverrideForConfig(cfg Config) (string, bool) {
 	if p.override == nil {
 		return "", false
@@ -146,11 +145,10 @@ func (testCloudflareProvider) ClassProfiles() []ProviderClassProfile {
 	return UniformLinuxAMD64ClassProfiles(ProviderClassMachine{Type: "standard-4"})
 }
 
-func (selectorClassProfileProvider) Name() string      { return "selector-class-profile" }
-func (selectorClassProfileProvider) Aliases() []string { return []string{"selector-class-alias"} }
 func (selectorClassProfileProvider) Spec() ProviderSpec {
 	return ProviderSpec{
-		Name: "selector-class-profile", Kind: ProviderKindSSHLease,
+		Aliases: []string{"selector-class-alias"},
+		Name:    "selector-class-profile", Kind: ProviderKindSSHLease,
 		Targets:          []TargetSpec{{OS: targetLinux}, {OS: targetWindows, WindowsMode: windowsModeNormal}, {OS: targetWindows, WindowsMode: windowsModeWSL2}},
 		ClassDisposition: ProviderClassDispositionMapped,
 	}
@@ -180,15 +178,15 @@ func TestProviderClassProfileSelectionIsExact(t *testing.T) {
 		want []string
 		ok   bool
 	}{
-		{name: "exact architecture beats mixed", cfg: Config{Provider: provider.Name(), TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: "standard"}, want: []string{"amd64-primary", "amd64-fallback"}, ok: true},
-		{name: "mixed is explicit fallback", cfg: Config{Provider: provider.Name(), TargetOS: targetLinux, Architecture: ArchitectureARM64, Class: "standard"}, want: []string{"mixed-primary", "mixed-fallback"}, ok: true},
-		{name: "empty Windows mode normalizes", cfg: Config{Provider: provider.Name(), TargetOS: targetWindows, Architecture: ArchitectureAMD64, Class: "standard"}, want: []string{"windows-normal"}, ok: true},
-		{name: "exact Windows mode", cfg: Config{Provider: provider.Name(), TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Architecture: ArchitectureAMD64, Class: "standard"}, want: []string{"windows-wsl2"}, ok: true},
-		{name: "no architecture fallback", cfg: Config{Provider: provider.Name(), TargetOS: targetWindows, WindowsMode: windowsModeNormal, Architecture: ArchitectureARM64, Class: "standard"}},
-		{name: "no Windows mode fallback", cfg: Config{Provider: provider.Name(), TargetOS: targetWindows, WindowsMode: "future", Architecture: ArchitectureAMD64, Class: "standard"}},
-		{name: "custom class not synthesized", cfg: Config{Provider: provider.Name(), TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: "custom"}},
-		{name: "uppercase class not normalized", cfg: Config{Provider: provider.Name(), TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: "STANDARD"}},
-		{name: "padded class not trimmed", cfg: Config{Provider: provider.Name(), TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: " standard "}},
+		{name: "exact architecture beats mixed", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: "standard"}, want: []string{"amd64-primary", "amd64-fallback"}, ok: true},
+		{name: "mixed is explicit fallback", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetLinux, Architecture: ArchitectureARM64, Class: "standard"}, want: []string{"mixed-primary", "mixed-fallback"}, ok: true},
+		{name: "empty Windows mode normalizes", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetWindows, Architecture: ArchitectureAMD64, Class: "standard"}, want: []string{"windows-normal"}, ok: true},
+		{name: "exact Windows mode", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Architecture: ArchitectureAMD64, Class: "standard"}, want: []string{"windows-wsl2"}, ok: true},
+		{name: "no architecture fallback", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetWindows, WindowsMode: windowsModeNormal, Architecture: ArchitectureARM64, Class: "standard"}},
+		{name: "no Windows mode fallback", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetWindows, WindowsMode: "future", Architecture: ArchitectureAMD64, Class: "standard"}},
+		{name: "custom class not synthesized", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: "custom"}},
+		{name: "uppercase class not normalized", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: "STANDARD"}},
+		{name: "padded class not trimmed", cfg: Config{Provider: provider.Spec().Name, TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: " standard "}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -205,7 +203,7 @@ func TestProviderClassProfileSelectionIsExact(t *testing.T) {
 
 func TestCanonicalProviderClassRequiresMatchingSelector(t *testing.T) {
 	provider := selectorClassProfileProvider{}
-	cfg := Config{Provider: provider.Name(), TargetOS: targetWindows, WindowsMode: windowsModeNormal, Architecture: ArchitectureARM64, Class: "standard"}
+	cfg := Config{Provider: provider.Spec().Name, TargetOS: targetWindows, WindowsMode: windowsModeNormal, Architecture: ArchitectureARM64, Class: "standard"}
 	err := validateProviderClassSelector(provider, cfg)
 	var exitErr ExitError
 	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "no class profile") {
@@ -323,10 +321,10 @@ func TestStoredExactTypesPrecedeMissingClassProfiles(t *testing.T) {
 		name string
 		got  []string
 	}{
-		{name: "AWS", got: awsLaunchCandidates(Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeNormal, Architecture: ArchitectureARM64, Class: "standard", ServerType: storedType})},
-		{name: "Azure", got: azureVMSizeCandidatesForConfig(Config{Provider: "azure", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Architecture: ArchitectureARM64, Class: "standard", ServerType: storedType})},
-		{name: "GCP", got: gcpMachineTypeCandidatesForConfig(Config{Provider: "gcp", TargetOS: targetLinux, Architecture: ArchitectureARM64, Class: "standard", ServerType: storedType})},
-		{name: "Hetzner", got: hetznerServerTypeCandidatesForConfig(Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureARM64, Class: "standard", ServerType: storedType})},
+		{name: "AWS", got: AWSLaunchCandidates(Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeNormal, Architecture: ArchitectureARM64, Class: "standard", ServerType: storedType})},
+		{name: "Azure", got: AzureVMSizeCandidatesForConfig(Config{Provider: "azure", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Architecture: ArchitectureARM64, Class: "standard", ServerType: storedType})},
+		{name: "GCP", got: GCPMachineTypeCandidatesForConfig(Config{Provider: "gcp", TargetOS: targetLinux, Architecture: ArchitectureARM64, Class: "standard", ServerType: storedType})},
+		{name: "Hetzner", got: HetznerServerTypeCandidatesForConfig(Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureARM64, Class: "standard", ServerType: storedType})},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -340,10 +338,10 @@ func TestStoredExactTypesPrecedeMissingClassProfiles(t *testing.T) {
 		name string
 		got  []string
 	}{
-		{name: "AWS", got: awsLaunchCandidates(Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeNormal, Architecture: ArchitectureARM64, Class: "standard", ServerType: "standard"})},
-		{name: "Azure", got: azureVMSizeCandidatesForConfig(Config{Provider: "azure", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Architecture: ArchitectureARM64, Class: "standard", ServerType: "standard"})},
-		{name: "GCP", got: gcpMachineTypeCandidatesForConfig(Config{Provider: "gcp", TargetOS: targetLinux, Architecture: ArchitectureARM64, Class: "standard", ServerType: "standard"})},
-		{name: "Hetzner", got: hetznerServerTypeCandidatesForConfig(Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureARM64, Class: "standard", ServerType: "standard"})},
+		{name: "AWS", got: AWSLaunchCandidates(Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeNormal, Architecture: ArchitectureARM64, Class: "standard", ServerType: "standard"})},
+		{name: "Azure", got: AzureVMSizeCandidatesForConfig(Config{Provider: "azure", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Architecture: ArchitectureARM64, Class: "standard", ServerType: "standard"})},
+		{name: "GCP", got: GCPMachineTypeCandidatesForConfig(Config{Provider: "gcp", TargetOS: targetLinux, Architecture: ArchitectureARM64, Class: "standard", ServerType: "standard"})},
+		{name: "Hetzner", got: HetznerServerTypeCandidatesForConfig(Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureARM64, Class: "standard", ServerType: "standard"})},
 	}
 	for _, test := range literalTests {
 		t.Run(test.name+" canonical literal", func(t *testing.T) {
@@ -358,10 +356,10 @@ func TestStoredExactTypesPrecedeMissingClassProfiles(t *testing.T) {
 		stored     []string
 		classValue []string
 	}{
-		{name: "AWS", stored: awsLaunchCandidates(Config{Provider: "aws", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: storedType}), classValue: awsLaunchCandidates(Config{Provider: "aws", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: "standard"})},
+		{name: "AWS", stored: AWSLaunchCandidates(Config{Provider: "aws", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: storedType}), classValue: AWSLaunchCandidates(Config{Provider: "aws", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: "standard"})},
 		{name: "Azure", stored: azureProvisioningCandidatesForConfig(Config{Provider: "azure", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: storedType}), classValue: azureProvisioningCandidatesForConfig(Config{Provider: "azure", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: "standard"})},
-		{name: "GCP", stored: gcpMachineTypeCandidatesForConfig(Config{Provider: "gcp", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: storedType}), classValue: gcpMachineTypeCandidatesForConfig(Config{Provider: "gcp", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: "standard"})},
-		{name: "Hetzner", stored: hetznerServerTypeCandidatesForConfig(Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: storedType}), classValue: hetznerServerTypeCandidatesForConfig(Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: "standard"})},
+		{name: "GCP", stored: GCPMachineTypeCandidatesForConfig(Config{Provider: "gcp", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: storedType}), classValue: GCPMachineTypeCandidatesForConfig(Config{Provider: "gcp", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: "standard"})},
+		{name: "Hetzner", stored: HetznerServerTypeCandidatesForConfig(Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: storedType}), classValue: HetznerServerTypeCandidatesForConfig(Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "standard", ServerType: "standard"})},
 	}
 	for _, test := range matchedTests {
 		t.Run(test.name+" matched selector", func(t *testing.T) {
@@ -380,7 +378,7 @@ func TestStoredExactTypesPrecedeMissingClassProfiles(t *testing.T) {
 	if storedType := concreteStoredServerType(padded); storedType != "" {
 		t.Fatalf("padded class placeholder treated as stored type %q", storedType)
 	}
-	if got := awsLaunchCandidates(padded); !reflect.DeepEqual(got, []string{" fast ", "t3.small"}) {
+	if got := AWSLaunchCandidates(padded); !reflect.DeepEqual(got, []string{" fast ", "t3.small"}) {
 		t.Fatalf("padded custom class candidates=%v want literal plus policy fallback", got)
 	}
 }
@@ -400,7 +398,7 @@ func TestProviderCandidateStoredTypeFallbackParity(t *testing.T) {
 		fastType      string
 	}{
 		{
-			name: "AWS", candidates: awsLaunchCandidates,
+			name: "AWS", candidates: AWSLaunchCandidates,
 			base:       Config{Provider: "aws", TargetOS: targetLinux, WindowsMode: windowsModeNormal, Architecture: ArchitectureAMD64, architectureExplicit: true},
 			missing:    Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeNormal, Architecture: ArchitectureARM64, architectureExplicit: true},
 			customWant: []string{storedType, "custom-shape", "t3.small"}, uppercaseWant: []string{storedType, "FAST", "t3.small"}, paddedWant: []string{storedType, " fast ", "t3.small"},
@@ -414,14 +412,14 @@ func TestProviderCandidateStoredTypeFallbackParity(t *testing.T) {
 			standardType: "Standard_D32ads_v6", fastType: "Standard_D64ads_v6",
 		},
 		{
-			name: "GCP", candidates: gcpMachineTypeCandidatesForConfig,
+			name: "GCP", candidates: GCPMachineTypeCandidatesForConfig,
 			base:       Config{Provider: "gcp", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true},
 			missing:    Config{Provider: "gcp", TargetOS: targetLinux, Architecture: ArchitectureARM64, architectureExplicit: true},
 			customWant: []string{storedType, "custom-shape"}, uppercaseWant: []string{storedType, "FAST"}, paddedWant: []string{storedType, " fast "},
 			standardType: "c4-standard-32", fastType: "c4-standard-64",
 		},
 		{
-			name: "Hetzner", candidates: hetznerServerTypeCandidatesForConfig,
+			name: "Hetzner", candidates: HetznerServerTypeCandidatesForConfig,
 			base:       Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true},
 			missing:    Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureARM64, architectureExplicit: true},
 			customWant: []string{storedType, "custom-shape"}, uppercaseWant: []string{storedType, "FAST"}, paddedWant: []string{storedType, " fast "},
@@ -528,7 +526,7 @@ func TestProviderCandidateStoredTypeFallbackParity(t *testing.T) {
 		Class: " custom-mac-type ", ServerType: storedType,
 	}
 	macWant := append([]string{storedType, macConfig.Class}, awsMacOSInstanceTypeCandidates()...)
-	if got := awsLaunchCandidates(macConfig); !reflect.DeepEqual(got, macWant) {
+	if got := AWSLaunchCandidates(macConfig); !reflect.DeepEqual(got, macWant) {
 		t.Fatalf("AWS custom macOS candidates=%v want %v", got, macWant)
 	}
 }
@@ -541,10 +539,10 @@ func TestServerTypeForConfigRecomputesNonExplicitStoredType(t *testing.T) {
 			return serverType, serverType != ""
 		},
 	}
-	providerRegistry[provider.Name()] = provider
-	t.Cleanup(func() { delete(providerRegistry, provider.Name()) })
+	providerRegistry[provider.Spec().Name] = provider
+	t.Cleanup(func() { delete(providerRegistry, provider.Spec().Name) })
 
-	cfg := Config{Provider: provider.Name(), TargetOS: targetWindows, Architecture: ArchitectureARM64, Class: "standard", ServerType: "stored-arm-type"}
+	cfg := Config{Provider: provider.Spec().Name, TargetOS: targetWindows, Architecture: ArchitectureARM64, Class: "standard", ServerType: "stored-arm-type"}
 	if got := serverTypeForConfig(cfg); got != "provider-default" {
 		t.Fatalf("server type=%q want provider-default", got)
 	}
@@ -569,20 +567,20 @@ func TestServerTypeForConfigRecomputesNonExplicitStoredType(t *testing.T) {
 
 func TestHetznerExplicitTypeMatchingClassIsExact(t *testing.T) {
 	matched := Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureAMD64, architectureExplicit: true, Class: "fast", ServerType: "fast", ServerTypeExplicit: true}
-	if got := hetznerServerTypeCandidatesForConfig(matched); !reflect.DeepEqual(got, []string{"fast"}) {
+	if got := HetznerServerTypeCandidatesForConfig(matched); !reflect.DeepEqual(got, []string{"fast"}) {
 		t.Fatalf("matched candidates=%v want [fast]", got)
 	}
 
 	missing := matched
 	missing.Architecture = ArchitectureARM64
-	if got := hetznerServerTypeCandidatesForConfig(missing); !reflect.DeepEqual(got, []string{"fast"}) {
+	if got := HetznerServerTypeCandidatesForConfig(missing); !reflect.DeepEqual(got, []string{"fast"}) {
 		t.Fatalf("missing-selector candidates=%v want [fast]", got)
 	}
 }
 
 func TestProviderClassCatalogSortsProfilesWithoutSortingFallbacks(t *testing.T) {
 	provider := selectorClassProfileProvider{}
-	catalog := providerClassCatalogFor(provider)
+	catalog := ProviderClassCatalogFor(provider)
 	if catalog.Profiles == nil {
 		t.Fatal("profiles is nil")
 	}

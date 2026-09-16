@@ -76,7 +76,7 @@ func TestIsCanonicalGCPServer(t *testing.T) {
 	leaseID := "cbx_123456abcdef"
 	slug := "blue-box"
 	canonical := Server{
-		Name: leaseProviderName(leaseID, slug),
+		Name: LeaseProviderName(leaseID, slug),
 		Labels: map[string]string{
 			"crabbox":    "true",
 			"created_by": "crabbox",
@@ -182,10 +182,10 @@ func TestGCPListCrabboxServersAggregatesZones(t *testing.T) {
 	var gotPartialSuccess string
 	fallbackLeaseID := "cbx_333333333333"
 	fallbackSlug := "fallback-zone"
-	fallbackName := leaseProviderName(fallbackLeaseID, fallbackSlug)
+	fallbackName := LeaseProviderName(fallbackLeaseID, fallbackSlug)
 	otherLeaseID := "cbx_444444444444"
 	otherSlug := "other-zone"
-	otherName := leaseProviderName(otherLeaseID, otherSlug)
+	otherName := LeaseProviderName(otherLeaseID, otherSlug)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotFilter = r.URL.Query().Get("filter")

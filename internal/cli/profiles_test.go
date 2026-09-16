@@ -5,12 +5,16 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -194,6 +198,65 @@ func TestProfileEnvAllowRespectsEnvironmentAndCLIPrecedence(t *testing.T) {
 	}
 }
 
+func TestEmptyReplacementListsPreserveAdditiveProfileAndSyncPolicy(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Chdir(t.TempDir())
+	writeReplacementListConfig(t, userConfigPath(), `profile: qa
+env:
+  allow: [BUILD_FLAVOR]
+sync:
+  exclude: [user-cache]
+profiles:
+  qa:
+    env:
+      allow: [PROFILE_FIRST]
+    envAllow: [PROFILE_SECOND]
+`)
+	writeReplacementListConfig(t, "crabbox.yaml", `env:
+  allow: []
+sync:
+  exclude: [repo-cache]
+profiles:
+  qa:
+    envAllow: [PROFILE_THIRD, PROFILE_FIRST]
+`)
+	writeReplacementListConfig(t, ".crabbox.yaml", `sync:
+  exclude: []
+profiles:
+  qa:
+    env:
+      allow: []
+    envAllow: []
+`)
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applySelectedProfileConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.EnvAllow, ","); got != "PROFILE_FIRST,PROFILE_SECOND,PROFILE_THIRD" {
+		t.Fatalf("profile additions after top-level clear=%q", got)
+	}
+	wantExcludes := appendOrderedStrings(baseConfig().Sync.Excludes, "user-cache", "repo-cache")
+	if strings.Join(cfg.Sync.Excludes, ",") != strings.Join(wantExcludes, ",") {
+		t.Fatalf("empty sync.exclude cleared additive exclusions: %v", cfg.Sync.Excludes)
+	}
+	t.Setenv("CRABBOX_ENV_ALLOW", "BUILD_FLAVOR")
+	cfg, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applySelectedProfileConfig(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	applyRunEnvAllowFlags(&cfg, []string{"CI"})
+	if got := strings.Join(cfg.EnvAllow, ","); got != "BUILD_FLAVOR,CI" {
+		t.Fatalf("env replacement followed by CLI append=%q", got)
+	}
+}
+
 func TestPresetCommandPreservesQuotedArguments(t *testing.T) {
 	cfg := Config{
 		Profile: "qa",
@@ -278,6 +341,10 @@ func TestPresetCommandTreatsVariablesAsArgValues(t *testing.T) {
 	if shouldUseShellWithLiteralArgs(expansion.Command, expansion.LiteralArgs) {
 		t.Fatalf("placeholder value should not introduce shell operators: %#v", expansion.Command)
 	}
+	intent, err := ParseCommandIntent(expansion.Command, false, expansion.LiteralArgs)
+	if err != nil || !slices.Equal(intent.Argv("bash", "-lc"), want) {
+		t.Fatalf("profile command intent=%q err=%v", intent.Argv("bash", "-lc"), err)
+	}
 	if got := runCommandDisplayWithLiteralArgs(expansion.Command, false, expansion.LiteralArgs); got != "pnpm qa --scenario '&&' --fail-fast" {
 		t.Fatalf("display=%q", got)
 	}
@@ -290,6 +357,10 @@ func TestPresetCommandTreatsVariablesAsArgValues(t *testing.T) {
 	}
 	if shouldUseShellWithLiteralArgs(single.Command, single.LiteralArgs) {
 		t.Fatalf("single placeholder value should remain a literal arg: %#v", single.Command)
+	}
+	singleIntent, err := ParseCommandIntent(single.Command, false, single.LiteralArgs)
+	if err != nil || !slices.Equal(singleIntent.Argv("bash", "-lc"), single.Command) {
+		t.Fatalf("single profile intent=%q err=%v", singleIntent.Argv("bash", "-lc"), err)
 	}
 	if got := runCommandShellStringWithLiteralArgs(single.Command, false, single.LiteralArgs); got != "'echo ok && false'" {
 		t.Fatalf("single shell command=%q", got)
@@ -729,13 +800,37 @@ func TestProfileDoctorWorkdirUsesConfiguredWorkRoot(t *testing.T) {
 }
 
 func TestSafeArtifactGlob(t *testing.T) {
-	if !safeArtifactGlob(".artifacts/qa-e2e/**") {
-		t.Fatal("expected QA artifact glob to be accepted")
+	for _, glob := range []string{".artifacts/qa-e2e/**", "reports/result..json", "reports/.../proof.json", ".gitignore"} {
+		if !safeArtifactGlob(glob) {
+			t.Fatalf("expected safe glob %q to be accepted", glob)
+		}
 	}
-	for _, glob := range []string{"", "../secret", "/etc/passwd", ".//etc/passwd", ".artifacts/$(id)", "-C/tmp", "{/,}etc/passwd", ".{.,}/secret"} {
+	for _, glob := range []string{"", "..", "../secret", "reports/../secret", "/etc/passwd", ".//etc/passwd", ".artifacts/$(id)", "-C/tmp", "{/,}etc/passwd", ".{.,}/secret"} {
 		if safeArtifactGlob(glob) {
 			t.Fatalf("expected unsafe glob %q to be rejected", glob)
 		}
+	}
+}
+
+func TestRunArtifactGlobsValidateComponents(t *testing.T) {
+	for flag, validate := range map[string]func([]string) error{
+		"--artifact-glob":    ValidateRunArtifactGlobs,
+		"--require-artifact": ValidateRequiredRunArtifactGlobs,
+	} {
+		t.Run(flag, func(t *testing.T) {
+			for _, glob := range []string{"reports/result..json", "reports/.gitignore", "reports/.crabbox-report.json", "reports/.git-backup/**", "**/*"} {
+				if err := validate([]string{glob}); err != nil {
+					t.Fatalf("safe glob %q rejected: %v", glob, err)
+				}
+			}
+			for _, glob := range []string{"..", "reports/../proof.json", ".git", ".git/config", ".crabbox/evidence/proof.json", "reports/.git/config", "./reports/.crabbox/**", "reports/**/.git/config"} {
+				err := validate([]string{glob})
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, flag) {
+					t.Fatalf("unsafe glob %q error=%v, want flag-specific exit 2", glob, err)
+				}
+			}
+		})
 	}
 }
 
@@ -784,6 +879,10 @@ func TestRunArtifactCollectScriptExcludesEnvProfiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".artifacts", "result.txt"), []byte("ok\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	proof := []byte("{\"ok\":true}\n")
+	if err := os.WriteFile(filepath.Join(dir, ".artifacts", "result..json"), proof, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	archivePath := filepath.Join(dir, ".crabbox", "artifacts.tgz")
 	script := runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", []string{"./**"})
 	if out, err := exec.Command("bash", "-lc", script).CombinedOutput(); err != nil {
@@ -797,6 +896,9 @@ func TestRunArtifactCollectScriptExcludesEnvProfiles(t *testing.T) {
 	}
 	if !stringSliceContains(names, ".artifacts/result.txt") {
 		t.Fatalf("archive missing artifact file: %#v", names)
+	}
+	if got := readTarGzContents(t, archivePath)[".artifacts/result..json"]; !bytes.Equal(got, proof) {
+		t.Fatalf("archive lost consecutive-dot artifact bytes: %q", got)
 	}
 }
 
@@ -827,14 +929,22 @@ func TestRunArtifactRequireScriptMatchesRequiredArtifacts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "reports", "data", "nested", "quality.json"), []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	script := runArtifactRequireScript(dir, []string{"reports/data/manifest.json", "reports/data/**/*.json"})
+	if err := os.WriteFile(filepath.Join(dir, "reports", "data", "result..json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	globs := []string{"reports/data/manifest.json", "reports/data/result..json", "reports/data/**/*.json"}
+	if err := validateRequiredRunArtifactGlobs(globs); err != nil {
+		t.Fatal(err)
+	}
+	script := runArtifactRequireScript(dir, globs)
 	out, err := exec.Command("bash", "-lc", script).CombinedOutput()
 	if err != nil {
 		t.Fatalf("require script failed: %v\n%s", err, out)
 	}
 	for _, want := range []string{
 		"required artifact reports/data/manifest.json matched=1",
-		"required artifact reports/data/**/*.json matched=2",
+		"required artifact reports/data/result..json matched=1",
+		"required artifact reports/data/**/*.json matched=3",
 	} {
 		if !strings.Contains(string(out), want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
@@ -1157,6 +1267,494 @@ func TestArtifactGlobSearchRootUsesLiteralPrefix(t *testing.T) {
 	}
 }
 
+func TestRunArtifactNestedGlobAvoidsSiblingEnumeration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("artifact glob scripts require a POSIX target")
+	}
+	for _, mode := range []string{"required", "collect", "delegated", "delegated-file"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, name := range []string{
+				"reports/data/proof.txt",
+				"reports/data/nested/result.txt",
+				"reports/sibling/unrelated.txt",
+			} {
+				writeFile(t, filepath.Join(dir, name), name)
+			}
+			globs := []string{"reports/data/**/*.txt"}
+			script := runArtifactRequireScript(dir, globs)
+			archive := filepath.Join(t.TempDir(), "archive.tgz")
+			args := []string(nil)
+			switch mode {
+			case "collect":
+				archive = filepath.Join(dir, ".crabbox", "artifacts.tgz")
+				script = runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", globs)
+			case "delegated":
+				script = DelegatedRunArtifactScript(globs, globs, 2, 1024*1024)
+			case "delegated-file":
+				parent, err := filepath.EvalSymlinks(filepath.Dir(archive))
+				if err != nil {
+					t.Fatal(err)
+				}
+				archive = filepath.Join(parent, "archive.tgz")
+				script = DelegatedRunArtifactFileScript(globs, globs, 2, 1024*1024)
+				args = []string{archive}
+			}
+			trace := filepath.Join(t.TempDir(), "enumerated")
+			prefix := "find() { command find \"$@\" | tee -a " + shellQuote(trace) + "; }\n"
+			cmd := exec.CommandContext(t.Context(), "bash", append([]string{"-c", prefix + script, "--"}, args...)...)
+			cmd.Dir = dir
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("generated %s script failed: %v\n%s", mode, err, out)
+			}
+			if mode != "collect" && !strings.Contains(string(out), "required artifact reports/data/**/*.txt matched=2") {
+				t.Fatalf("required membership changed: %s", out)
+			}
+			if mode == "delegated" {
+				_, encoded, begin := strings.Cut(string(out), DelegatedRunArtifactBeginMarker+"\n")
+				encoded, _, end := strings.Cut(encoded, DelegatedRunArtifactEndMarker+"\n")
+				if !begin || !end {
+					t.Fatalf("missing archive framing: %s", out)
+				}
+				data, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(encoded), ""))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(archive, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode != "required" {
+				names := tarGzNames(t, archive)
+				slices.Sort(names)
+				want := []string{"reports/data/nested/result.txt", "reports/data/proof.txt"}
+				if !slices.Equal(names, want) {
+					t.Fatalf("archive membership=%q, want %q", names, want)
+				}
+			}
+			enumerated, err := os.ReadFile(trace)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(enumerated, []byte("reports/data/proof.txt\x00")) {
+				t.Fatalf("real find did not enumerate the selected file: %q", enumerated)
+			}
+			if bytes.Contains(enumerated, []byte("reports/sibling/unrelated.txt\x00")) {
+				t.Fatalf("generated %s script unnecessarily enumerated sibling file; selected membership is correct; find output=%q", mode, enumerated)
+			}
+		})
+	}
+}
+
+func TestRunArtifactNestedGlobRequiresExactDirectoryEntry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("artifact glob scripts require a POSIX target")
+	}
+	for _, tt := range []struct {
+		name, entry, wantRoot string
+	}{
+		{name: "mismatched spelling", entry: "reports/DATA", wantRoot: "reports"},
+		{name: "exact spelling", entry: "reports/data", wantRoot: "reports/data"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "reports/data/proof.txt"), "selected")
+			writeFile(t, filepath.Join(dir, "reports/sibling/unrelated.txt"), "unrelated")
+			traceDir := t.TempDir()
+			probe := filepath.Join(traceDir, "probe")
+			roots := filepath.Join(traceDir, "roots")
+			enumerated := filepath.Join(traceDir, "enumerated")
+			// Only the shallow entry spelling is controlled. Both directories and
+			// recursive discovery are real; this is not a case-insensitive volume.
+			prefix := `find() {
+  if [ "$#" -eq 8 ] && [ "$*" = 'reports -mindepth 1 -maxdepth 1 -type d -print0' ]; then
+    printf 'probe\n' >> ` + shellQuote(probe) + `
+    printf '%s\0' ` + shellQuote(tt.entry) + `
+  else
+    printf '%s\n' "$1" >> ` + shellQuote(roots) + `
+    command find "$@" | tee -a ` + shellQuote(enumerated) + `
+  fi
+}
+`
+			script := runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", []string{"reports/data/**/*.txt"})
+			cmd := exec.CommandContext(t.Context(), "bash", "-c", prefix+script)
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("controlled entry probe failed: %v\n%s", err, out)
+			}
+			probeCalls, err := os.ReadFile(probe)
+			if err != nil || string(probeCalls) != "probe\n" {
+				t.Fatalf("real candidate safety checks did not reach one shallow probe: %q, %v", probeCalls, err)
+			}
+			archive := filepath.Join(dir, ".crabbox", "artifacts.tgz")
+			if names := tarGzNames(t, archive); !slices.Equal(names, []string{"reports/data/proof.txt"}) {
+				t.Fatalf("controlled probe changed membership: %q", names)
+			}
+			if got := readTarGzContents(t, archive)["reports/data/proof.txt"]; string(got) != "selected" {
+				t.Fatalf("selected file content changed: %q", got)
+			}
+			actualRoots, err := os.ReadFile(roots)
+			if err != nil || string(actualRoots) != tt.wantRoot+"\n" {
+				t.Fatalf("recursive find root=%q, want %q; error=%v", actualRoots, tt.wantRoot+"\n", err)
+			}
+			paths, err := os.ReadFile(enumerated)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(paths, []byte("reports/data/proof.txt\x00")) {
+				t.Fatalf("selected file was not discovered by real find: %q", paths)
+			}
+			if got := bytes.Contains(paths, []byte("reports/sibling/unrelated.txt\x00")); got != (tt.wantRoot == "reports") {
+				t.Fatalf("real sibling discovery=%t, want legacy traversal=%t: %q", got, tt.wantRoot == "reports", paths)
+			}
+		})
+	}
+}
+
+func TestRunArtifactNonRecursiveGlobBoundsEnumeration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("artifact glob scripts require a POSIX target")
+	}
+	for _, tt := range []struct {
+		name, glob, setup, probeEntry string
+		want, overDepth, stillVisited []string
+	}{
+		{name: "root", glob: "*.json", want: []string{"root.json"}, overDepth: []string{"reports/data/summary.json"}},
+		{name: "one directory", glob: "reports/*.json", want: []string{"reports/root.json"}, overDepth: []string{"reports/data/summary.json"}},
+		{name: "narrowed directory", glob: "reports/data/*.json", want: []string{"reports/data/a.json", "reports/data/summary.json"}, overDepth: []string{"reports/data/deep/hidden.json"}},
+		{name: "relative prefix", glob: "./reports/data/*.json", want: []string{"reports/data/a.json", "reports/data/summary.json"}, overDepth: []string{"reports/data/deep/hidden.json"}},
+		{name: "partial filename", glob: "reports/data/sum*.json", want: []string{"reports/data/summary.json"}, overDepth: []string{"reports/data/deep/hidden.json"}},
+		{name: "question mark", glob: "rep*/data/?.json", want: []string{"reports/data/a.json"}, overDepth: []string{"reports/data/deep/hidden.json"}},
+		{name: "wildcard directory", glob: "reports/run.*/diagnostics/*.json", want: []string{"reports/run.a/diagnostics/start.json", "reports/run.b/diagnostics/end.json"}, overDepth: []string{"reports/run.a/diagnostics/deep/hidden.json", "reports/runtime/lib/node_modules/pkg/package.json"}},
+		{name: "folded matching", glob: "reports/data/*.json", setup: "shopt -s nocasematch\n", want: []string{"reports/data/UPPER.JSON", "reports/data/a.json", "reports/data/summary.json"}, overDepth: []string{"reports/data/deep/hidden.json"}},
+		{name: "refused narrowing", glob: "reports/data/*.json", probeEntry: "reports/DATA", want: []string{"reports/data/a.json", "reports/data/summary.json"}, overDepth: []string{"reports/data/deep/hidden.json"}},
+		{name: "recursive", glob: "reports/data/**/*.json", want: []string{"reports/data/a.json", "reports/data/deep/hidden.json", "reports/data/summary.json"}, stillVisited: []string{"reports/data/deep/hidden.json"}},
+		{name: "embedded recursive", glob: "reports/pre**post.json", want: []string{"reports/pre/inner/post.json"}, stillVisited: []string{"reports/runtime/lib/node_modules/pkg/package.json"}},
+		{name: "double separator", glob: "reports/data//*.json", stillVisited: []string{"reports/data/deep/hidden.json"}},
+		{name: "dot component", glob: "reports/./data/*.json", stillVisited: []string{"reports/data/deep/hidden.json"}},
+		{name: "leading space", glob: " reports/data/*.json", stillVisited: []string{"reports/data/deep/hidden.json"}},
+	} {
+		for _, mode := range []string{"required", "collect", "delegated", "delegated-file"} {
+			t.Run(tt.name+"/"+mode, func(t *testing.T) {
+				dir := t.TempDir()
+				for _, name := range []string{
+					"root.json", "reports/root.json", "reports/data/a.json",
+					"reports/data/summary.json", "reports/data/UPPER.JSON", "reports/data/deep/hidden.json",
+					"reports/run.a/diagnostics/start.json", "reports/run.b/diagnostics/end.json",
+					"reports/run.a/diagnostics/deep/hidden.json",
+					"reports/runtime/lib/node_modules/pkg/package.json", "reports/pre/inner/post.json",
+					"reports/.git/private.json", "reports/.crabbox/private.json",
+				} {
+					writeFile(t, filepath.Join(dir, name), name)
+				}
+				traceDir := t.TempDir()
+				prefix := tt.setup + "find() {\n"
+				if tt.probeEntry != "" {
+					// Only the existing shallow spelling probe is controlled.
+					prefix += `if [ "$*" = 'reports -mindepth 1 -maxdepth 1 -type d -print0' ]; then printf '%s\0' ` + shellQuote(tt.probeEntry) + "; return; fi\n"
+				}
+				prefix += "local trace\ntrace=$(mktemp " + shellQuote(filepath.Join(traceDir, "find.XXXXXX")) + ")\n" +
+					"printf '%s\\0' \"$@\" > \"$trace.argv\"\ncommand find \"$@\" | tee \"$trace.paths\"\n}\n"
+				globs := []string{tt.glob}
+				script := runArtifactRequireScript(dir, globs)
+				archiveDir, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				archive := filepath.Join(archiveDir, "archive.tgz")
+				var args []string
+				switch mode {
+				case "collect":
+					archive = filepath.Join(dir, ".crabbox/artifacts.tgz")
+					script = runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", globs)
+				case "delegated":
+					script = DelegatedRunArtifactScript(globs, globs, 16, 1024*1024)
+				case "delegated-file":
+					script = DelegatedRunArtifactFileScript(globs, globs, 16, 1024*1024)
+					args = []string{archive}
+				}
+				cmd := exec.CommandContext(t.Context(), "bash", append([]string{"-c", prefix + script, "--"}, args...)...)
+				cmd.Dir = dir
+				cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+				out, err := cmd.CombinedOutput()
+				missing := len(tt.want) == 0 && mode != "collect"
+				if missing {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) || exitErr.ExitCode() != 8 {
+						t.Fatalf("missing required exit changed: %v\n%s", err, out)
+					}
+					if _, statErr := os.Stat(archive); !errors.Is(statErr, os.ErrNotExist) || strings.Contains(string(out), DelegatedRunArtifactBeginMarker) {
+						t.Fatalf("missing required artifact published an archive: %v\n%s", statErr, out)
+					}
+				} else if err != nil {
+					t.Fatalf("generated script failed: %v\n%s", err, out)
+				}
+				if !missing && mode != "collect" {
+					if !strings.Contains(string(out), fmt.Sprintf("required artifact %s matched=%d", tt.glob, len(tt.want))) {
+						t.Fatalf("required membership changed: %s", out)
+					}
+				}
+				if !missing && mode == "delegated" {
+					_, encoded, begin := strings.Cut(string(out), DelegatedRunArtifactBeginMarker+"\n")
+					encoded, _, end := strings.Cut(encoded, DelegatedRunArtifactEndMarker+"\n")
+					if !begin || !end {
+						t.Fatal("missing archive framing")
+					}
+					data, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(encoded), ""))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(archive, data, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if !missing && mode != "required" {
+					names := tarGzNames(t, archive)
+					slices.Sort(names)
+					if !slices.Equal(names, tt.want) {
+						t.Fatalf("archive membership=%q, want %q", names, tt.want)
+					}
+					contents := readTarGzContents(t, archive)
+					for _, name := range tt.want {
+						if string(contents[name]) != name {
+							t.Fatalf("archive content changed for %s", name)
+						}
+					}
+				}
+				t.Logf("selection/required outcome/archive content PASS: %q", tt.want)
+				traces, err := filepath.Glob(filepath.Join(traceDir, "*.paths"))
+				if err != nil || len(traces) == 0 {
+					t.Fatalf("missing find traces: %v", err)
+				}
+				var enumerated []byte
+				for _, path := range traces {
+					paths, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					argv, err := os.ReadFile(strings.TrimSuffix(path, ".paths") + ".argv")
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Logf("find argv=%q output=%q", argv, paths)
+					enumerated = append(enumerated, paths...)
+				}
+				for _, name := range append(append([]string{}, tt.want...), tt.stillVisited...) {
+					if !bytes.Contains(enumerated, []byte(name+"\x00")) {
+						t.Errorf("real discovery lost %s", name)
+					}
+				}
+				for _, name := range tt.overDepth {
+					if bytes.Contains(enumerated, []byte(name+"\x00")) {
+						t.Errorf("over-depth find enumeration despite correct selection: %s", name)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestArtifactGlobNarrowSearchRootAddsOneLiteralDirectory(t *testing.T) {
+	for glob, want := range map[string]string{
+		"reports/data/**/*.txt":       "reports/data",
+		"./reports/data/*.txt":        "reports/data",
+		".artifacts/run/**":           ".artifacts/run",
+		"reports/data/nested/?.txt":   "reports/data/nested",
+		"reports/**":                  "",
+		"**/*.txt":                    "",
+		"reports/da*/**/*.txt":        "",
+		"reports/data/pro*.txt":       "",
+		"reports/data/proof.txt":      "",
+		"reports/data//**/*.txt":      "",
+		"reports/./data/**/*.txt":     "",
+		"reports/data/./*.txt":        "",
+		" reports/data/**/*.txt":      "",
+		"reports/data/**/*.txt ":      "",
+		"reports/../data/**/*.txt":    "",
+		"reports/\u00a0data/**/*.txt": "",
+	} {
+		if got := artifactGlobNarrowSearchRoot(glob); got != want {
+			t.Errorf("artifactGlobNarrowSearchRoot(%q)=%q, want %q", glob, got, want)
+		}
+	}
+}
+
+func TestRunArtifactNestedGlobPreservesSelection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("artifact glob scripts require a POSIX target")
+	}
+	dir := t.TempDir()
+	for _, name := range []string{
+		"reports/data/proof.txt",
+		"reports/data/nested/result.txt",
+		"reports/data/UPPER.TXT",
+		"reports/Mixed/proof.txt",
+		"reports/sibling/unrelated.txt",
+		"reports/data/.git/private.txt",
+		"reports/data/.crabbox/private.txt",
+	} {
+		writeFile(t, filepath.Join(dir, name), name)
+	}
+	for link, target := range map[string]string{
+		"reports/data/leaf.txt":     "proof.txt",
+		"reports/data/dangling.txt": "missing.txt",
+		"reports/link":              "data",
+	} {
+		if err := os.Symlink(target, filepath.Join(dir, link)); err != nil {
+			t.Fatalf("symlink fixture unavailable: %v", err)
+		}
+	}
+	recursive := []string{"reports/data/leaf.txt", "reports/data/nested/result.txt", "reports/data/proof.txt"}
+	for _, tt := range []struct {
+		name, glob, setup, fallbackRoot string
+		want                            []string
+	}{
+		{name: "recursive", glob: "reports/data/**/*.txt", want: recursive},
+		{name: "relative prefix", glob: "./reports/data/**/*.txt", want: recursive},
+		{name: "single level", glob: "reports/data/*.txt", want: []string{"reports/data/leaf.txt", "reports/data/proof.txt"}},
+		{name: "partial filename", glob: "reports/data/pro*.txt", fallbackRoot: "reports/data", want: []string{"reports/data/proof.txt"}},
+		{name: "partial directory", glob: "reports/da*/**/*.txt", fallbackRoot: "reports", want: recursive},
+		{name: "double slash", glob: "reports/data//**/*.txt", fallbackRoot: "reports"},
+		{name: "dot component", glob: "reports/./data/**/*.txt", fallbackRoot: "reports"},
+		{name: "leading space", glob: " reports/data/**/*.txt", fallbackRoot: "reports"},
+		{name: "case different directory", glob: "reports/mixed/**/*.txt", fallbackRoot: "reports"},
+		{name: "case folded directory", glob: "reports/mixed/**/*.txt", setup: "shopt -s nocasematch\n", fallbackRoot: "reports", want: []string{"reports/Mixed/proof.txt"}},
+		{name: "case folded filenames", glob: "reports/data/**/*.txt", setup: "shopt -s nocasematch\n", fallbackRoot: "reports", want: []string{"reports/data/UPPER.TXT", "reports/data/leaf.txt", "reports/data/nested/result.txt", "reports/data/proof.txt"}},
+		{name: "shell glob settings", glob: "reports/data/**/*.txt", setup: "GLOBIGNORE='data:*.txt'\nshopt -s nocaseglob\nset -f\n", want: recursive},
+		{name: "nocaseglob only", glob: "reports/data/**/*.txt", setup: "shopt -s nocaseglob\n", want: recursive},
+		{name: "directory symlink", glob: "reports/link/**/*.txt", fallbackRoot: "reports"},
+		{name: "missing directory", glob: "reports/absent/**/*.txt", fallbackRoot: "reports"},
+		{name: "git component", glob: "reports/data/.git/**/*.txt", fallbackRoot: "reports/data"},
+		{name: "control component", glob: "reports/data/.crabbox/**/*.txt", fallbackRoot: "reports/data"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			trace := filepath.Join(t.TempDir(), "roots")
+			prefix := tt.setup + "find() { printf '%s\\n' \"$1\" >> " + shellQuote(trace) + "; command find \"$@\"; }\n"
+			globs := []string{tt.glob, tt.glob}
+			archive := filepath.Join(dir, ".crabbox", "artifacts.tgz")
+			cmd := exec.CommandContext(t.Context(), "bash", "-c", prefix+runArtifactCollectScript(dir, ".crabbox/artifacts.tgz", globs))
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("collect failed: %v\n%s", err, out)
+			}
+			names := tarGzNames(t, archive)
+			slices.Sort(names)
+			if !slices.Equal(names, tt.want) {
+				t.Fatalf("archive membership=%q, want %q", names, tt.want)
+			}
+			if slices.Contains(names, "reports/data/leaf.txt") {
+				header := readTarGzHeaders(t, archive)["reports/data/leaf.txt"]
+				if header.Typeflag != tar.TypeSymlink || header.Linkname != "proof.txt" {
+					t.Fatalf("leaf symlink changed: %+v", header)
+				}
+				if got := readTarGzContents(t, archive)["reports/data/proof.txt"]; string(got) != "reports/data/proof.txt" {
+					t.Fatalf("selected contents changed: %q", got)
+				}
+			}
+			if tt.fallbackRoot != "" {
+				roots, err := os.ReadFile(trace)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, root := range strings.Split(strings.TrimSpace(string(roots)), "\n") {
+					if root != tt.fallbackRoot {
+						t.Fatalf("legacy search root changed: %q, want %q", root, tt.fallbackRoot)
+					}
+				}
+			}
+			cmd = exec.CommandContext(t.Context(), "bash", "-c", tt.setup+runArtifactRequireScript(dir, globs))
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+			out, err = cmd.CombinedOutput()
+			if len(tt.want) > 0 {
+				want := fmt.Sprintf("required artifact %s matched=%d", tt.glob, len(tt.want))
+				if err != nil || strings.Count(string(out), want) != 2 {
+					t.Fatalf("required membership changed: %v\n%s", err, out)
+				}
+			} else {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != 8 {
+					t.Fatalf("missing required artifact: error=%v, want exit 8; output=%s", err, out)
+				}
+			}
+		})
+	}
+}
+
+func TestRunArtifactNestedGlobKeepsFilenameNormalization(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("artifact glob scripts require a POSIX target")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "reports/data/proof.txt\n"), "proof")
+	cmd := exec.CommandContext(t.Context(), "bash", "-c", runArtifactRequireScript(dir, []string{"reports/data/*.txt"}))
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "required artifact reports/data/*.txt matched=1") {
+		t.Fatalf("required filename normalization changed: %v\n%s", err, out)
+	}
+}
+
+func TestRunArtifactNestedGlobPreservesDelegatedLimits(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("artifact glob scripts require a POSIX target")
+	}
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "reports/data/a.txt"), "first")
+	writeFile(t, filepath.Join(dir, "reports/data/b.txt"), "second")
+	globs := []string{"reports/data/**/*.txt", "reports/data/*.txt"}
+	for _, tt := range []struct {
+		name     string
+		required []string
+		maxFiles int
+		maxBytes int64
+		wantCode int
+	}{
+		{name: "deduplicated at file cap", maxFiles: 2, maxBytes: 1024 * 1024},
+		{name: "file cap", maxFiles: 1, maxBytes: 1024 * 1024, wantCode: 9},
+		{name: "byte cap", maxFiles: 2, maxBytes: 1, wantCode: 9},
+		{name: "required missing", required: []string{"reports/absent/**/*.txt"}, maxFiles: 2, maxBytes: 1024 * 1024, wantCode: 8},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, fileMode := range []bool{false, true} {
+				script := DelegatedRunArtifactScript(tt.required, globs, tt.maxFiles, tt.maxBytes)
+				args := []string(nil)
+				directory, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				archive := filepath.Join(directory, "archive.tgz")
+				if fileMode {
+					script = DelegatedRunArtifactFileScript(tt.required, globs, tt.maxFiles, tt.maxBytes)
+					args = []string{archive}
+				}
+				cmd := exec.CommandContext(t.Context(), "bash", append([]string{"-c", script, "--"}, args...)...)
+				cmd.Dir = dir
+				cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+				out, err := cmd.CombinedOutput()
+				code := 0
+				if err != nil {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) {
+						t.Fatal(err)
+					}
+					code = exitErr.ExitCode()
+				}
+				if code != tt.wantCode {
+					t.Fatalf("file mode=%t: exit=%d want=%d; output=%s", fileMode, code, tt.wantCode, out)
+				}
+				if code != 0 {
+					if _, err := os.Stat(archive); !errors.Is(err, os.ErrNotExist) || strings.Contains(string(out), DelegatedRunArtifactBeginMarker) {
+						t.Fatalf("failed collection published an archive: file mode=%t stat=%v output=%s", fileMode, err, out)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestArtifactScriptGeneratorsNeverExpandUserGlobs(t *testing.T) {
 	glob := "reports/*.json"
 	scripts := []string{
@@ -1307,6 +1905,13 @@ func TestProfileValidationRejectsWindowsOnlyDoctorTool(t *testing.T) {
 	var exitErr ExitError
 	if !AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "not supported for POSIX profile doctor") {
 		t.Fatalf("error=%v, want POSIX profile doctor rejection", err)
+	}
+}
+
+func TestProfileDoctorRejectsFunctionalPreflight(t *testing.T) {
+	err := validateProfileDoctorTools([]string{pythonVenvPreflightTool})
+	if ExitCodeForError(err, 0) != 2 || !strings.Contains(err.Error(), "not supported for POSIX profile doctor") {
+		t.Fatalf("functional run preflight was admitted as a version check: %v", err)
 	}
 }
 
@@ -1463,6 +2068,7 @@ profiles:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	downloadedArtifacts := []byte("artifacts\n")
 	script := `#!/bin/sh
 cmd=""
 for arg do cmd="$arg"; done
@@ -1470,7 +2076,7 @@ input="$(cat)"
 printf '%s\n%s\n---\n' "$cmd" "$input" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd
 $input" in
-  *"base64 <"*) printf 'YXJ0aWZhY3RzCg=='; exit 0 ;;
+  *"base64 <"*) printf '%s' ` + shellQuote(encodedRunDownloadPayload(int64(len(downloadedArtifacts)), downloadedArtifacts)) + `; exit 0 ;;
   *"base64 -d >"*) printf 'ok      node             v22.1.0\nok      pnpm             9.0.0\nok      docker-compose   Docker Compose version v2.27.0\n'; exit 0 ;;
   *"artifacts.tgz"*) printf 'warning: no artifact matches\n'; exit 0 ;;
 esac

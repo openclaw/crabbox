@@ -26,15 +26,15 @@ func (a App) namespaceInstanceProxy(ctx context.Context, args []string) error {
 	region := fs.String("region", "", "Namespace region")
 	keychain := fs.String("keychain", "", "Namespace keychain")
 	if err := fs.Parse(args); err != nil {
-		return exit(2, "%v", err)
+		return Exit(2, "%v", err)
 	}
 	if fs.NArg() != 1 {
-		return exit(2, "namespace instance proxy requires an instance id")
+		return Exit(2, "namespace instance proxy requires an instance id")
 	}
 
 	dir, err := os.MkdirTemp("", "crabbox-namespace-proxy-*")
 	if err != nil {
-		return exit(2, "create Namespace proxy temp directory: %v", err)
+		return Exit(2, "create Namespace proxy temp directory: %v", err)
 	}
 	defer os.RemoveAll(dir)
 	outputPath := filepath.Join(dir, "proxy.json")
@@ -57,7 +57,7 @@ func (a App) namespaceInstanceProxy(ctx context.Context, args []string) error {
 	cmd.Stdout = io.Discard
 	cmd.Stderr = a.Stderr
 	if err := cmd.Start(); err != nil {
-		return exit(2, "start nsc proxy: %v", err)
+		return Exit(2, "start nsc proxy: %v", err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -74,7 +74,7 @@ func (a App) namespaceInstanceProxy(ctx context.Context, args []string) error {
 	if err != nil {
 		_ = cmd.Process.Kill()
 		<-done
-		return exit(2, "connect Namespace proxy %s: %v", proxy.Endpoint, err)
+		return Exit(2, "connect Namespace proxy %s: %v", proxy.Endpoint, err)
 	}
 
 	processErr, processExited, copyErr := copyNamespaceProxyStreams(ctx, conn, a.input(), a.Stdout, done)
@@ -86,10 +86,10 @@ func (a App) namespaceInstanceProxy(ctx context.Context, args []string) error {
 		return ctx.Err()
 	}
 	if processErr != nil && copyErr == nil {
-		return exit(exitCode(processErr), "nsc proxy exited: %v", processErr)
+		return Exit(exitCode(processErr), "nsc proxy exited: %v", processErr)
 	}
 	if copyErr != nil && !errors.Is(copyErr, net.ErrClosed) {
-		return exit(2, "Namespace proxy stream: %v", copyErr)
+		return Exit(2, "Namespace proxy stream: %v", copyErr)
 	}
 	return nil
 }
@@ -158,11 +158,11 @@ func waitForNamespaceProxy(ctx context.Context, path string, done <-chan error, 
 		if data, err := os.ReadFile(path); err == nil {
 			var output namespaceProxyOutput
 			if err := json.Unmarshal(data, &output); err != nil {
-				outputErr = exit(5, "parse nsc proxy output: %v", err)
+				outputErr = Exit(5, "parse nsc proxy output: %v", err)
 			} else if strings.TrimSpace(output.Endpoint) == "" {
-				outputErr = exit(5, "nsc proxy output omitted endpoint")
+				outputErr = Exit(5, "nsc proxy output omitted endpoint")
 			} else if _, _, err := net.SplitHostPort(output.Endpoint); err != nil {
-				outputErr = exit(5, "invalid nsc proxy endpoint %q: %v", output.Endpoint, err)
+				outputErr = Exit(5, "invalid nsc proxy endpoint %q: %v", output.Endpoint, err)
 			} else {
 				return output, false, nil
 			}
@@ -173,15 +173,15 @@ func waitForNamespaceProxy(ctx context.Context, path string, done <-chan error, 
 				return namespaceProxyOutput{}, true, outputErr
 			}
 			if err == nil {
-				return namespaceProxyOutput{}, true, exit(5, "nsc proxy exited before publishing an endpoint")
+				return namespaceProxyOutput{}, true, Exit(5, "nsc proxy exited before publishing an endpoint")
 			}
-			return namespaceProxyOutput{}, true, exit(exitCode(err), "nsc proxy exited before publishing an endpoint: %v", err)
+			return namespaceProxyOutput{}, true, Exit(exitCode(err), "nsc proxy exited before publishing an endpoint: %v", err)
 		case <-ticker.C:
 		case <-deadline.C:
 			if outputErr != nil {
 				return namespaceProxyOutput{}, false, outputErr
 			}
-			return namespaceProxyOutput{}, false, exit(5, "timed out waiting for nsc proxy endpoint")
+			return namespaceProxyOutput{}, false, Exit(5, "timed out waiting for nsc proxy endpoint")
 		case <-ctx.Done():
 			return namespaceProxyOutput{}, false, ctx.Err()
 		}

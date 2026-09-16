@@ -77,7 +77,7 @@ func TestIncusCheckpointProcessDeathRetainsRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		client := captureCrashClient{fake, root, os.Getenv("CRABBOX_TEST_CAPTURE_PHASE")}
-		newClient = func(Config) (instanceClient, error) { return client, nil }
+		newClient = func(core.Config) (instanceClient, error) { return client, nil }
 		err = (core.App{Stdout: io.Discard, Stderr: io.Discard}).Run(context.Background(), []string{"checkpoint", "create", "--provider", "incus", "--id", lease.LeaseID, "--mode", "native", "--json"})
 		t.Fatalf("capture did not reach crash boundary: %v", err)
 	}
@@ -161,23 +161,23 @@ func TestIncusIncompleteAllocationLostDeleteReply(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			lease := LeaseTarget{LeaseID: req.RequestedLeaseID, Server: core.Server{Provider: providerName, CloudID: claim.FixedCreateIntent.Attempt["name"], Labels: claim.Labels}}
+			lease := core.LeaseTarget{LeaseID: req.RequestedLeaseID, Server: core.Server{Provider: providerName, CloudID: claim.FixedCreateIntent.Attempt["name"], Labels: claim.Labels}}
 			fake.lostDeleteReply = sentinel
-			if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease, Force: true}); err == nil {
+			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, Force: true}); err == nil {
 				t.Fatal("expected uncertain delete")
 			}
 			fake.lostDeleteReply = nil
 			if scenario == "cleanup-replay" {
-				err = b.Cleanup(context.Background(), CleanupRequest{})
+				err = b.Cleanup(context.Background(), core.CleanupRequest{})
 			} else {
 				resolved := lease
 				if reachedServer {
-					resolved, err = b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
+					resolved, err = b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
 					if err != nil {
 						t.Fatalf("resolve deleted incomplete allocation: %v", err)
 					}
 				}
-				err = b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: resolved, Force: true})
+				err = b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved, Force: true})
 			}
 			if !reachedServer {
 				if err == nil {

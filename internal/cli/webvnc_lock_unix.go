@@ -53,8 +53,12 @@ func forwardInheritedWebVNCDaemonPortReservation(cmd *exec.Cmd) (func(), error) 
 	return func() { _ = file.Close() }, nil
 }
 
-func lockWebVNCDaemonFile(file *os.File) error {
-	return unix.Flock(int(file.Fd()), unix.LOCK_EX)
+func tryLockWebVNCDaemonFile(file *os.File) (bool, error) {
+	err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func unlockWebVNCDaemonFile(file *os.File) error {

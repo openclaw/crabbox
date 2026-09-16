@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -15,9 +14,6 @@ func init() {
 }
 
 type Provider struct{}
-
-func (Provider) Name() string      { return "xcp-ng" }
-func (Provider) Aliases() []string { return nil }
 
 func (Provider) ClaimScope(cfg core.Config) string {
 	endpoint, err := xapiEndpoint(cfg.XCPNg.APIURL)
@@ -49,6 +45,7 @@ func (Provider) ClaimScope(cfg core.Config) string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationUsernamePassword),
 		Name:             "xcp-ng",
 		Family:           "xcp-ng",
 		Kind:             core.ProviderKindSSHLease,
@@ -98,49 +95,67 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	}
 	if core.FlagWasSet(fs, "xcp-ng-api-url") {
 		cfg.XCPNg.APIURL = *v.APIURL
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-username") {
 		cfg.XCPNg.Username = *v.Username
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-template") {
 		cfg.XCPNg.Template = *v.Template
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.XCPNg.TemplateUUID = ""
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.ServerType = xcpNgServerTypeForConfig(*cfg)
 	}
 	if core.FlagWasSet(fs, "xcp-ng-template-uuid") {
 		cfg.XCPNg.TemplateUUID = *v.TemplateUUID
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.XCPNg.Template = ""
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.ServerType = xcpNgServerTypeForConfig(*cfg)
 	}
 	if core.FlagWasSet(fs, "xcp-ng-sr") {
 		cfg.XCPNg.SR = *v.SR
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.XCPNg.SRUUID = ""
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-sr-uuid") {
 		cfg.XCPNg.SRUUID = *v.SRUUID
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.XCPNg.SR = ""
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-network") {
 		cfg.XCPNg.Network = *v.Network
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.XCPNg.NetworkUUID = ""
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-network-uuid") {
 		cfg.XCPNg.NetworkUUID = *v.NetworkUUID
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.XCPNg.Network = ""
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-host") {
 		cfg.XCPNg.Host = *v.Host
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	if core.FlagWasSet(fs, "xcp-ng-user") {
 		cfg.XCPNg.User = *v.User
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.SSHUser = *v.User
 	}
 	if core.FlagWasSet(fs, "xcp-ng-work-root") {
 		cfg.XCPNg.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 		cfg.WorkRoot = *v.WorkRoot
 	}
 	if core.FlagWasSet(fs, "xcp-ng-insecure-tls") {
 		cfg.XCPNg.InsecureTLS = *v.InsecureTLS
+		core.RecordProviderFlagInputs(cfg, true, "xcp-ng")
 	}
 	return nil
 }
@@ -149,12 +164,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return xcpNgServerTypeForConfig(cfg)
 }
 
-func (Provider) ServerTypeForClass(string) string { return "template" }
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewLeaseBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("xcp-ng", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

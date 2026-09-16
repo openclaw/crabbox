@@ -183,11 +183,186 @@ func TestAcquireRequiresProvisioningTemplate(t *testing.T) {
 	}
 }
 
+func TestKubeVirtConfigFlags(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cfg := core.BaseConfig()
+	cfg.KubeVirt.Context = "context-example"
+	fields := []struct {
+		field, flag, value string
+		local              bool
+	}{
+		{"Kubectl", "kubectl", "~/tool", true}, {"Virtctl", "virtctl", "~/tool", true}, {"Kubeconfig", "kubeconfig", "~/fixture", true}, {"Context", "context", "context-next", false}, {"Namespace", "namespace", "team-example", false}, {"Template", "template", "~/fixture", true}, {"SSHUser", "ssh-user", "example", false}, {"SSHKey", "ssh-key", "~/fixture", true}, {"SSHPublicKey", "ssh-public-key", "~/fixture", true}, {"SSHPort", "ssh-port", "2222", false}, {"WorkRoot", "work-root", "/workspace/~/guest", false},
+	}
+	fs := flag.NewFlagSet("config", flag.ContinueOnError)
+	v := (Provider{}).RegisterFlags(fs, cfg)
+	var args []string
+	for _, f := range fields {
+		name := "kubevirt-" + f.flag
+		if fs.Lookup(name).DefValue != reflect.ValueOf(cfg.KubeVirt).FieldByName(f.field).String() {
+			t.Fatalf("registration %s", name)
+		}
+		args = append(args, "--"+name+"="+f.value)
+	}
+	if fs.Lookup("kubevirt-delete-on-release").DefValue != "true" {
+		t.Fatal("bool default")
+	}
+	cfg.KubeVirt.Kubectl = "~/prior"
+	before := cfg.KubeVirt
+	if err := (Provider{}).ApplyFlags(&cfg, fs, v); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KubeVirt != before || core.DeleteOnReleaseExplicit(cfg, providerName) {
+		t.Fatal("unvisited flags mutated state or expanded path")
+	}
+	args = append(args, "--kubevirt-delete-on-release=false")
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Provider{}).ApplyFlags(&cfg, fs, v); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range fields {
+		want := f.value
+		if f.local {
+			want = filepath.Join(home, strings.TrimPrefix(want, "~/"))
+		}
+		if got := reflect.ValueOf(cfg.KubeVirt).FieldByName(f.field).String(); got != want {
+			t.Fatalf("%s=%q want %q", f.flag, got, want)
+		}
+	}
+	if cfg.WorkRoot != "/workspace/~/guest" || core.IsWorkRootExplicit(&cfg) || !core.DeleteOnReleaseExplicit(cfg, providerName) || cfg.KubeVirt.DeleteOnRelease {
+		t.Fatal("flag root/bool timing")
+	}
+	for _, f := range fields {
+		t.Run("empty-"+f.field, func(t *testing.T) {
+			c := core.BaseConfig()
+			c.KubeVirt.Context = "context-example"
+			fs := flag.NewFlagSet("empty", flag.ContinueOnError)
+			v := (Provider{}).RegisterFlags(fs, c)
+			if err := fs.Parse([]string{"--kubevirt-" + f.flag + "="}); err != nil {
+				t.Fatal(err)
+			}
+			err := (Provider{}).ApplyFlags(&c, fs, v)
+			required := f.field == "Kubectl" || f.field == "Virtctl" || f.field == "Context" || f.field == "Namespace" || f.field == "SSHUser" || f.field == "SSHPort"
+			if (err != nil) != required {
+				t.Fatalf("empty %s validation=%v", f.field, err)
+			}
+			if reflect.ValueOf(c.KubeVirt).FieldByName(f.field).String() != "" {
+				t.Fatal("empty not assigned before validation")
+			}
+		})
+	}
+	for _, foreign := range []any{nil, struct{}{}} {
+		c := core.Config{}
+		if err := (Provider{}).ApplyFlags(&c, flag.NewFlagSet("foreign", flag.ContinueOnError), foreign); err != nil || !reflect.DeepEqual(c, core.Config{}) {
+			t.Fatal("foreign values must precede validation")
+		}
+	}
+	for _, name := range []string{"kubevirt", "kubernetes-vm"} {
+		c := core.BaseConfig()
+		c.Provider = name
+		c.KubeVirt.Context = "context-example"
+		fs := flag.NewFlagSet(name, flag.ContinueOnError)
+		v := (Provider{}).RegisterFlags(fs, c)
+		if err := fs.Parse([]string{"--kubevirt-context=first", "--kubevirt-context=last", "--kubevirt-delete-on-release=true"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := (Provider{}).ApplyFlags(&c, fs, v); err != nil {
+			t.Fatal(err)
+		}
+		if c.KubeVirt.Context != "last" || !core.DeleteOnReleaseExplicit(c, providerName) {
+			t.Fatal("last-wins/equal marker")
+		}
+	}
+}
+
+func TestKubeVirtConfigWorkRoot(t *testing.T) {
+	base := core.BaseConfig()
+	for _, tc := range []struct{ name, generic, provider, want string }{
+		{"defaults", base.WorkRoot, base.KubeVirt.WorkRoot, base.KubeVirt.WorkRoot},
+		{"inherit", "/workspace/generic", base.KubeVirt.WorkRoot, "/workspace/generic"},
+		{"blank provider", "/workspace/generic", "", "/workspace/generic"},
+		{"space provider", "/workspace/generic", "  ", "/workspace/generic"},
+		{"custom provider", "/workspace/generic", "/workspace/provider", "/workspace/provider"},
+		{"padded default provider", "/workspace/generic", " " + base.KubeVirt.WorkRoot + " ", " " + base.KubeVirt.WorkRoot + " "},
+		{"padded generic", " /workspace/generic ", base.KubeVirt.WorkRoot, " /workspace/generic "},
+		{"blank generic", "", base.KubeVirt.WorkRoot, base.KubeVirt.WorkRoot},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.KubeVirt.Context = "context-example"
+			cfg.WorkRoot = tc.generic
+			cfg.KubeVirt.WorkRoot = tc.provider
+			before := cfg
+			route := (Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{Purpose: core.CommandRoutingReconnect})
+			var root string
+			for i, arg := range route.Args {
+				if arg == "--kubevirt-work-root" {
+					root = route.Args[i+1]
+				}
+			}
+			if root != tc.want {
+				t.Fatalf("routing root=%q want %q", root, tc.want)
+			}
+			backend, err := (Provider{}).Configure(cfg, core.Runtime{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := backend.(*leaseBackend).cfg
+			want := cfg.KubeVirt
+			want.WorkRoot = tc.want
+			if got.KubeVirt != want || got.WorkRoot != strings.TrimSpace(tc.want) || core.IsWorkRootExplicit(&got) || core.DeleteOnReleaseExplicit(got, providerName) {
+				t.Fatalf("configured roots/state=%#v", got.KubeVirt)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("input config mutated")
+			}
+		})
+	}
+	for _, tc := range []struct{ generic, provider, want string }{{base.WorkRoot, "/workspace/provider", "/workspace/provider"}, {" " + base.WorkRoot + " ", "/workspace/provider", " " + base.WorkRoot + " "}, {base.WorkRoot, "", base.WorkRoot}, {base.WorkRoot, "  ", "  "}} {
+		cfg := core.BaseConfig()
+		cfg.WorkRoot = tc.generic
+		cfg.KubeVirt.WorkRoot = tc.provider
+		if err := (Provider{}).RouteConfig(&cfg, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.WorkRoot != tc.want {
+			t.Fatal("RouteConfig raw reverse rule changed")
+		}
+	}
+}
+
+func TestKubeVirtConfigRouting(t *testing.T) {
+	t.Setenv("KUBECONFIG", "  fixture-config  ")
+	cfg := core.BaseConfig()
+	cfg.KubeVirt.Kubeconfig = "  "
+	cfg.KubeVirt.Context = "context-example"
+	cfg.KubeVirt.Template = " template-example "
+	cfg.KubeVirt.DeleteOnRelease = false
+	for _, purpose := range []core.CommandRoutingPurpose{core.CommandRoutingReconnect, core.CommandRoutingRescue, core.CommandRoutingRetry} {
+		route := (Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{Purpose: purpose})
+		joined := strings.Join(route.Args, "\n")
+		if !reflect.DeepEqual(route.Env, []string{"KUBECONFIG=fixture-config"}) || strings.Contains(joined, "--kubevirt-kubeconfig") || !strings.Contains(joined, "--kubevirt-template\n template-example ") {
+			t.Fatal("routing optional/raw/env behavior")
+		}
+		if strings.Contains(joined, "--kubevirt-delete-on-release=false") != (purpose != core.CommandRoutingRetry) {
+			t.Fatal("routing purpose release policy")
+		}
+	}
+	core.MarkDeleteOnReleaseExplicit(&cfg, providerName)
+	cfg.KubeVirt.Kubeconfig = " configured "
+	route := (Provider{}).CommandRouting(cfg, core.CommandRoutingRequest{Purpose: core.CommandRoutingRetry})
+	if len(route.Env) != 0 || !strings.Contains(strings.Join(route.Args, "\n"), "--kubevirt-delete-on-release=false") {
+		t.Fatal("configured path/explicit false routing")
+	}
+}
+
 func TestFlagsExpandKubeVirtUserPaths(t *testing.T) {
 	home := isolateCrabboxState(t)
 	cfg := testConfig(t)
 	fs := flag.NewFlagSet("kubevirt", flag.ContinueOnError)
-	values := registerFlags(fs, cfg)
+	values := (Provider{}).RegisterFlags(fs, cfg)
 	if err := fs.Parse([]string{
 		"--kubevirt-kubectl=~/bin/kubectl",
 		"--kubevirt-virtctl=~/bin/virtctl",
@@ -198,7 +373,7 @@ func TestFlagsExpandKubeVirtUserPaths(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyFlags(&cfg, fs, values); err != nil {
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
 	for label, got := range map[string]string{
@@ -448,8 +623,8 @@ func TestReleaseDeletesGeneratedKey(t *testing.T) {
 	if backend.RetainLeaseClaimAfterRelease(lease) {
 		t.Fatal("delete-on-release backend retained claim")
 	}
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || !outcome.Terminal {
+		t.Fatalf("delete outcome=%+v err=%v", outcome, err)
 	}
 	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
 		t.Fatalf("generated key still exists: %v", err)
@@ -483,8 +658,8 @@ func TestReleaseRetainedVMPreservesClaimAndKey(t *testing.T) {
 	if !backend.RetainLeaseClaimAfterRelease(lease) {
 		t.Fatal("explicit retain policy did not override stored delete policy")
 	}
-	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
-		t.Fatal(err)
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || outcome.Terminal {
+		t.Fatalf("stop outcome=%+v err=%v", outcome, err)
 	}
 	if _, err := os.Stat(keyPath); err != nil {
 		t.Fatalf("retained key missing: %v", err)

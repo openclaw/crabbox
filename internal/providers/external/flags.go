@@ -57,6 +57,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "external-routing-file") {
 		core.MarkExternalRoutingFileExplicit(cfg)
+		core.RecordProviderFlagIntents(cfg, true, "external")
 		cfg.External.RoutingFile = *v.RoutingFile
 		routing, err := loadRoutingFile(cfg.External.RoutingFile, *v.RoutingDigest, digestWasSet)
 		if err != nil {
@@ -64,6 +65,7 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		}
 		core.PreserveExternalDesktopChildEnvironmentBoundary(cfg)
 		cfg.External = routing
+		core.RecordProviderFlagInputs(cfg, true, "external")
 		restoreRoutingTarget(cfg, fs)
 		core.MarkExternalRoutingCredentialSources(cfg)
 		markRestoredRoutingTargetSources(cfg, fs)
@@ -85,9 +87,11 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 	}
 	if core.FlagWasSet(fs, "external-command") {
 		cfg.External.Command = *v.Command
+		core.RecordProviderFlagInputs(cfg, true, "external")
 	}
 	if core.FlagWasSet(fs, "external-arg") {
 		cfg.External.Args = append([]string(nil), v.Args.values...)
+		core.RecordProviderFlagInputs(cfg, true, "external")
 	}
 	if core.FlagWasSet(fs, "external-config-json") {
 		config := map[string]any{}
@@ -95,25 +99,33 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return core.Exit(2, "external config JSON must be an object: %v", err)
 		}
 		cfg.External.Config = config
+		core.RecordProviderFlagInputs(cfg, true, "external")
 	}
 	if core.FlagWasSet(fs, "external-work-root") {
 		cfg.External.WorkRoot = *v.WorkRoot
+		core.RecordProviderFlagInputs(cfg, true, "external")
 		cfg.WorkRoot = *v.WorkRoot
 	}
 	if core.FlagWasSet(fs, "external-idempotent-lease-id") {
 		cfg.External.Capabilities.IdempotentLeaseID = *v.IdempotentLeaseID
+		core.RecordProviderFlagInputs(cfg, true, "external")
 	}
 	if core.FlagWasSet(fs, "external-command") || core.FlagWasSet(fs, "external-arg") || core.FlagWasSet(fs, "external-config-json") {
 		core.MarkExternalProviderOutputFlagExplicit(cfg)
+		core.RecordProviderFlagIntents(cfg, true, "external")
 	}
 	if core.FlagWasSet(fs, "external-desktop-username") {
 		cfg.External.Connection.Desktop.Username = *v.DesktopUsername
+		core.RecordProviderFlagInputs(cfg, true, "external")
 		core.MarkExternalDesktopUsernameExplicit(cfg)
+		core.RecordProviderFlagIntents(cfg, true, "external")
 	}
 	if core.FlagWasSet(fs, "external-desktop-password-env") {
 		core.PreserveExternalDesktopChildEnvironmentBoundary(cfg)
 		cfg.External.Connection.Desktop.PasswordEnv = *v.DesktopPasswordEnv
+		core.RecordProviderFlagInputs(cfg, true, "external")
 		core.MarkExternalDesktopPasswordEnvExplicit(cfg)
+		core.RecordProviderFlagIntents(cfg, true, "external")
 	}
 	return validateConfig(*cfg)
 }

@@ -9,8 +9,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -19,6 +21,52 @@ import (
 
 func TestMain(m *testing.M) {
 	os.Exit(testutil.RunWithIsolatedUserDirs(m))
+}
+
+func TestHyperVConfigShowSection(t *testing.T) {
+	for _, selected := range []string{"", "hyperv", "multipass"} {
+		for _, tc := range []struct {
+			name         string
+			raw          string
+			cpus, memory int
+			initPassword bool
+		}{
+			{name: "empty"},
+			{name: "raw", raw: " padded ", cpus: -2, memory: -7},
+			{name: "configured", raw: "configured", cpus: 4, memory: 8192, initPassword: true},
+		} {
+			t.Run(selected+"/"+tc.name, func(t *testing.T) {
+				cfg := core.Config{Provider: selected, HyperV: core.HyperVConfig{
+					Image: tc.raw, User: tc.raw, WorkRoot: tc.raw, Switch: tc.raw,
+					CPUs: tc.cpus, Memory: tc.memory, InitPassword: tc.initPassword,
+					GuestPassword: "synthetic-omission-marker",
+				}}
+				before := cfg
+				section := (Provider{}).ConfigShowSection(cfg)
+				got := map[string]any{}
+				var text []string
+				for _, field := range section.Fields {
+					got[field.JSONName] = field.JSONValue
+					text = append(text, field.TextName+"="+field.TextValue)
+				}
+				want := map[string]any{"image": tc.raw, "user": tc.raw, "workRoot": tc.raw, "cpus": tc.cpus, "memory": tc.memory, "switch": tc.raw, "initPassword": tc.initPassword}
+				wantText := fmt.Sprintf("image=%s user=%s work_root=%s cpus=%d memory=%d switch=%s init_password=%t", tc.raw, tc.raw, tc.raw, tc.cpus, tc.memory, tc.raw, tc.initPassword)
+				if section.JSONKey != "hyperv" || section.TextLabel != "hyperv" || !reflect.DeepEqual(section.Providers, []string{"hyperv"}) || len(section.Fields) != 7 || !reflect.DeepEqual(got, want) || strings.Join(text, " ") != wantText {
+					t.Fatal("unexpected Hyper-V projection roster, types, or values")
+				}
+				encoded, err := json.Marshal(section)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(encoded), cfg.HyperV.GuestPassword) {
+					t.Fatal("guest password entered the display projection")
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("projection mutated configuration")
+				}
+			})
+		}
+	}
 }
 
 type recordingRunner struct {
@@ -84,8 +132,8 @@ func testBackend(runner *recordingRunner) *backend {
 
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
-	if p.Name() != providerName {
-		t.Fatalf("Name=%q want %s", p.Name(), providerName)
+	if p.Spec().Name != providerName {
+		t.Fatalf("Name=%q want %s", p.Spec().Name, providerName)
 	}
 	spec := p.Spec()
 	if spec.Kind != core.ProviderKindSSHLease || spec.Family != "local-vm" {
@@ -110,8 +158,8 @@ func TestProviderAliasesResolve(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)
 		}
-		if got.Name() != providerName {
-			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Name())
+		if got.Spec().Name != providerName {
+			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Spec().Name)
 		}
 	}
 }
@@ -221,7 +269,7 @@ func TestDoctorReportsConfiguredImage(t *testing.T) {
 	t.Cleanup(func() { hypervHostOS = oldOS })
 
 	b := testBackend(&recordingRunner{})
-	result, err := b.Doctor(context.Background(), DoctorRequest{})
+	result, err := b.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatalf("Doctor: %v", err)
 	}
@@ -244,7 +292,7 @@ func TestCleanupScopedToCrabboxPrefix(t *testing.T) {
 	}
 	cfg := b.configForRun()
 	claims := map[string]core.LeaseClaim{}
-	var views []LeaseView
+	var views []core.LeaseView
 	for _, vm := range vms {
 		claim := claims[vm.Name]
 		if claim.LeaseID == "" && !strings.HasPrefix(vm.Name, "crabbox-") {
@@ -351,19 +399,6 @@ func TestParseFirstIPv4(t *testing.T) {
 	}
 }
 
-func TestIsIPv4(t *testing.T) {
-	for _, good := range []string{"192.168.1.1", "10.0.0.1", "172.20.0.5", "0.0.0.0", "255.255.255.255"} {
-		if !isIPv4(good) {
-			t.Fatalf("isIPv4(%q) should be true", good)
-		}
-	}
-	for _, bad := range []string{"fe80::1", "abc", "192.168.1", "192.168.1.1.1", "300.0.0.1"} {
-		if isIPv4(bad) {
-			t.Fatalf("isIPv4(%q) should be false", bad)
-		}
-	}
-}
-
 func TestHypervState(t *testing.T) {
 	tests := map[int]string{
 		2:  "running",
@@ -388,7 +423,7 @@ func TestInstanceScopeRoundTrip(t *testing.T) {
 
 func TestShouldCleanupProtectsRetainedLease(t *testing.T) {
 	now := time.Now().UTC()
-	server := Server{Status: "stopped", Labels: map[string]string{
+	server := core.Server{Status: "stopped", Labels: map[string]string{
 		"keep":       "true",
 		"expires_at": core.LeaseLabelTime(now.Add(-time.Hour)),
 	}}
@@ -399,7 +434,7 @@ func TestShouldCleanupProtectsRetainedLease(t *testing.T) {
 }
 
 func TestShouldCleanupExpiredClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	claim := core.LeaseClaim{
 		LeaseID:            "cbx_123",
 		LastUsedAt:         time.Now().Add(-48 * time.Hour).Format(time.RFC3339),
@@ -411,21 +446,21 @@ func TestShouldCleanupExpiredClaim(t *testing.T) {
 }
 
 func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
 }
 
 func TestShouldCleanupStoppedVM(t *testing.T) {
-	server := Server{Status: "off", Labels: map[string]string{}}
+	server := core.Server{Status: "off", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s, want false missing claim", ok, reason)
 	}
 }
 
 func TestReleaseRequiresExactClaim(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
 	t.Cleanup(func() { hypervHostOS = oldOS })
@@ -433,11 +468,11 @@ func TestReleaseRequiresExactClaim(t *testing.T) {
 	const name = "crabbox-unclaimed-1234"
 	runner := &recordingRunner{}
 	b := testBackend(runner)
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: leaseID,
-		Server:  Server{CloudID: name, Labels: map[string]string{"lease": leaseID, "instance": name}},
+		Server:  core.Server{CloudID: name, Labels: map[string]string{"lease": leaseID, "instance": name}},
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "no exact local claim") {
 		t.Fatalf("ReleaseLease unclaimed err=%v", err)
 	}
 	for _, call := range runner.calls {
@@ -771,7 +806,6 @@ func TestAcquireRejectsUnsafeSSHUser(t *testing.T) {
 
 func TestAcquireQuarantinesSSHBeforeConnectingNetwork(t *testing.T) {
 	testutil.IsolateUserDirs(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
@@ -786,7 +820,7 @@ func TestAcquireQuarantinesSSHBeforeConnectingNetwork(t *testing.T) {
 		}
 		script := req.Args[len(req.Args)-1]
 		if strings.Contains(script, "Start-VM") {
-			claims, err := listLeaseClaims()
+			claims, err := core.ListLeaseClaims()
 			claimSeenBeforeStart = err == nil && len(claims) == 1
 		}
 		if strings.Contains(script, "Connect-VMNetworkAdapter") {
@@ -841,7 +875,6 @@ func TestAcquireQuarantinesSSHBeforeConnectingNetwork(t *testing.T) {
 
 func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
 	testutil.IsolateUserDirs(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
 	t.Cleanup(func() { hypervHostOS = oldOS })
@@ -859,7 +892,7 @@ func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
 		t.Fatal("Acquire unexpectedly succeeded")
 	}
 
-	claims, claimErr := listLeaseClaims()
+	claims, claimErr := core.ListLeaseClaims()
 	if claimErr != nil {
 		t.Fatalf("listLeaseClaims: %v", claimErr)
 	}
@@ -868,13 +901,13 @@ func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
 	}
 	claim := claims[0]
 	t.Cleanup(func() {
-		removeLeaseClaim(claim.LeaseID)
-		removeStoredTestboxKey(claim.LeaseID)
+		core.RemoveLeaseClaim(claim.LeaseID)
+		core.RemoveStoredTestboxKey(claim.LeaseID)
 	})
 	if claim.Provider != providerName || instanceNameFromClaim(claim) == "" {
 		t.Fatalf("retained claim missing provider identity: %#v", claim)
 	}
-	keyPath, keyErr := testboxKeyPath(claim.LeaseID)
+	keyPath, keyErr := core.TestboxKeyPath(claim.LeaseID)
 	if keyErr != nil {
 		t.Fatalf("testboxKeyPath: %v", keyErr)
 	}
@@ -885,7 +918,6 @@ func TestAcquireKeepPersistsClaimAndKeyBeforeBootstrap(t *testing.T) {
 
 func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
 	testutil.IsolateUserDirs(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
 	t.Cleanup(func() { hypervHostOS = oldOS })
@@ -896,7 +928,7 @@ func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
 		if len(req.Args) == 0 || !strings.Contains(req.Args[len(req.Args)-1], "Get-VMNetworkAdapter") {
 			return
 		}
-		claims, err := listLeaseClaims()
+		claims, err := core.ListLeaseClaims()
 		if err == nil && len(claims) == 1 {
 			observed = claims[0]
 		}
@@ -914,14 +946,14 @@ func TestAcquirePersistsProvisionalClaimThenRollsBackFailedLease(t *testing.T) {
 	if observed.LeaseID == "" || observed.Provider != providerName || instanceNameFromClaim(observed) == "" {
 		t.Fatalf("bootstrap started without a provisional claim: %#v", observed)
 	}
-	claims, claimErr := listLeaseClaims()
+	claims, claimErr := core.ListLeaseClaims()
 	if claimErr != nil {
 		t.Fatalf("listLeaseClaims: %v", claimErr)
 	}
 	if len(claims) != 0 {
 		t.Fatalf("failed non-retained lease left claims: %#v", claims)
 	}
-	keyPath, keyErr := testboxKeyPath(observed.LeaseID)
+	keyPath, keyErr := core.TestboxKeyPath(observed.LeaseID)
 	if keyErr != nil {
 		t.Fatalf("testboxKeyPath: %v", keyErr)
 	}
@@ -970,22 +1002,22 @@ func TestAcquireInitPasswordRejectsCmdUnsafeUser(t *testing.T) {
 // Success must leave a claim that already carries the endpoint -- there is no
 // separate endpoint update whose failure could strand a half-written claim.
 func TestPersistLeaseWritesClaimAndEndpointAtomically(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	b := testBackend(&recordingRunner{})
 	cfg := b.configForRun()
-	lease := LeaseTarget{LeaseID: "cbx_atomic123456"}
+	lease := core.LeaseTarget{LeaseID: "cbx_atomic123456"}
 	lease.Server = b.serverFromInstance(hypervVM{Name: "crabbox-atom-1234", State: 2}, core.LeaseClaim{}, cfg)
 	lease.Server.PublicNet.IPv4.IP = "172.20.0.9"
-	lease.SSH = sshTargetFromConfig(cfg, "172.20.0.9")
+	lease.SSH = core.SSHTargetFromConfig(cfg, "172.20.0.9")
 
-	req := AcquireRequest{}
+	req := core.AcquireRequest{}
 	req.Repo.Root = t.TempDir()
 	if err := persistLease("cbx_atomic123456", "atomslug", "crabbox-atom-1234", cfg, req, lease); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
-	t.Cleanup(func() { removeLeaseClaim("cbx_atomic123456") })
+	t.Cleanup(func() { core.RemoveLeaseClaim("cbx_atomic123456") })
 
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		t.Fatalf("listLeaseClaims: %v", err)
 	}
@@ -1020,11 +1052,11 @@ func TestPersistLeaseFailureLeavesNoStaleClaim(t *testing.T) {
 
 	b := testBackend(&recordingRunner{})
 	cfg := b.configForRun()
-	lease := LeaseTarget{LeaseID: "cbx_atomfail12345"}
+	lease := core.LeaseTarget{LeaseID: "cbx_atomfail12345"}
 	lease.Server = b.serverFromInstance(hypervVM{Name: "crabbox-atom-fail", State: 2}, core.LeaseClaim{}, cfg)
-	lease.SSH = sshTargetFromConfig(cfg, "172.20.0.10")
+	lease.SSH = core.SSHTargetFromConfig(cfg, "172.20.0.10")
 
-	req := AcquireRequest{}
+	req := core.AcquireRequest{}
 	req.Repo.Root = t.TempDir()
 	if err := persistLease("cbx_atomfail12345", "atomfail", "crabbox-atom-fail", cfg, req, lease); err == nil {
 		t.Fatal("persistLease should fail when the state directory is unwritable")
@@ -1036,7 +1068,7 @@ func TestPersistLeaseFailureLeavesNoStaleClaim(t *testing.T) {
 }
 
 func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	name := "crabbox-retained-no-ip"
 	queryScript := fmt.Sprintf(`Get-VM -ErrorAction Stop | Where-Object { $_.Name -eq '%s' } | Select-Object Name, State | ConvertTo-Json -Compress`, name)
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
@@ -1044,7 +1076,7 @@ func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
 	}}
 	b := testBackend(runner)
 	cfg := b.configForRun()
-	req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}
+	req := core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}
 	claim := core.LeaseClaim{
 		LeaseID:       "cbx_retained12345",
 		Slug:          "retained-no-ip",
@@ -1052,16 +1084,16 @@ func TestResolveStatusOnlyAllowsRetainedLeaseWithoutIP(t *testing.T) {
 		ProviderScope: instanceScope(name),
 		Labels:        map[string]string{"instance": name, "state": "leased"},
 	}
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: claim.LeaseID,
 	}
 	if err := persistLease(claim.LeaseID, claim.Slug, name, cfg, req, lease); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
-	t.Cleanup(func() { removeLeaseClaim(claim.LeaseID) })
+	t.Cleanup(func() { core.RemoveLeaseClaim(claim.LeaseID) })
 
-	resolved, err := b.Resolve(context.Background(), ResolveRequest{ID: claim.LeaseID, StatusOnly: true})
+	resolved, err := b.Resolve(context.Background(), core.ResolveRequest{ID: claim.LeaseID, StatusOnly: true})
 	if err != nil {
 		t.Fatalf("Resolve status-only: %v", err)
 	}
@@ -1103,7 +1135,7 @@ func TestQueryVMParsesSingle(t *testing.T) {
 }
 
 func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1115,9 +1147,17 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 	const leaseID = "cbx_missing123456"
 	const name = "crabbox-missing-1234"
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
-	b := testBackend(runner)
+	inherited := testBackend(runner).cfg
+	inherited.TargetOS = core.TargetWindows
+	inherited.WindowsMode = core.WindowsModeNormal
+	inherited.HyperV.CPUs = -2
+	configured, err := (Provider{}).Configure(inherited, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	if err != nil {
+		t.Fatalf("configure existing-lease release with inherited sizing: %v", err)
+	}
+	b := configured.(*backend)
 	cfg := b.configForRun()
-	if _, _, err := ensureTestboxKeyForConfig(cfg, leaseID); err != nil {
+	if _, _, err := core.EnsureTestboxKeyForConfig(cfg, leaseID); err != nil {
 		t.Fatalf("ensureTestboxKeyForConfig: %v", err)
 	}
 	claim := core.LeaseClaim{
@@ -1127,11 +1167,11 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 		ProviderScope: instanceScope(name),
 		Labels:        map[string]string{"instance": name, "lease": leaseID},
 	}
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
-	req := AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}
+	req := core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}
 	if err := persistLease(leaseID, claim.Slug, name, cfg, req, lease); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
@@ -1150,20 +1190,20 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resolved, err := b.Resolve(context.Background(), ResolveRequest{ID: leaseID, ReleaseOnly: true})
+	resolved, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
 		t.Fatalf("Resolve release-only: %v", err)
 	}
 	if resolved.Server.Status != "missing" {
 		t.Fatalf("resolved status=%q want missing", resolved.Server.Status)
 	}
-	if err := b.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: resolved}); err != nil {
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
 		t.Fatalf("ReleaseLease: %v", err)
 	}
-	if claims, err := listLeaseClaims(); err != nil || len(claims) != 0 {
+	if claims, err := core.ListLeaseClaims(); err != nil || len(claims) != 0 {
 		t.Fatalf("claims after release=%#v err=%v", claims, err)
 	}
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := core.TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatalf("testboxKeyPath: %v", err)
 	}
@@ -1183,7 +1223,7 @@ func TestReleasePrunesClaimAndKeyWhenVMIsMissing(t *testing.T) {
 }
 
 func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -1193,7 +1233,16 @@ func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
 
 	const leaseID = "cbx_cleanupmissing"
 	const name = "crabbox-cleanup-missing"
-	b := testBackend(&recordingRunner{responses: map[string]core.LocalCommandResult{}})
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	inherited := testBackend(runner).cfg
+	inherited.TargetOS = core.TargetWindows
+	inherited.WindowsMode = core.WindowsModeNormal
+	inherited.HyperV.Memory = -2
+	configured, err := (Provider{}).Configure(inherited, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner})
+	if err != nil {
+		t.Fatalf("configure existing-lease cleanup with inherited sizing: %v", err)
+	}
+	b := configured.(*backend)
 	cfg := b.configForRun()
 	claim := core.LeaseClaim{
 		LeaseID:       leaseID,
@@ -1207,11 +1256,11 @@ func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
 			"created_at": core.LeaseLabelTime(time.Now().Add(-2 * hypervProvisioningClaimGrace)),
 		},
 	}
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
-	if err := persistLease(leaseID, claim.Slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}, lease); err != nil {
+	if err := persistLease(leaseID, claim.Slug, name, cfg, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}}, lease); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
@@ -1228,13 +1277,13 @@ func TestCleanupMissingClaimRemovesDeterministicStorage(t *testing.T) {
 	if _, err := os.Stat(baseVHD); !os.IsNotExist(err) {
 		t.Fatalf("cleanup left deterministic disk %s: %v", baseVHD, err)
 	}
-	if claims, err := listLeaseClaims(); err != nil || len(claims) != 0 {
+	if claims, err := core.ListLeaseClaims(); err != nil || len(claims) != 0 {
 		t.Fatalf("claims after cleanup=%#v err=%v", claims, err)
 	}
 }
 
 func TestCleanupMissingKeepClaimPreservesStorage(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	testutil.IsolateUserDirs(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -1259,11 +1308,11 @@ func TestCleanupMissingKeepClaimPreservesStorage(t *testing.T) {
 			"created_at": core.LeaseLabelTime(time.Now().Add(-2 * hypervProvisioningClaimGrace)),
 		},
 	}
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
-	if err := persistLease(leaseID, claim.Slug, name, cfg, AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}, lease); err != nil {
+	if err := persistLease(leaseID, claim.Slug, name, cfg, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, Keep: true}, lease); err != nil {
 		t.Fatalf("persistLease: %v", err)
 	}
 	baseVHD := filepath.Join(hypervVHDDir(), name+".vhdx")
@@ -1280,7 +1329,7 @@ func TestCleanupMissingKeepClaimPreservesStorage(t *testing.T) {
 	if _, err := os.Stat(baseVHD); err != nil {
 		t.Fatalf("cleanup removed retained disk %s: %v", baseVHD, err)
 	}
-	if claims, err := listLeaseClaims(); err != nil || len(claims) != 1 || claims[0].LeaseID != leaseID {
+	if claims, err := core.ListLeaseClaims(); err != nil || len(claims) != 1 || claims[0].LeaseID != leaseID {
 		t.Fatalf("claims after cleanup=%#v err=%v", claims, err)
 	}
 }
@@ -2014,7 +2063,6 @@ func TestInvokeInGuestAbortsOnContextCancel(t *testing.T) {
 // The readiness probe must precede the SSH lockdown.
 func TestAcquireWaitsForGuestReadyBeforeLockdown(t *testing.T) {
 	testutil.IsolateUserDirs(t)
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	oldOS := hypervHostOS
 	hypervHostOS = "windows"
@@ -2052,5 +2100,171 @@ func TestAcquireWaitsForGuestReadyBeforeLockdown(t *testing.T) {
 	}
 	if readyIdx >= stageIdx {
 		t.Fatalf("readiness probe (%d) must precede pre-network lockdown (%d)", readyIdx, stageIdx)
+	}
+}
+
+func TestWaitGuestReadyBackoffDeadlinePreservesProbeCodeAndCause(t *testing.T) {
+	for _, code := range []int{23, -9} {
+		t.Run(fmt.Sprintf("code_%d", code), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				runner := &recordingRunner{}
+				runner.respond = func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+					if !readinessProbe(req) {
+						t.Fatal("unexpected non-readiness command")
+					}
+					return core.LocalCommandResult{ExitCode: code, Stderr: "guest boot pending"}, errors.New("probe unavailable"), true
+				}
+				b := testBackend(runner)
+				b.guestReadyBudget = 100 * time.Millisecond
+				b.guestReadyProbeTimeout = time.Second
+				b.guestRetryBackoff = time.Hour
+				started := time.Now()
+				err := b.waitGuestReady(context.Background(), "crabbox-blue-1234", "crabbox")
+				if err == nil || !strings.Contains(err.Error(), "did not accept PowerShell Direct within 100ms") || !strings.Contains(err.Error(), "guest boot pending") || core.ExitCodeForError(err, 1) != code {
+					t.Fatalf("boot diagnostic/code changed: err=%v want code=%d", err, code)
+				}
+				var failure core.ExitError
+				if !core.AsExitError(err, &failure) || failure.Code != code || failure.Message != "guest readiness probe failed: probe unavailable: guest boot pending" {
+					t.Errorf("first typed probe error changed: %#v", failure)
+				}
+				if len(runner.calls) != 1 || time.Since(started) != b.guestReadyBudget {
+					t.Fatalf("backoff budget/first probe changed: calls=%d elapsed=%s", len(runner.calls), time.Since(started))
+				}
+				if !errors.Is(err, context.DeadlineExceeded) || core.RunStatusForResult(core.RunResult{}, err) != core.RunStatusTimedOut || core.RunErrorKindForResult(core.RunResult{}, err) != core.RunErrorTimeout {
+					t.Errorf("owned boot deadline lost: err=%v status=%s kind=%s", err, core.RunStatusForResult(core.RunResult{}, err), core.RunErrorKindForResult(core.RunResult{}, err))
+				}
+			})
+		})
+	}
+}
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "C:\\crabbox"},
+		{"", "/work/crabbox", "C:\\crabbox"},
+		{"", "/Users/ec2-user/crabbox", "C:\\crabbox"},
+		{"", "C:\\crabbox", "C:\\crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "},
+		{"", "/WORK/crabbox", "/WORK/crabbox"},
+		{"", "c:\\crabbox", "c:\\crabbox"},
+		{"", "/srv/custom", "/srv/custom"},
+		{"", "/Users/alice/custom", "/Users/alice/custom"},
+		{"", "D:\\custom", "D:\\custom"},
+		{"", "  ", "  "},
+		{" ", "/srv/custom", " "},
+		{"/work/crabbox", "/srv/custom", "/work/crabbox"},
+		{"relative", "/srv/custom", "relative"},
+		{"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := core.Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			if explicit {
+				core.MarkWorkRootExplicit(&cfg)
+				cfg.TargetOS = "existing-target"
+				cfg.WindowsMode = "prior-mode"
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.HyperV.WorkRoot = tc.providerRoot
+
+			want := cfg
+			want.Provider = "hyperv"
+			if !explicit {
+				want.TargetOS = "windows"
+				want.WindowsMode = "normal"
+			}
+			want.HyperV.WorkRoot = tc.want
+			want.WorkRoot = tc.want
+			want.HyperV.User = "fixture-user"
+			want.HyperV.CPUs = 4
+			want.HyperV.Memory = 8192
+			want.HyperV.Switch = "Default Switch"
+			want.SSHPort = "22"
+			want.SSHFallbackPorts = []string{}
+			applyDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
+	}
+}
+
+func TestHyperVDecodedSizing(t *testing.T) {
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+	for _, tc := range []struct {
+		name                              string
+		cpus, memory, wantCPU, wantMemory int
+		wantError                         string
+	}{
+		{"negative CPU", -1, 8192, -1, 8192, "hyperv.cpus must be zero or greater"},
+		{"negative memory", 4, -1, 4, -1, "hyperv.memory must be zero or greater"},
+		{"both negative", -2, -2, -2, -2, "hyperv.cpus must be zero or greater"},
+		{"zero defaults", 0, 0, 4, 8192, ""},
+		{"positive", 3, 1536, 3, 1536, ""},
+	} {
+		for _, source := range []string{"decoded", "flags"} {
+			t.Run(tc.name+"/"+source, func(t *testing.T) {
+				cfg := core.BaseConfig()
+				cfg.Provider = providerName
+				cfg.TargetOS = core.TargetWindows
+				cfg.WindowsMode = core.WindowsModeNormal
+				if source == "flags" {
+					fs := flag.NewFlagSet("sizing", flag.ContinueOnError)
+					values := registerFlags(fs, cfg)
+					if err := fs.Parse([]string{fmt.Sprintf("--hyperv-cpu=%d", tc.cpus), fmt.Sprintf("--hyperv-memory=%d", tc.memory)}); err != nil {
+						t.Fatal(err)
+					}
+					if err := applyFlags(&cfg, fs, values); err != nil {
+						t.Fatal(err)
+					}
+					if cfg.HyperV.CPUs != tc.wantCPU || cfg.HyperV.Memory != tc.wantMemory {
+						t.Fatalf("flag normalization lost sizing: %d/%d", cfg.HyperV.CPUs, cfg.HyperV.Memory)
+					}
+				} else {
+					cfg.HyperV.CPUs, cfg.HyperV.Memory = tc.cpus, tc.memory
+				}
+				runner := &recordingRunner{}
+				got, err := (Provider{}).Configure(cfg, core.Runtime{Exec: runner})
+				if err != nil {
+					t.Fatal(err)
+				}
+				configured := got.(*backend).cfg.HyperV
+				if configured.CPUs != tc.wantCPU || configured.Memory != tc.wantMemory {
+					t.Fatalf("Configure sizing = %d/%d", configured.CPUs, configured.Memory)
+				}
+				_, err = got.(*backend).Acquire(t.Context(), core.AcquireRequest{})
+				var exit core.ExitError
+				if tc.wantError != "" {
+					if !errors.As(err, &exit) || exit.Code != 2 || exit.Message != tc.wantError {
+						t.Fatalf("Acquire sizing: %v", err)
+					}
+				} else if !errors.As(err, &exit) || exit.Code != 2 || !strings.Contains(exit.Message, "requires --hyperv-image") {
+					t.Fatalf("valid sizing did not reach image validation: %v", err)
+				}
+				if len(runner.calls) != 0 {
+					t.Fatal("sizing or missing-image rejection dispatched a native command")
+				}
+			})
+		}
+	}
+}
+
+func TestHyperVUnselectedSizingFlagsRemainRaw(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "unselected"
+	beforeTarget, beforeUser, beforeRoot := cfg.TargetOS, cfg.SSHUser, cfg.WorkRoot
+	fs := flag.NewFlagSet("sizing", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--hyperv-cpu=-2", "--hyperv-memory=0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HyperV.CPUs != -2 || cfg.HyperV.Memory != 0 || cfg.Provider != "unselected" || cfg.TargetOS != beforeTarget || cfg.SSHUser != beforeUser || cfg.WorkRoot != beforeRoot {
+		t.Fatal("unselected flags changed normalization contract")
 	}
 }

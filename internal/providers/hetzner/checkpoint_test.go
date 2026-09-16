@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"io"
 	"net/http"
 	"os"
@@ -110,7 +112,7 @@ func TestHetznerCheckpointCLIWithMalformedUnrelatedConfig(t *testing.T) {
 }
 
 type fakeHetznerSnapshotClient struct {
-	server            Server
+	server            core.Server
 	serverErr         error
 	created           core.HetznerImage
 	createErr         error
@@ -126,7 +128,7 @@ type fakeHetznerSnapshotClient struct {
 	events            []string
 }
 
-func (f *fakeHetznerSnapshotClient) GetServer(context.Context, int64) (Server, error) {
+func (f *fakeHetznerSnapshotClient) GetServer(context.Context, int64) (core.Server, error) {
 	f.events = append(f.events, "get-server")
 	return f.server, f.serverErr
 }
@@ -135,7 +137,7 @@ func (f *fakeHetznerSnapshotClient) CreateServerSnapshot(_ context.Context, serv
 	f.events = append(f.events, "create-snapshot")
 	f.createServerID = serverID
 	f.createDescription = description
-	f.createLabels = cloneMetadata(labels)
+	f.createLabels = shared.CloneLabels(labels)
 	return f.created, f.createErr
 }
 
@@ -194,7 +196,7 @@ func TestHetznerNativeCheckpointCapabilityMatrix(t *testing.T) {
 	provider := Provider{}
 	base := core.NativeCheckpointRequest{
 		Config:   core.Config{TargetOS: core.TargetLinux},
-		Server:   Server{CloudID: "42"},
+		Server:   core.Server{CloudID: "42"},
 		Target:   core.SSHTarget{TargetOS: core.TargetLinux},
 		Strategy: core.CheckpointStrategyDiskSnapshot,
 	}
@@ -219,6 +221,45 @@ func TestHetznerNativeCheckpointCapabilityMatrix(t *testing.T) {
 			mutate(&req)
 			if got, ok := provider.NativeCheckpointCapability(req); ok {
 				t.Fatalf("capability=%+v, want unsupported", got)
+			}
+		})
+	}
+}
+
+func TestCreateHetznerCheckpointSubmissionBoundary(t *testing.T) {
+	for _, phase := range []string{"source", "preparation", "submission"} {
+		t.Run(phase, func(t *testing.T) {
+			installHetznerClaimState(t)
+			source := checkpointHetznerServer()
+			seedHetznerClaim(t, source)
+			client := &fakeHetznerSnapshotClient{server: source}
+			events := installHetznerCheckpointHooks(t, client)
+			cause := core.Exit(7, "fixture %s failure", phase)
+			switch phase {
+			case "source":
+				client.serverErr = cause
+			case "preparation":
+				prepareHetznerCheckpointSource = func(context.Context, core.SSHTarget) error {
+					*events = append(*events, "prepare-source")
+					return cause
+				}
+			case "submission":
+				client.createErr = cause
+			}
+			result, err := (Provider{}).CreateNativeCheckpoint(t.Context(), checkpointCreateRequest(false, 0))
+			var unsubmitted core.NativeCheckpointNotSubmittedError
+			if !errors.Is(err, cause) || errors.As(err, &unsubmitted) != (phase != "submission") || result.Image.ID != "" {
+				t.Fatalf("phase=%s result=%+v err=%v, wrong submission certainty", phase, result, err)
+			}
+			want := []string{"get-server"}
+			if phase != "source" {
+				want = append(want, "prepare-source")
+			}
+			if phase == "submission" {
+				want = append(want, "create-snapshot")
+			}
+			if !reflect.DeepEqual(*events, want) {
+				t.Fatalf("events=%v, want %v", *events, want)
 			}
 		})
 	}
@@ -261,12 +302,12 @@ func TestCreateHetznerCheckpointWaitFalseRecordsBinding(t *testing.T) {
 
 func TestCreateHetznerCheckpointRejectsOwnershipBeforeGuestReset(t *testing.T) {
 	for name, tc := range map[string]struct {
-		mutate func(*Server)
+		mutate func(*core.Server)
 		seed   bool
 	}{
-		"missing canonical label": {mutate: func(server *Server) { delete(server.Labels, "created_by") }, seed: true},
-		"source lease mismatch":   {mutate: func(server *Server) { server.Labels["lease"] = "cbx_other123456" }, seed: true},
-		"missing exact claim":     {mutate: func(*Server) {}, seed: false},
+		"missing canonical label": {mutate: func(server *core.Server) { delete(server.Labels, "created_by") }, seed: true},
+		"source lease mismatch":   {mutate: func(server *core.Server) { server.Labels["lease"] = "cbx_other123456" }, seed: true},
+		"missing exact claim":     {mutate: func(*core.Server) {}, seed: false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			installHetznerClaimState(t)
@@ -435,6 +476,48 @@ func TestCreateHetznerCheckpointParentCancellationCancelsInFlightGet(t *testing.
 	}
 }
 
+func TestCreateHetznerCheckpointPersistsBeforeReadiness(t *testing.T) {
+	for _, failPersist := range []bool{false, true} {
+		t.Run(fmt.Sprintf("persistence failure=%t", failPersist), func(t *testing.T) {
+			installHetznerClaimState(t)
+			source := checkpointHetznerServer()
+			seedHetznerClaim(t, source)
+			var saved core.NativeCheckpointCreateResult
+			client := &fakeHetznerSnapshotClient{
+				server:  source,
+				created: core.HetznerImage{ID: 99, Type: "snapshot", Status: "creating", Architecture: "x86"},
+				getImageFn: func(context.Context, int64) (core.HetznerImage, error) {
+					if saved.Image.ID != "99" || !reflect.DeepEqual(saved.Metadata, checkpointMetadata()) {
+						t.Errorf("snapshot cleanup identity was not persisted before readiness: %+v", saved)
+					}
+					return core.HetznerImage{ID: 99, Type: "snapshot", Status: "available", Architecture: "x86"}, nil
+				},
+			}
+			installHetznerCheckpointHooks(t, client)
+			request := checkpointCreateRequest(true, time.Second)
+			persistErr := errors.New("checkpoint store unavailable")
+			request.Persist = func(result core.NativeCheckpointCreateResult) error {
+				if failPersist {
+					return persistErr
+				}
+				saved = result
+				return nil
+			}
+			result, err := (Provider{}).CreateNativeCheckpoint(context.Background(), request)
+			if result.Image.ID != "99" {
+				t.Fatalf("creation identity lost: %+v", result)
+			}
+			if failPersist {
+				if !errors.Is(err, persistErr) || client.getImageCalls != 0 {
+					t.Fatalf("persistence failure reached readiness: err=%v reads=%d", err, client.getImageCalls)
+				}
+			} else if err != nil || client.getImageCalls != 1 {
+				t.Fatalf("creation failed: err=%v reads=%d", err, client.getImageCalls)
+			}
+		})
+	}
+}
+
 func TestHetznerCheckpointVerifyAndDeleteRequireExactOwnedSnapshot(t *testing.T) {
 	for name, tc := range map[string]struct {
 		mutate    func(*core.HetznerImage)
@@ -512,7 +595,7 @@ func TestHetznerCheckpointForkConfigPreservesImageLocationArchitectureAndOverrid
 		t.Fatalf("err=%v, want architecture refusal", err)
 	}
 	badSource := record
-	badSource.Metadata = cloneMetadata(record.Metadata)
+	badSource.Metadata = shared.CloneLabels(record.Metadata)
 	badSource.Metadata[checkpointMetadataSourceType] = "backup"
 	if err := (Provider{}).ApplyNativeCheckpointForkConfig(core.NativeCheckpointForkRequest{Config: &core.Config{}, Record: badSource}); err == nil {
 		t.Fatal("expected source type refusal")
@@ -526,7 +609,7 @@ func TestCreateHetznerCheckpointRejectsImageStrategyClearly(t *testing.T) {
 	}
 }
 
-func checkpointHetznerServer() Server {
+func checkpointHetznerServer() core.Server {
 	server := crabboxHetznerServer(42, "cbx_abcdef123456")
 	server.Location = &core.ServerLocationInfo{Name: "fsn1"}
 	server.Image = &core.ServerImageInfo{Architecture: "x86"}

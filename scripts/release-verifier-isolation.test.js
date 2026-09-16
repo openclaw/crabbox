@@ -116,7 +116,7 @@ test("release-capable token is isolated from checkout, verification, and candida
   assert.match(guardJob, /GH_TOKEN: \$\{\{ secrets\.CRABBOX_RULESET_READ_TOKEN \}\}/);
   assert.equal((guardJob.match(/secrets\./g) ?? []).length, 1);
   assert.match(downloadJob, /permissions:\n\s+contents: write/);
-  assert.match(downloadJob, /GH_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(downloadJob, /GH_TOKEN: \$\{\{ inputs.draft && github\.token \|\| '' \}\}/);
   assert.match(downloadJob, /Download exact numeric release without executing its bytes/);
   assert.doesNotMatch(downloadJob, /actions\/checkout@|verify-release\.sh|CRABBOX_VERIFY_MODE/);
   assert.doesNotMatch(verifierJobs, /contents: write|GH_TOKEN:|secrets\./);

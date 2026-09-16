@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -14,10 +13,10 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return tenkiProvider }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) ClaimScope(cfg core.Config) string {
+	// Workspace and project no longer select Tenki CLI inventory. Keep them in
+	// the local claim identity so older scoped leases can still be resolved and
+	// released without weakening their original ownership fence.
 	endpoint := strings.TrimRight(strings.TrimSpace(cfg.Tenki.Endpoint), "/")
 	if endpoint == "" {
 		endpoint = "default"
@@ -27,6 +26,7 @@ func (Provider) ClaimScope(cfg core.Config) string {
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationCLI),
 		Name:             tenkiProvider,
 		Family:           tenkiProvider,
 		Kind:             core.ProviderKindSSHLease,
@@ -49,10 +49,6 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return NewTenkiBackend(p.Spec(), cfg, rt)
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("tenki", func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.Tenki.Image != "" {
 		return cfg.Tenki.Image
@@ -60,9 +56,5 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.Tenki.Snapshot != "" {
 		return "snapshot"
 	}
-	return "sandbox"
-}
-
-func (Provider) ServerTypeForClass(string) string {
 	return "sandbox"
 }

@@ -80,7 +80,23 @@ remote_main=$(git -C "$ROOT" ls-remote origin "refs/heads/$CRABBOX_RELEASE_DEFAU
 # Native execution is a separate token-free operator step and later a clean
 # dependent Actions job. Re-run only protected static verification here.
 verify_home=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-draft-verify.XXXXXX")
-trap 'rm -rf "$verify_home"' EXIT
+cleanup_verify_home() {
+  local primary_status=$? cleanup_status
+  trap - EXIT
+  # Go caches contain read-only directories. Repair only this private tree's
+  # directories, without following symlinks or changing hard-linked files.
+  if find -P "$verify_home" -type d -exec chmod u+w {} + && rm -rf -- "$verify_home"; then
+    return "$primary_status"
+  else
+    cleanup_status=$?
+    echo "failed to remove draft verification home: $verify_home" >&2
+    if [[ "$primary_status" -ne 0 ]]; then
+      return "$primary_status"
+    fi
+    return "$cleanup_status"
+  fi
+}
+trap cleanup_verify_home EXIT
 native_arch=$(uname -m)
 env -i \
   CRABBOX_VERIFY_EXEC_ARCH="$native_arch" \
@@ -162,4 +178,5 @@ while IFS=$'\t' read -r asset_id asset_name expected_size expected_digest; do
   cmp "$ASSET_DIR/$asset_name" "$download/$asset_name"
 done < <(jq -r '.assets[] | [.id, .name, .size, .digest] | @tsv' "$verify_home/release.json")
 
+cleanup_verify_home
 echo "Created immutable private draft release_id=$release_id tag=$TAG"

@@ -17,7 +17,7 @@ func touchDirectLeaseBestEffort(ctx context.Context, cfg Config, server Server, 
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	}
-	server.Labels = touchDirectLeaseLabels(server.Labels, cfg, state, time.Now().UTC())
+	server.Labels = TouchDirectLeaseLabels(server.Labels, cfg, state, time.Now().UTC())
 	if isStaticProvider(cfg.Provider) || server.Provider == staticProvider {
 		return server
 	}

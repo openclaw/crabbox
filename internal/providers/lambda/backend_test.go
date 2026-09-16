@@ -107,15 +107,15 @@ func (f *fakeLambdaAPI) DeleteSSHKey(_ context.Context, id string) error {
 }
 
 func (f *fakeLambdaAPI) ListRegions(context.Context) ([]Region, error) {
-	return []Region{{Name: defaultRegion}}, nil
+	return []Region{{Name: "us-west-1"}}, nil
 }
 
 func (f *fakeLambdaAPI) ListInstanceTypes(context.Context) ([]InstanceType, error) {
-	return []InstanceType{{Name: defaultType, RegionsWithCapacityAvailable: []string{defaultRegion}}}, nil
+	return []InstanceType{{Name: defaultType, RegionsWithCapacityAvailable: []string{"us-west-1"}}}, nil
 }
 
 func (f *fakeLambdaAPI) ListImages(context.Context) ([]Image, error) {
-	return []Image{{Family: defaultImageFamily, Region: defaultRegion}}, nil
+	return []Image{{Family: "lambda-stack-24-04", Region: "us-west-1"}}, nil
 }
 
 func (f *fakeLambdaAPI) ListFilesystems(context.Context) ([]Filesystem, error) { return nil, nil }
@@ -134,9 +134,9 @@ func newTestBackend(t *testing.T, api *fakeLambdaAPI) *backend {
 	cfg.SSHPort = defaultPort
 	cfg.WorkRoot = "/work/crabbox"
 	cfg.ServerType = defaultType
-	cfg.Lambda.Region = defaultRegion
+	cfg.Lambda.Region = "us-west-1"
 	cfg.Lambda.Type = defaultType
-	cfg.Lambda.ImageFamily = defaultImageFamily
+	cfg.Lambda.ImageFamily = "lambda-stack-24-04"
 	b := &backend{spec: Provider{}.Spec(), cfg: cfg, rt: core.Runtime{Stderr: io.Discard}}
 	b.clientFactory = func(core.Runtime) (lambdaAPI, error) { return api, nil }
 	b.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error { return nil }
@@ -202,10 +202,10 @@ func TestAcquireCreatesKeyLaunchesPollsAndClaimsLease(t *testing.T) {
 		t.Fatalf("launchRequests=%#v", api.launchRequests)
 	}
 	req := api.launchRequests[0]
-	if req.RegionName != defaultRegion || req.InstanceTypeName != defaultType || req.Quantity != 1 || len(req.SSHKeyNames) != 1 || req.SSHKeyNames[0] != api.addKeyRequests[0].Name {
+	if req.RegionName != "us-west-1" || req.InstanceTypeName != defaultType || req.Quantity != 1 || len(req.SSHKeyNames) != 1 || req.SSHKeyNames[0] != api.addKeyRequests[0].Name {
 		t.Fatalf("launch request=%#v", req)
 	}
-	if req.ImageFamily != defaultImageFamily || req.ImageID != "" || req.UserData == "" || strings.Contains(req.UserData, "base64") {
+	if req.ImageFamily != "lambda-stack-24-04" || req.ImageID != "" || req.UserData == "" || strings.Contains(req.UserData, "base64") {
 		t.Fatalf("launch image/user_data shape=%#v", req)
 	}
 	if req.FirewallRulesetName != "default" || len(req.FileSystemNames) != 1 || len(req.FileSystemMounts) != 1 {

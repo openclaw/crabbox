@@ -33,7 +33,7 @@ type controllerAcquireIdentity struct {
 func controllerAcquireIdentityFromLease(provider string, lease LeaseTarget) controllerAcquireIdentity {
 	return controllerAcquireIdentity{
 		LeaseID:    lease.LeaseID,
-		Slug:       serverSlug(lease.Server),
+		Slug:       ServerSlug(lease.Server),
 		Provider:   provider,
 		ResourceID: strings.TrimSpace(lease.Server.CloudID),
 	}
@@ -250,7 +250,7 @@ func validateControllerAcquireIdentity(identity controllerAcquireIdentity) error
 	if identity.LeaseID != strings.TrimSpace(identity.LeaseID) || !validLeaseClaimID(identity.LeaseID) {
 		return fmt.Errorf("controller acquire identity has invalid lease ID")
 	}
-	if identity.Slug != strings.TrimSpace(identity.Slug) || normalizeLeaseSlug(identity.Slug) != identity.Slug {
+	if identity.Slug != strings.TrimSpace(identity.Slug) || NormalizeLeaseSlug(identity.Slug) != identity.Slug {
 		return fmt.Errorf("controller acquire identity has invalid slug")
 	}
 	for name, value := range map[string]string{
