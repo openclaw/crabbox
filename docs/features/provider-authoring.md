@@ -420,6 +420,14 @@ reads, and invokes adapter checks and progress. Keep state strings,
 retryability, normalization, ownership checks, provider actions, claim updates,
 cleanup, and error wording in the adapter.
 
+For bounded acquisition reads that stop at the first fetch error and return no
+partial value on failure, use `shared.PollReady`. It owns the child timeout and
+distinguishes that deadline from caller cancellation and immediate client
+deadlines. Supply the provider's readiness predicate and nonnil timeout error;
+the interval, request construction, state interpretation, and diagnostic remain
+adapter-owned. Use `Poll` directly when retryability, progress, last-observation
+retention, or detached-context policy differs.
+
 Vanilla provider HTTP redirect guards should use `shared.SecureHTTPClient` and
 `core.SameHTTPOrigin`. The shared policy compares scheme and hostname
 case-insensitively, normalizes the default HTTP and HTTPS ports, preserves an

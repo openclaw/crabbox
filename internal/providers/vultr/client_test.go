@@ -17,6 +17,36 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestVultrAcquisitionReadinessHTTP(t *testing.T) {
+	const id = "11111111-1111-4111-8111-111111111111"
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/instances/"+id {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) == 1 {
+			_, _ = io.WriteString(w, `{"instance":{"id":"`+id+`","status":"pending","main_ip":"203.0.113.42","power_status":"stopped"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"instance":{"id":"`+id+`","status":"active","main_ip":"203.0.113.42","power_status":"running","server_status":"ok"}}`)
+	}))
+	defer server.Close()
+	t.Setenv("VULTR_API_KEY", "fixture-token")
+	client, err := newVultrClient(core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.baseURL = server.URL
+	got, err := new(backend).waitForInstanceReady(context.Background(), client, id, time.Minute)
+	if err != nil || got.ID != id || !instanceReady(got) || calls.Load() != 2 {
+		t.Fatalf("instance=%#v err=%v requests=%d", got, err, calls.Load())
+	}
+	t.Log("production HTTP client: two observations, IP present but pending to active/running")
+}
+
 func TestVultrClientCreateInstanceRequestShape(t *testing.T) {
 	var requests []struct {
 		Method string
