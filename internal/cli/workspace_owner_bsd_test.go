@@ -59,20 +59,13 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 			dir := t.TempDir()
 			isolateRunTestUserDirs(t, dir)
 			t.Chdir(dir)
-			logPath := installRecordingSSH(t, dir)
+			workloadHandler := ""
+			if tc.workloadCode != 0 {
+				workloadHandler = "case \"$match\" in *cbx-after-functional*) exit " + strconv.Itoa(tc.workloadCode) + " ;; esac"
+			}
+			logPath := installRecordingSSH(t, dir, workloadHandler)
 			ctx, cancel := context.WithCancelCause(t.Context())
 			defer cancel(nil)
-			if tc.workloadCode != 0 {
-				sshPath := filepath.Join(dir, "ssh")
-				script, err := os.ReadFile(sshPath)
-				if err != nil {
-					t.Fatal(err)
-				}
-				script = bytes.Replace(script, []byte("case \"$match\" in"), []byte("case \"$match\" in\n  *cbx-after-functional*) exit "+strconv.Itoa(tc.workloadCode)+" ;;"), 1)
-				if err := os.WriteFile(sshPath, script, 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
 			oldRun, oldControl := runOwnedFunctionalPreflight, runFunctionalPreflightControl
 			t.Cleanup(func() { runOwnedFunctionalPreflight, runFunctionalPreflightControl = oldRun, oldControl })
 			controlFailure := errors.New("synthetic owned control transport unavailable")

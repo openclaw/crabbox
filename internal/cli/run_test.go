@@ -369,7 +369,8 @@ func TestStopDefersUnsafeLocalConnectionCleanupUntilRelease(t *testing.T) {
 	}
 }
 
-func installRecordingSSH(t *testing.T, dir string) string {
+// Handlers see decoded commands without depending on the recorder's shell layout.
+func installRecordingSSH(t *testing.T, dir string, commandHandlers ...string) string {
 	t.Helper()
 	logPath := filepath.Join(dir, "ssh.log")
 	sshPath := filepath.Join(dir, "ssh")
@@ -388,6 +389,7 @@ esac
 printf '%s\n%s\n---\n' "$cmd" "$decoded" >> "$CRABBOX_FAKE_SSH_LOG"
 match=$cmd
 if [ -n "$decoded" ]; then match=$decoded; fi
+` + strings.Join(commandHandlers, "\n") + `
 if [ -n "${CRABBOX_FAKE_SSH_FILESYSTEM_PATH:-}" ]; then
   case "$match" in
     *"uname -m"*|*"/tmp/crabbox-runtime-"*)
