@@ -105,8 +105,14 @@ func enforceManagedLeaseCapabilities(cfg Config, server Server, leaseID string) 
 	if isStaticProvider(cfg.Provider) || server.Provider == staticProvider {
 		return nil
 	}
-	if cfg.Desktop && !labelBool(server.Labels["desktop"]) && !macOSScreenSharingLease(cfg, server) {
-		return Exit(2, "lease %s was not created with desktop=true; warm a new lease with --desktop", leaseID)
+	if cfg.Desktop && !labelBool(server.Labels["desktop"]) {
+		ok, err := macOSScreenSharingLease(cfg, server, leaseID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return Exit(2, "lease %s was not created with desktop=true; warm a new lease with --desktop", leaseID)
+		}
 	}
 	if cfg.Desktop {
 		requestedDesktopEnv := normalizedDesktopEnv(cfg.DesktopEnv)
@@ -123,16 +129,54 @@ func enforceManagedLeaseCapabilities(cfg Config, server Server, leaseID string) 
 	return nil
 }
 
-func macOSScreenSharingLease(cfg Config, server Server) bool {
-	if cfg.TargetOS != targetMacOS && !strings.EqualFold(server.Labels["target"], targetMacOS) {
-		return false
+func macOSScreenSharingLease(cfg Config, server Server, leaseID string) (bool, error) {
+	if !macOSLeaseTarget(cfg, server) {
+		return false, nil
+	}
+	if ok, err := parallelsOwnedMacOSDesktopLease(cfg, server, leaseID); err != nil || ok {
+		return ok, err
 	}
 	providerName := firstNonBlank(server.Provider, cfg.Provider)
 	if providerName == "" {
-		return true
+		return true, nil
 	}
 	provider, err := ProviderFor(providerName)
-	return err != nil || provider.Spec().Coordinator != CoordinatorNever
+	return err != nil || provider.Spec().Coordinator != CoordinatorNever, nil
+}
+
+func macOSLeaseTarget(cfg Config, server Server) bool {
+	return cfg.TargetOS == targetMacOS || strings.EqualFold(server.Labels["target"], targetMacOS)
+}
+
+// parallelsOwnedMacOSDesktopLease allows desktop reuse on a Crabbox-owned
+// Parallels macOS clone without rewriting desktop=true. Native --desktop
+// grants ARD -all; already-configured Screen Sharing is proved later by
+// RFB/SSH. Source VM names and unowned claims stay outside this allowance.
+func parallelsOwnedMacOSDesktopLease(cfg Config, server Server, leaseID string) (bool, error) {
+	if firstNonBlank(server.Provider, cfg.Provider) != parallelsProvider {
+		return false, nil
+	}
+	leaseID = strings.TrimSpace(leaseID)
+	nameLeaseID, _ := parallelsLeaseFromVMName(server.Name)
+	if leaseID == "" || nameLeaseID == "" || nameLeaseID != leaseID {
+		return false, nil
+	}
+	if label := strings.TrimSpace(server.Labels["lease"]); label != "" && label != leaseID {
+		return false, nil
+	}
+	cloudID := strings.TrimSpace(server.CloudID)
+	host := strings.TrimSpace(server.Labels["host"])
+	if cloudID == "" || host == "" {
+		return false, nil
+	}
+	claim, ok, exact, err := ResolveLeaseClaimForProviderWithExact(leaseID, parallelsProvider)
+	if err != nil {
+		return false, err
+	}
+	if !ok || !exact || claim.LeaseID != leaseID || strings.TrimSpace(claim.CloudID) != cloudID || strings.TrimSpace(claim.Labels["host"]) != host {
+		return false, nil
+	}
+	return true, nil
 }
 
 func labelBool(value string) bool {

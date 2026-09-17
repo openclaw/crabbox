@@ -54,9 +54,12 @@ Capability flags follow a two-step validation, both in
 
 Label enforcement is skipped for static SSH targets, because Crabbox does not
 own the host. There the capability is detected probe-by-probe instead (see
-[Static targets](#static-targets)). A macOS lease is treated as
-desktop-capable without a `desktop=true` label, because Screen Sharing is the
-desktop.
+[Static targets](#static-targets)). A coordinator-backed macOS lease is treated
+as desktop-capable without a `desktop=true` label, because Screen Sharing is
+the desktop. An exact-claim Crabbox Parallels macOS clone is treated the same
+so already-configured Screen Sharing can be used without rewriting lease
+metadata; source and unowned VMs remain rejected, and RFB/SSH still prove the
+desktop after GUI setup.
 
 ## Desktop
 
