@@ -950,27 +950,10 @@ func TestBlacksmithRunFailureStagesLocalCommand(t *testing.T) {
 				if len(req.Args) < 2 || req.Args[0] != "testbox" || req.Args[1] != "run" {
 					return core.LocalCommandResult{ExitCode: 2}, fmt.Errorf("unexpected native operation: %v", req.Args)
 				}
-				var gotCommand string
-				for _, arg := range req.Args {
-					if strings.HasPrefix(arg, "printf ") {
-						gotCommand = arg
-						break
-					}
-				}
-				if gotCommand != command {
-					return core.LocalCommandResult{ExitCode: 2}, fmt.Errorf("delegated command changed: got %q want %q", gotCommand, command)
-				}
 				runs++
-				cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", gotCommand)
-				cmd.Dir, cmd.Stdout, cmd.Stderr = repo, req.Stdout, req.Stderr
-				cmd.Env = []string{"PATH=/usr/bin:/bin"}
-				cmd.WaitDelay = time.Second
-				err := cmd.Run()
-				if cmd.ProcessState == nil {
-					return core.LocalCommandResult{ExitCode: 2}, err
-				}
-				nativeCode = cmd.ProcessState.ExitCode()
-				return core.LocalCommandResult{ExitCode: nativeCode}, err
+				result, err := runSyntheticBlacksmithCommand(t, t.Context(), req)
+				nativeCode = result.ExitCode
+				return result, err
 			}}
 			backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
 			var stdout, stderr bytes.Buffer
@@ -1605,15 +1588,15 @@ func TestParseBlacksmithListIgnoresEmptyMessage(t *testing.T) {
 
 func TestBlacksmithRunArgs(t *testing.T) {
 	cfg := core.BaseConfig()
-	cfg.Blacksmith.Org = "openclaw"
-	got := blacksmithRunArgs(cfg, "tbx_abc123", "/tmp/key", []string{"OPENCLAW_TESTBOX=1", "pnpm", "check:changed"}, true, false)
+	cfg.Blacksmith.Org = "example-org"
+	got := blacksmithRunArgs(cfg, "tbx_abc123", "/tmp/key", []string{"TESTBOX_MODE=1", "pnpm", "test"}, true, false)
 	want := []string{
-		"--org", "openclaw",
+		"--org", "example-org",
 		"testbox", "run",
 		"--id", "tbx_abc123",
 		"--ssh-private-key", "/tmp/key",
 		"--debug",
-		"OPENCLAW_TESTBOX='1' 'pnpm' 'check:changed'",
+		"eval '' 'TESTBOX_MODE='\\''1'\\'' '\\''pnpm'\\'' '\\''test'\\'''",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args=%#v want %#v", got, want)
@@ -1654,21 +1637,118 @@ func TestBlacksmithCommandString(t *testing.T) {
 			want:      "echo hello",
 		},
 		{
-			name:      "explicit multiline shell trims trailing blank suffix",
+			name:      "explicit multiline shell preserves trailing blanks",
 			command:   []string{"set -e\nrun_case() {\n  printf '%s\\n' \"$1\"\n}\nrun_case ok\n \n"},
 			shellMode: true,
-			want:      "set -e\nrun_case() {\n  printf '%s\\n' \"$1\"\n}\nrun_case ok",
+			want:      "set -e\nrun_case() {\n  printf '%s\\n' \"$1\"\n}\nrun_case ok\n \n",
 		},
 		{
-			name:    "single shell string trims trailing blank suffix",
+			name:    "single shell string preserves trailing newline",
 			command: []string{"pnpm test\n"},
-			want:    "pnpm test",
+			want:    "pnpm test\n",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := blacksmithCommandString(tt.command, tt.shellMode); got != tt.want {
 				t.Fatalf("command=%q want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBlacksmithRunShellBoundary(t *testing.T) {
+	if _, err := exec.LookPath("/bin/sh"); err != nil {
+		t.Skip("synthetic native transport requires a POSIX shell")
+	}
+	for _, tt := range []struct {
+		name, stdout, stderr string
+		command              []string
+		shell                bool
+		code                 int
+	}{
+		{
+			name:    "terminal heredoc",
+			command: []string{"cat <<'PAYLOAD'\n'quoted' \"$HOME\" $(printf BAD) \\ tail\t \nPAYLOAD"},
+			shell:   true,
+			stdout:  "'quoted' \"$HOME\" $(printf BAD) \\ tail\t \n",
+		},
+		{
+			name:    "single source heredoc with newline",
+			command: []string{"cat <<'PAYLOAD'\nheredoc-ok\nPAYLOAD\n"},
+			stdout:  "heredoc-ok\n",
+		},
+		{
+			name:    "heredoc failure",
+			command: []string{"sh <<'SCRIPT'\nprintf heredoc-failure >&2\nexit 23\nSCRIPT"},
+			shell:   true,
+			stderr:  "heredoc-failure",
+			code:    23,
+		},
+		{
+			name:    "ordinary streams",
+			command: []string{"printf out; printf err >&2"},
+			shell:   true,
+			stdout:  "out",
+			stderr:  "err",
+		},
+		{
+			name:    "multiline trailing blanks",
+			command: []string{"set -e\nrun_case() {\n  printf '%s' \"$1\"\n}\nrun_case ok\n \t\n"},
+			shell:   true,
+			stdout:  "ok",
+		},
+		{name: "nonzero status", command: []string{"printf before; false"}, stdout: "before", code: 1},
+		{name: "explicit exit", command: []string{"printf before; exit 23; printf BAD"}, stdout: "before", code: 23},
+		{name: "errexit", command: []string{"set -e\nprintf before\nfalse\nprintf BAD"}, shell: true, stdout: "before", code: 1},
+		{name: "pipeline status", command: []string{"printf input | sh -c 'cat >/dev/null; exit 7'"}, shell: true, code: 7},
+		{name: "trailing comment", command: []string{"printf comment-ok # trailing comment"}, stdout: "comment-ok"},
+		{name: "trailing semicolon", command: []string{"printf semicolon-ok;"}, stdout: "semicolon-ok"},
+		{name: "escaped trailing space", command: []string{"printf '%s' tail\\ "}, stdout: "tail "},
+		{
+			name:    "literal argv",
+			command: []string{"printf", "[%s]", "", "two words", "it's quoted", "$HOME", "semi;colon", "line1\nline2"},
+			stdout:  "[][two words][it's quoted][$HOME][semi;colon][line1\nline2]",
+		},
+		{
+			name:    "inline program and arguments",
+			command: []string{"sh", "-c", "printf '%s|%s' \"$1\" \"$2\"", "fixture", "'quoted' $HOME", "$(printf BAD)\nnext"},
+			stdout:  "'quoted' $HOME|$(printf BAD)\nnext",
+		},
+		{name: "environment assignment", command: []string{"VALUE=two words", "sh", "-c", "printf '%s' \"$VALUE\""}, stdout: "two words"},
+		{name: "argv shell operator", command: []string{"printf", "%s", "two words", "&&", "printf", "ok"}, stdout: "two wordsok"},
+		{name: "working directory", command: []string{"test -f input && mkdir child && cd child && test -f ../input && printf cwd-ok"}, stdout: "cwd-ok"},
+		{name: "option-like command", command: []string{"-shell-probe"}, stdout: "option-ok"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateBlacksmithOwnership(t)
+			repo := t.TempDir()
+			t.Chdir(repo)
+			testWriteBlacksmithFile(t, repo, "input", "input")
+			if tt.name == "option-like command" {
+				if err := os.WriteFile(filepath.Join(repo, "-shell-probe"), []byte("#!/bin/sh\nprintf option-ok\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", repo+string(os.PathListSeparator)+os.Getenv("PATH"))
+			}
+			const id = "tbx_shell_boundary"
+			prepareBlacksmithGuestKey(t, id)
+			testOwnedBlacksmithClaim(t, id, "shell-boundary", repo)
+			var stdout, stderr, nativeStderr bytes.Buffer
+			runs := 0
+			runner := &blacksmithFuncRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				runs++
+				req.Stderr = io.MultiWriter(req.Stderr, &nativeStderr)
+				return runSyntheticBlacksmithCommand(t, t.Context(), req)
+			}}
+			backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
+			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
+			result, err := backend.Run(t.Context(), core.RunRequest{ID: id, Repo: core.Repo{Root: repo}, Command: tt.command, ShellMode: tt.shell})
+			if runs != 1 || result.ExitCode != tt.code || (err == nil) != (tt.code == 0) || stdout.String() != tt.stdout || nativeStderr.String() != tt.stderr {
+				t.Fatalf("runs=%d code=%d want=%d err=%v stdout=%q want=%q stderr=%q want=%q", runs, result.ExitCode, tt.code, err, stdout.String(), tt.stdout, nativeStderr.String(), tt.stderr)
+			}
+			if (tt.shell || len(tt.command) == 1) && result.CommandText != strings.Join(tt.command, " ") {
+				t.Fatalf("reported command changed: %q", result.CommandText)
 			}
 		})
 	}
