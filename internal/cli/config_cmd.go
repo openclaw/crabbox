@@ -393,24 +393,6 @@ func configShowView(cfg Config) map[string]any {
 			"evalTimeout":       cfg.Nomad.EvalTimeout.String(),
 			"execTimeoutSecs":   cfg.Nomad.ExecTimeoutSecs,
 		},
-		"upstashBox": map[string]any{
-			"baseUrl":   redactedConfigURL(cfg.UpstashBox.BaseURL),
-			"auth":      tokenState(cfg.UpstashBox.APIKey),
-			"runtime":   cfg.UpstashBox.Runtime,
-			"size":      cfg.UpstashBox.Size,
-			"workdir":   cfg.UpstashBox.Workdir,
-			"keepAlive": cfg.UpstashBox.KeepAlive,
-		},
-		"smolvm": map[string]any{
-			"baseUrl":  redactedConfigURL(cfg.Smolvm.BaseURL),
-			"auth":     tokenState(cfg.Smolvm.APIKey),
-			"image":    cfg.Smolvm.Image,
-			"workdir":  cfg.Smolvm.Workdir,
-			"cpus":     cfg.Smolvm.CPUs,
-			"memoryMB": cfg.Smolvm.MemoryMB,
-			"network":  cfg.Smolvm.Network,
-			"keep":     cfg.Smolvm.Keep,
-		},
 		"blaxel": map[string]any{
 			"apiUrl":          redactedConfigURL(cfg.Blaxel.APIURL),
 			"auth":            tokenState(cfg.Blaxel.APIKey),
@@ -587,8 +569,12 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "morph api_url=%s snapshot=%s ssh_gateway_host=%s work_root=%s delete_on_release=%t wake_on_ssh=%t auth=%s\n", blank(redactedConfigURL(cfg.Morph.APIURL), "-"), blank(cfg.Morph.Snapshot, "-"), blank(cfg.Morph.SSHGatewayHost, "-"), blank(cfg.Morph.WorkRoot, "-"), cfg.Morph.DeleteOnRelease, cfg.Morph.WakeOnSSH, tokenState(cfg.Morph.APIKey))
 	fmt.Fprintf(w, "e2b api_url=%s domain=%s template=%s workdir=%s user=%s\n", redactedConfigURL(cfg.E2B.APIURL), cfg.E2B.Domain, cfg.E2B.Template, cfg.E2B.Workdir, blank(cfg.E2B.User, "-"))
 	fmt.Fprintf(w, "cubesandbox api_url=%s domain=%s template=%s workdir=%s user=%s proxy_node_ip=%s proxy_port_http=%d proxy_scheme=%s auth=%s\n", blank(redactedConfigURL(cfg.CubeSandbox.APIURL), "-"), blank(cfg.CubeSandbox.Domain, "-"), blank(cfg.CubeSandbox.Template, "-"), blank(cfg.CubeSandbox.Workdir, "-"), blank(cfg.CubeSandbox.User, "-"), blank(cfg.CubeSandbox.ProxyNodeIP, "-"), cfg.CubeSandbox.ProxyPortHTTP, blank(cfg.CubeSandbox.ProxyScheme, "-"), tokenState(cfg.CubeSandbox.APIKey))
-	fmt.Fprintf(w, "upstash_box base_url=%s runtime=%s size=%s workdir=%s keep_alive=%t auth=%s\n", redactedConfigURL(cfg.UpstashBox.BaseURL), cfg.UpstashBox.Runtime, cfg.UpstashBox.Size, cfg.UpstashBox.Workdir, cfg.UpstashBox.KeepAlive, tokenState(cfg.UpstashBox.APIKey))
-	fmt.Fprintf(w, "smolvm base_url=%s image=%s workdir=%s cpus=%d memory_mb=%d network=%s keep=%t auth=%s\n", redactedConfigURL(cfg.Smolvm.BaseURL), cfg.Smolvm.Image, cfg.Smolvm.Workdir, cfg.Smolvm.CPUs, cfg.Smolvm.MemoryMB, cfg.Smolvm.Network, cfg.Smolvm.Keep, tokenState(cfg.Smolvm.APIKey))
+	if err := layout.writeSlot(w, "upstash_box"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "smolvm"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "blaxel api_url=%s workspace=%s region=%s image=%s memory_mb=%d ttl=%s idle_ttl=%s workdir=%s exec_timeout_secs=%d forget_missing=%t auth=%s\n", blank(redactedConfigURL(cfg.Blaxel.APIURL), "-"), blank(cfg.Blaxel.Workspace, "-"), blank(cfg.Blaxel.Region, "-"), cfg.Blaxel.Image, cfg.Blaxel.MemoryMB, blank(cfg.Blaxel.TTL, "-"), blank(cfg.Blaxel.IdleTTL, "-"), cfg.Blaxel.Workdir, cfg.Blaxel.ExecTimeoutSecs, cfg.Blaxel.ForgetMissing, tokenState(cfg.Blaxel.APIKey))
 	fmt.Fprintf(w, "nomad address=%s region=%s namespace=%s auth_env=%s auth=%s tls_ca=%s tls_capath=%s tls_cert=%s tls_key=%s tls_server_name=%s skip_verify=%t task=%s driver=%s image=%s workdir=%s jobspec_template=%s node_pool=%s datacenters=%s cpu=%d memory_mb=%d disk_mb=%d alloc_ready_timeout=%s eval_timeout=%s exec_timeout_secs=%d\n", blank(redactedConfigURL(cfg.Nomad.Address), "-"), blank(cfg.Nomad.Region, "-"), blank(cfg.Nomad.Namespace, "-"), nomadTextAuthEnv(cfg), nomadAuthState(cfg), blank(cfg.Nomad.CACert, "-"), blank(cfg.Nomad.CAPath, "-"), blank(cfg.Nomad.ClientCert, "-"), blank(cfg.Nomad.ClientKey, "-"), blank(cfg.Nomad.TLSServerName, "-"), cfg.Nomad.SkipVerify, cfg.Nomad.Task, cfg.Nomad.Driver, cfg.Nomad.Image, cfg.Nomad.Workdir, blank(cfg.Nomad.JobSpecTemplate, "-"), blank(cfg.Nomad.NodePool, "-"), blank(strings.Join(cfg.Nomad.Datacenters, ","), "-"), cfg.Nomad.CPU, cfg.Nomad.MemoryMB, cfg.Nomad.DiskMB, cfg.Nomad.AllocReadyTimeout, cfg.Nomad.EvalTimeout, cfg.Nomad.ExecTimeoutSecs)
 	fmt.Fprintf(w, "ascii_box base_url=%s cli=%s workdir=%s auth=%s\n", redactedConfigURL(cfg.AsciiBox.BaseURL), cfg.AsciiBox.CLIPath, cfg.AsciiBox.Workdir, tokenState(cfg.AsciiBox.APIKey))

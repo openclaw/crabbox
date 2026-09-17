@@ -12,7 +12,9 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/ovh"
 	_ "github.com/openclaw/crabbox/internal/providers/proxmox"
 	_ "github.com/openclaw/crabbox/internal/providers/scaleway"
+	_ "github.com/openclaw/crabbox/internal/providers/smolvm"
 	_ "github.com/openclaw/crabbox/internal/providers/tencentcloud"
+	_ "github.com/openclaw/crabbox/internal/providers/upstashbox"
 	_ "github.com/openclaw/crabbox/internal/providers/vast"
 	_ "github.com/openclaw/crabbox/internal/providers/vultr"
 )
