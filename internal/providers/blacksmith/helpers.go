@@ -62,7 +62,11 @@ func blacksmithRunArgs(cfg core.Config, leaseID, keyPath string, command []strin
 	if debug {
 		args = append(args, "--debug")
 	}
-	args = append(args, blacksmithCommandString(command, shellMode))
+	// The native CLI appends status/activity commands directly after this text.
+	// Quote the source for eval so heredocs, comments, and trailing whitespace
+	// cannot consume that suffix. The empty argument keeps option-like source
+	// portable without eval's non-POSIX "--", and retains the native shell.
+	args = append(args, "eval '' "+core.ShellQuote(blacksmithCommandString(command, shellMode)))
 	return args
 }
 
@@ -214,11 +218,7 @@ func blacksmithCommandString(command []string, shellMode bool) string {
 		return ""
 	}
 	if shellMode || len(command) == 1 {
-		return trimBlacksmithShellCommand(strings.Join(command, " "))
+		return strings.Join(command, " ")
 	}
 	return core.ShellScriptFromArgv(command)
-}
-
-func trimBlacksmithShellCommand(command string) string {
-	return strings.TrimRight(command, " \t\r\n")
 }

@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-- Add opt-in Bash preflight reporting on Linux, macOS, and WSL2 without changing default probes; report missing Bash without blocking independent commands. [PR 2300](https://github.com/openclaw/crabbox/pull/2300). Thanks @coygeek.
+- Add opt-in Bash preflight reporting on Linux, macOS, and WSL2 without changing default probes; complete runtime installations can report missing Bash and continue independent commands. [PR 2300](https://github.com/openclaw/crabbox/pull/2300). Thanks @coygeek.
 - Bundle small Linux runtime companions with complete CLI archives so managed execution can operate without Bash; discover installed companions automatically and explain how CLI-only installations can obtain the complete runtime pack. [PR 2300](https://github.com/openclaw/crabbox/pull/2300).
+
+- Preserve terminal heredocs and significant trailing whitespace in Blacksmith Testbox shell commands while retaining command output and exit status. [PR 2295](https://github.com/openclaw/crabbox/pull/2295). Thanks @shakkernerd.
 
 - Preserve local GCP lease claims during cleanup dry-runs when an instance disappears, and share the cleanup mutation boundary with Azure recovery. [PR 2297](https://github.com/openclaw/crabbox/pull/2297).
 

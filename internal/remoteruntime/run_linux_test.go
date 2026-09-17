@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -285,7 +286,7 @@ func nativeControl(t *testing.T, nonce, action string) []byte {
 	if action == "cleanup" {
 		cmd.Args = append(cmd.Args, strconv.FormatInt(MaxCleanupWait.Milliseconds(), 10))
 	}
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + t.TempDir()}
+	cmd.Env = nativeEnvironment(t)
 	var diagnostic bytes.Buffer
 	cmd.Stderr = &diagnostic
 	output, err := cmd.Output()
@@ -321,6 +322,17 @@ func nativeCommand(t *testing.T, nonce, source string, input []byte, execution t
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, exe, Command, "run", Protocol, nonce, strconv.Itoa(len(source)), strconv.Itoa(len(input)), "1000", "100", strconv.FormatInt(execution.Milliseconds(), 10), mode, inputMode)
 	cmd.Stdin = bytes.NewReader(append([]byte(source), input...))
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + t.TempDir()}
+	cmd.Env = nativeEnvironment(t)
 	return cmd
+}
+
+func nativeEnvironment(t *testing.T) []string {
+	t.Helper()
+	env := []string{"PATH=/usr/bin:/bin", "HOME=" + t.TempDir()}
+	// Runtime subprocesses bypass m.Run, so send their coverage to the
+	// directory that the parent test harness will merge into its profile.
+	if dir := flag.Lookup("test.gocoverdir"); dir != nil && dir.Value.String() != "" {
+		env = append(env, "GOCOVERDIR="+dir.Value.String())
+	}
+	return env
 }
