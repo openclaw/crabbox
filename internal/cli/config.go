@@ -1136,7 +1136,8 @@ func finalizeProviderSelection(cfg *Config) error {
 	return applyProviderConfigDefaults(cfg)
 }
 
-func applyLinuxConnectionDefaults(cfg *Config, defaultSSHUser, defaultSSHPort string) {
+// ApplyLinuxConnectionDefaults restores explicit connection settings before applying Linux defaults.
+func ApplyLinuxConnectionDefaults(cfg *Config, defaultSSHUser, defaultSSHPort string) {
 	if !IsTargetExplicit(cfg) {
 		cfg.TargetOS = targetLinux
 	}
@@ -1185,47 +1186,10 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			return validateTargetConfig(*cfg)
 		}
 	}
-	if cfg.Provider == "digitalocean" {
-		if cfg.DigitalOcean.Region == "" {
-			cfg.DigitalOcean.Region = DigitalOceanRegionFallback
-		}
-		if cfg.osImageExplicit && !cfg.digitalOceanImageExplicit {
-			if cfg.OSImage == "ubuntu:24.04" {
-				cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
-			} else {
-				cfg.DigitalOcean.Image = ""
-			}
-		} else if cfg.DigitalOcean.Image == "" {
-			cfg.DigitalOcean.Image = DigitalOceanImageFallback
-		}
-		applyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
-		normalizeTargetConfig(cfg)
-		return validateTargetConfig(*cfg)
-	}
 	if cfg.Provider == "vultr" {
 		cfg.Vultr = cfg.Vultr.WithRuntimeDefaults()
-		applyLinuxConnectionDefaults(cfg, "root", "22")
+		ApplyLinuxConnectionDefaults(cfg, "root", "22")
 		cfg.SSHFallbackPorts = nil
-		normalizeTargetConfig(cfg)
-		return validateTargetConfig(*cfg)
-	}
-	if cfg.Provider == "linode" {
-		if cfg.Linode.Region == "" {
-			cfg.Linode.Region = LinodeConfiguredRegionDefault
-		}
-		if cfg.osImageExplicit && !cfg.linodeImageExplicit {
-			if cfg.OSImage == "ubuntu:24.04" {
-				cfg.Linode.Image = "linode/ubuntu24.04"
-			} else {
-				cfg.Linode.Image = ""
-			}
-		} else if cfg.Linode.Image == "" {
-			cfg.Linode.Image = LinodeImageFallback
-		}
-		if cfg.Linode.Type == "" {
-			cfg.Linode.Type = LinodeConfiguredTypeDefault
-		}
-		applyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -1238,7 +1202,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 				cfg.Lambda.ImageFamily = ""
 			}
 		}
-		applyLinuxConnectionDefaults(cfg, "ubuntu", "22")
+		ApplyLinuxConnectionDefaults(cfg, "ubuntu", "22")
 		cfg.SSHFallbackPorts = nil
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
@@ -1300,7 +1264,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 	}
 	if cfg.Provider == "nebius" {
 		cfg.Nebius = cfg.Nebius.WithRuntimeDefaults()
-		applyLinuxConnectionDefaults(cfg, cfg.Nebius.User, baseConfig().SSHPort)
+		ApplyLinuxConnectionDefaults(cfg, cfg.Nebius.User, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -1314,7 +1278,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.OVH.Flavor == "" {
 			cfg.OVH.Flavor = OVHConfigDefaultFlavor
 		}
-		applyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
+		ApplyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -1337,7 +1301,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.Scaleway.Type == "" {
 			cfg.Scaleway.Type = ScalewayConfigDefaultType
 		}
-		applyLinuxConnectionDefaults(cfg, "root", "22")
+		ApplyLinuxConnectionDefaults(cfg, "root", "22")
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -1360,7 +1324,7 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		if cfg.TencentCloud.InternetMaxBandwidthOut == 0 {
 			cfg.TencentCloud.InternetMaxBandwidthOut = TencentCloudInternetMaxBandwidthOutFallback
 		}
-		applyLinuxConnectionDefaults(cfg, "ubuntu", "22")
+		ApplyLinuxConnectionDefaults(cfg, "ubuntu", "22")
 		cfg.SSHFallbackPorts = nil
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
@@ -7761,6 +7725,14 @@ func IsWindowsModeExplicit(cfg Config) bool {
 
 func MarkArchitectureExplicit(cfg *Config) {
 	cfg.architectureExplicit = true
+}
+
+func DigitalOceanImageWasExplicit(cfg Config) bool {
+	return cfg.digitalOceanImageExplicit
+}
+
+func LinodeImageWasExplicit(cfg Config) bool {
+	return cfg.linodeImageExplicit
 }
 
 func OSImageWasExplicit(cfg Config) bool {

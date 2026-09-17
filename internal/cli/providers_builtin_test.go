@@ -13,9 +13,7 @@ import (
 
 func init() {
 	RegisterProvider(testHetznerProvider{})
-	RegisterProvider(testDigitalOceanProvider{})
 	RegisterProvider(testVultrProvider{})
-	RegisterProvider(testLinodeProvider{})
 	RegisterProvider(testLambdaProvider{})
 	RegisterProvider(testNebiusProvider{})
 	RegisterProvider(testScalewayProvider{})
@@ -416,27 +414,6 @@ func (b testHetznerBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 	return b.testSSHBackend.Acquire(ctx, req)
 }
 
-type testDigitalOceanProvider struct{}
-
-func (testDigitalOceanProvider) Spec() ProviderSpec {
-	return ProviderSpec{
-		Name:        "digitalocean",
-		Family:      "digitalocean",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale},
-		Coordinator: CoordinatorNever,
-	}
-}
-func (testDigitalOceanProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
-func (testDigitalOceanProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
-	return nil
-}
-func (testDigitalOceanProvider) ServerTypeForConfig(Config) string { return "s-1vcpu-1gb" }
-func (p testDigitalOceanProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
-}
-
 type testVultrProvider struct{}
 
 func (testVultrProvider) Spec() ProviderSpec {
@@ -455,35 +432,6 @@ func (testVultrProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 }
 func (testVultrProvider) ServerTypeForConfig(Config) string { return "vc2-1c-1gb" }
 func (p testVultrProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
-}
-
-type testLinodeProvider struct{}
-
-func (testLinodeProvider) Spec() ProviderSpec {
-	return ProviderSpec{
-		Name:        "linode",
-		Family:      "linode",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale},
-		Coordinator: CoordinatorNever,
-	}
-}
-func (testLinodeProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
-func (testLinodeProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
-	return nil
-}
-func (testLinodeProvider) ServerTypeForConfig(cfg Config) string {
-	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
-		return cfg.ServerType
-	}
-	if cfg.Linode.Type != "" {
-		return cfg.Linode.Type
-	}
-	return "g6-standard-1"
-}
-func (p testLinodeProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 

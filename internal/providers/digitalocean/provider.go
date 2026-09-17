@@ -102,3 +102,27 @@ func digitalOceanServerTypeForClass(class string) string {
 	}
 	return "s-1vcpu-1gb"
 }
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	applyNativeDefaults(&cfg.DigitalOcean)
+	if core.OSImageWasExplicit(*cfg) && !core.DigitalOceanImageWasExplicit(*cfg) {
+		if cfg.OSImage == "ubuntu:24.04" {
+			cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+		} else {
+			// Leave unsupported intent unresolved until acquisition validation.
+			cfg.DigitalOcean.Image = ""
+		}
+	}
+	base := core.BaseConfig()
+	core.ApplyLinuxConnectionDefaults(cfg, base.SSHUser, base.SSHPort)
+	return nil
+}
+
+func applyNativeDefaults(cfg *core.DigitalOceanConfig) {
+	if cfg.Region == "" {
+		cfg.Region = core.DigitalOceanRegionFallback
+	}
+	if cfg.Image == "" {
+		cfg.Image = core.DigitalOceanImageFallback
+	}
+}

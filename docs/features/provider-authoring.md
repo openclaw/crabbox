@@ -325,6 +325,16 @@ Never accept secrets as flag arguments. Pull them from environment variables,
 SDK config, the broker, or the operator's credential store. Flags are visible in
 shell history, process listings, and recorded run logs.
 
+Provider-native configuration defaults belong in `ProviderConfigDefaulter`'s
+`ApplyConfigDefaults` hook. Core calls it after input parsing and portable-OS
+preprocessing, then normalizes and validates the target. Use core provenance
+accessors to preserve explicit inputs; `ApplyLinuxConnectionDefaults` restores
+explicit connection settings when applying Linux defaults across provider changes.
+Keep acquisition-only validation deferred: DigitalOcean and Linode preserve an
+unresolved explicit portable image until backend construction captures the error,
+before filling runtime fallbacks. Passive config-display hooks must not resolve
+defaults themselves.
+
 ## Step 6. Implement The Backend
 
 Pick the interface that matches the kind you declared. Both embed `Backend`,

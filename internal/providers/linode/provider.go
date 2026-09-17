@@ -65,3 +65,30 @@ func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewLinodeLeaseBackend(p.Spec(), cfg, rt), nil
 }
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	applyNativeDefaults(&cfg.Linode)
+	if core.OSImageWasExplicit(*cfg) && !core.LinodeImageWasExplicit(*cfg) {
+		if cfg.OSImage == "ubuntu:24.04" {
+			cfg.Linode.Image = "linode/ubuntu24.04"
+		} else {
+			// Leave unsupported intent unresolved until acquisition validation.
+			cfg.Linode.Image = ""
+		}
+	}
+	if cfg.Linode.Type == "" {
+		cfg.Linode.Type = core.LinodeConfiguredTypeDefault
+	}
+	base := core.BaseConfig()
+	core.ApplyLinuxConnectionDefaults(cfg, base.SSHUser, base.SSHPort)
+	return nil
+}
+
+func applyNativeDefaults(cfg *core.LinodeConfig) {
+	if cfg.Region == "" {
+		cfg.Region = core.LinodeConfiguredRegionDefault
+	}
+	if cfg.Image == "" {
+		cfg.Image = core.LinodeImageFallback
+	}
+}

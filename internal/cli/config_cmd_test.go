@@ -1896,6 +1896,17 @@ lambda:
 	}
 }
 
+func configShowTextSection(t *testing.T, text, name string) string {
+	t.Helper()
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, name+" ") {
+			return line
+		}
+	}
+	t.Fatalf("config show missing %s section", name)
+	return ""
+}
+
 func TestConfigShowIncludesNvidiaBrevWithoutSecretSurface(t *testing.T) {
 	configPath := isolatedConfigPath(t)
 	t.Setenv("CRABBOX_NVIDIA_BREV_TOKEN", "ignored-brev-secret")
@@ -1926,9 +1937,14 @@ func TestConfigShowIncludesNvidiaBrevWithoutSecretSurface(t *testing.T) {
 	if !strings.Contains(text, want) {
 		t.Fatalf("config show missing nvidia-brev summary: %q", text)
 	}
-	for _, secretFragment := range []string{"ignored-brev-secret", "token", "api_key", "password", "private_key"} {
-		if strings.Contains(strings.ToLower(text), secretFragment) {
-			t.Fatalf("config show text exposed %q: %q", secretFragment, text)
+	if strings.Contains(strings.ToLower(text), "ignored-brev-secret") {
+		t.Fatalf("config show text exposed the synthetic secret: %q", text)
+	}
+	// Other providers may describe token-based authentication in their metadata.
+	section := configShowTextSection(t, text, "nvidia_brev")
+	for _, secretField := range []string{"token", "api_key", "password", "private_key"} {
+		if strings.Contains(strings.ToLower(section), secretField) {
+			t.Fatalf("nvidia-brev config text exposed %q: %q", secretField, section)
 		}
 	}
 
@@ -2109,9 +2125,10 @@ nebius:
 	if !strings.Contains(text, want) {
 		t.Fatalf("config show missing nebius summary: %q", text)
 	}
-	for _, secretFragment := range []string{"token", "api_key", "private_key", "password"} {
-		if strings.Contains(strings.ToLower(text), secretFragment) {
-			t.Fatalf("config show text exposed %q: %q", secretFragment, text)
+	section := configShowTextSection(t, text, "nebius")
+	for _, secretField := range []string{"token", "api_key", "private_key", "password"} {
+		if strings.Contains(strings.ToLower(section), secretField) {
+			t.Fatalf("nebius config text exposed %q: %q", secretField, section)
 		}
 	}
 
