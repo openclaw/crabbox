@@ -24,6 +24,8 @@ func archivePrivateFile(info os.FileInfo) bool {
 
 func archiveHasHardLinks(_ os.FileInfo) bool { return true }
 
+func archiveLinkCount(_ os.FileInfo) (uint64, bool) { return 0, false }
+
 func archivePrivateDirectory(_ os.FileInfo) bool { return false }
 
 func archiveTrustedDirectory(_ os.FileInfo) bool { return false }

@@ -45,8 +45,16 @@ func archivePrivateFile(info os.FileInfo) bool {
 }
 
 func archiveHasHardLinks(info os.FileInfo) bool {
+	links, ok := archiveLinkCount(info)
+	return !ok || links > 1
+}
+
+func archiveLinkCount(info os.FileInfo) (uint64, bool) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return !ok || stat.Nlink > 1
+	if !ok {
+		return 0, false
+	}
+	return uint64(stat.Nlink), true
 }
 
 func archivePrivateDirectory(info os.FileInfo) bool {

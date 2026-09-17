@@ -100,7 +100,7 @@ func TestJournalResolvesParentBeforeCleaning(t *testing.T) {
 func TestJournalRecoversOrdinaryPublicationPhases(t *testing.T) {
 	for _, spelling := range []string{"original", "relative", "symlink-parent", "parent-case", "basename-case"} {
 		t.Run(spelling, func(t *testing.T) {
-			for _, phase := range []string{"decision", "old-renamed", "new-renamed", "old-retired"} {
+			for _, phase := range []string{"decision-linked", "decision-unlinked", "decision-reopened", "decision", "old-renamed", "new-renamed", "old-retired"} {
 				t.Run(phase, func(t *testing.T) {
 					root := journalTestDirectory(t)
 					parent := filepath.Join(root, "Parent")
@@ -159,10 +159,33 @@ func TestJournalRecoversOrdinaryPublicationPhases(t *testing.T) {
 					if err := c.sync(record); err != nil {
 						t.Fatal(err)
 					}
-					if err := c.write(record); err != nil {
+					if phase == "decision-linked" || phase == "decision-unlinked" || phase == "decision-reopened" {
+						pending, err := c.linkDecision(record)
+						if err != nil {
+							t.Fatal(err)
+						}
+						info, err := os.Lstat(c.journal)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if links, known := archiveLinkCount(info); !known || links != 2 {
+							t.Fatalf("linked decision has %d links, known=%v", links, known)
+						}
+						if phase == "decision-unlinked" {
+							if err := os.Remove(pending); err != nil {
+								t.Fatal(err)
+							}
+						}
+						if phase == "decision-reopened" {
+							if _, err := c.read(); err != nil {
+								t.Fatal(err)
+							}
+						}
+						journalTestContents(t, target, "old")
+					} else if err := c.write(record); err != nil {
 						t.Fatal(err)
 					}
-					if phase != "decision" {
+					if !strings.HasPrefix(phase, "decision") {
 						if err := c.move("Destination", filepath.Join(record.Workspace, "old"), record.Old); err != nil {
 							t.Fatal(err)
 						}
@@ -195,6 +218,9 @@ func TestJournalRecoversOrdinaryPublicationPhases(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
+					if _, err := os.Lstat(reopened.pending(saved)); !os.IsNotExist(err) {
+						t.Fatalf("pending decision not retired: %v", err)
+					}
 					if err := reopened.recover(saved); err != nil {
 						t.Fatal(err)
 					}
@@ -212,6 +238,41 @@ func TestJournalRecoversOrdinaryPublicationPhases(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+func TestJournalWritePreservesExistingDecision(t *testing.T) {
+	root := journalTestDirectory(t)
+	c, err := openArchiveJournal(filepath.Join(root, "destination"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.parent.Close()
+	first, err := c.workspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Decision = string(ArchiveKeepDestination)
+	if err := c.write(first); err != nil {
+		t.Fatal(err)
+	}
+	second, err := c.workspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second.Decision = string(ArchiveKeepDestination)
+	if err := c.write(second); !os.IsExist(err) {
+		t.Fatalf("second decision write=%v, want already exists", err)
+	}
+	saved, err := c.read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Workspace != first.Workspace || saved.WorkspaceID != first.WorkspaceID {
+		t.Fatal("existing decision was replaced")
+	}
+	if _, err := os.Lstat(c.pending(second)); !os.IsNotExist(err) {
+		t.Fatalf("failed writer retained pending decision: %v", err)
 	}
 }
 

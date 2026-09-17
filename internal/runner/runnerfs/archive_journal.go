@@ -175,7 +175,8 @@ func (c *archiveJournalContext) read() (*archiveJournal, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !archivePrivateFile(info) || archiveHasHardLinks(info) {
+	links, known := archiveLinkCount(info)
+	if !archivePrivateFile(info) || !known || (links != 1 && links != 2) {
 		return nil, errors.New("copy recovery journal is not a private regular file")
 	}
 	file, err := os.OpenFile(c.journal, os.O_RDONLY|nonblockingOpen, 0)
@@ -203,8 +204,7 @@ func (c *archiveJournalContext) read() (*archiveJournal, error) {
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return nil, errors.New("copy recovery journal has trailing data")
 	}
-	if record.Version != 2 || record.Parent != c.parentID || !c.matchesTarget(record.Target) ||
-		!strings.HasPrefix(record.Workspace, ".crabbox-cp-publish-") || filepath.Base(record.Workspace) != record.Workspace || record.WorkspaceID == "" {
+	if record.Version != 2 || record.Parent != c.parentID || !c.matchesTarget(record.Target) {
 		return nil, errors.New("copy recovery journal does not match destination and physical parent")
 	}
 	if record.Decision != "publish" && record.Decision != string(ArchiveKeepDestination) && record.Decision != string(ArchiveRestoreBackup) {
@@ -213,7 +213,65 @@ func (c *archiveJournalContext) read() (*archiveJournal, error) {
 	if record.Decision == "publish" && (record.New == "" || record.Marker != "" || record.Backup != "") {
 		return nil, errors.New("copy recovery journal has invalid publication identities")
 	}
+	if err := c.validateWorkspace(&record); err != nil {
+		return nil, err
+	}
+	if err := c.finishPending(&record, file); err != nil {
+		return nil, err
+	}
 	return &record, nil
+}
+
+func (c *archiveJournalContext) pending(record *archiveJournal) string {
+	return filepath.Join(c.directory, "."+filepath.Base(c.journal)+"-"+record.Workspace+".pending")
+}
+
+// A linked decision may survive interruption before its private pending name
+// is removed. Only that exact second name belongs to this publication.
+func (c *archiveJournalContext) finishPending(record *archiveJournal, file *os.File) error {
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	named, err := os.Lstat(c.journal)
+	if err != nil {
+		return err
+	}
+	links, known := archiveLinkCount(info)
+	if !archivePrivateFile(info) || !os.SameFile(info, named) || !archivePrivateFile(named) || !known || (links != 1 && links != 2) {
+		return errors.New("copy recovery journal is not a private singly linked file")
+	}
+	if links == 2 {
+		pending := c.pending(record)
+		other, err := os.Lstat(pending)
+		if err != nil {
+			return err
+		}
+		otherLinks, known := archiveLinkCount(other)
+		if !archivePrivateFile(other) || !known || otherLinks != 2 || !os.SameFile(info, other) {
+			return errors.New("copy recovery journal has an unrelated hard link")
+		}
+		if err := os.Remove(pending); err != nil {
+			return err
+		}
+		if err := syncCopyArchiveDirectory(c.directory); err != nil {
+			return err
+		}
+	}
+	actual, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	named, err = os.Lstat(c.journal)
+	if err != nil {
+		return err
+	}
+	links, known = archiveLinkCount(actual)
+	namedLinks, namedKnown := archiveLinkCount(named)
+	if !archivePrivateFile(actual) || !archivePrivateFile(named) || !os.SameFile(info, actual) || !os.SameFile(actual, named) || !known || links != 1 || !namedKnown || namedLinks != 1 {
+		return errors.New("copy recovery journal changed while finishing publication")
+	}
+	return nil
 }
 
 func (c *archiveJournalContext) matchesTarget(recorded string) bool {
@@ -247,33 +305,53 @@ func (c *archiveJournalContext) matchesTarget(recorded string) bool {
 }
 
 func (c *archiveJournalContext) write(record *archiveJournal) error {
-	data, err := json.Marshal(record)
+	temporary, err := c.linkDecision(record)
 	if err != nil {
 		return err
 	}
-	if len(data) > archiveJournalLimit {
-		return errors.New("copy recovery journal exceeds size limit")
-	}
-	file, err := os.CreateTemp(c.directory, ".pending-*")
-	if err != nil {
-		return err
-	}
-	temporary := file.Name()
 	defer os.Remove(temporary)
-	_, writeErr := file.Write(data)
-	syncErr := file.Sync()
-	closeErr := file.Close()
-	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
-		return err
-	}
-	// An existing record must be recovered; it can never be overwritten.
-	if err := os.Link(temporary, c.journal); err != nil {
-		return err
-	}
 	if err := os.Remove(temporary); err != nil {
 		return err
 	}
 	return syncCopyArchiveDirectory(c.directory)
+}
+
+// linkDecision durably prepares the contents and exclusively publishes the
+// decision name. The caller must remove the pending name and sync the directory.
+func (c *archiveJournalContext) linkDecision(record *archiveJournal) (string, error) {
+	if err := c.validateWorkspace(record); err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return "", err
+	}
+	if len(data) > archiveJournalLimit {
+		return "", errors.New("copy recovery journal exceeds size limit")
+	}
+	temporary := c.pending(record)
+	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	linked := false
+	defer func() {
+		if !linked {
+			_ = os.Remove(temporary)
+		}
+	}()
+	_, writeErr := file.Write(data)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return "", err
+	}
+	// An existing record must be recovered; it can never be overwritten.
+	if err := os.Link(temporary, c.journal); err != nil {
+		return "", err
+	}
+	linked = true
+	return temporary, nil
 }
 
 func (c *archiveJournalContext) workspace() (*archiveJournal, error) {
@@ -300,6 +378,20 @@ func (c *archiveJournalContext) workspace() (*archiveJournal, error) {
 
 func (c *archiveJournalContext) sync(record *archiveJournal) error {
 	return errors.Join(syncArchiveRootDirectory(c.parent, record.Workspace), syncArchiveRootDirectory(c.parent, "."))
+}
+
+func (c *archiveJournalContext) validateWorkspace(record *archiveJournal) error {
+	if !strings.HasPrefix(record.Workspace, ".crabbox-cp-publish-") || filepath.Base(record.Workspace) != record.Workspace || record.WorkspaceID == "" {
+		return errors.New("copy recovery journal has an invalid workspace")
+	}
+	info, err := c.parent.Lstat(record.Workspace)
+	if err != nil {
+		return err
+	}
+	if !archivePrivateDirectory(info) || archiveIdentity(info) != record.WorkspaceID {
+		return errors.New("copy recovery workspace identity changed; all data retained")
+	}
+	return nil
 }
 
 // move accepts either the original or already-completed rename, and never
@@ -331,12 +423,8 @@ func (c *archiveJournalContext) recover(record *archiveJournal) error {
 	if err := syncCopyArchiveDirectory(c.directory); err != nil {
 		return err
 	}
-	info, err := c.parent.Lstat(record.Workspace)
-	if err != nil {
+	if err := c.validateWorkspace(record); err != nil {
 		return err
-	}
-	if !archivePrivateDirectory(info) || archiveIdentity(info) != record.WorkspaceID {
-		return errors.New("copy recovery workspace identity changed; all data retained")
 	}
 	target := filepath.Base(record.Target)
 	switch record.Decision {
