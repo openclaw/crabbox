@@ -13,7 +13,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/openclaw/crabbox/internal/remoteruntime"
@@ -93,15 +92,19 @@ func extractArchive(ctx context.Context, archive, directory, platform, arch, mod
 		controller += ".exe"
 	}
 	// Limits cover normal release payloads while bounding decompression and disk use.
-	allowed := map[string]int64{controller: 512 << 20}
+	type allowedEntry struct {
+		path  string
+		limit int64
+	}
+	allowed := map[string]allowedEntry{controller: {controller, 512 << 20}}
 	if platform == "darwin" && arch == "arm64" {
-		allowed["crabbox-apple-vm-helper"] = 512 << 20
+		allowed["crabbox-apple-vm-helper"] = allowedEntry{"crabbox-apple-vm-helper", 512 << 20}
 	}
 	if mode != "none" {
-		allowed["crabbox-runtime/linux-amd64"] = 64 << 20
-		allowed["crabbox-runtime/linux-arm64"] = 64 << 20
+		allowed["crabbox-runtime/linux-amd64"] = allowedEntry{"crabbox-runtime/linux-amd64", 64 << 20}
+		allowed["crabbox-runtime/linux-arm64"] = allowedEntry{"crabbox-runtime/linux-arm64", 64 << 20}
 		if mode == "final" {
-			allowed["crabbox-runtime/manifest.json"] = 64 << 10
+			allowed["crabbox-runtime/manifest.json"] = allowedEntry{"crabbox-runtime/manifest.json", 64 << 10}
 		}
 	}
 	input, err := os.Open(archive)
@@ -141,12 +144,13 @@ func extractArchive(ctx context.Context, archive, directory, platform, arch, mod
 			directorySeen = true
 			return nil
 		}
-		limit, ok := allowed[name]
-		if !ok || seen[name] || !kind.IsRegular() || size <= 0 || size > limit {
+		entry, ok := allowed[name]
+		if !ok || seen[entry.path] || !kind.IsRegular() || size <= 0 || size > entry.limit {
 			return fmt.Errorf("unexpected, duplicate, nonregular, or oversized archive member: %s", name)
 		}
-		seen[name] = true
-		file := filepath.Join(directory, filepath.FromSlash(name))
+		seen[entry.path] = true
+		// Filesystem paths come from the fixed inventory, never the archive header.
+		file := filepath.Join(directory, filepath.FromSlash(entry.path))
 		output, err := os.OpenFile(file, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 		if err != nil {
 			return err
@@ -163,7 +167,7 @@ func extractArchive(ctx context.Context, archive, directory, platform, arch, mod
 			return fmt.Errorf("archive member length mismatch: %s", name)
 		}
 		permissions := os.FileMode(0755)
-		if strings.HasSuffix(name, "/manifest.json") {
+		if entry.path == "crabbox-runtime/manifest.json" {
 			permissions = 0644
 		}
 		if err := os.Chmod(file, permissions); err != nil {

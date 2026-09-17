@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -145,6 +146,17 @@ func TestReleaseArchiveLayouts(t *testing.T) {
 						got, err := os.ReadFile(filepath.Join(destination, name))
 						if err != nil || !bytes.Equal(got, want) {
 							t.Fatalf("member %s differs: %v", name, err)
+						}
+						info, err := os.Stat(filepath.Join(destination, name))
+						if err != nil {
+							t.Fatal(err)
+						}
+						permissions := os.FileMode(0755)
+						if name == "crabbox-runtime/manifest.json" {
+							permissions = 0644
+						}
+						if runtime.GOOS != "windows" && info.Mode().Perm() != permissions {
+							t.Fatalf("member %s permissions=%o, want %o", name, info.Mode().Perm(), permissions)
 						}
 					}
 					if mode == "none" {

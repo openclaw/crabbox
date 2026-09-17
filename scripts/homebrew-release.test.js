@@ -1026,9 +1026,11 @@ test("installed runtime pack follows the Homebrew CLI symlink and preserves froz
     fs.copyFileSync(path.join(pack, member), path.join(extracted, "crabbox-runtime", member));
   }
   const verify = () => spawnSync("/bin/bash", [
-    "-c", 'source "$1"; verify_homebrew_runtime_pack "$2" "$3" "$4" "$5"',
-    "homebrew-runtime-test", verifier, process.execPath, extracted, installedCLI, linkedCLI,
-  ], { encoding: "utf8" });
+    "-s", "--", verifier, process.execPath, extracted, installedCLI, linkedCLI,
+  ], {
+    encoding: "utf8",
+    input: 'source "$1"\nverify_homebrew_runtime_pack "$2" "$3" "$4" "$5"\n',
+  });
   try {
     assert.equal(verify().status, 0);
     const runtime = path.join(pack, "linux-arm64");
