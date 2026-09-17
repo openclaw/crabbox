@@ -13,7 +13,6 @@ import (
 
 func init() {
 	RegisterProvider(testHetznerProvider{})
-	RegisterProvider(testScalewayProvider{})
 	RegisterProvider(testAWSProvider{})
 	RegisterProvider(testAWSLambdaMicroVMProvider{})
 	RegisterProvider(testAzureProvider{})
@@ -409,35 +408,6 @@ func (b testHetznerBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 		return LeaseTarget{}, err
 	}
 	return b.testSSHBackend.Acquire(ctx, req)
-}
-
-type testScalewayProvider struct{}
-
-func (testScalewayProvider) Spec() ProviderSpec {
-	return ProviderSpec{
-		Name:        "scaleway",
-		Family:      "scaleway",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale},
-		Coordinator: CoordinatorNever,
-	}
-}
-func (testScalewayProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
-func (testScalewayProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
-	return nil
-}
-func (testScalewayProvider) ServerTypeForConfig(cfg Config) string {
-	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
-		return cfg.ServerType
-	}
-	if cfg.Scaleway.Type != "" {
-		return cfg.Scaleway.Type
-	}
-	return "DEV1-S"
-}
-func (p testScalewayProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
 }
 
 type testGCPProvider struct{}

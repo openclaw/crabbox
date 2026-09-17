@@ -1241,67 +1241,6 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
-	if cfg.Provider == "ovh" {
-		if cfg.OVH.Endpoint == "" {
-			cfg.OVH.Endpoint = OVHConfigDefaultEndpoint
-		}
-		if cfg.OVH.Image == "" {
-			cfg.OVH.Image = OVHConfigDefaultImage
-		}
-		if cfg.OVH.Flavor == "" {
-			cfg.OVH.Flavor = OVHConfigDefaultFlavor
-		}
-		ApplyLinuxConnectionDefaults(cfg, baseConfig().SSHUser, baseConfig().SSHPort)
-		normalizeTargetConfig(cfg)
-		return validateTargetConfig(*cfg)
-	}
-	if cfg.Provider == "scaleway" {
-		if cfg.Scaleway.Region == "" {
-			cfg.Scaleway.Region = ScalewayConfigDefaultRegion
-		}
-		if cfg.Scaleway.Zone == "" {
-			cfg.Scaleway.Zone = ScalewayConfigDefaultZone
-		}
-		if cfg.osImageExplicit && !cfg.scalewayImageExplicit {
-			if cfg.OSImage == "ubuntu:24.04" {
-				cfg.Scaleway.Image = "ubuntu_noble"
-			} else {
-				cfg.Scaleway.Image = ""
-			}
-		} else if cfg.Scaleway.Image == "" {
-			cfg.Scaleway.Image = ScalewayConfigDefaultImage
-		}
-		if cfg.Scaleway.Type == "" {
-			cfg.Scaleway.Type = ScalewayConfigDefaultType
-		}
-		ApplyLinuxConnectionDefaults(cfg, "root", "22")
-		normalizeTargetConfig(cfg)
-		return validateTargetConfig(*cfg)
-	}
-	if cfg.Provider == "tencentcloud" {
-		if cfg.TencentCloud.Region == "" {
-			cfg.TencentCloud.Region = TencentCloudRegionFallback
-		}
-		if cfg.TencentCloud.Zone == "" {
-			cfg.TencentCloud.Zone = TencentCloudZoneFallback
-		}
-		if cfg.TencentCloud.Type == "" {
-			cfg.TencentCloud.Type = TencentCloudTypeFallback
-		}
-		if cfg.TencentCloud.RootGB == 0 {
-			cfg.TencentCloud.RootGB = TencentCloudRootGBFallback
-		}
-		if cfg.TencentCloud.InternetChargeType == "" {
-			cfg.TencentCloud.InternetChargeType = TencentCloudInternetChargeTypeFallback
-		}
-		if cfg.TencentCloud.InternetMaxBandwidthOut == 0 {
-			cfg.TencentCloud.InternetMaxBandwidthOut = TencentCloudInternetMaxBandwidthOutFallback
-		}
-		ApplyLinuxConnectionDefaults(cfg, "ubuntu", "22")
-		cfg.SSHFallbackPorts = nil
-		normalizeTargetConfig(cfg)
-		return validateTargetConfig(*cfg)
-	}
 	if cfg.Provider == "hyperv" {
 		if !IsTargetExplicit(cfg) {
 			cfg.TargetOS = targetWindows

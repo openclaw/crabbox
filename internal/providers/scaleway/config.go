@@ -55,3 +55,26 @@ func validateFoundationConfig(cfg core.Config) error {
 	}
 	return nil
 }
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	if cfg.Scaleway.Region == "" {
+		cfg.Scaleway.Region = core.ScalewayConfigDefaultRegion
+	}
+	if cfg.Scaleway.Zone == "" {
+		cfg.Scaleway.Zone = core.ScalewayConfigDefaultZone
+	}
+	if core.OSImageWasExplicit(*cfg) && !core.ScalewayImageWasExplicit(*cfg) {
+		if cfg.OSImage == "ubuntu:24.04" {
+			cfg.Scaleway.Image = "ubuntu_noble"
+		} else {
+			cfg.Scaleway.Image = ""
+		}
+	} else if cfg.Scaleway.Image == "" {
+		cfg.Scaleway.Image = core.ScalewayConfigDefaultImage
+	}
+	if cfg.Scaleway.Type == "" {
+		cfg.Scaleway.Type = core.ScalewayConfigDefaultType
+	}
+	core.ApplyLinuxConnectionDefaults(cfg, "root", "22")
+	return nil
+}
