@@ -549,7 +549,7 @@ func (b *linodeLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (
 		}
 	}
 	result := core.InventoryDoctorResult(providerName, count)
-	result.Message += fmt.Sprintf(" default_type=%s region=%s image=%s", b.Cfg.ServerType, linodeRegionForConfig(b.Cfg), linodeImageForConfig(b.Cfg))
+	result.Message += fmt.Sprintf(" default_type=%s region=%s image=%s", linodeServerTypeForConfig(b.Cfg), linodeRegionForConfig(b.Cfg), linodeImageForConfig(b.Cfg))
 	return result, nil
 }
 
