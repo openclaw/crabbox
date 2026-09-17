@@ -3070,10 +3070,15 @@ func TestRemotePruneSyncManifestDeletesOnlyManagedPaths(t *testing.T) {
 
 func TestRemotePruneSyncManifestUsesDeletedListBeforeOldManifestDiff(t *testing.T) {
 	got := remotePruneSyncManifest("/work/repo", "0123456789abcdef0123456789abcdef")
-	deletedIndex := strings.Index(got, `delete_paths < "$deleted"`)
-	oldIndex := strings.Index(got, "manifest_removed_paths | delete_paths")
-	if deletedIndex < 0 || oldIndex < 0 || deletedIndex > oldIndex {
-		t.Fatalf("deleted list should be applied before old manifest diff: %q", got)
+	// Both the Bash and POSIX branches must finish explicit deletions before
+	// computing the old-manifest difference and consuming its staged output.
+	want := `if [ -f "$deleted" ]; then delete_paths "$deleted"; fi
+if [ -f "$old" ] && [ -f "$new" ]; then
+  manifest_removed_paths > "$prune_paths"
+  delete_paths "$prune_paths"
+fi`
+	if strings.Count(got, want) != 2 {
+		t.Fatalf("deleted list should be applied before old manifest diff in both shell branches: %q", got)
 	}
 }
 
@@ -3420,7 +3425,7 @@ func TestRemotePruneSyncManifestFallsBackToPerlWithoutPython(t *testing.T) {
 	mustWriteTestFile(t, filepath.Join(workdir, "stale.txt"), "stale")
 
 	toolDir := t.TempDir()
-	for _, name := range []string{"dirname", "rm", "rmdir", "mktemp", "od"} {
+	for _, name := range []string{"cat", "dirname", "rm", "rmdir", "mktemp", "od"} {
 		mustWriteTestCommandWrapper(t, toolDir, name)
 	}
 	mustWriteTestBashNoProfileWrapper(t, toolDir)
@@ -3454,7 +3459,7 @@ func TestRemotePruneSyncManifestFailsClosedWhenInterpreterFails(t *testing.T) {
 	mustWriteTestFile(t, filepath.Join(workdir, "stale.txt"), "stale")
 
 	toolDir := t.TempDir()
-	for _, name := range []string{"dirname", "rm", "rmdir", "mktemp", "od"} {
+	for _, name := range []string{"cat", "dirname", "rm", "rmdir", "mktemp", "od"} {
 		mustWriteTestCommandWrapper(t, toolDir, name)
 	}
 	mustWriteTestBashNoProfileWrapper(t, toolDir)
@@ -6094,8 +6099,11 @@ func TestRemoteWriteSyncManifestsNewForTargetUsesInterpretedWriterForWSL2(t *tes
 	if strings.Contains(plain, "status=none") {
 		t.Fatalf("non-WSL2 manifest writer should not require GNU dd extensions: %q", plain)
 	}
-	if strings.Count(plain, "dd bs=1 count=\"") != 2 {
-		t.Fatalf("non-WSL2 manifest writer should exact-read both blobs: %q", plain)
+	// The portable wrapper includes one writer in each shell branch.
+	for _, length := range []string{"manifest_len", "deleted_len"} {
+		if strings.Count(plain, `dd bs=1 count="$`+length+`"`) != 2 {
+			t.Fatalf("non-WSL2 manifest writer should exact-read %s in both shell branches: %q", length, plain)
+		}
 	}
 	if strings.Contains(plain, "cat >") {
 		t.Fatalf("non-WSL2 manifest writer should not read either blob through EOF: %q", plain)
@@ -6118,7 +6126,7 @@ func TestRemoteWriteSyncManifestsNewForTargetPlainWSL2IsHermetic(t *testing.T) {
 		"/usr/bin/env -i",
 		"BASH_ENV=/dev/null",
 		"ENV=/dev/null",
-		"/bin/bash --noprofile --norc -c",
+		"/bin/sh -c",
 		"/usr/bin/python3 -c",
 		"/bin/mkdir -p --",
 		"/usr/bin/find",

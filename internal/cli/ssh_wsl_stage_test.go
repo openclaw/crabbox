@@ -169,6 +169,26 @@ func newLoopbackSFTPClientWithServerConn(t *testing.T, root string, wrap func(ne
 	return client
 }
 
+// recordLegacyBashProbeShell keeps prerequisite calls separate from workload call
+// indices, while recording every probe for assertions by transport fixtures.
+func recordLegacyBashProbeShell(t *testing.T, logPath string) string {
+	t.Helper()
+	commands := []string{legacyBashProbe}
+	for _, shell := range []wslStageShell{wslStageCMD, wslStagePowerShell} {
+		command, err := nativeWSLPOSIXCommand(legacyBashProbe, 5*time.Second, shell)
+		if err != nil {
+			t.Fatal(err)
+		}
+		commands = append(commands, command)
+	}
+	var script strings.Builder
+	script.WriteString("probe_command=; for probe_arg do probe_command=$probe_arg; done\n")
+	for _, command := range commands {
+		script.WriteString("if [ \"$probe_command\" = " + shellQuote(command) + " ]; then printf 'probe\\n' >> " + shellQuote(logPath) + "; exit 0; fi\n")
+	}
+	return script.String()
+}
+
 func stubWSLStageRoutePreparation(t *testing.T, prepare func(context.Context, SSHTarget, string, string) error) {
 	t.Helper()
 	previous, oldDiscard, oldProbe := prepareWSLStageRoute, discardWSLStageFile, probeWSLStageRoute
@@ -1903,6 +1923,47 @@ func TestWSLStagePreservesOwnerExecutionAndCleanupReserve(t *testing.T) {
 	}
 }
 
+func TestWSLStageBashPrerequisitePreservesExecutionReserve(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX SSH fixture")
+	}
+	dir := t.TempDir()
+	probeLog, workloadLog := filepath.Join(dir, "probe"), filepath.Join(dir, "workload")
+	script := "#!/bin/sh\nlast=; for arg do last=$arg; done\n" +
+		"if [ \"$last\" = " + shellQuote(legacyBashProbe) + " ]; then\n" +
+		"  printf probe > " + shellQuote(probeLog) + "\n  /bin/sleep 0.7\n  exit 0\nfi\n" +
+		"printf workload > " + shellQuote(workloadLog) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	spool, _ := newTestWSLStageSpool(t, []byte("ordinary command"))
+	spool.timing.reserve = 2500 * time.Millisecond
+	oldStage, oldCleanup := stageWSLSpool, cleanupPublishedWSLStage
+	t.Cleanup(func() { stageWSLSpool, cleanupPublishedWSLStage = oldStage, oldCleanup })
+	stageWSLSpool = func(spool *wslStageSpool, _ context.Context, _ *SSHTarget, _ wslStageTiming, _, _ string, _ io.Writer) (string, error) {
+		spool.shell = wslStageCMD
+		return strings.Repeat("a", 32), nil
+	}
+	cleanups := 0
+	cleanupPublishedWSLStage = func(context.Context, SSHTarget, string, *wslStageSpool, time.Duration, time.Duration, string) error {
+		cleanups++
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	err := spool.run(ctx, &SSHTarget{Host: "fixture.invalid", Port: "22", NoControlMaster: true}, "1", "1", io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "execution and cleanup deadline") || cleanups != 1 {
+		t.Fatalf("error=%v cleanups=%d, want reserve rejection and cleanup", err, cleanups)
+	}
+	if data, err := os.ReadFile(probeLog); err != nil || string(data) != "probe" {
+		t.Fatalf("prerequisite=%q err=%v", data, err)
+	}
+	if _, err := os.Stat(workloadLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("workload ran after prerequisite spent execution reserve: %v", err)
+	}
+}
+
 func TestWSLStageUploadDeadlineCannotConsumeExecutionReserve(t *testing.T) {
 	stubWSLStageRoutePreparation(t, func(context.Context, SSHTarget, string, string) error { return nil })
 	spool, _ := newTestWSLStageSpool(t, []byte("private-owner-payload"))
@@ -2904,8 +2965,8 @@ func TestSSHTransportRejectsLateZeroExit(t *testing.T) {
 				// The descendant writes only after the SSH leader has been reaped.
 				// Cancellation during output drain therefore cannot kill the leader
 				// and mask the late-success guard with a process failure.
-				script := `#!/bin/sh
-parent=$$
+				probeLog := filepath.Join(dir, "prerequisites")
+				script := "#!/bin/sh\n" + recordLegacyBashProbeShell(t, probeLog) + `parent=$$
 (
   attempts=0
   while kill -0 "$parent" 2>/dev/null; do
@@ -2941,6 +3002,14 @@ exit ` + fmt.Sprint(code) + "\n"
 					err = spool.run(ctx, &target, "10", "3", stdout, io.Discard)
 				} else {
 					err = executePreparedSSH(ctx, &target, "true", nil, 0, sshCommandLimit{execution: sshControlExecutionLimit}, "10", "3", stdout, io.Discard)
+				}
+				probes, probeErr := os.ReadFile(probeLog)
+				if staged {
+					if probeErr != nil || string(probes) != "probe\n" {
+						t.Fatalf("Bash prerequisite calls=%q err=%v, want one", probes, probeErr)
+					}
+				} else if !errors.Is(probeErr, os.ErrNotExist) {
+					t.Fatalf("unstaged transport unexpectedly probed Bash: calls=%q err=%v", probes, probeErr)
 				}
 				if output.String() != "drained" || !errors.Is(context.Cause(ctx), cause) {
 					t.Fatalf("drain boundary not reached: output=%q cause=%v", output.String(), context.Cause(ctx))

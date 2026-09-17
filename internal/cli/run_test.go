@@ -369,8 +369,7 @@ func installRecordingSSH(t *testing.T, dir string) string {
 	t.Helper()
 	logPath := filepath.Join(dir, "ssh.log")
 	sshPath := filepath.Join(dir, "ssh")
-	script := `#!/bin/sh
-cmd=""
+	script := "#!/bin/sh\n" + recordLegacyBashProbeShell(t, logPath+".prerequisites") + `cmd=""
 for arg do cmd="$arg"; done
 decoded=""
 case "$cmd" in
@@ -5437,7 +5436,7 @@ for arg do
 done
 printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
-  *"command -v"*) printf '` + missingRemoteToolPrefix + `pnpm\n' ;;
+  *"` + missingRemoteToolPrefix + `"*) printf '` + missingRemoteToolPrefix + `pnpm\n' ;;
 esac
 exit 0
 `
@@ -5558,7 +5557,7 @@ for arg do
 done
 printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
-  *"command -v"*) printf 'pnpm\n' ;;
+  *"` + missingRemoteToolPrefix + `"*) printf 'pnpm\n' ;;
 esac
 exit 0
 `
@@ -5656,7 +5655,7 @@ for arg do
 done
 printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
-  *"command -v"*) printf '` + missingRemoteToolPrefix + `pnpm\n' ;;
+  *"` + missingRemoteToolPrefix + `"*) printf '` + missingRemoteToolPrefix + `pnpm\n' ;;
 esac
 exit 0
 `
@@ -5681,7 +5680,7 @@ exit 0
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if strings.Contains(string(logData), "command -v") {
+	if strings.Contains(string(logData), missingRemoteToolPrefix) {
 		t.Fatalf("forwarded PATH should skip command runtime probe:\n%s", logData)
 	}
 	if !strings.Contains(string(logData), "pnpm") {
@@ -6873,6 +6872,9 @@ func TestWindowsWSL2RemoteCapabilityPreflightUsesBoundedWrapper(t *testing.T) {
 	commands := recordedSSHCommands(string(data))
 	if len(commands) != 1 {
 		t.Fatalf("ssh commands=%d want 1:\n%s", len(commands), data)
+	}
+	if probes, err := os.ReadFile(logPath + ".prerequisites"); err != nil || string(probes) != "probe\n" {
+		t.Fatalf("Bash prerequisite calls=%q err=%v, want one", probes, err)
 	}
 	if commands[0] != launcher || len(commands[0]) >= wslStageLauncherCommandLimit {
 		t.Fatalf("WSL2 preflight launcher=%q", commands[0])

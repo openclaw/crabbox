@@ -496,14 +496,18 @@ func (s *wslStageSpool) run(ctx context.Context, target *SSHTarget, connectTimeo
 	if err := requireWSLStageExecutionReserve(ctx, s.timing.reserve); err != nil {
 		return err
 	}
+	command := buildWSLStageLauncher(nonce, s.size, s.digest(), s.shell)
+	if command == "" || len(command) >= wslStageLauncherCommandLimit {
+		return errors.New("WSL2 stage launcher exceeds its command budget")
+	}
 	if s.legacyBash {
 		if err := requireLegacyBash(ctx, *target, s.shell); err != nil {
 			return err
 		}
-	}
-	command := buildWSLStageLauncher(nonce, s.size, s.digest(), s.shell)
-	if command == "" || len(command) >= wslStageLauncherCommandLimit {
-		return errors.New("WSL2 stage launcher exceeds its command budget")
+		// The prerequisite transport must leave the same cleanup reserve intact.
+		if err := requireWSLStageExecutionReserve(ctx, s.timing.reserve); err != nil {
+			return err
+		}
 	}
 	execCtx, cancel := ctx, func() {}
 	if s.timing.execute > 0 {

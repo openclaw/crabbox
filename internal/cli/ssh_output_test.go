@@ -199,7 +199,7 @@ func TestRunSSHOutputBoundedWSL2StagesCommand(t *testing.T) {
 	}
 	dir := t.TempDir()
 	executions, remotePath, stdinPath := filepath.Join(dir, "executions"), filepath.Join(dir, "remote"), filepath.Join(dir, "stdin")
-	script := "#!/bin/sh\nprintf x >> " + shellQuote(executions) + "\nlast=; for arg; do last=$arg; done\nprintf '%s' \"$last\" > " + shellQuote(remotePath) + "\ncat > " + shellQuote(stdinPath) + "\nprintf arm64\n"
+	script := "#!/bin/sh\n" + recordLegacyBashProbeShell(t, filepath.Join(dir, "prerequisites")) + "printf x >> " + shellQuote(executions) + "\nlast=; for arg; do last=$arg; done\nprintf '%s' \"$last\" > " + shellQuote(remotePath) + "\ncat > " + shellQuote(stdinPath) + "\nprintf arm64\n"
 	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -247,6 +247,10 @@ func TestRunSSHOutputBoundedWSL2StagesCommand(t *testing.T) {
 	if launcher == "" || len(launcher) >= wslStageLauncherCommandLimit || string(remote) != launcher || len(stdin) != 0 || string(runs) != "x" {
 		t.Fatalf("launcher=%d remote=%t stdin=%d executions=%q", len(launcher), string(remote) == launcher, len(stdin), runs)
 	}
+	if probes, err := os.ReadFile(filepath.Join(dir, "prerequisites")); err != nil || string(probes) != "probe\n" {
+		t.Fatalf("Bash prerequisite calls=%q err=%v, want one", probes, err)
+	}
+
 }
 
 func TestRunSSHOutputBoundedFallbackSemantics(t *testing.T) {

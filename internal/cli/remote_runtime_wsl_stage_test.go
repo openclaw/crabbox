@@ -200,12 +200,17 @@ func TestNativeWSLCommandCleanupOutcome(t *testing.T) {
 			if _, err := scope.ensure(ctx, target); err != nil {
 				t.Fatal(err)
 			}
-			spool, err := newWSLStageSpool("exit 23", nil, nil, 0, sshCommandLimit{})
+			program, err := nativeWSLStageProgram(nativeWSLStageTestRuntime(runtimePath), "command", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Cleanup runs through the POSIX stand-in transport above.
+			program.runtime = native
+			spool, err := newWSLStageSpoolWithProgram("exit 23", nil, nil, 0, sshCommandLimit{}, program)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer spool.close()
-			spool.nativeRuntime = native
 			oldStage, oldBuild, oldCleanup := stageWSLSpool, buildWSLStageLauncher, cleanupPublishedWSLStage
 			t.Cleanup(func() {
 				stageWSLSpool, buildWSLStageLauncher, cleanupPublishedWSLStage = oldStage, oldBuild, oldCleanup
