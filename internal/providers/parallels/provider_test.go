@@ -307,11 +307,72 @@ func TestResolveReusesSavedSSHPortWhenToolsReportsNoIP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.LeaseID != leaseID || lease.Server.PublicNet.IPv4.IP != "10.211.55.9" || lease.SSH.Port != "22" {
+	if lease.LeaseID != leaseID || lease.Server.PublicNet.IPv4.IP != "10.211.55.9" || lease.SSH.Host != "10.211.55.9" || lease.SSH.Port != "22" {
 		t.Fatalf("reuse lease=%#v ssh=%#v", lease.Server, lease.SSH)
+	}
+	if lease.Server.Labels["ip_source"] != "dhcp-mac" {
+		t.Fatalf("ip_source=%q, want dhcp-mac", lease.Server.Labels["ip_source"])
 	}
 	if !reflect.DeepEqual(runner.probedPorts, []string{"22"}) {
 		t.Fatalf("probed ports=%v, want saved port 22 only", runner.probedPorts)
+	}
+}
+
+func TestResolvePreservesExactClaimSSHPortWhenIPDiscoveryFails(t *testing.T) {
+	for _, mode := range []struct {
+		name      string
+		request   core.ResolveRequest
+		wantError bool
+	}{
+		{name: "connection", request: core.ResolveRequest{ID: "blue"}, wantError: true},
+		{name: "release", request: core.ResolveRequest{ID: "blue", ReleaseOnly: true}},
+		{name: "status", request: core.ResolveRequest{ID: "blue", StatusOnly: true, NoLocalStateMutations: true}},
+		{name: "status readiness", request: core.ResolveRequest{ID: "blue", StatusOnly: true, ReadyProbe: true, NoLocalStateMutations: true}},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", filepath.Join(root, "home"))
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+			t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+
+			leaseID := "cbx_good"
+			server := core.Server{
+				CloudID:  "vm-good",
+				Provider: "parallels",
+				Name:     "crabbox-cbx-good-blue",
+				Labels:   map[string]string{"provider": "parallels", "lease": leaseID, "slug": "blue", "host": "local"},
+			}
+			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "blue", "parallels", "", "", "/repo", time.Minute, false, server, core.SSHTarget{Port: "22"}); err != nil {
+				t.Fatal(err)
+			}
+
+			runner := &parallelsCleanupRunner{vmJSON: `[{"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"running"}]`}
+			cfg := testParallelsCleanupConfig()
+			cfg.SSHPort = "2222"
+			cfg.SSHFallbackPorts = []string{"22"}
+			backend := &leaseBackend{DirectSSHBackend: sharedBackend(cfg, runner)}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			lease, err := backend.Resolve(ctx, mode.request)
+			if mode.wantError {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("Resolve error=%v, want original discovery cancellation after exact-claim SSH port restore", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lease.Server.CloudID != "vm-good" || lease.LeaseID != leaseID || lease.SSH.Host != "" {
+				t.Fatalf("unexpected resolved lease=%#v ssh=%#v", lease.Server, lease.SSH)
+			}
+			if lease.SSH.Port != "22" || len(lease.SSH.FallbackPorts) != 0 {
+				t.Fatalf("status/release endpoint=%#v, want saved claim port 22", lease.SSH)
+			}
+			if !reflect.DeepEqual(runner.execVMIDs, []string{"vm-good"}) {
+				t.Fatalf("guest metadata lookup lost VM identity: %v", runner.execVMIDs)
+			}
+		})
 	}
 }
 
