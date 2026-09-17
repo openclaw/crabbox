@@ -603,58 +603,61 @@ func TestBoxSSHConnectionPrefersAdvertisedEndpoint(t *testing.T) {
 	}
 }
 
-// Boat publishes the SSH endpoint a moment after a box first reports ready, so
-// the wait prefers the endpoint for a bounded window rather than resolving to
-// the ip:22 fallback.
-func TestWaitForBoxReadyPrefersEndpointWithinGrace(t *testing.T) {
-	runner := &fakeCommandRunner{
-		configPath: filepath.Join(t.TempDir(), "config.json"),
-		infoResponses: []string{
-			`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20"}}`,
-			`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","sshEndpoint":"198.51.100.20:19036"}}`,
-		},
-	}
-	c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner, endpointGrace: time.Minute}
-	box, err := c.waitForBoxReady(context.Background(), boxData{ID: "bx_2", State: "ready", IP: "203.0.113.20"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if box.SSHEndpoint != "198.51.100.20:19036" {
-		t.Fatalf("wait returned %#v; want the advertised endpoint", box)
-	}
-	host, port, err := boxSSHConnection(box)
-	if err != nil || host != "198.51.100.20" || port != "19036" {
-		t.Fatalf("connection=%q:%q err=%v; want the advertised endpoint, not ip:22", host, port, err)
+// Releasing a lease must survive the rename: the current CLI reports deletion
+// operations with kind "sandbox" while older Box CLIs reported "box". Any other
+// kind must still be rejected so the claim is retained.
+func TestValidateBoxDeletionOperationAcceptsRenamedKind(t *testing.T) {
+	const opID = "bdop_e896e624d8af4d9e92cab7848ecb8a83"
+	for _, tt := range []struct {
+		name, kind string
+		wantErr    bool
+	}{
+		{"renamed sandbox kind", "sandbox", false},
+		{"legacy box kind", "box", false},
+		{"unrelated kind is rejected", "snapshot", true},
+		{"empty kind is rejected", "", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			operation := boxDeletionOperation{ID: opID, Kind: tt.kind, TargetID: "bx_1", Status: "pending"}
+			err := validateBoxDeletionOperation(operation, "bx_1", opID)
+			if tt.wantErr && err == nil {
+				t.Fatalf("kind %q was accepted", tt.kind)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("kind %q rejected: %v", tt.kind, err)
+			}
+		})
 	}
 }
 
-// The preference must never strand a box that only ever reports an ip: such a
-// box still becomes ready and still resolves to the ip:22 fallback.
-func TestWaitForBoxReadyAcceptsIPOnlyBox(t *testing.T) {
+// The CLI mints this key. The renamed CLI writes ascii_sandbox_ed25519 while
+// older Box CLIs wrote ascii_box_ed25519, so Crabbox must read whichever name
+// the installed CLI actually created.
+func TestBoxSSHKeyResolvesCLIMintedName(t *testing.T) {
 	for _, tt := range []struct {
-		name  string
-		grace time.Duration
+		name    string
+		present []string
+		want    string
 	}{
-		{"no grace configured", 0},
-		{"grace elapses", 50 * time.Millisecond},
+		{"renamed CLI key", []string{"ascii_sandbox_ed25519"}, "ascii_sandbox_ed25519"},
+		{"legacy CLI key", []string{"ascii_box_ed25519"}, "ascii_box_ed25519"},
+		{"both present prefers current", []string{"ascii_box_ed25519", "ascii_sandbox_ed25519"}, "ascii_sandbox_ed25519"},
+		{"neither present keeps legacy default", nil, "ascii_box_ed25519"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			ipOnly := `{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20"}}`
-			runner := &fakeCommandRunner{
-				configPath:    filepath.Join(t.TempDir(), "config.json"),
-				infoResponses: []string{ipOnly, ipOnly, ipOnly, ipOnly},
+			home := t.TempDir()
+			t.Setenv("CRABBOX_ASCII_BOX_HOME", home)
+			if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+				t.Fatal(err)
 			}
-			c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner, endpointGrace: tt.grace}
-			box, err := c.waitForBoxReady(context.Background(), boxData{ID: "bx_2", State: "ready", IP: "203.0.113.20"})
-			if err != nil {
-				t.Fatalf("ip-only box was stranded: %v", err)
+			for _, key := range tt.present {
+				if err := os.WriteFile(filepath.Join(home, ".ssh", key), []byte("key"), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
-			if !boxReadyForSSH(box) {
-				t.Fatalf("ip-only box not ready: %#v", box)
-			}
-			host, port, err := boxSSHConnection(box)
-			if err != nil || host != "203.0.113.20" || port != "22" {
-				t.Fatalf("connection=%q:%q err=%v; want the ip:22 fallback", host, port, err)
+			got := boxSSHKey(core.Config{})
+			if want := filepath.Join(home, ".ssh", tt.want); got != want {
+				t.Fatalf("boxSSHKey()=%q want %q", got, want)
 			}
 		})
 	}

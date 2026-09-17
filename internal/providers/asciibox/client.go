@@ -39,7 +39,6 @@ type client struct {
 	home                string
 	runner              core.CommandRunner
 	releasePollInterval time.Duration
-	endpointGrace       time.Duration
 }
 
 type createRequest struct {
@@ -89,7 +88,7 @@ var newAPI = func(cfg core.Config, rt core.Runtime) (api, error) {
 		return nil, core.Exit(2, "provider=%s requires a local command runner", providerName)
 	}
 	cliPath := resolveAsciiBoxCLI(strings.TrimSpace(cfg.AsciiBox.CLIPath))
-	return &client{apiKey: apiKey, apiURL: apiURL, org: asciiBoxOrg(), cliPath: cliPath, home: asciiBoxCLIHome(), runner: rt.Exec, endpointGrace: boxEndpointGrace}, nil
+	return &client{apiKey: apiKey, apiURL: apiURL, org: asciiBoxOrg(), cliPath: cliPath, home: asciiBoxCLIHome(), runner: rt.Exec}, nil
 }
 
 func validateAsciiBoxBaseURL(raw string) (string, error) {
@@ -592,36 +591,13 @@ func writePrivateFileAtomic(path string, data []byte) error {
 	return atomicfile.WritePrivate(path, "."+filepath.Base(path)+".tmp-", data, os.Rename)
 }
 
-// Boat publishes the SSH endpoint a moment after a box first reports ready, and
-// it serves SSH on a per-box port rather than 22. Prefer the endpoint for a
-// bounded window so a fresh box is not resolved to the ip:22 fallback, but give
-// up the preference rather than strand a box that only ever reports an ip.
-const boxEndpointGrace = 60 * time.Second
-
 func (c *client) waitForBoxReady(ctx context.Context, box boxData) (boxData, error) {
 	latest := box
 	deadline := time.NewTimer(5 * time.Minute)
 	defer deadline.Stop()
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	grace := time.NewTimer(c.endpointGrace)
-	defer grace.Stop()
-	graceExpired := c.endpointGrace <= 0
-	// Holding is only ever a preference: it never outlives the grace window, so
-	// an ip-only box still becomes ready and still resolves to ip:22.
-	holdingForEndpoint := func(current boxData) bool {
-		if graceExpired || boxSSHAdvertised(current) {
-			return false
-		}
-		select {
-		case <-grace.C:
-			graceExpired = true
-			return false
-		default:
-			return true
-		}
-	}
-	if boxReadyForSSH(latest) && !holdingForEndpoint(latest) {
+	if boxReadyForSSH(latest) {
 		return latest, nil
 	}
 	var lastErr error
@@ -653,7 +629,7 @@ func (c *client) waitForBoxReady(ctx context.Context, box boxData) (boxData, err
 				return false, fmt.Errorf("ascii-box identity changed during readiness")
 			}
 			latest = mergeBox(latest, refreshed)
-			return boxReadyForSSH(latest) && !holdingForEndpoint(latest), nil
+			return boxReadyForSSH(latest), nil
 		}, nil)
 	return latest, err
 }

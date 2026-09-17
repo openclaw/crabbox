@@ -588,10 +588,6 @@ func boxExpiresAt(box boxData) string {
 	}
 }
 
-func boxSSHAdvertised(box boxData) bool {
-	return shared.FirstNonBlankTrimmed(box.SSHEndpoint, box.SSHEndpointAlt) != ""
-}
-
 func boxReadyForSSH(box boxData) bool {
 	return statusReady(boxState(box)) && boxHost(box) != "" && boxSSHUser(box) != ""
 }
