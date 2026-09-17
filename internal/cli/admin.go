@@ -146,6 +146,7 @@ const awsProviderPolicyJSON = `{
       "Action": [
         "ec2:DescribeImages",
         "ec2:DescribeInstances",
+        "ec2:DescribeInstanceTypes",
         "ec2:DescribeKeyPairs",
         "ec2:DescribeSecurityGroups",
         "ec2:DescribeFastSnapshotRestores",

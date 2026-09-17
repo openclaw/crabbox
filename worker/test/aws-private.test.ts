@@ -103,6 +103,11 @@ describe("private AWS workspaces", () => {
         authorizations.push(request.headers.get("authorization") ?? "");
         sessionTokens.push(request.headers.get("x-amz-security-token") ?? "");
         if (action === "GetCallerIdentity") return stsIdentityResponse("001234567890");
+        if (action === "DescribeInstanceTypes") {
+          return ec2XMLResponse(
+            "<DescribeInstanceTypesResponse><instanceTypeSet><item><instanceType>t3.small</instanceType><vCpuInfo><defaultVCpus>2</defaultVCpus></vCpuInfo></item></instanceTypeSet></DescribeInstanceTypesResponse>",
+          );
+        }
         if (action === "DescribeInstances") {
           if (terminated) {
             return ec2XMLResponse(
@@ -168,6 +173,7 @@ describe("private AWS workspaces", () => {
       "DescribeInstances",
       "DescribeKeyPairs",
       "DeleteKeyPair",
+      "DescribeInstanceTypes",
       "GetServiceQuota",
       "DescribeInstanceInformation",
     ]);

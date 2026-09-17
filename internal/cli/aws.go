@@ -113,12 +113,43 @@ func (c *AWSClient) CapacityDoctorChecks(ctx context.Context, cfg Config) []Doct
 	if cfg.ServerType == "" {
 		cfg.ServerType = serverTypeForConfig(cfg)
 	}
+	vcpus := c.capacityInstanceTypeVCPUs(ctx, cfg)
 	checks := make([]DoctorCheck, 0, 2)
 	for _, market := range awsCapacityDoctorMarkets(cfg) {
 		limit, known, err := c.appliedEC2ServiceQuota(ctx, awsQuotaCodeForMarket(market))
-		checks = append(checks, awsCapacityDoctorCheckForQuota(cfg, market, limit, known, err))
+		checks = append(checks, awsCapacityDoctorCheckForQuota(cfg, market, limit, known, err, vcpus))
 	}
 	return checks
+}
+
+func (c *AWSClient) capacityInstanceTypeVCPUs(ctx context.Context, cfg Config) map[string]int {
+	if c.ec2 == nil {
+		return nil
+	}
+	requested := []string{cfg.ServerType}
+	for _, candidate := range awsCapacityRecommendationCandidates(cfg) {
+		requested = appendUniqueStrings(requested, candidate.serverType)
+	}
+	instanceTypes := make([]types.InstanceType, len(requested))
+	for index, name := range requested {
+		instanceTypes[index] = types.InstanceType(name)
+	}
+	paginator := ec2.NewDescribeInstanceTypesPaginator(c.ec2, &ec2.DescribeInstanceTypesInput{
+		InstanceTypes: instanceTypes,
+	})
+	vcpus := make(map[string]int)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil
+		}
+		for _, info := range page.InstanceTypes {
+			if info.VCpuInfo != nil && aws.ToInt32(info.VCpuInfo.DefaultVCpus) > 0 {
+				vcpus[string(info.InstanceType)] = int(aws.ToInt32(info.VCpuInfo.DefaultVCpus))
+			}
+		}
+	}
+	return vcpus
 }
 
 func (c *AWSClient) appliedEC2ServiceQuota(ctx context.Context, quotaCode string) (float64, bool, error) {
@@ -1584,13 +1615,13 @@ func awsQuotaCodeForMarket(market string) string {
 	return awsSpotQuotaCode
 }
 
-func awsCapacityDoctorCheckForQuota(cfg Config, market string, quotaValue float64, quotaKnown bool, quotaErr error) DoctorCheck {
+func awsCapacityDoctorCheckForQuota(cfg Config, market string, quotaValue float64, quotaKnown bool, quotaErr error, vcpus map[string]int) DoctorCheck {
 	serverType := strings.TrimSpace(cfg.ServerType)
 	if serverType == "" {
 		serverType = serverTypeForConfig(cfg)
 	}
 	quotaCode := awsQuotaCodeForMarket(market)
-	needed := AWSInstanceTypeVCPUs(serverType)
+	needed := vcpus[serverType]
 	base := map[string]string{
 		"provider":             "aws",
 		"market":               market,
@@ -1598,6 +1629,9 @@ func awsCapacityDoctorCheckForQuota(cfg Config, market string, quotaValue float6
 		"default_class":        cfg.Class,
 		"default_type":         serverType,
 		"default_needed_vcpus": strconv.Itoa(needed),
+	}
+	if needed == 0 {
+		base["default_needed_vcpus"] = "unknown"
 	}
 	if quotaErr != nil {
 		base["hint"] = "allow_servicequotas_getservicequota"
@@ -1630,7 +1664,7 @@ func awsCapacityDoctorCheckForQuota(cfg Config, market string, quotaValue float6
 		}
 	}
 	if quotaValue < float64(needed) {
-		recommendedClass, recommendedType := awsRecommendedClassForQuota(cfg, limit)
+		recommendedClass, recommendedType := awsRecommendedClassForQuota(cfg, limit, vcpus)
 		if recommendedClass != "" {
 			base["recommended_class"] = recommendedClass
 			base["recommended_type"] = recommendedType
@@ -1675,29 +1709,39 @@ func awsDoctorMessage(prefix string, details map[string]string) string {
 	return b.String()
 }
 
-func awsRecommendedClassForQuota(cfg Config, limitVCPUs int) (string, string) {
-	if limitVCPUs <= 0 {
-		return "", ""
-	}
+type awsCapacityRecommendation struct {
+	machineClass string
+	serverType   string
+}
+
+func awsCapacityRecommendationCandidates(cfg Config) []awsCapacityRecommendation {
 	architecture := effectiveArchitectureForConfig(cfg)
-	classes := []string{"beast", "large", "fast", "standard", "small", "tiny"}
-	for _, class := range classes {
+	var out []awsCapacityRecommendation
+	for _, class := range []string{"beast", "large", "fast", "standard", "small", "tiny"} {
 		candidates := awsInstanceTypeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, architecture, class)
-		if len(candidates) == 0 {
-			continue
-		}
-		if AWSInstanceTypeVCPUs(candidates[0]) <= limitVCPUs {
-			return class, candidates[0]
+		if len(candidates) > 0 {
+			out = append(out, awsCapacityRecommendation{class, candidates[0]})
 		}
 	}
 	for _, serverType := range awsInstanceTypeCandidatesForTargetModeArchitectureClass(cfg.TargetOS, cfg.WindowsMode, architecture, "standard") {
-		if AWSInstanceTypeVCPUs(serverType) <= limitVCPUs {
-			return "standard", serverType
+		out = append(out, awsCapacityRecommendation{"standard", serverType})
+	}
+	return out
+}
+
+func awsRecommendedClassForQuota(cfg Config, limitVCPUs int, vcpus map[string]int) (string, string) {
+	if limitVCPUs <= 0 {
+		return "", ""
+	}
+	for _, candidate := range awsCapacityRecommendationCandidates(cfg) {
+		if needed := vcpus[candidate.serverType]; needed > 0 && needed <= limitVCPUs {
+			return candidate.machineClass, candidate.serverType
 		}
 	}
 	return "", ""
 }
 
+// AWSInstanceTypeVCPUs estimates offline display values. Quota decisions use EC2 metadata.
 func AWSInstanceTypeVCPUs(serverType string) int {
 	_, size, ok := strings.Cut(strings.TrimSpace(serverType), ".")
 	if !ok || size == "" {

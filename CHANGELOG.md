@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Use EC2 instance metadata for AWS vCPU quota admission and readiness, including bare-metal types, and keep unknown instance costs out of capacity recommendations. [PR 2302](https://github.com/openclaw/crabbox/pull/2302).
+
 - Add opt-in Bash preflight reporting on Linux, macOS, and WSL2 without changing default probes; complete runtime installations can report missing Bash and continue independent commands. [PR 2300](https://github.com/openclaw/crabbox/pull/2300). Thanks @coygeek.
 - Bundle small Linux runtime companions with complete CLI archives so managed execution can operate without Bash; discover installed companions automatically and explain how CLI-only installations can obtain the complete runtime pack. [PR 2300](https://github.com/openclaw/crabbox/pull/2300).
 

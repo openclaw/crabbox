@@ -48757,10 +48757,26 @@ describe("fleet identity", () => {
   });
 
   it("reports AWS capacity quota readiness before a lease is requested", async () => {
+    const ec2Actions: Array<string | null> = [];
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const awsRequest = input instanceof Request ? input : new Request(input, init);
+        if (new URL(awsRequest.url).hostname === "ec2.eu-west-1.amazonaws.com") {
+          const params = new URLSearchParams(await awsRequest.clone().text());
+          ec2Actions.push(params.get("Action"));
+          return ec2XMLResponse(
+            `<DescribeInstanceTypesResponse><instanceTypeSet>${[
+              ["c7a.48xlarge", 192],
+              ["c7a.8xlarge", 32],
+            ]
+              .map(
+                ([name, vcpus]) =>
+                  `<item><instanceType>${name}</instanceType><vCpuInfo><defaultVCpus>${vcpus}</defaultVCpus></vCpuInfo></item>`,
+              )
+              .join("")}</instanceTypeSet></DescribeInstanceTypesResponse>`,
+          );
+        }
         expect(new URL(awsRequest.url).hostname).toBe("servicequotas.eu-west-1.amazonaws.com");
         expect(awsRequest.headers.get("x-amz-target")).toBe(
           "ServiceQuotasV20190624.GetServiceQuota",
@@ -48788,6 +48804,7 @@ describe("fleet identity", () => {
     );
 
     expect(response.status).toBe(200);
+    expect(ec2Actions).toEqual(["DescribeInstanceTypes"]);
     const body = (await response.json()) as {
       checks?: Array<{ status: string; details: Record<string, string> }>;
     };
@@ -51033,6 +51050,11 @@ function awsIngressTestFleet(
       if (action === "DescribeSecurityGroups") {
         return ec2XMLResponse(
           "<Response><securityGroupInfo><item><groupId>sg-shared</groupId><ipPermissions /></item></securityGroupInfo></Response>",
+        );
+      }
+      if (action === "DescribeInstanceTypes") {
+        return ec2XMLResponse(
+          "<DescribeInstanceTypesResponse><instanceTypeSet><item><instanceType>t3.small</instanceType><vCpuInfo><defaultVCpus>2</defaultVCpus></vCpuInfo></item></instanceTypeSet></DescribeInstanceTypesResponse>",
         );
       }
       if (action === "RunInstances") {

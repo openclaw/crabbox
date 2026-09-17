@@ -67,6 +67,11 @@ const awsOnDemandQuotaCode = "L-1216C47A";
 const awsSSHIngressDescription = "Crabbox SSH";
 const awsRunInstancesOutcomeUncertain = "crabbox_aws_run_instances_outcome_uncertain";
 type AWSInstanceLookup = { kind: "absent" } | { kind: "present"; server: ProviderMachine };
+type AWSInstanceTypeInfo = {
+  vcpus: number;
+  memoryMiB: number;
+  architectures: string[];
+};
 type AWSDescribeInstancesResult = {
   root: Record<string, unknown>;
   reservations: Record<string, unknown>[];
@@ -873,11 +878,15 @@ export class EC2SpotClient {
     if (config.target === "macos") {
       return [];
     }
+    const vcpus = await this.instanceTypeVCPUs([
+      config.serverType,
+      ...awsCapacityRecommendationCandidates(config).map((candidate) => candidate.serverType),
+    ]);
     return await Promise.all(
       awsCapacityReadinessMarkets(config).map(async (market) => {
         const code = awsQuotaCodeForMarket(market);
         const quota = await this.appliedServiceQuota(code);
-        return awsCapacityReadinessCheckForQuota(config, market, this.region, quota);
+        return awsCapacityReadinessCheckForQuota(config, market, this.region, quota, vcpus);
       }),
     );
   }
@@ -984,36 +993,65 @@ export class EC2SpotClient {
     return identity;
   }
 
+  private async describeInstanceTypes(
+    instanceTypes: string[],
+  ): Promise<Map<string, AWSInstanceTypeInfo>> {
+    const requested = uniqueStrings(instanceTypes);
+    if (requested.length === 0) return new Map();
+    const params = Object.fromEntries(
+      requested.map((instanceType, index) => [`InstanceType.${index + 1}`, instanceType]),
+    );
+    const root = await this.ec2("DescribeInstanceTypes", params);
+    const described = new Map<string, AWSInstanceTypeInfo>();
+    for (const item of items(record(root["instanceTypeSet"])["item"]).map(record)) {
+      const instanceType = asString(item["instanceType"]);
+      if (!requested.includes(instanceType)) continue;
+      const vcpus = Number(asString(record(item["vCpuInfo"])["defaultVCpus"]));
+      described.set(instanceType, {
+        vcpus: Number.isSafeInteger(vcpus) && vcpus > 0 ? vcpus : 0,
+        memoryMiB: positiveInt(asString(record(item["memoryInfo"])["sizeInMiB"])),
+        architectures: items(
+          record(record(item["processorInfo"])["supportedArchitectures"])["item"],
+        ).map(asString),
+      });
+    }
+    return described;
+  }
+
+  private async instanceTypeVCPUs(instanceTypes: string[]): Promise<Map<string, number>> {
+    await this.ensureExpectedIdentity();
+    try {
+      const described = await this.describeInstanceTypes(instanceTypes);
+      return new Map(
+        [...described]
+          .filter(([, info]) => info.vcpus > 0)
+          .map(([name, info]) => [name, info.vcpus]),
+      );
+    } catch (error) {
+      if (error instanceof AWSLeaseAuthorityError) throw error;
+      // Metadata is advisory for ordinary launches; private workspace caps remain strict.
+      return new Map();
+    }
+  }
+
   private async assertPrivateWorkspaceInstanceTypes(
     policy: AWSPrivateWorkspaceConfig,
   ): Promise<void> {
-    const params: Record<string, string> = {};
-    policy.instanceTypes.forEach((instanceType, index) => {
-      params[`InstanceType.${index + 1}`] = instanceType;
-    });
-    const root = await this.ec2("DescribeInstanceTypes", params);
-    const described = items(record(root["instanceTypeSet"])["item"]).map(record);
+    const described = await this.describeInstanceTypes(policy.instanceTypes);
     for (const instanceType of policy.instanceTypes) {
-      const item = described.find(
-        (candidate) => asString(candidate["instanceType"]) === instanceType,
-      );
-      if (!item) {
+      const info = described.get(instanceType);
+      if (!info) {
         throw new Error(`AWS instance type is unavailable in ${this.region}: ${instanceType}`);
       }
-      const architectures = items(
-        record(record(item["processorInfo"])["supportedArchitectures"])["item"],
-      ).map(asString);
-      const vcpus = positiveInt(asString(record(item["vCpuInfo"])["defaultVCpus"]));
-      const memoryMiB = positiveInt(asString(record(item["memoryInfo"])["sizeInMiB"]));
-      if (!architectures.includes("x86_64")) {
+      if (!info.architectures.includes("x86_64")) {
         throw new Error(`AWS private workspace instance type must support x86_64: ${instanceType}`);
       }
-      if (!vcpus || vcpus > policy.maxVCPUs) {
+      if (!info.vcpus || info.vcpus > policy.maxVCPUs) {
         throw new Error(
           `AWS private workspace instance type ${instanceType} exceeds ${policy.maxVCPUs} vCPUs`,
         );
       }
-      if (!memoryMiB || memoryMiB > policy.maxMemoryMiB) {
+      if (!info.memoryMiB || info.memoryMiB > policy.maxMemoryMiB) {
         throw new Error(
           `AWS private workspace instance type ${instanceType} exceeds ${policy.maxMemoryMiB} MiB`,
         );
@@ -1312,6 +1350,10 @@ export class EC2SpotClient {
         );
       }
       const candidates = pinnedMacHostType ? [pinnedMacHostType] : awsLaunchCandidates(config);
+      const vcpus =
+        config.target === "macos"
+          ? new Map<string, number>()
+          : await this.instanceTypeVCPUs(candidates);
       const allowCapacityHandoff =
         !config.awsPrivate && !config.serverTypeExplicit && config.target !== "macos";
       const hasQuotaEligibleCandidate = (
@@ -1320,7 +1362,14 @@ export class EC2SpotClient {
         quota: number | undefined,
       ) =>
         serverTypes.some(
-          (serverType) => !awsQuotaPreflightAttempt(serverType, market, this.region, quota),
+          (serverType) =>
+            !awsQuotaPreflightAttempt(
+              serverType,
+              market,
+              this.region,
+              quota,
+              vcpus.get(serverType),
+            ),
         );
       const history = new ProvisioningAttemptHistory();
       const imageCache = new Map<string, string>();
@@ -1367,6 +1416,7 @@ export class EC2SpotClient {
           config.capacityMarket,
           this.region,
           initialQuota.value,
+          vcpus.get(serverType),
         );
         if (preflight) {
           history.record(preflight, `${serverType}: ${preflight.message}`);
@@ -1448,7 +1498,13 @@ export class EC2SpotClient {
         for (const [candidateIndex, serverType] of marketFallbackCandidates.entries()) {
           // oxlint-disable-next-line eslint/no-await-in-loop -- on-demand fallback follows its admitted candidate order.
           const quota = await quotaForMarket("on-demand");
-          const preflight = awsQuotaPreflightAttempt(serverType, "on-demand", this.region, quota);
+          const preflight = awsQuotaPreflightAttempt(
+            serverType,
+            "on-demand",
+            this.region,
+            quota,
+            vcpus.get(serverType),
+          );
           if (preflight) {
             history.record(preflight, `on-demand ${serverType}: ${preflight.message}`);
             continue;
@@ -4067,27 +4123,13 @@ function awsServiceQuotaFromRecord(value: unknown): AWSServiceQuota | undefined 
   return out;
 }
 
-export function awsInstanceTypeVCPUs(serverType: string): number | undefined {
-  const match = /\.([0-9]+)xlarge$/.exec(serverType);
-  if (match?.[1]) {
-    return Number.parseInt(match[1], 10) * 4;
-  }
-  if (serverType.endsWith(".xlarge")) {
-    return 4;
-  }
-  if (/\.(nano|micro|small|medium|large)$/.test(serverType)) {
-    return 2;
-  }
-  return undefined;
-}
-
 export function awsQuotaPreflightAttempt(
   serverType: string,
   market: string,
   region: string,
   quotaValue: number | undefined,
+  needed: number | undefined,
 ): ProvisioningAttempt | undefined {
-  const needed = awsInstanceTypeVCPUs(serverType);
   if (!needed || quotaValue === undefined || quotaValue >= needed) {
     return undefined;
   }
@@ -4117,9 +4159,10 @@ export function awsCapacityReadinessCheckForQuota(
   market: string,
   region: string,
   quotaValue: number | undefined,
+  vcpus: ReadonlyMap<string, number>,
 ): AWSCapacityReadinessCheck {
   const quotaCode = awsQuotaCodeForMarket(market);
-  const needed = awsInstanceTypeVCPUs(config.serverType);
+  const needed = vcpus.get(config.serverType);
   const details: Record<string, string> = {
     provider: "aws",
     market,
@@ -4127,7 +4170,7 @@ export function awsCapacityReadinessCheckForQuota(
     quota_code: quotaCode,
     default_class: config.class,
     default_type: config.serverType,
-    default_needed_vcpus: String(needed ?? 0),
+    default_needed_vcpus: needed === undefined ? "unknown" : String(needed),
   };
   if (quotaValue === undefined) {
     details["hint"] = "servicequotas_unavailable_or_forbidden";
@@ -4149,7 +4192,7 @@ export function awsCapacityReadinessCheckForQuota(
     };
   }
   if (quotaValue < needed) {
-    const recommendation = awsRecommendedClassForQuota(config, Math.trunc(quotaValue));
+    const recommendation = awsRecommendedClassForQuota(config, Math.trunc(quotaValue), vcpus);
     if (recommendation) {
       details["recommended_class"] = recommendation.machineClass;
       details["recommended_type"] = recommendation.serverType;
@@ -4188,13 +4231,10 @@ function awsCapacityReadinessMessage(prefix: string, details: Record<string, str
   return suffix ? `${prefix} ${suffix}` : prefix;
 }
 
-function awsRecommendedClassForQuota(
+function awsCapacityRecommendationCandidates(
   config: Pick<LeaseConfig, "target" | "windowsMode" | "architecture">,
-  limitVCPUs: number,
-): { machineClass: string; serverType: string } | undefined {
-  if (limitVCPUs <= 0) {
-    return undefined;
-  }
+): { machineClass: string; serverType: string }[] {
+  const candidates: { machineClass: string; serverType: string }[] = [];
   for (const machineClass of ["beast", "large", "fast", "standard", "small", "tiny"]) {
     const [serverType] = awsInstanceTypeCandidatesForTargetClass(
       config.target,
@@ -4202,9 +4242,7 @@ function awsRecommendedClassForQuota(
       config.windowsMode,
       config.architecture,
     );
-    if (serverType && (awsInstanceTypeVCPUs(serverType) ?? 0) <= limitVCPUs) {
-      return { machineClass, serverType };
-    }
+    if (serverType) candidates.push({ machineClass, serverType });
   }
   for (const serverType of awsInstanceTypeCandidatesForTargetClass(
     config.target,
@@ -4212,11 +4250,21 @@ function awsRecommendedClassForQuota(
     config.windowsMode,
     config.architecture,
   )) {
-    if ((awsInstanceTypeVCPUs(serverType) ?? 0) <= limitVCPUs) {
-      return { machineClass: "standard", serverType };
-    }
+    candidates.push({ machineClass: "standard", serverType });
   }
-  return undefined;
+  return candidates;
+}
+
+function awsRecommendedClassForQuota(
+  config: Pick<LeaseConfig, "target" | "windowsMode" | "architecture">,
+  limitVCPUs: number,
+  vcpus: ReadonlyMap<string, number>,
+): { machineClass: string; serverType: string } | undefined {
+  if (limitVCPUs <= 0) return undefined;
+  return awsCapacityRecommendationCandidates(config).find(({ serverType }) => {
+    const needed = vcpus.get(serverType);
+    return needed !== undefined && needed > 0 && needed <= limitVCPUs;
+  });
 }
 
 function uniqueStrings(values: string[]): string[] {

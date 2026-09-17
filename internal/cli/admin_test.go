@@ -118,6 +118,7 @@ func TestAdminAWSPolicyPrintsProviderPermissions(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		`"ec2:RunInstances"`,
+		`"ec2:DescribeInstanceTypes"`,
 		`"ec2:TerminateInstances"`,
 		`"ec2:CreateSecurityGroup"`,
 		`"ec2:CreateImage"`,
