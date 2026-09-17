@@ -169,6 +169,30 @@ func newTestBackend(t *testing.T, api *fakeLinodeAPI) *linodeLeaseBackend {
 	return backend
 }
 
+func TestLinodeDoctorEffectiveType(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  core.Config
+		want string
+	}{
+		{name: "native configured type", cfg: core.Config{Linode: core.LinodeConfig{Type: "g6-nanode-1"}}, want: "g6-nanode-1"},
+		{name: "explicit generic override", cfg: core.Config{ServerType: "g6-standard-2", ServerTypeExplicit: true, Linode: core.LinodeConfig{Type: "g6-nanode-1"}}, want: "g6-standard-2"},
+		{name: "class fallback", cfg: core.Config{Class: "standard"}, want: "g6-standard-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := newLinodeLeaseBackend(Provider{}.Spec(), tc.cfg, core.Runtime{})
+			backend.clientFactory = func(core.Runtime) (linodeAPI, error) { return &fakeLinodeAPI{}, nil }
+			result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(result.Message, " default_type="+tc.want+" ") {
+				t.Fatalf("doctor message=%q, want default_type=%s", result.Message, tc.want)
+			}
+		})
+	}
+}
+
 func TestWaitForLinodeIP(t *testing.T) {
 	t.Run("pending to ready", func(t *testing.T) {
 		calls := 0

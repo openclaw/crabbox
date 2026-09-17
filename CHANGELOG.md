@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Preserve terminal heredocs and significant trailing whitespace in Blacksmith Testbox shell commands while retaining command output and exit status. [PR 2295](https://github.com/openclaw/crabbox/pull/2295). Thanks @shakkernerd.
+
+- Preserve local GCP lease claims during cleanup dry-runs when an instance disappears, and share the cleanup mutation boundary with Azure recovery. [PR 2297](https://github.com/openclaw/crabbox/pull/2297).
+
+- Run generated managed-runner readiness checks with POSIX sh while preserving tool, bootstrap marker, workroot, and desktop readiness checks. [PR 2296](https://github.com/openclaw/crabbox/pull/2296).
+
+- Report the effective Linode machine type in doctor diagnostics, honoring configured native types and explicit generic overrides. [PR 2298](https://github.com/openclaw/crabbox/pull/2298).
+
 - Finish the old workspace owner before replacing an unavailable lease, acquire fresh ownership before retrying sync, and avoid repeating completed cleanup when replacement acquisition fails. [PR 2293](https://github.com/openclaw/crabbox/pull/2293).
 
 - Scope Git-overlay cache preservation to each verified directory, so root-only ignore rules do not retain stale nested dependency caches. [PR 2291](https://github.com/openclaw/crabbox/pull/2291).
