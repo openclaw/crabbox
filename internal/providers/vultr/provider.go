@@ -66,3 +66,10 @@ func vultrServerTypeForClass(class string) string {
 	}
 	return "vc2-1c-1gb"
 }
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	cfg.Vultr = cfg.Vultr.WithRuntimeDefaults()
+	core.ApplyLinuxConnectionDefaults(cfg, "root", "22")
+	cfg.SSHFallbackPorts = nil
+	return nil
+}

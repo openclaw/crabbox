@@ -1186,27 +1186,6 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			return validateTargetConfig(*cfg)
 		}
 	}
-	if cfg.Provider == "vultr" {
-		cfg.Vultr = cfg.Vultr.WithRuntimeDefaults()
-		ApplyLinuxConnectionDefaults(cfg, "root", "22")
-		cfg.SSHFallbackPorts = nil
-		normalizeTargetConfig(cfg)
-		return validateTargetConfig(*cfg)
-	}
-	if cfg.Provider == "lambda" {
-		cfg.Lambda = cfg.Lambda.WithRuntimeDefaults()
-		if cfg.osImageExplicit && !cfg.lambdaImageExplicit && !cfg.lambdaImageFamilyExplicit {
-			if cfg.OSImage == "ubuntu:24.04" {
-				cfg.Lambda.ImageFamily = "lambda-stack-24-04"
-			} else {
-				cfg.Lambda.ImageFamily = ""
-			}
-		}
-		ApplyLinuxConnectionDefaults(cfg, "ubuntu", "22")
-		cfg.SSHFallbackPorts = nil
-		normalizeTargetConfig(cfg)
-		return validateTargetConfig(*cfg)
-	}
 	if cfg.Provider == "vast" {
 		cfg.Vast.InstanceType = normalizeVastInstanceType(cfg.Vast.InstanceType)
 		if cfg.Vast.APIURL == "" {
@@ -1259,12 +1238,6 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			cfg.SSHPort = "22"
 		}
 		cfg.SSHFallbackPorts = nil
-		normalizeTargetConfig(cfg)
-		return validateTargetConfig(*cfg)
-	}
-	if cfg.Provider == "nebius" {
-		cfg.Nebius = cfg.Nebius.WithRuntimeDefaults()
-		ApplyLinuxConnectionDefaults(cfg, cfg.Nebius.User, baseConfig().SSHPort)
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
 	}
@@ -7725,6 +7698,14 @@ func IsWindowsModeExplicit(cfg Config) bool {
 
 func MarkArchitectureExplicit(cfg *Config) {
 	cfg.architectureExplicit = true
+}
+
+func LambdaImageWasExplicit(cfg Config) bool {
+	return cfg.lambdaImageExplicit
+}
+
+func LambdaImageFamilyWasExplicit(cfg Config) bool {
+	return cfg.lambdaImageFamilyExplicit
 }
 
 func DigitalOceanImageWasExplicit(cfg Config) bool {

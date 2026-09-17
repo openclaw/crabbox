@@ -63,3 +63,17 @@ func (b *backend) Spec() core.ProviderSpec { return b.spec }
 func newLambdaAPIClient(rt core.Runtime) (lambdaAPI, error) {
 	return newClient(rt)
 }
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	cfg.Lambda = cfg.Lambda.WithRuntimeDefaults()
+	if core.OSImageWasExplicit(*cfg) && !core.LambdaImageWasExplicit(*cfg) && !core.LambdaImageFamilyWasExplicit(*cfg) {
+		if cfg.OSImage == "ubuntu:24.04" {
+			cfg.Lambda.ImageFamily = "lambda-stack-24-04"
+		} else {
+			cfg.Lambda.ImageFamily = ""
+		}
+	}
+	core.ApplyLinuxConnectionDefaults(cfg, "ubuntu", "22")
+	cfg.SSHFallbackPorts = nil
+	return nil
+}

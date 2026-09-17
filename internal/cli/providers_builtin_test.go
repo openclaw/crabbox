@@ -13,9 +13,6 @@ import (
 
 func init() {
 	RegisterProvider(testHetznerProvider{})
-	RegisterProvider(testVultrProvider{})
-	RegisterProvider(testLambdaProvider{})
-	RegisterProvider(testNebiusProvider{})
 	RegisterProvider(testScalewayProvider{})
 	RegisterProvider(testAWSProvider{})
 	RegisterProvider(testAWSLambdaMicroVMProvider{})
@@ -412,76 +409,6 @@ func (b testHetznerBackend) Acquire(ctx context.Context, req AcquireRequest) (Le
 		return LeaseTarget{}, err
 	}
 	return b.testSSHBackend.Acquire(ctx, req)
-}
-
-type testVultrProvider struct{}
-
-func (testVultrProvider) Spec() ProviderSpec {
-	return ProviderSpec{
-		Name:        "vultr",
-		Family:      "vultr",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
-		Coordinator: CoordinatorNever,
-	}
-}
-func (testVultrProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
-func (testVultrProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
-	return nil
-}
-func (testVultrProvider) ServerTypeForConfig(Config) string { return "vc2-1c-1gb" }
-func (p testVultrProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
-}
-
-type testLambdaProvider struct{}
-
-func (testLambdaProvider) Spec() ProviderSpec {
-	return ProviderSpec{
-		Name:        "lambda",
-		Family:      "lambda",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup, FeatureTailscale},
-		Coordinator: CoordinatorNever,
-	}
-}
-func (testLambdaProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
-func (testLambdaProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
-	return nil
-}
-func (testLambdaProvider) ServerTypeForConfig(cfg Config) string {
-	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
-		return cfg.ServerType
-	}
-	if cfg.Lambda.Type != "" {
-		return cfg.Lambda.Type
-	}
-	return "gpu_1x_a10"
-}
-func (p testLambdaProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
-}
-
-type testNebiusProvider struct{}
-
-func (testNebiusProvider) Spec() ProviderSpec {
-	return ProviderSpec{
-		Name:        "nebius",
-		Family:      "nebius",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
-		Coordinator: CoordinatorNever,
-	}
-}
-func (testNebiusProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
-func (testNebiusProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
-	return nil
-}
-func (p testNebiusProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
 }
 
 type testScalewayProvider struct{}
