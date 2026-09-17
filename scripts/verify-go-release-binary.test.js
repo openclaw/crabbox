@@ -28,11 +28,11 @@ process.stdout.write(fs.readFileSync(process.argv[5]));
       "vcs.revision": commit, "vcs.modified": "false",
     }).map(([Key, Value]) => ({ Key, Value })),
   };
-  const run = (value, expectedPath = "example.test/fixture", arch = "amd64") => {
+  const run = (value, expectedPath = "example.test/fixture", arch = "amd64", platform = "linux", layout) => {
     fs.writeFileSync(binary, JSON.stringify(value));
     return spawnSync(process.execPath, [
       path.join(import.meta.dirname, "verify-go-release-binary.mjs"), binary,
-      expectedPath, commit, "linux", arch, "go1.26.4",
+      expectedPath, commit, platform, arch, "go1.26.4", ...(layout ? [layout] : []),
     ], { cwd: root, encoding: "utf8", env: { HOME: root, PATH: root, GOTOOLCHAIN: "auto" } });
   };
   const valid = run(info);
@@ -55,6 +55,12 @@ process.stdout.write(fs.readFileSync(process.argv[5]));
     runtimeInfo.Settings.push({ Key: key, Value: baseline });
     const accepted = run(runtimeInfo, runtimePath, arch);
     assert.equal(accepted.status, 0, accepted.stderr);
+    for (const platform of ["darwin", "windows"]) {
+      const other = { ...runtimeInfo, Settings: runtimeInfo.Settings.map((setting) => setting.Key === "GOOS" ? { Key: "GOOS", Value: platform } : setting) };
+      assert.notEqual(run(other, runtimePath, arch, platform).status, 0);
+      const filesystem = run(other, runtimePath, arch, platform, "filesystem");
+      assert.equal(filesystem.status, 0, filesystem.stderr);
+    }
     runtimeInfo.Settings.at(-1).Value = arch === "amd64" ? "v3" : "v9.0";
     assert.notEqual(run(runtimeInfo, runtimePath, arch).status, 0);
   }

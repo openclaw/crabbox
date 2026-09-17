@@ -7,6 +7,8 @@ import (
 	"debug/elf"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -23,6 +25,11 @@ func digest(data []byte) string {
 
 func buildFixture(t *testing.T, arch, pkg string, flags ...string) []byte {
 	t.Helper()
+	return buildTargetFixture(t, Target{"linux", arch}, pkg, flags...)
+}
+
+func buildTargetFixture(t *testing.T, target Target, pkg string, flags ...string) []byte {
+	t.Helper()
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "go.mod"), []byte("module github.com/openclaw/crabbox\n\ngo 1.26\n"))
 	if err := os.MkdirAll(filepath.Join(dir, pkg), 0700); err != nil {
@@ -34,7 +41,7 @@ func buildFixture(t *testing.T, arch, pkg string, flags ...string) []byte {
 	args = append(args, "./"+pkg)
 	cmd := exec.Command("go", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0", "GOTOOLCHAIN=local", "GOWORK=off", "GOFLAGS=", "GOPROXY=off", "GOSUMDB=off")
+	cmd.Env = append(os.Environ(), "GOOS="+target.OS, "GOARCH="+target.Arch, "CGO_ENABLED=0", "GOTOOLCHAIN=local", "GOWORK=off", "GOFLAGS=", "GOPROXY=off", "GOSUMDB=off")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build owned fixture: %v\n%s", err, output)
 	}
@@ -49,6 +56,53 @@ func writeFile(t *testing.T, name string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(name, data, 0600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFilesystemArtifactSource(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, arch := range []string{"amd64", "arm64"} {
+			t.Run(goos+"_"+arch, func(t *testing.T) {
+				target := Target{goos, arch}
+				data := buildTargetFixture(t, target, "cmd/crabbox-runner")
+				want := bytes.Clone(data)
+				buildID := digest([]byte("owned development source"))
+				first, err := NewFilesystemBytes(t.Context(), data, target, buildID, "1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer first.Close()
+				second, err := NewFilesystemBytes(t.Context(), data, target, buildID, "1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer second.Close()
+				data[0] ^= 0xff // The producer still owns its original buffer.
+				if got := first.Identity(); got != (Identity{Target: target, ProtocolVersion: "1", Size: int64(len(want)), SHA256: digest(want), Capability: Filesystem, BuildID: buildID}) {
+					t.Fatalf("filesystem identity: %+v", got)
+				}
+				got, err := io.ReadAll(first)
+				if err != nil || !bytes.Equal(got, want) {
+					t.Fatalf("first owned stream: %v", err)
+				}
+				if err := first.Close(); err != nil {
+					t.Fatal(err)
+				}
+				got, err = io.ReadAll(second)
+				if err != nil || !bytes.Equal(got, want) {
+					t.Fatalf("independent stream: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestFilesystemArtifactSourceCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cause := fmt.Errorf("operator canceled development build")
+	cancel(cause)
+	if artifact, err := NewFilesystemBytes(ctx, nil, Target{"linux", "amd64"}, "", ""); artifact != nil || !errors.Is(err, cause) {
+		t.Fatalf("canceled admission: artifact=%v error=%v", artifact, err)
 	}
 }
 
@@ -92,7 +146,7 @@ func TestOpenLocal(t *testing.T) {
 			if arch == "arm64" {
 				want = arm64
 			}
-			if a.Identity() != (Identity{Target{"linux", arch}, "CBX-REMOTE-1", int64(len(want)), digest(want)}) {
+			if a.Identity() != (Identity{Target: Target{"linux", arch}, ProtocolVersion: "CBX-REMOTE-1", Size: int64(len(want)), SHA256: digest(want), Capability: Supervisor}) {
 				t.Fatalf("unexpected identity: %+v", a.Identity())
 			}
 			got, err := io.ReadAll(a)
@@ -319,6 +373,48 @@ func TestPackPaths(t *testing.T) {
 	}
 }
 
+func TestExecutableMetadataFormats(t *testing.T) {
+	for _, osName := range []string{"linux", "darwin", "windows"} {
+		for _, arch := range []string{"amd64", "arm64"} {
+			target := Target{osName, arch}
+			t.Run(osName+"/"+arch, func(t *testing.T) {
+				data := buildTargetFixture(t, target, "cmd/crabbox-runtime")
+				if err := inspectExecutable(t.Context(), bytes.NewReader(data), target); err != nil {
+					t.Fatal(err)
+				}
+				other := target
+				if arch == "amd64" {
+					other.Arch = "arm64"
+				} else {
+					other.Arch = "amd64"
+				}
+				if err := inspectExecutable(t.Context(), bytes.NewReader(data), other); err == nil || !strings.Contains(err.Error(), "architecture does not match") {
+					t.Fatalf("architecture mismatch: %v", err)
+				}
+				other = Target{"linux", arch}
+				if osName == "linux" {
+					other.OS = "darwin"
+				}
+				if err := inspectExecutable(t.Context(), bytes.NewReader(data), other); err == nil || !strings.Contains(err.Error(), "read ") {
+					t.Fatalf("format mismatch: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestExecutableMetadataPackageMismatch(t *testing.T) {
+	for _, osName := range []string{"darwin", "windows"} {
+		t.Run(osName, func(t *testing.T) {
+			target := Target{osName, "amd64"}
+			data := buildTargetFixture(t, target, "cmd/other")
+			if err := inspectExecutable(t.Context(), bytes.NewReader(data), target); err == nil || !strings.Contains(err.Error(), "Go package mismatch") {
+				t.Fatalf("package mismatch: %v", err)
+			}
+		})
+	}
+}
+
 func TestBuildInfoPolicy(t *testing.T) {
 	valid := func() *debug.BuildInfo {
 		return &debug.BuildInfo{Path: runtimePackage, Main: debug.Module{Version: "(devel)"}, Settings: []debug.BuildSetting{{Key: "GOOS", Value: "linux"}, {Key: "GOARCH", Value: "amd64"}, {Key: "CGO_ENABLED", Value: "0"}, {Key: "vcs.modified", Value: "true"}}}
@@ -471,4 +567,163 @@ func TestMarshalLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Close()
+}
+
+func TestCapabilityManifestRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	controller := filepath.Join(dir, "controller")
+	writeFile(t, controller, []byte("finalized controller"))
+	buildID := digest([]byte("filesystem source"))
+	required := Requirement{Filesystem, "1", buildID}
+	var inputs []CapabilityInput
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, arch := range []string{"amd64", "arm64"} {
+			target := Target{goos, arch}
+			name := goos + "-" + arch
+			writeFile(t, filepath.Join(dir, name), buildTargetFixture(t, target, "cmd/crabbox-runtime"))
+			claims := []CapabilityClaim{{Filesystem, "1", buildID}}
+			if goos == "linux" {
+				claims = append(claims, CapabilityClaim{Supervisor, "CBX-REMOTE-1", ""})
+			}
+			inputs = append(inputs, CapabilityInput{target, name, claims})
+		}
+	}
+	data, err := MarshalCapabilities(t.Context(), dir, controller, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := MarshalCapabilities(t.Context(), dir, controller, inputs)
+	if err != nil || !bytes.Equal(data, again) {
+		t.Fatalf("deterministic manifest: %v", err)
+	}
+	manifestPath := filepath.Join(dir, "manifest.json")
+	writeFile(t, manifestPath, data)
+	set, err := OpenCapabilitySet(t.Context(), manifestPath, controller, required)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, in := range inputs {
+		a, err := set.Open(t.Context(), in.Target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := a.Identity()
+		if got.Capability != Filesystem || got.BuildID != buildID || got.ProtocolVersion != "1" || got.Target != in.Target {
+			t.Fatalf("identity: %+v", got)
+		}
+		contents, err := io.ReadAll(a)
+		a.Close()
+		if err != nil || digest(contents) != got.SHA256 {
+			t.Fatalf("validated stream: %v", err)
+		}
+	}
+	supervisor, err := OpenCapabilitySet(t.Context(), manifestPath, controller, Requirement{Supervisor, "CBX-REMOTE-1", ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := supervisor.Open(t.Context(), Target{"linux", "amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+	if _, err := supervisor.Open(t.Context(), Target{"darwin", "amd64"}); err == nil {
+		t.Fatal("non-Linux supervisor admitted")
+	}
+	if _, err := OpenCapabilitySet(t.Context(), manifestPath, controller, Requirement{Filesystem, "1", digest([]byte("different source"))}); err == nil {
+		t.Fatal("wrong fingerprint admitted")
+	}
+	if _, err := OpenLocalSet(t.Context(), manifestPath, controller, "1"); err == nil {
+		t.Fatal("v2 admitted by legacy loader")
+	}
+	legacy, err := MarshalLocal(t.Context(), dir, controller, []ArtifactInput{{inputs[0].Target, inputs[0].Path}}, "CBX-REMOTE-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, manifestPath, legacy)
+	legacySet, err := OpenCapabilitySet(t.Context(), manifestPath, controller, Requirement{Supervisor, "CBX-REMOTE-1", ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err = legacySet.Open(t.Context(), inputs[0].Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+	if _, err := OpenCapabilitySet(t.Context(), manifestPath, controller, required); err == nil {
+		t.Fatal("v1 inferred filesystem capability")
+	}
+	// A partial operator pack need not provide the official six-target inventory.
+	partial, err := MarshalCapabilities(t.Context(), dir, controller, inputs[:1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, manifestPath, partial)
+	partialSet, err := OpenCapabilitySet(t.Context(), manifestPath, controller, required)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := partialSet.Open(t.Context(), Target{"windows", "amd64"}); err == nil {
+		t.Fatal("missing target admitted")
+	}
+	// The existing snapshot continues to select its original six entries.
+	a, err = set.Open(t.Context(), Target{"windows", "arm64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+}
+
+func TestCapabilityManifestValidation(t *testing.T) {
+	valid := capabilityManifest{2, digest([]byte("controller")), []capabilityEntry{{entry{"linux", "amd64", "runtime", 1, digest([]byte("runtime"))}, []CapabilityClaim{{Filesystem, "1", digest([]byte("source"))}}}}}
+	cases := []struct {
+		name string
+		edit func(*capabilityManifest)
+	}{
+		{"unknown capability", func(m *capabilityManifest) { m.Artifacts[0].Capabilities[0].Name = "other" }},
+		{"missing fingerprint", func(m *capabilityManifest) { m.Artifacts[0].Capabilities[0].BuildID = "" }},
+		{"duplicate capability", func(m *capabilityManifest) {
+			m.Artifacts[0].Capabilities = append(m.Artifacts[0].Capabilities, m.Artifacts[0].Capabilities[0])
+		}},
+		{"non Linux supervisor", func(m *capabilityManifest) {
+			m.Artifacts[0].OS = "darwin"
+			m.Artifacts[0].Capabilities = []CapabilityClaim{{Supervisor, "1", ""}}
+		}},
+		{"supervisor fingerprint", func(m *capabilityManifest) { m.Artifacts[0].Capabilities[0].Name = Supervisor }},
+		{"no claims", func(m *capabilityManifest) { m.Artifacts[0].Capabilities = nil }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, _ := json.Marshal(valid)
+			var m capabilityManifest
+			if err := json.Unmarshal(data, &m); err != nil {
+				t.Fatal(err)
+			}
+			tc.edit(&m)
+			if err := validateCapabilities(&m); err == nil {
+				t.Fatal("invalid claim accepted")
+			}
+		})
+	}
+	dir := t.TempDir()
+	name := filepath.Join(dir, "manifest.json")
+	data, _ := json.Marshal(valid)
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{"unknown field", bytes.Replace(data, []byte(`"name":"filesystem"`), []byte(`"name":"filesystem","extra":1`), 1)},
+		{"null build ID", bytes.Replace(data, []byte(`"buildId":"`+digest([]byte("source"))+`"`), []byte(`"buildId":null`), 1)},
+		{"duplicate field", bytes.Replace(data, []byte(`"schemaVersion":2`), []byte(`"schemaVersion":2,"schemaVersion":2`), 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeFile(t, name, tc.data)
+			data, err := readManifestData(name)
+			if err == nil {
+				_, err = parseCapabilityManifest(data)
+			}
+			if err == nil {
+				t.Fatal("invalid JSON accepted")
+			}
+		})
+	}
 }

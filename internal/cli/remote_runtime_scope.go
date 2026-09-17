@@ -48,9 +48,11 @@ type nativeRuntimeScope struct {
 	controller      string
 	discoveryErr    error
 	loadOnce        sync.Once
-	set             *runtimeartifact.LocalSet
+	set             runtimeartifact.Source
+	required        runtimeartifact.Requirement
+	development     runtimeartifact.Source
 	loadErr         error
-	install         func(context.Context, SSHTarget, *runtimeartifact.LocalSet) (*remoteNativeRuntime, error)
+	install         func(context.Context, SSHTarget, runtimeartifact.Source) (*remoteNativeRuntime, error)
 	remove          func(context.Context, *remoteNativeRuntime) error
 	ready           func(context.Context, *SSHTarget, io.Writer) error
 	mu              sync.Mutex
@@ -71,6 +73,7 @@ func newNativeRuntimeScopeForExecutable(controller, override string, discoveryEr
 	}
 	return &nativeRuntimeScope{
 		manifest:     manifest,
+		required:     runtimeartifact.Requirement{Capability: runtimeartifact.Supervisor, ProtocolVersion: remoteruntime.Protocol},
 		controller:   controller,
 		discoveryErr: discoveryErr,
 		install:      prepareNativeRuntime,
@@ -159,11 +162,10 @@ func (s *nativeRuntimeScope) load(ctx context.Context) {
 			s.loadErr = s.discoveryErr
 			return
 		}
-		if s.manifest == "" {
+		s.set, s.loadErr = runtimeartifact.ResolveSource(ctx, s.controller, s.manifest, s.required, s.development)
+		if s.loadErr == nil && s.set == nil {
 			s.loadErr = errors.New(missingNativeRuntimePackDiagnostic)
-			return
 		}
-		s.set, s.loadErr = runtimeartifact.OpenLocalSet(ctx, s.manifest, s.controller, remoteruntime.Protocol)
 	})
 }
 
@@ -187,6 +189,9 @@ func (s *nativeRuntimeScope) validateLocal(ctx context.Context, target SSHTarget
 // Admission belongs to the command operation after guest bootstrap. Transport
 // builders only borrow the completed installation; they never initialize it.
 func (s *nativeRuntimeScope) admit(ctx context.Context, target SSHTarget) (context.Context, error) {
+	if s.required.Capability != runtimeartifact.Supervisor {
+		return ctx, errors.New("supervisor admission requires its own capability scope")
+	}
 	if !s.selected() || !isWindowsWSL2Target(target) {
 		return ctx, nil
 	}

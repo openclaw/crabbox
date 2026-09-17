@@ -102,6 +102,73 @@ func runtimeFixture(t *testing.T) (string, string) {
 	return directory, controller
 }
 
+func TestFilesystemReleaseArchiveLayouts(t *testing.T) {
+	pack := t.TempDir()
+	controller, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildID, err := sourceID(t.Context(), "../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := filesystemInputs(buildID)
+	for _, input := range inputs {
+		cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w -X github.com/openclaw/crabbox/internal/runner.BuildID="+buildID, "-o", filepath.Join(pack, input.Path), "../../cmd/crabbox-runtime")
+		cmd.Env = append(os.Environ(), "GOOS="+input.Target.OS, "GOARCH="+input.Target.Arch, "CGO_ENABLED=0", "GOFLAGS=", "GOWORK=off", "GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("build %s: %v\n%s", input.Path, err, output)
+		}
+	}
+	var output, diagnostic bytes.Buffer
+	args := []string{"prepare", "--directory", pack, "--controller", controller, "--filesystem-build-id", buildID}
+	if code := run(t.Context(), args, &output, &diagnostic); code != 0 {
+		t.Fatalf("prepare=%d: %s", code, diagnostic.String())
+	}
+	if err := os.WriteFile(filepath.Join(pack, "manifest.json"), output.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args[0] = "verify"
+	if code := run(t.Context(), args, io.Discard, &diagnostic); code != 0 {
+		t.Fatalf("verify=%d: %s", code, diagnostic.String())
+	}
+	for _, platform := range []string{"linux", "windows"} {
+		for _, mode := range []string{"unsigned-filesystem", "final-filesystem"} {
+			t.Run(platform+"/"+mode, func(t *testing.T) {
+				name := "crabbox"
+				if platform == "windows" {
+					name += ".exe"
+				}
+				files := map[string]string{name: controller}
+				for _, input := range inputs {
+					files["crabbox-runtime/"+input.Path] = filepath.Join(pack, input.Path)
+				}
+				if mode == "final-filesystem" {
+					files["crabbox-runtime/manifest.json"] = filepath.Join(pack, "manifest.json")
+				}
+				archive := writeArchiveFixture(t, files, platform == "windows")
+				report, err := extractArchive(t.Context(), archive, filepath.Join(t.TempDir(), "stage"), platform, "amd64", mode, buildID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if report.RuntimePack.SchemaVersion != 2 || report.RuntimePack.ProtocolVersion != "" || len(report.RuntimePack.Artifacts) != 6 || (report.RuntimePack.Manifest != nil) != (mode == "final-filesystem") {
+					t.Fatalf("wrong pack report: %+v", report.RuntimePack)
+				}
+				for i, artifact := range report.RuntimePack.Artifacts {
+					if artifact.Path != "crabbox-runtime/"+inputs[i].Path || len(artifact.Capabilities) != len(inputs[i].Capabilities) || artifact.Capabilities[0].BuildID != buildID {
+						t.Fatalf("wrong artifact: %+v", artifact)
+					}
+				}
+				delete(files, "crabbox-runtime/windows-arm64.exe")
+				incomplete := writeArchiveFixture(t, files, platform == "windows")
+				if _, err := extractArchive(t.Context(), incomplete, filepath.Join(t.TempDir(), "incomplete"), platform, "amd64", mode, buildID); err == nil {
+					t.Fatal("incomplete archive accepted")
+				}
+			})
+		}
+	}
+}
+
 func TestReleaseArchiveLayouts(t *testing.T) {
 	pack, controller := runtimeFixture(t)
 	var stdout, stderr bytes.Buffer
@@ -133,7 +200,7 @@ func TestReleaseArchiveLayouts(t *testing.T) {
 					}
 					archive := writeArchiveFixture(t, files, platform == "windows")
 					destination := filepath.Join(t.TempDir(), "new")
-					report, err := extractArchive(t.Context(), archive, destination, platform, arch, mode)
+					report, err := extractArchive(t.Context(), archive, destination, platform, arch, mode, "")
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -166,7 +233,7 @@ func TestReleaseArchiveLayouts(t *testing.T) {
 					} else if report.RuntimePack == nil || len(report.RuntimePack.Artifacts) != 2 || (report.RuntimePack.Manifest != nil) != (mode == "final") {
 						t.Fatalf("runtime report=%+v", report.RuntimePack)
 					}
-					if _, err := extractArchive(t.Context(), archive, destination, platform, arch, mode); err == nil {
+					if _, err := extractArchive(t.Context(), archive, destination, platform, arch, mode, ""); err == nil {
 						t.Fatal("extract accepted an existing destination")
 					}
 				})
@@ -175,7 +242,7 @@ func TestReleaseArchiveLayouts(t *testing.T) {
 	}
 	archive := writeArchiveFixture(t, map[string]string{"crabbox": controller}, false)
 	destination := filepath.Join(t.TempDir(), "incomplete")
-	if _, err := extractArchive(t.Context(), archive, destination, "linux", "amd64", "final"); err == nil {
+	if _, err := extractArchive(t.Context(), archive, destination, "linux", "amd64", "final", ""); err == nil {
 		t.Fatal("accepted a missing runtime pack")
 	}
 	if _, err := os.Stat(destination); !os.IsNotExist(err) {
@@ -196,7 +263,7 @@ func TestReleaseArchiveLayouts(t *testing.T) {
 			files["crabbox-runtime/"+name] = filepath.Join(pack, name)
 		}
 		stale := writeArchiveFixture(t, files, false)
-		if _, err := extractArchive(t.Context(), stale, filepath.Join(t.TempDir(), "stale"), "linux", "amd64", "final"); err == nil || !strings.Contains(err.Error(), "controller SHA-256 mismatch") {
+		if _, err := extractArchive(t.Context(), stale, filepath.Join(t.TempDir(), "stale"), "linux", "amd64", "final", ""); err == nil || !strings.Contains(err.Error(), "controller SHA-256 mismatch") {
 			t.Fatalf("stale controller binding: %v", err)
 		}
 		var manifest, diagnostics bytes.Buffer
@@ -207,7 +274,7 @@ func TestReleaseArchiveLayouts(t *testing.T) {
 			t.Fatal(err)
 		}
 		current := writeArchiveFixture(t, files, false)
-		if _, err := extractArchive(t.Context(), current, filepath.Join(t.TempDir(), "final"), "linux", "amd64", "final"); err != nil {
+		if _, err := extractArchive(t.Context(), current, filepath.Join(t.TempDir(), "final"), "linux", "amd64", "final", ""); err != nil {
 			t.Fatalf("final controller binding: %v", err)
 		}
 	})

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -18,11 +19,18 @@ import (
 )
 
 const usage = `Usage: runtime-artifacts <prepare|verify> --directory DIR --controller FILE
-       runtime-artifacts extract --archive FILE --directory NEW_DIR --os OS --arch ARCH --runtime-pack none|unsigned|final
+       runtime-artifacts <prepare|verify> --directory DIR --controller FILE --filesystem-build-id SHA256
+       runtime-artifacts source-id --source-directory FROZEN_SOURCE
+       runtime-artifacts extract --archive FILE --directory NEW_DIR --os OS --arch ARCH --runtime-pack MODE [--filesystem-build-id SHA256]
 
   prepare  Print a manifest for finalized linux-amd64 and linux-arm64 files.
   verify   Verify DIR/manifest.json and both runtime targets; print JSON identities.
   extract  Stage an exact release archive in a new private directory; print JSON evidence.
+  source-id  Fingerprint dependency-free helper source without executing it.
+
+Filesystem mode prepares/verifies all six targets and explicit capability claims.
+Extraction MODE: none, unsigned, final (historical layouts), or
+unsigned-filesystem/final-filesystem (requires the frozen filesystem build ID).
 
 Inputs are read-only. No configuration, network, build, execution, or prompts.
 The caller writes prepare output atomically only after controller signing and
@@ -48,13 +56,30 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 	}
-	if len(args) == 0 || args[0] != "prepare" && args[0] != "verify" && args[0] != "extract" {
+	if len(args) == 0 || args[0] != "prepare" && args[0] != "verify" && args[0] != "extract" && args[0] != "source-id" {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	if args[0] == "source-id" {
+		source := fs.String("source-directory", "", "frozen source checkout")
+		if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 || *source == "" {
+			fmt.Fprintln(stderr, "source-id requires only --source-directory; use --help")
+			return 2
+		}
+		id, err := sourceID(ctx, *source)
+		if err == nil {
+			_, err = fmt.Fprintln(stdout, id)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	}
 	directory := fs.String("directory", "", "runtime pack directory")
+	buildID := fs.String("filesystem-build-id", "", "frozen filesystem source fingerprint")
 	if args[0] == "extract" {
 		archive := fs.String("archive", "", "release archive")
 		platform := fs.String("os", "", "controller operating system")
@@ -68,7 +93,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "extract requires --archive, a new --directory, --os, --arch, and --runtime-pack; use --help")
 			return 2
 		}
-		report, err := extractArchive(ctx, *archive, *directory, *platform, *arch, *mode)
+		report, err := extractArchive(ctx, *archive, *directory, *platform, *arch, *mode, *buildID)
 		if err == nil {
 			err = json.NewEncoder(stdout).Encode(report)
 		}
@@ -94,7 +119,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var err error
 	if args[0] == "prepare" {
 		var data []byte
-		data, err = runtimeartifact.MarshalLocal(ctx, *directory, *controller, inputs, remoteruntime.Protocol)
+		if *buildID != "" {
+			data, err = prepareFilesystemPack(ctx, *directory, *controller, *buildID)
+		} else {
+			data, err = runtimeartifact.MarshalLocal(ctx, *directory, *controller, inputs, remoteruntime.Protocol)
+		}
 		if err == nil {
 			var written int
 			written, err = stdout.Write(data)
@@ -103,7 +132,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			}
 		}
 	} else {
-		err = verify(ctx, *directory, *controller, inputs, stdout)
+		if *buildID != "" {
+			var data []byte
+			data, err = verifyFilesystemPack(ctx, *directory, *controller, *buildID)
+			if err == nil {
+				_, err = io.Copy(stdout, bytes.NewReader(data))
+			}
+		} else {
+			err = verify(ctx, *directory, *controller, inputs, stdout)
+		}
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, err)

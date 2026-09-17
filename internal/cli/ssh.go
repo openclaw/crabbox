@@ -790,10 +790,12 @@ func resolveSSHPortNoInput(ctx context.Context, target *SSHTarget, connectTimeou
 }
 
 type sshTransportPreparation struct {
-	command     string
-	setupMarker string
-	direct      io.ReadSeeker
-	stage       *wslStageSpool
+	// retirementUnconfirmed records dispatch evidence independently of joined errors.
+	retirementUnconfirmed bool
+	command               string
+	setupMarker           string
+	direct                io.ReadSeeker
+	stage                 *wslStageSpool
 	// replay borrows a finite input owner; its caller closes it after dispatch.
 	replay *replayableSSHInput
 }
@@ -868,8 +870,13 @@ func prepareSSHTransport(ctx context.Context, target SSHTarget, command string, 
 
 func (p *sshTransportPreparation) run(ctx context.Context, target *SSHTarget, connectTimeout, connectionAttempts string, stdout, stderr io.Writer) error {
 	if p.stage != nil {
+		p.retirementUnconfirmed = true
 		p.stage.setupMarker = p.setupMarker
-		return p.stage.run(ctx, target, connectTimeout, connectionAttempts, stdout, stderr)
+		err := p.stage.run(ctx, target, connectTimeout, connectionAttempts, stdout, stderr)
+		// Staged errors may leave work beyond the SSH process; only its full
+		// successful completion currently supplies retirement evidence.
+		p.retirementUnconfirmed = err != nil
+		return err
 	}
 	if err := resolveSSHPortNoInput(ctx, target, connectTimeout, connectionAttempts, stderr); err != nil {
 		return err
@@ -912,6 +919,18 @@ func (p *sshTransportPreparation) runOnce(ctx context.Context, target SSHTarget,
 		return false, err
 	}
 	cmd.Stdin = input
+	p.retirementUnconfirmed = true
+	defer func() {
+		// Inspect the command we own, never an arbitrary ExitError found in a
+		// joined error. OpenSSH reserves 255 for transport failure; a normal
+		// exit below that reports remote command completion. Cancellation and
+		// signaled termination cannot establish remote retirement.
+		if cmd.Process == nil {
+			p.retirementUnconfirmed = false // local Start failed: no dispatch
+		} else if ctx.Err() == nil && cmd.ProcessState != nil && cmd.ProcessState.Exited() && cmd.ProcessState.ExitCode() >= 0 && cmd.ProcessState.ExitCode() < 255 {
+			p.retirementUnconfirmed = false
+		}
+	}()
 	stdout, stderr, finish := workspaceOwnerSetupStreams(p.setupMarker, stdout, stderr)
 	defer func() {
 		err = finish(err)
@@ -974,26 +993,36 @@ func (e sshPreparationError) Unwrap() error { return e.error }
 // executeSSH owns workspace preparation; executePreparedSSH is the lower,
 // generic transport boundary and has no knowledge of workspace ownership.
 func executeSSH(ctx context.Context, target *SSHTarget, remote string, input io.ReadSeeker, size int64, limit time.Duration, connectTimeout, attempts string, stdout, stderr io.Writer) (err error) {
+	_, err = executeSSHWithRetirement(ctx, target, remote, input, size, limit, connectTimeout, attempts, stdout, stderr)
+	return err
+}
+
+// executeSSHWithRetirement keeps remote lifetime evidence separate from local
+// diagnostics and spool errors. An owner cleanup failure remains conservative.
+func executeSSHWithRetirement(ctx context.Context, target *SSHTarget, remote string, input io.ReadSeeker, size int64, limit time.Duration, connectTimeout, attempts string, stdout, stderr io.Writer) (retirementUnconfirmed bool, err error) {
 	var inputSize *int64
 	if input != nil {
 		inputSize = &size
 	}
 	prepared, err := prepareWorkspaceOwnerRemote(ctx, *target, remote, inputSize)
 	if err != nil {
-		return sshPreparationError{err}
+		return false, sshPreparationError{err}
 	}
 	defer func() {
 		if err != nil {
-			err = errors.Join(err, prepared.close(ctx, *target))
+			cleanupErr := prepared.close(ctx, *target)
+			retirementUnconfirmed = retirementUnconfirmed || cleanupErr != nil
+			err = errors.Join(err, cleanupErr)
 		}
 	}()
 	commandLimit := sshCommandLimit{execution: limit}
 	transport, err := prepareSSHTransport(ctx, *target, prepared.command, input, size, commandLimit)
 	if err != nil {
-		return sshPreparationError{err}
+		return false, sshPreparationError{err}
 	}
 	transport.setupMarker = prepared.setupMarker
-	return transport.execute(ctx, target, commandLimit, connectTimeout, attempts, stdout, stderr)
+	err = transport.execute(ctx, target, commandLimit, connectTimeout, attempts, stdout, stderr)
+	return transport.retirementUnconfirmed, err
 }
 
 func executePreparedSSH(ctx context.Context, target *SSHTarget, command string, input io.ReadSeeker, size int64, limit sshCommandLimit, connectTimeout, attempts string, stdout, stderr io.Writer) (err error) {

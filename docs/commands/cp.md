@@ -45,6 +45,7 @@ directions, and copy-specific flags before the complete provider flag reference.
 --id <lease-id-or-slug>
 --provider <name>
 -L                      follow symbolic links when copying from host to sandbox
+--recover <choice>      adopt legacy archive recovery data at one exact destination
 ```
 
 ## Transport Selection
@@ -70,9 +71,9 @@ the full transfer and removes it after the child exits.
 The rsync path requires rsync on both sides. The local client must be rsync
 3.4.3 or newer; Crabbox rejects older clients for data transfer because known
 sender/receiver vulnerabilities cross the lease trust boundary. The archive
-path instead requires standard POSIX tools including `bash`, `tar`, `gzip`,
-`find`, `mktemp`, `awk`, `ps`, `ln`, and `sync` on the native Linux or macOS POSIX
-lease. Local Go code creates uploads and validates downloads. Download entries must remain under one
+path installs a temporary filesystem runner on the native Linux or macOS
+lease. The same Go implementation creates and validates archives on both sides,
+using the resolved SSH transport. Download entries must remain under one
 source root and may contain only regular files and directories; Crabbox rejects
 links (including hard links), special files, duplicate or escaping paths, archives over 1,000,000
 entries, individual files over 64 GiB, or streams over 256 GiB. Tar header
@@ -83,14 +84,11 @@ so no preserved link graph can escape the transferred tree.
 Uploads extract into a private remote staging directory. Downloads extract into
 a private directory beside the destination. Both replace the selected target
 only after the complete archive validates. An interruption before publication
-keeps the prior contents at the target or in its durable backup, which the next
-copy restores if publication did not finish. An interruption after publication
-keeps the new target and defers backup cleanup to the next copy. Replacement
-uses a private durable `<target>.crabbox-cp-transaction` lock record and
-`<target>.crabbox-cp-backup` sidecars; after a process or host crash, the next
-copy to that target automatically restores an interrupted backup or finishes
-cleanup of a published replacement. A backup without its marker is never
-deleted automatically and produces an actionable error. This differs
+keeps the prior contents at the target or in its durable backup. A private
+filesystem journal records publication and cleanup, so the next copy can recover
+an interrupted operation. Historical `.crabbox-cp-transaction` and
+`.crabbox-cp-backup` sidecars are not automatically adopted or deleted; a copy
+that encounters them stops and preserves them for explicit recovery. This differs
 from rsync's incremental merge: archive fallback replaces an existing selected
 file or directory subtree on success instead of retaining unrelated entries in
 that subtree.
@@ -106,6 +104,41 @@ safe rsync 3.4.3 or newer.
 
 On a Windows client, targets that depend on the native Windows OpenSSH config
 use native rsync rather than WSL rsync so the configured route remains intact.
+
+## Interrupted archive recovery
+
+New archive copies record their publication decision in a private persistent
+journal under the user's configuration directory, outside the transferred tree.
+Before that decision, the old destination remains unchanged. After the decision,
+the next copy resumes publication and cleanup using the recorded destination and
+file identities. Do not remove this journal while a transaction is unresolved.
+
+Older releases left `.crabbox-cp-transaction` and `.crabbox-cp-backup` sidecars
+that do not identify an intended recovery outcome reliably. Copying stops when
+it encounters those files and prints the exact destination and recovery commands.
+Inspect the destination and backup, then explicitly choose one outcome:
+
+```sh
+crabbox cp --recover keep-destination -- ./exact-destination
+crabbox cp --recover restore-backup -- ./exact-destination
+
+crabbox cp --recover keep-destination --id blue-box -- SANDBOX:/tmp/exact-destination
+crabbox cp --recover restore-backup --id blue-box -- SANDBOX:/tmp/exact-destination
+```
+
+`keep-destination` leaves the current destination as it is, including absent,
+and retains any backup. `restore-backup` requires a backup and restores it while
+retaining the previous destination. Both retain the old marker and all unselected
+data in a collision-safe private sibling directory whose path is printed. No
+legacy data is deleted implicitly. Remove retained data only after inspecting it
+and confirming that it is no longer needed.
+
+Recovery takes one exact destination, not a source/destination pair, and does not
+accept `-L`. Local recovery accepts no lease/provider flags. Remote recovery
+requires a claimed POSIX SSH lease; provider-native copy backends and native
+Windows archive recovery are not supported. If transport fails after recovery,
+the outcome is ambiguous: inspect the destination and retained data before
+choosing any further action.
 
 ## See also
 

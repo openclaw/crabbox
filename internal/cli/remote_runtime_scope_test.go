@@ -20,7 +20,7 @@ func testNativeRuntimeScope() *nativeRuntimeScope {
 	s := newNativeRuntimeScope()
 	// These lifecycle tests do not read packs or contact an SSH target.
 	s.loadOnce.Do(func() {})
-	s.install = func(_ context.Context, target SSHTarget, _ *runtimeartifact.LocalSet) (*remoteNativeRuntime, error) {
+	s.install = func(_ context.Context, target SSHTarget, _ runtimeartifact.Source) (*remoteNativeRuntime, error) {
 		return &remoteNativeRuntime{target: target, path: "/tmp/example-runtime/crabbox"}, nil
 	}
 	s.remove = func(context.Context, *remoteNativeRuntime) error { return nil }
@@ -36,7 +36,7 @@ func TestNativeRuntimeScopeSharesInstallation(t *testing.T) {
 	var installs atomic.Int32
 	var removals atomic.Int32
 	started, proceed := make(chan struct{}), make(chan struct{})
-	s.install = func(_ context.Context, target SSHTarget, _ *runtimeartifact.LocalSet) (*remoteNativeRuntime, error) {
+	s.install = func(_ context.Context, target SSHTarget, _ runtimeartifact.Source) (*remoteNativeRuntime, error) {
 		if installs.Add(1) == 1 {
 			close(started)
 		}
@@ -83,7 +83,7 @@ func TestNativeRuntimeScopeSharesInstallation(t *testing.T) {
 func TestNativeRuntimeScopeCanceledWaiterDoesNotReinstall(t *testing.T) {
 	s := testNativeRuntimeScope()
 	started, proceed, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	s.install = func(context.Context, SSHTarget, *runtimeartifact.LocalSet) (*remoteNativeRuntime, error) {
+	s.install = func(context.Context, SSHTarget, runtimeartifact.Source) (*remoteNativeRuntime, error) {
 		close(started)
 		<-proceed
 		return &remoteNativeRuntime{}, nil
@@ -115,7 +115,7 @@ func TestNativeRuntimeScopeCachesFailure(t *testing.T) {
 	s := testNativeRuntimeScope()
 	want := errors.New("fixture installation failed")
 	calls := 0
-	s.install = func(context.Context, SSHTarget, *runtimeartifact.LocalSet) (*remoteNativeRuntime, error) {
+	s.install = func(context.Context, SSHTarget, runtimeartifact.Source) (*remoteNativeRuntime, error) {
 		calls++
 		return nil, want
 	}
@@ -266,7 +266,7 @@ func TestNativeRuntimeAdmissionPreparesOutsideTransport(t *testing.T) {
 		target.recordPreparedEndpoint("22")
 		return nil
 	}
-	s.install = func(ctx context.Context, target SSHTarget, _ *runtimeartifact.LocalSet) (*remoteNativeRuntime, error) {
+	s.install = func(ctx context.Context, target SSHTarget, _ runtimeartifact.Source) (*remoteNativeRuntime, error) {
 		if runtime, _ := admittedNativeRuntime(ctx, target); runtime != nil {
 			t.Fatal("installation inherited an admitted handle")
 		}
@@ -331,7 +331,7 @@ func TestNativeRuntimeAdmissionStopsBeforeInstallOnCancellation(t *testing.T) {
 		target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
 		ready := false
 		s.ready = func(context.Context, *SSHTarget, io.Writer) error { ready = true; cancel(); return nil }
-		s.install = func(context.Context, SSHTarget, *runtimeartifact.LocalSet) (*remoteNativeRuntime, error) {
+		s.install = func(context.Context, SSHTarget, runtimeartifact.Source) (*remoteNativeRuntime, error) {
 			t.Error("installed after cancellation")
 			return nil, nil
 		}
@@ -360,7 +360,7 @@ func TestNativeRuntimeAdmissionRediscoversFallbackBeforeReusingInstallation(t *t
 		target.recordPreparedEndpoint(healthyPort)
 		return nil
 	}
-	s.install = func(_ context.Context, target SSHTarget, _ *runtimeartifact.LocalSet) (*remoteNativeRuntime, error) {
+	s.install = func(_ context.Context, target SSHTarget, _ runtimeartifact.Source) (*remoteNativeRuntime, error) {
 		events = append(events, "install:"+target.Port)
 		runtime := nativeWSLStageTestRuntime("/tmp/runtime/crabbox")
 		runtime.target = target
@@ -412,7 +412,7 @@ func TestNativeRuntimeAdmissionRejectsStoppedRoutesBeforeReadiness(t *testing.T)
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			case "installation failed":
-				s.install = func(context.Context, SSHTarget, *runtimeartifact.LocalSet) (*remoteNativeRuntime, error) {
+				s.install = func(context.Context, SSHTarget, runtimeartifact.Source) (*remoteNativeRuntime, error) {
 					return nil, installationErr
 				}
 				if _, err := s.ensure(ctx, target); !errors.Is(err, installationErr) {
@@ -460,7 +460,7 @@ func TestNativeRuntimeScopeDiscoveryFailsBeforeGuestAccess(t *testing.T) {
 			}
 			s := newNativeRuntimeScopeForExecutable(controller, "", nil)
 			s.ready = func(context.Context, *SSHTarget, io.Writer) error { t.Fatal("invalid pack accessed guest"); return nil }
-			s.install = func(context.Context, SSHTarget, *runtimeartifact.LocalSet) (*remoteNativeRuntime, error) {
+			s.install = func(context.Context, SSHTarget, runtimeartifact.Source) (*remoteNativeRuntime, error) {
 				t.Fatal("invalid pack installed")
 				return nil, nil
 			}
@@ -549,5 +549,101 @@ func TestNativeRuntimePreflightRejectsLocalFailureBeforeTransport(t *testing.T) 
 	}
 	if len(data) != 0 {
 		t.Fatalf("local rejection accessed guest: %q", data)
+	}
+}
+
+func TestFilesystemRuntimeScopeOwnsCapabilityAndLifecycle(t *testing.T) {
+	scope, err := newFilesystemRuntimeScope(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope.required.Capability != runtimeartifact.Filesystem || scope.required.ProtocolVersion != "1" || scope.required.BuildID == "" {
+		t.Fatalf("filesystem requirement = %+v", scope.required)
+	}
+	// Mock only installation and removal: no pack, compilation, or guest access.
+	scope.loadOnce.Do(func() {})
+	var removed int
+	scope.install = func(_ context.Context, target SSHTarget, _ runtimeartifact.Source) (*remoteNativeRuntime, error) {
+		return &remoteNativeRuntime{target: target, path: "/tmp/crabbox-runtime-test/crabbox", identity: runtimeartifact.Identity{
+			Target: runtimeartifact.Target{OS: "darwin", Arch: "arm64"}, Capability: runtimeartifact.Filesystem,
+			ProtocolVersion: "1", BuildID: scope.required.BuildID,
+		}}, nil
+	}
+	scope.remove = func(context.Context, *remoteNativeRuntime) error { removed++; return nil }
+	ctx := runtimeLeaseContext(t.Context(), "filesystem-lease")
+	target := SSHTarget{TargetOS: targetMacOS}
+	client, err := scope.filesystemClient(ctx, target, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.Identity.OS != "darwin" || client.Identity.Arch != "arm64" || client.Identity.BuildID != scope.required.BuildID || client.Identity.Protocol != 1 {
+		t.Fatalf("client identity = %+v", client.Identity)
+	}
+	if err := scope.finish(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed %d installations", removed)
+	}
+	if err := client.Transport(ctx, nil, io.Discard); err == nil {
+		t.Fatal("client reused finalized installation")
+	}
+	supervisor := testNativeRuntimeScope()
+	if _, err := supervisor.filesystemClient(ctx, target, io.Discard); err == nil {
+		t.Fatal("supervisor accepted filesystem client")
+	}
+}
+
+func TestFilesystemSourceErrorPrecedesGuestAccess(t *testing.T) {
+	scope, err := newFilesystemRuntimeScope(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope.discoveryErr = nil
+	scope.manifest = filepath.Join(t.TempDir(), "missing-manifest.json")
+	scope.install = func(context.Context, SSHTarget, runtimeartifact.Source) (*remoteNativeRuntime, error) {
+		t.Fatal("guest installer called after local source failure")
+		return nil, nil
+	}
+	if _, err := scope.ensure(t.Context(), SSHTarget{TargetOS: targetLinux}); err == nil {
+		t.Fatal("missing explicit pack accepted")
+	}
+}
+
+func TestFilesystemCanceledSpoolDoesNotRetainInstallation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	called := false
+	unknown, err := runFilesystemCommand(ctx, SSHTarget{}, func(int64) string {
+		called = true
+		return "unused"
+	}, strings.NewReader("ordinary input"), io.Discard, io.Discard)
+	if !errors.Is(err, context.Canceled) || unknown || called {
+		t.Fatalf("canceled spool: error=%v unknown=%v dispatched=%v", err, unknown, called)
+	}
+}
+
+func TestPOSIXRuntimeCapabilityTargets(t *testing.T) {
+	supervisor := runtimeartifact.Requirement{Capability: runtimeartifact.Supervisor, ProtocolVersion: "CBX-REMOTE-1"}
+	filesystem := runtimeartifact.Requirement{Capability: runtimeartifact.Filesystem, ProtocolVersion: "1", BuildID: "source"}
+	for _, test := range []struct {
+		name     string
+		target   SSHTarget
+		required runtimeartifact.Requirement
+		want     string
+	}{
+		{"supervisor linux", SSHTarget{TargetOS: targetLinux}, supervisor, "linux"},
+		{"supervisor macOS rejected", SSHTarget{TargetOS: targetMacOS}, supervisor, ""},
+		{"filesystem linux", SSHTarget{TargetOS: targetLinux}, filesystem, "linux"},
+		{"filesystem macOS", SSHTarget{TargetOS: targetMacOS}, filesystem, "darwin"},
+		{"filesystem WSL", SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, filesystem, "linux"},
+		{"filesystem native Windows rejected", SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, filesystem, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := posixRuntimeOS(test.target, test.required)
+			if got != test.want || (err != nil) != (test.want == "") {
+				t.Fatalf("OS=%q err=%v", got, err)
+			}
+		})
 	}
 }

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Use one native filesystem engine for POSIX archive copies and cross-platform JUnit collection, preserving report bytes and deduplicating paths to the same file. Complete installations include matching Linux, macOS, and Windows companions. [PR 1556](https://github.com/openclaw/crabbox/pull/1556).
+- Add explicit `cp --recover keep-destination|restore-backup` recovery for interrupted legacy archive copies, retaining unselected destination and backup data instead of inferring an outcome from old sidecars. [PR 1556](https://github.com/openclaw/crabbox/pull/1556).
+
 - Add opt-in Bash preflight reporting on Linux, macOS, and WSL2 without changing default probes; complete runtime installations can report missing Bash and continue independent commands. [PR 2300](https://github.com/openclaw/crabbox/pull/2300). Thanks @coygeek.
 - Bundle small Linux runtime companions with complete CLI archives so managed execution can operate without Bash; discover installed companions automatically and explain how CLI-only installations can obtain the complete runtime pack. [PR 2300](https://github.com/openclaw/crabbox/pull/2300).
 

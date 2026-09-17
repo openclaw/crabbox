@@ -2244,7 +2244,7 @@ func TestNativeRuntimeNetworkProbeDoesNotRequireAdmission(t *testing.T) {
 	t.Setenv("CRABBOX_WSL_SHELL", wsl2ProbeCommand("exit 0", "/usr/bin/env BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c"))
 	scope := testNativeRuntimeScope()
 	scope.manifest = "selected fixture"
-	scope.install = func(context.Context, SSHTarget, *runtimeartifact.LocalSet) (*remoteNativeRuntime, error) {
+	scope.install = func(context.Context, SSHTarget, runtimeartifact.Source) (*remoteNativeRuntime, error) {
 		t.Error("network discovery installed a runtime")
 		return nil, nil
 	}

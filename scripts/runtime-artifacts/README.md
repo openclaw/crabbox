@@ -52,6 +52,38 @@ immutable and generate fresh reports through the protected tool. A report is
 not self-authenticating proof of extraction. Release provenance combines these
 reports with independent source/build metadata checks and pinned archive hashes.
 
+## Filesystem-capable packs
+
+The filesystem layout is explicit and separate from the historical Linux pair.
+First compute the helper fingerprint from the frozen source checkout:
+
+```sh
+go run ./scripts/runtime-artifacts source-id --source-directory /path/to/frozen-source
+```
+
+The protected tool reads only the dependency-free helper sources and its module
+and entrypoint templates. It never executes code from that checkout. The same
+fingerprint algorithm is used by the controller's embedded development compiler.
+The producer injects this fingerprint into the runtime's filesystem handshake;
+the fingerprint does not attest the complete controller or replace release
+source provenance.
+
+Pass `--filesystem-build-id SOURCE_SHA256` to `prepare` and `verify` to select
+local manifest schema 2. Required files are `darwin-amd64`, `darwin-arm64`,
+`linux-amd64`, `linux-arm64`, `windows-amd64.exe`, and `windows-arm64.exe`.
+Every target explicitly claims filesystem protocol 1 and the supplied build ID;
+only Linux targets additionally claim supervisor protocol `CBX-REMOTE-1`.
+Final verification requires the exact canonical manifest for all six finalized
+files and the archived controller. It does not execute any companion or verify
+its runtime handshake. Finish all signing before preparing this manifest.
+
+Extraction selects `unsigned-filesystem` or `final-filesystem`, and requires
+the same `--filesystem-build-id`. The unsigned layout has six companions;
+the final layout additionally has the controller-bound manifest. Historical
+`none`, `unsigned`, and `final` modes retain their original inventories and do
+not accept a filesystem build ID. Local manifest schema 2 is distinct from
+release provenance schema 3, which describes this six-runtime release layout.
+
 All modes keep diagnostics on stderr. Exit status is 0 for success, 1 for
 verification or I/O failure, and 2 for invalid arguments. `--help` works even
 when other arguments are invalid. There are no prompts, configuration files,
