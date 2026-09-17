@@ -630,33 +630,44 @@ func TestValidateBoxDeletionOperationAcceptsRenamedKind(t *testing.T) {
 	}
 }
 
-// The CLI mints this key. The renamed CLI writes ascii_sandbox_ed25519 while
-// older Box CLIs wrote ascii_box_ed25519, so Crabbox must read whichever name
-// the installed CLI actually created.
-func TestBoxSSHKeyResolvesCLIMintedName(t *testing.T) {
+// The CLI owns this key, and a home that has run both CLIs holds two keys of
+// which only one authenticates. Crabbox must follow the key the configured CLI
+// last wrote, not a fixed name preference: PrepareSSH runs that CLI just before
+// the target is used, so a stale key from the other CLI would fail SSH despite
+// successful native preparation.
+func TestBoxSSHKeyFollowsTheActiveCLI(t *testing.T) {
+	legacy, renamed := "ascii_box_ed25519", "ascii_sandbox_ed25519"
 	for _, tt := range []struct {
 		name    string
-		present []string
+		written []string // in order; later entries are newer
 		want    string
 	}{
-		{"renamed CLI key", []string{"ascii_sandbox_ed25519"}, "ascii_sandbox_ed25519"},
-		{"legacy CLI key", []string{"ascii_box_ed25519"}, "ascii_box_ed25519"},
-		{"both present prefers current", []string{"ascii_box_ed25519", "ascii_sandbox_ed25519"}, "ascii_sandbox_ed25519"},
-		{"neither present keeps legacy default", nil, "ascii_box_ed25519"},
+		{"only the renamed CLI has run", []string{renamed}, renamed},
+		{"only a legacy CLI has run", []string{legacy}, legacy},
+		{"upgraded: renamed key is the live one", []string{legacy, renamed}, renamed},
+		{"pinned legacy CLI: legacy key is the live one", []string{renamed, legacy}, legacy},
+		{"neither has run yet keeps the legacy name", nil, legacy},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("CRABBOX_ASCII_BOX_HOME", home)
-			if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+			dir := filepath.Join(home, ".ssh")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			for _, key := range tt.present {
-				if err := os.WriteFile(filepath.Join(home, ".ssh", key), []byte("key"), 0o600); err != nil {
+			stamp := time.Now().Add(-time.Hour)
+			for i, key := range tt.written {
+				path := filepath.Join(dir, key)
+				if err := os.WriteFile(path, []byte("key"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				// Order the writes in time so "last written" is unambiguous.
+				at := stamp.Add(time.Duration(i+1) * time.Minute)
+				if err := os.Chtimes(path, at, at); err != nil {
 					t.Fatal(err)
 				}
 			}
-			got := boxSSHKey(core.Config{})
-			if want := filepath.Join(home, ".ssh", tt.want); got != want {
+			if got, want := boxSSHKey(core.Config{}), filepath.Join(dir, tt.want); got != want {
 				t.Fatalf("boxSSHKey()=%q want %q", got, want)
 			}
 		})
@@ -740,28 +751,49 @@ func TestDecodeBoxesAcceptsRenamedEnvelope(t *testing.T) {
 	}
 }
 
-// A transitional CLI can emit both envelopes. An empty one must never hide a
-// populated one, because the cleanup callers read an empty inventory as proof
-// that a Box is really gone.
-func TestDecodeBoxesNeverLetsAnEmptyEnvelopeHideEntries(t *testing.T) {
+// A transitional CLI can report a Box under only one envelope. Cleanup reads
+// this inventory as proof that a Box is really gone, so every reported resource
+// has to survive decoding or a still-present Box could have its claim removed.
+func TestDecodeBoxesReconcilesBothEnvelopes(t *testing.T) {
 	for _, tt := range []struct {
 		name, payload string
-		want          int
+		want          []string
 	}{
-		{"empty sandboxes alongside populated boxes", `{"sandboxes":[],"boxes":[{"id":"bx_1"}]}`, 1},
-		{"empty boxes alongside populated sandboxes", `{"boxes":[],"sandboxes":[{"id":"bx_1"}]}`, 1},
-		{"both populated", `{"sandboxes":[{"id":"bx_1"}],"boxes":[{"id":"bx_1"}]}`, 1},
-		{"both genuinely empty still proves absence", `{"sandboxes":[],"boxes":[]}`, 0},
+		{"conflicting equal-length envelopes keep both", `{"sandboxes":[{"id":"bx_other"}],"boxes":[{"id":"bx_target"}]}`, []string{"bx_other", "bx_target"}},
+		{"empty sandboxes cannot hide populated boxes", `{"sandboxes":[],"boxes":[{"id":"bx_target"}]}`, []string{"bx_target"}},
+		{"empty boxes cannot hide populated sandboxes", `{"boxes":[],"sandboxes":[{"id":"bx_target"}]}`, []string{"bx_target"}},
+		{"same Box in both envelopes is not duplicated", `{"sandboxes":[{"id":"bx_target"}],"boxes":[{"id":"bx_target"}]}`, []string{"bx_target"}},
+		{"both genuinely empty still proves absence", `{"sandboxes":[],"boxes":[]}`, nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			boxes, err := decodeBoxes([]byte(tt.payload), true)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(boxes) != tt.want {
-				t.Fatalf("decoded %d boxes, want %d: %#v", len(boxes), tt.want, boxes)
+			var got []string
+			for _, box := range boxes {
+				got = append(got, box.ID)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("decoded %v want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("decoded %v want %v", got, tt.want)
+				}
 			}
 		})
+	}
+}
+
+// Merging the two envelopes must not lose fields reported by only one of them.
+func TestDecodeBoxesMergesFieldsAcrossEnvelopes(t *testing.T) {
+	boxes, err := decodeBoxes([]byte(`{"sandboxes":[{"id":"bx_1","state":"ready"}],"boxes":[{"id":"bx_1","sshEndpoint":"198.51.100.20:19036"}]}`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(boxes) != 1 || boxes[0].State != "ready" || boxes[0].SSHEndpoint != "198.51.100.20:19036" {
+		t.Fatalf("merged=%#v", boxes)
 	}
 }
 

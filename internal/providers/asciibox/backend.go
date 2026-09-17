@@ -539,19 +539,38 @@ func boxSSHConnection(box boxData) (string, string, error) {
 	return host, "22", nil
 }
 
-// The CLI owns this key; Crabbox only reads whichever name the installed CLI
-// minted. The renamed CLI writes ascii_sandbox_ed25519 while older Box CLIs
-// wrote ascii_box_ed25519, so probe the current name first and keep the legacy
-// name as the default when neither exists yet.
+// The CLI owns this key. The renamed CLI mints ascii_sandbox_ed25519 while
+// older Box CLIs minted ascii_box_ed25519, and a home that has run both holds
+// two keys of which only one authenticates. PrepareSSH runs the configured CLI
+// immediately before the target is used, so the key that CLI last wrote is the
+// live credential; picking by file name instead would hand SSH a stale key that
+// the native preparation never authorized. Ties keep the legacy name, which is
+// the pre-rename behavior.
 func boxSSHKey(cfg core.Config) string {
 	dir := path.Join(asciiBoxCLIHome(), ".ssh")
-	for _, name := range []string{"ascii_sandbox_ed25519", "ascii_box_ed25519"} {
-		candidate := path.Join(dir, name)
-		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
-			return candidate
+	legacy := path.Join(dir, "ascii_box_ed25519")
+	renamed := path.Join(dir, "ascii_sandbox_ed25519")
+	legacyAt, hasLegacy := regularFileModTime(legacy)
+	renamedAt, hasRenamed := regularFileModTime(renamed)
+	switch {
+	case hasLegacy && hasRenamed:
+		if renamedAt.After(legacyAt) {
+			return renamed
 		}
+		return legacy
+	case hasRenamed:
+		return renamed
+	default:
+		return legacy
 	}
-	return path.Join(dir, "ascii_box_ed25519")
+}
+
+func regularFileModTime(path string) (time.Time, bool) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return time.Time{}, false
+	}
+	return info.ModTime(), true
 }
 
 func boxHost(box boxData) string {

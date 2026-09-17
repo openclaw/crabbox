@@ -863,15 +863,17 @@ func decodeBoxes(data []byte, requireComplete bool) ([]boxData, error) {
 	if err := json.Unmarshal(data, &wrapped); err == nil {
 		// An empty but present array is a complete, empty inventory, so keep
 		// nil-vs-empty significant when choosing between the two envelopes.
+		// Reconcile both envelopes rather than choosing one. A transitional CLI
+		// can report a resource under only one of them, and callers treat this
+		// inventory as proof that a Box is really gone, so dropping either side
+		// could authorize removing the claim of a Box that still exists.
 		inventory := wrapped.Sandboxes
-		if len(wrapped.Boxes) > len(inventory) {
-			// Never let an empty envelope hide a populated one. A transitional
-			// CLI can emit both, and callers treat an empty inventory as proof
-			// that a Box is really gone.
-			inventory = wrapped.Boxes
-		}
-		if inventory == nil {
-			inventory = wrapped.Boxes
+		if wrapped.Boxes != nil {
+			if inventory == nil {
+				inventory = wrapped.Boxes
+			} else {
+				inventory = reconcileBoxEnvelopes(inventory, wrapped.Boxes)
+			}
 		}
 		if inventory != nil {
 			if requireComplete && (wrapped.PageInfo.HasMore || wrapped.PageInfo.NextCursor != "") {
@@ -888,6 +890,27 @@ func decodeBoxes(data []byte, requireComplete bool) ([]boxData, error) {
 		return nil, fmt.Errorf("ascii-box inventory response is missing boxes")
 	}
 	return completeBoxes(boxes)
+}
+
+// Union by identity, preserving order and merging the two reports of the same
+// Box so neither envelope's fields are lost.
+func reconcileBoxEnvelopes(primary, secondary []boxData) []boxData {
+	merged := make([]boxData, 0, len(primary)+len(secondary))
+	index := make(map[string]int, len(primary)+len(secondary))
+	for _, group := range [][]boxData{primary, secondary} {
+		for _, box := range group {
+			id := strings.TrimSpace(box.ID)
+			if at, ok := index[id]; ok && id != "" {
+				merged[at] = mergeBox(merged[at], box)
+				continue
+			}
+			if id != "" {
+				index[id] = len(merged)
+			}
+			merged = append(merged, box)
+		}
+	}
+	return merged
 }
 
 func completeBoxes(boxes []boxData) ([]boxData, error) {
