@@ -1350,3 +1350,65 @@ func TestRunpodBindingEffectivePayloadContract(t *testing.T) {
 		}
 	}
 }
+
+type compactRequestTransport func(*http.Request) (*http.Response, error)
+
+func (f compactRequestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestCompactJSONRequestOrdinaryBodyContract(t *testing.T) {
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "request-context")
+	var typedNil *struct{ Value string }
+	for _, tc := range []struct {
+		name   string
+		body   any
+		want   string
+		absent bool
+	}{
+		{name: "absent", absent: true},
+		{name: "typed nil", body: typedNil, want: "null"},
+		{name: "compact JSON", body: map[string]string{"value": "plain"}, want: `{"value":"plain"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			httpClient := &http.Client{Transport: compactRequestTransport(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if req.Method != http.MethodPost || req.URL.String() != "https://example.test/ordinary?label=a+b" || req.Context().Value(contextKey{}) != "request-context" {
+					t.Fatalf("request method/URL/context changed: %s %s", req.Method, req.URL)
+				}
+				if (req.Body == nil) != tc.absent {
+					t.Fatal("absent body distinction changed")
+				}
+				var body []byte
+				if req.Body != nil {
+					var err error
+					body, err = io.ReadAll(req.Body)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if string(body) != tc.want {
+					t.Fatalf("body=%q, want %q", body, tc.want)
+				}
+				contentType := "application/json"
+				if tc.absent {
+					contentType = ""
+				}
+				if req.Header.Get("Content-Type") != contentType {
+					t.Fatalf("content type=%q, want %q", req.Header.Get("Content-Type"), contentType)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}, nil
+			})}
+			c := &runpodClient{apiURL: "https://example.test", httpClient: httpClient}
+			err := c.do(ctx, http.MethodPost, "/ordinary?label=a+b", tc.body, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 {
+				t.Fatalf("transport calls=%d, want 1", calls)
+			}
+		})
+	}
+}
