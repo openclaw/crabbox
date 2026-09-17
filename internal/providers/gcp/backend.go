@@ -279,8 +279,8 @@ func (b *gcpLeaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) 
 		live, err := client.GetServer(ctx, server.CloudID)
 		if err != nil {
 			if core.IsGCPNotFound(err) {
-				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live instance no longer exists\n", server.DisplayID(), server.Name)
-				if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+				decision := shared.DirectCleanupDecision{Action: shared.ForgetMissingCleanupServer, Claim: claim}
+				if err := decision.Apply(ctx, req, b.RT); err != nil {
 					return err
 				}
 				continue
@@ -299,11 +299,14 @@ func (b *gcpLeaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) 
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live instance %s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
-		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", live.DisplayID(), live.Name)
-		if req.DryRun {
-			continue
+		decision := shared.DirectCleanupDecision{
+			Action: shared.DeleteCleanupServer,
+			Server: live,
+			Mutate: func(ctx context.Context) error {
+				return deleteClaimedGCPServer(ctx, client, live, claim)
+			},
 		}
-		if err := deleteClaimedGCPServer(ctx, client, live, claim); err != nil {
+		if err := decision.Apply(ctx, req, b.RT); err != nil {
 			return err
 		}
 	}
