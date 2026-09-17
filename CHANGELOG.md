@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Report the effective Linode machine type in doctor diagnostics, honoring configured native types and explicit generic overrides.
+
 - Run generated managed-runner readiness checks with POSIX sh while preserving tool, bootstrap marker, workroot, and desktop readiness checks. [PR 2296](https://github.com/openclaw/crabbox/pull/2296).
 
 - Finish the old workspace owner before replacing an unavailable lease, acquire fresh ownership before retrying sync, and avoid repeating completed cleanup when replacement acquisition fails. [PR 2293](https://github.com/openclaw/crabbox/pull/2293).
