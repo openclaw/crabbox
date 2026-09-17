@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Report the effective Linode machine type in doctor diagnostics, honoring configured native types and explicit generic overrides.
+- Report the effective Linode machine type in doctor diagnostics, honoring configured native types and explicit generic overrides. [PR 2298](https://github.com/openclaw/crabbox/pull/2298).
 
 - Run generated managed-runner readiness checks with POSIX sh while preserving tool, bootstrap marker, workroot, and desktop readiness checks. [PR 2296](https://github.com/openclaw/crabbox/pull/2296).
 
