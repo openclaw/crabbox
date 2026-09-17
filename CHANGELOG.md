@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Allow desktop commands on an already-configured Crabbox-owned macOS Parallels clone without forging a `desktop=true` lease label. Screen Sharing is still verified over RFB/SSH after GUI setup; source and unowned VMs stay rejected. [PR 1745](https://github.com/openclaw/crabbox/pull/1745).
+- After macOS `desktop type` authenticates and reads the first RFB framebuffer, wait a bounded cancel-aware interval before the first key so Apple Screen Sharing can finish asynchronous input-control acquisition. The wait is not glyph proof. [PR 1745](https://github.com/openclaw/crabbox/pull/1745).
 - Wait for an RFB framebuffer before macOS `desktop type` key events and drain one after, so Screen Sharing can consume the full text before the tunnel closes. [PR 1745](https://github.com/openclaw/crabbox/pull/1745).
 
 - Use one native filesystem engine for POSIX archive copies and cross-platform JUnit collection, preserving report bytes and deduplicating paths to the same file. Complete installations include matching Linux, macOS, and Windows companions. [PR 1556](https://github.com/openclaw/crabbox/pull/1556).

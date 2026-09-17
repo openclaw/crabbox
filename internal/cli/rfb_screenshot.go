@@ -28,7 +28,20 @@ const (
 	rfbSecurityARD   = 30
 	rfbEncodingRaw   = 0
 	rfbKeyEventDelay = 5 * time.Millisecond
+
+	// defaultRFBInputReadySettle is a documented delay, not a protocol
+	// handshake. RFB 3.8 and Apple ARD type 30 finish ServerInit and can
+	// emit a framebuffer before Screen Sharing has attached input control
+	// to the console session. Tight/QEMU fence and continuous-update
+	// messages are not advertised. The same-session helper that landed a
+	// full nonce waited ~2s after the first frame (Spotlight 500ms +
+	// launch 1200ms + key I/O) before the first text that actually
+	// appeared. Tests may shorten rfbInputReadySettle; do not treat the
+	// wait, the drain frame, or the byte count as glyph proof.
+	defaultRFBInputReadySettle = 2 * time.Second
 )
+
+var rfbInputReadySettle = defaultRFBInputReadySettle
 
 type rfbCredentials struct {
 	Username string
@@ -116,7 +129,17 @@ func applyRFBConnDeadline(ctx context.Context, conn net.Conn) error {
 }
 
 func waitRFBKeyEventDelay(ctx context.Context) error {
-	timer := time.NewTimer(rfbKeyEventDelay)
+	return waitRFBDuration(ctx, rfbKeyEventDelay)
+}
+
+func waitRFBDuration(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -124,6 +147,13 @@ func waitRFBKeyEventDelay(ctx context.Context) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func waitRFBInputReady(ctx context.Context) error {
+	if err := waitRFBDuration(ctx, rfbInputReadySettle); err != nil {
+		return fmt.Errorf("wait for RFB input ready: %w", err)
+	}
+	return nil
 }
 
 func typeRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, text string) error {
@@ -255,6 +285,12 @@ func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredential
 	// first-character-only delivery failure.
 	if _, err := requestAndReadRFBFramebuffer(conn, width, height); err != nil {
 		return fmt.Errorf("wait for RFB session ready: %w", err)
+	}
+	// A readable framebuffer is not input-control readiness. Apple grants
+	// session control asynchronously after ClientInit; keys sent in that
+	// window are accepted on the socket and discarded by the console.
+	if err := waitRFBInputReady(ctx); err != nil {
+		return err
 	}
 	for _, r := range text {
 		if err := ctx.Err(); err != nil {

@@ -479,7 +479,24 @@ func TestWriteRFBPointerEventRejectsProtocolOverflow(t *testing.T) {
 	}
 }
 
+func useRFBInputReadySettle(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := rfbInputReadySettle
+	rfbInputReadySettle = d
+	t.Cleanup(func() { rfbInputReadySettle = prev })
+}
+
+func TestRFBInputReadySettleIsDocumentedDelay(t *testing.T) {
+	if defaultRFBInputReadySettle != 2*time.Second {
+		t.Fatalf("default RFB input-ready settle=%s, want 2s documented delay", defaultRFBInputReadySettle)
+	}
+	if rfbInputReadySettle != defaultRFBInputReadySettle {
+		t.Fatalf("rfbInputReadySettle=%s, want default %s", rfbInputReadySettle, defaultRFBInputReadySettle)
+	}
+}
+
 func TestTypeRFBTextSendsExactKeyEventsAfterReadyAndDrain(t *testing.T) {
+	useRFBInputReadySettle(t, 0)
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
@@ -503,6 +520,7 @@ func TestTypeRFBTextSendsExactKeyEventsAfterReadyAndDrain(t *testing.T) {
 }
 
 func TestTypeRFBTextSendsUnicodeKeyEventsAfterReadyAndDrain(t *testing.T) {
+	useRFBInputReadySettle(t, 0)
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
@@ -586,6 +604,7 @@ func TestTypeRFBTextHonorsCanceledContext(t *testing.T) {
 }
 
 func TestTypeRFBTextFailsWhenReadyFramebufferIsMissing(t *testing.T) {
+	useRFBInputReadySettle(t, 0)
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
@@ -610,6 +629,7 @@ func TestTypeRFBTextFailsWhenReadyFramebufferIsMissing(t *testing.T) {
 }
 
 func TestTypeRFBTextFailsWhenDrainFramebufferIsMissing(t *testing.T) {
+	useRFBInputReadySettle(t, 0)
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()
@@ -631,6 +651,178 @@ func TestTypeRFBTextFailsWhenDrainFramebufferIsMissing(t *testing.T) {
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestTypeRFBTextWaitsForInputReadyBeforeFirstKey(t *testing.T) {
+	const settle = 40 * time.Millisecond
+	useRFBInputReadySettle(t, settle)
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	const text = "A"
+	serverErr := make(chan error, 1)
+	go func() {
+		_ = server.SetDeadline(time.Now().Add(10 * time.Second))
+		if err := serveTestARDHandshakeWithSecurityResult(server, "ec2-user", "example-pass", true); err != nil {
+			serverErr <- err
+			return
+		}
+		clientInit := []byte{0}
+		if _, err := io.ReadFull(server, clientInit); err != nil {
+			serverErr <- err
+			return
+		}
+		if clientInit[0] != 1 {
+			serverErr <- errUnexpectedTestBytes("client init", clientInit)
+			return
+		}
+		const width, height = 2, 1
+		serverInit := make([]byte, 24)
+		binary.BigEndian.PutUint16(serverInit[0:2], width)
+		binary.BigEndian.PutUint16(serverInit[2:4], height)
+		serverInit[4] = 32
+		serverInit[5] = 24
+		serverInit[7] = 1
+		if _, err := server.Write(serverInit); err != nil {
+			serverErr <- err
+			return
+		}
+		if err := readTestRFBReadySetup(server); err != nil {
+			serverErr <- err
+			return
+		}
+		if err := writeTestRFBRawFrame(server, width, height, []byte{0, 0, 255, 255, 0, 255, 0, 255}); err != nil {
+			serverErr <- err
+			return
+		}
+		frameAt := time.Now()
+		event := make([]byte, 8)
+		if _, err := io.ReadFull(server, event); err != nil {
+			serverErr <- err
+			return
+		}
+		waited := time.Since(frameAt)
+		if event[0] != 4 {
+			serverErr <- fmt.Errorf("wanted first key after input-ready settle, got message %d", event[0])
+			return
+		}
+		if waited < settle {
+			serverErr <- fmt.Errorf("first key %s after framebuffer, want >= %s input-ready settle", waited, settle)
+			return
+		}
+		if event[1] != 1 || binary.BigEndian.Uint32(event[4:8]) != 0x41 {
+			serverErr <- errUnexpectedTestBytes("key event", event)
+			return
+		}
+		up := make([]byte, 8)
+		if _, err := io.ReadFull(server, up); err != nil {
+			serverErr <- err
+			return
+		}
+		if err := readTestRFBFramebufferRequest(server); err != nil {
+			serverErr <- err
+			return
+		}
+		serverErr <- writeTestRFBRawFrame(server, width, height, []byte{255, 0, 0, 255, 0, 0, 255, 255})
+	}()
+
+	if err := typeRFBTextFromConn(context.Background(), client, rfbCredentials{
+		Username: "ec2-user",
+		Password: "example-pass",
+	}, localWebVNCAuthARD, text); err != nil {
+		t.Fatalf("type RFB text: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("fake RFB server: %v", err)
+	}
+}
+
+func TestTypeRFBTextHonorsCanceledContextDuringInputReady(t *testing.T) {
+	const settle = 250 * time.Millisecond
+	useRFBInputReadySettle(t, settle)
+
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	frameWritten := make(chan struct{})
+	serverErr := make(chan error, 1)
+	go func() {
+		_ = server.SetDeadline(time.Now().Add(10 * time.Second))
+		if err := serveTestARDHandshakeWithSecurityResult(server, "ec2-user", "example-pass", true); err != nil {
+			serverErr <- err
+			return
+		}
+		clientInit := []byte{0}
+		if _, err := io.ReadFull(server, clientInit); err != nil {
+			serverErr <- err
+			return
+		}
+		const width, height = 2, 1
+		serverInit := make([]byte, 24)
+		binary.BigEndian.PutUint16(serverInit[0:2], width)
+		binary.BigEndian.PutUint16(serverInit[2:4], height)
+		serverInit[4] = 32
+		serverInit[5] = 24
+		serverInit[7] = 1
+		if _, err := server.Write(serverInit); err != nil {
+			serverErr <- err
+			return
+		}
+		if err := readTestRFBReadySetup(server); err != nil {
+			serverErr <- err
+			return
+		}
+		if err := writeTestRFBRawFrame(server, width, height, []byte{0, 0, 255, 255, 0, 255, 0, 255}); err != nil {
+			serverErr <- err
+			return
+		}
+		close(frameWritten)
+		first := []byte{0}
+		n, err := server.Read(first)
+		if n > 0 && first[0] == 4 {
+			serverErr <- fmt.Errorf("key event during canceled input-ready settle")
+			return
+		}
+		if err == nil || errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || strings.Contains(err.Error(), "closed") {
+			serverErr <- nil
+			return
+		}
+		serverErr <- err
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := time.Now()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- typeRFBTextFromConn(ctx, client, rfbCredentials{
+			Username: "ec2-user",
+			Password: "example-pass",
+		}, localWebVNCAuthARD, "_CRABBOX")
+	}()
+	select {
+	case <-frameWritten:
+	case err := <-serverErr:
+		t.Fatalf("server failed before framebuffer: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ready framebuffer")
+	}
+	cancel()
+	err := <-errCh
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "wait for RFB input ready") {
+		t.Fatalf("error=%v", err)
+	}
+	if elapsed >= settle {
+		t.Fatalf("canceled input-ready wait took %s, want < settle %s", elapsed, settle)
+	}
+	_ = client.Close()
+	if err := <-serverErr; err != nil {
+		t.Fatalf("fake RFB server: %v", err)
 	}
 }
 
