@@ -500,7 +500,7 @@ func TestClientPreservesObservedGenerationAfterReadinessFailure(t *testing.T) {
 		newErr:     errors.New("exit status 1"),
 		infoResponses: []string{
 			`{"box":{"id":"bx_2","state":"provisioning","createdAt":"2026-08-30T12:00:00Z"}}`,
-			`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","createdAt":"2026-08-30T12:00:01Z"}}`,
+			`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","sshEndpoint":"198.51.100.20:19036","createdAt":"2026-08-30T12:00:01Z"}}`,
 		},
 	}
 	c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: home, runner: runner}
@@ -563,6 +563,41 @@ func TestRedactBoxSecretsCoversBothKeyPrefixes(t *testing.T) {
 			}
 			if !strings.Contains(got, tt.wantPrefix) {
 				t.Fatalf("redacted=%q want it to contain %q", got, tt.wantPrefix)
+			}
+		})
+	}
+}
+
+// Readiness now waits for the advertised endpoint, so pin the connection
+// resolution itself: an advertised endpoint wins, and the ip:22 fallback stays
+// available for a box that reports no endpoint at all.
+func TestBoxSSHConnectionPrefersAdvertisedEndpoint(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		box      boxData
+		wantHost string
+		wantPort string
+		wantErr  bool
+	}{
+		{name: "advertised endpoint", box: boxData{ID: "bx_1", IP: "203.0.113.10", SSHEndpoint: "198.51.100.20:19040"}, wantHost: "198.51.100.20", wantPort: "19040"},
+		{name: "snake_case endpoint alias", box: boxData{ID: "bx_1", SSHEndpointAlt: "198.51.100.20:19041"}, wantHost: "198.51.100.20", wantPort: "19041"},
+		{name: "no endpoint falls back to ip:22", box: boxData{ID: "bx_1", IP: "203.0.113.10"}, wantHost: "203.0.113.10", wantPort: "22"},
+		{name: "malformed endpoint is rejected", box: boxData{ID: "bx_1", IP: "203.0.113.10", SSHEndpoint: "198.51.100.20"}, wantErr: true},
+		{name: "no host at all is rejected", box: boxData{ID: "bx_1"}, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			host, port, err := boxSSHConnection(tt.box)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("host=%q port=%q want error", host, port)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if host != tt.wantHost || port != tt.wantPort {
+				t.Fatalf("host=%q port=%q want %q %q", host, port, tt.wantHost, tt.wantPort)
 			}
 		})
 	}
@@ -986,7 +1021,7 @@ func testRuntime() core.Runtime {
 }
 
 func testBox() boxData {
-	return boxData{ID: "bx_1", createdID: "bx_1", CreatedAt: "2026-08-30T12:00:00Z", State: "ready", IP: "203.0.113.10"}
+	return boxData{ID: "bx_1", createdID: "bx_1", CreatedAt: "2026-08-30T12:00:00Z", State: "ready", IP: "203.0.113.10", SSHEndpoint: "203.0.113.10:19035"}
 }
 
 func withFakeAPI(t *testing.T, fake api) {
@@ -1161,12 +1196,12 @@ func (r *fakeCommandRunner) Run(_ context.Context, req core.LocalCommandRequest)
 		return core.LocalCommandResult{Stdout: strings.Join([]string{
 			`{"event":"created","id":"bx_1","ttlSeconds":1800}`,
 			`{"event":"state","id":"bx_1","state":"provisioning"}`,
-			`{"event":"ready","id":"bx_1","state":"ready","ip":"203.0.113.10","archiveAfter":"2026-05-30T20:00:00Z"}`,
+			`{"event":"ready","id":"bx_1","state":"ready","ip":"203.0.113.10","sshEndpoint":"203.0.113.10:19035","archiveAfter":"2026-05-30T20:00:00Z"}`,
 		}, "\n")}, nil
 	case strings.Contains(joined, " ssh bx_1 -- true"):
 		return core.LocalCommandResult{}, nil
 	case strings.Contains(joined, " info bx_1"):
-		return core.LocalCommandResult{Stdout: `{"box":{"id":"bx_1","state":"ready","ip":"203.0.113.10"}}`}, nil
+		return core.LocalCommandResult{Stdout: `{"box":{"id":"bx_1","state":"ready","ip":"203.0.113.10","sshEndpoint":"203.0.113.10:19035"}}`}, nil
 	case strings.Contains(joined, " info bx_2"):
 		if len(r.infoResponses) == 0 {
 			return core.LocalCommandResult{Stderr: "missing info response"}, fmt.Errorf("missing info response")
@@ -1175,7 +1210,7 @@ func (r *fakeCommandRunner) Run(_ context.Context, req core.LocalCommandRequest)
 		r.infoResponses = r.infoResponses[1:]
 		return core.LocalCommandResult{Stdout: out}, nil
 	case strings.Contains(joined, " list"):
-		return core.LocalCommandResult{Stdout: `{"boxes":[{"id":"bx_1","state":"ready","ip":"203.0.113.10"}]}`}, nil
+		return core.LocalCommandResult{Stdout: `{"boxes":[{"id":"bx_1","state":"ready","ip":"203.0.113.10","sshEndpoint":"203.0.113.10:19035"}]}`}, nil
 	case strings.Contains(joined, " stop bx_1"):
 		return core.LocalCommandResult{Stdout: `{"id":"bx_1","status":"deleted"}`}, nil
 	case strings.Contains(joined, " delete bx_1"):
