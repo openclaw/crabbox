@@ -3139,19 +3139,6 @@ func TestE2BEnvironmentAcceptanceAndSource(t *testing.T) {
 	}
 }
 
-func TestE2BCoreTemplateDefaultKeepsRawWhitespace(t *testing.T) {
-	for _, raw := range []string{"", "  ", "custom"} {
-		cfg := Config{Provider: "e2b", E2B: E2BConfig{Template: raw}}
-		want := raw
-		if want == "" {
-			want = "base"
-		}
-		if got := serverTypeForConfig(cfg); got != want {
-			t.Fatalf("template=%q got=%q want=%q", raw, got, want)
-		}
-	}
-}
-
 func TestCloudflareConfigAcceptanceAndSource(t *testing.T) {
 	for _, source := range []string{"user", "repository", "environment"} {
 		for _, mode := range []string{"omitted", "empty", "null", "equal", "whitespace", "token only", "URL only"} {
@@ -3356,24 +3343,6 @@ func TestUpstashBoxEnvironmentAcceptanceAndSource(t *testing.T) {
 			}
 			if cfg.UpstashBox.KeepAlive != want {
 				t.Fatalf("bool raw=%q prior=%t", raw, prior)
-			}
-		}
-	}
-}
-
-func TestUpstashBoxCoreSizePresentationUsesExactAliases(t *testing.T) {
-	for _, name := range []string{"upstash-box", "upstash", "box", "upstashbox", " Upstash "} {
-		for _, size := range []string{"", "  ", "medium"} {
-			cfg := Config{Provider: name, UpstashBox: UpstashBoxConfig{Size: size}}
-			want := ""
-			if name == "upstash-box" || name == "upstash" {
-				want = size
-				if want == "" {
-					want = "small"
-				}
-			}
-			if got := serverTypeForConfig(cfg); got != want {
-				t.Fatalf("name=%q raw=%q type=%q want=%q", name, size, got, want)
 			}
 		}
 	}
@@ -14197,17 +14166,6 @@ func TestModalConfigEnvironmentContract(t *testing.T) {
 	}
 }
 
-func TestModalConfigServerTypeFallback(t *testing.T) {
-	for _, tc := range []struct{ raw, want string }{{"", "python:3.13-slim"}, {"  ", "  "}, {" custom-image ", " custom-image "}} {
-		cfg := baseConfig()
-		cfg.Provider = "modal"
-		cfg.Modal.Image = tc.raw
-		if got := serverTypeForConfig(cfg); got != tc.want {
-			t.Fatalf("serverType=%q want=%q", got, tc.want)
-		}
-	}
-}
-
 func TestMorphConfigFileContract(t *testing.T) {
 	wantDefaults := MorphConfig{APIURL: "https://cloud.morph.so", SSHGatewayHost: "ssh.cloud.morph.so", WorkRoot: "/tmp/crabbox", WakeOnSSH: true}
 	if got := baseConfig().Morph; got != wantDefaults {
@@ -14626,7 +14584,7 @@ func TestExeDevConfigEnvironmentContract(t *testing.T) {
 	}
 }
 
-func TestExeDevConfigCoreFallbackContract(t *testing.T) {
+func TestExeDevConfigWorkRootFallbackContract(t *testing.T) {
 	for _, tc := range []struct{ providerRoot, generic, want string }{{"", "/work/crabbox", "/tmp/crabbox"}, {"", "/custom/root", "/custom/root"}, {"/specific/root", "/custom/root", "/specific/root"}, {"  ", "/custom/root", "  "}} {
 		cfg := baseConfig()
 		cfg.Provider = "exe-dev"
@@ -14637,14 +14595,6 @@ func TestExeDevConfigCoreFallbackContract(t *testing.T) {
 		}
 		if cfg.WorkRoot != tc.want || cfg.ExeDev.WorkRoot != tc.want {
 			t.Fatalf("roots=%q/%q want=%q", cfg.WorkRoot, cfg.ExeDev.WorkRoot, tc.want)
-		}
-	}
-	for _, tc := range []struct{ raw, want string }{{"", "default"}, {"  ", "  "}, {" image ", " image "}} {
-		cfg := baseConfig()
-		cfg.Provider = "exe-dev"
-		cfg.ExeDev.Image = tc.raw
-		if got := serverTypeForConfig(cfg); got != tc.want {
-			t.Fatalf("display=%q want=%q", got, tc.want)
 		}
 	}
 }

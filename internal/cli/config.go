@@ -7034,18 +7034,6 @@ func serverTypeForConfig(cfg Config) string {
 	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) || cfg.Provider == "islo" || cfg.Provider == "sprites" || cfg.Provider == "local-container" || cfg.Provider == "multipass" {
 		return ""
 	}
-	if cfg.Provider == "e2b" {
-		return blank(cfg.E2B.Template, E2BConfigDefaultTemplate)
-	}
-	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
-		return blank(cfg.ExeDev.Image, ExeDevDefaultImageLabel)
-	}
-	if cfg.Provider == "modal" {
-		return blank(cfg.Modal.Image, ModalConfigDefaultImage)
-	}
-	if cfg.Provider == "upstash-box" || cfg.Provider == "upstash" {
-		return blank(cfg.UpstashBox.Size, UpstashBoxConfigDefaultSize)
-	}
 	if cfg.Provider == "proxmox" {
 		return proxmoxServerTypeForConfig(cfg)
 	}
