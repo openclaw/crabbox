@@ -618,6 +618,11 @@ type cloudflareDoctorOverrideProvider struct {
 	ProviderServerTypeProvider
 }
 
+type proxmoxDoctorOverrideProvider struct {
+	doctorOverrideProvider
+	ProviderServerTypeProvider
+}
+
 type doctorResultBackend struct {
 	testDoctorDelegatedBackend
 	result DoctorResult
@@ -625,6 +630,23 @@ type doctorResultBackend struct {
 
 func (b doctorResultBackend) Doctor(context.Context, DoctorRequest) (DoctorResult, error) {
 	return b.result, nil
+}
+
+func overrideDoctorProvider(t *testing.T, provider Provider) {
+	t.Helper()
+	spec := provider.Spec()
+	for _, name := range append([]string{spec.Name}, spec.Aliases...) {
+		key := normalizeProviderName(name)
+		previous, present := providerRegistry[key]
+		t.Cleanup(func() {
+			if present {
+				providerRegistry[key] = previous
+			} else {
+				delete(providerRegistry, key)
+			}
+		})
+		providerRegistry[key] = provider
+	}
 }
 
 func stubCloudflareDoctor(t *testing.T, result DoctorResult) {
@@ -655,18 +677,7 @@ func stubCloudflareDoctor(t *testing.T, result DoctorResult) {
 		ProviderClassProfileProvider: original.(ProviderClassProfileProvider),
 		ProviderServerTypeProvider:   original.(ProviderServerTypeProvider),
 	}
-	for _, name := range append([]string{original.Spec().Name}, original.Spec().Aliases...) {
-		key := normalizeProviderName(name)
-		previous, present := providerRegistry[key]
-		t.Cleanup(func() {
-			if present {
-				providerRegistry[key] = previous
-			} else {
-				delete(providerRegistry, key)
-			}
-		})
-		providerRegistry[key] = override
-	}
+	overrideDoctorProvider(t, override)
 	t.Cleanup(func() {
 		if calls != 1 {
 			t.Errorf("synthetic doctor configuration calls=%d, want 1", calls)
@@ -716,6 +727,43 @@ func TestDoctorFromRunAppliesRecordedContext(t *testing.T) {
 		}
 	}
 	clearConfigEnv(t)
+	original, err := ProviderFor("proxmox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise recorded-run restoration without invoking provider diagnostics.
+	backend := doctorResultBackend{
+		testDoctorDelegatedBackend: testDoctorDelegatedBackend{testDelegatedBackend{spec: original.Spec()}},
+		result: DoctorResult{Provider: "proxmox", Checks: []DoctorCheck{{
+			Status: "skip", Check: "provider", Message: "provider=proxmox direct_doctor=unsupported timeout=" + doctorProviderTimeout.String(),
+		}}},
+	}
+	calls := 0
+	override := proxmoxDoctorOverrideProvider{
+		doctorOverrideProvider: doctorOverrideProvider{
+			doctorConfigurationProvider: doctorConfigurationProvider{
+				Provider: original,
+				configure: func(Config, Runtime) (Backend, error) {
+					t.Fatal("recorded-context fixture must not configure the acquisition backend")
+					return nil, nil
+				},
+			},
+			doctor: func(cfg Config, _ Runtime) (DoctorBackend, error) {
+				calls++
+				if cfg.Provider != "proxmox" || cfg.TargetOS != targetLinux || cfg.Class != "standard" || cfg.ServerType != "vm-large" {
+					t.Fatalf("doctor did not receive recorded context: provider=%s target=%s class=%s type=%s", cfg.Provider, cfg.TargetOS, cfg.Class, cfg.ServerType)
+				}
+				return backend, nil
+			},
+		},
+		ProviderServerTypeProvider: original.(ProviderServerTypeProvider),
+	}
+	overrideDoctorProvider(t, override)
+	t.Cleanup(func() {
+		if calls != 2 {
+			t.Errorf("synthetic doctor configuration calls=%d, want 2", calls)
+		}
+	})
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -741,7 +789,7 @@ func TestDoctorFromRunAppliesRecordedContext(t *testing.T) {
 	t.Setenv("CRABBOX_COORDINATOR", server.URL)
 
 	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--from-run", "run_123"})
+	err = (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--from-run", "run_123"})
 	if err != nil {
 		t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 	}
