@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -2055,7 +2056,15 @@ vast:
 	}
 
 	stdout.Reset()
-	if err := json.NewEncoder(&stdout).Encode(configShowView(cfg)); err != nil {
+	view := configShowView(cfg)
+	sections, err := collectProviderConfigShowSections(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := addProviderConfigShowSections(view, sections); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewEncoder(&stdout).Encode(view); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -2233,7 +2242,7 @@ nebius:
 
 func TestConfigShowAppliesNvidiaBrevGenericWorkRoot(t *testing.T) {
 	cfg := baseConfig()
-	cfg.Provider = "nvidia-brev"
+	setProviderSelection(&cfg, "nvidia-brev", providerSelectionFlag)
 	cfg.WorkRoot = "/srv/crabbox"
 	MarkWorkRootExplicit(&cfg)
 	got := effectiveConfigForShow(cfg)
@@ -2243,20 +2252,33 @@ func TestConfigShowAppliesNvidiaBrevGenericWorkRoot(t *testing.T) {
 }
 
 func TestConfigShowAppliesHostingerPerUserWorkRootDefault(t *testing.T) {
+	provider, err := ProviderFor("hostinger")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootFor := func(cfg Config) any {
+		for _, field := range provider.(ProviderConfigShowProjector).ConfigShowSection(cfg).Fields {
+			if field.JSONName == "workRoot" {
+				return field.JSONValue
+			}
+		}
+		t.Fatal("Hostinger section missing workRoot")
+		return nil
+	}
 	other := effectiveConfigForShow(baseConfig())
-	if other.Hostinger.WorkRoot != "/home/root/crabbox" ||
+	if rootFor(other) != "/home/root/crabbox" ||
 		other.WorkRoot != defaultPOSIXWorkRoot {
 		t.Fatalf("unexpected inactive Hostinger defaults: %#v", other)
 	}
 
 	explicit := baseConfig()
 	explicit.Hostinger.WorkRoot = " /home/root/crabbox "
-	if got := effectiveConfigForShow(explicit).Hostinger.WorkRoot; got != explicit.Hostinger.WorkRoot {
+	if got := rootFor(effectiveConfigForShow(explicit)); got != explicit.Hostinger.WorkRoot {
 		t.Fatalf("explicit Hostinger work root changed: %q", got)
 	}
 
 	cfg := baseConfig()
-	cfg.Provider = "hostinger"
+	setProviderSelection(&cfg, "hostinger", providerSelectionFlag)
 	cfg.Hostinger.User = "ubuntu"
 
 	got := effectiveConfigForShow(cfg)
@@ -3032,7 +3054,15 @@ func TestConfigShowRedactsAllEndpointURLComponents(t *testing.T) {
 
 	var text bytes.Buffer
 	writeConfigShowText(&text, cfg)
-	jsonData, err := json.Marshal(configShowView(cfg))
+	view := configShowView(cfg)
+	sections, err := collectProviderConfigShowSections(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := addProviderConfigShowSections(view, sections); err != nil {
+		t.Fatal(err)
+	}
+	jsonData, err := json.Marshal(view)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3491,5 +3521,119 @@ func TestLambdaBindingJSON(t *testing.T) {
 	want = `{"auth":"missing","filesystemMounts":[{"name":"data","mountPath":"/mnt/data"},{}],"filesystemNames":["data"],"firewallRuleset":"rule","image":"image","imageFamily":"family","region":"west","sshCIDRs":["cidr"],"type":"gpu"}`
 	if string(data) != want {
 		t.Fatalf("config-show JSON=%s", data)
+	}
+}
+
+func TestProviderDisplayRootsAndSelection(t *testing.T) {
+	for _, name := range []string{"hostinger", "vast", "vast-ai", "vastai", "nvidia-brev", "brev", "nvidia"} {
+		provider, err := ProviderFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, selected := range []bool{false, true} {
+			for _, roots := range []string{"default", "generic", "provider", "explicit-default", "whitespace"} {
+				t.Run(name+"/"+strconv.FormatBool(selected)+"/"+roots, func(t *testing.T) {
+					cfg := baseConfig()
+					if selected {
+						setProviderSelection(&cfg, name, providerSelectionFlag)
+					}
+					cfg.SSHUser, cfg.SSHPort = "generic-user", "2209"
+					cfg.SSHFallbackPorts = []string{"2208"}
+					MarkSSHUserExplicit(&cfg)
+					MarkSSHPortExplicit(&cfg)
+					cfg.Hostinger.User, cfg.Vast.User = " raw-user ", " raw-user "
+					wantRoots := map[string]string{"hostinger": "/home/raw-user/crabbox", "vast": VastConfigDefaultWorkRoot, "nvidiaBrev": NvidiaBrevConfigDefaultWorkRoot}
+					if roots != "default" {
+						cfg.WorkRoot = "/generic/root"
+						MarkWorkRootExplicit(&cfg)
+						for key := range wantRoots {
+							wantRoots[key] = "/generic/root"
+						}
+					}
+					switch roots {
+					case "provider", "whitespace":
+						root := "/provider/root"
+						if roots == "whitespace" {
+							root = "  "
+						}
+						cfg.Hostinger.WorkRoot, cfg.Vast.WorkRoot, cfg.NvidiaBrev.WorkRoot = root, root, root
+						for key := range wantRoots {
+							wantRoots[key] = root
+						}
+					case "explicit-default":
+						cfg.Vast.WorkRoot, cfg.NvidiaBrev.WorkRoot = VastConfigDefaultWorkRoot, NvidiaBrevConfigDefaultWorkRoot
+						MarkVastWorkRootExplicit(&cfg)
+						MarkNvidiaBrevWorkRootExplicit(&cfg)
+						wantRoots["vast"], wantRoots["nvidiaBrev"] = VastConfigDefaultWorkRoot, NvidiaBrevConfigDefaultWorkRoot
+					}
+					before := cfg
+					before.SSHFallbackPorts = slices.Clone(cfg.SSHFallbackPorts)
+					got := effectiveConfigForShow(cfg)
+					if !reflect.DeepEqual(cfg, before) || !reflect.DeepEqual(got.inputProvenance, before.inputProvenance) {
+						t.Fatal("display changed input config or provenance")
+					}
+					sections, err := collectProviderConfigShowSections(got)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(cfg, before) {
+						t.Fatal("section projection mutated the original input")
+					}
+					for _, section := range sections {
+						want, check := wantRoots[section.JSONKey]
+						if !check {
+							continue
+						}
+						found := false
+						for _, field := range section.Fields {
+							if field.JSONName == "workRoot" {
+								found = true
+								if field.JSONValue != want || field.TextValue != want {
+									t.Fatalf("section=%s root=%v/%q want=%q", section.JSONKey, field.JSONValue, field.TextValue, want)
+								}
+							}
+						}
+						if !found {
+							t.Fatalf("section=%s missing workRoot", section.JSONKey)
+						}
+						delete(wantRoots, section.JSONKey)
+					}
+					if len(wantRoots) != 0 {
+						t.Fatalf("missing sections: %v", wantRoots)
+					}
+					if !selected {
+						if !reflect.DeepEqual(got, before) {
+							t.Fatal("inactive provider changed generic display configuration")
+						}
+						return
+					}
+					switch provider.Spec().Name {
+					case "hostinger":
+						if got.SSHUser != " raw-user " || got.SSHPort != "22" || got.SSHFallbackPorts != nil || got.WorkRoot != got.Hostinger.WorkRoot {
+							t.Fatal("Hostinger display connection projection changed")
+						}
+					case "vast":
+						if got.SSHUser != "generic-user" || got.SSHPort != "22" || got.SSHFallbackPorts != nil || got.WorkRoot != got.Vast.WorkRoot {
+							t.Fatal("Vast explicit user or fixed port projection changed")
+						}
+					case "nvidia-brev":
+						if got.SSHUser != before.SSHUser || got.SSHPort != before.SSHPort || !reflect.DeepEqual(got.SSHFallbackPorts, before.SSHFallbackPorts) || got.WorkRoot != got.NvidiaBrev.WorkRoot {
+							t.Fatal("Brev changed unrelated connection fields")
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestVastDisplayUsesProviderUserWithoutGenericProvenance(t *testing.T) {
+	cfg := baseConfig()
+	setProviderSelection(&cfg, "vast-ai", providerSelectionEnvironment)
+	cfg.SSHUser, cfg.SSHPort = "unmarked-user", "2209"
+	cfg.Vast.User = " raw-provider-user "
+	got := effectiveConfigForShow(cfg)
+	if got.SSHUser != cfg.Vast.User || got.SSHPort != "22" || got.SSHFallbackPorts != nil {
+		t.Fatalf("Vast display user/port/fallback=%q/%q/%v", got.SSHUser, got.SSHPort, got.SSHFallbackPorts)
 	}
 }

@@ -245,7 +245,7 @@ func TestConfigShowLegacySlotPositions(t *testing.T) {
 		}
 		return true
 	})
-	if got := strings.Join(order, ","); got != "actions,blacksmith,agent_sandbox,phala,superserve,local_container,apple_container,mxc,docker_sandbox,multipass,machine0,tart,lume,cloudflare,cloudflare_sandbox,static,results,jobs,aws,aws_lambda_microvm,azure,digitalocean,vultr,linode,github_codespaces,azure_dynamic_sessions,gcp,proxmox,firecracker,xcp_ng,parallels" {
+	if got := strings.Join(order, ","); got != "actions,blacksmith,agent_sandbox,phala,superserve,local_container,apple_container,mxc,docker_sandbox,multipass,machine0,tart,lume,cloudflare,cloudflare_sandbox,static,results,jobs,aws,aws_lambda_microvm,azure,digitalocean,vultr,linode,github_codespaces,vast,nvidia_brev,hostinger,azure_dynamic_sessions,gcp,proxmox,firecracker,xcp_ng,parallels" {
 		t.Fatalf("legacy text slot positions: %s", got)
 	}
 }

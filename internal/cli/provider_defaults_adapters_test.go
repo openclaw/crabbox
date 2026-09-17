@@ -4,9 +4,11 @@ package cli_test
 import (
 	_ "github.com/openclaw/crabbox/internal/providers/cloudflare"
 	_ "github.com/openclaw/crabbox/internal/providers/digitalocean"
+	_ "github.com/openclaw/crabbox/internal/providers/hostinger"
 	_ "github.com/openclaw/crabbox/internal/providers/lambda"
 	_ "github.com/openclaw/crabbox/internal/providers/linode"
 	_ "github.com/openclaw/crabbox/internal/providers/nebius"
+	_ "github.com/openclaw/crabbox/internal/providers/nvidiabrev"
 	_ "github.com/openclaw/crabbox/internal/providers/ovh"
 	_ "github.com/openclaw/crabbox/internal/providers/proxmox"
 	_ "github.com/openclaw/crabbox/internal/providers/scaleway"
