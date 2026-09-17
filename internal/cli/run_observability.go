@@ -323,7 +323,7 @@ func remoteMissingToolsCommand(tools []string) string {
   fi
 done
 `)
-	return "bash -lc " + shellQuote(b.String())
+	return remotePortableShellInvocation(b.String(), nil)
 }
 
 func runWSL2RemoteCapabilityPreflight(ctx context.Context, target SSHTarget, workdir string, env map[string]string, envFiles []string, tools []string) (string, error) {
@@ -437,7 +437,7 @@ preflight_cmd() {
 	for _, tool := range tools {
 		script += posixPreflightProbe(tool)
 	}
-	return remoteShellCommandWithEnvFiles(workdir, env, envFiles, script)
+	return remotePortableWorkloadCommand(workdir, env, envFiles, script, nil)
 }
 
 func windowsRemoteCapabilityPreflightCommand(workdir string, env map[string]string, envFiles []string, tools []string) string {
@@ -589,6 +589,7 @@ var preflightToolRegistry = map[string]preflightToolSpec{
 	"xcodebuild":               {Posix: []string{"xcodebuild", "-version"}, OS: map[string]bool{"macos": true}},
 	"brew":                     {Posix: []string{"brew", "--version"}, OS: map[string]bool{"macos": true}},
 	"apt":                      {Posix: []string{"apt-get", "--version"}, OS: map[string]bool{"linux": true}},
+	"bash":                     {Posix: []string{"bash", "--version"}, OS: map[string]bool{"linux": true, "macos": true}},
 	"bubblewrap":               {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
 	"bun":                      {Posix: []string{"bun", "--version"}, Windows: []string{"bun", "--version"}},
 	"bwrap":                    {Posix: []string{"bwrap", "--version"}, OS: map[string]bool{"linux": true}},
@@ -1330,6 +1331,10 @@ func remoteFailureCaptureCommand(workdir, remotePath, scriptPath string) string 
 }
 
 func remoteFailureCaptureCommandWithLimits(workdir, remotePath, scriptPath string, limits runDownloadLimits) string {
+	return remotePortableShellInvocation(remoteFailureCaptureScript(workdir, remotePath, scriptPath, limits), nil)
+}
+
+func remoteFailureCaptureScript(workdir, remotePath, scriptPath string, limits runDownloadLimits) string {
 	var script bytes.Buffer
 	script.WriteString("set -eu\n")
 	script.WriteString("cd " + shellQuote(workdir) + "\n")
@@ -1358,7 +1363,6 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 printf '` + remoteFailureCaptureOwnedPrefix + `%s\n' "$out"
-capture_file_blocks=$((capture_max_bytes / 1024))
 capture_required_blocks=$(((capture_reserve_bytes + 2 * capture_max_bytes + 1023) / 1024))
 capture_require_space() {
   label=$1
@@ -1372,7 +1376,7 @@ capture_require_space() {
     return 7
   fi
 }
-capture_apply_file_limit() {
+capture_read_file_limit() {
   if ! inherited=$(ulimit -Sf 2>/dev/null); then
     printf 'failure capture file limit unavailable\n' >&2
     return 7
@@ -1383,6 +1387,46 @@ capture_apply_file_limit() {
       printf 'failure capture file limit unknown: %s\n' "$inherited" >&2
       return 7
       ;;
+    0)
+      printf 'failure capture inherited file limit is lower: inherited=0\n' >&2
+      return 7
+      ;;
+  esac
+}
+capture_prepare_file_limit() {
+  capture_read_file_limit || return $?
+  # File-limit units differ between POSIX shells and older macOS Bash.
+  # Calibrate only in a child; never lower the parent's inherited limit.
+  capture_probe="$scratch/file-limit-unit"
+  capture_probe_result=0
+  {
+    (
+      ulimit -c 0 || exit 7
+      ulimit -f 1 || exit 7
+      dd if=/dev/zero of="$capture_probe" bs=2048 count=1
+    ) >/dev/null 2>&1 || capture_probe_result=$?
+  } 2>/dev/null
+  capture_probe_signal=$(kill -l "$capture_probe_result" 2>/dev/null) || capture_probe_signal=
+  case "$capture_probe_signal" in
+    XFSZ|SIGXFSZ) ;;
+    *) printf 'failure capture file-limit unit unavailable\n' >&2; return 7 ;;
+  esac
+  if [ ! -f "$capture_probe" ]; then
+    printf 'failure capture file-limit unit unavailable\n' >&2
+    return 7
+  fi
+  capture_unit=$(wc -c < "$capture_probe") || return 7
+  capture_unit=$(printf '%s' "$capture_unit" | tr -d '[:space:]') || return 7
+  rm -f -- "$capture_probe" || return 7
+  case "$capture_unit" in
+    512|1024) capture_file_blocks=$((capture_max_bytes / capture_unit)) ;;
+    *) printf 'failure capture file-limit unit unknown: %s\n' "$capture_unit" >&2; return 7 ;;
+  esac
+}
+capture_apply_file_limit() {
+  capture_read_file_limit || return $?
+  case "$inherited" in
+    unlimited) ;;
     *)
       if [ "$inherited" -lt "$capture_file_blocks" ]; then
         printf 'failure capture inherited file limit is lower: inherited=%s required=%s\n' "$inherited" "$capture_file_blocks" >&2
@@ -1430,10 +1474,11 @@ checkout=$(pwd -P 2>/dev/null || pwd)
 while IFS= read -r path; do
   printf '%s\0' "$path"
 done < "$files.sorted" > "$archive_list"
-metadata=(.crabbox/capture-manifest.txt)
-if [ -f "$gateway_tail" ]; then metadata+=(.crabbox/gateway-log-tail.txt); fi
+set -- .crabbox/capture-manifest.txt
+if [ -f "$gateway_tail" ]; then set -- "$@" .crabbox/gateway-log-tail.txt; fi
 capture_require_space scratch "$scratch"
 capture_require_space output "$out_dir"
+capture_prepare_file_limit
 raw_archive="$scratch/capture.tar"
 (
   capture_apply_file_limit
@@ -1441,7 +1486,7 @@ raw_archive="$scratch/capture.tar"
 )
 (
   capture_apply_file_limit
-  COPYFILE_DISABLE=1 tar -rf "$raw_archive" -C "$scratch" "${metadata[@]}" 2>/dev/null
+  COPYFILE_DISABLE=1 tar -rf "$raw_archive" -C "$scratch" "$@" 2>/dev/null
 )
 (
   capture_apply_file_limit
@@ -1449,12 +1494,12 @@ raw_archive="$scratch/capture.tar"
 ) > "$out"
 printf '%s\n' "$out"
 `)
-	return "bash -lc " + shellQuote(script.String())
+	return script.String()
 }
 
 func remoteRemoveFailureCaptureCommand(workdir, remotePath string) string {
 	script := "set -eu\ncd " + shellQuote(workdir) + "\nrm -f -- " + shellQuote(remotePath)
-	return "bash -lc " + shellQuote(script)
+	return remotePortableShellInvocation(script, nil)
 }
 
 const (

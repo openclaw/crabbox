@@ -84,7 +84,7 @@ func remoteGitLocalSeedFingerprint(workdir string, plan gitLocalSeedPlan) string
 
 func remoteGitLocalSeedCommand(workdir string, plan gitLocalSeedPlan, action string) string {
 	if !plan.valid() {
-		return remotePlainManifestShellCommand("echo 'local Git seed: invalid receiver plan' >&2; exit 67")
+		return remoteHermeticPOSIXControlCommand("echo 'local Git seed: invalid receiver plan' >&2; exit 67")
 	}
 	script := `set -eu
 umask 077
@@ -171,7 +171,9 @@ verify_metadata() {
   config_keys="$(plain_git config --file "$metadata/config" --no-includes --name-only --list 2>/dev/null)" || return 1
   while IFS= read -r key; do
     case "$key" in core.repositoryformatversion|core.filemode|core.bare|core.logallrefupdates|core.ignorecase|core.precomposeunicode|core.symlinks|extensions.objectformat) ;; *) return 1 ;; esac
-  done <<< "$config_keys"
+  done <<EOF
+$config_keys
+EOF
   plain_git --git-dir="$metadata" fsck --full --strict --no-reflogs >/dev/null 2>&1 || return 1
 }
 `
@@ -208,7 +210,9 @@ while IFS=' ' read -r oid ref; do
   plain_git check-ref-format "$ref" >/dev/null 2>&1 || fail
   if [ "$ref" = "$transport_head_ref" ]; then continue; fi
   plain_git --git-dir="$fresh" update-ref "$ref" "$oid" >/dev/null 2>&1 || fail
-done <<< "$bundle_refs"
+done <<EOF
+$bundle_refs
+EOF
 plain_git --git-dir="$fresh" update-ref --no-deref HEAD "$expected_head" >/dev/null 2>&1 || fail
 plain_git --git-dir="$fresh" read-tree "$expected_head" >/dev/null 2>&1 || fail
 printf 'crabbox-local-seed-v1' > "$fresh/crabbox-local-owner"
@@ -275,7 +279,7 @@ printf '%s' "$expected_fingerprint"
 `
 		}
 	}
-	return remotePlainManifestShellCommand(script)
+	return remoteHermeticPOSIXControlCommand(script)
 }
 
 func windowsGitLocalSeed(workdir string, plan gitLocalSeedPlan) string {

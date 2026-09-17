@@ -131,6 +131,27 @@ archives and the raw VMD, plus the actual Go, GoReleaser, Swift, Xcode, macOS,
 and architecture facts. Treat the printed SHA-256 as a separate handoff value;
 do not re-read or infer it from a replaceable candidate directory.
 
+Tagged sources containing `cmd/crabbox-runtime/main.go` also build static Linux
+amd64 and arm64 companions once, credential-free, with the pinned Go toolchain
+and baseline CPU settings (`GOAMD64=v1`, `GOARM64=v8.0`). Both companions appear
+in every unsigned platform archive under `crabbox-runtime/`; they are not extra
+public assets. The candidate manifest uses schema 2 and records this source
+capability. Tags without that command retain schema 1 and their legacy member
+inventory. The packager and verifier independently check the frozen tag's
+capability, so a runtime-enabled source cannot select the legacy layout.
+Historical final provenance verifies its producer configuration against the
+`.goreleaser.yaml` blob at the originally pinned verifier commit, not the newer
+tooling checkout. New candidate production still requires the current protected
+configuration. Missing historical Git objects fail verification; this lookup
+does not lazily fetch them or consult replacement objects.
+
+The protected `scripts/runtime-artifacts` tool stages exact archive inventories
+without executing candidate files. The packager generates each final runtime
+manifest only after its controller bytes, including macOS signatures, are final.
+That manifest binds the controller hash and both runtime files. The companions
+remain unchanged through signing. Source provenance comes from the frozen
+producer and independent Go build-info checks, not from this local manifest.
+
 Pass that exact digest as the required fourth argument to the local signing
 wrapper. The packager stages the complete candidate into a private directory,
 recomputes every manifest-bound fact before it touches the signing key, and
@@ -189,12 +210,12 @@ For version `X.Y.Z`, the uploaded GitHub asset set is exactly these eight files:
 
 | Asset | Exact archive members or purpose |
 | --- | --- |
-| `crabbox_X.Y.Z_darwin_amd64.tar.gz` | `crabbox` |
-| `crabbox_X.Y.Z_darwin_arm64.tar.gz` | `crabbox`, `crabbox-apple-vm-helper` |
-| `crabbox_X.Y.Z_linux_amd64.tar.gz` | `crabbox` |
-| `crabbox_X.Y.Z_linux_arm64.tar.gz` | `crabbox` |
-| `crabbox_X.Y.Z_windows_amd64.zip` | `crabbox.exe` |
-| `crabbox_X.Y.Z_windows_arm64.zip` | `crabbox.exe` |
+| `crabbox_X.Y.Z_darwin_amd64.tar.gz` | `crabbox`, runtime pack files below |
+| `crabbox_X.Y.Z_darwin_arm64.tar.gz` | `crabbox`, `crabbox-apple-vm-helper`, runtime pack files below |
+| `crabbox_X.Y.Z_linux_amd64.tar.gz` | `crabbox`, runtime pack files below |
+| `crabbox_X.Y.Z_linux_arm64.tar.gz` | `crabbox`, runtime pack files below |
+| `crabbox_X.Y.Z_windows_amd64.zip` | `crabbox.exe`, runtime pack files below |
+| `crabbox_X.Y.Z_windows_arm64.zip` | `crabbox.exe`, runtime pack files below |
 | `checksums.txt` | Canonical SHA-256 records for the six platform archives and `provenance.json` |
 | `provenance.json` | Schema-pinned source, toolchain, signing, notarization, archive, and checksum provenance |
 
@@ -202,6 +223,22 @@ GitHub's generated source links are not uploaded assets and do not change the
 count. Reject missing, duplicate, renamed, zero-byte, or extra uploaded assets.
 Archive member names and counts are exact; no implicit documentation files or
 unlisted executables are allowed.
+
+For schema-2 releases, the runtime pack files are exactly
+`crabbox-runtime/manifest.json`, `crabbox-runtime/linux-amd64`, and
+`crabbox-runtime/linux-arm64`. Every archive includes both execution-target
+architectures, irrespective of the controller's host. Final archives contain
+explicit file entries, without directory entries. Schema-1 releases omit these
+three files and preserve their original inventories.
+
+Schema-2 provenance records each pack's controller binding, manifest identity,
+and both runtime identities separately from macOS notarization records. Protected
+extraction reports are regenerated from the archives before provenance checks.
+Homebrew must install the entire pack beside the real controller in its keg;
+verification compares all three installed files with the frozen archive and
+checks the public command symlink. The existing Go installation channel remains
+CLI-only: it does not install companion assets. Never copy a release pack beside
+an independently compiled controller; their hashes intentionally differ.
 
 `provenance.json` binds the repository, version, signed tag-object ID, peeled
 source commit, protected verifier commit, exact candidate-manifest digest and

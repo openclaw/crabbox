@@ -104,6 +104,8 @@ function writeExecutable(file, contents) {
 
 function runMockedHomebrewPhase({
   useLauncher = false,
+  runtimePack = false,
+  installedRuntimePackMissing = false,
   nativeArch = "arm64",
   alreadyInstalled = false,
   installedArch,
@@ -164,13 +166,21 @@ function runMockedHomebrewPhase({
     )}\n`,
   );
 
+  if (runtimePack) {
+    fs.mkdirSync(path.join(payload, "crabbox-runtime"));
+    for (const member of ["manifest.json", "linux-amd64", "linux-arm64"]) {
+      fs.writeFileSync(path.join(payload, "crabbox-runtime", member), `synthetic ${member}`);
+    }
+  }
+  const runtimeMembers = runtimePack
+    ? ["crabbox-runtime/manifest.json", "crabbox-runtime/linux-amd64", "crabbox-runtime/linux-arm64"] : [];
   const archivePaths = {
     darwinAmd64: path.join(assets, "crabbox_1.2.3_darwin_amd64.tar.gz"),
     darwinArm64: path.join(assets, "crabbox_1.2.3_darwin_arm64.tar.gz"),
     linuxAmd64: path.join(assets, "crabbox_1.2.3_linux_amd64.tar.gz"),
     linuxArm64: path.join(assets, "crabbox_1.2.3_linux_arm64.tar.gz"),
   };
-  execFileSync("tar", ["-czf", archivePaths.darwinAmd64, "-C", payload, "crabbox"]);
+  execFileSync("tar", ["-czf", archivePaths.darwinAmd64, "-C", payload, "crabbox", ...runtimeMembers]);
   execFileSync("tar", [
     "-czf",
     archivePaths.darwinArm64,
@@ -178,6 +188,7 @@ function runMockedHomebrewPhase({
     payload,
     "crabbox",
     "crabbox-apple-vm-helper",
+    ...runtimeMembers,
   ]);
   fs.writeFileSync(archivePaths.linuxAmd64, "mock linux amd64 archive\n");
   fs.writeFileSync(archivePaths.linuxArm64, "mock linux arm64 archive\n");
@@ -192,6 +203,7 @@ function runMockedHomebrewPhase({
   fs.writeFileSync(
     path.join(assets, "provenance.json"),
     JSON.stringify({
+      schemaVersion: runtimePack ? 2 : 1,
       payloads: [
         {
           binaries: [
@@ -306,8 +318,14 @@ case "\${1:-}" in
     /bin/cp ${shellQuote(cli)} ${shellQuote(installedCli)}
     ${(nativeArch === "arm64" && !helperMissing) || helperOnIntel ? `/bin/cp ${shellQuote(helper)} ${shellQuote(installedHelper)}` : ""}
     ${helperByteMismatch ? `printf '# changed\\n' >>${shellQuote(installedHelper)}` : ""}
+    ${runtimePack && !installedRuntimePackMissing ? `/bin/cp -R ${shellQuote(path.join(payload, "crabbox-runtime"))} ${shellQuote(path.join(prefix, "bin"))}` : ""}
+    ${runtimePack ? `/bin/ln -sf ${shellQuote(installedCli)} ${shellQuote(path.join(mockBin, "crabbox"))}` : ""}
     ${corruptInstall};;
   --prefix)
+    if [ "$#" = 1 ]; then
+      printf '%s\\n' ${shellQuote(root)}
+      exit 0
+    fi
     [ "$*" = "--prefix openclaw/tap/crabbox" ] || exit 82
     printf '%s\\n' ${shellQuote(prefix)}
     ;;
@@ -443,7 +461,7 @@ test("Homebrew verifier checks immutable bytes before credential-free native ins
   assert.ok(phase.indexOf("verify_homebrew_formula") < phase.indexOf('"$brew_bin" fetch'));
   assert.ok(phase.indexOf('"$brew_bin" fetch --force --formula') < phase.indexOf('"$brew_bin" install'));
   assert.ok(phase.indexOf("verify-macos-binary.sh") < phase.indexOf('"$brew_bin" test'));
-  assert.ok(phase.indexOf('"$brew_bin" test') < phase.indexOf('"$installed_cli" --version'));
+  assert.ok(phase.indexOf('"$brew_bin" test') < phase.indexOf('"$version_cli" --version'));
 });
 
 test("Homebrew verifier cleanup survives main function scope", () => {
@@ -989,4 +1007,68 @@ test("internal Homebrew phase refuses an unsanitized direct call", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("installed runtime pack follows the Homebrew CLI symlink and preserves frozen bytes", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-homebrew-runtime-"));
+  const extracted = path.join(root, "extracted");
+  const cellar = path.join(root, "Cellar", "crabbox", "1.2.3", "bin");
+  const linkedCLI = path.join(root, "opt", "homebrew", "bin", "crabbox");
+  const installedCLI = path.join(cellar, "crabbox");
+  const pack = path.join(cellar, "crabbox-runtime");
+  fs.mkdirSync(path.dirname(linkedCLI), { recursive: true });
+  fs.mkdirSync(pack, { recursive: true });
+  fs.mkdirSync(path.join(extracted, "crabbox-runtime"), { recursive: true });
+  fs.writeFileSync(installedCLI, "synthetic controller");
+  fs.symlinkSync(installedCLI, linkedCLI);
+  for (const member of ["manifest.json", "linux-amd64", "linux-arm64"]) {
+    fs.writeFileSync(path.join(pack, member), `synthetic ${member}`);
+    fs.copyFileSync(path.join(pack, member), path.join(extracted, "crabbox-runtime", member));
+  }
+  const verify = () => spawnSync("/bin/bash", [
+    "-s", "--", verifier, process.execPath, extracted, installedCLI, linkedCLI,
+  ], {
+    encoding: "utf8",
+    input: 'source "$1"\nverify_homebrew_runtime_pack "$2" "$3" "$4" "$5"\n',
+  });
+  try {
+    assert.equal(verify().status, 0);
+    const runtime = path.join(pack, "linux-arm64");
+    fs.writeFileSync(runtime, "wrong runtime bytes");
+    assert.match(verify().stderr, /differs from the frozen release archive/);
+    fs.unlinkSync(runtime);
+    assert.match(verify().stderr, /member inventory is not exact/);
+    fs.symlinkSync(path.join(extracted, "crabbox-runtime", "linux-arm64"), runtime);
+    assert.match(verify().stderr, /differs from the frozen release archive/);
+    fs.unlinkSync(runtime);
+    fs.copyFileSync(path.join(extracted, "crabbox-runtime", "linux-arm64"), runtime);
+    fs.writeFileSync(path.join(pack, "extra"), "unexpected");
+    assert.match(verify().stderr, /member inventory is not exact/);
+    fs.unlinkSync(path.join(pack, "extra"));
+    fs.renameSync(pack, `${pack}-elsewhere`);
+    fs.symlinkSync(`${pack}-elsewhere`, pack);
+    assert.match(verify().stderr, /not a real directory/);
+    fs.unlinkSync(pack);
+    fs.renameSync(`${pack}-elsewhere`, pack);
+    fs.unlinkSync(linkedCLI);
+    fs.writeFileSync(linkedCLI, "other controller");
+    assert.match(verify().stderr, /does not resolve to the verified controller/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const nativeArch of ["arm64", "x86_64"]) {
+  test(`schema 2 Homebrew install verifies offline pack and linked CLI on ${nativeArch}`, () => {
+    const result = runMockedHomebrewPhase({ runtimePack: true, nativeArch });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.calls, /brew:--prefix\n/);
+    assert.match(result.stdout, /Verified Homebrew/);
+  });
+}
+
+test("schema 2 Homebrew phase rejects formulae that omit the offline pack", () => {
+  const result = runMockedHomebrewPhase({ runtimePack: true, installedRuntimePackMissing: true });
+  assert.notEqual(result.status, 0);
+  assert.doesNotMatch(result.calls, /brew:test/);
 });

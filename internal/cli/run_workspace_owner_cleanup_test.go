@@ -287,8 +287,11 @@ func TestRunCommandLeaseCleanupQuiescesWorkspaceOwner(t *testing.T) {
 		releaseReply          string
 		releaseErr            error
 		cancelParent          bool
+		nativeRuntime         bool
 	}{
 		{name: "successful evidence-backed run", command: "renewal-cleanup-success", download: true, wantStop: true},
+		{name: "native runtime terminal handoff", command: "renewal-cleanup-success", wantStop: true, nativeRuntime: true},
+		{name: "native runtime retained workspace cleanup", command: "renewal-cleanup-success", preservesSSHWorkspace: true, wantStop: true, wantOwnerRelease: true, nativeRuntime: true},
 		{name: "renewal fails before stop", command: "renewal-cleanup-success", renewErr: errors.New("renew response lost"), wantExit: 7, wantOwnerRelease: true},
 		{name: "stop is not confirmed", command: "renewal-cleanup-success", stopErr: errors.New("stop not confirmed"), wantExit: 7, wantStop: true, wantOwnerRelease: true},
 		{name: "nonzero with ambiguous owner", command: "renewal-cleanup-exit-23", renewErr: errors.New("renew response lost"), wantExit: 23, wantOwnerRelease: true},
@@ -315,6 +318,7 @@ func TestRunCommandLeaseCleanupQuiescesWorkspaceOwner(t *testing.T) {
 			releaseStarted := make(chan struct{})
 			var releaseOnce sync.Once
 			var releaseOvertookRenewal atomic.Bool
+			var runtimeRemovals atomic.Int32
 			runEnvProfileTestReleaseHook = func() error {
 				defer remote.backendReturned.Store(true)
 				remote.destroyed.Store(!test.preservesSSHWorkspace)
@@ -349,6 +353,27 @@ func TestRunCommandLeaseCleanupQuiescesWorkspaceOwner(t *testing.T) {
 				Stdout: &stdout,
 				Stderr: &stderr,
 				workspaceOwnerAcquirer: func(ctx context.Context, target SSHTarget, leaseID string, stderr io.Writer) (*workspaceOwner, error) {
+					if test.nativeRuntime {
+						scope, ok := ctx.Value(nativeRuntimeScopeKey{}).(*nativeRuntimeScope)
+						if !ok || nativeRuntimeLease(ctx) != leaseID {
+							return nil, errors.New("workspace owner did not inherit runtime scope and lease")
+						}
+						fake := testNativeRuntimeScope()
+						scope.loadOnce.Do(func() {})
+						scope.install = fake.install
+						scope.remove = func(context.Context, *remoteNativeRuntime) error {
+							runtimeRemovals.Add(1)
+							select {
+							case <-remote.ownerReleased:
+								return nil
+							default:
+								return errors.New("runtime removal preceded workspace owner close")
+							}
+						}
+						if _, err := scope.ensure(ctx, target); err != nil {
+							return nil, err
+						}
+					}
 					owner, err := remote.acquire(ctx, target, leaseID, stderr)
 					if err == nil {
 						ownerReady <- owner
@@ -391,6 +416,9 @@ func TestRunCommandLeaseCleanupQuiescesWorkspaceOwner(t *testing.T) {
 			remote.unblockRenewal()
 
 			runErr := result.wait(t)
+			if test.nativeRuntime && (runtimeRemovals.Load() == 1) != test.preservesSSHWorkspace {
+				t.Fatalf("runtime removals=%d preserves=%t", runtimeRemovals.Load(), test.preservesSSHWorkspace)
+			}
 			if releaseOvertookRenewal.Load() {
 				t.Fatal("backend release observed renewal still in flight")
 			}

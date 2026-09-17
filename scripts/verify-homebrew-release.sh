@@ -10,6 +10,12 @@ SCRIPT_PATH="$ROOT/scripts/verify-homebrew-release.sh"
 PROTECTED_HOMEBREW_TOOLING=(
   .github/release-allowed-signers
   .goreleaser.yaml
+  go.mod
+  go.sum
+  internal/remoteruntime
+  internal/runtimeartifact
+  scripts/build-release-runtime-tool.sh
+  scripts/runtime-artifacts
   scripts/extract-release-notes.sh
   scripts/extract-release-vmd.mjs
   scripts/release-config.sh
@@ -244,6 +250,36 @@ if (
 NODE
 }
 
+# Upstream static verification authenticates the pack and controller binding;
+# this checks that Homebrew preserved those exact bytes beside the real CLI.
+verify_homebrew_runtime_pack() {
+  local node_bin=$1 extracted=$2 installed_cli=$3 linked_cli=$4
+  "$node_bin" - "$extracted" "$installed_cli" "$linked_cli" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const [extracted, installedCLI, linkedCLI] = process.argv.slice(2);
+const controller = fs.realpathSync(installedCLI);
+if (fs.realpathSync(linkedCLI) !== controller) {
+  throw new Error("Homebrew-linked Crabbox CLI does not resolve to the verified controller");
+}
+const directory = path.join(path.dirname(controller), "crabbox-runtime");
+if (!fs.lstatSync(directory).isDirectory()) {
+  throw new Error("Homebrew runtime pack is not a real directory beside the controller");
+}
+const members = ["linux-amd64", "linux-arm64", "manifest.json"];
+if (JSON.stringify(fs.readdirSync(directory).sort()) !== JSON.stringify(members)) {
+  throw new Error("Homebrew runtime pack member inventory is not exact");
+}
+for (const member of members) {
+  const file = path.join(directory, member);
+  if (!fs.lstatSync(file).isFile() ||
+      !fs.readFileSync(file).equals(fs.readFileSync(path.join(extracted, "crabbox-runtime", member)))) {
+    throw new Error(`Homebrew runtime pack differs from the frozen release archive: ${member}`);
+  }
+}
+NODE
+}
+
 homebrew_phase() {
   [[ $# -eq 9 ]] || usage
   local tag=$1 asset_dir=$2 tag_object=$3 source_commit=$4 verifier_commit=$5
@@ -334,8 +370,17 @@ homebrew_phase() {
   }
   local extracted="$work/extracted"
   mkdir -m 700 "$extracted"
+  local runtime_pack
+  runtime_pack=$("$node_bin" -e '
+    const p = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
+    process.stdout.write(p.schemaVersion === 2 ? "1" : "0");
+  ' "$asset_dir/provenance.json")
   local expected_members=crabbox
   [[ "$native_arch" == arm64 ]] && expected_members=$'crabbox\ncrabbox-apple-vm-helper'
+  if [[ "$runtime_pack" == 1 ]]; then
+    expected_members=$(printf '%s\n' "$expected_members" \
+      crabbox-runtime/manifest.json crabbox-runtime/linux-amd64 crabbox-runtime/linux-arm64 | LC_ALL=C sort)
+  fi
   [[ "$(tar -tzf "$native_archive" | LC_ALL=C sort)" == "$expected_members" ]] || {
     echo "native release archive member inventory changed" >&2
     return 1
@@ -373,6 +418,18 @@ homebrew_phase() {
     return 1
   fi
 
+  local version_cli="$installed_cli"
+  if [[ "$runtime_pack" == 1 ]]; then
+    local brew_prefix
+    brew_prefix=$("$brew_bin" --prefix)
+    [[ "$brew_prefix" == /* && "$brew_prefix" != *$'\n'* && -d "$brew_prefix" ]] || {
+      echo "Homebrew returned an invalid global prefix" >&2
+      return 1
+    }
+    version_cli="$brew_prefix/bin/crabbox"
+    verify_homebrew_runtime_pack "$node_bin" "$extracted" "$installed_cli" "$version_cli"
+  fi
+
   assert_no_downstream_credentials
   "$brew_bin" test "$FORMULA"
 
@@ -405,7 +462,7 @@ homebrew_phase() {
       return 1
     }
   fi
-  actual_version=$(HOME="$candidate_home" "$installed_cli" --version)
+  actual_version=$(HOME="$candidate_home" "$version_cli" --version)
   [[ "$actual_version" == "$version" ]] || {
     echo "Homebrew-installed Crabbox version mismatch: $actual_version" >&2
     return 1

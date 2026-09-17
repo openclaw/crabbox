@@ -59,7 +59,9 @@ archives:
         formats:
           - zip
     files:
-      - none*
+      - src: artifacts/release-runtime/linux-*
+        dst: crabbox-runtime
+        strip_parent: true
 
 checksum:
   name_template: checksums.txt

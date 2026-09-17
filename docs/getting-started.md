@@ -37,9 +37,13 @@ provider through config, `CRABBOX_PROVIDER`, or `--provider` before a lifecycle
 command. That selection is strict and can fail until its credentials are
 configured; run `crabbox providers recommend` to compare options.
 
-If you do not use Homebrew, GitHub Releases ship signed archives for macOS,
-Linux, and Windows. Download the matching archive from
+If you do not use Homebrew, GitHub Releases ship platform archives for macOS,
+Linux, and Windows, with signed and notarized macOS executables. Download the matching archive from
 <https://github.com/openclaw/crabbox/releases>.
+
+Keep any included `crabbox-runtime` directory beside the real CLI executable.
+Both Linux runtime architectures belong to the matched controller; copying only
+the CLI or mixing releases does not preserve the complete runtime pack.
 
 Go users can install only the CLI from an explicit release version. This
 channel is supported starting with v0.44.0; do not use `@latest` while older,
@@ -52,7 +56,7 @@ go install github.com/openclaw/crabbox/cmd/crabbox@v0.44.0
 The module requires Go 1.26 and declares go1.26.5 as its preferred toolchain;
 use Go 1.26.5 or newer, or leave automatic toolchain selection enabled. This
 command compiles the Go CLI locally. It does not install release companion
-executables or assets, especially `crabbox-apple-vm-helper`, and it is not the
+executables or assets, including `crabbox-apple-vm-helper` and the runtime pack, and it is not the
 signed/notarized prebuilt distribution. Use Homebrew or a release archive for
 the complete platform distribution, notably Apple VM support on Apple Silicon.
 

@@ -117,6 +117,22 @@ func TestApplyFlagsExplicitHostBypassesConfiguredFleet(t *testing.T) {
 	}
 }
 
+func TestResolveReportsDiscoveredIP(t *testing.T) {
+	seedParallelsCleanupState(t)
+	runner := &parallelsCleanupRunner{
+		vmJSON:     `[{"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"running"}]`,
+		nextVMJSON: `[{"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"running","ip_configured":"192.0.2.10"}]`,
+	}
+	backend := &leaseBackend{DirectSSHBackend: sharedBackend(testParallelsCleanupConfig(), runner)}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "blue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.Host != "192.0.2.10" || lease.Server.PublicNet.IPv4.IP != "192.0.2.10" {
+		t.Fatalf("discovered SSH host=%q server IP=%q, want 192.0.2.10", lease.SSH.Host, lease.Server.PublicNet.IPv4.IP)
+	}
+}
+
 func TestResolvePreservesVMWhenIPDiscoveryFails(t *testing.T) {
 	for _, mode := range []struct {
 		name      string
@@ -509,6 +525,7 @@ func (r *parallelsFleetRunner) Run(_ context.Context, req core.LocalCommandReque
 }
 
 type parallelsCleanupRunner struct {
+	nextVMJSON  string
 	vmJSON      string
 	execVMIDs   []string
 	deleteCalls int
@@ -527,7 +544,11 @@ func (r *parallelsCleanupRunner) Run(_ context.Context, req core.LocalCommandReq
 		return core.LocalCommandResult{}, nil
 	case "list":
 		if r.vmJSON != "" {
-			return core.LocalCommandResult{Stdout: r.vmJSON}, nil
+			vmJSON := r.vmJSON
+			if r.nextVMJSON != "" {
+				r.vmJSON, r.nextVMJSON = r.nextVMJSON, ""
+			}
+			return core.LocalCommandResult{Stdout: vmJSON}, nil
 		}
 		return core.LocalCommandResult{Stdout: `[{"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"stopped","ip_configured":"10.0.0.5"}]`}, nil
 	case "delete":

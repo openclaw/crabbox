@@ -15,7 +15,10 @@ identity() {
         printf '%s %s\n' "$3" "${20}"
         return
     fi
-    read -r pgid state weekday month day clock year extra < <(LC_ALL=C ps -o pgid= -o state= -o lstart= -p "$1" 2>/dev/null) || return 1
+    raw=$(LC_ALL=C ps -o pgid= -o state= -o lstart= -p "$1" 2>/dev/null) || return 1
+    read -r pgid state weekday month day clock year extra <<EOF || return 1
+$raw
+EOF
     case $state in Z*|X*) return 1;; esac
     [ -z "${extra:-}" ] || return 1
     case $month in
@@ -34,10 +37,10 @@ identity() {
 @FUNCTIONAL_PRELUDE@
 case $mode in
 run)
-    # Bash monitor mode supplies the portable group boundary. The supervisor
+    # The selected runtime supplies the group boundary. The supervisor
     # remains the direct parent/reaper of the separately guarded worker group.
     set -m
-    bash -c "$CBX_HELPER" sh supervise "$directory" "$nonce" "$command_size" 0 "$idle_ms" "$grace_ms" "$caller_mask" <&0 &
+    @CONTROL_SHELL@ -c "$CBX_HELPER" sh supervise "$directory" "$nonce" "$command_size" 0 "$idle_ms" "$grace_ms" "$caller_mask" <&0 &
     supervisor=$!
     supervisor_group=$(jobs -p %%)
     set +m
@@ -108,7 +111,7 @@ if [ "$failed" = 1 ]; then remove_evidence || :; exit 74; fi
 : >"$directory/input"
 mkfifo -m 600 "$directory/scratch/control" || exit 74
 exec 8<>"$directory/scratch/control"
-bash -c "$CBX_HELPER" sh watch "$directory" "$nonce" 0 0 0 0 "$caller_mask" </dev/null &
+@CONTROL_SHELL@ -c "$CBX_HELPER" sh watch "$directory" "$nonce" 0 0 0 0 "$caller_mask" </dev/null &
 watcher=$!
 exec 8>&-
 @GUARDED_WORKLOAD@

@@ -60,6 +60,13 @@ Unknown names still fail with exit 2 before lease acquisition. Their diagnostic
 points to `crabbox preflight-tools`, and `crabbox run --help` includes the same
 discovery hint. Arbitrary executable names are not accepted.
 
+`bash` is an opt-in literal `bash --version` probe for `linux`, `macos` and
+`windows/wsl2`; native Windows skips it. It does not change default membership.
+Use `--preflight --preflight-tools bash` to select it alone or
+`--preflight --preflight-tools default,bash` to append it. A bounded first output
+line or `bash=missing` is diagnostic only; see [run preflight](run.md#preflight)
+for the companion runtime and Bash-dependent workload requirements.
+
 ## Functional Python environment probe
 
 `python3-venv` is opt-in for `linux`, `macos` and `windows/wsl2`, not native

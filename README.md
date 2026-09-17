@@ -60,6 +60,11 @@ For **macOS, Linux, and Windows**, you can also download a
 [release archive](https://github.com/openclaw/crabbox/releases/latest).
 Windows users should follow the [Windows installation guide](docs/windows-install.md).
 
+When a release includes a `crabbox-runtime` directory, keep it beside the real
+CLI executable. The matched pack contains both Linux execution architectures
+for remote Linux and WSL2 work; copying only the CLI omits those capabilities.
+Do not mix a runtime pack with a differently built controller.
+
 Local prerequisites for the SSH workflow: `git`, `ssh`, `ssh-keygen`,
 `rsync`, and `curl`. The local quick start also needs a running Docker or
 Podman engine.
@@ -77,8 +82,8 @@ The module requires Go 1.26 and prefers go1.26.5; use Go 1.26.5 or newer, or
 leave automatic toolchain selection enabled.
 
 `go install` compiles only the CLI. It omits companion executables and assets,
-including `crabbox-apple-vm-helper`, and is not the signed/notarized prebuilt
-distribution. Use Homebrew or a release archive for complete platform capabilities,
+including `crabbox-apple-vm-helper` and the native runtime pack, and is not the
+signed/notarized prebuilt distribution. Use Homebrew or a release archive for complete platform capabilities,
 especially Apple VM support on Apple Silicon.
 
 </details>

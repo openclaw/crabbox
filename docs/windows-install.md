@@ -50,6 +50,12 @@ arm64, queries the latest stable
 downloads the matching archive and `checksums.txt`, verifies SHA-256 before
 extraction, and adds the install directory to your user `PATH`.
 
+Extract the complete archive. If it includes `crabbox-runtime`, keep that
+directory beside `crabbox.exe`; its manifest matches the exact controller and
+contains both Linux runtime architectures for remote execution. Moving only
+`crabbox.exe` or mixing files from different releases omits or invalidates the
+pack. The installer below preserves the directory structure.
+
 ```powershell
 $ErrorActionPreference = "Stop"
 $minimumVersion = [version]"0.42.1"

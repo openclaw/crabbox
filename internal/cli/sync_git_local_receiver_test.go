@@ -100,9 +100,7 @@ func runLocalReceiver(t *testing.T, command string, input []byte) ([]byte, error
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX receiver execution; native Windows has a separate platform gate")
 	}
-	cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", command)
-	cmd.Stdin = bytes.NewReader(input)
-	return cmd.CombinedOutput()
+	return runPortableGitControlCommand(t, command, input)
 }
 
 func requireLocalReceiver(t *testing.T, command string, input []byte) []byte {
