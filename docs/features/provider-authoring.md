@@ -464,6 +464,14 @@ Cleanup must honor `CleanupRequest.DryRun`, log every skip/delete decision to
 machines. When a broker is configured, core refuses to call provider cleanup at
 all — brokered cleanup belongs to the coordinator scheduler.
 
+Adapters with explicit cleanup decisions can use `shared.DirectCleanupDecision`
+to apply a server deletion, recovery continuation, or confirmed-missing claim
+retirement behind one dry-run boundary. Discover and validate candidates before
+applying the decision; put mutating provider preparation, recovery writes, and
+key removal inside its mutation callback. Missing-resource policy and recovery
+eligibility remain adapter-owned. Azure and GCP use this boundary without
+changing the ordinary `DirectSSHBackend.CleanupServers` contract.
+
 For claim-authorized providers built on `shared.DirectSSHBackend`, use its
 opt-in `PrepareCleanup` hook after the shared expiration/keep gate. Preparation
 may read the account, live resource, and exact local claim even during dry-run,
