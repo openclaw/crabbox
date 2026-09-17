@@ -7031,12 +7031,6 @@ func serverTypeForConfig(cfg Config) string {
 			return typer.ServerTypeForConfig(cfg)
 		}
 	}
-	if isBlacksmithProvider(cfg.Provider) || isStaticProvider(cfg.Provider) || cfg.Provider == "islo" || cfg.Provider == "sprites" || cfg.Provider == "local-container" || cfg.Provider == "multipass" {
-		return ""
-	}
-	if cfg.Provider == "proxmox" {
-		return proxmoxServerTypeForConfig(cfg)
-	}
 	if cfg.Provider == "firecracker" {
 		return firecrackerServerTypeForConfig(cfg)
 	}
@@ -7062,13 +7056,6 @@ func incusServerTypeForConfig(cfg Config) string {
 		return instanceType + ":" + image
 	}
 	return instanceType
-}
-
-func proxmoxServerTypeForConfig(cfg Config) string {
-	if cfg.Proxmox.TemplateID > 0 {
-		return "template-" + strconv.Itoa(cfg.Proxmox.TemplateID)
-	}
-	return "template"
 }
 
 func firecrackerServerTypeForConfig(_ Config) string {
@@ -7511,10 +7498,6 @@ func ApplyLeaseDuration(target *time.Duration, value string) error {
 
 func ServerTypeForProviderClass(provider, class string) string {
 	return serverTypeForProviderClass(provider, class)
-}
-
-func ProxmoxServerTypeForConfig(cfg Config) string {
-	return proxmoxServerTypeForConfig(cfg)
 }
 
 func IncusServerTypeForConfig(cfg Config) string {

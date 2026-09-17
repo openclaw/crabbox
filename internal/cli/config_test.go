@@ -13067,12 +13067,6 @@ func TestConfigServerTypeHelperBranches(t *testing.T) {
 	if got := incusServerTypeForConfig(Config{Incus: IncusConfig{InstanceType: "vm", Image: "images:ubuntu/24.04/cloud"}}); got != "vm:images:ubuntu/24.04/cloud" {
 		t.Fatalf("incus vm=%q", got)
 	}
-	if got := proxmoxServerTypeForConfig(Config{}); got != "template" {
-		t.Fatalf("proxmox default=%q", got)
-	}
-	if got := proxmoxServerTypeForConfig(Config{Proxmox: ProxmoxConfig{TemplateID: 9000}}); got != "template-9000" {
-		t.Fatalf("proxmox template=%q", got)
-	}
 	if got := firecrackerServerTypeForConfig(Config{}); got != "microvm" {
 		t.Fatalf("firecracker default=%q", got)
 	}

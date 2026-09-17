@@ -6682,7 +6682,6 @@ func TestServerTypeForProviderClassDirectProviders(t *testing.T) {
 		{provider: "islo", class: "beast", want: ""},
 		{provider: "namespace", class: "standard", want: "S"},
 		{provider: "namespace-devbox", class: " custom-xl ", want: "CUSTOM-XL"},
-		{provider: "proxmox", class: "beast", want: "template"},
 		{provider: "sprites", class: "beast", want: ""},
 		{provider: "cloudflare", class: "standard", want: "standard-4"},
 		{provider: "cf", class: "beast", want: "standard-4"},

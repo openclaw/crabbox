@@ -2,6 +2,7 @@ package proxmox
 
 import (
 	"flag"
+	"strconv"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -11,6 +12,13 @@ func init() {
 }
 
 type Provider struct{}
+
+func (Provider) ServerTypeForConfig(cfg core.Config) string {
+	if cfg.Proxmox.TemplateID > 0 {
+		return "template-" + strconv.Itoa(cfg.Proxmox.TemplateID)
+	}
+	return "template"
+}
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
@@ -69,7 +77,7 @@ func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 	if core.FlagWasSet(fs, "proxmox-template-id") {
 		cfg.Proxmox.TemplateID = *v.TemplateID
 		core.RecordProviderFlagInputs(cfg, true, "proxmox")
-		cfg.ServerType = core.ProxmoxServerTypeForConfig(*cfg)
+		cfg.ServerType = (Provider{}).ServerTypeForConfig(*cfg)
 	}
 	if core.FlagWasSet(fs, "proxmox-storage") {
 		cfg.Proxmox.Storage = *v.Storage
