@@ -7403,6 +7403,10 @@ func TestCMakePreflightUserAndRepositoryConfig(t *testing.T) {
 	testPreflightToolUserAndRepositoryConfig(t, "cmake")
 }
 
+func TestBashPreflightUserAndRepositoryConfig(t *testing.T) {
+	testPreflightToolUserAndRepositoryConfig(t, "bash")
+}
+
 func TestPythonVenvPreflightUserAndRepositoryConfig(t *testing.T) {
 	testPreflightToolUserAndRepositoryConfig(t, "python3-venv")
 }
