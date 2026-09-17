@@ -4,6 +4,7 @@ package cli_test
 import (
 	_ "github.com/openclaw/crabbox/internal/providers/cloudflare"
 	_ "github.com/openclaw/crabbox/internal/providers/digitalocean"
+	_ "github.com/openclaw/crabbox/internal/providers/exedev"
 	_ "github.com/openclaw/crabbox/internal/providers/hostinger"
 	_ "github.com/openclaw/crabbox/internal/providers/lambda"
 	_ "github.com/openclaw/crabbox/internal/providers/linode"

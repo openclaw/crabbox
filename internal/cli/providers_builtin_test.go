@@ -24,7 +24,6 @@ func init() {
 	RegisterProvider(testXCPNgProvider{})
 	RegisterProvider(testStaticSSHProvider{})
 	RegisterProvider(testExternalProvider{})
-	RegisterProvider(testExeDevProvider{})
 	RegisterProvider(testRunPodProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
@@ -871,58 +870,6 @@ func (b testStaticSSHBackend) Acquire(context.Context, AcquireRequest) (LeaseTar
 
 func (b testStaticSSHBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
 	return b.Acquire(context.Background(), AcquireRequest{})
-}
-
-type testExeDevProvider struct{}
-
-func (testExeDevProvider) Spec() ProviderSpec {
-	return ProviderSpec{
-		Aliases:     []string{"exe", "exedev"},
-		Name:        "exe-dev",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
-		Coordinator: CoordinatorNever,
-	}
-}
-func (testExeDevProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
-	return testExeDevFlagValues{
-		ControlHost: fs.String("exe-dev-control-host", defaults.ExeDev.ControlHost, "exe.dev SSH API host"),
-		Image:       fs.String("exe-dev-image", defaults.ExeDev.Image, "exe.dev VM image"),
-		User:        fs.String("exe-dev-user", defaults.ExeDev.User, "exe.dev VM SSH user"),
-		WorkRoot:    fs.String("exe-dev-work-root", defaults.ExeDev.WorkRoot, "exe.dev VM work root"),
-	}
-}
-func (testExeDevProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(testExeDevFlagValues)
-	if !ok {
-		return nil
-	}
-	if flagWasSet(fs, "exe-dev-control-host") {
-		cfg.ExeDev.ControlHost = *v.ControlHost
-	}
-	if flagWasSet(fs, "exe-dev-image") {
-		cfg.ExeDev.Image = *v.Image
-	}
-	if flagWasSet(fs, "exe-dev-user") {
-		cfg.ExeDev.User = *v.User
-		cfg.SSHUser = *v.User
-	}
-	if flagWasSet(fs, "exe-dev-work-root") {
-		cfg.ExeDev.WorkRoot = *v.WorkRoot
-		cfg.WorkRoot = *v.WorkRoot
-	}
-	return nil
-}
-func (p testExeDevProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
-}
-
-type testExeDevFlagValues struct {
-	ControlHost *string
-	Image       *string
-	User        *string
-	WorkRoot    *string
 }
 
 type testRunPodProvider struct{}
