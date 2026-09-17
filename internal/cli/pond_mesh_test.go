@@ -950,6 +950,7 @@ func TestDisambiguatePondMemberNamesAvoidsShellExportCollisions(t *testing.T) {
 // List() returns nil — the test is about the capability gate, not the member
 // projection.
 func TestCollectPondMembersAcrossProvidersFiltersByCapability(t *testing.T) {
+	stubPondExeDevBackend(t)
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "cbx_hetzner", Slug: "api", Provider: "hetzner", Pond: "alpha", RepoRoot: "/r"},
 		{LeaseID: "cbx_runpod", Slug: "edge", Provider: "exe-dev", Pond: "alpha", RepoRoot: "/r"},
@@ -973,6 +974,7 @@ func TestCollectPondMembersAcrossProvidersFiltersByCapability(t *testing.T) {
 // `--provider X` still narrows the iteration to a single provider, even
 // though the function now defaults to cross-provider mode.
 func TestCollectPondMembersAcrossProvidersHonorsProviderFilter(t *testing.T) {
+	stubPondExeDevBackend(t)
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "cbx_hetzner", Slug: "api", Provider: "hetzner", Pond: "alpha", RepoRoot: "/r"},
 		{LeaseID: "cbx_runpod", Slug: "edge", Provider: "exe-dev", Pond: "alpha", RepoRoot: "/r"},
@@ -1046,4 +1048,17 @@ func TestProviderCapabilitiesAvailable(t *testing.T) {
 			t.Errorf("providerCapabilities(%q).Available() = %v, want %v", tc.provider, got, tc.want)
 		}
 	}
+}
+
+// These capability tests need an empty local List result, not a provider query.
+func stubPondExeDevBackend(t *testing.T) {
+	original := providerRegistry["exe-dev"]
+	t.Cleanup(func() { providerRegistry["exe-dev"] = original })
+	providerRegistry["exe-dev"] = pondEmptySSHProvider{original}
+}
+
+type pondEmptySSHProvider struct{ Provider }
+
+func (p pondEmptySSHProvider) Configure(Config, Runtime) (Backend, error) {
+	return testSSHBackend{spec: p.Spec()}, nil
 }

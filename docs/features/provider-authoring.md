@@ -327,7 +327,14 @@ shell history, process listings, and recorded run logs.
 
 Provider-native configuration defaults belong in `ProviderConfigDefaulter`'s
 `ApplyConfigDefaults` hook. Core calls it after input parsing and portable-OS
-preprocessing, then normalizes and validates the target. Use core provenance
+preprocessing, then normally normalizes and validates the target. Providers whose
+existing command boundary retains native defaults after target normalization
+implement `ProviderConfigDefaultsPhase` and return
+`ProviderConfigDefaultsCallerFinalizes`. This leaves finalization with the caller:
+config loading normalizes afterward, while command paths may already have
+normalized before defaults. The zero/default phase retains dispatcher
+normalization and validation. Both phases are config-only; neither may acquire
+runners or inspect native runtime state. Use core provenance
 accessors to preserve explicit inputs; `ApplyLinuxConnectionDefaults` restores
 explicit connection settings when applying Linux defaults across provider changes.
 Keep acquisition-only validation deferred: DigitalOcean and Linode preserve an

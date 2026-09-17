@@ -1182,6 +1182,9 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			if err := defaulter.ApplyConfigDefaults(cfg); err != nil {
 				return err
 			}
+			if phase, ok := provider.(ProviderConfigDefaultsPhase); ok && phase.ConfigDefaultsTargetFinalization() == ProviderConfigDefaultsCallerFinalizes {
+				return nil
+			}
 			normalizeTargetConfig(cfg)
 			return validateTargetConfig(*cfg)
 		}
@@ -1240,56 +1243,6 @@ func applyProviderConfigDefaults(cfg *Config) error {
 		cfg.SSHFallbackPorts = nil
 		normalizeTargetConfig(cfg)
 		return validateTargetConfig(*cfg)
-	}
-	if cfg.Provider == "hyperv" {
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetWindows
-		}
-		cfg.SSHFallbackPorts = nil
-		if cfg.HyperV.User != "" {
-			cfg.SSHUser = cfg.HyperV.User
-		}
-		if cfg.HyperV.WorkRoot != "" {
-			cfg.WorkRoot = cfg.HyperV.WorkRoot
-		}
-		cfg.SSHPort = "22"
-		return nil
-	}
-	if cfg.Provider == "windows-sandbox" || cfg.Provider == "wsb" || cfg.Provider == "windows-sandbox-provider" {
-		if IsTargetExplicit(cfg) && normalizeTargetOS(cfg.TargetOS) != targetWindows {
-			return Exit(2, "provider=windows-sandbox supports target=windows only")
-		}
-		if cfg.TargetOS == "" || (!IsTargetExplicit(cfg) && cfg.TargetOS == targetLinux) {
-			cfg.TargetOS = targetWindows
-		}
-		if cfg.explicitWindowsMode != "" && normalizeWindowsMode(cfg.explicitWindowsMode) != windowsModeNormal {
-			return Exit(2, "provider=windows-sandbox supports windows.mode=normal only")
-		}
-		cfg.WindowsMode = windowsModeNormal
-		if cfg.WindowsSandbox.Workdir == "" {
-			cfg.WindowsSandbox.Workdir = `C:\crabbox-work`
-		}
-		cfg.WorkRoot = cfg.WindowsSandbox.Workdir
-		return nil
-	}
-	if cfg.Provider == "exe-dev" || cfg.Provider == "exedev" || cfg.Provider == "exe" {
-		if cfg.ExeDev.User != "" {
-			cfg.SSHUser = cfg.ExeDev.User
-		} else if cfg.SSHUser == baseConfig().SSHUser {
-			cfg.SSHUser = getenv("USER", cfg.SSHUser)
-		}
-		if cfg.SSHPort == "" || cfg.SSHPort == baseConfig().SSHPort {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
-		cfg.ExeDev.WorkRoot = ResolveInheritedWorkRoot(cfg.ExeDev.WorkRoot, cfg.WorkRoot, ExeDevWorkRootFallback)
-		if cfg.ExeDev.WorkRoot != "" {
-			cfg.WorkRoot = cfg.ExeDev.WorkRoot
-		}
-		if cfg.TargetOS == "" {
-			cfg.TargetOS = targetLinux
-		}
-		return nil
 	}
 	if cfg.Provider == "tart" || cfg.Provider == "local-tart" || cfg.Provider == "macos-vm" {
 		if cfg.Tart.User != "" {
@@ -7630,6 +7583,10 @@ func IncusServerTypeForConfig(cfg Config) string {
 func IsArchitectureExplicit(cfg Config) bool {
 	return cfg.architectureExplicit
 }
+
+// ExplicitWindowsModeValue returns the saved explicit mode, without inferring a
+// value from the separate command-flag marker used by IsWindowsModeExplicit.
+func ExplicitWindowsModeValue(cfg Config) string { return cfg.explicitWindowsMode }
 
 func IsWindowsModeExplicit(cfg Config) bool {
 	return cfg.explicitWindowsMode != "" || cfg.windowsModeFlagExplicit

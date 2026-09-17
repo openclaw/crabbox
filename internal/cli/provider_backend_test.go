@@ -2054,3 +2054,196 @@ func TestProviderNameMatchesExactMetadataOnly(t *testing.T) {
 		t.Fatal("metadata consultation or registry boundary changed")
 	}
 }
+
+func TestCallerFinalizedDefaultsPreserveLeaseFlagRoots(t *testing.T) {
+	for _, tc := range []struct{ provider, flag string }{
+		{"hyperv", "hyperv-work-root"}, {"windows-sandbox", "windows-sandbox-workdir"},
+		{"wsb", "windows-sandbox-workdir"}, {"windows-sandbox-provider", "windows-sandbox-workdir"},
+		{"exe-dev", "exe-dev-work-root"}, {"exe", "exe-dev-work-root"}, {"exedev", "exe-dev-work-root"},
+	} {
+		for _, root := range []string{"/work/crabbox", `C:\crabbox`, "/Users/ec2-user/crabbox", "  ", "/custom/work"} {
+			t.Run(tc.provider+"/"+root, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := baseConfig()
+				fs := flag.NewFlagSet("lease", flag.ContinueOnError)
+				fs.SetOutput(io.Discard)
+				values := registerLeaseCreateFlags(fs, cfg)
+				if err := fs.Parse([]string{"--provider", tc.provider, "--" + tc.flag, root}); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.WorkRoot != root {
+					t.Fatalf("root=%q want %q", cfg.WorkRoot, root)
+				}
+			})
+		}
+	}
+}
+
+func TestCallerFinalizedDefaultsLoadConfig(t *testing.T) {
+	for _, tc := range []struct{ name, yaml, target, root, err string }{
+		{"hyperv", "provider: hyperv\nhyperv:\n  workRoot: /work/crabbox\n", "windows", `C:\crabbox`, ""},
+		{"sandbox alias", "provider: wsb\nwindowsSandbox:\n  workdir: /work/crabbox\n", "windows", `C:\crabbox`, ""},
+		{"sandbox target alias", "provider: windows-sandbox\ntarget: win\nwindows:\n  mode: powershell\n", "windows", `C:\crabbox-work`, ""},
+		{"sandbox errors retain priority", "provider: windows-sandbox\ntarget: bogus\nwindows:\n  mode: bogus\n", "", "", "provider=windows-sandbox supports target=windows only"},
+		{"sandbox mode error", "provider: windows-sandbox\nwindows:\n  mode: wsl\n", "", "", "provider=windows-sandbox supports windows.mode=normal only"},
+		{"hyperv invalid target", "provider: hyperv\ntarget: bogus\n", "", "", "target must be"},
+		{"exe target alias", "provider: exe\ntarget: ubuntu\n", "linux", "/tmp/crabbox", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", path)
+			cfg, err := loadConfig()
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("error=%v want %q", err, tc.err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TargetOS != tc.target || cfg.WorkRoot != tc.root {
+				t.Fatalf("target/root=%q/%q want %q/%q", cfg.TargetOS, cfg.WorkRoot, tc.target, tc.root)
+			}
+		})
+	}
+}
+
+func TestCallerFinalizedDefaultsExeDevUser(t *testing.T) {
+	for _, user := range []string{"", "alice", "  alice  "} {
+		t.Run(user, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("USER", user)
+			cfg := baseConfig()
+			cfg.Provider = "exe-dev"
+			cfg.ExeDev.User = ""
+			want := cfg.SSHUser
+			if user != "" {
+				want = user
+			}
+			if err := applyProviderConfigDefaults(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.SSHUser != want {
+				t.Fatalf("user=%q want %q", cfg.SSHUser, want)
+			}
+		})
+	}
+}
+
+type defaultPhaseTestProvider struct{ Provider }
+
+func (defaultPhaseTestProvider) ApplyConfigDefaults(cfg *Config) error {
+	cfg.TargetOS = "win"
+	cfg.WorkRoot = "/work/crabbox"
+	return nil
+}
+
+type explicitDefaultPhaseTestProvider struct {
+	defaultPhaseTestProvider
+	phase ProviderConfigDefaultsTargetFinalization
+}
+
+func (p explicitDefaultPhaseTestProvider) ConfigDefaultsTargetFinalization() ProviderConfigDefaultsTargetFinalization {
+	return p.phase
+}
+
+func TestProviderConfigDefaultsFinalizationContract(t *testing.T) {
+	original := providerRegistry["hyperv"]
+	t.Cleanup(func() { providerRegistry["hyperv"] = original })
+	for _, tc := range []struct {
+		name         string
+		provider     Provider
+		target, root string
+	}{
+		{"implicit dispatcher", defaultPhaseTestProvider{original}, "windows", `C:\crabbox`},
+		{"explicit dispatcher", explicitDefaultPhaseTestProvider{defaultPhaseTestProvider{original}, ProviderConfigDefaultsDispatcherFinalizes}, "windows", `C:\crabbox`},
+		{"caller", explicitDefaultPhaseTestProvider{defaultPhaseTestProvider{original}, ProviderConfigDefaultsCallerFinalizes}, "win", "/work/crabbox"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			providerRegistry["hyperv"] = tc.provider
+			cfg := baseConfig()
+			cfg.Provider = "hyperv"
+			if err := applyProviderConfigDefaults(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TargetOS != tc.target || cfg.WorkRoot != tc.root {
+				t.Fatalf("target/root=%q/%q want %q/%q", cfg.TargetOS, cfg.WorkRoot, tc.target, tc.root)
+			}
+		})
+	}
+}
+
+func TestWindowsSandboxSavedModeProvenance(t *testing.T) {
+	for _, tc := range []struct {
+		name, saved string
+		marker      bool
+		wantErr     string
+	}{
+		{"flag marker alone", "", true, ""},
+		{"saved alias", "powershell", false, ""},
+		{"saved unsupported", "wsl", false, "provider=windows-sandbox supports windows.mode=normal only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = "windows-sandbox"
+			cfg.WindowsMode = "wsl2"
+			cfg.explicitWindowsMode = tc.saved
+			cfg.windowsModeFlagExplicit = tc.marker
+			err := applyProviderConfigDefaults(&cfg)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("error=%v want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.WindowsMode != windowsModeNormal {
+				t.Fatalf("mode=%q", cfg.WindowsMode)
+			}
+		})
+	}
+}
+
+func TestCallerFinalizedDefaultsResolvedConfig(t *testing.T) {
+	for _, tc := range []struct{ provider, yaml string }{
+		{"hyperv", "hyperv:\n  workRoot: /work/crabbox\n"},
+		{"windows-sandbox", "windowsSandbox:\n  workdir: /work/crabbox\n"},
+		{"exe-dev", "exeDev:\n  workRoot: /work/crabbox\n"},
+	} {
+		for _, id := range []string{"", "synthetic-existing-id"} {
+			t.Run(tc.provider+"/"+id, func(t *testing.T) {
+				clearConfigEnv(t)
+				path := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(path, []byte("provider: "+tc.provider+"\n"+tc.yaml), 0600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("CRABBOX_CONFIG", path)
+				defaults := baseConfig()
+				fs := newFlagSet("test", io.Discard)
+				fs.String("provider", "", "")
+				target := registerTargetFlags(fs, defaults)
+				network := registerNetworkModeFlag(fs, defaults)
+				if err := fs.Parse([]string{"--provider", tc.provider}); err != nil {
+					t.Fatal(err)
+				}
+				cfg, err := loadLeaseTargetConfig(fs, tc.provider, target, network, leaseTargetConfigOptions{LeaseID: id, ProviderResourceID: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if cfg.WorkRoot != "/work/crabbox" {
+					t.Fatalf("root=%q", cfg.WorkRoot)
+				}
+			})
+		}
+	}
+}

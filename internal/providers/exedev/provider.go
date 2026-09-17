@@ -2,6 +2,7 @@ package exedev
 
 import (
 	"flag"
+	"os"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -42,4 +43,30 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 		return nil, core.Exit(2, "--tailscale is not supported for provider=%s; exe.dev VMs expose public SSH only", providerName)
 	}
 	return NewExeDevLeaseBackend(p.Spec(), cfg, rt), nil
+}
+
+func (Provider) ConfigDefaultsTargetFinalization() core.ProviderConfigDefaultsTargetFinalization {
+	return core.ProviderConfigDefaultsCallerFinalizes
+}
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	if cfg.ExeDev.User != "" {
+		cfg.SSHUser = cfg.ExeDev.User
+	} else if cfg.SSHUser == core.BaseConfig().SSHUser {
+		if user := os.Getenv("USER"); user != "" {
+			cfg.SSHUser = user
+		}
+	}
+	if cfg.SSHPort == "" || cfg.SSHPort == core.BaseConfig().SSHPort {
+		cfg.SSHPort = "22"
+	}
+	cfg.SSHFallbackPorts = nil
+	cfg.ExeDev.WorkRoot = core.ResolveInheritedWorkRoot(cfg.ExeDev.WorkRoot, cfg.WorkRoot, core.ExeDevWorkRootFallback)
+	if cfg.ExeDev.WorkRoot != "" {
+		cfg.WorkRoot = cfg.ExeDev.WorkRoot
+	}
+	if cfg.TargetOS == "" {
+		cfg.TargetOS = core.TargetLinux
+	}
+	return nil
 }

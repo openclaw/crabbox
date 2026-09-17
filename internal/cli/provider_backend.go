@@ -39,9 +39,28 @@ type CoordinatorAcquireValidator interface {
 }
 
 // ProviderConfigDefaulter owns provider-specific defaults that must be applied
-// after generic config parsing and before target validation.
+// after generic config parsing. Core then finalizes the target unless the
+// optional ProviderConfigDefaultsPhase leaves that boundary with the caller.
 type ProviderConfigDefaulter interface {
 	ApplyConfigDefaults(cfg *Config) error
+}
+
+// ProviderConfigDefaultsTargetFinalization identifies who normalizes and validates
+// the target after provider defaults. The zero value preserves dispatcher ownership.
+type ProviderConfigDefaultsTargetFinalization uint8
+
+const (
+	ProviderConfigDefaultsDispatcherFinalizes ProviderConfigDefaultsTargetFinalization = iota
+	// ProviderConfigDefaultsCallerFinalizes preserves the caller's existing phase:
+	// config loading finalizes afterward, while commands may have finalized before
+	// applying provider-native defaults. It does not add a finalization pass.
+	ProviderConfigDefaultsCallerFinalizes
+)
+
+// ProviderConfigDefaultsPhase optionally refines ProviderConfigDefaulter's target
+// finalization boundary. Defaults must remain config-only in either phase.
+type ProviderConfigDefaultsPhase interface {
+	ConfigDefaultsTargetFinalization() ProviderConfigDefaultsTargetFinalization
 }
 
 type ProviderSSHTargetConfigurer interface {

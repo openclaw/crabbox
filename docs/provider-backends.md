@@ -1137,6 +1137,18 @@ explicit-root markers, or different projection rules retain their own policy.
 Never pass provider secrets as command-line arguments. Use environment variables,
 local SDK config, the broker, or a credential store outside repo config.
 
+### Config-default target finalization
+
+`ProviderConfigDefaulter.ApplyConfigDefaults` runs after portable input preparation.
+By default core normalizes and validates the target immediately afterward.
+`ProviderConfigDefaultsPhase.ConfigDefaultsTargetFinalization` can instead return
+`ProviderConfigDefaultsCallerFinalizes` when the caller owns that boundary. Config
+loading still normalizes after defaults; command paths that normalized earlier
+retain provider-native values without an added normalization pass. This is a
+config-only capability, not permission to skip command admission or call a native
+runtime. Hyper-V, Windows Sandbox, and Exe.dev retain this existing caller-owned
+boundary. Other defaulters retain the zero/default dispatcher-owned phase.
+
 ## Runtime
 
 Backends receive a narrow runtime:

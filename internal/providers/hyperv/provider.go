@@ -45,3 +45,22 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	}
 	return newBackend(p.Spec(), cfg, rt), nil
 }
+
+func (Provider) ConfigDefaultsTargetFinalization() core.ProviderConfigDefaultsTargetFinalization {
+	return core.ProviderConfigDefaultsCallerFinalizes
+}
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	if !core.IsTargetExplicit(cfg) {
+		cfg.TargetOS = core.TargetWindows
+	}
+	cfg.SSHFallbackPorts = nil
+	if cfg.HyperV.User != "" {
+		cfg.SSHUser = cfg.HyperV.User
+	}
+	if cfg.HyperV.WorkRoot != "" {
+		cfg.WorkRoot = cfg.HyperV.WorkRoot
+	}
+	cfg.SSHPort = "22"
+	return nil
+}

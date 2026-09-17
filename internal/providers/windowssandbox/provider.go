@@ -47,3 +47,25 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	}
 	return newBackend(p.Spec(), cfg, rt), nil
 }
+
+func (Provider) ConfigDefaultsTargetFinalization() core.ProviderConfigDefaultsTargetFinalization {
+	return core.ProviderConfigDefaultsCallerFinalizes
+}
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	if core.IsTargetExplicit(cfg) && core.NormalizeTargetOS(cfg.TargetOS) != core.TargetWindows {
+		return core.Exit(2, "provider=windows-sandbox supports target=windows only")
+	}
+	if cfg.TargetOS == "" || (!core.IsTargetExplicit(cfg) && cfg.TargetOS == core.TargetLinux) {
+		cfg.TargetOS = core.TargetWindows
+	}
+	if core.ExplicitWindowsModeValue(*cfg) != "" && core.NormalizeWindowsMode(core.ExplicitWindowsModeValue(*cfg)) != core.WindowsModeNormal {
+		return core.Exit(2, "provider=windows-sandbox supports windows.mode=normal only")
+	}
+	cfg.WindowsMode = core.WindowsModeNormal
+	if cfg.WindowsSandbox.Workdir == "" {
+		cfg.WindowsSandbox.Workdir = `C:\crabbox-work`
+	}
+	cfg.WorkRoot = cfg.WindowsSandbox.Workdir
+	return nil
+}

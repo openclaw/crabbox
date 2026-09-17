@@ -3,6 +3,8 @@ package cli_test
 // Register the real defaults owners so core configuration tests exercise adapter hooks.
 import (
 	_ "github.com/openclaw/crabbox/internal/providers/digitalocean"
+	_ "github.com/openclaw/crabbox/internal/providers/exedev"
+	_ "github.com/openclaw/crabbox/internal/providers/hyperv"
 	_ "github.com/openclaw/crabbox/internal/providers/lambda"
 	_ "github.com/openclaw/crabbox/internal/providers/linode"
 	_ "github.com/openclaw/crabbox/internal/providers/nebius"
@@ -10,4 +12,5 @@ import (
 	_ "github.com/openclaw/crabbox/internal/providers/scaleway"
 	_ "github.com/openclaw/crabbox/internal/providers/tencentcloud"
 	_ "github.com/openclaw/crabbox/internal/providers/vultr"
+	_ "github.com/openclaw/crabbox/internal/providers/windowssandbox"
 )

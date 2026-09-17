@@ -690,3 +690,9 @@ func windowsPathJoin(parts ...string) string {
 	}
 	return out
 }
+
+// NormalizeTargetOS canonicalizes a target name without changing configuration.
+func NormalizeTargetOS(value string) string { return normalizeTargetOS(value) }
+
+// NormalizeWindowsMode canonicalizes a mode without changing configuration.
+func NormalizeWindowsMode(value string) string { return normalizeWindowsMode(value) }
