@@ -5,6 +5,8 @@
 - Add opt-in Bash preflight reporting on Linux, macOS, and WSL2 without changing default probes; report missing Bash without blocking independent commands.
 - Bundle small Linux runtime companions with complete CLI archives so managed execution can operate without Bash; discover installed companions automatically and explain how CLI-only installations can obtain the complete runtime pack.
 
+- Run generated managed-runner readiness checks with POSIX sh while preserving tool, bootstrap marker, workroot, and desktop readiness checks. [PR 2296](https://github.com/openclaw/crabbox/pull/2296).
+
 - Finish the old workspace owner before replacing an unavailable lease, acquire fresh ownership before retrying sync, and avoid repeating completed cleanup when replacement acquisition fails. [PR 2293](https://github.com/openclaw/crabbox/pull/2293).
 
 - Scope Git-overlay cache preservation to each verified directory, so root-only ignore rules do not retain stale nested dependency caches. [PR 2291](https://github.com/openclaw/crabbox/pull/2291).
