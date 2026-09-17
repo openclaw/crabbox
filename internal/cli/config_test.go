@@ -18038,3 +18038,128 @@ func TestSyncSourceConfig(t *testing.T) {
 		t.Fatal("active invalid source accepted")
 	}
 }
+
+func TestNomadBindingDefaultsOwnFreshDatacenters(t *testing.T) {
+	first, second := baseConfig().Nomad, baseConfig().Nomad
+	want := NomadConfig{TokenEnv: "NOMAD_TOKEN", Task: "crabbox", Driver: "docker", Image: "ubuntu:24.04", Workdir: "/workspace/crabbox", Datacenters: []string{"dc1"}, CPU: 1000, MemoryMB: 2048, DiskMB: 1024, AllocReadyTimeout: 5 * time.Minute, EvalTimeout: 5 * time.Minute, ExecTimeoutSecs: 600}
+	if !reflect.DeepEqual(first, want) || !reflect.DeepEqual(second, want) {
+		t.Fatal("compiled Nomad defaults changed")
+	}
+	first.Datacenters[0] = "changed"
+	if second.Datacenters[0] != "dc1" || baseConfig().Nomad.Datacenters[0] != "dc1" {
+		t.Fatal("Nomad datacenter defaults share storage")
+	}
+}
+
+func TestNomadBindingCentralFlagSource(t *testing.T) {
+	cfg := baseConfig()
+	cfg.credentialProvenance.nomadAddress = credentialSourceTrustedFile
+	cfg.credentialProvenance.nomadTokenEnv = credentialSourceTrustedFile
+	before := cfg
+	fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+	fs.String("nomad-address", "", "")
+	fs.String("nomad-token-env", "", "")
+	markCredentialDestinationFlagSources(&cfg, fs)
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("unvisited Nomad flags changed source facts or values")
+	}
+	if err := fs.Parse([]string{"--nomad-address=", "--nomad-token-env="}); err != nil {
+		t.Fatal(err)
+	}
+	markCredentialDestinationFlagSources(&cfg, fs)
+	want := before
+	want.credentialProvenance.nomadAddress = credentialSourceFlag
+	want.credentialProvenance.nomadTokenEnv = credentialSourceFlag
+	if !reflect.DeepEqual(cfg, want) {
+		t.Fatal("raw empty visits must update only the existing source facts")
+	}
+}
+
+func TestNomadBindingFilePartialApplication(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, trusted := range []bool{false, true} {
+		cfg := baseConfig()
+		before := cfg.Nomad
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte("nomad:\n  address: ' raw-address '\n  tokenEnv: FIXTURE_TOKEN_NAME\n  caCert: ~/fixture.pem\n  task: ''\n  datacenters: [' first ', '', first]\n  cpu: -1\n  memoryMB: 12\n"), &file); err != nil {
+			t.Fatal(err)
+		}
+		err := applyFileConfigWithTrust(&cfg, file, trusted)
+		if !trusted {
+			if err != nil || !reflect.DeepEqual(cfg.Nomad, before) {
+				t.Fatal("repository Nomad fields must remain unaccepted")
+			}
+			continue
+		}
+		if err == nil || err.Error() != "nomad cpu must be non-negative" {
+			t.Fatalf("file error=%v", err)
+		}
+		if cfg.Nomad.Address != " raw-address " || cfg.Nomad.TokenEnv != "FIXTURE_TOKEN_NAME" || cfg.Nomad.CACert != filepath.Join(home, "fixture.pem") || cfg.Nomad.Task != "" || !reflect.DeepEqual(cfg.Nomad.Datacenters, []string{"first", "first"}) || cfg.Nomad.CPU != before.CPU || cfg.Nomad.MemoryMB != before.MemoryMB {
+			t.Fatalf("partial Nomad file application changed: %#v", cfg.Nomad)
+		}
+		if cfg.credentialProvenance.nomadAddress != credentialSourceTrustedFile || cfg.credentialProvenance.nomadTokenEnv != credentialSourceTrustedFile || cfg.inputProvenance["nomad"].values == 0 {
+			t.Fatal("accepted inputs lost provenance before error")
+		}
+	}
+}
+
+func TestNomadBindingEnvironmentPartialApplication(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("NOMAD_ADDR", "alias-address")
+	t.Setenv("CRABBOX_NOMAD_ADDR", " primary-address ")
+	t.Setenv("NOMAD_REGION", "alias-region")
+	t.Setenv("CRABBOX_NOMAD_SKIP_VERIFY", "false")
+	t.Setenv("NOMAD_SKIP_VERIFY", "true")
+	t.Setenv("CRABBOX_NOMAD_CPU", "-2")
+	t.Setenv("CRABBOX_NOMAD_ALLOC_READY_TIMEOUT", "invalid")
+	t.Setenv("CRABBOX_NOMAD_EVAL_TIMEOUT", "2m")
+	t.Setenv("CRABBOX_NOMAD_EXEC_TIMEOUT_SECS", "invalid")
+	cfg := baseConfig()
+	cfg.Nomad.CACert = "~/prior.pem"
+	err := applyEnv(&cfg)
+	if err == nil {
+		t.Fatal("expected strict final integer error")
+	}
+	if cfg.Nomad.Address != " primary-address " || cfg.Nomad.Region != "alias-region" || cfg.Nomad.SkipVerify || cfg.Nomad.CPU != -2 || cfg.Nomad.AllocReadyTimeout != 5*time.Minute || cfg.Nomad.EvalTimeout != 2*time.Minute || cfg.Nomad.ExecTimeoutSecs != 0 || cfg.Nomad.CACert != filepath.Join(home, "prior.pem") {
+		t.Fatalf("partial Nomad environment application changed: %#v", cfg.Nomad)
+	}
+	if cfg.credentialProvenance.nomadAddress != credentialSourceEnvironment || cfg.inputProvenance["nomad"].values == 0 {
+		t.Fatal("accepted environment inputs lost provenance before error")
+	}
+}
+
+func TestNomadBindingListSourcePresence(t *testing.T) {
+	clearConfigEnv(t)
+	for _, yamlText := range []string{"nomad: {}", "nomad:\n  datacenters: []\n", "nomad:\n  datacenters: null\n"} {
+		cfg := baseConfig()
+		cfg.Nomad.Datacenters = []string{" prior "}
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte(yamlText), &file); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFileConfig(&cfg, file); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg.Nomad.Datacenters, []string{" prior "}) {
+			t.Fatalf("empty/omitted file list changed inherited value: %v", cfg.Nomad.Datacenters)
+		}
+	}
+	for _, raw := range []string{"", "none", " first ,,first "} {
+		t.Setenv("CRABBOX_NOMAD_DATACENTERS", raw)
+		cfg := baseConfig()
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if raw == "" || raw == "none" {
+			if len(cfg.Nomad.Datacenters) != 0 {
+				t.Fatalf("present empty/none environment did not clear list: %v", cfg.Nomad.Datacenters)
+			}
+		} else if !reflect.DeepEqual(cfg.Nomad.Datacenters, []string{"first", "first"}) {
+			t.Fatalf("environment list changed: %v", cfg.Nomad.Datacenters)
+		}
+	}
+}

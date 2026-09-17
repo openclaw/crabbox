@@ -253,10 +253,11 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if CloudflareConfigFlagPresence(fs).APIURL {
 		provenance.cloudflareAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "nomad-address") {
+	nomadFlags := NomadConfigFlagPresence(fs)
+	if nomadFlags.Address {
 		provenance.nomadAddress = credentialSourceFlag
 	}
-	if flagWasSet(fs, "nomad-token-env") {
+	if nomadFlags.TokenEnv {
 		provenance.nomadTokenEnv = credentialSourceFlag
 	}
 	if SemaphoreConfigFlagPresence(fs).Host {

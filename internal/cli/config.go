@@ -547,35 +547,6 @@ type TenkiConfig struct {
 	DiskGB    int
 }
 
-// NomadConfig configures the delegated Nomad provider. The ACL token is
-// intentionally absent: it is read at runtime from NOMAD_TOKEN or TokenEnv and
-// is never persisted in Crabbox config or placed on argv.
-type NomadConfig struct {
-	Address           string
-	Region            string
-	Namespace         string
-	TokenEnv          string
-	CACert            string
-	CAPath            string
-	ClientCert        string
-	ClientKey         string
-	TLSServerName     string
-	SkipVerify        bool
-	Task              string
-	Driver            string
-	Image             string
-	Workdir           string
-	JobSpecTemplate   string
-	NodePool          string
-	Datacenters       []string
-	CPU               int
-	MemoryMB          int
-	DiskMB            int
-	AllocReadyTimeout time.Duration
-	EvalTimeout       time.Duration
-	ExecTimeoutSecs   int
-}
-
 // SuperserveConfig configures the delegated Superserve provider. The API key is
 // intentionally absent: it is read at runtime from
 // CRABBOX_SUPERSERVE_API_KEY / SUPERSERVE_API_KEY and sent only in request
@@ -2018,25 +1989,12 @@ func baseConfig() Config {
 			CLIPath:  "tenki",
 			WorkRoot: "/home/tenki/crabbox",
 		},
-		Tensorlake:   defaultTensorlakeConfig(),
-		Cua:          defaultCuaConfig(),
-		OpenComputer: defaultOpenComputerConfig(),
-		CodeSandbox:  defaultCodeSandboxConfig(),
-		OpenSandbox:  defaultOpenSandboxConfig(),
-		Nomad: NomadConfig{
-			TokenEnv:          "NOMAD_TOKEN",
-			Task:              "crabbox",
-			Driver:            "docker",
-			Image:             "ubuntu:24.04",
-			Workdir:           "/workspace/crabbox",
-			Datacenters:       []string{"dc1"},
-			CPU:               1000,
-			MemoryMB:          2048,
-			DiskMB:            1024,
-			AllocReadyTimeout: 5 * time.Minute,
-			EvalTimeout:       5 * time.Minute,
-			ExecTimeoutSecs:   600,
-		},
+		Tensorlake:        defaultTensorlakeConfig(),
+		Cua:               defaultCuaConfig(),
+		OpenComputer:      defaultOpenComputerConfig(),
+		CodeSandbox:       defaultCodeSandboxConfig(),
+		OpenSandbox:       defaultOpenSandboxConfig(),
+		Nomad:             initialNomadConfig(),
 		Blaxel:            defaultBlaxelConfig(),
 		VercelSandbox:     defaultVercelSandboxConfig(),
 		CloudflareSandbox: defaultCloudflareSandboxConfig(),
@@ -2569,32 +2527,6 @@ type fileTenkiConfig struct {
 	CPUs      int    `yaml:"cpus,omitempty"`
 	MemoryMB  int    `yaml:"memoryMB,omitempty"`
 	DiskGB    int    `yaml:"diskGB,omitempty"`
-}
-
-type fileNomadConfig struct {
-	Address           string   `yaml:"address,omitempty"`
-	Region            string   `yaml:"region,omitempty"`
-	Namespace         string   `yaml:"namespace,omitempty"`
-	TokenEnv          string   `yaml:"tokenEnv,omitempty"`
-	CACert            string   `yaml:"caCert,omitempty"`
-	CAPath            string   `yaml:"caPath,omitempty"`
-	ClientCert        string   `yaml:"clientCert,omitempty"`
-	ClientKey         string   `yaml:"clientKey,omitempty"`
-	TLSServerName     string   `yaml:"tlsServerName,omitempty"`
-	SkipVerify        *bool    `yaml:"skipVerify,omitempty"`
-	Task              *string  `yaml:"task,omitempty"`
-	Driver            *string  `yaml:"driver,omitempty"`
-	Image             *string  `yaml:"image,omitempty"`
-	Workdir           *string  `yaml:"workdir,omitempty"`
-	JobSpecTemplate   string   `yaml:"jobspecTemplate,omitempty"`
-	NodePool          string   `yaml:"nodePool,omitempty"`
-	Datacenters       []string `yaml:"datacenters,omitempty"`
-	CPU               *int     `yaml:"cpu,omitempty"`
-	MemoryMB          *int     `yaml:"memoryMB,omitempty"`
-	DiskMB            *int     `yaml:"diskMB,omitempty"`
-	AllocReadyTimeout string   `yaml:"allocReadyTimeout,omitempty"`
-	EvalTimeout       string   `yaml:"evalTimeout,omitempty"`
-	ExecTimeoutSecs   *int     `yaml:"execTimeoutSecs,omitempty"`
 }
 
 type fileSuperserveConfig struct {
@@ -4590,114 +4522,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Nomad != nil {
-		if trusted && file.Nomad.Address != "" {
-			cfg.Nomad.Address = file.Nomad.Address
-			recordConfigInput(cfg, "nomad", inputSource, true)
-			cfg.credentialProvenance.nomadAddress = credentialSource
-		}
-		if trusted && file.Nomad.TokenEnv != "" {
-			cfg.Nomad.TokenEnv = file.Nomad.TokenEnv
-			recordConfigInput(cfg, "nomad", inputSource, true)
-			cfg.credentialProvenance.nomadTokenEnv = credentialSource
-		}
-		if trusted && file.Nomad.CACert != "" {
-			cfg.Nomad.CACert = expandUserPath(file.Nomad.CACert)
-			recordConfigInput(cfg, "nomad", inputSource, true)
-		}
-		if trusted && file.Nomad.CAPath != "" {
-			cfg.Nomad.CAPath = expandUserPath(file.Nomad.CAPath)
-			recordConfigInput(cfg, "nomad", inputSource, true)
-		}
-		if trusted && file.Nomad.ClientCert != "" {
-			cfg.Nomad.ClientCert = expandUserPath(file.Nomad.ClientCert)
-			recordConfigInput(cfg, "nomad", inputSource, true)
-		}
-		if trusted && file.Nomad.ClientKey != "" {
-			cfg.Nomad.ClientKey = expandUserPath(file.Nomad.ClientKey)
-			recordConfigInput(cfg, "nomad", inputSource, true)
-		}
-		if trusted && file.Nomad.TLSServerName != "" {
-			cfg.Nomad.TLSServerName = file.Nomad.TLSServerName
-			recordConfigInput(cfg, "nomad", inputSource, true)
-		}
-		if trusted && file.Nomad.SkipVerify != nil {
-			cfg.Nomad.SkipVerify = *file.Nomad.SkipVerify
-			recordConfigInput(cfg, "nomad", inputSource, true)
-		}
-		if trusted {
-			if file.Nomad.Region != "" {
-				cfg.Nomad.Region = file.Nomad.Region
-				recordConfigInput(cfg, "nomad", inputSource, true)
-			}
-			if file.Nomad.Namespace != "" {
-				cfg.Nomad.Namespace = file.Nomad.Namespace
-				recordConfigInput(cfg, "nomad", inputSource, true)
-			}
-			if file.Nomad.Task != nil {
-				cfg.Nomad.Task = *file.Nomad.Task
-				recordConfigInput(cfg, "nomad", inputSource, true)
-			}
-			if file.Nomad.Driver != nil {
-				cfg.Nomad.Driver = *file.Nomad.Driver
-				recordConfigInput(cfg, "nomad", inputSource, true)
-			}
-			if file.Nomad.Image != nil {
-				cfg.Nomad.Image = *file.Nomad.Image
-				recordConfigInput(cfg, "nomad", inputSource, true)
-			}
-			if file.Nomad.Workdir != nil {
-				cfg.Nomad.Workdir = *file.Nomad.Workdir
-				recordConfigInput(cfg, "nomad", inputSource, true)
-			}
-			if file.Nomad.JobSpecTemplate != "" {
-				cfg.Nomad.JobSpecTemplate = expandUserPath(file.Nomad.JobSpecTemplate)
-				recordConfigInput(cfg, "nomad", inputSource, true)
-			}
-			if file.Nomad.NodePool != "" {
-				cfg.Nomad.NodePool = file.Nomad.NodePool
-				recordConfigInput(cfg, "nomad", inputSource, true)
-			}
-			if len(file.Nomad.Datacenters) > 0 {
-				cfg.Nomad.Datacenters = normalizeList(file.Nomad.Datacenters)
-				recordConfigInput(cfg, "nomad", inputSource, true)
-			}
-			if file.Nomad.CPU != nil {
-				if *file.Nomad.CPU < 0 {
-					return Exit(2, "nomad cpu must be non-negative")
-				}
-				cfg.Nomad.CPU = *file.Nomad.CPU
-				recordConfigInput(cfg, "nomad", inputSource, true)
-			}
-			if file.Nomad.MemoryMB != nil {
-				if *file.Nomad.MemoryMB < 0 {
-					return Exit(2, "nomad memoryMB must be non-negative")
-				}
-				cfg.Nomad.MemoryMB = *file.Nomad.MemoryMB
-				recordConfigInput(cfg, "nomad", inputSource, true)
-			}
-			if file.Nomad.DiskMB != nil {
-				if *file.Nomad.DiskMB < 0 {
-					return Exit(2, "nomad diskMB must be non-negative")
-				}
-				cfg.Nomad.DiskMB = *file.Nomad.DiskMB
-				recordConfigInput(cfg, "nomad", inputSource, true)
-			}
-			if file.Nomad.AllocReadyTimeout != "" {
-				recordConfigInput(cfg, "nomad", inputSource, applyLeaseDuration(&cfg.Nomad.AllocReadyTimeout, file.Nomad.AllocReadyTimeout))
-			}
-			if file.Nomad.EvalTimeout != "" {
-				recordConfigInput(cfg, "nomad", inputSource, applyLeaseDuration(&cfg.Nomad.EvalTimeout, file.Nomad.EvalTimeout))
-			}
-			if file.Nomad.ExecTimeoutSecs != nil {
-				if *file.Nomad.ExecTimeoutSecs < 0 {
-					return Exit(2, "nomad execTimeoutSecs must be non-negative")
-				}
-				cfg.Nomad.ExecTimeoutSecs = *file.Nomad.ExecTimeoutSecs
-				recordConfigInput(cfg, "nomad", inputSource, true)
-			}
-		}
+	if err := applyNomadFileConfig(cfg, file.Nomad, trusted, inputSource, credentialSource); err != nil {
+		return err
 	}
+
 	{
 		applied, err := cfg.Blaxel.applyFile(file.Blaxel, trusted)
 		recordConfigInput(cfg, "blaxel", inputSource, applied.InputAccepted)
@@ -6447,59 +6275,10 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if value := os.Getenv("CRABBOX_NOMAD_ADDR"); value != "" {
-		cfg.Nomad.Address = value
-		cfg.credentialProvenance.nomadAddress = credentialSourceEnvironment
-		recordConfigInput(cfg, "nomad", configInputEnvironment, true)
-	} else if value := os.Getenv("NOMAD_ADDR"); value != "" {
-		cfg.Nomad.Address = value
-		cfg.credentialProvenance.nomadAddress = credentialSourceEnvironment
-		recordConfigInput(cfg, "nomad", configInputEnvironment, true)
-	}
-	cfg.Nomad.Region = configInputEnvString(cfg, "nomad", cfg.Nomad.Region, "CRABBOX_NOMAD_REGION", "NOMAD_REGION")
-	cfg.Nomad.Namespace = configInputEnvString(cfg, "nomad", cfg.Nomad.Namespace, "CRABBOX_NOMAD_NAMESPACE", "NOMAD_NAMESPACE")
-	if value := os.Getenv("CRABBOX_NOMAD_TOKEN_ENV"); value != "" {
-		cfg.Nomad.TokenEnv = value
-		cfg.credentialProvenance.nomadTokenEnv = credentialSourceEnvironment
-		recordConfigInput(cfg, "nomad", configInputEnvironment, true)
-	}
-	cfg.Nomad.CACert = expandUserPath(configInputEnvString(cfg, "nomad", cfg.Nomad.CACert, "CRABBOX_NOMAD_CA_CERT", "NOMAD_CACERT"))
-	cfg.Nomad.CAPath = expandUserPath(configInputEnvString(cfg, "nomad", cfg.Nomad.CAPath, "CRABBOX_NOMAD_CA_PATH", "NOMAD_CAPATH"))
-	cfg.Nomad.ClientCert = expandUserPath(configInputEnvString(cfg, "nomad", cfg.Nomad.ClientCert, "CRABBOX_NOMAD_CLIENT_CERT", "NOMAD_CLIENT_CERT"))
-	cfg.Nomad.ClientKey = expandUserPath(configInputEnvString(cfg, "nomad", cfg.Nomad.ClientKey, "CRABBOX_NOMAD_CLIENT_KEY", "NOMAD_CLIENT_KEY"))
-	cfg.Nomad.TLSServerName = configInputEnvString(cfg, "nomad", cfg.Nomad.TLSServerName, "CRABBOX_NOMAD_TLS_SERVER_NAME", "NOMAD_TLS_SERVER_NAME")
-	if v, ok := getenvBool("CRABBOX_NOMAD_SKIP_VERIFY"); ok {
-		cfg.Nomad.SkipVerify = v
-		recordConfigInput(cfg, "nomad", configInputEnvironment, true)
-	} else if v, ok := getenvBool("NOMAD_SKIP_VERIFY"); ok {
-		cfg.Nomad.SkipVerify = v
-		recordConfigInput(cfg, "nomad", configInputEnvironment, true)
-	}
-	cfg.Nomad.Task = configInputEnvString(cfg, "nomad", cfg.Nomad.Task, "CRABBOX_NOMAD_TASK")
-	cfg.Nomad.Driver = configInputEnvString(cfg, "nomad", cfg.Nomad.Driver, "CRABBOX_NOMAD_DRIVER")
-	cfg.Nomad.Image = configInputEnvString(cfg, "nomad", cfg.Nomad.Image, "CRABBOX_NOMAD_IMAGE")
-	cfg.Nomad.Workdir = configInputEnvString(cfg, "nomad", cfg.Nomad.Workdir, "CRABBOX_NOMAD_WORKDIR")
-	cfg.Nomad.JobSpecTemplate = expandUserPath(configInputEnvString(cfg, "nomad", cfg.Nomad.JobSpecTemplate, "CRABBOX_NOMAD_JOBSPEC_TEMPLATE"))
-	cfg.Nomad.NodePool = configInputEnvString(cfg, "nomad", cfg.Nomad.NodePool, "CRABBOX_NOMAD_NODE_POOL")
-	if datacenters, ok := getenvList("CRABBOX_NOMAD_DATACENTERS"); ok {
-		cfg.Nomad.Datacenters = datacenters
-		recordConfigInput(cfg, "nomad", configInputEnvironment, true)
-	}
-	cfg.Nomad.CPU = configInputEnvInt(cfg, "nomad", cfg.Nomad.CPU, "CRABBOX_NOMAD_CPU")
-	cfg.Nomad.MemoryMB = configInputEnvInt(cfg, "nomad", cfg.Nomad.MemoryMB, "CRABBOX_NOMAD_MEMORY_MB")
-	cfg.Nomad.DiskMB = configInputEnvInt(cfg, "nomad", cfg.Nomad.DiskMB, "CRABBOX_NOMAD_DISK_MB")
-	if timeout := os.Getenv("CRABBOX_NOMAD_ALLOC_READY_TIMEOUT"); timeout != "" {
-		recordConfigInput(cfg, "nomad", configInputEnvironment, applyLeaseDuration(&cfg.Nomad.AllocReadyTimeout, timeout))
-	}
-	if timeout := os.Getenv("CRABBOX_NOMAD_EVAL_TIMEOUT"); timeout != "" {
-		recordConfigInput(cfg, "nomad", configInputEnvironment, applyLeaseDuration(&cfg.Nomad.EvalTimeout, timeout))
-	}
-	var nomadExecAccepted bool
-	cfg.Nomad.ExecTimeoutSecs, nomadExecAccepted, err = getenvNonNegativeIntAccepted("CRABBOX_NOMAD_EXEC_TIMEOUT_SECS", cfg.Nomad.ExecTimeoutSecs)
-	recordConfigInput(cfg, "nomad", configInputEnvironment, nomadExecAccepted)
-	if err != nil {
+	if err := applyNomadEnvironmentConfig(cfg); err != nil {
 		return err
 	}
+
 	{
 		applied, err := cfg.Blaxel.applyEnv()
 		recordConfigInput(cfg, "blaxel", configInputEnvironment, applied.InputAccepted)

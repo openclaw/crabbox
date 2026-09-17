@@ -65,6 +65,15 @@ representation. Replacing lists register before ordinary flags, and appending
 lists register afterward. Registration neither applies values to configuration
 nor records source provenance.
 
+Nomad's 23-field owner is `internal/cli/config_nomad.go`. Generated scalar
+defaults are combined with a fresh `dc1` datacenter slice in `initialNomadConfig`.
+All file fields remain trusted-user-only. Source-specific path expansion and
+address/token-variable-name provenance remain in the core wrappers; central
+post-success flag marking consumes the generated raw-visit report. Generic
+machine-flag rejection and final validation remain in the provider wrapper.
+File/environment durations keep positive-overlay behavior, while explicit
+duration flags retain trimmed positive parsing and partial-error ordering.
+
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
