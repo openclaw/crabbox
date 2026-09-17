@@ -539,38 +539,24 @@ func boxSSHConnection(box boxData) (string, string, error) {
 	return host, "22", nil
 }
 
-// The CLI owns this key. The renamed CLI mints ascii_sandbox_ed25519 while
-// older Box CLIs minted ascii_box_ed25519, and a home that has run both holds
-// two keys of which only one authenticates. PrepareSSH runs the configured CLI
-// immediately before the target is used, so the key that CLI last wrote is the
-// live credential; picking by file name instead would hand SSH a stale key that
-// the native preparation never authorized. Ties keep the legacy name, which is
-// the pre-rename behavior.
+// The CLI owns this key. The renamed CLI mints ascii_sandbox_ed25519 where
+// older Box CLIs minted ascii_box_ed25519, so fall forward to the renamed name
+// only when the legacy key is absent. Whenever the legacy key exists it is
+// used, exactly as before the rename, so no existing setup can change which
+// credential Crabbox presents. Choosing between two present keys would need a
+// signal the CLI does not expose: file order says nothing about which key the
+// configured CLI actually authorized.
 func boxSSHKey(cfg core.Config) string {
 	dir := path.Join(asciiBoxCLIHome(), ".ssh")
 	legacy := path.Join(dir, "ascii_box_ed25519")
+	if info, err := os.Stat(legacy); err == nil && info.Mode().IsRegular() {
+		return legacy
+	}
 	renamed := path.Join(dir, "ascii_sandbox_ed25519")
-	legacyAt, hasLegacy := regularFileModTime(legacy)
-	renamedAt, hasRenamed := regularFileModTime(renamed)
-	switch {
-	case hasLegacy && hasRenamed:
-		if renamedAt.After(legacyAt) {
-			return renamed
-		}
-		return legacy
-	case hasRenamed:
+	if info, err := os.Stat(renamed); err == nil && info.Mode().IsRegular() {
 		return renamed
-	default:
-		return legacy
 	}
-}
-
-func regularFileModTime(path string) (time.Time, bool) {
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return time.Time{}, false
-	}
-	return info.ModTime(), true
+	return legacy
 }
 
 func boxHost(box boxData) string {

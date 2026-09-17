@@ -630,23 +630,24 @@ func TestValidateBoxDeletionOperationAcceptsRenamedKind(t *testing.T) {
 	}
 }
 
-// The CLI owns this key, and a home that has run both CLIs holds two keys of
-// which only one authenticates. Crabbox must follow the key the configured CLI
-// last wrote, not a fixed name preference: PrepareSSH runs that CLI just before
-// the target is used, so a stale key from the other CLI would fail SSH despite
-// successful native preparation.
-func TestBoxSSHKeyFollowsTheActiveCLI(t *testing.T) {
+// The CLI owns this key. Crabbox falls forward to the renamed name only when
+// the legacy key is absent, so a pre-rename home keeps presenting the exact
+// credential it always did and no existing setup can change behavior. The
+// legacy key wins whenever it exists, whatever its age relative to a renamed
+// key that the configured CLI never authorized.
+func TestBoxSSHKeyPrefersTheLegacyKeyWhenPresent(t *testing.T) {
 	legacy, renamed := "ascii_box_ed25519", "ascii_sandbox_ed25519"
 	for _, tt := range []struct {
-		name    string
-		written []string // in order; later entries are newer
-		want    string
+		name        string
+		present     []string
+		legacyOlder bool
+		want        string
 	}{
-		{"only the renamed CLI has run", []string{renamed}, renamed},
-		{"only a legacy CLI has run", []string{legacy}, legacy},
-		{"upgraded: renamed key is the live one", []string{legacy, renamed}, renamed},
-		{"pinned legacy CLI: legacy key is the live one", []string{renamed, legacy}, legacy},
-		{"neither has run yet keeps the legacy name", nil, legacy},
+		{name: "only the renamed CLI has run", present: []string{renamed}, want: renamed},
+		{name: "only a legacy CLI has run", present: []string{legacy}, want: legacy},
+		{name: "both present keeps the legacy key", present: []string{legacy, renamed}, want: legacy},
+		{name: "legacy key older than an unused renamed key still wins", present: []string{legacy, renamed}, legacyOlder: true, want: legacy},
+		{name: "neither present keeps the legacy name", want: legacy},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -655,15 +656,14 @@ func TestBoxSSHKeyFollowsTheActiveCLI(t *testing.T) {
 			if err := os.MkdirAll(dir, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			stamp := time.Now().Add(-time.Hour)
-			for i, key := range tt.written {
-				path := filepath.Join(dir, key)
-				if err := os.WriteFile(path, []byte("key"), 0o600); err != nil {
+			for _, key := range tt.present {
+				if err := os.WriteFile(filepath.Join(dir, key), []byte("key"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				// Order the writes in time so "last written" is unambiguous.
-				at := stamp.Add(time.Duration(i+1) * time.Minute)
-				if err := os.Chtimes(path, at, at); err != nil {
+			}
+			if tt.legacyOlder {
+				old := time.Now().Add(-90 * 24 * time.Hour)
+				if err := os.Chtimes(filepath.Join(dir, legacy), old, old); err != nil {
 					t.Fatal(err)
 				}
 			}
