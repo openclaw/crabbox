@@ -65,6 +65,38 @@ func TestJournalPublication(t *testing.T) {
 	journalTestContents(t, target, "new")
 }
 
+func TestJournalResolvesParentBeforeCleaning(t *testing.T) {
+	root := journalTestDirectory(t)
+	parent := filepath.Join(root, "physical")
+	child := filepath.Join(parent, "child")
+	if err := os.MkdirAll(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(child, alias); err != nil {
+		t.Fatal(err)
+	}
+	physical, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(physical, "destination")
+	t.Chdir(root)
+	// Preserve the caller's spelling; filepath.Join would clean it prematurely.
+	for _, target := range []string{alias + "/../destination", "alias/../destination"} {
+		c, err := openArchiveJournal(target, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.target != want {
+			t.Errorf("resolved destination=%q, want %q", c.target, want)
+		}
+		if err := c.parent.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestJournalRecoversOrdinaryPublicationPhases(t *testing.T) {
 	for _, spelling := range []string{"original", "relative", "symlink-parent", "parent-case", "basename-case"} {
 		t.Run(spelling, func(t *testing.T) {

@@ -92,15 +92,12 @@ func openArchiveJournal(target, payload string) (*archiveJournalContext, error) 
 	if runtime.GOOS == "windows" {
 		return nil, errors.New("archive publication requires a POSIX host")
 	}
-	abs, err := filepath.Abs(target)
+	resolved, err := resolvePathParent(target)
 	if err != nil {
 		return nil, err
 	}
-	physical, err := filepath.EvalSymlinks(filepath.Dir(abs))
-	if err != nil {
-		return nil, err
-	}
-	target = filepath.Join(physical, filepath.Base(abs))
+	target = resolved
+	physical := filepath.Dir(target)
 	if target == physical {
 		return nil, errors.New("cannot publish over filesystem root")
 	}
