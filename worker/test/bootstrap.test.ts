@@ -1,3 +1,8 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, symlinkSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -228,6 +233,86 @@ describe("cloud-init bootstrap", () => {
     expect(got).not.toContain("path: /etc/ssh/ssh_host_ed25519_key");
   });
 
+  it.skipIf(process.platform === "win32")(
+    "runs readiness without Bash and retains failure checks",
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), "crabbox-ready-"));
+      try {
+        for (const tool of ["git", "rsync", "curl", "jq", "tmux", "flock", "systemctl", "ss"]) {
+          writeFileSync(
+            join(fixture, tool),
+            "#!/bin/sh\n" +
+              (tool === "ss" ? 'printf "%s\\n" "${SOCKETS-127.0.0.1:5900}"\n' : "") +
+              '[ "${FAIL_TOOL-}" != "' +
+              tool +
+              '" ]\n',
+            { mode: 0o755 },
+          );
+        }
+        symlinkSync("/usr/bin/grep", join(fixture, "grep"));
+        for (const awsPrivate of [false, true]) {
+          const generated = cloudInit({
+            ...config,
+            desktop: !awsPrivate,
+            awsPrivate,
+            workRoot: fixture,
+          });
+          const lines = generated
+            .split("  - path: /usr/local/bin/crabbox-ready\n")[1]
+            .split("    content: |\n")[1]
+            .split("\n");
+          const end = lines.findIndex((line) => line !== "" && !line.startsWith("      "));
+          const script = lines
+            .slice(0, end)
+            .map((line) => line.slice(6))
+            .join("\n")
+            .replaceAll("/var/lib/crabbox/bootstrapped", join(fixture, "bootstrapped"))
+            .replaceAll(fixture + "/workspaces", fixture);
+          expect(script).toMatch(/^#!\/bin\/sh\nset -eu\n/);
+          const failures = awsPrivate
+            ? ["", "git", "curl", "jq", "systemctl", "marker", "workroot"]
+            : [
+                "",
+                "git",
+                "rsync",
+                "curl",
+                "jq",
+                "tmux",
+                "flock",
+                "systemctl",
+                "ss",
+                "socket",
+                "marker",
+                "workroot",
+              ];
+          for (const failure of failures) {
+            writeFileSync(join(fixture, "bootstrapped"), "");
+            if (failure === "marker") rmSync(join(fixture, "bootstrapped"));
+            const candidate =
+              failure === "workroot"
+                ? script.replace(
+                    "test " + (awsPrivate ? "-d " : "-w ") + fixture,
+                    "test -d " + fixture + "/missing",
+                  )
+                : script;
+            const result = spawnSync("/bin/sh", ["-c", candidate], {
+              env: {
+                PATH: fixture,
+                FAIL_TOOL: failure,
+                ...(failure === "socket" ? { SOCKETS: "127.0.0.1:9999" } : {}),
+              },
+            });
+            expect(result.status, `${awsPrivate}/${failure}: ${result.stderr}`).toBe(
+              failure === "" ? 0 : 1,
+            );
+          }
+        }
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("uses retrying package installation in runcmd", () => {
     const got = cloudInit(config);
     const minimalUpdate = "retry apt-get -o Acquire::Languages=none";
@@ -371,7 +456,7 @@ describe("cloud-init bootstrap", () => {
     expect(got).toContain("xterm -title 'Crabbox Desktop'");
     expect(got).toContain("(umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)");
     expect(got).toContain("tigervncpasswd -f > /var/lib/crabbox/vnc.pass");
-    expect(got).toContain("ss -ltn | grep -q '127.0.0.1:5900'");
+    expect(got).toContain("listening_sockets=$(ss -ltn)");
     expect(got).toContain(
       "systemctl disable --now crabbox-wayvnc.service crabbox-x11vnc.service 2>/dev/null || true",
     );

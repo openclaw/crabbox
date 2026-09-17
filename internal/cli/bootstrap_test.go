@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -218,7 +219,7 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 		"xterm -title 'Crabbox Desktop'",
 		"(umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)",
 		"tigervncpasswd -f > /var/lib/crabbox/vnc.pass",
-		"ss -ltn | grep -q '127.0.0.1:5900'",
+		"listening_sockets=$(ss -ltn)",
 		"systemctl disable --now crabbox-wayvnc.service crabbox-x11vnc.service 2>/dev/null || true",
 		"systemctl enable crabbox-xvfb.service crabbox-desktop.service",
 		"systemctl restart crabbox-xvfb.service crabbox-desktop.service",
@@ -1163,5 +1164,74 @@ func TestAWSUserDataMacOSProfile(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("macOS user data missing %q", want)
 		}
+	}
+}
+
+func TestCloudInitReadinessWithoutBash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture")
+	}
+	cfg := baseConfig()
+	cfg.Desktop = true
+	cfg.WorkRoot = t.TempDir()
+	var document struct {
+		Files []struct{ Path, Content string } `yaml:"write_files"`
+	}
+	if err := yaml.Unmarshal([]byte(cloudInit(cfg, "ssh-ed25519 fixture")), &document); err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	for _, file := range document.Files {
+		if file.Path == "/usr/local/bin/crabbox-ready" {
+			script = file.Content
+		}
+	}
+	if !strings.HasPrefix(script, "#!/bin/sh\nset -eu\n") {
+		t.Fatalf("unexpected readiness interpreter: %q", script)
+	}
+	fixture := t.TempDir()
+	marker := filepath.Join(fixture, "bootstrapped")
+	script = strings.ReplaceAll(script, "/var/lib/crabbox/bootstrapped", shellQuote(marker))
+	for _, tool := range []string{"git", "rsync", "curl", "jq", "tmux", "flock", "systemctl", "ss"} {
+		body := "#!/bin/sh\n"
+		if tool == "ss" {
+			body += "printf '%s\\n' \"${SOCKETS-127.0.0.1:5900}\"\n"
+		}
+		body += "[ \"${FAIL_TOOL-}\" != " + shellQuote(tool) + " ]\n"
+		if err := os.WriteFile(filepath.Join(fixture, tool), []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	grep, err := exec.LookPath("grep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(grep, filepath.Join(fixture, "grep")); err != nil {
+		t.Fatal(err)
+	}
+	for _, failure := range []string{"", "git", "rsync", "curl", "jq", "tmux", "flock", "systemctl", "ss", "socket", "marker", "workroot"} {
+		t.Run("failure="+failure, func(t *testing.T) {
+			if err := os.WriteFile(marker, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			candidate := script
+			if failure == "marker" {
+				if err := os.Remove(marker); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if failure == "workroot" {
+				candidate = strings.ReplaceAll(candidate, cfg.WorkRoot, filepath.Join(fixture, "missing"))
+			}
+			cmd := exec.Command("/bin/sh", "-c", candidate)
+			cmd.Env = []string{"PATH=" + fixture, "FAIL_TOOL=" + failure}
+			if failure == "socket" {
+				cmd.Env = append(cmd.Env, "SOCKETS=127.0.0.1:9999")
+			}
+			out, err := cmd.CombinedOutput()
+			if (err == nil) != (failure == "") {
+				t.Fatalf("readiness result: %v; %s", err, out)
+			}
+		})
 	}
 }
