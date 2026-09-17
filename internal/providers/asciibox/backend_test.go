@@ -500,7 +500,7 @@ func TestClientPreservesObservedGenerationAfterReadinessFailure(t *testing.T) {
 		newErr:     errors.New("exit status 1"),
 		infoResponses: []string{
 			`{"box":{"id":"bx_2","state":"provisioning","createdAt":"2026-08-30T12:00:00Z"}}`,
-			`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","sshEndpoint":"198.51.100.20:19036","createdAt":"2026-08-30T12:00:01Z"}}`,
+			`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","createdAt":"2026-08-30T12:00:01Z"}}`,
 		},
 	}
 	c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: home, runner: runner}
@@ -603,85 +603,58 @@ func TestBoxSSHConnectionPrefersAdvertisedEndpoint(t *testing.T) {
 	}
 }
 
-// Boat reports a box ready before it publishes the SSH endpoint, and serves SSH
-// on a per-box port. Readiness must wait for that endpoint rather than resolve
-// to the ip:22 fallback.
-func TestBoxReadyForSSHRequiresAdvertisedEndpoint(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		box  boxData
-		want bool
-	}{
-		{"ready with advertised endpoint", boxData{State: "ready", IP: "203.0.113.10", SSHEndpoint: "198.51.100.20:19040"}, true},
-		{"idle with advertised endpoint", boxData{State: "idle", IP: "203.0.113.10", SSHEndpoint: "198.51.100.20:19040"}, true},
-		{"snake_case endpoint alias", boxData{State: "ready", SSHEndpointAlt: "198.51.100.20:19040"}, true},
-		{"ready but endpoint not yet published", boxData{State: "ready", IP: "2001:db8::28"}, false},
-		{"idle but endpoint not yet published", boxData{State: "idle", IP: "203.0.113.10"}, false},
-		{"terminal state with endpoint", boxData{State: "deleted", SSHEndpoint: "198.51.100.20:19040"}, false},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := boxReadyForSSH(tt.box); got != tt.want {
-				t.Fatalf("boxReadyForSSH(%#v)=%v want %v", tt.box, got, tt.want)
-			}
-		})
+// Boat publishes the SSH endpoint a moment after a box first reports ready, so
+// the wait prefers the endpoint for a bounded window rather than resolving to
+// the ip:22 fallback.
+func TestWaitForBoxReadyPrefersEndpointWithinGrace(t *testing.T) {
+	runner := &fakeCommandRunner{
+		configPath: filepath.Join(t.TempDir(), "config.json"),
+		infoResponses: []string{
+			`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20"}}`,
+			`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","sshEndpoint":"198.51.100.20:19036"}}`,
+		},
+	}
+	c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner, endpointGrace: time.Minute}
+	box, err := c.waitForBoxReady(context.Background(), boxData{ID: "bx_2", State: "ready", IP: "203.0.113.20"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if box.SSHEndpoint != "198.51.100.20:19036" {
+		t.Fatalf("wait returned %#v; want the advertised endpoint", box)
+	}
+	host, port, err := boxSSHConnection(box)
+	if err != nil || host != "198.51.100.20" || port != "19036" {
+		t.Fatalf("connection=%q:%q err=%v; want the advertised endpoint, not ip:22", host, port, err)
 	}
 }
 
-// Releasing a lease must survive the rename: the current CLI reports deletion
-// operations with kind "sandbox" while older Box CLIs reported "box". Any other
-// kind must still be rejected so the claim is retained.
-func TestValidateBoxDeletionOperationAcceptsRenamedKind(t *testing.T) {
-	const opID = "bdop_e896e624d8af4d9e92cab7848ecb8a83"
+// The preference must never strand a box that only ever reports an ip: such a
+// box still becomes ready and still resolves to the ip:22 fallback.
+func TestWaitForBoxReadyAcceptsIPOnlyBox(t *testing.T) {
 	for _, tt := range []struct {
-		name, kind string
-		wantErr    bool
+		name  string
+		grace time.Duration
 	}{
-		{"renamed sandbox kind", "sandbox", false},
-		{"legacy box kind", "box", false},
-		{"unrelated kind is rejected", "snapshot", true},
-		{"empty kind is rejected", "", true},
+		{"no grace configured", 0},
+		{"grace elapses", 50 * time.Millisecond},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			operation := boxDeletionOperation{ID: opID, Kind: tt.kind, TargetID: "bx_1", Status: "pending"}
-			err := validateBoxDeletionOperation(operation, "bx_1", opID)
-			if tt.wantErr && err == nil {
-				t.Fatalf("kind %q was accepted", tt.kind)
+			ipOnly := `{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20"}}`
+			runner := &fakeCommandRunner{
+				configPath:    filepath.Join(t.TempDir(), "config.json"),
+				infoResponses: []string{ipOnly, ipOnly, ipOnly, ipOnly},
 			}
-			if !tt.wantErr && err != nil {
-				t.Fatalf("kind %q rejected: %v", tt.kind, err)
+			c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner, endpointGrace: tt.grace}
+			box, err := c.waitForBoxReady(context.Background(), boxData{ID: "bx_2", State: "ready", IP: "203.0.113.20"})
+			if err != nil {
+				t.Fatalf("ip-only box was stranded: %v", err)
 			}
-		})
-	}
-}
-
-// The CLI mints this key. The renamed CLI writes ascii_sandbox_ed25519 while
-// older Box CLIs wrote ascii_box_ed25519, so Crabbox must read whichever name
-// the installed CLI actually created.
-func TestBoxSSHKeyResolvesCLIMintedName(t *testing.T) {
-	for _, tt := range []struct {
-		name    string
-		present []string
-		want    string
-	}{
-		{"renamed CLI key", []string{"ascii_sandbox_ed25519"}, "ascii_sandbox_ed25519"},
-		{"legacy CLI key", []string{"ascii_box_ed25519"}, "ascii_box_ed25519"},
-		{"both present prefers current", []string{"ascii_box_ed25519", "ascii_sandbox_ed25519"}, "ascii_sandbox_ed25519"},
-		{"neither present keeps legacy default", nil, "ascii_box_ed25519"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			home := t.TempDir()
-			t.Setenv("CRABBOX_ASCII_BOX_HOME", home)
-			if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
-				t.Fatal(err)
+			if !boxReadyForSSH(box) {
+				t.Fatalf("ip-only box not ready: %#v", box)
 			}
-			for _, key := range tt.present {
-				if err := os.WriteFile(filepath.Join(home, ".ssh", key), []byte("key"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			got := boxSSHKey(core.Config{})
-			if want := filepath.Join(home, ".ssh", tt.want); got != want {
-				t.Fatalf("boxSSHKey()=%q want %q", got, want)
+			host, port, err := boxSSHConnection(box)
+			if err != nil || host != "203.0.113.20" || port != "22" {
+				t.Fatalf("connection=%q:%q err=%v; want the ip:22 fallback", host, port, err)
 			}
 		})
 	}
@@ -751,6 +724,31 @@ func TestDecodeBoxesAcceptsRenamedEnvelope(t *testing.T) {
 		{"renamed sandboxes envelope", `{"sandboxes":[{"id":"bx_1"},{"id":"bx_2"}],"pageInfo":{"hasMore":false,"nextCursor":null}}`, 2},
 		{"legacy boxes envelope", `{"boxes":[{"id":"bx_1"},{"id":"bx_2"}]}`, 2},
 		{"renamed empty inventory proves absence", `{"sandboxes":[],"pageInfo":{"hasMore":false,"nextCursor":null}}`, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			boxes, err := decodeBoxes([]byte(tt.payload), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(boxes) != tt.want {
+				t.Fatalf("decoded %d boxes, want %d: %#v", len(boxes), tt.want, boxes)
+			}
+		})
+	}
+}
+
+// A transitional CLI can emit both envelopes. An empty one must never hide a
+// populated one, because the cleanup callers read an empty inventory as proof
+// that a Box is really gone.
+func TestDecodeBoxesNeverLetsAnEmptyEnvelopeHideEntries(t *testing.T) {
+	for _, tt := range []struct {
+		name, payload string
+		want          int
+	}{
+		{"empty sandboxes alongside populated boxes", `{"sandboxes":[],"boxes":[{"id":"bx_1"}]}`, 1},
+		{"empty boxes alongside populated sandboxes", `{"boxes":[],"sandboxes":[{"id":"bx_1"}]}`, 1},
+		{"both populated", `{"sandboxes":[{"id":"bx_1"}],"boxes":[{"id":"bx_1"}]}`, 1},
+		{"both genuinely empty still proves absence", `{"sandboxes":[],"boxes":[]}`, 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			boxes, err := decodeBoxes([]byte(tt.payload), true)
@@ -1021,7 +1019,7 @@ func testRuntime() core.Runtime {
 }
 
 func testBox() boxData {
-	return boxData{ID: "bx_1", createdID: "bx_1", CreatedAt: "2026-08-30T12:00:00Z", State: "ready", IP: "203.0.113.10", SSHEndpoint: "203.0.113.10:19035"}
+	return boxData{ID: "bx_1", createdID: "bx_1", CreatedAt: "2026-08-30T12:00:00Z", State: "ready", IP: "203.0.113.10"}
 }
 
 func withFakeAPI(t *testing.T, fake api) {
@@ -1196,12 +1194,12 @@ func (r *fakeCommandRunner) Run(_ context.Context, req core.LocalCommandRequest)
 		return core.LocalCommandResult{Stdout: strings.Join([]string{
 			`{"event":"created","id":"bx_1","ttlSeconds":1800}`,
 			`{"event":"state","id":"bx_1","state":"provisioning"}`,
-			`{"event":"ready","id":"bx_1","state":"ready","ip":"203.0.113.10","sshEndpoint":"203.0.113.10:19035","archiveAfter":"2026-05-30T20:00:00Z"}`,
+			`{"event":"ready","id":"bx_1","state":"ready","ip":"203.0.113.10","archiveAfter":"2026-05-30T20:00:00Z"}`,
 		}, "\n")}, nil
 	case strings.Contains(joined, " ssh bx_1 -- true"):
 		return core.LocalCommandResult{}, nil
 	case strings.Contains(joined, " info bx_1"):
-		return core.LocalCommandResult{Stdout: `{"box":{"id":"bx_1","state":"ready","ip":"203.0.113.10","sshEndpoint":"203.0.113.10:19035"}}`}, nil
+		return core.LocalCommandResult{Stdout: `{"box":{"id":"bx_1","state":"ready","ip":"203.0.113.10"}}`}, nil
 	case strings.Contains(joined, " info bx_2"):
 		if len(r.infoResponses) == 0 {
 			return core.LocalCommandResult{Stderr: "missing info response"}, fmt.Errorf("missing info response")
@@ -1210,7 +1208,7 @@ func (r *fakeCommandRunner) Run(_ context.Context, req core.LocalCommandRequest)
 		r.infoResponses = r.infoResponses[1:]
 		return core.LocalCommandResult{Stdout: out}, nil
 	case strings.Contains(joined, " list"):
-		return core.LocalCommandResult{Stdout: `{"boxes":[{"id":"bx_1","state":"ready","ip":"203.0.113.10","sshEndpoint":"203.0.113.10:19035"}]}`}, nil
+		return core.LocalCommandResult{Stdout: `{"boxes":[{"id":"bx_1","state":"ready","ip":"203.0.113.10"}]}`}, nil
 	case strings.Contains(joined, " stop bx_1"):
 		return core.LocalCommandResult{Stdout: `{"id":"bx_1","status":"deleted"}`}, nil
 	case strings.Contains(joined, " delete bx_1"):

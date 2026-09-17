@@ -865,7 +865,7 @@ func TestRollbackRetainsChangedOrUnprovenAttempt(t *testing.T) {
 
 func TestDecodeNewBoxPinsCreatedIdentity(t *testing.T) {
 	for _, tail := range []string{
-		`{"event":"ready","id":"bx_other","state":"ready","ip":"203.0.113.10","sshEndpoint":"203.0.113.10:19035"}`,
+		`{"event":"ready","id":"bx_other","state":"ready","ip":"203.0.113.10"}`,
 		`{"event":"error","id":"bx_other","error":"failed"}`,
 		`{"event":"created","id":"bx_other"}`,
 		`not json`,
