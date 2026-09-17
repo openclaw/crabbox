@@ -81,12 +81,10 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	if cfg.ServerType == "" && core.IsCanonicalProviderClass(cfg.Class) {
 		return nil, core.Exit(2, "provider=%s has no class profile for class=%s target=%s architecture=%s", providerName, cfg.Class, cfg.TargetOS, cfg.Architecture)
 	}
-	if normalized, ok := core.NormalizeCloudflareContainerInstanceType(cfg.ServerType); ok {
-		cfg.ServerType = normalized
-	} else if !cfg.ServerTypeExplicit {
-		cfg.ServerType = (Provider{}).ServerTypeForConfig(cfg)
-	} else {
-		return nil, core.Exit(2, "cloudflare --type must be one of %s", strings.Join(core.CloudflareContainerInstanceTypes(), ", "))
+	instanceType, err := resolveInstanceType(cfg.ServerType, (Provider{}).ServerTypeForConfig(cfg), cfg.ServerTypeExplicit)
+	if err != nil {
+		return nil, err
 	}
+	cfg.ServerType = instanceType
 	return NewCloudflareBackend(p.Spec(), cfg, rt), nil
 }

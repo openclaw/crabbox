@@ -59,12 +59,9 @@ func newCloudflareClient(cfg core.Config, rt core.Runtime) (*cloudflareClient, e
 	if token == "" {
 		return nil, core.Exit(2, "%s requires CRABBOX_CLOUDFLARE_RUNNER_TOKEN or user-level config", providerName)
 	}
-	instanceType, ok := core.NormalizeCloudflareContainerInstanceType(core.Blank(cfg.ServerType, cloudflareContainerInstanceTypeForClass(cfg.Class)))
-	if !ok {
-		if cfg.ServerTypeExplicit {
-			return nil, core.Exit(2, "%s --type must be one of %s", providerName, strings.Join(core.CloudflareContainerInstanceTypes(), ", "))
-		}
-		instanceType = cloudflareContainerInstanceTypeForClass(cfg.Class)
+	instanceType, err := resolveInstanceType(core.Blank(cfg.ServerType, cloudflareContainerInstanceTypeForClass(cfg.Class)), cloudflareContainerInstanceTypeForClass(cfg.Class), cfg.ServerTypeExplicit)
+	if err != nil {
+		return nil, err
 	}
 	parsed, err := url.Parse(apiURL)
 	if err != nil {

@@ -86,9 +86,12 @@ import _ "github.com/openclaw/crabbox/internal/providers/example"
 `cmd/crabbox/main.go` already imports `internal/providers/all`, so nothing else
 needs to change for the binary to see the new provider.
 
-Tests inside `internal/cli` cannot import `internal/providers/all` because that
-creates an import cycle. If you need a test provider for core dispatch, register
-it from a same-package test file.
+Same-package tests in `internal/cli` cannot import provider adapters because that
+creates an import cycle. Register a synthetic provider there only to test core
+dispatch. To test actual provider policy, use an external `cli_test` package,
+which can import and register the real adapter without an import cycle. Use
+scoped backend injection when needed to keep execution local; do not reproduce
+the adapter's policy in a fake provider.
 
 ## Step 3. Register The Provider
 
