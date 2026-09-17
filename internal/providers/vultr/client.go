@@ -174,16 +174,18 @@ func (c *vultrClient) doAttempt(ctx context.Context, method, path string, body a
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusTooManyRequests && allowRetry {
 		delay := retryAfter(resp.Header.Get("Retry-After"))
 		if delay > 0 {
+			// Release this attempt's connection before backoff and the next request.
+			_ = resp.Body.Close()
 			if err := c.sleep(ctx, delay); err != nil {
 				return err
 			}
 			return c.doAttempt(ctx, method, path, body, out, false)
 		}
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		body := strings.TrimSpace(string(data))

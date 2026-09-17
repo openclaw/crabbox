@@ -22,6 +22,7 @@
 - Reject oversized Superserve-derived sandbox lifetimes before rounding seconds, preventing duration overflow from bypassing the seven-day cap. [PR 2504](https://github.com/openclaw/crabbox/pull/2504). Thanks @steipete.
 - Reject overflowing OpenSandbox execution and lifetime budgets before requests, preserve valid coverage rules, and retain recovery claims with malformed lifetime seconds. [PR 2511](https://github.com/openclaw/crabbox/pull/2511). Thanks @steipete.
 - Reject overflowing Cloudflare Dynamic Workers execution budgets before dispatch, preserving disabled timeouts and repository security caps. [PR 2507](https://github.com/openclaw/crabbox/pull/2507). Thanks @steipete.
+- Release Vultr rate-limit responses before waiting and retrying, preventing a retry from stalling behind its own connection limit. [PR 2306](https://github.com/openclaw/crabbox/pull/2306). Thanks @steipete.
 
 ## 0.65.0 - 2026-09-22
 
