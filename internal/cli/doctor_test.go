@@ -612,12 +612,75 @@ func TestDoctorDoesNotPrepareExistingLease(t *testing.T) {
 	}
 }
 
+type cloudflareDoctorOverrideProvider struct {
+	doctorOverrideProvider
+	ProviderClassProfileProvider
+	ProviderServerTypeProvider
+}
+
+type doctorResultBackend struct {
+	testDoctorDelegatedBackend
+	result DoctorResult
+}
+
+func (b doctorResultBackend) Doctor(context.Context, DoctorRequest) (DoctorResult, error) {
+	return b.result, nil
+}
+
+func stubCloudflareDoctor(t *testing.T, result DoctorResult) {
+	t.Helper()
+	original, err := ProviderFor("cloudflare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := doctorResultBackend{
+		testDoctorDelegatedBackend: testDoctorDelegatedBackend{testDelegatedBackend{spec: original.Spec()}},
+		result:                     result,
+	}
+	calls := 0
+	override := cloudflareDoctorOverrideProvider{
+		doctorOverrideProvider: doctorOverrideProvider{
+			doctorConfigurationProvider: doctorConfigurationProvider{
+				Provider: original,
+				configure: func(Config, Runtime) (Backend, error) {
+					t.Fatal("synthetic doctor fixture must not configure the real backend")
+					return nil, nil
+				},
+			},
+			doctor: func(Config, Runtime) (DoctorBackend, error) {
+				calls++
+				return backend, nil
+			},
+		},
+		ProviderClassProfileProvider: original.(ProviderClassProfileProvider),
+		ProviderServerTypeProvider:   original.(ProviderServerTypeProvider),
+	}
+	for _, name := range append([]string{original.Spec().Name}, original.Spec().Aliases...) {
+		key := normalizeProviderName(name)
+		previous, present := providerRegistry[key]
+		t.Cleanup(func() {
+			if present {
+				providerRegistry[key] = previous
+			} else {
+				delete(providerRegistry, key)
+			}
+		})
+		providerRegistry[key] = override
+	}
+	t.Cleanup(func() {
+		if calls != 1 {
+			t.Errorf("synthetic doctor configuration calls=%d, want 1", calls)
+		}
+	})
+}
+
 func TestDoctorRunsDirectProviderCheckForCoordinatorNeverProvider(t *testing.T) {
 	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync", "curl"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("missing local doctor tool %s: %v", tool, err)
 		}
 	}
+	stubCloudflareDoctor(t, DoctorResult{Provider: "cloudflare", Message: "direct_check=ready"})
 	clearConfigEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -736,7 +799,11 @@ func TestDoctorFromRunProviderSurvivesUnrelatedIdentifierClaim(t *testing.T) {
 }
 
 func TestDoctorDirectProviderCheckIncludesTimeoutWhenMessageHasProvider(t *testing.T) {
-	for _, tool := range doctorLocalTools(testCloudflareProvider{}.Spec()) {
+	provider, err := ProviderFor("cloudflare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range doctorLocalTools(provider.Spec()) {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("missing local doctor tool %s: %v", tool, err)
 		}
@@ -746,7 +813,7 @@ func TestDoctorDirectProviderCheckIncludesTimeoutWhenMessageHasProvider(t *testi
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("CRABBOX_CONFIG", "")
-	testCloudflareDoctorResult = &DoctorResult{
+	stubCloudflareDoctor(t, DoctorResult{
 		Provider: "cloudflare",
 		Checks: []DoctorCheck{{
 			Status:  "ok",
@@ -754,11 +821,10 @@ func TestDoctorDirectProviderCheckIncludesTimeoutWhenMessageHasProvider(t *testi
 			Message: "provider=cloudflare direct_check=ready",
 			Details: map[string]string{"provider": "cloudflare"},
 		}},
-	}
-	defer func() { testCloudflareDoctorResult = nil }()
+	})
 
 	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--provider", "cloudflare"})
+	err = (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--provider", "cloudflare"})
 	if err != nil {
 		t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 	}

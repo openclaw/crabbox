@@ -19,7 +19,7 @@ func NewCloudflareBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runti
 	if cfg.ServerType == "" {
 		cfg.ServerType = cloudflareContainerInstanceTypeForClass(cfg.Class)
 	}
-	if normalized, ok := core.NormalizeCloudflareContainerInstanceType(cfg.ServerType); ok {
+	if normalized, ok := normalizeContainerInstanceType(cfg.ServerType); ok {
 		cfg.ServerType = normalized
 	}
 	return &cloudflareBackend{spec: spec, cfg: cfg, rt: rt}

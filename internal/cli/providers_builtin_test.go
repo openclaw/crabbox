@@ -36,7 +36,6 @@ func init() {
 	RegisterProvider(testFreestyleProvider{})
 	RegisterProvider(testE2BProvider{})
 	RegisterProvider(testModalProvider{})
-	RegisterProvider(testCloudflareProvider{})
 	RegisterProvider(testCloudflareDynamicWorkersProvider{})
 	RegisterProvider(testAgentSandboxProvider{})
 	RegisterProvider(testSpritesProvider{})
@@ -1493,59 +1492,6 @@ func (p testModalProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testDelegatedBackend{spec: p.Spec()}, nil
 }
 
-type testCloudflareProvider struct{}
-
-var testCloudflareDoctorResult *DoctorResult
-
-func (testCloudflareProvider) Spec() ProviderSpec {
-	return ProviderSpec{
-		Aliases:          []string{"cf"},
-		Name:             "cloudflare",
-		Kind:             ProviderKindDelegatedRun,
-		Targets:          []TargetSpec{{OS: targetLinux}},
-		Features:         FeatureSet{FeatureArchiveSync, FeatureCleanup},
-		Coordinator:      CoordinatorNever,
-		ClassDisposition: ProviderClassDispositionMapped,
-	}
-}
-func (testCloudflareProvider) RegisterFlags(*flag.FlagSet, Config) any {
-	return noProviderFlags{}
-}
-func (testCloudflareProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
-	return nil
-}
-func (testCloudflareProvider) ServerTypeForConfig(cfg Config) string {
-	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
-		return candidates[0]
-	}
-	if IsCanonicalProviderClass(cfg.Class) {
-		return ""
-	}
-	class := cfg.Class
-	cfg.Class = strings.ToLower(strings.TrimSpace(class))
-	if cfg.Class == "" {
-		cfg.Class = "standard"
-	}
-	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
-		return candidates[0]
-	}
-	if instanceType, ok := normalizeCloudflareContainerInstanceType(class); ok {
-		return instanceType
-	}
-	return strings.TrimSpace(class)
-}
-func (p testCloudflareProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testDoctorDelegatedBackend{testDelegatedBackend{spec: p.Spec()}}, nil
-}
-
-func (p testCloudflareProvider) ConfigureDoctor(cfg Config, rt Runtime) (DoctorBackend, error) {
-	backend, err := p.Configure(cfg, rt)
-	if err != nil {
-		return nil, err
-	}
-	return backend.(DoctorBackend), nil
-}
-
 type testCloudflareDynamicWorkersProvider struct{}
 
 type testCloudflareDynamicWorkersFlagValues struct {
@@ -2356,9 +2302,6 @@ type testDoctorDelegatedBackend struct {
 }
 
 func (b testDoctorDelegatedBackend) Doctor(context.Context, DoctorRequest) (DoctorResult, error) {
-	if testCloudflareDoctorResult != nil {
-		return *testCloudflareDoctorResult, nil
-	}
 	return DoctorResult{Provider: b.spec.Name, Message: "direct_check=ready"}, nil
 }
 

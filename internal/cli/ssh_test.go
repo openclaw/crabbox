@@ -6656,44 +6656,6 @@ func TestAWSExplicitARM64TypeInference(t *testing.T) {
 	}
 }
 
-func TestCloudflareContainerInstanceTypeMapping(t *testing.T) {
-	tests := []struct {
-		class string
-		want  string
-	}{
-		{class: "", want: "standard-4"},
-		{class: "tiny", want: "standard-4"},
-		{class: "small", want: "standard-4"},
-		{class: "standard", want: "standard-4"},
-		{class: "fast", want: "standard-4"},
-		{class: "large", want: "standard-4"},
-		{class: "beast", want: "standard-4"},
-		{class: "lite", want: "lite"},
-		{class: "basic", want: "basic"},
-		{class: "standard-3", want: "standard-3"},
-	}
-	for _, tt := range tests {
-		if got := cloudflareContainerInstanceTypeForClass(tt.class); got != tt.want {
-			t.Fatalf("cloudflareContainerInstanceTypeForClass(%q)=%q want %q", tt.class, got, tt.want)
-		}
-		if got := CloudflareContainerInstanceTypeForClass(tt.class); got != tt.want {
-			t.Fatalf("CloudflareContainerInstanceTypeForClass(%q)=%q want %q", tt.class, got, tt.want)
-		}
-	}
-}
-
-func TestNormalizeCloudflareContainerInstanceType(t *testing.T) {
-	for _, valid := range CloudflareContainerInstanceTypes() {
-		got, ok := NormalizeCloudflareContainerInstanceType(" " + strings.ToUpper(valid) + " ")
-		if !ok || got != valid {
-			t.Fatalf("NormalizeCloudflareContainerInstanceType(%q)=(%q,%t), want (%q,true)", valid, got, ok, valid)
-		}
-	}
-	if got, ok := NormalizeCloudflareContainerInstanceType("ccx63"); ok || got != "" {
-		t.Fatalf("NormalizeCloudflareContainerInstanceType(ccx63)=(%q,%t), want empty,false", got, ok)
-	}
-}
-
 func TestCloudflareServerTypeForConfig(t *testing.T) {
 	tests := []struct {
 		cfg  Config

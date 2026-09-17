@@ -7221,42 +7221,6 @@ func ApplyParallelsTemplateConfig(cfg *Config, name string) error {
 	return nil
 }
 
-func cloudflareContainerInstanceTypes() []string {
-	return []string{"lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"}
-}
-
-func CloudflareContainerInstanceTypes() []string {
-	return cloudflareContainerInstanceTypes()
-}
-
-func normalizeCloudflareContainerInstanceType(value string) (string, bool) {
-	trimmed := strings.ToLower(strings.TrimSpace(value))
-	for _, instanceType := range cloudflareContainerInstanceTypes() {
-		if trimmed == instanceType {
-			return instanceType, true
-		}
-	}
-	return "", false
-}
-
-func NormalizeCloudflareContainerInstanceType(value string) (string, bool) {
-	return normalizeCloudflareContainerInstanceType(value)
-}
-
-func cloudflareContainerInstanceTypeForClass(class string) string {
-	provider, err := ProviderFor("cloudflare")
-	if err == nil {
-		if resolver, ok := provider.(ProviderServerTypeProvider); ok {
-			return resolver.ServerTypeForConfig(Config{Provider: "cloudflare", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class})
-		}
-	}
-	return strings.TrimSpace(class)
-}
-
-func CloudflareContainerInstanceTypeForClass(class string) string {
-	return cloudflareContainerInstanceTypeForClass(class)
-}
-
 func serverTypeCandidatesForClass(class string) []string {
 	cfg := Config{Provider: "hetzner", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class, architectureExplicit: true}
 	return HetznerServerTypeCandidatesForConfig(cfg)

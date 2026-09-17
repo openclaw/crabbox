@@ -60,7 +60,7 @@ func cloudflareTypeForClass(class string) string {
 	if class == "" {
 		return "standard-4"
 	}
-	if instanceType, ok := core.NormalizeCloudflareContainerInstanceType(class); ok {
+	if instanceType, ok := normalizeContainerInstanceType(class); ok {
 		return instanceType
 	}
 	return strings.TrimSpace(class)
