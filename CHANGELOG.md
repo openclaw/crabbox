@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Report Parallels IP-discovery failures when connecting to a lease while preserving VM identity for best-effort status and cleanup.
+
 - Preserve terminal heredocs and significant trailing whitespace in Blacksmith Testbox shell commands while retaining command output and exit status. [PR 2295](https://github.com/openclaw/crabbox/pull/2295). Thanks @shakkernerd.
 
 - Preserve local GCP lease claims during cleanup dry-runs when an instance disappears, and share the cleanup mutation boundary with Azure recovery. [PR 2297](https://github.com/openclaw/crabbox/pull/2297).

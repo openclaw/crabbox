@@ -173,7 +173,14 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 					return core.LeaseTarget{}, err
 				}
 				if vm.IP == "" && strings.EqualFold(vm.State, "running") {
-					vm, _ = client.WaitForIP(ctx, vm.ID, 30*time.Second)
+					discovered, err := client.WaitForIP(ctx, vm.ID, 30*time.Second)
+					if err != nil {
+						if !req.ReleaseOnly && !req.StatusOnly {
+							return core.LeaseTarget{}, err
+						}
+					} else {
+						vm = discovered
+					}
 				}
 				if strings.TrimSpace(candidate.SSHUser) == core.BaseConfig().SSHUser {
 					var user string
