@@ -23,7 +23,7 @@ type execTestProvider struct {
 func (p execTestProvider) Spec() ProviderSpec {
 	spec := p.runEnvProfileTestProvider.Spec()
 	spec.Name = "exec-command-test"
-	spec.Targets = []TargetSpec{{OS: targetLinux}}
+	spec.Targets = []TargetSpec{{OS: targetLinux}, {OS: targetWindows, WindowsMode: windowsModeNormal}}
 	spec.Features = append(spec.Features, FeatureClaimExec)
 	return spec
 }
