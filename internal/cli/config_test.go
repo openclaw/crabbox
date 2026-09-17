@@ -15370,6 +15370,76 @@ func TestVastBindingCoreDefaultsAndMarkers(t *testing.T) {
 			t.Fatal("core explicit projection changed")
 		}
 	}
+	t.Run("restore saved connection values without changing intent", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "vast"
+		cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort = "/saved/root", "saved-user", "2200"
+		MarkWorkRootExplicit(&cfg)
+		MarkSSHUserExplicit(&cfg)
+		MarkSSHPortExplicit(&cfg)
+		cfg.WorkRoot, cfg.SSHUser, cfg.SSHPort = "/current/root", "current-user", "2222"
+		cfg.Vast.WorkRoot = "/unmarked/provider/root"
+		cfg.SSHFallbackPorts = []string{"2223"}
+		before := cfg.credentialProvenance
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.WorkRoot != "/saved/root" || cfg.Vast.WorkRoot != "/saved/root" || cfg.SSHUser != "saved-user" || cfg.SSHPort != "2200" || len(cfg.SSHFallbackPorts) != 0 {
+			t.Fatal("saved connection restoration changed")
+		}
+		if !reflect.DeepEqual(cfg.credentialProvenance, before) || IsVastWorkRootExplicit(&cfg) || DeleteOnReleaseExplicit(cfg, "vast") || IsTargetExplicit(&cfg) {
+			t.Fatal("defaulting changed input intent")
+		}
+	})
+	for _, target := range []string{targetLinux, targetMacOS, targetWindows} {
+		t.Run("explicit target "+target, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider, cfg.TargetOS = "vast", target
+			MarkTargetExplicit(&cfg)
+			if err := applyProviderConfigDefaults(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TargetOS != target || cfg.WorkRoot != defaultWorkRootForTarget(target, windowsModeNormal) || cfg.Vast.WorkRoot != VastConfigDefaultWorkRoot {
+				t.Fatal("target normalization phase changed")
+			}
+		})
+	}
+	t.Run("saved windows mode and inherited target", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider, cfg.TargetOS = "vast", targetWindows
+		cfg.WindowsMode = windowsModeWSL2
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.TargetOS != targetLinux || cfg.WindowsMode != windowsModeNormal {
+			t.Fatal("inherited target or mode was retained")
+		}
+		cfg.TargetOS = targetWindows
+		MarkTargetExplicit(&cfg)
+		cfg.explicitWindowsMode = windowsModeWSL2
+		cfg.WindowsMode = windowsModeNormal
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.TargetOS != targetWindows || cfg.WindowsMode != windowsModeWSL2 || cfg.WorkRoot != defaultPOSIXWorkRoot {
+			t.Fatal("saved windows mode restoration changed")
+		}
+	})
+
+	t.Run("raw field defaults and normalized instance type", func(t *testing.T) {
+		cfg := baseConfig()
+		cfg.Provider = "vast"
+		cfg.Vast = VastConfig{APIURL: " ", InstanceType: " On_Demand ", Image: " ", Runtype: " ", DiskGB: -1, Order: " ", User: " ", WorkRoot: " ", ReleaseAction: " "}
+		want := cfg.Vast
+		want.InstanceType = "ondemand"
+		if err := applyProviderConfigDefaults(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Vast != want || cfg.WorkRoot != defaultPOSIXWorkRoot {
+			t.Fatal("raw-empty provider defaults or subsequent root normalization changed")
+		}
+	})
+
 }
 
 func TestVastBindingCentralURLPhase(t *testing.T) {

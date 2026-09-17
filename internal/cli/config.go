@@ -1186,61 +1186,6 @@ func applyProviderConfigDefaults(cfg *Config) error {
 			return validateTargetConfig(*cfg)
 		}
 	}
-	if cfg.Provider == "vast" {
-		cfg.Vast.InstanceType = normalizeVastInstanceType(cfg.Vast.InstanceType)
-		if cfg.Vast.APIURL == "" {
-			cfg.Vast.APIURL = VastConfigDefaultAPIURL
-		}
-		if cfg.Vast.InstanceType == "" {
-			cfg.Vast.InstanceType = VastConfigDefaultInstanceType
-		}
-		if cfg.Vast.Image == "" {
-			cfg.Vast.Image = VastConfigDefaultImage
-		}
-		if cfg.Vast.Runtype == "" {
-			cfg.Vast.Runtype = VastConfigDefaultRuntype
-		}
-		if cfg.Vast.DiskGB == 0 {
-			cfg.Vast.DiskGB = VastConfigDefaultDiskGB
-		}
-		if cfg.Vast.Order == "" {
-			cfg.Vast.Order = VastConfigDefaultOrder
-		}
-		if cfg.Vast.User == "" {
-			cfg.Vast.User = VastConfigDefaultUser
-		}
-		if cfg.Vast.WorkRoot == "" {
-			cfg.Vast.WorkRoot = VastConfigDefaultWorkRoot
-		}
-		if cfg.Vast.ReleaseAction == "" {
-			cfg.Vast.ReleaseAction = VastConfigDefaultReleaseAction
-		}
-		if !IsTargetExplicit(cfg) {
-			cfg.TargetOS = targetLinux
-		}
-		if cfg.explicitWindowsMode != "" {
-			cfg.WindowsMode = cfg.explicitWindowsMode
-		} else {
-			cfg.WindowsMode = windowsModeNormal
-		}
-		if cfg.explicitWorkRoot != "" && !IsVastWorkRootExplicit(cfg) {
-			cfg.Vast.WorkRoot = cfg.explicitWorkRoot
-		}
-		cfg.WorkRoot = cfg.Vast.WorkRoot
-		if cfg.explicitSSHUser != "" {
-			cfg.SSHUser = cfg.explicitSSHUser
-		} else {
-			cfg.SSHUser = cfg.Vast.User
-		}
-		if cfg.explicitSSHPort != "" {
-			cfg.SSHPort = cfg.explicitSSHPort
-		} else {
-			cfg.SSHPort = "22"
-		}
-		cfg.SSHFallbackPorts = nil
-		normalizeTargetConfig(cfg)
-		return validateTargetConfig(*cfg)
-	}
 	if cfg.Provider == "hyperv" {
 		if !IsTargetExplicit(cfg) {
 			cfg.TargetOS = targetWindows
