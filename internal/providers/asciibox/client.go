@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -86,10 +87,7 @@ var newAPI = func(cfg core.Config, rt core.Runtime) (api, error) {
 	if rt.Exec == nil {
 		return nil, core.Exit(2, "provider=%s requires a local command runner", providerName)
 	}
-	cliPath := strings.TrimSpace(cfg.AsciiBox.CLIPath)
-	if cliPath == "" {
-		cliPath = "box"
-	}
+	cliPath := resolveAsciiBoxCLI(strings.TrimSpace(cfg.AsciiBox.CLIPath))
 	return &client{apiKey: apiKey, apiURL: apiURL, org: asciiBoxOrg(), cliPath: cliPath, home: asciiBoxCLIHome(), runner: rt.Exec}, nil
 }
 
@@ -650,13 +648,40 @@ func (c *client) formatError(result core.LocalCommandResult, err error) string {
 
 var (
 	boxTokenParamRE = regexp.MustCompile(`(?i)([?&](?:box_token|token|access_token|auth_token)=)[^&\s"']+`)
-	boxSecretRE     = regexp.MustCompile(`box_[A-Za-z0-9_-]+`)
+	// Legacy keys are "box_"-prefixed; the Boat rename issues "boat_" keys.
+	// Match both so a live credential can never reach diagnostics unredacted.
+	boxSecretRE = regexp.MustCompile(`bo(?:x|at)_[A-Za-z0-9_-]+`)
 )
 
 func redactBoxSecrets(value string) string {
 	value = boxTokenParamRE.ReplaceAllString(value, "${1}REDACTED")
-	return boxSecretRE.ReplaceAllString(value, "box_REDACTED")
+	return boxSecretRE.ReplaceAllStringFunc(value, func(secret string) string {
+		prefix := secret[:strings.Index(secret, "_")+1]
+		return prefix + "REDACTED"
+	})
 }
+
+// ASCII renamed the Box CLI to Boat, so a current install ships only "boat".
+// Fall forward to it when the configured bare name is the legacy default and
+// that binary is not installed. An explicit path or any resolvable name is
+// always honored as given.
+func resolveAsciiBoxCLI(configured string) string {
+	if configured == "" {
+		configured = "box"
+	}
+	if configured != "box" || filepath.Base(configured) != configured {
+		return configured
+	}
+	if _, err := asciiBoxCLILookPath("box"); err == nil {
+		return "box"
+	}
+	if _, err := asciiBoxCLILookPath("boat"); err == nil {
+		return "boat"
+	}
+	return "box"
+}
+
+var asciiBoxCLILookPath = exec.LookPath
 
 func asciiBoxCLIHome() string {
 	if configured := strings.TrimSpace(os.Getenv("CRABBOX_ASCII_BOX_HOME")); configured != "" {
@@ -797,11 +822,20 @@ func mergeBox(base, update boxData) boxData {
 }
 
 func decodeBox(data []byte) (boxData, error) {
+	// ASCII renamed Box to Boat and renamed the CLI's JSON envelope from "box"
+	// to "sandbox". Accept either so one Crabbox build works against both the
+	// renamed CLI and older installs.
 	var wrapped struct {
-		Box boxData `json:"box"`
+		Sandbox boxData `json:"sandbox"`
+		Box     boxData `json:"box"`
 	}
-	if err := json.Unmarshal(data, &wrapped); err == nil && strings.TrimSpace(wrapped.Box.ID) != "" {
-		return wrapped.Box, nil
+	if err := json.Unmarshal(data, &wrapped); err == nil {
+		if strings.TrimSpace(wrapped.Sandbox.ID) != "" {
+			return wrapped.Sandbox, nil
+		}
+		if strings.TrimSpace(wrapped.Box.ID) != "" {
+			return wrapped.Box, nil
+		}
 	}
 	var box boxData
 	if err := json.Unmarshal(data, &box); err != nil {
@@ -812,17 +846,26 @@ func decodeBox(data []byte) (boxData, error) {
 
 func decodeBoxes(data []byte, requireComplete bool) ([]boxData, error) {
 	var wrapped struct {
-		Boxes    []boxData `json:"boxes"`
-		PageInfo struct {
+		Sandboxes []boxData `json:"sandboxes"`
+		Boxes     []boxData `json:"boxes"`
+		PageInfo  struct {
 			HasMore    bool   `json:"hasMore"`
 			NextCursor string `json:"nextCursor"`
 		} `json:"pageInfo"`
 	}
-	if err := json.Unmarshal(data, &wrapped); err == nil && wrapped.Boxes != nil {
-		if requireComplete && (wrapped.PageInfo.HasMore || wrapped.PageInfo.NextCursor != "") {
-			return nil, fmt.Errorf("ascii-box inventory is paginated; cannot prove complete absence")
+	if err := json.Unmarshal(data, &wrapped); err == nil {
+		// An empty but present array is a complete, empty inventory, so keep
+		// nil-vs-empty significant when choosing between the two envelopes.
+		inventory := wrapped.Sandboxes
+		if inventory == nil {
+			inventory = wrapped.Boxes
 		}
-		return completeBoxes(wrapped.Boxes)
+		if inventory != nil {
+			if requireComplete && (wrapped.PageInfo.HasMore || wrapped.PageInfo.NextCursor != "") {
+				return nil, fmt.Errorf("ascii-box inventory is paginated; cannot prove complete absence")
+			}
+			return completeBoxes(inventory)
+		}
 	}
 	var boxes []boxData
 	if err := json.Unmarshal(data, &boxes); err != nil {

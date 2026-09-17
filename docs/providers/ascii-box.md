@@ -11,20 +11,17 @@ Read when:
 > `ascii-box`, `ascii`, and `asciibox` names remain compatible so existing
 > configuration and durable lease state continue to resolve safely.
 >
-> The rename is very recent. The upstream Boat site and YC listing have moved to
-> `boat.dev` / Boat, while older `box.ascii.dev` surfaces are still available
-> during the migration. This adapter therefore keeps its existing Box CLI/config
-> contract for now instead of guessing at migration details that could break
-> existing leases.
+> The canonical provider id stays `ascii-box` so durable lease and claim state
+> keeps resolving. Crabbox reads both the renamed `sandbox`/`sandboxes` CLI JSON
+> envelopes and the legacy `box`/`boxes` ones, and prefers the `boat` binary when
+> the legacy `box` command is not installed, so one build works across the
+> migration.
 
 [Boat](https://boat.dev) (by ASCII) provides persistent Ubuntu sandbox VMs.
 Crabbox currently uses the documented legacy `box --json` automation surface as
 the control plane, lets `box ssh` prepare the CLI-managed SSH key, and then runs
 normal Crabbox sync and commands over SSH. The provider does not depend on
 private exec, upload, or command-stream REST endpoints.
-
-Boat is a Y Combinator **Fall 2026** company. The YC listing describes Boat as
-cloud VMs for agents and links to `boat.dev`.
 
 ## When To Use
 

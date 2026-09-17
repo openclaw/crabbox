@@ -55,7 +55,7 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	if p.Spec().Name != providerName {
 		t.Fatalf("Name=%q want %s", p.Spec().Name, providerName)
 	}
-	for _, alias := range []string{"ascii", "asciibox", "ascii-box"} {
+	for _, alias := range []string{"boat", "ascii", "asciibox", "ascii-box"} {
 		got, err := core.ProviderFor(alias)
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)
@@ -544,6 +544,169 @@ func TestRedactBoxSecrets(t *testing.T) {
 	got := redactBoxSecrets(`open https://box.ascii.dev/session?box_token=secret-value&ok=1 with box_realToken`)
 	if strings.Contains(got, "secret-value") || strings.Contains(got, "box_realToken") {
 		t.Fatalf("redacted=%q", got)
+	}
+}
+
+// The Boat rename issues "boat_"-prefixed API keys. They must redact like the
+// legacy "box_" keys instead of reaching diagnostics in the clear.
+func TestRedactBoxSecretsCoversBothKeyPrefixes(t *testing.T) {
+	for _, tt := range []struct {
+		name, secret, wantPrefix string
+	}{
+		{"legacy box key", "box_realTokenValue", "box_REDACTED"},
+		{"renamed boat key", "boat_realTokenValue", "boat_REDACTED"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactBoxSecrets("ascii-box CLI limits failed: rejected " + tt.secret)
+			if strings.Contains(got, tt.secret) {
+				t.Fatalf("redacted output leaked the key: %q", got)
+			}
+			if !strings.Contains(got, tt.wantPrefix) {
+				t.Fatalf("redacted=%q want it to contain %q", got, tt.wantPrefix)
+			}
+		})
+	}
+}
+
+// Boat reports a box ready before it publishes the SSH endpoint, and serves SSH
+// on a per-box port. Readiness must wait for that endpoint rather than resolve
+// to the ip:22 fallback.
+func TestBoxReadyForSSHRequiresAdvertisedEndpoint(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		box  boxData
+		want bool
+	}{
+		{"ready with advertised endpoint", boxData{State: "ready", IP: "203.0.113.10", SSHEndpoint: "198.51.100.20:19040"}, true},
+		{"idle with advertised endpoint", boxData{State: "idle", IP: "203.0.113.10", SSHEndpoint: "198.51.100.20:19040"}, true},
+		{"snake_case endpoint alias", boxData{State: "ready", SSHEndpointAlt: "198.51.100.20:19040"}, true},
+		{"ready but endpoint not yet published", boxData{State: "ready", IP: "2001:db8::28"}, false},
+		{"idle but endpoint not yet published", boxData{State: "idle", IP: "203.0.113.10"}, false},
+		{"terminal state with endpoint", boxData{State: "deleted", SSHEndpoint: "198.51.100.20:19040"}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := boxReadyForSSH(tt.box); got != tt.want {
+				t.Fatalf("boxReadyForSSH(%#v)=%v want %v", tt.box, got, tt.want)
+			}
+		})
+	}
+}
+
+// The CLI mints this key. The renamed CLI writes ascii_sandbox_ed25519 while
+// older Box CLIs wrote ascii_box_ed25519, so Crabbox must read whichever name
+// the installed CLI actually created.
+func TestBoxSSHKeyResolvesCLIMintedName(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		present []string
+		want    string
+	}{
+		{"renamed CLI key", []string{"ascii_sandbox_ed25519"}, "ascii_sandbox_ed25519"},
+		{"legacy CLI key", []string{"ascii_box_ed25519"}, "ascii_box_ed25519"},
+		{"both present prefers current", []string{"ascii_box_ed25519", "ascii_sandbox_ed25519"}, "ascii_sandbox_ed25519"},
+		{"neither present keeps legacy default", nil, "ascii_box_ed25519"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("CRABBOX_ASCII_BOX_HOME", home)
+			if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range tt.present {
+				if err := os.WriteFile(filepath.Join(home, ".ssh", key), []byte("key"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := boxSSHKey(core.Config{})
+			if want := filepath.Join(home, ".ssh", tt.want); got != want {
+				t.Fatalf("boxSSHKey()=%q want %q", got, want)
+			}
+		})
+	}
+}
+
+// ASCII renamed the Box CLI to Boat. A current install ships only "boat", but an
+// explicitly configured command must always be honored exactly as given.
+func TestResolveAsciiBoxCLIPrefersInstalledBinary(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		configured string
+		installed  map[string]bool
+		want       string
+	}{
+		{"legacy box still installed", "box", map[string]bool{"box": true, "boat": true}, "box"},
+		{"only renamed boat installed", "box", map[string]bool{"boat": true}, "boat"},
+		{"empty falls back to boat when box absent", "", map[string]bool{"boat": true}, "boat"},
+		{"neither installed keeps legacy name", "box", nil, "box"},
+		{"explicit boat honored", "boat", map[string]bool{"box": true}, "boat"},
+		{"explicit absolute path honored", "/opt/ascii/bin/box", nil, "/opt/ascii/bin/box"},
+		{"explicit relative path honored", "./box", map[string]bool{"boat": true}, "./box"},
+		{"explicit other name honored", "box-legacy", map[string]bool{"boat": true}, "box-legacy"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			original := asciiBoxCLILookPath
+			t.Cleanup(func() { asciiBoxCLILookPath = original })
+			asciiBoxCLILookPath = func(name string) (string, error) {
+				if tt.installed[name] {
+					return "/usr/local/bin/" + name, nil
+				}
+				return "", fmt.Errorf("%s: not found", name)
+			}
+			if got := resolveAsciiBoxCLI(tt.configured); got != tt.want {
+				t.Fatalf("resolveAsciiBoxCLI(%q)=%q want %q", tt.configured, got, tt.want)
+			}
+		})
+	}
+}
+
+// ASCII renamed Box to Boat and renamed the CLI's JSON envelope from
+// "box"/"boxes" to "sandbox"/"sandboxes". One build must read both.
+func TestDecodeBoxAcceptsRenamedEnvelope(t *testing.T) {
+	for _, tt := range []struct {
+		name, payload string
+	}{
+		{"renamed sandbox envelope", `{"sandbox":{"id":"bx_1","state":"idle","sshEndpoint":"198.51.100.20:19035"}}`},
+		{"legacy box envelope", `{"box":{"id":"bx_1","state":"idle","sshEndpoint":"198.51.100.20:19035"}}`},
+		{"bare object", `{"id":"bx_1","state":"idle","sshEndpoint":"198.51.100.20:19035"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			box, err := decodeBox([]byte(tt.payload))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if box.ID != "bx_1" || box.State != "idle" || box.SSHEndpoint != "198.51.100.20:19035" {
+				t.Fatalf("decoded=%#v", box)
+			}
+		})
+	}
+}
+
+func TestDecodeBoxesAcceptsRenamedEnvelope(t *testing.T) {
+	for _, tt := range []struct {
+		name, payload string
+		want          int
+	}{
+		{"renamed sandboxes envelope", `{"sandboxes":[{"id":"bx_1"},{"id":"bx_2"}],"pageInfo":{"hasMore":false,"nextCursor":null}}`, 2},
+		{"legacy boxes envelope", `{"boxes":[{"id":"bx_1"},{"id":"bx_2"}]}`, 2},
+		{"renamed empty inventory proves absence", `{"sandboxes":[],"pageInfo":{"hasMore":false,"nextCursor":null}}`, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			boxes, err := decodeBoxes([]byte(tt.payload), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(boxes) != tt.want {
+				t.Fatalf("decoded %d boxes, want %d: %#v", len(boxes), tt.want, boxes)
+			}
+		})
+	}
+}
+
+// A paginated inventory can never prove complete absence, whichever envelope
+// the CLI used to report it.
+func TestDecodeBoxesRejectsPaginatedRenamedInventory(t *testing.T) {
+	if _, err := decodeBoxes([]byte(`{"sandboxes":[{"id":"bx_1"}],"pageInfo":{"hasMore":true,"nextCursor":"c1"}}`), true); err == nil {
+		t.Fatal("paginated renamed inventory was accepted as complete")
 	}
 }
 

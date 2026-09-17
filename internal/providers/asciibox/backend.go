@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path"
 	"regexp"
 	"strings"
@@ -538,8 +539,19 @@ func boxSSHConnection(box boxData) (string, string, error) {
 	return host, "22", nil
 }
 
+// The CLI owns this key; Crabbox only reads whichever name the installed CLI
+// minted. The renamed CLI writes ascii_sandbox_ed25519 while older Box CLIs
+// wrote ascii_box_ed25519, so probe the current name first and keep the legacy
+// name as the default when neither exists yet.
 func boxSSHKey(cfg core.Config) string {
-	return path.Join(asciiBoxCLIHome(), ".ssh", "ascii_box_ed25519")
+	dir := path.Join(asciiBoxCLIHome(), ".ssh")
+	for _, name := range []string{"ascii_sandbox_ed25519", "ascii_box_ed25519"} {
+		candidate := path.Join(dir, name)
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+			return candidate
+		}
+	}
+	return path.Join(dir, "ascii_box_ed25519")
 }
 
 func boxHost(box boxData) string {
@@ -576,8 +588,16 @@ func boxExpiresAt(box boxData) string {
 	}
 }
 
+func boxSSHAdvertised(box boxData) bool {
+	return shared.FirstNonBlankTrimmed(box.SSHEndpoint, box.SSHEndpointAlt) != ""
+}
+
 func boxReadyForSSH(box boxData) bool {
-	return statusReady(boxState(box)) && boxHost(box) != "" && boxSSHUser(box) != ""
+	// Boat reports a box ready before it publishes the SSH endpoint, and it
+	// serves SSH on a per-box port rather than 22. Requiring the advertised
+	// endpoint keeps readiness from resolving to the ip:22 fallback, which
+	// never answers and burns the whole provisioning deadline.
+	return statusReady(boxState(box)) && boxSSHAdvertised(box) && boxSSHUser(box) != ""
 }
 
 func boxStateFailed(status string) bool {
