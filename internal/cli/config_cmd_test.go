@@ -2227,7 +2227,6 @@ func TestConfigShowSSHDefaults(t *testing.T) {
 	type sshValues struct{ user, port string }
 	for _, tc := range []struct {
 		name, provider     string
-		source             providerSelectionSource
 		user, port         string
 		marked             *sshValues
 		fallback           []string
@@ -2240,7 +2239,7 @@ func TestConfigShowSSHDefaults(t *testing.T) {
 			wantUser: "root", wantPort: "22",
 		},
 		{
-			name: "digitalocean/base compiled default", provider: "digitalocean", source: providerSelectionCompiledDefault,
+			name: "digitalocean/compiled connection defaults", provider: "digitalocean",
 			user: "crabbox", port: "2222", fallback: []string{"22", "2201"}, fallbackExplicit: true,
 			wantUser: "root", wantPort: "22",
 		},
@@ -2249,7 +2248,7 @@ func TestConfigShowSSHDefaults(t *testing.T) {
 			wantUser: "root", wantPort: "22",
 		},
 		{
-			name: "linode/base compiled default", provider: "linode", source: providerSelectionCompiledDefault,
+			name: "linode/compiled connection defaults", provider: "linode",
 			user: "crabbox", port: "2222", fallback: []string{"22", "2201"},
 			wantUser: "root", wantPort: "22",
 		},
@@ -2258,7 +2257,7 @@ func TestConfigShowSSHDefaults(t *testing.T) {
 			wantUser: "root", wantPort: "22",
 		},
 		{
-			name: "vultr/base compiled default", provider: "vultr", source: providerSelectionCompiledDefault,
+			name: "vultr/compiled connection defaults", provider: "vultr",
 			user: "crabbox", port: "2222", fallback: []string{}, fallbackExplicit: true,
 			wantUser: "root", wantPort: "22",
 		},
@@ -2268,7 +2267,7 @@ func TestConfigShowSSHDefaults(t *testing.T) {
 			wantUser: "ubuntu", wantPort: "22",
 		},
 		{
-			name: "lambda/base compiled default", provider: "lambda", source: providerSelectionCompiledDefault,
+			name: "lambda/compiled connection defaults", provider: "lambda",
 			user: "crabbox", port: "2222", fallback: []string{"22", "2201"}, fallbackExplicit: true,
 			wantUser: "ubuntu", wantPort: "22",
 		},
@@ -2277,7 +2276,7 @@ func TestConfigShowSSHDefaults(t *testing.T) {
 			wantUser: "root", wantPort: "22",
 		},
 		{
-			name: "scaleway/base compiled default", provider: "scaleway", source: providerSelectionCompiledDefault,
+			name: "scaleway/compiled connection defaults", provider: "scaleway",
 			user: "crabbox", port: "2222", fallback: []string{"22", "2201"},
 			wantUser: "root", wantPort: "22",
 		},
@@ -2286,7 +2285,7 @@ func TestConfigShowSSHDefaults(t *testing.T) {
 			wantUser: "ubuntu", wantPort: "22",
 		},
 		{
-			name: "tencentcloud/base compiled default", provider: "tencentcloud", source: providerSelectionCompiledDefault,
+			name: "tencentcloud/compiled connection defaults", provider: "tencentcloud",
 			user: "crabbox", port: "2222", fallback: []string{},
 			wantUser: "ubuntu", wantPort: "22",
 		},
@@ -2346,7 +2345,7 @@ func TestConfigShowSSHDefaults(t *testing.T) {
 			wantUser: "", wantPort: "",
 		},
 		{
-			name: "scaleway/actionable selection", provider: "scaleway", source: providerSelectionFlag,
+			name: "scaleway/actionable selection", provider: "scaleway",
 			fallback: []string{"2201"}, wantUser: "root", wantPort: "22",
 		},
 		{
@@ -2354,28 +2353,13 @@ func TestConfigShowSSHDefaults(t *testing.T) {
 			fallback: []string{"22", "2201"}, wantFallback: []string{"22", "2201"},
 			wantUser: "", wantPort: "",
 		},
-		{
-			name: "outside cohort/padded provider", provider: " digitalocean ",
-			user: "crabbox", port: "2222", fallback: []string{"2201"},
-			wantUser: "crabbox", wantPort: "2222", wantFallback: []string{"2201"},
-		},
-		{
-			name: "outside cohort/alias", provider: "do",
-			fallback: []string{}, wantFallback: []string{},
-			wantUser: "", wantPort: "",
-		},
-		{
-			name: "outside cohort/case variant", provider: "Lambda",
-			user: "crabbox", port: "2222", fallback: []string{"2201"},
-			wantUser: "crabbox", wantPort: "2222", wantFallback: []string{"2201"},
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := Config{
-				Provider: tc.provider, providerSelectionSource: tc.source,
 				TargetOS: "windows", WindowsMode: "wsl", Class: "beast", WorkRoot: "/srv/config-show",
 				SSHFallbackPorts: tc.fallback, sshFallbackPortsExplicit: tc.fallbackExplicit,
 			}
+			setProviderSelection(&cfg, tc.provider, providerSelectionFlag)
 			// Keep the unrelated work-root preprojections stable for the full-config comparison.
 			cfg.Hostinger.WorkRoot = "/srv/hostinger"
 			cfg.Vast.WorkRoot = "/srv/vast"
@@ -2410,6 +2394,31 @@ func TestConfigShowSSHDefaults(t *testing.T) {
 				t.Errorf("display projection changed fallback backing data: got %#v, want %#v", fallbackBacking, beforeBacking)
 			}
 		})
+	}
+}
+
+func TestConfigShowSSHDefaultsUnselected(t *testing.T) {
+	clearConfigEnv(t)
+	for _, provider := range []string{"", "hetzner", "digitalocean", "linode", "vultr", "lambda", "scaleway", "tencentcloud", " digitalocean ", "do", "Lambda"} {
+		for _, source := range []providerSelectionSource{"", providerSelectionCompiledDefault} {
+			t.Run(provider+"/"+string(source), func(t *testing.T) {
+				cfg := Config{
+					Provider: provider, providerSelectionSource: source,
+					SSHUser: "crabbox", SSHPort: "2222", SSHFallbackPorts: []string{"2201"},
+				}
+				cfg.Hostinger.WorkRoot = "/srv/hostinger"
+				cfg.Vast.WorkRoot = "/srv/vast"
+				cfg.NvidiaBrev.WorkRoot = "/srv/brev"
+				before := cfg
+				before.SSHFallbackPorts = slices.Clone(cfg.SSHFallbackPorts)
+				if got := effectiveConfigForShow(cfg); !reflect.DeepEqual(got, before) {
+					t.Fatal("unselected provider changed display configuration")
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("unselected display projection changed the input configuration")
+				}
+			})
+		}
 	}
 }
 
