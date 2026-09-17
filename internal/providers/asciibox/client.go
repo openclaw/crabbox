@@ -366,8 +366,15 @@ func decodeBoxDeletionOperation(output, targetID, operationID string) (boxDeleti
 	return operation, nil
 }
 
+// The renamed CLI reports deletion operations with kind "sandbox"; older Box
+// CLIs reported "box". Accept exactly those two so the guard stays fail-closed
+// on any other kind.
+func boxDeletionKind(kind string) bool {
+	return kind == "sandbox" || kind == "box"
+}
+
 func validateBoxDeletionOperation(operation boxDeletionOperation, targetID, operationID string) error {
-	if !boxDeletionIDRE.MatchString(operation.ID) || operation.Kind != "box" || operation.TargetID != targetID || operationID != "" && operation.ID != operationID {
+	if !boxDeletionIDRE.MatchString(operation.ID) || !boxDeletionKind(operation.Kind) || operation.TargetID != targetID || operationID != "" && operation.ID != operationID {
 		return fmt.Errorf("ascii-box deletion operation identity is missing or changed; retaining claim")
 	}
 	switch operation.Status {

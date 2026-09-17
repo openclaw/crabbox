@@ -592,6 +592,33 @@ func TestBoxReadyForSSHRequiresAdvertisedEndpoint(t *testing.T) {
 	}
 }
 
+// Releasing a lease must survive the rename: the current CLI reports deletion
+// operations with kind "sandbox" while older Box CLIs reported "box". Any other
+// kind must still be rejected so the claim is retained.
+func TestValidateBoxDeletionOperationAcceptsRenamedKind(t *testing.T) {
+	const opID = "bdop_e896e624d8af4d9e92cab7848ecb8a83"
+	for _, tt := range []struct {
+		name, kind string
+		wantErr    bool
+	}{
+		{"renamed sandbox kind", "sandbox", false},
+		{"legacy box kind", "box", false},
+		{"unrelated kind is rejected", "snapshot", true},
+		{"empty kind is rejected", "", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			operation := boxDeletionOperation{ID: opID, Kind: tt.kind, TargetID: "bx_1", Status: "pending"}
+			err := validateBoxDeletionOperation(operation, "bx_1", opID)
+			if tt.wantErr && err == nil {
+				t.Fatalf("kind %q was accepted", tt.kind)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("kind %q rejected: %v", tt.kind, err)
+			}
+		})
+	}
+}
+
 // The CLI mints this key. The renamed CLI writes ascii_sandbox_ed25519 while
 // older Box CLIs wrote ascii_box_ed25519, so Crabbox must read whichever name
 // the installed CLI actually created.
