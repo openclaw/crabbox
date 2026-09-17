@@ -32,6 +32,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/runner"
+	"github.com/openclaw/crabbox/internal/runner/runnerwire"
+	"github.com/openclaw/crabbox/internal/runtimeartifact"
 )
 
 type rejectTimingJSONWriter struct {
@@ -384,6 +388,19 @@ esac
 printf '%s\n%s\n---\n' "$cmd" "$decoded" >> "$CRABBOX_FAKE_SSH_LOG"
 match=$cmd
 if [ -n "$decoded" ]; then match=$decoded; fi
+if [ -n "${CRABBOX_FAKE_SSH_FILESYSTEM_PATH:-}" ]; then
+  case "$match" in
+    *"uname -m"*|*"/tmp/crabbox-runtime-"*)
+      case "$match" in
+        *"__filesystem"*)
+          /usr/bin/tee "$CRABBOX_FAKE_SSH_FILESYSTEM_REQUEST" | PATH="$CRABBOX_FAKE_SSH_FILESYSTEM_PATH" /bin/sh -c "$match"
+          ;;
+        *) PATH="$CRABBOX_FAKE_SSH_FILESYSTEM_PATH" /bin/sh -c "$match" ;;
+      esac
+      exit $?
+      ;;
+  esac
+fi
 case "$match" in
   *"protocol_action='acquire'"*) printf ACQUIRED; exit 0 ;;
   *"protocol_action='renew'"*) printf RENEWED; exit 0 ;;
@@ -5588,6 +5605,18 @@ exit 0
 }
 
 func TestRunCommandEmptyReplacementLists(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX recording SSH fixture")
+	}
+	// Compile once before the recording fixture deliberately removes Go from PATH.
+	artifact, err := runner.DevelopmentSource().Open(t.Context(), runtimeartifact.Target{OS: runtime.GOOS, Arch: runtime.GOARCH})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := artifact.Close(); err != nil {
+		t.Fatal(err)
+	}
+	nativePath := os.Getenv("PATH")
 	for _, tc := range []struct {
 		name      string
 		flags     []string
@@ -5605,12 +5634,18 @@ func TestRunCommandEmptyReplacementLists(t *testing.T) {
 			t.Chdir(dir)
 			t.Setenv("CRABBOX_CONFIG", "")
 			logPath := installRecordingSSH(t, dir)
+			requestPath := filepath.Join(dir, "filesystem.request")
+			t.Setenv("CRABBOX_FAKE_SSH_FILESYSTEM_PATH", nativePath)
+			t.Setenv("CRABBOX_FAKE_SSH_FILESYSTEM_REQUEST", requestPath)
 			for _, name := range []string{"CI", "NODE_OPTIONS", "BUILD_FLAVOR"} {
 				t.Setenv(name, "synthetic-local-proof")
 			}
 			writeReplacementListConfig(t, "crabbox.yaml", fmt.Sprintf("env:\n  allow: [CI, NODE_OPTIONS, BUILD_FLAVOR]\nresults:\n  junit: [old-report.xml]\n  auto: %t\nrun:\n  preflightTools: [cmake]\n", tc.auto))
 			writeReplacementListConfig(t, ".crabbox.yaml", "env:\n  allow: []\nresults:\n  junit: []\nrun:\n  preflightTools: []\n")
-			args := []string{"--provider", "ssh", "--static-host", "127.0.0.1", "--static-user", "runner", "--static-work-root", "/tmp/crabbox-list-test", "--no-sync", "--preflight"}
+			args := []string{"--provider", "ssh", "--static-host", "127.0.0.1", "--static-user", "runner", "--static-work-root", filepath.Join(dir, "remote"), "--no-sync", "--preflight"}
+			if runtime.GOOS == "darwin" {
+				args = append(args, "--target", "macos")
+			}
 			args = append(args, tc.flags...)
 			args = append(args, "--", "true")
 			var stdout, stderr bytes.Buffer
@@ -5630,8 +5665,30 @@ func TestRunCommandEmptyReplacementLists(t *testing.T) {
 			if strings.Contains(log, "BUILD_FLAVOR=") != tc.wantAllow {
 				t.Errorf("forwarding BUILD_FLAVOR does not match CLI append=%t", tc.wantAllow)
 			}
-			if strings.Contains(log, "new-report.xml") != tc.wantJUnit {
-				t.Errorf("result collection does not match CLI selection=%t", tc.wantJUnit)
+			requestData, requestErr := os.ReadFile(requestPath)
+			if !tc.wantJUnit && !tc.auto {
+				if !os.IsNotExist(requestErr) {
+					t.Errorf("cleared results started a filesystem request: %v", requestErr)
+				}
+			} else {
+				if requestErr != nil {
+					t.Fatal(requestErr)
+				}
+				frame, err := runnerwire.NewReader(bytes.NewReader(requestData), 0).Next()
+				if err != nil || frame.Header.Kind != runnerwire.Request {
+					t.Fatalf("filesystem request frame: %v, %s", err, frame.Header.Kind)
+				}
+				var request runner.Request
+				if err := json.Unmarshal(frame.Header.Meta, &request); err != nil {
+					t.Fatal(err)
+				}
+				var wantPaths []string
+				if tc.wantJUnit {
+					wantPaths = []string{"new-report.xml"}
+				}
+				if request.Operation != runner.Collect || !slices.Equal(request.Paths, wantPaths) || request.Auto != tc.auto {
+					t.Errorf("filesystem collection=%+v; want paths=%v auto=%t", request, wantPaths, tc.auto)
+				}
 			}
 			if strings.Contains(log, remoteResultsMarker) != tc.auto {
 				t.Errorf("auto collection marker does not match results.auto=%t", tc.auto)

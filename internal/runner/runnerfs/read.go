@@ -47,16 +47,6 @@ func OpenRoot(name string) (*Root, error) {
 
 func (r *Root) Close() error { return r.root.Close() }
 
-// Read resolves absolute in-workspace links before opening through the anchored
-// root. Resolution alone never authorizes an ordinary path-based open: a later
-// symlink or directory replacement must still pass os.Root's confinement.
-func (r *Root) Read(name string, limit int64) (File, error) {
-	if limit < 1 || limit >= 1<<62 {
-		return File{}, errors.New("invalid file byte limit")
-	}
-	return r.readDistinct(context.Background(), name, limit, nil)
-}
-
 var errDuplicateReport = errors.New("report file already collected")
 
 func (r *Root) readDistinct(ctx context.Context, name string, limit int64, seen []os.FileInfo) (File, error) {
@@ -117,6 +107,7 @@ func (r *Root) openRegular(name string) (*os.File, error) {
 	return file, nil
 }
 
+// Resolve in-workspace links, but always open through the anchored root.
 func (r *Root) open(name string) (*os.File, error) {
 	rel := name
 	if filepath.IsAbs(name) {
