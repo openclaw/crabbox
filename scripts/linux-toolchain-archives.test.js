@@ -24,11 +24,23 @@ function fixture(t) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-toolchain-")));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   for (const dir of ["archives", "staging", "home", "tmp"]) fs.mkdirSync(path.join(root, dir));
+  let fixturePath = process.env.PATH;
+  if (process.platform === "darwin") {
+    const commands = path.join(root, "commands");
+    fs.mkdirSync(commands);
+    // Darwin's bare mktemp -d ignores TMPDIR; model Linux placement inside the fixture.
+    writeTool(path.join(commands, "mktemp"), `
+if [[ "$#" -eq 1 && "$1" == -d ]]; then
+  exec /usr/bin/mktemp -d "\${TMPDIR%/}/tmp.XXXXXXXXXX"
+fi
+exec /usr/bin/mktemp "$@"`);
+    fixturePath = `${commands}${path.delimiter}${fixturePath}`;
+  }
   const run = (body, env = {}) =>
     spawnSync("bash", ["-c", `source "$INSTALLER"\n${body}`], {
       cwd: root,
       env: {
-        PATH: process.env.PATH,
+        PATH: fixturePath,
         HOME: path.join(root, "home"),
         TMPDIR: path.join(root, "tmp"),
         INSTALLER: installer,
