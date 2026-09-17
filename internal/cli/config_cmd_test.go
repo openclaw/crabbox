@@ -2028,7 +2028,21 @@ vast:
 
 	var stdout bytes.Buffer
 	app := App{Stdout: &stdout, Stderr: &bytes.Buffer{}}
-	if err := app.configShow(nil); err != nil {
+	for _, args := range [][]string{nil, {"--json"}} {
+		if err := app.configShow(args); err == nil || err.Error() != "vast.apiUrl must be an absolute URL without credentials" {
+			t.Fatalf("config show invalid URL error=%v", err)
+		}
+		if stdout.Len() != 0 {
+			t.Fatal("config show rendered invalid configuration")
+		}
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The command rejects this URL; exercise redaction at the rendering layer.
+	cfg = effectiveConfigForShow(cfg)
+	if err := writeConfigShowText(&stdout, cfg); err != nil {
 		t.Fatal(err)
 	}
 	text := stdout.String()
@@ -2041,7 +2055,7 @@ vast:
 	}
 
 	stdout.Reset()
-	if err := app.configShow([]string{"--json"}); err != nil {
+	if err := json.NewEncoder(&stdout).Encode(configShowView(cfg)); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -2091,6 +2105,37 @@ vast:
 	if strings.Contains(stdout.String(), "vast-redaction-fixture-secret") || strings.Contains(stdout.String(), "user:secret") || strings.Contains(stdout.String(), "hidden") {
 		t.Fatalf("config show json leaked Vast secret: %q", stdout.String())
 	}
+	t.Run("valid config command", func(t *testing.T) {
+		path := isolatedConfigPath(t)
+		if err := os.WriteFile(path, []byte("provider: vast\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var output bytes.Buffer
+		app := App{Stdout: &output, Stderr: &bytes.Buffer{}}
+		if err := app.configShow(nil); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(output.String(), "vast api_url=https://console.vast.ai/api/v0 instance_type=ondemand") {
+			t.Fatal("valid Vast configuration missing from command output")
+		}
+		output.Reset()
+		if err := app.configShow([]string{"--json"}); err != nil {
+			t.Fatal(err)
+		}
+		var view struct {
+			Provider string `json:"provider"`
+			Vast     struct {
+				InstanceType string `json:"instanceType"`
+			} `json:"vast"`
+		}
+		if err := json.Unmarshal(output.Bytes(), &view); err != nil {
+			t.Fatal(err)
+		}
+		if view.Provider != "vast" || view.Vast.InstanceType != "ondemand" {
+			t.Fatalf("unexpected valid Vast command view: %#v", view)
+		}
+	})
+
 }
 
 func TestConfigShowIncludesNebiusWithoutSecretSurface(t *testing.T) {
