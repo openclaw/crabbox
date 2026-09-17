@@ -39,6 +39,12 @@ const expected = new Map([
   ["vcs.revision", expectedCommit],
   ["vcs.modified", "false"],
 ]);
+if (expectedPath === "github.com/openclaw/crabbox/cmd/crabbox-runtime") {
+  if (expectedGoos !== "linux" || !["amd64", "arm64"].includes(expectedGoarch)) {
+    throw new Error("remote runtime release targets must be linux/amd64 or linux/arm64");
+  }
+  expected.set(expectedGoarch === "amd64" ? "GOAMD64" : "GOARM64", expectedGoarch === "amd64" ? "v1" : "v8.0");
+}
 
 if (info.Path !== expectedPath) {
   throw new Error(`${binary} package path ${JSON.stringify(info.Path)} does not equal ${expectedPath}`);

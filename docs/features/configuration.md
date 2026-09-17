@@ -1033,6 +1033,15 @@ list and prints only the workspace summary, without restoring default probes.
 Preflight probes are diagnostic only: a missing tool does not block the
 workload, and Crabbox does not install or upgrade toolchains.
 
+Use `preflightTools: [default, bash]` to append the opt-in literal
+`bash --version` probe without changing the defaults. The CLI equivalent is
+`--preflight --preflight-tools default,bash`. Linux, macOS and WSL2 report a
+bounded first output line or `bash=missing`; native Windows skips the probe.
+A missing Bash diagnostic does not block an independent command. Linux SSH
+execution without Bash needs the complete companion runtime pack; see
+[run preflight](../commands/run.md#preflight) and the
+[run command](../commands/run.md) for installation and shell requirements.
+
 Add `python3-venv` to this list in repository or user configuration to opt into a
 functional disposable-venv check on Linux, macOS or WSL2. For example,
 `preflightTools: [default, python3-venv, python3-venv]` retains the ordered defaults

@@ -414,9 +414,13 @@ func newTestWSLStageSpool(t *testing.T, payload []byte) (*wslStageSpool, []byte)
 }
 
 func newTestWSLStageSpoolWithLimit(t *testing.T, payload []byte, limit sshCommandLimit) (*wslStageSpool, []byte) {
+	return newTestWSLStageSpoolProgram(t, payload, limit, wslStageProgram{source: wslLinuxHelper, bootstrap: wslHelperBootstrap})
+}
+
+func newTestWSLStageSpoolProgram(t *testing.T, payload []byte, limit sshCommandLimit, program wslStageProgram) (*wslStageSpool, []byte) {
 	t.Helper()
 	remote := "printf stage"
-	spool, err := newWSLStageSpool(remote, payload, nil, int64(len(payload)), limit)
+	spool, err := newWSLStageSpoolWithProgram(remote, payload, nil, int64(len(payload)), limit, program)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2282,7 +2286,7 @@ func TestWSLFunctionalPreflightControlPreservesOrdinaryStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := []byte{0, 255, '\r', '\n'}
-	transport, err := prepareSSHTransport(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, command, bytes.NewReader(payload), int64(len(payload)), sshCommandLimit{})
+	transport, err := prepareSSHTransport(t.Context(), SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, command, bytes.NewReader(payload), int64(len(payload)), sshCommandLimit{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2404,7 +2408,19 @@ func TestWSLStageInitialHandoffBudgets(t *testing.T) {
 	if err != nil {
 		t.Skip("PowerShell is unavailable")
 	}
-	_, raw := newTestWSLStageSpool(t, []byte{0, 255, 13, 10})
+	native, err := nativeWSLStageProgram(nativeWSLStageTestRuntime("/tmp/runtime/crabbox"), "command", sshControlExecutionLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("legacy", func(t *testing.T) {
+		testWSLStageInitialHandoffBudgets(t, powerShell, wslStageProgram{source: wslLinuxHelper, bootstrap: wslHelperBootstrap})
+	})
+	t.Run("native", func(t *testing.T) { testWSLStageInitialHandoffBudgets(t, powerShell, native) })
+}
+
+func testWSLStageInitialHandoffBudgets(t *testing.T, powerShell string, program wslStageProgram) {
+	t.Helper()
+	_, raw := newTestWSLStageSpoolProgram(t, []byte{0, 255, 13, 10}, sshCommandLimit{}, program)
 	owner, helper, command, payload := decodeWSLStage(t, raw)
 	functions, _, found := strings.Cut(owner, "\ntry {\n    $process = Start-Linux 'run'")
 	if !found {
@@ -2487,10 +2503,10 @@ try {
 			}
 		})
 	}
-	t.Run("completion", func(t *testing.T) { testWSLStageOwnerCompletionBudgets(t, powerShell) })
+	t.Run("completion", func(t *testing.T) { testWSLStageOwnerCompletionBudgets(t, powerShell, program) })
 }
 
-func testWSLStageOwnerCompletionBudgets(t *testing.T, powerShell string) {
+func testWSLStageOwnerCompletionBudgets(t *testing.T, powerShell string, program wslStageProgram) {
 	t.Helper()
 	for _, test := range []struct {
 		name                        string
@@ -2511,7 +2527,7 @@ func testWSLStageOwnerCompletionBudgets(t *testing.T, powerShell string) {
 		{name: "cleanup refusal stays failure", delay: 38000, cleanupCode: 23, cleanupFailure: true, wantFailure: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, raw := newTestWSLStageSpoolWithLimit(t, []byte{0, 255, 13, 10}, sshCommandLimit{execution: sshControlExecutionLimit, control: !test.finite})
+			_, raw := newTestWSLStageSpoolProgram(t, []byte{0, 255, 13, 10}, sshCommandLimit{execution: sshControlExecutionLimit, control: !test.finite}, program)
 			owner, helper, command, payload := decodeWSLStage(t, raw)
 			path := filepath.Join(t.TempDir(), "envelope")
 			if err := os.WriteFile(path, raw, 0600); err != nil {

@@ -107,6 +107,15 @@ git -C "$SOURCE" checkout --quiet --detach "$TAG_COMMIT"
 [[ "$(git -C "$SOURCE" rev-parse HEAD)" == "$TAG_COMMIT" ]]
 [[ -z "$(git -C "$SOURCE" status --porcelain --untracked-files=all)" ]]
 
+# Build each Linux companion once, before the controller archive matrix.
+# Old tags without the runtime command retain their original archive contract.
+runtime_pack=false
+if git -C "$SOURCE" cat-file -e "$TAG_COMMIT:cmd/crabbox-runtime/main.go" 2>/dev/null; then
+  runtime_pack=true
+  "$ROOT/scripts/build-release-runtimes.sh" "$SOURCE" "$TAG_COMMIT" \
+    "$SOURCE/artifacts/release-runtime" "$WORK/runtime-build"
+fi
+
 (
   cd "$SOURCE"
   run_goreleaser() {
@@ -178,6 +187,7 @@ manifest_sha=$(node "$ROOT/scripts/release-provenance.mjs" candidate-write \
   --tag-object "$TAG_OBJECT" \
   --source-commit "$TAG_COMMIT" \
   --verifier-commit "$VERIFIER_COMMIT" \
+  --runtime-pack "$runtime_pack" \
   --producer-os "$producer_os" \
   --producer-arch "$producer_arch" \
   --go-version "$producer_go_version" \

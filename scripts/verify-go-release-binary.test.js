@@ -28,11 +28,11 @@ process.stdout.write(fs.readFileSync(process.argv[5]));
       "vcs.revision": commit, "vcs.modified": "false",
     }).map(([Key, Value]) => ({ Key, Value })),
   };
-  const run = (value) => {
+  const run = (value, expectedPath = "example.test/fixture", arch = "amd64") => {
     fs.writeFileSync(binary, JSON.stringify(value));
     return spawnSync(process.execPath, [
       path.join(import.meta.dirname, "verify-go-release-binary.mjs"), binary,
-      "example.test/fixture", commit, "linux", "amd64", "go1.26.4",
+      expectedPath, commit, "linux", arch, "go1.26.4",
     ], { cwd: root, encoding: "utf8", env: { HOME: root, PATH: root, GOTOOLCHAIN: "auto" } });
   };
   const valid = run(info);
@@ -48,4 +48,14 @@ process.stdout.write(fs.readFileSync(process.argv[5]));
   const wrongPath = run({ ...info, Path: "example.test/other" });
   assert.notEqual(wrongPath.status, 0);
   assert.match(wrongPath.stderr, /package path .* does not equal example.test\/fixture/);
+  const runtimePath = "github.com/openclaw/crabbox/cmd/crabbox-runtime";
+  for (const [arch, key, baseline] of [["amd64", "GOAMD64", "v1"], ["arm64", "GOARM64", "v8.0"]]) {
+    const runtimeInfo = { ...info, Path: runtimePath, Settings: info.Settings.map((setting) => setting.Key === "GOARCH" ? { Key: "GOARCH", Value: arch } : setting) };
+    assert.notEqual(run(runtimeInfo, runtimePath, arch).status, 0);
+    runtimeInfo.Settings.push({ Key: key, Value: baseline });
+    const accepted = run(runtimeInfo, runtimePath, arch);
+    assert.equal(accepted.status, 0, accepted.stderr);
+    runtimeInfo.Settings.at(-1).Value = arch === "amd64" ? "v3" : "v9.0";
+    assert.notEqual(run(runtimeInfo, runtimePath, arch).status, 0);
+  }
 });

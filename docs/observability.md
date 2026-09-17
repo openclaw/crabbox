@@ -385,6 +385,16 @@ WSL2, and native Windows targets. It reports only the first output line or
 `cmake=missing`; the result is diagnostic only, so missing CMake does not block
 the workload or trigger installation or upgrades.
 
+The opt-in `bash` probe (`--preflight --preflight-tools bash`, or
+`--preflight --preflight-tools default,bash`) invokes literal `bash --version`
+on Linux, macOS and WSL2, retaining at most 4096 bytes and displaying the first
+line as `remote preflight bash=<version>`. If Bash is unavailable, it prints
+`remote preflight bash=missing`; native Windows skips it. The defaults remain
+unchanged. Missing Bash is diagnostic only for an independent workload, not an
+installation request or a guarantee that Bash scripts can run. Linux SSH
+managed execution without Bash requires the complete companion runtime pack;
+see [run](commands/run.md) for readiness and CLI-only installation constraints.
+
 The opt-in `python3-venv` probe checks a real disposable environment on Linux,
 macOS and WSL2, not merely the interpreter version or whether `venv` imports.
 It reports `remote preflight python3-venv=<state> cleanup=<confirmed|unconfirmed>`.

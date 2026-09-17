@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -83,7 +84,59 @@ function releaseNotes(notesFile) {
   return { bytes: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
 }
 
-function payloadFor(directory, name, version, embeddedVmd, notaryIds = {}) {
+function runtimePackExpected(args, actual = false) {
+  const requested = args["runtime-pack"];
+  if (requested !== undefined && requested !== "true" && requested !== "false") {
+    throw new Error("--runtime-pack must be true or false");
+  }
+  if (requested !== undefined && (requested === "true") !== actual) {
+    throw new Error("runtime pack layout does not match the frozen source capability");
+  }
+  return actual;
+}
+
+// Reports are produced afresh by protected runtime-artifacts extraction in the
+// caller's private staging directory. Their archive identity prevents mixing
+// reports between payloads; they are not a substitute for that extraction gate.
+function runtimePackReport(directory, reports, name, platform, arch) {
+  if (!reports) throw new Error("runtime pack layout requires --runtime-reports from protected extraction");
+  const file = path.join(reports, `${name}.json`);
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 65536) {
+    throw new Error("runtime extraction report must be a bounded regular file");
+  }
+  const report = JSON.parse(fs.readFileSync(file, "utf8"));
+  assertExactKeys(report, ["name", "size", "sha256", "os", "arch", "runtimePack"], "runtime extraction report");
+  const archive = path.join(directory, name);
+  if (report.name !== name || report.os !== platform || report.arch !== arch ||
+      report.size !== fs.statSync(archive).size || report.sha256 !== sha256(archive)) {
+    throw new Error(`runtime extraction report does not match archive: ${name}`);
+  }
+  const pack = report.runtimePack;
+  assertExactKeys(pack, ["protocolVersion", "controllerSha256", "manifest", "artifacts"], "runtime pack");
+  if (pack.protocolVersion !== "CBX-REMOTE-1" || !/^[0-9a-f]{64}$/.test(pack.controllerSha256 ?? "")) {
+    throw new Error("runtime pack protocol or controller identity is invalid");
+  }
+  const assertFile = (entry, expectedPath, maximum, label, extra = []) => {
+    assertExactKeys(entry, ["path", "size", "sha256", ...extra], label);
+    if (entry.path !== expectedPath || !Number.isSafeInteger(entry.size) || entry.size <= 0 ||
+        entry.size > maximum || !/^[0-9a-f]{64}$/.test(entry.sha256 ?? "")) {
+      throw new Error(`${label} identity is invalid`);
+    }
+  };
+  assertFile(pack.manifest, "crabbox-runtime/manifest.json", 65536, "runtime manifest");
+  if (!Array.isArray(pack.artifacts) || pack.artifacts.length !== 2) {
+    throw new Error("runtime artifact inventory is not exact");
+  }
+  for (const [index, targetArch] of ["amd64", "arm64"].entries()) {
+    const entry = pack.artifacts[index];
+    assertFile(entry, `crabbox-runtime/linux-${targetArch}`, 64 * 1024 * 1024, "runtime artifact", ["os", "arch"]);
+    if (entry.os !== "linux" || entry.arch !== targetArch) throw new Error("runtime artifact target is invalid");
+  }
+  return pack;
+}
+
+function payloadFor(directory, name, version, embeddedVmd, notaryIds = {}, runtimeReports) {
   const match = new RegExp(
     `^crabbox_${version.replaceAll(".", "\\.")}_(darwin|linux|windows)_(amd64|arm64)\\.(tar\\.gz|zip)$`,
   ).exec(name);
@@ -119,7 +172,9 @@ function payloadFor(directory, name, version, embeddedVmd, notaryIds = {}) {
     });
   }
   const file = path.join(directory, name);
-  return { name, sha256: sha256(file), size: fs.statSync(file).size, platform, arch, format, binaries };
+  return { name, sha256: sha256(file), size: fs.statSync(file).size, platform, arch, format, binaries,
+    ...(runtimeReports ? { runtimePack: runtimePackReport(directory, runtimeReports, name, platform, arch) } : {}),
+  };
 }
 
 function exactJson(value) {
@@ -169,7 +224,7 @@ function assertCandidateInventory(directory, version, manifestPresent) {
   }
 }
 
-function assertProducer(value) {
+function assertProducer(value, expectedConfigSha256 = RELEASE_CONFIG_SHA256) {
   assertExactKeys(
     value,
     [
@@ -196,7 +251,7 @@ function assertProducer(value) {
     !/^\d+(?:\.\d+){0,2}$/.test(value.xcodeVersion) ||
     typeof value.xcodeBuild !== "string" ||
     !/^[A-Za-z0-9.]+$/.test(value.xcodeBuild) ||
-    value.releaseConfigSha256 !== RELEASE_CONFIG_SHA256
+    value.releaseConfigSha256 !== expectedConfigSha256
   ) {
     throw new Error("candidate producer does not match the pinned toolchain contract");
   }
@@ -267,7 +322,7 @@ function assertRecordedCandidateInputs(value, version) {
   }
 }
 
-function assertFinalProducer(value, releaseIdentity, version) {
+function assertFinalProducer(value, releaseIdentity, version, runtimePack) {
   assertExactKeys(
     value,
     [
@@ -281,17 +336,26 @@ function assertFinalProducer(value, releaseIdentity, version) {
       "swift",
       "xcodeBuild",
       "xcodeVersion",
+      ...(runtimePack ? ["runtimePack"] : []),
     ],
     "release producer",
   );
-  const { inputs, manifestSha256, ...toolchain } = value;
-  assertProducer(toolchain);
+  const { inputs, manifestSha256, runtimePack: recordedRuntimePack, ...toolchain } = value;
+  if (runtimePack && recordedRuntimePack !== true) throw new Error("producer runtime capability is missing");
+  // Reverification uses the original protected producer policy, not today's
+  // working-tree config. Outer release gates establish this commit's ancestry.
+  assertSha("provenance verifier commit", releaseIdentity.verifierCommit);
+  const producerConfig = execFileSync("git", [
+    "--no-replace-objects", "--no-lazy-fetch", "-C", path.resolve(import.meta.dirname, ".."),
+    "cat-file", "blob", `${releaseIdentity.verifierCommit}:.goreleaser.yaml`,
+  ], { maxBuffer: 1024 * 1024 });
+  assertProducer(toolchain, crypto.createHash("sha256").update(producerConfig).digest("hex"));
   assertRecordedCandidateInputs(inputs, version);
   if (!/^[0-9a-f]{64}$/.test(manifestSha256 ?? "")) {
     throw new Error("candidate manifest digest is invalid");
   }
   const originalManifest = {
-    schemaVersion: 1,
+    schemaVersion: runtimePack ? 2 : 1,
     repository: REPOSITORY,
     tag: releaseIdentity.tag,
     tagObject: releaseIdentity.tagObject,
@@ -299,6 +363,7 @@ function assertFinalProducer(value, releaseIdentity, version) {
     verifierCommit: releaseIdentity.verifierCommit,
     producer: toolchain,
     inputs,
+    ...(runtimePack ? { runtimePack: true } : {}),
   };
   const actualManifestSha256 = crypto.createHash("sha256").update(exactJson(originalManifest)).digest("hex");
   if (manifestSha256 !== actualManifestSha256) {
@@ -307,6 +372,7 @@ function assertFinalProducer(value, releaseIdentity, version) {
 }
 
 function validateCandidateManifest(value, directory, args) {
+  const runtimePack = runtimePackExpected(args, value.schemaVersion === 2);
   assertExactKeys(
     value,
     [
@@ -318,12 +384,14 @@ function validateCandidateManifest(value, directory, args) {
       "tag",
       "tagObject",
       "verifierCommit",
+      ...(runtimePack ? ["runtimePack"] : []),
     ],
     "candidate manifest",
   );
   const version = args.tag?.slice(1);
   if (
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== (runtimePack ? 2 : 1) ||
+    (runtimePack && value.runtimePack !== true) ||
     value.repository !== REPOSITORY ||
     value.tag !== args.tag ||
     value.tagObject !== args["tag-object"] ||
@@ -349,6 +417,7 @@ function candidateRequired(args) {
 
 function candidateWrite(args) {
   candidateRequired(args);
+  const runtimePack = runtimePackExpected(args, args["runtime-pack"] === "true");
   for (const required of [
     "producer-os",
     "producer-arch",
@@ -363,7 +432,7 @@ function candidateWrite(args) {
   const version = args.tag.slice(1);
   assertCandidateInventory(args.dir, version, false);
   const value = {
-    schemaVersion: 1,
+    schemaVersion: runtimePack ? 2 : 1,
     repository: REPOSITORY,
     tag: args.tag,
     tagObject: args["tag-object"],
@@ -380,6 +449,7 @@ function candidateWrite(args) {
       releaseConfigSha256: RELEASE_CONFIG_SHA256,
     },
     inputs: candidateInputs(args.dir, version),
+    ...(runtimePack ? { runtimePack: true } : {}),
   };
   assertProducer(value.producer);
   const file = path.join(args.dir, CANDIDATE_MANIFEST);
@@ -515,7 +585,10 @@ function write(args) {
     "tag-object": args["tag-object"],
     "source-commit": args["source-commit"],
     "verifier-commit": args["verifier-commit"],
+    "runtime-pack": args["runtime-pack"],
   });
+  const runtimePack = runtimePackExpected(args, candidate.value.schemaVersion === 2);
+  if (runtimePack && !args["runtime-reports"]) throw new Error("runtime pack layout requires --runtime-reports");
   if (
     !/^[0-9a-f]{64}$/.test(args["candidate-manifest-sha256"]) ||
     candidate.sha256 !== args["candidate-manifest-sha256"]
@@ -531,7 +604,7 @@ function write(args) {
   };
   assertPackager(packager);
   const provenance = {
-    schemaVersion: 1,
+    schemaVersion: runtimePack ? 2 : 1,
     repository: REPOSITORY,
     version,
     source: {
@@ -554,11 +627,12 @@ function write(args) {
       manifestSha256: candidate.sha256,
       ...candidate.value.producer,
       inputs: candidate.value.inputs,
+      ...(runtimePack ? { runtimePack: true } : {}),
     },
     packager,
     releaseAssets,
     payloads: archives.map((name) =>
-      payloadFor(args.dir, name, version, embeddedVmd, notaryIds),
+      payloadFor(args.dir, name, version, embeddedVmd, notaryIds, runtimePack ? args["runtime-reports"] : undefined),
     ),
   };
   fs.writeFileSync(path.join(args.dir, "provenance.json"), exactJson(provenance), {
@@ -581,6 +655,8 @@ function verify(args) {
   const version = args.tag.slice(1);
   const file = path.join(args.dir, "provenance.json");
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
+  const runtimePack = runtimePackExpected(args, value.schemaVersion === 2);
+  if (runtimePack && !args["runtime-reports"]) throw new Error("runtime pack layout requires --runtime-reports");
   const archives = expectedArchives(version);
   const releaseAssets = [...archives, "checksums.txt", "provenance.json"].sort();
   assertExactKeys(
@@ -622,10 +698,11 @@ function verify(args) {
       verifierCommit: args["verifier-commit"],
     },
     version,
+    runtimePack,
   );
   assertPackager(value.packager);
   if (
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== (runtimePack ? 2 : 1) ||
     value.repository !== REPOSITORY ||
     value.version !== version ||
     value.source?.tag !== args.tag ||
@@ -669,6 +746,7 @@ function verify(args) {
       version,
       helperEntry?.embeddedVmd,
       notaryIds,
+      runtimePack ? args["runtime-reports"] : undefined,
     );
     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
       throw new Error(`provenance payload mismatch: ${name}`);

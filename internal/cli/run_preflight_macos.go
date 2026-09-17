@@ -19,7 +19,7 @@ const (
 
 // The existing owner's watcher remains a living direct child until retirement.
 // A relative builtin timeout avoids wall-clock arithmetic and a sleep child.
-func macOSPreflightHelper(budget time.Duration) string {
+func macOSPreflightHelper(budget time.Duration) posixPreflightProgram {
 	watch := `exec /bin/zsh -f -c '
 directory=$1
 : >"$directory/.timer-ready" || exit 74
@@ -45,7 +45,7 @@ fi
 	// A 100ms owner poll can leave a short diagnostic running beyond its
 	// deadline even after the native timer has fired.
 	workload := guardedWorkloadScript(init, tick, ".01")
-	return posixPreflightHelper(workload, watch)
+	return posixPreflightHelper(workload, watch, "/bin/sh")
 }
 
 type macOSPreflightProbeResult struct {
@@ -58,7 +58,7 @@ type macOSPreflightProbeResult struct {
 var runMacOSPreflightProbe = func(ctx context.Context, target SSHTarget, workdir string, env map[string]string, envFiles []string, script string, budget time.Duration) (macOSPreflightProbeResult, error) {
 	output := newSynchronizedBuffer(32 << 10)
 	result, err := runPOSIXPreflight(ctx, target, macOSPreflightHelper(budget), func(nonce string) string {
-		command := remoteShellCommandWithEnvFiles(workdir, env, envFiles, script)
+		command := remotePortableWorkloadCommand(workdir, env, envFiles, script, nil)
 		return macOSPreflightWorker(nonce, "/tmp/crabbox-command-"+nonce+"/scratch", command)
 	}, &output, io.Discard)
 	err = functionalPreflightWithOwnerError(ctx, err)
@@ -87,15 +87,22 @@ func macOSPreflightWorker(nonce, scratch, command string) string {
 	child := "if [ \"$1\" = x ]; then export LC_ALL=\"$2\"; else unset LC_ALL; fi\nexec 2>/dev/null\n" + command
 	timing := shellQuote(scratch + "/timing")
 	probe := shellQuote(scratch + "/probe")
+	result := shellQuote(scratch + "/probe-status")
 	// SSH stderr also carries supervisor diagnostics. Keep the fixed-size
 	// native timing report in owned scratch, then frame it on worker stdout.
 	// Drain excess stdout rather than SIGPIPE a successful verbose command.
 	// Stage forwarded assignments privately instead of in the outer shell argv.
-	return "(umask 077; builtin printf '%s' " + shellQuote(child) + " >" + probe + ") || exit 74\n" +
+	// Publish status before closing producer stdout, so drain EOF follows it.
+	return "(umask 077; command printf '%s' " + shellQuote(child) + " >" + probe + ") || exit 74\n" +
 		"printf 'CBX-MACOS-OUTPUT-1 %s\\n' " + shellQuote(nonce) + "\n" +
-		"LC_ALL=C /usr/bin/time -p /bin/bash " + probe + " \"${LC_ALL+x}\" \"${LC_ALL-}\" 2>" + timing +
-		" | { /usr/bin/head -c 4096; /bin/cat >/dev/null; }\n" +
-		"probe_code=${PIPESTATUS[0]}\nprintf '\\nCBX-MACOS-TIME-1 %s %s\\n' " + shellQuote(nonce) + " \"$probe_code\"\n" +
+		"{ if LC_ALL=C /usr/bin/time -p /bin/sh " + probe + " \"${LC_ALL+x}\" \"${LC_ALL-}\" 2>" + timing +
+		"; then probe_code=0; else probe_code=$?; fi\n" +
+		"command printf '%s\\n' \"$probe_code\" >" + result + " || exit 74\n" +
+		"} | { /usr/bin/head -c 4096 && /bin/cat >/dev/null; } || exit 74\n" +
+		"{ IFS= read -r probe_code && ! IFS= read -r probe_extra && [ -z \"$probe_extra\" ]; } <" + result + " || exit 74\n" +
+		"case \"$probe_code\" in ''|*[!0-9]*) exit 74 ;; esac\n" +
+		"[ \"${#probe_code}\" -le 3 ] && [ \"$probe_code\" -le 255 ] || exit 74\n" +
+		"printf '\\nCBX-MACOS-TIME-1 %s %s\\n' " + shellQuote(nonce) + " \"$probe_code\"\n" +
 		"/bin/cat " + timing + " || exit 74\nexit 0\n"
 }
 

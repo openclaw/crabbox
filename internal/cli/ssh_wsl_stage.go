@@ -56,17 +56,24 @@ func guardedWorkloadScript(init, tick, poll string) string {
 	).Replace(strings.TrimSuffix(guardedWorkload, "\n"))
 }
 
-var wslLinuxHelper = strings.NewReplacer(
-	"@GUARDED_GROUP_FUNCTIONS@", strings.TrimSuffix(guardedGroupFunctions, "\n"),
-	"@GUARDED_MEMBERS@", strings.TrimSuffix(guardedMembers, "\n"),
-	"@GUARDED_WORKLOAD@", guardedWorkloadScript("", "", ".1"),
+func composeGuardedControl(source, workload, interpreter string) string {
+	source = strings.NewReplacer(
+		"@GUARDED_GROUP_FUNCTIONS@", strings.TrimSuffix(guardedGroupFunctions, "\n"),
+		"@GUARDED_MEMBERS@", strings.TrimSuffix(guardedMembers, "\n"),
+		"@GUARDED_WORKLOAD@", workload,
+	).Replace(source)
+	// Bind after composition so placeholders introduced by fragments resolve too.
+	return strings.ReplaceAll(source, "@CONTROL_SHELL@", shellQuote(interpreter))
+}
+
+var wslLinuxHelper = composeGuardedControl(strings.NewReplacer(
 	"@FUNCTIONAL_PRELUDE@", "", "@FUNCTIONAL_CLEANUP@", "", "@FUNCTIONAL_CLEANUP_POLL@", "", "@FUNCTIONAL_SCRATCH@", "",
-).Replace(wslLinuxTemplate)
+).Replace(wslLinuxTemplate), guardedWorkloadScript("", "", ".1"), "bash")
 
 // Framework's stdin StreamWriter may emit a UTF-8 preamble. Consume only the
 // declared preamble, then the exact helper; never read ahead into command/input.
 // The sentinel retains trailing newlines and wc counts bytes in every locale.
-const wslHelperBootstrap = `case $2 in
+const wslHelperBootstrapPrefix = `case $2 in
 0) ;;
 3) p=$(dd bs=1 count=3 2>/dev/null); [ "$p" = "$(printf '\357\273\277')" ] || exit 74;;
 *) exit 74;;
@@ -76,7 +83,10 @@ h=${h%.}
 [ "$(printf %s "$h" | wc -c)" -eq "$1" ] || exit 74
 export CBX_HELPER="$h"
 shift 2
-exec bash -c "$h" sh "$@"`
+`
+
+const wslHelperBootstrap = wslHelperBootstrapPrefix + `exec bash -c "$h" sh "$@"`
+const wslPOSIXHelperBootstrap = wslHelperBootstrapPrefix + `exec /usr/bin/env BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c "$h" sh "$@"`
 
 const wslStageCleanupTimeout, wslStageCanceledCleanupTimeout = 15 * time.Second, 5 * time.Second
 const wslSFTPDiagnosticLimit = 4 << 10
@@ -215,6 +225,8 @@ type wslStageSpool struct {
 	functionalNonce   string
 	functionalCleanup context.Context
 	functionalCancel  context.CancelFunc
+	nativeRuntime     *remoteNativeRuntime
+	legacyBash        bool
 }
 type wslStageRouteProofKey struct{}
 type retryableWSLStageError struct{ error }
@@ -334,9 +346,26 @@ func newWSLStageSpool(command string, payload []byte, source io.ReadSeeker, payl
 }
 
 func newWSLStageSpoolWithHelper(command string, payload []byte, source io.ReadSeeker, payloadSize int64, limit sshCommandLimit, linuxHelper string) (*wslStageSpool, error) {
-	owner := strings.NewReplacer("@BOOTSTRAP@", psQuote(wslHelperBootstrap),
+	return newWSLStageSpoolWithProgram(command, payload, source, payloadSize, limit, wslStageProgram{source: linuxHelper, bootstrap: wslHelperBootstrap})
+}
+
+type wslStageProgram struct {
+	source    string
+	bootstrap string
+	runtime   *remoteNativeRuntime
+}
+
+func newWSLStageSpoolWithProgram(command string, payload []byte, source io.ReadSeeker, payloadSize int64, limit sshCommandLimit, program wslStageProgram) (*wslStageSpool, error) {
+	linuxHelper := program.source
+	cleanupArgument := ""
+	if program.runtime != nil {
+		cleanupArgument = " + ' ' + $(if ($mode -eq 'cleanup') { Remaining 10000 } else { 0 })"
+	}
+	owner := strings.NewReplacer("@BOOTSTRAP@", psQuote(program.bootstrap),
+		"@NATIVE_CLEANUP_ALLOWANCE@", cleanupArgument,
 		"@STARTUP@", fmt.Sprint(wslStageIdleTimeout.Milliseconds())).Replace(wslWindowsOwner)
 	if len(owner) == 0 || len(linuxHelper) == 0 || len(owner) > wslStageMaxHelper || len(linuxHelper) > wslStageMaxHelper ||
+		program.bootstrap == "" || !utf8.ValidString(program.bootstrap) || strings.ContainsRune(program.bootstrap, 0) ||
 		!utf8.ValidString(linuxHelper) || strings.ContainsRune(linuxHelper, 0) ||
 		len(command) > wslStageMaxCommand || payloadSize < 0 || payloadSize > wslStageMaxSize || limit.execution < 0 {
 		return nil, errors.New("WSL2 envelope exceeds bounded descriptor limits")
@@ -375,7 +404,7 @@ func newWSLStageSpoolWithHelper(command string, payload []byte, source io.ReadSe
 	if err != nil {
 		return nil, err
 	}
-	spool := &wslStageSpool{input: input, size: total, timing: timing}
+	spool := &wslStageSpool{input: input, size: total, timing: timing, nativeRuntime: program.runtime, legacyBash: program.runtime == nil && program.bootstrap == wslHelperBootstrap}
 	spool.expected, err = spool.prefixDigest(context.Background(), total)
 	if err != nil {
 		_ = spool.close()
@@ -430,19 +459,47 @@ func (s *wslStageSpool) run(ctx context.Context, target *SSHTarget, connectTimeo
 	if err != nil {
 		return err
 	}
+	var nativeCleanupCtx context.Context
+	var nativeCleanupCancel context.CancelFunc
+	defer func() {
+		if nativeCleanupCancel != nil {
+			nativeCleanupCancel()
+		}
+	}()
+	cleanupContext := func() context.Context {
+		if s.functionalCleanup != nil {
+			return s.functionalCleanup
+		}
+		if s.nativeRuntime == nil {
+			return ctx
+		}
+		if nativeCleanupCtx == nil {
+			nativeCleanupCtx, nativeCleanupCancel = wslStageCleanupContext(ctx, wslStageCleanupTimeout, wslStageCanceledCleanupTimeout)
+		}
+		return nativeCleanupCtx
+	}
 	defer func() {
 		if err != nil {
-			cleanupCtx := ctx
-			if s.functionalCleanup != nil {
-				cleanupCtx = s.functionalCleanup
+			cleanupCtx := cleanupContext()
+			budget, canceledBudget := wslStageCleanupBudget(cleanupCtx), wslStageCanceledCleanupTimeout
+			if nativeCleanupCtx != nil {
+				// Native acknowledgment and Windows envelope removal share one
+				// cleanup phase; an expired phase must not receive another grace.
+				deadline, _ := nativeCleanupCtx.Deadline()
+				budget, canceledBudget = max(0, time.Until(deadline)), 0
 			}
-			if cleanupErr := cleanupPublishedWSLStage(cleanupCtx, *target, nonce, s, wslStageCleanupBudget(cleanupCtx), wslStageCanceledCleanupTimeout, connectTimeout); cleanupErr != nil {
+			if cleanupErr := cleanupPublishedWSLStage(cleanupCtx, *target, nonce, s, budget, canceledBudget, connectTimeout); cleanupErr != nil {
 				err = errors.Join(err, fmt.Errorf("owned WSL2 ready stage cleanup failed: %w", cleanupErr))
 			}
 		}
 	}()
 	if err := requireWSLStageExecutionReserve(ctx, s.timing.reserve); err != nil {
 		return err
+	}
+	if s.legacyBash {
+		if err := requireLegacyBash(ctx, *target, s.shell); err != nil {
+			return err
+		}
 	}
 	command := buildWSLStageLauncher(nonce, s.size, s.digest(), s.shell)
 	if command == "" || len(command) >= wslStageLauncherCommandLimit {
@@ -469,7 +526,17 @@ func (s *wslStageSpool) run(ctx context.Context, target *SSHTarget, connectTimeo
 	if err != nil && (shouldRetrySSHPort(err) || errors.Is(context.Cause(execCtx), context.DeadlineExceeded)) {
 		err = Exit(7, "WSL2 staged command result is ambiguous: %v", err)
 	}
-	return finish(err)
+	err = finish(err)
+	if s.nativeRuntime != nil && s.functionalNonce == "" && err != nil {
+		if cleanupErr := s.nativeRuntime.confirmCleanup(cleanupContext(), nonce); cleanupErr != nil {
+			reason := fmt.Errorf("command stage /tmp/crabbox-command-%s cleanup unconfirmed: %w", nonce, cleanupErr)
+			if scope, ok := ctx.Value(nativeRuntimeScopeKey{}).(*nativeRuntimeScope); ok {
+				scope.retain(s.nativeRuntime, reason)
+			}
+			err = errors.Join(err, fmt.Errorf("native runtime retained at %s: %w", s.nativeRuntime.path, reason))
+		}
+	}
+	return err
 }
 
 func requireWSLStageExecutionReserve(ctx context.Context, reserve time.Duration) error {
@@ -618,6 +685,12 @@ func prepareWSLStageRootWithin(ctx context.Context, target SSHTarget, connectTim
 	return wslStageShell(fields[2]), nil
 }
 
+const wslStageShellDiscoveryScript = `  $parentPID = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
+  $shell = (Get-Process -Id $parentPID).ProcessName.ToLowerInvariant()
+  if ($shell -eq "pwsh") { $shell = "powershell" }
+  if ($shell -notin "cmd", "powershell") { throw "unsupported SSH shell" }
+`
+
 func wslStageRootPreparationCommand(proofs ...string) string {
 	proof := ""
 	if len(proofs) > 0 && proofs[0] != "" {
@@ -631,11 +704,7 @@ func wslStageRootPreparationCommand(proofs ...string) string {
 	// Persist also clears modified flags, so each directory needing normalization gets a fresh descriptor.
 	return wslStagePowerShellCommand(`$ErrorActionPreference = "Stop"
 try {
-  $parentPID = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
-  $shell = (Get-Process -Id $parentPID).ProcessName.ToLowerInvariant()
-  if ($shell -eq "pwsh") { $shell = "powershell" }
-  if ($shell -notin "cmd", "powershell") { throw "unsupported SSH shell" }
-  $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+`+wslStageShellDiscoveryScript+`  $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
   $allowed = @($sid.Value, "S-1-5-18", "S-1-5-32-544" | Select-Object -Unique)
   function Test-StageDirectory($path, $protected = $false, $owners = @($sid.Value)) {
     $item = Get-Item -LiteralPath $path -Force

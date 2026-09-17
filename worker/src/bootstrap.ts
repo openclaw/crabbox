@@ -124,8 +124,8 @@ ${portLines}
   - path: /usr/local/bin/crabbox-ready
     permissions: '0755'
     content: |
-      #!/usr/bin/env bash
-      set -euo pipefail
+      #!/bin/sh
+      set -eu
       git --version
       rsync --version >/dev/null
       curl --version >/dev/null
@@ -181,8 +181,8 @@ write_files:
   - path: /usr/local/bin/crabbox-ready
     permissions: '0755'
     content: |
-      #!/usr/bin/env bash
-      set -euo pipefail
+      #!/bin/sh
+      set -eu
       git --version
       curl --version >/dev/null
       jq --version >/dev/null
@@ -391,8 +391,8 @@ ${sharedLinuxNodeInstall()}${sharedWslTruffleHogInstall()}if [ -d /proc/sys/fs/b
   fi
 fi
 cat >/usr/local/bin/crabbox-ready <<'READY'
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 git --version >/dev/null
 rsync --version >/dev/null
 curl --version >/dev/null
@@ -458,17 +458,20 @@ function optionalReadyChecks(config: LeaseConfig): string {
     );
   }
   if (config.desktop) {
+    // Check ss separately: POSIX sh has no portable pipefail.
     if (config.desktopEnv !== "xfce") {
       lines.push(
         "      systemctl is-active --quiet crabbox-desktop.service",
         "      systemctl is-active --quiet crabbox-wayvnc.service",
-        "      ss -ltn | grep -q '127.0.0.1:5900'",
+        "      listening_sockets=$(ss -ltn)",
+        "      printf '%s\\n' \"$listening_sockets\" | grep -q '127.0.0.1:5900'",
       );
     } else {
       lines.push(
         "      systemctl is-active --quiet crabbox-xvfb.service",
         "      systemctl is-active --quiet crabbox-desktop.service",
-        "      ss -ltn | grep -q '127.0.0.1:5900'",
+        "      listening_sockets=$(ss -ltn)",
+        "      printf '%s\\n' \"$listening_sockets\" | grep -q '127.0.0.1:5900'",
       );
     }
   }

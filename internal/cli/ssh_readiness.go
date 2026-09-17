@@ -88,6 +88,16 @@ func runSSHReadinessProbe(ctx context.Context, target SSHTarget, remote, connect
 	return sshReadinessProbeError(ctx, err, diagnostic.hostKeyRejected())
 }
 
+func runWSLReadinessTransport(ctx context.Context, target SSHTarget, command, connectTimeout, attempts string) error {
+	transport := sshTransportPreparation{command: command}
+	var diagnostic sshReadinessDiagnostic
+	_, err := transport.runOnce(ctx, target, connectTimeout, attempts, io.Discard, &diagnostic, false)
+	if err == nil {
+		err = context.Cause(ctx)
+	}
+	return sshReadinessProbeError(ctx, err, diagnostic.hostKeyRejected())
+}
+
 func sshReadinessProbeError(ctx context.Context, err error, hostKeyRejected bool) error {
 	// A host-key rejection cannot recover while waiting for guest bootstrap.
 	// Retain the exit cause, but never expose captured remote stderr or key data.

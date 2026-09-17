@@ -399,6 +399,11 @@ func (a App) runCommand(ctx context.Context, args []string) error {
 }
 
 func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, benchmarkCtx benchmarkRecordContext) (err error) {
+	runtimeScope := newNativeRuntimeScope()
+	ctx = context.WithValue(ctx, nativeRuntimeScopeKey{}, runtimeScope)
+	ctx = contextWithoutNativeRuntimeAdmission(context.WithValue(ctx, nativeRuntimeLeaseKey{}, ""))
+	operationCtx := ctx
+	defer func() { err = errors.Join(err, runtimeScope.finish(context.WithoutCancel(operationCtx))) }()
 	defaults := defaultConfig()
 	fs := newFlagSet("run", a.Stderr)
 	runFlags := registerRunFlags(fs, defaults, ordinaryLeaseCreateFlagRegistrationOptions())
@@ -962,7 +967,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	var lifecycleOwner *workspaceOwner
 	ownerParentCtx := ctx
 	defer func() {
-		if lifecycleOwner == nil {
+		if lifecycleOwner == nil && !runtimeScope.hasLease(leaseID) {
 			return
 		}
 		cleanupStartedAt := time.Now()
@@ -970,8 +975,19 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		defer func() {
 			cleanup.Duration += time.Since(cleanupStartedAt)
 		}()
+		var closeErr error
+		defer func() {
+			runtimeErr := runtimeScope.finalizeLease(context.WithoutCancel(ownerParentCtx), leaseID, false, closeErr)
+			if runtimeErr != nil {
+				runFailure = recordRunFailure(&runFailure, runtimeErr)
+				err = errors.Join(err, runtimeErr)
+			}
+		}()
+		if lifecycleOwner == nil {
+			return
+		}
 		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ownerParentCtx), lifecycleOwner.quiesceTimeout())
-		closeErr := lifecycleOwner.Close(releaseCtx)
+		closeErr = lifecycleOwner.Close(releaseCtx)
 		cancel()
 		if closeErr != nil {
 			runFailure = recordRunFailure(&runFailure, closeErr)
@@ -1053,6 +1069,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			a.writeActionsHydrationStopBestEffort(context.WithoutCancel(ctx), target, borrowedPool.Entry.LeaseID)
 		}
 		returnErr := returnReadyPoolAfterWorkspaceOwner(ctx, &lifecycleOwner, func(returnCtx context.Context) error {
+			if runtimeErr := runtimeScope.finalizeLease(returnCtx, leaseID, false, nil); runtimeErr != nil {
+				return runtimeErr
+			}
 			var err error
 			if borrowedPool.Entry.Identity != nil {
 				_, err = coord.ReturnTypedReadyPoolLease(returnCtx, borrowedPool.Entry.Key, map[string]any{
@@ -1366,7 +1385,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			releaseApp.Stderr = io.Discard
 		}
 		cleanup.Attempted = true
-		outcome, releaseErr := releaseApp.releaseBackendLeaseWithOutcomeBestEffort(context.Background(), sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
+		releaseCtx := contextWithoutWorkspaceOwner(context.WithoutCancel(ctx))
+		outcome, releaseErr := releaseApp.releaseBackendLeaseWithOutcomeBestEffort(releaseCtx, sshBackend, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID, Coordinator: coord})
+		releaseErr = errors.Join(releaseErr, runtimeScope.afterRelease(releaseCtx, leaseID, sshBackend, outcome, releaseErr))
 		cleanup.Err = releaseErr
 		cleanup.Stopped = outcome.Terminal
 		if cleanup.Err == nil || cleanup.Stopped {
@@ -1390,8 +1411,14 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			fmt.Fprintf(a.Stderr, "lease cleanup stopped=%t policy=%s lease=%s slug=%s\n", cleanup.Stopped, blank(*stopAfter, "auto"), leaseID, blank(ServerSlug(server), "-"))
 		}
 	}()
+	defer func() {
+		if recorder != nil && recorder.telemetryRequested {
+			recorder.CaptureTelemetryEnd(context.WithoutCancel(ctx), target)
+		}
+	}()
 	admitLease := func(lease *LeaseTarget) error {
 		server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+		ctx = context.WithValue(ctx, nativeRuntimeLeaseKey{}, leaseID)
 		observation.BindLease(leaseID, ServerSlug(server))
 		applyResolvedServerConfig(&cfg, server)
 		stripTargetCredentialsFromRunEnv(&envSelection, target)
@@ -1446,6 +1473,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	prepareResolvedLease := func(lease *LeaseTarget) error {
 		server, target, leaseID = lease.Server, lease.SSH, lease.LeaseID
+		ctx = context.WithValue(ctx, nativeRuntimeLeaseKey{}, leaseID)
 		if lease.Coordinator != nil {
 			coord = lease.Coordinator
 			useCoordinator = true
@@ -1630,11 +1658,29 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 	}
 	var runnerConnectDuration time.Duration
+	prepareRunRuntime := func() error {
+		preparedCtx, prepareErr := runtimeScope.prepareCommandRuntime(ctx, &target, a.Stderr)
+		if prepareErr == nil {
+			ctx = preparedCtx
+		}
+		return prepareErr
+	}
+	// WSL heartbeat collection is a no-op, so keep lease renewal running while
+	// size-bounded runtime setup runs outside short owner/readiness deadlines.
+	if runtimeScope.selected() && isWindowsWSL2Target(target) {
+		target = bootstrapNetworkTarget(cfg, server, target)
+		if err := prepareRunRuntime(); err != nil {
+			return recordFailure(err)
+		}
+	}
 	acquireLifecycleOwner := func() error {
 		if !shouldAcquireWorkspaceOwner(target, acquired, acquiredRunMayRetainLease(*keep, *keepOnFailure, *stopAfter), sshBackend) {
 			return nil
 		}
 		target = bootstrapNetworkTarget(cfg, server, target)
+		if err := prepareRunRuntime(); err != nil {
+			return recordFailure(err)
+		}
 		connectStartedAt := time.Now()
 		waitErr := a.waitForSSHReady(ctx, &target, "workspace owner", 2*time.Minute)
 		runnerConnectDuration += time.Since(connectStartedAt)
@@ -1651,6 +1697,9 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			if resolved.FallbackReason != "" {
 				fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 			}
+		}
+		if err := prepareRunRuntime(); err != nil {
+			return recordFailure(err)
 		}
 		ownerParentCtx = ctx
 		if a.workspaceOwnerAcquirer != nil {
@@ -1885,9 +1934,14 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			releaseApp.Stderr = io.Discard
 		}
 		oldLeaseCleanupStartedAt := time.Now()
-		oldLeaseCleanupErr := releaseReplacementLease(ownerParentCtx, &lifecycleOwner, &releaseResolvedLease, sshBackend, func(releaseCtx context.Context) (ReleaseLeaseOutcome, error) {
-			return releaseApp.releaseBackendLeaseWithOutcomeBestEffort(releaseCtx, sshBackend, cfg, oldLease)
+		oldReleaseCtx := contextWithoutWorkspaceOwner(ctx)
+		oldLeaseCleanupErr := releaseReplacementLease(oldReleaseCtx, &lifecycleOwner, &releaseResolvedLease, sshBackend, func(releaseCtx context.Context) (ReleaseLeaseOutcome, error) {
+			outcome, releaseErr := releaseApp.releaseBackendLeaseWithOutcomeBestEffort(releaseCtx, sshBackend, cfg, oldLease)
+			return outcome, errors.Join(releaseErr, runtimeScope.afterRelease(releaseCtx, oldLeaseID, sshBackend, outcome, releaseErr))
 		})
+		if oldLeaseCleanupErr == nil {
+			oldLeaseCleanupErr = runtimeScope.finalizeLease(context.WithoutCancel(oldReleaseCtx), oldLeaseID, false, nil)
+		}
 		oldLeaseCleanupDuration := time.Since(oldLeaseCleanupStartedAt)
 		if oldLeaseCleanupErr != nil {
 			recorder.Event("lease.replace.failed", "leasing", oldLeaseCleanupErr.Error())
@@ -1900,7 +1954,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 
 		replacementLeaseStartedAt := time.Now()
-		newLease, err := sshBackend.Acquire(ctx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim})
+		acquireCtx := contextWithoutNativeRuntimeAdmission(context.WithValue(ctx, nativeRuntimeLeaseKey{}, ""))
+		newLease, err := sshBackend.Acquire(acquireCtx, AcquireRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim})
 		replacementLeaseDuration := time.Since(replacementLeaseStartedAt)
 		if err != nil {
 			recordFailedReplacementLeaseDuration(&timings, replacementLeaseDuration)
@@ -1915,6 +1970,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			MachineType: oldMachineType,
 		}
 		server, target, leaseID = newLease.Server, newLease.SSH, newLease.LeaseID
+		ctx = contextWithoutNativeRuntimeAdmission(context.WithValue(ctx, nativeRuntimeLeaseKey{}, leaseID))
 		resetRunnerTimingsForReplacement(&timings, oldAttemptReport, oldLeaseCleanupDuration, replacementLeaseDuration, newLease.runnerTiming)
 		acquired = true
 		releaseResolvedLease = true
@@ -1959,6 +2015,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		runReq.Env = envSelection.Effective
 		if err := a.claimRunLeaseTargetForRepoAndRegister(ctx, leaseID, ServerSlug(server), &cfg, &server, target, repo.Root, *reclaim, false, nil); err != nil {
 			return true, err
+		}
+		if runtimeScope.selected() && isWindowsWSL2Target(target) {
+			target = bootstrapNetworkTarget(cfg, server, target)
+			if err := prepareRunRuntime(); err != nil {
+				return true, err
+			}
 		}
 		ownerConnectBefore := runnerConnectDuration
 		ownerErr := acquireLifecycleOwner()
@@ -2019,6 +2081,9 @@ retrySync:
 		stepStart := time.Now()
 		recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before sync")
 		target = bootstrapNetworkTarget(cfg, server, target)
+		if err := prepareRunRuntime(); err != nil {
+			return recordFailure(err)
+		}
 		bootstrapErr := a.waitForSSHReady(ctx, &target, "before sync", 2*time.Minute)
 		connectDuration := time.Since(stepStart)
 		timings.bootstrap += connectDuration
@@ -2037,6 +2102,9 @@ retrySync:
 			if resolved.FallbackReason != "" {
 				fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 			}
+		}
+		if err := prepareRunRuntime(); err != nil {
+			return recordFailure(err)
 		}
 		printContext(target)
 		if !exitNodeEgressChecked {
@@ -2379,6 +2447,7 @@ retrySync:
 		}
 		pendingSyncMetadata := true
 		cleanupTarget := target
+		cleanupParentCtx := context.WithoutCancel(ctx)
 		cleanupWorkdir := workdir
 		cleanupGitOverlay := overlayDecision.Enabled
 		cleanupPlainManifest := plainManifestMode
@@ -2386,7 +2455,7 @@ retrySync:
 			if !pendingSyncMetadata {
 				return
 			}
-			cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 15*time.Second)
+			cleanupCtx, cancelCleanup := context.WithTimeout(cleanupParentCtx, 15*time.Second)
 			defer cancelCleanup()
 			cleanupCommand := remoteDiscardSyncPendingMetadata(cleanupWorkdir, finalizeToken, cleanupPlainManifest)
 			if cleanupGitOverlay {
@@ -2551,6 +2620,9 @@ afterSync:
 	}
 	recorder.Event("bootstrap.waiting", "bootstrap", "waiting for SSH before command")
 	target = bootstrapNetworkTarget(cfg, server, target)
+	if err := prepareRunRuntime(); err != nil {
+		return recordFailure(err)
+	}
 	bootstrapStartedAt := time.Now()
 	bootstrapErr := a.waitForSSHReady(ctx, &target, "before command", runBeforeCommandSSHReadyTimeout)
 	connectDuration := time.Since(bootstrapStartedAt)
@@ -2577,6 +2649,9 @@ afterSync:
 		if resolved.FallbackReason != "" {
 			fmt.Fprintf(a.Stderr, "network fallback %s\n", resolved.FallbackReason)
 		}
+	}
+	if err := prepareRunRuntime(); err != nil {
+		return recordFailure(err)
 	}
 	printContext(target)
 	if !exitNodeEgressChecked {
@@ -2617,12 +2692,13 @@ afterSync:
 			return recordFailure(err)
 		}
 		persistEnvProfile := false
+		profileCleanupCtx := context.WithoutCancel(ctx)
 		defer func() {
 			// Helper mode intentionally keeps the profile; all failure paths clean it up.
 			if persistEnvProfile {
 				return
 			}
-			if out, cleanupErr := runSSHCombinedOutput(context.Background(), target, removeRunEnvProfileCommand(target, workdir, profileEnvFile)); cleanupErr != nil {
+			if out, cleanupErr := runSSHCombinedOutput(profileCleanupCtx, target, removeRunEnvProfileCommand(target, workdir, profileEnvFile)); cleanupErr != nil {
 				fmt.Fprintf(a.Stderr, "warning: remote env profile cleanup failed: %v: %s\n", cleanupErr, strings.TrimSpace(out))
 			}
 		}()
