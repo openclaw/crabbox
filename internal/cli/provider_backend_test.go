@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -2052,5 +2053,60 @@ func TestProviderNameMatchesExactMetadataOnly(t *testing.T) {
 	}
 	if specCalls == 0 || len(providerRegistry) != registrySize {
 		t.Fatal("metadata consultation or registry boundary changed")
+	}
+}
+
+func TestProviderOwnedConfigShowConnectionProjection(t *testing.T) {
+	for _, provider := range []struct {
+		name string
+		user string
+	}{
+		{"digitalocean", "root"},
+		{"linode", "root"},
+		{"vultr", "root"},
+		{"lambda", "ubuntu"},
+		{"scaleway", "root"},
+		{"tencentcloud", "ubuntu"},
+	} {
+		t.Run(provider.name, func(t *testing.T) {
+			for _, mode := range []string{"compiled_defaults", "empty", "custom", "explicit_defaults"} {
+				t.Run(mode, func(t *testing.T) {
+					cfg := baseConfig()
+					setProviderSelection(&cfg, provider.name, providerSelectionFlag)
+					// These unresolved and provider-specific settings must remain passive.
+					cfg.DigitalOcean.Image = ""
+					cfg.Linode.Image = ""
+					cfg.Vultr.UserScheme = "limited"
+					cfg.SSHFallbackPorts = []string{"2200", "2201"}
+					wantUser, wantPort := provider.user, "22"
+					switch mode {
+					case "empty":
+						cfg.SSHUser, cfg.SSHPort = "", ""
+					case "custom":
+						cfg.SSHUser, cfg.SSHPort = "operator", "2202"
+						wantUser, wantPort = cfg.SSHUser, cfg.SSHPort
+					case "explicit_defaults":
+						cfg.explicitSSHUser, cfg.explicitSSHPort = cfg.SSHUser, cfg.SSHPort
+						wantUser, wantPort = cfg.SSHUser, cfg.SSHPort
+					}
+					adapter, err := ProviderFor(cfg.Provider)
+					if err != nil {
+						t.Fatal(err)
+					}
+					normalizer, ok := adapter.(ProviderConfigShowNormalizer)
+					if !ok {
+						t.Fatal("registered provider does not own config-show normalization")
+					}
+					want := cfg
+					want.SSHUser, want.SSHPort, want.SSHFallbackPorts = wantUser, wantPort, nil
+					if got := normalizer.NormalizeConfigForShow(cfg); !reflect.DeepEqual(got, want) {
+						t.Fatal("display projection changed fields beyond the expected connection defaults")
+					}
+					if got := effectiveConfigForShow(cfg); got.SSHUser != wantUser || got.SSHPort != wantPort || got.SSHFallbackPorts != nil {
+						t.Fatalf("display connection = %q:%q fallbacks=%v", got.SSHUser, got.SSHPort, got.SSHFallbackPorts)
+					}
+				})
+			}
+		})
 	}
 }

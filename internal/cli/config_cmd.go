@@ -101,21 +101,6 @@ func effectiveConfigForShow(cfg Config) Config {
 	cfg.Hostinger.WorkRoot = EffectiveHostingerWorkRoot(cfg)
 	cfg.Vast.WorkRoot = EffectiveVastWorkRoot(cfg)
 	cfg.NvidiaBrev.WorkRoot = EffectiveNvidiaBrevWorkRoot(cfg)
-	if cfg.Provider == "digitalocean" || cfg.Provider == "linode" {
-		applyConfigShowSSHDefaults(&cfg, "root")
-	}
-	if cfg.Provider == "vultr" {
-		applyConfigShowSSHDefaults(&cfg, "root")
-	}
-	if cfg.Provider == "lambda" {
-		applyConfigShowSSHDefaults(&cfg, "ubuntu")
-	}
-	if cfg.Provider == "scaleway" {
-		applyConfigShowSSHDefaults(&cfg, "root")
-	}
-	if cfg.Provider == "tencentcloud" {
-		applyConfigShowSSHDefaults(&cfg, "ubuntu")
-	}
 	if cfg.Provider == "hostinger" {
 		cfg.WorkRoot = cfg.Hostinger.WorkRoot
 		cfg.SSHUser = cfg.Hostinger.User
@@ -143,8 +128,8 @@ func effectiveConfigForShow(cfg Config) Config {
 	return cfg
 }
 
-// applyConfigShowSSHDefaults only mutates the local copy used for offline display.
-func applyConfigShowSSHDefaults(cfg *Config, user string) {
+// ApplyConfigShowSSHDefaults projects connection defaults onto a local copy for offline display.
+func ApplyConfigShowSSHDefaults(cfg *Config, user string) {
 	base := baseConfig()
 	if !IsSSHUserExplicit(cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
 		cfg.SSHUser = user

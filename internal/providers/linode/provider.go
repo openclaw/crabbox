@@ -15,6 +15,11 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
+	core.ApplyConfigShowSSHDefaults(&cfg, "root")
+	return cfg
+}
+
 var _ core.ProviderClassProfileProvider = Provider{}
 
 var classProfiles = core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: defaultType})

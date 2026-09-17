@@ -336,7 +336,10 @@ explicit connection settings when applying Linux defaults across provider change
 Keep acquisition-only validation deferred: DigitalOcean and Linode preserve an
 unresolved explicit portable image until backend construction captures the error,
 before filling runtime fallbacks. Passive config-display hooks must not resolve
-defaults themselves.
+defaults themselves. Implement `ProviderConfigShowNormalizer` for narrow,
+selected-provider display projections; use `ApplyConfigShowSSHDefaults` when
+projecting conventional SSH defaults without changing explicit connection inputs
+or provider-native configuration.
 
 ## Step 6. Implement The Backend
 
