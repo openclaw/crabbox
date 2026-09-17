@@ -1892,6 +1892,10 @@ func (f compactRequestTransport) RoundTrip(req *http.Request) (*http.Response, e
 
 func TestCompactJSONRequestOrdinaryBodyContract(t *testing.T) {
 	type contextKey struct{}
+	type observedRequest struct {
+		method, target, body, contentType string
+		readErr                           error
+	}
 	ctx := context.WithValue(context.Background(), contextKey{}, "request-context")
 	var typedNil *struct{ Value string }
 	for _, tc := range []struct {
@@ -1905,36 +1909,28 @@ func TestCompactJSONRequestOrdinaryBodyContract(t *testing.T) {
 		{name: "compact JSON", body: map[string]string{"value": "plain"}, want: `{"value":"plain"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			received := make(chan observedRequest, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				body, err := io.ReadAll(req.Body)
+				received <- observedRequest{req.Method, req.RequestURI, string(body), req.Header.Get("Content-Type"), err}
+				w.WriteHeader(http.StatusOK)
+			}))
+			t.Cleanup(server.Close)
+			httpClient := server.Client()
+			httpClient.Timeout = 10 * time.Second
+			wireTransport := httpClient.Transport
 			calls := 0
-			httpClient := &http.Client{Transport: compactRequestTransport(func(req *http.Request) (*http.Response, error) {
+			httpClient.Transport = compactRequestTransport(func(req *http.Request) (*http.Response, error) {
 				calls++
-				if req.Method != http.MethodPost || req.URL.String() != "https://example.test/ordinary?label=a+b" || req.Context().Value(contextKey{}) != "request-context" {
+				if req.Method != http.MethodPost || req.URL.String() != server.URL+"/ordinary?label=a+b" || req.Context().Value(contextKey{}) != "request-context" {
 					t.Fatalf("request method/URL/context changed: %s %s", req.Method, req.URL)
 				}
 				if (req.Body == nil) != tc.absent {
 					t.Fatal("absent body distinction changed")
 				}
-				var body []byte
-				if req.Body != nil {
-					var err error
-					body, err = io.ReadAll(req.Body)
-					if err != nil {
-						t.Fatal(err)
-					}
-				}
-				if string(body) != tc.want {
-					t.Fatalf("body=%q, want %q", body, tc.want)
-				}
-				contentType := "application/json"
-				if tc.absent {
-					contentType = ""
-				}
-				if req.Header.Get("Content-Type") != contentType {
-					t.Fatalf("content type=%q, want %q", req.Header.Get("Content-Type"), contentType)
-				}
-				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}, nil
-			})}
-			c := &client{base: "https://example.test", http: httpClient}
+				return wireTransport.RoundTrip(req)
+			})
+			c := &client{base: server.URL, http: httpClient}
 			err := c.doJSON(ctx, http.MethodPost, "/ordinary", url.Values{"label": {"a b"}}, tc.body, nil)
 			if err != nil {
 				t.Fatal(err)
@@ -1942,6 +1938,21 @@ func TestCompactJSONRequestOrdinaryBodyContract(t *testing.T) {
 			if calls != 1 {
 				t.Fatalf("transport calls=%d, want 1", calls)
 			}
+			seen := <-received
+			if seen.readErr != nil {
+				t.Fatal(seen.readErr)
+			}
+			if seen.method != http.MethodPost || seen.target != "/ordinary?label=a+b" || seen.body != tc.want {
+				t.Fatalf("HTTP request=%s %s body=%q, want POST /ordinary?label=a+b body=%q", seen.method, seen.target, seen.body, tc.want)
+			}
+			contentType := "application/json"
+			if tc.absent {
+				contentType = ""
+			}
+			if seen.contentType != contentType {
+				t.Fatalf("HTTP content type=%q, want %q", seen.contentType, contentType)
+			}
+			t.Logf("localhost HTTP %s %s body=%q content_type=%q", seen.method, seen.target, seen.body, seen.contentType)
 		})
 	}
 }
