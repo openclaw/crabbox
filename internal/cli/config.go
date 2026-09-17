@@ -7046,9 +7046,6 @@ func serverTypeForConfig(cfg Config) string {
 	if cfg.Provider == "upstash-box" || cfg.Provider == "upstash" {
 		return blank(cfg.UpstashBox.Size, UpstashBoxConfigDefaultSize)
 	}
-	if cfg.Provider == "daytona" {
-		return "snapshot"
-	}
 	if cfg.Provider == "proxmox" {
 		return proxmoxServerTypeForConfig(cfg)
 	}

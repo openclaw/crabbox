@@ -6682,7 +6682,6 @@ func TestServerTypeForProviderClassDirectProviders(t *testing.T) {
 		{provider: "islo", class: "beast", want: ""},
 		{provider: "e2b", class: "beast", want: "base"},
 		{provider: "modal", class: "beast", want: "python:3.13-slim"},
-		{provider: "daytona", class: "beast", want: "snapshot"},
 		{provider: "namespace", class: "standard", want: "S"},
 		{provider: "namespace-devbox", class: " custom-xl ", want: "CUSTOM-XL"},
 		{provider: "proxmox", class: "beast", want: "template"},
