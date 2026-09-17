@@ -608,6 +608,12 @@ func TestAzureCleanupDryRunRevalidatesExactClaim(t *testing.T) {
 	if len(fake.getIDs) != 1 || len(fake.deleted) != 0 {
 		t.Fatalf("get=%v deleted=%v, want one revalidation and no delete", fake.getIDs, fake.deleted)
 	}
+	if len(fake.prepareCleanup) != 0 {
+		t.Fatalf("dry-run prepared=%v, want no mutating preparation", fake.prepareCleanup)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"]); err != nil || !exists {
+		t.Fatalf("dry-run claim exists=%v err=%v, want retained claim", exists, err)
+	}
 	if !strings.Contains(stderr.String(), "delete server id=crabbox-dry-run") {
 		t.Fatalf("stderr=%q, want dry-run deletion plan", stderr.String())
 	}
@@ -776,6 +782,16 @@ func TestAzureCleanupResumesDurablyBoundCompanionsAfterVMDeletion(t *testing.T) 
 
 	var stderr strings.Builder
 	backend := NewAzureLeaseBackend(core.ProviderSpec{}, azureAcquireTestConfig(), core.Runtime{Stderr: &stderr}).(*azureLeaseBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.prepareCleanup) != 0 || len(fake.cleanupExpected) != 0 {
+		t.Fatalf("dry-run prepared=%v cleanup=%v, want no recovery mutation", fake.prepareCleanup, fake.cleanupExpected)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"]); err != nil || !exists {
+		t.Fatalf("dry-run recovery claim exists=%v err=%v, want retained claim", exists, err)
+	}
+	stderr.Reset()
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
@@ -787,6 +803,52 @@ func TestAzureCleanupResumesDurablyBoundCompanionsAfterVMDeletion(t *testing.T) 
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"]); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v, want removed after recovery", exists, err)
+	}
+}
+
+func TestAzureCleanupMissingResourcePolicyByPhase(t *testing.T) {
+	for _, recovery := range []bool{false, true} {
+		for _, preparation := range []bool{false, true} {
+			t.Run(fmt.Sprintf("recovery=%v/preparation=%v", recovery, preparation), func(t *testing.T) {
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				server := azureTestServer("crabbox-cleanup", "cbx_123456abcdef", "cleanup")
+				server.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
+				if recovery {
+					server.Labels[core.AzureCleanupBindingLabel] = "v1"
+				}
+				storeAzureTestClaim(t, server)
+				missing := core.Exit(4, "azure vm not found")
+				fake := &fakeAzureClient{}
+				if !recovery {
+					fake.servers = []core.Server{server}
+				}
+				if preparation {
+					fake.prepareErr = missing
+				} else {
+					fake.deleteCleanupFunc = func(core.Server) error { return missing }
+				}
+				oldClient := newAzureClient
+				newAzureClient = func(context.Context, core.Config) (azureClient, error) { return fake, nil }
+				t.Cleanup(func() { newAzureClient = oldClient })
+
+				var stderr strings.Builder
+				backend := NewAzureLeaseBackend(core.ProviderSpec{}, azureAcquireTestConfig(), core.Runtime{Stderr: &stderr}).(*azureLeaseBackend)
+				err := backend.Cleanup(context.Background(), core.CleanupRequest{})
+				if recovery || preparation {
+					if !errors.Is(err, missing) {
+						t.Fatalf("err=%v, want missing-resource error", err)
+					}
+				} else if err != nil || !strings.Contains(stderr.String(), "skip server id=crabbox-cleanup name=crabbox-cleanup reason=live VM no longer exists at delete boundary") {
+					t.Fatalf("err=%v stderr=%q, want live delete-boundary skip", err, stderr.String())
+				}
+				if len(fake.prepareCleanup) != 1 || (preparation && len(fake.cleanupExpected) != 0) || (!preparation && len(fake.cleanupExpected) != 1) {
+					t.Fatalf("prepared=%v cleanup=%v, unexpected mutation phase", fake.prepareCleanup, fake.cleanupExpected)
+				}
+				if _, exists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"]); err != nil || !exists {
+					t.Fatalf("claim exists=%v err=%v, want retained recovery state", exists, err)
+				}
+			})
+		}
 	}
 }
 
