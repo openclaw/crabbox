@@ -86,9 +86,12 @@ import _ "github.com/openclaw/crabbox/internal/providers/example"
 `cmd/crabbox/main.go` already imports `internal/providers/all`, so nothing else
 needs to change for the binary to see the new provider.
 
-Tests inside `internal/cli` cannot import `internal/providers/all` because that
-creates an import cycle. If you need a test provider for core dispatch, register
-it from a same-package test file.
+Same-package tests in `internal/cli` cannot import provider adapters because that
+creates an import cycle. Register a synthetic provider there only to test core
+dispatch. To test actual provider policy, use an external `cli_test` package,
+which can import and register the real adapter without an import cycle. Use
+scoped backend injection when needed to keep execution local; do not reproduce
+the adapter's policy in a fake provider.
 
 ## Step 3. Register The Provider
 
@@ -325,6 +328,24 @@ Never accept secrets as flag arguments. Pull them from environment variables,
 SDK config, the broker, or the operator's credential store. Flags are visible in
 shell history, process listings, and recorded run logs.
 
+Provider-native configuration defaults belong in `ProviderConfigDefaulter`'s
+`ApplyConfigDefaults` hook. Core calls it after input parsing and portable-OS
+preprocessing, then normalizes and validates the target. Use core provenance
+accessors to preserve explicit inputs; `ApplyLinuxConnectionDefaults` restores
+explicit connection settings when applying Linux defaults across provider changes.
+Keep acquisition-only validation deferred: DigitalOcean and Linode preserve an
+unresolved explicit portable image until backend construction captures the error,
+before filling runtime fallbacks. Passive config-display hooks must not invoke
+configuration-default phases. Implement `ProviderConfigShowNormalizer` for narrow,
+selected-provider display projections; use `ApplyConfigShowSSHDefaults` when
+projecting conventional SSH defaults without changing explicit connection inputs
+or provider-native configuration. Provider-owned config-show sections may derive
+pure effective display values from the supplied Config, including inactive
+providers' displayed work roots. They must not call ApplyConfigDefaults, load
+configuration, read environment or native state, resolve credentials, or mutate
+the supplied configuration. Selected top-level projections still belong in
+ProviderConfigShowNormalizer and require actionable provider selection.
+
 ## Step 6. Implement The Backend
 
 Pick the interface that matches the kind you declared. Both embed `Backend`,
@@ -372,6 +393,14 @@ resource validation, and every deletion decision remain adapter-owned.
 
 `List` returns `[]LeaseView` (a type alias for `Server`). Do not print from
 `List` — core renders the table.
+
+Claim-publication helpers initialize a missing idle policy, but preserve an
+already-recorded positive idle duration during ordinary direct-lease preparation,
+repository reclaim, and endpoint publication. Their duration argument is not
+implicit replacement intent. Explicit idle changes belong to the run/Touch
+policy path; managed coordinator projections remain authoritative. This also
+keeps acquisition finalization from reinitializing a policy already published
+by the provider's first acquisition step.
 
 `Touch` updates idle/state metadata on the provider when possible. Use the
 `internal/cli/provider_labels.go` helpers for safe label encoding. The optional
@@ -455,6 +484,14 @@ Cleanup must honor `CleanupRequest.DryRun`, log every skip/delete decision to
 `rt.Stderr`, and filter by Crabbox labels so it never touches unrelated
 machines. When a broker is configured, core refuses to call provider cleanup at
 all — brokered cleanup belongs to the coordinator scheduler.
+
+Adapters with explicit cleanup decisions can use `shared.DirectCleanupDecision`
+to apply a server deletion, recovery continuation, or confirmed-missing claim
+retirement behind one dry-run boundary. Discover and validate candidates before
+applying the decision; put mutating provider preparation, recovery writes, and
+key removal inside its mutation callback. Missing-resource policy and recovery
+eligibility remain adapter-owned. Azure and GCP use this boundary without
+changing the ordinary `DirectSSHBackend.CleanupServers` contract.
 
 For claim-authorized providers built on `shared.DirectSSHBackend`, use its
 opt-in `PrepareCleanup` hook after the shared expiration/keep gate. Preparation

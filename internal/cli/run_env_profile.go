@@ -400,7 +400,7 @@ func remoteProbeRunEnvProfileCommand(workdir, remotePath string, names []string)
 		b.WriteString(shellQuote(name))
 		b.WriteString("; fi\n")
 	}
-	return "bash -lc " + shellQuote(b.String())
+	return remotePOSIXControlCommand(b.String())
 }
 
 func remoteUploadRunEnvHelperCommand(workdir, remotePath string) string {
@@ -411,11 +411,11 @@ func remoteUploadRunEnvHelperCommand(workdir, remotePath string) string {
 		"umask 077\n" +
 		"cat > " + shellQuote(remotePath) + "\n" +
 		"chmod 700 " + shellQuote(remotePath) + "\n"
-	return "bash -lc " + shellQuote(script)
+	return remotePOSIXControlCommand(script)
 }
 
 func formatRunEnvHelper(profilePath string) string {
-	return "#!/usr/bin/env bash\n" +
+	return "#!/bin/sh\n" +
 		"set -e\n" +
 		"cd \"$(dirname \"$0\")/../..\"\n" +
 		"profile=" + shellQuote(profilePath) + "\n" +
@@ -433,12 +433,12 @@ func remoteUploadRunEnvProfileCommand(workdir, remotePath string) string {
 		"umask 077\n" +
 		"cat > " + shellQuote(remotePath) + "\n" +
 		"chmod 600 " + shellQuote(remotePath) + "\n"
-	return "bash -lc " + shellQuote(script)
+	return remotePOSIXControlCommand(script)
 }
 
 func remoteRemoveRunEnvProfileCommand(workdir, remotePath string) string {
 	script := "set -eu\ncd " + shellQuote(workdir) + "\nrm -f -- " + shellQuote(remotePath)
-	return "bash -lc " + shellQuote(script)
+	return remotePOSIXControlCommand(script)
 }
 
 func removeRunEnvProfileCommand(target SSHTarget, workdir, remotePath string) string {

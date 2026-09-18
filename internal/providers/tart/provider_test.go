@@ -332,7 +332,7 @@ func TestApplyFlagsRejectsExplicitLinuxTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := applyFlags(&cfg, fs, flagValues{})
+	err := applyFlags(&cfg, fs, core.TartConfigFlagValues{})
 	if err == nil {
 		t.Fatal("applyFlags should reject explicit --target linux")
 	}
@@ -350,7 +350,7 @@ func TestApplyFlagsRejectsExplicitWindowsTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := applyFlags(&cfg, fs, flagValues{})
+	err := applyFlags(&cfg, fs, core.TartConfigFlagValues{})
 	if err == nil {
 		t.Fatal("applyFlags should reject explicit --target windows")
 	}
@@ -363,7 +363,7 @@ func TestApplyFlagsDefaultsLinuxToMacOS(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
 
-	err := applyFlags(&cfg, fs, flagValues{})
+	err := applyFlags(&cfg, fs, core.TartConfigFlagValues{})
 	if err != nil {
 		t.Fatalf("applyFlags failed: %v", err)
 	}
@@ -382,7 +382,7 @@ func TestApplyFlagsRejectsExplicitTargetFromEnv(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
 
-	err := applyFlags(&cfg, fs, flagValues{})
+	err := applyFlags(&cfg, fs, core.TartConfigFlagValues{})
 	if err == nil {
 		t.Fatal("applyFlags should reject explicit target=linux from env")
 	}
@@ -397,7 +397,7 @@ func TestApplyFlagsRejectsExplicitTargetFromYAML(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
 
-	err := applyFlags(&cfg, fs, flagValues{})
+	err := applyFlags(&cfg, fs, core.TartConfigFlagValues{})
 	if err == nil {
 		t.Fatal("applyFlags should reject explicit target=linux from YAML")
 	}
@@ -415,7 +415,7 @@ func TestApplyFlagsAcceptsExplicitMacOS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := applyFlags(&cfg, fs, flagValues{})
+	err := applyFlags(&cfg, fs, core.TartConfigFlagValues{})
 	if err != nil {
 		t.Fatalf("applyFlags should accept explicit --target macos: %v", err)
 	}
@@ -4252,5 +4252,97 @@ func TestInheritedWorkRootCallerContract(t *testing.T) {
 				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
 			}
 		}
+	}
+}
+
+func TestApplyFlagsOrderedPartialState(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		wantError   string
+		cpu, memory int
+		accepted    bool
+	}{
+		{"CPU before any acceptance", []string{"--tart-cpu", "3"}, "--tart-cpu", 4, 8192, false},
+		{"image and user before CPU", []string{"--tart-image", "synthetic-image", "--tart-user", "alice", "--tart-cpu", "3", "--tart-memory", "1"}, "--tart-cpu", 4, 8192, true},
+		{"CPU before memory", []string{"--tart-cpu", "8", "--tart-memory", "1", "--tart-disk", "-1"}, "--tart-memory", 8, 8192, true},
+		{"memory before disk", []string{"--tart-cpu", "8", "--tart-memory", "16384", "--tart-disk", "-1"}, "--tart-disk", 8, 16384, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			want := cfg
+			want.Tart.CPUs, want.Tart.Memory = tc.cpu, tc.memory
+			if tc.name == "image and user before CPU" {
+				want.Tart.Image, want.Tart.User = "synthetic-image", "alice"
+				core.MarkTartImageExplicit(&want)
+			}
+			core.RecordProviderFlagInputs(&want, tc.accepted, providerName)
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatal(err)
+			}
+			err := applyFlags(&cfg, fs, values)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("error=%v, want %s", err, tc.wantError)
+			}
+			// Whole-config equality includes private explicit markers and the input ledger.
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("partial values, markers, ledger, or final-phase state differ")
+			}
+		})
+	}
+}
+
+func TestApplyFlagsDiskZeroRetainsMarker(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "other"
+	core.MarkTartDiskExplicit(&cfg)
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, providerName)
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--tart-disk", "0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, want) {
+		t.Fatal("visited zero must retain the disk marker and record accepted input")
+	}
+}
+
+func TestApplyFlagsSelectedPhaseBoundary(t *testing.T) {
+	for _, provider := range []string{"tart", "local-tart", "macos-vm", "other"} {
+		t.Run(provider, func(t *testing.T) {
+			t.Setenv("CRABBOX_TART_CPUS", "invalid")
+			t.Setenv("CRABBOX_TART_MEMORY", "invalid")
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			want := cfg
+			want.Tart.User = "alice"
+			core.RecordProviderFlagInputs(&want, true, providerName)
+			if provider != "other" {
+				want.TargetOS = core.TargetMacOS
+			}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			if err := fs.Parse([]string{"--tart-user", "alice"}); err != nil {
+				t.Fatal(err)
+			}
+			err := applyFlags(&cfg, fs, values)
+			if provider == "other" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "CRABBOX_TART_CPUS") {
+				t.Fatalf("first strict environment error=%v", err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("selected phase changed partial values, markers, ledger, or defaults")
+			}
+		})
 	}
 }

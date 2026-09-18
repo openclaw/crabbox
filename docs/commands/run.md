@@ -64,6 +64,21 @@ crabbox run -- bash -c 'set -eu; ./scripts/test.sh'
 This inner Bash inherits exported environment values, not unexported shell
 variables or functions from login startup files.
 
+With the complete release's sibling `crabbox-runtime/` directory installed,
+Linux SSH managed execution can run an independent argv command even when Bash
+is absent. Internal supervision uses the native runtime; argv execution uses
+`/bin/sh` when Bash is unavailable. When Bash is present, including on macOS,
+Crabbox retains the Bash login environment and literal argv behavior. Explicit
+`--shell` and Bash scripts still require Bash.
+
+Newly generated Linux `crabbox-ready` scripts use `/bin/sh`, so Bash absence
+alone does not prevent managed readiness with the complete runtime pack.
+Existing images and their readiness scripts are not upgraded in place. A
+CLI-only `go install` does not supply the companion runtime pack: if an internal
+Bash-dependent path needs Bash on a host without it, the
+error identifies the missing runtime pack and recommends Homebrew or extracting
+the complete platform archive with `crabbox-runtime/` intact.
+
 On POSIX and WSL2 SSH targets, private command staging does not change the
 remote caller's umask for user work. Commands keep the target shell's creation
 policy; Crabbox's staged scripts, input, and workspace-owner state remain private.
@@ -107,6 +122,17 @@ discarding the live process record. Stop a disposable lease with `crabbox stop
 are never destroyed by stop: finish or terminate the known remote workload on
 that host before reusing its workspace. Do not delete owner records to bypass
 the busy check.
+
+When a fresh disposable lease loses SSH after sync, Crabbox may replace it once.
+Replacement quiesces the old owner, confirms lease release, and finishes any
+remaining owner cleanup before acquiring fresh ownership and syncing again. Caller
+cancellation still applies throughout replacement acquisition.
+
+If owner inspection or renewal cannot be confirmed, replacement stops and the old
+lease may remain for recovery; Crabbox does not allocate another lease while that
+ownership is uncertain. Check it with `crabbox inspect --provider <provider> --id <lease>`
+and use the matching `stop` command for a disposable lease. Static SSH hosts are
+not destroyed by `stop`.
 
 ## Remote workspace root
 
@@ -228,7 +254,13 @@ Aliases, explicit reclaim, and coordinator-managed leases retain their existing
 resolution paths; stale heartbeat snapshots still fail the exact-claim check.
 
 `--idle-timeout` controls inactivity expiry (default `30m`); `--ttl` is the
-maximum wall-clock lifetime (default `90m`). Use `--stop-after
+maximum wall-clock lifetime (default `90m`). Reusing a claimed direct lease keeps
+its recorded idle timeout unless `--idle-timeout` is explicitly supplied; reader
+defaults and transferring the repository claim with `--reclaim` do not replace
+that policy. This applies to direct allocation even in registered broker mode;
+managed leases continue to use the coordinator's policy. An explicit replacement
+on an existing direct lease is stored in whole seconds, rounded to the nearest
+second with a minimum of one second for a positive value. Use `--stop-after
 success|always|failure|never` to make lease cleanup explicit. Without it, a
 newly acquired one-shot lease is released after the command and an existing
 `--id` lease is left alone. The run details always print the exact `crabbox
@@ -654,6 +686,19 @@ probes likewise invoke the literal requested command with `--version`, including
 `python` and `python3` on native Windows; Crabbox does not map either name to
 `py`. An unavailable literal command prints `<name>=missing` and the run
 continues.
+
+The opt-in `bash` probe invokes the literal `bash --version` on Linux, macOS,
+and WSL2; native Windows skips it. Select it with
+`--preflight --preflight-tools bash`, or append it to the unchanged defaults with
+`--preflight --preflight-tools default,bash`. It prints the bounded first output
+line as `remote preflight bash=<version>`, or `remote preflight bash=missing`
+when Bash is unavailable. This diagnostic does not prevent an independent
+command from running or install Bash; it does not make a Bash-dependent workload
+portable. For example:
+
+```sh
+crabbox run --preflight --preflight-tools bash -- /bin/sh -c 'printf "ready\n"'
+```
 
 `python3-venv` is a separate, opt-in functional probe for Linux, macOS and WSL2;
 native Windows skips it. It creates a fresh disposable virtual environment with

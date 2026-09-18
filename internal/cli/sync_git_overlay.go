@@ -858,21 +858,20 @@ func gitOverlayBoundaryViolation(reason string) bool {
 
 func gitOverlayHermeticFunctions() string {
 	return `git() {
-	local overlay_git_environment=()
-	if [ -n "${GIT_INDEX_FILE:-}" ]; then overlay_git_environment+=("GIT_INDEX_FILE=$GIT_INDEX_FILE"); fi
-	if [ -n "${overlay_no_lazy_fetch:-}" ]; then overlay_git_environment+=("GIT_NO_LAZY_FETCH=1"); fi
-  /usr/bin/env -i HOME=/dev/null XDG_CONFIG_HOME=/dev/null PATH=/usr/bin:/bin LANG=C LC_ALL=C \
-    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-    GIT_ATTR_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false \
-    GCM_INTERACTIVE=Never GIT_SSH_COMMAND=/bin/false GIT_LFS_SKIP_SMUDGE=1 \
-    GIT_TRACE_PACKET="${overlay_packet_trace:-0}" "${overlay_git_environment[@]}" \
-    /usr/bin/git -c credential.helper= -c credential.interactive=never \
+  set -- /usr/bin/git -c credential.helper= -c credential.interactive=never \
       -c core.hooksPath=/dev/null -c core.attributesFile=/dev/null -c core.excludesFile=/dev/null \
       -c core.fsmonitor=false -c core.autocrlf=false -c core.eol=lf \
       -c core.symlinks=true -c core.filemode=true -c protocol.allow=never \
       -c protocol.file.allow=always -c protocol.http.allow=always -c protocol.https.allow=always \
       -c protocol.ext.allow=never -c protocol.git.allow=never -c protocol.ssh.allow=never \
       -c fetch.recurseSubmodules=false -c submodule.recurse=false "$@"
+  if [ -n "${overlay_no_lazy_fetch:-}" ]; then set -- "GIT_NO_LAZY_FETCH=1" "$@"; fi
+  if [ -n "${GIT_INDEX_FILE:-}" ]; then set -- "GIT_INDEX_FILE=$GIT_INDEX_FILE" "$@"; fi
+  /usr/bin/env -i HOME=/dev/null XDG_CONFIG_HOME=/dev/null PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_ATTR_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false \
+    GCM_INTERACTIVE=Never GIT_SSH_COMMAND=/bin/false GIT_LFS_SKIP_SMUDGE=1 \
+    GIT_TRACE_PACKET="${overlay_packet_trace:-0}" "$@"
 }
 overlay_workspace_safe() {
   checkout_root="$(cd -P -- "$1" 2>/dev/null && pwd -P)" || return 1
@@ -962,17 +961,13 @@ overlay_git_metadata_safe() (
 `
 }
 
-func remoteGitOverlayShellCommand(script string) string {
-	return "/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C BASH_ENV=/dev/null ENV=/dev/null /bin/bash --noprofile --norc -c " + shellQuote(script)
-}
-
 func remoteDiscardGitOverlaySyncPendingMetadata(workdir, finalizeToken string) string {
 	script := `set -e
 cd ` + shellQuote(workdir) + `
 ` + gitOverlayHermeticFunctions() + remotePlainSyncMetaDirScript() + `
 /bin/rm -f -- "$meta_dir/` + remoteSyncPendingManifestName(finalizeToken) + `" "$meta_dir/` + remoteSyncPendingDeletedName(finalizeToken) + `"
 `
-	return remoteGitOverlayShellCommand(script)
+	return remoteHermeticPOSIXControlCommand(script)
 }
 
 func remotePrepareGitOverlay(workdir string, plan gitCoherencePlan) string {
@@ -988,7 +983,7 @@ func remotePrepareGitOverlayWithHint(workdir string, plan gitCoherencePlan, base
 		return "printf '" + gitOverlayFallbackMarker + "unsupported_origin_transport\\n' >&2; exit 78"
 	}
 	parent := filepath.ToSlash(filepath.Dir(workdir))
-	script := `set -e -o pipefail
+	script := `set -e
 workdir=` + shellQuote(workdir) + `
 parent=` + shellQuote(parent) + `
 expected_origin=` + shellQuote(plan.RemoteURL) + `
@@ -1007,9 +1002,10 @@ overlay_fallback() {
 case "$workdir" in "$parent"/*) ;; *) overlay_fallback unsafe_remote_root ;; esac
 if [ -L "$workdir" ]; then overlay_fallback symlink_remote_root; fi
 if [ -L "$parent" ]; then overlay_fallback symlink_remote_parent; fi
-for prerequisite in /bin/bash /bin/cat /bin/mkdir /bin/rm /bin/mv /bin/cp /usr/bin/env /usr/bin/git /usr/bin/find /usr/bin/mktemp /usr/bin/awk /usr/bin/grep; do
+for prerequisite in /bin/sh /bin/cat /bin/mkdir /bin/rm /bin/mv /bin/cp /usr/bin/env /usr/bin/git /usr/bin/find /usr/bin/mktemp /usr/bin/awk /usr/bin/grep; do
   [ -x "$prerequisite" ] || overlay_fallback remote_prerequisite_missing
 done
+command -v od >/dev/null 2>&1 || overlay_fallback remote_prerequisite_missing
 /bin/mkdir -p "$parent"
 canonical_parent="$(cd -P -- "$parent" 2>/dev/null && pwd -P)" || overlay_fallback symlink_remote_parent
 git_overlay_parent_safe() {
@@ -1090,17 +1086,17 @@ if [ ! -d "$workdir/.git" ]; then
   checkout_root="$seed_tmp"
 fi
 git -C "$checkout_root" ls-files -t -z >"$git_runtime_root/index-skip-flags" || overlay_fallback index_inspection_failed
-while IFS= read -r -d '' index_entry; do
+` + remoteNULRecordLoop("index_entry", `"$git_runtime_root/index-skip-flags"`, `"$git_runtime_root/index-octets"`, `
   case "$index_entry" in
     S\ *) overlay_fallback skip_worktree_index ;;
   esac
-done <"$git_runtime_root/index-skip-flags"
+`, "overlay_fallback index_inspection_failed") + `
 git -C "$checkout_root" ls-files -v -z >"$git_runtime_root/index-assume-flags" || overlay_fallback index_inspection_failed
-while IFS= read -r -d '' index_entry; do
+` + remoteNULRecordLoop("index_entry", `"$git_runtime_root/index-assume-flags"`, `"$git_runtime_root/index-octets"`, `
   case "$index_entry" in
     [a-z]\ *) overlay_fallback assume_unchanged_index ;;
   esac
-done <"$git_runtime_root/index-assume-flags"
+`, "overlay_fallback index_inspection_failed") + `
 if [ -z "$reuse_hint_valid" ]; then
   overlay_no_lazy_fetch=
   overlay_packet_trace="$git_runtime_root/packets"
@@ -1129,16 +1125,16 @@ if [ -z "$reuse_hint_valid" ]; then
   fi
   git -C "$checkout_root" config --local remote.origin.promisor true || overlay_fallback filtered_history_unsupported
   git -C "$checkout_root" config --local remote.origin.partialclonefilter blob:none || overlay_fallback filtered_history_unsupported
-  fetch_args=(--quiet --no-tags --no-write-fetch-head --filter=blob:none)
+  set -- --quiet --no-tags --no-write-fetch-head --filter=blob:none
   if [ "$(git -C "$checkout_root" rev-parse --is-shallow-repository 2>/dev/null || true)" = true ]; then
-    fetch_args+=(--unshallow)
+    set -- "$@" --unshallow
   fi
-  refspecs=("+refs/heads/$advertised_branch:refs/remotes/origin/$advertised_branch")
+  set -- "$@" origin "+refs/heads/$advertised_branch:refs/remotes/origin/$advertised_branch"
   if [ -n "$base_ref" ] && [ "$base_ref" != "$advertised_branch" ]; then
-    refspecs+=("+refs/heads/$base_ref:refs/remotes/origin/$base_ref")
+    set -- "$@" "+refs/heads/$base_ref:refs/remotes/origin/$base_ref"
   fi
   set +e
-  git -C "$checkout_root" fetch "${fetch_args[@]}" origin "${refspecs[@]}" 2>"$git_runtime_root/transport-error"
+  git -C "$checkout_root" fetch "$@" 2>"$git_runtime_root/transport-error"
   transport_status=$?
   set -e
   if [ "$transport_status" -ne 0 ]; then
@@ -1191,24 +1187,32 @@ if [ "$(git config --bool core.sparseCheckout 2>/dev/null || true)" = true ] ||
 fi
 git checkout --quiet --force --detach "$expected_target" || overlay_fallback checkout_failed
 git reset --hard --quiet "$expected_target" || overlay_fallback reset_failed
-clean_args=(-ffdx --quiet -e /.crabbox/)
+set -- -ffdx --quiet -e /.crabbox/
 /usr/bin/find -P . \( -ipath './.git' -o -ipath './.crabbox' \) -prune -o \
   \( -type d -o -type l \) \( -iname node_modules -o -iname .pnpm-store -o -ipath '*/.yarn/cache' -o -ipath '*/.yarn/unplugged' \) \
   -print0 -prune >"$git_runtime_root/cache-paths" || overlay_fallback cache_discovery_failed
-while IFS= read -r -d '' cache_path; do
+` + remoteNULRecordLoop("cache_path", `"$git_runtime_root/cache-paths"`, `"$git_runtime_root/cache-octets"`, `
   cache_lookup_path="$cache_path"
   cache_path="${cache_path#./}"
   if [ -L "$cache_path" ]; then overlay_fallback unsafe_cache_root; fi
+  printf '%s\0' "$cache_lookup_path" >"$git_runtime_root/cache-input" || overlay_fallback cache_ignore_failed
   set +e
-  printf '%s\0' "$cache_lookup_path" | git check-ignore --no-index -v -z --stdin >"$git_runtime_root/cache-ignore" 2>/dev/null
+  git check-ignore --no-index -v -z --stdin <"$git_runtime_root/cache-input" >"$git_runtime_root/cache-ignore" 2>/dev/null
   ignore_status=$?
   set -e
   if [ "$ignore_status" -eq 1 ]; then continue; fi
   [ "$ignore_status" -eq 0 ] || overlay_fallback cache_ignore_failed
-  {
-    IFS= read -r -d '' ignore_source && IFS= read -r -d '' ignore_line &&
-      IFS= read -r -d '' ignore_pattern && IFS= read -r -d '' ignore_path
-  } <"$git_runtime_root/cache-ignore" || overlay_fallback cache_ignore_failed
+  ignore_fields=0
+`+remoteNULRecordLoop("ignore_field", `"$git_runtime_root/cache-ignore"`, `"$git_runtime_root/ignore-octets"`, `
+  ignore_fields=$((ignore_fields + 1))
+  case "$ignore_fields" in
+    1) ignore_source="$ignore_field" ;;
+    2) ignore_line="$ignore_field" ;;
+    3) ignore_pattern="$ignore_field" ;;
+    4) ignore_path="$ignore_field" ;;
+  esac
+`, "overlay_fallback cache_ignore_failed")+`
+  [ "$ignore_fields" -ge 4 ] || overlay_fallback cache_ignore_failed
   case "$ignore_source" in .gitignore|*/.gitignore) ;; *) continue ;; esac
   case "$ignore_source" in /*|../*|*/../*) continue ;; esac
   [ -f "$ignore_source" ] && [ ! -L "$ignore_source" ] || overlay_fallback cache_ignore_untrusted
@@ -1218,22 +1222,25 @@ while IFS= read -r -d '' cache_path; do
   if [ -L "$cache_path" ] || [ ! -d "$cache_path" ]; then overlay_fallback unsafe_cache_root; fi
   resolved_cache="$(cd -P -- "$cache_path" && pwd -P)" || overlay_fallback unsafe_cache_root
   case "$resolved_cache/" in "$workdir"/*) ;; *) overlay_fallback unsafe_cache_root ;; esac
-  cache_pattern="${cache_path//\\/\\\\}"
-  cache_pattern="${cache_pattern//\*/\\*}"
-  cache_pattern="${cache_pattern//\?/\\?}"
-  cache_pattern="${cache_pattern//\[/\\[}"
-  cache_pattern="${cache_pattern//\]/\\]}"
-  cache_pattern="${cache_pattern//!/\\!}"
-  cache_pattern="${cache_pattern//#/\\#}"
-  clean_args+=(-e "$cache_pattern/")
-done <"$git_runtime_root/cache-paths"
-git clean "${clean_args[@]}" || overlay_fallback clean_failed
+  cache_pattern=
+  cache_rest="$cache_path"
+  while [ -n "$cache_rest" ]; do
+    cache_tail=${cache_rest#?}
+    cache_char=${cache_rest%"$cache_tail"}
+    case "$cache_char" in '\'|'*'|'?'|'['|']'|'!'|'#') cache_pattern="$cache_pattern\\" ;; esac
+    cache_pattern="$cache_pattern$cache_char"
+    cache_rest="$cache_tail"
+  done
+  # Preserve this verified path, not same-named caches elsewhere in the tree.
+  set -- "$@" -e "/$cache_pattern/"
+`, "overlay_fallback cache_discovery_failed") + `
+git clean "$@" || overlay_fallback clean_failed
 [ "$(git rev-parse --verify HEAD^{commit})" = "$expected_target" ] || overlay_fallback head_mismatch
 [ "$(git write-tree)" = "$expected_tree" ] || overlay_fallback index_tree_mismatch
 overlay_metadata_safe "$workdir" || overlay_fallback unsafe_overlay_metadata
 /bin/rm -f -- .git/crabbox/sync-fingerprint .git/crabbox/git-hydrate-base
 `
-	return remoteGitOverlayShellCommand(script)
+	return remoteHermeticPOSIXControlCommand(script)
 }
 
 func remotePruneGitOverlaySyncManifest(workdir, finalizeToken string, allowMassDeletions ...bool) string {
@@ -1327,14 +1334,17 @@ for my $path (@deleted, @old) {
 }
 die "remote sync sanity failed: " . scalar(@pending) . " pending deletions\n" if $ARGV[3] ne "1" && @pending >= 200;
 binmode STDOUT; print STDOUT map { $_ . "\0" } @pending;`
-	script := `set -e -o pipefail
+	script := `set -e
 cd ` + shellQuote(workdir) + `
 ` + gitOverlayHermeticFunctions() + metadataScript + `
 old="$meta_dir/sync-manifest"
 new="$meta_dir/` + manifestName + `"
 deleted="$meta_dir/` + deletedName + `"
-delete_paths() {
-  while IFS= read -r -d '' rel; do
+produce_prune_paths() {
+` + remoteSyncInterpreterCommand(python, perl, "\"$old\" \"$new\" \"$deleted\" "+shellQuote(allowValue)) + `
+}
+if [ ! -d "$meta_dir" ]; then produce_prune_paths > /dev/null; exit 0; fi
+` + remoteSyncPruneFiles(finalizeToken) + remoteSyncNULConsumer(`
     case "$rel" in ''|/*|../*|*/../*|.git|.git/*|*/.git|*/.git/*|.crabbox|.crabbox/*|*/.crabbox|*/.crabbox/*) echo "unsafe overlay deletion path" >&2; exit 67 ;; esac
     remainder="$rel"
     ancestor=
@@ -1351,9 +1361,8 @@ delete_paths() {
       /bin/rmdir -- "$dir" 2>/dev/null || break
       dir=$(/usr/bin/dirname -- "$dir")
     done
-  done
-}
-` + remoteSyncInterpreterCommand(python, perl, "\"$old\" \"$new\" \"$deleted\" "+shellQuote(allowValue)) + ` | delete_paths
+`) + `produce_prune_paths > "$prune_paths"
+delete_paths "$prune_paths"
 `
-	return remoteGitOverlayShellCommand(script)
+	return remoteHermeticPOSIXControlCommand(script)
 }

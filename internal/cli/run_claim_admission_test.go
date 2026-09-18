@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -48,6 +49,53 @@ func (b *runClaimAdmissionTestBackend) Resolve(ctx context.Context, _ ResolveReq
 
 func (b *runClaimAdmissionTestBackend) ResolveRunLeaseUnderClaim(ctx context.Context, req ResolveRequest, original LeaseClaim) (LeaseTarget, error) {
 	return b.Resolve(ctx, req)
+}
+
+func TestRunClaimAdmissionSelectsRecordedIdlePolicy(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprint("explicit=", explicit), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			provider := runClaimAdmissionTestProvider{}
+			cfg := baseConfig()
+			cfg.Provider, cfg.IdleTimeout = provider.Spec().Name, 5*time.Minute
+			id := "cbx_123456789abc"
+			repo := Repo{Root: t.TempDir(), Name: "fixture"}
+			lease := LeaseTarget{LeaseID: id, Server: Server{Provider: cfg.Provider, CloudID: "fixture-instance", Labels: DirectLeaseLabels(cfg, id, "fixture", cfg.Provider, "", true, time.Now())}, SSH: SSHTarget{Host: "127.0.0.1", Port: "2200"}}
+			if err := ClaimLeaseTargetForRepoConfig(id, "fixture", cfg, lease.Server, lease.SSH, repo.Root, cfg.IdleTimeout, false); err != nil {
+				t.Fatal(err)
+			}
+			lease.Server.Labels["idle_timeout"], lease.Server.Labels["idle_timeout_secs"] = "1800", "1800"
+			b := &runClaimAdmissionTestBackend{runEnvProfileTestBackend: runEnvProfileTestBackend{spec: provider.Spec()}, lease: lease, entered: make(chan struct{}), release: make(chan struct{})}
+			close(b.release)
+			cfg.IdleTimeout = 30 * time.Minute
+			var override *time.Duration
+			want := 300
+			if explicit {
+				value := 10 * time.Minute
+				override, want = &value, 600
+			}
+			result, admitted, err := admitRunLeaseUnderClaim(t.Context(), b, ResolveRequest{ID: id, Repo: repo, Prepare: true}, &cfg, override, func(*LeaseTarget) error { return nil })
+			if err != nil || !admitted {
+				t.Fatalf("admitted=%t err=%v", admitted, err)
+			}
+			claim, err := ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, labels := range []map[string]string{claim.Labels, result.Server.Labels} {
+				if labels["idle_timeout"] != fmt.Sprint(want) || labels["idle_timeout_secs"] != fmt.Sprint(want) {
+					t.Fatalf("published idle aliases diverged: %v", labels)
+				}
+			}
+			if claim.IdleTimeoutSeconds != want || cfg.IdleTimeout != time.Duration(want)*time.Second {
+				t.Fatalf("scalar=%d config=%s want=%d", claim.IdleTimeoutSeconds, cfg.IdleTimeout, want)
+			}
+			snapshot, exists, set := ServerLeaseClaimSnapshot(result.Server)
+			if !exists || !set || snapshot.Revision != claim.Revision || snapshot.IdleTimeoutSeconds != want {
+				t.Fatal("returned snapshot did not carry the published policy")
+			}
+		})
+	}
 }
 
 func TestRunClaimAdmissionCoexistsWithHeartbeat(t *testing.T) {
@@ -252,7 +300,7 @@ func TestRunClaimAdmissionPublishesOnlyValidatedCurrentOwner(t *testing.T) {
 			close(b.release)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			result, admitted, err := admitRunLeaseUnderClaim(ctx, b, ResolveRequest{ID: lease.LeaseID, Repo: repo, Prepare: true}, &cfg, func(target *LeaseTarget) error {
+			result, admitted, err := admitRunLeaseUnderClaim(ctx, b, ResolveRequest{ID: lease.LeaseID, Repo: repo, Prepare: true}, &cfg, nil, func(target *LeaseTarget) error {
 				if test.admit != nil {
 					return test.admit(cancel, target)
 				}
@@ -270,7 +318,7 @@ func TestRunClaimAdmissionPublishesOnlyValidatedCurrentOwner(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := (App{}).claimRunLeaseTargetForRepoAndRegister(ctx, result.LeaseID, ServerSlug(result.Server), cfg, &result.Server, result.SSH, repo.Root, false, true); err != nil {
+				if err := (App{}).claimRunLeaseTargetForRepoAndRegister(ctx, result.LeaseID, ServerSlug(result.Server), &cfg, &result.Server, result.SSH, repo.Root, false, true, nil); err != nil {
 					t.Fatal(err)
 				}
 				after, readErr = ReadLeaseClaim(lease.LeaseID)

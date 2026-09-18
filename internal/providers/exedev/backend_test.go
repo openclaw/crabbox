@@ -30,6 +30,29 @@ func (r *exeDevRecordingRunner) Run(_ context.Context, req core.LocalCommandRequ
 	return core.LocalCommandResult{}, nil
 }
 
+func TestNativeServerTypeProjection(t *testing.T) {
+	for _, name := range []string{"exe-dev", "exe", "exedev", " Exe "} {
+		if got := core.ServerTypeForProviderClass(name, "beast"); got != "default" {
+			t.Fatalf("provider=%q default type=%q, want %q", name, got, "default")
+		}
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolver, ok := provider.(core.ProviderServerTypeProvider)
+		if !ok {
+			t.Fatalf("provider=%q has no native type capability", name)
+		}
+		for _, tc := range []struct{ raw, want string }{{"", "default"}, {"  ", "  "}, {"custom", "custom"}, {" custom ", " custom "}} {
+			cfg := core.Config{Provider: name, Class: "beast", ServerType: "unrelated-type", ServerTypeExplicit: true}
+			cfg.ExeDev.Image = tc.raw
+			if got := resolver.ServerTypeForConfig(cfg); got != tc.want {
+				t.Fatalf("provider=%q raw=%q type=%q, want %q", name, tc.raw, got, tc.want)
+			}
+		}
+	}
+}
+
 func TestExeDevListFiltersCrabboxVMsByDefault(t *testing.T) {
 	runner := &exeDevRecordingRunner{}
 	runner.fn = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {

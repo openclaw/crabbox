@@ -278,26 +278,14 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		}
 	}
 	cfg := b.Cfg
-	labels := liveServer.Labels
-	if req.IdleTimeout > 0 {
-		cfg.IdleTimeout = req.IdleTimeout
-		labels = shared.CloneLabels(labels)
-		delete(labels, "idle_timeout")
-		delete(labels, "idle_timeout_secs")
-	}
-	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.now().UTC())
+	now := b.now().UTC()
+	labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(liveServer.Labels, cfg, req.State, now, req.IdleTimeoutOverride)
 	labels = addNebiusScopeLabels(labels, cfg)
 	if err := client.UpdateLabels(ctx, server.CloudID, labels); err != nil {
 		return core.Server{}, err
 	}
 	if claimExists {
-		liveServer.Labels = labels
-		var err error
-		if claim.RepoRoot != "" {
-			_, err = core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, labels["slug"], cfg, liveServer, req.Lease.SSH, claim.RepoRoot, cfg.IdleTimeout, false, claim, true)
-		} else {
-			_, err = core.ClaimLeaseTargetForConfigIfUnchanged(leaseID, labels["slug"], cfg, liveServer, req.Lease.SSH, cfg.IdleTimeout, claim, true)
-		}
+		_, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, leaseID, claim, labels, now, req.IdleTimeoutOverride)
 		if err != nil {
 			return core.Server{}, err
 		}

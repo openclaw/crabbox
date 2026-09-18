@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -147,5 +148,154 @@ func TestLocalContainerConfigShowSection(t *testing.T) {
 				t.Fatal("projection mutated original config or slice contents")
 			}
 		})
+	}
+}
+
+func TestLocalContainerBindingVolumePhases(t *testing.T) {
+	for _, provider := range []string{"other", providerName} {
+		for _, prior := range [][]string{nil, {}, {" inherited ", "a,b"}} {
+			for _, args := range [][]string{{}, {""}, {" raw ", "a,b", "raw", "raw"}} {
+				for _, guard := range []string{"", "id", "pool", "both"} {
+					cfg := core.Config{Provider: provider, SSHUser: "generic", WorkRoot: "/generic", LocalContainer: core.LocalContainerConfig{Volumes: []string{"cfg-prior"}, CheckpointMetadata: map[string]string{"keep": "same"}}}
+					want := cfg
+					fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+					fs.String("id", "", "")
+					fs.String("pool", "", "")
+					v := registerFlags(fs, core.Config{LocalContainer: core.LocalContainerConfig{Volumes: prior}})
+					if fs.Lookup("local-container-volume").DefValue != strings.Join(prior, ",") {
+						t.Fatal("default text")
+					}
+					getter := fs.Lookup("local-container-volume").Value.(flag.Getter)
+					if getter.Get().([]string) == nil {
+						t.Fatal("nil getter")
+					}
+					for _, raw := range args {
+						if err := fs.Set("local-container-volume", raw); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := fs.Parse([]string{"--local-container-runtime=runtime-fixture", "--local-container-image=image-fixture", "--local-container-user=user-fixture", "--local-container-work-root=/work/fixture", "--local-container-cpus=-2", "--local-container-memory=5g", "--local-container-network=network-fixture"}); err != nil {
+						t.Fatal(err)
+					}
+					if guard == "id" || guard == "both" {
+						if err := fs.Set("id", " lease "); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if guard == "pool" || guard == "both" {
+						if err := fs.Set("pool", " pool "); err != nil {
+							t.Fatal(err)
+						}
+					}
+					core.ApplyLocalContainerRuntime(&want, "runtime-fixture")
+					core.ApplyLocalContainerImage(&want, "image-fixture")
+					core.ApplyLocalContainerWorkRoot(&want, "/work/fixture")
+					want.LocalContainer.User = "user-fixture"
+					want.SSHUser = "user-fixture"
+					want.WorkRoot = "/work/fixture"
+					core.MarkWorkRootExplicit(&want)
+					want.LocalContainer.CPUs = -2
+					want.LocalContainer.Memory = "5g"
+					want.LocalContainer.Network = "network-fixture"
+					core.RecordProviderFlagInputs(&want, true, providerName)
+					list := append(append([]string(nil), prior...), args...)
+					bad := len(list) > 0 && guard != ""
+					if len(list) > 0 && !bad {
+						want.LocalContainer.Volumes = list
+					}
+					if !bad && provider == providerName {
+						applyDefaults(&want)
+					}
+					err := applyFlags(&cfg, fs, v)
+					if (err != nil) != bad {
+						t.Fatalf("guard=%s prior=%#v args=%#v err=%v", guard, prior, args, err)
+					}
+					if bad {
+						marker := "--pool"
+						if guard == "id" || guard == "both" {
+							marker = "--id"
+						}
+						if !strings.Contains(err.Error(), marker) {
+							t.Fatal("guard order")
+						}
+					}
+					if !reflect.DeepEqual(cfg, want) {
+						t.Fatalf("partial/default state changed: %+v want %+v", cfg.LocalContainer, want.LocalContainer)
+					}
+					if len(list) > 0 {
+						got := getter.Get().([]string)
+						got[0] = "changed"
+						if getter.Get().([]string)[0] != list[0] {
+							t.Fatal("getter aliases")
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestLocalContainerBindingRegistrationOrder(t *testing.T) {
+	order := []string{"runtime", "image", "user", "work-root", "cpus", "memory", "network", "docker-socket", "volume"}
+	for i, dup := range order {
+		fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		fs.String("local-container-"+dup, "", "")
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("duplicate missing")
+				}
+			}()
+			registerFlags(fs, core.Config{})
+		}()
+		for j, name := range order {
+			if (fs.Lookup("local-container-"+name) != nil) != (j <= i) {
+				t.Fatal("registration order")
+			}
+		}
+		if fs.Lookup("local-container-no-hostname") != nil {
+			t.Fatal("new hostname flag")
+		}
+	}
+}
+
+func TestLocalContainerBindingPureForkFlagMapper(t *testing.T) {
+	// This mapper only assigns parsed fields; no checkpoint operation is invoked.
+	for _, prior := range [][]string{nil, {}, {" inherited "}} {
+		for _, extra := range []string{"absent", "", " raw,a "} {
+			cfg := core.Config{LocalContainer: core.LocalContainerConfig{Runtime: "keep-runtime", Image: "keep-image", User: "keep-user", WorkRoot: "keep-root", CPUs: 1, Memory: "prior", Network: "prior", Volumes: []string{"prior-cfg"}, CheckpointMetadata: map[string]string{"keep": "value"}}}
+			want := cfg
+			fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+			v := registerFlags(fs, core.Config{LocalContainer: core.LocalContainerConfig{Volumes: prior}})
+			if err := (Provider{}).ApplyNativeCheckpointForkFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, want) {
+				t.Fatal("foreign mapper value")
+			}
+			if err := fs.Parse([]string{"--local-container-runtime=ignored", "--local-container-image=ignored", "--local-container-work-root=ignored", "--local-container-cpus=-2", "--local-container-memory=memory", "--local-container-network=network"}); err != nil {
+				t.Fatal(err)
+			}
+			list := append([]string(nil), prior...)
+			if extra != "absent" {
+				if err := fs.Set("local-container-volume", extra); err != nil {
+					t.Fatal(err)
+				}
+				list = append(list, extra)
+			}
+			want.LocalContainer.CPUs = -2
+			want.LocalContainer.Memory = "memory"
+			want.LocalContainer.Network = "network"
+			if len(list) > 0 {
+				want.LocalContainer.Volumes = list
+			}
+			if err := (Provider{}).ApplyNativeCheckpointForkFlags(&cfg, fs, v); err != nil || !reflect.DeepEqual(cfg, want) {
+				t.Fatal("mapper subset changed")
+			}
+			if len(list) > 0 {
+				cfg.LocalContainer.Volumes[0] = "changed"
+				if fs.Lookup("local-container-volume").Value.(flag.Getter).Get().([]string)[0] != list[0] {
+					t.Fatal("mapper failed to copy")
+				}
+			}
+		}
 	}
 }

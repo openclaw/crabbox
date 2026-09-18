@@ -1,0 +1,9 @@
+package main
+import ("context"; "os"; "os/signal"; "syscall"; "github.com/openclaw/crabbox/internal/runner")
+func main() {
+ if len(os.Args) < 2 || os.Args[1] != runner.Command { os.Exit(74) }
+ ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+ defer stop()
+ go func() { <-ctx.Done(); stop() }()
+ os.Exit(runner.Main(ctx, os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+}

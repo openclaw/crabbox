@@ -170,4 +170,5 @@ type leaseClaimTargetOptions struct {
 	endpoint  leaseClaimEndpointMode
 	directory claimDirectoryPolicy
 	action    func() error
+	idle      claimIdlePolicy
 }

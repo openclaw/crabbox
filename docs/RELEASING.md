@@ -131,6 +131,37 @@ archives and the raw VMD, plus the actual Go, GoReleaser, Swift, Xcode, macOS,
 and architecture facts. Treat the printed SHA-256 as a separate handoff value;
 do not re-read or infer it from a replaceable candidate directory.
 
+Tagged sources containing the filesystem entrypoint template
+`internal/runner/development/main.go.txt` build six companions once,
+credential-free, for Darwin, Linux, and Windows on amd64 and arm64. Baseline CPU
+settings remain `GOAMD64=v1` and `GOARM64=v8.0`. Each unsigned archive contains
+the complete set under `crabbox-runtime/`; these are not extra public assets.
+Candidate and final provenance use schema 3 and bind the helper source
+fingerprint. Protected tooling computes that fingerprint from frozen source
+bytes without executing candidate code. The producer injects it into each
+companion's filesystem handshake.
+
+Historical tags containing only `cmd/crabbox-runtime/main.go` retain the Linux
+pair and schema 2. Tags without that command retain schema 1 and their legacy
+member inventory. The packager and verifier independently check the frozen tag's
+capability, so a runtime-enabled source cannot select an older layout.
+Historical final provenance verifies its producer configuration against the
+`.goreleaser.yaml` and literal toolchain versions in `scripts/release-config.sh`
+at the originally pinned verifier commit, not the newer tooling checkout. The
+policy reader never executes historical shell code. New candidate production
+uses the current protected configuration, including Go 1.26.5. Missing historical Git objects fail verification; this lookup
+does not lazily fetch them or consult replacement objects.
+
+The protected `scripts/runtime-artifacts` tool stages exact archive inventories
+without executing candidate files. The packager generates each final runtime
+manifest only after its controller bytes, including macOS signatures, are final.
+For schema 3, each Darwin companion is signed and notarized once under
+`org.openclaw.crabbox.runtime`, then those identical signed bytes are copied
+into all six archives. The final manifest binds the controller hash and every
+final companion; it is generated only after companion signing as well. Linux
+and Windows companions remain unchanged through signing. Source provenance comes from the frozen
+producer and independent Go build-info checks, not from this local manifest.
+
 Pass that exact digest as the required fourth argument to the local signing
 wrapper. The packager stages the complete candidate into a private directory,
 recomputes every manifest-bound fact before it touches the signing key, and
@@ -189,12 +220,12 @@ For version `X.Y.Z`, the uploaded GitHub asset set is exactly these eight files:
 
 | Asset | Exact archive members or purpose |
 | --- | --- |
-| `crabbox_X.Y.Z_darwin_amd64.tar.gz` | `crabbox` |
-| `crabbox_X.Y.Z_darwin_arm64.tar.gz` | `crabbox`, `crabbox-apple-vm-helper` |
-| `crabbox_X.Y.Z_linux_amd64.tar.gz` | `crabbox` |
-| `crabbox_X.Y.Z_linux_arm64.tar.gz` | `crabbox` |
-| `crabbox_X.Y.Z_windows_amd64.zip` | `crabbox.exe` |
-| `crabbox_X.Y.Z_windows_arm64.zip` | `crabbox.exe` |
+| `crabbox_X.Y.Z_darwin_amd64.tar.gz` | `crabbox`, runtime pack files below |
+| `crabbox_X.Y.Z_darwin_arm64.tar.gz` | `crabbox`, `crabbox-apple-vm-helper`, runtime pack files below |
+| `crabbox_X.Y.Z_linux_amd64.tar.gz` | `crabbox`, runtime pack files below |
+| `crabbox_X.Y.Z_linux_arm64.tar.gz` | `crabbox`, runtime pack files below |
+| `crabbox_X.Y.Z_windows_amd64.zip` | `crabbox.exe`, runtime pack files below |
+| `crabbox_X.Y.Z_windows_arm64.zip` | `crabbox.exe`, runtime pack files below |
 | `checksums.txt` | Canonical SHA-256 records for the six platform archives and `provenance.json` |
 | `provenance.json` | Schema-pinned source, toolchain, signing, notarization, archive, and checksum provenance |
 
@@ -202,6 +233,37 @@ GitHub's generated source links are not uploaded assets and do not change the
 count. Reject missing, duplicate, renamed, zero-byte, or extra uploaded assets.
 Archive member names and counts are exact; no implicit documentation files or
 unlisted executables are allowed.
+
+For schema-2 releases, the runtime pack files are exactly
+`crabbox-runtime/manifest.json`, `crabbox-runtime/linux-amd64`, and
+`crabbox-runtime/linux-arm64`. Every archive includes both execution-target
+architectures, irrespective of the controller's host. Final archives contain
+explicit file entries, without directory entries. Schema-1 releases omit these
+three files and preserve their original inventories.
+
+Schema-2 provenance records each pack's controller binding, manifest identity,
+and both runtime identities separately from macOS notarization records. Protected
+extraction reports are regenerated from the archives before provenance checks.
+Homebrew must install the entire pack beside the real controller in its keg;
+verification compares all three installed files with the frozen archive and
+checks the public command symlink. The existing Go installation channel remains
+CLI-only: it does not install companion assets. Never copy a release pack beside
+an independently compiled controller; their hashes intentionally differ.
+
+Schema-3 releases instead contain `crabbox-runtime/manifest.json` and exactly
+six companions: `darwin-amd64`, `darwin-arm64`, `linux-amd64`, `linux-arm64`,
+`windows-amd64.exe`, and `windows-arm64.exe`, all beneath `crabbox-runtime/`.
+Their local manifest uses schema 2 with explicit filesystem protocol/build-ID
+claims for every target and supervisor claims only for Linux. This local schema
+number is independent of the release provenance schema. Homebrew verifies all
+seven installed pack files against the frozen archive.
+
+Schema-3 provenance additionally records both Darwin companion signatures,
+including exact bytes, identifier, Team ID, hardened runtime, timestamp, and
+notarization submission. Their hashes must agree across all six payloads. The
+six notarization submissions (two CLI, helper, VMD, two runtime) must be distinct;
+historical schemas retain their four-submission contract. Signature/notarization
+verification does not execute the companions.
 
 `provenance.json` binds the repository, version, signed tag-object ID, peeled
 source commit, protected verifier commit, exact candidate-manifest digest and

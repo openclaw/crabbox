@@ -10,22 +10,33 @@ import (
 // registerConfigFlags populates generated, typed flag storage from a validated
 // schema. List constructors own their snapshots; registration never applies a
 // value to the runtime config or records input provenance.
-func registerConfigFlags(fs *flag.FlagSet, defaults, values any) {
+func registerConfigFlags(fs *flag.FlagSet, defaults, values any, order ...string) {
 	cfg, parsed := reflect.ValueOf(defaults), reflect.ValueOf(values).Elem()
-	// Keep the existing order: replacing lists, ordinary flags, appending lists.
+	register := func(name string) {
+		field, _ := cfg.Type().FieldByName(name)
+		parsed.FieldByName(name).Set(reflect.ValueOf(registerConfigFlag(fs, cfg.FieldByName(name), field.Tag)))
+	}
+	// An explicit generated order is a validated, complete permutation.
+	if len(order) != 0 {
+		for _, name := range order {
+			register(name)
+		}
+		return
+	}
+	// Register replacing/nonempty lists first, scalars next, then other append lists.
 	for phase := 0; phase < 3; phase++ {
 		for i := 0; i < parsed.NumField(); i++ {
 			name := parsed.Type().Field(i).Name
 			field, _ := cfg.Type().FieldByName(name)
 			fieldPhase := 1
 			switch field.Tag.Get("flagList") {
-			case "replace-append":
+			case "replace-append", "append-trimmed-nonempty":
 				fieldPhase = 0
-			case "append-trimmed":
+			case "append-trimmed", "append-raw":
 				fieldPhase = 2
 			}
 			if fieldPhase == phase {
-				parsed.Field(i).Set(reflect.ValueOf(registerConfigFlag(fs, cfg.FieldByName(name), field.Tag)))
+				register(name)
 			}
 		}
 	}
@@ -60,8 +71,16 @@ func registerConfigFlag(fs *flag.FlagSet, value reflect.Value, tags reflect.Stru
 	case reflect.Slice:
 		defaults := value.Interface().([]string)
 		switch tags.Get("flagList") {
+		case "append-raw":
+			list := newRawAppendListFlag(defaults)
+			fs.Var(list, name, help)
+			return list.values
 		case "replace-append":
 			list := newReplaceAppendListFlag(defaults)
+			fs.Var(list, name, help)
+			return list
+		case "append-trimmed-nonempty":
+			list := newAppendTrimmedNonemptyListFlag(defaults)
 			fs.Var(list, name, help)
 			return list
 		case "append-trimmed":

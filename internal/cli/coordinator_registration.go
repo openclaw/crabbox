@@ -20,7 +20,7 @@ func (a App) claimLeaseTargetForRepoAndRegister(
 	repoRoot string,
 	reclaim bool,
 ) error {
-	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, false)
+	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, &cfg, server, target, repoRoot, reclaim, false, nil)
 }
 
 func (a App) claimResolvedLeaseTargetForRepoAndRegister(
@@ -32,19 +32,44 @@ func (a App) claimResolvedLeaseTargetForRepoAndRegister(
 	repoRoot string,
 	reclaim bool,
 ) error {
-	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, true)
+	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, &cfg, server, target, repoRoot, reclaim, true, nil)
 }
 
 func (a App) claimRunLeaseTargetForRepoAndRegister(
 	ctx context.Context,
 	leaseID, slug string,
-	cfg Config,
+	cfg *Config,
 	server *Server,
 	target SSHTarget,
 	repoRoot string,
 	reclaim, resolved bool,
+	idleTimeoutOverride *time.Duration,
 ) error {
-	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, resolved)
+	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, resolved, idleTimeoutOverride)
+}
+
+// Initialized direct leases own their recorded idle policy. Managed leases instead
+// use the coordinator's projection; a registration URL alone does not make a
+// registered direct lease coordinator-managed.
+func applyClaimIdlePolicy(cfg *Config, server *Server, recorded LeaseClaim, exists bool, override *time.Duration) error {
+	if !exists {
+		return nil
+	}
+	policy := claimIdlePolicyForConfig(*cfg)
+	if policy == claimIdleCoordinatorProjection {
+		return nil
+	}
+	proposed := cfg.IdleTimeout
+	if override != nil {
+		policy, proposed = claimIdleReplaceExplicitly, *override
+	}
+	idle, normalize, err := selectClaimIdleTimeout(recorded.IdleTimeoutSeconds, proposed, policy)
+	if err != nil || !normalize {
+		return err
+	}
+	cfg.IdleTimeout = idle
+	server.Labels = claimLabelsWithIdleTimeout(server.Labels, idle)
+	return nil
 }
 
 func refreshRunLeaseClaimEndpoint(leaseID string, server *Server, target SSHTarget) {
@@ -64,11 +89,12 @@ func refreshRunLeaseClaimEndpoint(leaseID string, server *Server, target SSHTarg
 func (a App) claimLeaseTargetForRepoAndRegisterMode(
 	ctx context.Context,
 	leaseID, slug string,
-	cfg Config,
+	cfg *Config,
 	server *Server,
 	target SSHTarget,
 	repoRoot string,
 	reclaim, resolved bool,
+	idleTimeoutOverride *time.Duration,
 ) error {
 	var expected leaseClaim
 	var expectedExists bool
@@ -83,10 +109,19 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 	if err != nil {
 		return err
 	}
-	claimed, err := ClaimLeaseTargetForRepoConfigIfUnchanged(
+	if err := applyClaimIdlePolicy(cfg, server, expected, expectedExists, idleTimeoutOverride); err != nil {
+		return err
+	}
+	idlePolicy := claimIdlePolicyForConfig(*cfg)
+	if idlePolicy == claimIdlePreserveRecorded && resolved && expectedExists && idleTimeoutOverride != nil {
+		idlePolicy = claimIdleReplaceExplicitly
+	}
+	provider, _ := claimProviderDetailsForConfig(*cfg)
+	claimed, err := claimLeaseTargetForRepoConfigScopeIfUnchangedMode(
 		leaseID,
 		slug,
-		cfg,
+		*cfg,
+		providerClaimScope(provider, *cfg),
 		*server,
 		target,
 		repoRoot,
@@ -94,6 +129,7 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 		reclaim,
 		expected,
 		expectedExists,
+		leaseClaimTargetOptions{idle: idlePolicy},
 	)
 	if err != nil {
 		return err
@@ -104,7 +140,7 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 		SSH:     target,
 		LeaseID: leaseID,
 	}
-	err = a.registerCoordinatorLeaseBestEffort(ctx, cfg, &lease)
+	err = a.registerCoordinatorLeaseBestEffort(ctx, *cfg, &lease)
 	*server = lease.Server
 	return err
 }

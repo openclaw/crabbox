@@ -100,9 +100,7 @@ func runLocalReceiver(t *testing.T, command string, input []byte) ([]byte, error
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX receiver execution; native Windows has a separate platform gate")
 	}
-	cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", command)
-	cmd.Stdin = bytes.NewReader(input)
-	return cmd.CombinedOutput()
+	return runPortableGitControlCommand(t, command, input)
 }
 
 func requireLocalReceiver(t *testing.T, command string, input []byte) []byte {
@@ -152,6 +150,268 @@ func TestGitLocalReceiverMetadataOnlyAndFinalize(t *testing.T) {
 	}
 	if out, err := runLocalReceiver(t, remoteGitLocalSeedFingerprint(workdir, plan), nil); err == nil || bytes.Contains(out, []byte(plan.Fingerprint)) {
 		t.Fatalf("workload-invalidated fingerprint reused: %q %v", out, err)
+	}
+}
+
+func TestGitLocalReceiverRawManifestHandoffPrunesPriorFiles(t *testing.T) {
+	plan, data, _ := localReceiverFixture(t)
+	workdir := t.TempDir()
+	rawToken, localToken := strings.Repeat("a", 32), strings.Repeat("b", 32)
+	oldPath := "old generated\nfile.txt"
+	unmanagedPath := "excluded.txt"
+	mustWriteTestFile(t, filepath.Join(workdir, oldPath), "previously synced\n")
+	mustWriteTestFile(t, filepath.Join(workdir, unmanagedPath), "runner-owned content\n")
+	rawManifest := []byte(oldPath + "\x00accepted.txt\x00")
+	requireLocalReceiver(t, remoteWriteSyncManifestsNewMode(workdir, rawToken, true),
+		[]byte(syncManifestInputForTarget(SSHTarget{}, rawManifest, nil)))
+	mustWriteTestFile(t, filepath.Join(workdir, "accepted.txt"), "old content\n")
+	requireLocalReceiver(t, remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: rawToken, PlainManifest: true}), nil)
+	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox/sync-fingerprint"), "stale fingerprint")
+	mustWriteTestFile(t, filepath.Join(workdir, ".crabbox/git-hydrate-base"), "stale base")
+
+	requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+	if got, err := os.ReadFile(filepath.Join(workdir, ".git/crabbox/sync-manifest")); err != nil || !bytes.Equal(got, rawManifest) {
+		t.Fatalf("raw manifest handoff: %q %v", got, err)
+	}
+	for _, name := range []string{"crabbox-local-complete", "crabbox/sync-fingerprint", "crabbox/git-hydrate-base"} {
+		if _, err := os.Stat(filepath.Join(workdir, ".git", name)); !os.IsNotExist(err) {
+			t.Fatalf("raw readiness marker imported: %s %v", name, err)
+		}
+	}
+	newManifest := []byte("accepted.txt\x00")
+	requireLocalReceiver(t, remoteWriteSyncManifestsNew(workdir, localToken),
+		[]byte(syncManifestInputForTarget(SSHTarget{}, newManifest, nil)))
+	requireLocalReceiver(t, remotePruneSyncManifestForTargetMode(SSHTarget{}, workdir, localToken, true), nil)
+	mustWriteTestFile(t, filepath.Join(workdir, "accepted.txt"), "new content\n")
+	requireLocalReceiver(t, remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: localToken}), nil)
+	requireLocalReceiver(t, remoteGitLocalSeedFinalize(workdir, plan), nil)
+
+	if _, err := os.Stat(filepath.Join(workdir, oldPath)); !os.IsNotExist(err) {
+		t.Fatalf("previously managed file survived prune: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(workdir, unmanagedPath)); err != nil || string(got) != "runner-owned content\n" {
+		t.Fatalf("unmanaged file changed: %q %v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(workdir, ".git/crabbox/sync-manifest")); err != nil || !bytes.Equal(got, newManifest) {
+		t.Fatalf("new committed manifest: %q %v", got, err)
+	}
+	if gitOutput(workdir, "rev-parse", "HEAD") != plan.Head || gitOutput(workdir, "write-tree") != plan.Tree {
+		t.Fatal("local metadata identity changed")
+	}
+}
+
+func TestGitLocalReceiverPruneRejectsSymlinkAncestors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX and WSL shell pruning behavior")
+	}
+	plan, data, _ := localReceiverFixture(t)
+	for _, mode := range []string{"posix", "wsl2"} {
+		t.Run(mode, func(t *testing.T) {
+			target := SSHTarget{}
+			if mode == "wsl2" {
+				target = SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+			}
+			for _, attachment := range []string{"raw", "owned-reuse"} {
+				t.Run(attachment, func(t *testing.T) {
+					workdir := t.TempDir()
+					const oldPath = "generated/old.txt"
+					const rawToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+					const token = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+					mustWriteTestFile(t, filepath.Join(workdir, oldPath), "prior synced file\n")
+					requireLocalReceiver(t, remoteWriteSyncManifestsNewMode(workdir, rawToken, true),
+						[]byte(syncManifestInputForTarget(SSHTarget{}, []byte(oldPath+"\x00"), nil)))
+					requireLocalReceiver(t, remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: rawToken, PlainManifest: true}), nil)
+					if attachment == "owned-reuse" {
+						requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+					}
+					outside := t.TempDir()
+					protected := filepath.Join(outside, "old.txt")
+					mustWriteTestFile(t, protected, "outside workspace\n")
+					if err := os.RemoveAll(filepath.Join(workdir, "generated")); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(outside, filepath.Join(workdir, "generated")); err != nil {
+						t.Fatal(err)
+					}
+					requireLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+					requireLocalReceiver(t, remoteWriteSyncManifestsNewForTarget(target, workdir, token),
+						[]byte(syncManifestInputForTarget(target, []byte("accepted.txt\x00"), nil)))
+					out, err := runLocalReceiver(t, remotePruneSyncManifestForTargetMode(target, workdir, token, true), nil)
+					if got, readErr := os.ReadFile(protected); readErr != nil || string(got) != "outside workspace\n" {
+						t.Fatalf("prune escaped workspace: %q %v", got, readErr)
+					}
+					if err == nil || !bytes.Contains(out, []byte("refuses symlink ancestor")) {
+						t.Fatalf("unsafe prune was not rejected: %q %v", out, err)
+					}
+					if gitOutput(workdir, "rev-parse", "HEAD") != plan.Head || gitOutput(workdir, "write-tree") != plan.Tree {
+						t.Fatal("rejected prune changed Git identity")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestGitLocalReceiverRejectsInvalidRawManifestBeforePublication(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX receiver behavior")
+	}
+	plan, data, _ := localReceiverFixture(t)
+	for _, scenario := range []string{"directory", "symlink", "dangling-symlink", "parent-symlink"} {
+		t.Run(scenario, func(t *testing.T) {
+			workdir := t.TempDir()
+			manifest := filepath.Join(workdir, ".crabbox/sync-manifest")
+			mustWriteTestFile(t, filepath.Join(workdir, "owned.txt"), "raw content")
+			if scenario != "parent-symlink" {
+				if err := os.MkdirAll(filepath.Dir(manifest), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "parent-symlink" {
+				source := t.TempDir()
+				mustWriteTestFile(t, filepath.Join(source, "sync-manifest"), "owned.txt\x00")
+				if err := os.Symlink(source, filepath.Dir(manifest)); err != nil {
+					t.Fatal(err)
+				}
+			} else if scenario == "directory" {
+				if err := os.Mkdir(manifest, 0700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				source := filepath.Join(t.TempDir(), "manifest")
+				if scenario == "symlink" {
+					mustWriteTestFile(t, source, "owned.txt\x00")
+				}
+				if err := os.Symlink(source, manifest); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := runLocalReceiver(t, remoteGitLocalSeed(workdir, plan), data)
+			if err == nil || !bytes.Contains(out, []byte("publish failed")) {
+				t.Fatalf("invalid raw manifest accepted: %q %v", out, err)
+			}
+			if _, err := os.Lstat(filepath.Join(workdir, ".git")); !os.IsNotExist(err) {
+				t.Fatalf("failed import published metadata: %v", err)
+			}
+			if got, err := os.ReadFile(filepath.Join(workdir, "owned.txt")); err != nil || string(got) != "raw content" {
+				t.Fatalf("failed import changed raw file: %q %v", got, err)
+			}
+			if entries, err := filepath.Glob(filepath.Join(workdir, ".crabbox-local-git.*")); err != nil || len(entries) != 0 {
+				t.Fatalf("failed import staging residue: %v %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestGitLocalReceiverManifestSelection(t *testing.T) {
+	testGitLocalReceiverManifestSelection(t, func(t *testing.T, command string, input []byte) {
+		requireLocalReceiver(t, command, input)
+	}, remoteGitLocalSeed)
+}
+
+func testGitLocalReceiverManifestSelection(t *testing.T, receive func(*testing.T, string, []byte), command func(string, gitLocalSeedPlan) string) {
+	t.Helper()
+	plan, data, _ := localReceiverFixture(t)
+	for _, scenario := range []string{"raw", "raw-absent", "raw-empty", "owned", "owned-absent"} {
+		t.Run(scenario, func(t *testing.T) {
+			workdir := t.TempDir()
+			raw := filepath.Join(workdir, ".crabbox/sync-manifest")
+			canonical := filepath.Join(workdir, ".git/crabbox/sync-manifest")
+			want := "raw old.txt\x00"
+			if strings.HasPrefix(scenario, "owned") {
+				receive(t, command(workdir, plan), data)
+				if scenario == "owned" {
+					want = "canonical old.txt\x00"
+					mustWriteTestFile(t, canonical, want)
+				}
+			}
+			if scenario != "raw-absent" {
+				rawContent := "raw old.txt\x00"
+				if scenario == "raw-empty" {
+					rawContent, want = "", ""
+				}
+				mustWriteTestFile(t, raw, rawContent)
+				mustWriteTestFile(t, filepath.Join(workdir, ".crabbox/sync-fingerprint"), "stale fingerprint")
+				mustWriteTestFile(t, filepath.Join(workdir, ".crabbox/git-hydrate-base"), "stale base")
+			}
+			receive(t, command(workdir, plan), data)
+			got, err := os.ReadFile(canonical)
+			if strings.HasSuffix(scenario, "-absent") {
+				if !os.IsNotExist(err) {
+					t.Fatalf("invented prior ownership: %q %v", got, err)
+				}
+			} else if err != nil || string(got) != want {
+				t.Fatalf("wrong prior manifest: %q %v; want %q", got, err, want)
+			}
+			for _, name := range []string{"crabbox-local-complete", "crabbox/sync-fingerprint", "crabbox/git-hydrate-base"} {
+				if _, err := os.Stat(filepath.Join(workdir, ".git", name)); !os.IsNotExist(err) {
+					t.Fatalf("stale readiness marker imported: %s %v", name, err)
+				}
+			}
+		})
+	}
+}
+
+func TestGitLocalReceiverWindowsManifestHandoff(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows receiver behavior")
+	}
+	shell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receive := func(command string, input []byte) ([]byte, error) {
+		script := filepath.Join(t.TempDir(), "receiver.ps1")
+		// Keep production errors private while exposing native failures in this fixture.
+		body := strings.Replace(decodePowerShellCommand(t, command),
+			`[Console]::Error.WriteLine("local Git seed: $phase failed")`,
+			`[Console]::Error.WriteLine($_.Exception.GetType().FullName + ": " + $_.Exception.Message)
+  [Console]::Error.WriteLine("local Git seed: $phase failed")`, 1)
+		mustWriteTestFile(t, script, body)
+		cmd := exec.Command(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script)
+		// The CI host starts Go from PowerShell 7, whose module paths break 5.1
+		// cmdlet discovery through intermediary processes. Let 5.1 build its own paths.
+		for _, entry := range os.Environ() {
+			name, _, _ := strings.Cut(entry, "=")
+			if !strings.EqualFold(name, "PSModulePath") {
+				cmd.Env = append(cmd.Env, entry)
+			}
+		}
+		cmd.Stdin = bytes.NewReader(input)
+		return cmd.CombinedOutput()
+	}
+	testGitLocalReceiverManifestSelection(t, func(t *testing.T, command string, input []byte) {
+		if out, err := receive(command, input); err != nil {
+			t.Fatalf("native Windows receiver: %v\n%s", err, out)
+		}
+	}, windowsGitLocalSeed)
+	for _, scenario := range []string{"directory", "parent-junction"} {
+		t.Run(scenario, func(t *testing.T) {
+			plan, data, _ := localReceiverFixture(t)
+			workdir := t.TempDir()
+			if scenario == "directory" {
+				if err := os.MkdirAll(filepath.Join(workdir, ".crabbox/sync-manifest"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				source := t.TempDir()
+				mustWriteTestFile(t, filepath.Join(source, "sync-manifest"), "owned.txt\x00")
+				if out, err := exec.Command("cmd.exe", "/c", "mklink", "/J", filepath.Join(workdir, ".crabbox"), source).CombinedOutput(); err != nil {
+					t.Fatalf("create fixture junction: %v\n%s", err, out)
+				}
+			}
+			mustWriteTestFile(t, filepath.Join(workdir, "owned.txt"), "raw content")
+			out, err := receive(windowsGitLocalSeed(workdir, plan), data)
+			if err == nil || !bytes.Contains(out, []byte("publish failed")) {
+				t.Fatalf("invalid raw manifest accepted: %q %v", out, err)
+			}
+			if _, err := os.Lstat(filepath.Join(workdir, ".git")); !os.IsNotExist(err) {
+				t.Fatalf("failed import published metadata: %v", err)
+			}
+			if got, err := os.ReadFile(filepath.Join(workdir, "owned.txt")); err != nil || string(got) != "raw content" {
+				t.Fatalf("failed import changed raw file: %q %v", got, err)
+			}
+		})
 	}
 }
 

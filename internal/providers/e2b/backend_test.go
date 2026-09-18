@@ -341,6 +341,29 @@ func TestValidateE2BAPIURL(t *testing.T) {
 	}
 }
 
+func TestNativeServerTypeProjection(t *testing.T) {
+	for _, name := range []string{"e2b", " E2B "} {
+		if got := core.ServerTypeForProviderClass(name, "beast"); got != "base" {
+			t.Fatalf("provider=%q default type=%q, want %q", name, got, "base")
+		}
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolver, ok := provider.(core.ProviderServerTypeProvider)
+		if !ok {
+			t.Fatalf("provider=%q has no native type capability", name)
+		}
+		for _, tc := range []struct{ raw, want string }{{"", "base"}, {"  ", "  "}, {"custom", "custom"}, {" custom ", " custom "}} {
+			cfg := core.Config{Provider: name, Class: "beast", ServerType: "unrelated-type", ServerTypeExplicit: true}
+			cfg.E2B.Template = tc.raw
+			if got := resolver.ServerTypeForConfig(cfg); got != tc.want {
+				t.Fatalf("provider=%q raw=%q type=%q, want %q", name, tc.raw, got, tc.want)
+			}
+		}
+	}
+}
+
 func TestE2BFlagsPreserveExactGuardAndDeferredValidation(t *testing.T) {
 	cfg := core.Config{Provider: "e2b"}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)

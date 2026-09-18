@@ -510,8 +510,10 @@ inspection failure also disables fingerprint reuse for that fallback.
 Only dependency caches ignored by verified `.gitignore` files from the exact
 target tree may survive overlay preparation: `node_modules`, `.pnpm-store`,
 `.yarn/cache`, and `.yarn/unplugged`. Local `.git/info/exclude` cannot grant
-cache preservation. Existing workspace ownership and ready-pool preparation
-remain unchanged. A real, contained `.crabbox` directory and its reserved
+cache preservation. Each exclusion is scoped to the verified directory: a
+root-only `/node_modules/` rule does not preserve unselected nested caches,
+while separately selected nested caches remain reusable. Existing workspace
+ownership and ready-pool preparation remain unchanged. A real, contained `.crabbox` directory and its reserved
 `env`, `scripts`, `logs`, `captures`, and `runs` runtime state survive overlay
 cleanup; symlinked runtime or Git metadata roots are rejected.
 

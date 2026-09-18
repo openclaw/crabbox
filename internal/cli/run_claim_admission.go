@@ -12,7 +12,7 @@ var errRunClaimAdmissionUnavailable = errors.New("run claim admission unavailabl
 // existing owners. A bound canonical reuse owns one lock from the original
 // claim read through provider preparation and publication, so a heartbeat
 // cannot invalidate its own command admission halfway through that flow.
-func admitRunLeaseUnderClaim(ctx context.Context, backend SSHLoginBackend, req ResolveRequest, cfg *Config, admit func(*LeaseTarget) error) (LeaseTarget, bool, error) {
+func admitRunLeaseUnderClaim(ctx context.Context, backend SSHLoginBackend, req ResolveRequest, cfg *Config, idleTimeoutOverride *time.Duration, admit func(*LeaseTarget) error) (LeaseTarget, bool, error) {
 	resolver, ok := backend.(RunLeaseClaimResolver)
 	if !ok || req.Reclaim || !IsCanonicalLeaseID(req.ID) {
 		return LeaseTarget{}, false, nil
@@ -54,8 +54,16 @@ func admitRunLeaseUnderClaim(ctx context.Context, backend SSHLoginBackend, req R
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			if err := applyClaimIdlePolicy(cfg, &lease.Server, *current, true, idleTimeoutOverride); err != nil {
+				return err
+			}
 			provider, details := claimProviderDetailsForConfig(*cfg)
+			idlePolicy := claimIdlePolicyForConfig(*cfg)
+			if idlePolicy == claimIdlePreserveRecorded && idleTimeoutOverride != nil {
+				idlePolicy = claimIdleReplaceExplicitly
+			}
 			return transformLeaseClaimForRepo(current, req.ID, ServerSlug(lease.Server), provider, providerClaimScope(provider, *cfg), cfg.Pond, details, req.Repo.Root, cfg.IdleTimeout, false, claimMetadata{
+				idlePolicy:      idlePolicy,
 				setCacheVolumes: true,
 				cacheVolumes:    CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes),
 				setEndpoint:     true,

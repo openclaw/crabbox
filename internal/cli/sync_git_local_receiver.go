@@ -84,7 +84,7 @@ func remoteGitLocalSeedFingerprint(workdir string, plan gitLocalSeedPlan) string
 
 func remoteGitLocalSeedCommand(workdir string, plan gitLocalSeedPlan, action string) string {
 	if !plan.valid() {
-		return remotePlainManifestShellCommand("echo 'local Git seed: invalid receiver plan' >&2; exit 67")
+		return remoteHermeticPOSIXControlCommand("echo 'local Git seed: invalid receiver plan' >&2; exit 67")
 	}
 	script := `set -eu
 umask 077
@@ -171,7 +171,9 @@ verify_metadata() {
   config_keys="$(plain_git config --file "$metadata/config" --no-includes --name-only --list 2>/dev/null)" || return 1
   while IFS= read -r key; do
     case "$key" in core.repositoryformatversion|core.filemode|core.bare|core.logallrefupdates|core.ignorecase|core.precomposeunicode|core.symlinks|extensions.objectformat) ;; *) return 1 ;; esac
-  done <<< "$config_keys"
+  done <<EOF
+$config_keys
+EOF
   plain_git --git-dir="$metadata" fsck --full --strict --no-reflogs >/dev/null 2>&1 || return 1
 }
 `
@@ -208,7 +210,9 @@ while IFS=' ' read -r oid ref; do
   plain_git check-ref-format "$ref" >/dev/null 2>&1 || fail
   if [ "$ref" = "$transport_head_ref" ]; then continue; fi
   plain_git --git-dir="$fresh" update-ref "$ref" "$oid" >/dev/null 2>&1 || fail
-done <<< "$bundle_refs"
+done <<EOF
+$bundle_refs
+EOF
 plain_git --git-dir="$fresh" update-ref --no-deref HEAD "$expected_head" >/dev/null 2>&1 || fail
 plain_git --git-dir="$fresh" read-tree "$expected_head" >/dev/null 2>&1 || fail
 printf 'crabbox-local-seed-v1' > "$fresh/crabbox-local-owner"
@@ -218,13 +222,21 @@ phase=verify-metadata
 verify_metadata || fail
 metadata="$workdir/.git"
 phase=publish
+# Attaching Git changes the manifest location. Carry prior file ownership into
+# the new metadata so ordinary prune still removes files from earlier raw syncs.
+manifest_dir="$workdir/.crabbox"
 if [ -e "$metadata" ] || [ -L "$metadata" ]; then
   owned_metadata || ownership_fail
-  if [ -e "$metadata/crabbox/sync-manifest" ]; then
-    [ -f "$metadata/crabbox/sync-manifest" ] || fail
-    mkdir -- "$fresh/crabbox" || fail
-    cp -- "$metadata/crabbox/sync-manifest" "$fresh/crabbox/sync-manifest" || fail
-  fi
+  manifest_dir="$metadata/crabbox"
+fi
+manifest="$manifest_dir/sync-manifest"
+if [ -e "$manifest" ] || [ -L "$manifest" ]; then
+  [ -d "$manifest_dir" ] && [ ! -L "$manifest_dir" ] || fail
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] || fail
+  mkdir -- "$fresh/crabbox" || fail
+  cp -- "$manifest" "$fresh/crabbox/sync-manifest" || fail
+fi
+if [ -e "$metadata" ] || [ -L "$metadata" ]; then
   previous="$stage/previous.git"
   mv -- "$metadata" "$previous" || fail
   backup="$previous"
@@ -267,7 +279,7 @@ printf '%s' "$expected_fingerprint"
 `
 		}
 	}
-	return remotePlainManifestShellCommand(script)
+	return remoteHermeticPOSIXControlCommand(script)
 }
 
 func windowsGitLocalSeed(workdir string, plan gitLocalSeedPlan) string {
@@ -431,13 +443,22 @@ try {
   Assert-LocalMetadata
   $metadata = Join-Path $workdir '.git'
   $phase = 'publish'
+  # Match the POSIX handoff: raw ownership is used only on the first attachment.
+  $manifestDirectory = Join-Path $workdir '.crabbox'
   if (Test-Path -LiteralPath $metadata) {
     Assert-ImportOwnership
-    $manifest = Join-Path $metadata 'crabbox/sync-manifest'
-    if (Test-Path -LiteralPath $manifest) {
-      $null = New-Item -ItemType Directory -Path (Join-Path $fresh 'crabbox')
-      [IO.File]::Copy($manifest, (Join-Path $fresh 'crabbox/sync-manifest'))
-    }
+    $manifestDirectory = Join-Path $metadata 'crabbox'
+  }
+  $manifest = Join-Path $manifestDirectory 'sync-manifest'
+  if (Test-Path -LiteralPath $manifest) {
+    $directory = Get-Item -Force -LiteralPath $manifestDirectory
+    if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'invalid manifest directory' }
+    $item = Get-Item -Force -LiteralPath $manifest
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'invalid sync manifest' }
+    $null = New-Item -ItemType Directory -Path (Join-Path $fresh 'crabbox')
+    [IO.File]::Copy($manifest, (Join-Path $fresh 'crabbox/sync-manifest'))
+  }
+  if (Test-Path -LiteralPath $metadata) {
     $previous = Join-Path $stage 'previous.git'
     [IO.Directory]::Move($metadata, $previous)
     $backup = $previous

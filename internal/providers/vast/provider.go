@@ -28,6 +28,49 @@ func (Provider) Spec() core.ProviderSpec {
 	}
 }
 
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	cfg.Vast.InstanceType = core.NormalizeVastInstanceType(cfg.Vast.InstanceType)
+	applyVastProviderFieldDefaults(&cfg.Vast)
+	if cfg.Vast.APIURL == "" {
+		cfg.Vast.APIURL = core.VastConfigDefaultAPIURL
+	}
+	if cfg.Vast.Image == "" {
+		cfg.Vast.Image = core.VastConfigDefaultImage
+	}
+	if cfg.Vast.DiskGB == 0 {
+		cfg.Vast.DiskGB = core.VastConfigDefaultDiskGB
+	}
+	if cfg.Vast.User == "" {
+		cfg.Vast.User = core.VastConfigDefaultUser
+	}
+	if cfg.Vast.WorkRoot == "" {
+		cfg.Vast.WorkRoot = core.VastConfigDefaultWorkRoot
+	}
+	core.ApplyLinuxConnectionDefaults(cfg, cfg.Vast.User, "22")
+	if core.IsWorkRootExplicit(cfg) && !core.IsVastWorkRootExplicit(cfg) {
+		cfg.Vast.WorkRoot = cfg.WorkRoot
+	}
+	cfg.WorkRoot = cfg.Vast.WorkRoot
+	cfg.SSHFallbackPorts = nil
+	return nil
+}
+
+// Both phases fill these raw-empty fields; normalization belongs to the caller.
+func applyVastProviderFieldDefaults(cfg *core.VastConfig) {
+	if cfg.InstanceType == "" {
+		cfg.InstanceType = core.VastConfigDefaultInstanceType
+	}
+	if cfg.Runtype == "" {
+		cfg.Runtype = core.VastConfigDefaultRuntype
+	}
+	if cfg.Order == "" {
+		cfg.Order = core.VastConfigDefaultOrder
+	}
+	if cfg.ReleaseAction == "" {
+		cfg.ReleaseAction = core.VastConfigDefaultReleaseAction
+	}
+}
+
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return RegisterVastProviderFlags(fs, defaults)
 }

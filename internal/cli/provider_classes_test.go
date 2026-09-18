@@ -141,10 +141,6 @@ func (testNamespaceProvider) ClassProfiles() []ProviderClassProfile {
 	return testLinuxProfiles([]string{"S", "S", "S", "M", "L", "XL"})
 }
 
-func (testCloudflareProvider) ClassProfiles() []ProviderClassProfile {
-	return UniformLinuxAMD64ClassProfiles(ProviderClassMachine{Type: "standard-4"})
-}
-
 func (selectorClassProfileProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Aliases: []string{"selector-class-alias"},

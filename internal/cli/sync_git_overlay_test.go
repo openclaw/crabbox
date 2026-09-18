@@ -267,7 +267,26 @@ func (fixture gitOverlayFixture) manifest(t *testing.T) (SyncManifest, SyncExclu
 
 func runOverlayCommand(t *testing.T, command string, input []byte, environment ...string) ([]byte, error) {
 	t.Helper()
-	cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", command)
+	return runOverlayCommandUsingShell(t, "/bin/bash", command, input, environment...)
+}
+
+func runPortableGitControlCommand(t *testing.T, command string, input []byte, environment ...string) ([]byte, error) {
+	t.Helper()
+	shell := "/bin/sh"
+	if dash, err := exec.LookPath("dash"); err == nil {
+		shell = dash
+	}
+	command = strings.Replace(command, "/bin/sh -c ", shellQuote(shell)+" -c ", 1)
+	return runOverlayCommandUsingShell(t, shell, command, input, environment...)
+}
+
+func runOverlayCommandUsingShell(t *testing.T, shell, command string, input []byte, environment ...string) ([]byte, error) {
+	t.Helper()
+	args := []string{"-c", command}
+	if shell == "/bin/bash" {
+		args = []string{"--noprofile", "--norc", "-c", command}
+	}
+	cmd := exec.Command(shell, args...)
 	if input != nil {
 		cmd.Stdin = bytes.NewReader(input)
 	}
@@ -2326,6 +2345,17 @@ func TestRemotePrepareGitOverlayUsesTrustedTemporaryPaths(t *testing.T) {
 		Tree:      strings.Repeat("b", 40),
 		Branch:    "main",
 	})
+	transport, err := prepareSSHTransport(t.Context(), SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, command, nil, 0, sshCommandLimit{control: true, execution: sshControlExecutionLimit})
+	if err != nil {
+		t.Fatalf("expanded overlay control exceeds transport admission: %v", err)
+	}
+	if transport.stage == nil {
+		t.Fatal("WSL control was not staged")
+	}
+	t.Logf("overlay command=%d bytes, staged envelope=%d bytes", len(command), transport.stage.size)
+	if err := transport.close(); err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{
 		`baseline_tmp="$(/usr/bin/mktemp "$checkout_root/.git/crabbox/sync-manifest.overlay.XXXXXX")"`,
 		`cache_lookup_path="$cache_path"`,
@@ -2353,6 +2383,42 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 	for _, reuse := range []bool{false, true} {
 		t.Run(fmt.Sprintf("reuse=%t", reuse), func(t *testing.T) {
 			fixture := newGitOverlayFixture(t)
+			ignore := "/node_modules/\n/nested/node_modules/\n/packages/pnpm/.pnpm-store/\n/.yarn/cache/\n/.yarn/unplugged/\n" +
+				"/packages/app\\[1\\]/node_modules/\n/packages/app\\*/node_modules/\n/packages/app\\?/node_modules/\n" +
+				"/packages/back\\\\slash/node_modules/\n/\\!project/node_modules/\n/\\#project/node_modules/\n"
+			mustWriteTestFile(t, filepath.Join(fixture.root, ".gitignore"), ignore)
+			runGit(t, fixture.root, "add", ".gitignore")
+			runGit(t, fixture.root, "commit", "-qm", "cache selection fixture")
+			runGit(t, fixture.root, "push", "-q", "origin", "main")
+			runGit(t, fixture.root, "fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*")
+			fixture.repo.Head = gitOutput(fixture.root, "rev-parse", "HEAD")
+			var blocked bool
+			fixture.plan, blocked = syncGitCoherencePlan(fixture.cfg, fixture.repo)
+			if blocked || !fixture.plan.enabled() {
+				t.Fatal("updated fixture has no coherence plan")
+			}
+			caches := []string{
+				"node_modules/cached.txt", "nested/node_modules/cached.txt", "packages/pnpm/.pnpm-store/cached.txt",
+				".yarn/cache/cached.txt", ".yarn/unplugged/cached.txt", "packages/app[1]/node_modules/cached.txt",
+				"packages/app*/node_modules/cached.txt", "packages/app?/node_modules/cached.txt", "packages/back\\slash/node_modules/cached.txt",
+				"!project/node_modules/cached.txt", "#project/node_modules/cached.txt",
+			}
+			assertCaches := func(workdir string) {
+				t.Helper()
+				if !reuse {
+					return
+				}
+				for _, name := range caches {
+					if content, err := os.ReadFile(filepath.Join(workdir, name)); err != nil || string(content) != "cache:"+name+"\n" {
+						t.Fatalf("selected cache %q=%q err=%v", name, content, err)
+					}
+				}
+				for _, name := range []string{"packages/app1/node_modules/cached.txt", "packages/backslash/node_modules/cached.txt"} {
+					if _, err := os.Stat(filepath.Join(workdir, name)); !os.IsNotExist(err) {
+						t.Fatalf("unselected lookalike cache %q survived: %v", name, err)
+					}
+				}
+			}
 			mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "staged payload\n")
 			runGit(t, fixture.root, "add", "staged.txt")
 			mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "unstaged payload\n")
@@ -2380,16 +2446,22 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 				if out, err := exec.Command("git", "clone", "--quiet", fixture.origin, workdir).CombinedOutput(); err != nil {
 					t.Fatalf("clone existing workspace: %v\n%s", err, out)
 				}
-				mustWriteTestFile(t, filepath.Join(workdir, "node_modules", "cached.txt"), "trusted cache\n")
+				for _, name := range caches {
+					mustWriteTestFile(t, filepath.Join(workdir, name), "cache:"+name+"\n")
+				}
+				for _, name := range []string{"packages/app1/node_modules/cached.txt", "packages/backslash/node_modules/cached.txt"} {
+					mustWriteTestFile(t, filepath.Join(workdir, name), "unselected cache\n")
+				}
 				mustWriteTestFile(t, filepath.Join(workdir, ".pnpm-store", "stale.txt"), "untrusted cache\n")
 				mustWriteTestFile(t, filepath.Join(workdir, ".git", "info", "exclude"), ".pnpm-store/\n")
 				mustWriteTestFile(t, filepath.Join(workdir, "previous.txt"), "previous managed file\n")
 				mustWriteTestFile(t, filepath.Join(workdir, ".git", "crabbox", "sync-manifest"), "previous.txt\x00")
 			}
-			if out, err := runOverlayCommand(t, remotePrepareGitOverlay(workdir, fixture.plan), nil); err != nil {
+			if out, err := runPortableGitControlCommand(t, remotePrepareGitOverlay(workdir, fixture.plan), nil); err != nil {
 				t.Fatalf("prepare failed: %v\n%s", err, out)
 			}
 			assertNoGitOverlayResidue(t, workdir)
+			assertCaches(workdir)
 			if got := gitOutput(workdir, "rev-parse", "HEAD"); got != fixture.repo.Head {
 				t.Fatalf("remote HEAD=%q want=%q", got, fixture.repo.Head)
 			}
@@ -2404,9 +2476,6 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 					t.Fatal("fresh overlay materialized an unrelated historical blob")
 				}
 			} else {
-				if content, err := os.ReadFile(filepath.Join(workdir, "node_modules", "cached.txt")); err != nil || string(content) != "trusted cache\n" {
-					t.Fatalf("trusted dependency cache=%q err=%v", content, err)
-				}
 				if _, err := os.Stat(filepath.Join(workdir, ".pnpm-store")); !os.IsNotExist(err) {
 					t.Fatalf("mutable .git/info/exclude authorized a stale cache: %v", err)
 				}
@@ -2417,10 +2486,10 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 			}
 			const token = "0123456789abcdef0123456789abcdef"
 			frame := []byte(syncManifestInputForTarget(SSHTarget{TargetOS: targetLinux}, manifest.NUL(), manifest.DeletedNUL()))
-			if out, err := runOverlayCommand(t, remoteWriteSyncManifestsNew(workdir, token), frame); err != nil {
+			if out, err := runPortableGitControlCommand(t, remoteWriteSyncManifestsNewWithMetadata(workdir, token, remotePlainSyncMetaDirScript()), frame); err != nil {
 				t.Fatalf("write complete authoritative manifests: %v\n%s", err, out)
 			}
-			if out, err := runOverlayCommand(t, remotePruneGitOverlaySyncManifest(workdir, token), nil); err != nil {
+			if out, err := runPortableGitControlCommand(t, remotePruneGitOverlaySyncManifest(workdir, token), nil); err != nil {
 				t.Fatalf("prune reset paths: %v\n%s", err, out)
 			}
 			for _, removed := range []string{"excluded.txt", "deleted.txt", "renamed.txt", "previous.txt"} {
@@ -2434,9 +2503,11 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 				t.Fatalf("transfer overlay: %v\n%s", err, out)
 			}
 			finalize := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Coherence: fixture.plan, Fingerprint: fingerprint, GitOverlay: true})
-			if out, err := runOverlayCommand(t, finalize, nil); err != nil {
+			if out, err := runPortableGitControlCommand(t, finalize, nil); err != nil {
 				t.Fatalf("finalize overlay: %v\n%s", err, out)
 			}
+			assertCaches(workdir)
+			assertNoGitOverlayResidue(t, workdir)
 			for _, name := range []string{"staged.txt", "unstaged.txt", "untracked.txt", "renamed-new.txt"} {
 				local, _ := os.ReadFile(filepath.Join(fixture.root, name))
 				remote, err := os.ReadFile(filepath.Join(workdir, name))
@@ -2700,6 +2771,30 @@ func TestRemoteGitOverlayPruneRejectsProtectedAndMalformedManifestPaths(t *testi
 	}
 }
 
+func TestGitOverlayHermeticFunctionsRunWithDash(t *testing.T) {
+	dash, err := exec.LookPath("dash")
+	if err != nil {
+		t.Skip("Dash is required for this POSIX grammar check")
+	}
+	workdir := t.TempDir()
+	index := filepath.Join(workdir, "alternate index")
+	mustWriteTestFile(t, filepath.Join(workdir, "payload.txt"), "fixture\n")
+	script := "set -e\ncd " + shellQuote(workdir) + "\n" + gitOverlayHermeticFunctions() +
+		"\ngit init -q\nGIT_INDEX_FILE=" + shellQuote(index) + "\noverlay_no_lazy_fetch=1\ngit update-index --add -- payload.txt\ngit ls-files\n"
+	cmd := exec.Command(dash, "-c", script)
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + t.TempDir()}
+	out, err := cmd.CombinedOutput()
+	if err != nil || string(out) != "payload.txt\n" {
+		t.Fatalf("portable Git helper: output=%q err=%v", out, err)
+	}
+	if _, err := os.Stat(index); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, ".git", "index")); !os.IsNotExist(err) {
+		t.Fatalf("optional index was not retained: %v", err)
+	}
+}
+
 func TestRemoteGitOverlayPruneHandlesSafeShapeTransitions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX symlink integration")
@@ -2871,7 +2966,7 @@ func TestRemoteGitOverlayRetainsFilteredFeatureAndBaseHistory(t *testing.T) {
 		t.Fatalf("feature coherence plan=%#v blocked=%t", plan, blocked)
 	}
 	workdir := filepath.Join(t.TempDir(), "workspace")
-	if output, err := runOverlayCommand(t, remotePrepareGitOverlayWithBase(workdir, plan, "main", baseSHA), nil); err != nil {
+	if output, err := runPortableGitControlCommand(t, remotePrepareGitOverlayWithBase(workdir, plan, "main", baseSHA), nil); err != nil {
 		t.Fatalf("prepare filtered feature history: %v\n%s", err, output)
 	}
 	for ref, want := range map[string]string{"HEAD": targetSHA, "refs/remotes/origin/feature": tipSHA, "refs/remotes/origin/main": baseSHA} {
@@ -2887,16 +2982,39 @@ func TestRemoteGitOverlayRetainsFilteredFeatureAndBaseHistory(t *testing.T) {
 			t.Fatalf("history workload git %v: %v\n%s", args, err, output)
 		}
 	}
+	shallow := filepath.Join(t.TempDir(), "shallow-workspace")
+	if output, err := exec.Command("git", "clone", "--quiet", "--depth=1", "--branch", "feature", "--filter=blob:none", "file://"+fixture.origin, shallow).CombinedOutput(); err != nil {
+		t.Fatalf("create shallow workspace: %v\n%s", err, output)
+	}
+	runGit(t, shallow, "remote", "set-url", "origin", plan.RemoteURL)
+	if gitOutput(shallow, "rev-parse", "--is-shallow-repository") != "true" {
+		t.Fatal("fixture is not shallow")
+	}
+	if output, err := runPortableGitControlCommand(t, remotePrepareGitOverlayWithBase(shallow, plan, "main", baseSHA), nil); err != nil {
+		t.Fatalf("prepare shallow feature/base history: %v\n%s", err, output)
+	}
+	for ref, want := range map[string]string{"HEAD": targetSHA, "refs/remotes/origin/feature": tipSHA, "refs/remotes/origin/main": baseSHA} {
+		if got := gitOutput(shallow, "rev-parse", ref); got != want {
+			t.Fatalf("shallow remote %s=%q want=%q", ref, got, want)
+		}
+	}
+	if gitOutput(shallow, "rev-parse", "--is-shallow-repository") != "false" {
+		t.Fatal("overlay did not unshallow required history")
+	}
+	if err := exec.Command("git", "-C", shallow, "--no-lazy-fetch", "cat-file", "-e", largeBlob).Run(); err == nil {
+		t.Fatal("shallow recovery materialized deleted history blob")
+	}
+	assertNoGitOverlayResidue(t, shallow)
 	manifest, _ := fixture.manifest(t)
 	const token = "13579bdf2468ace013579bdf2468ace0"
 	frame := []byte(syncManifestInputForTarget(SSHTarget{TargetOS: targetLinux}, manifest.NUL(), manifest.DeletedNUL()))
-	if output, err := runOverlayCommand(t, remoteWriteSyncManifestsNewWithMetadata(workdir, token, remotePlainSyncMetaDirScript()), frame); err != nil {
+	if output, err := runPortableGitControlCommand(t, remoteWriteSyncManifestsNewWithMetadata(workdir, token, remotePlainSyncMetaDirScript()), frame); err != nil {
 		t.Fatalf("write feature manifest: %v\n%s", err, output)
 	}
-	if output, err := runOverlayCommand(t, remotePruneGitOverlaySyncManifest(workdir, token), nil); err != nil {
+	if output, err := runPortableGitControlCommand(t, remotePruneGitOverlaySyncManifest(workdir, token), nil); err != nil {
 		t.Fatalf("prune feature manifest: %v\n%s", err, output)
 	}
-	if output, err := runOverlayCommand(t, remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Coherence: plan, GitOverlay: true, BaseRef: "main", BaseSHA: baseSHA}), nil); err != nil {
+	if output, err := runPortableGitControlCommand(t, remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Coherence: plan, GitOverlay: true, BaseRef: "main", BaseSHA: baseSHA}), nil); err != nil {
 		t.Fatalf("finalize feature manifest: %v\n%s", err, output)
 	}
 	if marker, err := os.ReadFile(filepath.Join(workdir, ".git", "crabbox", "git-hydrate-base")); err != nil || string(marker) != "main "+baseSHA+"\n" {

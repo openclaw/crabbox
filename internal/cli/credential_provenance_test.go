@@ -479,12 +479,14 @@ func TestRepositoryCredentialDestinationAllowsExplicitFlagOverride(t *testing.T)
 func TestVastCredentialDestinationAllowsExplicitFlagOverride(t *testing.T) {
 	cfg := Config{
 		Provider: "vast",
-		Vast:     VastConfig{APIURL: "https://repo.example.test", APIKey: "secret"},
+		Vast:     defaultVastConfig(),
 		credentialProvenance: credentialDestinationProvenance{
 			vastAPIURL: credentialSourceRepository,
 			vastAPIKey: credentialSourceEnvironment,
 		},
 	}
+	cfg.Vast.APIURL = "https://repo.example.test"
+	cfg.Vast.APIKey = "secret"
 	fs := newFlagSet("test", io.Discard)
 	values := registerProviderFlags(fs, cfg)
 	if err := parseFlags(fs, []string{"--vast-api-url", "https://approved.example.test"}); err != nil {

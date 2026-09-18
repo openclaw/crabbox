@@ -84,18 +84,7 @@ func applyVastDefaults(cfg *core.Config) {
 	if cfg.SSHPort == "" {
 		cfg.SSHPort = "22"
 	}
-	if cfg.Vast.InstanceType == "" {
-		cfg.Vast.InstanceType = core.VastConfigDefaultInstanceType
-	}
-	if cfg.Vast.Runtype == "" {
-		cfg.Vast.Runtype = core.VastConfigDefaultRuntype
-	}
-	if cfg.Vast.Order == "" {
-		cfg.Vast.Order = core.VastConfigDefaultOrder
-	}
-	if cfg.Vast.ReleaseAction == "" {
-		cfg.Vast.ReleaseAction = core.VastConfigDefaultReleaseAction
-	}
+	applyVastProviderFieldDefaults(&cfg.Vast)
 }
 
 func (b *backend) stderr() io.Writer {

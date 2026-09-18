@@ -1,12 +1,10 @@
 package runpod
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -142,15 +140,7 @@ func runpodRedirectError(destination *url.URL) error {
 }
 
 func (c *runpodClient) do(ctx context.Context, method, path string, body any, out any) error {
-	var reader io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reader = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.apiURL+path, reader)
+	req, err := shared.NewCompactJSONRequest(ctx, method, c.apiURL+path, body)
 	if err != nil {
 		return err
 	}

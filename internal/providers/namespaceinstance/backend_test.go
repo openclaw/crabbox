@@ -694,11 +694,12 @@ func TestTouchPersistsUpdatedLabelsToClaim(t *testing.T) {
 			time.Now().Add(-time.Minute),
 		),
 	}
+	server.Labels["namespace_tenant"] = cfg.NamespaceInstance.TenantID
 	target := core.SSHTarget{Host: "instance-1", User: "root", Port: "22"}
 	if err := core.ClaimLeaseTargetForConfig(leaseID, "blue-box", cfg, server, target, cfg.IdleTimeout); err != nil {
 		t.Fatal(err)
 	}
-	runner := &fakeRunner{results: []core.LocalCommandResult{{}}}
+	runner := &fakeRunner{results: []core.LocalCommandResult{{}, {}, {}}}
 	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
 	touched, err := b.Touch(context.Background(), core.TouchRequest{
 		Lease:       core.LeaseTarget{LeaseID: leaseID, Server: server, SSH: target},
@@ -716,6 +717,26 @@ func TestTouchPersistsUpdatedLabelsToClaim(t *testing.T) {
 		claims[0].Labels["last_touched_at"] != touched.Labels["last_touched_at"] ||
 		claims[0].Labels["expires_at"] != touched.Labels["expires_at"] {
 		t.Fatalf("claims=%#v touched=%#v", claims, touched.Labels)
+	}
+	override := 7 * time.Minute
+	for _, step := range []struct {
+		name     string
+		override *time.Duration
+	}{{"explicit", &override}, {"ordinary", nil}} {
+		t.Run(step.name, func(t *testing.T) {
+			var err error
+			touched, err = b.Touch(context.Background(), core.TouchRequest{
+				Lease: core.LeaseTarget{LeaseID: leaseID, Server: touched, SSH: target},
+				State: "ready", IdleTimeout: time.Hour, IdleTimeoutOverride: step.override,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, _, err := core.ReadLeaseClaimWithPresence(leaseID)
+			if err != nil || claim.IdleTimeoutSeconds != 420 || claim.Labels["idle_timeout"] != "420" || claim.Labels["idle_timeout_secs"] != "420" || touched.Labels["idle_timeout_secs"] != "420" {
+				t.Fatalf("claim=%#v touched=%#v err=%v", claim, touched, err)
+			}
+		})
 	}
 }
 

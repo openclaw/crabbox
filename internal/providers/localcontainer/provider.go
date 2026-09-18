@@ -176,7 +176,7 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 }
 
 func (Provider) ApplyNativeCheckpointForkFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(flagValues)
+	v, ok := values.(core.LocalContainerConfigFlagValues)
 	if !ok {
 		return nil
 	}

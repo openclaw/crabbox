@@ -47,6 +47,19 @@ crabbox status --provider blacksmith-testbox --id tbx_123
 crabbox stop --provider blacksmith-testbox tbx_123
 ```
 
+Use `--shell` for multiline shell scripts, including a heredoc at the end of
+the command:
+
+```sh
+crabbox run --provider blacksmith-testbox --id tbx_123 --shell -- 'cat <<"EOF"
+literal $HOME and $(commands)
+EOF'
+```
+
+Crabbox preserves the script's whitespace and literal content while separating
+it from Blacksmith's command bookkeeping. Commands use the native remote shell
+and retain their output and exit status, including an explicit `exit`.
+
 Run delegated sync from a full Git checkout. Crabbox rejects a checkout when
 sparse rules or `skip-worktree` index state leave tracked paths absent because
 those paths can otherwise be misread as deletions during a later full sync. A

@@ -18,6 +18,29 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestNativeServerTypeProjection(t *testing.T) {
+	for _, name := range []string{"modal", " Modal "} {
+		if got := core.ServerTypeForProviderClass(name, "beast"); got != "python:3.13-slim" {
+			t.Fatalf("provider=%q default type=%q, want %q", name, got, "python:3.13-slim")
+		}
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolver, ok := provider.(core.ProviderServerTypeProvider)
+		if !ok {
+			t.Fatalf("provider=%q has no native type capability", name)
+		}
+		for _, tc := range []struct{ raw, want string }{{"", "python:3.13-slim"}, {"  ", "  "}, {"custom", "custom"}, {" custom ", " custom "}} {
+			cfg := core.Config{Provider: name, Class: "beast", ServerType: "unrelated-type", ServerTypeExplicit: true}
+			cfg.Modal.Image = tc.raw
+			if got := resolver.ServerTypeForConfig(cfg); got != tc.want {
+				t.Fatalf("provider=%q raw=%q type=%q, want %q", name, tc.raw, got, tc.want)
+			}
+		}
+	}
+}
+
 func TestProviderSpec(t *testing.T) {
 	p := Provider{}
 	if p.Spec().Name != "modal" {

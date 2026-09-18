@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -142,16 +141,23 @@ func TestWorkspaceOwnerDashSignalHandoff(t *testing.T) {
 				home, owner := workspaceOwnerSetupFixture(t)
 				payload := "exec " + shell + " -c " + shellQuote("trap 'exit 42' "+signal+"; kill -"+signal+" $$; printf survived-signal")
 				script := remoteWorkspaceOwnerPOSIXWitnessScript(owner.key, owner.token, payload, "")
-				// Route only this generated fixture's shells to dash; no global
-				// shell replacement and no changes to the production launcher.
-				script = strings.ReplaceAll(script, "/bin/sh", shell)
-				script = strings.ReplaceAll(script, "exec sh -c", "exec "+shell+" -c")
+				// Run the outer shell and payload in dash, preserving the production
+				// Darwin bootstrap: its multi-digit descriptor cleanup needs /bin/sh.
 				prefix := "ulimit -c 0; "
 				if ignored {
 					prefix += "trap '' " + signal + "; "
 				}
 				cmd, ctx := boundedWorkspaceOwnerCommand(t, home, os.Getenv("PATH"), prefix+"exec "+shell+" -c "+shellQuote(script))
 				cmd.Path, cmd.Args[0] = shell, shell
+				// Include a multi-digit inherited descriptor, as a busy test process can.
+				null, err := os.Open(os.DevNull)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = null.Close() })
+				for range 8 {
+					cmd.ExtraFiles = append(cmd.ExtraFiles, null)
+				}
 				out, err := cmd.CombinedOutput()
 				if ctx.Err() != nil {
 					t.Fatal("dash witness exceeded its bound")

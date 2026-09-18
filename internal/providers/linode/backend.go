@@ -549,7 +549,7 @@ func (b *linodeLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (
 		}
 	}
 	result := core.InventoryDoctorResult(providerName, count)
-	result.Message += fmt.Sprintf(" default_type=%s region=%s image=%s", b.Cfg.ServerType, linodeRegionForConfig(b.Cfg), linodeImageForConfig(b.Cfg))
+	result.Message += fmt.Sprintf(" default_type=%s region=%s image=%s", linodeServerTypeForConfig(b.Cfg), linodeRegionForConfig(b.Cfg), linodeImageForConfig(b.Cfg))
 	return result, nil
 }
 
@@ -1058,12 +1058,7 @@ func applyLinodeDefaults(cfg *core.Config) {
 	if cfg.TargetOS == "" {
 		cfg.TargetOS = core.TargetLinux
 	}
-	if cfg.Linode.Region == "" {
-		cfg.Linode.Region = core.LinodeConfiguredRegionDefault
-	}
-	if cfg.Linode.Image == "" {
-		cfg.Linode.Image = core.LinodeImageFallback
-	}
+	applyNativeDefaults(&cfg.Linode)
 	if cfg.Linode.Type == "" {
 		cfg.Linode.Type = linodeServerTypeForClass(cfg.Class)
 	}

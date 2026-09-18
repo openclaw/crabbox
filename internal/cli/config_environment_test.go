@@ -31,3 +31,37 @@ func TestConfigEnvironmentSplitIgnoresRuntimeFields(t *testing.T) {
 		t.Fatal("environment application changed runtime state")
 	}
 }
+
+func TestConfigEnvironmentThirdAliasOrdering(t *testing.T) {
+	type config struct {
+		Value string `sources:"env" env:"CRABBOX_TEST_ALIAS_PRIMARY" envAlias:"CRABBOX_TEST_ALIAS_FIRST" envAlias2:"CRABBOX_TEST_ALIAS_SECOND" envAlias3:"CRABBOX_TEST_ALIAS_THIRD" reportApplied:"true"`
+	}
+	type report struct{ InputAccepted, Value bool }
+	names := []string{"CRABBOX_TEST_ALIAS_PRIMARY", "CRABBOX_TEST_ALIAS_FIRST", "CRABBOX_TEST_ALIAS_SECOND", "CRABBOX_TEST_ALIAS_THIRD"}
+	for winner := -1; winner < len(names); winner++ {
+		for _, raw := range []string{"fixture-value", "  "} {
+			for i, name := range names {
+				value := ""
+				if winner >= 0 && i >= winner {
+					value = "fixture-later"
+				}
+				if i == winner {
+					value = raw
+				}
+				t.Setenv(name, value)
+			}
+			cfg := config{Value: "prior"}
+			var got report
+			if err := applyConfigEnvironment(&cfg, &got, 0, 1); err != nil {
+				t.Fatal(err)
+			}
+			want := "prior"
+			if winner >= 0 {
+				want = raw
+			}
+			if cfg.Value != want || got != (report{InputAccepted: winner >= 0, Value: winner >= 0}) {
+				t.Fatalf("winner=%d raw=%q cfg=%+v report=%+v", winner, raw, cfg, got)
+			}
+		}
+	}
+}

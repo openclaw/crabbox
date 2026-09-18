@@ -87,6 +87,24 @@ updated; the CLI does not fall back to anonymous record creation. Run IDs are
 single-invocation identities, and recovery relies on the existing record's
 retention. A new CLI invocation always uses a new ID.
 
+If this invocation abandons admission before any workload can start, the CLI
+separately reports a failed admission to the original authenticated coordinator.
+The first admission's effective authentication, owner, and organization headers
+are retained only in memory for this admission and its terminal bookkeeping;
+normal token refresh outside that invocation binding is unchanged.
+This bookkeeping may add up to 60 seconds and three attempts after the existing
+10-second admission allowance; it does not extend admission or replay the command.
+The coordinator checks the original owner, organization, and request, and refuses
+to change a record whose lifecycle has advanced. A matching absent admission can
+be recorded as failed atomically, so a late original admission cannot reopen it.
+This is failed pre-work history, not a signed workload receipt.
+
+The initiating command error remains the result. If terminal bookkeeping cannot
+be confirmed, the CLI explicitly reports unresolved history and the original run
+ID. Inspect that history without replaying the workload: there is no persistent
+retry queue or automatic repair of older stranded records. Acknowledged workload
+completion still uses the separate signed-receipt finish path.
+
 - **`history`** lists recorded runs. Filter with `--lease`, `--owner`, `--org`,
   `--state`, and `--limit` (default 50). It is intended for command debugging,
   not unbounded log archival.
@@ -384,6 +402,16 @@ The opt-in CMake probe invokes the literal `cmake --version` command on POSIX,
 WSL2, and native Windows targets. It reports only the first output line or
 `cmake=missing`; the result is diagnostic only, so missing CMake does not block
 the workload or trigger installation or upgrades.
+
+The opt-in `bash` probe (`--preflight --preflight-tools bash`, or
+`--preflight --preflight-tools default,bash`) invokes literal `bash --version`
+on Linux, macOS and WSL2, retaining at most 4096 bytes and displaying the first
+line as `remote preflight bash=<version>`. If Bash is unavailable, it prints
+`remote preflight bash=missing`; native Windows skips it. The defaults remain
+unchanged. Missing Bash is diagnostic only for an independent workload, not an
+installation request or a guarantee that Bash scripts can run. Linux SSH
+managed execution without Bash requires the complete companion runtime pack;
+see [run](commands/run.md) for readiness and CLI-only installation constraints.
 
 The opt-in `python3-venv` probe checks a real disposable environment on Linux,
 macOS and WSL2, not merely the interpreter version or whether `venv` imports.
