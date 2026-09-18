@@ -164,7 +164,7 @@ func readArtifactManifestRef(ctx context.Context, ref string) (artifactManifest,
 	if isHTTPArtifactRef(path) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, path, nil)
 		if err != nil {
-			return artifactManifest{}, path, Exit(2, "create artifact manifest request: %v", err)
+			return artifactManifest{}, path, Exit(2, "create artifact manifest request: %v", artifactRequestError(err))
 		}
 		resp, err := artifactHTTPClient(req.URL).Do(req)
 		if err != nil {
@@ -378,7 +378,7 @@ func rejectSymlinkedArtifactSourcePath(baseAbs, cleanPath string) error {
 func downloadArtifactURL(ctx context.Context, file artifactManifestFile, outPath string) (string, int64, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, file.URL, nil)
 	if err != nil {
-		return "", 0, "", Exit(2, "create artifact download request for %s: %v", file.Name, err)
+		return "", 0, "", Exit(2, "create artifact download request for %s: %v", file.Name, artifactRequestError(err))
 	}
 	resp, err := artifactHTTPClient(req.URL).Do(req)
 	if err != nil {
@@ -421,6 +421,13 @@ func artifactHTTPClient(origin *url.URL) *http.Client {
 func artifactRequestError(err error) error {
 	if errors.Is(err, errArtifactCrossOriginRedirect) {
 		return errArtifactCrossOriginRedirect
+	}
+	var requestErr *url.Error
+	if errors.As(err, &requestErr) {
+		redacted := *requestErr
+		redacted.URL = "<redacted>"
+		redacted.Err = artifactRequestError(requestErr.Err)
+		return &redacted
 	}
 	return err
 }

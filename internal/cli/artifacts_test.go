@@ -5,10 +5,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -2170,11 +2173,110 @@ func TestArtifactHTTPFlowsRejectCrossOriginRedirects(t *testing.T) {
 	}))
 	defer redirect.Close()
 
+	signedURL := redirect.URL + "/artifact?X-Amz-Signature=secret-signature"
+	for _, test := range artifactHTTPFailureFlows(t, signedURL) {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.run()
+			if err == nil || !strings.Contains(err.Error(), errArtifactCrossOriginRedirect.Error()) {
+				t.Fatalf("error=%v, want cross-origin redirect rejection", err)
+			}
+			if strings.Contains(err.Error(), "secret-signature") {
+				t.Fatalf("error leaked signed URL: %v", err)
+			}
+		})
+	}
+	if got := targetRequests.Load(); got != 0 {
+		t.Fatalf("cross-origin target received %d requests", got)
+	}
+}
+
+func TestArtifactHTTPFlowsRedactRequestErrorURLs(t *testing.T) {
+	const signedQuery = "?X-Amz-Credential=synthetic-credential&X-Amz-Signature=synthetic-signature&X-Amz-Security-Token=synthetic-token"
+	cause := errors.New("synthetic connection failure")
+	requests := 0
+	originalClient := http.DefaultClient
+	t.Cleanup(func() { http.DefaultClient = originalClient })
+	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, &net.OpError{Op: "write", Net: "tcp", Err: cause}
+	})}
+	for _, failure := range []struct {
+		name         string
+		url          string
+		wantCause    string
+		wantRequests int
+	}{
+		{name: "transport", url: "https://artifacts.invalid/private-capability/object" + signedQuery, wantCause: cause.Error(), wantRequests: 1},
+		{name: "malformed URL", url: "https://artifacts.invalid/private-capability/%zz" + signedQuery, wantCause: "invalid URL escape", wantRequests: 0},
+	} {
+		t.Run(failure.name, func(t *testing.T) {
+			for _, flow := range artifactHTTPFailureFlows(t, failure.url) {
+				t.Run(flow.name, func(t *testing.T) {
+					before := requests
+					err := flow.run()
+					if err == nil || !strings.Contains(err.Error(), failure.wantCause) {
+						t.Fatalf("error=%v, want useful cause %q", err, failure.wantCause)
+					}
+					if got := requests - before; got != failure.wantRequests {
+						t.Fatalf("transport requests=%d, want %d", got, failure.wantRequests)
+					}
+					for _, sensitive := range []string{"artifacts.invalid", "private-capability", "X-Amz-", "synthetic-credential", "synthetic-signature", "synthetic-token"} {
+						if strings.Contains(err.Error(), sensitive) {
+							t.Fatalf("request error exposed signed URL component %q: %v", sensitive, err)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestArtifactRequestErrorPreservesTransportCause(t *testing.T) {
+	const signedURL = "https://artifacts.invalid/private-capability?X-Amz-Signature=synthetic-signature"
+	cause := errors.New("synthetic connection failure")
+	transportErr := &net.OpError{Op: "write", Net: "tcp", Err: cause}
+	for _, nested := range []bool{false, true} {
+		t.Run(fmt.Sprintf("nested=%t", nested), func(t *testing.T) {
+			var inner error = transportErr
+			if nested {
+				inner = &url.Error{Op: "connect", URL: signedURL, Err: transportErr}
+			}
+			original := &url.Error{Op: "Put", URL: signedURL, Err: inner}
+			originalText := original.Error()
+			redacted := artifactRequestError(original)
+			if !errors.Is(redacted, cause) {
+				t.Fatalf("redaction lost underlying cause: %v", redacted)
+			}
+			var gotTransport *net.OpError
+			if !errors.As(redacted, &gotTransport) || gotTransport != transportErr {
+				t.Fatalf("redaction lost transport error type: %v", redacted)
+			}
+			var gotURL *url.Error
+			if !errors.As(redacted, &gotURL) || gotURL.Op != original.Op {
+				t.Fatalf("redaction lost request operation: %v", redacted)
+			}
+			if strings.Contains(redacted.Error(), "artifacts.invalid") || strings.Contains(redacted.Error(), "synthetic-signature") {
+				t.Fatalf("redacted error retained a signed URL: %v", redacted)
+			}
+			if original.Error() != originalText || original.URL != signedURL || original.Err != inner {
+				t.Fatalf("redaction mutated the original request error: %v", original)
+			}
+		})
+	}
+}
+
+func artifactHTTPFailureFlows(t *testing.T, signedURL string) []struct {
+	name string
+	run  func() error
+} {
+	t.Helper()
 	dir := t.TempDir()
 	uploadPath := filepath.Join(dir, "upload.txt")
 	mustWriteFile(t, uploadPath, "private artifact")
-	signedURL := redirect.URL + "/artifact?X-Amz-Signature=secret-signature"
-	tests := []struct {
+	return []struct {
 		name string
 		run  func() error
 	}{
@@ -2210,21 +2312,6 @@ func TestArtifactHTTPFlowsRejectCrossOriginRedirects(t *testing.T) {
 				})
 			},
 		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			err := test.run()
-			if err == nil || !strings.Contains(err.Error(), errArtifactCrossOriginRedirect.Error()) {
-				t.Fatalf("error=%v, want cross-origin redirect rejection", err)
-			}
-			if strings.Contains(err.Error(), "secret-signature") {
-				t.Fatalf("error leaked signed URL: %v", err)
-			}
-		})
-	}
-	if got := targetRequests.Load(); got != 0 {
-		t.Fatalf("cross-origin target received %d requests", got)
 	}
 }
 

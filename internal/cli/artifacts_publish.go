@@ -628,7 +628,7 @@ func uploadArtifactGrantReader(ctx context.Context, file io.ReaderAt, size int64
 	}
 	req, err := http.NewRequestWithContext(ctx, method, grant.Upload.URL, requestBody())
 	if err != nil {
-		return Exit(2, "create artifact upload request for %s: %v", grant.Name, err)
+		return Exit(2, "create artifact upload request for %s: %v", grant.Name, artifactRequestError(err))
 	}
 	req.ContentLength = contentLength
 	req.GetBody = func() (io.ReadCloser, error) {
