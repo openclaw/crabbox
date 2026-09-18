@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"reflect"
 	"strconv"
@@ -100,6 +101,18 @@ func applyConfigEnvironmentField(dst reflect.Value, tags reflect.StructTag) (boo
 		dst.SetInt(int64(value))
 		return accepted, err
 	case reflect.Float64:
+		if tags.Get("envFloat") == "checked" {
+			raw := os.Getenv(name)
+			if raw == "" {
+				return false, nil
+			}
+			value, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				return false, fmt.Errorf("parse %s: %w", name, err)
+			}
+			dst.SetFloat(value)
+			return true, nil
+		}
 		value, accepted := lookupEnvFloat(name)
 		if accepted {
 			dst.SetFloat(value)

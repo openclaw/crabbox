@@ -498,19 +498,6 @@ type IsloConfig struct {
 	IdlePause bool
 }
 
-type DockerSandboxConfig struct {
-	CLIPath         string
-	Agent           string
-	Template        string
-	CPUs            float64
-	Memory          string
-	Clone           bool
-	Workdir         string
-	ExtraWorkspaces []string
-	MCP             []string
-	Kit             []string
-}
-
 type AsciiBoxConfig struct {
 	APIKey  string
 	BaseURL string
@@ -590,16 +577,6 @@ type ParallelsHostConfig struct {
 
 // DefaultTartImage is the immutable built-in image; the Tart adapter verifies its contents.
 const DefaultTartImage = "ghcr.io/cirruslabs/macos-sequoia-base@sha256:785c3acb40fa5af6dd5aab96cd60408372c26125e173c14ea417498d086f829c"
-
-type TartConfig struct {
-	Image    string
-	User     string
-	Password string
-	WorkRoot string
-	CPUs     int
-	Memory   int
-	Disk     int
-}
 
 type HyperVConfig struct {
 	Image         string
@@ -1858,15 +1835,12 @@ func baseConfig() Config {
 		CloudflareSandbox: defaultCloudflareSandboxConfig(),
 		Superserve:        defaultSuperserveConfig(),
 		Crownest:          defaultCrownestConfig(),
-		DockerSandbox: DockerSandboxConfig{
-			CLIPath: "sbx",
-			Agent:   "shell",
-		},
-		AnthropicSRT:    defaultAnthropicSRTConfig(),
-		CloudRunSandbox: defaultCloudRunSandboxConfig(),
-		Modal:           defaultModalConfig(),
-		UpstashBox:      defaultUpstashBoxConfig(),
-		Smolvm:          defaultSmolvmConfig(),
+		DockerSandbox:     defaultDockerSandboxConfig(),
+		AnthropicSRT:      defaultAnthropicSRTConfig(),
+		CloudRunSandbox:   defaultCloudRunSandboxConfig(),
+		Modal:             defaultModalConfig(),
+		UpstashBox:        defaultUpstashBoxConfig(),
+		Smolvm:            defaultSmolvmConfig(),
 		AsciiBox: AsciiBoxConfig{
 			BaseURL: "https://ascii.dev",
 			CLIPath: "box",
@@ -1895,14 +1869,8 @@ func baseConfig() Config {
 		MXC:            defaultMXCConfig(),
 		Multipass:      initialMultipassConfig(multipassImage),
 		Machine0:       defaultMachine0Config(),
-		Tart: TartConfig{
-			Image:    DefaultTartImage,
-			User:     "admin",
-			WorkRoot: "/Users/admin/crabbox",
-			CPUs:     4,
-			Memory:   8192,
-		},
-		Lume: defaultLumeConfig(),
+		Tart:           initialTartConfig(),
+		Lume:           defaultLumeConfig(),
 		HyperV: HyperVConfig{
 			User:     "crabbox",
 			WorkRoot: defaultWindowsWorkRoot,
@@ -2290,19 +2258,6 @@ type fileIsloConfig struct {
 	IdlePause      *bool  `yaml:"idlePause,omitempty"`
 }
 
-type fileDockerSandboxConfig struct {
-	CLIPath         string    `yaml:"cliPath,omitempty"`
-	Agent           string    `yaml:"agent,omitempty"`
-	Template        *string   `yaml:"template,omitempty"`
-	CPUs            *float64  `yaml:"cpus,omitempty"`
-	Memory          *string   `yaml:"memory,omitempty"`
-	Clone           *bool     `yaml:"clone,omitempty"`
-	Workdir         *string   `yaml:"workdir,omitempty"`
-	ExtraWorkspaces *[]string `yaml:"extraWorkspaces,omitempty"`
-	MCP             *[]string `yaml:"mcp,omitempty"`
-	Kit             *[]string `yaml:"kit,omitempty"`
-}
-
 type fileAsciiBoxConfig struct {
 	BaseURL string `yaml:"baseUrl,omitempty"`
 	CLIPath string `yaml:"cliPath,omitempty"`
@@ -2452,16 +2407,6 @@ func positiveMinimum(current, candidate int) int {
 		return candidate
 	}
 	return min(current, candidate)
-}
-
-type fileTartConfig struct {
-	Image    string `yaml:"image,omitempty"`
-	User     string `yaml:"user,omitempty"`
-	Password string `yaml:"password,omitempty"`
-	WorkRoot string `yaml:"workRoot,omitempty"`
-	CPUs     *int   `yaml:"cpus,omitempty"`
-	Memory   *int   `yaml:"memory,omitempty"`
-	Disk     *int   `yaml:"disk,omitempty"`
 }
 
 type fileHyperVConfig struct {
@@ -4060,48 +4005,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		return err
 	}
 	if file.DockerSandbox != nil {
-		if file.DockerSandbox.CLIPath != "" {
-			cfg.DockerSandbox.CLIPath = file.DockerSandbox.CLIPath
-			recordConfigInput(cfg, "docker-sandbox", inputSource, true)
-		}
-		if file.DockerSandbox.Agent != "" {
-			cfg.DockerSandbox.Agent = file.DockerSandbox.Agent
-			recordConfigInput(cfg, "docker-sandbox", inputSource, true)
-		}
-		if file.DockerSandbox.Template != nil {
-			applyOptional(&cfg.DockerSandbox.Template, file.DockerSandbox.Template)
-			recordConfigInput(cfg, "docker-sandbox", inputSource, true)
-		}
-		if file.DockerSandbox.CPUs != nil {
-			if *file.DockerSandbox.CPUs < 0 {
-				return Exit(2, "docker-sandbox cpus must be non-negative")
-			}
-			cfg.DockerSandbox.CPUs = *file.DockerSandbox.CPUs
-			recordConfigInput(cfg, "docker-sandbox", inputSource, true)
-		}
-		if file.DockerSandbox.Memory != nil {
-			applyOptional(&cfg.DockerSandbox.Memory, file.DockerSandbox.Memory)
-			recordConfigInput(cfg, "docker-sandbox", inputSource, true)
-		}
-		if file.DockerSandbox.Clone != nil {
-			applyOptional(&cfg.DockerSandbox.Clone, file.DockerSandbox.Clone)
-			recordConfigInput(cfg, "docker-sandbox", inputSource, true)
-		}
-		if file.DockerSandbox.Workdir != nil {
-			applyOptional(&cfg.DockerSandbox.Workdir, file.DockerSandbox.Workdir)
-			recordConfigInput(cfg, "docker-sandbox", inputSource, true)
-		}
-		if file.DockerSandbox.ExtraWorkspaces != nil {
-			cfg.DockerSandbox.ExtraWorkspaces = append([]string(nil), (*file.DockerSandbox.ExtraWorkspaces)...)
-			recordConfigInput(cfg, "docker-sandbox", inputSource, true)
-		}
-		if file.DockerSandbox.MCP != nil {
-			cfg.DockerSandbox.MCP = append([]string(nil), (*file.DockerSandbox.MCP)...)
-			recordConfigInput(cfg, "docker-sandbox", inputSource, true)
-		}
-		if file.DockerSandbox.Kit != nil {
-			cfg.DockerSandbox.Kit = append([]string(nil), (*file.DockerSandbox.Kit)...)
-			recordConfigInput(cfg, "docker-sandbox", inputSource, true)
+		applied, err := cfg.DockerSandbox.applyFile(file.DockerSandbox)
+		recordConfigInput(cfg, "docker-sandbox", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
 		}
 	}
 	{
@@ -4244,39 +4151,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Tart != nil {
-		if file.Tart.Image != "" {
-			cfg.Tart.Image = file.Tart.Image
-			cfg.tartImageExplicit = true
-			recordConfigInput(cfg, "tart", inputSource, true)
-		}
-		if file.Tart.User != "" {
-			cfg.Tart.User = file.Tart.User
-			recordConfigInput(cfg, "tart", inputSource, true)
-		}
-		if file.Tart.Password != "" {
-			cfg.Tart.Password = file.Tart.Password
-			recordConfigInput(cfg, "tart", inputSource, true)
-		}
-		if file.Tart.WorkRoot != "" {
-			cfg.Tart.WorkRoot = file.Tart.WorkRoot
-			recordConfigInput(cfg, "tart", inputSource, true)
-		}
-		if file.Tart.CPUs != nil {
-			cfg.Tart.CPUs = *file.Tart.CPUs
-			cfg.tartCPUsExplicit = true
-			recordConfigInput(cfg, "tart", inputSource, true)
-		}
-		if file.Tart.Memory != nil {
-			cfg.Tart.Memory = *file.Tart.Memory
-			cfg.tartMemoryExplicit = true
-			recordConfigInput(cfg, "tart", inputSource, true)
-		}
-		if file.Tart.Disk != nil {
-			cfg.Tart.Disk = *file.Tart.Disk
-			cfg.tartDiskExplicit = true
-			recordConfigInput(cfg, "tart", inputSource, true)
-		}
+	if err := applyTartFileConfig(cfg, file.Tart, inputSource); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.Lume.applyFile(file.Lume, trusted)
@@ -5634,34 +5510,12 @@ func applyEnv(cfg *Config) error {
 	if err := applySuperserveEnvironmentConfig(cfg); err != nil {
 		return err
 	}
-	cfg.DockerSandbox.CLIPath = configInputEnvString(cfg, "docker-sandbox", cfg.DockerSandbox.CLIPath, "CRABBOX_DOCKER_SANDBOX_CLI")
-	cfg.DockerSandbox.Agent = configInputEnvString(cfg, "docker-sandbox", cfg.DockerSandbox.Agent, "CRABBOX_DOCKER_SANDBOX_AGENT")
-	cfg.DockerSandbox.Template = configInputEnvString(cfg, "docker-sandbox", cfg.DockerSandbox.Template, "CRABBOX_DOCKER_SANDBOX_TEMPLATE")
-	if cpus := os.Getenv("CRABBOX_DOCKER_SANDBOX_CPUS"); cpus != "" {
-		parsed, err := strconv.ParseFloat(cpus, 64)
+	{
+		applied, err := cfg.DockerSandbox.applyEnv()
+		recordConfigInput(cfg, "docker-sandbox", configInputEnvironment, applied.InputAccepted)
 		if err != nil {
-			return fmt.Errorf("parse CRABBOX_DOCKER_SANDBOX_CPUS: %w", err)
+			return err
 		}
-		cfg.DockerSandbox.CPUs = parsed
-		recordConfigInput(cfg, "docker-sandbox", configInputEnvironment, true)
-	}
-	cfg.DockerSandbox.Memory = configInputEnvString(cfg, "docker-sandbox", cfg.DockerSandbox.Memory, "CRABBOX_DOCKER_SANDBOX_MEMORY")
-	if v, ok := getenvBool("CRABBOX_DOCKER_SANDBOX_CLONE"); ok {
-		cfg.DockerSandbox.Clone = v
-		recordConfigInput(cfg, "docker-sandbox", configInputEnvironment, true)
-	}
-	cfg.DockerSandbox.Workdir = configInputEnvString(cfg, "docker-sandbox", cfg.DockerSandbox.Workdir, "CRABBOX_DOCKER_SANDBOX_WORKDIR")
-	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_EXTRA_WORKSPACES"); ok {
-		cfg.DockerSandbox.ExtraWorkspaces = values
-		recordConfigInput(cfg, "docker-sandbox", configInputEnvironment, true)
-	}
-	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_MCP"); ok {
-		cfg.DockerSandbox.MCP = values
-		recordConfigInput(cfg, "docker-sandbox", configInputEnvironment, true)
-	}
-	if values, ok := getenvList("CRABBOX_DOCKER_SANDBOX_KIT"); ok {
-		cfg.DockerSandbox.Kit = values
-		recordConfigInput(cfg, "docker-sandbox", configInputEnvironment, true)
 	}
 	{
 		applied, err := cfg.AnthropicSRT.applyEnv()
@@ -5816,28 +5670,8 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if image := os.Getenv("CRABBOX_TART_IMAGE"); image != "" {
-		cfg.Tart.Image = image
-		cfg.tartImageExplicit = true
-		recordConfigInput(cfg, "tart", configInputEnvironment, true)
-	}
-	cfg.Tart.User = configInputEnvString(cfg, "tart", cfg.Tart.User, "CRABBOX_TART_USER")
-	cfg.Tart.Password = configInputEnvString(cfg, "tart", cfg.Tart.Password, "CRABBOX_TART_PASSWORD")
-	cfg.Tart.WorkRoot = configInputEnvString(cfg, "tart", cfg.Tart.WorkRoot, "CRABBOX_TART_WORK_ROOT")
-	if v := os.Getenv("CRABBOX_TART_CPUS"); v != "" {
-		cfg.Tart.CPUs = configInputEnvInt(cfg, "tart", cfg.Tart.CPUs, "CRABBOX_TART_CPUS")
-		cfg.tartCPUsExplicit = true
-		recordConfigInputIntent(cfg, "tart", configInputEnvironment, true)
-	}
-	if v := os.Getenv("CRABBOX_TART_MEMORY"); v != "" {
-		cfg.Tart.Memory = configInputEnvInt(cfg, "tart", cfg.Tart.Memory, "CRABBOX_TART_MEMORY")
-		cfg.tartMemoryExplicit = true
-		recordConfigInputIntent(cfg, "tart", configInputEnvironment, true)
-	}
-	if v := os.Getenv("CRABBOX_TART_DISK"); v != "" {
-		cfg.Tart.Disk = configInputEnvInt(cfg, "tart", cfg.Tart.Disk, "CRABBOX_TART_DISK")
-		cfg.tartDiskExplicit = cfg.Tart.Disk > 0
-		recordConfigInputIntent(cfg, "tart", configInputEnvironment, true)
+	if err := applyTartEnvConfig(cfg); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.Lume.applyEnv()

@@ -25,7 +25,7 @@ type field struct {
 	envSplitBefore                                                                                                                                                               bool
 	flagDurationRawPositive                                                                                                                                                      bool
 	fileListNonemptyNormalized, envListTrimmedNonempty, flagListCSV                                                                                                              bool
-	flagDurationRawZeroReset, flagListAppendTrimmed                                                                                                                              bool
+	flagDurationRawZeroReset, flagListAppendTrimmed, flagListAppendTrimmedNonempty                                                                                               bool
 	flagDurationError                                                                                                                                                            string
 	envListCSV, flagListScalarEmptyNil                                                                                                                                           bool
 	fileStorageValue                                                                                                                                                             bool
@@ -183,7 +183,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		case "user,repo,env,flag":
 		case "user,repo,flag":
 			f.noEnv = true
-			for _, tag := range []string{"env", "envAlias", "envAlias2", "envAlias3", "envAliasAfterConfig", "envInt", "envList", "envSplitBefore"} {
+			for _, tag := range []string{"env", "envAlias", "envAlias2", "envAlias3", "envAliasAfterConfig", "envInt", "envFloat", "envList", "envSplitBefore"} {
 				if _, ok := tags.Lookup(tag); ok {
 					return s, fmt.Errorf("%s: user,repo,flag sources require an absent %s tag", f.name, tag)
 				}
@@ -346,7 +346,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		}{
 			{"fileList", !f.noFile, map[string]*bool{"raw": &f.fileListRaw, "nonempty-raw": &f.fileListNonemptyRaw, "nonempty-normalized": &f.fileListNonemptyNormalized, "present-normalized": &f.fileListPresentNormalized}},
 			{"envList", !f.noEnv, map[string]*bool{"presence": &f.envListPresence, "csv": &f.envListCSV, "trimmed-nonempty": &f.envListTrimmedNonempty}},
-			{"flagList", !f.noFlag, map[string]*bool{"replace-append": &f.flagListReplaceAppend, "append-trimmed": &f.flagListAppendTrimmed, "empty-scalar": &f.flagListEmptyScalar, "scalar-empty-nil": &f.flagListScalarEmptyNil, "csv": &f.flagListCSV}},
+			{"flagList", !f.noFlag, map[string]*bool{"replace-append": &f.flagListReplaceAppend, "append-trimmed": &f.flagListAppendTrimmed, "append-trimmed-nonempty": &f.flagListAppendTrimmedNonempty, "empty-scalar": &f.flagListEmptyScalar, "scalar-empty-nil": &f.flagListScalarEmptyNil, "csv": &f.flagListCSV}},
 		} {
 			if value, ok := tags.Lookup(mode.tag); ok {
 				enabled := mode.values[value]
@@ -401,10 +401,15 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			f.fileIntNonzero = value == "nonzero"
 		}
 		if value, ok := tags.Lookup("fileFloat"); ok {
-			if value != "positive" || f.kind != "float64" || f.noFile {
-				return s, fmt.Errorf("%s: fileFloat is supported only as positive for file-admitted float64 fields", f.name)
+			if (value != "positive" && value != "nonnegative") || f.kind != "float64" || f.noFile {
+				return s, fmt.Errorf("%s: fileFloat is supported only as positive or nonnegative for file-admitted float64 fields", f.name)
 			}
-			f.fileFloatPositive = true
+			f.fileFloatPositive = value == "positive"
+		}
+		if value, ok := tags.Lookup("envFloat"); ok {
+			if value != "checked" || f.kind != "float64" || f.noEnv {
+				return s, fmt.Errorf("%s: envFloat requires checked on an environment-admitted float64 field", f.name)
+			}
 		}
 		if value, ok := tags.Lookup("envInt"); ok {
 			if value == "checked-alias" {
@@ -654,6 +659,9 @@ func generate(s schema, source string) ([]byte, error) {
 				}
 				if f.flagListAppendTrimmed {
 					kind = "appendTrimmedListFlag"
+				}
+				if f.flagListAppendTrimmedNonempty {
+					kind = "appendTrimmedNonemptyListFlag"
 				}
 			}
 			p("%s *%s\n", f.name, kind)

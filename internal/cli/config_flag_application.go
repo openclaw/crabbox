@@ -50,7 +50,7 @@ func applyConfigFlagField(dst, src reflect.Value, tags reflect.StructTag) (bool,
 	if dst.Kind() == reflect.Slice {
 		var value []string
 		switch tags.Get("flagList") {
-		case "replace-append", "append-trimmed":
+		case "replace-append", "append-trimmed", "append-trimmed-nonempty":
 			value = append([]string(nil), src.Interface().(flag.Getter).Get().([]string)...)
 		case "csv":
 			value = splitCSV(src.Elem().String())

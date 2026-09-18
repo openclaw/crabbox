@@ -14,6 +14,21 @@ func (s *appendTrimmedListFlag) Set(value string) error {
 	return s.stringListFlag.Set(strings.TrimSpace(value))
 }
 
+// appendTrimmedNonemptyListFlag ignores blank occurrences but retains whole values.
+type appendTrimmedNonemptyListFlag struct{ stringListFlag }
+
+func newAppendTrimmedNonemptyListFlag(defaults []string) *appendTrimmedNonemptyListFlag {
+	return &appendTrimmedNonemptyListFlag{stringListFlag(append([]string(nil), defaults...))}
+}
+
+func (s *appendTrimmedNonemptyListFlag) Set(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	return s.stringListFlag.Set(value)
+}
+
 // replaceAppendListFlag replaces its snapshot on the first occurrence, then
 // appends trimmed comma-separated items in order, including duplicates.
 type replaceAppendListFlag struct {

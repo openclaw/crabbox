@@ -2099,7 +2099,7 @@ func TestRegistrationOnly(t *testing.T){
 func TestSchemaFileFloatPositiveFailsClosed(t *testing.T) {
 	for _, tc := range []struct{ name, old, new, want string }{
 		{"empty", `help:"CPUs"`, `help:"CPUs" fileFloat:""`, "fileFloat is supported only as positive"},
-		{"unknown", `help:"CPUs"`, `help:"CPUs" fileFloat:"nonnegative"`, "fileFloat is supported only as positive"},
+		{"unknown", `help:"CPUs"`, `help:"CPUs" fileFloat:"unsupported"`, "fileFloat is supported only as positive"},
 		{"string", `help:"Name"`, `help:"Name" fileFloat:"positive"`, "fileFloat is supported only as positive"},
 		{"int", `help:"Count"`, `help:"Count" fileFloat:"positive"`, "fileFloat is supported only as positive"},
 		{"bool", `help:"Enabled"`, `help:"Enabled" fileFloat:"positive"`, "fileFloat is supported only as positive"},
@@ -4118,6 +4118,103 @@ func TestSuperserveGeneratedConfigIsCurrent(t *testing.T) {
 
 func TestMXCGeneratedConfigIsCurrent(t *testing.T) {
 	if err := run("../../internal/cli/config_mxc.go", "../../internal/cli/config_mxc_generated.go", "MXCConfig", "mxc", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDockerSandboxFixedModesSchema(t *testing.T) {
+	for _, tc := range []struct{ kind, mode string }{
+		{"float64", `envFloat:"checked"`}, {"float64", `fileFloat:"nonnegative"`}, {"[]string", `flagList:"append-trimmed-nonempty"`},
+	} {
+		source := "package cli\ntype PilotConfig struct { Value " + tc.kind + " `sources:\"user,repo,env,flag\" config:\"value\" env:\"VALUE\" flag:\"value\" help:\"Value\" " + tc.mode + "` }"
+		s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+		if err != nil {
+			t.Errorf("supported %s: %v", tc.mode, err)
+			continue
+		}
+		a, err := generate(s, "pilot.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := generate(s, "pilot.go")
+		if err != nil || !bytes.Equal(a, b) {
+			t.Fatal("nondeterministic mode")
+		}
+		for _, changed := range []string{strings.Replace(source, tc.kind, "string", 1), strings.Replace(source, tc.mode, strings.Split(tc.mode, ":")[0]+`:""`, 1), strings.Replace(source, tc.mode, strings.Split(tc.mode, ":")[0]+`:"unknown"`, 1)} {
+			if _, err := parseSchema([]byte(changed), "PilotConfig", "pilot"); err == nil {
+				t.Errorf("accepted unsupported mode: %s", changed)
+			}
+		}
+	}
+	for _, field := range []string{
+		`Value float64 ` + "`" + `sources:"flag" flag:"value" help:"Value" envFloat:"checked"` + "`",
+		`Value float64 ` + "`" + `sources:"user,repo,flag" config:"value" flag:"value" help:"Value" envFloat:"checked"` + "`",
+		`Value float64 ` + "`" + `sources:"env,flag" env:"VALUE" flag:"value" help:"Value" fileFloat:"nonnegative"` + "`",
+		`Value float64 ` + "`" + `sources:"user,repo,env,flag" config:"value" env:"VALUE" flag:"value" help:"Value" fileFloat:"nonnegative" fileStorage:"value"` + "`",
+		`Value []string ` + "`" + `sources:"user,repo,env" config:"value" env:"VALUE" flagList:"append-trimmed-nonempty"` + "`",
+	} {
+		if _, err := parseSchema([]byte("package cli\ntype PilotConfig struct {"+field+"}"), "PilotConfig", "pilot"); err == nil {
+			t.Errorf("accepted forbidden composition: %s", field)
+		}
+	}
+}
+
+func TestDockerSandboxFixedModesExecutable(t *testing.T) {
+	const source = "package cli\ntype PilotConfig struct {\n" +
+		" First string `sources:\"user,repo,env,flag\" config:\"first\" env:\"FIRST\" flag:\"first\" help:\"First\" reportApplied:\"true\"`\n" +
+		" CPUs float64 `sources:\"user,repo,env,flag\" config:\"cpus\" env:\"CPUS\" flag:\"cpus\" help:\"CPUs\" envFloat:\"checked\" fileFloat:\"nonnegative\"`\n" +
+		" Tail string `sources:\"user,repo,env,flag\" config:\"tail\" env:\"TAIL\" flag:\"tail\" help:\"Tail\" reportApplied:\"true\"`\n" +
+		" Items []string `sources:\"user,repo,env,flag\" config:\"items\" env:\"ITEMS\" flag:\"item\" help:\"Items\" fileList:\"raw\" envList:\"presence\" flagList:\"append-trimmed-nonempty\"`\n}"
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const behavior = `package cli
+import("flag";"fmt";"math";"os";"reflect";"strconv";"strings";"testing")
+func firstNonEmptyEnv(names ...string)(string,bool){for _,name:=range names{if v:=os.Getenv(name);v!="" {return v,true}};return "",false}
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func Exit(_ int,message string,args ...any)error{return fmt.Errorf(message,args...)}
+func TestCheckedFloat(t *testing.T){
+ for _,earlier:=range []string{"","first"}{ for _,raw:=range []string{""," ","invalid","0","-0","-1","1.5","2","NaN","+Inf","-Inf","1e999"}{
+  t.Setenv("FIRST",earlier);t.Setenv("CPUS",raw);t.Setenv("TAIL","later")
+  cfg:=PilotConfig{CPUs:7,Tail:"prior"};parsed,pe:=strconv.ParseFloat(raw,64);bad:=raw!=""&&pe!=nil
+  got,err:=cfg.applyEnv();if (err!=nil)!=bad {t.Fatalf("%q: %v",raw,err)}
+  if bad {if cfg.CPUs!=7||cfg.Tail!="prior"||got.Tail||got.InputAccepted!=(earlier!="")||err.Error()!=fmt.Sprintf("parse CPUS: %v",pe){t.Fatalf("partial: %+v %+v %v",cfg,got,err)}} else {
+   want:=parsed;if raw==""{want=7};if !(math.IsNaN(want)&&math.IsNaN(cfg.CPUs))&&math.Float64bits(want)!=math.Float64bits(cfg.CPUs){t.Fatal("float changed")};if cfg.Tail!="later"||!got.Tail||!got.InputAccepted{t.Fatal("later field missing")}
+  }
+ }}
+ for _,first:=range []*string{nil,new("first")} {for _,value:=range []*float64{nil,new(0.0),new(math.Copysign(0,-1)),new(-1.0),new(1.5),new(2.0),new(math.NaN()),new(math.Inf(1)),new(math.Inf(-1))}{
+  cfg:=PilotConfig{CPUs:7,Tail:"prior"};bad:=value!=nil&&*value<0;got,err:=cfg.applyFile(&filePilotConfig{First:first,CPUs:value,Tail:new("later")})
+  if (err!=nil)!=bad{t.Fatal(err)};if bad{if err.Error()!="pilot cpus must be non-negative"||cfg.CPUs!=7||cfg.Tail!="prior"||got.InputAccepted!=(first!=nil){t.Fatal("file partial state")}}else{want:=7.0;if value!=nil{want=*value};if !(math.IsNaN(want)&&math.IsNaN(cfg.CPUs))&&math.Float64bits(want)!=math.Float64bits(cfg.CPUs){t.Fatal("file float changed")};if !got.Tail||cfg.Tail!="later"{t.Fatal("file tail")}}
+ }}
+}
+func TestWholeOccurrenceLists(t *testing.T){
+ for _,prior:=range [][]string{nil,{}, {" prior ","dup"}} {for _,args:=range [][]string{{},{""},{" "},{" a,b ",""," dup ","dup"}}{
+  cfg:=PilotConfig{Items:prior};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg);getter:=fs.Lookup("item").Value.(flag.Getter)
+  if getter.Get().([]string)==nil||fs.Lookup("item").DefValue!=strings.Join(prior,","){t.Fatal("snapshot shape")}
+  want:=append([]string(nil),prior...);for _,raw:=range args{if err:=fs.Set("item",raw);err!=nil{t.Fatal(err)};if v:=strings.TrimSpace(raw);v!=""{want=append(want,v)}}
+  got,err:=values.Apply(&cfg,fs);if err!=nil||got.InputAccepted!=(len(args)>0){t.Fatal("accepted visit")}
+  if len(args)==0{want=prior};if !reflect.DeepEqual(cfg.Items,want){t.Fatalf("list %#v != %#v",cfg.Items,want)}
+  if len(args)>0&&len(want)>0{cfg.Items[0]="changed";if getter.Get().([]string)[0]!=want[0]{t.Fatal("copy")}}
+ }}
+ fs:=flag.NewFlagSet("duplicate",flag.ContinueOnError);fs.String("first","","");func(){defer func(){if recover()==nil{t.Fatal("missing duplicate panic")}}();RegisterPilotConfigFlags(fs,PilotConfig{})}();if fs.Lookup("item")==nil||fs.Lookup("cpus")!=nil{t.Fatal("early registration")}
+}
+`
+	runScalarFixture(t, source, output, behavior)
+}
+
+func TestDockerSandboxGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_docker_sandbox.go", "../../internal/cli/config_docker_sandbox_generated.go", "DockerSandboxConfig", "docker-sandbox", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTartGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_tart.go", "../../internal/cli/config_tart_generated.go", "TartConfig", "tart", true); err != nil {
 		t.Fatal(err)
 	}
 }

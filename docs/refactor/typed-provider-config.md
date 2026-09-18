@@ -155,6 +155,23 @@ provider keeps its sizing guard before typed values and unconditional validation
 after all visited assignments. Configured URL/workdir fallback constants share
 generated values without moving runtime fallback or validation policy.
 
+Docker Sandbox declares all ten fields in `internal/cli/config_docker_sandbox.go`.
+Its checked raw environment float retains the previous CPU value on parse failure,
+and its present pointer-file float rejects only negative values before assignment.
+Both preserve earlier accepted inputs and stop before later fields. Final finite
+and whole-number validation remains in the provider, after visited flags and
+accepted-input recording. The exact-provider sizing guard still runs first.
+
+Its repeated list flags use `flagList:"append-trimmed-nonempty"`: registration
+snapshots inherited lists before ordinary flags, whole trimmed nonempty occurrences
+append without comma splitting, and blank visits still apply and record their
+snapshot. Getter and application copies remain independent. File lists stay raw
+pointer-backed copies; environment lists retain their presence/`none` behavior.
+`envFloat:"checked"` admits only environment float64 fields, and
+`fileFloat:"nonnegative"` requires pointer-backed file float64 fields. Neither
+changes existing tolerant float parsing or positive-only file float rules.
+The configured workdir stays empty; backend runtime defaults remain separate.
+
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
@@ -214,6 +231,15 @@ timeout error, leaving the later release value, marker, intent and final default
 phase untouched on that error. Environment path expansion remains unconditional
 on the final fallback values. Backend defaults and native operations stay
 outside the generated owner.
+
+Tart's seven-field owner is `internal/cli/config_tart.go`. Manual flag application
+keeps the provider's ordered resource checks and partial-error effects, consuming
+all five generated raw-visit members. File numeric presence and raw environment
+numeric intent remain explicit wrapper policy: malformed nonempty input records
+intent without acceptance, and disk intent uses the resulting value. The composed
+initializer combines generated user/CPU/memory defaults with the existing single
+image constant and guest work root. Password and work root gain no argv binding;
+selected-provider normalization and runtime defaults remain in their existing phases.
 
 Incus uses a complete hybrid owner in `internal/cli/config_incus.go`. The exact
 type-doc directive `//configgen:flag-application manual` generates file/env

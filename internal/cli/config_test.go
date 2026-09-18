@@ -9372,7 +9372,7 @@ func TestTartInputValueAndIntent(t *testing.T) {
 		{"MEMORY", func(c Config) (int, bool) { return c.Tart.Memory, c.tartMemoryExplicit }},
 		{"DISK", func(c Config) (int, bool) { return c.Tart.Disk, c.tartDiskExplicit }},
 	} {
-		for _, raw := range []string{"", "invalid", " 4 ", "0", "-1", "7"} {
+		for _, raw := range []string{"", "invalid", " 4 ", "0", "-1", "7", "9223372036854775808", "-9223372036854775809"} {
 			t.Run(field.name+"/"+raw, func(t *testing.T) {
 				clearConfigEnv(t)
 				cfg := Config{Tart: TartConfig{CPUs: 7, Memory: 7, Disk: 7}}
@@ -19206,6 +19206,285 @@ func TestMXCBindingEnvironment(t *testing.T) {
 					t.Fatalf("facts=%+v", cfg.inputProvenance["mxc"])
 				}
 			})
+		}
+	}
+}
+
+func assertDockerSandboxBindingEqual(t *testing.T, got, want DockerSandboxConfig) {
+	t.Helper()
+	if !(math.IsNaN(got.CPUs) && math.IsNaN(want.CPUs)) && math.Float64bits(got.CPUs) != math.Float64bits(want.CPUs) {
+		t.Fatalf("CPUs=%g, want %g", got.CPUs, want.CPUs)
+	}
+	got.CPUs, want.CPUs = 0, 0
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("config=%#v, want %#v", got, want)
+	}
+}
+
+func TestDockerSandboxBindingFileFloatAndPartialState(t *testing.T) {
+	clearConfigEnv(t)
+	for _, trusted := range []bool{false, true} {
+		for _, earlier := range []bool{false, true} {
+			for _, value := range []*float64{nil, new(0.0), new(math.Copysign(0, -1)), new(-1.0), new(1.5), new(2.0), new(math.NaN()), new(math.Inf(1)), new(math.Inf(-1))} {
+				cfg := baseConfig()
+				cfg.DockerSandbox.CPUs = 7
+				cfg.DockerSandbox.Memory, cfg.DockerSandbox.Workdir = "prior", "prior"
+				cfg.DockerSandbox.ExtraWorkspaces, cfg.DockerSandbox.MCP, cfg.DockerSandbox.Kit = []string{"prior"}, []string{"prior"}, []string{"prior"}
+				want := cfg.DockerSandbox
+				file := &fileDockerSandboxConfig{CPUs: value, Memory: new("later"), Clone: new(true), Workdir: new("later"), ExtraWorkspaces: new([]string{"later"}), MCP: new([]string{"later"}), Kit: new([]string{"later"})}
+				if earlier {
+					file.CLIPath, want.CLIPath = "fixture", "fixture"
+				}
+				bad := value != nil && *value < 0
+				if !bad {
+					if value != nil {
+						want.CPUs = *value
+					}
+					want.Memory, want.Clone, want.Workdir = "later", true, "later"
+					want.ExtraWorkspaces, want.MCP, want.Kit = []string{"later"}, []string{"later"}, []string{"later"}
+				}
+				before, err := yaml.Marshal(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = applyFileConfigWithTrust(&cfg, fileConfig{DockerSandbox: file}, trusted)
+				if (err != nil) != bad || bad && err.Error() != "docker-sandbox cpus must be non-negative" {
+					t.Fatalf("file float error=%v", err)
+				}
+				assertDockerSandboxBindingEqual(t, cfg.DockerSandbox, want)
+				after, marshalErr := yaml.Marshal(file)
+				if marshalErr != nil || !bytes.Equal(before, after) {
+					t.Fatal("DTO mutated")
+				}
+				ledger := Config{}
+				source := configInputRepo
+				if trusted {
+					source = configInputUser
+				}
+				recordConfigInput(&ledger, "docker-sandbox", source, earlier || !bad)
+				if cfg.inputProvenance["docker-sandbox"] != ledger.inputProvenance["docker-sandbox"] {
+					t.Fatal("file accepted facts changed")
+				}
+			}
+		}
+	}
+}
+
+func TestDockerSandboxBindingEnvironmentFloatAndPartialState(t *testing.T) {
+	clearConfigEnv(t)
+	for _, earlier := range []bool{false, true} {
+		for _, raw := range []string{"", " ", "invalid", "0", "-0", "-1", "1.5", "2", "NaN", "+Inf", "-Inf", "1e999"} {
+			cfg := baseConfig()
+			cfg.DockerSandbox.CPUs = 7
+			cfg.DockerSandbox.Memory, cfg.DockerSandbox.Workdir = "prior", "prior"
+			cfg.DockerSandbox.ExtraWorkspaces, cfg.DockerSandbox.MCP, cfg.DockerSandbox.Kit = []string{"prior"}, []string{"prior"}, []string{"prior"}
+			want := cfg.DockerSandbox
+			cli := ""
+			if earlier {
+				cli, want.CLIPath = "fixture", "fixture"
+			}
+			t.Setenv("CRABBOX_DOCKER_SANDBOX_CLI", cli)
+			t.Setenv("CRABBOX_DOCKER_SANDBOX_CPUS", raw)
+			for _, suffix := range []string{"MEMORY", "WORKDIR", "EXTRA_WORKSPACES", "MCP", "KIT"} {
+				t.Setenv("CRABBOX_DOCKER_SANDBOX_"+suffix, "later")
+			}
+			t.Setenv("CRABBOX_DOCKER_SANDBOX_CLONE", "true")
+			parsed, parseErr := strconv.ParseFloat(raw, 64)
+			bad := raw != "" && parseErr != nil
+			if !bad {
+				if raw != "" {
+					want.CPUs = parsed
+				}
+				want.Memory, want.Clone, want.Workdir = "later", true, "later"
+				want.ExtraWorkspaces, want.MCP, want.Kit = []string{"later"}, []string{"later"}, []string{"later"}
+			}
+			err := applyEnv(&cfg)
+			if (err != nil) != bad {
+				t.Fatalf("raw=%q error=%v", raw, err)
+			}
+			if bad && err.Error() != fmt.Sprintf("parse CRABBOX_DOCKER_SANDBOX_CPUS: %v", parseErr) {
+				t.Fatalf("raw float diagnostic changed: %v", err)
+			}
+			assertDockerSandboxBindingEqual(t, cfg.DockerSandbox, want)
+			if (cfg.inputProvenance["docker-sandbox"].values != 0) != (earlier || !bad) {
+				t.Fatal("environment partial acceptance changed")
+			}
+		}
+	}
+}
+
+func TestDockerSandboxBindingStringsAndLists(t *testing.T) {
+	clearConfigEnv(t)
+	assertDockerSandboxBindingEqual(t, baseConfig().DockerSandbox, DockerSandboxConfig{CLIPath: "sbx", Agent: "shell"})
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"", "  ", "fixture"} {
+			for _, list := range []*[]string{nil, new([]string(nil)), new([]string{}), new([]string{" raw ", "", "a,b", "dup", "dup"})} {
+				cfg := baseConfig()
+				cfg.DockerSandbox = DockerSandboxConfig{CLIPath: "prior", Agent: "prior", Template: "prior", Memory: "prior", Clone: true, Workdir: "prior", ExtraWorkspaces: []string{"prior"}, MCP: []string{"prior"}, Kit: []string{"prior"}}
+				file := &fileDockerSandboxConfig{CLIPath: raw, Agent: raw, Template: &raw, Memory: &raw, Clone: new(false), Workdir: &raw, ExtraWorkspaces: list, MCP: list, Kit: list}
+				want := cfg.DockerSandbox
+				if raw != "" {
+					want.CLIPath, want.Agent = raw, raw
+				}
+				want.Template, want.Memory, want.Clone, want.Workdir = raw, raw, false, raw
+				if list != nil {
+					want.ExtraWorkspaces, want.MCP, want.Kit = append([]string(nil), (*list)...), append([]string(nil), (*list)...), append([]string(nil), (*list)...)
+				}
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{DockerSandbox: file}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				assertDockerSandboxBindingEqual(t, cfg.DockerSandbox, want)
+				if list != nil && len(*list) > 0 {
+					cfg.DockerSandbox.ExtraWorkspaces[0] = "changed"
+					if (*list)[0] != " raw " || cfg.DockerSandbox.MCP[0] != " raw " {
+						t.Fatal("raw file lists share input or each other")
+					}
+				}
+			}
+		}
+	}
+	for _, tc := range []struct {
+		raw  *string
+		want []string
+	}{{nil, []string{"prior"}}, {new(""), []string{}}, {new("  "), []string{}}, {new(" NoNe "), []string{}}, {new(" a, ,a,none "), []string{"a", "a", "none"}}} {
+		cfg := baseConfig()
+		cfg.DockerSandbox.ExtraWorkspaces, cfg.DockerSandbox.MCP, cfg.DockerSandbox.Kit = []string{"prior"}, []string{"prior"}, []string{"prior"}
+		for _, suffix := range []string{"EXTRA_WORKSPACES", "MCP", "KIT"} {
+			key := "CRABBOX_DOCKER_SANDBOX_" + suffix
+			t.Setenv(key, "")
+			if tc.raw == nil {
+				if err := os.Unsetenv(key); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				t.Setenv(key, *tc.raw)
+			}
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		for _, got := range [][]string{cfg.DockerSandbox.ExtraWorkspaces, cfg.DockerSandbox.MCP, cfg.DockerSandbox.Kit} {
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("environment list=%#v want=%#v", got, tc.want)
+			}
+		}
+		if (cfg.inputProvenance["docker-sandbox"].values != 0) != (tc.raw != nil) {
+			t.Fatal("list environment presence changed")
+		}
+	}
+}
+
+func TestTartMechanicalBindingContract(t *testing.T) {
+	clearConfigEnv(t)
+	wantDefault := TartConfig{Image: DefaultTartImage, User: "admin", WorkRoot: "/Users/admin/crabbox", CPUs: 4, Memory: 8192}
+	if got := baseConfig().Tart; got != wantDefault {
+		t.Fatalf("compiled defaults=%#v", got)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, n := range []int{-1, 0, 7} {
+			cfg := Config{}
+			input := fileTartConfig{Image: " ", User: "alice", Password: "synthetic-inert", WorkRoot: " /work ", CPUs: &n, Memory: &n, Disk: &n}
+			before := input
+			beforeNumber := n
+			if err := applyFileConfigWithTrust(&cfg, fileConfig{Tart: &input}, trusted); err != nil {
+				t.Fatal(err)
+			}
+			want := TartConfig{Image: " ", User: "alice", Password: "synthetic-inert", WorkRoot: " /work ", CPUs: n, Memory: n, Disk: n}
+			if cfg.Tart != want || !cfg.tartImageExplicit || !cfg.tartCPUsExplicit || !cfg.tartMemoryExplicit || !cfg.tartDiskExplicit {
+				t.Fatal("file values or presence markers changed")
+			}
+			if !reflect.DeepEqual(input, before) || *input.CPUs != beforeNumber || *input.Memory != beforeNumber || *input.Disk != beforeNumber {
+				t.Fatal("file DTO mutated")
+			}
+			source := configInputRepo
+			if trusted {
+				source = configInputUser
+			}
+			if cfg.inputProvenance["tart"].values != 1<<(source-1) || cfg.inputProvenance["tart"].intents != 0 {
+				t.Fatal("file accepted ledger changed")
+			}
+			prior := cfg
+			if err := applyFileConfigWithTrust(&cfg, fileConfig{Tart: &fileTartConfig{}}, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, prior) {
+				t.Fatal("missing fields must inherit markers and values")
+			}
+		}
+	}
+	for _, raw := range []string{"", " ", "same"} {
+		t.Run("image/"+raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := Config{Tart: TartConfig{Image: "same"}}
+			t.Setenv("CRABBOX_TART_IMAGE", raw)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			want := raw
+			if raw == "" {
+				want = "same"
+			}
+			if cfg.Tart.Image != want || cfg.tartImageExplicit != (raw != "") || (cfg.inputProvenance["tart"].values != 0) != (raw != "") {
+				t.Fatal("image acceptance or explicit marker changed")
+			}
+		})
+	}
+}
+
+func TestTartEnvironmentStrings(t *testing.T) {
+	for _, raw := range []string{"", " ", "synthetic-inert"} {
+		t.Run(raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := Config{Tart: TartConfig{User: "synthetic-inert", Password: "synthetic-inert", WorkRoot: "synthetic-inert"}}
+			for _, field := range []string{"USER", "PASSWORD", "WORK_ROOT"} {
+				t.Setenv("CRABBOX_TART_"+field, raw)
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			want := raw
+			if raw == "" {
+				want = "synthetic-inert"
+			}
+			if cfg.Tart.User != want || cfg.Tart.Password != want || cfg.Tart.WorkRoot != want {
+				t.Fatal("raw environment strings changed")
+			}
+			facts := cfg.inputProvenance["tart"]
+			if (facts.values != 0) != (raw != "") || facts.intents != 0 {
+				t.Fatal("environment string acceptance changed")
+			}
+		})
+	}
+}
+
+func TestTartPriorNumericMarkers(t *testing.T) {
+	for _, raw := range []string{"", "invalid", "0", "-1", "7"} {
+		for _, prior := range []int{0, 7} {
+			for _, marker := range []bool{false, true} {
+				clearConfigEnv(t)
+				cfg := Config{Tart: TartConfig{CPUs: prior, Memory: prior, Disk: prior}, tartCPUsExplicit: marker, tartMemoryExplicit: marker, tartDiskExplicit: marker}
+				for _, field := range []string{"CPUS", "MEMORY", "DISK"} {
+					t.Setenv("CRABBOX_TART_"+field, raw)
+				}
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				value, err := strconv.Atoi(raw)
+				if err != nil {
+					value = prior
+				}
+				cpuMarker, diskMarker := marker, marker
+				if raw != "" {
+					cpuMarker, diskMarker = true, value > 0
+				}
+				if cfg.Tart.CPUs != value || cfg.Tart.Memory != value || cfg.Tart.Disk != value || cfg.tartCPUsExplicit != cpuMarker || cfg.tartMemoryExplicit != cpuMarker || cfg.tartDiskExplicit != diskMarker {
+					t.Fatalf("raw=%q prior=%d marker=%v: numeric marker contract changed", raw, prior, marker)
+				}
+				facts := cfg.inputProvenance["tart"]
+				if (facts.values != 0) != (err == nil) || (facts.intents != 0) != (raw != "") {
+					t.Fatal("accepted value and raw intent differ")
+				}
+			}
 		}
 	}
 }

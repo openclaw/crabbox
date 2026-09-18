@@ -12,14 +12,14 @@ import (
 // value to the runtime config or records input provenance.
 func registerConfigFlags(fs *flag.FlagSet, defaults, values any) {
 	cfg, parsed := reflect.ValueOf(defaults), reflect.ValueOf(values).Elem()
-	// Keep the existing order: replacing lists, ordinary flags, appending lists.
+	// Register replacing/nonempty lists first, scalars next, then other append lists.
 	for phase := 0; phase < 3; phase++ {
 		for i := 0; i < parsed.NumField(); i++ {
 			name := parsed.Type().Field(i).Name
 			field, _ := cfg.Type().FieldByName(name)
 			fieldPhase := 1
 			switch field.Tag.Get("flagList") {
-			case "replace-append":
+			case "replace-append", "append-trimmed-nonempty":
 				fieldPhase = 0
 			case "append-trimmed":
 				fieldPhase = 2
@@ -62,6 +62,10 @@ func registerConfigFlag(fs *flag.FlagSet, value reflect.Value, tags reflect.Stru
 		switch tags.Get("flagList") {
 		case "replace-append":
 			list := newReplaceAppendListFlag(defaults)
+			fs.Var(list, name, help)
+			return list
+		case "append-trimmed-nonempty":
+			list := newAppendTrimmedNonemptyListFlag(defaults)
 			fs.Var(list, name, help)
 			return list
 		case "append-trimmed":

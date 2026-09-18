@@ -76,6 +76,9 @@ func applyConfigFileField(dst, src reflect.Value, tags reflect.StructTag, provid
 			}
 		}
 	case reflect.Float64:
+		if tags.Get("fileFloat") == "nonnegative" && src.Float() < 0 {
+			return false, Exit(2, "%s %s must be non-negative", provider, tags.Get("config"))
+		}
 		if tags.Get("fileFloat") == "positive" && !(src.Float() > 0) {
 			return false, nil
 		}
