@@ -651,9 +651,10 @@ as the primary safety rails, and size fleet/org monthly caps with enough room
 for TTL-based reservations during busy test bursts.
 
 Managed checkpoint limits are independent of lease cost accounting. The
-shipped Cloudflare production and preview configuration sets checkpoint caps
-to 20 globally, 10 per owner, and 20 per organization; claim caps retain their
-16/64/256 defaults. Creation and use reject excess work transactionally with
+shipped Cloudflare production configuration sets checkpoint caps to 100
+globally, per owner, and per organization. Preview caps remain 20 globally,
+10 per owner, and 20 per organization; claim caps retain their 16/64/256
+defaults. Creation and use reject excess work transactionally with
 HTTP 429 `checkpoint_limit_exceeded` or `checkpoint_claim_limit_exceeded`.
 Checkpoint events retain only the most recent 256 transitions, so operators
 must not interpret the event endpoint as complete checkpoint lifetime history.

@@ -660,11 +660,12 @@ Managed checkpoint caps default to 64 globally
 (`CRABBOX_MAX_CHECKPOINTS_PER_ORG`). Active fork/shard claims default to 16 per
 checkpoint (`CRABBOX_MAX_CHECKPOINT_USE_CLAIMS`), 64 per owner
 (`CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER`), and 256 globally
-(`CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL`). Production and preview Wrangler
-configuration explicitly use checkpoint caps of 20/10/20 and claim caps of
-16/64/256. Invalid or zero values fall back to their finite defaults. These
-guardrails reject excess requests before provider mutation or claim/event
-creation; each checkpoint also retains only its latest 256 audit events.
+(`CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL`). Production Wrangler configuration
+sets all three checkpoint caps to 100; preview checkpoint caps remain
+20/10/20. Both configurations retain claim caps of 16/64/256. Invalid or zero
+values fall back to their finite defaults. These guardrails reject excess
+requests before provider mutation or claim/event creation; each checkpoint
+also retains only its latest 256 audit events.
 
 After deployment, point the CLI at the broker:
 
