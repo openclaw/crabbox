@@ -474,6 +474,11 @@ func transformLeaseClaimForRepo(existing *leaseClaim, leaseID, slug, provider, p
 	if hadExisting {
 		recordedIdle = original.IdleTimeoutSeconds
 	}
+	if metadata.idlePolicy == claimIdleCoordinatorProjection {
+		if projected, ok := parseDurationSecondsLabel(metadata.server.Labels["idle_timeout_secs"]); ok {
+			idleTimeout = projected
+		}
+	}
 	idleTimeout, normalizeIdle, err := selectClaimIdleTimeout(recordedIdle, idleTimeout, metadata.idlePolicy)
 	if err != nil {
 		return err

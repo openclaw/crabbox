@@ -398,7 +398,8 @@ Claim-publication helpers initialize a missing idle policy, but preserve an
 already-recorded positive idle duration during ordinary direct-lease preparation,
 repository reclaim, and endpoint publication. Their duration argument is not
 implicit replacement intent. Explicit idle changes belong to the run/Touch
-policy path; managed coordinator projections remain authoritative. This also
+policy path; managed coordinator projections use the resolved server's
+`idle_timeout_secs` label rather than the command's configured default. This also
 keeps acquisition finalization from reinitializing a policy already published
 by the provider's first acquisition step.
 

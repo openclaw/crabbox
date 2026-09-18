@@ -1187,9 +1187,9 @@ func TestClaimPublicationKeepsCoordinatorIdleAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.IdleTimeout = 30 * time.Minute
-	server.Labels["idle_timeout"], server.Labels["idle_timeout_secs"] = "1800", "1800"
+	server.Labels["idle_timeout"], server.Labels["idle_timeout_secs"] = "10800", "10800"
 	after, err := ClaimLeaseTargetForRepoConfigIfUnchanged(id, slug, cfg, server, target, repo, cfg.IdleTimeout, false, before, true)
-	if err != nil || after.IdleTimeoutSeconds != 1800 || after.Labels["idle_timeout_secs"] != "1800" {
+	if err != nil || after.IdleTimeoutSeconds != 10800 || after.Labels["idle_timeout_secs"] != "10800" {
 		t.Fatalf("cached policy overrode coordinator projection: claim=%#v err=%v", after, err)
 	}
 }

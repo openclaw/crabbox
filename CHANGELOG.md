@@ -4,6 +4,7 @@
 
 ### Fixes
 
+- Keep coordinator-managed lease claims aligned with the broker's idle timeout when resolving SSH access, instead of recording the local default; ordinary touches continue to preserve remote policy.
 - Raise production coordinator checkpoint limits to 100 globally, per owner, and per organization so retained worker caches do not exhaust the previous 10-checkpoint owner limit.
 - Finalize abandoned run admissions through bounded, authenticated pre-work bookkeeping, keeping late admission responses from leaving history running and reporting unresolved history honestly. [Issue 2223](https://github.com/openclaw/crabbox/issues/2223). [PR 2227](https://github.com/openclaw/crabbox/pull/2227). Thanks @steipete.
 - Recover abandoned external-provider slug reservation locks on Windows so later reservations can acquire and release normally. [PR 2292](https://github.com/openclaw/crabbox/pull/2292). Thanks @zozo123.
