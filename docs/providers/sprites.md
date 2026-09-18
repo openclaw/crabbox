@@ -140,6 +140,13 @@ until readiness is explicitly probed. `status --wait` probes SSH using the
 existing key; it can wake the Sprite but does not bootstrap it. Use a normal
 reuse command such as `run --id <slug>` when SSH bootstrap needs to be retried.
 
+Status and list project native identity and state without inventing creation
+or expiry timestamps. When an associated local claim exists, they show its
+recorded idle timeout, TTL, retention, and last use; otherwise those values
+remain unknown. Reader configuration does not replace saved policy, and a read
+does not count as lease activity. Recorded TTL is local policy, not a native
+Sprites deletion deadline.
+
 If a Sprite has already been deleted, `stop` confirms the token's organization
 against the saved claim and rechecks absence before removing the local claim
 and key. Claims without the original organization and immutable ID are preserved,

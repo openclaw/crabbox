@@ -43,6 +43,63 @@ func TestSpritesLabelsRoundTripLeaseAndSlug(t *testing.T) {
 	}
 }
 
+func TestSpritesObservationOmitsUnavailableHistory(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	cfg := core.BaseConfig()
+	cfg.Provider, cfg.TTL, cfg.IdleTimeout = spritesProvider, 2*time.Hour, 45*time.Minute
+	cfg.Sprites.WorkRoot = "/home/sprite/crabbox"
+	b := &spritesBackend{cfg: cfg}
+	sprite := spritesInfo{
+		ID: "sprite-observed", Name: "crabbox-observed", Organization: "example-org", Status: "cold",
+		URL: "https://sprite.example.test", Labels: spritesAPILabels("cbx_abcdef123456", "observed"),
+	}
+	server := b.spriteToServer(sprite, nil)
+	if server.CloudID != sprite.Name || server.Status != "cold" || server.Labels["sprites_resource_id"] != sprite.ID || server.Labels["url"] != sprite.URL {
+		t.Fatalf("native facts changed: %#v", server)
+	}
+	for _, key := range []string{"created_at", "updated_at", "last_touched_at", "expires_at", "ttl_secs", "idle_timeout", "idle_timeout_secs", "keep"} {
+		if value, exists := server.Labels[key]; exists {
+			t.Errorf("observation invented %s=%q from reader configuration", key, value)
+		}
+	}
+}
+
+func TestSpritesObservationAndClaimPublicationUseRecordedPolicy(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider, cfg.TTL, cfg.IdleTimeout = spritesProvider, 2*time.Hour, 45*time.Minute
+	cfg.Sprites.WorkRoot = "/home/sprite/crabbox"
+	b := &spritesBackend{cfg: cfg}
+	sprite := spritesInfo{ID: "sprite-observed", Name: "crabbox-observed", Status: "cold", Labels: spritesAPILabels("cbx_abcdef123456", "observed")}
+	history := core.LeaseClaim{
+		IdleTimeoutSeconds: 300, LastUsedAt: "2026-01-02T03:04:05Z",
+		Labels: map[string]string{
+			"created_at": "1767320000", "last_touched_at": "1767320100", "expires_at": "1767320400",
+			"idle_timeout": "300", "idle_timeout_secs": "300", "ttl_secs": "600", "keep": "false",
+		},
+	}
+	before, _ := json.Marshal(history)
+	observed := b.spriteToServer(sprite, &history)
+	if observed.Labels["idle_timeout_secs"] != "300" || observed.Labels["ttl_secs"] != "600" || observed.Labels["keep"] != "false" || observed.Labels["last_touched_at"] != core.LeaseLabelTime(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)) {
+		t.Fatalf("observation did not use recorded history: %v", observed.Labels)
+	}
+	for _, key := range []string{"created_at", "expires_at"} {
+		if _, exists := observed.Labels[key]; exists {
+			t.Errorf("local policy %s was presented as native history", key)
+		}
+	}
+	prepared := b.claimServer(sprite, history.Labels)
+	for key, want := range history.Labels {
+		if got := prepared.Labels[key]; got != want {
+			t.Errorf("endpoint publication changed %s=%q, want %q", key, got, want)
+		}
+	}
+	prepared.Labels["keep"] = "true"
+	after, _ := json.Marshal(history)
+	if string(before) != string(after) {
+		t.Fatal("projection mutated recorded history")
+	}
+}
+
 func TestCrabboxSpriteOwnershipRequiresLabels(t *testing.T) {
 	sprite := spritesInfo{Name: "crabbox-handmade"}
 	if isCrabboxSprite(sprite) {

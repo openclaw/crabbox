@@ -126,13 +126,14 @@ func (b *spritesBackend) Acquire(ctx context.Context, req core.AcquireRequest) (
 		}
 		core.RemoveStoredTestboxKey(leaseID)
 	}
-	server := b.spriteToServer(sprite, req.Keep)
+	policy := core.DirectLeaseLabels(cfg, leaseID, slug, spritesProvider, "", req.Keep, core.ClockNow(b.rt.Clock).UTC())
+	server := b.claimServer(sprite, policy)
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
 		cleanupFailedAcquire()
 		return core.LeaseTarget{}, err
 	}
 	claimed = true
-	lease, err := b.prepareLease(ctx, sprite, leaseID, slug, req.Keep, keyPath, publicKey)
+	lease, err := b.prepareLease(ctx, sprite, leaseID, slug, server.Labels, keyPath, publicKey)
 	if err != nil {
 		cleanupFailedAcquire()
 		return core.LeaseTarget{}, err
@@ -152,7 +153,7 @@ func (b *spritesBackend) Resolve(ctx context.Context, req core.ResolveRequest) (
 	}
 	if req.ReleaseOnly {
 		sprite := spritesInfo{Name: name, Labels: spritesAPILabels(leaseID, slug)}
-		return core.LeaseTarget{Server: b.spriteToServer(sprite, true), LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: b.spriteToServer(sprite, nil), LeaseID: leaseID}, nil
 	}
 	sprite, err := b.client.GetSprite(ctx, name)
 	if err != nil {
@@ -188,7 +189,11 @@ func (b *spritesBackend) Resolve(ctx context.Context, req core.ResolveRequest) (
 	if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	resolved := core.LeaseTarget{Server: b.spriteToServer(sprite, true), SSH: target, LeaseID: leaseID}
+	var history *core.LeaseClaim
+	if hasClaim {
+		history = &claim
+	}
+	resolved := core.LeaseTarget{Server: b.spriteToServer(sprite, history), SSH: target, LeaseID: leaseID}
 	resolved.Server.Labels["lease"], resolved.Server.Labels["slug"] = leaseID, slug
 	if err := core.ValidateLeaseTargetProviderIdentity(resolved, req.ExpectedProviderIdentity); err != nil {
 		return core.LeaseTarget{}, err
@@ -212,7 +217,11 @@ func (b *spritesBackend) Resolve(ctx context.Context, req core.ResolveRequest) (
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	lease, err := b.prepareLease(ctx, sprite, leaseID, slug, true, keyPath, publicKey)
+	policy := claim.Labels
+	if !hasClaim {
+		policy = core.DirectLeaseLabels(b.configForRun(), leaseID, slug, spritesProvider, "", true, core.ClockNow(b.rt.Clock).UTC())
+	}
+	lease, err := b.prepareLease(ctx, sprite, leaseID, slug, policy, keyPath, publicKey)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -257,7 +266,7 @@ func (b *spritesBackend) List(ctx context.Context, req core.ListRequest) ([]core
 		if !isCrabboxSprite(sprite) {
 			continue
 		}
-		out = append(out, b.spriteToServer(sprite, true))
+		out = append(out, b.spriteToServer(sprite, b.observationClaim(sprite)))
 	}
 	return out, nil
 }
@@ -395,7 +404,7 @@ func (b *spritesBackend) configForRun() core.Config {
 	return cfg
 }
 
-func (b *spritesBackend) prepareLease(ctx context.Context, sprite spritesInfo, leaseID, slug string, keep bool, keyPath, publicKey string) (core.LeaseTarget, error) {
+func (b *spritesBackend) prepareLease(ctx context.Context, sprite spritesInfo, leaseID, slug string, policy map[string]string, keyPath, publicKey string) (core.LeaseTarget, error) {
 	cfg := b.configForRun()
 	if err := cleanSpritesWorkRoot(cfg.WorkRoot); err != nil {
 		return core.LeaseTarget{}, err
@@ -407,10 +416,9 @@ func (b *spritesBackend) prepareLease(ctx context.Context, sprite spritesInfo, l
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	server := b.spriteToServer(sprite, keep)
+	server := b.claimServer(sprite, policy)
 	server.Labels["lease"] = leaseID
 	server.Labels["slug"] = slug
-	server.Labels["keep"] = fmt.Sprint(keep)
 	server.Labels["work_root"] = cfg.WorkRoot
 	server.Labels["state"] = "ready"
 	server.Status = "ready"
@@ -525,11 +533,29 @@ func (b *spritesBackend) findSpriteByLease(ctx context.Context, leaseID string) 
 	return spritesInfo{}, core.Exit(4, "sprites lease %q was not found", leaseID)
 }
 
-func (b *spritesBackend) spriteToServer(sprite spritesInfo, keep bool) core.Server {
+func (b *spritesBackend) observationClaim(sprite spritesInfo) *core.LeaseClaim {
+	claim, exists, err := core.ReadLeaseClaimWithPresence(spritesLeaseID(sprite))
+	if err != nil || !exists || b.validateResolvedClaim(claim, sprite, core.ResolveRequest{}) != nil {
+		return nil
+	}
+	return &claim
+}
+
+// Endpoint preparation carries the saved policy, not the observation-only view.
+func (b *spritesBackend) claimServer(sprite spritesInfo, policy map[string]string) core.Server {
+	server := b.spriteToServer(sprite, nil)
+	server.Labels = shared.LabelsWithDefaults(server.Labels, policy)
+	return server
+}
+
+func (b *spritesBackend) spriteToServer(sprite spritesInfo, history *core.LeaseClaim) core.Server {
 	leaseID := spritesLeaseID(sprite)
 	slug := spritesSlug(leaseID, sprite)
 	cfg := b.configForRun()
-	labels := core.DirectLeaseLabels(cfg, leaseID, slug, spritesProvider, "", keep, time.Now().UTC())
+	labels := (shared.SandboxObservation{
+		Provider: spritesProvider, Target: targetLinux, LeaseID: leaseID,
+		Slug: slug, State: spritesState(sprite.Status),
+	}).Labels(history)
 	labels["name"] = sprite.Name
 	labels["state"] = spritesState(sprite.Status)
 	labels["work_root"] = cfg.WorkRoot
