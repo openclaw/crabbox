@@ -7,10 +7,12 @@ import { azureProvisioningCandidatesForConfig } from "../src/azure";
 import {
   awsMacOSInstanceTypeCandidates,
   awsARM64InstanceTypeCandidatesForClass,
+  awsInstanceTypeCandidatesForArchitectureClass,
   awsInstanceTypeCandidatesForClass,
   awsInstanceTypeCandidatesForTargetClass,
   azureARM64VMSizeCandidatesForClass,
   azureWindowsVMSizeCandidatesForClass,
+  azureVMSizeCandidatesForArchitectureClass,
   azureVMSizeCandidatesForClass,
   azureVMSizeCandidatesForTargetClass,
   gcpMachineTypeCandidatesForClass,
@@ -25,6 +27,16 @@ import { gcpProvisioningCandidatesForConfig } from "../src/gcp";
 import { hetznerProvisioningCandidatesForConfig } from "../src/hetzner";
 
 describe("machine class config", () => {
+  const classCandidateSelectors = [
+    serverTypeCandidatesForClass,
+    (value: string) => awsInstanceTypeCandidatesForArchitectureClass("amd64", value),
+    awsARM64InstanceTypeCandidatesForClass,
+    (value: string) => azureVMSizeCandidatesForArchitectureClass("amd64", value),
+    azureARM64VMSizeCandidatesForClass,
+    azureWindowsVMSizeCandidatesForClass,
+    gcpMachineTypeCandidatesForClass,
+  ];
+
   it("maps known classes to preferred Hetzner candidates", () => {
     expect(serverTypeForClass("beast")).toBe("ccx63");
     expect(serverTypeCandidatesForClass("beast")).toEqual([
@@ -41,11 +53,12 @@ describe("machine class config", () => {
   });
 
   it("preserves uppercase, padded, and unknown class literals", () => {
+    for (const machineClass of ["", "FAST", " fast ", "custom-shape", "constructor", "__proto__"]) {
+      for (const selector of classCandidateSelectors) {
+        expect(selector(machineClass)).toEqual([machineClass]);
+      }
+    }
     for (const machineClass of ["FAST", " fast ", "custom-shape"]) {
-      expect(serverTypeCandidatesForClass(machineClass)).toEqual([machineClass]);
-      expect(awsInstanceTypeCandidatesForClass(machineClass)).toEqual([machineClass]);
-      expect(azureVMSizeCandidatesForClass(machineClass)).toEqual([machineClass]);
-      expect(gcpMachineTypeCandidatesForClass(machineClass)).toEqual([machineClass]);
       expect(
         awsLaunchCandidates({
           serverType: "",
@@ -56,6 +69,27 @@ describe("machine class config", () => {
           architecture: "amd64",
         }),
       ).toEqual([machineClass, "t3.small"]);
+    }
+  });
+
+  it("returns fresh candidate arrays for known and custom classes", () => {
+    for (const selector of classCandidateSelectors) {
+      for (const machineClass of ["tiny", "custom-shape"]) {
+        const candidates = selector(machineClass);
+        const saved = [...candidates];
+        candidates[0] = "mutated";
+        expect(selector(machineClass)).toEqual(saved);
+      }
+    }
+  });
+
+  it("preserves runtime-invalid class values without coercion", () => {
+    for (const selector of classCandidateSelectors) {
+      for (const value of [null, undefined, {}, Symbol("fixture")]) {
+        const candidates = selector(value as unknown as string);
+        expect(candidates).toHaveLength(1);
+        expect(candidates[0]).toBe(value);
+      }
     }
   });
 

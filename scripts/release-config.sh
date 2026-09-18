@@ -4,10 +4,11 @@ set -euo pipefail
 
 CRABBOX_RELEASE_REPOSITORY=openclaw/crabbox
 CRABBOX_RELEASE_DEFAULT_BRANCH=main
-CRABBOX_RELEASE_GO_VERSION=go1.26.4
+CRABBOX_RELEASE_GO_VERSION=go1.26.5
 CRABBOX_RELEASE_GORELEASER_VERSION=2.17.0
 CRABBOX_RELEASE_TEAM_ID=FWJYW4S8P8
 CRABBOX_RELEASE_AUTHORITY="Developer ID Application: OpenClaw Foundation (${CRABBOX_RELEASE_TEAM_ID})"
+CRABBOX_RELEASE_RUNTIME_IDENTIFIER=org.openclaw.crabbox.runtime
 CRABBOX_RELEASE_CLI_IDENTIFIER=org.openclaw.crabbox
 CRABBOX_RELEASE_HELPER_IDENTIFIER=org.openclaw.crabbox.apple-vm-helper
 CRABBOX_RELEASE_VMD_IDENTIFIER=org.openclaw.crabbox.apple-vm-vmd
@@ -18,6 +19,7 @@ readonly \
   CRABBOX_RELEASE_GORELEASER_VERSION \
   CRABBOX_RELEASE_TEAM_ID \
   CRABBOX_RELEASE_AUTHORITY \
+  CRABBOX_RELEASE_RUNTIME_IDENTIFIER \
   CRABBOX_RELEASE_CLI_IDENTIFIER \
   CRABBOX_RELEASE_HELPER_IDENTIFIER \
   CRABBOX_RELEASE_VMD_IDENTIFIER
@@ -52,6 +54,7 @@ crabbox_release_asset_names() {
 crabbox_release_designated_requirement() {
   local identifier=${1:-}
   case "$identifier" in
+    "$CRABBOX_RELEASE_RUNTIME_IDENTIFIER" | \
     "$CRABBOX_RELEASE_CLI_IDENTIFIER" | \
       "$CRABBOX_RELEASE_HELPER_IDENTIFIER" | \
       "$CRABBOX_RELEASE_VMD_IDENTIFIER") ;;
@@ -79,6 +82,8 @@ crabbox_release_assert_identifier_arch() {
   local identifier=${1:-} arch
   arch=$(crabbox_release_normalize_macos_arch "${2:-}") || return
   case "$identifier:$arch" in
+    "$CRABBOX_RELEASE_RUNTIME_IDENTIFIER:arm64" | \
+      "$CRABBOX_RELEASE_RUNTIME_IDENTIFIER:x86_64" | \
     "$CRABBOX_RELEASE_CLI_IDENTIFIER:arm64" | \
       "$CRABBOX_RELEASE_CLI_IDENTIFIER:x86_64" | \
       "$CRABBOX_RELEASE_HELPER_IDENTIFIER:arm64" | \

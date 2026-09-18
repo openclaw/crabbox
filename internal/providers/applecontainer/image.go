@@ -43,7 +43,7 @@ func (b *backend) imageControl(ctx context.Context, cfg core.Config, args []stri
 		return core.LocalCommandResult{}, ctx.Err()
 	}
 	if err != nil || result.ExitCode != 0 || len(result.Stdout) >= limit || len(result.Stderr) >= limit {
-		return core.LocalCommandResult{}, exit(5, "Apple Container %s image verification command failed (native response withheld)", args[0])
+		return core.LocalCommandResult{}, core.Exit(5, "Apple Container %s image verification command failed (native response withheld)", args[0])
 	}
 	return result, nil
 }
@@ -55,20 +55,20 @@ func (b *backend) inspectImageContainer(ctx context.Context, cfg core.Config, na
 	}
 	var entries []json.RawMessage
 	if json.Unmarshal([]byte(result.Stdout), &entries) != nil || len(entries) != 1 {
-		return imageContainerObservation{}, exit(5, "Apple Container inspect must return exactly one created container")
+		return imageContainerObservation{}, core.Exit(5, "Apple Container inspect must return exactly one created container")
 	}
 	var c inspectContainer
 	var raw struct {
 		Configuration json.RawMessage `json:"configuration"`
 	}
 	if json.Unmarshal(entries[0], &c) != nil || json.Unmarshal(entries[0], &raw) != nil || c.id() != name {
-		return imageContainerObservation{}, exit(5, "Apple Container inspect did not return the exact created target")
+		return imageContainerObservation{}, core.Exit(5, "Apple Container inspect did not return the exact created target")
 	}
 	var configuration any
 	decoder := json.NewDecoder(bytes.NewReader(raw.Configuration))
 	decoder.UseNumber()
 	if decoder.Decode(&configuration) != nil || configuration == nil {
-		return imageContainerObservation{}, exit(5, "Apple Container inspect omitted its created configuration")
+		return imageContainerObservation{}, core.Exit(5, "Apple Container inspect omitted its created configuration")
 	}
 	return imageContainerObservation{c, configuration}, nil
 }
@@ -118,17 +118,17 @@ func (b *backend) createPinnedContainer(ctx context.Context, cfg core.Config, ar
 		return retained(err)
 	}
 	if strings.TrimSpace(result.Stdout) != name {
-		return retained(exit(5, "Apple Container create did not confirm the requested target"))
+		return retained(core.Exit(5, "Apple Container create did not confirm the requested target"))
 	}
 	observed, err := b.inspectImageContainer(ctx, cfg, name)
 	if err != nil {
 		return retained(err)
 	}
 	if !ownedStoppedImageContainer(observed.container, cfg.AppleContainer.Image, leaseID, slug) {
-		return retained(exit(5, "Apple Container created target has incomplete or unexpected ownership/image metadata"))
+		return retained(core.Exit(5, "Apple Container created target has incomplete or unexpected ownership/image metadata"))
 	}
 	if observed.container.Configuration.Image.Descriptor.Digest != digest {
-		cause := exit(5, "Apple Container created image digest differs from the reviewed default; bootstrap refused")
+		cause := core.Exit(5, "Apple Container created image digest differs from the reviewed default; bootstrap refused")
 		if err := b.rollbackImageContainer(cfg, observed, leaseID, slug); err != nil {
 			return retained(errors.Join(cause, err))
 		}
@@ -136,14 +136,14 @@ func (b *backend) createPinnedContainer(ctx context.Context, cfg core.Config, ar
 	}
 	err = core.WithDurableLeaseClaimLock(leaseID, func(_ *core.LeaseClaim, exists bool, _ func() error) error {
 		if exists {
-			return exit(2, "Apple Container claim appeared before verified image start")
+			return core.Exit(2, "Apple Container claim appeared before verified image start")
 		}
 		fresh, err := b.inspectImageContainer(ctx, cfg, name)
 		if err != nil {
 			return err
 		}
 		if !ownedStoppedImageContainer(fresh.container, cfg.AppleContainer.Image, leaseID, slug) || !reflect.DeepEqual(fresh.configuration, observed.configuration) {
-			return exit(2, "Apple Container configuration changed before verified image start")
+			return core.Exit(2, "Apple Container configuration changed before verified image start")
 		}
 		_, err = b.imageControl(ctx, cfg, []string{"start", name}, 2*time.Minute)
 		return err
@@ -164,7 +164,7 @@ func (b *backend) rollbackImageContainer(cfg core.Config, observed imageContaine
 			return err
 		}
 		if !ownedStoppedImageContainer(fresh.container, cfg.AppleContainer.Image, leaseID, slug) || !reflect.DeepEqual(fresh.configuration, observed.configuration) {
-			return exit(2, "Apple Container created target changed; refusing image rollback")
+			return core.Exit(2, "Apple Container created target changed; refusing image rollback")
 		}
 		if _, err := b.imageControl(ctx, cfg, []string{"delete", "--force", name}, 30*time.Second); err != nil {
 			return err
@@ -175,11 +175,11 @@ func (b *backend) rollbackImageContainer(cfg core.Config, observed imageContaine
 		}
 		var containers []inspectContainer
 		if strings.TrimSpace(result.Stdout) == "null" || json.Unmarshal([]byte(result.Stdout), &containers) != nil {
-			return exit(5, "Apple Container image rollback inventory is invalid")
+			return core.Exit(5, "Apple Container image rollback inventory is invalid")
 		}
 		for _, c := range containers {
 			if c.id() == "" || c.id() == name {
-				return exit(5, "Apple Container image rollback absence is unconfirmed")
+				return core.Exit(5, "Apple Container image rollback absence is unconfirmed")
 			}
 		}
 		return nil

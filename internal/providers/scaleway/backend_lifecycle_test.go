@@ -78,7 +78,8 @@ func TestScalewayAcquireListResolveTouchReleaseLifecycle(t *testing.T) {
 	if resolved.LeaseID != lease.LeaseID || resolved.Server.CloudID != fake.server.ID {
 		t.Fatalf("resolved=%#v", resolved)
 	}
-	touched, err := backend.Touch(context.Background(), core.TouchRequest{Lease: resolved, State: "running", IdleTimeout: 4 * time.Hour})
+	override := 4 * time.Hour
+	touched, err := backend.Touch(context.Background(), core.TouchRequest{Lease: resolved, State: "running", IdleTimeout: override, IdleTimeoutOverride: &override})
 	if err != nil {
 		t.Fatalf("Touch: %v", err)
 	}
@@ -87,6 +88,18 @@ func TestScalewayAcquireListResolveTouchReleaseLifecycle(t *testing.T) {
 	}
 	if touched.Labels["idle_timeout_secs"] != "14400" {
 		t.Fatalf("touch did not persist idle timeout override: %#v", touched.Labels)
+	}
+	claim, _, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || claim.IdleTimeoutSeconds != 14400 || claim.Labels["idle_timeout_secs"] != "14400" {
+		t.Fatalf("explicit touch claim=%#v err=%v", claim, err)
+	}
+	touched, err = backend.Touch(context.Background(), core.TouchRequest{Lease: resolved, State: "ready", IdleTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, _, err = core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || claim.IdleTimeoutSeconds != 14400 || claim.Labels["idle_timeout_secs"] != "14400" || touched.Labels["idle_timeout_secs"] != "14400" || labelsFromTags(fake.server.Tags)["idle_timeout_secs"] != "14400" {
+		t.Fatalf("ordinary touch changed idle: claim=%#v server=%#v err=%v", claim, touched, err)
 	}
 	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
 		t.Fatalf("ReleaseLease: %v", err)

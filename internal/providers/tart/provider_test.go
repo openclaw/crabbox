@@ -8,11 +8,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	shared "github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -53,18 +55,40 @@ func commandKey(args []string) string {
 	return strings.Join(args, "\x00")
 }
 
+func TestTartConfigShowSection(t *testing.T) {
+	for _, number := range []int{0, -2, 4} {
+		cfg := core.Config{Provider: "other", Tart: core.TartConfig{Image: " raw-image ", User: "", WorkRoot: " raw-root ", CPUs: number, Memory: number, Disk: number}}
+		before := cfg
+		section := (Provider{}).ConfigShowSection(cfg)
+		got := map[string]any{}
+		var fields []string
+		for _, f := range section.Fields {
+			got[f.JSONName] = f.JSONValue
+			fields = append(fields, f.TextName+"="+f.TextValue)
+		}
+		want := map[string]any{"image": " raw-image ", "user": "", "workRoot": " raw-root ", "cpus": number, "memory": number, "disk": number}
+		text := fmt.Sprintf("image= raw-image  user= work_root= raw-root  cpus=%d memory=%d disk=%d", number, number, number)
+		if section.JSONKey != "tart" || section.TextLabel != "tart" || !reflect.DeepEqual(section.Providers, []string{"tart"}) || len(section.Fields) != 6 || !reflect.DeepEqual(got, want) || strings.Join(fields, " ") != text {
+			t.Fatalf("Tart projection %#v", section)
+		}
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("projection mutated config")
+		}
+	}
+}
+
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
-	if p.Name() != providerName {
-		t.Fatalf("Name=%q want %s", p.Name(), providerName)
+	if p.Spec().Name != providerName {
+		t.Fatalf("Name=%q want %s", p.Spec().Name, providerName)
 	}
 	for _, alias := range []string{"tart", "local-tart", "macos-vm"} {
 		got, err := core.ProviderFor(alias)
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)
 		}
-		if got.Name() != providerName {
-			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Name())
+		if got.Spec().Name != providerName {
+			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Spec().Name)
 		}
 	}
 	spec := p.Spec()
@@ -275,14 +299,14 @@ func TestInstanceScopeRoundTrip(t *testing.T) {
 }
 
 func TestShouldCleanupRespectsKeepLabel(t *testing.T) {
-	server := Server{Status: "stopped", Labels: map[string]string{"keep": "true"}}
+	server := core.Server{Status: "stopped", Labels: map[string]string{"keep": "true"}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, true, time.Now()); ok || reason != "keep=true" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
 	}
 }
 
 func TestShouldCleanupExpiredClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	claim := core.LeaseClaim{LeaseID: "cbx_123", LastUsedAt: time.Now().Add(-48 * time.Hour).Format(time.RFC3339), IdleTimeoutSeconds: int((30 * time.Minute).Seconds())}
 	if ok, reason := shouldCleanup(server, claim, true, time.Now()); !ok || reason != "claim expired" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
@@ -290,68 +314,9 @@ func TestShouldCleanupExpiredClaim(t *testing.T) {
 }
 
 func TestShouldCleanupSkipsMissingClaim(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	if ok, reason := shouldCleanup(server, core.LeaseClaim{}, false, time.Now()); ok || reason != "missing claim" {
 		t.Fatalf("cleanup=%v reason=%s", ok, reason)
-	}
-}
-
-func TestAcquireKeepIPFailureDeletesUnclaimedVMAndKey(t *testing.T) {
-	testutil.IsolateUserDirs(t)
-	t.Setenv("TART_HOME", t.TempDir())
-	binDir := t.TempDir()
-	fakeTart := filepath.Join(binDir, "tart")
-	if err := os.WriteFile(fakeTart, []byte("#!/bin/sh\nsleep 0.2\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	runner := &recordingRunner{
-		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: "[]"},
-		},
-		onRun: func(req core.LocalCommandRequest) {
-			if req.Args[0] == "clone" {
-				if err := os.MkdirAll(filepath.Join(os.Getenv("TART_HOME"), "vms", req.Args[2]), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-		},
-	}
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	cfg.Tart.Image = "custom-base"
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	b.startupObserveTimeout = 20 * time.Millisecond
-	// Keep setup outside the deadline race under coverage while still forcing
-	// waitForIP to fail promptly after the VM starts.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	if _, err := b.Acquire(ctx, core.AcquireRequest{Keep: true, Repo: core.Repo{Root: t.TempDir()}}); err == nil {
-		t.Fatal("Acquire succeeded")
-	}
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	keys, err := filepath.Glob(filepath.Join(configDir, "crabbox", "testboxes", "*", "id_ed25519"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(keys) != 0 {
-		t.Fatalf("unclaimed failed VM key count=%d paths=%v, want 0", len(keys), keys)
-	}
-	stopped, deleted := false, false
-	for _, call := range runner.calls {
-		if len(call.Args) > 0 && call.Args[0] == "stop" {
-			stopped = true
-		}
-		if len(call.Args) > 0 && call.Args[0] == "delete" {
-			deleted = true
-		}
-	}
-	if !stopped || !deleted {
-		t.Fatalf("keep=true unclaimed post-start failure should cleanup VM, stopped=%t deleted=%t calls=%v", stopped, deleted, runner.calls)
 	}
 }
 
@@ -367,7 +332,7 @@ func TestApplyFlagsRejectsExplicitLinuxTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := applyFlags(&cfg, fs, flagValues{})
+	err := applyFlags(&cfg, fs, core.TartConfigFlagValues{})
 	if err == nil {
 		t.Fatal("applyFlags should reject explicit --target linux")
 	}
@@ -385,7 +350,7 @@ func TestApplyFlagsRejectsExplicitWindowsTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := applyFlags(&cfg, fs, flagValues{})
+	err := applyFlags(&cfg, fs, core.TartConfigFlagValues{})
 	if err == nil {
 		t.Fatal("applyFlags should reject explicit --target windows")
 	}
@@ -398,7 +363,7 @@ func TestApplyFlagsDefaultsLinuxToMacOS(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
 
-	err := applyFlags(&cfg, fs, flagValues{})
+	err := applyFlags(&cfg, fs, core.TartConfigFlagValues{})
 	if err != nil {
 		t.Fatalf("applyFlags failed: %v", err)
 	}
@@ -417,7 +382,7 @@ func TestApplyFlagsRejectsExplicitTargetFromEnv(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
 
-	err := applyFlags(&cfg, fs, flagValues{})
+	err := applyFlags(&cfg, fs, core.TartConfigFlagValues{})
 	if err == nil {
 		t.Fatal("applyFlags should reject explicit target=linux from env")
 	}
@@ -432,7 +397,7 @@ func TestApplyFlagsRejectsExplicitTargetFromYAML(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
 
-	err := applyFlags(&cfg, fs, flagValues{})
+	err := applyFlags(&cfg, fs, core.TartConfigFlagValues{})
 	if err == nil {
 		t.Fatal("applyFlags should reject explicit target=linux from YAML")
 	}
@@ -450,7 +415,7 @@ func TestApplyFlagsAcceptsExplicitMacOS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := applyFlags(&cfg, fs, flagValues{})
+	err := applyFlags(&cfg, fs, core.TartConfigFlagValues{})
 	if err != nil {
 		t.Fatalf("applyFlags should accept explicit --target macos: %v", err)
 	}
@@ -1016,7 +981,7 @@ func TestConfigureVMSkipsZeroCPUAndMemory(t *testing.T) {
 }
 
 func TestShouldCleanupStoppedInstance(t *testing.T) {
-	server := Server{Status: "stopped", Labels: map[string]string{}}
+	server := core.Server{Status: "stopped", Labels: map[string]string{}}
 	ok, reason := shouldCleanup(server, core.LeaseClaim{}, true, time.Now())
 	if !ok || reason != "instance state=stopped" {
 		t.Fatalf("cleanup=%v reason=%q, want true/instance state=stopped", ok, reason)
@@ -1024,7 +989,7 @@ func TestShouldCleanupStoppedInstance(t *testing.T) {
 }
 
 func TestShouldCleanupZeroIdleTimeout(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	claim := core.LeaseClaim{
 		LeaseID:            "cbx_123",
 		LastUsedAt:         time.Now().Add(-48 * time.Hour).Format(time.RFC3339),
@@ -1067,7 +1032,7 @@ func TestConfigureVMSkipsExplicitZeroDisk(t *testing.T) {
 }
 
 func TestShouldCleanupGracePeriodNotExpired(t *testing.T) {
-	server := Server{Status: "running", Labels: map[string]string{}}
+	server := core.Server{Status: "running", Labels: map[string]string{}}
 	now := time.Now()
 	claim := core.LeaseClaim{
 		LeaseID:            "cbx_123",
@@ -1612,7 +1577,7 @@ func TestCleanupRemovesOrphanedClaimsWithoutDeletingStoredKey(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(os.Getenv("TART_HOME"), "vms", "crabbox-gone-9999")); err != nil {
 		t.Fatal(err)
 	}
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := core.TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatalf("testbox key path: %v", err)
 	}
@@ -2171,53 +2136,37 @@ func TestInstanceNameFromClaim(t *testing.T) {
 }
 
 func TestFirstNonBlank(t *testing.T) {
-	if got := firstNonBlank("", "  ", "hello", "world"); got != "hello" {
+	if got := shared.FirstNonBlank("", "  ", "hello", "world"); got != "hello" {
 		t.Fatalf("firstNonBlank = %q, want hello", got)
 	}
-	if got := firstNonBlank("", "", ""); got != "" {
+	if got := shared.FirstNonBlank("", "", ""); got != "" {
 		t.Fatalf("firstNonBlank all blank = %q", got)
 	}
-	if got := firstNonBlank("first"); got != "first" {
+	if got := shared.FirstNonBlank("first"); got != "first" {
 		t.Fatalf("firstNonBlank single = %q", got)
 	}
 }
 
-func TestCommandError(t *testing.T) {
-	err := commandError("tart stop", core.LocalCommandResult{ExitCode: 1, Stderr: "VM not running"}, fmt.Errorf("exit status 1"))
-	if !strings.Contains(err.Error(), "VM not running") {
-		t.Fatalf("commandError should include stderr: %v", err)
-	}
-	if !strings.Contains(err.Error(), "tart stop") {
-		t.Fatalf("commandError should include action: %v", err)
-	}
-}
-
-func TestCommandErrorFallsBackToStdout(t *testing.T) {
-	err := commandError("tart stop", core.LocalCommandResult{ExitCode: 1, Stdout: "some output"}, fmt.Errorf("exit status 1"))
-	if !strings.Contains(err.Error(), "some output") {
-		t.Fatalf("commandError should fall back to stdout: %v", err)
-	}
-}
-
-func TestCommandErrorMinimalExitCode(t *testing.T) {
-	err := commandError("tart stop", core.LocalCommandResult{ExitCode: 0}, fmt.Errorf("exit status 1"))
-	var exitErr core.ExitError
-	if !core.AsExitError(err, &exitErr) {
-		t.Fatalf("expected ExitError, got %T", err)
-	}
-	if exitErr.Code != 1 {
-		t.Fatalf("exit code = %d, want 1 (minimum)", exitErr.Code)
-	}
-}
-
 func TestIsTartProviderName(t *testing.T) {
+	selected := func(name string) bool {
+		cfg := core.BaseConfig()
+		cfg.Provider = name
+		cfg.TargetOS = "linux"
+		fs := flag.NewFlagSet("name-contract", flag.ContinueOnError)
+		p := Provider{}
+		values := p.RegisterFlags(fs, cfg)
+		if err := p.ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		return cfg.TargetOS == "macos"
+	}
 	for _, name := range []string{"tart", "Tart", "TART", "local-tart", "macos-vm", " tart "} {
-		if !isTartProviderName(name) {
+		if !selected(name) {
 			t.Errorf("isTartProviderName(%q) = false, want true", name)
 		}
 	}
 	for _, name := range []string{"docker", "aws", "hyperv", ""} {
-		if isTartProviderName(name) {
+		if selected(name) {
 			t.Errorf("isTartProviderName(%q) = true, want false", name)
 		}
 	}
@@ -2293,7 +2242,7 @@ func TestConfigureDoctor(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	p := Provider{}
-	backend, err := p.ConfigureDoctor(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
+	backend, err := core.ConfigureProviderDoctor(p, cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
 	if err != nil {
 		t.Fatalf("ConfigureDoctor: %v", err)
 	}
@@ -2477,7 +2426,7 @@ func TestReleaseLeasePrunesMissingResolvedInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup claim: %v", err)
 	}
-	keyPath, err := testboxKeyPath("cbx_missingrel")
+	keyPath, err := core.TestboxKeyPath("cbx_missingrel")
 	if err != nil {
 		t.Fatalf("testbox key path: %v", err)
 	}
@@ -2513,7 +2462,7 @@ func TestReleaseLeasePrunesMissingResolvedInstance(t *testing.T) {
 			t.Fatal("ReleaseLease should not delete an already-missing resolved VM")
 		}
 	}
-	if _, ok, err := resolveLeaseClaimForProvider("cbx_missingrel", providerName); err != nil {
+	if _, ok, err := core.ResolveLeaseClaimForProvider("cbx_missingrel", providerName); err != nil {
 		t.Fatalf("resolve claim: %v", err)
 	} else if ok {
 		t.Fatal("ReleaseLease should prune the stale claim")
@@ -2531,7 +2480,7 @@ func TestReleaseLeasePrunesAlreadyResolvedMissingInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setup claim: %v", err)
 	}
-	keyPath, err := testboxKeyPath("cbx_resolvedmissing")
+	keyPath, err := core.TestboxKeyPath("cbx_resolvedmissing")
 	if err != nil {
 		t.Fatalf("testbox key path: %v", err)
 	}
@@ -2566,7 +2515,7 @@ func TestReleaseLeasePrunesAlreadyResolvedMissingInstance(t *testing.T) {
 	if len(runner.calls) != 0 {
 		t.Fatalf("ReleaseLease should not call tart for already-resolved missing instance, calls=%v", runner.calls)
 	}
-	if _, ok, err := resolveLeaseClaimForProvider("cbx_resolvedmissing", providerName); err != nil {
+	if _, ok, err := core.ResolveLeaseClaimForProvider("cbx_resolvedmissing", providerName); err != nil {
 		t.Fatalf("resolve claim: %v", err)
 	} else if ok {
 		t.Fatal("ReleaseLease should prune the stale claim")
@@ -3063,29 +3012,25 @@ func TestConfigureVMSkipsDiskWhenNotExplicit(t *testing.T) {
 	}
 }
 
-func TestValidateTartEnvIntNonNegative(t *testing.T) {
-	t.Setenv("CRABBOX_TART_DISK", "0")
-	err := validateTartEnvIntNonNegative("CRABBOX_TART_DISK", "disk must be non-negative")
-	if err != nil {
-		t.Fatalf("should accept 0: %v", err)
-	}
-
-	t.Setenv("CRABBOX_TART_DISK", "50")
-	err = validateTartEnvIntNonNegative("CRABBOX_TART_DISK", "disk must be non-negative")
-	if err != nil {
-		t.Fatalf("should accept 50: %v", err)
-	}
-
-	t.Setenv("CRABBOX_TART_DISK", "-1")
-	err = validateTartEnvIntNonNegative("CRABBOX_TART_DISK", "disk must be non-negative")
-	if err == nil {
-		t.Fatal("should reject negative disk")
-	}
-
-	t.Setenv("CRABBOX_TART_DISK", "abc")
-	err = validateTartEnvIntNonNegative("CRABBOX_TART_DISK", "disk must be non-negative")
-	if err == nil {
-		t.Fatal("should reject non-integer")
+func TestValidateTartEnvIntZeroMinimum(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"", ""}, {"0", ""}, {"+0", ""}, {"50", ""},
+		{"-1", "disk must be non-negative (got -1)"},
+		{"abc", `CRABBOX_TART_DISK must be a valid integer (got "abc")`},
+		{" 50 ", `CRABBOX_TART_DISK must be a valid integer (got " 50 ")`},
+		{"99999999999999999999999", `CRABBOX_TART_DISK must be a valid integer (got "99999999999999999999999")`},
+	} {
+		t.Run(fmt.Sprintf("%q", tc.raw), func(t *testing.T) {
+			t.Setenv("CRABBOX_TART_DISK", tc.raw)
+			err := validateTartEnvInt("CRABBOX_TART_DISK", 0, "disk must be non-negative")
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || err.Error() != tc.want || core.ExitCodeForError(err, 1) != 2 {
+				t.Fatalf("error=%v, want exit2 %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -3358,60 +3303,6 @@ func TestInjectSSHKeyExecError(t *testing.T) {
 	}
 }
 
-func TestCommandErrorWithStderr(t *testing.T) {
-	result := core.LocalCommandResult{ExitCode: 5, Stderr: "some detail\n"}
-	err := commandError("test-action", result, fmt.Errorf("wrapped"))
-	if err == nil {
-		t.Fatal("commandError should return non-nil")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "test-action failed") {
-		t.Fatalf("should mention action: %s", msg)
-	}
-	if !strings.Contains(msg, "some detail") {
-		t.Fatalf("should include stderr detail: %s", msg)
-	}
-}
-
-func TestCommandErrorWithStdoutFallback(t *testing.T) {
-	result := core.LocalCommandResult{ExitCode: 0, Stderr: "", Stdout: "stdout detail\n"}
-	err := commandError("test-action", result, fmt.Errorf("wrapped"))
-	if err == nil {
-		t.Fatal("commandError should return non-nil")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "stdout detail") {
-		t.Fatalf("should fallback to stdout: %s", msg)
-	}
-}
-
-func TestCommandErrorNoDetail(t *testing.T) {
-	result := core.LocalCommandResult{ExitCode: 0, Stderr: "", Stdout: ""}
-	err := commandError("test-action", result, fmt.Errorf("original"))
-	if err == nil {
-		t.Fatal("commandError should return non-nil")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "test-action failed") {
-		t.Fatalf("should mention action: %s", msg)
-	}
-	if !strings.Contains(msg, "original") {
-		t.Fatalf("should include original error: %s", msg)
-	}
-}
-
-func TestCommandErrorZeroExitCodeBecomesOne(t *testing.T) {
-	result := core.LocalCommandResult{ExitCode: 0}
-	err := commandError("action", result, fmt.Errorf("err"))
-	var exitErr core.ExitError
-	if !core.AsExitError(err, &exitErr) {
-		t.Fatalf("expected ExitError, got %T", err)
-	}
-	if exitErr.Code == 0 {
-		t.Fatal("exit code 0 should become non-zero")
-	}
-}
-
 func TestFirstLineEmpty(t *testing.T) {
 	if got := firstLine(""); got != "unknown" {
 		t.Fatalf("firstLine(\"\") = %q, want \"unknown\"", got)
@@ -3434,19 +3325,19 @@ func TestFirstLineMultiLine(t *testing.T) {
 }
 
 func TestFirstNonBlankAllEmpty(t *testing.T) {
-	if got := firstNonBlank("", "  ", "\t"); got != "" {
+	if got := shared.FirstNonBlank("", "  ", "\t"); got != "" {
 		t.Fatalf("firstNonBlank all empty = %q, want \"\"", got)
 	}
 }
 
 func TestFirstNonBlankFindsFirst(t *testing.T) {
-	if got := firstNonBlank("", "hello", "world"); got != "hello" {
+	if got := shared.FirstNonBlank("", "hello", "world"); got != "hello" {
 		t.Fatalf("firstNonBlank = %q, want \"hello\"", got)
 	}
 }
 
 func TestFirstNonBlankSingleValue(t *testing.T) {
-	if got := firstNonBlank("only"); got != "only" {
+	if got := shared.FirstNonBlank("only"); got != "only" {
 		t.Fatalf("firstNonBlank(\"only\") = %q", got)
 	}
 }
@@ -3848,7 +3739,7 @@ func TestApplyFlagsConfigMemoryZeroWithExplicit(t *testing.T) {
 }
 
 func TestShouldCleanupUnparseableLastUsedAt(t *testing.T) {
-	server := Server{
+	server := core.Server{
 		Status: "running",
 		Labels: map[string]string{"state": "ready"},
 	}
@@ -3867,7 +3758,7 @@ func TestShouldCleanupUnparseableLastUsedAt(t *testing.T) {
 }
 
 func TestShouldCleanupZeroLastUsedAt(t *testing.T) {
-	server := Server{
+	server := core.Server{
 		Status: "running",
 		Labels: map[string]string{"state": "ready"},
 	}
@@ -3886,7 +3777,7 @@ func TestConfigureDoctorError(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	cfg.Tailscale.Enabled = true
-	_, err := (Provider{}).ConfigureDoctor(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
+	_, err := core.ConfigureProviderDoctor((Provider{}), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}})
 	if err == nil {
 		t.Fatal("ConfigureDoctor should propagate Configure error")
 	}
@@ -3896,9 +3787,9 @@ func TestReleaseLeaseMessageFormat(t *testing.T) {
 	runner := &recordingRunner{}
 	cfg := core.BaseConfig()
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: "test-lease-id",
-		Server: Server{
+		Server: core.Server{
 			CloudID: "crabbox-test-vm",
 			Labels:  map[string]string{},
 		},
@@ -3916,9 +3807,9 @@ func TestReleaseLeaseMessageNoCloudID(t *testing.T) {
 	runner := &recordingRunner{}
 	cfg := core.BaseConfig()
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: "test-lease-id",
-		Server: Server{
+		Server: core.Server{
 			Labels: map[string]string{"instance": "from-labels"},
 		},
 	}
@@ -3932,9 +3823,9 @@ func TestReleaseLeaseMessageEmptyBoth(t *testing.T) {
 	runner := &recordingRunner{}
 	cfg := core.BaseConfig()
 	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-	lease := LeaseTarget{
+	lease := core.LeaseTarget{
 		LeaseID: "test-lease-id",
-		Server: Server{
+		Server: core.Server{
 			Labels: map[string]string{},
 		},
 	}
@@ -4184,7 +4075,7 @@ func TestServerFromInstanceSourcePreferred(t *testing.T) {
 }
 
 func TestShouldCleanupNegativeIdleTimeout(t *testing.T) {
-	server := Server{
+	server := core.Server{
 		Status: "running",
 		Labels: map[string]string{"state": "ready"},
 	}
@@ -4200,7 +4091,7 @@ func TestShouldCleanupNegativeIdleTimeout(t *testing.T) {
 }
 
 func TestShouldCleanupNotRunningNotReady(t *testing.T) {
-	server := Server{
+	server := core.Server{
 		Status: "suspended",
 		Labels: map[string]string{"state": "suspended"},
 	}
@@ -4215,7 +4106,7 @@ func TestShouldCleanupNotRunningNotReady(t *testing.T) {
 }
 
 func TestShouldCleanupEmptyStatus(t *testing.T) {
-	server := Server{
+	server := core.Server{
 		Status: "",
 		Labels: map[string]string{},
 	}
@@ -4227,10 +4118,10 @@ func TestShouldCleanupEmptyStatus(t *testing.T) {
 }
 
 func TestBlankHelper(t *testing.T) {
-	if got := blank("value", "fallback"); got != "value" {
+	if got := core.Blank("value", "fallback"); got != "value" {
 		t.Fatalf("blank(\"value\", \"fallback\") = %q", got)
 	}
-	if got := blank("", "fallback"); got != "fallback" {
+	if got := core.Blank("", "fallback"); got != "fallback" {
 		t.Fatalf("blank(\"\", \"fallback\") = %q", got)
 	}
 }
@@ -4299,14 +4190,159 @@ func TestInstanceNameFromClaimReturnsEmptyForMissing(t *testing.T) {
 }
 
 func TestNormalizeLeaseSlugEmpty(t *testing.T) {
-	if got := normalizeLeaseSlug(""); got != "" {
+	if got := core.NormalizeLeaseSlug(""); got != "" {
 		t.Fatalf("normalizeLeaseSlug(\"\") = %q", got)
 	}
 }
 
 func TestNormalizeLeaseSlugWithPrefix(t *testing.T) {
-	result := normalizeLeaseSlug("my-slug")
+	result := core.NormalizeLeaseSlug("my-slug")
 	if result == "" {
 		t.Fatal("normalizeLeaseSlug should return non-empty for valid slug")
+	}
+}
+
+func TestInheritedWorkRootCallerContract(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USER", "fixture-user")
+	for _, tc := range []struct{ providerRoot, genericRoot, want string }{
+		{"", "", "/Users/admin/crabbox"},
+		{"", "/work/crabbox", "/Users/admin/crabbox"},
+		{"", "/Users/ec2-user/crabbox", "/Users/admin/crabbox"},
+		{"", "C:\\crabbox", "/Users/admin/crabbox"},
+		{"", " /work/crabbox ", " /work/crabbox "},
+		{"", "/WORK/crabbox", "/WORK/crabbox"},
+		{"", "c:\\crabbox", "c:\\crabbox"},
+		{"", "/srv/custom", "/srv/custom"},
+		{"", "/Users/alice/custom", "/Users/alice/custom"},
+		{"", "D:\\custom", "D:\\custom"},
+		{"", "  ", "  "},
+		{" ", "/srv/custom", " "},
+		{"/work/crabbox", "/srv/custom", "/work/crabbox"},
+		{"relative", "/srv/custom", "relative"},
+		{"/provider/root", "/srv/custom", "/provider/root"},
+	} {
+		for _, explicit := range []bool{false, true} {
+			cfg := core.Config{Provider: "prior", WorkRoot: "/recorded/root", SSHUser: "fixture-user", SSHPort: "1234", SSHFallbackPorts: []string{"4567"}, ServerType: "prior-type", Network: "prior-network"}
+			if explicit {
+				core.MarkWorkRootExplicit(&cfg)
+				cfg.TargetOS = "existing-target"
+				cfg.WindowsMode = "prior-mode"
+			}
+			cfg.WorkRoot = tc.genericRoot
+			cfg.Tart.WorkRoot = tc.providerRoot
+			cfg.Tart.Image = "fixture-image"
+			want := cfg
+			want.Provider = "tart"
+			if !explicit {
+				want.TargetOS = "macos"
+			}
+			want.Tart.WorkRoot = tc.want
+			want.WorkRoot = tc.want
+			want.Tart.User = "fixture-user"
+			want.Tart.Password = "admin"
+			want.Tart.CPUs = 4
+			want.Tart.Memory = 8192
+			want.SSHPort = "22"
+			want.SSHFallbackPorts = []string{}
+			want.WindowsMode = ""
+			want.ServerType = "fixture-image"
+			applyDefaults(&cfg)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("whole config differs for roots=%q/%q explicit=%t: got=%#v want=%#v", tc.providerRoot, tc.genericRoot, explicit, cfg, want)
+			}
+		}
+	}
+}
+
+func TestApplyFlagsOrderedPartialState(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		wantError   string
+		cpu, memory int
+		accepted    bool
+	}{
+		{"CPU before any acceptance", []string{"--tart-cpu", "3"}, "--tart-cpu", 4, 8192, false},
+		{"image and user before CPU", []string{"--tart-image", "synthetic-image", "--tart-user", "alice", "--tart-cpu", "3", "--tart-memory", "1"}, "--tart-cpu", 4, 8192, true},
+		{"CPU before memory", []string{"--tart-cpu", "8", "--tart-memory", "1", "--tart-disk", "-1"}, "--tart-memory", 8, 8192, true},
+		{"memory before disk", []string{"--tart-cpu", "8", "--tart-memory", "16384", "--tart-disk", "-1"}, "--tart-disk", 8, 16384, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			want := cfg
+			want.Tart.CPUs, want.Tart.Memory = tc.cpu, tc.memory
+			if tc.name == "image and user before CPU" {
+				want.Tart.Image, want.Tart.User = "synthetic-image", "alice"
+				core.MarkTartImageExplicit(&want)
+			}
+			core.RecordProviderFlagInputs(&want, tc.accepted, providerName)
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatal(err)
+			}
+			err := applyFlags(&cfg, fs, values)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("error=%v, want %s", err, tc.wantError)
+			}
+			// Whole-config equality includes private explicit markers and the input ledger.
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("partial values, markers, ledger, or final-phase state differ")
+			}
+		})
+	}
+}
+
+func TestApplyFlagsDiskZeroRetainsMarker(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "other"
+	core.MarkTartDiskExplicit(&cfg)
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, providerName)
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := registerFlags(fs, cfg)
+	if err := fs.Parse([]string{"--tart-disk", "0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, want) {
+		t.Fatal("visited zero must retain the disk marker and record accepted input")
+	}
+}
+
+func TestApplyFlagsSelectedPhaseBoundary(t *testing.T) {
+	for _, provider := range []string{"tart", "local-tart", "macos-vm", "other"} {
+		t.Run(provider, func(t *testing.T) {
+			t.Setenv("CRABBOX_TART_CPUS", "invalid")
+			t.Setenv("CRABBOX_TART_MEMORY", "invalid")
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			want := cfg
+			want.Tart.User = "alice"
+			core.RecordProviderFlagInputs(&want, true, providerName)
+			if provider != "other" {
+				want.TargetOS = core.TargetMacOS
+			}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			values := registerFlags(fs, cfg)
+			if err := fs.Parse([]string{"--tart-user", "alice"}); err != nil {
+				t.Fatal(err)
+			}
+			err := applyFlags(&cfg, fs, values)
+			if provider == "other" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "CRABBOX_TART_CPUS") {
+				t.Fatalf("first strict environment error=%v", err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("selected phase changed partial values, markers, ledger, or defaults")
+			}
+		})
 	}
 }

@@ -292,11 +292,11 @@ func (f forwardBoundaryFixture) waitRecord(t *testing.T) forwardBoundaryRecord {
 		data, err := os.ReadFile(filepath.Join(f.root, "started.json"))
 		return err == nil && json.Unmarshal(data, &record) == nil
 	})
-	started, identityErr := webVNCDaemonProcessStartIdentity(record.PID)
+	started, identityErr := LocalProcessStartIdentity(record.PID)
 	t.Cleanup(func() {
 		// Last-resort cleanup touches only this recorded test child. Normal tests
 		// use the production owner's cancel/stop/Wait path first.
-		if current, err := webVNCDaemonProcessStartIdentity(record.PID); identityErr == nil && err == nil && current == started {
+		if current, err := LocalProcessStartIdentity(record.PID); identityErr == nil && err == nil && current == started {
 			_ = syscall.Kill(record.PID, syscall.SIGKILL)
 		}
 	})
@@ -431,6 +431,7 @@ func boundaryResult(t *testing.T, result <-chan error) error {
 // same real recorder and real OpenSSH config-resolution checks as the red tests.
 func TestSSHForwardBoundaryPrivateSessionControl(t *testing.T) {
 	f := newForwardBoundaryFixture(t, true, "ready")
+	f.target.ChildEnv = map[string]string{"TEST_FORWARD_OVERRIDE": "target-value"}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result := make(chan error, 1)
@@ -438,6 +439,9 @@ func TestSSHForwardBoundaryPrivateSessionControl(t *testing.T) {
 	go func() { result <- runSSHLocalForward(ctx, f.target, port, "5900", io.Discard) }()
 	r := f.waitRecord(t)
 	f.assertAliveBoundary(t, r)
+	if !r.OverrideOK {
+		t.Error("SSH local forward lost target environment overrides")
+	}
 	cancel()
 	if err := boundaryResult(t, result); err != nil {
 		t.Fatal(err)

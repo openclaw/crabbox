@@ -50,8 +50,10 @@ environment settings are forwarded to the isolated subprocess; unrelated
 ambient variables remain excluded.
 
 The API URL is trusted local input only. It can come from `--cua-api-url`,
-`CRABBOX_CUA_API_URL`, or SDK-compatible `CUA_BASE_URL`. Repository YAML cannot
-set it. Overrides must use HTTPS, except loopback HTTP for local development,
+`CRABBOX_CUA_API_URL`, or SDK-compatible `CUA_BASE_URL`. Neither user nor
+repository YAML can set it. A nonempty `CRABBOX_CUA_API_URL` takes precedence over
+`CUA_BASE_URL`; an empty value falls through. Overrides must use HTTPS, except
+loopback HTTP for local development,
 and cannot contain userinfo, query parameters, or fragments. A terminal `/v1`
 is removed because the SDK adds its own API version path.
 

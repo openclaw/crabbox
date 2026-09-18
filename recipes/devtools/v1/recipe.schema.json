@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://crabbox.sh/schemas/devtools-image-recipe-v1.json",
+  "title": "Developer image recipe",
+  "description": "Provider-neutral executable inputs for a reproducible developer image",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "platform", "execution", "inputs"],
+  "properties": {
+    "schema": { "const": "crabbox-devtools-image-recipe/v1" },
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9_]+)*$" },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "architecture"],
+      "properties": {
+        "os": { "enum": ["linux"] },
+        "architecture": { "enum": ["x86_64"] }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "arguments", "environment"],
+      "properties": {
+        "command": { "const": "bash" },
+        "arguments": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+$" }
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [],
+          "properties": {}
+        }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": { "type": "string", "pattern": "^[A-Za-z0-9_./-]+$" },
+          "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+      }
+    }
+  }
+}

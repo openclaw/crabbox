@@ -9,7 +9,7 @@ import (
 
 var linuxUsernamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 
-func renderNebiusCloudInit(cfg Config, publicKey string) (string, error) {
+func renderNebiusCloudInit(cfg core.Config, publicKey string) (string, error) {
 	user := strings.TrimSpace(cfg.SSHUser)
 	if user == "" {
 		user = strings.TrimSpace(cfg.Nebius.User)

@@ -3,6 +3,7 @@ package asciibox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,23 +12,56 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestManualConfigInputFlags(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "fixture-other"
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	values := RegisterAsciiBoxProviderFlags(fs, cfg)
+	before := cfg
+	if err := ApplyAsciiBoxProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatalf("foreign values changed configuration: %v", err)
+	}
+	if err := ApplyAsciiBoxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	core.RecordProviderFlagInputs(&want, true, "ascii-box")
+	if reflect.DeepEqual(cfg, want) {
+		t.Fatal("unvisited flags recorded input")
+	}
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := fs.Set("ascii-box-workdir", "/work/fixture"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyAsciiBoxProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want = cfg
+		core.RecordProviderFlagInputs(&want, true, "ascii-box")
+		if !reflect.DeepEqual(cfg, want) {
+			t.Fatal("accepted/equal flag value was not recorded")
+		}
+	}
+}
+
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
-	if p.Name() != providerName {
-		t.Fatalf("Name=%q want %s", p.Name(), providerName)
+	if p.Spec().Name != providerName {
+		t.Fatalf("Name=%q want %s", p.Spec().Name, providerName)
 	}
 	for _, alias := range []string{"ascii", "asciibox", "ascii-box"} {
 		got, err := core.ProviderFor(alias)
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)
 		}
-		if got.Name() != providerName {
-			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Name())
+		if got.Spec().Name != providerName {
+			t.Fatalf("ProviderFor(%q).Name=%q", alias, got.Spec().Name)
 		}
 	}
 	spec := p.Spec()
@@ -105,12 +139,13 @@ func TestReleaseBoxRecoversFromRecentSnapshotGuard(t *testing.T) {
 	runner := &releaseCommandRunner{
 		configPath: filepath.Join(t.TempDir(), "config.json"),
 		outcomes: map[string][]commandOutcome{
-			"stop":   {snapshotGuardOutcome()},
-			"delete": {snapshotGuardOutcome(), {result: LocalCommandResult{Stdout: `{"id":"bx_guard","status":"deleted"}`}}},
-			"extend": {{result: LocalCommandResult{Stdout: `{"id":"bx_guard","archiveAfter":"soon"}`}}},
+			"stop":     {snapshotGuardOutcome()},
+			"delete":   {snapshotGuardOutcome(), deletionOutcome(testDeletionID, "bx_guard", "box", "pending")},
+			"deletion": {deletionOutcome(testDeletionID, "bx_guard", "box", "completed")},
+			"extend":   {{result: core.LocalCommandResult{Stdout: `{"id":"bx_guard","archiveAfter":"soon"}`}}},
 			"info": {
-				{result: LocalCommandResult{Stdout: `{"box":{"id":"bx_guard","state":"idle"}}`}},
-				{result: LocalCommandResult{Stdout: `{"box":{"id":"bx_guard","state":"idle","status":"stopping"}}`}},
+				{result: core.LocalCommandResult{Stdout: `{"box":{"id":"bx_guard","state":"idle"}}`}},
+				{result: core.LocalCommandResult{Stdout: `{"box":{"id":"bx_guard","state":"idle","status":"stopping"}}`}},
 			},
 		},
 	}
@@ -134,6 +169,8 @@ func TestReleaseBoxRecoversFromRecentSnapshotGuard(t *testing.T) {
 		"box --no-update --json --org personal --api-url https://ascii.dev info bx_guard",
 		"box --no-update --json --org personal --api-url https://ascii.dev info bx_guard",
 		"box --no-update --json --org personal --api-url https://ascii.dev delete bx_guard --yes",
+		"box --no-update --json --org personal --api-url https://ascii.dev status",
+		"box --no-update --json --org personal --api-url https://ascii.dev deletion status " + testDeletionID,
 	}
 	if !reflect.DeepEqual(runner.commands, want) {
 		t.Fatalf("commands=%v want=%v", runner.commands, want)
@@ -144,8 +181,8 @@ func TestReleaseBoxDoesNotRecoverUnrelatedDeleteFailure(t *testing.T) {
 	runner := &releaseCommandRunner{
 		configPath: filepath.Join(t.TempDir(), "config.json"),
 		outcomes: map[string][]commandOutcome{
-			"stop":   {{result: LocalCommandResult{}}},
-			"delete": {{result: LocalCommandResult{Stderr: "permission denied"}, err: fmt.Errorf("exit status 1")}},
+			"stop":   {{result: core.LocalCommandResult{}}},
+			"delete": {{result: core.LocalCommandResult{Stderr: "permission denied"}, err: fmt.Errorf("exit status 1")}},
 		},
 	}
 	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner}
@@ -165,7 +202,7 @@ func TestReleaseBoxReportsSnapshotRecoveryExtendFailure(t *testing.T) {
 		outcomes: map[string][]commandOutcome{
 			"stop":   {snapshotGuardOutcome()},
 			"delete": {snapshotGuardOutcome()},
-			"extend": {{result: LocalCommandResult{Stderr: "extend throttled"}, err: fmt.Errorf("exit status 1")}},
+			"extend": {{result: core.LocalCommandResult{Stderr: "extend throttled"}, err: fmt.Errorf("exit status 1")}},
 		},
 	}
 	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner}
@@ -199,6 +236,89 @@ func TestReleaseBoxSkipsSnapshotRecoveryAfterCancellation(t *testing.T) {
 	if containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev extend bx_guard --ttl 1") {
 		t.Fatalf("unexpected snapshot recovery commands=%v", runner.commands)
 	}
+}
+
+const testDeletionID = "bdop_0123456789abcdef0123456789abcdef"
+
+func deletionOutcome(id, target, kind, state string) commandOutcome {
+	completedAt := "null"
+	if state == "completed" {
+		completedAt = `"2026-09-02T09:00:00Z"`
+	}
+	return commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"operation":{"id":%q,"targetId":%q,"kind":%q,"status":%q,"completedAt":%s}}`, id, target, kind, state, completedAt)}}
+}
+
+func TestReleaseBoxRequiresCompletedDeletionOperation(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		initial  commandOutcome
+		polls    []commandOutcome
+		cancelOn string
+		wantErr  bool
+	}{
+		{name: "pending processing completed", initial: deletionOutcome(testDeletionID, "bx_guard", "box", "pending"), polls: []commandOutcome{deletionOutcome(testDeletionID, "bx_guard", "box", "processing"), deletionOutcome(testDeletionID, "bx_guard", "box", "completed")}},
+		{name: "blocked completed", initial: deletionOutcome(testDeletionID, "bx_guard", "box", "blocked"), polls: []commandOutcome{deletionOutcome(testDeletionID, "bx_guard", "box", "completed")}},
+		{name: "already completed", initial: deletionOutcome(testDeletionID, "bx_guard", "box", "completed")},
+		{name: "missing receipt", initial: commandOutcome{result: core.LocalCommandResult{Stdout: `{}`}}, wantErr: true},
+		{name: "legacy deleted response", initial: commandOutcome{result: core.LocalCommandResult{Stdout: `{"id":"bx_guard","status":"deleted"}`}}, wantErr: true},
+		{name: "malformed receipt", initial: commandOutcome{result: core.LocalCommandResult{Stdout: `not json`}}, wantErr: true},
+		{name: "invalid operation ID", initial: deletionOutcome("bdop_other", "bx_guard", "box", "completed"), wantErr: true},
+		{name: "wrong initial target", initial: deletionOutcome(testDeletionID, "bx_other", "box", "completed"), wantErr: true},
+		{name: "wrong initial kind", initial: deletionOutcome(testDeletionID, "bx_guard", "account", "completed"), wantErr: true},
+		{name: "unknown state", initial: deletionOutcome(testDeletionID, "bx_guard", "box", "deleted"), wantErr: true},
+		{name: "missing completion timestamp", initial: commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"operation":{"id":%q,"targetId":"bx_guard","kind":"box","status":"completed","completedAt":null}}`, testDeletionID)}}, wantErr: true},
+		{name: "invalid completion timestamp", initial: commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"operation":{"id":%q,"targetId":"bx_guard","kind":"box","status":"completed","completedAt":"yesterday"}}`, testDeletionID)}}, wantErr: true},
+		{name: "changed operation", initial: deletionOutcome(testDeletionID, "bx_guard", "box", "pending"), polls: []commandOutcome{deletionOutcome("bdop_fedcba9876543210fedcba9876543210", "bx_guard", "box", "completed")}, wantErr: true},
+		{name: "malformed poll", initial: deletionOutcome(testDeletionID, "bx_guard", "box", "pending"), polls: []commandOutcome{{result: core.LocalCommandResult{Stdout: `{"operation":null}`}}}, wantErr: true},
+		{name: "changed target", initial: deletionOutcome(testDeletionID, "bx_guard", "box", "pending"), polls: []commandOutcome{deletionOutcome(testDeletionID, "bx_other", "box", "completed")}, wantErr: true},
+		{name: "changed kind", initial: deletionOutcome(testDeletionID, "bx_guard", "box", "pending"), polls: []commandOutcome{deletionOutcome(testDeletionID, "bx_guard", "account", "completed")}, wantErr: true},
+		{name: "operation lookup failure", initial: deletionOutcome(testDeletionID, "bx_guard", "box", "pending"), polls: []commandOutcome{{result: core.LocalCommandResult{Stderr: "operation not found (404)"}, err: errors.New("exit status 1")}}, wantErr: true},
+		{name: "canceled acceptance", initial: deletionOutcome(testDeletionID, "bx_guard", "box", "pending"), cancelOn: "delete", wantErr: true},
+		{name: "canceled completed response", initial: deletionOutcome(testDeletionID, "bx_guard", "box", "pending"), polls: []commandOutcome{deletionOutcome(testDeletionID, "bx_guard", "box", "completed")}, cancelOn: "deletion", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runner := &releaseCommandRunner{configPath: filepath.Join(t.TempDir(), "config.json"), outcomes: map[string][]commandOutcome{
+				"stop": {{result: core.LocalCommandResult{}}}, "delete": {test.initial}, "deletion": append([]commandOutcome(nil), test.polls...),
+			}, onAction: func(action string) {
+				if action == test.cancelOn {
+					cancel()
+				}
+			}}
+			c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner, releasePollInterval: time.Nanosecond}
+			err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
+			if (err != nil) != test.wantErr {
+				t.Fatalf("ReleaseBox error=%v wantErr=%t", err, test.wantErr)
+			}
+			if test.cancelOn != "" && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation lost: %v", err)
+			}
+			if !test.wantErr && len(runner.outcomes["deletion"]) != 0 {
+				t.Fatalf("returned before observing completed operation: commands=%v", runner.commands)
+			}
+			for _, command := range runner.commands {
+				if strings.Contains(command, " deletion ") && command != "box --no-update --json --org personal --api-url https://ascii.dev deletion status "+testDeletionID {
+					t.Fatalf("polled a different operation: %s", command)
+				}
+			}
+		})
+	}
+}
+
+func TestReleaseBoxPendingOperationHonorsDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		runner := &releaseCommandRunner{configPath: filepath.Join(t.TempDir(), "config.json"), outcomes: map[string][]commandOutcome{
+			"stop": {{result: core.LocalCommandResult{}}}, "delete": {deletionOutcome(testDeletionID, "bx_guard", "box", "blocked")},
+		}}
+		c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner, releasePollInterval: time.Hour}
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
+		if !errors.Is(err, context.DeadlineExceeded) || !containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev delete bx_guard --yes") {
+			t.Fatalf("pending deletion err=%v commands=%v", err, runner.commands)
+		}
+	})
 }
 
 func TestAsciiBoxBaseURLValidation(t *testing.T) {
@@ -257,7 +377,7 @@ func TestNewAPIRejectsUnsafeBaseURLBeforeCommandOrConfigWrite(t *testing.T) {
 	cfg := testConfig()
 	cfg.AsciiBox.BaseURL = "http://ascii.dev"
 
-	client, err := newAPI(cfg, Runtime{Exec: runner})
+	client, err := newAPI(cfg, core.Runtime{Exec: runner})
 	if err == nil || client != nil || !strings.Contains(err.Error(), "must use HTTPS") {
 		t.Fatalf("client=%#v err=%v", client, err)
 	}
@@ -272,7 +392,7 @@ func TestNewAPIRejectsUnsafeBaseURLBeforeCommandOrConfigWrite(t *testing.T) {
 func TestNewAPICanonicalizesBaseURL(t *testing.T) {
 	cfg := testConfig()
 	cfg.AsciiBox.BaseURL = " HTTPS://ASCII.DEV:443/api/ "
-	got, err := newAPI(cfg, Runtime{Exec: &fakeCommandRunner{}})
+	got, err := newAPI(cfg, core.Runtime{Exec: &fakeCommandRunner{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +470,7 @@ func TestClientPollsPartialCreateOutput(t *testing.T) {
 			`{"event":"state","id":"bx_2","state":"provisioning"}`,
 		}, "\n"),
 		newErr:        fmt.Errorf("exit status 1"),
-		infoResponses: []string{`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","expiresAt":"2026-06-10T12:00:00Z"}}`},
+		infoResponses: []string{`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","sshEndpoint":"198.51.100.20:19036","expiresAt":"2026-06-10T12:00:00Z"}}`},
 	}
 	client := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: home, runner: runner}
 	box, err := client.CreateBox(context.Background(), createRequest{TTL: 30 * time.Minute})
@@ -360,11 +480,41 @@ func TestClientPollsPartialCreateOutput(t *testing.T) {
 	if box.ID != "bx_2" || boxHost(box) != "203.0.113.20" {
 		t.Fatalf("box=%#v", box)
 	}
+	if box.SSHEndpoint != "198.51.100.20:19036" {
+		t.Fatalf("ssh endpoint=%q", box.SSHEndpoint)
+	}
 	if got := boxExpiresAt(box); got != "2026-06-10T12:00:00Z" {
 		t.Fatalf("boxExpiresAt=%q, want info response expiration", got)
 	}
 	if !containsCommand(runner.commands, "box --no-update --json --org personal --api-url https://ascii.dev info bx_2") {
 		t.Fatalf("commands missing info poll: %v", runner.commands)
+	}
+}
+
+func TestClientPreservesObservedGenerationAfterReadinessFailure(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	home := t.TempDir()
+	runner := &fakeCommandRunner{
+		configPath: home + "/config.json",
+		newStdout:  `{"event":"created","id":"bx_2"}`,
+		newErr:     errors.New("exit status 1"),
+		infoResponses: []string{
+			`{"box":{"id":"bx_2","state":"provisioning","createdAt":"2026-08-30T12:00:00Z"}}`,
+			`{"box":{"id":"bx_2","state":"ready","ip":"203.0.113.20","createdAt":"2026-08-30T12:00:01Z"}}`,
+		},
+	}
+	c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: home, runner: runner}
+	box, err := c.CreateBox(context.Background(), createRequest{TTL: 30 * time.Minute})
+	if err == nil {
+		t.Fatal("readiness identity change succeeded")
+	}
+	if box.ID != "bx_2" || box.createdID != "bx_2" || boxCreationTime(box) != "2026-08-30T12:00:00Z" {
+		t.Errorf("creation failure lost its original observed generation: %+v", box)
+	}
+	replacement := &fakeAPI{box: boxData{ID: "bx_2", CreatedAt: "2026-08-30T12:00:01Z", State: "ready", IP: "203.0.113.20"}}
+	b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	if err := b.rollbackBox(context.Background(), replacement, "cbx_123456789abc", box, core.LeaseClaim{}, false); err == nil || replacement.deleted {
+		t.Fatalf("unpublished rollback adopted a later generation: err=%v deleted=%t", err, replacement.deleted)
 	}
 }
 
@@ -404,7 +554,7 @@ func TestAcquireClaimsBoxAndReturnsSSHTarget(t *testing.T) {
 	stubSSHWait(t)
 
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
-	lease, err := backend.Acquire(context.Background(), AcquireRequest{
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{
 		Repo:          core.Repo{Name: "repo", Root: t.TempDir()},
 		Options:       core.LeaseOptions{TTL: 45 * time.Minute},
 		Keep:          true,
@@ -437,6 +587,40 @@ func TestAcquireClaimsBoxAndReturnsSSHTarget(t *testing.T) {
 	}
 }
 
+func TestAcquireUsesBoxSSHEndpoint(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeAPI{box: testBox()}
+	fake.box.SSHEndpoint = "198.51.100.20:19036"
+	withFakeAPI(t, fake)
+	stubSSHWait(t)
+
+	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{
+		Repo: core.Repo{Name: "repo", Root: t.TempDir()},
+		Keep: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.Host != "198.51.100.20" || lease.SSH.Port != "19036" {
+		t.Fatalf("lease SSH=%#v", lease.SSH)
+	}
+	if lease.Server.PublicNet.IPv4.IP != "203.0.113.10" {
+		t.Fatalf("public IP=%q, want provider box IP", lease.Server.PublicNet.IPv4.IP)
+	}
+}
+
+func TestBoxSSHTargetRejectsMalformedEndpoint(t *testing.T) {
+	_, err := boxSSHTarget(testConfig(), boxData{
+		ID:          "bx_malformed",
+		IP:          "203.0.113.10",
+		SSHEndpoint: "gateway-without-port",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid SSH endpoint") {
+		t.Fatalf("err=%v, want malformed endpoint error", err)
+	}
+}
+
 func TestAcquireReleasesPartiallyCreatedBox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := &fakeAPI{
@@ -446,7 +630,7 @@ func TestAcquireReleasesPartiallyCreatedBox(t *testing.T) {
 	withFakeAPI(t, fake)
 
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
-	_, err := backend.Acquire(context.Background(), AcquireRequest{
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{
 		Repo: core.Repo{Name: "repo", Root: t.TempDir()},
 		Keep: true,
 	})
@@ -468,14 +652,14 @@ func TestResolveUsesClaimScopeAndReleaseDeletesBox(t *testing.T) {
 	}
 
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "proof"})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "proof"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if lease.LeaseID != "cbx_123456789abc" || lease.Server.CloudID != "bx_1" || lease.SSH.Host != "203.0.113.10" {
 		t.Fatalf("lease=%#v", lease)
 	}
-	if err := backend.ReleaseLease(context.Background(), ReleaseLeaseRequest{Lease: lease}); err != nil {
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(fake.deletedIDs, []string{"bx_1"}) {
@@ -495,7 +679,7 @@ func TestResolveReleaseOnlyDoesNotRequireSSHFields(t *testing.T) {
 	}
 
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
-	lease, err := backend.Resolve(context.Background(), ResolveRequest{ID: "booting", ReleaseOnly: true})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "booting", ReleaseOnly: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +694,7 @@ func TestResolveRawBoxIDDoesNotAdopt(t *testing.T) {
 	withFakeAPI(t, fake)
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
 	for _, releaseOnly := range []bool{false, true} {
-		_, err := backend.Resolve(context.Background(), ResolveRequest{ID: "bx_external", Repo: core.Repo{Root: t.TempDir()}, ReleaseOnly: releaseOnly, Reclaim: true})
+		_, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "bx_external", Repo: core.Repo{Root: t.TempDir()}, ReleaseOnly: releaseOnly, Reclaim: true})
 		if err == nil {
 			t.Fatal("unclaimed raw ID was accepted")
 		}
@@ -525,7 +709,7 @@ func TestStatusMapsBoxAPIFields(t *testing.T) {
 	fake := &fakeAPI{box: testBox()}
 	withFakeAPI(t, fake)
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
-	view, err := backend.Status(context.Background(), StatusRequest{ID: "bx_1"})
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "bx_1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,11 +718,25 @@ func TestStatusMapsBoxAPIFields(t *testing.T) {
 	}
 }
 
+func TestStatusMapsBoxSSHEndpoint(t *testing.T) {
+	fake := &fakeAPI{box: testBox()}
+	fake.box.SSHEndpoint = "198.51.100.20:19036"
+	withFakeAPI(t, fake)
+	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "bx_1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Host != "203.0.113.10" || view.SSHHost != "198.51.100.20" || view.SSHPort != "19036" {
+		t.Fatalf("view=%#v", view)
+	}
+}
+
 func TestStatusWaitReturnsTerminalBoxState(t *testing.T) {
 	fake := &fakeAPI{box: boxData{ID: "bx_failed", State: "error", IP: "203.0.113.10"}}
 	withFakeAPI(t, fake)
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
-	view, err := backend.Status(context.Background(), StatusRequest{ID: "bx_failed", Wait: true, WaitTimeout: time.Minute})
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "bx_failed", Wait: true, WaitTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -580,11 +778,11 @@ func hasFeature(features core.FeatureSet, want core.Feature) bool {
 	return false
 }
 
-func testConfig() Config {
-	return Config{
+func testConfig() core.Config {
+	return core.Config{
 		Provider: providerName,
 		SSHKey:   "/tmp/global-crabbox-key",
-		AsciiBox: AsciiBoxConfig{
+		AsciiBox: core.AsciiBoxConfig{
 			APIKey:  "box_key",
 			BaseURL: "https://ascii.dev",
 			CLIPath: "box",
@@ -593,39 +791,40 @@ func testConfig() Config {
 	}
 }
 
-func testRuntime() Runtime {
-	return Runtime{Stdout: io.Discard, Stderr: io.Discard}
+func testRuntime() core.Runtime {
+	return core.Runtime{Stdout: io.Discard, Stderr: io.Discard}
 }
 
 func testBox() boxData {
 	return boxData{ID: "bx_1", createdID: "bx_1", CreatedAt: "2026-08-30T12:00:00Z", State: "ready", IP: "203.0.113.10"}
 }
 
-func withFakeAPI(t *testing.T, fake *fakeAPI) {
+func withFakeAPI(t *testing.T, fake api) {
 	t.Helper()
 	original := newAPI
-	newAPI = func(Config, Runtime) (api, error) { return fake, nil }
+	newAPI = func(core.Config, core.Runtime) (api, error) { return fake, nil }
 	t.Cleanup(func() { newAPI = original })
 }
 
 func stubSSHWait(t *testing.T) {
 	t.Helper()
 	original := waitForSSHReadyFunc
-	waitForSSHReadyFunc = func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error { return nil }
+	waitForSSHReadyFunc = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return nil }
 	t.Cleanup(func() { waitForSSHReadyFunc = original })
 }
 
 type fakeAPI struct {
-	createReq   createRequest
-	createErr   error
-	box         boxData
-	prepareIDs  []string
-	deletedIDs  []string
-	deleted     bool
-	getHook     func(string) (boxData, error)
-	prepareHook func(string) error
-	listHook    func() ([]boxData, error)
-	releaseHook func(string) error
+	createReq    createRequest
+	createErr    error
+	box          boxData
+	prepareIDs   []string
+	deletedIDs   []string
+	deleted      bool
+	getHook      func(string) (boxData, error)
+	prepareHook  func(string) error
+	listHook     func() ([]boxData, error)
+	releaseHook  func(string) error
+	deletionHook func(string, string) (boxDeletionOperation, error)
 }
 
 func (f *fakeAPI) CreateBox(_ context.Context, req createRequest) (boxData, error) {
@@ -692,6 +891,13 @@ func (f *fakeAPI) ReleaseBox(ctx context.Context, id string, validate func(conte
 	return nil
 }
 
+func (f *fakeAPI) GetDeletionOperation(_ context.Context, targetID, operationID string) (boxDeletionOperation, error) {
+	if f.deletionHook != nil {
+		return f.deletionHook(targetID, operationID)
+	}
+	return boxDeletionOperation{}, errors.New("unexpected deletion operation lookup")
+}
+
 type fakeCommandRunner struct {
 	commands   []string
 	env        [][]string
@@ -703,7 +909,7 @@ type fakeCommandRunner struct {
 }
 
 type commandOutcome struct {
-	result LocalCommandResult
+	result core.LocalCommandResult
 	err    error
 }
 
@@ -714,15 +920,15 @@ type releaseCommandRunner struct {
 	onAction   func(string)
 }
 
-func (r *releaseCommandRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *releaseCommandRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.commands = append(r.commands, strings.Join(append([]string{req.Name}, req.Args...), " "))
 	action := boxCLIAction(req.Args)
 	if action == "status" {
-		return LocalCommandResult{Stdout: fmt.Sprintf(`{"account":null,"api":{},"config":{"path":%q}}`, r.configPath)}, nil
+		return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"account":null,"api":{},"config":{"path":%q}}`, r.configPath)}, nil
 	}
 	queue := r.outcomes[action]
 	if len(queue) == 0 {
-		return LocalCommandResult{Stderr: "unexpected command"}, fmt.Errorf("unexpected %s command", action)
+		return core.LocalCommandResult{Stderr: "unexpected command"}, fmt.Errorf("unexpected %s command", action)
 	}
 	outcome := queue[0]
 	r.outcomes[action] = queue[1:]
@@ -735,7 +941,7 @@ func (r *releaseCommandRunner) Run(_ context.Context, req LocalCommandRequest) (
 func boxCLIAction(args []string) string {
 	for _, arg := range args {
 		switch arg {
-		case "status", "stop", "delete", "extend", "info":
+		case "status", "stop", "delete", "deletion", "extend", "info", "list":
 			return arg
 		}
 	}
@@ -744,46 +950,48 @@ func boxCLIAction(args []string) string {
 
 func snapshotGuardOutcome() commandOutcome {
 	return commandOutcome{
-		result: LocalCommandResult{Stdout: `{"code":"snapshot_required","error":"Refusing request: no successful snapshot in the last 30 minutes.","status":409}`},
+		result: core.LocalCommandResult{Stdout: `{"code":"snapshot_required","error":"Refusing request: no successful snapshot in the last 30 minutes.","status":409}`},
 		err:    fmt.Errorf("exit status 1"),
 	}
 }
 
-func (r *fakeCommandRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+func (r *fakeCommandRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.commands = append(r.commands, strings.Join(append([]string{req.Name}, req.Args...), " "))
 	r.env = append(r.env, req.Env)
 	joined := strings.Join(req.Args, " ")
 	switch {
+	case strings.Contains(joined, " deletion status "+testDeletionID):
+		return deletionOutcome(testDeletionID, "bx_1", "box", "completed").result, nil
 	case strings.Contains(joined, " status"):
-		return LocalCommandResult{Stdout: fmt.Sprintf(`{"account":null,"api":{},"config":{"path":%q}}`, r.configPath)}, nil
+		return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"account":null,"api":{},"config":{"path":%q}}`, r.configPath)}, nil
 	case strings.Contains(joined, " new "):
 		if r.newStdout != "" || r.newErr != nil {
-			return LocalCommandResult{Stdout: r.newStdout}, r.newErr
+			return core.LocalCommandResult{Stdout: r.newStdout}, r.newErr
 		}
-		return LocalCommandResult{Stdout: strings.Join([]string{
+		return core.LocalCommandResult{Stdout: strings.Join([]string{
 			`{"event":"created","id":"bx_1","ttlSeconds":1800}`,
 			`{"event":"state","id":"bx_1","state":"provisioning"}`,
 			`{"event":"ready","id":"bx_1","state":"ready","ip":"203.0.113.10","archiveAfter":"2026-05-30T20:00:00Z"}`,
 		}, "\n")}, nil
 	case strings.Contains(joined, " ssh bx_1 -- true"):
-		return LocalCommandResult{}, nil
+		return core.LocalCommandResult{}, nil
 	case strings.Contains(joined, " info bx_1"):
-		return LocalCommandResult{Stdout: `{"box":{"id":"bx_1","state":"ready","ip":"203.0.113.10"}}`}, nil
+		return core.LocalCommandResult{Stdout: `{"box":{"id":"bx_1","state":"ready","ip":"203.0.113.10"}}`}, nil
 	case strings.Contains(joined, " info bx_2"):
 		if len(r.infoResponses) == 0 {
-			return LocalCommandResult{Stderr: "missing info response"}, fmt.Errorf("missing info response")
+			return core.LocalCommandResult{Stderr: "missing info response"}, fmt.Errorf("missing info response")
 		}
 		out := r.infoResponses[0]
 		r.infoResponses = r.infoResponses[1:]
-		return LocalCommandResult{Stdout: out}, nil
+		return core.LocalCommandResult{Stdout: out}, nil
 	case strings.Contains(joined, " list"):
-		return LocalCommandResult{Stdout: `{"boxes":[{"id":"bx_1","state":"ready","ip":"203.0.113.10"}]}`}, nil
+		return core.LocalCommandResult{Stdout: `{"boxes":[{"id":"bx_1","state":"ready","ip":"203.0.113.10"}]}`}, nil
 	case strings.Contains(joined, " stop bx_1"):
-		return LocalCommandResult{Stdout: `{"id":"bx_1","status":"deleted"}`}, nil
+		return core.LocalCommandResult{Stdout: `{"id":"bx_1","status":"deleted"}`}, nil
 	case strings.Contains(joined, " delete bx_1"):
-		return LocalCommandResult{Stdout: `{"id":"bx_1","status":"deleted"}`}, nil
+		return deletionOutcome(testDeletionID, "bx_1", "box", "completed").result, nil
 	default:
-		return LocalCommandResult{Stderr: "unexpected command"}, fmt.Errorf("unexpected command")
+		return core.LocalCommandResult{Stderr: "unexpected command"}, fmt.Errorf("unexpected command")
 	}
 }
 

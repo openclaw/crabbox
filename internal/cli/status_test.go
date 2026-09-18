@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -13,6 +14,49 @@ import (
 	"testing"
 	"time"
 )
+
+func TestMemoryDiagnosticsPresentationRouting(t *testing.T) {
+	for _, mode := range []string{"inspect", "status", "plain-status", "wait", "wait-json", "helper"} {
+		t.Run(mode, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
+			backend := &statusResolveRecordingBackend{state: "exited"}
+			testAWSBackendOverride = backend
+			t.Cleanup(func() { testAWSBackendOverride = nil })
+			app := App{Stdout: io.Discard, Stderr: io.Discard}
+			args := []string{"--provider", "aws", "--id", "cbx_status"}
+			switch mode {
+			case "inspect":
+				_ = app.inspect(t.Context(), append(args, "--json"))
+			case "status":
+				_ = app.status(t.Context(), append(args, "--json"))
+			case "plain-status":
+				_ = app.status(t.Context(), args)
+			case "wait":
+				_ = app.status(t.Context(), append(args, "--wait"))
+			case "wait-json":
+				_ = app.status(t.Context(), append(args, "--wait", "--json"))
+			case "helper":
+				cfg := defaultConfig()
+				cfg.Provider = "aws"
+				setProviderSelection(&cfg, "aws", providerSelectionFlag)
+				_, _ = app.leaseStatus(t.Context(), cfg, "cbx_status")
+			}
+			if len(backend.requests) != 1 {
+				t.Fatalf("resolve calls=%d", len(backend.requests))
+			}
+			req := backend.requests[0]
+			got := req.IncludeDiagnostics
+			if want := mode == "inspect" || mode == "status"; got != want {
+				t.Fatalf("presentation diagnostics=%t want %t", got, want)
+			}
+			data, err := json.Marshal(req)
+			if err != nil || strings.Contains(strings.ToLower(string(data)), "includediagnostics") {
+				t.Fatalf("internal flag entered wire request: %s err=%v", data, err)
+			}
+		})
+	}
+}
 
 func TestStatusWaitDoneTreatsTerminalStatesAsDone(t *testing.T) {
 	for _, state := range []string{"dead", "deleting", "exited", "expired", "failed", "missing", "released", "stopped", "stopped_with_code", "terminated"} {
@@ -180,6 +224,43 @@ func TestStatusViewKeepsFourSecondWindowsSSHProbe(t *testing.T) {
 	assertSSHOption(t, args, "ConnectionAttempts", "3")
 }
 
+func TestStatusWSL2ReadinessAllowsCompleteProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
+	}
+	installSSHArgsRecorder(t)
+	t.Setenv("CRABBOX_FAKE_SSH_DELAY", "2.1")
+	previous := probeWSLSFTPSubsystem
+	probeWSLSFTPSubsystem = func(context.Context, SSHTarget, string, string, io.Writer) error { return nil }
+	t.Cleanup(func() { probeWSLSFTPSubsystem = previous })
+	cfg := baseConfig()
+	cfg.Network = NetworkPublic
+	target := SSHTarget{Host: "example.test", User: "runner", Port: "22", FallbackPorts: []string{}, TargetOS: targetWindows, WindowsMode: windowsModeWSL2, NetworkKind: NetworkPublic, ReadyCheck: "true"}
+	view, err := statusViewFromLeaseTarget(t.Context(), cfg, LeaseTarget{
+		Server: Server{Status: "active"}, SSH: target,
+	})
+	if err != nil || !view.Ready {
+		t.Fatalf("ready=%t err=%v; two successful WSL invocations may exceed four seconds", view.Ready, err)
+	}
+}
+
+func TestStatusSSHReadinessTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name, target, mode string
+		want               time.Duration
+	}{
+		{"linux", targetLinux, "", 4 * time.Second},
+		{"native Windows", targetWindows, windowsModeNormal, 4 * time.Second},
+		{"WSL2", targetWindows, windowsModeWSL2, 30 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := statusSSHReadinessTimeout(SSHTarget{TargetOS: test.target, WindowsMode: test.mode}); got != test.want {
+				t.Fatalf("timeout=%s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
 func TestStatusWaitRequestsReadyProbe(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
@@ -239,17 +320,17 @@ func TestStatusWaitRequestsReadyProbe(t *testing.T) {
 			"provider": "aws",
 		},
 	}
-	if err := claimLeaseTargetForRepoConfig("cbx_status", "status", cfg, claimServer, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig("cbx_status", "status", cfg, claimServer, SSHTarget{}, "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	beforePlainStatus, err := readLeaseClaim("cbx_status")
+	beforePlainStatus, err := ReadLeaseClaim("cbx_status")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := app.status(context.Background(), []string{"--provider", "aws", "--id", "cbx_status"}); err != nil {
 		t.Fatal(err)
 	}
-	afterPlainStatus, err := readLeaseClaim("cbx_status")
+	afterPlainStatus, err := ReadLeaseClaim("cbx_status")
 	if err != nil || !reflect.DeepEqual(afterPlainStatus, beforePlainStatus) || len(backend.touches) != 0 {
 		t.Fatalf("plain status mutated claim: before=%#v after=%#v touches=%#v err=%v", beforePlainStatus, afterPlainStatus, backend.touches, err)
 	}
@@ -304,10 +385,10 @@ func TestStatusWaitTerminalRuntimeStatePreservesExactClaim(t *testing.T) {
 					"state": "provisioning", "recovery": "ssh-readiness-pending",
 				},
 			}
-			if err := claimLeaseTargetForRepoConfig("cbx_status", "status", cfg, claimServer, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+			if err := ClaimLeaseTargetForRepoConfig("cbx_status", "status", cfg, claimServer, SSHTarget{}, "/repo", time.Minute, false); err != nil {
 				t.Fatal(err)
 			}
-			before, err := readLeaseClaim("cbx_status")
+			before, err := ReadLeaseClaim("cbx_status")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -336,7 +417,7 @@ func TestStatusWaitTerminalRuntimeStatePreservesExactClaim(t *testing.T) {
 			if len(backend.touches) != 0 {
 				t.Fatalf("terminal status touched claim: %#v", backend.touches)
 			}
-			after, err := readLeaseClaim("cbx_status")
+			after, err := ReadLeaseClaim("cbx_status")
 			if err != nil || !reflect.DeepEqual(after, before) {
 				t.Fatalf("terminal status changed claim: before=%#v after=%#v err=%v", before, after, err)
 			}
@@ -357,7 +438,7 @@ func TestStatusWaitClaimReplacementPreventsProviderMutation(t *testing.T) {
 	server := Server{Provider: "aws", CloudID: "i-status", Labels: map[string]string{
 		"lease": "cbx_status", "slug": "status", "provider": "aws",
 	}}
-	if err := claimLeaseTargetForRepoConfig("cbx_status", "status", cfg, server, SSHTarget{}, "/repo", time.Minute, false); err != nil {
+	if err := ClaimLeaseTargetForRepoConfig("cbx_status", "status", cfg, server, SSHTarget{}, "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	var replacement leaseClaim
@@ -370,11 +451,11 @@ func TestStatusWaitClaimReplacementPreventsProviderMutation(t *testing.T) {
 		labels := cloneStringMap(snapshot.Labels)
 		labels["owner"] = "replacement-owner"
 		var err error
-		replacement, err = updateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, snapshot, labels)
+		replacement, err = UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, snapshot, labels)
 		if err != nil {
 			return Server{}, err
 		}
-		_, updated, _, err := UpdateLeaseClaimTouchIfUnchangedAction(req.Lease.LeaseID, snapshot, time.Now(), req.IdleTimeoutOverride, func() (Server, SSHTarget, bool, error) {
+		_, updated, _, err := UpdateLeaseClaimTouchIfUnchangedAction(t.Context(), req.Lease.LeaseID, snapshot, time.Now(), req.IdleTimeoutOverride, func() (Server, SSHTarget, bool, error) {
 			providerWrites++
 			return req.Lease.Server, req.Lease.SSH, true, nil
 		})
@@ -385,7 +466,7 @@ func TestStatusWaitClaimReplacementPreventsProviderMutation(t *testing.T) {
 		"--provider", "aws", "--id", "cbx_status", "--wait", "--wait-timeout", "1ns",
 	})
 	var exitErr ExitError
-	persisted, readErr := readLeaseClaim("cbx_status")
+	persisted, readErr := ReadLeaseClaim("cbx_status")
 	if !AsExitError(err, &exitErr) || exitErr.Code != 5 ||
 		!strings.Contains(stderr.String(), "claim changed") || providerWrites != 0 ||
 		readErr != nil || !reflect.DeepEqual(persisted, replacement) {
@@ -399,7 +480,7 @@ func TestStatusLeaseExactClaimAuthorizerOwnsDynamicScopeValidation(t *testing.T)
 	server := Server{Provider: "aws", CloudID: "dynamic-resource", Labels: map[string]string{
 		"lease": leaseID, "provider": "aws", "runtime_scope": "runtime:dynamic/context:owned",
 	}}
-	if err := claimLeaseForRepoProviderScopePondEndpoint(
+	if err := ClaimLeaseForRepoProviderScopePondEndpoint(
 		leaseID,
 		"dynamic-status",
 		"aws",
@@ -555,4 +636,32 @@ func (b *statusResolveRecordingBackend) Touch(_ context.Context, req TouchReques
 		return b.touchFn(req)
 	}
 	return req.Lease.Server, nil
+}
+
+// TestStatusViewOmitsProviderResourceIDWhenUnset pins the backward-compatible
+// half of the inspect JSON contract: providers whose only identity is the
+// resource name must not gain a new key in `crabbox inspect --json`.
+func TestStatusViewOmitsProviderResourceIDWhenUnset(t *testing.T) {
+	encoded, err := json.Marshal(statusView{ID: "cbx_example", Provider: "example", ServerID: "example-server"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := decoded["providerResourceId"]; ok {
+		t.Fatalf("inspect JSON = %s, want no providerResourceId key when the provider sets none", encoded)
+	}
+	decoded = nil
+	encoded, err = json.Marshal(statusView{ID: "cbx_example", Provider: "example", ServerID: "example-server", ProviderResourceID: "resource-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["providerResourceId"] != "resource-1" {
+		t.Fatalf("inspect JSON providerResourceId=%v, want the provider resource id", decoded["providerResourceId"])
+	}
 }

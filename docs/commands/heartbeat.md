@@ -26,6 +26,18 @@ the existing lease heartbeat endpoint. The configured owner credentials and
 provider binding are unchanged, so unknown, unowned, expired, released, or
 otherwise terminal leases retain the coordinator's normal failure response.
 
+For AWS leases whose recorded SSH source policy is complete and unchanged,
+the command acknowledges renewal after persisting the deadline and scheduling
+ingress maintenance. It does not wait for AWS security-group reconciliation. Changed or
+incomplete source policy retains the normal access-refresh attempt before the
+response; pinned source ranges remain authoritative.
+
+HTTP heartbeats use the existing 30-minute mutation budget so a slow access
+refresh can finish. An earlier caller deadline or cancellation still wins;
+a timeout leaves the outcome uncertain and does not replay the request.
+Automatic heartbeats and best-effort foreground touches retain their shorter
+20-second caller budgets.
+
 `broker.mode: registered` has both coordinator and direct-provider expiry
 state. The command therefore requires the exact direct claim, sends one
 coordinator heartbeat, and calls the provider's existing `Touch` capability
@@ -42,14 +54,54 @@ claim is never recreated or overwritten. Terminal leases are rejected before
 touch. Providers without lease-touch support fail with
 `provider=<name> does not support lease heartbeat`.
 
+AWS fixed leases bind their scope to the caller account recorded at creation.
+Heartbeat validates that account and the exact live instance before writing
+tags, while holding the unchanged local claim. Renewals preserve native
+ownership tags, including the full fixed-create fingerprint.
+Waiting for the mutation lock honors request cancellation.
+
+## Delegated providers
+
+A delegated-run provider has no Crabbox-managed SSH lease to touch. Providers
+that advertise the `lease-heartbeat` feature keep the lease alive through their
+own API instead: the command hands the identifier to the provider, which makes
+a cheap authenticated call intended to register activity on the lease. The
+provider owns every check on this path — Crabbox does no lease resolution,
+claim check, or state validation of its own before delegating.
+
+Because the provider owns the lease's idle policy here, the command reports the
+idle window the provider reports back, and reports nothing at all when the
+provider does not report one. It never substitutes the local `idle_timeout`
+configuration, which does not describe such a lease. For the same reason
+`--idle-timeout` is refused on this path with
+`provider=<name> does not support replacing the lease idle timeout while heartbeating`,
+rather than accepted and silently ignored.
+
+This path does not rewrite lifecycle policy or absolute lifetime limits.
+Provider activity may defer idle pausing. It persists nothing locally: the
+reported `lastTouchedAt` is when the provider observed the lease, so `crabbox
+claims` keeps showing the claim's previous `lastUsed`. What the provider's call
+defers on its own side is the provider's business; see the provider's own page.
+
+A coordinator-registered broker keeps the coordinator path above, because the
+coordinator remains the source of truth for expiry wherever a coordinator lease
+can exist. Providers declared `CoordinatorNever` can never hold one, so they use
+the delegated path regardless of broker mode. Providers that do not advertise
+the feature keep failing with
+`provider=<name> does not support lease heartbeat`.
+
 ## Idle timeout
 
 `--idle-timeout <duration>` optionally replaces the lease's idle window while
-refreshing it. The value must be positive. Omitting the flag preserves the
+refreshing it, on the coordinator and direct-provider paths. It is not
+supported on the delegated-provider path above. The value must be positive.
+Omitting the flag preserves the
 current direct-provider timeout when it is available in lease metadata and
 omits the coordinator heartbeat override. Direct static and local-runtime
 providers persist the refreshed timestamps, expiry, and any explicit timeout
 replacement in the exact claim so a fresh CLI process observes the same state.
+Heartbeat preserves existing provider metadata, including ownership fingerprints
+and empty attestation fields; it changes only lifecycle values.
 
 ## Output
 

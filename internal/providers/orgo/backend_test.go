@@ -3,13 +3,20 @@ package orgo
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type fakeOrgoAPI struct {
@@ -28,6 +35,9 @@ type fakeOrgoAPI struct {
 	missingDeleteNotFound   bool
 	bashCommands            []string
 	bashExitCode            int
+	bashErr                 error
+	onBash                  func()
+	onDelete                func()
 	bashStdout              string
 	bashStderr              string
 	omitWorkspaceID         bool
@@ -113,7 +123,7 @@ func (f *fakeOrgoAPI) GetComputer(_ context.Context, id string) (orgoComputer, e
 	}
 	computer, ok := f.computers[id]
 	if !ok {
-		return orgoComputer{}, exit(4, "missing computer %s", id)
+		return orgoComputer{}, core.Exit(4, "missing computer %s", id)
 	}
 	if f.replaceInstanceOnGet == f.getComputerCalls {
 		computer.InstanceID = "instance_replaced"
@@ -138,8 +148,11 @@ func (f *fakeOrgoAPI) StartComputer(_ context.Context, id string) error {
 func (f *fakeOrgoAPI) DeleteComputer(ctx context.Context, id string) error {
 	_, f.deleteComputerDeadline = ctx.Deadline()
 	f.deletedComputers = append(f.deletedComputers, id)
+	if f.onDelete != nil {
+		f.onDelete()
+	}
 	if _, ok := f.computers[id]; !ok && f.missingDeleteNotFound {
-		return exit(4, "missing computer %s", id)
+		return core.Exit(4, "missing computer %s", id)
 	}
 	delete(f.computers, id)
 	return f.deleteComputerErr
@@ -148,18 +161,21 @@ func (f *fakeOrgoAPI) DeleteComputer(ctx context.Context, id string) error {
 func (f *fakeOrgoAPI) RunBash(_ context.Context, id string, command string, stdout, stderr io.Writer) (int, error) {
 	f.bashStatuses = append(f.bashStatuses, f.computers[id].Status)
 	f.bashCommands = append(f.bashCommands, command)
+	if f.onBash != nil {
+		f.onBash()
+	}
 	if f.bashStdout != "" {
 		_, _ = io.WriteString(stdout, f.bashStdout)
 	}
 	if f.bashStderr != "" {
 		_, _ = io.WriteString(stderr, f.bashStderr)
 	}
-	return f.bashExitCode, nil
+	return f.bashExitCode, f.bashErr
 }
 
 func TestProviderRegistersSecretSafeFlags(t *testing.T) {
 	fs := flag.NewFlagSet("orgo", flag.ContinueOnError)
-	cfg := Config{}
+	cfg := core.Config{}
 	values := RegisterOrgoProviderFlags(fs, cfg)
 	if fs.Lookup("orgo-api-key") != nil {
 		t.Fatalf("Orgo API key must not be registered as a CLI flag")
@@ -187,7 +203,7 @@ func TestProviderAliasesRejectUnsupportedMachineFlags(t *testing.T) {
 	for _, provider := range []string{providerName, "orgo-ai", " ORGO-AI "} {
 		t.Run(provider, func(t *testing.T) {
 			fs := flag.NewFlagSet(provider, flag.ContinueOnError)
-			cfg := Config{Provider: provider}
+			cfg := core.Config{Provider: provider}
 			values := RegisterOrgoProviderFlags(fs, cfg)
 			fs.String("class", "", "")
 			if err := fs.Parse([]string{"--class", "large"}); err != nil {
@@ -204,11 +220,11 @@ func TestRunCreatesExecutesAndDeletesTemporaryWorkspace(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
 	var stdout, stderr bytes.Buffer
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: &stdout, Stderr: &stderr}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: &stdout, Stderr: &stderr}).(*orgoBackend)
 	backend.client = fake
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:       Repo{Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Root: t.TempDir()},
 		NoSync:     true,
 		Command:    []string{"printf", "crabbox-orgo-ok"},
 		Env:        map[string]string{"EXAMPLE_TOKEN": "test value"},
@@ -250,11 +266,11 @@ func TestRunWaitsForNewComputerBeforeBash(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
 	fake.computerStatuses = []string{"creating", "running"}
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 	backend.client = fake
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: t.TempDir()},
 		NoSync:  true,
 		Command: []string{"true"},
 	})
@@ -287,10 +303,10 @@ func TestRunStartsReusedComputerBeforeBash(t *testing.T) {
 				ID: "computer_test", Name: "orgo-reused", WorkspaceID: "ws_existing", Status: tt.statuses[0],
 			}
 			fake.computerStatuses = append([]string(nil), tt.statuses...)
-			backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+			backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 			backend.client = fake
 
-			result, err := backend.Run(context.Background(), RunRequest{ID: "computer_test", NoSync: true, Command: []string{"true"}})
+			result, err := backend.Run(context.Background(), core.RunRequest{ID: "computer_test", NoSync: true, Command: []string{"true"}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -311,11 +327,11 @@ func TestCreateComputerCleansUpTerminalStartupFailure(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
 	fake.computerStatuses = []string{"creating", "error"}
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 	backend.client = fake
 
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: t.TempDir()},
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: t.TempDir()},
 		NoSync:  true,
 		Command: []string{"true"},
 	})
@@ -339,9 +355,9 @@ func TestCreateComputerReportsRollbackFailureWithResourceIdentity(t *testing.T) 
 	fake.computerStatuses = []string{"creating", "failed"}
 	fake.deleteComputerErr = errors.New("computer cleanup failed")
 	fake.deleteWorkspaceErr = errors.New("workspace cleanup failed")
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 
-	_, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "rollback-proof", false)
+	_, err := backend.createComputer(context.Background(), fake, core.Repo{Root: t.TempDir()}, "rollback-proof", false)
 	if err == nil {
 		t.Fatal("create unexpectedly succeeded")
 	}
@@ -357,9 +373,9 @@ func TestCreateComputerReportsWorkspaceRollbackFailureAfterCreateError(t *testin
 	fake := newFakeOrgoAPI()
 	fake.createComputerErr = &orgoHTTPError{StatusCode: 400, Body: "computer create failed"}
 	fake.deleteWorkspaceErr = errors.New("workspace cleanup failed")
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 
-	_, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "rollback-proof", false)
+	_, err := backend.createComputer(context.Background(), fake, core.Repo{Root: t.TempDir()}, "rollback-proof", false)
 	if err == nil {
 		t.Fatal("create unexpectedly succeeded")
 	}
@@ -374,8 +390,8 @@ func TestCreateComputerPreservesRequestedWorkspaceWhenResponseOmitsIt(t *testing
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
 	fake.omitWorkspaceID = true
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
-	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "workspace-proof", false)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	lease, err := backend.createComputer(context.Background(), fake, core.Repo{Root: t.TempDir()}, "workspace-proof", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,22 +409,22 @@ func TestCreateComputerPreservesRequestedWorkspaceWhenResponseOmitsIt(t *testing
 func TestStopByComputerIDDeletesTemporaryWorkspaceAndClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 	backend.client = fake
-	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "cloud-id-stop", false)
+	lease, err := backend.createComputer(context.Background(), fake, core.Repo{Root: t.TempDir()}, "cloud-id-stop", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	otherLeaseID := "cbx_slug_collision_1234567890"
-	if err := claimLeaseForRepoProviderEndpoint(otherLeaseID, lease.Computer.ID, orgoClaimScope(backend.cfg, lease.Computer.WorkspaceID), t.TempDir(), time.Minute, false, Server{
+	if err := claimLeaseForRepoProviderEndpoint(otherLeaseID, lease.Computer.ID, orgoClaimScope(backend.cfg, lease.Computer.WorkspaceID), t.TempDir(), time.Minute, false, core.Server{
 		CloudID:  "other-computer",
 		Provider: providerName,
 		Name:     "other-computer",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { removeLeaseClaim(otherLeaseID) })
-	if err := backend.Stop(context.Background(), StopRequest{ID: lease.Computer.ID}); err != nil {
+	t.Cleanup(func() { core.RemoveLeaseClaim(otherLeaseID) })
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: lease.Computer.ID}); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(fake.deletedComputers, ","); got != lease.Computer.ID {
@@ -426,10 +442,10 @@ func TestStopRefusesUnclaimedComputerID(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
 	fake.computers["computer_unclaimed"] = orgoComputer{ID: "computer_unclaimed", Status: "running"}
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 	backend.client = fake
 
-	err := backend.Stop(context.Background(), StopRequest{ID: "computer_unclaimed"})
+	err := backend.Stop(context.Background(), core.StopRequest{ID: "computer_unclaimed"})
 	if err == nil || !strings.Contains(err.Error(), "refuses to stop unclaimed") {
 		t.Fatalf("err=%v", err)
 	}
@@ -454,9 +470,9 @@ func TestStopRequiresExactOrgoEndpointWorkspaceAndComputerIdentity(t *testing.T)
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			originalAPI := newFakeOrgoAPI()
-			original := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key", APIBase: "https://one.example.test/api"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+			original := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key", APIBase: "https://one.example.test/api"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 			original.client = originalAPI
-			lease, err := original.createComputer(context.Background(), originalAPI, Repo{Root: t.TempDir()}, "owned", false)
+			lease, err := original.createComputer(context.Background(), originalAPI, core.Repo{Root: t.TempDir()}, "owned", false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -466,13 +482,13 @@ func TestStopRequiresExactOrgoEndpointWorkspaceAndComputerIdentity(t *testing.T)
 				computer.InstanceID = test.instanceID
 			}
 			currentAPI.computers[computer.ID] = computer
-			current := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{
+			current := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{
 				APIKey:      "test-key",
-				APIBase:     blank(test.endpoint, "https://one.example.test/api"),
+				APIBase:     core.Blank(test.endpoint, "https://one.example.test/api"),
 				WorkspaceID: test.workspace,
-			}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+			}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 			current.client = currentAPI
-			err = current.Stop(context.Background(), StopRequest{ID: lease.Computer.ID})
+			err = current.Stop(context.Background(), core.StopRequest{ID: lease.Computer.ID})
 			if test.name == "exact ownership" {
 				if err != nil || len(currentAPI.deletedComputers) != 1 || len(currentAPI.deletedWorkspaces) != 1 {
 					t.Fatalf("owned stop err=%v computers=%v workspaces=%v", err, currentAPI.deletedComputers, currentAPI.deletedWorkspaces)
@@ -496,18 +512,18 @@ func TestStopRetriesWorkspaceCleanupAfterComputerWasDeleted(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
 	fake.missingDeleteNotFound = true
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 	backend.client = fake
-	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "partial-cleanup", false)
+	lease, err := backend.createComputer(context.Background(), fake, core.Repo{Root: t.TempDir()}, "partial-cleanup", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fake.deleteWorkspaceErr = errors.New("transient workspace delete failure")
-	if err := backend.Stop(context.Background(), StopRequest{ID: lease.LeaseID}); err == nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: lease.LeaseID}); err == nil {
 		t.Fatal("first stop unexpectedly succeeded")
 	}
 	fake.deleteWorkspaceErr = nil
-	if err := backend.Stop(context.Background(), StopRequest{ID: lease.LeaseID}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: lease.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(fake.deletedComputers, ","); got != "computer_test" {
@@ -524,14 +540,14 @@ func TestStopRetriesWorkspaceCleanupAfterComputerWasDeleted(t *testing.T) {
 func TestStopFinishesWorkspaceCleanupWhenComputerDisappearsDuringLockedPreflight(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 	backend.client = fake
-	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "preflight-disappearance", false)
+	lease, err := backend.createComputer(context.Background(), fake, core.Repo{Root: t.TempDir()}, "preflight-disappearance", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fake.disappearOnGet = 2
-	if err := backend.Stop(context.Background(), StopRequest{ID: lease.LeaseID}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: lease.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.deletedComputers) != 0 || strings.Join(fake.deletedWorkspaces, ",") != "ws_created" {
@@ -545,14 +561,14 @@ func TestStopFinishesWorkspaceCleanupWhenComputerDisappearsDuringLockedPreflight
 func TestStopRefusesInstanceReplacementDuringLockedPreflight(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 	backend.client = fake
-	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "preflight-replacement", false)
+	lease, err := backend.createComputer(context.Background(), fake, core.Repo{Root: t.TempDir()}, "preflight-replacement", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fake.replaceInstanceOnGet = 2
-	if err := backend.Stop(context.Background(), StopRequest{ID: lease.LeaseID}); err == nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: lease.LeaseID}); err == nil {
 		t.Fatal("stop unexpectedly accepted an instance replacement")
 	}
 	if len(fake.deletedComputers) != 0 || len(fake.deletedWorkspaces) != 0 {
@@ -566,15 +582,15 @@ func TestStopRefusesInstanceReplacementDuringLockedPreflight(t *testing.T) {
 func TestStopRetainsClaimWhenNotFoundCouldBeAuthorizationFailure(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 	backend.client = fake
-	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "ambiguous-not-found", false)
+	lease, err := backend.createComputer(context.Background(), fake, core.Repo{Root: t.TempDir()}, "ambiguous-not-found", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	delete(fake.computers, lease.Computer.ID)
-	fake.getWorkspaceErr = exit(4, "workspace unavailable")
-	if err := backend.Stop(context.Background(), StopRequest{ID: lease.LeaseID}); err == nil {
+	fake.getWorkspaceErr = core.Exit(4, "workspace unavailable")
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: lease.LeaseID}); err == nil {
 		t.Fatal("stop unexpectedly accepted ambiguous absence")
 	}
 	if len(fake.deletedComputers) != 0 || len(fake.deletedWorkspaces) != 0 {
@@ -588,15 +604,15 @@ func TestStopRetainsClaimWhenNotFoundCouldBeAuthorizationFailure(t *testing.T) {
 func TestStopFinalizesClaimWhenComputerAndWorkspaceAreConfirmedAbsent(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 	backend.client = fake
-	lease, err := backend.createComputer(context.Background(), fake, Repo{Root: t.TempDir()}, "confirmed-absence", false)
+	lease, err := backend.createComputer(context.Background(), fake, core.Repo{Root: t.TempDir()}, "confirmed-absence", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	delete(fake.computers, lease.Computer.ID)
 	fake.getWorkspaceErr = &orgoHTTPError{StatusCode: http.StatusNotFound, Body: "workspace not found"}
-	if err := backend.Stop(context.Background(), StopRequest{ID: lease.LeaseID}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: lease.LeaseID}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.deletedComputers) != 0 || len(fake.deletedWorkspaces) != 0 {
@@ -611,12 +627,12 @@ func TestWarmupClaimsSlugForStatusAndStop(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
 	var stdout, stderr bytes.Buffer
-	cfg := Config{Orgo: OrgoConfig{APIKey: "test-key", WorkspaceID: "ws_existing"}}
-	backend := NewOrgoBackend(Provider{}.Spec(), cfg, Runtime{Stdout: &stdout, Stderr: &stderr}).(*orgoBackend)
+	cfg := core.Config{Orgo: core.OrgoConfig{APIKey: "test-key", WorkspaceID: "ws_existing"}}
+	backend := NewOrgoBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &stdout, Stderr: &stderr}).(*orgoBackend)
 	backend.client = fake
 
-	if err := backend.Warmup(context.Background(), WarmupRequest{
-		Repo:          Repo{Root: t.TempDir()},
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{
+		Repo:          core.Repo{Root: t.TempDir()},
 		RequestedSlug: "orgo-smoke",
 	}); err != nil {
 		t.Fatal(err)
@@ -624,14 +640,14 @@ func TestWarmupClaimsSlugForStatusAndStop(t *testing.T) {
 	if !strings.Contains(stdout.String(), "slug=orgo-smoke") {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
-	view, err := backend.Status(context.Background(), StatusRequest{ID: "orgo-smoke", Wait: true})
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "orgo-smoke", Wait: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if view.ServerID != "computer_test" || view.Slug != "orgo-smoke" || !view.Ready {
 		t.Fatalf("status=%#v", view)
 	}
-	if err := backend.Stop(context.Background(), StopRequest{ID: "orgo-smoke"}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: "orgo-smoke"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(fake.deletedComputers, ","); got != "computer_test" {
@@ -648,9 +664,9 @@ func TestStatusWaitStopsOnTerminalStates(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			fake := newFakeOrgoAPI()
 			fake.computers["computer_test"] = orgoComputer{ID: "computer_test", Status: state}
-			backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+			backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 			backend.client = fake
-			_, err := backend.Status(context.Background(), StatusRequest{ID: "computer_test", Wait: true})
+			_, err := backend.Status(context.Background(), core.StatusRequest{ID: "computer_test", Wait: true})
 			if err == nil || !strings.Contains(err.Error(), "entered "+state+" state") {
 				t.Fatalf("err=%v", err)
 			}
@@ -662,18 +678,18 @@ func TestListMergesLocalClaimLabels(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
 	var stdout, stderr bytes.Buffer
-	cfg := Config{Orgo: OrgoConfig{APIKey: "test-key", WorkspaceID: "ws_existing"}}
-	backend := NewOrgoBackend(Provider{}.Spec(), cfg, Runtime{Stdout: &stdout, Stderr: &stderr}).(*orgoBackend)
+	cfg := core.Config{Orgo: core.OrgoConfig{APIKey: "test-key", WorkspaceID: "ws_existing"}}
+	backend := NewOrgoBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: &stdout, Stderr: &stderr}).(*orgoBackend)
 	backend.client = fake
 
-	if err := backend.Warmup(context.Background(), WarmupRequest{
-		Repo:          Repo{Root: t.TempDir()},
+	if err := backend.Warmup(context.Background(), core.WarmupRequest{
+		Repo:          core.Repo{Root: t.TempDir()},
 		RequestedSlug: "orgo-list",
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	claims, err := listLeaseClaims()
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,7 +703,7 @@ func TestListMergesLocalClaimLabels(t *testing.T) {
 		t.Fatalf("claim slug label=%q", got)
 	}
 
-	views, err := backend.List(context.Background(), ListRequest{})
+	views, err := backend.List(context.Background(), core.ListRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -713,10 +729,10 @@ func TestDoctorCountsInventoryComputers(t *testing.T) {
 	fake := newFakeOrgoAPI()
 	fake.computers["computer_one"] = orgoComputer{ID: "computer_one", WorkspaceID: "ws_existing", Status: "running"}
 	fake.computers["computer_two"] = orgoComputer{ID: "computer_two", WorkspaceID: "ws_existing", Status: "stopped"}
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key", WorkspaceID: "ws_existing"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key", WorkspaceID: "ws_existing"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 	backend.client = fake
 
-	result, err := backend.Doctor(context.Background(), DoctorRequest{})
+	result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -729,15 +745,13 @@ func TestDoctorCountsInventoryComputers(t *testing.T) {
 }
 
 func TestBuildCommandQuotesForwardedEnvValues(t *testing.T) {
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 
-	command, err := backend.buildCommand(RunRequest{
-		Command: []string{"printf", "ok"},
-		Env: map[string]string{
-			"PIPE": "|",
-			"SEMI": ";",
-		},
-	})
+	intent, err := core.ParseCommandIntent([]string{"printf", "%s", "&&"}, false, map[int]bool{2: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, err := backend.buildCommand(intent, map[string]string{"PIPE": "|", "SEMI": ";"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -750,17 +764,20 @@ func TestBuildCommandQuotesForwardedEnvValues(t *testing.T) {
 	if strings.Contains(command, "export PIPE=|\n") || strings.Contains(command, "export SEMI=;\n") {
 		t.Fatalf("control operator leaked unquoted: %q", command)
 	}
+	if !strings.HasSuffix(command, "'printf' '%s' '&&'") {
+		t.Fatalf("literal argument was reinterpreted: %q", command)
+	}
 }
 
 func TestRunKeepOnFailurePreservesComputer(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := newFakeOrgoAPI()
 	fake.bashExitCode = 7
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key", WorkspaceID: "ws_existing"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key", WorkspaceID: "ws_existing"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 	backend.client = fake
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:          Repo{Root: t.TempDir()},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:          core.Repo{Root: t.TempDir()},
 		NoSync:        true,
 		KeepOnFailure: true,
 		Command:       []string{"false"},
@@ -781,7 +798,7 @@ func TestDeleteLeaseTreatsOwnedWorkspaceDeletionAsAuthoritative(t *testing.T) {
 	computerErr := errors.New("computer delete failed")
 	fake := newFakeOrgoAPI()
 	fake.deleteComputerErr = computerErr
-	backend := NewOrgoBackend(Provider{}.Spec(), Config{Orgo: OrgoConfig{APIKey: "test-key"}}, Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
+	backend := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "test-key"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*orgoBackend)
 
 	err := backend.deleteLease(context.Background(), fake, orgoLease{
 		LeaseID:          "lease_test",
@@ -796,5 +813,401 @@ func TestDeleteLeaseTreatsOwnedWorkspaceDeletionAsAuthoritative(t *testing.T) {
 	}
 	if got := strings.Join(fake.deletedWorkspaces, ","); got != "ws_created" {
 		t.Fatalf("deleted workspaces=%q", got)
+	}
+}
+
+type orgoRunClock struct{ at time.Time }
+
+func (c *orgoRunClock) Now() time.Time { return c.at }
+
+type orgoFailingTimingWriter struct {
+	bytes.Buffer
+	err error
+}
+
+func (w *orgoFailingTimingWriter) Write(p []byte) (int, error) {
+	if bytes.HasPrefix(p, []byte("{")) {
+		return 0, w.err
+	}
+	return w.Buffer.Write(p)
+}
+
+func TestRunFinalizesAfterAuthoritativeCleanup(t *testing.T) {
+	computerErr := errors.New("synthetic computer deletion failure")
+	workspaceErr := errors.New("synthetic workspace deletion failure")
+	for _, tc := range []struct {
+		name, workspace           string
+		commandCode               int
+		computerErr, workspaceErr error
+		wantCode                  int
+		wantKind                  core.RunErrorKind
+		wantClaim                 bool
+	}{
+		{name: "computer-cleanup", workspace: "ws_existing", computerErr: computerErr, wantCode: 1, wantKind: core.RunErrorProvider, wantClaim: true},
+		{name: "command-and-cleanup", workspace: "ws_existing", commandCode: 7, computerErr: computerErr, wantCode: 7, wantKind: core.RunErrorCommandExit, wantClaim: true},
+		{name: "workspace-cleanup", workspaceErr: workspaceErr, wantCode: 1, wantKind: core.RunErrorProvider, wantClaim: true},
+		{name: "cascade-success", computerErr: computerErr, wantCode: 0, wantKind: core.RunErrorNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			clock := &orgoRunClock{at: time.Unix(1000, 0)}
+			fake := newFakeOrgoAPI()
+			fake.bashExitCode = tc.commandCode
+			fake.deleteComputerErr = tc.computerErr
+			fake.deleteWorkspaceErr = tc.workspaceErr
+			fake.onBash = func() { clock.at = clock.at.Add(time.Second) }
+			fake.onDelete = func() { clock.at = clock.at.Add(2 * time.Second) }
+			var stderr bytes.Buffer
+			b := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "synthetic", WorkspaceID: tc.workspace}}, core.Runtime{Stdout: io.Discard, Stderr: &stderr, Clock: clock}).(*orgoBackend)
+			b.client = fake
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir()}, Command: []string{"true"}, TimingJSON: true})
+			wantStatus := core.RunStatusSucceeded
+			if tc.wantCode != 0 {
+				wantStatus = core.RunStatusFailed
+			}
+			if result.ExitCode != tc.wantCode || result.Status != wantStatus || result.ErrorKind != tc.wantKind || (err != nil) != (tc.wantCode != 0) {
+				t.Errorf("result=%+v err=%v", result, err)
+			}
+			if result.Session != nil {
+				t.Errorf("unadvertised session=%+v", result.Session)
+			}
+			if result.Command != time.Second || result.Total != 3*time.Second {
+				t.Errorf("command=%s total=%s", result.Command, result.Total)
+			}
+			if tc.wantCode != 0 {
+				var public core.ExitError
+				if !core.AsExitError(err, &public) || public.Code != tc.wantCode {
+					t.Errorf("public code=%d err=%v", public.Code, err)
+				}
+				secondary := tc.computerErr
+				if tc.workspaceErr != nil {
+					secondary = tc.workspaceErr
+				}
+				if !errors.Is(err, secondary) || !strings.Contains(public.Message, secondary.Error()) {
+					t.Errorf("lost cleanup error: %v", err)
+				}
+			}
+			_, ok, claimErr := core.ReadLeaseClaimWithPresence(result.LeaseID)
+			if claimErr != nil || ok != tc.wantClaim {
+				t.Errorf("claim=%t want=%t err=%v", ok, tc.wantClaim, claimErr)
+			}
+			var report core.TimingReport
+			count := 0
+			for _, line := range strings.Split(stderr.String(), "\n") {
+				if strings.HasPrefix(line, "{") {
+					if err := json.Unmarshal([]byte(line), &report); err != nil {
+						t.Fatal(err)
+					}
+					count++
+				}
+			}
+			if count != 1 || report.ExitCode != tc.wantCode || report.RunStatus != wantStatus || report.ErrorKind != tc.wantKind || report.TotalMs != 3000 || !report.SyncSkipped {
+				t.Errorf("timing=%+v count=%d", report, count)
+			}
+		})
+	}
+}
+
+func TestRunPreservesPrimaryHTTPCodeAndClassification(t *testing.T) {
+	for _, status := range []int{401, 403, 404, 429, 500} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := newFakeOrgoAPI()
+			fake.bashExitCode = 1
+			fake.bashErr = &orgoHTTPError{StatusCode: status, Body: "synthetic request refusal"}
+			var stderr bytes.Buffer
+			b := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "synthetic", WorkspaceID: "ws_existing"}}, core.Runtime{Stdout: io.Discard, Stderr: &stderr}).(*orgoBackend)
+			b.client = fake
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir()}, Command: []string{"true"}, KeepOnFailure: true, TimingJSON: true})
+			var expected, actual core.ExitError
+			if !core.AsExitError(fake.bashErr, &expected) || !core.AsExitError(err, &actual) {
+				t.Fatal("missing typed HTTP error")
+			}
+			if result.ExitCode != expected.Code || actual.Code != expected.Code || result.ErrorKind != core.RunErrorProvider || !errors.Is(err, fake.bashErr) {
+				t.Errorf("result=%+v code=%d want=%d err=%v", result, actual.Code, expected.Code, err)
+			}
+			if len(fake.deletedComputers) != 0 || result.Session != nil {
+				t.Errorf("cleanup=%v session=%+v", fake.deletedComputers, result.Session)
+			}
+			var report core.TimingReport
+			for _, line := range strings.Split(stderr.String(), "\n") {
+				if strings.HasPrefix(line, "{") {
+					if err := json.Unmarshal([]byte(line), &report); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if report.ExitCode != expected.Code || report.ErrorKind != core.RunErrorProvider {
+				t.Errorf("timing=%+v", report)
+			}
+		})
+	}
+}
+
+func TestRunTimingFailureKeepsPrimaryAndRetention(t *testing.T) {
+	for _, cause := range []error{nil, context.Canceled, &orgoHTTPError{StatusCode: 403, Body: "synthetic denied"}} {
+		t.Run(fmt.Sprint(cause), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := newFakeOrgoAPI()
+			fake.bashExitCode = 7
+			fake.bashErr = cause
+			writerErr := errors.New("synthetic timing writer failure")
+			writer := &orgoFailingTimingWriter{err: writerErr}
+			b := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "synthetic", WorkspaceID: "ws_existing"}}, core.Runtime{Stdout: io.Discard, Stderr: writer}).(*orgoBackend)
+			b.client = fake
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir()}, Command: []string{"false"}, KeepOnFailure: true, TimingJSON: true})
+			wantCode := 7
+			if cause != nil {
+				wantCode = 1
+				var typed core.ExitError
+				if core.AsExitError(cause, &typed) {
+					wantCode = typed.Code
+				}
+			}
+			var public core.ExitError
+			if !core.AsExitError(err, &public) || public.Code != wantCode || result.ExitCode != wantCode || !errors.Is(err, writerErr) {
+				t.Errorf("code=%d want=%d result=%+v err=%v", public.Code, wantCode, result, err)
+			}
+			if cause != nil && !errors.Is(err, cause) {
+				t.Errorf("lost primary cause: %v", err)
+			}
+			if cause == nil && !strings.Contains(public.Message, "exit=7") {
+				t.Errorf("lost command exit: %v", err)
+			}
+			if len(fake.deletedComputers) != 0 {
+				t.Errorf("retained computer deleted: %v", fake.deletedComputers)
+			}
+		})
+	}
+}
+
+type orgoTypedTimingReportWriter struct {
+	bytes.Buffer
+	err     error
+	reports []core.TimingReport
+}
+
+func (w *orgoTypedTimingReportWriter) WriteTimingReport(report core.TimingReport) error {
+	w.reports = append(w.reports, report)
+	return w.err
+}
+
+func TestRunTypedTimingReportFailurePreservesFirstPublicCode(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		commandCode int
+		cleanupErr  error
+		wantCode    int
+		wantKind    core.RunErrorKind
+	}{
+		{name: "first-writer", wantCode: 69, wantKind: core.RunErrorProvider},
+		{name: "command-first", commandCode: 7, wantCode: 7, wantKind: core.RunErrorCommandExit},
+		{name: "cleanup-first", cleanupErr: errors.New("synthetic cleanup failure"), wantCode: 1, wantKind: core.RunErrorProvider},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			fake := newFakeOrgoAPI()
+			fake.bashExitCode = tc.commandCode
+			fake.deleteComputerErr = tc.cleanupErr
+			writerErr := core.ExitError{Code: 69, Message: "synthetic typed timing failure"}
+			writer := &orgoTypedTimingReportWriter{err: writerErr}
+			b := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: "synthetic", WorkspaceID: "ws_existing"}}, core.Runtime{Stdout: io.Discard, Stderr: writer}).(*orgoBackend)
+			b.client = fake
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir()}, Command: []string{"true"}, TimingJSON: true})
+			var public core.ExitError
+			if !core.AsExitError(err, &public) || public.Code != tc.wantCode || result.ExitCode != tc.wantCode || result.ErrorKind != tc.wantKind || !errors.Is(err, writerErr) {
+				t.Errorf("result=%+v public code=%d want=%d err=%v", result, public.Code, tc.wantCode, err)
+			}
+			if !strings.Contains(public.Message, writerErr.Message) {
+				t.Errorf("writer diagnostic lost: %v", err)
+			}
+			if tc.commandCode != 0 && !strings.Contains(public.Message, "exit=7") {
+				t.Errorf("command diagnostic lost: %v", err)
+			}
+			if tc.cleanupErr != nil && !errors.Is(err, tc.cleanupErr) {
+				t.Errorf("cleanup cause lost: %v", err)
+			}
+			if len(writer.reports) != 1 || len(fake.deletedComputers) != 1 {
+				t.Fatalf("reports=%v deletes=%v", writer.reports, fake.deletedComputers)
+			}
+			wantReported := tc.commandCode
+			if tc.cleanupErr != nil {
+				wantReported = 1
+			}
+			if writer.reports[0].ExitCode != wantReported {
+				t.Errorf("report before writer failure=%+v", writer.reports[0])
+			}
+			_, claimPresent, claimErr := core.ReadLeaseClaimWithPresence(result.LeaseID)
+			if claimErr != nil || claimPresent != (tc.cleanupErr != nil) {
+				t.Errorf("claim=%t err=%v", claimPresent, claimErr)
+			}
+		})
+	}
+}
+
+func TestOrgoConfigFlagAndFactoryContract(t *testing.T) {
+	for _, provider := range []string{"orgo", " ORGO-AI ", "aws"} {
+		cfg := core.Config{Provider: provider, Orgo: core.OrgoConfig{APIKey: "inert", APIBase: "https://configured.example.test", WorkspaceID: "prior", RAMGB: 4, CPUs: 1, DiskGB: 8, Resolution: "1280x720x24"}}
+		fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+		values := RegisterOrgoProviderFlags(fs, cfg)
+		count := 0
+		fs.VisitAll(func(*flag.Flag) { count++ })
+		if count != 6 || fs.Lookup("orgo-api-key") != nil {
+			t.Fatalf("flag count=%d", count)
+		}
+		original := cfg.Orgo
+		if err := ApplyOrgoProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Orgo != original {
+			t.Fatal("unvisited changed config")
+		}
+		if err := fs.Parse([]string{"--orgo-api-base=", "--orgo-workspace-id=workspace", "--orgo-ram=0", "--orgo-cpu=-2", "--orgo-disk=-3", "--orgo-resolution=  "}); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyOrgoProviderFlags(&cfg, fs, struct{}{}); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Orgo != original {
+			t.Fatal("wrong values type changed config")
+		}
+		if err := ApplyOrgoProviderFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		want := core.OrgoConfig{APIKey: "inert", WorkspaceID: "workspace", RAMGB: 0, CPUs: -2, DiskGB: -3, Resolution: "  "}
+		if cfg.Orgo != want {
+			t.Fatalf("flags=%#v want=%#v", cfg.Orgo, want)
+		}
+		t.Setenv("CRABBOX_ORGO_API_KEY", "")
+		t.Setenv("ORGO_API_KEY", "")
+		t.Setenv("CRABBOX_ORGO_API_BASE", "https://ambient.example.test")
+		t.Setenv("ORGO_API_BASE_URL", "https://vendor.example.test")
+		b := NewOrgoBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*orgoBackend)
+		want.APIBase = "https://www.orgo.ai/api"
+		want.RAMGB = 4
+		want.CPUs = 1
+		want.DiskGB = 8
+		want.Resolution = "1280x720x24"
+		if b.cfg.Orgo != want || b.cfg.Provider != "orgo" || b.cfg.TargetOS != "linux" {
+			t.Fatalf("factory defaults=%#v", b.cfg.Orgo)
+		}
+		client, err := b.api()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if client.(*orgoHTTPClient).baseURL != "https://www.orgo.ai/api" {
+			t.Fatal("cleared flag reopened ambient base")
+		}
+	}
+}
+
+func TestOrgoConfigEffectiveDefaultsAndScope(t *testing.T) {
+	for _, raw := range []string{"", "  "} {
+		cfg := core.Config{Orgo: core.OrgoConfig{APIBase: raw, Resolution: raw, RAMGB: -2, CPUs: 0, DiskGB: -3}}
+		applyOrgoDefaults(&cfg)
+		want := core.OrgoConfig{APIBase: "https://www.orgo.ai/api", RAMGB: 4, CPUs: 1, DiskGB: 8, Resolution: "1280x720x24"}
+		if cfg.Orgo != want || cfg.Provider != "orgo" || cfg.TargetOS != "linux" {
+			t.Fatalf("defaults=%#v", cfg.Orgo)
+		}
+	}
+	cfg := core.Config{Provider: "other", TargetOS: "windows", Orgo: core.OrgoConfig{APIBase: " https://EXAMPLE.test/api/ ", Resolution: " 1920x1080 ", RAMGB: 2, CPUs: 3, DiskGB: 4, WorkspaceID: "workspace"}}
+	want := cfg.Orgo
+	applyOrgoDefaults(&cfg)
+	if cfg.Orgo != want || cfg.Provider != "orgo" || cfg.TargetOS != "windows" {
+		t.Fatal("positive/raw configured values changed")
+	}
+	if got := orgoClaimScope(cfg, " workspace "); got != "endpoint:https://example.test/api|workspace:workspace" {
+		t.Fatalf("scope=%q", got)
+	}
+	if got := orgoClaimScope(core.Config{}, " workspace "); got != "endpoint:https://www.orgo.ai/api|workspace:workspace" {
+		t.Fatalf("default scope=%q", got)
+	}
+}
+
+func TestOrgoConfigFactoryKeyNormalization(t *testing.T) {
+	for _, tc := range []struct{ name, primary, resolved, vendor, want string }{
+		{"configured", "", " inert-configured ", "inert-vendor", "inert-configured"},
+		{"primary", " inert-primary ", " inert-primary ", "inert-vendor", "inert-primary"},
+		{"vendor", "", "inert-vendor", " inert-vendor ", "inert-vendor"},
+		{"configured-blank", "", "  ", " inert-vendor ", "inert-vendor"},
+		{"primary-blank", "  ", "  ", " inert-vendor ", "inert-vendor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CRABBOX_ORGO_API_KEY", tc.primary)
+			t.Setenv("ORGO_API_KEY", tc.vendor)
+			b := NewOrgoBackend(Provider{}.Spec(), core.Config{Orgo: core.OrgoConfig{APIKey: tc.resolved}}, core.Runtime{}).(*orgoBackend)
+			api, err := b.api()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if api.(*orgoHTTPClient).apiKey != tc.want {
+				t.Fatalf("normalization changed for %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestOrgoConfigMachineFlagOrder(t *testing.T) {
+	for _, provider := range []string{"orgo", " ORGO-AI ", "aws"} {
+		for _, args := range [][]string{{"--class=large", "--type=machine"}, {"--type=machine"}} {
+			cfg := core.Config{Provider: provider}
+			fs := flag.NewFlagSet("contract", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			RegisterOrgoProviderFlags(fs, cfg)
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			err := ApplyOrgoProviderFlags(&cfg, fs, struct{}{})
+			if provider == "aws" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			want := "--type is not supported"
+			if len(args) == 2 {
+				want = "--class is not supported"
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("provider=%q err=%v want=%s", provider, err, want)
+			}
+		}
+	}
+}
+
+func TestOrgoConfigLoaderContract(t *testing.T) {
+	for _, primary := range []string{"", "inert-primary"} {
+		t.Run(primary, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			t.Chdir(t.TempDir())
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("provider: orgo\norgo:\n  apiKey: inert-configured\n  workspaceID: workspace-configured\n  ramGB: 6\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_CONFIG", path)
+			t.Setenv("CRABBOX_ORGO_API_KEY", primary)
+			t.Setenv("ORGO_API_KEY", "inert-vendor")
+			t.Setenv("CRABBOX_ORGO_WORKSPACE_ID", "workspace-env")
+			cfg, err := core.LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantKey := "inert-configured"
+			if primary != "" {
+				wantKey = primary
+			}
+			if cfg.Orgo.APIKey != wantKey || cfg.Orgo.WorkspaceID != "workspace-env" || cfg.Orgo.RAMGB != 6 || cfg.Orgo.APIBase != "https://www.orgo.ai/api" {
+				t.Fatal("public loader precedence/default contract changed")
+			}
+			backend := NewOrgoBackend(Provider{}.Spec(), cfg, core.Runtime{}).(*orgoBackend)
+			api, err := backend.api()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if api.(*orgoHTTPClient).apiKey != wantKey {
+				t.Fatal("loader/factory key mismatch")
+			}
+		})
 	}
 }

@@ -12,6 +12,7 @@ import (
 )
 
 func runCheckpointAbandonContract(t *testing.T, repo, binary string) {
+	t.Parallel()
 	t.Run("abandon legacy source preserves unknown image obligation", func(t *testing.T) {
 		f := newCheckpointAbandonFixture(t, repo, binary)
 		finishCheckpointAbandonment(t, f, captureFixtureCheckpoint)

@@ -70,7 +70,7 @@ esac
 			}
 			args = append(args, "--", command)
 			err := (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args)
-			var exitErr ExitError
+			var exitErr core.ExitError
 			if !core.AsExitError(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "blacksmith-testbox") || !strings.Contains(err.Error(), "--no-sync is not supported") {
 				t.Errorf("error=%v, want provider-specific unsupported --no-sync exit 2", err)
 			}

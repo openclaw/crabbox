@@ -166,7 +166,9 @@ func TestReadyPoolRunBorrowInputForRunRequiresExactNoSyncCommit(t *testing.T) {
 		t.Fatalf("run borrow input did not negotiate heartbeat support: %#v", input)
 	}
 
-	_, err = readyPoolRunBorrowInputForRun(Config{Actions: ActionsConfig{Ref: "feature"}}, Repo{BaseRef: "main"}, "openclaw/openclaw", true)
+	refOnlyConfig := Config{}
+	refOnlyConfig.Actions.Ref = "feature"
+	_, err = readyPoolRunBorrowInputForRun(refOnlyConfig, Repo{BaseRef: "main"}, "openclaw/openclaw", true)
 	if err == nil {
 		t.Fatal("no-sync ref-only input succeeded")
 	}
@@ -414,12 +416,12 @@ func TestRunReadyPoolEndpointPrecedesExplicitSSHPort(t *testing.T) {
 				t.Fatal(err)
 			}
 			const leaseID = "cbx_abcdef123456"
-			const runID = "run_pool_endpoint"
 			key := testOpenSSHPublicKey("ssh-ed25519", testBytes(32, 41))
 			lease := CoordinatorLease{ID: leaseID, Provider: "run-ready-pool-preflight-test", Host: "127.0.0.1", SSHUser: "lease-user", SSHPort: "2222", SSHFallbackPorts: []string{port}, SSHHostKey: key, State: "active", TargetOS: targetLinux, WorkRoot: "/work/crabbox"}
 			entry := CoordinatorReadyPoolEntry{Key: "shared-linux", LeaseID: leaseID, SSHHost: lease.Host, SSHUser: lease.SSHUser, SSHPort: port, BorrowToken: "test-borrow-token"}
 			var borrowed, returned atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				runID := strings.SplitN(strings.TrimPrefix(req.URL.Path, "/v1/runs/"), "/", 2)[0]
 				switch req.Method + " " + req.URL.Path {
 				case "POST /v1/ready-pools/shared-linux/borrow":
 					borrowed.Add(1)
@@ -438,7 +440,16 @@ func TestRunReadyPoolEndpointPrecedesExplicitSSHPort(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(CoordinatorReadyPoolResponse{Entry: entry, Lease: lease})
 				case "GET /v1/leases/" + leaseID, "POST /v1/leases/" + leaseID + "/heartbeat":
 					_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
-				case "POST /v1/runs", "POST /v1/runs/" + runID + "/finish":
+				case "PUT /v1/runs/" + runID:
+					var body struct {
+						Command []string `json:"command"`
+					}
+					if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(CoordinatorRunResponse{Run: CoordinatorRun{ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "running", Phase: "starting", Command: body.Command}})
+				case "POST /v1/runs/" + runID + "/finish":
 					_ = json.NewEncoder(w).Encode(map[string]any{"run": CoordinatorRun{ID: runID, LeaseID: leaseID, Provider: lease.Provider, State: "running"}})
 				case "POST /v1/runs/" + runID + "/events":
 					_ = json.NewEncoder(w).Encode(map[string]any{"event": CoordinatorRunEvent{RunID: runID, Seq: 1}})
@@ -466,7 +477,7 @@ func TestRunReadyPoolEndpointPrecedesExplicitSSHPort(t *testing.T) {
 			args = append(args, "--", "true")
 			reachedOwner := errors.New("stop after exact pool endpoint reaches workspace owner")
 			ownerCalls := 0
-			var output synchronizedBuffer
+			output := newSynchronizedBuffer(0)
 			app := App{Stdout: &output, Stderr: &output, workspaceOwnerAcquirer: func(_ context.Context, target SSHTarget, id string, _ io.Writer) (*workspaceOwner, error) {
 				ownerCalls++
 				if id != leaseID || target.Port != port || target.Host != lease.Host || target.User != lease.SSHUser || target.SSHHostKey != key {

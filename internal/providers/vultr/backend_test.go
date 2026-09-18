@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1771,4 +1772,60 @@ func attachCurrentVultrClaim(t *testing.T, server *core.Server, leaseID string) 
 	}
 	core.SetServerLeaseClaimSnapshot(server, claim, true)
 	return claim
+}
+
+func TestVultrConfigShowCompletePassiveSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("actual provider has no passive config-show projector")
+	}
+	for _, tc := range []struct {
+		name  string
+		input core.VultrConfig
+		want  map[string]any
+		text  string
+	}{
+		{name: "nil", input: core.VultrConfig{}, want: map[string]any{"region": "", "os": "", "image": "", "snapshot": "", "firewallGroup": "", "vpcIds": []string(nil), "sshCIDRs": []string(nil), "userScheme": ""}, text: "vultr region= os=- image=- snapshot=- firewall_group=- vpc_ids=- ssh_cidrs=- user_scheme=-\n"},
+		{name: "empty", input: core.VultrConfig{VPCIDs: []string{}, SSHCIDRs: []string{}}, want: map[string]any{"region": "", "os": "", "image": "", "snapshot": "", "firewallGroup": "", "vpcIds": []string{}, "sshCIDRs": []string{}, "userScheme": ""}, text: "vultr region= os=- image=- snapshot=- firewall_group=- vpc_ids=- ssh_cidrs=- user_scheme=-\n"},
+		{name: "simultaneous-raw-boot-strings", input: core.VultrConfig{Region: "raw-region", OS: "002284", Image: "image reference", Snapshot: "snapshot reference", FirewallGroup: "firewall reference", VPCIDs: []string{"last", "first", "last", " "}, SSHCIDRs: []string{"second", "first", "second", " "}, UserScheme: "raw-scheme"}, want: map[string]any{"region": "raw-region", "os": "002284", "image": "image reference", "snapshot": "snapshot reference", "firewallGroup": "firewall reference", "vpcIds": []string{"last", "first", "last", " "}, "sshCIDRs": []string{"second", "first", "second", " "}, "userScheme": "raw-scheme"}, text: "vultr region=raw-region os=002284 image=image reference snapshot=snapshot reference firewall_group=firewall reference vpc_ids=last,first,last,  ssh_cidrs=second,first,second,  user_scheme=raw-scheme\n"},
+		{name: "whitespace-empty-elements", input: core.VultrConfig{Region: " ", OS: " ", Image: " ", Snapshot: " ", FirewallGroup: " ", VPCIDs: []string{"", ""}, SSHCIDRs: []string{"", ""}, UserScheme: " "}, want: map[string]any{"region": " ", "os": " ", "image": " ", "snapshot": " ", "firewallGroup": " ", "vpcIds": []string{"", ""}, "sshCIDRs": []string{"", ""}, "userScheme": " "}, text: "vultr region=  os=  image=  snapshot=  firewall_group=  vpc_ids=, ssh_cidrs=, user_scheme= \n"},
+	} {
+		for _, selected := range []string{"vultr", "static"} {
+			t.Run(tc.name+"/"+selected, func(t *testing.T) {
+				cfg := core.Config{Provider: selected, Vultr: tc.input}
+				before := cfg.Vultr
+				before.VPCIDs = slices.Clone(cfg.Vultr.VPCIDs)
+				before.SSHCIDRs = slices.Clone(cfg.Vultr.SSHCIDRs)
+				section := projector.ConfigShowSection(cfg)
+				if section.JSONKey != "vultr" || section.TextLabel != "vultr" || !reflect.DeepEqual(section.Providers, []string{"vultr"}) {
+					t.Fatalf("section metadata=%#v", section)
+				}
+				wantOrder := []string{"region", "os", "image", "snapshot", "firewallGroup", "vpcIds", "sshCIDRs", "userScheme"}
+				if len(section.Fields) != len(wantOrder) {
+					t.Fatalf("field count=%d want %d", len(section.Fields), len(wantOrder))
+				}
+				got := map[string]any{}
+				line := section.TextLabel
+				for i, field := range section.Fields {
+					if field.JSONName != wantOrder[i] {
+						t.Fatalf("field %d name=%q want %q", i, field.JSONName, wantOrder[i])
+					}
+					got[field.JSONName] = field.JSONValue
+					if field.TextName != "" {
+						line += " " + field.TextName + "=" + field.TextValue
+					}
+				}
+				line += "\n"
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("public fields=%#v want %#v", got, tc.want)
+				}
+				if line != tc.text {
+					t.Fatalf("text=%q want %q", line, tc.text)
+				}
+				if !reflect.DeepEqual(cfg.Vultr, before) {
+					t.Fatal("projection mutated supplied configuration")
+				}
+			})
+		}
+	}
 }

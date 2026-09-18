@@ -10,6 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,9 +25,91 @@ import (
 	"testing"
 	"time"
 	"unicode/utf16"
+
+	"github.com/openclaw/crabbox/internal/runtimeartifact"
 )
 
 const powerShellEncodedCommandPrefix = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
+
+func TestSynchronizedBufferSnapshots(t *testing.T) {
+	for _, limit := range []int{-1, 0, 4} {
+		t.Run(strconv.Itoa(limit), func(t *testing.T) {
+			output := newSynchronizedBuffer(limit)
+			if output.Bytes() != nil || output.String() != "" {
+				t.Fatal("new capture is not empty")
+			}
+			if n, err := output.Write([]byte("ab")); n != 2 || err != nil {
+				t.Fatalf("write=%d/%v", n, err)
+			}
+			snapshot := output.Bytes()
+			snapshot[0] = 'z'
+			if output.String() != "ab" {
+				t.Fatal("snapshot mutation changed captured bytes")
+			}
+			if n, err := output.Write([]byte("cd")); n != 2 || err != nil {
+				t.Fatalf("write=%d/%v", n, err)
+			}
+			if string(snapshot) != "zb" || string(output.Bytes()) != "abcd" {
+				t.Fatalf("snapshot=%q capture=%q", snapshot, output.Bytes())
+			}
+			if retained, truncated := output.boundedString(); retained != "abcd" || truncated {
+				t.Fatalf("exact-fill view=%q/%v", retained, truncated)
+			}
+			for _, input := range []string{"e", ""} {
+				if n, err := output.Write([]byte(input)); n != len(input) || err != nil {
+					t.Fatalf("write=%d/%v", n, err)
+				}
+				retained, truncated := output.boundedString()
+				if limit > 0 {
+					if output.Bytes() != nil || output.String() != "" || retained != "abcd" || !truncated {
+						t.Fatalf("truncated views: bytes=%q string=%q bounded=%q/%v", output.Bytes(), output.String(), retained, truncated)
+					}
+				} else if string(output.Bytes()) != "abcde" || output.String() != "abcde" || retained != "abcde" || truncated {
+					t.Fatalf("unlimited views: bytes=%q string=%q bounded=%q/%v", output.Bytes(), output.String(), retained, truncated)
+				}
+			}
+		})
+	}
+}
+
+func TestSynchronizedBufferConcurrentSnapshots(t *testing.T) {
+	for _, limit := range []int{0, 4} {
+		t.Run(strconv.Itoa(limit), func(t *testing.T) {
+			output := newSynchronizedBuffer(limit)
+			start := make(chan struct{})
+			var workers sync.WaitGroup
+			for range 4 {
+				workers.Go(func() {
+					<-start
+					for range 2 {
+						if n, err := output.Write([]byte("x")); n != 1 || err != nil {
+							t.Errorf("write=%d/%v", n, err)
+						}
+					}
+				})
+			}
+			workers.Go(func() {
+				<-start
+				for range 8 {
+					if snapshot := output.Bytes(); len(snapshot) > 0 {
+						snapshot[0] = 'z'
+					}
+					_ = output.String()
+					_, _ = output.boundedString()
+				}
+			})
+			close(start)
+			workers.Wait()
+			want := "xxxxxxxx"
+			if limit > 0 {
+				want = "xxxx"
+			}
+			if retained, truncated := output.boundedString(); retained != want || truncated != (limit > 0) {
+				t.Fatalf("final view=%q/%v, want %q/%v", retained, truncated, want, limit > 0)
+			}
+		})
+	}
+}
 
 func TestSSHCommandContextBoundsPipeDrainAfterCancellation(t *testing.T) {
 	cmd := sshCommandContext(context.Background(), SSHTarget{}, "-V")
@@ -39,9 +124,10 @@ func TestWindowsPowerShellStdinScriptCommandUsesExactLengthFrame(t *testing.T) {
 		t.Fatalf("stdin script command length=%d exceeds cmd.exe limit", len(command))
 	}
 	decoded := decodePowerShellCommand(t, command)
+	assertWindowsPowerShellPathRefresh(t, decoded)
 	for _, want := range []string{
 		"$remaining = [Int64]12345",
-		"$stdin.Read($buffer, 0, $readSize)",
+		"$stdin.ReadAsync($buffer, 0, $readSize).GetAwaiter().GetResult()",
 		"SSH stdin ended before the framed payload",
 		"$scriptFile.Flush($true)",
 		"-File $path",
@@ -394,7 +480,7 @@ func TestRemoteCommandQuotesWorkdirEnvAndArgs(t *testing.T) {
 		"cd '/work/crabbox/cbx_1/my-app'",
 		"NODE_OPTIONS='--max-old-space-size=8192'",
 		"bash -lc",
-		`bash -lc 'cd '\''/work/crabbox/cbx_1/my-app'\'' && exec "$@"' bash 'pnpm' 'check:changed'`,
+		`sh 'pnpm' 'check:changed'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommand() missing %q in %q", want, got)
@@ -443,7 +529,7 @@ func TestRemoteCommandSourcesActionsEnvFile(t *testing.T) {
 		"cd '/home/runner/work/repo/repo'",
 		"if [ -f '/home/runner/.crabbox/actions/cbx-123.env.sh' ]; then . '/home/runner/.crabbox/actions/cbx-123.env.sh'; fi",
 		"CI='1'",
-		`bash -lc 'cd '\''/home/runner/work/repo/repo'\'' && exec "$@"' bash 'pnpm' 'test'`,
+		`sh 'pnpm' 'test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommandWithEnvFile() missing %q in %q", want, got)
@@ -460,7 +546,7 @@ func TestRemoteCommandSourcesMultipleEnvFilesWithoutInlineSecret(t *testing.T) {
 		"if [ -f '/home/runner/.crabbox/actions/cbx-123.env.sh' ]; then . '/home/runner/.crabbox/actions/cbx-123.env.sh'; fi",
 		"if [ -f '.crabbox/env/run.env.sh' ]; then . '.crabbox/env/run.env.sh'; fi",
 		"CI='1'",
-		`bash -lc 'cd '\''/work/repo'\'' && exec "$@"' bash 'pnpm' 'test'`,
+		`sh 'pnpm' 'test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommandWithEnvFiles() missing %q in %q", want, got)
@@ -1046,6 +1132,121 @@ func TestStaticLeaseBypassesCoordinatorAndUsesTargetServerType(t *testing.T) {
 	}
 }
 
+func TestCommandIntentArgv(t *testing.T) {
+	tests := []struct {
+		name    string
+		command []string
+		shell   bool
+		literal map[int]bool
+		want    []string
+	}{
+		{"literal argv", []string{"printf", "%s", "a b", ""}, false, nil, []string{"printf", "%s", "a b", ""}},
+		{"single inferred source", []string{"printf 'a b'"}, false, nil, []string{"bash", "-lc", "printf 'a b'"}},
+		{"explicit source", []string{"printf", "'%s'", "'a b'"}, true, nil, []string{"bash", "-lc", "printf '%s' 'a b'"}},
+		{"empty explicit source", []string{""}, true, nil, []string{"bash", "-lc", ""}},
+		{"operators", []string{"echo", "a b", "&&", "echo", "done"}, false, nil, []string{"bash", "-lc", "'echo' 'a b' && 'echo' 'done'"}},
+		{"assignment", []string{"FOO=a b", "printenv", "FOO"}, false, nil, []string{"bash", "-lc", "FOO='a b' 'printenv' 'FOO'"}},
+		{"invalid assignment is executable", []string{"bad-name=x", "arg"}, false, nil, []string{"bad-name=x", "arg"}},
+		{"literal assignment executable", []string{"FOO=x", "argument"}, false, map[int]bool{0: true}, []string{"FOO=x", "argument"}},
+		{"literal operator", []string{"echo", "&&"}, false, map[int]bool{1: true}, []string{"echo", "&&"}},
+		{"literal single source", []string{"echo ok && false"}, false, map[int]bool{0: true}, []string{"echo ok && false"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			intent, err := ParseCommandIntent(tt.command, tt.shell, tt.literal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := intent.Argv("bash", "-lc"); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("argv=%q want=%q", got, tt.want)
+			}
+			// Neither caller mutations nor a rendered transport may change the intent.
+			tt.command[0] = "changed"
+			prefix := []string{"bash", "-lc", "spare"}[:2]
+			first := intent.Argv(prefix...)
+			first[0] = "changed"
+			if got := intent.Argv("bash", "-lc"); !reflect.DeepEqual(got, tt.want) || prefix[0] != "bash" {
+				t.Fatalf("intent or prefix aliased caller storage: argv=%q prefix=%q", got, prefix)
+			}
+		})
+	}
+	if _, err := ParseCommandIntent(nil, false, nil); err == nil || err.Error() != "missing command" {
+		t.Fatalf("missing command error=%v", err)
+	}
+}
+
+func TestCommandIntentNativeTransport(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX command transport")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash unavailable")
+	}
+	home := t.TempDir()
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "FOO=x"), []byte("#!/bin/sh\nprintf literal-executable\nexit 42\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	marker := filepath.Join(home, "must-not-exist")
+	tests := []struct {
+		name    string
+		command []string
+		shell   bool
+		want    string
+		code    int
+		literal map[int]bool
+	}{
+		{"literal arguments", []string{"printf", "<%s>", "a b", "", "$HOME", "$(printf bad)", "`bad`", "*.go", "a'b"}, false, "<a b><><$HOME><$(printf bad)><`bad`><*.go><a'b>", 0, nil},
+		{"inferred source", []string{"printf '%s' 'raw source'"}, false, "raw source", 0, nil},
+		{"operators", []string{"printf", "%s", "first", "&&", "printf", "%s", "second"}, false, "firstsecond", 0, nil},
+		{"environment", []string{"CBX_NATIVE_VALUE=a b", "printenv", "CBX_NATIVE_VALUE"}, false, "a b\n", 0, nil},
+		{"explicit source", []string{"printf '%s' 'explicit source'"}, true, "explicit source", 0, nil},
+		{"empty source", []string{""}, true, "", 0, nil},
+		{"nonzero exit", []string{"exit 42"}, true, "", 42, nil},
+		{"literal assignment executable", []string{"FOO=x"}, false, "literal-executable", 42, nil},
+		{"literal assignment with argument", []string{"FOO=x", "argument"}, false, "literal-executable", 42, map[int]bool{0: true}},
+		{"literal separator", []string{"printf", "%s", ";", "touch", marker}, false, ";touch" + marker, 0, map[int]bool{2: true}},
+		{"literal mixed with intentional operator", []string{"printf", "%s", ";", "&&", "printf", "%s", "done"}, false, ";done", 0, map[int]bool{2: true}},
+	}
+	for _, tt := range tests {
+		for _, transport := range []string{"argv", "command", "source"} {
+			t.Run(fmt.Sprintf("%s/transport=%s", tt.name, transport), func(t *testing.T) {
+				intent, err := ParseCommandIntent(tt.command, tt.shell, tt.literal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				argv := intent.Argv(bash, "-lc")
+				if transport == "command" {
+					argv = []string{"/bin/sh", "-c", intent.ShellCommand(bash, "-lc")}
+				} else if transport == "source" {
+					argv = []string{"/bin/sh", "-c", intent.ShellSource()}
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+				cmd.Env = []string{"HOME=" + home, "PATH=" + bin + ":" + filepath.Dir(bash) + ":/usr/bin:/bin", "BASH_ENV=" + os.DevNull, "ENV=" + os.DevNull}
+				out, err := cmd.CombinedOutput()
+				code := 0
+				if err != nil {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) {
+						t.Fatal(err)
+					}
+					code = exitErr.ExitCode()
+				}
+				if string(out) != tt.want || code != tt.code {
+					t.Fatalf("output=%q exit=%d want=%q exit=%d", out, code, tt.want, tt.code)
+				}
+			})
+		}
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("literal separator created marker: %v", err)
+	}
+}
+
 func TestShouldUseShellForControlOperators(t *testing.T) {
 	if !shouldUseShell([]string{"pnpm", "install", "&&", "pnpm", "test"}) {
 		t.Fatal("expected shell mode for && token")
@@ -1537,7 +1738,7 @@ printf 'executed once\n'
 			if len(lines) != test.wantCalls {
 				t.Fatalf("ssh calls=%d, want %d:\n%s", len(lines), test.wantCalls, calls)
 			}
-			if got := strings.Contains(lines[len(lines)-1], "ControlMaster=no"); got != test.wantDirect {
+			if got := strings.Contains(lines[len(lines)-1], "ControlMaster=no"); !test.authSecret && got != test.wantDirect {
 				t.Fatalf("last SSH invocation disables multiplexing=%t, want %t:\n%s", got, test.wantDirect, calls)
 			}
 			if (test.wantCode == 0 || test.mode == "nested-ssh" || test.mode == "server-disconnect") && stdout.String() != "executed once\n" {
@@ -1764,7 +1965,7 @@ exit 0
 	if err := runSSHQuietWithOptionsResolvePort(t.Context(), &target, "true", "1", "1"); err != nil {
 		t.Fatal(err)
 	}
-	if target.Port != "2222" || len(target.FallbackPorts) != 0 {
+	if target.Port != "2222" {
 		t.Fatalf("successful readiness target=%#v, want pinned port 2222", target)
 	}
 	calls, err := os.ReadFile(callsPath)
@@ -1788,7 +1989,7 @@ func TestProxySSHReadinessPinsOnlyFullyReadyFallback(t *testing.T) {
 			return waitForSSHReady(ctx, target, io.Discard, "test", 5*time.Second) == nil
 		}},
 		{name: "probe", run: func(ctx context.Context, target *SSHTarget) bool {
-			return probeSSHReady(ctx, target, 5*time.Second)
+			return ProbeSSHReady(ctx, target, 5*time.Second)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1815,12 +2016,19 @@ exit 0
 				User: "crabbox", Host: "proxy.example", Port: "2222", FallbackPorts: []string{"22"},
 				SSHConfigProxy: true, ReadyCheck: "true",
 			}
-			if !test.run(t.Context(), &target) || target.Port != "22" || len(target.FallbackPorts) != 0 {
+			if !test.run(t.Context(), &target) || target.Port != "22" {
 				t.Fatalf("readiness did not pin the fully ready fallback: %+v", target)
 			}
 			calls, err := os.ReadFile(callsPath)
 			if got, want := string(calls), "2222:true\n22:true\n"; err != nil || got != want {
 				t.Fatalf("readiness calls=%q error=%v want=%q", got, err, want)
+			}
+			if err := resolveSSHPortNoInput(t.Context(), &target, "5", "1", io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(callsPath)
+			if err != nil || string(after) != string(calls) {
+				t.Fatalf("proxy readiness route was rediscovered: %s error=%v", after, err)
 			}
 		})
 	}
@@ -1897,7 +2105,7 @@ func TestSSHReadinessCallsUseTargetProfile(t *testing.T) {
 			{
 				name: "probe",
 				run: func(ctx context.Context, target *SSHTarget) bool {
-					return probeSSHReady(ctx, target, 4*time.Second)
+					return ProbeSSHReady(ctx, target, 4*time.Second)
 				},
 			},
 		} {
@@ -1984,7 +2192,7 @@ func TestWSL2ReadinessUsesDirectNoInputWrapperAndPinsFullFallback(t *testing.T) 
 	if err := probeWSL2SSHReady(t.Context(), &target, sshReadinessProfileForTarget(target), io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if target.Port != "22" || len(target.FallbackPorts) != 0 {
+	if target.Port != "22" {
 		t.Fatalf("target=%+v, want fully-ready fallback pinned", target)
 	}
 	calls, err := os.ReadFile(logPath)
@@ -1993,6 +2201,72 @@ func TestWSL2ReadinessUsesDirectNoInputWrapperAndPinsFullFallback(t *testing.T) 
 	}
 	if got, want := string(calls), "ssh:2222:shell\nsftp:2222\nssh:22:shell\nsftp:22\nssh:22:ready\n"; got != want {
 		t.Fatalf("calls=%q want=%q", got, want)
+	}
+	if err := resolveSSHPortNoInput(t.Context(), &target, "10", "3", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(logPath)
+	if err != nil || string(after) != string(calls) {
+		t.Fatalf("WSL readiness route was rediscovered: %s error=%v", after, err)
+	}
+}
+
+func TestNativeRuntimeTransportReadinessSkipsWorkloadProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake SSH fixture")
+	}
+	target := SSHTarget{User: "fixture", Host: "example.test", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, ReadyCheck: "owned readiness command"}
+	logPath := installWSL2ReadinessRecorder(t, "exit 0", target.ReadyCheck)
+	t.Setenv("CRABBOX_WSL_SHELL", wsl2ProbeCommand("exit 0", "/usr/bin/env BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c"))
+	oldProbe := probeWSLSFTPSubsystem
+	sftp := 0
+	probeWSLSFTPSubsystem = func(context.Context, SSHTarget, string, string, io.Writer) error { sftp++; return nil }
+	t.Cleanup(func() { probeWSLSFTPSubsystem = oldProbe })
+	ctx := context.WithValue(t.Context(), nativeRuntimeTransportProbeKey{}, true)
+	if err := probeWSL2SSHReady(ctx, &target, sshReadinessProfileForTarget(target), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil || string(calls) != "ssh:22:shell\n" || sftp != 1 {
+		t.Fatalf("transport-only probes: calls=%q sftp=%d err=%v", calls, sftp, err)
+	}
+	if target.preparedEndpoint != "example.test:22" {
+		t.Fatal("transport endpoint not recorded")
+	}
+}
+
+func TestNativeRuntimeNetworkProbeDoesNotRequireAdmission(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake SSH fixture")
+	}
+	target := SSHTarget{User: "fixture", Host: "tailnet.example", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, ReadyCheck: "owned readiness command"}
+	logPath := installWSL2ReadinessRecorder(t, "exit 0", target.ReadyCheck)
+	t.Setenv("CRABBOX_WSL_SHELL", wsl2ProbeCommand("exit 0", "/usr/bin/env BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c"))
+	scope := testNativeRuntimeScope()
+	scope.manifest = "selected fixture"
+	scope.install = func(context.Context, SSHTarget, runtimeartifact.Source) (*remoteNativeRuntime, error) {
+		t.Error("network discovery installed a runtime")
+		return nil, nil
+	}
+	ctx := context.WithValue(runtimeLeaseContext(t.Context(), "lease-a"), nativeRuntimeScopeKey{}, scope)
+	for _, admitted := range []bool{false, true} {
+		probeCtx := ctx
+		if admitted {
+			probeCtx = context.WithValue(ctx, nativeRuntimeAdmissionKey{}, &nativeRuntimeAdmission{lease: "lease-a"})
+		}
+		if !probeSSHTransport(probeCtx, &target, 5*time.Second) {
+			t.Fatal("unprepared candidate route was not probed")
+		}
+	}
+	if err := scope.finalizeLease(ctx, "lease-a", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if probeSSHTransport(ctx, &target, time.Second) {
+		t.Fatal("finalized lease was probed")
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil || string(calls) != "ssh:22:shell\nssh:22:shell\n" {
+		t.Fatalf("network probes=%q err=%v", calls, err)
 	}
 }
 
@@ -2018,6 +2292,57 @@ func TestWSL2ReadinessAllMissingSFTPStopsWithoutRepollOrMutation(t *testing.T) {
 	calls, readErr := os.ReadFile(logPath)
 	if readErr != nil || strings.Count(string(calls), "\n") != 2 {
 		t.Fatalf("calls=%q err=%v, want one shell/auth attempt per port", calls, readErr)
+	}
+}
+
+func TestWSL2ReadinessSFTPHostKeyRejectionStopsWithoutFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake SSH fixture")
+	}
+	exit255 := exec.Command("sh", "-c", "exit 255").Run()
+	if exitCode(exit255) != 255 {
+		t.Fatalf("fixture exit status: %v", exit255)
+	}
+	for _, prefix := range []string{"", strings.Repeat("x", 64*1024)} {
+		t.Run(fmt.Sprintf("prefix-bytes=%d", len(prefix)), func(t *testing.T) {
+			target := SSHTarget{User: "fixture", Host: "readiness.example", Port: "2222", FallbackPorts: []string{"22"}, TargetOS: targetWindows, WindowsMode: windowsModeWSL2, ReadyCheck: "true"}
+			original := target
+			logPath := installWSL2ReadinessRecorder(t, "exit 0", target.ReadyCheck)
+			oldStart := startWSLSFTPSubsystem
+			t.Cleanup(func() { startWSLSFTPSubsystem = oldStart })
+			probes := 0
+			startWSLSFTPSubsystem = func(_ context.Context, candidate SSHTarget, _, _, subsystem string, stderr io.Writer) (io.Reader, io.WriteCloser, func() error, error) {
+				probes++
+				if candidate.Port != "2222" || subsystem != "sftp" {
+					t.Errorf("unexpected fallback/subsystem: port=%s subsystem=%s", candidate.Port, subsystem)
+				}
+				for _, fragment := range []string{prefix, "private-diagnostic-data\nHost key ver", "ification failed.\r\n"} {
+					if _, err := io.WriteString(stderr, fragment); err != nil {
+						t.Fatal(err)
+					}
+				}
+				clientConn, serverConn := net.Pipe()
+				_ = serverConn.Close()
+				return clientConn, clientConn, func() error { return exit255 }, nil
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			var progress bytes.Buffer
+			err := waitForSSHReady(ctx, &target, &progress, "before sync", time.Minute)
+			if !errors.Is(err, errSSHHostKeyVerification) || !errors.Is(err, exit255) || ctx.Err() != nil {
+				t.Errorf("readiness did not preserve immediate host-key failure: %v (context=%v)", err, ctx.Err())
+			}
+			if probes != 1 || !reflect.DeepEqual(target, original) {
+				t.Errorf("probes=%d target=%+v, want one probe and unchanged target", probes, target)
+			}
+			if strings.Contains(err.Error(), "private-diagnostic-data") || strings.Contains(progress.String(), "waiting for") {
+				t.Error("host-key failure leaked into its error or entered readiness backoff")
+			}
+			calls, readErr := os.ReadFile(logPath)
+			if readErr != nil || string(calls) != "ssh:2222:shell\n" {
+				t.Errorf("SSH calls=%q err=%v, want only the initial transport probe", calls, readErr)
+			}
+		})
 	}
 }
 
@@ -2107,7 +2432,7 @@ func TestWindowsSSHReadyProbeHonorsCallerBudget(t *testing.T) {
 		ReadyCheck:     "true",
 	}
 	start := time.Now()
-	if probeSSHReady(context.Background(), &target, 20*time.Millisecond) {
+	if ProbeSSHReady(context.Background(), &target, 20*time.Millisecond) {
 		t.Fatal("Windows readiness probe ignored the caller's short budget")
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -2409,6 +2734,23 @@ func TestSSHControlPathIsScopedByKey(t *testing.T) {
 	if !strings.HasPrefix(filepath.Base(left), "crabbox-ssh-") || !strings.HasSuffix(left, "-%C") {
 		t.Fatalf("unexpected control path %q", left)
 	}
+	t.Run("selected roots with the same endpoint", func(t *testing.T) {
+		dirs := isolateTestUserDirs(t)
+		keyA, err := testboxKeyPath("cbx_1516")
+		if err != nil {
+			t.Fatal(err)
+		}
+		left := sshControlPath(SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "2222", Key: keyA})
+		t.Setenv("XDG_STATE_HOME", filepath.Join(dirs.Root, "other-state"))
+		keyB, err := testboxKeyPath("cbx_1516")
+		if err != nil || keyA == keyB {
+			t.Fatalf("selected roots did not resolve distinct keys: %q %q %v", keyA, keyB, err)
+		}
+		right := sshControlPath(SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "2222", Key: keyB})
+		if left == right {
+			t.Fatalf("selected roots shared a control path for the same endpoint: %q", left)
+		}
+	})
 }
 
 func TestSSHControlPathIsScopedByProxyAndCertificate(t *testing.T) {
@@ -2472,11 +2814,11 @@ func TestSSHWaitProgressIncludesElapsedAndRemaining(t *testing.T) {
 	}
 }
 
-func TestSSHWaitProgressDistinguishesAuthFromReadiness(t *testing.T) {
+func TestSSHWaitProgressDistinguishesTransportFromReadiness(t *testing.T) {
 	target := &SSHTarget{Host: "203.0.113.10", Port: "2222"}
 	got := sshWaitProgressMessage(target, "bootstrap", "2222", "", "2222:tcp", 5*time.Second, time.Minute)
-	if !strings.Contains(got, "bootstrap ssh-auth") {
-		t.Fatalf("TCP-only progress should report ssh-auth stage: %q", got)
+	if !strings.Contains(got, "bootstrap ssh-transport") {
+		t.Fatalf("TCP-only progress should report ssh-transport stage: %q", got)
 	}
 	got = sshWaitProgressMessage(target, "bootstrap", "2222", "2222", "2222:auth", 5*time.Second, time.Minute)
 	if !strings.Contains(got, "bootstrap ready-check") {
@@ -2728,10 +3070,15 @@ func TestRemotePruneSyncManifestDeletesOnlyManagedPaths(t *testing.T) {
 
 func TestRemotePruneSyncManifestUsesDeletedListBeforeOldManifestDiff(t *testing.T) {
 	got := remotePruneSyncManifest("/work/repo", "0123456789abcdef0123456789abcdef")
-	deletedIndex := strings.Index(got, `delete_paths < "$deleted"`)
-	oldIndex := strings.Index(got, "manifest_removed_paths | delete_paths")
-	if deletedIndex < 0 || oldIndex < 0 || deletedIndex > oldIndex {
-		t.Fatalf("deleted list should be applied before old manifest diff: %q", got)
+	// Both the Bash and POSIX branches must finish explicit deletions before
+	// computing the old-manifest difference and consuming its staged output.
+	want := `if [ -f "$deleted" ]; then delete_paths "$deleted"; fi
+if [ -f "$old" ] && [ -f "$new" ]; then
+  manifest_removed_paths > "$prune_paths"
+  delete_paths "$prune_paths"
+fi`
+	if strings.Count(got, want) != 2 {
+		t.Fatalf("deleted list should be applied before old manifest diff in both shell branches: %q", got)
 	}
 }
 
@@ -2742,10 +3089,236 @@ func TestRemotePruneSyncManifestForWSL2UsesShortCoreutils(t *testing.T) {
 			t.Fatalf("WSL2 prune command missing %q in %q", want, got)
 		}
 	}
-	for _, notWant := range []string{"command -v python3", "command -v perl"} {
+	for _, notWant := range []string{"python", "perl"} {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("WSL2 prune command should stay short, found %q in %q", notWant, got)
 		}
+	}
+}
+
+func TestRemoteSyncNULConsumerPreservesRecords(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX manifest consumer")
+	}
+	shells := []string{"/bin/sh"}
+	if dash, err := exec.LookPath("dash"); err == nil {
+		shells = append(shells, dash)
+	}
+	for _, shell := range shells {
+		t.Run(filepath.Base(shell), func(t *testing.T) {
+			workdir := t.TempDir()
+			input := filepath.Join(workdir, "records")
+			want := []byte("space name\x00line\nname\n\x00caf\xc3\xa9\x00binary\xff\x00\x00")
+			if err := os.WriteFile(input, append(append([]byte(nil), want...), []byte("unterminated")...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			script := "set -e\nmeta_dir=" + shellQuote(workdir) + "\n" + remoteSyncPruneFiles("records") +
+				remoteSyncNULConsumer(`      printf '%s\000' "$rel"`) + "delete_paths " + shellQuote(input)
+			out, err := exec.Command(shell, "-c", script).CombinedOutput()
+			if err != nil || !bytes.Equal(out, want) {
+				t.Fatalf("records=%q want=%q err=%v", out, want, err)
+			}
+			files, err := filepath.Glob(filepath.Join(workdir, "sync-prune.*"))
+			if err != nil || len(files) != 0 {
+				t.Fatalf("prune temporary files remain: %v err=%v", files, err)
+			}
+		})
+	}
+}
+
+func BenchmarkRemoteSyncNULConsumer(b *testing.B) {
+	if runtime.GOOS == "windows" {
+		b.Skip("POSIX manifest consumer")
+	}
+	shells := []string{"/bin/sh"}
+	if dash, err := exec.LookPath("dash"); err == nil {
+		shells = append(shells, dash)
+	}
+	for _, shell := range shells {
+		for _, records := range []int{100, 1000} {
+			b.Run(fmt.Sprintf("%s/%d", filepath.Base(shell), records), func(b *testing.B) {
+				workdir := b.TempDir()
+				input := filepath.Join(workdir, "records")
+				want := []byte(strings.Repeat("packages/example/src/filename with spaces.go\x00", records))
+				if err := os.WriteFile(input, want, 0o600); err != nil {
+					b.Fatal(err)
+				}
+				script := "set -e\nmeta_dir=" + shellQuote(workdir) + "\n" + remoteSyncPruneFiles("benchmark") +
+					remoteSyncNULConsumer(`      printf '%s\000' "$rel"`) + "delete_paths " + shellQuote(input)
+				b.SetBytes(int64(len(want)))
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					out, err := exec.Command(shell, "-c", script).CombinedOutput()
+					if err != nil || !bytes.Equal(out, want) {
+						b.Fatalf("record mismatch: output bytes=%d err=%v", len(out), err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRemoteNULRecordLoopPreservesInlineState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX manifest consumer")
+	}
+	shells := []string{"/bin/sh"}
+	if dash, err := exec.LookPath("dash"); err == nil {
+		shells = append(shells, dash)
+	}
+	for _, shell := range shells {
+		t.Run(filepath.Base(shell), func(t *testing.T) {
+			root := t.TempDir()
+			outer, inner := filepath.Join(root, "outer"), filepath.Join(root, "inner")
+			mustWriteTestFile(t, outer, "a\x00skip\x00b\x00unfinished")
+			mustWriteTestFile(t, inner, "1\x00\x00last\n\x00unfinished")
+			innerLoop := remoteNULRecordLoop("inner", shellQuote(inner), shellQuote(inner+".scratch"), `set -- "$@" "$outer:$inner"`, "exit 23")
+			outerLoop := remoteNULRecordLoop("outer", shellQuote(outer), shellQuote(outer+".scratch"), "case \"$outer\" in skip) continue ;; esac\n"+innerLoop, "exit 23")
+			script := "set -e\nset -- initial\n" + outerLoop + `printf '%s\000' "$@" "$outer" "$inner"`
+			out, err := exec.Command(shell, "-c", script).CombinedOutput()
+			want := "initial\x00a:1\x00a:\x00a:last\n\x00b:1\x00b:\x00b:last\n\x00b\x00last\n\x00"
+			if err != nil || string(out) != want {
+				t.Fatalf("nested loop state=%q want=%q err=%v", out, want, err)
+			}
+			missing := remoteNULRecordLoop("record", shellQuote(filepath.Join(root, "missing")), shellQuote(filepath.Join(root, "scratch")), `printf 'body ran'`, "exit 23")
+			if out, err := exec.Command(shell, "-c", "set -e\n"+missing).Output(); exitCode(err) != 23 || len(out) != 0 {
+				t.Fatalf("input failure executed body or lost status: output=%q err=%v", out, err)
+			}
+			failedBody := remoteNULRecordLoop("record", shellQuote(outer), shellQuote(filepath.Join(root, "scratch")), "false\nprintf 'body continued'", "exit 23")
+			if out, err := exec.Command(shell, "-c", "set -e\n"+failedBody).Output(); exitCode(err) != 1 || len(out) != 0 {
+				t.Fatalf("loop disabled body error propagation: output=%q err=%v", out, err)
+			}
+		})
+	}
+}
+
+func TestRemotePrunePreservesStatusWithoutLogout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX sync control")
+	}
+	const token = "0123456789abcdef0123456789abcdef"
+	workdir := t.TempDir()
+	meta := filepath.Join(workdir, ".crabbox")
+	for _, name := range []string{"old.txt", "keep.txt"} {
+		mustWriteTestFile(t, filepath.Join(workdir, name), "fixture")
+	}
+	mustWriteTestFile(t, filepath.Join(meta, "sync-manifest"), "old.txt\x00keep.txt\x00")
+	mustWriteTestFile(t, filepath.Join(meta, remoteSyncPendingManifestName(token)), "keep.txt\x00")
+	mustWriteTestFile(t, filepath.Join(meta, remoteSyncPendingDeletedName(token)), "")
+	command := "/bin/sh -c " + shellQuote(remotePruneSyncManifest(workdir, token))
+	if out, err := runGitControlWithShellHook(t, "logout", command); err != nil {
+		t.Fatalf("successful prune status changed: %v %s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "old.txt")); !os.IsNotExist(err) {
+		t.Fatalf("old file retained: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "keep.txt")); err != nil {
+		t.Fatal(err)
+	}
+	// The same cleanup trap must preserve failure too, without invoking logout.
+	script := "set -e\nmeta_dir=" + shellQuote(meta) + "\n" + remoteSyncPruneFiles(token) + "/bin/sh -c 'exit 23'\n"
+	if out, err := runGitControlWithShellHook(t, "logout", remotePortableShellInvocation(script, nil)); exitCode(err) != 23 {
+		t.Fatalf("failed prune status changed: %v %s", err, out)
+	}
+	files, err := filepath.Glob(filepath.Join(meta, "sync-prune.*"))
+	if err != nil || len(files) != 0 {
+		t.Fatalf("prune staging retained: %v %v", files, err)
+	}
+}
+
+func TestRemotePrunePortableFilenames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX manifest consumer")
+	}
+	const token = "0123456789abcdef0123456789abcdef"
+	for _, mode := range []string{"ordinary", "plain", "coreutils"} {
+		t.Run(mode, func(t *testing.T) {
+			workdir := t.TempDir()
+			tools := t.TempDir()
+			names := []string{"mktemp", "cat", "od", "rm", "rmdir", "dirname"}
+			if mode != "coreutils" {
+				names = append(names, "python3", "perl")
+			}
+			for _, name := range names {
+				if path, err := exec.LookPath(name); err == nil {
+					if err := os.Symlink(path, filepath.Join(tools, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if mode == "coreutils" {
+				for _, name := range []string{"sort", "comm"} {
+					path, err := exec.LookPath("g" + name)
+					if err != nil {
+						path, err = exec.LookPath(name)
+					}
+					if err != nil {
+						t.Skipf("%s unavailable", name)
+					}
+					args := []string{"-z", os.DevNull}
+					if name == "comm" {
+						args = append(args, os.DevNull)
+					}
+					if out, err := exec.Command(path, args...).CombinedOutput(); err != nil {
+						t.Skipf("%s -z unavailable: %v %s", name, err, out)
+					}
+					if err := os.Symlink(path, filepath.Join(tools, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			meta := filepath.Join(workdir, ".crabbox")
+			stale := []string{"space name.txt", "line\nname\n", "caf\u00e9.txt", "old-dir/last\n"}
+			for _, name := range append(append([]string(nil), stale...), "keep.txt", "unmanaged.txt", "explicit.txt") {
+				mustWriteTestFile(t, filepath.Join(workdir, name), "fixture")
+			}
+			mustWriteTestFile(t, filepath.Join(meta, "sync-manifest"), strings.Join(append(stale, "keep.txt"), "\x00")+"\x00")
+			mustWriteTestFile(t, filepath.Join(meta, remoteSyncPendingManifestName(token)), "keep.txt\x00")
+			mustWriteTestFile(t, filepath.Join(meta, remoteSyncPendingDeletedName(token)), "explicit.txt\x00")
+			runPrune := func(dir string) ([]byte, error) {
+				command := remotePruneSyncManifest(dir, token)
+				if mode == "plain" {
+					command = remotePruneSyncManifestForTargetMode(SSHTarget{TargetOS: targetLinux}, dir, token, true)
+				}
+				if mode == "coreutils" {
+					command = remotePruneSyncManifestCoreutils(dir, token)
+				}
+				// Exercise the same source with Dash and no Bash in the legacy
+				// owner's PATH. Plain mode retains its fixed hermetic environment.
+				if dash, err := exec.LookPath("dash"); err == nil {
+					command = strings.Replace(command, "/bin/sh -c ", shellQuote(dash)+" -c ", 1)
+				}
+				cmd := exec.Command("/bin/sh", "-c", command)
+				cmd.Env = []string{"PATH=" + tools, "HOME=" + t.TempDir()}
+				return cmd.CombinedOutput()
+			}
+			out, err := runPrune(workdir)
+			if err != nil {
+				t.Fatalf("prune failed: %v\n%s", err, out)
+			}
+			for _, name := range append(stale, "explicit.txt") {
+				if _, err := os.Stat(filepath.Join(workdir, name)); !os.IsNotExist(err) {
+					t.Errorf("managed file %q remains: %v", name, err)
+				}
+			}
+			for _, name := range []string{"keep.txt", "unmanaged.txt"} {
+				if _, err := os.Stat(filepath.Join(workdir, name)); err != nil {
+					t.Errorf("retained file %q missing: %v", name, err)
+				}
+			}
+			files, err := filepath.Glob(filepath.Join(meta, "sync-prune.*"))
+			if err != nil || len(files) != 0 {
+				t.Fatalf("prune temporary files remain: %v err=%v", files, err)
+			}
+			empty := t.TempDir()
+			if out, err := runPrune(empty); err != nil {
+				t.Fatalf("empty workspace prune: %v\n%s", err, out)
+			}
+			entries, err := os.ReadDir(empty)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("no-op prune created metadata: %v err=%v", entries, err)
+			}
+		})
 	}
 }
 
@@ -2852,7 +3425,7 @@ func TestRemotePruneSyncManifestFallsBackToPerlWithoutPython(t *testing.T) {
 	mustWriteTestFile(t, filepath.Join(workdir, "stale.txt"), "stale")
 
 	toolDir := t.TempDir()
-	for _, name := range []string{"dirname", "rm", "rmdir"} {
+	for _, name := range []string{"cat", "dirname", "rm", "rmdir", "mktemp", "od"} {
 		mustWriteTestCommandWrapper(t, toolDir, name)
 	}
 	mustWriteTestBashNoProfileWrapper(t, toolDir)
@@ -2886,7 +3459,7 @@ func TestRemotePruneSyncManifestFailsClosedWhenInterpreterFails(t *testing.T) {
 	mustWriteTestFile(t, filepath.Join(workdir, "stale.txt"), "stale")
 
 	toolDir := t.TempDir()
-	for _, name := range []string{"dirname", "rm", "rmdir"} {
+	for _, name := range []string{"cat", "dirname", "rm", "rmdir", "mktemp", "od"} {
 		mustWriteTestCommandWrapper(t, toolDir, name)
 	}
 	mustWriteTestBashNoProfileWrapper(t, toolDir)
@@ -2897,11 +3470,15 @@ func TestRemotePruneSyncManifestFailsClosedWhenInterpreterFails(t *testing.T) {
 	}
 	cmd := exec.Command(bashPath, "--noprofile", "--norc", "-c", remotePruneSyncManifest(workdir, "0123456789abcdef0123456789abcdef"))
 	cmd.Env = append(os.Environ(), "PATH="+toolDir)
-	if out, err := cmd.CombinedOutput(); err == nil {
-		t.Fatalf("remote prune unexpectedly succeeded\n%s", out)
+	if out, err := cmd.CombinedOutput(); exitCode(err) != 23 {
+		t.Fatalf("remote prune did not preserve interpreter exit 23: err=%v\n%s", err, out)
 	}
 	if _, err := os.Stat(filepath.Join(workdir, "stale.txt")); err != nil {
 		t.Fatalf("stale.txt should survive interpreter failure: %v", err)
+	}
+	files, err := filepath.Glob(filepath.Join(workdir, ".crabbox", "sync-prune.*"))
+	if err != nil || len(files) != 0 {
+		t.Fatalf("interpreter failure left prune temporary files: %v err=%v", files, err)
 	}
 }
 
@@ -2912,7 +3489,7 @@ func TestRemotePruneSyncManifestDoesNotSwallowReadErrors(t *testing.T) {
 			t.Fatalf("remote prune still treats manifest read errors as missing: %q", unsafe)
 		}
 	}
-	if !strings.Contains(got, "set -e -o pipefail") {
+	if !strings.Contains(got, `manifest_removed_paths > "$prune_paths"`) {
 		t.Fatalf("remote prune must propagate interpreter failures: %q", got)
 	}
 }
@@ -2984,6 +3561,48 @@ func TestRemoteFinalizeSyncCommitsMetadataInOneCommand(t *testing.T) {
 	}
 	if string(completeToken) != finalizeToken {
 		t.Fatalf("unexpected complete token: %q", completeToken)
+	}
+}
+
+func TestRemoteFinalizeSyncPlainManifestSuppressesOriginState(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	workdir := t.TempDir()
+	runGit(t, workdir, "init")
+	runGit(t, workdir, "config", "user.email", "alice@example.com")
+	runGit(t, workdir, "config", "user.name", "Alice")
+	mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "tracked\n")
+	runGit(t, workdir, "add", ".")
+	runGit(t, workdir, "commit", "-qm", "base")
+	metaDir := coherenceMetaDir(t, workdir)
+	mustWriteTestFile(t, filepath.Join(metaDir, remoteSyncPendingManifestName(token)), "tracked.txt\x00")
+	mustWriteTestFile(t, filepath.Join(metaDir, "sync-fingerprint"), "stale")
+	mustWriteTestFile(t, filepath.Join(metaDir, "git-hydrate-base"), "main stale\n")
+
+	command := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+		PlainManifest: true,
+		HydrateGit:    true,
+		BaseRef:       "main",
+		BaseSHA:       "abc123",
+		Fingerprint:   "must-not-publish",
+		Token:         token,
+	})
+	for _, forbidden := range []string{"git fetch ", "repair_origin", "base_tmp=", "refs/remotes/origin/"} {
+		if strings.Contains(command, forbidden) {
+			t.Fatalf("plain manifest finalize contains %q:\n%s", forbidden, command)
+		}
+	}
+	for _, want := range []string{"plain_git status --porcelain=v1", "protocol.allow=never", "BASH_ENV=/dev/null", "ENV=/dev/null"} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("plain manifest finalize missing %q:\n%s", want, command)
+		}
+	}
+	if out, err := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("plain manifest finalize: %v\n%s", err, out)
+	}
+	for _, name := range []string{"sync-fingerprint", "git-hydrate-base"} {
+		if _, err := os.Stat(filepath.Join(metaDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s survived plain manifest finalize: %v", name, err)
+		}
 	}
 }
 
@@ -3367,17 +3986,13 @@ exec ` + shellQuote(gitOutput("", "--exec-path")+"/git") + ` "$@"
 	if err := os.WriteFile(filepath.Join(tools, "git"), []byte(gitScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	envFile := filepath.Join(tools, "env")
-	if err := os.WriteFile(envFile, []byte("export PATH="+shellQuote(tools)+":$PATH\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	commonEnv := []string{
-		"BASH_ENV=" + envFile,
+		"PATH=" + tools + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"CRABBOX_COHERENT_READY=" + coherentReady,
 		"CRABBOX_OVERLAY_WROTE=" + overlayWrote,
 		"CRABBOX_RELEASE_OVERLAY=" + releaseOverlay,
 	}
-	coherent := exec.Command("bash", "-lc", remoteFinalizeSync(coherentWorkdir, remoteSyncFinalizeOptions{
+	coherent := exec.Command("/bin/sh", "-c", remoteFinalizeSync(coherentWorkdir, remoteSyncFinalizeOptions{
 		Token:       token,
 		Fingerprint: "coherent",
 		Coherence:   plan,
@@ -3417,7 +4032,7 @@ exec ` + shellQuote(gitOutput("", "--exec-path")+"/git") + ` "$@"
 	}
 	waitForPath(coherentReady, "coherent finalizer did not reach candidate status inspection")
 
-	overlay = exec.Command("bash", "-lc", remoteFinalizeSync(overlayWorkdir, remoteSyncFinalizeOptions{Token: token}))
+	overlay = exec.Command("/bin/sh", "-c", remoteFinalizeSync(overlayWorkdir, remoteSyncFinalizeOptions{Token: token}))
 	overlay.Env = append(os.Environ(), append(commonEnv, "CRABBOX_STATUS_ROLE=overlay")...)
 	var overlayOutput bytes.Buffer
 	overlay.Stdout = &overlayOutput
@@ -3613,7 +4228,7 @@ func stageCoherenceFinalize(t *testing.T, workdir, token string) {
 }
 
 func runCoherenceFinalize(workdir string, plan gitCoherencePlan, token, fingerprint string, env ...string) ([]byte, error) {
-	cmd := exec.Command("bash", "-lc", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
+	cmd := exec.Command("/bin/sh", "-c", remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{
 		Token:       token,
 		Fingerprint: fingerprint,
 		Coherence:   plan,
@@ -3654,6 +4269,125 @@ func requireGitOutput(t *testing.T, workdir, want string, args ...string) {
 	t.Helper()
 	if got := gitOutput(workdir, args...); got != want {
 		t.Fatalf("git %v=%q want %q", args, got, want)
+	}
+}
+
+func newGitCoherenceFixtureWithDeletedTopic(t *testing.T) gitCoherenceFixture {
+	t.Helper()
+	f := newGitCoherenceFixture(t)
+	runGit(t, f.origin, "update-ref", "refs/heads/alpha-deleted", f.b)
+	runGit(t, f.origin, "update-ref", "refs/heads/release", f.c)
+	runGit(t, f.source, "fetch", "--no-prune", "origin", "+refs/heads/*:refs/remotes/origin/*")
+	runGit(t, f.origin, "update-ref", "-d", "refs/heads/alpha-deleted")
+	runGit(t, f.source, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	runGit(t, f.source, "checkout", "--quiet", "--detach", f.b)
+	requireGitOutput(t, f.origin, "", "for-each-ref", "refs/heads/alpha-deleted")
+	requireGitOutput(t, f.source, f.b, "rev-parse", "refs/remotes/origin/alpha-deleted")
+	refs := gitOutput(f.source, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/remotes/origin")
+	t.Cleanup(func() {
+		requireGitOutput(t, f.source, refs, "for-each-ref", "--format=%(refname) %(objectname) %(symref)", "refs/remotes/origin")
+		requireGitOutput(t, f.source, f.b, "rev-parse", "HEAD")
+	})
+	return f
+}
+
+func TestRemoteGitSeedAndCoherencePreferContainingBranchOverDeletedTopic(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell Git seed/coherence fixture")
+	}
+	t.Parallel()
+	f := newGitCoherenceFixtureWithDeletedTopic(t)
+	for _, tc := range []struct {
+		name, configuredBase, baseRef, want string
+	}{
+		{"repository base", "", "main", "main"},
+		{"origin default", "", "missing", "main"},
+		{"configured base after default deletion", "release", "main", "release"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reusedWorkdir := f.workspace(t, f.c, true)
+			if tc.configuredBase != "" {
+				runGit(t, f.origin, "update-ref", "-d", "refs/heads/main")
+				requireGitOutput(t, f.source, f.c, "rev-parse", "refs/remotes/origin/main")
+			}
+			cfg := baseConfig()
+			cfg.Sync.BaseRef = tc.configuredBase
+			plan, blocked := syncGitCoherencePlan(cfg, Repo{
+				Root: f.source, RemoteURL: f.origin, Head: f.b, BaseRef: tc.baseRef,
+			})
+			if blocked || !plan.enabled() {
+				t.Fatalf("coherence plan unavailable: blocked=%v plan=%#v", blocked, plan)
+			}
+			for _, mode := range []string{"seed", "coherence"} {
+				t.Run(mode, func(t *testing.T) {
+					var workdir string
+					if mode == "seed" {
+						workdir = filepath.Join(t.TempDir(), "work")
+						if out, err := exec.Command("/bin/sh", "-c", remoteGitSeed(workdir, plan)).CombinedOutput(); err != nil {
+							t.Fatalf("seed via %q: %v\n%s", plan.Branch, err, out)
+						}
+					} else {
+						workdir = reusedWorkdir
+						mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+						const token = "abababababababababababababababab"
+						stageCoherenceFinalize(t, workdir, token)
+						if out, err := runCoherenceFinalize(workdir, plan, token, "fp-b"); err != nil {
+							t.Fatalf("coherence via %q: %v\n%s", plan.Branch, err, out)
+						}
+						if got := readCoherentFingerprint(t, workdir, plan); got != "fp-b" {
+							t.Fatalf("coherent fingerprint=%q", got)
+						}
+					}
+					if plan.Branch != tc.want {
+						t.Fatalf("branch=%q, want %q", plan.Branch, tc.want)
+					}
+					requireGitOutput(t, workdir, f.b, "rev-parse", "HEAD")
+					requireGitOutput(t, workdir, gitOutput(f.source, "rev-parse", f.b+"^{tree}"), "write-tree")
+					requireGitOutput(t, workdir, f.c, "rev-parse", "refs/remotes/origin/"+tc.want)
+					requireGitOutput(t, workdir, "", "status", "--porcelain")
+				})
+			}
+		})
+	}
+}
+
+func TestWindowsGitSeedAndCoherenceUseContainingBranch(t *testing.T) {
+	t.Parallel()
+	f := newGitCoherenceFixtureWithDeletedTopic(t)
+	plan, blocked := syncGitCoherencePlan(baseConfig(), Repo{
+		Root: f.source, RemoteURL: f.origin, Head: f.b, BaseRef: "origin/main",
+	})
+	if blocked || !plan.enabled() {
+		t.Fatalf("coherence plan unavailable: blocked=%v plan=%#v", blocked, plan)
+	}
+	tree := gitOutput(f.source, "rev-parse", f.b+"^{tree}")
+	for _, tc := range []struct {
+		name, command string
+		want          []string
+	}{
+		{"seed", windowsGitSeed(`C:\work\repo`, plan), []string{
+			"--single-branch --branch 'main' $expectedOrigin $tmp",
+			"checkout --quiet --detach '" + f.b + "'",
+			"$expectedTree = '" + tree + "'",
+		}},
+		{"coherence", windowsGitCoherence(`C:\work\repo`, plan), []string{
+			`("+refs/heads/" + 'main' + ":" + $tmpRef)`,
+			"$target = '" + f.b + "'; $tree = '" + tree + "'",
+			"git merge-base --is-ancestor $target $tmpRef",
+			"git update-ref --no-deref HEAD $target $oldHead",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decoded := decodePowerShellCommand(t, tc.command)
+			for _, want := range tc.want {
+				if !strings.Contains(decoded, want) {
+					t.Errorf("Windows %s missing %q (plan branch=%q)", tc.name, want, plan.Branch)
+				}
+			}
+			if strings.Contains(decoded, "alpha-deleted") || strings.Contains(decoded, f.c) {
+				t.Error("Windows command selected deleted topic or newer branch tip")
+			}
+		})
 	}
 }
 
@@ -3707,7 +4441,7 @@ func TestRemoteGitCoherenceExitTrapBehavior(t *testing.T) {
 		beforeIndex := coherenceIndexBytes(t, workdir)
 		tools := coherenceFailureTools(t, plan.Target)
 		out, err := runCoherenceFinalize(workdir, plan, token, "fp-failure",
-			"BASH_ENV="+filepath.Join(tools, "env"), "CRABBOX_FAIL_MV=complete")
+			"PATH="+tools+string(os.PathListSeparator)+os.Getenv("PATH"), "CRABBOX_FAIL_MV=complete")
 		if got := exitCode(err); got != 94 {
 			t.Fatalf("failed finalize exit=%d, want original exit 94: %v\n%s", got, err, out)
 		}
@@ -3771,7 +4505,7 @@ func TestRemoteGitCoherenceRepairsReuseBeforeFingerprintSkip(t *testing.T) {
 	if got := readCoherentFingerprint(t, workdir, planB); got != "fp-b" {
 		t.Fatalf("coherent B fingerprint=%q", got)
 	}
-	if out, err := exec.Command("bash", "-lc", remoteInvalidateSyncFingerprintForTarget(SSHTarget{TargetOS: targetLinux}, workdir)).CombinedOutput(); err != nil {
+	if out, err := exec.Command("bash", "-lc", remoteInvalidateSyncFingerprintForTarget(SSHTarget{TargetOS: targetLinux}, workdir, false)).CombinedOutput(); err != nil {
 		t.Fatalf("invalidate fingerprint: %v\n%s", err, out)
 	}
 	if got := readCoherentFingerprint(t, workdir, planB); got != "" {
@@ -3797,7 +4531,7 @@ func TestRemoteGitCoherenceFailsClosedWhenAdvertisedBranchCannotBeVerified(t *te
 	f := newGitCoherenceFixture(t)
 	workdir := f.workspace(t, f.a, true)
 	plan := f.plan(t, f.b)
-	plan.RemoteURL = filepath.Join(t.TempDir(), "missing-origin.git")
+	plan.Branch = "missing"
 	const token = "abababababababababababababababab"
 	stageCoherenceFinalize(t, workdir, token)
 	out, err := runCoherenceFinalize(workdir, plan, token, "must-not-publish")
@@ -3881,9 +4615,6 @@ exec /bin/mv "$@"
 	if err := os.WriteFile(filepath.Join(dir, "mv"), []byte(mvScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "env"), []byte("export PATH="+shellQuote(dir)+":$PATH\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	return dir
 }
 
@@ -3898,7 +4629,7 @@ func TestRemoteGitCoherenceRollsBackFailuresAndRetries(t *testing.T) {
 			stageCoherenceFinalize(t, workdir, token)
 			beforeIndex := coherenceIndexBytes(t, workdir)
 			tools := coherenceFailureTools(t, plan.Target)
-			env := []string{"BASH_ENV=" + filepath.Join(tools, "env")}
+			env := []string{"PATH=" + tools + string(os.PathListSeparator) + os.Getenv("PATH")}
 			if failure == "fingerprint" || failure == "complete" {
 				env = append(env, "CRABBOX_FAIL_MV="+failure)
 			} else {
@@ -3934,7 +4665,7 @@ func TestRemoteGitCoherenceDoesNotOverwriteConcurrentRollbackChanges(t *testing.
 			token := fmt.Sprintf("%032x", len(failure)+200)
 			stageCoherenceFinalize(t, workdir, token)
 			tools := coherenceFailureTools(t, plan.Target)
-			env := []string{"BASH_ENV=" + filepath.Join(tools, "env"), "CRABBOX_FAIL_MV=" + failure, "CRABBOX_CONCURRENT_WORKDIR=" + workdir, "CRABBOX_CONCURRENT_HEAD=" + f.c, "CRABBOX_TARGET_HEAD=" + f.b, "CRABBOX_OLD_HEAD=" + f.a}
+			env := []string{"PATH=" + tools + string(os.PathListSeparator) + os.Getenv("PATH"), "CRABBOX_FAIL_MV=" + failure, "CRABBOX_CONCURRENT_WORKDIR=" + workdir, "CRABBOX_CONCURRENT_HEAD=" + f.c, "CRABBOX_TARGET_HEAD=" + f.b, "CRABBOX_OLD_HEAD=" + f.a}
 			out, err := runCoherenceFinalize(workdir, plan, token, "fp-"+failure, env...)
 			if err == nil {
 				t.Fatalf("concurrent fault unexpectedly succeeded\n%s", out)
@@ -4567,8 +5298,10 @@ func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
 	got := remoteGitSeed("/work/repo", gitCoherencePlan{RemoteURL: "https://github.com/openclaw/crabbox.git", Target: "missing-sha", Tree: "tree", Branch: "main"})
 	for _, want := range []string{
 		"git -C \"$tmp\" checkout --quiet --detach",
-		"cleanup_seed() { rm -rf -- \"$tmp\"; }",
+		"cleanup_seed() { rm -rf -- \"$tmp\"; rm -f -- \"$transport_error\"; }",
 		"trap cleanup_seed EXIT",
+		"cat \"$transport_error\" >&2",
+		"exit 78",
 		"mv -- \"$tmp\" \"$workdir\"",
 	} {
 		if !strings.Contains(got, want) {
@@ -4577,6 +5310,515 @@ func TestRemoteGitSeedRemovesFailedCheckout(t *testing.T) {
 	}
 	if strings.Contains(got, "git checkout --quiet FETCH_HEAD || true") {
 		t.Fatalf("remoteGitSeed should not keep failed checkouts: %q", got)
+	}
+	for _, forbidden := range []string{"origin_transport_fallback", "CRABBOX_GIT_ORIGIN_FALLBACK", "Authentication failed", "repository not found"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("remoteGitSeed retained origin policy %q in %q", forbidden, got)
+		}
+	}
+}
+
+func TestRemoteGitOriginTransportClassification(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX origin transport classifier")
+	}
+	tests := []struct {
+		name         string
+		remoteURL    string
+		message      string
+		exitCode     int
+		truncated    bool
+		wantReason   string
+		wantFallback bool
+	}{
+		{name: "authentication", remoteURL: "https://example.test/repo.git", message: "fatal: Authentication failed", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_auth_required", wantFallback: true},
+		{name: "HTTP 403", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: The requested URL returned error: 403", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_auth_required", wantFallback: true},
+		{name: "DNS", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: Could not resolve host: example.test", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_unavailable", wantFallback: true},
+		{name: "TLS", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: SSL certificate problem: unable to get local issuer certificate", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_unavailable", wantFallback: true},
+		{name: "firewall", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: No route to host", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_unavailable", wantFallback: true},
+		{name: "disconnected socket Linux", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access 'https://example.test/repo.git/': getpeername() failed with errno 107: Transport endpoint is not connected", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_unavailable", wantFallback: true},
+		{name: "disconnected socket BSD", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: getpeername() failed with errno 57: Socket is not connected", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_unavailable", wantFallback: true},
+		{name: "other socket inspection error", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: getpeername() failed with errno 9: Bad file descriptor", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "unclassified HTTP failure", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: unknown transport failure", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "HTTP server failure beats disconnected socket", remoteURL: "https://example.test/repo.git", message: "fatal: The requested URL returned error: 503\ngetpeername() failed with errno 107: Transport endpoint is not connected", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "disconnected socket wrong exit", remoteURL: "https://example.test/repo.git", message: "getpeername() failed with errno 107: Transport endpoint is not connected", exitCode: 67},
+		{name: "disconnected socket truncated", remoteURL: "https://example.test/repo.git", message: "getpeername() failed with errno 107: Transport endpoint is not connected", exitCode: gitOriginRuntimeFallbackExitCode, truncated: true},
+		{name: "private HTTP repository", remoteURL: "https://example.test/repo.git", message: "remote: Repository not found.", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_auth_required", wantFallback: true},
+		{name: "filesystem unavailable", remoteURL: "/srv/git/repo.git", message: "fatal: '/srv/git/repo.git' does not appear to be a git repository", exitCode: gitOriginRuntimeFallbackExitCode, wantReason: "origin_unavailable", wantFallback: true},
+		{name: "HTTP server failure beats transport", remoteURL: "https://example.test/repo.git", message: "fatal: The requested URL returned error: 503; Failed to connect", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "HTTP response", remoteURL: "https://example.test/repo.git", message: "fatal: unable to access: The requested URL returned error: 500", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "missing branch", remoteURL: "https://example.test/repo.git", message: "fatal: couldn't find remote ref absent", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "marker spoof", remoteURL: "https://example.test/repo.git", message: "CRABBOX_GIT_ORIGIN_FALLBACK:origin_unavailable", exitCode: gitOriginRuntimeFallbackExitCode},
+		{name: "wrong exit", remoteURL: "https://example.test/repo.git", message: "fatal: Authentication failed", exitCode: 67},
+		{name: "truncated authentication", remoteURL: "https://example.test/repo.git", message: "fatal: Authentication failed", exitCode: gitOriginRuntimeFallbackExitCode, truncated: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := exec.Command("sh", "-c", "exit "+strconv.Itoa(tt.exitCode)).Run()
+			if tt.truncated {
+				err = &gitOriginDiagnosticsTruncatedError{err: err}
+			}
+			reason, fallback := gitOriginRuntimeFallbackResult(tt.remoteURL, tt.message, err)
+			if fallback != tt.wantFallback || reason != tt.wantReason {
+				t.Fatalf("fallback=%t reason=%q err=%v output=%q", fallback, reason, err, tt.message)
+			}
+		})
+	}
+	if reason, fallback := gitOriginRuntimeFallbackResult("https://example.test/repo.git", "fatal: Authentication failed", nil); fallback || reason != "" {
+		t.Fatalf("successful attempt classified fallback=%t reason=%q", fallback, reason)
+	}
+	functions := remoteGitOriginTransportFunctions()
+	for _, forbidden := range []string{"grep", "origin_transport_fallback", "CRABBOX_GIT_ORIGIN_FALLBACK", "Authentication failed", "repository not found"} {
+		if strings.Contains(functions, forbidden) {
+			t.Fatalf("remote origin helper retained policy %q:\n%s", forbidden, functions)
+		}
+	}
+}
+
+func TestRemoteGitOriginAttemptCommandsDeferPolicyToGo(t *testing.T) {
+	plan := gitCoherencePlan{
+		RemoteURL: "https://example.test/repo.git",
+		Target:    strings.Repeat("a", 40),
+		Tree:      strings.Repeat("b", 40),
+		Branch:    "main",
+	}
+	commands := map[string]string{
+		"seed": remoteGitSeed("/work/repo", plan),
+		"finalize": remoteFinalizeSync("/work/repo", remoteSyncFinalizeOptions{
+			HydrateGit: true,
+			Token:      strings.Repeat("c", 32),
+			Coherence:  plan,
+		}),
+	}
+	for name, command := range commands {
+		t.Run(name, func(t *testing.T) {
+			for _, want := range []string{`cat "$transport_error" >&2`, "exit 78"} {
+				if !strings.Contains(command, want) {
+					t.Fatalf("%s missing %q:\n%s", name, want, command)
+				}
+			}
+			catIndex := strings.Index(command, `cat "$transport_error" >&2`)
+			exitIndex := strings.Index(command[catIndex:], "exit 78")
+			if exitIndex < 0 {
+				t.Fatalf("%s does not emit transport diagnostics before exit 78:\n%s", name, command)
+			}
+			if name == "finalize" {
+				diagnostic := "remote sync finalize failed: Git coherence fetch failed"
+				diagnosticIndex := strings.Index(command, diagnostic)
+				if diagnosticIndex < 0 || diagnosticIndex > catIndex {
+					t.Fatalf("finalize does not emit %q before raw transport diagnostics:\n%s", diagnostic, command)
+				}
+			}
+			for _, forbidden := range []string{"origin_transport_fallback", "CRABBOX_GIT_ORIGIN_FALLBACK", "Authentication failed", "repository not found"} {
+				if strings.Contains(command, forbidden) {
+					t.Fatalf("%s retained origin policy %q:\n%s", name, forbidden, command)
+				}
+			}
+		})
+	}
+}
+
+func newGitTransportFailureHTTPServer(t *testing.T) string {
+	t.Helper()
+
+	// Wait for the HTTP request before closing: resetting immediately after
+	// accept races libcurl's connection inspection and varies its diagnostic.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "" {
+			t.Error("transport failure fixture received origin credentials")
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack transport failure connection: %v", err)
+			return
+		}
+		if err := conn.Close(); err != nil {
+			t.Errorf("close transport failure connection: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
+}
+
+func runGitControlWithShellHook(t *testing.T, hook, command string) ([]byte, error) {
+	t.Helper()
+	home := t.TempDir()
+	marker := filepath.Join(home, "hook-ran")
+	envFile := os.DevNull
+	if hook == "logout" {
+		mustWriteTestFile(t, filepath.Join(home, ".bash_profile"), ":\n")
+		mustWriteTestFile(t, filepath.Join(home, ".bash_logout"), "printf logout >"+shellQuote(marker)+"\nfalse\n")
+	} else {
+		envFile = filepath.Join(home, "bash-env")
+		mustWriteTestFile(t, envFile, "printf startup >"+shellQuote(marker)+"\nexit 97\n")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", "exec "+command)
+	cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "SHLVL=0", "BASH_ENV=" + envFile, "ENV=" + envFile, "LC_ALL=C"}
+	cmd.WaitDelay = time.Second
+	out, err := cmd.CombinedOutput()
+	if data, statErr := os.ReadFile(marker); !os.IsNotExist(statErr) {
+		t.Errorf("Git control executed %s hook: marker=%q err=%v", hook, data, statErr)
+	}
+	return out, err
+}
+
+func TestRemoteGitControlsIgnoreShellHooks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git control shell")
+	}
+	f := newGitCoherenceFixture(t)
+	for _, hook := range []string{"logout", "BASH_ENV"} {
+		for _, scenario := range []string{"seed unavailable", "seed fresh", "seed reused", "finalize unavailable", "finalize success", "finalize tree mismatch"} {
+			t.Run(hook+"/"+scenario, func(t *testing.T) {
+				plan := f.plan(t, f.b)
+				workdir := filepath.Join(t.TempDir(), "work")
+				wantCode, wantReason := 0, ""
+				if strings.HasSuffix(scenario, "unavailable") {
+					plan.RemoteURL = filepath.Join(t.TempDir(), "absent-origin.git")
+					wantCode, wantReason = gitOriginRuntimeFallbackExitCode, "origin_unavailable"
+				}
+				var command string
+				if strings.HasPrefix(scenario, "seed") {
+					if scenario == "seed reused" {
+						workdir = f.workspace(t, f.b, false)
+					}
+					command = remoteGitSeed(workdir, plan)
+				} else {
+					workdir = f.workspace(t, f.a, true)
+					mustWriteTestFile(t, filepath.Join(workdir, "tracked.txt"), "B\n")
+					const token = "61616161616161616161616161616161"
+					stageCoherenceFinalize(t, workdir, token)
+					if scenario == "finalize tree mismatch" {
+						plan.Tree = strings.Repeat("f", 40)
+						wantCode = 67
+					}
+					command = remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Fingerprint: "coherent", Coherence: plan})
+				}
+				out, err := runGitControlWithShellHook(t, hook, command)
+				if got := exitCode(err); got != wantCode {
+					t.Fatalf("Git control exit=%d want=%d err=%v output=%q", got, wantCode, err, out)
+				}
+				if reason, fallback := gitOriginRuntimeFallbackResult(plan.RemoteURL, string(out), err); reason != wantReason || fallback != (wantReason != "") {
+					t.Fatalf("fallback=%t reason=%q want=%q output=%q", fallback, reason, wantReason, out)
+				}
+				if wantCode == 0 {
+					requireGitOutput(t, workdir, f.b, "rev-parse", "HEAD")
+					requireGitOutput(t, workdir, plan.Tree, "write-tree")
+				} else if strings.HasPrefix(scenario, "finalize") {
+					requireGitOutput(t, workdir, f.a, "rev-parse", "HEAD")
+					if got := readCoherentFingerprint(t, workdir, plan); got != "" {
+						t.Fatalf("failed finalizer certified fingerprint %q", got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRemoteGitMetadataControlsIgnoreShellHooks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git control shell")
+	}
+	f := newGitCoherenceFixture(t)
+	for _, hook := range []string{"logout", "BASH_ENV"} {
+		for _, operation := range []string{"hydrate status", "fingerprint", "seed manifest", "discard pending"} {
+			t.Run(hook+"/"+operation, func(t *testing.T) {
+				workdir := f.workspace(t, f.c, false)
+				plan := f.plan(t, f.c)
+				meta := coherenceMetaDir(t, workdir)
+				var command, want string
+				var discarded []string
+				var preserved map[string]string
+				switch operation {
+				case "hydrate status":
+					mustWriteTestFile(t, filepath.Join(meta, "git-hydrate-base"), "main "+f.c+"\n")
+					command, want = remoteGitHydrateStatus(workdir, "main", f.c), "marker base current"
+				case "fingerprint":
+					for name, value := range map[string]string{"sync-finalize-token": "complete", "sync-finalize-complete-token": "complete", "sync-fingerprint": "coherent"} {
+						mustWriteTestFile(t, filepath.Join(meta, name), value)
+					}
+					command, want = remoteReadSyncFingerprint(workdir, plan), "coherent"
+				case "seed manifest":
+					command = remoteSeedSyncManifestFromGit(workdir)
+				case "discard pending":
+					const token = "81818181818181818181818181818181"
+					const neighbor = "82828282828282828282828282828282"
+					discarded = []string{remoteSyncPendingManifestName(token), remoteSyncPendingDeletedName(token)}
+					preserved = map[string]string{
+						remoteSyncPendingManifestName(neighbor): "neighbor.txt\x00",
+						remoteSyncPendingDeletedName(neighbor):  "neighbor-deleted.txt\x00",
+						"sync-manifest":                         "committed.txt\x00",
+					}
+					for _, name := range discarded {
+						mustWriteTestFile(t, filepath.Join(meta, name), "discard.txt\x00")
+					}
+					for name, value := range preserved {
+						mustWriteTestFile(t, filepath.Join(meta, name), value)
+					}
+					command = remoteDiscardSyncPendingMetadata(workdir, token, false)
+				}
+				out, err := runGitControlWithShellHook(t, hook, command)
+				if err != nil || string(out) != want {
+					t.Fatalf("Git metadata control output=%q want=%q err=%v", out, want, err)
+				}
+				if operation == "seed manifest" {
+					wantManifest := "deleted.txt\x00modified.txt\x00other/omit.txt\x00src/keep.txt\x00tracked.txt\x00"
+					if data, readErr := os.ReadFile(filepath.Join(meta, "sync-manifest")); readErr != nil || string(data) != wantManifest {
+						t.Fatalf("seeded manifest=%q err=%v", data, readErr)
+					}
+				}
+				for _, name := range discarded {
+					if _, statErr := os.Stat(filepath.Join(meta, name)); !os.IsNotExist(statErr) {
+						t.Fatalf("discarded pending metadata %s survived: %v", name, statErr)
+					}
+				}
+				for name, value := range preserved {
+					if data, readErr := os.ReadFile(filepath.Join(meta, name)); readErr != nil || string(data) != value {
+						t.Fatalf("discard changed neighboring metadata %s: data=%q err=%v", name, data, readErr)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRemoteUserWorkloadPreservesLoginShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX workload shell")
+	}
+	for _, shell := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shell=%t", shell), func(t *testing.T) {
+			home, workdir := t.TempDir(), t.TempDir()
+			mustWriteTestFile(t, filepath.Join(home, ".bash_profile"), "export CRABBOX_TEST_LOGIN_VALUE=profile-loaded\ncd \"$HOME\"\n")
+			const script = `printf '%s\n%s' "$CRABBOX_TEST_LOGIN_VALUE" "$PWD"`
+			command := remoteCommand(workdir, nil, []string{"bash", "-c", script})
+			if shell {
+				command = remoteShellCommand(workdir, nil, script)
+			}
+			cmd := exec.Command("/bin/sh", "-c", command)
+			cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "BASH_ENV=" + os.DevNull, "ENV=" + os.DevNull}
+			if out, err := cmd.CombinedOutput(); err != nil || string(out) != "profile-loaded\n"+workdir {
+				t.Fatalf("user workload lost login profile: output=%q err=%v", out, err)
+			}
+		})
+	}
+}
+
+func TestRemoteArgvWithoutBashPreservesEnvironmentAndExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX argv renderer")
+	}
+	for _, code := range []int{0, 23, 127} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			root, workdir, emptyPath := t.TempDir(), t.TempDir(), t.TempDir()
+			first, second := filepath.Join(root, "first.env"), filepath.Join(root, "second.env")
+			mustWriteTestFile(t, first, "export FIXTURE_VALUE=first\n")
+			mustWriteTestFile(t, second, "export FIXTURE_VALUE=second\ncd "+shellQuote(root)+"\n")
+			marker := filepath.Join(root, "invocations")
+			workload := filepath.Join(root, "workload.sh")
+			mustWriteTestFile(t, workload, "printf 'x' >> "+shellQuote(marker)+"\nprintf '%s\\n' \"$FIXTURE_VALUE\" \"$PWD\" \"$1\"\nexit "+strconv.Itoa(code)+"\n")
+			command := remoteCommandWithEnvFiles(workdir, map[string]string{"PATH": emptyPath, "FIXTURE_VALUE": "forwarded"}, []string{first, second}, []string{"/bin/sh", workload, "literal 'value';*"})
+			out, err := exec.Command("/bin/sh", "-c", command).CombinedOutput()
+			if exitCode(err) != code || string(out) != "forwarded\n"+workdir+"\nliteral 'value';*\n" {
+				t.Fatalf("exit=%d want=%d output=%q err=%v", exitCode(err), code, out, err)
+			}
+			calls, err := os.ReadFile(marker)
+			if err != nil || string(calls) != "x" {
+				t.Fatalf("workload invoked more than once: %q err=%v", calls, err)
+			}
+		})
+	}
+}
+
+func TestRemoteGitSeedClassifiesRuntimeOriginFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git seed integration")
+	}
+	for _, kind := range []string{"missing filesystem", "private HTTP", "HTTP transport", "non-auth HTTP", "missing branch"} {
+		t.Run(kind, func(t *testing.T) {
+			remote := filepath.Join(t.TempDir(), "missing.git")
+			var server *httptest.Server
+			switch kind {
+			case "private HTTP", "non-auth HTTP":
+				status := http.StatusUnauthorized
+				if kind == "non-auth HTTP" {
+					status = http.StatusInternalServerError
+				}
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					if request.Header.Get("Authorization") != "" {
+						t.Errorf("seed forwarded an Authorization header")
+					}
+					if status == http.StatusUnauthorized {
+						w.Header().Set("WWW-Authenticate", `Basic realm="private"`)
+					}
+					http.Error(w, http.StatusText(status), status)
+				}))
+				defer server.Close()
+				remote = server.URL + "/repo.git"
+			case "HTTP transport":
+				remote = newGitTransportFailureHTTPServer(t) + "/repo.git"
+			}
+			workdir := filepath.Join(t.TempDir(), "work")
+			plan := gitCoherencePlan{RemoteURL: remote, Target: strings.Repeat("a", 40), Tree: strings.Repeat("b", 40), Branch: "main"}
+			if kind == "missing branch" {
+				f := newGitCoherenceFixture(t)
+				plan = f.plan(t, f.b)
+				plan.Branch = "absent"
+			}
+			out, err := exec.Command("bash", "-lc", remoteGitSeed(workdir, plan)).CombinedOutput()
+			reason, fallback := gitOriginRuntimeFallbackResult(plan.RemoteURL, string(out), err)
+			if kind == "HTTP transport" && !strings.Contains(string(out), "Empty reply from server") {
+				t.Fatalf("transport fixture did not close after the HTTP request: err=%v output=%q", err, out)
+			}
+			wantReason := "origin_unavailable"
+			wantFallback := true
+			if kind == "private HTTP" {
+				wantReason = "origin_auth_required"
+			} else if kind == "non-auth HTTP" || kind == "missing branch" {
+				wantReason, wantFallback = "", false
+			}
+			if fallback != wantFallback || reason != wantReason || err == nil {
+				t.Fatalf("fallback=%t reason=%q err=%v output=%q", fallback, reason, err, out)
+			}
+			if _, statErr := os.Stat(workdir); !os.IsNotExist(statErr) {
+				t.Fatalf("failed seed retained workspace: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestRemoteFinalizeRuntimeOriginFallbackRetriesCommittedManifest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX Git finalize integration")
+	}
+	for _, kind := range []string{"missing filesystem", "private HTTP", "HTTP transport", "non-auth HTTP", "missing branch", "tree verification"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newGitCoherenceFixture(t)
+			workdir := f.workspace(t, f.a, true)
+			plan := f.plan(t, f.b)
+			var server *httptest.Server
+			switch kind {
+			case "missing filesystem":
+				if err := os.Rename(f.origin, f.origin+".missing"); err != nil {
+					t.Fatal(err)
+				}
+			case "private HTTP", "non-auth HTTP":
+				status := http.StatusUnauthorized
+				if kind == "non-auth HTTP" {
+					status = http.StatusInternalServerError
+				}
+				server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					if request.Header.Get("Authorization") != "" {
+						t.Errorf("finalize forwarded an Authorization header")
+					}
+					if status == http.StatusUnauthorized {
+						w.Header().Set("WWW-Authenticate", `Basic realm="private"`)
+					}
+					http.Error(w, http.StatusText(status), status)
+				}))
+				defer server.Close()
+				plan.RemoteURL = server.URL + "/repo.git"
+			case "HTTP transport":
+				plan.RemoteURL = newGitTransportFailureHTTPServer(t) + "/repo.git"
+			case "missing branch":
+				plan.Branch = "absent"
+			case "tree verification":
+				plan.Tree = strings.Repeat("f", 40)
+			}
+			const token = "1234567890abcdef1234567890abcdef"
+			stageCoherenceFinalize(t, workdir, token)
+			meta := coherenceMetaDir(t, workdir)
+			mustWriteTestFile(t, filepath.Join(meta, "sync-fingerprint"), "stale")
+			mustWriteTestFile(t, filepath.Join(meta, "git-hydrate-base"), "main stale\n")
+
+			tools := t.TempDir()
+			logPath := filepath.Join(tools, "ssh.log")
+			ssh := `#!/bin/sh
+remote=""
+for arg do remote="$arg"; done
+printf '%s\n---\n' "$remote" >> "$CRABBOX_FINALIZE_SSH_LOG"
+exec /bin/bash --noprofile --norc -c "$remote"
+`
+			if err := os.WriteFile(filepath.Join(tools, "ssh"), []byte(ssh), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_FINALIZE_SSH_LOG", logPath)
+			out, err, reason, fallback := runRemoteFinalizeSync(context.Background(), SSHTarget{
+				User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux, NoControlMaster: true,
+			}, workdir, remoteSyncFinalizeOptions{
+				HydrateGit: true, BaseRef: "main", BaseSHA: f.b, Fingerprint: "new", Token: token, Coherence: plan,
+			})
+			wantFallback := kind == "missing filesystem" || kind == "private HTTP" || kind == "HTTP transport"
+			wantReason := ""
+			if kind == "missing filesystem" || kind == "HTTP transport" {
+				wantReason = "origin_unavailable"
+			} else if kind == "private HTTP" {
+				wantReason = "origin_auth_required"
+			}
+			if fallback != wantFallback || reason != wantReason {
+				t.Fatalf("fallback=%t reason=%q err=%v output=%q", fallback, reason, err, out)
+			}
+			logData, readErr := os.ReadFile(logPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			commands := strings.Split(strings.TrimSuffix(string(logData), "---\n"), "---\n")
+			wantAttempts := 1
+			if wantFallback {
+				wantAttempts = 2
+			}
+			if len(commands) != wantAttempts {
+				t.Fatalf("finalize attempts=%d want %d:\n%s", len(commands), wantAttempts, logData)
+			}
+			for _, command := range commands {
+				if !strings.Contains(command, token) {
+					t.Fatalf("finalize retry changed token:\n%s", logData)
+				}
+			}
+			if !wantFallback {
+				if err == nil {
+					t.Fatalf("non-origin failure succeeded: output=%q", out)
+				}
+				if kind == "missing branch" {
+					diagnostic := "remote sync finalize failed: Git coherence fetch failed"
+					raw := "fatal: couldn't find remote ref refs/heads/absent"
+					diagnosticIndex := strings.Index(out, diagnostic)
+					rawIndex := strings.Index(out, raw)
+					if diagnosticIndex < 0 || rawIndex < 0 || diagnosticIndex > rawIndex {
+						t.Fatalf("missing branch diagnostics out of order: %q", out)
+					}
+				}
+				if kind == "non-auth HTTP" && !strings.Contains(out, "500") {
+					t.Fatalf("fatal HTTP diagnostics were not retained: %q", out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("fallback finalize: %v\n%s", err, out)
+			}
+			if strings.Contains(out, "Authentication failed") ||
+				strings.Contains(out, "Failed to connect") ||
+				strings.Contains(out, "does not appear to be a git repository") {
+				t.Fatalf("successful fallback retained first-attempt diagnostics: %q", out)
+			}
+			for _, name := range []string{"sync-finalize-token", "sync-finalize-complete-token"} {
+				value, readErr := os.ReadFile(filepath.Join(meta, name))
+				if readErr != nil || string(value) != token {
+					t.Fatalf("%s=%q err=%v", name, value, readErr)
+				}
+			}
+			for _, name := range []string{"sync-fingerprint", "git-hydrate-base"} {
+				if _, statErr := os.Stat(filepath.Join(meta, name)); !os.IsNotExist(statErr) {
+					t.Fatalf("%s survived fallback: %v", name, statErr)
+				}
+			}
+			if _, statErr := os.Stat(filepath.Join(meta, "sync-manifest")); statErr != nil {
+				t.Fatalf("committed manifest missing: %v", statErr)
+			}
+		})
 	}
 }
 
@@ -4631,6 +5873,13 @@ func TestRemoteGitSeedLocalCanary(t *testing.T) {
 		seed := exec.Command("bash", "-lc", remoteGitSeed(workdir, plan))
 		if out, err := seed.CombinedOutput(); err != nil {
 			t.Fatalf("%s: %v\n%s", label, err, out)
+		}
+		staging, err := filepath.Glob(filepath.Join(filepath.Dir(workdir), ".seed.*"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(staging) != 0 {
+			t.Fatalf("%s left seed staging files: %v", label, staging)
 		}
 	}
 	requireSeeded := func(workdir string) {
@@ -4743,7 +5992,11 @@ func TestRemoteGitSeedSupportsSeedOnlyPlanWithoutTree(t *testing.T) {
 		t.Fatalf("expected seed-only plan, got %#v", plan)
 	}
 	workdir := filepath.Join(t.TempDir(), "seed-only")
-	if out, err := exec.Command("bash", "-lc", remoteGitSeed(workdir, plan)).CombinedOutput(); err != nil {
+	command := remoteGitSeed(workdir, plan)
+	if dash, err := exec.LookPath("dash"); err == nil {
+		command = strings.Replace(command, "/bin/sh -c ", shellQuote(dash)+" -c ", 1)
+	}
+	if out, err := exec.Command("/bin/sh", "-c", command).CombinedOutput(); err != nil {
 		t.Fatalf("seed-only Git seed failed: %v\n%s", err, out)
 	}
 	requireGitOutput(t, workdir, f.b, "rev-parse", "HEAD")
@@ -4846,8 +6099,11 @@ func TestRemoteWriteSyncManifestsNewForTargetUsesInterpretedWriterForWSL2(t *tes
 	if strings.Contains(plain, "status=none") {
 		t.Fatalf("non-WSL2 manifest writer should not require GNU dd extensions: %q", plain)
 	}
-	if strings.Count(plain, "dd bs=1 count=\"") != 2 {
-		t.Fatalf("non-WSL2 manifest writer should exact-read both blobs: %q", plain)
+	// The portable wrapper includes one writer in each shell branch.
+	for _, length := range []string{"manifest_len", "deleted_len"} {
+		if strings.Count(plain, `dd bs=1 count="$`+length+`"`) != 2 {
+			t.Fatalf("non-WSL2 manifest writer should exact-read %s in both shell branches: %q", length, plain)
+		}
 	}
 	if strings.Contains(plain, "cat >") {
 		t.Fatalf("non-WSL2 manifest writer should not read either blob through EOF: %q", plain)
@@ -4856,6 +6112,72 @@ func TestRemoteWriteSyncManifestsNewForTargetUsesInterpretedWriterForWSL2(t *tes
 		if !strings.Contains(plain, want) {
 			t.Fatalf("non-WSL2 manifest writer missing %q: %q", want, plain)
 		}
+	}
+}
+
+func TestRemoteWriteSyncManifestsNewForTargetPlainWSL2IsHermetic(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+	if got, want := remoteWriteSyncManifestsNewForTargetMode(target, "/work/repo", token, false), remoteWriteSyncManifestsNewPython("/work/repo", token); got != want {
+		t.Fatal("ordinary WSL2 manifest command bytes changed")
+	}
+	got := remoteWriteSyncManifestsNewForTargetMode(target, "/work/repo", token, true)
+	for _, want := range []string{
+		"/usr/bin/env -i",
+		"BASH_ENV=/dev/null",
+		"ENV=/dev/null",
+		"/bin/sh -c",
+		"/usr/bin/python3 -c",
+		"/bin/mkdir -p --",
+		"/usr/bin/find",
+		"-exec /bin/rm",
+		"plain_git",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("plain WSL2 writer missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "bash -lc") {
+		t.Fatalf("plain WSL2 writer uses a login shell:\n%s", got)
+	}
+}
+
+func TestPlainManifestMetadataIgnoresHostileEnvironment(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	workdir := filepath.Join(t.TempDir(), "repo")
+	marker := filepath.Join(t.TempDir(), "executed")
+	profile := filepath.Join(t.TempDir(), "profile")
+	mustWriteTestFile(t, profile, "printf hostile >"+shellQuote(marker)+"\n")
+	hostileBin := t.TempDir()
+	for _, name := range []string{"bash", "git", "python3", "mkdir", "find", "rm"} {
+		writeExecutable(t, filepath.Join(hostileBin, name), "#!/bin/sh\nprintf hostile >"+shellQuote(marker)+"\nexit 97\n")
+	}
+	manifest := []byte("tracked.txt\x00")
+	deleted := []byte("removed.txt\x00")
+	command := exec.Command("/bin/sh", "-c", remoteWriteSyncManifestsNewForTargetMode(
+		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+		workdir,
+		token,
+		true,
+	))
+	command.Env = []string{"PATH=" + hostileBin, "BASH_ENV=" + profile, "ENV=" + profile}
+	command.Stdin = strings.NewReader(syncManifestInputForTarget(
+		SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2},
+		manifest,
+		deleted,
+	))
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("plain WSL2 writer failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("hostile environment executed: %v", err)
+	}
+	metaDir := filepath.Join(workdir, ".crabbox")
+	if got, err := os.ReadFile(filepath.Join(metaDir, remoteSyncPendingManifestName(token))); err != nil || !bytes.Equal(got, manifest) {
+		t.Fatalf("manifest=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(metaDir, remoteSyncPendingDeletedName(token))); err != nil || !bytes.Equal(got, deleted) {
+		t.Fatalf("deleted=%q err=%v", got, err)
 	}
 }
 
@@ -5133,13 +6455,13 @@ func TestRemoteSyncMetadataUsesGitDirForGitWorktree(t *testing.T) {
 }
 
 func TestIsBootstrapWaitError(t *testing.T) {
-	if !isBootstrapWaitError(exit(5, "timed out waiting for SSH on 203.0.113.10 during bootstrap")) {
+	if !isBootstrapWaitError(Exit(5, "timed out waiting for SSH on 203.0.113.10 during bootstrap")) {
 		t.Fatal("expected SSH timeout to be retryable")
 	}
-	if !isBootstrapWaitError(exit(5, "timed out waiting for XCP-ng guest IPv4")) {
+	if !isBootstrapWaitError(Exit(5, "timed out waiting for XCP-ng guest IPv4")) {
 		t.Fatal("expected XCP-ng guest IPv4 timeout to be retryable")
 	}
-	if isBootstrapWaitError(exit(6, "rsync failed")) {
+	if isBootstrapWaitError(Exit(6, "rsync failed")) {
 		t.Fatal("sync failure must not be treated as retryable bootstrap")
 	}
 }
@@ -5244,46 +6566,14 @@ func TestBootstrapWaitTimeoutExtendsForDesktopBrowser(t *testing.T) {
 
 func TestServerProviderKeyUsesOnlyCrabboxLeaseKeys(t *testing.T) {
 	server := Server{Labels: map[string]string{"lease": "cbx_123456abcdef"}}
-	if got := serverProviderKey(server); got != "crabbox-cbx-123456abcdef" {
+	if got := ServerProviderKey(server); got != "crabbox-cbx-123456abcdef" {
 		t.Fatalf("serverProviderKey()=%q", got)
 	}
-	if !validCrabboxProviderKey("crabbox-cbx-123456abcdef") {
+	if !ValidCrabboxProviderKey("crabbox-cbx-123456abcdef") {
 		t.Fatal("expected per-lease provider key to be valid")
 	}
-	if validCrabboxProviderKey("crabbox-steipete") {
+	if ValidCrabboxProviderKey("crabbox-steipete") {
 		t.Fatal("shared key must not be treated as per-lease cleanup key")
-	}
-}
-
-func TestMoveStoredTestboxKeyHandlesCoordinatorRenamedLease(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
-	oldPath, err := testboxKeyPath("cbx_111111111111")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(oldPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(oldPath, []byte("key"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(oldPath+".pub", []byte("pub"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := moveStoredTestboxKey("cbx_111111111111", "cbx_222222222222"); err != nil {
-		t.Fatal(err)
-	}
-	newPath, err := testboxKeyPath("cbx_222222222222")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(newPath); err != nil {
-		t.Fatalf("moved key missing: %v", err)
-	}
-	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
-		t.Fatalf("old key still exists or unexpected stat error: %v", err)
 	}
 }
 
@@ -5366,44 +6656,6 @@ func TestAWSExplicitARM64TypeInference(t *testing.T) {
 	}
 }
 
-func TestCloudflareContainerInstanceTypeMapping(t *testing.T) {
-	tests := []struct {
-		class string
-		want  string
-	}{
-		{class: "", want: "standard-4"},
-		{class: "tiny", want: "standard-4"},
-		{class: "small", want: "standard-4"},
-		{class: "standard", want: "standard-4"},
-		{class: "fast", want: "standard-4"},
-		{class: "large", want: "standard-4"},
-		{class: "beast", want: "standard-4"},
-		{class: "lite", want: "lite"},
-		{class: "basic", want: "basic"},
-		{class: "standard-3", want: "standard-3"},
-	}
-	for _, tt := range tests {
-		if got := cloudflareContainerInstanceTypeForClass(tt.class); got != tt.want {
-			t.Fatalf("cloudflareContainerInstanceTypeForClass(%q)=%q want %q", tt.class, got, tt.want)
-		}
-		if got := CloudflareContainerInstanceTypeForClass(tt.class); got != tt.want {
-			t.Fatalf("CloudflareContainerInstanceTypeForClass(%q)=%q want %q", tt.class, got, tt.want)
-		}
-	}
-}
-
-func TestNormalizeCloudflareContainerInstanceType(t *testing.T) {
-	for _, valid := range CloudflareContainerInstanceTypes() {
-		got, ok := NormalizeCloudflareContainerInstanceType(" " + strings.ToUpper(valid) + " ")
-		if !ok || got != valid {
-			t.Fatalf("NormalizeCloudflareContainerInstanceType(%q)=(%q,%t), want (%q,true)", valid, got, ok, valid)
-		}
-	}
-	if got, ok := NormalizeCloudflareContainerInstanceType("ccx63"); ok || got != "" {
-		t.Fatalf("NormalizeCloudflareContainerInstanceType(ccx63)=(%q,%t), want empty,false", got, ok)
-	}
-}
-
 func TestCloudflareServerTypeForConfig(t *testing.T) {
 	tests := []struct {
 		cfg  Config
@@ -5428,12 +6680,8 @@ func TestServerTypeForProviderClassDirectProviders(t *testing.T) {
 		{provider: "blacksmith-testbox", class: "beast", want: ""},
 		{provider: "ssh", class: "beast", want: ""},
 		{provider: "islo", class: "beast", want: ""},
-		{provider: "e2b", class: "beast", want: "base"},
-		{provider: "modal", class: "beast", want: "python:3.13-slim"},
-		{provider: "daytona", class: "beast", want: "snapshot"},
 		{provider: "namespace", class: "standard", want: "S"},
 		{provider: "namespace-devbox", class: " custom-xl ", want: "CUSTOM-XL"},
-		{provider: "proxmox", class: "beast", want: "template"},
 		{provider: "sprites", class: "beast", want: ""},
 		{provider: "cloudflare", class: "standard", want: "standard-4"},
 		{provider: "cf", class: "beast", want: "standard-4"},
@@ -5475,28 +6723,28 @@ func TestMappedProviderCandidatesPreserveNonCanonicalClassLiterals(t *testing.T)
 				t.Errorf("provider=%s class=%q candidates=%v want literal", provider, class, got)
 			}
 		}
-		if got := awsLaunchCandidates(Config{Provider: "aws", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class}); !reflect.DeepEqual(got, []string{class, "t3.small"}) {
+		if got := AWSLaunchCandidates(Config{Provider: "aws", TargetOS: targetLinux, Architecture: ArchitectureAMD64, Class: class}); !reflect.DeepEqual(got, []string{class, "t3.small"}) {
 			t.Errorf("AWS class=%q launch candidates=%v", class, got)
 		}
 	}
 }
 
 func TestAWSLaunchCandidatesAddsPolicyFallbackUnlessExact(t *testing.T) {
-	got := awsLaunchCandidates(Config{Provider: "aws", Class: "beast", ServerType: "c7a.48xlarge"})
+	got := AWSLaunchCandidates(Config{Provider: "aws", Class: "beast", ServerType: "c7a.48xlarge"})
 	if got[len(got)-1] != "t3.small" {
 		t.Fatalf("last fallback=%q want t3.small in %v", got[len(got)-1], got)
 	}
-	arm := awsLaunchCandidates(Config{Provider: "aws", TargetOS: targetLinux, Architecture: ArchitectureARM64, architectureExplicit: true, Class: "beast", ServerType: "c7g.16xlarge"})
+	arm := AWSLaunchCandidates(Config{Provider: "aws", TargetOS: targetLinux, Architecture: ArchitectureARM64, architectureExplicit: true, Class: "beast", ServerType: "c7g.16xlarge"})
 	if arm[len(arm)-1] != "t4g.small" {
 		t.Fatalf("last arm fallback=%q want t4g.small in %v", arm[len(arm)-1], arm)
 	}
-	wsl2 := awsLaunchCandidates(Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Class: "standard", ServerType: "m8i.large"})
+	wsl2 := AWSLaunchCandidates(Config{Provider: "aws", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Class: "standard", ServerType: "m8i.large"})
 	for _, candidate := range wsl2 {
 		if strings.HasPrefix(candidate, "t3.") || strings.HasPrefix(candidate, "m7") {
 			t.Fatalf("WSL2 candidate %q does not support nested virtualization: %v", candidate, wsl2)
 		}
 	}
-	exact := awsLaunchCandidates(Config{Provider: "aws", Class: "beast", ServerType: "t3.small", ServerTypeExplicit: true})
+	exact := AWSLaunchCandidates(Config{Provider: "aws", Class: "beast", ServerType: "t3.small", ServerTypeExplicit: true})
 	if len(exact) != 1 || exact[0] != "t3.small" {
 		t.Fatalf("exact candidates=%v", exact)
 	}
@@ -5553,7 +6801,7 @@ func TestSSHControlBudgetsSeparateFiniteAuthorityFromUnlimitedWork(t *testing.T)
 			t.Fatal("ordinary unlimited execution acquired a control duration")
 		}
 	}
-	if _, err := prepareSSHTransport(SSHTarget{}, "true", nil, 0, sshCommandLimit{control: true}); err == nil {
+	if _, err := prepareSSHTransport(t.Context(), SSHTarget{}, "true", nil, 0, sshCommandLimit{control: true}); err == nil {
 		t.Fatal("unlimited control command accepted")
 	}
 }
@@ -5607,5 +6855,54 @@ $t=$raw.WriteAsync($b,0,$b.Length);if(!$t.Wait(5000)){exit 74};$null=$t.GetAwait
 				t.Fatalf("post-preamble bytes=%x err=%v", got, err)
 			}
 		})
+	}
+}
+
+func TestCommandIntentShellSourceKeepsExistingShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell context")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh unavailable")
+	}
+	root := t.TempDir()
+	source, err := ParseCommandIntent([]string{`printf '%s:' "$hidden"; say "$1"; exit 7`}, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prelude := `hidden=local; say() { printf '%s' "$1"; }; set -- argument; trap 'printf :trap' EXIT; `
+	cmd := exec.Command(sh, "-c", prelude+source.ShellSource())
+	cmd.Env = []string{"HOME=" + root, "PATH=/usr/bin:/bin", "ENV=" + os.DevNull}
+	out, runErr := cmd.CombinedOutput()
+	var ee *exec.ExitError
+	if !errors.As(runErr, &ee) || ee.ExitCode() != 7 || string(out) != "local:argument:trap" {
+		t.Fatalf("existing shell output=%q err=%v", out, runErr)
+	}
+	program := filepath.Join(root, "argv-program")
+	if err := os.WriteFile(program, []byte("#!/bin/sh\nprintf argv\nexit 42\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	argv, err := ParseCommandIntent([]string{program}, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command(sh, "-c", `trap 'printf old-shell-trap' EXIT; `+argv.ShellSource()+`; printf old-shell-suffix`)
+	cmd.Env = []string{"HOME=" + root, "PATH=/usr/bin:/bin", "ENV=" + os.DevNull}
+	out, runErr = cmd.CombinedOutput()
+	if !errors.As(runErr, &ee) || ee.ExitCode() != 42 || string(out) != "argv" {
+		t.Fatalf("terminal exec output=%q err=%v", out, runErr)
+	}
+	for _, tc := range []struct {
+		shell bool
+		want  string
+	}{{true, ""}, {false, "exec ''"}} {
+		intent, err := ParseCommandIntent([]string{""}, tc.shell, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := intent.ShellSource(); got != tc.want {
+			t.Fatalf("empty source shell=%t got=%q want=%q", tc.shell, got, tc.want)
+		}
 	}
 }

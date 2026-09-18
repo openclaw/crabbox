@@ -31,6 +31,16 @@ func TestBlacksmithStopDiagnosticsCLI(t *testing.T) {
 	}
 }
 
+func TestBlacksmithNeverAssignedCleanupCLI(t *testing.T) {
+	if os.Getenv("CRABBOX_TEST_BLACKSMITH_CHILD") == "1" {
+		blacksmithCLIProcess(t, os.Getenv("CRABBOX_TEST_MODE"))
+		return
+	}
+	for _, mode := range []string{"never-assigned-completed", "never-assigned-stop", "never-assigned-reconcile"} {
+		t.Run(mode, func(t *testing.T) { blacksmithCLIProcess(t, mode) })
+	}
+}
+
 func blacksmithCLIProcess(t *testing.T, mode string) {
 	t.Helper()
 	if os.Getenv("CRABBOX_TEST_BLACKSMITH_CHILD") == "1" {
@@ -56,9 +66,14 @@ func blacksmithCLIProcess(t *testing.T, mode string) {
 	claimPath := filepath.Join(dirs.StateHome, "crabbox", "claims", id+".json")
 	callsPath := filepath.Join(bin, "calls")
 	var nativeStatus strings.Builder
+	neverAssigned := strings.HasPrefix(mode, "never-assigned-")
+	runURL := "https://github.com/example-org/my-app/actions/runs/123456789"
+	if neverAssigned {
+		runURL = ""
+	}
 	w := tabwriter.NewWriter(&nativeStatus, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tSTATUS\tIP\tWORKFLOW\tJOB\tREF\tCREATED\tRUN URL")
-	fmt.Fprintf(w, "%s\tcompleted\t\t.github/workflows/testbox.yml\tgo\tmain\t2026-08-30T12:00:00.123456Z\thttps://github.com/example-org/my-app/actions/runs/123456789\n", id)
+	fmt.Fprintf(w, "%s\tcompleted\t\t.github/workflows/testbox.yml\tgo\tmain\t2026-09-02T13:54:37.000000Z\t%s\n", id, runURL)
 	if err := w.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +81,11 @@ func blacksmithCLIProcess(t *testing.T, mode string) {
 	if err := os.WriteFile(statusPath, []byte(nativeStatus.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(statusPath+".ready", []byte(strings.Replace(nativeStatus.String(), "completed", "ready    ", 1)), 0o600); err != nil {
+	initialState := "ready    "
+	if neverAssigned {
+		initialState = "queued   "
+	}
+	if err := os.WriteFile(statusPath+".ready", []byte(strings.Replace(nativeStatus.String(), "completed", initialState, 1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fake := `#!/bin/sh
@@ -84,6 +103,10 @@ case "$1 $2" in
   'testbox stop')
     [ "$3" = '--id' ] && [ "$4" = 'tbx_process123' ] || exit 94
     touch "$CRABBOX_TEST_STATUS.stopped"
+    if [ "$CRABBOX_TEST_MODE" = 'never-assigned-stop' ]; then
+      printf 'Testbox tbx_process123 stopped (completed)\n'
+      exit 0
+    fi
     printf 'Error: stop failed: HTTP 409: testbox already stopped\n' >&2
     exit 1 ;;
   'testbox status')
@@ -93,6 +116,7 @@ case "$1 $2" in
     n=$((n + 1))
     printf '%s\n' "$n" > "$CRABBOX_TEST_STATUS.count"
     case "$CRABBOX_TEST_MODE:$n" in
+      never-assigned-completed:*) cat "$CRABBOX_TEST_STATUS"; exit 0 ;;
       preflight:1|lookup:2|late-status:3)
         cat "$CRABBOX_TEST_STATUS"
         printf 'Error: authentication unavailable for synthetic status query\n' >&2
@@ -169,12 +193,37 @@ esac
 	if mode != "run" {
 		testName = "TestBlacksmithStopDiagnosticsCLI"
 	}
+	if neverAssigned {
+		testName = "TestBlacksmithNeverAssignedCleanupCLI"
+	}
 	child := exec.CommandContext(t.Context(), binary, "-test.run=^"+testName+"$")
 	child.Env, child.Dir = childEnv, repo
 	var stdout, stderr bytes.Buffer
 	child.Stdout, child.Stderr = &stdout, &stderr
 	err = child.Run()
 	var exitErr *exec.ExitError
+	if neverAssigned {
+		if err != nil {
+			t.Fatalf("never-assigned cleanup failed: %v stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+		}
+		wantCalls := "testbox status\ntestbox stop\ntestbox status\ntestbox status\n"
+		if mode == "never-assigned-completed" {
+			wantCalls = "testbox status\ntestbox status\n"
+		}
+		calls, readErr := os.ReadFile(callsPath)
+		if readErr != nil || string(calls) != wantCalls {
+			t.Errorf("unexpected native calls: %q: %v", calls, readErr)
+		}
+		for _, path := range []string{claimPath, filepath.Dir(key)} {
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Errorf("cleanup left %s: %v", path, err)
+			}
+		}
+		if strings.Contains(stderr.String(), "cleanup reconciled") != (mode == "never-assigned-reconcile") || strings.Contains(stderr.String(), "Error: stop failed") {
+			t.Errorf("incorrect reconciliation diagnostic: %s", stderr.String())
+		}
+		return
+	}
 	if mode != "run" {
 		wantCode, wantCalls, reason := 1, 3, "authentication unavailable for synthetic status query"
 		switch mode {

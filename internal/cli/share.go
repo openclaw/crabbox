@@ -24,7 +24,7 @@ func (a App) share(ctx context.Context, args []string) error {
 	}
 	setIDFromFirstArg(fs, id)
 	if *id == "" {
-		return exit(2, "usage: crabbox share --id <lease-id-or-slug> [--user <owner>|--org|--list]")
+		return Exit(2, "usage: crabbox share --id <lease-id-or-slug> [--user <owner>|--org|--list]")
 	}
 	shareRole, err := parseCoordinatorShareRole(*role)
 	if err != nil {
@@ -47,7 +47,7 @@ func (a App) share(ctx context.Context, args []string) error {
 	for _, user := range users {
 		normalized := normalizeShareOwner(user)
 		if normalized == "" {
-			return exit(2, "invalid empty --user")
+			return Exit(2, "invalid empty --user")
 		}
 		current.Users[normalized] = shareRole
 	}
@@ -74,10 +74,10 @@ func (a App) unshare(ctx context.Context, args []string) error {
 	}
 	setIDFromFirstArg(fs, id)
 	if *id == "" {
-		return exit(2, "usage: crabbox unshare --id <lease-id-or-slug> [--user <owner>|--org|--all]")
+		return Exit(2, "usage: crabbox unshare --id <lease-id-or-slug> [--user <owner>|--org|--all]")
 	}
 	if len(users) == 0 && !*org && !*all {
-		return exit(2, "usage: crabbox unshare --id <lease-id-or-slug> [--user <owner>|--org|--all]")
+		return Exit(2, "usage: crabbox unshare --id <lease-id-or-slug> [--user <owner>|--org|--all]")
 	}
 	coord, err := shareCoordinator()
 	if err != nil {
@@ -117,7 +117,7 @@ func shareCoordinator() (*CoordinatorClient, error) {
 		return nil, err
 	}
 	if !ok {
-		return nil, exit(2, "share requires a configured coordinator")
+		return nil, Exit(2, "share requires a configured coordinator")
 	}
 	return coord, nil
 }
@@ -129,7 +129,7 @@ func parseCoordinatorShareRole(value string) (CoordinatorShareRole, error) {
 	case CoordinatorShareManage:
 		return CoordinatorShareManage, nil
 	default:
-		return "", exit(2, "share role must be use or manage")
+		return "", Exit(2, "share role must be use or manage")
 	}
 }
 

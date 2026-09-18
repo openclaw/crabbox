@@ -5,11 +5,15 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestWriteWindowsBootstrapSSHWarningIncludesDetail(t *testing.T) {
@@ -38,7 +42,9 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 		"test -s '/etc/ssl/certs/ca-certificates.crt'",
 		"crabbox Linux readiness manifest verified; skipping apt bootstrap",
 		"crabbox legacy image readiness migrated without package-manager work",
-		"retry apt-get update",
+		"retry apt-get -o Acquire::Languages=none",
+		"-o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false",
+		"-o Acquire::IndexTargets::deb::CNF::DefaultEnabled=false update",
 		"retry apt-get install -y --no-install-recommends $crabbox_readiness_packages",
 		"crabbox_readiness_packages='ca-certificates curl git jq openssh-server rsync tmux util-linux'",
 		"curl --version >/dev/null",
@@ -48,7 +54,6 @@ func TestCloudInitUsesRetryingBootstrap(t *testing.T) {
 		"test -w '/work/crabbox'",
 		"      Port 2222\n      Port 22",
 		"systemctl enable ssh || true",
-		"timeout 30s systemctl restart ssh || timeout 30s systemctl restart ssh.socket || true",
 		"touch /var/lib/crabbox/bootstrapped",
 	} {
 		if !strings.Contains(got, want) {
@@ -144,7 +149,7 @@ func TestCloudInitStartsSSHBeforeOptionalDesktopBootstrap(t *testing.T) {
 	cfg.Desktop = true
 	got := cloudInit(cfg, "ssh-ed25519 test")
 	sshIndex := strings.Index(got, "timeout 30s systemctl restart ssh")
-	desktopIndex := strings.Index(got, "retry apt-get install -y --no-install-recommends tigervnc-standalone-server")
+	desktopIndex := strings.Index(got, "crabbox_install_packages tigervnc-standalone-server")
 	bootstrappedIndex := strings.Index(got, "touch /var/lib/crabbox/bootstrapped")
 	if sshIndex < 0 || desktopIndex < 0 || bootstrappedIndex < 0 {
 		t.Fatalf("cloudInit(desktop) missing expected bootstrap markers")
@@ -172,15 +177,14 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 		"/usr/local/bin/crabbox-configure-desktop-theme",
 		"/etc/systemd/system/crabbox-desktop.service",
 		"/usr/local/bin/crabbox-desktop-session",
-		"/etc/systemd/system/crabbox-desktop-session.service",
+		"/etc/xdg/autostart/crabbox-desktop.desktop",
 		"ExecStart=/usr/bin/Xtigervnc :99",
 		"-AcceptSetDesktopSize",
 		"-localhost yes",
 		"-SecurityTypes VncAuth",
 		"ExecStart=/usr/bin/startxfce4",
 		"systemctl is-active --quiet crabbox-desktop.service",
-		"systemctl is-active --quiet crabbox-desktop-session.service",
-		`requested_mode="${1:-${CRABBOX_DESKTOP_THEME:-}}"`,
+		`requested_mode="${1:-}"`,
 		`"$config_dir/crabbox/desktop-theme"`,
 		"gtk_theme=Adwaita-dark",
 		`gtk_candidates="Arc-Dark Greybird-dark Adwaita-dark Greybird"`,
@@ -204,22 +208,10 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 		"mkdir -p \"$config_dir/xfce4/xfconf/xfce-perchannel-xml\"",
 		"xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme",
 		"xfconf-query -c xfwm4 -p /general/theme",
-		"xfconf-query -c xfwm4 -p /general/box_move",
-		"xfconf-query -c xfwm4 -p /general/box_resize",
-		"xfconf-query -c xfwm4 -p /general/move_opacity",
-		"xfconf-query -c xfwm4 -p /general/resize_opacity",
-		"xfconf-query -c xfwm4 -p /general/snap_to_border",
 		"xfconf-query -c xfwm4 -p /general/snap_width",
-		"xfconf-query -c xfwm4 -p /general/tile_on_move",
-		"xfconf-query -c xfwm4 -p /general/use_compositing",
-		"xfconf-query -c xfwm4 -p /general/wrap_windows",
 		"xfconf-query -c xfce4-panel -p /panels/dark-mode",
 		"/panels/$panel_id/background-rgba",
 		"crabbox desktop theme start",
-		"crabbox-xfce4-panel-$user.log",
-		"pkill -USR1 -x xfce4-panel",
-		"xfwm4 --replace --compositor=off",
-		`xsetroot -solid "$root_color"`,
 		`gsettings set org.gnome.desktop.interface color-scheme "$gsettings_scheme"`,
 		"CRABBOX_DESKTOP_USER=crabbox /usr/local/bin/crabbox-configure-desktop-theme",
 		"CRABBOX_DESKTOP_USER=\"$(id -un)\" /usr/local/bin/crabbox-configure-desktop-theme",
@@ -227,10 +219,10 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 		"xterm -title 'Crabbox Desktop'",
 		"(umask 077 && openssl rand -base64 18 > /var/lib/crabbox/vnc.password)",
 		"tigervncpasswd -f > /var/lib/crabbox/vnc.pass",
-		"ss -ltn | grep -q '127.0.0.1:5900'",
+		"listening_sockets=$(ss -ltn)",
 		"systemctl disable --now crabbox-wayvnc.service crabbox-x11vnc.service 2>/dev/null || true",
-		"systemctl enable crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
-		"systemctl restart crabbox-xvfb.service crabbox-desktop.service crabbox-desktop-session.service",
+		"systemctl enable crabbox-xvfb.service crabbox-desktop.service",
+		"systemctl restart crabbox-xvfb.service crabbox-desktop.service",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("cloudInit(desktop) missing %q", want)
@@ -238,6 +230,40 @@ func TestCloudInitDesktopProfile(t *testing.T) {
 	}
 	if strings.Contains(got, "/etc/systemd/system/crabbox-x11vnc.service") {
 		t.Fatal("cloudInit(desktop) should not install the fixed-size x11vnc service")
+	}
+}
+
+func TestCloudInitDesktopRetainsReleasedResetAlias(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Desktop = true
+	var document struct {
+		Files []struct{ Path, Content string } `yaml:"write_files"`
+	}
+	if err := yaml.Unmarshal([]byte(cloudInit(cfg, "ssh-ed25519 fixture")), &document); err != nil {
+		t.Fatal(err)
+	}
+	var desktop string
+	for _, file := range document.Files {
+		if file.Path == "/etc/systemd/system/crabbox-desktop-session.service" {
+			t.Fatal("legacy reset name must not install an independent service")
+		}
+		if file.Path == "/etc/systemd/system/crabbox-desktop.service" {
+			desktop = file.Content
+		}
+	}
+	section, executable, alias := "", "", ""
+	for _, line := range strings.Split(desktop, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.Trim(line, "[]")
+		} else if section == "Service" && strings.HasPrefix(line, "ExecStart=") {
+			executable = strings.TrimPrefix(line, "ExecStart=")
+		} else if section == "Install" && strings.HasPrefix(line, "Alias=") {
+			alias = strings.TrimPrefix(line, "Alias=")
+		}
+	}
+	if executable != "/usr/bin/startxfce4" || alias != "crabbox-desktop-session.service" {
+		t.Fatalf("released reset name must alias the XFCE owner: executable=%q alias=%q", executable, alias)
 	}
 }
 
@@ -300,6 +326,10 @@ func TestCloudInitGnomeDesktopProfile(t *testing.T) {
 	cfg.Browser = true
 	cfg.DesktopEnv = "gnome"
 	got := cloudInit(cfg, "ssh-ed25519 test")
+	if strings.Count(got, indentCloudInitRuncmd(sharedGnomeDesktopTheme())) != 1 {
+		t.Fatal("GNOME cloud-init must install exactly one complete shared theme script")
+	}
+
 	for _, want := range []string{
 		"labwc wayvnc swaybg librsvg2-common gnome-panel wlr-randr grim slurp wtype wl-clipboard",
 		"swaybg librsvg2-common",
@@ -604,6 +634,71 @@ func TestAWSUserDataDefaultsToCloudInit(t *testing.T) {
 	}
 }
 
+func TestAWSUserDataUbuntuAPTPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		modify func(*Config)
+		want   bool
+	}{
+		{name: "default Canonical amd64", want: true},
+		{name: "explicit amd64", modify: func(cfg *Config) { cfg.architectureExplicit = true }, want: true},
+		{name: "custom or captured AMI", modify: func(cfg *Config) { cfg.AWSAMI = "ami-custom" }},
+		{name: "snapshot fork", modify: func(cfg *Config) { cfg.AWSSnapshot = "snap-captured" }},
+		{name: "Ubuntu 24.04", modify: func(cfg *Config) { cfg.OSImage = "ubuntu:24.04" }},
+		{name: "explicit ARM", modify: func(cfg *Config) {
+			cfg.Architecture, cfg.architectureExplicit = ArchitectureARM64, true
+		}},
+		{name: "inferred Graviton", modify: func(cfg *Config) { cfg.ServerType = "m7g.large" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = "aws"
+			cfg.ServerType = "m7a.large"
+			if tc.modify != nil {
+				tc.modify(&cfg)
+			}
+			got := awsUserData(cfg, "ssh-ed25519 test")
+			var document map[string]any
+			if err := yaml.Unmarshal([]byte(got), &document); err != nil {
+				t.Fatalf("invalid cloud-config: %v", err)
+			}
+			if !tc.want {
+				if _, ok := document["apt"]; ok {
+					t.Fatal("custom image or unqualified target must retain its APT policy")
+				}
+				if got != cloudInit(cfg, "ssh-ed25519 test") {
+					t.Fatal("excluded image must retain the ordinary cloud-init bytes")
+				}
+				return
+			}
+			want := map[string]any{
+				"primary":  []any{map[string]any{"arches": []any{"amd64"}, "uri": "https://archive.ubuntu.com/ubuntu/"}},
+				"security": []any{map[string]any{"arches": []any{"amd64"}, "uri": "http://security.ubuntu.com/ubuntu/"}},
+			}
+			if !reflect.DeepEqual(document["apt"], want) {
+				t.Fatalf("APT policy = %#v, want primary HTTPS with the separate security archive", document["apt"])
+			}
+		})
+	}
+	for _, provider := range []string{"gcp", "hetzner", "azure"} {
+		t.Run(provider, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = provider
+			got := cloudInit(cfg, "ssh-ed25519 test")
+			if provider == "azure" {
+				got = azureLinuxCloudInit(cfg, "ssh-ed25519 test")
+			}
+			var document map[string]any
+			if err := yaml.Unmarshal([]byte(got), &document); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := document["apt"]; ok {
+				t.Fatal("AWS archive policy must not change another provider")
+			}
+		})
+	}
+}
+
 func TestAWSUserDataWindowsProfile(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"
@@ -617,10 +712,10 @@ func TestAWSUserDataWindowsProfile(t *testing.T) {
 	}
 	defaultWorkRootCfg := cfg
 	defaultWorkRootCfg.WorkRoot = ""
-	if got := windowsBootstrapPowerShell(defaultWorkRootCfg, "ssh-ed25519 test"); !strings.Contains(got, `$workRoot = 'C:\crabbox'`) {
+	if got := WindowsBootstrapPowerShell(defaultWorkRootCfg, "ssh-ed25519 test"); !strings.Contains(got, `$workRoot = 'C:\crabbox'`) {
 		t.Fatalf("windows user data should default work root, got missing marker")
 	}
-	got := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	got := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
 		"function Assert-CrabboxFileSHA256",
 		"Get-FileHash -LiteralPath $Path -Algorithm SHA256",
@@ -714,7 +809,7 @@ func TestAWSUserDataWindowsCoreProfileSkipsDesktop(t *testing.T) {
 	cfg.TargetOS = targetWindows
 	cfg.WindowsMode = windowsModeNormal
 	cfg.WorkRoot = `C:\crabbox`
-	got := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	got := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
 		"function Assert-CrabboxFileSHA256",
 		"OpenSSH-Win64.zip",
@@ -763,7 +858,7 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 	cfg.TargetOS = targetWindows
 	cfg.WindowsMode = windowsModeWSL2
 	cfg.WorkRoot = `/work/crabbox`
-	got := windowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+	got := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
 	for _, want := range []string{
 		`$workRoot = 'C:\crabbox'`,
 		`C:\ProgramData\crabbox\windows.password`,
@@ -790,7 +885,7 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 		`$wslSetup = "C:\ProgramData\crabbox\wsl\linux-setup.sh"`,
 		"WriteAllText($wslSetup",
 		"wsl.exe -d $wslDistro --user root --exec bash /mnt/c/ProgramData/crabbox/wsl/linux-setup.sh",
-		"apt-get install -y --no-install-recommends ca-certificates curl git jq python3-minimal rsync",
+		"apt-get install -y --no-install-recommends ca-certificates curl git jq python3 rsync sudo",
 		"trufflehog_version='3.95.9'",
 		"trufflehog_${trufflehog_version}_linux_amd64.tar.gz",
 		wslTruffleHogAMD64SHA256,
@@ -828,6 +923,66 @@ func TestAWSUserDataWindowsWSL2Profile(t *testing.T) {
 	}
 	if sftpIndex, readyIndex := strings.Index(got, "Subsystem sftp internal-sftp"), strings.Index(got, "crabbox-ready"); sftpIndex < 0 || readyIndex < 0 || sftpIndex > readyIndex {
 		t.Fatalf("windows WSL2 bootstrap must configure SFTP before checking WSL readiness")
+	}
+}
+
+func TestManagedWindowsWSL2BootstrapInstallsNodeBeforeReadiness(t *testing.T) {
+	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.TargetOS, cfg.WindowsMode = targetWindows, mode
+			script := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+			install := "bash /var/lib/crabbox/install-linux-developer-tools.sh --node-only"
+			if mode == windowsModeNormal {
+				if strings.Contains(script, install) {
+					t.Fatal("native Windows unexpectedly installs a Linux runtime")
+				}
+				return
+			}
+			setupStart := strings.Index(script, "$linuxSetup = @'")
+			installIndex := strings.Index(script, install)
+			readyIndex := strings.Index(script, "cat >/usr/local/bin/crabbox-ready <<'READY'")
+			if setupStart < 0 || installIndex <= setupStart || readyIndex <= installIndex {
+				t.Fatal("WSL distro must install the shared Node baseline before readiness")
+			}
+			ready := script[readyIndex:]
+			for _, probe := range []string{"node --version >/dev/null", "npm --version >/dev/null"} {
+				if !strings.Contains(ready, probe) {
+					t.Errorf("WSL readiness missing %s", probe)
+				}
+			}
+		})
+	}
+}
+
+func TestManagedWindowsWSL2BootstrapOwnsDistroInitialization(t *testing.T) {
+	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.TargetOS, cfg.WindowsMode = targetWindows, mode
+			script := WindowsBootstrapPowerShell(cfg, "ssh-ed25519 test")
+			steps := []string{
+				"touch /etc/cloud/cloud-init.disabled",
+				"wsl.exe --terminate $wslDistro",
+				"wsl.exe -d $wslDistro --exec /usr/local/bin/crabbox-ready",
+				"WSL cold-start readiness failed with exit $LASTEXITCODE",
+				"Set-Content -NoNewline -Encoding ASCII -Path $setupCompletePath",
+			}
+			last := -1
+			for _, step := range steps {
+				index := strings.Index(script, step)
+				if mode == windowsModeNormal {
+					if index >= 0 && step != steps[len(steps)-1] {
+						t.Fatalf("native Windows unexpectedly configures WSL: %s", step)
+					}
+					continue
+				}
+				if index <= last {
+					t.Fatalf("missing or out-of-order WSL initialization step: %s", step)
+				}
+				last = index
+			}
+		})
 	}
 }
 
@@ -1009,5 +1164,74 @@ func TestAWSUserDataMacOSProfile(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("macOS user data missing %q", want)
 		}
+	}
+}
+
+func TestCloudInitReadinessWithoutBash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture")
+	}
+	cfg := baseConfig()
+	cfg.Desktop = true
+	cfg.WorkRoot = t.TempDir()
+	var document struct {
+		Files []struct{ Path, Content string } `yaml:"write_files"`
+	}
+	if err := yaml.Unmarshal([]byte(cloudInit(cfg, "ssh-ed25519 fixture")), &document); err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	for _, file := range document.Files {
+		if file.Path == "/usr/local/bin/crabbox-ready" {
+			script = file.Content
+		}
+	}
+	if !strings.HasPrefix(script, "#!/bin/sh\nset -eu\n") {
+		t.Fatalf("unexpected readiness interpreter: %q", script)
+	}
+	fixture := t.TempDir()
+	marker := filepath.Join(fixture, "bootstrapped")
+	script = strings.ReplaceAll(script, "/var/lib/crabbox/bootstrapped", shellQuote(marker))
+	for _, tool := range []string{"git", "rsync", "curl", "jq", "tmux", "flock", "systemctl", "ss"} {
+		body := "#!/bin/sh\n"
+		if tool == "ss" {
+			body += "printf '%s\\n' \"${SOCKETS-127.0.0.1:5900}\"\n"
+		}
+		body += "[ \"${FAIL_TOOL-}\" != " + shellQuote(tool) + " ]\n"
+		if err := os.WriteFile(filepath.Join(fixture, tool), []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	grep, err := exec.LookPath("grep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(grep, filepath.Join(fixture, "grep")); err != nil {
+		t.Fatal(err)
+	}
+	for _, failure := range []string{"", "git", "rsync", "curl", "jq", "tmux", "flock", "systemctl", "ss", "socket", "marker", "workroot"} {
+		t.Run("failure="+failure, func(t *testing.T) {
+			if err := os.WriteFile(marker, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			candidate := script
+			if failure == "marker" {
+				if err := os.Remove(marker); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if failure == "workroot" {
+				candidate = strings.ReplaceAll(candidate, cfg.WorkRoot, filepath.Join(fixture, "missing"))
+			}
+			cmd := exec.Command("/bin/sh", "-c", candidate)
+			cmd.Env = []string{"PATH=" + fixture, "FAIL_TOOL=" + failure}
+			if failure == "socket" {
+				cmd.Env = append(cmd.Env, "SOCKETS=127.0.0.1:9999")
+			}
+			out, err := cmd.CombinedOutput()
+			if (err == nil) != (failure == "") {
+				t.Fatalf("readiness result: %v; %s", err, out)
+			}
+		})
 	}
 }

@@ -21,6 +21,11 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      desktop-resize-only:
+        description: Run clean desktop provisioning and browser resizing proof only
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,9 +40,10 @@ env:
 
 jobs:
   hermetic:
+    if: ${{ !inputs.desktop-resize-only }}
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ matrix.timeout-minutes || 15 }}
 
     strategy:
       fail-fast: false
@@ -51,11 +57,14 @@ jobs:
           - name: local-container
             runner: ubuntu-latest
             build-cli: true
+            # Cold bootstrap allows 20m; leave room for build, use and cleanup.
+            timeout-minutes: 30
             smoke: |
+              set -o pipefail
               CRABBOX_LIVE=1 \
               CRABBOX_LIVE_PROVIDERS=local-container \
               CRABBOX_BIN="$PWD/bin/crabbox" \
-                scripts/live-smoke.sh
+                scripts/live-smoke.sh 2>&1 | tee "$RUNNER_TEMP/local-container-smoke.log"
 
           # Read-only doctor readiness contract. Hosted runners do not ship
           # Firecracker or CNI plugins, so the script's own
@@ -120,9 +129,15 @@ jobs:
         run: |
           archive="$RUNNER_TEMP/rsync-$RSYNC_VERSION.tar.gz"
           prefix="$RUNNER_TEMP/rsync-install"
-          curl --fail --location --silent --show-error \
+          if ! curl --disable --fail --location --silent --show-error \
+            --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 60 \
             --output "$archive" \
-            "https://download.samba.org/pub/rsync/src/rsync-$RSYNC_VERSION.tar.gz"
+            "https://download.samba.org/pub/rsync/src/rsync-$RSYNC_VERSION.tar.gz"; then
+            curl --disable --fail --location --silent --show-error \
+              --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 60 \
+              --output "$archive" \
+              "https://github.com/RsyncProject/rsync/releases/download/v$RSYNC_VERSION/rsync-$RSYNC_VERSION.tar.gz"
+          fi
           printf '%s  %s\n' "$RSYNC_SHA256" "$archive" | sha256sum --check --strict
           tar -xzf "$archive" -C "$RUNNER_TEMP"
           cd "$RUNNER_TEMP/rsync-$RSYNC_VERSION"
@@ -145,3 +160,66 @@ jobs:
 
       - name: Run connector lifecycle smoke
         run: ${{ matrix.smoke }}
+
+      - name: Diagnose local-container bootstrap
+        if: failure() && matrix.name == 'local-container'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/local-container-smoke.log"
+          test -f "$log" || exit 0
+          lease="$(sed -nE 's/^provisioning provider=local-container lease=(cbx_[0-9a-f]{12}) .*/\1/p' "$log")"
+          if [[ ! "$lease" =~ ^cbx_[0-9a-f]{12}$ ]]; then
+            echo "No unique smoke lease; skipping container diagnostics"
+            exit 0
+          fi
+          containers="$(docker ps -aq --no-trunc --filter label=crabbox=true --filter label=provider=local-container --filter "label=lease=$lease")"
+          if [[ ! "$containers" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "No unique exact smoke container; skipping container diagnostics"
+            exit 0
+          fi
+          # Never dump Config.Env or argv: bootstrap needs only state and logs.
+          docker inspect --format '{{json .State}}' "$containers"
+          timeout 15s docker logs --tail 100 "$containers"
+
+  desktop-resize:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.desktop-resize-only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Bound provisioning and cleanup time
+        run: echo "DESKTOP_PROOF_JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+      - name: Check out exact candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+      - name: Build candidate and check desktop owners
+        run: |
+          go build -trimpath -o bin/crabbox ./cmd/crabbox
+          go test ./internal/cli -run '^TestWebVNCURLs$' -count=1
+          go test ./internal/providers/localcontainer -run '^Test(BootstrapScriptUsesAccountHomeDirectory|BootstrapScriptSupportsResizableXFCE)$' -count=1
+      - name: Install locked browser proof dependencies
+        run: |
+          npm ci --prefix scripts
+          ./scripts/node_modules/.bin/playwright install --with-deps chromium
+      - name: Exercise clean desktops and real noVNC
+        run: |
+          ulimit -c 0
+          node scripts/desktop-resize-proof.mjs
+      - name: Upload bounded desktop proof
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-resize-proof-${{ github.sha }}
+          path: dist/desktop-resize-proof
+          if-no-files-found: error
+          retention-days: 30

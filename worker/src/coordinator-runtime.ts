@@ -1,3 +1,4 @@
+import { AsyncMutex } from "./async-mutex";
 export interface CoordinatorStorageView {
   get<T>(key: string, options?: { noCache?: boolean }): Promise<T | undefined>;
   put<T>(key: string, value: T, options?: { noCache?: boolean }): Promise<void>;
@@ -14,6 +15,46 @@ export interface CoordinatorStorage extends CoordinatorStorageView {
   // Implementations may retry callbacks after serialization conflicts; callbacks must contain
   // only storage reads/writes and must not perform external or otherwise non-idempotent effects.
   transaction<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T>;
+}
+
+export const provisioningDuePrefix = "provisioning-due:";
+export const legacyAlarmKey = "runtime:legacy-alarm";
+
+export interface ProvisioningDueRecord {
+  operationID: string;
+  at: number;
+}
+
+export async function earliestProvisioningWake(
+  storage: CoordinatorStorageView,
+): Promise<number | undefined> {
+  const entries = await storage.list<ProvisioningDueRecord>({
+    prefix: provisioningDuePrefix,
+    limit: 1,
+  });
+  if (entries.size === 0) return undefined;
+  const at = entries.values().next().value?.at;
+  // A malformed index value still needs the bounded controller tick to quarantine it.
+  return typeof at === "number" && Number.isFinite(at) ? at : Date.now();
+}
+
+export async function mergedCoordinatorWake(
+  storage: CoordinatorStorageView,
+): Promise<number | undefined> {
+  const legacy = await storage.get<number | null>(legacyAlarmKey);
+  const provisioning = await earliestProvisioningWake(storage);
+  if (legacy == null) return provisioning;
+  return provisioning === undefined ? legacy : Math.min(legacy, provisioning);
+}
+
+export async function setLegacyWake(storage: CoordinatorStorageView, time?: number): Promise<void> {
+  await storage.put(legacyAlarmKey, time ?? null);
+}
+
+export interface ProvisioningRuntime {
+  commitAndWake<T>(callback: (transaction: CoordinatorStorageView) => Promise<T>): Promise<T>;
+  registerProvisioningTick(tick: () => Promise<void>): void;
+  ownMaintenance(operation: Promise<void>): void;
 }
 
 export type CoordinatorRequestQueue = "direct" | "lifecycle";
@@ -66,11 +107,15 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     path[0] === "v1" &&
     path[1] === "leases" &&
     path[2] &&
-    path.length === 3
+    (path.length === 3 || (path.length === 4 && path[3] === "from-checkpoint"))
   ) {
     return "direct";
   }
   if (path[0] === "v1" && path[1] === "workspaces") {
+    return "direct";
+  }
+  if (method === "GET" && path.join("/") === "v1/control") {
+    // Admission only binds this socket; control messages retain their lifecycle fences.
     return "direct";
   }
   if (method === "GET" && path.join("/") === "v1/native-vnc/handoff") {
@@ -88,7 +133,7 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     path[2] &&
     ((method === "POST" &&
       path.length === 4 &&
-      (path[3] === "promote" || path[3] === "promote-catalog")) ||
+      (path[3] === "promote" || path[3] === "promote-cas" || path[3] === "promote-catalog")) ||
       (method === "DELETE" &&
         (path.length === 3 ||
           (path.length === 4 && (path[3] === "promote-catalog" || path[3] === "promote")))))
@@ -111,6 +156,17 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     return "direct";
   }
   if (path[0] === "v1" && path[1] === "providers" && path[3] === "readiness") {
+    return "direct";
+  }
+  if (
+    path[0] === "v1" &&
+    path[1] === "leases" &&
+    path[2] &&
+    path.length === 4 &&
+    path[3] === "cleanup" &&
+    (method === "GET" || method === "POST")
+  ) {
+    // Provider reads stay outside the queue; recovery owns its short final commit fence.
     return "direct";
   }
   if (
@@ -212,30 +268,22 @@ export interface CoordinatorRuntime {
   getAlarm(): Promise<number | undefined>;
   scheduleAlarm(time: number): Promise<void>;
   clearAlarm(): Promise<void>;
+  readonly provisioning?: ProvisioningRuntime;
 }
 
 export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
+  readonly provisioning: ProvisioningRuntime = this;
   readonly storage: CoordinatorStorage;
   readonly ephemeralWebSocketMaxPayloadBytes = 32 * 1024 * 1024;
   private readonly attachments = new WeakMap<WebSocket, unknown>();
-  private exclusiveTail = Promise.resolve();
+  private readonly exclusive = new AsyncMutex();
 
   constructor(private readonly state: DurableObjectState) {
     this.storage = state.storage;
   }
 
-  async runExclusive<T>(callback: () => Promise<T>): Promise<T> {
-    const predecessor = this.exclusiveTail;
-    let release!: () => void;
-    this.exclusiveTail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await predecessor;
-    try {
-      return await callback();
-    } finally {
-      release();
-    }
+  runExclusive<T>(callback: () => Promise<T>): Promise<T> {
+    return this.exclusive.run(callback);
   }
 
   createWebSocketUpgrade(
@@ -312,12 +360,43 @@ export class CloudflareCoordinatorRuntime implements CoordinatorRuntime {
     });
   }
 
+  async commitAndWake<T>(
+    callback: (transaction: CoordinatorStorageView) => Promise<T>,
+  ): Promise<T> {
+    return this.state.storage.transaction(async (transaction) => {
+      const currentAlarm = await transaction.getAlarm();
+      if ((await transaction.get(legacyAlarmKey)) === undefined) {
+        if (currentAlarm !== null) await transaction.put(legacyAlarmKey, currentAlarm);
+      }
+      const result = await callback(transaction);
+      const wake = await mergedCoordinatorWake(transaction);
+      if (wake === undefined) {
+        if (currentAlarm !== null) await transaction.deleteAlarm();
+      } else if (wake !== currentAlarm || wake <= Date.now()) {
+        // A retained due timestamp may outlive its consumed job; only future wakes are reusable.
+        await transaction.setAlarm(wake);
+      }
+      return result;
+    });
+  }
+
+  registerProvisioningTick(_tick: () => Promise<void>): void {
+    // Constructor recovery is storage-only; provider I/O belongs to a later alarm.
+    this.state.blockConcurrencyWhile(async () => {
+      await this.commitAndWake(async () => undefined);
+    });
+  }
+
+  ownMaintenance(operation: Promise<void>): void {
+    this.state.waitUntil(operation);
+  }
+
   scheduleAlarm(time: number): Promise<void> {
-    return this.state.storage.setAlarm(time);
+    return this.commitAndWake(async (transaction) => setLegacyWake(transaction, time));
   }
 
   clearAlarm(): Promise<void> {
-    return this.state.storage.deleteAlarm();
+    return this.commitAndWake(async (transaction) => setLegacyWake(transaction));
   }
 
   private runSocketOperation<T>(

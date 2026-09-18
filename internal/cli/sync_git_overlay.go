@@ -2,22 +2,34 @@ package cli
 
 import (
 	"bytes"
-	"crypto/sha256"
+	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 )
 
 const (
-	gitOverlayFallbackExitCode = 78
-	gitOverlayFallbackMarker   = "CRABBOX_GIT_OVERLAY_FALLBACK:"
-	gitOverlayMutationMarker   = "CRABBOX_GIT_OVERLAY_WORKSPACE_MUTATED"
+	gitOriginRuntimeFallbackExitCode = 78
+	gitOverlayFallbackExitCode       = 78
+	gitOverlayFallbackMarker         = "CRABBOX_GIT_OVERLAY_FALLBACK:"
+	gitOverlayMutationMarker         = "CRABBOX_GIT_OVERLAY_WORKSPACE_MUTATED"
+	// POSIX ERE keeps Go and remote grep aligned; status digits in URLs are not authentication failures.
+	gitOriginHTTPAuthPattern = `authentication (failed|required)|could not read Username|unable to get password|terminal prompts disabled|access denied|permission denied|HTTP(/[0-9.]+)?[[:space:]]+(401|403)([^[:alnum:]_]|$)|requested URL returned error:[[:space:]]*(401|403)([^[:alnum:]_]|$)`
+)
+
+var (
+	gitOriginHTTPServerError = regexp.MustCompile(`(?i)(?:requested URL returned error:[[:space:]]*|HTTP(?:/[0-9.]+)?[[:space:]]+|HTTP code[[:space:]]*=[[:space:]]*)5[0-9][0-9]\b`)
+	gitOriginHTTPAuthError   = regexp.MustCompile(`(?i)` + gitOriginHTTPAuthPattern)
+	gitOriginTransportError  = regexp.MustCompile(`(?i)Could not resolve (?:host|proxy)|Could not resolve hostname|Failed to connect|Couldn.t connect to server|Connection (?:refused|timed out|reset by peer)|getpeername\(\) failed with errno [0-9]+: (?:Transport endpoint|Socket) is not connected\b|Operation timed out|Network is unreachable|No route to host|SSL certificate problem|server certificate verification failed|TLS connect error|SSL connect error|gnutls_handshake\(\) failed|Empty reply from server|Recv failure|Send failure|Failed sending data to the peer`)
+	gitOriginHTTPNotFound    = regexp.MustCompile(`(?i)\brepository not found\b`)
+	gitOriginFilesystemError = regexp.MustCompile(`(?i)does not appear to be a git repository|repository .* does not exist|No such file or directory|Permission denied|unable to access`)
 )
 
 var gitOverlayTransformAttributes = []string{
@@ -30,11 +42,460 @@ type gitOverlayDecision struct {
 	Reason    string
 }
 
+type gitOriginDisposition uint8
+
+const (
+	gitOriginAbsent gitOriginDisposition = iota
+	gitOriginRemoteAttemptSafe
+	gitOriginNonForwardable
+)
+
+const (
+	gitOverlaySnapshotMaxAttempts = 3
+)
+
+type gitOverlaySnapshot struct {
+	sourceSnapshot
+	Manifest    SyncManifest
+	Excludes    SyncExcludeRules
+	Fingerprint string
+	Checkout    gitOverlayCheckoutState
+}
+
+type gitOverlayCheckoutState struct {
+	Head             string
+	IndexTree        string
+	IndexFingerprint string
+}
+
+var gitOverlayGitExecutable = func() string {
+	path, err := exec.LookPath("git")
+	if err != nil {
+		return "git"
+	}
+	return path
+}()
+
+func newGitOverlaySnapshot() (gitOverlaySnapshot, error) {
+	snapshot, err := newSourceSnapshot()
+	return gitOverlaySnapshot{sourceSnapshot: snapshot}, err
+}
+
+func prepareGitOverlaySnapshot(
+	ctx context.Context,
+	repo Repo,
+	cfg Config,
+	excludes SyncExcludeRules,
+	includes []string,
+	plan gitCoherencePlan,
+) (gitOverlaySnapshot, error) {
+	return prepareGitOverlaySnapshotWithHook(ctx, repo, cfg, excludes, includes, plan, nil)
+}
+
+func prepareGitOverlaySnapshotWithHook(
+	ctx context.Context,
+	repo Repo,
+	cfg Config,
+	excludes SyncExcludeRules,
+	includes []string,
+	plan gitCoherencePlan,
+	hook sourceSnapshotHook,
+) (gitOverlaySnapshot, error) {
+	return prepareGitOverlaySnapshotWithCleanup(ctx, repo, cfg, excludes, includes, plan, hook, func(snapshot *gitOverlaySnapshot) error {
+		return snapshot.cleanup()
+	})
+}
+
+func prepareGitOverlaySnapshotWithCleanup(
+	ctx context.Context,
+	repo Repo,
+	cfg Config,
+	_ SyncExcludeRules,
+	includes []string,
+	plan gitCoherencePlan,
+	hook sourceSnapshotHook,
+	cleanup func(*gitOverlaySnapshot) error,
+) (gitOverlaySnapshot, error) {
+	policy := gitSnapshotPolicy{
+		target:   plan.Target,
+		checkout: captureGitOverlayCheckoutState,
+		manifest: syncManifestFilteredRules,
+		validate: validateGitOverlayManifestAtState,
+		files:    func(manifest SyncManifest) []string { return manifest.OverlayFiles },
+		fingerprint: func(repo Repo, manifest SyncManifest, excludes SyncExcludeRules, _ gitOverlayCheckoutState) (string, error) {
+			return syncFingerprintForManifest(ctx, repo, cfg, manifest, excludes, plan)
+		},
+	}
+	return prepareGitSnapshotWithCleanup(ctx, repo, cfg, includes, policy, hook, cleanup)
+}
+
+type gitSnapshotPolicy struct {
+	target      string
+	checkout    func(string) (gitOverlayCheckoutState, error)
+	manifest    func(string, SyncExcludeRules, []string) (SyncManifest, error)
+	validate    func(Repo, SyncManifest, gitOverlayCheckoutState) error
+	files       func(SyncManifest) []string
+	fingerprint func(Repo, SyncManifest, SyncExcludeRules, gitOverlayCheckoutState) (string, error)
+}
+
+func prepareGitSnapshotWithCleanup(
+	ctx context.Context,
+	repo Repo,
+	cfg Config,
+	includes []string,
+	policy gitSnapshotPolicy,
+	hook sourceSnapshotHook,
+	cleanup func(*gitOverlaySnapshot) error,
+) (accepted gitOverlaySnapshot, result error) {
+	defer func() {
+		if result != nil && ctx.Err() != nil && !errors.Is(result, ctx.Err()) {
+			result = errors.Join(result, ctx.Err())
+		}
+	}()
+	for attempt := 1; attempt <= gitOverlaySnapshotMaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return gitOverlaySnapshot{}, err
+		}
+		checkout, err := policy.checkout(repo.Root)
+		if err != nil {
+			if errors.Is(err, errSourceSnapshotDrift) && attempt < gitOverlaySnapshotMaxAttempts {
+				continue
+			}
+			return gitOverlaySnapshot{}, err
+		}
+		if checkout.Head != repo.Head || checkout.Head != policy.target {
+			return gitOverlaySnapshot{}, fmt.Errorf("head_changed")
+		}
+		if hook != nil {
+			hook("initial_checkout_state_captured", attempt, "")
+		}
+		excludes, err := syncExcludes(repo.Root, cfg)
+		if err != nil {
+			return gitOverlaySnapshot{}, err
+		}
+		manifest, err := policy.manifest(repo.Root, excludes, includes)
+		if err != nil {
+			return gitOverlaySnapshot{}, err
+		}
+		validationErr := policy.validate(repo, manifest, checkout)
+		if hook != nil {
+			hook("before_initial_validation_checkout_state", attempt, "")
+		}
+		validatedCheckout, checkoutErr := policy.checkout(repo.Root)
+		if checkoutErr != nil || validatedCheckout != checkout {
+			if attempt < gitOverlaySnapshotMaxAttempts {
+				continue
+			}
+			return gitOverlaySnapshot{}, errSourceSnapshotDrift
+		}
+		if validationErr != nil {
+			return gitOverlaySnapshot{}, validationErr
+		}
+		if err := ctx.Err(); err != nil {
+			return gitOverlaySnapshot{}, err
+		}
+		snapshot, err := newGitOverlaySnapshot()
+		if err != nil {
+			return gitOverlaySnapshot{}, err
+		}
+		snapshot.Manifest = manifest
+		snapshot.Excludes = excludes
+		snapshot.Checkout = checkout
+		if hook != nil {
+			hook("snapshot_created", attempt, snapshot.Root)
+		}
+		if err := copySourceSnapshotOwned(ctx, repo.Root, &snapshot.sourceSnapshot, policy.files(manifest), attempt, hook); err != nil {
+			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, err, cleanup); retry {
+				continue
+			} else {
+				return retained, result
+			}
+		}
+		if hook != nil {
+			hook("snapshot_copied", attempt, snapshot.Root)
+		}
+		if err := ctx.Err(); err != nil {
+			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
+		}
+		snapshotRepo := repo
+		snapshotRepo.Root = snapshot.Root
+		snapshot.Fingerprint, err = policy.fingerprint(snapshotRepo, manifest, excludes, checkout)
+		if err != nil {
+			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
+		}
+		if hook != nil {
+			hook("snapshot_fingerprinted", attempt, snapshot.Root)
+		}
+		refreshedExcludes, err := syncExcludes(repo.Root, cfg)
+		if err != nil {
+			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
+		}
+		if !sameSyncExcludeRules(excludes, refreshedExcludes) {
+			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errSourceSnapshotDrift, cleanup); retry {
+				continue
+			} else {
+				return retained, result
+			}
+		}
+		refreshed, err := policy.manifest(repo.Root, refreshedExcludes, includes)
+		if err != nil {
+			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
+		}
+		if !sameSyncManifest(manifest, refreshed) {
+			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errSourceSnapshotDrift, cleanup); retry {
+				continue
+			} else {
+				return retained, result
+			}
+		}
+		if hook != nil {
+			hook("before_live_fingerprint", attempt, snapshot.Root)
+		}
+		liveFingerprint, err := policy.fingerprint(repo, refreshed, refreshedExcludes, checkout)
+		if err != nil {
+			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
+		}
+		if hook != nil {
+			hook("live_fingerprinted", attempt, snapshot.Root)
+		}
+		finalExcludes, err := syncExcludes(repo.Root, cfg)
+		if err != nil {
+			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
+		}
+		finalManifest, err := policy.manifest(repo.Root, finalExcludes, includes)
+		if err != nil {
+			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
+		}
+		if hook != nil {
+			hook("before_final_checkout_state", attempt, snapshot.Root)
+		}
+		finalCheckout, err := policy.checkout(repo.Root)
+		if err != nil || finalCheckout != checkout {
+			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errSourceSnapshotDrift, cleanup); retry {
+				continue
+			} else {
+				return retained, result
+			}
+		}
+		finalValidationErr := policy.validate(repo, finalManifest, finalCheckout)
+		acceptedExcludes, err := syncExcludes(repo.Root, cfg)
+		if err != nil {
+			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
+		}
+		acceptedManifest, err := policy.manifest(repo.Root, acceptedExcludes, includes)
+		if err != nil {
+			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
+		}
+		acceptedFingerprint, err := policy.fingerprint(repo, acceptedManifest, acceptedExcludes, finalCheckout)
+		if err != nil {
+			return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
+		}
+		if hook != nil {
+			hook("before_accepted_checkout_state", attempt, snapshot.Root)
+		}
+		acceptedCheckout, err := policy.checkout(repo.Root)
+		if err != nil || acceptedCheckout != finalCheckout {
+			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errSourceSnapshotDrift, cleanup); retry {
+				continue
+			} else {
+				return retained, result
+			}
+		}
+		if !sameSyncExcludeRules(finalExcludes, acceptedExcludes) ||
+			!sameSyncManifest(finalManifest, acceptedManifest) {
+			if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errSourceSnapshotDrift, cleanup); retry {
+				continue
+			} else {
+				return retained, result
+			}
+		}
+		if finalValidationErr != nil {
+			return cleanupGitOverlaySnapshotAfterFailure(snapshot, finalValidationErr, cleanup)
+		}
+		if sameSyncExcludeRules(refreshedExcludes, finalExcludes) &&
+			sameSyncManifest(manifest, refreshed) &&
+			sameSyncManifest(manifest, finalManifest) &&
+			snapshot.Fingerprint == liveFingerprint &&
+			snapshot.Fingerprint == acceptedFingerprint {
+			if err := ctx.Err(); err != nil {
+				return cleanupGitOverlaySnapshotAfterFailure(snapshot, err, cleanup)
+			}
+			snapshot.Manifest = acceptedManifest
+			snapshot.Excludes = acceptedExcludes
+			return snapshot, nil
+		}
+		if retry, retained, result := retryGitOverlaySnapshotAfterDrift(&snapshot, errSourceSnapshotDrift, cleanup); retry {
+			continue
+		} else {
+			return retained, result
+		}
+	}
+	return gitOverlaySnapshot{}, errSourceSnapshotDrift
+}
+
+func captureGitOverlayCheckoutState(root string) (gitOverlayCheckoutState, error) {
+	return captureGitOverlayCheckoutStateWithHook(root, nil)
+}
+
+func captureGitOverlayCheckoutStateWithHook(root string, betweenSamples func()) (gitOverlayCheckoutState, error) {
+	return captureGitCheckoutStateWithReader(root, betweenSamples, gitOverlayGitBytes)
+}
+
+func captureGitCheckoutStateWithReader(root string, betweenSamples func(), readBytes func(string, ...string) ([]byte, error)) (gitOverlayCheckoutState, error) {
+	return captureGitCheckoutStateWithStateReader(root, betweenSamples, readBytes, func(root string) (gitOverlayCheckoutState, error) {
+		return readGitCheckoutStateWithReader(root, readBytes)
+	})
+}
+
+func captureGitCheckoutStateWithStateReader(root string, betweenSamples func(), readBytes func(string, ...string) ([]byte, error), readState func(string) (gitOverlayCheckoutState, error)) (gitOverlayCheckoutState, error) {
+	first, err := readState(root)
+	if err != nil {
+		return gitOverlayCheckoutState{}, err
+	}
+	if betweenSamples != nil {
+		betweenSamples()
+	}
+	topLevelBytes, err := readBytes(root, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return gitOverlayCheckoutState{}, errSourceSnapshotDrift
+	}
+	canonicalRoot, err := filepath.Abs(root)
+	if err != nil {
+		return gitOverlayCheckoutState{}, fmt.Errorf("invalid_checkout_root")
+	}
+	canonicalTopLevel, err := filepath.Abs(strings.TrimSpace(string(topLevelBytes)))
+	if err != nil {
+		return gitOverlayCheckoutState{}, fmt.Errorf("invalid_checkout_root")
+	}
+	canonicalRoot = canonicalRepositoryPath(canonicalRoot)
+	canonicalTopLevel = canonicalRepositoryPath(canonicalTopLevel)
+	if !sameCanonicalRepositoryPath(canonicalRoot, canonicalTopLevel) {
+		return gitOverlayCheckoutState{}, fmt.Errorf("checkout_root_mismatch")
+	}
+	second, err := readState(root)
+	if err != nil {
+		return gitOverlayCheckoutState{}, err
+	}
+	if first != second {
+		return gitOverlayCheckoutState{}, errSourceSnapshotDrift
+	}
+	return first, nil
+}
+
+func readGitCheckoutStateWithReader(root string, readBytes func(string, ...string) ([]byte, error)) (gitOverlayCheckoutState, error) {
+	output := func(args ...string) (string, error) {
+		out, err := readBytes(root, args...)
+		return strings.TrimSpace(string(out)), err
+	}
+	head, err := output("rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil || !validGitObjectID(head) {
+		if symbolic, symbolicErr := output("symbolic-ref", "--quiet", "HEAD"); symbolicErr == nil && symbolic != "" {
+			return gitOverlayCheckoutState{}, fmt.Errorf("unborn_head")
+		}
+		return gitOverlayCheckoutState{}, fmt.Errorf("invalid_head")
+	}
+	indexTree, err := output("write-tree")
+	if err != nil || !validGitObjectID(indexTree) {
+		if unmerged, unmergedErr := readBytes(root, "ls-files", "--unmerged", "-z"); unmergedErr == nil && len(unmerged) != 0 {
+			return gitOverlayCheckoutState{}, fmt.Errorf("unmerged_index")
+		}
+		return gitOverlayCheckoutState{}, fmt.Errorf("invalid_index")
+	}
+	return gitOverlayCheckoutState{Head: head, IndexTree: indexTree}, nil
+}
+
+func validGitObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func gitOverlayGitBytes(root string, args ...string) ([]byte, error) {
+	commandArgs := []string{
+		"--no-optional-locks",
+		"-c", "credential.helper=",
+		"-c", "credential.interactive=never",
+		"-c", "core.hooksPath=" + os.DevNull,
+		"-c", "core.fsmonitor=false",
+		"-c", "core.attributesFile=" + os.DevNull,
+		"-c", "core.excludesFile=" + os.DevNull,
+	}
+	commandArgs = append(commandArgs, args...)
+	cmd := exec.Command(gitOverlayGitExecutable, commandArgs...)
+	cmd.Dir = root
+	cmd.Env = gitOverlayGitEnvironment()
+	return cmd.Output()
+}
+
+func gitOverlayGitEnvironment() []string {
+	environment := []string{
+		"HOME=" + os.DevNull,
+		"XDG_CONFIG_HOME=" + os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_CONFIG_SYSTEM=" + os.DevNull,
+		"GIT_ATTR_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_ASKPASS=" + os.DevNull,
+		"SSH_ASKPASS=" + os.DevNull,
+		"GCM_INTERACTIVE=Never",
+		"GIT_OPTIONAL_LOCKS=0",
+		"GIT_LITERAL_PATHSPECS=1",
+	}
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		switch strings.ToUpper(name) {
+		case "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TMPDIR", "TMP", "TEMP":
+			environment = append(environment, entry)
+		}
+	}
+	return environment
+}
+
+func cleanupGitOverlaySnapshotAfterFailure(snapshot gitOverlaySnapshot, primary error, cleanup func(*gitOverlaySnapshot) error) (gitOverlaySnapshot, error) {
+	cleanupErr := cleanup(&snapshot)
+	if cleanupErr == nil {
+		return gitOverlaySnapshot{}, primary
+	}
+	return snapshot, errors.Join(primary, cleanupErr)
+}
+
+func retryGitOverlaySnapshotAfterDrift(snapshot *gitOverlaySnapshot, err error, cleanup func(*gitOverlaySnapshot) error) (bool, gitOverlaySnapshot, error) {
+	cleanupErr := cleanup(snapshot)
+	if cleanupErr != nil {
+		return false, *snapshot, errors.Join(err, cleanupErr)
+	}
+	if errors.Is(err, errSourceSnapshotDrift) {
+		return true, gitOverlaySnapshot{}, nil
+	}
+	return false, gitOverlaySnapshot{}, err
+}
+
+func sameSyncExcludeRules(left, right SyncExcludeRules) bool {
+	return left.managedSubtree == right.managedSubtree && slices.Equal(left.rules, right.rules)
+}
+
+func terminalGitOverlayPreparationError(err error, retained bool, contextErr error) error {
+	if contextErr != nil && !errors.Is(err, contextErr) {
+		err = errors.Join(err, contextErr)
+	}
+	if retained {
+		return fmt.Errorf("%w: %w", Exit(6, "create immutable git overlay snapshot"), err)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return nil
+}
+
 func decideGitOverlay(cfg Config, repo Repo, target SSHTarget, manifest SyncManifest, coherence gitCoherencePlan, credentialBlocked, fullResync, hydratedByActions bool) gitOverlayDecision {
 	decision := gitOverlayDecision{Requested: cfg.Sync.GitOverlay}
 	if !decision.Requested {
 		return decision
 	}
+	originDisposition := classifyGitOrigin(repo.RemoteURL)
 	switch {
 	case target.TargetOS != targetLinux || isWindowsNativeTarget(target) || isWindowsWSL2Target(target):
 		decision.Reason = "unsupported_target"
@@ -50,7 +511,9 @@ func decideGitOverlay(cfg Config, repo Repo, target SSHTarget, manifest SyncMani
 		decision.Reason = "include_whitelist"
 	case credentialBlocked || gitRemoteURLHasCredentials(repo.RemoteURL):
 		decision.Reason = "credential_origin"
-	case !gitOverlayOriginTransportSupported(repo.RemoteURL) || !gitOverlayOriginTransportSupported(coherence.RemoteURL):
+	case originDisposition == gitOriginAbsent:
+		decision.Reason = "missing_origin"
+	case originDisposition != gitOriginRemoteAttemptSafe || !gitOverlayOriginTransportSupported(coherence.RemoteURL):
 		decision.Reason = "unsupported_origin_transport"
 	case !coherence.enabled():
 		decision.Reason = "unseedable_head"
@@ -65,35 +528,59 @@ func decideGitOverlay(cfg Config, repo Repo, target SSHTarget, manifest SyncMani
 }
 
 func gitOverlayOriginTransportSupported(remoteURL string) bool {
+	return classifyGitOrigin(remoteURL) == gitOriginRemoteAttemptSafe
+}
+
+func classifyGitOrigin(remoteURL string) gitOriginDisposition {
 	raw := strings.TrimSpace(remoteURL)
-	if raw == "" || gitRemoteURLHasCredentials(raw) {
-		return false
+	if raw == "" {
+		return gitOriginAbsent
+	}
+	if gitRemoteURLHasCredentials(raw) || strings.ContainsAny(raw, "?#") {
+		return gitOriginNonForwardable
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return false
+	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.Opaque != "" {
+		return gitOriginNonForwardable
 	}
 	if parsed.Scheme != "" {
 		switch strings.ToLower(parsed.Scheme) {
 		case "http", "https":
-			return parsed.Host != ""
+			if parsed.Host != "" {
+				return gitOriginRemoteAttemptSafe
+			}
 		case "file":
-			return parsed.Host == "" || strings.EqualFold(parsed.Host, "localhost")
-		default:
-			return false
+			if parsed.Path != "" && (parsed.Host == "" || strings.EqualFold(parsed.Host, "localhost")) {
+				return gitOriginRemoteAttemptSafe
+			}
 		}
+		return gitOriginNonForwardable
 	}
-	return !strings.Contains(raw, ":") && !strings.HasPrefix(raw, "-")
+	if parsed.Host != "" || strings.HasPrefix(raw, "//") || strings.Contains(raw, ":") || strings.HasPrefix(raw, "-") {
+		return gitOriginNonForwardable
+	}
+	return gitOriginRemoteAttemptSafe
 }
 
 func validateGitOverlayManifest(repo Repo, manifest SyncManifest) error {
 	if repo.Root == "" || repo.Head == "" {
 		return fmt.Errorf("missing_repo_identity")
 	}
+	checkout, err := captureGitOverlayCheckoutState(repo.Root)
+	if err != nil {
+		return err
+	}
+	return validateGitOverlayManifestAtState(repo, manifest, checkout)
+}
+
+func validateGitOverlayManifestAtState(repo Repo, manifest SyncManifest, checkout gitOverlayCheckoutState) error {
+	if repo.Root == "" || repo.Head == "" {
+		return fmt.Errorf("missing_repo_identity")
+	}
 	if gitCheckoutSparseEnabled(repo.Root) {
 		return fmt.Errorf("sparse_checkout")
 	}
-	if head := gitOutput(repo.Root, "rev-parse", "--verify", "HEAD^{commit}"); head == "" || head != repo.Head {
+	if checkout.Head == "" || checkout.Head != repo.Head {
 		return fmt.Errorf("head_changed")
 	}
 	if err := validateGitOverlayCheckoutConfig(repo.Root); err != nil {
@@ -109,6 +596,9 @@ func validateGitOverlayManifest(repo Repo, manifest SyncManifest) error {
 		}
 		if entry.skipWorktree {
 			return fmt.Errorf("skip_worktree")
+		}
+		if entry.assumeUnchanged {
+			return fmt.Errorf("assume_unchanged_index")
 		}
 		if entry.mode == "160000" {
 			return fmt.Errorf("gitlink")
@@ -262,64 +752,6 @@ func sameSyncManifest(left, right SyncManifest) bool {
 		left.Bytes == right.Bytes && left.ChangedBytes == right.ChangedBytes && left.OverlayBytes == right.OverlayBytes
 }
 
-func gitOverlayLocalSnapshot(repo Repo, manifest SyncManifest) (string, error) {
-	if gitOutput(repo.Root, "rev-parse", "--verify", "HEAD^{commit}") != repo.Head {
-		return "", fmt.Errorf("head_changed")
-	}
-	index := gitOutput(repo.Root, "rev-parse", "--git-path", "index")
-	if index == "" {
-		return "", fmt.Errorf("missing_index")
-	}
-	if !filepath.IsAbs(index) {
-		index = filepath.Join(repo.Root, index)
-	}
-	h := sha256.New()
-	fmt.Fprintf(h, "head=%s\nmanifest=%x\ndeleted=%x\noverlay=%x\n", repo.Head, sha256.Sum256(manifest.NUL()), sha256.Sum256(manifest.DeletedNUL()), sha256.Sum256(manifest.OverlayNUL()))
-	indexFile, err := os.Open(index)
-	if err != nil {
-		return "", err
-	}
-	if _, err := io.Copy(h, indexFile); err != nil {
-		_ = indexFile.Close()
-		return "", err
-	}
-	_ = indexFile.Close()
-	for _, rel := range manifest.Changed {
-		full := filepath.Join(repo.Root, filepath.FromSlash(rel))
-		info, err := os.Lstat(full)
-		fmt.Fprintf(h, "\npath=%s\n", rel)
-		if os.IsNotExist(err) {
-			fmt.Fprint(h, "missing\n")
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-		fmt.Fprintf(h, "mode=%s size=%d\n", info.Mode(), info.Size())
-		if info.Mode()&os.ModeSymlink != 0 {
-			target, err := os.Readlink(full)
-			if err != nil {
-				return "", err
-			}
-			fmt.Fprintf(h, "link=%s\n", target)
-			continue
-		}
-		if !info.Mode().IsRegular() {
-			return "", fmt.Errorf("unsupported_file_type")
-		}
-		file, err := os.Open(full)
-		if err != nil {
-			return "", err
-		}
-		if _, err := io.Copy(h, file); err != nil {
-			_ = file.Close()
-			return "", err
-		}
-		_ = file.Close()
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
 func gitOverlayLocalFallbackReason(err error) string {
 	reason := strings.ToLower(strings.TrimSpace(err.Error()))
 	if reason == "" {
@@ -345,6 +777,40 @@ func gitOverlayFallbackResult(output string, err error) (string, bool) {
 	return reason, fallback
 }
 
+func gitSeedRuntimeFallbackResult(plan gitCoherencePlan, output string, err error) (string, bool) {
+	// The runner has not published the private seed when its exact-SHA fetch
+	// fails. Local-only commits and servers that refuse SHA wants use file sync.
+	if plan.Branch == "" && plan.seedEnabled() && err != nil && exitCode(err) == gitOriginRuntimeFallbackExitCode {
+		return "exact_commit_unavailable", true
+	}
+	return gitOriginRuntimeFallbackResult(plan.RemoteURL, output, err)
+}
+
+func gitOriginRuntimeFallbackResult(remoteURL, output string, err error) (string, bool) {
+	if err == nil || exitCode(err) != gitOriginRuntimeFallbackExitCode {
+		return "", false
+	}
+	var truncated *gitOriginDiagnosticsTruncatedError
+	if errors.As(err, &truncated) {
+		return "", false
+	}
+	parsed, parseErr := url.Parse(strings.TrimSpace(remoteURL))
+	isHTTP := parseErr == nil && (strings.EqualFold(parsed.Scheme, "http") || strings.EqualFold(parsed.Scheme, "https"))
+	switch {
+	case isHTTP && gitOriginHTTPAuthError.MatchString(output):
+		return "origin_auth_required", true
+	case isHTTP && gitOriginHTTPServerError.MatchString(output):
+		return "", false
+	case gitOriginTransportError.MatchString(output):
+		return "origin_unavailable", true
+	case isHTTP && gitOriginHTTPNotFound.MatchString(output):
+		return "origin_auth_required", true
+	case !isHTTP && gitOriginFilesystemError.MatchString(output):
+		return "origin_unavailable", true
+	}
+	return "", false
+}
+
 func gitOverlayFallbackOutcome(output string, err error) (string, bool, bool) {
 	if err == nil || exitCode(err) != gitOverlayFallbackExitCode {
 		return "", false, false
@@ -367,9 +833,23 @@ func gitOverlayFallbackOutcome(output string, err error) (string, bool, bool) {
 	return reason, true, mutated
 }
 
+// Hidden index flags omit worktree changes from ordinary fingerprint inputs.
+func gitOverlayLocalFingerprintUnsafe(root string) bool {
+	tracked, err := loadGitTrackedPaths(root)
+	if err != nil {
+		return true
+	}
+	for _, entry := range tracked {
+		if entry.skipWorktree || entry.assumeUnchanged {
+			return true
+		}
+	}
+	return false
+}
+
 func gitOverlayBoundaryViolation(reason string) bool {
 	switch reason {
-	case "unsafe_remote_root", "symlink_remote_root", "symlink_git_directory", "symlink_git_config", "symlink_git_objects", "unsafe_overlay_metadata", "unsafe_runtime_state":
+	case "unsafe_remote_root", "symlink_remote_root", "symlink_remote_parent", "symlink_git_directory", "symlink_git_config", "symlink_git_objects", "symlink_git_info", "symlink_git_attributes", "symlink_git_exclude", "symlink_git_objects_info", "symlink_git_alternates", "unsafe_git_metadata", "unsafe_overlay_metadata", "unsafe_runtime_state":
 		return true
 	default:
 		return false
@@ -378,31 +858,41 @@ func gitOverlayBoundaryViolation(reason string) bool {
 
 func gitOverlayHermeticFunctions() string {
 	return `git() {
-	local overlay_git_environment=()
-	if [ -n "${GIT_INDEX_FILE:-}" ]; then overlay_git_environment+=("GIT_INDEX_FILE=$GIT_INDEX_FILE"); fi
-  /usr/bin/env -i HOME=/dev/null XDG_CONFIG_HOME=/dev/null PATH=/usr/bin:/bin LANG=C LC_ALL=C \
-    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-    GIT_ATTR_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false \
-    GCM_INTERACTIVE=Never GIT_SSH_COMMAND=/bin/false GIT_LFS_SKIP_SMUDGE=1 \
-    GIT_TRACE_PACKET="${overlay_packet_trace:-0}" "${overlay_git_environment[@]}" \
-    /usr/bin/git -c credential.helper= -c credential.interactive=never \
+  set -- /usr/bin/git -c credential.helper= -c credential.interactive=never \
       -c core.hooksPath=/dev/null -c core.attributesFile=/dev/null -c core.excludesFile=/dev/null \
       -c core.fsmonitor=false -c core.autocrlf=false -c core.eol=lf \
       -c core.symlinks=true -c core.filemode=true -c protocol.allow=never \
       -c protocol.file.allow=always -c protocol.http.allow=always -c protocol.https.allow=always \
       -c protocol.ext.allow=never -c protocol.git.allow=never -c protocol.ssh.allow=never \
       -c fetch.recurseSubmodules=false -c submodule.recurse=false "$@"
+  if [ -n "${overlay_no_lazy_fetch:-}" ]; then set -- "GIT_NO_LAZY_FETCH=1" "$@"; fi
+  if [ -n "${GIT_INDEX_FILE:-}" ]; then set -- "GIT_INDEX_FILE=$GIT_INDEX_FILE" "$@"; fi
+  /usr/bin/env -i HOME=/dev/null XDG_CONFIG_HOME=/dev/null PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    GIT_ATTR_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false \
+    GCM_INTERACTIVE=Never GIT_SSH_COMMAND=/bin/false GIT_LFS_SKIP_SMUDGE=1 \
+    GIT_TRACE_PACKET="${overlay_packet_trace:-0}" "$@"
 }
 overlay_workspace_safe() {
   checkout_root="$(cd -P -- "$1" 2>/dev/null && pwd -P)" || return 1
   [ -d "$checkout_root/.git" ] && [ ! -L "$checkout_root/.git" ] || return 1
   [ -f "$checkout_root/.git/config" ] && [ ! -L "$checkout_root/.git/config" ] || return 1
   [ -d "$checkout_root/.git/objects" ] && [ ! -L "$checkout_root/.git/objects" ] || return 1
+  for metadata_dir in "$checkout_root/.git/info" "$checkout_root/.git/objects/info"; do
+    if [ -e "$metadata_dir" ] || [ -L "$metadata_dir" ]; then
+      [ -d "$metadata_dir" ] && [ ! -L "$metadata_dir" ] || return 1
+    fi
+  done
+  for metadata_file in "$checkout_root/.git/info/attributes" "$checkout_root/.git/info/exclude" "$checkout_root/.git/objects/info/alternates"; do
+    if [ -e "$metadata_file" ] || [ -L "$metadata_file" ]; then
+      [ -f "$metadata_file" ] && [ ! -L "$metadata_file" ] || return 1
+    fi
+  done
   [ ! -s "$checkout_root/.git/objects/info/alternates" ] || return 1
   [ ! -s "$checkout_root/.git/info/attributes" ] || return 1
   set +e
   unsafe_keys="$(git config --file "$checkout_root/.git/config" --no-includes --name-only --get-regexp \
-    '^(include([.]|$)|includeif[.]|url[.].*[.](insteadof|pushinsteadof)|protocol([.]|$)|http([.]|$)|credential([.]|$)|filter[.]|extensions[.]worktreeconfig|core[.](hookspath|attributesfile|excludesfile|fsmonitor|gitproxy|sshcommand|worktree)|remote[.].*[.](uploadpack|receivepack|proxy|vcs))' 2>/dev/null)"
+    '^(include([.]|$)|includeif[.]|url[.].*[.](insteadof|pushinsteadof)|protocol([.]|$)|http([.]|$)|credential([.]|$)|filter[.]|extensions[.]worktreeconfig|core[.](hookspath|attributesfile|excludesfile|fsmonitor|gitproxy|sshcommand|alternaterefscommand|worktree)|remote[.].*[.](uploadpack|receivepack|proxy|vcs))' 2>/dev/null)"
   config_status=$?
   set -e
   { [ "$config_status" -eq 0 ] || [ "$config_status" -eq 1 ]; } && [ -z "$unsafe_keys" ] || return 1
@@ -446,23 +936,54 @@ overlay_runtime_state_safe() {
     if [ -L "$runtime_path" ] || { [ -e "$runtime_path" ] && [ ! -d "$runtime_path" ]; }; then return 1; fi
   done
 }
+overlay_git_metadata_safe() (
+  checkout_root="$(cd -P -- "$1" 2>/dev/null && pwd -P)" || return 1
+  checkout_git_dir="$(git -C "$checkout_root" rev-parse --absolute-git-dir 2>/dev/null)" || return 1
+  [ ! -L "$checkout_root/.git" ] && [ -d "$checkout_root/.git" ] || return 1
+  checkout_git_dir="$(cd -P -- "$checkout_git_dir" 2>/dev/null && pwd -P)" || return 1
+  [ "$checkout_git_dir" = "$checkout_root/.git" ] || return 1
+  for metadata_dir in objects refs logs; do
+    metadata_path="$checkout_git_dir/$metadata_dir"
+    if [ -e "$metadata_path" ] || [ -L "$metadata_path" ]; then
+      [ ! -L "$metadata_path" ] && [ -d "$metadata_path" ] || return 1
+      [ "$(cd -P -- "$metadata_path" 2>/dev/null && pwd -P)" = "$metadata_path" ] || return 1
+      if ! /usr/bin/find -P "$metadata_path" -type l -print -quit > "$git_runtime_root/git-metadata-symlinks"; then return 1; fi
+      [ ! -s "$git_runtime_root/git-metadata-symlinks" ] || return 1
+    fi
+  done
+  for metadata_file in HEAD config config.worktree index packed-refs shallow; do
+    metadata_path="$checkout_git_dir/$metadata_file"
+    if [ -e "$metadata_path" ] || [ -L "$metadata_path" ]; then
+      [ ! -L "$metadata_path" ] && [ -f "$metadata_path" ] || return 1
+    fi
+  done
+)
 `
 }
 
-func remoteGitOverlayShellCommand(script string) string {
-	return "/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /bin/bash --noprofile --norc -c " + shellQuote(script)
+func remoteDiscardGitOverlaySyncPendingMetadata(workdir, finalizeToken string) string {
+	script := `set -e
+cd ` + shellQuote(workdir) + `
+` + gitOverlayHermeticFunctions() + remotePlainSyncMetaDirScript() + `
+/bin/rm -f -- "$meta_dir/` + remoteSyncPendingManifestName(finalizeToken) + `" "$meta_dir/` + remoteSyncPendingDeletedName(finalizeToken) + `"
+`
+	return remoteHermeticPOSIXControlCommand(script)
 }
 
 func remotePrepareGitOverlay(workdir string, plan gitCoherencePlan) string {
-	return remotePrepareGitOverlayWithBase(workdir, plan, "", "")
+	return remotePrepareGitOverlayWithHint(workdir, plan, "", "", "")
 }
 
 func remotePrepareGitOverlayWithBase(workdir string, plan gitCoherencePlan, baseRef, baseSHA string) string {
+	return remotePrepareGitOverlayWithHint(workdir, plan, baseRef, baseSHA, "")
+}
+
+func remotePrepareGitOverlayWithHint(workdir string, plan gitCoherencePlan, baseRef, baseSHA, fingerprint string) string {
 	if !plan.enabled() || !gitOverlayOriginTransportSupported(plan.RemoteURL) {
 		return "printf '" + gitOverlayFallbackMarker + "unsupported_origin_transport\\n' >&2; exit 78"
 	}
 	parent := filepath.ToSlash(filepath.Dir(workdir))
-	script := `set -e -o pipefail
+	script := `set -e
 workdir=` + shellQuote(workdir) + `
 parent=` + shellQuote(parent) + `
 expected_origin=` + shellQuote(plan.RemoteURL) + `
@@ -471,6 +992,7 @@ expected_tree=` + shellQuote(plan.Tree) + `
 advertised_branch=` + shellQuote(plan.Branch) + `
 base_ref=` + shellQuote(baseRef) + `
 expected_base=` + shellQuote(baseSHA) + `
+expected_fingerprint=` + shellQuote(fingerprint) + `
 overlay_mutated=
 overlay_fallback() {
   if [ -n "$overlay_mutated" ]; then printf '%s\n' ` + shellQuote(gitOverlayMutationMarker) + ` >&2; fi
@@ -479,10 +1001,18 @@ overlay_fallback() {
 }
 case "$workdir" in "$parent"/*) ;; *) overlay_fallback unsafe_remote_root ;; esac
 if [ -L "$workdir" ]; then overlay_fallback symlink_remote_root; fi
-for prerequisite in /bin/bash /bin/mkdir /bin/rm /bin/mv /bin/cp /usr/bin/env /usr/bin/git /usr/bin/find /usr/bin/mktemp /usr/bin/awk /usr/bin/grep; do
+if [ -L "$parent" ]; then overlay_fallback symlink_remote_parent; fi
+for prerequisite in /bin/sh /bin/cat /bin/mkdir /bin/rm /bin/mv /bin/cp /usr/bin/env /usr/bin/git /usr/bin/find /usr/bin/mktemp /usr/bin/awk /usr/bin/grep; do
   [ -x "$prerequisite" ] || overlay_fallback remote_prerequisite_missing
 done
+command -v od >/dev/null 2>&1 || overlay_fallback remote_prerequisite_missing
 /bin/mkdir -p "$parent"
+canonical_parent="$(cd -P -- "$parent" 2>/dev/null && pwd -P)" || overlay_fallback symlink_remote_parent
+git_overlay_parent_safe() {
+  [ ! -L "$parent" ] && [ -d "$parent" ] || return 1
+  [ "$(cd -P -- "$parent" 2>/dev/null && pwd -P)" = "$canonical_parent" ]
+}
+git_overlay_parent_safe || overlay_fallback symlink_remote_parent
 git_runtime_root="$(/usr/bin/mktemp -d "$parent/.overlay-git.XXXXXX")" || overlay_fallback remote_prerequisite_missing
 seed_tmp=
 baseline_tmp=
@@ -496,81 +1026,134 @@ cleanup_git_overlay() {
 }
 trap cleanup_git_overlay EXIT
 ` + gitOverlayHermeticFunctions() + `
+overlay_no_lazy_fetch=1
 if [ -n "$base_ref" ] && [ -z "$expected_base" ]; then overlay_fallback base_ref_unavailable; fi
-overlay_packet_trace="$git_runtime_root/packets"
-set +e
-git -C "$git_runtime_root" -c protocol.version=2 ls-remote --exit-code --heads "$expected_origin" \
-  "refs/heads/$advertised_branch" "refs/heads/$base_ref" >"$git_runtime_root/advertised" 2>"$git_runtime_root/transport-error"
-transport_status=$?
-overlay_packet_trace=
-set -e
-if [ "$transport_status" -ne 0 ]; then
-  if [ "$transport_status" -eq 2 ]; then overlay_fallback advertised_branch_missing; fi
-  if /usr/bin/grep -Eiq 'authentication (failed|required)|could not read Username|unable to get password|terminal prompts disabled|access denied|permission denied|HTTP.*(401|403)|requested URL returned error: (401|403)|repository not found' "$git_runtime_root/transport-error"; then
-    overlay_fallback origin_auth_required
-  fi
-  case "$expected_origin" in http://*|https://*) /bin/cat "$git_runtime_root/transport-error" >&2; exit "$transport_status" ;; *) overlay_fallback origin_unavailable ;; esac
-fi
-if ! /usr/bin/grep -Eq 'packet:.*< fetch=.*filter' "$git_runtime_root/packets"; then
-  overlay_fallback filtered_history_unsupported
-fi
-advertised_target="$(/usr/bin/awk -v branch="refs/heads/$advertised_branch" '$2 == branch { print $1; exit }' "$git_runtime_root/advertised")"
-[ -n "$advertised_target" ] || overlay_fallback advertised_branch_missing
-if [ -n "$base_ref" ]; then
-  advertised_base="$(/usr/bin/awk -v branch="refs/heads/$base_ref" '$2 == branch { print $1; exit }' "$git_runtime_root/advertised")"
-  [ -n "$advertised_base" ] || overlay_fallback base_ref_missing
-  [ "$advertised_base" = "$expected_base" ] || overlay_fallback base_ref_mismatch
-fi
+reuse_hint_valid=
 if [ -e "$workdir/.git" ] || [ -L "$workdir/.git" ]; then
 	if [ -L "$workdir/.git" ]; then overlay_fallback symlink_git_directory; fi
 	if [ -L "$workdir/.git/config" ]; then overlay_fallback symlink_git_config; fi
 	if [ -L "$workdir/.git/objects" ]; then overlay_fallback symlink_git_objects; fi
+  if [ -L "$workdir/.git/info" ]; then overlay_fallback symlink_git_info; fi
+  if [ -L "$workdir/.git/info/attributes" ]; then overlay_fallback symlink_git_attributes; fi
+  if [ -L "$workdir/.git/info/exclude" ]; then overlay_fallback symlink_git_exclude; fi
+  if [ -L "$workdir/.git/objects/info" ]; then overlay_fallback symlink_git_objects_info; fi
+  if [ -L "$workdir/.git/objects/info/alternates" ]; then overlay_fallback symlink_git_alternates; fi
   overlay_workspace_safe "$workdir" || overlay_fallback unsafe_git_workspace
+  overlay_git_metadata_safe "$workdir" || overlay_fallback unsafe_git_metadata
   overlay_metadata_safe "$workdir" || overlay_fallback unsafe_overlay_metadata
   overlay_runtime_state_safe "$workdir" || overlay_fallback unsafe_runtime_state
   [ "$(git -C "$workdir" remote get-url origin 2>/dev/null || true)" = "$expected_origin" ] || overlay_fallback origin_mismatch
+  checkout_root="$workdir"
+  meta_dir="$checkout_root/.git/crabbox"
+  committed="$meta_dir/sync-finalize-token"
+  complete="$meta_dir/sync-finalize-complete-token"
+  published="$meta_dir/sync-fingerprint"
+  committed_value=
+  complete_value=
+  if [ -n "$expected_fingerprint" ] &&
+     [ -f "$committed" ] && [ ! -L "$committed" ] &&
+     [ -f "$complete" ] && [ ! -L "$complete" ] &&
+     [ -f "$published" ] && [ ! -L "$published" ]; then
+    committed_value="$(/bin/cat "$committed" 2>/dev/null || true)"
+    complete_value="$(/bin/cat "$complete" 2>/dev/null || true)"
+    if [ -n "$committed_value" ] &&
+       [ "$committed_value" = "$complete_value" ] &&
+       [ "$(/bin/cat "$published" 2>/dev/null || true)" = "$expected_fingerprint" ] &&
+       [ "$(git -C "$checkout_root" rev-parse --verify HEAD^{commit} 2>/dev/null || true)" = "$expected_target" ] &&
+       [ "$(git -C "$checkout_root" write-tree 2>/dev/null || true)" = "$expected_tree" ] &&
+       [ "$(git -C "$checkout_root" rev-parse --verify "$expected_target^{tree}" 2>/dev/null || true)" = "$expected_tree" ] &&
+       git -C "$checkout_root" merge-base --is-ancestor "$expected_target" "refs/remotes/origin/$advertised_branch" >/dev/null 2>&1; then
+      reuse_hint_valid=1
+      if [ -n "$base_ref" ]; then
+        if [ ! -f "$meta_dir/git-hydrate-base" ] ||
+           [ -L "$meta_dir/git-hydrate-base" ] ||
+           [ "$(/bin/cat "$meta_dir/git-hydrate-base" 2>/dev/null || true)" != "$base_ref $expected_base" ] ||
+           [ "$(git -C "$checkout_root" rev-parse --verify "refs/remotes/origin/$base_ref^{commit}" 2>/dev/null || true)" != "$expected_base" ] ||
+           ! git -C "$checkout_root" merge-base --is-ancestor "$expected_base" "$expected_target" >/dev/null 2>&1; then
+          reuse_hint_valid=
+        fi
+      fi
+    fi
+  fi
 elif [ -d "$workdir" ]; then
   overlay_fallback non_git_workspace
 fi
 if [ ! -d "$workdir/.git" ]; then
+  git_overlay_parent_safe || overlay_fallback symlink_remote_parent
   seed_tmp="$(/usr/bin/mktemp -d "$parent/.overlay-seed.XXXXXX")"
   git init --quiet "$seed_tmp" || overlay_fallback checkout_init_failed
   git -C "$seed_tmp" remote add origin "$expected_origin" || overlay_fallback checkout_init_failed
   checkout_root="$seed_tmp"
-else
-  checkout_root="$workdir"
 fi
-git -C "$checkout_root" config --local remote.origin.promisor true || overlay_fallback filtered_history_unsupported
-git -C "$checkout_root" config --local remote.origin.partialclonefilter blob:none || overlay_fallback filtered_history_unsupported
-fetch_args=(--quiet --no-tags --no-write-fetch-head --filter=blob:none)
-if [ "$(git -C "$checkout_root" rev-parse --is-shallow-repository 2>/dev/null || true)" = true ]; then
-  fetch_args+=(--unshallow)
-fi
-refspecs=("+refs/heads/$advertised_branch:refs/remotes/origin/$advertised_branch")
-if [ -n "$base_ref" ] && [ "$base_ref" != "$advertised_branch" ]; then
-  refspecs+=("+refs/heads/$base_ref:refs/remotes/origin/$base_ref")
-fi
-set +e
-git -C "$checkout_root" fetch "${fetch_args[@]}" origin "${refspecs[@]}" 2>"$git_runtime_root/transport-error"
-transport_status=$?
-set -e
-if [ "$transport_status" -ne 0 ]; then
-  if /usr/bin/grep -Eiq 'authentication (failed|required)|could not read Username|unable to get password|terminal prompts disabled|access denied|permission denied|HTTP.*(401|403)|requested URL returned error: (401|403)|repository not found' "$git_runtime_root/transport-error"; then
-    overlay_fallback origin_auth_required
+git -C "$checkout_root" ls-files -t -z >"$git_runtime_root/index-skip-flags" || overlay_fallback index_inspection_failed
+` + remoteNULRecordLoop("index_entry", `"$git_runtime_root/index-skip-flags"`, `"$git_runtime_root/index-octets"`, `
+  case "$index_entry" in
+    S\ *) overlay_fallback skip_worktree_index ;;
+  esac
+`, "overlay_fallback index_inspection_failed") + `
+git -C "$checkout_root" ls-files -v -z >"$git_runtime_root/index-assume-flags" || overlay_fallback index_inspection_failed
+` + remoteNULRecordLoop("index_entry", `"$git_runtime_root/index-assume-flags"`, `"$git_runtime_root/index-octets"`, `
+  case "$index_entry" in
+    [a-z]\ *) overlay_fallback assume_unchanged_index ;;
+  esac
+`, "overlay_fallback index_inspection_failed") + `
+if [ -z "$reuse_hint_valid" ]; then
+  overlay_no_lazy_fetch=
+  overlay_packet_trace="$git_runtime_root/packets"
+  set +e
+  git -C "$git_runtime_root" -c protocol.version=2 ls-remote --exit-code --heads "$expected_origin" \
+    "refs/heads/$advertised_branch" "refs/heads/$base_ref" >"$git_runtime_root/advertised" 2>"$git_runtime_root/transport-error"
+  transport_status=$?
+  overlay_packet_trace=
+  set -e
+  if [ "$transport_status" -ne 0 ]; then
+    if [ "$transport_status" -eq 2 ]; then overlay_fallback advertised_branch_missing; fi
+    if /usr/bin/grep -Eiq ` + shellQuote(gitOriginHTTPAuthPattern+"|repository not found") + ` "$git_runtime_root/transport-error"; then
+      overlay_fallback origin_auth_required
+    fi
+    overlay_fallback origin_unavailable
   fi
-  /bin/cat "$git_runtime_root/transport-error" >&2
-  exit "$transport_status"
-fi
-if /usr/bin/grep -Eiq 'filtering not recognized|filtering not supported|server does not support filter' "$git_runtime_root/transport-error"; then
-  overlay_fallback filtered_history_unsupported
-fi
-fetched_branch="$(git -C "$checkout_root" rev-parse --verify "refs/remotes/origin/$advertised_branch^{commit}" 2>/dev/null || true)"
-[ "$fetched_branch" = "$advertised_target" ] || overlay_fallback advertised_branch_changed
-git -C "$checkout_root" cat-file -e "$expected_target^{commit}" 2>/dev/null || overlay_fallback target_missing
-git -C "$checkout_root" merge-base --is-ancestor "$expected_target" "$fetched_branch" >/dev/null 2>&1 || overlay_fallback target_not_advertised
-[ "$(git -C "$checkout_root" rev-parse --verify "$expected_target^{tree}" 2>/dev/null || true)" = "$expected_tree" ] || overlay_fallback tree_mismatch
-if [ -n "$base_ref" ] && [ "$(git -C "$checkout_root" rev-parse --verify "refs/remotes/origin/$base_ref^{commit}" 2>/dev/null || true)" != "$expected_base" ]; then
-  overlay_fallback base_ref_mismatch
+  if ! /usr/bin/grep -Eq 'packet:.*< fetch=.*filter' "$git_runtime_root/packets"; then
+    overlay_fallback filtered_history_unsupported
+  fi
+  advertised_target="$(/usr/bin/awk -v branch="refs/heads/$advertised_branch" '$2 == branch { print $1; exit }' "$git_runtime_root/advertised")"
+  [ -n "$advertised_target" ] || overlay_fallback advertised_branch_missing
+  if [ -n "$base_ref" ]; then
+    advertised_base="$(/usr/bin/awk -v branch="refs/heads/$base_ref" '$2 == branch { print $1; exit }' "$git_runtime_root/advertised")"
+    [ -n "$advertised_base" ] || overlay_fallback base_ref_missing
+    [ "$advertised_base" = "$expected_base" ] || overlay_fallback base_ref_mismatch
+  fi
+  git -C "$checkout_root" config --local remote.origin.promisor true || overlay_fallback filtered_history_unsupported
+  git -C "$checkout_root" config --local remote.origin.partialclonefilter blob:none || overlay_fallback filtered_history_unsupported
+  set -- --quiet --no-tags --no-write-fetch-head --filter=blob:none
+  if [ "$(git -C "$checkout_root" rev-parse --is-shallow-repository 2>/dev/null || true)" = true ]; then
+    set -- "$@" --unshallow
+  fi
+  set -- "$@" origin "+refs/heads/$advertised_branch:refs/remotes/origin/$advertised_branch"
+  if [ -n "$base_ref" ] && [ "$base_ref" != "$advertised_branch" ]; then
+    set -- "$@" "+refs/heads/$base_ref:refs/remotes/origin/$base_ref"
+  fi
+  set +e
+  git -C "$checkout_root" fetch "$@" 2>"$git_runtime_root/transport-error"
+  transport_status=$?
+  set -e
+  if [ "$transport_status" -ne 0 ]; then
+    if /usr/bin/grep -Eiq ` + shellQuote(gitOriginHTTPAuthPattern+"|repository not found") + ` "$git_runtime_root/transport-error"; then
+      overlay_fallback origin_auth_required
+    fi
+    overlay_fallback origin_unavailable
+  fi
+  if /usr/bin/grep -Eiq 'filtering not recognized|filtering not supported|server does not support filter' "$git_runtime_root/transport-error"; then
+    overlay_fallback filtered_history_unsupported
+  fi
+  fetched_branch="$(git -C "$checkout_root" rev-parse --verify "refs/remotes/origin/$advertised_branch^{commit}" 2>/dev/null || true)"
+  [ "$fetched_branch" = "$advertised_target" ] || overlay_fallback advertised_branch_changed
+  git -C "$checkout_root" cat-file -e "$expected_target^{commit}" 2>/dev/null || overlay_fallback target_missing
+  git -C "$checkout_root" merge-base --is-ancestor "$expected_target" "$fetched_branch" >/dev/null 2>&1 || overlay_fallback target_not_advertised
+  [ "$(git -C "$checkout_root" rev-parse --verify "$expected_target^{tree}" 2>/dev/null || true)" = "$expected_tree" ] || overlay_fallback tree_mismatch
+  if [ -n "$base_ref" ] && [ "$(git -C "$checkout_root" rev-parse --verify "refs/remotes/origin/$base_ref^{commit}" 2>/dev/null || true)" != "$expected_base" ]; then
+    overlay_fallback base_ref_mismatch
+  fi
 fi
 overlay_metadata_safe "$checkout_root" || overlay_fallback unsafe_overlay_metadata
 if [ -f "$checkout_root/.git/crabbox/sync-manifest" ]; then
@@ -578,17 +1161,17 @@ if [ -f "$checkout_root/.git/crabbox/sync-manifest" ]; then
 fi
 /bin/mkdir -p "$checkout_root/.git/crabbox"
 overlay_metadata_safe "$checkout_root" || overlay_fallback unsafe_overlay_metadata
-baseline_tmp="$checkout_root/.git/crabbox/sync-manifest.overlay.$$"
-if [ -e "$baseline_tmp" ] || [ -L "$baseline_tmp" ]; then overlay_fallback unsafe_overlay_metadata; fi
+baseline_tmp="$(/usr/bin/mktemp "$checkout_root/.git/crabbox/sync-manifest.overlay.XXXXXX")" || overlay_fallback baseline_failed
 if [ -f "$git_runtime_root/previous-manifest" ]; then
   /bin/cp -- "$git_runtime_root/previous-manifest" "$baseline_tmp" || overlay_fallback baseline_failed
 else
-  (set -C; : > "$baseline_tmp") || overlay_fallback baseline_failed
+  : > "$baseline_tmp" || overlay_fallback baseline_failed
 fi
 git -C "$checkout_root" ls-tree -r -z --name-only --full-tree "$expected_target" >> "$baseline_tmp" || overlay_fallback baseline_failed
 /bin/mv -- "$baseline_tmp" "$checkout_root/.git/crabbox/sync-manifest" || overlay_fallback baseline_failed
 baseline_tmp=
 if [ -n "$seed_tmp" ]; then
+  git_overlay_parent_safe || overlay_fallback symlink_remote_parent
   /bin/mv -- "$seed_tmp" "$workdir"
   seed_tmp=
 fi
@@ -604,23 +1187,32 @@ if [ "$(git config --bool core.sparseCheckout 2>/dev/null || true)" = true ] ||
 fi
 git checkout --quiet --force --detach "$expected_target" || overlay_fallback checkout_failed
 git reset --hard --quiet "$expected_target" || overlay_fallback reset_failed
-clean_args=(-ffdx --quiet -e /.crabbox/)
+set -- -ffdx --quiet -e /.crabbox/
 /usr/bin/find -P . \( -ipath './.git' -o -ipath './.crabbox' \) -prune -o \
   \( -type d -o -type l \) \( -iname node_modules -o -iname .pnpm-store -o -ipath '*/.yarn/cache' -o -ipath '*/.yarn/unplugged' \) \
   -print0 -prune >"$git_runtime_root/cache-paths" || overlay_fallback cache_discovery_failed
-while IFS= read -r -d '' cache_path; do
+` + remoteNULRecordLoop("cache_path", `"$git_runtime_root/cache-paths"`, `"$git_runtime_root/cache-octets"`, `
+  cache_lookup_path="$cache_path"
   cache_path="${cache_path#./}"
   if [ -L "$cache_path" ]; then overlay_fallback unsafe_cache_root; fi
+  printf '%s\0' "$cache_lookup_path" >"$git_runtime_root/cache-input" || overlay_fallback cache_ignore_failed
   set +e
-  printf '%s\0' "$cache_path" | git check-ignore --no-index -v -z --stdin >"$git_runtime_root/cache-ignore" 2>/dev/null
+  git check-ignore --no-index -v -z --stdin <"$git_runtime_root/cache-input" >"$git_runtime_root/cache-ignore" 2>/dev/null
   ignore_status=$?
   set -e
   if [ "$ignore_status" -eq 1 ]; then continue; fi
   [ "$ignore_status" -eq 0 ] || overlay_fallback cache_ignore_failed
-  {
-    IFS= read -r -d '' ignore_source && IFS= read -r -d '' ignore_line &&
-      IFS= read -r -d '' ignore_pattern && IFS= read -r -d '' ignore_path
-  } <"$git_runtime_root/cache-ignore" || overlay_fallback cache_ignore_failed
+  ignore_fields=0
+`+remoteNULRecordLoop("ignore_field", `"$git_runtime_root/cache-ignore"`, `"$git_runtime_root/ignore-octets"`, `
+  ignore_fields=$((ignore_fields + 1))
+  case "$ignore_fields" in
+    1) ignore_source="$ignore_field" ;;
+    2) ignore_line="$ignore_field" ;;
+    3) ignore_pattern="$ignore_field" ;;
+    4) ignore_path="$ignore_field" ;;
+  esac
+`, "overlay_fallback cache_ignore_failed")+`
+  [ "$ignore_fields" -ge 4 ] || overlay_fallback cache_ignore_failed
   case "$ignore_source" in .gitignore|*/.gitignore) ;; *) continue ;; esac
   case "$ignore_source" in /*|../*|*/../*) continue ;; esac
   [ -f "$ignore_source" ] && [ ! -L "$ignore_source" ] || overlay_fallback cache_ignore_untrusted
@@ -630,22 +1222,25 @@ while IFS= read -r -d '' cache_path; do
   if [ -L "$cache_path" ] || [ ! -d "$cache_path" ]; then overlay_fallback unsafe_cache_root; fi
   resolved_cache="$(cd -P -- "$cache_path" && pwd -P)" || overlay_fallback unsafe_cache_root
   case "$resolved_cache/" in "$workdir"/*) ;; *) overlay_fallback unsafe_cache_root ;; esac
-  cache_pattern="${cache_path//\\/\\\\}"
-  cache_pattern="${cache_pattern//\*/\\*}"
-  cache_pattern="${cache_pattern//\?/\\?}"
-  cache_pattern="${cache_pattern//\[/\\[}"
-  cache_pattern="${cache_pattern//\]/\\]}"
-  cache_pattern="${cache_pattern//!/\\!}"
-  cache_pattern="${cache_pattern//#/\\#}"
-  clean_args+=(-e "$cache_pattern/")
-done <"$git_runtime_root/cache-paths"
-git clean "${clean_args[@]}" || overlay_fallback clean_failed
+  cache_pattern=
+  cache_rest="$cache_path"
+  while [ -n "$cache_rest" ]; do
+    cache_tail=${cache_rest#?}
+    cache_char=${cache_rest%"$cache_tail"}
+    case "$cache_char" in '\'|'*'|'?'|'['|']'|'!'|'#') cache_pattern="$cache_pattern\\" ;; esac
+    cache_pattern="$cache_pattern$cache_char"
+    cache_rest="$cache_tail"
+  done
+  # Preserve this verified path, not same-named caches elsewhere in the tree.
+  set -- "$@" -e "/$cache_pattern/"
+`, "overlay_fallback cache_discovery_failed") + `
+git clean "$@" || overlay_fallback clean_failed
 [ "$(git rev-parse --verify HEAD^{commit})" = "$expected_target" ] || overlay_fallback head_mismatch
 [ "$(git write-tree)" = "$expected_tree" ] || overlay_fallback index_tree_mismatch
 overlay_metadata_safe "$workdir" || overlay_fallback unsafe_overlay_metadata
 /bin/rm -f -- .git/crabbox/sync-fingerprint .git/crabbox/git-hydrate-base
 `
-	return remoteGitOverlayShellCommand(script)
+	return remoteHermeticPOSIXControlCommand(script)
 }
 
 func remotePruneGitOverlaySyncManifest(workdir, finalizeToken string, allowMassDeletions ...bool) string {
@@ -739,14 +1334,17 @@ for my $path (@deleted, @old) {
 }
 die "remote sync sanity failed: " . scalar(@pending) . " pending deletions\n" if $ARGV[3] ne "1" && @pending >= 200;
 binmode STDOUT; print STDOUT map { $_ . "\0" } @pending;`
-	script := `set -e -o pipefail
+	script := `set -e
 cd ` + shellQuote(workdir) + `
 ` + gitOverlayHermeticFunctions() + metadataScript + `
 old="$meta_dir/sync-manifest"
 new="$meta_dir/` + manifestName + `"
 deleted="$meta_dir/` + deletedName + `"
-delete_paths() {
-  while IFS= read -r -d '' rel; do
+produce_prune_paths() {
+` + remoteSyncInterpreterCommand(python, perl, "\"$old\" \"$new\" \"$deleted\" "+shellQuote(allowValue)) + `
+}
+if [ ! -d "$meta_dir" ]; then produce_prune_paths > /dev/null; exit 0; fi
+` + remoteSyncPruneFiles(finalizeToken) + remoteSyncNULConsumer(`
     case "$rel" in ''|/*|../*|*/../*|.git|.git/*|*/.git|*/.git/*|.crabbox|.crabbox/*|*/.crabbox|*/.crabbox/*) echo "unsafe overlay deletion path" >&2; exit 67 ;; esac
     remainder="$rel"
     ancestor=
@@ -763,9 +1361,8 @@ delete_paths() {
       /bin/rmdir -- "$dir" 2>/dev/null || break
       dir=$(/usr/bin/dirname -- "$dir")
     done
-  done
-}
-` + remoteSyncInterpreterCommand(python, perl, "\"$old\" \"$new\" \"$deleted\" "+shellQuote(allowValue)) + ` | delete_paths
+`) + `produce_prune_paths > "$prune_paths"
+delete_paths "$prune_paths"
 `
-	return remoteGitOverlayShellCommand(script)
+	return remoteHermeticPOSIXControlCommand(script)
 }

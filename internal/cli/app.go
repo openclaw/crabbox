@@ -7,15 +7,25 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 type App struct {
-	Stdout io.Writer
-	Stderr io.Writer
-	Stdin  io.Reader
+	Stdout                io.Writer
+	Stderr                io.Writer
+	Stdin                 io.Reader
+	synthesizedFlagInputs bool
 
 	runOutcome             *shardRunOutcome
 	workspaceOwnerAcquirer func(context.Context, SSHTarget, string, io.Writer) (*workspaceOwner, error)
+	sshReadinessWaiter     func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error
+}
+
+func (a App) waitForSSHReady(ctx context.Context, target *SSHTarget, phase string, timeout time.Duration) error {
+	if a.sshReadinessWaiter != nil {
+		return a.sshReadinessWaiter(ctx, target, a.Stderr, phase, timeout)
+	}
+	return waitForSSHReady(ctx, target, a.Stderr, phase, timeout)
 }
 
 func Run(ctx context.Context, args []string) error {
@@ -33,7 +43,7 @@ func (a App) input() io.Reader {
 func (a App) Run(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		a.printHelp()
-		return exit(2, "missing command")
+		return Exit(2, "missing command")
 	}
 
 	switch args[0] {
@@ -94,6 +104,8 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.syncPlan(ctx, helpArgs), true
 	case "providers":
 		return a.providers(ctx, helpArgs), true
+	case "preflight-tools":
+		return a.preflightTools(helpArgs), true
 	case "history":
 		return a.history(ctx, helpArgs), true
 	case "logs":
@@ -116,10 +128,14 @@ func (a App) directCommandHelp(ctx context.Context, args []string) (error, bool)
 		return a.list(ctx, helpArgs), true
 	case "usage":
 		return a.usage(ctx, helpArgs), true
+	case "capacity":
+		return a.capacity(ctx, helpArgs), true
 	case "ssh":
 		return a.ssh(ctx, helpArgs), true
 	case "connect":
 		return a.connect(ctx, helpArgs), true
+	case "exec":
+		return a.execCommand(ctx, helpArgs), true
 	case "open":
 		return a.open(ctx, helpArgs), true
 	case "ports":
@@ -204,6 +220,7 @@ Commands:
   artifacts   Collect, transform, and publish QA artifacts
   sync-plan   Show local sync manifest size hotspots
   providers   Show provider capabilities and recommendations
+  preflight-tools  List accepted preflight names and target support offline
   history     List recorded remote runs
   logs        Print recorded run logs
   events      Print recorded run events
@@ -220,6 +237,7 @@ Commands:
   unshare     Remove lease sharing
   image       Create provider images and promote brokered AWS runner images
   usage       Show cost and usage estimates by user, org, or fleet
+  capacity    Show self-owner admission count and effective owner limit
   marketplace  Preview the Crabbox credits gateway and smart routing quotes
   admin       Lease admin controls for trusted operators
   actions     Hydrate boxes from repo workflows or GitHub runners
@@ -227,6 +245,7 @@ Commands:
   checkpoint  Create, restore, and fork workspace checkpoints
   ssh         Print the SSH command for a lease
   connect     Open an interactive SSH session to a lease
+  exec        Execute a command under the current lease claim without syncing
   open        Prepare an editor handoff for a lease
   ports       Publish, list, or unpublish provider-native ports
   cp          Copy files between the host and a lease
@@ -386,7 +405,7 @@ func parseFlags(fs *flag.FlagSet, args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return ExitError{Code: 0}
 		}
-		return exit(2, "%v", err)
+		return Exit(2, "%v", err)
 	}
 	return nil
 }

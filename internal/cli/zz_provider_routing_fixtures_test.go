@@ -15,9 +15,6 @@ func (testGCPProvider) ClaimScope(cfg Config) string {
 	}
 	return "project:" + cfg.GCPProject
 }
-func (testProxmoxProvider) CommandRouting(cfg Config, _ CommandRoutingRequest) CommandRouting {
-	return CommandRouting{Args: []string{"--proxmox-api-url", cfg.Proxmox.APIURL}}
-}
 func (testStaticSSHProvider) CommandRouting(cfg Config, request CommandRoutingRequest) CommandRouting {
 	cfg.Static.Host = firstNonBlank(cfg.Static.Host, request.Target.Host)
 	cfg.Static.User = firstNonBlank(cfg.Static.User, request.Target.User)
@@ -60,8 +57,6 @@ type routingFixtureProvider struct {
 	route func(Config) CommandRouting
 }
 
-func (p routingFixtureProvider) Name() string                                 { return p.name }
-func (p routingFixtureProvider) Aliases() []string                            { return nil }
 func (p routingFixtureProvider) Spec() ProviderSpec                           { return ProviderSpec{Name: p.name} }
 func (p routingFixtureProvider) RegisterFlags(*flag.FlagSet, Config) any      { return nil }
 func (p routingFixtureProvider) ApplyFlags(*Config, *flag.FlagSet, any) error { return nil }

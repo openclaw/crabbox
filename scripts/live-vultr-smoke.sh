@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/live-smoke-common.sh"
+
 provider_enabled() {
   local list="${CRABBOX_LIVE_PROVIDERS:-vultr}"
   local item
@@ -26,99 +28,6 @@ classify_blocker() {
   fi
   printf 'classification=%s command=%q exit=%s\n' "$classification" "$command" "$status" >&2
   printf '%s\n' "$output" >&2
-}
-
-classify_validation_failure() {
-  local command="$1"
-  local status="$2"
-  local output="$3"
-  printf 'classification=validation_failed command=%q exit=%s\n' "$command" "$status" >&2
-  printf '%s\n' "$output" >&2
-}
-
-run_capture() {
-  local command="$1"
-  shift
-  local output
-  set +e
-  output="$("$@" 2>&1)"
-  local status=$?
-  set -e
-  if [ "$status" -ne 0 ]; then
-    classify_blocker "$command" "$status" "$output"
-    exit "$status"
-  fi
-  printf '%s\n' "$output"
-}
-
-validate_list_json_contains_slug() {
-  local command="$1"
-  local output="$2"
-  local validation_output=""
-  local status=0
-  set +e
-  validation_output="$(CRABBOX_SMOKE_SLUG="$slug" python3 -c '
-import json
-import os
-import sys
-
-slug = os.environ["CRABBOX_SMOKE_SLUG"]
-try:
-    payload = json.load(sys.stdin)
-except Exception as exc:
-    print(f"invalid JSON: {exc}", file=sys.stderr)
-    sys.exit(1)
-
-def has_slug(value):
-    if isinstance(value, dict):
-        labels = value.get("labels")
-        if isinstance(labels, dict) and labels.get("slug") == slug:
-            return True
-        if value.get("slug") == slug or value.get("name") == slug or value.get("id") == slug or value.get("leaseId") == slug:
-            return True
-        return any(has_slug(child) for child in value.values())
-    if isinstance(value, list):
-        return any(has_slug(child) for child in value)
-    return False
-
-if not has_slug(payload):
-    print(f"list JSON did not include slug {slug}", file=sys.stderr)
-    sys.exit(1)
-' <<<"$output" 2>&1)"
-  status=$?
-  set -e
-  if [ "$status" -ne 0 ]; then
-    classify_validation_failure "$command" "$status" "$validation_output"
-    exit "$status"
-  fi
-}
-
-validate_list_json_empty() {
-  local command="$1"
-  local output="$2"
-  local validation_output=""
-  local status=0
-  set +e
-  validation_output="$(python3 -c '
-import json
-import sys
-
-try:
-    payload = json.load(sys.stdin)
-except Exception as exc:
-    print(f"invalid JSON: {exc}", file=sys.stderr)
-    sys.exit(1)
-
-if payload != []:
-    print("Vultr Crabbox inventory is not empty", file=sys.stderr)
-    sys.exit(1)
-' <<<"$output" 2>&1)"
-  status=$?
-  set -e
-  if [ "$status" -ne 0 ]; then
-    classify_validation_failure "$command" "$status" "$validation_output"
-    exit "$status"
-  fi
 }
 
 raw_vultr_has_slug() {
@@ -156,19 +65,6 @@ except Exception:
 
 sys.exit(1)
 '
-}
-
-local_testbox_key_snapshot() {
-  local roots=(
-    "${XDG_CONFIG_HOME:-$HOME/.config}/crabbox/testboxes"
-    "$HOME/Library/Application Support/crabbox/testboxes"
-  )
-  local root
-  for root in "${roots[@]}"; do
-    if [ -d "$root" ]; then
-      find "$root" -type f -print
-    fi
-  done | sort -u
 }
 
 cleanup_armed=0
@@ -268,7 +164,7 @@ export VULTR_API_KEY
 doctor_output="$(run_capture "bin/crabbox doctor --provider vultr" bin/crabbox doctor --provider vultr)"
 printf '%s\n' "$doctor_output"
 initial_list_output="$(run_capture "bin/crabbox list --provider vultr --json" bin/crabbox list --provider vultr --json)"
-validate_list_json_empty "bin/crabbox list --provider vultr --json" "$initial_list_output"
+validate_list_json_empty "bin/crabbox list --provider vultr --json" "$initial_list_output" "Vultr"
 initial_local_key_snapshot="$(local_testbox_key_snapshot)"
 cleanup_armed=1
 run_capture "bin/crabbox warmup --provider vultr --slug $slug --keep --type vc2-1c-1gb --ttl 20m --idle-timeout 5m" bin/crabbox warmup --provider vultr --slug "$slug" --keep --type vc2-1c-1gb --ttl 20m --idle-timeout 5m >/dev/null
@@ -281,7 +177,7 @@ run_capture "bin/crabbox stop --provider vultr $slug" bin/crabbox stop --provide
 cleanup_armed=0
 cleanup_output="$(run_capture "bin/crabbox cleanup --provider vultr --dry-run" bin/crabbox cleanup --provider vultr --dry-run)"
 post_list_output="$(run_capture "bin/crabbox list --provider vultr --json" bin/crabbox list --provider vultr --json)"
-validate_list_json_empty "bin/crabbox list --provider vultr --json" "$post_list_output"
+validate_list_json_empty "bin/crabbox list --provider vultr --json" "$post_list_output" "Vultr"
 printf '%s\n' "$cleanup_output"
 printf '%s\n' "$post_list_output"
 printf 'classification=live_vultr_smoke_passed slug=%s cleanup=complete\n' "$slug"

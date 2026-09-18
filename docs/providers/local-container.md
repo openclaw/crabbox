@@ -87,6 +87,45 @@ If the command supplies stderr, Crabbox includes its bounded diagnostic in the
 error so daemon startup failures are not hidden behind an empty-identity message.
 These failures stop acquisition before a lease or container is created.
 
+### Initial image evidence
+
+Docker and Podman runs record the configured creation reference separately from
+the actual container's full runtime image ID. The optional `imageEvidence`
+object appears in timing JSON and retained `inspect --json` output; the context
+block, emitted Markdown proof, and opt-in local history expose the same snapshot.
+Saved timing, proof, and local-history records remain readable after cleanup.
+`machineType` and `serverType` keep their existing display-image meanings.
+
+`configuredReference` is the creation reference, not a later invocation's image
+override. `runtimeImageId` is the runtime-reported container image ID, or an empty
+string when unavailable. `repositoryDigests` is a sorted, deduplicated array of
+repository digest references reported by local image inspection using that ID.
+It is never inferred from a tag, a bare digest, or a registry lookup. A pinned
+input digest and the runtime image ID may identify different image objects.
+
+`repositoryDigestStatus` is `available` for a nonempty reported list,
+`unavailable` for a successful empty or null list, and `unknown` when observation
+fails or the image ID is absent. Empty lists serialize as `[]`. An optional
+metadata query is bounded to two seconds; failure warns without changing the
+workload or cleanup result. Caller cancellation still cancels the operation.
+Locally built or tagged images can have repository digests: only observed
+metadata determines availability.
+
+The first validated container inspection is captured into the existing pending
+claim publication before SSH bootstrap completes. During the brief initial
+pending phase before that durable observation, inspection omits `imageEvidence`
+rather than returning a temporary live digest list. Once published, inspection
+and the completed run retain that same snapshot throughout bootstrap, even if
+the runtime's repository-digest list changes in the meantime.
+
+Retained claims keep the snapshot bound to the container and image IDs. Reuse
+preserves it; readiness and cleanup do not perform extra image queries. Older
+claims can be observed when resolved for use. Other providers and old saved run
+records without an observation omit the whole object. This is unsigned evidence
+of the initial image, not an attestation of the container's writable filesystem;
+signed receipts and checkpoint identities are unchanged. Image selection,
+pull policy, architecture, and lifecycle behavior are unchanged.
+
 ### Fixed-ID replay
 
 ```sh
@@ -122,6 +161,7 @@ localContainer:
   memory: ""               # memory limit, e.g. 8g
   network: bridge          # container network
   dockerSocket: false      # mount the host Docker-compatible socket into the lease
+  noHostname: false        # omit the explicit container hostname when true
 ```
 
 Defaults applied when unset: `runtime=docker`, a reviewed Ubuntu OCI index
@@ -162,11 +202,42 @@ is reported as `resource_exhaustion=memory`; an OOM from an earlier command on a
 reused lease does not classify a later ordinary failure. Docker/Podman cgroup
 paths and counter parsing remain inside this provider.
 
-The failure digest marks this condition non-retryable with the unchanged
-configuration and suggests increasing `localContainer.memory` (or
-`--local-container-memory`) or reducing workload concurrency. If cgroup evidence
-cannot be read, Crabbox prints a diagnostic warning and preserves the original
-command failure and ordinary user-command classification.
+If the post-command counter cannot be read, a newly observed runtime
+`OOMKilled` transition can also establish OOM; a prior `OOMKilled=true`, reset
+counter, or exit 137 alone cannot. Evidence read failures are warnings and
+preserve the original exit and ordinary failure classification.
+
+After positive OOM evidence, the adapter optionally observes capacity through
+the same captured runtime/context/connection, with a 500ms aggregate budget
+(including bounded command-output draining), no retries, and bounded output.
+Probe failure never discards positive OOM evidence. Actual inspected container
+settings from **before the command** take precedence over invocation config;
+reusing `--id` does not apply a new `--local-container-memory` value. Legacy
+claims do not reconstruct the originally requested memory string.
+
+The digest, timing JSON `failureEvidence`, and local failure bundle keep these
+separate facts: container memory limit, combined memory-and-swap setting, and
+runtime total RAM when the captured runtime identity can still be verified.
+Limits are `finite`, `unlimited`, or `unknown`; a zero memory-and-swap setting is
+`default`, not a claim about available swap. Missing, malformed, overflowing,
+unverifiable, or timed-out observations remain unknown. There is no synthesized
+effective limit: total RAM is neither free memory nor necessarily the complete
+bound. Parent cgroups, rootless constraints, VM capacity, and swap availability
+can matter; Crabbox does not walk host cgroup ancestors or add privileged probes.
+The container's mounted Docker socket is not used to observe its runtime.
+
+Below observed RAM, advice to recreate with a larger limit is conditional on
+the limit being binding and actual headroom. At or above observed RAM, raising
+the flag does not add RAM; inspect runtime/VM, parent, and swap constraints.
+Unknown evidence advises reducing demand and checking active limits, not
+blindly raising a flag. No automatic resizing, refusal, or retry is introduced.
+
+`inspect` and non-wait `status --json` expose fresh facts in returned labels
+under `diagnostic.memory.*`, with `settings_phase=current`. These are output
+only, not stored claim/container labels or lifecycle authority. They do not
+reconstruct an old OOM. Failure snapshots survive one-shot deletion; fresh
+inspection requires a retained container. Ordinary resolution, heartbeat,
+checkpoint, release, and `status --wait` do not request capacity diagnostics.
 
 Provider flags:
 
@@ -211,7 +282,29 @@ CRABBOX_LOCAL_CONTAINER_CPUS
 CRABBOX_LOCAL_CONTAINER_MEMORY
 CRABBOX_LOCAL_CONTAINER_NETWORK
 CRABBOX_LOCAL_CONTAINER_DOCKER_SOCKET
+CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME
 ```
+
+File strings only replace earlier values when nonempty, and file CPU values
+apply only when positive. Environment CPU parsing preserves the earlier value
+on malformed input; an explicit environment zero still applies. The two boolean
+settings distinguish omission/null from explicit `false`, so false can override
+an earlier true value. Source overlays keep string text unchanged; later
+provider defaults and runtime normalization remain separate.
+
+Explicit runtime, image and work-root input remains explicit even when it equals
+the existing value. The raw initial work root is empty; the effective
+`/work/crabbox` default is applied later. `noHostname` has no provider CLI flag,
+and volumes and checkpoint metadata are not file/environment settings.
+
+Set `localContainer.noHostname: true` or
+`CRABBOX_LOCAL_CONTAINER_NO_HOSTNAME=1` when the runtime rejects an explicit
+hostname, such as when it shares the host UTS namespace. By default Crabbox
+passes `--hostname` with the container name; this opt-in only omits that argument.
+It does not change the runtime's namespace, network, or capability settings.
+The configured runtime must still support the loopback-published SSH port.
+Changing this setting for a fixed lease ID returns `lease_id_conflict`; omitted
+or `false` preserves the existing fixed-lease fingerprint.
 
 Host bind mounts must be passed explicitly with `--local-container-volume`.
 Crabbox intentionally ignores `localContainer.volumes` from config files because
@@ -260,6 +353,12 @@ then retry stop. Orphan cleanup also preserves claims with bootstrap residue.
 Bootstrap paths from older releases under the current system temp root remain
 supported.
 
+If runtime removal fails after the container has disappeared, retry `stop` with
+the original configuration. Crabbox can finish cleanup after an exact-ID absence
+confirmation, including Podman's quoted-ID diagnostic. Connection, permission,
+authentication, and ambiguous errors still retain the claim and local recovery
+state; the original removal failure is not converted into success.
+
 1. `warmup` or a fresh `run` creates a per-lease SSH key.
 2. The provider writes its bootstrap script under the user's cache directory,
    normally shared with desktop Docker VMs, then runs
@@ -271,7 +370,7 @@ supported.
    login profile. Profiles added after bootstrap can prepend to or intentionally
    replace that baseline; the profile selected during bootstrap keeps its final
    managed restore block.
-4. With `--desktop`, the container installs and starts Xvfb, XFCE, x11vnc,
+4. With `--desktop`, the container installs and starts resize-capable TigerVNC, XFCE,
    xdotool, screenshot tools, ffmpeg, noVNC, and websockify — no systemd
    required.
 5. With `--browser`, the container preserves a working Chrome, Chromium, Firefox
@@ -389,7 +488,7 @@ container ID leaves both the container and claim untouched.
 - Cache volumes persist as Docker-compatible named volumes after a container is
   stopped.
   Remove them with the Docker-compatible runtime when the cache key is obsolete.
-- The default `debian:bookworm` image bootstraps packages on first start. Use a
+- The pinned default Ubuntu image bootstraps packages on first start. Use a
   prebuilt image with SSH/Git/rsync/desktop/browser packages when startup time
   matters.
 

@@ -1,6 +1,7 @@
 package shared
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -82,10 +83,16 @@ func RequireExactClaim(want ClaimBinding) (core.LeaseClaim, error) {
 // RemoveExactClaimAfter keeps the exact claim fenced until the provider action
 // succeeds and its durable ownership record has been removed.
 func RemoveExactClaimAfter(claim core.LeaseClaim, want ClaimBinding, action func() error) error {
+	return RemoveExactClaimAfterContext(context.Background(), claim, want, action)
+}
+
+// RemoveExactClaimAfterContext also bounds waiting for the exact claim fence.
+// The action must honor ctx itself and must not reenter claim operations.
+func RemoveExactClaimAfterContext(ctx context.Context, claim core.LeaseClaim, want ClaimBinding, action func() error) error {
 	if err := ValidateClaimBinding(claim, want); err != nil {
 		return core.Exit(2, "%s lease=%s has a stale exact local ownership claim: %v", want.Provider, want.LeaseID, err)
 	}
-	return core.RemoveLeaseClaimIfUnchangedAfter(want.LeaseID, claim, action)
+	return core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, want.LeaseID, claim, true, action)
 }
 
 // UpdateExactClaimLabelsAfter fences provider mutations that retain their
@@ -210,4 +217,36 @@ func CloneLabels(labels map[string]string) map[string]string {
 		clone = map[string]string{}
 	}
 	return clone
+}
+
+// LabelsWithDefaults copies labels and fills missing or empty values. Whitespace
+// is a stored value, and an empty default still creates the corresponding key.
+func LabelsWithDefaults(labels, defaults map[string]string) map[string]string {
+	labels = CloneLabels(labels)
+	for key, value := range defaults {
+		if labels[key] == "" {
+			labels[key] = value
+		}
+	}
+	return labels
+}
+
+// IndexProviderClaims indexes stored snapshots using adapter-owned resource
+// keys. Empty keys are skipped and later snapshots win duplicate keys. The
+// index is a lookup aid; it does not grant ownership or mutation authority.
+func IndexProviderClaims(provider string, key func(core.LeaseClaim) string) (map[string]core.LeaseClaim, error) {
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]core.LeaseClaim{}
+	for _, claim := range claims {
+		if claim.Provider != provider {
+			continue
+		}
+		if name := key(claim); name != "" {
+			out[name] = claim
+		}
+	}
+	return out, nil
 }

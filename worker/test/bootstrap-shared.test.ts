@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { awsUserData, windowsBootstrapPowerShell } from "../src/bootstrap";
 import {
+  sharedLinuxSSHRestart,
   googleLinuxSigningKeyFingerprint,
   defaultTailscaleVersion,
   defaultTailscaleAMD64SHA256,
@@ -13,6 +14,8 @@ import {
   sharedCodeServerInstall,
   sharedMacOS,
   sharedWindowsCore,
+  sharedWindowsRuntime,
+  sharedWindowsRuntimeGate,
   sharedWindowsDesktop,
   sharedWindowsDesktopPrelude,
   sharedWindowsFinalize,
@@ -68,6 +71,7 @@ describe("shared bootstrap composition fixtures", () => {
       const script =
         config.target === "windows" ? windowsBootstrapPowerShell(config) : awsUserData(config);
       const fragments: string[] = [];
+      const absent: string[] = [];
       if (config.target === "windows") {
         fragments.push(
           sharedWindowsHeader(
@@ -78,7 +82,17 @@ describe("shared bootstrap composition fixtures", () => {
           ),
           sharedWindowsCore(),
         );
+        if (config.windowsMode !== "wsl2") {
+          fragments.push(sharedWindowsRuntime(), sharedWindowsRuntimeGate());
+        }
         if (config.windowsMode === "wsl2") {
+          absent.push(
+            "CrabboxWindowsRuntime",
+            "crabboxSetupWasComplete",
+            "PendingBoot",
+            "VC_redist",
+            "Remove-Item -LiteralPath $setupCompletePath",
+          );
           fragments.push(sharedWindowsNativePrelude(), sharedWslTruffleHogInstall());
           fragments.push("test -e /proc/sys/fs/binfmt_misc/WSLInterop");
         } else if (config.desktop) {
@@ -90,8 +104,15 @@ describe("shared bootstrap composition fixtures", () => {
         fragments.push(
           sharedMacOS(config.sshUser, config.sshPublicKey, config.workRoot, fixture.ports),
         );
-      } else if (config.code) {
-        fragments.push(sharedCodeServerInstall());
+      } else {
+        fragments.push(
+          sharedLinuxSSHRestart()
+            .trimEnd()
+            .split("\n")
+            .map((line) => `    ${line}`)
+            .join("\n"),
+        );
+        if (config.code) fragments.push(sharedCodeServerInstall());
       }
       if (config.tailscale) {
         fragments.push(
@@ -106,6 +127,7 @@ describe("shared bootstrap composition fixtures", () => {
       }
       if (config.browser) fragments.push(googleLinuxSigningKeyFingerprint);
       for (const fragment of fragments) expect(script).toContain(fragment);
+      for (const fragment of absent) expect(script).not.toContain(fragment);
     });
   }
 });

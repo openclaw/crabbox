@@ -110,7 +110,7 @@ func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun, reser
 	}
 
 	publishFreshClaim := func() {
-		freshLabels := touchInstanceLabels(staleLabels, core.BaseConfig(), "ready", time.Now().UTC())
+		freshLabels := core.TouchDirectLeaseLabels(staleLabels, core.BaseConfig(), "ready", time.Now().UTC())
 		freshServer := core.Server{
 			CloudID:  name,
 			Provider: providerName,
@@ -137,7 +137,7 @@ func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun, reser
 		if !reserveBeforeSnapshot {
 			publishFreshClaim()
 		}
-		freshLabels := touchInstanceLabels(staleLabels, core.BaseConfig(), "ready", time.Now().UTC())
+		freshLabels := core.TouchDirectLeaseLabels(staleLabels, core.BaseConfig(), "ready", time.Now().UTC())
 		freshConfig := cloneMap(instanceConfig)
 		for key, value := range freshLabels {
 			freshConfig[labelKey(key)] = value
@@ -149,7 +149,7 @@ func testCleanupPreservesInstanceReclaimedDuringList(t *testing.T, dryRun, reser
 	}
 
 	oldNewClient := newClient
-	newClient = func(Config) (instanceClient, error) { return client, nil }
+	newClient = func(core.Config) (instanceClient, error) { return client, nil }
 	t.Cleanup(func() { newClient = oldNewClient })
 
 	cfg := core.BaseConfig()
@@ -253,7 +253,7 @@ func TestCleanupRemovesUnchangedClaimedExpiredInstance(t *testing.T) {
 	}
 
 	oldNewClient := newClient
-	newClient = func(Config) (instanceClient, error) { return fake, nil }
+	newClient = func(core.Config) (instanceClient, error) { return fake, nil }
 	t.Cleanup(func() { newClient = oldNewClient })
 
 	cfg := core.BaseConfig()
@@ -364,7 +364,7 @@ func TestResolveRollsBackReservationWhenInstanceDisappearsOrChanges(t *testing.T
 				}
 			}
 			oldNewClient := newClient
-			newClient = func(Config) (instanceClient, error) { return client, nil }
+			newClient = func(core.Config) (instanceClient, error) { return client, nil }
 			t.Cleanup(func() { newClient = oldNewClient })
 
 			cfg := core.BaseConfig()

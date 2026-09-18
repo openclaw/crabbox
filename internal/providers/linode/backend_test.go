@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -168,6 +169,30 @@ func newTestBackend(t *testing.T, api *fakeLinodeAPI) *linodeLeaseBackend {
 	return backend
 }
 
+func TestLinodeDoctorEffectiveType(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  core.Config
+		want string
+	}{
+		{name: "native configured type", cfg: core.Config{Linode: core.LinodeConfig{Type: "g6-nanode-1"}}, want: "g6-nanode-1"},
+		{name: "explicit generic override", cfg: core.Config{ServerType: "g6-standard-2", ServerTypeExplicit: true, Linode: core.LinodeConfig{Type: "g6-nanode-1"}}, want: "g6-standard-2"},
+		{name: "class fallback", cfg: core.Config{Class: "standard"}, want: "g6-standard-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := newLinodeLeaseBackend(Provider{}.Spec(), tc.cfg, core.Runtime{})
+			backend.clientFactory = func(core.Runtime) (linodeAPI, error) { return &fakeLinodeAPI{}, nil }
+			result, err := backend.Doctor(context.Background(), core.DoctorRequest{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(result.Message, " default_type="+tc.want+" ") {
+				t.Fatalf("doctor message=%q, want default_type=%s", result.Message, tc.want)
+			}
+		})
+	}
+}
+
 func TestWaitForLinodeIP(t *testing.T) {
 	t.Run("pending to ready", func(t *testing.T) {
 		calls := 0
@@ -255,7 +280,7 @@ func TestAcquireCreatesLinodeClaimsLeaseAndMarksReady(t *testing.T) {
 		t.Fatalf("createRequests=%#v", api.createRequests)
 	}
 	req := api.createRequests[0]
-	if req.Label != core.LeaseProviderName(lease.LeaseID, "my-app") || req.Region != defaultRegion || req.Type != defaultType || req.Image != defaultImage {
+	if req.Label != core.LeaseProviderName(lease.LeaseID, "my-app") || req.Region != "us-ord" || req.Type != defaultType || req.Image != "linode/ubuntu24.04" {
 		t.Fatalf("request=%#v", req)
 	}
 	if len(req.AuthorizedKeys) != 1 || !strings.HasPrefix(req.AuthorizedKeys[0], "ssh-ed25519 ") {
@@ -286,26 +311,41 @@ func TestAcquireCreatesLinodeClaimsLeaseAndMarksReady(t *testing.T) {
 }
 
 func TestAcquireRecordsConfiguredLinodeTypeInMetadata(t *testing.T) {
-	api := &fakeLinodeAPI{}
-	backend := newTestBackend(t, api)
-	backend.Cfg.Linode.Type = "g6-standard-2"
-
-	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "custom-type"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(api.createRequests) != 1 || api.createRequests[0].Type != "g6-standard-2" {
-		t.Fatalf("createRequests=%#v", api.createRequests)
-	}
-	if lease.Server.ServerType.Name != "g6-standard-2" || lease.Server.Labels["server_type"] != "g6-standard-2" {
-		t.Fatalf("lease server type=%#v labels=%v", lease.Server.ServerType, lease.Server.Labels)
-	}
-	claim, ok, err := core.ResolveLeaseClaimForProvider("custom-type", providerName)
-	if err != nil || !ok {
-		t.Fatalf("claim ok=%v err=%v", ok, err)
-	}
-	if claim.Labels["server_type"] != "g6-standard-2" {
-		t.Fatalf("claim labels=%v", claim.Labels)
+	for _, tc := range []struct {
+		name, providerType, explicitType, want string
+	}{
+		{"provider type", "g6-standard-2", "", "g6-standard-2"},
+		{"explicit override", "g6-standard-2", "g6-nanode-1", "g6-nanode-1"},
+		{"padded explicit override", "g6-standard-2", " g6-nanode-1 ", "g6-nanode-1"},
+		{"blank explicit uses provider type", "g6-standard-2", " \t ", "g6-standard-2"},
+		{"blank explicit uses default", "", " ", defaultType},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeLinodeAPI{}
+			backend := newTestBackend(t, api)
+			backend.Cfg.Linode.Type = tc.providerType
+			if tc.explicitType != "" {
+				backend.Cfg.ServerType = tc.explicitType
+				backend.Cfg.ServerTypeExplicit = true
+			}
+			lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "custom-type"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(api.createRequests) != 1 || api.createRequests[0].Type != tc.want {
+				t.Fatalf("createRequests=%#v", api.createRequests)
+			}
+			if lease.Server.ServerType.Name != tc.want || lease.Server.Labels["server_type"] != tc.want {
+				t.Fatalf("lease server type=%#v labels=%v", lease.Server.ServerType, lease.Server.Labels)
+			}
+			claim, ok, err := core.ResolveLeaseClaimForProvider("custom-type", providerName)
+			if err != nil || !ok {
+				t.Fatalf("claim ok=%v err=%v", ok, err)
+			}
+			if claim.Labels["server_type"] != tc.want {
+				t.Fatalf("claim labels=%v", claim.Labels)
+			}
+		})
 	}
 }
 
@@ -1536,5 +1576,60 @@ func TestRollbackCleanupClaimResolvesWithSnapshotAndReleases(t *testing.T) {
 	}
 	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stored key retained after rollback cleanup: %v", err)
+	}
+}
+
+func TestLinodeConfigShowCompletePassiveSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("actual provider has no passive config-show projector")
+	}
+	for _, tc := range []struct {
+		name  string
+		input core.LinodeConfig
+		want  map[string]any
+		text  string
+	}{
+		{name: "nil", input: core.LinodeConfig{}, want: map[string]any{"region": "", "image": "", "type": "", "firewall": "", "sshCIDRs": []string(nil)}, text: "linode region= image= type= firewall=- ssh_cidrs=-\n"},
+		{name: "empty", input: core.LinodeConfig{SSHCIDRs: []string{}}, want: map[string]any{"region": "", "image": "", "type": "", "firewall": "", "sshCIDRs": []string{}}, text: "linode region= image= type= firewall=- ssh_cidrs=-\n"},
+		{name: "raw-references-list", input: core.LinodeConfig{Region: "raw-region", Image: "image reference", Type: "raw-type", FirewallID: "firewall reference", SSHCIDRs: []string{"second", "first", "second", " "}}, want: map[string]any{"region": "raw-region", "image": "image reference", "type": "raw-type", "firewall": "firewall reference", "sshCIDRs": []string{"second", "first", "second", " "}}, text: "linode region=raw-region image=image reference type=raw-type firewall=firewall reference ssh_cidrs=second,first,second, \n"},
+		{name: "whitespace-empty-elements", input: core.LinodeConfig{Region: " ", Image: " ", Type: " ", FirewallID: " ", SSHCIDRs: []string{"", ""}}, want: map[string]any{"region": " ", "image": " ", "type": " ", "firewall": " ", "sshCIDRs": []string{"", ""}}, text: "linode region=  image=  type=  firewall=  ssh_cidrs=,\n"},
+	} {
+		for _, selected := range []string{"linode", "static"} {
+			t.Run(tc.name+"/"+selected, func(t *testing.T) {
+				cfg := core.Config{Provider: selected, Linode: tc.input}
+				before := cfg.Linode
+				before.SSHCIDRs = slices.Clone(cfg.Linode.SSHCIDRs)
+				section := projector.ConfigShowSection(cfg)
+				if section.JSONKey != "linode" || section.TextLabel != "linode" || !reflect.DeepEqual(section.Providers, []string{"linode"}) {
+					t.Fatalf("section metadata=%#v", section)
+				}
+				wantOrder := []string{"region", "image", "type", "firewall", "sshCIDRs"}
+				if len(section.Fields) != len(wantOrder) {
+					t.Fatalf("field count=%d want %d", len(section.Fields), len(wantOrder))
+				}
+				got := map[string]any{}
+				line := section.TextLabel
+				for i, field := range section.Fields {
+					if field.JSONName != wantOrder[i] {
+						t.Fatalf("field %d name=%q want %q", i, field.JSONName, wantOrder[i])
+					}
+					got[field.JSONName] = field.JSONValue
+					if field.TextName != "" {
+						line += " " + field.TextName + "=" + field.TextValue
+					}
+				}
+				line += "\n"
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("public fields=%#v want %#v", got, tc.want)
+				}
+				if line != tc.text {
+					t.Fatalf("text=%q want %q", line, tc.text)
+				}
+				if !reflect.DeepEqual(cfg.Linode, before) {
+					t.Fatal("projection mutated supplied configuration")
+				}
+			})
+		}
 	}
 }

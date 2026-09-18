@@ -33,13 +33,13 @@ type lumeVMConfigFile struct {
 	MachineIdentifier string `json:"machineIdentifier"`
 }
 
-func lumeVMImmutableID(cfg Config, inst lumeVM) (string, error) {
+func lumeVMImmutableID(cfg core.Config, inst lumeVM) (string, error) {
 	root, err := lumeStorageRoot(cfg, inst.LocationName)
 	if err != nil {
 		return "", err
 	}
 	if filepath.Base(inst.Name) != inst.Name || inst.Name == "." || inst.Name == ".." {
-		return "", exit(5, "refusing unsafe Lume VM name %q", inst.Name)
+		return "", core.Exit(5, "refusing unsafe Lume VM name %q", inst.Name)
 	}
 	return lumeVMImmutableIDAtPath(filepath.Join(root, inst.Name), inst.Name)
 }
@@ -48,22 +48,22 @@ func lumeVMImmutableIDAtPath(vmPath, name string) (string, error) {
 	configPath := filepath.Join(vmPath, "config.json")
 	info, err := os.Lstat(configPath)
 	if err != nil {
-		return "", exit(5, "inspect Lume VM identity for %s: %v", name, err)
+		return "", core.Exit(5, "inspect Lume VM identity for %s: %v", name, err)
 	}
 	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 1<<20 {
-		return "", exit(5, "Lume VM identity config for %s is not a small regular file", name)
+		return "", core.Exit(5, "Lume VM identity config for %s is not a small regular file", name)
 	}
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return "", exit(5, "read Lume VM identity for %s: %v", name, err)
+		return "", core.Exit(5, "read Lume VM identity for %s: %v", name, err)
 	}
 	var vmConfig lumeVMConfigFile
 	if err := json.Unmarshal(data, &vmConfig); err != nil {
-		return "", exit(5, "parse Lume VM identity for %s: %v", name, err)
+		return "", core.Exit(5, "parse Lume VM identity for %s: %v", name, err)
 	}
 	machineID, err := base64.StdEncoding.DecodeString(strings.TrimSpace(vmConfig.MachineIdentifier))
 	if err != nil || len(machineID) == 0 || len(machineID) > 1024 {
-		return "", exit(5, "Lume VM %s has an invalid machine identifier", name)
+		return "", core.Exit(5, "Lume VM %s has an invalid machine identifier", name)
 	}
 	sum := sha256.Sum256(machineID)
 	return "lume-machine-" + hex.EncodeToString(sum[:]), nil
@@ -73,10 +73,10 @@ func ensureLumeStorageIdentity(root string) (string, error) {
 	root = filepath.Clean(root)
 	info, err := os.Lstat(root)
 	if err != nil {
-		return "", exit(5, "inspect Lume storage %q: %v", root, err)
+		return "", core.Exit(5, "inspect Lume storage %q: %v", root, err)
 	}
 	if !info.IsDir() {
-		return "", exit(5, "Lume storage %q is not a directory", root)
+		return "", core.Exit(5, "Lume storage %q is not a directory", root)
 	}
 	marker := filepath.Join(root, lumeStorageIdentityFile)
 	if _, err := os.Lstat(marker); err == nil {
@@ -89,17 +89,17 @@ func ensureLumeStorageIdentity(root string) (string, error) {
 		}
 		return identity, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", exit(5, "inspect Lume storage identity %q: %v", root, err)
+		return "", core.Exit(5, "inspect Lume storage identity %q: %v", root, err)
 	}
 
 	random := make([]byte, 32)
 	if _, err := rand.Read(random); err != nil {
-		return "", exit(5, "generate Lume storage identity: %v", err)
+		return "", core.Exit(5, "generate Lume storage identity: %v", err)
 	}
 	identity := hex.EncodeToString(random)
 	file, err := os.CreateTemp(root, "."+lumeStorageIdentityFile+".tmp-")
 	if err != nil {
-		return "", exit(5, "create temporary Lume storage identity %q: %v", root, err)
+		return "", core.Exit(5, "create temporary Lume storage identity %q: %v", root, err)
 	}
 	temporary := file.Name()
 	defer func() {
@@ -107,13 +107,13 @@ func ensureLumeStorageIdentity(root string) (string, error) {
 		_ = os.Remove(temporary)
 	}()
 	if _, err := file.WriteString(identity + "\n"); err != nil {
-		return "", exit(5, "write Lume storage identity %q: %v", root, err)
+		return "", core.Exit(5, "write Lume storage identity %q: %v", root, err)
 	}
 	if err := file.Sync(); err != nil {
-		return "", exit(5, "sync Lume storage identity %q: %v", root, err)
+		return "", core.Exit(5, "sync Lume storage identity %q: %v", root, err)
 	}
 	if err := file.Close(); err != nil {
-		return "", exit(5, "close Lume storage identity %q: %v", root, err)
+		return "", core.Exit(5, "close Lume storage identity %q: %v", root, err)
 	}
 	if err := os.Link(temporary, marker); errors.Is(err, os.ErrExist) {
 		installed, readErr := readLumeStorageIdentity(root)
@@ -125,10 +125,10 @@ func ensureLumeStorageIdentity(root string) (string, error) {
 		}
 		return installed, nil
 	} else if err != nil {
-		return "", exit(5, "publish Lume storage identity %q: %v", root, err)
+		return "", core.Exit(5, "publish Lume storage identity %q: %v", root, err)
 	}
 	if err := os.Remove(temporary); err != nil {
-		return "", exit(5, "remove temporary Lume storage identity %q: %v", root, err)
+		return "", core.Exit(5, "remove temporary Lume storage identity %q: %v", root, err)
 	}
 	if err := syncLumeStorageDirectory(root); err != nil {
 		return "", err
@@ -139,15 +139,15 @@ func ensureLumeStorageIdentity(root string) (string, error) {
 func syncLumeStorageDirectory(root string) error {
 	dir, err := os.Open(root)
 	if err != nil {
-		return exit(5, "open Lume storage %q for identity sync: %v", root, err)
+		return core.Exit(5, "open Lume storage %q for identity sync: %v", root, err)
 	}
 	syncErr := dir.Sync()
 	closeErr := dir.Close()
 	if syncErr != nil {
-		return exit(5, "sync Lume storage identity directory %q: %v", root, syncErr)
+		return core.Exit(5, "sync Lume storage identity directory %q: %v", root, syncErr)
 	}
 	if closeErr != nil {
-		return exit(5, "close Lume storage identity directory %q: %v", root, closeErr)
+		return core.Exit(5, "close Lume storage identity directory %q: %v", root, closeErr)
 	}
 	return nil
 }
@@ -157,33 +157,33 @@ func readLumeStorageIdentity(root string) (string, error) {
 	marker := filepath.Join(root, lumeStorageIdentityFile)
 	before, err := os.Lstat(marker)
 	if err != nil {
-		return "", exit(5, "read Lume storage identity %q: %v", root, err)
+		return "", core.Exit(5, "read Lume storage identity %q: %v", root, err)
 	}
 	if !before.Mode().IsRegular() || before.Size() <= 0 || before.Size() > 128 {
-		return "", exit(5, "Lume storage identity %q is not a small regular file", marker)
+		return "", core.Exit(5, "Lume storage identity %q is not a small regular file", marker)
 	}
 	file, err := os.Open(marker)
 	if err != nil {
-		return "", exit(5, "open Lume storage identity %q: %v", root, err)
+		return "", core.Exit(5, "open Lume storage identity %q: %v", root, err)
 	}
 	defer file.Close()
 	after, err := file.Stat()
 	if err != nil || !os.SameFile(before, after) {
-		return "", exit(5, "Lume storage identity %q changed while opening", root)
+		return "", core.Exit(5, "Lume storage identity %q changed while opening", root)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, 129))
 	if err != nil {
-		return "", exit(5, "read Lume storage identity %q: %v", root, err)
+		return "", core.Exit(5, "read Lume storage identity %q: %v", root, err)
 	}
 	identity := strings.TrimSpace(string(data))
 	decoded, decodeErr := hex.DecodeString(identity)
 	if decodeErr != nil || len(decoded) != 32 {
-		return "", exit(5, "Lume storage identity %q is invalid", root)
+		return "", core.Exit(5, "Lume storage identity %q is invalid", root)
 	}
 	return identity, nil
 }
 
-func lumeStorageRoot(cfg Config, reportedLocation string) (string, error) {
+func lumeStorageRoot(cfg core.Config, reportedLocation string) (string, error) {
 	storage := strings.TrimSpace(cfg.Lume.Storage)
 	if storage == "" {
 		storage = strings.TrimSpace(reportedLocation)
@@ -209,7 +209,7 @@ func lumeStorageRoot(cfg Config, reportedLocation string) (string, error) {
 	if storage == "home" {
 		return filepath.Clean(core.ExpandUserPath("~/.lume")), nil
 	}
-	return "", exit(5, "Lume storage location %q is not configured", storage)
+	return "", core.Exit(5, "Lume storage location %q is not configured", storage)
 }
 
 func expandLumePath(value string) string {
@@ -253,14 +253,14 @@ func loadLumeSettings() (lumeSettingsFile, error) {
 		return settings, nil
 	}
 	if err != nil {
-		return lumeSettingsFile{}, exit(5, "read Lume storage settings: %v", err)
+		return lumeSettingsFile{}, core.Exit(5, "read Lume storage settings: %v", err)
 	}
 	if len(data) > 1<<20 {
-		return lumeSettingsFile{}, exit(5, "Lume storage settings are too large")
+		return lumeSettingsFile{}, core.Exit(5, "Lume storage settings are too large")
 	}
 	var configured lumeSettingsFile
 	if err := yaml.Unmarshal(data, &configured); err != nil {
-		return lumeSettingsFile{}, exit(5, "parse Lume storage settings: %v", err)
+		return lumeSettingsFile{}, core.Exit(5, "parse Lume storage settings: %v", err)
 	}
 	if strings.TrimSpace(configured.DefaultLocationName) == "" {
 		configured.DefaultLocationName = "home"

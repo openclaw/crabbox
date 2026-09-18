@@ -32,7 +32,7 @@ func TestClaimMetadataRejectsFIFOWithoutWaiting(t *testing.T) {
 	}
 	defer writer.Close()
 	done := make(chan error, 1)
-	go func() { _, err := readLeaseClaim(id); done <- err }()
+	go func() { _, err := ReadLeaseClaim(id); done <- err }()
 	select {
 	case err := <-done:
 		var fileErr *leaseClaimFileError

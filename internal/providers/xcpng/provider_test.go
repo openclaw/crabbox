@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -12,10 +13,10 @@ import (
 
 func TestProviderSpec(t *testing.T) {
 	provider := Provider{}
-	if provider.Name() != "xcp-ng" {
-		t.Fatalf("Name=%q", provider.Name())
+	if provider.Spec().Name != "xcp-ng" {
+		t.Fatalf("Name=%q", provider.Spec().Name)
 	}
-	if aliases := provider.Aliases(); len(aliases) != 0 {
+	if aliases := provider.Spec().Aliases; len(aliases) != 0 {
 		t.Fatalf("Aliases=%v want none", aliases)
 	}
 	spec := provider.Spec()
@@ -37,8 +38,8 @@ func TestProviderForResolvesCanonicalOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.Name() != "xcp-ng" {
-		t.Fatalf("provider=%s", provider.Name())
+	if provider.Spec().Name != "xcp-ng" {
+		t.Fatalf("provider=%s", provider.Spec().Name)
 	}
 	if _, err := core.ProviderFor("xcpng"); err == nil {
 		t.Fatal("xcpng alias must not resolve")
@@ -62,9 +63,6 @@ func TestProviderServerTypeUsesTemplateIdentity(t *testing.T) {
 				t.Fatalf("ServerTypeForConfig=%q want %q", got, tt.want)
 			}
 		})
-	}
-	if got := provider.ServerTypeForClass("linux-small"); got != "template" {
-		t.Fatalf("ServerTypeForClass=%q want template", got)
 	}
 }
 
@@ -140,6 +138,29 @@ func TestFlagsClearStaleNameUUIDCounterparts(t *testing.T) {
 				NetworkUUID:  "net-0002",
 			},
 		},
+		{
+			name: "both flags uuid wins after name",
+			args: []string{
+				"--xcp-ng-template", "Other Template", "--xcp-ng-template-uuid", xcpNgTestVMUUID,
+				"--xcp-ng-sr", "other-sr", "--xcp-ng-sr-uuid", "sr-0002",
+				"--xcp-ng-network", "other-network", "--xcp-ng-network-uuid", "net-0002",
+			},
+			want: core.XCPNgConfig{TemplateUUID: xcpNgTestVMUUID, SRUUID: "sr-0002", NetworkUUID: "net-0002"},
+		},
+		{
+			name: "both flags uuid wins before name",
+			args: []string{
+				"--xcp-ng-template-uuid", xcpNgTestVMUUID, "--xcp-ng-template", "Other Template",
+				"--xcp-ng-sr-uuid", "sr-0002", "--xcp-ng-sr", "other-sr",
+				"--xcp-ng-network-uuid", "net-0002", "--xcp-ng-network", "other-network",
+			},
+			want: core.XCPNgConfig{TemplateUUID: xcpNgTestVMUUID, SRUUID: "sr-0002", NetworkUUID: "net-0002"},
+		},
+		{
+			name: "empty uuid flags clear stale names",
+			args: []string{"--xcp-ng-template-uuid=", "--xcp-ng-sr-uuid=", "--xcp-ng-network-uuid="},
+			want: core.XCPNgConfig{},
+		},
 	}
 
 	for _, tt := range tests {
@@ -184,7 +205,7 @@ func TestConfigureDoctorReturnsNonMutatingBackend(t *testing.T) {
 		return fake, nil
 	}
 	t.Cleanup(func() { newLifecycleClient = old })
-	doctor, err := Provider{}.ConfigureDoctor(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := core.ConfigureProviderDoctor(Provider{}, cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +227,7 @@ func TestConfigureDoctorReturnsNonMutatingBackend(t *testing.T) {
 func TestDoctorReportsIncompleteConfigWithoutSecretValues(t *testing.T) {
 	cfg := core.Config{}
 	cfg.XCPNg.Password = "secret"
-	doctor, err := Provider{}.ConfigureDoctor(cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
+	doctor, err := core.ConfigureProviderDoctor(Provider{}, cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,5 +240,122 @@ func TestDoctorReportsIncompleteConfigWithoutSecretValues(t *testing.T) {
 	}
 	if strings.Contains(result.Message, cfg.XCPNg.Password) {
 		t.Fatal("doctor result leaked password")
+	}
+}
+
+func TestXCPNgBindingFlagPairPresenceAndOrder(t *testing.T) {
+	for _, provider := range []string{"xcp-ng", "fixture-other"} {
+		for _, pair := range []struct {
+			flag string
+			get  func(*core.XCPNgConfig) (*string, *string)
+		}{
+			{"template", func(c *core.XCPNgConfig) (*string, *string) { return &c.Template, &c.TemplateUUID }},
+			{"sr", func(c *core.XCPNgConfig) (*string, *string) { return &c.SR, &c.SRUUID }},
+			{"network", func(c *core.XCPNgConfig) (*string, *string) { return &c.Network, &c.NetworkUUID }},
+		} {
+			for _, name := range []*string{nil, new(""), new("  "), new("fixture-name"), new("prior-name")} {
+				for _, uuid := range []*string{nil, new(""), new("  "), new("fixture-uuid"), new("prior-uuid")} {
+					for _, reverse := range []bool{false, true} {
+						cfg := core.BaseConfig()
+						cfg.Provider, cfg.ServerType, cfg.SSHUser, cfg.WorkRoot = provider, "prior-type", "generic-user", "/generic"
+						n, u := pair.get(&cfg.XCPNg)
+						*n, *u = "prior-name", "prior-uuid"
+						before := cfg
+						fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+						values := (Provider{}).RegisterFlags(fs, cfg)
+						args := []string{}
+						if name != nil {
+							args = append(args, "--xcp-ng-"+pair.flag+"="+*name)
+						}
+						if uuid != nil {
+							args = append(args, "--xcp-ng-"+pair.flag+"-uuid="+*uuid)
+						}
+						if reverse && len(args) == 2 {
+							args[0], args[1] = args[1], args[0]
+						}
+						if err := fs.Parse(args); err != nil {
+							t.Fatal(err)
+						}
+						if err := (Provider{}).ApplyFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+							t.Fatal("foreign values changed configuration")
+						}
+						want := before
+						n, u = pair.get(&want.XCPNg)
+						if uuid != nil {
+							*n, *u = "", *uuid
+						} else if name != nil {
+							*n, *u = *name, ""
+						}
+						accepted := name != nil || uuid != nil
+						if pair.flag == "template" && accepted {
+							want.ServerType = "template"
+							if raw := strings.TrimSpace(*u); raw != "" {
+								want.ServerType = "template-" + raw
+							} else if raw := strings.TrimSpace(*n); raw != "" {
+								want.ServerType = "template-" + core.NormalizeLeaseSlug(raw)
+							}
+						}
+						core.RecordProviderFlagInputs(&want, accepted, "xcp-ng")
+						for repeat := 0; repeat < 2; repeat++ {
+							if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+								t.Fatal(err)
+							}
+							if !reflect.DeepEqual(cfg, want) {
+								t.Fatalf("provider=%s pair=%s reverse=%v: flag pair or side effects changed", provider, pair.flag, reverse)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestXCPNgBindingOrdinaryFlagEffects(t *testing.T) {
+	for _, name := range []string{"api-url", "username", "host", "user", "work-root", "insecure-tls"} {
+		for _, raw := range []string{"", "  ", "fixture", "fixture-prior"} {
+			for _, boolean := range []string{"false", "true"} {
+				cfg := core.BaseConfig()
+				cfg.Provider, cfg.ServerType, cfg.SSHUser, cfg.WorkRoot = "fixture-other", "prior-type", "generic-user", "/generic"
+				cfg.XCPNg = core.XCPNgConfig{APIURL: "fixture-prior", Username: "fixture-prior", Password: "fixture-password", Host: "fixture-prior", User: "fixture-prior", WorkRoot: "fixture-prior", InsecureTLS: true}
+				before := cfg
+				fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+				values := (Provider{}).RegisterFlags(fs, cfg)
+				count := 0
+				fs.VisitAll(func(*flag.Flag) { count++ })
+				if count != 12 || fs.Lookup("xcp-ng-password") != nil {
+					t.Fatal("flag surface changed")
+				}
+				if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, before) {
+					t.Fatal("unvisited flags changed configuration")
+				}
+				value := raw
+				if name == "insecure-tls" {
+					value = boolean
+				}
+				if err := fs.Set("xcp-ng-"+name, value); err != nil {
+					t.Fatal(err)
+				}
+				want := before
+				switch name {
+				case "api-url":
+					want.XCPNg.APIURL = raw
+				case "username":
+					want.XCPNg.Username = raw
+				case "host":
+					want.XCPNg.Host = raw
+				case "user":
+					want.XCPNg.User, want.SSHUser = raw, raw
+				case "work-root":
+					want.XCPNg.WorkRoot, want.WorkRoot = raw, raw
+				case "insecure-tls":
+					want.XCPNg.InsecureTLS = boolean == "true"
+				}
+				core.RecordProviderFlagInputs(&want, true, "xcp-ng")
+				if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, want) {
+					t.Fatalf("flag=%s raw=%q: ordinary flag side effects changed: %v", name, raw, err)
+				}
+			}
+		}
 	}
 }

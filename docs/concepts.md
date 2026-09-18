@@ -188,8 +188,8 @@ deletions, missing manifest entries, and other suspicious sync outcomes. See
 ## Capabilities
 
 **Desktop** - lease capability (`--desktop`) that adds a visible session:
-resize-capable TigerVNC + XFCE on managed cloud Linux, Xvfb + XFCE + x11vnc in
-local containers, or Wayland/GNOME. Required for `crabbox
+resize-capable TigerVNC + XFCE on managed cloud Linux and new local
+containers, or Wayland/GNOME. Required for `crabbox
 vnc`, `crabbox webvnc`, and most `--browser` UI runs.
 
 **Browser** - lease capability (`--browser`) that installs Chrome/Chromium and
@@ -253,9 +253,12 @@ identity instead of raw client headers.
 
 ## Storage
 
-**State directory** - where the CLI keeps local state (claims, per-lease keys,
-known_hosts, checkpoints). Defaults to `$XDG_STATE_HOME/crabbox`, falling back to
-the platform-specific user config directory.
+**State directory** - where the CLI keeps local claims, history and checkpoints.
+An explicit `XDG_STATE_HOME` puts these under `$XDG_STATE_HOME/crabbox` and also
+selects that namespace for generated per-lease keys and host trust. When unset
+or empty, state uses `<os-user-config-dir>/crabbox/state`, while keys retain
+`<os-user-config-dir>/crabbox/testboxes`. Changing roots does not migrate or
+search old state. See [SSH keys](features/ssh-keys.md).
 
 **Claim** - a JSON file under the state directory binding a lease to a repo
 checkout. Required for `crabbox run --id` to resolve slugs and to refuse

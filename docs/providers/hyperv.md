@@ -80,6 +80,12 @@ Notes:
 
 ## Configuration
 
+`crabbox config show` displays loaded nonsecret Hyper-V settings in the `hyperv`
+text line and JSON section, even when another provider is selected. It preserves
+empty, zero and false values without resolving new defaults or invoking Hyper-V.
+The guest password and credential-presence information are not displayed;
+`initPassword` is only the configured boolean, not evidence of guest changes.
+
 ### Flags
 
 | Flag | Default | Description |
@@ -91,6 +97,15 @@ Notes:
 | `--hyperv-memory` | `8192` | Memory in MB |
 | `--hyperv-switch` | `Default Switch` | Hyper-V virtual switch name |
 | `--hyperv-init-password` | `false` | Set the guest password at first boot via the lease disk (password-less auto-logon templates) |
+
+Decoded negative CPU or memory values, including environment and explicit flag
+values, are rejected when creating a VM, before native commands or local lease
+state changes. Inherited sizing does not block stopping an existing lease or
+cleaning up its resources; those operations retain their existing checks.
+Zero retains the defaults
+of 4 CPUs and 8192 MB; positive values are passed through unchanged. YAML CPU
+and memory values still apply only when positive, so zero or negative YAML
+values leave the previous setting unchanged.
 
 ### Config file
 
@@ -144,6 +159,10 @@ During `Acquire`, the provider:
 PowerShell Direct calls use the guest administrator password. Readiness and
 later guest operations have bounded retries, preventing a stalled call from
 hanging the lease.
+
+Exhausting the PowerShell Direct boot-readiness budget reports a timeout while
+preserving the last probe's diagnostic and public exit code. Caller cancellation
+still takes precedence over that provider-owned budget.
 
 Set `CRABBOX_HYPERV_GUEST_PASSWORD` or `hyperv.guestPassword` in trusted user
 config to match the administrator password in your VHDX template. The provider

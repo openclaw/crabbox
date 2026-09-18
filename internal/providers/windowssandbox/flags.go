@@ -4,48 +4,23 @@ import (
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type flagValues struct {
-	Workdir            *string
-	TempRoot           *string
-	Networking         *string
-	VGPU               *string
-	Clipboard          *string
-	ProtectedClient    *string
-	AudioInput         *string
-	VideoInput         *string
-	PrinterRedirection *string
-	MemoryMB           *int
-}
-
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return flagValues{
-		Workdir:            fs.String("windows-sandbox-workdir", defaults.WindowsSandbox.Workdir, "absolute working directory inside Windows Sandbox"),
-		TempRoot:           fs.String("windows-sandbox-temp-root", defaults.WindowsSandbox.TempRoot, "host directory for temporary Windows Sandbox workspaces"),
-		Networking:         fs.String("windows-sandbox-networking", defaults.WindowsSandbox.Networking, "Windows Sandbox networking: enable, disable, or default"),
-		VGPU:               fs.String("windows-sandbox-vgpu", defaults.WindowsSandbox.VGPU, "Windows Sandbox vGPU: enable, disable, or default"),
-		Clipboard:          fs.String("windows-sandbox-clipboard", defaults.WindowsSandbox.Clipboard, "Windows Sandbox clipboard redirection: enable, disable, or default"),
-		ProtectedClient:    fs.String("windows-sandbox-protected-client", defaults.WindowsSandbox.ProtectedClient, "Windows Sandbox protected client: enable, disable, or default"),
-		AudioInput:         fs.String("windows-sandbox-audio-input", defaults.WindowsSandbox.AudioInput, "Windows Sandbox audio input: enable, disable, or default"),
-		VideoInput:         fs.String("windows-sandbox-video-input", defaults.WindowsSandbox.VideoInput, "Windows Sandbox video input: enable, disable, or default"),
-		PrinterRedirection: fs.String("windows-sandbox-printer-redirection", defaults.WindowsSandbox.PrinterRedirection, "Windows Sandbox printer redirection: enable, disable, or default"),
-		MemoryMB:           fs.Int("windows-sandbox-memory-mb", defaults.WindowsSandbox.MemoryMB, "Windows Sandbox memory in MB; 0 leaves the platform default"),
-	}
+	return core.RegisterWindowsSandboxConfigFlags(fs, defaults.WindowsSandbox)
 }
 
 func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(flagValues)
+	v, ok := values.(core.WindowsSandboxConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	selected := cfg.Provider == providerName || cfg.Provider == "wsb" || cfg.Provider == "windows-sandbox-provider"
+	visited := core.WindowsSandboxConfigFlagPresence(fs)
+	selected := core.ProviderNameMatchesExact(cfg.Provider, Provider{})
 	if selected {
-		if core.FlagWasSet(fs, "class") {
-			return exit(2, "--class is not supported for provider=%s; Windows Sandbox sizing is controlled by the host", providerName)
-		}
-		if core.FlagWasSet(fs, "type") {
-			return exit(2, "--type is not supported for provider=%s; Windows Sandbox sizing is controlled by the host", providerName)
+		if err := shared.RejectExplicitMachineSizingFlags(fs, providerName, "Windows Sandbox sizing is controlled by the host", "Windows Sandbox sizing is controlled by the host"); err != nil {
+			return err
 		}
 		if !core.FlagWasSet(fs, "target") {
 			cfg.TargetOS = targetWindows
@@ -54,66 +29,76 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			cfg.WindowsMode = windowsModeNormal
 		}
 	}
-	if core.FlagWasSet(fs, "windows-sandbox-workdir") {
+	if visited.Workdir {
 		cfg.WindowsSandbox.Workdir = *v.Workdir
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
-	if core.FlagWasSet(fs, "windows-sandbox-temp-root") {
+	if visited.TempRoot {
 		cfg.WindowsSandbox.TempRoot = *v.TempRoot
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
-	if core.FlagWasSet(fs, "windows-sandbox-networking") {
+	if visited.Networking {
 		normalized, err := normalizeWSBState(*v.Networking, "windows-sandbox-networking")
 		if err != nil {
 			return err
 		}
 		cfg.WindowsSandbox.Networking = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
-	if core.FlagWasSet(fs, "windows-sandbox-vgpu") {
+	if visited.VGPU {
 		normalized, err := normalizeWSBState(*v.VGPU, "windows-sandbox-vgpu")
 		if err != nil {
 			return err
 		}
 		cfg.WindowsSandbox.VGPU = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
-	if core.FlagWasSet(fs, "windows-sandbox-clipboard") {
+	if visited.Clipboard {
 		normalized, err := normalizeWSBState(*v.Clipboard, "windows-sandbox-clipboard")
 		if err != nil {
 			return err
 		}
 		cfg.WindowsSandbox.Clipboard = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
-	if core.FlagWasSet(fs, "windows-sandbox-protected-client") {
+	if visited.ProtectedClient {
 		normalized, err := normalizeWSBState(*v.ProtectedClient, "windows-sandbox-protected-client")
 		if err != nil {
 			return err
 		}
 		cfg.WindowsSandbox.ProtectedClient = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
-	if core.FlagWasSet(fs, "windows-sandbox-audio-input") {
+	if visited.AudioInput {
 		normalized, err := normalizeWSBState(*v.AudioInput, "windows-sandbox-audio-input")
 		if err != nil {
 			return err
 		}
 		cfg.WindowsSandbox.AudioInput = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
-	if core.FlagWasSet(fs, "windows-sandbox-video-input") {
+	if visited.VideoInput {
 		normalized, err := normalizeWSBState(*v.VideoInput, "windows-sandbox-video-input")
 		if err != nil {
 			return err
 		}
 		cfg.WindowsSandbox.VideoInput = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
-	if core.FlagWasSet(fs, "windows-sandbox-printer-redirection") {
+	if visited.PrinterRedirection {
 		normalized, err := normalizeWSBState(*v.PrinterRedirection, "windows-sandbox-printer-redirection")
 		if err != nil {
 			return err
 		}
 		cfg.WindowsSandbox.PrinterRedirection = normalized
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
-	if core.FlagWasSet(fs, "windows-sandbox-memory-mb") {
+	if visited.MemoryMB {
 		if *v.MemoryMB < 0 {
-			return exit(2, "--windows-sandbox-memory-mb must be non-negative")
+			return core.Exit(2, "--windows-sandbox-memory-mb must be non-negative")
 		}
 		cfg.WindowsSandbox.MemoryMB = *v.MemoryMB
+		core.RecordProviderFlagInputs(cfg, true, "windows-sandbox")
 	}
 	if selected {
 		applyDefaults(cfg)

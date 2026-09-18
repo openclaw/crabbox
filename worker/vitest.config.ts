@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
   resolve: {
@@ -13,5 +13,7 @@ export default defineConfig({
   test: {
     environment: "node",
     globals: false,
+    // The real-store proof runs separately against its job-local PostgreSQL service.
+    exclude: [...configDefaults.exclude, "test/aws-cleanup-recovery.postgres.test.ts"],
   },
 });

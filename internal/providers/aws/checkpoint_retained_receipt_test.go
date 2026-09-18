@@ -59,8 +59,8 @@ func runCheckpointRetirementReceipt(t *testing.T, tc checkpointReceiptCase) {
 	t.Cleanup(installFixedAWSTestClient(t, fake))
 	cfg := fixedAWSTestConfig()
 	cfg.AWSSSHCIDRs = []string{"127.0.0.1/32"}
-	b := NewAWSLeaseBackend(Provider{}.Spec(), cfg, Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
-	lease, err := b.Acquire(t.Context(), AcquireRequest{Repo: core.Repo{Root: repo}, Keep: true, RequestedLeaseID: "cbx_abcdef123493", RequestedSlug: "retirement-receipt"})
+	b := NewAWSLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
+	lease, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: repo}, Keep: true, RequestedLeaseID: "cbx_abcdef123493", RequestedSlug: "retirement-receipt"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func runCheckpointRetirementReceipt(t *testing.T, tc checkpointReceiptCase) {
 		t.Fatal(err)
 	}
 	core.SetServerLeaseClaimSnapshot(&lease.Server, bound, true)
-	if err := b.ReleaseLease(t.Context(), ReleaseLeaseRequest{Lease: lease, CheckpointID: checkpointID}); err != nil {
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease, CheckpointID: checkpointID}); err != nil {
 		t.Fatal(err)
 	}
 	terminal, err := core.ReadLeaseClaim(lease.LeaseID)
@@ -127,7 +127,7 @@ func runCheckpointRetirementReceipt(t *testing.T, tc checkpointReceiptCase) {
 	// Reopen the backend with empty inventory, as after process interruption and
 	// EC2's disappearance of terminated instances. No create/delete is allowed.
 	reloaded := &fakeAWSClient{accountID: tc.account, getErr: tc.getErr}
-	newAWSClient = func(context.Context, Config) (awsClient, error) { return reloaded, nil }
+	newAWSClient = func(context.Context, core.Config) (awsClient, error) { return reloaded, nil }
 	if tc.region != "" {
 		t.Setenv("CRABBOX_AWS_REGION", tc.region)
 	}

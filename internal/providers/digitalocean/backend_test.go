@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1338,6 +1339,10 @@ func TestResolveVisibleDropletIgnoresUnrelatedCorruptClaim(t *testing.T) {
 	item := droplet{ID: 108, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
 	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
 	backend := newTestBackend(t, api)
+	// Prepare this owned synthetic namespace before manually inserting a corrupt claim.
+	if err := core.PreflightLeaseSSHStorage(); err != nil {
+		t.Fatal(err)
+	}
 	stateDir, err := core.CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
@@ -1820,6 +1825,10 @@ func TestUnreadableExactClaimBlocksResolveAndRelease(t *testing.T) {
 	item := droplet{ID: 112, Name: core.LeaseProviderName(leaseID, slug), Status: "active", Tags: tagsFromLabels(labels)}
 	api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
 	backend := newTestBackend(t, api)
+	// Prepare this owned synthetic namespace before manually inserting a corrupt claim.
+	if err := core.PreflightLeaseSSHStorage(); err != nil {
+		t.Fatal(err)
+	}
 	stateDir, err := core.CrabboxStateDir()
 	if err != nil {
 		t.Fatal(err)
@@ -2849,17 +2858,15 @@ func claimedDigitalOceanTarget(t *testing.T, server core.Server) core.LeaseTarge
 
 func writeStoredTestboxKey(t *testing.T, leaseID string) string {
 	t.Helper()
-	keyPath, err := core.TestboxKeyPath(leaseID)
+	// Fresh synthetic files need the same owner/privacy preparation as generated keys.
+	keyPath, err := core.PrepareStoredTestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+	if err := core.WritePreparedLeaseSSHKeyFile(keyPath, []byte("test-key")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(keyPath, []byte("test-key"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(keyPath+".pub", []byte("ssh-ed25519 test-key"), 0o644); err != nil {
+	if err := core.WritePreparedLeaseSSHKeyFile(keyPath+".pub", []byte("ssh-ed25519 test-key")); err != nil {
 		t.Fatal(err)
 	}
 	return keyPath
@@ -3733,4 +3740,59 @@ func (c fixedClock) Now() time.Time { return c.t }
 
 func TestMain(m *testing.M) {
 	os.Exit(testutil.RunWithIsolatedUserDirs(m))
+}
+
+func TestDigitalOceanConfigShowCompletePassiveSection(t *testing.T) {
+	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
+	if !ok {
+		t.Fatal("actual provider has no passive config-show projector")
+	}
+	for _, tc := range []struct {
+		name  string
+		input core.DigitalOceanConfig
+		want  map[string]any
+		text  string
+	}{
+		{name: "nil", input: core.DigitalOceanConfig{}, want: map[string]any{"region": "", "image": "", "vpc": "", "sshCIDRs": []string(nil)}, text: "digitalocean region= image= vpc=- ssh_cidrs=-\n"},
+		{name: "empty", input: core.DigitalOceanConfig{SSHCIDRs: []string{}}, want: map[string]any{"region": "", "image": "", "vpc": "", "sshCIDRs": []string{}}, text: "digitalocean region= image= vpc=- ssh_cidrs=-\n"},
+		{name: "raw-references-list", input: core.DigitalOceanConfig{Region: "raw-region", Image: "image reference", VPCUUID: "vpc reference", SSHCIDRs: []string{"second", "first", "second", " "}}, want: map[string]any{"region": "raw-region", "image": "image reference", "vpc": "vpc reference", "sshCIDRs": []string{"second", "first", "second", " "}}, text: "digitalocean region=raw-region image=image reference vpc=vpc reference ssh_cidrs=second,first,second, \n"},
+		{name: "whitespace-empty-elements", input: core.DigitalOceanConfig{Region: " ", Image: " ", VPCUUID: " ", SSHCIDRs: []string{"", ""}}, want: map[string]any{"region": " ", "image": " ", "vpc": " ", "sshCIDRs": []string{"", ""}}, text: "digitalocean region=  image=  vpc=  ssh_cidrs=,\n"},
+	} {
+		for _, selected := range []string{"digitalocean", "static"} {
+			t.Run(tc.name+"/"+selected, func(t *testing.T) {
+				cfg := core.Config{Provider: selected, DigitalOcean: tc.input}
+				before := cfg.DigitalOcean
+				before.SSHCIDRs = slices.Clone(cfg.DigitalOcean.SSHCIDRs)
+				section := projector.ConfigShowSection(cfg)
+				if section.JSONKey != "digitalocean" || section.TextLabel != "digitalocean" || !reflect.DeepEqual(section.Providers, []string{"digitalocean"}) {
+					t.Fatalf("section metadata=%#v", section)
+				}
+				wantOrder := []string{"region", "image", "vpc", "sshCIDRs"}
+				if len(section.Fields) != len(wantOrder) {
+					t.Fatalf("field count=%d want %d", len(section.Fields), len(wantOrder))
+				}
+				got := map[string]any{}
+				line := section.TextLabel
+				for i, field := range section.Fields {
+					if field.JSONName != wantOrder[i] {
+						t.Fatalf("field %d name=%q want %q", i, field.JSONName, wantOrder[i])
+					}
+					got[field.JSONName] = field.JSONValue
+					if field.TextName != "" {
+						line += " " + field.TextName + "=" + field.TextValue
+					}
+				}
+				line += "\n"
+				if !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("public fields=%#v want %#v", got, tc.want)
+				}
+				if line != tc.text {
+					t.Fatalf("text=%q want %q", line, tc.text)
+				}
+				if !reflect.DeepEqual(cfg.DigitalOcean, before) {
+					t.Fatal("projection mutated supplied configuration")
+				}
+			})
+		}
+	}
 }

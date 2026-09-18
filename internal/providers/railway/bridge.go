@@ -32,7 +32,7 @@ import (
 func (b *railwayBackend) PublishPeer(ctx context.Context, leaseID string, port int, ttl time.Duration) (core.BridgePeerTarget, error) {
 	_ = ttl
 	if port <= 0 || port > 65535 {
-		return core.BridgePeerTarget{}, exit(2, "railway bridge: port %d out of range", port)
+		return core.BridgePeerTarget{}, core.Exit(2, "railway bridge: port %d out of range", port)
 	}
 	url, status, err := b.bridgeDeploymentURL(ctx, leaseID)
 	if err != nil {
@@ -43,7 +43,7 @@ func (b *railwayBackend) PublishPeer(ctx context.Context, leaseID string, port i
 		if statusText == "" {
 			statusText = "unknown"
 		}
-		return core.BridgePeerTarget{}, exit(4, "railway bridge: deployment for %q is not ready (status=%s)", leaseID, statusText)
+		return core.BridgePeerTarget{}, core.Exit(4, "railway bridge: deployment for %q is not ready (status=%s)", leaseID, statusText)
 	}
 	return core.BridgePeerTarget{Port: port, URL: url}, nil
 }
@@ -69,7 +69,7 @@ func (b *railwayBackend) ListPeerTargets(ctx context.Context, leaseID string) ([
 func (b *railwayBackend) bridgeDeploymentURL(ctx context.Context, leaseID string) (string, railwayDeploymentStatus, error) {
 	serviceID := strings.TrimSpace(leaseID)
 	if serviceID == "" {
-		return "", "", exit(2, "railway bridge: missing lease id")
+		return "", "", core.Exit(2, "railway bridge: missing lease id")
 	}
 	projectID, environmentID, err := b.requireProjectEnv()
 	if err != nil {

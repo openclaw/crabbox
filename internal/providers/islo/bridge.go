@@ -16,7 +16,7 @@ const isloShareReuseSkew = 30 * time.Second
 // islo create-share endpoint counts as a published URL on the user's tenant.
 func (b *isloBackend) PublishPeer(ctx context.Context, leaseID string, port int, ttl time.Duration) (core.BridgePeerTarget, error) {
 	if port <= 0 || port > 65535 {
-		return core.BridgePeerTarget{}, exit(2, "islo bridge: port %d out of range", port)
+		return core.BridgePeerTarget{}, core.Exit(2, "islo bridge: port %d out of range", port)
 	}
 	name, err := isloSandboxNameFromLeaseID(leaseID)
 	if err != nil {
@@ -95,17 +95,17 @@ func bridgeTargetFromShare(share IsloShare) core.BridgePeerTarget {
 func isloSandboxNameFromLeaseID(leaseID string) (string, error) {
 	leaseID = strings.TrimSpace(leaseID)
 	if leaseID == "" {
-		return "", exit(2, "islo bridge: missing lease id")
+		return "", core.Exit(2, "islo bridge: missing lease id")
 	}
 	if strings.HasPrefix(leaseID, isloLeasePrefix) {
 		name := strings.TrimPrefix(leaseID, isloLeasePrefix)
 		if !isCrabboxIsloSandboxName(name) {
-			return "", exit(2, "islo bridge: lease %q is not a Crabbox-owned sandbox", leaseID)
+			return "", core.Exit(2, "islo bridge: lease %q is not a Crabbox-owned sandbox", leaseID)
 		}
 		return name, nil
 	}
 	if isCrabboxIsloSandboxName(leaseID) {
 		return leaseID, nil
 	}
-	return "", exit(2, "islo bridge: lease %q is not a Crabbox-owned islo sandbox", leaseID)
+	return "", core.Exit(2, "islo bridge: lease %q is not a Crabbox-owned islo sandbox", leaseID)
 }

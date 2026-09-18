@@ -3,10 +3,12 @@ package nvidiabrev
 import (
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestNvidiaBrevSSHConfigParsesDirectTarget(t *testing.T) {
-	target, err := selectBrevSSHTarget(Config{}, `Host my-gpu-box
+	target, err := selectBrevSSHTarget(core.Config{}, `Host my-gpu-box
   HostName 10.0.0.5
   User brev
   Port 2222
@@ -33,7 +35,7 @@ func TestNvidiaBrevSSHConfigParsesDirectTarget(t *testing.T) {
 }
 
 func TestNvidiaBrevSSHConfigParsesProxyTarget(t *testing.T) {
-	target, err := selectBrevSSHTarget(Config{}, `Host my-gpu-box
+	target, err := selectBrevSSHTarget(core.Config{}, `Host my-gpu-box
   User brev
   IdentityFile "/home/test/.brev/brev.pem"
   ProxyCommand /home/test/.brev/cloudflared access ssh --hostname proxy.example
@@ -64,7 +66,7 @@ Host gpu-box-host
   IdentityFile "/home/test/.brev/brev.pem"
 `
 	alias := brevSSHConfigAlias("gpu-box", "host")
-	target, err := selectBrevSSHTarget(Config{}, data, alias)
+	target, err := selectBrevSSHTarget(core.Config{}, data, alias)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +76,7 @@ Host gpu-box-host
 }
 
 func TestNvidiaBrevSSHConfigPrefersConfiguredUser(t *testing.T) {
-	target, err := selectBrevSSHTarget(Config{NvidiaBrev: NvidiaBrevConfig{User: "alice"}}, `Host gpu-box
+	target, err := selectBrevSSHTarget(core.Config{NvidiaBrev: core.NvidiaBrevConfig{User: "alice"}}, `Host gpu-box
   HostName 10.0.0.5
   User brev
   IdentityFile "/home/test/.brev/brev.pem"
@@ -88,7 +90,7 @@ func TestNvidiaBrevSSHConfigPrefersConfiguredUser(t *testing.T) {
 }
 
 func TestNvidiaBrevSSHConfigPrefersGeneratedUserOverGenericDefault(t *testing.T) {
-	target, err := selectBrevSSHTarget(Config{SSHUser: "crabbox"}, `Host gpu-box
+	target, err := selectBrevSSHTarget(core.Config{SSHUser: "crabbox"}, `Host gpu-box
   HostName 10.0.0.5
   User brev
   IdentityFile "/home/test/.brev/brev.pem"
@@ -127,7 +129,7 @@ func TestNvidiaBrevSSHConfigReportsMissingFields(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := selectBrevSSHTarget(Config{}, tt.data, "gpu")
+			_, err := selectBrevSSHTarget(core.Config{}, tt.data, "gpu")
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err=%v, want %q", err, tt.want)
 			}
@@ -142,7 +144,7 @@ func TestNvidiaBrevSSHConfigRejectsInvalidUsers(t *testing.T) {
   User ` + user + `
   IdentityFile "/home/test/.brev/brev.pem"
 `
-		for _, cfg := range []Config{{NvidiaBrev: NvidiaBrevConfig{User: user}}, {}} {
+		for _, cfg := range []core.Config{{NvidiaBrev: core.NvidiaBrevConfig{User: user}}, {}} {
 			_, err := selectBrevSSHTarget(cfg, data, "gpu")
 			if err == nil || !strings.Contains(err.Error(), "invalid User") {
 				t.Fatalf("user=%q cfg=%#v err=%v", user, cfg.NvidiaBrev, err)
@@ -155,7 +157,7 @@ func TestNvidiaBrevSSHConfigRejectsInvalidUsers(t *testing.T) {
   IdentityFile "/home/test/.brev/brev.pem"
 `
 	for _, user := range []string{"alice\nbob", "alice\tbob"} {
-		_, err := selectBrevSSHTarget(Config{NvidiaBrev: NvidiaBrevConfig{User: user}}, data, "gpu")
+		_, err := selectBrevSSHTarget(core.Config{NvidiaBrev: core.NvidiaBrevConfig{User: user}}, data, "gpu")
 		if err == nil || !strings.Contains(err.Error(), "invalid User") {
 			t.Fatalf("configured user=%q err=%v", user, err)
 		}
@@ -164,7 +166,7 @@ func TestNvidiaBrevSSHConfigRejectsInvalidUsers(t *testing.T) {
 
 func TestNvidiaBrevSSHConfigAllowsOpenSSHUsernames(t *testing.T) {
 	user := "1" + strings.Repeat("a", 64)
-	target, err := selectBrevSSHTarget(Config{NvidiaBrev: NvidiaBrevConfig{User: user}}, `Host gpu
+	target, err := selectBrevSSHTarget(core.Config{NvidiaBrev: core.NvidiaBrevConfig{User: user}}, `Host gpu
   HostName 10.0.0.5
   User brev
   IdentityFile "/home/test/.brev/brev.pem"
@@ -178,7 +180,7 @@ func TestNvidiaBrevSSHConfigAllowsOpenSSHUsernames(t *testing.T) {
 }
 
 func TestNvidiaBrevSSHConfigRejectsAmbiguousAlias(t *testing.T) {
-	_, err := selectBrevSSHTarget(Config{}, `Host gpu
+	_, err := selectBrevSSHTarget(core.Config{}, `Host gpu
   HostName 10.0.0.5
   User brev
   IdentityFile "/home/test/.brev/brev.pem"

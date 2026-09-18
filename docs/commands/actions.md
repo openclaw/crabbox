@@ -95,15 +95,19 @@ crabbox actions dispatch -f testbox_id=cbx_abcdef123456
 
 ## Workflow inputs
 
-Every `-f` / `--field` value must be `key=value`. CLI values override matching
-`actions.fields` entries for that dispatch.
+Every `-f` / `--field` value must be `key=value`. During `actions hydrate`, CLI
+values override matching `actions.fields` entries. Automatic hydration also uses
+`actions.fields`.
 
-Crabbox inspects the selected workflow's `workflow_dispatch.inputs` (when the
-workflow path is available under `.github/workflows/`). It sends only declared
-inputs and requires `crabbox_id`, `crabbox_runner_label`, and
-`crabbox_keep_alive_minutes`; `crabbox_job` is optional. If a GitHub dispatch
-rejects `crabbox_job` as an unexpected input, Crabbox retries once without it so
-older workflow refs stay usable.
+Standalone `actions dispatch` sends only inputs explicitly supplied with `-f` /
+`--field`; it still uses configured repository, workflow, and ref defaults.
+
+For GitHub runner hydration, Crabbox inspects the selected workflow's
+`workflow_dispatch.inputs` (when the workflow path is available under
+`.github/workflows/`). It sends only declared inputs and requires `crabbox_id`,
+`crabbox_runner_label`, and `crabbox_keep_alive_minutes`; `crabbox_job` is optional.
+If that hydration dispatch rejects `crabbox_job` as an unexpected input, Crabbox
+retries once without it so older workflow refs stay usable.
 
 A hydrate workflow must accept these inputs:
 
@@ -170,9 +174,16 @@ crabbox run --id blue-lobster -- pnpm test:changed
 
 The workflow owns repository-specific setup: checkout, dependency install,
 caches, and project tools. Local hydration supports `run` steps plus common
-setup actions: `actions/checkout`, `actions/setup-node`, `actions/setup-go`,
-`actions/setup-python`, and `actions/cache/restore|save` (cache restore reports a
-miss; save is skipped). Repo-local composite actions (`./path`) are supported.
+setup actions: `actions/checkout`, `actions/setup-node`, `pnpm/action-setup`,
+`actions/setup-go`, `actions/setup-python`, and `actions/cache/restore|save`
+(cache restore reports a miss; save is skipped). `pnpm/action-setup` requires an
+explicit exact `version` (`major.minor.patch`) and installs into the managed tool
+cache without lifecycle scripts; it bootstraps Node 24 if Node or npm is absent,
+so pnpm setup may precede setup-node. A later setup-node selects the project Node
+version without displacing the managed pnpm. Other pnpm inputs and version
+inference/ranges require `--github-runner`; install project dependencies in a
+separate `run` step. Setup-node accepts `cache: pnpm` as an explicitly uncached
+local run. Repo-local composite actions (`./path`) are supported.
 Job containers and service containers are not; `actions/checkout` options that
 change the repository, path, submodules, or LFS fail locally so you can rerun
 with `--github-runner` when you need full GitHub Actions semantics.

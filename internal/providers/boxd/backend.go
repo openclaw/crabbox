@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -272,7 +273,9 @@ func (b *backend) prepare(ctx context.Context, c *consoleClient, claim core.Leas
 	if err := core.UseLeaseKnownHosts(&target, claim.LeaseID); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	core.UseStoredTestboxKey(&target, claim.LeaseID)
+	if err := core.UseStoredTestboxKey(&target, claim.LeaseID); err != nil {
+		return core.LeaseTarget{}, err
+	}
 	if err := pinHostKey(target); err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -358,7 +361,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		target := core.SSHTargetFromConfig(b.cfg, vm.PublicIP)
 		target.User, target.Port, target.SSHHostKey = "boxd", strconv.Itoa(claim.SSHPort), claim.Labels["ssh_host_key"]
 		target.Key = ""
-		core.UseStoredTestboxKey(&target, claim.LeaseID)
+		if err := core.UseStoredTestboxKey(&target, claim.LeaseID); err != nil {
+			return core.LeaseTarget{}, err
+		}
 		if target.Key == "" {
 			return core.LeaseTarget{}, core.Exit(5, "boxd stored lease SSH key is missing")
 		}
@@ -404,8 +409,10 @@ func (b *backend) exactClaim(lease core.LeaseTarget) (core.LeaseClaim, error) {
 		if !exists {
 			return core.LeaseClaim{}, core.Exit(4, "boxd ownership snapshot is absent")
 		}
-		if err := core.VerifyLeaseClaimUnchanged(claim.LeaseID, snapshot); err != nil {
-			return core.LeaseClaim{}, err
+		// Compare the validated read here; each mutation owner fences this exact
+		// claim again. A separate preflight lock cannot protect later effects.
+		if !reflect.DeepEqual(claim, snapshot) {
+			return core.LeaseClaim{}, core.Exit(2, "lease %s claim changed; retry", claim.LeaseID)
 		}
 	}
 	return claim, nil
@@ -528,7 +535,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	}
 	server := leaseFromClaim(claim, vm).Server
 	server.Labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(server.Labels, b.cfg, req.State, b.now(), req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(claim.LeaseID, claim, server.Labels, b.now(), req.IdleTimeoutOverride)
+	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, claim.LeaseID, claim, server.Labels, b.now(), req.IdleTimeoutOverride)
 	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, err
 }

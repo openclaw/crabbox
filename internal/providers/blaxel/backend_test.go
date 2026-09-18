@@ -1,10 +1,13 @@
 package blaxel
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -43,11 +46,91 @@ type lifecycleFakeClient struct {
 	stopContextErr error
 	getProcess     func(context.Context) (Process, error)
 	onGetSandbox   func()
+	onCreate       func()
+	onUpload       func(io.Reader) error
+	onExec         func(context.Context, ExecuteProcessRequest) (Process, error)
+}
+
+func TestBlaxelConfiguredDefaultPredicates(t *testing.T) {
+	for _, raw := range []string{"", "  ", " https://example.invalid/api/ "} {
+		cfg := core.Config{Blaxel: core.BlaxelConfig{APIKey: "inert", APIURL: raw}}
+		api, err := newBlaxelClient(cfg, core.Runtime{HTTP: &http.Client{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "https://api.blaxel.ai"
+		if strings.TrimSpace(raw) != "" {
+			want = "https://example.invalid/api"
+		}
+		if api.(*restClient).base != want {
+			t.Fatal("client trim-before-default changed")
+		}
+		err = validateBlaxelConfig(cfg)
+		if (err != nil) != (raw == "  ") {
+			t.Fatalf("validation blank-before-trim=%v", err)
+		}
+	}
+	for _, seconds := range []int{-1, 0, 17} {
+		b := backend{cfg: core.Config{Blaxel: core.BlaxelConfig{ExecTimeoutSecs: seconds}}}
+		want := 600
+		if seconds > 0 {
+			want = seconds
+		}
+		if b.execTimeoutSecs() != want {
+			t.Fatal("exec timeout fallback changed")
+		}
+	}
+	for _, raw := range []string{"", "  ", " /workspace/app/ "} {
+		cfg := core.Config{Blaxel: core.BlaxelConfig{Workdir: raw}}
+		got, err := blaxelWorkdir(cfg)
+		if raw == "  " {
+			if err == nil {
+				t.Fatal("whitespace workdir unexpectedly defaulted")
+			}
+			continue
+		}
+		want := "/workspace/crabbox"
+		if raw != "" {
+			want = "/workspace/app"
+		}
+		if err != nil || got != want {
+			t.Fatalf("workdir=%q error=%v", got, err)
+		}
+	}
+}
+
+func TestBlaxelCreatePreservesRawDefaultPredicates(t *testing.T) {
+	for _, raw := range []string{"", "  ", "custom"} {
+		t.Run(fmt.Sprintf("raw=%q", raw), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := core.BaseConfig()
+			cfg.Blaxel.Image = raw
+			cfg.Blaxel.Workdir = raw
+			if raw == "custom" {
+				cfg.Blaxel.Workdir = "/workspace/custom"
+			}
+			fake := newLifecycleFakeClient()
+			b := &backend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			if _, _, _, err := b.createSandbox(context.Background(), fake, core.Repo{Name: "example", Root: t.TempDir()}, false, ""); err != nil {
+				t.Fatal(err)
+			}
+			image, dir := raw, raw
+			if raw == "custom" {
+				dir = "/workspace/custom"
+			}
+			if raw == "" {
+				image, dir = "ubuntu:24.04", "/workspace/crabbox"
+			}
+			if len(fake.createReqs) != 1 || fake.createReqs[0].Image != image || fake.createReqs[0].WorkingDir != dir {
+				t.Fatal("create raw-empty defaults changed")
+			}
+		})
+	}
 }
 
 func newLifecycleFakeClient() *lifecycleFakeClient {
 	return &lifecycleFakeClient{
-		baseURL:       defaultAPIURL,
+		baseURL:       "https://api.blaxel.ai",
 		sandboxes:     map[string]Sandbox{},
 		nextSandboxID: "sbx_1",
 		logs:          ProcessLogs{Stdout: "ok\n", Stderr: "warn\n"},
@@ -60,6 +143,9 @@ func (f *lifecycleFakeClient) Probe(context.Context) error {
 }
 func (f *lifecycleFakeClient) CreateSandbox(_ context.Context, req CreateSandboxRequest) (Sandbox, error) {
 	f.createReqs = append(f.createReqs, req)
+	if f.onCreate != nil {
+		f.onCreate()
+	}
 	id := f.nextSandboxID
 	if id == "" {
 		id = "sbx_1"
@@ -119,7 +205,10 @@ func (f *lifecycleFakeClient) DeleteSandbox(_ context.Context, id string) error 
 	delete(f.sandboxes, id)
 	return nil
 }
-func (f *lifecycleFakeClient) ExecuteProcess(_ context.Context, _ string, req ExecuteProcessRequest) (Process, error) {
+func (f *lifecycleFakeClient) ExecuteProcess(ctx context.Context, _ string, req ExecuteProcessRequest) (Process, error) {
+	if f.onExec != nil {
+		return f.onExec(ctx, req)
+	}
 	if f.processErr != nil {
 		return Process{}, f.processErr
 	}
@@ -145,6 +234,11 @@ func (f *lifecycleFakeClient) WriteFile(context.Context, string, WriteFileReques
 	return nil
 }
 func (f *lifecycleFakeClient) UploadFile(_ context.Context, _ string, remotePath string, r io.Reader) error {
+	if f.onUpload != nil {
+		if err := f.onUpload(r); err != nil {
+			return err
+		}
+	}
 	_, _ = io.ReadAll(r)
 	f.uploads = append(f.uploads, remotePath)
 	return nil
@@ -169,7 +263,7 @@ func (f *lifecycleFakeClient) effectiveProcessStatus() string {
 
 func TestWarmupCreatesClaimAndCompletesRemoteLabels(t *testing.T) {
 	backend, fake, _, stdout, _ := newLifecycleBackend(t)
-	err := backend.Warmup(context.Background(), WarmupRequest{Repo: testRepo(t), RequestedSlug: "warm-one"})
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: testRepo(t), RequestedSlug: "warm-one"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +279,7 @@ func TestWarmupCreatesClaimAndCompletesRemoteLabels(t *testing.T) {
 		labels[blaxelClaimKey] == "" || labels["crabbox.repo"] == "" {
 		t.Fatalf("labels=%#v", labels)
 	}
-	claim, err := readLeaseClaim(leasePrefix + "sbx_1")
+	claim, err := core.ReadLeaseClaim(leasePrefix + "sbx_1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,14 +294,14 @@ func TestWarmupCreatesClaimAndCompletesRemoteLabels(t *testing.T) {
 func TestWarmupPreservesCreateIDWhenLabelUpdateOmitsID(t *testing.T) {
 	backend, fake, _, stdout, _ := newLifecycleBackend(t)
 	fake.updateEmptyID = true
-	err := backend.Warmup(context.Background(), WarmupRequest{Repo: testRepo(t), RequestedSlug: "empty-update"})
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: testRepo(t), RequestedSlug: "empty-update"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted=%#v", fake.deleted)
 	}
-	if claim, err := readLeaseClaim(leasePrefix + "sbx_1"); err != nil || claim.LeaseID != leasePrefix+"sbx_1" {
+	if claim, err := core.ReadLeaseClaim(leasePrefix + "sbx_1"); err != nil || claim.LeaseID != leasePrefix+"sbx_1" {
 		t.Fatalf("claim=%#v err=%v", claim, err)
 	}
 	if !strings.Contains(stdout.String(), "sandbox=sbx_1") {
@@ -217,7 +311,7 @@ func TestWarmupPreservesCreateIDWhenLabelUpdateOmitsID(t *testing.T) {
 
 func TestBlaxelWorkdirRejectsBroadPaths(t *testing.T) {
 	for _, workdir := range []string{"/", "/tmp", "/workspace", "/home", "/root", "/usr", "/var"} {
-		cfg := Config{Blaxel: BlaxelConfig{Workdir: workdir}}
+		cfg := core.Config{Blaxel: core.BlaxelConfig{Workdir: workdir}}
 		if _, err := blaxelWorkdir(cfg); err == nil || !strings.Contains(err.Error(), "too broad") {
 			t.Fatalf("blaxelWorkdir(%q) err=%v, want too broad", workdir, err)
 		}
@@ -225,7 +319,7 @@ func TestBlaxelWorkdirRejectsBroadPaths(t *testing.T) {
 			t.Fatalf("validateBlaxelConfig(%q) err=%v, want too broad", workdir, err)
 		}
 	}
-	cfg := Config{Blaxel: BlaxelConfig{Workdir: " /workspace/crabbox/../project "}}
+	cfg := core.Config{Blaxel: core.BlaxelConfig{Workdir: " /workspace/crabbox/../project "}}
 	if got, err := blaxelWorkdir(cfg); err != nil || got != "/workspace/project" {
 		t.Fatalf("blaxelWorkdir cleaned=%q err=%v", got, err)
 	}
@@ -233,7 +327,7 @@ func TestBlaxelWorkdirRejectsBroadPaths(t *testing.T) {
 
 func TestRunForwardsEnvInProcessBodyAndReturnsRemoteExit(t *testing.T) {
 	backend, fake, _, stdout, stderr := newLifecycleBackend(t)
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		Repo:       testRepo(t),
 		NoSync:     true,
 		Keep:       true,
@@ -271,9 +365,267 @@ func TestRunForwardsEnvInProcessBodyAndReturnsRemoteExit(t *testing.T) {
 	}
 }
 
+func TestRunUsesCommandIntentAtProcessBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		command     []string
+		literal     map[int]bool
+		wantCommand string
+		wantArgs    []string
+	}{
+		{name: "single shell source", command: []string{"printf ready && printf done"}, wantCommand: "bash", wantArgs: []string{"-lc", "printf ready && printf done"}},
+		{name: "literal operator", command: []string{"printf", "%s", "&&"}, literal: map[int]bool{2: true}, wantCommand: "printf", wantArgs: []string{"%s", "&&"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend, fake, _, _, _ := newLifecycleBackend(t)
+			_, err := backend.Run(t.Context(), core.RunRequest{Repo: testRepo(t), NoSync: true, Keep: true, Command: tc.command, CommandLiteralArgs: tc.literal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := fake.execReqs[len(fake.execReqs)-1]
+			if got.Command != tc.wantCommand || strings.Join(got.Args, "\x00") != strings.Join(tc.wantArgs, "\x00") {
+				t.Fatalf("process=%q %#v, want %q %#v", got.Command, got.Args, tc.wantCommand, tc.wantArgs)
+			}
+		})
+	}
+}
+
+func TestRunPreservesCancellationAfterStoppingProcess(t *testing.T) {
+	b, fake, _, _, _ := newLifecycleBackend(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fake.processStatus = "running"
+	fake.getProcess = func(ctx context.Context) (Process, error) {
+		if len(fake.execReqs) == 1 {
+			return Process{ID: "proc_1", Status: "completed", ExitCode: intPtr(0)}, nil
+		}
+		cancel()
+		return Process{}, redactError(fmt.Errorf("fixture polling: %w", ctx.Err()))
+	}
+	result, err := b.Run(ctx, core.RunRequest{Repo: testRepo(t), NoSync: true, KeepOnFailure: true, Command: []string{"fixture-user"}})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Run error %v lost cancellation", err)
+	}
+	var exitErr core.ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+		t.Errorf("Run error=%v, want exit code 1", err)
+	}
+	final := core.FinalizeRunResult(result, err)
+	if final.Status != core.RunStatusCanceled || final.ErrorKind != core.RunErrorCanceled {
+		t.Errorf("status=%s error kind=%s, want canceled", final.Status, final.ErrorKind)
+	}
+	if len(fake.stopped) != 1 || fake.stopped[0] != "proc_1" || !fake.stopDeadline || fake.stopContextErr != nil {
+		t.Errorf("stops=%v deadline=%t context=%v", fake.stopped, fake.stopDeadline, fake.stopContextErr)
+	}
+	if result.Session == nil || !result.Session.Kept || len(fake.deleted) != 0 {
+		t.Fatalf("session=%#v, deletes=%v", result.Session, fake.deleted)
+	}
+	if err := b.Stop(context.Background(), core.StopRequest{ID: result.LeaseID}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunPreparesArchiveBeforeCreate(t *testing.T) {
+	t.Run("create-failure-closes-archive", func(t *testing.T) {
+		b, fake, _, _, _ := newLifecycleBackend(t)
+		temp := t.TempDir()
+		t.Setenv("TMPDIR", temp)
+		t.Setenv("TMP", temp)
+		t.Setenv("TEMP", temp)
+		fake.updateErr = errors.New("synthetic create-label failure")
+		createCalled := false
+		fake.onCreate = func() {
+			createCalled = true
+			files, err := filepath.Glob(filepath.Join(temp, "crabbox-blaxel-sync-*.tgz"))
+			if err != nil || len(files) != 1 {
+				t.Fatalf("prepared archives at create=%v err=%v", files, err)
+			}
+		}
+		if _, err := b.Run(t.Context(), core.RunRequest{Repo: testRepo(t), SyncOnly: true}); err == nil {
+			t.Fatal("create failure was hidden")
+		}
+		if !createCalled {
+			t.Fatal("archive preparation failed before the expected create callback")
+		}
+		files, err := filepath.Glob(filepath.Join(temp, "crabbox-blaxel-sync-*.tgz"))
+		if err != nil || len(files) != 0 {
+			t.Fatalf("prepared archives leaked after failed acquisition=%v err=%v", files, err)
+		}
+	})
+	t.Run("guardrail", func(t *testing.T) {
+		b, fake, _, _, _ := newLifecycleBackend(t)
+		b.cfg.Sync.FailFiles = 1
+		_, err := b.Run(t.Context(), core.RunRequest{Repo: testRepo(t), SyncOnly: true})
+		if err == nil || len(fake.createReqs) != 0 {
+			t.Fatalf("preflight err=%v creates=%d, want refusal before allocation", err, len(fake.createReqs))
+		}
+	})
+	t.Run("snapshot", func(t *testing.T) {
+		b, fake, _, _, _ := newLifecycleBackend(t)
+		repo := testRepo(t)
+		fake.onCreate = func() {
+			if err := os.WriteFile(filepath.Join(repo.Root, "main.go"), []byte("changed during provisioning\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var uploaded string
+		fake.onUpload = func(body io.Reader) error {
+			if _, ok := body.(io.Seeker); !ok {
+				return errors.New("upload lost native retry's seekable archive")
+			}
+			gz, err := gzip.NewReader(body)
+			if err != nil {
+				return err
+			}
+			defer gz.Close()
+			reader := tar.NewReader(gz)
+			for {
+				header, err := reader.Next()
+				if errors.Is(err, io.EOF) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				if strings.TrimPrefix(header.Name, "./") == "main.go" {
+					data, err := io.ReadAll(reader)
+					uploaded = string(data)
+					if err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if _, err := b.Run(t.Context(), core.RunRequest{Repo: repo, SyncOnly: true}); err != nil {
+			t.Fatal(err)
+		}
+		if uploaded != "package main\n" {
+			t.Fatalf("uploaded snapshot=%q, want pre-create bytes", uploaded)
+		}
+	})
+}
+
+func TestSharedArchiveSyncNativeWorkspace(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("native Bash fixture")
+	}
+	for _, scenario := range []string{"replace", "merge", "partial", "corrupt", "cancel"} {
+		t.Run(scenario, func(t *testing.T) {
+			b, fake, _, _, _ := newLifecycleBackend(t)
+			repo := testRepo(t)
+			workspace := filepath.Join(t.TempDir(), "workspace")
+			if err := os.Mkdir(workspace, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workspace, "old"), []byte("retained"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			b.cfg.Sync.Delete = scenario != "merge"
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var archives []string
+			nativeExecs := 0
+			fake.onExec = func(callCtx context.Context, req ExecuteProcessRequest) (Process, error) {
+				nativeExecs++
+				command := exec.CommandContext(callCtx, req.Command, req.Args...)
+				command.Dir = repo.Root
+				command.Env = []string{"HOME=" + repo.Root, "PATH=/usr/bin:/bin"}
+				var stdout, stderr bytes.Buffer
+				command.Stdout = &stdout
+				command.Stderr = &stderr
+				err := command.Run()
+				code := 0
+				if err != nil {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) {
+						return Process{}, err
+					}
+					code = exitErr.ExitCode()
+				}
+				fake.logs = ProcessLogs{Stdout: stdout.String(), Stderr: stderr.String()}
+				return Process{ID: "native-sync", Status: "completed", ExitCode: &code}, nil
+			}
+			client := &nativeArchiveClient{lifecycleFakeClient: fake, upload: func(callCtx context.Context, remote string, body io.Reader) error {
+				archives = append(archives, remote)
+				if !strings.HasPrefix(filepath.Base(remote), "crabbox-blaxel-sync-") {
+					return errors.New("unexpected archive path")
+				}
+				file, err := os.OpenFile(remote, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+				if err != nil {
+					return err
+				}
+				t.Cleanup(func() { _ = os.Remove(remote) })
+				defer file.Close()
+				switch scenario {
+				case "partial", "cancel":
+					_, _ = io.CopyN(file, body, 1)
+					if scenario == "cancel" {
+						cancel()
+						return callCtx.Err()
+					}
+					return errors.New("synthetic partial upload")
+				case "corrupt":
+					_, err = file.WriteString("not a tar archive")
+					return err
+				default:
+					_, err = io.Copy(file, body)
+					return err
+				}
+			}}
+			_, _, err := b.workspace(client, "sbx-owned", core.RunRequest{Repo: repo}, workspace).Sync(ctx, nil)
+			success := scenario == "replace" || scenario == "merge"
+			if (err == nil) != success {
+				t.Fatalf("sync err=%v success=%t", err, success)
+			}
+			if scenario == "cancel" && !errors.Is(err, context.Canceled) {
+				t.Fatalf("lost upload cancellation: %v", err)
+			}
+			old, oldErr := os.ReadFile(filepath.Join(workspace, "old"))
+			if scenario == "replace" {
+				if !errors.Is(oldErr, os.ErrNotExist) {
+					t.Fatalf("old file survived replace: %v", oldErr)
+				}
+			} else if oldErr != nil || string(old) != "retained" {
+				t.Fatalf("old workspace changed: %q %v", old, oldErr)
+			}
+			if success {
+				data, err := os.ReadFile(filepath.Join(workspace, "main.go"))
+				if err != nil || string(data) != "package main\n" {
+					t.Fatalf("new workspace=%q err=%v", data, err)
+				}
+			}
+			for _, remote := range archives {
+				if _, err := os.Stat(remote); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("archive remains: %s %v", remote, err)
+				}
+			}
+			siblings, err := os.ReadDir(filepath.Dir(workspace))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(siblings) != 1 || siblings[0].Name() != "workspace" {
+				t.Fatalf("staging/backup left: %v", siblings)
+			}
+			if nativeExecs == 0 {
+				t.Fatal("no native cleanup/extraction ran")
+			}
+			t.Logf("%s: native Bash/tar commands=%d archives=%d original workspace preserved on failure=%t", scenario, nativeExecs, len(archives), !success)
+		})
+	}
+}
+
+type nativeArchiveClient struct {
+	*lifecycleFakeClient
+	upload func(context.Context, string, io.Reader) error
+}
+
+func (c *nativeArchiveClient) UploadFile(ctx context.Context, _ string, remote string, body io.Reader) error {
+	return c.upload(ctx, remote, body)
+}
+
 func TestRunSyncOnlyUploadsArchiveAndSkipsUserCommand(t *testing.T) {
 	backend, fake, _, stdout, _ := newLifecycleBackend(t)
-	result, err := backend.Run(context.Background(), RunRequest{
+	result, err := backend.Run(context.Background(), core.RunRequest{
 		Repo:     testRepo(t),
 		SyncOnly: true,
 		Keep:     true,
@@ -304,7 +656,7 @@ func TestRunSyncOnlyUploadsArchiveAndSkipsUserCommand(t *testing.T) {
 func TestExecCommandReturnsWhenTerminalProcessOmitsExitCode(t *testing.T) {
 	backend, fake, _, _, _ := newLifecycleBackend(t)
 	fake.omitExitCode = true
-	code, err := backend.execCommand(context.Background(), fake, "sbx_1", "/workspace/crabbox", []string{"true"}, nil)
+	code, err := backend.execCommand(context.Background(), fake, "sbx_1", "/workspace/crabbox", []string{"true"}, nil, backend.rt.Stdout, backend.rt.Stderr)
 	if err == nil || !strings.Contains(err.Error(), "without an exit code") {
 		t.Fatalf("execCommand code=%d err=%v, want missing exit code error", code, err)
 	}
@@ -333,7 +685,7 @@ func TestExecCommandEnforcesLocalProcessWaitTimeout(t *testing.T) {
 	backend.cfg.Blaxel.ExecTimeoutSecs = 1
 	fake.processStatus = "running"
 	fake.omitExitCode = true
-	code, err := backend.execCommand(context.Background(), fake, "sbx_1", "/workspace/crabbox", []string{"sleep", "600"}, nil)
+	code, err := backend.execCommand(context.Background(), fake, "sbx_1", "/workspace/crabbox", []string{"sleep", "600"}, nil, backend.rt.Stdout, backend.rt.Stderr)
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("execCommand code=%d err=%v, want deadline exceeded", code, err)
 	}
@@ -383,33 +735,16 @@ func TestWaitProcessStopsRemoteWhenGetProcessReturnsCancellation(t *testing.T) {
 	}
 }
 
-func TestBuildCommandPreservesExplicitShellScript(t *testing.T) {
-	got, err := buildCommand([]string{"python3 --version && pytest"}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(got, "\x00") != "bash\x00-lc\x00python3 --version && pytest" {
-		t.Fatalf("shell command=%#v", got)
-	}
-	auto, err := buildCommand([]string{"KEY=value", "pytest"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(auto, "\x00") != "bash\x00-lc\x00KEY='value' 'pytest'" {
-		t.Fatalf("auto-shell command=%#v", auto)
-	}
-}
-
 func TestStopRequiresMatchingRemoteOwnershipLabels(t *testing.T) {
 	backend, fake, _, _, _ := newLifecycleBackend(t)
-	err := backend.Warmup(context.Background(), WarmupRequest{Repo: testRepo(t), RequestedSlug: "owned"})
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: testRepo(t), RequestedSlug: "owned"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	sb := fake.sandboxes["sbx_1"]
 	sb.Labels[blaxelClaimKey] = "foreign"
 	fake.sandboxes["sbx_1"] = sb
-	err = backend.Stop(context.Background(), StopRequest{ID: "owned"})
+	err = backend.Stop(context.Background(), core.StopRequest{ID: "owned"})
 	if err == nil || !strings.Contains(err.Error(), "ownership labels") {
 		t.Fatalf("Stop err=%v, want ownership mismatch", err)
 	}
@@ -420,11 +755,11 @@ func TestStopRequiresMatchingRemoteOwnershipLabels(t *testing.T) {
 
 func TestCleanupDryRunSkipsFreshAndDoesNotDelete(t *testing.T) {
 	backend, fake, _, stdout, stderr := newLifecycleBackend(t)
-	err := backend.Warmup(context.Background(), WarmupRequest{Repo: testRepo(t), RequestedSlug: "fresh"})
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: testRepo(t), RequestedSlug: "fresh"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.Cleanup(context.Background(), CleanupRequest{DryRun: true}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.deleted) != 0 {
@@ -440,81 +775,81 @@ func TestCleanupDryRunSkipsFreshAndDoesNotDelete(t *testing.T) {
 
 func TestCleanupDeletesDueOwnedClaimOnly(t *testing.T) {
 	backend, fake, _, _, _ := newLifecycleBackend(t)
-	err := backend.Warmup(context.Background(), WarmupRequest{Repo: testRepo(t), RequestedSlug: "due"})
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: testRepo(t), RequestedSlug: "due"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, err := readLeaseClaim(leasePrefix + "sbx_1")
+	claim, err := core.ReadLeaseClaim(leasePrefix + "sbx_1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().UTC().Add(-2 * time.Hour)
-	if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, "", testRepo(t).Root, time.Second, true); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, "", testRepo(t).Root, time.Second, true); err != nil {
 		t.Fatal(err)
 	}
-	claim, err = readLeaseClaim(claim.LeaseID)
+	claim, err = core.ReadLeaseClaim(claim.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	claim.LastUsedAt = old.Format(time.RFC3339)
 	writeClaimForTest(t, claim)
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != "sbx_1" {
 		t.Fatalf("deleted=%#v", fake.deleted)
 	}
-	if claim, err := readLeaseClaim(leasePrefix + "sbx_1"); err != nil || claim.LeaseID != "" {
+	if claim, err := core.ReadLeaseClaim(leasePrefix + "sbx_1"); err != nil || claim.LeaseID != "" {
 		t.Fatalf("claim=%#v err=%v, want removed", claim, err)
 	}
 }
 
 func TestStopPreservesMissingClaimUnlessForgetMissing(t *testing.T) {
 	backend, fake, _, _, _ := newLifecycleBackend(t)
-	err := backend.Warmup(context.Background(), WarmupRequest{Repo: testRepo(t), RequestedSlug: "missing"})
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: testRepo(t), RequestedSlug: "missing"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	delete(fake.sandboxes, "sbx_1")
-	err = backend.Stop(context.Background(), StopRequest{ID: "missing"})
+	err = backend.Stop(context.Background(), core.StopRequest{ID: "missing"})
 	if err == nil || !strings.Contains(err.Error(), "status=404") {
 		t.Fatalf("Stop err=%v, want preserved 404", err)
 	}
-	if _, err := readLeaseClaim(leasePrefix + "sbx_1"); err != nil {
+	if _, err := core.ReadLeaseClaim(leasePrefix + "sbx_1"); err != nil {
 		t.Fatalf("claim should be preserved: %v", err)
 	}
 	backend.cfg.Blaxel.ForgetMissing = true
-	if err := backend.Stop(context.Background(), StopRequest{ID: "missing"}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: "missing"}); err != nil {
 		t.Fatal(err)
 	}
-	if claim, err := readLeaseClaim(leasePrefix + "sbx_1"); err != nil || claim.LeaseID != "" {
+	if claim, err := core.ReadLeaseClaim(leasePrefix + "sbx_1"); err != nil || claim.LeaseID != "" {
 		t.Fatalf("claim=%#v err=%v, want removed", claim, err)
 	}
 }
 
 func TestStopPreservesReplacedClaimBeforeSandboxDeletion(t *testing.T) {
 	backend, fake, _, _, _ := newLifecycleBackend(t)
-	if err := backend.Warmup(t.Context(), WarmupRequest{Repo: testRepo(t), RequestedSlug: "replaced"}); err != nil {
+	if err := backend.Warmup(t.Context(), core.WarmupRequest{Repo: testRepo(t), RequestedSlug: "replaced"}); err != nil {
 		t.Fatal(err)
 	}
 	replacementRepo := t.TempDir()
 	fake.onGetSandbox = func() {
-		claim, err := readLeaseClaim(leasePrefix + "sbx_1")
+		claim, err := core.ReadLeaseClaim(leasePrefix + "sbx_1")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := claimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, replacementRepo, time.Minute, true); err != nil {
+		if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, replacementRepo, time.Minute, true); err != nil {
 			t.Fatal(err)
 		}
 	}
-	err := backend.Stop(t.Context(), StopRequest{ID: "replaced"})
+	err := backend.Stop(t.Context(), core.StopRequest{ID: "replaced"})
 	if err == nil || !strings.Contains(err.Error(), "claim changed; retry") {
 		t.Fatalf("stop err=%v, want replaced-claim refusal", err)
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted=%#v, want replaced sandbox claim protected", fake.deleted)
 	}
-	claim, err := readLeaseClaim(leasePrefix + "sbx_1")
+	claim, err := core.ReadLeaseClaim(leasePrefix + "sbx_1")
 	if err != nil || claim.RepoRoot != replacementRepo {
 		t.Fatalf("replacement claim=%#v err=%v", claim, err)
 	}
@@ -523,7 +858,7 @@ func TestStopPreservesReplacedClaimBeforeSandboxDeletion(t *testing.T) {
 func TestCreateLabelUpdateFailureCleansRemote(t *testing.T) {
 	backend, fake, _, _, _ := newLifecycleBackend(t)
 	fake.updateErr = errors.New("label denied")
-	err := backend.Warmup(context.Background(), WarmupRequest{Repo: testRepo(t)})
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: testRepo(t)})
 	if err == nil || !strings.Contains(err.Error(), "label denied") {
 		t.Fatalf("Warmup err=%v", err)
 	}
@@ -536,7 +871,7 @@ func TestCreateCleanupFailureWritesRecoveryClaimAndCleanupDeletesMatch(t *testin
 	backend, fake, _, stdout, _ := newLifecycleBackend(t)
 	fake.updateErr = errors.New("label denied")
 	fake.deleteErr = errors.New("delete denied")
-	err := backend.Warmup(context.Background(), WarmupRequest{Repo: testRepo(t)})
+	err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: testRepo(t)})
 	if err == nil || !strings.Contains(err.Error(), "recovery") {
 		t.Fatalf("Warmup err=%v, want recovery claim failure context", err)
 	}
@@ -544,7 +879,7 @@ func TestCreateCleanupFailureWritesRecoveryClaimAndCleanupDeletesMatch(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	var recovery LeaseClaim
+	var recovery core.LeaseClaim
 	for _, claim := range recoveries {
 		if strings.HasPrefix(claim.LeaseID, recoveryPrefix) {
 			recovery = claim
@@ -562,7 +897,7 @@ func TestCreateCleanupFailureWritesRecoveryClaimAndCleanupDeletesMatch(t *testin
 	fake.sandboxes["sbx_1"] = sb
 	fake.updateErr = nil
 	fake.deleteErr = nil
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.deleted) < 2 || fake.deleted[len(fake.deleted)-1] != "sbx_1" {
@@ -571,7 +906,7 @@ func TestCreateCleanupFailureWritesRecoveryClaimAndCleanupDeletesMatch(t *testin
 	if !strings.Contains(stdout.String(), "reason=ambiguous create") {
 		t.Fatalf("stdout=%q", stdout.String())
 	}
-	if claim, err := readLeaseClaim(recovery.LeaseID); err != nil || claim.LeaseID != "" {
+	if claim, err := core.ReadLeaseClaim(recovery.LeaseID); err != nil || claim.LeaseID != "" {
 		t.Fatalf("recovery claim=%#v err=%v, want removed", claim, err)
 	}
 }
@@ -582,7 +917,7 @@ func TestRecoveryCleanupPaginatesBeforeRemovingRecoveryClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recovery := LeaseClaim{
+	recovery := core.LeaseClaim{
 		LeaseID:            recoveryPrefix + "abc123",
 		Provider:           providerName,
 		ProviderScope:      scope,
@@ -601,7 +936,7 @@ func TestRecoveryCleanupPaginatesBeforeRemovingRecoveryClaim(t *testing.T) {
 			},
 		}}},
 	}
-	if err := backend.Cleanup(context.Background(), CleanupRequest{}); err != nil {
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.listReqs) != 2 || fake.listReqs[0].Limit != 200 || fake.listReqs[1].Cursor != "page-2" {
@@ -610,7 +945,7 @@ func TestRecoveryCleanupPaginatesBeforeRemovingRecoveryClaim(t *testing.T) {
 	if len(fake.deleted) != 1 || fake.deleted[0] != "sbx_2" {
 		t.Fatalf("deleted=%#v", fake.deleted)
 	}
-	if claim, err := readLeaseClaim(recovery.LeaseID); err != nil || claim.LeaseID != "" {
+	if claim, err := core.ReadLeaseClaim(recovery.LeaseID); err != nil || claim.LeaseID != "" {
 		t.Fatalf("recovery claim=%#v err=%v, want removed", claim, err)
 	}
 }
@@ -624,7 +959,7 @@ func TestStandbySandboxStateIsReady(t *testing.T) {
 func TestCreateReadinessFailureDeletesOneShotSandboxAndClaim(t *testing.T) {
 	backend, fake, _, _, _ := newLifecycleBackend(t)
 	fake.createStatus = "failed"
-	_, err := backend.Run(context.Background(), RunRequest{
+	_, err := backend.Run(context.Background(), core.RunRequest{
 		Repo:    testRepo(t),
 		NoSync:  true,
 		Command: []string{"true"},
@@ -635,7 +970,7 @@ func TestCreateReadinessFailureDeletesOneShotSandboxAndClaim(t *testing.T) {
 	if len(fake.deleted) != 1 || fake.deleted[0] != "sbx_1" {
 		t.Fatalf("deleted=%#v", fake.deleted)
 	}
-	if claim, err := readLeaseClaim(leasePrefix + "sbx_1"); err != nil || claim.LeaseID != "" {
+	if claim, err := core.ReadLeaseClaim(leasePrefix + "sbx_1"); err != nil || claim.LeaseID != "" {
 		t.Fatalf("claim=%#v err=%v, want removed", claim, err)
 	}
 }
@@ -659,15 +994,15 @@ func newLifecycleBackend(t *testing.T) (*backend, *lifecycleFakeClient, string, 
 				Workspace: "workspace-test",
 			},
 		},
-		rt: Runtime{Stdout: stdout, Stderr: stderr},
-		clientFactory: func(Config, Runtime) (Client, error) {
+		rt: core.Runtime{Stdout: stdout, Stderr: stderr},
+		clientFactory: func(core.Config, core.Runtime) (Client, error) {
 			return fake, nil
 		},
 	}
 	return backend, fake, state, stdout, stderr
 }
 
-func testRepo(t *testing.T) Repo {
+func testRepo(t *testing.T) core.Repo {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.org/repo\n"), 0o600); err != nil {
@@ -679,7 +1014,7 @@ func testRepo(t *testing.T) Repo {
 	runGit(t, root, "init")
 	runGit(t, root, "add", ".")
 	runGit(t, root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init")
-	return Repo{Root: root, Name: "my-app", Head: "abc123"}
+	return core.Repo{Root: root, Name: "my-app", Head: "abc123"}
 }
 
 func runGit(t *testing.T, dir string, args ...string) {
@@ -691,7 +1026,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
-func writeClaimForTest(t *testing.T, claim LeaseClaim) {
+func writeClaimForTest(t *testing.T, claim core.LeaseClaim) {
 	t.Helper()
 	claimsDir := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims")
 	if err := os.MkdirAll(claimsDir, 0o700); err != nil {
@@ -715,3 +1050,105 @@ func cloneLabels(in map[string]string) map[string]string {
 }
 
 func intPtr(v int) *int { return &v }
+
+func TestRunFinalizesCleanupFailure(t *testing.T) {
+	for _, commandExit := range []int{0, 7} {
+		t.Run(fmt.Sprint(commandExit), func(t *testing.T) {
+			b, fake, _, _, stderr := newLifecycleBackend(t)
+			fake.deleteErr = errors.New("synthetic delete failure")
+			fake.onExec = func(_ context.Context, req ExecuteProcessRequest) (Process, error) {
+				code := 0
+				if req.Command == "fixture-user" {
+					code = commandExit
+				}
+				return Process{ID: "proc_1", Status: "completed", ExitCode: intPtr(code)}, nil
+			}
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: testRepo(t), NoSync: true, TimingJSON: true, Command: []string{"fixture-user"}})
+			wantCode, wantKind := commandExit, core.RunErrorCommandExit
+			if commandExit == 0 {
+				wantCode, wantKind = 1, core.RunErrorProvider
+			}
+			if err == nil || !strings.Contains(err.Error(), "synthetic delete failure") || result.ExitCode != wantCode || result.Status != core.RunStatusFailed || result.ErrorKind != wantKind {
+				t.Errorf("result=%+v err=%v", result, err)
+			}
+			if result.Session == nil || !result.Session.Kept {
+				t.Errorf("session=%+v", result.Session)
+			}
+			if claim, err := core.ReadLeaseClaim(leasePrefix + "sbx_1"); err != nil || claim.LeaseID == "" {
+				t.Fatalf("claim=%+v err=%v", claim, err)
+			}
+			var report core.TimingReport
+			found := false
+			for _, line := range strings.Split(stderr.String(), "\n") {
+				if strings.HasPrefix(line, "{") && json.Unmarshal([]byte(line), &report) == nil {
+					found = true
+				}
+			}
+			if !found || report.ExitCode != wantCode || report.RunStatus != core.RunStatusFailed || report.ErrorKind != wantKind {
+				t.Errorf("timing=%+v stderr=%s", report, stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunSetupFailureKeepsRecoverableSession(t *testing.T) {
+	b, fake, _, _, stderr := newLifecycleBackend(t)
+	fake.processErr = errors.New("synthetic setup failure")
+	result, err := b.Run(t.Context(), core.RunRequest{Repo: testRepo(t), NoSync: true, KeepOnFailure: true, TimingJSON: true, Command: []string{"fixture-user"}})
+	if err == nil || result.Provider != providerName || result.LeaseID != leasePrefix+"sbx_1" || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
+		t.Errorf("result=%+v err=%v", result, err)
+	}
+	if result.Session == nil || !result.Session.Kept || result.Session.CleanupCommand == "" || len(fake.deleted) != 0 {
+		t.Errorf("session=%+v deletes=%v", result.Session, fake.deleted)
+	}
+	if !strings.Contains(stderr.String(), `"exitCode":1`) {
+		t.Errorf("missing failed timing: %s", stderr.String())
+	}
+}
+
+func TestRunCleanupPreservesChangedOwnership(t *testing.T) {
+	for _, change := range []string{"local-claim", "remote-labels", "missing"} {
+		t.Run(change, func(t *testing.T) {
+			b, fake, _, _, _ := newLifecycleBackend(t)
+			replacementRepo := t.TempDir()
+			fake.onExec = func(_ context.Context, req ExecuteProcessRequest) (Process, error) {
+				if req.Command == "fixture-user" {
+					switch change {
+					case "local-claim":
+						claim, err := core.ReadLeaseClaim(leasePrefix + "sbx_1")
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, replacementRepo, time.Minute, true); err != nil {
+							t.Fatal(err)
+						}
+					case "remote-labels":
+						sb := fake.sandboxes["sbx_1"]
+						sb.Labels[blaxelClaimKey] = "successor-owner"
+						fake.sandboxes["sbx_1"] = sb
+					case "missing":
+						delete(fake.sandboxes, "sbx_1")
+					}
+				}
+				return Process{ID: "proc_1", Status: "completed", ExitCode: intPtr(0)}, nil
+			}
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: testRepo(t), NoSync: true, Command: []string{"fixture-user"}})
+			claim, claimErr := core.ReadLeaseClaim(leasePrefix + "sbx_1")
+			if claimErr != nil {
+				t.Fatal(claimErr)
+			}
+			if change == "missing" {
+				if err != nil || result.Session == nil || result.Session.Kept || claim.LeaseID != "" {
+					t.Fatalf("result=%+v claim=%+v err=%v", result, claim, err)
+				}
+				return
+			}
+			if err == nil || result.Session == nil || !result.Session.Kept || len(fake.deleted) != 0 || claim.LeaseID == "" {
+				t.Fatalf("result=%+v claim=%+v deleted=%v err=%v", result, claim, fake.deleted, err)
+			}
+			if change == "local-claim" && claim.RepoRoot != replacementRepo {
+				t.Fatalf("successor claim lost: %+v", claim)
+			}
+		})
+	}
+}

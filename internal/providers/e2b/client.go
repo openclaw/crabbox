@@ -1,12 +1,7 @@
 package e2b
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/binary"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,18 +9,9 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
-
-type e2bAPI interface {
-	CreateSandbox(context.Context, e2bCreateSandboxRequest) (e2bSandbox, error)
-	ConnectSandbox(context.Context, string, int) (e2bSession, error)
-	GetSandbox(context.Context, string) (e2bSandbox, error)
-	ListSandboxes(context.Context, map[string]string) ([]e2bSandbox, error)
-	DeleteSandbox(context.Context, string) error
-	UploadFile(context.Context, e2bSession, string, io.Reader) error
-	StartProcess(context.Context, e2bSession, e2bProcessRequest) (int, error)
-}
 
 type e2bClient struct {
 	apiKey     string
@@ -37,48 +23,6 @@ type e2bClient struct {
 }
 
 const e2bControlTimeout = 60 * time.Second
-
-type e2bCreateSandboxRequest struct {
-	TemplateID          string
-	TimeoutSeconds      int
-	Metadata            map[string]string
-	AllowInternetAccess bool
-}
-
-type e2bSandbox struct {
-	TemplateID      string            `json:"templateID"`
-	SandboxID       string            `json:"sandboxID"`
-	ClientID        string            `json:"clientID"`
-	StartedAt       string            `json:"startedAt"`
-	EndAt           string            `json:"endAt"`
-	EnvdVersion     string            `json:"envdVersion"`
-	EnvdAccessToken string            `json:"envdAccessToken"`
-	TrafficToken    string            `json:"trafficAccessToken"`
-	Alias           string            `json:"alias"`
-	Domain          string            `json:"domain"`
-	State           string            `json:"state"`
-	CPUCount        int               `json:"cpuCount"`
-	MemoryMB        int               `json:"memoryMB"`
-	DiskSizeMB      int               `json:"diskSizeMB"`
-	Metadata        map[string]string `json:"metadata"`
-}
-
-type e2bSession struct {
-	SandboxID       string
-	EnvdVersion     string
-	EnvdAccessToken string
-	Domain          string
-}
-
-type e2bProcessRequest struct {
-	Command string
-	CWD     string
-	Env     map[string]string
-	User    string
-	Timeout time.Duration
-	Stdout  io.Writer
-	Stderr  io.Writer
-}
 
 type e2bAPIError struct {
 	StatusCode int
@@ -93,17 +37,17 @@ func (e *e2bAPIError) Error() string {
 	return e.Status + ": " + e.Body
 }
 
-var newE2BClient = func(cfg Config, rt Runtime) (e2bAPI, error) {
+var newE2BClient = func(cfg core.Config, rt core.Runtime) (shared.EnvdSandboxAPI, error) {
 	apiKey := strings.TrimSpace(cfg.E2B.APIKey)
 	if apiKey == "" {
-		return nil, exit(2, "provider=e2b requires E2B_API_KEY")
+		return nil, core.Exit(2, "provider=e2b requires E2B_API_KEY")
 	}
-	httpClient, envdClient := e2bHTTPClients(rt.HTTP, e2bControlTimeout)
-	apiURL, err := validateE2BAPIURL(blank(cfg.E2B.APIURL, "https://api.e2b.app"))
+	httpClient, envdClient := shared.ControlAndDataHTTPClients(rt.HTTP, e2bControlTimeout)
+	apiURL, err := validateE2BAPIURL(core.Blank(cfg.E2B.APIURL, core.E2BConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}
-	domain := strings.TrimSpace(blank(cfg.E2B.Domain, "e2b.app"))
+	domain := strings.TrimSpace(core.Blank(cfg.E2B.Domain, core.E2BConfigDefaultDomain))
 	return &e2bClient{
 		apiKey:     apiKey,
 		apiURL:     apiURL,
@@ -116,24 +60,17 @@ var newE2BClient = func(cfg Config, rt Runtime) (e2bAPI, error) {
 
 func validateE2BAPIURL(raw string) (string, error) {
 	return shared.NormalizeHTTPSURL(raw, shared.EndpointURLErrors{
-		Invalid:    exit(2, "provider=e2b API URL must be an absolute HTTPS URL"),
-		Components: exit(2, "provider=e2b API URL must not contain userinfo, query parameters, or a fragment"),
-		Insecure:   exit(2, "provider=e2b API URL must use HTTPS except for loopback development endpoints"),
+		Invalid:    core.Exit(2, "provider=e2b API URL must be an absolute HTTPS URL"),
+		Components: core.Exit(2, "provider=e2b API URL must not contain userinfo, query parameters, or a fragment"),
+		Insecure:   core.Exit(2, "provider=e2b API URL must use HTTPS except for loopback development endpoints"),
 	})
-}
-
-func e2bHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{Timeout: 0}
 }
 
 func e2bRedirectError(destination *url.URL) error {
 	return fmt.Errorf("e2b refused cross-origin redirect to %s", destination.Redacted())
 }
 
-func (c *e2bClient) CreateSandbox(ctx context.Context, req e2bCreateSandboxRequest) (e2bSandbox, error) {
+func (c *e2bClient) CreateSandbox(ctx context.Context, req shared.EnvdSandboxCreateRequest) (shared.EnvdSandbox, error) {
 	body := map[string]any{
 		"templateID":            req.TemplateID,
 		"timeout":               req.TimeoutSeconds,
@@ -141,82 +78,30 @@ func (c *e2bClient) CreateSandbox(ctx context.Context, req e2bCreateSandboxReque
 		"allow_internet_access": req.AllowInternetAccess,
 		"metadata":              req.Metadata,
 	}
-	var sandbox e2bSandbox
-	if err := c.doJSON(ctx, http.MethodPost, "/sandboxes", nil, body, &sandbox); err != nil {
-		return e2bSandbox{}, err
-	}
-	if sandbox.Metadata == nil {
-		sandbox.Metadata = req.Metadata
-	}
-	if sandbox.State == "" {
-		sandbox.State = "running"
-	}
-	return sandbox, nil
+	return c.control().CreateSandbox(ctx, body, req.Metadata)
 }
 
-func (c *e2bClient) ConnectSandbox(ctx context.Context, sandboxID string, timeoutSeconds int) (e2bSession, error) {
-	if timeoutSeconds <= 0 {
-		timeoutSeconds = 300
-	}
-	body := map[string]any{"timeout": timeoutSeconds}
-	var sandbox e2bSandbox
-	if err := c.doJSON(ctx, http.MethodPost, "/sandboxes/"+url.PathEscape(sandboxID)+"/connect", nil, body, &sandbox); err != nil {
-		return e2bSession{}, err
+func (c *e2bClient) ConnectSandbox(ctx context.Context, sandboxID string, timeoutSeconds int) (shared.EnvdSandboxSession, error) {
+	sandbox, err := c.control().ConnectSandbox(ctx, sandboxID, timeoutSeconds)
+	if err != nil {
+		return shared.EnvdSandboxSession{}, err
 	}
 	return c.sessionFromSandbox(sandbox), nil
 }
 
-func (c *e2bClient) GetSandbox(ctx context.Context, sandboxID string) (e2bSandbox, error) {
-	var sandbox e2bSandbox
-	if err := c.doJSON(ctx, http.MethodGet, "/sandboxes/"+url.PathEscape(sandboxID), nil, nil, &sandbox); err != nil {
-		return e2bSandbox{}, err
-	}
-	if sandbox.Metadata == nil {
-		sandbox.Metadata = map[string]string{}
-	}
-	return sandbox, nil
+func (c *e2bClient) GetSandbox(ctx context.Context, sandboxID string) (shared.EnvdSandbox, error) {
+	return c.control().GetSandbox(ctx, sandboxID)
 }
 
-func (c *e2bClient) ListSandboxes(ctx context.Context, metadata map[string]string) ([]e2bSandbox, error) {
-	var all []e2bSandbox
-	nextToken := ""
-	for {
-		query := url.Values{}
-		query.Set("limit", "100")
-		query.Set("state", "running,paused")
-		if nextToken != "" {
-			query.Set("nextToken", nextToken)
-		}
-		if len(metadata) > 0 {
-			values := url.Values{}
-			for key, value := range metadata {
-				values.Set(key, value)
-			}
-			query.Set("metadata", values.Encode())
-		}
-		var page []e2bSandbox
-		headers, err := c.doJSONWithHeaders(ctx, http.MethodGet, "/v2/sandboxes", query, nil, &page)
-		if err != nil {
-			return nil, err
-		}
-		for i := range page {
-			if page[i].Metadata == nil {
-				page[i].Metadata = map[string]string{}
-			}
-		}
-		all = append(all, page...)
-		nextToken = headers.Get("x-next-token")
-		if nextToken == "" {
-			return all, nil
-		}
-	}
+func (c *e2bClient) ListSandboxes(ctx context.Context, metadata map[string]string) ([]shared.EnvdSandbox, error) {
+	return c.control().ListSandboxes(ctx, metadata)
 }
 
 func (c *e2bClient) DeleteSandbox(ctx context.Context, sandboxID string) error {
-	return c.doJSON(ctx, http.MethodDelete, "/sandboxes/"+url.PathEscape(sandboxID), nil, nil, nil)
+	return c.control().DeleteSandbox(ctx, sandboxID)
 }
 
-func (c *e2bClient) UploadFile(ctx context.Context, session e2bSession, targetPath string, r io.Reader) error {
+func (c *e2bClient) UploadFile(ctx context.Context, session shared.EnvdSandboxSession, targetPath string, r io.Reader) error {
 	return shared.UploadEnvdFile(ctx, shared.EnvdUploadFileRequest{
 		Endpoint:       c.envdURL(session, "/files"),
 		TargetPath:     targetPath,
@@ -226,55 +111,36 @@ func (c *e2bClient) UploadFile(ctx context.Context, session e2bSession, targetPa
 		HTTPClient:     c.dataPlaneHTTPClient(),
 		SetHeaders:     func(req *http.Request) { c.setEnvdHeaders(req, session) },
 		RedirectError:  e2bRedirectError,
-		SummarizeError: summarizeJSON,
+		SummarizeError: core.SummarizeJSON,
 		APIError: func(statusCode int, status, body string) error {
 			return &e2bAPIError{StatusCode: statusCode, Status: status, Body: body}
 		},
 	})
 }
 
-func (c *e2bClient) StartProcess(ctx context.Context, session e2bSession, req e2bProcessRequest) (int, error) {
+func (c *e2bClient) StartProcess(ctx context.Context, session shared.EnvdSandboxSession, req shared.EnvdSandboxProcessRequest) (int, error) {
 	return shared.StartEnvdProcess(ctx, shared.EnvdProcessRequest{
-		Endpoint:       c.envdURL(session, "/process.Process/Start"),
-		Command:        req.Command,
-		CWD:            req.CWD,
-		Env:            req.Env,
-		User:           req.User,
-		Timeout:        req.Timeout,
-		Stdout:         req.Stdout,
-		Stderr:         req.Stderr,
-		AccessToken:    session.EnvdAccessToken,
-		HTTPClient:     c.dataPlaneHTTPClient(),
-		SetHeaders:     func(httpReq *http.Request) { c.setEnvdHeaders(httpReq, session) },
-		RedirectError:  e2bRedirectError,
-		EncodeEnvelope: encodeConnectJSONEnvelope,
-		ParseStream:    parseE2BProcessStream,
-		SummarizeError: summarizeJSON,
+		EnvdSandboxProcessRequest: req,
+		Endpoint:                  c.envdURL(session, "/process.Process/Start"),
+		AccessToken:               session.EnvdAccessToken,
+		HTTPClient:                c.dataPlaneHTTPClient(),
+		SetHeaders:                func(httpReq *http.Request) { c.setEnvdHeaders(httpReq, session) },
+		RedirectError:             e2bRedirectError,
+		Provider:                  "e2b",
+		InterpretEnd:              interpretE2BProcessEnd,
+		SummarizeError:            core.SummarizeJSON,
 		APIError: func(statusCode int, status, body string) error {
 			return &e2bAPIError{StatusCode: statusCode, Status: status, Body: body}
 		},
 	})
-}
-
-func (c *e2bClient) doJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {
-	_, err := c.doJSONWithHeaders(ctx, method, path, query, body, out)
-	return err
 }
 
 func (c *e2bClient) doJSONWithHeaders(ctx context.Context, method, path string, query url.Values, body any, out any) (http.Header, error) {
-	var r io.Reader
-	if body != nil {
-		var buf bytes.Buffer
-		if err := json.NewEncoder(&buf).Encode(body); err != nil {
-			return nil, err
-		}
-		r = &buf
-	}
 	endpoint := c.apiURL + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, r)
+	req, err := shared.NewJSONRequest(ctx, method, endpoint, body)
 	if err != nil {
 		return nil, err
 	}
@@ -288,27 +154,20 @@ func (c *e2bClient) doJSONWithHeaders(ctx context.Context, method, path string, 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
+	if err := shared.DecodeUnboundedJSONResponse(resp, out, func(statusCode int, status string, data []byte) error {
+		return &e2bAPIError{StatusCode: statusCode, Status: status, Body: shared.RedactErrorSecrets(core.SummarizeJSON(data), c.apiKey)}
+	}); err != nil {
 		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &e2bAPIError{StatusCode: resp.StatusCode, Status: resp.Status, Body: shared.RedactErrorSecrets(summarizeJSON(data), c.apiKey)}
-	}
-	if out != nil && len(data) > 0 {
-		if err := json.Unmarshal(data, out); err != nil {
-			return nil, err
-		}
 	}
 	return resp.Header.Clone(), nil
 }
 
-func (c *e2bClient) sessionFromSandbox(sandbox e2bSandbox) e2bSession {
+func (c *e2bClient) sessionFromSandbox(sandbox shared.EnvdSandbox) shared.EnvdSandboxSession {
 	domain := strings.TrimSpace(sandbox.Domain)
 	if domain == "" {
 		domain = c.domain
 	}
-	return e2bSession{
+	return shared.EnvdSandboxSession{
 		SandboxID:       sandbox.SandboxID,
 		EnvdVersion:     sandbox.EnvdVersion,
 		EnvdAccessToken: sandbox.EnvdAccessToken,
@@ -316,7 +175,7 @@ func (c *e2bClient) sessionFromSandbox(sandbox e2bSandbox) e2bSession {
 	}
 }
 
-func (c *e2bClient) envdURL(session e2bSession, path string) string {
+func (c *e2bClient) envdURL(session shared.EnvdSandboxSession, path string) string {
 	domain := strings.TrimSpace(session.Domain)
 	if domain == "" {
 		domain = c.domain
@@ -324,7 +183,7 @@ func (c *e2bClient) envdURL(session e2bSession, path string) string {
 	return "https://49983-" + session.SandboxID + "." + domain + path
 }
 
-func (c *e2bClient) setEnvdHeaders(req *http.Request, session e2bSession) {
+func (c *e2bClient) setEnvdHeaders(req *http.Request, session shared.EnvdSandboxSession) {
 	req.Header.Set("X-Access-Token", session.EnvdAccessToken)
 	req.Header.Set("E2b-Sandbox-Id", session.SandboxID)
 	req.Header.Set("E2b-Sandbox-Port", "49983")
@@ -337,113 +196,13 @@ func (c *e2bClient) dataPlaneHTTPClient() *http.Client {
 	return &http.Client{Timeout: 0}
 }
 
-type e2bStartResponse struct {
-	Event struct {
-		Start *struct {
-			PID uint32 `json:"pid"`
-		} `json:"start,omitempty"`
-		Data *struct {
-			Stdout string `json:"stdout,omitempty"`
-			Stderr string `json:"stderr,omitempty"`
-			PTY    string `json:"pty,omitempty"`
-		} `json:"data,omitempty"`
-		End *struct {
-			ExitCode int    `json:"exitCode"`
-			Exited   bool   `json:"exited"`
-			Status   string `json:"status"`
-			Error    string `json:"error,omitempty"`
-		} `json:"end,omitempty"`
-		Keepalive map[string]any `json:"keepalive,omitempty"`
-	} `json:"event"`
+func interpretE2BProcessEnd(end shared.EnvdProcessEnd, stderr io.Writer, secrets ...string) (int, error) {
+	if !end.Exited && end.Error != "" {
+		fmt.Fprintln(stderr, shared.RedactErrorSecrets(end.Error, secrets...))
+	}
+	return end.ExitCode, nil
 }
 
-type e2bEndStream struct {
-	Error *struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error,omitempty"`
-}
-
-func encodeConnectJSONEnvelope(v any) ([]byte, error) {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
-	}
-	var out bytes.Buffer
-	out.WriteByte(0)
-	var size [4]byte
-	binary.BigEndian.PutUint32(size[:], uint32(len(data)))
-	out.Write(size[:])
-	out.Write(data)
-	return out.Bytes(), nil
-}
-
-func parseE2BProcessStream(r io.Reader, stdout, stderr io.Writer, secrets ...string) (int, error) {
-	exitCode := 0
-	seenEnd := false
-	for {
-		var header [5]byte
-		if _, err := io.ReadFull(r, header[:]); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return 1, err
-		}
-		flags := header[0]
-		size := binary.BigEndian.Uint32(header[1:])
-		if flags&1 != 0 {
-			return 1, fmt.Errorf("compressed connect envelopes are not supported")
-		}
-		data := make([]byte, size)
-		if _, err := io.ReadFull(r, data); err != nil {
-			return 1, err
-		}
-		if flags&2 != 0 {
-			var end e2bEndStream
-			if len(data) > 0 {
-				if err := json.Unmarshal(data, &end); err != nil {
-					return 1, err
-				}
-			}
-			if end.Error != nil {
-				return 1, errors.New(shared.RedactErrorSecrets(end.Error.Code+": "+end.Error.Message, secrets...))
-			}
-			break
-		}
-		var event e2bStartResponse
-		if err := json.Unmarshal(data, &event); err != nil {
-			return 1, err
-		}
-		if event.Event.Data != nil {
-			if err := writeBase64(event.Event.Data.Stdout, stdout); err != nil {
-				return 1, err
-			}
-			if err := writeBase64(event.Event.Data.Stderr, stderr); err != nil {
-				return 1, err
-			}
-		}
-		if event.Event.End != nil {
-			exitCode = event.Event.End.ExitCode
-			seenEnd = true
-			if !event.Event.End.Exited && event.Event.End.Error != "" {
-				fmt.Fprintln(stderr, shared.RedactErrorSecrets(event.Event.End.Error, secrets...))
-			}
-		}
-	}
-	if !seenEnd {
-		return 1, fmt.Errorf("e2b process stream ended without end event")
-	}
-	return exitCode, nil
-}
-
-func writeBase64(value string, w io.Writer) error {
-	if value == "" {
-		return nil
-	}
-	data, err := base64.StdEncoding.DecodeString(value)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(data)
-	return err
+func (c *e2bClient) control() shared.EnvdSandboxControl {
+	return shared.EnvdSandboxControl{Request: c.doJSONWithHeaders}
 }

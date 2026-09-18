@@ -2,6 +2,8 @@ package gcp
 
 import (
 	"flag"
+	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -16,8 +18,9 @@ func init() {
 type Provider struct{}
 
 var (
-	_ core.ProviderClassProfileProvider = Provider{}
-	_ core.ProviderClassSpecProvider    = Provider{}
+	_ core.ProviderClassProfileProvider             = Provider{}
+	_ core.ProviderClassSpecProvider                = Provider{}
+	_ core.ProviderReadyPoolImageIdentityCapability = Provider{}
 )
 
 // Google publishes these standard machine-family ratios in the Compute Engine
@@ -31,12 +34,23 @@ var memoryQuarterGBPerVCPU = map[string]int{
 
 var classProfiles = buildClassProfiles()
 
-func (Provider) Name() string { return "gcp" }
-func (Provider) Aliases() []string {
-	return []string{"google", "google-cloud"}
-}
+var (
+	readyPoolNumericIDPattern = regexp.MustCompile(`^[0-9]+$`)
+	readyPoolResourcePattern  = regexp.MustCompile(
+		`^projects/([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)/global/(images|snapshots)/([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)$`,
+	)
+	readyPoolScopePattern = regexp.MustCompile(
+		`^projects/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?/global/(images|snapshots)$`,
+	)
+)
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Aliases: []string{"google", "google-cloud"},
+		Authentication: core.ProviderAuthentication{
+			{Route: "direct", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationSDKCredentials}, Description: "Direct access uses Google Application Default Credentials."},
+			{Route: "brokered", Methods: []core.ProviderAuthenticationMethod{core.ProviderAuthenticationCoordinator}, Description: "The client authenticates to the coordinator; cloud credentials remain server-side."},
+		},
 		Name:   "gcp",
 		Family: "gcp",
 		Kind:   core.ProviderKindSSHLease,
@@ -51,6 +65,55 @@ func (Provider) Spec() core.ProviderSpec {
 func (Provider) RegisterFlags(*flag.FlagSet, core.Config) any { return core.NoProviderFlags() }
 func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 	return nil
+}
+
+func (Provider) ReadyPoolImageIdentityMatchesLease(req core.ProviderReadyPoolImageIdentityRequest) bool {
+	image := req.Lease.Image
+	if image == nil {
+		return false
+	}
+	scope, ok := readyPoolImageScope(image.SourceID, image.Kind)
+	return req.Identity.Provider == "gcp" &&
+		req.Lease.Provider == "gcp" &&
+		image.Provider == "gcp" &&
+		req.Lease.Project != "" &&
+		strings.TrimSpace(req.Lease.Project) == req.Lease.Project &&
+		ok &&
+		readyPoolScopePattern.MatchString(req.Identity.Scope) &&
+		readyPoolNumericIDPattern.MatchString(req.Identity.ID) &&
+		image.ID == req.Identity.ID &&
+		scope == req.Identity.Scope
+}
+
+func readyPoolImageScope(sourceID, kind string) (string, bool) {
+	resource := sourceID
+	if strings.HasPrefix(resource, "https://") {
+		matched := false
+		for _, prefix := range []string{
+			"https://compute.googleapis.com/compute/v1/",
+			"https://www.googleapis.com/compute/v1/",
+		} {
+			if strings.HasPrefix(resource, prefix) {
+				resource = strings.TrimPrefix(resource, prefix)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return "", false
+		}
+	}
+	match := readyPoolResourcePattern.FindStringSubmatch(resource)
+	if match == nil {
+		return "", false
+	}
+	collection := match[3]
+	if (kind == "gcp-image" && collection != "images") ||
+		(kind == "gcp-disk-snapshot" && collection != "snapshots") ||
+		(kind != "gcp-image" && kind != "gcp-disk-snapshot") {
+		return "", false
+	}
+	return fmt.Sprintf("projects/%s/global/%s", match[1], collection), true
 }
 
 func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, slug string, server core.Server, allowProviderMetadata bool) (core.Server, error) {
@@ -97,10 +160,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 		return ""
 	}
 	return gcpMachineTypeCandidatesForClass(cfg.Class)[0]
-}
-
-func (Provider) ServerTypeForClass(class string) string {
-	return gcpMachineTypeCandidatesForClass(class)[0]
 }
 
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
@@ -178,15 +237,11 @@ func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, err
 	return NewGCPLeaseBackend(p.Spec(), cfg, rt), nil
 }
 
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("gcp", func() (core.Backend, error) { return p.Configure(cfg, rt) })
-}
-
 func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (core.NativeCheckpointCapability, bool) {
 	if req.Config.Coordinator == "" || req.Server.CloudID == "" {
 		return core.NativeCheckpointCapability{}, false
 	}
-	if firstNonBlank(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
+	if shared.FirstNonEmpty(req.Target.TargetOS, req.Config.TargetOS) != core.TargetLinux {
 		return core.NativeCheckpointCapability{}, false
 	}
 	if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
@@ -195,17 +250,13 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 	return core.NativeCheckpointCapability{Kind: core.CheckpointKindGCPDisk, RetireSource: true}, true
 }
 
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonEmpty(values...)
-}
-
 func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkRequest) error {
 	cfg := req.Config
 	switch req.Record.Kind {
 	case core.CheckpointKindGCP:
-		cfg.GCPMachineImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+		cfg.GCPMachineImage = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
 	case core.CheckpointKindGCPDisk:
-		cfg.GCPSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+		cfg.GCPSnapshot = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
 	default:
 		return core.Exit(2, "provider=gcp does not support checkpoint kind=%s", req.Record.Kind)
 	}

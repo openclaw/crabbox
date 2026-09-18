@@ -87,6 +87,12 @@ Do not pass OVH credentials as command-line arguments. Keep them in the
 environment or in a local secret manager. Crabbox config stores only non-secret
 OVH settings.
 
+These five non-secret settings use the shared typed configuration bindings.
+Empty YAML or environment strings preserve the previous value; nonempty strings
+retain whitespace, and explicitly empty flags still assign. Image explicitness
+records accepted input even when it equals the default. Regional endpoint aliases,
+machine-class mapping, and native credential handling remain provider-owned.
+
 ## Credential Scope
 
 The provider signs requests with OVH application credentials and operates only

@@ -87,7 +87,7 @@ func marketplaceCoordinator() (*CoordinatorClient, error) {
 		return nil, err
 	}
 	if !ok {
-		return nil, exit(2, "marketplace requires a configured coordinator")
+		return nil, Exit(2, "marketplace requires a configured coordinator")
 	}
 	return coord, nil
 }
@@ -205,7 +205,7 @@ func printMarketplaceDecisions(out interface{ Write([]byte) (int, error) }, deci
 func parseMarketplaceTTL(value string) (time.Duration, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return 0, exit(2, "ttl must not be empty")
+		return 0, Exit(2, "ttl must not be empty")
 	}
 	duration, err := time.ParseDuration(value)
 	if err == nil && duration > 0 {
@@ -216,9 +216,9 @@ func parseMarketplaceTTL(value string) (time.Duration, error) {
 		return time.Duration(seconds) * time.Second, nil
 	}
 	if err != nil {
-		return 0, exit(2, "invalid ttl %q: use values like 30m, 1h, or 3600s", value)
+		return 0, Exit(2, "invalid ttl %q: use values like 30m, 1h, or 3600s", value)
 	}
-	return 0, exit(2, "ttl must be positive")
+	return 0, Exit(2, "ttl must be positive")
 }
 
 func splitMarketplaceList(value string) []string {

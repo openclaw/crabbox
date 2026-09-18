@@ -6,12 +6,73 @@ Read when:
 - debugging a failed remote command after the fact;
 - deciding what belongs in coordinator-stored run history.
 
-History and logs are a **brokered-mode** feature. When `crabbox run` executes
+Shared history and logs are a **brokered-mode** feature. When `crabbox run` executes
 against a brokered provider (`aws`, `azure`, `daytona`, `gcp`, `hetzner` with a
 coordinator configured), the CLI mirrors the run into coordinator storage as a
 durable, queryable record. Direct-provider runs and delegated runs do not produce
 central history — there you have only the live terminal output and any local
-captures you ask for.
+captures you ask for, unless you explicitly enable private local history.
+
+## Private local history
+
+`crabbox run --record-local -- <command>` retains a bounded local record keyed
+by the same printed `run_...` ID. The record survives normal lease removal and
+does not require or upload to a coordinator. The default is off. Enable it for
+future runs in trusted user configuration with `history.local.enabled: true`;
+repository configuration cannot enable or disable that policy. An explicit
+`--record-local=false` overrides the user policy.
+
+```sh
+crabbox run --provider local-container --record-local -- printf 'example\n'
+crabbox history --source local
+crabbox logs run_<id> --source local
+crabbox results run_<id> --source local --json
+crabbox history prune --source local
+crabbox history delete run_<id> --source local
+```
+
+Local history lives under the existing state directory's `history` directory,
+separate from lease claims. Files and directories are private to their owner.
+An explicit `XDG_STATE_HOME` places it at `$XDG_STATE_HOME/crabbox/history`, beside
+the separate claim and generated lease-key namespaces; the unset default remains
+unchanged. Root switching does not migrate records or credentials.
+It retains up to 100 inactive records, 256 MiB overall, and 30 days; abandoned
+incomplete records are included. Active writers hold a lock and reserve bounded
+space. Admission fails before acquisition if private storage cannot be reserved.
+An unavailable final write warns without changing the command's existing exit,
+timing, or receipt. An interrupted or uncommitted record is marked incomplete,
+not successful; its output may be unavailable.
+
+When a provider supplies initial image evidence, the local record includes its
+`imageEvidence` snapshot, including after the lease is removed. Local history
+text and JSON expose it without querying a runtime. See
+[local-container image evidence](../providers/local-container.md#initial-image-evidence)
+for the image ID, digest availability, and unsigned-observation contract.
+
+The log uses the same 8 MiB UTF-8 tail and capture-omission policy described
+below. Metadata is capped at 256 KiB and serialized parsed results at 1 MiB.
+Result totals remain intact when detailed entries are omitted or clipped; local
+readback exposes those limits. Raw JUnit XML and arbitrary remote files are not
+retained. Caller output is not automatically secret-redacted: opt in only when
+private retention is appropriate. Command/display diagnostics use the existing
+diagnostic redactor.
+
+Workload writers are observed separately from Crabbox's own diagnostic output.
+Direct SSH transports and some delegated native CLIs mix command and provider
+messages; those retained streams are labelled `provider-run`, not a pure workload
+transcript. Streams a
+provider does not expose and streams directed exclusively to captures remain
+explicitly unavailable or omitted. Unsupported delegated JUnit collection is
+not fabricated into a passing result.
+
+`history`, `logs`, and `results` accept `--source local|coordinator|all`.
+With a coordinator configured, the existing default broker route and JSON stay
+unchanged. Without one, existing local history is readable, including after
+retention is disabled. Explicit local reads stay offline. Source-qualified
+output distinguishes local-only data, acknowledged coordinator records, and
+both; correlation includes a noncredential endpoint reference, not just an ID.
+A local self-record is never coordinator-attested evidence. `events`, `attach`,
+and `receipt` retain their coordinator-only contract.
 
 ## What a recorded run contains
 
@@ -30,12 +91,39 @@ ordered events as it advances:
 - `lease.released`
 - `run.failed` (if the run errors before the command finishes)
 
+Current clients admit runs through `PUT /v1/runs/<run-id>`, using a cryptographically
+random ID known before the request. The coordinator commits the record and its
+first event atomically. Matching admission replay returns the retained record;
+changed request content conflicts, and another actor cannot adopt the record.
+The original request binding remains unchanged when later events attach or
+replace a lease. Legacy clients can still use `POST /v1/runs` for coordinator-issued
+IDs, but that route cannot recover a lost create response. Upgrade an older
+coordinator before using the current client's admission route.
+
+Admission recovery is limited to the original live CLI invocation before command
+execution. A terminal or already-progressed record is a historical result, not
+permission to execute again. Record retention is unchanged; clients must never
+reuse an ID for a new invocation.
+
 Crabbox-generated event messages are redacted before they enter coordinator
 storage. The recorder removes configured and provider-discovered runtime
 credentials, authorization headers, credential-bearing URLs, and other known
 secret encodings while preserving useful diagnostic context. Raw `stdout` and
 `stderr` event data and retained command logs remain caller-owned output and are
 not automatically redacted.
+
+Phase and stream diagnostics publish through one bounded queue while the workload
+continues. An existing lease's run creation already records its binding; a new
+or replacement lease binding first drains and joins diagnostics, then gets its
+own acknowledged request before command admission. Missing diagnostic endpoints
+do not block an already bound run; a changed binding must be accepted because
+the signed terminal receipt requires the exact lease, slug, and provider.
+Sync-only runs keep their optional-history behavior and warn when binding is
+unavailable. Before
+terminal recording, the CLI drains diagnostics for up to two seconds, cancels
+remaining publication, and joins the publisher. Queue overflow or drain expiry
+produces a warning; retained logs and verified terminal receipts remain the
+completion record.
 
 Each event carries a sequence number, type, phase, and stream. Streamed output
 events are capped at **64 KiB total per run**; once the cap is hit the CLI emits
@@ -87,12 +175,23 @@ execution and includes `runID`. A missing receipt is not reconstructed from logs
 or events. A receipt-bearing CLI fails closed against a coordinator that accepts
 the finish but cannot return the exact stored receipt.
 
+If terminal recording fails, the CLI reports the attempted finish submission
+and receipt-verification errors, the attempt count, and the recovery command.
+These diagnostics remain available when the shared 60-second recording deadline
+expires. That failure does not establish the remote command's exit status; use
+the committed receipt to resolve an ambiguous result.
+
 Run records keep the initiating actor in `owner`/`org` and retain every backing
 lease identity used by a replacement flow. Each backing lease owner has
 read-only access to history, details, logs, events, telemetry, live event
 subscriptions, and portal pages for auditing work on their lease. Only the
 initiating actor or an admin can append events or telemetry and finish the run.
 Lease shares do not grant access to runs created by other actors.
+
+Once a finish is committed, later events remain in the ordered audit trail but
+do not change the run's terminal state, phase, end time, or backing lease
+metadata. This includes delayed output, duplicate failure notifications, and
+post-finish lease cleanup events; the committed logs and receipt remain authoritative.
 
 ## Storage limits
 

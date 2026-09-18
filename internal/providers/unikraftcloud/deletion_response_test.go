@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 type unikraftCloudNamelessDeleteAPI struct {
@@ -37,17 +39,17 @@ func TestStopAcceptsExactDeleteResponseWithOmittedName(t *testing.T) {
 	api := &unikraftCloudNamelessDeleteAPI{fakeUnikraftCloudAPI: base}
 	b := testBackend(api, nil, nil)
 
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	claim := onlyTestClaim(t)
-	if err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID}); err != nil {
+	if err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID}); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if len(base.deletedIDs) != 1 || base.deletedIDs[0] != testInstanceUUID {
 		t.Fatalf("deleted IDs = %#v", base.deletedIDs)
 	}
-	if _, exists, err := readLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
+	if _, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v, want removed", exists, err)
 	}
 }
@@ -61,18 +63,18 @@ func TestStopRetainsDeleteAttemptForConflictingResponseName(t *testing.T) {
 	api := &unikraftCloudConflictingDeleteNameAPI{fakeUnikraftCloudAPI: base}
 	b := testBackend(api, nil, nil)
 
-	if err := b.Warmup(context.Background(), WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: core.Repo{Root: t.TempDir(), Name: "demo"}}); err != nil {
 		t.Fatalf("Warmup: %v", err)
 	}
 	claim := onlyTestClaim(t)
-	err := b.Stop(context.Background(), StopRequest{ID: claim.LeaseID})
+	err := b.Stop(context.Background(), core.StopRequest{ID: claim.LeaseID})
 	if err == nil || !strings.Contains(err.Error(), "changed name") {
 		t.Fatalf("Stop err = %v, want changed-name refusal", err)
 	}
 	if len(base.deletedIDs) != 1 || base.deletedIDs[0] != testInstanceUUID {
 		t.Fatalf("deleted IDs = %#v", base.deletedIDs)
 	}
-	stored, exists, readErr := readLeaseClaimWithPresence(claim.LeaseID)
+	stored, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
 	if readErr != nil || !exists {
 		t.Fatalf("claim exists=%v err=%v, want retained", exists, readErr)
 	}

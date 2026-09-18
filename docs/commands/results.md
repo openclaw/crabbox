@@ -12,9 +12,14 @@ crabbox results run_abcdef123456 --failed-only
 crabbox results run_abcdef123456 --json
 ```
 
-The run id is accepted as a positional argument or via `--id`. A coordinator
-must be configured (`CRABBOX_COORDINATOR` or `config set-broker`), because
-results are read back from the recorded run, not from the live box.
+The run id is accepted as a positional argument or via `--id`. Results are read
+from recorded runs, not from the live box. A configured coordinator
+(`CRABBOX_COORDINATOR` or `config set-broker`) remains the default source.
+Opted-in local records also work without a coordinator: use `--source local`, or
+`--source coordinator|all` for explicit source selection. Existing configured
+broker defaults are unchanged. Local results preserve collected summary totals
+and disclose unavailable results or clipped/omitted details; they do not retain
+raw XML or claim coordinator attestation.
 
 ## How results get attached
 
@@ -60,7 +65,14 @@ Raw XML is never stored. Multiple JUnit files are merged into one summary, so a
 multi-report setup still produces a single result record. Bad files produce
 named warnings without erasing valid summaries. Auto discovery accepts files
 up to 16 MiB and 64 MiB total; it skips larger reports explicitly instead of
-truncating them into invalid XML.
+truncating them into invalid XML. Managed SSH collection uses the shared filesystem
+runner on POSIX and native Windows targets, preserving original report bytes for
+parsing. Explicit collection accepts up to 4,096 paths, 64 MiB per report, and
+256 MiB total. Automatic discovery retains up to 50 reports and prioritizes
+reports containing failure or error elements. Paths referring to the same opened
+file count once across explicit and automatic collection; separate files with
+identical content remain separate reports. Provider-native result APIs retain
+their provider contract.
 
 By default, result parsing does not replace the wrapped command's exit status.
 With `--fail-on-test-failures` or `results.failOnFailures: true`, a command that

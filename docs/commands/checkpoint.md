@@ -136,6 +136,29 @@ crabbox checkpoint create --id swift-crab --mode native --json
 --discard-failed            Explicitly discard a verified failed capture and retire.
 ```
 
+On success, `--json` prints the checkpoint record. A native checkpoint operation
+that can prove it never attempted image submission may instead return this failure
+object, with a nonzero exit status, after the exact local reservation is removed
+and its absence is verified:
+
+```json
+{
+  "schema": "crabbox.checkpoint.create.failure.v1",
+  "outcome": "not_submitted",
+  "provider": "machine0",
+  "leaseId": "cbx_abcdef012345",
+  "checkpointId": "chk_0123456789abcdef",
+  "localReservation": "removed"
+}
+```
+
+The provider, lease, and checkpoint identify this invocation only. This result
+does not mean the source restarted successfully or is ready for use; source
+cleanup remains the lease owner's responsibility. Failed local cleanup emits no
+such result. Coordinator-managed captures, lost replies, interrupted commands,
+and failures after submission retain their existing recovery behavior. Never
+infer non-submission from an empty image ID, a missing checkpoint, or error text.
+
 `--mode` also accepts the aliases `provider-native`/`vm` (native),
 `ami`/`image` (image), `snapshot`/`disk`/`disk-snapshot` (disk snapshot),
 `workspace`/`workspace-archive` (archive), and `recipe`. `--strategy auto`
@@ -184,7 +207,28 @@ the checkpoint for inspection.
 
 Before a native snapshot, Crabbox cleans the source: on Linux it runs
 `cloud-init clean --logs` (so a forked box regenerates SSH host keys) and
-`sync` to flush filesystem writes.
+`sync` to flush filesystem writes. Preparation uses the distro's
+`/usr/bin/python3` and installed cloud-init module to resolve its configured
+runtime directory. Before cleaning, it waits up to 30 seconds for cloud-init
+completion using `status --wait --format=json`; both a successful exit and
+`status: done` are required. Disabled initialization and recoverable errors
+remain failures. The runtime directory must be on `tmpfs`, outside cloud-init's
+disk cache. The existing completion records are
+copied there before cleaning, so the running source remains ready while a new
+VM must complete its own boot. An immediate status check after cleaning must
+still report successful completion; it does not wait to mask lost boot state.
+Status failures identify the pre-clean or post-clean phase and observed state.
+Preparation errors stop capture before creating an image. Brokered source
+preparation failures, and direct AWS and Hetzner failures confirmed before their
+image-create request, release the fresh local reservation and can emit the
+non-submission JSON receipt above.
+This does not certify source rollback. Errors once the image request begins
+retain the checkpoint for recovery; existing uncertain records are unchanged.
+
+Direct AWS and Hetzner captures record the accepted image identity before
+waiting for readiness. If the process is interrupted during that wait, the
+checkpoint remains available for `inspect --verify` and provider cleanup;
+do not submit a replacement capture just because the wait was interrupted.
 
 ### Replayable source retirement
 
@@ -540,10 +584,20 @@ crabbox checkpoint fork --provider parallels --parallels-template ubuntu-fast --
   checkpoint, changed create intent, ambiguous resources, or a released lease
   ID fails without allocating a replacement. A later fork failure preserves the
   known fixed-ID lease for recovery instead of deleting adopted work. Direct
-  AWS, Machine0, local-container, and Incus container backends support this
-  checkpoint-bound contract. Archive checkpoints, direct Hetzner, direct Parallels snapshots,
-  coordinator-backed leases, and external providers reject fixed checkpoint
-  forks. Fixed IDs must remain retained and cannot fan out, override the
+  AWS, Machine0, Daytona, local-container, Incus containers, and coordinator-managed native
+  checkpoint backends support this checkpoint-bound contract. Direct Daytona can
+  replay a successfully acquired child after its source snapshot is retired;
+  fresh and incomplete acquisitions still attest the exact native snapshot. Managed forks bind the
+  checkpoint incarnation and immutable image to the coordinator's fixed intent;
+  replay preserves the original provisioning claim and does not advance checkpoint
+  usage again. A replacement use claim must still be valid and available; replay
+  consumes it once. Only the exact original attempt claim can replay after its
+  consumption. An older coordinator rejects the dedicated fixed-checkpoint route
+  without falling back to ordinary creation. A fresh managed-fork CLI invocation still needs
+  a valid use claim and refuses a deleted checkpoint; an in-request retry can
+  recover its already-created child after source deletion. Archive checkpoints, direct Hetzner,
+  direct Parallels snapshots, legacy unmanaged brokered checkpoints, and external
+  providers reject fixed checkpoint forks. Fixed IDs must remain retained and cannot fan out, override the
   deterministic workdir, or run commands following `--`.
 - *JSON output:* one fork prints one JSON object; `--count` greater than one
   prints one JSON array. Every object contains `checkpointId`, `leaseId`,
@@ -592,6 +646,12 @@ For native checkpoints, delete removes the provider resource first (AMIs are
 deregistered along with their backing EBS snapshots; disk snapshots are
 deleted), then removes the local record. Archive checkpoints just lose their
 tarball and record.
+
+Direct AWS deletion records all discovered backing snapshot IDs before
+deregistering the AMI. If deletion is interrupted or a snapshot cannot be
+removed, retry the same checkpoint deletion to finish its recorded cleanup.
+An unavailable backing mapping or failed discovery retains the checkpoint;
+it does not count as completed cleanup.
 
 Coordinator-managed checkpoints delete through the checkpoint endpoint, never
 the generic image endpoint. Active use claims, promoted-image catalog pins,
@@ -661,8 +721,9 @@ crabbox checkpoint prune --older-than 30d --unused-for 14d --kind native
 
 At least one of `--older-than` or `--unused-for` is required; when both are
 present, a checkpoint must satisfy both. Durations accept Go syntax such as
-`720h` or a whole number of days such as `30d`. Native checkpoints prune through
-the same provider-first deletion path as `checkpoint delete`, so a provider
+`720h` or a whole number of days such as `30d`. Values beyond Go's duration
+range (more than 106751 whole days) are rejected before pruning. Native
+checkpoints prune through the same provider-first deletion path as `checkpoint delete`, so a provider
 failure keeps the local record. Preview the exact match set with `--dry-run`.
 
 The coordinator automatically expires only managed brokered native checkpoints

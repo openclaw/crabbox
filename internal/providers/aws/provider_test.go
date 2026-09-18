@@ -28,6 +28,46 @@ func TestProviderAdvertisesRunSessionContract(t *testing.T) {
 	}
 }
 
+func TestReadyPoolImageIdentityMatchesLease(t *testing.T) {
+	request := core.ProviderReadyPoolImageIdentityRequest{
+		Identity: core.CoordinatorReadyPoolImageIdentity{
+			Provider: "aws", Scope: "us-east-1", ID: "ami-0123456789abcdef0",
+		},
+		Lease: core.ProviderReadyPoolLeaseImageIdentity{
+			Provider: "aws", Region: "us-east-1",
+			Image: &core.CoordinatorLeaseImage{
+				Provider: "aws", Kind: "aws-ami", Region: "us-east-1", ID: "ami-0123456789abcdef0",
+			},
+		},
+	}
+	if !(Provider{}).ReadyPoolImageIdentityMatchesLease(request) {
+		t.Fatal("valid AWS image identity rejected")
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*core.ProviderReadyPoolImageIdentityRequest)
+	}{
+		{"identity provider", func(req *core.ProviderReadyPoolImageIdentityRequest) { req.Identity.Provider = "gcp" }},
+		{"lease provider", func(req *core.ProviderReadyPoolImageIdentityRequest) { req.Lease.Provider = "gcp" }},
+		{"missing image", func(req *core.ProviderReadyPoolImageIdentityRequest) { req.Lease.Image = nil }},
+		{"image provider", func(req *core.ProviderReadyPoolImageIdentityRequest) { req.Lease.Image.Provider = "gcp" }},
+		{"image kind", func(req *core.ProviderReadyPoolImageIdentityRequest) { req.Lease.Image.Kind = "aws-ebs" }},
+		{"image id", func(req *core.ProviderReadyPoolImageIdentityRequest) { req.Lease.Image.ID = "ami-other" }},
+		{"image region", func(req *core.ProviderReadyPoolImageIdentityRequest) { req.Lease.Image.Region = "eu-west-1" }},
+		{"lease region", func(req *core.ProviderReadyPoolImageIdentityRequest) { req.Lease.Region = "eu-west-1" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := request
+			image := *request.Lease.Image
+			changed.Lease.Image = &image
+			tc.mutate(&changed)
+			if (Provider{}).ReadyPoolImageIdentityMatchesLease(changed) {
+				t.Fatalf("mismatched request accepted: %#v", changed)
+			}
+		})
+	}
+}
+
 func TestAWSLinuxReadinessWaitsForCurrentBootCloudInit(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("executing Linux readiness checks requires a POSIX shell")

@@ -13,14 +13,18 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
+	core.ApplyConfigShowSSHDefaults(&cfg, "root")
+	return cfg
+}
+
 var _ core.ProviderClassProfileProvider = Provider{}
 
 var classProfiles = core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: "s-1vcpu-1gb"})
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIToken),
 		Name:             providerName,
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
@@ -91,16 +95,8 @@ func (p Provider) ServerTypeForConfig(cfg core.Config) string {
 	return digitalOceanServerTypeForClass(cfg.Class)
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return digitalOceanServerTypeForClass(class)
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewDigitalOceanLeaseBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("digitalocean", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }
 
 func digitalOceanServerTypeForClass(class string) string {
@@ -110,4 +106,28 @@ func digitalOceanServerTypeForClass(class string) string {
 		}
 	}
 	return "s-1vcpu-1gb"
+}
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	applyNativeDefaults(&cfg.DigitalOcean)
+	if core.OSImageWasExplicit(*cfg) && !core.DigitalOceanImageWasExplicit(*cfg) {
+		if cfg.OSImage == "ubuntu:24.04" {
+			cfg.DigitalOcean.Image = "ubuntu-24-04-x64"
+		} else {
+			// Leave unsupported intent unresolved until acquisition validation.
+			cfg.DigitalOcean.Image = ""
+		}
+	}
+	base := core.BaseConfig()
+	core.ApplyLinuxConnectionDefaults(cfg, base.SSHUser, base.SSHPort)
+	return nil
+}
+
+func applyNativeDefaults(cfg *core.DigitalOceanConfig) {
+	if cfg.Region == "" {
+		cfg.Region = core.DigitalOceanRegionFallback
+	}
+	if cfg.Image == "" {
+		cfg.Image = core.DigitalOceanImageFallback
+	}
 }

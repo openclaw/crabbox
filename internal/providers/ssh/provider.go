@@ -4,7 +4,6 @@ import (
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -13,7 +12,7 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) SupportsArchitecture(cfg Config, architecture string) bool {
+func (Provider) SupportsArchitecture(cfg core.Config, architecture string) bool {
 	if architecture != core.ArchitectureAMD64 && architecture != core.ArchitectureARM64 {
 		return false
 	}
@@ -27,15 +26,13 @@ func (Provider) SupportsArchitecture(cfg Config, architecture string) bool {
 	}
 }
 
-func (Provider) Name() string { return "ssh" }
-func (Provider) Aliases() []string {
-	return []string{"static", "static-ssh"}
-}
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Name:   "ssh",
-		Family: "ssh",
-		Kind:   core.ProviderKindSSHLease,
+		Aliases:        []string{"static", "static-ssh"},
+		Authentication: core.DirectProviderAuthentication(core.ProviderAuthenticationSSH),
+		Name:           "ssh",
+		Family:         "ssh",
+		Kind:           core.ProviderKindSSHLease,
 		Targets: []core.TargetSpec{
 			{OS: core.TargetLinux},
 			{OS: core.TargetWindows, WindowsMode: "normal"},
@@ -53,8 +50,4 @@ func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 }
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewStaticSSHLeaseBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("ssh", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }

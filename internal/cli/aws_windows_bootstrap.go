@@ -5,36 +5,59 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 )
 
 func bootstrapManagedWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarget, publicKey string, stderr io.Writer) error {
+	initial := managedWindowsBootstrapTarget(cfg, *target, sshPortCandidates(target.Port, target.FallbackPorts))
+	return bootstrapPreparedManagedWindowsDesktop(ctx, cfg, target, initial, publicKey, stderr)
+}
+
+func managedWindowsBootstrapTarget(cfg Config, target SSHTarget, authorizedPorts []string) SSHTarget {
+	initial := target
+	if cfg.TargetOS != targetWindows {
+		return initial
+	}
+	if cfg.Provider == "aws" || cfg.WindowsMode == windowsModeWSL2 {
+		initial.WindowsMode = windowsModeNormal
+		initial.ReadyCheck = PowershellCommand(`$PSVersionTable.PSVersion | Out-Null`)
+	}
+	if cfg.Provider == "aws" {
+		initial.User = "Administrator"
+		// EC2Launch needs port 22 before workload port pinning takes effect.
+		// Retain only advertised routes, adding just that initial foothold.
+		initial.FallbackPorts = []string{}
+		for _, port := range uniqueSSHPorts(authorizedPorts) {
+			if port != initial.Port && (port == "22" || slices.Contains(target.FallbackPorts, port)) {
+				initial.FallbackPorts = append(initial.FallbackPorts, port)
+			}
+		}
+	}
+	return initial
+}
+
+func bootstrapPreparedManagedWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarget, bootstrapTarget SSHTarget, publicKey string, stderr io.Writer) error {
+	if cfg.TargetOS == targetMacOS {
+		return bootstrapManagedMacOS(ctx, cfg, target, stderr)
+	}
 	if cfg.TargetOS != targetWindows {
 		return waitForSSHReady(ctx, target, stderr, "bootstrap", bootstrapWaitTimeout(cfg))
 	}
 	if cfg.WindowsMode == windowsModeWSL2 {
-		bootstrapTarget := *target
-		bootstrapTarget.WindowsMode = windowsModeNormal
-		bootstrapTarget.ReadyCheck = powershellCommand(`$PSVersionTable.PSVersion | Out-Null`)
 		if cfg.Provider == "aws" {
-			bootstrapTarget.User = "Administrator"
 			target.User = "Administrator"
 		}
 		return bootstrapManagedWindowsWSL2(ctx, cfg, target, bootstrapTarget, publicKey, stderr)
 	}
 	if cfg.Provider == "azure" && cfg.WindowsMode == windowsModeNormal && cfg.Desktop {
-		bootstrapTarget := *target
 		return runWindowsBootstrapOverSSH(ctx, cfg, target, bootstrapTarget, publicKey, stderr, "Windows desktop bootstrap")
 	}
 	if cfg.Provider != "aws" {
 		return waitForSSHReady(ctx, target, stderr, "bootstrap", bootstrapWaitTimeout(cfg))
 	}
-	bootstrapTarget := *target
-	bootstrapTarget.User = "Administrator"
-	bootstrapTarget.WindowsMode = windowsModeNormal
-	bootstrapTarget.ReadyCheck = powershellCommand(`$PSVersionTable.PSVersion | Out-Null`)
 	phase := "Windows core bootstrap"
 	if cfg.Desktop {
 		phase = "Windows desktop bootstrap"
@@ -47,18 +70,24 @@ func bootstrapAWSWindowsDesktop(ctx context.Context, cfg Config, target *SSHTarg
 }
 
 func runWindowsBootstrapOverSSH(ctx context.Context, cfg Config, target *SSHTarget, bootstrapTarget SSHTarget, publicKey string, stderr io.Writer, phase string) error {
+	// Bootstrap restarts sshd after updating machine PATH. Probe new sessions,
+	// not a surviving pre-bootstrap control master with the old environment.
+	bootstrapTarget.NoControlMaster = true
+	previousNoControlMaster := target.NoControlMaster
+	target.NoControlMaster = true
+	defer func() { target.NoControlMaster = previousNoControlMaster }()
 	if err := waitForSSHReady(ctx, &bootstrapTarget, stderr, "windows openssh", 20*time.Minute); err != nil {
 		return err
 	}
 	fmt.Fprintf(stderr, "running %s over SSH\n", phase)
-	remote := powershellCommand(`$ErrorActionPreference = "Stop"
+	remote := PowershellCommand(`$ErrorActionPreference = "Stop"
 $path = "C:\ProgramData\crabbox-bootstrap.ps1"
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
 $input | Set-Content -Encoding UTF8 -LiteralPath $path
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $path
 exit $LASTEXITCODE`)
 	var bootstrapOutput bytes.Buffer
-	err := runSSHInput(ctx, bootstrapTarget, remote, strings.NewReader(windowsBootstrapPowerShell(cfg, publicKey)), &bootstrapOutput, &bootstrapOutput)
+	err := runSSHInput(ctx, bootstrapTarget, remote, strings.NewReader(WindowsBootstrapPowerShell(cfg, publicKey)), &bootstrapOutput, &bootstrapOutput)
 	if err != nil {
 		writeWindowsBootstrapSSHWarning(stderr, phase, err, bootstrapOutput.String())
 	}
@@ -85,7 +114,7 @@ func waitForWindowsBootstrapSSHReady(ctx context.Context, target *SSHTarget, std
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return exit(5, "timed out waiting for stable Windows SSH on %s during bootstrap; %s", target.Host, sshWaitNextAction("bootstrap"))
+			return Exit(5, "timed out waiting for stable Windows SSH on %s during bootstrap; %s", target.Host, sshWaitNextAction("bootstrap"))
 		}
 		timer := time.NewTimer(minDuration(stableInterval, remaining))
 		select {
@@ -96,7 +125,7 @@ func waitForWindowsBootstrapSSHReady(ctx context.Context, target *SSHTarget, std
 		}
 		remaining = time.Until(deadline)
 		if remaining <= 0 {
-			return exit(5, "timed out waiting for stable Windows SSH on %s during bootstrap; %s", target.Host, sshWaitNextAction("bootstrap"))
+			return Exit(5, "timed out waiting for stable Windows SSH on %s during bootstrap; %s", target.Host, sshWaitNextAction("bootstrap"))
 		}
 		if probeWindowsSSHStable(ctx, target, deadline) {
 			stable++
@@ -106,7 +135,7 @@ func waitForWindowsBootstrapSSHReady(ctx context.Context, target *SSHTarget, std
 		stable = 0
 		remaining = time.Until(deadline)
 		if remaining <= 0 {
-			return exit(5, "timed out waiting for stable Windows SSH on %s during bootstrap; %s", target.Host, sshWaitNextAction("bootstrap"))
+			return Exit(5, "timed out waiting for stable Windows SSH on %s during bootstrap; %s", target.Host, sshWaitNextAction("bootstrap"))
 		}
 		if err := waitForSSHReady(ctx, target, stderr, "bootstrap", remaining); err != nil {
 			return err
@@ -124,7 +153,7 @@ func probeWindowsSSHStable(ctx context.Context, target *SSHTarget, deadline time
 	}
 	probeCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	return probeSSHReady(probeCtx, target, minDuration(30*time.Second, remaining))
+	return ProbeSSHReady(probeCtx, target, minDuration(30*time.Second, remaining))
 }
 
 func waitForManagedWindowsLoopbackVNC(ctx context.Context, target *SSHTarget, stderr io.Writer, timeout time.Duration) error {
@@ -144,7 +173,7 @@ func waitForManagedWindowsLoopbackVNC(ctx context.Context, target *SSHTarget, st
 			}
 		}
 		if time.Now().After(deadline) {
-			return exit(5, "managed Windows desktop did not expose VNC on 127.0.0.1:5900")
+			return Exit(5, "managed Windows desktop did not expose VNC on 127.0.0.1:5900")
 		}
 		if err := sleepContext(ctx, 5*time.Second); err != nil {
 			return context.Cause(ctx)
@@ -172,12 +201,18 @@ func bootstrapManagedWindowsWSL2(ctx context.Context, cfg Config, target *SSHTar
 		if err != nil {
 			writeWindowsBootstrapSSHWarning(stderr, "Windows WSL2 bootstrap", err, bootstrapOutput.String())
 		}
+		if cfg.Provider == "aws" && IsSSHPortExplicit(&cfg) {
+			// After initial setup, reboot readiness and later setup stages must
+			// use the workload route, never promote the initial foothold to it.
+			bootstrapTarget.Port = target.Port
+			bootstrapTarget.FallbackPorts = target.FallbackPorts
+		}
 		if err := waitForWindowsBootstrapSSHReady(ctx, &bootstrapTarget, stderr, 20*time.Minute); err != nil {
 			return err
 		}
 		target.Port = bootstrapTarget.Port
 		if probeWindowsWSL2BootstrapComplete(ctx, bootstrapTarget, target, 30*time.Second) {
-			return nil
+			return waitForSSHReady(ctx, target, stderr, "WSL2 runtime", bootstrapWaitTimeout(cfg))
 		}
 		fmt.Fprintln(stderr, "Windows WSL2 setup marker is not ready after bootstrap; retrying bootstrap")
 	}
@@ -219,7 +254,7 @@ func probeWindowsWSL2BootstrapComplete(ctx context.Context, bootstrapTarget SSHT
 	profile := sshReadinessProfileForTarget(bootstrapTarget)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	remote := powershellCommand(`$ErrorActionPreference = "Stop"
+	remote := PowershellCommand(`$ErrorActionPreference = "Stop"
 if (-not (Test-Path -LiteralPath "C:\ProgramData\crabbox\setup-complete")) {
   throw "setup-complete marker missing"
 }`)
@@ -238,15 +273,15 @@ if (-not (Test-Path -LiteralPath "C:\ProgramData\crabbox\setup-complete")) {
 func runWindowsWSL2BootstrapAttempt(ctx context.Context, cfg Config, bootstrapTarget SSHTarget, publicKey string, stderr io.Writer) error {
 	attemptCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
-	remote := powershellCommand(`$ErrorActionPreference = "Stop"
+	remote := PowershellCommand(`$ErrorActionPreference = "Stop"
 $path = "C:\ProgramData\crabbox-bootstrap.ps1"
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
 $input | Set-Content -Encoding UTF8 -LiteralPath $path
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $path
 exit $LASTEXITCODE`)
-	err := runSSHInput(attemptCtx, bootstrapTarget, remote, strings.NewReader(windowsBootstrapPowerShell(cfg, publicKey)), stderr, stderr)
+	err := runSSHInput(attemptCtx, bootstrapTarget, remote, strings.NewReader(WindowsBootstrapPowerShell(cfg, publicKey)), stderr, stderr)
 	if attemptCtx.Err() == context.DeadlineExceeded {
-		return exit(7, "Windows WSL2 bootstrap command timed out after 20m0s")
+		return Exit(7, "Windows WSL2 bootstrap command timed out after 20m0s")
 	}
 	return err
 }

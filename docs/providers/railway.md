@@ -72,9 +72,11 @@ export RAILWAY_API_TOKEN=...   # required, account token from /account/tokens
 ```
 
 `CRABBOX_RAILWAY_API_TOKEN` is also accepted and wins over `RAILWAY_API_TOKEN`,
-matching the precedence used by other delegated providers. The token is read
-from the environment or config only; the provider does not register a CLI flag
-for it, so it is never passed on the command line. Crabbox sends the same
+matching the precedence used by other delegated providers. CLI configuration
+reads the token only from these environment variables; neither user nor
+repository YAML accepts a token field, and no token flag is registered.
+Programmatic callers can still supply the runtime config's token field.
+Crabbox sends the same
 `Authorization: Bearer <token>` header and a JSON `{query, variables}` body that
 a raw GraphQL request would:
 
@@ -115,6 +117,19 @@ CRABBOX_RAILWAY_ENVIRONMENT_ID (or RAILWAY_ENVIRONMENT_ID)
 
 The `--railway-url` flag and `RAILWAY_API_URL` env var override `railway.apiUrl`.
 A non-`https` URL is rejected unless it targets `localhost`.
+
+The four bindings share one typed declaration. Nonempty YAML strings override
+earlier values; omitted, null, and empty strings leave them unchanged. Environment
+overrides select the first raw nonempty primary or alias value without trimming.
+Explicitly visited empty flags still apply. A repository-selected API URL keeps
+repository provenance and remains subject to the existing credential-destination
+checks; generating its binding does not grant it permission to use inherited
+credentials.
+
+Token and endpoint validation remain deferred to client construction, with the
+token checked first. A raw-empty runtime API URL receives the compiled endpoint
+default, but a whitespace-only URL does not. Claim scoping and command routing
+retain their separate empty-endpoint behavior rather than adding that fallback.
 
 ## Capabilities
 

@@ -6,7 +6,7 @@ on:
       - main
     paths:
       - "docs/**"
-      - "skills/crabbox/**"
+      - "skills/**"
       - "scripts/build-docs-site.mjs"
       - "scripts/enhance-docs-site.mjs"
       - "scripts/normalize-provider-counts.mjs"

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -33,25 +34,29 @@ func NewLeaseID() string {
 	return newLeaseID()
 }
 
-func newRunID() string {
-	return "run_" + strings.TrimPrefix(newLeaseID(), "cbx_")
+func newRunID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", err
+	}
+	return "run_" + hex.EncodeToString(value[:]), nil
 }
 
 func PublicKeyFor(privatePath string) (string, error) {
 	if strings.TrimSpace(privatePath) == "" {
-		return "", exit(2, "ssh key path is not configured")
+		return "", Exit(2, "ssh key path is not configured")
 	}
 	pub := privatePath + ".pub"
 	data, err := os.ReadFile(pub)
 	if err != nil {
-		return "", exit(2, "read ssh public key %s: %v", pub, err)
+		return "", Exit(2, "read ssh public key %s: %v", pub, err)
 	}
 	key := strings.TrimSpace(string(data))
 	if key == "" {
-		return "", exit(2, "ssh public key %s is empty", pub)
+		return "", Exit(2, "ssh public key %s is empty", pub)
 	}
 	if !LooksLikeInlineSSHPublicKey(key) {
-		return "", exit(2, "ssh public key %s is not a supported OpenSSH public key", pub)
+		return "", Exit(2, "ssh public key %s is not a supported OpenSSH public key", pub)
 	}
 	return key, nil
 }
@@ -73,9 +78,12 @@ func testboxKeyPath(leaseID string) (string, error) {
 	if leaseID != strings.TrimSpace(leaseID) || !validLeaseClaimID(leaseID) {
 		return "", invalidLeaseClaimIDError{id: leaseID}
 	}
-	dir, err := os.UserConfigDir()
+	dir, err := leaseSSHRoot()
 	if err != nil {
-		return "", exit(2, "user config directory is unavailable")
+		if os.Getenv("XDG_STATE_HOME") != "" {
+			return "", err
+		}
+		return "", Exit(2, "user config directory is unavailable")
 	}
 	return filepath.Join(dir, "crabbox", "testboxes", leaseID, "id_ed25519"), nil
 }
@@ -85,35 +93,53 @@ func ensureTestboxLeaseDirectory(leaseID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	configDir, err := os.UserConfigDir()
+	if err := ensureLeaseSSHDirectories([]string{"crabbox", "testboxes", leaseID}); err != nil {
+		return "", err
+	}
+	return filepath.Dir(keyPath), nil
+}
+
+func ensureLeaseSSHDirectories(components []string) error {
+	configDir, err := leaseSSHRoot()
 	if err != nil {
-		return "", exit(2, "user config directory is unavailable")
+		return err
 	}
 	boundary, err := privateDirectoryDurabilityBoundary(configDir, configDir)
 	if err != nil {
-		return "", err
+		return err
 	}
+	_, rootErr := os.Lstat(configDir)
 	if err := ensureDirectoryPathWithoutSymlinks(configDir, boundary); err != nil {
-		return "", exit(2, "create user config directory without symlinks: %v", err)
+		return Exit(2, "create user config directory without symlinks: %v", err)
+	}
+	if os.Getenv("XDG_STATE_HOME") != "" {
+		if errors.Is(rootErr, os.ErrNotExist) {
+			if err := secureSSHTransportPath(configDir, true); err != nil {
+				return err
+			}
+		}
+		if err := verifySelectedLeaseSSHRoot(configDir); err != nil {
+			return err
+		}
 	}
 	current := configDir
-	for _, component := range []string{"crabbox", "testboxes", leaseID} {
+	for _, component := range components {
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) {
 			if err := createPrivateSSHTransportDirectory(current); err != nil {
-				return "", exit(2, "create private lease SSH directory: %v", err)
+				return Exit(2, "create private lease SSH directory: %v", err)
 			}
 			info, err = os.Lstat(current)
 		}
 		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return "", exit(2, "lease SSH directory has an unsafe path component")
+			return Exit(2, "lease SSH directory has an unsafe path component")
 		}
-		if err := secureSSHTransportPath(current, true); err != nil {
-			return "", exit(2, "secure lease SSH directory: %v", err)
+		if err := secureLeaseSSHDirectory(current); err != nil {
+			return Exit(2, "secure lease SSH directory: %v", err)
 		}
 	}
-	return filepath.Dir(keyPath), nil
+	return nil
 }
 
 func inspectTestboxLeaseDirectory(leaseID string) (string, error) {
@@ -121,9 +147,9 @@ func inspectTestboxLeaseDirectory(leaseID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	configDir, err := os.UserConfigDir()
+	configDir, err := leaseSSHRoot()
 	if err != nil {
-		return "", exit(2, "user config directory is unavailable")
+		return "", Exit(2, "user config directory is unavailable")
 	}
 	boundary, err := privateDirectoryDurabilityBoundary(configDir, configDir)
 	if err != nil {
@@ -133,15 +159,26 @@ func inspectTestboxLeaseDirectory(leaseID string) (string, error) {
 		return "", err
 	}
 	current := configDir
-	for _, component := range []string{"crabbox", "testboxes", leaseID} {
+	for _, component := range []string{"", "crabbox", "testboxes", leaseID} {
+		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
 		if err != nil {
 			return "", err
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return "", exit(2, "lease SSH directory has an unsafe path component")
+			return "", Exit(2, "lease SSH directory has an unsafe path component")
 		}
-		current = filepath.Join(current, component)
+		if os.Getenv("XDG_STATE_HOME") != "" {
+			var err error
+			if component == "" {
+				err = verifySelectedLeaseSSHRoot(current)
+			} else {
+				err = verifySelectedLeaseSSHPath(current, true)
+			}
+			if err != nil {
+				return "", err
+			}
+		}
 	}
 	return filepath.Dir(keyPath), nil
 }
@@ -198,6 +235,26 @@ func TestboxKeyPath(leaseID string) (string, error) {
 	return testboxKeyPath(leaseID)
 }
 
+// StoredTestboxKeyPath admits existing material in an explicitly selected root.
+// A missing key retains its calculated path for callers' existing diagnostics.
+func StoredTestboxKeyPath(leaseID string) (string, error) {
+	path, err := testboxKeyPath(leaseID)
+	if err != nil {
+		return "", err
+	}
+	return path, inspectSelectedLeaseSSHKey(leaseID)
+}
+
+// OptionalStoredTestboxKeyPath preserves legacy optional-key fallback when no
+// root is selected. Explicit-root admission errors must never become fallback.
+func OptionalStoredTestboxKeyPath(leaseID string) (string, error) {
+	path, err := StoredTestboxKeyPath(leaseID)
+	if err != nil && os.Getenv("XDG_STATE_HOME") == "" {
+		return "", nil
+	}
+	return path, err
+}
+
 func ensureTestboxKey(leaseID string) (string, string, error) {
 	return ensureTestboxKeyWithType(leaseID, "ed25519")
 }
@@ -222,12 +279,26 @@ func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	if _, err := os.Stat(privatePath); err == nil {
+	statKey := os.Stat
+	if os.Getenv("XDG_STATE_HOME") != "" {
+		statKey = os.Lstat
+	}
+	if _, err := statKey(privatePath); err == nil {
+		if err := inspectSelectedLeaseSSHKey(leaseID); err != nil {
+			return "", "", err
+		}
 		publicKey, err := PublicKeyFor(privatePath)
 		return privatePath, publicKey, err
+	} else if os.Getenv("XDG_STATE_HOME") != "" && !errors.Is(err, os.ErrNotExist) {
+		return "", "", err
 	}
 	if _, err := ensureTestboxLeaseDirectory(leaseID); err != nil {
 		return "", "", err
+	}
+	if os.Getenv("XDG_STATE_HOME") != "" {
+		if err := inspectSelectedLeaseSSHFiles(privatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", "", err
+		}
 	}
 	args := []string{"-q", "-t", keyType, "-N", "", "-C", "crabbox " + leaseID, "-f", privatePath}
 	if keyType == "rsa" {
@@ -235,30 +306,37 @@ func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
 	}
 	cmd := exec.Command("ssh-keygen", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return "", "", exit(2, "generate ssh key for %s: %v: %s", leaseID, err, strings.TrimSpace(string(out)))
+		return "", "", Exit(2, "generate ssh key for %s: %v: %s", leaseID, err, strings.TrimSpace(string(out)))
+	}
+	if err := secureCreatedLeaseSSHKeyPair(privatePath); err != nil {
+		return "", "", err
+	}
+	if err := inspectSelectedLeaseSSHKey(leaseID); err != nil {
+		return "", "", err
 	}
 	publicKey, err := PublicKeyFor(privatePath)
 	return privatePath, publicKey, err
 }
 
-func useStoredTestboxKey(target *SSHTarget, leaseID string) {
-	keyPath, err := testboxKeyPath(leaseID)
-	if err != nil {
-		return
+func useStoredTestboxKey(target *SSHTarget, leaseID string) error {
+	keyPath, err := OptionalStoredTestboxKeyPath(leaseID)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	if _, err := os.Stat(keyPath); err == nil {
 		target.Key = keyPath
 	}
+	return nil
 }
 
-func UseStoredTestboxKey(target *SSHTarget, leaseID string) {
-	useStoredTestboxKey(target, leaseID)
+func UseStoredTestboxKey(target *SSHTarget, leaseID string) error {
+	return useStoredTestboxKey(target, leaseID)
 }
 
 func useLeaseKnownHosts(target *SSHTarget, leaseID string) error {
 	dir, err := ensureTestboxLeaseDirectory(leaseID)
 	if err != nil {
-		return exit(2, "prepare lease SSH host-key directory for %s: %v", leaseID, err)
+		return Exit(2, "prepare lease SSH host-key directory for %s: %v", leaseID, err)
 	}
 	// Keep the verified host identity beside Crabbox's lease credentials so
 	// cleanup removes both and identical provider hostnames cannot share trust.
@@ -270,46 +348,17 @@ func UseLeaseKnownHosts(target *SSHTarget, leaseID string) error {
 	return useLeaseKnownHosts(target, leaseID)
 }
 
-func moveStoredTestboxKey(oldLeaseID, newLeaseID string) error {
-	if oldLeaseID == "" || newLeaseID == "" || oldLeaseID == newLeaseID {
-		return nil
-	}
-	oldPath, err := testboxKeyPath(oldLeaseID)
-	if err != nil {
-		return err
-	}
-	newPath, err := testboxKeyPath(newLeaseID)
-	if err != nil {
-		return err
-	}
-	oldDir := filepath.Dir(oldPath)
-	newDir := filepath.Dir(newPath)
-	if _, err := os.Stat(oldPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	if _, err := os.Stat(newPath); err == nil {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(newDir), 0o700); err != nil {
-		return err
-	}
-	return os.Rename(oldDir, newDir)
-}
-
 func removeStoredTestboxKey(leaseID string) {
-	_ = removeStoredTestboxConnectionArtifacts(leaseID)
+	_ = removeStoredTestboxConnectionArtifacts(context.Background(), leaseID)
 }
 
 func RemoveStoredTestboxKey(leaseID string) {
 	removeStoredTestboxKey(leaseID)
 }
 
-// RemoveStoredTestboxConnectionArtifacts removes only the canonical lease SSH directory.
+// RemoveStoredTestboxConnectionArtifacts closes lease-owned SSH masters and removes canonical credentials.
 func RemoveStoredTestboxConnectionArtifacts(leaseID string) error {
-	return removeStoredTestboxConnectionArtifacts(leaseID)
+	return removeStoredTestboxConnectionArtifacts(context.Background(), leaseID)
 }
 
 func providerKeyForLease(leaseID string) string {

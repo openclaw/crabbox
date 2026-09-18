@@ -86,11 +86,11 @@ func runWebVNCCleanupBridge(ctx context.Context, root string) error {
 		// Written only after the actual owner's Stop/Wait path completed.
 		_ = os.WriteFile(filepath.Join(root, fmt.Sprintf("reaped-%d", os.Getpid())), nil, 0o600)
 	}()
-	started, err := webVNCDaemonProcessStartIdentity(tunnel.PID())
+	started, err := LocalProcessStartIdentity(tunnel.PID())
 	if err != nil {
 		return err
 	}
-	childStarted, err := webVNCDaemonProcessStartIdentity(os.Getpid())
+	childStarted, err := LocalProcessStartIdentity(os.Getpid())
 	if err != nil {
 		return err
 	}
@@ -266,7 +266,7 @@ func startWebVNCCleanupFixture(t *testing.T, mode string) (string, string, *exec
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	started, err := webVNCDaemonProcessStartIdentity(cmd.Process.Pid)
+	started, err := LocalProcessStartIdentity(cmd.Process.Pid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,10 +301,10 @@ func waitWebVNCCleanupRecord(t *testing.T, root string, previousChild int) webVN
 		return false
 	})
 	t.Cleanup(func() {
-		if current, err := webVNCDaemonProcessStartIdentity(record.Child); err == nil && current == record.ChildStarted {
+		if current, err := LocalProcessStartIdentity(record.Child); err == nil && current == record.ChildStarted {
 			_ = syscall.Kill(record.Child, syscall.SIGKILL)
 		}
-		if current, err := webVNCDaemonProcessStartIdentity(record.Tunnel); err == nil && current == record.Started {
+		if current, err := LocalProcessStartIdentity(record.Tunnel); err == nil && current == record.Started {
 			_ = syscall.Kill(-record.Tunnel, syscall.SIGKILL)
 		}
 	})
@@ -505,7 +505,7 @@ func assertWebVNCCleanupReaped(t *testing.T, root string, record webVNCCleanupRe
 	if _, err := os.Stat(filepath.Join(root, fmt.Sprintf("reaped-%d", record.Child))); err != nil {
 		t.Fatalf("foreground child exited without reaping its real SSH tunnel: %v", err)
 	}
-	if current, err := webVNCDaemonProcessStartIdentity(record.Tunnel); err == nil && current == record.Started {
+	if current, err := LocalProcessStartIdentity(record.Tunnel); err == nil && current == record.Started {
 		t.Fatal("recorded SSH process survived foreground cleanup")
 	}
 }

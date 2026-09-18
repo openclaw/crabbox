@@ -1,10 +1,198 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+func TestPhalaOrdinarySources(t *testing.T) {
+	clearConfigEnv(t)
+	wantDefaults := PhalaConfig{CLIPath: "phala", InstanceType: "tdx.small", WorkRoot: "/var/volatile/crabbox"}
+	if got := baseConfig().Phala; !reflect.DeepEqual(got, wantDefaults) {
+		t.Fatalf("defaults %#v", got)
+	}
+	fields := []struct {
+		field, key, env string
+		path            bool
+	}{{"CLIPath", "cli", "CLI", true}, {"InstanceType", "instanceType", "INSTANCE_TYPE", false}, {"WorkRoot", "workRoot", "WORK_ROOT", false}, {"NodeID", "nodeId", "NODE_ID", false}, {"Compose", "compose", "COMPOSE", true}}
+	for _, source := range []string{"file", "env"} {
+		for _, value := range []string{"", "same", " padded ", "~/ordinary"} {
+			t.Run(source+"/"+value, func(t *testing.T) {
+				clearConfigEnv(t)
+				home := t.TempDir()
+				t.Setenv("HOME", home)
+				cfg := Config{}
+				for _, f := range fields {
+					v := "same"
+					if f.path {
+						v = "~/inherited"
+					}
+					reflect.ValueOf(&cfg.Phala).Elem().FieldByName(f.field).SetString(v)
+				}
+				want := cfg.Phala
+				for _, f := range fields {
+					v := reflect.ValueOf(&want).Elem().FieldByName(f.field)
+					if value != "" {
+						v.SetString(value)
+					}
+					if f.path && (source == "env" || value != "") && strings.HasPrefix(v.String(), "~/") {
+						v.SetString(filepath.Join(home, strings.TrimPrefix(v.String(), "~/")))
+					}
+				}
+				inputSource := configInputUser
+				if source == "file" {
+					body := map[string]any{}
+					for _, f := range fields {
+						body[f.key] = value
+					}
+					data, err := yaml.Marshal(map[string]any{"phala": body})
+					if err != nil {
+						t.Fatal(err)
+					}
+					var file fileConfig
+					if err := yaml.Unmarshal(data, &file); err != nil {
+						t.Fatal(err)
+					}
+					original := *file.Phala
+					if err := applyFileConfig(&cfg, file); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(*file.Phala, original) {
+						t.Fatal("input changed")
+					}
+				} else {
+					inputSource = configInputEnvironment
+					for _, f := range fields {
+						t.Setenv("CRABBOX_PHALA_"+f.env, value)
+					}
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var ledger configInputLedger
+				if value != "" {
+					ledger = ledger.withInput("phala", inputSource, configInputValue)
+				}
+				if !reflect.DeepEqual(cfg.Phala, want) || PhalaInstanceTypeWasExplicit(cfg) != (value != "") || !reflect.DeepEqual(cfg.inputProvenance, ledger) {
+					t.Fatalf("source %#v ledger %#v", cfg.Phala, cfg.inputProvenance)
+				}
+			})
+		}
+	}
+	for _, source := range []string{"file", "env"} {
+		for _, raw := range []string{"null", "false", "true", "invalid", ""} {
+			if source == "file" && (raw == "invalid" || raw == "") {
+				continue
+			}
+			t.Run(source+"/pointer/"+raw, func(t *testing.T) {
+				clearConfigEnv(t)
+				prior := true
+				cfg := Config{Phala: PhalaConfig{Attest: &prior}}
+				var input *bool
+				accepted := raw == "true" || raw == "false"
+				inputSource := configInputUser
+				if source == "file" {
+					var file fileConfig
+					if err := yaml.Unmarshal([]byte("phala: {attest: "+raw+"}"), &file); err != nil {
+						t.Fatal(err)
+					}
+					input = file.Phala.Attest
+					if err := applyFileConfig(&cfg, file); err != nil {
+						t.Fatal(err)
+					}
+					if input != nil && *input != (raw == "true") {
+						t.Fatal("file bool mutated")
+					}
+				} else {
+					inputSource = configInputEnvironment
+					t.Setenv("CRABBOX_PHALA_ATTEST", raw)
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var ledger configInputLedger
+				if accepted {
+					ledger = ledger.withInput("phala", inputSource, configInputValue)
+					if cfg.Phala.Attest == nil || cfg.Phala.Attest == &prior || cfg.Phala.Attest == input || *cfg.Phala.Attest != (raw == "true") {
+						t.Fatal("accepted bool must be independent fresh copy")
+					}
+				} else if cfg.Phala.Attest != &prior {
+					t.Fatal("ignored bool replaced prior pointer")
+				}
+				if !prior || !reflect.DeepEqual(cfg.inputProvenance, ledger) {
+					t.Fatal("prior value or accepted facts changed")
+				}
+			})
+		}
+	}
+}
+
+func TestPhalaOrdinaryWriterAndRuntimeShape(t *testing.T) {
+	for _, raw := range []string{"null", "false", "true"} {
+		path := isolatedConfigPath(t)
+		body := "phala: {cli: '~/ordinary', instanceType: ' padded ', workRoot: '', nodeId: '', compose: '', attest: " + raw + "}"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := readFileConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writeUserFileConfig(file); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := yaml.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]any{"cli": "~/ordinary", "instanceType": " padded "}
+		if raw != "null" {
+			want["attest"] = raw == "true"
+		}
+		if !reflect.DeepEqual(got, map[string]any{"phala": want}) {
+			t.Fatalf("writer %#v", got)
+		}
+		cfg := PhalaConfig{}
+		if raw != "null" {
+			v := raw == "true"
+			cfg.Attest = &v
+		}
+		data, err = json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runtimeJSON map[string]any
+		if err := json.Unmarshal(data, &runtimeJSON); err != nil {
+			t.Fatal(err)
+		}
+		v, present := runtimeJSON["Attest"]
+		if !present || len(runtimeJSON) != 6 || (raw == "null" && v != nil) || (raw != "null" && v != (raw == "true")) {
+			t.Fatalf("runtime JSON %s", data)
+		}
+		data, err = yaml.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var runtimeYAML map[string]any
+		if err := yaml.Unmarshal(data, &runtimeYAML); err != nil {
+			t.Fatal(err)
+		}
+		v, present = runtimeYAML["attest"]
+		if !present || len(runtimeYAML) != 6 || (raw == "null" && v != nil) || (raw != "null" && v != (raw == "true")) {
+			t.Fatalf("runtime YAML %s", data)
+		}
+	}
+}
 
 func TestPhalaConfigDefaults(t *testing.T) {
 	cfg := baseConfig()

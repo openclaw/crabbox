@@ -24,7 +24,7 @@ func providerRouting(cfg Config, request CommandRoutingRequest) CommandRouting {
 	if !ok {
 		return CommandRouting{}
 	}
-	cfg.Provider = provider.Name()
+	cfg.Provider = provider.Spec().Name
 	return router.CommandRouting(cfg, request)
 }
 
@@ -41,7 +41,7 @@ func CommandRoutingFor(cfg Config, leaseID string, purpose CommandRoutingPurpose
 	var args []string
 	if provider := strings.TrimSpace(cfg.Provider); provider != "" {
 		if resolved, err := ProviderFor(provider); err == nil {
-			provider = resolved.Name()
+			provider = resolved.Spec().Name
 		}
 		args = append(args, "--provider", provider)
 	}

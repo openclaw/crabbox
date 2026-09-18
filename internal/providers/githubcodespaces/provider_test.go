@@ -2,6 +2,8 @@ package githubcodespaces
 
 import (
 	"flag"
+	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +27,7 @@ func TestProviderSpec(t *testing.T) {
 }
 
 func TestProviderAliases(t *testing.T) {
-	got := strings.Join(Provider{}.Aliases(), ",")
+	got := strings.Join(Provider{}.Spec().Aliases, ",")
 	if got != "codespaces,gh-codespaces" {
 		t.Fatalf("aliases=%q", got)
 	}
@@ -39,8 +41,8 @@ func TestServerTypeForConfigUsesMachineOrExplicitType(t *testing.T) {
 	if got := provider.ServerTypeForConfig(core.Config{ServerType: "premiumLinux", ServerTypeExplicit: true, GitHubCodespaces: core.GitHubCodespacesConfig{Machine: "standardLinux32gb"}}); got != "premiumLinux" {
 		t.Fatalf("explicit ServerTypeForConfig=%q", got)
 	}
-	if got := provider.ServerTypeForClass("beast"); got != defaultCodespaceMachine {
-		t.Fatalf("ServerTypeForClass=%q", got)
+	if got := provider.ServerTypeForConfig(core.Config{Class: "beast"}); got != defaultCodespaceMachine {
+		t.Fatalf("ServerTypeForConfig=%q", got)
 	}
 }
 
@@ -289,7 +291,7 @@ func TestCodespacesWorkRootFlagControlsDefaultDerivation(t *testing.T) {
 			if err := (Provider{}).ApplyConfigDefaults(&cfg); err != nil {
 				t.Fatal(err)
 			}
-			backend := newBackend(Provider{}.Spec(), cfg, Runtime{})
+			backend := newBackend(Provider{}.Spec(), cfg, core.Runtime{})
 			if got := backend.effectiveWorkRoot("example-org/my-app"); got != tt.want {
 				t.Fatalf("work root=%q want %q", got, tt.want)
 			}
@@ -362,6 +364,99 @@ func TestValidRepoAllowsDotGitHubRepository(t *testing.T) {
 	for _, repo := range []string{".example/repo", "example./repo", "example-org/.", "example-org/.."} {
 		if validRepo(repo) {
 			t.Fatalf("repo=%q should be invalid", repo)
+		}
+	}
+}
+
+func TestCodespacesBindingRegistrationOrder(t *testing.T) {
+	order := []string{"repo", "ref", "machine", "devcontainer-path", "working-directory", "geo", "idle-timeout", "retention-period", "delete-on-release", "gh-path", "work-root"}
+	for i, duplicate := range order {
+		fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		fs.String("github-codespaces-"+duplicate, "", "")
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected duplicate panic")
+				}
+			}()
+			RegisterGitHubCodespacesProviderFlags(fs, core.BaseConfig())
+		}()
+		for j, name := range order {
+			if (fs.Lookup("github-codespaces-"+name) != nil) != (j <= i) {
+				t.Fatalf("duplicate %s registration prefix changed at %s", duplicate, name)
+			}
+		}
+		if fs.Lookup("github-codespaces-api-url") != nil || fs.Lookup("github-codespaces-token") != nil {
+			t.Fatal("new argv source")
+		}
+	}
+}
+
+func TestCodespacesBindingFlagPhases(t *testing.T) {
+	for _, provider := range []string{providerName, "codespaces", "gh-codespaces", "other"} {
+		for _, wrongType := range []bool{false, true} {
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			cfg.TargetOS = "linux"
+			before := cfg
+			fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+			fs.String("type", "", "")
+			fs.String("class", "", "")
+			values := RegisterGitHubCodespacesProviderFlags(fs, cfg)
+			if err := fs.Set("type", " generic-machine "); err != nil {
+				t.Fatal(err)
+			}
+			if wrongType {
+				values = struct{}{}
+			}
+			if err := ApplyGitHubCodespacesProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			want := before
+			if provider != "other" {
+				want.GitHubCodespaces.Machine = "generic-machine"
+				core.RecordProviderFlagInputs(&want, true, providerName)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("provider=%s wrong=%v pre-type generic effect", provider, wrongType)
+			}
+			cfg = before
+			cfg.TargetOS = "windows"
+			if err := ApplyGitHubCodespacesProviderFlags(&cfg, fs, struct{}{}); (err != nil) != (provider != "other") {
+				t.Fatal("target guard phase")
+			}
+			cfg = before
+			if err := fs.Set("class", "fixture"); err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyGitHubCodespacesProviderFlags(&cfg, fs, struct{}{}); (err != nil) != (provider != "other") {
+				t.Fatal("class guard phase")
+			}
+		}
+		for _, duration := range []string{"0s", "168h", "-1s", "1ns", "721h"} {
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			cfg.TargetOS = "linux"
+			fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+			fs.String("type", "", "")
+			values := RegisterGitHubCodespacesProviderFlags(fs, cfg)
+			args := []string{"--type=generic", "--github-codespaces-repo=example-org/app", "--github-codespaces-ref=raw-ref", "--github-codespaces-machine= machine ", "--github-codespaces-devcontainer-path=dev.json", "--github-codespaces-working-directory=/workspaces/app", "--github-codespaces-geo=raw-geo", "--github-codespaces-retention-period=" + duration, "--github-codespaces-delete-on-release=false", "--github-codespaces-gh-path=~/raw-gh", "--github-codespaces-work-root=/workspaces/fixture"}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			err := ApplyGitHubCodespacesProviderFlags(&cfg, fs, values)
+			bad := duration == "-1s" || duration == "721h"
+			if (err != nil) != bad {
+				t.Fatalf("%s: %v", duration, err)
+			}
+			wantDuration, _ := time.ParseDuration(duration)
+			if cfg.GitHubCodespaces.RetentionPeriod != wantDuration || !core.GitHubCodespacesRetentionExplicit(cfg) || cfg.GitHubCodespaces.DeleteOnRelease || !core.DeleteOnReleaseExplicit(cfg, providerName) || cfg.GitHubCodespaces.GHPath != "~/raw-gh" || cfg.WorkRoot != "/workspaces/fixture" || !core.IsWorkRootExplicit(&cfg) || cfg.ServerType != "machine" || !cfg.ServerTypeExplicit {
+				t.Fatal("typed values/markers/late effects moved after validation")
+			}
+			if cfg.GitHubCodespaces.APIURL != "https://api.github.com" || cfg.GitHubCodespaces.Repo != "example-org/app" || cfg.GitHubCodespaces.Ref != "raw-ref" || cfg.GitHubCodespaces.Machine != " machine " || cfg.GitHubCodespaces.DevcontainerPath != "dev.json" || cfg.GitHubCodespaces.WorkingDirectory != "/workspaces/app" || cfg.GitHubCodespaces.Geo != "raw-geo" {
+				t.Fatal("typed fields changed")
+			}
 		}
 	}
 }

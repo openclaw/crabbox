@@ -119,8 +119,26 @@ cat; printf stderr-ok >&2`
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", remoteWorkspaceOwnerPOSIXWitness(key, token, payload, true))
+			prefix := ""
+			if scenario == "binary-input" && runtime.GOOS == "darwin" {
+				prefix = "umask 027; "
+				payload = `if (printf unexpected >&13) 2>/dev/null; then exit 98; fi
+[ "$(umask)" = 0027 ] || exit 97
+` + payload
+			}
+			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", prefix+remoteWorkspaceOwnerPOSIXWitness(key, token, payload, true))
 			cmd.Env = []string{"HOME=" + home, "PATH=" + path}
+			if scenario == "binary-input" && runtime.GOOS == "darwin" {
+				file, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer file.Close()
+				// Include fd 13 to exercise the native handoff above single-digit fds.
+				for range 11 {
+					cmd.ExtraFiles = append(cmd.ExtraFiles, file)
+				}
+			}
 			cmd.Stdin = bytes.NewReader(input)
 			var stdout, stderr bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &stdout, &stderr

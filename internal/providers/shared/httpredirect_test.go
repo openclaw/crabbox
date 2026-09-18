@@ -3,36 +3,46 @@ package shared
 import (
 	"errors"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
+	"reflect"
 	"testing"
+	"time"
 )
 
-func TestSameOrigin(t *testing.T) {
-	t.Parallel()
+func TestControlAndDataHTTPClients(t *testing.T) {
+	control, data := ControlAndDataHTTPClients(nil, 23*time.Second)
+	if control == nil || data == nil || control == data || control.Timeout != 23*time.Second || data.Timeout != 0 {
+		t.Fatalf("default clients control=%+v data=%+v", control, data)
+	}
+	control.Timeout = time.Second
+	if data.Timeout != 0 {
+		t.Fatal("default control and data settings are coupled")
+	}
 
-	base := mustParseURL(t, "https://Example.COM/api")
-	tests := []struct {
-		name      string
-		candidate string
-		want      bool
-	}{
-		{name: "identical", candidate: "https://example.com/api", want: true},
-		{name: "default port", candidate: "HTTPS://EXAMPLE.COM:443/other", want: true},
-		{name: "other scheme", candidate: "http://example.com/api", want: false},
-		{name: "other host", candidate: "https://other.example.com/api", want: false},
-		{name: "other port", candidate: "https://example.com:8443/api", want: false},
-		{name: "userinfo ignored", candidate: "https://alice@example.com/api", want: true},
+	transport := &http.Transport{DisableKeepAlives: true}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			candidate := mustParseURL(t, test.candidate)
-			if got := SameOrigin(base, candidate); got != test.want {
-				t.Fatalf("SameOrigin(%q, %q) = %v, want %v", base, candidate, got, test.want)
-			}
-		})
+	redirectErr := errors.New("caller redirect policy")
+	redirectCalls := 0
+	redirect := func(*http.Request, []*http.Request) error { redirectCalls++; return redirectErr }
+	injected := &http.Client{Transport: transport, Jar: jar, Timeout: 17 * time.Second, CheckRedirect: redirect}
+	control, data = ControlAndDataHTTPClients(injected, time.Second)
+	if control != injected || data != injected {
+		t.Fatal("injected client identity changed")
 	}
-	if SameOrigin(nil, base) || SameOrigin(base, nil) {
-		t.Fatal("SameOrigin accepted a nil URL")
+	if injected.Transport != transport || injected.Jar != jar || injected.Timeout != 17*time.Second || reflect.ValueOf(injected.CheckRedirect).Pointer() != reflect.ValueOf(redirect).Pointer() {
+		t.Fatal("constructor mutated the injected client")
+	}
+	for _, client := range []*http.Client{control, data, injected} {
+		if !errors.Is(client.CheckRedirect(nil, nil), redirectErr) {
+			t.Fatal("caller redirect policy changed")
+		}
+	}
+	if redirectCalls != 3 {
+		t.Fatalf("redirect calls=%d", redirectCalls)
 	}
 }
 

@@ -13,8 +13,16 @@ import (
 const gitSeedDiagnosticLimit = 16 << 10
 
 // Remote output is untrusted, including helper output and URLs. Only fixed
-// labels leave this classifier; truncated captures are discarded by the reader.
+// labels leave this classifier; truncated captures are discarded before parsing.
 func warnRemoteGitSeedFailure(w io.Writer, output string, err error) {
+	reportRemoteGitSeedFailure(w, output, err, "continuing with file sync")
+}
+
+func reportRemoteGitSeedFailure(w io.Writer, output string, err error, disposition string) {
+	var truncated *gitOriginDiagnosticsTruncatedError
+	if errors.As(err, &truncated) {
+		output = ""
+	}
 	phase, reason := "unknown", "unknown"
 	lines := strings.Split(output, "\n")
 	detailStart := 0
@@ -74,5 +82,5 @@ func warnRemoteGitSeedFailure(w io.Writer, output string, err error) {
 	case errors.As(err, &exitErr) && exitErr.ExitCode() >= 0:
 		status = strconv.Itoa(exitErr.ExitCode())
 	}
-	fmt.Fprintf(w, "warning: remote git seed failed: phase=%s reason=%s exit=%s; continuing with file sync; Git metadata was not seeded or verified\n", phase, reason, status)
+	fmt.Fprintf(w, "warning: remote git seed failed: phase=%s reason=%s exit=%s; %s; Git metadata was not seeded or verified\n", phase, reason, status, disposition)
 }

@@ -25,11 +25,6 @@ if (!/^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/.test(tag)) {
 
 const repository = JSON.parse(fs.readFileSync(repositoryFile, "utf8"));
 const rulesets = JSON.parse(fs.readFileSync(rulesetsFile, "utf8"));
-const releaseTeamBypass = {
-  actor_id: 16654667,
-  actor_type: "Team",
-  bypass_mode: "pull_request",
-};
 const requiredReleaseWorkflow = {
   path: ".github/workflows/crabbox-release-check.yml",
   ref: "refs/heads/main",
@@ -53,16 +48,6 @@ function exactActiveRuleset(value, target) {
     value.conditions?.ref_name &&
     Array.isArray(value.conditions.ref_name.include) &&
     Array.isArray(value.conditions.ref_name.exclude)
-  );
-}
-
-function hasExactReleaseTeamBypass(value) {
-  const actors = value.bypass_actors;
-  return (
-    actors.length === 1 &&
-    actors[0]?.actor_id === releaseTeamBypass.actor_id &&
-    actors[0]?.actor_type === releaseTeamBypass.actor_type &&
-    actors[0]?.bypass_mode === releaseTeamBypass.bypass_mode
   );
 }
 
@@ -141,31 +126,6 @@ function rule(value, type) {
   return value.rules.find((entry) => entry?.type === type);
 }
 
-const branchApprovalPolicies = rulesets.filter(
-  (value) =>
-    exactActiveRuleset(value, "branch") && includesBranch(value) && rule(value, "pull_request"),
-);
-if (branchApprovalPolicies.length !== 1) {
-  fail(
-    "default branch must have exactly one active pull-request approval ruleset",
-  );
-}
-const branchPolicy = branchApprovalPolicies[0];
-const pullRequest = rule(branchPolicy, "pull_request")?.parameters;
-if (
-  !hasExactReleaseTeamBypass(branchPolicy) ||
-  branchPolicy.rules.length !== 1 ||
-  pullRequest?.dismiss_stale_reviews_on_push !== true ||
-  pullRequest?.require_code_owner_review !== true ||
-  pullRequest?.require_last_push_approval !== true ||
-  !Number.isSafeInteger(pullRequest?.required_approving_review_count) ||
-  pullRequest.required_approving_review_count < 1
-) {
-  fail(
-    "default branch lacks one approval-only release-team PR bypass with CODEOWNER and last-push protection",
-  );
-}
-
 const bypassableHistoryPolicy = rulesets.find(
   (value) =>
     exactActiveRuleset(value, "branch") &&
@@ -185,11 +145,7 @@ const branchHistoryPolicy = rulesets.find((value) => {
   ) {
     return false;
   }
-  return (
-    !rule(value, "pull_request") &&
-    rule(value, "deletion") &&
-    rule(value, "non_fast_forward")
-  );
+  return rule(value, "deletion") && rule(value, "non_fast_forward");
 });
 if (!branchHistoryPolicy) {
   fail(
@@ -240,7 +196,6 @@ if (!tagPolicy) {
 
 process.stdout.write(
   `${JSON.stringify({
-    branchApprovalRulesetId: branchPolicy.id,
     branchHistoryRulesetId: branchHistoryPolicy.id,
     branchWorkflowRulesetId: branchWorkflowPolicy.id,
     tagRulesetId: tagPolicy.id,

@@ -3,33 +3,22 @@ package nomad
 import (
 	"context"
 	"io"
-	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *backend) syncWorkspace(ctx context.Context, client Client, ready allocationReadiness, req RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]timingPhase, time.Duration, error) {
-	syncReq := core.DelegatedArchiveSyncRequest{
-		Config:              b.cfg,
-		Repo:                req.Repo,
-		ForceSyncLarge:      req.ForceSyncLarge,
-		Workdir:             workdir,
-		TempPattern:         "crabbox-nomad-sync-*.tgz",
-		RemoteArchiveDir:    "/tmp",
-		RemoteArchivePrefix: ".crabbox-nomad-sync-",
-		PhaseName:           "nomad_sync",
-		Provider:            providerName,
-		Stderr:              b.rt.Stderr,
-		Now:                 b.now,
-		CleanupContext:      b.cleanupContext,
-		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
-			return b.uploadArchive(uploadCtx, client, ready, remoteArchive, body)
-		},
-		Exec: func(execCtx context.Context, command string) error {
-			return b.execShell(execCtx, client, ready, command)
-		},
+func (b *backend) workspace(client Client, ready allocationReadiness, req RunRequest, workdir string) core.ArchiveWorkspace {
+	workspace := core.NewArchiveWorkspace(b.cfg, b.rt, req, providerName, workdir)
+	workspace.RemoteArchiveDir = "/tmp"
+	workspace.RemoteArchivePrefix = ".crabbox-nomad-sync-"
+	workspace.CleanupContext = b.cleanupContext
+	workspace.Upload = func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
+		return b.uploadArchive(uploadCtx, client, ready, remoteArchive, body)
 	}
-	return core.RunDelegatedArchiveSync(ctx, syncReq, prepared...)
+	workspace.Exec = func(execCtx context.Context, command string) error {
+		return b.execShell(execCtx, client, ready, command)
+	}
+	return workspace
 }
 
 func (b *backend) uploadArchive(ctx context.Context, client Client, ready allocationReadiness, remoteArchive string, body io.Reader) error {

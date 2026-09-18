@@ -64,7 +64,7 @@ function Start-Linux([string]$mode) {
     if ([BitConverter]::ToString($preamble) -notin @('','EF-BB-BF')) { throw 'unsupported WSL2 pipe preamble' }
     $info.Arguments = '--exec sh -c "' + $bootstrap.Replace('"','\"') + '" sh ' +
         $helperSize + ' ' + $preamble.Length + ' ' + $mode + ' ' + $directory + ' ' + $nonce + ' ' +
-        $commandSize + ' ' + $payloadSize + ' ' + $idle + ' ' + $grace
+        $commandSize + ' ' + $payloadSize + ' ' + $idle + ' ' + $grace@NATIVE_CLEANUP_ALLOWANCE@
     return [Diagnostics.Process]::Start($info)
 }
 function Open-LinuxInput($child) {

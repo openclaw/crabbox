@@ -81,7 +81,7 @@ func (k FixedLeaseKind) ValidateTerminalClaim(claim, previous LeaseClaim, leaseI
 		intent.State != "released" ||
 		!validIdentity || claim.SSHHost != "" || claim.SSHPort != 0 ||
 		len(intent.Attempt) != 0 || len(intent.FailedAttempts) != 0 {
-		return exit(4, "lease_id_conflict: fixed %s lease %s has an invalid terminal tombstone", k.Label, leaseID)
+		return Exit(4, "lease_id_conflict: fixed %s lease %s has an invalid terminal tombstone", k.Label, leaseID)
 	}
 	if extra != nil {
 		if err := extra(claim); err != nil {
@@ -95,7 +95,7 @@ func (k FixedLeaseKind) ValidateTerminalClaim(claim, previous LeaseClaim, leaseI
 			if claim.CloudID != expected.CloudID || claim.CloudNumericID != expected.CloudNumericID ||
 				claim.CloudImmutableID != expected.CloudImmutableID || claim.RepoRoot != expected.RepoRoot ||
 				!maps.Equal(claim.Labels, expected.Labels) {
-				return exit(4, "lease_id_conflict: fixed %s lease %s terminal tombstone changed resource identity", k.Label, leaseID)
+				return Exit(4, "lease_id_conflict: fixed %s lease %s terminal tombstone changed resource identity", k.Label, leaseID)
 			}
 		}
 		if previous.LeaseID != leaseID ||
@@ -104,7 +104,7 @@ func (k FixedLeaseKind) ValidateTerminalClaim(claim, previous LeaseClaim, leaseI
 			previousIntent.ProviderScope != intent.ProviderScope ||
 			previousIntent.CheckpointID != intent.CheckpointID ||
 			previousIntent.Slug != intent.Slug {
-			return exit(4, "lease_id_conflict: fixed %s lease %s terminal tombstone changed identity", k.Label, leaseID)
+			return Exit(4, "lease_id_conflict: fixed %s lease %s terminal tombstone changed identity", k.Label, leaseID)
 		}
 	}
 	return nil
@@ -123,7 +123,7 @@ func (k FixedLeaseKind) RetainClaimAfterRelease(
 	}
 	if !exists || !k.IsFixedClaim(claim) {
 		if k.IsFixedClaim(previous) || providerEvidence {
-			return false, exit(4, "lease_id_conflict: fixed %s lease %s has no valid terminal tombstone after release", k.Label, leaseID)
+			return false, Exit(4, "lease_id_conflict: fixed %s lease %s has no valid terminal tombstone after release", k.Label, leaseID)
 		}
 		return false, nil
 	}

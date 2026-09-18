@@ -43,7 +43,9 @@ func redirectCheckedHTTPClient(source *http.Client, check func(*http.Request) er
 	return &client
 }
 
-func sameHTTPOrigin(a, b *url.URL) bool {
+// SameHTTPOrigin compares scheme, hostname, and effective port. Callers retain
+// URL admission and any redirect restrictions beyond origin equality.
+func SameHTTPOrigin(a, b *url.URL) bool {
 	return a != nil && b != nil &&
 		strings.EqualFold(a.Scheme, b.Scheme) &&
 		strings.EqualFold(a.Hostname(), b.Hostname()) &&

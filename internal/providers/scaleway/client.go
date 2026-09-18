@@ -185,7 +185,7 @@ func (t *scalewayRedirectTransport) RoundTrip(req *http.Request) (*http.Response
 	switch {
 	case parseErr != nil:
 		marker = scalewayRedirectInvalid
-	case !sameScalewayOrigin(t.trusted, target):
+	case !core.SameHTTPOrigin(t.trusted, target):
 		marker = scalewayRedirectCrossOrigin
 	case t.enforceDefaultLimit && scalewayRedirectHop(req.Context()) >= 9:
 		marker = scalewayRedirectLimit
@@ -249,7 +249,7 @@ func secureScalewayHTTPClient(source *http.Client, trusted *url.URL) *http.Clien
 				return errScalewayRedirectLimit
 			}
 		}
-		if !sameScalewayOrigin(trusted, req.URL) {
+		if !core.SameHTTPOrigin(trusted, req.URL) {
 			return errScalewayCrossOriginRedirect
 		}
 		if originalCheckRedirect != nil {
@@ -275,27 +275,6 @@ func isScalewayRedirect(status int) bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func sameScalewayOrigin(a, b *url.URL) bool {
-	return a != nil && b != nil &&
-		strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectiveScalewayPort(a) == effectiveScalewayPort(b)
-}
-
-func effectiveScalewayPort(value *url.URL) string {
-	if port := value.Port(); port != "" {
-		return port
-	}
-	switch strings.ToLower(value.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
 	}
 }
 
@@ -332,10 +311,10 @@ func applyCrabboxScalewayOverrides(profile *scw.Profile, cfg core.Config) {
 
 func applyScalewayLocationDefaults(profile *scw.Profile) {
 	if stringPtrValue(profile.DefaultRegion) == "" {
-		profile.DefaultRegion = scw.StringPtr(defaultRegion)
+		profile.DefaultRegion = scw.StringPtr(core.ScalewayConfigDefaultRegion)
 	}
 	if stringPtrValue(profile.DefaultZone) == "" {
-		profile.DefaultZone = scw.StringPtr(defaultZone)
+		profile.DefaultZone = scw.StringPtr(core.ScalewayConfigDefaultZone)
 	}
 }
 

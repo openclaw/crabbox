@@ -2,10 +2,14 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const runFailureEvidenceTimeout = 5 * time.Second
@@ -48,11 +52,21 @@ func ClassifyRunFailureWithEvidence(exitCode int, text string, phases []TimingPh
 		return FailureClassification{BlockedStage: "ssh", RetryLikely: "true"}
 	case isKnownHTMLAuthBody(lower):
 		return FailureClassification{BlockedStage: "provider_auth", RetryLikely: "false"}
+	}
+	// Runtime phases outrank workload text that may describe an earlier phase.
+	switch phaseName := finalTimingPhaseName(phases); phaseName {
+	case "install", "hydrate", "setup":
+		return FailureClassification{BlockedStage: "install", RetryLikely: "unknown"}
+	case "build", "test":
+		return FailureClassification{BlockedStage: phaseName, RetryLikely: "unknown"}
+	case "", "user-command":
+		// No specific phase was reported; retain diagnostic-only classification.
+	default:
+		return FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"}
+	}
+	switch {
 	case strings.Contains(lower, "exdev") ||
-		strings.Contains(lower, "enomem") ||
-		strings.Contains(lower, "package-import-method") ||
-		strings.Contains(lower, "child-concurrency") ||
-		strings.Contains(lower, "network-concurrency"):
+		strings.Contains(lower, "enomem"):
 		return FailureClassification{BlockedStage: "install", RetryLikely: "unknown"}
 	case strings.Contains(lower, "model_call") ||
 		strings.Contains(lower, "model call") ||
@@ -62,18 +76,28 @@ func ClassifyRunFailureWithEvidence(exitCode int, text string, phases []TimingPh
 		strings.Contains(lower, "tokens") && strings.Contains(lower, "maximum"):
 		return FailureClassification{BlockedStage: "model_call", RetryLikely: "unknown"}
 	}
-	if phaseName := finalTimingPhaseName(phases); strings.Contains(phaseName, "install") || strings.Contains(phaseName, "hydrate") || strings.Contains(phaseName, "setup") {
-		return FailureClassification{BlockedStage: "install", RetryLikely: "unknown"}
-	}
 	return FailureClassification{BlockedStage: "unknown", RetryLikely: "unknown"}
 }
 
-func classifyRunOutcomeFailure(exitCode int, text string, phases []TimingPhase, evidence RunFailureEvidence, testResultsFailed bool) FailureClassification {
+func classifyRunOutcomeFailure(exitCode int, text string, phases []TimingPhase, evidence RunFailureEvidence, testResultsFailed, artifactValidationFailed bool) FailureClassification {
 	classification := ClassifyRunFailureWithEvidence(exitCode, text, phases, evidence)
+	if artifactValidationFailed && classification.ResourceExhaustion == "" {
+		return FailureClassification{BlockedStage: "artifacts", RetryLikely: "unknown"}
+	}
 	if testResultsFailed && classification.ResourceExhaustion == "" {
 		return FailureClassification{BlockedStage: "test", RetryLikely: "false"}
 	}
 	return classification
+}
+
+func applyArtifactFailureOutcome(report *TimingReport, artifactFailure, observedContextErr error) {
+	if artifactFailure == nil || report.ResourceExhaustion != "" {
+		return
+	}
+	// The workload succeeded; the synthetic gate code is not a command exit.
+	failure := errors.Join(artifactFailure, observedContextErr)
+	report.RunStatus = RunStatusForResult(RunResult{}, failure)
+	report.ErrorKind = RunErrorKindForResult(RunResult{}, failure)
 }
 
 func isBlacksmithActionsCancelled(lower string) bool {
@@ -147,11 +171,56 @@ func collectRunFailureEvidence(ctx context.Context, collector RunFailureEvidence
 	}
 	switch evidence.ResourceExhaustion {
 	case "", ResourceExhaustionMemory:
-		return evidence
+		return sanitizeRunFailureEvidence(evidence)
 	default:
 		fmt.Fprintf(nonNilWriter(warnings), "warning: failed-run evidence collection returned unsupported resource exhaustion reason %q\n", evidence.ResourceExhaustion)
 		return RunFailureEvidence{}
 	}
+}
+
+// Optional presentation must never invalidate positive provider evidence.
+func sanitizeRunFailureEvidence(evidence RunFailureEvidence) RunFailureEvidence {
+	clean := RunFailureEvidence{ResourceExhaustion: evidence.ResourceExhaustion}
+	if safeFailurePresentation(evidence.Hint, 768) {
+		clean.Hint = evidence.Hint
+	}
+	keys := make([]string, 0, len(evidence.Details))
+	for key := range evidence.Details {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	total := len(clean.Hint)
+	for _, key := range keys {
+		value := evidence.Details[key]
+		if !safeFailurePresentation(key, 64) || !safeFailurePresentation(value, 256) ||
+			strings.IndexFunc(key, func(r rune) bool {
+				return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '-')
+			}) >= 0 || total+len(key)+len(value) > 4096 {
+			continue
+		}
+		if clean.Details == nil {
+			clean.Details = make(map[string]string)
+		}
+		clean.Details[key] = value
+		total += len(key) + len(value)
+		if len(clean.Details) == 16 {
+			break
+		}
+	}
+	return clean
+}
+
+func safeFailurePresentation(value string, limit int) bool {
+	return value != "" && len(value) <= limit && utf8.ValidString(value) &&
+		strings.IndexFunc(value, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) < 0
+}
+
+func runFailureEvidenceSnapshot(evidence RunFailureEvidence) *RunFailureEvidence {
+	clean := sanitizeRunFailureEvidence(evidence)
+	if clean.ResourceExhaustion == "" && clean.Hint == "" && len(clean.Details) == 0 {
+		return nil
+	}
+	return &clean
 }
 
 func nonNilWriter(w io.Writer) io.Writer {
@@ -241,11 +310,14 @@ type runFailureDigestInput struct {
 	CommandDisplay        string
 	ShellMode             bool
 	ScriptMode            bool
+	NoSync                bool
+	RequiredArtifactGlobs []string
 	Routing               CommandRouting
 	SSHRouting            CommandRouting
 	StopRouting           CommandRouting
 	StopCommand           string
 	Classification        FailureClassification
+	Evidence              RunFailureEvidence
 	Phases                []TimingPhase
 	Results               *TestResultSummary
 }
@@ -268,7 +340,16 @@ func printRunFailureDigest(w io.Writer, input runFailureDigestInput) {
 		fmt.Fprintf(w, "  resource_exhaustion: %s\n", input.Classification.ResourceExhaustion)
 	}
 	if input.Classification.ResourceExhaustion == ResourceExhaustionMemory {
-		fmt.Fprintln(w, "  hint: increase the memory limit or reduce workload concurrency before retrying")
+		evidence := sanitizeRunFailureEvidence(input.Evidence)
+		fmt.Fprintf(w, "  hint: %s\n", blank(evidence.Hint, "reduce memory demand and inspect active limits and runtime capacity before retrying"))
+		keys := make([]string, 0, len(evidence.Details))
+		for key := range evidence.Details {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			fmt.Fprintf(w, "  evidence: %s=%s\n", key, evidence.Details[key])
+		}
 	}
 	if input.LeaseStopped {
 		fmt.Fprintln(w, "  lease: stopped; lease-based recovery is unavailable")
@@ -279,7 +360,7 @@ func printRunFailureDigest(w io.Writer, input runFailureDigestInput) {
 	printFailureDigestPhases(w, input.Phases)
 	printFailureDigestShellChain(w, input)
 	printFailureDigestResults(w, input.Results)
-	for _, command := range failureDigestNextCommands(input, retry) {
+	for _, command := range classifiedFailureDigestNextCommands(input, retry) {
 		fmt.Fprintf(w, "  next: %s\n", command)
 	}
 }
@@ -316,6 +397,8 @@ func failureDigestPhase(classification FailureClassification, phases []TimingPha
 
 func failureDigestArea(classification FailureClassification, phase string) string {
 	switch classification.BlockedStage {
+	case "artifacts":
+		return "artifacts"
 	case "provider_auth":
 		return "provider_auth"
 	case "ssh":
@@ -360,7 +443,14 @@ func failureDigestNextCommands(input runFailureDigestInput, retry string) []stri
 			if len(routing.Args) == 0 {
 				routing = fallbackFailureDigestRouting(input, CommandRoutingRetry)
 			}
-			runArgs := append(append([]string{"crabbox", "run"}, routing.Args...), "--id", leaseRef, "--fresh-sync")
+			syncFlag := "--fresh-sync"
+			if input.NoSync {
+				syncFlag = "--no-sync"
+			}
+			runArgs := append(append([]string{"crabbox", "run"}, routing.Args...), "--id", leaseRef, syncFlag)
+			for _, glob := range input.RequiredArtifactGlobs {
+				runArgs = append(runArgs, "--require-artifact", glob)
+			}
 			if input.ShellMode {
 				runArgs = append(runArgs, "--shell")
 			}
@@ -373,6 +463,13 @@ func failureDigestNextCommands(input runFailureDigestInput, retry string) []stri
 		commands = append(commands, firstNonBlank(input.StopCommand, stopRouting.ShellCommand(append(append([]string{"crabbox", "stop"}, stopRouting.Args...), leaseRef))))
 	}
 	return commands
+}
+
+func classifiedFailureDigestNextCommands(input runFailureDigestInput, retry string) []string {
+	if retry != "true" {
+		retry = "false"
+	}
+	return failureDigestNextCommands(input, retry)
 }
 
 func failureDigestRetryCommand(input runFailureDigestInput) string {

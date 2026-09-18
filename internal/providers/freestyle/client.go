@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
@@ -86,16 +87,16 @@ type freestyleHTTPClient struct {
 const freestyleListPageSize = 100
 const freestyleControlTimeout = 60 * time.Second
 
-var newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
+var newFreestyleClient = func(cfg core.Config, rt core.Runtime) (freestyleAPI, error) {
 	apiKey := strings.TrimSpace(cfg.Freestyle.APIKey)
 	if apiKey == "" {
-		return nil, exit(2, "provider=freestyle requires FREESTYLE_API_KEY")
+		return nil, core.Exit(2, "provider=freestyle requires FREESTYLE_API_KEY")
 	}
-	apiURL, err := validateFreestyleAPIURL(blank(cfg.Freestyle.APIURL, "https://api.freestyle.sh"))
+	apiURL, err := validateFreestyleAPIURL(core.Blank(cfg.Freestyle.APIURL, core.FreestyleConfigDefaultAPIURL))
 	if err != nil {
 		return nil, err
 	}
-	httpClient, dataHTTPClient := freestyleHTTPClients(rt.HTTP, freestyleControlTimeout)
+	httpClient, dataHTTPClient := shared.ControlAndDataHTTPClients(rt.HTTP, freestyleControlTimeout)
 	trusted, _ := url.Parse(apiURL)
 	return &freestyleHTTPClient{
 		apiKey:         apiKey,
@@ -105,18 +106,11 @@ var newFreestyleClient = func(cfg Config, rt Runtime) (freestyleAPI, error) {
 	}, nil
 }
 
-func freestyleHTTPClients(injected *http.Client, controlTimeout time.Duration) (*http.Client, *http.Client) {
-	if injected != nil {
-		return injected, injected
-	}
-	return &http.Client{Timeout: controlTimeout}, &http.Client{}
-}
-
 func validateFreestyleAPIURL(raw string) (string, error) {
 	return shared.NormalizeHTTPSURL(raw, shared.EndpointURLErrors{
-		Invalid:    exit(2, "provider=freestyle API URL must be an absolute HTTPS URL"),
-		Components: exit(2, "provider=freestyle API URL must not contain userinfo, query parameters, or a fragment"),
-		Insecure:   exit(2, "provider=freestyle API URL must use HTTPS except for loopback development endpoints"),
+		Invalid:    core.Exit(2, "provider=freestyle API URL must be an absolute HTTPS URL"),
+		Components: core.Exit(2, "provider=freestyle API URL must not contain userinfo, query parameters, or a fragment"),
+		Insecure:   core.Exit(2, "provider=freestyle API URL must use HTTPS except for loopback development endpoints"),
 	})
 }
 

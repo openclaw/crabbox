@@ -22,7 +22,7 @@ func TestControllerRecoveryDoesNotSignalPriorBootProcessGroup(t *testing.T) {
 	if err := runner.RecoverControllerChildren(context.Background(), statePath); err != nil {
 		t.Fatal(err)
 	}
-	if _, alive := webVNCDaemonProcessCommand(child.Process.Pid); !alive {
+	if _, alive := LocalProcessCommand(child.Process.Pid); !alive {
 		t.Fatal("prior-boot controller identity signaled the recycled process group")
 	}
 	if _, err := os.Stat(identityPath); !os.IsNotExist(err) {
@@ -42,7 +42,7 @@ func TestControllerRecoveryRequiresRecordedNonceMatch(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "does not match its recorded process identity") {
 		t.Fatalf("recovery error=%v, want nonce mismatch refusal", err)
 	}
-	if _, alive := webVNCDaemonProcessCommand(child.Process.Pid); !alive {
+	if _, alive := LocalProcessCommand(child.Process.Pid); !alive {
 		t.Fatal("nonce mismatch signaled the unrelated controller process group")
 	}
 	if _, err := os.Stat(identityPath); err != nil {
@@ -103,7 +103,7 @@ func startControllerRecoveryTestProcess(t *testing.T, nonce string) *exec.Cmd {
 
 func writeControllerRecoveryTestIdentity(t *testing.T, pid int, nonce, bootID string) (string, string) {
 	t.Helper()
-	started, err := webVNCDaemonProcessStartIdentity(pid)
+	started, err := LocalProcessStartIdentity(pid)
 	if err != nil {
 		t.Fatal(err)
 	}

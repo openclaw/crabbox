@@ -86,7 +86,7 @@ func TestMachine0TouchDurablyPersistsLifecycleAndIdleTimeout(t *testing.T) {
 			}
 			api.machine.PricePerHour = 123_000
 			api.machines = []machine{api.machine}
-			lease, err = b.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, StatusOnly: true})
+			lease, err = b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -98,7 +98,7 @@ func TestMachine0TouchDurablyPersistsLifecycleAndIdleTimeout(t *testing.T) {
 			now := previousTouch.Add(2 * time.Minute)
 			b.rt.Clock = machine0HeartbeatClock(now)
 			b.cfg.IdleTimeout = 15 * time.Minute
-			touch := TouchRequest{Lease: lease, State: "running", IdleTimeout: b.cfg.IdleTimeout}
+			touch := core.TouchRequest{Lease: lease, State: "running", IdleTimeout: b.cfg.IdleTimeout}
 			wantTimeout := 45 * time.Minute
 			if tc.override > 0 {
 				touch.IdleTimeoutOverride = &tc.override
@@ -124,7 +124,7 @@ func TestMachine0TouchDurablyPersistsLifecycleAndIdleTimeout(t *testing.T) {
 
 			fresh := testBackendWithAPI(api)
 			fresh.cfg.IdleTimeout = 5 * time.Minute
-			resolved, err := fresh.Resolve(context.Background(), ResolveRequest{ID: lease.LeaseID, StatusOnly: true})
+			resolved, err := fresh.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true})
 			if err != nil || resolved.Server.Labels["idle_timeout_secs"] != wantSeconds ||
 				resolved.Server.Labels["last_touched_at"] != core.LeaseLabelTime(now) {
 				t.Fatalf("fresh backend lost committed lifecycle: lease=%#v err=%v", resolved, err)
@@ -139,56 +139,56 @@ func TestMachine0TouchRejectsOwnershipChangesWithoutMutation(t *testing.T) {
 	tooShort := 100 * time.Millisecond
 	tests := []struct {
 		name   string
-		mutate func(*testing.T, *LeaseTarget, *LeaseClaim, *TouchRequest)
+		mutate func(*testing.T, *core.LeaseTarget, *core.LeaseClaim, *core.TouchRequest)
 		want   string
 	}{
-		{name: "missing snapshot", mutate: func(_ *testing.T, lease *LeaseTarget, _ *LeaseClaim, _ *TouchRequest) {
-			core.SetServerLeaseClaimSnapshot(&lease.Server, LeaseClaim{}, false)
+		{name: "missing snapshot", mutate: func(_ *testing.T, lease *core.LeaseTarget, _ *core.LeaseClaim, _ *core.TouchRequest) {
+			core.SetServerLeaseClaimSnapshot(&lease.Server, core.LeaseClaim{}, false)
 		}, want: "no exact claim snapshot"},
-		{name: "noncanonical lease", mutate: func(_ *testing.T, lease *LeaseTarget, _ *LeaseClaim, _ *TouchRequest) {
+		{name: "noncanonical lease", mutate: func(_ *testing.T, lease *core.LeaseTarget, _ *core.LeaseClaim, _ *core.TouchRequest) {
 			lease.LeaseID = "not-canonical"
 		}, want: "canonical lease"},
-		{name: "wrong lease", mutate: func(_ *testing.T, lease *LeaseTarget, _ *LeaseClaim, _ *TouchRequest) {
+		{name: "wrong lease", mutate: func(_ *testing.T, lease *core.LeaseTarget, _ *core.LeaseClaim, _ *core.TouchRequest) {
 			lease.LeaseID = "cbx_abcdef123457"
 		}, want: "canonical lease"},
-		{name: "wrong server provider", mutate: func(_ *testing.T, lease *LeaseTarget, _ *LeaseClaim, _ *TouchRequest) {
+		{name: "wrong server provider", mutate: func(_ *testing.T, lease *core.LeaseTarget, _ *core.LeaseClaim, _ *core.TouchRequest) {
 			lease.Server.Provider = "external"
 		}, want: "provider"},
-		{name: "wrong claim provider", mutate: func(_ *testing.T, _ *LeaseTarget, claim *LeaseClaim, _ *TouchRequest) {
+		{name: "wrong claim provider", mutate: func(_ *testing.T, _ *core.LeaseTarget, claim *core.LeaseClaim, _ *core.TouchRequest) {
 			claim.Provider = "external"
 		}, want: "provider"},
-		{name: "missing server resource", mutate: func(_ *testing.T, lease *LeaseTarget, _ *LeaseClaim, _ *TouchRequest) {
+		{name: "missing server resource", mutate: func(_ *testing.T, lease *core.LeaseTarget, _ *core.LeaseClaim, _ *core.TouchRequest) {
 			lease.Server.CloudID = ""
 		}, want: "immutable Machine0 identity"},
-		{name: "wrong server resource", mutate: func(_ *testing.T, lease *LeaseTarget, _ *LeaseClaim, _ *TouchRequest) {
+		{name: "wrong server resource", mutate: func(_ *testing.T, lease *core.LeaseTarget, _ *core.LeaseClaim, _ *core.TouchRequest) {
 			lease.Server.CloudID = "vm-replacement"
 			lease.Server.ImmutableID = "vm-replacement"
 		}, want: "immutable Machine0 identity"},
-		{name: "missing server immutable identity", mutate: func(_ *testing.T, lease *LeaseTarget, _ *LeaseClaim, _ *TouchRequest) {
+		{name: "missing server immutable identity", mutate: func(_ *testing.T, lease *core.LeaseTarget, _ *core.LeaseClaim, _ *core.TouchRequest) {
 			lease.Server.ImmutableID = ""
 		}, want: "immutable Machine0 identity"},
-		{name: "wrong claim resource", mutate: func(_ *testing.T, _ *LeaseTarget, claim *LeaseClaim, _ *TouchRequest) {
+		{name: "wrong claim resource", mutate: func(_ *testing.T, _ *core.LeaseTarget, claim *core.LeaseClaim, _ *core.TouchRequest) {
 			claim.CloudID = "vm-replacement"
 		}, want: "Machine0 id mismatch"},
-		{name: "missing claim immutable identity", mutate: func(_ *testing.T, _ *LeaseTarget, claim *LeaseClaim, _ *TouchRequest) {
+		{name: "missing claim immutable identity", mutate: func(_ *testing.T, _ *core.LeaseTarget, claim *core.LeaseClaim, _ *core.TouchRequest) {
 			claim.CloudImmutableID = ""
 		}, want: "immutable Machine0 identity"},
-		{name: "wrong claim scope", mutate: func(_ *testing.T, _ *LeaseTarget, claim *LeaseClaim, _ *TouchRequest) {
+		{name: "wrong claim scope", mutate: func(_ *testing.T, _ *core.LeaseTarget, claim *core.LeaseClaim, _ *core.TouchRequest) {
 			claim.ProviderScope = machineScope("vm-replacement")
 		}, want: "provider scope mismatch"},
-		{name: "missing claim scope", mutate: func(_ *testing.T, _ *LeaseTarget, claim *LeaseClaim, _ *TouchRequest) {
+		{name: "missing claim scope", mutate: func(_ *testing.T, _ *core.LeaseTarget, claim *core.LeaseClaim, _ *core.TouchRequest) {
 			claim.ProviderScope = ""
 		}, want: "provider scope mismatch"},
-		{name: "zero timeout override", mutate: func(_ *testing.T, _ *LeaseTarget, _ *LeaseClaim, touch *TouchRequest) {
+		{name: "zero timeout override", mutate: func(_ *testing.T, _ *core.LeaseTarget, _ *core.LeaseClaim, touch *core.TouchRequest) {
 			touch.IdleTimeoutOverride = &zero
 		}, want: "must be positive"},
-		{name: "negative timeout override", mutate: func(_ *testing.T, _ *LeaseTarget, _ *LeaseClaim, touch *TouchRequest) {
+		{name: "negative timeout override", mutate: func(_ *testing.T, _ *core.LeaseTarget, _ *core.LeaseClaim, touch *core.TouchRequest) {
 			touch.IdleTimeoutOverride = &negative
 		}, want: "must be positive"},
-		{name: "subsecond timeout override", mutate: func(_ *testing.T, _ *LeaseTarget, _ *LeaseClaim, touch *TouchRequest) {
+		{name: "subsecond timeout override", mutate: func(_ *testing.T, _ *core.LeaseTarget, _ *core.LeaseClaim, touch *core.TouchRequest) {
 			touch.IdleTimeoutOverride = &tooShort
 		}, want: "at least one second"},
-		{name: "concurrent claim replacement", mutate: func(t *testing.T, lease *LeaseTarget, claim *LeaseClaim, _ *TouchRequest) {
+		{name: "concurrent claim replacement", mutate: func(t *testing.T, lease *core.LeaseTarget, claim *core.LeaseClaim, _ *core.TouchRequest) {
 			labels := make(map[string]string, len(claim.Labels)+1)
 			for key, value := range claim.Labels {
 				labels[key] = value
@@ -198,7 +198,7 @@ func TestMachine0TouchRejectsOwnershipChangesWithoutMutation(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, want: "claim changed"},
-		{name: "removed claim", mutate: func(t *testing.T, lease *LeaseTarget, claim *LeaseClaim, _ *TouchRequest) {
+		{name: "removed claim", mutate: func(t *testing.T, lease *core.LeaseTarget, claim *core.LeaseClaim, _ *core.TouchRequest) {
 			if err := core.RemoveLeaseClaimIfUnchanged(lease.LeaseID, *claim); err != nil {
 				t.Fatal(err)
 			}
@@ -214,7 +214,7 @@ func TestMachine0TouchRejectsOwnershipChangesWithoutMutation(t *testing.T) {
 			leaseID := lease.LeaseID
 			claim := readFixedMachine0Claim(t, leaseID)
 			core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
-			touch := TouchRequest{State: "running"}
+			touch := core.TouchRequest{State: "running"}
 			tc.mutate(t, &lease, &claim, &touch)
 			if tc.name != "missing snapshot" {
 				core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)

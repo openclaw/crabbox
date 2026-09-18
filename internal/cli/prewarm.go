@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"time"
 )
@@ -42,6 +43,25 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	}
 	typedIdentityFile := flagWasSet(fs, "pool-identity-file")
 	typedCacheCompatibility := flagWasSet(fs, "pool-cache-compatibility")
+	if (typedIdentityFile || typedCacheCompatibility) && strings.TrimSpace(*poolKey) == "" {
+		return Exit(2, "typed ready-pool identity flags require --pool")
+	}
+	if typedIdentityFile && typedCacheCompatibility {
+		return Exit(2, "--pool-identity-file and --pool-cache-compatibility are mutually exclusive")
+	}
+	if typedCacheCompatibility && strings.TrimSpace(*poolCacheCompatibility) == "" {
+		return Exit(2, "--pool-cache-compatibility must not be empty")
+	}
+	var poolIdentity *CoordinatorReadyPoolIdentityV1
+	var poolIdentityErr error
+	if typedIdentityFile {
+		identity, identityErr := loadReadyPoolIdentity(*poolIdentityFile)
+		if identityErr != nil {
+			poolIdentityErr = identityErr
+		} else {
+			poolIdentity = &identity
+		}
+	}
 	_ = reclaim
 	requestedSlug, err := requestedLeaseSlug(*leaseFlags.Slug)
 	if err != nil {
@@ -54,20 +74,34 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	if err != nil {
 		return err
 	}
+	if poolIdentity != nil {
+		if providerErr := bindReadyPoolIdentityProviderConfig(&cfg, fs, leaseFlags.Provider, *poolIdentity); providerErr != nil {
+			return providerErr
+		}
+	}
 	if err := applyLeaseCreateFlagsForLeaseMode(&cfg, fs, leaseFlags, "", false); err != nil {
 		return err
 	}
+	if poolIdentity != nil {
+		if providerErr := validateReadyPoolIdentityProviderConfig(cfg, *poolIdentity); providerErr != nil {
+			return providerErr
+		}
+	}
 	if *repoFlag != "" {
 		cfg.Actions.Repo = *repoFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *workflowFlag != "" {
 		cfg.Actions.Workflow = *workflowFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *jobFlag != "" {
 		cfg.Actions.Job = *jobFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	if *refFlag != "" {
 		cfg.Actions.Ref = *refFlag
+		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
 	}
 	followupArgs := prewarmProviderPassthroughArgs(args, defaults)
 	if strings.TrimSpace(*probeCommand) != "" {
@@ -85,36 +119,22 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 			return err
 		}
 	}
-	if (typedIdentityFile || typedCacheCompatibility) && strings.TrimSpace(*poolKey) == "" {
-		return exit(2, "typed ready-pool identity flags require --pool")
-	}
-	if typedIdentityFile && typedCacheCompatibility {
-		return exit(2, "--pool-identity-file and --pool-cache-compatibility are mutually exclusive")
-	}
-	if typedCacheCompatibility && strings.TrimSpace(*poolCacheCompatibility) == "" {
-		return exit(2, "--pool-cache-compatibility must not be empty")
-	}
-	var poolIdentity *CoordinatorReadyPoolIdentityV1
-	if typedIdentityFile {
-		identity, identityErr := loadReadyPoolIdentity(*poolIdentityFile)
-		if identityErr != nil {
-			return identityErr
-		}
-		poolIdentity = &identity
+	if poolIdentityErr != nil {
+		return poolIdentityErr
 	}
 	backend, err := loadBackend(cfg, runtimeForApp(a))
 	if err != nil {
 		return err
 	}
 	if backend.Spec().Kind == ProviderKindServiceControl {
-		return exit(2, "prewarm is not supported for provider=%s; it does not provide a lease or run surface", backend.Spec().Name)
+		return Exit(2, "prewarm is not supported for provider=%s; it does not provide a lease or run surface", backend.Spec().Name)
 	}
 	readyPoolKey := strings.TrimSpace(*poolKey)
 	if strings.TrimSpace(poolFillClaim) != "" && readyPoolKey == "" {
-		return exit(2, "ready-pool fill claim requires --pool")
+		return Exit(2, "ready-pool fill claim requires --pool")
 	}
 	if readyPoolKey != "" && backendCoordinator(backend) == nil {
-		return exit(2, "--pool requires a coordinator-backed SSH lease provider")
+		return Exit(2, "--pool requires a coordinator-backed SSH lease provider")
 	}
 	if typedIdentityFile || typedCacheCompatibility {
 		coord, coordinatorErr := readyPoolCoordinatorFromConfig(cfg)
@@ -144,16 +164,16 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	var out bytes.Buffer
 	var acquiredLease LeaseTarget
 	warmupStarted := time.Now()
-	warmupApp := App{Stdout: io.MultiWriter(a.Stdout, &out), Stderr: a.Stderr}
+	warmupApp := App{Stdout: io.MultiWriter(a.Stdout, &out), Stderr: a.Stderr, synthesizedFlagInputs: true}
 	if err := warmupApp.warmupWithLeaseObserver(ctx, leaseArgs, func(lease LeaseTarget) { acquiredLease = lease }); err != nil {
 		return err
 	}
 	leaseID := parseWarmupLeaseID(out.String())
 	if leaseID == "" {
-		return exit(2, "prewarm could not parse warmup lease id")
+		return Exit(2, "prewarm could not parse warmup lease id")
 	}
 	if backend.Spec().Kind != ProviderKindDelegatedRun && acquiredLease.LeaseID != leaseID {
-		return exit(2, "prewarm warmup lease identity was not preserved")
+		return Exit(2, "prewarm warmup lease identity was not preserved")
 	}
 	warmupMs := time.Since(warmupStarted).Milliseconds()
 	hydration := "skipped"
@@ -166,7 +186,9 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 		hydrateStarted := time.Now()
 		hydrateArgs = prewarmHydrateArgs(cfg, leaseID, *githubRunner, *waitTimeout, *keepAliveMinutes, followupArgs)
 		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, acquiredLease, "actions hydration", func() error {
-			return a.actionsHydrate(ctx, hydrateArgs)
+			child := a
+			child.synthesizedFlagInputs = true
+			return child.actionsHydrate(ctx, hydrateArgs)
 		}); err != nil {
 			return err
 		}
@@ -178,7 +200,9 @@ func (a App) prewarmWithPoolFillClaim(ctx context.Context, args []string, poolFi
 	if strings.TrimSpace(*probeCommand) != "" {
 		probeStarted := time.Now()
 		if err := a.runPrewarmPostWarmupStep(ctx, backend, cfg, acquiredLease, "probe", func() error {
-			return a.runCommand(ctx, prewarmProbeArgs(cfg, leaseID, *probeCommand, followupArgs))
+			child := a
+			child.synthesizedFlagInputs = true
+			return child.runCommand(ctx, prewarmProbeArgs(cfg, leaseID, *probeCommand, followupArgs))
 		}); err != nil {
 			return err
 		}
@@ -434,7 +458,7 @@ func admitPrewarmProbe(args []string) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	cfg, err := loadRunConfig(fs, flags, leaseFlagTarget{Reuse: true}, false)
+	cfg, err := loadRunConfig(fs, flags, leaseFlagTarget{Reuse: true, SynthesizedInputs: true}, false, nil)
 	if err != nil {
 		return err
 	}
@@ -443,6 +467,7 @@ func admitPrewarmProbe(args []string) error {
 		return err
 	}
 	req := runRequestFromFlags(cfg, flags, expansion.Command)
+	req.CommandLiteralArgs = maps.Clone(expansion.LiteralArgs)
 	req.ReuseLease = true
 	req.ShellMode = expansion.Shell
 	req.Preflight = expansion.Preflight
@@ -453,10 +478,10 @@ func admitPrewarmProbe(args []string) error {
 		return err
 	}
 	if err := validateProviderRun(provider, req, *flags.ReadyPool, len(*flags.RequiredSchemas) > 0, expansion.Profile.Doctor.Enabled); err != nil {
-		return exit(2, "prewarm --probe-command is not supported for provider=%s: %v; omit --probe-command or choose a provider that supports the probe options", provider.Spec().Name, err)
+		return Exit(2, "prewarm --probe-command is not supported for provider=%s: %v; omit --probe-command or choose a provider that supports the probe options", provider.Spec().Name, err)
 	}
 	if err := validateProviderConfig(cfg); err != nil {
-		return exit(2, "prewarm probe configuration is invalid: %v", err)
+		return Exit(2, "prewarm probe configuration is invalid: %v", err)
 	}
 	return nil
 }
@@ -478,12 +503,12 @@ func admitPrewarmHydration(cfg Config, passthrough []string) error {
 		return err
 	}
 	// Use hydration's config loader, without a lease lookup or run-profile expansion.
-	projected, err := flags.loadConfig(fs, "")
+	projected, err := flags.loadConfig(fs, "", true)
 	if err != nil {
 		return err
 	}
 	if err := validateProviderConfig(projected); err != nil {
-		return exit(2, "prewarm hydration configuration is invalid: %v", err)
+		return Exit(2, "prewarm hydration configuration is invalid: %v", err)
 	}
 	return nil
 }

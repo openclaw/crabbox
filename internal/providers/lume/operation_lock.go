@@ -30,7 +30,7 @@ func lockLumeCapacity(ctx context.Context) (func(), error) {
 	}
 	lockDir := filepath.Join(stateDir, "claim-locks")
 	if err := os.MkdirAll(lockDir, 0o700); err != nil {
-		return nil, exit(2, "create Lume capacity lock directory: %v", err)
+		return nil, core.Exit(2, "create Lume capacity lock directory: %v", err)
 	}
 	lockPath := filepath.Join(lockDir, "lume-macos-capacity.lock")
 	value, _ := lumeCapacityLocks.LoadOrStore(lockPath, newLumeCapacitySemaphore())
@@ -55,7 +55,7 @@ func lockLumeCapacity(ctx context.Context) (func(), error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return nil, exit(2, "Lume macOS capacity lock was not acquired")
+		return nil, core.Exit(2, "Lume macOS capacity lock was not acquired")
 	}
 
 	var once sync.Once

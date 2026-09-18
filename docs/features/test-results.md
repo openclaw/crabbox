@@ -81,12 +81,17 @@ reports from an earlier run:
    and transfers at most 64 MiB total. Reports outside those bounds are skipped
    with a warning naming the file; accepted reports are never truncated.
 
-Explicit `--junit` files and auto-discovered files are merged (de-duplicated by
-normalized workdir-relative path), so a multi-report setup still produces one
-result record. A malformed, partial, or oversized report emits a named warning
-without discarding summaries parsed from other valid files. The CLI prints a
-one-line summary to stderr and includes every valid parsed summary in the run's
-`finish` payload.
+Explicit `--junit` files and auto-discovered files are merged into one result
+record. Native filesystem collection deduplicates by the opened file's identity,
+so relative and absolute paths, symlinks, and hard links to the same report count
+once across explicit and automatic collection. The first readable explicit
+spelling is retained. Separate files with identical contents remain separate
+reports. Provider-native result APIs retain their provider contract.
+
+A malformed, partial, or oversized report emits a named warning without
+discarding summaries parsed from other valid files. The CLI prints a one-line
+summary to stderr and includes every valid parsed summary in the run's `finish`
+payload.
 
 Result collection warnings remain non-fatal. To make parsed test failures affect
 the run status, opt in with `--fail-on-test-failures`,

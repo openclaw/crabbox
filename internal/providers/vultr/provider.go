@@ -4,7 +4,6 @@ import (
 	"flag"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const providerName = "vultr"
@@ -15,15 +14,18 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
+	core.ApplyConfigShowSSHDefaults(&cfg, "root")
+	return cfg
+}
+
 var _ core.ProviderClassProfileProvider = Provider{}
 
 var classProfiles = core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: "vc2-1c-1gb"})
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
-
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		Name:             providerName,
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
@@ -57,16 +59,8 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return vultrServerTypeForClass(cfg.Class)
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return vultrServerTypeForClass(class)
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return NewBackend(p.Spec(), cfg, rt), nil
-}
-
-func (p Provider) ConfigureDoctor(cfg core.Config, rt core.Runtime) (core.DoctorBackend, error) {
-	return shared.ConfigureDoctor("vultr", func() (core.Backend, error) { return p.Configure(cfg, rt) })
 }
 
 func vultrServerTypeForClass(class string) string {
@@ -76,4 +70,11 @@ func vultrServerTypeForClass(class string) string {
 		}
 	}
 	return "vc2-1c-1gb"
+}
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	cfg.Vultr = cfg.Vultr.WithRuntimeDefaults()
+	core.ApplyLinuxConnectionDefaults(cfg, "root", "22")
+	cfg.SSHFallbackPorts = nil
+	return nil
 }

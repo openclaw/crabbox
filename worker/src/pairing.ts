@@ -1,4 +1,5 @@
-import { base64URL, sha256Hex, type GitHubUserGrant } from "./auth";
+import type { GitHubUserGrant } from "./auth";
+import { base64URL, sha256Hex } from "./encoding";
 import { bearerToken, pathParts } from "./http";
 import { timingSafeEqual } from "./timing-safe";
 import type { Env } from "./types";
@@ -140,10 +141,6 @@ export function pairingGrantKey(grantHash: string): string {
   return `pairing-grant:${grantHash}`;
 }
 
-export function pairingGrantPrefixKey(): string {
-  return "pairing-grant:";
-}
-
 export function pairingGrantOwnerIndexKey(owner: string, org: string, grantHash: string): string {
   return `${pairingGrantOwnerIndexPrefix(owner, org)}${grantHash}`;
 }
@@ -172,10 +169,6 @@ export async function parsedDeviceToken(
 
 export function deviceTokenKey(id: string): string {
   return `device-token:${id}`;
-}
-
-export function deviceTokenPrefixKey(): string {
-  return "device-token:";
 }
 
 export function deviceOwnerIndexKey(owner: string, org: string, deviceID: string): string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"path/filepath"
 	"reflect"
@@ -43,8 +44,8 @@ func (r *fakeRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.
 
 func TestProviderContract(t *testing.T) {
 	provider := Provider{}
-	if provider.Name() != providerName || !reflect.DeepEqual(provider.Aliases(), []string{"namespace-compute"}) {
-		t.Fatalf("provider identity=%q aliases=%v", provider.Name(), provider.Aliases())
+	if provider.Spec().Name != providerName || !reflect.DeepEqual(provider.Spec().Aliases, []string{"namespace-compute"}) {
+		t.Fatalf("provider identity=%q aliases=%v", provider.Spec().Name, provider.Spec().Aliases)
 	}
 	spec := provider.Spec()
 	if spec.Kind != core.ProviderKindSSHLease || spec.Coordinator != core.CoordinatorNever ||
@@ -61,7 +62,7 @@ func TestLeasePinsProxyHostKeyPerLease(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
-	lease, err := (&backend{}).lease(instance{ClusterID: "instance-id", Labels: map[string]string{"lease": leaseID}}, cfg, leaseID)
+	lease, err := (&backend{}).lease(instance{ClusterID: "instance-id", Labels: map[string]string{"lease": leaseID}}, cfg, leaseID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,6 +187,103 @@ func TestMachineTypeForClass(t *testing.T) {
 		if got := machineTypeForClass(test.class); got != test.want {
 			t.Fatalf("machineTypeForClass(%q)=%q want %q", test.class, got, test.want)
 		}
+	}
+}
+
+func TestNamespaceInstanceOrdinaryFlagLists(t *testing.T) {
+	inherited := []string{" inherited "}
+	defaults := core.Config{NamespaceInstance: core.NamespaceInstanceConfig{Volumes: inherited}}
+	fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
+	values := (Provider{}).RegisterFlags(fs, defaults)
+	volume := fs.Lookup("namespace-instance-volume")
+	getter := volume.Value.(flag.Getter)
+	inherited[0] = "changed-after-registration"
+	if got := getter.Get().([]string); !reflect.DeepEqual(got, []string{" inherited "}) {
+		t.Fatal("registration did not clone inherited list")
+	}
+	copy := getter.Get().([]string)
+	copy[0] = "changed-copy"
+	if getter.Get().([]string)[0] != " inherited " {
+		t.Fatal("Getter aliases storage")
+	}
+	cfg := core.Config{Provider: "unselected-metadata", WorkRoot: "generic", NamespaceInstance: core.NamespaceInstanceConfig{CLIPath: "prior", TenantID: "tenant-sentinel", Volumes: []string{"runtime"}, Bare: true}}
+	before := cfg.NamespaceInstance
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.NamespaceInstance, before) {
+		t.Fatal("unvisited flags changed metadata")
+	}
+	if err := fs.Parse([]string{"--namespace-instance-volume= a,b ", "--namespace-instance-volume= ", "--namespace-instance-volume=none"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{" inherited ", "a,b", "", "none"}
+	if volume.Value.String() != strings.Join(want, ",") {
+		t.Fatal("whole-occurrence display")
+	}
+	if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.NamespaceInstance.Volumes, want) || cfg.NamespaceInstance.TenantID != "tenant-sentinel" {
+		t.Fatal("inherited append/application")
+	}
+	cfg.NamespaceInstance.Volumes[0] = "runtime-copy-change"
+	if getter.Get().([]string)[0] != " inherited " {
+		t.Fatal("applied list aliases flag storage")
+	}
+	empty := flag.NewFlagSet("empty", flag.ContinueOnError)
+	(Provider{}).RegisterFlags(empty, core.Config{})
+	if got := empty.Lookup("namespace-instance-volume").Value.(flag.Getter).Get().([]string); got == nil || len(got) != 0 {
+		t.Fatal("empty Getter must be nonnil copy")
+	}
+}
+
+func TestNamespaceInstanceOrdinaryFlagDuration(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want time.Duration
+		bad  bool
+	}{{"", time.Minute, false}, {"2m", 2 * time.Minute, false}, {"0s", 0, false}, {" 0s ", 0, false}, {"0", time.Minute, true}, {"0m", time.Minute, true}, {"-0s", time.Minute, true}, {" ", time.Minute, true}, {"-1m", time.Minute, true}, {" 2m ", time.Minute, true}, {"invalid", time.Minute, true}} {
+		t.Run(fmt.Sprintf("%q", tc.raw), func(t *testing.T) {
+			cfg := core.Config{Provider: "unselected-metadata", WorkRoot: "generic", NamespaceInstance: core.NamespaceInstanceConfig{CLIPath: "before", MachineType: "before", Duration: time.Minute, Region: "before", Endpoint: "before", Keychain: "before", TenantID: "tenant-sentinel", Volumes: []string{"prior"}, WorkRoot: "before", Bare: true}}
+			before := cfg.NamespaceInstance
+			fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
+			values := (Provider{}).RegisterFlags(fs, cfg)
+			if fs.Lookup("namespace-instance-duration").DefValue != "1m0s" {
+				t.Fatal("duration registration string")
+			}
+			if err := fs.Parse([]string{"--namespace-instance-cli=~/literal", "--namespace-instance-machine-type=4x8", "--namespace-instance-duration=" + tc.raw, "--namespace-instance-region=next", "--namespace-instance-endpoint=https://example.invalid", "--namespace-instance-keychain=fixture", "--namespace-instance-volume=next", "--namespace-instance-work-root=~/guest", "--namespace-instance-bare=false"}); err != nil {
+				t.Fatal(err)
+			}
+			err := (Provider{}).ApplyFlags(&cfg, fs, values)
+			want := before
+			want.CLIPath = "~/literal"
+			want.MachineType = "4x8"
+			want.Duration = tc.want
+			if tc.bad {
+				if err == nil || err.Error() != fmt.Sprintf("invalid duration %q", tc.raw) {
+					t.Fatalf("error=%v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				want.Region = "next"
+				want.Endpoint = "https://example.invalid"
+				want.Keychain = "fixture"
+				want.Volumes = []string{"prior", "next"}
+				want.WorkRoot = "~/guest"
+				want.Bare = false
+			}
+			if !reflect.DeepEqual(cfg.NamespaceInstance, want) || cfg.WorkRoot != "generic" {
+				t.Fatalf("partial metadata=%#v want %#v", cfg.NamespaceInstance, want)
+			}
+		})
+	}
+	cfg := core.Config{Provider: "unselected-metadata", NamespaceInstance: core.NamespaceInstanceConfig{TenantID: "tenant-sentinel"}}
+	before := cfg
+	if err := (Provider{}).ApplyFlags(&cfg, flag.NewFlagSet("foreign", flag.ContinueOnError), struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+		t.Fatal("foreign flag values changed config")
 	}
 }
 
@@ -596,11 +694,12 @@ func TestTouchPersistsUpdatedLabelsToClaim(t *testing.T) {
 			time.Now().Add(-time.Minute),
 		),
 	}
+	server.Labels["namespace_tenant"] = cfg.NamespaceInstance.TenantID
 	target := core.SSHTarget{Host: "instance-1", User: "root", Port: "22"}
 	if err := core.ClaimLeaseTargetForConfig(leaseID, "blue-box", cfg, server, target, cfg.IdleTimeout); err != nil {
 		t.Fatal(err)
 	}
-	runner := &fakeRunner{results: []core.LocalCommandResult{{}}}
+	runner := &fakeRunner{results: []core.LocalCommandResult{{}, {}, {}}}
 	b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
 	touched, err := b.Touch(context.Background(), core.TouchRequest{
 		Lease:       core.LeaseTarget{LeaseID: leaseID, Server: server, SSH: target},
@@ -618,6 +717,26 @@ func TestTouchPersistsUpdatedLabelsToClaim(t *testing.T) {
 		claims[0].Labels["last_touched_at"] != touched.Labels["last_touched_at"] ||
 		claims[0].Labels["expires_at"] != touched.Labels["expires_at"] {
 		t.Fatalf("claims=%#v touched=%#v", claims, touched.Labels)
+	}
+	override := 7 * time.Minute
+	for _, step := range []struct {
+		name     string
+		override *time.Duration
+	}{{"explicit", &override}, {"ordinary", nil}} {
+		t.Run(step.name, func(t *testing.T) {
+			var err error
+			touched, err = b.Touch(context.Background(), core.TouchRequest{
+				Lease: core.LeaseTarget{LeaseID: leaseID, Server: touched, SSH: target},
+				State: "ready", IdleTimeout: time.Hour, IdleTimeoutOverride: step.override,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, _, err := core.ReadLeaseClaimWithPresence(leaseID)
+			if err != nil || claim.IdleTimeoutSeconds != 420 || claim.Labels["idle_timeout"] != "420" || claim.Labels["idle_timeout_secs"] != "420" || touched.Labels["idle_timeout_secs"] != "420" {
+				t.Fatalf("claim=%#v touched=%#v err=%v", claim, touched, err)
+			}
+		})
 	}
 }
 

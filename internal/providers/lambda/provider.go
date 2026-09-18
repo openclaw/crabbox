@@ -15,10 +15,14 @@ func init() {
 
 type Provider struct{}
 
-func (Provider) Name() string      { return providerName }
-func (Provider) Aliases() []string { return nil }
+func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
+	core.ApplyConfigShowSSHDefaults(&cfg, defaultUser)
+	return cfg
+}
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
+		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		Name:             providerName,
 		Family:           providerName,
 		Kind:             core.ProviderKindSSHLease,
@@ -42,10 +46,6 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	return typeForConfig(cfg)
 }
 
-func (Provider) ServerTypeForClass(class string) string {
-	return serverTypeForClass(class)
-}
-
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
 	return &backend{spec: p.Spec(), cfg: cfg, rt: rt, clientFactory: newLambdaAPIClient}, nil
 }
@@ -67,4 +67,18 @@ func (b *backend) Spec() core.ProviderSpec { return b.spec }
 
 func newLambdaAPIClient(rt core.Runtime) (lambdaAPI, error) {
 	return newClient(rt)
+}
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	cfg.Lambda = cfg.Lambda.WithRuntimeDefaults()
+	if core.OSImageWasExplicit(*cfg) && !core.LambdaImageWasExplicit(*cfg) && !core.LambdaImageFamilyWasExplicit(*cfg) {
+		if cfg.OSImage == "ubuntu:24.04" {
+			cfg.Lambda.ImageFamily = "lambda-stack-24-04"
+		} else {
+			cfg.Lambda.ImageFamily = ""
+		}
+	}
+	core.ApplyLinuxConnectionDefaults(cfg, "ubuntu", "22")
+	cfg.SSHFallbackPorts = nil
+	return nil
 }

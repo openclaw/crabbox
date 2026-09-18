@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -21,7 +20,7 @@ func (a App) claimLeaseTargetForRepoAndRegister(
 	repoRoot string,
 	reclaim bool,
 ) error {
-	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, false)
+	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, &cfg, server, target, repoRoot, reclaim, false, nil)
 }
 
 func (a App) claimResolvedLeaseTargetForRepoAndRegister(
@@ -33,19 +32,44 @@ func (a App) claimResolvedLeaseTargetForRepoAndRegister(
 	repoRoot string,
 	reclaim bool,
 ) error {
-	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, true)
+	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, &cfg, server, target, repoRoot, reclaim, true, nil)
 }
 
 func (a App) claimRunLeaseTargetForRepoAndRegister(
 	ctx context.Context,
 	leaseID, slug string,
-	cfg Config,
+	cfg *Config,
 	server *Server,
 	target SSHTarget,
 	repoRoot string,
 	reclaim, resolved bool,
+	idleTimeoutOverride *time.Duration,
 ) error {
-	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, resolved)
+	return a.claimLeaseTargetForRepoAndRegisterMode(ctx, leaseID, slug, cfg, server, target, repoRoot, reclaim, resolved, idleTimeoutOverride)
+}
+
+// Initialized direct leases own their recorded idle policy. Managed leases instead
+// use the coordinator's projection; a registration URL alone does not make a
+// registered direct lease coordinator-managed.
+func applyClaimIdlePolicy(cfg *Config, server *Server, recorded LeaseClaim, exists bool, override *time.Duration) error {
+	if !exists {
+		return nil
+	}
+	policy := claimIdlePolicyForConfig(*cfg)
+	if policy == claimIdleCoordinatorProjection {
+		return nil
+	}
+	proposed := cfg.IdleTimeout
+	if override != nil {
+		policy, proposed = claimIdleReplaceExplicitly, *override
+	}
+	idle, normalize, err := selectClaimIdleTimeout(recorded.IdleTimeoutSeconds, proposed, policy)
+	if err != nil || !normalize {
+		return err
+	}
+	cfg.IdleTimeout = idle
+	server.Labels = claimLabelsWithIdleTimeout(server.Labels, idle)
+	return nil
 }
 
 func refreshRunLeaseClaimEndpoint(leaseID string, server *Server, target SSHTarget) {
@@ -56,7 +80,7 @@ func refreshRunLeaseClaimEndpoint(leaseID string, server *Server, target SSHTarg
 	if !set || !exists {
 		return
 	}
-	updated, err := updateLeaseClaimEndpointIfUnchanged(leaseID, expected, *server, target)
+	updated, err := UpdateLeaseClaimEndpointIfUnchanged(leaseID, expected, *server, target)
 	if err == nil {
 		SetServerLeaseClaimSnapshot(server, updated, true)
 	}
@@ -65,11 +89,12 @@ func refreshRunLeaseClaimEndpoint(leaseID string, server *Server, target SSHTarg
 func (a App) claimLeaseTargetForRepoAndRegisterMode(
 	ctx context.Context,
 	leaseID, slug string,
-	cfg Config,
+	cfg *Config,
 	server *Server,
 	target SSHTarget,
 	repoRoot string,
 	reclaim, resolved bool,
+	idleTimeoutOverride *time.Duration,
 ) error {
 	var expected leaseClaim
 	var expectedExists bool
@@ -79,15 +104,24 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 	} else if server.claimSnapshotSet {
 		expected, expectedExists, err = resolvedLeaseClaimSnapshot(leaseID, *server)
 	} else {
-		expected, expectedExists, err = readLeaseClaimWithPresence(leaseID)
+		expected, expectedExists, err = ReadLeaseClaimWithPresence(leaseID)
 	}
 	if err != nil {
 		return err
 	}
-	claimed, err := claimLeaseTargetForRepoConfigIfUnchanged(
+	if err := applyClaimIdlePolicy(cfg, server, expected, expectedExists, idleTimeoutOverride); err != nil {
+		return err
+	}
+	idlePolicy := claimIdlePolicyForConfig(*cfg)
+	if idlePolicy == claimIdlePreserveRecorded && resolved && expectedExists && idleTimeoutOverride != nil {
+		idlePolicy = claimIdleReplaceExplicitly
+	}
+	provider, _ := claimProviderDetailsForConfig(*cfg)
+	claimed, err := claimLeaseTargetForRepoConfigScopeIfUnchangedMode(
 		leaseID,
 		slug,
-		cfg,
+		*cfg,
+		providerClaimScope(provider, *cfg),
 		*server,
 		target,
 		repoRoot,
@@ -95,6 +129,7 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 		reclaim,
 		expected,
 		expectedExists,
+		leaseClaimTargetOptions{idle: idlePolicy},
 	)
 	if err != nil {
 		return err
@@ -105,7 +140,7 @@ func (a App) claimLeaseTargetForRepoAndRegisterMode(
 		SSH:     target,
 		LeaseID: leaseID,
 	}
-	err = a.registerCoordinatorLeaseBestEffort(ctx, cfg, &lease)
+	err = a.registerCoordinatorLeaseBestEffort(ctx, *cfg, &lease)
 	*server = lease.Server
 	return err
 }
@@ -140,7 +175,7 @@ func (a App) registerCoordinatorLeaseBestEffort(ctx context.Context, cfg Config,
 	provider := firstNonBlank(server.Provider, cfg.Provider)
 	targetOS := firstNonBlank(target.TargetOS, cfg.TargetOS)
 	registration := CoordinatorLeaseRegistration{
-		Slug:               firstNonBlank(serverSlug(server), lease.LeaseID),
+		Slug:               firstNonBlank(ServerSlug(server), lease.LeaseID),
 		Provider:           provider,
 		TargetOS:           targetOS,
 		WindowsMode:        firstNonBlank(target.WindowsMode, cfg.WindowsMode),
@@ -159,7 +194,7 @@ func (a App) registerCoordinatorLeaseBestEffort(ctx context.Context, cfg Config,
 		WorkRoot:           cfg.WorkRoot,
 		Profile:            cfg.Profile,
 		Class:              cfg.Class,
-		Pond:               normalizePondName(cfg.Pond),
+		Pond:               NormalizePondName(cfg.Pond),
 		ExposedPorts:       append([]string(nil), cfg.ExposedPorts...),
 		TTLSeconds:         int(cfg.TTL.Seconds()),
 		IdleTimeoutSeconds: int(cfg.IdleTimeout.Seconds()),
@@ -419,20 +454,6 @@ func runtimeAdapterDeleteCompletionMismatch(err error) bool {
 	return coordinatorResponseErrorCode(err, 409) == "runtime_adapter_delete_completion_mismatch"
 }
 
-func coordinatorResponseErrorCode(err error, status int) string {
-	var httpErr CoordinatorHTTPError
-	if !errors.As(err, &httpErr) || httpErr.StatusCode != status {
-		return ""
-	}
-	var body struct {
-		Error string `json:"error"`
-	}
-	if json.Unmarshal([]byte(httpErr.Message), &body) != nil {
-		return ""
-	}
-	return body.Error
-}
-
 func (a App) coordinatorRegistrationWarning(leaseID string, err error) {
 	if a.Stderr == nil {
 		return
@@ -493,7 +514,7 @@ func (a App) releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(ctx context.
 	if adapterMode {
 		return a.completeRuntimeAdapterDeleteAfterConfirmedAbsence(ctx, cfg, leaseID, adapterID, workspaceID)
 	}
-	claim, exists, err := readLeaseClaimWithPresence(leaseID)
+	claim, exists, err := ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return err
 	}
@@ -521,7 +542,7 @@ func (a App) completeRuntimeAdapterDeleteAfterConfirmedAbsence(ctx context.Conte
 		}
 		return err
 	}
-	claim, exists, err := readLeaseClaimWithPresence(leaseID)
+	claim, exists, err := ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return err
 	}

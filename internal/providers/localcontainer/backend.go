@@ -60,11 +60,15 @@ var _ core.StatusTouchClaimAuthorizer = (*backend)(nil)
 
 type inspectContainer struct {
 	ID              string            `json:"Id"`
+	Image           string            `json:"Image"`
 	Name            string            `json:"Name"`
 	Created         string            `json:"Created"`
 	Config          inspectConfig     `json:"Config"`
 	State           inspectState      `json:"State"`
 	NetworkSettings inspectNetworking `json:"NetworkSettings"`
+	// Optional settings must not make identity or OOM-state inspection fail.
+	HostConfig json.RawMessage `json:"HostConfig"`
+	Mounts     json.RawMessage `json:"Mounts"`
 }
 
 type inspectConfig struct {
@@ -123,25 +127,26 @@ func (b *backend) BeginRunFailureEvidence(ctx context.Context, req core.RunFailu
 	if containerID == "" {
 		return nil, core.Exit(2, "local-container failed-run evidence requires a container id")
 	}
-	baseline, err := b.readOOMKillCount(ctx, containerID)
+	runtime := b.memoryRuntime()
+	baseline, err := readOOMKillCount(ctx, runtime.run, containerID)
 	if err != nil {
 		return nil, err
 	}
-	baselineContainer, err := b.inspectContainer(ctx, containerID)
+	baselineContainer, err := inspectRuntimeContainer(ctx, runtime.run, containerID)
 	if err != nil {
 		return nil, err
 	}
 	return func(ctx context.Context) (core.RunFailureEvidence, error) {
-		current, err := b.readOOMKillCount(ctx, containerID)
+		current, err := readOOMKillCount(ctx, runtime.run, containerID)
 		if err == nil && current > baseline {
-			return core.RunFailureEvidence{ResourceExhaustion: core.ResourceExhaustionMemory}, nil
+			return runtime.memoryFailureEvidence(ctx, containerID, baselineContainer), nil
 		}
 		if err == nil {
 			return core.RunFailureEvidence{}, nil
 		}
-		container, inspectErr := b.inspectContainer(ctx, containerID)
+		container, inspectErr := inspectRuntimeContainer(ctx, runtime.run, containerID)
 		if inspectErr == nil && !baselineContainer.State.OOMKilled && container.State.OOMKilled {
-			return core.RunFailureEvidence{ResourceExhaustion: core.ResourceExhaustionMemory}, nil
+			return runtime.memoryFailureEvidence(ctx, containerID, baselineContainer), nil
 		}
 		if inspectErr != nil {
 			return core.RunFailureEvidence{}, fmt.Errorf("%v; inspect container OOM state: %w", err, inspectErr)
@@ -151,9 +156,13 @@ func (b *backend) BeginRunFailureEvidence(ctx context.Context, req core.RunFailu
 }
 
 func (b *backend) readOOMKillCount(ctx context.Context, containerID string) (uint64, error) {
+	return readOOMKillCount(ctx, b.memoryRuntime().run, containerID)
+}
+
+func readOOMKillCount(ctx context.Context, run containerObservationCommand, containerID string) (uint64, error) {
 	var failures []string
 	for _, cgroupPath := range cgroupOOMCounterPaths {
-		result, err := b.docker(ctx, []string{"exec", containerID, "cat", cgroupPath}, nil, nil)
+		result, err := run(ctx, []string{"exec", containerID, "cat", cgroupPath})
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", cgroupPath, err))
 			continue
@@ -186,8 +195,7 @@ func parseOOMKillCount(text string) (uint64, error) {
 }
 
 func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID string) error {
-	core.UseStoredTestboxKey(&target.SSH, leaseID)
-	return nil
+	return core.UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
@@ -218,12 +226,12 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		if !hasCompleteCapturedRuntimeScope(completedScope) {
 			return core.LeaseTarget{}, core.Exit(2, "local-container runtime identity is incomplete; refusing to create an unscoped lease")
 		}
-		metadata := cloneLabels(cfg.LocalContainer.CheckpointMetadata)
+		metadata := shared.CloneLabels(cfg.LocalContainer.CheckpointMetadata)
 		for _, key := range checkpointScopeMetadataKeys {
 			metadata[key] = completedScope[key]
 		}
-		cfg.LocalContainer.CheckpointMetadata = cloneLabels(metadata)
-		b.cfg.LocalContainer.CheckpointMetadata = cloneLabels(metadata)
+		cfg.LocalContainer.CheckpointMetadata = shared.CloneLabels(metadata)
+		b.cfg.LocalContainer.CheckpointMetadata = shared.CloneLabels(metadata)
 	}
 	if strings.TrimSpace(req.RequestedLeaseID) != "" {
 		return b.acquireFixed(ctx, req, cfg)
@@ -307,7 +315,22 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		}
 		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 	}
-	lease = b.pendingLease(cfg, container, leaseID, slug)
+	lease, err = b.pendingLease(cfg, container, leaseID, slug)
+	if err != nil {
+		retained, reconcileErr := b.reconcileReadinessFailure(req.Keep, pendingClaim, lease, bootstrapDir, err)
+		if retained {
+			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
+		}
+		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
+	}
+	lease.Server.ImageEvidence, err = b.observeImageEvidence(ctx, cfg, container, pendingClaim)
+	if err != nil {
+		retained, reconcileErr := b.reconcileReadinessFailure(req.Keep, pendingClaim, lease, bootstrapDir, err)
+		if retained {
+			b.printPendingRecovery(leaseID, slug, pendingClaim, err)
+		}
+		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
+	}
 	markPendingLease(&lease.Server)
 	updatedPendingClaim, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, pendingClaim, lease.Server, lease.SSH)
 	if err != nil {
@@ -327,6 +350,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 	}
 	markPendingLease(&lease.Server)
+	lease.Server.ImageEvidence = core.CloneImageEvidence(pendingClaim.ImageEvidence)
 	updatedPendingClaim, err = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, pendingClaim, lease.Server, lease.SSH)
 	if err != nil {
 		retained, reconcileErr := b.reconcileChangedClaim(lease, bootstrapDir)
@@ -345,7 +369,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 	}
 	lease.Server.Status = "ready"
-	lease.Server.Labels = cloneLabels(lease.Server.Labels)
+	lease.Server.Labels = shared.CloneLabels(lease.Server.Labels)
 	lease.Server.Labels["state"] = "ready"
 	delete(lease.Server.Labels, "recovery")
 	readyClaim, err := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, pendingClaim, lease.Server, lease.SSH)
@@ -426,7 +450,7 @@ func (b *backend) publishCreatedPendingClaim(leaseID, slug, claimScope string, r
 	return claim, err
 }
 
-func (b *backend) pendingLease(cfg core.Config, container inspectContainer, leaseID, slug string) core.LeaseTarget {
+func (b *backend) pendingLease(cfg core.Config, container inspectContainer, leaseID, slug string) (core.LeaseTarget, error) {
 	server := b.serverFromContainer(container, cfg)
 	if user := strings.TrimSpace(server.Labels["ssh_user"]); user != "" {
 		cfg.LocalContainer.User = user
@@ -437,15 +461,17 @@ func (b *backend) pendingLease(cfg core.Config, container inspectContainer, leas
 		cfg.WorkRoot = root
 	}
 	host, port, _ := containerSSHHostPort(container)
-	if keyPath, err := core.TestboxKeyPath(leaseID); err == nil {
+	if keyPath, err := core.OptionalStoredTestboxKeyPath(leaseID); err == nil {
 		if _, statErr := os.Stat(keyPath); statErr == nil {
 			cfg.SSHKey = keyPath
 		}
+	} else if !os.IsNotExist(err) {
+		return core.LeaseTarget{Server: server, LeaseID: leaseID}, err
 	}
 	target := core.SSHTargetFromConfig(cfg, host)
 	target.Port = port
 	target.ReadyCheck = localContainerReadyCheck(cfg)
-	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
 
 func (b *backend) waitForContainerEndpoint(ctx context.Context, cfg core.Config, containerID, leaseID, slug string) (core.LeaseTarget, error) {
@@ -557,7 +583,7 @@ func markPendingLease(server *core.Server) {
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	} else {
-		server.Labels = cloneLabels(server.Labels)
+		server.Labels = shared.CloneLabels(server.Labels)
 	}
 	server.Status = pendingClaimState
 	server.Labels["state"] = pendingClaimState
@@ -658,7 +684,7 @@ func (b *backend) rollbackPendingLease(expected core.LeaseClaim, lease core.Leas
 		if err := b.removeContainer(rollbackCtx, lease.Server.CloudID); err != nil {
 			return err
 		}
-		labels := cloneLabels(lease.Server.Labels)
+		labels := shared.CloneLabels(lease.Server.Labels)
 		labels["bootstrap_dir"] = bootstrapDir
 		return b.cleanupContainerSidecars(lease.LeaseID, labels, true)
 	})
@@ -669,7 +695,7 @@ func (b *backend) rollbackPendingLease(expected core.LeaseClaim, lease core.Leas
 }
 
 func (b *backend) printPendingRecovery(leaseID, slug string, claim core.LeaseClaim, reason error) {
-	runtimeName := firstNonBlank(claim.Labels[checkpointMetadataRuntime], claim.Labels["runtime"], b.cfg.LocalContainer.Runtime, "docker")
+	runtimeName := shared.FirstNonBlank(claim.Labels[checkpointMetadataRuntime], claim.Labels["runtime"], b.cfg.LocalContainer.Runtime, "docker")
 	envPrefix := []string{"CRABBOX_LOCAL_CONTAINER_RUNTIME=" + core.ShellQuote(runtimeName)}
 	scope := checkpointScopeFromMetadata(checkpointScopeMetadataFromLabels(claim.Labels), runtimeName)
 	if isDockerRuntime(runtimeName) && scope.Context != "" {
@@ -749,6 +775,11 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		core.SetServerLeaseClaimSnapshot(&server, claim, true)
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
+	if !readOnlyStatus || req.Prepare || req.ReadyProbe {
+		if err := validateLocalContainerInspectedMounts(container); err != nil {
+			return core.LeaseTarget{}, err
+		}
+	}
 	var exactClaim core.LeaseClaim
 	if owned {
 		claim, ok, exact, claimErr := core.ResolveLeaseClaimForProviderWithExact(leaseID, providerName)
@@ -763,10 +794,21 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	}
 	var lease core.LeaseTarget
 	if isPendingLocalContainerClaim(exactClaim) {
-		lease = b.pendingLease(cfg, container, leaseID, slug)
+		lease, err = b.pendingLease(cfg, container, leaseID, slug)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
 		if req.Prepare {
 			keep := strings.EqualFold(exactClaim.Labels["keep"], "true")
 			bootstrapDir := strings.TrimSpace(exactClaim.Labels["bootstrap_dir"])
+			imageEvidence, observationErr := b.observeImageEvidence(ctx, cfg, container, exactClaim)
+			if observationErr != nil {
+				retained, reconcileErr := b.reconcileReadinessFailure(keep, exactClaim, lease, bootstrapDir, observationErr)
+				if retained {
+					b.printPendingRecovery(leaseID, slug, exactClaim, observationErr)
+				}
+				return core.LeaseTarget{}, errors.Join(observationErr, reconcileErr)
+			}
 			lease, err = b.waitForContainerEndpoint(ctx, cfg, container.ID, leaseID, slug)
 			if err != nil {
 				retained, reconcileErr := b.reconcileReadinessFailure(keep, exactClaim, lease, bootstrapDir, err)
@@ -776,6 +818,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 				return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 			}
 			markPendingLease(&lease.Server)
+			lease.Server.ImageEvidence = imageEvidence
 			updatedClaim, updateErr := core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, exactClaim, lease.Server, lease.SSH)
 			err = updateErr
 			if err != nil {
@@ -794,7 +837,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 				return core.LeaseTarget{}, errors.Join(err, reconcileErr)
 			}
 			lease.Server.Status = "ready"
-			lease.Server.Labels = cloneLabels(lease.Server.Labels)
+			lease.Server.Labels = shared.CloneLabels(lease.Server.Labels)
 			lease.Server.Labels["state"] = "ready"
 			delete(lease.Server.Labels, "recovery")
 			updatedClaim, updateErr = core.UpdateLeaseClaimEndpointIfUnchanged(leaseID, exactClaim, lease.Server, lease.SSH)
@@ -809,7 +852,10 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 			exactClaim = updatedClaim
 		}
 	} else if terminalContainerState(container.State.Status) != "" && req.StatusOnly {
-		lease = b.pendingLease(cfg, container, leaseID, slug)
+		lease, err = b.pendingLease(cfg, container, leaseID, slug)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
 	} else {
 		lease, err = b.prepareLease(ctx, cfg, container, leaseID, slug, false)
 		if err != nil {
@@ -819,6 +865,18 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if owned {
 		lease.Server = mergeLocalContainerClaim(lease.Server, exactClaim)
 		core.SetServerLeaseClaimSnapshot(&lease.Server, exactClaim, true)
+	}
+	if isPendingLocalContainerClaim(exactClaim) {
+		// Until acquisition publishes its first snapshot, status must not expose
+		// a transient observation that can disagree with the completed run.
+		if exactClaim.ImageEvidence != nil && exactClaim.ImageEvidence.RuntimeImageID == container.Image {
+			lease.Server.ImageEvidence = core.CloneImageEvidence(exactClaim.ImageEvidence)
+		}
+	} else {
+		lease.Server.ImageEvidence, err = b.observeImageEvidence(ctx, cfg, container, exactClaim)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
 	}
 	if req.Reclaim && (!owned || !hasCompleteCapturedRuntimeScope(exactClaim.Labels)) {
 		scope, scopeErr := b.captureRuntimeScope(ctx, cfg)
@@ -856,6 +914,18 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		}
 	}
 	lease.Server.Labels = publicLocalContainerClaimLabels(lease.Server.Labels)
+	if req.IncludeDiagnostics && req.IsReadOnlyStatus() && !req.ReadyProbe {
+		// All ownership/claim merges are complete. Enrich only the returned copy.
+		lease.Server.Labels = shared.CloneLabels(lease.Server.Labels)
+		for key := range lease.Server.Labels {
+			if strings.HasPrefix(key, memoryDiagnosticPrefix) {
+				delete(lease.Server.Labels, key)
+			}
+		}
+		for key, value := range b.memoryRuntime().memoryDetails(ctx, container.ID, container, "current") {
+			lease.Server.Labels[memoryDiagnosticPrefix+key] = value
+		}
+	}
 	return lease, nil
 }
 
@@ -944,7 +1014,7 @@ func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		return err
 	}
 	if !appliedScope {
-		identifier := firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"])
+		identifier := shared.FirstNonBlank(lease.LeaseID, lease.Server.Labels["lease"])
 		if claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName); err != nil {
 			return err
 		} else if ok {
@@ -1085,7 +1155,7 @@ func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.Leas
 }
 
 func (b *backend) releaseMissingClaim(ctx context.Context, lease core.LeaseTarget, checkpointID string, outcome *core.ReleaseLeaseOutcome) (bool, error) {
-	leaseID := strings.TrimSpace(firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]))
+	leaseID := strings.TrimSpace(shared.FirstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]))
 	if leaseID == "" || strings.TrimSpace(lease.Server.CloudID) != "" {
 		return false, nil
 	}
@@ -1578,27 +1648,20 @@ func (b *backend) cleanupContainerSidecars(leaseID string, labels map[string]str
 }
 
 func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
-	expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
-	if !set || !exists {
-		return core.Server{}, core.Exit(4, "local-container lease %s has no exact claim snapshot; refusing touch", req.Lease.LeaseID)
-	}
-	if err := b.AuthorizeStatusTouchClaim(ctx, req.Lease, expected); err != nil {
-		return core.Server{}, err
-	}
-	if req.IdleTimeoutOverride != nil && *req.IdleTimeoutOverride <= 0 {
-		return core.Server{}, core.Exit(2, "local-container lease %s idle timeout override must be positive", req.Lease.LeaseID)
-	}
-
-	now := time.Now().UTC()
-	if b.rt.Clock != nil {
-		now = b.rt.Clock.Now().UTC()
-	}
-	cfg := b.configForRun()
-	if expected.IdleTimeoutSeconds > 0 {
-		cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
-	}
-	labels := localContainerTouchLabels(expected, cfg, req.State, now, req.IdleTimeoutOverride)
-	updated, err := core.UpdateLeaseClaimTouchIfUnchanged(req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider: "local-container", Authorize: b.AuthorizeStatusTouchClaim,
+		Prepare: func(expected core.LeaseClaim) (map[string]string, time.Time) {
+			now := time.Now().UTC()
+			if b.rt.Clock != nil {
+				now = b.rt.Clock.Now().UTC()
+			}
+			cfg := b.configForRun()
+			if expected.IdleTimeoutSeconds > 0 {
+				cfg.IdleTimeout = time.Duration(expected.IdleTimeoutSeconds) * time.Second
+			}
+			return localContainerTouchLabels(expected, cfg, req.State, now, req.IdleTimeoutOverride), now
+		},
+	})
 	if err != nil {
 		return core.Server{}, err
 	}
@@ -1608,14 +1671,13 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 }
 
 func localContainerTouchLabels(claim core.LeaseClaim, cfg core.Config, state string, now time.Time, idleTimeoutOverride *time.Duration) map[string]string {
-	labels := cloneLabels(claim.Labels)
-	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, state, now, idleTimeoutOverride)
-	for key, value := range claim.Labels {
-		switch key {
-		case "state", "last_touched_at", "idle_timeout", "idle_timeout_secs", "expires_at":
-			continue
+	labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(claim.Labels, cfg, state, now, idleTimeoutOverride)
+	// Expiry uses parsed lifecycle values, while the claim retains its original
+	// creation anchor and TTL representation across heartbeat updates.
+	for _, key := range []string{"created_at", "ttl_secs"} {
+		if value, ok := claim.Labels[key]; ok {
+			labels[key] = value
 		}
-		labels[key] = value
 	}
 	return labels
 }
@@ -1643,7 +1705,7 @@ func (b *backend) ValidateCheckpointForkWorkdir(ctx context.Context, lease core.
 	}
 	result, err := b.docker(ctx, args, nil, nil)
 	if err != nil {
-		return commandError("validate local-container checkpoint fork workdir", result, err)
+		return shared.LocalCommandError("validate local-container checkpoint fork workdir", result, err)
 	}
 	return nil
 }
@@ -1761,6 +1823,9 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 	hostWorkRoot := ""
 	if cfg.LocalContainer.DockerSocket {
 		hostWorkRoot, containerWorkRoot = dockerSocketWorkRoots(cfg)
+		if err := validateLocalContainerHostMount("local-container host work-root mount", hostWorkRoot); err != nil {
+			return "", "", err
+		}
 		labels["host_work_root"] = hostWorkRoot
 	}
 	hostLeaseWorkRoot := ""
@@ -1782,7 +1847,6 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 	args := []string{
 		"run", "-d",
 		"--name", name,
-		"--hostname", name,
 		"--user", "root",
 		"--network", cfg.LocalContainer.Network,
 		"-p", "127.0.0.1::" + sshPort,
@@ -1797,6 +1861,10 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 	}
 	for i, volume := range cfg.Cache.Volumes {
 		args = append(args, "-e", fmt.Sprintf("CRABBOX_CACHE_VOLUME_PATH_%d=%s", i, strings.TrimSpace(volume.Path)))
+	}
+	// Runtimes sharing a host UTS namespace can reject an explicit hostname.
+	if !cfg.LocalContainer.NoHostname {
+		args = append(args, "--hostname", name)
 	}
 	for i, destination := range hostVolumeDestinations {
 		args = append(args, "-e", fmt.Sprintf("CRABBOX_HOST_VOLUME_PATH_%d=%s", i, destination))
@@ -1837,6 +1905,9 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 		if err != nil {
 			return "", "", err
 		}
+		if err := validateLocalContainerHostMount("local-container Docker socket mount", socketPath); err != nil {
+			return "", "", err
+		}
 		args = append(args, "-v", socketPath+":"+dockerSocketInGuest)
 		if isPodmanRuntime(cfg.LocalContainer.Runtime) {
 			args = append(args, "--security-opt", "label=disable")
@@ -1856,6 +1927,9 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 	if err != nil {
 		return "", "", core.Exit(2, "create bootstrap script directory: %v", err)
 	}
+	if err := validateLocalContainerHostMount("local-container bootstrap mount", bootstrapDir); err != nil {
+		return "", "", errors.Join(err, os.Remove(bootstrapDir))
+	}
 	bootstrapPath := filepath.Join(bootstrapDir, "bootstrap.sh")
 	if err := os.WriteFile(bootstrapPath, []byte(bootstrapScript), 0o644); err != nil {
 		os.RemoveAll(bootstrapDir)
@@ -1871,14 +1945,14 @@ func (b *backend) createContainerWithFixedIntent(ctx context.Context, cfg core.C
 		containerID, owned, inspectErr := b.ownedContainerID(cleanupCtx, leaseID, bootstrapDir)
 		if owned {
 			cleanupHostLeaseWorkRoot = false
-			return containerID, bootstrapDir, commandError("container run", result, err)
+			return containerID, bootstrapDir, shared.LocalCommandError("container run", result, err)
 		}
 		if inspectErr == nil {
 			os.RemoveAll(bootstrapDir)
 		} else {
 			cleanupHostLeaseWorkRoot = false
 		}
-		return "", "", commandError("container run", result, err)
+		return "", "", shared.LocalCommandError("container run", result, err)
 	}
 	id := strings.TrimSpace(result.Stdout)
 	if id == "" {
@@ -1923,13 +1997,9 @@ func localContainerCacheVolumeMounts(volumes []core.CacheVolumeConfig) ([]string
 		if !strings.HasPrefix(path, "/") {
 			return nil, core.Exit(2, "cache volume path %q must be absolute", path)
 		}
-		mounts = append(mounts, localContainerCacheVolumeName(key)+":"+path)
+		mounts = append(mounts, shared.CacheVolumeName(key)+":"+path)
 	}
 	return mounts, nil
-}
-
-func localContainerCacheVolumeName(key string) string {
-	return shared.CacheVolumeName(key)
 }
 
 func (b *backend) dockerSocketMountPath(ctx context.Context) (string, error) {
@@ -2071,11 +2141,13 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, container i
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	keyPath, err := core.TestboxKeyPath(leaseID)
+	keyPath, err := core.OptionalStoredTestboxKeyPath(leaseID)
 	if err == nil {
 		if _, statErr := os.Stat(keyPath); statErr == nil {
 			cfg.SSHKey = keyPath
 		}
+	} else if !os.IsNotExist(err) {
+		return core.LeaseTarget{}, err
 	}
 	target := core.SSHTargetFromConfig(cfg, host)
 	target.Port = port
@@ -2093,7 +2165,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, container i
 func (b *backend) listContainers(ctx context.Context) ([]inspectContainer, error) {
 	result, err := b.docker(ctx, []string{"ps", "-a", "--filter", "label=crabbox=true", "--filter", "label=provider=" + providerName, "--format", "{{.ID}}"}, nil, nil)
 	if err != nil {
-		return nil, commandError("container list", result, err)
+		return nil, shared.LocalCommandError("container list", result, err)
 	}
 	ids := strings.Fields(result.Stdout)
 	containers := make([]inspectContainer, 0, len(ids))
@@ -2108,9 +2180,13 @@ func (b *backend) listContainers(ctx context.Context) ([]inspectContainer, error
 }
 
 func (b *backend) inspectContainer(ctx context.Context, id string) (inspectContainer, error) {
-	result, err := b.docker(ctx, []string{"inspect", id}, nil, nil)
+	return inspectRuntimeContainer(ctx, b.memoryRuntime().run, id)
+}
+
+func inspectRuntimeContainer(ctx context.Context, run containerObservationCommand, id string) (inspectContainer, error) {
+	result, err := run(ctx, []string{"inspect", id})
 	if err != nil {
-		return inspectContainer{}, commandError("container inspect", result, err)
+		return inspectContainer{}, shared.LocalCommandError("container inspect", result, err)
 	}
 	var containers []inspectContainer
 	if err := json.Unmarshal([]byte(result.Stdout), &containers); err != nil {
@@ -2127,11 +2203,15 @@ func (b *backend) exactContainerAbsent(ctx context.Context, id string) (bool, er
 	if err == nil {
 		return false, nil
 	}
-	detail := strings.ToLower(strings.TrimSpace(firstNonBlank(result.Stderr, result.Stdout)))
+	detail := strings.ToLower(strings.TrimSpace(shared.FirstNonBlank(result.Stderr, result.Stdout)))
 	if localContainerRouteFailure(detail) {
-		return false, commandError("confirm local-container absence", result, err)
+		return false, shared.LocalCommandError("confirm local-container absence", result, err)
 	}
 	containerID := strings.ToLower(strings.TrimSpace(id))
+	// Accept Podman's quoted-ID spelling only as the complete diagnostic.
+	if containerID != "" && detail == "error: no such container \""+containerID+"\"" {
+		return true, nil
+	}
 	for _, marker := range []string{
 		"no such object: " + containerID,
 		"no such container: " + containerID,
@@ -2146,7 +2226,7 @@ func (b *backend) exactContainerAbsent(ctx context.Context, id string) (bool, er
 			return true, nil
 		}
 	}
-	return false, commandError("confirm local-container absence", result, err)
+	return false, shared.LocalCommandError("confirm local-container absence", result, err)
 }
 
 func localContainerRouteFailure(detail string) bool {
@@ -2296,10 +2376,10 @@ func (b *backend) findContainerForClaim(ctx context.Context, claim core.LeaseCla
 		for _, container := range containers {
 			if strings.TrimSpace(container.ID) == boundID {
 				labels := container.Config.Labels
-				return container, firstNonBlank(claim.LeaseID, labels["lease"]), firstNonBlank(claim.Slug, labels["slug"]), nil
+				return container, shared.FirstNonBlank(claim.LeaseID, labels["lease"]), shared.FirstNonBlank(claim.Slug, labels["slug"]), nil
 			}
 		}
-		return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", firstNonBlank(claim.Slug, claim.LeaseID))
+		return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", shared.FirstNonBlank(claim.Slug, claim.LeaseID))
 	}
 	var matched *inspectContainer
 	for _, container := range containers {
@@ -2316,13 +2396,13 @@ func (b *backend) findContainerForClaim(ctx context.Context, claim core.LeaseCla
 		labels := matched.Config.Labels
 		return *matched, labels["lease"], labels["slug"], nil
 	}
-	return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", firstNonBlank(claim.Slug, claim.LeaseID))
+	return inspectContainer{}, "", "", core.Exit(4, "local-container lease not found: %s", shared.FirstNonBlank(claim.Slug, claim.LeaseID))
 }
 
 func (b *backend) removeContainer(ctx context.Context, id string) error {
 	result, err := b.docker(ctx, []string{"rm", "-f", id}, nil, b.rt.Stderr)
 	if err != nil {
-		return commandError("container remove", result, err)
+		return shared.LocalCommandError("container remove", result, err)
 	}
 	return nil
 }
@@ -2468,6 +2548,12 @@ func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.W
 }
 
 func (b *backend) containerRuntime(ctx context.Context, cfg core.Config, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
+	req := containerRuntimeRequest(cfg, args)
+	req.Stdout, req.Stderr = stdout, stderr
+	return b.rt.Exec.Run(ctx, req)
+}
+
+func containerRuntimeRequest(cfg core.Config, args []string) core.LocalCommandRequest {
 	var env []string
 	if metadata := cfg.LocalContainer.CheckpointMetadata; len(metadata) != 0 {
 		scope := checkpointScopeFromMetadata(metadata, cfg.LocalContainer.Runtime)
@@ -2478,13 +2564,11 @@ func (b *backend) containerRuntime(ctx context.Context, cfg core.Config, args []
 		}
 		env = checkpointEnvForScope(scope)
 	}
-	return b.rt.Exec.Run(ctx, core.LocalCommandRequest{
-		Name:   cfg.LocalContainer.Runtime,
-		Args:   args,
-		Env:    env,
-		Stdout: stdout,
-		Stderr: stderr,
-	})
+	return core.LocalCommandRequest{
+		Name: cfg.LocalContainer.Runtime,
+		Args: args,
+		Env:  env,
+	}
 }
 
 func (b *backend) assertRequestedArchitecture(ctx context.Context, cfg core.Config) (string, error) {
@@ -2503,7 +2587,7 @@ func (b *backend) assertRequestedArchitecture(ctx context.Context, cfg core.Conf
 	}
 	result, runErr := b.containerRuntime(ctx, cfg, []string{"info", "--format", format}, nil, nil)
 	if runErr != nil {
-		return "", core.Exit(2, "local-container architecture assertion failed: requested=%s available=unknown: query %s daemon architecture: %v", requested, runtimeLabel, commandError("container runtime info", result, runErr))
+		return "", core.Exit(2, "local-container architecture assertion failed: requested=%s available=unknown: query %s daemon architecture: %v", requested, runtimeLabel, shared.LocalCommandError("container runtime info", result, runErr))
 	}
 	raw := strings.TrimSpace(result.Stdout)
 	available, normalizeErr := core.NormalizeArchitecture(raw)
@@ -2554,7 +2638,7 @@ func (b *backend) serverFromContainer(container inspectContainer, cfg core.Confi
 		server.Status = "ready"
 	}
 	server.PublicNet.IPv4.IP = host
-	server.ServerType.Name = firstNonBlank(labels["server_type"], cfg.LocalContainer.Image)
+	server.ServerType.Name = shared.FirstNonBlank(labels["server_type"], cfg.LocalContainer.Image)
 	return server
 }
 
@@ -2588,7 +2672,7 @@ func mergeLocalContainerClaim(server core.Server, claim core.LeaseClaim) core.Se
 }
 
 func publicLocalContainerClaimLabels(labels map[string]string) map[string]string {
-	out := cloneLabels(labels)
+	out := shared.CloneLabels(labels)
 	for key := range out {
 		if privateLocalContainerScopeLabel(key) {
 			delete(out, key)
@@ -2614,14 +2698,6 @@ func isPendingLocalContainerClaim(claim core.LeaseClaim) bool {
 		strings.TrimSpace(claim.ProviderScope) != ""
 }
 
-func cloneLabels(labels map[string]string) map[string]string {
-	cloned := make(map[string]string, len(labels))
-	for key, value := range labels {
-		cloned[key] = value
-	}
-	return cloned
-}
-
 func containerSSHHostPort(container inspectContainer) (string, string, error) {
 	ports := container.NetworkSettings.Ports[sshPort+"/tcp"]
 	if len(ports) == 0 {
@@ -2632,21 +2708,6 @@ func containerSSHHostPort(container inspectContainer) (string, string, error) {
 		host = "127.0.0.1"
 	}
 	return host, strings.TrimSpace(ports[0].HostPort), nil
-}
-
-func commandError(action string, result core.LocalCommandResult, err error) error {
-	code := result.ExitCode
-	if code == 0 {
-		code = 1
-	}
-	detail := strings.TrimSpace(result.Stderr)
-	if detail == "" {
-		detail = strings.TrimSpace(result.Stdout)
-	}
-	if detail != "" {
-		return core.Exit(code, "%s failed: %v: %s", action, err, detail)
-	}
-	return core.Exit(code, "%s failed: %v", action, err)
 }
 
 func isPodmanRuntime(runtimeName string) bool {
@@ -2667,19 +2728,15 @@ func blank(value, fallback string) string {
 	return value
 }
 
-func firstNonBlank(values ...string) string {
-	return shared.FirstNonBlank(values...)
-}
-
 func hostLeaseWorkRoot(lease core.LeaseTarget) string {
-	return hostLeaseWorkRootFromLabels(firstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]), lease.Server.Labels)
+	return hostLeaseWorkRootFromLabels(shared.FirstNonBlank(lease.LeaseID, lease.Server.Labels["lease"]), lease.Server.Labels)
 }
 
 func hostLeaseWorkRootFromLabels(leaseID string, labels map[string]string) string {
 	if labels["docker_socket"] != "1" {
 		return ""
 	}
-	root := strings.TrimSpace(firstNonBlank(labels["host_work_root"], labels["work_root"]))
+	root := strings.TrimSpace(shared.FirstNonBlank(labels["host_work_root"], labels["work_root"]))
 	leaseID = strings.TrimSpace(leaseID)
 	if root == "" || leaseID == "" || !filepath.IsAbs(root) {
 		return ""
@@ -2831,8 +2888,8 @@ func localContainerReadyCheck(cfg core.Config) string {
 			)
 		default:
 			checks = append(checks,
-				"pgrep -f 'Xvfb :99' >/dev/null",
-				"pgrep -f 'x11vnc.*-rfbport 5900' >/dev/null",
+				// Existing leases keep their original desktop server until recreated.
+				"(pgrep -f 'Xtigervnc :99' >/dev/null || (pgrep -f 'Xvfb :99' >/dev/null && pgrep -f 'x11vnc.*-rfbport 5900' >/dev/null))",
 				"ss -ltn | grep -q '127.0.0.1:5900'",
 				"test -s /var/lib/crabbox/vnc.password",
 			)
@@ -2892,7 +2949,7 @@ func validateLocalContainerHostVolumes(cfg core.Config, workRoot string) ([]stri
 	}
 	destinations := make([]string, 0, len(cfg.LocalContainer.Volumes))
 	for _, volume := range cfg.LocalContainer.Volumes {
-		destination, err := localContainerVolumeDestination(volume)
+		source, destination, err := localContainerVolumePaths(volume)
 		if err != nil {
 			return nil, err
 		}
@@ -2901,34 +2958,99 @@ func validateLocalContainerHostVolumes(cfg core.Config, workRoot string) ([]stri
 				return nil, core.Exit(2, "local-container volume %q targets %s, which overlaps bootstrap-managed path %s", volume, destination, path.Clean(managedPath))
 			}
 		}
+		if !localContainerNamedVolume(source) {
+			if err := validateLocalContainerHostMount("local-container host volume", source); err != nil {
+				return nil, err
+			}
+		}
 		destinations = append(destinations, destination)
 	}
 	return destinations, nil
 }
 
+func validateLocalContainerHostMount(scope, source string) error {
+	if os.Getenv("XDG_STATE_HOME") == "" {
+		return nil
+	}
+	root, err := filepath.Abs(source)
+	if err != nil {
+		return err
+	}
+	return core.ValidateManagedStateTransferScope(scope, root)
+}
+
+func validateLocalContainerInspectedMounts(container inspectContainer) error {
+	if os.Getenv("XDG_STATE_HOME") == "" {
+		return nil
+	}
+	var mounts []struct {
+		Type   string `json:"Type"`
+		Source string `json:"Source"`
+	}
+	if json.Unmarshal(container.Mounts, &mounts) != nil || mounts == nil {
+		return core.Exit(2, "local-container retained bind mount scope is unavailable for %s", container.ID)
+	}
+	for _, mount := range mounts {
+		if mount.Type == "" {
+			return core.Exit(2, "local-container retained bind mount scope is incomplete for %s", container.ID)
+		}
+		if mount.Type != "bind" {
+			continue
+		}
+		if !filepath.IsAbs(mount.Source) {
+			return core.Exit(2, "local-container retained bind mount source is not an absolute host path for %s", container.ID)
+		}
+		if _, err := os.Lstat(mount.Source); err != nil {
+			return core.Exit(2, "local-container retained bind mount source cannot be qualified on this host for %s: %v", container.ID, err)
+		}
+		if err := validateLocalContainerHostMount("local-container retained bind mount", mount.Source); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func localContainerVolumeDestination(spec string) (string, error) {
+	_, destination, err := localContainerVolumePaths(spec)
+	return destination, err
+}
+
+func localContainerNamedVolume(source string) bool {
+	if source == "" {
+		return false
+	}
+	for i, c := range source {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || (i > 0 && strings.ContainsRune("_.-", c)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func localContainerVolumePaths(spec string) (string, string, error) {
 	spec = strings.TrimSpace(spec)
 	original := spec
 	lastColon := strings.LastIndex(spec, ":")
 	if lastColon < 0 {
-		return "", core.Exit(2, "invalid local-container volume %q; expected host:container[:options]", original)
+		return "", "", core.Exit(2, "invalid local-container volume %q; expected host:container[:options]", original)
 	}
 	destination := spec[lastColon+1:]
 	if !strings.HasPrefix(destination, "/") {
 		spec = spec[:lastColon]
 		lastColon = strings.LastIndex(spec, ":")
 		if lastColon < 0 {
-			return "", core.Exit(2, "invalid local-container volume %q; expected host:container[:options]", original)
+			return "", "", core.Exit(2, "invalid local-container volume %q; expected host:container[:options]", original)
 		}
 		destination = spec[lastColon+1:]
 	}
 	if !strings.HasPrefix(destination, "/") {
-		return "", core.Exit(2, "invalid local-container volume destination %q; expected an absolute container path", destination)
+		return "", "", core.Exit(2, "invalid local-container volume destination %q; expected an absolute container path", destination)
 	}
 	if strings.ContainsAny(destination, "\r\n") {
-		return "", core.Exit(2, "invalid local-container volume destination %q; line breaks are not allowed", destination)
+		return "", "", core.Exit(2, "invalid local-container volume destination %q; line breaks are not allowed", destination)
 	}
-	return path.Clean(destination), nil
+	return spec[:lastColon], path.Clean(destination), nil
 }
 
 func containerPathsOverlap(left, right string) bool {
@@ -3063,7 +3185,7 @@ MOZILLA
 fi
 `
 
-const bootstrapScript = `
+var bootstrapScript = `
 set -eu
 image_path="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 export DEBIAN_FRONTEND=noninteractive
@@ -3160,7 +3282,7 @@ if [ "${CRABBOX_DESKTOP:-0}" = "1" ] && command -v apt-get >/dev/null 2>&1; then
       apt-get install -y --no-install-recommends labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr dbus-user-session xwayland xdg-desktop-portal-wlr fonts-dejavu-core fonts-liberation iproute2 openssl procps netcat-openbsd novnc websockify
     fi
   else
-    apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme procps netcat-openbsd novnc websockify
+    apt-get install -y --no-install-recommends tigervnc-standalone-server tigervnc-tools xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl arc-theme procps netcat-openbsd novnc websockify
   fi
 fi
 ` + localContainerBrowserInstallScript + `
@@ -3388,206 +3510,7 @@ xkb_layout=us
 WAYVNC
     if [ "$desktop_env" = "gnome" ]; then
     cat >/usr/local/bin/crabbox-configure-desktop-theme <<'THEME'
-#!/bin/sh
-set -eu
-requested_mode="${1:-${CRABBOX_DESKTOP_THEME:-}}"
-user="${CRABBOX_DESKTOP_USER:-crabbox}"
-home_dir="$(getent passwd "$user" | cut -d: -f6)"
-if [ -z "$home_dir" ]; then
-  home_dir="/home/$user"
-fi
-config_dir="$home_dir/.config"
-mode="$requested_mode"
-if [ -z "$mode" ] && [ -f "$config_dir/crabbox/desktop-theme" ]; then
-  mode="$(cat "$config_dir/crabbox/desktop-theme" 2>/dev/null || true)"
-fi
-case "$mode" in
-  light|dark) ;;
-  *) mode=dark ;;
-esac
-if [ "$mode" = "light" ]; then
-  gtk_theme=Adwaita
-  gtk_prefer_dark_ini=0
-  gsettings_scheme=prefer-light
-  terminal_fg="#1f2937"
-  terminal_bg="#f8fafc"
-  labwc_title_bg="#f3f4f6"
-  labwc_title_fg="#111827"
-  labwc_inactive_title_bg="#e5e7eb"
-  labwc_inactive_title_fg="#374151"
-  labwc_border="#cbd5e1"
-  terminal_menu_bg="#f3f4f6"
-  terminal_menu_fg="#111827"
-  terminal_menu_hover_bg="#e5e7eb"
-  wallpaper_bg="#e7eef7"
-  wallpaper_panel="#d6e7f2"
-  wallpaper_accent="#0891b2"
-  wallpaper_grid="#b9c7d7"
-else
-  gtk_theme=Adwaita-dark
-  gtk_prefer_dark_ini=1
-  gsettings_scheme=prefer-dark
-  terminal_fg="#e5e7eb"
-  terminal_bg="#000000"
-  labwc_title_bg="#1f2329"
-  labwc_title_fg="#e5e7eb"
-  labwc_inactive_title_bg="#111827"
-  labwc_inactive_title_fg="#9ca3af"
-  labwc_border="#30363d"
-  terminal_menu_bg="#2b2f36"
-  terminal_menu_fg="#d1d5db"
-  terminal_menu_hover_bg="#374151"
-  wallpaper_bg="#0d1117"
-  wallpaper_panel="#111827"
-  wallpaper_accent="#22d3ee"
-  wallpaper_grid="#1f2937"
-fi
-if [ "$(id -u)" -eq 0 ]; then
-  install -d -m 0700 -o "$user" "$config_dir/crabbox" "$config_dir/gtk-3.0" "$config_dir/gtk-4.0"
-else
-  mkdir -p "$config_dir/crabbox" "$config_dir/gtk-3.0" "$config_dir/gtk-4.0" "$config_dir/labwc"
-  chmod 0700 "$config_dir" "$config_dir/crabbox" "$config_dir/gtk-3.0" "$config_dir/gtk-4.0" "$config_dir/labwc"
-fi
-printf '%s\n' "$mode" > "$config_dir/crabbox/desktop-theme"
-for gtk_dir in "$config_dir/gtk-3.0" "$config_dir/gtk-4.0"; do
-  cat > "$gtk_dir/settings.ini" <<EOF
-[Settings]
-gtk-theme-name=$gtk_theme
-gtk-icon-theme-name=Adwaita
-gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini
-EOF
-done
-cat > "$home_dir/.gtkrc-2.0" <<EOF
-gtk-theme-name="$gtk_theme"
-gtk-icon-theme-name="Adwaita"
-gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini
-EOF
-if [ "$(id -u)" -eq 0 ]; then
-  chown -R "$user" "$config_dir/crabbox" "$config_dir/gtk-3.0" "$config_dir/gtk-4.0" "$home_dir/.gtkrc-2.0"
-fi
-if [ -f /var/lib/crabbox/desktop.env ]; then
-  . /var/lib/crabbox/desktop.env
-fi
-display="${DISPLAY:-:0}"
-runtime="${XDG_RUNTIME_DIR:-/tmp/crabbox-runtime-$(id -u "$user")}"
-dbus_address="${DBUS_SESSION_BUS_ADDRESS:-}"
-if [ -z "$dbus_address" ]; then
-  labwc_pid="$(pgrep -u "$user" -n -x labwc 2>/dev/null || true)"
-  if [ -n "$labwc_pid" ] && [ -r "/proc/$labwc_pid/environ" ]; then
-    dbus_address="$(tr '\0' '\n' < "/proc/$labwc_pid/environ" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -n1)"
-  fi
-fi
-set_gnome_terminal_theme() {
-  profiles="$(gsettings get org.gnome.Terminal.ProfilesList list 2>/dev/null | tr -d "[],'" || true)"
-  default_profile="$(gsettings get org.gnome.Terminal.ProfilesList default 2>/dev/null | tr -d "'" || true)"
-  if [ -n "$default_profile" ] && ! printf ' %s ' "$profiles" | grep -q " $default_profile "; then
-    profiles="$profiles $default_profile"
-  fi
-  for profile in $profiles; do
-    [ -n "$profile" ] || continue
-    profile_path="/org/gnome/terminal/legacy/profiles:/:$profile/"
-    gsettings set "org.gnome.Terminal.Legacy.Profile:$profile_path" use-theme-colors false >/dev/null 2>&1 || true
-    gsettings set "org.gnome.Terminal.Legacy.Profile:$profile_path" foreground-color "$terminal_fg" >/dev/null 2>&1 || true
-    gsettings set "org.gnome.Terminal.Legacy.Profile:$profile_path" background-color "$terminal_bg" >/dev/null 2>&1 || true
-    gsettings set "org.gnome.Terminal.Legacy.Profile:$profile_path" use-transparent-background false >/dev/null 2>&1 || true
-  done
-}
-set_gtk_chrome_theme() {
-  cat > "$config_dir/gtk-3.0/gtk.css" <<EOF
-menubar, .menubar {
-  background-color: $terminal_menu_bg;
-  color: $terminal_menu_fg;
-}
-menubar menuitem, menubar menuitem label {
-  color: $terminal_menu_fg;
-}
-menubar menuitem:hover {
-  background-color: $terminal_menu_hover_bg;
-  color: $terminal_menu_fg;
-}
-EOF
-}
-set_labwc_theme() {
-  mkdir -p "$config_dir/labwc"
-  cat > "$config_dir/labwc/themerc-override" <<EOF
-window.active.title.bg.color: $labwc_title_bg
-window.active.label.text.color: $labwc_title_fg
-window.inactive.title.bg.color: $labwc_inactive_title_bg
-window.inactive.label.text.color: $labwc_inactive_title_fg
-window.active.border.color: $labwc_border
-window.inactive.border.color: $labwc_border
-window.active.button.unpressed.image.color: $labwc_title_fg
-window.inactive.button.unpressed.image.color: $labwc_inactive_title_fg
-window.active.button.hover.image.color: $labwc_title_fg
-window.inactive.button.hover.image.color: $labwc_inactive_title_fg
-window.active.button.pressed.image.color: $labwc_title_fg
-window.inactive.button.pressed.image.color: $labwc_inactive_title_fg
-EOF
-  if command -v labwc >/dev/null 2>&1; then
-    labwc_pid="$(pgrep -u "$user" -n -x labwc 2>/dev/null || true)"
-    if [ -n "$labwc_pid" ]; then
-      LABWC_PID="$labwc_pid" XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" labwc --reconfigure >/dev/null 2>&1 || kill -HUP "$labwc_pid" >/dev/null 2>&1 || true
-    fi
-  fi
-}
-set_desktop_background() {
-  wallpaper_file="$config_dir/crabbox/desktop-background-$mode.svg"
-  cat > "$wallpaper_file" <<EOF
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1920 1080">
-  <rect width="1920" height="1080" fill="$wallpaper_bg"/>
-  <path d="M0 720 C360 620 520 760 860 650 C1210 540 1430 660 1920 520 L1920 1080 L0 1080 Z" fill="$wallpaper_panel"/>
-  <g stroke="$wallpaper_grid" stroke-width="1" opacity="0.45">
-    <path d="M0 180 H1920M0 360 H1920M0 540 H1920M0 720 H1920M0 900 H1920"/>
-    <path d="M240 0 V1080M480 0 V1080M720 0 V1080M960 0 V1080M1200 0 V1080M1440 0 V1080M1680 0 V1080"/>
-  </g>
-  <path d="M220 740 C520 520 790 910 1090 670 S1510 520 1710 700" fill="none" stroke="$wallpaper_accent" stroke-width="18" stroke-linecap="round" opacity="0.8"/>
-  <rect x="1320" y="180" width="360" height="170" rx="18" fill="$wallpaper_accent" opacity="0.12"/>
-</svg>
-EOF
-  if command -v swaybg >/dev/null 2>&1; then
-    pkill -u "$user" -x swaybg >/dev/null 2>&1 || true
-    (
-      if XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" swaybg -i "$wallpaper_file" -m fill; then
-        exit 0
-      else
-        status=$?
-      fi
-      [ "$status" -lt 128 ] || exit "$status"
-      exec env XDG_RUNTIME_DIR="$runtime" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" swaybg -c "$wallpaper_bg"
-    ) </dev/null >/tmp/crabbox-swaybg.log 2>&1 &
-  fi
-}
-target_uid="$(id -u "$user" 2>/dev/null || printf 0)"
-if [ "$(id -u)" -eq 0 ] && [ "$target_uid" -ne 0 ]; then
-  su "$user" -s /bin/sh -c "CRABBOX_DESKTOP_USER='$user' CRABBOX_DESKTOP_THEME='$mode' DISPLAY='$display' XDG_RUNTIME_DIR='$runtime' DBUS_SESSION_BUS_ADDRESS='$dbus_address' GDK_BACKEND=x11 /usr/local/bin/crabbox-configure-desktop-theme '$mode'" || true
-  exit 0
-fi
-if command -v gsettings >/dev/null 2>&1; then
-  if [ "$(id -u)" -eq 0 ]; then
-    su "$user" -s /bin/sh -c "DISPLAY='$display' XDG_RUNTIME_DIR='$runtime' DBUS_SESSION_BUS_ADDRESS='$dbus_address' GDK_BACKEND=x11 gsettings set org.gnome.desktop.interface color-scheme '$gsettings_scheme' >/dev/null 2>&1 || true"
-    su "$user" -s /bin/sh -c "DISPLAY='$display' XDG_RUNTIME_DIR='$runtime' DBUS_SESSION_BUS_ADDRESS='$dbus_address' GDK_BACKEND=x11 gsettings set org.gnome.desktop.interface gtk-theme '$gtk_theme' >/dev/null 2>&1 || true"
-  else
-    DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="$dbus_address" GDK_BACKEND=x11 gsettings set org.gnome.desktop.interface color-scheme "$gsettings_scheme" >/dev/null 2>&1 || true
-    DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="$dbus_address" GDK_BACKEND=x11 gsettings set org.gnome.desktop.interface gtk-theme "$gtk_theme" >/dev/null 2>&1 || true
-    DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="$dbus_address" GDK_BACKEND=x11 set_gnome_terminal_theme
-  fi
-fi
-set_gtk_chrome_theme
-set_labwc_theme
-set_desktop_background
-if [ "$(id -u)" -eq 0 ] && pgrep -u "$user" -x gnome-panel >/dev/null 2>&1; then
-  pkill -TERM -u "$user" -x gnome-panel >/dev/null 2>&1 || true
-  su "$user" -s /bin/sh -c "DISPLAY='$display' XDG_RUNTIME_DIR='$runtime' DBUS_SESSION_BUS_ADDRESS='$dbus_address' GDK_BACKEND=x11 GTK_THEME='$gtk_theme' nohup gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &" >/dev/null 2>&1 || true
-elif [ "$(id -u)" -ne 0 ] && pgrep -x gnome-panel >/dev/null 2>&1; then
-  pkill -TERM -x gnome-panel >/dev/null 2>&1 || true
-  DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="$dbus_address" GDK_BACKEND=x11 GTK_THEME="$gtk_theme" nohup gnome-panel >/tmp/crabbox-gnome-panel.log 2>&1 &
-fi
-previous_terminal_theme="$(cat "$config_dir/crabbox/gnome-terminal-theme" 2>/dev/null || true)"
-printf '%s\n' "$mode" > "$config_dir/crabbox/gnome-terminal-theme"
-if [ "$(id -u)" -ne 0 ] && [ "$mode" = dark ] && command -v gnome-terminal >/dev/null 2>&1 && { [ "$previous_terminal_theme" != "$mode" ] || ! pgrep -u "$(id -u)" -f '/gnome-terminal-server' >/dev/null 2>&1; }; then
-  (sleep 0.4; DISPLAY="$display" XDG_RUNTIME_DIR="$runtime" DBUS_SESSION_BUS_ADDRESS="$dbus_address" GDK_BACKEND=x11 GTK_THEME="$gtk_theme" NO_AT_BRIDGE=1 gnome-terminal -- bash -l >/tmp/crabbox-gnome-terminal.log 2>&1 &) >/dev/null 2>&1 &
-fi
-THEME
+` + core.GnomeDesktopThemeScript() + `THEME
     chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme
     fi
     chown -R "$user" "$home_dir/.config"
@@ -3639,319 +3562,44 @@ DESKTOP
     chmod 0755 /usr/local/bin/crabbox-start-desktop
     CRABBOX_SSH_USER="$user" /usr/local/bin/crabbox-start-desktop
   else
-  { head -c 8 /var/lib/crabbox/vnc.password; printf '\n'; head -c 8 /var/lib/crabbox/vnc.password; printf '\n\n'; } | x11vnc -storepasswd /var/lib/crabbox/vnc.pass >/dev/null 2>&1
+  head -c 8 /var/lib/crabbox/vnc.password | tigervncpasswd -f > /var/lib/crabbox/vnc.pass
   chown "$user" /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
   chmod 0600 /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
   printf 'CRABBOX_DESKTOP_ENV=xfce\nDISPLAY=:99\n' >/var/lib/crabbox/desktop.env
   chown "$user" /var/lib/crabbox/desktop.env
   chmod 0644 /var/lib/crabbox/desktop.env
-  config_dir="$home_dir/.config"
-  mode="${CRABBOX_DESKTOP_THEME:-}"
-  if [ -z "$mode" ] && [ -f "$config_dir/crabbox/desktop-theme" ]; then
-    mode="$(cat "$config_dir/crabbox/desktop-theme" 2>/dev/null || true)"
-  fi
-  case "$mode" in
-    light|dark) ;;
-    *) mode=dark ;;
-  esac
-  if [ "$mode" = "light" ]; then
-    gtk_theme=Adwaita
-    gtk_prefer_dark=false
-    gtk_prefer_dark_ini=0
-    panel_rgba="0.94 0.95 0.97 1"
-    panel_css_bg="#eef2f7"
-    panel_css_fg="#111827"
-    gtk_candidates="Arc Greybird Adwaita"
-    xfwm_candidates="Arc Greybird Daloa Default"
-  else
-    gtk_theme=Adwaita-dark
-    gtk_prefer_dark=true
-    gtk_prefer_dark_ini=1
-    panel_rgba="0.12 0.13 0.15 1"
-    panel_css_bg="#20242b"
-    panel_css_fg="#e5e7eb"
-    gtk_candidates="Arc-Dark Greybird-dark Adwaita-dark Greybird"
-    xfwm_candidates="Arc-Dark Greybird-dark Daloa Default"
-  fi
-  for candidate in $gtk_candidates; do
-    if [ -d "/usr/share/themes/$candidate/gtk-3.0" ]; then
-      gtk_theme="$candidate"
-      break
-    fi
-  done
-  xfwm_theme=Default
-  for candidate in $xfwm_candidates; do
-    if [ -d "/usr/share/themes/$candidate/xfwm4" ]; then
-      xfwm_theme="$candidate"
-      break
-    fi
-  done
-  install -d -m 0700 -o "$user" "$config_dir/xfce4/xfconf/xfce-perchannel-xml" "$config_dir/xfce4/terminal" "$config_dir/gtk-3.0" "$config_dir/crabbox"
-  printf '%s\n' "$mode" > "$config_dir/crabbox/desktop-theme"
-  cat > "$config_dir/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml" <<XML
-<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xsettings" version="1.0">
-  <property name="Net" type="empty">
-    <property name="ThemeName" type="string" value="$gtk_theme"/>
-    <property name="IconThemeName" type="string" value="Adwaita"/>
-  </property>
-  <property name="Gtk" type="empty">
-    <property name="ApplicationPreferDarkTheme" type="bool" value="$gtk_prefer_dark"/>
-  </property>
-</channel>
-XML
-  if [ ! -s "$config_dir/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" ]; then
-    cat > "$config_dir/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" <<XML
-<?xml version="1.0" encoding="UTF-8"?>
-<channel name="xfwm4" version="1.0">
-  <property name="general" type="empty">
-    <property name="theme" type="string" value="$xfwm_theme"/>
-    <property name="box_move" type="bool" value="false"/>
-    <property name="box_resize" type="bool" value="false"/>
-    <property name="move_opacity" type="int" value="100"/>
-    <property name="resize_opacity" type="int" value="100"/>
-    <property name="snap_resist" type="bool" value="false"/>
-    <property name="snap_to_border" type="bool" value="false"/>
-    <property name="snap_to_windows" type="bool" value="false"/>
-    <property name="snap_width" type="int" value="0"/>
-    <property name="tile_on_move" type="bool" value="false"/>
-    <property name="use_compositing" type="bool" value="false"/>
-    <property name="wrap_windows" type="bool" value="false"/>
-  </property>
-</channel>
-XML
-  fi
-  if [ "$mode" = "light" ]; then
-    terminal_fg="#1f2937"
-    terminal_bg="#f8fafc"
-    terminal_cursor="#111827"
-  else
-    terminal_fg="#e5e7eb"
-    terminal_bg="#111827"
-    terminal_cursor="#f3f4f6"
-  fi
-  cat > "$config_dir/xfce4/terminal/terminalrc" <<EOF
-[Configuration]
-ColorForeground=$terminal_fg
-ColorBackground=$terminal_bg
-ColorCursor=$terminal_cursor
-MiscBell=FALSE
-EOF
-  cat > "$config_dir/gtk-3.0/settings.ini" <<EOF
-[Settings]
-gtk-theme-name=$gtk_theme
-gtk-icon-theme-name=Adwaita
-gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini
-EOF
-  cat > "$home_dir/.gtkrc-2.0" <<EOF
-gtk-theme-name="$gtk_theme"
-gtk-icon-theme-name="Adwaita"
-gtk-application-prefer-dark-theme=$gtk_prefer_dark_ini
-EOF
-  css_file="$config_dir/gtk-3.0/gtk.css"
-  css_tmp="$(mktemp)"
-  if [ -f "$css_file" ]; then
-    sed '/^[/][*] crabbox desktop theme start [*][/]$/,/^[/][*] crabbox desktop theme end [*][/]$/d' "$css_file" > "$css_tmp" || true
-  fi
-  cat >> "$css_tmp" <<EOF
-/* crabbox desktop theme start */
-.xfce4-panel { background: $panel_css_bg; background-color: $panel_css_bg; color: $panel_css_fg; }
-.xfce4-panel * { color: $panel_css_fg; text-shadow: none; -gtk-icon-shadow: none; }
-.xfce4-panel button,
-.xfce4-panel button.flat,
-.xfce4-panel button:hover,
-.xfce4-panel button:active,
-.xfce4-panel button:checked,
-.xfce4-panel button:focus,
-.xfce4-panel button:backdrop,
-.xfce4-panel .tasklist button,
-.xfce4-panel .tasklist button:hover,
-.xfce4-panel .tasklist button:active,
-.xfce4-panel .tasklist button:checked,
-.xfce4-panel .tasklist button:checked:hover,
-.xfce4-panel .tasklist button:focus,
-.xfce4-panel .tasklist button:backdrop,
-.xfce4-panel .tasklist .toggle,
-.xfce4-panel .tasklist .toggle:hover,
-.xfce4-panel .tasklist .toggle:checked,
-.xfce4-panel .tasklist .toggle:checked:hover,
-.xfce4-panel .tasklist button:checked,
-.xfce4-panel .tasklist button:active {
-  background: $panel_css_bg;
-  background-image: none;
-  background-color: $panel_css_bg;
-  border-image: none;
-  border-color: $panel_css_fg;
-  box-shadow: none;
-  color: $panel_css_fg;
-  outline-color: transparent;
-  text-shadow: none;
-  -gtk-icon-shadow: none;
-}
-.xfce4-panel .tasklist button label,
-.xfce4-panel .tasklist .toggle label {
-  color: $panel_css_fg;
-  text-shadow: none;
-}
-/* crabbox desktop theme end */
-EOF
-  mv "$css_tmp" "$css_file"
-  chown -R "$user" "$config_dir" "$home_dir/.gtkrc-2.0"
+  install -d -m 0755 /usr/local/lib/crabbox
+  cat >/usr/local/lib/crabbox/xfce-session.sh <<'SESSION_ENV'
+` + core.XfceSessionEnvironmentScript() + `SESSION_ENV
+  chmod 0644 /usr/local/lib/crabbox/xfce-session.sh
+  cat >/usr/local/bin/crabbox-configure-desktop-theme <<'THEME'
+` + core.XfceDesktopThemeScript() + `THEME
+  cat >/usr/local/bin/crabbox-desktop-session <<'SESSION'
+` + core.XfceDesktopSessionScript() + `SESSION
+  mkdir -p /etc/xdg/autostart
+  cat >/etc/xdg/autostart/crabbox-desktop.desktop <<'AUTOSTART'
+[Desktop Entry]
+Type=Application
+Name=Crabbox Desktop
+Exec=/usr/local/bin/crabbox-desktop-session
+OnlyShowIn=XFCE;
+AUTOSTART
+  chmod 0755 /usr/local/bin/crabbox-configure-desktop-theme /usr/local/bin/crabbox-desktop-session
   cat >/usr/local/bin/crabbox-start-desktop <<'DESKTOP'
 #!/bin/sh
 set -eu
 user="${CRABBOX_SSH_USER:-crabbox}"
 runtime="/tmp/crabbox-runtime-$user"
-requested_mode="${1:-${CRABBOX_DESKTOP_THEME:-}}"
-home_dir="$(getent passwd "$user" | cut -d: -f6)"
-if [ -z "$home_dir" ]; then
-  home_dir="/home/$user"
-fi
-config_dir="$home_dir/.config"
-mode="$requested_mode"
-if [ -z "$mode" ] && [ -f "$config_dir/crabbox/desktop-theme" ]; then
-  mode="$(cat "$config_dir/crabbox/desktop-theme" 2>/dev/null || true)"
-fi
-case "$mode" in
-  light|dark) ;;
-  *) mode=dark ;;
-esac
-if [ "$mode" = "light" ]; then
-  gtk_theme=Adwaita
-  gtk_prefer_dark=false
-  gsettings_scheme=prefer-light
-  root_color="#f4f6f8"
-  terminal_fg="#1f2937"
-  terminal_bg="#f8fafc"
-  panel_rgba="0.94 0.95 0.97 1"
-  panel_css_bg="#eef2f7"
-  panel_css_fg="#111827"
-  gtk_candidates="Arc Greybird Adwaita"
-  xfwm_candidates="Arc Greybird Daloa Default"
-else
-  gtk_theme=Adwaita-dark
-  gtk_prefer_dark=true
-  gsettings_scheme=prefer-dark
-  root_color="#20242b"
-  terminal_fg="#e5e7eb"
-  terminal_bg="#111827"
-  panel_rgba="0.12 0.13 0.15 1"
-  panel_css_bg="#20242b"
-  panel_css_fg="#e5e7eb"
-  gtk_candidates="Arc-Dark Greybird-dark Adwaita-dark Greybird"
-  xfwm_candidates="Arc-Dark Greybird-dark Daloa Default"
-fi
-for candidate in $gtk_candidates; do
-  if [ -d "/usr/share/themes/$candidate/gtk-3.0" ]; then
-    gtk_theme="$candidate"
-    break
-  fi
-done
-xfwm_theme=Default
-for candidate in $xfwm_candidates; do
-  if [ -d "/usr/share/themes/$candidate/xfwm4" ]; then
-    xfwm_theme="$candidate"
-    break
-  fi
-done
-install -d -m 0700 -o "$user" "$config_dir/gtk-3.0" "$config_dir/crabbox"
-printf '%s\n' "$mode" > "$config_dir/crabbox/desktop-theme"
-css_file="$config_dir/gtk-3.0/gtk.css"
-css_tmp="$(mktemp)"
-if [ -f "$css_file" ]; then
-  sed '/^[/][*] crabbox desktop theme start [*][/]$/,/^[/][*] crabbox desktop theme end [*][/]$/d' "$css_file" > "$css_tmp" || true
-fi
-cat >> "$css_tmp" <<EOF
-/* crabbox desktop theme start */
-.xfce4-panel { background: $panel_css_bg; background-color: $panel_css_bg; color: $panel_css_fg; }
-.xfce4-panel * { color: $panel_css_fg; text-shadow: none; -gtk-icon-shadow: none; }
-.xfce4-panel button,
-.xfce4-panel button.flat,
-.xfce4-panel button:hover,
-.xfce4-panel button:active,
-.xfce4-panel button:checked,
-.xfce4-panel button:focus,
-.xfce4-panel button:backdrop,
-.xfce4-panel .tasklist button,
-.xfce4-panel .tasklist button:hover,
-.xfce4-panel .tasklist button:active,
-.xfce4-panel .tasklist button:checked,
-.xfce4-panel .tasklist button:checked:hover,
-.xfce4-panel .tasklist button:focus,
-.xfce4-panel .tasklist button:backdrop,
-.xfce4-panel .tasklist .toggle,
-.xfce4-panel .tasklist .toggle:hover,
-.xfce4-panel .tasklist .toggle:checked,
-.xfce4-panel .tasklist .toggle:checked:hover,
-.xfce4-panel .tasklist button:checked,
-.xfce4-panel .tasklist button:active {
-  background: $panel_css_bg;
-  background-image: none;
-  background-color: $panel_css_bg;
-  border-image: none;
-  border-color: $panel_css_fg;
-  box-shadow: none;
-  color: $panel_css_fg;
-  outline-color: transparent;
-  text-shadow: none;
-  -gtk-icon-shadow: none;
-}
-.xfce4-panel .tasklist button label,
-.xfce4-panel .tasklist .toggle label {
-  color: $panel_css_fg;
-  text-shadow: none;
-}
-/* crabbox desktop theme end */
-EOF
-mv "$css_tmp" "$css_file"
-chown -R "$user" "$config_dir/gtk-3.0" "$config_dir/crabbox"
 install -d -m 0700 -o "$user" "$runtime"
-if ! pgrep -u "$user" -f 'Xvfb :99' >/dev/null 2>&1; then
-  su "$user" -s /bin/sh -c "XDG_RUNTIME_DIR='$runtime' Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac >/tmp/crabbox-xvfb.log 2>&1 &"
+if ! pgrep -u "$user" -f 'Xtigervnc :99' >/dev/null 2>&1; then
+  su "$user" -s /bin/sh -c "XDG_RUNTIME_DIR='$runtime' Xtigervnc :99 -geometry 1920x1080 -depth 24 -localhost yes -rfbport 5900 -SecurityTypes VncAuth -PasswordFile=/var/lib/crabbox/vnc.pass -AlwaysShared -AcceptSetDesktopSize -nolisten tcp -ac >/tmp/crabbox-xvfb.log 2>&1 &"
 fi
 sleep 1
-if ! pgrep -u "$user" -f 'xfce4-session|startxfce4' >/dev/null 2>&1; then
+if ! pgrep -u "$user" -x xfce4-session >/dev/null 2>&1; then
+  env -u DISPLAY CRABBOX_DESKTOP_USER="$user" /usr/local/bin/crabbox-configure-desktop-theme "${1:-}"
   su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' dbus-launch startxfce4 >/tmp/crabbox-desktop.log 2>&1 &"
-fi
-sleep 2
-if command -v xfconf-query >/dev/null 2>&1; then
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xsettings -p /Net/ThemeName -n -t string -s '$gtk_theme' >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xsettings -p /Net/IconThemeName -n -t string -s Adwaita >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xsettings -p /Gtk/ApplicationPreferDarkTheme -n -t bool -s '$gtk_prefer_dark' >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/theme -n -t string -s '$xfwm_theme' >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/box_move -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/box_resize -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/move_opacity -n -t int -s 100 >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/resize_opacity -n -t int -s 100 >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/snap_resist -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/snap_to_border -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/snap_to_windows -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/snap_width -n -t int -s 0 >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/tile_on_move -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/use_compositing -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfwm4 -p /general/wrap_windows -n -t bool -s false >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfce4-panel -p /panels/dark-mode -n -t bool -s '$gtk_prefer_dark' >/dev/null 2>&1 || true"
-  set -- $panel_rgba
-  for panel_id in panel-1 panel-2; do
-    su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfce4-panel -p /panels/$panel_id/background-style -n -t int -s 1 >/dev/null 2>&1 || true"
-    su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfconf-query -c xfce4-panel -p /panels/$panel_id/background-rgba -n -a -t double -s '$1' -t double -s '$2' -t double -s '$3' -t double -s '$4' >/dev/null 2>&1 || true"
-  done
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' pkill -TERM -x xfce4-panel >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' sh -c 'sleep 0.4; xfce4-panel >/tmp/crabbox-xfce4-panel-$user.log 2>&1 &' >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfwm4 --replace --compositor=off >/tmp/crabbox-xfwm4-replace-'$user'.log 2>&1 &"
-fi
-su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xsetroot -solid '$root_color' >/dev/null 2>&1 || true"
-if command -v gsettings >/dev/null 2>&1; then
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' gsettings set org.gnome.desktop.interface color-scheme '$gsettings_scheme' >/dev/null 2>&1 || true"
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' gsettings set org.gnome.desktop.interface gtk-theme '$gtk_theme' >/dev/null 2>&1 || true"
-fi
-if command -v xfce4-terminal >/dev/null 2>&1 && ! pgrep -u "$user" -f 'xfce4-terminal.*Crabbox Desktop' >/dev/null 2>&1; then
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xfce4-terminal --title='Crabbox Desktop' --geometry=110x32+48+48 >/tmp/crabbox-terminal.log 2>&1 &" || true
-elif command -v xterm >/dev/null 2>&1 && ! pgrep -u "$user" -f 'xterm -title Crabbox Desktop' >/dev/null 2>&1; then
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' xterm -title 'Crabbox Desktop' -geometry 110x32+48+48 -bg '$terminal_bg' -fg '$terminal_fg' >/tmp/crabbox-terminal.log 2>&1 &" || true
-fi
-if ! ss -ltn | grep -q '127.0.0.1:5900'; then
-  su "$user" -s /bin/sh -c "DISPLAY=:99 XDG_RUNTIME_DIR='$runtime' x11vnc -display :99 -localhost -rfbport 5900 -forever -shared -rfbauth /var/lib/crabbox/vnc.pass -wait 16 -defer 8 -nowait_bog -o /tmp/crabbox-x11vnc.log >/tmp/crabbox-x11vnc.stdout.log 2>&1 &"
+else
+  runuser -u "$user" -- env DISPLAY=:99 /usr/local/bin/crabbox-desktop-session "${1:-}"
 fi
 DESKTOP
   chmod 0755 /usr/local/bin/crabbox-start-desktop

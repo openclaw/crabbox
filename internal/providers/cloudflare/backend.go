@@ -2,41 +2,43 @@ package cloudflare
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"io"
+	"net/http"
 	"path"
-	"path/filepath"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-func NewCloudflareBackend(spec ProviderSpec, cfg Config, rt Runtime) Backend {
+func NewCloudflareBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
 	cfg.Provider = providerName
 	if cfg.ServerType == "" {
 		cfg.ServerType = cloudflareContainerInstanceTypeForClass(cfg.Class)
 	}
-	if normalized, ok := normalizeCloudflareContainerInstanceType(cfg.ServerType); ok {
+	if normalized, ok := normalizeContainerInstanceType(cfg.ServerType); ok {
 		cfg.ServerType = normalized
 	}
 	return &cloudflareBackend{spec: spec, cfg: cfg, rt: rt}
 }
 
 type cloudflareBackend struct {
-	spec ProviderSpec
-	cfg  Config
-	rt   Runtime
+	spec core.ProviderSpec
+	cfg  core.Config
+	rt   core.Runtime
 }
 
 var cloudflareDoctorTimeout = 10 * time.Second
 
-func (b *cloudflareBackend) Spec() ProviderSpec { return b.spec }
+func (b *cloudflareBackend) Spec() core.ProviderSpec { return b.spec }
 
-func (b *cloudflareBackend) Doctor(ctx context.Context, _ DoctorRequest) (DoctorResult, error) {
+func (b *cloudflareBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
 	client, err := newCloudflareClient(b.cfg, b.rt)
 	if err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
 	if cloudflareDoctorTimeout > 0 {
 		var cancel context.CancelFunc
@@ -44,226 +46,140 @@ func (b *cloudflareBackend) Doctor(ctx context.Context, _ DoctorRequest) (Doctor
 		defer cancel()
 	}
 	if err := client.checkAuth(ctx); err != nil {
-		return DoctorResult{}, err
+		return core.DoctorResult{}, err
 	}
-	return DoctorResult{
+	return core.DoctorResult{
 		Provider: providerName,
 		Message:  fmt.Sprintf("auth=ready control_plane=ready api=readiness mutation=false runner=%s type=%s runtime=ready", client.baseURL, client.instanceType),
 	}, nil
 }
 
-func (b *cloudflareBackend) Warmup(ctx context.Context, req WarmupRequest) error {
+func (b *cloudflareBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
 	if req.ActionsRunner {
-		return exit(2, "--actions-runner is not supported for provider=%s", providerName)
+		return core.Exit(2, "--actions-runner is not supported for provider=%s", providerName)
 	}
-	started := b.now()
+	started := core.ClockNow(b.rt.Clock)
 	client, err := newCloudflareClient(b.cfg, b.rt)
 	if err != nil {
 		return err
 	}
-	leaseID, sandbox, slug, err := b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
+	claim, sandbox, err := b.createSandbox(ctx, client, req.Repo, req.RequestedSlug)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandbox.ID)
+	fmt.Fprintf(b.rt.Stdout, "leased %s slug=%s provider=%s sandbox=%s\n", claim.LeaseID, claim.Slug, providerName, sandbox.ID)
 	if !req.Keep {
 		fmt.Fprintf(b.rt.Stderr, "warning: %s warmup keeps the container until explicit stop\n", providerName)
 	}
-	total := b.now().Sub(started)
-	fmt.Fprintf(b.rt.Stdout, "warmup complete total=%s\n", total.Round(time.Millisecond))
-	if req.TimingJSON {
-		return writeTimingJSON(b.rt.Stderr, timingReport{
-			Provider: providerName,
-			LeaseID:  leaseID,
-			Slug:     slug,
-			TotalMs:  total.Milliseconds(),
-			ExitCode: 0,
-		})
-	}
-	return nil
+	total := core.ClockNow(b.rt.Clock).Sub(started)
+	return shared.CompleteWarmup(b.rt, req.TimingJSON, shared.WarmupCompletion{
+		Provider: providerName,
+		LeaseID:  claim.LeaseID,
+		Slug:     claim.Slug,
+		Total:    total,
+	})
 }
 
-func (b *cloudflareBackend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
-	if err := rejectCloudflareSyncOptions(req); err != nil {
-		return RunResult{}, err
-	}
+func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
 	workdir, err := cloudflareWorkdir(b.cfg)
 	if err != nil {
-		return RunResult{}, err
+		return core.RunResult{}, err
 	}
-	started := b.now()
-	client, err := newCloudflareClient(b.cfg, b.rt)
-	if err != nil {
-		return RunResult{}, err
+	var client *cloudflareClient
+	var claim core.LeaseClaim
+	var command string
+	bound := func() shared.DelegatedSandbox {
+		return shared.DelegatedSandbox{LeaseID: claim.LeaseID, Slug: core.Blank(claim.Slug, core.NewLeaseSlug(claim.LeaseID)), CleanupCommand: cloudflareCleanupCommand(claim.LeaseID)}
 	}
-	leaseID, sandboxID, slug := "", "", ""
-	acquired := false
-	if req.ID == "" {
-		var sandbox cloudflareContainer
-		leaseID, sandbox, slug, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
-		if err != nil {
-			return RunResult{}, err
-		}
-		sandboxID = sandbox.ID
-		fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", leaseID, slug, providerName, sandboxID)
-		acquired = true
-	} else {
-		var instanceType string
-		leaseID, sandboxID, slug, instanceType, err = b.resolveSandboxID(req.ID, req.Repo.Root, req.Reclaim)
-		if err != nil {
-			return RunResult{}, err
-		}
-		client.useInstanceType(instanceType)
-	}
-	shouldStop := acquired && !req.Keep
-	if shouldStop {
-		defer func() {
-			if !shouldStop {
-				return
+	return shared.RunDelegatedSandbox(ctx, req, shared.DelegatedSandboxLifecycle{
+		Provider: providerName, Runtime: b.rt, Workdir: workdir,
+		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: cloudflareCleanupTimeout,
+		Preflight: func(context.Context) error {
+			if err := rejectCloudflareSyncOptions(req); err != nil {
+				return err
 			}
-			cleanupCtx, cancel := cloudflareCleanupContext()
-			defer cancel()
-			if err := client.destroySandbox(cleanupCtx, sandboxID); err != nil {
-				fmt.Fprintf(b.rt.Stderr, "warning: %s destroy failed for %s: %v\n", providerName, sandboxID, err)
-				return
+			if !req.SyncOnly {
+				intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+				if err != nil {
+					return err
+				}
+				command = intent.ShellScript()
 			}
-			removeLeaseClaim(leaseID)
-		}()
-	}
-	session := &RunSessionHandle{
-		Provider:       providerName,
-		LeaseID:        leaseID,
-		Slug:           slug,
-		Reused:         !acquired,
-		Kept:           !shouldStop,
-		CleanupCommand: cloudflareCleanupCommand(leaseID),
-	}
-
-	syncDuration := time.Duration(0)
-	syncPhases := []timingPhase{{Name: "sync", Skipped: true, Reason: "--no-sync"}}
-	if !req.NoSync {
-		syncPhases, syncDuration, err = b.syncWorkspace(ctx, client, sandboxID, req, workdir)
-		if err != nil {
-			return RunResult{Total: b.now().Sub(started), SyncDelegated: true, Session: session}, err
-		}
-		fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-	} else if err := b.prepareWorkspace(ctx, client, sandboxID, workdir, false); err != nil {
-		return RunResult{Session: session}, err
-	}
-	if req.SyncOnly {
-		result := RunResult{Total: b.now().Sub(started), SyncDelegated: true, Session: session}
-		fmt.Fprintf(b.rt.Stdout, "synced %s\n", workdir)
-		if req.TimingJSON {
-			err := writeTimingJSON(b.rt.Stderr, timingReport{
-				Provider:      providerName,
-				LeaseID:       leaseID,
-				Slug:          slug,
-				SyncDelegated: true,
-				SyncMs:        syncDuration.Milliseconds(),
-				SyncPhases:    syncPhases,
-				SyncSkipped:   req.NoSync,
-				TotalMs:       result.Total.Milliseconds(),
-				ExitCode:      0,
-				Label:         strings.TrimSpace(req.Label),
-			})
-			return result, err
-		}
-		return result, nil
-	}
-
-	command, err := buildCloudflareCommand(req.Command, req.ShellMode)
-	if err != nil {
-		return RunResult{Session: session}, err
-	}
-	if req.EnvSummary {
-		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
-	}
-	commandStarted := b.now()
-	exitCode, commandErr := client.execStream(ctx, sandboxID, execStreamRequest{
-		Command:   command,
-		Cwd:       workdir,
-		Env:       req.Env,
-		TimeoutMS: durationMillisecondsCeil(b.cfg.TTL),
-	}, b.rt.Stdout, b.rt.Stderr)
-	if commandErr != nil && exitCode == 0 {
-		exitCode = 1
-	}
-	commandDuration := b.now().Sub(commandStarted)
-	result := RunResult{
-		ExitCode:      exitCode,
-		Command:       commandDuration,
-		Total:         b.now().Sub(started),
-		SyncDelegated: true,
-		Session:       session,
-	}
-	result = finalizeRunResult(result, commandErr)
-	if req.NoSync {
-		fmt.Fprintf(b.rt.Stderr, "%s run summary sync_skipped=true command=%s total=%s exit=%d\n", providerName, result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	} else {
-		fmt.Fprintf(b.rt.Stderr, "%s run summary sync=%s command=%s total=%s exit=%d\n", providerName, syncDuration.Round(time.Millisecond), result.Command.Round(time.Millisecond), result.Total.Round(time.Millisecond), result.ExitCode)
-	}
-	if req.TimingJSON {
-		report := timingReportWithRunResult(timingReport{
-			Provider:      providerName,
-			LeaseID:       leaseID,
-			Slug:          slug,
-			SyncDelegated: true,
-			SyncMs:        syncDuration.Milliseconds(),
-			SyncPhases:    syncPhases,
-			SyncSkipped:   req.NoSync,
-			CommandMs:     commandDuration.Milliseconds(),
-			TotalMs:       result.Total.Milliseconds(),
-			ExitCode:      result.ExitCode,
-			Label:         strings.TrimSpace(req.Label),
-		}, result, commandErr)
-		if err := writeTimingJSON(b.rt.Stderr, report); err != nil {
-			return result, err
-		}
-	}
-	if commandErr != nil {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		session.Kept = !shouldStop
-		return result, ExitError{Code: 1, Message: fmt.Sprintf("%s run failed: %v", providerName, commandErr)}
-	}
-	if result.ExitCode != 0 {
-		handleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
-		session.Kept = !shouldStop
-		return result, ExitError{Code: result.ExitCode, Message: fmt.Sprintf("%s run exited %d", providerName, result.ExitCode)}
-	}
-	return result, nil
+			client, err = newCloudflareClient(b.cfg, b.rt)
+			return err
+		},
+		Workspace: func() shared.SandboxWorkspace {
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+				SyncFunc: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					return b.syncWorkspace(ctx, client, claim.LeaseID, req, workdir, prepared)
+				},
+				EnsureFunc: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, claim.LeaseID, workdir) },
+			}
+		},
+		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			claim, _, err = b.createSandbox(ctx, client, req.Repo, req.RequestedSlug)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			fmt.Fprintf(b.rt.Stderr, "leased %s slug=%s provider=%s sandbox=%s\n", claim.LeaseID, claim.Slug, providerName, claim.LeaseID)
+			return bound(), nil
+		},
+		Resolve: func(ctx context.Context) (shared.DelegatedSandbox, error) {
+			claim, err = resolveCloudflareClaim(req.ID)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			claim, err = admitRunClaim(ctx, claim, req.Repo.Root, req.Reclaim)
+			if err != nil {
+				return shared.DelegatedSandbox{}, err
+			}
+			client.useInstanceType(cloudflareClaimInstanceType(claim))
+			return bound(), nil
+		},
+		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
+			if req.EnvSummary {
+				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
+			}
+			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
+				return client.execStream(ctx, claim.LeaseID, shared.CommandStreamRequest{Command: command, Cwd: workdir, Env: req.Env, TimeoutMS: durationMillisecondsCeil(b.cfg.TTL)}, stdout, stderr)
+			}}, nil
+		},
+		Cleanup: func(ctx context.Context) error { _, err := destroyClaimedSandbox(ctx, client, claim); return err },
+	})
 }
 
-func (b *cloudflareBackend) List(ctx context.Context, req ListRequest) ([]LeaseView, error) {
+func (b *cloudflareBackend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseView, error) {
 	claims, err := localCloudflareClaims()
 	if err != nil {
 		return nil, err
 	}
 	if req.Refresh {
 		if len(claims) == 0 {
-			return []LeaseView{}, nil
+			return []core.LeaseView{}, nil
 		}
 		return b.listRefreshed(ctx, claims)
 	}
-	servers := make([]Server, 0, len(claims))
+	servers := make([]core.Server, 0, len(claims))
 	for _, claim := range claims {
 		servers = append(servers, claimToServer(claim, "unknown"))
 	}
 	return servers, nil
 }
 
-func (b *cloudflareBackend) listRefreshed(ctx context.Context, claims []localClaim) ([]LeaseView, error) {
+func (b *cloudflareBackend) listRefreshed(ctx context.Context, claims []core.LeaseClaim) ([]core.LeaseView, error) {
 	client, err := newCloudflareClient(b.cfg, b.rt)
 	if err != nil {
 		return nil, err
 	}
-	servers := make([]Server, 0, len(claims))
+	servers := make([]core.Server, 0, len(claims))
 	defaultInstanceType := client.instanceType
 	for _, claim := range claims {
 		client.instanceType = defaultInstanceType
-		client.useInstanceType(claim.instanceType())
+		client.useInstanceType(cloudflareClaimInstanceType(claim))
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
-			if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
+			if cloudflareNotFoundError(err) {
 				servers = append(servers, claimToServer(claim, "missing"))
 				continue
 			}
@@ -276,68 +192,66 @@ func (b *cloudflareBackend) listRefreshed(ctx context.Context, claims []localCla
 	return servers, nil
 }
 
-func (b *cloudflareBackend) Status(ctx context.Context, req StatusRequest) (StatusView, error) {
+func (b *cloudflareBackend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
 	client, err := newCloudflareClient(b.cfg, b.rt)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
-	leaseID, sandboxID, slug, instanceType, err := b.resolveSandboxID(req.ID, "", false)
+	claim, err := resolveCloudflareClaim(req.ID)
 	if err != nil {
-		return StatusView{}, err
+		return core.StatusView{}, err
 	}
-	client.useInstanceType(instanceType)
-	deadline := b.now().Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
-	}
-	for {
-		sandbox, err := client.getSandbox(ctx, sandboxID)
+	client.useInstanceType(cloudflareClaimInstanceType(claim))
+	return shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
+		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
-			return StatusView{}, err
+			return core.StatusView{}, false, err
 		}
-		view := sandboxStatusView(leaseID, slug, sandbox)
-		if cloudflareTerminalState(view.State) {
-			removeLeaseClaim(leaseID)
-			return view, nil
-		}
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if b.now().After(deadline) {
-			return StatusView{}, exit(5, "timed out waiting for %s container %s to become ready", providerName, sandboxID)
-		}
-		select {
-		case <-ctx.Done():
-			return StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		view := sandboxStatusView(claim.LeaseID, claim.Slug, sandbox)
+		return view, cloudflareTerminalState(view.State), nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for %s container %s to become ready", providerName, claim.LeaseID)
+	})
 }
 
-func (b *cloudflareBackend) Stop(ctx context.Context, req StopRequest) error {
+func (b *cloudflareBackend) Stop(ctx context.Context, req core.StopRequest) error {
 	client, err := newCloudflareClient(b.cfg, b.rt)
 	if err != nil {
 		return err
 	}
-	leaseID, sandboxID, _, instanceType, err := b.resolveSandboxID(req.ID, "", false)
+	claim, err := resolveCloudflareClaim(req.ID)
 	if err != nil {
 		return err
 	}
-	client.useInstanceType(instanceType)
-	if err := client.destroySandbox(ctx, sandboxID); err != nil {
-		if cloudflareNotFoundError(err) {
-			removeLeaseClaim(leaseID)
-			fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s reason=not-found\n", providerName, leaseID)
-			return nil
-		}
+	missing, err := destroyClaimedSandbox(ctx, client, claim)
+	if err != nil {
 		return err
 	}
-	removeLeaseClaim(leaseID)
-	fmt.Fprintf(b.rt.Stdout, "stopped %s provider=%s sandbox=%s\n", leaseID, providerName, sandboxID)
+	if missing {
+		fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s reason=not-found\n", providerName, claim.LeaseID)
+	} else {
+		fmt.Fprintf(b.rt.Stdout, "stopped %s provider=%s sandbox=%s\n", claim.LeaseID, providerName, claim.LeaseID)
+	}
 	return nil
 }
 
-func (b *cloudflareBackend) Cleanup(ctx context.Context, req CleanupRequest) error {
+// Keep the captured local authority fenced through the native effect. The
+// runner's instance type is a routing preference, not a remote generation CAS.
+func destroyClaimedSandbox(ctx context.Context, client *cloudflareClient, claim core.LeaseClaim) (bool, error) {
+	client.useInstanceType(cloudflareClaimInstanceType(claim))
+	missing := false
+	err := core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, claim.LeaseID, claim, true, func() error {
+		err := client.destroySandbox(ctx, claim.LeaseID)
+		if cloudflareNotFoundError(err) {
+			missing = true
+			return nil
+		}
+		return err
+	})
+	return missing, err
+}
+
+func (b *cloudflareBackend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	client, err := newCloudflareClient(b.cfg, b.rt)
 	if err != nil {
 		return err
@@ -350,17 +264,19 @@ func (b *cloudflareBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 	defaultInstanceType := client.instanceType
 	for _, claim := range claims {
 		client.instanceType = defaultInstanceType
-		client.useInstanceType(claim.instanceType())
+		client.useInstanceType(cloudflareClaimInstanceType(claim))
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
 			if cloudflareNotFoundError(err) {
 				if req.DryRun {
-					fmt.Fprintf(b.rt.Stdout, "would remove stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, blank(claim.Slug, "-"))
+					fmt.Fprintf(b.rt.Stdout, "would remove stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"))
 					continue
 				}
-				removeLeaseClaim(claim.LeaseID)
+				if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+					return err
+				}
 				removed++
-				fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, blank(claim.Slug, "-"))
+				fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s slug=%s reason=not-found\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"))
 				continue
 			}
 			fmt.Fprintf(b.rt.Stderr, "warning: %s status failed for %s: %v\n", providerName, claim.LeaseID, err)
@@ -370,12 +286,14 @@ func (b *cloudflareBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 			continue
 		}
 		if req.DryRun {
-			fmt.Fprintf(b.rt.Stdout, "would remove stale %s claim %s slug=%s state=%s\n", providerName, claim.LeaseID, blank(claim.Slug, "-"), sandbox.State)
+			fmt.Fprintf(b.rt.Stdout, "would confirm cleanup of %s claim %s slug=%s state=%s\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"), sandbox.State)
 			continue
 		}
-		removeLeaseClaim(claim.LeaseID)
+		if _, err := destroyClaimedSandbox(ctx, client, claim); err != nil {
+			return err
+		}
 		removed++
-		fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s slug=%s state=%s\n", providerName, claim.LeaseID, blank(claim.Slug, "-"), sandbox.State)
+		fmt.Fprintf(b.rt.Stdout, "removed stale %s claim %s slug=%s state=%s\n", providerName, claim.LeaseID, core.Blank(claim.Slug, "-"), sandbox.State)
 	}
 	if !req.DryRun {
 		fmt.Fprintf(b.rt.Stdout, "%s cleanup removed=%d checked=%d\n", providerName, removed, len(claims))
@@ -384,119 +302,103 @@ func (b *cloudflareBackend) Cleanup(ctx context.Context, req CleanupRequest) err
 }
 
 func cloudflareNotFoundError(err error) bool {
-	if err == nil {
-		return false
-	}
-	text := strings.ToLower(err.Error())
-	return strings.Contains(text, "404") || strings.Contains(text, "not found")
+	var responseErr *cloudflareResponseError
+	return errors.As(err, &responseErr) && responseErr.statusCode == http.StatusNotFound
 }
 
 func cloudflareCleanupCommand(leaseID string) string {
-	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, shellQuote(leaseID))
+	return fmt.Sprintf("crabbox stop --provider %s --id %s", providerName, core.ShellQuote(leaseID))
 }
 
-func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflareClient, repo Repo, reclaim bool, requestedSlug string) (string, cloudflareContainer, string, error) {
-	leaseID := newLeaseID()
-	slug, err := allocateClaimLeaseSlug(leaseID, requestedSlug)
+func (b *cloudflareBackend) createSandbox(ctx context.Context, client *cloudflareClient, repo core.Repo, requestedSlug string) (core.LeaseClaim, cloudflareContainer, error) {
+	if strings.TrimSpace(repo.Root) == "" {
+		return core.LeaseClaim{}, cloudflareContainer{}, core.Exit(2, "cloudflare creation requires a repository root for the recovery claim")
+	}
+	leaseID := core.NewLeaseID()
+	slug, err := core.AllocateClaimLeaseSlug(leaseID, requestedSlug)
 	if err != nil {
-		return "", cloudflareContainer{}, "", err
+		return core.LeaseClaim{}, cloudflareContainer{}, err
 	}
 	workdir, err := cloudflareWorkdir(b.cfg)
 	if err != nil {
-		return "", cloudflareContainer{}, "", err
+		return core.LeaseClaim{}, cloudflareContainer{}, err
 	}
-	labels := map[string]string{
-		"crabbox":       "true",
-		"provider":      providerName,
-		"lease":         leaseID,
-		"slug":          slug,
-		"repo":          repo.Name,
-		"instance_type": client.instanceType,
-	}
+	labels := map[string]string{"crabbox": "true", "provider": providerName, "lease": leaseID, "slug": slug, "repo": repo.Name, "instance_type": client.instanceType}
 	sandbox, err := client.createSandbox(ctx, createSandboxRequest{
-		ID:                 leaseID,
-		LeaseID:            leaseID,
-		Slug:               slug,
-		Repo:               repo.Name,
-		Workdir:            workdir,
-		InstanceType:       client.instanceType,
-		TTLSeconds:         durationSecondsCeil(b.cfg.TTL),
-		IdleTimeoutSeconds: durationSecondsCeil(b.cfg.IdleTimeout),
-		Labels:             labels,
+		ID: leaseID, LeaseID: leaseID, Slug: slug, Repo: repo.Name, Workdir: workdir,
+		InstanceType: client.instanceType, TTLSeconds: durationSecondsCeil(b.cfg.TTL), IdleTimeoutSeconds: durationSecondsCeil(b.cfg.IdleTimeout), Labels: labels,
 	})
 	if err != nil {
-		return "", cloudflareContainer{}, "", err
+		return core.LeaseClaim{}, cloudflareContainer{}, err
 	}
-	if err := claimLeaseForRepoProviderPondLabels(leaseID, slug, providerName, b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, reclaim, labels); err != nil {
+	if sandbox.ID != leaseID {
+		return core.LeaseClaim{}, cloudflareContainer{}, fmt.Errorf("cloudflare creation returned unexpected sandbox %q for requested %q; inspect the runner before recovery", sandbox.ID, leaseID)
+	}
+	claim, err := core.ClaimLeaseForRepoProviderScopePondWithLabels(leaseID, slug, providerName, "", b.cfg.Pond, repo.Root, b.cfg.IdleTimeout, labels)
+	if err != nil {
 		cleanupCtx, cancel := cloudflareCleanupContext()
-		cleanupErr := client.destroySandbox(cleanupCtx, sandbox.ID)
-		cancel()
+		defer cancel()
+		cleanupErr := core.CleanupLeaseClaimIfUnchangedAfterContext(cleanupCtx, leaseID, core.LeaseClaim{}, false, func() error { return client.destroySandbox(cleanupCtx, leaseID) })
 		if cleanupErr != nil {
-			return "", cloudflareContainer{}, "", fmt.Errorf("%w; cleanup failed for %s sandbox %s: %v", err, providerName, sandbox.ID, cleanupErr)
+			err = errors.Join(err, fmt.Errorf("cleanup failed for cloudflare sandbox %s; inspect its claim and runner before recovery: %w", leaseID, cleanupErr))
 		}
-		return "", cloudflareContainer{}, "", err
+		return core.LeaseClaim{}, cloudflareContainer{}, err
 	}
-	return leaseID, sandbox, slug, nil
+	return claim, sandbox, nil
 }
 
-func (b *cloudflareBackend) resolveSandboxID(identifier, repoRoot string, reclaim bool) (string, string, string, string, error) {
-	claim, ok, err := resolveLeaseClaimForProvider(identifier, providerName)
+func resolveCloudflareClaim(identifier string) (core.LeaseClaim, error) {
+	claim, ok, err := core.ResolveLeaseClaimForProvider(identifier, providerName)
 	if err != nil {
-		return "", "", "", "", err
+		return core.LeaseClaim{}, err
 	}
 	if ok {
-		if repoRoot != "" {
-			if err := claimLeaseForRepoProvider(claim.LeaseID, claim.Slug, providerName, repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim); err != nil {
-				return "", "", "", "", err
-			}
-		}
-		return claim.LeaseID, claim.LeaseID, blank(claim.Slug, newLeaseSlug(claim.LeaseID)), cloudflareClaimInstanceType(claim), nil
+		return claim, nil
 	}
 	value := strings.TrimSpace(identifier)
 	if value == "" {
-		return "", "", "", "", exit(2, "%s id is required", providerName)
+		return core.LeaseClaim{}, core.Exit(2, "%s id is required", providerName)
 	}
-	return "", "", "", "", exit(2, "refusing to use %s sandbox %q without a local Crabbox claim", providerName, value)
+	return core.LeaseClaim{}, core.Exit(2, "refusing to use %s sandbox %q without a local Crabbox claim", providerName, value)
 }
 
-func buildCloudflareCommand(command []string, shellMode bool) (string, error) {
-	if len(command) == 0 {
-		return "", errors.New("missing command")
+func admitRunClaim(ctx context.Context, captured core.LeaseClaim, repoRoot string, reclaim bool) (core.LeaseClaim, error) {
+	if err := ctx.Err(); err != nil {
+		return core.LeaseClaim{}, err
 	}
-	if shellMode {
-		return strings.Join(command, " "), nil
+	if repoRoot == "" {
+		err := core.WithLeaseClaimUnchangedShared(ctx, captured.LeaseID, captured, func() error { return nil })
+		return captured, err
 	}
-	if shouldUseShell(command) || leadingEnvAssignment(command) {
-		return shellScriptFromArgv(command), nil
-	}
-	return strings.Join(shellWords(command), " "), nil
+	// Repository admission retains the existing non-cancelable local lock wait.
+	return core.ClaimLeaseForRepoProviderScopePondIfUnchanged(captured.LeaseID, captured.Slug, providerName, captured.ProviderScope, captured.Pond, repoRoot, time.Duration(captured.IdleTimeoutSeconds)*time.Second, reclaim, captured, true)
 }
 
-func rejectCloudflareSyncOptions(req RunRequest) error {
+func rejectCloudflareSyncOptions(req core.RunRequest) error {
 	if req.ChecksumSync {
-		return exit(2, "%s uses archive sync; --checksum is not supported", providerName)
+		return core.Exit(2, "%s uses archive sync; --checksum is not supported", providerName)
 	}
 	return nil
 }
 
-func cloudflareWorkdir(cfg Config) (string, error) {
-	workdir := blank(strings.TrimSpace(cfg.Cloudflare.Workdir), "/workspace/crabbox")
+func cloudflareWorkdir(cfg core.Config) (string, error) {
+	workdir := core.Blank(strings.TrimSpace(cfg.Cloudflare.Workdir), core.CloudflareConfigDefaultWorkdir)
 	clean := path.Clean(workdir)
 	if !strings.HasPrefix(clean, "/") {
-		return "", exit(2, "%s workdir %q must resolve to an absolute path", providerName, workdir)
+		return "", core.Exit(2, "%s workdir %q must resolve to an absolute path", providerName, workdir)
 	}
 	switch clean {
 	case "/", "/bin", "/dev", "/etc", "/home", "/lib", "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var", "/workspace":
-		return "", exit(2, "%s workdir %q is too broad; choose a dedicated subdirectory", providerName, clean)
+		return "", core.Exit(2, "%s workdir %q is too broad; choose a dedicated subdirectory", providerName, clean)
 	}
 	return clean, nil
 }
 
-func sandboxStatusView(leaseID, slug string, sandbox cloudflareContainer) StatusView {
+func sandboxStatusView(leaseID, slug string, sandbox cloudflareContainer) core.StatusView {
 	server := sandboxToServer(leaseID, slug, sandbox)
-	return StatusView{
+	return core.StatusView{
 		ID:         leaseID,
-		Slug:       blank(slug, newLeaseSlug(leaseID)),
+		Slug:       core.Blank(slug, core.NewLeaseSlug(leaseID)),
 		Provider:   providerName,
 		TargetOS:   targetLinux,
 		State:      server.Status,
@@ -508,20 +410,20 @@ func sandboxStatusView(leaseID, slug string, sandbox cloudflareContainer) Status
 	}
 }
 
-func sandboxToServer(leaseID, slug string, sandbox cloudflareContainer) Server {
+func sandboxToServer(leaseID, slug string, sandbox cloudflareContainer) core.Server {
 	labels := map[string]string{}
 	for k, v := range sandbox.Labels {
 		labels[k] = v
 	}
 	labels["provider"] = providerName
 	labels["lease"] = leaseID
-	labels["slug"] = blank(slug, newLeaseSlug(leaseID))
+	labels["slug"] = core.Blank(slug, core.NewLeaseSlug(leaseID))
 	labels["target"] = targetLinux
-	state := blank(sandbox.State, "running")
-	instanceType := blank(sandbox.InstanceType, providerName)
+	state := core.Blank(sandbox.State, "running")
+	instanceType := core.Blank(sandbox.InstanceType, providerName)
 	labels["state"] = state
 	labels["instance_type"] = instanceType
-	server := Server{
+	server := core.Server{
 		Provider: providerName,
 		CloudID:  sandbox.ID,
 		Name:     sandbox.ID,
@@ -532,15 +434,15 @@ func sandboxToServer(leaseID, slug string, sandbox cloudflareContainer) Server {
 	return server
 }
 
-func claimToServer(claim localClaim, state string) Server {
+func claimToServer(claim core.LeaseClaim, state string) core.Server {
 	labels := map[string]string{
 		"provider": providerName,
 		"lease":    claim.LeaseID,
-		"slug":     blank(claim.Slug, newLeaseSlug(claim.LeaseID)),
+		"slug":     core.Blank(claim.Slug, core.NewLeaseSlug(claim.LeaseID)),
 		"target":   targetLinux,
 		"state":    state,
 	}
-	server := Server{
+	server := core.Server{
 		Provider: providerName,
 		CloudID:  claim.LeaseID,
 		Name:     claim.LeaseID,
@@ -579,71 +481,20 @@ func durationMillisecondsCeil(duration time.Duration) int64 {
 	return int64((duration + time.Millisecond - 1) / time.Millisecond)
 }
 
-func (b *cloudflareBackend) now() time.Time {
-	if b.rt.Clock != nil {
-		return b.rt.Clock.Now()
-	}
-	return time.Now()
-}
-
-type localClaim struct {
-	LeaseID      string            `json:"leaseID"`
-	Slug         string            `json:"slug,omitempty"`
-	Provider     string            `json:"provider,omitempty"`
-	InstanceType string            `json:"instanceType,omitempty"`
-	Labels       map[string]string `json:"labels,omitempty"`
-}
-
-func (c localClaim) instanceType() string {
-	if c.InstanceType != "" {
-		return c.InstanceType
-	}
-	return c.Labels["instance_type"]
-}
-
-func cloudflareClaimInstanceType(claim LeaseClaim) string {
+func cloudflareClaimInstanceType(claim core.LeaseClaim) string {
 	return claim.Labels["instance_type"]
 }
 
-func localCloudflareClaims() ([]localClaim, error) {
-	dir, err := localClaimsDir()
+func localCloudflareClaims() ([]core.LeaseClaim, error) {
+	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, exit(2, "read claims directory: %v", err)
-	}
-	var claims []localClaim
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			return nil, exit(2, "read claim %s: %v", entry.Name(), err)
-		}
-		var claim localClaim
-		if err := json.Unmarshal(data, &claim); err != nil {
-			return nil, exit(2, "parse claim %s: %v", entry.Name(), err)
-		}
+	var filtered []core.LeaseClaim
+	for _, claim := range claims {
 		if claim.Provider == providerName {
-			claims = append(claims, claim)
+			filtered = append(filtered, claim)
 		}
 	}
-	return claims, nil
-}
-
-func localClaimsDir() (string, error) {
-	if dir := os.Getenv("XDG_STATE_HOME"); dir != "" {
-		return filepath.Join(dir, "crabbox", "claims"), nil
-	}
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return "", exit(2, "user state directory is unavailable")
-	}
-	return filepath.Join(dir, "crabbox", "state", "claims"), nil
+	return filtered, nil
 }

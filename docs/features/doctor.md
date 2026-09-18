@@ -129,7 +129,7 @@ than warning about unproven pressure. When the coordinator path runs, doctor
 returns immediately after the SSH-key check — it does not also run the direct
 provider check.
 
-**Direct path (no coordinator).** Providers that implement `DoctorProvider` run
+**Direct path (no coordinator).** Providers whose configured backend implements `DoctorBackend` run
 their own non-mutating check (cheapest list or readiness API), bounded to the 10s
 provider timeout. Examples:
 
@@ -159,7 +159,7 @@ socket/address/remote path through the official Go client, reports
 operators can distinguish config/auth drift from guest reachability issues
 before running a live smoke.
 
-**No direct doctor.** Providers without a `DoctorProvider` implementation print
+**No direct doctor.** Providers whose backend has no `DoctorBackend` capability print
 `skip provider provider=<name> direct_doctor=unsupported`.
 
 Failures add a `class` and a remediation `hint`. The class is one of `timeout`,
@@ -260,7 +260,7 @@ lifted from the message, plus provider-supplied detail fields).
 ## Adding A Check
 
 Doctor orchestration lives in `internal/cli/doctor.go`; the pond check lives in
-`internal/cli/doctor_pond.go`. Prefer provider-owned `DoctorProvider`
+`internal/cli/doctor_pond.go`. Prefer provider-owned `DoctorBackend`
 implementations for direct provider checks rather than provider-specific branches
 in core. Keep each check explicit and cheap, and emit stable `ok`, `failed`,
 `missing`, `skip`, or `warning` lines that stay easy to scan in terminal logs.

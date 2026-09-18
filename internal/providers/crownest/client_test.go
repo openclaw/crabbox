@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestClientSandboxWorkspaceRunAndArchiveFlow(t *testing.T) {
@@ -59,7 +61,7 @@ func TestClientSandboxWorkspaceRunAndArchiveFlow(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("CRABBOX_CROWNEST_API_KEY", "cn_test_key")
-	client, err := newClient(testConfigWithURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newClient(testConfigWithURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +111,7 @@ func TestClientCreateWorkspaceRunPreservesSandboxIDOnMissingRunID(t *testing.T) 
 	defer server.Close()
 
 	t.Setenv("CRABBOX_CROWNEST_API_KEY", "cn_test_key")
-	client, err := newClient(testConfigWithURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newClient(testConfigWithURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +151,7 @@ func TestClientRedactsSecretsFromErrors(t *testing.T) {
 	}))
 	defer server.Close()
 	t.Setenv("CRABBOX_CROWNEST_API_KEY", "cn_test_key")
-	client, err := newClient(testConfigWithURL(server.URL), Runtime{HTTP: server.Client()})
+	client, err := newClient(testConfigWithURL(server.URL), core.Runtime{HTTP: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +208,7 @@ func TestClientKeepsRequestContextAliveUntilJSONBodyRead(t *testing.T) {
 	}
 }
 
-func testConfigWithURL(url string) Config {
+func testConfigWithURL(url string) core.Config {
 	cfg := testConfig()
 	cfg.Crownest.APIURL = url
 	return cfg

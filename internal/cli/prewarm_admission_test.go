@@ -27,8 +27,6 @@ type probeAdmissionProvider struct {
 	warmupConfig                     Config
 }
 
-func (p *probeAdmissionProvider) Name() string       { return p.spec.Name }
-func (p *probeAdmissionProvider) Aliases() []string  { return nil }
 func (p *probeAdmissionProvider) Spec() ProviderSpec { return p.spec }
 func (p *probeAdmissionProvider) CreationOnlyFlagNames() []string {
 	return []string{"admission-create"}
@@ -55,7 +53,7 @@ func (p *probeAdmissionProvider) ClaimScope(cfg Config) string {
 func (p *probeAdmissionProvider) ValidateRunOptions(req RunRequest) error {
 	p.admissions = append(p.admissions, req)
 	if p.reject {
-		return exit(2, "probe admission: --no-sync unsupported; use a provider workflow probe")
+		return Exit(2, "probe admission: --no-sync unsupported; use a provider workflow probe")
 	}
 	return nil
 }
@@ -80,7 +78,7 @@ func (b *probeAdmissionBackend) Warmup(context.Context, WarmupRequest) error {
 func (b *probeAdmissionBackend) Run(_ context.Context, req RunRequest) (RunResult, error) {
 	b.p.ran++
 	b.p.execution = probeAdmissionObservation{b.cfg, req}
-	return RunResult{Provider: b.p.Name(), LeaseID: req.ID}, nil
+	return RunResult{Provider: b.p.Spec().Name, LeaseID: req.ID}, nil
 }
 func (b *probeAdmissionBackend) Stop(context.Context, StopRequest) error { b.p.stopped++; return nil }
 func (b *probeAdmissionBackend) List(context.Context, ListRequest) ([]LeaseView, error) {
@@ -116,7 +114,7 @@ func setupProbeAdmission(t *testing.T, features FeatureSet) *probeAdmissionProvi
 		Targets: []TargetSpec{{OS: targetLinux}}, Features: features, Coordinator: CoordinatorNever,
 	}}
 	RegisterProvider(p)
-	t.Cleanup(func() { delete(providerRegistry, p.Name()) })
+	t.Cleanup(func() { delete(providerRegistry, p.Spec().Name) })
 	writeFile(t, filepath.Join(root, "config.yaml"), "provider: probe-admission-test\nblacksmith:\n  org: config-route\n  workflow: config-only\n")
 	return p
 }
@@ -262,6 +260,34 @@ func TestRunProviderAdmissionBeforeConfigure(t *testing.T) {
 			req := p.admissions[0]
 			if req.ID != id || req.ReuseLease != (id != "") || !req.NoHydrate || !req.NoSync || !req.ShellMode {
 				t.Fatalf("intent=%#v", req)
+			}
+		})
+	}
+}
+
+func TestRunProfileLiteralIntentSurvivesDelegatedHandoff(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mixed=%t", mixed), func(t *testing.T) {
+			p := setupProbeAdmission(t, nil)
+			preset := "printf {{scenario}}"
+			want := []string{"printf", "&&"}
+			if mixed {
+				preset += " && printf done"
+				want = append(want, "&&", "printf", "done")
+			}
+			writeFile(t, os.Getenv("CRABBOX_CONFIG"), "provider: probe-admission-test\nprofiles:\n  qa:\n    presets:\n      check:\n        command: "+preset+"\n")
+			var stdout, stderr bytes.Buffer
+			err := (App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), []string{"run", "--profile", "qa", "--preset", "check", "--scenario", "&&", "--id", "cbx_0123456789ab", "--no-sync", "--no-hydrate"})
+			if err != nil {
+				t.Fatalf("run: %v\n%s", err, stderr.String())
+			}
+			if len(p.admissions) != 1 || p.ran != 1 {
+				t.Fatalf("admissions=%d executions=%d", len(p.admissions), p.ran)
+			}
+			for _, req := range []RunRequest{p.admissions[0], p.execution.req} {
+				if req.ShellMode || !reflect.DeepEqual(req.Command, want) || !reflect.DeepEqual(req.CommandLiteralArgs, map[int]bool{1: true}) {
+					t.Fatalf("lost literal intent: command=%q literal=%v shell=%t", req.Command, req.CommandLiteralArgs, req.ShellMode)
+				}
 			}
 		})
 	}

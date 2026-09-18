@@ -24,20 +24,20 @@ func (b *backend) PrepareNativeCheckpointAbandon(ctx context.Context, req core.N
 		capture.SourceScope != claim.ProviderScope || capture.SourceRevision != claim.Revision ||
 		capture.SourceClaimedAt != claim.ClaimedAt || capture.SourceName == "" ||
 		req.Server.CloudID != claim.CloudID || req.Server.Name != capture.SourceName {
-		return nil, exit(2, "checkpoint abandonment requires the exact current unbound Machine0 source claim")
+		return nil, core.Exit(2, "checkpoint abandonment requires the exact current unbound Machine0 source claim")
 	}
 	intent := ""
 	if claim.FixedCreateIntent != nil {
 		intent = claim.FixedCreateIntent.Fingerprint
 	}
 	if capture.SourceIntent != intent {
-		return nil, exit(2, "checkpoint abandonment source intent changed")
+		return nil, core.Exit(2, "checkpoint abandonment source intent changed")
 	}
 	if reason := checkpointRetirementPolicy(b.configForRun(), claim.Labels); reason != "" {
-		return nil, exit(2, "%s", reason)
+		return nil, core.Exit(2, "%s", reason)
 	}
 	if req.Metadata[metadataImageID] != "" || req.Metadata[metadataImageVersion] != "" {
-		return nil, exit(2, "checkpoint abandonment cannot discard a recorded Machine0 image identity")
+		return nil, core.Exit(2, "checkpoint abandonment cannot discard a recorded Machine0 image identity")
 	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
@@ -56,7 +56,7 @@ func (b *backend) PrepareNativeCheckpointAbandon(ctx context.Context, req core.N
 		"machine0_original_submission": "unknown",
 	} {
 		if expected == "" || metadata[key] != "" && metadata[key] != expected {
-			return nil, exit(2, "checkpoint abandonment metadata conflicts with its source binding: %s", key)
+			return nil, core.Exit(2, "checkpoint abandonment metadata conflicts with its source binding: %s", key)
 		}
 		metadata[key] = expected
 	}
@@ -65,7 +65,7 @@ func (b *backend) PrepareNativeCheckpointAbandon(ctx context.Context, req core.N
 		return nil, err
 	}
 	if strings.TrimSpace(accountID) == "" || metadata[metadataSourceCleanupAccountID] != "" && metadata[metadataSourceCleanupAccountID] != accountID {
-		return nil, exit(2, "Machine0 checkpoint source cleanup account identity changed; retain source")
+		return nil, core.Exit(2, "Machine0 checkpoint source cleanup account identity changed; retain source")
 	}
 	metadata[metadataSourceCleanupAccountID] = accountID
 	if _, err := b.readCheckpointSource(ctx, claim, capture.SourceName); err != nil {
@@ -79,7 +79,7 @@ func (b *backend) PrepareNativeCheckpointAbandon(ctx context.Context, req core.N
 
 func (b *backend) attestCheckpointSourceAccount(ctx context.Context, metadata map[string]string, capture *core.NativeCheckpointCapture) error {
 	if capture == nil {
-		return exit(2, "checkpoint source cleanup has no operation identity; retain source")
+		return core.Exit(2, "checkpoint source cleanup has no operation identity; retain source")
 	}
 	key := metadataAccountID
 	switch capture.SourceDisposition {
@@ -89,7 +89,7 @@ func (b *backend) attestCheckpointSourceAccount(ctx context.Context, metadata ma
 		// original image account, or promote cleanup provenance to image authority.
 		key = metadataSourceCleanupAccountID
 	default:
-		return exit(2, "checkpoint source cleanup has an unknown disposition; retain source")
+		return core.Exit(2, "checkpoint source cleanup has an unknown disposition; retain source")
 	}
 	return b.attestCheckpointAccount(ctx, metadata[key])
 }

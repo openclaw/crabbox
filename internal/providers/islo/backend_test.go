@@ -1,9 +1,7 @@
 package islo
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -20,10 +18,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	gosdk "github.com/islo-labs/go-sdk"
+	sdkcore "github.com/islo-labs/go-sdk/core"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func isolateIsloTestHome(t *testing.T) {
@@ -31,6 +32,17 @@ func isolateIsloTestHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+}
+
+func newIsloSDKHTTPTestClient(t *testing.T, server *httptest.Server) isloAPI {
+	t.Helper()
+	// The SDK cache is process-wide; isolate each invocation even if a server address is reused.
+	apiKey := "ak_test_" + t.TempDir()
+	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: apiKey, BaseURL: server.URL}}, core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api
 }
 
 func TestParseIsloSSE(t *testing.T) {
@@ -107,33 +119,104 @@ func TestParseIsloSSERejectsInvalidExitEvent(t *testing.T) {
 	}
 }
 
-func TestIsloExecCommandPreservesShellString(t *testing.T) {
-	got, err := isloExecCommand([]string{"pnpm install && pnpm test"}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"bash", "-lc", "pnpm install && pnpm test"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
+type isloOutputFailureWriter struct{ err error }
+
+func (w isloOutputFailureWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestParseIsloSSEPropagatesOutputWriteFailure(t *testing.T) {
+	writeErr := errors.New("output destination rejected bytes")
+	for _, stream := range []string{"stdout", "stderr"} {
+		for _, position := range []string{"before exit", "after exit", "final EOF flush"} {
+			t.Run(stream+"/"+position, func(t *testing.T) {
+				output := "event: " + stream + "\ndata: command output"
+				body := output + "\n\nevent: exit\ndata: 0\n\n"
+				if position == "after exit" {
+					body = "event: exit\ndata: 23\n\n" + output + "\n\n"
+				} else if position == "final EOF flush" {
+					body = "event: exit\ndata: 137\n\n" + output
+				}
+				var stdout, stderr io.Writer = io.Discard, io.Discard
+				if stream == "stdout" {
+					stdout = isloOutputFailureWriter{writeErr}
+				} else {
+					stderr = isloOutputFailureWriter{writeErr}
+				}
+				code, err := parseIsloSSE(strings.NewReader(body), stdout, stderr)
+				if code != 1 || err != writeErr {
+					t.Fatalf("code=%d err=%v, want code 1 and original writer error", code, err)
+				}
+			})
+		}
 	}
 }
 
-func TestIsloExecCommandQuotesImplicitShellArgv(t *testing.T) {
-	got, err := isloExecCommand([]string{"FOO=bar", "pnpm", "test"}, false)
+func TestParseIsloSSEReadOnlyOutputFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "output")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 || got[0] != "bash" || got[1] != "-lc" || !strings.Contains(got[2], "FOO=") || !strings.Contains(got[2], "'pnpm'") {
-		t.Fatalf("command=%#v", got)
+	defer file.Close()
+	_, writeErr := file.Write([]byte("probe"))
+	var pathErr *os.PathError
+	if !errors.As(writeErr, &pathErr) {
+		t.Fatalf("read-only file write error=%v", writeErr)
+	}
+	for _, stream := range []string{"stdout", "stderr"} {
+		t.Run(stream, func(t *testing.T) {
+			var stdout, stderr io.Writer = io.Discard, io.Discard
+			if stream == "stdout" {
+				stdout = file
+			} else {
+				stderr = file
+			}
+			body := "event: " + stream + "\ndata: command output\n\nevent: exit\ndata: 0\n\n"
+			code, err := parseIsloSSE(strings.NewReader(body), stdout, stderr)
+			if code != 1 || !errors.Is(err, pathErr.Err) {
+				t.Fatalf("code=%d err=%v, want code 1 and file error %v", code, err, pathErr.Err)
+			}
+		})
 	}
 }
 
-func TestLeadingEnvAssignmentUsesShell(t *testing.T) {
-	if !leadingEnvAssignment([]string{"FOO=bar", "pnpm", "test"}) {
-		t.Fatal("expected leading env assignment to require shell")
-	}
-	if leadingEnvAssignment([]string{"pnpm", "test"}) {
-		t.Fatal("plain argv should not require shell")
+func TestParseIsloSSEPreservesCompletionRules(t *testing.T) {
+	readErr := errors.New("stream disconnected")
+	for _, tc := range []struct {
+		name    string
+		body    string
+		readErr error
+		code    int
+		output  string
+		errText string
+	}{
+		{name: "multiline comments and final EOF", body: ": keepalive\r\nevent: stdout\r\ndata: first\r\nid: ignored\r\ndata: second\r\n\r\nevent: exit\ndata: -1", code: -1, output: "first\nsecond"},
+		{name: "last exit wins", body: "event: exit\ndata: 7\n\nevent: stdout\ndata: between\n\nevent: exit\ndata: 23", code: 23, output: "between"},
+		{name: "error event with exit", body: "event: exit\ndata: 0\n\nevent: error\ndata: diagnostic", code: 0},
+		{name: "read error after exit", body: "event: exit\ndata: 23\n\n", readErr: readErr, code: 1, errText: "stream disconnected"},
+		{name: "invalid exit after exit", body: "event: exit\ndata: 23\n\nevent: exit\ndata: invalid", code: 1, errText: "invalid exit event"},
+		{name: "final decode error precedes read error", body: "event: exit\ndata: invalid", readErr: readErr, code: 1, errText: "invalid exit event"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reader io.Reader = strings.NewReader(tc.body)
+			if tc.readErr != nil {
+				reader = io.MultiReader(reader, iotest.ErrReader(tc.readErr))
+			}
+			var stdout bytes.Buffer
+			code, err := parseIsloSSE(reader, &stdout, io.Discard)
+			if code != tc.code || stdout.String() != tc.output {
+				t.Fatalf("code=%d output=%q, want %d/%q", code, stdout.String(), tc.code, tc.output)
+			}
+			if tc.errText == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.errText) {
+				t.Fatalf("err=%v, want %q", err, tc.errText)
+			}
+		})
 	}
 }
 
@@ -176,7 +259,7 @@ func TestIsloProviderDeclaresPauseResume(t *testing.T) {
 }
 
 func TestIsloProviderExposesLoginWithoutSSHLease(t *testing.T) {
-	backend := NewIsloBackend((Provider{}).Spec(), Config{}, Runtime{})
+	backend := NewIsloBackend((Provider{}).Spec(), core.Config{}, core.Runtime{})
 	if _, ok := backend.(core.SSHLoginBackend); !ok {
 		t.Fatalf("backend=%T does not expose SSH login", backend)
 	}
@@ -215,10 +298,10 @@ func TestIsloStopRejectsNonCanonicalSandboxBeforeDelete(t *testing.T) {
 	client := &fakeIsloSyncClient{}
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
-	backend := &isloBackend{spec: (Provider{}).Spec(), cfg: Config{Provider: isloProvider}}
+	backend := &isloBackend{spec: (Provider{}).Spec(), cfg: core.Config{Provider: isloProvider}}
 
 	for _, id := range []string{"crabbox repo abc123", "isb_crabbox/repo/abc123"} {
-		if err := backend.Stop(context.Background(), StopRequest{ID: id}); err == nil {
+		if err := backend.Stop(context.Background(), core.StopRequest{ID: id}); err == nil {
 			t.Errorf("Stop(%q) accepted a non-canonical sandbox name", id)
 		}
 	}
@@ -233,14 +316,16 @@ func TestIsloMutationsRejectCanonicalSandboxWithoutExactClaim(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
 	for name, mutate := range map[string]func() error{
-		"stop":   func() error { return backend.Stop(context.Background(), StopRequest{ID: "crabbox-repo-abcdef"}) },
-		"pause":  func() error { return backend.Pause(context.Background(), PauseRequest{ID: "crabbox-repo-abcdef"}) },
-		"resume": func() error { return backend.Resume(context.Background(), ResumeRequest{ID: "crabbox-repo-abcdef"}) },
+		"stop":  func() error { return backend.Stop(context.Background(), core.StopRequest{ID: "crabbox-repo-abcdef"}) },
+		"pause": func() error { return backend.Pause(context.Background(), core.PauseRequest{ID: "crabbox-repo-abcdef"}) },
+		"resume": func() error {
+			return backend.Resume(context.Background(), core.ResumeRequest{ID: "crabbox-repo-abcdef"})
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := mutate()
@@ -258,7 +343,7 @@ func TestIsloStopDeletesExactlyClaimedSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	isolateIsloTestHome(t)
 	const leaseID = "isb_crabbox-repo-abcdef"
-	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	target := core.SSHTarget{}
@@ -270,11 +355,11 @@ func TestIsloStopDeletesExactlyClaimedSandbox(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	if err := backend.Stop(context.Background(), StopRequest{ID: "web"}); err != nil {
+	if err := backend.Stop(context.Background(), core.StopRequest{ID: "web"}); err != nil {
 		t.Fatal(err)
 	}
 	if client.deleteCalls != 1 {
@@ -289,7 +374,7 @@ func TestResolveIsloLeaseIDPreservesClaimSlug(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	root := t.TempDir()
 	leaseID := "isb_crabbox-repo-abcdef"
-	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, root, time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "web", isloProvider, root, time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -307,8 +392,9 @@ func TestResolveIsloLeaseIDPreservesClaimSlug(t *testing.T) {
 func TestResolveIsloLeaseIDForRepoRequiresExplicitVerifiedReclaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	root := t.TempDir()
-	backend := &isloBackend{cfg: Config{IdleTimeout: 7 * time.Minute, Pond: "demo"}}
+	backend := &isloBackend{cfg: core.Config{IdleTimeout: 7 * time.Minute, Pond: "demo"}}
 	client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{
+		ID:     isloTestResourceID,
 		Name:   "crabbox-repo-abcdef",
 		Status: "running",
 	}}
@@ -343,7 +429,7 @@ func TestResolveIsloLeaseIDForRepoDoesNotClaimMissingSandbox(t *testing.T) {
 func TestResolveIsloLeaseIDIgnoresSyntheticSlugCollision(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	root := t.TempDir()
-	if err := claimLeaseForRepoProvider("isb_crabbox-other-abcdef", "isb-crabbox-repo-abcdef", isloProvider, root, time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("isb_crabbox-other-abcdef", "isb-crabbox-repo-abcdef", isloProvider, root, time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -371,13 +457,13 @@ func TestIsloCleanupCommandQuotesLeaseID(t *testing.T) {
 }
 
 func TestIsloWorkspacePathDefaultsUnderWorkspace(t *testing.T) {
-	if got, err := isloWorkspacePath(Config{}); err != nil || got != "/workspace/crabbox" {
+	if got, err := isloWorkspacePath(core.Config{}); err != nil || got != "/workspace/crabbox" {
 		t.Fatalf("workspace=%q err=%v", got, err)
 	}
-	if got, err := isloWorkspacePath(Config{Islo: IsloConfig{Workdir: "repo"}}); err != nil || got != "/workspace/repo" {
+	if got, err := isloWorkspacePath(core.Config{Islo: core.IsloConfig{Workdir: "repo"}}); err != nil || got != "/workspace/repo" {
 		t.Fatalf("workspace=%q err=%v", got, err)
 	}
-	if got, err := isloWorkspacePath(Config{Islo: IsloConfig{Workdir: "team/repo"}}); err != nil || got != "/workspace/team/repo" {
+	if got, err := isloWorkspacePath(core.Config{Islo: core.IsloConfig{Workdir: "team/repo"}}); err != nil || got != "/workspace/team/repo" {
 		t.Fatalf("workspace=%q err=%v", got, err)
 	}
 }
@@ -385,7 +471,7 @@ func TestIsloWorkspacePathDefaultsUnderWorkspace(t *testing.T) {
 func TestIsloWorkspacePathRejectsEscapes(t *testing.T) {
 	for _, workdir := range []string{"/work/repo", "/etc", "../etc", "repo/../../../etc", ".", "./.."} {
 		t.Run(workdir, func(t *testing.T) {
-			if got, err := isloWorkspacePath(Config{Islo: IsloConfig{Workdir: workdir}}); err == nil {
+			if got, err := isloWorkspacePath(core.Config{Islo: core.IsloConfig{Workdir: workdir}}); err == nil {
 				t.Fatalf("workspace=%q, want error for workdir %q", got, workdir)
 			}
 		})
@@ -394,10 +480,10 @@ func TestIsloWorkspacePathRejectsEscapes(t *testing.T) {
 
 func TestIsloRunRejectsUnsafeWorkdirBeforeProviderClient(t *testing.T) {
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{Workdir: "../etc"}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{Workdir: "../etc"}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	_, err := backend.Run(context.Background(), RunRequest{NoSync: true})
+	_, err := backend.Run(context.Background(), core.RunRequest{NoSync: true})
 	if err == nil || !strings.Contains(err.Error(), "escapes /workspace") {
 		t.Fatalf("Run err=%v, want workdir containment error", err)
 	}
@@ -408,7 +494,7 @@ func TestIsloResolveSSHUsesSandboxHostnameDefaults(t *testing.T) {
 	isolateIsloTestHome(t)
 	root := t.TempDir()
 	leaseID := "isb_crabbox-repo-abcdef"
-	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, root, time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "web", isloProvider, root, time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	client := &fakeIsloSyncClient{
@@ -417,11 +503,11 @@ func TestIsloResolveSSHUsesSandboxHostnameDefaults(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
 
-	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "web", Repo: Repo{Root: root}})
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "web", Repo: core.Repo{Root: root}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +537,7 @@ func TestIsloResolveSSHHonorsExplicitSSHOverrides(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	isolateIsloTestHome(t)
 	leaseID := "isb_crabbox-repo-abcdef"
-	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	client := &fakeIsloSyncClient{
@@ -459,11 +545,11 @@ func TestIsloResolveSSHHonorsExplicitSSHOverrides(t *testing.T) {
 	}
 	restore := swapNewIsloClient(client)
 	defer restore()
-	cfg := Config{SSHUser: "alice", SSHPort: "2022", SSHKey: "/tmp/islo-key", Islo: IsloConfig{APIKey: "test"}}
+	cfg := core.Config{SSHUser: "alice", SSHPort: "2022", SSHKey: "/tmp/islo-key", Islo: core.IsloConfig{APIKey: "test"}}
 	core.MarkSSHUserExplicit(&cfg)
 	core.MarkSSHPortExplicit(&cfg)
 	core.MarkSSHKeyExplicit(&cfg)
-	backend := &isloBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
+	backend := &isloBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard}}
 
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID})
 	if err != nil {
@@ -479,18 +565,18 @@ func TestIsloResolveSSHResumesPausedSandbox(t *testing.T) {
 	isolateIsloTestHome(t)
 	root := t.TempDir()
 	client := &fakeIsloSyncClient{
-		getSandbox: &gosdk.SandboxResponse{Name: "crabbox-repo-abcdef", Status: "paused"},
+		getSandbox: &gosdk.SandboxResponse{ID: isloTestResourceID, Name: "crabbox-repo-abcdef", Status: "paused"},
 	}
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
 
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{
 		ID:      "crabbox-repo-abcdef",
-		Repo:    Repo{Root: root},
+		Repo:    core.Repo{Root: root},
 		Reclaim: true,
 	})
 	if err != nil {
@@ -513,13 +599,13 @@ func TestIsloResolveSSHRejectsUnclaimedSandboxBeforeResume(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	t.Cleanup(restore)
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
 
 	_, err := backend.Resolve(context.Background(), core.ResolveRequest{
 		ID:   "crabbox-repo-abcdef",
-		Repo: Repo{Root: t.TempDir()},
+		Repo: core.Repo{Root: t.TempDir()},
 	})
 	if err == nil || !strings.Contains(err.Error(), "--reclaim") {
 		t.Fatalf("Resolve error = %v, want explicit reclaim refusal", err)
@@ -533,7 +619,7 @@ func TestIsloResolveSSHRejectsForeignClaimBeforeResume(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	isolateIsloTestHome(t)
 	leaseID := "isb_crabbox-repo-abcdef"
-	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	client := &fakeIsloSyncClient{
@@ -542,13 +628,13 @@ func TestIsloResolveSSHRejectsForeignClaimBeforeResume(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
 
 	_, err := backend.Resolve(context.Background(), core.ResolveRequest{
 		ID:   leaseID,
-		Repo: Repo{Root: t.TempDir()},
+		Repo: core.Repo{Root: t.TempDir()},
 	})
 	if err == nil || !strings.Contains(err.Error(), "--reclaim") {
 		t.Fatalf("expected ownership error, got %v", err)
@@ -562,7 +648,7 @@ func TestIsloResolveSSHWaitsForStartingSandbox(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	isolateIsloTestHome(t)
 	leaseID := "isb_crabbox-repo-abcdef"
-	if err := claimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	client := &fakeIsloSyncClient{
@@ -574,8 +660,8 @@ func TestIsloResolveSSHWaitsForStartingSandbox(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
 
 	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID})
@@ -590,13 +676,13 @@ func TestIsloResolveSSHWaitsForStartingSandbox(t *testing.T) {
 func TestIsloStatusViewIncludesTailscaleMetadata(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-node-a"
-	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", "node-a.tailnet.example"); err != nil {
+	if err := core.UpdateLeaseClaimTailscale(leaseID, "100.64.7.7", "node-a.tailnet.example"); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateLeaseClaimTailscaleSettings(leaseID, "node-a", []string{"tag:demo"}, "", "exit.tailnet.example", true); err != nil {
+	if err := core.UpdateLeaseClaimTailscaleSettings(leaseID, "node-a", []string{"tag:demo"}, "", "exit.tailnet.example", true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -616,10 +702,10 @@ func TestIsloStatusViewIncludesTailscaleMetadata(t *testing.T) {
 func TestIsloStatusViewMarksTailscaleValidationUnknown(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-node-a"
-	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+	if err := core.UpdateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -636,10 +722,10 @@ func TestIsloStatusViewMarksTailscaleValidationUnknown(t *testing.T) {
 func TestIsloStatusViewPreservesUnavailableEnrollment(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-node-a"
-	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateLeaseClaimTailscaleSettings(leaseID, "node-a", []string{"tag:demo"}, "", "", false); err != nil {
+	if err := core.UpdateLeaseClaimTailscaleSettings(leaseID, "node-a", []string{"tag:demo"}, "", "", false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -656,10 +742,10 @@ func TestIsloStatusViewPreservesUnavailableEnrollment(t *testing.T) {
 func TestIsloStatusViewDoesNotReportStoppedTailscaleReady(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-node-a"
-	if err := claimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "node-a", isloProvider, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+	if err := core.UpdateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -673,7 +759,7 @@ func TestIsloStatusViewDoesNotReportStoppedTailscaleReady(t *testing.T) {
 }
 
 func TestIsloClientUsesBoundedDefaultTransport(t *testing.T) {
-	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "test", BaseURL: "http://127.0.0.1:8787"}}, Runtime{})
+	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "test", BaseURL: "http://127.0.0.1:8787"}}, core.Runtime{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -711,7 +797,7 @@ func TestNewIsloClientRejectsUnsupportedDefaultTransport(t *testing.T) {
 	recorder := &recordingDefaultRoundTripper{}
 	http.DefaultTransport = recorder
 
-	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "test", BaseURL: "http://127.0.0.1:8787"}}, Runtime{})
+	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "test", BaseURL: "http://127.0.0.1:8787"}}, core.Runtime{})
 	if api != nil || err == nil || !strings.Contains(err.Error(), "non-nil *http.Transport") {
 		t.Fatalf("api=%#v err=%v, want transport setup error", api, err)
 	}
@@ -727,7 +813,7 @@ func TestNewIsloClientAcceptsExplicitClientWithUnsupportedDefault(t *testing.T) 
 	injectedTransport := &recordingDefaultRoundTripper{}
 	injected := &http.Client{Transport: injectedTransport}
 
-	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "test", BaseURL: "http://127.0.0.1:8787"}}, Runtime{HTTP: injected})
+	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "test", BaseURL: "http://127.0.0.1:8787"}}, core.Runtime{HTTP: injected})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -737,6 +823,83 @@ func TestNewIsloClientAcceptsExplicitClientWithUnsupportedDefault(t *testing.T) 
 	}
 	if client.httpClient.Transport != injectedTransport {
 		t.Fatal("newIsloClient did not preserve the explicit transport")
+	}
+}
+
+func TestIsloRunWorkspacePreparationRespectsSyncIntent(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is required to exercise workspace preparation")
+	}
+	for _, tt := range []struct {
+		name     string
+		noSync   bool
+		delete   bool
+		preserve bool
+	}{
+		{name: "no sync preserves with delete enabled", noSync: true, delete: true, preserve: true},
+		{name: "sync replaces with delete enabled", delete: true},
+		{name: "sync preserves with delete disabled", preserve: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			client := &fakeIsloSyncClient{createName: "crabbox-workspace-abcdef"}
+			restore := swapNewIsloClient(client)
+			defer restore()
+			repo := t.TempDir()
+			init := exec.Command("git", "init", repo)
+			if output, err := init.CombinedOutput(); err != nil {
+				t.Fatalf("git init: %v\n%s", err, output)
+			}
+			if err := os.WriteFile(filepath.Join(repo, "input.txt"), []byte("sync input"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := core.Config{Islo: core.IsloConfig{Workdir: "repo"}}
+			cfg.Sync.Delete = tt.delete
+			backend := &isloBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			if _, err := backend.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: repo, Name: "repo"}, Keep: true, NoSync: tt.noSync, Command: []string{"true"}}); err != nil {
+				t.Fatal(err)
+			}
+			if len(client.execRequests) != 2 {
+				t.Fatalf("exec requests=%d, want preparation and workload", len(client.execRequests))
+			}
+			if got := client.uploaded.Len() > 0; got == tt.noSync {
+				t.Fatalf("archive uploaded=%v, no-sync=%v", got, tt.noSync)
+			}
+			workspace := filepath.Join(t.TempDir(), "workspace")
+			if err := os.Mkdir(workspace, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(workspace, "retained.txt")
+			if err := os.WriteFile(marker, []byte("retained workspace data"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// Replay only the emitted preparation against a test-owned directory.
+			command := client.execRequests[0].GetCommand()
+			if len(command) != 3 || command[0] != "bash" || command[1] != "-lc" {
+				t.Fatalf("unexpected preparation command: %q", command)
+			}
+			local := strings.ReplaceAll(command[2], core.ShellQuote("/workspace/repo"), core.ShellQuote(workspace))
+			if local == command[2] {
+				t.Fatal("preparation did not target the configured workspace")
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			if output, err := exec.CommandContext(ctx, bash, "-lc", local).CombinedOutput(); err != nil {
+				t.Fatalf("prepare workspace: %v\n%s", err, output)
+			}
+			data, err := os.ReadFile(marker)
+			if tt.preserve {
+				if err != nil || string(data) != "retained workspace data" {
+					t.Fatalf("workspace marker not preserved: data=%q err=%v", data, err)
+				}
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("sync replacement left marker: err=%v", err)
+			}
+			if backend.cfg.Sync.Delete != tt.delete {
+				t.Fatal("workspace preparation changed sync configuration")
+			}
+		})
 	}
 }
 
@@ -755,12 +918,12 @@ func TestIsloRunReturnsSessionHandleForKeptSandbox(t *testing.T) {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: &bytes.Buffer{}},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: &bytes.Buffer{}},
 	}
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:       Repo{Root: root, Name: "repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Root: root, Name: "repo"},
 		Keep:       true,
 		TimingJSON: true,
 		Command:    []string{"true"},
@@ -801,11 +964,11 @@ func TestIsloRunTimingJSONClassifiesCommandFailure(t *testing.T) {
 	defer restore()
 	var stderr bytes.Buffer
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: &stderr},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: &stderr},
 	}
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:       Repo{Root: t.TempDir(), Name: "repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:       core.Repo{Root: t.TempDir(), Name: "repo"},
 		Keep:       true,
 		NoSync:     true,
 		TimingJSON: true,
@@ -828,19 +991,19 @@ func TestIsloRunCleanupDeleteUsesBoundedContext(t *testing.T) {
 	defer restore()
 	var stderr bytes.Buffer
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: &stderr},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: &stderr},
 	}
 	start := time.Now()
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:  true,
 		Command: []string{"true"},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cleanup err=%v, want retained timeout cause", err)
 	}
-	if result.ExitCode != 0 {
+	if result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider || result.Session == nil || !result.Session.Kept {
 		t.Fatalf("result=%#v", result)
 	}
 	if client.deleteCalls != 1 {
@@ -849,8 +1012,12 @@ func TestIsloRunCleanupDeleteUsesBoundedContext(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
 	}
-	if !strings.Contains(stderr.String(), "warning: islo stop failed for crabbox-repo-abcdef: context deadline exceeded") {
-		t.Fatalf("stderr=%q, want cleanup timeout warning", stderr.String())
+	var public core.ExitError
+	if !core.AsExitError(err, &public) || public.Code != 1 || !strings.Contains(public.Message, "islo stop failed") {
+		t.Fatalf("public code=%d message=%q, want cleanup failure", public.Code, public.Message)
+	}
+	if _, ok, claimErr := core.ResolveLeaseClaim(result.Session.LeaseID); claimErr != nil || !ok {
+		t.Fatalf("recovery claim retained=%v err=%v", ok, claimErr)
 	}
 }
 
@@ -868,11 +1035,11 @@ func TestIsloRunRetrievesRequiredArtifactAndDownloadBeforeStop(t *testing.T) {
 	defer restore()
 	var stderr bytes.Buffer
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: &stderr},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: &stderr},
 	}
-	result, err := backend.Run(t.Context(), RunRequest{
-		Repo:                  Repo{Root: t.TempDir(), Name: "repo"},
+	result, err := backend.Run(t.Context(), core.RunRequest{
+		Repo:                  core.Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:                true,
 		Command:               []string{"true"},
 		RequiredArtifactGlobs: []string{"reports/manifest.json"},
@@ -903,8 +1070,8 @@ func TestIsloFetchRunFileUsesWorkloadUser(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 	data, err := backend.fetchRunFileAs(t.Context(), core.DelegatedRunDownloadRequest{
 		LeaseID:    "isb_crabbox-repo-abcdef",
@@ -931,8 +1098,8 @@ func TestIsloFetchRunFileHonorsContextDeadline(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
@@ -964,11 +1131,11 @@ func TestIsloRunPreservesLocalDownloadExitCode(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
-	result, err := backend.Run(t.Context(), RunRequest{
-		Repo:      Repo{Root: t.TempDir(), Name: "repo"},
+	result, err := backend.Run(t.Context(), core.RunRequest{
+		Repo:      core.Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:    true,
 		Command:   []string{"true"},
 		Downloads: []string{"reports/proof.txt=" + filepath.Join(parent, "proof.txt")},
@@ -992,11 +1159,11 @@ func TestIsloRunRejectsOversizedRequiredArtifact(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
-	result, err := backend.Run(t.Context(), RunRequest{
-		Repo:                  Repo{Root: t.TempDir(), Name: "repo"},
+	result, err := backend.Run(t.Context(), core.RunRequest{
+		Repo:                  core.Repo{Root: t.TempDir(), Name: "repo"},
 		NoSync:                true,
 		Command:               []string{"true"},
 		RequiredArtifactGlobs: []string{"reports/manifest.json"},
@@ -1030,21 +1197,21 @@ func TestIsloCommandForErrorRedactsArchiveChunk(t *testing.T) {
 func TestIsloRunMigratesReusedWorkspaceOwnership(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-old-abcdef"
-	if err := claimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+	if err := core.UpdateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
 		t.Fatal(err)
 	}
 	client := &fakeIsloSyncClient{execOut: "CRABBOX_TS_IP=100.64.7.8"}
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	_, err := backend.Run(context.Background(), RunRequest{
+	_, err := backend.Run(context.Background(), core.RunRequest{
 		ID:      leaseID,
 		Keep:    true,
 		NoSync:  true,
@@ -1080,15 +1247,15 @@ func TestIsloRunMigratesFreshTailnetWorkspaceOwnership(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{
-			Islo:      IsloConfig{APIKey: "test", Workdir: "repo"},
+		cfg: core.Config{
+			Islo:      core.IsloConfig{APIKey: "test", Workdir: "repo"},
 			Tailscale: core.TailscaleConfig{Enabled: true, AuthKey: "tskey-secret"},
 		},
-		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	_, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+	_, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: t.TempDir(), Name: "repo"},
 		Keep:    true,
 		NoSync:  true,
 		Command: []string{"true"},
@@ -1112,15 +1279,15 @@ func TestIsloRunReturnsSessionHandleWhenFreshTailnetMigrationFails(t *testing.T)
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{
-			Islo:      IsloConfig{APIKey: "test", Workdir: "repo"},
+		cfg: core.Config{
+			Islo:      core.IsloConfig{APIKey: "test", Workdir: "repo"},
 			Tailscale: core.TailscaleConfig{Enabled: true, AuthKey: "tskey-secret"},
 		},
-		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: t.TempDir(), Name: "repo"},
 		Keep:    true,
 		NoSync:  true,
 		Command: []string{"true"},
@@ -1144,21 +1311,21 @@ func TestIsloWorkspaceOwnershipRepairCommandIsValidBash(t *testing.T) {
 func TestIsloRunRejectsReusedPlainLeaseTailscaleEnrollment(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-old-abcdef"
-	if err := claimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	client := &fakeIsloSyncClient{}
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{
-			Islo:      IsloConfig{APIKey: "test", Workdir: "repo"},
+		cfg: core.Config{
+			Islo:      core.IsloConfig{APIKey: "test", Workdir: "repo"},
 			Tailscale: core.TailscaleConfig{Enabled: true, AuthKey: "tskey-secret"},
 		},
-		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	_, err := backend.Run(context.Background(), RunRequest{
+	_, err := backend.Run(context.Background(), core.RunRequest{
 		ID:      leaseID,
 		Keep:    true,
 		NoSync:  true,
@@ -1178,14 +1345,14 @@ func TestIsloRunRequiresClaimBeforeReusedLeaseTailscaleEnrollment(t *testing.T) 
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{
-			Islo:      IsloConfig{APIKey: "test", Workdir: "repo"},
+		cfg: core.Config{
+			Islo:      core.IsloConfig{APIKey: "test", Workdir: "repo"},
 			Tailscale: core.TailscaleConfig{Enabled: true, AuthKey: "tskey-secret"},
 		},
-		rt: Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	_, err := backend.Run(context.Background(), RunRequest{
+	_, err := backend.Run(context.Background(), core.RunRequest{
 		ID:      "isb_crabbox-unclaimed-abcdef",
 		Keep:    true,
 		NoSync:  true,
@@ -1202,10 +1369,10 @@ func TestIsloRunRequiresClaimBeforeReusedLeaseTailscaleEnrollment(t *testing.T) 
 func TestIsloRunAddsTailnetProxyDefaultsToWorkload(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-old-abcdef"
-	if err := claimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+	if err := core.UpdateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
 		t.Fatal(err)
 	}
 	client := &fakeIsloSyncClient{
@@ -1214,11 +1381,11 @@ func TestIsloRunAddsTailnetProxyDefaultsToWorkload(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	_, err := backend.Run(context.Background(), RunRequest{
+	_, err := backend.Run(context.Background(), core.RunRequest{
 		ID:      leaseID,
 		Keep:    true,
 		NoSync:  true,
@@ -1249,10 +1416,10 @@ func TestIsloRunAddsTailnetProxyDefaultsToWorkload(t *testing.T) {
 func TestIsloRunFailsClosedWhenEnrolledTailnetValidationUnavailable(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "isb_crabbox-old-abcdef"
-	if err := claimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider(leaseID, "old", isloProvider, t.TempDir(), time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
+	if err := core.UpdateLeaseClaimTailscale(leaseID, "100.64.7.7", ""); err != nil {
 		t.Fatal(err)
 	}
 	client := &fakeIsloSyncClient{
@@ -1262,11 +1429,11 @@ func TestIsloRunFailsClosedWhenEnrolledTailnetValidationUnavailable(t *testing.T
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	_, err := backend.Run(context.Background(), RunRequest{
+	_, err := backend.Run(context.Background(), core.RunRequest{
 		ID:      leaseID,
 		Keep:    true,
 		NoSync:  true,
@@ -1305,12 +1472,12 @@ func TestIsloRunReturnsSessionHandleWhenPrepareFails(t *testing.T) {
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
 
-	result, err := backend.Run(context.Background(), RunRequest{
-		Repo:    Repo{Root: t.TempDir(), Name: "repo"},
+	result, err := backend.Run(context.Background(), core.RunRequest{
+		Repo:    core.Repo{Root: t.TempDir(), Name: "repo"},
 		Keep:    true,
 		NoSync:  true,
 		Command: []string{"true"},
@@ -1329,10 +1496,10 @@ func TestIsloRunReturnsSessionHandleWhenPrepareFails(t *testing.T) {
 func TestIsloCreateSandboxRejectsUnsafeWorkdirBeforeAPI(t *testing.T) {
 	client := &fakeIsloSyncClient{}
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{Workdir: "../etc"}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{Workdir: "../etc"}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	_, _, _, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err == nil || !strings.Contains(err.Error(), "escapes /workspace") {
 		t.Fatalf("createSandbox err=%v, want workdir containment error", err)
 	}
@@ -1341,7 +1508,7 @@ func TestIsloCreateSandboxRejectsUnsafeWorkdirBeforeAPI(t *testing.T) {
 	}
 }
 
-func decodeLastTimingReport(t *testing.T, output string) timingReport {
+func decodeLastTimingReport(t *testing.T, output string) core.TimingReport {
 	t.Helper()
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -1350,14 +1517,14 @@ func decodeLastTimingReport(t *testing.T, output string) timingReport {
 		if start < 0 {
 			continue
 		}
-		var report timingReport
+		var report core.TimingReport
 		if err := json.Unmarshal([]byte(line[start:]), &report); err != nil {
 			t.Fatalf("timing json: %v\noutput=%s", err, output)
 		}
 		return report
 	}
 	t.Fatalf("output does not contain timing JSON: %s", output)
-	return timingReport{}
+	return core.TimingReport{}
 }
 
 func TestIsloCreateSandboxOmitsDefaultProviderCreateFields(t *testing.T) {
@@ -1365,11 +1532,11 @@ func TestIsloCreateSandboxOmitsDefaultProviderCreateFields(t *testing.T) {
 	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
 	backend := &isloBackend{
 		cfg: core.BaseConfig(),
-		rt:  Runtime{Stderr: io.Discard},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
 	backend.cfg.Provider = isloProvider
 	backend.cfg.Islo.Workdir = "team/repo"
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	_, _, _, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1392,14 +1559,14 @@ func TestIsloCreateSandboxSendsNonDefaultProviderCreateFields(t *testing.T) {
 	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
 	backend := &isloBackend{
 		cfg: core.BaseConfig(),
-		rt:  Runtime{Stderr: io.Discard},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
 	backend.cfg.Provider = isloProvider
 	backend.cfg.Islo.Image = "docker.io/library/custom:latest"
 	backend.cfg.Islo.VCPUs = 4
 	backend.cfg.Islo.MemoryMB = 8192
 	backend.cfg.Islo.DiskGB = 80
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	_, _, _, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1429,8 +1596,8 @@ func TestIsloCreateSandboxSendsExplicitDefaultProviderCreateFields(t *testing.T)
 	core.MarkIsloVCPUsExplicit(&cfg)
 	core.MarkIsloMemoryMBExplicit(&cfg)
 	core.MarkIsloDiskGBExplicit(&cfg)
-	backend := &isloBackend{cfg: cfg, rt: Runtime{Stderr: io.Discard}}
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	backend := &isloBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard}}
+	_, _, _, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1475,16 +1642,16 @@ func TestIsloCreateSandboxRejectsMissingTailscaleAuthKeyBeforeAPI(t *testing.T) 
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
 	backend := &isloBackend{
-		cfg: Config{
-			Islo: IsloConfig{Workdir: "team/repo"},
+		cfg: core.Config{
+			Islo: core.IsloConfig{Workdir: "team/repo"},
 			Tailscale: core.TailscaleConfig{
 				Enabled:    true,
 				AuthKeyEnv: "TEST_TS_AUTH_KEY",
 			},
 		},
-		rt: Runtime{Stderr: io.Discard},
+		rt: core.Runtime{Stderr: io.Discard},
 	}
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "")
+	_, _, _, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "")
 	if err == nil || !strings.Contains(err.Error(), "$TEST_TS_AUTH_KEY") {
 		t.Fatalf("expected missing auth key error, got %v", err)
 	}
@@ -1500,17 +1667,17 @@ func TestIsloCreateSandboxStoresPondClaimForList(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef"}
 	backend := &isloBackend{
-		cfg: Config{
+		cfg: core.Config{
 			Pond: "Alpha Pond",
-			Islo: IsloConfig{Workdir: "team/repo"},
+			Islo: core.IsloConfig{Workdir: "team/repo"},
 		},
-		rt: Runtime{Stderr: io.Discard},
+		rt: core.Runtime{Stderr: io.Discard},
 	}
-	leaseID, _, slug, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "web")
+	leaseID, _, slug, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "web")
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, ok, err := resolveLeaseClaim(leaseID)
+	claim, ok, err := core.ResolveLeaseClaim(leaseID)
 	if err != nil || !ok {
 		t.Fatalf("resolve claim ok=%t err=%v", ok, err)
 	}
@@ -1521,8 +1688,8 @@ func TestIsloCreateSandboxStoresPondClaimForList(t *testing.T) {
 	if server.Labels["pond"] != "alpha-pond" {
 		t.Fatalf("server pond label=%q labels=%#v", server.Labels["pond"], server.Labels)
 	}
-	if server.Labels["slug"] != normalizeLeaseSlug(slug) {
-		t.Fatalf("server slug=%q want %q", server.Labels["slug"], normalizeLeaseSlug(slug))
+	if server.Labels["slug"] != core.NormalizeLeaseSlug(slug) {
+		t.Fatalf("server slug=%q want %q", server.Labels["slug"], core.NormalizeLeaseSlug(slug))
 	}
 }
 
@@ -1534,9 +1701,9 @@ func TestIsloCreateSandboxTailscaleClaimAndOptions(t *testing.T) {
 		execOut:    "tailscale up ok\nCRABBOX_TS_IP=100.64.7.7\n",
 	}
 	backend := &isloBackend{
-		cfg: Config{
+		cfg: core.Config{
 			Pond: "Mesh Demo",
-			Islo: IsloConfig{Workdir: "repo"},
+			Islo: core.IsloConfig{Workdir: "repo"},
 			Tailscale: core.TailscaleConfig{
 				Enabled:                true,
 				AuthKey:                "tskey-secret",
@@ -1547,9 +1714,9 @@ func TestIsloCreateSandboxTailscaleClaimAndOptions(t *testing.T) {
 				ExitNodeAllowLANAccess: true,
 			},
 		},
-		rt: Runtime{Stderr: io.Discard},
+		rt: core.Runtime{Stderr: io.Discard},
 	}
-	leaseID, _, slug, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "node-a")
+	leaseID, _, slug, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "node-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1576,7 +1743,7 @@ func TestIsloCreateSandboxTailscaleClaimAndOptions(t *testing.T) {
 			t.Fatalf("exec env %s=%q want %q", key, got, want)
 		}
 	}
-	claim, ok, err := resolveLeaseClaim(leaseID)
+	claim, ok, err := core.ResolveLeaseClaim(leaseID)
 	if err != nil || !ok {
 		t.Fatalf("resolve claim ok=%t err=%v", ok, err)
 	}
@@ -1596,30 +1763,53 @@ func TestIsloCreateSandboxTailscaleClaimAndOptions(t *testing.T) {
 }
 
 func TestIsloCreateSandboxRetainsClaimWhenTailscaleRollbackFails(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	client := &fakeIsloSyncClient{
-		createName: "crabbox-repo-abcdef",
-		execErr:    errors.New("tailscale failed"),
-		deleteErr:  errors.New("delete failed"),
-	}
-	backend := &isloBackend{
-		cfg: Config{
-			Pond: "Mesh Demo",
-			Islo: IsloConfig{Workdir: "repo"},
-			Tailscale: core.TailscaleConfig{
-				Enabled: true,
-				AuthKey: "tskey-secret",
-			},
-		},
-		rt: Runtime{Stderr: io.Discard},
-	}
-	_, _, _, err := backend.createSandbox(context.Background(), client, Repo{Root: t.TempDir(), Name: "repo"}, false, "node-a")
-	if err == nil || !strings.Contains(err.Error(), "cleanup failed") {
-		t.Fatalf("expected cleanup failure, got %v", err)
-	}
-	claim, ok, claimErr := resolveLeaseClaim("isb_crabbox-repo-abcdef")
-	if claimErr != nil || !ok {
-		t.Fatalf("claim should remain discoverable after failed rollback: ok=%t err=%v claim=%#v", ok, claimErr, claim)
+	for _, changedOwner := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed_owner=%t", changedOwner), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			isolateIsloTestHome(t)
+			client := &fakeIsloSyncClient{
+				createName:       isloTeardownName,
+				execErrOnCommand: errors.New("tailscale failed"),
+			}
+			var replacement core.LeaseClaim
+			if changedOwner {
+				client.execErrOnCommandHook = func() {
+					if err := core.ClaimLeaseForRepoProvider(isloTeardownLeaseID, "node-a", isloProvider, t.TempDir(), time.Hour, true); err != nil {
+						t.Fatal(err)
+					}
+					var ok bool
+					var err error
+					replacement, ok, err = resolveExactIsloLeaseClaim(isloTeardownLeaseID)
+					if err != nil || !ok {
+						t.Fatalf("replacement claim ok=%t err=%v", ok, err)
+					}
+				}
+			} else {
+				client.deleteErr = errors.New("delete failed")
+			}
+			backend := &isloBackend{
+				cfg: core.Config{
+					Pond: "Mesh Demo",
+					Islo: core.IsloConfig{Workdir: "repo"},
+					Tailscale: core.TailscaleConfig{
+						Enabled: true,
+						AuthKey: "tskey-secret",
+					},
+				},
+				rt: core.Runtime{Stderr: io.Discard},
+			}
+			_, _, _, _, err := backend.createSandbox(context.Background(), client, core.Repo{Root: t.TempDir(), Name: "repo"}, false, "node-a")
+			if err == nil || !strings.Contains(err.Error(), "cleanup failed") {
+				t.Fatalf("expected cleanup failure, got %v", err)
+			}
+			claim, ok, claimErr := resolveExactIsloLeaseClaim(isloTeardownLeaseID)
+			if claimErr != nil || !ok {
+				t.Fatalf("claim should remain discoverable after failed rollback: ok=%t err=%v claim=%#v", ok, claimErr, claim)
+			}
+			if changedOwner && (client.deleteCalls != 0 || !reflect.DeepEqual(claim, replacement)) {
+				t.Fatalf("rollback changed the replacement owner's sandbox or claim: deletes=%d claim=%#v want=%#v", client.deleteCalls, claim, replacement)
+			}
+		})
 	}
 }
 
@@ -1641,11 +1831,11 @@ func TestIsloSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	}
 	client := &fakeIsloSyncClient{}
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{Workdir: "repo"}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{Workdir: "repo"}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", RunRequest{
-		Repo: Repo{Root: root, Name: "repo"},
+	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", core.RunRequest{
+		Repo: core.Repo{Root: root, Name: "repo"},
 	}, isloWorkloadUser)
 	if err != nil {
 		t.Fatal(err)
@@ -1663,7 +1853,7 @@ func TestIsloSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 	if repair.GetUser() == nil || *repair.GetUser() != isloAdminUser || !strings.Contains(client.prepareCommands[1], "chown -R 'islo:islo' '/workspace/repo'") {
 		t.Fatalf("ownership repair request=%#v command=%q", repair, client.prepareCommands[1])
 	}
-	if !tarGzipContains(t, client.uploaded.Bytes(), "go.mod") {
+	if !testutil.TarGzipContains(t, client.uploaded.Bytes(), "go.mod") {
 		t.Fatal("uploaded archive missing go.mod")
 	}
 }
@@ -1686,11 +1876,11 @@ func TestIsloSyncWorkspaceFallsBackToExecUpload(t *testing.T) {
 	}
 	client := &fakeIsloSyncClient{uploadErr: errors.New("api upload failed"), closeUploadReader: true}
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{Workdir: "repo"}},
-		rt:  Runtime{Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{Workdir: "repo"}},
+		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", RunRequest{
-		Repo: Repo{Root: root, Name: "repo"},
+	_, _, err := backend.syncWorkspace(context.Background(), client, "crabbox-test", core.RunRequest{
+		Repo: core.Repo{Root: root, Name: "repo"},
 	}, isloWorkloadUser)
 	if err != nil {
 		t.Fatal(err)
@@ -1724,7 +1914,7 @@ func TestIsloExecUploadCleansTempFilesOnChunkFailure(t *testing.T) {
 		execErrOnCommandHook:     cancel,
 		rejectCanceledContext:    true,
 	}
-	backend := &isloBackend{rt: Runtime{Stderr: io.Discard}}
+	backend := &isloBackend{rt: core.Runtime{Stderr: io.Discard}}
 	archive := bytes.NewReader(bytes.Repeat([]byte("x"), 49*1024))
 
 	err := backend.uploadArchiveViaExec(ctx, client, "crabbox-test", "/workspace/repo", archive, "")
@@ -1757,11 +1947,11 @@ func TestIsloFallbackExtractCommandCleansUploadsOnFailure(t *testing.T) {
 
 func TestIsloExecForwardsEnv(t *testing.T) {
 	client := &fakeIsloSyncClient{}
-	backend := &isloBackend{rt: Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	code, err := backend.exec(context.Background(), client, "crabbox-test", "/workspace/repo", []string{"env"}, false, map[string]string{
+	backend := &isloBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	code, err := backend.exec(context.Background(), client, "crabbox-test", "/workspace/repo", core.RunRequest{Command: []string{"env"}}, map[string]string{
 		"API_TOKEN": "secret",
 		"CI":        "1",
-	}, "")
+	}, "", backend.rt.Stdout, backend.rt.Stderr)
 	if err != nil || code != 0 {
 		t.Fatalf("exec code=%d err=%v", code, err)
 	}
@@ -1775,19 +1965,19 @@ func TestIsloExecForwardsEnv(t *testing.T) {
 }
 
 func TestRejectIsloSyncOptionsAllowsForceSyncLarge(t *testing.T) {
-	if err := rejectIsloSyncOptions(RunRequest{ForceSyncLarge: true}); err != nil {
+	if err := rejectIsloSyncOptions(core.RunRequest{ForceSyncLarge: true}); err != nil {
 		t.Fatalf("force sync large should be honored by Islo archive sync: %v", err)
 	}
-	if err := rejectIsloSyncOptions(RunRequest{SyncOnly: true}); err == nil || !strings.Contains(err.Error(), "--sync-only") {
+	if err := rejectIsloSyncOptions(core.RunRequest{SyncOnly: true}); err == nil || !strings.Contains(err.Error(), "--sync-only") {
 		t.Fatalf("sync-only err=%v", err)
 	}
-	if err := rejectIsloSyncOptions(RunRequest{ChecksumSync: true}); err == nil || !strings.Contains(err.Error(), "--checksum") {
+	if err := rejectIsloSyncOptions(core.RunRequest{ChecksumSync: true}); err == nil || !strings.Contains(err.Error(), "--checksum") {
 		t.Fatalf("checksum err=%v", err)
 	}
 }
 
 func TestNewIsloSandboxNameUsesCrabboxPrefix(t *testing.T) {
-	name := newIsloSandboxName(Repo{Name: "repo"})
+	name := newIsloSandboxName(core.Repo{Name: "repo"})
 	if !strings.HasPrefix(name, "crabbox-repo-") {
 		t.Fatalf("name=%q", name)
 	}
@@ -1836,10 +2026,7 @@ func TestIsloSDKClientListUsesInjectedHTTPAndPaginates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "ak_test", BaseURL: srv.URL}}, Runtime{HTTP: srv.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	api := newIsloSDKHTTPTestClient(t, srv)
 	items, err := api.ListSandboxes(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -1902,10 +2089,7 @@ func TestIsloSDKClientUploadArchiveStreamsMultipartTarball(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	api, err := newIsloClient(Config{Islo: IsloConfig{APIKey: "ak_test", BaseURL: srv.URL}}, Runtime{HTTP: srv.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	api := newIsloSDKHTTPTestClient(t, srv)
 	if err := api.UploadArchive(t.Context(), "crabbox-test", "/workspace/repo", strings.NewReader("archive")); err != nil {
 		t.Fatal(err)
 	}
@@ -1916,30 +2100,30 @@ func TestIsloSDKClientUploadArchiveStreamsMultipartTarball(t *testing.T) {
 
 func TestIsloPauseResumeCallProvider(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	if err := claimLeaseForRepoProvider("isb_crabbox-repo-abcdef", "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
+	if err := core.ClaimLeaseForRepoProvider("isb_crabbox-repo-abcdef", "web", isloProvider, t.TempDir(), time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	client := &fakeIsloSyncClient{}
 	restore := swapNewIsloClient(client)
 	defer restore()
 	backend := &isloBackend{
-		cfg: Config{Islo: IsloConfig{APIKey: "test"}},
-		rt:  Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test"}},
+		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
 	}
-	if err := backend.Pause(context.Background(), PauseRequest{ID: "crabbox-repo-abcdef"}); err != nil {
+	if err := backend.Pause(context.Background(), core.PauseRequest{ID: "crabbox-repo-abcdef"}); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
 	if client.pausedName != "crabbox-repo-abcdef" {
 		t.Fatalf("pausedName=%q, want crabbox-repo-abcdef", client.pausedName)
 	}
-	if err := backend.Resume(context.Background(), ResumeRequest{ID: "crabbox-repo-abcdef"}); err != nil {
+	if err := backend.Resume(context.Background(), core.ResumeRequest{ID: "crabbox-repo-abcdef"}); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	if client.resumedName != "crabbox-repo-abcdef" {
 		t.Fatalf("resumedName=%q, want crabbox-repo-abcdef", client.resumedName)
 	}
 	// A non-Crabbox sandbox id must be rejected before any provider call.
-	if err := backend.Pause(context.Background(), PauseRequest{ID: "production"}); err == nil {
+	if err := backend.Pause(context.Background(), core.PauseRequest{ID: "production"}); err == nil {
 		t.Fatal("expected non-Crabbox sandbox to be rejected")
 	}
 }
@@ -1947,6 +2131,8 @@ func TestIsloPauseResumeCallProvider(t *testing.T) {
 type fakeIsloSyncClient struct {
 	prepareCommands          []string
 	execRequests             []*gosdk.ExecRequest
+	execNames                []string
+	execErrOut               string
 	uploadPath               string
 	uploaded                 bytes.Buffer
 	uploadErr                error
@@ -1961,35 +2147,138 @@ type fakeIsloSyncClient struct {
 	execErrOnCommandContains string
 	execErrOnCommandSkip     int
 	execErrOnCommandHook     func()
+	execHook                 func(*gosdk.ExecRequest)
 	execDeadlineCommand      string
 	execDeadline             time.Time
 	rejectCanceledContext    bool
 	closeUploadReader        bool
 	createRequest            *gosdk.CreateSandboxRequest
+	createErr                error
+	createSandboxHook        func()
 	createName               string
+	createID                 string
+	createdBy                string
+	createdByEntity          string
 	getSandbox               *gosdk.SandboxResponse
 	getSandboxes             []*gosdk.SandboxResponse
 	getSandboxErr            error
+	getSandboxHook           func()
+	getSandboxNames          []string
 	getSandboxGone           bool
+	byID                     map[string]*gosdk.SandboxResponse
+	byIDSandboxes            []*gosdk.SandboxResponse
+	byIDErr                  error
+	byIDCalls                []string
 	resumeErr                error
 	resumeCalls              int
 	blockDelete              bool
+	blockReads               bool
 	deleteErr                error
+	deleteHook               func()
 	deleteCalls              int
+	deletedNames             []string
+	deleteCtxErrs            []error
+	listCalls                int
+	listResponse             []*gosdk.SandboxResponse
 	pausedName               string
 	resumedName              string
+	// sandboxIDs and deleted model the live identity contract: a sandbox has an
+	// immutable id alongside its name, `GET /sandboxes/{name}` answers 404
+	// immediately after a delete, and `GET /sandboxes/-/by-id/{id}` keeps
+	// answering with a "deleted" tombstone.
+	sandboxIDs map[string]string
+	deleted    map[string]bool
+	deletedIDs map[string]bool
+}
+
+func isloTestNotFoundError() error {
+	return &gosdk.NotFoundError{APIError: sdkcore.NewAPIError(http.StatusNotFound, errors.New("sandbox not found"))}
+}
+
+func (f *fakeIsloSyncClient) registerSandbox(name, id string) {
+	if f.sandboxIDs == nil {
+		f.sandboxIDs = map[string]string{}
+	}
+	if id != "" {
+		f.sandboxIDs[name] = id
+	}
+}
+
+// markDeleted models a sandbox the tenant deleted before this process looked at
+// it: the name answers 404 and the id keeps answering with a tombstone.
+func (f *fakeIsloSyncClient) markDeleted(name string) {
+	if f.deleted == nil {
+		f.deleted = map[string]bool{}
+	}
+	f.deleted[name] = true
+	if id := f.sandboxIDs[name]; id != "" {
+		if f.deletedIDs == nil {
+			f.deletedIDs = map[string]bool{}
+		}
+		f.deletedIDs[id] = true
+	}
+}
+
+func (f *fakeIsloSyncClient) liveSandbox(name string) *gosdk.SandboxResponse {
+	sandbox := &gosdk.SandboxResponse{ID: f.sandboxIDs[name], Name: name, Status: "running"}
+	if f.createdBy != "" {
+		sandbox.CreatedBy = stringValue(f.createdBy)
+	}
+	return sandbox
 }
 
 func (f *fakeIsloSyncClient) CreateSandbox(_ context.Context, req *gosdk.CreateSandboxRequest) (*gosdk.SandboxResponse, error) {
 	f.createRequest = req
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
+	if f.createID == "" {
+		f.createID = isloTestResourceID
+	}
 	name := f.createName
 	if name == "" {
 		name = "crabbox-test-abcdef"
 	}
-	return &gosdk.SandboxResponse{Name: name}, nil
+	f.registerSandbox(name, f.createID)
+	if f.createSandboxHook != nil {
+		f.createSandboxHook()
+	}
+	sandbox := &gosdk.SandboxResponse{ID: f.createID, Name: name}
+	if f.createdBy != "" {
+		sandbox.CreatedBy = stringValue(f.createdBy)
+	}
+	if f.createdByEntity != "" {
+		raw, err := json.Marshal(map[string]any{
+			"id":                f.createID,
+			"name":              name,
+			"status":            "starting",
+			"image":             "",
+			"created_at":        "2026-01-01T00:00:00Z",
+			"created_by":        f.createdBy,
+			"created_by_entity": f.createdByEntity,
+		})
+		if err != nil {
+			return nil, err
+		}
+		// created_by_entity is not in the pinned SDK model, so it only reaches
+		// the adapter through the extra-properties bag UnmarshalJSON fills.
+		sandbox = &gosdk.SandboxResponse{}
+		if err := json.Unmarshal(raw, sandbox); err != nil {
+			return nil, err
+		}
+	}
+	return sandbox, nil
 }
 
-func (f *fakeIsloSyncClient) GetSandbox(_ context.Context, name string) (*gosdk.SandboxResponse, error) {
+func (f *fakeIsloSyncClient) GetSandbox(ctx context.Context, name string) (*gosdk.SandboxResponse, error) {
+	f.getSandboxNames = append(f.getSandboxNames, name)
+	if f.getSandboxHook != nil {
+		f.getSandboxHook()
+	}
+	if f.blockReads {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if f.getSandboxErr != nil {
 		return nil, f.getSandboxErr
 	}
@@ -2004,7 +2293,50 @@ func (f *fakeIsloSyncClient) GetSandbox(_ context.Context, name string) (*gosdk.
 	if f.getSandbox != nil {
 		return f.getSandbox, nil
 	}
-	return &gosdk.SandboxResponse{Name: name, Status: "running"}, nil
+	if f.deleted[name] {
+		return nil, isloTestNotFoundError()
+	}
+	return f.liveSandbox(name), nil
+}
+
+func (f *fakeIsloSyncClient) GetSandboxByID(ctx context.Context, id string) (*gosdk.SandboxResponse, error) {
+	f.byIDCalls = append(f.byIDCalls, id)
+	if f.blockReads {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if f.byIDErr != nil {
+		return nil, f.byIDErr
+	}
+	if len(f.byIDSandboxes) > 0 {
+		sandbox := f.byIDSandboxes[0]
+		f.byIDSandboxes = f.byIDSandboxes[1:]
+		return sandbox, nil
+	}
+	if sandbox, ok := f.byID[id]; ok {
+		if sandbox == nil {
+			return nil, isloTestNotFoundError()
+		}
+		return sandbox, nil
+	}
+	if f.deletedIDs[id] {
+		return &gosdk.SandboxResponse{ID: id, Name: f.nameForID(id), Status: "deleted", DeletedAt: stringValue("2026-01-01T00:00:01Z")}, nil
+	}
+	for name, known := range f.sandboxIDs {
+		if known == id && !f.deleted[name] {
+			return f.liveSandbox(name), nil
+		}
+	}
+	return nil, isloTestNotFoundError()
+}
+
+func (f *fakeIsloSyncClient) nameForID(id string) string {
+	for name, known := range f.sandboxIDs {
+		if known == id {
+			return name
+		}
+	}
+	return ""
 }
 
 func (f *fakeIsloSyncClient) ResumeSandbox(_ context.Context, name string) (*gosdk.SandboxResponse, error) {
@@ -2018,17 +2350,37 @@ func (f *fakeIsloSyncClient) ResumeSandbox(_ context.Context, name string) (*gos
 }
 
 func (f *fakeIsloSyncClient) ListSandboxes(context.Context) ([]*gosdk.SandboxResponse, error) {
-	return nil, nil
+	f.listCalls++
+	return f.listResponse, nil
 }
 
-func (f *fakeIsloSyncClient) DeleteSandbox(ctx context.Context, _ string) error {
+func (f *fakeIsloSyncClient) DeleteSandbox(ctx context.Context, name string) error {
 	f.deleteCalls++
+	if f.deleteHook != nil {
+		f.deleteHook()
+	}
+	f.deletedNames = append(f.deletedNames, name)
+	// Record whether the delete was dispatched on an already-expired context.
+	// Counting the call alone cannot distinguish a delete that was actually sent
+	// from one the transport would refuse, which is the billing leak the reserved
+	// slice of the teardown budget exists to prevent.
+	f.deleteCtxErrs = append(f.deleteCtxErrs, ctx.Err())
 	if f.blockDelete {
 		<-ctx.Done()
 		return ctx.Err()
 	}
 	if f.deleteErr != nil {
 		return f.deleteErr
+	}
+	if f.deleted == nil {
+		f.deleted = map[string]bool{}
+	}
+	f.deleted[name] = true
+	if id := f.sandboxIDs[name]; id != "" {
+		if f.deletedIDs == nil {
+			f.deletedIDs = map[string]bool{}
+		}
+		f.deletedIDs[id] = true
 	}
 	return nil
 }
@@ -2052,11 +2404,18 @@ func (f *fakeIsloSyncClient) UploadArchive(_ context.Context, _ string, targetPa
 	return err
 }
 
-func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosdk.ExecRequest, stdout, _ io.Writer) (int, error) {
+func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, name string, req *gosdk.ExecRequest, stdout, stderr io.Writer) (int, error) {
 	if f.rejectCanceledContext && ctx.Err() != nil {
 		return 1, ctx.Err()
 	}
 	f.execRequests = append(f.execRequests, req)
+	f.execNames = append(f.execNames, name)
+	if f.execErrOut != "" && stderr != nil {
+		_, _ = io.WriteString(stderr, f.execErrOut)
+	}
+	if f.execHook != nil {
+		f.execHook(req)
+	}
 	callIndex := len(f.execRequests) - 1
 	command := strings.Join(req.GetCommand(), " ")
 	if f.execDeadlineCommand != "" && strings.Contains(command, f.execDeadlineCommand) {
@@ -2127,7 +2486,7 @@ func (f *fakeIsloSyncClient) commandContains(value string) bool {
 
 func swapNewIsloClient(client isloAPI) func() {
 	previous := newIsloClient
-	newIsloClient = func(Config, Runtime) (isloAPI, error) {
+	newIsloClient = func(core.Config, core.Runtime) (isloAPI, error) {
 		return client, nil
 	}
 	return func() {
@@ -2142,24 +2501,491 @@ func withIsloCleanupTimeout(t *testing.T, timeout time.Duration) {
 	t.Cleanup(func() { isloCleanupTimeout = original })
 }
 
-func tarGzipContains(t *testing.T, data []byte, name string) bool {
-	t.Helper()
-	gz, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		t.Fatal(err)
+// This writer fails only timing serialization, not earlier human diagnostics.
+type isloTimingFailureWriter struct {
+	bytes.Buffer
+	err error
+}
+
+func (w *isloTimingFailureWriter) Write(p []byte) (int, error) {
+	if w.err != nil && bytes.HasPrefix(p, []byte("{")) {
+		return 0, w.err
 	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			return false
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-		if header.Name == name {
-			return true
+	return w.Buffer.Write(p)
+}
+
+func TestIsloRunBoundFailureOwnership(t *testing.T) {
+	transportErr := errors.New("workload transport failed")
+	deleteErr := errors.New("owned delete failed")
+	writerErr := errors.New("timing serialization failed")
+	for _, tc := range []struct {
+		name, stage                   string
+		commandCode                   int
+		runErr, cleanupErr, writerErr error
+		keep, keepFailure             bool
+		wantCode                      int
+		wantKind                      core.RunErrorKind
+		wantKept                      bool
+		wantDeletes                   int
+	}{
+		{name: "success", wantDeletes: 1},
+		{name: "kept success", keep: true, wantKept: true},
+		{name: "cleanup only", cleanupErr: deleteErr, wantCode: 1, wantKind: core.RunErrorProvider, wantKept: true, wantDeletes: 1},
+		{name: "command cleanup", commandCode: 42, cleanupErr: deleteErr, wantCode: 42, wantKind: core.RunErrorCommandExit, wantKept: true, wantDeletes: 1},
+		{name: "command writer", commandCode: 42, writerErr: writerErr, keepFailure: true, wantCode: 42, wantKind: core.RunErrorCommandExit, wantKept: true},
+		{name: "command cleanup writer", commandCode: 42, cleanupErr: deleteErr, writerErr: writerErr, wantCode: 42, wantKind: core.RunErrorCommandExit, wantKept: true, wantDeletes: 1},
+		{name: "transport", runErr: transportErr, wantCode: 1, wantKind: core.RunErrorProvider, wantDeletes: 1},
+		{name: "typed exec error remains one", runErr: core.ExitError{Code: 69, Message: "native exec transport unavailable"}, wantCode: 1, wantKind: core.RunErrorProvider, wantDeletes: 1},
+		{name: "cancel writer", runErr: context.Canceled, writerErr: writerErr, keepFailure: true, wantCode: 1, wantKind: core.RunErrorCanceled, wantKept: true},
+		{name: "deadline cleanup writer", runErr: context.DeadlineExceeded, cleanupErr: deleteErr, writerErr: writerErr, wantCode: 1, wantKind: core.RunErrorTimeout, wantKept: true, wantDeletes: 1},
+		{name: "writer after deleted success", writerErr: writerErr, keepFailure: true, wantCode: 1, wantKind: core.RunErrorProvider, wantDeletes: 1},
+		{name: "first typed writer", writerErr: core.ExitError{Code: 69, Message: "typed timing failure"}, wantCode: 69, wantKind: core.RunErrorProvider, wantDeletes: 1},
+		{name: "prepare helper code", stage: "prepare", keepFailure: true, wantCode: 9, wantKind: core.RunErrorProvider, wantKept: true},
+		{name: "prepare default cleanup", stage: "prepare", wantCode: 9, wantKind: core.RunErrorProvider, wantDeletes: 1},
+		{name: "prepare cleanup writer", stage: "prepare", cleanupErr: deleteErr, writerErr: writerErr, wantCode: 9, wantKind: core.RunErrorProvider, wantKept: true, wantDeletes: 1},
+		{name: "missing command", stage: "command preparation", keepFailure: true, wantCode: 1, wantKind: core.RunErrorProvider, wantKept: true},
+		{name: "sync guardrail code", stage: "guardrail", keepFailure: true, wantCode: 6, wantKind: core.RunErrorProvider, wantKept: true},
+		{name: "archive and fallback", stage: "archive", runErr: transportErr, keepFailure: true, wantCode: 1, wantKind: core.RunErrorProvider, wantKept: true},
+		{name: "tailnet workspace repair", stage: "ownership", runErr: transportErr, keepFailure: true, wantCode: 1, wantKind: core.RunErrorProvider, wantKept: true},
+		{name: "artifact classification", stage: "artifact", keepFailure: true, wantCode: 7, wantKind: core.RunErrorProvider, wantKept: true},
+		{name: "artifact writer", stage: "artifact", writerErr: writerErr, keepFailure: true, wantCode: 7, wantKind: core.RunErrorProvider, wantKept: true},
+		{name: "download cleanup writer", stage: "download", cleanupErr: deleteErr, writerErr: writerErr, wantCode: 2, wantKind: core.RunErrorProvider, wantKept: true, wantDeletes: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef", execCodes: []int{0, tc.commandCode}, deleteErr: tc.cleanupErr}
+			restore := swapNewIsloClient(client)
+			defer restore()
+			writer := &isloTimingFailureWriter{err: tc.writerErr}
+			clock := &fixedClock{now: time.Now()}
+			client.deleteHook = func() { clock.now = clock.now.Add(2 * time.Second) }
+			b := &isloBackend{cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: writer, Clock: clock}}
+			req := core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: "repo"}, NoSync: true, TimingJSON: true, Command: []string{"proof-command"}, Env: map[string]string{"APP_MODE": "fixture"}, Keep: tc.keep, KeepOnFailure: tc.keepFailure}
+			client.execErrOnCommand, client.execErrOnCommandContains = tc.runErr, "proof-command"
+			switch tc.stage {
+			case "prepare":
+				client.execCodes = []int{9}
+			case "command preparation":
+				req.Command = nil
+			case "ownership":
+				b.cfg.Tailscale = core.TailscaleConfig{Enabled: true, AuthKey: "test-tailnet-auth"}
+				client.execOut = "CRABBOX_TS_IP=100.64.7.7"
+				client.execErrOnCommandContains = "chown -R"
+			case "archive", "guardrail":
+				req.NoSync = false
+				if err := os.WriteFile(filepath.Join(req.Repo.Root, "input.txt"), []byte("fixture"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command("git", "init")
+				cmd.Dir = req.Repo.Root
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git init: %v %s", err, out)
+				}
+				if tc.stage == "guardrail" {
+					b.cfg.Sync.FailFiles = 1
+				}
+				client.uploadErr = errors.New("archive API rejected")
+				client.execErrOnCommandContains = "printf %s"
+			case "artifact":
+				req.RequiredArtifactGlobs = []string{"reports/missing.txt"}
+			case "download":
+				client.retrieveFiles = map[string][]byte{"reports/proof.txt": []byte("proof")}
+				parent := filepath.Join(t.TempDir(), "not-directory")
+				if err := os.WriteFile(parent, []byte("occupied"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				req.Downloads = []string{"reports/proof.txt=" + filepath.Join(parent, "proof.txt")}
+			}
+			result, err := b.Run(context.Background(), req)
+			result = core.FinalizeRunResult(result, err)
+			if result.ExitCode != tc.wantCode || result.ErrorKind != tc.wantKind {
+				t.Errorf("result code=%d kind=%q want %d/%q err=%v", result.ExitCode, result.ErrorKind, tc.wantCode, tc.wantKind, err)
+			}
+			if result.Session == nil || result.Session.Kept != tc.wantKept || result.Session.Reused {
+				t.Errorf("session=%+v want kept=%v fresh", result.Session, tc.wantKept)
+			}
+			if client.deleteCalls != tc.wantDeletes {
+				t.Errorf("deletes=%d want=%d", client.deleteCalls, tc.wantDeletes)
+			}
+			if _, exists, claimErr := core.ResolveLeaseClaim("isb_crabbox-repo-abcdef"); claimErr != nil || exists != tc.wantKept {
+				t.Errorf("claim exists=%v err=%v want=%v", exists, claimErr, tc.wantKept)
+			}
+			if result.Total != time.Duration(tc.wantDeletes)*2*time.Second {
+				t.Errorf("total=%s must include completed delete stage", result.Total)
+			}
+			if result.Command != 0 {
+				t.Errorf("command timer included non-command work: %s", result.Command)
+			}
+			if tc.wantCode == 0 {
+				if err != nil {
+					t.Errorf("unexpected err=%v", err)
+				}
+			} else {
+				var public core.ExitError
+				if !core.AsExitError(err, &public) || public.Code != tc.wantCode {
+					t.Errorf("public code=%d err=%v want=%d", public.Code, err, tc.wantCode)
+				}
+				for _, cause := range []error{tc.runErr, tc.cleanupErr, tc.writerErr} {
+					if cause != nil && (!errors.Is(err, cause) || !strings.Contains(public.Message, cause.Error())) {
+						t.Errorf("missing cause or public diagnostic %q: %v / %q", cause, err, public.Message)
+					}
+				}
+			}
+			if tc.writerErr == nil {
+				report := decodeLastTimingReport(t, writer.String())
+				if report.ExitCode != tc.wantCode || report.ErrorKind != tc.wantKind || report.RunStatus != result.Status || report.TotalMs != result.Total.Milliseconds() {
+					t.Errorf("timing=%+v result=%+v", report, result)
+				}
+			}
+			workloadCalls := 0
+			for _, request := range client.execRequests {
+				if strings.Contains(strings.Join(request.GetCommand(), " "), "proof-command") {
+					workloadCalls++
+					if request.GetEnv()["APP_MODE"] == nil || *request.GetEnv()["APP_MODE"] != "fixture" {
+						t.Error("workload env changed")
+					}
+				}
+			}
+			wantWorkloadCalls := 1
+			switch tc.stage {
+			case "prepare", "command preparation", "archive", "guardrail", "ownership":
+				wantWorkloadCalls = 0
+			}
+			if workloadCalls != wantWorkloadCalls {
+				t.Errorf("workload calls=%d want=%d", workloadCalls, wantWorkloadCalls)
+			}
+
+		})
+	}
+}
+
+func TestIsloRunFinalErrorRedactsProviderKeyAndRetainsCauses(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const key = "synthetic-islo-credential"
+	primary := errors.New("workload rejected " + key)
+	secondary := errors.New("delete rejected " + key)
+	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef", execErrOnCommand: primary, execErrOnCommandContains: "proof-command", deleteErr: secondary}
+	restore := swapNewIsloClient(client)
+	defer restore()
+	b := &isloBackend{cfg: core.Config{Islo: core.IsloConfig{APIKey: key, Workdir: "repo"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+	result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: "repo"}, NoSync: true, Command: []string{"proof-command"}})
+	var public core.ExitError
+	if !core.AsExitError(err, &public) || public.Code != 1 || result.ExitCode != 1 || !errors.Is(err, primary) || !errors.Is(err, secondary) {
+		t.Fatalf("lost selected code or causes: result=%+v publicCode=%d", result, public.Code)
+	}
+	if strings.Contains(err.Error(), key) || !strings.Contains(public.Message, "[redacted]") || !strings.Contains(public.Message, "delete rejected") {
+		t.Fatal("final public diagnostic did not preserve redacted primary and secondary messages")
+	}
+}
+
+func TestIsloRunRetainsBoundReuseAfterTailnetFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, stage string
+		cause       error
+		kind        core.RunErrorKind
+		writer      bool
+	}{
+		{"resume typed failure", "resume", core.ExitError{Code: 69, Message: "resume unavailable"}, core.RunErrorProvider, false},
+		{"health typed failure", "health", core.ExitError{Code: 69, Message: "health unavailable"}, core.RunErrorProvider, false},
+		{"health cancellation", "health", context.Canceled, core.RunErrorCanceled, false},
+		{"health deadline writer", "health", context.DeadlineExceeded, core.RunErrorTimeout, true},
+		{"repair typed failure", "repair", core.ExitError{Code: 69, Message: "repair unavailable"}, core.RunErrorProvider, false},
+		{"repair cancellation", "repair", context.Canceled, core.RunErrorCanceled, false},
+		{"metadata update failure", "metadata", nil, core.RunErrorProvider, false},
+		{"not yet running", "starting", nil, core.RunErrorProvider, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", state)
+			claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "reuse", isloTeardownName, isloTestResourceID, isloTestClaimScope)
+			if err := core.UpdateLeaseClaimTailscale(isloTeardownLeaseID, "100.64.7.7", ""); err != nil {
+				t.Fatal(err)
+			}
+			original, _, _ := resolveExactIsloLeaseClaim(isloTeardownLeaseID)
+			client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{ID: isloTestResourceID, Name: isloTeardownName, Status: "running"}, execOut: "CRABBOX_TS_IP=100.64.7.7"}
+			clock := &fixedClock{now: time.Now()}
+			client.getSandboxHook = func() { clock.now = clock.now.Add(time.Second) }
+			claimPath := filepath.Join(state, "crabbox", "claims", isloTeardownLeaseID+".json")
+			switch tc.stage {
+			case "resume":
+				client.getSandbox.Status = "paused"
+				client.resumeErr = tc.cause
+			case "health":
+				client.execErrOnCommand = tc.cause
+				client.execErrOnCommandContains = `"BackendState"`
+			case "repair":
+				client.execCodes = []int{1}
+				client.execErrOnCommand = tc.cause
+				client.execErrOnCommandContains = "TS_AUTH_VALUE"
+			case "starting":
+				client.getSandbox.Status = "starting"
+			case "metadata":
+				client.execHook = func(req *gosdk.ExecRequest) {
+					if strings.Contains(strings.Join(req.GetCommand(), " "), `"BackendState"`) {
+						if err := os.WriteFile(claimPath, []byte("invalid-json"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+			}
+			writerErr := errors.New("timing writer failed")
+			writer := &isloTimingFailureWriter{}
+			if tc.writer {
+				writer.err = writerErr
+			}
+			b := newIsloTeardownBackend(t, client, writer)
+			b.rt.Clock = clock
+			wantCode := 1
+			if tc.stage == "metadata" {
+				wantCode = 2 // Existing claim parse errors already have a public code.
+			}
+			result, err := b.Run(context.Background(), core.RunRequest{ID: isloTeardownLeaseID, NoSync: true, TimingJSON: true, Command: []string{"workload-must-not-run"}})
+			if err == nil || core.ExitCodeForError(err, 1) != wantCode || result.ExitCode != wantCode || result.ErrorKind != tc.kind {
+				t.Errorf("outcome=%d/%s public=%d err=%v", result.ExitCode, result.ErrorKind, core.ExitCodeForError(err, 1), err)
+			}
+			if result.Session == nil || !result.Session.Reused || !result.Session.Kept || result.Session.LeaseID != original.LeaseID {
+				t.Errorf("bound reuse session=%+v", result.Session)
+			}
+			if tc.cause != nil && !errors.Is(err, tc.cause) {
+				t.Errorf("missing actual cause %v", tc.cause)
+			}
+			if tc.writer && !errors.Is(err, writerErr) {
+				t.Error("missing secondary writer cause")
+			}
+			if result.Command != 0 || result.Total != time.Second {
+				t.Errorf("timing command=%s total=%s", result.Command, result.Total)
+			}
+			if !tc.writer {
+				report := decodeLastTimingReport(t, writer.String())
+				if report.ExitCode != wantCode || report.ErrorKind != tc.kind || report.RunStatus != result.Status || report.TotalMs != 1000 {
+					t.Errorf("report=%+v", report)
+				}
+			}
+			if client.deleteCalls != 0 || client.createRequest != nil {
+				t.Fatal("reused failure acquired or deleted a resource")
+			}
+			for _, req := range client.execRequests {
+				if strings.Contains(strings.Join(req.GetCommand(), " "), "workload-must-not-run") {
+					t.Error("workload ran after failed tailnet preparation")
+				}
+				if req.GetUser() == nil || *req.GetUser() != isloAdminUser {
+					t.Error("tailnet preparation lost root user")
+				}
+			}
+			if tc.stage == "metadata" {
+				data, readErr := os.ReadFile(claimPath)
+				if readErr != nil || string(data) != "invalid-json" {
+					t.Error("finalizer rewrote corrupted claim")
+				}
+			} else {
+				current, exists, readErr := resolveExactIsloLeaseClaim(isloTeardownLeaseID)
+				if readErr != nil || !exists || !sameIsloRunOwnership(original, current) {
+					t.Error("reused failure lost original identity/owner")
+				}
+			}
+		})
+	}
+}
+
+func TestIsloRunTailnetAdmissionStillRejectsBeforeBinding(t *testing.T) {
+	for _, kind := range []string{"missing claim", "corrupt claim", "scope", "id", "missing sandbox", "terminal", "unenrolled request"} {
+		t.Run(kind, func(t *testing.T) {
+			state := t.TempDir()
+			t.Setenv("XDG_STATE_HOME", state)
+			client := &fakeIsloSyncClient{getSandbox: &gosdk.SandboxResponse{ID: isloTestResourceID, Name: isloTeardownName, Status: "running"}}
+			if kind != "missing claim" {
+				scope := isloTestClaimScope
+				if kind == "scope" {
+					scope = "endpoint:https://other.example"
+				}
+				claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "reuse", isloTeardownName, isloTestResourceID, scope)
+				if kind != "unenrolled request" {
+					if err := core.UpdateLeaseClaimTailscale(isloTeardownLeaseID, "100.64.7.7", ""); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			switch kind {
+			case "corrupt claim":
+				if err := os.WriteFile(filepath.Join(state, "crabbox", "claims", isloTeardownLeaseID+".json"), []byte("invalid-json"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "id":
+				client.getSandbox.ID = "0195f3d2-5c1a-7c39-9c1e-000000000000"
+			case "missing sandbox":
+				client.getSandboxGone = true
+			case "terminal":
+				client.getSandbox.Status = "deleted"
+			}
+			b := newIsloTeardownBackend(t, client, io.Discard)
+			if kind == "missing claim" || kind == "unenrolled request" {
+				b.cfg.Tailscale.Enabled = true
+			}
+			result, err := b.Run(context.Background(), core.RunRequest{ID: isloTeardownLeaseID, NoSync: true, Command: []string{"workload-must-not-run"}})
+			if err == nil || result.Session != nil {
+				t.Errorf("admission err=%v session=%+v", err, result.Session)
+			}
+			if client.createRequest != nil || client.deleteCalls != 0 || client.resumeCalls != 0 || len(client.execRequests) != 0 {
+				t.Error("unbound admission performed remote mutation/execution")
+			}
+		})
+	}
+}
+
+func TestIsloRunPreservesPlainAndLegacyReuseAdmission(t *testing.T) {
+	for _, enrolled := range []bool{false, true} {
+		t.Run(strconv.FormatBool(enrolled), func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			claimIsloLegacyLease(t, isloTeardownLeaseID)
+			client := &fakeIsloSyncClient{
+				execOut:    "CRABBOX_TS_IP=100.64.7.7",
+				getSandbox: &gosdk.SandboxResponse{Name: isloTeardownName, Status: "running"},
+			}
+			if enrolled {
+				if err := core.UpdateLeaseClaimTailscale(isloTeardownLeaseID, "100.64.7.7", ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			b := newIsloTeardownBackend(t, client, io.Discard)
+			result, err := b.Run(context.Background(), core.RunRequest{ID: isloTeardownLeaseID, NoSync: true, Command: []string{"true"}})
+			if err != nil || result.Session == nil || !result.Session.Reused || !result.Session.Kept {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			claim, ok, err := resolveExactIsloLeaseClaim(isloTeardownLeaseID)
+			if err != nil || !ok || isloClaimIdentity(claim).ID != "" {
+				t.Error("legacy claim identity was promoted or lost")
+			}
+			if len(client.getSandboxNames) != 1 {
+				t.Errorf("readiness should reuse enrolled admission or perform one plain-lease lookup: %v", client.getSandboxNames)
+			}
+			if client.deleteCalls != 0 || client.createRequest != nil {
+				t.Error("reuse created or deleted a resource")
+			}
+		})
+	}
+}
+
+func TestIsloCreateFailureReportsUnconfirmedAttemptWithoutAcquisition(t *testing.T) {
+	for _, mode := range []string{"run", "warmup"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			isolateIsloTestHome(t)
+			cause := errors.Join(core.ExitError{Code: 69, Message: "synthetic create failure with synthetic-key"}, context.DeadlineExceeded)
+			client := &fakeIsloSyncClient{createErr: cause}
+			restore := swapNewIsloClient(client)
+			defer restore()
+			cfg := core.BaseConfig()
+			cfg.Islo.APIKey = "synthetic-key"
+			var output bytes.Buffer
+			backend := &isloBackend{cfg: cfg, rt: core.Runtime{Stdout: &output, Stderr: &output}}
+			repo := core.Repo{Root: t.TempDir(), Name: "proof"}
+			var result core.RunResult
+			var err error
+			if mode == "run" {
+				result, err = backend.Run(context.Background(), core.RunRequest{Repo: repo, Command: []string{"true"}})
+			} else {
+				err = backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo})
+			}
+			if err == nil || core.ExitCodeForError(err, 1) != 69 || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("typed cause/code lost: %v", err)
+			}
+			name := *client.createRequest.Name
+			if !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "unconfirmed") || strings.Contains(err.Error(), cfg.Islo.APIKey) {
+				t.Fatalf("missing unconfirmed attempt locator: %v", err)
+			}
+			if result.LeaseID != "" || result.Session != nil || strings.Contains(output.String(), "leased ") {
+				t.Fatalf("failed create reported acquired result: %#v %s", result, output.String())
+			}
+			if client.deleteCalls != 0 || len(client.execRequests) != 0 || client.uploadPath != "" {
+				t.Fatal("failed create caused cleanup or workload")
+			}
+			entries, readErr := os.ReadDir(filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims"))
+			if !errors.Is(readErr, os.ErrNotExist) && (readErr != nil || len(entries) != 0) {
+				t.Fatalf("failed create published claim: %v %v", entries, readErr)
+			}
+		})
+	}
+}
+
+type incompleteIsloCreateClient struct {
+	fakeIsloSyncClient
+	response *gosdk.SandboxResponse
+}
+
+func (f *incompleteIsloCreateClient) CreateSandbox(_ context.Context, req *gosdk.CreateSandboxRequest) (*gosdk.SandboxResponse, error) {
+	f.createRequest = req
+	return f.response, nil
+}
+
+func TestIsloIncompleteCreateResponseReportsUnconfirmedAttempt(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response *gosdk.SandboxResponse
+	}{
+		{"nil response", nil},
+		{"missing name", &gosdk.SandboxResponse{ID: "synthetic-id"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			isolateIsloTestHome(t)
+			client := &incompleteIsloCreateClient{response: tc.response}
+			restore := swapNewIsloClient(client)
+			defer restore()
+			cfg := core.BaseConfig()
+			cfg.Islo.APIKey = "synthetic-key"
+			var output bytes.Buffer
+			backend := &isloBackend{cfg: cfg, rt: core.Runtime{Stdout: &output, Stderr: &output}}
+			result, err := backend.Run(context.Background(), core.RunRequest{Repo: core.Repo{Root: t.TempDir(), Name: cfg.Islo.APIKey}, Command: []string{"true"}})
+			if err == nil || core.ExitCodeForError(err, 1) != 5 {
+				t.Fatalf("incomplete response changed exit5: %v", err)
+			}
+			if !strings.Contains(err.Error(), "unconfirmed") || !strings.Contains(err.Error(), "name=\"crabbox-") || strings.Contains(err.Error(), cfg.Islo.APIKey) {
+				t.Fatalf("missing safe unconfirmed name: %v", err)
+			}
+			if result.LeaseID != "" || result.Session != nil || strings.Contains(output.String(), "leased ") {
+				t.Fatalf("incomplete response reported acquisition: %#v %s", result, output.String())
+			}
+			if client.deleteCalls != 0 || len(client.execRequests) != 0 || client.uploadPath != "" {
+				t.Fatal("incomplete response caused cleanup or workload")
+			}
+			entries, readErr := os.ReadDir(filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims"))
+			if !errors.Is(readErr, os.ErrNotExist) && (readErr != nil || len(entries) != 0) {
+				t.Fatalf("incomplete response published claim: %v %v", entries, readErr)
+			}
+		})
+	}
+}
+
+func TestIsloFlagsCompleteAssignmentContract(t *testing.T) {
+	for _, provider := range []string{"islo", "other"} {
+		for _, number := range []int{-1, 0, 2} {
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			cfg.Islo.IdlePause = true
+			want := cfg
+			want.Islo.BaseURL, want.Islo.Image, want.Islo.Workdir = "", "", " raw "
+			want.Islo.GatewayProfile, want.Islo.SnapshotName = "gateway", "snapshot"
+			want.Islo.VCPUs, want.Islo.MemoryMB, want.Islo.DiskGB, want.Islo.IdlePause = number, number, number, false
+			core.MarkIsloImageExplicit(&want)
+			core.MarkIsloVCPUsExplicit(&want)
+			core.MarkIsloMemoryMBExplicit(&want)
+			core.MarkIsloDiskGBExplicit(&want)
+			core.RecordProviderFlagInputs(&want, true, "islo")
+			fs := flag.NewFlagSet("islo", flag.ContinueOnError)
+			values := RegisterIsloProviderFlags(fs, cfg)
+			if err := fs.Parse([]string{"--islo-base-url=", "--islo-image=", "--islo-workdir= raw ", "--islo-gateway-profile=gateway", "--islo-snapshot-name=snapshot", "--islo-vcpus=" + strconv.Itoa(number), "--islo-memory-mb=" + strconv.Itoa(number), "--islo-disk-gb=" + strconv.Itoa(number), "--islo-idle-pause=false"}); err != nil {
+				t.Fatal(err)
+			}
+			prior := cfg
+			if err := ApplyIsloProviderFlags(&cfg, fs, "wrong-type"); err != nil || !reflect.DeepEqual(cfg, prior) {
+				t.Fatal("wrong-type guard changed")
+			}
+			if err := ApplyIsloProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("accepted values, markers, ledger or provider changed")
+			}
 		}
 	}
 }

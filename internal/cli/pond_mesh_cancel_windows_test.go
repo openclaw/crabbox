@@ -227,7 +227,7 @@ func TestPondMeshCancelKillsWindowsProcessTree(t *testing.T) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, alive := webVNCDaemonProcessCommand(childPID); !alive {
+		if _, alive := LocalProcessCommand(childPID); !alive {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -355,7 +355,7 @@ func waitForPondMeshWindowsProcessExit(t *testing.T, pid int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, alive := webVNCDaemonProcessCommand(pid); !alive {
+		if _, alive := LocalProcessCommand(pid); !alive {
 			return
 		}
 		if time.Now().After(deadline) {

@@ -6,17 +6,122 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestDoctorChecksStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		checks []DoctorCheck
+		want   string
+	}{
+		{name: "nil checks", want: "ok"},
+		{name: "empty checks", checks: []DoctorCheck{}, want: "ok"},
+		{name: "absent status", checks: []DoctorCheck{{Check: "config"}}, want: "ok"},
+		{name: "empty status", checks: []DoctorCheck{{Status: ""}}, want: "ok"},
+		{name: "whitespace status", checks: []DoctorCheck{{Status: " \t\n"}}, want: "ok"},
+		{name: "literal missing", checks: []DoctorCheck{{Status: "missing"}}, want: "failed"},
+		{name: "ok", checks: []DoctorCheck{{Status: "ok"}}, want: "ok"},
+		{name: "failed", checks: []DoctorCheck{{Status: "failed"}}, want: "failed"},
+		{name: "warning", checks: []DoctorCheck{{Status: "warning"}}, want: "warning"},
+		{name: "skip", checks: []DoctorCheck{{Status: "skip"}}, want: "ok"},
+		{name: "unknown statuses", checks: []DoctorCheck{{Status: "unknown"}, {Status: "error"}, {Status: "blocked"}}, want: "ok"},
+		{name: "failure words are not statuses", checks: []DoctorCheck{{Status: "missing tool"}, {Status: "not failed"}, {Status: "warnings"}}, want: "ok"},
+		{name: "normalized ok and skip", checks: []DoctorCheck{{Status: " OK "}, {Status: "\tSkIp\n"}}, want: "ok"},
+		{name: "normalized failed", checks: []DoctorCheck{{Status: "\tFaIlEd\n"}}, want: "failed"},
+		{name: "normalized missing", checks: []DoctorCheck{{Status: " MiSsInG "}}, want: "failed"},
+		{name: "normalized warning", checks: []DoctorCheck{{Status: "\nWaRnInG\t"}}, want: "warning"},
+		{name: "warning then failure", checks: []DoctorCheck{{Status: "warning"}, {Status: "failed"}}, want: "failed"},
+		{name: "failure then warning", checks: []DoctorCheck{{Status: "failed"}, {Status: "warning"}}, want: "failed"},
+		{name: "warning then missing", checks: []DoctorCheck{{Status: " WARNING "}, {Status: " MiSsInG "}}, want: "failed"},
+		{name: "missing then warning", checks: []DoctorCheck{{Status: " MiSsInG "}, {Status: " WARNING "}}, want: "failed"},
+		{name: "nonfailures do not clear warning", checks: []DoctorCheck{{Status: "warning"}, {}, {Status: "skip"}, {Status: "unknown"}, {Status: "ok"}}, want: "warning"},
+		{name: "duplicate successes", checks: []DoctorCheck{{Status: "ok"}, {Status: "ok"}}, want: "ok"},
+		{name: "duplicate warnings", checks: []DoctorCheck{{Status: "warning"}, {Status: "warning"}}, want: "warning"},
+		{name: "duplicate failures", checks: []DoctorCheck{{Status: "failed"}, {Status: "failed"}}, want: "failed"},
+		{
+			name: "raw checks and details survive warning",
+			checks: []DoctorCheck{
+				{Status: " WaRnInG ", Check: " network ", Message: " advisory\n", Details: map[string]string{"note": " raw value ", "mutation": "false"}},
+				{Status: "", Check: "empty details", Details: map[string]string{}},
+				{Status: " SkIp ", Check: "nil details"},
+			},
+			want: "warning",
+		},
+		{
+			name: "raw checks and details survive failure",
+			checks: []DoctorCheck{
+				{Status: " MiSsInG ", Check: " config ", Message: " unavailable\n", Details: map[string]string{"note": " raw value "}},
+				{Status: " WaRnInG ", Check: "later check", Details: map[string]string{"note": " retain me "}},
+			},
+			want: "failed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := slices.Clone(tt.checks)
+			for i := range before {
+				before[i].Details = maps.Clone(tt.checks[i].Details)
+			}
+			if got := DoctorChecksStatus(tt.checks); got != tt.want {
+				t.Errorf("DoctorChecksStatus() = %q, want %q", got, tt.want)
+			}
+			if !reflect.DeepEqual(tt.checks, before) {
+				t.Errorf("checks changed: got %#v, want %#v", tt.checks, before)
+			}
+		})
+	}
+}
+
+func TestDoctorStatusFails(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		want   bool
+	}{
+		{name: "absent status", want: false},
+		{name: "empty status", status: "", want: false},
+		{name: "whitespace status", status: " \t\n", want: false},
+		{name: "literal missing", status: "missing", want: true},
+		{name: "failed", status: "failed", want: true},
+		{name: "ok", status: "ok", want: false},
+		{name: "advisory warning", status: "warning", want: false},
+		{name: "skip", status: "skip", want: false},
+		{name: "unknown", status: "unknown", want: false},
+		{name: "error is not failed", status: "error", want: false},
+		{name: "local blocked is not failed", status: "blocked", want: false},
+		{name: "missing phrase is not missing", status: "missing tool", want: false},
+		{name: "failed phrase is not failed", status: "not failed", want: false},
+		{name: "padded failed", status: " failed\t", want: true},
+		{name: "mixed case failed", status: "FaIlEd", want: true},
+		{name: "normalized failed", status: "\tFaIlEd\n", want: true},
+		{name: "padded missing", status: " missing\n", want: true},
+		{name: "mixed case missing", status: "MiSsInG", want: true},
+		{name: "normalized missing", status: "\nMiSsInG\t", want: true},
+		{name: "normalized warning", status: " WaRnInG ", want: false},
+		{name: "normalized skip", status: " SkIp ", want: false},
+		{name: "normalized ok", status: " OK ", want: false},
+		{name: "normalized unknown", status: " UNKNOWN ", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := doctorStatusFails(tt.status); got != tt.want {
+				t.Errorf("doctorStatusFails(%q) = %t, want %t", tt.status, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestCoordinatorProviderReadinessSupported(t *testing.T) {
 	tests := []struct {
@@ -462,7 +567,7 @@ func TestDoctorIDUsesSharedLeaseIdentifierRouting(t *testing.T) {
 		if _, err := PersistExternalRouting(leaseID, ExternalConfig{Command: "doctor-external", WorkRoot: "/work/doctor"}); err != nil {
 			t.Fatal(err)
 		}
-		if err := claimLeaseForRepoProviderScope(leaseID, "doctor-external", "external", "doctor-scope", root, time.Minute, false); err != nil {
+		if err := ClaimLeaseForRepoProviderScope(leaseID, "doctor-external", "external", "doctor-scope", root, time.Minute, false); err != nil {
 			t.Fatal(err)
 		}
 		testExternalResolveHook = func(req ResolveRequest) (LeaseTarget, error) {
@@ -507,12 +612,86 @@ func TestDoctorDoesNotPrepareExistingLease(t *testing.T) {
 	}
 }
 
+type cloudflareDoctorOverrideProvider struct {
+	doctorOverrideProvider
+	ProviderClassProfileProvider
+	ProviderServerTypeProvider
+}
+
+type proxmoxDoctorOverrideProvider struct {
+	doctorOverrideProvider
+	ProviderServerTypeProvider
+}
+
+type doctorResultBackend struct {
+	testDoctorDelegatedBackend
+	result DoctorResult
+}
+
+func (b doctorResultBackend) Doctor(context.Context, DoctorRequest) (DoctorResult, error) {
+	return b.result, nil
+}
+
+func overrideDoctorProvider(t *testing.T, provider Provider) {
+	t.Helper()
+	spec := provider.Spec()
+	for _, name := range append([]string{spec.Name}, spec.Aliases...) {
+		key := normalizeProviderName(name)
+		previous, present := providerRegistry[key]
+		t.Cleanup(func() {
+			if present {
+				providerRegistry[key] = previous
+			} else {
+				delete(providerRegistry, key)
+			}
+		})
+		providerRegistry[key] = provider
+	}
+}
+
+func stubCloudflareDoctor(t *testing.T, result DoctorResult) {
+	t.Helper()
+	original, err := ProviderFor("cloudflare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := doctorResultBackend{
+		testDoctorDelegatedBackend: testDoctorDelegatedBackend{testDelegatedBackend{spec: original.Spec()}},
+		result:                     result,
+	}
+	calls := 0
+	override := cloudflareDoctorOverrideProvider{
+		doctorOverrideProvider: doctorOverrideProvider{
+			doctorConfigurationProvider: doctorConfigurationProvider{
+				Provider: original,
+				configure: func(Config, Runtime) (Backend, error) {
+					t.Fatal("synthetic doctor fixture must not configure the real backend")
+					return nil, nil
+				},
+			},
+			doctor: func(Config, Runtime) (DoctorBackend, error) {
+				calls++
+				return backend, nil
+			},
+		},
+		ProviderClassProfileProvider: original.(ProviderClassProfileProvider),
+		ProviderServerTypeProvider:   original.(ProviderServerTypeProvider),
+	}
+	overrideDoctorProvider(t, override)
+	t.Cleanup(func() {
+		if calls != 1 {
+			t.Errorf("synthetic doctor configuration calls=%d, want 1", calls)
+		}
+	})
+}
+
 func TestDoctorRunsDirectProviderCheckForCoordinatorNeverProvider(t *testing.T) {
 	for _, tool := range []string{"git", "ssh", "ssh-keygen", "rsync", "curl"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("missing local doctor tool %s: %v", tool, err)
 		}
 	}
+	stubCloudflareDoctor(t, DoctorResult{Provider: "cloudflare", Message: "direct_check=ready"})
 	clearConfigEnv(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -548,6 +727,43 @@ func TestDoctorFromRunAppliesRecordedContext(t *testing.T) {
 		}
 	}
 	clearConfigEnv(t)
+	original, err := ProviderFor("proxmox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise recorded-run restoration without invoking provider diagnostics.
+	backend := doctorResultBackend{
+		testDoctorDelegatedBackend: testDoctorDelegatedBackend{testDelegatedBackend{spec: original.Spec()}},
+		result: DoctorResult{Provider: "proxmox", Checks: []DoctorCheck{{
+			Status: "skip", Check: "provider", Message: "provider=proxmox direct_doctor=unsupported timeout=" + doctorProviderTimeout.String(),
+		}}},
+	}
+	calls := 0
+	override := proxmoxDoctorOverrideProvider{
+		doctorOverrideProvider: doctorOverrideProvider{
+			doctorConfigurationProvider: doctorConfigurationProvider{
+				Provider: original,
+				configure: func(Config, Runtime) (Backend, error) {
+					t.Fatal("recorded-context fixture must not configure the acquisition backend")
+					return nil, nil
+				},
+			},
+			doctor: func(cfg Config, _ Runtime) (DoctorBackend, error) {
+				calls++
+				if cfg.Provider != "proxmox" || cfg.TargetOS != targetLinux || cfg.Class != "standard" || cfg.ServerType != "vm-large" {
+					t.Fatalf("doctor did not receive recorded context: provider=%s target=%s class=%s type=%s", cfg.Provider, cfg.TargetOS, cfg.Class, cfg.ServerType)
+				}
+				return backend, nil
+			},
+		},
+		ProviderServerTypeProvider: original.(ProviderServerTypeProvider),
+	}
+	overrideDoctorProvider(t, override)
+	t.Cleanup(func() {
+		if calls != 2 {
+			t.Errorf("synthetic doctor configuration calls=%d, want 2", calls)
+		}
+	})
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -573,7 +789,7 @@ func TestDoctorFromRunAppliesRecordedContext(t *testing.T) {
 	t.Setenv("CRABBOX_COORDINATOR", server.URL)
 
 	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--from-run", "run_123"})
+	err = (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--from-run", "run_123"})
 	if err != nil {
 		t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 	}
@@ -605,7 +821,7 @@ func TestDoctorFromRunProviderSurvivesUnrelatedIdentifierClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
 	t.Setenv("PATH", doctorTestToolPath(t, []string{"git", "ssh", "ssh-keygen", "rsync"}))
-	if err := claimLeaseForRepoProvider("cbx_recorded_doctor", "recorded-doctor", "external", "/repo", time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProvider("cbx_recorded_doctor", "recorded-doctor", "external", "/repo", time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -631,7 +847,11 @@ func TestDoctorFromRunProviderSurvivesUnrelatedIdentifierClaim(t *testing.T) {
 }
 
 func TestDoctorDirectProviderCheckIncludesTimeoutWhenMessageHasProvider(t *testing.T) {
-	for _, tool := range doctorLocalTools(testCloudflareProvider{}.Spec()) {
+	provider, err := ProviderFor("cloudflare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range doctorLocalTools(provider.Spec()) {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("missing local doctor tool %s: %v", tool, err)
 		}
@@ -641,7 +861,7 @@ func TestDoctorDirectProviderCheckIncludesTimeoutWhenMessageHasProvider(t *testi
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("CRABBOX_CONFIG", "")
-	testCloudflareDoctorResult = &DoctorResult{
+	stubCloudflareDoctor(t, DoctorResult{
 		Provider: "cloudflare",
 		Checks: []DoctorCheck{{
 			Status:  "ok",
@@ -649,11 +869,10 @@ func TestDoctorDirectProviderCheckIncludesTimeoutWhenMessageHasProvider(t *testi
 			Message: "provider=cloudflare direct_check=ready",
 			Details: map[string]string{"provider": "cloudflare"},
 		}},
-	}
-	defer func() { testCloudflareDoctorResult = nil }()
+	})
 
 	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--provider", "cloudflare"})
+	err = (App{Stdout: &stdout, Stderr: &stderr}).doctor(context.Background(), []string{"--provider", "cloudflare"})
 	if err != nil {
 		t.Fatalf("doctor error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
 	}

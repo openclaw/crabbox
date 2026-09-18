@@ -68,7 +68,7 @@ func validateProfileConfig(name string, profile ProfileConfig) error {
 	}
 	if profile.Doctor.Enabled {
 		if err := validateProfileDoctorTools(profile.Doctor.Tools); err != nil {
-			return exit(2, "profile %q doctor: %v", name, err)
+			return Exit(2, "profile %q doctor: %v", name, err)
 		}
 	}
 	return nil
@@ -81,13 +81,13 @@ func validateProfileDoctorTools(tools []string) error {
 		}
 		spec, ok := preflightToolRegistry[tool]
 		if !ok {
-			return exit(2, "unknown preflight tool %q", tool)
+			return Exit(2, "unknown preflight tool %q", tool)
 		}
 		if tool == "sudo" {
 			continue
 		}
 		if len(spec.Posix) == 0 {
-			return exit(2, "profile doctor tool %q is not supported for POSIX profile doctor", tool)
+			return Exit(2, "profile doctor tool %q is not supported for POSIX profile doctor", tool)
 		}
 	}
 	return nil
@@ -125,7 +125,7 @@ func expandRunProfile(cfg Config, presetName, scenario string, vars []string, co
 	}
 	preset, ok := cfg.Presets[expansion.PresetName]
 	if !ok {
-		return runProfileExpansion{}, exit(2, "preset %q is not configured for profile %q", expansion.PresetName, cfg.Profile)
+		return runProfileExpansion{}, Exit(2, "preset %q is not configured for profile %q", expansion.PresetName, cfg.Profile)
 	}
 	if err := validateProfileEnvNames("preset "+expansion.PresetName, preset.Env); err != nil {
 		return runProfileExpansion{}, err
@@ -158,13 +158,13 @@ func expandRunProfile(cfg Config, presetName, scenario string, vars []string, co
 		} else {
 			words, wordLiterals, err := splitShellWordsWithLiterals(preset.Command)
 			if err != nil {
-				return runProfileExpansion{}, exit(2, "preset %q command: %v", expansion.PresetName, err)
+				return runProfileExpansion{}, Exit(2, "preset %q command: %v", expansion.PresetName, err)
 			}
 			expansion.Command, expansion.LiteralArgs = expandPresetWords(words, wordLiterals, variables)
 		}
 	}
 	if len(expansion.Command) == 0 {
-		return runProfileExpansion{}, exit(2, "preset %q expanded to an empty command", expansion.PresetName)
+		return runProfileExpansion{}, Exit(2, "preset %q expanded to an empty command", expansion.PresetName)
 	}
 	return expansion, nil
 }
@@ -176,7 +176,7 @@ func parsePresetVariables(values []string) (map[string]string, error) {
 			key, val, ok := strings.Cut(part, "=")
 			key = strings.TrimSpace(key)
 			if !ok || key == "" {
-				return nil, exit(2, "--preset-var expects name=value")
+				return nil, Exit(2, "--preset-var expects name=value")
 			}
 			out[key] = strings.TrimSpace(val)
 		}
@@ -213,8 +213,8 @@ func isPresetPlaceholderWord(word string) bool {
 
 func validateProfileEnvNames(label string, env map[string]string) error {
 	for key := range env {
-		if !validEnvName(strings.TrimSpace(key)) {
-			return exit(2, "%s env key %q is not a valid shell environment name", label, key)
+		if !ValidShellEnvName(strings.TrimSpace(key)) {
+			return Exit(2, "%s env key %q is not a valid shell environment name", label, key)
 		}
 	}
 	return nil
@@ -249,7 +249,7 @@ func validatePresetTemplatePlaceholders(label, value string, vars map[string]str
 		return nil
 	}
 	sort.Strings(missing)
-	return exit(2, "%s has unresolved preset variable(s): %s", label, strings.Join(missing, ", "))
+	return Exit(2, "%s has unresolved preset variable(s): %s", label, strings.Join(missing, ", "))
 }
 
 func formatExpandedPresetCommand(name string, command []string, shell bool, env map[string]string, literalArgs map[int]bool) string {

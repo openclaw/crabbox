@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   EC2SpotClient,
+  AWSLeaseAuthorityError,
   awsAutomaticProbesConfigured,
   awsCredentialsConfigured,
   awsOrphanSweepCredentialsConfigured,
@@ -11,6 +12,7 @@ import {
 } from "../src/aws";
 import { leaseConfig, type LeaseConfig } from "../src/config";
 import { AWSProvider } from "../src/fleet";
+import { providerKeyForLease } from "../src/provider-key";
 import { providerProvisioningCleanupClaim } from "../src/provider-provisioning";
 import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
 
@@ -44,7 +46,7 @@ describe("private AWS workspaces", () => {
         authorizations.push(request.headers.get("authorization") ?? "");
         sessionTokens.push(request.headers.get("x-amz-security-token") ?? "");
         return ec2XMLResponse(
-          "<DescribeInstancesResponse><reservationSet /></DescribeInstancesResponse>",
+          "<DescribeInstancesResponse><requestId>req-credentials</requestId><reservationSet /></DescribeInstancesResponse>",
         );
       }),
     );
@@ -57,6 +59,202 @@ describe("private AWS workspaces", () => {
     expect(authorizations[0]).toContain("Credential=TASKKEY1/");
     expect(authorizations[1]).toContain("Credential=TASKKEY2/");
     expect(sessionTokens).toEqual(["task-token-1", "task-token-2"]);
+  });
+
+  it("uses one credential snapshot for an account-authoritative lease operation", async () => {
+    let generation = 0;
+    const credentials = vi.fn<
+      () => Promise<{ accessKeyId: string; secretAccessKey: string; sessionToken: string }>
+    >(async () => {
+      generation += 1;
+      return {
+        accessKeyId: `TASKKEY${generation}`,
+        secretAccessKey: `task-secret-${generation}`,
+        sessionToken: `task-token-${generation}`,
+      };
+    });
+    const leaseID = "cbx_abcdef123456";
+    const keyName = providerKeyForLease(leaseID);
+    const actions: string[] = [];
+    const authorizations: string[] = [];
+    const sessionTokens: string[] = [];
+    let terminated = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestFrom(input, init);
+        const host = new URL(request.url).hostname;
+        if (host.startsWith("servicequotas.")) {
+          actions.push("GetServiceQuota");
+          authorizations.push(request.headers.get("authorization") ?? "");
+          sessionTokens.push(request.headers.get("x-amz-security-token") ?? "");
+          return jsonResponse({ Quota: { Value: 1024 } });
+        }
+        if (host.startsWith("ssm.")) {
+          actions.push("DescribeInstanceInformation");
+          authorizations.push(request.headers.get("authorization") ?? "");
+          sessionTokens.push(request.headers.get("x-amz-security-token") ?? "");
+          return jsonResponse({
+            InstanceInformationList: [{ InstanceId: "i-private123", PingStatus: "Online" }],
+          });
+        }
+        const action = new URLSearchParams(await request.clone().text()).get("Action") ?? "";
+        actions.push(action);
+        authorizations.push(request.headers.get("authorization") ?? "");
+        sessionTokens.push(request.headers.get("x-amz-security-token") ?? "");
+        if (action === "GetCallerIdentity") return stsIdentityResponse("001234567890");
+        if (action === "DescribeInstances") {
+          if (terminated) {
+            return ec2XMLResponse(
+              "<DescribeInstancesResponse><requestId>req-absent</requestId><reservationSet /></DescribeInstancesResponse>",
+            );
+          }
+          return ec2XMLResponse(`<DescribeInstancesResponse><requestId>req-present</requestId>
+            <reservationSet><item><ownerId>001234567890</ownerId><instancesSet><item>
+              <instanceId>i-private123</instanceId>
+              <instanceState><name>running</name></instanceState>
+            </item></instancesSet></item></reservationSet>
+          </DescribeInstancesResponse>`);
+        }
+        if (action === "TerminateInstances") {
+          terminated = true;
+          return ec2XMLResponse(`<TerminateInstancesResponse><instancesSet><item>
+            <instanceId>i-private123</instanceId>
+          </item></instancesSet></TerminateInstancesResponse>`);
+        }
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse(`<DescribeKeyPairsResponse><keySet><item>
+            <keyName>${keyName}</keyName><keyPairId>key-123</keyPairId><tagSet>
+              <item><key>crabbox</key><value>true</value></item>
+              <item><key>created_by</key><value>crabbox</value></item>
+              <item><key>lease</key><value>${leaseID}</value></item>
+            </tagSet>
+          </item></keySet></DescribeKeyPairsResponse>`);
+        }
+        if (action === "DeleteKeyPair") {
+          return ec2XMLResponse("<DeleteKeyPairResponse />");
+        }
+        throw new Error(`unexpected AWS action ${action}`);
+      }),
+    );
+    const client = new EC2SpotClient({ awsCredentialProvider: credentials } as Env, region);
+
+    await client.withLeaseOperation(async (operation) => {
+      await expect(operation.verifiedIdentity()).resolves.toMatchObject({
+        account: "001234567890",
+      });
+      await expect(operation.findServer("i-private123")).resolves.toMatchObject({
+        cloudID: "i-private123",
+      });
+      await operation.terminateServerAndWait("i-private123");
+      await operation.deleteSSHKey(keyName, leaseID);
+      await operation.client.capacityReadinessChecks(
+        leaseConfig({
+          provider: "aws",
+          target: "linux",
+          serverType: "t3.small",
+          capacity: { market: "on-demand" },
+          sshPublicKey: "ssh-ed25519 test",
+        }),
+      );
+      await operation.client.waitForSSMOnline("i-private123");
+    });
+
+    expect(credentials).toHaveBeenCalledTimes(1);
+    expect(actions).toEqual([
+      "GetCallerIdentity",
+      "DescribeInstances",
+      "TerminateInstances",
+      "DescribeInstances",
+      "DescribeKeyPairs",
+      "DeleteKeyPair",
+      "GetServiceQuota",
+      "DescribeInstanceInformation",
+    ]);
+    expect(authorizations.every((value) => value.includes("Credential=TASKKEY1/"))).toBe(true);
+    expect(sessionTokens).toEqual(Array(actions.length).fill("task-token-1"));
+  });
+
+  it("uses the qualification transport through the operation session client", async () => {
+    const execute = vi.fn<
+      (request: { action: string; service: string }) => Promise<{ body: string; status: number }>
+    >(async (request) => {
+      if (request.action === "GetCallerIdentity") {
+        return { body: await stsIdentityResponse(expectedAccountID).text(), status: 200 };
+      }
+      if (request.action === "DescribeInstances") {
+        return {
+          body: "<DescribeInstancesResponse><requestId>req-empty</requestId><reservationSet /></DescribeInstancesResponse>",
+          status: 200,
+        };
+      }
+      throw new Error(`unexpected qualification action ${request.action}`);
+    });
+    const client = new EC2SpotClient(
+      { CRABBOX_AWS_QUALIFICATION_TRANSPORT: { execute } } as Env,
+      region,
+    );
+
+    await client.withLeaseOperation(async (operation) => {
+      await expect(operation.verifiedIdentity()).resolves.toMatchObject({
+        account: expectedAccountID,
+      });
+      await expect(operation.client.listCrabboxServers()).resolves.toEqual([]);
+    });
+
+    expect(execute.mock.calls.map(([request]) => [request.service, request.action])).toEqual([
+      ["sts", "GetCallerIdentity"],
+      ["ec2", "DescribeInstances"],
+    ]);
+  });
+
+  it.each([
+    {
+      name: "ownership tags do not match",
+      keyPairID: "key-123",
+      tags: "<item><key>lease</key><value>cbx_other000000</value></item>",
+      message: "ownership does not match",
+    },
+    {
+      name: "the immutable key id is missing",
+      keyPairID: "",
+      tags: `<item><key>crabbox</key><value>true</value></item>
+        <item><key>created_by</key><value>crabbox</value></item>
+        <item><key>lease</key><value>cbx_abcdef123456</value></item>`,
+      message: "missing its immutable key pair ID",
+    },
+  ])("treats SSH key cleanup as unauthorized when $name", async ({ keyPairID, tags, message }) => {
+    const leaseID = "cbx_abcdef123456";
+    const keyName = providerKeyForLease(leaseID);
+    const actions: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestFrom(input, init);
+        const action = new URLSearchParams(await request.text()).get("Action") ?? "";
+        actions.push(action);
+        if (action === "GetCallerIdentity") return stsIdentityResponse(expectedAccountID);
+        if (action === "DescribeKeyPairs") {
+          return ec2XMLResponse(`<DescribeKeyPairsResponse><keySet><item>
+            <keyName>${keyName}</keyName>${keyPairID ? `<keyPairId>${keyPairID}</keyPairId>` : ""}
+            <tagSet>${tags}</tagSet>
+          </item></keySet></DescribeKeyPairsResponse>`);
+        }
+        throw new Error(`unexpected AWS action ${action}`);
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      region,
+    );
+
+    const error = await client
+      .withLeaseOperation((operation) => operation.deleteSSHKey(keyName, leaseID))
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AWSLeaseAuthorityError);
+    expect(error).toMatchObject({ message: expect.stringContaining(message) });
+    expect(actions).not.toContain("DeleteKeyPair");
   });
 
   it("retries an expected identity check after a transient failure", async () => {
@@ -74,6 +272,33 @@ describe("private AWS workspaces", () => {
     await expect(client.verifiedIdentity()).rejects.toThrow("temporary STS failure");
     await expect(client.verifiedIdentity()).resolves.toMatchObject({ account: expectedAccountID });
     expect(identity).toHaveBeenCalledTimes(2);
+  });
+
+  it("binds a private Linux lease to the authenticated AWS account during preparation", async () => {
+    const actions: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestFrom(input, init);
+        const action = new URLSearchParams(await request.clone().text()).get("Action") ?? "";
+        actions.push(action);
+        return stsIdentityResponse(expectedAccountID);
+      }),
+    );
+    const provider = new AWSProvider(privateWorkspaceEnv(), region, {} as never);
+
+    const prepared = await provider.prepareLeaseCreate(
+      { ...privateLeaseConfig(), awsUseStockImage: true },
+      {
+        id: "cbx_private000001",
+        provider: "aws",
+        network: {},
+      } as LeaseRecord,
+      { requestSourceCIDRs: [], activeLeases: [] },
+    );
+
+    expect(prepared.lease.providerScope).toBe(`aws:account:${expectedAccountID}`);
+    expect(actions).toEqual(["GetCallerIdentity"]);
   });
 
   it("does not enable orphan sweeps from an unproven default credential chain", () => {
@@ -514,7 +739,8 @@ describe("private AWS workspaces", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        ec2XMLResponse(`<DescribeInstancesResponse><reservationSet><item><instancesSet><item>
+        ec2XMLResponse(`<DescribeInstancesResponse><requestId>req-private-address</requestId>
+          <reservationSet><item><instancesSet><item>
           <instanceId>i-private123</instanceId><privateIpAddress>10.0.2.15</privateIpAddress>
           <instanceState><name>running</name></instanceState>
           <metadataOptions><httpEndpoint>enabled</httpEndpoint><httpTokens>required</httpTokens>
@@ -740,6 +966,122 @@ describe("private AWS workspaces", () => {
     expect(actions).toEqual(["TerminateInstances", "DescribeInstances"]);
   });
 
+  it("confirms acknowledged termination from an empty successful DescribeInstances response", async () => {
+    const actions: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestFrom(input, init);
+        const action = new URLSearchParams(await request.clone().text()).get("Action") ?? "";
+        actions.push(action);
+        if (action === "TerminateInstances") {
+          return ec2XMLResponse(`<TerminateInstancesResponse><instancesSet><item>
+            <instanceId>i-private123</instanceId>
+          </item></instancesSet></TerminateInstancesResponse>`);
+        }
+        return ec2XMLResponse(
+          "<DescribeInstancesResponse><requestId>req-terminated</requestId><reservationSet /></DescribeInstancesResponse>",
+        );
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      region,
+    );
+
+    await expect(client.terminateServerAndWait("i-private123")).resolves.toBeUndefined();
+    expect(actions).toEqual(["TerminateInstances", "DescribeInstances"]);
+  });
+
+  it("routes public managed lease release through confirmed termination", async () => {
+    const provider = new AWSProvider(expectedEnv(), region, {} as never);
+    const lease = publicManagedLease();
+    const actions: string[] = [];
+    let terminated = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const action =
+          new URLSearchParams(await requestFrom(input, init).clone().text()).get("Action") ?? "";
+        actions.push(action);
+        if (action === "GetCallerIdentity") return stsIdentityResponse(expectedAccountID);
+        if (action === "DescribeInstances") {
+          return terminated
+            ? ec2XMLResponse(
+                "<DescribeInstancesResponse><requestId>req-absent</requestId><reservationSet /></DescribeInstancesResponse>",
+              )
+            : publicManagedInstanceResponse("running");
+        }
+        if (action === "TerminateInstances") {
+          terminated = true;
+          return ec2XMLResponse(`<TerminateInstancesResponse><instancesSet><item>
+            <instanceId>${lease.cloudID}</instanceId>
+          </item></instancesSet></TerminateInstancesResponse>`);
+        }
+        throw new Error(`unexpected AWS action ${action}`);
+      }),
+    );
+
+    await expect(provider.releaseLease(lease)).resolves.toBeUndefined();
+    expect(actions).toEqual([
+      "GetCallerIdentity",
+      "DescribeInstances",
+      "TerminateInstances",
+      "DescribeInstances",
+    ]);
+  });
+
+  it("propagates public managed termination confirmation failure", async () => {
+    const provider = new AWSProvider(expectedEnv(), region, {} as never);
+    const lease = publicManagedLease();
+    vi.stubGlobal("setTimeout", ((callback: () => void) => {
+      queueMicrotask(callback);
+      return 0;
+    }) as typeof setTimeout);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const action =
+          new URLSearchParams(await requestFrom(input, init).clone().text()).get("Action") ?? "";
+        if (action === "GetCallerIdentity") return stsIdentityResponse(expectedAccountID);
+        if (action === "DescribeInstances") return publicManagedInstanceResponse("shutting-down");
+        if (action === "TerminateInstances") {
+          return ec2XMLResponse(`<TerminateInstancesResponse><instancesSet><item>
+            <instanceId>${lease.cloudID}</instanceId>
+          </item></instancesSet></TerminateInstancesResponse>`);
+        }
+        throw new Error(`unexpected AWS action ${action}`);
+      }),
+    );
+    try {
+      await expect(provider.releaseLease(lease)).rejects.toThrow(
+        "timed out confirming AWS instance termination",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps normal public deletion fire-and-forget", async () => {
+    const actions: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestFrom(input, init);
+        const action = new URLSearchParams(await request.clone().text()).get("Action") ?? "";
+        actions.push(action);
+        return ec2XMLResponse("<TerminateInstancesResponse />");
+      }),
+    );
+    const client = new EC2SpotClient(
+      { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
+      region,
+    );
+
+    await expect(client.deleteServer("i-public123")).resolves.toBeUndefined();
+    expect(actions).toEqual(["TerminateInstances"]);
+  });
+
   it("checks termination once more after the final backoff", async () => {
     let describeCalls = 0;
     const delays: number[] = [];
@@ -760,7 +1102,8 @@ describe("private AWS workspaces", () => {
         }
         describeCalls += 1;
         const state = describeCalls === 7 ? "terminated" : "shutting-down";
-        return ec2XMLResponse(`<DescribeInstancesResponse><reservationSet><item>
+        return ec2XMLResponse(`<DescribeInstancesResponse><requestId>req-termination-poll</requestId>
+          <reservationSet><item>
           <instancesSet><item><instanceId>i-private123</instanceId>
             <instanceState><name>${state}</name></instanceState>
           </item></instancesSet>
@@ -778,14 +1121,17 @@ describe("private AWS workspaces", () => {
   });
 
   it("rejects unacknowledged termination because absence may be propagation delay", async () => {
+    const actions: string[] = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        awsErrorResponse(
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = requestFrom(input, init);
+        actions.push(new URLSearchParams(await request.clone().text()).get("Action") ?? "");
+        return awsErrorResponse(
           "InvalidInstanceID.NotFound",
           "The instance ID 'i-private123' does not exist",
-        ),
-      ),
+        );
+      }),
     );
     const client = new EC2SpotClient(
       { AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "secret" } as Env,
@@ -795,6 +1141,7 @@ describe("private AWS workspaces", () => {
     await expect(client.terminateServerAndWait("i-private123")).rejects.toThrow(
       "InvalidInstanceID.NotFound",
     );
+    expect(actions).toEqual(["TerminateInstances"]);
   });
 
   it("requires the full fail-closed private deployment policy", () => {
@@ -856,6 +1203,55 @@ function privateLeaseConfig(): LeaseConfig {
     capacity: { market: "on-demand", fallback: "none", regions: [region], hints: false },
     providerKey: "crabbox-workspace-private",
   });
+}
+
+function publicManagedLease(): LeaseRecord {
+  return {
+    id: "cbx_abcdef123456",
+    slug: "public-release",
+    provider: "aws",
+    providerScope: `aws:account:${expectedAccountID}`,
+    region,
+    target: "linux",
+    cloudID: "i-public123",
+    owner: "alice@example.com",
+    org: "example-org",
+    profile: "default",
+    class: "standard",
+    serverType: "t3a.small",
+    serverID: 0,
+    serverName: "crabbox-public-release",
+    providerKey: "",
+    host: "192.0.2.10",
+    sshUser: "crabbox",
+    sshPort: "22",
+    workRoot: "/work/crabbox",
+    keep: false,
+    ttlSeconds: 3600,
+    estimatedHourlyUSD: 0.1,
+    maxEstimatedUSD: 0.1,
+    state: "released",
+    createdAt: "2026-09-06T00:00:00Z",
+    updatedAt: "2026-09-06T00:00:00Z",
+    expiresAt: "2026-09-06T01:00:00Z",
+  };
+}
+
+function publicManagedInstanceResponse(status: string): Response {
+  return ec2XMLResponse(`<DescribeInstancesResponse><requestId>req-public</requestId>
+    <reservationSet><item><ownerId>${expectedAccountID}</ownerId><instancesSet><item>
+      <instanceId>i-public123</instanceId><instanceType>t3a.small</instanceType>
+      <instanceState><name>${status}</name></instanceState><ipAddress>192.0.2.10</ipAddress>
+      <tagSet>
+        <item><key>crabbox</key><value>true</value></item>
+        <item><key>created_by</key><value>crabbox</value></item>
+        <item><key>lease</key><value>cbx_abcdef123456</value></item>
+        <item><key>slug</key><value>public-release</value></item>
+        <item><key>owner</key><value>alice_example.com</value></item>
+        <item><key>provider</key><value>aws</value></item>
+      </tagSet>
+    </item></instancesSet></item></reservationSet>
+  </DescribeInstancesResponse>`);
 }
 
 function privatePolicy(): AWSPrivateWorkspaceConfig {

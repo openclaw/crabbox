@@ -6,32 +6,25 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-const (
-	defaultRegion = "fr-par"
-	defaultZone   = "fr-par-1"
-	defaultImage  = "ubuntu_noble"
-	defaultType   = "DEV1-S"
-)
-
 func regionForConfig(cfg core.Config) string {
 	if value := strings.TrimSpace(cfg.Scaleway.Region); value != "" {
 		return value
 	}
-	return defaultRegion
+	return core.ScalewayConfigDefaultRegion
 }
 
 func zoneForConfig(cfg core.Config) string {
 	if value := strings.TrimSpace(cfg.Scaleway.Zone); value != "" {
 		return value
 	}
-	return defaultZone
+	return core.ScalewayConfigDefaultZone
 }
 
 func imageForConfig(cfg core.Config) string {
 	if value := strings.TrimSpace(cfg.Scaleway.Image); value != "" {
 		return value
 	}
-	return defaultImage
+	return core.ScalewayConfigDefaultImage
 }
 
 func serverTypeForConfig(cfg core.Config) string {
@@ -60,5 +53,28 @@ func validateFoundationConfig(cfg core.Config) error {
 	if strings.TrimSpace(serverTypeForConfig(cfg)) == "" {
 		return core.Exit(2, "scaleway type is required")
 	}
+	return nil
+}
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	if cfg.Scaleway.Region == "" {
+		cfg.Scaleway.Region = core.ScalewayConfigDefaultRegion
+	}
+	if cfg.Scaleway.Zone == "" {
+		cfg.Scaleway.Zone = core.ScalewayConfigDefaultZone
+	}
+	if core.OSImageWasExplicit(*cfg) && !core.ScalewayImageWasExplicit(*cfg) {
+		if cfg.OSImage == "ubuntu:24.04" {
+			cfg.Scaleway.Image = "ubuntu_noble"
+		} else {
+			cfg.Scaleway.Image = ""
+		}
+	} else if cfg.Scaleway.Image == "" {
+		cfg.Scaleway.Image = core.ScalewayConfigDefaultImage
+	}
+	if cfg.Scaleway.Type == "" {
+		cfg.Scaleway.Type = core.ScalewayConfigDefaultType
+	}
+	core.ApplyLinuxConnectionDefaults(cfg, "root", "22")
 	return nil
 }

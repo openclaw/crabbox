@@ -1,8 +1,21 @@
 # Repository Guidelines
 
+`CLAUDE.md` is a symlink to this file. Edit `AGENTS.md` and preserve the link so agent instructions stay in sync.
+
 ## Project Structure & Module Organization
 
-Crabbox is a Go CLI plus a Cloudflare Worker coordinator. The CLI entrypoint is `cmd/crabbox`, with implementation and Go tests in `internal/cli`. Worker source lives in `worker/src`, with Vitest tests in `worker/test`. Documentation lives in `docs/`; command docs are under `docs/commands`, and feature notes under `docs/features`. Release configuration is in `.goreleaser.yaml`; GitHub Actions live in `.github/workflows`. Generated outputs such as `bin/`, `dist/`, `worker/dist/`, and `worker/node_modules/` should not be edited by hand.
+Crabbox is a Go CLI with an optional coordinator on Cloudflare Workers or Node.js with PostgreSQL.
+
+| Area | Location |
+| --- | --- |
+| CLI entrypoint and command behavior | `cmd/crabbox`, `internal/cli` |
+| Go provider adapters | `internal/providers/<name>` |
+| Shared coordinator and Node.js runtime | `worker/src`, `worker/node` |
+| Coordinator tests | `worker/test` |
+| Command and feature documentation | `docs/commands`, `docs/features` |
+| CI and release configuration | `.github/workflows`, `.goreleaser.yaml` |
+
+Use `docs/source-map.md` for the detailed code map. Generated outputs such as `bin/`, `dist/`, `worker/dist/`, and `worker/node_modules/` should not be edited by hand.
 
 ## Product Positioning
 
@@ -12,18 +25,24 @@ Crabbox is a generic remote software testing and execution tool. New code, docs,
 
 Keep core provider-neutral. Core may pass generic request/lease context and call provider capabilities for defaults, access, provision, images, release, cleanup, and diagnostics. Provider-specific reconciliation, firewall/security-group semantics, labels, snapshots, hosts, regions, rollout compatibility, and resource naming live behind provider adapters. No `provider == aws/gcp/...` logic in core unless it is unavoidable routing/config glue and no provider hook fits.
 
+Provider contracts and extension points are documented in `docs/features/provider-authoring.md` and `docs/provider-backends.md`; coordinator runtime boundaries are described in `docs/architecture.md`.
+
 ## Build, Test, and Development Commands
+
+Run from the repository root. Use the Go toolchain declared in `go.mod` and the Node version in `.node-version`.
 
 - `go build -trimpath -o bin/crabbox ./cmd/crabbox`: build the local CLI.
 - `go vet ./...`: run Go static checks.
-- `go test -race ./...`: run the Go test suite with the race detector.
-- `gofmt -w $(git ls-files '*.go')`: format Go files.
-- `npm ci --prefix worker`: install Worker dependencies.
+- `go test -race -timeout=20m ./...`: run the Go test suite with the race detector and CI's race-test package timeout.
+- `gofmt -w path/to/changed.go`: format changed Go files; substitute their actual paths.
+- `npm ci --prefix worker`: install coordinator dependencies.
 - `npm run format:check --prefix worker`: verify TypeScript formatting.
 - `npm run lint --prefix worker`: run `oxlint`.
 - `npm run check --prefix worker`: run TypeScript typechecking.
+- `npm run check:node --prefix worker`: typecheck the Node.js coordinator.
 - `npm test --prefix worker`: run Vitest tests.
 - `npm run build --prefix worker`: dry-run the Worker build through Wrangler.
+- `npm run build:node --prefix worker`: build the Node.js coordinator.
 - `node scripts/build-docs-site.mjs`: generate the docs site into `dist/docs-site`.
 
 ## Coding Style & Naming Conventions
@@ -38,9 +57,11 @@ Name Go tests `*_test.go` beside the code they cover. Name Worker tests `*.test.
 
 History uses Conventional Commit prefixes such as `feat:`, `fix:`, `docs:`, and `ci:`. Keep commits focused and mention user-visible behavior changes. Pull requests should include a clear summary, verification commands, config or secret implications, and screenshots only for generated docs or UI changes. Issue/PR references: always use full GitHub URLs, every time.
 
+Maintainers and agents add user-visible fixes and features to `CHANGELOG.md` as work lands, normally under `## Unreleased`; contributor PR authors leave changelog edits to maintainers. Use concise one-line bullets, full PR links, and contributor thanks by `@login`. Release preparation finalizes the accumulated section's version and date; do not defer changelog maintenance until release time.
+
 ## Releasing
 
-Follow `docs/RELEASING.md` exactly. One explicit full release/publish request authorizes the complete normal sequence: preparation/tagging/build/signing, private draft/upload, native dispatch/proof, publication, fresh public verification, public Go installation, Homebrew update/proof, and closeout, without renewed chat approval at each stage. Narrow requests stay narrow. The original request is the authorization; GitHub events alone do not authorize a release. Sequential technical gates, identity binding, credential isolation, immutability, exact frozen inputs, actual exclusive-writer coordination, and cancellation boundaries remain mandatory. Authorization is not evidence of an administrative freeze. Explicit cancellation requires renewed direction before mutations resume. Pitfalls that have broken past releases:
+Follow `docs/RELEASING.md` exactly. One explicit full release/publish request authorizes the complete normal sequence: preparation/tagging/build/signing, private draft/upload, native dispatch/proof, publication, ordinary Homebrew tap update, independent public/native/Go installation smokes, and closeout, without renewed chat approval at each stage. Narrow requests stay narrow. The original request is the authorization; GitHub events alone do not authorize a release. Sequential technical gates, identity binding, credential isolation, immutability, exact frozen inputs, immediate publication readbacks, and cancellation boundaries remain mandatory. Publication does not require a particular PR-approval ruleset or an administrative writer freeze; existing GitHub merge protections still apply. The final read and publication are not atomic, and a detected post-publication mismatch is an incident rather than permission to rewrite the release. Explicit cancellation requires renewed direction before mutations resume. Publication establishes tap eligibility; public smoke results are not an approval gate. Dispatch the existing ordinary tap updater explicitly and retry Homebrew alone after failure, never production or publication. Tap maintainers own executable formulae; evaluate them only credential-free. Cancellation cannot stop independent reconciliation of an already-public release. Pitfalls that have broken past releases:
 
 - Before tagging on any maintainer Mac, that machine's SSH signing key must BOTH be in `.github/release-allowed-signers` AND be registered on the maintainer's GitHub account as a signing key. GitHub evaluates SSH tag-signature verification at push time only; a tag pushed before its key is registered is permanently `unknown_key` and can never pass `scripts/publish-release.sh`'s `verification.verified` gate. Check `gh api repos/openclaw/crabbox/git/tags/<tag-object> --jq .verification` immediately after pushing the tag, before building anything.
 - The signed tag annotation must be exactly the bare version (`git tag -s v0.39.0 -m "v0.39.0"`), never a descriptive message. `scripts/verify-release-source.sh` requires the tag subject to equal the version, and the protected tag ruleset blocks deleting or recreating a wrong tag.
@@ -49,6 +70,8 @@ Follow `docs/RELEASING.md` exactly. One explicit full release/publish request au
 - The producer is credential-free and refuses to run if any release credential is present; unset every variable in the check at the top of `scripts/build-release-candidate.sh` (the GitHub, Homebrew-tap, and Actions tokens plus the codesign identity and notary profile), not just `GH_TOKEN`/`GITHUB_TOKEN`.
 
 ## Security & Configuration Tips
+
+The authentication and isolation model is documented in `SECURITY.md` and `docs/security.md`.
 
 Keep provider and broker tokens out of the repository. Do not pass secrets as command-line arguments. Local config belongs in `~/.config/crabbox/config.yaml`, `~/Library/Application Support/crabbox/config.yaml`, `crabbox.yaml`, or `.crabbox.yaml` as documented.
 Tenki provider SSH uses `tenki sandbox ssh-proxy` with Tenki-managed key/cert files under `~/.config/tenki`; do not use Crabbox per-lease keys for gateway auth.
