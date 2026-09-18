@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Clarify that configured Actions fields and workflow-input inspection belong to hydration, while standalone dispatch sends only explicitly supplied fields.
+
 ## 0.61.0 - 2026-09-17
 
 ### Highlights
