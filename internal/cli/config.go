@@ -503,20 +503,6 @@ type UnikraftCloudConfig struct {
 	MemoryMB int
 }
 
-type HostingerConfig struct {
-	APIToken        string
-	APIURL          string
-	ItemID          string
-	PaymentMethodID string
-	TemplateID      string
-	DataCenterID    string
-	HostnamePrefix  string
-	User            string
-	WorkRoot        string
-	AllowPurchase   bool
-	ReleaseAction   string
-}
-
 type IsloConfig struct {
 	APIKey         string
 	BaseURL        string
@@ -531,20 +517,6 @@ type IsloConfig struct {
 	// IdleTimeout. Off by default: the provider adapter sends no lifecycle
 	// policy unless it is set.
 	IdlePause bool
-}
-
-type TenkiConfig struct {
-	CLIPath   string
-	Endpoint  string
-	Gateway   string
-	Workspace string
-	Project   string
-	Image     string
-	Snapshot  string
-	WorkRoot  string
-	CPUs      int
-	MemoryMB  int
-	DiskGB    int
 }
 
 // SuperserveConfig configures the delegated Superserve provider. The API key is
@@ -1969,12 +1941,7 @@ func baseConfig() Config {
 		Blacksmith: defaultBlacksmithConfig(),
 		NvidiaBrev: defaultNvidiaBrevConfig(),
 		Nebius:     (NebiusConfig{}).WithRuntimeDefaults(),
-		Hostinger: HostingerConfig{
-			APIURL:         "https://developers.hostinger.com",
-			HostnamePrefix: "crabbox",
-			User:           "root",
-			ReleaseAction:  "stop",
-		},
+		Hostinger:  defaultHostingerConfig(),
 		Islo: IsloConfig{
 			BaseURL:  "https://api.islo.dev",
 			Image:    isloImage,
@@ -1983,12 +1950,9 @@ func baseConfig() Config {
 			MemoryMB: 4096,
 			DiskGB:   20,
 		},
-		Wandb:     defaultWandbConfig(),
-		Freestyle: defaultFreestyleConfig(),
-		Tenki: TenkiConfig{
-			CLIPath:  "tenki",
-			WorkRoot: "/home/tenki/crabbox",
-		},
+		Wandb:             defaultWandbConfig(),
+		Freestyle:         defaultFreestyleConfig(),
+		Tenki:             defaultTenkiConfig(),
 		Tensorlake:        defaultTensorlakeConfig(),
 		Cua:               defaultCuaConfig(),
 		OpenComputer:      defaultOpenComputerConfig(),
@@ -2489,20 +2453,6 @@ type fileUnikraftCloudConfig struct {
 	MemoryMB int    `yaml:"memoryMB,omitempty"`
 }
 
-type fileHostingerConfig struct {
-	APIToken        string `yaml:"apiToken,omitempty"`
-	APIURL          string `yaml:"apiUrl,omitempty"`
-	ItemID          string `yaml:"itemId,omitempty"`
-	PaymentMethodID string `yaml:"paymentMethodId,omitempty"`
-	TemplateID      string `yaml:"templateId,omitempty"`
-	DataCenterID    string `yaml:"dataCenterId,omitempty"`
-	HostnamePrefix  string `yaml:"hostnamePrefix,omitempty"`
-	User            string `yaml:"user,omitempty"`
-	WorkRoot        string `yaml:"workRoot,omitempty"`
-	AllowPurchase   *bool  `yaml:"allowPurchase,omitempty"`
-	ReleaseAction   string `yaml:"releaseAction,omitempty"`
-}
-
 type fileIsloConfig struct {
 	BaseURL        string `yaml:"baseUrl,omitempty"`
 	Image          string `yaml:"image,omitempty"`
@@ -2513,20 +2463,6 @@ type fileIsloConfig struct {
 	MemoryMB       int    `yaml:"memoryMB,omitempty"`
 	DiskGB         int    `yaml:"diskGB,omitempty"`
 	IdlePause      *bool  `yaml:"idlePause,omitempty"`
-}
-
-type fileTenkiConfig struct {
-	CLIPath   string `yaml:"cliPath,omitempty"`
-	Endpoint  string `yaml:"endpoint,omitempty"`
-	Gateway   string `yaml:"gateway,omitempty"`
-	Workspace string `yaml:"workspace,omitempty"`
-	Project   string `yaml:"project,omitempty"`
-	Image     string `yaml:"image,omitempty"`
-	Snapshot  string `yaml:"snapshot,omitempty"`
-	WorkRoot  string `yaml:"workRoot,omitempty"`
-	CPUs      int    `yaml:"cpus,omitempty"`
-	MemoryMB  int    `yaml:"memoryMB,omitempty"`
-	DiskGB    int    `yaml:"diskGB,omitempty"`
 }
 
 type fileSuperserveConfig struct {
@@ -4318,54 +4254,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if err := applyNvidiaBrevFileConfig(cfg, file.NvidiaBrev, trusted, inputSource); err != nil {
 		return err
 	}
-	if file.Hostinger != nil {
-		if trusted && file.Hostinger.APIToken != "" {
-			cfg.Hostinger.APIToken = file.Hostinger.APIToken
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if trusted && file.Hostinger.APIURL != "" {
-			cfg.Hostinger.APIURL = file.Hostinger.APIURL
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if trusted && file.Hostinger.ItemID != "" {
-			cfg.Hostinger.ItemID = file.Hostinger.ItemID
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if trusted && file.Hostinger.PaymentMethodID != "" {
-			cfg.Hostinger.PaymentMethodID = file.Hostinger.PaymentMethodID
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if trusted && file.Hostinger.TemplateID != "" {
-			cfg.Hostinger.TemplateID = file.Hostinger.TemplateID
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if trusted && file.Hostinger.DataCenterID != "" {
-			cfg.Hostinger.DataCenterID = file.Hostinger.DataCenterID
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if file.Hostinger.HostnamePrefix != "" {
-			cfg.Hostinger.HostnamePrefix = file.Hostinger.HostnamePrefix
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if file.Hostinger.User != "" {
-			cfg.Hostinger.User = file.Hostinger.User
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-			MarkHostingerUserExplicit(cfg)
-		}
-		if file.Hostinger.WorkRoot != "" {
-			cfg.Hostinger.WorkRoot = file.Hostinger.WorkRoot
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-			MarkHostingerWorkRootExplicit(cfg)
-		}
-		if file.Hostinger.AllowPurchase != nil && (trusted || !*file.Hostinger.AllowPurchase) {
-			cfg.Hostinger.AllowPurchase = *file.Hostinger.AllowPurchase
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
-		if file.Hostinger.ReleaseAction != "" {
-			cfg.Hostinger.ReleaseAction = file.Hostinger.ReleaseAction
-			recordConfigInput(cfg, "hostinger", inputSource, true)
-		}
+	if err := applyHostingerFileConfig(cfg, file.Hostinger, trusted, inputSource); err != nil {
+		return err
 	}
+
 	{
 		applied, err := cfg.Wandb.applyFile(file.Wandb)
 		recordConfigInput(cfg, "wandb", inputSource, applied.InputAccepted)
@@ -4436,54 +4328,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Tenki != nil {
-		if file.Tenki.CLIPath != "" {
-			cfg.Tenki.CLIPath = file.Tenki.CLIPath
-			recordConfigInput(cfg, "tenki", inputSource, true)
-		}
-		if file.Tenki.Endpoint != "" {
-			cfg.Tenki.Endpoint = file.Tenki.Endpoint
-			recordConfigInput(cfg, "tenki", inputSource, true)
-			cfg.credentialProvenance.tenkiEndpoint = credentialSource
-		}
-		if file.Tenki.Gateway != "" {
-			cfg.Tenki.Gateway = file.Tenki.Gateway
-			recordConfigInput(cfg, "tenki", inputSource, true)
-			cfg.credentialProvenance.tenkiGateway = credentialSource
-		}
-		if file.Tenki.Workspace != "" {
-			cfg.Tenki.Workspace = file.Tenki.Workspace
-			recordConfigInput(cfg, "tenki", inputSource, true)
-		}
-		if file.Tenki.Project != "" {
-			cfg.Tenki.Project = file.Tenki.Project
-			recordConfigInput(cfg, "tenki", inputSource, true)
-		}
-		if file.Tenki.Image != "" {
-			cfg.Tenki.Image = file.Tenki.Image
-			recordConfigInput(cfg, "tenki", inputSource, true)
-		}
-		if file.Tenki.Snapshot != "" {
-			cfg.Tenki.Snapshot = file.Tenki.Snapshot
-			recordConfigInput(cfg, "tenki", inputSource, true)
-		}
-		if file.Tenki.WorkRoot != "" {
-			cfg.Tenki.WorkRoot = file.Tenki.WorkRoot
-			recordConfigInput(cfg, "tenki", inputSource, true)
-		}
-		if file.Tenki.CPUs > 0 {
-			cfg.Tenki.CPUs = file.Tenki.CPUs
-			recordConfigInput(cfg, "tenki", inputSource, true)
-		}
-		if file.Tenki.MemoryMB > 0 {
-			cfg.Tenki.MemoryMB = file.Tenki.MemoryMB
-			recordConfigInput(cfg, "tenki", inputSource, true)
-		}
-		if file.Tenki.DiskGB > 0 {
-			cfg.Tenki.DiskGB = file.Tenki.DiskGB
-			recordConfigInput(cfg, "tenki", inputSource, true)
-		}
+	if err := applyTenkiFileConfig(cfg, file.Tenki, inputSource, credentialSource); err != nil {
+		return err
 	}
+
 	{
 		applied, err := cfg.Tensorlake.applyFile(file.Tensorlake)
 		recordConfigInput(cfg, "tensorlake", inputSource, applied.InputAccepted)
@@ -6125,28 +5973,10 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.Hostinger.APIToken = configInputEnvString(cfg, "hostinger", cfg.Hostinger.APIToken, "CRABBOX_HOSTINGER_API_TOKEN", "HOSTINGER_API_TOKEN")
-	cfg.Hostinger.APIURL = configInputEnvString(cfg, "hostinger", cfg.Hostinger.APIURL, "CRABBOX_HOSTINGER_API_URL", "HOSTINGER_API_URL")
-	cfg.Hostinger.ItemID = configInputEnvString(cfg, "hostinger", cfg.Hostinger.ItemID, "CRABBOX_HOSTINGER_ITEM_ID")
-	cfg.Hostinger.PaymentMethodID = configInputEnvString(cfg, "hostinger", cfg.Hostinger.PaymentMethodID, "CRABBOX_HOSTINGER_PAYMENT_METHOD_ID")
-	cfg.Hostinger.TemplateID = configInputEnvString(cfg, "hostinger", cfg.Hostinger.TemplateID, "CRABBOX_HOSTINGER_TEMPLATE_ID")
-	cfg.Hostinger.DataCenterID = configInputEnvString(cfg, "hostinger", cfg.Hostinger.DataCenterID, "CRABBOX_HOSTINGER_DATA_CENTER_ID")
-	cfg.Hostinger.HostnamePrefix = configInputEnvString(cfg, "hostinger", cfg.Hostinger.HostnamePrefix, "CRABBOX_HOSTINGER_HOSTNAME_PREFIX")
-	if user := os.Getenv("CRABBOX_HOSTINGER_USER"); user != "" {
-		cfg.Hostinger.User = user
-		recordConfigInput(cfg, "hostinger", configInputEnvironment, true)
-		MarkHostingerUserExplicit(cfg)
+	if err := applyHostingerEnvironmentConfig(cfg); err != nil {
+		return err
 	}
-	if workRoot := os.Getenv("CRABBOX_HOSTINGER_WORK_ROOT"); workRoot != "" {
-		cfg.Hostinger.WorkRoot = workRoot
-		recordConfigInput(cfg, "hostinger", configInputEnvironment, true)
-		MarkHostingerWorkRootExplicit(cfg)
-	}
-	if value, ok := getenvBool("CRABBOX_HOSTINGER_ALLOW_PURCHASE"); ok {
-		cfg.Hostinger.AllowPurchase = value
-		recordConfigInput(cfg, "hostinger", configInputEnvironment, true)
-	}
-	cfg.Hostinger.ReleaseAction = configInputEnvString(cfg, "hostinger", cfg.Hostinger.ReleaseAction, "CRABBOX_HOSTINGER_RELEASE_ACTION")
+
 	{
 		applied, err := cfg.Wandb.applyEnv()
 		recordConfigInput(cfg, "wandb", configInputEnvironment, applied.InputAccepted)
@@ -6214,25 +6044,10 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.Tenki.CLIPath = configInputEnvString(cfg, "tenki", cfg.Tenki.CLIPath, "CRABBOX_TENKI_CLI", "TENKI_CLI")
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENKI_ENDPOINT", "TENKI_ENDPOINT"); ok {
-		cfg.Tenki.Endpoint = value
-		recordConfigInput(cfg, "tenki", configInputEnvironment, true)
-		cfg.credentialProvenance.tenkiEndpoint = credentialSourceEnvironment
+	if err := applyTenkiEnvironmentConfig(cfg); err != nil {
+		return err
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_TENKI_GATEWAY", "TENKI_GATEWAY"); ok {
-		cfg.Tenki.Gateway = value
-		recordConfigInput(cfg, "tenki", configInputEnvironment, true)
-		cfg.credentialProvenance.tenkiGateway = credentialSourceEnvironment
-	}
-	cfg.Tenki.Workspace = configInputEnvString(cfg, "tenki", cfg.Tenki.Workspace, "CRABBOX_TENKI_WORKSPACE")
-	cfg.Tenki.Project = configInputEnvString(cfg, "tenki", cfg.Tenki.Project, "CRABBOX_TENKI_PROJECT")
-	cfg.Tenki.Image = configInputEnvString(cfg, "tenki", cfg.Tenki.Image, "CRABBOX_TENKI_IMAGE")
-	cfg.Tenki.Snapshot = configInputEnvString(cfg, "tenki", cfg.Tenki.Snapshot, "CRABBOX_TENKI_SNAPSHOT")
-	cfg.Tenki.WorkRoot = configInputEnvString(cfg, "tenki", cfg.Tenki.WorkRoot, "CRABBOX_TENKI_WORK_ROOT")
-	cfg.Tenki.CPUs = configInputEnvInt(cfg, "tenki", cfg.Tenki.CPUs, "CRABBOX_TENKI_CPUS")
-	cfg.Tenki.MemoryMB = configInputEnvInt(cfg, "tenki", cfg.Tenki.MemoryMB, "CRABBOX_TENKI_MEMORY_MB")
-	cfg.Tenki.DiskGB = configInputEnvInt(cfg, "tenki", cfg.Tenki.DiskGB, "CRABBOX_TENKI_DISK_GB")
+
 	{
 		applied, err := cfg.Tensorlake.applyEnv()
 		recordConfigInput(cfg, "tensorlake", configInputEnvironment, applied.InputAccepted)

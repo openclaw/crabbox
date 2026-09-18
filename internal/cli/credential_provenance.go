@@ -232,10 +232,11 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "islo-base-url") {
 		provenance.isloBaseURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "tenki-endpoint") {
+	tenkiFlags := TenkiConfigFlagPresence(fs)
+	if tenkiFlags.Endpoint {
 		provenance.tenkiEndpoint = credentialSourceFlag
 	}
-	if flagWasSet(fs, "tenki-gateway") {
+	if tenkiFlags.Gateway {
 		provenance.tenkiGateway = credentialSourceFlag
 	}
 	if TensorlakeConfigFlagPresence(fs).APIURL {

@@ -18163,3 +18163,160 @@ func TestNomadBindingListSourcePresence(t *testing.T) {
 		}
 	}
 }
+
+func TestHostingerBindingDefaultsAndFileAdmission(t *testing.T) {
+	clearConfigEnv(t)
+	wantDefaults := HostingerConfig{APIURL: "https://developers.hostinger.com", HostnamePrefix: "crabbox", User: "root", ReleaseAction: "stop"}
+	if got := baseConfig().Hostinger; !reflect.DeepEqual(got, wantDefaults) {
+		t.Fatalf("Hostinger defaults=%#v", got)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, allowed := range []bool{false, true} {
+			for _, raw := range []string{"", "  ", " fixture "} {
+				cfg := baseConfig()
+				cfg.Hostinger.AllowPurchase = !allowed
+				priorSSHUser := cfg.SSHUser
+				value, originalValue := allowed, allowed
+				input := &fileHostingerConfig{APIURL: "https://hostinger.example.test", ItemID: "fixture-item", PaymentMethodID: "101", TemplateID: "202", DataCenterID: "303", User: raw, WorkRoot: raw, AllowPurchase: &value}
+				snapshot := *input
+				snapshot.AllowPurchase = new(bool)
+				*snapshot.AllowPurchase = allowed
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{Hostinger: input}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(*input, snapshot) || input.AllowPurchase != &value || value != originalValue {
+					t.Fatal("file binding mutated its input DTO or bool pointer")
+				}
+				want := wantDefaults
+				want.AllowPurchase = !allowed
+				if trusted {
+					want.APIURL, want.ItemID, want.PaymentMethodID, want.TemplateID, want.DataCenterID = input.APIURL, input.ItemID, input.PaymentMethodID, input.TemplateID, input.DataCenterID
+				}
+				if raw != "" {
+					want.User, want.WorkRoot = raw, raw
+				}
+				if trusted || !allowed {
+					want.AllowPurchase = allowed
+				}
+				if !reflect.DeepEqual(cfg.Hostinger, want) || cfg.SSHUser != priorSSHUser {
+					t.Fatalf("trusted=%t bool=%t raw=%q bindings=%#v want=%#v", trusted, allowed, raw, cfg.Hostinger, want)
+				}
+				if IsHostingerUserExplicit(&cfg) != (raw != "") || IsHostingerWorkRootExplicit(&cfg) != (raw != "") {
+					t.Fatal("file explicit-field markers changed")
+				}
+				accepted := trusted || !allowed || raw != ""
+				if (cfg.inputProvenance["hostinger"].values != 0) != accepted {
+					t.Fatal("file input acceptance changed")
+				}
+			}
+		}
+	}
+}
+
+func TestHostingerBindingEnvironmentAliasesAndMarkers(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HOSTINGER_API_URL", "https://alias.example.test")
+	for _, raw := range []string{"", "  ", " fixture "} {
+		t.Setenv("CRABBOX_HOSTINGER_API_URL", raw)
+		t.Setenv("CRABBOX_HOSTINGER_USER", raw)
+		t.Setenv("CRABBOX_HOSTINGER_WORK_ROOT", raw)
+		t.Setenv("CRABBOX_HOSTINGER_ALLOW_PURCHASE", "false")
+		cfg := baseConfig()
+		cfg.Hostinger.AllowPurchase = true
+		priorSSHUser := cfg.SSHUser
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		wantURL, wantUser := raw, raw
+		if raw == "" {
+			wantURL, wantUser = "https://alias.example.test", "root"
+		}
+		if cfg.Hostinger.APIURL != wantURL || cfg.Hostinger.User != wantUser || cfg.Hostinger.WorkRoot != raw || cfg.Hostinger.AllowPurchase || cfg.SSHUser != priorSSHUser {
+			t.Fatalf("raw=%q environment bindings=%#v", raw, cfg.Hostinger)
+		}
+		if IsHostingerUserExplicit(&cfg) != (raw != "") || IsHostingerWorkRootExplicit(&cfg) != (raw != "") || cfg.inputProvenance["hostinger"].values == 0 {
+			t.Fatal("environment markers/acceptance changed")
+		}
+	}
+}
+
+func TestTenkiBindingDefaultsAndFileValues(t *testing.T) {
+	clearConfigEnv(t)
+	wantDefaults := TenkiConfig{CLIPath: "tenki", WorkRoot: "/home/tenki/crabbox"}
+	if got := baseConfig().Tenki; !reflect.DeepEqual(got, wantDefaults) {
+		t.Fatalf("Tenki defaults=%#v", got)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"", "  ", " fixture "} {
+			for _, number := range []int{-2, 0, 3} {
+				cfg := baseConfig()
+				cfg.Tenki.CPUs, cfg.Tenki.MemoryMB, cfg.Tenki.DiskGB = 7, 8, 9
+				input := &fileTenkiConfig{CLIPath: raw, Endpoint: raw, Gateway: raw, Workspace: raw, Project: raw, Image: raw, Snapshot: raw, WorkRoot: raw, CPUs: number, MemoryMB: number, DiskGB: number}
+				before := *input
+				want := cfg.Tenki
+				if raw != "" {
+					want.CLIPath, want.Endpoint, want.Gateway, want.Workspace, want.Project, want.Image, want.Snapshot, want.WorkRoot = raw, raw, raw, raw, raw, raw, raw, raw
+				}
+				if number > 0 {
+					want.CPUs, want.MemoryMB, want.DiskGB = number, number, number
+				}
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{Tenki: input}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(cfg.Tenki, want) || !reflect.DeepEqual(*input, before) {
+					t.Fatalf("raw=%q number=%d file values or input changed", raw, number)
+				}
+				if (cfg.inputProvenance["tenki"].values != 0) != (raw != "" || number > 0) {
+					t.Fatal("file accepted-input fact changed")
+				}
+				if raw != "" {
+					wantSource := credentialSourceRepository
+					if trusted {
+						wantSource = credentialSourceTrustedFile
+					}
+					if cfg.credentialProvenance.tenkiEndpoint != wantSource || cfg.credentialProvenance.tenkiGateway != wantSource {
+						t.Fatal("accepted endpoint/gateway source changed")
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestTenkiBindingEnvironmentAliasesAndIntegers(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("TENKI_CLI", "alias-cli")
+	t.Setenv("TENKI_ENDPOINT", "alias-endpoint")
+	t.Setenv("TENKI_GATEWAY", "alias-gateway")
+	for _, raw := range []string{"", "  ", " fixture "} {
+		for _, number := range []string{"invalid", "-2", "0", "3"} {
+			t.Setenv("CRABBOX_TENKI_CLI", raw)
+			t.Setenv("CRABBOX_TENKI_ENDPOINT", raw)
+			t.Setenv("CRABBOX_TENKI_GATEWAY", raw)
+			t.Setenv("CRABBOX_TENKI_IMAGE", raw)
+			t.Setenv("CRABBOX_TENKI_SNAPSHOT", raw)
+			t.Setenv("CRABBOX_TENKI_CPUS", number)
+			t.Setenv("CRABBOX_TENKI_MEMORY_MB", number)
+			t.Setenv("CRABBOX_TENKI_DISK_GB", number)
+			cfg := baseConfig()
+			cfg.Tenki.CPUs, cfg.Tenki.MemoryMB, cfg.Tenki.DiskGB = 7, 7, 7
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			wantCLI, wantEndpoint, wantGateway := raw, raw, raw
+			if raw == "" {
+				wantCLI, wantEndpoint, wantGateway = "alias-cli", "alias-endpoint", "alias-gateway"
+			}
+			wantNumber := 7
+			if number != "invalid" {
+				wantNumber, _ = strconv.Atoi(number)
+			}
+			if cfg.Tenki.CLIPath != wantCLI || cfg.Tenki.Endpoint != wantEndpoint || cfg.Tenki.Gateway != wantGateway || cfg.Tenki.Image != raw || cfg.Tenki.Snapshot != raw || cfg.Tenki.CPUs != wantNumber || cfg.Tenki.MemoryMB != wantNumber || cfg.Tenki.DiskGB != wantNumber {
+				t.Fatalf("raw=%q number=%q environment values changed: %#v", raw, number, cfg.Tenki)
+			}
+			if cfg.credentialProvenance.tenkiEndpoint != credentialSourceEnvironment || cfg.credentialProvenance.tenkiGateway != credentialSourceEnvironment || cfg.inputProvenance["tenki"].values == 0 {
+				t.Fatal("environment source or accepted-input fact changed")
+			}
+		}
+	}
+}

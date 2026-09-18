@@ -74,6 +74,20 @@ machine-flag rejection and final validation remain in the provider wrapper.
 File/environment durations keep positive-overlay behavior, while explicit
 duration flags retain trimmed positive parsing and partial-error ordering.
 
+Hostinger's eleven-field owner is `internal/cli/config_hostinger.go`. Its API
+token remains a trusted-file/environment field without an argv binding. A
+shallow file snapshot preserves the existing conditional boolean admission
+without mutating the DTO. Accepted user/root markers and the immediate generic
+SSH-user flag effect remain in wrappers, followed by the existing exact-provider
+default application. All compiled defaults are generated scalar values.
+
+Tenki's eleven-field owner is `internal/cli/config_tenki.go`. Raw file strings,
+positive-only file integers, and tolerant environment integers retain their
+existing source rules. Accepted endpoint/gateway provenance remains in core
+wrappers, while raw flag provenance uses the generated visitor at the existing
+central post-success phase. Provider guards still precede typed application;
+image/snapshot normalization and exact-provider validation remain afterward.
+
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.

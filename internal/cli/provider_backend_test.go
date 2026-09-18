@@ -2110,3 +2110,39 @@ func TestProviderOwnedConfigShowConnectionProjection(t *testing.T) {
 		})
 	}
 }
+
+func TestTenkiBindingCentralFlagSourcePhase(t *testing.T) {
+	original := providerRegistry["aws"]
+	t.Cleanup(func() { providerRegistry["aws"] = original })
+	for _, fail := range []bool{false, true} {
+		cfg := baseConfig()
+		cfg.Provider = "aws"
+		cfg.credentialProvenance.tenkiEndpoint = credentialSourceTrustedFile
+		cfg.credentialProvenance.tenkiGateway = credentialSourceTrustedFile
+		var seenEndpoint, seenGateway credentialValueSource
+		var applyErr error
+		if fail {
+			applyErr = Exit(2, "synthetic flag rejection")
+		}
+		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(observed Config) {
+			seenEndpoint, seenGateway = observed.credentialProvenance.tenkiEndpoint, observed.credentialProvenance.tenkiGateway
+		}}
+		fs := newFlagSet("test", io.Discard)
+		fs.String("tenki-endpoint", "", "")
+		fs.String("tenki-gateway", "", "")
+		if err := fs.Parse([]string{"--tenki-endpoint=", "--tenki-gateway="}); err != nil {
+			t.Fatal(err)
+		}
+		err := applyProviderFlags(&cfg, fs, providerFlagValues{})
+		if (err != nil) != fail {
+			t.Fatalf("central flag error=%v", err)
+		}
+		want := credentialSourceFlag
+		if fail {
+			want = credentialSourceTrustedFile
+		}
+		if seenEndpoint != credentialSourceTrustedFile || seenGateway != credentialSourceTrustedFile || cfg.credentialProvenance.tenkiEndpoint != want || cfg.credentialProvenance.tenkiGateway != want {
+			t.Fatal("central marking moved before successful provider application")
+		}
+	}
+}

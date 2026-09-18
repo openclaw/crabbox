@@ -18,34 +18,8 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type tenkiFlagValues struct {
-	CLIPath   *string
-	Endpoint  *string
-	Gateway   *string
-	Workspace *string
-	Project   *string
-	Image     *string
-	Snapshot  *string
-	WorkRoot  *string
-	CPUs      *int
-	MemoryMB  *int
-	DiskGB    *int
-}
-
 func RegisterTenkiProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return tenkiFlagValues{
-		CLIPath:   fs.String("tenki-cli", defaults.Tenki.CLIPath, "Tenki CLI path"),
-		Endpoint:  fs.String("tenki-endpoint", defaults.Tenki.Endpoint, "Tenki sandbox API endpoint"),
-		Gateway:   fs.String("tenki-gateway", defaults.Tenki.Gateway, "Tenki sandbox SSH gateway WebSocket URL"),
-		Workspace: fs.String("tenki-workspace", defaults.Tenki.Workspace, "legacy Tenki workspace claim scope for existing leases"),
-		Project:   fs.String("tenki-project", defaults.Tenki.Project, "legacy Tenki project claim scope for existing leases"),
-		Image:     fs.String("tenki-image", defaults.Tenki.Image, "Tenki sandbox registry image ref"),
-		Snapshot:  fs.String("tenki-snapshot", defaults.Tenki.Snapshot, "Tenki sandbox snapshot ID"),
-		WorkRoot:  fs.String("tenki-work-root", defaults.Tenki.WorkRoot, "Tenki remote work root"),
-		CPUs:      fs.Int("tenki-cpus", defaults.Tenki.CPUs, "Tenki sandbox CPU cores"),
-		MemoryMB:  fs.Int("tenki-memory-mb", defaults.Tenki.MemoryMB, "Tenki sandbox memory in MB"),
-		DiskGB:    fs.Int("tenki-disk-gb", defaults.Tenki.DiskGB, "Tenki sandbox root disk size in GB"),
-	}
+	return core.RegisterTenkiConfigFlags(fs, defaults.Tenki)
 }
 
 func ApplyTenkiProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
@@ -60,53 +34,14 @@ func ApplyTenkiProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 			return core.Exit(2, "provider=tenki supports target=linux only")
 		}
 	}
-	v, ok := values.(tenkiFlagValues)
+	v, ok := values.(core.TenkiConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "tenki-cli") {
-		cfg.Tenki.CLIPath = *v.CLIPath
-		core.RecordProviderFlagInputs(cfg, true, "tenki")
-	}
-	if core.FlagWasSet(fs, "tenki-endpoint") {
-		cfg.Tenki.Endpoint = *v.Endpoint
-		core.RecordProviderFlagInputs(cfg, true, "tenki")
-	}
-	if core.FlagWasSet(fs, "tenki-gateway") {
-		cfg.Tenki.Gateway = *v.Gateway
-		core.RecordProviderFlagInputs(cfg, true, "tenki")
-	}
-	if core.FlagWasSet(fs, "tenki-workspace") {
-		cfg.Tenki.Workspace = *v.Workspace
-		core.RecordProviderFlagInputs(cfg, true, "tenki")
-	}
-	if core.FlagWasSet(fs, "tenki-project") {
-		cfg.Tenki.Project = *v.Project
-		core.RecordProviderFlagInputs(cfg, true, "tenki")
-	}
-	if core.FlagWasSet(fs, "tenki-image") {
-		cfg.Tenki.Image = *v.Image
-		core.RecordProviderFlagInputs(cfg, true, "tenki")
-	}
-	if core.FlagWasSet(fs, "tenki-snapshot") {
-		cfg.Tenki.Snapshot = *v.Snapshot
-		core.RecordProviderFlagInputs(cfg, true, "tenki")
-	}
-	if core.FlagWasSet(fs, "tenki-work-root") {
-		cfg.Tenki.WorkRoot = *v.WorkRoot
-		core.RecordProviderFlagInputs(cfg, true, "tenki")
-	}
-	if core.FlagWasSet(fs, "tenki-cpus") {
-		cfg.Tenki.CPUs = *v.CPUs
-		core.RecordProviderFlagInputs(cfg, true, "tenki")
-	}
-	if core.FlagWasSet(fs, "tenki-memory-mb") {
-		cfg.Tenki.MemoryMB = *v.MemoryMB
-		core.RecordProviderFlagInputs(cfg, true, "tenki")
-	}
-	if core.FlagWasSet(fs, "tenki-disk-gb") {
-		cfg.Tenki.DiskGB = *v.DiskGB
-		core.RecordProviderFlagInputs(cfg, true, "tenki")
+	applied, err := v.Apply(&cfg.Tenki, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "tenki")
+	if err != nil {
+		return err
 	}
 	normalizeTenkiProviderConfig(cfg)
 	if cfg.Provider == tenkiProvider {
