@@ -219,3 +219,12 @@ func TestNomadBindingFlagsPreservePresenceAndLastList(t *testing.T) {
 		t.Fatalf("last scalar list flag=%v", cfg.Nomad.Datacenters)
 	}
 }
+
+func TestNomadTokenVariableNameFallback(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{{"", "NOMAD_TOKEN"}, {"  ", "NOMAD_TOKEN"}, {" NOMAD_TOKEN ", "NOMAD_TOKEN"}, {" CUSTOM_NAME ", "CUSTOM_NAME"}} {
+		cfg := core.Config{Nomad: core.NomadConfig{TokenEnv: tc.raw}}
+		if got := nomadTokenEnv(cfg); got != tc.want {
+			t.Fatalf("variable name=%q want=%q", got, tc.want)
+		}
+	}
+}

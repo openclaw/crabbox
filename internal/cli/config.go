@@ -1771,7 +1771,7 @@ func EffectiveHostingerWorkRoot(cfg Config) string {
 	}
 	user := strings.TrimSpace(cfg.Hostinger.User)
 	if user == "" {
-		user = "root"
+		user = HostingerConfigDefaultUser
 	}
 	return "/home/" + user + "/crabbox"
 }

@@ -1189,11 +1189,11 @@ func tenkiConfiguredServerType(cfg core.Config) string {
 }
 
 func tenkiWorkRoot(cfg core.Config) string {
-	return core.Blank(strings.TrimSpace(cfg.Tenki.WorkRoot), "/home/tenki/crabbox")
+	return core.Blank(strings.TrimSpace(cfg.Tenki.WorkRoot), core.TenkiConfigDefaultWorkRoot)
 }
 
 func tenkiCLIPath(cfg core.Config) string {
-	return core.Blank(strings.TrimSpace(cfg.Tenki.CLIPath), "tenki")
+	return core.Blank(strings.TrimSpace(cfg.Tenki.CLIPath), core.TenkiConfigDefaultCLIPath)
 }
 
 func cleanTenkiWorkRoot(workRoot string) error {

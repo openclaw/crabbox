@@ -110,7 +110,7 @@ func validateNomadAddress(address string) error {
 func nomadTokenEnv(cfg Config) string {
 	envName := strings.TrimSpace(cfg.Nomad.TokenEnv)
 	if envName == "" {
-		return "NOMAD_TOKEN"
+		return core.NomadConfigDefaultTokenEnv
 	}
 	return envName
 }

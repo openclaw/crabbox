@@ -3637,3 +3637,15 @@ func TestVastDisplayUsesProviderUserWithoutGenericProvenance(t *testing.T) {
 		t.Fatalf("Vast display user/port/fallback=%q/%q/%v", got.SSHUser, got.SSHPort, got.SSHFallbackPorts)
 	}
 }
+
+func TestNomadDisplayVariableNameFallback(t *testing.T) {
+	for _, tc := range []struct{ raw, name, mode string }{{"", "NOMAD_TOKEN", "default"}, {"  ", "NOMAD_TOKEN", "default"}, {" NOMAD_TOKEN ", "NOMAD_TOKEN", "default"}, {" CUSTOM_NAME ", "CUSTOM_NAME", "custom"}} {
+		cfg := Config{Nomad: NomadConfig{TokenEnv: tc.raw}}
+		if got := nomadAuthEnv(cfg); got != tc.name {
+			t.Fatalf("display variable name=%q want=%q", got, tc.name)
+		}
+		if got := nomadTextAuthEnv(cfg); got != tc.mode {
+			t.Fatalf("display variable mode=%q want=%q", got, tc.mode)
+		}
+	}
+}

@@ -972,3 +972,23 @@ func TestDaytonaBindingFlagsRemainRawAndGuarded(t *testing.T) {
 		}
 	}
 }
+
+func TestDaytonaScalarFallbackValues(t *testing.T) {
+	for _, tc := range []struct{ user, gateway, root, wantUser, wantGateway, wantRoot string }{
+		{"", "", "", "daytona", "ssh.app.daytona.io", "/home/daytona/crabbox"},
+		{"  ", "  ", "  ", "daytona", "ssh.app.daytona.io", "/home/daytona/crabbox"},
+		{" alice ", " gateway.example.test ", "", "alice", "gateway.example.test", "/home/alice/crabbox"},
+		{" alice ", " gateway.example.test ", " /custom/root ", "alice", "gateway.example.test", "/custom/root"},
+	} {
+		cfg := core.Config{Daytona: core.DaytonaConfig{User: tc.user, SSHGatewayHost: tc.gateway, WorkRoot: tc.root}}
+		if daytonaUser(cfg) != tc.wantUser || daytonaSSHGatewayHost(cfg) != tc.wantGateway || daytonaWorkRoot(cfg) != tc.wantRoot {
+			t.Fatal("trimmed user/gateway or dynamic work-root fallback changed")
+		}
+	}
+	for _, tc := range []struct{ configured, want int }{{-1, 30}, {0, 30}, {1, 1}, {30, 30}, {45, 45}} {
+		cfg := core.Config{Daytona: core.DaytonaConfig{SSHAccessMinutes: tc.configured}}
+		if got := daytonaSSHAccessMinutes(cfg); got != tc.want {
+			t.Fatalf("minutes=%d got=%d want=%d", tc.configured, got, tc.want)
+		}
+	}
+}

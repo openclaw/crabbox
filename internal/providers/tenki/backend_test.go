@@ -1238,3 +1238,19 @@ func TestTenkiBindingGuardsPrecedeForeignValues(t *testing.T) {
 		}
 	}
 }
+
+func TestTenkiScalarFallbackValues(t *testing.T) {
+	for _, tc := range []struct{ cli, root, wantCLI, wantRoot string }{
+		{"", "", "tenki", "/home/tenki/crabbox"},
+		{"  ", "  ", "tenki", "/home/tenki/crabbox"},
+		{" custom-cli ", " /custom/root ", "custom-cli", "/custom/root"},
+	} {
+		cfg := core.Config{Tenki: core.TenkiConfig{CLIPath: tc.cli, WorkRoot: tc.root}}
+		if got := tenkiCLIPath(cfg); got != tc.wantCLI {
+			t.Fatalf("CLI fallback=%q want=%q", got, tc.wantCLI)
+		}
+		if got := tenkiWorkRoot(cfg); got != tc.wantRoot {
+			t.Fatalf("root fallback=%q want=%q", got, tc.wantRoot)
+		}
+	}
+}

@@ -632,7 +632,7 @@ func daytonaStateFailed(state string) bool {
 }
 
 func daytonaUser(cfg core.Config) string {
-	return core.Blank(strings.TrimSpace(cfg.Daytona.User), "daytona")
+	return core.Blank(strings.TrimSpace(cfg.Daytona.User), core.DaytonaConfigDefaultUser)
 }
 
 func daytonaWorkRoot(cfg core.Config) string {
@@ -640,12 +640,12 @@ func daytonaWorkRoot(cfg core.Config) string {
 }
 
 func daytonaSSHGatewayHost(cfg core.Config) string {
-	return core.Blank(strings.TrimSpace(cfg.Daytona.SSHGatewayHost), "ssh.app.daytona.io")
+	return core.Blank(strings.TrimSpace(cfg.Daytona.SSHGatewayHost), core.DaytonaConfigDefaultSSHGatewayHost)
 }
 
 func daytonaSSHAccessMinutes(cfg core.Config) int {
 	if cfg.Daytona.SSHAccessMinutes > 0 {
 		return cfg.Daytona.SSHAccessMinutes
 	}
-	return 30
+	return core.DaytonaConfigDefaultSSHAccessMinutes
 }

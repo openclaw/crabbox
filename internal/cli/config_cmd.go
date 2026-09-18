@@ -927,13 +927,13 @@ func tokenState(token string) string {
 func nomadAuthEnv(cfg Config) string {
 	envName := strings.TrimSpace(cfg.Nomad.TokenEnv)
 	if envName == "" {
-		return "NOMAD_TOKEN"
+		return NomadConfigDefaultTokenEnv
 	}
 	return envName
 }
 
 func nomadTextAuthEnv(cfg Config) string {
-	if nomadAuthEnv(cfg) == "NOMAD_TOKEN" {
+	if nomadAuthEnv(cfg) == NomadConfigDefaultTokenEnv {
 		return "default"
 	}
 	return "custom"
