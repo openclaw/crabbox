@@ -18,7 +18,7 @@ func applyConfigFileOverlay(config, input, report any, trusted bool, provider st
 	for i := 0; i < cfg.NumField(); i++ {
 		field := cfg.Type().Field(i)
 		switch field.Tag.Get("sources") {
-		case "user,repo,env,flag", "user,repo,env":
+		case "user,repo,env,flag", "user,repo,env", "user,repo,flag":
 		case "user,env,flag", "user,env":
 			if !trusted {
 				continue

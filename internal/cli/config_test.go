@@ -18560,3 +18560,155 @@ func TestProxmoxBindingEnvironmentValues(t *testing.T) {
 		}
 	}
 }
+
+func TestSpritesUnikraftBindingFileValues(t *testing.T) {
+	clearConfigEnv(t)
+	defaults := baseConfig()
+	if defaults.Sprites != (SpritesConfig{APIURL: "https://api.sprites.dev", WorkRoot: "/home/sprite/crabbox"}) || defaults.UnikraftCloud != (UnikraftCloudConfig{Metro: "fra"}) {
+		t.Fatal("binding defaults changed")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"", "  ", "fixture-file"} {
+			for _, memory := range []int{-1, 0, 256} {
+				cfg := baseConfig()
+				cfg.Sprites = SpritesConfig{Token: "fixture-prior", APIURL: "prior-url", WorkRoot: "prior-root"}
+				cfg.UnikraftCloud = UnikraftCloudConfig{APIKey: "fixture-prior", APIURL: "prior-url", Metro: "prior-metro", Image: "prior-image", MemoryMB: 128}
+				cfg.credentialProvenance.spritesToken = credentialSourceTrustedFile
+				file := fileConfig{Sprites: &fileSpritesConfig{APIURL: raw, WorkRoot: raw}, UnikraftCloud: &fileUnikraftCloudConfig{APIKey: raw, APIURL: raw, Metro: raw, Image: raw, MemoryMB: memory}}
+				before, err := yaml.Marshal(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantSprites, wantUnikraft := cfg.Sprites, cfg.UnikraftCloud
+				if raw != "" {
+					wantSprites.APIURL, wantSprites.WorkRoot = raw, raw
+					wantUnikraft.APIKey, wantUnikraft.APIURL, wantUnikraft.Metro, wantUnikraft.Image = raw, raw, raw, raw
+				}
+				if memory > 0 {
+					wantUnikraft.MemoryMB = memory
+				}
+				if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+					t.Fatal(err)
+				}
+				after, err := yaml.Marshal(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if cfg.Sprites != wantSprites || cfg.UnikraftCloud != wantUnikraft || !bytes.Equal(before, after) {
+					t.Fatalf("trusted=%v raw=%q memory=%d: values or DTO changed", trusted, raw, memory)
+				}
+				inputSource, source := configInputRepo, credentialSourceRepository
+				if trusted {
+					inputSource, source = configInputUser, credentialSourceTrustedFile
+				}
+				wantLedger := Config{}
+				recordConfigInput(&wantLedger, "sprites", inputSource, raw != "")
+				recordConfigInput(&wantLedger, "unikraft-cloud", inputSource, raw != "" || memory > 0)
+				for _, name := range []configInputOwner{"sprites", "unikraft-cloud"} {
+					if cfg.inputProvenance[name] != wantLedger.inputProvenance[name] {
+						t.Fatal("file source acceptance changed")
+					}
+				}
+				if raw == "" {
+					source = credentialSourceUnknown
+				}
+				p := cfg.credentialProvenance
+				if p.spritesAPIURL != source || p.unikraftCloudAPIKey != source || p.unikraftCloudAPIURL != source || p.spritesToken != credentialSourceTrustedFile {
+					t.Fatal("file provenance changed")
+				}
+			}
+		}
+	}
+	var input fileSpritesConfig
+	if err := yaml.Unmarshal([]byte("token: fixture-file\n"), &input); err != nil {
+		t.Fatal(err)
+	}
+	if input != (fileSpritesConfig{}) || reflect.TypeFor[fileSpritesConfig]().NumField() != 2 {
+		t.Fatal("Sprites token gained YAML input")
+	}
+	for _, raw := range []string{"{}", "{memoryMB: null}", "{memoryMB: invalid}"} {
+		var input fileUnikraftCloudConfig
+		err := yaml.Unmarshal([]byte(raw), &input)
+		if (err != nil) != strings.Contains(raw, "invalid") {
+			t.Fatalf("memory decoding %q: %v", raw, err)
+		}
+	}
+}
+
+func TestSpritesUnikraftBindingEnvironmentPrecedence(t *testing.T) {
+	clearConfigEnv(t)
+	for _, tc := range []struct {
+		name   configInputOwner
+		keys   []string
+		set    func(*Config, string)
+		get    func(Config) string
+		source func(*Config) *credentialValueSource
+	}{
+		{"sprites", []string{"CRABBOX_SPRITES_TOKEN", "SPRITES_TOKEN", "SPRITE_TOKEN", "SETUP_SPRITE_TOKEN"}, func(c *Config, s string) { c.Sprites.Token = s }, func(c Config) string { return c.Sprites.Token }, func(c *Config) *credentialValueSource { return &c.credentialProvenance.spritesToken }},
+		{"unikraft-cloud", []string{"CRABBOX_UNIKRAFT_CLOUD_API_KEY", "UNIKRAFT_CLOUD_API_KEY", "UKC_API_KEY", "UKC_TOKEN"}, func(c *Config, s string) { c.UnikraftCloud.APIKey = s }, func(c Config) string { return c.UnikraftCloud.APIKey }, func(c *Config) *credentialValueSource { return &c.credentialProvenance.unikraftCloudAPIKey }},
+		{"sprites", []string{"CRABBOX_SPRITES_API_URL", "SPRITES_API_URL"}, func(c *Config, s string) { c.Sprites.APIURL = s }, func(c Config) string { return c.Sprites.APIURL }, func(c *Config) *credentialValueSource { return &c.credentialProvenance.spritesAPIURL }},
+		{"sprites", []string{"CRABBOX_SPRITES_WORK_ROOT"}, func(c *Config, s string) { c.Sprites.WorkRoot = s }, func(c Config) string { return c.Sprites.WorkRoot }, nil},
+		{"unikraft-cloud", []string{"CRABBOX_UNIKRAFT_CLOUD_API_URL", "UNIKRAFT_CLOUD_API_URL"}, func(c *Config, s string) { c.UnikraftCloud.APIURL = s }, func(c Config) string { return c.UnikraftCloud.APIURL }, func(c *Config) *credentialValueSource { return &c.credentialProvenance.unikraftCloudAPIURL }},
+		{"unikraft-cloud", []string{"CRABBOX_UNIKRAFT_CLOUD_METRO", "UNIKRAFT_CLOUD_METRO", "UKC_METRO"}, func(c *Config, s string) { c.UnikraftCloud.Metro = s }, func(c Config) string { return c.UnikraftCloud.Metro }, nil},
+		{"unikraft-cloud", []string{"CRABBOX_UNIKRAFT_CLOUD_IMAGE", "UNIKRAFT_CLOUD_IMAGE"}, func(c *Config, s string) { c.UnikraftCloud.Image = s }, func(c Config) string { return c.UnikraftCloud.Image }, nil},
+	} {
+		t.Run(tc.keys[0], func(t *testing.T) {
+			for first := -2; first < len(tc.keys); first++ {
+				for _, raw := range []string{"  ", "fixture-primary", "fixture-prior"} {
+					for i, key := range tc.keys {
+						value := ""
+						if first >= 0 && i >= first {
+							value = "fixture-lower"
+						}
+						if i == first {
+							value = raw
+						}
+						t.Setenv(key, value)
+						if first == -2 {
+							if err := os.Unsetenv(key); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					cfg := baseConfig()
+					tc.set(&cfg, "fixture-prior")
+					if tc.source != nil {
+						*tc.source(&cfg) = credentialSourceTrustedFile
+					}
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+					want, wantSource := "fixture-prior", credentialSourceTrustedFile
+					if first >= 0 {
+						want, wantSource = raw, credentialSourceEnvironment
+					}
+					if tc.get(cfg) != want || (tc.source != nil && *tc.source(&cfg) != wantSource) {
+						t.Fatalf("first=%d raw=%q: value/source changed", first, raw)
+					}
+					wantLedger := Config{}
+					recordConfigInput(&wantLedger, tc.name, configInputEnvironment, first >= 0)
+					if cfg.inputProvenance[tc.name] != wantLedger.inputProvenance[tc.name] {
+						t.Fatal("environment acceptance changed")
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestUnikraftBindingMemoryHasNoEnvironmentSource(t *testing.T) {
+	clearConfigEnv(t)
+	for _, raw := range []string{"", "invalid", "-1", "0", "256"} {
+		for _, key := range []string{"CRABBOX_UNIKRAFT_CLOUD_MEMORY_MB", "UNIKRAFT_CLOUD_MEMORY_MB", "UKC_MEMORY_MB"} {
+			t.Setenv(key, raw)
+		}
+		cfg := baseConfig()
+		cfg.UnikraftCloud.MemoryMB = 128
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.UnikraftCloud.MemoryMB != 128 || cfg.inputProvenance["unikraft-cloud"].values != 0 {
+			t.Fatal("memory gained environment input")
+		}
+	}
+}

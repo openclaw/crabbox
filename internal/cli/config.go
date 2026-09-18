@@ -482,14 +482,6 @@ func NormalizeAzureBackend(backend string) (string, error) {
 	}
 }
 
-type UnikraftCloudConfig struct {
-	APIKey   string
-	APIURL   string
-	Metro    string
-	Image    string
-	MemoryMB int
-}
-
 type IsloConfig struct {
 	APIKey         string
 	BaseURL        string
@@ -636,12 +628,6 @@ type ParallelsHostConfig struct {
 	MaxVMs     int
 	hostSource credentialValueSource
 	keySource  credentialValueSource
-}
-
-type SpritesConfig struct {
-	Token    string
-	APIURL   string
-	WorkRoot string
 }
 
 type MXCConfig struct {
@@ -1896,18 +1882,16 @@ func baseConfig() Config {
 			Workdir:       "crabbox",
 			ProxyPortHTTP: 80,
 		},
-		ExeDev:       defaultExeDevConfig(),
-		Railway:      defaultRailwayConfig(),
-		FastAPICloud: defaultFastAPICloudConfig(),
-		UnikraftCloud: UnikraftCloudConfig{
-			Metro: "fra",
-		},
-		Runpod:     defaultRunpodConfig(),
-		Vast:       defaultVastConfig(),
-		Blacksmith: defaultBlacksmithConfig(),
-		NvidiaBrev: defaultNvidiaBrevConfig(),
-		Nebius:     (NebiusConfig{}).WithRuntimeDefaults(),
-		Hostinger:  defaultHostingerConfig(),
+		ExeDev:        defaultExeDevConfig(),
+		Railway:       defaultRailwayConfig(),
+		FastAPICloud:  defaultFastAPICloudConfig(),
+		UnikraftCloud: defaultUnikraftCloudConfig(),
+		Runpod:        defaultRunpodConfig(),
+		Vast:          defaultVastConfig(),
+		Blacksmith:    defaultBlacksmithConfig(),
+		NvidiaBrev:    defaultNvidiaBrevConfig(),
+		Nebius:        (NebiusConfig{}).WithRuntimeDefaults(),
+		Hostinger:     defaultHostingerConfig(),
 		Islo: IsloConfig{
 			BaseURL:  "https://api.islo.dev",
 			Image:    isloImage,
@@ -1968,10 +1952,7 @@ func baseConfig() Config {
 			User:           "crabbox",
 			StartupTimeout: 15 * time.Minute,
 		},
-		Sprites: SpritesConfig{
-			APIURL:   "https://api.sprites.dev",
-			WorkRoot: "/home/sprite/crabbox",
-		},
+		Sprites:        defaultSpritesConfig(),
 		LocalContainer: initialLocalContainerConfig(containerImage),
 		AppleContainer: initialAppleContainerConfig(containerImage),
 		AppleVM:        initialAppleVMConfig(osImageSpecs[osImage].AppleVMImage, osImageSpecs[osImage].AppleVMSHA256),
@@ -2382,14 +2363,6 @@ type fileCubeSandboxConfig struct {
 	ProxyScheme   string `yaml:"proxyScheme,omitempty"`
 }
 
-type fileUnikraftCloudConfig struct {
-	APIKey   string `yaml:"apiKey,omitempty"`
-	APIURL   string `yaml:"apiUrl,omitempty"`
-	Metro    string `yaml:"metro,omitempty"`
-	Image    string `yaml:"image,omitempty"`
-	MemoryMB int    `yaml:"memoryMB,omitempty"`
-}
-
 type fileIsloConfig struct {
 	BaseURL        string `yaml:"baseUrl,omitempty"`
 	Image          string `yaml:"image,omitempty"`
@@ -2576,11 +2549,6 @@ func positiveMinimum(current, candidate int) int {
 		return candidate
 	}
 	return min(current, candidate)
-}
-
-type fileSpritesConfig struct {
-	APIURL   string `yaml:"apiUrl,omitempty"`
-	WorkRoot string `yaml:"workRoot,omitempty"`
 }
 
 type fileMXCConfig struct {
@@ -4062,29 +4030,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.UnikraftCloud != nil {
-		if file.UnikraftCloud.APIKey != "" {
-			cfg.UnikraftCloud.APIKey = file.UnikraftCloud.APIKey
-			recordConfigInput(cfg, "unikraft-cloud", inputSource, true)
-			cfg.credentialProvenance.unikraftCloudAPIKey = credentialSource
-		}
-		if file.UnikraftCloud.APIURL != "" {
-			cfg.UnikraftCloud.APIURL = file.UnikraftCloud.APIURL
-			recordConfigInput(cfg, "unikraft-cloud", inputSource, true)
-			cfg.credentialProvenance.unikraftCloudAPIURL = credentialSource
-		}
-		if file.UnikraftCloud.Metro != "" {
-			cfg.UnikraftCloud.Metro = file.UnikraftCloud.Metro
-			recordConfigInput(cfg, "unikraft-cloud", inputSource, true)
-		}
-		if file.UnikraftCloud.Image != "" {
-			cfg.UnikraftCloud.Image = file.UnikraftCloud.Image
-			recordConfigInput(cfg, "unikraft-cloud", inputSource, true)
-		}
-		if file.UnikraftCloud.MemoryMB > 0 {
-			cfg.UnikraftCloud.MemoryMB = file.UnikraftCloud.MemoryMB
-			recordConfigInput(cfg, "unikraft-cloud", inputSource, true)
-		}
+	if err := applyUnikraftCloudFileConfig(cfg, file.UnikraftCloud, inputSource, credentialSource); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.Runpod.applyFile(file.Runpod)
@@ -4419,16 +4366,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Sprites != nil {
-		if file.Sprites.APIURL != "" {
-			cfg.Sprites.APIURL = file.Sprites.APIURL
-			recordConfigInput(cfg, "sprites", inputSource, true)
-			cfg.credentialProvenance.spritesAPIURL = credentialSource
-		}
-		if file.Sprites.WorkRoot != "" {
-			cfg.Sprites.WorkRoot = file.Sprites.WorkRoot
-			recordConfigInput(cfg, "sprites", inputSource, true)
-		}
+	if err := applySpritesFileConfig(cfg, file.Sprites, inputSource, credentialSource); err != nil {
+		return err
 	}
 	{
 		applied := applyLocalContainerFile(cfg, file.LocalContainer)
@@ -5727,18 +5666,9 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_UNIKRAFT_CLOUD_API_KEY", "UNIKRAFT_CLOUD_API_KEY", "UKC_API_KEY", "UKC_TOKEN"); ok {
-		cfg.UnikraftCloud.APIKey = value
-		recordConfigInput(cfg, "unikraft-cloud", configInputEnvironment, true)
-		cfg.credentialProvenance.unikraftCloudAPIKey = credentialSourceEnvironment
+	if err := applyUnikraftCloudEnvironmentConfig(cfg); err != nil {
+		return err
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_UNIKRAFT_CLOUD_API_URL", "UNIKRAFT_CLOUD_API_URL"); ok {
-		cfg.UnikraftCloud.APIURL = value
-		recordConfigInput(cfg, "unikraft-cloud", configInputEnvironment, true)
-		cfg.credentialProvenance.unikraftCloudAPIURL = credentialSourceEnvironment
-	}
-	cfg.UnikraftCloud.Metro = configInputEnvString(cfg, "unikraft-cloud", cfg.UnikraftCloud.Metro, "CRABBOX_UNIKRAFT_CLOUD_METRO", "UNIKRAFT_CLOUD_METRO", "UKC_METRO")
-	cfg.UnikraftCloud.Image = configInputEnvString(cfg, "unikraft-cloud", cfg.UnikraftCloud.Image, "CRABBOX_UNIKRAFT_CLOUD_IMAGE", "UNIKRAFT_CLOUD_IMAGE")
 	{
 		applied, err := cfg.Runpod.applyEnv()
 		recordConfigInput(cfg, "runpod", configInputEnvironment, applied.InputAccepted)
@@ -6091,17 +6021,9 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SPRITES_TOKEN", "SPRITES_TOKEN", "SPRITE_TOKEN", "SETUP_SPRITE_TOKEN"); ok {
-		cfg.Sprites.Token = value
-		recordConfigInput(cfg, "sprites", configInputEnvironment, true)
-		cfg.credentialProvenance.spritesToken = credentialSourceEnvironment
+	if err := applySpritesEnvironmentConfig(cfg); err != nil {
+		return err
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_SPRITES_API_URL", "SPRITES_API_URL"); ok {
-		cfg.Sprites.APIURL = value
-		recordConfigInput(cfg, "sprites", configInputEnvironment, true)
-		cfg.credentialProvenance.spritesAPIURL = credentialSourceEnvironment
-	}
-	cfg.Sprites.WorkRoot = configInputEnvString(cfg, "sprites", cfg.Sprites.WorkRoot, "CRABBOX_SPRITES_WORK_ROOT")
 	{
 		applied := applyLocalContainerEnv(cfg)
 		recordConfigInput(cfg, "local-container", configInputEnvironment, applied.InputAccepted)

@@ -222,7 +222,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if OrgoConfigFlagPresence(fs).APIBase {
 		provenance.orgoAPIBase = credentialSourceFlag
 	}
-	if flagWasSet(fs, "unikraft-cloud-url") {
+	if UnikraftCloudConfigFlagPresence(fs).APIURL {
 		provenance.unikraftCloudAPIURL = credentialSourceFlag
 	}
 	if RunpodConfigFlagPresence(fs).APIURL {
@@ -266,7 +266,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if SemaphoreConfigFlagPresence(fs).Host {
 		provenance.semaphoreHost = credentialSourceFlag
 	}
-	if flagWasSet(fs, "sprites-api-url") {
+	if SpritesConfigFlagPresence(fs).APIURL {
 		provenance.spritesAPIURL = credentialSourceFlag
 	}
 	if AzureDynamicSessionsConfigFlagPresence(fs).Endpoint {

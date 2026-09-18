@@ -31,7 +31,7 @@ type field struct {
 	fileListNonemptyRaw, flagListEmptyScalar                                                                                                                                     bool
 	fileIntNonzero                                                                                                                                                               bool
 	fileListRaw, envListPresence, flagListReplaceAppend                                                                                                                          bool
-	name, kind, key, configAlias, env, envAlias, envAlias2, flag, help, defaultExpr, flagFallbackExpr                                                                            string
+	name, kind, key, configAlias, env, envAlias, envAlias2, envAlias3, flag, help, defaultExpr, flagFallbackExpr                                                                 string
 	nonnegative, trustedFileOnly, noFile, noEnv, noFlag, fileIgnoreEmpty, reportApplied, envIntFallback, fileIntPositive, fileIntPresent, fileFloatPositive, envAliasAfterConfig bool
 }
 
@@ -180,6 +180,13 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		// general source-policy language or a default permission.
 		switch tags.Get("sources") {
 		case "user,repo,env,flag":
+		case "user,repo,flag":
+			f.noEnv = true
+			for _, tag := range []string{"env", "envAlias", "envAlias2", "envAlias3", "envAliasAfterConfig", "envInt", "envList", "envSplitBefore"} {
+				if _, ok := tags.Lookup(tag); ok {
+					return s, fmt.Errorf("%s: user,repo,flag sources require an absent %s tag", f.name, tag)
+				}
+			}
 		case "user,env,flag":
 			f.trustedFileOnly = true
 		case "env,flag":
@@ -204,13 +211,13 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			}
 		case "flag":
 			f.noFile, f.noEnv = true, true
-			for _, tag := range []string{"config", "env", "envAlias", "envAlias2"} {
+			for _, tag := range []string{"config", "env", "envAlias", "envAlias2", "envAlias3"} {
 				if _, ok := tags.Lookup(tag); ok {
 					return s, fmt.Errorf("%s: flag sources require an absent %s tag", f.name, tag)
 				}
 			}
 		default:
-			return s, fmt.Errorf("%s requires explicit sources user,repo,env,flag, user,env,flag, env,flag, flag, env, user,repo,env, or user,env", f.name)
+			return s, fmt.Errorf("%s requires explicit sources user,repo,env,flag, user,env,flag, env,flag, flag, env, user,repo,env, user,env, or user,repo,flag", f.name)
 		}
 		var bindings []struct{ label, value string }
 		if !f.noFlag {
@@ -234,6 +241,14 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			}
 			f.envAlias2 = alias2
 			bindings = append(bindings, struct{ label, value string }{"env", alias2})
+		}
+		alias3, hasAlias3 := tags.Lookup("envAlias3")
+		if hasAlias3 {
+			if !hasAlias2 {
+				return s, fmt.Errorf("%s: envAlias3 requires envAlias2", f.name)
+			}
+			f.envAlias3 = alias3
+			bindings = append(bindings, struct{ label, value string }{"env", alias3})
 		}
 		configAlias, hasConfigAlias := tags.Lookup("configAlias")
 		if hasConfigAlias {
@@ -357,6 +372,9 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		}
 		if hasAlias2 && (f.kind != "string" || f.noEnv) {
 			return s, fmt.Errorf("%s: envAlias2 requires an environment-admitted string field", f.name)
+		}
+		if hasAlias3 && (f.kind != "string" || f.noEnv) {
+			return s, fmt.Errorf("%s: envAlias3 requires an environment-admitted string field", f.name)
 		}
 		if value, ok := tags.Lookup("envAliasAfterConfig"); ok {
 			if value != "true" || f.kind != "string" || f.noEnv || !hasAlias || hasAlias2 {

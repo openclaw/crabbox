@@ -16,7 +16,8 @@ func applyConfigEnvironment(config, report any, start, end int) error {
 	position := 0
 	for i := 0; i < cfg.NumField(); i++ {
 		field := cfg.Type().Field(i)
-		if field.Tag.Get("sources") == "runtime" {
+		sources := field.Tag.Get("sources")
+		if sources == "runtime" {
 			continue
 		}
 		selected := position >= start && position < end
@@ -24,7 +25,7 @@ func applyConfigEnvironment(config, report any, start, end int) error {
 		if !selected {
 			continue
 		}
-		if field.Tag.Get("sources") == "flag" {
+		if sources == "flag" || sources == "user,repo,flag" {
 			continue
 		}
 		accepted, err := applyConfigEnvironmentField(cfg.Field(i), field.Tag)
@@ -58,6 +59,9 @@ func applyConfigEnvironmentField(dst reflect.Value, tags reflect.StructTag) (boo
 		}
 		if second := tags.Get("envAlias2"); second != "" {
 			names = append(names, second)
+		}
+		if third := tags.Get("envAlias3"); third != "" {
+			names = append(names, third)
 		}
 		value, accepted := firstNonEmptyEnv(names...)
 		if accepted {

@@ -3850,3 +3850,169 @@ func applyLeaseDurationFixtureSource(t *testing.T) string {
 	t.Helper()
 	return sourceFixtureFunctions(t, "config.go", "ApplyLeaseDuration")
 }
+
+func TestSchemaThirdEnvAliasFailsClosed(t *testing.T) {
+	const chain = `envAlias:"FIRST" envAlias2:"SECOND" envAlias3:"THIRD"`
+	valid := strings.Replace(sample, `help:"Name"`, `help:"Name" `+chain, 1)
+	if _, err := parseSchema([]byte(valid), "PilotConfig", "pilot"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, old, replacement, want string }{
+		{"missing first", `envAlias:"FIRST" `, "", "requires envAlias"},
+		{"missing second", `envAlias2:"SECOND" `, "", "envAlias3 requires envAlias2"},
+		{"empty third", `envAlias3:"THIRD"`, `envAlias3:""`, "invalid env binding"},
+		{"whitespace third", `envAlias3:"THIRD"`, `envAlias3:" THIRD"`, "invalid env binding"},
+		{"comma third", `envAlias3:"THIRD"`, `envAlias3:"ONE,TWO"`, "invalid env binding"},
+		{"primary collision", `envAlias3:"THIRD"`, `envAlias3:"PILOT_NAME"`, "duplicate env binding"},
+		{"first collision", `envAlias3:"THIRD"`, `envAlias3:"FIRST"`, "duplicate env binding"},
+		{"second collision", `envAlias3:"THIRD"`, `envAlias3:"SECOND"`, "duplicate env binding"},
+		{"later field collision", `envAlias3:"THIRD"`, `envAlias3:"PILOT_COUNT"`, "duplicate env binding"},
+		{"after config", `help:"Name"`, `help:"Name" envAliasAfterConfig:"true"`, "exactly one envAlias"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseSchema([]byte(strings.Replace(valid, tc.old, tc.replacement, 1)), "PilotConfig", "pilot")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v want=%q", err, tc.want)
+			}
+		})
+	}
+	for _, kind := range []string{"bool", "int", "int64", "float64", "[]string", "*bool"} {
+		source := strings.Replace(valid, "Name string", "Name "+kind, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("third alias accepted on %s", kind)
+		}
+	}
+	for _, source := range []string{
+		"package cli\ntype PilotConfig struct { Name string `sources:\"flag\" flag:\"name\" help:\"Name\" " + chain + "` }",
+		"package cli\ntype PilotConfig struct { Name string `sources:\"runtime\" " + chain + "` }",
+	} {
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+			t.Fatal("third alias accepted without environment admission")
+		}
+	}
+	first := " First string `sources:\"env\" env:\"PRIMARY\" " + chain + "`\n"
+	for _, binding := range []string{`env:"THIRD"`, `env:"OTHER" envAlias:"THIRD"`, `env:"OTHER" envAlias:"ALIAS" envAlias2:"THIRD"`, `env:"OTHER" envAlias:"ALIAS" envAlias2:"ANOTHER" envAlias3:"THIRD"`} {
+		second := " Other string `sources:\"env\" " + binding + "`\n"
+		for _, fields := range []string{first + second, second + first} {
+			if _, err := parseSchema([]byte("package cli\ntype PilotConfig struct {\n"+fields+"}"), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "duplicate env binding") {
+				t.Fatalf("third alias cross-field collision: %v", err)
+			}
+		}
+	}
+}
+
+func TestGenerateThirdEnvAlias(t *testing.T) {
+	source := strings.Replace(appliedSample, `envAlias:"PILOT_INPUT_ALIAS"`, `envAlias:"PILOT_INPUT_ALIAS" envAlias2:"PILOT_INPUT_SECOND" envAlias3:"PILOT_INPUT_THIRD"`, 1)
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatal("third alias output is not deterministic")
+	}
+	runAppliedFixture(t, source, output, `
+func TestThirdFallback(t *testing.T) {
+ for _, tc := range []struct{primary, first, second, third, want string; accepted bool}{
+  {"", "", "", "", "prior", false},
+  {"", "", "", "fixture-third", "fixture-third", true},
+  {"", "", "fixture-second", "fixture-third", "fixture-second", true},
+  {"", "fixture-first", "fixture-second", "fixture-third", "fixture-first", true},
+  {"fixture-primary", "fixture-first", "fixture-second", "fixture-third", "fixture-primary", true},
+  {"  ", "fixture-first", "fixture-second", "fixture-third", "  ", true},
+  {"", "  ", "fixture-second", "fixture-third", "  ", true},
+  {"", "", "  ", "fixture-third", "  ", true},
+  {"", "", "", "  ", "  ", true},
+  {"prior", "", "", "", "prior", true},
+ } {
+  cfg := PilotConfig{Input: "prior"}
+  input = map[string]string{"PILOT_INPUT": tc.primary, "PILOT_INPUT_ALIAS": tc.first, "PILOT_INPUT_SECOND": tc.second, "PILOT_INPUT_THIRD": tc.third}
+  selections = map[string]int{}; boolAccepted = false; intError = false
+  got, err := cfg.applyEnv()
+  if err != nil || cfg.Input != tc.want || got.Input != tc.accepted || got.InputAccepted != tc.accepted || selections["PILOT_INPUT"] != 1 { t.Fatalf("cfg=%+v report=%+v err=%v", cfg, got, err) }
+ }
+}
+`)
+}
+
+const fileFlagNoEnvSample = "package cli\ntype PilotConfig struct {\n" +
+	" First string `sources:\"env\" env:\"PILOT_FIRST\" reportApplied:\"true\"`\n" +
+	" Memory int `sources:\"user,repo,flag\" config:\"memory\" flag:\"memory\" help:\"Memory\" nonnegative:\"true\" fileInt:\"positive\" fileStorage:\"value\" default:\"0\"`\n" +
+	" Last string `sources:\"env\" env:\"PILOT_LAST\" reportApplied:\"true\" envSplitBefore:\"true\"`\n}"
+
+func TestSchemaFileFlagWithoutEnvironment(t *testing.T) {
+	s, err := parseSchema([]byte(fileFlagNoEnvSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := s.fields[1]
+	if !f.noEnv || f.noFile || f.noFlag || f.trustedFileOnly || !f.fileIntPositive || !f.fileStorageValue {
+		t.Fatalf("incorrect file/flag source facts: %+v", f)
+	}
+	for _, tag := range []string{`env:"MEMORY"`, `env:""`, `envAlias:"ALIAS"`, `envAlias2:"ALIAS"`, `envAlias3:"ALIAS"`, `envAliasAfterConfig:"true"`, `envInt:"fallback"`, `envList:"presence"`, `envSplitBefore:"true"`} {
+		source := strings.Replace(fileFlagNoEnvSample, `help:"Memory"`, `help:"Memory" `+tag, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "absent ") {
+			t.Fatalf("accepted forbidden no-env tag %s: %v", tag, err)
+		}
+	}
+	for _, grant := range []string{"repo,user,flag", "user,flag", "repo,flag", "user,repo", "user,repo,flag,env"} {
+		source := strings.Replace(fileFlagNoEnvSample, `sources:"user,repo,flag"`, `sources:"`+grant+`"`, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("accepted unapproved source combination %q", grant)
+		}
+	}
+	noPrefix := strings.Replace(fileFlagNoEnvSample, " First string `sources:\"env\" env:\"PILOT_FIRST\" reportApplied:\"true\"`\n", "", 1)
+	if _, err := parseSchema([]byte(noPrefix), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "envSplitBefore") {
+		t.Fatalf("file/flag-only field created an environment prefix: %v", err)
+	}
+}
+
+func TestGenerateFileFlagWithoutEnvironment(t *testing.T) {
+	s, err := parseSchema([]byte(fileFlagNoEnvSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatal("file/flag output is not deterministic")
+	}
+	typecheckGenerated(t, fileFlagNoEnvSample, output)
+	runScalarFixture(t, fileFlagNoEnvSample, output, `package cli
+import ("flag"; "fmt"; "reflect"; "testing")
+func Exit(_ int, format string, args ...any) error { return fmt.Errorf(format, args...) }
+func flagWasSet(fs *flag.FlagSet, name string) bool { found:=false; fs.Visit(func(f *flag.Flag){ if f.Name==name { found=true } }); return found }
+func firstNonEmptyEnv(names ...string)(string,bool) { if names[0]=="PILOT_FIRST" { return "first",true }; if names[0]=="PILOT_LAST" { return "last",true }; panic("unexpected environment selection") }
+func getenvNonNegativeIntAccepted(string,int)(int,bool,error) { panic("file/flag-only integer attempted environment selection") }
+func TestFileFlagContract(t *testing.T) {
+ if defaultPilotConfig().Memory != 0 { t.Fatal("zero default changed") }
+ field, ok := reflect.TypeOf(filePilotConfig{}).FieldByName("Memory")
+ if !ok || field.Type.Kind()!=reflect.Int || field.Tag.Get("yaml")!="memory,omitempty" || reflect.TypeOf(filePilotConfig{}).NumField()!=1 { t.Fatal("value DTO shape changed") }
+ for _, trusted := range []bool{false,true} { for _, value := range []int{-2,0,9} {
+  cfg:=PilotConfig{Memory:7}; file:=filePilotConfig{Memory:value}; var report PilotConfigApplied
+  if err:=applyConfigFileOverlay(&cfg,&file,&report,trusted,"pilot"); err!=nil { t.Fatal(err) }
+  want:=7; if value>0 { want=value }
+  if cfg.Memory!=want || report.InputAccepted!=(value>0) || file.Memory!=value { t.Fatal("file admission/positive/input contract changed") }
+ } }
+ cfg:=PilotConfig{Memory:7}; got,err:=cfg.applyEnvPrefix()
+ if err!=nil || cfg.First!="first" || cfg.Last!="" || cfg.Memory!=7 || got!=(PilotConfigApplied{InputAccepted:true,First:true}) { t.Fatal("prefix position or environment skip changed") }
+ got,err=cfg.applyEnvSuffix()
+ if err!=nil || cfg.Last!="last" || cfg.Memory!=7 || got!=(PilotConfigApplied{InputAccepted:true,Last:true}) { t.Fatal("suffix position changed") }
+ for _, raw := range []string{"0","-2","9"} {
+  fs:=flag.NewFlagSet("test",flag.ContinueOnError); values:=RegisterPilotConfigFlags(fs,PilotConfig{Memory:17})
+  cfg:=PilotConfig{Memory:23}; got,err:=values.Apply(&cfg,fs)
+  if err!=nil || got.InputAccepted || cfg.Memory!=23 || fs.Lookup("memory").DefValue!="17" { t.Fatal("unvisited flag/default snapshot changed") }
+  if err:=fs.Parse([]string{"--memory="+raw}); err!=nil { t.Fatal(err) }
+  got,err=values.Apply(&cfg,fs); want:=9; if raw=="0" {want=0}; if raw=="-2" {want=-2}
+  if err!=nil || !got.InputAccepted || cfg.Memory!=want { t.Fatal("signed flag assignment changed") }
+ }
+}
+`)
+}

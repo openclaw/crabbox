@@ -105,6 +105,23 @@ root. Its non-fallible flag assignments precede the existing visited TemplateID
 projection, which depends only on that ID; accepted user/root flags alone mirror
 to generic connection fields. No provider-selection guard or validation is added.
 
+Sprites declares all three inputs in `internal/cli/config_sprites.go`. Its token
+keeps the four existing environment names in order and gains no file or argv
+source. URL/root file values ignore raw empty input, and configured defaults stay
+scalar. Exact-provider class/type/target guards and option validation still run
+before typed flag application, including before the wrong-type no-op. Accepted
+token/URL facts feed the existing provenance wrappers; raw URL flag presence stays
+in the central post-success phase.
+
+Unikraft Cloud declares all five inputs in `internal/cli/config_unikraft_cloud.go`.
+Its key retains all four environment names and existing user/repository file
+admission without an argv binding. Metro and the other strings keep their shorter
+alias chains and raw nonempty precedence. MemoryMB uses `user,repo,flag`: positive
+file values apply, visited flag values retain zero/negative integers, and there
+is no environment binding. The alias-aware selected-provider sizing guard still
+precedes typed application; API-key/URL provenance retains its existing owners.
+Metro-derived endpoints and runtime image/memory fallback policy remain separate.
+
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
@@ -601,6 +618,11 @@ selection and native Container/Machine behavior remain outside this owner.
    environment/flag-only field uses `sources:"env,flag"` and must omit the
    `config` tag entirely, including an empty tag. A CLI-only field uses
    `sources:"flag"` and must omit `config`, `env`, and `envAlias` tags entirely.
+   An existing file/flag binding without environment input uses exactly
+   `sources:"user,repo,flag"`. It retains existing file predicates and visited-flag
+   rules, and must omit `env`, all environment aliases, `envAliasAfterConfig`,
+   `envInt`, `envList`, and `envSplitBefore` tags, even empty ones. It still
+   occupies its schema position when environment application is split.
    An existing environment-only string uses `sources:"env"`: require its
    primary `env`, allow an existing alias, and omit `config`, `flag`, `help`, and
    `default` tags entirely. This mode retains a zero default and exposes no YAML
@@ -659,19 +681,20 @@ selection and native Container/Machine behavior remain outside this owner.
    environment input. Float default validation remains separate; `fileInt` and
    the integer-only nonnegative policy do not become float policies.
    A string field may name an existing fallback environment variable with
-   `envAlias`, and a second with `envAlias2` only when the first is present.
+   `envAlias`, a second with `envAlias2` only when the first is present,
+   and a third with `envAlias3` only when both earlier aliases are present.
    All names share collision checks; empty aliases and fields without environment
    admission are rejected. Integer fields permit exactly one `envAlias` only with
    `envInt:"fallback"`, using nested `getenvInt` calls so a malformed primary falls
    back to the alias and then the prior value; parsed zero and negatives still win.
    Strict integers and other non-string types reject aliases, and `envAlias2`
-   remains string-only. For string aliases, the primary value wins,
-   then the first alias, then the second, then the prior value. Empty values
+   and `envAlias3` remain string-only. For string aliases, the primary value wins,
+   then the first alias, then the second, then the third, then the prior value. Empty values
    fall through without trimming nonempty values. No arbitrary alias list or
    custom parser is accepted.
    An existing single-alias string binding whose configured value outranks the
    alias can declare `envAliasAfterConfig:"true"`. It requires environment
-   admission and exactly one alias, with no `envAlias2`. A raw nonempty primary
+   admission and exactly one alias, with no `envAlias2` or `envAlias3`. A raw nonempty primary
    assigns first; otherwise the alias assigns only when the current config value
    is exactly empty. Applied reports follow those accepted branches, not value
    changes. This fixed rule performs no trimming and is not a general precedence

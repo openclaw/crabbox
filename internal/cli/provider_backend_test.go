@@ -2136,50 +2136,64 @@ func TestConfigBindingCentralFlagSourcePhase(t *testing.T) {
 				return [2]*credentialValueSource{&cfg.credentialProvenance.proxmoxAPIURL, &cfg.credentialProvenance.proxmoxInsecureTLS}
 			},
 		},
+		{
+			name: "sprites-unikraft", flags: [2]string{"sprites-api-url", "unikraft-cloud-url"},
+			sources: func(cfg *Config) [2]*credentialValueSource {
+				return [2]*credentialValueSource{&cfg.credentialProvenance.spritesAPIURL, &cfg.credentialProvenance.unikraftCloudAPIURL}
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			original := providerRegistry["aws"]
 			t.Cleanup(func() { providerRegistry["aws"] = original })
 			for _, fail := range []bool{false, true} {
-				cfg := baseConfig()
-				cfg.Provider = "aws"
-				for _, source := range tc.sources(&cfg) {
-					*source = credentialSourceTrustedFile
-				}
-				var seen [2]credentialValueSource
-				var applyErr error
-				if fail {
-					applyErr = Exit(2, "synthetic flag rejection")
-				}
-				providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(observed Config) {
-					for i, source := range tc.sources(&observed) {
-						seen[i] = *source
+				for _, visited := range [][2]bool{{false, false}, {true, false}, {false, true}, {true, true}} {
+					cfg := baseConfig()
+					cfg.Provider = "aws"
+					for _, source := range tc.sources(&cfg) {
+						*source = credentialSourceTrustedFile
 					}
-				}}
-				fs := newFlagSet("test", io.Discard)
-				fs.String(tc.flags[0], "", "")
-				args := []string{"--" + tc.flags[0] + "=", "--" + tc.flags[1] + "="}
-				if tc.secondBool {
-					fs.Bool(tc.flags[1], true, "")
-					args[1] += "false"
-				} else {
-					fs.String(tc.flags[1], "", "")
-				}
-				if err := fs.Parse(args); err != nil {
-					t.Fatal(err)
-				}
-				err := applyProviderFlags(&cfg, fs, providerFlagValues{})
-				if (err != nil) != fail {
-					t.Fatalf("fail=%t central flag error=%v", fail, err)
-				}
-				want := credentialSourceFlag
-				if fail {
-					want = credentialSourceTrustedFile
-				}
-				for i, source := range tc.sources(&cfg) {
-					if seen[i] != credentialSourceTrustedFile || *source != want {
-						t.Fatalf("fail=%t flag=%s central marking moved from its post-success phase", fail, tc.flags[i])
+					var seen [2]credentialValueSource
+					var applyErr error
+					if fail {
+						applyErr = Exit(2, "synthetic flag rejection")
+					}
+					providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(observed Config) {
+						for i, source := range tc.sources(&observed) {
+							seen[i] = *source
+						}
+					}}
+					fs := newFlagSet("test", io.Discard)
+					fs.String(tc.flags[0], "", "")
+					values := [2]string{"", ""}
+					if tc.secondBool {
+						fs.Bool(tc.flags[1], true, "")
+						values[1] = "false"
+					} else {
+						fs.String(tc.flags[1], "", "")
+					}
+					var args []string
+					for i, visit := range visited {
+						if visit {
+							args = append(args, "--"+tc.flags[i]+"="+values[i])
+						}
+					}
+					if err := fs.Parse(args); err != nil {
+						t.Fatal(err)
+					}
+					err := applyProviderFlags(&cfg, fs, providerFlagValues{})
+					if (err != nil) != fail {
+						t.Fatalf("fail=%t visited=%v central flag error=%v", fail, visited, err)
+					}
+					for i, source := range tc.sources(&cfg) {
+						want := credentialSourceTrustedFile
+						if visited[i] && !fail {
+							want = credentialSourceFlag
+						}
+						if seen[i] != credentialSourceTrustedFile || *source != want {
+							t.Fatalf("fail=%t visited=%v flag=%s central marking moved from its post-success phase", fail, visited, tc.flags[i])
+						}
 					}
 				}
 			}
