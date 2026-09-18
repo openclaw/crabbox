@@ -32,12 +32,7 @@ func (s *replaceAppendListFlag) Set(value string) error {
 		s.values = nil
 		s.set = true
 	}
-	for _, item := range strings.Split(value, ",") {
-		item = strings.TrimSpace(item)
-		if item != "" {
-			s.values = append(s.values, item)
-		}
-	}
+	s.values = append(s.values, NormalizeList(strings.Split(value, ","))...)
 	return nil
 }
 

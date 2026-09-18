@@ -691,7 +691,7 @@ func getenv(string, string) string { panic("stub") }
 func getenvFloat(string, float64) float64 { panic("stub") }
 func getenvNonNegativeInt(string, int) (int, error) { panic("stub") }
 func getenvBool(string) (bool, bool) { panic("stub") }
-func normalizeList([]string) []string { panic("stub") }
+func NormalizeList([]string) []string { panic("stub") }
 func splitCommaList(string) []string { panic("stub") }
 `
 	for name, stub := range map[string]string{
@@ -2431,7 +2431,7 @@ func TestGenerateSourceSpecificLists(t *testing.T) {
 		t.Fatal(err)
 	}
 	getters := ""
-	for _, name := range []string{"getenvList", "parseEnvListValue", "splitCommaList", "normalizeList"} {
+	for _, name := range []string{"getenvList", "parseEnvListValue", "splitCommaList", "NormalizeList"} {
 		start := strings.Index(string(coreSource), "func "+name+"(")
 		if start < 0 {
 			t.Fatalf("missing core helper%s", name)
@@ -2516,7 +2516,7 @@ func TestGenerateCSVListSourceContract(t *testing.T) {
 	}
 	typecheckGenerated(t, input+"\nfunc splitCSV(string) []string { panic(\"stub\") }", output)
 	helpers := ""
-	for _, item := range []struct{ file, name string }{{"config.go", "splitCommaList"}, {"config.go", "normalizeList"}, {"config.go", "parseEnvListValue"}, {"egress.go", "splitCSV"}} {
+	for _, item := range []struct{ file, name string }{{"config.go", "splitCommaList"}, {"config.go", "NormalizeList"}, {"config.go", "parseEnvListValue"}, {"egress.go", "splitCSV"}} {
 		source, err := os.ReadFile("../../internal/cli/" + item.file)
 		if err != nil {
 			t.Fatal(err)
@@ -2868,7 +2868,7 @@ func TestGenerateNonemptyRawAndEmptyScalarLists(t *testing.T) {
 		t.Fatal(err)
 	}
 	getters := ""
-	for _, name := range []string{"splitCommaList", "normalizeList"} {
+	for _, name := range []string{"splitCommaList", "NormalizeList"} {
 		start := strings.Index(string(coreSource), "func "+name+"(")
 		if start < 0 {
 			t.Fatalf("missing %s", name)
@@ -3083,7 +3083,7 @@ func TestGenerateNoFlagListSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	getters := ""
-	for _, name := range []string{"splitCommaList", "normalizeList"} {
+	for _, name := range []string{"splitCommaList", "NormalizeList"} {
 		start := strings.Index(string(coreSource), "func "+name+"(")
 		if start < 0 {
 			t.Fatalf("missing%s", name)
@@ -3390,7 +3390,7 @@ func TestGenerateRawValueAndAppendTrimmedLists(t *testing.T) {
 			t.Fatalf("missing list binding %q", want)
 		}
 	}
-	for _, bad := range []string{"*file.Items", "normalizeList(file.Items)", "newReplaceAppendListFlag", `fs.String("item"`} {
+	for _, bad := range []string{"*file.Items", "NormalizeList(file.Items)", "newReplaceAppendListFlag", `fs.String("item"`} {
 		if strings.Contains(text, bad) {
 			t.Fatalf("unexpected list binding %q", bad)
 		}
@@ -3402,7 +3402,7 @@ func TestGenerateRawValueAndAppendTrimmedLists(t *testing.T) {
 		t.Fatal(err)
 	}
 	getters := ""
-	for _, name := range []string{"splitCommaList", "normalizeList"} {
+	for _, name := range []string{"splitCommaList", "NormalizeList"} {
 		start := strings.Index(string(coreSource), "func "+name+"(")
 		if start < 0 {
 			t.Fatalf("missing core helper %s", name)
@@ -3774,7 +3774,7 @@ func TestEnvAcceptance(t *testing.T){
 
 func acceptanceCoreFunctions(t *testing.T) string {
 	t.Helper()
-	return configFixtureFunctions(t, "lookupEnvInteger", "lookupEnvFloat", "getenvNonNegativeIntAccepted", "getenvBool", "getenvList", "parseEnvListValue", "splitCommaList", "normalizeList", "applyLeaseDuration") + applyLeaseDurationFixtureSource(t) + sourceFixtureFunctions(t, "egress.go", "splitCSV")
+	return configFixtureFunctions(t, "lookupEnvInteger", "lookupEnvFloat", "getenvNonNegativeIntAccepted", "getenvBool", "getenvList", "parseEnvListValue", "splitCommaList", "NormalizeList", "applyLeaseDuration") + applyLeaseDurationFixtureSource(t) + sourceFixtureFunctions(t, "egress.go", "splitCSV")
 }
 
 // Existing behavior fixtures supply their specialized helpers; fill only the
@@ -3794,7 +3794,7 @@ func acceptanceFixtureSource(t *testing.T, existing, generated string) string {
 		{"config.go", "parseEnvListValue"},
 		{"egress.go", "splitCSV"},
 		{"config.go", "splitCommaList"},
-		{"config.go", "normalizeList"},
+		{"config.go", "NormalizeList"},
 		{"config.go", "applyLeaseDuration"},
 		{"flags.go", "flagWasSet"},
 		{"config_cmd.go", "blank"},

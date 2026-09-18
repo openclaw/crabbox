@@ -555,32 +555,6 @@ type CloudflareDynamicWorkersConfig struct {
 	repositoryTimeoutSecsCapActive bool
 }
 
-type XCPNgConfig struct {
-	APIURL       string
-	Username     string
-	Password     string
-	Template     string
-	TemplateUUID string
-	SR           string
-	SRUUID       string
-	Network      string
-	NetworkUUID  string
-	Host         string
-	User         string
-	WorkRoot     string
-	InsecureTLS  bool
-}
-
-// A nonempty selector replaces the whole layer's name/UUID pair; two empty inputs inherit it.
-func applyXCPNgNameUUIDPair(dstName, dstUUID *string, incomingName, incomingUUID string) bool {
-	if incomingName == "" && incomingUUID == "" {
-		return false
-	}
-	*dstName = incomingName
-	*dstUUID = incomingUUID
-	return true
-}
-
 type ParallelsConfig struct {
 	Template         string
 	Source           string
@@ -1943,10 +1917,7 @@ func baseConfig() Config {
 		},
 		Proxmox:     initialProxmoxConfig(),
 		Firecracker: initialFirecrackerConfig(),
-		XCPNg: XCPNgConfig{
-			User:     "crabbox",
-			WorkRoot: defaultPOSIXWorkRoot,
-		},
+		XCPNg:       initialXCPNgConfig(),
 		Parallels: ParallelsConfig{
 			CloneMode:      "linked",
 			User:           "crabbox",
@@ -2206,22 +2177,6 @@ type fileGCPConfig struct {
 	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
 	RootGB         int64    `yaml:"rootGB,omitempty"`
 	ServiceAccount string   `yaml:"serviceAccount,omitempty"`
-}
-
-type fileXCPNgConfig struct {
-	APIURL       string `yaml:"apiUrl,omitempty"`
-	Username     string `yaml:"username,omitempty"`
-	Password     string `yaml:"password,omitempty"`
-	Template     string `yaml:"template,omitempty"`
-	TemplateUUID string `yaml:"templateUuid,omitempty"`
-	SR           string `yaml:"sr,omitempty"`
-	SRUUID       string `yaml:"srUuid,omitempty"`
-	Network      string `yaml:"network,omitempty"`
-	NetworkUUID  string `yaml:"networkUuid,omitempty"`
-	Host         string `yaml:"host,omitempty"`
-	User         string `yaml:"user,omitempty"`
-	WorkRoot     string `yaml:"workRoot,omitempty"`
-	InsecureTLS  *bool  `yaml:"insecureTLS,omitempty"`
 }
 
 type fileParallelsConfig struct {
@@ -3094,7 +3049,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.BrokerAutoWebVNC, file.Broker.AutoWebVNC))
 		if trusted && len(file.Broker.LoginRedirectOrigins) > 0 {
-			cfg.BrokerLoginRedirectOrigins = normalizeList(file.Broker.LoginRedirectOrigins)
+			cfg.BrokerLoginRedirectOrigins = NormalizeList(file.Broker.LoginRedirectOrigins)
 			recordConfigInput(cfg, configInputGeneric, inputSource, true)
 		}
 		if file.Broker.AdminToken != "" {
@@ -3457,40 +3412,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.XCPNg != nil {
-		// Project config is repository-controlled. Do not let it redirect
-		// or replace inherited user or environment XAPI credentials.
-		if trusted && file.XCPNg.APIURL != "" {
-			cfg.XCPNg.APIURL = file.XCPNg.APIURL
-			recordConfigInput(cfg, "xcp-ng", inputSource, true)
-		}
-		if trusted && file.XCPNg.Username != "" {
-			cfg.XCPNg.Username = file.XCPNg.Username
-			recordConfigInput(cfg, "xcp-ng", inputSource, true)
-		}
-		if trusted && file.XCPNg.Password != "" {
-			cfg.XCPNg.Password = file.XCPNg.Password
-			recordConfigInput(cfg, "xcp-ng", inputSource, true)
-		}
-		recordConfigInput(cfg, "xcp-ng", inputSource, applyXCPNgNameUUIDPair(&cfg.XCPNg.Template, &cfg.XCPNg.TemplateUUID, file.XCPNg.Template, file.XCPNg.TemplateUUID))
-		recordConfigInput(cfg, "xcp-ng", inputSource, applyXCPNgNameUUIDPair(&cfg.XCPNg.SR, &cfg.XCPNg.SRUUID, file.XCPNg.SR, file.XCPNg.SRUUID))
-		recordConfigInput(cfg, "xcp-ng", inputSource, applyXCPNgNameUUIDPair(&cfg.XCPNg.Network, &cfg.XCPNg.NetworkUUID, file.XCPNg.Network, file.XCPNg.NetworkUUID))
-		if file.XCPNg.Host != "" {
-			cfg.XCPNg.Host = file.XCPNg.Host
-			recordConfigInput(cfg, "xcp-ng", inputSource, true)
-		}
-		if file.XCPNg.User != "" {
-			cfg.XCPNg.User = file.XCPNg.User
-			recordConfigInput(cfg, "xcp-ng", inputSource, true)
-		}
-		if file.XCPNg.WorkRoot != "" {
-			cfg.XCPNg.WorkRoot = file.XCPNg.WorkRoot
-			recordConfigInput(cfg, "xcp-ng", inputSource, true)
-		}
-		if trusted && file.XCPNg.InsecureTLS != nil {
-			cfg.XCPNg.InsecureTLS = *file.XCPNg.InsecureTLS
-			recordConfigInput(cfg, "xcp-ng", inputSource, true)
-		}
+	if err := applyXCPNgFileConfig(cfg, file.XCPNg, trusted, inputSource); err != nil {
+		return err
 	}
 	if file.Parallels != nil {
 		if file.Parallels.Template != "" {
@@ -3597,7 +3520,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			MarkSSHPortExplicit(cfg)
 		}
 		if file.SSH.FallbackPorts != nil {
-			cfg.SSHFallbackPorts = normalizeList(*file.SSH.FallbackPorts)
+			cfg.SSHFallbackPorts = NormalizeList(*file.SSH.FallbackPorts)
 			recordConfigInput(cfg, configInputGeneric, inputSource, true)
 			cfg.sshFallbackPortsExplicit = true
 			cfg.explicitSSHFallbackPorts = append([]string(nil), cfg.SSHFallbackPorts...)
@@ -4219,11 +4142,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "superserve", inputSource, true)
 		}
 		if file.Superserve.NetworkAllowOut != nil {
-			cfg.Superserve.NetworkAllowOut = normalizeList(file.Superserve.NetworkAllowOut)
+			cfg.Superserve.NetworkAllowOut = NormalizeList(file.Superserve.NetworkAllowOut)
 			recordConfigInput(cfg, "superserve", inputSource, true)
 		}
 		if file.Superserve.NetworkDenyOut != nil {
-			cfg.Superserve.NetworkDenyOut = normalizeList(file.Superserve.NetworkDenyOut)
+			cfg.Superserve.NetworkDenyOut = NormalizeList(file.Superserve.NetworkDenyOut)
 			recordConfigInput(cfg, "superserve", inputSource, true)
 		}
 		recordConfigInput(cfg, "superserve", inputSource, applyOptional(&cfg.Superserve.ForgetMissing, file.Superserve.ForgetMissing))
@@ -5329,21 +5252,8 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.XCPNg.APIURL = configInputEnvString(cfg, "xcp-ng", cfg.XCPNg.APIURL, "CRABBOX_XCP_NG_API_URL")
-	cfg.XCPNg.Username = configInputEnvString(cfg, "xcp-ng", cfg.XCPNg.Username, "CRABBOX_XCP_NG_USERNAME")
-	cfg.XCPNg.Password = configInputEnvString(cfg, "xcp-ng", cfg.XCPNg.Password, "CRABBOX_XCP_NG_PASSWORD")
-	xcpNgTemplate, xcpNgTemplateUUID := os.Getenv("CRABBOX_XCP_NG_TEMPLATE"), os.Getenv("CRABBOX_XCP_NG_TEMPLATE_UUID")
-	recordConfigInput(cfg, "xcp-ng", configInputEnvironment, applyXCPNgNameUUIDPair(&cfg.XCPNg.Template, &cfg.XCPNg.TemplateUUID, xcpNgTemplate, xcpNgTemplateUUID))
-	xcpNgSR, xcpNgSRUUID := os.Getenv("CRABBOX_XCP_NG_SR"), os.Getenv("CRABBOX_XCP_NG_SR_UUID")
-	recordConfigInput(cfg, "xcp-ng", configInputEnvironment, applyXCPNgNameUUIDPair(&cfg.XCPNg.SR, &cfg.XCPNg.SRUUID, xcpNgSR, xcpNgSRUUID))
-	xcpNgNetwork, xcpNgNetworkUUID := os.Getenv("CRABBOX_XCP_NG_NETWORK"), os.Getenv("CRABBOX_XCP_NG_NETWORK_UUID")
-	recordConfigInput(cfg, "xcp-ng", configInputEnvironment, applyXCPNgNameUUIDPair(&cfg.XCPNg.Network, &cfg.XCPNg.NetworkUUID, xcpNgNetwork, xcpNgNetworkUUID))
-	cfg.XCPNg.Host = configInputEnvString(cfg, "xcp-ng", cfg.XCPNg.Host, "CRABBOX_XCP_NG_HOST")
-	cfg.XCPNg.User = configInputEnvString(cfg, "xcp-ng", cfg.XCPNg.User, "CRABBOX_XCP_NG_USER")
-	cfg.XCPNg.WorkRoot = configInputEnvString(cfg, "xcp-ng", cfg.XCPNg.WorkRoot, "CRABBOX_XCP_NG_WORK_ROOT")
-	if value, ok := getenvBool("CRABBOX_XCP_NG_INSECURE_TLS"); ok {
-		cfg.XCPNg.InsecureTLS = value
-		recordConfigInput(cfg, "xcp-ng", configInputEnvironment, true)
+	if err := applyXCPNgEnvironmentConfig(cfg); err != nil {
+		return err
 	}
 	cfg.Parallels.Source = configInputEnvString(cfg, "parallels", cfg.Parallels.Source, "CRABBOX_PARALLELS_SOURCE")
 	cfg.Parallels.SourceID = configInputEnvString(cfg, "parallels", cfg.Parallels.SourceID, "CRABBOX_PARALLELS_SOURCE_ID")
@@ -6741,10 +6651,12 @@ func parseEnvListValue(value string) []string {
 
 func splitCommaList(value string) []string {
 	parts := strings.Split(value, ",")
-	return normalizeList(parts)
+	return NormalizeList(parts)
 }
 
-func normalizeList(values []string) []string {
+// NormalizeList trims entries and drops blanks, retaining order and duplicates.
+// It returns fresh storage and a nonnil empty slice without changing its input.
+func NormalizeList(values []string) []string {
 	out := make([]string, 0, len(values))
 	for _, part := range values {
 		part = strings.TrimSpace(part)

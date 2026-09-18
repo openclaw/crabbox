@@ -75,11 +75,11 @@ func ApplySuperserveProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any
 		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
 	if core.FlagWasSet(fs, "superserve-network-allow-out") {
-		cfg.Superserve.NetworkAllowOut = splitSuperserveList(*v.NetworkAllowOut)
+		cfg.Superserve.NetworkAllowOut = core.NormalizeList(strings.Split(*v.NetworkAllowOut, ","))
 		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
 	if core.FlagWasSet(fs, "superserve-network-deny-out") {
-		cfg.Superserve.NetworkDenyOut = splitSuperserveList(*v.NetworkDenyOut)
+		cfg.Superserve.NetworkDenyOut = core.NormalizeList(strings.Split(*v.NetworkDenyOut, ","))
 		core.RecordProviderFlagInputs(cfg, true, "superserve")
 	}
 	if core.FlagWasSet(fs, "superserve-forget-missing") {
@@ -165,16 +165,4 @@ func superserveWorkdir(cfg core.Config) (string, error) {
 		return "", core.Exit(2, "superserve workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
-}
-
-func splitSuperserveList(value string) []string {
-	parts := strings.Split(value, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
 }

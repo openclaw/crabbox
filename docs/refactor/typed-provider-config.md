@@ -122,6 +122,23 @@ is no environment binding. The alias-aware selected-provider sizing guard still
 precedes typed application; API-key/URL provenance retains its existing owners.
 Metro-derived endpoints and runtime image/memory fallback policy remain separate.
 
+XCP-ng's thirteen-field owner is `internal/cli/config_xcpng.go`. URL, username,
+password and TLS file input remain trusted-user-only; password has no argv
+binding. Generated accepted-field reports feed explicit layer-pair policy:
+a nonempty name or UUID replaces both inherited members, while two empty inputs
+inherit both. File/environment input can retain both nonempty members. Flags
+have a different rule: a visited UUID wins over a visited name regardless of
+argv order, including an explicitly empty UUID. That rule stays in the provider
+wrapper, followed by template display projection and generic user/root effects.
+No pair-specific generator mode or new source-provenance tracking is added.
+
+`NormalizeList` is the shared value-only trim/drop-empty owner used by file and
+environment bindings, Superserve scalar list flags, and replace-append flags.
+It retains order and duplicates and returns independent, nonnil storage.
+Callers still own source presence, comma splitting, first-visit reset, append
+versus replacement, and any `none` sentinel. DockerSandbox's raw file lists and
+whole-occurrence repeated flags keep their different contracts.
+
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.

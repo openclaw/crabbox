@@ -95,9 +95,9 @@ func applyConfigFileField(dst, src reflect.Value, tags reflect.StructTag, provid
 			if len(value) == 0 {
 				return false, nil
 			}
-			value = normalizeList(value)
+			value = NormalizeList(value)
 		default:
-			value = normalizeList(value)
+			value = NormalizeList(value)
 		}
 		src = reflect.ValueOf(value)
 	case reflect.Pointer:

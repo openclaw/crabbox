@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -230,4 +231,37 @@ func testConfig() core.Config {
 	cfg.Superserve.Workdir = defaultWorkdir
 	cfg.Superserve.ExecTimeoutSecs = 600
 	return cfg
+}
+
+func TestSuperserveListFlagValueContract(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{nil, []string{" prior "}},
+		{[]string{"--superserve-network-allow-out="}, []string{}},
+		{[]string{"--superserve-network-allow-out=old", "--superserve-network-allow-out= a, ,a, none "}, []string{"a", "a", "none"}},
+	} {
+		cfg := testConfig()
+		prior := []string{" prior "}
+		cfg.Superserve.NetworkAllowOut = prior
+		cfg.Superserve.NetworkDenyOut = []string{"192.0.2.0/24"}
+		fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+		values := (Provider{}).RegisterFlags(fs, cfg)
+		if fs.Lookup("superserve-network-allow-out").DefValue != " prior " {
+			t.Fatal("registration changed raw defaults")
+		}
+		if err := fs.Parse(tc.args); err != nil {
+			t.Fatal(err)
+		}
+		if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg.Superserve.NetworkAllowOut, tc.want) || !reflect.DeepEqual(cfg.Superserve.NetworkDenyOut, []string{"192.0.2.0/24"}) {
+			t.Fatalf("lists=%#v", cfg.Superserve)
+		}
+		if prior[0] != " prior " {
+			t.Fatal("flags mutated inherited storage")
+		}
+	}
 }

@@ -9910,7 +9910,7 @@ func TestXCPNgHigherPrecedenceNamesClearInheritedUUIDs(t *testing.T) {
 			want: selectors{" template ", " template-uuid\t", " sr ", " sr-uuid\t", " network ", " network-uuid\t"},
 		},
 	}
-	for _, source := range []string{"file", "env"} {
+	for _, source := range []string{"file", "repo", "env"} {
 		for _, tt := range tests {
 			t.Run(source+"/"+tt.name, func(t *testing.T) {
 				clearConfigEnv(t)
@@ -9925,11 +9925,12 @@ func TestXCPNgHigherPrecedenceNamesClearInheritedUUIDs(t *testing.T) {
 					Network: prior[4], NetworkUUID: prior[5],
 					Host: "prior-host", User: "prior-user", WorkRoot: t.TempDir(),
 				}
+				cfg.ServerType, cfg.SSHUser, cfg.WorkRoot = "prior-type", "generic-user", "/generic"
 				want := cfg.XCPNg
 				want.Template, want.TemplateUUID = tt.want[0], tt.want[1]
 				want.SR, want.SRUUID = tt.want[2], tt.want[3]
 				want.Network, want.NetworkUUID = tt.want[4], tt.want[5]
-				if source == "file" {
+				if source != "env" {
 					file := fileConfig{}
 					wantFile := fileConfig{}
 					if !tt.absent {
@@ -9941,7 +9942,7 @@ func TestXCPNgHigherPrecedenceNamesClearInheritedUUIDs(t *testing.T) {
 						inputCopy := input
 						file.XCPNg, wantFile.XCPNg = &input, &inputCopy
 					}
-					if err := applyFileConfig(&cfg, file); err != nil {
+					if err := applyFileConfigWithTrust(&cfg, file, source == "file"); err != nil {
 						t.Fatal(err)
 					}
 					if !reflect.DeepEqual(file, wantFile) {
@@ -9963,6 +9964,25 @@ func TestXCPNgHigherPrecedenceNamesClearInheritedUUIDs(t *testing.T) {
 				}
 				if !reflect.DeepEqual(cfg.XCPNg, want) {
 					t.Fatalf("XCPNg=%#v, want %#v", cfg.XCPNg, want)
+				}
+				if cfg.ServerType != "prior-type" || cfg.SSHUser != "generic-user" || cfg.WorkRoot != "/generic" {
+					t.Fatal("file/environment selectors gained generic side effects")
+				}
+				inputSource := configInputEnvironment
+				if source == "file" {
+					inputSource = configInputUser
+				}
+				if source == "repo" {
+					inputSource = configInputRepo
+				}
+				accepted := false
+				for _, value := range tt.in {
+					accepted = accepted || value != ""
+				}
+				wantLedger := Config{}
+				recordConfigInput(&wantLedger, "xcp-ng", inputSource, accepted)
+				if cfg.inputProvenance["xcp-ng"] != wantLedger.inputProvenance["xcp-ng"] {
+					t.Fatal("selector accepted-input source changed")
 				}
 			})
 		}
@@ -18709,6 +18729,142 @@ func TestUnikraftBindingMemoryHasNoEnvironmentSource(t *testing.T) {
 		}
 		if cfg.UnikraftCloud.MemoryMB != 128 || cfg.inputProvenance["unikraft-cloud"].values != 0 {
 			t.Fatal("memory gained environment input")
+		}
+	}
+}
+
+func TestSuperserveListSourceValueContract(t *testing.T) {
+	clearConfigEnv(t)
+	for _, trusted := range []bool{false, true} {
+		for _, tc := range []struct {
+			body string
+			want []string
+		}{
+			{"{}", []string{"prior"}},
+			{"networkAllowOut: null", []string{"prior"}},
+			{"networkAllowOut: []", []string{}},
+			{"networkAllowOut: [' a ', '', 'a', 'none', 'x,y']", []string{"a", "a", "none", "x,y"}},
+		} {
+			var file fileSuperserveConfig
+			if err := yaml.Unmarshal([]byte(tc.body), &file); err != nil {
+				t.Fatal(err)
+			}
+			before, err := yaml.Marshal(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := baseConfig()
+			cfg.Superserve.NetworkAllowOut = []string{"prior"}
+			if err := applyFileConfigWithTrust(&cfg, fileConfig{Superserve: &file}, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Superserve.NetworkAllowOut, tc.want) {
+				t.Fatalf("body=%s got=%#v", tc.body, cfg.Superserve.NetworkAllowOut)
+			}
+			after, err := yaml.Marshal(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(before) != string(after) {
+				t.Fatal("file DTO mutated")
+			}
+			if len(file.NetworkAllowOut) == 0 && strings.Contains(string(after), "networkAllowOut") {
+				t.Fatal("value-slice omitempty shape changed")
+			}
+		}
+	}
+	for _, tc := range []struct {
+		raw  string
+		want []string
+	}{
+		{"", []string{"prior"}}, {" , ", []string{}}, {" a, a,none ", []string{"a", "a", "none"}},
+	} {
+		t.Setenv("CRABBOX_SUPERSERVE_NETWORK_ALLOW_OUT", tc.raw)
+		cfg := baseConfig()
+		cfg.Superserve.NetworkAllowOut = []string{"prior"}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg.Superserve.NetworkAllowOut, tc.want) {
+			t.Fatalf("raw=%q got=%#v", tc.raw, cfg.Superserve.NetworkAllowOut)
+		}
+	}
+}
+
+func TestXCPNgBindingOrdinarySources(t *testing.T) {
+	clearConfigEnv(t)
+	if got, want := baseConfig().XCPNg, (XCPNgConfig{User: "crabbox", WorkRoot: defaultPOSIXWorkRoot}); got != want {
+		t.Fatalf("defaults=%#v, want %#v", got, want)
+	}
+	for _, source := range []string{"user", "repo", "env"} {
+		for _, raw := range []string{"", "  ", "fixture", "fixture-prior"} {
+			for _, boolean := range []string{"", "invalid", "false", "true"} {
+				cfg := baseConfig()
+				cfg.Provider, cfg.ServerType, cfg.SSHUser, cfg.WorkRoot = "fixture-other", "prior-type", "generic-user", "/generic"
+				cfg.XCPNg = XCPNgConfig{APIURL: "fixture-prior", Username: "fixture-prior", Password: "fixture-prior", Host: "fixture-prior", User: "fixture-prior", WorkRoot: "fixture-prior", InsecureTLS: true}
+				want := cfg.XCPNg
+				trusted := source == "user"
+				boolAccepted := boolean == "true" || boolean == "false"
+				if raw != "" {
+					want.Host, want.User, want.WorkRoot = raw, raw, raw
+					if source != "repo" {
+						want.APIURL, want.Username, want.Password = raw, raw, raw
+					}
+				}
+				if boolAccepted && source != "repo" {
+					want.InsecureTLS = boolean == "true"
+				}
+				if source == "env" {
+					for _, key := range []string{"API_URL", "USERNAME", "PASSWORD", "HOST", "USER", "WORK_ROOT"} {
+						t.Setenv("CRABBOX_XCP_NG_"+key, raw)
+					}
+					t.Setenv("CRABBOX_XCP_NG_INSECURE_TLS", boolean)
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					file := &fileXCPNgConfig{APIURL: raw, Username: raw, Password: raw, Host: raw, User: raw, WorkRoot: raw}
+					if boolAccepted {
+						file.InsecureTLS = new(boolean == "true")
+					}
+					before, err := yaml.Marshal(file)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := applyFileConfigWithTrust(&cfg, fileConfig{XCPNg: file}, trusted); err != nil {
+						t.Fatal(err)
+					}
+					after, err := yaml.Marshal(file)
+					if err != nil || !bytes.Equal(before, after) {
+						t.Fatal("file DTO mutated")
+					}
+				}
+				if cfg.XCPNg != want || cfg.ServerType != "prior-type" || cfg.SSHUser != "generic-user" || cfg.WorkRoot != "/generic" {
+					t.Fatalf("source=%s raw=%q bool=%q: values or generic side effects changed", source, raw, boolean)
+				}
+				inputSource := configInputRepo
+				if source == "user" {
+					inputSource = configInputUser
+				}
+				if source == "env" {
+					inputSource = configInputEnvironment
+				}
+				wantLedger := Config{}
+				recordConfigInput(&wantLedger, "xcp-ng", inputSource, raw != "" || boolAccepted && source != "repo")
+				if cfg.inputProvenance["xcp-ng"] != wantLedger.inputProvenance["xcp-ng"] {
+					t.Fatal("ordinary accepted-input source changed")
+				}
+			}
+		}
+	}
+	for _, boolean := range []bool{false, true} {
+		cfg := baseConfig()
+		prior := cfg.XCPNg
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{XCPNg: &fileXCPNgConfig{APIURL: "fixture-url", Username: "fixture-user", Password: "fixture-password", InsecureTLS: &boolean}}, false); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.XCPNg != prior || cfg.inputProvenance["xcp-ng"].values != 0 {
+			t.Fatal("repository-only restricted fields gained admission")
 		}
 	}
 }
