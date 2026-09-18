@@ -88,6 +88,23 @@ wrappers, while raw flag provenance uses the generated visitor at the existing
 central post-success phase. Provider guards still precede typed application;
 image/snapshot normalization and exact-provider validation remain afterward.
 
+Daytona's ten-field owner is `internal/cli/config_daytona.go`. Three strings stay
+environment-only, while seven file/flag fields preserve raw strings and the
+positive-file/tolerant-environment minute integer. Source provenance remains in
+core wrappers and its generated raw-flag visitor remains in the central
+post-success phase. The exact-provider type guard still precedes typed flag
+application; no normalization, final validation, or snapshot policy is added.
+
+Proxmox's complete twelve-field owner is `internal/cli/config_proxmox.go`.
+All existing file grants remain unchanged, including token fields without argv
+bindings. Raw strings ignore empty file input; TemplateID keeps positive-only
+file input and tolerant signed environment parsing; booleans retain presence.
+Accepted source reports remain in core wrappers, and raw URL/TLS visits remain
+in the central post-success phase. The initializer aliases the shared POSIX work
+root. Its non-fallible flag assignments precede the existing visited TemplateID
+projection, which depends only on that ID; accepted user/root flags alone mirror
+to generic connection fields. No provider-selection guard or validation is added.
+
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.

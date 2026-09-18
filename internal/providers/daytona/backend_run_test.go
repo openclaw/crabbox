@@ -918,3 +918,57 @@ func TestDaytonaBackendIsHybridSDKRunAndSSHAccess(t *testing.T) {
 		t.Fatal("SSH scripts require native Daytona idle activity")
 	}
 }
+
+func TestDaytonaBindingFlagsRemainRawAndGuarded(t *testing.T) {
+	for _, provider := range []string{"daytona", "DAYTONA", " daytona ", "other"} {
+		for _, hasType := range []bool{false, true} {
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			fs := flag.NewFlagSet("binding", flag.ContinueOnError)
+			values := RegisterDaytonaProviderFlags(fs, cfg)
+			count := 0
+			fs.VisitAll(func(*flag.Flag) { count++ })
+			if count != 7 {
+				t.Fatalf("public flag count=%d want 7", count)
+			}
+			for _, name := range []string{"daytona-api-key", "daytona-jwt-token", "daytona-organization-id"} {
+				if fs.Lookup(name) != nil {
+					t.Fatalf("environment-only field acquired flag %s", name)
+				}
+			}
+			fs.String("type", "", "")
+			args := []string{"--daytona-api-url= raw-url ", "--daytona-snapshot=", "--daytona-target= raw-target ", "--daytona-user= raw-user ", "--daytona-work-root=  ", "--daytona-ssh-gateway-host= raw-gateway ", "--daytona-ssh-access-minutes=-2"}
+			if hasType {
+				args = append(args, "--type=")
+			}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			before := cfg
+			err := ApplyDaytonaProviderFlags(&cfg, fs, struct{}{})
+			guarded := provider == "daytona" && hasType
+			if guarded {
+				if err == nil || err.Error() != "--type is not supported for provider=daytona; choose CPU, memory, and disk in the Daytona snapshot" {
+					t.Fatalf("guard error=%v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, before) {
+				t.Fatal("guard or foreign values mutated configuration")
+			}
+			if guarded {
+				continue
+			}
+			want := before
+			want.Daytona.APIURL, want.Daytona.Snapshot, want.Daytona.Target, want.Daytona.User, want.Daytona.WorkRoot, want.Daytona.SSHGatewayHost, want.Daytona.SSHAccessMinutes = " raw-url ", "", " raw-target ", " raw-user ", "  ", " raw-gateway ", -2
+			core.RecordProviderFlagInputs(&want, true, "daytona")
+			if err := ApplyDaytonaProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("raw assignments, signed minutes, or accepted-input facts changed")
+			}
+		}
+	}
+}

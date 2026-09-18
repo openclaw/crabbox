@@ -18320,3 +18320,243 @@ func TestTenkiBindingEnvironmentAliasesAndIntegers(t *testing.T) {
 		}
 	}
 }
+
+func TestDaytonaBindingDefaultsAndFileValues(t *testing.T) {
+	clearConfigEnv(t)
+	wantDefaults := DaytonaConfig{APIURL: "https://app.daytona.io/api", User: "daytona", WorkRoot: "/home/daytona/crabbox", SSHGatewayHost: "ssh.app.daytona.io", SSHAccessMinutes: 30}
+	if !reflect.DeepEqual(baseConfig().Daytona, wantDefaults) || reflect.TypeOf(DaytonaConfig{}).NumField() != 10 || reflect.TypeOf(fileDaytonaConfig{}).NumField() != 7 {
+		t.Fatal("Daytona defaults or configured field surface changed")
+	}
+	for _, name := range []string{"APIKey", "JWTToken", "OrganizationID"} {
+		if _, present := reflect.TypeOf(fileDaytonaConfig{}).FieldByName(name); present {
+			t.Fatalf("environment-only %s acquired a file binding", name)
+		}
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"", "  ", " fixture "} {
+			for _, minutes := range []int{-2, 0, 3} {
+				cfg := baseConfig()
+				input := &fileDaytonaConfig{APIURL: raw, Snapshot: raw, Target: raw, User: raw, WorkRoot: raw, SSHGatewayHost: raw, SSHAccessMinutes: minutes}
+				before := *input
+				want := wantDefaults
+				if raw != "" {
+					want.APIURL, want.Snapshot, want.Target, want.User, want.WorkRoot, want.SSHGatewayHost = raw, raw, raw, raw, raw, raw
+				}
+				if minutes > 0 {
+					want.SSHAccessMinutes = minutes
+				}
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{Daytona: input}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(cfg.Daytona, want) || !reflect.DeepEqual(*input, before) {
+					t.Fatalf("file values or DTO changed for raw=%q minutes=%d", raw, minutes)
+				}
+				if (cfg.inputProvenance["daytona"].values != 0) != (raw != "" || minutes > 0) {
+					t.Fatal("file acceptance changed")
+				}
+				if raw != "" {
+					wantSource := credentialSourceRepository
+					if trusted {
+						wantSource = credentialSourceTrustedFile
+					}
+					if cfg.credentialProvenance.daytonaAPIURL != wantSource || cfg.credentialProvenance.daytonaSSHGateway != wantSource {
+						t.Fatal("file endpoint source changed")
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestDaytonaBindingOrdinaryEnvironmentAliases(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("DAYTONA_API_URL", "alias-url")
+	t.Setenv("DAYTONA_SNAPSHOT", "alias-snapshot")
+	t.Setenv("DAYTONA_TARGET", "alias-target")
+	t.Setenv("DAYTONA_ORGANIZATION_ID", "alias-organization")
+	for _, raw := range []string{"", "  ", " fixture "} {
+		for _, minutes := range []string{"invalid", "-2", "0", "3"} {
+			for _, suffix := range []string{"API_URL", "SNAPSHOT", "TARGET", "ORGANIZATION_ID", "USER", "WORK_ROOT", "SSH_GATEWAY_HOST"} {
+				t.Setenv("CRABBOX_DAYTONA_"+suffix, raw)
+			}
+			t.Setenv("CRABBOX_DAYTONA_SSH_ACCESS_MINUTES", minutes)
+			cfg := baseConfig()
+			want := cfg.Daytona
+			if raw != "" {
+				want.APIURL, want.Snapshot, want.Target, want.OrganizationID, want.User, want.WorkRoot, want.SSHGatewayHost = raw, raw, raw, raw, raw, raw, raw
+			} else {
+				want.APIURL, want.Snapshot, want.Target, want.OrganizationID = "alias-url", "alias-snapshot", "alias-target", "alias-organization"
+			}
+			if minutes != "invalid" {
+				want.SSHAccessMinutes, _ = strconv.Atoi(minutes)
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Daytona, want) || cfg.credentialProvenance.daytonaAPIURL != credentialSourceEnvironment || cfg.inputProvenance["daytona"].values == 0 {
+				t.Fatalf("ordinary environment bindings changed for raw=%q minutes=%q", raw, minutes)
+			}
+			if raw != "" && cfg.credentialProvenance.daytonaSSHGateway != credentialSourceEnvironment {
+				t.Fatal("gateway environment provenance missing")
+			}
+		}
+	}
+}
+
+func TestDaytonaBindingEnvironmentOnlyFields(t *testing.T) {
+	clearConfigEnv(t)
+	for _, tc := range []struct{ primary, alias, want string }{
+		{"", "", "fixture-prior"},
+		{"", "fixture-alias", "fixture-alias"},
+		{"fixture-primary", "fixture-alias", "fixture-primary"},
+		{"  ", "fixture-alias", "  "},
+	} {
+		for _, suffix := range []string{"API_KEY", "JWT_TOKEN", "ORGANIZATION_ID"} {
+			t.Setenv("CRABBOX_DAYTONA_"+suffix, tc.primary)
+			t.Setenv("DAYTONA_"+suffix, tc.alias)
+		}
+		cfg := baseConfig()
+		cfg.Daytona.APIKey, cfg.Daytona.JWTToken, cfg.Daytona.OrganizationID = "fixture-prior", "fixture-prior", "fixture-prior"
+		cfg.credentialProvenance.daytonaAPIKey, cfg.credentialProvenance.daytonaJWTToken = credentialSourceTrustedFile, credentialSourceTrustedFile
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Daytona.APIKey != tc.want || cfg.Daytona.JWTToken != tc.want || cfg.Daytona.OrganizationID != tc.want {
+			t.Fatal("environment-only primary/alias/previous precedence changed")
+		}
+		accepted := tc.primary != "" || tc.alias != ""
+		wantSource := credentialSourceTrustedFile
+		if accepted {
+			wantSource = credentialSourceEnvironment
+		}
+		if cfg.credentialProvenance.daytonaAPIKey != wantSource || cfg.credentialProvenance.daytonaJWTToken != wantSource || (cfg.inputProvenance["daytona"].values != 0) != accepted {
+			t.Fatal("environment-only provenance or acceptance changed")
+		}
+	}
+}
+
+func TestProxmoxBindingDefaultsAndFileValues(t *testing.T) {
+	clearConfigEnv(t)
+	if got, want := baseConfig().Proxmox, (ProxmoxConfig{User: "crabbox", WorkRoot: defaultPOSIXWorkRoot, FullClone: true}); got != want {
+		t.Fatalf("defaults=%#v, want %#v", got, want)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"", "  ", "fixture-file"} {
+			for _, number := range []int{-2, 0, 3} {
+				for _, boolean := range []*bool{nil, new(false), new(true)} {
+					cfg := baseConfig()
+					cfg.Proxmox = ProxmoxConfig{APIURL: "prior", TokenID: "fixture-prior", TokenSecret: "fixture-prior", Node: "prior", TemplateID: 7, Storage: "prior", Pool: "prior", Bridge: "prior", User: "prior", WorkRoot: "prior", FullClone: true, InsecureTLS: true}
+					cfg.SSHUser, cfg.WorkRoot = "generic-user", "/generic"
+					input := &fileProxmoxConfig{APIURL: raw, TokenID: raw, TokenSecret: raw, Node: raw, TemplateID: number, Storage: raw, Pool: raw, Bridge: raw, User: raw, WorkRoot: raw, FullClone: boolean, InsecureTLS: boolean}
+					before, err := yaml.Marshal(input)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := cfg.Proxmox
+					if raw != "" {
+						want.APIURL, want.TokenID, want.TokenSecret, want.Node, want.Storage, want.Pool, want.Bridge, want.User, want.WorkRoot = raw, raw, raw, raw, raw, raw, raw, raw, raw
+					}
+					if number > 0 {
+						want.TemplateID = number
+					}
+					if boolean != nil {
+						want.FullClone, want.InsecureTLS = *boolean, *boolean
+					}
+					if err := applyFileConfigWithTrust(&cfg, fileConfig{Proxmox: input}, trusted); err != nil {
+						t.Fatal(err)
+					}
+					after, err := yaml.Marshal(input)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if cfg.Proxmox != want || !bytes.Equal(before, after) {
+						t.Fatalf("trusted=%v raw=%q number=%d: file values or DTO changed", trusted, raw, number)
+					}
+					if cfg.SSHUser != "generic-user" || cfg.WorkRoot != "/generic" {
+						t.Fatal("file overlay gained generic connection effects")
+					}
+					wantSource := credentialSourceRepository
+					inputSource := configInputRepo
+					if trusted {
+						wantSource, inputSource = credentialSourceTrustedFile, configInputUser
+					}
+					wantLedger := Config{}
+					recordConfigInput(&wantLedger, "proxmox", inputSource, raw != "" || number > 0 || boolean != nil)
+					if cfg.inputProvenance["proxmox"] != wantLedger.inputProvenance["proxmox"] {
+						t.Fatal("file accepted-input source changed")
+					}
+					stringSource, boolSource := credentialSourceUnknown, credentialSourceUnknown
+					if raw != "" {
+						stringSource = wantSource
+					}
+					if boolean != nil {
+						boolSource = wantSource
+					}
+					p := cfg.credentialProvenance
+					if p.proxmoxAPIURL != stringSource || p.proxmoxTokenID != stringSource || p.proxmoxTokenSecret != stringSource || p.proxmoxInsecureTLS != boolSource {
+						t.Fatal("file provenance changed")
+					}
+				}
+			}
+		}
+	}
+	for _, raw := range []string{"{}", "{templateId: null}", "{templateId: invalid}"} {
+		var input fileProxmoxConfig
+		err := yaml.Unmarshal([]byte(raw), &input)
+		if (err != nil) != strings.Contains(raw, "invalid") {
+			t.Fatalf("file integer decoding %q: %v", raw, err)
+		}
+	}
+}
+
+func TestProxmoxBindingEnvironmentValues(t *testing.T) {
+	clearConfigEnv(t)
+	for _, raw := range []string{"", "  ", "fixture-primary"} {
+		for _, number := range []string{"", "invalid", "-2", "0", "3", " 3 "} {
+			for _, boolean := range []string{"", "invalid", "false", "true"} {
+				for _, suffix := range []string{"API_URL", "TOKEN_ID", "TOKEN_SECRET", "NODE", "STORAGE", "POOL", "BRIDGE", "USER", "WORK_ROOT"} {
+					t.Setenv("CRABBOX_PROXMOX_"+suffix, raw)
+				}
+				t.Setenv("CRABBOX_PROXMOX_TEMPLATE_ID", number)
+				t.Setenv("CRABBOX_PROXMOX_FULL_CLONE", boolean)
+				t.Setenv("CRABBOX_PROXMOX_INSECURE_TLS", boolean)
+				cfg := baseConfig()
+				cfg.Proxmox = ProxmoxConfig{APIURL: "prior", TokenID: "fixture-prior", TokenSecret: "fixture-prior", Node: "prior", TemplateID: 7, Storage: "prior", Pool: "prior", Bridge: "prior", User: "prior", WorkRoot: "prior", FullClone: true, InsecureTLS: true}
+				want := cfg.Proxmox
+				if raw != "" {
+					want.APIURL, want.TokenID, want.TokenSecret, want.Node, want.Storage, want.Pool, want.Bridge, want.User, want.WorkRoot = raw, raw, raw, raw, raw, raw, raw, raw, raw
+				}
+				parsed, numberErr := strconv.Atoi(number)
+				if numberErr == nil {
+					want.TemplateID = parsed
+				}
+				boolAccepted := boolean == "true" || boolean == "false"
+				if boolAccepted {
+					want.FullClone, want.InsecureTLS = boolean == "true", boolean == "true"
+				}
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.Proxmox != want {
+					t.Fatalf("raw=%q number=%q bool=%q: environment values changed", raw, number, boolean)
+				}
+				wantLedger := Config{}
+				recordConfigInput(&wantLedger, "proxmox", configInputEnvironment, raw != "" || numberErr == nil || boolAccepted)
+				if cfg.inputProvenance["proxmox"] != wantLedger.inputProvenance["proxmox"] {
+					t.Fatal("environment accepted-input source changed")
+				}
+				stringSource, boolSource := credentialSourceUnknown, credentialSourceUnknown
+				if raw != "" {
+					stringSource = credentialSourceEnvironment
+				}
+				if boolAccepted {
+					boolSource = credentialSourceEnvironment
+				}
+				p := cfg.credentialProvenance
+				if p.proxmoxAPIURL != stringSource || p.proxmoxTokenID != stringSource || p.proxmoxTokenSecret != stringSource || p.proxmoxInsecureTLS != boolSource {
+					t.Fatal("environment provenance changed")
+				}
+			}
+		}
+	}
+}

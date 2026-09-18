@@ -18,26 +18,8 @@ const (
 	daytonaTokenRedacted = "<token>"
 )
 
-type daytonaFlagValues struct {
-	APIURL           *string
-	Snapshot         *string
-	Target           *string
-	User             *string
-	WorkRoot         *string
-	SSHGatewayHost   *string
-	SSHAccessMinutes *int
-}
-
 func RegisterDaytonaProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return daytonaFlagValues{
-		APIURL:           fs.String("daytona-api-url", defaults.Daytona.APIURL, "Daytona API URL"),
-		Snapshot:         fs.String("daytona-snapshot", defaults.Daytona.Snapshot, "Daytona snapshot name"),
-		Target:           fs.String("daytona-target", defaults.Daytona.Target, "Daytona compute target"),
-		User:             fs.String("daytona-user", defaults.Daytona.User, "Daytona sandbox user"),
-		WorkRoot:         fs.String("daytona-work-root", defaults.Daytona.WorkRoot, "Daytona sandbox work root"),
-		SSHGatewayHost:   fs.String("daytona-ssh-gateway-host", defaults.Daytona.SSHGatewayHost, "Daytona SSH gateway host"),
-		SSHAccessMinutes: fs.Int("daytona-ssh-access-minutes", defaults.Daytona.SSHAccessMinutes, "Daytona SSH access token TTL in minutes"),
-	}
+	return core.RegisterDaytonaConfigFlags(fs, defaults.Daytona)
 }
 
 func ApplyDaytonaProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
@@ -46,39 +28,13 @@ func ApplyDaytonaProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) e
 			return core.Exit(2, "--type is not supported for provider=daytona; choose CPU, memory, and disk in the Daytona snapshot")
 		}
 	}
-	v, ok := values.(daytonaFlagValues)
+	v, ok := values.(core.DaytonaConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "daytona-api-url") {
-		cfg.Daytona.APIURL = *v.APIURL
-		core.RecordProviderFlagInputs(cfg, true, "daytona")
-	}
-	if core.FlagWasSet(fs, "daytona-snapshot") {
-		cfg.Daytona.Snapshot = *v.Snapshot
-		core.RecordProviderFlagInputs(cfg, true, "daytona")
-	}
-	if core.FlagWasSet(fs, "daytona-target") {
-		cfg.Daytona.Target = *v.Target
-		core.RecordProviderFlagInputs(cfg, true, "daytona")
-	}
-	if core.FlagWasSet(fs, "daytona-user") {
-		cfg.Daytona.User = *v.User
-		core.RecordProviderFlagInputs(cfg, true, "daytona")
-	}
-	if core.FlagWasSet(fs, "daytona-work-root") {
-		cfg.Daytona.WorkRoot = *v.WorkRoot
-		core.RecordProviderFlagInputs(cfg, true, "daytona")
-	}
-	if core.FlagWasSet(fs, "daytona-ssh-gateway-host") {
-		cfg.Daytona.SSHGatewayHost = *v.SSHGatewayHost
-		core.RecordProviderFlagInputs(cfg, true, "daytona")
-	}
-	if core.FlagWasSet(fs, "daytona-ssh-access-minutes") {
-		cfg.Daytona.SSHAccessMinutes = *v.SSHAccessMinutes
-		core.RecordProviderFlagInputs(cfg, true, "daytona")
-	}
-	return nil
+	applied, err := v.Apply(&cfg.Daytona, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "daytona")
+	return err
 }
 
 func NewDaytonaLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {

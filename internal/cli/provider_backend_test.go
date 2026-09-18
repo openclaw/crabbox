@@ -2111,38 +2111,78 @@ func TestProviderOwnedConfigShowConnectionProjection(t *testing.T) {
 	}
 }
 
-func TestTenkiBindingCentralFlagSourcePhase(t *testing.T) {
-	original := providerRegistry["aws"]
-	t.Cleanup(func() { providerRegistry["aws"] = original })
-	for _, fail := range []bool{false, true} {
-		cfg := baseConfig()
-		cfg.Provider = "aws"
-		cfg.credentialProvenance.tenkiEndpoint = credentialSourceTrustedFile
-		cfg.credentialProvenance.tenkiGateway = credentialSourceTrustedFile
-		var seenEndpoint, seenGateway credentialValueSource
-		var applyErr error
-		if fail {
-			applyErr = Exit(2, "synthetic flag rejection")
-		}
-		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(observed Config) {
-			seenEndpoint, seenGateway = observed.credentialProvenance.tenkiEndpoint, observed.credentialProvenance.tenkiGateway
-		}}
-		fs := newFlagSet("test", io.Discard)
-		fs.String("tenki-endpoint", "", "")
-		fs.String("tenki-gateway", "", "")
-		if err := fs.Parse([]string{"--tenki-endpoint=", "--tenki-gateway="}); err != nil {
-			t.Fatal(err)
-		}
-		err := applyProviderFlags(&cfg, fs, providerFlagValues{})
-		if (err != nil) != fail {
-			t.Fatalf("central flag error=%v", err)
-		}
-		want := credentialSourceFlag
-		if fail {
-			want = credentialSourceTrustedFile
-		}
-		if seenEndpoint != credentialSourceTrustedFile || seenGateway != credentialSourceTrustedFile || cfg.credentialProvenance.tenkiEndpoint != want || cfg.credentialProvenance.tenkiGateway != want {
-			t.Fatal("central marking moved before successful provider application")
-		}
+func TestConfigBindingCentralFlagSourcePhase(t *testing.T) {
+	cases := []struct {
+		name       string
+		flags      [2]string
+		secondBool bool
+		sources    func(*Config) [2]*credentialValueSource
+	}{
+		{
+			name: "tenki", flags: [2]string{"tenki-endpoint", "tenki-gateway"},
+			sources: func(cfg *Config) [2]*credentialValueSource {
+				return [2]*credentialValueSource{&cfg.credentialProvenance.tenkiEndpoint, &cfg.credentialProvenance.tenkiGateway}
+			},
+		},
+		{
+			name: "daytona", flags: [2]string{"daytona-api-url", "daytona-ssh-gateway-host"},
+			sources: func(cfg *Config) [2]*credentialValueSource {
+				return [2]*credentialValueSource{&cfg.credentialProvenance.daytonaAPIURL, &cfg.credentialProvenance.daytonaSSHGateway}
+			},
+		},
+		{
+			name: "proxmox", flags: [2]string{"proxmox-api-url", "proxmox-insecure-tls"}, secondBool: true,
+			sources: func(cfg *Config) [2]*credentialValueSource {
+				return [2]*credentialValueSource{&cfg.credentialProvenance.proxmoxAPIURL, &cfg.credentialProvenance.proxmoxInsecureTLS}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			original := providerRegistry["aws"]
+			t.Cleanup(func() { providerRegistry["aws"] = original })
+			for _, fail := range []bool{false, true} {
+				cfg := baseConfig()
+				cfg.Provider = "aws"
+				for _, source := range tc.sources(&cfg) {
+					*source = credentialSourceTrustedFile
+				}
+				var seen [2]credentialValueSource
+				var applyErr error
+				if fail {
+					applyErr = Exit(2, "synthetic flag rejection")
+				}
+				providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(observed Config) {
+					for i, source := range tc.sources(&observed) {
+						seen[i] = *source
+					}
+				}}
+				fs := newFlagSet("test", io.Discard)
+				fs.String(tc.flags[0], "", "")
+				args := []string{"--" + tc.flags[0] + "=", "--" + tc.flags[1] + "="}
+				if tc.secondBool {
+					fs.Bool(tc.flags[1], true, "")
+					args[1] += "false"
+				} else {
+					fs.String(tc.flags[1], "", "")
+				}
+				if err := fs.Parse(args); err != nil {
+					t.Fatal(err)
+				}
+				err := applyProviderFlags(&cfg, fs, providerFlagValues{})
+				if (err != nil) != fail {
+					t.Fatalf("fail=%t central flag error=%v", fail, err)
+				}
+				want := credentialSourceFlag
+				if fail {
+					want = credentialSourceTrustedFile
+				}
+				for i, source := range tc.sources(&cfg) {
+					if seen[i] != credentialSourceTrustedFile || *source != want {
+						t.Fatalf("fail=%t flag=%s central marking moved from its post-success phase", fail, tc.flags[i])
+					}
+				}
+			}
+		})
 	}
 }

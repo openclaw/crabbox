@@ -454,19 +454,6 @@ type ExternalDesktopConfig struct {
 	PasswordEnv string `yaml:"passwordEnv,omitempty" json:"passwordEnv,omitempty"`
 }
 
-type DaytonaConfig struct {
-	APIKey           string
-	JWTToken         string
-	OrganizationID   string
-	APIURL           string
-	Snapshot         string
-	Target           string
-	User             string
-	WorkRoot         string
-	SSHGatewayHost   string
-	SSHAccessMinutes int
-}
-
 type CubeSandboxConfig struct {
 	APIKey        string
 	APIURL        string
@@ -574,21 +561,6 @@ type CloudflareDynamicWorkersConfig struct {
 	repositorySubrequestsCapActive bool
 	repositoryTimeoutSecsCap       int
 	repositoryTimeoutSecsCapActive bool
-}
-
-type ProxmoxConfig struct {
-	APIURL      string
-	TokenID     string
-	TokenSecret string
-	Node        string
-	TemplateID  int
-	Storage     string
-	Pool        string
-	Bridge      string
-	User        string
-	WorkRoot    string
-	FullClone   bool
-	InsecureTLS bool
 }
 
 type XCPNgConfig struct {
@@ -1912,17 +1884,11 @@ func baseConfig() Config {
 			WorkRoot:        "/home/boxd/crabbox",
 			DeleteOnRelease: true,
 		},
-		Coder: defaultCoderConfig(),
-		Morph: defaultMorphConfig(),
-		Orgo:  defaultOrgoConfig(),
-		Daytona: DaytonaConfig{
-			APIURL:           "https://app.daytona.io/api",
-			User:             "daytona",
-			WorkRoot:         "/home/daytona/crabbox",
-			SSHGatewayHost:   "ssh.app.daytona.io",
-			SSHAccessMinutes: 30,
-		},
-		E2B: defaultE2BConfig(),
+		Coder:   defaultCoderConfig(),
+		Morph:   defaultMorphConfig(),
+		Orgo:    defaultOrgoConfig(),
+		Daytona: defaultDaytonaConfig(),
+		E2B:     defaultE2BConfig(),
 		CubeSandbox: CubeSandboxConfig{
 			APIURL:        "http://127.0.0.1:3000",
 			Domain:        "cube.app",
@@ -1991,11 +1957,7 @@ func baseConfig() Config {
 			TimeoutSecs:       60,
 			Metadata:          map[string]string{},
 		},
-		Proxmox: ProxmoxConfig{
-			User:      "crabbox",
-			WorkRoot:  defaultPOSIXWorkRoot,
-			FullClone: true,
-		},
+		Proxmox:     initialProxmoxConfig(),
 		Firecracker: initialFirecrackerConfig(),
 		XCPNg: XCPNgConfig{
 			User:     "crabbox",
@@ -2265,21 +2227,6 @@ type fileGCPConfig struct {
 	ServiceAccount string   `yaml:"serviceAccount,omitempty"`
 }
 
-type fileProxmoxConfig struct {
-	APIURL      string `yaml:"apiUrl,omitempty"`
-	TokenID     string `yaml:"tokenId,omitempty"`
-	TokenSecret string `yaml:"tokenSecret,omitempty"`
-	Node        string `yaml:"node,omitempty"`
-	TemplateID  int    `yaml:"templateId,omitempty"`
-	Storage     string `yaml:"storage,omitempty"`
-	Pool        string `yaml:"pool,omitempty"`
-	Bridge      string `yaml:"bridge,omitempty"`
-	User        string `yaml:"user,omitempty"`
-	WorkRoot    string `yaml:"workRoot,omitempty"`
-	FullClone   *bool  `yaml:"fullClone,omitempty"`
-	InsecureTLS *bool  `yaml:"insecureTLS,omitempty"`
-}
-
 type fileXCPNgConfig struct {
 	APIURL       string `yaml:"apiUrl,omitempty"`
 	Username     string `yaml:"username,omitempty"`
@@ -2422,16 +2369,6 @@ type fileBoxdConfig struct {
 	Org             string `yaml:"org,omitempty"`
 	WorkRoot        string `yaml:"workRoot,omitempty"`
 	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
-}
-
-type fileDaytonaConfig struct {
-	APIURL           string `yaml:"apiUrl,omitempty"`
-	Snapshot         string `yaml:"snapshot,omitempty"`
-	Target           string `yaml:"target,omitempty"`
-	User             string `yaml:"user,omitempty"`
-	WorkRoot         string `yaml:"workRoot,omitempty"`
-	SSHGatewayHost   string `yaml:"sshGatewayHost,omitempty"`
-	SSHAccessMinutes int    `yaml:"sshAccessMinutes,omitempty"`
 }
 
 type fileCubeSandboxConfig struct {
@@ -3537,56 +3474,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Proxmox != nil {
-		if file.Proxmox.APIURL != "" {
-			cfg.Proxmox.APIURL = file.Proxmox.APIURL
-			recordConfigInput(cfg, "proxmox", inputSource, true)
-			cfg.credentialProvenance.proxmoxAPIURL = credentialSource
-		}
-		if file.Proxmox.TokenID != "" {
-			cfg.Proxmox.TokenID = file.Proxmox.TokenID
-			recordConfigInput(cfg, "proxmox", inputSource, true)
-			cfg.credentialProvenance.proxmoxTokenID = credentialSource
-		}
-		if file.Proxmox.TokenSecret != "" {
-			cfg.Proxmox.TokenSecret = file.Proxmox.TokenSecret
-			recordConfigInput(cfg, "proxmox", inputSource, true)
-			cfg.credentialProvenance.proxmoxTokenSecret = credentialSource
-		}
-		if file.Proxmox.Node != "" {
-			cfg.Proxmox.Node = file.Proxmox.Node
-			recordConfigInput(cfg, "proxmox", inputSource, true)
-		}
-		if file.Proxmox.TemplateID > 0 {
-			cfg.Proxmox.TemplateID = file.Proxmox.TemplateID
-			recordConfigInput(cfg, "proxmox", inputSource, true)
-		}
-		if file.Proxmox.Storage != "" {
-			cfg.Proxmox.Storage = file.Proxmox.Storage
-			recordConfigInput(cfg, "proxmox", inputSource, true)
-		}
-		if file.Proxmox.Pool != "" {
-			cfg.Proxmox.Pool = file.Proxmox.Pool
-			recordConfigInput(cfg, "proxmox", inputSource, true)
-		}
-		if file.Proxmox.Bridge != "" {
-			cfg.Proxmox.Bridge = file.Proxmox.Bridge
-			recordConfigInput(cfg, "proxmox", inputSource, true)
-		}
-		if file.Proxmox.User != "" {
-			cfg.Proxmox.User = file.Proxmox.User
-			recordConfigInput(cfg, "proxmox", inputSource, true)
-		}
-		if file.Proxmox.WorkRoot != "" {
-			cfg.Proxmox.WorkRoot = file.Proxmox.WorkRoot
-			recordConfigInput(cfg, "proxmox", inputSource, true)
-		}
-		recordConfigInput(cfg, "proxmox", inputSource, applyOptional(&cfg.Proxmox.FullClone, file.Proxmox.FullClone))
-		if file.Proxmox.InsecureTLS != nil {
-			cfg.Proxmox.InsecureTLS = *file.Proxmox.InsecureTLS
-			recordConfigInput(cfg, "proxmox", inputSource, true)
-			cfg.credentialProvenance.proxmoxInsecureTLS = credentialSource
-		}
+	if err := applyProxmoxFileConfig(cfg, file.Proxmox, inputSource, credentialSource); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.Firecracker.applyFile(file.Firecracker, trusted)
@@ -4087,38 +3976,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Daytona != nil {
-		if file.Daytona.APIURL != "" {
-			cfg.Daytona.APIURL = file.Daytona.APIURL
-			recordConfigInput(cfg, "daytona", inputSource, true)
-			cfg.credentialProvenance.daytonaAPIURL = credentialSource
-		}
-		if file.Daytona.Snapshot != "" {
-			cfg.Daytona.Snapshot = file.Daytona.Snapshot
-			recordConfigInput(cfg, "daytona", inputSource, true)
-		}
-		if file.Daytona.Target != "" {
-			cfg.Daytona.Target = file.Daytona.Target
-			recordConfigInput(cfg, "daytona", inputSource, true)
-		}
-		if file.Daytona.User != "" {
-			cfg.Daytona.User = file.Daytona.User
-			recordConfigInput(cfg, "daytona", inputSource, true)
-		}
-		if file.Daytona.WorkRoot != "" {
-			cfg.Daytona.WorkRoot = file.Daytona.WorkRoot
-			recordConfigInput(cfg, "daytona", inputSource, true)
-		}
-		if file.Daytona.SSHGatewayHost != "" {
-			cfg.Daytona.SSHGatewayHost = file.Daytona.SSHGatewayHost
-			recordConfigInput(cfg, "daytona", inputSource, true)
-			cfg.credentialProvenance.daytonaSSHGateway = credentialSource
-		}
-		if file.Daytona.SSHAccessMinutes > 0 {
-			cfg.Daytona.SSHAccessMinutes = file.Daytona.SSHAccessMinutes
-			recordConfigInput(cfg, "daytona", inputSource, true)
-		}
+	if err := applyDaytonaFileConfig(cfg, file.Daytona, inputSource, credentialSource); err != nil {
+		return err
 	}
+
 	{
 		applied, err := cfg.E2B.applyFile(file.E2B)
 		recordConfigInput(cfg, "e2b", inputSource, applied.InputAccepted)
@@ -5509,36 +5370,8 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if value := os.Getenv("CRABBOX_PROXMOX_API_URL"); value != "" {
-		cfg.Proxmox.APIURL = value
-		recordConfigInput(cfg, "proxmox", configInputEnvironment, true)
-		cfg.credentialProvenance.proxmoxAPIURL = credentialSourceEnvironment
-	}
-	if value := os.Getenv("CRABBOX_PROXMOX_TOKEN_ID"); value != "" {
-		cfg.Proxmox.TokenID = value
-		recordConfigInput(cfg, "proxmox", configInputEnvironment, true)
-		cfg.credentialProvenance.proxmoxTokenID = credentialSourceEnvironment
-	}
-	if value := os.Getenv("CRABBOX_PROXMOX_TOKEN_SECRET"); value != "" {
-		cfg.Proxmox.TokenSecret = value
-		recordConfigInput(cfg, "proxmox", configInputEnvironment, true)
-		cfg.credentialProvenance.proxmoxTokenSecret = credentialSourceEnvironment
-	}
-	cfg.Proxmox.Node = configInputEnvString(cfg, "proxmox", cfg.Proxmox.Node, "CRABBOX_PROXMOX_NODE")
-	cfg.Proxmox.TemplateID = configInputEnvInt(cfg, "proxmox", cfg.Proxmox.TemplateID, "CRABBOX_PROXMOX_TEMPLATE_ID")
-	cfg.Proxmox.Storage = configInputEnvString(cfg, "proxmox", cfg.Proxmox.Storage, "CRABBOX_PROXMOX_STORAGE")
-	cfg.Proxmox.Pool = configInputEnvString(cfg, "proxmox", cfg.Proxmox.Pool, "CRABBOX_PROXMOX_POOL")
-	cfg.Proxmox.Bridge = configInputEnvString(cfg, "proxmox", cfg.Proxmox.Bridge, "CRABBOX_PROXMOX_BRIDGE")
-	cfg.Proxmox.User = configInputEnvString(cfg, "proxmox", cfg.Proxmox.User, "CRABBOX_PROXMOX_USER")
-	cfg.Proxmox.WorkRoot = configInputEnvString(cfg, "proxmox", cfg.Proxmox.WorkRoot, "CRABBOX_PROXMOX_WORK_ROOT")
-	if value, ok := getenvBool("CRABBOX_PROXMOX_FULL_CLONE"); ok {
-		cfg.Proxmox.FullClone = value
-		recordConfigInput(cfg, "proxmox", configInputEnvironment, true)
-	}
-	if value, ok := getenvBool("CRABBOX_PROXMOX_INSECURE_TLS"); ok {
-		cfg.Proxmox.InsecureTLS = value
-		recordConfigInput(cfg, "proxmox", configInputEnvironment, true)
-		cfg.credentialProvenance.proxmoxInsecureTLS = credentialSourceEnvironment
+	if err := applyProxmoxEnvironmentConfig(cfg); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.Firecracker.applyEnv()
@@ -5802,32 +5635,10 @@ func applyEnv(cfg *Config) error {
 	}
 	cfg.Coder.CLIPath = expandUserPath(cfg.Coder.CLIPath)
 	cfg.Coder.RichParameterFile = expandUserPath(cfg.Coder.RichParameterFile)
-	if value, ok := firstNonEmptyEnv("CRABBOX_DAYTONA_API_KEY", "DAYTONA_API_KEY"); ok {
-		cfg.Daytona.APIKey = value
-		recordConfigInput(cfg, "daytona", configInputEnvironment, true)
-		cfg.credentialProvenance.daytonaAPIKey = credentialSourceEnvironment
+	if err := applyDaytonaEnvironmentConfig(cfg); err != nil {
+		return err
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_DAYTONA_JWT_TOKEN", "DAYTONA_JWT_TOKEN"); ok {
-		cfg.Daytona.JWTToken = value
-		recordConfigInput(cfg, "daytona", configInputEnvironment, true)
-		cfg.credentialProvenance.daytonaJWTToken = credentialSourceEnvironment
-	}
-	cfg.Daytona.OrganizationID = configInputEnvString(cfg, "daytona", cfg.Daytona.OrganizationID, "CRABBOX_DAYTONA_ORGANIZATION_ID", "DAYTONA_ORGANIZATION_ID")
-	if value, ok := firstNonEmptyEnv("CRABBOX_DAYTONA_API_URL", "DAYTONA_API_URL"); ok {
-		cfg.Daytona.APIURL = value
-		recordConfigInput(cfg, "daytona", configInputEnvironment, true)
-		cfg.credentialProvenance.daytonaAPIURL = credentialSourceEnvironment
-	}
-	cfg.Daytona.Snapshot = configInputEnvString(cfg, "daytona", cfg.Daytona.Snapshot, "CRABBOX_DAYTONA_SNAPSHOT", "DAYTONA_SNAPSHOT")
-	cfg.Daytona.Target = configInputEnvString(cfg, "daytona", cfg.Daytona.Target, "CRABBOX_DAYTONA_TARGET", "DAYTONA_TARGET")
-	cfg.Daytona.User = configInputEnvString(cfg, "daytona", cfg.Daytona.User, "CRABBOX_DAYTONA_USER")
-	cfg.Daytona.WorkRoot = configInputEnvString(cfg, "daytona", cfg.Daytona.WorkRoot, "CRABBOX_DAYTONA_WORK_ROOT")
-	if value := os.Getenv("CRABBOX_DAYTONA_SSH_GATEWAY_HOST"); value != "" {
-		cfg.Daytona.SSHGatewayHost = value
-		recordConfigInput(cfg, "daytona", configInputEnvironment, true)
-		cfg.credentialProvenance.daytonaSSHGateway = credentialSourceEnvironment
-	}
-	cfg.Daytona.SSHAccessMinutes = configInputEnvInt(cfg, "daytona", cfg.Daytona.SSHAccessMinutes, "CRABBOX_DAYTONA_SSH_ACCESS_MINUTES")
+
 	{
 		applied, err := cfg.E2B.applyEnv()
 		recordConfigInput(cfg, "e2b", configInputEnvironment, applied.InputAccepted)

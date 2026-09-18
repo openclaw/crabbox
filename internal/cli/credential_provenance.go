@@ -170,10 +170,11 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 		return
 	}
 	provenance := &cfg.credentialProvenance
-	if flagWasSet(fs, "proxmox-api-url") {
+	proxmoxFlags := ProxmoxConfigFlagPresence(fs)
+	if proxmoxFlags.APIURL {
 		provenance.proxmoxAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "proxmox-insecure-tls") {
+	if proxmoxFlags.InsecureTLS {
 		provenance.proxmoxInsecureTLS = credentialSourceFlag
 	}
 	morphFlags := MorphConfigFlagPresence(fs)
@@ -183,10 +184,11 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if morphFlags.SSHGatewayHost {
 		provenance.morphSSHGatewayHost = credentialSourceFlag
 	}
-	if flagWasSet(fs, "daytona-api-url") {
+	daytonaFlags := DaytonaConfigFlagPresence(fs)
+	if daytonaFlags.APIURL {
 		provenance.daytonaAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "daytona-ssh-gateway-host") {
+	if daytonaFlags.SSHGatewayHost {
 		provenance.daytonaSSHGateway = credentialSourceFlag
 	}
 	e2bFlags := E2BConfigFlagPresence(fs)
