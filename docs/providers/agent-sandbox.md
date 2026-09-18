@@ -59,20 +59,20 @@ hydration, Tailscale, or the normal SSH/rsync data plane.
 
 ## Supported Agent Sandbox Version
 
-Crabbox currently targets the Agent Sandbox `v0.5.0rc1` prerelease API:
+Crabbox uses the Agent Sandbox beta API:
 
 - `agents.x-k8s.io/v1beta1`
 - `extensions.agents.x-k8s.io/v1beta1`
 
-This is intentional because `v0.5.0` is expected to promote the same beta API
-soon. Crabbox does not carry `v1alpha1` compatibility. Until stable `v0.5.0`
-ships, pin the controller and CRDs to `v0.5.0rc1` or a newer release that still
-serves these `v1beta1` resources.
+The fixed lease-ID lifecycle is natively qualified against Agent Sandbox
+`v1.0.0`. Pin the controller and CRDs together to that release. Merely serving
+the same resource versions does not qualify another controller's foreground
+deletion behavior. Crabbox does not carry `v1alpha1` compatibility.
 
 Official project and release references:
 
 - [Agent Sandbox project](https://github.com/kubernetes-sigs/agent-sandbox)
-- [Agent Sandbox v0.5.0rc1 release](https://github.com/kubernetes-sigs/agent-sandbox/releases/tag/v0.5.0rc1)
+- [Agent Sandbox v1.0.0 release](https://github.com/kubernetes-sigs/agent-sandbox/releases/tag/v1.0.0)
 
 ## Commands
 
