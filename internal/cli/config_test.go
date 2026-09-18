@@ -18868,3 +18868,344 @@ func TestXCPNgBindingOrdinarySources(t *testing.T) {
 		}
 	}
 }
+
+func TestSuperserveBindingOrdinarySources(t *testing.T) {
+	clearConfigEnv(t)
+	for _, source := range []string{"user", "repo", "env"} {
+		for _, raw := range []string{"", "  ", " fixture "} {
+			for _, number := range []int{0, 7} {
+				cfg := baseConfig()
+				cfg.Superserve.BaseURL, cfg.Superserve.Template, cfg.Superserve.Snapshot, cfg.Superserve.Workdir = "prior", "prior", "prior", "prior"
+				cfg.Superserve.TimeoutSecs, cfg.Superserve.ExecTimeoutSecs, cfg.Superserve.ForgetMissing = 19, 23, true
+				want := cfg.Superserve
+				want.TimeoutSecs, want.ExecTimeoutSecs, want.ForgetMissing = number, number, false
+				if source == "env" {
+					for _, suffix := range []string{"BASE_URL", "TEMPLATE", "SNAPSHOT", "WORKDIR"} {
+						t.Setenv("CRABBOX_SUPERSERVE_"+suffix, raw)
+					}
+					for _, suffix := range []string{"TIMEOUT_SECS", "EXEC_TIMEOUT_SECS"} {
+						t.Setenv("CRABBOX_SUPERSERVE_"+suffix, strconv.Itoa(number))
+					}
+					t.Setenv("CRABBOX_SUPERSERVE_FORGET_MISSING", "false")
+					if raw != "" {
+						want.BaseURL, want.Template, want.Snapshot, want.Workdir = raw, raw, raw, raw
+					}
+					if err := applyEnv(&cfg); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					input := &fileSuperserveConfig{BaseURL: raw, Template: &raw, Snapshot: &raw, Workdir: &raw, TimeoutSecs: &number, ExecTimeoutSecs: &number, ForgetMissing: new(false)}
+					before, err := yaml.Marshal(input)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want.Template, want.Snapshot, want.Workdir = raw, raw, raw
+					if source == "user" && strings.TrimSpace(raw) != "" {
+						want.BaseURL = raw
+					}
+					if err := applyFileConfigWithTrust(&cfg, fileConfig{Superserve: input}, source == "user"); err != nil {
+						t.Fatal(err)
+					}
+					after, err := yaml.Marshal(input)
+					if err != nil || !bytes.Equal(before, after) {
+						t.Fatal("file DTO mutated")
+					}
+				}
+				if !reflect.DeepEqual(cfg.Superserve, want) {
+					t.Fatalf("source=%s raw=%q number=%d: values changed", source, raw, number)
+				}
+				inputSource := configInputRepo
+				if source == "user" {
+					inputSource = configInputUser
+				}
+				if source == "env" {
+					inputSource = configInputEnvironment
+				}
+				ledger := Config{}
+				recordConfigInput(&ledger, "superserve", inputSource, true)
+				if cfg.inputProvenance["superserve"] != ledger.inputProvenance["superserve"] {
+					t.Fatal("accepted-source fact changed")
+				}
+			}
+		}
+	}
+}
+
+func TestSuperserveBindingAliasesAndIgnoredInputs(t *testing.T) {
+	clearConfigEnv(t)
+	for _, primary := range []string{"", "  ", "fixture-prior", "fixture-primary"} {
+		for _, alias := range []string{"", "fixture-alias"} {
+			t.Setenv("CRABBOX_SUPERSERVE_BASE_URL", primary)
+			t.Setenv("SUPERSERVE_BASE_URL", alias)
+			t.Setenv("CRABBOX_SUPERSERVE_FORGET_MISSING", "invalid")
+			cfg := baseConfig()
+			cfg.Superserve.BaseURL = "fixture-prior"
+			want := cfg.Superserve
+			accepted := primary != "" || alias != ""
+			if primary != "" {
+				want.BaseURL = primary
+			} else if alias != "" {
+				want.BaseURL = alias
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Superserve, want) || (cfg.inputProvenance["superserve"].values != 0) != accepted {
+				t.Fatal("alias precedence or ignored environment input changed")
+			}
+		}
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"", "  ", " fixture "} {
+			cfg := baseConfig()
+			want := cfg.Superserve
+			if trusted && strings.TrimSpace(raw) != "" {
+				want.BaseURL = raw
+			}
+			if err := applyFileConfigWithTrust(&cfg, fileConfig{Superserve: &fileSuperserveConfig{BaseURL: raw}}, trusted); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Superserve, want) || (cfg.inputProvenance["superserve"].values != 0) != (trusted && strings.TrimSpace(raw) != "") {
+				t.Fatal("blank URL or omitted pointer admission changed")
+			}
+		}
+	}
+}
+
+func TestSuperserveBindingPartialIntegerErrors(t *testing.T) {
+	clearConfigEnv(t)
+	for _, source := range []string{"file", "env"} {
+		for _, second := range []bool{false, true} {
+			for _, earlier := range []bool{false, true} {
+				for _, raw := range []string{"-1", "invalid", " 7 "} {
+					if source == "file" && raw != "-1" {
+						continue
+					}
+					cfg := baseConfig()
+					cfg.Superserve.Template, cfg.Superserve.TimeoutSecs, cfg.Superserve.ExecTimeoutSecs = "prior", 19, 23
+					cfg.Superserve.NetworkAllowOut, cfg.Superserve.NetworkDenyOut = []string{"prior"}, []string{"prior"}
+					want := cfg.Superserve
+					if earlier {
+						want.Template = "fixture"
+					}
+					if second {
+						want.TimeoutSecs = 7
+					}
+					var err error
+					wantError := "superserve timeoutSecs must be non-negative"
+					if second {
+						wantError = "superserve execTimeoutSecs must be non-negative"
+					}
+					if source == "file" {
+						file := &fileSuperserveConfig{TimeoutSecs: new(-1), ExecTimeoutSecs: new(7), NetworkAllowOut: []string{"new"}, NetworkDenyOut: []string{"new"}, ForgetMissing: new(true)}
+						if earlier {
+							file.Template = new("fixture")
+						}
+						if second {
+							file.TimeoutSecs, file.ExecTimeoutSecs = new(7), new(-1)
+						}
+						err = applyFileConfigWithTrust(&cfg, fileConfig{Superserve: file}, false)
+					} else {
+						template := ""
+						if earlier {
+							template = "fixture"
+						}
+						t.Setenv("CRABBOX_SUPERSERVE_TEMPLATE", template)
+						t.Setenv("CRABBOX_SUPERSERVE_TIMEOUT_SECS", raw)
+						t.Setenv("CRABBOX_SUPERSERVE_EXEC_TIMEOUT_SECS", "7")
+						key := "CRABBOX_SUPERSERVE_TIMEOUT_SECS"
+						want.TimeoutSecs = 0
+						if second {
+							t.Setenv(key, "7")
+							key = "CRABBOX_SUPERSERVE_EXEC_TIMEOUT_SECS"
+							t.Setenv(key, raw)
+							want.TimeoutSecs, want.ExecTimeoutSecs = 7, 0
+						}
+						t.Setenv("CRABBOX_SUPERSERVE_NETWORK_ALLOW_OUT", "new")
+						t.Setenv("CRABBOX_SUPERSERVE_NETWORK_DENY_OUT", "new")
+						t.Setenv("CRABBOX_SUPERSERVE_FORGET_MISSING", "true")
+						wantError = key + " must be an integer"
+						if raw == "-1" {
+							wantError = key + " must be non-negative"
+						}
+						err = applyEnv(&cfg)
+					}
+					if err == nil || err.Error() != wantError || !reflect.DeepEqual(cfg.Superserve, want) {
+						t.Fatalf("source=%s second=%v earlier=%v raw=%q: partial state/error changed: %v", source, second, earlier, raw, err)
+					}
+					if (cfg.inputProvenance["superserve"].values != 0) != (earlier || second) {
+						t.Fatal("partial accepted-input facts changed")
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestSuperserveBindingListStorageAndFacts(t *testing.T) {
+	clearConfigEnv(t)
+	for _, trusted := range []bool{false, true} {
+		for _, prior := range [][]string{nil, {}, {"prior"}} {
+			for _, raw := range [][]string{nil, {}, {" "}, {" a ", "", "a", "none", "x,y"}} {
+				cfg := baseConfig()
+				cfg.Superserve.NetworkAllowOut, cfg.Superserve.NetworkDenyOut = prior, prior
+				file := &fileSuperserveConfig{NetworkAllowOut: raw, NetworkDenyOut: raw}
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{Superserve: file}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				want := prior
+				if raw != nil {
+					want = []string{}
+					if len(raw) > 1 {
+						want = []string{"a", "a", "none", "x,y"}
+					}
+				}
+				if !reflect.DeepEqual(cfg.Superserve.NetworkAllowOut, want) || !reflect.DeepEqual(cfg.Superserve.NetworkDenyOut, want) || (cfg.inputProvenance["superserve"].values != 0) != (raw != nil) {
+					t.Fatal("list presence, shape or acceptance changed")
+				}
+				if len(want) > 0 && raw != nil {
+					cfg.Superserve.NetworkAllowOut[0] = "changed"
+					if cfg.Superserve.NetworkDenyOut[0] != "a" || raw[0] != " a " {
+						t.Fatal("normalized lists share input or each other")
+					}
+				}
+				if raw == nil && len(prior) > 0 && &cfg.Superserve.NetworkAllowOut[0] != &prior[0] {
+					t.Fatal("ignored nil list lost inherited storage")
+				}
+			}
+		}
+	}
+}
+
+func TestMXCBindingDefaultsAndFile(t *testing.T) {
+	wantDefaults := MXCConfig{CLIPath: "wxc-exec.exe", Version: "0.6.0-alpha", Containment: "processcontainer", Network: "block"}
+	if !reflect.DeepEqual(baseConfig().MXC, wantDefaults) {
+		t.Fatalf("defaults=%#v", baseConfig().MXC)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, field := range []string{"CLIPath", "Version", "Containment", "Network", "ReadOnlyPaths", "ReadWritePaths", "AllowedHosts", "BlockedHosts", "AllowDACLMutation", "AllowWindowsUI", "Experimental"} {
+			for _, variant := range []string{"absent", "empty", "value"} {
+				cfg := Config{MXC: MXCConfig{CLIPath: "prior", Version: "prior", Containment: "prior", Network: "prior", ReadOnlyPaths: []string{"prior"}, ReadWritePaths: []string{"prior"}, AllowedHosts: []string{"prior"}, BlockedHosts: []string{"prior"}, AllowDACLMutation: true, AllowWindowsUI: true, Experimental: true}}
+				file := fileMXCConfig{}
+				dst := reflect.ValueOf(&cfg.MXC).Elem().FieldByName(field)
+				src := reflect.ValueOf(&file).Elem().FieldByName(field)
+				want := dst.Interface()
+				accepted := false
+				if variant != "absent" {
+					switch dst.Kind() {
+					case reflect.String:
+						raw := ""
+						if variant == "value" {
+							raw = " fixture "
+						}
+						src.SetString(raw)
+						if raw != "" {
+							want = raw
+							accepted = true
+						}
+					case reflect.Slice:
+						raw := []string{}
+						if variant == "value" {
+							raw = []string{" a ", "", "a", "none", "x,y"}
+						}
+						src.Set(reflect.ValueOf(raw))
+						want = append([]string(nil), raw...)
+						accepted = true
+					case reflect.Bool:
+						raw := variant == "value"
+						src.Set(reflect.ValueOf(&raw))
+						want = raw
+						accepted = true
+					}
+				}
+				before, err := yaml.Marshal(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{MXC: &file}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(dst.Interface(), want) {
+					t.Fatalf("%s/%s got=%#v want=%#v", field, variant, dst.Interface(), want)
+				}
+				source := configInputRepo
+				if trusted {
+					source = configInputUser
+				}
+				var ledger configInputLedger
+				if accepted {
+					ledger = ledger.withInput("mxc", source, configInputValue)
+				}
+				if cfg.inputProvenance["mxc"] != ledger["mxc"] {
+					t.Fatalf("%s/%s accepted facts=%+v", field, variant, cfg.inputProvenance["mxc"])
+				}
+				if dst.Kind() == reflect.Slice && dst.Len() > 0 {
+					dst.Index(0).SetString("mutated-result")
+				}
+				after, err := yaml.Marshal(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(before, after) {
+					t.Fatal("file input storage mutated")
+				}
+			}
+		}
+	}
+}
+
+func TestMXCBindingEnvironment(t *testing.T) {
+	fields := map[string]string{"CLIPath": "CLI", "Version": "VERSION", "Containment": "CONTAINMENT", "Network": "NETWORK", "ReadOnlyPaths": "READONLY_PATHS", "ReadWritePaths": "READWRITE_PATHS", "AllowedHosts": "ALLOWED_HOSTS", "BlockedHosts": "BLOCKED_HOSTS", "AllowDACLMutation": "ALLOW_DACL_MUTATION", "AllowWindowsUI": "ALLOW_WINDOWS_UI", "Experimental": "EXPERIMENTAL"}
+	for field, suffix := range fields {
+		for _, raw := range []string{"", "  ", " a, ,a,none ", "false", "true"} {
+			t.Run(field+"/"+raw, func(t *testing.T) {
+				clearConfigEnv(t)
+				t.Setenv("CRABBOX_MXC_"+suffix, raw)
+				cfg := Config{}
+				dst := reflect.ValueOf(&cfg.MXC).Elem().FieldByName(field)
+				var want any
+				accepted := raw != ""
+				switch dst.Kind() {
+				case reflect.String:
+					dst.SetString("prior")
+					want = "prior"
+					if accepted {
+						want = raw
+					}
+				case reflect.Slice:
+					dst.Set(reflect.ValueOf([]string{"prior"}))
+					want = []string{"prior"}
+					switch raw {
+					case "":
+					case "  ":
+						want = []string{}
+					case " a, ,a,none ":
+						want = []string{"a", "a", "none"}
+					default:
+						want = []string{raw}
+					}
+				case reflect.Bool:
+					dst.SetBool(true)
+					want = true
+					accepted = raw == "false" || raw == "true"
+					if raw == "false" {
+						want = false
+					}
+				}
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(dst.Interface(), want) {
+					t.Fatalf("got=%#v want=%#v", dst.Interface(), want)
+				}
+				var ledger configInputLedger
+				if accepted {
+					ledger = ledger.withInput("mxc", configInputEnvironment, configInputValue)
+				}
+				if cfg.inputProvenance["mxc"] != ledger["mxc"] {
+					t.Fatalf("facts=%+v", cfg.inputProvenance["mxc"])
+				}
+			})
+		}
+	}
+}

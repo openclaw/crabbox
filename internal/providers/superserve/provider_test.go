@@ -265,3 +265,72 @@ func TestSuperserveListFlagValueContract(t *testing.T) {
 		}
 	}
 }
+
+func TestSuperserveBindingFlagValidationPhases(t *testing.T) {
+	for _, provider := range []string{providerName, " SuPeRsErVe ", "fixture-other"} {
+		for _, generic := range []string{"class", "type"} {
+			cfg := testConfig()
+			cfg.Provider = provider
+			cfg.Superserve.TimeoutSecs = -1
+			before := cfg
+			fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+			fs.String(generic, "", "")
+			values := (Provider{}).RegisterFlags(fs, cfg)
+			if err := (Provider{}).ApplyFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+				t.Fatal("foreign values gained validation or mutation")
+			}
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err == nil || !strings.Contains(err.Error(), "timeoutSecs") || !reflect.DeepEqual(cfg, before) {
+				t.Fatal("typed unvisited values skipped final validation")
+			}
+			if err := fs.Set(generic, "fixture"); err != nil {
+				t.Fatal(err)
+			}
+			err := (Provider{}).ApplyFlags(&cfg, fs, struct{}{})
+			if provider == "fixture-other" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "--"+generic) {
+				t.Fatal("selected sizing guard moved after type assertion")
+			}
+		}
+		cfg := testConfig()
+		cfg.Provider = provider
+		fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+		values := (Provider{}).RegisterFlags(fs, cfg)
+		if err := fs.Parse([]string{"--superserve-template=fixture", "--superserve-timeout-secs=-1", "--superserve-exec-timeout-secs=-2", "--superserve-network-allow-out= a, ,a ", "--superserve-network-deny-out=192.0.2.0/24", "--superserve-forget-missing=true"}); err != nil {
+			t.Fatal(err)
+		}
+		want := cfg
+		want.Superserve.Template, want.Superserve.TimeoutSecs, want.Superserve.ExecTimeoutSecs = "fixture", -1, -2
+		want.Superserve.NetworkAllowOut, want.Superserve.NetworkDenyOut, want.Superserve.ForgetMissing = []string{"a", "a"}, []string{"192.0.2.0/24"}, true
+		core.RecordProviderFlagInputs(&want, true, "superserve")
+		err := (Provider{}).ApplyFlags(&cfg, fs, values)
+		if err == nil || !strings.Contains(err.Error(), "timeoutSecs") || !reflect.DeepEqual(cfg, want) {
+			t.Fatal("final validation moved before later assignments or accepted facts")
+		}
+	}
+}
+
+func TestSuperserveBindingDenyListFlags(t *testing.T) {
+	for _, raw := range []string{"", "  ", " , ", " 192.0.2.0/24, ,192.0.2.0/24 "} {
+		cfg := testConfig()
+		cfg.Superserve.NetworkDenyOut = []string{"198.51.100.0/24"}
+		fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+		values := (Provider{}).RegisterFlags(fs, cfg)
+		if err := fs.Parse([]string{"--superserve-network-deny-out=203.0.113.0/24", "--superserve-network-deny-out=" + raw}); err != nil {
+			t.Fatal(err)
+		}
+		want := cfg
+		want.Superserve.NetworkDenyOut = []string{}
+		if strings.Contains(raw, "192.") {
+			want.Superserve.NetworkDenyOut = []string{"192.0.2.0/24", "192.0.2.0/24"}
+		}
+		core.RecordProviderFlagInputs(&want, true, "superserve")
+		for repeat := 0; repeat < 2; repeat++ {
+			if err := (Provider{}).ApplyFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("deny scalar flag contract changed: %v", err)
+			}
+		}
+	}
+}

@@ -139,6 +139,22 @@ Callers still own source presence, comma splitting, first-visit reset, append
 versus replacement, and any `none` sentinel. DockerSandbox's raw file lists and
 whole-occurrence repeated flags keep their different contracts.
 
+Superserve declares all nine fields in `internal/cli/config_superserve.go`.
+Its two value-backed YAML lists use `fileList:"present-normalized"` with
+`fileStorage:"value"`: nil inherits, every nonnil input normalizes into fresh
+storage, and explicit empty input clears to a nonnil empty list. Ordinary
+raw-nonempty environment input and joined-default scalar flags retain their
+separate comma-splitting and presence rules. The runtime API key stays absent
+from config, YAML and argv.
+
+A shallow file snapshot preserves trusted-only, trimmed-blank BaseURL admission
+without changing persistence. Checked file integers retain their previous value
+on failure, while strict environment integers clear the failing field to zero;
+wrappers record earlier accepted inputs before returning either error. The
+provider keeps its sizing guard before typed values and unconditional validation
+after all visited assignments. Configured URL/workdir fallback constants share
+generated values without moving runtime fallback or validation policy.
+
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
@@ -525,7 +541,7 @@ handling. An explicitly present empty provider block remains `{}`.
 | Kind | Required file rule |
 | --- | --- |
 | `string` | `fileIgnoreEmpty:"true"` |
-| `[]string` | `fileList:"nonempty-raw"`, `fileList:"nonempty-normalized"`, or nil-presence/cloning `fileList:"raw"` |
+| `[]string` | `fileList:"nonempty-raw"`, `fileList:"nonempty-normalized"`, `fileList:"present-normalized"`, or nil-presence/cloning `fileList:"raw"` |
 | `int`, `int64` | `fileInt:"positive"` or `fileInt:"nonzero"` |
 | `float64` | `fileFloat:"positive"` |
 | `time.Duration` | raw string with `duration:"positive-overlay"` |
@@ -619,6 +635,19 @@ Apple Machine flags with their existing names and help. They are not aliases or
 a configurable prefix factory. Provider wrappers retain image markers, generic
 user/root propagation, and the exact selected Container defaults call. OS-image
 selection and native Container/Machine behavior remain outside this owner.
+
+## MXC's inert binding owner
+
+`config_mxc.go` declares all eleven file/environment/flag bindings and the four
+compiled string defaults. File lists retain value storage, ignore nil, and clone
+raw entries (an explicit empty list clears to nil). Environment lists accept raw
+nonempty input and normalize comma-separated values to a nonnil empty slice when
+blank; `none` is literal. Scalar flags use joined defaults and last-value-wins,
+normalizing an empty result to nil. These are distinct source contracts.
+
+Provider wrappers retain accepted-input recording and its synthesized-input
+suppression. No binding selects a provider or performs containment validation;
+MXC execution and runtime policy remain in the adapter.
 
 ## Adding a field
 
@@ -728,6 +757,12 @@ selection and native Container/Machine behavior remain outside this owner.
    it adds an exact nonempty check without trimming, changing environment/flag
    behavior, or changing other fields' presence semantics.
    Existing list bindings can opt into fixed source-specific rules on `[]string`:
+   `fileList:"present-normalized"` requires explicit `fileStorage:"value"` and
+   file-admitted `[]string`. It ignores nil input and normalizes every nonnil
+   input, including an empty list, using `NormalizeList`. Accepted empty or
+   all-blank input yields fresh nonnil empty storage; values and source DTOs do
+   not share backing arrays. Value-slice `omitempty` remains unchanged. The mode
+   adds no environment or flag policy, and no new source grant.
    `fileList:"raw"` clones a supplied YAML list without normalization, preserving
    raw elements, order, and duplicates; omission/null preserves the prior value,
    while an explicit empty list clears it. `fileList:"nonempty-raw"` instead

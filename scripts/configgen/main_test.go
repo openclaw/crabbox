@@ -3664,6 +3664,7 @@ func TestGenerateFileInputAccepted(t *testing.T) {
 		{"raw-pointer-list", "[]string", `fileList:"raw"`, `[]string{"same"}`, `{nil,false,false},{ptr([]string{}),true,false},{ptr([]string{"same"}),true,false}`},
 		{"raw-value-list", "[]string", `fileList:"raw" fileStorage:"value"`, `[]string{"same"}`, `{nil,false,false},{[]string{},true,false},{[]string{"same"},true,false}`},
 		{"nonempty-raw-list", "[]string", `fileList:"nonempty-raw" fileStorage:"value"`, `[]string{"same"}`, `{nil,false,false},{[]string{},false,false},{[]string{""},true,false},{[]string{"same"},true,false}`},
+		{"present-normalized-list", "[]string", `fileList:"present-normalized" fileStorage:"value"`, `[]string{"same"}`, `{nil,false,false},{[]string{},true,false},{[]string{" "},true,false},{[]string{"same"},true,false}`},
 		{"nonempty-normalized-list", "[]string", `fileList:"nonempty-normalized" fileStorage:"value"`, `[]string{"same"}`, `{nil,false,false},{[]string{},false,false},{[]string{" "},true,false},{[]string{"same"},true,false}`},
 		{"duration", "time.Duration", `duration:"positive-overlay" fileStorage:"value"`, `7*time.Second`, `{"",false,false},{"bad",false,false},{"0s",false,false},{" 7s ",false,false},{"7s",true,false}`},
 	} {
@@ -4015,4 +4016,108 @@ func TestFileFlagContract(t *testing.T) {
  }
 }
 `)
+}
+
+const presentNormalizedListSample = "package cli\ntype PilotConfig struct { Items []string `sources:\"user,repo,env,flag\" config:\"items\" env:\"ITEMS\" flag:\"items\" help:\"Items\" fileList:\"present-normalized\" fileStorage:\"value\"` }"
+
+func TestSchemaPresentNormalizedListFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, source string }{
+		{"missing storage", strings.Replace(presentNormalizedListSample, ` fileStorage:"value"`, "", 1)},
+		{"empty storage", strings.Replace(presentNormalizedListSample, `fileStorage:"value"`, `fileStorage:""`, 1)},
+		{"pointer storage", strings.Replace(presentNormalizedListSample, `fileStorage:"value"`, `fileStorage:"pointer"`, 1)},
+		{"no file", `package cli; type PilotConfig struct { Items []string ` + "`" + `sources:"flag" flag:"items" help:"Items" fileList:"present-normalized" fileStorage:"value"` + "`" + ` }`},
+		{"wrong kind", strings.Replace(presentNormalizedListSample, "Items []string", "Items string", 1)},
+		{"empty mode", strings.Replace(presentNormalizedListSample, `fileList:"present-normalized"`, `fileList:""`, 1)},
+		{"unknown mode", strings.Replace(presentNormalizedListSample, `fileList:"present-normalized"`, `fileList:"normalized-present"`, 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := parseSchema([]byte(tc.source), "PilotConfig", "pilot"); err == nil {
+				t.Fatal("unsupported present-normalized schema accepted")
+			}
+		})
+	}
+	if _, err := parseSchema([]byte(presentNormalizedListSample), "PilotConfig", "pilot"); err != nil {
+		t.Fatalf("valid present-normalized schema rejected: %v", err)
+	}
+}
+
+func TestGeneratePresentNormalizedList(t *testing.T) {
+	s, err := parseSchema([]byte(presentNormalizedListSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(output, again) {
+		t.Fatal("nondeterministic present-normalized output")
+	}
+	if !strings.Contains(strings.Join(strings.Fields(string(output)), " "), "Items []string `yaml:\"items,omitempty\"`") {
+		t.Fatal("value DTO storage changed")
+	}
+	coreSource, err := os.ReadFile("../../internal/cli/config.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	helpers := ""
+	for _, name := range []string{"splitCommaList", "NormalizeList"} {
+		start := strings.Index(string(coreSource), "func "+name+"(")
+		if start < 0 {
+			t.Fatalf("missing helper %s", name)
+		}
+		rest := string(coreSource)[start:]
+		end := strings.Index(rest, "\nfunc ")
+		if end < 0 {
+			t.Fatalf("missing end of helper %s", name)
+		}
+		helpers += rest[:end] + "\n"
+	}
+	const behavior = `package cli
+import("flag";"reflect";"strings";"testing")
+func flagWasSet(fs *flag.FlagSet,name string)bool{found:=false;fs.Visit(func(f *flag.Flag){if f.Name==name{found=true}});return found}
+func TestPresentNormalizedFileList(t *testing.T){
+ for _,prior:=range [][]string{nil,{}, {"prior"}}{
+  for _,file:=range []*filePilotConfig{nil,{}, {Items:nil}}{
+   cfg:=PilotConfig{Items:prior};got,err:=cfg.applyFile(file)
+   if err!=nil||got.InputAccepted||!reflect.DeepEqual(cfg.Items,prior){t.Fatal("nil input changed prior or accepted")}
+   if len(prior)>0&&&cfg.Items[0]!=&prior[0]{t.Fatal("nil input changed storage")}
+  }
+  for _,raw:=range [][]string{{},{" "},{" a ","","a","none","x,y"}}{
+   cfg:=PilotConfig{Items:prior};file:=filePilotConfig{Items:raw};got,err:=cfg.applyFile(&file)
+   want:=[]string{};if len(raw)>1{want=[]string{"a","a","none","x,y"}}
+   if err!=nil||!got.InputAccepted||!reflect.DeepEqual(cfg.Items,want){t.Fatalf("present normalization: %#v %v",cfg.Items,err)}
+   if len(want)>0{cfg.Items[0]="changed";if raw[0]!=" a "{t.Fatal("normalization changed or shared source")}}
+   if again,err:=cfg.applyFile(&file);err!=nil||!again.InputAccepted||!reflect.DeepEqual(cfg.Items,want){t.Fatal("equal/empty reapplication was not accepted")}
+  }
+ }
+}
+func TestOrdinaryListSourcesRemainIndependent(t *testing.T){
+ for _,raw:=range []string{"","  "," , "," a, ,a,none "}{
+  cfg:=PilotConfig{Items:[]string{"prior"}};t.Setenv("ITEMS",raw);got,err:=cfg.applyEnv()
+  want:=[]string{};if strings.Contains(raw,"a,"){want=[]string{"a","a","none"}}
+  envWant:=want;if raw==""{envWant=[]string{"prior"}}
+  if err!=nil||got.InputAccepted!=(raw!="")||!reflect.DeepEqual(cfg.Items,envWant){t.Fatal("ordinary environment changed")}
+  cfg.Items=[]string{" prior "};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);values:=RegisterPilotConfigFlags(fs,cfg)
+  if fs.Lookup("items").DefValue!=" prior "{t.Fatal("registration changed joined defaults")}
+  if got,err:=values.Apply(&cfg,fs);err!=nil||got.InputAccepted||!reflect.DeepEqual(cfg.Items,[]string{" prior "}){t.Fatal("unvisited flags changed prior")}
+  if err:=fs.Parse([]string{"--items=old","--items="+raw});err!=nil{t.Fatal(err)}
+  if got,err:=values.Apply(&cfg,fs);err!=nil||!got.InputAccepted||!reflect.DeepEqual(cfg.Items,want){t.Fatal("ordinary scalar flags changed")}
+ }
+}
+`
+	runScalarFixture(t, presentNormalizedListSample, output, behavior+helpers)
+}
+
+func TestSuperserveGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_superserve.go", "../../internal/cli/config_superserve_generated.go", "SuperserveConfig", "superserve", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMXCGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_mxc.go", "../../internal/cli/config_mxc_generated.go", "MXCConfig", "mxc", true); err != nil {
+		t.Fatal(err)
+	}
 }

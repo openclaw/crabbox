@@ -20,6 +20,7 @@ import (
 )
 
 type field struct {
+	fileListPresentNormalized                                                                                                                                                    bool
 	envIntCheckedAlias                                                                                                                                                           bool
 	envSplitBefore                                                                                                                                                               bool
 	flagDurationRawPositive                                                                                                                                                      bool
@@ -343,7 +344,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			admitted bool
 			values   map[string]*bool
 		}{
-			{"fileList", !f.noFile, map[string]*bool{"raw": &f.fileListRaw, "nonempty-raw": &f.fileListNonemptyRaw, "nonempty-normalized": &f.fileListNonemptyNormalized}},
+			{"fileList", !f.noFile, map[string]*bool{"raw": &f.fileListRaw, "nonempty-raw": &f.fileListNonemptyRaw, "nonempty-normalized": &f.fileListNonemptyNormalized, "present-normalized": &f.fileListPresentNormalized}},
 			{"envList", !f.noEnv, map[string]*bool{"presence": &f.envListPresence, "csv": &f.envListCSV, "trimmed-nonempty": &f.envListTrimmedNonempty}},
 			{"flagList", !f.noFlag, map[string]*bool{"replace-append": &f.flagListReplaceAppend, "append-trimmed": &f.flagListAppendTrimmed, "empty-scalar": &f.flagListEmptyScalar, "scalar-empty-nil": &f.flagListScalarEmptyNil, "csv": &f.flagListCSV}},
 		} {
@@ -441,13 +442,16 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 				return s, fmt.Errorf("%s default must be non-negative", f.name)
 			}
 		}
+		if f.fileListPresentNormalized && tags.Get("fileStorage") != "value" {
+			return s, fmt.Errorf("%s: fileList present-normalized requires fileStorage value", f.name)
+		}
 		if value, ok := tags.Lookup("fileStorage"); ok {
 			eligible := false
 			switch f.kind {
 			case "string":
 				eligible = f.fileIgnoreEmpty
 			case "[]string":
-				eligible = f.fileListNonemptyRaw || f.fileListRaw || f.fileListNonemptyNormalized
+				eligible = f.fileListNonemptyRaw || f.fileListRaw || f.fileListNonemptyNormalized || f.fileListPresentNormalized
 			case "int", "int64":
 				eligible = f.fileIntPositive || f.fileIntNonzero
 			case "float64":

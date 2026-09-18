@@ -498,22 +498,6 @@ type IsloConfig struct {
 	IdlePause bool
 }
 
-// SuperserveConfig configures the delegated Superserve provider. The API key is
-// intentionally absent: it is read at runtime from
-// CRABBOX_SUPERSERVE_API_KEY / SUPERSERVE_API_KEY and sent only in request
-// headers, never persisted in Crabbox config or placed on argv.
-type SuperserveConfig struct {
-	BaseURL         string
-	Template        string
-	Snapshot        string
-	Workdir         string
-	TimeoutSecs     int
-	ExecTimeoutSecs int
-	NetworkAllowOut []string
-	NetworkDenyOut  []string
-	ForgetMissing   bool
-}
-
 type DockerSandboxConfig struct {
 	CLIPath         string
 	Agent           string
@@ -602,20 +586,6 @@ type ParallelsHostConfig struct {
 	MaxVMs     int
 	hostSource credentialValueSource
 	keySource  credentialValueSource
-}
-
-type MXCConfig struct {
-	CLIPath           string
-	Version           string
-	Containment       string
-	Network           string
-	ReadOnlyPaths     []string
-	ReadWritePaths    []string
-	AllowedHosts      []string
-	BlockedHosts      []string
-	AllowDACLMutation bool
-	AllowWindowsUI    bool
-	Experimental      bool
 }
 
 // DefaultTartImage is the immutable built-in image; the Tart adapter verifies its contents.
@@ -1886,13 +1856,8 @@ func baseConfig() Config {
 		Blaxel:            defaultBlaxelConfig(),
 		VercelSandbox:     defaultVercelSandboxConfig(),
 		CloudflareSandbox: defaultCloudflareSandboxConfig(),
-		Superserve: SuperserveConfig{
-			BaseURL:         "https://api.superserve.ai",
-			Template:        "superserve/base",
-			Workdir:         "/workspace/crabbox",
-			ExecTimeoutSecs: 600,
-		},
-		Crownest: defaultCrownestConfig(),
+		Superserve:        defaultSuperserveConfig(),
+		Crownest:          defaultCrownestConfig(),
 		DockerSandbox: DockerSandboxConfig{
 			CLIPath: "sbx",
 			Agent:   "shell",
@@ -1927,14 +1892,9 @@ func baseConfig() Config {
 		LocalContainer: initialLocalContainerConfig(containerImage),
 		AppleContainer: initialAppleContainerConfig(containerImage),
 		AppleVM:        initialAppleVMConfig(osImageSpecs[osImage].AppleVMImage, osImageSpecs[osImage].AppleVMSHA256),
-		MXC: MXCConfig{
-			CLIPath:     "wxc-exec.exe",
-			Version:     "0.6.0-alpha",
-			Containment: "processcontainer",
-			Network:     "block",
-		},
-		Multipass: initialMultipassConfig(multipassImage),
-		Machine0:  defaultMachine0Config(),
+		MXC:            defaultMXCConfig(),
+		Multipass:      initialMultipassConfig(multipassImage),
+		Machine0:       defaultMachine0Config(),
 		Tart: TartConfig{
 			Image:    DefaultTartImage,
 			User:     "admin",
@@ -2330,18 +2290,6 @@ type fileIsloConfig struct {
 	IdlePause      *bool  `yaml:"idlePause,omitempty"`
 }
 
-type fileSuperserveConfig struct {
-	BaseURL         string   `yaml:"baseUrl,omitempty"`
-	Template        *string  `yaml:"template,omitempty"`
-	Snapshot        *string  `yaml:"snapshot,omitempty"`
-	Workdir         *string  `yaml:"workdir,omitempty"`
-	TimeoutSecs     *int     `yaml:"timeoutSecs,omitempty"`
-	ExecTimeoutSecs *int     `yaml:"execTimeoutSecs,omitempty"`
-	NetworkAllowOut []string `yaml:"networkAllowOut,omitempty"`
-	NetworkDenyOut  []string `yaml:"networkDenyOut,omitempty"`
-	ForgetMissing   *bool    `yaml:"forgetMissing,omitempty"`
-}
-
 type fileDockerSandboxConfig struct {
 	CLIPath         string    `yaml:"cliPath,omitempty"`
 	Agent           string    `yaml:"agent,omitempty"`
@@ -2504,20 +2452,6 @@ func positiveMinimum(current, candidate int) int {
 		return candidate
 	}
 	return min(current, candidate)
-}
-
-type fileMXCConfig struct {
-	CLIPath           string   `yaml:"cliPath,omitempty"`
-	Version           string   `yaml:"version,omitempty"`
-	Containment       string   `yaml:"containment,omitempty"`
-	Network           string   `yaml:"network,omitempty"`
-	ReadOnlyPaths     []string `yaml:"readOnlyPaths,omitempty"`
-	ReadWritePaths    []string `yaml:"readWritePaths,omitempty"`
-	AllowedHosts      []string `yaml:"allowedHosts,omitempty"`
-	BlockedHosts      []string `yaml:"blockedHosts,omitempty"`
-	AllowDACLMutation *bool    `yaml:"allowDaclMutation,omitempty"`
-	AllowWindowsUI    *bool    `yaml:"allowWindowsUI,omitempty"`
-	Experimental      *bool    `yaml:"experimental,omitempty"`
 }
 
 type fileTartConfig struct {
@@ -4119,37 +4053,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Superserve != nil {
-		if trusted && strings.TrimSpace(file.Superserve.BaseURL) != "" {
-			cfg.Superserve.BaseURL = file.Superserve.BaseURL
-			recordConfigInput(cfg, "superserve", inputSource, true)
-		}
-		recordConfigInput(cfg, "superserve", inputSource, applyOptional(&cfg.Superserve.Template, file.Superserve.Template))
-		recordConfigInput(cfg, "superserve", inputSource, applyOptional(&cfg.Superserve.Snapshot, file.Superserve.Snapshot))
-		recordConfigInput(cfg, "superserve", inputSource, applyOptional(&cfg.Superserve.Workdir, file.Superserve.Workdir))
-		if file.Superserve.TimeoutSecs != nil {
-			if *file.Superserve.TimeoutSecs < 0 {
-				return Exit(2, "superserve timeoutSecs must be non-negative")
-			}
-			cfg.Superserve.TimeoutSecs = *file.Superserve.TimeoutSecs
-			recordConfigInput(cfg, "superserve", inputSource, true)
-		}
-		if file.Superserve.ExecTimeoutSecs != nil {
-			if *file.Superserve.ExecTimeoutSecs < 0 {
-				return Exit(2, "superserve execTimeoutSecs must be non-negative")
-			}
-			cfg.Superserve.ExecTimeoutSecs = *file.Superserve.ExecTimeoutSecs
-			recordConfigInput(cfg, "superserve", inputSource, true)
-		}
-		if file.Superserve.NetworkAllowOut != nil {
-			cfg.Superserve.NetworkAllowOut = NormalizeList(file.Superserve.NetworkAllowOut)
-			recordConfigInput(cfg, "superserve", inputSource, true)
-		}
-		if file.Superserve.NetworkDenyOut != nil {
-			cfg.Superserve.NetworkDenyOut = NormalizeList(file.Superserve.NetworkDenyOut)
-			recordConfigInput(cfg, "superserve", inputSource, true)
-		}
-		recordConfigInput(cfg, "superserve", inputSource, applyOptional(&cfg.Superserve.ForgetMissing, file.Superserve.ForgetMissing))
+	if err := applySuperserveFileConfig(cfg, file.Superserve, trusted, inputSource); err != nil {
+		return err
 	}
 	if err := applyCrownestFileConfig(cfg, file.Crownest, trusted, inputSource); err != nil {
 		return err
@@ -4312,50 +4217,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		applied := applyAppleVMFile(cfg, file.AppleVM)
 		recordConfigInput(cfg, "apple-vm", inputSource, applied.InputAccepted)
 	}
-	if file.MXC != nil {
-		if file.MXC.CLIPath != "" {
-			cfg.MXC.CLIPath = file.MXC.CLIPath
-			recordConfigInput(cfg, "mxc", inputSource, true)
-		}
-		if file.MXC.Version != "" {
-			cfg.MXC.Version = file.MXC.Version
-			recordConfigInput(cfg, "mxc", inputSource, true)
-		}
-		if file.MXC.Containment != "" {
-			cfg.MXC.Containment = file.MXC.Containment
-			recordConfigInput(cfg, "mxc", inputSource, true)
-		}
-		if file.MXC.Network != "" {
-			cfg.MXC.Network = file.MXC.Network
-			recordConfigInput(cfg, "mxc", inputSource, true)
-		}
-		if file.MXC.ReadOnlyPaths != nil {
-			cfg.MXC.ReadOnlyPaths = append([]string(nil), file.MXC.ReadOnlyPaths...)
-			recordConfigInput(cfg, "mxc", inputSource, true)
-		}
-		if file.MXC.ReadWritePaths != nil {
-			cfg.MXC.ReadWritePaths = append([]string(nil), file.MXC.ReadWritePaths...)
-			recordConfigInput(cfg, "mxc", inputSource, true)
-		}
-		if file.MXC.AllowedHosts != nil {
-			cfg.MXC.AllowedHosts = append([]string(nil), file.MXC.AllowedHosts...)
-			recordConfigInput(cfg, "mxc", inputSource, true)
-		}
-		if file.MXC.BlockedHosts != nil {
-			cfg.MXC.BlockedHosts = append([]string(nil), file.MXC.BlockedHosts...)
-			recordConfigInput(cfg, "mxc", inputSource, true)
-		}
-		if file.MXC.AllowDACLMutation != nil {
-			cfg.MXC.AllowDACLMutation = *file.MXC.AllowDACLMutation
-			recordConfigInput(cfg, "mxc", inputSource, true)
-		}
-		if file.MXC.AllowWindowsUI != nil {
-			cfg.MXC.AllowWindowsUI = *file.MXC.AllowWindowsUI
-			recordConfigInput(cfg, "mxc", inputSource, true)
-		}
-		if file.MXC.Experimental != nil {
-			cfg.MXC.Experimental = *file.MXC.Experimental
-			recordConfigInput(cfg, "mxc", inputSource, true)
+	{
+		applied, err := cfg.MXC.applyFile(file.MXC)
+		recordConfigInput(cfg, "mxc", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
 		}
 	}
 	{
@@ -5712,7 +5578,6 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	var err error
 	{
 		applied, err := cfg.Cua.applyEnv()
 		recordConfigInput(cfg, "cua", configInputEnvironment, applied.InputAccepted)
@@ -5766,37 +5631,8 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.Superserve.BaseURL = configInputEnvString(cfg, "superserve", cfg.Superserve.BaseURL, "CRABBOX_SUPERSERVE_BASE_URL", "SUPERSERVE_BASE_URL")
-	cfg.Superserve.Template = configInputEnvString(cfg, "superserve", cfg.Superserve.Template, "CRABBOX_SUPERSERVE_TEMPLATE")
-	cfg.Superserve.Snapshot = configInputEnvString(cfg, "superserve", cfg.Superserve.Snapshot, "CRABBOX_SUPERSERVE_SNAPSHOT")
-	cfg.Superserve.Workdir = configInputEnvString(cfg, "superserve", cfg.Superserve.Workdir, "CRABBOX_SUPERSERVE_WORKDIR")
-	{
-		var accepted bool
-		cfg.Superserve.TimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_SUPERSERVE_TIMEOUT_SECS", cfg.Superserve.TimeoutSecs)
-		recordConfigInput(cfg, "superserve", configInputEnvironment, accepted)
-	}
-	if err != nil {
+	if err := applySuperserveEnvironmentConfig(cfg); err != nil {
 		return err
-	}
-	{
-		var accepted bool
-		cfg.Superserve.ExecTimeoutSecs, accepted, err = getenvNonNegativeIntAccepted("CRABBOX_SUPERSERVE_EXEC_TIMEOUT_SECS", cfg.Superserve.ExecTimeoutSecs)
-		recordConfigInput(cfg, "superserve", configInputEnvironment, accepted)
-	}
-	if err != nil {
-		return err
-	}
-	if allowOut := os.Getenv("CRABBOX_SUPERSERVE_NETWORK_ALLOW_OUT"); allowOut != "" {
-		cfg.Superserve.NetworkAllowOut = splitCommaList(allowOut)
-		recordConfigInput(cfg, "superserve", configInputEnvironment, true)
-	}
-	if denyOut := os.Getenv("CRABBOX_SUPERSERVE_NETWORK_DENY_OUT"); denyOut != "" {
-		cfg.Superserve.NetworkDenyOut = splitCommaList(denyOut)
-		recordConfigInput(cfg, "superserve", configInputEnvironment, true)
-	}
-	if v, ok := getenvBool("CRABBOX_SUPERSERVE_FORGET_MISSING"); ok {
-		cfg.Superserve.ForgetMissing = v
-		recordConfigInput(cfg, "superserve", configInputEnvironment, true)
 	}
 	cfg.DockerSandbox.CLIPath = configInputEnvString(cfg, "docker-sandbox", cfg.DockerSandbox.CLIPath, "CRABBOX_DOCKER_SANDBOX_CLI")
 	cfg.DockerSandbox.Agent = configInputEnvString(cfg, "docker-sandbox", cfg.DockerSandbox.Agent, "CRABBOX_DOCKER_SANDBOX_AGENT")
@@ -5953,37 +5789,12 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.MXC.CLIPath = configInputEnvString(cfg, "mxc", cfg.MXC.CLIPath, "CRABBOX_MXC_CLI")
-	cfg.MXC.Version = configInputEnvString(cfg, "mxc", cfg.MXC.Version, "CRABBOX_MXC_VERSION")
-	cfg.MXC.Containment = configInputEnvString(cfg, "mxc", cfg.MXC.Containment, "CRABBOX_MXC_CONTAINMENT")
-	cfg.MXC.Network = configInputEnvString(cfg, "mxc", cfg.MXC.Network, "CRABBOX_MXC_NETWORK")
-	if value := os.Getenv("CRABBOX_MXC_READONLY_PATHS"); value != "" {
-		cfg.MXC.ReadOnlyPaths = splitCommaList(value)
-		recordConfigInput(cfg, "mxc", configInputEnvironment, true)
-	}
-	if value := os.Getenv("CRABBOX_MXC_READWRITE_PATHS"); value != "" {
-		cfg.MXC.ReadWritePaths = splitCommaList(value)
-		recordConfigInput(cfg, "mxc", configInputEnvironment, true)
-	}
-	if value := os.Getenv("CRABBOX_MXC_ALLOWED_HOSTS"); value != "" {
-		cfg.MXC.AllowedHosts = splitCommaList(value)
-		recordConfigInput(cfg, "mxc", configInputEnvironment, true)
-	}
-	if value := os.Getenv("CRABBOX_MXC_BLOCKED_HOSTS"); value != "" {
-		cfg.MXC.BlockedHosts = splitCommaList(value)
-		recordConfigInput(cfg, "mxc", configInputEnvironment, true)
-	}
-	if value, ok := getenvBool("CRABBOX_MXC_ALLOW_DACL_MUTATION"); ok {
-		cfg.MXC.AllowDACLMutation = value
-		recordConfigInput(cfg, "mxc", configInputEnvironment, true)
-	}
-	if value, ok := getenvBool("CRABBOX_MXC_ALLOW_WINDOWS_UI"); ok {
-		cfg.MXC.AllowWindowsUI = value
-		recordConfigInput(cfg, "mxc", configInputEnvironment, true)
-	}
-	if value, ok := getenvBool("CRABBOX_MXC_EXPERIMENTAL"); ok {
-		cfg.MXC.Experimental = value
-		recordConfigInput(cfg, "mxc", configInputEnvironment, true)
+	{
+		applied, err := cfg.MXC.applyEnv()
+		recordConfigInput(cfg, "mxc", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
 	}
 	{
 		applied, err := cfg.Multipass.applyEnv()

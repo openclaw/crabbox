@@ -91,6 +91,11 @@ func applyConfigFileField(dst, src reflect.Value, tags reflect.StructTag, provid
 			if len(value) == 0 {
 				return false, nil
 			}
+		case "present-normalized":
+			if value == nil {
+				return false, nil
+			}
+			value = NormalizeList(value)
 		case "nonempty-normalized":
 			if len(value) == 0 {
 				return false, nil
