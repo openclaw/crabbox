@@ -19488,3 +19488,237 @@ func TestTartPriorNumericMarkers(t *testing.T) {
 		}
 	}
 }
+
+func TestCodespacesBindingDurationSources(t *testing.T) {
+	clearConfigEnv(t)
+	for _, source := range []string{"user", "repo", "env"} {
+		for _, raw := range []string{"", "0", "0s", "-1s", "1ns", "30m", "168h", " 1h ", "bad", "999999999999999999h"} {
+			cfg := baseConfig()
+			before := cfg.GitHubCodespaces
+			file := &fileGitHubCodespacesConfig{IdleTimeout: raw, RetentionPeriod: raw}
+			if source == "env" {
+				t.Setenv("CRABBOX_GITHUB_CODESPACES_IDLE_TIMEOUT", raw)
+				t.Setenv("CRABBOX_GITHUB_CODESPACES_RETENTION_PERIOD", raw)
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := applyFileConfigWithTrust(&cfg, fileConfig{GitHubCodespaces: file}, source == "user"); err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := time.ParseDuration(raw)
+			retentionAccepted := source != "repo" && raw != "" && err == nil && parsed >= 0
+			idleAccepted := source != "repo" && raw != "" && err == nil && parsed > 0
+			want := before
+			if idleAccepted {
+				want.IdleTimeout = parsed
+			}
+			if retentionAccepted {
+				want.RetentionPeriod = parsed
+			}
+			if !reflect.DeepEqual(cfg.GitHubCodespaces, want) || GitHubCodespacesRetentionExplicit(cfg) != retentionAccepted {
+				t.Fatalf("%s %q: %+v retention=%v", source, raw, cfg.GitHubCodespaces, GitHubCodespacesRetentionExplicit(cfg))
+			}
+			if (cfg.inputProvenance["github-codespaces"].values != 0) != (retentionAccepted || idleAccepted) {
+				t.Fatalf("%s %q accepted facts", source, raw)
+			}
+			if file.IdleTimeout != raw || file.RetentionPeriod != raw {
+				t.Fatal("DTO mutated")
+			}
+		}
+		t.Setenv("CRABBOX_GITHUB_CODESPACES_IDLE_TIMEOUT", "")
+		t.Setenv("CRABBOX_GITHUB_CODESPACES_RETENTION_PERIOD", "")
+	}
+}
+
+func TestCodespacesBindingStringsAndMarkers(t *testing.T) {
+	clearConfigEnv(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	defaults := baseConfig().GitHubCodespaces
+	wantDefaults := GitHubCodespacesConfig{APIURL: "https://api.github.com", GHPath: "gh", Machine: "basicLinux32gb", IdleTimeout: 30 * time.Minute, RetentionPeriod: 168 * time.Hour, DeleteOnRelease: true, WorkRoot: "/workspaces/crabbox"}
+	if !reflect.DeepEqual(defaults, wantDefaults) {
+		t.Fatalf("defaults=%#v", defaults)
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"", " raw ", "~/fixture"} {
+			for _, del := range []*bool{nil, new(false), new(true)} {
+				cfg := baseConfig()
+				cfg.GitHubCodespaces.GHPath = "~/prior"
+				want := cfg.GitHubCodespaces
+				file := &fileGitHubCodespacesConfig{APIURL: raw, GHPath: raw, Repo: raw, Ref: raw, Machine: raw, DevcontainerPath: raw, WorkingDirectory: raw, Geo: raw, WorkRoot: raw, DeleteOnRelease: del}
+				if raw != "" {
+					want.Ref, want.Machine, want.DevcontainerPath, want.WorkingDirectory, want.Geo, want.WorkRoot = raw, raw, raw, raw, raw, raw
+					if trusted {
+						want.APIURL, want.GHPath, want.Repo = raw, expandUserPath(raw), raw
+					}
+				}
+				if trusted && del != nil {
+					want.DeleteOnRelease = *del
+				}
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{GitHubCodespaces: file}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(cfg.GitHubCodespaces, want) || DeleteOnReleaseExplicit(cfg, "github-codespaces") != (trusted && del != nil) || GitHubCodespacesRetentionExplicit(cfg) {
+					t.Fatalf("file=%+v cfg=%+v", file, cfg.GitHubCodespaces)
+				}
+				if (cfg.inputProvenance["github-codespaces"].values != 0) != (raw != "" || trusted && del != nil) {
+					t.Fatal("file accepted facts")
+				}
+			}
+		}
+	}
+	for _, raw := range []string{"", "false", "true", "invalid"} {
+		cfg := baseConfig()
+		cfg.GitHubCodespaces.GHPath = "~/prior"
+		t.Setenv("CRABBOX_GITHUB_CODESPACES_DELETE_ON_RELEASE", raw)
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		valid := raw == "false" || raw == "true"
+		if cfg.GitHubCodespaces.GHPath != filepath.Join(home, "prior") || DeleteOnReleaseExplicit(cfg, "github-codespaces") != valid || cfg.GitHubCodespaces.DeleteOnRelease != (raw != "false") {
+			t.Fatal("unconditional env expansion or bool acceptance")
+		}
+		if (cfg.inputProvenance["github-codespaces"].values != 0) != valid {
+			t.Fatal("expansion invented input")
+		}
+	}
+	t.Setenv("CRABBOX_GITHUB_CODESPACES_DELETE_ON_RELEASE", "")
+	for _, raw := range []string{"", " raw ", "~/fixture"} {
+		cfg := baseConfig()
+		want := cfg.GitHubCodespaces
+		for _, key := range []string{"API_URL", "GH_PATH", "REPO", "REF", "MACHINE", "DEVCONTAINER_PATH", "WORKING_DIRECTORY", "GEO", "WORK_ROOT"} {
+			t.Setenv("CRABBOX_GITHUB_CODESPACES_"+key, raw)
+		}
+		if raw != "" {
+			want.APIURL, want.GHPath, want.Repo, want.Ref, want.Machine, want.DevcontainerPath, want.WorkingDirectory, want.Geo, want.WorkRoot = raw, expandUserPath(raw), raw, raw, raw, raw, raw, raw, raw
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg.GitHubCodespaces, want) {
+			t.Fatalf("env %q: %+v", raw, cfg.GitHubCodespaces)
+		}
+	}
+}
+
+func TestIsloIntegerAcceptanceAndMarkers(t *testing.T) {
+	for _, raw := range []string{"", " ", " 2 ", "invalid", "+", "-", "+0", "-0", "0", "+2", "-2", "2", "02", "0x2", "1_0", "9223372036854775807", "9223372036854775808", "-9223372036854775808", "-9223372036854775809"} {
+		for _, priorMarker := range []bool{false, true} {
+			clearConfigEnv(t)
+			cfg := Config{Islo: IsloConfig{VCPUs: 2, MemoryMB: 2, DiskGB: 2}, isloVCPUsExplicit: priorMarker, isloMemoryMBExplicit: priorMarker, isloDiskGBExplicit: priorMarker}
+			parsed, parseErr := strconv.Atoi(raw)
+			for _, name := range []string{"CRABBOX_ISLO_VCPUS", "CRABBOX_ISLO_MEMORY_MB", "CRABBOX_ISLO_DISK_GB"} {
+				t.Setenv(name, raw)
+				value, accepted := lookupEnvInteger(name, strconv.IntSize)
+				if accepted != (parseErr == nil) || (accepted && int(value) != parsed) {
+					t.Fatalf("raw=%q: Atoi and accepted native integer differ", raw)
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			want, marker := 2, priorMarker
+			if parseErr == nil {
+				want, marker = parsed, true
+			}
+			if cfg.Islo.VCPUs != want || cfg.Islo.MemoryMB != want || cfg.Islo.DiskGB != want || cfg.isloVCPUsExplicit != marker || cfg.isloMemoryMBExplicit != marker || cfg.isloDiskGBExplicit != marker {
+				t.Fatalf("raw=%q prior=%v: values or markers differ", raw, priorMarker)
+			}
+			facts := cfg.inputProvenance["islo"]
+			if (facts.values != 0) != (parseErr == nil) || facts.intents != 0 {
+				t.Fatalf("raw=%q: accepted/intent facts=%#v", raw, facts)
+			}
+		}
+	}
+}
+
+func TestIsloCompleteBindingContract(t *testing.T) {
+	clearConfigEnv(t)
+	base := baseConfig()
+	_, _, _, _, image, _, err := osImageDefaultProviderImages(base.OSImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.Islo != (IsloConfig{BaseURL: "https://api.islo.dev", Image: image, Workdir: "crabbox", VCPUs: 2, MemoryMB: 4096, DiskGB: 20}) {
+		t.Fatal("composed defaults differ")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, number := range []int{-1, 0, 2} {
+			for _, oldMarker := range []bool{false, true} {
+				cfg := Config{Islo: IsloConfig{VCPUs: 2, MemoryMB: 2, DiskGB: 2, IdlePause: true}, isloVCPUsExplicit: oldMarker, isloMemoryMBExplicit: oldMarker, isloDiskGBExplicit: oldMarker}
+				off := false
+				input := fileIsloConfig{BaseURL: "https://synthetic.example.test", Image: " ", Workdir: " raw ", GatewayProfile: "gateway", SnapshotName: "snapshot", VCPUs: number, MemoryMB: number, DiskGB: number, IdlePause: &off}
+				before := input
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{Islo: &input}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				marker := oldMarker || number > 0
+				if cfg.Islo != (IsloConfig{BaseURL: input.BaseURL, Image: " ", Workdir: " raw ", GatewayProfile: "gateway", SnapshotName: "snapshot", VCPUs: 2, MemoryMB: 2, DiskGB: 2}) || !cfg.isloImageExplicit || cfg.isloVCPUsExplicit != marker || cfg.isloMemoryMBExplicit != marker || cfg.isloDiskGBExplicit != marker {
+					t.Fatal("file values/markers differ")
+				}
+				if !reflect.DeepEqual(input, before) || off {
+					t.Fatal("DTO mutated")
+				}
+				wantSource, wantBit := credentialSourceRepository, uint8(1<<(configInputRepo-1))
+				if trusted {
+					wantSource, wantBit = credentialSourceTrustedFile, uint8(1<<(configInputUser-1))
+				}
+				if cfg.credentialProvenance.isloBaseURL != wantSource || cfg.inputProvenance["islo"].values != wantBit || cfg.inputProvenance["islo"].intents != 0 {
+					t.Fatal("source accounting differs")
+				}
+				prior := cfg
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{Islo: &fileIsloConfig{}}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(cfg, prior) {
+					t.Fatal("empty file did not inherit")
+				}
+			}
+		}
+	}
+	for _, primary := range []string{"", " ", "synthetic-primary"} {
+		clearConfigEnv(t)
+		var cfg Config
+		t.Setenv("ISLO_API_KEY", "synthetic-alias")
+		t.Setenv("ISLO_BASE_URL", "synthetic-alias")
+		t.Setenv("CRABBOX_ISLO_API_KEY", primary)
+		t.Setenv("CRABBOX_ISLO_BASE_URL", primary)
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		want := primary
+		if want == "" {
+			want = "synthetic-alias"
+		}
+		if cfg.Islo.APIKey != want || cfg.Islo.BaseURL != want || cfg.credentialProvenance.isloAPIKey != credentialSourceEnvironment || cfg.credentialProvenance.isloBaseURL != credentialSourceEnvironment || cfg.inputProvenance["islo"].intents != 0 {
+			t.Fatal("alias source accounting differs")
+		}
+	}
+}
+
+func TestIsloAcceptedFieldIsolation(t *testing.T) {
+	for _, raw := range []string{"", " ", "invalid", "true", "false", " YES ", " OFF "} {
+		clearConfigEnv(t)
+		cfg := Config{Islo: IsloConfig{VCPUs: 2, MemoryMB: 4096, DiskGB: 20, IdlePause: true}}
+		for _, name := range []string{"CRABBOX_ISLO_VCPUS", "CRABBOX_ISLO_MEMORY_MB", "CRABBOX_ISLO_DISK_GB"} {
+			t.Setenv(name, "invalid")
+		}
+		for _, name := range []string{"CRABBOX_ISLO_IMAGE", "CRABBOX_ISLO_WORKDIR", "CRABBOX_ISLO_GATEWAY_PROFILE", "CRABBOX_ISLO_SNAPSHOT_NAME"} {
+			t.Setenv(name, " ")
+		}
+		t.Setenv("CRABBOX_ISLO_IDLE_PAUSE", raw)
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Islo.Image != " " || cfg.Islo.Workdir != " " || cfg.Islo.GatewayProfile != " " || cfg.Islo.SnapshotName != " " || !cfg.isloImageExplicit {
+			t.Fatal("raw strings changed")
+		}
+		if cfg.Islo.VCPUs != 2 || cfg.Islo.MemoryMB != 4096 || cfg.Islo.DiskGB != 20 || cfg.isloVCPUsExplicit || cfg.isloMemoryMBExplicit || cfg.isloDiskGBExplicit {
+			t.Fatal("unrelated acceptance manufactured resource intent")
+		}
+		want := raw != "false" && raw != " OFF "
+		if cfg.Islo.IdlePause != want || cfg.inputProvenance["islo"].values == 0 || cfg.inputProvenance["islo"].intents != 0 {
+			t.Fatal("bool or value/intent accounting changed")
+		}
+	}
+}

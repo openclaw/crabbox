@@ -10,8 +10,19 @@ import (
 // registerConfigFlags populates generated, typed flag storage from a validated
 // schema. List constructors own their snapshots; registration never applies a
 // value to the runtime config or records input provenance.
-func registerConfigFlags(fs *flag.FlagSet, defaults, values any) {
+func registerConfigFlags(fs *flag.FlagSet, defaults, values any, order ...string) {
 	cfg, parsed := reflect.ValueOf(defaults), reflect.ValueOf(values).Elem()
+	register := func(name string) {
+		field, _ := cfg.Type().FieldByName(name)
+		parsed.FieldByName(name).Set(reflect.ValueOf(registerConfigFlag(fs, cfg.FieldByName(name), field.Tag)))
+	}
+	// An explicit generated order is a validated, complete permutation.
+	if len(order) != 0 {
+		for _, name := range order {
+			register(name)
+		}
+		return
+	}
 	// Register replacing/nonempty lists first, scalars next, then other append lists.
 	for phase := 0; phase < 3; phase++ {
 		for i := 0; i < parsed.NumField(); i++ {
@@ -25,7 +36,7 @@ func registerConfigFlags(fs *flag.FlagSet, defaults, values any) {
 				fieldPhase = 2
 			}
 			if fieldPhase == phase {
-				parsed.Field(i).Set(reflect.ValueOf(registerConfigFlag(fs, cfg.FieldByName(name), field.Tag)))
+				register(name)
 			}
 		}
 	}

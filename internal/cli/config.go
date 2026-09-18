@@ -352,24 +352,6 @@ type CapacityConfig struct {
 	Hints             bool
 }
 
-// GitHubCodespacesConfig is intentionally token-free. Authentication comes
-// from the GitHub CLI credential store or GitHub's standard environment
-// variables at the point of use, never from Crabbox config or argv.
-type GitHubCodespacesConfig struct {
-	APIURL           string
-	GHPath           string
-	Repo             string
-	Ref              string
-	Machine          string
-	DevcontainerPath string
-	WorkingDirectory string
-	Geo              string
-	IdleTimeout      time.Duration
-	RetentionPeriod  time.Duration
-	DeleteOnRelease  bool
-	WorkRoot         string
-}
-
 type ActionsConfig struct {
 	Repo          string
 	Workflow      string
@@ -480,22 +462,6 @@ func NormalizeAzureBackend(backend string) (string, error) {
 	default:
 		return "", fmt.Errorf("azure backend must be vm or dynamic-sessions")
 	}
-}
-
-type IsloConfig struct {
-	APIKey         string
-	BaseURL        string
-	Image          string
-	Workdir        string
-	GatewayProfile string
-	SnapshotName   string
-	VCPUs          int
-	MemoryMB       int
-	DiskGB         int
-	// IdlePause opts a sandbox into a provider-enforced idle pause derived from
-	// IdleTimeout. Off by default: the provider adapter sends no lifecycle
-	// policy unless it is set.
-	IdlePause bool
 }
 
 type AsciiBoxConfig struct {
@@ -1731,28 +1697,20 @@ func baseConfig() Config {
 		DigitalOcean:            defaultDigitalOceanConfig(),
 		Vultr:                   defaultVultrConfig(),
 		Linode:                  initialLinodeConfig(linodeImage),
-		GitHubCodespaces: GitHubCodespacesConfig{
-			APIURL:          "https://api.github.com",
-			GHPath:          "gh",
-			Machine:         "basicLinux32gb",
-			IdleTimeout:     30 * time.Minute,
-			RetentionPeriod: 7 * 24 * time.Hour,
-			DeleteOnRelease: true,
-			WorkRoot:        "/workspaces/crabbox",
-		},
-		Lambda:           initialLambdaConfig(),
-		OVH:              defaultOVHConfig(),
-		Scaleway:         defaultScalewayConfig(),
-		TencentCloud:     defaultTencentCloudConfig(),
-		Incus:            initialIncusConfig(),
-		SSHUser:          "crabbox",
-		SSHKey:           sshKey,
-		SSHPort:          "2222",
-		SSHFallbackPorts: []string{"22"},
-		ProviderKey:      "crabbox-steipete",
-		WorkRoot:         defaultPOSIXWorkRoot,
-		TTL:              90 * time.Minute,
-		IdleTimeout:      30 * time.Minute,
+		GitHubCodespaces:        initialGitHubCodespacesConfig(),
+		Lambda:                  initialLambdaConfig(),
+		OVH:                     defaultOVHConfig(),
+		Scaleway:                defaultScalewayConfig(),
+		TencentCloud:            defaultTencentCloudConfig(),
+		Incus:                   initialIncusConfig(),
+		SSHUser:                 "crabbox",
+		SSHKey:                  sshKey,
+		SSHPort:                 "2222",
+		SSHFallbackPorts:        []string{"22"},
+		ProviderKey:             "crabbox-steipete",
+		WorkRoot:                defaultPOSIXWorkRoot,
+		TTL:                     90 * time.Minute,
+		IdleTimeout:             30 * time.Minute,
 		Sync: SyncConfig{
 			Source:        "git",
 			Delete:        true,
@@ -1803,24 +1761,17 @@ func baseConfig() Config {
 			Workdir:       "crabbox",
 			ProxyPortHTTP: 80,
 		},
-		ExeDev:        defaultExeDevConfig(),
-		Railway:       defaultRailwayConfig(),
-		FastAPICloud:  defaultFastAPICloudConfig(),
-		UnikraftCloud: defaultUnikraftCloudConfig(),
-		Runpod:        defaultRunpodConfig(),
-		Vast:          defaultVastConfig(),
-		Blacksmith:    defaultBlacksmithConfig(),
-		NvidiaBrev:    defaultNvidiaBrevConfig(),
-		Nebius:        (NebiusConfig{}).WithRuntimeDefaults(),
-		Hostinger:     defaultHostingerConfig(),
-		Islo: IsloConfig{
-			BaseURL:  "https://api.islo.dev",
-			Image:    isloImage,
-			Workdir:  "crabbox",
-			VCPUs:    2,
-			MemoryMB: 4096,
-			DiskGB:   20,
-		},
+		ExeDev:            defaultExeDevConfig(),
+		Railway:           defaultRailwayConfig(),
+		FastAPICloud:      defaultFastAPICloudConfig(),
+		UnikraftCloud:     defaultUnikraftCloudConfig(),
+		Runpod:            defaultRunpodConfig(),
+		Vast:              defaultVastConfig(),
+		Blacksmith:        defaultBlacksmithConfig(),
+		NvidiaBrev:        defaultNvidiaBrevConfig(),
+		Nebius:            (NebiusConfig{}).WithRuntimeDefaults(),
+		Hostinger:         defaultHostingerConfig(),
+		Islo:              initialIsloConfig(isloImage),
 		Wandb:             defaultWandbConfig(),
 		Freestyle:         defaultFreestyleConfig(),
 		Tenki:             defaultTenkiConfig(),
@@ -2051,21 +2002,6 @@ type fileHetznerConfig struct {
 	SSHKey   string `yaml:"sshKey,omitempty"`
 }
 
-type fileGitHubCodespacesConfig struct {
-	APIURL           string `yaml:"apiUrl,omitempty"`
-	GHPath           string `yaml:"ghPath,omitempty"`
-	Repo             string `yaml:"repo,omitempty"`
-	Ref              string `yaml:"ref,omitempty"`
-	Machine          string `yaml:"machine,omitempty"`
-	DevcontainerPath string `yaml:"devcontainerPath,omitempty"`
-	WorkingDirectory string `yaml:"workingDirectory,omitempty"`
-	Geo              string `yaml:"geo,omitempty"`
-	IdleTimeout      string `yaml:"idleTimeout,omitempty"`
-	RetentionPeriod  string `yaml:"retentionPeriod,omitempty"`
-	DeleteOnRelease  *bool  `yaml:"deleteOnRelease,omitempty"`
-	WorkRoot         string `yaml:"workRoot,omitempty"`
-}
-
 type fileAWSConfig struct {
 	Region          string   `yaml:"region,omitempty"`
 	AMI             string   `yaml:"ami,omitempty"`
@@ -2244,18 +2180,6 @@ type fileCubeSandboxConfig struct {
 	ProxyNodeIP   string `yaml:"proxyNodeIp,omitempty"`
 	ProxyPortHTTP int    `yaml:"proxyPortHttp,omitempty"`
 	ProxyScheme   string `yaml:"proxyScheme,omitempty"`
-}
-
-type fileIsloConfig struct {
-	BaseURL        string `yaml:"baseUrl,omitempty"`
-	Image          string `yaml:"image,omitempty"`
-	Workdir        string `yaml:"workdir,omitempty"`
-	GatewayProfile string `yaml:"gatewayProfile,omitempty"`
-	SnapshotName   string `yaml:"snapshotName,omitempty"`
-	VCPUs          int    `yaml:"vcpus,omitempty"`
-	MemoryMB       int    `yaml:"memoryMB,omitempty"`
-	DiskGB         int    `yaml:"diskGB,omitempty"`
-	IdlePause      *bool  `yaml:"idlePause,omitempty"`
 }
 
 type fileAsciiBoxConfig struct {
@@ -3004,56 +2928,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.GitHubCodespaces != nil {
-		if trusted && file.GitHubCodespaces.APIURL != "" {
-			cfg.GitHubCodespaces.APIURL = file.GitHubCodespaces.APIURL
-			recordConfigInput(cfg, "github-codespaces", inputSource, true)
-		}
-		if trusted && file.GitHubCodespaces.GHPath != "" {
-			cfg.GitHubCodespaces.GHPath = expandUserPath(file.GitHubCodespaces.GHPath)
-			recordConfigInput(cfg, "github-codespaces", inputSource, true)
-		}
-		if trusted && file.GitHubCodespaces.Repo != "" {
-			cfg.GitHubCodespaces.Repo = file.GitHubCodespaces.Repo
-			recordConfigInput(cfg, "github-codespaces", inputSource, true)
-		}
-		if file.GitHubCodespaces.Ref != "" {
-			cfg.GitHubCodespaces.Ref = file.GitHubCodespaces.Ref
-			recordConfigInput(cfg, "github-codespaces", inputSource, true)
-		}
-		if file.GitHubCodespaces.Machine != "" {
-			cfg.GitHubCodespaces.Machine = file.GitHubCodespaces.Machine
-			recordConfigInput(cfg, "github-codespaces", inputSource, true)
-		}
-		if file.GitHubCodespaces.DevcontainerPath != "" {
-			cfg.GitHubCodespaces.DevcontainerPath = file.GitHubCodespaces.DevcontainerPath
-			recordConfigInput(cfg, "github-codespaces", inputSource, true)
-		}
-		if file.GitHubCodespaces.WorkingDirectory != "" {
-			cfg.GitHubCodespaces.WorkingDirectory = file.GitHubCodespaces.WorkingDirectory
-			recordConfigInput(cfg, "github-codespaces", inputSource, true)
-		}
-		if file.GitHubCodespaces.Geo != "" {
-			cfg.GitHubCodespaces.Geo = file.GitHubCodespaces.Geo
-			recordConfigInput(cfg, "github-codespaces", inputSource, true)
-		}
-		if trusted {
-			recordConfigInput(cfg, "github-codespaces", inputSource, applyLeaseDuration(&cfg.GitHubCodespaces.IdleTimeout, file.GitHubCodespaces.IdleTimeout))
-			if applyNonNegativeLeaseDuration(&cfg.GitHubCodespaces.RetentionPeriod, file.GitHubCodespaces.RetentionPeriod) {
-				recordConfigInput(cfg, "github-codespaces", inputSource, true)
-				MarkGitHubCodespacesRetentionExplicit(cfg)
-			}
-		}
-		if trusted && file.GitHubCodespaces.DeleteOnRelease != nil {
-			cfg.GitHubCodespaces.DeleteOnRelease = *file.GitHubCodespaces.DeleteOnRelease
-			recordConfigInput(cfg, "github-codespaces", inputSource, true)
-			MarkDeleteOnReleaseExplicit(cfg, "github-codespaces")
-		}
-		if file.GitHubCodespaces.WorkRoot != "" {
-			cfg.GitHubCodespaces.WorkRoot = file.GitHubCodespaces.WorkRoot
-			recordConfigInput(cfg, "github-codespaces", inputSource, true)
-		}
+	if err := applyGitHubCodespacesFileConfig(cfg, file.GitHubCodespaces, trusted, inputSource); err != nil {
+		return err
 	}
+
 	{
 		applied := cfg.Lambda.applyFile(file.Lambda)
 		recordConfigInput(cfg, "lambda", inputSource, applied.InputAccepted)
@@ -3888,48 +3766,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Islo != nil {
-		if file.Islo.BaseURL != "" {
-			cfg.Islo.BaseURL = file.Islo.BaseURL
-			recordConfigInput(cfg, "islo", inputSource, true)
-			cfg.credentialProvenance.isloBaseURL = credentialSource
-		}
-		if file.Islo.Image != "" {
-			cfg.Islo.Image = file.Islo.Image
-			recordConfigInput(cfg, "islo", inputSource, true)
-			cfg.isloImageExplicit = true
-		}
-		if file.Islo.Workdir != "" {
-			cfg.Islo.Workdir = file.Islo.Workdir
-			recordConfigInput(cfg, "islo", inputSource, true)
-		}
-		if file.Islo.GatewayProfile != "" {
-			cfg.Islo.GatewayProfile = file.Islo.GatewayProfile
-			recordConfigInput(cfg, "islo", inputSource, true)
-		}
-		if file.Islo.SnapshotName != "" {
-			cfg.Islo.SnapshotName = file.Islo.SnapshotName
-			recordConfigInput(cfg, "islo", inputSource, true)
-		}
-		if file.Islo.VCPUs > 0 {
-			cfg.Islo.VCPUs = file.Islo.VCPUs
-			recordConfigInput(cfg, "islo", inputSource, true)
-			cfg.isloVCPUsExplicit = true
-		}
-		if file.Islo.MemoryMB > 0 {
-			cfg.Islo.MemoryMB = file.Islo.MemoryMB
-			recordConfigInput(cfg, "islo", inputSource, true)
-			cfg.isloMemoryMBExplicit = true
-		}
-		if file.Islo.DiskGB > 0 {
-			cfg.Islo.DiskGB = file.Islo.DiskGB
-			recordConfigInput(cfg, "islo", inputSource, true)
-			cfg.isloDiskGBExplicit = true
-		}
-		if file.Islo.IdlePause != nil {
-			cfg.Islo.IdlePause = *file.Islo.IdlePause
-			recordConfigInput(cfg, "islo", inputSource, true)
-		}
+	if err := applyIsloFileConfig(cfg, file.Islo, inputSource, credentialSource); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.Freestyle.applyFile(file.Freestyle, trusted)
@@ -4905,29 +4743,10 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.GitHubCodespaces.APIURL = configInputEnvString(cfg, "github-codespaces", cfg.GitHubCodespaces.APIURL, "CRABBOX_GITHUB_CODESPACES_API_URL")
-	cfg.GitHubCodespaces.GHPath = expandUserPath(configInputEnvString(cfg, "github-codespaces", cfg.GitHubCodespaces.GHPath, "CRABBOX_GITHUB_CODESPACES_GH_PATH"))
-	cfg.GitHubCodespaces.Repo = configInputEnvString(cfg, "github-codespaces", cfg.GitHubCodespaces.Repo, "CRABBOX_GITHUB_CODESPACES_REPO")
-	cfg.GitHubCodespaces.Ref = configInputEnvString(cfg, "github-codespaces", cfg.GitHubCodespaces.Ref, "CRABBOX_GITHUB_CODESPACES_REF")
-	cfg.GitHubCodespaces.Machine = configInputEnvString(cfg, "github-codespaces", cfg.GitHubCodespaces.Machine, "CRABBOX_GITHUB_CODESPACES_MACHINE")
-	cfg.GitHubCodespaces.DevcontainerPath = configInputEnvString(cfg, "github-codespaces", cfg.GitHubCodespaces.DevcontainerPath, "CRABBOX_GITHUB_CODESPACES_DEVCONTAINER_PATH")
-	cfg.GitHubCodespaces.WorkingDirectory = configInputEnvString(cfg, "github-codespaces", cfg.GitHubCodespaces.WorkingDirectory, "CRABBOX_GITHUB_CODESPACES_WORKING_DIRECTORY")
-	cfg.GitHubCodespaces.Geo = configInputEnvString(cfg, "github-codespaces", cfg.GitHubCodespaces.Geo, "CRABBOX_GITHUB_CODESPACES_GEO")
-	if idleTimeout := os.Getenv("CRABBOX_GITHUB_CODESPACES_IDLE_TIMEOUT"); idleTimeout != "" {
-		recordConfigInput(cfg, "github-codespaces", configInputEnvironment, applyLeaseDuration(&cfg.GitHubCodespaces.IdleTimeout, idleTimeout))
+	if err := applyGitHubCodespacesEnvironmentConfig(cfg); err != nil {
+		return err
 	}
-	if retentionPeriod := os.Getenv("CRABBOX_GITHUB_CODESPACES_RETENTION_PERIOD"); retentionPeriod != "" {
-		if applyNonNegativeLeaseDuration(&cfg.GitHubCodespaces.RetentionPeriod, retentionPeriod) {
-			recordConfigInput(cfg, "github-codespaces", configInputEnvironment, true)
-			MarkGitHubCodespacesRetentionExplicit(cfg)
-		}
-	}
-	if value, ok := getenvBool("CRABBOX_GITHUB_CODESPACES_DELETE_ON_RELEASE"); ok {
-		cfg.GitHubCodespaces.DeleteOnRelease = value
-		recordConfigInput(cfg, "github-codespaces", configInputEnvironment, true)
-		MarkDeleteOnReleaseExplicit(cfg, "github-codespaces")
-	}
-	cfg.GitHubCodespaces.WorkRoot = configInputEnvString(cfg, "github-codespaces", cfg.GitHubCodespaces.WorkRoot, "CRABBOX_GITHUB_CODESPACES_WORK_ROOT")
+
 	{
 		applied := cfg.Lambda.applyEnv()
 		recordConfigInput(cfg, "lambda", configInputEnvironment, applied.InputAccepted)
@@ -5390,45 +5209,8 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_ISLO_API_KEY", "ISLO_API_KEY"); ok {
-		cfg.Islo.APIKey = value
-		recordConfigInput(cfg, "islo", configInputEnvironment, true)
-		cfg.credentialProvenance.isloAPIKey = credentialSourceEnvironment
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_ISLO_BASE_URL", "ISLO_BASE_URL"); ok {
-		cfg.Islo.BaseURL = value
-		recordConfigInput(cfg, "islo", configInputEnvironment, true)
-		cfg.credentialProvenance.isloBaseURL = credentialSourceEnvironment
-	}
-	if image := os.Getenv("CRABBOX_ISLO_IMAGE"); image != "" {
-		cfg.Islo.Image = image
-		recordConfigInput(cfg, "islo", configInputEnvironment, true)
-		cfg.isloImageExplicit = true
-	}
-	cfg.Islo.Workdir = configInputEnvString(cfg, "islo", cfg.Islo.Workdir, "CRABBOX_ISLO_WORKDIR")
-	cfg.Islo.GatewayProfile = configInputEnvString(cfg, "islo", cfg.Islo.GatewayProfile, "CRABBOX_ISLO_GATEWAY_PROFILE")
-	cfg.Islo.SnapshotName = configInputEnvString(cfg, "islo", cfg.Islo.SnapshotName, "CRABBOX_ISLO_SNAPSHOT_NAME")
-	if raw := os.Getenv("CRABBOX_ISLO_VCPUS"); raw != "" {
-		cfg.Islo.VCPUs = configInputEnvInt(cfg, "islo", cfg.Islo.VCPUs, "CRABBOX_ISLO_VCPUS")
-		if _, err := strconv.Atoi(raw); err == nil {
-			cfg.isloVCPUsExplicit = true
-		}
-	}
-	if raw := os.Getenv("CRABBOX_ISLO_MEMORY_MB"); raw != "" {
-		cfg.Islo.MemoryMB = configInputEnvInt(cfg, "islo", cfg.Islo.MemoryMB, "CRABBOX_ISLO_MEMORY_MB")
-		if _, err := strconv.Atoi(raw); err == nil {
-			cfg.isloMemoryMBExplicit = true
-		}
-	}
-	if raw := os.Getenv("CRABBOX_ISLO_DISK_GB"); raw != "" {
-		cfg.Islo.DiskGB = configInputEnvInt(cfg, "islo", cfg.Islo.DiskGB, "CRABBOX_ISLO_DISK_GB")
-		if _, err := strconv.Atoi(raw); err == nil {
-			cfg.isloDiskGBExplicit = true
-		}
-	}
-	if value, ok := getenvBool("CRABBOX_ISLO_IDLE_PAUSE"); ok {
-		cfg.Islo.IdlePause = value
-		recordConfigInput(cfg, "islo", configInputEnvironment, true)
+	if err := applyIsloEnvironmentConfig(cfg); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.Freestyle.applyEnv()

@@ -56,6 +56,7 @@ func (f field) fileBindings() []fileBinding {
 }
 
 type schema struct {
+	flagOrder           []string
 	manualFlags         bool
 	pkg, name, provider string
 	fields              []field
@@ -139,6 +140,14 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 	}
 	for _, group := range file.Comments {
 		for _, comment := range group.List {
+			if strings.HasPrefix(comment.Text, "//configgen:flag-order") {
+				const prefix = "//configgen:flag-order "
+				if !allowedDirectives[comment] || !strings.HasPrefix(comment.Text, prefix) || s.flagOrder != nil {
+					return s, fmt.Errorf("flag-order requires one exact field-order directive on the selected type")
+				}
+				s.flagOrder = strings.Split(strings.TrimPrefix(comment.Text, prefix), ",")
+				continue
+			}
 			if !strings.HasPrefix(comment.Text, "//configgen:flag-application") {
 				continue
 			}
@@ -294,8 +303,8 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			return s, fmt.Errorf("%s: unsupported config type %s", f.name, f.kind)
 		}
 		if mode, present := tags.Lookup("duration"); f.kind == "time.Duration" {
-			if !present || mode != "positive-overlay" {
-				return s, fmt.Errorf("%s: time.Duration requires duration positive-overlay", f.name)
+			if !present || (mode != "positive-overlay" && mode != "nonnegative-overlay") {
+				return s, fmt.Errorf("%s: time.Duration requires duration positive-overlay or nonnegative-overlay", f.name)
 			}
 			if !f.noFile && tags.Get("fileStorage") != "value" {
 				return s, fmt.Errorf("%s: duration file input requires fileStorage value", f.name)
@@ -357,8 +366,8 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			}
 		}
 		if value, ok := tags.Lookup("reportApplied"); ok {
-			if value != "true" || (f.kind != "string" && f.kind != "bool") {
-				return s, fmt.Errorf("%s: reportApplied is supported only as true for string or bool fields", f.name)
+			if value != "true" || (f.kind != "string" && f.kind != "bool" && f.kind != "int" && f.kind != "time.Duration") {
+				return s, fmt.Errorf("%s: reportApplied is supported only as true for string, bool, int, or time.Duration fields", f.name)
 			}
 			f.reportApplied = true
 			if f.name == "InputAccepted" {
@@ -479,6 +488,23 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 	}
 	if len(s.fields) == 0 {
 		return s, fmt.Errorf("%s has no fields", name)
+	}
+	if s.flagOrder != nil {
+		admitted := map[string]bool{}
+		for _, f := range s.fields {
+			if !f.noFlag {
+				admitted[f.name] = true
+			}
+		}
+		for _, name := range s.flagOrder {
+			if !admitted[name] {
+				return s, fmt.Errorf("flag-order requires an exact permutation of flag fields; invalid or repeated field %q", name)
+			}
+			delete(admitted, name)
+		}
+		if len(admitted) != 0 {
+			return s, fmt.Errorf("flag-order requires every flag-admitted field exactly once")
+		}
 	}
 	if s.manualFlags {
 		hasFlags := false
@@ -667,7 +693,11 @@ func generate(s schema, source string) ([]byte, error) {
 			p("%s *%s\n", f.name, kind)
 		}
 		p("}\n\n")
-		p("// Register%sFlags registers mechanical bindings without selecting a provider.\nfunc Register%sFlags(fs *flag.FlagSet, defaults %s) %sFlagValues {\nvar values %sFlagValues\nregisterConfigFlags(fs, defaults, &values)\nreturn values\n}\n\n", s.name, s.name, s.name, s.name, s.name)
+		p("// Register%sFlags registers mechanical bindings without selecting a provider.\nfunc Register%sFlags(fs *flag.FlagSet, defaults %s) %sFlagValues {\nvar values %sFlagValues\nregisterConfigFlags(fs, defaults, &values", s.name, s.name, s.name, s.name, s.name)
+		for _, name := range s.flagOrder {
+			p(", %q", name)
+		}
+		p(")\nreturn values\n}\n\n")
 
 		if trackedFlags || s.manualFlags {
 			p("// %sVisitedFlags records raw flag visits, independently of application.\ntype %sVisitedFlags struct {\n", s.name, s.name)

@@ -2142,6 +2142,12 @@ func TestConfigBindingCentralFlagSourcePhase(t *testing.T) {
 				return [2]*credentialValueSource{&cfg.credentialProvenance.spritesAPIURL, &cfg.credentialProvenance.unikraftCloudAPIURL}
 			},
 		},
+		{
+			name: "islo-tenki", flags: [2]string{"islo-base-url", "tenki-endpoint"},
+			sources: func(cfg *Config) [2]*credentialValueSource {
+				return [2]*credentialValueSource{&cfg.credentialProvenance.isloBaseURL, &cfg.credentialProvenance.tenkiEndpoint}
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -231,7 +231,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if VastConfigFlagPresence(fs).APIURL {
 		provenance.vastAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "islo-base-url") {
+	if IsloConfigFlagPresence(fs).BaseURL {
 		provenance.isloBaseURL = credentialSourceFlag
 	}
 	tenkiFlags := TenkiConfigFlagPresence(fs)
