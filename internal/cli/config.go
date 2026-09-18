@@ -3821,8 +3821,11 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		return err
 	}
 	{
-		applied := applyLocalContainerFile(cfg, file.LocalContainer)
+		applied, err := applyLocalContainerFile(cfg, file.LocalContainer)
 		recordConfigInput(cfg, "local-container", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
 	}
 	{
 		applied := cfg.AppleContainer.applyFile(file.AppleContainer)
@@ -5176,8 +5179,11 @@ func applyEnv(cfg *Config) error {
 		return err
 	}
 	{
-		applied := applyLocalContainerEnv(cfg)
+		applied, err := applyLocalContainerEnv(cfg)
 		recordConfigInput(cfg, "local-container", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
 	}
 	{
 		applied := cfg.AppleContainer.applyEnv()

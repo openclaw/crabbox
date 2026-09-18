@@ -4436,3 +4436,65 @@ func TestWindowsSandboxGeneratedConfigIsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+const localRawAppendSample = "package cli\n//configgen:flag-application manual\ntype PilotConfig struct {\n Items []string `sources:\"flag\" flag:\"item\" help:\"Items\" flagList:\"append-raw\"`\n Name string `sources:\"env,flag\" env:\"NAME\" flag:\"name\" help:\"Name\"`\n}"
+
+func TestLocalContainerRawAppendSchema(t *testing.T) {
+	if _, err := parseSchema([]byte(localRawAppendSample), "PilotConfig", "pilot"); err != nil {
+		t.Errorf("supported raw append: %v", err)
+	}
+	for _, change := range []struct{ old, new string }{
+		{"//configgen:flag-application manual\n", ""},
+		{`flagList:"append-raw"`, `flagList:""`}, {`flagList:"append-raw"`, `flagList:"unknown"`},
+		{"Items []string", "Items string"},
+		{`sources:"flag"`, `sources:"env,flag" env:"ITEMS"`},
+		{`sources:"flag"`, `sources:"user,repo,flag" config:"items"`},
+		{`sources:"flag" flag:"item" help:"Items"`, `sources:"user,repo,env" config:"items" env:"ITEMS"`},
+	} {
+		source := strings.Replace(localRawAppendSample, change.old, change.new, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+			t.Errorf("invalid raw append accepted: %s", change.new)
+		}
+	}
+}
+
+func TestLocalContainerRawAppendExecutable(t *testing.T) {
+	s, err := parseSchema([]byte(localRawAppendSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "Items *[]string") || strings.Contains(string(out), "func (values PilotConfigFlagValues) Apply(") {
+		t.Fatal("raw slice storage/manual application")
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(out, again) {
+		t.Fatal("nondeterministic output")
+	}
+	const behavior = `package cli
+import("bytes";"flag";"io";"reflect";"strings";"testing")
+func TestRawAppend(t *testing.T){
+ for _,prior:=range [][]string{nil,{}, {" prior ","dup"}}{for _,args:=range [][]string{{},{""},{" raw ","a,b","dup","dup"}}{
+  cfg:=PilotConfig{Items:prior};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);v:=RegisterPilotConfigFlags(fs,cfg)
+  if v.Items==nil||(*v.Items==nil)!=(prior==nil)||fs.Lookup("item").DefValue!=strings.Join(prior,","){t.Fatal("snapshot nil/empty/default shape")}
+  var help bytes.Buffer;fs.SetOutput(&help);fs.PrintDefaults();if strings.Contains(help.String(),"panic"){t.Fatal("zero wrapper help panic")};getter:=fs.Lookup("item").Value.(flag.Getter);if getter.Get().([]string)==nil{t.Fatal("nil getter")}
+  want:=append([]string{},prior...);for _,raw:=range args{if err:=fs.Set("item",raw);err!=nil{t.Fatal(err)};want=append(want,raw)}
+  if !reflect.DeepEqual(getter.Get(),want)||PilotConfigFlagPresence(fs).Items!=(len(args)>0){t.Fatal("raw append/visit")}
+  if len(want)>0{got:=getter.Get().([]string);got[0]="changed";if (*v.Items)[0]!=want[0]{t.Fatal("getter shares")}}
+  *v.Items=append(*v.Items,"direct");if !strings.HasSuffix(fs.Lookup("item").Value.String(),"direct"){t.Fatal("wrapper not backed by generated pointer")}
+ }}
+ prior:=make([]string,1,4);prior[0]="before";fs:=flag.NewFlagSet("snapshot",flag.ContinueOnError);v:=RegisterPilotConfigFlags(fs,PilotConfig{Items:prior});prior[0]="after";if (*v.Items)[0]!="before"{t.Fatal("defaults not snapshotted")}
+ fs=flag.NewFlagSet("order",flag.ContinueOnError);fs.SetOutput(io.Discard);fs.String("name","","");func(){defer func(){if recover()==nil{t.Fatal("duplicate missing")}}();RegisterPilotConfigFlags(fs,PilotConfig{})}();if fs.Lookup("item")!=nil{t.Fatal("raw append registered before ordinary flags")}
+}
+`
+	runScalarFixture(t, localRawAppendSample, out, behavior)
+}
+
+func TestLocalContainerGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_local_container.go", "../../internal/cli/config_local_container_generated.go", "LocalContainerConfig", "local-container", true); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -20145,3 +20145,44 @@ func TestWindowsSandboxBindingEnvironment(t *testing.T) {
 		}
 	})
 }
+
+func TestLocalContainerBindingInitializationAndOmissions(t *testing.T) {
+	for _, image := range []string{"", " resolved-image "} {
+		want := LocalContainerConfig{Runtime: "docker", Image: image, User: "crabbox", Network: "bridge"}
+		if !reflect.DeepEqual(initialLocalContainerConfig(image), want) {
+			t.Fatal("resolved image or configured defaults changed")
+		}
+	}
+	for _, trusted := range []bool{false, true} {
+		cfg := baseConfig()
+		volumes := []string{"kept"}
+		metadata := map[string]string{"kept": "value"}
+		cfg.LocalContainer.Volumes = volumes
+		cfg.LocalContainer.CheckpointMetadata = metadata
+		var file fileConfig
+		if err := yaml.Unmarshal([]byte("localContainer:\n  runtime: fixture\n  image: fixture\n  user: fixture\n  workRoot: fixture\n  cpus: 3\n  memory: fixture\n  network: fixture\n  dockerSocket: true\n  noHostname: true\n  volumes: [ignored]\n  checkpointMetadata: {ignored: ignored}\n"), &file); err != nil {
+			t.Fatal(err)
+		}
+		if err := applyFileConfigWithTrust(&cfg, file, trusted); err != nil {
+			t.Fatal(err)
+		}
+		want := LocalContainerConfig{Runtime: "fixture", Image: "fixture", User: "fixture", WorkRoot: "fixture", CPUs: 3, Memory: "fixture", Network: "fixture", DockerSocket: true, NoHostname: true, Volumes: volumes, CheckpointMetadata: metadata}
+		if !reflect.DeepEqual(cfg.LocalContainer, want) {
+			t.Fatal("file sources widened/narrowed")
+		}
+		clearConfigEnv(t)
+		t.Setenv("CRABBOX_LOCAL_CONTAINER_VOLUMES", "ignored")
+		t.Setenv("CRABBOX_LOCAL_CONTAINER_CHECKPOINT_METADATA", "ignored")
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(cfg.LocalContainer, want) {
+			t.Fatal("runtime-only values gained environment source")
+		}
+		volumes[0] = "later"
+		metadata["kept"] = "later"
+		if cfg.LocalContainer.Volumes[0] != "later" || cfg.LocalContainer.CheckpointMetadata["kept"] != "later" {
+			t.Fatal("ordinary overlays changed runtime-state identity")
+		}
+	}
+}

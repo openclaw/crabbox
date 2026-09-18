@@ -686,26 +686,32 @@ provider lookups remain separate from these raw-empty rules.
 Native mount filtering, lookup, credentials, class selection and OS mappings remain
 provider policy. The following field instructions apply to generated owners.
 
-## Local Container's concrete source owner
+## Local Container's complete binding owner
 
-`config_local_container.go` keeps eleven runtime members distinct from nine
-file/environment settings. The file type retains two pointer booleans and its
-existing omissions. CLI-only volumes and transient checkpoint metadata remain
-runtime data, not new persisted settings; their list/map identities survive
-ordinary source application. The initializer accepts the resolved image and
-keeps the raw work root empty without marking compiled defaults explicit.
+`config_local_container.go` declares all eleven runtime members. Generated file
+input retains the nine admitted fields, two pointer booleans, and existing
+omissions. NoHostname stays file/environment-only; volumes are flag-only;
+checkpoint metadata is runtime-only with its existing YAML/JSON omissions.
+Ordinary file/environment application leaves list/map runtime state untouched.
+The composed initializer accepts the resolved image, including empty, and keeps
+the configured work root empty without marking compiled defaults explicit.
 
-Three accepted-input operations pair Runtime, Image and WorkRoot assignments
-with their existing source markers. File/environment predicates and scalar flag
-visitation stay with their current callers. The flag work-root operation sets
-the provider bit before the independent generic root copy/snapshot; later
-observers see the same state, including the existing empty-snapshot semantics.
-No concurrency guarantee or callback layer is introduced.
+Accepted Runtime, Image and WorkRoot reports feed the existing marker operations.
+Manual flag application preserves scalar order, generic user/root effects and
+root snapshot timing. The provider still checks nonempty volumes against id
+before pool after scalar effects and before selected-provider defaults. Inherited
+unvisited volumes still reach these checks; only a successful explicit flag visit
+records volume input. The companion fork-flag mapper consumes the same generated
+storage and retains its existing copied volume assignment.
 
-Flag storage, raw volume-list behavior, creation-only checks and provider
-defaults remain provider-owned. NoHostname stays file/environment-only. This
-concrete owner needs neither generated runtime-state exclusions nor a new flag
-list framework; native, socket, mount and checkpoint behavior is unchanged.
+The fixed `flagList:"append-raw"` mode requires a flag-only string slice and
+manual flag application. Generated storage is `*[]string`; a private shared
+flag.Value wrapper appends whole occurrences without trimming, splitting or
+deduplication. Registration snapshots inherited values, preserving nil/empty
+shape; Getter returns an independent nonnil slice. Raw append flags register
+after ordinary scalars. Default-slice backing-array identity is not a public
+contract. No generic automatic application, callback, configurable parser,
+file/environment volume source or runtime behavior is added.
 
 ## Apple Container's shared concrete owner
 

@@ -20,6 +20,7 @@ import (
 )
 
 type field struct {
+	flagListAppendRaw                                                                                                                                                            bool
 	fileListPresentNormalized                                                                                                                                                    bool
 	envIntCheckedAlias                                                                                                                                                           bool
 	envSplitBefore                                                                                                                                                               bool
@@ -355,7 +356,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		}{
 			{"fileList", !f.noFile, map[string]*bool{"raw": &f.fileListRaw, "nonempty-raw": &f.fileListNonemptyRaw, "nonempty-normalized": &f.fileListNonemptyNormalized, "present-normalized": &f.fileListPresentNormalized}},
 			{"envList", !f.noEnv, map[string]*bool{"presence": &f.envListPresence, "csv": &f.envListCSV, "trimmed-nonempty": &f.envListTrimmedNonempty}},
-			{"flagList", !f.noFlag, map[string]*bool{"replace-append": &f.flagListReplaceAppend, "append-trimmed": &f.flagListAppendTrimmed, "append-trimmed-nonempty": &f.flagListAppendTrimmedNonempty, "empty-scalar": &f.flagListEmptyScalar, "scalar-empty-nil": &f.flagListScalarEmptyNil, "csv": &f.flagListCSV}},
+			{"flagList", !f.noFlag, map[string]*bool{"replace-append": &f.flagListReplaceAppend, "append-trimmed": &f.flagListAppendTrimmed, "append-raw": &f.flagListAppendRaw, "append-trimmed-nonempty": &f.flagListAppendTrimmedNonempty, "empty-scalar": &f.flagListEmptyScalar, "scalar-empty-nil": &f.flagListScalarEmptyNil, "csv": &f.flagListCSV}},
 		} {
 			if value, ok := tags.Lookup(mode.tag); ok {
 				enabled := mode.values[value]
@@ -364,6 +365,9 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 				}
 				*enabled = true
 			}
+		}
+		if f.flagListAppendRaw && (!s.manualFlags || tags.Get("sources") != "flag") {
+			return s, fmt.Errorf("%s: flagList append-raw requires flag-only input and manual flag application", f.name)
 		}
 		if value, ok := tags.Lookup("envString"); ok {
 			if value != "presence" || f.kind != "string" || f.noEnv || hasAlias || hasAlias2 || hasAlias3 {
@@ -693,6 +697,9 @@ func generate(s schema, source string) ([]byte, error) {
 				}
 				if f.flagListAppendTrimmedNonempty {
 					kind = "appendTrimmedNonemptyListFlag"
+				}
+				if f.flagListAppendRaw {
+					kind = "[]string"
 				}
 			}
 			p("%s *%s\n", f.name, kind)

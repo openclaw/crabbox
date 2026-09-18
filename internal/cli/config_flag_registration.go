@@ -32,7 +32,7 @@ func registerConfigFlags(fs *flag.FlagSet, defaults, values any, order ...string
 			switch field.Tag.Get("flagList") {
 			case "replace-append", "append-trimmed-nonempty":
 				fieldPhase = 0
-			case "append-trimmed":
+			case "append-trimmed", "append-raw":
 				fieldPhase = 2
 			}
 			if fieldPhase == phase {
@@ -71,6 +71,10 @@ func registerConfigFlag(fs *flag.FlagSet, value reflect.Value, tags reflect.Stru
 	case reflect.Slice:
 		defaults := value.Interface().([]string)
 		switch tags.Get("flagList") {
+		case "append-raw":
+			list := newRawAppendListFlag(defaults)
+			fs.Var(list, name, help)
+			return list.values
 		case "replace-append":
 			list := newReplaceAppendListFlag(defaults)
 			fs.Var(list, name, help)

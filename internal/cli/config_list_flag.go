@@ -1,6 +1,9 @@
 package cli
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // appendTrimmedListFlag retains inherited items and appends each whole occurrence.
 // Empty strings and commas are values, not clearing or splitting instructions.
@@ -53,4 +56,32 @@ func (s *replaceAppendListFlag) Set(value string) error {
 
 func (s *replaceAppendListFlag) Get() any {
 	return append([]string{}, s.values...)
+}
+
+// rawAppendListFlag keeps one raw value per occurrence; policy stays in manual application.
+type rawAppendListFlag struct{ values *[]string }
+
+func newRawAppendListFlag(defaults []string) *rawAppendListFlag {
+	values := slices.Clone(defaults)
+	return &rawAppendListFlag{values: &values}
+}
+
+func (s *rawAppendListFlag) String() string {
+	// flag.PrintDefaults asks a zero-valued wrapper for its empty representation.
+	if s == nil || s.values == nil {
+		return ""
+	}
+	return strings.Join(*s.values, ",")
+}
+
+func (s *rawAppendListFlag) Set(value string) error {
+	*s.values = append(*s.values, value)
+	return nil
+}
+
+func (s *rawAppendListFlag) Get() any {
+	if s == nil || s.values == nil {
+		return []string{}
+	}
+	return append([]string{}, (*s.values)...)
 }
