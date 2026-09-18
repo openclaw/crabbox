@@ -4,11 +4,12 @@
 
 ### Fixes
 
-- Let admin commands use an already-authorized GitHub broker session when no explicit admin token is configured, preserving token precedence and server denials. [PR 1714](https://github.com/openclaw/crabbox/pull/1714). Thanks @steipete.
+- Raise production coordinator checkpoint limits to 100 globally, per owner, and per organization so retained worker caches do not exhaust the previous 10-checkpoint owner limit.
 - Finalize abandoned run admissions through bounded, authenticated pre-work bookkeeping, keeping late admission responses from leaving history running and reporting unresolved history honestly. [Issue 2223](https://github.com/openclaw/crabbox/issues/2223). [PR 2227](https://github.com/openclaw/crabbox/pull/2227). Thanks @steipete.
 - Recover abandoned external-provider slug reservation locks on Windows so later reservations can acquire and release normally. [PR 2292](https://github.com/openclaw/crabbox/pull/2292). Thanks @zozo123.
 - Clarify that configured Actions fields and workflow-input inspection belong to hydration, while standalone dispatch sends only explicitly supplied fields. ([#2330](https://github.com/openclaw/crabbox/pull/2330))
 - Let explicit broker heartbeats wait for provider access refreshes using the existing mutation budget, while preserving shorter automatic-heartbeat and foreground-touch deadlines, caller cancellation, and single-request behavior. [PR 2331](https://github.com/openclaw/crabbox/pull/2331). Thanks @steipete.
+- Let admin commands use an already-authorized GitHub broker session when no explicit admin token is configured, preserving token precedence and server denials. [PR 1714](https://github.com/openclaw/crabbox/pull/1714). Thanks @steipete.
 
 ## 0.61.0 - 2026-09-17
 
