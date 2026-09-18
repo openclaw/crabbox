@@ -638,8 +638,7 @@ func installWorkspaceOwnerRecordingSSH(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	sshPath := filepath.Join(dir, "ssh")
-	script := `#!/bin/sh
-log_dir=$CRABBOX_OWNER_SSH_LOG_DIR
+	script := "#!/bin/sh\n" + recordLegacyBashProbeShell(t, filepath.Join(dir, "prerequisites")) + `log_dir=$CRABBOX_OWNER_SSH_LOG_DIR
 count=0
 if [ -f "$log_dir/count" ]; then read count < "$log_dir/count"; fi
 count=$((count + 1))
@@ -1075,6 +1074,9 @@ func TestWorkspaceOwnerWSL2StagesThenExecutesOnceWithoutStdin(t *testing.T) {
 	}
 	if staged != 4 {
 		t.Fatalf("stage calls=%d want 4", staged)
+	}
+	if probes, err := os.ReadFile(filepath.Join(dir, "prerequisites")); err != nil || string(probes) != strings.Repeat("probe\n", 4) {
+		t.Fatalf("Bash prerequisite calls=%q err=%v, want four", probes, err)
 	}
 }
 

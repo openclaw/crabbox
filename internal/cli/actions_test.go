@@ -1003,7 +1003,7 @@ cat >/dev/null
 			t.Fatalf("Actions plain manifest ran forbidden Git path %q:\n%s", forbidden, log)
 		}
 	}
-	for _, want := range []string{"/usr/bin/env -i", "/bin/bash --noprofile --norc", "plain_git", "protocol.allow=never"} {
+	for _, want := range []string{"/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c", "plain_git", "protocol.allow=never"} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("Actions plain manifest missing %q:\n%s", want, log)
 		}
@@ -1788,8 +1788,8 @@ func TestExecuteLocalActionsHydrationNormalizesConfigDerivedWSL2Target(t *testin
 	logPath := filepath.Join(dir, "ssh.log")
 	hydratedPath := filepath.Join(dir, "hydrated")
 	stagedCommandPath := filepath.Join(dir, "staged-command")
-	sshScript := `#!/bin/sh
-remote=""
+	probeLog := filepath.Join(dir, "prerequisites")
+	sshScript := "#!/bin/sh\n" + recordLegacyBashProbeShell(t, probeLog) + `remote=""
 for arg do remote="$arg"; done
 decoded="$remote"
 decode_base64() {
@@ -1800,6 +1800,10 @@ decode_base64() {
   fi
 }
 case "$remote" in
+  *"FromBase64String('"*)
+    encoded=$(printf '%s\n' "$remote" | /usr/bin/sed -n "s/.*FromBase64String('\([^']*\)').*/\1/p")
+    decoded=$(printf '%s' "$encoded" | decode_base64)
+    ;;
   *" -EncodedCommand "*)
     encoded=${remote##* }
     outer=$(printf '%s' "$encoded" | decode_base64 | /usr/bin/iconv -f UTF-16LE -t UTF-8)
@@ -1865,6 +1869,9 @@ exit 0
 	logText := string(logData)
 	if !strings.Contains(logText, "timeout --signal=TERM") || strings.Contains(logText, "nohup") {
 		t.Fatalf("config-derived WSL2 target used the wrong hydration path:\n%s", logText)
+	}
+	if probes, err := os.ReadFile(probeLog); err != nil || len(probes) == 0 {
+		t.Fatalf("WSL2 fixture did not observe the Bash prerequisite: %q %v", probes, err)
 	}
 }
 
@@ -2244,7 +2251,7 @@ esac
 	for _, command := range strings.Split(string(logData), "---\n") {
 		if strings.Contains(command, "/bin/rm -f --") && strings.Contains(command, "sync-fingerprint") {
 			invalidations++
-			for _, want := range []string{remoteJoin(cfg, "cbx_gh", "repo"), "/usr/bin/env -i", "/bin/bash --noprofile --norc"} {
+			for _, want := range []string{remoteJoin(cfg, "cbx_gh", "repo"), "/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c", "plain_git", "protocol.allow=never"} {
 				if !strings.Contains(command, want) {
 					t.Fatalf("GitHub runner invalidation missing %q:\n%s", want, command)
 				}

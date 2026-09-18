@@ -25,12 +25,17 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/runner"
+	"github.com/openclaw/crabbox/internal/runner/runnerwire"
+	"github.com/openclaw/crabbox/internal/runtimeartifact"
 )
 
 type rejectTimingJSONWriter struct {
@@ -364,12 +369,12 @@ func TestStopDefersUnsafeLocalConnectionCleanupUntilRelease(t *testing.T) {
 	}
 }
 
-func installRecordingSSH(t *testing.T, dir string) string {
+// Handlers see decoded commands without depending on the recorder's shell layout.
+func installRecordingSSH(t *testing.T, dir string, commandHandlers ...string) string {
 	t.Helper()
 	logPath := filepath.Join(dir, "ssh.log")
 	sshPath := filepath.Join(dir, "ssh")
-	script := `#!/bin/sh
-cmd=""
+	script := "#!/bin/sh\n" + recordLegacyBashProbeShell(t, logPath+".prerequisites") + `cmd=""
 for arg do cmd="$arg"; done
 decoded=""
 case "$cmd" in
@@ -384,6 +389,20 @@ esac
 printf '%s\n%s\n---\n' "$cmd" "$decoded" >> "$CRABBOX_FAKE_SSH_LOG"
 match=$cmd
 if [ -n "$decoded" ]; then match=$decoded; fi
+` + strings.Join(commandHandlers, "\n") + `
+if [ -n "${CRABBOX_FAKE_SSH_FILESYSTEM_PATH:-}" ]; then
+  case "$match" in
+    *"uname -m"*|*"/tmp/crabbox-runtime-"*)
+      case "$match" in
+        *"__filesystem"*)
+          /usr/bin/tee "$CRABBOX_FAKE_SSH_FILESYSTEM_REQUEST" | PATH="$CRABBOX_FAKE_SSH_FILESYSTEM_PATH" /bin/sh -c "$match"
+          ;;
+        *) PATH="$CRABBOX_FAKE_SSH_FILESYSTEM_PATH" /bin/sh -c "$match" ;;
+      esac
+      exit $?
+      ;;
+  esac
+fi
 case "$match" in
   *"protocol_action='acquire'"*) printf ACQUIRED; exit 0 ;;
   *"protocol_action='renew'"*) printf RENEWED; exit 0 ;;
@@ -723,7 +742,7 @@ func (runEnvProfileTestProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Name:        "run-env-profile-test",
 		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}, {OS: targetWindows, WindowsMode: windowsModeNormal}},
+		Targets:     []TargetSpec{{OS: targetLinux}, {OS: targetMacOS}, {OS: targetWindows, WindowsMode: windowsModeNormal}},
 		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
 		Coordinator: CoordinatorNever,
 	}
@@ -1461,6 +1480,235 @@ func TestRunBuildsSyncManifestAfterAcquire(t *testing.T) {
 			}
 			if !bytes.Contains(manifest, []byte("after-acquire.txt\x00")) {
 				t.Fatalf("ordinary sync reused the pre-acquisition file list: %q", manifest)
+			}
+		})
+	}
+}
+
+// This transport fixture executes every generated command and uses real rsync.
+// It does not simulate successful sync or carry manifest bytes in shell variables.
+func TestPOSIXRunTransportHelper(t *testing.T) {
+	if os.Getenv("CRABBOX_POSIX_TRANSPORT_HELPER") != "1" {
+		return
+	}
+	separator := slices.Index(os.Args, "--")
+	if separator < 0 || len(os.Args) <= separator+2 {
+		os.Exit(90)
+	}
+	mode, args := os.Args[separator+1], os.Args[separator+2:]
+	var command *exec.Cmd
+	if mode == "ssh" {
+		if slices.Contains(args, "-G") {
+			command = exec.Command(os.Getenv("CRABBOX_POSIX_REAL_SSH"), args...)
+		} else {
+			remote := args[len(args)-1]
+			if os.Getenv("CRABBOX_POSIX_BASH_AVAILABLE") == "false" && strings.Contains(remote, "/bin/bash") {
+				fmt.Fprintln(os.Stderr, "fixture: absolute Bash control invocation is unavailable")
+				os.Exit(127)
+			}
+			command = exec.Command("/bin/sh", "-c", remote)
+			command.Env = append(os.Environ(), "PATH="+os.Getenv("CRABBOX_POSIX_REMOTE_PATH"))
+		}
+	} else if mode == "rsync" {
+		var local []string
+		for i := 0; i < len(args); i++ {
+			if args[i] == "-e" {
+				i++
+				continue
+			}
+			local = append(local, args[i])
+		}
+		if len(local) < 2 {
+			os.Exit(91)
+		}
+		_, destination, remote := strings.Cut(local[len(local)-1], ":")
+		if !remote && slices.Contains(local, "--server") {
+			destination, remote = local[len(local)-1], true
+		}
+		destination = strings.Trim(destination, "'")
+		root := os.Getenv("CRABBOX_POSIX_REMOTE_ROOT") + string(os.PathSeparator)
+		if !remote || !strings.HasPrefix(filepath.Clean(destination), root) {
+			fmt.Fprintf(os.Stderr, "fixture: unexpected rsync destination %q\n", local[len(local)-1])
+			os.Exit(92)
+		}
+		local[len(local)-1] = destination
+		command = exec.Command(os.Getenv("CRABBOX_POSIX_REAL_RSYNC"), local...)
+		command.Env = append(os.Environ(), "PATH="+filepath.Dir(os.Getenv("CRABBOX_POSIX_REAL_RSYNC"))+string(os.PathListSeparator)+os.Getenv("PATH"))
+	} else {
+		os.Exit(93)
+	}
+	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := command.Run(); err != nil {
+		os.Exit(exitCode(err))
+	}
+	os.Exit(0)
+}
+
+func TestRunDefaultSyncWithoutBash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX transport fixture; native WSL is qualified separately")
+	}
+	ssh, sshErr := exec.LookPath("ssh")
+	rsync, rsyncErr := exec.LookPath("rsync")
+	if sshErr != nil || rsyncErr != nil {
+		t.Skip("requires local SSH config inspection and real rsync")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		targetOS      string
+		bashAvailable bool
+		workloadExit  int
+	}{
+		{targetLinux, true, 0},
+		{targetLinux, true, 23},
+		{targetLinux, false, 0},
+		{targetLinux, false, 23},
+		{targetMacOS, false, 0},
+	} {
+		bashAvailable, workloadExit := tc.bashAvailable, tc.workloadExit
+		t.Run(fmt.Sprintf("%s/bash=%t/exit=%d", tc.targetOS, bashAvailable, workloadExit), func(t *testing.T) {
+			if tc.targetOS == targetMacOS && runtime.GOOS != "darwin" {
+				t.Skip("native macOS default preflight")
+			}
+			clearConfigEnv(t)
+			root := t.TempDir()
+			isolateRunTestUserDirs(t, root)
+			source, remoteRoot := filepath.Join(root, "source"), filepath.Join(root, "remote")
+			transport, remoteBin := filepath.Join(root, "transport"), filepath.Join(root, "remote-bin")
+			for _, path := range []string{source, remoteRoot, transport, remoteBin} {
+				if err := os.MkdirAll(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, name := range strings.Fields("sh cat head tail sed tr cut wc dd id whoami uname dirname basename mkdir mktemp rm rmdir chmod mv cp ln find touch date sleep sort comm git perl python3 env base64 tar gzip ps mkfifo od awk") {
+				if path, err := exec.LookPath(name); err == nil {
+					if err := os.Symlink(path, filepath.Join(remoteBin, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if bashAvailable {
+				bash, err := exec.LookPath("bash")
+				if err != nil {
+					t.Skip("Bash-present compatibility control requires Bash")
+				}
+				if err := os.Symlink(bash, filepath.Join(remoteBin, "bash")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, name := range []string{"ssh", "rsync"} {
+				body := "#!/bin/sh\n" + synchronousHelperRacePrefix() + "exec " + shellQuote(self) + " -test.run='^TestPOSIXRunTransportHelper$' -- " + name + " \"$@\"\n"
+				if err := os.WriteFile(filepath.Join(transport, name), []byte(body), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("CRABBOX_POSIX_TRANSPORT_HELPER", "1")
+			t.Setenv("CRABBOX_POSIX_REAL_SSH", ssh)
+			t.Setenv("CRABBOX_POSIX_REAL_RSYNC", rsync)
+			t.Setenv("CRABBOX_POSIX_REMOTE_PATH", remoteBin)
+			t.Setenv("CRABBOX_POSIX_REMOTE_ROOT", remoteRoot)
+			t.Setenv("CRABBOX_POSIX_BASH_AVAILABLE", strconv.FormatBool(bashAvailable))
+			t.Setenv("PATH", transport+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_CONFIG", filepath.Join(root, "missing.yaml"))
+			t.Setenv("CRABBOX_WORK_ROOT", remoteRoot)
+			t.Setenv("FIXTURE_VALUE", "forwarded-value")
+			t.Chdir(source)
+			runGit(t, source, "init")
+			runGit(t, source, "config", "user.email", "test@example.com")
+			runGit(t, source, "config", "user.name", "Test")
+			writeFile(t, filepath.Join(source, "tracked.txt"), "tracked\n")
+			runGit(t, source, "add", ".")
+			runGit(t, source, "commit", "-m", "initial fixture")
+			writeFile(t, filepath.Join(source, "new.txt"), "newly-synced-content\n")
+			writeFile(t, filepath.Join(source, "workload.sh"), "#!/bin/sh\ncat new.txt\nprintf 'cwd=%s\\nenv=%s\\narg=%s\\n' \"$PWD\" \"$FIXTURE_VALUE\" \"$1\"\nexit \"$2\"\n")
+			profile := filepath.Join(root, "profile.env")
+			writeFile(t, profile, "FIXTURE_VALUE=profile-value\n")
+			port := startTCPReadinessFixture(t)
+			runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
+				return LeaseTarget{Server: Server{Provider: "run-env-profile-test"}, SSH: SSHTarget{User: "fixture", Host: "127.0.0.1", Port: port, TargetOS: tc.targetOS, ReadyCheck: "true"}, LeaseID: "cbx_posix_fixture"}, nil
+			}
+			t.Cleanup(func() { runEnvProfileTestAcquireLease = nil })
+			var stdout, stderr bytes.Buffer
+			allowance := 30 * time.Second
+			if tc.targetOS == targetMacOS {
+				allowance = 2 * time.Minute
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), allowance)
+			defer cancel()
+			err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(ctx, []string{
+				"--provider", "run-env-profile-test", "--target", tc.targetOS, "--no-hydrate", "--preflight", "--preflight-tools", "default,bash,bash",
+				"--env-from-profile", profile, "--allow-env", "FIXTURE_VALUE", "--", "/bin/sh", "workload.sh", "literal value;*", strconv.Itoa(workloadExit),
+			})
+			code := exitCode(err)
+			var commandExit ExitError
+			if AsExitError(err, &commandExit) {
+				code = commandExit.Code
+			}
+			if code != workloadExit {
+				t.Fatalf("exit=%d want=%d err=%v\nstdout=%s\nstderr=%s", code, workloadExit, err, &stdout, &stderr)
+			}
+			workspace := filepath.Join(remoteRoot, "cbx_posix_fixture", "source")
+			for _, want := range []string{"newly-synced-content\n", "cwd=" + workspace + "\n", "env=profile-value\n", "arg=literal value;*\n"} {
+				if !strings.Contains(stdout.String(), want) {
+					t.Errorf("output missing %q: %s", want, &stdout)
+				}
+			}
+			if strings.Count(stderr.String(), "remote preflight bash=") != 1 {
+				t.Errorf("Bash diagnostic not emitted exactly once: %s", &stderr)
+			}
+			if !bashAvailable && !strings.Contains(stderr.String(), "remote preflight bash=missing") {
+				t.Errorf("missing Bash was not diagnostic: %s", &stderr)
+			}
+			if bashAvailable && !strings.Contains(stderr.String(), "remote preflight bash=GNU bash, version ") {
+				t.Errorf("available Bash did not report its literal version: %s", &stderr)
+			}
+			if strings.Contains(stderr.String(), "remote preflight failed:") {
+				t.Errorf("base probe failed instead of reporting tool results: %s", &stderr)
+			}
+			if tc.targetOS == targetMacOS {
+				nativeCtx, stop := context.WithTimeout(t.Context(), 10*time.Second)
+				defer stop()
+				native := func(args ...string) (string, error) {
+					out, err := exec.CommandContext(nativeCtx, args[0], args[1:]...).Output()
+					return strings.TrimSpace(string(out)), err
+				}
+				observed := map[string]string{}
+				for _, query := range []struct{ key, command, argument string }{
+					{"macos_version", "/usr/bin/sw_vers", "-productVersion"},
+					{"macos_build", "/usr/bin/sw_vers", "-buildVersion"},
+					{"architecture", "/usr/bin/uname", "-m"},
+				} {
+					value, err := native(query.command, query.argument)
+					if err != nil || value == "" {
+						t.Fatalf("native %s unavailable: %q %v", query.key, value, err)
+					}
+					observed[query.key] = value
+				}
+				developer := os.Getenv("DEVELOPER_DIR")
+				if developer == "" {
+					var err error
+					developer, err = native("/usr/bin/xcode-select", "-p")
+					if err != nil {
+						developer = "missing"
+					}
+				}
+				observed["developer_directory"] = macOSPreflightValue(developer)
+				observed["developer_tools"] = "unavailable"
+				if clang, err := native("/usr/bin/xcrun", "clang", "--version"); err == nil && clang != "" {
+					observed["developer_tools"] = "clt"
+					if xcode, err := native("/usr/bin/xcodebuild", "-version"); err == nil && xcode != "" {
+						observed["developer_tools"] = "xcode"
+					}
+				}
+				for key, value := range observed {
+					prefix := "remote preflight " + key + "="
+					if strings.Count(stderr.String(), prefix) != 1 || !strings.Contains(stderr.String(), prefix+value+"\n") {
+						t.Errorf("platform field %s did not match native %q: %s", key, value, &stderr)
+					}
+				}
 			}
 		})
 	}
@@ -5207,7 +5455,7 @@ for arg do
 done
 printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
-  *"command -v"*) printf '` + missingRemoteToolPrefix + `pnpm\n' ;;
+  *"` + missingRemoteToolPrefix + `"*) printf '` + missingRemoteToolPrefix + `pnpm\n' ;;
 esac
 exit 0
 `
@@ -5328,7 +5576,7 @@ for arg do
 done
 printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
-  *"command -v"*) printf 'pnpm\n' ;;
+  *"` + missingRemoteToolPrefix + `"*) printf 'pnpm\n' ;;
 esac
 exit 0
 `
@@ -5359,6 +5607,18 @@ exit 0
 }
 
 func TestRunCommandEmptyReplacementLists(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX recording SSH fixture")
+	}
+	// Compile once before the recording fixture deliberately removes Go from PATH.
+	artifact, err := runner.DevelopmentSource().Open(t.Context(), runtimeartifact.Target{OS: runtime.GOOS, Arch: runtime.GOARCH})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := artifact.Close(); err != nil {
+		t.Fatal(err)
+	}
+	nativePath := os.Getenv("PATH")
 	for _, tc := range []struct {
 		name      string
 		flags     []string
@@ -5376,12 +5636,18 @@ func TestRunCommandEmptyReplacementLists(t *testing.T) {
 			t.Chdir(dir)
 			t.Setenv("CRABBOX_CONFIG", "")
 			logPath := installRecordingSSH(t, dir)
+			requestPath := filepath.Join(dir, "filesystem.request")
+			t.Setenv("CRABBOX_FAKE_SSH_FILESYSTEM_PATH", nativePath)
+			t.Setenv("CRABBOX_FAKE_SSH_FILESYSTEM_REQUEST", requestPath)
 			for _, name := range []string{"CI", "NODE_OPTIONS", "BUILD_FLAVOR"} {
 				t.Setenv(name, "synthetic-local-proof")
 			}
 			writeReplacementListConfig(t, "crabbox.yaml", fmt.Sprintf("env:\n  allow: [CI, NODE_OPTIONS, BUILD_FLAVOR]\nresults:\n  junit: [old-report.xml]\n  auto: %t\nrun:\n  preflightTools: [cmake]\n", tc.auto))
 			writeReplacementListConfig(t, ".crabbox.yaml", "env:\n  allow: []\nresults:\n  junit: []\nrun:\n  preflightTools: []\n")
-			args := []string{"--provider", "ssh", "--static-host", "127.0.0.1", "--static-user", "runner", "--static-work-root", "/tmp/crabbox-list-test", "--no-sync", "--preflight"}
+			args := []string{"--provider", "ssh", "--static-host", "127.0.0.1", "--static-user", "runner", "--static-work-root", filepath.Join(dir, "remote"), "--no-sync", "--preflight"}
+			if runtime.GOOS == "darwin" {
+				args = append(args, "--target", "macos")
+			}
 			args = append(args, tc.flags...)
 			args = append(args, "--", "true")
 			var stdout, stderr bytes.Buffer
@@ -5401,8 +5667,30 @@ func TestRunCommandEmptyReplacementLists(t *testing.T) {
 			if strings.Contains(log, "BUILD_FLAVOR=") != tc.wantAllow {
 				t.Errorf("forwarding BUILD_FLAVOR does not match CLI append=%t", tc.wantAllow)
 			}
-			if strings.Contains(log, "new-report.xml") != tc.wantJUnit {
-				t.Errorf("result collection does not match CLI selection=%t", tc.wantJUnit)
+			requestData, requestErr := os.ReadFile(requestPath)
+			if !tc.wantJUnit && !tc.auto {
+				if !os.IsNotExist(requestErr) {
+					t.Errorf("cleared results started a filesystem request: %v", requestErr)
+				}
+			} else {
+				if requestErr != nil {
+					t.Fatal(requestErr)
+				}
+				frame, err := runnerwire.NewReader(bytes.NewReader(requestData), 0).Next()
+				if err != nil || frame.Header.Kind != runnerwire.Request {
+					t.Fatalf("filesystem request frame: %v, %s", err, frame.Header.Kind)
+				}
+				var request runner.Request
+				if err := json.Unmarshal(frame.Header.Meta, &request); err != nil {
+					t.Fatal(err)
+				}
+				var wantPaths []string
+				if tc.wantJUnit {
+					wantPaths = []string{"new-report.xml"}
+				}
+				if request.Operation != runner.Collect || !slices.Equal(request.Paths, wantPaths) || request.Auto != tc.auto {
+					t.Errorf("filesystem collection=%+v; want paths=%v auto=%t", request, wantPaths, tc.auto)
+				}
 			}
 			if strings.Contains(log, remoteResultsMarker) != tc.auto {
 				t.Errorf("auto collection marker does not match results.auto=%t", tc.auto)
@@ -5426,7 +5714,7 @@ for arg do
 done
 printf '%s\n---\n' "$cmd" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
-  *"command -v"*) printf '` + missingRemoteToolPrefix + `pnpm\n' ;;
+  *"` + missingRemoteToolPrefix + `"*) printf '` + missingRemoteToolPrefix + `pnpm\n' ;;
 esac
 exit 0
 `
@@ -5451,7 +5739,7 @@ exit 0
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if strings.Contains(string(logData), "command -v") {
+	if strings.Contains(string(logData), missingRemoteToolPrefix) {
 		t.Fatalf("forwarded PATH should skip command runtime probe:\n%s", logData)
 	}
 	if !strings.Contains(string(logData), "pnpm") {
@@ -6564,16 +6852,16 @@ func recordedSSHCommands(log string) []string {
 }
 
 func TestPreflightToolsForTargetFiltersByOS(t *testing.T) {
-	got := preflightToolsForTarget(SSHTarget{TargetOS: targetMacOS}, []string{"node", "apt", "powershell", "bun"})
-	if strings.Join(got, ",") != "node,bun" {
+	got := preflightToolsForTarget(SSHTarget{TargetOS: targetMacOS}, []string{"node", "apt", "powershell", "bash", "bun"})
+	if strings.Join(got, ",") != "node,bash,bun" {
 		t.Fatalf("mac tools=%v", got)
 	}
-	got = preflightToolsForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, []string{"node", "apt", "powershell", "bun"})
+	got = preflightToolsForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, []string{"node", "apt", "powershell", "bash", "bun"})
 	if strings.Join(got, ",") != "node,powershell,bun" {
 		t.Fatalf("windows tools=%v", got)
 	}
-	got = preflightToolsForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, []string{"node", "apt", "powershell", "bun"})
-	if strings.Join(got, ",") != "node,apt,bun" {
+	got = preflightToolsForTarget(SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, []string{"node", "apt", "powershell", "bash", "bun"})
+	if strings.Join(got, ",") != "node,apt,bash,bun" {
 		t.Fatalf("wsl2 tools=%v", got)
 	}
 	got = preflightToolsForTarget(SSHTarget{TargetOS: targetLinux}, []string{"none"})
@@ -6644,6 +6932,9 @@ func TestWindowsWSL2RemoteCapabilityPreflightUsesBoundedWrapper(t *testing.T) {
 	if len(commands) != 1 {
 		t.Fatalf("ssh commands=%d want 1:\n%s", len(commands), data)
 	}
+	if probes, err := os.ReadFile(logPath + ".prerequisites"); err != nil || string(probes) != "probe\n" {
+		t.Fatalf("Bash prerequisite calls=%q err=%v, want one", probes, err)
+	}
 	if commands[0] != launcher || len(commands[0]) >= wslStageLauncherCommandLimit {
 		t.Fatalf("WSL2 preflight launcher=%q", commands[0])
 	}
@@ -6707,7 +6998,7 @@ func TestValidatePreflightToolsRejectsUnknown(t *testing.T) {
 	if err := validatePreflightTools([]string{"node", "bogus"}); ExitCodeForError(err, 1) != 2 || !strings.Contains(err.Error(), "crabbox preflight-tools") {
 		t.Fatalf("expected unknown preflight tool error with discovery hint: %v", err)
 	}
-	if err := validatePreflightTools([]string{"default", "bun"}); err != nil {
+	if err := validatePreflightTools([]string{"default", "bun", "bash"}); err != nil {
 		t.Fatalf("default tools should validate: %v", err)
 	}
 }
@@ -7171,6 +7462,10 @@ func TestCMakePreflightNativeWindowsPresentAndMissing(t *testing.T) {
 
 func TestCMakePreflightUserAndRepositoryConfig(t *testing.T) {
 	testPreflightToolUserAndRepositoryConfig(t, "cmake")
+}
+
+func TestBashPreflightUserAndRepositoryConfig(t *testing.T) {
+	testPreflightToolUserAndRepositoryConfig(t, "bash")
 }
 
 func TestPythonVenvPreflightUserAndRepositoryConfig(t *testing.T) {
@@ -7677,8 +7972,22 @@ func TestDelegatedPreflightPrintsUnsupportedMessage(t *testing.T) {
 }
 
 func TestRemoteFailureCaptureCommandAvoidsDuplicateDirectoryChildren(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is required for POSIX capture command test")
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX capture command")
+	}
+	shell := "/bin/sh"
+	if dash, err := exec.LookPath("dash"); err == nil {
+		shell = dash
+	}
+	binDir, tempRoot := t.TempDir(), t.TempDir()
+	for _, name := range []string{"mkdir", "mktemp", "rm", "dd", "df", "awk", "date", "hostname", "tail", "find", "sed", "sort", "tar", "gzip", "wc", "tr", "dirname"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(path, filepath.Join(binDir, name)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	workdir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(workdir, "test-results"), 0o777); err != nil {
@@ -7689,8 +7998,14 @@ func TestRemoteFailureCaptureCommandAvoidsDuplicateDirectoryChildren(t *testing.
 	}
 
 	command := remoteFailureCaptureCommand(workdir, ".crabbox/capture.tar.gz", "")
-	if out, err := exec.Command("bash", "-lc", command).CombinedOutput(); err != nil {
+	command = strings.Replace(command, "/bin/sh -c ", shellQuote(shell)+" -c ", 1)
+	cmd := exec.Command(shell, "-c", command)
+	cmd.Env = []string{"PATH=" + binDir, "HOME=" + t.TempDir(), "TMPDIR=" + tempRoot, "BASH_ENV=" + os.DevNull, "ENV=" + os.DevNull}
+	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("capture command failed: %v\n%s", err, out)
+	}
+	if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("capture scratch retained: entries=%v err=%v", entries, err)
 	}
 
 	file, err := os.Open(filepath.Join(workdir, ".crabbox", "capture.tar.gz"))
@@ -8049,47 +8364,84 @@ printf 'fake 9999999 0 %s 0%% /\n' "$available"
 }
 
 func TestRemoteFailureCaptureEnforcesWriterCaps(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skip("bash is required for POSIX capture command test")
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX capture writer limits")
 	}
-	for _, test := range []struct {
-		name       string
-		maxBytes   int64
-		evidence   int
-		fakeGzip   bool
-		lowerLimit bool
-	}{
-		{name: "raw tar", maxBytes: 32 << 10, evidence: 64 << 10},
-		{name: "gzip output", maxBytes: 64 << 10, evidence: 1, fakeGzip: true},
-		{name: "lower inherited limit", maxBytes: 64 << 10, evidence: 1, lowerLimit: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			workdir := t.TempDir()
-			tempRoot := t.TempDir()
-			binDir := t.TempDir()
-			t.Setenv("TMPDIR", tempRoot)
-			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			if err := os.WriteFile(filepath.Join(workdir, "evidence.log"), bytes.Repeat([]byte("x"), test.evidence), 0o600); err != nil {
-				t.Fatal(err)
+	shells := []string{"/bin/sh"}
+	for _, name := range []string{"bash", "dash"} {
+		if shell, err := exec.LookPath(name); err == nil {
+			shells = append(shells, shell)
+		}
+	}
+	for _, shell := range shells {
+		t.Run(filepath.Base(shell), func(t *testing.T) {
+			for _, test := range []struct {
+				name        string
+				maxBytes    int64
+				evidence    int
+				gzipBytes   int
+				lowerLimit  bool
+				shortProbe  bool
+				wantSuccess bool
+			}{
+				{name: "raw tar", maxBytes: 32 << 10, evidence: 64 << 10},
+				{name: "gzip output", maxBytes: 64 << 10, evidence: 1, gzipBytes: 128 << 10},
+				{name: "lower inherited limit", maxBytes: 64 << 10, evidence: 1, lowerLimit: true},
+				{name: "exact cap", maxBytes: 64 << 10, evidence: 1, gzipBytes: 64 << 10, wantSuccess: true},
+				{name: "one byte over cap", maxBytes: 64 << 10, evidence: 1, gzipBytes: (64 << 10) + 1},
+				{name: "ordinary short probe write", maxBytes: 64 << 10, evidence: 1, shortProbe: true},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					workdir, tempRoot, binDir := t.TempDir(), t.TempDir(), t.TempDir()
+					t.Setenv("TMPDIR", tempRoot)
+					t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+					t.Setenv("BASH_ENV", os.DevNull)
+					t.Setenv("ENV", os.DevNull)
+					if err := os.WriteFile(filepath.Join(workdir, "evidence.log"), bytes.Repeat([]byte("x"), test.evidence), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if test.gzipBytes > 0 {
+						fake := "#!/bin/sh\nexec dd if=/dev/zero bs=" + strconv.Itoa(test.gzipBytes) + " count=1 2>/dev/null\n"
+						if err := os.WriteFile(filepath.Join(binDir, "gzip"), []byte(fake), 0o700); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if test.shortProbe {
+						fake := "#!/bin/sh\nfor arg do case \"$arg\" in of=*) out=${arg#of=};; esac; done\nprintf '%s' " + shellQuote(strings.Repeat("x", 512)) + " > \"$out\"\nexit 1\n"
+						if err := os.WriteFile(filepath.Join(binDir, "dd"), []byte(fake), 0o700); err != nil {
+							t.Fatal(err)
+						}
+					}
+					command := remoteFailureCaptureScript(workdir, ".crabbox/capture.tar.gz", "", runDownloadLimits{MaxBytes: test.maxBytes, DiskReserveBytes: 0})
+					if test.lowerLimit {
+						command = "ulimit -f 1; " + command
+					}
+					out, err := exec.Command(shell, "-c", command).CombinedOutput()
+					if test.wantSuccess {
+						if err != nil {
+							t.Fatalf("exact-cap capture failed: %v\n%s", err, out)
+						}
+						if string(out) != remoteFailureCaptureOwnedPrefix+".crabbox/capture.tar.gz\n.crabbox/capture.tar.gz\n" {
+							t.Fatalf("successful capture emitted calibration noise: %q", out)
+						}
+						info, err := os.Stat(filepath.Join(workdir, ".crabbox", "capture.tar.gz"))
+						if err != nil || info.Size() != test.maxBytes {
+							t.Fatalf("exact-cap size: info=%v err=%v", info, err)
+						}
+						if entries, err := os.ReadDir(tempRoot); err != nil || len(entries) != 0 {
+							t.Fatalf("capture scratch retained: entries=%v err=%v", entries, err)
+						}
+					} else {
+						if err == nil {
+							t.Fatalf("capture unexpectedly succeeded:\n%s", out)
+						}
+						if test.shortProbe && !strings.Contains(string(out), "file-limit unit unavailable") {
+							t.Fatalf("ordinary short write was accepted as calibration: %q", out)
+						}
+						assertRemoteFailureCaptureFilesRemoved(t, workdir, tempRoot)
+					}
+				})
 			}
-			if test.fakeGzip {
-				fakeGzip := filepath.Join(binDir, "gzip")
-				if err := os.WriteFile(fakeGzip, []byte("#!/bin/sh\nexec dd if=/dev/zero bs=1024 count=128 2>/dev/null\n"), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			command := remoteFailureCaptureCommandWithLimits(workdir, ".crabbox/capture.tar.gz", "", runDownloadLimits{
-				MaxBytes:         test.maxBytes,
-				DiskReserveBytes: 0,
-			})
-			command = strings.Replace(command, "bash -lc ", "bash --noprofile --norc -c ", 1)
-			if test.lowerLimit {
-				command = "ulimit -f 1; " + command
-			}
-			if out, err := exec.Command("bash", "-c", command).CombinedOutput(); err == nil {
-				t.Fatalf("capture unexpectedly succeeded:\n%s", out)
-			}
-			assertRemoteFailureCaptureFilesRemoved(t, workdir, tempRoot)
 		})
 	}
 }
@@ -9243,14 +9595,35 @@ func TestRunEnvProvidesPathHandlesWindowsCasing(t *testing.T) {
 
 func TestRemoteMissingToolsCommandUsesLoginShell(t *testing.T) {
 	got := remoteMissingToolsCommand([]string{"pnpm"})
-	if !strings.HasPrefix(got, "bash -lc ") {
-		t.Fatalf("command=%q want bash -lc wrapper", got)
+	if !strings.Contains(got, "exec bash -lc ") {
+		t.Fatalf("command=%q want Bash-present login branch", got)
 	}
 	if !strings.Contains(got, "command -v") {
 		t.Fatalf("command=%q want command -v probe", got)
 	}
 	if !strings.Contains(got, missingRemoteToolPrefix) {
 		t.Fatalf("command=%q want missing tool sentinel", got)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	home, tools := t.TempDir(), t.TempDir()
+	tool := filepath.Join(tools, "fixture-tool")
+	mustWriteTestFile(t, tool, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(tool, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustWriteTestFile(t, filepath.Join(home, ".bash_profile"), "export PATH="+shellQuote(tools)+"\n")
+	for _, bashPresent := range []bool{true, false} {
+		path := os.Getenv("PATH")
+		if !bashPresent {
+			path = tools
+		}
+		cmd := exec.Command("/bin/sh", "-c", remoteMissingToolsCommand([]string{"fixture-tool", "fixture-missing"}))
+		cmd.Env = []string{"HOME=" + home, "PATH=" + path, "BASH_ENV=" + os.DevNull, "ENV=" + os.DevNull}
+		if out, err := cmd.CombinedOutput(); err != nil || string(out) != missingRemoteToolPrefix+"fixture-missing\n" {
+			t.Fatalf("bash=%t missing-tool output=%q err=%v", bashPresent, out, err)
+		}
 	}
 }
 

@@ -115,7 +115,7 @@ func remoteUploadRunScriptCommand(workdir, remotePath string) string {
 		"mkdir -p " + shellQuote(dir) + "\n" +
 		"cat > " + shellQuote(remotePath) + "\n" +
 		"chmod 700 " + shellQuote(remotePath) + "\n"
-	return "bash -lc " + shellQuote(script)
+	return remotePOSIXControlCommand(script)
 }
 
 func windowsRemoteUploadRunScriptCommand(workdir, remotePath string) string {
@@ -155,14 +155,13 @@ func remoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, e
 	var b strings.Builder
 	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
 	if script.Shebang {
-		b.WriteString("bash -lc ")
-		b.WriteString(shellQuote(`exec "$@"`))
-		b.WriteString(" bash ")
-	} else {
-		b.WriteString("bash -lc ")
-		b.WriteString(shellQuote(`exec bash "$@"`))
-		b.WriteString(" bash ")
+		arguments := append([]string{script.RemotePath}, args...)
+		b.WriteString(remotePortableShellInvocation(`exec "$@"`, arguments))
+		return b.String()
 	}
+	b.WriteString("bash -lc ")
+	b.WriteString(shellQuote(`exec bash "$@"`))
+	b.WriteString(" bash ")
 	b.WriteString(shellQuote(script.RemotePath))
 	for _, arg := range args {
 		b.WriteByte(' ')

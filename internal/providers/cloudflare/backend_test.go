@@ -2223,3 +2223,109 @@ func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
 		t.Fatalf("error=%v calls=%d", err, calls)
 	}
 }
+
+func TestCloudflareInstanceTypeResolutionPhases(t *testing.T) {
+	const invalidType = "cloudflare --type must be one of lite, basic, standard-1, standard-2, standard-3, standard-4"
+	for _, tc := range []struct {
+		name, stored, class, target, architecture string
+		explicit, visited                         bool
+		wantFlags, wantConfigure, wantClient      string
+		flagsError, configureError, clientError   string
+	}{
+		{name: "empty", class: "standard", wantFlags: "standard-4", wantConfigure: "standard-4", wantClient: "standard-4"},
+		{name: "mixed-case", stored: " STANDARD-2 ", class: "standard", explicit: true, wantFlags: "standard-2", wantConfigure: "standard-2", wantClient: "standard-2"},
+		{name: "implicit-fallback", stored: "old-size", class: "standard", wantFlags: "standard-4", wantConfigure: "standard-4", wantClient: "standard-4"},
+		{name: "explicit-invalid", stored: "old-size", class: "standard", explicit: true, flagsError: invalidType, configureError: invalidType, clientError: invalidType},
+		{name: "visited-invalid", stored: "old-size", class: "standard", visited: true, flagsError: invalidType, wantConfigure: "standard-4", wantClient: "standard-4"},
+		{name: "explicit-empty", class: "standard", explicit: true, wantFlags: "standard-4", wantConfigure: "standard-4", wantClient: "standard-4"},
+		{name: "explicit-whitespace", stored: " \t", class: "standard", explicit: true, wantFlags: "standard-4", configureError: invalidType, clientError: invalidType},
+		{name: "unknown-class-fallback", stored: "old-size", class: "custom-size", wantFlags: "custom-size", wantConfigure: "custom-size", wantClient: "custom-size"},
+		{name: "unsupported-profile", class: "standard", target: core.TargetLinux, architecture: core.ArchitectureARM64, wantFlags: "standard-4", configureError: "provider=cloudflare has no class profile for class=standard target=linux architecture=arm64", wantClient: "standard-4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: providerName, ServerType: tc.stored, ServerTypeExplicit: tc.explicit, Class: tc.class, TargetOS: core.Blank(tc.target, core.TargetLinux), Architecture: core.Blank(tc.architecture, core.ArchitectureAMD64)}
+			check := func(phase, got, want string, err error, wantError string) {
+				t.Helper()
+				if wantError != "" {
+					if err == nil || err.Error() != wantError {
+						t.Fatalf("%s error = %v, want %q", phase, err, wantError)
+					}
+					return
+				}
+				if err != nil || got != want {
+					t.Fatalf("%s type = %q, error = %v; want %q", phase, got, err, want)
+				}
+			}
+			flagConfig := cfg
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.String("type", "", "")
+			if tc.visited {
+				if err := fs.Parse([]string{"--type=" + tc.stored}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := ApplyCloudflareProviderFlags(&flagConfig, fs, struct{}{})
+			check("flags", flagConfig.ServerType, tc.wantFlags, err, tc.flagsError)
+			if err != nil && !reflect.DeepEqual(flagConfig, cfg) {
+				t.Fatal("rejected type mutated config")
+			}
+			backend, err := (Provider{}).Configure(cfg, core.Runtime{})
+			configuredType := ""
+			if err == nil {
+				configuredType = backend.(*cloudflareBackend).cfg.ServerType
+			}
+			check("configure", configuredType, tc.wantConfigure, err, tc.configureError)
+			cfg.Cloudflare = core.CloudflareConfig{APIURL: "https://example.invalid", Token: "synthetic-token"}
+			inert := &http.Client{Transport: testutil.RoundTripFunc(func(*http.Request) (*http.Response, error) {
+				t.Fatal("instance type resolution must not send HTTP requests")
+				return nil, errors.New("unexpected request")
+			})}
+			client, err := newCloudflareClient(cfg, core.Runtime{HTTP: inert})
+			clientType := ""
+			if err == nil {
+				clientType = client.instanceType
+			}
+			check("client", clientType, tc.wantClient, err, tc.clientError)
+		})
+	}
+}
+
+func TestCloudflareInstanceTypeCanonicalSizes(t *testing.T) {
+	for _, size := range []string{"lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"} {
+		t.Run(size, func(t *testing.T) {
+			input := " " + strings.ToUpper(size) + " "
+			if got, ok := normalizeContainerInstanceType(input); !ok || got != size {
+				t.Fatalf("normalized type = (%q,%t), want (%q,true)", got, ok, size)
+			}
+			got, err := resolveInstanceType(input, "unused-fallback", true)
+			if err != nil || got != size {
+				t.Fatalf("type = %q, error = %v; want %q", got, err, size)
+			}
+		})
+	}
+	if got, ok := normalizeContainerInstanceType("ccx63"); ok || got != "" {
+		t.Fatalf("normalized unsupported type = (%q,%t), want (empty,false)", got, ok)
+	}
+}
+
+func TestCloudflareContainerInstanceTypeMapping(t *testing.T) {
+	for _, tc := range []struct {
+		class string
+		want  string
+	}{
+		{class: "", want: "standard-4"},
+		{class: "tiny", want: "standard-4"},
+		{class: "small", want: "standard-4"},
+		{class: "standard", want: "standard-4"},
+		{class: "fast", want: "standard-4"},
+		{class: "large", want: "standard-4"},
+		{class: "beast", want: "standard-4"},
+		{class: "lite", want: "lite"},
+		{class: "basic", want: "basic"},
+		{class: "standard-3", want: "standard-3"},
+	} {
+		if got := cloudflareContainerInstanceTypeForClass(tc.class); got != tc.want {
+			t.Fatalf("class %q type = %q, want %q", tc.class, got, tc.want)
+		}
+	}
+}

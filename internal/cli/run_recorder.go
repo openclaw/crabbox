@@ -45,6 +45,9 @@ type runRecorder struct {
 	warnMu             sync.Mutex
 	publisher          *runEventPublisher
 	telemetryStart     *LeaseTelemetry
+	telemetryRequested bool
+	telemetryEnd       *LeaseTelemetry
+	telemetryEndFrozen bool
 	telemetryMu        sync.Mutex
 	telemetrySamples   []*LeaseTelemetry
 	telemetryCancel    func()
@@ -200,6 +203,7 @@ func (r *runRecorder) CaptureTelemetryStart(ctx context.Context, target SSHTarge
 	if r == nil || r.coord == nil || r.runID == "" || r.telemetryStart != nil {
 		return
 	}
+	r.telemetryRequested = true
 	r.telemetryStart = collectLeaseTelemetryBestEffort(contextWithoutWorkspaceOwner(ctx), leaseTelemetryCollectorForTarget(target))
 	r.recordTelemetrySample(r.telemetryStart)
 }
@@ -208,6 +212,7 @@ func (r *runRecorder) StartTelemetrySampler(ctx context.Context, target SSHTarge
 	if r == nil || r.coord == nil || r.runID == "" {
 		return
 	}
+	r.telemetryRequested = true
 	r.telemetryMu.Lock()
 	if r.telemetryCancel != nil {
 		r.telemetryMu.Unlock()
@@ -264,10 +269,8 @@ func (r *runRecorder) Finish(ctx context.Context, target SSHTarget, exitCode int
 		return nil
 	}
 	r.waitForEvents(runEventOutputPostWait)
-	r.stopTelemetrySampler()
-	telemetryEnd := collectLeaseTelemetryBestEffort(contextWithoutWorkspaceOwner(ctx), leaseTelemetryCollectorForTarget(target))
-	r.recordTelemetrySample(telemetryEnd)
-	telemetry := runTelemetrySummary(r.telemetryStart, telemetryEnd, r.telemetrySnapshot())
+	r.CaptureTelemetryEnd(ctx, target)
+	telemetry := runTelemetrySummary(r.telemetryStart, r.telemetryEnd, r.telemetrySnapshot())
 	ctx, cancel := context.WithTimeout(context.Background(), runRecorderFinishTimeout)
 	defer cancel()
 	var lastErr error
@@ -427,6 +430,18 @@ func (r *runRecorder) stopTelemetrySampler() {
 	<-done
 }
 
+// CaptureTelemetryEnd is called by the run owner before lease cleanup can
+// revoke guest access. Finish may subsequently publish without another SSH call.
+func (r *runRecorder) CaptureTelemetryEnd(ctx context.Context, target SSHTarget) {
+	if r == nil || r.runID == "" || r.telemetryEndFrozen {
+		return
+	}
+	r.stopTelemetrySampler()
+	r.telemetryEnd = collectLeaseTelemetryBestEffort(contextWithoutWorkspaceOwner(ctx), leaseTelemetryCollectorForTarget(target))
+	r.recordTelemetrySample(r.telemetryEnd)
+	r.telemetryEndFrozen = true
+}
+
 func (r *runRecorder) resetTelemetryForLeaseReplacement() {
 	if r == nil {
 		return
@@ -434,6 +449,9 @@ func (r *runRecorder) resetTelemetryForLeaseReplacement() {
 	r.stopTelemetrySampler()
 	r.telemetryMu.Lock()
 	r.telemetryStart = nil
+	r.telemetryRequested = false
+	r.telemetryEnd = nil
+	r.telemetryEndFrozen = false
 	r.telemetrySamples = nil
 	r.telemetryMu.Unlock()
 }

@@ -2,6 +2,10 @@ package unikraftcloud
 
 import (
 	"flag"
+	"io"
+	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -104,5 +108,74 @@ func TestApplyUnikraftCloudProviderFlags(t *testing.T) {
 				test.check(t, cfg)
 			}
 		})
+	}
+}
+
+func TestUnikraftBindingFlagsAndAliasGuards(t *testing.T) {
+	for _, provider := range []string{providerName, "unikraftcloud", "ukc", " UKC ", "fixture-other"} {
+		for _, raw := range []string{"", "  ", "fixture"} {
+			for _, memory := range []int{-1, 0, 256} {
+				cfg := core.BaseConfig()
+				cfg.Provider = provider
+				before := cfg
+				fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+				values := registerUnikraftCloudProviderFlags(fs, cfg)
+				if err := applyUnikraftCloudProviderFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, before) {
+					t.Fatal("unvisited flags changed configuration")
+				}
+				for _, name := range []string{"url", "metro", "image"} {
+					if err := fs.Set("unikraft-cloud-"+name, raw); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := fs.Set("unikraft-cloud-memory", strconv.Itoa(memory)); err != nil {
+					t.Fatal(err)
+				}
+				if err := applyUnikraftCloudProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+					t.Fatal("foreign values changed configuration")
+				}
+				want := before
+				want.UnikraftCloud.APIURL, want.UnikraftCloud.Metro, want.UnikraftCloud.Image, want.UnikraftCloud.MemoryMB = raw, raw, raw, memory
+				core.RecordProviderFlagInputs(&want, true, "unikraft-cloud")
+				for repeat := 0; repeat < 2; repeat++ {
+					if err := applyUnikraftCloudProviderFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, want) {
+						t.Fatalf("provider=%q raw=%q memory=%d: assignments changed: %v", provider, raw, memory, err)
+					}
+				}
+			}
+		}
+		for _, generic := range []string{"class", "type"} {
+			for _, foreign := range []bool{false, true} {
+				cfg := core.BaseConfig()
+				cfg.Provider = provider
+				fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+				fs.String(generic, "", "")
+				values := registerUnikraftCloudProviderFlags(fs, cfg)
+				if err := fs.Set(generic, "fixture"); err != nil {
+					t.Fatal(err)
+				}
+				if err := fs.Set("unikraft-cloud-metro", "fixture"); err != nil {
+					t.Fatal(err)
+				}
+				before := cfg
+				if foreign {
+					values = struct{}{}
+				}
+				err := applyUnikraftCloudProviderFlags(&cfg, fs, values)
+				if provider != "fixture-other" {
+					if err == nil || !strings.Contains(err.Error(), "--"+generic) || !reflect.DeepEqual(cfg, before) {
+						t.Fatalf("provider=%q foreign=%v: selected guard changed: %v", provider, foreign, err)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	registerUnikraftCloudProviderFlags(fs, core.BaseConfig())
+	if err := fs.Parse([]string{"--unikraft-cloud-memory=invalid"}); err == nil {
+		t.Fatal("malformed memory flag accepted")
 	}
 }

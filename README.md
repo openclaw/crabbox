@@ -60,6 +60,16 @@ For **macOS, Linux, and Windows**, you can also download a
 [release archive](https://github.com/openclaw/crabbox/releases/latest).
 Windows users should follow the [Windows installation guide](docs/windows-install.md).
 
+When a release includes a `crabbox-runtime` directory, keep it beside the real
+CLI executable. New filesystem-capable packs contain amd64 and arm64 companions
+for Linux, macOS, and Windows. Linux companions additionally provide native
+managed execution for Linux and WSL2; copying only the CLI omits those bundled capabilities.
+Do not mix a runtime pack with a differently built controller.
+An official release with a missing or incomplete pack is a broken installation:
+reinstall its matching archive or Homebrew package. It does not silently compile
+replacement companions from source. CLI-only source builds retain their existing
+shell-backed supervisor route.
+
 Local prerequisites for the SSH workflow: `git`, `ssh`, `ssh-keygen`,
 `rsync`, and `curl`. The local quick start also needs a running Docker or
 Podman engine.
@@ -77,9 +87,12 @@ The module requires Go 1.26 and prefers go1.26.5; use Go 1.26.5 or newer, or
 leave automatic toolchain selection enabled.
 
 `go install` compiles only the CLI. It omits companion executables and assets,
-including `crabbox-apple-vm-helper`, and is not the signed/notarized prebuilt
-distribution. Use Homebrew or a release archive for complete platform capabilities,
+including `crabbox-apple-vm-helper` and the native runtime pack, and is not the
+signed/notarized prebuilt distribution. Use Homebrew or a release archive for complete platform capabilities,
 especially Apple VM support on Apple Silicon.
+Without an installed pack, source-built CLIs can compile the dependency-free
+filesystem helper with a local Go 1.26-or-newer compiler. This does not compile
+the managed-command supervisor or produce a signed release installation.
 
 </details>
 

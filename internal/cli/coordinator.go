@@ -1451,7 +1451,8 @@ func (c *CoordinatorClient) heartbeatLease(ctx context.Context, id, expectedProv
 	if err != nil {
 		return res.Lease, err
 	}
-	err = c.doControl(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/heartbeat", heartbeatRequestBody(expectedProvider, idleTimeout, telemetry), &res)
+	// A heartbeat can wait for provider access changes; callers bound periodic touches.
+	err = c.do(ctx, http.MethodPost, "/v1/leases/"+url.PathEscape(id)+"/heartbeat", heartbeatRequestBody(expectedProvider, idleTimeout, telemetry), &res)
 	return res.Lease, err
 }
 

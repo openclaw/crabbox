@@ -7,86 +7,48 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type volumeListFlag []string
-
-func (f *volumeListFlag) String() string { return strings.Join(*f, ",") }
-func (f *volumeListFlag) Set(value string) error {
-	*f = append(*f, value)
-	return nil
-}
-func (f *volumeListFlag) Get() any { return append([]string{}, (*f)...) }
-
-type flagValues struct {
-	Runtime      *string
-	Image        *string
-	User         *string
-	WorkRoot     *string
-	CPUs         *int
-	Memory       *string
-	Network      *string
-	DockerSocket *bool
-	Volumes      *volumeListFlag
-}
-
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
-	volumes := volumeListFlag(defaults.LocalContainer.Volumes)
-	v := flagValues{
-		Runtime:  fs.String("local-container-runtime", defaults.LocalContainer.Runtime, "Docker-compatible CLI to use for local containers"),
-		Image:    fs.String("local-container-image", defaults.LocalContainer.Image, "container image for local-container leases"),
-		User:     fs.String("local-container-user", defaults.LocalContainer.User, "SSH user created inside local-container leases"),
-		WorkRoot: fs.String("local-container-work-root", defaults.LocalContainer.WorkRoot, "remote Crabbox work root inside local-container leases"),
-		CPUs:     fs.Int("local-container-cpus", defaults.LocalContainer.CPUs, "CPU limit for local-container leases; 0 leaves runtime default"),
-		Memory:   fs.String("local-container-memory", defaults.LocalContainer.Memory, "memory limit for local-container leases, for example 8g"),
-		Network:  fs.String("local-container-network", defaults.LocalContainer.Network, "container network for local-container leases"),
-		DockerSocket: fs.Bool("local-container-docker-socket", defaults.LocalContainer.DockerSocket,
-			"mount the host Docker-compatible socket into local-container leases so docker commands use the host engine"),
-		Volumes: &volumes,
-	}
-	// CLI-only: bind mounts expose host paths and must be an explicit
-	// operator action. Not loaded from repo-local .crabbox.yaml — see
-	// the omission comment in config_local_container.go.
-	fs.Var(&volumes, "local-container-volume",
-		"bind-mount a host path into the container; host:container[:ro]; repeatable")
-	return v
+	return core.RegisterLocalContainerConfigFlags(fs, defaults.LocalContainer)
 }
 
 func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(flagValues)
+	v, ok := values.(core.LocalContainerConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "local-container-runtime") {
+	visited := core.LocalContainerConfigFlagPresence(fs)
+	if visited.Runtime {
 		core.ApplyLocalContainerRuntime(cfg, *v.Runtime)
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if core.FlagWasSet(fs, "local-container-image") {
+	if visited.Image {
 		core.ApplyLocalContainerImage(cfg, *v.Image)
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if core.FlagWasSet(fs, "local-container-user") {
+	if visited.User {
 		cfg.LocalContainer.User = *v.User
 		cfg.SSHUser = *v.User
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if core.FlagWasSet(fs, "local-container-work-root") {
+	if visited.WorkRoot {
 		core.ApplyLocalContainerWorkRoot(cfg, *v.WorkRoot)
 		cfg.WorkRoot = *v.WorkRoot
 		core.MarkWorkRootExplicit(cfg)
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if core.FlagWasSet(fs, "local-container-cpus") {
+	if visited.CPUs {
 		cfg.LocalContainer.CPUs = *v.CPUs
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if core.FlagWasSet(fs, "local-container-memory") {
+	if visited.Memory {
 		cfg.LocalContainer.Memory = *v.Memory
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if core.FlagWasSet(fs, "local-container-network") {
+	if visited.Network {
 		cfg.LocalContainer.Network = *v.Network
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if core.FlagWasSet(fs, "local-container-docker-socket") {
+	if visited.DockerSocket {
 		cfg.LocalContainer.DockerSocket = *v.DockerSocket
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
@@ -97,8 +59,8 @@ func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 		if poolFlag := fs.Lookup("pool"); poolFlag != nil && strings.TrimSpace(poolFlag.Value.String()) != "" {
 			return core.Exit(2, "--local-container-volume only applies when creating a new lease; omit --pool or warm a new lease")
 		}
-		cfg.LocalContainer.Volumes = []string(*v.Volumes)
-		core.RecordProviderFlagInputs(cfg, core.FlagWasSet(fs, "local-container-volume"), providerName)
+		cfg.LocalContainer.Volumes = *v.Volumes
+		core.RecordProviderFlagInputs(cfg, visited.Volumes, providerName)
 	}
 	if core.ProviderNameMatchesExact(cfg.Provider, Provider{}) {
 		applyDefaults(cfg)

@@ -373,19 +373,11 @@ func (c *client) doDataJSON(ctx context.Context, method, path string, query url.
 }
 
 func (c *client) doJSONWithClient(ctx context.Context, httpClient *http.Client, method, path string, query url.Values, body any, out any) error {
-	var input io.Reader
-	if body != nil {
-		data, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		input = bytes.NewReader(data)
-	}
 	u := c.base + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u, input)
+	req, err := shared.NewCompactJSONRequest(ctx, method, u, body)
 	if err != nil {
 		return err
 	}

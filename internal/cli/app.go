@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
 type App struct {
@@ -17,6 +18,14 @@ type App struct {
 
 	runOutcome             *shardRunOutcome
 	workspaceOwnerAcquirer func(context.Context, SSHTarget, string, io.Writer) (*workspaceOwner, error)
+	sshReadinessWaiter     func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error
+}
+
+func (a App) waitForSSHReady(ctx context.Context, target *SSHTarget, phase string, timeout time.Duration) error {
+	if a.sshReadinessWaiter != nil {
+		return a.sshReadinessWaiter(ctx, target, a.Stderr, phase, timeout)
+	}
+	return waitForSSHReady(ctx, target, a.Stderr, phase, timeout)
 }
 
 func Run(ctx context.Context, args []string) error {

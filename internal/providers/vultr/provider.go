@@ -14,6 +14,11 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
+	core.ApplyConfigShowSSHDefaults(&cfg, "root")
+	return cfg
+}
+
 var _ core.ProviderClassProfileProvider = Provider{}
 
 var classProfiles = core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: "vc2-1c-1gb"})
@@ -65,4 +70,11 @@ func vultrServerTypeForClass(class string) string {
 		}
 	}
 	return "vc2-1c-1gb"
+}
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	cfg.Vultr = cfg.Vultr.WithRuntimeDefaults()
+	core.ApplyLinuxConnectionDefaults(cfg, "root", "22")
+	cfg.SSHFallbackPorts = nil
+	return nil
 }

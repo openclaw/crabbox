@@ -16,6 +16,57 @@ import (
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
+func TestDirectCleanupDecisionPreviewsBeforeMutation(t *testing.T) {
+	for _, action := range []DirectCleanupAction{DeleteCleanupServer, ResumeCleanupServer} {
+		t.Run(fmt.Sprint(action), func(t *testing.T) {
+			calls := 0
+			failure := errors.New("provider cleanup failed")
+			decision := DirectCleanupDecision{
+				Action: action,
+				Server: core.Server{CloudID: "example-server", Name: "example-server"},
+				Mutate: func(context.Context) error { calls++; return failure },
+			}
+			var stderr bytes.Buffer
+			rt := core.Runtime{Stderr: &stderr}
+			if err := decision.Apply(context.Background(), core.CleanupRequest{DryRun: true}, rt); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 0 || !strings.Contains(stderr.String(), "server id=example-server") {
+				t.Fatalf("calls=%d output=%q, want preview without mutation", calls, stderr.String())
+			}
+			if err := decision.Apply(context.Background(), core.CleanupRequest{}, rt); !errors.Is(err, failure) || calls != 1 {
+				t.Fatalf("calls=%d err=%v, want one mutation and its error", calls, err)
+			}
+		})
+	}
+}
+
+func TestDirectCleanupDecisionMissingClaimDryRun(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	leaseID := "cbx_123456abcdef"
+	if err := core.ClaimLeaseForRepoProviderScope(leaseID, "example", "gcp", "project:example", t.TempDir(), time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := DirectCleanupDecision{Action: ForgetMissingCleanupServer, Claim: claim}
+	rt := core.Runtime{Stderr: io.Discard}
+	if err := decision.Apply(context.Background(), core.CleanupRequest{DryRun: true}, rt); err != nil {
+		t.Fatal(err)
+	}
+	if after, err := core.ReadLeaseClaim(leaseID); err != nil || !reflect.DeepEqual(after, claim) {
+		t.Fatalf("claim=%+v err=%v, want unchanged preview", after, err)
+	}
+	if err := decision.Apply(context.Background(), core.CleanupRequest{}, rt); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v, want retired missing-server claim", exists, err)
+	}
+}
+
 func TestCleanupServersUsesSingleBatchCutoff(t *testing.T) {
 	clock := &testCleanupClock{now: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)}
 	boundary := clock.now.Add(time.Minute)

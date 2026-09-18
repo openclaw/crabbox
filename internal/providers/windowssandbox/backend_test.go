@@ -3,10 +3,12 @@ package windowssandbox
 import (
 	"context"
 	"errors"
+	"flag"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -500,6 +502,131 @@ func (r *cancelAwareRunner) Run(ctx context.Context, req core.LocalCommandReques
 		case <-ctx.Done():
 			return core.LocalCommandResult{ExitCode: 1}, ctx.Err()
 		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// This matrix invokes only flag parsing and in-memory configuration policy.
+func TestWindowsSandboxBindingFlagPhases(t *testing.T) {
+	fields := []struct{ field, flag string }{
+		{"Networking", "networking"}, {"VGPU", "vgpu"}, {"Clipboard", "clipboard"}, {"ProtectedClient", "protected-client"}, {"AudioInput", "audio-input"}, {"VideoInput", "video-input"}, {"PrinterRedirection", "printer-redirection"},
+	}
+	for _, provider := range []string{"windows-sandbox", "wsb", "windows-sandbox-provider", " WINDOWS-SANDBOX ", "other"} {
+		for stop := 0; stop <= len(fields); stop++ {
+			for _, earlier := range []bool{false, true} {
+				cfg := core.Config{Provider: provider, TargetOS: "linux", WindowsMode: "retained", ServerType: "retained", WorkRoot: "retained"}
+				cfg.WindowsSandbox = core.WindowsSandboxConfig{Workdir: "retained", TempRoot: "retained", Networking: "retained", VGPU: "retained", Clipboard: "retained", ProtectedClient: "retained", AudioInput: "retained", VideoInput: "retained", PrinterRedirection: "retained", MemoryMB: 64}
+				want := cfg
+				fs := flag.NewFlagSet("inert", flag.ContinueOnError)
+				fs.SetOutput(io.Discard)
+				values := registerFlags(fs, cfg)
+				args := []string{}
+				if earlier {
+					args = append(args, "--windows-sandbox-workdir=raw", "--windows-sandbox-temp-root=~/raw")
+					want.WindowsSandbox.Workdir = "raw"
+					want.WindowsSandbox.TempRoot = "~/raw"
+					for i := 0; i < stop; i++ {
+						args = append(args, "--windows-sandbox-"+fields[i].flag+"= yes ")
+						reflect.ValueOf(&want.WindowsSandbox).Elem().FieldByName(fields[i].field).SetString("Enable")
+					}
+					core.RecordProviderFlagInputs(&want, true, "windows-sandbox")
+				}
+				errorText := "--windows-sandbox-memory-mb must be non-negative"
+				if stop < len(fields) {
+					args = append(args, "--windows-sandbox-"+fields[stop].flag+"=invalid")
+					errorText = "windows-sandbox-" + fields[stop].flag + " must be enable, disable, or default"
+				} else {
+					args = append(args, "--windows-sandbox-memory-mb=-1")
+				}
+				if provider == "windows-sandbox" || provider == "wsb" || provider == "windows-sandbox-provider" {
+					want.TargetOS = "windows"
+					want.WindowsMode = "normal"
+				}
+				if err := fs.Parse(args); err != nil {
+					t.Fatal(err)
+				}
+				err := applyFlags(&cfg, fs, values)
+				if !reflect.DeepEqual(err, core.Exit(2, "%s", errorText)) || !reflect.DeepEqual(cfg, want) {
+					t.Fatalf("provider=%q stop=%d earlier=%v err=%v got=%+v want=%+v", provider, stop, earlier, err, cfg, want)
+				}
+			}
+		}
+	}
+}
+
+func TestWindowsSandboxBindingFlagGuardsAndSuccess(t *testing.T) {
+	for _, wrongType := range []bool{false, true} {
+		for _, sizing := range []string{"class", "type"} {
+			cfg := core.Config{Provider: "windows-sandbox", TargetOS: "linux", WindowsMode: "retained"}
+			want := cfg
+			fs := flag.NewFlagSet("inert", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			values := registerFlags(fs, cfg)
+			args := []string{"--type=fixture", "--windows-sandbox-networking=invalid"}
+			if sizing == "class" {
+				args = append(args, "--class=fixture")
+			}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			if wrongType {
+				values = struct{}{}
+			}
+			err := applyFlags(&cfg, fs, values)
+			if wrongType {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if !reflect.DeepEqual(err, core.Exit(2, "--%s is not supported for provider=windows-sandbox; Windows Sandbox sizing is controlled by the host", sizing)) {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("guard mutated configuration")
+			}
+		}
+	}
+	for _, provider := range []string{"wsb", "windows-sandbox-provider", " WINDOWS-SANDBOX ", "other"} {
+		for _, targetVisit := range []bool{false, true} {
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			cfg.TargetOS = "linux"
+			cfg.WindowsMode = "retained"
+			want := cfg
+			fs := flag.NewFlagSet("inert", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			fs.String("target", "", "")
+			fs.String("windows-mode", "", "")
+			values := registerFlags(fs, cfg)
+			args := []string{"--windows-sandbox-workdir=", "--windows-sandbox-temp-root=~/raw", "--windows-sandbox-networking=", "--windows-sandbox-memory-mb=0"}
+			if targetVisit {
+				args = append(args, "--target=linux", "--windows-mode=retained")
+			}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			want.WindowsSandbox.Workdir = ""
+			want.WindowsSandbox.TempRoot = "~/raw"
+			want.WindowsSandbox.Networking = "Default"
+			want.WindowsSandbox.MemoryMB = 0
+			core.RecordProviderFlagInputs(&want, true, "windows-sandbox")
+			if provider == "wsb" || provider == "windows-sandbox-provider" {
+				want.Provider = "windows-sandbox"
+				want.ServerType = "windows-sandbox"
+				want.WindowsSandbox.Workdir = `C:\crabbox-work`
+				want.WorkRoot = `C:\crabbox-work`
+				if !targetVisit {
+					want.TargetOS = "windows"
+					want.WindowsMode = "normal"
+				}
+			}
+			if err := applyFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("provider=%q targetVisit=%v got=%+v want=%+v", provider, targetVisit, cfg, want)
+			}
 		}
 	}
 }

@@ -3,10 +3,13 @@
 package external
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 // An abandoned lock file must be reclaimed and re-acquired, not reported as
@@ -72,4 +75,47 @@ func TestWaitForSlugReservationLockRecoversAfterAbandonedLock(t *testing.T) {
 		t.Fatalf("waitForSlugReservationLock after release: %v", err)
 	}
 	again()
+}
+
+func TestAllocateLeaseSlugWindowsReleaseAndReuse(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	backend := &leaseBackend{cfg: testConfig()}
+	for _, leaseID := range []string{"cbx_first", "cbx_second"} {
+		slug, reservation, err := backend.allocateLeaseSlug(leaseID, "shared")
+		if err != nil {
+			t.Fatalf("allocateLeaseSlug(%s): %v", leaseID, err)
+		}
+		if reservation == nil {
+			t.Fatalf("allocateLeaseSlug(%s) returned no reservation", leaseID)
+		}
+		t.Cleanup(reservation.Release)
+		if slug != "shared" {
+			t.Fatalf("allocated slug=%q, want shared", slug)
+		}
+		data, err := os.ReadFile(reservation.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var record slugReservationRecord
+		if err := json.Unmarshal(data, &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.LeaseID != leaseID || record.Slug != slug {
+			t.Fatalf("persisted reservation does not match lease %s and slug %s", leaseID, slug)
+		}
+		lockPath, err := slugReservationLockPath(reservation.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+			t.Fatalf("allocation left the reservation lock behind: %v", err)
+		}
+
+		reservation.Release()
+		for _, path := range []string{reservation.path, lockPath} {
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("release left reservation state at %s: %v", path, err)
+			}
+		}
+	}
 }

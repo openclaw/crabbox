@@ -3,6 +3,7 @@ package mxc
 import (
 	"flag"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -75,5 +76,75 @@ func TestParseWindowsBuild(t *testing.T) {
 	}
 	if build != 26100 {
 		t.Fatalf("build = %d, want 26100", build)
+	}
+}
+
+func TestMXCBindingFlagContract(t *testing.T) {
+	fields := map[string]string{"CLIPath": "mxc-cli", "Version": "mxc-version", "Containment": "mxc-containment", "Network": "mxc-network", "ReadOnlyPaths": "mxc-readonly-paths", "ReadWritePaths": "mxc-readwrite-paths", "AllowedHosts": "mxc-allowed-hosts", "BlockedHosts": "mxc-blocked-hosts", "AllowDACLMutation": "mxc-allow-dacl-mutation", "AllowWindowsUI": "mxc-allow-windows-ui", "Experimental": "mxc-experimental"}
+	for _, provider := range []string{"mxc", "execution-container", "ssh", ""} {
+		for field, name := range fields {
+			for _, visit := range []string{"absent", "empty", "value"} {
+				cfg := core.Config{Provider: provider}
+				dst := reflect.ValueOf(&cfg.MXC).Elem().FieldByName(field)
+				var want any
+				raw := " fixture "
+				def := "prior"
+				switch dst.Kind() {
+				case reflect.String:
+					dst.SetString("prior")
+					want = "prior"
+					if visit != "absent" {
+						if visit == "empty" {
+							raw = ""
+						}
+						want = raw
+					}
+				case reflect.Slice:
+					dst.Set(reflect.ValueOf([]string{" prior ", "none"}))
+					want = []string{" prior ", "none"}
+					def = " prior ,none"
+					raw = " a, ,a,none "
+					if visit == "empty" {
+						raw = " , "
+						want = []string(nil)
+					} else if visit == "value" {
+						want = []string{"a", "a", "none"}
+					}
+				case reflect.Bool:
+					dst.SetBool(true)
+					want = true
+					def = "true"
+					raw = "true"
+					if visit == "empty" {
+						raw = "false"
+						want = false
+					}
+				}
+				fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+				values := registerFlags(fs, cfg)
+				if fs.Lookup(name).DefValue != def {
+					t.Fatalf("%s default=%q", name, fs.Lookup(name).DefValue)
+				}
+				if visit != "absent" {
+					first := "previous"
+					if dst.Kind() == reflect.Bool {
+						first = "true"
+					}
+					if err := fs.Parse([]string{"--" + name + "=" + first, "--" + name + "=" + raw}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before := cfg.MXC
+				if err := applyFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(before, cfg.MXC) {
+					t.Fatal("wrong type mutated config")
+				}
+				if err := applyFlags(&cfg, fs, values); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(dst.Interface(), want) || cfg.Provider != provider {
+					t.Fatalf("%s/%s/%s got=%#v want=%#v", provider, field, visit, dst.Interface(), want)
+				}
+			}
+		}
 	}
 }

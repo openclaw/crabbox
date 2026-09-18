@@ -1372,12 +1372,7 @@ func applyDigitalOceanDefaults(cfg *core.Config) {
 	if cfg.TargetOS == "" {
 		cfg.TargetOS = core.TargetLinux
 	}
-	if cfg.DigitalOcean.Region == "" {
-		cfg.DigitalOcean.Region = core.DigitalOceanRegionFallback
-	}
-	if cfg.DigitalOcean.Image == "" {
-		cfg.DigitalOcean.Image = core.DigitalOceanImageFallback
-	}
+	applyNativeDefaults(&cfg.DigitalOcean)
 	if !cfg.ServerTypeExplicit || cfg.ServerType == "" {
 		cfg.ServerType = digitalOceanServerTypeForClass(cfg.Class)
 	}

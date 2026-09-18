@@ -12,6 +12,10 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) ServerTypeForConfig(cfg core.Config) string {
+	return core.Blank(cfg.E2B.Template, core.E2BConfigDefaultTemplate)
+}
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),

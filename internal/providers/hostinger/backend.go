@@ -795,19 +795,19 @@ func applyDefaults(cfg *core.Config) {
 		cfg.TargetOS = targetLinux
 	}
 	if cfg.Hostinger.APIURL == "" {
-		cfg.Hostinger.APIURL = "https://developers.hostinger.com"
+		cfg.Hostinger.APIURL = core.HostingerConfigDefaultAPIURL
 	}
 	if cfg.Hostinger.HostnamePrefix == "" {
-		cfg.Hostinger.HostnamePrefix = "crabbox"
+		cfg.Hostinger.HostnamePrefix = core.HostingerConfigDefaultHostnamePrefix
 	}
 	if cfg.Hostinger.User == "" {
-		cfg.Hostinger.User = "root"
+		cfg.Hostinger.User = core.HostingerConfigDefaultUser
 	}
 	if cfg.Hostinger.WorkRoot == "" {
 		cfg.Hostinger.WorkRoot = core.EffectiveHostingerWorkRoot(*cfg)
 	}
 	if cfg.Hostinger.ReleaseAction == "" {
-		cfg.Hostinger.ReleaseAction = "stop"
+		cfg.Hostinger.ReleaseAction = core.HostingerConfigDefaultReleaseAction
 	}
 	cfg.SSHUser = cfg.Hostinger.User
 	cfg.SSHPort = "22"

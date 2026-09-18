@@ -12,16 +12,8 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type spritesFlagValues struct {
-	APIURL   *string
-	WorkRoot *string
-}
-
 func RegisterSpritesProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return spritesFlagValues{
-		APIURL:   fs.String("sprites-api-url", defaults.Sprites.APIURL, "Sprites API URL"),
-		WorkRoot: fs.String("sprites-work-root", defaults.Sprites.WorkRoot, "Sprites remote work root"),
-	}
+	return core.RegisterSpritesConfigFlags(fs, defaults.Sprites)
 }
 
 func ApplySpritesProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
@@ -39,19 +31,13 @@ func ApplySpritesProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) e
 			return err
 		}
 	}
-	v, ok := values.(spritesFlagValues)
+	v, ok := values.(core.SpritesConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "sprites-api-url") {
-		cfg.Sprites.APIURL = *v.APIURL
-		core.RecordProviderFlagInputs(cfg, true, "sprites")
-	}
-	if core.FlagWasSet(fs, "sprites-work-root") {
-		cfg.Sprites.WorkRoot = *v.WorkRoot
-		core.RecordProviderFlagInputs(cfg, true, "sprites")
-	}
-	return nil
+	applied, err := v.Apply(&cfg.Sprites, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "sprites")
+	return err
 }
 
 func NewSpritesBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) (core.Backend, error) {

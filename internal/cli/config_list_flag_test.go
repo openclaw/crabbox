@@ -48,3 +48,35 @@ func TestReplaceAppendListFlagEmptyGetter(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeListValueContract(t *testing.T) {
+	for _, input := range [][]string{nil, {}, {"", " \t"}, {" a ", "", "a", "none", " x,y "}} {
+		before := append([]string(nil), input...)
+		got := NormalizeList(input)
+		want := []string{}
+		if len(input) == 5 {
+			want = []string{"a", "a", "none", "x,y"}
+		}
+		if got == nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("got=%#v want=%#v", got, want)
+		}
+		if len(got) > 0 {
+			got[0] = "changed"
+		}
+		if !reflect.DeepEqual(append([]string(nil), input...), before) {
+			t.Fatal("normalization shared or mutated input storage")
+		}
+	}
+}
+
+func TestReplaceAppendListFlagBlankAfterValues(t *testing.T) {
+	value := newReplaceAppendListFlag([]string{"prior"})
+	for _, raw := range []string{" , ", "a, a,none", "  "} {
+		if err := value.Set(raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !reflect.DeepEqual(value.values, []string{"a", "a", "none"}) {
+		t.Fatalf("values=%#v", value.values)
+	}
+}

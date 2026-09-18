@@ -470,6 +470,16 @@ func TestGCPCleanupTreatsMissingLiveInstanceAsAlreadyDeleted(t *testing.T) {
 
 	var stderr bytes.Buffer
 	backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
+	if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if claim, err := core.ReadLeaseClaim(leaseID); err != nil || claim.LeaseID != leaseID {
+		t.Fatalf("dry-run missing-instance claim=%+v err=%v, want retained claim", claim, err)
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("dry-run deleted=%v, want no mutation", fake.deleted)
+	}
+	stderr.Reset()
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
 	}

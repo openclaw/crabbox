@@ -69,7 +69,7 @@ func installWorkspaceOwnerWSLStageFixture(t *testing.T, home, path string) *work
 	}
 	// Never record argv or command text. Readiness transport probes are fixed
 	// and input-free; execution receives only the staged file's finite stdin.
-	script := "#!/bin/sh\nfor arg; do [ \"$arg\" != -E ] || exit 91; remote=\"$arg\"; done\n" +
+	script := "#!/bin/sh\n" + recordLegacyBashProbeShell(t, fixture.logPath) + "for arg; do [ \"$arg\" != -E ] || exit 91; remote=\"$arg\"; done\n" +
 		"[ \"$remote\" != " + shellQuote(wsl2ReadinessCommand("exit 0")) + " ] || exit 0\n" +
 		"[ \"$remote\" = " + shellQuote(launcher) + " ] || exit 92\n" +
 		"/bin/cat > " + shellQuote(filepath.Join(dir, "received-stdin")) + "\n" +
@@ -87,6 +87,9 @@ func (f *workspaceOwnerWSLStageFixture) requireCalls(t *testing.T, stages, execu
 	data, err := os.ReadFile(f.logPath)
 	if err != nil && !(executions == 0 && os.IsNotExist(err)) {
 		t.Fatal(err)
+	}
+	if probes := strings.Count(string(data), "probe\n"); probes != stages {
+		t.Fatalf("Bash prerequisite calls=%d, want %d", probes, stages)
 	}
 	if f.stages != stages || strings.Count(string(data), "execute\n") != executions || f.cleanups != cleanups {
 		t.Fatalf("stages=%d executions=%d cleanups=%d; want %d/%d/%d", f.stages, strings.Count(string(data), "execute\n"), f.cleanups, stages, executions, cleanups)

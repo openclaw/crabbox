@@ -163,7 +163,6 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 			}
 			labels["host"] = parallelsHostName(candidate)
 			server := core.Server{CloudID: vm.ID, Provider: "parallels", Name: vm.Name, Status: strings.ToLower(vm.State), Labels: labels}
-			server.PublicNet.IPv4.IP = vm.IP
 			server.ServerType.Name = core.ServerTypeForProviderClass("parallels", candidate.Class)
 			normalizedID := strings.ReplaceAll(id, "_", "-")
 			if vm.ID == id || vm.Name == id || leaseID == id || strings.ReplaceAll(leaseID, "_", "-") == normalizedID || core.NormalizeLeaseSlug(slug) == core.NormalizeLeaseSlug(id) {
@@ -173,8 +172,16 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 					return core.LeaseTarget{}, err
 				}
 				if vm.IP == "" && strings.EqualFold(vm.State, "running") {
-					vm, _ = client.WaitForIP(ctx, vm.ID, 30*time.Second)
+					discovered, err := client.WaitForIP(ctx, vm.ID, 30*time.Second)
+					if err != nil {
+						if !req.ReleaseOnly && !req.StatusOnly {
+							return core.LeaseTarget{}, err
+						}
+					} else {
+						vm = discovered
+					}
 				}
+				server.PublicNet.IPv4.IP = vm.IP
 				if strings.TrimSpace(candidate.SSHUser) == core.BaseConfig().SSHUser {
 					var user string
 					var err error

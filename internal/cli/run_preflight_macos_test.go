@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"slices"
@@ -28,6 +30,39 @@ func TestMacOSPreflightTiming(t *testing.T) {
 		elapsed, code, err := parseMacOSPreflightTiming("real "+tc.real+"\nuser 0.00\nsys 0.00\nCBX-MACOS-TIME-1 "+nonce+" "+tc.code+"\n", nonce)
 		if err != nil || elapsed != tc.want || strconv.Itoa(code) != tc.code {
 			t.Fatalf("%+v: elapsed=%v code=%d err=%v", tc, elapsed, code, err)
+		}
+	}
+}
+
+func TestPreflightControlInterpreterComposition(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		target  SSHTarget
+		program posixPreflightProgram
+	}{
+		{"macOS platform", SSHTarget{TargetOS: targetMacOS}, macOSPreflightHelper(time.Second)},
+		{"macOS functional", SSHTarget{TargetOS: targetMacOS}, functionalPOSIXPreflightHelper(time.Second, "/bin/sh")},
+		{"Linux functional", SSHTarget{TargetOS: targetLinux}, functionalPOSIXPreflightHelper(time.Second, "bash")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.program.interpreter != preflightControlInterpreter(tc.target) {
+				t.Fatal("helper and completion control disagree on interpreter")
+			}
+			if strings.Contains(tc.program.source, "@CONTROL_SHELL@") || !strings.Contains(tc.program.source, "exec "+shellQuote(tc.program.interpreter)+` "$directory/command"`) {
+				t.Fatal("shared member interpreter was not bound after composition")
+			}
+			if tc.target.TargetOS == targetMacOS && runtime.GOOS == "darwin" {
+				cmd := exec.Command(tc.program.interpreter, "-n", "-c", tc.program.source)
+				cmd.Env = []string{"PATH=/usr/bin:/bin", "BASH_ENV=" + os.DevNull, "ENV=" + os.DevNull}
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("native control syntax: %v\n%s", err, out)
+				}
+			}
+		})
+	}
+	for _, helper := range []string{wslLinuxHelper, functionalWSLPreflightHelper(time.Second)} {
+		if strings.Contains(helper, "@CONTROL_SHELL@") || !strings.Contains(helper, `exec 'bash' "$directory/command"`) {
+			t.Fatal("WSL lost its existing Bash runtime binding")
 		}
 	}
 }
@@ -218,31 +253,80 @@ func TestMacOSPreflightWorkerNative(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("Apple time output")
 	}
-	t.Setenv("LC_ALL", "POSIX")
-	for _, tc := range []struct {
-		name, script, output string
-		code                 int
-	}{
-		{"success", "printf 'Version 1\\nsecond line\\n'", "Version 1\nsecond line\n", 0},
-		{"nonzero stdout", "printf 'not a successful version\\n'; exit 7", "not a successful version\n", 7},
-		{"empty", "exit 0", "", 0},
-		{"child locale", "printf %s \"$LC_ALL\"", "POSIX", 0},
-		{"child umask", "umask", "0027\n", 0},
-		{"long stdout", "printf '%05000d' 0", strings.Repeat("0", 4096), 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			nonce := strings.Repeat("b", 32)
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, "/bin/bash", "-c", "umask 027\n"+macOSPreflightWorker(nonce, t.TempDir(), tc.script))
-			var out, report bytes.Buffer
-			cmd.Stdout, cmd.Stderr = &out, &report
-			if err := cmd.Run(); err != nil {
-				t.Fatalf("worker: %v / %s", err, report.String())
-			}
-			value, elapsed, code, err := parseMacOSPreflightOutput(out.String(), nonce)
-			if err != nil || code != tc.code || value != tc.output || elapsed <= 0 {
-				t.Fatalf("output=%q code=%d elapsed=%v err=%v report=%q", value, code, elapsed, err, report.String())
+	shells := []string{"/bin/bash", "/bin/sh"}
+	if dash, err := exec.LookPath("dash"); err == nil {
+		shells = append(shells, dash)
+	}
+	for _, shell := range shells {
+		t.Run(filepath.Base(shell), func(t *testing.T) {
+			for _, tc := range []struct {
+				name, script, output, locale         string
+				code                                 int
+				localeUnset, composed, blockedStatus bool
+			}{
+				{name: "success", script: "printf 'Version 1\\nsecond line\\n'", output: "Version 1\nsecond line\n"},
+				{name: "nonzero stdout", script: "printf 'not a successful version\\n'; exit 7", output: "not a successful version\n", code: 7},
+				{name: "empty", script: "exit 0"},
+				{name: "exit127", script: "exit 127", code: 127},
+				{name: "child locale", script: "printf %s \"$LC_ALL\"", locale: "POSIX", output: "POSIX"},
+				{name: "empty locale", script: "printf '%s:%s' \"${LC_ALL+x}\" \"$LC_ALL\"", output: "x:"},
+				{name: "unset locale", script: "printf %s \"${LC_ALL+x}\"", localeUnset: true},
+				{name: "child umask", script: "umask", output: "0027\n"},
+				{name: "long stdout", script: "printf '%05000d' 0", output: strings.Repeat("0", 4096)},
+				{name: "long nonzero", script: "printf '%05000d' 0; printf finished > completion; exit 23", output: strings.Repeat("0", 4096), code: 23},
+				{name: "composed environment", script: `printf '%s\n%s' "$FIXTURE_VALUE" "$PWD"`, composed: true},
+				{name: "status write failure", script: "printf version", blockedStatus: true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					nonce := strings.Repeat("b", 32)
+					workdir := t.TempDir()
+					command := tc.script
+					want := tc.output
+					if tc.composed {
+						profile := filepath.Join(workdir, "fixture.env")
+						mustWriteTestFile(t, profile, "export FIXTURE_VALUE=profile\ncd /\n")
+						command = remotePortableWorkloadCommand(workdir, map[string]string{"FIXTURE_VALUE": "forwarded"}, []string{profile}, tc.script, nil)
+						want = "forwarded\n" + workdir
+					}
+					ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+					defer cancel()
+					scratch := t.TempDir()
+					if tc.blockedStatus {
+						if err := os.Mkdir(filepath.Join(scratch, "probe-status"), 0o700); err != nil {
+							t.Fatal(err)
+						}
+					}
+					cmd := exec.CommandContext(ctx, shell, "-c", "umask 027\n"+macOSPreflightWorker(nonce, scratch, command))
+					cmd.Dir = workdir
+					cmd.Env = []string{"PATH=" + t.TempDir(), "HOME=" + t.TempDir(), "BASH_ENV=" + os.DevNull, "ENV=" + os.DevNull}
+					if !tc.localeUnset {
+						cmd.Env = append(cmd.Env, "LC_ALL="+tc.locale)
+					}
+					var out, report bytes.Buffer
+					cmd.Stdout, cmd.Stderr = &out, &report
+					runErr := cmd.Run()
+					if tc.blockedStatus {
+						if exitCode(runErr) != 74 {
+							t.Fatalf("status publication failure exit=%v report=%q", runErr, report.String())
+						}
+						if _, _, _, err := parseMacOSPreflightOutput(out.String(), nonce); err == nil {
+							t.Fatal("unpublished status became a completed probe")
+						}
+						return
+					}
+					if runErr != nil {
+						t.Fatalf("worker: %v / %s", runErr, report.String())
+					}
+					value, elapsed, code, err := parseMacOSPreflightOutput(out.String(), nonce)
+					if err != nil || code != tc.code || value != want || elapsed <= 0 {
+						t.Fatalf("output=%q code=%d elapsed=%v err=%v report=%q", value, code, elapsed, err, report.String())
+					}
+					if tc.name == "long nonzero" {
+						if data, err := os.ReadFile(filepath.Join(workdir, "completion")); err != nil || string(data) != "finished" {
+							t.Fatalf("verbose producer did not finish: data=%q err=%v", data, err)
+						}
+					}
+				})
 			}
 		})
 	}

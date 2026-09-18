@@ -971,7 +971,7 @@ rm -f "$child"`
 	// across exec. Close extra descriptors in a fresh -c shell (no script fd),
 	// so a detached user daemon cannot hold the witness identity pipe open.
 	macExec := `if [ "$(uname -s)" = Darwin ]; then
-  exec /bin/bash -c 'for owner_fd in /dev/fd/*; do
+  exec /bin/sh -c 'for owner_fd in /dev/fd/*; do
     owner_fd=${owner_fd##*/}
     case "$owner_fd" in ""|*[!0-9]*|0|1|2) continue ;; esac
     eval "exec $owner_fd>&-"

@@ -44,23 +44,39 @@ func testWriteBlacksmithFile(t *testing.T, root, name, text string) {
 
 func syntheticBlacksmithCommand(t *testing.T, req core.LocalCommandRequest) string {
 	t.Helper()
-	for _, arg := range req.Args {
-		if strings.HasPrefix(arg, "/bin/sh -c ") {
-			return arg
+	args := req.Args
+	if len(args) >= 2 && args[0] == "--org" {
+		args = args[2:]
+	}
+	if len(args) >= 2 && args[0] == "testbox" && args[1] == "run" {
+		for args = args[2:]; len(args) > 0; {
+			switch args[0] {
+			case "--id", "--ssh-private-key":
+				if len(args) < 2 {
+					t.Fatal("missing native option value")
+				}
+				args = args[2:]
+			case "--debug":
+				args = args[1:]
+			default:
+				return args[0]
+			}
 		}
 	}
-	t.Fatal("missing supervisor command")
+	t.Fatal("missing native run command")
 	return ""
 }
 
-// Synthetic native transport only: executes the actual wrapper and generic
-// artifact script locally. No native CLI, credentials, sync, or lease exists.
+// Synthetic native transport only: execute Crabbox's actual command inside the
+// status/activity wrapper observed in Blacksmith CLI 0.4.60. No native CLI,
+// credentials, sync, or lease exists; callers isolate HOME before execution.
 func runSyntheticBlacksmithCommand(t *testing.T, ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	t.Helper()
-	if req.Dir == "" || req.Stdin != nil || !req.DisableOutputCapture || req.CancelGracePeriod <= 0 {
+	if req.Stdin != nil || !req.DisableOutputCapture || (req.Dir != "" && req.CancelGracePeriod <= 0) {
 		t.Errorf("unbounded or changed native request: dir=%q stdin=%v capture=%t grace=%s", req.Dir, req.Stdin != nil, req.DisableOutputCapture, req.CancelGracePeriod)
 	}
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", syntheticBlacksmithCommand(t, req))
+	command := fmt.Sprintf("cd %s && (touch ~/.testbox-last-activity || true) && %s; __ec=$?; touch ~/.testbox-last-activity; exit $__ec", core.ShellQuote("."), syntheticBlacksmithCommand(t, req))
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
 	cmd.Dir, cmd.Stdout, cmd.Stderr = req.Dir, req.Stdout, req.Stderr
 	cmd.WaitDelay = time.Second
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "TMPDIR=" + t.TempDir()}
@@ -142,6 +158,8 @@ func TestBlacksmithArtifactRunShellAndTerminalExit(t *testing.T) {
 			{name: "argv", argv: []string{"printf", "%s", "a b", "'quoted'", "$HOME"}, stdout: "a b'quoted'$HOME"},
 			{name: "env", argv: []string{"VALUE=a b", "bash", "-c", `printf '%s' "$VALUE"`}, stdout: "a b"},
 			{name: "multiline", command: "printf 'line1\\nline2\\n'\nprintf original > report", stdout: "line1\nline2\n"},
+			{name: "terminal-heredoc", command: "cat <<'DATA'\nliteral $HOME and 'quotes'\nDATA", stdout: "literal $HOME and 'quotes'\n"},
+			{name: "escaped-trailing-space", command: "printf '%s' tail\\ ", stdout: "tail "},
 			{name: "literal-control-bytes", command: "printf 'out\\036bytes\\037tail'; printf 'err\\036bytes\\037tail' >&2; printf original > report", stdout: "out\x1ebytes\x1ftail", stderr: "err\x1ebytes\x1ftail"},
 			{name: "literal-control-bytes-failure", command: "printf 'out\\036bytes\\037tail'; printf 'err\\036bytes\\037tail' >&2; printf original > report; exit 23", stdout: "out\x1ebytes\x1ftail", stderr: "err\x1ebytes\x1ftail", code: 23},
 			{name: "stdin", command: "read value; printf 'read=%s' $?; printf original > report", stdout: "read=1"},
@@ -769,7 +787,7 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 						// Buffer receipts until the real remote timeout finishes so
 						// the equal local budget starts only after native completion.
 						for i, arg := range req.Args {
-							if strings.HasPrefix(arg, "/bin/sh -c ") {
+							if arg == syntheticBlacksmithCommand(t, req) {
 								req.Args[i] = strings.Replace(arg, "set -euo pipefail", "sleep 1; set -euo pipefail", 1)
 							}
 						}
@@ -938,7 +956,7 @@ func TestBlacksmithArtifactRunInitialSourceAndTiming(t *testing.T) {
 		// A second synthetic native sync would overwrite this workload file.
 		testWriteBlacksmithFile(t, req.Dir, "report", "local-sync-bytes")
 		for i, arg := range req.Args {
-			if strings.HasPrefix(arg, "/bin/sh -c ") {
+			if arg == syntheticBlacksmithCommand(t, req) {
 				req.Args[i] = strings.Replace(arg, "set -euo pipefail", "sleep 0.2; set -euo pipefail", 1)
 			}
 		}
@@ -1134,7 +1152,7 @@ func TestBlacksmithArtifactFailureCleanupAndClassification(t *testing.T) {
 						return core.LocalCommandResult{}, nil
 					case "run":
 						for i, arg := range req.Args {
-							if strings.HasPrefix(arg, "/bin/sh -c ") {
+							if arg == syntheticBlacksmithCommand(t, req) {
 								switch mode {
 								case "collector-cleanup":
 									// Run the original EXIT cleanup before reporting failure,
