@@ -454,6 +454,17 @@ test("Markdown heading anchors avoid duplicate and literal-suffix collisions per
   assert.match(markdownToHtml("## Setup", "other.md"), /<h2 id="setup">/);
 });
 
+test("site heading identity preserves its block and syntax contracts", () => {
+  const markdown = "## Setup\n```text\n## Setup\n```\n<!--\n```text\n## Setup\n```\n-->\n| Header | Other |\n| --- | --- |\n| ## Setup | value |\n## Setup\n##\tTabbed\n## <em>Marked</em>\n##### Deep\n###### Deeper";
+  const html = markdownToHtml(markdown, "example.md");
+  const ids = [...html.matchAll(/<h[1-6] id="([^"]*)"/g)].map((match) => match[1]);
+  assert.deepEqual(ids, ["setup", "setup-1", "tabbed", "em-marked-em"]);
+  assert.equal(occurrences(html, '<pre><code class="language-text">## Setup</code></pre>'), 2);
+  assert.match(html, /<td>## Setup<\/td>/);
+  assert.match(html, /##### Deep/);
+  assert.match(html, /###### Deeper/);
+});
+
 generatedTest("generated cache TOC links to each distinct cache volumes section", () => {
   const html = readGenerated("features/cache.html");
   const toc = element(html, "nav", /class="toc"/);

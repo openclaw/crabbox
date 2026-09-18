@@ -6,35 +6,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
-	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 const archiveUploadChunkSize = 3 << 20
 
-func (b *backend) syncWorkspace(ctx context.Context, transport sandboxTransport, sandboxID string, req core.RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
-		Config:              b.cfg,
-		Repo:                req.Repo,
-		ForceSyncLarge:      req.ForceSyncLarge,
-		Workdir:             workdir,
-		TempPattern:         "crabbox-cloud-run-sandbox-sync-*.tgz",
-		RemoteArchiveDir:    "/tmp",
-		RemoteArchivePrefix: "crabbox-sync-",
-		PhaseName:           "cloud_run_sandbox_sync",
-		Provider:            providerName,
-		Stderr:              b.rt.Stderr,
-		Now:                 func() time.Time { return core.ClockNow(b.rt.Clock) },
-		CleanupContext:      b.cleanupContext,
-		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
-			return b.uploadArchive(uploadCtx, transport, sandboxID, remoteArchive, body)
-		},
-		Exec: func(execCtx context.Context, command string) error {
-			return b.execShell(execCtx, transport, sandboxID, command)
-		},
-	}, prepared...)
+func (b *backend) workspace(transport sandboxTransport, sandboxID string, req core.RunRequest, workdir string) core.ArchiveWorkspace {
+	workspace := core.NewArchiveWorkspace(b.cfg, b.rt, req, providerName, workdir)
+	workspace.RemoteArchiveDir = "/tmp"
+	workspace.RemoteArchivePrefix = "crabbox-sync-"
+	workspace.CleanupContext = b.cleanupContext
+	workspace.Upload = func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
+		return b.uploadArchive(uploadCtx, transport, sandboxID, remoteArchive, body)
+	}
+	workspace.Exec = func(execCtx context.Context, command string) error {
+		return b.execShell(execCtx, transport, sandboxID, command)
+	}
+	return workspace
 }
 
 func (b *backend) uploadArchive(ctx context.Context, transport sandboxTransport, sandboxID, remoteArchive string, body io.Reader) error {
@@ -117,33 +106,4 @@ func (b *backend) execShell(ctx context.Context, transport sandboxTransport, san
 		return core.Exit(code, "cloud-run-sandbox exec %q exited %d", command, code)
 	}
 	return nil
-}
-
-func (b *backend) ensureWorkspace(ctx context.Context, transport sandboxTransport, sandboxID, workdir string) error {
-	return b.execShell(ctx, transport, sandboxID, "mkdir -p "+core.ShellQuote(workdir))
-}
-
-func (b *backend) execCommand(ctx context.Context, transport sandboxTransport, sandboxID, workdir string, command []string, env map[string]string, stdout, stderr io.Writer) (int, error) {
-	if len(command) == 0 {
-		return 2, core.Exit(2, "missing command")
-	}
-	commandText := core.ShellScriptFromArgv(command)
-	if len(command) == 1 && core.ShouldUseShell(command) {
-		commandText = command[0]
-	}
-	return transport.Exec(ctx, sandboxID, commandText, execOptions{
-		Workdir: workdir,
-		Env:     env,
-		Timeout: defaultExecTimeout,
-	}, stdout, stderr)
-}
-
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, core.Exit(2, "missing command")
-	}
-	if shellMode {
-		return []string{strings.Join(command, " ")}, nil
-	}
-	return command, nil
 }

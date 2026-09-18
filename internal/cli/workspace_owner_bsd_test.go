@@ -23,6 +23,12 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("requires the POSIX supervisor fixture")
 	}
+	// The SSH recorder replaces PATH; resolve the fixture's host interpreter
+	// before that isolation instead of looking it up in the simulated guest PATH.
+	fixtureBash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("requires a local Bash supervisor fixture")
+	}
 	for _, tc := range []struct {
 		name, state                                                                                         string
 		code, workloadCode                                                                                  int
@@ -53,20 +59,13 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 			dir := t.TempDir()
 			isolateRunTestUserDirs(t, dir)
 			t.Chdir(dir)
-			logPath := installRecordingSSH(t, dir)
+			workloadHandler := ""
+			if tc.workloadCode != 0 {
+				workloadHandler = "case \"$match\" in *cbx-after-functional*) exit " + strconv.Itoa(tc.workloadCode) + " ;; esac"
+			}
+			logPath := installRecordingSSH(t, dir, workloadHandler)
 			ctx, cancel := context.WithCancelCause(t.Context())
 			defer cancel(nil)
-			if tc.workloadCode != 0 {
-				sshPath := filepath.Join(dir, "ssh")
-				script, err := os.ReadFile(sshPath)
-				if err != nil {
-					t.Fatal(err)
-				}
-				script = bytes.Replace(script, []byte("case \"$match\" in"), []byte("case \"$match\" in\n  *cbx-after-functional*) exit "+strconv.Itoa(tc.workloadCode)+" ;;"), 1)
-				if err := os.WriteFile(sshPath, script, 0o755); err != nil {
-					t.Fatal(err)
-				}
-			}
 			oldRun, oldControl := runOwnedFunctionalPreflight, runFunctionalPreflightControl
 			t.Cleanup(func() { runOwnedFunctionalPreflight, runFunctionalPreflightControl = oldRun, oldControl })
 			controlFailure := errors.New("synthetic owned control transport unavailable")
@@ -98,10 +97,14 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 				} else {
 					worker += "exit " + strconv.Itoa(tc.code) + "\n"
 				}
-				helper := functionalPOSIXPreflightHelper(budget)
+				interpreter := preflightControlInterpreter(target)
+				if interpreter == "bash" {
+					interpreter = fixtureBash
+				}
+				helper := functionalPOSIXPreflightHelper(budget, interpreter)
 				remoteCtx, remoteCancel := context.WithTimeout(t.Context(), 25*time.Second)
-				cmd := exec.CommandContext(remoteCtx, "/bin/bash", "-c", helper, "sh", "run", stage, nonce, strconv.Itoa(len(worker)), "0", "15000", "100")
-				cmd.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin", "CBX_HELPER=" + helper}
+				cmd := exec.CommandContext(remoteCtx, helper.interpreter, "-c", helper.source, "sh", "run", stage, nonce, strconv.Itoa(len(worker)), "0", "15000", "100")
+				cmd.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin", "CBX_HELPER=" + helper.source}
 				cmd.Stdin = strings.NewReader(worker)
 				cmd.WaitDelay = 5 * time.Second
 				output := newSynchronizedBuffer(16 << 10)
@@ -119,7 +122,7 @@ func TestRunFunctionalPreflightContinuation(t *testing.T) {
 					if err != nil {
 						return nil, err
 					}
-					control := exec.CommandContext(controlCtx, "/bin/bash", "-c", text)
+					control := exec.CommandContext(controlCtx, helper.interpreter, "-c", text)
 					control.Env = []string{"HOME=" + dir, "PATH=/usr/bin:/bin"}
 					return control.Output()
 				}
@@ -365,17 +368,25 @@ func TestFunctionalPOSIXPreflightOwner(t *testing.T) {
 		t.Skip("POSIX supervisor requires a POSIX host")
 	}
 	for _, tc := range []struct {
-		name, state     string
-		code            int
-		cancel, timeout bool
+		name, state       string
+		code              int
+		cancel, timeout   bool
+		macOS, functional bool
 	}{
 		{name: "ready", state: "ready"},
 		{name: "capability unavailable", state: "venv-unavailable", code: 21},
 		{name: "worker failed", state: "worker-failed", code: 23},
 		{name: "caller cancellation", state: "canceled", cancel: true},
 		{name: "worker deadline", state: "timed-out", code: 74, timeout: true},
+		{name: "macOS ready", state: "ready", macOS: true},
+		{name: "macOS functional ready", state: "ready", macOS: true, functional: true},
+		{name: "macOS worker failed", state: "worker-failed", code: 23, macOS: true},
+		{name: "macOS fractional deadline", state: "timed-out", code: 74, timeout: true, macOS: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.macOS && runtime.GOOS != "darwin" {
+				t.Skip("macOS relative timer requires the base system zsh")
+			}
 			waitFile := func(path string, limit time.Duration) {
 				t.Helper()
 				deadline := time.Now().Add(limit)
@@ -397,11 +408,26 @@ func TestFunctionalPOSIXPreflightOwner(t *testing.T) {
 			}
 			directory := filepath.Join(root, "owned")
 			nonce := strings.Repeat("a", 32)
+			var controlTarget SSHTarget
+			if tc.macOS {
+				nonce, err = randomHex(16)
+				if err != nil {
+					t.Fatal(err)
+				}
+				directory = "/tmp/crabbox-command-" + nonce
+				if _, err := os.Lstat(directory); !os.IsNotExist(err) {
+					t.Fatalf("native fixture stage already exists: %v", err)
+				}
+				controlTarget = SSHTarget{User: "fixture", Host: "127.0.0.1", Port: startTCPReadinessFixture(t), TargetOS: targetMacOS, NoControlMaster: true}
+			}
 			tools := filepath.Join(root, "tools")
 			if err := os.Mkdir(tools, 0o700); err != nil {
 				t.Fatal(err)
 			}
 			for _, name := range []string{"bash", "ps", "mkdir", "head", "wc", "cat", "mkfifo", "mv", "rm", "sleep"} {
+				if tc.macOS && name == "bash" {
+					continue
+				}
 				path := filepath.Join("/bin", name)
 				if _, err := os.Stat(path); err != nil {
 					path = filepath.Join("/usr/bin", name)
@@ -409,6 +435,27 @@ func TestFunctionalPOSIXPreflightOwner(t *testing.T) {
 				if err := os.Symlink(path, filepath.Join(tools, name)); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if tc.macOS {
+				ssh, err := exec.LookPath("ssh")
+				if err != nil {
+					t.Fatal(err)
+				}
+				self, err := os.Executable()
+				if err != nil {
+					t.Fatal(err)
+				}
+				transport := t.TempDir()
+				wrapper := "#!/bin/sh\n" + synchronousHelperRacePrefix() + "exec " + shellQuote(self) + " -test.run='^TestPOSIXRunTransportHelper$' -- ssh \"$@\"\n"
+				if err := os.WriteFile(filepath.Join(transport, "ssh"), []byte(wrapper), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				isolateRunTestUserDirs(t, root)
+				t.Setenv("CRABBOX_POSIX_TRANSPORT_HELPER", "1")
+				t.Setenv("CRABBOX_POSIX_REAL_SSH", ssh)
+				t.Setenv("CRABBOX_POSIX_REMOTE_PATH", tools)
+				t.Setenv("CRABBOX_POSIX_BASH_AVAILABLE", "false")
+				t.Setenv("PATH", transport+string(os.PathListSeparator)+os.Getenv("PATH"))
 			}
 			command := "test -d " + shellQuote(filepath.Join(directory, "scratch")) + " || exit 75\nprintf marker >" + shellQuote(filepath.Join(directory, "scratch", "marker")) + " || exit 75\n"
 			budget := 10 * time.Second
@@ -420,11 +467,26 @@ func TestFunctionalPOSIXPreflightOwner(t *testing.T) {
 			} else {
 				command += "sleep .2\nexit " + strconv.Itoa(tc.code) + "\n"
 			}
-			helper := functionalPOSIXPreflightHelper(budget)
-			ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+			helper := functionalPOSIXPreflightHelper(budget, "bash")
+			if tc.macOS {
+				budget = macOSPreflightCommandTime
+				if tc.timeout {
+					budget = 1250 * time.Millisecond
+				}
+				if tc.functional {
+					helper = functionalPOSIXPreflightHelper(budget, "/bin/sh")
+				} else {
+					helper = macOSPreflightHelper(budget)
+				}
+			}
+			// Exercise production cleanup; a 100ms fixture grace is too short
+			// for ordinary BSD process-group retirement under scheduler load.
+			grace := wsl2SignalGrace
+			allowance := 60 * time.Second
+			ctx, cancel := context.WithTimeout(t.Context(), allowance)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, "/bin/bash", "-c", helper, "sh", "run", directory, nonce, strconv.Itoa(len(command)), "0", "15000", "100")
-			cmd.Env = []string{"PATH=" + tools, "HOME=" + root, "CBX_HELPER=" + helper}
+			cmd := exec.CommandContext(ctx, helper.interpreter, "-c", helper.source, "sh", "run", directory, nonce, strconv.Itoa(len(command)), "0", "15000", strconv.FormatInt(grace.Milliseconds(), 10))
+			cmd.Env = []string{"PATH=" + tools, "HOME=" + root, "CBX_HELPER=" + helper.source}
 			cmd.Stdin = strings.NewReader(command)
 			var out synchronizedBuffer = newSynchronizedBuffer(16 << 10)
 			cmd.Stdout, cmd.Stderr = &out, &out
@@ -434,8 +496,15 @@ func TestFunctionalPOSIXPreflightOwner(t *testing.T) {
 			}
 			done := make(chan struct{})
 			var processErr error
+			stageRetired := false
 			go func() { processErr = cmd.Wait(); close(done) }()
 			t.Cleanup(func() {
+				if stageRetired {
+					if err := os.RemoveAll(root); err != nil {
+						t.Error(err)
+					}
+					return
+				}
 				if data, _ := os.ReadFile(filepath.Join(directory, ".nonce")); string(data) == nonce {
 					_ = os.WriteFile(filepath.Join(directory, ".cancel"), nil, 0o600)
 				}
@@ -443,6 +512,19 @@ func TestFunctionalPOSIXPreflightOwner(t *testing.T) {
 				case <-done:
 				case <-time.After(20 * time.Second):
 					t.Errorf("owned supervisor unconfirmed; retained %s", root)
+					return
+				}
+				if tc.macOS {
+					cleanupCtx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+					defer stop()
+					completion, controlErr := finishFunctionalPreflight(cleanupCtx, cleanupCtx, controlTarget, nonce, processErr)
+					if !completion.StageRetired {
+						t.Errorf("native stage retirement unconfirmed; retained %s: %v", root, controlErr)
+						return
+					}
+					if err := os.RemoveAll(root); err != nil {
+						t.Error(err)
+					}
 					return
 				}
 				record, _ := os.ReadFile(filepath.Join(directory, ".completion"))
@@ -465,13 +547,26 @@ func TestFunctionalPOSIXPreflightOwner(t *testing.T) {
 			}
 			select {
 			case <-done:
-			case <-time.After(25 * time.Second):
+			case <-time.After(allowance):
 				t.Fatal("supervisor did not return")
 			}
 			if !tc.cancel && exitCode(processErr) != tc.code {
 				t.Fatalf("exit=%v: %s", processErr, out.String())
 			}
 			waitFile(filepath.Join(directory, ".completion"), 10*time.Second)
+			if tc.macOS {
+				cleanupCtx, stop := context.WithTimeout(t.Context(), 30*time.Second)
+				defer stop()
+				completion, err := finishFunctionalPreflight(ctx, cleanupCtx, controlTarget, nonce, processErr)
+				stageRetired = completion.StageRetired
+				if err != nil || completion.State != tc.state || !completion.WorkerQuiesced || !completion.ScratchRemoved || !completion.StageRetired {
+					t.Fatalf("native completion=%+v err=%v: %s", completion, err, out.String())
+				}
+				if _, err := os.Lstat(directory); !os.IsNotExist(err) {
+					t.Fatalf("retired native stage remains: %v", err)
+				}
+				return
+			}
 			record, err := os.ReadFile(filepath.Join(directory, ".completion"))
 			if err != nil {
 				t.Fatal(err)

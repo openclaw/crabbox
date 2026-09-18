@@ -170,10 +170,11 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 		return
 	}
 	provenance := &cfg.credentialProvenance
-	if flagWasSet(fs, "proxmox-api-url") {
+	proxmoxFlags := ProxmoxConfigFlagPresence(fs)
+	if proxmoxFlags.APIURL {
 		provenance.proxmoxAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "proxmox-insecure-tls") {
+	if proxmoxFlags.InsecureTLS {
 		provenance.proxmoxInsecureTLS = credentialSourceFlag
 	}
 	morphFlags := MorphConfigFlagPresence(fs)
@@ -183,10 +184,11 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if morphFlags.SSHGatewayHost {
 		provenance.morphSSHGatewayHost = credentialSourceFlag
 	}
-	if flagWasSet(fs, "daytona-api-url") {
+	daytonaFlags := DaytonaConfigFlagPresence(fs)
+	if daytonaFlags.APIURL {
 		provenance.daytonaAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "daytona-ssh-gateway-host") {
+	if daytonaFlags.SSHGatewayHost {
 		provenance.daytonaSSHGateway = credentialSourceFlag
 	}
 	e2bFlags := E2BConfigFlagPresence(fs)
@@ -220,7 +222,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if OrgoConfigFlagPresence(fs).APIBase {
 		provenance.orgoAPIBase = credentialSourceFlag
 	}
-	if flagWasSet(fs, "unikraft-cloud-url") {
+	if UnikraftCloudConfigFlagPresence(fs).APIURL {
 		provenance.unikraftCloudAPIURL = credentialSourceFlag
 	}
 	if RunpodConfigFlagPresence(fs).APIURL {
@@ -229,13 +231,14 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if VastConfigFlagPresence(fs).APIURL {
 		provenance.vastAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "islo-base-url") {
+	if IsloConfigFlagPresence(fs).BaseURL {
 		provenance.isloBaseURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "tenki-endpoint") {
+	tenkiFlags := TenkiConfigFlagPresence(fs)
+	if tenkiFlags.Endpoint {
 		provenance.tenkiEndpoint = credentialSourceFlag
 	}
-	if flagWasSet(fs, "tenki-gateway") {
+	if tenkiFlags.Gateway {
 		provenance.tenkiGateway = credentialSourceFlag
 	}
 	if TensorlakeConfigFlagPresence(fs).APIURL {
@@ -253,16 +256,17 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if CloudflareConfigFlagPresence(fs).APIURL {
 		provenance.cloudflareAPIURL = credentialSourceFlag
 	}
-	if flagWasSet(fs, "nomad-address") {
+	nomadFlags := NomadConfigFlagPresence(fs)
+	if nomadFlags.Address {
 		provenance.nomadAddress = credentialSourceFlag
 	}
-	if flagWasSet(fs, "nomad-token-env") {
+	if nomadFlags.TokenEnv {
 		provenance.nomadTokenEnv = credentialSourceFlag
 	}
 	if SemaphoreConfigFlagPresence(fs).Host {
 		provenance.semaphoreHost = credentialSourceFlag
 	}
-	if flagWasSet(fs, "sprites-api-url") {
+	if SpritesConfigFlagPresence(fs).APIURL {
 		provenance.spritesAPIURL = credentialSourceFlag
 	}
 	if AzureDynamicSessionsConfigFlagPresence(fs).Endpoint {
@@ -274,7 +278,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "parallels-host-key") {
 		provenance.parallelsHostKey = credentialSourceFlag
 	}
-	if flagWasSet(fs, "static-host") {
+	if StaticConfigFlagPresence(fs).Host {
 		provenance.staticHost = credentialSourceFlag
 	}
 	if ExeDevConfigFlagPresence(fs).ControlHost {

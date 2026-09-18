@@ -91,48 +91,13 @@ func configArchitectureForShow(cfg Config) string {
 	return effectiveArchitectureForConfig(cfg)
 }
 
-// ProviderConfigShowNormalizer applies provider-owned defaults for offline
-// diagnostics only. It must not discover runtimes or change execution config.
+// ProviderConfigShowNormalizer projects effective display values for a selected
+// provider only. It must not discover runtimes or change execution config.
 type ProviderConfigShowNormalizer interface {
 	NormalizeConfigForShow(cfg Config) Config
 }
 
 func effectiveConfigForShow(cfg Config) Config {
-	cfg.Hostinger.WorkRoot = EffectiveHostingerWorkRoot(cfg)
-	cfg.Vast.WorkRoot = EffectiveVastWorkRoot(cfg)
-	cfg.NvidiaBrev.WorkRoot = EffectiveNvidiaBrevWorkRoot(cfg)
-	if cfg.Provider == "digitalocean" || cfg.Provider == "linode" {
-		applyConfigShowSSHDefaults(&cfg, "root")
-	}
-	if cfg.Provider == "vultr" {
-		applyConfigShowSSHDefaults(&cfg, "root")
-	}
-	if cfg.Provider == "lambda" {
-		applyConfigShowSSHDefaults(&cfg, "ubuntu")
-	}
-	if cfg.Provider == "scaleway" {
-		applyConfigShowSSHDefaults(&cfg, "root")
-	}
-	if cfg.Provider == "tencentcloud" {
-		applyConfigShowSSHDefaults(&cfg, "ubuntu")
-	}
-	if cfg.Provider == "hostinger" {
-		cfg.WorkRoot = cfg.Hostinger.WorkRoot
-		cfg.SSHUser = cfg.Hostinger.User
-		cfg.SSHPort = "22"
-		cfg.SSHFallbackPorts = nil
-	}
-	switch normalizeProviderName(cfg.Provider) {
-	case "vast", "vast-ai", "vastai":
-		cfg.WorkRoot = cfg.Vast.WorkRoot
-		if !IsSSHUserExplicit(&cfg) {
-			cfg.SSHUser = cfg.Vast.User
-		}
-		cfg.SSHPort = "22"
-		cfg.SSHFallbackPorts = nil
-	case "nvidia-brev", "brev", "nvidia":
-		cfg.WorkRoot = cfg.NvidiaBrev.WorkRoot
-	}
 	if providerSelectionIsActionable(cfg) {
 		if provider, err := ProviderFor(cfg.Provider); err == nil {
 			if normalizer, ok := provider.(ProviderConfigShowNormalizer); ok {
@@ -143,8 +108,8 @@ func effectiveConfigForShow(cfg Config) Config {
 	return cfg
 }
 
-// applyConfigShowSSHDefaults only mutates the local copy used for offline display.
-func applyConfigShowSSHDefaults(cfg *Config, user string) {
+// ApplyConfigShowSSHDefaults projects connection defaults onto a local copy for offline display.
+func ApplyConfigShowSSHDefaults(cfg *Config, user string) {
 	base := baseConfig()
 	if !IsSSHUserExplicit(cfg) && (cfg.SSHUser == "" || cfg.SSHUser == base.SSHUser) {
 		cfg.SSHUser = user
@@ -192,20 +157,22 @@ func configShowView(cfg Config) map[string]any {
 		"ttl":                        cfg.TTL.String(),
 		"idleTimeout":                cfg.IdleTimeout.String(),
 		"sync": map[string]any{
-			"exclude":     configuredExcludes(cfg).patterns(),
-			"include":     syncIncludes(cfg),
-			"delete":      cfg.Sync.Delete,
-			"checksum":    cfg.Sync.Checksum,
-			"gitSeed":     cfg.Sync.GitSeed,
-			"gitOverlay":  cfg.Sync.GitOverlay,
-			"fingerprint": cfg.Sync.Fingerprint,
-			"baseRef":     cfg.Sync.BaseRef,
-			"timeout":     cfg.Sync.Timeout.String(),
-			"warnFiles":   cfg.Sync.WarnFiles,
-			"warnBytes":   cfg.Sync.WarnBytes,
-			"failFiles":   cfg.Sync.FailFiles,
-			"failBytes":   cfg.Sync.FailBytes,
-			"allowLarge":  cfg.Sync.AllowLarge,
+			"source":        effectiveSyncSource(cfg),
+			"exclude":       configuredExcludes(cfg).patterns(),
+			"include":       syncIncludes(cfg),
+			"delete":        cfg.Sync.Delete,
+			"checksum":      cfg.Sync.Checksum,
+			"gitSeed":       cfg.Sync.GitSeed,
+			"gitSeedSource": effectiveGitSeedSource(cfg),
+			"gitOverlay":    cfg.Sync.GitOverlay,
+			"fingerprint":   cfg.Sync.Fingerprint,
+			"baseRef":       cfg.Sync.BaseRef,
+			"timeout":       cfg.Sync.Timeout.String(),
+			"warnFiles":     cfg.Sync.WarnFiles,
+			"warnBytes":     cfg.Sync.WarnBytes,
+			"failFiles":     cfg.Sync.FailFiles,
+			"failBytes":     cfg.Sync.FailBytes,
+			"allowLarge":    cfg.Sync.AllowLarge,
 		},
 		"env": map[string]any{
 			"allow": cfg.EnvAllow,
@@ -256,38 +223,6 @@ func configShowView(cfg Config) map[string]any {
 			"filesystemMounts": cfg.Lambda.FilesystemMounts,
 			"auth":             lambdaAuthState(),
 		},
-		"nvidiaBrev": map[string]any{
-			"cli":           cfg.NvidiaBrev.CLI,
-			"auth":          "cli",
-			"org":           cfg.NvidiaBrev.Org,
-			"type":          cfg.NvidiaBrev.Type,
-			"gpuName":       cfg.NvidiaBrev.GPUName,
-			"provider":      cfg.NvidiaBrev.Provider,
-			"mode":          cfg.NvidiaBrev.Mode,
-			"launchable":    cfg.NvidiaBrev.Launchable,
-			"startupScript": cfg.NvidiaBrev.StartupScript,
-			"releaseAction": cfg.NvidiaBrev.ReleaseAction,
-			"target":        cfg.NvidiaBrev.Target,
-			"user":          cfg.NvidiaBrev.User,
-			"workRoot":      cfg.NvidiaBrev.WorkRoot,
-		},
-		"vast": map[string]any{
-			"apiUrl":         redactedConfigURL(cfg.Vast.APIURL),
-			"auth":           tokenState(cfg.Vast.APIKey),
-			"instanceType":   cfg.Vast.InstanceType,
-			"gpuName":        cfg.Vast.GPUName,
-			"gpuCount":       cfg.Vast.GPUCount,
-			"image":          cfg.Vast.Image,
-			"templateId":     cfg.Vast.TemplateID,
-			"runtype":        cfg.Vast.Runtype,
-			"diskGB":         cfg.Vast.DiskGB,
-			"maxDphTotal":    cfg.Vast.MaxDphTotal,
-			"minReliability": cfg.Vast.MinReliability,
-			"order":          cfg.Vast.Order,
-			"user":           cfg.Vast.User,
-			"workRoot":       cfg.Vast.WorkRoot,
-			"releaseAction":  cfg.Vast.ReleaseAction,
-		},
 		"nebius": map[string]any{
 			"cli":              cfg.Nebius.CLI,
 			"auth":             "cli",
@@ -304,19 +239,6 @@ func configShowView(cfg Config) map[string]any {
 			"securityGroupIds": cfg.Nebius.SecurityGroupIDs,
 			"serviceAccountId": cfg.Nebius.ServiceAccountID,
 			"recoveryPolicy":   cfg.Nebius.RecoveryPolicy,
-		},
-		"hostinger": map[string]any{
-			"apiUrl":          redactedConfigURL(cfg.Hostinger.APIURL),
-			"auth":            tokenState(cfg.Hostinger.APIToken),
-			"itemId":          cfg.Hostinger.ItemID,
-			"paymentMethodId": cfg.Hostinger.PaymentMethodID,
-			"templateId":      cfg.Hostinger.TemplateID,
-			"dataCenterId":    cfg.Hostinger.DataCenterID,
-			"hostnamePrefix":  cfg.Hostinger.HostnamePrefix,
-			"user":            cfg.Hostinger.User,
-			"workRoot":        cfg.Hostinger.WorkRoot,
-			"allowPurchase":   cfg.Hostinger.AllowPurchase,
-			"releaseAction":   cfg.Hostinger.ReleaseAction,
 		},
 		"ovh": map[string]any{
 			"endpoint":  redactedConfigURL(cfg.OVH.Endpoint),
@@ -470,24 +392,6 @@ func configShowView(cfg Config) map[string]any {
 			"allocReadyTimeout": cfg.Nomad.AllocReadyTimeout.String(),
 			"evalTimeout":       cfg.Nomad.EvalTimeout.String(),
 			"execTimeoutSecs":   cfg.Nomad.ExecTimeoutSecs,
-		},
-		"upstashBox": map[string]any{
-			"baseUrl":   redactedConfigURL(cfg.UpstashBox.BaseURL),
-			"auth":      tokenState(cfg.UpstashBox.APIKey),
-			"runtime":   cfg.UpstashBox.Runtime,
-			"size":      cfg.UpstashBox.Size,
-			"workdir":   cfg.UpstashBox.Workdir,
-			"keepAlive": cfg.UpstashBox.KeepAlive,
-		},
-		"smolvm": map[string]any{
-			"baseUrl":  redactedConfigURL(cfg.Smolvm.BaseURL),
-			"auth":     tokenState(cfg.Smolvm.APIKey),
-			"image":    cfg.Smolvm.Image,
-			"workdir":  cfg.Smolvm.Workdir,
-			"cpus":     cfg.Smolvm.CPUs,
-			"memoryMB": cfg.Smolvm.MemoryMB,
-			"network":  cfg.Smolvm.Network,
-			"keep":     cfg.Smolvm.Keep,
 		},
 		"blaxel": map[string]any{
 			"apiUrl":          redactedConfigURL(cfg.Blaxel.APIURL),
@@ -647,7 +551,8 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "broker=%s mode=%s auto_webvnc=%t login_redirect_origins=%s auth=%s admin_auth=%s\n", blank(redactedConfigURL(cfg.Coordinator), "-"), cfg.BrokerMode, cfg.BrokerAutoWebVNC, blank(strings.Join(cfg.BrokerLoginRedirectOrigins, ","), "-"), coordinatorTokenState(cfg), tokenState(cfg.CoordAdminToken))
 	fmt.Fprintf(w, "access_auth=%s\n", accessAuthState(cfg.Access))
 	fmt.Fprintf(w, "ssh=%s@<host>:%s fallback_ports=%s key=%s\n", cfg.SSHUser, cfg.SSHPort, blank(strings.Join(cfg.SSHFallbackPorts, ","), "-"), cfg.SSHKey)
-	fmt.Fprintf(w, "sync delete=%t checksum=%t git_seed=%t git_overlay=%t fingerprint=%t base_ref=%s excludes=%d includes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, cfg.Sync.GitOverlay, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg).rules), len(syncIncludes(cfg)), cfg.Sync.Timeout)
+	fmt.Fprintf(w, "sync source=%s\n", effectiveSyncSource(cfg))
+	fmt.Fprintf(w, "sync delete=%t checksum=%t git_seed=%t git_seed_source=%s git_overlay=%t fingerprint=%t base_ref=%s excludes=%d includes=%d timeout=%s\n", cfg.Sync.Delete, cfg.Sync.Checksum, cfg.Sync.GitSeed, effectiveGitSeedSource(cfg), cfg.Sync.GitOverlay, cfg.Sync.Fingerprint, blank(cfg.Sync.BaseRef, "-"), len(configuredExcludes(cfg).rules), len(syncIncludes(cfg)), cfg.Sync.Timeout)
 	fmt.Fprintf(w, "env allow=%s\n", strings.Join(cfg.EnvAllow, ","))
 	fmt.Fprintf(w, "run preflight_tools=%s\n", blank(strings.Join(cfg.Run.PreflightTools, ","), "-"))
 	fmt.Fprintf(w, "capacity market=%s strategy=%s fallback=%s regions=%s hints=%t\n", cfg.Capacity.Market, cfg.Capacity.Strategy, cfg.Capacity.Fallback, blank(strings.Join(cfg.Capacity.Regions, ","), "-"), cfg.Capacity.Hints)
@@ -664,8 +569,12 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	fmt.Fprintf(w, "morph api_url=%s snapshot=%s ssh_gateway_host=%s work_root=%s delete_on_release=%t wake_on_ssh=%t auth=%s\n", blank(redactedConfigURL(cfg.Morph.APIURL), "-"), blank(cfg.Morph.Snapshot, "-"), blank(cfg.Morph.SSHGatewayHost, "-"), blank(cfg.Morph.WorkRoot, "-"), cfg.Morph.DeleteOnRelease, cfg.Morph.WakeOnSSH, tokenState(cfg.Morph.APIKey))
 	fmt.Fprintf(w, "e2b api_url=%s domain=%s template=%s workdir=%s user=%s\n", redactedConfigURL(cfg.E2B.APIURL), cfg.E2B.Domain, cfg.E2B.Template, cfg.E2B.Workdir, blank(cfg.E2B.User, "-"))
 	fmt.Fprintf(w, "cubesandbox api_url=%s domain=%s template=%s workdir=%s user=%s proxy_node_ip=%s proxy_port_http=%d proxy_scheme=%s auth=%s\n", blank(redactedConfigURL(cfg.CubeSandbox.APIURL), "-"), blank(cfg.CubeSandbox.Domain, "-"), blank(cfg.CubeSandbox.Template, "-"), blank(cfg.CubeSandbox.Workdir, "-"), blank(cfg.CubeSandbox.User, "-"), blank(cfg.CubeSandbox.ProxyNodeIP, "-"), cfg.CubeSandbox.ProxyPortHTTP, blank(cfg.CubeSandbox.ProxyScheme, "-"), tokenState(cfg.CubeSandbox.APIKey))
-	fmt.Fprintf(w, "upstash_box base_url=%s runtime=%s size=%s workdir=%s keep_alive=%t auth=%s\n", redactedConfigURL(cfg.UpstashBox.BaseURL), cfg.UpstashBox.Runtime, cfg.UpstashBox.Size, cfg.UpstashBox.Workdir, cfg.UpstashBox.KeepAlive, tokenState(cfg.UpstashBox.APIKey))
-	fmt.Fprintf(w, "smolvm base_url=%s image=%s workdir=%s cpus=%d memory_mb=%d network=%s keep=%t auth=%s\n", redactedConfigURL(cfg.Smolvm.BaseURL), cfg.Smolvm.Image, cfg.Smolvm.Workdir, cfg.Smolvm.CPUs, cfg.Smolvm.MemoryMB, cfg.Smolvm.Network, cfg.Smolvm.Keep, tokenState(cfg.Smolvm.APIKey))
+	if err := layout.writeSlot(w, "upstash_box"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "smolvm"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "blaxel api_url=%s workspace=%s region=%s image=%s memory_mb=%d ttl=%s idle_ttl=%s workdir=%s exec_timeout_secs=%d forget_missing=%t auth=%s\n", blank(redactedConfigURL(cfg.Blaxel.APIURL), "-"), blank(cfg.Blaxel.Workspace, "-"), blank(cfg.Blaxel.Region, "-"), cfg.Blaxel.Image, cfg.Blaxel.MemoryMB, blank(cfg.Blaxel.TTL, "-"), blank(cfg.Blaxel.IdleTTL, "-"), cfg.Blaxel.Workdir, cfg.Blaxel.ExecTimeoutSecs, cfg.Blaxel.ForgetMissing, tokenState(cfg.Blaxel.APIKey))
 	fmt.Fprintf(w, "nomad address=%s region=%s namespace=%s auth_env=%s auth=%s tls_ca=%s tls_capath=%s tls_cert=%s tls_key=%s tls_server_name=%s skip_verify=%t task=%s driver=%s image=%s workdir=%s jobspec_template=%s node_pool=%s datacenters=%s cpu=%d memory_mb=%d disk_mb=%d alloc_ready_timeout=%s eval_timeout=%s exec_timeout_secs=%d\n", blank(redactedConfigURL(cfg.Nomad.Address), "-"), blank(cfg.Nomad.Region, "-"), blank(cfg.Nomad.Namespace, "-"), nomadTextAuthEnv(cfg), nomadAuthState(cfg), blank(cfg.Nomad.CACert, "-"), blank(cfg.Nomad.CAPath, "-"), blank(cfg.Nomad.ClientCert, "-"), blank(cfg.Nomad.ClientKey, "-"), blank(cfg.Nomad.TLSServerName, "-"), cfg.Nomad.SkipVerify, cfg.Nomad.Task, cfg.Nomad.Driver, cfg.Nomad.Image, cfg.Nomad.Workdir, blank(cfg.Nomad.JobSpecTemplate, "-"), blank(cfg.Nomad.NodePool, "-"), blank(strings.Join(cfg.Nomad.Datacenters, ","), "-"), cfg.Nomad.CPU, cfg.Nomad.MemoryMB, cfg.Nomad.DiskMB, cfg.Nomad.AllocReadyTimeout, cfg.Nomad.EvalTimeout, cfg.Nomad.ExecTimeoutSecs)
 	fmt.Fprintf(w, "ascii_box base_url=%s cli=%s workdir=%s auth=%s\n", redactedConfigURL(cfg.AsciiBox.BaseURL), cfg.AsciiBox.CLIPath, cfg.AsciiBox.Workdir, tokenState(cfg.AsciiBox.APIKey))
@@ -727,10 +636,16 @@ func writeConfigShowText(w io.Writer, cfg Config) error {
 	}
 	fmt.Fprintf(w, "github_codespaces api_url=%s gh_path=%s repo=%s ref=%s machine=%s devcontainer_path=%s working_directory=%s geo=%s idle_timeout=%s retention_period=%s delete_on_release=%t work_root=%s auth_mode=cli auth_status=unchecked readiness=unchecked\n", blank(redactedConfigURL(cfg.GitHubCodespaces.APIURL), "-"), blank(cfg.GitHubCodespaces.GHPath, "-"), blank(cfg.GitHubCodespaces.Repo, "-"), blank(cfg.GitHubCodespaces.Ref, "-"), blank(cfg.GitHubCodespaces.Machine, "-"), blank(cfg.GitHubCodespaces.DevcontainerPath, "-"), blank(cfg.GitHubCodespaces.WorkingDirectory, "-"), blank(cfg.GitHubCodespaces.Geo, "-"), cfg.GitHubCodespaces.IdleTimeout, cfg.GitHubCodespaces.RetentionPeriod, cfg.GitHubCodespaces.DeleteOnRelease, blank(cfg.GitHubCodespaces.WorkRoot, "-"))
 	fmt.Fprintf(w, "lambda region=%s type=%s image=%s image_family=%s firewall_ruleset=%s ssh_cidrs=%s filesystems=%s mounts=%d auth=%s\n", cfg.Lambda.Region, cfg.Lambda.Type, blank(cfg.Lambda.Image, "-"), blank(cfg.Lambda.ImageFamily, "-"), blank(cfg.Lambda.FirewallRuleset, "-"), blank(strings.Join(cfg.Lambda.SSHCIDRs, ","), "-"), blank(strings.Join(cfg.Lambda.FilesystemNames, ","), "-"), len(cfg.Lambda.FilesystemMounts), lambdaAuthState())
-	fmt.Fprintf(w, "vast api_url=%s instance_type=%s gpu_name=%s gpu_count=%d image=%s template_id=%s runtype=%s disk_gb=%d max_dph_total=%.4g min_reliability=%.4g order=%s user=%s work_root=%s release_action=%s auth=%s\n", blank(redactedConfigURL(cfg.Vast.APIURL), "-"), blank(cfg.Vast.InstanceType, "-"), blank(cfg.Vast.GPUName, "-"), cfg.Vast.GPUCount, blank(cfg.Vast.Image, "-"), blank(cfg.Vast.TemplateID, "-"), blank(cfg.Vast.Runtype, "-"), cfg.Vast.DiskGB, cfg.Vast.MaxDphTotal, cfg.Vast.MinReliability, blank(cfg.Vast.Order, "-"), blank(cfg.Vast.User, "-"), blank(cfg.Vast.WorkRoot, "-"), blank(cfg.Vast.ReleaseAction, "-"), tokenState(cfg.Vast.APIKey))
-	fmt.Fprintf(w, "nvidia_brev cli=%s org=%s type=%s gpu_name=%s provider=%s mode=%s launchable=%s startup_script=%s release_action=%s target=%s user=%s work_root=%s auth_mode=cli auth_status=unchecked readiness=unchecked\n", blank(cfg.NvidiaBrev.CLI, "-"), blank(cfg.NvidiaBrev.Org, "-"), blank(cfg.NvidiaBrev.Type, "-"), blank(cfg.NvidiaBrev.GPUName, "-"), blank(cfg.NvidiaBrev.Provider, "-"), blank(cfg.NvidiaBrev.Mode, "-"), blank(cfg.NvidiaBrev.Launchable, "-"), blank(cfg.NvidiaBrev.StartupScript, "-"), blank(cfg.NvidiaBrev.ReleaseAction, "-"), blank(cfg.NvidiaBrev.Target, "-"), blank(cfg.NvidiaBrev.User, "-"), blank(cfg.NvidiaBrev.WorkRoot, "-"))
+	if err := layout.writeSlot(w, "vast"); err != nil {
+		return err
+	}
+	if err := layout.writeSlot(w, "nvidia_brev"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "nebius cli=%s profile=%s parent_id=%s subnet_id=%s platform=%s preset=%s image_family=%s disk_type=%s disk_size_gib=%d user=%s public_ip=%s security_group_ids=%s service_account_id=%s recovery_policy=%s auth_mode=cli auth_status=unchecked readiness=unchecked\n", blank(cfg.Nebius.CLI, "-"), blank(cfg.Nebius.Profile, "-"), blank(cfg.Nebius.ParentID, "-"), blank(cfg.Nebius.SubnetID, "-"), blank(cfg.Nebius.Platform, "-"), blank(cfg.Nebius.Preset, "-"), blank(cfg.Nebius.ImageFamily, "-"), blank(cfg.Nebius.DiskType, "-"), cfg.Nebius.DiskSizeGiB, blank(cfg.Nebius.User, "-"), blank(cfg.Nebius.PublicIP, "-"), blank(strings.Join(cfg.Nebius.SecurityGroupIDs, ","), "-"), blank(cfg.Nebius.ServiceAccountID, "-"), blank(cfg.Nebius.RecoveryPolicy, "-"))
-	fmt.Fprintf(w, "hostinger api_url=%s item_id=%s payment_method_id=%s template_id=%s data_center_id=%s hostname_prefix=%s user=%s work_root=%s allow_purchase=%t release_action=%s auth=%s\n", blank(redactedConfigURL(cfg.Hostinger.APIURL), "-"), blank(cfg.Hostinger.ItemID, "-"), blank(cfg.Hostinger.PaymentMethodID, "-"), blank(cfg.Hostinger.TemplateID, "-"), blank(cfg.Hostinger.DataCenterID, "-"), blank(cfg.Hostinger.HostnamePrefix, "-"), blank(cfg.Hostinger.User, "-"), blank(cfg.Hostinger.WorkRoot, "-"), cfg.Hostinger.AllowPurchase, blank(cfg.Hostinger.ReleaseAction, "-"), tokenState(cfg.Hostinger.APIToken))
+	if err := layout.writeSlot(w, "hostinger"); err != nil {
+		return err
+	}
 	fmt.Fprintf(w, "ovh endpoint=%s project_id=%s region=%s image=%s flavor=%s auth=%s\n", blank(redactedConfigURL(cfg.OVH.Endpoint), "-"), blank(cfg.OVH.ProjectID, "-"), blank(cfg.OVH.Region, "-"), blank(cfg.OVH.Image, "-"), blank(cfg.OVH.Flavor, "-"), ovhAuthState())
 	fmt.Fprintf(w, "scaleway region=%s zone=%s image=%s type=%s project_id=%s organization_id=%s security_group=%s ssh_cidrs=%s auth=%s\n", blank(cfg.Scaleway.Region, "-"), blank(cfg.Scaleway.Zone, "-"), blank(cfg.Scaleway.Image, "-"), blank(cfg.Scaleway.Type, "-"), blank(cfg.Scaleway.ProjectID, "-"), blank(cfg.Scaleway.OrganizationID, "-"), blank(cfg.Scaleway.SecurityGroup, "-"), blank(strings.Join(cfg.Scaleway.SSHCIDRs, ","), "-"), scalewayAuthState())
 	fmt.Fprintf(w, "tencentcloud region=%s zone=%s image=%s type=%s vpc_id=%s subnet_id=%s security_group_id=%s root_gb=%d internet_charge_type=%s internet_max_bandwidth_out=%d ssh_cidrs=%s api_endpoint=%s auth=%s\n", blank(cfg.TencentCloud.Region, "-"), blank(cfg.TencentCloud.Zone, "-"), blank(cfg.TencentCloud.Image, "-"), blank(cfg.TencentCloud.Type, "-"), blank(cfg.TencentCloud.VPCID, "-"), blank(cfg.TencentCloud.SubnetID, "-"), blank(cfg.TencentCloud.SecurityGroupID, "-"), cfg.TencentCloud.RootGB, blank(cfg.TencentCloud.InternetChargeType, "-"), cfg.TencentCloud.InternetMaxBandwidthOut, blank(strings.Join(cfg.TencentCloud.SSHCIDRs, ","), "-"), blank(redactedConfigURL(cfg.TencentCloud.APIEndpoint), "-"), tencentCloudAuthState())
@@ -1012,13 +927,13 @@ func tokenState(token string) string {
 func nomadAuthEnv(cfg Config) string {
 	envName := strings.TrimSpace(cfg.Nomad.TokenEnv)
 	if envName == "" {
-		return "NOMAD_TOKEN"
+		return NomadConfigDefaultTokenEnv
 	}
 	return envName
 }
 
 func nomadTextAuthEnv(cfg Config) string {
-	if nomadAuthEnv(cfg) == "NOMAD_TOKEN" {
+	if nomadAuthEnv(cfg) == NomadConfigDefaultTokenEnv {
 		return "default"
 	}
 	return "custom"

@@ -85,7 +85,15 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req core.RunRequest) (core.
 			cli, err = newTensorlakeCLI(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+		Workspace: func() shared.SandboxWorkspace {
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+				SyncFunc: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					return b.syncWorkspace(ctx, cli, claim.CloudID, req, workdir, archive)
+				},
+				EnsureFunc: func(ctx context.Context) error { return b.prepareWorkspace(ctx, cli, claim.CloudID, workdir) },
+			}
+		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var name string
 			var err error
@@ -114,10 +122,6 @@ func (b *tensorlakeBackend) Run(ctx context.Context, req core.RunRequest) (core.
 			fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, claim.LeaseID, claim.CloudID, workdir)
 			return nil
 		},
-		Sync: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, cli, claim.CloudID, req, workdir, archive)
-		},
-		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, cli, claim.CloudID, workdir) },
 		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 			if err != nil {
@@ -226,12 +230,8 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req core.StatusRequest) 
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
-	}
 	var lastDescribeErr error
-	for {
+	view, err := shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
 		var item sandboxIdentity
 		describeErr := core.WithLeaseClaimUnchanged(leaseID, claim, func() error {
 			var err error
@@ -241,7 +241,7 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req core.StatusRequest) 
 		state := item.State
 		if describeErr != nil {
 			if !req.Wait {
-				return core.StatusView{}, describeErr
+				return core.StatusView{}, false, describeErr
 			}
 			lastDescribeErr = describeErr
 		} else {
@@ -263,26 +263,14 @@ func (b *tensorlakeBackend) Status(ctx context.Context, req core.StatusRequest) 
 				"state":    state,
 			},
 		}
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			err := core.Exit(5, "timed out waiting for tensorlake sandbox %s to become ready", sandboxID)
-			if lastDescribeErr != nil {
-				return core.StatusView{}, errors.Join(err, fmt.Errorf("last tensorlake describe failed: %w", lastDescribeErr))
-			}
-			return core.StatusView{}, err
-		}
-		select {
-		case <-ctx.Done():
-			err := ctx.Err()
-			if lastDescribeErr != nil {
-				return core.StatusView{}, errors.Join(err, fmt.Errorf("last tensorlake describe failed: %w", lastDescribeErr))
-			}
-			return core.StatusView{}, err
-		case <-time.After(2 * time.Second):
-		}
+		return view, false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for tensorlake sandbox %s to become ready", sandboxID)
+	})
+	if err != nil && lastDescribeErr != nil {
+		return view, errors.Join(err, fmt.Errorf("last tensorlake describe failed: %w", lastDescribeErr))
 	}
+	return view, err
 }
 
 func (b *tensorlakeBackend) Stop(ctx context.Context, req core.StopRequest) error {

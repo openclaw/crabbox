@@ -2,6 +2,7 @@ package cli
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 func TestManagedStateArchiveRejectsSuppliedMarker(t *testing.T) {
@@ -70,15 +72,91 @@ func TestCreateSyncArchiveRejectsUnsafePaths(t *testing.T) {
 	}
 }
 
-func TestCopySyncArchiveMemberStopsAfterCancellation(t *testing.T) {
+func TestCopySourceBytesStopsAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	writer := &cancelAfterFirstWrite{cancel: cancel}
-	err := copySyncArchiveMember(ctx, writer, strings.NewReader(strings.Repeat("x", 256*1024)))
+	written, err := copySourceBytes(ctx, writer, strings.NewReader(strings.Repeat("x", 256*1024)), -1)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v, want context canceled", err)
 	}
+	if writer.writes != 1 || written <= 0 || written >= 256*1024 {
+		t.Fatalf("writes=%d bytes=%d", writer.writes, written)
+	}
 }
+
+func TestCopySourceBytesCancellationOnFinalData(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer := &cancelAfterFirstWrite{cancel: cancel}
+	written, err := copySourceBytes(ctx, writer, iotest.DataErrReader(strings.NewReader("source")), -1)
+	if written != 6 || !errors.Is(err, context.Canceled) {
+		t.Fatalf("bytes=%d error=%v", written, err)
+	}
+}
+
+func TestObservedSourceFileReadStopsAfterCancellation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "payload.txt")
+	content := strings.Repeat("x", 256*1024)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	observed, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer := &cancelAfterFirstWrite{cancel: cancel}
+	written, err := copyObservedSourceFileBytes(ctx, writer, path, observed)
+	if !errors.Is(err, context.Canceled) || writer.writes != 1 || written <= 0 || written >= int64(len(content)) {
+		t.Fatalf("writes=%d bytes=%d error=%v", writer.writes, written, err)
+	}
+	if after, err := os.Lstat(path); err != nil || !sameSourceSnapshotIdentity(observed, after) {
+		t.Fatalf("source observation changed: %v", err)
+	}
+}
+
+func TestCopySourceBytesLimitsAndCounts(t *testing.T) {
+	for _, tc := range []struct {
+		name, input string
+		limit       int64
+		wantLimit   bool
+	}{
+		{name: "unbounded", input: "source", limit: -1},
+		{name: "exact", input: "source", limit: 6},
+		{name: "below bound", input: "source", limit: 8},
+		{name: "empty", limit: 0},
+		{name: "exceeds bound", input: "source", limit: 5, wantLimit: true},
+		{name: "exceeds empty bound", input: "source", limit: 0, wantLimit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var output bytes.Buffer
+			written, err := copySourceBytes(context.Background(), &output, strings.NewReader(tc.input), tc.limit)
+			if written != int64(output.Len()) {
+				t.Fatalf("count=%d actual=%d", written, output.Len())
+			}
+			if tc.wantLimit {
+				if !errors.Is(err, errSourceCopyLimit) || written > tc.limit {
+					t.Fatalf("bytes=%d limit=%d error=%v", written, tc.limit, err)
+				}
+			} else if err != nil || output.String() != tc.input {
+				t.Fatalf("output=%q error=%v", output.String(), err)
+			}
+		})
+	}
+}
+
+func TestCopySourceBytesReportsShortWrite(t *testing.T) {
+	written, err := copySourceBytes(context.Background(), sourceShortWriter{}, strings.NewReader("source"), -1)
+	if written != 5 || !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("bytes=%d error=%v", written, err)
+	}
+}
+
+type sourceShortWriter struct{}
+
+func (sourceShortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
 
 func syncArchiveNames(t *testing.T, archive *os.File) map[string]bool {
 	t.Helper()

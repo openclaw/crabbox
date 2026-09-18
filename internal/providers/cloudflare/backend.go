@@ -19,7 +19,7 @@ func NewCloudflareBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runti
 	if cfg.ServerType == "" {
 		cfg.ServerType = cloudflareContainerInstanceTypeForClass(cfg.Class)
 	}
-	if normalized, ok := core.NormalizeCloudflareContainerInstanceType(cfg.ServerType); ok {
+	if normalized, ok := normalizeContainerInstanceType(cfg.ServerType); ok {
 		cfg.ServerType = normalized
 	}
 	return &cloudflareBackend{spec: spec, cfg: cfg, rt: rt}
@@ -99,15 +99,24 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 				return err
 			}
 			if !req.SyncOnly {
-				command, err = buildCloudflareCommand(req.Command, req.ShellMode)
+				intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 				if err != nil {
 					return err
 				}
+				command = intent.ShellScript()
 			}
 			client, err = newCloudflareClient(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+		Workspace: func() shared.SandboxWorkspace {
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+				SyncFunc: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					return b.syncWorkspace(ctx, client, claim.LeaseID, req, workdir, prepared)
+				},
+				EnsureFunc: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, claim.LeaseID, workdir) },
+			}
+		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			claim, _, err = b.createSandbox(ctx, client, req.Repo, req.RequestedSlug)
 			if err != nil {
@@ -128,16 +137,12 @@ func (b *cloudflareBackend) Run(ctx context.Context, req core.RunRequest) (core.
 			client.useInstanceType(cloudflareClaimInstanceType(claim))
 			return bound(), nil
 		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, claim.LeaseID, req, workdir, prepared)
-		},
-		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, claim.LeaseID, workdir) },
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			if req.EnvSummary {
 				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
-				return client.execStream(ctx, claim.LeaseID, execStreamRequest{Command: command, Cwd: workdir, Env: req.Env, TimeoutMS: durationMillisecondsCeil(b.cfg.TTL)}, stdout, stderr)
+				return client.execStream(ctx, claim.LeaseID, shared.CommandStreamRequest{Command: command, Cwd: workdir, Env: req.Env, TimeoutMS: durationMillisecondsCeil(b.cfg.TTL)}, stdout, stderr)
 			}}, nil
 		},
 		Cleanup: func(ctx context.Context) error { _, err := destroyClaimedSandbox(ctx, client, claim); return err },
@@ -197,31 +202,16 @@ func (b *cloudflareBackend) Status(ctx context.Context, req core.StatusRequest) 
 		return core.StatusView{}, err
 	}
 	client.useInstanceType(cloudflareClaimInstanceType(claim))
-	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
-	}
-	for {
+	return shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
 		sandbox, err := client.getSandbox(ctx, claim.LeaseID)
 		if err != nil {
-			return core.StatusView{}, err
+			return core.StatusView{}, false, err
 		}
 		view := sandboxStatusView(claim.LeaseID, claim.Slug, sandbox)
-		if cloudflareTerminalState(view.State) {
-			return view, nil
-		}
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for %s container %s to become ready", providerName, claim.LeaseID)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return view, cloudflareTerminalState(view.State), nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for %s container %s to become ready", providerName, claim.LeaseID)
+	})
 }
 
 func (b *cloudflareBackend) Stop(ctx context.Context, req core.StopRequest) error {
@@ -382,19 +372,6 @@ func admitRunClaim(ctx context.Context, captured core.LeaseClaim, repoRoot strin
 	}
 	// Repository admission retains the existing non-cancelable local lock wait.
 	return core.ClaimLeaseForRepoProviderScopePondIfUnchanged(captured.LeaseID, captured.Slug, providerName, captured.ProviderScope, captured.Pond, repoRoot, time.Duration(captured.IdleTimeoutSeconds)*time.Second, reclaim, captured, true)
-}
-
-func buildCloudflareCommand(command []string, shellMode bool) (string, error) {
-	if len(command) == 0 {
-		return "", errors.New("missing command")
-	}
-	if shellMode {
-		return strings.Join(command, " "), nil
-	}
-	if core.ShouldUseShell(command) || core.LeadingEnvAssignment(command) {
-		return core.ShellScriptFromArgv(command), nil
-	}
-	return strings.Join(core.ShellWords(command), " "), nil
 }
 
 func rejectCloudflareSyncOptions(req core.RunRequest) error {

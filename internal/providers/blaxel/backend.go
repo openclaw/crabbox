@@ -67,13 +67,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			client, err = b.client()
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-blaxel-sync-*.tgz", Stderr: b.rt.Stderr,
-				Now: func() time.Time { return now(b.rt) },
-			})
-		},
+		Workspace: func() shared.SandboxWorkspace { return b.workspace(client, sandboxID, req, workdir) },
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var sb Sandbox
 			var err error
@@ -106,15 +100,12 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
 			return nil
 		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, sandboxID, req, workdir, prepared)
-		},
-		NoSync: func(ctx context.Context) error { return b.ensureWorkspace(ctx, client, sandboxID, workdir) },
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
-			command, err := buildCommand(req.Command, req.ShellMode)
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 			if err != nil {
-				return shared.DelegatedSandboxCommand{}, err
+				return shared.DelegatedSandboxCommand{}, core.Exit(2, "%v", err)
 			}
+			command := intent.Argv("bash", "-lc")
 			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
@@ -179,20 +170,7 @@ func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseV
 			}
 			state = core.Blank(sb.Status, "unknown")
 		}
-		servers = append(servers, core.Server{
-			Provider: providerName,
-			CloudID:  sandboxID,
-			Name:     sandboxID,
-			Status:   state,
-			Labels: map[string]string{
-				"provider": providerName,
-				"lease":    claim.LeaseID,
-				"slug":     claim.Slug,
-				"pond":     claim.Pond,
-				"target":   targetLinux,
-				"state":    state,
-			},
-		})
+		servers = append(servers, shared.SandboxLeaseView(providerName, targetLinux, claim, sandboxID, sandboxID, state))
 	}
 	return servers, nil
 }
@@ -689,19 +667,6 @@ func (b *backend) execTimeoutSecs() int {
 		return b.cfg.Blaxel.ExecTimeoutSecs
 	}
 	return core.BlaxelConfigDefaultExecTimeoutSecs
-}
-
-func buildCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, core.Exit(2, "missing command")
-	}
-	if shellMode {
-		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
-	}
-	if core.ShouldUseShell(command) {
-		return []string{"bash", "-lc", core.ShellScriptFromArgv(command)}, nil
-	}
-	return command, nil
 }
 
 func blaxelWorkdir(cfg core.Config) (string, error) {

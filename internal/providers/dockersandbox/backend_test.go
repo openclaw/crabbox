@@ -2117,3 +2117,187 @@ func TestDockerSandboxConfigShowSection(t *testing.T) {
 		})
 	}
 }
+
+func TestDockerSandboxBindingRepeatedFlagStorage(t *testing.T) {
+	for _, prior := range [][]string{nil, {}, {" prior ", "dup"}} {
+		for _, args := range [][]string{{}, {""}, {"  "}, {" a,b ", "", " dup ", "dup"}} {
+			cfg := newTestConfig()
+			cfg.DockerSandbox.ExtraWorkspaces, cfg.DockerSandbox.MCP, cfg.DockerSandbox.Kit = prior, prior, prior
+			before := cfg
+			fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+			values := RegisterDockerSandboxProviderFlags(fs, cfg)
+			wantList := append([]string(nil), prior...)
+			for _, name := range []string{"docker-sandbox-extra-workspace", "docker-sandbox-mcp", "docker-sandbox-kit"} {
+				getter := fs.Lookup(name).Value.(flag.Getter)
+				if getter.Get().([]string) == nil || fs.Lookup(name).DefValue != strings.Join(prior, ",") {
+					t.Fatal("registration/Get shape changed")
+				}
+				if len(prior) > 0 {
+					copy := getter.Get().([]string)
+					copy[0] = "changed"
+					if getter.Get().([]string)[0] != " prior " {
+						t.Fatal("Get shares storage")
+					}
+				}
+				for _, raw := range args {
+					if err := fs.Set(name, raw); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			for _, raw := range args {
+				if value := strings.TrimSpace(raw); value != "" {
+					wantList = append(wantList, value)
+				}
+			}
+			want := before
+			if len(args) > 0 {
+				want.DockerSandbox.ExtraWorkspaces, want.DockerSandbox.MCP, want.DockerSandbox.Kit = wantList, wantList, wantList
+				core.RecordProviderFlagInputs(&want, true, "docker-sandbox")
+			}
+			if err := ApplyDockerSandboxProviderFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("repeat contract changed: %v", err)
+			}
+			if len(args) > 0 && len(wantList) > 0 {
+				cfg.DockerSandbox.ExtraWorkspaces[0] = "changed"
+				if fs.Lookup("docker-sandbox-extra-workspace").Value.(flag.Getter).Get().([]string)[0] != wantList[0] || cfg.DockerSandbox.MCP[0] != wantList[0] {
+					t.Fatal("application shares list storage")
+				}
+			}
+		}
+	}
+	cfg := newTestConfig()
+	prior := []string{"prior"}
+	cfg.DockerSandbox.MCP = prior
+	fs := flag.NewFlagSet("snapshot", flag.ContinueOnError)
+	values := RegisterDockerSandboxProviderFlags(fs, cfg)
+	prior[0] = "later"
+	if err := ApplyDockerSandboxProviderFlags(&cfg, fs, values); err != nil || cfg.DockerSandbox.MCP[0] != "later" || fs.Lookup("docker-sandbox-mcp").Value.String() != "prior" {
+		t.Fatal("unvisited snapshot changed")
+	}
+	if err := fs.Set("docker-sandbox-mcp", " "); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyDockerSandboxProviderFlags(&cfg, fs, values); err != nil || cfg.DockerSandbox.MCP[0] != "prior" {
+		t.Fatal("visited blank did not apply inherited snapshot")
+	}
+}
+
+func TestDockerSandboxBindingListsRegisterBeforeScalars(t *testing.T) {
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.String("docker-sandbox-cli", "", "")
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		RegisterDockerSandboxProviderFlags(fs, newTestConfig())
+	}()
+	if recovered == nil {
+		t.Fatal("expected duplicate scalar registration")
+	}
+	for _, name := range []string{"docker-sandbox-extra-workspace", "docker-sandbox-mcp", "docker-sandbox-kit"} {
+		if fs.Lookup(name) == nil {
+			t.Fatal("repeated lists registered after scalars")
+		}
+	}
+	if fs.Lookup("docker-sandbox-agent") != nil {
+		t.Fatal("ordinary scalar ordering changed")
+	}
+}
+
+func TestDockerSandboxBindingFloatFlagsAndPhases(t *testing.T) {
+	for _, provider := range []string{providerName, " Docker-Sandbox ", "fixture-other"} {
+		for _, raw := range []string{"0", "-0", "-1", "1.5", "2", "NaN", "+Inf", "-Inf", "1e999", " ", "invalid"} {
+			cfg := newTestConfig()
+			cfg.Provider, cfg.DockerSandbox.CPUs = provider, 7
+			before := cfg
+			fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			values := RegisterDockerSandboxProviderFlags(fs, cfg)
+			parsed, parseErr := strconv.ParseFloat(raw, 64)
+			err := fs.Parse([]string{"--docker-sandbox-cli=fixture", "--docker-sandbox-cpus=" + raw, "--docker-sandbox-memory=fixture", "--docker-sandbox-clone=true", "--docker-sandbox-mcp=fixture"})
+			if parseErr != nil {
+				if err == nil || !reflect.DeepEqual(cfg, before) {
+					t.Fatal("malformed float flag parse changed")
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyDockerSandboxProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+				t.Fatal("foreign values changed config")
+			}
+			want := before
+			want.DockerSandbox.CLIPath, want.DockerSandbox.CPUs, want.DockerSandbox.Memory, want.DockerSandbox.Clone, want.DockerSandbox.MCP = "fixture", parsed, "fixture", true, []string{"fixture"}
+			core.RecordProviderFlagInputs(&want, true, "docker-sandbox")
+			err = ApplyDockerSandboxProviderFlags(&cfg, fs, values)
+			message := ""
+			if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+				message = "finite"
+			} else if parsed < 0 {
+				message = "greater than zero"
+			} else if parsed != math.Trunc(parsed) {
+				message = "whole number"
+			}
+			if (err != nil) != (message != "") || err != nil && !strings.Contains(err.Error(), message) {
+				t.Fatalf("raw=%q validation changed: %v", raw, err)
+			}
+			if !(math.IsNaN(cfg.DockerSandbox.CPUs) && math.IsNaN(parsed)) && math.Float64bits(cfg.DockerSandbox.CPUs) != math.Float64bits(parsed) {
+				t.Fatal("flag CPU value changed")
+			}
+			cfg.DockerSandbox.CPUs, want.DockerSandbox.CPUs = 0, 0
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("final validation moved before later assignments or facts")
+			}
+		}
+		for _, generic := range []string{"class", "type"} {
+			cfg := newTestConfig()
+			cfg.Provider = provider
+			cfg.DockerSandbox.CPUs = -1
+			fs := flag.NewFlagSet("guard", flag.ContinueOnError)
+			fs.String(generic, "", "")
+			values := RegisterDockerSandboxProviderFlags(fs, cfg)
+			if err := ApplyDockerSandboxProviderFlags(&cfg, fs, values); err == nil {
+				t.Fatal("typed absent values skipped validation")
+			}
+			if err := fs.Set(generic, "fixture"); err != nil {
+				t.Fatal(err)
+			}
+			err := ApplyDockerSandboxProviderFlags(&cfg, fs, struct{}{})
+			if provider == providerName {
+				if err == nil || !strings.Contains(err.Error(), "--"+generic) {
+					t.Fatal("exact selected guard moved after type assertion")
+				}
+			} else if err != nil {
+				t.Fatal("guard gained provider normalization")
+			}
+		}
+	}
+}
+
+func TestDockerSandboxBindingHelpSurface(t *testing.T) {
+	cfg := newTestConfig()
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	var help bytes.Buffer
+	fs.SetOutput(&help)
+	values := RegisterDockerSandboxProviderFlags(fs, cfg)
+	fs.PrintDefaults()
+	t.Logf("help=%q", help.String())
+	args := []string{"--docker-sandbox-cli=fixture", "--docker-sandbox-agent=shell", "--docker-sandbox-template=fixture", "--docker-sandbox-cpus=2", "--docker-sandbox-memory=6g", "--docker-sandbox-clone=true", "--docker-sandbox-workdir=/workspace/fixture", "--docker-sandbox-extra-workspace= a,b ", "--docker-sandbox-mcp= mcp ", "--docker-sandbox-kit= kit "}
+	if err := fs.Parse(args); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyDockerSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	want := core.DockerSandboxConfig{CLIPath: "fixture", Agent: "shell", Template: "fixture", CPUs: 2, Memory: "6g", Clone: true, Workdir: "/workspace/fixture", ExtraWorkspaces: []string{"a,b"}, MCP: []string{"mcp"}, Kit: []string{"kit"}}
+	if !reflect.DeepEqual(cfg.DockerSandbox, want) {
+		t.Fatalf("all flag fields: %#v", cfg.DockerSandbox)
+	}
+	output, err := json.Marshal(cfg.DockerSandbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("config=%s", output)
+}

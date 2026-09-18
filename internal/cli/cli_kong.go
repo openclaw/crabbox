@@ -734,13 +734,13 @@ func (c *pauseKongCmd) Run(ctx context.Context, app App) error   { return app.pa
 func (c *resumeKongCmd) Run(ctx context.Context, app App) error  { return app.resume(ctx, c.Args) }
 func (c *cleanupKongCmd) Run(ctx context.Context, app App) error { return app.cleanup(ctx, c.Args) }
 func (c *pondConnectKongCmd) Run(ctx context.Context, app App) error {
-	return app.pondConnect(ctx, stripKongCommandPath(c.Args, "pond", "connect"))
+	return app.pondConnect(ctx, c.Args)
 }
 func (c *pondDisconnectKongCmd) Run(ctx context.Context, app App) error {
-	return app.pondDisconnect(ctx, stripKongCommandPath(c.Args, "pond", "disconnect"))
+	return app.pondDisconnect(ctx, c.Args)
 }
 func (c *pondReleaseKongCmd) Run(ctx context.Context, app App) error {
-	return app.pondRelease(ctx, stripKongCommandPath(c.Args, "pond", "release"))
+	return app.pondRelease(ctx, c.Args)
 }
 
 func (c *desktopLaunchKongCmd) Run(ctx context.Context, app App) error {
@@ -966,7 +966,7 @@ func (c *machineCleanupKongCmd) Run(ctx context.Context, app App) error {
 }
 
 func (c *pondPeersKongCmd) Run(ctx context.Context, app App) error {
-	return app.pondPeers(ctx, stripKongCommandPath(c.Args, "pond", "peers"))
+	return app.pondPeers(ctx, c.Args)
 }
 
 func (c *versionKongCmd) Run(app App) error {

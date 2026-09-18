@@ -84,12 +84,7 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req core.RunReque
 			client, err = newAzureDynamicSessionsClient(ctx, b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-azds-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-			})
-		},
+		Workspace: func() shared.SandboxWorkspace { return b.workspace(client, leaseID, req, workspace) },
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
 			leaseID, slug, err = b.createSession(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
@@ -112,21 +107,18 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req core.RunReque
 		},
 		// Keep invalid-workspace handling after acquisition, with normal retention.
 		Setup: func(context.Context) error { return workspaceErr },
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, leaseID, req, workspace, prepared)
-		},
-		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, leaseID, workspace) },
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
-			command, err := buildAzureDynamicSessionsCommand(req.Command, req.ShellMode)
+			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 			if err != nil {
 				return shared.DelegatedSandboxCommand{}, err
 			}
+			command := intent.ShellScript()
 			if req.EnvSummary {
 				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			return shared.DelegatedSandboxCommand{Text: command, Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
 				fmt.Fprintf(b.rt.Stderr, "running on %s %s\n", providerName, strings.Join(req.Command, " "))
-				return client.ExecStream(ctx, leaseID, azureDynamicSessionsExecRequest{
+				return client.ExecStream(ctx, leaseID, shared.CommandStreamRequest{
 					Command: command, Cwd: workspace, Env: req.Env,
 					TimeoutMS: durationMillisecondsCeil(azureDynamicSessionsTimeout(b.cfg)),
 				}, stdout, stderr)
@@ -199,28 +191,19 @@ func (b *azureDynamicSessionsBackend) Status(ctx context.Context, req core.Statu
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	for {
-		session, err := client.GetSession(wait.Context(), leaseID)
+	return wait.Poll(leaseID, 2*time.Second, func(ctx context.Context) (core.StatusView, bool, error) {
+		session, err := client.GetSession(ctx, leaseID)
 		if err == nil {
-			view := b.statusView(leaseID, slug, session)
-			if !req.Wait || view.Ready {
-				return view, nil
-			}
-			if err := wait.Next(leaseID, 2*time.Second); err != nil {
-				return core.StatusView{}, err
-			}
-			continue
+			return b.statusView(leaseID, slug, session), false, nil
 		}
 		if ctxErr := wait.ContextError(leaseID); ctxErr != nil {
-			return core.StatusView{}, ctxErr
+			return core.StatusView{}, false, ctxErr
 		}
 		if !isNotFoundError(err) || !req.Wait {
-			return core.StatusView{}, providerError("get session", err)
+			return core.StatusView{}, false, providerError("get session", err)
 		}
-		if err := wait.Next(leaseID, 2*time.Second); err != nil {
-			return core.StatusView{}, err
-		}
-	}
+		return core.StatusView{}, false, nil
+	})
 }
 
 func (b *azureDynamicSessionsBackend) Stop(ctx context.Context, req core.StopRequest) error {

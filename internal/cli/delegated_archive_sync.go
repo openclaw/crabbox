@@ -115,7 +115,9 @@ func prepareDelegatedArchive(ctx context.Context, req DelegatedArchivePreparatio
 	}, archiveCtx, cancel, nil
 }
 
-type DelegatedArchiveSyncRequest struct {
+// ArchiveWorkspace binds local archive preparation and remote workspace transfer
+// to one configuration. Upload and Exec are invoked only after lease admission.
+type ArchiveWorkspace struct {
 	Config              Config
 	Repo                Repo
 	ForceSyncLarge      bool
@@ -132,9 +134,42 @@ type DelegatedArchiveSyncRequest struct {
 	Upload              func(context.Context, string, io.Reader) error
 	Exec                func(context.Context, string) error
 	Replace             func(context.Context, string, string) error
+	// Path admission belongs to remote operations; local preparation can precede it.
+	CleanWorkdir func(string) (string, error)
 }
 
-func RunDelegatedArchiveSync(ctx context.Context, req DelegatedArchiveSyncRequest, prepared ...*PreparedArchive) ([]TimingPhase, time.Duration, error) {
+func NewArchiveWorkspace(cfg Config, rt Runtime, req RunRequest, provider, workdir string) ArchiveWorkspace {
+	return ArchiveWorkspace{
+		Config: cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge, Workdir: workdir,
+		Provider: provider, TempPattern: "crabbox-" + provider + "-sync-*.tgz",
+		PhaseName: strings.ReplaceAll(provider, "-", "_") + "_sync",
+		Stderr:    rt.Stderr, Now: func() time.Time { return ClockNow(rt.Clock) },
+	}
+}
+
+func (req ArchiveWorkspace) PrepareArchive(ctx context.Context) (*PreparedArchive, error) {
+	return PrepareDelegatedArchive(ctx, DelegatedArchivePreparationRequest{
+		Config: req.Config, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
+		TempPattern: req.TempPattern, Stderr: req.Stderr, Now: req.Now,
+	})
+}
+
+func (req ArchiveWorkspace) Ensure(ctx context.Context) error {
+	var err error
+	if req, err = req.cleanWorkdir(); err != nil {
+		return err
+	}
+	if req.Exec == nil || strings.TrimSpace(req.Workdir) == "" {
+		return fmt.Errorf("delegated archive workspace requires workdir and exec callback")
+	}
+	return req.Exec(ctx, "mkdir -p "+ShellQuote(req.Workdir))
+}
+
+func (req ArchiveWorkspace) Sync(ctx context.Context, prepared ...*PreparedArchive) ([]TimingPhase, time.Duration, error) {
+	var workdirErr error
+	if req, workdirErr = req.cleanWorkdir(); workdirErr != nil {
+		return nil, 0, workdirErr
+	}
 	var preparedArchive *PreparedArchive
 	if len(prepared) > 0 {
 		preparedArchive = prepared[0]
@@ -296,6 +331,14 @@ func RunDelegatedArchiveSync(ctx context.Context, req DelegatedArchiveSyncReques
 	phases = append(phases, TimingPhase{Name: "cleanup", Ms: cleanupDuration.Milliseconds()})
 	phases = append(phases, TimingPhase{Name: phaseName, Ms: total.Milliseconds()})
 	return phases, total, nil
+}
+
+func (req ArchiveWorkspace) cleanWorkdir() (ArchiveWorkspace, error) {
+	var err error
+	if req.CleanWorkdir != nil {
+		req.Workdir, err = req.CleanWorkdir(req.Workdir)
+	}
+	return req, err
 }
 
 func replaceDelegatedArchiveWorkspace(ctx context.Context, exec func(context.Context, string) error, stagingDir, workdir, provider string, stderr io.Writer) error {

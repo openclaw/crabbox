@@ -639,34 +639,53 @@ func TestPondPeersCommandRejectsBadPort(t *testing.T) {
 	}
 }
 
-func TestPondConnectKongStripsCommandPath(t *testing.T) {
-	withTempClaims(t, nil)
-	t.Setenv("HOME", t.TempDir())
-	var out, errBuf strings.Builder
-	app := App{Stdout: &out, Stderr: &errBuf}
-	if err := app.Run(context.Background(), []string{"pond", "connect", "alpha", "--export"}); err != nil {
-		t.Fatalf("pond connect through Kong: %v", err)
-	}
-	if !strings.Contains(errBuf.String(), `pond "alpha" has no SSH-mesh-capable members`) {
-		t.Fatalf("expected stripped pond name alpha, stdout=%q stderr=%q", out.String(), errBuf.String())
-	}
-	if strings.Contains(errBuf.String(), `pond "pond"`) {
-		t.Fatalf("Kong command path leaked into pond name: %q", errBuf.String())
+func TestPondLifecyclePreservesNames(t *testing.T) {
+	clearConfigEnv(t)
+	t.Chdir(t.TempDir())
+	for _, command := range []string{"connect", "disconnect", "release"} {
+		for _, tc := range []struct {
+			args []string
+			pond string
+		}{
+			{args: []string{"alpha"}, pond: "alpha"},
+			{args: []string{"pond"}, pond: "pond"},
+			{args: []string{"--", "--help"}, pond: "help"},
+		} {
+			args := append([]string{"pond", command}, tc.args...)
+			if command == "connect" && tc.pond == "alpha" {
+				args = append(args, "--export")
+			}
+			t.Run(strings.Join(args, " "), func(t *testing.T) {
+				var stdout, stderr strings.Builder
+				if err := (App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args); err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(stdout.String()+stderr.String(), `pond "`+tc.pond+`" has no `) {
+					t.Fatalf("pond name changed: stdout=%q stderr=%q", stdout.String(), stderr.String())
+				}
+			})
+		}
 	}
 }
 
-func TestPondReleaseKongStripsCommandPath(t *testing.T) {
-	withTempClaims(t, nil)
-	var out, errBuf strings.Builder
-	app := App{Stdout: &out, Stderr: &errBuf}
-	if err := app.Run(context.Background(), []string{"pond", "release", "alpha"}); err != nil {
-		t.Fatalf("pond release through Kong: %v", err)
-	}
-	if !strings.Contains(out.String(), `pond "alpha" has no active leases`) {
-		t.Fatalf("expected stripped pond name alpha, stdout=%q stderr=%q", out.String(), errBuf.String())
-	}
-	if strings.Contains(out.String(), `pond "pond-release-alpha"`) {
-		t.Fatalf("Kong command path leaked into pond name: %q", out.String())
+func TestPondLifecycleRejectsInvalidArguments(t *testing.T) {
+	clearConfigEnv(t)
+	t.Chdir(t.TempDir())
+	for _, command := range []string{"disconnect", "release"} {
+		for _, tail := range [][]string{nil, {"alpha", "beta"}, {"--unknown"}, {"alpha", "--unknown"}} {
+			args := append([]string{"pond", command}, tail...)
+			t.Run(strings.Join(args, " "), func(t *testing.T) {
+				var stdout, stderr strings.Builder
+				err := (App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args)
+				var exitErr ExitError
+				if !AsExitError(err, &exitErr) || exitErr.Code != 2 {
+					t.Fatalf("expected argument error, got %v", err)
+				}
+				if stdout.Len() != 0 {
+					t.Fatalf("invalid arguments reached pond operation: %s", &stdout)
+				}
+			})
+		}
 	}
 }
 

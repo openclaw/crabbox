@@ -83,7 +83,15 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			client, err = newAPI(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+		Workspace: func() shared.SandboxWorkspace {
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+				SyncFunc: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					return b.syncWorkspace(ctx, client, claim.CloudID, req, folder, prepared)
+				},
+				EnsureFunc: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, claim.CloudID, folder, false) },
+			}
+		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var machine machineData
 			var err error
@@ -102,10 +110,6 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			}
 			return session(), nil
 		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, claim.CloudID, req, folder, prepared)
-		},
-		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, claim.CloudID, folder, false) },
 		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 			if err != nil {
@@ -181,34 +185,30 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	return shared.PollDelegatedStatus(ctx, shared.DelegatedStatusRequest{
-		ID:          req.ID,
-		Provider:    providerName,
-		TargetOS:    targetLinux,
-		Network:     networkPublic,
-		Wait:        req.Wait,
-		WaitTimeout: req.WaitTimeout,
-		Now:         b.now,
-		Resolve: func(id string) (string, string, string, error) {
-			return b.resolveMachineID(ctx, client, id)
-		},
-		Get: func(getCtx context.Context, machineID string) (shared.DelegatedStatusResource, error) {
-			machine, err := client.GetMachine(getCtx, machineID)
-			if err != nil {
-				return shared.DelegatedStatusResource{}, err
-			}
-			server := machineToServer(b.cfg, machine)
-			return shared.DelegatedStatusResource{
-				State:      machine.State,
-				ServerID:   machine.ID,
-				ServerType: server.ServerType.Name,
-				Ready:      statusReady(machine.State),
-				Labels:     server.Labels,
-			}, nil
-		},
-		TimeoutError: func(machineID string) error {
-			return core.Exit(5, "timed out waiting for smolvm %s to become ready", machineID)
-		},
+	leaseID, machineID, slug, err := b.resolveMachineID(ctx, client, req.ID)
+	if err != nil {
+		return core.StatusView{}, err
+	}
+	return shared.PollStatus(ctx, req, b.now, func(ctx context.Context) (core.StatusView, bool, error) {
+		machine, err := client.GetMachine(ctx, machineID)
+		if err != nil {
+			return core.StatusView{}, false, err
+		}
+		server := machineToServer(b.cfg, machine)
+		return core.StatusView{
+			ID:         leaseID,
+			Slug:       core.Blank(slug, server.Labels["slug"]),
+			Provider:   providerName,
+			TargetOS:   targetLinux,
+			Network:    networkPublic,
+			State:      machine.State,
+			ServerID:   machine.ID,
+			ServerType: server.ServerType.Name,
+			Ready:      statusReady(machine.State),
+			Labels:     server.Labels,
+		}, false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for smolvm %s to become ready", machineID)
 	})
 }
 

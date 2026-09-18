@@ -148,6 +148,12 @@ CRABBOX_MULTIPASS_DISK
 CRABBOX_MULTIPASS_LAUNCH_TIMEOUT
 ```
 
+Decoded negative CPU counts, including environment and explicit flag values, are
+rejected before acquiring a new VM. Creation-only CPU sizing does not block
+operations on existing leases, including stop and cleanup. Zero leaves the Multipass CPU default,
+and positive counts are passed through. YAML CPU values still apply only when
+positive; zero or negative YAML values leave the previous setting unchanged.
+
 ## Lease Behavior
 
 1. `warmup` or a fresh `run` creates a per-lease SSH key.
@@ -167,6 +173,10 @@ CRABBOX_MULTIPASS_LAUNCH_TIMEOUT
 7. `cleanup --provider multipass` deletes stopped Crabbox VMs and running
    non-`keep` VMs whose local claim is stale past the idle timeout plus the
    direct-provider grace window.
+
+List and status report the observed state for non-running instances, even when
+a previous readiness check saved a ready label. For running instances, an
+existing saved ready label remains visible.
 
 Multipass does not expose provider labels. Crabbox therefore treats the exact
 instance-bound local lease claim as the source of ownership. `stop` and

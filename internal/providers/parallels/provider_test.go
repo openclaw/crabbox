@@ -117,6 +117,60 @@ func TestApplyFlagsExplicitHostBypassesConfiguredFleet(t *testing.T) {
 	}
 }
 
+func TestResolveReportsDiscoveredIP(t *testing.T) {
+	seedParallelsCleanupState(t)
+	runner := &parallelsCleanupRunner{
+		vmJSON:     `[{"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"running"}]`,
+		nextVMJSON: `[{"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"running","ip_configured":"192.0.2.10"}]`,
+	}
+	backend := &leaseBackend{DirectSSHBackend: sharedBackend(testParallelsCleanupConfig(), runner)}
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "blue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.Host != "192.0.2.10" || lease.Server.PublicNet.IPv4.IP != "192.0.2.10" {
+		t.Fatalf("discovered SSH host=%q server IP=%q, want 192.0.2.10", lease.SSH.Host, lease.Server.PublicNet.IPv4.IP)
+	}
+}
+
+func TestResolvePreservesVMWhenIPDiscoveryFails(t *testing.T) {
+	for _, mode := range []struct {
+		name      string
+		request   core.ResolveRequest
+		wantError bool
+	}{
+		{name: "connection", request: core.ResolveRequest{ID: "blue"}, wantError: true},
+		{name: "release", request: core.ResolveRequest{ID: "blue", ReleaseOnly: true}},
+		{name: "status", request: core.ResolveRequest{ID: "blue", StatusOnly: true, NoLocalStateMutations: true}},
+		{name: "status readiness", request: core.ResolveRequest{ID: "blue", StatusOnly: true, ReadyProbe: true, NoLocalStateMutations: true}},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			leaseID, _ := seedParallelsCleanupState(t)
+			runner := &parallelsCleanupRunner{vmJSON: `[{"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"running"}]`}
+			backend := &leaseBackend{DirectSSHBackend: sharedBackend(testParallelsCleanupConfig(), runner)}
+			// No reported IP; cancellation makes discovery fail without a timed wait.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			lease, err := backend.Resolve(ctx, mode.request)
+			if mode.wantError {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("Resolve error=%v, want original discovery cancellation", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lease.Server.CloudID != "vm-good" || lease.LeaseID != leaseID || lease.SSH.Host != "" {
+				t.Fatalf("unexpected resolved lease=%#v ssh=%#v", lease.Server, lease.SSH)
+			}
+			if !reflect.DeepEqual(runner.execVMIDs, []string{"vm-good"}) {
+				t.Fatalf("guest metadata lookup lost VM identity: %v", runner.execVMIDs)
+			}
+		})
+	}
+}
+
 func TestResolveReportsPartialFleetInventory(t *testing.T) {
 	backend := &leaseBackend{
 		DirectSSHBackend: sharedBackend(testParallelsFleetConfig(), &parallelsFleetRunner{}),
@@ -471,6 +525,9 @@ func (r *parallelsFleetRunner) Run(_ context.Context, req core.LocalCommandReque
 }
 
 type parallelsCleanupRunner struct {
+	nextVMJSON  string
+	vmJSON      string
+	execVMIDs   []string
 	deleteCalls int
 	deleteErr   error
 }
@@ -480,7 +537,19 @@ func (r *parallelsCleanupRunner) Run(_ context.Context, req core.LocalCommandReq
 		return core.LocalCommandResult{}, errors.New("unexpected command")
 	}
 	switch req.Args[0] {
+	case "exec":
+		if len(req.Args) > 1 {
+			r.execVMIDs = append(r.execVMIDs, req.Args[1])
+		}
+		return core.LocalCommandResult{}, nil
 	case "list":
+		if r.vmJSON != "" {
+			vmJSON := r.vmJSON
+			if r.nextVMJSON != "" {
+				r.vmJSON, r.nextVMJSON = r.nextVMJSON, ""
+			}
+			return core.LocalCommandResult{Stdout: vmJSON}, nil
+		}
 		return core.LocalCommandResult{Stdout: `[{"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"stopped","ip_configured":"10.0.0.5"}]`}, nil
 	case "delete":
 		r.deleteCalls++

@@ -414,7 +414,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		}
 	}
 	server := req.Lease.Server
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, now)
+	server.Labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(server.Labels, cfg, req.State, now, req.IdleTimeoutOverride)
 	leaseID := strings.TrimSpace(req.Lease.LeaseID)
 	if leaseID != "" {
 		claim, ok, err := resolveNamespaceClaim(leaseID, cfg)
@@ -426,11 +426,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 			idleTimeout = cfg.IdleTimeout
 		}
 		if ok {
-			if claim.RepoRoot != "" {
-				_, err = core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], cfg, server, req.Lease.SSH, claim.RepoRoot, idleTimeout, false, claim, true)
-			} else {
-				_, err = core.ClaimLeaseTargetForConfigIfUnchanged(leaseID, server.Labels["slug"], cfg, server, req.Lease.SSH, idleTimeout, claim, true)
-			}
+			_, err = core.UpdateLeaseClaimTouchIfUnchanged(ctx, leaseID, claim, server.Labels, now, req.IdleTimeoutOverride)
 		} else {
 			err = core.ClaimLeaseTargetForConfig(leaseID, server.Labels["slug"], cfg, server, req.Lease.SSH, idleTimeout)
 		}

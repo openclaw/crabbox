@@ -11,11 +11,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func gitOverlayTemporaryDirectoryMode(finalMode os.FileMode) os.FileMode {
+func sourceSnapshotTemporaryDirectoryMode(finalMode os.FileMode) os.FileMode {
 	return finalMode | 0o222
 }
 
-func syncGitOverlaySymlinkTimes(path string, modTime time.Time) error {
+func syncSourceSnapshotSymlinkTimes(path string, modTime time.Time) error {
 	pathPtr, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return err
@@ -47,7 +47,7 @@ func syncGitOverlaySymlinkTimes(path string, modTime time.Time) error {
 	return nil
 }
 
-func thawGitOverlaySnapshotFiles(root *os.Root) error {
+func thawSourceSnapshotFiles(root *os.Root) error {
 	return fs.WalkDir(root.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -94,7 +94,7 @@ func thawGitOverlaySnapshotFiles(root *os.Root) error {
 	})
 }
 
-func openGitOverlaySnapshotParent(path string) (*os.File, error) {
+func openSourceSnapshotParent(path string) (*os.File, error) {
 	pathPtr, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err

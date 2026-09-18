@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +25,30 @@ func newDigitalOceanTestClient(t *testing.T, server *httptest.Server, token stri
 	}
 	client.baseURL = server.URL
 	return client
+}
+
+func TestDigitalOceanAcquisitionReadinessHTTP(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/droplets/42" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) == 1 {
+			_, _ = io.WriteString(w, `{"droplet":{"id":42,"status":"new","networks":{"v4":[]}}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"droplet":{"id":42,"status":"off","networks":{"v4":[{"ip_address":"203.0.113.42","type":"public"}]}}}`)
+	}))
+	defer server.Close()
+	client := newDigitalOceanTestClient(t, server, "fixture-token")
+	got, err := new(digitalOceanLeaseBackend).waitForDropletIP(context.Background(), client, 42, time.Minute)
+	if err != nil || got.ID != 42 || publicIPv4(got) != "203.0.113.42" || calls.Load() != 2 {
+		t.Fatalf("droplet=%#v err=%v requests=%d", got, err, calls.Load())
+	}
+	t.Log("production HTTP client: two observations, pending to public IP while off")
 }
 
 func TestDigitalOceanClientCreateDropletRequestShape(t *testing.T) {

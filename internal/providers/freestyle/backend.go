@@ -54,7 +54,20 @@ type freestyleBackend struct {
 
 func (b *freestyleBackend) Spec() core.ProviderSpec { return b.spec }
 
+func (b *freestyleBackend) validateCreationSizing() error {
+	if b.cfg.Freestyle.VCPUs < 0 {
+		return core.Exit(2, "freestyle vcpus must be non-negative")
+	}
+	if b.cfg.Freestyle.MemoryGB < 0 {
+		return core.Exit(2, "freestyle memoryGB must be non-negative")
+	}
+	return nil
+}
+
 func (b *freestyleBackend) Warmup(ctx context.Context, req core.WarmupRequest) error {
+	if err := b.validateCreationSizing(); err != nil {
+		return err
+	}
 	if req.ActionsRunner {
 		return core.Exit(2, "--actions-runner is not supported for provider=%s", freestyleProvider)
 	}
@@ -81,6 +94,11 @@ func (b *freestyleBackend) Warmup(ctx context.Context, req core.WarmupRequest) e
 }
 
 func (b *freestyleBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
+	if req.ID == "" {
+		if err := b.validateCreationSizing(); err != nil {
+			return core.RunResult{}, err
+		}
+	}
 	workspace, workspaceErr := freestyleWorkspacePath(b.cfg)
 	var client freestyleAPI
 	var leaseID, name, slug string
@@ -104,7 +122,15 @@ func (b *freestyleBackend) Run(ctx context.Context, req core.RunRequest) (core.R
 			client, err = newFreestyleClient(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+		Workspace: func() shared.SandboxWorkspace {
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: func(ctx context.Context) (*core.PreparedArchive, error) { return b.prepareArchive(ctx, req) },
+				SyncFunc: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					return b.syncWorkspace(ctx, client, name, req, archive)
+				},
+				EnsureFunc: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, name, workspace) },
+			}
+		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
 			leaseID, name, slug, err = b.createSandbox(ctx, client, req.Repo, req.Reclaim, req.RequestedSlug)
@@ -127,16 +153,12 @@ func (b *freestyleBackend) Run(ctx context.Context, req core.RunRequest) (core.R
 			fmt.Fprintf(b.rt.Stderr, "provider=freestyle lease=%s sandbox=%s\n", leaseID, name)
 			return nil
 		},
-		Sync: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, name, req, archive)
-		},
-		NoSync: func(ctx context.Context) error { return b.prepareWorkspace(ctx, client, name, workspace) },
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			if req.EnvSummary {
 				core.PrintEnvForwardingSummary(b.rt.Stderr, freestyleProvider, "forwarded", req.Options.EnvAllow, req.Env)
 			}
 			return shared.DelegatedSandboxCommand{Run: func(ctx context.Context, stdout, stderr io.Writer) (int, error) {
-				return b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, req.Env, stdout, stderr)
+				return b.exec(ctx, client, name, workspace, req, stdout, stderr)
 			}}, nil
 		},
 		Cleanup: func(ctx context.Context) error {
@@ -185,31 +207,19 @@ func (b *freestyleBackend) Status(ctx context.Context, req core.StatusRequest) (
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
-	}
-	for {
+	return shared.PollStatus(ctx, req, b.now, func(ctx context.Context) (core.StatusView, bool, error) {
 		vm, err := client.GetVM(ctx, id)
 		if err != nil {
-			return core.StatusView{}, freestyleError("get vm", err)
+			return core.StatusView{}, false, freestyleError("get vm", err)
 		}
 		view := freestyleStatusView(leaseID, vm)
-		if !req.Wait || view.Ready {
-			return view, nil
+		if req.Wait && !view.Ready && freestyleStatusTerminal(view.State) {
+			return core.StatusView{}, false, core.Exit(5, "freestyle vm %s entered terminal state %q before becoming ready", id, view.State)
 		}
-		if freestyleStatusTerminal(view.State) {
-			return core.StatusView{}, core.Exit(5, "freestyle vm %s entered terminal state %q before becoming ready", id, view.State)
-		}
-		if b.now().After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for vm %s to become ready", id)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return view, false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for vm %s to become ready", id)
+	})
 }
 
 func (b *freestyleBackend) Stop(ctx context.Context, req core.StopRequest) error {
@@ -233,6 +243,9 @@ func (b *freestyleBackend) Stop(ctx context.Context, req core.StopRequest) error
 }
 
 func (b *freestyleBackend) createSandbox(ctx context.Context, client freestyleAPI, repo core.Repo, reclaim bool, requestedSlug string) (string, string, string, error) {
+	if err := b.validateCreationSizing(); err != nil {
+		return "", "", "", err
+	}
 	if _, err := freestyleRelativeWorkdir(b.cfg); err != nil {
 		return "", "", "", err
 	}
@@ -294,16 +307,19 @@ func freestyleCleanupCommand(leaseID string) string {
 	return fmt.Sprintf("crabbox stop --provider %s --id %s", freestyleProvider, core.ShellQuote(leaseID))
 }
 
-func (b *freestyleBackend) exec(ctx context.Context, client freestyleAPI, id, workdir string, command []string, shellMode bool, env map[string]string, stdout, stderr io.Writer) (int, error) {
-	execCommand := freestyleExecCommand(command, shellMode)
+func (b *freestyleBackend) exec(ctx context.Context, client freestyleAPI, id, workdir string, req core.RunRequest, stdout, stderr io.Writer) (int, error) {
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+	if err != nil {
+		return 0, err
+	}
 	parts := make([]string, 0, 3)
 	if workdir != "" {
 		parts = append(parts, "cd "+core.ShellQuote(workdir))
 	}
-	if envCommand := freestyleEnvExportCommand(env); envCommand != "" {
+	if envCommand := freestyleEnvExportCommand(req.Env); envCommand != "" {
 		parts = append(parts, envCommand)
 	}
-	parts = append(parts, execCommand)
+	parts = append(parts, intent.ShellScript())
 	fullCommand := strings.Join(parts, " && ")
 	return client.Exec(ctx, id, "bash -lc "+core.ShellQuote(fullCommand), stdout, stderr)
 }
@@ -331,22 +347,6 @@ func freestyleEnvExportCommand(env map[string]string) string {
 		b.WriteString(core.ShellQuote(env[name]))
 	}
 	return b.String()
-}
-
-func freestyleExecCommand(command []string, shellMode bool) string {
-	if len(command) == 0 {
-		return ""
-	}
-	if shellMode {
-		return strings.Join(command, " ")
-	}
-	if len(command) == 1 && core.ShouldUseShell(command) {
-		return command[0]
-	}
-	if core.ShouldUseShell(command) || core.LeadingEnvAssignment(command) {
-		return core.ShellScriptFromArgv(command)
-	}
-	return strings.Join(core.ShellWords(command), " ")
 }
 
 func (b *freestyleBackend) resolveLeaseID(ctx context.Context, client freestyleAPI, id, repoRoot string, reclaim bool) (string, string, error) {
@@ -463,16 +463,15 @@ func freestyleStatusView(leaseID string, vm freestyleVM) core.StatusView {
 	}
 	applyFreestyleClaimMetadata(labels, leaseID)
 	return core.StatusView{
-		ID:         leaseID,
-		Slug:       labels["slug"],
-		Provider:   freestyleProvider,
-		TargetOS:   targetLinux,
-		State:      vm.State,
-		ServerID:   vm.ID,
-		ServerType: vm.Name,
-		Network:    NetworkPublic,
-		Ready:      freestyleStatusReady(vm.State),
-		Labels:     labels,
+		ID:       leaseID,
+		Slug:     labels["slug"],
+		Provider: freestyleProvider,
+		TargetOS: targetLinux,
+		State:    vm.State,
+		ServerID: vm.ID,
+		Network:  NetworkPublic,
+		Ready:    freestyleStatusReady(vm.State),
+		Labels:   labels,
 	}
 }
 

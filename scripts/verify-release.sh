@@ -115,33 +115,31 @@ tagged_changelog="$WORK/tagged-changelog.md"
 git -C "$ROOT" show "$TAG_COMMIT:CHANGELOG.md" >"$tagged_changelog"
 "$ROOT/scripts/extract-release-notes.sh" "$TAG" \
   <"$tagged_changelog" >"$notes"
-node "$ROOT/scripts/release-provenance.mjs" verify \
-  --dir "$ASSET_DIR" \
-  --tag "$TAG" \
-  --tag-object "$TAG_OBJECT" \
-  --source-commit "$TAG_COMMIT" \
-  --verifier-commit "$VERIFIER_COMMIT" \
-  --notes "$notes"
 
-extract_archive() {
-  local name=$1 destination=$2 expected=$3 listing
-  mkdir -m 700 "$destination"
-  if [[ "$name" == *.zip ]]; then
-    listing=$(unzip -Z1 "$ASSET_DIR/$name" | LC_ALL=C sort)
-    [[ "$listing" == "$expected" ]] || {
-      echo "unexpected archive members: $name" >&2
-      exit 1
-    }
-    unzip -q "$ASSET_DIR/$name" -d "$destination"
-  else
-    listing=$(tar -tzf "$ASSET_DIR/$name" | LC_ALL=C sort)
-    [[ "$listing" == "$expected" ]] || {
-      echo "unexpected archive members: $name" >&2
-      exit 1
-    }
-    tar -xzf "$ASSET_DIR/$name" -C "$destination"
-  fi
-}
+release_go_version=$(node "$ROOT/scripts/release-policy.mjs" "$ROOT" "$VERIFIER_COMMIT" --go-version)
+runtime_pack=none
+runtime_pack_enabled=false
+filesystem_identity_args=()
+runtime_metadata_args=()
+if git -C "$ROOT" cat-file -e "$TAG_COMMIT:cmd/crabbox-runtime/main.go" 2>/dev/null; then
+  runtime_pack=final
+  runtime_pack_enabled=true
+fi
+"$ROOT/scripts/build-release-runtime-tool.sh" "$WORK/runtime-tool"
+runtime_tool="$WORK/runtime-tool/runtime-artifacts"
+mkdir -m 700 "$WORK/reports"
+if [[ "$runtime_pack_enabled" == true ]] &&
+  git -C "$ROOT" cat-file -e "$TAG_COMMIT:internal/runner/development/main.go.txt" 2>/dev/null; then
+  runtime_pack=final-filesystem
+  runtime_pack_enabled=filesystem
+  # Hash frozen source data with protected tooling; never execute tagged code.
+  mkdir -m 700 "$WORK/source"
+  git -C "$ROOT" archive "$TAG_COMMIT" internal/runner | tar -xf - -C "$WORK/source"
+  filesystem_build_id=$("$runtime_tool" source-id --source-directory "$WORK/source")
+  [[ "$filesystem_build_id" =~ ^[0-9a-f]{64}$ ]]
+  filesystem_identity_args=(--filesystem-build-id "$filesystem_build_id")
+  runtime_metadata_args=(filesystem)
+fi
 
 for platform in darwin linux windows; do
   for arch in amd64 arm64; do
@@ -150,20 +148,48 @@ for platform in darwin linux windows; do
     [[ "$platform" == windows ]] && extension=zip binary=crabbox.exe
     name="crabbox_${version}_${platform}_${arch}.${extension}"
     destination="$WORK/${platform}-${arch}"
-    expected=$binary
-    [[ "$platform" == darwin && "$arch" == arm64 ]] && expected=$'crabbox\ncrabbox-apple-vm-helper'
-    extract_archive "$name" "$destination" "$expected"
+    "$runtime_tool" extract --archive "$ASSET_DIR/$name" \
+      --directory "$destination" --os "$platform" --arch "$arch" \
+      --runtime-pack "$runtime_pack" ${filesystem_identity_args[@]+"${filesystem_identity_args[@]}"} >"$WORK/reports/$name.json"
+    if [[ "$runtime_pack" != none ]]; then
+      "$runtime_tool" verify --directory "$destination/crabbox-runtime" \
+        --controller "$destination/$binary" ${filesystem_identity_args[@]+"${filesystem_identity_args[@]}"} >/dev/null
+      runtime_platforms=(linux)
+      [[ "$runtime_pack" == final-filesystem ]] && runtime_platforms=(darwin linux windows)
+      for runtime_platform in "${runtime_platforms[@]}"; do
+        for runtime_arch in amd64 arm64; do
+          runtime_name="$runtime_platform-$runtime_arch"
+          [[ "$runtime_platform" == windows ]] && runtime_name="$runtime_name.exe"
+          node "$ROOT/scripts/verify-go-release-binary.mjs" \
+            "$destination/crabbox-runtime/$runtime_name" \
+            github.com/openclaw/crabbox/cmd/crabbox-runtime \
+            "$TAG_COMMIT" "$runtime_platform" "$runtime_arch" "$release_go_version" \
+            ${runtime_metadata_args[@]+"${runtime_metadata_args[@]}"}
+        done
+      done
+    fi
     node "$ROOT/scripts/verify-go-release-binary.mjs" \
       "$destination/$binary" github.com/openclaw/crabbox/cmd/crabbox \
-      "$TAG_COMMIT" "$platform" "$arch" "$CRABBOX_RELEASE_GO_VERSION"
+      "$TAG_COMMIT" "$platform" "$arch" "$release_go_version"
     if [[ "$platform" == darwin && "$arch" == arm64 ]]; then
       node "$ROOT/scripts/verify-go-release-binary.mjs" \
         "$destination/crabbox-apple-vm-helper" \
         github.com/openclaw/crabbox/cmd/crabbox-apple-vm-helper \
-        "$TAG_COMMIT" darwin arm64 "$CRABBOX_RELEASE_GO_VERSION"
+        "$TAG_COMMIT" darwin arm64 "$release_go_version"
     fi
   done
 done
+
+provenance_runtime_args=(--runtime-pack "$runtime_pack_enabled")
+[[ "$runtime_pack_enabled" != false ]] && provenance_runtime_args+=(--runtime-reports "$WORK/reports")
+node "$ROOT/scripts/release-provenance.mjs" verify "${provenance_runtime_args[@]}" \
+  ${filesystem_identity_args[@]+"${filesystem_identity_args[@]}"} \
+  --dir "$ASSET_DIR" \
+  --tag "$TAG" \
+  --tag-object "$TAG_OBJECT" \
+  --source-commit "$TAG_COMMIT" \
+  --verifier-commit "$VERIFIER_COMMIT" \
+  --notes "$notes"
 
 "$ROOT/scripts/verify-macos-binary.sh" \
   "$CRABBOX_RELEASE_CLI_IDENTIFIER" x86_64 "$WORK/darwin-amd64/crabbox"
@@ -171,6 +197,15 @@ done
   "$CRABBOX_RELEASE_CLI_IDENTIFIER" arm64 "$WORK/darwin-arm64/crabbox"
 "$ROOT/scripts/verify-macos-binary.sh" \
   "$CRABBOX_RELEASE_HELPER_IDENTIFIER" arm64 "$WORK/darwin-arm64/crabbox-apple-vm-helper"
+
+if [[ "$runtime_pack" == final-filesystem ]]; then
+  # Each archive carries the same signed companions, authenticated by provenance.
+  # Verify signatures and online notarization without executing either runtime.
+  CRABBOX_VERIFY_EXECUTE=0 "$ROOT/scripts/verify-macos-binary.sh" \
+    "$CRABBOX_RELEASE_RUNTIME_IDENTIFIER" x86_64 "$WORK/darwin-amd64/crabbox-runtime/darwin-amd64"
+  CRABBOX_VERIFY_EXECUTE=0 "$ROOT/scripts/verify-macos-binary.sh" \
+    "$CRABBOX_RELEASE_RUNTIME_IDENTIFIER" arm64 "$WORK/darwin-amd64/crabbox-runtime/darwin-arm64"
+fi
 
 embedded_vmd="$WORK/crabbox-apple-vm-vmd"
 node "$ROOT/scripts/extract-release-vmd.mjs" \

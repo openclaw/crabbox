@@ -68,18 +68,13 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	fs := newFlagSet("actions hydrate", a.Stderr)
 	connectionFlags := registerActionsHydrateTargetFlags(fs, defaults)
 	leaseIDFlag := fs.String("id", "", "existing lease id or slug")
-	repoFlag := fs.String("repo", "", "GitHub repository owner/name")
-	workflowFlag := fs.String("workflow", "", "workflow file/name/id")
-	jobFlag := fs.String("job", "", "expected hydrate workflow job/input name")
-	refFlag := fs.String("ref", "", "workflow ref")
+	workflowFlags := registerActionsHydrateWorkflowFlags(fs)
 	waitTimeout := fs.Duration("wait-timeout", 20*time.Minute, "time to wait for Actions hydration")
 	keepAliveMinutes := fs.Int("keep-alive-minutes", 90, "minutes for workflow to keep the job alive")
 	githubRunner := fs.Bool("github-runner", false, "hydrate by registering a GitHub self-hosted runner instead of local SSH execution")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
-	fieldFlags := stringListFlag{}
-	fs.Var(&fieldFlags, "f", "workflow input key=value")
-	fs.Var(&fieldFlags, "field", "workflow input key=value")
+	fieldFlags := registerActionsInputFields(fs)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -108,26 +103,14 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	if err != nil {
 		return err
 	}
+	if effectiveGitSeedSource(cfg) == "local" {
+		return Exit(2, "Actions hydration owns Git metadata; set sync.gitSeedSource=origin for Actions hydration")
+	}
 	repo, err := findRepo()
 	if err != nil {
 		return err
 	}
-	if *repoFlag != "" {
-		cfg.Actions.Repo = *repoFlag
-		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
-	}
-	if *workflowFlag != "" {
-		cfg.Actions.Workflow = *workflowFlag
-		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
-	}
-	if *jobFlag != "" {
-		cfg.Actions.Job = *jobFlag
-		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
-	}
-	if *refFlag != "" {
-		cfg.Actions.Ref = *refFlag
-		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
-	}
+	workflowFlags.Apply(&cfg)
 	if cfg.Actions.Workflow == "" {
 		return Exit(2, "actions hydrate requires --workflow or actions.workflow")
 	}
@@ -208,7 +191,7 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 	}
 	label := githubActionsLeaseLabel(leaseID)
 	ref := actionsRef(cfg, repo)
-	extraFields := mergeWorkflowInputFields(cfg.Actions.Fields, fieldFlags)
+	extraFields := mergeWorkflowInputFields(cfg.Actions.Fields, *fieldFlags)
 	fields := actionsHydrateFields(leaseID, label, cfg.Actions.Job, *keepAliveMinutes, extraFields)
 	if !*githubRunner {
 		localFields := actionsHydrateFields(leaseID, label, cfg.Actions.Job, 0, extraFields)
@@ -350,7 +333,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	leaseIDFlag := fs.String("id", "", "existing lease id or slug")
-	repoFlag := fs.String("repo", "", "GitHub repository owner/name")
+	workflowFlags := registerActionsRepositoryFlags(fs)
 	nameFlag := fs.String("name", "", "runner name")
 	labelsFlag := fs.String("labels", "", "comma-separated extra runner labels")
 	versionFlag := fs.String("version", "", "actions/runner version or latest")
@@ -373,10 +356,7 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if *repoFlag != "" {
-		cfg.Actions.Repo = *repoFlag
-		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
-	}
+	workflowFlags.Apply(&cfg)
 	if *versionFlag != "" {
 		cfg.Actions.RunnerVersion = *versionFlag
 		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
@@ -405,12 +385,8 @@ func (a App) actionsRegister(ctx context.Context, args []string) error {
 
 func (a App) actionsDispatch(ctx context.Context, args []string) error {
 	fs := newFlagSet("actions dispatch", a.Stderr)
-	repoFlag := fs.String("repo", "", "GitHub repository owner/name")
-	workflowFlag := fs.String("workflow", "", "workflow file/name/id")
-	refFlag := fs.String("ref", "", "workflow ref")
-	fieldFlags := stringListFlag{}
-	fs.Var(&fieldFlags, "f", "workflow input key=value")
-	fs.Var(&fieldFlags, "field", "workflow input key=value")
+	workflowFlags := registerActionsDispatchWorkflowFlags(fs)
+	fieldFlags := registerActionsInputFields(fs)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -422,18 +398,7 @@ func (a App) actionsDispatch(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if *repoFlag != "" {
-		cfg.Actions.Repo = *repoFlag
-		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
-	}
-	if *workflowFlag != "" {
-		cfg.Actions.Workflow = *workflowFlag
-		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
-	}
-	if *refFlag != "" {
-		cfg.Actions.Ref = *refFlag
-		recordConfigInput(&cfg, configInputGeneric, configInputFlag, true)
-	}
+	workflowFlags.Apply(&cfg)
 	ghRepo, err := resolveGitHubRepo(repo, cfg.Actions.Repo)
 	if err != nil {
 		return err
@@ -442,7 +407,7 @@ func (a App) actionsDispatch(ctx context.Context, args []string) error {
 		return Exit(2, "actions dispatch requires --workflow or actions.workflow")
 	}
 	ref := actionsRef(cfg, repo)
-	if err := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, fieldFlags, externalDesktopChildEnvDenylist(cfg, cfg.TargetOS)); err != nil {
+	if err := dispatchGitHubActionsWorkflow(ctx, repo.Root, ghRepo, cfg.Actions.Workflow, ref, *fieldFlags, externalDesktopChildEnvDenylist(cfg, cfg.TargetOS)); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "dispatched workflow=%s repo=%s ref=%s\n", cfg.Actions.Workflow, ghRepo.Slug(), ref)
@@ -530,6 +495,9 @@ type localActionsHydrationPlan struct {
 }
 
 func prepareLocalActionsHydration(cfg Config, repo Repo, target SSHTarget, leaseID, expectedJob string, fields []string) (localActionsHydrationPlan, error) {
+	if effectiveGitSeedSource(cfg) == "local" {
+		return localActionsHydrationPlan{}, Exit(2, "Actions hydration cannot use local-object Git seeding")
+	}
 	target = targetWithConfigDefaults(target, cfg)
 	if !supportsLocalActionsHydrateTarget(target) {
 		return localActionsHydrationPlan{}, Exit(2, "local Actions hydration currently supports Linux and Windows WSL2 targets only")
@@ -719,7 +687,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	}
 	if !plainManifest && coherence.seedEnabled() {
 		if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
-			if reason, fallback := gitOriginRuntimeFallbackResult(coherence.RemoteURL, out, err); fallback {
+			if reason, fallback := gitSeedRuntimeFallbackResult(coherence, out, err); fallback {
 				plainManifest = true
 				coherence = gitCoherencePlan{}
 				fmt.Fprintf(a.Stderr, "git origin fallback reason=%s; using plain manifest sync\n", reason)
@@ -755,7 +723,7 @@ func (a App) syncLocalActionsWorkspace(ctx context.Context, cfg Config, repo Rep
 	}
 	fingerprint := ""
 	if cfg.Sync.Fingerprint && !plainManifest {
-		if value, err := syncFingerprintForManifest(repo, cfg, manifest, excludes, coherence); err == nil {
+		if value, err := syncFingerprintForManifest(ctx, repo, cfg, manifest, excludes, coherence); err == nil {
 			fingerprint = value
 		} else {
 			fmt.Fprintf(a.Stderr, "warning: sync fingerprint failed: %v\n", err)

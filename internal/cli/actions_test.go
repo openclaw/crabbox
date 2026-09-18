@@ -8,12 +8,14 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -1003,7 +1005,7 @@ cat >/dev/null
 			t.Fatalf("Actions plain manifest ran forbidden Git path %q:\n%s", forbidden, log)
 		}
 	}
-	for _, want := range []string{"/usr/bin/env -i", "/bin/bash --noprofile --norc", "plain_git", "protocol.allow=never"} {
+	for _, want := range []string{"/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c", "plain_git", "protocol.allow=never"} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("Actions plain manifest missing %q:\n%s", want, log)
 		}
@@ -1788,8 +1790,8 @@ func TestExecuteLocalActionsHydrationNormalizesConfigDerivedWSL2Target(t *testin
 	logPath := filepath.Join(dir, "ssh.log")
 	hydratedPath := filepath.Join(dir, "hydrated")
 	stagedCommandPath := filepath.Join(dir, "staged-command")
-	sshScript := `#!/bin/sh
-remote=""
+	probeLog := filepath.Join(dir, "prerequisites")
+	sshScript := "#!/bin/sh\n" + recordLegacyBashProbeShell(t, probeLog) + `remote=""
 for arg do remote="$arg"; done
 decoded="$remote"
 decode_base64() {
@@ -1800,6 +1802,10 @@ decode_base64() {
   fi
 }
 case "$remote" in
+  *"FromBase64String('"*)
+    encoded=$(printf '%s\n' "$remote" | /usr/bin/sed -n "s/.*FromBase64String('\([^']*\)').*/\1/p")
+    decoded=$(printf '%s' "$encoded" | decode_base64)
+    ;;
   *" -EncodedCommand "*)
     encoded=${remote##* }
     outer=$(printf '%s' "$encoded" | decode_base64 | /usr/bin/iconv -f UTF-16LE -t UTF-8)
@@ -1865,6 +1871,9 @@ exit 0
 	logText := string(logData)
 	if !strings.Contains(logText, "timeout --signal=TERM") || strings.Contains(logText, "nohup") {
 		t.Fatalf("config-derived WSL2 target used the wrong hydration path:\n%s", logText)
+	}
+	if probes, err := os.ReadFile(probeLog); err != nil || len(probes) == 0 {
+		t.Fatalf("WSL2 fixture did not observe the Bash prerequisite: %q %v", probes, err)
 	}
 }
 
@@ -2244,7 +2253,7 @@ esac
 	for _, command := range strings.Split(string(logData), "---\n") {
 		if strings.Contains(command, "/bin/rm -f --") && strings.Contains(command, "sync-fingerprint") {
 			invalidations++
-			for _, want := range []string{remoteJoin(cfg, "cbx_gh", "repo"), "/usr/bin/env -i", "/bin/bash --noprofile --norc"} {
+			for _, want := range []string{remoteJoin(cfg, "cbx_gh", "repo"), "/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c", "plain_git", "protocol.allow=never"} {
 				if !strings.Contains(command, want) {
 					t.Fatalf("GitHub runner invalidation missing %q:\n%s", want, command)
 				}
@@ -2778,5 +2787,99 @@ exit 255
 				t.Fatal("hydration wait did not return within 3s after cancel; still blocked on bare sleep")
 			}
 		})
+	}
+}
+
+func TestActionsWorkflowHelperSelectors(t *testing.T) {
+	for _, surface := range []struct {
+		name     string
+		register func(*flag.FlagSet) actionsWorkflowFlagValues
+		names    []string
+	}{{"hydrate", registerActionsHydrateWorkflowFlags, []string{"repo", "workflow", "job", "ref"}}, {"dispatch", registerActionsDispatchWorkflowFlags, []string{"repo", "workflow", "ref"}}, {"register", registerActionsRepositoryFlags, []string{"repo"}}} {
+		for _, raw := range []*string{nil, new(""), new("prior"), new(" raw ")} {
+			for _, synthesized := range []bool{false, true} {
+				cfg := baseConfig()
+				cfg.Actions.Repo = "prior"
+				cfg.Actions.Workflow = "prior"
+				cfg.Actions.Job = "prior"
+				cfg.Actions.Ref = "prior"
+				cfg.Actions.Fields = []string{"config=1"}
+				markSynthesizedFlagInputs(&cfg, synthesized)
+				want := cfg
+				fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+				values := surface.register(fs)
+				var names []string
+				fs.VisitAll(func(f *flag.Flag) {
+					names = append(names, f.Name)
+					if f.DefValue != "" || f.Value.(flag.Getter).Get() != "" {
+						t.Fatal("selector did not register empty default")
+					}
+				})
+				if len(names) != len(surface.names) {
+					t.Fatal("surface gained flags")
+				}
+				for _, name := range surface.names {
+					if fs.Lookup(name) == nil {
+						t.Fatal("missing selector")
+					}
+					if raw != nil {
+						if err := fs.Set(name, *raw); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if raw != nil && *raw != "" {
+						switch name {
+						case "repo":
+							want.Actions.Repo = *raw
+						case "workflow":
+							want.Actions.Workflow = *raw
+						case "job":
+							want.Actions.Job = *raw
+						case "ref":
+							want.Actions.Ref = *raw
+						}
+					}
+				}
+				recordConfigInput(&want, configInputGeneric, configInputFlag, raw != nil && *raw != "")
+				values.Apply(&cfg)
+				if !reflect.DeepEqual(cfg, want) {
+					t.Fatalf("%s raw=%v synthesized=%v", surface.name, raw, synthesized)
+				}
+			}
+		}
+	}
+}
+
+func TestActionsWorkflowHelperFieldAliases(t *testing.T) {
+	fs := flag.NewFlagSet("fields", flag.ContinueOnError)
+	fields := registerActionsInputFields(fs)
+	if fields == nil || *fields == nil || fs.Lookup("f").Value != fs.Lookup("field").Value {
+		t.Fatal("aliases/storage shape")
+	}
+	cfg := baseConfig()
+	cfg.Actions.Fields = []string{"a=config", "keep=1"}
+	before := append([]string(nil), cfg.Actions.Fields...)
+	if err := fs.Parse([]string{"-f", "a=cli", "--field", " raw,field ", "-f", "", "--field", "a=last"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"a=cli", " raw,field ", "", "a=last"}
+	if !reflect.DeepEqual([]string(*fields), want) {
+		t.Fatal("raw aliases changed")
+	}
+	if !reflect.DeepEqual(cfg.Actions.Fields, before) {
+		t.Fatal("parsing merged into configuration")
+	}
+	hydrated := mergeWorkflowInputFields(cfg.Actions.Fields, *fields)
+	if !reflect.DeepEqual(hydrated, []string{"a=last", "keep=1", " raw,field ", ""}) {
+		t.Fatalf("hydration merge=%#v", hydrated)
+	}
+	// Standalone dispatch's boundary remains the raw list, without invoking the command.
+	if !reflect.DeepEqual([]string(*fields), want) {
+		t.Fatal("hydration mutated standalone input")
+	}
+	copy := fs.Lookup("field").Value.(flag.Getter).Get().([]string)
+	copy[0] = "changed"
+	if (*fields)[0] != "a=cli" {
+		t.Fatal("Getter shares")
 	}
 }

@@ -315,12 +315,9 @@ func (b *nvidiaBrevBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("deleted lease=%s workspace=%s", lease.LeaseID, workspace)
 }
 
-func (b *nvidiaBrevBackend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
+func (b *nvidiaBrevBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
 	cfg := b.configForRun()
-	if req.IdleTimeout > 0 {
-		cfg.IdleTimeout = req.IdleTimeout
-	}
 	var claim core.LeaseClaim
 	var claimed bool
 	var err error
@@ -340,14 +337,15 @@ func (b *nvidiaBrevBackend) Touch(_ context.Context, req core.TouchRequest) (cor
 	if server.Labels == nil {
 		server.Labels = map[string]string{}
 	}
-	server.Labels = touchDirectLeaseLabels(server.Labels, cfg, req.State)
+	now := core.ClockNow(b.rt.Clock).UTC()
+	server.Labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(server.Labels, cfg, req.State, now, req.IdleTimeoutOverride)
 	if strings.TrimSpace(req.State) != "" {
 		server.Status = strings.TrimSpace(req.State)
 	} else if state := strings.TrimSpace(server.Labels["state"]); state != "" {
 		server.Status = state
 	}
 	if claimed && claim.RepoRoot != "" {
-		if _, err := claimLeaseTargetForRepoConfigIfUnchanged(claim.LeaseID, claim.Slug, cfg, server, req.Lease.SSH, claim.RepoRoot, false, claim, true); err != nil {
+		if _, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, claim.LeaseID, claim, server.Labels, now, req.IdleTimeoutOverride); err != nil {
 			return server, err
 		}
 	}

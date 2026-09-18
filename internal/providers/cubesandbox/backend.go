@@ -149,11 +149,8 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			client, err = newCubeSandboxClient(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-cubesandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-			})
+		Workspace: func() shared.SandboxWorkspace {
+			return workspaceForConfig(b.cfg, b.rt).Bind(client, session, req, workspace)
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var sandbox shared.EnvdSandbox
@@ -181,12 +178,6 @@ func (b *cubesandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 				return cubesandboxError("connect sandbox", err)
 			}
 			return nil
-		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return workspaceForConfig(b.cfg, b.rt).Sync(ctx, client, session, req, workspace, prepared)
-		},
-		NoSync: func(ctx context.Context) error {
-			return workspaceForConfig(b.cfg, b.rt).Prepare(ctx, client, session, workspace)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
@@ -267,28 +258,15 @@ func (b *cubesandboxBackend) Status(ctx context.Context, req core.StatusRequest)
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
-	}
-	for {
+	return shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
 		sandbox, err := client.GetSandbox(ctx, sandboxID)
 		if err != nil {
-			return core.StatusView{}, cubesandboxError("get sandbox", err)
+			return core.StatusView{}, false, cubesandboxError("get sandbox", err)
 		}
-		view := sandboxViews.Status(leaseID, sandbox)
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return sandboxViews.Status(leaseID, sandbox), false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for sandbox %s to become ready", sandboxID)
+	})
 }
 
 func (b *cubesandboxBackend) Stop(ctx context.Context, req core.StopRequest) error {

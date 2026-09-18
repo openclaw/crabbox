@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -135,5 +136,41 @@ func TestLoadConfigPreservesExplicitHyperVTargetForCLIOverride(t *testing.T) {
 	}
 	if cfg.TargetOS != targetLinux || !IsTargetExplicit(&cfg) {
 		t.Fatalf("explicit target was rewritten: target=%q explicit=%v", cfg.TargetOS, IsTargetExplicit(&cfg))
+	}
+}
+
+func TestHyperVSizingSourceDecoding(t *testing.T) {
+	for _, value := range []int{-2, 0, 3} {
+		t.Run(fmt.Sprint(value), func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			cfg.HyperV.CPUs, cfg.HyperV.Memory = 7, 7168
+			if err := applyFileConfig(&cfg, fileConfig{HyperV: &fileHyperVConfig{CPUs: value, Memory: value}}); err != nil {
+				t.Fatal(err)
+			}
+			wantCPU, wantMemory := 7, 7168
+			if value > 0 {
+				wantCPU, wantMemory = value, value
+			}
+			if cfg.HyperV.CPUs != wantCPU || cfg.HyperV.Memory != wantMemory {
+				t.Fatal("file positive-only application changed")
+			}
+			t.Setenv("CRABBOX_HYPERV_CPUS", fmt.Sprint(value))
+			t.Setenv("CRABBOX_HYPERV_MEMORY", fmt.Sprint(value))
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.HyperV.CPUs != value || cfg.HyperV.Memory != value {
+				t.Fatal("environment signed values were not retained")
+			}
+			t.Setenv("CRABBOX_HYPERV_CPUS", "invalid")
+			t.Setenv("CRABBOX_HYPERV_MEMORY", "invalid")
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.HyperV.CPUs != value || cfg.HyperV.Memory != value {
+				t.Fatal("malformed environment did not preserve prior values")
+			}
+		})
 	}
 }

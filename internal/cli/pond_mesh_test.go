@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -205,18 +206,39 @@ func TestApplyLeaseCreateFlagsSetsExposedPorts(t *testing.T) {
 		Network:     NetworkAuto,
 		Capacity:    CapacityConfig{Market: "spot"},
 	}
-	fs := flag.NewFlagSet("warmup", flag.ContinueOnError)
-	values := registerLeaseCreateFlags(fs, defaults)
-	if err := fs.Parse([]string{"--expose", "8080", "--expose", "9090"}); err != nil {
-		t.Fatal(err)
-	}
-	cfg := defaults
-	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
-		t.Fatalf("applyLeaseCreateFlags: %v", err)
-	}
-	want := []string{"8080", "9090"}
-	if !reflect.DeepEqual(cfg.ExposedPorts, want) {
-		t.Fatalf("cfg.ExposedPorts=%v want %v", cfg.ExposedPorts, want)
+	for _, tc := range []struct {
+		name        string
+		leaseID     string
+		coordinator string
+		mode        BrokerMode
+	}{
+		{name: "managed creation", coordinator: "https://coordinator.example.com", mode: BrokerModeManaged},
+		{name: "direct reuse", leaseID: "cbx_direct"},
+		{name: "registered reuse", leaseID: "cbx_registered", coordinator: "https://coordinator.example.com", mode: BrokerModeRegistered},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := defaults
+			cfg.BrokerMode = tc.mode
+			cfg.Coordinator = tc.coordinator
+			var stderr bytes.Buffer
+			fs := flag.NewFlagSet("warmup", flag.ContinueOnError)
+			fs.SetOutput(&stderr)
+			values := registerLeaseCreateFlags(fs, cfg)
+			if err := fs.Parse([]string{"--provider", "hetzner", "--expose", "9090,8080", "--expose", "9090"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyLeaseCreateFlagsForLease(&cfg, fs, values, tc.leaseID); err != nil {
+				t.Fatalf("applyLeaseCreateFlags: %v", err)
+			}
+			want := []string{"8080", "9090"}
+			if !reflect.DeepEqual(cfg.ExposedPorts, want) {
+				t.Fatalf("cfg.ExposedPorts=%v want %v", cfg.ExposedPorts, want)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("unexpected diagnostic: %s", stderr.String())
+			}
+		})
 	}
 }
 
@@ -915,31 +937,45 @@ func TestDisambiguatePondMemberNamesAvoidsShellExportCollisions(t *testing.T) {
 	}
 }
 
+func assertSyntheticExeDevListCall(t *testing.T, runner *recordingCommandRunner) {
+	t.Helper()
+	if len(runner.calls) != 1 {
+		t.Fatalf("process calls=%d, want one exe.dev list", len(runner.calls))
+	}
+	call := runner.calls[0]
+	wantTail := []string{"exe.example.test", "ls --l --json"}
+	if call.Name != "ssh" || len(call.Args) < len(wantTail) || !reflect.DeepEqual(call.Args[len(call.Args)-len(wantTail):], wantTail) {
+		t.Fatalf("process=%q args=%q, want only synthetic exe.dev list", call.Name, call.Args)
+	}
+}
+
 // TestCollectPondMembersAcrossProvidersFiltersByCapability is the cross-
 // provider gating test for the capability refactor. It seeds claims for a
-// mix of SSH-mesh-capable (Hetzner, RunPod) and URL-only (Islo, Modal)
+// mix of SSH-mesh-capable (Hetzner, exe.dev) and URL-only (Islo, Modal)
 // providers in the same pond, then asserts that `collectPondMembersAcrossProviders`:
 //
-//   - includes Hetzner and RunPod in the iteration (both advertise FeatureSSH);
+//   - includes Hetzner and exe.dev in the iteration (both advertise FeatureSSH);
 //   - lands Islo and Modal in the `ineligible` slice (URLBridge-only, no SSH);
 //   - and filters out claims that belong to a different pond.
 //
-// The actual `pondMember` list comes back empty because the test SSH backend's
-// List() returns nil — the test is about the capability gate, not the member
-// projection.
+// Empty synthetic inventories keep this focused on the capability gate; the
+// real exe.dev adapter lists through the recording command runner.
 func TestCollectPondMembersAcrossProvidersFiltersByCapability(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "cbx_hetzner", Slug: "api", Provider: "hetzner", Pond: "alpha", RepoRoot: "/r"},
-		{LeaseID: "cbx_runpod", Slug: "edge", Provider: "exe-dev", Pond: "alpha", RepoRoot: "/r"},
+		{LeaseID: "cbx_exedev", Slug: "edge", Provider: "exe-dev", Pond: "alpha", RepoRoot: "/r"},
 		{LeaseID: "isb_modal", Slug: "fn", Provider: "modal", Pond: "alpha", RepoRoot: "/r"},
 		{LeaseID: "isb_islo", Slug: "share", Provider: "islo", Pond: "alpha", RepoRoot: "/r"},
 		{LeaseID: "cbx_beta", Slug: "noise", Provider: "hetzner", Pond: "beta", RepoRoot: "/r"},
 	})
 	cfg := defaultConfig()
-	_, ineligible, err := collectPondMembersAcrossProviders(context.Background(), Runtime{}, cfg, "alpha", "")
+	cfg.ExeDev.ControlHost = "exe.example.test"
+	runner := &recordingCommandRunner{result: LocalCommandResult{Stdout: `{ "vms": [] }`}}
+	_, ineligible, err := collectPondMembersAcrossProviders(context.Background(), testRuntimeWithRunner(runner), cfg, "alpha", "")
 	if err != nil {
 		t.Fatalf("collectPondMembersAcrossProviders: %v", err)
 	}
+	assertSyntheticExeDevListCall(t, runner)
 	sort.Strings(ineligible)
 	want := []string{"islo", "modal"}
 	if !reflect.DeepEqual(ineligible, want) {
@@ -953,13 +989,16 @@ func TestCollectPondMembersAcrossProvidersFiltersByCapability(t *testing.T) {
 func TestCollectPondMembersAcrossProvidersHonorsProviderFilter(t *testing.T) {
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "cbx_hetzner", Slug: "api", Provider: "hetzner", Pond: "alpha", RepoRoot: "/r"},
-		{LeaseID: "cbx_runpod", Slug: "edge", Provider: "exe-dev", Pond: "alpha", RepoRoot: "/r"},
+		{LeaseID: "cbx_exedev", Slug: "edge", Provider: "exe-dev", Pond: "alpha", RepoRoot: "/r"},
 	})
 	cfg := defaultConfig()
-	_, ineligible, err := collectPondMembersAcrossProviders(context.Background(), Runtime{}, cfg, "alpha", "exe-dev")
+	cfg.ExeDev.ControlHost = "exe.example.test"
+	runner := &recordingCommandRunner{result: LocalCommandResult{Stdout: `{ "vms": [] }`}}
+	_, ineligible, err := collectPondMembersAcrossProviders(context.Background(), testRuntimeWithRunner(runner), cfg, "alpha", "exe-dev")
 	if err != nil {
 		t.Fatalf("collectPondMembersAcrossProviders: %v", err)
 	}
+	assertSyntheticExeDevListCall(t, runner)
 	if len(ineligible) != 0 {
 		t.Fatalf("expected no ineligible when filter excludes other providers, got %v", ineligible)
 	}
@@ -978,7 +1017,7 @@ func TestProviderCapabilitiesPrimary(t *testing.T) {
 		{"hetzner", TransportTailnet},
 		{"azure", TransportTailnet},
 		{"gcp", TransportTailnet},
-		{"aws", TransportSSH},     // FeatureSSH only; no FeatureTailscale yet
+		{"aws", TransportTailnet},
 		{"proxmox", TransportSSH}, // legacy mapping was TransportTailnet — capability model corrects to SSH
 		{"exe-dev", TransportSSH},
 		{"daytona", TransportSSH},
@@ -1008,7 +1047,7 @@ func TestProviderCapabilitiesAvailable(t *testing.T) {
 		{"hetzner", []string{TransportTailnet, TransportSSH}},
 		{"azure", []string{TransportTailnet, TransportSSH}},
 		{"gcp", []string{TransportTailnet, TransportSSH}},
-		{"aws", []string{TransportSSH}},
+		{"aws", []string{TransportTailnet, TransportSSH}},
 		{"exe-dev", []string{TransportSSH}},
 		{"islo", []string{TransportURL}},
 		{"modal", nil},

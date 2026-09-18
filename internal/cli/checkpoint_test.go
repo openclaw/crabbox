@@ -3297,18 +3297,29 @@ func TestValidateCheckpointForkWorkdirUsesProviderHook(t *testing.T) {
 	}
 }
 
-func TestParseInterspersedFlagsAllowsCheckpointBeforeFlags(t *testing.T) {
-	fs := newFlagSet("checkpoint restore", io.Discard)
-	id := fs.String("id", "", "lease id")
-	clear := fs.Bool("clear", true, "clear")
-	if err := parseInterspersedFlags(fs, []string{"chk_123", "--id", "cbx_123", "--clear=false"}); err != nil {
-		t.Fatal(err)
-	}
-	if *id != "cbx_123" || *clear {
-		t.Fatalf("flags id=%q clear=%t", *id, *clear)
-	}
-	if fs.NArg() != 1 || fs.Arg(0) != "chk_123" {
-		t.Fatalf("args=%q", fs.Args())
+func TestParseInterspersedFlagsPreservesArguments(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{args: []string{"chk_123", "--id", "cbx_123", "--clear=false"}, want: []string{"chk_123"}},
+		{args: []string{"--id", "cbx_123", "--clear=false", "--", "--help"}, want: []string{"--help"}},
+		{args: []string{"chk_123", "--id", "cbx_123", "--clear=false", "--", "--help"}, want: []string{"chk_123", "--help"}},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			fs := newFlagSet("checkpoint restore", io.Discard)
+			id := fs.String("id", "", "lease id")
+			clear := fs.Bool("clear", true, "clear")
+			if err := parseInterspersedFlags(fs, tc.args); err != nil {
+				t.Fatal(err)
+			}
+			if *id != "cbx_123" || *clear {
+				t.Fatalf("flags id=%q clear=%t", *id, *clear)
+			}
+			if !reflect.DeepEqual(fs.Args(), tc.want) {
+				t.Fatalf("args=%q, want %q", fs.Args(), tc.want)
+			}
+		})
 	}
 }
 

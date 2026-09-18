@@ -205,6 +205,15 @@ func requireIsloIdentityMatch(claim core.LeaseClaim, observed isloIdentity) (str
 	return fmt.Sprintf("islo sandbox %q reports different creator attribution than the lease recorded: %s; attribution only corroborates ownership, so this is advisory only and does not block the operation", observed.Name, strings.Join(advisories, "; ")), nil
 }
 
+// Exec admission requires complete observed identity for an ID-bound claim.
+// Legacy unbound claims retain their existing name-based compatibility contract.
+func requireIsloExecIdentity(claim core.LeaseClaim, name string, live isloIdentity, before string) error {
+	if bound := isloClaimIdentity(claim).ID; bound != "" && (live.ID != bound || live.Name != name) {
+		return core.Exit(4, "islo sandbox %q did not identify claimed resource %s before %s; refusing remote execution", name, bound, before)
+	}
+	return nil
+}
+
 // A deletion timestamp alone does not prove the sandbox has reached a terminal
 // state. Callers must also verify that the response identifies their resource.
 func isloSandboxDeleted(sandbox *gosdk.SandboxResponse) bool {

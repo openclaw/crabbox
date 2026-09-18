@@ -106,11 +106,14 @@ resource and deletion evidence are preserved independently.
 ## CLI request budgets
 
 The CLI bounds individual lease reads (including authoritative provider
-metadata), health, identity, provider readiness, and HTTP heartbeat requests to
+metadata), health, identity, and provider readiness requests to
 30 seconds. The same deadline covers authentication, response-body reads, and
 any eligible read-only curl fallback; an earlier caller deadline still wins.
-Best-effort foreground lease touches retain their shorter 20-second budget.
-Provisioning and image operations retain the 30-minute HTTP budget.
+HTTP heartbeats use the existing 30-minute mutation budget because a changed
+source policy can require a provider access refresh before the response.
+Automatic heartbeats and best-effort foreground lease touches retain their
+shorter 20-second caller budgets. Provisioning and image operations retain the
+30-minute HTTP budget.
 
 Before releasing a lease, `stop` allows ten seconds for its preliminary lookup.
 If that lookup fails, ordinary stop can use the existing provider-scoped release
@@ -253,6 +256,11 @@ An unbound canceled tombstone rejects only that exact owner/org/token operation;
 it does not reserve the provisional ID against a fresh token or a fixed,
 registered, or workspace lifecycle. Pending and canonical-bound attempts remain
 global ID reservations.
+An exact `502 tailscale_unavailable` response stops create replay because the
+coordinator rejected Tailscale preparation before provider allocation. The CLI
+still cancels its ordinary create attempt and reports the original error; fixed
+ID operations retain their existing caller-owned recovery. Other server errors
+and transport failures continue to use the same-token recovery path.
 Tokenless POSTs from older CLIs remain supported with their previous behavior,
 but they do not gain this cancellation guarantee. Roll out the coordinator
 before distributing a CLI that sends create attempts; once token-bound creates
@@ -500,15 +508,18 @@ retries preserve that wakeup, including after coordinator reconstruction.
 An already-due stored alarm time is rearmed at the earlier of that time and the
 requested deadline: a consumed runtime job can leave its timestamp behind.
 An earlier future alarm is preserved without another scheduling write.
-AWS heartbeat access refresh also arms its recorded ingress reconciliation at the
-existing one-second minimum delay instead of rescanning unrelated fleet metadata
-while holding the ingress lock. Earlier alarms remain scheduled.
+AWS heartbeats with complete, unchanged SSH source policy record ingress
+reconciliation and arm its existing one-second wakeup before acknowledging the
+renewal. They do not wait behind other AWS ingress work. The AWS provider compares
+the current policy using the same pinned-range and address-family rules as an
+access refresh. Changed sources or incomplete source metadata still finish the
+normal refresh attempt before the response. Earlier alarms remain scheduled.
 Alarm storage errors still fail the request and do not certify cleanup success.
 The existing full scheduler shares the lifecycle mutex with this arming, so a
 scan cannot race an acknowledgement's earlier wakeup. Full maintenance scans,
-slug resolution, provider access refresh, and provider ingress locking retain
-their existing behavior; their work and other shared-queue stalls are not
-bounded by this acknowledgement path.
+slug resolution, access refreshes that change sources, and provider ingress locking
+retain their existing behavior. An acknowledgement confirms the renewal and its
+scheduled maintenance, not successful installation of security-group rules.
 
 **Expiry and cleanup.** A DO alarm and the cron both run maintenance:
 `expireLeases` deletes cloud servers for active leases past `expiresAt`

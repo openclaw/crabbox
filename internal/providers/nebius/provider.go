@@ -70,3 +70,9 @@ func (Provider) ValidateConfig(cfg core.Config) error {
 	}
 	return nil
 }
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	cfg.Nebius = cfg.Nebius.WithRuntimeDefaults()
+	core.ApplyLinuxConnectionDefaults(cfg, cfg.Nebius.User, core.BaseConfig().SSHPort)
+	return nil
+}

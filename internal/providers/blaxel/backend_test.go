@@ -365,6 +365,31 @@ func TestRunForwardsEnvInProcessBodyAndReturnsRemoteExit(t *testing.T) {
 	}
 }
 
+func TestRunUsesCommandIntentAtProcessBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		command     []string
+		literal     map[int]bool
+		wantCommand string
+		wantArgs    []string
+	}{
+		{name: "single shell source", command: []string{"printf ready && printf done"}, wantCommand: "bash", wantArgs: []string{"-lc", "printf ready && printf done"}},
+		{name: "literal operator", command: []string{"printf", "%s", "&&"}, literal: map[int]bool{2: true}, wantCommand: "printf", wantArgs: []string{"%s", "&&"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend, fake, _, _, _ := newLifecycleBackend(t)
+			_, err := backend.Run(t.Context(), core.RunRequest{Repo: testRepo(t), NoSync: true, Keep: true, Command: tc.command, CommandLiteralArgs: tc.literal})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := fake.execReqs[len(fake.execReqs)-1]
+			if got.Command != tc.wantCommand || strings.Join(got.Args, "\x00") != strings.Join(tc.wantArgs, "\x00") {
+				t.Fatalf("process=%q %#v, want %q %#v", got.Command, got.Args, tc.wantCommand, tc.wantArgs)
+			}
+		})
+	}
+}
+
 func TestRunPreservesCancellationAfterStoppingProcess(t *testing.T) {
 	b, fake, _, _, _ := newLifecycleBackend(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -547,7 +572,7 @@ func TestSharedArchiveSyncNativeWorkspace(t *testing.T) {
 					return err
 				}
 			}}
-			_, _, err := b.syncWorkspace(ctx, client, "sbx-owned", core.RunRequest{Repo: repo}, workspace, nil)
+			_, _, err := b.workspace(client, "sbx-owned", core.RunRequest{Repo: repo}, workspace).Sync(ctx, nil)
 			success := scenario == "replace" || scenario == "merge"
 			if (err == nil) != success {
 				t.Fatalf("sync err=%v success=%t", err, success)
@@ -707,23 +732,6 @@ func TestWaitProcessStopsRemoteWhenGetProcessReturnsCancellation(t *testing.T) {
 				t.Fatalf("StopProcess context deadline=%t err=%v", fake.stopDeadline, fake.stopContextErr)
 			}
 		})
-	}
-}
-
-func TestBuildCommandPreservesExplicitShellScript(t *testing.T) {
-	got, err := buildCommand([]string{"python3 --version && pytest"}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(got, "\x00") != "bash\x00-lc\x00python3 --version && pytest" {
-		t.Fatalf("shell command=%#v", got)
-	}
-	auto, err := buildCommand([]string{"KEY=value", "pytest"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Join(auto, "\x00") != "bash\x00-lc\x00KEY='value' 'pytest'" {
-		t.Fatalf("auto-shell command=%#v", auto)
 	}
 }
 

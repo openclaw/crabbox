@@ -20,6 +20,7 @@ const headers = {
   "x-crabbox-owner": "alice@example.com",
   "x-crabbox-org": "example-org",
   "x-crabbox-admin": "true",
+  "x-crabbox-admin-grant-version": "a".repeat(64),
 };
 
 const env = {

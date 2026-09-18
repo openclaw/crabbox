@@ -24872,6 +24872,72 @@ describe("fleet lease identity and idle", () => {
     expect(storage.value("lease:cbx_abcdef123456")).toBeUndefined();
   });
 
+  it("returns Tailscale OAuth failures before provisioning and preserves the unbound create attempt", async () => {
+    const storage = new MemoryStorage();
+    const leaseID = "cbx_abcdef123456";
+    const createAttemptID = "cat_0123456789abcdef0123456789abcdef";
+    const createMachine = vi.fn<(config: LeaseConfig) => void>();
+    const prepareLease = vi.fn<
+      (config: LeaseConfig, lease: LeaseRecord) => { config: LeaseConfig; lease: LeaseRecord }
+    >((config, lease) => ({ config, lease }));
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse({ message: "invalid client credentials" }, 401),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const fleet = testFleet(
+      storage,
+      {
+        hetzner: fakeProvider(createMachine, { onPrepareLeaseCreate: prepareLease }),
+      },
+      {
+        CRABBOX_TAILSCALE_CLIENT_ID: "client-id",
+        CRABBOX_TAILSCALE_CLIENT_SECRET: "client-secret",
+        CRABBOX_TAILSCALE_TAGS: "tag:ci",
+      },
+    );
+
+    const create = await fleet.fetch(
+      request("POST", "/v1/leases", {
+        headers: { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" },
+        body: {
+          leaseID,
+          createAttemptID,
+          provider: "hetzner",
+          tailscale: true,
+          tailscaleTags: ["tag:ci"],
+          sshPublicKey: "ssh-ed25519 test",
+        },
+      }),
+    );
+
+    expect(create.status).toBe(502);
+    await expect(create.json()).resolves.toEqual({
+      error: "tailscale_unavailable",
+      message: "tailscale oauth token failed: http 401",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.tailscale.com/api/v2/oauth/token",
+      expect.anything(),
+    );
+    expect(prepareLease).not.toHaveBeenCalled();
+    expect(createMachine).not.toHaveBeenCalled();
+    expect(storage.value(`lease:${leaseID}`)).toBeUndefined();
+    expect(storage.value(`provider-access:${leaseID}`)).toBeUndefined();
+    expect(storage.value(provisioningOperationKey(leaseID))).toBeUndefined();
+    const attempt = storage.value(`create-attempt:${leaseID}`);
+    expect(attempt).toMatchObject({
+      requestedLeaseID: leaseID,
+      token: createAttemptID,
+      owner: "alice@example.com",
+      org: orgKeyForLabel("example-org"),
+      state: "pending",
+    });
+    expect(attempt).not.toHaveProperty("canonicalLeaseID");
+    expect(attempt).not.toHaveProperty("cloudID");
+    expect(attempt).not.toHaveProperty("generation");
+  });
+
   it.each(["oauth token", "create auth key"])(
     "translates brokered Tailscale %s tag ownership denials without raw diagnostics",
     async (operation) => {
@@ -26924,6 +26990,121 @@ describe("fleet lease identity and idle", () => {
     expect(f.actions.filter((action) => action === "LookupEvents")).toHaveLength(2);
     expect(f.storage.value(`lease:${f.lease.id}`)).toEqual(before);
     expect(f.storage.value(`aws-cleanup-recovery-audit:${f.lease.id}`)).toBeUndefined();
+  });
+
+  it.each([
+    { pausedRead: "provider lookup", rotateGrant: true },
+    { pausedRead: "eligibility read", rotateGrant: true },
+    { pausedRead: "audit read", rotateGrant: true },
+    { pausedRead: "audit read", rotateGrant: false },
+  ])(
+    "fences legacy AWS recovery admin grants across $pausedRead (rotate=$rotateGrant)",
+    async ({ pausedRead, rotateGrant }) => {
+      const f = awsLegacyRecoveryFixture();
+      const inspected = await f.inspect();
+      expect(inspected.status).toBe(200);
+      const { inspection } = (await inspected.json()) as {
+        inspection: { claimFingerprint: string };
+      };
+      const leaseKey = `lease:${f.lease.id}`;
+      const auditKey = `aws-cleanup-recovery-audit:${f.lease.id}`;
+      const before = structuredClone(f.storage.value<LeaseRecord>(leaseKey)!);
+      const beforeWake = f.storage.value(legacyAlarmKey);
+      const beforeAlarm = f.storage.alarm();
+      const reading = deferred<void>();
+      const resume = deferred<void>();
+      let paused = false;
+      let auditWrites = 0;
+      const pause = async () => {
+        paused = true;
+        reading.resolve();
+        await resume.promise;
+      };
+      f.storage.beforePut = async (key) => {
+        if (key === auditKey) auditWrites += 1;
+      };
+      f.state.beforeLookup = async () => {
+        if (pausedRead === "provider lookup") {
+          await pause();
+          return;
+        }
+        const watchedKey =
+          pausedRead === "audit read" ? auditKey : provisioningOperationKey(f.lease.id);
+        f.storage.afterGet = async (key) => {
+          if (!paused && key === watchedKey) await pause();
+        };
+      };
+
+      const recovery = f.recover(inspection.claimFingerprint);
+      try {
+        await Promise.race([
+          reading.promise,
+          recovery.then((response) => {
+            throw new Error(`recovery settled before paused read: HTTP ${response.status}`);
+          }),
+        ]);
+        const forwarded = await f.fleet.fetch(
+          request("GET", "/v1/leases/cbx_ffffffffffff", {
+            headers: {
+              ...f.headers,
+              "x-crabbox-admin-grant-version": (rotateGrant ? "b" : "a").repeat(64),
+            },
+          }),
+        );
+        expect(forwarded.status).toBe(404);
+        resume.resolve();
+        const response = await recovery;
+        expect(response.status).toBe(rotateGrant ? 409 : 200);
+        const body = (await response.json()) as { error?: string; recovery?: unknown };
+        const recoveredLease = {
+          ...before,
+          providerScope: "aws:account:123456789012",
+          provisioningResourceMayExist: false,
+          cleanupRetryAt: expect.any(String),
+          updatedAt: expect.any(String),
+        };
+        const scheduledWake = expect.any(Number);
+        expect(body).toMatchObject(
+          rotateGrant
+            ? { error: "cleanup_recovery_refused" }
+            : { recovery: { providerScope: "aws:account:123456789012" } },
+        );
+        expect(auditWrites).toBe(rotateGrant ? 0 : 1);
+        expect(f.storage.value(leaseKey)).toEqual(rotateGrant ? before : recoveredLease);
+        expect(f.storage.value(auditKey)).toEqual(rotateGrant ? undefined : body.recovery);
+        expect(f.storage.value(legacyAlarmKey)).toEqual(rotateGrant ? beforeWake : scheduledWake);
+        expect(f.storage.alarm()).toEqual(rotateGrant ? beforeAlarm : scheduledWake);
+        expect(rotateGrant || Number(f.storage.alarm()) <= Date.now()).toBe(true);
+        expect(f.actions).not.toContain("DeleteKeyPair");
+        expect(f.actions).not.toContain("TerminateInstances");
+      } finally {
+        resume.resolve();
+        await recovery;
+      }
+    },
+  );
+
+  it("refuses legacy AWS recovery without an admitted admin grant version", async () => {
+    const f = awsLegacyRecoveryFixture();
+    f.headers["x-crabbox-admin-grant-version"] = "";
+    const inspected = await f.inspect();
+    expect(inspected.status).toBe(200);
+    const { inspection } = (await inspected.json()) as {
+      inspection: { claimFingerprint: string };
+    };
+    const key = `lease:${f.lease.id}`;
+    const before = structuredClone(f.storage.value(key));
+    const beforeWake = f.storage.value(legacyAlarmKey);
+    const beforeAlarm = f.storage.alarm();
+
+    expect((await f.recover(inspection.claimFingerprint)).status).toBe(409);
+
+    expect(f.storage.value(key)).toEqual(before);
+    expect(f.storage.value(`aws-cleanup-recovery-audit:${f.lease.id}`)).toBeUndefined();
+    expect(f.storage.value(legacyAlarmKey)).toBe(beforeWake);
+    expect(f.storage.alarm()).toBe(beforeAlarm);
+    expect(f.actions).not.toContain("DeleteKeyPair");
+    expect(f.actions).not.toContain("TerminateInstances");
   });
 
   it.each([
@@ -29658,6 +29839,103 @@ describe("fleet lease identity and idle", () => {
     ]);
     expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
   });
+
+  it.each([true, false])(
+    "handles concurrent same-source heartbeats during pending AWS ingress (complete=%s)",
+    async (complete) => {
+      const storage = new MemoryStorage();
+      const reconcileStarted = deferred<void>();
+      const finishReconcile = deferred<void>();
+      const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+      const reconcile = vi.spyOn(provider, "reconcileLeaseAccess").mockImplementation(async () => {
+        if (reconcile.mock.calls.length === 1) {
+          reconcileStarted.resolve();
+          await finishReconcile.promise;
+        }
+      });
+      const fleet = testFleet(storage, { aws: provider });
+      const now = Date.now();
+      const source = "198.51.100.20";
+      const leases = Array.from({ length: 4 }, (_, index) => {
+        const pins =
+          index === 0 ? [source + "/32", "203.0.113.1/32", "203.0.113.2/32", "203.0.113.3/32"] : [];
+        const lease = testLease({
+          id: `cbx_${(index + 1).toString().padStart(12, "0")}`,
+          provider: "aws",
+          owner: "alice@example.com",
+          org: "example-org",
+          region: "eu-west-1",
+          providerScope: "aws:account:123456789012",
+          createdAt: new Date(now - 3600_000).toISOString(),
+          lastTouchedAt: new Date(now - 1800_000).toISOString(),
+          expiresAt: new Date(now + 9000_000).toISOString(),
+          ttlSeconds: 28800,
+          idleTimeoutSeconds: 10800,
+          network: {
+            awsSecurityGroupID: "sg-shared",
+            sshSourceCIDRs: pins.length > 0 ? pins : [source + "/32"],
+            sshPinnedSourceCIDRs: pins,
+            sshSourceCIDRsComplete: complete,
+          },
+        });
+        storage.seed(`lease:${lease.id}`, structuredClone(lease));
+        return lease;
+      });
+      storage.seed("aws-ingress-reconcile:pending", {
+        targets: [
+          {
+            anchor: leases[0],
+            attempts: 0,
+            generation: "older-reconciliation",
+            updatedAt: new Date(now).toISOString(),
+            retryAt: new Date(now).toISOString(),
+          },
+        ],
+      });
+
+      const alarm = fleet.alarm();
+      await reconcileStarted.promise;
+      const heartbeats = leases.map((lease) =>
+        fleet.fetch(
+          request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+            headers: {
+              "cf-connecting-ip": source,
+              "x-crabbox-owner": lease.owner,
+              "x-crabbox-org": "example-org",
+            },
+            body: { idleTimeoutSeconds: 10800 },
+          }),
+        ),
+      );
+      try {
+        const responses = await Promise.race([
+          Promise.all(heartbeats),
+          new Promise<undefined>((resolve) => setImmediate(() => resolve(undefined))),
+        ]);
+        expect(responses !== undefined).toBe(complete);
+        expect(reconcile).toHaveBeenCalledTimes(1);
+      } finally {
+        finishReconcile.resolve();
+        await Promise.allSettled([...heartbeats, alarm]);
+      }
+
+      const responses = await Promise.all(heartbeats);
+      expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200]);
+      const renewed = await Promise.all(
+        responses.map(async (response) => (await response.json()) as { lease: LeaseRecord }),
+      );
+      for (const [index, { lease }] of renewed.entries()) {
+        expect(Date.parse(lease.expiresAt)).toBeGreaterThan(Date.parse(leases[index].expiresAt));
+        expect(lease.network).toEqual({ ...leases[index].network, sshSourceCIDRsComplete: true });
+        expect(lease.idleTimeoutSeconds).toBe(10800);
+        expect(lease.ttlSeconds).toBe(28800);
+      }
+      expect(storage.value("aws-ingress-reconcile:pending")).toBeDefined();
+      await fleet.alarm();
+      expect(reconcile.mock.calls.length).toBeGreaterThan(1);
+      expect(storage.value("aws-ingress-reconcile:pending")).toBeUndefined();
+    },
+  );
 
   it("preserves active AWS lease SSH ingress CIDRs while creating another lease", async () => {
     const storage = new MemoryStorage();
@@ -49637,6 +49915,57 @@ describe("synthetic acknowledgement reliability", () => {
     },
   );
 
+  it.each(["intent", "alarm"])(
+    "does not acknowledge unchanged-source renewal when ingress %s persistence fails",
+    async (failure) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const storage = new RetainedAlarmStorage();
+        const lease = {
+          ...seedLease(storage),
+          provider: "aws" as const,
+          region: "eu-west-1",
+          network: {
+            awsSecurityGroupID: "sg-heartbeat",
+            sshSourceCIDRs: ["198.51.100.44/32"],
+            sshSourceCIDRsComplete: true,
+          },
+        };
+        storage.seed(`lease:${lease.id}`, lease);
+        const provider = new AWSProvider({} as Env, "eu-west-1", storage);
+        const reconcile = vi.spyOn(provider, "reconcileLeaseAccess").mockResolvedValue();
+        const fleet = testFleet(storage, { aws: provider });
+        await fleet.ready();
+        const previousAlarm = Date.parse(lease.expiresAt);
+        await alarmRuntime(storage).scheduleAlarm(previousAlarm);
+        if (failure === "intent") {
+          storage.beforePut = async (key) => {
+            if (key === "aws-ingress-reconcile:pending") {
+              throw new Error("synthetic ingress intent failure");
+            }
+          };
+        } else {
+          vi.spyOn(storage, "beforeAlarmWrite").mockRejectedValueOnce(
+            new Error("synthetic ingress alarm failure"),
+          );
+        }
+
+        const response = await fleet.fetch(
+          request("POST", `/v1/leases/${lease.id}/heartbeat`, {
+            headers: { ...headers, "cf-connecting-ip": "198.51.100.44" },
+          }),
+        );
+        expect(response.status).toBe(500);
+        expect(storage.alarm()).toBe(previousAlarm);
+        expect(storage.queuedAlarm).toBe(previousAlarm);
+        expect(Boolean(storage.value("aws-ingress-reconcile:pending"))).toBe(failure === "alarm");
+        expect(reconcile).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("publishes native alarm bookkeeping only for the committed serialization attempt", async () => {
     const storage = new RetainedAlarmStorage();
     const runtime = alarmRuntime(storage);
@@ -50671,7 +51000,7 @@ function awsLegacyRecoveryFixture(keep = false) {
     lookupStatus: 200,
     lookupBody: undefined as string | undefined,
     lookupError: false,
-    beforeLookup: undefined as (() => void) | undefined,
+    beforeLookup: undefined as (() => void | Promise<void>) | undefined,
     keyFailure: false,
     keyDeleted: false,
   };
@@ -50690,7 +51019,7 @@ function awsLegacyRecoveryFixture(keep = false) {
         actions.push("LookupEvents");
         const lookup = (await outgoing.json()) as Record<string, unknown>;
         lookupAttributes.push(lookup.LookupAttributes);
-        state.beforeLookup?.();
+        await state.beforeLookup?.();
         if (state.lookupError) throw new Error("private-bootstrap-canary");
         return new Response(
           state.lookupBody ??
@@ -50749,6 +51078,7 @@ function awsLegacyRecoveryFixture(keep = false) {
     "x-crabbox-owner": lease.owner,
     "x-crabbox-org": "example-org",
     "x-crabbox-admin": "true",
+    "x-crabbox-admin-grant-version": "a".repeat(64),
   };
   const inspect = () => fleet.fetch(request("GET", `/v1/leases/${lease.id}/cleanup`, { headers }));
   const recover = (claimFingerprint: string) =>

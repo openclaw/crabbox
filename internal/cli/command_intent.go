@@ -49,5 +49,14 @@ func (c CommandIntent) ShellSource() string {
 	if c.shell {
 		return c.source
 	}
-	return "exec " + strings.Join(shellWords(c.args), " ")
+	return "exec " + c.ShellScript()
+}
+
+// ShellScript renders intent inside a transport-owned POSIX shell without
+// replacing that shell. Literal arguments stay quoted, including operator text.
+func (c CommandIntent) ShellScript() string {
+	if c.shell {
+		return c.source
+	}
+	return strings.Join(shellWords(c.args), " ")
 }

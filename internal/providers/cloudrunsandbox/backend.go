@@ -73,12 +73,12 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (finalResult cor
 	if req.Options.Tailscale.Enabled {
 		return core.RunResult{}, core.Exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
-	var command []string
+	var command core.CommandIntent
 	if !req.SyncOnly {
 		var err error
-		command, err = buildCommand(req.Command, req.ShellMode)
+		command, err = core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 		if err != nil {
-			return core.RunResult{}, err
+			return core.RunResult{}, core.Exit(2, "%v", err)
 		}
 	}
 	workdir, err := cloudRunSandboxWorkdir(b.cfg)
@@ -92,10 +92,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (finalResult cor
 	}
 	var prepared *core.PreparedArchive
 	if req.ID == "" && !req.NoSync {
-		prepared, err = core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-			Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-			TempPattern: "crabbox-cloud-run-sandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-		})
+		prepared, err = b.workspace(transport, "", req, workdir).PrepareArchive(ctx)
 		if err != nil {
 			return core.RunResult{}, err
 		}
@@ -192,7 +189,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (finalResult cor
 				pendingTiming.SyncPhases = syncPhases
 			}
 			if !req.NoSync {
-				syncPhases, syncDuration, err = b.syncWorkspace(ctx, transport, sandboxID, req, workdir, prepared)
+				syncPhases, syncDuration, err = b.workspace(transport, sandboxID, req, workdir).Sync(ctx, prepared)
 				if req.TimingJSON {
 					pendingTiming.SyncMs = syncDuration.Milliseconds()
 					pendingTiming.SyncPhases = syncPhases
@@ -202,7 +199,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (finalResult cor
 					return core.RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true, Session: session}, err
 				}
 				fmt.Fprintf(b.rt.Stderr, "sync complete in %s\n", syncDuration.Round(time.Millisecond))
-			} else if err := b.ensureWorkspace(ctx, transport, sandboxID, workdir); err != nil {
+			} else if err := b.workspace(transport, sandboxID, req, workdir).Ensure(ctx); err != nil {
 				core.HandleDelegatedRunFailure(b.rt.Stderr, req, providerName, leaseID, slug, b.cfg.IdleTimeout, b.cfg.TTL, acquired, &shouldStop)
 				return core.RunResult{Provider: providerName, LeaseID: leaseID, Slug: slug, Total: core.ClockNow(b.rt.Clock).Sub(started), SyncDelegated: true, Session: session}, err
 			}
@@ -233,7 +230,9 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (finalResult cor
 			commandStart := core.ClockNow(b.rt.Clock)
 			req.Observation.Phase(core.RunPhaseCommand)
 			stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputProvider)
-			exitCode, runErr := b.execCommand(ctx, transport, sandboxID, workdir, command, req.Env, stdout, stderr)
+			exitCode, runErr := transport.Exec(ctx, sandboxID, command.ShellScript(), execOptions{
+				Workdir: workdir, Env: req.Env, Timeout: defaultExecTimeout,
+			}, stdout, stderr)
 			commandDuration := core.ClockNow(b.rt.Clock).Sub(commandStart)
 			commandRan = true
 			outcome := shared.FinalizeDelegatedCommandOutcome(exitCode, runErr)
@@ -357,20 +356,7 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 				state = "unknown"
 			}
 		}
-		servers = append(servers, core.Server{
-			Provider: providerName,
-			CloudID:  sandboxID,
-			Name:     sandboxID,
-			Status:   state,
-			Labels: map[string]string{
-				"provider": providerName,
-				"lease":    claim.LeaseID,
-				"slug":     claim.Slug,
-				"pond":     claim.Pond,
-				"target":   targetLinux,
-				"state":    state,
-			},
-		})
+		servers = append(servers, shared.SandboxLeaseView(providerName, targetLinux, claim, sandboxID, sandboxID, state))
 	}
 	return servers, nil
 }

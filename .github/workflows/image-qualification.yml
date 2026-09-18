@@ -159,10 +159,15 @@ jobs:
           retention-days: 1
 
   admit:
-    name: Admit rollback-capable candidate
+    name: Prepare protected qualification handoff
     needs: [authorize, build-candidate]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: image-qualification
+    outputs:
+      handoff_sha256: ${{ steps.admit.outputs.handoff_sha256 }}
+      handoff_artifact_id: ${{ steps.handoff.outputs.artifact-id }}
+      handoff_artifact_digest: ${{ steps.handoff.outputs.artifact-digest }}
     steps:
       - name: Check out protected admission tooling
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -176,16 +181,36 @@ jobs:
           path: ${{ runner.temp }}/image-qualification-candidate
           merge-multiple: true
       - name: Verify manifest and rollback admission contract
+        id: admit
         env:
           GH_TOKEN: ${{ github.token }}
           QUALIFICATION_ARTIFACT_DIR: ${{ runner.temp }}/image-qualification-candidate
           QUALIFICATION_CANDIDATE_ARTIFACT_DIGEST: ${{ needs.build-candidate.outputs.candidate_artifact_digest }}
           QUALIFICATION_CANDIDATE_ARTIFACT_ID: ${{ needs.build-candidate.outputs.candidate_artifact_id }}
           QUALIFICATION_CANDIDATE_RUN_ID: ${{ needs.build-candidate.outputs.candidate_run_id }}
+          QUALIFICATION_HANDOFF_DIR: ${{ runner.temp }}/image-qualification-handoff
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          QUALIFICATION_AUTHORITY_SHA: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_SHA }}
+          QUALIFICATION_AUTHORITY_VERSION: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_VERSION }}
+          QUALIFICATION_EXPECTED_POLICY_HASH: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_POLICY_HASH }}
+          QUALIFICATION_AWS_REGION: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AWS_REGION }}
+          QUALIFICATION_SUBNET_ID: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_SUBNET_ID }}
+          QUALIFICATION_SECURITY_GROUP_ID: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_SECURITY_GROUP_ID }}
+          QUALIFICATION_BASE_AMI_ID: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_BASE_AMI_ID }}
+          QUALIFICATION_ROOT_GB: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ROOT_GB }}
         run: node scripts/image-qualification-control.mjs admit
+      - name: Publish immutable nonsecret handoff
+        id: handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-qualification-handoff-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/image-qualification-handoff
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 1
 
   deploy-enroll:
-    name: Protected deploy and enroll
+    name: Deploy after exact IAM binding and credential custody
     needs: [authorize, build-candidate, admit]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -223,6 +248,12 @@ jobs:
           artifact-ids: ${{ needs.build-candidate.outputs.candidate_artifact_id }}
           path: ${{ runner.temp }}/image-qualification-candidate
           merge-multiple: true
+      - name: Download immutable preparation
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.admit.outputs.handoff_artifact_id }}
+          path: ${{ runner.temp }}/image-qualification-handoff
+          merge-multiple: true
       - name: Revalidate, deploy, read back, and enroll
         id: deploy
         env:
@@ -236,6 +267,10 @@ jobs:
           QUALIFICATION_CANDIDATE_ARTIFACT_DIGEST: ${{ needs.build-candidate.outputs.candidate_artifact_digest }}
           QUALIFICATION_CANDIDATE_ARTIFACT_ID: ${{ needs.build-candidate.outputs.candidate_artifact_id }}
           QUALIFICATION_CANDIDATE_RUN_ID: ${{ needs.build-candidate.outputs.candidate_run_id }}
+          QUALIFICATION_HANDOFF_DIR: ${{ runner.temp }}/image-qualification-handoff
+          QUALIFICATION_HANDOFF_SHA256: ${{ needs.admit.outputs.handoff_sha256 }}
+          QUALIFICATION_HANDOFF_ARTIFACT_ID: ${{ needs.admit.outputs.handoff_artifact_id }}
+          QUALIFICATION_HANDOFF_ARTIFACT_DIGEST: ${{ needs.admit.outputs.handoff_artifact_digest }}
           QUALIFICATION_AWS_REGION: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AWS_REGION }}
           QUALIFICATION_SUBNET_ID: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_SUBNET_ID }}
           QUALIFICATION_SECURITY_GROUP_ID: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_SECURITY_GROUP_ID }}
@@ -255,7 +290,7 @@ jobs:
 
   arm:
     name: Protected final deployment admission
-    needs: [authorize, build-candidate, deploy-enroll]
+    needs: [authorize, build-candidate, admit, deploy-enroll]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: image-qualification
@@ -265,6 +300,12 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
+      - name: Download immutable preparation
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.admit.outputs.handoff_artifact_id }}
+          path: ${{ runner.temp }}/image-qualification-handoff
+          merge-multiple: true
       - name: Revalidate exact Worker version and arm execution
         id: arm
         env:
@@ -275,6 +316,17 @@ jobs:
           QUALIFICATION_CANDIDATE_ARTIFACT_DIGEST: ${{ needs.build-candidate.outputs.candidate_artifact_digest }}
           QUALIFICATION_CANDIDATE_ARTIFACT_ID: ${{ needs.build-candidate.outputs.candidate_artifact_id }}
           QUALIFICATION_CANDIDATE_RUN_ID: ${{ needs.build-candidate.outputs.candidate_run_id }}
+          QUALIFICATION_HANDOFF_DIR: ${{ runner.temp }}/image-qualification-handoff
+          QUALIFICATION_HANDOFF_SHA256: ${{ needs.admit.outputs.handoff_sha256 }}
+          QUALIFICATION_HANDOFF_ARTIFACT_ID: ${{ needs.admit.outputs.handoff_artifact_id }}
+          QUALIFICATION_HANDOFF_ARTIFACT_DIGEST: ${{ needs.admit.outputs.handoff_artifact_digest }}
+          QUALIFICATION_AUTHORITY_SHA: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_SHA }}
+          QUALIFICATION_AUTHORITY_VERSION: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AUTHORITY_VERSION }}
+          QUALIFICATION_AWS_REGION: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_AWS_REGION }}
+          QUALIFICATION_SUBNET_ID: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_SUBNET_ID }}
+          QUALIFICATION_SECURITY_GROUP_ID: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_SECURITY_GROUP_ID }}
+          QUALIFICATION_BASE_AMI_ID: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_BASE_AMI_ID }}
+          QUALIFICATION_ROOT_GB: ${{ vars.CRABBOX_IMAGE_QUALIFICATION_ROOT_GB }}
           QUALIFICATION_EXPECTED_RUN_ID: ${{ needs.deploy-enroll.outputs.run_id }}
           QUALIFICATION_EXPECTED_CANDIDATE_SHA: ${{ needs.deploy-enroll.outputs.candidate_sha }}
           QUALIFICATION_EXPECTED_CANDIDATE_WORKER: ${{ needs.deploy-enroll.outputs.candidate_worker }}

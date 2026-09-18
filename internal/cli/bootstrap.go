@@ -74,8 +74,8 @@ write_files:
   - path: /usr/local/bin/crabbox-ready
     permissions: '0755'
     content: |
-      #!/usr/bin/env bash
-      set -euo pipefail
+      #!/bin/sh
+      set -eu
       git --version
       rsync --version >/dev/null
       curl --version >/dev/null
@@ -307,8 +307,8 @@ with path.open('w') as output:
     config.write(output, space_around_delimiters=False)
 WSL_USER
 ` + sharedLinuxNodeInstall() + sharedWslTruffleHogInstall() + `cat >/usr/local/bin/crabbox-ready <<'READY'
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 test "$(id -u)" -ne 0
 test "$(id -un)" = crabbox
 test "$HOME" = /home/crabbox
@@ -480,7 +480,9 @@ func cloudInitOptionalReadyChecks(cfg Config) string {
 			b.WriteString("      systemctl is-active --quiet crabbox-xvfb.service\n")
 			b.WriteString("      systemctl is-active --quiet crabbox-desktop.service\n")
 		}
-		b.WriteString("      ss -ltn | grep -q '127.0.0.1:5900'\n")
+		// Check the producer separately: POSIX sh has no portable pipefail.
+		b.WriteString("      listening_sockets=$(ss -ltn)\n")
+		b.WriteString("      printf '%s\\n' \"$listening_sockets\" | grep -q '127.0.0.1:5900'\n")
 	}
 	if cfg.Browser {
 		b.WriteString("      test -s /var/lib/crabbox/browser.env\n")

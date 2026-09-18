@@ -8,6 +8,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 type backend struct {
@@ -36,10 +37,11 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 	if err != nil {
 		return core.RunResult{}, err
 	}
-	commandText, err := buildCommandText(req.Command, req.ShellMode)
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
 	if err != nil {
-		return core.RunResult{}, err
+		return core.RunResult{}, core.Exit(2, "%v", err)
 	}
+	commandText := intent.ShellScript()
 	if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 		core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
@@ -74,10 +76,11 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 		}
 	}
 	if runErr != nil {
-		if exitCode != 0 {
-			return result, core.Exit(exitCode, "anthropic-sandbox-runtime run failed: %v", runErr)
+		code := exitCode
+		if code == 0 {
+			code = 1
 		}
-		return result, core.Exit(1, "anthropic-sandbox-runtime run failed: %v", runErr)
+		return result, shared.ExitErrorWithCause(code, fmt.Sprintf("anthropic-sandbox-runtime run failed: %v", runErr), runErr)
 	}
 	return result, nil
 }
@@ -151,22 +154,6 @@ func rejectRunOptions(spec core.ProviderSpec, req core.RunRequest) error {
 		return core.Exit(2, "provider=anthropic-sandbox-runtime requires a local workspace")
 	}
 	return nil
-}
-
-func buildCommandText(command []string, shellMode bool) (string, error) {
-	if len(command) == 0 {
-		return "", core.Exit(2, "missing command")
-	}
-	if shellMode {
-		return strings.Join(command, " "), nil
-	}
-	if len(command) == 1 && core.ShouldUseShell(command) {
-		return command[0], nil
-	}
-	if core.ShouldUseShell(command) || core.LeadingEnvAssignment(command) {
-		return core.ShellScriptFromArgv(command), nil
-	}
-	return core.ShellScriptFromArgv(command), nil
 }
 
 func doctorCheck(name string, err error, details map[string]string) core.DoctorCheck {

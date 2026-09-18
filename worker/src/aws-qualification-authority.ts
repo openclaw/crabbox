@@ -296,6 +296,8 @@ export class AWSQualificationRegistry extends DurableObject<AWSQualificationAuth
       throw new Error("AWS qualification registry run is retired");
     }
     const active = await this.ctx.storage.get<AWSQualificationRegistryRecord>(registryStateKey);
+    // Retirement and registry reads may outlive the admission window.
+    validateRunWindow(identity);
     if (active) {
       if (canonicalJSON(registryIdentity(active)) !== canonicalJSON(registryIdentity(identity))) {
         throw new Error("AWS qualification registry already has an active run");
@@ -444,6 +446,7 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       }
       const policyHash = await qualificationPolicyHash(policy);
       const retainedRootDeviceName = await this.verifyRetainedImage(identity, policy);
+      validateRunWindow(identity);
       await this.ctx.storage.put({
         [stateKey]: {
           identity: structuredClone(identity),
@@ -461,6 +464,9 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       await this.ctx.storage.setAlarm(
         expiresAt - (identity.retainedImage ? awsQualificationCleanupReserveMs : 0),
       );
+      // Keep persisted ownership and its alarm if storage crossed the cutoff.
+      // A refused registry claim must not orphan a run that already owns cleanup.
+      validateRunWindow(identity);
     });
   }
 
@@ -936,7 +942,44 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
     const image = images[0];
     const rootDeviceName = asString(image?.["rootDeviceName"]);
     const mappings = items(record(image?.["blockDeviceMapping"])["item"]).map(record);
-    const root = record(mappings[0]?.["ebs"]);
+    const ebsMappings = mappings.filter((mapping) => Object.hasOwn(mapping, "ebs"));
+    const rootMapping = ebsMappings[0];
+    const root = record(rootMapping?.["ebs"]);
+    const deviceNamePattern = /^\/dev\/(?:sd|xvd)[a-z][0-9]*$/;
+    const deviceNames = new Set<string>();
+    const virtualNames = new Set<string>();
+    // AMIs can retain instance-store mappings beside their EBS root. Admit only
+    // explicit ephemeral devices; ignoring arbitrary non-EBS entries hides malformed mappings.
+    const validMappings = mappings.every((mapping) => {
+      const deviceName = mapping["deviceName"];
+      if (
+        typeof deviceName !== "string" ||
+        !deviceNamePattern.test(deviceName) ||
+        deviceNames.has(deviceName) ||
+        Object.hasOwn(mapping, "noDevice")
+      ) {
+        return false;
+      }
+      deviceNames.add(deviceName);
+      if (Object.hasOwn(mapping, "ebs")) {
+        return (
+          deviceName === rootDeviceName &&
+          isPlainRecord(mapping["ebs"]) &&
+          !Object.hasOwn(mapping, "virtualName")
+        );
+      }
+      const virtualName = mapping["virtualName"];
+      if (
+        deviceName === rootDeviceName ||
+        typeof virtualName !== "string" ||
+        !/^ephemeral(?:[0-9]|1[0-9]|2[0-3])$/.test(virtualName) ||
+        virtualNames.has(virtualName)
+      ) {
+        return false;
+      }
+      virtualNames.add(virtualName);
+      return true;
+    });
     if (
       result.status !== 200 ||
       images.length !== 1 ||
@@ -947,9 +990,10 @@ export class AWSQualificationRun extends DurableObject<AWSQualificationAuthority
       asString(image["architecture"]) !== "x86_64" ||
       asString(image["platform"]) !== "" ||
       asString(image["rootDeviceType"]) !== "ebs" ||
-      !/^\/dev\/(?:sd|xvd)[a-z][0-9]*$/.test(rootDeviceName) ||
-      mappings.length !== 1 ||
-      asString(mappings[0]?.["deviceName"]) !== rootDeviceName ||
+      !deviceNamePattern.test(rootDeviceName) ||
+      !validMappings ||
+      ebsMappings.length !== 1 ||
+      asString(rootMapping?.["deviceName"]) !== rootDeviceName ||
       asString(root["snapshotId"]) !== borrowed.snapshotId ||
       Number(root["volumeSize"]) !== awsQualificationRetainedRootGB ||
       canonicalJSON(imageSnapshotIDs(image)) !== canonicalJSON([borrowed.snapshotId])
@@ -2503,6 +2547,9 @@ function validateRunWindow(identity: AWSQualificationRunIdentity): void {
   const maximum = identity.retainedImage ? awsQualificationRetainedRunMs : awsQualificationMaxRunMs;
   if (expiresAt <= now || expiresAt > now + maximum) {
     throw new Error(`AWS qualification expiry must be in the next ${maximum / 60_000} minutes`);
+  }
+  if (identity.retainedImage && now >= expiresAt - awsQualificationCleanupReserveMs) {
+    throw new Error("AWS qualification retained work window expired");
   }
 }
 

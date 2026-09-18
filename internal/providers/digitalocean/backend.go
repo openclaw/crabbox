@@ -1260,25 +1260,12 @@ func authorizeDigitalOceanSSHKeyDelete(ctx context.Context, client digitalOceanA
 }
 
 func (b *digitalOceanLeaseBackend) waitForDropletIP(ctx context.Context, client digitalOceanAPI, id int64, timeout time.Duration) (droplet, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	result, err := shared.Poll(waitCtx, 0, 3*time.Second, shared.SleepContext,
+	return shared.PollReady(ctx, timeout, 3*time.Second,
 		func(observeCtx context.Context) (droplet, error) {
 			return client.GetDroplet(observeCtx, id)
 		},
-		func(_ context.Context, item droplet, fetchErr error) (bool, error) {
-			if fetchErr != nil {
-				return false, fetchErr
-			}
-			return publicIPv4(item) != "", nil
-		}, nil)
-	if err != nil {
-		if context.Cause(ctx) == nil && errors.Is(context.Cause(waitCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
-			return droplet{}, core.Exit(5, "timed out waiting for DigitalOcean Droplet IP")
-		}
-		return droplet{}, err
-	}
-	return result.Value, nil
+		func(item droplet) bool { return publicIPv4(item) != "" },
+		core.Exit(5, "timed out waiting for DigitalOcean Droplet IP"))
 }
 
 func rollbackDigitalOceanAcquire(client digitalOceanAPI, dropletID, keyID int64) error {
@@ -1385,12 +1372,7 @@ func applyDigitalOceanDefaults(cfg *core.Config) {
 	if cfg.TargetOS == "" {
 		cfg.TargetOS = core.TargetLinux
 	}
-	if cfg.DigitalOcean.Region == "" {
-		cfg.DigitalOcean.Region = core.DigitalOceanRegionFallback
-	}
-	if cfg.DigitalOcean.Image == "" {
-		cfg.DigitalOcean.Image = core.DigitalOceanImageFallback
-	}
+	applyNativeDefaults(&cfg.DigitalOcean)
 	if !cfg.ServerTypeExplicit || cfg.ServerType == "" {
 		cfg.ServerType = digitalOceanServerTypeForClass(cfg.Class)
 	}

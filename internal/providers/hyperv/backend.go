@@ -73,10 +73,10 @@ func applyDefaults(cfg *core.Config) {
 		}
 	}
 	cfg.HyperV.WorkRoot = core.ResolveInheritedWorkRoot(cfg.HyperV.WorkRoot, cfg.WorkRoot, `C:\crabbox`)
-	if cfg.HyperV.CPUs <= 0 {
+	if cfg.HyperV.CPUs == 0 {
 		cfg.HyperV.CPUs = 4
 	}
-	if cfg.HyperV.Memory <= 0 {
+	if cfg.HyperV.Memory == 0 {
 		cfg.HyperV.Memory = 8192
 	}
 	if cfg.HyperV.Switch == "" {
@@ -100,6 +100,13 @@ func (b *backend) configForRun() core.Config {
 }
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	// Sizing applies only to creation; existing leases must remain recoverable.
+	if b.cfg.HyperV.CPUs < 0 {
+		return core.LeaseTarget{}, core.Exit(2, "hyperv.cpus must be zero or greater")
+	}
+	if b.cfg.HyperV.Memory < 0 {
+		return core.LeaseTarget{}, core.Exit(2, "hyperv.memory must be zero or greater")
+	}
 	if hypervHostOS != "windows" {
 		return core.LeaseTarget{}, core.Exit(2, "provider=%s requires a Windows host with Hyper-V enabled", providerName)
 	}

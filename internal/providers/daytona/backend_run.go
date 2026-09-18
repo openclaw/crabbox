@@ -17,6 +17,7 @@ import (
 	sdkoptions "github.com/daytonaio/daytona/libs/sdk-go/pkg/options"
 	sdktypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 var daytonaCleanupTimeout = 30 * time.Second
@@ -196,10 +197,11 @@ func (b *daytonaLeaseBackend) run(ctx context.Context, req core.RunRequest, orig
 		}
 		return result, nil
 	}
-	command := daytonaCommandString(req.Command, req.ShellMode)
-	if command == "" {
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+	if err != nil || intent.ShellScript() == "" {
 		return core.RunResult{}, core.Exit(2, "missing command")
 	}
+	command := intent.ShellScript()
 	commandStarted := time.Now()
 	req.Observation.Phase(core.RunPhaseCommand)
 	req.Observation.OmitStream("stderr", "provider-combines-output")
@@ -275,37 +277,26 @@ func (b *daytonaLeaseBackend) Status(ctx context.Context, req core.StatusRequest
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	deadline := time.Now().Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = time.Now().Add(5 * time.Minute)
-	}
-	for {
+	return shared.PollStatus(ctx, req, time.Now, func(ctx context.Context) (core.StatusView, bool, error) {
 		sandbox, leaseID, err := resolveDaytonaSandbox(ctx, client, b.cfg, req.ID)
 		if err != nil {
 			if exists && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == "acquired" && daytonaIsNotFoundError(err) {
 				if err := b.releaseFixed(ctx, claim, "", true, ""); err != nil {
-					return core.StatusView{}, err
+					return core.StatusView{}, false, err
 				}
-				return b.Status(ctx, req)
+				view, err := b.Status(ctx, req)
+				return view, true, err
 			}
-			return core.StatusView{}, err
+			return core.StatusView{}, false, err
 		}
 		view := daytonaStatusView(leaseID, sandbox)
-		if !req.Wait || view.Ready {
-			return view, nil
+		if req.Wait && !view.Ready && daytonaStateFailed(daytonaSandboxState(sandbox)) {
+			return view, true, core.Exit(5, "daytona sandbox %s entered terminal state=%s", req.ID, daytonaSandboxState(sandbox))
 		}
-		if daytonaStateFailed(daytonaSandboxState(sandbox)) {
-			return view, core.Exit(5, "daytona sandbox %s entered terminal state=%s", req.ID, daytonaSandboxState(sandbox))
-		}
-		if time.Now().After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for sandbox %s to become ready", req.ID)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return view, false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for sandbox %s to become ready", req.ID)
+	})
 }
 
 func (b *daytonaLeaseBackend) Stop(ctx context.Context, req core.StopRequest) error {
@@ -570,19 +561,6 @@ func daytonaExtractArchiveCommand(workdir, archivePath, deletePrefix string) str
 
 func createDaytonaSyncArchive(ctx context.Context, repo core.Repo, manifest core.SyncManifest, _ io.Writer) (*os.File, error) {
 	return core.CreateSyncArchive(ctx, repo, manifest, "crabbox-daytona-sync-*.tgz")
-}
-
-func daytonaCommandString(command []string, shellMode bool) string {
-	if len(command) == 0 {
-		return ""
-	}
-	if shellMode {
-		return strings.Join(command, " ")
-	}
-	if core.ShouldUseShell(command) || core.LeadingEnvAssignment(command) {
-		return core.ShellScriptFromArgv(command)
-	}
-	return strings.Join(core.ShellWords(command), " ")
 }
 
 func daytonaStatusView(leaseID string, sandbox *apidaytona.Sandbox) core.StatusView {

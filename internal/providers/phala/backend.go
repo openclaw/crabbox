@@ -603,7 +603,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	now := core.ClockNow(b.rt.Clock).UTC()
 	server := req.Lease.Server
 	gatewayHost := strings.TrimSpace(server.Labels["gateway_host"])
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, now)
+	server.Labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(server.Labels, cfg, req.State, now, req.IdleTimeoutOverride)
 	// gateway_host is local connection metadata, not a provider label. Preserve
 	// its complete DNS value across the generic provider-label timestamp update.
 	if gatewayHost != "" {
@@ -619,19 +619,10 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		if idleTimeout <= 0 {
 			idleTimeout = cfg.IdleTimeout
 		}
-		// The claim write unconditionally overwrites claim.Slug with the slug arg, so
-		// a blank server.Labels["slug"] (e.g. a lease target whose labels lost it)
-		// would WIPE the stored slug on every idle keepalive. Prefer the existing
-		// claim's slug so Touch never blanks it.
-		slug := shared.FirstNonBlankTrimmed(server.Labels["slug"], claim.Slug)
 		if ok {
-			if claim.RepoRoot != "" {
-				_, err = core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, req.Lease.SSH, claim.RepoRoot, idleTimeout, false, claim, true)
-			} else {
-				_, err = core.ClaimLeaseTargetForConfigIfUnchanged(leaseID, slug, cfg, server, req.Lease.SSH, idleTimeout, claim, true)
-			}
+			_, err = core.UpdateLeaseClaimTouchIfUnchanged(ctx, leaseID, claim, server.Labels, now, req.IdleTimeoutOverride)
 		} else {
-			err = core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, server, req.Lease.SSH, idleTimeout)
+			err = core.ClaimLeaseTargetForConfig(leaseID, server.Labels["slug"], cfg, server, req.Lease.SSH, idleTimeout)
 		}
 		if err != nil {
 			return core.Server{}, err

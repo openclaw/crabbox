@@ -23,6 +23,7 @@ type TimingReport struct {
 	SyncMode           string                   `json:"syncMode,omitempty"`
 	SyncTransferFiles  int                      `json:"syncTransferFiles,omitempty"`
 	SyncTransferBytes  int64                    `json:"syncTransferBytes,omitempty"`
+	SyncSeedBytes      int64                    `json:"syncSeedBytes,omitempty"`
 	SyncFallbackReason string                   `json:"syncFallbackReason,omitempty"`
 	HydrateMs          int64                    `json:"hydrateMs,omitempty"`
 	ProbeMs            int64                    `json:"probeMs,omitempty"`
@@ -164,6 +165,7 @@ func timingReportFromRun(provider, leaseID, slug string, timings runTimings, tot
 		SyncMode:           timings.syncMode,
 		SyncTransferFiles:  timings.syncTransferFiles,
 		SyncTransferBytes:  timings.syncTransferBytes,
+		SyncSeedBytes:      timings.syncSeedBytes,
 		SyncFallbackReason: timings.syncFallbackReason,
 		CommandMs:          timings.command.Milliseconds(),
 		CommandPhases:      timings.commandPhases,

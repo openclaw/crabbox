@@ -25,6 +25,29 @@ import (
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
+func TestNativeServerTypeProjection(t *testing.T) {
+	for _, name := range []string{"upstash-box", "upstash", "box", "upstashbox", " Upstash "} {
+		if got := core.ServerTypeForProviderClass(name, "beast"); got != "small" {
+			t.Fatalf("provider=%q default type=%q, want %q", name, got, "small")
+		}
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolver, ok := provider.(core.ProviderServerTypeProvider)
+		if !ok {
+			t.Fatalf("provider=%q has no native type capability", name)
+		}
+		for _, tc := range []struct{ raw, want string }{{"", "small"}, {"  ", "  "}, {"custom", "custom"}, {" custom ", " custom "}} {
+			cfg := core.Config{Provider: name, Class: "beast", ServerType: "unrelated-type", ServerTypeExplicit: true}
+			cfg.UpstashBox.Size = tc.raw
+			if got := resolver.ServerTypeForConfig(cfg); got != tc.want {
+				t.Fatalf("provider=%q raw=%q type=%q, want %q", name, tc.raw, got, tc.want)
+			}
+		}
+	}
+}
+
 func TestProviderSpecAndAliases(t *testing.T) {
 	p := Provider{}
 	if p.Spec().Name != providerName {
@@ -216,7 +239,7 @@ func TestStopRequiresExactScopedUpstashBoxOwnership(t *testing.T) {
 			backend := NewBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 			leaseID := "cbx_0123456789ab"
 			if test.seedClaim {
-				server := boxToServer(backend.cfg, box)
+				server := boxToServer(backend.cfg, box, nil)
 				if test.staleIdentity {
 					server.CloudID = "box_original"
 				}
@@ -252,7 +275,7 @@ func TestStopFinalizesClaimWhenUpstashBoxVanishesDuringLockedPreflight(t *testin
 	cfg := core.Config{UpstashBox: core.UpstashBoxConfig{APIKey: "test-key", BaseURL: "https://one.example.test"}}
 	backend := NewBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	leaseID := "cbx_0123456789ab"
-	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "vanished", providerName, upstashBoxClaimScope(backend.cfg), "", t.TempDir(), time.Hour, false, boxToServer(backend.cfg, box), core.SSHTarget{}); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "vanished", providerName, upstashBoxClaimScope(backend.cfg), "", t.TempDir(), time.Hour, false, boxToServer(backend.cfg, box, nil), core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := backend.Stop(context.Background(), core.StopRequest{ID: box.ID}); err != nil {
@@ -274,7 +297,7 @@ func TestStopFinalizesRetainedClaimAfterUpstashBoxWasAlreadyDeleted(t *testing.T
 	cfg := core.Config{UpstashBox: core.UpstashBoxConfig{APIKey: "test-key", BaseURL: "https://one.example.test"}}
 	backend := NewBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
 	leaseID := "cbx_0123456789ab"
-	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "deleted", providerName, upstashBoxClaimScope(backend.cfg), "", t.TempDir(), time.Hour, false, boxToServer(backend.cfg, box), core.SSHTarget{}); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "deleted", providerName, upstashBoxClaimScope(backend.cfg), "", t.TempDir(), time.Hour, false, boxToServer(backend.cfg, box, nil), core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := backend.Stop(context.Background(), core.StopRequest{ID: leaseID}); err != nil {
@@ -1127,7 +1150,8 @@ func TestRunReusedBoxReturnsSession(t *testing.T) {
 }
 
 func TestStatusMapsBoxName(t *testing.T) {
-	fake := &fakeAPI{box: boxData{ID: "box_1", Name: "crabbox-blue-123456789abc", Runtime: "python", Size: "medium", Status: "running"}}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeAPI{box: boxData{ID: "box_1", Name: "crabbox-blue-123456789abc", Runtime: "python", Size: "medium", Status: "running", CreatedAt: 1700000000, UpdatedAt: 1700000010}}
 	withFakeAPI(t, fake)
 	cfg := testConfig()
 	cfg.UpstashBox.BaseURL = "https://eu-west-1.box.upstash.com"
@@ -1142,9 +1166,95 @@ func TestStatusMapsBoxName(t *testing.T) {
 	if view.Labels["runtime"] != "python" || view.Labels["size"] != "medium" {
 		t.Fatalf("labels=%v", view.Labels)
 	}
-	server := boxToServer(cfg, fake.box)
+	if view.Labels["created_at"] != "1700000000" || view.Labels["updated_at"] != "1700000010" {
+		t.Fatalf("native timestamps lost: %v", view.Labels)
+	}
+	for _, key := range []string{"last_touched_at", "ttl_secs", "idle_timeout", "expires_at", "keep"} {
+		if _, ok := view.Labels[key]; ok {
+			t.Fatalf("unclaimed observation invented %s: %v", key, view.Labels)
+		}
+	}
+	server := boxToServer(cfg, fake.box, nil)
 	if server.PublicNet.IPv4.IP != "eu-west-1.box.upstash.com" {
 		t.Fatalf("host=%q", server.PublicNet.IPv4.IP)
+	}
+}
+
+func TestObservationPreservesRecordedBoxPolicy(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeAPI{}
+	withFakeAPI(t, fake)
+	cfg := testConfig()
+	cfg.TTL, cfg.IdleTimeout, cfg.Profile = 10*time.Minute, 5*time.Minute, "creation"
+	b := NewBackend(Provider{}.Spec(), cfg, testRuntime()).(*backend)
+	repo := core.Repo{Root: t.TempDir(), Name: "fixture"}
+	leaseID, box, _, err := b.createBox(t.Context(), fake, repo, true, false, "blue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if original.Labels["ttl_secs"] != "600" || original.Labels["keep"] != "true" || original.IdleTimeoutSeconds != 300 {
+		t.Fatalf("acquisition policy not recorded: %#v", original)
+	}
+	b.cfg.TTL, b.cfg.IdleTimeout, b.cfg.Profile = 90*time.Minute, 30*time.Minute, "reader"
+	for _, reuse := range []bool{false, true} {
+		if reuse {
+			if _, _, _, err := b.resolveBoxID(t.Context(), fake, leaseID, repo.Root, false); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before, err := core.ReadLeaseClaim(leaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		view, err := b.Status(t.Context(), core.StatusRequest{ID: leaseID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		servers, err := b.List(t.Context(), core.ListRequest{})
+		if err != nil || len(servers) != 1 {
+			t.Fatalf("list=%v err=%v", servers, err)
+		}
+		for _, labels := range []map[string]string{view.Labels, servers[0].Labels} {
+			if labels["created_at"] != core.LeaseLabelTime(time.Unix(box.CreatedAt, 0)) || labels["ttl_secs"] != "600" || labels["idle_timeout_secs"] != "300" || labels["profile"] != "creation" || labels["keep"] != "true" || labels["keep_alive"] != "false" {
+				t.Fatalf("reuse=%t observed labels=%v", reuse, labels)
+			}
+			if _, ok := labels["expires_at"]; ok {
+				t.Fatalf("invented provider expiry: %v", labels)
+			}
+		}
+		after, err := core.ReadLeaseClaim(leaseID)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("status/list mutated claim: %v", err)
+		}
+		if after.Labels["ttl_secs"] != "600" || after.Labels["expires_at"] != original.Labels["expires_at"] {
+			t.Fatalf("reuse replaced recorded policy: %v", after.Labels)
+		}
+	}
+	b.cfg.UpstashBox.BaseURL = "https://other.example.test"
+	view, err := b.Status(t.Context(), core.StatusRequest{ID: leaseID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := view.Labels["ttl_secs"]; ok {
+		t.Fatal("observation borrowed history from another endpoint")
+	}
+}
+
+func TestBoxObservationMissingFacts(t *testing.T) {
+	cfg := testConfig()
+	box := boxData{ID: "box", Name: "crabbox-blue-123456789abc", CreatedAt: -1}
+	view := boxToServer(cfg, box, nil)
+	for _, key := range []string{"created_at", "updated_at", "runtime", "size", "server_type", "ttl_secs", "last_touched_at"} {
+		if _, ok := view.Labels[key]; ok {
+			t.Fatalf("invented %s: %v", key, view.Labels)
+		}
+	}
+	if view.ServerType.Name != "" {
+		t.Fatalf("invented size: %s", view.ServerType.Name)
 	}
 }
 

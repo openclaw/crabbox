@@ -17,9 +17,11 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -70,17 +72,6 @@ func TestCloudflareWorkdirRejectsBroadPaths(t *testing.T) {
 	cfg.Cloudflare.Workdir = "/workspace"
 	if _, err := cloudflareWorkdir(cfg); err == nil {
 		t.Fatal("cloudflareWorkdir accepted broad /workspace path")
-	}
-}
-
-func TestBuildCloudflareCommandQuotesArgv(t *testing.T) {
-	got, err := buildCloudflareCommand([]string{"node", "-e", "console.log('ok')"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "'node' '-e' 'console.log('\\''ok'\\'')'"
-	if got != want {
-		t.Fatalf("command = %q, want %q", got, want)
 	}
 }
 
@@ -330,7 +321,7 @@ func TestCloudflareClientRejectsCrossOriginExecRedirectBeforeReplay(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = client.execStream(context.Background(), "cbx_test", execStreamRequest{
+			_, err = client.execStream(context.Background(), "cbx_test", shared.CommandStreamRequest{
 				Command: "deploy",
 				Env:     map[string]string{"DEPLOY_TOKEN": "sensitive"},
 			}, io.Discard, io.Discard)
@@ -541,7 +532,7 @@ func TestCloudflareClientRedactsStreamError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.execStream(context.Background(), "cbx_test", execStreamRequest{Command: "true"}, io.Discard, io.Discard)
+	_, err = client.execStream(context.Background(), "cbx_test", shared.CommandStreamRequest{Command: "true"}, io.Discard, io.Discard)
 	if err == nil {
 		t.Fatal("execStream returned nil")
 	}
@@ -876,7 +867,7 @@ func TestCloudflareSyncPreservesWorkspaceUntilReplacement(t *testing.T) {
 					}
 					w.WriteHeader(http.StatusOK)
 				case strings.HasSuffix(r.URL.Path, "/exec-stream"):
-					var command execStreamRequest
+					var command shared.CommandStreamRequest
 					if err := json.NewDecoder(r.Body).Decode(&command); err != nil {
 						t.Error(err)
 						http.Error(w, "decode", 500)
@@ -957,7 +948,7 @@ func TestCloudflareSyncPreservesWorkspaceUntilReplacement(t *testing.T) {
 }
 
 func TestCloudflareRemoteDiskCheckRejectsSmallContainer(t *testing.T) {
-	var got execStreamRequest
+	var got shared.CommandStreamRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/sandboxes/cbx_test/exec-stream" {
 			http.NotFound(w, r)
@@ -1042,7 +1033,7 @@ func TestCloudflareClientExecStream(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code, err := client.execStream(context.Background(), "cbx_test", execStreamRequest{Command: "true"}, &stdout, &stderr)
+	code, err := client.execStream(context.Background(), "cbx_test", shared.CommandStreamRequest{Command: "true"}, &stdout, &stderr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1098,7 +1089,7 @@ func TestCloudflareClientExecStreamPropagatesWriterErrors(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = client.execStream(context.Background(), "cbx_test", execStreamRequest{Command: "true"}, tc.stdout, tc.stderr)
+			_, err = client.execStream(context.Background(), "cbx_test", shared.CommandStreamRequest{Command: "true"}, tc.stdout, tc.stderr)
 			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), tc.writerErr) {
 				t.Fatalf("execStream error = %v, want %q and %q", err, tc.want, tc.writerErr)
 			}
@@ -1161,65 +1152,80 @@ func TestCloudflareRunReportsCommandErrorAsFailure(t *testing.T) {
 func TestCloudflareRunCleanupDestroyUsesBoundedContext(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	withCloudflareCleanupTimeout(t, 20*time.Millisecond)
-	var createdID string
-	execCalls := 0
-	deleteSeen := make(chan struct{}, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
-			var req createSandboxRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("decode create request: %v", err)
+	// Measure request cancellation after local claim admission, without racing
+	// the cleanup deadline against HTTP connection setup or handler scheduling.
+	synctest.Test(t, func(t *testing.T) {
+		var createdID string
+		execCalls := 0
+		deleteSeen := make(chan struct{}, 1)
+		var deleteDeadlineRemaining time.Duration
+		transport := &http.Client{Transport: testutil.RoundTripFunc(func(r *http.Request) (*http.Response, error) {
+			response := func(body, contentType string) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{contentType}}, Body: io.NopCloser(strings.NewReader(body))}, nil
 			}
-			createdID = req.ID
-			_, _ = fmt.Fprintf(w, `{"id":%q,"state":"running","workdir":%q}`, req.ID, req.Workdir)
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/"+createdID+"/exec-stream":
-			execCalls++
-			w.Header().Set("Content-Type", "application/x-ndjson")
-			_, _ = io.WriteString(w, `{"type":"complete","exitCode":0}`+"\n")
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/"+createdID:
-			deleteSeen <- struct{}{}
-			<-r.Context().Done()
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+				var req createSandboxRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					t.Fatalf("decode create request: %v", err)
+				}
+				createdID = req.ID
+				return response(fmt.Sprintf(`{"id":%q,"state":"running","workdir":%q}`, req.ID, req.Workdir), "application/json")
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes/"+createdID+"/exec-stream":
+				execCalls++
+				return response(`{"type":"complete","exitCode":0}`+"\n", "application/x-ndjson")
+			case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/"+createdID:
+				deadline, ok := r.Context().Deadline()
+				if !ok {
+					t.Fatal("destroy request has no deadline")
+				}
+				deleteDeadlineRemaining = time.Until(deadline)
+				deleteSeen <- struct{}{}
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			default:
+				return nil, fmt.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+		})}
 
-	cfg := core.Config{Provider: providerName}
-	cfg.Cloudflare.APIURL = server.URL
-	cfg.Cloudflare.Token = "token"
-	var stderr bytes.Buffer
-	backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: server.Client(), Stderr: &stderr, Stdout: io.Discard}}
-	start := time.Now()
-	result, err := backend.Run(context.Background(), core.RunRequest{
-		Repo:    core.Repo{Name: "repo", Root: t.TempDir()},
-		Command: []string{"true"},
-		NoSync:  true,
+		cfg := core.Config{Provider: providerName}
+		cfg.Cloudflare.APIURL = "https://runner.example.test"
+		cfg.Cloudflare.Token = "token"
+		var stderr bytes.Buffer
+		backend := cloudflareBackend{cfg: cfg, rt: core.Runtime{HTTP: transport, Stderr: &stderr, Stdout: io.Discard}}
+		start := time.Now()
+		result, err := backend.Run(context.Background(), core.RunRequest{
+			Repo:    core.Repo{Name: "repo", Root: t.TempDir()},
+			Command: []string{"true"},
+			NoSync:  true,
+		})
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("cleanup error=%v", err)
+		}
+		if result.ExitCode != 1 || result.Session == nil || !result.Session.Kept {
+			t.Fatalf("result=%#v", result)
+		}
+		if result.Status != "failed" || result.ErrorKind != core.RunErrorProvider {
+			t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
+		}
+		if execCalls != 2 {
+			t.Fatalf("exec calls=%d, want prepare and command", execCalls)
+		}
+		select {
+		case <-deleteSeen:
+		default:
+			t.Fatal("destroy was not attempted")
+		}
+		if deleteDeadlineRemaining <= 0 || deleteDeadlineRemaining > 20*time.Millisecond {
+			t.Fatalf("destroy deadline remaining=%s, want positive and at most 20ms", deleteDeadlineRemaining)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("Run took %s, want bounded cleanup", elapsed)
+		}
+		if _, ok, err := core.ResolveLeaseClaimForProvider(createdID, providerName); err != nil || !ok {
+			t.Fatalf("missing recovery claim: %v", err)
+		}
 	})
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("cleanup error=%v", err)
-	}
-	if result.ExitCode != 1 || result.Session == nil || !result.Session.Kept {
-		t.Fatalf("result=%#v", result)
-	}
-	if result.Status != "failed" || result.ErrorKind != core.RunErrorProvider {
-		t.Fatalf("status/error=%q/%q", result.Status, result.ErrorKind)
-	}
-	if execCalls != 2 {
-		t.Fatalf("exec calls=%d, want prepare and command", execCalls)
-	}
-	select {
-	case <-deleteSeen:
-	default:
-		t.Fatal("destroy was not attempted")
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
-	}
-	if _, ok, err := core.ResolveLeaseClaimForProvider(createdID, providerName); err != nil || !ok {
-		t.Fatalf("missing recovery claim: %v", err)
-	}
 }
 
 func TestCloudflareRunKeepReturnsSessionHandle(t *testing.T) {
@@ -2130,7 +2136,7 @@ func TestCloudflareStreamCancellationAtCleanEOF(t *testing.T) {
 				data = "{\"type\":\"complete\",\"exitCode\":7}\n"
 			}
 			client := &cloudflareClient{baseURL: "http://127.0.0.1", http: &http.Client{Transport: cloudflareStreamEOFTransport{body: &cloudflareCancelingEOFBody{data: data, cancel: cancel}}}}
-			code, err := client.execStream(ctx, "fixture", execStreamRequest{Command: "true"}, io.Discard, io.Discard)
+			code, err := client.execStream(ctx, "fixture", shared.CommandStreamRequest{Command: "true"}, io.Discard, io.Discard)
 			if complete {
 				if err != nil || code != 7 {
 					t.Fatalf("accepted completion changed: code=%d err=%v", code, err)
@@ -2209,11 +2215,117 @@ func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
 		return nil, sentinel
 	})}
 	c := &cloudflareClient{baseURL: "https://api.example.test/base", token: "synthetic-token", instanceType: "large size", http: transport}
-	code, err := c.execStream(ctx, "sandbox one", execStreamRequest{Command: "<&>", Cwd: "/work", Env: map[string]string{"A": "B"}, TimeoutMS: 7}, io.Discard, io.Discard)
+	code, err := c.execStream(ctx, "sandbox one", shared.CommandStreamRequest{Command: "<&>", Cwd: "/work", Env: map[string]string{"A": "B"}, TimeoutMS: 7}, io.Discard, io.Discard)
 	if code != 0 {
 		t.Fatalf("exit=%d", code)
 	}
 	if !errors.Is(err, sentinel) || calls != 1 {
 		t.Fatalf("error=%v calls=%d", err, calls)
+	}
+}
+
+func TestCloudflareInstanceTypeResolutionPhases(t *testing.T) {
+	const invalidType = "cloudflare --type must be one of lite, basic, standard-1, standard-2, standard-3, standard-4"
+	for _, tc := range []struct {
+		name, stored, class, target, architecture string
+		explicit, visited                         bool
+		wantFlags, wantConfigure, wantClient      string
+		flagsError, configureError, clientError   string
+	}{
+		{name: "empty", class: "standard", wantFlags: "standard-4", wantConfigure: "standard-4", wantClient: "standard-4"},
+		{name: "mixed-case", stored: " STANDARD-2 ", class: "standard", explicit: true, wantFlags: "standard-2", wantConfigure: "standard-2", wantClient: "standard-2"},
+		{name: "implicit-fallback", stored: "old-size", class: "standard", wantFlags: "standard-4", wantConfigure: "standard-4", wantClient: "standard-4"},
+		{name: "explicit-invalid", stored: "old-size", class: "standard", explicit: true, flagsError: invalidType, configureError: invalidType, clientError: invalidType},
+		{name: "visited-invalid", stored: "old-size", class: "standard", visited: true, flagsError: invalidType, wantConfigure: "standard-4", wantClient: "standard-4"},
+		{name: "explicit-empty", class: "standard", explicit: true, wantFlags: "standard-4", wantConfigure: "standard-4", wantClient: "standard-4"},
+		{name: "explicit-whitespace", stored: " \t", class: "standard", explicit: true, wantFlags: "standard-4", configureError: invalidType, clientError: invalidType},
+		{name: "unknown-class-fallback", stored: "old-size", class: "custom-size", wantFlags: "custom-size", wantConfigure: "custom-size", wantClient: "custom-size"},
+		{name: "unsupported-profile", class: "standard", target: core.TargetLinux, architecture: core.ArchitectureARM64, wantFlags: "standard-4", configureError: "provider=cloudflare has no class profile for class=standard target=linux architecture=arm64", wantClient: "standard-4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: providerName, ServerType: tc.stored, ServerTypeExplicit: tc.explicit, Class: tc.class, TargetOS: core.Blank(tc.target, core.TargetLinux), Architecture: core.Blank(tc.architecture, core.ArchitectureAMD64)}
+			check := func(phase, got, want string, err error, wantError string) {
+				t.Helper()
+				if wantError != "" {
+					if err == nil || err.Error() != wantError {
+						t.Fatalf("%s error = %v, want %q", phase, err, wantError)
+					}
+					return
+				}
+				if err != nil || got != want {
+					t.Fatalf("%s type = %q, error = %v; want %q", phase, got, err, want)
+				}
+			}
+			flagConfig := cfg
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.String("type", "", "")
+			if tc.visited {
+				if err := fs.Parse([]string{"--type=" + tc.stored}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := ApplyCloudflareProviderFlags(&flagConfig, fs, struct{}{})
+			check("flags", flagConfig.ServerType, tc.wantFlags, err, tc.flagsError)
+			if err != nil && !reflect.DeepEqual(flagConfig, cfg) {
+				t.Fatal("rejected type mutated config")
+			}
+			backend, err := (Provider{}).Configure(cfg, core.Runtime{})
+			configuredType := ""
+			if err == nil {
+				configuredType = backend.(*cloudflareBackend).cfg.ServerType
+			}
+			check("configure", configuredType, tc.wantConfigure, err, tc.configureError)
+			cfg.Cloudflare = core.CloudflareConfig{APIURL: "https://example.invalid", Token: "synthetic-token"}
+			inert := &http.Client{Transport: testutil.RoundTripFunc(func(*http.Request) (*http.Response, error) {
+				t.Fatal("instance type resolution must not send HTTP requests")
+				return nil, errors.New("unexpected request")
+			})}
+			client, err := newCloudflareClient(cfg, core.Runtime{HTTP: inert})
+			clientType := ""
+			if err == nil {
+				clientType = client.instanceType
+			}
+			check("client", clientType, tc.wantClient, err, tc.clientError)
+		})
+	}
+}
+
+func TestCloudflareInstanceTypeCanonicalSizes(t *testing.T) {
+	for _, size := range []string{"lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"} {
+		t.Run(size, func(t *testing.T) {
+			input := " " + strings.ToUpper(size) + " "
+			if got, ok := normalizeContainerInstanceType(input); !ok || got != size {
+				t.Fatalf("normalized type = (%q,%t), want (%q,true)", got, ok, size)
+			}
+			got, err := resolveInstanceType(input, "unused-fallback", true)
+			if err != nil || got != size {
+				t.Fatalf("type = %q, error = %v; want %q", got, err, size)
+			}
+		})
+	}
+	if got, ok := normalizeContainerInstanceType("ccx63"); ok || got != "" {
+		t.Fatalf("normalized unsupported type = (%q,%t), want (empty,false)", got, ok)
+	}
+}
+
+func TestCloudflareContainerInstanceTypeMapping(t *testing.T) {
+	for _, tc := range []struct {
+		class string
+		want  string
+	}{
+		{class: "", want: "standard-4"},
+		{class: "tiny", want: "standard-4"},
+		{class: "small", want: "standard-4"},
+		{class: "standard", want: "standard-4"},
+		{class: "fast", want: "standard-4"},
+		{class: "large", want: "standard-4"},
+		{class: "beast", want: "standard-4"},
+		{class: "lite", want: "lite"},
+		{class: "basic", want: "basic"},
+		{class: "standard-3", want: "standard-3"},
+	} {
+		if got := cloudflareContainerInstanceTypeForClass(tc.class); got != tc.want {
+			t.Fatalf("class %q type = %q, want %q", tc.class, got, tc.want)
+		}
 	}
 }

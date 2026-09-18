@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 	"unicode/utf16"
+
+	"github.com/openclaw/crabbox/internal/runtimeartifact"
 )
 
 const powerShellEncodedCommandPrefix = "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand "
@@ -478,7 +480,7 @@ func TestRemoteCommandQuotesWorkdirEnvAndArgs(t *testing.T) {
 		"cd '/work/crabbox/cbx_1/my-app'",
 		"NODE_OPTIONS='--max-old-space-size=8192'",
 		"bash -lc",
-		`bash -lc 'cd '\''/work/crabbox/cbx_1/my-app'\'' && exec "$@"' bash 'pnpm' 'check:changed'`,
+		`sh 'pnpm' 'check:changed'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommand() missing %q in %q", want, got)
@@ -527,7 +529,7 @@ func TestRemoteCommandSourcesActionsEnvFile(t *testing.T) {
 		"cd '/home/runner/work/repo/repo'",
 		"if [ -f '/home/runner/.crabbox/actions/cbx-123.env.sh' ]; then . '/home/runner/.crabbox/actions/cbx-123.env.sh'; fi",
 		"CI='1'",
-		`bash -lc 'cd '\''/home/runner/work/repo/repo'\'' && exec "$@"' bash 'pnpm' 'test'`,
+		`sh 'pnpm' 'test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommandWithEnvFile() missing %q in %q", want, got)
@@ -544,7 +546,7 @@ func TestRemoteCommandSourcesMultipleEnvFilesWithoutInlineSecret(t *testing.T) {
 		"if [ -f '/home/runner/.crabbox/actions/cbx-123.env.sh' ]; then . '/home/runner/.crabbox/actions/cbx-123.env.sh'; fi",
 		"if [ -f '.crabbox/env/run.env.sh' ]; then . '.crabbox/env/run.env.sh'; fi",
 		"CI='1'",
-		`bash -lc 'cd '\''/work/repo'\'' && exec "$@"' bash 'pnpm' 'test'`,
+		`sh 'pnpm' 'test'`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("remoteCommandWithEnvFiles() missing %q in %q", want, got)
@@ -2209,6 +2211,65 @@ func TestWSL2ReadinessUsesDirectNoInputWrapperAndPinsFullFallback(t *testing.T) 
 	}
 }
 
+func TestNativeRuntimeTransportReadinessSkipsWorkloadProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake SSH fixture")
+	}
+	target := SSHTarget{User: "fixture", Host: "example.test", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, ReadyCheck: "owned readiness command"}
+	logPath := installWSL2ReadinessRecorder(t, "exit 0", target.ReadyCheck)
+	t.Setenv("CRABBOX_WSL_SHELL", wsl2ProbeCommand("exit 0", "/usr/bin/env BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c"))
+	oldProbe := probeWSLSFTPSubsystem
+	sftp := 0
+	probeWSLSFTPSubsystem = func(context.Context, SSHTarget, string, string, io.Writer) error { sftp++; return nil }
+	t.Cleanup(func() { probeWSLSFTPSubsystem = oldProbe })
+	ctx := context.WithValue(t.Context(), nativeRuntimeTransportProbeKey{}, true)
+	if err := probeWSL2SSHReady(ctx, &target, sshReadinessProfileForTarget(target), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil || string(calls) != "ssh:22:shell\n" || sftp != 1 {
+		t.Fatalf("transport-only probes: calls=%q sftp=%d err=%v", calls, sftp, err)
+	}
+	if target.preparedEndpoint != "example.test:22" {
+		t.Fatal("transport endpoint not recorded")
+	}
+}
+
+func TestNativeRuntimeNetworkProbeDoesNotRequireAdmission(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX fake SSH fixture")
+	}
+	target := SSHTarget{User: "fixture", Host: "tailnet.example", Port: "22", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, ReadyCheck: "owned readiness command"}
+	logPath := installWSL2ReadinessRecorder(t, "exit 0", target.ReadyCheck)
+	t.Setenv("CRABBOX_WSL_SHELL", wsl2ProbeCommand("exit 0", "/usr/bin/env BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c"))
+	scope := testNativeRuntimeScope()
+	scope.manifest = "selected fixture"
+	scope.install = func(context.Context, SSHTarget, runtimeartifact.Source) (*remoteNativeRuntime, error) {
+		t.Error("network discovery installed a runtime")
+		return nil, nil
+	}
+	ctx := context.WithValue(runtimeLeaseContext(t.Context(), "lease-a"), nativeRuntimeScopeKey{}, scope)
+	for _, admitted := range []bool{false, true} {
+		probeCtx := ctx
+		if admitted {
+			probeCtx = context.WithValue(ctx, nativeRuntimeAdmissionKey{}, &nativeRuntimeAdmission{lease: "lease-a"})
+		}
+		if !probeSSHTransport(probeCtx, &target, 5*time.Second) {
+			t.Fatal("unprepared candidate route was not probed")
+		}
+	}
+	if err := scope.finalizeLease(ctx, "lease-a", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if probeSSHTransport(ctx, &target, time.Second) {
+		t.Fatal("finalized lease was probed")
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil || string(calls) != "ssh:22:shell\nssh:22:shell\n" {
+		t.Fatalf("network probes=%q err=%v", calls, err)
+	}
+}
+
 func TestWSL2ReadinessAllMissingSFTPStopsWithoutRepollOrMutation(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX fake ssh helper is only reliable on Unix hosts")
@@ -3009,10 +3070,15 @@ func TestRemotePruneSyncManifestDeletesOnlyManagedPaths(t *testing.T) {
 
 func TestRemotePruneSyncManifestUsesDeletedListBeforeOldManifestDiff(t *testing.T) {
 	got := remotePruneSyncManifest("/work/repo", "0123456789abcdef0123456789abcdef")
-	deletedIndex := strings.Index(got, `delete_paths < "$deleted"`)
-	oldIndex := strings.Index(got, "manifest_removed_paths | delete_paths")
-	if deletedIndex < 0 || oldIndex < 0 || deletedIndex > oldIndex {
-		t.Fatalf("deleted list should be applied before old manifest diff: %q", got)
+	// Both the Bash and POSIX branches must finish explicit deletions before
+	// computing the old-manifest difference and consuming its staged output.
+	want := `if [ -f "$deleted" ]; then delete_paths "$deleted"; fi
+if [ -f "$old" ] && [ -f "$new" ]; then
+  manifest_removed_paths > "$prune_paths"
+  delete_paths "$prune_paths"
+fi`
+	if strings.Count(got, want) != 2 {
+		t.Fatalf("deleted list should be applied before old manifest diff in both shell branches: %q", got)
 	}
 }
 
@@ -3023,10 +3089,236 @@ func TestRemotePruneSyncManifestForWSL2UsesShortCoreutils(t *testing.T) {
 			t.Fatalf("WSL2 prune command missing %q in %q", want, got)
 		}
 	}
-	for _, notWant := range []string{"command -v python3", "command -v perl"} {
+	for _, notWant := range []string{"python", "perl"} {
 		if strings.Contains(got, notWant) {
 			t.Fatalf("WSL2 prune command should stay short, found %q in %q", notWant, got)
 		}
+	}
+}
+
+func TestRemoteSyncNULConsumerPreservesRecords(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX manifest consumer")
+	}
+	shells := []string{"/bin/sh"}
+	if dash, err := exec.LookPath("dash"); err == nil {
+		shells = append(shells, dash)
+	}
+	for _, shell := range shells {
+		t.Run(filepath.Base(shell), func(t *testing.T) {
+			workdir := t.TempDir()
+			input := filepath.Join(workdir, "records")
+			want := []byte("space name\x00line\nname\n\x00caf\xc3\xa9\x00binary\xff\x00\x00")
+			if err := os.WriteFile(input, append(append([]byte(nil), want...), []byte("unterminated")...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			script := "set -e\nmeta_dir=" + shellQuote(workdir) + "\n" + remoteSyncPruneFiles("records") +
+				remoteSyncNULConsumer(`      printf '%s\000' "$rel"`) + "delete_paths " + shellQuote(input)
+			out, err := exec.Command(shell, "-c", script).CombinedOutput()
+			if err != nil || !bytes.Equal(out, want) {
+				t.Fatalf("records=%q want=%q err=%v", out, want, err)
+			}
+			files, err := filepath.Glob(filepath.Join(workdir, "sync-prune.*"))
+			if err != nil || len(files) != 0 {
+				t.Fatalf("prune temporary files remain: %v err=%v", files, err)
+			}
+		})
+	}
+}
+
+func BenchmarkRemoteSyncNULConsumer(b *testing.B) {
+	if runtime.GOOS == "windows" {
+		b.Skip("POSIX manifest consumer")
+	}
+	shells := []string{"/bin/sh"}
+	if dash, err := exec.LookPath("dash"); err == nil {
+		shells = append(shells, dash)
+	}
+	for _, shell := range shells {
+		for _, records := range []int{100, 1000} {
+			b.Run(fmt.Sprintf("%s/%d", filepath.Base(shell), records), func(b *testing.B) {
+				workdir := b.TempDir()
+				input := filepath.Join(workdir, "records")
+				want := []byte(strings.Repeat("packages/example/src/filename with spaces.go\x00", records))
+				if err := os.WriteFile(input, want, 0o600); err != nil {
+					b.Fatal(err)
+				}
+				script := "set -e\nmeta_dir=" + shellQuote(workdir) + "\n" + remoteSyncPruneFiles("benchmark") +
+					remoteSyncNULConsumer(`      printf '%s\000' "$rel"`) + "delete_paths " + shellQuote(input)
+				b.SetBytes(int64(len(want)))
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					out, err := exec.Command(shell, "-c", script).CombinedOutput()
+					if err != nil || !bytes.Equal(out, want) {
+						b.Fatalf("record mismatch: output bytes=%d err=%v", len(out), err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRemoteNULRecordLoopPreservesInlineState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX manifest consumer")
+	}
+	shells := []string{"/bin/sh"}
+	if dash, err := exec.LookPath("dash"); err == nil {
+		shells = append(shells, dash)
+	}
+	for _, shell := range shells {
+		t.Run(filepath.Base(shell), func(t *testing.T) {
+			root := t.TempDir()
+			outer, inner := filepath.Join(root, "outer"), filepath.Join(root, "inner")
+			mustWriteTestFile(t, outer, "a\x00skip\x00b\x00unfinished")
+			mustWriteTestFile(t, inner, "1\x00\x00last\n\x00unfinished")
+			innerLoop := remoteNULRecordLoop("inner", shellQuote(inner), shellQuote(inner+".scratch"), `set -- "$@" "$outer:$inner"`, "exit 23")
+			outerLoop := remoteNULRecordLoop("outer", shellQuote(outer), shellQuote(outer+".scratch"), "case \"$outer\" in skip) continue ;; esac\n"+innerLoop, "exit 23")
+			script := "set -e\nset -- initial\n" + outerLoop + `printf '%s\000' "$@" "$outer" "$inner"`
+			out, err := exec.Command(shell, "-c", script).CombinedOutput()
+			want := "initial\x00a:1\x00a:\x00a:last\n\x00b:1\x00b:\x00b:last\n\x00b\x00last\n\x00"
+			if err != nil || string(out) != want {
+				t.Fatalf("nested loop state=%q want=%q err=%v", out, want, err)
+			}
+			missing := remoteNULRecordLoop("record", shellQuote(filepath.Join(root, "missing")), shellQuote(filepath.Join(root, "scratch")), `printf 'body ran'`, "exit 23")
+			if out, err := exec.Command(shell, "-c", "set -e\n"+missing).Output(); exitCode(err) != 23 || len(out) != 0 {
+				t.Fatalf("input failure executed body or lost status: output=%q err=%v", out, err)
+			}
+			failedBody := remoteNULRecordLoop("record", shellQuote(outer), shellQuote(filepath.Join(root, "scratch")), "false\nprintf 'body continued'", "exit 23")
+			if out, err := exec.Command(shell, "-c", "set -e\n"+failedBody).Output(); exitCode(err) != 1 || len(out) != 0 {
+				t.Fatalf("loop disabled body error propagation: output=%q err=%v", out, err)
+			}
+		})
+	}
+}
+
+func TestRemotePrunePreservesStatusWithoutLogout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX sync control")
+	}
+	const token = "0123456789abcdef0123456789abcdef"
+	workdir := t.TempDir()
+	meta := filepath.Join(workdir, ".crabbox")
+	for _, name := range []string{"old.txt", "keep.txt"} {
+		mustWriteTestFile(t, filepath.Join(workdir, name), "fixture")
+	}
+	mustWriteTestFile(t, filepath.Join(meta, "sync-manifest"), "old.txt\x00keep.txt\x00")
+	mustWriteTestFile(t, filepath.Join(meta, remoteSyncPendingManifestName(token)), "keep.txt\x00")
+	mustWriteTestFile(t, filepath.Join(meta, remoteSyncPendingDeletedName(token)), "")
+	command := "/bin/sh -c " + shellQuote(remotePruneSyncManifest(workdir, token))
+	if out, err := runGitControlWithShellHook(t, "logout", command); err != nil {
+		t.Fatalf("successful prune status changed: %v %s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "old.txt")); !os.IsNotExist(err) {
+		t.Fatalf("old file retained: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "keep.txt")); err != nil {
+		t.Fatal(err)
+	}
+	// The same cleanup trap must preserve failure too, without invoking logout.
+	script := "set -e\nmeta_dir=" + shellQuote(meta) + "\n" + remoteSyncPruneFiles(token) + "/bin/sh -c 'exit 23'\n"
+	if out, err := runGitControlWithShellHook(t, "logout", remotePortableShellInvocation(script, nil)); exitCode(err) != 23 {
+		t.Fatalf("failed prune status changed: %v %s", err, out)
+	}
+	files, err := filepath.Glob(filepath.Join(meta, "sync-prune.*"))
+	if err != nil || len(files) != 0 {
+		t.Fatalf("prune staging retained: %v %v", files, err)
+	}
+}
+
+func TestRemotePrunePortableFilenames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX manifest consumer")
+	}
+	const token = "0123456789abcdef0123456789abcdef"
+	for _, mode := range []string{"ordinary", "plain", "coreutils"} {
+		t.Run(mode, func(t *testing.T) {
+			workdir := t.TempDir()
+			tools := t.TempDir()
+			names := []string{"mktemp", "cat", "od", "rm", "rmdir", "dirname"}
+			if mode != "coreutils" {
+				names = append(names, "python3", "perl")
+			}
+			for _, name := range names {
+				if path, err := exec.LookPath(name); err == nil {
+					if err := os.Symlink(path, filepath.Join(tools, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if mode == "coreutils" {
+				for _, name := range []string{"sort", "comm"} {
+					path, err := exec.LookPath("g" + name)
+					if err != nil {
+						path, err = exec.LookPath(name)
+					}
+					if err != nil {
+						t.Skipf("%s unavailable", name)
+					}
+					args := []string{"-z", os.DevNull}
+					if name == "comm" {
+						args = append(args, os.DevNull)
+					}
+					if out, err := exec.Command(path, args...).CombinedOutput(); err != nil {
+						t.Skipf("%s -z unavailable: %v %s", name, err, out)
+					}
+					if err := os.Symlink(path, filepath.Join(tools, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			meta := filepath.Join(workdir, ".crabbox")
+			stale := []string{"space name.txt", "line\nname\n", "caf\u00e9.txt", "old-dir/last\n"}
+			for _, name := range append(append([]string(nil), stale...), "keep.txt", "unmanaged.txt", "explicit.txt") {
+				mustWriteTestFile(t, filepath.Join(workdir, name), "fixture")
+			}
+			mustWriteTestFile(t, filepath.Join(meta, "sync-manifest"), strings.Join(append(stale, "keep.txt"), "\x00")+"\x00")
+			mustWriteTestFile(t, filepath.Join(meta, remoteSyncPendingManifestName(token)), "keep.txt\x00")
+			mustWriteTestFile(t, filepath.Join(meta, remoteSyncPendingDeletedName(token)), "explicit.txt\x00")
+			runPrune := func(dir string) ([]byte, error) {
+				command := remotePruneSyncManifest(dir, token)
+				if mode == "plain" {
+					command = remotePruneSyncManifestForTargetMode(SSHTarget{TargetOS: targetLinux}, dir, token, true)
+				}
+				if mode == "coreutils" {
+					command = remotePruneSyncManifestCoreutils(dir, token)
+				}
+				// Exercise the same source with Dash and no Bash in the legacy
+				// owner's PATH. Plain mode retains its fixed hermetic environment.
+				if dash, err := exec.LookPath("dash"); err == nil {
+					command = strings.Replace(command, "/bin/sh -c ", shellQuote(dash)+" -c ", 1)
+				}
+				cmd := exec.Command("/bin/sh", "-c", command)
+				cmd.Env = []string{"PATH=" + tools, "HOME=" + t.TempDir()}
+				return cmd.CombinedOutput()
+			}
+			out, err := runPrune(workdir)
+			if err != nil {
+				t.Fatalf("prune failed: %v\n%s", err, out)
+			}
+			for _, name := range append(stale, "explicit.txt") {
+				if _, err := os.Stat(filepath.Join(workdir, name)); !os.IsNotExist(err) {
+					t.Errorf("managed file %q remains: %v", name, err)
+				}
+			}
+			for _, name := range []string{"keep.txt", "unmanaged.txt"} {
+				if _, err := os.Stat(filepath.Join(workdir, name)); err != nil {
+					t.Errorf("retained file %q missing: %v", name, err)
+				}
+			}
+			files, err := filepath.Glob(filepath.Join(meta, "sync-prune.*"))
+			if err != nil || len(files) != 0 {
+				t.Fatalf("prune temporary files remain: %v err=%v", files, err)
+			}
+			empty := t.TempDir()
+			if out, err := runPrune(empty); err != nil {
+				t.Fatalf("empty workspace prune: %v\n%s", err, out)
+			}
+			entries, err := os.ReadDir(empty)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("no-op prune created metadata: %v err=%v", entries, err)
+			}
+		})
 	}
 }
 
@@ -3133,7 +3425,7 @@ func TestRemotePruneSyncManifestFallsBackToPerlWithoutPython(t *testing.T) {
 	mustWriteTestFile(t, filepath.Join(workdir, "stale.txt"), "stale")
 
 	toolDir := t.TempDir()
-	for _, name := range []string{"dirname", "rm", "rmdir"} {
+	for _, name := range []string{"cat", "dirname", "rm", "rmdir", "mktemp", "od"} {
 		mustWriteTestCommandWrapper(t, toolDir, name)
 	}
 	mustWriteTestBashNoProfileWrapper(t, toolDir)
@@ -3167,7 +3459,7 @@ func TestRemotePruneSyncManifestFailsClosedWhenInterpreterFails(t *testing.T) {
 	mustWriteTestFile(t, filepath.Join(workdir, "stale.txt"), "stale")
 
 	toolDir := t.TempDir()
-	for _, name := range []string{"dirname", "rm", "rmdir"} {
+	for _, name := range []string{"cat", "dirname", "rm", "rmdir", "mktemp", "od"} {
 		mustWriteTestCommandWrapper(t, toolDir, name)
 	}
 	mustWriteTestBashNoProfileWrapper(t, toolDir)
@@ -3178,11 +3470,15 @@ func TestRemotePruneSyncManifestFailsClosedWhenInterpreterFails(t *testing.T) {
 	}
 	cmd := exec.Command(bashPath, "--noprofile", "--norc", "-c", remotePruneSyncManifest(workdir, "0123456789abcdef0123456789abcdef"))
 	cmd.Env = append(os.Environ(), "PATH="+toolDir)
-	if out, err := cmd.CombinedOutput(); err == nil {
-		t.Fatalf("remote prune unexpectedly succeeded\n%s", out)
+	if out, err := cmd.CombinedOutput(); exitCode(err) != 23 {
+		t.Fatalf("remote prune did not preserve interpreter exit 23: err=%v\n%s", err, out)
 	}
 	if _, err := os.Stat(filepath.Join(workdir, "stale.txt")); err != nil {
 		t.Fatalf("stale.txt should survive interpreter failure: %v", err)
+	}
+	files, err := filepath.Glob(filepath.Join(workdir, ".crabbox", "sync-prune.*"))
+	if err != nil || len(files) != 0 {
+		t.Fatalf("interpreter failure left prune temporary files: %v err=%v", files, err)
 	}
 }
 
@@ -3193,7 +3489,7 @@ func TestRemotePruneSyncManifestDoesNotSwallowReadErrors(t *testing.T) {
 			t.Fatalf("remote prune still treats manifest read errors as missing: %q", unsafe)
 		}
 	}
-	if !strings.Contains(got, "set -e -o pipefail") {
+	if !strings.Contains(got, `manifest_removed_paths > "$prune_paths"`) {
 		t.Fatalf("remote prune must propagate interpreter failures: %q", got)
 	}
 }
@@ -5295,16 +5591,42 @@ func TestRemoteUserWorkloadPreservesLoginShell(t *testing.T) {
 	for _, shell := range []bool{false, true} {
 		t.Run(fmt.Sprintf("shell=%t", shell), func(t *testing.T) {
 			home, workdir := t.TempDir(), t.TempDir()
-			mustWriteTestFile(t, filepath.Join(home, ".bash_profile"), "export CRABBOX_TEST_LOGIN_VALUE=profile-loaded\n")
-			const script = `printf '%s' "$CRABBOX_TEST_LOGIN_VALUE"`
+			mustWriteTestFile(t, filepath.Join(home, ".bash_profile"), "export CRABBOX_TEST_LOGIN_VALUE=profile-loaded\ncd \"$HOME\"\n")
+			const script = `printf '%s\n%s' "$CRABBOX_TEST_LOGIN_VALUE" "$PWD"`
 			command := remoteCommand(workdir, nil, []string{"bash", "-c", script})
 			if shell {
 				command = remoteShellCommand(workdir, nil, script)
 			}
 			cmd := exec.Command("/bin/sh", "-c", command)
 			cmd.Env = []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "BASH_ENV=" + os.DevNull, "ENV=" + os.DevNull}
-			if out, err := cmd.CombinedOutput(); err != nil || string(out) != "profile-loaded" {
+			if out, err := cmd.CombinedOutput(); err != nil || string(out) != "profile-loaded\n"+workdir {
 				t.Fatalf("user workload lost login profile: output=%q err=%v", out, err)
+			}
+		})
+	}
+}
+
+func TestRemoteArgvWithoutBashPreservesEnvironmentAndExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX argv renderer")
+	}
+	for _, code := range []int{0, 23, 127} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			root, workdir, emptyPath := t.TempDir(), t.TempDir(), t.TempDir()
+			first, second := filepath.Join(root, "first.env"), filepath.Join(root, "second.env")
+			mustWriteTestFile(t, first, "export FIXTURE_VALUE=first\n")
+			mustWriteTestFile(t, second, "export FIXTURE_VALUE=second\ncd "+shellQuote(root)+"\n")
+			marker := filepath.Join(root, "invocations")
+			workload := filepath.Join(root, "workload.sh")
+			mustWriteTestFile(t, workload, "printf 'x' >> "+shellQuote(marker)+"\nprintf '%s\\n' \"$FIXTURE_VALUE\" \"$PWD\" \"$1\"\nexit "+strconv.Itoa(code)+"\n")
+			command := remoteCommandWithEnvFiles(workdir, map[string]string{"PATH": emptyPath, "FIXTURE_VALUE": "forwarded"}, []string{first, second}, []string{"/bin/sh", workload, "literal 'value';*"})
+			out, err := exec.Command("/bin/sh", "-c", command).CombinedOutput()
+			if exitCode(err) != code || string(out) != "forwarded\n"+workdir+"\nliteral 'value';*\n" {
+				t.Fatalf("exit=%d want=%d output=%q err=%v", exitCode(err), code, out, err)
+			}
+			calls, err := os.ReadFile(marker)
+			if err != nil || string(calls) != "x" {
+				t.Fatalf("workload invoked more than once: %q err=%v", calls, err)
 			}
 		})
 	}
@@ -5670,7 +5992,11 @@ func TestRemoteGitSeedSupportsSeedOnlyPlanWithoutTree(t *testing.T) {
 		t.Fatalf("expected seed-only plan, got %#v", plan)
 	}
 	workdir := filepath.Join(t.TempDir(), "seed-only")
-	if out, err := exec.Command("bash", "-lc", remoteGitSeed(workdir, plan)).CombinedOutput(); err != nil {
+	command := remoteGitSeed(workdir, plan)
+	if dash, err := exec.LookPath("dash"); err == nil {
+		command = strings.Replace(command, "/bin/sh -c ", shellQuote(dash)+" -c ", 1)
+	}
+	if out, err := exec.Command("/bin/sh", "-c", command).CombinedOutput(); err != nil {
 		t.Fatalf("seed-only Git seed failed: %v\n%s", err, out)
 	}
 	requireGitOutput(t, workdir, f.b, "rev-parse", "HEAD")
@@ -5773,8 +6099,11 @@ func TestRemoteWriteSyncManifestsNewForTargetUsesInterpretedWriterForWSL2(t *tes
 	if strings.Contains(plain, "status=none") {
 		t.Fatalf("non-WSL2 manifest writer should not require GNU dd extensions: %q", plain)
 	}
-	if strings.Count(plain, "dd bs=1 count=\"") != 2 {
-		t.Fatalf("non-WSL2 manifest writer should exact-read both blobs: %q", plain)
+	// The portable wrapper includes one writer in each shell branch.
+	for _, length := range []string{"manifest_len", "deleted_len"} {
+		if strings.Count(plain, `dd bs=1 count="$`+length+`"`) != 2 {
+			t.Fatalf("non-WSL2 manifest writer should exact-read %s in both shell branches: %q", length, plain)
+		}
 	}
 	if strings.Contains(plain, "cat >") {
 		t.Fatalf("non-WSL2 manifest writer should not read either blob through EOF: %q", plain)
@@ -5797,7 +6126,7 @@ func TestRemoteWriteSyncManifestsNewForTargetPlainWSL2IsHermetic(t *testing.T) {
 		"/usr/bin/env -i",
 		"BASH_ENV=/dev/null",
 		"ENV=/dev/null",
-		"/bin/bash --noprofile --norc -c",
+		"/bin/sh -c",
 		"/usr/bin/python3 -c",
 		"/bin/mkdir -p --",
 		"/usr/bin/find",
@@ -6327,44 +6656,6 @@ func TestAWSExplicitARM64TypeInference(t *testing.T) {
 	}
 }
 
-func TestCloudflareContainerInstanceTypeMapping(t *testing.T) {
-	tests := []struct {
-		class string
-		want  string
-	}{
-		{class: "", want: "standard-4"},
-		{class: "tiny", want: "standard-4"},
-		{class: "small", want: "standard-4"},
-		{class: "standard", want: "standard-4"},
-		{class: "fast", want: "standard-4"},
-		{class: "large", want: "standard-4"},
-		{class: "beast", want: "standard-4"},
-		{class: "lite", want: "lite"},
-		{class: "basic", want: "basic"},
-		{class: "standard-3", want: "standard-3"},
-	}
-	for _, tt := range tests {
-		if got := cloudflareContainerInstanceTypeForClass(tt.class); got != tt.want {
-			t.Fatalf("cloudflareContainerInstanceTypeForClass(%q)=%q want %q", tt.class, got, tt.want)
-		}
-		if got := CloudflareContainerInstanceTypeForClass(tt.class); got != tt.want {
-			t.Fatalf("CloudflareContainerInstanceTypeForClass(%q)=%q want %q", tt.class, got, tt.want)
-		}
-	}
-}
-
-func TestNormalizeCloudflareContainerInstanceType(t *testing.T) {
-	for _, valid := range CloudflareContainerInstanceTypes() {
-		got, ok := NormalizeCloudflareContainerInstanceType(" " + strings.ToUpper(valid) + " ")
-		if !ok || got != valid {
-			t.Fatalf("NormalizeCloudflareContainerInstanceType(%q)=(%q,%t), want (%q,true)", valid, got, ok, valid)
-		}
-	}
-	if got, ok := NormalizeCloudflareContainerInstanceType("ccx63"); ok || got != "" {
-		t.Fatalf("NormalizeCloudflareContainerInstanceType(ccx63)=(%q,%t), want empty,false", got, ok)
-	}
-}
-
 func TestCloudflareServerTypeForConfig(t *testing.T) {
 	tests := []struct {
 		cfg  Config
@@ -6389,12 +6680,8 @@ func TestServerTypeForProviderClassDirectProviders(t *testing.T) {
 		{provider: "blacksmith-testbox", class: "beast", want: ""},
 		{provider: "ssh", class: "beast", want: ""},
 		{provider: "islo", class: "beast", want: ""},
-		{provider: "e2b", class: "beast", want: "base"},
-		{provider: "modal", class: "beast", want: "python:3.13-slim"},
-		{provider: "daytona", class: "beast", want: "snapshot"},
 		{provider: "namespace", class: "standard", want: "S"},
 		{provider: "namespace-devbox", class: " custom-xl ", want: "CUSTOM-XL"},
-		{provider: "proxmox", class: "beast", want: "template"},
 		{provider: "sprites", class: "beast", want: ""},
 		{provider: "cloudflare", class: "standard", want: "standard-4"},
 		{provider: "cf", class: "beast", want: "standard-4"},
@@ -6514,7 +6801,7 @@ func TestSSHControlBudgetsSeparateFiniteAuthorityFromUnlimitedWork(t *testing.T)
 			t.Fatal("ordinary unlimited execution acquired a control duration")
 		}
 	}
-	if _, err := prepareSSHTransport(SSHTarget{}, "true", nil, 0, sshCommandLimit{control: true}); err == nil {
+	if _, err := prepareSSHTransport(t.Context(), SSHTarget{}, "true", nil, 0, sshCommandLimit{control: true}); err == nil {
 		t.Fatal("unlimited control command accepted")
 	}
 }

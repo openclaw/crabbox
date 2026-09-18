@@ -271,6 +271,44 @@ type LeaseTouchBackend interface {
 	Touch(ctx context.Context, req TouchRequest) (Server, error)
 }
 
+// LeaseHeartbeatBackend is implemented by providers that keep a lease alive
+// through their own API instead of a Crabbox-managed SSH lease touch. It is
+// optional: the `heartbeat` command reports the same unsupported error for
+// providers that do not implement it.
+//
+// Providers own lease resolution, ownership and state validation on this path.
+// They must refuse identifiers without an exact local claim.
+//
+// A heartbeat refreshes idle activity without writing lifecycle policy or
+// changing absolute lifetime limits. `--idle-timeout` is rejected before this
+// capability is reached: it reports the provider's window rather than replacing it.
+type LeaseHeartbeatBackend interface {
+	Backend
+	Heartbeat(ctx context.Context, req LeaseHeartbeatRequest) (LeaseHeartbeatResult, error)
+}
+
+type LeaseHeartbeatRequest struct {
+	// ID is the lease id, sandbox name, or slug exactly as the user typed it,
+	// unresolved and unvalidated.
+	ID string
+}
+
+type LeaseHeartbeatResult struct {
+	LeaseID string
+	Slug    string
+	State   string
+	// LastTouchedAt is when the provider observed the lease. Core renders it
+	// as-is and persists nothing on this path, so a local claim's own touch
+	// time is left alone.
+	LastTouchedAt time.Time
+	// IdleTimeout is the provider's OWN idle window, as reported by the
+	// provider for this lease. Leave it zero when the provider does not report
+	// one: the rendered view then omits the field rather than substituting
+	// Crabbox's configured default, which has no bearing on a lease whose idle
+	// policy the provider owns.
+	IdleTimeout time.Duration
+}
+
 type SSHLeaseBackend interface {
 	SSHLoginBackend
 	LeaseTouchBackend
@@ -736,6 +774,7 @@ const (
 	// FeatureFixedCurrentRepoStop requires RepositoryScopedStopBackend for fixed IDs.
 	FeatureFixedCurrentRepoStop Feature = "fixed-current-repo-stop"
 	FeaturePauseResume          Feature = "pause-resume"
+	FeatureLeaseHeartbeat       Feature = "lease-heartbeat"
 	FeatureMCP                  Feature = "mcp-attachments"
 )
 

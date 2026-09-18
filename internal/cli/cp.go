@@ -10,9 +10,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/openclaw/crabbox/internal/runner/runnerfs"
 )
 
 const copyUsage = "crabbox cp --id <lease-id-or-slug> [-L] <src> <dst>"
+const copyRecoveryUsage = "crabbox cp --recover <keep-destination|restore-backup> [--id <lease>] <destination>"
 const copyPathRule = "exactly one path must use SANDBOX:PATH"
 
 func (a App) copyCommand(ctx context.Context, args []string) error {
@@ -21,8 +24,11 @@ func (a App) copyCommand(ctx context.Context, args []string) error {
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), `Usage:
   %s
+  %s
 
 Copy between the host and a Crabbox-owned lease; %s.
+Recovery uses one exact destination: a local path without --id, or
+SANDBOX:PATH with --id. Unselected legacy data is retained.
 
 Examples:
   crabbox cp --id blue-box ./file.txt SANDBOX:/tmp/file.txt
@@ -32,24 +38,50 @@ Copy flags:
   --id <lease-id-or-slug>  required lease identifier
   --provider <name>       override the configured provider
   -L                     follow host-side symbolic links when uploading
+  --recover <choice>     explicitly adopt legacy archive state; one destination
 
 All flags:
-`, copyUsage, copyPathRule)
+`, copyUsage, copyRecoveryUsage, copyPathRule)
 		fs.PrintDefaults()
 	}
 	provider := registerProviderSelectionFlag(fs, defaults, providerHelpAll())
 	id := fs.String("id", "", "lease id or slug")
 	followLink := fs.Bool("L", false, "follow symbolic links when copying from host to sandbox")
+	recovery := fs.String("recover", "", "legacy archive recovery: keep-destination or restore-backup")
 	providerFlags := registerProviderFlags(fs, defaults)
 	targetFlags := registerTargetFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*id) == "" || fs.NArg() != 2 {
-		return Exit(2, "usage: %s", copyUsage)
-	}
-	if err := validateCopyArgs(fs.Arg(0), fs.Arg(1)); err != nil {
-		return err
+	recovering := flagWasSet(fs, "recover")
+	choice := runnerfs.ArchiveRecoveryChoice(*recovery)
+	if recovering {
+		if fs.NArg() != 1 || flagWasSet(fs, "L") || choice != runnerfs.ArchiveKeepDestination && choice != runnerfs.ArchiveRestoreBackup {
+			return Exit(2, "usage: %s (-L is not valid for recovery)", copyRecoveryUsage)
+		}
+		remote, destination := sandboxCopyPath(fs.Arg(0))
+		if strings.TrimSpace(destination) == "" {
+			return Exit(2, "recovery requires an explicit destination")
+		}
+		if !remote {
+			if strings.TrimSpace(*id) != "" {
+				return Exit(2, "local recovery does not accept --id; use SANDBOX:PATH for lease recovery")
+			}
+			if fs.NFlag() != 1 {
+				return Exit(2, "local recovery accepts only --recover and a destination; provider flags require SANDBOX:PATH")
+			}
+			return recoverLocalArchive(ctx, destination, choice, a.Stdout)
+		}
+		if strings.TrimSpace(*id) == "" {
+			return Exit(2, "remote recovery requires --id; usage: %s", copyRecoveryUsage)
+		}
+	} else {
+		if strings.TrimSpace(*id) == "" || fs.NArg() != 2 {
+			return Exit(2, "usage: %s", copyUsage)
+		}
+		if err := validateCopyArgs(fs.Arg(0), fs.Arg(1)); err != nil {
+			return err
+		}
 	}
 	cfg, err := loadPortsConfig(fs, *provider, providerFlags, targetFlags, *id)
 	if err != nil {
@@ -60,7 +92,7 @@ All flags:
 		return err
 	}
 	copyBackend, ok := backend.(CopyBackend)
-	if ok {
+	if ok && !recovering {
 		return copyBackend.Copy(ctx, CopyRequest{
 			Options:     leaseOptionsFromConfig(cfg),
 			ID:          *id,
@@ -70,6 +102,9 @@ All flags:
 		})
 	}
 	if _, ok := backend.(SSHLeaseBackend); !ok {
+		if recovering {
+			return Exit(2, "provider=%s does not support SSH archive recovery", backend.Spec().Name)
+		}
 		return Exit(2, "provider=%s does not support cp; it has neither native copy nor an SSH lease transport", backend.Spec().Name)
 	}
 	lease, err := a.resolveSSHTransportLeaseTargetForRepo(ctx, &cfg, *id, true, false)
@@ -84,7 +119,12 @@ All flags:
 	}
 	stopActivity := a.startInteractiveSSHLeaseActivity(ctx, cfg, lease)
 	defer stopActivity()
-	return copyOverResolvedSSH(ctx, lease.SSH, fs.Arg(0), fs.Arg(1), *followLink, a.Stdout, a.Stderr)
+	if recovering {
+		_, destination := sandboxCopyPath(fs.Arg(0))
+		return recoverRemoteArchive(ctx, lease.SSH, destination, choice, a.Stdout, a.Stderr)
+	}
+	err = copyOverResolvedSSH(ctx, lease.SSH, fs.Arg(0), fs.Arg(1), *followLink, a.Stdout, a.Stderr)
+	return archiveRecoveryGuidance(err, *id)
 }
 
 func validateCopyArgs(src, dst string) error {
@@ -123,19 +163,7 @@ func copyOverResolvedSSH(ctx context.Context, target SSHTarget, src, dst string,
 		if runtime.GOOS == "windows" || isWindowsWSL2Target(target) {
 			return Exit(2, "SSH cp archive fallback requires a POSIX operator host and native Linux or macOS lease (not WSL2); install rsync 3.4.3 or newer")
 		}
-		// The archive fallback is driven by native Go on the operator host, so it
-		// must use the native OpenSSH session even when Windows rsync probing chose
-		// a WSL session.
-		if wslExe != "" {
-			if closeErr := session.Close(); closeErr != nil {
-				return closeErr
-			}
-			session, err = newSSHTransportSession(ctx, target, false)
-			if err != nil {
-				return err
-			}
-		}
-		return copyOverResolvedSSHArchive(ctx, session, target, src, dst, followLink, stdout, stderr)
+		return copyOverResolvedSSHArchive(ctx, target, src, dst, followLink, stderr)
 	}
 	// Prefer secluded arguments whenever the remote rsync supports them: the
 	// paths then travel over the rsync protocol stream instead of the remote

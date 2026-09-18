@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"io"
 	"os"
@@ -12,6 +13,81 @@ import (
 	"testing"
 	"time"
 )
+
+func TestRunSSHOutputBoundedExecutionTimeoutAccountsForWSLStage(t *testing.T) {
+	for _, callerLimit := range []time.Duration{0, 5 * time.Second} {
+		t.Run(callerLimit.String(), func(t *testing.T) {
+			ctx := t.Context()
+			if callerLimit > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, callerLimit)
+				defer cancel()
+			}
+			oldStage := stageWSLSpool
+			t.Cleanup(func() { stageWSLSpool = oldStage })
+			stopped := errors.New("stop before remote staging")
+			calls := 0
+			stageWSLSpool = func(spool *wslStageSpool, stageCtx context.Context, target *SSHTarget, timing wslStageTiming, connect, attempts string, _ io.Writer) (string, error) {
+				calls++
+				if timing.operation != 15*time.Second || connect != "10" || attempts != "1" {
+					t.Fatalf("unexpected operation/transport options: %+v %s %s", timing, connect, attempts)
+				}
+				reader, err := spool.input.reset()
+				if err != nil {
+					t.Fatal(err)
+				}
+				var descriptor [wslStageHeaderSize]byte
+				if _, err := io.ReadFull(reader, descriptor[:]); err != nil {
+					t.Fatal(err)
+				}
+				if got := binary.LittleEndian.Uint64(descriptor[32:40]); got != 15000 {
+					t.Fatalf("WSL execution descriptor=%dms", got)
+				}
+				deadline, ok := stageCtx.Deadline()
+				if !ok {
+					t.Fatal("staged call is unbounded")
+				}
+				if callerLimit > 0 {
+					callerDeadline, _ := ctx.Deadline()
+					if !deadline.Equal(callerDeadline) {
+						t.Fatal("caller deadline changed")
+					}
+				} else {
+					budget := sshTransportCallBudget(*target, spool.size, sshCommandLimit{execution: 15 * time.Second})
+					if remaining := time.Until(deadline); remaining <= 15*time.Second || remaining > budget {
+						t.Fatalf("whole-call deadline does not use core accounting: %v budget=%v", remaining, budget)
+					}
+				}
+				return "", stopped
+			}
+			target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Port: "22", FallbackPorts: []string{}}
+			_, err := RunSSHOutputBoundedWithExecutionTimeout(ctx, target, "uname -m", 256, 15*time.Second)
+			if !errors.Is(err, stopped) || calls != 1 {
+				t.Fatalf("staging boundary calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}
+
+func TestRunSSHOutputBoundedExecutionTimeoutRejectsInvalidOrCanceled(t *testing.T) {
+	oldStage := stageWSLSpool
+	t.Cleanup(func() { stageWSLSpool = oldStage })
+	stageWSLSpool = func(*wslStageSpool, context.Context, *SSHTarget, wslStageTiming, string, string, io.Writer) (string, error) {
+		t.Fatal("invalid/canceled request reached staging")
+		return "", nil
+	}
+	target := SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}
+	for _, duration := range []time.Duration{0, -time.Second} {
+		if _, err := RunSSHOutputBoundedWithExecutionTimeout(t.Context(), target, "uname -m", 256, duration); err == nil || err.Error() != "SSH execution timeout must be positive" {
+			t.Fatalf("invalid allowance: %v", err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := RunSSHOutputBoundedWithExecutionTimeout(ctx, target, "uname -m", 256, 15*time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation not honored: %v", err)
+	}
+}
 
 func TestRunSSHOutputBounded(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -123,7 +199,7 @@ func TestRunSSHOutputBoundedWSL2StagesCommand(t *testing.T) {
 	}
 	dir := t.TempDir()
 	executions, remotePath, stdinPath := filepath.Join(dir, "executions"), filepath.Join(dir, "remote"), filepath.Join(dir, "stdin")
-	script := "#!/bin/sh\nprintf x >> " + shellQuote(executions) + "\nlast=; for arg; do last=$arg; done\nprintf '%s' \"$last\" > " + shellQuote(remotePath) + "\ncat > " + shellQuote(stdinPath) + "\nprintf arm64\n"
+	script := "#!/bin/sh\n" + recordLegacyBashProbeShell(t, filepath.Join(dir, "prerequisites")) + "printf x >> " + shellQuote(executions) + "\nlast=; for arg; do last=$arg; done\nprintf '%s' \"$last\" > " + shellQuote(remotePath) + "\ncat > " + shellQuote(stdinPath) + "\nprintf arm64\n"
 	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -171,6 +247,10 @@ func TestRunSSHOutputBoundedWSL2StagesCommand(t *testing.T) {
 	if launcher == "" || len(launcher) >= wslStageLauncherCommandLimit || string(remote) != launcher || len(stdin) != 0 || string(runs) != "x" {
 		t.Fatalf("launcher=%d remote=%t stdin=%d executions=%q", len(launcher), string(remote) == launcher, len(stdin), runs)
 	}
+	if probes, err := os.ReadFile(filepath.Join(dir, "prerequisites")); err != nil || string(probes) != "probe\n" {
+		t.Fatalf("Bash prerequisite calls=%q err=%v, want one", probes, err)
+	}
+
 }
 
 func TestRunSSHOutputBoundedFallbackSemantics(t *testing.T) {

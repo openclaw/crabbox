@@ -7220,7 +7220,7 @@ export class FleetCoordinator {
     leaseID: string,
     expectedBinding: string,
     observation: { providerScope: string; resourceAbsent: true },
-    persistAudit: (transaction: CoordinatorStorageView) => Promise<T>,
+    prepareAudit: (transaction: CoordinatorStorageView) => Promise<() => Promise<T>>,
   ): Promise<T> {
     const runtime = this.state.provisioning;
     if (!runtime)
@@ -7246,7 +7246,15 @@ export class FleetCoordinator {
             "Cleanup recovery lease or administrator authority changed before commit",
           );
         }
-        const audit = await persistAudit(transaction);
+        const writeAudit = await prepareAudit(transaction);
+        // Audit preparation can await storage; recheck authority before its first write.
+        const admittedGrantVersion = trustedAdminGrantVersion(request);
+        if (!admittedGrantVersion || admittedGrantVersion !== this.currentAdminGrantVersion) {
+          throw new ProviderResourceUnresolvedError(
+            "Cleanup recovery lease or administrator authority changed before commit",
+          );
+        }
+        const audit = await writeAudit();
         const now = Date.now();
         await transaction.put(leaseKey(leaseID), {
           ...current,
@@ -7313,13 +7321,13 @@ export class FleetCoordinator {
         return json({ error: "cleanup_recovery_requires_expired_blocked_lease" }, { status: 409 });
       }
       const expectedBinding = this.cleanupRecoveryLeaseBinding(lease);
-      const commitScopeRecovery: ProviderScopeRecoveryCommit = (observation, persistAudit) =>
+      const commitScopeRecovery: ProviderScopeRecoveryCommit = (observation, prepareAudit) =>
         this.commitRecoveredLeaseScope(
           request,
           lease.id,
           expectedBinding,
           observation,
-          persistAudit,
+          prepareAudit,
         );
       const scopeRecoveryArgs: [] | [ProviderScopeRecoveryCommit] =
         provider.supportsCleanupScopeRecovery ? [commitScopeRecovery] : [];
@@ -7775,7 +7783,23 @@ export class FleetCoordinator {
           { status: 409 },
         );
       }
-      return structuredClone(await this.applyLeaseHeartbeatState(lease, input));
+      const updated = await this.applyLeaseHeartbeatState(lease, input);
+      const providerID = managedLeaseProvider(updated);
+      if (
+        providerID &&
+        requestCIDRs.length > 0 &&
+        leaseOwnsAWSSSHAccess(updated) &&
+        this.provider(
+          providerID,
+          updated.region,
+          updated.providerProject,
+        ).leaseAccessRefreshUnchanged?.(updated, requestCIDRs)
+      ) {
+        await this.markAWSIngressReconcilePending(updated);
+        await this.armAlarmNoLaterThan(Date.now() + awsIngressReconcileMinDelayMs);
+        return json({ lease: this.leaseForRequest(updated, request, admin) });
+      }
+      return structuredClone(updated);
     });
     if (committed instanceof Response) {
       return committed;
@@ -26640,6 +26664,7 @@ interface CloudProvider {
     lease: LeaseRecord,
     context: ProviderAccessContext,
   ): Promise<LeaseRecord | void>;
+  leaseAccessRefreshUnchanged?(lease: LeaseRecord, incomingCIDRs: string[]): boolean;
   refreshLeaseAccessForResolution?(lease: LeaseRecord): Promise<LeaseRecord | void>;
   reconcileLeaseAccess?(lease: LeaseRecord, context: ProviderAccessContext): Promise<void>;
   createServerWithFallback(
@@ -26777,7 +26802,7 @@ type ProviderStateStorageView = CoordinatorStorageView;
 // The lifecycle owner accepts a proved scope binding, never an arbitrary lease patch.
 type ProviderScopeRecoveryCommit = <T>(
   observation: { providerScope: string; resourceAbsent: true },
-  persistAudit: (transaction: CoordinatorStorageView) => Promise<T>,
+  prepareAudit: (transaction: CoordinatorStorageView) => Promise<() => Promise<T>>,
 ) => Promise<T>;
 
 interface ProviderAccessContext {
@@ -28568,8 +28593,10 @@ export class AWSProvider implements CloudProvider {
         if (await transaction.get(key)) {
           throw new ProviderResourceUnresolvedError("AWS recovery evidence changed before commit");
         }
-        await transaction.put(key, audit);
-        return audit;
+        return async () => {
+          await transaction.put(key, audit);
+          return audit;
+        };
       },
     );
   }
@@ -28903,6 +28930,13 @@ export class AWSProvider implements CloudProvider {
         publishAccessBeforeProvisioning: true,
       },
     };
+  }
+
+  leaseAccessRefreshUnchanged(lease: LeaseRecord, incomingCIDRs: string[]): boolean {
+    if (lease.network?.sshSourceCIDRsComplete !== true) return false;
+    const current = lease.network.sshSourceCIDRs ?? [];
+    const refreshed = refreshedAWSSSHSourceCIDRs(lease, validCIDRs(incomingCIDRs));
+    return JSON.stringify(current.toSorted()) === JSON.stringify(refreshed.toSorted());
   }
 
   async refreshLeaseAccess(

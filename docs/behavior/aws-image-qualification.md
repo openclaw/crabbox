@@ -226,14 +226,50 @@ authorize paid execution.
 
 ## Enrollment and binding
 
+The protected workflow separates preparation from deployment. After the candidate
+bundle is built, approve **Prepare protected qualification handoff** to start the
+absolute clock. This job admits the bundle without AWS, Cloudflare API, or
+controller credentials and publishes one immutable
+`image-qualification-handoff-<run>-1` artifact. Its `handoff.json` binds the
+repository, protected workflow SHA, candidate SHA and artifact, run/attempt,
+derived owner, capsule, authority identity, configuration digest, and deadlines.
+Private account, network and resource coordinates are bound only by the digest;
+they are not published in this record.
+
+For retained mode, `iam-inputs.json` projects the same record into
+`authority_owner`, `run_id`, `source_sha`, `starts_at`, `creation_expires_at`, and
+`cleanup_expires_at`. Here `source_sha` is the **candidate SHA**, not the workflow
+or historical image SHA. Preserve the exact owner, including `@example.invalid`.
+The work cutoff is start plus 30 minutes and absolute expiry is start plus
+38 minutes. Mint preparation retains its 120-minute limit and emits no
+retained-role projection.
+
+The infrastructure operator consumes this verified handoff through the separately
+accepted deployment route, verifies exact IAM binding and authority credential
+custody, and only then approves **Deploy after exact IAM binding and credential
+custody**. Preparation does not apply IAM, issue credentials, deploy the authority,
+or establish a cleanup operator. Those remain prerequisites, not effects of
+approval. The workflow creates no provisional administrator credential route.
+
+Deployment verifies the immutable artifact ID, digest, run and source, then
+consumes the prepared identity without regenerating expiry. Preparation, central
+application, credential delivery, approvals and uploads all consume the same
+window. An elapsed work cutoff refuses deployment, enrollment and arm; approval
+does not promise 30 remaining execution minutes. Delayed provider or registry
+reads are rechecked before admission. A run already persisted before a late
+refusal retains its cleanup ownership and alarm. Reruns and replacement handoffs
+are rejected; an expired preparation requires a newly authorized run, not an
+extension. Protected finalization and the independent reaper remain available.
+
 Deploy the authority from
 `worker/wrangler.aws-qualification-authority.jsonc`. That config has no route,
 workers.dev URL, preview URL, or cron. Supply AWS credentials only to this Worker.
 
-Before deploying a candidate, bind the protected caller to
-`AWSQualificationController` with the reviewed deployment hash and call
-`enroll`. Add a candidate service binding whose props exactly match the enrolled
-identity:
+Protected tooling deploys the private candidate and binds the protected caller to
+`AWSQualificationController` with the reviewed deployment hash, then calls
+`claim` to enroll and activate that exact identity. Candidate execution remains
+blocked until enrollment and protected arm succeed. The candidate service
+binding props must exactly match the prepared and enrolled identity:
 
 ```json
 {

@@ -554,7 +554,7 @@ func (b *coordinatorLeaseBackend) createCoordinatorLeaseWithProgressMode(ctx con
 	if err != nil {
 		cancelOnError = coordinatorCreateLeaseErrorMayHaveCommitted(err) ||
 			(isCoordinatorStaleInstanceError(err) && !isCoordinatorStaleInstanceCleanedSignal(err))
-		if coordinatorCreateLeaseErrorMayHaveCommitted(err) && createCtx.Err() == nil {
+		if coordinatorCreateLeaseErrorCanReplay(err) && createCtx.Err() == nil {
 			lease, err = b.recoverCoordinatorLeaseAfterCreateError(createCtx, leaseID, fixed, create, err)
 			rebound = err == nil
 		}
@@ -631,7 +631,7 @@ func (b *coordinatorLeaseBackend) canceledCoordinatorLeaseCreateError(ctx contex
 func (b *coordinatorLeaseBackend) abandonUnrecoveredCoordinatorLeaseCreate(ctx context.Context, leaseID, slug, createAttemptID string, createErr error) error {
 	cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), coordinatorCanceledCreateRecoveryTimeout)
 	defer cancel()
-	fmt.Fprintf(b.rt.Stderr, "warning: abandoning uncertain coordinator create %s; recording durable cancellation\n", leaseID)
+	fmt.Fprintf(b.rt.Stderr, "warning: abandoning coordinator create %s; recording durable cancellation\n", leaseID)
 	if err := b.cancelCoordinatorLeaseCreate(cancelCtx, leaseID, slug, createAttemptID); err != nil {
 		return errors.Join(createErr, fmt.Errorf("cancel unrecovered coordinator lease create %s: %w", leaseID, err))
 	}
@@ -691,7 +691,7 @@ func coordinatorCancelCreateErrorRetryable(err error) bool {
 }
 
 func definitiveCoordinatorCreateError(err error) error {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || coordinatorCreateLeaseErrorMayHaveCommitted(err) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || coordinatorCreateLeaseErrorCanReplay(err) {
 		return nil
 	}
 	return fmt.Errorf("create coordinator lease: %w", err)
@@ -721,7 +721,7 @@ func (b *coordinatorLeaseBackend) recoverCoordinatorLeaseAfterCreateError(
 		if err == nil {
 			return lease, nil
 		}
-		if !coordinatorCreateLeaseErrorMayHaveCommitted(err) {
+		if !coordinatorCreateLeaseErrorCanReplay(err) {
 			return CoordinatorLease{}, err
 		}
 		select {
@@ -799,6 +799,13 @@ func coordinatorCreateLeaseErrorMayHaveCommitted(err error) bool {
 	}
 	var httpErr CoordinatorHTTPError
 	return errors.As(err, &httpErr) && httpErr.StatusCode >= http.StatusInternalServerError
+}
+
+func coordinatorCreateLeaseErrorCanReplay(err error) bool {
+	// Tailscale preparation fails before provider dispatch, but its admitted
+	// attempt still needs cancellation when an ordinary create is abandoned.
+	return coordinatorCreateLeaseErrorMayHaveCommitted(err) &&
+		coordinatorResponseErrorCode(err, http.StatusBadGateway) != "tailscale_unavailable"
 }
 
 func defaultCoordinatorCreateLeaseTimeoutForConfig(cfg Config) time.Duration {

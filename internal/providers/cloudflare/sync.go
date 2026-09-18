@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func (b *cloudflareBackend) prepareArchive(ctx context.Context, req core.RunRequest) (*core.PreparedArchive, error) {
@@ -29,7 +30,7 @@ func (b *cloudflareBackend) syncWorkspace(ctx context.Context, client *cloudflar
 		}
 	}
 	var diskDuration time.Duration
-	phases, total, err := core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
+	phases, total, err := (core.ArchiveWorkspace{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge, Workdir: workdir,
 		Provider: providerName, PhaseName: "cloudflare_sync", RemoteArchivePrefix: "crabbox-cloudflare-sync-",
 		Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
@@ -52,7 +53,7 @@ func (b *cloudflareBackend) syncWorkspace(ctx context.Context, client *cloudflar
 		Exec: func(execCtx context.Context, command string) error {
 			return b.execShell(execCtx, client, sandboxID, command, io.Discard)
 		},
-	}, prepared)
+	}).Sync(ctx, prepared)
 	for i := range phases {
 		if phases[i].Name == "upload" {
 			phases[i].Ms -= diskDuration.Milliseconds()
@@ -133,7 +134,7 @@ func (b *cloudflareBackend) prepareWorkspace(ctx context.Context, client *cloudf
 }
 
 func (b *cloudflareBackend) execShell(ctx context.Context, client *cloudflareClient, sandboxID, command string, stdout io.Writer) error {
-	code, err := client.execStream(ctx, sandboxID, execStreamRequest{
+	code, err := client.execStream(ctx, sandboxID, shared.CommandStreamRequest{
 		Command:   command,
 		Cwd:       "/",
 		TimeoutMS: durationMillisecondsCeil(b.cfg.TTL),

@@ -1663,7 +1663,7 @@ func TestCoordinatorCreateLeaseTimesOutWithDiagnostics(t *testing.T) {
 		}
 	}
 	if !strings.Contains(stderr.String(), "waiting for coordinator lease provider=azure slug=crimson-lobster") ||
-		!strings.Contains(stderr.String(), "abandoning uncertain coordinator create cbx_timeout; recording durable cancellation") {
+		!strings.Contains(stderr.String(), "abandoning coordinator create cbx_timeout; recording durable cancellation") {
 		t.Fatalf("missing progress or cancellation output: %q", stderr.String())
 	}
 	if got := cancellations.Load(); got != 1 {
@@ -1874,9 +1874,22 @@ func TestCoordinatorCreateLeaseTreatsAllServerErrorsAsAmbiguous(t *testing.T) {
 		http.StatusServiceUnavailable,
 		http.StatusGatewayTimeout,
 	} {
-		if !coordinatorCreateLeaseErrorMayHaveCommitted(CoordinatorHTTPError{StatusCode: statusCode}) {
+		err := CoordinatorHTTPError{StatusCode: statusCode}
+		if !coordinatorCreateLeaseErrorMayHaveCommitted(err) || !coordinatorCreateLeaseErrorCanReplay(err) {
 			t.Fatalf("status %d must be treated as an ambiguous create result", statusCode)
 		}
+	}
+	for _, body := range []string{
+		`{"error":"provider_failure","message":"tailscale_unavailable"}`,
+		`{"error":"tailscale_unavailable"`,
+		`tailscale_unavailable`,
+	} {
+		if !coordinatorCreateLeaseErrorCanReplay(CoordinatorHTTPError{StatusCode: http.StatusBadGateway, Message: body}) {
+			t.Fatalf("unrecognized 502 response %q must remain replayable", body)
+		}
+	}
+	if !coordinatorCreateLeaseErrorCanReplay(CoordinatorHTTPError{StatusCode: http.StatusServiceUnavailable, Message: `{"error":"tailscale_unavailable"}`}) {
+		t.Fatal("an unexpected status must remain replayable")
 	}
 	if coordinatorCreateLeaseErrorMayHaveCommitted(CoordinatorHTTPError{StatusCode: http.StatusConflict}) {
 		t.Fatal("conflict must remain definitive")
@@ -2315,6 +2328,85 @@ func TestCoordinatorCreateLeaseDefinitiveErrorDoesNotReconcile(t *testing.T) {
 	}
 	if gets.Load() != 0 || releases.Load() != 0 {
 		t.Fatalf("definitive error reconciliation gets=%d releases=%d, want 0/0", gets.Load(), releases.Load())
+	}
+}
+
+func TestCoordinatorCreateLeaseTailscaleFailureStopsReplay(t *testing.T) {
+	t.Setenv("CRABBOX_OWNER", "test@example.com")
+	for _, fixed := range []bool{false, true} {
+		for _, priorUncertainty := range []bool{false, true} {
+			t.Run(fmt.Sprintf("fixed=%v/priorUncertainty=%v", fixed, priorUncertainty), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					const leaseID = "cbx_tailscale_failure"
+					var attemptID string
+					creates, cancellations := 0, 0
+					coord := &CoordinatorClient{
+						BaseURL: "http://coordinator.test",
+						Token:   "user-token",
+						Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+							statusCode := http.StatusBadGateway
+							body := `{"error":"tailscale_unavailable","message":"tailscale oauth token failed: http 401"}`
+							var input struct {
+								LeaseID         string `json:"leaseID"`
+								CreateAttemptID string `json:"createAttemptID"`
+							}
+							if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
+								t.Fatal(err)
+							}
+							switch {
+							case !fixed && req.Method == http.MethodPost && req.URL.Path == "/v1/leases",
+								fixed && req.Method == http.MethodPut && req.URL.Path == "/v1/leases/"+leaseID:
+								creates++
+								if input.LeaseID != leaseID {
+									t.Fatalf("create lease ID=%q, want %q", input.LeaseID, leaseID)
+								}
+								if !fixed {
+									if creates == 1 {
+										attemptID = input.CreateAttemptID
+									}
+									if attemptID == "" || input.CreateAttemptID != attemptID {
+										t.Fatalf("create attempt=%q, want original %q", input.CreateAttemptID, attemptID)
+									}
+								}
+								if priorUncertainty && creates == 1 {
+									statusCode, body = http.StatusInternalServerError, "error code: 1101"
+								}
+							case !fixed && req.Method == http.MethodPost && req.URL.Path == "/v1/leases/"+leaseID+"/cancel-create":
+								cancellations++
+								if input.CreateAttemptID != attemptID {
+									t.Fatalf("canceled attempt=%q, want original %q", input.CreateAttemptID, attemptID)
+								}
+								statusCode = http.StatusOK
+								body = fmt.Sprintf(`{"canceledCreate":{"version":1,"requestedLeaseID":%q,"createAttemptID":%q,"state":"canceled"}}`, leaseID, attemptID)
+							default:
+								t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+							}
+							return &http.Response{StatusCode: statusCode, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+						})},
+					}
+					cfg := baseConfig()
+					cfg.Provider, cfg.TargetOS = "aws", targetLinux
+					backend := &coordinatorLeaseBackend{cfg: cfg, coord: coord, rt: Runtime{Stderr: &bytes.Buffer{}}}
+					lease, err := backend.createCoordinatorLeaseWithProgressMode(t.Context(), cfg, "ssh-ed25519 test", true, leaseID, "tailscale-failure", fixed)
+					wantCreates, wantCancellations := 1, 1
+					if priorUncertainty {
+						wantCreates++
+					}
+					if fixed {
+						wantCancellations = 0
+					}
+					if creates != wantCreates || cancellations != wantCancellations {
+						t.Fatalf("creates=%d cancellations=%d, want %d/%d", creates, cancellations, wantCreates, wantCancellations)
+					}
+					if err == nil || !strings.Contains(err.Error(), "tailscale oauth token failed: http 401") || errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("err=%v, want immediate Tailscale failure without a recovery timeout", err)
+					}
+					if lease.ID != "" {
+						t.Fatalf("failed create returned lease=%#v", lease)
+					}
+				})
+			})
+		}
 	}
 }
 

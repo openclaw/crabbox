@@ -37,7 +37,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client api, boxID string, r
 	}
 	// Box file APIs use absolute workspace paths; exec runs relative to its
 	// workspace root. Keep that translation here, not in the shared lifecycle.
-	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
+	return (core.ArchiveWorkspace{
 		Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
 		Workdir: folder, RemoteArchiveDir: ".", RemoteArchivePrefix: ".crabbox-upstash-box-sync-",
 		Provider: providerName, PhaseName: "upstash_box_sync", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
@@ -51,7 +51,7 @@ func (b *backend) syncWorkspace(ctx context.Context, client api, boxID string, r
 		Exec: func(execCtx context.Context, command string) error {
 			return b.execShell(execCtx, client, boxID, command, io.Discard)
 		},
-	}, archive)
+	}).Sync(ctx, archive)
 }
 
 func (b *backend) prepareWorkspace(ctx context.Context, client api, boxID, folder string) error {

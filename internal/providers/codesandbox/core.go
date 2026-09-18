@@ -10,14 +10,13 @@ import (
 )
 
 const (
-	providerName         = "codesandbox"
-	providerFamily       = "codesandbox"
-	leasePrefix          = "csbx_"
-	defaultWorkdir       = "/project/workspace"
-	defaultBridgeCommand = "node"
-	defaultSDKPackage    = "@codesandbox/sdk@2.4.2"
-	targetLinux          = core.TargetLinux
-	NetworkPublic        = core.NetworkPublic
+	providerName   = "codesandbox"
+	providerFamily = "codesandbox"
+	leasePrefix    = "csbx_"
+	// This SDK mount does not move when the configured workdir default changes.
+	codeSandboxWorkspaceRoot = "/project/workspace"
+	targetLinux              = core.TargetLinux
+	NetworkPublic            = core.NetworkPublic
 
 	codesandboxPrimaryAPIKeyEnv  = "CRABBOX_CODESANDBOX_API_KEY"
 	codesandboxFallbackAPIKeyEnv = "CSB_API_KEY"
@@ -34,7 +33,7 @@ func codeSandboxCleanupCommand(leaseID string) string {
 func operationTimeout(cfg core.CodeSandboxConfig) time.Duration {
 	seconds := cfg.OperationTimeoutSecs
 	if seconds <= 0 {
-		seconds = 30
+		seconds = core.CodeSandboxConfigDefaultOperationTimeoutSecs
 	}
 	return time.Duration(seconds) * time.Second
 }
@@ -43,19 +42,19 @@ func bridgeCommand(cfg core.CodeSandboxConfig) string {
 	if command := strings.TrimSpace(cfg.BridgeCommand); command != "" {
 		return command
 	}
-	return defaultBridgeCommand
+	return core.CodeSandboxConfigDefaultBridgeCommand
 }
 
 func sdkPackage(cfg core.CodeSandboxConfig) string {
 	if pkg := strings.TrimSpace(cfg.SDKPackage); pkg != "" {
 		return pkg
 	}
-	return defaultSDKPackage
+	return core.CodeSandboxConfigDefaultSDKPackage
 }
 
 func doctorListLimit(cfg core.CodeSandboxConfig) int {
 	if cfg.DoctorListLimit <= 0 {
-		return 1
+		return core.CodeSandboxConfigDefaultDoctorListLimit
 	}
 	return cfg.DoctorListLimit
 }

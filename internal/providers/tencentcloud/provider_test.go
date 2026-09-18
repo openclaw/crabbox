@@ -798,6 +798,20 @@ func TestTencentBindingRuntimeAndClassContract(t *testing.T) {
 		t.Fatal("generic type priority lost")
 	}
 	for _, tc := range []struct {
+		architecture, class, want string
+	}{
+		{core.ArchitectureAMD64, "fast", "SA5.LARGE8"},
+		{core.ArchitectureARM64, "standard", ""},
+	} {
+		cfg := core.Config{Provider: providerName, TargetOS: core.TargetLinux, Architecture: tc.architecture, Class: tc.class}
+		core.MarkClassExplicit(&cfg)
+		core.SetTencentCloudTypeExplicit(&cfg)
+		got := cfgForRun(cfg)
+		if got.TencentCloud.Type != tc.want || got.ServerType != tc.want {
+			t.Fatalf("explicit-empty native type with class=%s architecture=%s resolved=%q/%q want=%q", tc.class, tc.architecture, got.TencentCloud.Type, got.ServerType, tc.want)
+		}
+	}
+	for _, tc := range []struct {
 		market   string
 		explicit bool
 		want     string

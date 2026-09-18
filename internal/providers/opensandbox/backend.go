@@ -142,12 +142,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			api, err = b.client()
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-opensandbox-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-			})
-		},
+		Workspace: func() shared.SandboxWorkspace { return b.workspace(api, sandboxID, req, workdir) },
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
 			var unlock func()
@@ -218,12 +213,6 @@ func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			}
 			fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
 			return nil
-		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, api, sandboxID, req, workdir, prepared)
-		},
-		NoSync: func(ctx context.Context) error {
-			return b.ensureWorkspace(ctx, api, sandboxID, workdir)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
@@ -296,20 +285,7 @@ func (b *openSandboxBackend) List(ctx context.Context, req core.ListRequest) ([]
 			}
 			state = core.Blank(strings.ToLower(sb.State), statusViewReady)
 		}
-		servers = append(servers, core.Server{
-			Provider: providerName,
-			CloudID:  sandboxID,
-			Name:     sandboxID,
-			Status:   state,
-			Labels: map[string]string{
-				"provider": providerName,
-				"lease":    claim.LeaseID,
-				"slug":     claim.Slug,
-				"pond":     claim.Pond,
-				"target":   targetLinux,
-				"state":    state,
-			},
-		})
+		servers = append(servers, shared.SandboxLeaseView(providerName, targetLinux, claim, sandboxID, sandboxID, state))
 	}
 	return servers, nil
 }
@@ -349,31 +325,31 @@ func (b *openSandboxBackend) Status(ctx context.Context, req core.StatusRequest)
 		return core.Exit(5, "timed out waiting for opensandbox sandbox %s to become ready", id)
 	})
 	defer wait.Close()
-	for {
-		sb, getErr := api.GetSandbox(wait.Context(), sandboxID)
+	return wait.Poll(sandboxID, b.statusPollInterval(), func(ctx context.Context) (core.StatusView, bool, error) {
+		sb, getErr := api.GetSandbox(ctx, sandboxID)
 		if getErr != nil {
 			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
-				return core.StatusView{}, ctxErr
+				return core.StatusView{}, false, ctxErr
 			}
-			return core.StatusView{}, getErr
+			return core.StatusView{}, false, getErr
 		}
 		if err := validateOpenSandboxOwnership(claim, sb); err != nil {
-			return core.StatusView{}, err
+			return core.StatusView{}, false, err
 		}
 		state := strings.ToLower(strings.TrimSpace(sb.State))
 		ready := false
 		if isReadyState(state) {
-			probeCtx, probeCancel := context.WithTimeout(wait.Context(), b.statusProbeTimeout())
+			probeCtx, probeCancel := context.WithTimeout(ctx, b.statusProbeTimeout())
 			pingErr := api.PingSandbox(probeCtx, sandboxID)
 			probeCancel()
 			ready = pingErr == nil
 			if pingErr != nil {
 				if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
-					return core.StatusView{}, ctxErr
+					return core.StatusView{}, false, ctxErr
 				}
 			}
 			if pingErr != nil && !isOpenSandboxReadinessPending(pingErr) {
-				return core.StatusView{}, fmt.Errorf("opensandbox status execd health: %w", pingErr)
+				return core.StatusView{}, false, fmt.Errorf("opensandbox status execd health: %w", pingErr)
 			}
 		}
 		view := core.StatusView{
@@ -393,16 +369,11 @@ func (b *openSandboxBackend) Status(ctx context.Context, req core.StatusRequest)
 				"state":    state,
 			},
 		}
-		if !req.Wait || view.Ready {
-			return view, nil
+		if req.Wait && !view.Ready && isTerminalState(state) {
+			return core.StatusView{}, false, core.Exit(5, "opensandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if isTerminalState(state) {
-			return core.StatusView{}, core.Exit(5, "opensandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
-		}
-		if err := wait.Next(sandboxID, b.statusPollInterval()); err != nil {
-			return core.StatusView{}, err
-		}
-	}
+		return view, false, nil
+	})
 }
 
 func (b *openSandboxBackend) Stop(ctx context.Context, req core.StopRequest) error {

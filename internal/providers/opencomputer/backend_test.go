@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -31,6 +32,53 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // --- pure-function tests -----------------------------------------------------
+
+func TestOpenComputerConfigureSizing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cpu     int
+		memory  int
+		wantErr string
+	}{
+		{name: "defaults"},
+		{name: "cpu only", cpu: 7},
+		{name: "memory only", memory: 7},
+		{name: "positive", cpu: 7, memory: 3},
+		{name: "negative cpu", cpu: -2, wantErr: "opencomputer cpu must be non-negative"},
+		{name: "negative memory", memory: -2, wantErr: "opencomputer memoryMB must be non-negative"},
+		{name: "both negative", cpu: -2, memory: -2, wantErr: "opencomputer cpu must be non-negative"},
+		{name: "negative cpu with memory", cpu: -2, memory: 7, wantErr: "opencomputer cpu must be non-negative"},
+		{name: "negative memory with cpu", cpu: 7, memory: -2, wantErr: "opencomputer memoryMB must be non-negative"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{Provider: "opencomputer", OpenComputer: core.OpenComputerConfig{CPU: tc.cpu, MemoryMB: tc.memory}}
+			backend, err := (Provider{}).Configure(cfg, core.Runtime{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := backend.(*openComputerBackend).cfg.OpenComputer; got != cfg.OpenComputer {
+				t.Fatalf("sizing changed: %#v want %#v", got, cfg.OpenComputer)
+			}
+			if tc.wantErr != "" {
+				b := backend.(*openComputerBackend)
+				checks := map[string]func() error{
+					"warmup": func() error { return b.Warmup(t.Context(), core.WarmupRequest{}) },
+					"run":    func() error { _, err := b.Run(t.Context(), core.RunRequest{}); return err },
+					"create": func() error { _, _, _, err := b.createSandbox(t.Context(), nil, core.Repo{}, false, ""); return err },
+				}
+				for name, check := range checks {
+					t.Run(name, func(t *testing.T) {
+						err := check()
+						var exitErr core.ExitError
+						if !errors.As(err, &exitErr) || exitErr.Code != 2 || err.Error() != tc.wantErr {
+							t.Fatalf("creation err=%v, want exit 2: %s", err, tc.wantErr)
+						}
+					})
+				}
+			}
+		})
+	}
+}
 
 func TestOpenComputerConfigShowCompletePassiveSection(t *testing.T) {
 	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
@@ -684,34 +732,65 @@ func TestRunCancellationThroughNativeHTTPTransport(t *testing.T) {
 }
 
 func TestRunCleanupCannotBlockForever(t *testing.T) {
-	f := newFakeAPI(t)
-	f.blockDelete = true
-	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}}
-	backend := newAPIBackend(t, f)
-	var stderr bytes.Buffer
-	backend.rt.Stderr = &stderr
-	backend.cleanupTimeoutOverride = 20 * time.Millisecond
-	started := time.Now()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_testkey")
+	// Keep the existing response handler, but measure cancellation without
+	// racing the cleanup deadline against localhost delivery and scheduling.
+	synctest.Test(t, func(t *testing.T) {
+		f := &fakeAPI{sandboxID: "sb-test01", listState: "running", blockDelete: true,
+			execReply: []execRunResult{{ExitCode: 0}, {ExitCode: 0}}}
+		const apiURL = "https://api.example.test"
+		f.tags = map[string]string{openComputerClaimTagKey: testOCClaimScope(apiURL)}
+		var deleteDeadlineRemaining time.Duration
+		client := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method == http.MethodDelete && req.URL.Path == "/api/sandboxes/"+f.sandboxID {
+				deadline, ok := req.Context().Deadline()
+				if !ok {
+					t.Fatal("kill request has no deadline")
+				}
+				deleteDeadlineRemaining = time.Until(deadline)
+			}
+			incoming := req.Clone(req.Context())
+			if incoming.Body == nil {
+				incoming.Body = http.NoBody
+			}
+			defer incoming.Body.Close()
+			response := httptest.NewRecorder()
+			f.handle(response, incoming)
+			if err := req.Context().Err(); err != nil {
+				return nil, err
+			}
+			return response.Result(), nil
+		})}
+		var stderr bytes.Buffer
+		backend := NewOpenComputerBackend(Provider{}.Spec(), newTestConfig(apiURL), core.Runtime{HTTP: client, Stdout: io.Discard, Stderr: &stderr}).(*openComputerBackend)
+		backend.cleanupTimeoutOverride = 20 * time.Millisecond
+		started := time.Now()
 
-	res, err := backend.Run(context.Background(), core.RunRequest{
-		Repo: core.Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
+		res, err := backend.Run(context.Background(), core.RunRequest{
+			Repo: core.Repo{Name: "carbbox", Root: t.TempDir()}, Command: []string{"true"}, NoSync: true,
+		})
+		var exitErr core.ExitError
+		if !errors.As(err, &exitErr) || exitErr.Code != 1 || res.ExitCode != 1 || res.ErrorKind != core.RunErrorProvider {
+			t.Fatalf("result=%#v err=%v, want cleanup failure", res, err)
+		}
+		if res.Session == nil || !res.Session.Kept {
+			t.Fatalf("session=%#v, want retained cleanup handle", res.Session)
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("Run took %s, cleanup should be bounded", elapsed)
+		}
+		if f.calls(http.MethodDelete, "/api/sandboxes/") != 1 {
+			t.Fatalf("want 1 kill, got %d", f.calls(http.MethodDelete, "/api/sandboxes/"))
+		}
+		if deleteDeadlineRemaining <= 0 || deleteDeadlineRemaining > 20*time.Millisecond {
+			t.Fatalf("kill deadline remaining=%s, want positive and at most 20ms", deleteDeadlineRemaining)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Run error=%v, want cleanup deadline cause", err)
+		}
 	})
-	var exitErr core.ExitError
-	if !errors.As(err, &exitErr) || exitErr.Code != 1 || res.ExitCode != 1 || res.ErrorKind != core.RunErrorProvider {
-		t.Fatalf("result=%#v err=%v, want cleanup failure", res, err)
-	}
-	if res.Session == nil || !res.Session.Kept {
-		t.Fatalf("session=%#v, want retained cleanup handle", res.Session)
-	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("Run took %s, cleanup should be bounded", elapsed)
-	}
-	if f.calls(http.MethodDelete, "/api/sandboxes/") != 1 {
-		t.Fatalf("want 1 kill, got %d", f.calls(http.MethodDelete, "/api/sandboxes/"))
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Run error=%v, want cleanup deadline cause", err)
-	}
 }
 
 func TestRunLifecycleFinalization(t *testing.T) {
@@ -1223,6 +1302,13 @@ func TestRunReturnsReusedSandboxSession(t *testing.T) {
 	f := newFakeAPI(t)
 	f.execReply = []execRunResult{{ExitCode: 0}, {ExitCode: 0}}
 	backend := newAPIBackend(t, f)
+	backend.cfg.OpenComputer.CPU = -2
+	backend.cfg.OpenComputer.MemoryMB = -2
+	configured, err := (Provider{}).Configure(backend.cfg, backend.rt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend = configured.(*openComputerBackend)
 	repoRoot := t.TempDir()
 	leaseID := leasePrefix + f.sandboxID
 	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "blue", providerName, testOCClaimScope(f.server.URL), "", repoRoot, time.Minute, false); err != nil {
@@ -1242,6 +1328,12 @@ func TestRunReturnsReusedSandboxSession(t *testing.T) {
 	}
 	if f.calls(http.MethodDelete, "/api/sandboxes/") != 0 {
 		t.Fatalf("reused sandbox should not be deleted")
+	}
+	if err := backend.Stop(t.Context(), core.StopRequest{ID: leaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if f.callsExact(http.MethodDelete, "/api/sandboxes/"+f.sandboxID) != 1 {
+		t.Fatal("expected exactly one delete of the owned sandbox")
 	}
 }
 

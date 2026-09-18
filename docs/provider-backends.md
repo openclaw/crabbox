@@ -117,6 +117,11 @@ Delegated backends return normalized `StatusView` values. Rendering stays
 core-owned, so provider packages should not print their own `status` or `list`
 tables unless a compatibility interface explicitly asks for native output.
 
+Use `shared.SandboxLeaseView` for the common sandbox inventory projection. The
+adapter supplies the observed ID, display name, target, and state; shared code
+adds the lease ID, slug, and pond. Scope checks, ownership validation, and state
+classification remain adapter operations, and unrelated claim labels are omitted.
+
 A delegated backend must reject run/sync options that Crabbox cannot honor
 without a Crabbox-managed SSH target:
 
@@ -271,6 +276,26 @@ type PausableBackend interface {
 
 Declare `FeaturePauseResume` when implementing this interface so
 `crabbox providers` exposes the capability.
+
+Provider-owned lease heartbeats are optional, for providers with no
+Crabbox-managed SSH lease to touch:
+
+```go
+type LeaseHeartbeatBackend interface {
+	Backend
+
+	Heartbeat(ctx context.Context, req LeaseHeartbeatRequest) (LeaseHeartbeatResult, error)
+}
+```
+
+Declare `FeatureLeaseHeartbeat` when implementing this interface so
+`crabbox providers` exposes the capability. Core does no lease resolution,
+claim check, or state validation before calling, so the implementation owns
+every ownership and state check and must refuse an identifier it holds no local
+claim for. Report `LeaseHeartbeatResult.IdleTimeout` only from the provider's
+own view of the lease and leave it zero otherwise; core omits the field rather
+than substituting a local default. Do not rewrite lifecycle policy or absolute
+lifetime limits: `--idle-timeout` is refused before the call for that reason.
 
 List JSON compatibility is optional:
 
@@ -465,12 +490,28 @@ source-only shell boundaries. Shell-local functions, builtins, and state require
 shell intent, not literal argv. Do not insert a second shell or reinterpret the
 rendered source before transport.
 
+Use `ShellScript` when the transport owns the surrounding shell and must keep
+it: it preserves shell source and quotes literal argv without adding `exec`.
+Cloudflare containers, Azure Dynamic Sessions, Anthropic Sandbox Runtime,
+Daytona, Freestyle, Cloud Run Sandbox, and Orgo use this boundary. Blaxel and
+Islo use `Argv("bash", "-lc")`; Modal uses `ShellSource` inside its workdir and
+environment wrapper. These adapters share command classification rather than
+repeating single-string, operator, and environment-assignment heuristics.
+
 `shared.WrapCommandWithShellEnvProfile` accepts execution argv, not unclassified
 user input. Its fallback quotes every word literally before terminal execution;
 it must not infer operators or assignments again. An exact three-word
 `bash -lc <body>` invocation reuses its body inside the existing profile wrapper,
 preserving the single login-shell boundary used by Modal and Tensorlake. Profile
 sourcing is failure-gated without adding global errexit to user source.
+
+Runners using the `command`, `cwd`, `env`, and `timeoutMs` JSON contract share
+`shared.CommandStreamRequest`. Cloudflare containers and Azure Dynamic Sessions
+use `shared.CommandStream` to consume their NDJSON response: bounded events,
+stdout/stderr forwarding, and explicit completion have one owner. Adapters retain
+HTTP authentication, redirects, request deadlines, status errors, response-body
+cleanup, and error redaction. A decoded completion wins over cancellation;
+an EOF without completion never establishes success.
 
 Agent Sandbox and Nomad use `shared.ShellWorkspaceCommand` for their common
 POSIX-stdin wrapper: create and enter the workdir, export validated environment
@@ -607,6 +648,10 @@ Acquisition and resolution share mechanics with provider-neutral contracts:
   `core.ProviderKeyForLease` names provider-side keys when applicable.
 - `shared.Poll` repeats observations while the adapter owns readiness predicates,
   identity checks, side effects, timeouts, and diagnostics.
+- `core.SleepContext` owns delays that return `ctx.Err()` on cancellation,
+  including Vultr retries and W&B provisioning backoff. Use
+  `shared.SleepContext` only when the caller's contract preserves a custom
+  `context.Cause` instead; neither helper owns retry eligibility or scheduling.
 - `core.SSHTargetFromConfig` constructs conventional SSH endpoints, and
   `core.WaitForSSHReady` proves the common SSH bootstrap contract.
 - `shared.DirectSSHBackend.ResolvedLeaseTarget` packages an adapter-built endpoint
@@ -731,7 +776,7 @@ commits.
 
 Supporting mechanics remain reusable independently: `procjson.Exchange` for
 bounded subprocess JSON, `shared.Poll` for observations, operation locks for
-serialization, `core.RunDelegatedArchiveSync` for staged archive replacement,
+serialization, `core.ArchiveWorkspace` for staged archive replacement,
 and scoped claim helpers for guarded local state. None of these grants native
 resource ownership or proves that canceling transport stopped a remote command.
 
@@ -743,6 +788,16 @@ gap. A sync that prepares its own archive keeps the same deadline continuously
 through archive construction and transfer; manifest planning and guardrails
 remain outside that budget. Both paths close and remove the owned archive on
 success or failure, and remote cleanup keeps its independent bounded context.
+
+`DelegatedSandboxLifecycle.Workspace` returns a `shared.SandboxWorkspace` bound
+to the current resource. Its factory runs before acquisition for local archive
+preparation and after admission for remote operations; constructing a workspace
+must not contact the provider. Ordinary archive transports configure one
+`core.ArchiveWorkspace` with `core.NewArchiveWorkspace`: `PrepareArchive`, `Sync`,
+and `Ensure` share the request, naming, clock, and transfer settings. The adapter
+supplies upload and execution callbacks, optional path validation, and any native
+replacement or cleanup policy. `WorkspaceOperations` supports native injection,
+disk admission checks, or a claim fence around the entire operation.
 
 ## Provider registration
 
@@ -906,6 +961,7 @@ cli.FeatureRunArtifacts // "run-artifacts"
 cli.FeaturePreparedArtifactWorkspace // "prepared-artifact-workspace"
 cli.FeatureRunDownloads // "run-downloads"
 cli.FeaturePauseResume  // "pause-resume"
+cli.FeatureLeaseHeartbeat // "lease-heartbeat"
 cli.FeatureMCP          // "mcp-attachments"
 ```
 
@@ -955,6 +1011,10 @@ Checkpoint-related features are reserved for versioned workspaces:
   than over rsync.
 - `FeatureURLBridge`: delegated provider can expose a lease's port through the
   broker URL bridge.
+- `FeatureLeaseHeartbeat`: provider can keep a lease alive through its own API,
+  so `crabbox heartbeat` works without a Crabbox-managed SSH lease. The backend
+  implements `cli.LeaseHeartbeatBackend`. It refreshes activity without rewriting
+  lifecycle policy or absolute lifetime limits.
 
 Do not set the checkpoint flags for plain SSH access alone. Generic
 Git/archive/log checkpoints are core-owned and work even when a provider
@@ -1203,9 +1263,19 @@ own the remote workflow.
 table or lossy native status shape, keep that parsing inside the backend.
 
 Providers that bound in-flight status requests use `shared.StatusWait` for the
-wait context, deadline, and cancellation precedence. Construct it at the
-adapter's existing resolution boundary; keep ownership validation, readiness,
-terminal states, retry policy, and status-view fields in the adapter.
+wait context, deadline, and cancellation precedence, then its `Poll` method for
+observation sequencing. Construct it at the adapter's existing resolution
+boundary; keep ownership validation, readiness, terminal states, retry policy,
+and status-view fields in the adapter.
+
+Observation-only status waits use `shared.PollStatus` for the polling deadline
+and two-second delay. Adapters return complete `StatusView` values and identify
+final observations, retaining their ownership checks, terminal-state behavior,
+and error diagnostics. The helper preserves observed results before checking
+the deadline or cancellation; it does not add a timeout to provider requests.
+Both waiting contracts use the same observation driver. Transport and probe
+errors retain the adapter's existing context-error classification boundary;
+ownership failures are never reclassified by the shared driver.
 
 E2B-compatible adapters use `shared.EnvdSandboxViews` to project their common
 wire metadata. Provider identity and legacy ID prefixes stay explicit; resource

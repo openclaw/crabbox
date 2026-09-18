@@ -86,3 +86,23 @@ func ovhServerTypeForClass(class string) string {
 	}
 	return "b3-8"
 }
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	if cfg.OVH.Endpoint == "" {
+		cfg.OVH.Endpoint = core.OVHConfigDefaultEndpoint
+	}
+	cfg.OVH.Image = imageForConfig(*cfg)
+	if cfg.OVH.Flavor == "" {
+		cfg.OVH.Flavor = core.OVHConfigDefaultFlavor
+	}
+	base := core.BaseConfig()
+	core.ApplyLinuxConnectionDefaults(cfg, base.SSHUser, base.SSHPort)
+	return nil
+}
+
+func imageForConfig(cfg core.Config) string {
+	if cfg.OVH.Image == "" {
+		return core.OVHConfigDefaultImage
+	}
+	return cfg.OVH.Image
+}

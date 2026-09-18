@@ -34,6 +34,7 @@ crabbox run --provider islo --id swift-crab --shell 'pnpm install && pnpm test'
 crabbox status --provider islo --id swift-crab --wait
 crabbox pause --provider islo swift-crab
 crabbox resume --provider islo swift-crab
+crabbox heartbeat --provider islo swift-crab
 crabbox stop --provider islo swift-crab
 crabbox list --provider islo --json
 ```
@@ -87,6 +88,7 @@ islo:
   vcpus: 2
   memoryMB: 4096
   diskGB: 20
+  idlePause: false
 ```
 
 Provider flags (each overrides the matching `islo.*` config key):
@@ -100,13 +102,14 @@ Provider flags (each overrides the matching `islo.*` config key):
 --islo-vcpus
 --islo-memory-mb
 --islo-disk-gb
+--islo-idle-pause
 ```
 
 Every key also reads a `CRABBOX_ISLO_*` environment variable, which takes
 precedence over the config file: `CRABBOX_ISLO_BASE_URL`, `CRABBOX_ISLO_IMAGE`,
 `CRABBOX_ISLO_WORKDIR`, `CRABBOX_ISLO_GATEWAY_PROFILE`,
 `CRABBOX_ISLO_SNAPSHOT_NAME`, `CRABBOX_ISLO_VCPUS`, `CRABBOX_ISLO_MEMORY_MB`,
-and `CRABBOX_ISLO_DISK_GB`.
+`CRABBOX_ISLO_DISK_GB`, and `CRABBOX_ISLO_IDLE_PAUSE`.
 
 The resolved defaults are kept in Crabbox config for display and override
 compatibility, but the Islo create request omits implicit default `image`,
@@ -162,7 +165,8 @@ before the run session is bound. Resume, root health checks, daemon recovery, an
 metadata updates then run inside bound-session finalization: a failure returns a
 kept reused session and final timing, without running the workload or deleting
 the reused resource. Plain and legacy leases keep their existing admission
-semantics; this does not add a universal live lookup or upgrade an ID-less claim.
+semantics. Plain-lease readiness is checked after session binding; it does not
+upgrade an ID-less claim. Enrolled leases reuse their admitted readiness path.
 Post-admission Tailscale errors retain their actual causes while preserving the
 existing public codes and messages, including fallback `1` for opaque validation
 errors. A status code alone does not create a context-cancellation cause.
@@ -179,6 +183,38 @@ failures keep `2`. A first typed timing-writer failure keeps its own public code
 The final error message redacts the configured Islo API key; workload output and
 upstream errors that already discarded causes are not reconstructed by this run
 finalizer.
+
+### Idle pause policy (opt-in)
+
+`--islo-idle-pause`, `islo.idlePause: true`, or
+`CRABBOX_ISLO_IDLE_PAUSE=true` opts newly created sandboxes into an Islo
+idle-pause policy. It is off by default: an unset or false value sends no
+`lifecycle` object and leaves the existing tenant-default behavior unchanged.
+
+When enabled, Crabbox sends `--idle-timeout` as `pause_after_idle`, rounded
+up to whole seconds, and sets `auto_resume` to `never`. It does not send
+`delete_after` or `pause_after`; Crabbox's existing retention and explicit
+Stop behavior are unchanged. No lifecycle setting is updated on reuse.
+
+Choose this policy deliberately. Provider activity accounting is not established
+for long-running commands, published shares, or tailnet traffic, so a sandbox
+may pause while it is still useful. Choose an idle timeout longer than the
+longest expected workload and use `crabbox resume` when needed. Read-only
+status polling is not a promise that compute remains active.
+
+`run --id` and `ssh` check readiness and explicitly resume a paused sandbox
+before using it, even when idle pausing is disabled: an operator or tenant
+policy can also pause a sandbox. Resume may incur provider charges. A readiness
+failure during an admitted reused run retains its session and normal recovery
+information; it does not run the workload or delete the reused sandbox.
+
+With idle pausing enabled, explicit `--reclaim` rejects a reported
+`pause_after_idle` value that differs from the requested idle timeout. Use a
+matching timeout or create a new sandbox; reclaim does not rewrite policy.
+Legacy responses that omit lifecycle metadata remain adoptable, but do not
+confirm that the requested idle timeout is enforced. With the option disabled,
+reclaim does not impose an idle-pause policy requirement.
+
 
 `crabbox status --wait` polls the sandbox every 2 seconds until it reports
 `running`, bounded by `--wait-timeout` (default 5 minutes). If the sandbox
@@ -241,6 +277,34 @@ running and billable.
 - Pause / resume: yes. `crabbox pause` snapshots the sandbox to disk and frees
   its CPU/memory via Islo's pause API; `crabbox resume` restores it. The lease
   claim is preserved across a pause.
+- Heartbeat: yes. `crabbox heartbeat` runs one no-op exec (`true`) against the
+  sandbox, because Islo exposes no dedicated heartbeat endpoint. An exec is what
+  registers sandbox activity and can defer `lifecycle.pause_after_idle`.
+  The exec touches no filesystem state; its output is discarded, while the CLI
+  prints the heartbeat result.
+
+  The command makes exactly two calls, a `GET` and the exec, and writes no
+  lifecycle policy at all, so it cannot move the absolute deadline
+  (`pause_after` or `delete_after`) in either direction. It also persists
+  nothing: the reported `lastTouchedAt` is when the sandbox was observed, so
+  `crabbox claims` keeps showing the claim's previous `lastUsed`.
+
+  Heartbeat checks the claim's API endpoint before the lookup. For an ID-bound
+  claim, the observed resource ID and name must match before exec; it shares
+  that admission check with the provider's existing execution path. This is a
+  pre-dispatch check, not atomic generation binding for the name-addressed API.
+
+  The reported idle window is read from the live sandbox: `GET /sandboxes/{name}`
+  echoes `lifecycle` back, so `pause_after_idle` is reported when the sandbox
+  carries one, including a policy created with `--islo-idle-pause`. When
+  the echoed lifecycle has no `pause_after_idle`, the command reports no idle
+  timeout and warns that it has no idle deadline to defer. `--idle-timeout` is
+  refused: Islo exposes no endpoint that changes a live sandbox's lifecycle.
+
+  A sandbox observed as paused or terminal is refused before exec. Heartbeat
+  does not call the resume API or change `auto_resume`; explicit resume remains
+  a separate operation. Crabbox-created idle-pause policies use
+  `auto_resume=never`, as described above.
 - Bounded run downloads: yes. Safe relative single-file `--require-artifact`
   and `--download` requests are retrieved through Islo exec after command
   success and capped at 64 KiB per file.

@@ -82,7 +82,7 @@ test "$CRABBOX_TEST_COPY_OVERRIDE" = target-value && test -z "$CRABBOX_TEST_COPY
 	if err := probeResolvedSSHRemoteSecludedArgs(t.Context(), session, target, ""); err != nil {
 		t.Errorf("capability probe lost target environment: %v", err)
 	}
-	if err := runResolvedSSHArchiveCommand(t.Context(), session, target, "true", nil, &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+	if _, err := runFilesystemCommand(t.Context(), target, func(int64) string { return "true" }, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Errorf("archive command lost target environment: %v", err)
 	}
 }
@@ -192,4 +192,53 @@ wait "$child"
 		t.Fatal("cancelled copy did not return")
 	}
 	assertDescendantReaped(t, "rsync", childPID)
+}
+
+func TestFilesystemCommandRetirementEvidence(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		script          string
+		cancel          bool
+		wantUnconfirmed bool
+	}{
+		{name: "ordinary helper failure", script: "exit 1"},
+		{name: "missing target", script: "test -e /definitely-missing-crabbox-test-target"},
+		{name: "lost transport", script: "exit 255", wantUnconfirmed: true},
+		{name: "cancel before dispatch", script: "exit 0", cancel: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\n"+tt.script+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tt.cancel {
+				cancel()
+			}
+			unconfirmed, err := runFilesystemCommand(ctx, SSHTarget{NoControlMaster: true}, func(int64) string { return "exit 1" }, strings.NewReader(""), &bytes.Buffer{}, &bytes.Buffer{})
+			if err == nil {
+				t.Fatal("expected command error")
+			}
+			if unconfirmed != tt.wantUnconfirmed {
+				t.Fatalf("retirement unconfirmed=%v, want %v: %v", unconfirmed, tt.wantUnconfirmed, err)
+			}
+		})
+	}
+}
+
+func TestFilesystemCommandCancellationAfterDispatchRetains(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\nprintf ready\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	output := writerFunc(func(data []byte) (int, error) { cancel(); return len(data), nil })
+	unconfirmed, err := runFilesystemCommand(ctx, SSHTarget{NoControlMaster: true}, func(int64) string { return "true" }, strings.NewReader(""), output, &bytes.Buffer{})
+	if err == nil || !unconfirmed {
+		t.Fatalf("canceled dispatched command: unconfirmed=%v err=%v", unconfirmed, err)
+	}
 }

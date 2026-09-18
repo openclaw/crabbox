@@ -5,6 +5,14 @@ streams the output back, and exits with the remote command's exit code. It is
 the core verb: lease (or reuse) a machine, ship your code, run something, get
 the result.
 
+By default the source is Git. Opt into `sync.source: directory` with a nonempty
+`sync.include` to sync the effective current directory through the ordinary
+POSIX/WSL SSH managed-manifest transport. This still requires installed Git for
+source-tree ignore matching, but does not create source Git metadata. Full
+manifest and size validation runs before acquisition and again before transfer.
+See [directory source](../features/sync.md#explicit-directory-source) for the
+explicit unsupported Git-only, delegated, native-Windows, and watch modes.
+
 ```sh
 crabbox run --id swift-crab -- pnpm test:changed
 crabbox run --class beast -- pnpm check
@@ -36,7 +44,8 @@ snippets, pipes, or shell expansion.
 
 On Cloudflare Sandbox, Superserve, Crownest, Vercel Sandbox, Nomad, CodeSandbox,
 OpenComputer, Docker Sandbox, Agent Sandbox, SmolVM, Upstash Box, Tensorlake,
-and OpenSandbox,
+OpenSandbox, Blaxel, Cloudflare containers, Azure Dynamic Sessions, Anthropic
+Sandbox Runtime, Daytona, Freestyle, Islo, Modal, Cloud Run Sandbox, and Orgo,
 quoted or interpolated profile arguments retain their literal meaning through
 the delegated command transport. A value such as `&&` does not become a shell
 operator, and an executable named `FOO=x` is invoked rather than treated as an
@@ -54,6 +63,21 @@ crabbox run -- bash -c 'set -eu; ./scripts/test.sh'
 
 This inner Bash inherits exported environment values, not unexported shell
 variables or functions from login startup files.
+
+With the complete release's sibling `crabbox-runtime/` directory installed,
+Linux SSH managed execution can run an independent argv command even when Bash
+is absent. Internal supervision uses the native runtime; argv execution uses
+`/bin/sh` when Bash is unavailable. When Bash is present, including on macOS,
+Crabbox retains the Bash login environment and literal argv behavior. Explicit
+`--shell` and Bash scripts still require Bash.
+
+Newly generated Linux `crabbox-ready` scripts use `/bin/sh`, so Bash absence
+alone does not prevent managed readiness with the complete runtime pack.
+Existing images and their readiness scripts are not upgraded in place. A
+CLI-only `go install` does not supply the companion runtime pack: if an internal
+Bash-dependent path needs Bash on a host without it, the
+error identifies the missing runtime pack and recommends Homebrew or extracting
+the complete platform archive with `crabbox-runtime/` intact.
 
 On POSIX and WSL2 SSH targets, private command staging does not change the
 remote caller's umask for user work. Commands keep the target shell's creation
@@ -98,6 +122,17 @@ discarding the live process record. Stop a disposable lease with `crabbox stop
 are never destroyed by stop: finish or terminate the known remote workload on
 that host before reusing its workspace. Do not delete owner records to bypass
 the busy check.
+
+When a fresh disposable lease loses SSH after sync, Crabbox may replace it once.
+Replacement quiesces the old owner, confirms lease release, and finishes any
+remaining owner cleanup before acquiring fresh ownership and syncing again. Caller
+cancellation still applies throughout replacement acquisition.
+
+If owner inspection or renewal cannot be confirmed, replacement stops and the old
+lease may remain for recovery; Crabbox does not allocate another lease while that
+ownership is uncertain. Check it with `crabbox inspect --provider <provider> --id <lease>`
+and use the matching `stop` command for a disposable lease. Static SSH hosts are
+not destroyed by `stop`.
 
 ## Remote workspace root
 
@@ -219,7 +254,13 @@ Aliases, explicit reclaim, and coordinator-managed leases retain their existing
 resolution paths; stale heartbeat snapshots still fail the exact-claim check.
 
 `--idle-timeout` controls inactivity expiry (default `30m`); `--ttl` is the
-maximum wall-clock lifetime (default `90m`). Use `--stop-after
+maximum wall-clock lifetime (default `90m`). Reusing a claimed direct lease keeps
+its recorded idle timeout unless `--idle-timeout` is explicitly supplied; reader
+defaults and transferring the repository claim with `--reclaim` do not replace
+that policy. This applies to direct allocation even in registered broker mode;
+managed leases continue to use the coordinator's policy. An explicit replacement
+on an existing direct lease is stored in whole seconds, rounded to the nearest
+second with a minimum of one second for a positive value. Use `--stop-after
 success|always|failure|never` to make lease cleanup explicit. Without it, a
 newly acquired one-shot lease is released after the command and an existing
 `--id` lease is left alone. The run details always print the exact `crabbox
@@ -573,6 +614,11 @@ host tools, or fail just because a tool is missing. Install logic
 belongs in Actions hydration, a prebaked image, a devcontainer, Nix/mise/asdf,
 or the command/script you run.
 
+On POSIX targets (including WSL2), ordinary version probes retain at most
+4096 bytes of combined stdout/stderr and display its first line. Additional
+output is drained so a verbose tool can finish normally; the retained-output
+limit is not a new execution timeout. Native Windows probes are unchanged.
+
 The `npm`, `pnpm`, and `yarn` version probes disable Corepack networking,
 latest-version lookup, automatic project pinning, and download prompts for that
 probe only. An uncached Corepack-managed version may therefore be unavailable;
@@ -592,6 +638,29 @@ inspect every accepted name, aliases, default membership, and target support
 from the installed binary. Discovery works offline without configuration or a
 provider and does not run probes.
 
+On macOS, the default `macos_platform` snapshot reports `macos_version`,
+`macos_build`, observed `architecture`, `developer_directory`, and
+`developer_tools=xcode|clt|unavailable`. It uses the workload's directory and
+child environment, including `DEVELOPER_DIR`, without changing global developer
+selection. Standalone `swift`, `xcodebuild`, and `brew` versions are macOS-only
+opt-ins; they invoke the literal commands, not aliases or alternate tools.
+
+These macOS probes run sequentially with a five-second execution allowance per
+native command and a fifteen-second cumulative execution budget for the subset. Transport,
+setup, and confirmed cleanup have separate bounded allowances; this is not a
+fifteen-second full-run deadline. Completed execution is charged conservatively
+at the native timer's centisecond precision. Missing, nonzero, empty, and timed-out
+version probes print `missing`; successful versions contain at most 512 characters
+from the first stdout line. A probe not attempted because the subset budget is
+exhausted includes `reason=budget-exhausted`. Diagnostics allow the workload to
+continue only after confirmed cleanup; transport or ownership failures still
+fail the run. Homebrew auto-update and analytics are disabled only for its probe.
+No probe installs tools, accepts licenses, or changes workload policy.
+The platform snapshot retains fields completed before a later command times out.
+Each command has its own supervised cleanup, including the normal five-second
+termination grace, so a full platform snapshot can take substantially longer
+than its command-execution time.
+
 Use `--preflight-tools` to replace the default tool list for one run:
 
 ```sh
@@ -600,6 +669,7 @@ crabbox run --preflight --preflight-tools default,uv -- node --test
 crabbox run --preflight --preflight-tools default,cmake -- cmake --build build
 crabbox run --preflight --preflight-tools python,python3 -- python3 -m pytest
 crabbox run --preflight --preflight-tools default,python3-venv -- python3 -m pytest
+crabbox run --target macos --preflight --preflight-tools default,swift,xcodebuild,brew -- swift test
 crabbox run --preflight --preflight-tools raw_socket -- ./packet-tests
 crabbox run --preflight --preflight-tools none -- ./smoke.sh
 ```
@@ -616,6 +686,19 @@ probes likewise invoke the literal requested command with `--version`, including
 `python` and `python3` on native Windows; Crabbox does not map either name to
 `py`. An unavailable literal command prints `<name>=missing` and the run
 continues.
+
+The opt-in `bash` probe invokes the literal `bash --version` on Linux, macOS,
+and WSL2; native Windows skips it. Select it with
+`--preflight --preflight-tools bash`, or append it to the unchanged defaults with
+`--preflight --preflight-tools default,bash`. It prints the bounded first output
+line as `remote preflight bash=<version>`, or `remote preflight bash=missing`
+when Bash is unavailable. This diagnostic does not prevent an independent
+command from running or install Bash; it does not make a Bash-dependent workload
+portable. For example:
+
+```sh
+crabbox run --preflight --preflight-tools bash -- /bin/sh -c 'printf "ready\n"'
+```
 
 `python3-venv` is a separate, opt-in functional probe for Linux, macOS and WSL2;
 native Windows skips it. It creates a fresh disposable virtual environment with
@@ -1061,7 +1144,7 @@ lease-acting commands):
 --market spot|on-demand
 --slug <slug>                Only when creating a fresh lease.
 --pond <name>
---expose <port>              Repeatable; SSH-mesh-reachable TCP port.
+--expose <port>              Repeatable; SSH-mesh TCP port; creation-only for managed leases.
 --cache-volume [name=]key:path
                              Require a provider cache volume.
 --ttl <duration>             Default 90m.
@@ -1091,6 +1174,13 @@ lease-acting commands):
 --tailscale-exit-node-allow-lan-access
 ```
 
+For coordinator-managed leases, `--expose` records Pond ports only when creating
+the lease. `run --id <lease> --expose <port>` warns and continues without changing
+those declarations. To reach an existing service on remote loopback, use
+[`crabbox tunnel --id <lease> <port>`](tunnel.md); it does not require a prior
+`--expose` declaration. Registered coordinator leases can still refresh port
+declarations during registration.
+
 Provider-specific flags are registered by each adapter and only apply to that
 provider (for example `--azure-backend`, `--azure-os-disk`, the
 `--blacksmith-*`, `--exe-dev-*`, `--namespace-*`, `--semaphore-*`,
@@ -1111,6 +1201,7 @@ Run-specific flags:
 --no-hydrate
 --full-resync                Alias: --fresh-sync
 --checksum
+--git-seed-source <origin|local>
 --force-sync-large
 --debug
 --shell

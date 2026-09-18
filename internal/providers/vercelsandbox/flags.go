@@ -3,6 +3,7 @@ package vercelsandbox
 import (
 	"flag"
 	"fmt"
+	"math"
 	"net"
 	"path"
 	"strconv"
@@ -53,6 +54,9 @@ func validateVercelSandboxConfig(cfg core.Config) error {
 	}
 	if cfg.VercelSandbox.ExecTimeoutSecs < 0 {
 		return core.Exit(2, "vercel-sandbox execTimeoutSecs must be non-negative")
+	}
+	if math.IsNaN(cfg.VercelSandbox.VCPUs) || math.IsInf(cfg.VercelSandbox.VCPUs, 0) {
+		return core.Exit(2, "vercel-sandbox vcpus must be finite")
 	}
 	if cfg.VercelSandbox.VCPUs < 0 {
 		return core.Exit(2, "vercel-sandbox vcpus must be positive when set")

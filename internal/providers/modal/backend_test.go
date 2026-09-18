@@ -18,6 +18,29 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestNativeServerTypeProjection(t *testing.T) {
+	for _, name := range []string{"modal", " Modal "} {
+		if got := core.ServerTypeForProviderClass(name, "beast"); got != "python:3.13-slim" {
+			t.Fatalf("provider=%q default type=%q, want %q", name, got, "python:3.13-slim")
+		}
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolver, ok := provider.(core.ProviderServerTypeProvider)
+		if !ok {
+			t.Fatalf("provider=%q has no native type capability", name)
+		}
+		for _, tc := range []struct{ raw, want string }{{"", "python:3.13-slim"}, {"  ", "  "}, {"custom", "custom"}, {" custom ", " custom "}} {
+			cfg := core.Config{Provider: name, Class: "beast", ServerType: "unrelated-type", ServerTypeExplicit: true}
+			cfg.Modal.Image = tc.raw
+			if got := resolver.ServerTypeForConfig(cfg); got != tc.want {
+				t.Fatalf("provider=%q raw=%q type=%q, want %q", name, tc.raw, got, tc.want)
+			}
+		}
+	}
+}
+
 func TestProviderSpec(t *testing.T) {
 	p := Provider{}
 	if p.Spec().Name != "modal" {
@@ -111,7 +134,7 @@ func hasFeature(features core.FeatureSet, want core.Feature) bool {
 }
 
 func TestBuildModalCommandWrapsWorkdirAndShell(t *testing.T) {
-	got, err := buildModalCommand([]string{"pnpm", "test"}, false, "/workspace/crabbox")
+	got, err := buildModalCommand(core.RunRequest{Command: []string{"pnpm", "test"}}, "/workspace/crabbox")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +145,7 @@ func TestBuildModalCommandWrapsWorkdirAndShell(t *testing.T) {
 		t.Fatalf("command script=%q", got[2])
 	}
 
-	got, err = buildModalCommand([]string{"pnpm install && pnpm test"}, true, "/workspace/crabbox")
+	got, err = buildModalCommand(core.RunRequest{Command: []string{"pnpm install && pnpm test"}, ShellMode: true}, "/workspace/crabbox")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,9 +350,9 @@ func TestSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repoRoot, "hello.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := backend.syncWorkspace(context.Background(), fake, "sb-123", core.RunRequest{
+	_, _, err := backend.workspace(fake, "sb-123", core.RunRequest{
 		Repo: core.Repo{Name: "repo", Root: repoRoot},
-	}, "/workspace/crabbox")
+	}, "/workspace/crabbox").Sync(context.Background())
 	if err == nil {
 		t.Fatalf("expected extract failure")
 	}
@@ -690,7 +713,7 @@ func TestSyncWorkspaceUsesSharedTimeoutAndStaging(t *testing.T) {
 	cfg.Sync.Timeout = time.Millisecond
 	cfg.Sync.Delete = true
 	backend := NewModalBackend(Provider{}.Spec(), cfg, testRuntime()).(*modalBackend)
-	_, _, err = backend.syncWorkspace(t.Context(), fake, "sb-123", core.RunRequest{Repo: repo}, "/workspace/crabbox", prepared)
+	_, _, err = backend.workspace(fake, "sb-123", core.RunRequest{Repo: repo}, "/workspace/crabbox").Sync(t.Context(), prepared)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected transfer timeout, got %v", err)
 	}

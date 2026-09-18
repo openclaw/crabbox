@@ -164,7 +164,15 @@ func (a App) pondPeers(ctx context.Context, args []string) error {
 // and do not block the remaining peers; the function returns the first error
 // encountered so callers can decide whether the release was clean.
 func (a App) pondRelease(ctx context.Context, args []string) error {
-	pond, err := requestedPondName(strings.Join(args, " "))
+	fs := newFlagSet("pond release", a.Stderr)
+	fs.Usage = func() { fmt.Fprintln(a.Stderr, "Usage:\n  crabbox pond release <name>") }
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return Exit(2, "usage: crabbox pond release <name>")
+	}
+	pond, err := requestedPondName(fs.Arg(0))
 	if err != nil {
 		return err
 	}
@@ -536,6 +544,10 @@ func bridgePeerFromClaim(claim leaseClaim, class string) BridgePeer {
 	}
 	if caps.TailscaleEgress && claimHasTailscaleMetadata(claim) {
 		peer.Note = "tailnet available for outbound proxy traffic only"
+	}
+	// Tailscale is optional on SSH leases; capability alone does not enroll a peer.
+	if class == TransportTailnet && caps.SSHMesh && !claimHasTailscaleMetadata(claim) {
+		class = TransportSSH
 	}
 	switch class {
 	case TransportTailnet:

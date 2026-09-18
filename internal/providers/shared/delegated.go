@@ -70,20 +70,51 @@ type DelegatedSandboxLifecycle struct {
 	TTL            time.Duration
 	CleanupTimeout time.Duration
 
-	Preflight      func(context.Context) error
-	PrepareArchive func(context.Context) (*core.PreparedArchive, error)
-	Acquire        func(context.Context) (DelegatedSandbox, error)
-	Resolve        func(context.Context) (DelegatedSandbox, error)
+	Preflight func(context.Context) error
+	// Construction is local-only and binds whichever resource the current phase owns.
+	Workspace func() SandboxWorkspace
+	Acquire   func(context.Context) (DelegatedSandbox, error)
+	Resolve   func(context.Context) (DelegatedSandbox, error)
 	// AdmitReuse checks run readiness after Resolve binds an authorized session.
 	// Failure retains that session without activity refresh or rerun hints.
 	AdmitReuse func(context.Context) error
 	Setup      func(context.Context) error
-	Sync       func(context.Context, *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error)
-	NoSync     func(context.Context) error
 	Command    func(context.Context) (DelegatedSandboxCommand, error)
 	Retained   func(context.Context) error
 	Cleanup    func(context.Context) error
 }
+
+// SandboxWorkspace separates local preparation from operations on an admitted
+// sandbox. Archive transports use core.ArchiveWorkspace; native transports may
+// retain their own synchronization and workspace policy.
+type SandboxWorkspace interface {
+	PrepareArchive(context.Context) (*core.PreparedArchive, error)
+	Sync(context.Context, ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error)
+	Ensure(context.Context) error
+}
+
+// WorkspaceOperations adapts transports with native synchronization or a fence
+// around the entire workspace operation. Ordinary archive transports implement
+// SandboxWorkspace directly with core.ArchiveWorkspace.
+type WorkspaceOperations struct {
+	PrepareArchiveFunc func(context.Context) (*core.PreparedArchive, error)
+	SyncFunc           func(context.Context, *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error)
+	EnsureFunc         func(context.Context) error
+}
+
+func (w WorkspaceOperations) PrepareArchive(ctx context.Context) (*core.PreparedArchive, error) {
+	return w.PrepareArchiveFunc(ctx)
+}
+
+func (w WorkspaceOperations) Sync(ctx context.Context, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+	var archive *core.PreparedArchive
+	if len(prepared) > 0 {
+		archive = prepared[0]
+	}
+	return w.SyncFunc(ctx, archive)
+}
+
+func (w WorkspaceOperations) Ensure(ctx context.Context) error { return w.EnsureFunc(ctx) }
 
 // FinalizeDelegatedCommandOutcome interprets a provider's command response.
 // Transport errors do not establish command exits, regardless of numeric code.
@@ -239,7 +270,7 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 	}
 	var err error
 	if acquired && !req.NoSync {
-		prepared, err = lifecycle.PrepareArchive(ctx)
+		prepared, err = lifecycle.Workspace().PrepareArchive(ctx)
 		if err != nil {
 			return result, err
 		}
@@ -295,11 +326,11 @@ func RunDelegatedSandbox(ctx context.Context, req core.RunRequest, lifecycle Del
 	}
 	req.Observation.Phase(core.RunPhaseSync)
 	if req.NoSync {
-		if err := lifecycle.NoSync(ctx); err != nil {
+		if err := lifecycle.Workspace().Ensure(ctx); err != nil {
 			return result, err
 		}
 	} else {
-		syncPhases, syncDuration, err = lifecycle.Sync(ctx, prepared)
+		syncPhases, syncDuration, err = lifecycle.Workspace().Sync(ctx, prepared)
 		if err != nil {
 			return result, err
 		}

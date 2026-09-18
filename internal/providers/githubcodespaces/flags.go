@@ -9,34 +9,8 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type flagValues struct {
-	Repo            *string
-	Ref             *string
-	Machine         *string
-	Devcontainer    *string
-	WorkingDir      *string
-	Geo             *string
-	IdleTimeout     *time.Duration
-	RetentionPeriod *time.Duration
-	DeleteOnRelease *bool
-	GHPath          *string
-	WorkRoot        *string
-}
-
 func RegisterGitHubCodespacesProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return flagValues{
-		Repo:            fs.String("github-codespaces-repo", defaults.GitHubCodespaces.Repo, "GitHub repository owner/name for Codespaces"),
-		Ref:             fs.String("github-codespaces-ref", defaults.GitHubCodespaces.Ref, "Git ref for a new GitHub Codespace"),
-		Machine:         fs.String("github-codespaces-machine", defaults.GitHubCodespaces.Machine, "GitHub Codespaces machine slug"),
-		Devcontainer:    fs.String("github-codespaces-devcontainer-path", defaults.GitHubCodespaces.DevcontainerPath, "devcontainer path for a new GitHub Codespace"),
-		WorkingDir:      fs.String("github-codespaces-working-directory", defaults.GitHubCodespaces.WorkingDirectory, "working directory inside the GitHub Codespace"),
-		Geo:             fs.String("github-codespaces-geo", defaults.GitHubCodespaces.Geo, "GitHub Codespaces geographic location preference"),
-		IdleTimeout:     fs.Duration("github-codespaces-idle-timeout", defaults.GitHubCodespaces.IdleTimeout, "GitHub Codespaces idle timeout"),
-		RetentionPeriod: fs.Duration("github-codespaces-retention-period", defaults.GitHubCodespaces.RetentionPeriod, "GitHub Codespaces retention period"),
-		DeleteOnRelease: fs.Bool("github-codespaces-delete-on-release", defaults.GitHubCodespaces.DeleteOnRelease, "delete claim-owned GitHub Codespaces on release"),
-		GHPath:          fs.String("github-codespaces-gh-path", defaults.GitHubCodespaces.GHPath, "GitHub CLI executable path"),
-		WorkRoot:        fs.String("github-codespaces-work-root", defaults.GitHubCodespaces.WorkRoot, "work root inside GitHub Codespaces"),
-	}
+	return core.RegisterGitHubCodespacesConfigFlags(fs, defaults.GitHubCodespaces)
 }
 
 func ApplyGitHubCodespacesProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
@@ -54,59 +28,28 @@ func ApplyGitHubCodespacesProviderFlags(cfg *core.Config, fs *flag.FlagSet, valu
 			}
 		}
 	}
-	v, ok := values.(flagValues)
+	v, ok := values.(core.GitHubCodespacesConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "github-codespaces-repo") {
-		cfg.GitHubCodespaces.Repo = *v.Repo
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "github-codespaces-ref") {
-		cfg.GitHubCodespaces.Ref = *v.Ref
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "github-codespaces-machine") {
-		cfg.GitHubCodespaces.Machine = *v.Machine
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-		cfg.ServerType = strings.TrimSpace(*v.Machine)
+	applied, err := v.Apply(&cfg.GitHubCodespaces, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if applied.Machine {
+		cfg.ServerType = strings.TrimSpace(cfg.GitHubCodespaces.Machine)
 		cfg.ServerTypeExplicit = true
 	}
-	if core.FlagWasSet(fs, "github-codespaces-devcontainer-path") {
-		cfg.GitHubCodespaces.DevcontainerPath = *v.Devcontainer
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "github-codespaces-working-directory") {
-		cfg.GitHubCodespaces.WorkingDirectory = *v.WorkingDir
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "github-codespaces-geo") {
-		cfg.GitHubCodespaces.Geo = *v.Geo
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "github-codespaces-idle-timeout") {
-		cfg.GitHubCodespaces.IdleTimeout = *v.IdleTimeout
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "github-codespaces-retention-period") {
-		cfg.GitHubCodespaces.RetentionPeriod = *v.RetentionPeriod
-		core.RecordProviderFlagInputs(cfg, true, providerName)
+	if applied.RetentionPeriod {
 		core.MarkGitHubCodespacesRetentionExplicit(cfg)
 	}
-	if core.FlagWasSet(fs, "github-codespaces-delete-on-release") {
-		cfg.GitHubCodespaces.DeleteOnRelease = *v.DeleteOnRelease
-		core.RecordProviderFlagInputs(cfg, true, providerName)
+	if applied.DeleteOnRelease {
 		markDeleteOnReleaseExplicit(cfg)
 	}
-	if core.FlagWasSet(fs, "github-codespaces-gh-path") {
-		cfg.GitHubCodespaces.GHPath = *v.GHPath
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "github-codespaces-work-root") {
-		cfg.GitHubCodespaces.WorkRoot = *v.WorkRoot
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-		cfg.WorkRoot = *v.WorkRoot
+	if applied.WorkRoot {
+		cfg.WorkRoot = cfg.GitHubCodespaces.WorkRoot
 		core.MarkWorkRootExplicit(cfg)
+	}
+	if err != nil {
+		return err
 	}
 	return ValidateGitHubCodespacesConfig(*cfg)
 }

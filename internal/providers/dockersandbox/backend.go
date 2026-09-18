@@ -283,17 +283,8 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		if remaining < sleepFor {
 			sleepFor = remaining
 		}
-		timer := time.NewTimer(sleepFor)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			return core.StatusView{}, ctx.Err()
-		case <-timer.C:
+		if err := core.SleepContext(ctx, sleepFor); err != nil {
+			return core.StatusView{}, err
 		}
 	}
 }

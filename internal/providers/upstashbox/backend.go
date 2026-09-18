@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"path"
 	"regexp"
@@ -75,8 +76,18 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			client, err = newAPI(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return b.prepareArchive(ctx, req)
+		Workspace: func() shared.SandboxWorkspace {
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: func(ctx context.Context) (*core.PreparedArchive, error) {
+					return b.prepareArchive(ctx, req)
+				},
+				SyncFunc: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					return b.syncWorkspace(ctx, client, boxID, req, workdir, folder, archive)
+				},
+				EnsureFunc: func(ctx context.Context) error {
+					return b.prepareWorkspace(ctx, client, boxID, folder)
+				},
+			}
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var box boxData
@@ -96,12 +107,6 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 				return shared.DelegatedSandbox{}, err
 			}
 			return session(), nil
-		},
-		Sync: func(ctx context.Context, archive *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, client, boxID, req, workdir, folder, archive)
-		},
-		NoSync: func(ctx context.Context) error {
-			return b.prepareWorkspace(ctx, client, boxID, folder)
 		},
 		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
@@ -153,7 +158,7 @@ func (b *backend) List(ctx context.Context, req core.ListRequest) ([]core.LeaseV
 	servers := make([]core.Server, 0, len(boxes))
 	for _, box := range boxes {
 		if isCrabboxBox(box) {
-			servers = append(servers, boxToServer(b.cfg, box))
+			servers = append(servers, boxToServer(b.cfg, box, b.observationClaim(box)))
 		}
 	}
 	return servers, nil
@@ -172,34 +177,30 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	return shared.PollDelegatedStatus(ctx, shared.DelegatedStatusRequest{
-		ID:          req.ID,
-		Provider:    providerName,
-		TargetOS:    targetLinux,
-		Network:     networkPublic,
-		Wait:        req.Wait,
-		WaitTimeout: req.WaitTimeout,
-		Now:         func() time.Time { return core.ClockNow(b.rt.Clock) },
-		Resolve: func(id string) (string, string, string, error) {
-			return b.resolveBoxID(ctx, client, id, "", false)
-		},
-		Get: func(getCtx context.Context, boxID string) (shared.DelegatedStatusResource, error) {
-			box, err := client.GetBox(getCtx, boxID)
-			if err != nil {
-				return shared.DelegatedStatusResource{}, err
-			}
-			server := boxToServer(b.cfg, box)
-			return shared.DelegatedStatusResource{
-				State:      box.Status,
-				ServerID:   box.ID,
-				ServerType: server.ServerType.Name,
-				Ready:      statusReady(box.Status),
-				Labels:     server.Labels,
-			}, nil
-		},
-		TimeoutError: func(boxID string) error {
-			return core.Exit(5, "timed out waiting for upstash-box %s to become ready", boxID)
-		},
+	leaseID, boxID, slug, err := b.resolveBoxID(ctx, client, req.ID, "", false)
+	if err != nil {
+		return core.StatusView{}, err
+	}
+	return shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
+		box, err := client.GetBox(ctx, boxID)
+		if err != nil {
+			return core.StatusView{}, false, err
+		}
+		server := boxToServer(b.cfg, box, b.observationClaim(box))
+		return core.StatusView{
+			ID:         leaseID,
+			Slug:       core.Blank(slug, server.Labels["slug"]),
+			Provider:   providerName,
+			TargetOS:   targetLinux,
+			Network:    networkPublic,
+			State:      box.Status,
+			ServerID:   box.ID,
+			ServerType: server.ServerType.Name,
+			Ready:      statusReady(box.Status),
+			Labels:     server.Labels,
+		}, false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for upstash-box %s to become ready", boxID)
 	})
 }
 
@@ -264,7 +265,12 @@ func (b *backend) createBox(ctx context.Context, client api, repo core.Repo, kee
 	if err != nil {
 		return "", boxData{}, "", err
 	}
-	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, upstashBoxClaimScope(b.cfg), "", repo.Root, b.cfg.IdleTimeout, reclaim, boxToServer(b.cfg, box), core.SSHTarget{}); err != nil {
+	created := core.ClockNow(b.rt.Clock)
+	if box.CreatedAt > 0 {
+		created = time.Unix(box.CreatedAt, 0)
+	}
+	labels := core.DirectLeaseLabels(b.cfg, leaseID, slug, providerName, "", keep, created)
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, upstashBoxClaimScope(b.cfg), "", repo.Root, b.cfg.IdleTimeout, reclaim, b.claimServer(box, labels), core.SSHTarget{}); err != nil {
 		cleanupCtx, cancel := upstashBoxCleanupContext()
 		cleanupErr := client.DeleteBoxes(cleanupCtx, []string{box.ID})
 		cancel()
@@ -295,7 +301,7 @@ func (b *backend) resolveBoxID(ctx context.Context, client api, id, repoRoot str
 			return "", "", "", err
 		}
 		if repoRoot != "" {
-			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(claim.LeaseID, claim.Slug, providerName, upstashBoxClaimScope(b.cfg), "", repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim, boxToServer(b.cfg, box), core.SSHTarget{}); err != nil {
+			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(claim.LeaseID, claim.Slug, providerName, upstashBoxClaimScope(b.cfg), "", repoRoot, time.Duration(claim.IdleTimeoutSeconds)*time.Second, reclaim, b.claimServer(box, claim.Labels), core.SSHTarget{}); err != nil {
 				return "", "", "", err
 			}
 		}
@@ -348,14 +354,55 @@ func resolveBoxBySlug(ctx context.Context, client api, slug string) (boxData, er
 	return boxData{}, core.Exit(4, "upstash-box %q was not found", slug)
 }
 
-func boxToServer(cfg core.Config, box boxData) core.Server {
+func (b *backend) observationClaim(box boxData) *core.LeaseClaim {
 	leaseID := boxLeaseID(box)
-	labels := core.DirectLeaseLabels(cfg, leaseID, boxSlug(leaseID, box), providerName, "", box.KeepAlive, time.Now().UTC())
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		return nil
+	}
+	binding := shared.ClaimBinding{
+		Provider: providerName, ProviderScope: upstashBoxClaimScope(b.cfg), ExactProviderScope: true,
+		LeaseID: leaseID, Slug: boxSlug(leaseID, box), CloudID: box.ID,
+		RequiredLabels: map[string]string{"box_id": box.ID, "box_name": box.Name},
+	}
+	if shared.ValidateClaimBinding(claim, binding) != nil {
+		return nil
+	}
+	return &claim
+}
+
+// Endpoint refresh updates provider facts without reinitializing recorded policy.
+func (b *backend) claimServer(box boxData, recorded map[string]string) core.Server {
+	server := boxToServer(b.cfg, box, nil)
+	labels := maps.Clone(recorded)
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+	for key, value := range server.Labels {
+		if key != "created_at" || labels[key] == "" {
+			labels[key] = value
+		}
+	}
+	server.Labels = labels
+	return server
+}
+
+func boxToServer(cfg core.Config, box boxData, claim *core.LeaseClaim) core.Server {
+	leaseID := boxLeaseID(box)
+	labels := (shared.SandboxObservation{
+		Provider: providerName, Target: targetLinux, LeaseID: leaseID,
+		Slug: boxSlug(leaseID, box), State: box.Status,
+		CreatedAt: time.Unix(box.CreatedAt, 0), UpdatedAt: time.Unix(box.UpdatedAt, 0),
+	}).Labels(claim)
 	labels["box_id"] = box.ID
 	labels["box_name"] = box.Name
-	labels["runtime"] = core.Blank(box.Runtime, runtimeName(cfg))
-	labels["size"] = core.Blank(box.Size, sizeName(cfg))
-	labels["state"] = box.Status
+	labels["keep_alive"] = fmt.Sprint(box.KeepAlive)
+	if box.Runtime != "" {
+		labels["runtime"] = box.Runtime
+	}
+	if box.Size != "" {
+		labels["size"], labels["server_type"] = box.Size, box.Size
+	}
 	server := core.Server{
 		Provider: providerName,
 		CloudID:  box.ID,
@@ -363,7 +410,7 @@ func boxToServer(cfg core.Config, box boxData) core.Server {
 		Status:   box.Status,
 		Labels:   labels,
 	}
-	server.ServerType.Name = core.Blank(box.Size, sizeName(cfg))
+	server.ServerType.Name = box.Size
 	server.PublicNet.IPv4.IP = boxBaseHost(cfg)
 	return server
 }

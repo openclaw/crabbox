@@ -22,6 +22,81 @@ import (
 	"time"
 )
 
+func TestManagedStateSyncExcludeRulesEquality(t *testing.T) {
+	left := newSyncExcludeRules([]string{"build", "!build/source.txt"}, syncExcludeConfigured)
+	left.managedSubtree = "state/crabbox"
+	for _, tc := range []struct {
+		name, managed string
+		wantEqual     bool
+	}{
+		{name: "same scope", managed: "state/crabbox", wantEqual: true},
+		{name: "different scope", managed: "other-state/crabbox"},
+		{name: "scope removed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			right := left
+			right.managedSubtree = tc.managed
+			if got := sameSyncExcludeRules(left, right); got != tc.wantEqual {
+				t.Fatalf("scope equality=%v want %v", got, tc.wantEqual)
+			}
+		})
+	}
+}
+
+func TestManagedStateSnapshotRevalidatesConfigurationChange(t *testing.T) {
+	repo, cfg := newLocalGitSnapshotFixture(t)
+	testSnapshotManagedConfigurationChange(t, repo.Root, func(hook sourceSnapshotHook) (gitOverlaySnapshot, error) {
+		return prepareLocalGitSeedSnapshotWithHook(context.Background(), repo, cfg, hook)
+	})
+}
+
+func TestGitOverlaySnapshotRevalidatesManagedConfigurationChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("overlay validation requires POSIX Git checkout settings")
+	}
+	fixture := newGitOverlayFixture(t)
+	_, excludes := fixture.manifest(t)
+	testSnapshotManagedConfigurationChange(t, fixture.root, func(hook sourceSnapshotHook) (gitOverlaySnapshot, error) {
+		return prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, hook)
+	})
+}
+
+func testSnapshotManagedConfigurationChange(t *testing.T, root string, prepare func(sourceSnapshotHook) (gitOverlaySnapshot, error)) {
+	t.Helper()
+	mustWriteTestFile(t, filepath.Join(root, "unstaged.txt"), "stable local change\n")
+	for _, name := range []string{"state-a", "state-b"} {
+		if err := os.MkdirAll(filepath.Join(root, name, "crabbox"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state-a"))
+	var attempts []int
+	snapshot, err := prepare(func(phase string, attempt int, _ string) {
+		if phase == "snapshot_created" {
+			attempts = append(attempts, attempt)
+		}
+		if phase == "snapshot_copied" && attempt == 1 {
+			// Reconfigure at an explicit boundary; source files stay unchanged.
+			t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state-b"))
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := snapshot.cleanup(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if !slices.Equal(attempts, []int{1, 2}) || snapshot.Excludes.managedSubtree != "state-b/crabbox" {
+		t.Fatalf("attempts=%v accepted scope=%q", attempts, snapshot.Excludes.managedSubtree)
+	}
+	if got, err := os.ReadFile(filepath.Join(snapshot.Root, "unstaged.txt")); err != nil || string(got) != "stable local change\n" {
+		t.Fatalf("accepted content=%q error=%v", got, err)
+	}
+	t.Logf("snapshot attempts=%v; accepted managed subtree=%q; stable content preserved", attempts, snapshot.Excludes.managedSubtree)
+}
+
 type gitOverlayFixture struct {
 	root           string
 	origin         string
@@ -29,6 +104,110 @@ type gitOverlayFixture struct {
 	cfg            Config
 	plan           gitCoherencePlan
 	historicalBlob string
+}
+
+func TestGitOverlaySnapshotCancellationCleansOwnedStaging(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "local change\n")
+	_, excludes := fixture.manifest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var created string
+	observedPaths := 0
+	snapshot, err := prepareGitOverlaySnapshotWithHook(ctx, fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, _ int, root string) {
+		if phase == "snapshot_created" {
+			created = root
+			cancel()
+		}
+		if phase == "after_lstat" {
+			observedPaths++
+		}
+	})
+	t.Cleanup(func() {
+		if err := snapshot.cleanup(); err != nil {
+			t.Error(err)
+		}
+	})
+	if !errors.Is(err, context.Canceled) || snapshot.Root != "" || created == "" || observedPaths != 0 {
+		t.Fatalf("canceled=%t staged_root_retained=%t created=%t observed_paths=%d error=%v", errors.Is(err, context.Canceled), snapshot.Root != "", created != "", observedPaths, err)
+	}
+	if _, err := os.Stat(created); !os.IsNotExist(err) {
+		t.Fatalf("cancelled staging remains: %v", err)
+	}
+	t.Log("phase=snapshot_created; canceled=true; observed_paths=0; owned_staging_removed=true")
+}
+
+func TestGitOverlaySnapshotCancellationRetainsCleanupFailure(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "local change\n")
+	_, excludes := fixture.manifest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cleanupFailure := errors.New("injected cleanup failure")
+	var owned gitOverlaySnapshot
+	t.Cleanup(func() {
+		path := owned.Root
+		if err := owned.cleanup(); err != nil {
+			t.Error(err)
+		}
+		if path != "" {
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Errorf("retained test staging remains: %v", err)
+			}
+		}
+	})
+	snapshot, err := prepareGitOverlaySnapshotWithCleanup(ctx, fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, _ int, _ string) {
+		if phase == "snapshot_created" {
+			cancel()
+		}
+	}, func(snapshot *gitOverlaySnapshot) error {
+		owned = *snapshot
+		return cleanupFailure
+	})
+	if snapshot.Root == "" || !errors.Is(err, context.Canceled) || !errors.Is(err, cleanupFailure) {
+		t.Fatalf("retained snapshot=%+v error=%v", snapshot, err)
+	}
+	terminal := terminalGitOverlayPreparationError(err, true, ctx.Err())
+	if ExitCodeForError(terminal, 1) != 6 || !errors.Is(terminal, context.Canceled) || !errors.Is(terminal, cleanupFailure) {
+		t.Fatalf("terminal error lost exit code or cause: %v", terminal)
+	}
+}
+
+func TestGitOverlayPreparationCancellationPreventsFallback(t *testing.T) {
+	validationFailure := errors.New("ordinary validation failure")
+	if got := terminalGitOverlayPreparationError(validationFailure, false, nil); got != nil {
+		t.Fatalf("ordinary failure unexpectedly forbids fallback: %v", got)
+	}
+	got := terminalGitOverlayPreparationError(validationFailure, false, context.Canceled)
+	if !errors.Is(got, validationFailure) || !errors.Is(got, context.Canceled) {
+		t.Fatalf("concurrent cancellation was lost: %v", got)
+	}
+}
+
+func TestGitOverlaySnapshotCancellationPreservesValidationFailure(t *testing.T) {
+	fixture := newGitOverlayFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	validationFailure := errors.New("ordinary validation failure")
+	policy := gitSnapshotPolicy{
+		target: fixture.repo.Head,
+		checkout: func(string) (gitOverlayCheckoutState, error) {
+			return gitOverlayCheckoutState{Head: fixture.repo.Head}, nil
+		},
+		manifest: func(string, SyncExcludeRules, []string) (SyncManifest, error) {
+			return SyncManifest{}, nil
+		},
+		validate: func(Repo, SyncManifest, gitOverlayCheckoutState) error {
+			cancel()
+			return validationFailure
+		},
+	}
+	snapshot, err := prepareGitSnapshotWithCleanup(ctx, fixture.repo, fixture.cfg, nil, policy, nil, func(snapshot *gitOverlaySnapshot) error {
+		return snapshot.cleanup()
+	})
+	if snapshot.Root != "" || !errors.Is(err, context.Canceled) || !errors.Is(err, validationFailure) {
+		t.Fatalf("snapshot=%+v error=%v", snapshot, err)
+	}
 }
 
 func newGitOverlayFixture(t *testing.T) gitOverlayFixture {
@@ -88,7 +267,26 @@ func (fixture gitOverlayFixture) manifest(t *testing.T) (SyncManifest, SyncExclu
 
 func runOverlayCommand(t *testing.T, command string, input []byte, environment ...string) ([]byte, error) {
 	t.Helper()
-	cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", command)
+	return runOverlayCommandUsingShell(t, "/bin/bash", command, input, environment...)
+}
+
+func runPortableGitControlCommand(t *testing.T, command string, input []byte, environment ...string) ([]byte, error) {
+	t.Helper()
+	shell := "/bin/sh"
+	if dash, err := exec.LookPath("dash"); err == nil {
+		shell = dash
+	}
+	command = strings.Replace(command, "/bin/sh -c ", shellQuote(shell)+" -c ", 1)
+	return runOverlayCommandUsingShell(t, shell, command, input, environment...)
+}
+
+func runOverlayCommandUsingShell(t *testing.T, shell, command string, input []byte, environment ...string) ([]byte, error) {
+	t.Helper()
+	args := []string{"-c", command}
+	if shell == "/bin/bash" {
+		args = []string{"--noprofile", "--norc", "-c", command}
+	}
+	cmd := exec.Command(shell, args...)
 	if input != nil {
 		cmd.Stdin = bytes.NewReader(input)
 	}
@@ -207,7 +405,7 @@ func TestGitOverlaySnapshotRetriesWhenCleanTrackedFileChanges(t *testing.T) {
 	fixture := newGitOverlayFixture(t)
 	_, excludes := fixture.manifest(t)
 	attempts := 0
-	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+	snapshot, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
 		if phase == "snapshot_fingerprinted" {
 			attempts = attempt
 			if attempt == 1 {
@@ -236,7 +434,7 @@ func TestGitOverlaySnapshotRetriesSameSizeChangedFileMutation(t *testing.T) {
 	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "aaaa\n")
 	_, excludes := fixture.manifest(t)
 	attempts := 0
-	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+	snapshot, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
 		if phase == "snapshot_fingerprinted" {
 			attempts = attempt
 			if attempt == 1 {
@@ -267,7 +465,7 @@ func TestGitOverlaySnapshotRetriesReplacementAfterLstat(t *testing.T) {
 	}
 	_, excludes := fixture.manifest(t)
 	attempts := 0
-	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+	snapshot, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
 		if phase == "snapshot_created" {
 			attempts = attempt
 		}
@@ -309,7 +507,7 @@ func TestGitOverlaySnapshotRetriesMetadataChangeAfterLstat(t *testing.T) {
 	}
 	_, excludes := fixture.manifest(t)
 	attempts := 0
-	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+	snapshot, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
 		if phase == "snapshot_created" {
 			attempts = attempt
 		}
@@ -360,14 +558,14 @@ func TestGitOverlaySnapshotClassifiesDisappearanceAfterLstatAsDrift(t *testing.T
 					t.Fatal(err)
 				}
 			}
-			err := copyGitOverlaySnapshotWithHook(sourceRoot, snapshotRoot, []string{rel}, 1, func(phase string, _ int, _ string) {
+			err := copySourceSnapshotWithHook(context.Background(), sourceRoot, snapshotRoot, []string{rel}, 1, func(phase string, _ int, _ string) {
 				if phase == "after_lstat" {
 					if err := os.RemoveAll(remove); err != nil {
 						t.Fatal(err)
 					}
 				}
 			})
-			if !errors.Is(err, errGitOverlaySnapshotDrift) {
+			if !errors.Is(err, errSourceSnapshotDrift) {
 				t.Fatalf("disappearance error=%v, want snapshot drift", err)
 			}
 		})
@@ -382,8 +580,8 @@ func TestGitOverlaySnapshotStableSourceErrorsStayTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, operationErr := range []error{errors.New("synthetic source failure"), os.ErrPermission} {
-		got := classifyGitOverlaySnapshotSourceError(source, observed, operationErr)
-		if !errors.Is(got, operationErr) || errors.Is(got, errGitOverlaySnapshotDrift) {
+		got := classifySourceSnapshotError(source, observed, operationErr)
+		if !errors.Is(got, operationErr) || errors.Is(got, errSourceSnapshotDrift) {
 			t.Fatalf("stable source error=%v, want terminal %v", got, operationErr)
 		}
 	}
@@ -394,7 +592,7 @@ func TestGitOverlaySnapshotRetriesIgnoreRuleDriftAndOwnsAcceptedRules(t *testing
 	mustWriteTestFile(t, filepath.Join(fixture.root, "generated.txt"), "generated\n")
 	_, excludes := fixture.manifest(t)
 	attempts := 0
-	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+	snapshot, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
 		if phase == "snapshot_created" {
 			attempts = attempt
 		}
@@ -424,7 +622,7 @@ func TestGitOverlaySnapshotDestinationFailureIsTerminal(t *testing.T) {
 	_, excludes := fixture.manifest(t)
 	attempts := 0
 	var snapshotRoot string
-	_, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, root string) {
+	_, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, root string) {
 		if phase != "snapshot_created" {
 			return
 		}
@@ -435,7 +633,7 @@ func TestGitOverlaySnapshotDestinationFailureIsTerminal(t *testing.T) {
 	if snapshotRoot != "" {
 		t.Cleanup(func() { _ = os.RemoveAll(snapshotRoot) })
 	}
-	if err == nil || errors.Is(err, errGitOverlaySnapshotDrift) {
+	if err == nil || errors.Is(err, errSourceSnapshotDrift) {
 		t.Fatalf("destination failure=%v", err)
 	}
 	if attempts != 1 {
@@ -447,7 +645,7 @@ func TestGitOverlaySnapshotABAMutationCannotDivergeFingerprint(t *testing.T) {
 	fixture := newGitOverlayFixture(t)
 	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "aaaa\n")
 	_, excludes := fixture.manifest(t)
-	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+	snapshot, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
 		if attempt != 1 {
 			return
 		}
@@ -472,12 +670,12 @@ func TestGitOverlaySnapshotStableTreeReusesFingerprint(t *testing.T) {
 	fixture := newGitOverlayFixture(t)
 	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "stable local change\n")
 	_, excludes := fixture.manifest(t)
-	first, err := prepareGitOverlaySnapshot(fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
+	first, err := prepareGitOverlaySnapshot(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = first.cleanup() }()
-	second, err := prepareGitOverlaySnapshot(fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
+	second, err := prepareGitOverlaySnapshot(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +700,7 @@ func TestGitOverlaySnapshotAcceptsStableStagedIndex(t *testing.T) {
 		t.Fatalf("staged index tree=%q unexpectedly matches target tree", wantState.IndexTree)
 	}
 	_, excludes := fixture.manifest(t)
-	snapshot, err := prepareGitOverlaySnapshot(fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
+	snapshot, err := prepareGitOverlaySnapshot(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -521,7 +719,7 @@ func TestGitOverlaySnapshotRetriesIndexMutation(t *testing.T) {
 	runGit(t, fixture.root, "add", "staged.txt")
 	_, excludes := fixture.manifest(t)
 	attempts := 0
-	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+	snapshot, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
 		if phase == "initial_checkout_state_captured" {
 			attempts = attempt
 		}
@@ -553,7 +751,7 @@ func TestGitOverlaySnapshotRetriesIndexMutationAcrossValidationWindows(t *testin
 			runGit(t, fixture.root, "add", "staged.txt")
 			_, excludes := fixture.manifest(t)
 			attempts := 0
-			snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(current string, attempt int, _ string) {
+			snapshot, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(current string, attempt int, _ string) {
 				attempts = max(attempts, attempt)
 				if current == phase && attempt == 1 {
 					mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "second staged value\n")
@@ -579,7 +777,7 @@ func TestGitOverlaySnapshotFinalAcceptedManifestRejectsLateMutation(t *testing.T
 	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "first local value\n")
 	_, excludes := fixture.manifest(t)
 	attempts := 0
-	snapshot, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+	snapshot, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
 		attempts = max(attempts, attempt)
 		if phase == "before_final_checkout_state" && attempt == 1 {
 			mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "second local value\n")
@@ -601,7 +799,7 @@ func TestGitOverlaySnapshotHeadMutationDuringInitialValidationBecomesStaleTarget
 	fixture := newGitOverlayFixture(t)
 	_, excludes := fixture.manifest(t)
 	created := false
-	_, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
+	_, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, _ string) {
 		if phase == "snapshot_created" {
 			created = true
 		}
@@ -611,7 +809,7 @@ func TestGitOverlaySnapshotHeadMutationDuringInitialValidationBecomesStaleTarget
 			runGit(t, fixture.root, "commit", "-qm", "advance during initial validation")
 		}
 	})
-	if err == nil || !strings.Contains(err.Error(), "head_changed") || errors.Is(err, errGitOverlaySnapshotDrift) {
+	if err == nil || !strings.Contains(err.Error(), "head_changed") || errors.Is(err, errSourceSnapshotDrift) {
 		t.Fatalf("advanced HEAD error=%v, want terminal stale target", err)
 	}
 	if created {
@@ -623,7 +821,7 @@ func TestGitOverlaySnapshotHeadMutationRetriesThenRejectsStaleTarget(t *testing.
 	fixture := newGitOverlayFixture(t)
 	_, excludes := fixture.manifest(t)
 	var snapshotRoots []string
-	_, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, root string) {
+	_, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, root string) {
 		if phase == "snapshot_created" {
 			snapshotRoots = append(snapshotRoots, root)
 		}
@@ -633,7 +831,7 @@ func TestGitOverlaySnapshotHeadMutationRetriesThenRejectsStaleTarget(t *testing.
 			runGit(t, fixture.root, "commit", "-qm", "advance local head")
 		}
 	})
-	if err == nil || !strings.Contains(err.Error(), "head_changed") || errors.Is(err, errGitOverlaySnapshotDrift) {
+	if err == nil || !strings.Contains(err.Error(), "head_changed") || errors.Is(err, errSourceSnapshotDrift) {
 		t.Fatalf("advanced HEAD error=%v, want terminal stale target", err)
 	}
 	if len(snapshotRoots) != 1 {
@@ -649,10 +847,10 @@ func TestGitOverlaySnapshotInitialTargetMismatchIsTerminal(t *testing.T) {
 	runGit(t, fixture.root, "checkout", "--quiet", "--detach", "HEAD^")
 	_, excludes := fixture.manifest(t)
 	created := false
-	_, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, _ int, _ string) {
+	_, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, _ int, _ string) {
 		created = created || phase == "snapshot_created"
 	})
-	if err == nil || !strings.Contains(err.Error(), "head_changed") || errors.Is(err, errGitOverlaySnapshotDrift) {
+	if err == nil || !strings.Contains(err.Error(), "head_changed") || errors.Is(err, errSourceSnapshotDrift) {
 		t.Fatalf("initial target mismatch error=%v", err)
 	}
 	if created {
@@ -664,7 +862,7 @@ func TestGitOverlayCheckoutStateRejectsInvalidInitialState(t *testing.T) {
 	t.Run("unborn head", func(t *testing.T) {
 		root := t.TempDir()
 		runGit(t, root, "init", "-q")
-		if _, err := captureGitOverlayCheckoutState(root); err == nil || !strings.Contains(err.Error(), "unborn_head") || errors.Is(err, errGitOverlaySnapshotDrift) {
+		if _, err := captureGitOverlayCheckoutState(root); err == nil || !strings.Contains(err.Error(), "unborn_head") || errors.Is(err, errSourceSnapshotDrift) {
 			t.Fatalf("unborn checkout error=%v", err)
 		}
 	})
@@ -672,7 +870,7 @@ func TestGitOverlayCheckoutStateRejectsInvalidInitialState(t *testing.T) {
 	t.Run("invalid head", func(t *testing.T) {
 		fixture := newGitOverlayFixture(t)
 		mustWriteTestFile(t, filepath.Join(fixture.root, ".git", "HEAD"), "not a ref or object\n")
-		if _, err := captureGitOverlayCheckoutState(fixture.root); err == nil || !strings.Contains(err.Error(), "invalid_head") || errors.Is(err, errGitOverlaySnapshotDrift) {
+		if _, err := captureGitOverlayCheckoutState(fixture.root); err == nil || !strings.Contains(err.Error(), "invalid_head") || errors.Is(err, errSourceSnapshotDrift) {
 			t.Fatalf("invalid checkout error=%v", err)
 		}
 	})
@@ -680,7 +878,7 @@ func TestGitOverlayCheckoutStateRejectsInvalidInitialState(t *testing.T) {
 	t.Run("corrupt index", func(t *testing.T) {
 		fixture := newGitOverlayFixture(t)
 		mustWriteTestFile(t, filepath.Join(fixture.root, ".git", "index"), "corrupt index\n")
-		if _, err := captureGitOverlayCheckoutState(fixture.root); err == nil || !strings.Contains(err.Error(), "invalid_index") || errors.Is(err, errGitOverlaySnapshotDrift) {
+		if _, err := captureGitOverlayCheckoutState(fixture.root); err == nil || !strings.Contains(err.Error(), "invalid_index") || errors.Is(err, errSourceSnapshotDrift) {
 			t.Fatalf("corrupt index error=%v", err)
 		}
 	})
@@ -688,7 +886,7 @@ func TestGitOverlayCheckoutStateRejectsInvalidInitialState(t *testing.T) {
 	t.Run("unmerged index", func(t *testing.T) {
 		fixture := newGitOverlayFixture(t)
 		setUnmergedIndexModes(t, fixture.root, "clean.txt", "100644", "100644")
-		if _, err := captureGitOverlayCheckoutState(fixture.root); err == nil || !strings.Contains(err.Error(), "unmerged_index") || errors.Is(err, errGitOverlaySnapshotDrift) {
+		if _, err := captureGitOverlayCheckoutState(fixture.root); err == nil || !strings.Contains(err.Error(), "unmerged_index") || errors.Is(err, errSourceSnapshotDrift) {
 			t.Fatalf("unmerged index error=%v", err)
 		}
 	})
@@ -727,7 +925,7 @@ func TestGitOverlayCheckoutStateAcceptsExactDetachedAndLinkedWorktree(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := prepareGitOverlaySnapshot(linkedRepo, fixture.cfg, excludes, nil, linkedPlan)
+	snapshot, err := prepareGitOverlaySnapshot(context.Background(), linkedRepo, fixture.cfg, excludes, nil, linkedPlan)
 	if err != nil {
 		t.Fatalf("linked snapshot: %v", err)
 	}
@@ -771,7 +969,7 @@ func TestGitOverlayCheckoutStateRequiresStableDoubleSampleAndCanonicalRoot(t *te
 					runGit(t, fixture.root, "add", "staged.txt")
 				}
 			})
-			if !errors.Is(err, errGitOverlaySnapshotDrift) {
+			if !errors.Is(err, errSourceSnapshotDrift) {
 				t.Fatalf("%s mutation error=%v, want checkout drift", mutation, err)
 			}
 		})
@@ -813,7 +1011,7 @@ func TestGitOverlaySnapshotPreservesFileAndParentDirectoryModes(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, excludes := fixture.manifest(t)
-	snapshot, err := prepareGitOverlaySnapshot(fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
+	snapshot, err := prepareGitOverlaySnapshot(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -826,10 +1024,10 @@ func TestGitOverlaySnapshotPreservesFileAndParentDirectoryModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := gitOverlaySupportedMode(parentInfo.Mode()), gitOverlaySupportedMode(sourceParentInfo.Mode()); got != want {
+	if got, want := sourceSnapshotSupportedMode(parentInfo.Mode()), sourceSnapshotSupportedMode(sourceParentInfo.Mode()); got != want {
 		t.Fatalf("snapshot parent mode=%#o want %#o", got, want)
 	}
-	if want := normalizedGitOverlayFileTime(parentModTime); !parentInfo.ModTime().Equal(want) {
+	if want := normalizedSourceSnapshotFileTime(parentModTime); !parentInfo.ModTime().Equal(want) {
 		t.Fatalf("snapshot parent mtime=%s want %s", parentInfo.ModTime(), want)
 	}
 	fileInfo, err := os.Stat(filepath.Join(snapshot.Root, "private", "script.sh"))
@@ -840,7 +1038,7 @@ func TestGitOverlaySnapshotPreservesFileAndParentDirectoryModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := gitOverlaySupportedMode(fileInfo.Mode()), gitOverlaySupportedMode(sourceFileInfo.Mode()); got != want {
+	if got, want := sourceSnapshotSupportedMode(fileInfo.Mode()), sourceSnapshotSupportedMode(sourceFileInfo.Mode()); got != want {
 		t.Fatalf("snapshot file mode=%#o want %#o", got, want)
 	}
 	if !fileInfo.ModTime().Equal(modTime) {
@@ -868,7 +1066,7 @@ func TestGitOverlaySnapshotCopiesThroughNestedReadOnlyParents(t *testing.T) {
 	})
 
 	snapshotRoot := t.TempDir()
-	if err := copyGitOverlaySnapshot(sourceRoot, snapshotRoot, []string{"locked/deep/payload.txt"}); err != nil {
+	if err := copySourceSnapshot(context.Background(), sourceRoot, snapshotRoot, []string{"locked/deep/payload.txt"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{filepath.Join(snapshotRoot, "locked"), filepath.Join(snapshotRoot, "locked", "deep")} {
@@ -916,7 +1114,7 @@ func TestGitOverlaySnapshotDefersSharedParentModesAndRestoresDeepestFirst(t *tes
 
 	snapshotRoot := t.TempDir()
 	var observed [][2]os.FileMode
-	err := copyGitOverlaySnapshotWithHook(
+	err := copySourceSnapshotWithHook(context.Background(),
 		sourceRoot,
 		snapshotRoot,
 		[]string{"locked/first.txt", "locked/deep/second.txt"},
@@ -936,7 +1134,7 @@ func TestGitOverlaySnapshotDefersSharedParentModesAndRestoresDeepestFirst(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	tempMode := gitOverlayTemporaryDirectoryMode(0o555).Perm()
+	tempMode := sourceSnapshotTemporaryDirectoryMode(0o555).Perm()
 	wantObserved := [][2]os.FileMode{{tempMode, tempMode}, {tempMode, 0o555}}
 	if !slices.Equal(observed, wantObserved) {
 		t.Fatalf("restore observations=%#v want %#v", observed, wantObserved)
@@ -968,8 +1166,8 @@ func TestGitOverlaySnapshotPreservesSymlinkModificationTime(t *testing.T) {
 	if err := os.Symlink("target", source); err != nil {
 		t.Fatal(err)
 	}
-	wantTime := normalizedGitOverlayFileTime(time.Unix(1_650_000_000, 987_654_000))
-	if err := syncGitOverlaySymlinkTimes(source, wantTime); err != nil {
+	wantTime := normalizedSourceSnapshotFileTime(time.Unix(1_650_000_000, 987_654_000))
+	if err := syncSourceSnapshotSymlinkTimes(source, wantTime); err != nil {
 		t.Fatal(err)
 	}
 	sourceInfo, err := os.Lstat(source)
@@ -979,7 +1177,7 @@ func TestGitOverlaySnapshotPreservesSymlinkModificationTime(t *testing.T) {
 	if !sourceInfo.ModTime().Equal(wantTime) {
 		t.Fatalf("source symlink mtime=%s want %s", sourceInfo.ModTime(), wantTime)
 	}
-	if err := copyGitOverlaySnapshot(sourceRoot, snapshotRoot, []string{"link"}); err != nil {
+	if err := copySourceSnapshot(context.Background(), sourceRoot, snapshotRoot, []string{"link"}); err != nil {
 		t.Fatal(err)
 	}
 	copiedInfo, err := os.Lstat(filepath.Join(snapshotRoot, "link"))
@@ -1047,7 +1245,7 @@ func TestGitOverlaySnapshotRejectsSourceParentSymlinkDriftBeforeModeRestore(t *t
 	replacement := t.TempDir()
 	snapshotRoot := t.TempDir()
 	mutated := false
-	err := copyGitOverlaySnapshotWithHook(sourceRoot, snapshotRoot, []string{"private/payload.txt"}, 1, func(phase string, _ int, _ string) {
+	err := copySourceSnapshotWithHook(context.Background(), sourceRoot, snapshotRoot, []string{"private/payload.txt"}, 1, func(phase string, _ int, _ string) {
 		if phase != "before_parent_mode_restore" || mutated {
 			return
 		}
@@ -1059,7 +1257,7 @@ func TestGitOverlaySnapshotRejectsSourceParentSymlinkDriftBeforeModeRestore(t *t
 			t.Fatal(err)
 		}
 	})
-	if err == nil || !errors.Is(err, errGitOverlaySnapshotDrift) {
+	if err == nil || !errors.Is(err, errSourceSnapshotDrift) {
 		t.Fatalf("source parent symlink drift was not rejected: %v", err)
 	}
 	info, statErr := os.Stat(filepath.Join(snapshotRoot, "private"))
@@ -1099,7 +1297,7 @@ func TestGitOverlaySnapshotDestinationSymlinkDoesNotChmodTarget(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(outside, 0o755) })
 	mutated := false
-	err := copyGitOverlaySnapshotWithHook(sourceRoot, snapshotRoot, []string{"private/payload.txt"}, 1, func(phase string, _ int, _ string) {
+	err := copySourceSnapshotWithHook(context.Background(), sourceRoot, snapshotRoot, []string{"private/payload.txt"}, 1, func(phase string, _ int, _ string) {
 		if phase != "before_parent_mode_restore" || mutated {
 			return
 		}
@@ -1161,7 +1359,7 @@ func TestGitOverlaySnapshotPartialRestoreFailureThawsParentsForCleanup(t *testin
 
 	snapshotRoot := t.TempDir()
 	restoreCount := 0
-	err := copyGitOverlaySnapshotWithHook(sourceRoot, snapshotRoot, []string{"locked/deep/payload.txt"}, 1, func(phase string, _ int, _ string) {
+	err := copySourceSnapshotWithHook(context.Background(), sourceRoot, snapshotRoot, []string{"locked/deep/payload.txt"}, 1, func(phase string, _ int, _ string) {
 		if phase != "before_parent_mode_restore" {
 			return
 		}
@@ -1172,7 +1370,7 @@ func TestGitOverlaySnapshotPartialRestoreFailureThawsParentsForCleanup(t *testin
 			}
 		}
 	})
-	if err == nil || !errors.Is(err, errGitOverlaySnapshotDrift) {
+	if err == nil || !errors.Is(err, errSourceSnapshotDrift) {
 		t.Fatalf("partial restore source drift was not rejected: %v", err)
 	}
 	if restoreCount != 2 {
@@ -1225,8 +1423,8 @@ func TestGitOverlaySnapshotCopyFailureRetainsOwnershipWhenThawFails(t *testing.T
 	readOnlyPath := filepath.Join(root, "locked", "deep")
 	thawFailure := errors.New("synthetic thaw failure")
 	thawCalls := 0
-	var transferred *gitOverlaySnapshotParents
-	err = copyGitOverlaySnapshotContentsWithThaw(
+	var transferred *sourceSnapshotParents
+	err = copySourceSnapshotContentsWithThaw(context.Background(),
 		sourceRoot,
 		root,
 		[]string{"locked/deep/first.txt", "second.txt"},
@@ -1244,7 +1442,7 @@ func TestGitOverlaySnapshotCopyFailureRetainsOwnershipWhenThawFails(t *testing.T
 			}
 		},
 		snapshot.cleanupRoot,
-		func(parents *gitOverlaySnapshotParents) error {
+		func(parents *sourceSnapshotParents) error {
 			thawCalls++
 			transferred = parents
 			return thawFailure
@@ -1263,7 +1461,7 @@ func TestGitOverlaySnapshotCopyFailureRetainsOwnershipWhenThawFails(t *testing.T
 		t.Fatalf("failed thaw retained duplicate ownership: %+v", transferred)
 	}
 	owner := snapshot.cleanupRoot
-	owned := append([]*gitOverlaySnapshotParent(nil), owner.directories...)
+	owned := append([]*sourceSnapshotParent(nil), owner.directories...)
 	if len(owned) != 2 {
 		t.Fatalf("owned snapshot parents=%d want 2", len(owned))
 	}
@@ -1310,7 +1508,7 @@ func TestGitOverlaySnapshotParentIdentityRejectsReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshotRoot := t.TempDir()
-	parents, err := newGitOverlaySnapshotParents(sourceRoot)
+	parents, err := newSourceSnapshotParents(sourceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1329,7 +1527,7 @@ func TestGitOverlaySnapshotParentIdentityRejectsReplacement(t *testing.T) {
 	if err := os.Mkdir(sourceParent, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyGitOverlaySnapshotParents(identities); err == nil || !errors.Is(err, errGitOverlaySnapshotDrift) || !strings.Contains(err.Error(), "changed during copy") {
+	if err := verifySourceSnapshotParents(identities); err == nil || !errors.Is(err, errSourceSnapshotDrift) || !strings.Contains(err.Error(), "changed during copy") {
 		t.Fatalf("parent replacement was not rejected: %v", err)
 	}
 }
@@ -1339,7 +1537,7 @@ func TestGitOverlaySnapshotDriftLimitCleansEveryAttempt(t *testing.T) {
 	mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "initial\n")
 	_, excludes := fixture.manifest(t)
 	var snapshotRoots []string
-	_, err := prepareGitOverlaySnapshotWithHook(fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, snapshotRoot string) {
+	_, err := prepareGitOverlaySnapshotWithHook(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan, func(phase string, attempt int, snapshotRoot string) {
 		switch phase {
 		case "snapshot_created":
 			snapshotRoots = append(snapshotRoots, snapshotRoot)
@@ -1347,7 +1545,7 @@ func TestGitOverlaySnapshotDriftLimitCleansEveryAttempt(t *testing.T) {
 			mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), fmt.Sprintf("changed-%d\n", attempt))
 		}
 	})
-	if err == nil || !errors.Is(err, errGitOverlaySnapshotDrift) || !strings.Contains(err.Error(), "changed during snapshot creation") {
+	if err == nil || !errors.Is(err, errSourceSnapshotDrift) || !strings.Contains(err.Error(), "changed during snapshot creation") {
 		t.Fatalf("snapshot drift error=%v", err)
 	}
 	if len(snapshotRoots) != gitOverlaySnapshotMaxAttempts {
@@ -1361,7 +1559,7 @@ func TestGitOverlaySnapshotDriftLimitCleansEveryAttempt(t *testing.T) {
 }
 
 func TestGitOverlaySnapshotCleanupRetriesThenClearsRoot(t *testing.T) {
-	snapshot := gitOverlaySnapshot{Root: "/tmp/overlay-snapshot"}
+	snapshot := gitOverlaySnapshot{sourceSnapshot: sourceSnapshot{Root: "/tmp/overlay-snapshot"}}
 	var (
 		attempts int
 		sleeps   []time.Duration
@@ -1371,7 +1569,7 @@ func TestGitOverlaySnapshotCleanupRetriesThenClearsRoot(t *testing.T) {
 		if root != "/tmp/overlay-snapshot" {
 			t.Fatalf("cleanup root=%q", root)
 		}
-		if attempts < gitOverlayCleanupMaxAttempts {
+		if attempts < sourceSnapshotCleanupMaxAttempts {
 			return fmt.Errorf("transient cleanup failure %d", attempts)
 		}
 		return nil
@@ -1381,10 +1579,10 @@ func TestGitOverlaySnapshotCleanupRetriesThenClearsRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if attempts != gitOverlayCleanupMaxAttempts {
-		t.Fatalf("cleanup attempts=%d want %d", attempts, gitOverlayCleanupMaxAttempts)
+	if attempts != sourceSnapshotCleanupMaxAttempts {
+		t.Fatalf("cleanup attempts=%d want %d", attempts, sourceSnapshotCleanupMaxAttempts)
 	}
-	if !slices.Equal(sleeps, []time.Duration{gitOverlayCleanupRetryDelay, gitOverlayCleanupRetryDelay}) {
+	if !slices.Equal(sleeps, []time.Duration{sourceSnapshotCleanupRetryDelay, sourceSnapshotCleanupRetryDelay}) {
 		t.Fatalf("cleanup sleeps=%v", sleeps)
 	}
 	if snapshot.Root != "" {
@@ -1393,7 +1591,7 @@ func TestGitOverlaySnapshotCleanupRetriesThenClearsRoot(t *testing.T) {
 }
 
 func TestGitOverlaySnapshotCleanupExhaustionRetainsRootForRetry(t *testing.T) {
-	snapshot := gitOverlaySnapshot{Root: "/tmp/overlay-snapshot"}
+	snapshot := gitOverlaySnapshot{sourceSnapshot: sourceSnapshot{Root: "/tmp/overlay-snapshot"}}
 	attempts := 0
 	err := snapshot.cleanupWith(func(string) error {
 		attempts++
@@ -1402,8 +1600,8 @@ func TestGitOverlaySnapshotCleanupExhaustionRetainsRootForRetry(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "after 3 attempts") {
 		t.Fatalf("cleanup error=%v", err)
 	}
-	if attempts != gitOverlayCleanupMaxAttempts {
-		t.Fatalf("cleanup attempts=%d want %d", attempts, gitOverlayCleanupMaxAttempts)
+	if attempts != sourceSnapshotCleanupMaxAttempts {
+		t.Fatalf("cleanup attempts=%d want %d", attempts, sourceSnapshotCleanupMaxAttempts)
 	}
 	if snapshot.Root != "/tmp/overlay-snapshot" {
 		t.Fatalf("failed cleanup root=%q", snapshot.Root)
@@ -1414,7 +1612,7 @@ func TestGitOverlaySnapshotCleanupExhaustionRetainsRootForRetry(t *testing.T) {
 	}, func(time.Duration) {}); err != nil {
 		t.Fatal(err)
 	}
-	if attempts != gitOverlayCleanupMaxAttempts+1 {
+	if attempts != sourceSnapshotCleanupMaxAttempts+1 {
 		t.Fatalf("cleanup attempts after retry=%d", attempts)
 	}
 	if snapshot.Root != "" {
@@ -1443,7 +1641,7 @@ func TestGitOverlaySnapshotCleanupIsConfinedAndThawsReadOnlyParents(t *testing.T
 		t.Fatal(err)
 	}
 	_, excludes := fixture.manifest(t)
-	snapshot, err := prepareGitOverlaySnapshot(fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
+	snapshot, err := prepareGitOverlaySnapshot(context.Background(), fixture.repo, fixture.cfg, excludes, nil, fixture.plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1510,7 +1708,7 @@ func TestGitOverlaySnapshotConstructionErrorPrecedesCleanupExhaustion(t *testing
 	_, excludes := fixture.manifest(t)
 	cleanupFailure := errors.New("cleanup exhausted")
 	var snapshotRoot string
-	snapshot, err := prepareGitOverlaySnapshotWithCleanup(
+	snapshot, err := prepareGitOverlaySnapshotWithCleanup(context.Background(),
 		fixture.repo,
 		fixture.cfg,
 		excludes,
@@ -1566,7 +1764,7 @@ func TestGitOverlaySnapshotDriftJoinsCleanupExhaustion(t *testing.T) {
 	_, excludes := fixture.manifest(t)
 	cleanupFailure := errors.New("cleanup exhausted")
 	var snapshotRoot string
-	snapshot, err := prepareGitOverlaySnapshotWithCleanup(
+	snapshot, err := prepareGitOverlaySnapshotWithCleanup(context.Background(),
 		fixture.repo,
 		fixture.cfg,
 		excludes,
@@ -1589,7 +1787,7 @@ func TestGitOverlaySnapshotDriftJoinsCleanupExhaustion(t *testing.T) {
 	if snapshotRoot != "" {
 		t.Cleanup(func() { _ = os.RemoveAll(snapshotRoot) })
 	}
-	if err == nil || !strings.Contains(err.Error(), "local Git overlay changed during snapshot creation") {
+	if !errors.Is(err, errSourceSnapshotDrift) {
 		t.Fatalf("snapshot drift error=%v", err)
 	}
 	if snapshot.Root == "" || snapshot.cleanupRoot == nil {
@@ -1600,7 +1798,7 @@ func TestGitOverlaySnapshotDriftJoinsCleanupExhaustion(t *testing.T) {
 	if !errors.Is(err, cleanupFailure) || !strings.Contains(err.Error(), "after 3 attempts") {
 		t.Fatalf("snapshot drift omitted exhausted cleanup failure: %v", err)
 	}
-	if driftAt, cleanupAt := strings.Index(err.Error(), "local Git overlay changed"), strings.Index(err.Error(), cleanupFailure.Error()); driftAt < 0 || cleanupAt < 0 || driftAt >= cleanupAt {
+	if driftAt, cleanupAt := strings.Index(err.Error(), errSourceSnapshotDrift.Error()), strings.Index(err.Error(), cleanupFailure.Error()); driftAt < 0 || cleanupAt < 0 || driftAt >= cleanupAt {
 		t.Fatalf("snapshot drift error order=%q", err)
 	}
 	if err := snapshot.cleanup(); err != nil {
@@ -1615,7 +1813,7 @@ func assertGitOverlaySnapshotFingerprint(t *testing.T, repo Repo, cfg Config, ex
 	t.Helper()
 	snapshotRepo := repo
 	snapshotRepo.Root = snapshot.Root
-	fingerprint, err := syncFingerprintForManifest(snapshotRepo, cfg, snapshot.Manifest, excludes, plan)
+	fingerprint, err := syncFingerprintForManifest(context.Background(), snapshotRepo, cfg, snapshot.Manifest, excludes, plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2147,6 +2345,17 @@ func TestRemotePrepareGitOverlayUsesTrustedTemporaryPaths(t *testing.T) {
 		Tree:      strings.Repeat("b", 40),
 		Branch:    "main",
 	})
+	transport, err := prepareSSHTransport(t.Context(), SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeWSL2}, command, nil, 0, sshCommandLimit{control: true, execution: sshControlExecutionLimit})
+	if err != nil {
+		t.Fatalf("expanded overlay control exceeds transport admission: %v", err)
+	}
+	if transport.stage == nil {
+		t.Fatal("WSL control was not staged")
+	}
+	t.Logf("overlay command=%d bytes, staged envelope=%d bytes", len(command), transport.stage.size)
+	if err := transport.close(); err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{
 		`baseline_tmp="$(/usr/bin/mktemp "$checkout_root/.git/crabbox/sync-manifest.overlay.XXXXXX")"`,
 		`cache_lookup_path="$cache_path"`,
@@ -2174,6 +2383,42 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 	for _, reuse := range []bool{false, true} {
 		t.Run(fmt.Sprintf("reuse=%t", reuse), func(t *testing.T) {
 			fixture := newGitOverlayFixture(t)
+			ignore := "/node_modules/\n/nested/node_modules/\n/packages/pnpm/.pnpm-store/\n/.yarn/cache/\n/.yarn/unplugged/\n" +
+				"/packages/app\\[1\\]/node_modules/\n/packages/app\\*/node_modules/\n/packages/app\\?/node_modules/\n" +
+				"/packages/back\\\\slash/node_modules/\n/\\!project/node_modules/\n/\\#project/node_modules/\n"
+			mustWriteTestFile(t, filepath.Join(fixture.root, ".gitignore"), ignore)
+			runGit(t, fixture.root, "add", ".gitignore")
+			runGit(t, fixture.root, "commit", "-qm", "cache selection fixture")
+			runGit(t, fixture.root, "push", "-q", "origin", "main")
+			runGit(t, fixture.root, "fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*")
+			fixture.repo.Head = gitOutput(fixture.root, "rev-parse", "HEAD")
+			var blocked bool
+			fixture.plan, blocked = syncGitCoherencePlan(fixture.cfg, fixture.repo)
+			if blocked || !fixture.plan.enabled() {
+				t.Fatal("updated fixture has no coherence plan")
+			}
+			caches := []string{
+				"node_modules/cached.txt", "nested/node_modules/cached.txt", "packages/pnpm/.pnpm-store/cached.txt",
+				".yarn/cache/cached.txt", ".yarn/unplugged/cached.txt", "packages/app[1]/node_modules/cached.txt",
+				"packages/app*/node_modules/cached.txt", "packages/app?/node_modules/cached.txt", "packages/back\\slash/node_modules/cached.txt",
+				"!project/node_modules/cached.txt", "#project/node_modules/cached.txt",
+			}
+			assertCaches := func(workdir string) {
+				t.Helper()
+				if !reuse {
+					return
+				}
+				for _, name := range caches {
+					if content, err := os.ReadFile(filepath.Join(workdir, name)); err != nil || string(content) != "cache:"+name+"\n" {
+						t.Fatalf("selected cache %q=%q err=%v", name, content, err)
+					}
+				}
+				for _, name := range []string{"packages/app1/node_modules/cached.txt", "packages/backslash/node_modules/cached.txt"} {
+					if _, err := os.Stat(filepath.Join(workdir, name)); !os.IsNotExist(err) {
+						t.Fatalf("unselected lookalike cache %q survived: %v", name, err)
+					}
+				}
+			}
 			mustWriteTestFile(t, filepath.Join(fixture.root, "staged.txt"), "staged payload\n")
 			runGit(t, fixture.root, "add", "staged.txt")
 			mustWriteTestFile(t, filepath.Join(fixture.root, "unstaged.txt"), "unstaged payload\n")
@@ -2192,7 +2437,7 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 				t.Fatal(err)
 			}
 			manifest, excludes := fixture.manifest(t)
-			fingerprint, err := syncFingerprintForManifest(fixture.repo, fixture.cfg, manifest, excludes, fixture.plan)
+			fingerprint, err := syncFingerprintForManifest(context.Background(), fixture.repo, fixture.cfg, manifest, excludes, fixture.plan)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2201,16 +2446,22 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 				if out, err := exec.Command("git", "clone", "--quiet", fixture.origin, workdir).CombinedOutput(); err != nil {
 					t.Fatalf("clone existing workspace: %v\n%s", err, out)
 				}
-				mustWriteTestFile(t, filepath.Join(workdir, "node_modules", "cached.txt"), "trusted cache\n")
+				for _, name := range caches {
+					mustWriteTestFile(t, filepath.Join(workdir, name), "cache:"+name+"\n")
+				}
+				for _, name := range []string{"packages/app1/node_modules/cached.txt", "packages/backslash/node_modules/cached.txt"} {
+					mustWriteTestFile(t, filepath.Join(workdir, name), "unselected cache\n")
+				}
 				mustWriteTestFile(t, filepath.Join(workdir, ".pnpm-store", "stale.txt"), "untrusted cache\n")
 				mustWriteTestFile(t, filepath.Join(workdir, ".git", "info", "exclude"), ".pnpm-store/\n")
 				mustWriteTestFile(t, filepath.Join(workdir, "previous.txt"), "previous managed file\n")
 				mustWriteTestFile(t, filepath.Join(workdir, ".git", "crabbox", "sync-manifest"), "previous.txt\x00")
 			}
-			if out, err := runOverlayCommand(t, remotePrepareGitOverlay(workdir, fixture.plan), nil); err != nil {
+			if out, err := runPortableGitControlCommand(t, remotePrepareGitOverlay(workdir, fixture.plan), nil); err != nil {
 				t.Fatalf("prepare failed: %v\n%s", err, out)
 			}
 			assertNoGitOverlayResidue(t, workdir)
+			assertCaches(workdir)
 			if got := gitOutput(workdir, "rev-parse", "HEAD"); got != fixture.repo.Head {
 				t.Fatalf("remote HEAD=%q want=%q", got, fixture.repo.Head)
 			}
@@ -2225,9 +2476,6 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 					t.Fatal("fresh overlay materialized an unrelated historical blob")
 				}
 			} else {
-				if content, err := os.ReadFile(filepath.Join(workdir, "node_modules", "cached.txt")); err != nil || string(content) != "trusted cache\n" {
-					t.Fatalf("trusted dependency cache=%q err=%v", content, err)
-				}
 				if _, err := os.Stat(filepath.Join(workdir, ".pnpm-store")); !os.IsNotExist(err) {
 					t.Fatalf("mutable .git/info/exclude authorized a stale cache: %v", err)
 				}
@@ -2238,10 +2486,10 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 			}
 			const token = "0123456789abcdef0123456789abcdef"
 			frame := []byte(syncManifestInputForTarget(SSHTarget{TargetOS: targetLinux}, manifest.NUL(), manifest.DeletedNUL()))
-			if out, err := runOverlayCommand(t, remoteWriteSyncManifestsNew(workdir, token), frame); err != nil {
+			if out, err := runPortableGitControlCommand(t, remoteWriteSyncManifestsNewWithMetadata(workdir, token, remotePlainSyncMetaDirScript()), frame); err != nil {
 				t.Fatalf("write complete authoritative manifests: %v\n%s", err, out)
 			}
-			if out, err := runOverlayCommand(t, remotePruneGitOverlaySyncManifest(workdir, token), nil); err != nil {
+			if out, err := runPortableGitControlCommand(t, remotePruneGitOverlaySyncManifest(workdir, token), nil); err != nil {
 				t.Fatalf("prune reset paths: %v\n%s", err, out)
 			}
 			for _, removed := range []string{"excluded.txt", "deleted.txt", "renamed.txt", "previous.txt"} {
@@ -2255,9 +2503,11 @@ func TestRemoteGitOverlayPreparePruneTransferAndFinalize(t *testing.T) {
 				t.Fatalf("transfer overlay: %v\n%s", err, out)
 			}
 			finalize := remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Coherence: fixture.plan, Fingerprint: fingerprint, GitOverlay: true})
-			if out, err := runOverlayCommand(t, finalize, nil); err != nil {
+			if out, err := runPortableGitControlCommand(t, finalize, nil); err != nil {
 				t.Fatalf("finalize overlay: %v\n%s", err, out)
 			}
+			assertCaches(workdir)
+			assertNoGitOverlayResidue(t, workdir)
 			for _, name := range []string{"staged.txt", "unstaged.txt", "untracked.txt", "renamed-new.txt"} {
 				local, _ := os.ReadFile(filepath.Join(fixture.root, name))
 				remote, err := os.ReadFile(filepath.Join(workdir, name))
@@ -2521,6 +2771,30 @@ func TestRemoteGitOverlayPruneRejectsProtectedAndMalformedManifestPaths(t *testi
 	}
 }
 
+func TestGitOverlayHermeticFunctionsRunWithDash(t *testing.T) {
+	dash, err := exec.LookPath("dash")
+	if err != nil {
+		t.Skip("Dash is required for this POSIX grammar check")
+	}
+	workdir := t.TempDir()
+	index := filepath.Join(workdir, "alternate index")
+	mustWriteTestFile(t, filepath.Join(workdir, "payload.txt"), "fixture\n")
+	script := "set -e\ncd " + shellQuote(workdir) + "\n" + gitOverlayHermeticFunctions() +
+		"\ngit init -q\nGIT_INDEX_FILE=" + shellQuote(index) + "\noverlay_no_lazy_fetch=1\ngit update-index --add -- payload.txt\ngit ls-files\n"
+	cmd := exec.Command(dash, "-c", script)
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + t.TempDir()}
+	out, err := cmd.CombinedOutput()
+	if err != nil || string(out) != "payload.txt\n" {
+		t.Fatalf("portable Git helper: output=%q err=%v", out, err)
+	}
+	if _, err := os.Stat(index); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, ".git", "index")); !os.IsNotExist(err) {
+		t.Fatalf("optional index was not retained: %v", err)
+	}
+}
+
 func TestRemoteGitOverlayPruneHandlesSafeShapeTransitions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX symlink integration")
@@ -2692,7 +2966,7 @@ func TestRemoteGitOverlayRetainsFilteredFeatureAndBaseHistory(t *testing.T) {
 		t.Fatalf("feature coherence plan=%#v blocked=%t", plan, blocked)
 	}
 	workdir := filepath.Join(t.TempDir(), "workspace")
-	if output, err := runOverlayCommand(t, remotePrepareGitOverlayWithBase(workdir, plan, "main", baseSHA), nil); err != nil {
+	if output, err := runPortableGitControlCommand(t, remotePrepareGitOverlayWithBase(workdir, plan, "main", baseSHA), nil); err != nil {
 		t.Fatalf("prepare filtered feature history: %v\n%s", err, output)
 	}
 	for ref, want := range map[string]string{"HEAD": targetSHA, "refs/remotes/origin/feature": tipSHA, "refs/remotes/origin/main": baseSHA} {
@@ -2708,16 +2982,39 @@ func TestRemoteGitOverlayRetainsFilteredFeatureAndBaseHistory(t *testing.T) {
 			t.Fatalf("history workload git %v: %v\n%s", args, err, output)
 		}
 	}
+	shallow := filepath.Join(t.TempDir(), "shallow-workspace")
+	if output, err := exec.Command("git", "clone", "--quiet", "--depth=1", "--branch", "feature", "--filter=blob:none", "file://"+fixture.origin, shallow).CombinedOutput(); err != nil {
+		t.Fatalf("create shallow workspace: %v\n%s", err, output)
+	}
+	runGit(t, shallow, "remote", "set-url", "origin", plan.RemoteURL)
+	if gitOutput(shallow, "rev-parse", "--is-shallow-repository") != "true" {
+		t.Fatal("fixture is not shallow")
+	}
+	if output, err := runPortableGitControlCommand(t, remotePrepareGitOverlayWithBase(shallow, plan, "main", baseSHA), nil); err != nil {
+		t.Fatalf("prepare shallow feature/base history: %v\n%s", err, output)
+	}
+	for ref, want := range map[string]string{"HEAD": targetSHA, "refs/remotes/origin/feature": tipSHA, "refs/remotes/origin/main": baseSHA} {
+		if got := gitOutput(shallow, "rev-parse", ref); got != want {
+			t.Fatalf("shallow remote %s=%q want=%q", ref, got, want)
+		}
+	}
+	if gitOutput(shallow, "rev-parse", "--is-shallow-repository") != "false" {
+		t.Fatal("overlay did not unshallow required history")
+	}
+	if err := exec.Command("git", "-C", shallow, "--no-lazy-fetch", "cat-file", "-e", largeBlob).Run(); err == nil {
+		t.Fatal("shallow recovery materialized deleted history blob")
+	}
+	assertNoGitOverlayResidue(t, shallow)
 	manifest, _ := fixture.manifest(t)
 	const token = "13579bdf2468ace013579bdf2468ace0"
 	frame := []byte(syncManifestInputForTarget(SSHTarget{TargetOS: targetLinux}, manifest.NUL(), manifest.DeletedNUL()))
-	if output, err := runOverlayCommand(t, remoteWriteSyncManifestsNewWithMetadata(workdir, token, remotePlainSyncMetaDirScript()), frame); err != nil {
+	if output, err := runPortableGitControlCommand(t, remoteWriteSyncManifestsNewWithMetadata(workdir, token, remotePlainSyncMetaDirScript()), frame); err != nil {
 		t.Fatalf("write feature manifest: %v\n%s", err, output)
 	}
-	if output, err := runOverlayCommand(t, remotePruneGitOverlaySyncManifest(workdir, token), nil); err != nil {
+	if output, err := runPortableGitControlCommand(t, remotePruneGitOverlaySyncManifest(workdir, token), nil); err != nil {
 		t.Fatalf("prune feature manifest: %v\n%s", err, output)
 	}
-	if output, err := runOverlayCommand(t, remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Coherence: plan, GitOverlay: true, BaseRef: "main", BaseSHA: baseSHA}), nil); err != nil {
+	if output, err := runPortableGitControlCommand(t, remoteFinalizeSync(workdir, remoteSyncFinalizeOptions{Token: token, Coherence: plan, GitOverlay: true, BaseRef: "main", BaseSHA: baseSHA}), nil); err != nil {
 		t.Fatalf("finalize feature manifest: %v\n%s", err, output)
 	}
 	if marker, err := os.ReadFile(filepath.Join(workdir, ".git", "crabbox", "git-hydrate-base")); err != nil || string(marker) != "main "+baseSHA+"\n" {
@@ -3116,7 +3413,7 @@ func TestGitOverlayFingerprintPreservesLegacySchemaAndHashesLinkIdentity(t *test
 	manifest, excludes := fixture.manifest(t)
 	legacy := fixture.cfg
 	legacy.Sync.GitOverlay = false
-	got, err := syncFingerprintForManifest(fixture.repo, legacy, manifest, excludes, fixture.plan)
+	got, err := syncFingerprintForManifest(context.Background(), fixture.repo, legacy, manifest, excludes, fixture.plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3140,12 +3437,12 @@ func TestGitOverlayFingerprintPreservesLegacySchemaAndHashesLinkIdentity(t *test
 		t.Fatal(err)
 	}
 	manifest, excludes = fixture.manifest(t)
-	first, err := syncFingerprintForManifest(fixture.repo, fixture.cfg, manifest, excludes, fixture.plan)
+	first, err := syncFingerprintForManifest(context.Background(), fixture.repo, fixture.cfg, manifest, excludes, fixture.plan)
 	if err != nil {
 		t.Fatal(err)
 	}
 	mustWriteTestFile(t, outside, "second external content\n")
-	second, err := syncFingerprintForManifest(fixture.repo, fixture.cfg, manifest, excludes, fixture.plan)
+	second, err := syncFingerprintForManifest(context.Background(), fixture.repo, fixture.cfg, manifest, excludes, fixture.plan)
 	if err != nil || first != second {
 		t.Fatalf("overlay fingerprint followed symlink: first=%q second=%q err=%v", first, second, err)
 	}
@@ -3398,7 +3695,7 @@ func TestRunGitOverlaySuccessFallbackAndLateLocalEdit(t *testing.T) {
 						t.Fatal(err)
 					}
 					coherence, _ := syncGitCoherencePlan(fingerprintConfig, repo)
-					fingerprint, err := syncFingerprintForManifest(repo, fingerprintConfig, manifest, excludes, coherence)
+					fingerprint, err := syncFingerprintForManifest(context.Background(), repo, fingerprintConfig, manifest, excludes, coherence)
 					if err != nil {
 						t.Fatal(err)
 					}

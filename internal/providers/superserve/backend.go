@@ -138,12 +138,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			api, err = b.client()
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-superserve-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-			})
-		},
+		Workspace: func() shared.SandboxWorkspace { return b.workspace(api, &access, req, workdir) },
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var unlock func()
 			var err error
@@ -186,12 +181,6 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			}
 			fmt.Fprintf(b.rt.Stderr, "provider=%s lease=%s sandbox=%s workdir=%s\n", providerName, leaseID, sandboxID, workdir)
 			return nil
-		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return b.syncWorkspace(ctx, api, &access, req, workdir, prepared)
-		},
-		NoSync: func(ctx context.Context) error {
-			return b.ensureWorkspace(ctx, api, &access, workdir)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
@@ -284,16 +273,16 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		return core.Exit(5, "timed out waiting for superserve sandbox %s to become ready", id)
 	})
 	defer wait.Close()
-	for {
-		sb, getErr := api.GetSandbox(wait.Context(), sandboxID)
+	return wait.Poll(sandboxID, 2*time.Second, func(ctx context.Context) (core.StatusView, bool, error) {
+		sb, getErr := api.GetSandbox(ctx, sandboxID)
 		if getErr != nil {
 			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
-				return core.StatusView{}, ctxErr
+				return core.StatusView{}, false, ctxErr
 			}
-			return core.StatusView{}, getErr
+			return core.StatusView{}, false, getErr
 		}
 		if err := validateSuperserveSandboxOwnership(claim, sb); err != nil {
-			return core.StatusView{}, err
+			return core.StatusView{}, false, err
 		}
 		state := normalizedSandboxState(sb)
 		view := core.StatusView{
@@ -314,16 +303,11 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 				"state":    state,
 			},
 		}
-		if !req.Wait || view.Ready {
-			return view, nil
+		if req.Wait && !view.Ready && isTerminalState(state) {
+			return core.StatusView{}, false, core.Exit(5, "superserve sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if isTerminalState(state) {
-			return core.StatusView{}, core.Exit(5, "superserve sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
-		}
-		if err := wait.Next(sandboxID, 2*time.Second); err != nil {
-			return core.StatusView{}, err
-		}
-	}
+		return view, false, nil
+	})
 }
 
 func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
@@ -498,20 +482,7 @@ func (b *backend) baseMetadataFilter(baseURL string) map[string]string {
 
 func (b *backend) serverFromSandbox(claim core.LeaseClaim, sb superserveSandbox) core.Server {
 	state := normalizedSandboxState(sb)
-	return core.Server{
-		Provider: providerName,
-		CloudID:  sb.ID,
-		Name:     sb.ID,
-		Status:   state,
-		Labels: map[string]string{
-			"provider": providerName,
-			"lease":    claim.LeaseID,
-			"slug":     claim.Slug,
-			"pond":     claim.Pond,
-			"target":   targetLinux,
-			"state":    state,
-		},
-	}
+	return shared.SandboxLeaseView(providerName, targetLinux, claim, sb.ID, sb.ID, state)
 }
 
 func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL string) (string, string, string, error) {

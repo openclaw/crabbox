@@ -4,32 +4,22 @@ import (
 	"context"
 	"io"
 	"strings"
-	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func (b *openComputerBackend) syncWorkspace(ctx context.Context, api *ocAPIClient, sandboxID string, req core.RunRequest, workdir string, prepared ...*core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-	return core.RunDelegatedArchiveSync(ctx, core.DelegatedArchiveSyncRequest{
-		Config:              b.cfg,
-		Repo:                req.Repo,
-		ForceSyncLarge:      req.ForceSyncLarge,
-		Workdir:             workdir,
-		TempPattern:         "crabbox-opencomputer-sync-*.tgz",
-		RemoteArchiveDir:    "/tmp",
-		RemoteArchivePrefix: "crabbox-sync-",
-		PhaseName:           "opencomputer_sync",
-		Provider:            providerName,
-		Stderr:              b.rt.Stderr,
-		Now:                 func() time.Time { return core.ClockNow(b.rt.Clock) },
-		CleanupContext:      b.cleanupContext,
-		Upload: func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
-			return api.uploadFile(uploadCtx, sandboxID, remoteArchive, body)
-		},
-		Exec: func(execCtx context.Context, command string) error {
-			return b.execShell(execCtx, api, sandboxID, command)
-		},
-	}, prepared...)
+func (b *openComputerBackend) workspace(api *ocAPIClient, sandboxID string, req core.RunRequest, workdir string) core.ArchiveWorkspace {
+	workspace := core.NewArchiveWorkspace(b.cfg, b.rt, req, providerName, workdir)
+	workspace.RemoteArchiveDir = "/tmp"
+	workspace.RemoteArchivePrefix = "crabbox-sync-"
+	workspace.CleanupContext = b.cleanupContext
+	workspace.Upload = func(uploadCtx context.Context, remoteArchive string, body io.Reader) error {
+		return api.uploadFile(uploadCtx, sandboxID, remoteArchive, body)
+	}
+	workspace.Exec = func(execCtx context.Context, command string) error {
+		return b.execShell(execCtx, api, sandboxID, command)
+	}
+	return workspace
 }
 
 func (b *openComputerBackend) execShell(ctx context.Context, api *ocAPIClient, sandboxID, command string) error {
@@ -45,8 +35,4 @@ func (b *openComputerBackend) execShell(ctx context.Context, api *ocAPIClient, s
 		return core.Exit(res.ExitCode, "opencomputer exec %q exited %d: %s", command, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	return nil
-}
-
-func (b *openComputerBackend) ensureWorkspace(ctx context.Context, api *ocAPIClient, sandboxID, workdir string) error {
-	return b.execShell(ctx, api, sandboxID, "mkdir -p "+core.ShellQuote(workdir))
 }

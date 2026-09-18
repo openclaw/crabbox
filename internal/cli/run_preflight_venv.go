@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/openclaw/crabbox/internal/remoteruntime"
 )
 
 //go:embed scripts/functional-preflight-completion.sh
@@ -100,90 +102,170 @@ func functionalPreflightCleanupBudget(ctx context.Context) (context.Context, con
 }
 
 func functionalWSLPreflightHelper(budget time.Duration) string {
-	workload := strings.NewReplacer(
-		"@WORKLOAD_INIT@", fmt.Sprintf("deadline=$((SECONDS + %d))\n", max(1, int64((budget+time.Second-1)/time.Second))),
-		"@WORKLOAD_TICK@", "    if [ \"$SECONDS\" -ge \"$deadline\" ]; then : >\"$directory/.timed-out\"; break; fi\n",
-	).Replace(strings.TrimSuffix(guardedWorkload, "\n"))
+	workload := guardedWorkloadScript(
+		fmt.Sprintf("deadline=$((SECONDS + %d))\n", max(1, int64((budget+time.Second-1)/time.Second))),
+		"    if [ \"$SECONDS\" -ge \"$deadline\" ]; then : >\"$directory/.timed-out\"; break; fi\n", ".1")
 	completed := "    [ -f \"$directory/.completion\" ] && [ ! -e \"$directory/scratch\" ] && [ ! -L \"$directory/scratch\" ] && exit 0\n"
-	return strings.NewReplacer(
-		"@GUARDED_GROUP_FUNCTIONS@", strings.TrimSuffix(guardedGroupFunctions, "\n"),
-		"@GUARDED_MEMBERS@", strings.TrimSuffix(guardedMembers, "\n"),
-		"@GUARDED_WORKLOAD@", workload,
+	return composeGuardedControl(strings.NewReplacer(
 		"@FUNCTIONAL_PRELUDE@", functionalPreflightCompletionScript+"\n",
 		"@FUNCTIONAL_CLEANUP@", completed,
 		"@FUNCTIONAL_CLEANUP_POLL@", completed,
 		"@FUNCTIONAL_SCRATCH@", "mkdir -m 700 -- \"$directory/scratch\" || exit 74\n",
-	).Replace(wslLinuxTemplate)
+	).Replace(wslLinuxTemplate), workload, "bash")
 }
 
-func functionalPOSIXPreflightHelper(budget time.Duration) string {
-	workload := strings.NewReplacer(
-		"@WORKLOAD_INIT@", fmt.Sprintf("deadline=$((SECONDS + %d))\n", max(1, int64((budget+time.Second-1)/time.Second))),
-		"@WORKLOAD_TICK@", "    if [ \"$interrupted\" = 1 ]; then : >\"$directory/.cancel\"; break; fi\n"+
-			"    if [ \"$SECONDS\" -ge \"$deadline\" ]; then : >\"$directory/.timed-out\"; break; fi\n",
-	).Replace(strings.TrimSuffix(guardedWorkload, "\n"))
-	return strings.NewReplacer(
-		"@GUARDED_GROUP_FUNCTIONS@", strings.TrimSuffix(guardedGroupFunctions, "\n"),
-		"@GUARDED_MEMBERS@", strings.TrimSuffix(guardedMembers, "\n"),
-		"@GUARDED_WORKLOAD@", workload,
+func functionalPOSIXPreflightHelper(budget time.Duration, interpreter string) posixPreflightProgram {
+	workload := guardedWorkloadScript(
+		fmt.Sprintf("deadline=$((SECONDS + %d))\n", max(1, int64((budget+time.Second-1)/time.Second))),
+		"    if [ \"$interrupted\" = 1 ]; then : >\"$directory/.cancel\"; break; fi\n"+
+			"    if [ \"$SECONDS\" -ge \"$deadline\" ]; then : >\"$directory/.timed-out\"; break; fi\n", ".1")
+	program := posixPreflightHelper(workload, "    while :; do IFS= read -r -t 1 -u 8 ignored || :; done\n", interpreter)
+	program.nativeBudget = time.Duration(max(1, int64((budget+time.Second-1)/time.Second))) * time.Second
+	return program
+}
+
+type posixPreflightProgram struct {
+	interpreter  string
+	source       string
+	nativeBudget time.Duration
+}
+
+func preflightControlInterpreter(target SSHTarget) string {
+	if target.TargetOS == targetMacOS {
+		// Apple's native sh supports these supervisor primitives; generic sh may not.
+		return "/bin/sh"
+	}
+	return "bash"
+}
+
+func posixPreflightHelper(workload, watch, interpreter string) posixPreflightProgram {
+	source := strings.NewReplacer(
 		"@FUNCTIONAL_PRELUDE@", strings.TrimSuffix(functionalPreflightCompletionScript, "\n"),
+		"@FUNCTIONAL_WATCH@", watch,
 	).Replace(functionalPreflightPOSIXTemplate)
+	return posixPreflightProgram{interpreter: interpreter, source: composeGuardedControl(source, workload, interpreter)}
 }
 
-func runPOSIXFunctionalPreflight(ctx context.Context, target SSHTarget, workdir string, env map[string]string, envFiles []string) (completion functionalPreflightCompletion, err error) {
+type posixPreflightResult struct {
+	completion functionalPreflightCompletion
+	nonce      string
+}
+
+func runPOSIXFunctionalPreflight(ctx context.Context, target SSHTarget, workdir string, env map[string]string, envFiles []string) (functionalPreflightCompletion, error) {
+	result, err := runPOSIXPreflight(ctx, target, functionalPOSIXPreflightHelper(pythonVenvPreflightExecutionTime, preflightControlInterpreter(target)), func(nonce string) string {
+		return remotePortableWorkloadCommand(workdir, env, envFiles,
+			pythonVenvPreflightWorker("/tmp/crabbox-command-"+nonce+"/scratch"), nil)
+	}, io.Discard, io.Discard)
+	return result.completion, err
+}
+
+// The stage, not its worker output, establishes quiescence and retirement.
+// Execution uses the native owner's clock; transport and cleanup retain their
+// independent allowances even for short diagnostic workers.
+func runPOSIXPreflight(ctx context.Context, target SSHTarget, helper posixPreflightProgram, worker func(string) string, stdout, stderr io.Writer) (result posixPreflightResult, err error) {
+	ctx, native := newNativePreflightRuntime(ctx)
+	runtimeCleanupCtx := ctx
+	var cancelCleanup context.CancelFunc = func() {}
+	defer func() { cancelCleanup() }()
+	defer func() {
+		err = errors.Join(err, native.finish(runtimeCleanupCtx, result.nonce, result.completion.StageRetired))
+	}()
 	nonce, err := randomHex(16)
 	if err != nil {
-		return completion, err
+		return result, err
 	}
-	command := remoteShellCommandWithEnvFiles(workdir, env, envFiles,
-		pythonVenvPreflightWorker("/tmp/crabbox-command-"+nonce+"/scratch"))
+	result.nonce = nonce
+	command := worker(nonce)
 	if len(command) > wslStageMaxCommand {
-		return completion, errors.New("functional preflight command exceeds stage limit")
+		return result, errors.New("functional preflight command exceeds stage limit")
 	}
-	helper := functionalPOSIXPreflightHelper(pythonVenvPreflightExecutionTime)
-	remote := "export CBX_HELPER=" + shellQuote(helper) + "; exec bash -c \"$CBX_HELPER\" sh run " +
+	remote := "export CBX_HELPER=" + shellQuote(helper.source) + "; exec " + shellQuote(helper.interpreter) + " -c \"$CBX_HELPER\" sh run " +
 		shellQuote("/tmp/crabbox-command-"+nonce) + " " + shellQuote(nonce) +
 		fmt.Sprintf(" %d 0 %d %d", len(command), wslStageIdleTimeout.Milliseconds(), wsl2SignalGrace.Milliseconds())
+	useNative := target.TargetOS == targetLinux && helper.nativeBudget > 0 && native.scope.selected()
+	if useNative {
+		if err := native.scope.validateLocal(ctx, target); err != nil {
+			return result, err
+		}
+	}
 	// Resolve a usable endpoint before starting the native operation's clock.
 	// The nonce-bound operation itself is dispatched only once on that route.
 	target.NoControlMaster = true
 	prepareCtx, cancelPrepare := context.WithTimeout(ctx, sshTransportPreparationTimeout)
 	defer cancelPrepare()
 	if err := resolveSSHPortNoInput(prepareCtx, &target, "2", "1", io.Discard); err != nil {
-		return completion, err
+		return result, err
+	}
+	if !useNative && helper.interpreter == "bash" {
+		if err := requireLegacyBash(prepareCtx, target, ""); err != nil {
+			return result, err
+		}
+	}
+	if useNative {
+		ctx, err = native.prepare(ctx, target)
+		if err != nil {
+			return result, err
+		}
+		remote = native.installed.runCommand(nonce, len(command), helper.nativeBudget)
+		// Installation is a separate size-bounded setup phase; preserve the
+		// ordinary workspace-preparation allowance after it finishes.
+		var cancelNativePrepare context.CancelFunc
+		prepareCtx, cancelNativePrepare = context.WithTimeout(ctx, sshTransportPreparationTimeout)
+		defer cancelNativePrepare()
 	}
 	size := int64(len(command))
 	prepared, err := prepareWorkspaceOwnerRemote(prepareCtx, target, remote, &size)
 	if err != nil {
-		return completion, err
+		return result, err
 	}
 	defer func() {
 		if err != nil {
 			err = errors.Join(err, prepared.close(ctx, target))
 		}
 	}()
-	cleanupCtx, cancelCleanup := functionalPreflightCleanupBudget(ctx)
-	defer cancelCleanup()
-	// The helper owns the 90s worker deadline. Its transport wrapper must remain
+	var cleanupCtx context.Context
+	cleanupCtx, cancelCleanup = functionalPreflightCleanupBudget(ctx)
+	runtimeCleanupCtx = cleanupCtx
+	// The helper owns the worker deadline. Its transport wrapper must remain
 	// available for supervised cleanup; collection uses this same remaining clock.
 	deadline, _ := cleanupCtx.Deadline()
 	execCtx, cancelExec := context.WithDeadline(ctx, deadline)
 	defer cancelExec()
 	transport := sshTransportPreparation{command: prepared.command, direct: strings.NewReader(command), setupMarker: prepared.setupMarker}
-	_, runErr := transport.runOnce(execCtx, target, "2", "1", io.Discard, io.Discard, false)
+	native.dispatched = native.installed != nil
+	_, runErr := transport.runOnce(execCtx, target, "2", "1", stdout, stderr, false)
 	if runErr == nil {
 		runErr = context.Cause(execCtx)
 	}
-	return finishFunctionalPreflight(ctx, cleanupCtx, target, nonce, runErr)
+	result.completion, err = finishFunctionalPreflight(ctx, cleanupCtx, target, nonce, runErr)
+	return result, err
 }
 
 func runWSLFunctionalPreflight(ctx context.Context, target SSHTarget, workdir string, env map[string]string, envFiles []string) (completion functionalPreflightCompletion, err error) {
+	ctx, native := newNativePreflightRuntime(ctx)
 	nonce, err := randomHex(16)
 	if err != nil {
 		return completion, err
 	}
-	command := remoteShellCommandWithEnvFiles(workdir, env, envFiles,
-		pythonVenvPreflightWorker("/tmp/crabbox-command-"+nonce+"/scratch"))
+	defer func() { err = errors.Join(err, native.finish(ctx, nonce, completion.StageRetired)) }()
+	if native.scope.selected() {
+		if err := native.scope.validateLocal(ctx, target); err != nil {
+			return completion, err
+		}
+		target.NoControlMaster = true
+		prepareCtx, cancel := context.WithTimeout(ctx, sshTransportPreparationTimeout)
+		err = resolveSSHPortNoInput(prepareCtx, &target, "2", "1", io.Discard)
+		cancel()
+		if err != nil {
+			return completion, err
+		}
+		ctx, err = native.prepare(ctx, target)
+		if err != nil {
+			return completion, err
+		}
+	}
+	command := remotePortableWorkloadCommand(workdir, env, envFiles,
+		pythonVenvPreflightWorker("/tmp/crabbox-command-"+nonce+"/scratch"), nil)
 	prepared, err := prepareWorkspaceOwnerRemote(ctx, target, command, nil)
 	if err != nil {
 		return completion, err
@@ -194,8 +276,14 @@ func runWSLFunctionalPreflight(ctx context.Context, target SSHTarget, workdir st
 		}
 	}()
 	limit := sshCommandLimit{execution: functionalPreflightSupervisorAllowance}
-	spool, err := newWSLStageSpoolWithHelper(prepared.command, nil, nil, 0, limit,
-		functionalWSLPreflightHelper(pythonVenvPreflightExecutionTime))
+	program := wslStageProgram{source: functionalWSLPreflightHelper(pythonVenvPreflightExecutionTime), bootstrap: wslHelperBootstrap}
+	if native.installed != nil {
+		program, err = nativeWSLStageProgram(native.installed, "preflight", pythonVenvPreflightExecutionTime)
+		if err != nil {
+			return completion, err
+		}
+	}
+	spool, err := newWSLStageSpoolWithProgram(prepared.command, nil, nil, 0, limit, program)
 	if err != nil {
 		return completion, err
 	}
@@ -212,6 +300,7 @@ func runWSLFunctionalPreflight(ctx context.Context, target SSHTarget, workdir st
 		// acquire Linux stage cleanup authority from a staging failure.
 		return completion, runErr
 	}
+	native.dispatched = native.installed != nil
 	return finishFunctionalPreflight(ctx, spool.functionalCleanup, target, nonce, runErr)
 }
 
@@ -278,6 +367,18 @@ func functionalPreflightControl(ctx context.Context, target SSHTarget, nonce, ac
 	if err != nil {
 		return nil, err
 	}
+	if native, ok := ctx.Value(nativeRuntimeContextKey{}).(*remoteNativeRuntime); ok {
+		if nativeRuntimeRouteKey(target) != nativeRuntimeRouteKey(native.target) {
+			return nil, errors.New("native runtime control target changed")
+		}
+		controlCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		out := newSynchronizedBuffer(functionalPreflightCompletionLimit + 1)
+		if err := native.runMetadata(controlCtx, []string{"control", remoteruntime.Protocol, nonce, action}, &out); err != nil {
+			return nil, errors.Join(errors.New("functional preflight cleanup unconfirmed"), err)
+		}
+		return out.Bytes(), nil
+	}
 	out := newSynchronizedBuffer(functionalPreflightCompletionLimit + 1)
 	limit := sshCommandLimit{execution: 20 * time.Second}
 	if isWindowsWSL2Target(target) {
@@ -296,7 +397,7 @@ func functionalPreflightControl(ctx context.Context, target SSHTarget, nonce, ac
 			err = context.Cause(controlCtx)
 		}
 	} else {
-		err = executePreparedSSH(ctx, &target, "bash -c "+shellQuote(command), nil, 0,
+		err = executePreparedSSH(ctx, &target, shellQuote(preflightControlInterpreter(target))+" -c "+shellQuote(command), nil, 0,
 			limit, "2", "1", &out, io.Discard)
 	}
 	if err != nil {
@@ -372,35 +473,15 @@ const (
 	pythonVenvMissingInterpreter           = 20
 	pythonVenvUnavailable                  = 21
 	pythonVenvPipUnavailable               = 22
-	functionalPreflightCompletionLimit     = 256
+	functionalPreflightCompletionLimit     = remoteruntime.CompletionLimit
 )
 
-type functionalPreflightCompletion struct {
-	State          string
-	WorkerQuiesced bool
-	ScratchRemoved bool
-	StageRetired   bool
-}
+type functionalPreflightCompletion = remoteruntime.Completion
 
 // Only the stage owner may publish this record, after its children are reaped
 // and scratch is removed. Worker output is never accepted as an acknowledgement.
 func parseFunctionalPreflightCompletion(record []byte, nonce string) (functionalPreflightCompletion, error) {
-	var empty functionalPreflightCompletion
-	unconfirmed := errors.New("functional preflight cleanup unconfirmed")
-	if len(nonce) != 32 || strings.Trim(nonce, "0123456789abcdef") != "" || len(record) > functionalPreflightCompletionLimit {
-		return empty, unconfirmed
-	}
-	fields := strings.Split(string(record), "\n")
-	if len(fields) != 7 || fields[0] != "CBX-PREFLIGHT-1" || fields[1] != nonce ||
-		fields[3] != "worker-quiesced" || fields[4] != "scratch-removed" || fields[5] != "complete" || fields[6] != "" {
-		return empty, unconfirmed
-	}
-	switch fields[2] {
-	case "ready", "missing-python3", "venv-unavailable", "pip-unavailable", "worker-failed", "timed-out", "canceled":
-		return functionalPreflightCompletion{State: fields[2], WorkerQuiesced: true, ScratchRemoved: true}, nil
-	default:
-		return empty, unconfirmed
-	}
+	return remoteruntime.ParseCompletion(record, nonce)
 }
 
 // The stage owns scratch and cleanup. The worker reports capability only;

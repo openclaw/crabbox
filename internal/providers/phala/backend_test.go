@@ -784,6 +784,26 @@ func TestTouchPersistsUpdatedLabelsToClaim(t *testing.T) {
 		claims[0].Labels["gateway_host"] != gatewayHost {
 		t.Fatalf("claims=%#v touched=%#v", claims, touched.Labels)
 	}
+	override := 7 * time.Minute
+	for _, step := range []struct {
+		name     string
+		override *time.Duration
+	}{{"explicit", &override}, {"ordinary", nil}} {
+		t.Run(step.name, func(t *testing.T) {
+			var err error
+			touched, err = b.Touch(context.Background(), core.TouchRequest{
+				Lease: core.LeaseTarget{LeaseID: leaseID, Server: touched, SSH: target},
+				State: "ready", IdleTimeout: time.Hour, IdleTimeoutOverride: step.override,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, _, err := core.ReadLeaseClaimWithPresence(leaseID)
+			if err != nil || claim.IdleTimeoutSeconds != 420 || claim.Labels["idle_timeout"] != "420" || claim.Labels["idle_timeout_secs"] != "420" || touched.Labels["idle_timeout_secs"] != "420" || claim.Labels["gateway_host"] != gatewayHost {
+				t.Fatalf("claim=%#v touched=%#v err=%v", claim, touched, err)
+			}
+		})
+	}
 }
 
 func TestResolveRepairsTruncatedGatewayHostClaim(t *testing.T) {

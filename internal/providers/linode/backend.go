@@ -549,7 +549,7 @@ func (b *linodeLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (
 		}
 	}
 	result := core.InventoryDoctorResult(providerName, count)
-	result.Message += fmt.Sprintf(" default_type=%s region=%s image=%s", b.Cfg.ServerType, linodeRegionForConfig(b.Cfg), linodeImageForConfig(b.Cfg))
+	result.Message += fmt.Sprintf(" default_type=%s region=%s image=%s", linodeServerTypeForConfig(b.Cfg), linodeRegionForConfig(b.Cfg), linodeImageForConfig(b.Cfg))
 	return result, nil
 }
 
@@ -926,20 +926,10 @@ func appendLinodeIfMissing(linodes []linodeInstance, item linodeInstance) []lino
 }
 
 func (b *linodeLeaseBackend) waitForLinodeIP(ctx context.Context, client linodeAPI, id int64, timeout time.Duration) (linodeInstance, error) {
-	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	result, err := shared.Poll(waitCtx, 0, 3*time.Second, shared.SleepContext,
+	return shared.PollReady(ctx, timeout, 3*time.Second,
 		func(ctx context.Context) (linodeInstance, error) { return client.GetLinode(ctx, id) },
-		func(_ context.Context, item linodeInstance, fetchErr error) (bool, error) {
-			return publicIPv4(item) != "", fetchErr
-		}, nil)
-	if err != nil {
-		if context.Cause(ctx) == nil && errors.Is(context.Cause(waitCtx), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
-			return linodeInstance{}, core.Exit(5, "timed out waiting for Linode instance IP")
-		}
-		result.Value = linodeInstance{}
-	}
-	return result.Value, err
+		func(item linodeInstance) bool { return publicIPv4(item) != "" },
+		core.Exit(5, "timed out waiting for Linode instance IP"))
 }
 
 func rollbackLinodeAcquire(client linodeAPI, linodeID int64) error {
@@ -1068,12 +1058,7 @@ func applyLinodeDefaults(cfg *core.Config) {
 	if cfg.TargetOS == "" {
 		cfg.TargetOS = core.TargetLinux
 	}
-	if cfg.Linode.Region == "" {
-		cfg.Linode.Region = core.LinodeConfiguredRegionDefault
-	}
-	if cfg.Linode.Image == "" {
-		cfg.Linode.Image = core.LinodeImageFallback
-	}
+	applyNativeDefaults(&cfg.Linode)
 	if cfg.Linode.Type == "" {
 		cfg.Linode.Type = linodeServerTypeForClass(cfg.Class)
 	}

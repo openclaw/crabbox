@@ -723,9 +723,9 @@ func TestCubeSandboxSyncWorkspaceUploadsRepoArchive(t *testing.T) {
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
 	workspace := workspaceForConfig(backend.cfg, core.Runtime{}).Path()
-	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Sync(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Bind(client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 		Repo: core.Repo{Root: root, Name: "repo"},
-	}, workspace)
+	}, workspace).Sync(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -782,9 +782,9 @@ func TestCubeSandboxSyncWorkspaceCleansRemoteArchiveWhenExtractFails(t *testing.
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
 	workspace := workspaceForConfig(backend.cfg, core.Runtime{}).Path()
-	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Sync(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Bind(client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
 		Repo: core.Repo{Root: root, Name: "repo"},
-	}, workspace)
+	}, workspace).Sync(context.Background())
 	if err == nil {
 		t.Fatalf("expected extract failure")
 	}
@@ -810,7 +810,7 @@ func TestCubeSandboxPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 		cfg: cfg,
 		rt:  core.Runtime{Stderr: io.Discard},
 	}
-	err := workspaceForConfig(backend.cfg, backend.rt).Prepare(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/")
+	err := workspaceForConfig(backend.cfg, backend.rt).Bind(client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{}, "/").Ensure(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "too broad") {
 		t.Fatalf("err=%v, want unsafe workspace error", err)
 	}
@@ -822,7 +822,7 @@ func TestCubeSandboxPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
 func TestCubeSandboxPrepareWorkspacePreservesExistingWithoutSync(t *testing.T) {
 	client := &fakeCubeSandboxSyncClient{}
 	backend := &cubesandboxBackend{rt: core.Runtime{Stderr: io.Discard}}
-	if err := workspaceForConfig(backend.cfg, backend.rt).Prepare(context.Background(), client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/root/repo"); err != nil {
+	if err := workspaceForConfig(backend.cfg, backend.rt).Bind(client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{}, "/root/repo").Ensure(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.commands) != 1 || client.commands[0] != "mkdir -p '/root/repo'" {

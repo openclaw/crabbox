@@ -297,6 +297,15 @@ func applyLeaseCreateFlagsForTarget(cfg *Config, fs *flag.FlagSet, values leaseC
 		}
 		cfg.ExposedPorts = ports
 		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
+		if target.Reuse && target.ID != "" && providerSelectionIsActionable(*cfg) {
+			provider, err := ProviderFor(cfg.Provider)
+			if err != nil {
+				return err
+			}
+			if ShouldUseCoordinator(*cfg, provider.Spec()) {
+				fmt.Fprintf(fs.Output(), "warning: --expose does not update existing coordinator-managed lease %q; Pond port declarations are unchanged. Use crabbox tunnel --id <lease> <port> to forward an existing loopback service.\n", target.ID)
+			}
+		}
 	}
 	if err := validateLeaseDurations(*cfg); err != nil {
 		return err

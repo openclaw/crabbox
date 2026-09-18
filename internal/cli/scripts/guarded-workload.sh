@@ -1,8 +1,8 @@
 mkfifo -m 600 "$directory/guard-wait" || exit 74
 exec 6<>"$directory/guard-wait"
 set -m
-bash -c "$CBX_HELPER" sh guard "$directory" "$nonce" 0 0 0 0 "$caller_mask" </dev/null |
-    bash -c "$CBX_HELPER" sh workload "$directory" "$nonce" 0 0 0 0 "$caller_mask" <"$directory/input" 6>&- &
+@CONTROL_SHELL@ -c "$CBX_HELPER" sh guard "$directory" "$nonce" 0 0 0 0 "$caller_mask" </dev/null |
+    @CONTROL_SHELL@ -c "$CBX_HELPER" sh workload "$directory" "$nonce" 0 0 0 0 "$caller_mask" <"$directory/input" 6>&- &
 leader=$!
 owned_guard=$(jobs -p %%)
 set +m
@@ -35,7 +35,7 @@ while valid_guard; do
         break
     fi
     kill -0 "$leader" 2>/dev/null || break
-    sleep .1
+    sleep @WORKLOAD_POLL@
 done
 kill "$watcher" 2>/dev/null || :
 wait "$watcher" 2>/dev/null || :

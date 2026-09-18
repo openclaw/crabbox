@@ -632,17 +632,8 @@ func (b *blacksmithBackend) Status(ctx context.Context, req core.StatusRequest) 
 		if delay <= 0 {
 			return core.StatusView{}, core.Exit(5, "%s", blacksmithWaitTimeoutMessage(req.ID, lastState.State))
 		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			return core.StatusView{}, context.Cause(ctx)
-		case <-timer.C:
+		if err := shared.SleepContext(ctx, delay); err != nil {
+			return core.StatusView{}, err
 		}
 	}
 }

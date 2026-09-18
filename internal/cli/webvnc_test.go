@@ -1516,7 +1516,7 @@ func TestDirectSSHWebVNCWSL2StagesLargeCommandBeforeZeroInputExecute(t *testing.
 	remotePath := filepath.Join(dir, "remote")
 	stdinPath := filepath.Join(dir, "stdin")
 	sshPath := filepath.Join(dir, "ssh")
-	script := "#!/bin/sh\nprintf '%s' \"$*\" > " + shellQuote(argvPath) + "\nlast=;for arg;do last=$arg;done\nprintf '%s' \"$last\" > " + shellQuote(remotePath) + "\ncat > " + shellQuote(stdinPath) + "\nprintf running\n"
+	script := "#!/bin/sh\n" + recordLegacyBashProbeShell(t, filepath.Join(dir, "prerequisites")) + "printf '%s' \"$*\" > " + shellQuote(argvPath) + "\nlast=;for arg;do last=$arg;done\nprintf '%s' \"$last\" > " + shellQuote(remotePath) + "\ncat > " + shellQuote(stdinPath) + "\nprintf running\n"
 	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1559,6 +1559,10 @@ func TestDirectSSHWebVNCWSL2StagesLargeCommandBeforeZeroInputExecute(t *testing.
 	if strings.Contains(decodePowerShellCommand(t, string(remoteArg)), "large-webvnc-command") {
 		t.Fatal("encoded launcher embeds the WebVNC payload")
 	}
+	if probes, err := os.ReadFile(filepath.Join(dir, "prerequisites")); err != nil || string(probes) != "probe\n" {
+		t.Fatalf("Bash prerequisite calls=%q err=%v, want one", probes, err)
+	}
+
 }
 
 func TestDirectSSHWebVNCNativeWindowsUsesLocalBridge(t *testing.T) {

@@ -245,7 +245,7 @@ func TestConfigShowLegacySlotPositions(t *testing.T) {
 		}
 		return true
 	})
-	if got := strings.Join(order, ","); got != "actions,blacksmith,agent_sandbox,phala,superserve,local_container,apple_container,mxc,docker_sandbox,multipass,machine0,tart,lume,cloudflare,cloudflare_sandbox,static,results,jobs,aws,aws_lambda_microvm,azure,digitalocean,vultr,linode,github_codespaces,azure_dynamic_sessions,gcp,proxmox,firecracker,xcp_ng,parallels" {
+	if got := strings.Join(order, ","); got != "actions,blacksmith,agent_sandbox,phala,upstash_box,smolvm,superserve,local_container,apple_container,mxc,docker_sandbox,multipass,machine0,tart,lume,cloudflare,cloudflare_sandbox,static,results,jobs,aws,aws_lambda_microvm,azure,digitalocean,vultr,linode,github_codespaces,vast,nvidia_brev,hostinger,azure_dynamic_sessions,gcp,proxmox,firecracker,xcp_ng,parallels" {
 		t.Fatalf("legacy text slot positions: %s", got)
 	}
 }
@@ -372,5 +372,77 @@ func TestConfigShowMigratedLegacyOwnershipRetired(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDelegatedProviderDisplaySectionsPreserveRawValues(t *testing.T) {
+	for _, raw := range []string{"", "  ", " custom "} {
+		for _, enabled := range []bool{false, true} {
+			t.Run(strconv.Quote(raw)+"/"+strconv.FormatBool(enabled), func(t *testing.T) {
+				cfg := Config{
+					UpstashBox: UpstashBoxConfig{BaseURL: "https://upstash.example.test", Runtime: raw, Size: raw, Workdir: raw, KeepAlive: enabled},
+					Smolvm:     SmolvmConfig{BaseURL: "https://smol.example.test", Image: raw, Workdir: raw, Network: raw, Keep: enabled},
+				}
+				auth := "missing"
+				if enabled {
+					cfg.UpstashBox.APIKey, cfg.Smolvm.APIKey = "synthetic-presence", "synthetic-presence"
+					cfg.Smolvm.CPUs, cfg.Smolvm.MemoryMB = 3, 2048
+					auth = "configured"
+				}
+				before := cfg
+				for _, tc := range []struct {
+					provider, key, text string
+					json                map[string]any
+				}{
+					{"upstash-box", "upstashBox", "upstash_box base_url=https://upstash.example.test runtime=" + raw + " size=" + raw + " workdir=" + raw + " keep_alive=" + strconv.FormatBool(enabled) + " auth=" + auth + "\n", map[string]any{"baseUrl": cfg.UpstashBox.BaseURL, "auth": auth, "runtime": raw, "size": raw, "workdir": raw, "keepAlive": enabled}},
+					{"smolvm", "smolvm", "smolvm base_url=https://smol.example.test image=" + raw + " workdir=" + raw + " cpus=" + strconv.Itoa(cfg.Smolvm.CPUs) + " memory_mb=" + strconv.Itoa(cfg.Smolvm.MemoryMB) + " network=" + raw + " keep=" + strconv.FormatBool(enabled) + " auth=" + auth + "\n", map[string]any{"baseUrl": cfg.Smolvm.BaseURL, "auth": auth, "image": raw, "workdir": raw, "cpus": cfg.Smolvm.CPUs, "memoryMB": cfg.Smolvm.MemoryMB, "network": raw, "keep": enabled}},
+				} {
+					provider, err := ProviderFor(tc.provider)
+					if err != nil {
+						t.Fatal(err)
+					}
+					section := provider.(ProviderConfigShowProjector).ConfigShowSection(cfg)
+					view := map[string]any{}
+					if err := addProviderConfigShowSections(view, []ProviderConfigShowSection{section}); err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(view[tc.key], tc.json) {
+						t.Fatalf("provider=%s JSON=%#v want=%#v", tc.provider, view[tc.key], tc.json)
+					}
+					var output bytes.Buffer
+					if err := writeProviderConfigShowSections(&output, []ProviderConfigShowSection{section}); err != nil {
+						t.Fatal(err)
+					}
+					if output.String() != tc.text {
+						t.Fatalf("provider=%s text=%q want=%q", tc.provider, output.String(), tc.text)
+					}
+				}
+				if !reflect.DeepEqual(cfg, before) {
+					t.Fatal("section projection mutated configuration")
+				}
+			})
+		}
+	}
+}
+
+func TestDelegatedProviderDisplaySectionsRemainVisible(t *testing.T) {
+	for _, name := range []string{"", "hetzner", "upstash-box", "upstash", "box", "upstashbox", "smolvm", "smol", "smolmachines", "smolfleet"} {
+		cfg := baseConfig()
+		if name != "" {
+			setProviderSelection(&cfg, name, providerSelectionFlag)
+		}
+		sections, err := collectProviderConfigShowSections(effectiveConfigForShow(cfg))
+		if err != nil {
+			t.Fatal(err)
+		}
+		view := map[string]any{}
+		if err := addProviderConfigShowSections(view, sections); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"upstashBox", "smolvm"} {
+			if _, present := view[key]; !present {
+				t.Fatalf("selected=%q missing %s section", name, key)
+			}
+		}
 	}
 }

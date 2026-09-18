@@ -34,6 +34,17 @@ func isolateIsloTestHome(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 }
 
+func newIsloSDKHTTPTestClient(t *testing.T, server *httptest.Server) isloAPI {
+	t.Helper()
+	// The SDK cache is process-wide; isolate each invocation even if a server address is reused.
+	apiKey := "ak_test_" + t.TempDir()
+	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: apiKey, BaseURL: server.URL}}, core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api
+}
+
 func TestParseIsloSSE(t *testing.T) {
 	body := strings.Join([]string{
 		"event: stdout",
@@ -206,36 +217,6 @@ func TestParseIsloSSEPreservesCompletionRules(t *testing.T) {
 				t.Fatalf("err=%v, want %q", err, tc.errText)
 			}
 		})
-	}
-}
-
-func TestIsloExecCommandPreservesShellString(t *testing.T) {
-	got, err := isloExecCommand([]string{"pnpm install && pnpm test"}, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"bash", "-lc", "pnpm install && pnpm test"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("command=%#v want %#v", got, want)
-	}
-}
-
-func TestIsloExecCommandQuotesImplicitShellArgv(t *testing.T) {
-	got, err := isloExecCommand([]string{"FOO=bar", "pnpm", "test"}, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 3 || got[0] != "bash" || got[1] != "-lc" || !strings.Contains(got[2], "FOO=") || !strings.Contains(got[2], "'pnpm'") {
-		t.Fatalf("command=%#v", got)
-	}
-}
-
-func TestLeadingEnvAssignmentUsesShell(t *testing.T) {
-	if !leadingEnvAssignment([]string{"FOO=bar", "pnpm", "test"}) {
-		t.Fatal("expected leading env assignment to require shell")
-	}
-	if leadingEnvAssignment([]string{"pnpm", "test"}) {
-		t.Fatal("plain argv should not require shell")
 	}
 }
 
@@ -1967,7 +1948,7 @@ func TestIsloFallbackExtractCommandCleansUploadsOnFailure(t *testing.T) {
 func TestIsloExecForwardsEnv(t *testing.T) {
 	client := &fakeIsloSyncClient{}
 	backend := &isloBackend{rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	code, err := backend.exec(context.Background(), client, "crabbox-test", "/workspace/repo", []string{"env"}, false, map[string]string{
+	code, err := backend.exec(context.Background(), client, "crabbox-test", "/workspace/repo", core.RunRequest{Command: []string{"env"}}, map[string]string{
 		"API_TOKEN": "secret",
 		"CI":        "1",
 	}, "", backend.rt.Stdout, backend.rt.Stderr)
@@ -2045,10 +2026,7 @@ func TestIsloSDKClientListUsesInjectedHTTPAndPaginates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "ak_test", BaseURL: srv.URL}}, core.Runtime{HTTP: srv.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	api := newIsloSDKHTTPTestClient(t, srv)
 	items, err := api.ListSandboxes(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -2111,10 +2089,7 @@ func TestIsloSDKClientUploadArchiveStreamsMultipartTarball(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "ak_test", BaseURL: srv.URL}}, core.Runtime{HTTP: srv.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	api := newIsloSDKHTTPTestClient(t, srv)
 	if err := api.UploadArchive(t.Context(), "crabbox-test", "/workspace/repo", strings.NewReader("archive")); err != nil {
 		t.Fatal(err)
 	}
@@ -2156,6 +2131,8 @@ func TestIsloPauseResumeCallProvider(t *testing.T) {
 type fakeIsloSyncClient struct {
 	prepareCommands          []string
 	execRequests             []*gosdk.ExecRequest
+	execNames                []string
+	execErrOut               string
 	uploadPath               string
 	uploaded                 bytes.Buffer
 	uploadErr                error
@@ -2427,11 +2404,15 @@ func (f *fakeIsloSyncClient) UploadArchive(_ context.Context, _ string, targetPa
 	return err
 }
 
-func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, _ string, req *gosdk.ExecRequest, stdout, _ io.Writer) (int, error) {
+func (f *fakeIsloSyncClient) ExecStream(ctx context.Context, name string, req *gosdk.ExecRequest, stdout, stderr io.Writer) (int, error) {
 	if f.rejectCanceledContext && ctx.Err() != nil {
 		return 1, ctx.Err()
 	}
 	f.execRequests = append(f.execRequests, req)
+	f.execNames = append(f.execNames, name)
+	if f.execErrOut != "" && stderr != nil {
+		_, _ = io.WriteString(stderr, f.execErrOut)
+	}
 	if f.execHook != nil {
 		f.execHook(req)
 	}
@@ -2856,14 +2837,14 @@ func TestIsloRunPreservesPlainAndLegacyReuseAdmission(t *testing.T) {
 		t.Run(strconv.FormatBool(enrolled), func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			claimIsloLegacyLease(t, isloTeardownLeaseID)
-			client := &fakeIsloSyncClient{execOut: "CRABBOX_TS_IP=100.64.7.7"}
+			client := &fakeIsloSyncClient{
+				execOut:    "CRABBOX_TS_IP=100.64.7.7",
+				getSandbox: &gosdk.SandboxResponse{Name: isloTeardownName, Status: "running"},
+			}
 			if enrolled {
 				if err := core.UpdateLeaseClaimTailscale(isloTeardownLeaseID, "100.64.7.7", ""); err != nil {
 					t.Fatal(err)
 				}
-				client.getSandbox = &gosdk.SandboxResponse{Name: isloTeardownName, Status: "running"}
-			} else {
-				client.getSandboxErr = errors.New("plain reuse must not introduce a lookup")
 			}
 			b := newIsloTeardownBackend(t, client, io.Discard)
 			result, err := b.Run(context.Background(), core.RunRequest{ID: isloTeardownLeaseID, NoSync: true, Command: []string{"true"}})
@@ -2874,8 +2855,8 @@ func TestIsloRunPreservesPlainAndLegacyReuseAdmission(t *testing.T) {
 			if err != nil || !ok || isloClaimIdentity(claim).ID != "" {
 				t.Error("legacy claim identity was promoted or lost")
 			}
-			if !enrolled && len(client.getSandboxNames) != 0 {
-				t.Error("plain reuse added a live lookup")
+			if len(client.getSandboxNames) != 1 {
+				t.Errorf("readiness should reuse enrolled admission or perform one plain-lease lookup: %v", client.getSandboxNames)
 			}
 			if client.deleteCalls != 0 || client.createRequest != nil {
 				t.Error("reuse created or deleted a resource")
@@ -2972,5 +2953,39 @@ func TestIsloIncompleteCreateResponseReportsUnconfirmedAttempt(t *testing.T) {
 				t.Fatalf("incomplete response published claim: %v %v", entries, readErr)
 			}
 		})
+	}
+}
+
+func TestIsloFlagsCompleteAssignmentContract(t *testing.T) {
+	for _, provider := range []string{"islo", "other"} {
+		for _, number := range []int{-1, 0, 2} {
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			cfg.Islo.IdlePause = true
+			want := cfg
+			want.Islo.BaseURL, want.Islo.Image, want.Islo.Workdir = "", "", " raw "
+			want.Islo.GatewayProfile, want.Islo.SnapshotName = "gateway", "snapshot"
+			want.Islo.VCPUs, want.Islo.MemoryMB, want.Islo.DiskGB, want.Islo.IdlePause = number, number, number, false
+			core.MarkIsloImageExplicit(&want)
+			core.MarkIsloVCPUsExplicit(&want)
+			core.MarkIsloMemoryMBExplicit(&want)
+			core.MarkIsloDiskGBExplicit(&want)
+			core.RecordProviderFlagInputs(&want, true, "islo")
+			fs := flag.NewFlagSet("islo", flag.ContinueOnError)
+			values := RegisterIsloProviderFlags(fs, cfg)
+			if err := fs.Parse([]string{"--islo-base-url=", "--islo-image=", "--islo-workdir= raw ", "--islo-gateway-profile=gateway", "--islo-snapshot-name=snapshot", "--islo-vcpus=" + strconv.Itoa(number), "--islo-memory-mb=" + strconv.Itoa(number), "--islo-disk-gb=" + strconv.Itoa(number), "--islo-idle-pause=false"}); err != nil {
+				t.Fatal(err)
+			}
+			prior := cfg
+			if err := ApplyIsloProviderFlags(&cfg, fs, "wrong-type"); err != nil || !reflect.DeepEqual(cfg, prior) {
+				t.Fatal("wrong-type guard changed")
+			}
+			if err := ApplyIsloProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("accepted values, markers, ledger or provider changed")
+			}
+		}
 	}
 }

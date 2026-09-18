@@ -88,11 +88,22 @@ func (b *modalBackend) Run(ctx context.Context, req core.RunRequest) (core.RunRe
 			client, err = newModalAPI(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-modal-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-			})
+		Workspace: func() shared.SandboxWorkspace {
+			workspace := b.workspace(client, sandboxID, req, workdir)
+			return shared.WorkspaceOperations{
+				PrepareArchiveFunc: workspace.PrepareArchive,
+				SyncFunc: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
+					var phases []core.TimingPhase
+					var elapsed time.Duration
+					err := fenced(func() error {
+						var err error
+						phases, elapsed, err = workspace.Sync(ctx, prepared)
+						return err
+					})
+					return phases, elapsed, err
+				},
+				EnsureFunc: func(ctx context.Context) error { return fenced(func() error { return workspace.Ensure(ctx) }) },
+			}
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var err error
@@ -113,21 +124,8 @@ func (b *modalBackend) Run(ctx context.Context, req core.RunRequest) (core.RunRe
 			}
 			return handle(), err
 		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			var phases []core.TimingPhase
-			var elapsed time.Duration
-			err := fenced(func() error {
-				var err error
-				phases, elapsed, err = b.syncWorkspace(ctx, client, sandboxID, req, workdir, prepared)
-				return err
-			})
-			return phases, elapsed, err
-		},
-		NoSync: func(ctx context.Context) error {
-			return fenced(func() error { return b.prepareWorkspace(ctx, client, sandboxID, workdir) })
-		},
 		Command: func(ctx context.Context) (shared.DelegatedSandboxCommand, error) {
-			command, err := buildModalCommand(req.Command, req.ShellMode, workdir)
+			command, err := buildModalCommand(req, workdir)
 			if err != nil {
 				return shared.DelegatedSandboxCommand{}, err
 			}
@@ -207,28 +205,15 @@ func (b *modalBackend) Status(ctx context.Context, req core.StatusRequest) (core
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	deadline := core.ClockNow(b.rt.Clock).Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = core.ClockNow(b.rt.Clock).Add(5 * time.Minute)
-	}
-	for {
+	return shared.PollStatus(ctx, req, func() time.Time { return core.ClockNow(b.rt.Clock) }, func(ctx context.Context) (core.StatusView, bool, error) {
 		sandbox, err := client.GetSandbox(ctx, sandboxID)
 		if err != nil {
-			return core.StatusView{}, modalError("get sandbox", err)
+			return core.StatusView{}, false, modalError("get sandbox", err)
 		}
-		view := modalStatusView(leaseID, slug, sandbox)
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if core.ClockNow(b.rt.Clock).After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for modal sandbox %s to become ready", sandboxID)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return modalStatusView(leaseID, slug, sandbox), false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for modal sandbox %s to become ready", sandboxID)
+	})
 }
 
 func (b *modalBackend) Stop(ctx context.Context, req core.StopRequest) error {
@@ -474,18 +459,12 @@ func durationSecondsCeil(duration time.Duration) int {
 	return int((duration + time.Second - 1) / time.Second)
 }
 
-func buildModalCommand(command []string, shellMode bool, workdir string) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
+func buildModalCommand(req core.RunRequest, workdir string) ([]string, error) {
+	intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
+	if err != nil {
+		return nil, err
 	}
-	var script string
-	if shellMode {
-		script = strings.Join(command, " ")
-	} else if core.ShouldUseShell(command) || core.LeadingEnvAssignment(command) {
-		script = core.ShellScriptFromArgv(command)
-	} else {
-		script = "exec " + strings.Join(core.ShellWords(command), " ")
-	}
+	script := intent.ShellSource()
 	if strings.TrimSpace(workdir) != "" {
 		script = "cd " + core.ShellQuote(workdir) + " && " + script
 	}

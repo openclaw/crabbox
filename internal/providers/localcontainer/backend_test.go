@@ -8445,13 +8445,16 @@ func TestCreateContainerNoVolumesWhenEmpty(t *testing.T) {
 }
 
 func TestVolumeListFlagParsesRepeated(t *testing.T) {
-	var vols volumeListFlag
-	if err := vols.Set("/host/a:/guest/a:ro"); err != nil {
+	fs := flag.NewFlagSet("volumes", flag.ContinueOnError)
+	registerFlags(fs, core.Config{})
+	value := fs.Lookup("local-container-volume").Value
+	if err := value.Set("/host/a:/guest/a:ro"); err != nil {
 		t.Fatal(err)
 	}
-	if err := vols.Set("/host/b:/guest/b"); err != nil {
+	if err := value.Set("/host/b:/guest/b"); err != nil {
 		t.Fatal(err)
 	}
+	vols := value.(flag.Getter).Get().([]string)
 	if len(vols) != 2 {
 		t.Fatalf("expected 2 volumes, got %d", len(vols))
 	}

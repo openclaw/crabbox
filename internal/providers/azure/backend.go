@@ -304,36 +304,16 @@ func (b *azureLeaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live VM %s\n", server.DisplayID(), server.Name, reason)
 			continue
 		}
-		fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s\n", live.DisplayID(), live.Name)
-		if req.DryRun {
-			continue
+		decision := shared.DirectCleanupDecision{
+			Action: shared.DeleteCleanupServer,
+			Server: live,
+			Mutate: func(ctx context.Context) error {
+				return b.applyAzureCleanup(ctx, client, live, claim, now, azureCleanupLive)
+			},
 		}
-		prepared, err := client.PrepareCleanupServer(ctx, live, now)
-		if err != nil {
-			if core.IsAzureCleanupSkipError(err) {
-				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", live.DisplayID(), live.Name, err)
-				continue
-			}
+		if err := decision.Apply(ctx, req, b.RT); err != nil {
 			return err
 		}
-		claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, prepared.Labels)
-		if err != nil {
-			return err
-		}
-		if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
-			return client.DeleteCleanupServer(ctx, prepared, now)
-		}); err != nil {
-			if core.IsAzureCleanupSkipError(err) {
-				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", live.DisplayID(), live.Name, err)
-				continue
-			}
-			if isAzureCleanupNotFound(err) {
-				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=live VM no longer exists at delete boundary\n", live.DisplayID(), live.Name)
-				continue
-			}
-			return err
-		}
-		core.RemoveStoredTestboxKey(claim.LeaseID)
 	}
 	return b.resumeAzureCleanupClaims(ctx, client, seen, now, req.DryRun)
 }
@@ -352,33 +332,60 @@ func (b *azureLeaseBackend) resumeAzureCleanupClaims(ctx context.Context, client
 			fmt.Fprintf(b.RT.Stderr, "skip recovery server id=%s reason=exact local claim missing or stale\n", claim.CloudID)
 			continue
 		}
-		fmt.Fprintf(b.RT.Stderr, "resume cleanup server id=%s name=%s\n", server.DisplayID(), server.Name)
-		if dryRun {
-			continue
+		decision := shared.DirectCleanupDecision{
+			Action: shared.ResumeCleanupServer,
+			Server: server,
+			Mutate: func(ctx context.Context) error {
+				return b.applyAzureCleanup(ctx, client, server, claim, now, azureCleanupRecovery)
+			},
 		}
-		prepared, err := client.PrepareCleanupServer(ctx, server, now)
-		if err != nil {
-			if core.IsAzureCleanupSkipError(err) {
-				fmt.Fprintf(b.RT.Stderr, "skip recovery server id=%s reason=%v\n", server.DisplayID(), err)
-				continue
-			}
+		if err := decision.Apply(ctx, core.CleanupRequest{DryRun: dryRun}, b.RT); err != nil {
 			return err
 		}
-		claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, prepared.Labels)
-		if err != nil {
-			return err
-		}
-		if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
-			return client.DeleteCleanupServer(ctx, prepared, now)
-		}); err != nil {
-			if core.IsAzureCleanupSkipError(err) {
-				fmt.Fprintf(b.RT.Stderr, "skip recovery server id=%s reason=%v\n", server.DisplayID(), err)
-				continue
-			}
-			return err
-		}
-		core.RemoveStoredTestboxKey(claim.LeaseID)
 	}
+	return nil
+}
+
+type azureCleanupMode uint8
+
+const (
+	azureCleanupLive azureCleanupMode = iota
+	azureCleanupRecovery
+)
+
+// The decision owner calls this only after the dry-run gate. Recovery retains
+// missing-resource errors; only live cleanup tolerates a delete-boundary miss.
+func (b *azureLeaseBackend) applyAzureCleanup(ctx context.Context, client azureClient, server core.Server, claim core.LeaseClaim, now time.Time, mode azureCleanupMode) error {
+	description := fmt.Sprintf("server id=%s name=%s", server.DisplayID(), server.Name)
+	if mode == azureCleanupRecovery {
+		description = fmt.Sprintf("recovery server id=%s", server.DisplayID())
+	}
+	prepared, err := client.PrepareCleanupServer(ctx, server, now)
+	if err != nil {
+		if core.IsAzureCleanupSkipError(err) {
+			fmt.Fprintf(b.RT.Stderr, "skip %s reason=%v\n", description, err)
+			return nil
+		}
+		return err
+	}
+	claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, prepared.Labels)
+	if err != nil {
+		return err
+	}
+	if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+		return client.DeleteCleanupServer(ctx, prepared, now)
+	}); err != nil {
+		if core.IsAzureCleanupSkipError(err) {
+			fmt.Fprintf(b.RT.Stderr, "skip %s reason=%v\n", description, err)
+			return nil
+		}
+		if mode == azureCleanupLive && isAzureCleanupNotFound(err) {
+			fmt.Fprintf(b.RT.Stderr, "skip %s reason=live VM no longer exists at delete boundary\n", description)
+			return nil
+		}
+		return err
+	}
+	core.RemoveStoredTestboxKey(claim.LeaseID)
 	return nil
 }
 

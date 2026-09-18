@@ -45,6 +45,7 @@ islo:
   vcpus: 2
   memoryMB: 4096
   diskGB: 20
+  idlePause: false
 ```
 
 Defaults: `baseUrl` `https://api.islo.dev`, `workdir` `crabbox`, `vcpus` `2`,
@@ -72,6 +73,7 @@ variable:
 | `vcpus`          | `--islo-vcpus`           | `CRABBOX_ISLO_VCPUS`           |
 | `memoryMB`       | `--islo-memory-mb`       | `CRABBOX_ISLO_MEMORY_MB`       |
 | `diskGB`         | `--islo-disk-gb`         | `CRABBOX_ISLO_DISK_GB`         |
+| `idlePause`      | `--islo-idle-pause`      | `CRABBOX_ISLO_IDLE_PAUSE`      |
 
 `gatewayProfile` accepts an Islo gateway profile name or id and is passed
 opaquely in the sandbox create request. Gateway profiles are created and
@@ -85,8 +87,25 @@ crabbox run --provider islo -- pnpm test
 crabbox status --provider islo --id blue-lobster
 crabbox pause --provider islo blue-lobster
 crabbox resume --provider islo blue-lobster
+crabbox heartbeat --provider islo blue-lobster
 crabbox stop --provider islo blue-lobster
 ```
+
+## Idle pause policy (opt-in)
+
+Set `--islo-idle-pause`, `islo.idlePause: true`, or
+`CRABBOX_ISLO_IDLE_PAUSE=true` to send the idle timeout on new sandbox
+creation as `pause_after_idle`, rounded up to seconds, with `auto_resume=never`.
+The default sends no lifecycle policy. Existing policies are not rewritten,
+and no provider deletion deadline is added.
+
+An idle policy may pause long-running or externally accessed workloads because
+provider activity accounting is not established. Reused paused leases are
+explicitly resumed before `run --id` or `ssh`, regardless of this option.
+Reclaim with the option enabled rejects a reported incompatible idle timeout;
+legacy responses without policy metadata remain adoptable without confirming
+policy enforcement. See [the provider reference](../providers/islo.md#idle-pause-policy-opt-in)
+for the operational tradeoffs and recovery behavior.
 
 ## Behavior
 
@@ -140,6 +159,13 @@ crabbox stop --provider islo blue-lobster
   cleaning up that sandbox; it may remain running and billable.
 - **pause** snapshots the sandbox and releases its active compute while
   preserving the local lease claim; **resume** restores the sandbox to running.
+- **heartbeat** runs one no-op `true` exec against a running sandbox, which is
+  what registers activity, and reports the sandbox's echoed
+  `lifecycle.pause_after_idle` when it has one. It writes no lifecycle policy,
+  so it cannot change a sandbox's absolute deadline, and persists nothing
+  locally. A sandbox observed as paused or terminal is refused; heartbeat does
+  not call the resume API. See
+  [providers/islo.md](../providers/islo.md).
 - The sandbox is deleted on release unless kept. `--keep-on-failure` keeps a
   newly created failed sandbox until an explicit `stop` or provider-side expiry.
 

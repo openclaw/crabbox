@@ -4,6 +4,10 @@ List the preflight names accepted by this installed Crabbox binary, their
 default membership, and supported targets. Discovery is offline: it does not
 load configuration, select a provider, run a probe, or acquire a lease.
 
+`macos_platform` is a macOS-only default snapshot. `swift`, `xcodebuild`, and
+`brew` are macOS-only opt-in version probes. See [run](run.md) for their execution
+budgets, effective developer selection, and diagnostic/cleanup behavior.
+
 ```sh
 crabbox preflight-tools
 crabbox preflight-tools --json
@@ -55,6 +59,13 @@ any of these rules.
 Unknown names still fail with exit 2 before lease acquisition. Their diagnostic
 points to `crabbox preflight-tools`, and `crabbox run --help` includes the same
 discovery hint. Arbitrary executable names are not accepted.
+
+`bash` is an opt-in literal `bash --version` probe for `linux`, `macos` and
+`windows/wsl2`; native Windows skips it. It does not change default membership.
+Use `--preflight --preflight-tools bash` to select it alone or
+`--preflight --preflight-tools default,bash` to append it. A bounded first output
+line or `bash=missing` is diagnostic only; see [run preflight](run.md#preflight)
+for the companion runtime and Bash-dependent workload requirements.
 
 ## Functional Python environment probe
 

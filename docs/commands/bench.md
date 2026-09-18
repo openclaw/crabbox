@@ -74,6 +74,10 @@ crabbox bench report --since 7d --providers aws,hetzner
 crabbox bench report --command-fingerprint sha256:... --json
 ```
 
+`--since` accepts Go durations such as `24h` and whole days such as `7d`.
+Values beyond Go's duration range (more than 106751 whole days) are rejected
+instead of changing the report cutoff through integer overflow.
+
 Human output includes successful sample count (`n`), median total duration, p95
 total duration when enough samples exist, median sync and command duration,
 failure count, and an evidence marker. When records contain runner telemetry,

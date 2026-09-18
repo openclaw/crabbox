@@ -101,11 +101,8 @@ func (b *e2bBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResu
 			client, err = newE2BClient(b.cfg, b.rt)
 			return err
 		},
-		PrepareArchive: func(ctx context.Context) (*core.PreparedArchive, error) {
-			return core.PrepareDelegatedArchive(ctx, core.DelegatedArchivePreparationRequest{
-				Config: b.cfg, Repo: req.Repo, ForceSyncLarge: req.ForceSyncLarge,
-				TempPattern: "crabbox-e2b-sync-*.tgz", Stderr: b.rt.Stderr, Now: func() time.Time { return core.ClockNow(b.rt.Clock) },
-			})
+		Workspace: func() shared.SandboxWorkspace {
+			return workspaceForConfig(b.cfg, b.rt).Bind(client, session, req, workspace)
 		},
 		Acquire: func(ctx context.Context) (shared.DelegatedSandbox, error) {
 			var sandbox shared.EnvdSandbox
@@ -126,12 +123,6 @@ func (b *e2bBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResu
 			var err error
 			session, err = client.ConnectSandbox(ctx, sandboxID, e2bTimeoutSeconds(b.cfg.TTL))
 			return e2bError("connect sandbox", err)
-		},
-		Sync: func(ctx context.Context, prepared *core.PreparedArchive) ([]core.TimingPhase, time.Duration, error) {
-			return workspaceForConfig(b.cfg, b.rt).Sync(ctx, client, session, req, workspace, prepared)
-		},
-		NoSync: func(ctx context.Context) error {
-			return workspaceForConfig(b.cfg, b.rt).Prepare(ctx, client, session, workspace)
 		},
 		Command: func(context.Context) (shared.DelegatedSandboxCommand, error) {
 			intent, err := core.ParseCommandIntent(req.Command, req.ShellMode, req.CommandLiteralArgs)
@@ -194,22 +185,16 @@ func (b *e2bBackend) Status(ctx context.Context, req core.StatusRequest) (core.S
 		}
 		return core.StatusView{}, err
 	}
-	for {
-		sandbox, err := client.GetSandbox(wait.Context(), sandboxID)
+	return wait.Poll(sandboxID, 2*time.Second, func(ctx context.Context) (core.StatusView, bool, error) {
+		sandbox, err := client.GetSandbox(ctx, sandboxID)
 		if err != nil {
 			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
-				return core.StatusView{}, ctxErr
+				return core.StatusView{}, false, ctxErr
 			}
-			return core.StatusView{}, e2bError("get sandbox", err)
+			return core.StatusView{}, false, e2bError("get sandbox", err)
 		}
-		view := sandboxViews.Status(leaseID, sandbox)
-		if !req.Wait || view.Ready {
-			return view, nil
-		}
-		if err := wait.Next(sandboxID, 2*time.Second); err != nil {
-			return core.StatusView{}, err
-		}
-	}
+		return sandboxViews.Status(leaseID, sandbox), false, nil
+	})
 }
 
 func (b *e2bBackend) Stop(ctx context.Context, req core.StopRequest) error {

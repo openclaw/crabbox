@@ -960,6 +960,7 @@ than YAML. See [Provider Reference](../providers/README.md) for the per-provider
 
 ```yaml
 sync:
+  source: git # git (default) or explicit include-only directory
   delete: true
   checksum: false
   gitSeed: true
@@ -977,6 +978,13 @@ sync:
     - .turbo
     - dist
 ```
+
+`sync.source` selects `git` (default) or explicit `directory` mode;
+`CRABBOX_SYNC_SOURCE` overrides it. Directory mode requires a nonempty effective
+`sync.include`, uses the current directory as its root, and still requires Git
+for isolated source-tree ignore matching. See
+[directory source](sync.md#explicit-directory-source) for supported transports,
+Git-only restrictions, and inactive `--no-sync` behavior.
 
 A `.crabboxignore` file at the repo root appends to `sync.exclude`.
 `sync.gitOverlay` is an opt-in, credential-free Git transfer optimization for
@@ -1024,6 +1032,15 @@ the lower layer (built-in probes by default); `preflightTools: []` clears the
 list and prints only the workspace summary, without restoring default probes.
 Preflight probes are diagnostic only: a missing tool does not block the
 workload, and Crabbox does not install or upgrade toolchains.
+
+Use `preflightTools: [default, bash]` to append the opt-in literal
+`bash --version` probe without changing the defaults. The CLI equivalent is
+`--preflight --preflight-tools default,bash`. Linux, macOS and WSL2 report a
+bounded first output line or `bash=missing`; native Windows skips the probe.
+A missing Bash diagnostic does not block an independent command. Linux SSH
+execution without Bash needs the complete companion runtime pack; see
+[run preflight](../commands/run.md#preflight) and the
+[run command](../commands/run.md) for installation and shell requirements.
 
 Add `python3-venv` to this list in repository or user configuration to opt into a
 functional disposable-venv check on Linux, macOS or WSL2. For example,

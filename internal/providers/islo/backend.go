@@ -31,72 +31,19 @@ const (
 
 const isloRunFileReadTimeout = 20 * time.Second
 
-type isloFlagValues struct {
-	BaseURL        *string
-	Image          *string
-	Workdir        *string
-	GatewayProfile *string
-	SnapshotName   *string
-	VCPUs          *int
-	MemoryMB       *int
-	DiskGB         *int
-}
-
 func RegisterIsloProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return isloFlagValues{
-		BaseURL:        fs.String("islo-base-url", defaults.Islo.BaseURL, "Islo API base URL"),
-		Image:          fs.String("islo-image", defaults.Islo.Image, "Islo sandbox image"),
-		Workdir:        fs.String("islo-workdir", defaults.Islo.Workdir, "Islo sandbox working directory under /workspace"),
-		GatewayProfile: fs.String("islo-gateway-profile", defaults.Islo.GatewayProfile, "Islo gateway profile name or id"),
-		SnapshotName:   fs.String("islo-snapshot-name", defaults.Islo.SnapshotName, "Islo snapshot name"),
-		VCPUs:          fs.Int("islo-vcpus", defaults.Islo.VCPUs, "Islo sandbox vCPUs"),
-		MemoryMB:       fs.Int("islo-memory-mb", defaults.Islo.MemoryMB, "Islo sandbox memory in MB"),
-		DiskGB:         fs.Int("islo-disk-gb", defaults.Islo.DiskGB, "Islo sandbox disk in GB"),
-	}
+	return core.RegisterIsloConfigFlags(fs, defaults.Islo)
 }
 
 func ApplyIsloProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(isloFlagValues)
+	v, ok := values.(core.IsloConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "islo-base-url") {
-		cfg.Islo.BaseURL = *v.BaseURL
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-	}
-	if core.FlagWasSet(fs, "islo-image") {
-		cfg.Islo.Image = *v.Image
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-		core.MarkIsloImageExplicit(cfg)
-	}
-	if core.FlagWasSet(fs, "islo-workdir") {
-		cfg.Islo.Workdir = *v.Workdir
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-	}
-	if core.FlagWasSet(fs, "islo-gateway-profile") {
-		cfg.Islo.GatewayProfile = *v.GatewayProfile
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-	}
-	if core.FlagWasSet(fs, "islo-snapshot-name") {
-		cfg.Islo.SnapshotName = *v.SnapshotName
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-	}
-	if core.FlagWasSet(fs, "islo-vcpus") {
-		cfg.Islo.VCPUs = *v.VCPUs
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-		core.MarkIsloVCPUsExplicit(cfg)
-	}
-	if core.FlagWasSet(fs, "islo-memory-mb") {
-		cfg.Islo.MemoryMB = *v.MemoryMB
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-		core.MarkIsloMemoryMBExplicit(cfg)
-	}
-	if core.FlagWasSet(fs, "islo-disk-gb") {
-		cfg.Islo.DiskGB = *v.DiskGB
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-		core.MarkIsloDiskGBExplicit(cfg)
-	}
-	return nil
+	applied, err := v.Apply(&cfg.Islo, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, isloProvider)
+	core.MarkIsloConfigExplicit(cfg, applied)
+	return err
 }
 
 func NewIsloBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
@@ -243,6 +190,13 @@ func (b *isloBackend) Run(ctx context.Context, req core.RunRequest) (result core
 	}()
 
 	if !acquired {
+		// Enrolled leases already resume through their admitted readiness owner.
+		// Plain-lease resume is also post-admission so failures retain the session.
+		if tailnetAdmission == nil {
+			if _, err := b.resolveRunningSandbox(ctx, client, name, core.ResolveRequest{}); err != nil {
+				return result, err
+			}
+		}
 		meta, err := b.ensureAdmittedLeaseTailscale(ctx, client, name, slug, leaseID, tailnetAdmission, true)
 		if tailnetErrorBlocksRun(err) {
 			return result, err
@@ -272,7 +226,7 @@ func (b *isloBackend) Run(ctx context.Context, req core.RunRequest) (result core
 	commandStart := b.now()
 	req.Observation.Phase(core.RunPhaseCommand)
 	stdout, stderr := req.Observation.CommandWriters(b.rt.Stdout, b.rt.Stderr, core.RunOutputWorkload)
-	exitCode, runErr := b.exec(ctx, client, name, workspace, req.Command, req.ShellMode, isloWorkloadEnv(req.Env, tailnetReady), workloadUser, stdout, stderr)
+	exitCode, runErr := b.exec(ctx, client, name, workspace, req, isloWorkloadEnv(req.Env, tailnetReady), workloadUser, stdout, stderr)
 	commandDuration := b.now().Sub(commandStart)
 	commandRan = true
 	result.Command = commandDuration
@@ -458,26 +412,22 @@ func (b *isloBackend) Status(ctx context.Context, req core.StatusRequest) (core.
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	deadline := b.now().Add(req.WaitTimeout)
-	if req.WaitTimeout <= 0 {
-		deadline = b.now().Add(5 * time.Minute)
-	}
-	for {
+	return shared.PollStatus(ctx, req, b.now, func(ctx context.Context) (core.StatusView, bool, error) {
 		sandbox, err := b.resolveIsloSandbox(ctx, client, leaseID, name)
 		if err != nil {
-			return core.StatusView{}, err
+			return core.StatusView{}, false, err
 		}
 		view := isloStatusView(leaseID, sandbox)
 		if view.Labels["islo_resource_id_mismatch"] == "true" {
 			if req.Wait {
-				return view, core.Exit(4, "islo sandbox %q does not identify resource %s claimed by lease %q; refusing to wait on an unverified resource", name, view.Labels["islo_claimed_resource_id"], leaseID)
+				return view, true, core.Exit(4, "islo sandbox %q does not identify resource %s claimed by lease %q; refusing to wait on an unverified resource", name, view.Labels["islo_claimed_resource_id"], leaseID)
 			}
-			return view, nil
+			return view, true, nil
 		}
 		var tailscaleValidationErr error
 		if sandbox != nil && isloStatusReady(sandbox.GetStatus()) {
 			if strings.TrimSpace(view.ServerID) == "" {
-				return core.StatusView{}, core.Exit(5, "islo sandbox %s returned no current name; refusing remote status checks", leaseID)
+				return core.StatusView{}, false, core.Exit(5, "islo sandbox %s returned no current name; refusing remote status checks", leaseID)
 			}
 			if _, err := b.ensureLeaseTailscale(ctx, client, view.ServerID, core.NewLeaseSlug(leaseID), leaseID, false); err != nil {
 				switch {
@@ -486,27 +436,19 @@ func (b *isloBackend) Status(ctx context.Context, req core.StatusRequest) (core.
 				case errors.Is(err, core.ErrTailnetPeerValidationUnavailable):
 					tailscaleValidationErr = err
 				default:
-					return core.StatusView{}, err
+					return core.StatusView{}, false, err
 				}
 			}
 		}
 		view = isloStatusView(leaseID, sandbox)
 		applyIsloTailscaleValidationError(&view, tailscaleValidationErr)
-		if !req.Wait || view.Ready {
-			return view, nil
+		if req.Wait && !view.Ready && isloStatusTerminal(view.State) {
+			return core.StatusView{}, false, core.Exit(5, "sandbox %s entered terminal state %q before becoming ready", name, view.State)
 		}
-		if isloStatusTerminal(view.State) {
-			return core.StatusView{}, core.Exit(5, "sandbox %s entered terminal state %q before becoming ready", name, view.State)
-		}
-		if b.now().After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for sandbox %s to become ready", name)
-		}
-		select {
-		case <-ctx.Done():
-			return core.StatusView{}, ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
-	}
+		return view, false, nil
+	}, func() error {
+		return core.Exit(5, "timed out waiting for sandbox %s to become ready", name)
+	})
 }
 
 func (b *isloBackend) Stop(ctx context.Context, req core.StopRequest) error {
@@ -630,6 +572,7 @@ func (b *isloBackend) createSandbox(ctx context.Context, client isloAPI, repo co
 	if b.cfg.Islo.DiskGB > 0 && (b.cfg.Islo.DiskGB != base.Islo.DiskGB || core.IsloDiskGBExplicit(b.cfg)) {
 		create.DiskGb = intValue(b.cfg.Islo.DiskGB)
 	}
+	create.Lifecycle = isloLifecycleForConfig(b.cfg)
 	sandbox, err := client.CreateSandbox(ctx, create)
 	if err != nil {
 		return "", "", "", core.LeaseClaim{}, b.unconfirmedCreateError(name, isloError("create sandbox", err))
@@ -703,12 +646,12 @@ func (b *isloBackend) cleanupCreatedIsloSandbox(client isloAPI, identity isloIde
 	return nil
 }
 
-func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir string, command []string, shellMode bool, env map[string]string, user string, stdout, stderr io.Writer) (int, error) {
-	execCommand, err := isloExecCommand(command, shellMode)
+func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir string, run core.RunRequest, env map[string]string, user string, stdout, stderr io.Writer) (int, error) {
+	intent, err := core.ParseCommandIntent(run.Command, run.ShellMode, run.CommandLiteralArgs)
 	if err != nil {
 		return 2, err
 	}
-	req := &gosdk.ExecRequest{Command: execCommand}
+	req := &gosdk.ExecRequest{Command: intent.Argv("bash", "-lc")}
 	if user != "" {
 		req.User = stringValue(user)
 	}
@@ -723,19 +666,6 @@ func (b *isloBackend) exec(ctx context.Context, client isloAPI, name, workdir st
 		}
 	}
 	return client.ExecStream(ctx, name, req, stdout, stderr)
-}
-
-func isloExecCommand(command []string, shellMode bool) ([]string, error) {
-	if len(command) == 0 {
-		return nil, errors.New("missing command")
-	}
-	if shellMode {
-		return []string{"bash", "-lc", strings.Join(command, " ")}, nil
-	}
-	if core.ShouldUseShell(command) || leadingEnvAssignment(command) {
-		return []string{"bash", "-lc", core.ShellScriptFromArgv(command)}, nil
-	}
-	return command, nil
 }
 
 func resolveIsloLeaseID(id, repoRoot string, reclaim bool) (string, string, string, error) {
@@ -795,6 +725,10 @@ func (b *isloBackend) resolveLeaseIDForRepo(ctx context.Context, client isloAPI,
 	}
 	if sandbox == nil || sandbox.GetName() != name {
 		return "", "", "", core.Exit(4, "islo sandbox %q was not found; refusing to create a local claim", name)
+	}
+	// Reclaim must not imply that the requested create-only policy was applied.
+	if err := isloLifecycleConflict(name, sandbox, b.cfg); err != nil {
+		return "", "", "", err
 	}
 	if _, err := b.publishIsloClaim(ctx, leaseID, slug, repoRoot, isloIdentityFromSandbox(sandbox)); err != nil {
 		return "", "", "", err
@@ -1059,10 +993,6 @@ func newIsloSandboxName(repo core.Repo) string {
 
 func isCrabboxIsloSandboxName(name string) bool {
 	return name == core.NormalizeLeaseSlug(name) && strings.HasPrefix(name, isloNamePrefix)
-}
-
-func leadingEnvAssignment(command []string) bool {
-	return len(command) > 1 && strings.Contains(command[0], "=") && !strings.HasPrefix(command[0], "-")
 }
 
 func stringValue(v string) *string { return &v }

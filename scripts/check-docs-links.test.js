@@ -57,6 +57,29 @@ test("docs link checker accepts local links with titles and angle brackets", (t)
   assert.equal(result.status, 0, result.stderr);
 });
 
+test("site heading checks ignore fenced and commented pseudoheadings", (t) => {
+  const dir = newDocsFixture(t);
+  writeFile(path.join(dir, "docs", "guide.md"), "## Setup\n```text\n## Setup\n```\n<!--\n## Setup\n-->\n## Setup\n");
+  writeFile(path.join(dir, "README.md"), "[second](docs/guide.md#setup-1)\n");
+  assert.equal(runChecker(dir).status, 0);
+  writeFile(path.join(dir, "README.md"), "[phantom](docs/guide.md#setup-2)\n");
+  const result = runChecker(dir);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /missing heading docs\/guide\.md#setup-2/);
+});
+
+test("site and repository heading targets retain distinct contracts", (t) => {
+  const dir = newDocsFixture(t);
+  writeFile(path.join(dir, "docs", "guide.md"), "##\tTabbed\n## <em>Marked</em>\n##### Deep\n");
+  writeFile(path.join(dir, "README.md"), "##### Deep\n## <em>Marked</em>\n[tab](docs/guide.md#tabbed)\n[tag](docs/guide.md#em-marked-em)\n[repository depth](#deep)\n[repository tag](#marked)\n");
+  const valid = runChecker(dir);
+  assert.equal(valid.status, 0, valid.stderr);
+  writeFile(path.join(dir, "docs", "links.md"), "[unsupported site depth](guide.md#deep)\n");
+  const invalid = runChecker(dir);
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /missing heading guide\.md#deep/);
+});
+
 function newDocsFixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-docs-links-"));
   fs.mkdirSync(path.join(dir, "docs"));
