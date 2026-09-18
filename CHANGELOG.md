@@ -4,7 +4,7 @@
 
 ### Fixes
 
-- Clarify that configured Actions fields and workflow-input inspection belong to hydration, while standalone dispatch sends only explicitly supplied fields.
+- Clarify that configured Actions fields and workflow-input inspection belong to hydration, while standalone dispatch sends only explicitly supplied fields. ([#2330](https://github.com/openclaw/crabbox/pull/2330))
 
 ## 0.61.0 - 2026-09-17
 
