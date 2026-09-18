@@ -6,60 +6,19 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type flagValues struct {
-	Image        *string
-	User         *string
-	WorkRoot     *string
-	CPUs         *int
-	Memory       *int
-	Switch       *string
-	InitPassword *bool
-}
-
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return flagValues{
-		Image:        fs.String("hyperv-image", defaults.HyperV.Image, "Windows VHDX template path for Hyper-V VM creation"),
-		User:         fs.String("hyperv-user", defaults.HyperV.User, "guest administrator account for SSH (password via CRABBOX_HYPERV_GUEST_PASSWORD)"),
-		WorkRoot:     fs.String("hyperv-work-root", defaults.HyperV.WorkRoot, "Crabbox work root inside the guest"),
-		CPUs:         fs.Int("hyperv-cpu", defaults.HyperV.CPUs, "CPU count for Hyper-V leases"),
-		Memory:       fs.Int("hyperv-memory", defaults.HyperV.Memory, "memory in MB for Hyper-V leases"),
-		Switch:       fs.String("hyperv-switch", defaults.HyperV.Switch, "Hyper-V virtual switch name"),
-		InitPassword: fs.Bool("hyperv-init-password", defaults.HyperV.InitPassword, "set the guest password at first boot via the lease disk (for password-less auto-logon templates, e.g. Windows dev-environment VHDXs)"),
-	}
+	return core.RegisterHyperVConfigFlags(fs, defaults.HyperV)
 }
 
 func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(flagValues)
+	v, ok := values.(core.HyperVConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "hyperv-image") {
-		cfg.HyperV.Image = *v.Image
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "hyperv-user") {
-		cfg.HyperV.User = *v.User
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "hyperv-work-root") {
-		cfg.HyperV.WorkRoot = *v.WorkRoot
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "hyperv-cpu") {
-		cfg.HyperV.CPUs = *v.CPUs
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "hyperv-memory") {
-		cfg.HyperV.Memory = *v.Memory
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "hyperv-switch") {
-		cfg.HyperV.Switch = *v.Switch
-		core.RecordProviderFlagInputs(cfg, true, providerName)
-	}
-	if core.FlagWasSet(fs, "hyperv-init-password") {
-		cfg.HyperV.InitPassword = *v.InitPassword
-		core.RecordProviderFlagInputs(cfg, true, providerName)
+	applied, err := v.Apply(&cfg.HyperV, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	if err != nil {
+		return err
 	}
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {
 		// Target flags are applied after provider flags on several lifecycle

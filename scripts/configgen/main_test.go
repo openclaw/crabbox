@@ -4424,3 +4424,15 @@ func TestStaticGeneratedConfigIsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHyperVGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_hyperv.go", "../../internal/cli/config_hyperv_generated.go", "HyperVConfig", "hyperv", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWindowsSandboxGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_windows_sandbox.go", "../../internal/cli/config_windows_sandbox_generated.go", "WindowsSandboxConfig", "windows-sandbox", true); err != nil {
+		t.Fatal(err)
+	}
+}

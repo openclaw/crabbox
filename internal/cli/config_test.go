@@ -19943,3 +19943,205 @@ func TestStaticFlagRegistrationContract(t *testing.T) {
 		}
 	}
 }
+
+func TestHyperVBindingFileContract(t *testing.T) {
+	clearConfigEnv(t)
+	if baseConfig().HyperV != (HyperVConfig{User: "crabbox", WorkRoot: `C:\crabbox`, CPUs: 4, Memory: 8192, Switch: "Default Switch"}) {
+		t.Fatal("compiled defaults differ")
+	}
+	for _, trusted := range []bool{false, true} {
+		for _, field := range []string{"Image", "User", "WorkRoot", "CPUs", "Memory", "Switch", "GuestPassword", "InitPassword"} {
+			for _, raw := range []string{"", " ", "synthetic-inert", "-1", "0", "7", "13", "false", "true"} {
+				cfg := Config{HyperV: HyperVConfig{Image: "prior", User: "prior", WorkRoot: "prior", CPUs: 7, Memory: 7, Switch: "prior", GuestPassword: "synthetic-prior", InitPassword: true}}
+				want := cfg.HyperV
+				input := fileHyperVConfig{}
+				accepted := false
+				switch field {
+				case "CPUs", "Memory":
+					n, err := strconv.Atoi(raw)
+					if err != nil {
+						continue
+					}
+					reflect.ValueOf(&input).Elem().FieldByName(field).SetInt(int64(n))
+					accepted = n > 0
+					if accepted {
+						reflect.ValueOf(&want).Elem().FieldByName(field).SetInt(int64(n))
+					}
+				case "InitPassword":
+					if raw == "true" || raw == "false" {
+						v := raw == "true"
+						input.InitPassword = &v
+						want.InitPassword = v
+						accepted = true
+					} else if raw != "" {
+						continue
+					}
+				default:
+					reflect.ValueOf(&input).Elem().FieldByName(field).SetString(raw)
+					accepted = raw != ""
+					if accepted {
+						reflect.ValueOf(&want).Elem().FieldByName(field).SetString(raw)
+					}
+				}
+				before, _ := yaml.Marshal(input)
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{HyperV: &input}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				after, _ := yaml.Marshal(input)
+				facts := cfg.inputProvenance["hyperv"]
+				bit := uint8(1 << (configInputRepo - 1))
+				if trusted {
+					bit = 1 << (configInputUser - 1)
+				}
+				if !accepted {
+					bit = 0
+				}
+				if cfg.HyperV != want || !bytes.Equal(before, after) || facts.values != bit || facts.intents != 0 {
+					t.Fatalf("file contract field=%s raw=%q trusted=%v", field, raw, trusted)
+				}
+			}
+		}
+	}
+}
+
+func TestHyperVBindingEnvironmentContract(t *testing.T) {
+	for _, field := range []struct{ name, key string }{{"Image", "IMAGE"}, {"User", "USER"}, {"WorkRoot", "WORK_ROOT"}, {"CPUs", "CPUS"}, {"Memory", "MEMORY"}, {"Switch", "SWITCH"}, {"GuestPassword", "GUEST_PASSWORD"}, {"InitPassword", "INIT_PASSWORD"}} {
+		for _, raw := range []string{"", " ", "synthetic-inert", " 7 ", "7", "+7", "0", "-1", "9223372036854775808", "-9223372036854775809", "true", " OFF ", "invalid"} {
+			clearConfigEnv(t)
+			for _, key := range []string{"IMAGE", "USER", "WORK_ROOT", "CPUS", "MEMORY", "SWITCH", "GUEST_PASSWORD", "INIT_PASSWORD"} {
+				t.Setenv("CRABBOX_HYPERV_"+key, "")
+			}
+			cfg := Config{HyperV: HyperVConfig{Image: "prior", User: "prior", WorkRoot: "prior", CPUs: 7, Memory: 7, Switch: "prior", GuestPassword: "synthetic-prior", InitPassword: true}}
+			want := cfg.HyperV
+			accepted := false
+			switch field.name {
+			case "CPUs", "Memory":
+				n, err := strconv.Atoi(raw)
+				accepted = err == nil
+				if accepted {
+					reflect.ValueOf(&want).Elem().FieldByName(field.name).SetInt(int64(n))
+				}
+			case "InitPassword":
+				accepted = raw == "true" || raw == " OFF " || raw == "0"
+				if accepted {
+					want.InitPassword = raw == "true"
+				}
+			default:
+				accepted = raw != ""
+				if accepted {
+					reflect.ValueOf(&want).Elem().FieldByName(field.name).SetString(raw)
+				}
+			}
+			t.Setenv("CRABBOX_HYPERV_"+field.key, raw)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			facts := cfg.inputProvenance["hyperv"]
+			if cfg.HyperV != want || (facts.values != 0) != accepted || facts.intents != 0 {
+				t.Fatalf("env contract field=%s raw=%q", field.name, raw)
+			}
+		}
+	}
+}
+
+func TestWindowsSandboxBindingFiles(t *testing.T) {
+	fields := []string{"Workdir", "TempRoot", "Networking", "VGPU", "Clipboard", "ProtectedClient", "AudioInput", "VideoInput", "PrinterRedirection", "MemoryMB"}
+	for _, trusted := range []bool{false, true} {
+		for _, field := range fields {
+			for _, raw := range []string{"", "  ", "prior", "~/fixture", "0", "-1", "8192"} {
+				cfg := baseConfig()
+				cfg.WindowsSandbox = WindowsSandboxConfig{Workdir: "prior", TempRoot: "prior", Networking: "prior", VGPU: "prior", Clipboard: "prior", ProtectedClient: "prior", AudioInput: "prior", VideoInput: "prior", PrinterRedirection: "prior", MemoryMB: 4096}
+				want := cfg.WindowsSandbox
+				file := &fileWindowsSandboxConfig{}
+				accepted := false
+				if field == "MemoryMB" {
+					n, _ := strconv.Atoi(raw)
+					file.MemoryMB = n
+					accepted = trusted && n > 0
+					if accepted {
+						want.MemoryMB = n
+					}
+				} else {
+					reflect.ValueOf(file).Elem().FieldByName(field).SetString(raw)
+					accepted = raw != "" && (trusted || field == "Workdir")
+					if accepted {
+						value := raw
+						if field == "TempRoot" {
+							value = expandUserPath(raw)
+						}
+						reflect.ValueOf(&want).Elem().FieldByName(field).SetString(value)
+					}
+				}
+				before := *file
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{WindowsSandbox: file}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				if *file != before || cfg.WindowsSandbox != want {
+					t.Fatalf("%s/%q trusted=%v got=%+v want=%+v", field, raw, trusted, cfg.WindowsSandbox, want)
+				}
+				source := configInputRepo
+				if trusted {
+					source = configInputUser
+				}
+				ledger := Config{}
+				recordConfigInput(&ledger, "windows-sandbox", source, accepted)
+				if cfg.inputProvenance["windows-sandbox"] != ledger.inputProvenance["windows-sandbox"] {
+					t.Fatal("file accepted facts")
+				}
+			}
+		}
+	}
+}
+
+func TestWindowsSandboxBindingEnvironment(t *testing.T) {
+	fields := []struct{ field, env string }{
+		{"Workdir", "WORKDIR"}, {"TempRoot", "TEMP_ROOT"}, {"Networking", "NETWORKING"}, {"VGPU", "VGPU"}, {"Clipboard", "CLIPBOARD"}, {"ProtectedClient", "PROTECTED_CLIENT"}, {"AudioInput", "AUDIO_INPUT"}, {"VideoInput", "VIDEO_INPUT"}, {"PrinterRedirection", "PRINTER_REDIRECTION"}, {"MemoryMB", "MEMORY_MB"},
+	}
+	for _, field := range fields {
+		for _, raw := range []string{"", "  ", "prior", "~/fixture", "0", "-1", "4096", "8192", " 12 ", "999999999999999999999999"} {
+			t.Run(field.field+"/"+raw, func(t *testing.T) {
+				clearConfigEnv(t)
+				cfg := baseConfig()
+				cfg.WindowsSandbox = WindowsSandboxConfig{Workdir: "prior", TempRoot: "~/retained-fixture", Networking: "prior", VGPU: "prior", Clipboard: "prior", ProtectedClient: "prior", AudioInput: "prior", VideoInput: "prior", PrinterRedirection: "prior", MemoryMB: 4096}
+				want := cfg.WindowsSandbox
+				want.TempRoot = expandUserPath(want.TempRoot)
+				accepted := raw != ""
+				if field.field == "MemoryMB" {
+					n, err := strconv.Atoi(raw)
+					accepted = err == nil
+					if accepted {
+						want.MemoryMB = n
+					}
+				} else if accepted {
+					value := raw
+					if field.field == "TempRoot" {
+						value = expandUserPath(raw)
+					}
+					reflect.ValueOf(&want).Elem().FieldByName(field.field).SetString(value)
+				}
+				t.Setenv("CRABBOX_WINDOWS_SANDBOX_"+field.env, raw)
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.WindowsSandbox != want {
+					t.Fatalf("got=%+v want=%+v", cfg.WindowsSandbox, want)
+				}
+				facts := cfg.inputProvenance["windows-sandbox"]
+				if (facts.values != 0) != accepted || facts.intents != 0 {
+					t.Fatal("environment accepted facts")
+				}
+			})
+		}
+	}
+	t.Run("absent-path-expands-without-acceptance", func(t *testing.T) {
+		clearConfigEnv(t)
+		cfg := baseConfig()
+		cfg.WindowsSandbox.TempRoot = "~/retained-fixture"
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.WindowsSandbox.TempRoot != expandUserPath("~/retained-fixture") || cfg.inputProvenance["windows-sandbox"].values != 0 {
+			t.Fatal("absent path expansion")
+		}
+	})
+}

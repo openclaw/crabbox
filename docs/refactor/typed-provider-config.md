@@ -271,6 +271,14 @@ phase untouched on that error. Environment path expansion remains unconditional
 on the final fallback values. Backend defaults and native operations stay
 outside the generated owner.
 
+Hyper-V's eight-field owner is `internal/cli/config_hyperv.go`. Its seven flags
+use automatic assignment before the unchanged selected-provider target/default
+phase. GuestPassword retains user/repository/environment input without an argv
+binding. File integers stay positive-only, environment integers retain tolerant
+signed parsing, and the nullable file bool preserves explicit false. The composed
+initializer combines generated scalar defaults with the existing Windows work
+root; runtime default repair and generic SSH projections remain separate.
+
 Static's six-field owner is `internal/cli/config_static.go`, with zero compiled
 defaults and canonical input owner `ssh`. Four generated flag bindings compose
 into the generic target flags, before target normalization and validation. Host
@@ -1137,3 +1145,17 @@ Do not mark a sensitive field as repo-safe just to make generation succeed.
 Remaining providers can be considered individually after their existing
 contracts are captured. This pilot does not mandate converting the full catalog
 or moving provider types out of core.
+
+Windows Sandbox declares all ten fields in `internal/cli/config_windows_sandbox.go`.
+Only Workdir admits repository files; the nine host settings remain trusted-file
+inputs. Generated bindings retain raw enum strings and positive-only file memory
+versus tolerant signed environment memory. The file wrapper expands TempRoot only
+when accepted; the environment wrapper also expands an inherited TempRoot when no
+environment value was accepted. Flags retain raw paths.
+
+Its existing manual flag application keeps wrong-type handling before selection,
+exact provider aliases, sizing guards, target/mode assignments, then ordered enum
+validation and nonnegative memory validation. Earlier accepted fields and facts
+survive later errors; final defaults run only after success. Generated storage,
+registration and raw presence replace the duplicated mechanical lists without
+moving host policy enforcement, native operations or runtime defaults.

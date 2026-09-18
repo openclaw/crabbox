@@ -544,30 +544,6 @@ type ParallelsHostConfig struct {
 // DefaultTartImage is the immutable built-in image; the Tart adapter verifies its contents.
 const DefaultTartImage = "ghcr.io/cirruslabs/macos-sequoia-base@sha256:785c3acb40fa5af6dd5aab96cd60408372c26125e173c14ea417498d086f829c"
 
-type HyperVConfig struct {
-	Image         string
-	User          string
-	WorkRoot      string
-	CPUs          int
-	Memory        int
-	Switch        string
-	GuestPassword string
-	InitPassword  bool
-}
-
-type WindowsSandboxConfig struct {
-	Workdir            string
-	TempRoot           string
-	Networking         string
-	VGPU               string
-	Clipboard          string
-	ProtectedClient    string
-	AudioInput         string
-	VideoInput         string
-	PrinterRedirection string
-	MemoryMB           int
-}
-
 type ResultsConfig struct {
 	JUnit          []string
 	Auto           bool
@@ -1810,23 +1786,8 @@ func baseConfig() Config {
 		Machine0:       defaultMachine0Config(),
 		Tart:           initialTartConfig(),
 		Lume:           defaultLumeConfig(),
-		HyperV: HyperVConfig{
-			User:     "crabbox",
-			WorkRoot: defaultWindowsWorkRoot,
-			CPUs:     4,
-			Memory:   8192,
-			Switch:   "Default Switch",
-		},
-		WindowsSandbox: WindowsSandboxConfig{
-			Workdir:            `C:\crabbox-work`,
-			Networking:         "Enable",
-			VGPU:               "Disable",
-			Clipboard:          "Disable",
-			ProtectedClient:    "Default",
-			AudioInput:         "Disable",
-			VideoInput:         "Disable",
-			PrinterRedirection: "Disable",
-		},
+		HyperV:         initialHyperVConfig(),
+		WindowsSandbox: defaultWindowsSandboxConfig(),
 		Tailscale: TailscaleConfig{
 			Tags:             []string{"tag:crabbox"},
 			HostnameTemplate: "crabbox-{slug}",
@@ -2303,30 +2264,6 @@ func positiveMinimum(current, candidate int) int {
 		return candidate
 	}
 	return min(current, candidate)
-}
-
-type fileHyperVConfig struct {
-	Image         string `yaml:"image,omitempty"`
-	User          string `yaml:"user,omitempty"`
-	WorkRoot      string `yaml:"workRoot,omitempty"`
-	CPUs          int    `yaml:"cpus,omitempty"`
-	Memory        int    `yaml:"memory,omitempty"`
-	Switch        string `yaml:"switch,omitempty"`
-	GuestPassword string `yaml:"guestPassword,omitempty"`
-	InitPassword  *bool  `yaml:"initPassword,omitempty"`
-}
-
-type fileWindowsSandboxConfig struct {
-	Workdir            string `yaml:"workdir,omitempty"`
-	TempRoot           string `yaml:"tempRoot,omitempty"`
-	Networking         string `yaml:"networking,omitempty"`
-	VGPU               string `yaml:"vgpu,omitempty"`
-	Clipboard          string `yaml:"clipboard,omitempty"`
-	ProtectedClient    string `yaml:"protectedClient,omitempty"`
-	AudioInput         string `yaml:"audioInput,omitempty"`
-	VideoInput         string `yaml:"videoInput,omitempty"`
-	PrinterRedirection string `yaml:"printerRedirection,omitempty"`
-	MemoryMB           int    `yaml:"memoryMB,omitempty"`
 }
 
 type fileTailscaleConfig struct {
@@ -3940,83 +3877,15 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.HyperV != nil {
-		if file.HyperV.Image != "" {
-			cfg.HyperV.Image = file.HyperV.Image
-			recordConfigInput(cfg, "hyperv", inputSource, true)
-		}
-		if file.HyperV.User != "" {
-			cfg.HyperV.User = file.HyperV.User
-			recordConfigInput(cfg, "hyperv", inputSource, true)
-		}
-		if file.HyperV.WorkRoot != "" {
-			cfg.HyperV.WorkRoot = file.HyperV.WorkRoot
-			recordConfigInput(cfg, "hyperv", inputSource, true)
-		}
-		if file.HyperV.CPUs > 0 {
-			cfg.HyperV.CPUs = file.HyperV.CPUs
-			recordConfigInput(cfg, "hyperv", inputSource, true)
-		}
-		if file.HyperV.Memory > 0 {
-			cfg.HyperV.Memory = file.HyperV.Memory
-			recordConfigInput(cfg, "hyperv", inputSource, true)
-		}
-		if file.HyperV.Switch != "" {
-			cfg.HyperV.Switch = file.HyperV.Switch
-			recordConfigInput(cfg, "hyperv", inputSource, true)
-		}
-		if file.HyperV.GuestPassword != "" {
-			cfg.HyperV.GuestPassword = file.HyperV.GuestPassword
-			recordConfigInput(cfg, "hyperv", inputSource, true)
-		}
-		if file.HyperV.InitPassword != nil {
-			cfg.HyperV.InitPassword = *file.HyperV.InitPassword
-			recordConfigInput(cfg, "hyperv", inputSource, true)
+	{
+		applied, err := cfg.HyperV.applyFile(file.HyperV)
+		recordConfigInput(cfg, "hyperv", inputSource, applied.InputAccepted)
+		if err != nil {
+			return err
 		}
 	}
-	if file.WindowsSandbox != nil {
-		if file.WindowsSandbox.Workdir != "" {
-			cfg.WindowsSandbox.Workdir = file.WindowsSandbox.Workdir
-			recordConfigInput(cfg, "windows-sandbox", inputSource, true)
-		}
-		if trusted {
-			if file.WindowsSandbox.TempRoot != "" {
-				cfg.WindowsSandbox.TempRoot = expandUserPath(file.WindowsSandbox.TempRoot)
-				recordConfigInput(cfg, "windows-sandbox", inputSource, true)
-			}
-			if file.WindowsSandbox.Networking != "" {
-				cfg.WindowsSandbox.Networking = file.WindowsSandbox.Networking
-				recordConfigInput(cfg, "windows-sandbox", inputSource, true)
-			}
-			if file.WindowsSandbox.VGPU != "" {
-				cfg.WindowsSandbox.VGPU = file.WindowsSandbox.VGPU
-				recordConfigInput(cfg, "windows-sandbox", inputSource, true)
-			}
-			if file.WindowsSandbox.Clipboard != "" {
-				cfg.WindowsSandbox.Clipboard = file.WindowsSandbox.Clipboard
-				recordConfigInput(cfg, "windows-sandbox", inputSource, true)
-			}
-			if file.WindowsSandbox.ProtectedClient != "" {
-				cfg.WindowsSandbox.ProtectedClient = file.WindowsSandbox.ProtectedClient
-				recordConfigInput(cfg, "windows-sandbox", inputSource, true)
-			}
-			if file.WindowsSandbox.AudioInput != "" {
-				cfg.WindowsSandbox.AudioInput = file.WindowsSandbox.AudioInput
-				recordConfigInput(cfg, "windows-sandbox", inputSource, true)
-			}
-			if file.WindowsSandbox.VideoInput != "" {
-				cfg.WindowsSandbox.VideoInput = file.WindowsSandbox.VideoInput
-				recordConfigInput(cfg, "windows-sandbox", inputSource, true)
-			}
-			if file.WindowsSandbox.PrinterRedirection != "" {
-				cfg.WindowsSandbox.PrinterRedirection = file.WindowsSandbox.PrinterRedirection
-				recordConfigInput(cfg, "windows-sandbox", inputSource, true)
-			}
-			if file.WindowsSandbox.MemoryMB > 0 {
-				cfg.WindowsSandbox.MemoryMB = file.WindowsSandbox.MemoryMB
-				recordConfigInput(cfg, "windows-sandbox", inputSource, true)
-			}
-		}
+	if err := applyWindowsSandboxFileConfig(cfg, file.WindowsSandbox, trusted, inputSource); err != nil {
+		return err
 	}
 	if file.Tailscale != nil {
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Tailscale.Enabled, file.Tailscale.Enabled))
@@ -5362,27 +5231,16 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	cfg.HyperV.Image = configInputEnvString(cfg, "hyperv", cfg.HyperV.Image, "CRABBOX_HYPERV_IMAGE")
-	cfg.HyperV.User = configInputEnvString(cfg, "hyperv", cfg.HyperV.User, "CRABBOX_HYPERV_USER")
-	cfg.HyperV.WorkRoot = configInputEnvString(cfg, "hyperv", cfg.HyperV.WorkRoot, "CRABBOX_HYPERV_WORK_ROOT")
-	cfg.HyperV.CPUs = configInputEnvInt(cfg, "hyperv", cfg.HyperV.CPUs, "CRABBOX_HYPERV_CPUS")
-	cfg.HyperV.Memory = configInputEnvInt(cfg, "hyperv", cfg.HyperV.Memory, "CRABBOX_HYPERV_MEMORY")
-	cfg.HyperV.Switch = configInputEnvString(cfg, "hyperv", cfg.HyperV.Switch, "CRABBOX_HYPERV_SWITCH")
-	cfg.HyperV.GuestPassword = configInputEnvString(cfg, "hyperv", cfg.HyperV.GuestPassword, "CRABBOX_HYPERV_GUEST_PASSWORD")
-	if value, ok := getenvBool("CRABBOX_HYPERV_INIT_PASSWORD"); ok {
-		cfg.HyperV.InitPassword = value
-		recordConfigInput(cfg, "hyperv", configInputEnvironment, true)
+	{
+		applied, err := cfg.HyperV.applyEnv()
+		recordConfigInput(cfg, "hyperv", configInputEnvironment, applied.InputAccepted)
+		if err != nil {
+			return err
+		}
 	}
-	cfg.WindowsSandbox.Workdir = configInputEnvString(cfg, "windows-sandbox", cfg.WindowsSandbox.Workdir, "CRABBOX_WINDOWS_SANDBOX_WORKDIR")
-	cfg.WindowsSandbox.TempRoot = expandUserPath(configInputEnvString(cfg, "windows-sandbox", cfg.WindowsSandbox.TempRoot, "CRABBOX_WINDOWS_SANDBOX_TEMP_ROOT"))
-	cfg.WindowsSandbox.Networking = configInputEnvString(cfg, "windows-sandbox", cfg.WindowsSandbox.Networking, "CRABBOX_WINDOWS_SANDBOX_NETWORKING")
-	cfg.WindowsSandbox.VGPU = configInputEnvString(cfg, "windows-sandbox", cfg.WindowsSandbox.VGPU, "CRABBOX_WINDOWS_SANDBOX_VGPU")
-	cfg.WindowsSandbox.Clipboard = configInputEnvString(cfg, "windows-sandbox", cfg.WindowsSandbox.Clipboard, "CRABBOX_WINDOWS_SANDBOX_CLIPBOARD")
-	cfg.WindowsSandbox.ProtectedClient = configInputEnvString(cfg, "windows-sandbox", cfg.WindowsSandbox.ProtectedClient, "CRABBOX_WINDOWS_SANDBOX_PROTECTED_CLIENT")
-	cfg.WindowsSandbox.AudioInput = configInputEnvString(cfg, "windows-sandbox", cfg.WindowsSandbox.AudioInput, "CRABBOX_WINDOWS_SANDBOX_AUDIO_INPUT")
-	cfg.WindowsSandbox.VideoInput = configInputEnvString(cfg, "windows-sandbox", cfg.WindowsSandbox.VideoInput, "CRABBOX_WINDOWS_SANDBOX_VIDEO_INPUT")
-	cfg.WindowsSandbox.PrinterRedirection = configInputEnvString(cfg, "windows-sandbox", cfg.WindowsSandbox.PrinterRedirection, "CRABBOX_WINDOWS_SANDBOX_PRINTER_REDIRECTION")
-	cfg.WindowsSandbox.MemoryMB = configInputEnvInt(cfg, "windows-sandbox", cfg.WindowsSandbox.MemoryMB, "CRABBOX_WINDOWS_SANDBOX_MEMORY_MB")
+	if err := applyWindowsSandboxEnvironmentConfig(cfg); err != nil {
+		return err
+	}
 	if value, ok := getenvBool("CRABBOX_TAILSCALE"); ok {
 		cfg.Tailscale.Enabled = value
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
