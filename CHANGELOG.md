@@ -9,7 +9,7 @@
 - Add replay-safe fixed Proxmox lease IDs with durable VMID/generation binding, conflict checks, retained uncertain attempts, and terminal release tombstones. [PR 1861](https://github.com/openclaw/crabbox/pull/1861), [Issue 1847](https://github.com/openclaw/crabbox/issues/1847). Thanks @devinkuhn.
 - Migrate Boxd to TLS gRPC with API-key authentication, independently verified isolation, and immutable-ID cleanup, including recovery of legacy console claims. [PR 1718](https://github.com/openclaw/crabbox/pull/1718). Thanks @MichielMAnalytics.
 - Add opt-in direct-host Parallels capacity limits through `parallels.maxVMs` and `CRABBOX_PARALLELS_MAX_VMS`, preserve fleet-entry precedence, and let explicit YAML zero clear inherited limits. [PR 2392](https://github.com/openclaw/crabbox/pull/2392), [Issue 2386](https://github.com/openclaw/crabbox/issues/2386). Thanks @saariuslystoned.
-- Add durable fixed lease IDs for Agent Sandbox with exact Kubernetes identity replay and foreground terminal confirmation. [Issue 1742](https://github.com/openclaw/crabbox/issues/1742).
+- Add durable fixed lease IDs for Agent Sandbox with exact Kubernetes identity replay and foreground terminal confirmation. [Issue 1742](https://github.com/openclaw/crabbox/issues/1742). [PR 2342](https://github.com/openclaw/crabbox/pull/2342). Thanks @jimmybrancaccio.
 
 ### Fixes
 
