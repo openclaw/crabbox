@@ -2346,9 +2346,10 @@ func TestAgentActivityPublicCodeCompatibility(t *testing.T) {
 // fixedPositiveClient models the documented normal foreground completion path.
 type fixedPositiveClient struct {
 	*fakeKubernetesClient
-	t          *testing.T
-	leaseID    string
-	foreground int
+	t               *testing.T
+	leaseID         string
+	foreground      int
+	afterForeground func(context.Context)
 }
 
 func (f *fixedPositiveClient) Create(ctx context.Context, ref resourceRef, namespace string, obj *kubernetesObject) (*kubernetesObject, error) {
@@ -2368,6 +2369,9 @@ func (f *fixedPositiveClient) DeleteForeground(ctx context.Context, ref resource
 	delete(f.objects, sandboxResource+"/"+namespace+"/"+name+"-sandbox")
 	delete(f.objects, "pods/"+namespace+"/"+name+"-pod")
 	f.foreground++
+	if f.afterForeground != nil {
+		f.afterForeground(ctx)
+	}
 	return nil
 }
 
@@ -2518,5 +2522,54 @@ func TestFixedWarmupReplayKeepsPublishedWorkload(t *testing.T) {
 	}
 	if after.Labels["fixed_pod_uid"] != before.Labels["fixed_pod_uid"] || after.Labels["fixed_sandbox_uid"] != before.Labels["fixed_sandbox_uid"] || after.Labels[claimLabelContainer] != before.Labels[claimLabelContainer] || fake.creates != 1 {
 		t.Fatal("replay silently rebound published workload")
+	}
+}
+
+func TestFixedStopParentContextPreservesPendingFinality(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deadline=%t", deadline), func(t *testing.T) {
+			cfg := testAgentSandboxConfig(t)
+			const id = "cbx_174200000004"
+			fake := &fixedPositiveClient{fakeKubernetesClient: readyFakeClient(cfg), t: t, leaseID: id}
+			fake.objects[warmPoolResource+"/"+cfg.AgentSandbox.Namespace+"/"+cfg.AgentSandbox.WarmPool] = &kubernetesObject{Metadata: objectMeta{Name: cfg.AgentSandbox.WarmPool, UID: "pool-fixed-cancel"}}
+			b := testBackend(cfg, fake.fakeKubernetesClient, nil, nil)
+			b.newClient = func(context.Context, core.Config, core.Runtime) (kubernetesClient, error) { return fake, nil }
+			req := core.FixedWarmupRequest{WarmupRequest: core.WarmupRequest{Repo: testGitRepo(t), RequestedSlug: "fixed-cancel", Keep: true}, RequestedLeaseID: id, OnAcquired: func(core.FixedAcquisitionReceipt) error { return nil }}
+			if err := b.WarmupFixed(t.Context(), req); err != nil {
+				t.Fatal(err)
+			}
+			parent, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			want := error(context.Canceled)
+			if deadline {
+				var deadlineCancel context.CancelFunc
+				parent, deadlineCancel = context.WithTimeout(parent, 2*time.Second)
+				defer deadlineCancel()
+				want = context.DeadlineExceeded
+			}
+			fake.afterForeground = func(context.Context) {
+				// The controller has completed deletion, but confirmation must still obey the caller.
+				fake.getStarted = make(chan struct{}, 1)
+				fake.getRelease = make(chan struct{})
+				if !deadline {
+					cancel()
+				}
+			}
+			if err := b.Stop(parent, core.StopRequest{ID: id}); !errors.Is(err, want) {
+				t.Fatalf("stop err=%v, want %v", err, want)
+			}
+			pending, err := core.ReadLeaseClaim(id)
+			if err != nil || pending.FixedCreateIntent.State == "released" || pending.FixedCreateIntent.Attempt["delete_ack"] != pending.CloudImmutableID || fake.foreground != 1 {
+				t.Fatalf("confirmation lost pending receipt: claim=%#v err=%v deletes=%d", pending, err, fake.foreground)
+			}
+			fake.getStarted, fake.getRelease, fake.afterForeground = nil, nil, nil
+			if err := b.Stop(t.Context(), core.StopRequest{ID: id}); err != nil {
+				t.Fatal(err)
+			}
+			terminal, err := core.ReadLeaseClaim(id)
+			if err != nil || terminal.FixedCreateIntent.State != "released" || terminal.CloudImmutableID != pending.CloudImmutableID || fake.foreground != 1 {
+				t.Fatalf("retry finality: claim=%#v err=%v deletes=%d", terminal, err, fake.foreground)
+			}
+		})
 	}
 }

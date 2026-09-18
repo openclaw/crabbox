@@ -332,7 +332,10 @@ For fixed leases, the resource identity reported by status is the immutable
 and before readiness/completion. An acknowledgment or readiness failure retains
 the fixed handle for replay or explicit stop.
 
-Fixed stop uses UID-preconditioned **Foreground** deletion and bounded confirmation.
+Fixed stop uses UID-preconditioned **Foreground** deletion with a two-minute
+budget for deletion and completion confirmation, including normal pod termination.
+An earlier caller deadline or cancellation still ends the wait. If confirmation
+does not finish, the fixed handle remains available for a later stop retry.
 It retains local custody until the original claim disappears under the verified
 scope and warm-pool incarnation, and checks already-known Sandbox/Pod handles.
 The supported controller's normal foreground contract is the completion signal;

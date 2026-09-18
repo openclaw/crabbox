@@ -13,7 +13,11 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-const fixedPoolUIDLabel = "fixed_warm_pool_uid"
+const (
+	fixedPoolUIDLabel = "fixed_warm_pool_uid"
+	// Foreground completion includes the workload termination grace period.
+	fixedCleanupTimeout = 2 * time.Minute
+)
 
 var fixedClaimKind = core.FixedLeaseKind{
 	ClaimProvider: core.FixedAgentSandboxClaimProvider, IntentVersion: 1, Label: "agent-sandbox",
@@ -277,7 +281,7 @@ func (b *backend) stopFixed(ctx context.Context, id string, expected core.Provid
 }
 
 func (b *backend) releaseFixedLocked(ctx context.Context, client kubernetesClient, expectedClaim core.LeaseClaim, expected core.ProviderIdentityExpectation, repo string) error {
-	cleanupCtx, cancel := context.WithTimeout(ctx, agentSandboxCleanupTimeout)
+	cleanupCtx, cancel := context.WithTimeout(ctx, fixedCleanupTimeout)
 	defer cancel()
 	return core.WithDurableLeaseClaimLockContext(cleanupCtx, expectedClaim.LeaseID, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
 		if !exists || !reflect.DeepEqual(*claim, expectedClaim) {
