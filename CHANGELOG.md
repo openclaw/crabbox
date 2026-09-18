@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Let explicit broker heartbeats wait for provider access refreshes using the existing mutation budget, while preserving shorter automatic-heartbeat and foreground-touch deadlines, caller cancellation, and single-request behavior.
+- Let explicit broker heartbeats wait for provider access refreshes using the existing mutation budget, while preserving shorter automatic-heartbeat and foreground-touch deadlines, caller cancellation, and single-request behavior. [PR 2331](https://github.com/openclaw/crabbox/pull/2331). Thanks @steipete.
 
 ## 0.61.0 - 2026-09-17
 
