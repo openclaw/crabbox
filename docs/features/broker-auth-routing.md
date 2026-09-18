@@ -157,6 +157,10 @@ needs its own OAuth app: the callback URL must exactly match the public origin, 
 `CRABBOX_PUBLIC_URL` must use that same origin (it is used to build the callback and
 to canonicalize portal redirects). GitHub OAuth refuses to start without this setting,
 and callbacks from another origin are rejected before code exchange or session issuance.
+The Node direct-Host fallback requires the direct `Host` to exactly match the host and
+port in `CRABBOX_PUBLIC_URL`. It does not trust forwarded host, protocol, or
+client-address assertions from unknown peers, so canonical HTTPS routing remains stable
+when provider edge peer addresses change.
 
 For CLI login, the public callback redirects completion to a one-use
 `http://127.0.0.1:<random-port>/crabbox/oauth/<random-path>` listener created by
@@ -184,6 +188,10 @@ Login is gated by GitHub org membership before a user token is minted:
 - The allowed org set comes from `CRABBOX_GITHUB_ALLOWED_ORG` or comma-separated
   `CRABBOX_GITHUB_ALLOWED_ORGS`; if neither is set, it falls back to `CRABBOX_DEFAULT_ORG`.
   If no allowed org resolves, login is rejected.
+- If `CRABBOX_GITHUB_ALLOWED_OWNERS` is set, the immutable account owner must match one of
+  its comma-separated, canonical `github:<positive-numeric-id>` entries. Unset or blank
+  preserves org/team-only admission. Invalid or mutable entries fail closed, and policy
+  changes reject existing signed user and portal tokens before a warm membership cache is used.
 - The user must be an **active** member of an allowed org.
 - If `CRABBOX_GITHUB_ALLOWED_TEAMS` (or `CRABBOX_GITHUB_ALLOWED_TEAM`) is set, the user must
   also belong to at least one listed team after org membership passes. Entries are team
@@ -203,6 +211,7 @@ Login is gated by GitHub org membership before a user token is minted:
 ```text
 CRABBOX_GITHUB_CLIENT_ID
 CRABBOX_GITHUB_CLIENT_SECRET
+CRABBOX_GITHUB_ALLOWED_OWNERS    # optional; comma-separated github:<positive-numeric-id> owners
 CRABBOX_GITHUB_ALLOWED_ORG       # or CRABBOX_GITHUB_ALLOWED_ORGS (comma-separated)
 CRABBOX_GITHUB_ALLOWED_TEAMS     # optional; comma-separated team slugs
 CRABBOX_GITHUB_ADMIN_OWNERS      # optional; comma-separated github:<numeric-id> owners with admin

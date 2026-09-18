@@ -12,7 +12,7 @@ operational guardrail, not invoice reconciliation. Provider extras such as stati
 charges, egress, snapshots, taxes, credits, and discounts are not modeled.
 
 Cost tracking only applies to brokered providers (`aws`, `azure`, `daytona`,
-`gcp`, `hetzner`). Direct-from-CLI leases never reach the broker and are not
+`gcp`, `hetzner`, `koyeb`). Direct-from-CLI leases never reach the broker and are not
 accounted for.
 
 ## Reading `crabbox usage`

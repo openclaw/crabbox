@@ -6,6 +6,7 @@ import os from "node:os";
 import test from "node:test";
 
 import { markdownToHtml, readAgentSkills } from "./build-docs-site.mjs";
+import { render as renderProviderMatrix, validate as validateProviderMetadata } from "./generate-provider-matrix.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const providersDir = path.join(repoRoot, "docs", "providers");
@@ -354,6 +355,52 @@ generatedTest("provider index renders filterable rows in a scroll region", () =>
     new Set(["managed-cloud", "team-cloud"]),
     "Daytona should be discoverable as both a managed sandbox and coordinator-backed provider",
   );
+  assert.match(element(matrixRegion, "tr", /data-provider="koyeb"/), /coordinator only/);
+  assert.match(element(matrixRegion, "tr", /data-provider="daytona"/), /coordinator optional/);
+});
+
+test("provider matrix distinguishes coordinator requirements", () => {
+  const metadata = JSON.parse(fs.readFileSync(path.join(providersDir, "provider-metadata.json"), "utf8"));
+  const providers = [
+    { provider: "koyeb", kind: "ssh-lease", coordinator: "supported", targets: ["linux"] },
+    { provider: "daytona", kind: "ssh-lease", coordinator: "supported", targets: ["linux"] },
+    { provider: "ssh", kind: "ssh-lease", coordinator: "never", targets: ["linux"] },
+  ];
+  const matrix = renderProviderMatrix(providers, metadata);
+
+  assert.match(matrix, /^\| \[koyeb\].*coordinator only;/m);
+  assert.match(matrix, /^\| \[daytona\].*coordinator optional;/m);
+  assert.match(matrix, /^\| \[ssh\].*direct only;/m);
+});
+
+test("provider matrix validates optional coordinator-only metadata", () => {
+  const metadata = JSON.parse(fs.readFileSync(path.join(providersDir, "provider-metadata.json"), "utf8"));
+  const provider = {
+    provider: "koyeb",
+    kind: "ssh-lease",
+    coordinator: "supported",
+    features: ["crabbox-sync"],
+  };
+  const profile = { ...metadata.koyeb };
+  delete profile.coordinatorOnly;
+
+  assert.doesNotThrow(() => validateProviderMetadata([provider], { koyeb: profile }));
+  for (const coordinatorOnly of [false, true]) {
+    assert.doesNotThrow(() => validateProviderMetadata([provider], {
+      koyeb: { ...profile, coordinatorOnly },
+    }));
+  }
+  for (const coordinatorOnly of [null, "true", 1, [], {}]) {
+    assert.throws(() => validateProviderMetadata([provider], {
+      koyeb: { ...profile, coordinatorOnly },
+    }), /koyeb\.coordinatorOnly must be a boolean/);
+  }
+  assert.throws(() => validateProviderMetadata([{ ...provider, coordinator: "never" }], {
+    koyeb: { ...profile, coordinatorOnly: true },
+  }), /koyeb\.coordinatorOnly requires coordinator support/);
+  assert.doesNotThrow(() => validateProviderMetadata([{ ...provider, coordinator: "never" }], {
+    koyeb: { ...profile, coordinatorOnly: false },
+  }));
 });
 
 generatedTest("provider search includes credential and API-key metadata", () => {

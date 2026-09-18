@@ -12,6 +12,7 @@ import {
   nodeCoordinatorEnv,
   requiresAWSDeploymentReadiness,
 } from "./aws-deployment";
+import { databasePoolsResponse } from "./database-pools";
 import { NodeCoordinatorRuntime, type NodeUpgradeContext } from "./node-runtime";
 import {
   AsyncOperationTracker,
@@ -22,6 +23,7 @@ import {
   fleetRequestQueue,
   isReadinessRequestMethod,
   isTrustedProxySource,
+  nodeRequestOrigin,
   nodeResponseHeaders,
   nodeRequestAbortSignal,
   readNodeRequestBody,
@@ -107,6 +109,14 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse)
       if (!readBody) {
         request.destroy();
       }
+      return;
+    }
+    const poolResponse = databasePoolsResponse(prepared.request, prepared.authenticated, () =>
+      runtime.databasePools(),
+    );
+    if (poolResponse) {
+      await writeResponse(response, poolResponse, true);
+      request.destroy();
       return;
     }
     if (requiresAWSDeploymentReadiness(prepared.request)) {
@@ -250,14 +260,14 @@ function webRequestFromNode(
   context: NodeRequestContext,
   signal?: AbortSignal,
 ): Request {
-  const protocol = context.trustedProxy
-    ? firstHeader(request.headers["x-forwarded-proto"]) || "http"
-    : "http";
-  const forwardedHost = context.trustedProxy
-    ? firstHeader(request.headers["x-forwarded-host"])
-    : "";
-  const host = forwardedHost || request.headers.host || "localhost";
-  const url = `${protocol}://${host}${request.url || "/"}`;
+  const origin = nodeRequestOrigin({
+    directHost: request.headers.host,
+    forwardedHost: firstHeader(request.headers["x-forwarded-host"]),
+    forwardedProtocol: firstHeader(request.headers["x-forwarded-proto"]),
+    publicURL: env.CRABBOX_PUBLIC_URL,
+    trustedProxy: context.trustedProxy,
+  });
+  const url = `${origin}${request.url || "/"}`;
   const headers = new Headers();
   for (const [name, value] of Object.entries(request.headers)) {
     if (Array.isArray(value)) {

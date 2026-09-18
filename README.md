@@ -256,7 +256,7 @@ Start with the environment you already have:
 | A cloud account | [AWS](docs/providers/aws.md), [Azure](docs/providers/azure.md), [Google Cloud](docs/providers/gcp.md), [Hetzner](docs/providers/hetzner.md) |
 | Your own virtualization infrastructure | [Proxmox](docs/providers/proxmox.md), [Incus](docs/providers/incus.md), [Firecracker](docs/providers/firecracker.md) |
 | Apple Silicon | [Apple VM](docs/providers/apple-vm.md), [Apple Container](docs/providers/apple-container.md) |
-| A managed sandbox service | [Daytona](docs/providers/daytona.md), [E2B](docs/providers/e2b.md), [Modal](docs/providers/modal.md) |
+| A managed sandbox service | [Daytona](docs/providers/daytona.md), [E2B](docs/providers/e2b.md), [Koyeb](docs/providers/koyeb.md), [Modal](docs/providers/modal.md) |
 | GPU workloads | [RunPod](docs/providers/runpod.md) |
 
 **[Browse the complete provider matrix →](docs/providers/README.md)**

@@ -87,7 +87,7 @@ selection metadata. Regenerate it with `node scripts/generate-provider-matrix.mj
 `scripts/check-docs.sh` fails when provider registration, metadata, docs paths, or
 this generated table drift.
 
-Current built-in surface: 81 providers (46 SSH lease, 31 delegated run, 4 service control).
+Current built-in surface: 82 providers (47 SSH lease, 31 delegated run, 4 service control).
 
 Access terms:
 
@@ -135,6 +135,7 @@ Access terms:
 | [hyperv](hyperv.md) | built-in; `ssh-lease` · local-vm | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup` | `windows/normal`; Microsoft Hyper-V VM | `local`; GPU: no | Crabbox; VM delete | Local native Windows VM | Windows host with Hyper-V required |
 | [incus](incus.md) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `workspace-checkpoint`, `workspace-fork` | `linux`; Incus container or VM | `self-hosted`; GPU: optional | Crabbox; instance delete | Self-hosted Linux containers or VMs | Accessible Incus daemon required; native checkpoints capture container root disks only |
 | [islo](islo.md) | built-in; `delegated-run` · delegated-sandbox | Provider-specific SSH; `provider-owned` · direct only; features: `ssh`, `url-bridge`, `run-session`, `tailscale`, `pause-resume`, `run-downloads`, `lease-heartbeat` | `linux`; Islo sandbox | `provider-managed`; GPU: unknown | Islo; sandbox delete | Hosted delegated execution with keep, pause, and SSH helper | SSH feature is not Crabbox-managed sync/run |
+| [koyeb](koyeb.md) | built-in; `ssh-lease` · brokerable-cloud | Crabbox-managed SSH; `crabbox-sync` · coordinator only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code`, `tailscale` | `linux`; Koyeb Sandbox | `cloud`; GPU: no | Crabbox coordinator and Koyeb; owned Sandbox service delete | Ephemeral Linux desktop, browser, code, and shell sessions on Koyeb | Requires an immutable runner image and Koyeb API credentials on the coordinator |
 | [kubevirt](kubevirt.md) (`kubernetes-vm`) | built-in; `ssh-lease` · self-hosted-virtualization | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `desktop`, `browser`, `code` | `linux`; KubeVirt VirtualMachine | `self-hosted`; GPU: optional | Crabbox on Kubernetes; VirtualMachine delete | Kubernetes-hosted Linux VM | Needs KubeVirt, virtctl, and an SSH-ready template |
 | [lambda](lambda.md) | built-in; `ssh-lease` · gpu-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Lambda Cloud on-demand instance | `cloud`; GPU: yes | Crabbox; instance and key termination | Direct GPU-backed Linux workload over SSH | Direct-only; billing, quota, and capacity are account-owned |
 | [linode](linode.md) | built-in; `ssh-lease` · direct-cloud | Crabbox-managed SSH; `crabbox-sync` · direct only; features: `ssh`, `crabbox-sync`, `cleanup`, `tailscale` | `linux`; Linode instance | `cloud`; GPU: optional | Crabbox; instance and key delete | Straightforward direct Linux VM | Direct-only; optional firewall must already exist |

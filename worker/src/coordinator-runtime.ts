@@ -103,6 +103,14 @@ export function coordinatorRequestQueue(request: Request): CoordinatorRequestQue
     return "direct";
   }
   if (
+    path[0] === "v1" &&
+    path[1] === "leases" &&
+    path[3] === "project-checkpoint" &&
+    path.length === 4
+  ) {
+    return "direct";
+  }
+  if (
     method === "PUT" &&
     path[0] === "v1" &&
     path[1] === "leases" &&

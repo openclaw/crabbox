@@ -57,7 +57,9 @@ func applyDefaults(cfg *core.Config) {
 		cfg.TargetOS = targetLinux
 	}
 	cfg.WindowsMode = ""
-	cfg.SSHPort = sshPort
+	if !core.IsSSHPortExplicit(cfg) {
+		cfg.SSHPort = sshPort
+	}
 	cfg.SSHFallbackPorts = nil
 	if strings.TrimSpace(cfg.Machine0.CLIPath) == "" {
 		cfg.Machine0.CLIPath = base.CLIPath
@@ -1172,7 +1174,7 @@ func (b *backend) prepareLeaseWithOptions(ctx context.Context, item machine, ser
 			return core.LeaseTarget{}, err
 		}
 	}
-	target := core.SSHTarget{User: user, Host: item.IP, Key: keyPath, KnownHostsFile: knownHostsFile, Port: sshPort, TargetOS: targetLinux, NetworkKind: core.NetworkPublic, ReadyCheck: "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"}
+	target := core.SSHTarget{User: user, Host: item.IP, Key: keyPath, KnownHostsFile: knownHostsFile, Port: cfg.SSHPort, TargetOS: targetLinux, NetworkKind: core.NetworkPublic, ReadyCheck: "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null"}
 	if opts.Check {
 		if err := b.waitSSH(ctx, &target, core.BootstrapWaitTimeout(cfg)); err != nil {
 			return core.LeaseTarget{}, err

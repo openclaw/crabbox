@@ -181,6 +181,9 @@ export async function confirmHetznerServerCleanup(
   ) {
     throw new Error("unresolved Hetzner cleanup: invalid or conflicting exact server identity");
   }
+  if (lease.providerCleanup && lease.providerCleanup.provider !== "hetzner") {
+    throw new Error("invalid retained Hetzner cleanup evidence");
+  }
   let evidence: HetznerCleanupEvidence = lease.providerCleanup ?? {
     version: 1,
     provider: "hetzner",

@@ -37,6 +37,7 @@ export function publicLeaseRecord(record: LeaseRecord): PublicLeaseRecord {
   delete publicRecord.fixedCreateIntentHash;
   delete publicRecord.createAttemptID;
   delete publicRecord.createAttemptGeneration;
+  delete publicRecord.readyPoolConsumedKey;
   return publicRecord;
 }
 

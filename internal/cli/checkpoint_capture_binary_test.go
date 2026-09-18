@@ -676,6 +676,7 @@ type checkpointCaptureFixture struct {
 
 func newCheckpointCaptureFixture(t *testing.T, repo, binary string) *checkpointCaptureFixture {
 	t.Helper()
+	sshPort := startTCPReadinessFixture(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -692,7 +693,7 @@ func newCheckpointCaptureFixture(t *testing.T, repo, binary string) *checkpointC
 			t.Fatal(err)
 		}
 	}
-	config := "provider: machine0\nnetwork: public\nmachine0:\n  cliPath: " + filepath.Join(root, "native", "machine0") + "\n  size: large\n  region: eu\n  image: ubuntu-24-04\n"
+	config := "provider: machine0\nnetwork: public\nssh:\n  port: " + sshPort + "\nmachine0:\n  cliPath: " + filepath.Join(root, "native", "machine0") + "\n  size: large\n  region: eu\n  image: ubuntu-24-04\n"
 	if err := os.WriteFile(filepath.Join(root, "config.yaml"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -712,7 +713,8 @@ func newCheckpointCaptureFixture(t *testing.T, repo, binary string) *checkpointC
 	cfg.Provider, cfg.TargetOS, cfg.Network = "machine0", "linux", NetworkPublic
 	cfg.Machine0.Size, cfg.Machine0.Region, cfg.Machine0.Image = "large", "eu", "ubuntu-24-04"
 	cfg.ServerType, cfg.WorkRoot = cfg.Machine0.Size, cfg.Machine0.WorkRoot
-	cfg.WindowsMode, cfg.SSHPort, cfg.SSHFallbackPorts = "", "22", nil
+	cfg.WindowsMode, cfg.SSHPort, cfg.SSHFallbackPorts = "", sshPort, nil
+	MarkSSHPortExplicit(&cfg)
 	fingerprint, err := FixedMachine0CreateIntentFingerprint(cfg, FixedMachine0CreateIntentRequest{Keep: true})
 	if err != nil {
 		t.Fatal(err)

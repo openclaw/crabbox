@@ -57,10 +57,11 @@ type ProviderArchitectureCapability interface {
 }
 
 type ProviderReadyPoolLeaseImageIdentity struct {
-	Provider string
-	Region   string
-	Project  string
-	Image    *CoordinatorLeaseImage
+	Provider   string
+	Region     string
+	Project    string
+	ServerType string
+	Image      *CoordinatorLeaseImage
 }
 
 type ProviderReadyPoolImageIdentityRequest struct {

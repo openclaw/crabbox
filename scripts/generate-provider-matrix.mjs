@@ -37,11 +37,13 @@ const allowed = {
   gpu: new Set(["yes", "optional", "no", "unknown"])
 };
 
-try {
-  main();
-} catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  }
 }
 
 function main() {
@@ -109,7 +111,7 @@ function readProviderMatrix() {
   }
 }
 
-function validate(providers, metadata) {
+export function validate(providers, metadata) {
   const names = new Set(providers.map((provider) => provider.provider));
   const metadataNames = new Set(Object.keys(metadata));
   const missing = [...names].filter((name) => !metadataNames.has(name));
@@ -142,6 +144,12 @@ function validate(providers, metadata) {
         fail(`${provider.provider}.${field} has invalid value ${JSON.stringify(profile[field])}`);
       }
     }
+    if (Object.hasOwn(profile, "coordinatorOnly") && typeof profile.coordinatorOnly !== "boolean") {
+      fail(`${provider.provider}.coordinatorOnly must be a boolean`);
+    }
+    if (profile.coordinatorOnly === true && provider.coordinator !== "supported") {
+      fail(`${provider.provider}.coordinatorOnly requires coordinator support`);
+    }
     const docsPath = path.join(root, "docs", "providers", profile.docs);
     if (!profile.docs.endsWith(".md") || !fs.existsSync(docsPath)) {
       fail(`${provider.provider}.docs does not exist: ${profile.docs}`);
@@ -161,7 +169,7 @@ function validate(providers, metadata) {
   }
 }
 
-function render(providers, metadata) {
+export function render(providers, metadata) {
   const counts = new Map();
   for (const provider of providers) {
     counts.set(provider.kind, (counts.get(provider.kind) ?? 0) + 1);
@@ -192,7 +200,9 @@ function render(providers, metadata) {
     const profile = metadata[provider.provider];
     const aliases = provider.aliases?.length ? ` (${provider.aliases.map(code).join(", ")})` : "";
     const features = provider.features?.length ? provider.features.map(code).join(", ") : "none";
-    const coordinator = provider.coordinator === "supported" ? "coordinator optional" : "direct only";
+    const coordinator = provider.coordinator === "supported"
+      ? (profile.coordinatorOnly === true ? "coordinator only" : "coordinator optional")
+      : "direct only";
     lines.push(
       `| [${escapeCell(provider.provider)}](${escapeLink(profile.docs)})${aliases} | ${escapeCell(profile.status)}; ${code(provider.kind)} · ${escapeCell(profile.category)} | ${sshLabel(profile.ssh)}; ${code(profile.sync)} · ${escapeCell(coordinator)}; features: ${features} | ${provider.targets.map(code).join(", ")}; ${escapeCell(profile.substrate)} | ${code(profile.location)}; GPU: ${escapeCell(profile.gpu)} | ${escapeCell(profile.lifecycle)}; ${escapeCell(profile.cleanup)} | ${escapeCell(profile.bestFit)} | ${escapeCell(profile.caveat)} |`
     );

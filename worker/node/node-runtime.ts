@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 
+import { Pool } from "pg";
 import { PgBoss } from "pg-boss";
 import { WebSocket as NodeWebSocket, WebSocketServer, type RawData } from "ws";
 
@@ -18,6 +19,7 @@ import {
   type CoordinatorWebSocketUpgrade,
   type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
+import { DatabasePoolsObservation, type DatabasePoolsSnapshot } from "./database-pools";
 import { PostgresCoordinatorStorage } from "./postgres-storage";
 
 const alarmQueue = "coordinator-alarm";
@@ -46,6 +48,8 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
   readonly storage: PostgresCoordinatorStorage;
   readonly ephemeralWebSocketMaxPayloadBytes = 1024 * 1024;
   private readonly boss: PgBoss;
+  private readonly jobsPool: Pool;
+  private readonly poolObservation: DatabasePoolsObservation;
   private readonly webSocketServers = new Map<number, WebSocketServer>();
   private readonly upgradeContext = new AsyncLocalStorage<NodeUpgradeContext>();
   private readonly attachments = new WeakMap<WebSocket, unknown>();
@@ -68,16 +72,29 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
 
   constructor(connectionString: string) {
     this.storage = new PostgresCoordinatorStorage(connectionString);
+    // Preserve PgBoss's pg.Pool defaults while owning the supported SQL adapter.
+    this.jobsPool = new Pool({
+      connectionString,
+      application_name: "crabbox-coordinator-jobs",
+      connectionTimeoutMillis: 10_000,
+    });
+    this.poolObservation = new DatabasePoolsObservation(this.storage.pool, this.jobsPool);
     this.boss = new PgBoss({
       connectionString,
       schema: "crabbox_jobs",
       application_name: "crabbox-coordinator-jobs",
+      db: { executeSql: (text, values) => this.jobsPool.query(text, values) },
     });
     this.boss.on("error", (error) => {
       console.error("coordinator job queue error", error);
     });
+    this.jobsPool.on("error", (error) => this.boss.emit("error", error));
     this.pingInterval = setInterval(() => this.pingSockets(), 30_000);
     this.pingInterval.unref();
+  }
+
+  databasePools(): DatabasePoolsSnapshot {
+    return this.poolObservation.snapshot();
   }
 
   async start(alarmHandler: () => Promise<void>): Promise<void> {
@@ -147,6 +164,8 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     await this.drainMaintenance();
     if (this.wakeHintRun) await boundedWakeHint(this.wakeHintRun);
     await this.boss.stop({ graceful: true, timeout: 10_000 });
+    // PgBoss deliberately does not close an externally owned IDatabase adapter.
+    await this.jobsPool.end();
     await this.storage.close();
   }
 

@@ -963,6 +963,9 @@ func (b *coordinatorLeaseBackend) Status(ctx context.Context, req StatusRequest)
 		ID:                           lease.ID,
 		Slug:                         lease.Slug,
 		Provider:                     blank(lease.Provider, b.cfg.Provider),
+		ProviderProject:              lease.ProviderProject,
+		ProviderScope:                lease.ProviderScope,
+		Region:                       lease.Region,
 		TargetOS:                     blank(target.TargetOS, b.cfg.TargetOS),
 		WorkRoot:                     statusWorkRoot(b.cfg, server, target),
 		WindowsMode:                  blank(target.WindowsMode, b.cfg.WindowsMode),
@@ -1118,7 +1121,8 @@ func filterCoordinatorLeasesForProvider(leases []CoordinatorLease, provider stri
 }
 
 func redactCoordinatorLeaseListSecrets(leases []CoordinatorLease) []CoordinatorLease {
-	out := append([]CoordinatorLease(nil), leases...)
+	out := make([]CoordinatorLease, len(leases))
+	copy(out, leases)
 	for i := range out {
 		if strings.EqualFold(strings.TrimSpace(out[i].Provider), "daytona") && out[i].SSHUser != "" {
 			out[i].SSHUser = "<token>"
@@ -1238,6 +1242,8 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 			}
 			observationCoord = adminCoord
 		} else {
+			// A hidden 404 or absence from filtered, capped user inventory is
+			// not authoritative deletion proof. Preserve local retry artifacts.
 			return false, err
 		}
 	}

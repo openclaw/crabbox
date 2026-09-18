@@ -23,6 +23,12 @@ const claimDuration = 45_000;
 const retryDelay = 15_000;
 const maxRecordBytes = 100 * 1024;
 
+class ProvisioningCleanupAuthorityRevokedError extends Error {
+  constructor(cause?: unknown) {
+    super("provisioning cleanup owner or resource identity changed", { cause });
+  }
+}
+
 export interface LeaseProvisioningOperation extends ProvisioningMaterialBinding {
   owner: string;
   org: string;
@@ -242,7 +248,10 @@ export class LeaseProvisioningController {
   constructor(
     private readonly runtime: CoordinatorRuntime,
     private readonly env: Env,
-    private readonly provider: (provider: Provider) => ProviderResumableProvisioning | undefined,
+    private readonly provider: (
+      provider: Provider,
+      lease: LeaseRecord,
+    ) => ProviderResumableProvisioning | undefined,
     private readonly publish: (
       transaction: CoordinatorStorageView,
       lease: LeaseRecord,
@@ -309,7 +318,8 @@ export class LeaseProvisioningController {
         operation.step.phase === "terminal" ||
         operation.step.phase === "retained" ||
         operation.step.nextWake > now ||
-        (operation.claim && operation.claim.expiresAt > now)
+        (operation.claim && operation.claim.expiresAt > now) ||
+        (await transaction.get(`provisioning-quarantine:${leaseID}`))
       )
         return undefined;
       const journal = await transaction.get<ProvisioningAttemptJournal>(
@@ -392,7 +402,7 @@ export class LeaseProvisioningController {
     const { operation, lease, plan, sealed } = claimed;
     let result: ProvisioningStep;
     try {
-      const capability = this.provider(operation.provider);
+      const capability = this.provider(operation.provider, lease);
       if (
         !capability ||
         !plan ||
@@ -408,6 +418,8 @@ export class LeaseProvisioningController {
               material: await openProvisioningMaterial(this.env, operation, sealed),
             }
           : { canceled: true as const };
+      const expectedPlan = JSON.stringify(plan);
+      const expectedState = JSON.stringify(operation.step.state);
       result = await capability.advance({
         plan,
         step: structuredClone(operation.step),
@@ -416,9 +428,69 @@ export class LeaseProvisioningController {
         deadline: operation.deadline,
         retain: operation.retain === true,
         recovering: operation.step.delivery! > 1,
+        assertCleanupOwner: async () => {
+          let authorized: boolean;
+          try {
+            authorized = await runtime.commitAndWake(async (transaction) => {
+              const current = await transaction.get<LeaseProvisioningOperation>(
+                provisioningOperationKey(leaseID),
+              );
+              const latest = await transaction.get<LeaseRecord>(`lease:${leaseID}`);
+              const journalKey = provisioningAttemptKey(operation);
+              const journal = await transaction.get<ProvisioningAttemptJournal>(journalKey);
+              const currentPlan = await transaction.get<FrozenProvisioningPlan>(
+                provisioningPlanKey(operation.operationID),
+              );
+              const coordinationOwner = operation.step.coordinationKey
+                ? await transaction.get<string>(
+                    `provisioning-lock:${operation.step.coordinationKey}`,
+                  )
+                : undefined;
+              if (
+                !validOperation(current) ||
+                current.operationID !== operation.operationID ||
+                current.generation !== operation.generation ||
+                current.revision !== operation.revision ||
+                !current.claim ||
+                current.claim.id !== claimID ||
+                current.step.attempt !== operation.step.attempt ||
+                current.step.phase !== operation.step.phase ||
+                current.step.coordinationKey !== operation.step.coordinationKey ||
+                !latest ||
+                !matchesLease(operation, latest) ||
+                !matchesLease(current, latest)
+              )
+                return false;
+              if (
+                !validJournal(journal, current) ||
+                (current.step.state as { journal?: unknown })?.journal !== journalKey ||
+                JSON.stringify(journal.state) !== expectedState ||
+                JSON.stringify(currentPlan) !== expectedPlan
+              ) {
+                // Never let a stale result restore deleted or replaced durable identity evidence.
+                await quarantineDue(transaction, provisioningDueKey(current), leaseID);
+                return false;
+              }
+              return (
+                current.claim.expiresAt > Date.now() &&
+                current.retain !== true &&
+                latest.releaseDeletesServer !== false &&
+                (operation.step.coordinationKey === undefined ||
+                  coordinationOwner === operation.operationID)
+              );
+            });
+          } catch (cause) {
+            // Failed authority reads/quarantine must not enter the stale-step recovery path either.
+            throw new ProvisioningCleanupAuthorityRevokedError(cause);
+          }
+          if (!authorized || operation.claim!.expiresAt <= Date.now())
+            throw new ProvisioningCleanupAuthorityRevokedError();
+        },
       });
       validateProvisioningRecord(result);
-    } catch {
+    } catch (error) {
+      // A newer claim or revoked evidence owns the next delivery; do not restore our hydrated step.
+      if (error instanceof ProvisioningCleanupAuthorityRevokedError) return;
       result = {
         ...operation.step,
         phase: "blocked",

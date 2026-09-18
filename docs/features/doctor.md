@@ -117,7 +117,7 @@ selected from any higher-precedence source remains strict, including an
 explicit flag that happens to select the same provider as the compiled default.
 
 **Brokered path (coordinator configured).** For providers whose coordinator
-support is `supported` (`aws`, `azure`, `daytona`, `gcp`, `hetzner`), doctor asks
+support is `supported` (`aws`, `azure`, `daytona`, `gcp`, `hetzner`, `koyeb`), doctor asks
 the broker for secret readiness. Missing coordinator secret names are reported
 without exposing values, for example
 `missing=AZURE_TENANT_ID,AZURE_SUBSCRIPTION_ID`. The broker

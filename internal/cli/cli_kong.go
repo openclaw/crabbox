@@ -76,6 +76,8 @@ type crabboxKongCLI struct {
 	Pool           poolKongCmd           `cmd:"" help:"Alias commands for machine pools."`
 	Machine        machineKongCmd        `cmd:"" help:"Alias commands for direct-provider machines."`
 	Pond           pondKongCmd           `cmd:"" help:"Pond bridge plane: peer discovery for delegated providers."`
+
+	ProjectCheckpoint projectCheckpointKongCmd `cmd:"" passthrough:"" help:"Manage generation-bound project filesystem checkpoints."`
 }
 
 type kongExit struct {
@@ -599,6 +601,7 @@ type controllerStateValidateKongCmd struct {
 }
 
 type poolKongCmd struct {
+	Claim     poolClaimKongCmd     `cmd:"" passthrough:"" help:"Select and claim a clean single-use runner, or record an explicit cold miss."`
 	List      poolListKongCmd      `cmd:"" passthrough:"" help:"List machine inventory."`
 	Ready     poolReadyKongCmd     `cmd:"" passthrough:"" help:"List ready-pool leases."`
 	Identity  poolIdentityKongCmd  `cmd:"" passthrough:"" help:"Generate a typed ready-pool identity from an existing lease."`
@@ -609,6 +612,12 @@ type poolKongCmd struct {
 	Ensure    poolEnsureKongCmd    `cmd:"" passthrough:"" help:"Ensure ready-pool capacity."`
 }
 type poolListKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type poolClaimKongCmd struct {
+	Args []string `arg:"" optional:""`
+}
+type projectCheckpointKongCmd struct {
 	Args []string `arg:"" optional:""`
 }
 type poolReadyKongCmd struct {
@@ -945,6 +954,12 @@ func (c *poolReadyKongCmd) Run(ctx context.Context, app App) error {
 }
 func (c *poolIdentityKongCmd) Run(ctx context.Context, app App) error {
 	return app.readyPoolIdentity(ctx, stripKongCommandPath(c.Args, "pool", "identity"))
+}
+func (c *poolClaimKongCmd) Run(ctx context.Context, app App) error {
+	return app.readyPoolClaim(ctx, stripKongCommandPath(c.Args, "pool", "claim"))
+}
+func (c *projectCheckpointKongCmd) Run(ctx context.Context, app App) error {
+	return app.projectCheckpoint(ctx, stripKongCommandPath(c.Args, "project-checkpoint"))
 }
 func (c *poolRegisterKongCmd) Run(ctx context.Context, app App) error {
 	return app.readyPoolRegister(ctx, stripKongCommandPath(c.Args, "pool", "register"))

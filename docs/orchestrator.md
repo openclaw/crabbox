@@ -26,7 +26,7 @@ How a command reaches a provider is decided by `loadBackend`
 (`internal/cli/provider_backend.go`):
 
 - **Brokered.** The provider's spec advertises coordinator support (`aws`,
-  `azure`, `daytona`, `gcp`, `hetzner`) *and* a broker URL is configured
+  `azure`, `daytona`, `gcp`, `hetzner`, `koyeb`) *and* a broker URL is configured
   (`CRABBOX_COORDINATOR` or `config set-broker`). Lease lifecycle calls go
   through the coordinator over HTTP; the CLI still opens SSH and runs commands
   directly against the box.
@@ -36,8 +36,9 @@ How a command reaches a provider is decided by `loadBackend`
 - **Delegated.** Sandbox/run providers that own sync and execution end to end.
   The CLI never opens its own SSH or rsync session.
 
-The five brokerable providers run direct unless a broker is configured, so
-"brokered" is a deployment choice, not a property of the provider alone.
+The five general brokerable providers run direct unless a broker is configured,
+so "brokered" is a deployment choice for them. Koyeb is the exception: its
+one-call bootstrap and cleanup require the coordinator's durable journal.
 
 Brokered Daytona leases use the coordinator's API key to create the sandbox and
 mint an expiring SSH access token. The CLI receives that token as a secret SSH

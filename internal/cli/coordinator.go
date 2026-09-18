@@ -97,6 +97,7 @@ type CoordinatorLease struct {
 	Tailscale                    *TailscaleMetadata             `json:"tailscale,omitempty"`
 	Region                       string                         `json:"region,omitempty"`
 	ProviderProject              string                         `json:"providerProject,omitempty"`
+	ProviderScope                string                         `json:"providerScope,omitempty"`
 	Owner                        string                         `json:"owner"`
 	Org                          string                         `json:"org"`
 	Share                        *CoordinatorShare              `json:"share,omitempty"`
@@ -199,6 +200,7 @@ type CoordinatorLeaseImage struct {
 	Provider   string `json:"provider,omitempty"`
 	Kind       string `json:"kind,omitempty"`
 	Region     string `json:"region,omitempty"`
+	Scope      string `json:"scope,omitempty"`
 	SourceID   string `json:"sourceID,omitempty"`
 	PromotedAt string `json:"promotedAt,omitempty"`
 	Revision   string `json:"revision,omitempty"`

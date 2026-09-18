@@ -135,7 +135,8 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
     provider !== "aws" &&
     provider !== "azure" &&
     provider !== "gcp" &&
-    provider !== "daytona"
+    provider !== "daytona" &&
+    provider !== "koyeb"
   ) {
     throw new Error(`unsupported provider: ${String(provider)}`);
   }
@@ -179,7 +180,8 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
       provider === "hetzner" ||
       provider === "azure" ||
       provider === "gcp" ||
-      provider === "daytona"
+      provider === "daytona" ||
+      provider === "koyeb"
     ) {
       throw new Error(unsupportedManagedTargetMessage(provider, target));
     }
@@ -260,7 +262,7 @@ export function leaseConfig(input: LeaseRequest, defaults: LeaseConfigDefaults =
           architecture,
           serverTypeAzureOSDisk,
         ));
-  if (input.serverType && provider !== "daytona") {
+  if (input.serverType && provider !== "daytona" && provider !== "koyeb") {
     validateArchitectureServerType(
       provider,
       target,
@@ -809,22 +811,6 @@ function uniqueStrings(values: string[]): string[] {
 
 export function serverTypeForClass(machineClass: string): string {
   return serverTypeCandidatesForClass(machineClass)[0] ?? machineClass;
-}
-
-export function serverTypeForProviderClass(provider: Provider, machineClass: string): string {
-  if (provider === "daytona") {
-    return "snapshot";
-  }
-  if (provider === "aws") {
-    return awsInstanceTypeCandidatesForClass(machineClass)[0] ?? machineClass;
-  }
-  if (provider === "azure") {
-    return azureVMSizeCandidatesForClass(machineClass)[0] ?? machineClass;
-  }
-  if (provider === "gcp") {
-    return gcpMachineTypeCandidatesForClass(machineClass)[0] ?? machineClass;
-  }
-  return serverTypeForClass(machineClass);
 }
 
 export function serverTypeForConfig(

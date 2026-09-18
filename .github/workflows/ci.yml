@@ -20,6 +20,41 @@ env:
   GOTOOLCHAIN: local
 
 jobs:
+  koyeb-runner-preflight:
+    name: Koyeb runner preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Require native production architecture
+        run: test "$(uname -m)" = x86_64
+      - name: Install Worker test dependencies
+        run: npm ci --prefix worker --ignore-scripts --no-audit --no-fund
+      - name: Validate runner build contract
+        run: node images/koyeb-sandbox-runner/contract.test.mjs
+      - name: Build the packaged candidate
+        run: docker build --platform linux/amd64 --tag crabbox-runner:candidate images/koyeb-sandbox-runner
+      - name: Execute packaged executor, SSH, browser and terminal boundaries
+        shell: bash
+        run: |
+          set -o pipefail
+          node images/koyeb-sandbox-runner/preflight.mjs --image crabbox-runner:candidate | tee "$RUNNER_TEMP/koyeb-runner-preflight.txt"
+      - name: Retain packaged runner evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: koyeb-runner-preflight-${{ github.sha }}
+          path: ${{ runner.temp }}/koyeb-runner-preflight.txt
+          if-no-files-found: ignore
+          retention-days: 90
+
   go-test:
     name: Go test
     runs-on: ubuntu-latest

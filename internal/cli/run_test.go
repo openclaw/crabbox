@@ -2466,6 +2466,7 @@ func TestRunCommandWritesBrokeredReusedAWSLeaseOutputBeforeCommand(t *testing.T)
 		t.Run(tc.name, func(t *testing.T) {
 			clearConfigEnv(t)
 			dir := t.TempDir()
+			sshPort := startTCPReadinessFixture(t)
 			isolateRunTestUserDirs(t, dir)
 			t.Chdir(dir)
 			t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
@@ -2505,7 +2506,7 @@ exit 0
 				State:              "active",
 				Host:               "127.0.0.1",
 				SSHUser:            "crabbox",
-				SSHPort:            "22",
+				SSHPort:            sshPort,
 				SSHHostKey:         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICFNHmH+uXzuQadD4Pg9JhPQvl5fkM4L9spUDQ/mI+pc",
 				WorkRoot:           "/work/crabbox",
 				IdleTimeoutSeconds: 1800,
@@ -3171,6 +3172,7 @@ func TestPrintRunContextSummaryRedactsCoordinatorURLCredentials(t *testing.T) {
 func TestRunCommandInjectsReservedMetadataIntoStaticSSH(t *testing.T) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
+	sshPort := startTCPReadinessFixture(t)
 	isolateRunTestUserDirs(t, dir)
 	logPath := installRecordingSSH(t, dir)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "missing.yaml"))
@@ -3179,6 +3181,7 @@ func TestRunCommandInjectsReservedMetadataIntoStaticSSH(t *testing.T) {
 		"--provider", "ssh",
 		"--static-host", "127.0.0.1",
 		"--static-user", "runner",
+		"--static-port", sshPort,
 		"--static-work-root", "/tmp/crabbox-static-test",
 		"--no-sync",
 		"--",
@@ -5633,6 +5636,7 @@ func TestRunCommandEmptyReplacementLists(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			clearConfigEnv(t)
 			dir := t.TempDir()
+			sshPort := startTCPReadinessFixture(t)
 			t.Chdir(dir)
 			t.Setenv("CRABBOX_CONFIG", "")
 			logPath := installRecordingSSH(t, dir)
@@ -5644,7 +5648,7 @@ func TestRunCommandEmptyReplacementLists(t *testing.T) {
 			}
 			writeReplacementListConfig(t, "crabbox.yaml", fmt.Sprintf("env:\n  allow: [CI, NODE_OPTIONS, BUILD_FLAVOR]\nresults:\n  junit: [old-report.xml]\n  auto: %t\nrun:\n  preflightTools: [cmake]\n", tc.auto))
 			writeReplacementListConfig(t, ".crabbox.yaml", "env:\n  allow: []\nresults:\n  junit: []\nrun:\n  preflightTools: []\n")
-			args := []string{"--provider", "ssh", "--static-host", "127.0.0.1", "--static-user", "runner", "--static-work-root", filepath.Join(dir, "remote"), "--no-sync", "--preflight"}
+			args := []string{"--provider", "ssh", "--static-host", "127.0.0.1", "--static-user", "runner", "--static-port", sshPort, "--static-work-root", filepath.Join(dir, "remote"), "--no-sync", "--preflight"}
 			if runtime.GOOS == "darwin" {
 				args = append(args, "--target", "macos")
 			}

@@ -347,6 +347,22 @@ func TestEffectiveMachine0WorkRootUsesResolvedSSHUser(t *testing.T) {
 	}
 }
 
+func TestPrepareLeasePreservesExplicitSSHPort(t *testing.T) {
+	setupState(t)
+	item := readyMachine("203.0.113.10")
+	b := testBackendWithAPI(&fakeAPI{machine: item})
+	b.cfg.SSHPort = "2205"
+	core.MarkSSHPortExplicit(&b.cfg)
+
+	lease, err := b.prepareLease(context.Background(), item, core.Server{CloudID: item.ID}, "cbx_port", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SSH.Port != "2205" {
+		t.Fatalf("SSHPort=%q want 2205", lease.SSH.Port)
+	}
+}
+
 func TestPrepareLeaseUsesDeterministicPrivateMachineKnownHosts(t *testing.T) {
 	keyRoot := t.TempDir()
 	t.Setenv("SSH_KEY_PATH", keyRoot)

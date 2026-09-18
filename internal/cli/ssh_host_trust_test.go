@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -762,6 +763,77 @@ func TestCoordinatorReleaseObservationProviderMismatchFailsClosed(t *testing.T) 
 	}
 	if _, exists, err := ReadLeaseClaimWithPresence(leaseID); err != nil || !exists {
 		t.Fatalf("claim exists=%t err=%v, want retained", exists, err)
+	}
+}
+
+func TestCoordinatorReleaseHidden404PreservesArtifacts(t *testing.T) {
+	for _, inventoryCount := range []int{0, 1000} {
+		t.Run(fmt.Sprintf("inventory_excludes_target_with_%d_entries", inventoryCount), func(t *testing.T) {
+			isolateTestUserDirs(t)
+			configureCoordinatorReleaseTestTiming(t, time.Second, 0)
+			const leaseID = "cbx_abcdef123456"
+			keyPath, err := testboxKeyPath(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			artifacts := map[string][]byte{
+				keyPath:          []byte("private"),
+				keyPath + ".pub": []byte("public"),
+				filepath.Join(filepath.Dir(keyPath), "known_hosts"): []byte("retained host trust\n"),
+			}
+			for path, contents := range artifacts {
+				if err := os.WriteFile(path, contents, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := ClaimLeaseTargetForConfig(leaseID, "release-test", Config{Provider: "aws"}, Server{Provider: "aws"}, SSHTarget{}, time.Hour); err != nil {
+				t.Fatal(err)
+			}
+			claimPath, err := leaseClaimPath(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts[claimPath], err = os.ReadFile(claimPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			leases := make([]CoordinatorLease, inventoryCount)
+			for i := range leases {
+				leases[i] = CoordinatorLease{ID: fmt.Sprintf("cbx_%012d", i), Provider: "aws", State: "active"}
+			}
+			var releasePosts, inventoryRequests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/release":
+					releasePosts.Add(1)
+					http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/leases":
+					inventoryRequests.Add(1)
+					_ = json.NewEncoder(w).Encode(map[string]any{"leases": leases})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+			backend := coordinatorReleaseTestBackend(server, io.Discard)
+			outcome, err := backend.ReleaseLeaseWithOutcome(t.Context(), ReleaseLeaseRequest{Lease: LeaseTarget{
+				LeaseID: leaseID, Server: Server{Provider: "aws"},
+			}})
+			if err == nil || !isCoordinatorNotFoundError(err) || outcome.Terminal {
+				t.Errorf("outcome=%+v err=%v, want nonterminal missing-target failure", outcome, err)
+			}
+			for path, before := range artifacts {
+				if after, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(after, before) {
+					t.Errorf("artifact changed after unconfirmed release: %s err=%v", path, readErr)
+				}
+			}
+			if posts, lists := releasePosts.Load(), inventoryRequests.Load(); posts == 0 || lists != 0 {
+				t.Errorf("release POSTs=%d inventory requests=%d; inventory cannot prove deletion", posts, lists)
+			}
+		})
 	}
 }
 

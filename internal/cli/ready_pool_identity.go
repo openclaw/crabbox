@@ -163,10 +163,11 @@ func readyPoolIdentityMatchesLeaseWithProvider(provider Provider, identity Coord
 	if !ok || !capability.ReadyPoolImageIdentityMatchesLease(ProviderReadyPoolImageIdentityRequest{
 		Identity: identity.Image,
 		Lease: ProviderReadyPoolLeaseImageIdentity{
-			Provider: lease.Provider,
-			Region:   lease.Region,
-			Project:  lease.ProviderProject,
-			Image:    lease.Image,
+			Provider:   lease.Provider,
+			Region:     lease.Region,
+			Project:    lease.ProviderProject,
+			ServerType: lease.ServerType,
+			Image:      lease.Image,
 		},
 	}) {
 		return Exit(7, "coordinator lease provider, immutable image, or scope does not match ready-pool identity")

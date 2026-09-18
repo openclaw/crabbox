@@ -10,6 +10,12 @@ export interface AWSCredentials {
 export type AWSCredentialProvider = () => Promise<AWSCredentials>;
 
 export interface Env {
+  CRABBOX_PROJECT_CHECKPOINTS_ENABLED?: string;
+  CRABBOX_PROJECT_CHECKPOINT_TARGET?: string;
+  CRABBOX_PROJECT_CHECKPOINT_AUTHORITY?: string;
+  CRABBOX_PROJECT_CHECKPOINT_KEY_ID?: string;
+  CRABBOX_PROJECT_CHECKPOINT_ROOTS?: string;
+  CRABBOX_PROJECT_CHECKPOINT_PREVIOUS_KEYS?: string;
   FLEET: DurableObjectNamespace;
   CF_VERSION_METADATA?: {
     id: string;
@@ -95,6 +101,19 @@ export interface Env {
   CRABBOX_DAYTONA_WORK_ROOT?: string;
   CRABBOX_DAYTONA_SSH_GATEWAY_HOST?: string;
   CRABBOX_DAYTONA_SSH_ACCESS_MINUTES?: string;
+  KOYEB_API_TOKEN?: string;
+  CRABBOX_KOYEB_API_URL?: string;
+  CRABBOX_KOYEB_ORGANIZATION_ID?: string;
+  CRABBOX_KOYEB_APP_ID?: string;
+  CRABBOX_KOYEB_APP_TARGETS?: string;
+  CRABBOX_KOYEB_REGION?: string;
+  CRABBOX_KOYEB_INSTANCE_TYPE?: string;
+  CRABBOX_KOYEB_IMAGE?: string;
+  CRABBOX_KOYEB_REGISTRY_SECRET?: string;
+  KOYEB_APP_ID?: string;
+  KOYEB_APP_NAME?: string;
+  KOYEB_ORGANIZATION_ID?: string;
+  KOYEB_REGION?: string;
   CRABBOX_RUNTIME_ADAPTER_TOKEN?: string;
   CRABBOX_SHARED_TOKEN?: string;
   CRABBOX_SHARED_OWNER?: string;
@@ -105,6 +124,7 @@ export interface Env {
   CRABBOX_RUN_RETENTION_DAYS?: string;
   CRABBOX_GITHUB_CLIENT_ID?: string;
   CRABBOX_GITHUB_CLIENT_SECRET?: string;
+  CRABBOX_GITHUB_ALLOWED_OWNERS?: string;
   CRABBOX_GITHUB_ALLOWED_ORG?: string;
   CRABBOX_GITHUB_ALLOWED_ORGS?: string;
   CRABBOX_GITHUB_ALLOWED_TEAM?: string;
@@ -385,6 +405,13 @@ export const coordinatorProviderRegistry = [
     adminAudit: false,
     supportsCapacityMarket: false,
   },
+  {
+    provider: "koyeb",
+    label: "Koyeb Sandbox",
+    requiredSecrets: ["KOYEB_API_TOKEN"],
+    adminAudit: false,
+    supportsCapacityMarket: false,
+  },
 ] as const satisfies readonly {
   provider: string;
   label: string;
@@ -451,7 +478,27 @@ export interface HetznerCleanupEvidence {
   };
 }
 
-export type ProviderCleanupEvidence = HetznerCleanupEvidence;
+export interface KoyebCleanupEvidence {
+  version: 1;
+  provider: "koyeb";
+  leaseID: string;
+  serviceID: string;
+  allocationSHA256: string;
+  deploymentID: string;
+  dispatchStartedAt: string;
+  confirmationDeadline: string;
+  deleteAcceptedAt?: string;
+  deleteResult?: "accepted" | "not-found";
+  lastObservation?: { at: string; status: string };
+  confirmation?: { method: "service-absent" | "service-deleted"; at: string };
+}
+
+export type ProviderCleanupEvidence = HetznerCleanupEvidence | KoyebCleanupEvidence;
+
+export interface ProviderReleasePending {
+  status: "pending";
+  nextCheckAt: string;
+}
 
 export interface LeaseRecord {
   id: string;
@@ -502,6 +549,10 @@ export interface LeaseRecord {
   market?: string;
   provisioningAttempts?: ProvisioningAttempt[];
   image?: LeaseImageIdentity;
+  readyPoolConsumedAt?: string;
+  readyPoolConsumedKey?: string;
+  projectCheckpointKey?: string;
+  projectCheckpointGeneration?: number;
   provisioningTiming?: LeaseProvisioningTiming;
   awsSSMCommandID?: string;
   awsSSMCommandStatus?: string;
@@ -583,6 +634,8 @@ export interface ReadyPoolEntry {
   fingerprint?: string;
   compatibilityKey?: string;
   identity?: ReadyPoolIdentityV1;
+  singleUse?: boolean;
+  consumedAt?: string;
   image?: string;
   provider?: string;
   target?: TargetOS;
@@ -755,6 +808,7 @@ export interface LeaseImageIdentity {
   provider?: Provider;
   kind?: string;
   region?: string;
+  scope?: string;
   sourceID?: string;
   promotedAt?: string;
   revision?: string;

@@ -2735,6 +2735,70 @@ func TestLeaseToServerTargetAppliesAWSCloudInitReadiness(t *testing.T) {
 	}
 }
 
+type coordinatorKoyebTargetProvider struct{ testAWSProvider }
+
+func (coordinatorKoyebTargetProvider) Name() string { return "koyeb" }
+
+func (coordinatorKoyebTargetProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:        "koyeb",
+		Family:      "koyeb",
+		Kind:        ProviderKindSSHLease,
+		Targets:     []TargetSpec{{OS: targetLinux}},
+		Features:    FeatureSet{FeatureSSH, FeatureTailscale},
+		Coordinator: CoordinatorSupported,
+	}
+}
+
+func (coordinatorKoyebTargetProvider) ConfigureSSHTarget(target *SSHTarget, _ string) {
+	target.ProxyCommand = "tailscale nc %h %p"
+	target.SSHConfigProxy = true
+	target.ReadyCheck = "crabbox-ready"
+}
+
+func TestLeaseToServerTargetAppliesKoyebUserspaceTailscaleTransport(t *testing.T) {
+	const tailnetIP = "100.101.102.103"
+	previous, hadPrevious := providerRegistry["koyeb"]
+	providerRegistry["koyeb"] = coordinatorKoyebTargetProvider{}
+	t.Cleanup(func() {
+		if hadPrevious {
+			providerRegistry["koyeb"] = previous
+		} else {
+			delete(providerRegistry, "koyeb")
+		}
+	})
+
+	cfg := baseConfig()
+	cfg.Provider = "koyeb"
+	cfg.TargetOS = targetLinux
+	server, target, _ := leaseToServerTarget(CoordinatorLease{
+		ID:         "cbx_123",
+		Provider:   "koyeb",
+		TargetOS:   targetLinux,
+		Host:       tailnetIP,
+		SSHUser:    "crabbox",
+		SSHPort:    "22",
+		Tailscale:  &TailscaleMetadata{Enabled: true, IPv4: tailnetIP},
+		ServerType: "medium",
+	}, cfg)
+
+	if target.Host != tailnetIP || target.Port != "22" || target.User != "crabbox" {
+		t.Fatalf("target route=%#v", target)
+	}
+	if !target.SSHConfigProxy || target.ProxyCommand != "tailscale nc %h %p" {
+		t.Fatalf("target userspace proxy=%#v", target)
+	}
+	if target.ReadyCheck != "crabbox-ready" {
+		t.Fatalf("ready check=%q", target.ReadyCheck)
+	}
+	if target.NetworkKind == NetworkPublic {
+		t.Fatalf("target unexpectedly requires public networking: %#v", target)
+	}
+	if server.Labels["tailscale_ipv4"] != tailnetIP {
+		t.Fatalf("tailscale metadata=%#v", server.Labels)
+	}
+}
+
 func TestLeaseToServerTargetPreservesCoordinatorWorkRoot(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "aws"
@@ -3242,6 +3306,87 @@ func TestStopCoordinatorInspectFailureKeepsProviderBinding(t *testing.T) {
 	}
 	if releaseBody["expectedProvider"] != "aws" {
 		t.Fatalf("release body=%#v, want expectedProvider=aws", releaseBody)
+	}
+}
+
+func TestStopCoordinatorMissingLeaseDoesNotInferDeletionFromInventory(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		inventoryStatus int
+		leases          []CoordinatorLease
+	}{
+		{name: "filtered absent", leases: []CoordinatorLease{}},
+		{name: "still present", leases: []CoordinatorLease{{ID: "cbx_stop_missing", Provider: "aws", State: "active"}}},
+		{name: "inventory unavailable", inventoryStatus: http.StatusInternalServerError},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			isolateTestUserDirs(t)
+			configureCoordinatorReleaseTestTiming(t, time.Second, 0)
+			var releaseRequests, inventoryRequests int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/cbx_stop_missing":
+					http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/cbx_stop_missing/release":
+					releaseRequests++
+					http.Error(w, `{"error":"not_found"}`, http.StatusNotFound)
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/leases":
+					inventoryRequests++
+					if got := r.URL.Query().Get("view"); got != "current" {
+						t.Fatalf("inventory view=%q want current", got)
+					}
+					if got := r.URL.Query().Get("provider"); got != "aws" {
+						t.Fatalf("inventory provider=%q want aws", got)
+					}
+					if test.inventoryStatus != 0 {
+						http.Error(w, `{"error":"inventory_failed"}`, test.inventoryStatus)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"leases": test.leases})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			t.Setenv("CRABBOX_COORDINATOR", server.URL)
+			t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+
+			err := (App{Stdout: io.Discard, Stderr: io.Discard}).stop(context.Background(), []string{
+				"--provider", "aws", "--id", "cbx_stop_missing",
+			})
+			if err == nil || !isCoordinatorNotFoundError(err) {
+				t.Fatalf("stop err=%v, want original missing-target failure", err)
+			}
+			if releaseRequests == 0 || inventoryRequests != 0 {
+				t.Fatalf("release requests=%d inventory requests=%d", releaseRequests, inventoryRequests)
+			}
+		})
+	}
+}
+
+func TestCoordinatorListJSONEncodesEmptyArray(t *testing.T) {
+	clearConfigEnv(t)
+	isolateTestUserDirs(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/leases" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"leases": nil})
+	}))
+	defer server.Close()
+	t.Setenv("CRABBOX_COORDINATOR", server.URL)
+	t.Setenv("CRABBOX_COORDINATOR_TOKEN", "user-token")
+
+	var stdout bytes.Buffer
+	if err := (App{Stdout: &stdout, Stderr: io.Discard}).list(context.Background(), []string{
+		"--provider", "aws", "--json",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := stdout.String(); got != "[]\n" {
+		t.Fatalf("list output=%q want empty JSON array", got)
 	}
 }
 

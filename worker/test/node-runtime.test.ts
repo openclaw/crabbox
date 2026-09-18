@@ -2,6 +2,8 @@ import { EventEmitter } from "node:events";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 
+import { Pool } from "pg";
+import type { ConstructorOptions, Db } from "pg-boss";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket as NodeWebSocket } from "ws";
 
@@ -24,6 +26,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 
 const mocks = vi.hoisted(() => {
   const boss = {
+    emit: vi.fn<(...args: unknown[]) => boolean>(() => true),
     on: vi.fn<(...args: unknown[]) => unknown>(),
     start: vi.fn<() => Promise<void>>(async () => {}),
     stop: vi.fn<(...args: unknown[]) => Promise<void>>(async () => {}),
@@ -34,6 +37,7 @@ const mocks = vi.hoisted(() => {
     deleteQueuedJobs: vi.fn<(...args: unknown[]) => Promise<void>>(async () => {}),
   };
   const storage = {
+    pool: undefined as Pool | undefined,
     transaction:
       vi.fn<
         (callback: (transaction: CoordinatorStorageView) => Promise<unknown>) => Promise<unknown>
@@ -46,11 +50,12 @@ const mocks = vi.hoisted(() => {
     delete: vi.fn<(key: string) => Promise<void>>(async () => {}),
     take: vi.fn<(key: string) => Promise<unknown>>(async () => undefined),
   };
-  return { boss, storage };
+  return { boss, storage, bossConstructed: vi.fn<(options: ConstructorOptions) => void>() };
 });
 
 vi.mock("pg-boss", () => ({
-  PgBoss: function PgBoss() {
+  PgBoss: function PgBoss(options: ConstructorOptions) {
+    mocks.bossConstructed(options);
     return mocks.boss;
   },
 }));
@@ -67,6 +72,7 @@ import { fleetRequestQueue } from "../node/server-support";
 describe("NodeCoordinatorRuntime", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.storage.pool = new Pool();
     const storage = new ProvisioningTestStorage();
     mocks.storage.get.mockImplementation((key) => storage.get(key));
     mocks.storage.put.mockImplementation((key, value) => storage.put(key, value));
@@ -75,6 +81,67 @@ describe("NodeCoordinatorRuntime", () => {
     mocks.storage.list.mockImplementation((options) =>
       storage.list(options as Parameters<CoordinatorStorageView["list"]>[0]),
     );
+  });
+
+  it("owns the PgBoss SQL pool with unchanged defaults, errors, and shutdown ordering", async () => {
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    const config = mocks.bossConstructed.mock.calls[0]![0];
+    expect(config).toMatchObject({
+      connectionString: "postgresql://example.invalid/test",
+      schema: "crabbox_jobs",
+      application_name: "crabbox-coordinator-jobs",
+    });
+    const result = { rows: [{ value: 1 }], command: "SELECT", rowCount: 1, oid: 0, fields: [] };
+    const query = vi.spyOn(Pool.prototype, "query").mockResolvedValue(result);
+    try {
+      const db = config.db as Db;
+      await expect(db.executeSql("select $1 as value", [1])).resolves.toBe(result);
+      expect(query).toHaveBeenCalledExactlyOnceWith("select $1 as value", [1]);
+      const jobsPool = query.mock.contexts[0] as Pool;
+      expect(jobsPool).not.toBe(mocks.storage.pool);
+      expect(jobsPool.options).toMatchObject({
+        connectionString: "postgresql://example.invalid/test",
+        application_name: "crabbox-coordinator-jobs",
+        max: 10,
+        connectionTimeoutMillis: 10_000,
+        idleTimeoutMillis: 10_000,
+      });
+      const error = new Error("synthetic database error");
+      jobsPool.emit("error", error);
+      expect(mocks.boss.emit).toHaveBeenCalledExactlyOnceWith("error", error);
+      query.mockRejectedValueOnce(error);
+      await expect(db.executeSql("select 1")).rejects.toBe(error);
+      const end = vi.spyOn(jobsPool, "end");
+      await runtime.stop();
+      expect(mocks.boss.stop).toHaveBeenCalledExactlyOnceWith({ graceful: true, timeout: 10_000 });
+      expect(end).toHaveBeenCalledOnce();
+      expect(mocks.boss.stop.mock.invocationCallOrder[0]).toBeLessThan(
+        end.mock.invocationCallOrder[0]!,
+      );
+      expect(end.mock.invocationCallOrder[0]).toBeLessThan(
+        mocks.storage.close.mock.invocationCallOrder[0]!,
+      );
+    } finally {
+      query.mockRestore();
+    }
+  });
+
+  it("observes both runtime pools without SQL, jobs, or maintenance", async () => {
+    const runtime = new NodeCoordinatorRuntime("postgresql://example.invalid/test");
+    const query = vi.spyOn(Pool.prototype, "query");
+    try {
+      const first = runtime.databasePools();
+      expect(first.pools.storage).toMatchObject({ total: 0, idle: 0, waiting: 0, max: 10 });
+      expect(first.pools.jobs).toMatchObject({ total: 0, idle: 0, waiting: 0, max: 10 });
+      expect(query).not.toHaveBeenCalled();
+      expect(mocks.storage.get).not.toHaveBeenCalled();
+      expect(mocks.storage.transaction).not.toHaveBeenCalled();
+      expect(mocks.boss.start).not.toHaveBeenCalled();
+      expect(mocks.boss.send).not.toHaveBeenCalled();
+      await runtime.stop();
+    } finally {
+      query.mockRestore();
+    }
   });
 
   it("accepts a control handshake during unrelated lifecycle work and still queues messages", async () => {

@@ -73,8 +73,8 @@ through a coordinator.
 
 ## Brokered lifecycle
 
-When a provider is brokered (only `aws`, `azure`, `daytona`, `gcp`, and
-`hetzner`, and only when a coordinator URL is configured), the coordinator owns
+When a provider is brokered (`aws`, `azure`, `daytona`, `gcp`, `hetzner`, or
+`koyeb`, and only when a coordinator URL is configured), the coordinator owns
 the lease record and its lifecycle. The coordinator persists a `provisioning`
 reservation before calling the provider (`worker/src/types.ts`):
 
