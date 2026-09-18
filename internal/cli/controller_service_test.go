@@ -2824,6 +2824,8 @@ func TestControllerTerminalTransitionWriteFailureRevokesDesktopBeforeProvider(t 
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("desktop reopened through memory-backed terminal barrier: status=%d body=%s", response.Code, response.Body.String())
 	}
+	// Finish the reconciliation queued by the 503 response before advancing fixture phases.
+	waitControllerWorkspaceInactive(t, service, record.Request.ID)
 	runner.mu.Lock()
 	connections := runner.connectionCalls
 	runner.mu.Unlock()
