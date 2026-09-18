@@ -34,6 +34,17 @@ func isolateIsloTestHome(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 }
 
+func newIsloSDKHTTPTestClient(t *testing.T, server *httptest.Server) isloAPI {
+	t.Helper()
+	// The SDK cache is process-wide; isolate each invocation even if a server address is reused.
+	apiKey := "ak_test_" + t.TempDir()
+	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: apiKey, BaseURL: server.URL}}, core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api
+}
+
 func TestParseIsloSSE(t *testing.T) {
 	body := strings.Join([]string{
 		"event: stdout",
@@ -2015,10 +2026,7 @@ func TestIsloSDKClientListUsesInjectedHTTPAndPaginates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "ak_test", BaseURL: srv.URL}}, core.Runtime{HTTP: srv.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	api := newIsloSDKHTTPTestClient(t, srv)
 	items, err := api.ListSandboxes(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -2081,10 +2089,7 @@ func TestIsloSDKClientUploadArchiveStreamsMultipartTarball(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "ak_test", BaseURL: srv.URL}}, core.Runtime{HTTP: srv.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	api := newIsloSDKHTTPTestClient(t, srv)
 	if err := api.UploadArchive(t.Context(), "crabbox-test", "/workspace/repo", strings.NewReader("archive")); err != nil {
 		t.Fatal(err)
 	}
