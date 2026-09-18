@@ -3,9 +3,13 @@
 package external
 
 import (
+	"context"
 	"encoding/json"
+	"flag"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -80,7 +84,39 @@ func TestWaitForSlugReservationLockRecoversAfterAbandonedLock(t *testing.T) {
 func TestAllocateLeaseSlugWindowsReleaseAndReuse(t *testing.T) {
 	testutil.IsolateUserDirs(t)
 	backend := &leaseBackend{cfg: testConfig()}
-	for _, leaseID := range []string{"cbx_first", "cbx_second"} {
+	dir, err := backend.slugReservationDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSlugReservationDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := slugReservationPath(dir, "shared")
+	lockPath, err := slugReservationLockPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, executable, "-test.run=^TestWindowsSlugLockOwnerSubprocess$", "-test.timeout=10s", "--", "abandon-slug-lock", path)
+	child.WaitDelay = 5 * time.Second
+	if output, err := child.CombinedOutput(); err != nil {
+		t.Fatalf("reservation lock owner subprocess: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("exited child did not leave its reservation lock: %v", err)
+	}
+	t.Log("child owner exited normally; its production reservation lock remains for backend recovery")
+
+	for _, phase := range []struct{ name, leaseID string }{
+		{"recovery", "cbx_first"},
+		{"reuse", "cbx_second"},
+	} {
+		leaseID := phase.leaseID
 		slug, reservation, err := backend.allocateLeaseSlug(leaseID, "shared")
 		if err != nil {
 			t.Fatalf("allocateLeaseSlug(%s): %v", leaseID, err)
@@ -103,9 +139,8 @@ func TestAllocateLeaseSlugWindowsReleaseAndReuse(t *testing.T) {
 		if record.LeaseID != leaseID || record.Slug != slug {
 			t.Fatalf("persisted reservation does not match lease %s and slug %s", leaseID, slug)
 		}
-		lockPath, err := slugReservationLockPath(reservation.path)
-		if err != nil {
-			t.Fatal(err)
+		if reservation.path != path {
+			t.Fatal("backend allocated a different reservation path")
 		}
 		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 			t.Fatalf("allocation left the reservation lock behind: %v", err)
@@ -117,5 +152,23 @@ func TestAllocateLeaseSlugWindowsReleaseAndReuse(t *testing.T) {
 				t.Fatalf("release left reservation state at %s: %v", path, err)
 			}
 		}
+		t.Logf("backend %s succeeded; reservation and lock released", phase.name)
 	}
+}
+
+func TestWindowsSlugLockOwnerSubprocess(t *testing.T) {
+	args := flag.Args()
+	if len(args) != 2 || args[0] != "abandon-slug-lock" {
+		return
+	}
+	unlock, locked, err := lockSlugReservation(args[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !locked || unlock == nil {
+		t.Fatal("child did not acquire its reservation lock")
+	}
+	// Retain the real owner's handle through this test, then let normal process
+	// exit close it without running the reservation lock's release closure.
+	defer runtime.KeepAlive(unlock)
 }
