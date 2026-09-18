@@ -4,6 +4,7 @@
 
 ### Fixes
 
+- Build Apple VM cloud-init seed disks directly with the shared FAT16 writer, removing the host MS-DOS mount requirement while preserving the Firecracker and XCP-ng image formats. [PR 2343](https://github.com/openclaw/crabbox/pull/2343). Thanks @steipete.
 - Redact signed artifact URLs from upload, download, and manifest request setup and transport errors while preserving the operation and underlying failure. [PR 2340](https://github.com/openclaw/crabbox/pull/2340). Thanks @steipete.
 - Keep coordinator-managed lease claims aligned with the broker's idle timeout when resolving SSH access, instead of recording the local default; ordinary touches continue to preserve remote policy. [PR 2339](https://github.com/openclaw/crabbox/pull/2339). Thanks @steipete.
 - Raise production coordinator checkpoint limits to 100 globally, per owner, and per organization so retained worker caches do not exhaust the previous 10-checkpoint owner limit.

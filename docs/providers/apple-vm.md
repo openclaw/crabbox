@@ -45,8 +45,9 @@ difference is full-machine Linux boot and disk semantics under direct
 - enough free disk for the downloaded image, converted raw cache, and lease
   disks.
 
-The Xcode tools provide `codesign`, `hdiutil`, and `newfs_msdos`. Check the
-host before provisioning:
+The Xcode tools provide `codesign`. Seed disks are written directly as FAT16
+files; provisioning does not mount a host filesystem or require `hdiutil` or
+`newfs_msdos`. Check the host before provisioning:
 
 ```sh
 xcode-select -p
@@ -234,8 +235,9 @@ Images with backing files or backing chains are rejected so conversion cannot
 read other host files. Each lease gets a clone or sparse copy of that base,
 resized to `diskGiB`. Changing the image reference, expected checksum, or source
 file creates a new cache entry. Interrupted downloads and conversions exit
-gracefully, remove their staging files, and detach seed-image mounts. A later
-run also removes unlocked staging files left by a forced process termination
+gracefully and remove their staging files. The NoCloud seed is a private FAT16
+image containing `user-data` and `meta-data` under the `CIDATA` volume label.
+A later run also removes unlocked staging files left by a forced process termination
 or host restart.
 
 ## Lifecycle and networking
