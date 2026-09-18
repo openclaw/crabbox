@@ -25,6 +25,23 @@ var fixedClaimKind = core.FixedLeaseKind{
 		claimLabelNamespace, claimLabelWarmPool, fixedPoolUIDLabel},
 }
 
+func (b *backend) ValidateConfirmedAbsentTerminalReceipt(claim core.LeaseClaim, req core.ConfirmedAbsentLocalCleanupRequest) error {
+	expected := req.ExpectedProviderIdentity
+	if expected.LeaseID == "" || expected.AttemptLeaseID == "" || expected.Slug == "" || expected.ResourceID == "" || req.ProviderScope != claimScope(b.cfg) || claim.ProviderScope != req.ProviderScope {
+		return core.Exit(4, "agent-sandbox terminal receipt requires complete matching identity and scope")
+	}
+	if err := core.ValidateProviderIdentityExpectation(expected); err != nil {
+		return err
+	}
+	if err := validateFixedClaimShape(claim); err != nil {
+		return err
+	}
+	if claim.FixedCreateIntent.State != "released" {
+		return core.Exit(4, "agent-sandbox fixed receipt is not terminal")
+	}
+	return validateFixedExpectation(claim, expected)
+}
+
 func (b *backend) SupportsRequestedLeaseID() bool { return true }
 
 func isFixedClaim(claim core.LeaseClaim) bool {

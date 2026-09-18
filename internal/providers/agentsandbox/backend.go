@@ -328,10 +328,7 @@ func (b *backend) deleteCurrentRunClaim(ctx context.Context, client kubernetesCl
 }
 
 func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseView, error) {
-	client, err := b.client(ctx)
-	if err != nil {
-		return nil, err
-	}
+	var client kubernetesClient
 	claims, err := listAgentSandboxLeaseClaims()
 	if err != nil {
 		return nil, err
@@ -342,12 +339,27 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 			continue
 		}
 		if isFixedClaim(claim) {
+			if err := authorizeClaimScope(b.cfg, claim); err != nil {
+				return nil, err
+			}
+			if claim.FixedCreateIntent.State == "released" {
+				continue
+			}
 			view, err := b.Status(ctx, core.StatusRequest{ID: claim.LeaseID})
 			if err != nil {
 				return nil, err
 			}
+			if view.State == "released" {
+				continue
+			}
 			servers = append(servers, core.Server{Provider: providerName, CloudID: view.ServerID, Name: claimNameFromLocalClaim(claim), Status: view.State, Labels: view.Labels})
 			continue
+		}
+		if client == nil {
+			client, err = b.client(ctx)
+			if err != nil {
+				return nil, err
+			}
 		}
 		claimName := claimNameFromLocalClaim(claim)
 		ready := sandboxReadiness{}

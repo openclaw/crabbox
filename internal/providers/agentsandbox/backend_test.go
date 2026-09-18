@@ -2431,6 +2431,10 @@ func TestFixedWarmupPersistsReplaysAndStops(t *testing.T) {
 			if err != nil || result.ExitCode != 0 {
 				t.Fatalf("fixed use=%#v err=%v", result, err)
 			}
+			inventory, err := b.List(t.Context(), core.ListRequest{})
+			if err != nil || len(inventory) != 1 || inventory[0].CloudID != after.CloudImmutableID {
+				t.Fatalf("active fixed inventory=%#v err=%v", inventory, err)
+			}
 			expected := core.ProviderIdentityExpectation{LeaseID: id, AttemptLeaseID: id, Slug: after.Slug, ResourceID: after.CloudImmutableID}
 			stop := core.FixedStopRequest{StopRequest: core.StopRequest{ID: id}, ExpectedProviderIdentity: expected}
 			if err := b.StopFixed(t.Context(), stop); err != nil {
@@ -2456,6 +2460,13 @@ func TestFixedWarmupPersistsReplaysAndStops(t *testing.T) {
 			terminal, err := core.ReadLeaseClaim(id)
 			if err != nil || terminal.FixedCreateIntent.State != "released" || terminal.CloudImmutableID != after.CloudImmutableID || fake.foreground != 1 {
 				t.Fatalf("terminal=%#v err=%v foreground=%d", terminal, err, fake.foreground)
+			}
+			if err := b.ValidateConfirmedAbsentTerminalReceipt(terminal, core.ConfirmedAbsentLocalCleanupRequest{ExpectedProviderIdentity: expected, ProviderScope: claimScope(cfg)}); err != nil {
+				t.Fatal(err)
+			}
+			inventory, err = b.List(t.Context(), core.ListRequest{})
+			if err != nil || len(inventory) != 0 || clientConstructions != 0 || len(fake.gets) != getsBefore {
+				t.Fatalf("terminal inventory=%#v err=%v constructors=%d", inventory, err, clientConstructions)
 			}
 		})
 	}

@@ -1239,6 +1239,17 @@ type ConfirmedAbsentLocalStateCleaner interface {
 	CleanupConfirmedAbsentLocalState(context.Context, ConfirmedAbsentLocalCleanupRequest) error
 }
 
+// ConfirmedAbsentTerminalReceiptRetainer validates a provider-owned fixed receipt
+// that must survive confirmed-absence cleanup. Validation is local and read-only:
+// it must reject a missing fixed receipt and check terminal shape, configured
+// scope and every expected identity,
+// without provider calls or claim mutations. Core holds the claim fence across
+// coordinator deregistration and revalidates the unchanged receipt afterward.
+type ConfirmedAbsentTerminalReceiptRetainer interface {
+	Backend
+	ValidateConfirmedAbsentTerminalReceipt(LeaseClaim, ConfirmedAbsentLocalCleanupRequest) error
+}
+
 // ProviderIdentityExpectation is the complete immutable identity known by a
 // lifecycle caller before resolving a resource for destructive release.
 type ProviderIdentityExpectation struct {

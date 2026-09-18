@@ -351,7 +351,13 @@ is sufficient for this anchor; no new Namespace GET permission is required.
 Completed fixed leases retain a terminal tombstone. Repeated stop and terminal
 status validate the local receipt and original configured scope without requiring
 the pool or transport to remain available. A released fixed ID cannot allocate
-again. A new lease needs a new ID.
+again. A new lease needs a new ID. Validated terminal receipts are excluded from
+active `list` inventory; live and unresolved fixed claims remain visible or return
+an inventory error. Runtime adapters can therefore confirm absence after a normal
+fixed stop. Their confirmed-absence cleanup validates the full expected lease ID,
+attempt ID, slug, resource UID and original scope, then retains the unchanged
+terminal receipt under the claim lock across coordinator deregistration. This
+local completion step does not call Kubernetes or delete the receipt.
 
 Once creation has been submitted, this implementation does not automatically
 resubmit the same attempt, even after a definite create rejection. The recorded
