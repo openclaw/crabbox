@@ -143,18 +143,24 @@ func TestVultrClientDefaultRetryDelay(t *testing.T) {
 				if calls.Add(1) == 1 {
 					w.Header().Set("Retry-After", "1")
 					w.WriteHeader(http.StatusTooManyRequests)
+					_, _ = io.WriteString(w, "rate limited")
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
 			}))
 			defer server.Close()
 			t.Setenv("VULTR_API_KEY", "fixture-key")
-			client, err := newVultrClient(core.Runtime{HTTP: server.Client()})
+			httpClient := server.Client()
+			// A retry must release its prior response before requesting this connection.
+			httpClient.Transport.(*http.Transport).MaxConnsPerHost = 1
+			client, err := newVultrClient(core.Runtime{HTTP: httpClient})
 			if err != nil {
 				t.Fatal(err)
 			}
 			client.baseURL = server.URL
-			ctx, cancel := context.WithCancelCause(t.Context())
+			deadline, stop := context.WithTimeout(t.Context(), 5*time.Second)
+			defer stop()
+			ctx, cancel := context.WithCancelCause(deadline)
 			defer cancel(nil)
 			if canceled {
 				// Observe real response headers; keep the constructor's sleeper installed.

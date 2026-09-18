@@ -242,6 +242,7 @@ instance in `crabbox list --provider vultr --json` or the Vultr console.
 
 ## Gotchas
 
+- Rate-limited requests retry once when `Retry-After` specifies a positive delay, capped at five seconds. The previous response is closed before waiting, so retries can use clients with a single connection per host.
 - `vultr` is direct-only. Coordinator secrets and cost accounting do not cover
   these instances.
 - `--type` must be a valid Vultr plan id such as `vc2-1c-1gb`.
