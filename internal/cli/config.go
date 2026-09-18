@@ -352,17 +352,6 @@ type CapacityConfig struct {
 	Hints             bool
 }
 
-type ActionsConfig struct {
-	Repo          string
-	Workflow      string
-	Job           string
-	Ref           string
-	Fields        []string
-	RunnerLabels  []string
-	RunnerVersion string
-	Ephemeral     bool
-}
-
 type ExternalConfig struct {
 	Command                  string
 	Args                     []string
@@ -761,14 +750,6 @@ type JobHydrateConfig struct {
 	GitHubRunner     bool
 	WaitTimeout      time.Duration
 	KeepAliveMinutes int
-}
-
-type JobActionsConfig struct {
-	Repo     string
-	Workflow string
-	Job      string
-	Ref      string
-	Fields   []string
 }
 
 type AccessConfig struct {
@@ -1699,10 +1680,7 @@ func baseConfig() Config {
 			Fallback: "on-demand-after-120s",
 			Hints:    true,
 		},
-		Actions: ActionsConfig{
-			RunnerVersion: "latest",
-			Ephemeral:     true,
-		},
+		Actions:      initialActionsConfig(),
 		KubeVirt:     defaultKubeVirtConfig(),
 		SealosDevbox: defaultSealosDevboxConfig(),
 		AgentSandbox: defaultAgentSandboxConfig(),
@@ -2082,17 +2060,6 @@ type fileCapacityConfig struct {
 	Hints             *bool    `yaml:"hints,omitempty"`
 }
 
-type fileActionsConfig struct {
-	Repo          string   `yaml:"repo,omitempty"`
-	Workflow      string   `yaml:"workflow,omitempty"`
-	Job           string   `yaml:"job,omitempty"`
-	Ref           string   `yaml:"ref,omitempty"`
-	Fields        []string `yaml:"fields,omitempty"`
-	RunnerLabels  []string `yaml:"runnerLabels,omitempty"`
-	RunnerVersion string   `yaml:"runnerVersion,omitempty"`
-	Ephemeral     *bool    `yaml:"ephemeral,omitempty"`
-}
-
 type fileExternalConfig struct {
 	Command      string                      `yaml:"command,omitempty"`
 	Args         []string                    `yaml:"args,omitempty"`
@@ -2451,14 +2418,6 @@ type fileJobHydrateConfig struct {
 	GitHubRunner     *bool  `yaml:"githubRunner,omitempty"`
 	WaitTimeout      string `yaml:"waitTimeout,omitempty"`
 	KeepAliveMinutes int    `yaml:"keepAliveMinutes,omitempty"`
-}
-
-type fileJobActionsConfig struct {
-	Repo     string   `yaml:"repo,omitempty"`
-	Workflow string   `yaml:"workflow,omitempty"`
-	Job      string   `yaml:"job,omitempty"`
-	Ref      string   `yaml:"ref,omitempty"`
-	Fields   []string `yaml:"fields,omitempty"`
 }
 
 func configPaths() []string {
@@ -3288,37 +3247,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Capacity.Hints, file.Capacity.Hints))
 	}
-	if file.Actions != nil {
-		if file.Actions.Repo != "" {
-			cfg.Actions.Repo = file.Actions.Repo
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
-		if file.Actions.Workflow != "" {
-			cfg.Actions.Workflow = file.Actions.Workflow
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
-		if file.Actions.Job != "" {
-			cfg.Actions.Job = file.Actions.Job
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
-		if file.Actions.Ref != "" {
-			cfg.Actions.Ref = file.Actions.Ref
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
-		if len(file.Actions.Fields) > 0 {
-			cfg.Actions.Fields = appendUniqueStrings(nil, file.Actions.Fields...)
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
-		if len(file.Actions.RunnerLabels) > 0 {
-			cfg.Actions.RunnerLabels = appendUniqueStrings(nil, file.Actions.RunnerLabels...)
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
-		if file.Actions.RunnerVersion != "" {
-			cfg.Actions.RunnerVersion = file.Actions.RunnerVersion
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
-		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Actions.Ephemeral, file.Actions.Ephemeral))
-	}
+	applyActionsFileConfig(cfg, file.Actions, inputSource)
 	{
 		applied, err := cfg.Blacksmith.applyFile(file.Blacksmith)
 		recordConfigInput(cfg, "blacksmith-testbox", inputSource, applied.InputAccepted)
@@ -4176,23 +4105,7 @@ func applyFileJobConfig(job JobConfig, file fileJobConfig) JobConfig {
 			job.Hydrate.KeepAliveMinutes = file.Hydrate.KeepAliveMinutes
 		}
 	}
-	if file.Actions != nil {
-		if file.Actions.Repo != "" {
-			job.Actions.Repo = file.Actions.Repo
-		}
-		if file.Actions.Workflow != "" {
-			job.Actions.Workflow = file.Actions.Workflow
-		}
-		if file.Actions.Job != "" {
-			job.Actions.Job = file.Actions.Job
-		}
-		if file.Actions.Ref != "" {
-			job.Actions.Ref = file.Actions.Ref
-		}
-		if len(file.Actions.Fields) > 0 {
-			job.Actions.Fields = appendUniqueStrings(nil, file.Actions.Fields...)
-		}
-	}
+	job.Actions.applyFile(file.Actions)
 	applyOptional(&job.Shell, file.Shell)
 	if file.Command != "" {
 		job.Command = file.Command
@@ -4677,11 +4590,7 @@ func applyEnv(cfg *Config) error {
 		cfg.Capacity.Hints = value
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
 	}
-	cfg.Actions.Workflow = configInputEnvString(cfg, configInputGeneric, cfg.Actions.Workflow, "CRABBOX_ACTIONS_WORKFLOW")
-	cfg.Actions.Job = configInputEnvString(cfg, configInputGeneric, cfg.Actions.Job, "CRABBOX_ACTIONS_JOB")
-	cfg.Actions.Ref = configInputEnvString(cfg, configInputGeneric, cfg.Actions.Ref, "CRABBOX_ACTIONS_REF")
-	cfg.Actions.Repo = configInputEnvString(cfg, configInputGeneric, cfg.Actions.Repo, "CRABBOX_ACTIONS_REPO")
-	cfg.Actions.RunnerVersion = configInputEnvString(cfg, configInputGeneric, cfg.Actions.RunnerVersion, "CRABBOX_ACTIONS_RUNNER_VERSION")
+	applyActionsEnvPrefix(cfg)
 	{
 		applied, err := cfg.Blacksmith.applyEnvPrefix()
 		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, applied.InputAccepted)
@@ -5275,14 +5184,7 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if labels := os.Getenv("CRABBOX_ACTIONS_RUNNER_LABELS"); labels != "" {
-		cfg.Actions.RunnerLabels = splitCommaList(labels)
-		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
-	}
-	if value, ok := getenvBool("CRABBOX_ACTIONS_EPHEMERAL"); ok {
-		cfg.Actions.Ephemeral = value
-		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
-	}
+	applyActionsEnvSuffix(cfg)
 	if junit := os.Getenv("CRABBOX_RESULTS_JUNIT"); junit != "" {
 		cfg.Results.JUnit = splitCommaList(junit)
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)

@@ -1165,3 +1165,22 @@ validation and nonnegative memory validation. Earlier accepted fields and facts
 survive later errors; final defaults run only after success. Generated storage,
 registration and raw presence replace the duplicated mechanical lists without
 moving host policy enforcement, native operations or runtime defaults.
+
+## Actions' concrete workflow owner
+
+`config_actions.go` owns the five-field workflow record shared by global Actions
+and job overrides. Global runtime/file settings embed it inline; distinct named
+job and file-job records preserve their smaller shape. Supported file YAML and
+raw JSON remain flat, while runtime-only YAML is not a persistence contract.
+The shared file operation ignores empty strings and empty lists, and replaces
+nonempty field lists with fresh trimmed, unique entries. Nonempty all-blank
+input still clears to a nonnil empty list and records acceptance globally.
+Job overlays do not invent global input facts or runner settings.
+
+The early and late environment owners remain at their existing phases.
+`actions_flags.go` owns fixed hydrate/dispatch/register selector surfaces and
+raw-nonempty application, plus shared `-f`/`--field` storage. Defaults remain
+empty selector strings, and command guards, runner flags and execution stay in
+their original callers. Hydration alone merges configured fields; standalone
+dispatch forwards explicit fields unchanged. No generator, callback or
+configurable field grammar is introduced.

@@ -20186,3 +20186,194 @@ func TestLocalContainerBindingInitializationAndOmissions(t *testing.T) {
 		}
 	}
 }
+
+func TestActionsWorkflowOwnerFileAndCodec(t *testing.T) {
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []*string{nil, new(""), new("prior"), new(" raw ")} {
+			for _, tc := range []struct {
+				input, want []string
+				accepted    bool
+			}{{nil, []string{"prior=1"}, false}, {[]string{}, []string{"prior=1"}, false}, {[]string{"", " "}, []string{}, true}, {[]string{" a=1 ", "a=1", "b=2", "a=2"}, []string{"a=1", "b=2", "a=2"}, true}} {
+				cfg := baseConfig()
+				job := JobConfig{}
+				for _, name := range []string{"Repo", "Workflow", "Job", "Ref"} {
+					reflect.ValueOf(&cfg.Actions).Elem().FieldByName(name).SetString("prior")
+					reflect.ValueOf(&job.Actions).Elem().FieldByName(name).SetString("prior")
+				}
+				cfg.Actions.Fields = []string{"prior=1"}
+				job.Actions.Fields = []string{"prior=1"}
+				input := map[string]any{"fields": tc.input}
+				for _, key := range []string{"repo", "workflow", "job", "ref"} {
+					if raw == nil {
+						input[key] = nil
+					} else {
+						input[key] = *raw
+					}
+				}
+				body, err := yaml.Marshal(input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var global fileActionsConfig
+				var perJob fileJobActionsConfig
+				if err := yaml.Unmarshal(body, &global); err != nil {
+					t.Fatal(err)
+				}
+				if err := yaml.Unmarshal(body, &perJob); err != nil {
+					t.Fatal(err)
+				}
+				before, err := yaml.Marshal(global)
+				if err != nil {
+					t.Fatal(err)
+				}
+				jobBefore, err := yaml.Marshal(perJob)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(before, jobBefore) {
+					t.Fatal("global/job YAML field shape differs")
+				}
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{Actions: &global}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				job = applyFileJobConfig(job, fileJobConfig{Actions: &perJob})
+				wantText := "prior"
+				if raw != nil && *raw != "" {
+					wantText = *raw
+				}
+				for _, name := range []string{"Repo", "Workflow", "Job", "Ref"} {
+					if reflect.ValueOf(cfg.Actions).FieldByName(name).String() != wantText || reflect.ValueOf(job.Actions).FieldByName(name).String() != wantText {
+						t.Fatal("string overlay")
+					}
+				}
+				if !reflect.DeepEqual(cfg.Actions.Fields, tc.want) || !reflect.DeepEqual(job.Actions.Fields, tc.want) {
+					t.Fatalf("list cfg=%#v job=%#v want=%#v", cfg.Actions.Fields, job.Actions.Fields, tc.want)
+				}
+				ledger := Config{}
+				source := configInputRepo
+				if trusted {
+					source = configInputUser
+				}
+				recordConfigInput(&ledger, configInputGeneric, source, tc.accepted || raw != nil && *raw != "")
+				if cfg.inputProvenance[configInputGeneric] != ledger.inputProvenance[configInputGeneric] {
+					t.Fatal("accepted source facts")
+				}
+				after, _ := yaml.Marshal(global)
+				jobAfter, _ := yaml.Marshal(perJob)
+				if !bytes.Equal(before, after) || !bytes.Equal(jobBefore, jobAfter) {
+					t.Fatal("input DTO mutated")
+				}
+				if len(global.Fields) > 0 && len(cfg.Actions.Fields) > 0 {
+					cfg.Actions.Fields[0] = "changed"
+					if global.Fields[0] == "changed" || job.Actions.Fields[0] == "changed" {
+						t.Fatal("list copy sharing")
+					}
+				}
+			}
+		}
+	}
+	cfg := baseConfig()
+	cfg.Actions.Repo = "repo"
+	cfg.Actions.Workflow = "workflow"
+	cfg.Actions.Job = "job"
+	cfg.Actions.Ref = "ref"
+	cfg.Actions.Fields = []string{"a=1"}
+	cfg.Actions.RunnerLabels = []string{"runner"}
+	cfg.Actions.RunnerVersion = "v"
+	cfg.Actions.Ephemeral = false
+	raw, err := json.Marshal(cfg.Actions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"Repo":"repo","Workflow":"workflow","Job":"job","Ref":"ref","Fields":["a=1"],"RunnerLabels":["runner"],"RunnerVersion":"v","Ephemeral":false}` {
+		t.Fatalf("raw JSON=%s", raw)
+	}
+	view := configShowView(cfg)["actions"].(map[string]any)
+	if _, ok := view["fields"]; ok {
+		t.Fatal("global view gained fields")
+	}
+	if view["repo"] != "repo" || view["ephemeral"] != false {
+		t.Fatal("global view")
+	}
+	var file fileConfig
+	if err := yaml.Unmarshal([]byte("actions:\n  repo: example/app\n  fields: [a=1]\n  runnerLabels: [one]\n  runnerVersion: latest\n  ephemeral: false\njobs:\n  demo:\n    actions:\n      repo: example/job\n      fields: [b=2]\n"), &file); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := yaml.Marshal(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shape map[string]any
+	if err := yaml.Unmarshal(encoded, &shape); err != nil {
+		t.Fatal(err)
+	}
+	actions := shape["actions"].(map[string]any)
+	if len(actions) != 5 || actions["ephemeral"] != false || actions["repo"] != "example/app" {
+		t.Fatalf("flat writer shape=%#v", actions)
+	}
+	jobs := shape["jobs"].(map[string]any)
+	j := jobs["demo"].(map[string]any)["actions"].(map[string]any)
+	if len(j) != 2 || j["repo"] != "example/job" {
+		t.Fatal("job writer shape")
+	}
+	var empty fileActionsConfig
+	out, err := yaml.Marshal(&empty)
+	if err != nil || string(out) != "{}\n" {
+		t.Fatalf("empty file=%q %v", out, err)
+	}
+}
+
+func TestActionsWorkflowOwnerEnvironmentPhases(t *testing.T) {
+	clearConfigEnv(t)
+	for _, failure := range []bool{false, true} {
+		cfg := baseConfig()
+		cfg.Actions.RunnerLabels = []string{"prior"}
+		cfg.Actions.Ephemeral = true
+		cfg.Actions.Fields = []string{"kept=1"}
+		for _, key := range []string{"REPO", "WORKFLOW", "JOB", "REF", "RUNNER_VERSION"} {
+			t.Setenv("CRABBOX_ACTIONS_"+key, " raw ")
+		}
+		t.Setenv("CRABBOX_ACTIONS_RUNNER_LABELS", " a, a, ,b ")
+		t.Setenv("CRABBOX_ACTIONS_EPHEMERAL", "false")
+		t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", "")
+		if failure {
+			t.Setenv("CRABBOX_CLOUDFLARE_SANDBOX_EXEC_TIMEOUT_SECS", "invalid")
+		}
+		err := applyEnv(&cfg)
+		if (err != nil) != failure {
+			t.Fatal(err)
+		}
+		if cfg.Actions.Repo != " raw " || cfg.Actions.Workflow != " raw " || cfg.Actions.Job != " raw " || cfg.Actions.Ref != " raw " || cfg.Actions.RunnerVersion != " raw " {
+			t.Fatal("early values")
+		}
+		want := []string{"a", "a", "b"}
+		if failure {
+			want = []string{"prior"}
+		}
+		if !reflect.DeepEqual(cfg.Actions.RunnerLabels, want) || cfg.Actions.Ephemeral != failure || !reflect.DeepEqual(cfg.Actions.Fields, []string{"kept=1"}) {
+			t.Fatal("late source moved or fields changed")
+		}
+	}
+}
+
+func TestActionsWorkflowOwnerJobArguments(t *testing.T) {
+	job := JobConfig{}
+	job.Actions.Repo = "example/app"
+	job.Actions.Workflow = "workflow"
+	job.Actions.Job = "job"
+	job.Actions.Ref = "ref"
+	job.Actions.Fields = []string{"a=1", "a=2", " raw=3 "}
+	want := []string{"--id", "inert-id", "--repo", "example/app", "--workflow", "workflow", "--ref", "ref", "--job", "job", "--field", "a=1", "--field", "a=2", "--field", " raw=3 "}
+	if got := jobActionsHydrateArgs(job, "inert-id", false); !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv=%#v", got)
+	}
+	raw, err := json.Marshal(job.Actions)
+	if err != nil || string(raw) != `{"Repo":"example/app","Workflow":"workflow","Job":"job","Ref":"ref","Fields":["a=1","a=2"," raw=3 "]}` {
+		t.Fatalf("job JSON=%s %v", raw, err)
+	}
+	views := jobConfigViews(map[string]JobConfig{"demo": job})
+	fields := views["demo"].(map[string]any)["actions"].(map[string]any)["fields"]
+	if !reflect.DeepEqual(fields, job.Actions.Fields) {
+		t.Fatal("job fields view")
+	}
+}
