@@ -32,9 +32,9 @@ describe("wrangler config", () => {
   });
 
   it("keeps deployed and preview checkpoint and use-claim admission bounded", () => {
-    expect(configValues("CRABBOX_MAX_CHECKPOINTS")).toEqual([20, 20]);
-    expect(configValues("CRABBOX_MAX_CHECKPOINTS_PER_OWNER")).toEqual([10, 10]);
-    expect(configValues("CRABBOX_MAX_CHECKPOINTS_PER_ORG")).toEqual([20, 20]);
+    expect(configValues("CRABBOX_MAX_CHECKPOINTS")).toEqual([100, 20]);
+    expect(configValues("CRABBOX_MAX_CHECKPOINTS_PER_OWNER")).toEqual([100, 10]);
+    expect(configValues("CRABBOX_MAX_CHECKPOINTS_PER_ORG")).toEqual([100, 20]);
     expect(configValues("CRABBOX_MAX_CHECKPOINT_USE_CLAIMS")).toEqual([16, 16]);
     expect(configValues("CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_PER_OWNER")).toEqual([64, 64]);
     expect(configValues("CRABBOX_MAX_CHECKPOINT_USE_CLAIMS_TOTAL")).toEqual([256, 256]);
