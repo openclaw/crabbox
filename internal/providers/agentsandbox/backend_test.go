@@ -2342,3 +2342,181 @@ func TestAgentActivityPublicCodeCompatibility(t *testing.T) {
 		})
 	}
 }
+
+// fixedPositiveClient models the documented normal foreground completion path.
+type fixedPositiveClient struct {
+	*fakeKubernetesClient
+	t          *testing.T
+	leaseID    string
+	foreground int
+}
+
+func (f *fixedPositiveClient) Create(ctx context.Context, ref resourceRef, namespace string, obj *kubernetesObject) (*kubernetesObject, error) {
+	claim, err := core.ReadLeaseClaim(f.leaseID)
+	if err != nil || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "prepared" ||
+		claim.FixedCreateIntent.Attempt["submitted"] != "true" || claim.FixedCreateIntent.Attempt["nonce"] == "" ||
+		claim.Labels[fixedPoolUIDLabel] == "" || claim.FixedCreateIntent.Attempt["name"] != obj.Metadata.Name {
+		f.t.Fatalf("create preceded durable fixed intent: claim=%#v err=%v", claim, err)
+	}
+	return f.fakeKubernetesClient.Create(ctx, ref, namespace, obj)
+}
+
+func (f *fixedPositiveClient) DeleteForeground(ctx context.Context, ref resourceRef, namespace, name, uid string) error {
+	if err := f.fakeKubernetesClient.Delete(ctx, ref, namespace, name, uid); err != nil {
+		return err
+	}
+	delete(f.objects, sandboxResource+"/"+namespace+"/"+name+"-sandbox")
+	delete(f.objects, "pods/"+namespace+"/"+name+"-pod")
+	f.foreground++
+	return nil
+}
+
+func TestFixedWarmupPersistsReplaysAndStops(t *testing.T) {
+	for _, lostResponse := range []bool{false, true} {
+		t.Run(fmt.Sprint(lostResponse), func(t *testing.T) {
+			cfg := testAgentSandboxConfig(t)
+			const id = "cbx_174200000001"
+			fake := &fixedPositiveClient{fakeKubernetesClient: readyFakeClient(cfg), t: t, leaseID: id}
+			fake.objects[warmPoolResource+"/"+cfg.AgentSandbox.Namespace+"/"+cfg.AgentSandbox.WarmPool] = &kubernetesObject{Metadata: objectMeta{Name: cfg.AgentSandbox.WarmPool, UID: "pool-fixed-positive"}}
+			if lostResponse {
+				fake.createErrs = []error{errors.New("accepted create response lost")}
+			}
+			makeBackend := func() *backend {
+				b := testBackend(cfg, fake.fakeKubernetesClient, nil, nil)
+				b.newClient = func(context.Context, core.Config, core.Runtime) (kubernetesClient, error) { return fake, nil }
+				return b
+			}
+			b := makeBackend()
+			acks := 0
+			req := core.FixedWarmupRequest{WarmupRequest: core.WarmupRequest{Repo: testGitRepo(t), RequestedSlug: "fixed-positive", Keep: true}, RequestedLeaseID: id,
+				OnAcquired: func(receipt core.FixedAcquisitionReceipt) error {
+					claim, err := core.ReadLeaseClaim(id)
+					if err != nil || receipt.ResourceID == "" || receipt.ResourceID != claim.CloudImmutableID || receipt.LeaseID != id || receipt.Slug != claim.Slug || receipt.Provider != providerName {
+						t.Fatalf("ack before persisted exact identity: %#v %v", receipt, err)
+					}
+					if acks == 0 && claim.FixedCreateIntent.State != "prepared" {
+						t.Fatal("readiness finalized before acquisition acknowledgment")
+					}
+					acks++
+					return nil
+				}}
+			if err := b.WarmupFixed(t.Context(), req); err != nil {
+				t.Fatal(err)
+			}
+			before, err := core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A new backend instance recovers solely from the legitimate persisted intent.
+			b = makeBackend()
+			if err := b.WarmupFixed(t.Context(), req); err != nil {
+				t.Fatal(err)
+			}
+			after, err := core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fake.creates != 1 || acks != 2 || before.CloudImmutableID != after.CloudImmutableID || before.FixedCreateIntent.CreatedAt != after.FixedCreateIntent.CreatedAt || before.Labels[claimLabelExpiresAt] != after.Labels[claimLabelExpiresAt] {
+				t.Fatal("fixed replay replaced resource or lifetime")
+			}
+			view, err := b.Status(t.Context(), core.StatusRequest{ID: id})
+			if err != nil || !view.Ready || view.ServerID != after.CloudImmutableID || view.Slug != after.Slug {
+				t.Fatalf("fixed status=%#v err=%v", view, err)
+			}
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: req.Repo, ID: id, Keep: true, NoSync: true, Command: []string{"printf", "fixed-positive"}})
+			if err != nil || result.ExitCode != 0 {
+				t.Fatalf("fixed use=%#v err=%v", result, err)
+			}
+			expected := core.ProviderIdentityExpectation{LeaseID: id, AttemptLeaseID: id, Slug: after.Slug, ResourceID: after.CloudImmutableID}
+			stop := core.FixedStopRequest{StopRequest: core.StopRequest{ID: id}, ExpectedProviderIdentity: expected}
+			if err := b.StopFixed(t.Context(), stop); err != nil {
+				t.Fatal(err)
+			}
+			delete(fake.objects, warmPoolResource+"/"+cfg.AgentSandbox.Namespace+"/"+cfg.AgentSandbox.WarmPool)
+			getsBefore := len(fake.gets)
+			clientConstructions := 0
+			b.newClient = func(context.Context, core.Config, core.Runtime) (kubernetesClient, error) {
+				clientConstructions++
+				return nil, errors.New("completed fixture transport unavailable")
+			}
+			if err := b.StopFixed(t.Context(), stop); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.Stop(t.Context(), core.StopRequest{ID: id}); err != nil {
+				t.Fatal(err)
+			}
+			view, err = b.Status(t.Context(), core.StatusRequest{ID: id})
+			if err != nil || view.State != "released" || view.ServerID != after.CloudImmutableID || clientConstructions != 0 || len(fake.gets) != getsBefore {
+				t.Fatalf("terminal replay used native authority: view=%#v err=%v constructors=%d", view, err, clientConstructions)
+			}
+			terminal, err := core.ReadLeaseClaim(id)
+			if err != nil || terminal.FixedCreateIntent.State != "released" || terminal.CloudImmutableID != after.CloudImmutableID || fake.foreground != 1 {
+				t.Fatalf("terminal=%#v err=%v foreground=%d", terminal, err, fake.foreground)
+			}
+		})
+	}
+}
+
+func TestFixedWarmupRetainsIdentityAfterAcknowledgmentFailure(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	const id = "cbx_174200000002"
+	fake := &fixedPositiveClient{fakeKubernetesClient: readyFakeClient(cfg), t: t, leaseID: id}
+	fake.objects[warmPoolResource+"/"+cfg.AgentSandbox.Namespace+"/"+cfg.AgentSandbox.WarmPool] = &kubernetesObject{Metadata: objectMeta{Name: cfg.AgentSandbox.WarmPool, UID: "pool-fixed-ack"}}
+	b := testBackend(cfg, fake.fakeKubernetesClient, nil, nil)
+	b.newClient = func(context.Context, core.Config, core.Runtime) (kubernetesClient, error) { return fake, nil }
+	ackErr := errors.New("acquisition observer unavailable")
+	req := core.FixedWarmupRequest{WarmupRequest: core.WarmupRequest{Repo: testGitRepo(t), RequestedSlug: "fixed-ack", Keep: true}, RequestedLeaseID: id, OnAcquired: func(core.FixedAcquisitionReceipt) error { return ackErr }}
+	if err := b.WarmupFixed(t.Context(), req); !errors.Is(err, ackErr) {
+		t.Fatalf("ack error=%v", err)
+	}
+	claim, err := core.ReadLeaseClaim(id)
+	if err != nil || claim.CloudImmutableID == "" || claim.FixedCreateIntent.State != "prepared" || fake.deletes != 0 || b.rt.Stdout.(*bytes.Buffer).Len() != 0 {
+		t.Fatalf("ack failure lost custody: %#v %v", claim, err)
+	}
+	req.OnAcquired = func(core.FixedAcquisitionReceipt) error { return nil }
+	if err := b.WarmupFixed(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	if fake.creates != 1 {
+		t.Fatal("ack retry created a replacement")
+	}
+	if err := b.Stop(t.Context(), core.StopRequest{ID: id}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFixedWarmupReplayKeepsPublishedWorkload(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	const id = "cbx_174200000003"
+	fake := &fixedPositiveClient{fakeKubernetesClient: readyFakeClient(cfg), t: t, leaseID: id}
+	fake.objects[warmPoolResource+"/"+cfg.AgentSandbox.Namespace+"/"+cfg.AgentSandbox.WarmPool] = &kubernetesObject{Metadata: objectMeta{Name: cfg.AgentSandbox.WarmPool, UID: "pool-fixed-replay"}}
+	b := testBackend(cfg, fake.fakeKubernetesClient, nil, nil)
+	b.newClient = func(context.Context, core.Config, core.Runtime) (kubernetesClient, error) { return fake, nil }
+	req := core.FixedWarmupRequest{WarmupRequest: core.WarmupRequest{Repo: testGitRepo(t), RequestedSlug: "fixed-replay", Keep: true}, RequestedLeaseID: id, OnAcquired: func(core.FixedAcquisitionReceipt) error { return nil }}
+	if err := b.WarmupFixed(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	before, err := core.ReadLeaseClaim(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model a normal controller-created replacement Pod under the same Sandbox.
+	for key, pods := range fake.pods {
+		for i := range pods {
+			if pods[i].Name == before.Labels[claimLabelPodName] {
+				pods[i].UID = "uid-controller-replacement"
+			}
+		}
+		fake.pods[key] = pods
+	}
+	if err := b.WarmupFixed(t.Context(), req); err == nil || !strings.Contains(err.Error(), "workload identity changed") {
+		t.Fatalf("replay error=%v", err)
+	}
+	after, err := core.ReadLeaseClaim(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Labels["fixed_pod_uid"] != before.Labels["fixed_pod_uid"] || after.Labels["fixed_sandbox_uid"] != before.Labels["fixed_sandbox_uid"] || after.Labels[claimLabelContainer] != before.Labels[claimLabelContainer] || fake.creates != 1 {
+		t.Fatal("replay silently rebound published workload")
+	}
+}

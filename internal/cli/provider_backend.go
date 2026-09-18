@@ -720,6 +720,30 @@ type JSONListBackend interface {
 	ListJSON(ctx context.Context, req ListRequest) (any, error)
 }
 
+// DelegatedFixedWarmupBackend explicitly opts into durable delegated acquisition.
+type DelegatedFixedWarmupBackend interface {
+	WarmupFixed(context.Context, FixedWarmupRequest) error
+}
+
+type FixedAcquisitionReceipt struct {
+	LeaseID, Slug, Provider, ResourceID string
+}
+
+type FixedWarmupRequest struct {
+	WarmupRequest
+	RequestedLeaseID string
+	OnAcquired       func(FixedAcquisitionReceipt) error
+}
+
+type DelegatedFixedReleaseBackend interface {
+	StopFixed(context.Context, FixedStopRequest) error
+}
+
+type FixedStopRequest struct {
+	StopRequest
+	ExpectedProviderIdentity ProviderIdentityExpectation
+}
+
 type IdempotentLeaseIDBackend interface {
 	SupportsRequestedLeaseID() bool
 }

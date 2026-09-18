@@ -23,7 +23,7 @@ func (Provider) Spec() core.ProviderSpec {
 		Family:                     "agent-sandbox",
 		Kind:                       core.ProviderKindDelegatedRun,
 		Targets:                    []core.TargetSpec{{OS: core.TargetLinux}},
-		Features:                   core.FeatureSet{core.FeatureArchiveSync, core.FeatureCleanup, core.FeatureRunSession},
+		Features:                   core.FeatureSet{core.FeatureArchiveSync, core.FeatureCleanup, core.FeatureRunSession, core.FeatureFixedCurrentRepoStop},
 		Coordinator:                core.CoordinatorNever,
 		ClassDisposition:           core.ProviderClassDispositionUnmapped,
 	}
@@ -105,4 +105,20 @@ func validateConfig(cfg core.Config) error {
 		return core.Exit(2, "agent-sandbox execTimeoutSecs must be non-negative")
 	}
 	return nil
+}
+
+// Controller scope describes trusted local routing; live authority is pinned at acquisition.
+func (p Provider) ControllerProviderScope(cfg core.Config) (string, error) {
+	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
+		return "", core.Exit(2, "provider=%s supports target=linux only", providerName)
+	}
+	if err := p.ValidateConfig(cfg); err != nil {
+		return "", err
+	}
+	return claimScope(cfg), nil
+}
+
+func (p Provider) SupportsControllerFixedLeaseID(cfg core.Config) bool {
+	_, err := p.ControllerProviderScope(cfg)
+	return err == nil && cfg.TTL > 0
 }

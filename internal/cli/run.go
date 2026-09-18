@@ -98,6 +98,21 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		defer unlock()
 	}
 	options := leaseOptionsFromConfig(cfg)
+	if strings.TrimSpace(*requestedLeaseID) != "" {
+		if fixed, ok := backend.(DelegatedFixedWarmupBackend); ok {
+			return fixed.WarmupFixed(ctx, FixedWarmupRequest{
+				WarmupRequest: WarmupRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim,
+					ActionsRunner: *actionsRunner, RequestedSlug: requestedSlug, TimingJSON: *timingJSON,
+					BeforeComplete: func() { a.syncExternalRunnersBestEffort(ctx, cfg, backend) }},
+				RequestedLeaseID: strings.TrimSpace(*requestedLeaseID),
+				OnAcquired: func(receipt FixedAcquisitionReceipt) error {
+					return acknowledgeControllerAcquireIdentity(ctx, controllerAcquireIdentity{
+						LeaseID: receipt.LeaseID, Slug: receipt.Slug, Provider: receipt.Provider, ResourceID: receipt.ResourceID,
+					})
+				},
+			})
+		}
+	}
 	// Fixed IDs must reach Acquire; delegated warmup has no durable-ID request.
 	if delegated, ok := backend.(DelegatedRunBackend); ok && strings.TrimSpace(*requestedLeaseID) == "" {
 		return delegated.Warmup(ctx, WarmupRequest{
@@ -5004,6 +5019,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		if !expectedIdentity.empty() {
+			if fixed, ok := backend.(DelegatedFixedReleaseBackend); ok && !*reclaim {
+				return fixed.StopFixed(ctx, FixedStopRequest{StopRequest: StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id}, ExpectedProviderIdentity: expectedIdentity})
+			}
 			return Exit(2, "provider=%s cannot validate an expected release identity", backend.Spec().Name)
 		}
 		if *reclaim {
