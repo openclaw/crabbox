@@ -192,7 +192,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		case "user,repo,env,flag":
 		case "user,repo,flag":
 			f.noEnv = true
-			for _, tag := range []string{"env", "envAlias", "envAlias2", "envAlias3", "envAliasAfterConfig", "envInt", "envFloat", "envList", "envSplitBefore"} {
+			for _, tag := range []string{"env", "envAlias", "envAlias2", "envAlias3", "envAliasAfterConfig", "envInt", "envFloat", "envString", "envList", "envSplitBefore"} {
 				if _, ok := tags.Lookup(tag); ok {
 					return s, fmt.Errorf("%s: user,repo,flag sources require an absent %s tag", f.name, tag)
 				}
@@ -363,6 +363,11 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 					return s, fmt.Errorf("%s: %s requires a supported mode on a []string field with that source", f.name, mode.tag)
 				}
 				*enabled = true
+			}
+		}
+		if value, ok := tags.Lookup("envString"); ok {
+			if value != "presence" || f.kind != "string" || f.noEnv || hasAlias || hasAlias2 || hasAlias3 {
+				return s, fmt.Errorf("%s: envString requires presence on an environment-admitted string without aliases", f.name)
 			}
 		}
 		if value, ok := tags.Lookup("reportApplied"); ok {

@@ -278,7 +278,7 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 	if flagWasSet(fs, "parallels-host-key") {
 		provenance.parallelsHostKey = credentialSourceFlag
 	}
-	if flagWasSet(fs, "static-host") {
+	if StaticConfigFlagPresence(fs).Host {
 		provenance.staticHost = credentialSourceFlag
 	}
 	if ExeDevConfigFlagPresence(fs).ControlHost {

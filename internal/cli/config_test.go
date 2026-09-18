@@ -19722,3 +19722,224 @@ func TestIsloAcceptedFieldIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestBoxdBindingFileFacts(t *testing.T) {
+	clearManualBatchAConfigEnv(t)
+	for _, trusted := range []bool{false, true} {
+		for _, field := range []string{"APIURL", "Org", "WorkRoot", "DeleteOnRelease"} {
+			for _, raw := range []string{"", " prior ", "fixture", "false", "true"} {
+				cfg := baseConfig()
+				cfg.Boxd = BoxdConfig{APIURL: "prior", Org: "prior", WorkRoot: "prior", DeleteOnRelease: true}
+				want := cfg.Boxd
+				file := &fileBoxdConfig{}
+				accepted := false
+				if field == "DeleteOnRelease" {
+					if raw == "false" || raw == "true" {
+						v := raw == "true"
+						file.DeleteOnRelease = &v
+						want.DeleteOnRelease = v
+						accepted = true
+					}
+				} else {
+					reflect.ValueOf(file).Elem().FieldByName(field).SetString(raw)
+					accepted = raw != "" && (trusted || field == "WorkRoot")
+					if accepted {
+						reflect.ValueOf(&want).Elem().FieldByName(field).SetString(raw)
+					}
+				}
+				before, err := yaml.Marshal(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := applyFileConfigWithTrust(&cfg, fileConfig{Boxd: file}, trusted); err != nil {
+					t.Fatal(err)
+				}
+				after, err := yaml.Marshal(file)
+				if err != nil || !bytes.Equal(before, after) {
+					t.Fatal("DTO changed")
+				}
+				if !reflect.DeepEqual(cfg.Boxd, want) || IsBoxdWorkRootExplicit(&cfg) != (field == "WorkRoot" && accepted) || DeleteOnReleaseExplicit(cfg, "boxd") != (field == "DeleteOnRelease" && accepted) {
+					t.Fatalf("file %s/%q trusted=%v: %+v", field, raw, trusted, cfg.Boxd)
+				}
+				ledger := Config{}
+				source := configInputRepo
+				if trusted {
+					source = configInputUser
+				}
+				recordConfigInput(&ledger, "boxd", source, accepted)
+				recordConfigInputIntent(&ledger, "boxd", source, accepted && (field == "WorkRoot" || field == "DeleteOnRelease"))
+				if cfg.inputProvenance["boxd"] != ledger.inputProvenance["boxd"] {
+					t.Fatal("file value/intent facts")
+				}
+			}
+		}
+	}
+}
+
+func TestBoxdBindingEnvironmentPresence(t *testing.T) {
+	clearManualBatchAConfigEnv(t)
+	keys := map[string]string{"APIURL": "CRABBOX_BOXD_API_URL", "Org": "CRABBOX_BOXD_ORG", "WorkRoot": "CRABBOX_BOXD_WORK_ROOT", "DeleteOnRelease": "CRABBOX_BOXD_DELETE_ON_RELEASE"}
+	for field, key := range keys {
+		for _, raw := range []*string{nil, new(""), new("prior"), new("  "), new("false"), new("true"), new("invalid")} {
+			for _, k := range keys {
+				t.Setenv(k, "")
+				if err := os.Unsetenv(k); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if raw != nil {
+				t.Setenv(key, *raw)
+			}
+			cfg := baseConfig()
+			cfg.Boxd = BoxdConfig{APIURL: "prior", Org: "prior", WorkRoot: "prior", DeleteOnRelease: true}
+			want := cfg.Boxd
+			accepted := false
+			if raw != nil {
+				switch field {
+				case "APIURL", "Org":
+					accepted = true
+				case "WorkRoot":
+					accepted = *raw != ""
+				case "DeleteOnRelease":
+					accepted = *raw == "true" || *raw == "false"
+				}
+			}
+			if accepted {
+				if field == "DeleteOnRelease" {
+					want.DeleteOnRelease = *raw == "true"
+				} else {
+					reflect.ValueOf(&want).Elem().FieldByName(field).SetString(*raw)
+				}
+			}
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg.Boxd, want) || IsBoxdWorkRootExplicit(&cfg) != (field == "WorkRoot" && accepted) || DeleteOnReleaseExplicit(cfg, "boxd") != (field == "DeleteOnRelease" && accepted) {
+				t.Fatalf("env %s: %+v want %+v", field, cfg.Boxd, want)
+			}
+			ledger := Config{}
+			recordConfigInput(&ledger, "boxd", configInputEnvironment, accepted)
+			recordConfigInputIntent(&ledger, "boxd", configInputEnvironment, accepted && (field == "WorkRoot" || field == "DeleteOnRelease"))
+			if cfg.inputProvenance["boxd"] != ledger.inputProvenance["boxd"] {
+				t.Fatal("env value/intent facts")
+			}
+		}
+	}
+}
+
+func TestStaticCompleteFileEnvironmentBindings(t *testing.T) {
+	clearConfigEnv(t)
+	if baseConfig().Static != (StaticConfig{}) {
+		t.Fatal("Static must have zero compiled defaults")
+	}
+	prior := StaticConfig{ID: "old-id", Name: "old-name", Host: "old-host", User: "old-user", Port: "old-port", WorkRoot: "old-root"}
+	for _, trusted := range []bool{false, true} {
+		for _, raw := range []string{"", " ", "replacement"} {
+			cfg := Config{Static: prior, SSHUser: "generic-user", SSHPort: "generic-port", SSHKey: "/synthetic/not-read", WorkRoot: "/generic"}
+			input := fileStaticConfig{ID: raw, Name: raw, Host: raw, User: raw, Port: raw, WorkRoot: raw}
+			before := input
+			if err := applyFileConfigWithTrust(&cfg, fileConfig{Static: &input}, trusted); err != nil {
+				t.Fatal(err)
+			}
+			want := prior
+			if raw != "" {
+				want = StaticConfig{ID: raw, Name: raw, Host: raw, User: raw, Port: raw, WorkRoot: raw}
+			}
+			if cfg.Static != want || input != before {
+				t.Fatal("file values or immutable DTO changed")
+			}
+			facts := cfg.inputProvenance["ssh"]
+			wantSource, bit := credentialSourceRepository, uint8(1<<(configInputRepo-1))
+			if trusted {
+				wantSource, bit = credentialSourceTrustedFile, uint8(1<<(configInputUser-1))
+			}
+			if raw == "" {
+				wantSource, bit = credentialSourceUnknown, 0
+			}
+			if facts.values != bit || facts.intents != 0 || cfg.credentialProvenance.staticHost != wantSource {
+				t.Fatal("file accepted-source accounting changed")
+			}
+			if cfg.SSHUser != "generic-user" || cfg.SSHPort != "generic-port" || cfg.SSHKey != "/synthetic/not-read" || cfg.WorkRoot != "/generic" || cfg.explicitSSHUser != "" || cfg.explicitSSHPort != "" || cfg.explicitSSHKey != "" || cfg.explicitWorkRoot != "" {
+				t.Fatal("Static overlay changed generic connection policy")
+			}
+		}
+	}
+	for _, raw := range []string{"", " ", "replacement"} {
+		clearConfigEnv(t)
+		cfg := Config{Static: prior}
+		for _, name := range []string{"ID", "NAME", "HOST", "USER", "PORT", "WORK_ROOT"} {
+			t.Setenv("CRABBOX_STATIC_"+name, raw)
+		}
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		want := prior
+		if raw != "" {
+			want = StaticConfig{ID: raw, Name: raw, Host: raw, User: raw, Port: raw, WorkRoot: raw}
+		}
+		if cfg.Static != want || (cfg.inputProvenance["ssh"].values != 0) != (raw != "") || cfg.inputProvenance["ssh"].intents != 0 {
+			t.Fatal("environment values/acceptance changed")
+		}
+		wantSource := credentialSourceUnknown
+		if raw != "" {
+			wantSource = credentialSourceEnvironment
+		}
+		if cfg.credentialProvenance.staticHost != wantSource {
+			t.Fatal("environment host source changed")
+		}
+	}
+}
+
+func TestStaticTargetFlagsEarlyFailureState(t *testing.T) {
+	for _, raw := range []string{"", " ", "synthetic"} {
+		for _, target := range []string{"invalid", "linux"} {
+			cfg := baseConfig()
+			cfg.Provider = "other"
+			cfg.Static = StaticConfig{ID: "retained-id", Name: "retained-name", Host: "old", User: "old", Port: "old", WorkRoot: "old"}
+			cfg.credentialProvenance.staticHost = credentialSourceTrustedFile
+			fs := newFlagSet("test", io.Discard)
+			values := registerTargetFlags(fs, cfg)
+			args := []string{"--target=" + target, "--static-host=" + raw, "--static-user=" + raw, "--static-port=" + raw, "--static-work-root=" + raw}
+			if target == "linux" {
+				args = append(args, "--windows-mode=wsl2")
+			}
+			if err := fs.Parse(args); err != nil {
+				t.Fatal(err)
+			}
+			err := applyTargetFlagOverrides(&cfg, fs, values)
+			wantError := "target must be"
+			if target == "linux" {
+				wantError = "windows.mode is only valid"
+			}
+			if err == nil || !strings.Contains(err.Error(), wantError) {
+				t.Fatalf("error=%v", err)
+			}
+			if cfg.Static != (StaticConfig{ID: "retained-id", Name: "retained-name", Host: raw, User: raw, Port: raw, WorkRoot: raw}) || cfg.credentialProvenance.staticHost != credentialSourceFlag || cfg.inputProvenance["ssh"].values != 1<<(configInputFlag-1) || cfg.inputProvenance["ssh"].intents != 0 {
+				t.Fatal("static acceptance/source must precede target validation failure")
+			}
+			if !cfg.targetExplicit || !cfg.targetFlagExplicit || cfg.Provider != "other" || cfg.explicitSSHUser != "" || cfg.explicitSSHPort != "" || cfg.explicitWorkRoot != "" {
+				t.Fatal("target or generic marker policy changed")
+			}
+		}
+	}
+}
+
+func TestStaticFlagRegistrationContract(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Static = StaticConfig{Host: "host.example.test", User: "alice", Port: "2022", WorkRoot: "/work/raw"}
+	fs := newFlagSet("test", io.Discard)
+	registerTargetFlags(fs, cfg)
+	for _, tc := range []struct{ name, value, help string }{
+		{"static-host", cfg.Static.Host, "static SSH host"}, {"static-user", cfg.Static.User, "static SSH user"}, {"static-port", cfg.Static.Port, "static SSH port"}, {"static-work-root", cfg.Static.WorkRoot, "static target work root"},
+	} {
+		f := fs.Lookup(tc.name)
+		if f == nil || f.DefValue != tc.value || f.Usage != tc.help {
+			t.Fatalf("registration changed for %s", tc.name)
+		}
+	}
+	for _, name := range []string{"static-id", "static-name", "static-key"} {
+		if fs.Lookup(name) != nil {
+			t.Fatalf("unexpected flag %s", name)
+		}
+	}
+}

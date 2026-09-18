@@ -197,6 +197,20 @@ iteration order through the shared constructors. Declarations without it retain
 their existing three phases and unchanged generated output. Codespaces uses this
 to register GHPath near the end without changing config or YAML field order.
 
+Boxd declares all four fields in `internal/cli/config_boxd.go`. API URL and
+organization retain trusted-file-only admission and `envString:"presence"`:
+absent environment inputs inherit; present empty, equal and whitespace values
+assign and record accepted input without trimming. This fixed mode requires an
+environment-admitted string and rejects all alias composition. Ordinary string
+bindings keep their raw-nonempty environment semantics.
+
+File strings still ignore exact empty input. Work root and delete-on-release
+reports feed their existing explicit markers and source-intent records; URL and
+organization inputs record values only. Flag recording retains synthesized-input
+suppression. The selected-provider guards still precede typed application, and
+selected-provider defaults still follow assignments. No new final validation,
+token input, runtime fallback or credential policy is introduced.
+
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
@@ -256,6 +270,14 @@ timeout error, leaving the later release value, marker, intent and final default
 phase untouched on that error. Environment path expansion remains unconditional
 on the final fallback values. Backend defaults and native operations stay
 outside the generated owner.
+
+Static's six-field owner is `internal/cli/config_static.go`, with zero compiled
+defaults and canonical input owner `ssh`. Four generated flag bindings compose
+into the generic target flags, before target normalization and validation. Host
+provenance stays at both its early target-application phase and the existing
+central post-provider phase. ID and Name remain file/environment-only. Generic
+SSH credentials, explicit snapshots, target projections, aliases and claim
+routing are separate policies and do not move into this owner.
 
 Islo's ten-field owner is `internal/cli/config_islo.go`. Generated accepted
 integer facts preserve its resource markers: positive file numbers, successfully

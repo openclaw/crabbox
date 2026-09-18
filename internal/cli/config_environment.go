@@ -57,6 +57,13 @@ func applyConfigEnvironmentField(dst reflect.Value, tags reflect.StructTag) (boo
 	}
 	switch dst.Kind() {
 	case reflect.String:
+		if tags.Get("envString") == "presence" {
+			value, accepted := os.LookupEnv(name)
+			if accepted {
+				dst.SetString(value)
+			}
+			return accepted, nil
+		}
 		names := []string{name}
 		if alias != "" && (tags.Get("envAliasAfterConfig") != "true" || dst.String() == "") {
 			names = append(names, alias)

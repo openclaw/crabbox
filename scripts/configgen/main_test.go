@@ -4345,3 +4345,82 @@ func TestIsloGeneratedConfigIsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+const boxdPresenceSample = "package cli\ntype PilotConfig struct { Value string `sources:\"user,env,flag\" config:\"value\" env:\"VALUE\" flag:\"value\" help:\"Value\" fileIgnoreEmpty:\"true\" fileStorage:\"value\" envString:\"presence\" reportApplied:\"true\"`\n Plain string `sources:\"user,repo,env,flag\" config:\"plain\" env:\"PLAIN\" flag:\"plain\" help:\"Plain\" fileIgnoreEmpty:\"true\" fileStorage:\"value\" reportApplied:\"true\"` }"
+
+func TestBoxdPresenceSchema(t *testing.T) {
+	for _, kind := range []string{"bool", "int", "int64", "float64", "[]string"} {
+		policy := ""
+		if kind == "int" || kind == "int64" {
+			policy = ` nonnegative:"true" envInt:"fallback"`
+		}
+		source := "package cli\ntype PilotConfig struct { Value " + kind + " `sources:\"env,flag\" env:\"VALUE\" flag:\"value\" help:\"Value\" envString:\"presence\"" + policy + "` }"
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil || !strings.Contains(err.Error(), "envString requires presence") {
+			t.Errorf("wrong kind %s: %v", kind, err)
+		}
+	}
+	if _, err := parseSchema([]byte(boxdPresenceSample), "PilotConfig", "pilot"); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []struct{ old, new string }{
+		{`envString:"presence"`, `envString:""`}, {`envString:"presence"`, `envString:"nonempty"`},
+		{"Value string", "Value bool"}, {"Value string", "Value int"}, {"Value string", "Value []string"},
+		{`envString:"presence"`, `envString:"presence" envAlias:"ALIAS"`},
+		{`envString:"presence"`, `envString:"presence" envAlias:"ALIAS" envAlias2:"SECOND"`},
+		{`envString:"presence"`, `envString:"presence" envAlias:"ALIAS" envAlias2:"SECOND" envAlias3:"THIRD"`},
+		{`envString:"presence"`, `envString:"presence" envAlias:"ALIAS" envAliasAfterConfig:"true"`},
+	} {
+		source := strings.Replace(boxdPresenceSample, change.old, change.new, 1)
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+			t.Errorf("accepted invalid composition: %s", change.new)
+		}
+	}
+	for _, source := range []string{
+		"package cli\ntype PilotConfig struct { Value string `sources:\"flag\" flag:\"value\" help:\"Value\" envString:\"presence\"` }",
+		"package cli\ntype PilotConfig struct { Value string `sources:\"user,repo,flag\" config:\"value\" flag:\"value\" help:\"Value\" envString:\"presence\"` }",
+	} {
+		if _, err := parseSchema([]byte(source), "PilotConfig", "pilot"); err == nil {
+			t.Error("accepted presence without env source")
+		}
+	}
+}
+
+func TestBoxdPresenceExecutable(t *testing.T) {
+	s, err := parseSchema([]byte(boxdPresenceSample), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := generate(s, "pilot.go")
+	if err != nil || !bytes.Equal(out, again) {
+		t.Fatal("nondeterministic presence")
+	}
+	const behavior = `package cli
+import("flag";"os";"testing")
+func TestPresence(t *testing.T){
+ for _,raw:=range []*string{nil,new(""),new(" "),new("prior"),new("different")}{
+  t.Setenv("VALUE","");t.Setenv("PLAIN","");if raw==nil{if err:=os.Unsetenv("VALUE");err!=nil{t.Fatal(err)};if err:=os.Unsetenv("PLAIN");err!=nil{t.Fatal(err)}}else{t.Setenv("VALUE",*raw);t.Setenv("PLAIN",*raw)}
+  cfg:=PilotConfig{Value:"prior",Plain:"prior"};got,err:=cfg.applyEnv();presence:=raw!=nil;ordinary:=raw!=nil&&*raw!="";want,plain:="prior","prior";if presence{want=*raw};if ordinary{plain=*raw}
+  if err!=nil||cfg.Value!=want||cfg.Plain!=plain||got.Value!=presence||got.Plain!=ordinary||got.InputAccepted!=presence{t.Fatalf("presence cfg=%+v report=%+v err=%v",cfg,got,err)}
+ }
+ for _,trusted:=range []bool{false,true}{for _,raw:=range []string{""," ","prior"}{cfg:=PilotConfig{Value:"prior",Plain:"prior"};got,err:=cfg.applyFile(&filePilotConfig{Value:raw,Plain:raw},trusted);if err!=nil||got.Value!=(trusted&&raw!="")||got.Plain!=(raw!=""){t.Fatal("file admission changed")};want:="prior";if trusted&&raw!=""{want=raw};if cfg.Value!=want{t.Fatal("file value changed")}}}
+ cfg:=PilotConfig{Value:"prior"};fs:=flag.NewFlagSet("fixture",flag.ContinueOnError);v:=RegisterPilotConfigFlags(fs,cfg);if err:=fs.Set("value","");err!=nil{t.Fatal(err)};got,err:=v.Apply(&cfg,fs);if err!=nil||cfg.Value!=""||!got.Value||!got.InputAccepted||!PilotConfigFlagPresence(fs).Value{t.Fatal("empty visited flag changed")}
+}
+`
+	runScalarFixture(t, boxdPresenceSample, out, behavior)
+}
+
+func TestBoxdGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_boxd.go", "../../internal/cli/config_boxd_generated.go", "BoxdConfig", "boxd", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStaticGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_static.go", "../../internal/cli/config_static_generated.go", "StaticConfig", "ssh", true); err != nil {
+		t.Fatal(err)
+	}
+}

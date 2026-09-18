@@ -568,15 +568,6 @@ type WindowsSandboxConfig struct {
 	MemoryMB           int
 }
 
-type StaticConfig struct {
-	ID       string
-	Name     string
-	Host     string
-	User     string
-	Port     string
-	WorkRoot string
-}
-
 type ResultsConfig struct {
 	JUnit          []string
 	Auto           bool
@@ -1703,6 +1694,7 @@ func baseConfig() Config {
 		Scaleway:                defaultScalewayConfig(),
 		TencentCloud:            defaultTencentCloudConfig(),
 		Incus:                   initialIncusConfig(),
+		Static:                  defaultStaticConfig(),
 		SSHUser:                 "crabbox",
 		SSHKey:                  sshKey,
 		SSHPort:                 "2222",
@@ -1744,16 +1736,12 @@ func baseConfig() Config {
 		Namespace:         defaultNamespaceConfig(),
 		NamespaceInstance: defaultNamespaceInstanceConfig(),
 		Phala:             defaultPhalaConfig(),
-		Boxd: BoxdConfig{
-			APIURL:          "https://app.boxd.sh",
-			WorkRoot:        "/home/boxd/crabbox",
-			DeleteOnRelease: true,
-		},
-		Coder:   defaultCoderConfig(),
-		Morph:   defaultMorphConfig(),
-		Orgo:    defaultOrgoConfig(),
-		Daytona: defaultDaytonaConfig(),
-		E2B:     defaultE2BConfig(),
+		Boxd:              defaultBoxdConfig(),
+		Coder:             defaultCoderConfig(),
+		Morph:             defaultMorphConfig(),
+		Orgo:              defaultOrgoConfig(),
+		Daytona:           defaultDaytonaConfig(),
+		E2B:               defaultE2BConfig(),
 		CubeSandbox: CubeSandboxConfig{
 			APIURL:        "http://127.0.0.1:3000",
 			Domain:        "cube.app",
@@ -2155,22 +2143,6 @@ type fileExternalConfig struct {
 	RoutingFile  string                      `yaml:"routingFile,omitempty"`
 }
 
-// BoxdConfig contains non-secret HTTPS console routing and lease settings.
-// Interactive session tokens are read only from the environment by the provider.
-type BoxdConfig struct {
-	APIURL          string
-	Org             string // Empty selects the fixed personal account context.
-	WorkRoot        string
-	DeleteOnRelease bool
-}
-
-type fileBoxdConfig struct {
-	APIURL          string `yaml:"apiUrl,omitempty"`
-	Org             string `yaml:"org,omitempty"`
-	WorkRoot        string `yaml:"workRoot,omitempty"`
-	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
-}
-
 type fileCubeSandboxConfig struct {
 	APIURL        string `yaml:"apiUrl,omitempty"`
 	Domain        string `yaml:"domain,omitempty"`
@@ -2365,15 +2337,6 @@ type fileTailscaleConfig struct {
 	AuthKeyEnv             string   `yaml:"authKeyEnv,omitempty"`
 	ExitNode               string   `yaml:"exitNode,omitempty"`
 	ExitNodeAllowLANAccess *bool    `yaml:"exitNodeAllowLanAccess,omitempty"`
-}
-
-type fileStaticConfig struct {
-	ID       string `yaml:"id,omitempty"`
-	Name     string `yaml:"name,omitempty"`
-	Host     string `yaml:"host,omitempty"`
-	User     string `yaml:"user,omitempty"`
-	Port     string `yaml:"port,omitempty"`
-	WorkRoot string `yaml:"workRoot,omitempty"`
 }
 
 type fileResultsConfig struct {
@@ -3577,30 +3540,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if err := applyPhalaFileConfig(cfg, file.Phala, trusted, inputSource); err != nil {
 		return err
 	}
-	if file.Boxd != nil {
-		// Only trusted config can redirect credentials or organization billing.
-		if trusted {
-			if file.Boxd.APIURL != "" {
-				cfg.Boxd.APIURL = file.Boxd.APIURL
-				recordConfigInput(cfg, "boxd", inputSource, true)
-			}
-			if file.Boxd.Org != "" {
-				cfg.Boxd.Org = file.Boxd.Org
-				recordConfigInput(cfg, "boxd", inputSource, true)
-			}
-		}
-		if file.Boxd.WorkRoot != "" {
-			cfg.Boxd.WorkRoot = file.Boxd.WorkRoot
-			recordConfigInput(cfg, "boxd", inputSource, true)
-			MarkBoxdWorkRootExplicit(cfg)
-			recordConfigInputIntent(cfg, "boxd", inputSource, true)
-		}
-		if file.Boxd.DeleteOnRelease != nil {
-			cfg.Boxd.DeleteOnRelease = *file.Boxd.DeleteOnRelease
-			recordConfigInput(cfg, "boxd", inputSource, true)
-			MarkDeleteOnReleaseExplicit(cfg, "boxd")
-			recordConfigInputIntent(cfg, "boxd", inputSource, true)
-		}
+	if err := applyBoxdFileConfig(cfg, file.Boxd, trusted, inputSource); err != nil {
+		return err
 	}
 	if err := applyCoderFileConfig(cfg, file.Coder, inputSource); err != nil {
 		return err
@@ -4101,32 +4042,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Tailscale.ExitNodeAllowLANAccess, file.Tailscale.ExitNodeAllowLANAccess))
 	}
-	if file.Static != nil {
-		if file.Static.ID != "" {
-			cfg.Static.ID = file.Static.ID
-			recordConfigInput(cfg, "ssh", inputSource, true)
-		}
-		if file.Static.Name != "" {
-			cfg.Static.Name = file.Static.Name
-			recordConfigInput(cfg, "ssh", inputSource, true)
-		}
-		if file.Static.Host != "" {
-			cfg.Static.Host = file.Static.Host
-			recordConfigInput(cfg, "ssh", inputSource, true)
-			cfg.credentialProvenance.staticHost = credentialSource
-		}
-		if file.Static.User != "" {
-			cfg.Static.User = file.Static.User
-			recordConfigInput(cfg, "ssh", inputSource, true)
-		}
-		if file.Static.Port != "" {
-			cfg.Static.Port = file.Static.Port
-			recordConfigInput(cfg, "ssh", inputSource, true)
-		}
-		if file.Static.WorkRoot != "" {
-			cfg.Static.WorkRoot = file.Static.WorkRoot
-			recordConfigInput(cfg, "ssh", inputSource, true)
-		}
+	if err := applyStaticFileConfig(cfg, file.Static, inputSource, credentialSource); err != nil {
+		return err
 	}
 	if file.Results != nil {
 		if file.Results.JUnit != nil {
@@ -5016,25 +4933,8 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if value, ok := os.LookupEnv("CRABBOX_BOXD_API_URL"); ok {
-		cfg.Boxd.APIURL = value
-		recordConfigInput(cfg, "boxd", configInputEnvironment, true)
-	}
-	if value, ok := os.LookupEnv("CRABBOX_BOXD_ORG"); ok {
-		cfg.Boxd.Org = value
-		recordConfigInput(cfg, "boxd", configInputEnvironment, true)
-	}
-	if value := os.Getenv("CRABBOX_BOXD_WORK_ROOT"); value != "" {
-		cfg.Boxd.WorkRoot = value
-		recordConfigInput(cfg, "boxd", configInputEnvironment, true)
-		MarkBoxdWorkRootExplicit(cfg)
-		recordConfigInputIntent(cfg, "boxd", configInputEnvironment, true)
-	}
-	if value, ok := getenvBool("CRABBOX_BOXD_DELETE_ON_RELEASE"); ok {
-		cfg.Boxd.DeleteOnRelease = value
-		recordConfigInput(cfg, "boxd", configInputEnvironment, true)
-		MarkDeleteOnReleaseExplicit(cfg, "boxd")
-		recordConfigInputIntent(cfg, "boxd", configInputEnvironment, true)
+	if err := applyBoxdEnvironmentConfig(cfg); err != nil {
+		return err
 	}
 	{
 		applied, err := cfg.Coder.applyEnv()
@@ -5501,16 +5401,9 @@ func applyEnv(cfg *Config) error {
 	if cfg.Tailscale.AuthKeyEnv != "" {
 		cfg.Tailscale.AuthKey = configInputEnvString(cfg, configInputGeneric, "", cfg.Tailscale.AuthKeyEnv)
 	}
-	cfg.Static.ID = configInputEnvString(cfg, "ssh", cfg.Static.ID, "CRABBOX_STATIC_ID")
-	cfg.Static.Name = configInputEnvString(cfg, "ssh", cfg.Static.Name, "CRABBOX_STATIC_NAME")
-	if value := os.Getenv("CRABBOX_STATIC_HOST"); value != "" {
-		cfg.Static.Host = value
-		recordConfigInput(cfg, "ssh", configInputEnvironment, true)
-		cfg.credentialProvenance.staticHost = credentialSourceEnvironment
+	if err := applyStaticEnvironmentConfig(cfg); err != nil {
+		return err
 	}
-	cfg.Static.User = configInputEnvString(cfg, "ssh", cfg.Static.User, "CRABBOX_STATIC_USER")
-	cfg.Static.Port = configInputEnvString(cfg, "ssh", cfg.Static.Port, "CRABBOX_STATIC_PORT")
-	cfg.Static.WorkRoot = configInputEnvString(cfg, "ssh", cfg.Static.WorkRoot, "CRABBOX_STATIC_WORK_ROOT")
 	{
 		applied, err := cfg.Blacksmith.applyEnvSuffix()
 		recordConfigInput(cfg, "blacksmith-testbox", configInputEnvironment, applied.InputAccepted)
