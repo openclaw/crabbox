@@ -172,6 +172,31 @@ pointer-backed copies; environment lists retain their presence/`none` behavior.
 changes existing tolerant float parsing or positive-only file float rules.
 The configured workdir stays empty; backend runtime defaults remain separate.
 
+GitHub Codespaces declares all twelve fields in
+`internal/cli/config_github_codespaces.go`, retaining its token-free shape and
+API URL without an argv binding. Its composed initializer supplies that no-flag
+URL default. Trusted-only file inputs remain API URL, GH path, repository, both
+durations and delete-on-release; the other file grants remain repository-safe.
+File GH-path expansion runs only for an accepted field, environment expansion
+runs unconditionally, and flags retain raw values. Explicit retention/delete
+markers consume accepted-field reports, including equal and zero/false values.
+Generic machine effects and final validation stay in the provider wrapper.
+
+`duration:"nonnegative-overlay"` uses the existing nonnegative-duration helper for
+file/environment inputs. Empty, malformed, padded and negative text is ignored;
+zero and equal values are accepted. Positive-overlay and native duration flags
+keep their existing behavior. `reportApplied:"true"` additionally admits `int`
+and `time.Duration`, reporting assignments accepted by their existing source
+rules; it does not broaden parsing, source admission or numeric validation.
+
+An optional type-declaration `//configgen:flag-order FieldA,FieldB` directive
+specifies a complete flag-field permutation when registration differs from
+config/DTO order. Unknown, repeated, missing and no-flag fields are rejected,
+as are misplaced, repeated and malformed directives. The list only chooses
+iteration order through the shared constructors. Declarations without it retain
+their existing three phases and unchanged generated output. Codespaces uses this
+to register GHPath near the end without changing config or YAML field order.
+
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
@@ -231,6 +256,15 @@ timeout error, leaving the later release value, marker, intent and final default
 phase untouched on that error. Environment path expansion remains unconditional
 on the final fallback values. Backend defaults and native operations stay
 outside the generated owner.
+
+Islo's ten-field owner is `internal/cli/config_islo.go`. Generated accepted
+integer facts preserve its resource markers: positive file numbers, successfully
+parsed raw environment integers, and visited integer flags mark explicit inputs,
+including accepted defaults. Malformed environment input preserves old markers
+and does not add intent facts. The initializer composes scalar defaults with the
+existing OS-derived image. Credential sources remain wrapper-owned, with BaseURL
+flag provenance at the existing central post-success phase. Automatic flag
+assignment introduces no validation or provider-selection guard.
 
 Tart's seven-field owner is `internal/cli/config_tart.go`. Manual flag application
 keeps the provider's ordered resource checks and partial-error effects, consuming
@@ -300,10 +334,10 @@ Kubeconfig even when no override was accepted. The delete marker stays outside
 generation and is applied only when its field was reached. Flag application
 copies all visited values before the provider's existing validation.
 
-Duration support is deliberately one fixed mode: canonical standard-library
-`time.Duration` with `duration:"positive-overlay"`. File-admitted fields must
+Duration support uses canonical standard-library `time.Duration` with the fixed
+`duration:"positive-overlay"` or `duration:"nonnegative-overlay"` modes. File-admitted fields must
 also declare `fileStorage:"value"`; their YAML fields remain raw strings, not
-parsed durations or pointers. File/env input calls the existing positive,
+parsed durations or pointers. Positive-overlay file/env input calls the existing positive,
 tolerant `applyLeaseDuration` helper without trimming. That wrapper delegates
 parsing and assignment to the strict `ApplyLeaseDuration` helper, discarding its
 error for file/environment overlays; flag callers retain their error policy.
@@ -314,7 +348,9 @@ zero/negative values before provider validation; they do not inherit file/env
 acceptance. The Namespace string-flag exceptions are described below.
 Declared defaults must parse to a positive duration and produce typed constants;
 an omitted default remains zero. Arbitrary qualified types, alternate parsers,
-callbacks and additional file/environment duration policies are not supported.
+callbacks and other file/environment duration policies are not supported.
+Nonnegative-overlay reuses `applyNonNegativeLeaseDuration` and accepts zero while
+retaining the same raw-text, ignored-invalid and equal-assignment behavior.
 
 Blacksmith uses all six bindings together, with four string flags and two
 file/environment-only fields: a positive-overlay duration and a pointer-backed
@@ -570,7 +606,7 @@ handling. An explicitly present empty provider block remains `{}`.
 | `[]string` | `fileList:"nonempty-raw"`, `fileList:"nonempty-normalized"`, `fileList:"present-normalized"`, or nil-presence/cloning `fileList:"raw"` |
 | `int`, `int64` | `fileInt:"positive"` or `fileInt:"nonzero"` |
 | `float64` | `fileFloat:"positive"` |
-| `time.Duration` | raw string with `duration:"positive-overlay"` |
+| `time.Duration` | raw string with `duration:"positive-overlay"` or `duration:"nonnegative-overlay"` |
 
 Apart from the explicit raw value-slice combination, presence-sensitive rules,
 booleans and fields without file input cannot use value storage. Existing
@@ -812,7 +848,7 @@ MXC execution and runtime policy remain in the adapter.
    These modes require their corresponding admitted source and reject unsupported
    values or types. They accept no custom parser, separator, or expression and
    leave ordinary list bindings unchanged.
-   Use `reportApplied:"true"` only on string/bool fields whose accepted-input
+   Use `reportApplied:"true"` only on string, bool, int, or time.Duration fields whose accepted-input
    events are needed by an existing handwritten policy. See the report boundary
    below; this is not a new source grant.
    A file-admitted string can declare one `configAlias` YAML key. Its assignment

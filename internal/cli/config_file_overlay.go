@@ -51,6 +51,9 @@ func applyConfigFileField(dst, src reflect.Value, tags reflect.StructTag, provid
 		src = src.Elem()
 	}
 	if dst.Type() == reflect.TypeFor[time.Duration]() {
+		if tags.Get("duration") == "nonnegative-overlay" {
+			return applyNonNegativeLeaseDuration(dst.Addr().Interface().(*time.Duration), src.String()), nil
+		}
 		return applyLeaseDuration(dst.Addr().Interface().(*time.Duration), src.String()), nil
 	}
 	switch dst.Kind() {

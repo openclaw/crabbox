@@ -2950,3 +2950,37 @@ func TestIsloIncompleteCreateResponseReportsUnconfirmedAttempt(t *testing.T) {
 		})
 	}
 }
+
+func TestIsloFlagsCompleteAssignmentContract(t *testing.T) {
+	for _, provider := range []string{"islo", "other"} {
+		for _, number := range []int{-1, 0, 2} {
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			cfg.Islo.IdlePause = true
+			want := cfg
+			want.Islo.BaseURL, want.Islo.Image, want.Islo.Workdir = "", "", " raw "
+			want.Islo.GatewayProfile, want.Islo.SnapshotName = "gateway", "snapshot"
+			want.Islo.VCPUs, want.Islo.MemoryMB, want.Islo.DiskGB, want.Islo.IdlePause = number, number, number, false
+			core.MarkIsloImageExplicit(&want)
+			core.MarkIsloVCPUsExplicit(&want)
+			core.MarkIsloMemoryMBExplicit(&want)
+			core.MarkIsloDiskGBExplicit(&want)
+			core.RecordProviderFlagInputs(&want, true, "islo")
+			fs := flag.NewFlagSet("islo", flag.ContinueOnError)
+			values := RegisterIsloProviderFlags(fs, cfg)
+			if err := fs.Parse([]string{"--islo-base-url=", "--islo-image=", "--islo-workdir= raw ", "--islo-gateway-profile=gateway", "--islo-snapshot-name=snapshot", "--islo-vcpus=" + strconv.Itoa(number), "--islo-memory-mb=" + strconv.Itoa(number), "--islo-disk-gb=" + strconv.Itoa(number), "--islo-idle-pause=false"}); err != nil {
+				t.Fatal(err)
+			}
+			prior := cfg
+			if err := ApplyIsloProviderFlags(&cfg, fs, "wrong-type"); err != nil || !reflect.DeepEqual(cfg, prior) {
+				t.Fatal("wrong-type guard changed")
+			}
+			if err := ApplyIsloProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("accepted values, markers, ledger or provider changed")
+			}
+		}
+	}
+}

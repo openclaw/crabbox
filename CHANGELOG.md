@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-### Fixed
+### Fixes
 
+- Clarify that configured Actions fields and workflow-input inspection belong to hydration, while standalone dispatch sends only explicitly supplied fields. ([#2330](https://github.com/openclaw/crabbox/pull/2330))
 - Let explicit broker heartbeats wait for provider access refreshes using the existing mutation budget, while preserving shorter automatic-heartbeat and foreground-touch deadlines, caller cancellation, and single-request behavior. [PR 2331](https://github.com/openclaw/crabbox/pull/2331). Thanks @steipete.
 
 ## 0.61.0 - 2026-09-17

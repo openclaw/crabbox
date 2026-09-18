@@ -50,6 +50,9 @@ func recordConfigApplied(report reflect.Value, field reflect.StructField) {
 func applyConfigEnvironmentField(dst reflect.Value, tags reflect.StructTag) (bool, error) {
 	name, alias := tags.Get("env"), tags.Get("envAlias")
 	if dst.Type() == reflect.TypeFor[time.Duration]() {
+		if tags.Get("duration") == "nonnegative-overlay" {
+			return applyNonNegativeLeaseDuration(dst.Addr().Interface().(*time.Duration), os.Getenv(name)), nil
+		}
 		return applyLeaseDuration(dst.Addr().Interface().(*time.Duration), os.Getenv(name)), nil
 	}
 	switch dst.Kind() {
