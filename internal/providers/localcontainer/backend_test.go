@@ -3024,12 +3024,13 @@ func TestWaitForContainerEndpointBudget(t *testing.T) {
 	const stopped = `[{"Id":"endpoint-container","State":{"Status":"exited"}}]`
 	callerCause := errors.New("endpoint wait canceled by caller")
 	for _, tc := range []struct {
-		name        string
-		wantCalls   int
-		wantElapsed time.Duration
-		wantCode    int
-		wantMessage string
-		wantCause   error
+		name         string
+		wantCalls    int
+		wantMaxCalls int
+		wantElapsed  time.Duration
+		wantCode     int
+		wantMessage  string
+		wantCause    error
 	}{
 		{name: "ready", wantCalls: 1},
 		{name: "pending port", wantCalls: 2, wantElapsed: 100 * time.Millisecond},
@@ -3039,7 +3040,8 @@ func TestWaitForContainerEndpointBudget(t *testing.T) {
 		{name: "cancel during inspect", wantCalls: 1, wantCause: callerCause},
 		{name: "caller deadline", wantCalls: 1, wantElapsed: 50 * time.Millisecond, wantCause: context.DeadlineExceeded},
 		{name: "blocked inspect", wantCalls: 1, wantElapsed: 30 * time.Second, wantCode: 5, wantMessage: "timed out waiting for SSH port on local-container endpoint-con: container inspect failed: context deadline exceeded", wantCause: context.DeadlineExceeded},
-		{name: "pending timeout", wantCalls: 300, wantElapsed: 30 * time.Second, wantCode: 5, wantMessage: "timed out waiting for SSH port on local-container endpoint-con: container endpoint-con has no published SSH port", wantCause: context.DeadlineExceeded},
+		// The final sleep and deadline can wake together before cancellation is delivered.
+		{name: "pending timeout", wantCalls: 300, wantMaxCalls: 301, wantElapsed: 30 * time.Second, wantCode: 5, wantMessage: "timed out waiting for SSH port on local-container endpoint-con: container endpoint-con has no published SSH port", wantCause: context.DeadlineExceeded},
 		{name: "stopped", wantCalls: 1, wantCode: 5, wantMessage: "local-container lease cbx_endpoint container endpoint-con reached terminal runtime state exited before SSH readiness"},
 		{name: "late stopped observation", wantCalls: 1, wantElapsed: 31 * time.Second, wantCode: 5, wantMessage: "local-container lease cbx_endpoint container endpoint-con reached terminal runtime state exited before SSH readiness"},
 	} {
@@ -3117,8 +3119,9 @@ func TestWaitForContainerEndpointBudget(t *testing.T) {
 						t.Fatalf("error=%v does not retain %v", err, tc.wantCause)
 					}
 				}
-				if elapsed := time.Since(started); elapsed != tc.wantElapsed || len(runner.calls) != tc.wantCalls {
-					t.Fatalf("elapsed=%s calls=%d, want %s/%d", elapsed, len(runner.calls), tc.wantElapsed, tc.wantCalls)
+				maxCalls := max(tc.wantCalls, tc.wantMaxCalls)
+				if elapsed := time.Since(started); elapsed != tc.wantElapsed || len(runner.calls) < tc.wantCalls || len(runner.calls) > maxCalls {
+					t.Fatalf("elapsed=%s calls=%d, want %s/%d..%d", elapsed, len(runner.calls), tc.wantElapsed, tc.wantCalls, maxCalls)
 				}
 			})
 		})
