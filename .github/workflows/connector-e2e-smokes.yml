@@ -57,8 +57,8 @@ jobs:
           - name: local-container
             runner: ubuntu-latest
             build-cli: true
-            # Cold bootstrap allows 20m; leave room for build, use and cleanup.
-            timeout-minutes: 30
+            # Cold bootstrap allows 20m; leave room for native E2E and cleanup.
+            timeout-minutes: 40
             smoke: |
               set -o pipefail
               CRABBOX_LIVE=1 \
@@ -160,6 +160,20 @@ jobs:
 
       - name: Run connector lifecycle smoke
         run: ${{ matrix.smoke }}
+
+      - name: Verify native local-container lifecycle and cleanup
+        if: matrix.name == 'local-container'
+        run: |
+          set -o pipefail
+          go test -tags localcontainer -count=1 -run '^TestLocalContainerProviderE2E$' -timeout=12m -json ./cmd/crabbox | tee "$RUNNER_TEMP/local-container-e2e.jsonl"
+          python3 - "$RUNNER_TEMP/local-container-e2e.jsonl" <<'PY'
+          import json, sys
+          records = [json.loads(line) for line in open(sys.argv[1])]
+          name = 'TestLocalContainerProviderE2E'
+          for action in ('run', 'pass'):
+              assert any(r.get('Test') == name and r['Action'] == action for r in records), (name, action)
+          assert not any(r['Action'] == 'skip' for r in records), 'native Docker fixture skipped'
+          PY
 
       - name: Diagnose local-container bootstrap
         if: failure() && matrix.name == 'local-container'

@@ -5212,7 +5212,7 @@ func ServerProviderKey(server Server) string {
 		return server.Labels["provider_key"]
 	}
 	if server.Labels != nil && server.Labels["lease"] != "" {
-		return providerKeyForLease(server.Labels["lease"])
+		return ProviderKeyForLease(server.Labels["lease"])
 	}
 	return ""
 }

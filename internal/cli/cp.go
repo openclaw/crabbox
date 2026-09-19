@@ -227,12 +227,9 @@ func probeResolvedSSHRemoteSecludedArgs(ctx context.Context, session *sshTranspo
 		name = wslExe
 		args = append([]string{"ssh"}, args...)
 	}
-	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, name, args...)
-	if execHandle, ok := handle.(*pondMeshExecHandle); ok {
-		applyTargetChildEnvironment(execHandle.cmd, target)
-		execHandle.cmd.Stdout = io.Discard
-		execHandle.cmd.Stderr = io.Discard
-	}
+	handle := pondMeshExecCommand(ctx, target, name, args...)
+	handle.cmd.Stdout = io.Discard
+	handle.cmd.Stderr = io.Discard
 	if err := handle.Start(); err != nil {
 		return err
 	}

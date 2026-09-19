@@ -527,7 +527,7 @@ func TestCoordinatorInspectJSONIncludesOptionalSSHHostKey(t *testing.T) {
 			if !ok || metadata["instanceProfileAttached"] != false {
 				t.Fatalf("providerMetadata=%#v, want authoritative false", got["providerMetadata"])
 			}
-			keyPath, err := testboxKeyPath(test.id)
+			keyPath, err := TestboxKeyPath(test.id)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -642,7 +642,7 @@ func TestCoordinatorInspectJSONPreservesNetworkDiagnostics(t *testing.T) {
 			if requests.Load() != 1 {
 				t.Fatalf("inspect made %d requests, want one existing lease GET", requests.Load())
 			}
-			keyPath, err := testboxKeyPath("cbx_network")
+			keyPath, err := TestboxKeyPath("cbx_network")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -3577,7 +3577,7 @@ func TestCoordinatorAcquireRollbackQueuesReleaseOnceWithoutObservation(t *testin
 	if releasePosts != 1 || observations != 0 {
 		t.Fatalf("rollback release POSTs=%d observations=%d want 1/0", releasePosts, observations)
 	}
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}

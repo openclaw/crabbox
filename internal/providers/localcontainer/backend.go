@@ -31,6 +31,8 @@ const (
 	pendingRecoveryKind   = "ssh-readiness-pending"
 	pendingRecoveryReason = "post-create failure; exact claim retained"
 	readinessPollInterval = 250 * time.Millisecond
+
+	readinessInspectionTimeout = 30 * time.Second
 )
 
 var cgroupOOMCounterPaths = []string{
@@ -475,10 +477,11 @@ func (b *backend) pendingLease(cfg core.Config, container inspectContainer, leas
 }
 
 func (b *backend) waitForContainerEndpoint(ctx context.Context, cfg core.Config, containerID, leaseID, slug string) (core.LeaseTarget, error) {
-	deadline := time.Now().Add(30 * time.Second)
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	var lastErr error
 	var observedContainerErr error
-	result, err := shared.Poll(ctx, 0, 100*time.Millisecond, shared.SleepContext,
+	result, err := shared.Poll(waitCtx, 0, 100*time.Millisecond, shared.SleepContext,
 		func(observeCtx context.Context) (core.LeaseTarget, error) {
 			container, err := b.inspectContainer(observeCtx, containerID)
 			if err != nil {
@@ -498,12 +501,15 @@ func (b *backend) waitForContainerEndpoint(ctx context.Context, cfg core.Config,
 				return false, fetchErr
 			}
 			lastErr = fetchErr
-			if time.Now().After(deadline) {
-				return false, core.Exit(5, "timed out waiting for SSH port on local-container %s: %v", shortID(containerID), lastErr)
-			}
 			return false, nil
 		}, nil)
 	if err != nil {
+		if context.Cause(ctx) == nil && waitCtx.Err() == context.DeadlineExceeded && errors.Is(err, context.DeadlineExceeded) {
+			if lastErr == nil {
+				lastErr = err
+			}
+			err = shared.PollTerminationError(waitCtx, err, core.Exit(5, "timed out waiting for SSH port on local-container %s: %v", shortID(containerID), lastErr))
+		}
 		return core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: containerID}}, err
 	}
 	return result.Value, nil
@@ -511,6 +517,9 @@ func (b *backend) waitForContainerEndpoint(ctx context.Context, cfg core.Config,
 
 func (b *backend) waitForExactContainerSSHReady(ctx context.Context, lease *core.LeaseTarget, timeout time.Duration) error {
 	inspectExact := func(observeCtx context.Context) error {
+		// Keep inspections bounded without replacing the SSH waiter's own timeout diagnostics.
+		observeCtx, cancel := context.WithTimeout(observeCtx, readinessInspectionTimeout)
+		defer cancel()
 		container, err := b.inspectContainer(observeCtx, lease.Server.CloudID)
 		if err != nil {
 			return err

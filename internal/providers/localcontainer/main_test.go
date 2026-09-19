@@ -8,5 +8,8 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if address := os.Getenv(endpointProbeTestAddress); address != "" {
+		os.Exit(runEndpointProbeTestProcess(address))
+	}
 	os.Exit(testutil.RunWithIsolatedUserDirs(m))
 }

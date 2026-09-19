@@ -409,6 +409,19 @@ state; the original removal failure is not converted into success.
    `crabbox stop --provider docker <lease-or-slug>` removes the stale claim and
    stored SSH key.
 
+Endpoint discovery has a 30-second budget covering runtime inspections and
+100 ms waits between attempts. Earlier caller cancellation stops discovery;
+terminal container observations still fail immediately. This budget is separate
+from the subsequent SSH bootstrap readiness wait.
+
+During SSH bootstrap readiness, each exact-container inspection has its own
+30-second limit, including the initial check, periodic checks, and final check
+after SSH succeeds or fails. Earlier caller cancellation still applies. These
+inspection limits are separate from the SSH timeout, so initial and final
+checks can add bounded time to the operation. A failed final diagnostic check
+does not replace the original SSH error unless it observes a terminal or
+replacement container.
+
 When `warmup` or `run --keep` creates the container but SSH readiness is
 canceled, fails, or times out, Crabbox keeps the exact pending claim, container,
 key, and bootstrap directory. If that exact container exits, stops, or becomes
@@ -526,6 +539,10 @@ go test -tags localcontainer ./cmd/crabbox
 
 Set `CRABBOX_LOCAL_CONTAINER_E2E_IMAGE` to use a prebuilt image for faster
 startup. The test skips when the Docker CLI or daemon is unavailable.
+The Local Container CI job runs this native test after the CLI smoke and rejects
+a skipped result. It verifies warmup and SSH reuse, then independently checks
+that the container, lease claim, SSH key, and bootstrap directory are absent
+after stopping the lease.
 
 ## Related
 

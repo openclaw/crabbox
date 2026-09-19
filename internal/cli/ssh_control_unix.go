@@ -21,7 +21,7 @@ import (
 func sshControlLeaseDirectory(target SSHTarget) string {
 	for _, file := range []string{target.KnownHostsFile, target.Key} {
 		dir := filepath.Dir(file)
-		key, err := testboxKeyPath(filepath.Base(dir))
+		key, err := TestboxKeyPath(filepath.Base(dir))
 		if err == nil && dir == filepath.Dir(key) {
 			return dir
 		}

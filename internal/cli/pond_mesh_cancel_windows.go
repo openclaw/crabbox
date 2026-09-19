@@ -35,9 +35,6 @@ func pondMeshTerminationContext(ctx context.Context) (context.Context, func()) {
 }
 
 func (h *pondMeshExecHandle) Start() error {
-	if !h.managed {
-		return h.cmd.Start()
-	}
 	h.platform.mu.Lock()
 	defer h.platform.mu.Unlock()
 	h.cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -135,9 +132,6 @@ func resumePondMeshProcess(pid int) error {
 
 func (h *pondMeshExecHandle) Wait() error {
 	err := h.cmd.Wait()
-	if !h.managed {
-		return err
-	}
 	cleanupErr := h.finishPondMeshPlatform()
 	return h.joinCancellationError(errors.Join(err, cleanupErr))
 }

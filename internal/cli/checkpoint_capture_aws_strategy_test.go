@@ -48,7 +48,7 @@ func runCheckpointAWSStrategyContract(t *testing.T, repo, binary string) {
 						return
 					}
 					fmt.Fprintf(w, `<DescribeInstancesResponse><reservationSet><item><instancesSet><item><instanceId>%s</instanceId><instanceType>t3.medium</instanceType><ipAddress>127.0.0.1</ipAddress><instanceState><name>running</name></instanceState><tagSet>`, instanceID)
-					for key, value := range map[string]string{"Name": "aws-strategy-proof", "crabbox": "true", "created_by": "crabbox", "provider": "aws", "lease": captureFixtureLease, "slug": "aws-strategy-proof", "provider_key": providerKeyForLease(captureFixtureLease)} {
+					for key, value := range map[string]string{"Name": "aws-strategy-proof", "crabbox": "true", "created_by": "crabbox", "provider": "aws", "lease": captureFixtureLease, "slug": "aws-strategy-proof", "provider_key": ProviderKeyForLease(captureFixtureLease)} {
 						fmt.Fprintf(w, "<item><key>%s</key><value>%s</value></item>", key, value)
 					}
 					fmt.Fprint(w, `</tagSet></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`)
@@ -75,7 +75,7 @@ func runCheckpointAWSStrategyContract(t *testing.T, repo, binary string) {
 					removed = true
 					fmt.Fprint(w, `<TerminateInstancesResponse/>`)
 				case "DeleteKeyPair":
-					if r.Form.Get("KeyName") != providerKeyForLease(captureFixtureLease) {
+					if r.Form.Get("KeyName") != ProviderKeyForLease(captureFixtureLease) {
 						t.Errorf("wrong source key cleanup: %v", r.Form)
 					}
 					fmt.Fprint(w, `<DeleteKeyPairResponse><return>true</return></DeleteKeyPairResponse>`)
@@ -105,7 +105,7 @@ esac
 			claim := f.claim()
 			claim.Provider, claim.CloudID, claim.ProviderScope, claim.Slug = "aws", instanceID, "", "aws-strategy-proof"
 			claim.FixedCreateIntent = nil
-			claim.Labels = map[string]string{"aws_region": "us-east-1", "aws_account_id": accountID, "provider_key": providerKeyForLease(captureFixtureLease)}
+			claim.Labels = map[string]string{"aws_region": "us-east-1", "aws_account_id": accountID, "provider_key": ProviderKeyForLease(captureFixtureLease)}
 			claimPath := filepath.Join(f.root, "state", "crabbox", "claims", captureFixtureLease+".json")
 			f.writeJSON(claimPath, claim)
 			before, err := os.ReadFile(claimPath)
@@ -210,7 +210,7 @@ func runCheckpointAWSNonSubmissionContract(t *testing.T, repo, binary string) {
 						return
 					}
 					fmt.Fprintf(w, `<DescribeInstancesResponse><reservationSet><item><instancesSet><item><instanceId>%s</instanceId><instanceType>t3.medium</instanceType><ipAddress>127.0.0.1</ipAddress><instanceState><name>running</name></instanceState><tagSet>`, instanceID)
-					for key, value := range map[string]string{"Name": "aws-source-proof", "crabbox": "true", "created_by": "crabbox", "provider": "aws", "lease": captureFixtureLease, "slug": "aws-source-proof", "provider_key": providerKeyForLease(captureFixtureLease)} {
+					for key, value := range map[string]string{"Name": "aws-source-proof", "crabbox": "true", "created_by": "crabbox", "provider": "aws", "lease": captureFixtureLease, "slug": "aws-source-proof", "provider_key": ProviderKeyForLease(captureFixtureLease)} {
 						fmt.Fprintf(w, "<item><key>%s</key><value>%s</value></item>", key, value)
 					}
 					fmt.Fprint(w, `</tagSet></item></instancesSet></item></reservationSet></DescribeInstancesResponse>`)
@@ -241,7 +241,7 @@ esac
 			claim := f.claim()
 			claim.Provider, claim.CloudID, claim.ProviderScope, claim.Slug = "aws", instanceID, "", "aws-source-proof"
 			claim.FixedCreateIntent = nil
-			claim.Labels = map[string]string{"aws_region": "us-east-1", "aws_account_id": accountID, "provider_key": providerKeyForLease(captureFixtureLease)}
+			claim.Labels = map[string]string{"aws_region": "us-east-1", "aws_account_id": accountID, "provider_key": ProviderKeyForLease(captureFixtureLease)}
 			f.writeJSON(filepath.Join(f.root, "state", "crabbox", "claims", captureFixtureLease+".json"), claim)
 			args := []string{"checkpoint", "create", "--provider", "aws", "--id", captureFixtureLease, "--mode", "native", "--strategy", "image", "--json"}
 			if retained {

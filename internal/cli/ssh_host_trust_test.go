@@ -310,7 +310,7 @@ func TestPrepareLeaseSSHTrustRejectsLegacyHostKeyAlgorithm(t *testing.T) {
 func TestNoAuthoritativeSSHHostKeyKeepsAcceptNewBehavior(t *testing.T) {
 	isolateTestUserDirs(t)
 	target := SSHTarget{User: "crabbox", Host: "192.0.2.28", Port: "22"}
-	if err := useLeaseKnownHosts(&target, "cbx_abcdef123456"); err != nil {
+	if err := UseLeaseKnownHosts(&target, "cbx_abcdef123456"); err != nil {
 		t.Fatal(err)
 	}
 	if err := prepareLeaseSSHTrust(&target, "cbx_abcdef123456"); err != nil {
@@ -393,7 +393,7 @@ func TestCoordinatorReleaseRemovesOnlyPerLeaseConnectionArtifacts(t *testing.T) 
 	isolateTestUserDirs(t)
 	configureCoordinatorReleaseTestTiming(t, time.Second, 0)
 	const leaseID = "cbx_abcdef123456"
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func TestCoordinatorReleaseObservesPendingCreation(t *testing.T) {
 			isolateTestUserDirs(t)
 			configureCoordinatorReleaseTestTiming(t, 5*time.Minute, 0)
 			const leaseID = "cbx_abcdef123456"
-			keyPath, err := testboxKeyPath(leaseID)
+			keyPath, err := TestboxKeyPath(leaseID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -585,7 +585,7 @@ func TestCoordinatorReleasePreservesArtifactsWithoutConfirmedDestroy(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			isolateTestUserDirs(t)
 			const leaseID = "cbx_abcdef123456"
-			keyPath, err := testboxKeyPath(leaseID)
+			keyPath, err := TestboxKeyPath(leaseID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -670,7 +670,7 @@ func TestCoordinatorReleaseCancellationDuringObservationPreservesLocalState(t *t
 	isolateTestUserDirs(t)
 	configureCoordinatorReleaseTestTiming(t, time.Second, 0)
 	const leaseID = "cbx_abcdef123456"
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,7 +722,7 @@ func TestCoordinatorReleaseObservationProviderMismatchFailsClosed(t *testing.T) 
 	isolateTestUserDirs(t)
 	configureCoordinatorReleaseTestTiming(t, time.Second, 0)
 	const leaseID = "cbx_abcdef123456"
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -768,7 +768,7 @@ func TestCoordinatorReleaseObservationProviderMismatchFailsClosed(t *testing.T) 
 func TestCoordinatorReleasePreservesRemoteOutcomeWhenLocalArtifactCleanupFails(t *testing.T) {
 	isolateTestUserDirs(t)
 	const leaseID = "cbx_abcdef123456"
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}

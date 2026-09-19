@@ -671,7 +671,12 @@ func TestListArtifactBundleFilesSkipsPublishedMarkdown(t *testing.T) {
 	mustWriteFile(t, filepath.Join(dir, artifactManifestFilename), "{}")
 	mustWriteFile(t, filepath.Join(dir, "nested", "logs.txt"), "logs")
 	mustWriteFile(t, filepath.Join(dir, "nested", "published-artifacts.md", "child.txt"), "child")
-	files, err := listArtifactBundleFiles(dir)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -727,7 +732,7 @@ func TestSnapshotArtifactFilesRejectsSymlinkSwapAfterValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	files, err := listArtifactBundleFilesRoot(root, dir)
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -740,7 +745,7 @@ func TestSnapshotArtifactFilesRejectsSymlinkSwapAfterValidation(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	_, cleanup, err := snapshotArtifactFiles(root, files)
+	_, cleanup, err := prepareArtifactFiles(root, files, true)
 	defer cleanup()
 	if err == nil || !strings.Contains(err.Error(), "screenshot.png") {
 		t.Fatalf("error=%v, want changed artifact rejection", err)
@@ -795,7 +800,7 @@ func TestSnapshotArtifactFilesRejectsNestedDirectorySwap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	files, err := listArtifactBundleFilesRoot(root, dir)
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -808,7 +813,7 @@ func TestSnapshotArtifactFilesRejectsNestedDirectorySwap(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	_, cleanup, err := snapshotArtifactFiles(root, files)
+	_, cleanup, err := prepareArtifactFiles(root, files, true)
 	defer cleanup()
 	if err == nil || !strings.Contains(err.Error(), "nested/safe.txt") {
 		t.Fatalf("error=%v, want nested swap rejection", err)
@@ -824,11 +829,11 @@ func TestSnapshotArtifactFilesSupportsMaximumLengthComponent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	files, err := listArtifactBundleFilesRoot(root, dir)
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, cleanup, err := snapshotArtifactFiles(root, files)
+	_, cleanup, err := prepareArtifactFiles(root, files, true)
 	defer cleanup()
 	if err != nil {
 		t.Fatal(err)
@@ -925,8 +930,7 @@ func TestArtifactPublishSummaryRejectsExternalAliasToSwappedBundleFile(t *testin
 	if !inside {
 		t.Fatal("external alias target inside the bundle was not classified as bundle input")
 	}
-	_, cleanup, err := artifactPublishSummaryText("", binding, inside, root, files)
-	defer cleanup()
+	_, err = artifactPublishSummaryText("", binding, inside, root, files)
 	if err == nil || !strings.Contains(err.Error(), "summary file changed") {
 		t.Fatalf("error=%v, want outside identity rejection", err)
 	}
@@ -991,8 +995,7 @@ func TestArtifactPublishSummaryRejectsSymlinkDotDotSwap(t *testing.T) {
 	if !inside {
 		t.Fatal("component-wise symlink target inside bundle was classified as external")
 	}
-	_, cleanup, err := artifactPublishSummaryText("", binding, inside, root, files)
-	defer cleanup()
+	_, err = artifactPublishSummaryText("", binding, inside, root, files)
 	if err == nil || !strings.Contains(err.Error(), "summary file changed") {
 		t.Fatalf("error=%v, want outside identity rejection", err)
 	}
@@ -1084,8 +1087,7 @@ func TestArtifactPublishSummaryRejectsCaseAliasToSwappedBundleDirectory(t *testi
 	if !inside {
 		t.Fatal("case-equivalent alias target inside the bundle was not classified as bundle input")
 	}
-	_, cleanup, err := artifactPublishSummaryText("", binding, inside, root, files)
-	defer cleanup()
+	_, err = artifactPublishSummaryText("", binding, inside, root, files)
 	if err == nil || !strings.Contains(err.Error(), "summary file changed") {
 		t.Fatalf("error=%v, want outside identity rejection", err)
 	}
@@ -1153,7 +1155,7 @@ func TestArtifactPublishSummaryUsesValidatedSnapshotThroughDirectoryAlias(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshots, cleanupSnapshots, err := snapshotArtifactFiles(root, files)
+	snapshots, cleanupSnapshots, err := prepareArtifactFiles(root, files, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1175,8 +1177,7 @@ func TestArtifactPublishSummaryUsesValidatedSnapshotThroughDirectoryAlias(t *tes
 	if !inside {
 		t.Fatal("canonical summary path should match symlinked bundle root")
 	}
-	got, cleanupSummary, err := artifactPublishSummaryText("prefix", binding, inside, root, snapshots)
-	defer cleanupSummary()
+	got, err := artifactPublishSummaryText("prefix", binding, inside, root, snapshots)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1269,8 +1270,7 @@ func TestArtifactPublishSummaryRejectsIdentityChangeBeforeValidation(t *testing.
 	if !inside {
 		t.Fatal("summary path should remain classified inside the bundle")
 	}
-	_, cleanup, err := artifactPublishSummaryText("", binding, inside, root, files)
-	defer cleanup()
+	_, err = artifactPublishSummaryText("", binding, inside, root, files)
 	if err == nil || !strings.Contains(err.Error(), "summary file changed") {
 		t.Fatalf("error=%v, want identity change rejection", err)
 	}
@@ -1312,8 +1312,7 @@ func TestArtifactPublishSummaryRejectsCanonicalNestedParentReswap(t *testing.T) 
 	if !inside {
 		t.Fatal("canonical nested summary should remain classified inside aliased bundle")
 	}
-	_, cleanup, err := artifactPublishSummaryText("", binding, inside, root, files)
-	defer cleanup()
+	_, err = artifactPublishSummaryText("", binding, inside, root, files)
 	if err == nil || !strings.Contains(err.Error(), "summary file changed") {
 		t.Fatalf("error=%v, want outside identity rejection", err)
 	}
@@ -1328,14 +1327,15 @@ func TestWriteArtifactManifestUsesValidatedHandleForLocalStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	files, err := listArtifactBundleFilesRoot(root, dir)
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	validated, err := hashValidatedArtifactFiles(root, files)
+	validated, cleanup, err := prepareArtifactFiles(root, files, false)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer cleanup()
 	if validated[0].snapshotFile != nil {
 		t.Fatal("local manifest unexpectedly copied file to a snapshot")
 	}
@@ -1363,7 +1363,7 @@ func TestWriteArtifactManifestUsesValidatedHandleForLocalStorage(t *testing.T) {
 		t.Fatalf("files=%#v", manifest.Files)
 	}
 	wantHash := fmt.Sprintf("%x", sha256.Sum256([]byte("safe-bytes")))
-	if got := manifest.Files[0]; got.SHA256 != wantHash || got.Size != int64(len("safe-bytes")) {
+	if got := manifest.Files[0]; got.SHA256 != wantHash || got.Size == nil || *got.Size != int64(len("safe-bytes")) {
 		t.Fatalf("manifest file=%#v, want safe snapshot hash=%s", got, wantHash)
 	}
 	if got, readErr := os.ReadFile(outside); readErr != nil || string(got) != "outside-secret" {
@@ -1414,11 +1414,11 @@ func TestPublishArtifactFilesBrokerUsesValidatedSnapshotAfterPathSwap(t *testing
 		t.Fatal(err)
 	}
 	defer root.Close()
-	files, err := listArtifactBundleFilesRoot(root, dir)
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshots, cleanup, err := snapshotArtifactFiles(root, files)
+	snapshots, cleanup, err := prepareArtifactFiles(root, files, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1801,7 +1801,7 @@ func TestArtifactsPublishWritesManifestByDefault(t *testing.T) {
 		t.Fatalf("manifest=%#v", manifest)
 	}
 	file := manifest.Files[0]
-	if file.Name != "screenshot.png" || file.ContentType != "image/png" || file.Size != int64(len(data)) || file.SHA256 == "" {
+	if file.Name != "screenshot.png" || file.ContentType != "image/png" || file.Size == nil || *file.Size != int64(len(data)) || file.SHA256 == "" {
 		t.Fatalf("file=%#v", file)
 	}
 	if file.URL != "https://artifacts.example.com/proof/screenshot.png" {
@@ -1908,11 +1908,11 @@ func TestPublishArtifactFilesBrokerUploadsViaGrantedURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	files, err := listArtifactBundleFilesRoot(root, dir)
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshots, cleanup, err := snapshotArtifactFiles(root, files)
+	snapshots, cleanup, err := prepareArtifactFiles(root, files, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2065,7 +2065,7 @@ func TestArtifactsPullDownloadsAndVerifiesManifest(t *testing.T) {
 			Name:        "nested/screenshot.png",
 			URL:         server.URL + "/screenshot.png",
 			ContentType: "image/png",
-			Size:        int64(len(payload)),
+			Size:        new(int64(len(payload))),
 			SHA256:      hash,
 		}},
 	}
@@ -2120,7 +2120,7 @@ func TestDownloadArtifactURLRejectsContentLengthAboveLimit(t *testing.T) {
 	_, _, _, err := downloadArtifactURL(context.Background(), artifactManifestFile{
 		Name: "artifact.bin",
 		URL:  server.URL,
-		Size: 4,
+		Size: new(int64(4)),
 	}, outPath)
 	if err == nil || !strings.Contains(err.Error(), "content-length 1024 exceeds limit 4") {
 		t.Fatalf("err=%v", err)
@@ -2147,7 +2147,7 @@ func TestDownloadArtifactURLStopsStreamingAboveDeclaredSize(t *testing.T) {
 	_, _, _, err := downloadArtifactURL(context.Background(), artifactManifestFile{
 		Name: "artifact.bin",
 		URL:  server.URL,
-		Size: 4,
+		Size: new(int64(4)),
 	}, outPath)
 	if err == nil || !strings.Contains(err.Error(), "response exceeds limit 4") {
 		t.Fatalf("err=%v", err)
@@ -2293,7 +2293,7 @@ func artifactHTTPFailureFlows(t *testing.T, signedURL string) []struct {
 				_, _, _, err := downloadArtifactURL(context.Background(), artifactManifestFile{
 					Name: "artifact.txt",
 					URL:  signedURL,
-					Size: 64,
+					Size: new(int64(64)),
 				}, filepath.Join(dir, "download.txt"))
 				return err
 			},
@@ -2351,7 +2351,7 @@ func TestArtifactHTTPFlowsAllowSameOriginRedirects(t *testing.T) {
 	_, size, _, err := downloadArtifactURL(context.Background(), artifactManifestFile{
 		Name: "artifact.txt",
 		URL:  server.URL + "/download-start",
-		Size: int64(len(payload)),
+		Size: new(int64(len(payload))),
 	}, filepath.Join(dir, "download.txt"))
 	if err != nil || size != int64(len(payload)) {
 		t.Fatalf("download size=%d err=%v", size, err)
@@ -2384,7 +2384,7 @@ func TestArtifactsPullRejectsNegativeManifestSize(t *testing.T) {
 		Files: []artifactManifestFile{{
 			Name: "screenshot.png",
 			Path: "screenshot.png",
-			Size: -1,
+			Size: new(int64(-1)),
 		}},
 	}
 	data, err := json.Marshal(manifest)
@@ -2599,7 +2599,7 @@ func TestArtifactsPullAllowsOutputAfterManifestRef(t *testing.T) {
 			Name:        "screenshot.png",
 			Path:        "screenshot.png",
 			ContentType: "image/png",
-			Size:        int64(len(payload)),
+			Size:        new(int64(len(payload))),
 			SHA256:      hash,
 		}},
 	}
@@ -2646,7 +2646,7 @@ func TestArtifactsPullUsesLocalPathForR2ManifestURL(t *testing.T) {
 			Path:        "screenshot.png",
 			URL:         "r2://qa-artifacts/runs/abc/screenshot.png",
 			ContentType: "image/png",
-			Size:        int64(len(payload)),
+			Size:        new(int64(len(payload))),
 			SHA256:      hash,
 		}},
 	}
@@ -2688,7 +2688,7 @@ func TestArtifactsPullRejectsHashMismatch(t *testing.T) {
 		Files: []artifactManifestFile{{
 			Name:   "screenshot.png",
 			URL:    server.URL,
-			Size:   int64(len("changed")),
+			Size:   new(int64(len("changed"))),
 			SHA256: strings.Repeat("0", 64),
 		}},
 	}
@@ -2831,7 +2831,7 @@ func TestArtifactsPullRejectsSymlinkedOutputParent(t *testing.T) {
 					Kind:   "screenshot",
 					Name:   "link/owned.txt",
 					URL:    "http://" + r.Host + "/owned.txt",
-					Size:   int64(len(payload)),
+					Size:   new(int64(len(payload))),
 					SHA256: hash,
 				}},
 			}
