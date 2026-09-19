@@ -3739,6 +3739,91 @@ func TestAcquireTerminalContainerFailsPromptlyAndPreservesRecoveryPolicy(t *test
 	}
 }
 
+func TestExactContainerReadinessBoundsInspections(t *testing.T) {
+	sshFailure := errors.New("synthetic SSH readiness failure")
+	for _, tc := range []struct {
+		name        string
+		blockAt     int
+		sshResult   error
+		periodic    bool
+		callerLimit time.Duration
+		sshTimeout  time.Duration
+		wantElapsed time.Duration
+	}{
+		{name: "initial", blockAt: 1, sshTimeout: time.Minute, wantElapsed: 30 * time.Second},
+		{name: "periodic", blockAt: 2, periodic: true, sshTimeout: time.Minute, wantElapsed: 30*time.Second + 250*time.Millisecond},
+		{name: "final success", blockAt: 2, sshTimeout: time.Minute, wantElapsed: 30 * time.Second},
+		{name: "final failure preserves SSH error", blockAt: 2, sshResult: sshFailure, sshTimeout: time.Minute, wantElapsed: 30 * time.Second},
+		{name: "earlier caller deadline", blockAt: 1, callerLimit: 50 * time.Millisecond, sshTimeout: time.Minute, wantElapsed: 50 * time.Millisecond},
+		{name: "ready", sshTimeout: time.Minute},
+		{name: "zero SSH budget", sshResult: sshFailure},
+		{name: "negative SSH budget", sshResult: sshFailure, sshTimeout: -time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			synctest.Test(t, func(t *testing.T) {
+				guard := time.Minute
+				if tc.callerLimit > 0 {
+					guard = tc.callerLimit
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), guard)
+				defer cancel()
+				runner := &recordingRunner{}
+				runner.runContext = func(observeCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					if !reflect.DeepEqual(req.Args, []string{"inspect", "claimed-container"}) {
+						t.Fatalf("unexpected command: %v", req.Args)
+					}
+					if len(runner.calls) == tc.blockAt {
+						<-observeCtx.Done()
+						return core.LocalCommandResult{}, observeCtx.Err()
+					}
+					return core.LocalCommandResult{Stdout: `[{"Id":"claimed-container","State":{"Status":"running","Running":true}}]`}, nil
+				}
+				b := testBackend(runner)
+				sshJoined := make(chan struct{})
+				b.waitForSSHReady = func(waitCtx context.Context, _ *core.SSHTarget, _ io.Writer, _ string, timeout time.Duration) error {
+					defer close(sshJoined)
+					if timeout != tc.sshTimeout {
+						t.Errorf("SSH timeout=%s, want unchanged %s", timeout, tc.sshTimeout)
+					}
+					if tc.periodic {
+						<-waitCtx.Done()
+						return context.Cause(waitCtx)
+					}
+					return tc.sshResult
+				}
+				lease := core.LeaseTarget{LeaseID: "cbx_exact_container", Server: core.Server{CloudID: "claimed-container"}}
+				started := time.Now()
+				err := b.waitForExactContainerSSHReady(ctx, &lease, tc.sshTimeout)
+				if elapsed := time.Since(started); elapsed != tc.wantElapsed {
+					t.Errorf("readiness elapsed=%s, want %s", elapsed, tc.wantElapsed)
+				}
+				switch {
+				case tc.sshResult != nil:
+					if err != tc.sshResult {
+						t.Errorf("diagnostic inspection replaced SSH error: %v", err)
+					}
+				case tc.blockAt != 0:
+					if err == nil || !strings.Contains(err.Error(), "container inspect failed: context deadline exceeded") {
+						t.Errorf("blocked inspection returned %v, want deadline", err)
+					}
+				default:
+					if err != nil {
+						t.Errorf("healthy readiness failed: %v", err)
+					}
+				}
+				if tc.blockAt != 1 {
+					select {
+					case <-sshJoined:
+					default:
+						t.Error("SSH readiness goroutine was not joined")
+					}
+				}
+			})
+		})
+	}
+}
+
 func TestExactContainerReadinessRejectsReplacementIdentity(t *testing.T) {
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
 		commandKey([]string{"inspect", "claimed-container"}): {
