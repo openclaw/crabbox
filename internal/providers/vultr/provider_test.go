@@ -64,6 +64,26 @@ func TestProviderServerTypeDefaults(t *testing.T) {
 			t.Fatalf("ServerTypeForConfig(%q)=%q", class, got)
 		}
 	}
+	for _, tc := range []struct {
+		name string
+		cfg  core.Config
+		want string
+	}{
+		{"unsupported target", core.Config{Class: "standard", TargetOS: core.TargetWindows}, ""},
+		{"unsupported architecture", core.Config{Class: "standard", TargetOS: core.TargetLinux, Architecture: core.ArchitectureARM64}, ""},
+		{"legacy fallback", core.Config{Class: "custom", TargetOS: core.TargetWindows}, "vc2-1c-1gb"},
+		{"untrimmed class", core.Config{Class: " standard ", TargetOS: core.TargetWindows}, "vc2-1c-1gb"},
+		{"raw explicit override", core.Config{Class: "standard", TargetOS: core.TargetWindows, ServerType: " custom ", ServerTypeExplicit: true}, " custom "},
+		{"whitespace explicit override", core.Config{Class: "standard", ServerType: " ", ServerTypeExplicit: true}, " "},
+		{"empty explicit override", core.Config{Class: "standard", TargetOS: core.TargetWindows, ServerTypeExplicit: true}, ""},
+		{"inherited type", core.Config{Class: "standard", ServerType: "custom"}, "vc2-1c-1gb"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := provider.ServerTypeForConfig(tc.cfg); got != tc.want {
+				t.Fatalf("ServerTypeForConfig=%q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestConfigureReturnsLeaseAndDoctorBackend(t *testing.T) {
