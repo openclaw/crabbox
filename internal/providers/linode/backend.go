@@ -805,10 +805,9 @@ func (b *linodeLeaseBackend) deleteServer(ctx context.Context, _ core.Config, se
 		}
 		return client.DeleteLinode(ctx, item.ID)
 	}
-	if err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expectedClaim, action); err != nil {
+	if err := shared.RemoveSSHLeaseClaimAfter(expectedClaim, action); err != nil {
 		return fmt.Errorf("finalize linode cleanup claim: %w", err)
 	}
-	core.RemoveStoredTestboxKey(leaseID)
 	return nil
 }
 

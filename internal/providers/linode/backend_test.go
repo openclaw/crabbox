@@ -6,6 +6,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -676,6 +677,9 @@ func TestReleaseMissingLiveLinodeFinalizesLocalClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(keyPath), "known_hosts"), []byte("synthetic host trust\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
@@ -693,8 +697,69 @@ func TestReleaseMissingLiveLinodeFinalizesLocalClaim(t *testing.T) {
 	if _, ok, err := core.ResolveLeaseClaimForProvider(leaseID, providerName); err != nil || ok {
 		t.Fatalf("claim after release ok=%v err=%v", ok, err)
 	}
-	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("local key retained after release: %v", statErr)
+	if _, statErr := os.Lstat(filepath.Dir(keyPath)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("local connection artifacts retained after release: %v", statErr)
+	}
+}
+
+func TestReleaseArtifactFailureRetainsClaimForAbsentInstanceRetry(t *testing.T) {
+	api := &fakeLinodeAPI{}
+	backend := newTestBackend(t, api)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "artifact-retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := backend.prepareCleanupServer(context.Background(), lease.Server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, _, _ := core.ServerLeaseClaimSnapshot(prepared)
+	keyPath, err := core.TestboxKeyPath(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(keyPath)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}})
+	if err == nil || !strings.Contains(err.Error(), "remove SSH connection artifacts") {
+		t.Fatalf("ReleaseLease err=%v, want artifact cleanup failure", err)
+	}
+	if len(api.deleted) != 1 {
+		t.Fatalf("provider deletions=%v, want one completed deletion", api.deleted)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists || !reflect.DeepEqual(claim, expected) {
+		t.Fatalf("retry claim=%#v exists=%v err=%v", claim, exists, err)
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := core.EnsureTestboxKeyForConfig(backend.Cfg, lease.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "known_hosts"), []byte("synthetic host trust\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.deleted) != 1 {
+		t.Fatalf("provider deletion repeated for absent instance: %v", api.deleted)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+		t.Fatalf("claim exists=%v err=%v after retry", exists, err)
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("connection artifacts retained after retry: %v", err)
 	}
 }
 

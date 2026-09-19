@@ -159,6 +159,11 @@ instance id. Linodes with partial, foreign, malformed, claimless, or mismatched
 ownership are skipped or refused; a claimless Linode must first be adopted
 through explicit supported `--reclaim` reuse.
 
+After instance deletion or confirmed absence, cleanup removes generated SSH
+credentials and host-trust files before retiring the local claim, under the same
+unchanged-claim lock. Provider or SSH-artifact cleanup failures retain the claim
+for retry; a retry after successful instance deletion only finalizes local state.
+
 Heartbeat and Tailscale metadata updates require the same exact account- and
 instance-bound local claim. Crabbox holds the claim lock while updating Linode
 tags, rejects replaced or stale claim snapshots, preserves the existing idle
