@@ -7,6 +7,28 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestPrimaryClassProjection(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cfg  core.Config
+		want string
+	}{
+		{name: "matched", cfg: core.Config{Class: "standard", TargetOS: core.TargetLinux, Architecture: core.ArchitectureAMD64}, want: "c4-standard-32"},
+		{name: "unsupported target", cfg: core.Config{Class: "standard", TargetOS: core.TargetMacOS}},
+		{name: "unsupported architecture", cfg: core.Config{Class: "standard", TargetOS: core.TargetLinux, Architecture: core.ArchitectureARM64}},
+		{name: "custom raw fallback", cfg: core.Config{Class: " custom-shape "}, want: " custom-shape "},
+		{name: "canonical spelling remains exact", cfg: core.Config{Class: " STANDARD "}, want: " STANDARD "},
+		{name: "generic override belongs to caller", cfg: core.Config{Class: "standard", ServerType: "selected-shape", ServerTypeExplicit: true}, want: "c4-standard-32"},
+		{name: "generic override does not bypass selector here", cfg: core.Config{Class: "standard", TargetOS: core.TargetMacOS, ServerType: "selected-shape", ServerTypeExplicit: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := (Provider{}).ServerTypeForConfig(test.cfg); got != test.want {
+				t.Fatalf("type=%q want=%q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestClassSpecs(t *testing.T) {
 	want := []core.ClassSpec{
 		{Class: "tiny", Type: "c4-standard-4", VCPUs: 4, MemoryGB: 15},

@@ -153,13 +153,7 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 }
 
 func (Provider) ServerTypeForConfig(cfg core.Config) string {
-	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
-		return candidates[0]
-	}
-	if core.IsCanonicalProviderClass(cfg.Class) {
-		return ""
-	}
-	return gcpMachineTypeCandidatesForClass(cfg.Class)[0]
+	return core.ProviderClassPrimaryTypeForProfiles(classProfiles, cfg, cfg.Class)
 }
 
 func (Provider) ClassProfiles() []core.ProviderClassProfile {
