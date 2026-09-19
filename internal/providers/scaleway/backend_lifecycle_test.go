@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -31,6 +32,69 @@ func TestWaitForPublicIPv4HonorsCanceledCaller(t *testing.T) {
 	if server != nil || !errors.Is(err, cause) || client.getCalls != 0 {
 		t.Fatalf("server=%v err=%v calls=%d; want caller cause without observation", server, err, client.getCalls)
 	}
+}
+
+func TestWaitForPublicIPv4CancelsRealHTTPObservation(t *testing.T) {
+	requestSeen := make(chan struct{}, 1)
+	requestCanceled := make(chan struct{}, 1)
+	releaseHandler := make(chan struct{})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet || !strings.HasSuffix(req.URL.Path, "/servers/srv-1") || req.TLS == nil {
+			t.Errorf("unexpected SDK request: method=%s path=%s TLS=%t", req.Method, req.URL.Path, req.TLS != nil)
+		}
+		select {
+		case requestSeen <- struct{}{}:
+		case <-releaseHandler:
+			return
+		}
+		select {
+		case <-req.Context().Done():
+			select {
+			case requestCanceled <- struct{}{}:
+			default:
+			}
+		case <-releaseHandler:
+		}
+	}))
+	defer server.Close()
+	defer close(releaseHandler)
+	httpClient := server.Client()
+	defer httpClient.CloseIdleConnections()
+	client := newTestScalewaySDKClient(t, server.URL, httpClient)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	type result struct {
+		server *instance.Server
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		got, err := (&Backend{}).waitForPublicIPv4(ctx, client, "srv-1")
+		done <- result{got, err}
+	}()
+	select {
+	case <-requestSeen:
+	case got := <-done:
+		t.Fatalf("SDK returned before the HTTPS observation reached the server: %v", got.err)
+	case <-ctx.Done():
+		t.Fatal("HTTPS observation did not reach the server")
+	}
+	started := time.Now()
+	cancel()
+	select {
+	case got := <-done:
+		if got.server != nil || !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("server=%v err=%v, want caller cancellation", got.server, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("SDK observation did not return after cancellation")
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("HTTPS server did not observe request cancellation")
+	}
+	t.Logf("real HTTPS SDK request reached server; caller cancellation returned and server observed cancellation in %s", time.Since(started))
 }
 
 func TestWaitForPublicIPv4SDKObservationBudget(t *testing.T) {
