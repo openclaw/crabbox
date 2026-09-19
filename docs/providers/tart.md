@@ -81,6 +81,9 @@ and process metadata.
 2. `tart set crabbox-<slug> --cpu N --memory N` configures resources (disk size is only resized when `--tart-disk` is explicitly set).
 3. `tart run crabbox-<slug> --no-graphics --no-clipboard --no-audio` starts the VM headless with Tart's automatic host clipboard and audio passthrough disabled.
 4. `tart ip crabbox-<slug>` polls for the guest IP (DHCP, typically ~10s).
+   A five-minute context covers both the commands and the waits between probes;
+   earlier caller cancellation stops readiness. The first probe remains delayed
+   by three seconds, with retries following the same three-second ticker cadence.
 5. Crabbox waits up to two minutes for the Tart Guest Agent using a harmless
    `tart exec crabbox-<slug> /usr/bin/true` probe, then injects the SSH public key
    with `tart exec crabbox-<slug> bash -c "..."`. An IP alone is not guest-agent

@@ -369,6 +369,36 @@ func startProcess(t *testing.T, f *processFixture, ctx context.Context, keep boo
 	return p, f.next(t, "run")
 }
 
+func TestWaitForIPCancellationJoinsRealCommand(t *testing.T) {
+	f := newProcessFixture(t, "ip")
+	b := f.backend()
+	b.rt.Exec = core.RuntimeForProviderOperation(io.Discard).Exec
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	var ip string
+	var err error
+	done := make(chan struct{})
+	go func() {
+		ip, err = b.waitForIP(ctx, "crabbox-ip-cancel")
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel(nil)
+		awaitProcess(t, done)
+	})
+	child := f.next(t, "ip")
+	cause := errors.New("IP readiness canceled by caller")
+	started := time.Now()
+	cancel(cause)
+	awaitProcess(t, done)
+	var exit core.ExitError
+	if ip != "" || !core.AsExitError(err, &exit) || exit.Code != 2 || err.Error() != "tart ip crabbox-ip-cancel: context cancelled" || !errors.Is(err, cause) {
+		t.Fatalf("ip=%q err=%v, want caller cancellation with the existing diagnostic", ip, err)
+	}
+	child.exited(t)
+	t.Logf("real command handshake observed; readiness returned caller cancellation, command joined and control descriptor closed in %s", time.Since(started))
+}
+
 func TestDetachCommandCreatesSession(t *testing.T) {
 	cmd := exec.Command("tart", "run", "test")
 	detachCommand(cmd)
