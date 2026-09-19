@@ -5,6 +5,7 @@
 ### Fixes
 
 - Bound GCP public-IP discovery to two minutes, including in-flight observations, and stop before querying when the caller has already canceled.
+- Remove generated GCP lease SSH credentials and host-trust files after confirmed instance deletion or absence; retain the exact claim when local cleanup fails so cleanup can be retried.
 
 ## 0.62.0 - 2026-09-18
 

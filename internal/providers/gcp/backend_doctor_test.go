@@ -8,6 +8,8 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -110,6 +112,21 @@ func claimGCPTestServer(t *testing.T, cfg core.Config, server core.Server) {
 	if err := core.ClaimLeaseTargetForConfig(server.Labels["lease"], server.Labels["slug"], cfg, server, core.SSHTarget{}, time.Minute); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func gcpTestConnectionArtifacts(t *testing.T, leaseID string) string {
+	t.Helper()
+	key, err := core.PrepareStoredTestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(key)
+	for _, name := range []string{"id_ed25519", "id_ed25519.pub", "known_hosts"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("synthetic fixture\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
 }
 
 func TestValidateExactGCPClaimBindsProviderResourceAndLease(t *testing.T) {
@@ -550,6 +567,7 @@ func TestGCPCleanupTreatsMissingLiveInstanceAsAlreadyDeleted(t *testing.T) {
 	snapshot.Labels["expires_at"] = core.LeaseLabelTime(time.Now().Add(-time.Hour))
 	cfg := core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: snapshot.Labels["zone"]}
 	claimGCPTestServer(t, cfg, snapshot)
+	artifacts := gcpTestConnectionArtifacts(t, leaseID)
 	fake := &fakeGCPDoctorClient{
 		servers: []core.Server{snapshot},
 		getErr:  &googleapi.Error{Code: http.StatusNotFound, Message: "instance gone"},
@@ -569,6 +587,9 @@ func TestGCPCleanupTreatsMissingLiveInstanceAsAlreadyDeleted(t *testing.T) {
 	if len(fake.deleted) != 0 {
 		t.Fatalf("dry-run deleted=%v, want no mutation", fake.deleted)
 	}
+	if _, err := os.Stat(filepath.Join(artifacts, "id_ed25519")); err != nil {
+		t.Fatalf("dry-run changed connection artifacts: %v", err)
+	}
 	stderr.Reset()
 	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
@@ -583,6 +604,9 @@ func TestGCPCleanupTreatsMissingLiveInstanceAsAlreadyDeleted(t *testing.T) {
 	if claim.LeaseID != "" {
 		t.Fatalf("missing-instance claim was not removed: %#v", claim)
 	}
+	if _, err := os.Lstat(artifacts); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing-instance connection artifacts remain: %v", err)
+	}
 	if !strings.Contains(stderr.String(), "live instance no longer exists") {
 		t.Fatalf("stderr=%q, want already-deleted diagnostic", stderr.String())
 	}
@@ -594,6 +618,7 @@ func TestGCPReleaseLeaseRequiresCanonicalLiveOwnership(t *testing.T) {
 	slug := "release-box"
 	live := canonicalGCPTestServer(leaseID, slug)
 	claimGCPTestServer(t, core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}, live)
+	artifacts := gcpTestConnectionArtifacts(t, leaseID)
 	fake := &fakeGCPDoctorClient{get: map[string]core.Server{live.CloudID: live}}
 	old := newGCPClient
 	newGCPClient = func(context.Context, core.Config) (gcpClient, error) {
@@ -620,6 +645,84 @@ func TestGCPReleaseLeaseRequiresCanonicalLiveOwnership(t *testing.T) {
 	}
 	if claim.LeaseID != "" {
 		t.Fatalf("claim still present after verified release: %#v", claim)
+	}
+	if _, err := os.Lstat(artifacts); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("released connection artifacts remain: %v", err)
+	}
+}
+
+func TestGCPAbsentLeaseConnectionCleanup(t *testing.T) {
+	for _, mode := range []string{"release", "stale cleanup", "changed stale claim"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			leaseID := "cbx_777777777777"
+			server := canonicalGCPTestServer(leaseID, "gone")
+			cfg := core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}
+			claimGCPTestServer(t, cfg, server)
+			claim, err := core.ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts := gcpTestConnectionArtifacts(t, leaseID)
+			fake := &fakeGCPDoctorClient{getErr: &googleapi.Error{Code: http.StatusNotFound}}
+			if mode == "changed stale claim" {
+				updates := 0
+				fake.observe = func(context.Context, string) (core.Server, error) {
+					updates++
+					labels := maps.Clone(server.Labels)
+					labels["cleanup_generation"] = fmt.Sprint(updates)
+					if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels); err != nil {
+						t.Fatal(err)
+					}
+					return core.Server{}, &googleapi.Error{Code: http.StatusNotFound}
+				}
+			}
+			old := newGCPClient
+			newGCPClient = func(context.Context, core.Config) (gcpClient, error) { return fake, nil }
+			t.Cleanup(func() { newGCPClient = old })
+			backend := NewGCPLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+			if mode == "release" {
+				err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}})
+			} else {
+				if err := backend.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
+					t.Fatal(err)
+				}
+				if _, statErr := os.Stat(filepath.Join(artifacts, "id_ed25519")); statErr != nil {
+					t.Fatalf("dry-run changed SSH artifacts: %v", statErr)
+				}
+				if mode == "changed stale claim" {
+					claim, err = core.ReadLeaseClaim(leaseID)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				err = backend.Cleanup(context.Background(), core.CleanupRequest{})
+			}
+			if len(fake.deleted) != 0 {
+				t.Fatalf("absent resource was deleted: %v", fake.deleted)
+			}
+			if mode == "changed stale claim" {
+				if err == nil {
+					t.Fatal("cleanup accepted a changed claim")
+				}
+				if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || !exists {
+					t.Fatalf("changed claim lost: exists=%v err=%v", exists, readErr)
+				}
+				if _, statErr := os.Stat(filepath.Join(artifacts, "id_ed25519")); statErr != nil {
+					t.Fatalf("changed claim's SSH artifacts lost: %v", statErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, statErr := os.Lstat(artifacts); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("absent lease connection artifacts remain: %v", statErr)
+			}
+			if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || exists {
+				t.Fatalf("absent claim remains: exists=%v err=%v", exists, readErr)
+			}
+		})
 	}
 }
 

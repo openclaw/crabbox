@@ -196,7 +196,7 @@ func (b *gcpLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeas
 	live, err := client.GetServer(ctx, cloudID)
 	if err != nil {
 		if core.IsGCPNotFound(err) {
-			return core.RemoveLeaseClaimIfUnchanged(req.Lease.LeaseID, claim)
+			return shared.RemoveSSHLeaseClaimAfter(claim, nil)
 		}
 		return err
 	}
@@ -366,7 +366,7 @@ func validateExactGCPClaim(claim core.LeaseClaim, server core.Server, expectedLe
 }
 
 func deleteClaimedGCPServer(ctx context.Context, client gcpClient, server core.Server, claim core.LeaseClaim) error {
-	return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+	return shared.RemoveSSHLeaseClaimAfter(claim, func() error {
 		return client.DeleteServer(ctx, server.CloudID)
 	})
 }
@@ -423,7 +423,15 @@ func (b *gcpLeaseBackend) pruneStaleClaims(ctx context.Context, liveLeaseIDs map
 		}
 		fmt.Fprintf(b.RT.Stderr, "remove stale claim lease=%s slug=%s provider=gcp\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 		if !dryRun {
-			core.RemoveLeaseClaim(claim.LeaseID)
+			if strings.TrimSpace(claim.CloudID) == "" {
+				// No resource identity means no per-resource absence proof for SSH cleanup.
+				err = core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim)
+			} else {
+				err = shared.RemoveSSHLeaseClaimAfter(claim, nil)
+			}
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
