@@ -272,6 +272,11 @@ func testCoordinatorReleaseJoinsSSHControlMasters(t *testing.T, modes ...string)
 				if err != nil {
 					t.Fatal(err)
 				}
+				t.Cleanup(func() {
+					if err := RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
+						t.Errorf("cleanup synthetic lease: %v", err)
+					}
+				})
 				target := SSHTarget{User: "synthetic-mux-owner", Host: "127.0.0.1", Port: strconv.Itoa(endpoint.port()),
 					Key: key, SSHHostKey: endpoint.hostKey, TargetOS: targetLinux}
 				config := os.DevNull
@@ -320,9 +325,6 @@ func testCoordinatorReleaseJoinsSSHControlMasters(t *testing.T, modes ...string)
 				}
 				t.Cleanup(func() {
 					_, _ = control(identity.path, "exit")
-					if err := RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
-						t.Errorf("cleanup synthetic lease: %v", err)
-					}
 				})
 				checked, err := control(identity.path, "check")
 				if err != nil {
