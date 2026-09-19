@@ -136,6 +136,11 @@ func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 }
 
 func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, slug string, server core.Server, allowProviderMetadata bool) (core.Server, error) {
+	if existing.FixedCreateIntent != nil {
+		if err := validateFixedAzureServer(existing, server); err != nil {
+			return core.Server{}, err
+		}
+	}
 	_ = allowProviderMetadata
 	if provider != "azure" {
 		return core.Server{}, core.Exit(2, "refusing to rewrite Azure lease=%s as provider=%s", existing.LeaseID, provider)

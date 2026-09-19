@@ -906,6 +906,26 @@ func (c *AzureClient) createServer(ctx context.Context, cfg Config, publicKey, l
 }
 
 func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, name string) (Server, error) {
+	labels := DirectLeaseLabels(cfg, leaseID, slug, "azure", mapMarket(strings.EqualFold(cfg.Capacity.Market, "spot")), keep, time.Now().UTC())
+	return c.createServerStepsWithLabels(ctx, cfg, publicKey, leaseID, slug, name, labels)
+}
+
+// CreateFixedServer submits one candidate. Its adapter persists the attempt
+// first and owns reconciliation; ambiguous failures must not trigger rollback.
+func (c *AzureClient) CreateFixedServer(ctx context.Context, cfg Config, publicKey, leaseID, slug string, labels map[string]string) (Server, error) {
+	if cfg.AzureOSDisk == AzureOSDiskEphemeralPreview {
+		return Server{}, Exit(2, "direct Azure fixed leases do not support ephemeral-preview OS disks")
+	}
+	if _, err := c.validatedAzureOSDiskMode(ctx, cfg); err != nil {
+		return Server{}, err
+	}
+	if err := c.EnsureSharedInfra(ctx); err != nil {
+		return Server{}, err
+	}
+	return c.createServerStepsWithLabels(ctx, cfg, publicKey, leaseID, slug, LeaseProviderName(leaseID, slug), labels)
+}
+
+func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Config, publicKey, leaseID, slug, name string, labels map[string]string) (Server, error) {
 	pipName := name + "-pip"
 	nicName := name + "-nic"
 	diskName := name + "-osdisk"
@@ -914,8 +934,6 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
-	now := time.Now().UTC()
-	labels := DirectLeaseLabels(cfg, leaseID, slug, "azure", mapMarket(strings.EqualFold(cfg.Capacity.Market, "spot")), keep, now)
 	tags := azureLabelsToTags(labels)
 	sharedNSGID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/networkSecurityGroups/%s",
 		c.SubscriptionID, c.ResourceGroup, c.NSG)
@@ -1032,7 +1050,11 @@ func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicK
 			return Server{}, err
 		}
 	} else {
-		vmPoller, err := c.vmc.BeginCreateOrUpdate(ctx, c.ResourceGroup, name, vm, nil)
+		var options *armcompute.VirtualMachinesClientBeginCreateOrUpdateOptions
+		if labels["fixed_attempt"] != "" {
+			options = &armcompute.VirtualMachinesClientBeginCreateOrUpdateOptions{IfNoneMatch: to.Ptr("*")}
+		}
+		vmPoller, err := c.vmc.BeginCreateOrUpdate(ctx, c.ResourceGroup, name, vm, options)
 		if err != nil {
 			return Server{}, fmt.Errorf("begin vm: %w", err)
 		}

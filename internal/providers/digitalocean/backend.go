@@ -65,6 +65,9 @@ func NewDigitalOceanLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt cor
 }
 
 func (b *digitalOceanLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if req.RequestedLeaseID != "" {
+		return b.acquireFixed(ctx, req)
+	}
 	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req)
 	})
@@ -327,6 +330,11 @@ func (b *digitalOceanLeaseBackend) Resolve(ctx context.Context, req core.Resolve
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if core.IsCanonicalLeaseID(req.ID) {
+		if lease, handled, err := b.resolveFixed(ctx, client, req, accountID); handled {
+			return lease, err
+		}
+	}
 	droplets, err := client.ListCrabboxDroplets(ctx)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -362,6 +370,9 @@ func (b *digitalOceanLeaseBackend) Resolve(ctx context.Context, req core.Resolve
 		return b.targetFromDroplet(byID[server.ID], req, droplets, accountID)
 	}
 	if req.ReleaseOnly {
+		if lease, handled, err := b.resolveFixed(ctx, client, req, accountID); handled {
+			return lease, err
+		}
 		return b.releaseTargetFromClaim(ctx, client, req.ID, accountID)
 	}
 	return core.LeaseTarget{}, core.Exit(4, "lease/droplet not found: %s", req.ID)
@@ -631,7 +642,11 @@ func isPendingRecoveryClaim(claim core.LeaseClaim, leaseID string) bool {
 
 func validateDigitalOceanClaimIdentity(claim core.LeaseClaim, leaseID, slug string) error {
 	binding := shared.ClaimBinding{Provider: providerName, LeaseID: leaseID, Slug: slug}
-	if claim.Slug == "" || claim.ProviderScope != "" || shared.ValidateClaimBinding(claim, binding) != nil {
+	validScope := claim.ProviderScope == ""
+	if fixedLeaseKind.IsFixedClaim(claim) {
+		validScope = claim.ProviderScope == claim.Labels[digitalOceanAccountLabel] && claim.ProviderScope == claim.FixedCreateIntent.ProviderScope
+	}
+	if claim.Slug == "" || !validScope || shared.ValidateClaimBinding(claim, binding) != nil {
 		return core.Exit(2, "digitalocean lease claim identity does not match lease=%s slug=%s", leaseID, slug)
 	}
 	return nil
@@ -665,6 +680,14 @@ func (b *digitalOceanLeaseBackend) targetFromDroplet(item droplet, req core.Reso
 	claim, claimExists, claimErr := core.ReadLeaseClaimWithPresence(leaseID)
 	if claimErr != nil {
 		return core.LeaseTarget{}, fmt.Errorf("read digitalocean lease claim: %w", claimErr)
+	}
+	if claimExists && claim.FixedCreateIntent != nil {
+		if err := validateFixedDroplet(claim, item); err != nil {
+			return core.LeaseTarget{}, err
+		}
+	}
+	if !claimExists && server.Labels["fixed_attempt"] != "" {
+		return core.LeaseTarget{}, core.Exit(4, "DigitalOcean fixed lease cannot be adopted without its create intent")
 	}
 	if claimExists && !req.IsReadOnlyStatus() {
 		if claim.Provider != providerName {
@@ -762,6 +785,16 @@ func (b *digitalOceanLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequ
 }
 
 func (b *digitalOceanLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	if req.Lease.Server.CloudID != "" || req.Lease.Server.Name != "" {
+		return b.deleteServer(ctx, b.Cfg, req.Lease.Server)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID)
+	if err != nil {
+		return err
+	}
+	if exists && fixedLeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State == "released" {
+		return fixedLeaseKind.ValidateTerminalClaim(claim, claim, req.Lease.LeaseID, nil)
+	}
 	return b.deleteServer(ctx, b.Cfg, req.Lease.Server)
 }
 
@@ -1004,6 +1037,11 @@ func (b *digitalOceanLeaseBackend) recoverCleanupClaim(ctx context.Context, clie
 }
 
 func validateDigitalOceanCleanupClaim(server core.Server, claim core.LeaseClaim, accountID string) error {
+	if claim.FixedCreateIntent != nil && claim.CloudID != "" {
+		if err := validateFixedDroplet(claim, droplet{ID: server.ID, Name: server.Name, Tags: tagsFromLabels(server.Labels)}); err != nil {
+			return err
+		}
+	}
 	leaseID := server.Labels["lease"]
 	if claim.LeaseID != leaseID || claim.Provider == "" {
 		return core.Exit(2, "digitalocean lease claim is incomplete for lease=%s", leaseID)
@@ -1142,7 +1180,7 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Conf
 		}
 		return nil
 	}
-	if err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expectedClaim, action); err != nil {
+	if err := fixedLeaseKind.FinalizeAfterCleanup(expectedClaim, action); err != nil {
 		return fmt.Errorf("finalize digitalocean cleanup claim: %w", err)
 	}
 	core.RemoveStoredTestboxKey(leaseID)

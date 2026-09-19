@@ -45,6 +45,11 @@ func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 }
 
 func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, slug string, server core.Server, allowProviderMetadata bool) (core.Server, error) {
+	if existing.FixedCreateIntent != nil {
+		if err := validateFixedDroplet(existing, droplet{ID: server.ID, Name: server.Name, Tags: tagsFromLabels(server.Labels)}); err != nil {
+			return core.Server{}, err
+		}
+	}
 	if provider != providerName {
 		return core.Server{}, core.Exit(2, "refusing to rewrite digitalocean lease=%s as provider=%s", existing.LeaseID, provider)
 	}

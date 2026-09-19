@@ -28,6 +28,7 @@ type fakeDigitalOceanAPI struct {
 	accountFn      func() (string, error)
 	nextID         int64
 	createErr      error
+	fixedReplyErr  error
 	getErr         error
 	getFn          func(context.Context, int64) (droplet, error)
 	getCalls       int
