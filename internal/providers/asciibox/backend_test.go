@@ -55,7 +55,7 @@ func TestProviderSpecAndAliases(t *testing.T) {
 	if p.Spec().Name != providerName {
 		t.Fatalf("Name=%q want %s", p.Spec().Name, providerName)
 	}
-	for _, alias := range []string{"ascii", "asciibox", "ascii-box"} {
+	for _, alias := range []string{"boat", "ascii", "asciibox", "ascii-box"} {
 		got, err := core.ProviderFor(alias)
 		if err != nil {
 			t.Fatalf("ProviderFor(%q): %v", alias, err)
@@ -544,6 +544,264 @@ func TestRedactBoxSecrets(t *testing.T) {
 	got := redactBoxSecrets(`open https://box.ascii.dev/session?box_token=secret-value&ok=1 with box_realToken`)
 	if strings.Contains(got, "secret-value") || strings.Contains(got, "box_realToken") {
 		t.Fatalf("redacted=%q", got)
+	}
+}
+
+// The Boat rename issues "boat_"-prefixed API keys. They must redact like the
+// legacy "box_" keys instead of reaching diagnostics in the clear.
+func TestRedactBoxSecretsCoversBothKeyPrefixes(t *testing.T) {
+	for _, tt := range []struct {
+		name, secret, wantPrefix string
+	}{
+		{"legacy box key", "box_realTokenValue", "box_REDACTED"},
+		{"renamed boat key", "boat_realTokenValue", "boat_REDACTED"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactBoxSecrets("ascii-box CLI limits failed: rejected " + tt.secret)
+			if strings.Contains(got, tt.secret) {
+				t.Fatalf("redacted output leaked the key: %q", got)
+			}
+			if !strings.Contains(got, tt.wantPrefix) {
+				t.Fatalf("redacted=%q want it to contain %q", got, tt.wantPrefix)
+			}
+		})
+	}
+}
+
+// Readiness now waits for the advertised endpoint, so pin the connection
+// resolution itself: an advertised endpoint wins, and the ip:22 fallback stays
+// available for a box that reports no endpoint at all.
+func TestBoxSSHConnectionPrefersAdvertisedEndpoint(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		box      boxData
+		wantHost string
+		wantPort string
+		wantErr  bool
+	}{
+		{name: "advertised endpoint", box: boxData{ID: "bx_1", IP: "203.0.113.10", SSHEndpoint: "198.51.100.20:19040"}, wantHost: "198.51.100.20", wantPort: "19040"},
+		{name: "snake_case endpoint alias", box: boxData{ID: "bx_1", SSHEndpointAlt: "198.51.100.20:19041"}, wantHost: "198.51.100.20", wantPort: "19041"},
+		{name: "no endpoint falls back to ip:22", box: boxData{ID: "bx_1", IP: "203.0.113.10"}, wantHost: "203.0.113.10", wantPort: "22"},
+		{name: "malformed endpoint is rejected", box: boxData{ID: "bx_1", IP: "203.0.113.10", SSHEndpoint: "198.51.100.20"}, wantErr: true},
+		{name: "no host at all is rejected", box: boxData{ID: "bx_1"}, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			host, port, err := boxSSHConnection(tt.box)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("host=%q port=%q want error", host, port)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if host != tt.wantHost || port != tt.wantPort {
+				t.Fatalf("host=%q port=%q want %q %q", host, port, tt.wantHost, tt.wantPort)
+			}
+		})
+	}
+}
+
+// Releasing a lease must survive the rename: the current CLI reports deletion
+// operations with kind "sandbox" while older Box CLIs reported "box". Any other
+// kind must still be rejected so the claim is retained.
+func TestValidateBoxDeletionOperationAcceptsRenamedKind(t *testing.T) {
+	const opID = "bdop_e896e624d8af4d9e92cab7848ecb8a83"
+	for _, tt := range []struct {
+		name, kind string
+		wantErr    bool
+	}{
+		{"renamed sandbox kind", "sandbox", false},
+		{"legacy box kind", "box", false},
+		{"unrelated kind is rejected", "snapshot", true},
+		{"empty kind is rejected", "", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			operation := boxDeletionOperation{ID: opID, Kind: tt.kind, TargetID: "bx_1", Status: "pending"}
+			err := validateBoxDeletionOperation(operation, "bx_1", opID)
+			if tt.wantErr && err == nil {
+				t.Fatalf("kind %q was accepted", tt.kind)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("kind %q rejected: %v", tt.kind, err)
+			}
+		})
+	}
+}
+
+// The CLI owns this key. Crabbox falls forward to the renamed name only when
+// the legacy key is absent, so a pre-rename home keeps presenting the exact
+// credential it always did and no existing setup can change behavior. The
+// legacy key wins whenever it exists, whatever its age relative to a renamed
+// key that the configured CLI never authorized.
+func TestBoxSSHKeyPrefersTheLegacyKeyWhenPresent(t *testing.T) {
+	legacy, renamed := "ascii_box_ed25519", "ascii_sandbox_ed25519"
+	for _, tt := range []struct {
+		name        string
+		present     []string
+		legacyOlder bool
+		want        string
+	}{
+		{name: "only the renamed CLI has run", present: []string{renamed}, want: renamed},
+		{name: "only a legacy CLI has run", present: []string{legacy}, want: legacy},
+		{name: "both present keeps the legacy key", present: []string{legacy, renamed}, want: legacy},
+		{name: "legacy key older than an unused renamed key still wins", present: []string{legacy, renamed}, legacyOlder: true, want: legacy},
+		{name: "neither present keeps the legacy name", want: legacy},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("CRABBOX_ASCII_BOX_HOME", home)
+			dir := filepath.Join(home, ".ssh")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range tt.present {
+				if err := os.WriteFile(filepath.Join(dir, key), []byte("key"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.legacyOlder {
+				old := time.Now().Add(-90 * 24 * time.Hour)
+				if err := os.Chtimes(filepath.Join(dir, legacy), old, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got, want := boxSSHKey(core.Config{}), filepath.Join(dir, tt.want); got != want {
+				t.Fatalf("boxSSHKey()=%q want %q", got, want)
+			}
+		})
+	}
+}
+
+// ASCII renamed the Box CLI to Boat. A current install ships only "boat", but an
+// explicitly configured command must always be honored exactly as given.
+func TestResolveAsciiBoxCLIPrefersInstalledBinary(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		configured string
+		installed  map[string]bool
+		want       string
+	}{
+		{"legacy box still installed", "box", map[string]bool{"box": true, "boat": true}, "box"},
+		{"only renamed boat installed", "box", map[string]bool{"boat": true}, "boat"},
+		{"empty falls back to boat when box absent", "", map[string]bool{"boat": true}, "boat"},
+		{"neither installed keeps legacy name", "box", nil, "box"},
+		{"explicit boat honored", "boat", map[string]bool{"box": true}, "boat"},
+		{"explicit absolute path honored", "/opt/ascii/bin/box", nil, "/opt/ascii/bin/box"},
+		{"explicit relative path honored", "./box", map[string]bool{"boat": true}, "./box"},
+		{"explicit other name honored", "box-legacy", map[string]bool{"boat": true}, "box-legacy"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			original := asciiBoxCLILookPath
+			t.Cleanup(func() { asciiBoxCLILookPath = original })
+			asciiBoxCLILookPath = func(name string) (string, error) {
+				if tt.installed[name] {
+					return "/usr/local/bin/" + name, nil
+				}
+				return "", fmt.Errorf("%s: not found", name)
+			}
+			if got := resolveAsciiBoxCLI(tt.configured); got != tt.want {
+				t.Fatalf("resolveAsciiBoxCLI(%q)=%q want %q", tt.configured, got, tt.want)
+			}
+		})
+	}
+}
+
+// ASCII renamed Box to Boat and renamed the CLI's JSON envelope from
+// "box"/"boxes" to "sandbox"/"sandboxes". One build must read both.
+func TestDecodeBoxAcceptsRenamedEnvelope(t *testing.T) {
+	for _, tt := range []struct {
+		name, payload string
+	}{
+		{"renamed sandbox envelope", `{"sandbox":{"id":"bx_1","state":"idle","sshEndpoint":"198.51.100.20:19035"}}`},
+		{"legacy box envelope", `{"box":{"id":"bx_1","state":"idle","sshEndpoint":"198.51.100.20:19035"}}`},
+		{"bare object", `{"id":"bx_1","state":"idle","sshEndpoint":"198.51.100.20:19035"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			box, err := decodeBox([]byte(tt.payload))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if box.ID != "bx_1" || box.State != "idle" || box.SSHEndpoint != "198.51.100.20:19035" {
+				t.Fatalf("decoded=%#v", box)
+			}
+		})
+	}
+}
+
+func TestDecodeBoxesAcceptsRenamedEnvelope(t *testing.T) {
+	for _, tt := range []struct {
+		name, payload string
+		want          int
+	}{
+		{"renamed sandboxes envelope", `{"sandboxes":[{"id":"bx_1"},{"id":"bx_2"}],"pageInfo":{"hasMore":false,"nextCursor":null}}`, 2},
+		{"legacy boxes envelope", `{"boxes":[{"id":"bx_1"},{"id":"bx_2"}]}`, 2},
+		{"renamed empty inventory proves absence", `{"sandboxes":[],"pageInfo":{"hasMore":false,"nextCursor":null}}`, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			boxes, err := decodeBoxes([]byte(tt.payload), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(boxes) != tt.want {
+				t.Fatalf("decoded %d boxes, want %d: %#v", len(boxes), tt.want, boxes)
+			}
+		})
+	}
+}
+
+// A transitional CLI can report a Box under only one envelope. Cleanup reads
+// this inventory as proof that a Box is really gone, so every reported resource
+// has to survive decoding or a still-present Box could have its claim removed.
+func TestDecodeBoxesReconcilesBothEnvelopes(t *testing.T) {
+	for _, tt := range []struct {
+		name, payload string
+		want          []string
+	}{
+		{"conflicting equal-length envelopes keep both", `{"sandboxes":[{"id":"bx_other"}],"boxes":[{"id":"bx_target"}]}`, []string{"bx_other", "bx_target"}},
+		{"empty sandboxes cannot hide populated boxes", `{"sandboxes":[],"boxes":[{"id":"bx_target"}]}`, []string{"bx_target"}},
+		{"empty boxes cannot hide populated sandboxes", `{"boxes":[],"sandboxes":[{"id":"bx_target"}]}`, []string{"bx_target"}},
+		{"same Box in both envelopes is not duplicated", `{"sandboxes":[{"id":"bx_target"}],"boxes":[{"id":"bx_target"}]}`, []string{"bx_target"}},
+		{"both genuinely empty still proves absence", `{"sandboxes":[],"boxes":[]}`, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			boxes, err := decodeBoxes([]byte(tt.payload), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, box := range boxes {
+				got = append(got, box.ID)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("decoded %v want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("decoded %v want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// Merging the two envelopes must not lose fields reported by only one of them.
+func TestDecodeBoxesMergesFieldsAcrossEnvelopes(t *testing.T) {
+	boxes, err := decodeBoxes([]byte(`{"sandboxes":[{"id":"bx_1","state":"ready"}],"boxes":[{"id":"bx_1","sshEndpoint":"198.51.100.20:19036"}]}`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(boxes) != 1 || boxes[0].State != "ready" || boxes[0].SSHEndpoint != "198.51.100.20:19036" {
+		t.Fatalf("merged=%#v", boxes)
+	}
+}
+
+// A paginated inventory can never prove complete absence, whichever envelope
+// the CLI used to report it.
+func TestDecodeBoxesRejectsPaginatedRenamedInventory(t *testing.T) {
+	if _, err := decodeBoxes([]byte(`{"sandboxes":[{"id":"bx_1"}],"pageInfo":{"hasMore":true,"nextCursor":"c1"}}`), true); err == nil {
+		t.Fatal("paginated renamed inventory was accepted as complete")
 	}
 }
 

@@ -14,7 +14,10 @@ type Provider struct{}
 
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
-		Aliases:          []string{"ascii", "asciibox"},
+		// ASCII renamed its Box product to Boat in September 2026. Keep the
+		// existing canonical provider identity for durable lease/claim
+		// compatibility while accepting the current product name at the CLI.
+		Aliases:          []string{"boat", "ascii", "asciibox"},
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),
 		Name:             providerName,
 		Kind:             core.ProviderKindSSHLease,
