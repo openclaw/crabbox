@@ -19,7 +19,9 @@ const (
 
 var tagSafeRe = regexp.MustCompile(`[^A-Za-z0-9_:\-]`)
 
-var tagSchema = shared.LeaseTagSchema(shared.TailscaleTagFields()...)
+var tagSchema = shared.LeaseTagSchema(append(shared.TailscaleTagFields(),
+	shared.TagLabelField{Key: "fixed_intent_sha256"}, shared.TagLabelField{Key: "fixed_attempt"},
+)...)
 
 func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time.Time) []string {
 	labels := core.DirectLeaseLabels(cfg, leaseID, slug, providerName, "", keep, now)
