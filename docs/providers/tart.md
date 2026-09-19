@@ -40,7 +40,7 @@ CLI flags:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--tart-image` | `ghcr.io/cirruslabs/macos-sequoia-base@sha256:785c3acb40fa5af6dd5aab96cd60408372c26125e173c14ea417498d086f829c` | OCI base image to clone |
+| `--tart-image` | `ghcr.io/cirruslabs/macos-sequoia-base@sha256:4947ac5ab1b2fdc46ab856132d2ba958f8e45b5f85192c66370dafc028c514dd` | OCI base image to clone |
 | `--tart-cpu` | 4 | Guest CPU count |
 | `--tart-memory` | 8192 | Guest memory in MB |
 | `--tart-disk` | (clone default) | Guest disk size in GB; only applied when explicitly set |
@@ -129,7 +129,9 @@ remain tied to the caller's context.
 
 New leases without an image override use the immutable Sequoia image above.
 The original registry manifest and its VM configuration are checked in under
-`internal/providers/tart/images`. Crabbox hashes the manifest against the pin,
+`internal/providers/tart/images`. The pin was reviewed on 2026-09-18
+against the publisher’s 2026-09-05 image; its VM configuration SHA-256 is
+`1bbd9f74ddc3b6bffa892f89b8ea9444cf6634af3593e6bdfc6762952a08d8a7`. Crabbox hashes the manifest against the pin,
 then checks the cloned disk's exact size and every uncompressed chunk digest,
 the NVRAM size and digest, and the configuration before guest execution. Native
 Tart MAC-address regeneration and JSON formatting changes are allowed; other
