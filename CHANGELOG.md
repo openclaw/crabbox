@@ -4,7 +4,7 @@
 
 ### Fixes
 
-- Bound Scaleway public-IP readiness observations and waits to five minutes, honor earlier cancellation before querying, and preserve immediate API failures instead of misreporting a readiness timeout.
+- Bound Scaleway public-IP readiness observations and waits to five minutes, honor earlier cancellation before querying, and preserve immediate API failures instead of misreporting a readiness timeout. [PR 2348](https://github.com/openclaw/crabbox/pull/2348). Thanks @steipete.
 - Redact signed artifact URLs from upload, download, and manifest request setup and transport errors while preserving the operation and underlying failure. [PR 2340](https://github.com/openclaw/crabbox/pull/2340). Thanks @steipete.
 - Keep coordinator-managed lease claims aligned with the broker's idle timeout when resolving SSH access, instead of recording the local default; ordinary touches continue to preserve remote policy. [PR 2339](https://github.com/openclaw/crabbox/pull/2339). Thanks @steipete.
 - Raise production coordinator checkpoint limits to 100 globally, per owner, and per organization so retained worker caches do not exhaust the previous 10-checkpoint owner limit.
