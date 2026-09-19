@@ -906,8 +906,7 @@ func (c *AzureClient) createServer(ctx context.Context, cfg Config, publicKey, l
 }
 
 func (c *AzureClient) createServerSteps(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, name string) (Server, error) {
-	labels := DirectLeaseLabels(cfg, leaseID, slug, "azure", mapMarket(strings.EqualFold(cfg.Capacity.Market, "spot")), keep, time.Now().UTC())
-	return c.createServerStepsWithLabels(ctx, cfg, publicKey, leaseID, slug, name, labels)
+	return c.createServerStepsWithLabels(ctx, cfg, publicKey, leaseID, slug, name, keep, nil)
 }
 
 // CreateFixedServer submits one candidate. Its adapter persists the attempt
@@ -922,10 +921,10 @@ func (c *AzureClient) CreateFixedServer(ctx context.Context, cfg Config, publicK
 	if err := c.EnsureSharedInfra(ctx); err != nil {
 		return Server{}, err
 	}
-	return c.createServerStepsWithLabels(ctx, cfg, publicKey, leaseID, slug, LeaseProviderName(leaseID, slug), labels)
+	return c.createServerStepsWithLabels(ctx, cfg, publicKey, leaseID, slug, LeaseProviderName(leaseID, slug), false, labels)
 }
 
-func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Config, publicKey, leaseID, slug, name string, labels map[string]string) (Server, error) {
+func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Config, publicKey, leaseID, slug, name string, keep bool, labels map[string]string) (Server, error) {
 	pipName := name + "-pip"
 	nicName := name + "-nic"
 	diskName := name + "-osdisk"
@@ -933,6 +932,9 @@ func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Confi
 
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
+	}
+	if labels == nil {
+		labels = DirectLeaseLabels(cfg, leaseID, slug, "azure", mapMarket(strings.EqualFold(cfg.Capacity.Market, "spot")), keep, time.Now().UTC())
 	}
 	tags := azureLabelsToTags(labels)
 	sharedNSGID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/networkSecurityGroups/%s",

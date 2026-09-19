@@ -95,6 +95,9 @@ func (b *digitalOceanLeaseBackend) acquireFixed(ctx context.Context, req core.Ac
 		return binding, err
 	}, func(ctx context.Context, claim *core.LeaseClaim, intent *core.FixedCreateIntent, persist func() error) (core.LeaseTarget, error) {
 		var item droplet
+		if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
+			cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, claim.LeaseID, claim.Slug, cfg.Provider)
+		}
 		if intent.Attempt == nil {
 			createdAt, _ := time.Parse(time.RFC3339Nano, intent.CreatedAt)
 			intent.Attempt = map[string]string{"nonce": rand.Text()}

@@ -102,6 +102,9 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 		}
 		var server core.Server
 		name := core.LeaseProviderName(claim.LeaseID, claim.Slug)
+		if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
+			cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, claim.LeaseID, claim.Slug, cfg.Provider)
+		}
 		if intent.Attempt == nil {
 			if _, err := client.GetServer(ctx, name); err == nil {
 				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Azure VM name already exists")

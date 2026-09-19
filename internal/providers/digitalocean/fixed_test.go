@@ -151,9 +151,15 @@ func TestFixedDropletLostCreateReplyAndCleanupRetry(t *testing.T) {
 func TestFixedDropletBindsLeaseMetadata(t *testing.T) {
 	api := &fakeDigitalOceanAPI{}
 	b := newTestBackend(t, api)
+	b.Cfg.Tailscale.Enabled = true
+	b.Cfg.Tailscale.AuthKey = "test-only-key"
 	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123460", RequestedSlug: "metadata", Repo: core.Repo{Root: t.TempDir()}}
-	if _, err := b.Acquire(t.Context(), req); err != nil {
+	lease, err := b.Acquire(t.Context(), req)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if lease.Server.Labels["tailscale_hostname"] == "" {
+		t.Fatal("generated Tailscale hostname missing from lease labels")
 	}
 	b.Cfg.Pond = "different-network"
 	if _, err := b.Acquire(t.Context(), req); err == nil {
