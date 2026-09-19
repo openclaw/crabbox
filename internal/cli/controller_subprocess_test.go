@@ -1309,6 +1309,84 @@ func TestControllerPreAcquireInventoryUsesPersistedScopeWithoutRoutingFile(t *te
 	}
 }
 
+type confirmedAbsentReceiptTestBackend struct {
+	confirmedAbsentCleanupTestBackend
+	kind        FixedLeaseKind
+	validations int
+}
+
+func (b *confirmedAbsentReceiptTestBackend) ValidateConfirmedAbsentTerminalReceipt(claim LeaseClaim, req ConfirmedAbsentLocalCleanupRequest) error {
+	b.validations++
+	expected := req.ExpectedProviderIdentity
+	if claim.LeaseID != expected.LeaseID || claim.LeaseID != expected.AttemptLeaseID || claim.Slug != expected.Slug || claim.CloudID != expected.ResourceID || claim.ProviderScope != req.ProviderScope {
+		return errors.New("terminal receipt identity mismatch")
+	}
+	return b.kind.ValidateTerminalClaim(claim, LeaseClaim{}, expected.LeaseID, nil)
+}
+
+func TestConfirmedAbsentTerminalReceiptRetainsDurableClaimAcrossDeregistration(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_abc123abc123"
+	const scope = "receipt-scope"
+	kind := FixedLeaseKind{ClaimProvider: "test-fixed-v1", IntentVersion: 1, Label: "test", TerminalIdentityLabels: []string{"lease"}}
+	acquired := LeaseClaim{LeaseID: leaseID, Slug: "fixed-receipt", Provider: kind.ClaimProvider, ProviderScope: scope, CloudID: "resource-uid", CloudImmutableID: "resource-uid", Labels: map[string]string{"lease": leaseID}, FixedCreateIntent: &FixedCreateIntent{Version: 1, Fingerprint: strings.Repeat("b", 64), ProviderScope: scope, Slug: "fixed-receipt", State: "acquired"}}
+	if err := WithDurableLeaseClaimLock(leaseID, func(claim *LeaseClaim, _ bool, persist func() error) error {
+		*claim = kind.TerminalClaim(acquired, time.Now().UTC())
+		return persist()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &confirmedAbsentReceiptTestBackend{kind: kind}
+	expected := ProviderIdentityExpectation{LeaseID: leaseID, AttemptLeaseID: leaseID, Slug: acquired.Slug, ResourceID: acquired.CloudID}
+	deregistrations := 0
+	if err := finalizeConfirmedAbsentLocalState(t.Context(), backend, expected, scope, func() error {
+		deregistrations++
+		current, err := os.ReadFile(path)
+		if err != nil || string(current) != string(before) {
+			t.Fatalf("receipt changed before deregistration: %v", err)
+		}
+		if backend.validations != 2 {
+			t.Fatalf("pre-deregistration validations=%d", backend.validations)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) || deregistrations != 1 || backend.validations != 3 || backend.cleanupCalls != 0 {
+		t.Fatalf("receipt completion err=%v deregistrations=%d validations=%d sidecars=%d", err, deregistrations, backend.validations, backend.cleanupCalls)
+	}
+	if err := cleanupConfirmedAbsentLocalState(t.Context(), backend, expected, scope); err != nil {
+		t.Fatal(err)
+	}
+	after, err = os.ReadFile(path)
+	if err != nil || string(after) != string(before) || backend.cleanupCalls != 0 {
+		t.Fatalf("retry changed receipt: %v", err)
+	}
+}
+
+func TestConfirmedAbsentTerminalReceiptRequiresLocalCustody(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	backend := &confirmedAbsentReceiptTestBackend{}
+	expected := ProviderIdentityExpectation{LeaseID: "cbx_abc123abc123", AttemptLeaseID: "cbx_abc123abc123", Slug: "fixed-receipt", ResourceID: "resource-uid"}
+	deregistered := false
+	err := finalizeConfirmedAbsentLocalState(t.Context(), backend, expected, "receipt-scope", func() error { deregistered = true; return nil })
+	if err == nil || deregistered || backend.validations != 1 || backend.cleanupCalls != 0 {
+		t.Fatalf("missing custody err=%v deregistered=%t validations=%d sidecars=%d", err, deregistered, backend.validations, backend.cleanupCalls)
+	}
+	if _, exists, err := ReadLeaseClaimWithPresence(expected.LeaseID); err != nil || exists {
+		t.Fatalf("missing receipt was manufactured: exists=%t err=%v", exists, err)
+	}
+}
+
 func TestConfirmedAbsentLocalCleanupRemovesOnlyFullyMatchingClaim(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	leaseID := "cbx_abc123abc123"

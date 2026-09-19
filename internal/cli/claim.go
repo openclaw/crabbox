@@ -80,6 +80,8 @@ type FixedCreateIntent struct {
 	FailedAttempts []string          `json:"failedAttempts,omitempty"`
 }
 
+const FixedAgentSandboxClaimProvider = "agent-sandbox-fixed-v1"
+
 const FixedAWSClaimProvider = "aws-fixed-v1"
 const FixedMachine0ClaimProvider = "machine0-fixed-v1"
 const FixedDaytonaClaimProvider = "daytona-fixed-v1"
@@ -1292,6 +1294,8 @@ func fsyncDir(dir string) {
 
 func canonicalClaimProvider(provider string) string {
 	switch strings.TrimSpace(provider) {
+	case FixedAgentSandboxClaimProvider:
+		return "agent-sandbox"
 	case FixedAWSClaimProvider:
 		return "aws"
 	case FixedMachine0ClaimProvider:

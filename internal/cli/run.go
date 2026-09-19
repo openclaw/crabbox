@@ -98,6 +98,21 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		defer unlock()
 	}
 	options := leaseOptionsFromConfig(cfg)
+	if strings.TrimSpace(*requestedLeaseID) != "" {
+		if fixed, ok := backend.(DelegatedFixedWarmupBackend); ok {
+			return fixed.WarmupFixed(ctx, FixedWarmupRequest{
+				WarmupRequest: WarmupRequest{Repo: repo, Options: options, Keep: *keep, Reclaim: *reclaim,
+					ActionsRunner: *actionsRunner, RequestedSlug: requestedSlug, TimingJSON: *timingJSON,
+					BeforeComplete: func() { a.syncExternalRunnersBestEffort(ctx, cfg, backend) }},
+				RequestedLeaseID: strings.TrimSpace(*requestedLeaseID),
+				OnAcquired: func(receipt FixedAcquisitionReceipt) error {
+					return acknowledgeControllerAcquireIdentity(ctx, controllerAcquireIdentity{
+						LeaseID: receipt.LeaseID, Slug: receipt.Slug, Provider: receipt.Provider, ResourceID: receipt.ResourceID,
+					})
+				},
+			})
+		}
+	}
 	// Fixed IDs must reach Acquire; delegated warmup has no durable-ID request.
 	if delegated, ok := backend.(DelegatedRunBackend); ok && strings.TrimSpace(*requestedLeaseID) == "" {
 		return delegated.Warmup(ctx, WarmupRequest{
@@ -4977,16 +4992,12 @@ func (a App) stop(ctx context.Context, args []string) error {
 		// Validate the immutable local identity before the network mutation, but
 		// retain its route and claim until coordinator deregistration succeeds.
 		// A failed deregistration must remain retryable with the persisted route.
-		if _, err := confirmedAbsentLocalStateSnapshot(ctx, backend, expectedIdentity, *expectedProviderScope); err != nil {
-			return err
-		}
-		if err := a.releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(ctx, cfg, expectedIdentity.LeaseID); err != nil {
-			return fmt.Errorf("deregister coordinator lease after confirmed provider absence: %w", err)
-		}
-		if err := cleanupConfirmedAbsentLocalState(ctx, backend, expectedIdentity, *expectedProviderScope); err != nil {
-			return err
-		}
-		return nil
+		return finalizeConfirmedAbsentLocalState(ctx, backend, expectedIdentity, *expectedProviderScope, func() error {
+			if err := a.releaseRegisteredCoordinatorLeaseAfterConfirmedAbsence(ctx, cfg, expectedIdentity.LeaseID); err != nil {
+				return fmt.Errorf("deregister coordinator lease after confirmed provider absence: %w", err)
+			}
+			return nil
+		})
 	}
 	if *forceRecovery {
 		if reclaimer, ok := backend.(StopReclaimBackend); ok {
@@ -5001,6 +5012,9 @@ func (a App) stop(ctx context.Context, args []string) error {
 	}
 	if delegated, ok := backend.(DelegatedRunBackend); ok {
 		if !expectedIdentity.empty() {
+			if fixed, ok := backend.(DelegatedFixedReleaseBackend); ok && !*reclaim {
+				return fixed.StopFixed(ctx, FixedStopRequest{StopRequest: StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id}, ExpectedProviderIdentity: expectedIdentity})
+			}
 			return Exit(2, "provider=%s cannot validate an expected release identity", backend.Spec().Name)
 		}
 		if *reclaim {
@@ -5100,9 +5114,10 @@ func (a App) stop(ctx context.Context, args []string) error {
 }
 
 type confirmedAbsentLocalState struct {
-	leaseID     string
-	claim       leaseClaim
-	claimExists bool
+	leaseID        string
+	claim          leaseClaim
+	claimExists    bool
+	retainTerminal bool
 }
 
 func confirmedAbsentLocalStateSnapshot(ctx context.Context, backend Backend, expected ProviderIdentityExpectation, providerScope string) (confirmedAbsentLocalState, error) {
@@ -5121,9 +5136,28 @@ func confirmedAbsentLocalStateSnapshot(ctx context.Context, backend Backend, exp
 	if err != nil {
 		return confirmedAbsentLocalState{}, err
 	}
+	if !claimExists && IsCanonicalLeaseID(leaseID) {
+		if retainer, ok := backend.(ConfirmedAbsentTerminalReceiptRetainer); ok {
+			if err := retainer.ValidateConfirmedAbsentTerminalReceipt(claim, ConfirmedAbsentLocalCleanupRequest{ExpectedProviderIdentity: expected, ProviderScope: providerScope}); err != nil {
+				return confirmedAbsentLocalState{}, err
+			}
+			return confirmedAbsentLocalState{}, Exit(4, "fixed terminal receipt is missing before confirmed-absence cleanup")
+		}
+	}
+	retainTerminal := false
 	if claimExists {
-		if claim.Provider != provider {
-			return confirmedAbsentLocalState{}, Exit(4, "lease claim provider changed before confirmed-absence cleanup")
+		if claim.Provider != provider || claim.FixedCreateIntent != nil {
+			retainer, ok := backend.(ConfirmedAbsentTerminalReceiptRetainer)
+			if !ok {
+				return confirmedAbsentLocalState{}, Exit(4, "lease claim provider changed before confirmed-absence cleanup")
+			}
+			if expected.LeaseID == "" || expected.AttemptLeaseID == "" || expected.Slug == "" || expected.ResourceID == "" || providerScope == "" {
+				return confirmedAbsentLocalState{}, Exit(4, "terminal receipt cleanup requires complete provider identity and scope")
+			}
+			if err := retainer.ValidateConfirmedAbsentTerminalReceipt(cloneLeaseClaim(claim), ConfirmedAbsentLocalCleanupRequest{ExpectedProviderIdentity: expected, ProviderScope: providerScope}); err != nil {
+				return confirmedAbsentLocalState{}, err
+			}
+			retainTerminal = true
 		}
 		if claim.ProviderScope != providerScope {
 			return confirmedAbsentLocalState{}, Exit(4, "lease claim provider scope changed before confirmed-absence cleanup")
@@ -5140,13 +5174,54 @@ func confirmedAbsentLocalStateSnapshot(ctx context.Context, backend Backend, exp
 			return confirmedAbsentLocalState{}, Exit(4, "lease claim resource identity changed before confirmed-absence cleanup")
 		}
 	}
-	return confirmedAbsentLocalState{leaseID: leaseID, claim: claim, claimExists: claimExists}, nil
+	return confirmedAbsentLocalState{leaseID: leaseID, claim: claim, claimExists: claimExists, retainTerminal: retainTerminal}, nil
+}
+
+func finalizeConfirmedAbsentLocalState(ctx context.Context, backend Backend, expected ProviderIdentityExpectation, providerScope string, deregister func() error) error {
+	state, err := confirmedAbsentLocalStateSnapshot(ctx, backend, expected, providerScope)
+	if err != nil {
+		return err
+	}
+	if state.retainTerminal {
+		return retainConfirmedAbsentTerminalReceipt(ctx, backend, expected, providerScope, state, deregister)
+	}
+	if err := deregister(); err != nil {
+		return err
+	}
+	return cleanupConfirmedAbsentLocalState(ctx, backend, expected, providerScope)
+}
+
+func retainConfirmedAbsentTerminalReceipt(ctx context.Context, backend Backend, expected ProviderIdentityExpectation, providerScope string, state confirmedAbsentLocalState, deregister func() error) error {
+	return WithDurableLeaseClaimLockContext(ctx, state.leaseID, func(claim *leaseClaim, exists bool, _ func() error) error {
+		if err := unchangedLeaseClaimGuard(state.leaseID, state.claim, state.claimExists)(*claim, exists); err != nil {
+			return err
+		}
+		validate := func() error {
+			fresh, err := confirmedAbsentLocalStateSnapshot(ctx, backend, expected, providerScope)
+			if err != nil {
+				return err
+			}
+			return unchangedLeaseClaimGuard(state.leaseID, state.claim, state.claimExists)(fresh.claim, fresh.claimExists)
+		}
+		if err := validate(); err != nil {
+			return err
+		}
+		if deregister != nil {
+			if err := deregister(); err != nil {
+				return err
+			}
+		}
+		return validate()
+	})
 }
 
 func cleanupConfirmedAbsentLocalState(ctx context.Context, backend Backend, expected ProviderIdentityExpectation, providerScope string) error {
 	state, err := confirmedAbsentLocalStateSnapshot(ctx, backend, expected, providerScope)
 	if err != nil {
 		return err
+	}
+	if state.retainTerminal {
+		return retainConfirmedAbsentTerminalReceipt(ctx, backend, expected, providerScope, state, nil)
 	}
 	cleanupSidecars := func() error {
 		cleaner, ok := backend.(ConfirmedAbsentLocalStateCleaner)

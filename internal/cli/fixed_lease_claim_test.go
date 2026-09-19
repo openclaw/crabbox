@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/openclaw/crabbox/internal/testutil"
 )
@@ -76,6 +78,55 @@ func TestFixedLeaseTerminalIdentityRetention(t *testing.T) {
 				}
 			} else if terminal.CloudID != "" || terminal.CloudNumericID != 0 || terminal.CloudImmutableID != "" || terminal.RepoRoot != "" || len(terminal.Labels) != 0 {
 				t.Fatal("default compact behavior changed")
+			}
+		})
+	}
+}
+
+func TestFixedIntentTransportPublication(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		t.Run(map[bool]string{false: "delegated", true: "direct"}[direct], func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			const id = "cbx_174200000010"
+			kind := FixedLeaseKind{ClaimProvider: "fixture-fixed-v1", IntentVersion: 1, Label: "fixture"}
+			opts := FixedAcquireOptions{Kind: kind, LeaseID: id, RepoRoot: t.TempDir(), TTL: time.Hour}
+			prepare := func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error) {
+				return FixedLeaseBinding{ProviderScope: "fixture-scope", Fingerprint: "fixture-request", Slug: "fixture"}, nil
+			}
+			observePrepared := func(claim *LeaseClaim) {
+				persisted, err := ReadLeaseClaim(id)
+				if err != nil || persisted.FixedCreateIntent == nil || persisted.FixedCreateIntent.State != "prepared" || persisted.LeaseID != claim.LeaseID {
+					t.Fatalf("callback before prepared persistence: %#v %v", persisted, err)
+				}
+			}
+			if direct {
+				lease, err := AcquireFixedLease(opts, prepare, func(_ context.Context, claim *LeaseClaim, _ *FixedCreateIntent, _ func() error) (LeaseTarget, error) {
+					observePrepared(claim)
+					return LeaseTarget{LeaseID: id, Server: Server{CloudID: "resource", ImmutableID: "uid", Labels: map[string]string{"lease": id}}, SSH: SSHTarget{Host: "fixture.invalid", Port: "2222"}}, nil
+				}, t.Context())
+				if err != nil || lease.Server.CloudID != "resource" {
+					t.Fatalf("direct result=%#v err=%v", lease, err)
+				}
+			} else {
+				_, err := AcquireFixedIntent(opts, prepare, func(_ context.Context, claim *LeaseClaim, _ *FixedCreateIntent, _ func() error) error {
+					observePrepared(claim)
+					claim.CloudID, claim.CloudImmutableID = "resource", "uid"
+					claim.Labels = map[string]string{"lease": id}
+					return nil
+				}, t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			claim, err := ReadLeaseClaim(id)
+			if err != nil || claim.FixedCreateIntent.State != "acquired" || claim.CloudImmutableID != "uid" || claim.Labels["lease"] != id {
+				t.Fatalf("published claim=%#v err=%v", claim, err)
+			}
+			if direct && (claim.SSHHost != "fixture.invalid" || claim.SSHPort != 2222) {
+				t.Fatal("direct publication changed")
+			}
+			if !direct && (claim.SSHHost != "" || claim.SSHPort != 0) {
+				t.Fatal("delegated publication invented an SSH endpoint")
 			}
 		})
 	}

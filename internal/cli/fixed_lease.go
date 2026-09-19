@@ -55,11 +55,43 @@ func AcquireFixedLease(
 	acquire func(context.Context, *LeaseClaim, *FixedCreateIntent, func() error) (LeaseTarget, error),
 	ctx context.Context,
 ) (LeaseTarget, error) {
+	var acquired LeaseTarget
+	claim, err := AcquireFixedIntent(opts, prepare, func(ctx context.Context, claim *LeaseClaim, intent *FixedCreateIntent, persist func() error) error {
+		var err error
+		acquired, err = acquire(ctx, claim, intent, persist)
+		if err != nil {
+			return err
+		}
+		SetLeaseClaimResourceIdentity(claim, acquired.Server.CloudID, claim.CloudNumericID, acquired.Server.ImmutableID, acquired.Server.ImageEvidence)
+		claim.Slug = intent.Slug
+		claim.Provider = opts.Kind.ClaimProvider
+		claim.Labels = maps.Clone(acquired.Server.Labels)
+		claim.SSHHost = acquired.SSH.Host
+		if port, parseErr := strconv.Atoi(strings.TrimSpace(acquired.SSH.Port)); parseErr == nil {
+			claim.SSHPort = port
+		}
+		return nil
+	}, ctx)
+	if err != nil {
+		return LeaseTarget{}, err
+	}
+	SetServerLeaseClaimSnapshot(&acquired.Server, claim, true)
+	return acquired, nil
+}
+
+// AcquireFixedIntent owns durable fixed acquisition independently of transport.
+// Callbacks publish provider facts through persist and must not reenter claim locks.
+func AcquireFixedIntent(
+	opts FixedAcquireOptions,
+	prepare func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error),
+	acquire func(context.Context, *LeaseClaim, *FixedCreateIntent, func() error) error,
+	ctx context.Context,
+) (LeaseClaim, error) {
 	now := opts.Now
 	if now == nil {
 		now = time.Now
 	}
-	var acquired LeaseTarget
+	var completed LeaseClaim
 	err := WithDurableLeaseClaimLock(opts.LeaseID, func(claim *LeaseClaim, exists bool, persist func() error) error {
 		if exists && opts.Kind.IsFixedClaim(*claim) && claim.FixedCreateIntent.State == "released" {
 			return Exit(4, "lease_id_conflict: fixed lease %s is terminal and cannot be replayed", opts.LeaseID)
@@ -122,28 +154,19 @@ func AcquireFixedLease(
 			return Exit(4, "lease_id_conflict: fixed create intent for lease %s has expired", opts.LeaseID)
 		}
 
-		acquired, err = acquire(ctx, claim, intent, persist)
-		if err != nil {
+		if err := acquire(ctx, claim, intent, persist); err != nil {
 			return err
 		}
-		SetLeaseClaimResourceIdentity(claim, acquired.Server.CloudID, claim.CloudNumericID, acquired.Server.ImmutableID, acquired.Server.ImageEvidence)
-		claim.Slug = intent.Slug
-		claim.Provider = opts.Kind.ClaimProvider
-		claim.Labels = maps.Clone(acquired.Server.Labels)
-		claim.SSHHost = acquired.SSH.Host
 		claim.LastUsedAt = now().UTC().Format(time.RFC3339)
-		if port, parseErr := strconv.Atoi(strings.TrimSpace(acquired.SSH.Port)); parseErr == nil {
-			claim.SSHPort = port
-		}
 		intent.State = "acquired"
 		if err := persist(); err != nil {
 			return err
 		}
-		SetServerLeaseClaimSnapshot(&acquired.Server, *claim, true)
+		completed = *claim
 		return nil
 	})
 	if err != nil {
-		return LeaseTarget{}, err
+		return LeaseClaim{}, err
 	}
-	return acquired, nil
+	return completed, nil
 }

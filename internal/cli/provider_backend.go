@@ -694,6 +694,30 @@ type JSONListBackend interface {
 	ListJSON(ctx context.Context, req ListRequest) (any, error)
 }
 
+// DelegatedFixedWarmupBackend explicitly opts into durable delegated acquisition.
+type DelegatedFixedWarmupBackend interface {
+	WarmupFixed(context.Context, FixedWarmupRequest) error
+}
+
+type FixedAcquisitionReceipt struct {
+	LeaseID, Slug, Provider, ResourceID string
+}
+
+type FixedWarmupRequest struct {
+	WarmupRequest
+	RequestedLeaseID string
+	OnAcquired       func(FixedAcquisitionReceipt) error
+}
+
+type DelegatedFixedReleaseBackend interface {
+	StopFixed(context.Context, FixedStopRequest) error
+}
+
+type FixedStopRequest struct {
+	StopRequest
+	ExpectedProviderIdentity ProviderIdentityExpectation
+}
+
 type IdempotentLeaseIDBackend interface {
 	SupportsRequestedLeaseID() bool
 }
@@ -1187,6 +1211,17 @@ type ConfirmedAbsentLocalCleanupRequest struct {
 type ConfirmedAbsentLocalStateCleaner interface {
 	Backend
 	CleanupConfirmedAbsentLocalState(context.Context, ConfirmedAbsentLocalCleanupRequest) error
+}
+
+// ConfirmedAbsentTerminalReceiptRetainer validates a provider-owned fixed receipt
+// that must survive confirmed-absence cleanup. Validation is local and read-only:
+// it must reject a missing fixed receipt and check terminal shape, configured
+// scope and every expected identity,
+// without provider calls or claim mutations. Core holds the claim fence across
+// coordinator deregistration and revalidates the unchanged receipt afterward.
+type ConfirmedAbsentTerminalReceiptRetainer interface {
+	Backend
+	ValidateConfirmedAbsentTerminalReceipt(LeaseClaim, ConfirmedAbsentLocalCleanupRequest) error
 }
 
 // ProviderIdentityExpectation is the complete immutable identity known by a

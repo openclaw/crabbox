@@ -18,6 +18,10 @@
 - Add `warmup --lease-id` support for direct Azure and DigitalOcean leases. Persist the create intent before allocation, recover the same resource after interrupted provisioning, and reject replaced resources using immutable provider identities. [PR 2351](https://github.com/openclaw/crabbox/pull/2351). Thanks @steipete.
 - Raise checkpoint limits in the production Cloudflare coordinator configuration to 100 globally, per owner, and per organization, giving retained worker caches more room. Preview, lease, and checkpoint-use claim limits are unchanged. [PR 2338](https://github.com/openclaw/crabbox/pull/2338). Thanks @steipete.
 
+### Features
+
+- Add durable fixed lease IDs for Agent Sandbox with exact Kubernetes identity replay and foreground terminal confirmation with a two-minute cleanup budget, and adapter completion that preserves terminal receipts outside active inventory. [Issue 1742](https://github.com/openclaw/crabbox/issues/1742). [PR 2342](https://github.com/openclaw/crabbox/pull/2342). Thanks @jimmybrancaccio.
+
 ### Fixes
 
 - Bound each Local Container inspection during SSH readiness to 30 seconds, including final diagnostics, while preserving the overall SSH timeout, original SSH error, and exact-container identity checks. [PR 2352](https://github.com/openclaw/crabbox/pull/2352). Thanks @steipete.

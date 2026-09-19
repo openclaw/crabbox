@@ -10071,3 +10071,72 @@ func TestRunDirectorySourcePreservesConfigRoot(t *testing.T) {
 		t.Fatalf("configured root=%q acquired source=%q", configuredRoot, acquiredRoot)
 	}
 }
+
+type fixedDelegatedRoutingProvider struct{ backend *fixedDelegatedRoutingBackend }
+
+func (p fixedDelegatedRoutingProvider) Spec() ProviderSpec { return p.backend.Spec() }
+func (fixedDelegatedRoutingProvider) RegisterFlags(*flag.FlagSet, Config) any {
+	return noProviderFlags{}
+}
+func (fixedDelegatedRoutingProvider) ApplyFlags(*Config, *flag.FlagSet, any) error { return nil }
+func (p fixedDelegatedRoutingProvider) Configure(Config, Runtime) (Backend, error) {
+	return p.backend, nil
+}
+
+type fixedDelegatedRoutingBackend struct {
+	runArchiveSyncPreflightTestBackend
+	warmup       FixedWarmupRequest
+	stop         FixedStopRequest
+	acknowledged bool
+}
+
+func (*fixedDelegatedRoutingBackend) SupportsRequestedLeaseID() bool { return true }
+func (b *fixedDelegatedRoutingBackend) WarmupFixed(_ context.Context, req FixedWarmupRequest) error {
+	b.warmup = req
+	if req.OnAcquired == nil {
+		return errors.New("missing acquisition callback")
+	}
+	if err := req.OnAcquired(FixedAcquisitionReceipt{LeaseID: req.RequestedLeaseID, Slug: "fixed-route", Provider: b.Spec().Name, ResourceID: "claim-uid"}); err != nil {
+		return err
+	}
+	b.acknowledged = true
+	return nil
+}
+func (b *fixedDelegatedRoutingBackend) StopFixed(_ context.Context, req FixedStopRequest) error {
+	b.stop = req
+	return nil
+}
+
+func TestDelegatedFixedWarmupAndReleaseRouting(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if out, err := exec.Command("git", "init", "--quiet").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, out)
+	}
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(config, []byte("network: public\ntailscale:\n  enabled: false\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", config)
+	const provider = "fixed-delegated-routing-fixture"
+	b := &fixedDelegatedRoutingBackend{runArchiveSyncPreflightTestBackend: runArchiveSyncPreflightTestBackend{spec: ProviderSpec{Name: provider, Kind: ProviderKindDelegatedRun, Targets: []TargetSpec{{OS: targetLinux}}, Coordinator: CoordinatorNever}}}
+	RegisterProvider(fixedDelegatedRoutingProvider{backend: b})
+	t.Cleanup(func() { delete(providerRegistry, provider) })
+	const id = "cbx_174200000020"
+	a := App{Stdout: io.Discard, Stderr: io.Discard}
+	if err := a.warmup(t.Context(), []string{"--provider", provider, "--lease-id", id, "--slug", "fixed-route"}); err != nil {
+		t.Fatal(err)
+	}
+	if b.warmup.RequestedLeaseID != id || !b.acknowledged {
+		t.Fatal("fixed request or acknowledgment lost")
+	}
+	if err := a.stop(t.Context(), []string{"--provider", provider, "--id", id, "--expected-provider-lease-id", id, "--expected-provider-attempt-lease-id", id, "--expected-provider-slug", "fixed-route", "--expected-provider-resource-id", "claim-uid"}); err != nil {
+		t.Fatal(err)
+	}
+	want := ProviderIdentityExpectation{LeaseID: id, AttemptLeaseID: id, Slug: "fixed-route", ResourceID: "claim-uid"}
+	if b.stop.ID != id || b.stop.ExpectedProviderIdentity != want {
+		t.Fatalf("release identity=%#v", b.stop)
+	}
+}

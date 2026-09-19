@@ -592,7 +592,10 @@ func TestWebVNCWebSocketHeaderDeadlineNetwork(t *testing.T) {
 	})
 	run("upgraded session survives", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		var handlers sync.WaitGroup
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handlers.Add(1)
+			defer handlers.Done()
 			conn, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				t.Error(err)
@@ -608,8 +611,12 @@ func TestWebVNCWebSocketHeaderDeadlineNetwork(t *testing.T) {
 				t.Error(err)
 			}
 		}))
-		t.Cleanup(server.Close)
-		t.Cleanup(cancel)
+		t.Cleanup(func() {
+			cancel()
+			server.Close()
+			// Server.Close does not join handlers for upgraded WebSockets.
+			handlers.Wait()
+		})
 		options, err := webVNCWebSocketDialOptions(nil)
 		if err != nil {
 			t.Fatal(err)
@@ -632,6 +639,7 @@ func TestWebVNCWebSocketHeaderDeadlineNetwork(t *testing.T) {
 		if err != nil || kind != websocket.MessageBinary || !bytes.Equal(got, payload) {
 			t.Fatalf("upgraded session failed after handshake limit: kind=%v payload=%q err=%v", kind, got, err)
 		}
+		handlers.Wait()
 		t.Log("actual upgraded websocket echoed data after 31 seconds")
 	})
 }

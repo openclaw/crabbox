@@ -498,7 +498,8 @@ So an expired GCP box can reclaim itself even if the operator's machine is gone.
 Independent of provider cleanup, the CLI keeps a local **claim** file per lease
 so repo-local wrappers do not need their own ledger. Commands that reuse a lease
 validate that the current repo matches the claim; deleting a lease removes its
-claim. Move a claim to a different repo deliberately with `--reclaim`. See
+claim, except provider-owned fixed terminal receipts that prevent ID reuse.
+Move a claim to a different repo deliberately with `--reclaim`. See
 [Identifiers](identifiers.md) for the claim file format and location.
 
 Providers may durably publish an exact-resource claim with the generic
@@ -509,6 +510,15 @@ Provider adapters own the immutable resource identity and routing scope needed
 to inspect or delete that pending resource. Cleanup must compare the unchanged
 claim under its lifecycle fence before mutation so an old readiness or cleanup
 attempt cannot overwrite or delete a newer claim.
+
+Runtime-adapter confirmed-absence cleanup normally removes the matching local
+claim after coordinator deregistration. A provider can instead validate and retain
+a fixed terminal receipt through the explicit terminal-receipt capability. Core
+requires the full expected lease, attempt, slug, resource and scope, checks the
+unchanged receipt under its durable claim lock before and after deregistration,
+and preserves its bytes and revision. A terminal-looking label alone is not
+completion evidence; missing required receipts and unsupported fixed claim kinds
+fail closed.
 
 ## Related docs
 
