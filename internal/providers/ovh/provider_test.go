@@ -55,6 +55,23 @@ func TestProviderFlagsApplyNonSecretConfig(t *testing.T) {
 }
 
 func TestProviderServerTypeForConfig(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cfg  core.Config
+		want string
+	}{
+		{name: "unsupported target", cfg: core.Config{Class: "standard", TargetOS: core.TargetWindows}},
+		{name: "unsupported architecture", cfg: core.Config{Class: "standard", TargetOS: core.TargetLinux, Architecture: core.ArchitectureARM64}},
+		{name: "legacy input", cfg: core.Config{Class: " STANDARD "}, want: "b3-8"},
+		{name: "native flavor preserves spelling", cfg: core.Config{Class: "standard", TargetOS: core.TargetWindows, OVH: core.OVHConfig{Flavor: " native-flavor "}}, want: " native-flavor "},
+		{name: "explicit type precedes native", cfg: core.Config{Class: "standard", TargetOS: core.TargetWindows, ServerTypeExplicit: true, ServerType: " custom-type ", OVH: core.OVHConfig{Flavor: "native-flavor"}}, want: " custom-type "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := (Provider{}).ServerTypeForConfig(test.cfg); got != test.want {
+				t.Fatalf("type=%q want=%q", got, test.want)
+			}
+		})
+	}
 	provider := Provider{}
 	if got := provider.ServerTypeForConfig(core.Config{Class: "standard"}); got != "b3-8" {
 		t.Fatalf("ServerTypeForConfig standard=%q", got)

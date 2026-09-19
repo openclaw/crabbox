@@ -12,6 +12,24 @@ import (
 )
 
 func TestProviderSpecAndServerType(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cfg  core.Config
+		want string
+	}{
+		{name: "matched class", cfg: core.Config{Class: "standard"}, want: "DEV1-S"},
+		{name: "unsupported target", cfg: core.Config{Class: "standard", TargetOS: core.TargetWindows}},
+		{name: "unsupported architecture", cfg: core.Config{Class: "standard", TargetOS: core.TargetLinux, Architecture: core.ArchitectureARM64}},
+		{name: "legacy input", cfg: core.Config{Class: " STANDARD "}, want: "DEV1-S"},
+		{name: "native type preserves spelling", cfg: core.Config{Class: "standard", TargetOS: core.TargetWindows, Scaleway: core.ScalewayConfig{Type: " native-type "}}, want: " native-type "},
+		{name: "explicit type precedes native", cfg: core.Config{Class: "standard", TargetOS: core.TargetWindows, ServerTypeExplicit: true, ServerType: " custom-type ", Scaleway: core.ScalewayConfig{Type: "native-type"}}, want: " custom-type "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := (Provider{}).ServerTypeForConfig(test.cfg); got != test.want {
+				t.Fatalf("type=%q want=%q", got, test.want)
+			}
+		})
+	}
 	p := Provider{}
 	if p.Spec().Name != providerName || p.Spec().Aliases != nil {
 		t.Fatalf("provider name/aliases=%q/%v", p.Spec().Name, p.Spec().Aliases)
