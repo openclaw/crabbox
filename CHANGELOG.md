@@ -4,7 +4,7 @@
 
 ### Fixes
 
-- Bound each Local Container inspection during SSH readiness to 30 seconds, including final diagnostic checks, without hiding the original SSH failure or weakening exact-container validation.
+- Bound each Local Container inspection during SSH readiness to 30 seconds, including final diagnostic checks, without hiding the original SSH failure or weakening exact-container validation. [PR 2352](https://github.com/openclaw/crabbox/pull/2352). Thanks @steipete.
 - Bound Local Container endpoint discovery to 30 seconds, including in-flight runtime inspections, while preserving transient retries, terminal-container diagnostics, and pending lease recovery. [PR 2350](https://github.com/openclaw/crabbox/pull/2350). Thanks @steipete.
 - Apply Tart's five-minute IP-readiness budget to running probes as well as waits, preserving startup cadence and stopped-VM diagnostics while retaining cancellation causes. [PR 2349](https://github.com/openclaw/crabbox/pull/2349). Thanks @steipete.
 - Bound Scaleway public-IP readiness observations and waits to five minutes, honor earlier cancellation before querying, and preserve immediate API failures instead of misreporting a readiness timeout. [PR 2348](https://github.com/openclaw/crabbox/pull/2348). Thanks @steipete.
