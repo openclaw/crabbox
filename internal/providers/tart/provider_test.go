@@ -3,6 +3,7 @@ package tart
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -23,15 +25,19 @@ type recordingRunner struct {
 	responses map[string]core.LocalCommandResult
 	errors    map[string]error
 	onRun     func(core.LocalCommandRequest)
+	run       func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
-func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+func (r *recordingRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	recorded := req
 	// Failure diagnostics must not print inherited credentials.
 	recorded.Env = nil
 	r.calls = append(r.calls, recorded)
 	if r.onRun != nil {
 		r.onRun(req)
+	}
+	if r.run != nil {
+		return r.run(ctx, req)
 	}
 	key := commandKey(req.Args)
 	if err, ok := r.errors[key]; ok {
@@ -681,6 +687,107 @@ func TestWaitForIPDetectsStoppedVM(t *testing.T) {
 	errMsg := err.Error()
 	if !strings.Contains(errMsg, "is your VM running") {
 		t.Fatalf("waitForIP error = %q, want tart's stopped-VM diagnostic", errMsg)
+	}
+}
+
+func TestWaitForIPPollingContract(t *testing.T) {
+	callerCause := errors.New("caller stopped readiness")
+	for _, tc := range []struct {
+		name        string
+		wantCalls   int
+		wantElapsed time.Duration
+		wantCode    int
+		wantMessage string
+		wantCause   error
+	}{
+		{name: "ready", wantCalls: 1, wantElapsed: 3 * time.Second},
+		{name: "pending", wantCalls: 3, wantElapsed: 9 * time.Second},
+		{name: "transient error", wantCalls: 2, wantElapsed: 6 * time.Second},
+		{name: "client deadline", wantCalls: 2, wantElapsed: 6 * time.Second},
+		{name: "slow cadence", wantCalls: 2, wantElapsed: 7 * time.Second},
+		{name: "stopped", wantCalls: 1, wantElapsed: 3 * time.Second, wantCode: 2, wantMessage: "tart ip crabbox-test: VM is NOT RUNNING"},
+		{name: "pre-canceled", wantCode: 2, wantMessage: "tart ip crabbox-test: context cancelled", wantCause: callerCause},
+		{name: "cancel during command", wantCalls: 1, wantElapsed: 3 * time.Second, wantCode: 2, wantMessage: "tart ip crabbox-test: context cancelled", wantCause: callerCause},
+		{name: "caller deadline", wantElapsed: time.Second, wantCode: 2, wantMessage: "tart ip crabbox-test: context cancelled", wantCause: context.DeadlineExceeded},
+		{name: "owned timeout", wantCalls: 1, wantElapsed: 5 * time.Minute, wantCode: 5, wantMessage: "tart ip crabbox-test: timed out waiting for IP address", wantCause: context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			t.Setenv("TART_HOME", t.TempDir())
+			synctest.Test(t, func(t *testing.T) {
+				parent, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				if tc.name == "pre-canceled" {
+					cancel(callerCause)
+				}
+				guard := 6 * time.Minute
+				if tc.name == "caller deadline" {
+					guard = time.Second
+				}
+				ctx, stop := context.WithTimeout(parent, guard)
+				defer stop()
+				started := time.Now()
+				runner := &recordingRunner{}
+				runner.run = func(commandCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					if req.Name != "tart" || !reflect.DeepEqual(req.Args, []string{"ip", "crabbox-test"}) {
+						t.Fatalf("unexpected command: %s %v", req.Name, req.Args)
+					}
+					call := len(runner.calls)
+					switch tc.name {
+					case "pending":
+						if call < 3 {
+							return core.LocalCommandResult{Stdout: []string{"", "--\n"}[call-1]}, nil
+						}
+					case "transient error", "client deadline":
+						if call == 1 {
+							if tc.name == "client deadline" {
+								return core.LocalCommandResult{}, context.DeadlineExceeded
+							}
+							return core.LocalCommandResult{Stderr: "temporary lookup failure"}, errors.New("exit status 1")
+						}
+					case "slow cadence":
+						if call == 1 {
+							time.Sleep(4 * time.Second)
+							return core.LocalCommandResult{Stdout: "--"}, nil
+						}
+					case "stopped":
+						return core.LocalCommandResult{Stderr: "  VM is NOT RUNNING\n"}, errors.New("exit status 1")
+					case "cancel during command":
+						cancel(callerCause)
+						<-commandCtx.Done()
+						return core.LocalCommandResult{}, commandCtx.Err()
+					case "owned timeout":
+						deadline, ok := commandCtx.Deadline()
+						if !ok || !deadline.Equal(started.Add(5*time.Minute)) {
+							t.Errorf("command deadline=%v bounded=%t, want readiness budget", deadline, ok)
+						}
+						<-commandCtx.Done()
+						return core.LocalCommandResult{}, commandCtx.Err()
+					}
+					return core.LocalCommandResult{Stdout: " 192.0.2.10\n"}, nil
+				}
+				cfg := core.BaseConfig()
+				cfg.Provider = providerName
+				b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+				ip, err := b.waitForIP(ctx, "crabbox-test")
+				if tc.wantCode == 0 {
+					if err != nil || ip != "192.0.2.10" {
+						t.Fatalf("ip=%q err=%v", ip, err)
+					}
+				} else {
+					var exit core.ExitError
+					if ip != "" || !core.AsExitError(err, &exit) || exit.Code != tc.wantCode || err.Error() != tc.wantMessage {
+						t.Fatalf("ip=%q err=%v; want code=%d message=%q", ip, err, tc.wantCode, tc.wantMessage)
+					}
+					if tc.wantCause != nil && !errors.Is(err, tc.wantCause) {
+						t.Fatalf("err=%v does not retain %v", err, tc.wantCause)
+					}
+				}
+				if elapsed := time.Since(started); elapsed != tc.wantElapsed || len(runner.calls) != tc.wantCalls {
+					t.Fatalf("elapsed=%s calls=%d, want %s/%d", elapsed, len(runner.calls), tc.wantElapsed, tc.wantCalls)
+				}
+			})
+		})
 	}
 }
 
