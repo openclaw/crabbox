@@ -147,3 +147,19 @@ func TestFixedAzureLostCreateReplyRecoversOriginalVM(t *testing.T) {
 		t.Fatal("lost reply created replacement")
 	}
 }
+
+func TestFixedAzureBindsLeaseMetadata(t *testing.T) {
+	client := &fakeAzureClient{}
+	b := fixedAzureTestBackend(t, client)
+	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123460", RequestedSlug: "metadata", Repo: core.Repo{Root: t.TempDir()}}
+	if _, err := b.Acquire(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	b.Cfg.ExposedPorts = []string{"8080"}
+	if _, err := b.Acquire(t.Context(), req); err == nil {
+		t.Fatal("changed published ports accepted")
+	}
+	if len(client.createLeaseIDs) != 1 {
+		t.Fatal("duplicate create")
+	}
+}

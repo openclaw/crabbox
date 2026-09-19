@@ -72,11 +72,12 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 			bootstrap = core.WindowsBootstrapPowerShell(cfg, publicKey)
 		}
 		data, err := json.Marshal(struct {
+			Labels                                                                                                                                                   map[string]string
 			Location, Image, Disk, DiskSKU, VNet, Subnet, NSG, Network, Type, Architecture, Target, WindowsMode, Bootstrap, Slug, User, Port, WorkRoot, Pond, Market string
 			CIDRs                                                                                                                                                    []string
 			Keep                                                                                                                                                     bool
 			TTL, Idle                                                                                                                                                time.Duration
-		}{cfg.AzureLocation, cfg.AzureImage, cfg.AzureOSDisk, cfg.AzureOSDiskSKU, cfg.AzureVNet, cfg.AzureSubnet, cfg.AzureNSG, cfg.AzureNetwork, cfg.ServerType, cfg.Architecture, cfg.TargetOS, cfg.WindowsMode, bootstrap, req.RequestedSlug, cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.Pond, cfg.Capacity.Market, cfg.AzureSSHCIDRs, req.Keep, cfg.TTL, cfg.IdleTimeout})
+		}{core.DirectLeaseLabels(cfg, req.RequestedLeaseID, req.RequestedSlug, "azure", cfg.Capacity.Market, req.Keep, time.Unix(0, 0)), cfg.AzureLocation, cfg.AzureImage, cfg.AzureOSDisk, cfg.AzureOSDiskSKU, cfg.AzureVNet, cfg.AzureSubnet, cfg.AzureNSG, cfg.AzureNetwork, cfg.ServerType, cfg.Architecture, cfg.TargetOS, cfg.WindowsMode, bootstrap, core.NormalizeLeaseSlug(req.RequestedSlug), cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.Pond, cfg.Capacity.Market, cfg.AzureSSHCIDRs, req.Keep, cfg.TTL, cfg.IdleTimeout})
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}

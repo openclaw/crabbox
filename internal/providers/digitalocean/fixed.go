@@ -66,11 +66,12 @@ func (b *digitalOceanLeaseBackend) acquireFixed(ctx context.Context, req core.Ac
 		}
 		cfg.ProviderKey = providerKeyForLease(req.RequestedLeaseID)
 		data, err := json.Marshal(struct {
+			Labels                                                    map[string]string
 			Provider                                                  core.DigitalOceanConfig
 			Type, Architecture, Bootstrap, Slug, User, Port, WorkRoot string
 			Keep                                                      bool
 			TTL, Idle                                                 time.Duration
-		}{cfg.DigitalOcean, cfg.ServerType, cfg.Architecture, core.CloudInitUserData(cfg, publicKey), req.RequestedSlug, cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, req.Keep, cfg.TTL, cfg.IdleTimeout})
+		}{core.DirectLeaseLabels(cfg, req.RequestedLeaseID, req.RequestedSlug, providerName, "", req.Keep, time.Unix(0, 0)), cfg.DigitalOcean, cfg.ServerType, cfg.Architecture, core.CloudInitUserData(cfg, publicKey), core.NormalizeLeaseSlug(req.RequestedSlug), cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, req.Keep, cfg.TTL, cfg.IdleTimeout})
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}

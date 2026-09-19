@@ -147,3 +147,19 @@ func TestFixedDropletLostCreateReplyAndCleanupRetry(t *testing.T) {
 		t.Fatalf("missing tombstone: %+v %v", claim, err)
 	}
 }
+
+func TestFixedDropletBindsLeaseMetadata(t *testing.T) {
+	api := &fakeDigitalOceanAPI{}
+	b := newTestBackend(t, api)
+	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123460", RequestedSlug: "metadata", Repo: core.Repo{Root: t.TempDir()}}
+	if _, err := b.Acquire(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	b.Cfg.Pond = "different-network"
+	if _, err := b.Acquire(t.Context(), req); err == nil {
+		t.Fatal("changed pond accepted")
+	}
+	if len(api.createRequests) != 1 {
+		t.Fatal("duplicate create")
+	}
+}
