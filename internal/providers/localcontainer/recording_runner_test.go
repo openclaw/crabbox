@@ -37,6 +37,15 @@ func runEndpointProbeTestProcess(address string) int {
 // This controlled runtime process exercises the production command runner,
 // not an installed Docker CLI or daemon.
 func TestWaitForContainerEndpointTimeoutJoinsRealProcess(t *testing.T) {
+	testReadinessInspectionTimeoutJoinsRealProcess(t, false)
+}
+
+func TestExactContainerReadinessTimeoutJoinsRealProcess(t *testing.T) {
+	testReadinessInspectionTimeoutJoinsRealProcess(t, true)
+}
+
+func testReadinessInspectionTimeoutJoinsRealProcess(t *testing.T, exactReadiness bool) {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +66,12 @@ func TestWaitForContainerEndpointTimeoutJoinsRealProcess(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		started = time.Now()
-		lease, waitErr = b.waitForContainerEndpoint(ctx, b.configForRun(), "endpoint-container", "cbx_endpoint", "endpoint")
+		if exactReadiness {
+			lease = core.LeaseTarget{LeaseID: "cbx_endpoint", Server: core.Server{CloudID: "endpoint-container"}}
+			waitErr = b.waitForExactContainerSSHReady(ctx, &lease, time.Minute)
+		} else {
+			lease, waitErr = b.waitForContainerEndpoint(ctx, b.configForRun(), "endpoint-container", "cbx_endpoint", "endpoint")
+		}
 		close(done)
 	}()
 	var conn net.Conn
@@ -92,9 +106,15 @@ func TestWaitForContainerEndpointTimeoutJoinsRealProcess(t *testing.T) {
 		t.Fatal("inspection did not return within its readiness budget")
 	}
 	elapsed := time.Since(started)
-	var exit core.ExitError
-	if !core.AsExitError(waitErr, &exit) || exit.Code != 5 || !errors.Is(waitErr, context.DeadlineExceeded) || !strings.HasPrefix(waitErr.Error(), "timed out waiting for SSH port on local-container endpoint-con: container inspect failed:") {
-		t.Fatalf("unexpected endpoint timeout: %v", waitErr)
+	if exactReadiness {
+		if waitErr == nil || !strings.HasPrefix(waitErr.Error(), "container inspect failed:") || !strings.Contains(waitErr.Error(), "context deadline exceeded") {
+			t.Fatalf("unexpected exact-container inspection timeout: %v", waitErr)
+		}
+	} else {
+		var exit core.ExitError
+		if !core.AsExitError(waitErr, &exit) || exit.Code != 5 || !errors.Is(waitErr, context.DeadlineExceeded) || !strings.HasPrefix(waitErr.Error(), "timed out waiting for SSH port on local-container endpoint-con: container inspect failed:") {
+			t.Fatalf("unexpected endpoint timeout: %v", waitErr)
+		}
 	}
 	wantLease := core.LeaseTarget{LeaseID: "cbx_endpoint", Server: core.Server{CloudID: "endpoint-container"}}
 	if !reflect.DeepEqual(lease, wantLease) {

@@ -31,6 +31,8 @@ const (
 	pendingRecoveryKind   = "ssh-readiness-pending"
 	pendingRecoveryReason = "post-create failure; exact claim retained"
 	readinessPollInterval = 250 * time.Millisecond
+
+	readinessInspectionTimeout = 30 * time.Second
 )
 
 var cgroupOOMCounterPaths = []string{
@@ -515,6 +517,9 @@ func (b *backend) waitForContainerEndpoint(ctx context.Context, cfg core.Config,
 
 func (b *backend) waitForExactContainerSSHReady(ctx context.Context, lease *core.LeaseTarget, timeout time.Duration) error {
 	inspectExact := func(observeCtx context.Context) error {
+		// Keep inspections bounded without replacing the SSH waiter's own timeout diagnostics.
+		observeCtx, cancel := context.WithTimeout(observeCtx, readinessInspectionTimeout)
+		defer cancel()
 		container, err := b.inspectContainer(observeCtx, lease.Server.CloudID)
 		if err != nil {
 			return err

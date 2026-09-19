@@ -5,7 +5,7 @@
 ### Highlights
 
 - **Recover the same Azure VM or DigitalOcean Droplet.** Fixed lease IDs let direct provisioning recover the original allocation after a lost reply or readiness failure.
-- **Readiness probes now respect their deadlines.** Local Container endpoint checks and Tart/Scaleway IP discovery include running provider commands and requests in their timeout budgets.
+- **Readiness probes now respect their deadlines.** Local Container endpoint checks, SSH inspections, and Tart/Scaleway IP discovery include running provider commands and requests in their timeout budgets.
 - **Keep signed artifact URLs out of errors.** Upload, download, and manifest request failures retain useful diagnostics without exposing signed request URLs.
 - **More reliable lease policy and run history.** SSH access preserves coordinator idle timeouts, explicit heartbeats can finish access refreshes, and abandoned admissions are finalized without replaying workloads.
 
@@ -20,6 +20,7 @@
 
 ### Fixes
 
+- Bound each Local Container inspection during SSH readiness to 30 seconds, including final diagnostics, while preserving the overall SSH timeout, original SSH error, and exact-container identity checks. [PR 2352](https://github.com/openclaw/crabbox/pull/2352). Thanks @steipete.
 - Enforce readiness budgets for Local Container endpoint discovery (30 seconds), Tart IP discovery (five minutes), and Scaleway public-IP discovery (five minutes), including in-flight inspections and requests. Preserve each provider's retry behavior and diagnostics, and honor earlier cancellation. [PR 2350](https://github.com/openclaw/crabbox/pull/2350), [PR 2349](https://github.com/openclaw/crabbox/pull/2349), [PR 2348](https://github.com/openclaw/crabbox/pull/2348). Thanks @steipete.
 - Redact signed artifact request URLs from setup and transport errors for uploads, downloads, and manifests, while preserving the operation and underlying failure. [PR 2340](https://github.com/openclaw/crabbox/pull/2340). Thanks @steipete.
 - Preserve the coordinator's reported idle timeout when resolving SSH access and updating managed lease claims, so local defaults do not overwrite remote policy. [PR 2339](https://github.com/openclaw/crabbox/pull/2339). Thanks @steipete.
