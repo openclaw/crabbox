@@ -3,17 +3,21 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -23,6 +27,220 @@ import (
 
 const fakeWSLStageHelper = "CRABBOX_FAKE_WSL_STAGE_HELPER"
 const fakeWSLStageLauncherMode = "CRABBOX_FAKE_WSL_STAGE_LAUNCHER_MODE"
+const fakeWSLStageOwnerAddress = "CRABBOX_FAKE_WSL_STAGE_OWNER_ADDRESS"
+const fakeWSLStageOwnerToken = "CRABBOX_FAKE_WSL_STAGE_OWNER_TOKEN"
+
+type fakeWSLStageOwnedProcess struct {
+	pid    int
+	handle windows.Handle
+}
+
+type fakeWSLStageLifetime struct {
+	listener net.Listener
+	logPath  string
+	token    string
+	done     chan struct{}
+	ready    map[string]chan struct{}
+	once     sync.Once
+	mu       sync.Mutex
+	closed   bool
+	conns    []net.Conn
+	helpers  map[string]fakeWSLStageOwnedProcess
+	errors   []error
+}
+
+func newFakeWSLStageLifetime(t *testing.T, logPath string) *fakeWSLStageLifetime {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeWSLStageLifetime{listener: listener, logPath: logPath, token: rand.Text(), done: make(chan struct{}),
+		ready:   map[string]chan struct{}{"main": make(chan struct{}), "cleanup": make(chan struct{})},
+		helpers: make(map[string]fakeWSLStageOwnedProcess)}
+	t.Cleanup(func() { f.close(t) })
+	t.Setenv(fakeWSLStageOwnerAddress, listener.Addr().String())
+	t.Setenv(fakeWSLStageOwnerToken, f.token)
+	go func() {
+		defer close(f.done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			f.mu.Lock()
+			if f.closed {
+				f.mu.Unlock()
+				_ = conn.Close()
+				return
+			}
+			f.conns = append(f.conns, conn)
+			f.mu.Unlock()
+			f.admit(conn)
+		}
+	}()
+	return f
+}
+
+func (f *fakeWSLStageLifetime) recordError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.closed {
+		f.errors = append(f.errors, err)
+	}
+}
+
+func (f *fakeWSLStageLifetime) admit(conn net.Conn) {
+	keep := false
+	defer func() {
+		if !keep {
+			_ = conn.Close()
+		}
+	}()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return
+	}
+	line, err := bufio.NewReader(io.LimitReader(conn, 256)).ReadString('\n')
+	if err != nil {
+		// The production owner may terminate a non-surviving helper during setup.
+		return
+	}
+	fields := strings.Fields(line)
+	if len(fields) != 4 || fields[0] != f.token || f.ready[fields[1]] == nil {
+		f.recordError(fmt.Errorf("invalid fixture lifetime handshake"))
+		return
+	}
+	role := fields[1]
+	pid, pidErr := strconv.Atoi(fields[2])
+	created, createdErr := strconv.ParseUint(fields[3], 10, 64)
+	expectedPID, recordErr := strconv.Atoi(readFakeWSLStageFile(f.logPath + "." + role + ".pid"))
+	if pidErr != nil || createdErr != nil || recordErr != nil || pid <= 0 || uint64(pid) > uint64(^uint32(0)) || pid != expectedPID {
+		f.recordError(fmt.Errorf("invalid %s fixture process identity", role))
+		return
+	}
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err == windows.ERROR_INVALID_PARAMETER {
+		return
+	}
+	if err != nil {
+		f.recordError(fmt.Errorf("open %s fixture process: %w", role, err))
+		return
+	}
+	observed, err := fakeWSLStageProcessCreationTime(handle)
+	if err != nil || observed != created {
+		_ = windows.CloseHandle(handle)
+		f.recordError(fmt.Errorf("%s fixture process identity changed", role))
+		return
+	}
+	f.mu.Lock()
+	if f.closed || f.helpers[role].handle != 0 {
+		f.mu.Unlock()
+		_ = windows.CloseHandle(handle)
+		f.recordError(fmt.Errorf("duplicate %s fixture lifetime", role))
+		return
+	}
+	f.helpers[role] = fakeWSLStageOwnedProcess{pid: pid, handle: handle}
+	close(f.ready[role])
+	f.mu.Unlock()
+	if _, err := conn.Write([]byte{'R'}); err != nil {
+		exited, observeErr := fakeWSLStageHandleExited(handle)
+		if observeErr != nil || !exited {
+			f.recordError(fmt.Errorf("acknowledge %s fixture lifetime: %w", role, err))
+		}
+		return
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		f.recordError(fmt.Errorf("clear %s fixture handshake deadline: %w", role, err))
+		return
+	}
+	keep = true
+}
+
+func (f *fakeWSLStageLifetime) process(role string, pid int) (windows.Handle, error) {
+	select {
+	case <-f.ready[role]:
+	case <-time.After(10 * time.Second):
+		return 0, fmt.Errorf("%s fixture did not establish its lifetime", role)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	helper := f.helpers[role]
+	if helper.pid != pid {
+		return 0, fmt.Errorf("%s fixture PID changed", role)
+	}
+	return helper.handle, nil
+}
+
+func (f *fakeWSLStageLifetime) close(t *testing.T) {
+	t.Helper()
+	f.once.Do(func() {
+		f.mu.Lock()
+		f.closed = true
+		_ = f.listener.Close()
+		for _, conn := range f.conns {
+			_ = conn.Close()
+		}
+		f.mu.Unlock()
+		select {
+		case <-f.done:
+		case <-time.After(6 * time.Second):
+			t.Error("fixture lifetime accept loop did not join")
+			return
+		}
+		for _, err := range f.errors {
+			t.Error(err)
+		}
+		for role, helper := range f.helpers {
+			result, err := windows.WaitForSingleObject(helper.handle, 5000)
+			if err != nil || result != windows.WAIT_OBJECT_0 {
+				t.Errorf("%s fixture did not exit after owner closure: result=%d error=%v", role, result, err)
+				// The retained handle fences fallback termination against PID reuse.
+				_ = windows.TerminateProcess(helper.handle, 1)
+				result, err = windows.WaitForSingleObject(helper.handle, 5000)
+				if err != nil || result != windows.WAIT_OBJECT_0 {
+					t.Errorf("%s fixture fallback termination unconfirmed: result=%d error=%v", role, result, err)
+				}
+			}
+			_ = windows.CloseHandle(helper.handle)
+		}
+	})
+}
+
+func fakeWSLStageProcessCreationTime(handle windows.Handle) (uint64, error) {
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(handle, &created, &exited, &kernel, &user); err != nil {
+		return 0, err
+	}
+	return uint64(created.HighDateTime)<<32 | uint64(created.LowDateTime), nil
+}
+
+func waitForFakeWSLStageOwner(logPath, role string, started time.Time) error {
+	created, err := fakeWSLStageProcessCreationTime(windows.CurrentProcess())
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialTimeout("tcp4", os.Getenv(fakeWSLStageOwnerAddress), 5*time.Second)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(conn, "%s %s %d %d\n", os.Getenv(fakeWSLStageOwnerToken), role, os.Getpid(), created); err != nil {
+		return err
+	}
+	var ack [1]byte
+	if _, err := io.ReadFull(conn, ack[:]); err != nil || ack[0] != 'R' {
+		return fmt.Errorf("fixture lifetime was not acknowledged")
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return err
+	}
+	_ = appendFakeWSLStageTiming(logPath, role, "wait-start", started, time.Now())
+	_, _ = io.Copy(io.Discard, conn)
+	return nil
+}
 
 func init() {
 	if os.Getenv(fakeWSLStageHelper) != "1" || !strings.EqualFold(filepath.Base(os.Args[0]), "wsl.exe") {
@@ -108,18 +326,27 @@ func runFakeWSLStageLauncher(mode string) {
 		log("main-started")
 		_ = os.Stdout.Close()
 		_ = os.Stderr.Close()
-		_ = appendFakeWSLStageTiming(logPath, timingRole, "wait-start", started, time.Now())
-		time.Sleep(20 * time.Second)
+		if err := waitForFakeWSLStageOwner(logPath, timingRole, started); err != nil {
+			log("fixture lifetime setup failed")
+			os.Exit(95)
+		}
 	case "cleanup":
 		_ = readFakeWSLStageInput()
 		pid, _ := strconv.Atoi(readFakeWSLStageFile(logPath + ".main.pid"))
-		log(fmt.Sprintf("cleanup-started:main-exited:%t", fakeWSLStageProcessExited(pid)))
+		exited, err := fakeWSLStageProcessExited(pid)
+		if err != nil {
+			log("cleanup-started:main-observation-error")
+			os.Exit(96)
+		}
+		log(fmt.Sprintf("cleanup-started:main-exited:%t", exited))
 		if mode == "cleanup-ignore" || mode == "cleanup-delay" {
 			_ = os.WriteFile(logPath+".cleanup.pid", []byte(strconv.Itoa(os.Getpid())), 0o600)
 			_ = os.Stdout.Close()
 			_ = os.Stderr.Close()
-			_ = appendFakeWSLStageTiming(logPath, timingRole, "wait-start", started, time.Now())
-			time.Sleep(20 * time.Second)
+			if err := waitForFakeWSLStageOwner(logPath, timingRole, started); err != nil {
+				log("fixture lifetime setup failed")
+				os.Exit(95)
+			}
 		}
 	default:
 		log("unexpected-role:" + role)
@@ -165,20 +392,46 @@ func fakeWSLStageWaitStart(logPath, role string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("missing %s helper wait-start timestamp", role)
 }
 
-func fakeWSLStageProcessExited(pid int) bool {
-	if pid <= 0 {
-		return false
+func fakeWSLStageProcessExited(pid int) (bool, error) {
+	if pid <= 0 || uint64(pid) > uint64(^uint32(0)) {
+		return false, fmt.Errorf("invalid fixture process PID")
 	}
 	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
 	if err == windows.ERROR_INVALID_PARAMETER {
-		return true
+		return true, nil
 	}
 	if err != nil {
-		return false
+		return false, err
 	}
 	defer windows.CloseHandle(handle)
+	return fakeWSLStageHandleExited(handle)
+}
+
+func fakeWSLStageHandleExited(handle windows.Handle) (bool, error) {
 	result, err := windows.WaitForSingleObject(handle, 0)
-	return err == nil && result == windows.WAIT_OBJECT_0
+	if err != nil {
+		return false, err
+	}
+	switch result {
+	case windows.WAIT_OBJECT_0:
+		return true, nil
+	case uint32(windows.WAIT_TIMEOUT):
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected fixture process observation: %d", result)
+	}
+}
+
+func testWSLStageFixtureProcessObservationErrors(t *testing.T) {
+	if exited, err := fakeWSLStageProcessExited(os.Getpid()); err != nil || exited {
+		t.Fatalf("current process observation: exited=%t error=%v", exited, err)
+	}
+	if _, err := fakeWSLStageProcessExited(0); err == nil {
+		t.Fatal("invalid PID counted as a survivor")
+	}
+	if _, err := fakeWSLStageHandleExited(0); err == nil {
+		t.Fatal("unobservable process counted as a survivor")
+	}
 }
 
 func installFakeWSLStageExecutable(t *testing.T) string {
@@ -790,6 +1043,7 @@ func TestWSLStageLauncherIsFixedAndCarriesDigestBinding(t *testing.T) {
 }
 
 func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
+	t.Run("process observation errors", testWSLStageFixtureProcessObservationErrors)
 	for _, test := range []struct {
 		name         string
 		mode         string
@@ -831,6 +1085,7 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 			bin := installFakeWSLStageExecutable(t)
 			home, nonce := t.TempDir(), strings.Repeat("e", 32)
 			logPath := filepath.Join(t.TempDir(), "launcher.log")
+			lifetime := newFakeWSLStageLifetime(t, logPath)
 			started := time.Now()
 			type timingEvent struct {
 				event string
@@ -895,14 +1150,7 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 			ready := writeWSLStageReady(t, home, nonce, data)
 			defer func() {
 				timing("teardown-start", time.Now())
-				for _, role := range []string{"main", "cleanup"} {
-					if pid, err := strconv.Atoi(readFakeWSLStageFile(logPath + "." + role + ".pid")); err == nil && !fakeWSLStageProcessExited(pid) {
-						process, findErr := os.FindProcess(pid)
-						if findErr == nil {
-							_ = process.Kill()
-						}
-					}
-				}
+				lifetime.close(t)
 			}()
 
 			script := `[Environment]::CurrentDirectory=` + psQuote(bin) + `;` +
@@ -954,20 +1202,27 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 				pid, parseErr := strconv.Atoi(readFakeWSLStageFile(logPath + "." + test.wantSurvivor + ".pid"))
 				observationStarted := time.Now()
 				exited := false
+				var observeErr error
 				if parseErr == nil {
-					exited = fakeWSLStageProcessExited(pid)
+					var handle windows.Handle
+					handle, observeErr = lifetime.process(test.wantSurvivor, pid)
+					if observeErr == nil {
+						exited, observeErr = fakeWSLStageHandleExited(handle)
+					}
 				}
 				observationReturned := time.Now()
 				timing("observation-start", observationStarted)
-				event := "observation-not-exited-or-unobservable"
+				event := "observation-alive"
 				if parseErr != nil {
 					event = "observation-skipped-parse-error"
+				} else if observeErr != nil {
+					event = "observation-error"
 				} else if exited {
 					event = "observation-exited-or-absent"
 				}
 				timing(event, observationReturned)
-				if parseErr != nil || exited {
-					t.Fatalf("exact %s launcher did not exercise failed termination: pid=%d error=%v", test.wantSurvivor, pid, parseErr)
+				if parseErr != nil || observeErr != nil || exited {
+					t.Fatalf("exact %s launcher did not exercise failed termination: pid=%d parse=%v observation=%v", test.wantSurvivor, pid, parseErr, observeErr)
 				}
 			}
 			for _, secret := range []string{remote, nonce, ready, "private-launcher-secret", "private-cleanup-secret"} {
@@ -1035,6 +1290,7 @@ func testWSLStageFrameworkInput(t *testing.T, mode string) {
 				t.Setenv("CRABBOX_FAKE_WSL_STAGE_INPUT", log)
 				t.Setenv("CRABBOX_FAKE_WSL_STAGE_LAUNCHER_LOG", log+".launcher")
 				if cleanup {
+					newFakeWSLStageLifetime(t, log+".launcher")
 					t.Setenv(fakeWSLStageLauncherMode, "main-delay")
 				} else if delayed {
 					t.Setenv(fakeWSLStageLauncherMode, mode)
@@ -1071,6 +1327,9 @@ try {
   & ([ScriptBlock]::Create(` + psQuote(owner) + `)) $file $descriptor '` + strings.Repeat("a", 32) + `'
 } finally { $file.Dispose() }`
 				process := windowsPowerShellScriptCommand(t, script)
+				if cleanup {
+					process.WaitDelay = sshCommandWaitDelay
+				}
 				// Encoding changes belong only to this disposable test console.
 				process.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_CONSOLE, HideWindow: true}
 				output, err := process.CombinedOutput()
