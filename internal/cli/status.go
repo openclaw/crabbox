@@ -480,14 +480,14 @@ func resolveSSHLeaseTarget(ctx context.Context, backend SSHLoginBackend, req Res
 			}
 		}
 		if leaseIDChanged && !resolvedClaimExistedBefore && validLeaseClaimID(resolvedLeaseID) {
-			if aliasKeyPath, err := testboxKeyPath(resolvedLeaseID); !req.ReleaseOnly && err == nil && lease.SSH.Key == aliasKeyPath {
+			if aliasKeyPath, err := TestboxKeyPath(resolvedLeaseID); !req.ReleaseOnly && err == nil && lease.SSH.Key == aliasKeyPath {
 				return LeaseTarget{}, Exit(2, "lease %s resolved to %s but the canonical stored SSH key is unavailable", resolvedLeaseID, claimBefore.LeaseID)
 			}
 			if discardedClaimExists {
 				if err := RemoveLeaseClaimIfUnchanged(resolvedLeaseID, discardedClaim); err != nil {
 					return LeaseTarget{}, err
 				}
-				removeStoredTestboxKey(resolvedLeaseID)
+				RemoveStoredTestboxKey(resolvedLeaseID)
 			}
 		}
 	}

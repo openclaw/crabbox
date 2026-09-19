@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -24,9 +25,6 @@ import (
 // the argv at Start() and blocks Wait() on the signal channel so the orchestration
 // loop can be terminated deterministically without real ssh processes.
 type pondMeshRecordingHandle struct {
-	name      string
-	args      []string
-	pid       int
 	started   bool
 	signal    chan struct{}
 	ctx       context.Context
@@ -64,37 +62,10 @@ func (h *pondMeshRecordingHandle) Wait() error {
 	return nil
 }
 
-func (h *pondMeshRecordingHandle) String() string {
-	return h.name + " " + strings.Join(h.args, " ")
-}
-
-func (h *pondMeshRecordingHandle) PID() int { return h.pid }
-
-func (h *pondMeshRecordingHandle) Process() processSignaler { return testProcessSignaler{h.signal} }
-
 // WasTerminatedByOurCancel mirrors the production classifier for the recording
 // double: this stub's Wait() only returns nil (a healthy tunnel torn down by
 // the connect loop), so a set cancelled flag always denotes our teardown.
 func (h *pondMeshRecordingHandle) WasTerminatedByOurCancel() bool { return h.cancelled.Load() }
-
-// testProcessSignaler closes the underlying channel on the first signal so
-// the handle's Wait() returns.
-type testProcessSignaler struct {
-	signal chan struct{}
-}
-
-func (p testProcessSignaler) Signal(_ os.Signal) error {
-	select {
-	case <-p.signal:
-	default:
-		close(p.signal)
-	}
-	return nil
-}
-
-func (p testProcessSignaler) Kill() error {
-	return p.Signal(nil)
-}
 
 // pondMeshRecordingRunner mirrors the exedev backend's pattern: it captures
 // every (name, args) invocation it sees so tests can assert on the full SSH
@@ -107,12 +78,12 @@ type pondMeshRecordingRunner struct {
 	waitErrs  map[int]error
 }
 
-func (r *pondMeshRecordingRunner) Command(ctx context.Context, name string, args ...string) pondMeshHandle {
+func (r *pondMeshRecordingRunner) Command(ctx context.Context, _ SSHTarget, name string, args ...string) pondMeshHandle {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, append([]string{name}, args...))
 	index := len(r.handles)
-	h := &pondMeshRecordingHandle{name: name, args: append([]string{}, args...), pid: 1000 + index, signal: make(chan struct{}), ctx: ctx}
+	h := &pondMeshRecordingHandle{signal: make(chan struct{}), ctx: ctx}
 	if r.startHook != nil {
 		h.startHook = func() error { return r.startHook(index, ctx) }
 	}
@@ -126,21 +97,26 @@ func (r *pondMeshRecordingRunner) Command(ctx context.Context, name string, args
 func TestPondMeshProductionRunnersScrubTargetEnvironment(t *testing.T) {
 	t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-pond-ssh")
 	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
-	target := SSHTarget{ChildEnvDenylist: []string{"TEST_ARD_PASSWORD"}}
-	for name, runner := range map[string]pondMeshRunner{
-		"foreground": pondMeshExecRunner{},
-		"daemon":     pondMeshDaemonRunner{},
+	t.Setenv("CRABBOX_TEST_OVERRIDE", "old")
+	target := SSHTarget{
+		ChildEnvDenylist: []string{"TEST_ARD_PASSWORD"},
+		ChildEnv:         map[string]string{"CRABBOX_TEST_OVERRIDE": "new"},
+	}
+	foreground := pondMeshExecRunner{}.Command(context.Background(), target, "ssh", "example.test").(*pondMeshExecHandle)
+	for name, cmd := range map[string]*exec.Cmd{
+		"foreground": foreground.cmd,
+		"daemon":     pondMeshDaemonCommand(target, "ssh", "example.test"),
 	} {
 		t.Run(name, func(t *testing.T) {
-			handle := pondMeshRunnerCommand(context.Background(), runner, target, "ssh", "example.test")
-			execHandle := handle.(*pondMeshExecHandle)
-			cmd := execHandle.cmd
 			env := strings.Join(cmd.Env, "\n")
 			if strings.Contains(env, "TEST_ARD_PASSWORD=") || !strings.Contains(env, "CRABBOX_TEST_KEEP=preserved") {
-				t.Fatalf("child environment=%q", env)
+				t.Fatal("child environment leaked a blocked key or dropped a retained key")
 			}
-			if name == "foreground" && (!execHandle.managed || cmd.Cancel == nil || cmd.WaitDelay != pondMeshCancelWaitDelay) {
-				t.Fatalf("environment-aware foreground runner lost managed cancellation: managed=%v cancel=%v waitDelay=%v", execHandle.managed, cmd.Cancel != nil, cmd.WaitDelay)
+			if strings.Contains(env, "CRABBOX_TEST_OVERRIDE=old") || !strings.Contains(env, "CRABBOX_TEST_OVERRIDE=new") {
+				t.Fatal("child environment did not apply the target override")
+			}
+			if name == "foreground" && (cmd.Cancel == nil || cmd.WaitDelay != pondMeshCancelWaitDelay) {
+				t.Fatalf("foreground runner lost cancellation: cancel=%v waitDelay=%v", cmd.Cancel != nil, cmd.WaitDelay)
 			}
 		})
 	}
@@ -599,7 +575,7 @@ func TestRunPondMeshForwardsReportsUnexpectedCleanExit(t *testing.T) {
 		if len(runner.handles) == 1 {
 			handle := runner.handles[0]
 			runner.mu.Unlock()
-			_ = handle.Process().Signal(os.Interrupt)
+			close(handle.signal)
 			break
 		}
 		runner.mu.Unlock()

@@ -195,7 +195,7 @@ func secureAuthoritativeKnownHostsPath(path string, directory bool) error {
 }
 
 func removeStoredTestboxConnectionArtifacts(ctx context.Context, leaseID string) error {
-	key, err := testboxKeyPath(leaseID)
+	key, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		return err
 	}

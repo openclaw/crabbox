@@ -124,7 +124,7 @@ func (b resolveResultBackend) RebindResolvedLeaseTarget(target *LeaseTarget, lea
 		b.onRebind()
 	}
 	if b.rebindStoredTestboxKey {
-		return useStoredTestboxKey(&target.SSH, leaseID)
+		return UseStoredTestboxKey(&target.SSH, leaseID)
 	}
 	return nil
 }
@@ -137,7 +137,7 @@ func (b creatingMinimalClaimResolveBackend) Resolve(context.Context, ResolveRequ
 }
 
 func (b creatingMinimalClaimResolveBackend) RebindResolvedLeaseTarget(target *LeaseTarget, leaseID string) error {
-	return useStoredTestboxKey(&target.SSH, leaseID)
+	return UseStoredTestboxKey(&target.SSH, leaseID)
 }
 
 func (b stoppingClaimResolveBackend) Resolve(context.Context, ResolveRequest) (LeaseTarget, error) {
@@ -311,7 +311,7 @@ func TestLeaseSSHReleaseOnlyResolveSkipsGuestRebinding(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			key, err := testboxKeyPath(leaseID)
+			key, err := TestboxKeyPath(leaseID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -319,7 +319,7 @@ func TestLeaseSSHReleaseOnlyResolveSkipsGuestRebinding(t *testing.T) {
 			if err := os.WriteFile(namespace, []byte("not a directory"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			aliasKey, err := testboxKeyPath(aliasID)
+			aliasKey, err := TestboxKeyPath(aliasID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -363,7 +363,7 @@ func TestResolveSSHLeaseTargetFindsExistingClaimByCloudID(t *testing.T) {
 	if err := ClaimLeaseTargetForRepoConfig(leaseID, "cloudlookup", cfg, server, target, "/repo-a", time.Hour, true); err != nil {
 		t.Fatal(err)
 	}
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,11 +495,11 @@ func TestResolveSSHLeaseTargetRemovesProviderCreatedAliasClaim(t *testing.T) {
 	if err := ClaimLeaseTargetForRepoConfig(leaseID, "canonical", cfg, server, SSHTarget{}, "/repo-a", time.Hour, true); err != nil {
 		t.Fatal(err)
 	}
-	canonicalKeyPath, err := testboxKeyPath(leaseID)
+	canonicalKeyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	aliasKeyPath, err := testboxKeyPath(aliasID)
+	aliasKeyPath, err := TestboxKeyPath(aliasID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +552,7 @@ func TestResolveSSHLeaseTargetPreservesUnclaimedAliasArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifactPath, err := testboxKeyPath(aliasID)
+	artifactPath, err := TestboxKeyPath(aliasID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,7 +604,7 @@ func TestResolveSSHLeaseTargetPreservesProviderManagedCredentials(t *testing.T) 
 	if err := ClaimLeaseTargetForRepoConfig(leaseID, "tenki-session", cfg, server, SSHTarget{}, "/repo", time.Hour, true); err != nil {
 		t.Fatal(err)
 	}
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -640,7 +640,7 @@ func TestResolveSSHLeaseTargetPreservesProviderManagedCredentials(t *testing.T) 
 func TestCoordinatorLeaseBackendForwardsResolvedTargetRebinding(t *testing.T) {
 	isolateTestUserDirs(t)
 	leaseID := "cbx_coordinator123"
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}

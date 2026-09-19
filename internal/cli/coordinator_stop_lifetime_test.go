@@ -254,7 +254,7 @@ func TestWebVNCDaemonStopCancelsFenceWait(t *testing.T) {
 
 func managedStopLocalState(t *testing.T, id string) (string, string) {
 	t.Helper()
-	keyPath, err := testboxKeyPath(id)
+	keyPath, err := TestboxKeyPath(id)
 	if err != nil {
 		t.Fatal(err)
 	}

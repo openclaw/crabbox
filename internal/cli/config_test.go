@@ -12570,7 +12570,7 @@ func TestRepoConfigIsYamlOnly(t *testing.T) {
 	if cfg.Profile != "yaml-profile" || cfg.Provider != "aws" {
 		t.Fatalf("unexpected config: profile=%s provider=%s", cfg.Profile, cfg.Provider)
 	}
-	keyPath, err := testboxKeyPath("cbx_1516")
+	keyPath, err := TestboxKeyPath("cbx_1516")
 	wantKeyPath := filepath.Join(selectedState, "crabbox", "testboxes", "cbx_1516", "id_ed25519")
 	if err != nil || keyPath != wantKeyPath || os.Getenv("XDG_STATE_HOME") != selectedState {
 		t.Fatalf("repository YAML changed generated-key root: path=%q env=%q err=%v", keyPath, os.Getenv("XDG_STATE_HOME"), err)

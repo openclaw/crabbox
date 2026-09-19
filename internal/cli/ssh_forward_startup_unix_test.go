@@ -268,7 +268,7 @@ func TestPondSecretBoundaryChildEnvironment(t *testing.T) {
 	defer session.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	h := pondMeshRunnerCommand(ctx, pondMeshExecRunner{}, f.target, directSSHExecutable(), args...).(*pondMeshExecHandle)
+	h := pondMeshExecCommand(ctx, f.target, directSSHExecutable(), args...)
 	if err := h.Start(); err != nil {
 		t.Fatal(err)
 	}

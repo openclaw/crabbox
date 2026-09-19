@@ -88,7 +88,7 @@ func TestPondMeshCancelRunForwardsReturnsNoErrorOnWindows(t *testing.T) {
 }
 
 func TestPondMeshForwardStartsSuspendedInJob(t *testing.T) {
-	handle := pondMeshExecRunner{}.Command(context.Background(), "cmd.exe", "/c", "exit", "0")
+	handle := pondMeshExecRunner{}.Command(context.Background(), SSHTarget{}, "cmd.exe", "/c", "exit", "0")
 	execHandle := handle.(*pondMeshExecHandle)
 	if err := handle.Start(); err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func TestPondMeshNaturalSuccessBeforeCancelSurvivesOnWindows(t *testing.T) {
 func TestPondMeshNaturalExitDuringJobTerminationSurvivesOnWindows(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	handle := pondMeshExecRunner{}.Command(ctx, os.Args[0], "-test.run=^TestPondMeshWindowsExitHelper$")
+	handle := pondMeshExecRunner{}.Command(ctx, SSHTarget{}, os.Args[0], "-test.run=^TestPondMeshWindowsExitHelper$")
 	execHandle := handle.(*pondMeshExecHandle)
 	stateDir := t.TempDir()
 	ready := filepath.Join(stateDir, "ready")
@@ -195,7 +195,7 @@ func TestPondMeshCancelKillsWindowsProcessTree(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	handle := pondMeshExecRunner{}.Command(ctx, os.Args[0], "-test.run=^TestPondMeshCancelKillsWindowsProcessTree$")
+	handle := pondMeshExecRunner{}.Command(ctx, SSHTarget{}, os.Args[0], "-test.run=^TestPondMeshCancelKillsWindowsProcessTree$")
 	execHandle := handle.(*pondMeshExecHandle)
 	childPIDFile := filepath.Join(t.TempDir(), "child-pid")
 	execHandle.cmd.Env = append(os.Environ(),
@@ -240,7 +240,7 @@ func TestPondMeshCancelKillsWindowsProcessTree(t *testing.T) {
 func TestPondMeshJobTerminationFailureStillKillsWindowsProcessTree(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	handle := pondMeshExecRunner{}.Command(ctx, os.Args[0], "-test.run=^TestPondMeshCancelKillsWindowsProcessTree$")
+	handle := pondMeshExecRunner{}.Command(ctx, SSHTarget{}, os.Args[0], "-test.run=^TestPondMeshCancelKillsWindowsProcessTree$")
 	execHandle := handle.(*pondMeshExecHandle)
 	childPIDFile := filepath.Join(t.TempDir(), "child-pid")
 	execHandle.cmd.Env = append(os.Environ(),
@@ -396,7 +396,7 @@ func runPondMeshNaturalExitBeforeCancelWindows(t *testing.T, exitCode int) (erro
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	handle := pondMeshExecRunner{}.Command(ctx, os.Args[0], "-test.run=^TestPondMeshWindowsExitHelper$")
+	handle := pondMeshExecRunner{}.Command(ctx, SSHTarget{}, os.Args[0], "-test.run=^TestPondMeshWindowsExitHelper$")
 	execHandle := handle.(*pondMeshExecHandle)
 	ready := filepath.Join(t.TempDir(), "ready")
 	execHandle.cmd.Env = append(os.Environ(),
