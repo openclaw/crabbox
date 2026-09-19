@@ -4,8 +4,8 @@
 
 ### Fixes
 
-- Support direct Azure and DigitalOcean fixed-ID leases with durable create intents, same-resource retry, account and immutable-resource checks, and terminal cleanup tombstones.
-
+- Support direct Azure and DigitalOcean fixed-ID leases with durable create intents, same-resource retry, account and immutable-resource checks, and terminal cleanup tombstones. [PR 2351](https://github.com/openclaw/crabbox/pull/2351). Thanks @steipete.
+- Bound Local Container endpoint discovery to 30 seconds, including in-flight runtime inspections, while preserving transient retries, terminal-container diagnostics, and pending lease recovery. [PR 2350](https://github.com/openclaw/crabbox/pull/2350). Thanks @steipete.
 - Apply Tart's five-minute IP-readiness budget to running probes as well as waits, preserving startup cadence and stopped-VM diagnostics while retaining cancellation causes. [PR 2349](https://github.com/openclaw/crabbox/pull/2349). Thanks @steipete.
 - Bound Scaleway public-IP readiness observations and waits to five minutes, honor earlier cancellation before querying, and preserve immediate API failures instead of misreporting a readiness timeout. [PR 2348](https://github.com/openclaw/crabbox/pull/2348). Thanks @steipete.
 - Redact signed artifact URLs from upload, download, and manifest request setup and transport errors while preserving the operation and underlying failure. [PR 2340](https://github.com/openclaw/crabbox/pull/2340). Thanks @steipete.
