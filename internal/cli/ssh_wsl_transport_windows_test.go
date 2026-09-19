@@ -149,6 +149,22 @@ func readFakeWSLStageFile(path string) string {
 	return string(data)
 }
 
+func fakeWSLStageWaitStart(logPath, role string) (time.Time, error) {
+	prefix := "fixture-timing role=" + role + " event=wait-start unix_ns="
+	for _, line := range strings.Split(readFakeWSLStageFile(logPath+".timing"), "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		value, _, _ := strings.Cut(strings.TrimPrefix(line, prefix), " ")
+		ns, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || ns <= 0 {
+			return time.Time{}, fmt.Errorf("invalid %s helper wait-start timestamp", role)
+		}
+		return time.Unix(0, ns), nil
+	}
+	return time.Time{}, fmt.Errorf("missing %s helper wait-start timestamp", role)
+}
+
 func fakeWSLStageProcessExited(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -781,6 +797,7 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 		want         string
 		wantCleanup  bool
 		wantSurvivor string
+		observeAfter time.Duration
 	}{
 		{name: "blocked Windows to WSL pipe", mode: "main-no-read", want: "WSL2 command timed out", wantCleanup: true},
 		{
@@ -802,6 +819,12 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 			name: "cleanup delays kill", mode: "cleanup-delay",
 			mutation: `if($child -eq $cleanup){Start-Sleep -Milliseconds 25};$child.Kill()`,
 			want:     "WSL2 command cleanup failed", wantCleanup: true,
+		},
+		{
+			name: "cleanup survives delayed observation", mode: "cleanup-ignore",
+			mutation: `if($child -eq $cleanup){throw "private-cleanup-secret"}else{$child.Kill()}`,
+			want:     "cleanup launcher termination unconfirmed", wantCleanup: true, wantSurvivor: "cleanup",
+			observeAfter: 21 * time.Second,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -917,6 +940,17 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 				t.Fatalf("fallback cleanup raced the exact original launcher: %q", logs)
 			}
 			if test.wantSurvivor != "" {
+				if test.observeAfter > 0 {
+					waitStart, err := fakeWSLStageWaitStart(logPath, test.wantSurvivor)
+					if err != nil {
+						t.Fatal(err)
+					}
+					// Exercise observation after the former independent 20-second helper lifetime.
+					t.Logf("%s helper wait-start=%s; delaying observation by %s", test.wantSurvivor, waitStart.UTC().Format(time.RFC3339Nano), test.observeAfter)
+					timing("observation-delay-start", time.Now())
+					time.Sleep(test.observeAfter)
+					timing("observation-delay-end", time.Now())
+				}
 				pid, parseErr := strconv.Atoi(readFakeWSLStageFile(logPath + "." + test.wantSurvivor + ".pid"))
 				observationStarted := time.Now()
 				exited := false
