@@ -6,8 +6,10 @@ import (
 	"io"
 	"maps"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	iam "github.com/scaleway/scaleway-sdk-go/api/iam/v1alpha1"
@@ -18,6 +20,101 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
+
+func TestWaitForPublicIPv4HonorsCanceledCaller(t *testing.T) {
+	backend, client := newTestBackend(t)
+	client.server = testServer("srv-1", "ready", nil, "203.0.113.10")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cause := errors.New("caller finished")
+	cancel(cause)
+	server, err := backend.waitForPublicIPv4(ctx, client, "srv-1")
+	if server != nil || !errors.Is(err, cause) || client.getCalls != 0 {
+		t.Fatalf("server=%v err=%v calls=%d; want caller cause without observation", server, err, client.getCalls)
+	}
+}
+
+func TestWaitForPublicIPv4SDKObservationBudget(t *testing.T) {
+	readError := errors.New("observation failed")
+	for _, name := range []string{"ready", "pending then ready", "owned timeout", "caller deadline", "client deadline", "read error", "read error after deadline"} {
+		t.Run(name, func(t *testing.T) {
+			clearScalewayEnv(t)
+			t.Setenv("SCW_ACCESS_KEY", testScalewayAccessKey)
+			t.Setenv("SCW_SECRET_KEY", testScalewaySecretKey)
+			t.Setenv("SCW_DEFAULT_PROJECT_ID", testScalewayProjectID)
+			t.Setenv("SCW_DEFAULT_ORGANIZATION_ID", testScalewayOrganizationID)
+			synctest.Test(t, func(t *testing.T) {
+				ctx := context.Background()
+				budget := 5 * time.Minute
+				if name == "caller deadline" {
+					var cancel context.CancelFunc
+					budget = time.Minute
+					ctx, cancel = context.WithTimeout(ctx, budget)
+					defer cancel()
+				}
+				start := time.Now()
+				calls := 0
+				client, err := newClient(core.Config{}, core.Runtime{HTTP: &http.Client{Transport: scalewayRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+					deadline, bounded := req.Context().Deadline()
+					if !bounded || !deadline.Equal(start.Add(budget)) {
+						t.Errorf("SDK observation deadline=%v bounded=%t; want %v", deadline, bounded, start.Add(budget))
+						return nil, readError
+					}
+					switch name {
+					case "owned timeout", "caller deadline", "read error after deadline":
+						<-req.Context().Done()
+						if name == "read error after deadline" {
+							return nil, readError
+						}
+						return nil, req.Context().Err()
+					case "client deadline":
+						return nil, context.DeadlineExceeded
+					case "read error":
+						return nil, readError
+					}
+					body := `{"server":{"id":"srv-1","public_ip":{"address":"203.0.113.10"}}}`
+					if name == "pending then ready" && calls == 1 {
+						body = `{"server":null}`
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, ContentLength: int64(len(body)), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+				})}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				server, err := (&Backend{}).waitForPublicIPv4(ctx, client, "srv-1")
+				switch name {
+				case "ready", "pending then ready":
+					if err != nil || publicIPv4(server) != "203.0.113.10" {
+						t.Fatalf("server=%v err=%v", server, err)
+					}
+				case "owned timeout":
+					var exit core.ExitError
+					if server != nil || !core.AsExitError(err, &exit) || exit.Code != 5 || exit.Message != "timed out waiting for Scaleway Instance public IPv4" {
+						t.Fatalf("server=%v err=%v; want readiness timeout", server, err)
+					}
+				case "caller deadline", "client deadline":
+					if server != nil || !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatalf("server=%v err=%v; want original deadline", server, err)
+					}
+				default:
+					if server != nil || !errors.Is(err, readError) {
+						t.Fatalf("server=%v err=%v; want original observation error", server, err)
+					}
+				}
+				wantCalls := 1
+				if name == "pending then ready" {
+					wantCalls = 2
+					if elapsed := time.Since(start); elapsed != 3*time.Second {
+						t.Fatalf("poll interval=%v, want 3s", elapsed)
+					}
+				}
+				if calls != wantCalls {
+					t.Fatalf("observations=%d, want %d", calls, wantCalls)
+				}
+			})
+		})
+	}
+}
 
 func TestScalewayAcquireListResolveTouchReleaseLifecycle(t *testing.T) {
 	backend, fake := newTestBackend(t)
@@ -858,6 +955,7 @@ type fakeScalewayClient struct {
 	createErr                   error
 	createKeyErr                error
 	getErr                      error
+	getCalls                    int
 	deleteErr                   error
 	deleteKeyErr                error
 	createResponseWithoutServer bool
@@ -893,6 +991,7 @@ func (api *fakeInstanceAPI) ListServers(req *instance.ListServersRequest, opts .
 }
 
 func (api *fakeInstanceAPI) GetServer(req *instance.GetServerRequest, _ ...scw.RequestOption) (*instance.GetServerResponse, error) {
+	api.f.getCalls++
 	for _, server := range append(api.f.servers, api.f.server) {
 		if server != nil && server.ID == req.ServerID {
 			return &instance.GetServerResponse{Server: server}, nil
