@@ -188,6 +188,11 @@ path admission rules keep those checks in their own adapter.
 Resolve class defaults and explicit native size selectors from that request;
 providers do not need a separate class-only resolver. `ClassProfiles` remains
 the declarative catalog for supported target and architecture combinations.
+After handling explicit generic and native overrides, adapters can use
+`ProviderClassPrimaryTypeForProfiles` to select the matched primary type. It
+returns an empty type for an unsupported canonical selector and uses the
+adapter's supplied legacy fallback only for noncanonical input. Native override
+precedence, fallback mappings, and input normalization remain adapter-owned.
 
 Add optional capabilities as small interfaces instead of widening every backend.
 
