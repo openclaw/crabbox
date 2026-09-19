@@ -409,6 +409,11 @@ state; the original removal failure is not converted into success.
    `crabbox stop --provider docker <lease-or-slug>` removes the stale claim and
    stored SSH key.
 
+Endpoint discovery has a 30-second budget covering runtime inspections and
+100 ms waits between attempts. Earlier caller cancellation stops discovery;
+terminal container observations still fail immediately. This budget is separate
+from the subsequent SSH bootstrap readiness wait.
+
 When `warmup` or `run --keep` creates the container but SSH readiness is
 canceled, fails, or times out, Crabbox keeps the exact pending claim, container,
 key, and bootstrap directory. If that exact container exits, stops, or becomes
