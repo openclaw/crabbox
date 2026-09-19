@@ -261,6 +261,9 @@ project plus either a complete service-account key pair or
    maintenance `TERMINATE`, automatic restart off, and termination action
    `DELETE`.
 6. Wait for the public IP, then for SSH and the Crabbox ready marker.
+   Public-IP observations and their five-second retry waits share a two-minute
+   budget. Earlier cancellation stops discovery, and API errors fail immediately;
+   this budget does not include the subsequent SSH readiness phase.
 7. Touch labels during active runs.
 8. Delete the VM on release unless the lease is kept.
 

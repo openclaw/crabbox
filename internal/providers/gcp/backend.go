@@ -16,7 +16,6 @@ type gcpClient interface {
 	ListCrabboxServers(context.Context) ([]core.Server, error)
 	ListCrabboxServersComplete(context.Context) ([]core.Server, error)
 	CreateServerWithFallback(context.Context, core.Config, string, string, string, bool, func(string, ...any)) (core.Server, core.Config, error)
-	WaitForServerIP(context.Context, string) (core.Server, error)
 	GetServer(context.Context, string) (core.Server, error)
 	DeleteServer(context.Context, string) error
 	SetLabels(context.Context, string, map[string]string) error
@@ -91,7 +90,7 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	}
 	rollbackClient = client
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s type=%s zone=%s\n", leaseID, server.DisplayID(), cfg.ServerType, cfg.GCPZone)
-	server, err = client.WaitForServerIP(ctx, server.CloudID)
+	server, err = waitForServerIP(ctx, client, server.CloudID)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -105,6 +104,13 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		fmt.Fprintf(b.RT.Stderr, "warning: set labels: %v\n", err)
 	}
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+}
+
+func waitForServerIP(ctx context.Context, client gcpClient, name string) (core.Server, error) {
+	return shared.PollReady(ctx, 2*time.Minute, 5*time.Second,
+		func(ctx context.Context) (core.Server, error) { return client.GetServer(ctx, name) },
+		func(server core.Server) bool { return server.PublicNet.IPv4.IP != "" },
+		fmt.Errorf("timeout waiting for gcp public ip on %s", name))
 }
 
 func (b *gcpLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {

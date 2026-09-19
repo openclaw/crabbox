@@ -8,8 +8,10 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -25,10 +27,10 @@ type fakeGCPDoctorClient struct {
 	complete    []core.Server
 	get         map[string]core.Server
 	getErr      error
+	observe     func(context.Context, string) (core.Server, error)
 	created     core.Server
 	createCfg   core.Config
 	createErr   error
-	waitErr     error
 	deleteErr   error
 	createCalls int
 }
@@ -58,14 +60,10 @@ func (c *fakeGCPDoctorClient) CreateServerWithFallback(context.Context, core.Con
 	return c.created, c.createCfg, nil
 }
 
-func (c *fakeGCPDoctorClient) WaitForServerIP(context.Context, string) (core.Server, error) {
-	if c.waitErr != nil {
-		return core.Server{}, c.waitErr
+func (c *fakeGCPDoctorClient) GetServer(ctx context.Context, name string) (core.Server, error) {
+	if c.observe != nil {
+		return c.observe(ctx, name)
 	}
-	return c.created, nil
-}
-
-func (c *fakeGCPDoctorClient) GetServer(_ context.Context, name string) (core.Server, error) {
 	if c.getErr != nil {
 		return core.Server{}, c.getErr
 	}
@@ -185,6 +183,98 @@ func TestValidateGCPCleanupLiveServerRejectsReplacementInstance(t *testing.T) {
 	}
 }
 
+func TestWaitForServerIPReadinessBudget(t *testing.T) {
+	const name = "readiness-instance"
+	ready := core.Server{CloudID: name, Labels: map[string]string{"state": "provisioning"}}
+	ready.PublicNet.IPv4.IP = "192.0.2.10"
+	readErr := errors.New("instance observation unavailable")
+	callerCause := errors.New("caller stopped GCP readiness")
+	for _, tc := range []struct {
+		name         string
+		wantCalls    int
+		wantMaxCalls int
+		wantElapsed  time.Duration
+		wantErr      error
+		wantTimeout  bool
+	}{
+		{name: "ready", wantCalls: 1},
+		{name: "pending then ready", wantCalls: 2, wantElapsed: 5 * time.Second},
+		{name: "observation error", wantCalls: 1, wantErr: readErr},
+		{name: "client deadline", wantCalls: 1, wantErr: context.DeadlineExceeded},
+		{name: "pre-canceled", wantErr: callerCause},
+		{name: "cancel during wait", wantCalls: 1, wantElapsed: time.Second, wantErr: callerCause},
+		{name: "caller deadline", wantCalls: 1, wantElapsed: time.Second, wantErr: context.DeadlineExceeded},
+		{name: "blocked observation", wantCalls: 1, wantElapsed: 2 * time.Minute, wantTimeout: true},
+		// The final sleep and deadline may wake together before cancellation is delivered.
+		{name: "pending timeout", wantCalls: 24, wantMaxCalls: 25, wantElapsed: 2 * time.Minute, wantTimeout: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				parent, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				if tc.name == "pre-canceled" {
+					cancel(callerCause)
+				}
+				guard := 3 * time.Minute
+				if tc.name == "caller deadline" {
+					guard = time.Second
+				}
+				ctx, stop := context.WithTimeout(parent, guard)
+				defer stop()
+				if tc.name == "cancel during wait" {
+					time.AfterFunc(time.Second, func() { cancel(callerCause) })
+				}
+				calls := 0
+				started := time.Now()
+				client := &fakeGCPDoctorClient{observe: func(observeCtx context.Context, gotName string) (core.Server, error) {
+					calls++
+					if gotName != name {
+						t.Fatalf("observed %q, want %q", gotName, name)
+					}
+					switch tc.name {
+					case "pending then ready":
+						if calls == 1 {
+							return core.Server{CloudID: name}, nil
+						}
+					case "observation error", "client deadline":
+						return ready, tc.wantErr
+					case "cancel during wait", "pending timeout":
+						return core.Server{CloudID: name}, nil
+					case "blocked observation", "caller deadline":
+						if tc.name == "blocked observation" {
+							deadline, bounded := observeCtx.Deadline()
+							if !bounded || !deadline.Equal(started.Add(2*time.Minute)) {
+								t.Errorf("observation deadline=%v bounded=%t, want two-minute readiness budget", deadline, bounded)
+							}
+						}
+						<-observeCtx.Done()
+						return core.Server{}, observeCtx.Err()
+					}
+					return ready, nil
+				}}
+				server, err := waitForServerIP(ctx, client, name)
+				if tc.wantTimeout || tc.wantErr != nil {
+					if err == nil || !reflect.DeepEqual(server, core.Server{}) {
+						t.Fatalf("server=%+v err=%v, want zero server on failure", server, err)
+					}
+					if tc.wantTimeout && err.Error() != "timeout waiting for gcp public ip on "+name {
+						t.Fatalf("timeout diagnostic changed: %v", err)
+					}
+					if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+						t.Fatalf("err=%v, want %v", err, tc.wantErr)
+					}
+				} else if err != nil || !reflect.DeepEqual(server, ready) {
+					t.Fatalf("server=%+v err=%v, want ready server", server, err)
+				}
+				maxCalls := max(tc.wantCalls, tc.wantMaxCalls)
+				if elapsed := time.Since(started); elapsed != tc.wantElapsed || calls < tc.wantCalls || calls > maxCalls {
+					t.Fatalf("elapsed=%s calls=%d, want %s/%d..%d", elapsed, calls, tc.wantElapsed, tc.wantCalls, maxCalls)
+				}
+			})
+		})
+	}
+}
+
 func TestGCPAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -192,7 +282,7 @@ func TestGCPAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {
 	fake := &fakeGCPDoctorClient{
 		created:   core.Server{CloudID: "crabbox-created", Name: "crabbox-created", Labels: map[string]string{"lease": "cbx_created"}},
 		createCfg: core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"},
-		waitErr:   ipErr,
+		getErr:    ipErr,
 	}
 	old := newGCPClient
 	newGCPClient = func(context.Context, core.Config) (gcpClient, error) {
@@ -662,7 +752,9 @@ func TestGCPAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
 			oldWait := waitForSSHReady
 			waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return bootstrapErr }
 			t.Cleanup(func() { waitForSSHReady = oldWait })
-			fake := &fakeGCPDoctorClient{created: core.Server{CloudID: "crabbox-created", Labels: map[string]string{}}, createCfg: core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}}
+			server := core.Server{CloudID: "crabbox-created", Labels: map[string]string{}}
+			server.PublicNet.IPv4.IP = "192.0.2.10"
+			fake := &fakeGCPDoctorClient{created: server, get: map[string]core.Server{server.CloudID: server}, createCfg: core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}}
 			if failed {
 				fake.deleteErr = errors.New("delete unavailable")
 			}
@@ -695,7 +787,9 @@ func TestGCPAcquireRetainsCleanupClientFailureDespiteFallbackSuccess(t *testing.
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	primary := core.Exit(5, "timed out waiting for SSH: fixture")
 	debt := errors.New("selected-zone cleanup client unavailable")
-	fake := &fakeGCPDoctorClient{createCfg: core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-c"}}
+	server := core.Server{CloudID: "crabbox-created", Labels: map[string]string{}}
+	server.PublicNet.IPv4.IP = "192.0.2.10"
+	fake := &fakeGCPDoctorClient{created: server, get: map[string]core.Server{server.CloudID: server}, createCfg: core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-c"}}
 	oldClient, oldWait := newGCPClient, waitForSSHReady
 	bootstrapReached := false
 	newGCPClient = func(ctx context.Context, cfg core.Config) (gcpClient, error) {
