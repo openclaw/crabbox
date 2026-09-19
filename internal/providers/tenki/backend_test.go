@@ -864,6 +864,51 @@ func TestTenkiEnsureSessionReadyPreservesUnknownCreateStates(t *testing.T) {
 	}
 }
 
+func TestTenkiSSHTargetKnownHostsFile(t *testing.T) {
+	backend := &tenkiBackend{cfg: core.Config{Tenki: core.TenkiConfig{
+		CLIPath:  "/opt/Tenki CLI/tenki",
+		Endpoint: "https://api.tenki.test",
+		Gateway:  "wss://gateway.tenki.test",
+	}}}
+
+	for _, tc := range []struct {
+		name     string
+		reported string
+		want     string
+	}{
+		{
+			// The CLI maintains this file and writes the gateway CA into it as an
+			// @cert-authority line, so the host certificate verifies no matter
+			// which gateway replica the connection lands on.
+			name:     "prefers the known_hosts the CLI reports",
+			reported: "/home/user/.config/tenki/ssh/known_hosts",
+			want:     "/home/user/.config/tenki/ssh/known_hosts",
+		},
+		{
+			// Older CLIs omit the field; keep deriving a per-session path.
+			name:     "falls back when the CLI reports none",
+			reported: "",
+			want:     "/tmp/known_hosts_00000000-0000-0000-0000-000000000001",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := backend.sshTarget(tenkiSSHCommandOutput{
+				SessionID:       "00000000-0000-0000-0000-000000000001",
+				User:            "tenki",
+				Host:            "sandbox",
+				Port:            22,
+				IdentityFile:    "/tmp/id_ed25519",
+				CertificateFile: "/tmp/session-cert.pub",
+				ProxyCommand:    "tenki sandbox ssh-proxy --session 00000000-0000-0000-0000-000000000001",
+				KnownHostsFile:  tc.reported,
+			})
+			if target.KnownHostsFile != tc.want {
+				t.Fatalf("known_hosts=%q want=%q", target.KnownHostsFile, tc.want)
+			}
+		})
+	}
+}
+
 func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 	backend := &tenkiBackend{cfg: core.Config{Tenki: core.TenkiConfig{
 		CLIPath:  "/opt/Tenki CLI/tenki",

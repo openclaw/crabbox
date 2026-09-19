@@ -844,6 +844,7 @@ type tenkiSSHCommandOutput struct {
 	IdentityFile    string `json:"identity_file"`
 	CertificateFile string `json:"certificate_file"`
 	ProxyCommand    string `json:"proxy_command"`
+	KnownHostsFile  string `json:"known_hosts_file"`
 }
 
 func (o tenkiSSHCommandOutput) validate(sessionID string) error {
@@ -878,7 +879,7 @@ func (b *tenkiBackend) sshTarget(output tenkiSSHCommandOutput) core.SSHTarget {
 		Host:            core.Blank(strings.TrimSpace(output.Host), "sandbox"),
 		Key:             output.IdentityFile,
 		CertificateFile: output.CertificateFile,
-		KnownHostsFile:  tenkiKnownHostsFile(output),
+		KnownHostsFile:  core.Blank(strings.TrimSpace(output.KnownHostsFile), tenkiKnownHostsFile(output)),
 		Port:            port,
 		TargetOS:        targetLinux,
 		NetworkKind:     networkPublic,
