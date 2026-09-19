@@ -531,6 +531,10 @@ go test -tags localcontainer ./cmd/crabbox
 
 Set `CRABBOX_LOCAL_CONTAINER_E2E_IMAGE` to use a prebuilt image for faster
 startup. The test skips when the Docker CLI or daemon is unavailable.
+The Local Container CI job runs this native test after the CLI smoke and rejects
+a skipped result. It verifies warmup and SSH reuse, then independently checks
+that the container, lease claim, SSH key, and bootstrap directory are absent
+after stopping the lease.
 
 ## Related
 
