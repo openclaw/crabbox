@@ -349,7 +349,7 @@ workflow instead of silently adopting cloud metadata.
 After deletion or an exact lookup confirming the instance is absent, direct
 release and cleanup remove the lease's generated SSH key and private host-trust
 files before retiring its claim. Both local steps share the unchanged-claim
-lock. A provider or local cleanup failure retains the claim for retry, and
+lock. A provider-deletion or SSH-artifact cleanup failure retains the claim for retry, and
 `--dry-run` leaves the claim and SSH material untouched. Stale records without
 a cloud resource identity retain their existing claim-only pruning behavior.
 
