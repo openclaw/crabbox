@@ -267,6 +267,11 @@ project plus either a complete service-account key pair or
 7. Touch labels during active runs.
 8. Delete the VM on release unless the lease is kept.
 
+If acquisition fails after creating a VM, successful rollback also removes the
+lease's generated SSH credentials and host-trust files. Failed remote deletion
+retains those files; a local artifact-cleanup error is reported and prevents an
+automatic fresh-lease retry. Uncertain creation outcomes are unchanged.
+
 ## Machine classes
 
 ```text

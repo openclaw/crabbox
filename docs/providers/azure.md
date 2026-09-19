@@ -296,6 +296,12 @@ until the required service-principal secrets are present.
     coordinator's canonical-resource, quarantine, and fresh-preflight rules; see
     [Lifecycle and cleanup](../features/lifecycle-cleanup.md).
 
+For ordinary direct acquisition, successful owned rollback also removes the
+lease's generated SSH credentials and host-trust files. Failed deletion or
+uncertain VM ownership retains them; a local artifact-cleanup error prevents an
+automatic fresh-lease retry. Fixed-ID acquisition and its durable recovery
+records keep their existing lifecycle.
+
 ### Brokered checkpoint ownership
 
 New brokered Azure managed-OS-disk snapshots are coordinator-owned but manually
