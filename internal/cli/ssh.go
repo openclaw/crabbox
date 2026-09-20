@@ -454,6 +454,9 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 				probes = append(probes, port+":ready")
 			}
 			lastPorts = strings.Join(probes, ",")
+			if transportPort != "" {
+				lastProbe = "readiness"
+			}
 			fmt.Fprintln(stderr, sshWaitProgressMessage(target, phase, reachablePort, transportPort, lastPorts, time.Since(start), time.Until(deadline)))
 		}
 		if err := check(nil); err != nil {

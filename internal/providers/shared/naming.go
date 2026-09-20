@@ -7,7 +7,29 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+// SandboxNameBase normalizes the repository portion of a sandbox name.
+// Providers retain the prefix, length budget, and suffix policy.
+func SandboxNameBase(repoName, prefix string, maxBase int) string {
+	base := core.NormalizeLeaseSlug(repoName)
+	if base == "" {
+		base = "crabbox"
+	}
+	base = strings.TrimPrefix(base, strings.TrimSuffix(prefix, "-")+"-")
+	if maxBase < 1 {
+		maxBase = 1
+	}
+	if len(base) > maxBase {
+		base = strings.Trim(base[:maxBase], "-")
+	}
+	if base == "" {
+		base = "crabbox"
+	}
+	return base
+}
 
 func CacheVolumeName(key string) string {
 	key = strings.TrimSpace(key)

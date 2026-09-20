@@ -87,6 +87,25 @@ jobs:
           assert not any(r['Action'] == 'skip' for r in records), 'native fixture skipped'
           PY
 
+      - name: Require real SSH readiness diagnostics
+        shell: bash
+        run: |
+          go test ./internal/cli -run '^TestWaitForSSHReadyRealSSHTimeoutDiagnostic$' -count=1 -json | tee "$RUNNER_TEMP/ssh-readiness-tests.jsonl"
+          python3 - "$RUNNER_TEMP/ssh-readiness-tests.jsonl" <<'PY'
+          import json, sys
+          records = [json.loads(line) for line in open(sys.argv[1])]
+          root = 'TestWaitForSSHReadyRealSSHTimeoutDiagnostic'
+          required = [root] + [
+              f'{root}/proxy={proxy}/transport-success={success}'
+              for proxy in ('false', 'true')
+              for success in ('true', 'false')
+          ]
+          for name in required:
+              for action in ('run', 'pass'):
+                  assert any(r.get('Test') == name and r['Action'] == action for r in records), (name, action)
+          assert not any(r['Action'] == 'skip' for r in records), 'real SSH fixture skipped'
+          PY
+
       - name: Build
         run: go build -trimpath -o /tmp/crabbox ./cmd/crabbox
 

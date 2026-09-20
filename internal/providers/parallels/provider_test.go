@@ -668,6 +668,7 @@ func TestAcquireRemovesStoredKeyAfterPostKeyFailure(t *testing.T) {
 	cfg.TargetOS = core.TargetLinux
 	cfg.Parallels.Source = "source-vm"
 	cfg.Parallels.SourceSnapshot = "missing-snapshot"
+	cfg.Parallels.Hosts = []core.ParallelsHostConfig{{Name: "fixture-host", MaxVMs: 2}}
 	runner := &parallelsAcquireRunner{snapshotErr: errors.New("snapshot lookup failed")}
 	backend := &leaseBackend{
 		DirectSSHBackend: sharedBackend(cfg, runner),
@@ -680,6 +681,57 @@ func TestAcquireRemovesStoredKeyAfterPostKeyFailure(t *testing.T) {
 	keyMatches := storedTestboxKeyMatches(t)
 	if len(keyMatches) != 0 {
 		t.Fatalf("stored keys remain after failed acquire: %v", keyMatches)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, release, err := core.ReserveParallelsFleetCapacity(ctx, cfg, runner, "source-vm")
+	if err != nil {
+		t.Fatalf("failed acquisition retained its capacity reservation: %v", err)
+	}
+	release()
+}
+
+func TestAcquireHoldsCapacityThroughCloneOnly(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skip("ssh-keygen not available")
+	}
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	cfg := core.BaseConfig()
+	cfg.Provider = "parallels"
+	cfg.TargetOS = core.TargetLinux
+	cfg.Parallels.Source = "source-vm"
+	cfg.Parallels.CloneMode = "full"
+	cfg.Parallels.Hosts = []core.ParallelsHostConfig{{Name: "fixture-host", MaxVMs: 2}}
+	var observed []string
+	runner := &parallelsAcquireRunner{startErr: errors.New("stop after clone")}
+	runner.beforeCommand = func(command string) {
+		if command != "clone" && command != "start" {
+			return
+		}
+		observed = append(observed, command)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, release, err := core.ReserveParallelsFleetCapacity(ctx, cfg, &parallelsAcquireRunner{}, "source-vm")
+		if release != nil {
+			release()
+		}
+		if command == "clone" {
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("clone ran without retaining the capacity reservation: %v", err)
+			}
+		} else if err != nil {
+			t.Fatalf("capacity reservation remained held during startup: %v", err)
+		}
+	}
+	backend := &leaseBackend{DirectSSHBackend: sharedBackend(cfg, runner)}
+	if _, err := backend.acquireOnce(context.Background(), false, ""); err == nil || !strings.Contains(err.Error(), "stop after clone") {
+		t.Fatalf("acquireOnce err=%v, want controlled post-clone stop", err)
+	}
+	if strings.Join(observed, ",") != "clone,start" {
+		t.Fatalf("observed acquisition stages=%v, want clone and start", observed)
 	}
 }
 
@@ -859,17 +911,21 @@ func (r *parallelsCleanupRunner) Run(_ context.Context, req core.LocalCommandReq
 }
 
 type parallelsAcquireRunner struct {
-	snapshotErr error
-	startErr    error
-	deleteErr   error
-	cloneID     string
-	cloneName   string
-	cloneArgs   []string
+	beforeCommand func(string)
+	snapshotErr   error
+	startErr      error
+	deleteErr     error
+	cloneID       string
+	cloneName     string
+	cloneArgs     []string
 }
 
 func (r *parallelsAcquireRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	if req.Name != "prlctl" || len(req.Args) == 0 {
 		return core.LocalCommandResult{}, errors.New("unexpected command")
+	}
+	if r.beforeCommand != nil {
+		r.beforeCommand(req.Args[0])
 	}
 	switch req.Args[0] {
 	case "list":

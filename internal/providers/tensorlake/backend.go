@@ -384,21 +384,8 @@ func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
 }
 
 func newSandboxName(repo core.Repo) string {
-	base := core.NormalizeLeaseSlug(repo.Name)
-	if base == "" {
-		base = "crabbox"
-	}
-	base = strings.TrimPrefix(base, strings.TrimSuffix(namePrefix, "-")+"-")
 	maxBase := maxSandboxNameLen - len(namePrefix) - 1 - sandboxNameSuffixLen
-	if maxBase < 1 {
-		maxBase = 1
-	}
-	if len(base) > maxBase {
-		base = strings.Trim(base[:maxBase], "-")
-	}
-	if base == "" {
-		base = "crabbox"
-	}
+	base := shared.SandboxNameBase(repo.Name, namePrefix, maxBase)
 	return namePrefix + base + "-" + shared.RandomSuffix()
 }
 
