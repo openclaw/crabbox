@@ -21,6 +21,11 @@ bootstrap user. Lume's unlisted `ephemeral` storage is unsupported.
 
 Crabbox pins a durable marker in each storage root. Missing or changed storage
 identity retains lease claims and keys for fail-closed recovery.
+Terminal release and automatic cleanup honor cancellation while waiting for a
+lease's claim lock, releasing the capacity lock so other operations can proceed.
+Cancellation before admission preserves the VM, claim and SSH key; confirmed
+successful cleanup still finishes durable claim retirement. This does not change
+the independent acquisition-rollback and recovery-publication policy.
 
 Clone/start; SSH; run; clean; destroy; confirm absent.
 

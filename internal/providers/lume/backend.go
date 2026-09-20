@@ -619,7 +619,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		}
 		break
 	}
-	if err := core.RemoveLeaseClaimIfUnchangedAfter(lease.LeaseID, claim, func() error {
+	if err := core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, lease.LeaseID, claim, true, func() error {
 		return b.removeClaimedVM(ctx, cfg, name, claim, owner)
 	}); err != nil {
 		return err
@@ -722,7 +722,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			}
 			return b.removeClaimedVM(ctx, claimCfg, name, claim, owner)
 		}
-		if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, action); err != nil {
+		if err := core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, claim.LeaseID, claim, true, action); err != nil {
 			return err
 		}
 		core.RemoveStoredTestboxKey(claim.LeaseID)
