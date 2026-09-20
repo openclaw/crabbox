@@ -702,7 +702,7 @@ func (b *backend) deleteServerWithOutcome(ctx context.Context, server core.Serve
 			return fmt.Errorf("finalize vast stop claim: %w", err)
 		}
 	default:
-		if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+		if err := shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 			client, err := b.api()
 			if err != nil {
 				return err

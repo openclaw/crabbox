@@ -481,7 +481,7 @@ func (b *Backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 	if snapshot, _, set := core.ServerLeaseClaimSnapshot(server); set {
 		claim = snapshot
 	}
-	if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+	if err := shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		client, err := b.clientFactory(b.Cfg, b.RT)
 		if err != nil {
 			return err

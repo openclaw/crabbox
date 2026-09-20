@@ -166,7 +166,9 @@ func (b *tenkiBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 		if req.Keep {
 			return
 		}
-		terminate := func() error { return b.terminateSessionAcknowledged(context.Background(), session.ID) }
+		// Failed-acquisition cleanup deliberately outlives the acquisition context.
+		cleanupCtx := context.Background()
+		terminate := func() error { return b.terminateSessionAcknowledged(cleanupCtx, session.ID) }
 		if !claimed {
 			_ = terminate()
 			return
@@ -174,7 +176,7 @@ func (b *tenkiBackend) Acquire(ctx context.Context, req core.AcquireRequest) (co
 		binding := b.claimBinding(leaseID, slug, session.ID)
 		claim, err := shared.RequireExactClaim(binding)
 		if err == nil {
-			_ = shared.RemoveExactClaimAfter(claim, binding, terminate)
+			_ = shared.RemoveExactClaimAfterContext(cleanupCtx, claim, binding, terminate)
 		}
 	}
 	server := b.sessionToServer(cfg, session, leaseID, slug, req.Keep)
@@ -320,7 +322,7 @@ func (b *tenkiBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRe
 	if err != nil {
 		return err
 	}
-	if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+	if err := shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		session, err := b.getSession(ctx, sessionID)
 		if err != nil {
 			return err

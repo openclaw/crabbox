@@ -114,11 +114,13 @@ func (b *spritesBackend) Acquire(ctx context.Context, req core.AcquireRequest) (
 		if req.Keep {
 			return
 		}
-		deleteSprite := func() error { return b.client.DeleteSprite(context.Background(), sprite.Name) }
+		// Failed-acquisition cleanup deliberately outlives the acquisition context.
+		cleanupCtx := context.Background()
+		deleteSprite := func() error { return b.client.DeleteSprite(cleanupCtx, sprite.Name) }
 		if claimed {
 			binding := b.claimBinding(leaseID, slug, sprite.Name)
 			claim, err := shared.RequireExactClaim(binding)
-			if err != nil || shared.RemoveExactClaimAfter(claim, binding, deleteSprite) != nil {
+			if err != nil || shared.RemoveExactClaimAfterContext(cleanupCtx, claim, binding, deleteSprite) != nil {
 				return
 			}
 		} else if deleteSprite() != nil {
@@ -284,7 +286,7 @@ func (b *spritesBackend) ReleaseLease(ctx context.Context, req core.ReleaseLease
 	if err != nil {
 		return err
 	}
-	if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+	if err := shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		sprite, err := b.client.GetSprite(ctx, name)
 		if err != nil {
 			if isSpritesNotFound(err) {
