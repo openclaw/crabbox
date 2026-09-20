@@ -31,6 +31,28 @@ func TestCloneLabels(t *testing.T) {
 	}
 }
 
+func TestSandboxRepositoryMetadataScope(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		repo core.Repo
+		want string
+	}{
+		{"empty", core.Repo{}, "repo-sha256:e3b0c44298fc1c14"},
+		{"whitespace empty", core.Repo{Root: " \t\n", Name: " \n"}, "repo-sha256:e3b0c44298fc1c14"},
+		{"root before name and remote", core.Repo{Root: "abc", Name: "hello", RemoteURL: "https://example.com/repo.git"}, "repo-sha256:ba7816bf8f01cfea"},
+		{"trim root", core.Repo{Root: " \tabc\n", Name: "hello"}, "repo-sha256:ba7816bf8f01cfea"},
+		{"name fallback", core.Repo{Name: "hello"}, "repo-sha256:2cf24dba5fb0a30e"},
+		{"trim name fallback", core.Repo{Root: "\t", Name: " hello\n"}, "repo-sha256:2cf24dba5fb0a30e"},
+		{"remote alone ignored", core.Repo{RemoteURL: "https://example.com/repo.git"}, "repo-sha256:e3b0c44298fc1c14"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SandboxRepositoryMetadataScope(tc.repo); got != tc.want {
+				t.Fatalf("scope=%q want=%q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIndexProviderClaimsPreservesFilteringAndLastKeyWinner(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	ids := []string{"cbx_000000000001", "cbx_000000000002", "cbx_000000000003", "cbx_000000000004"}

@@ -3,7 +3,6 @@ package superserve
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -459,7 +458,7 @@ func (b *backend) ownershipMetadata(baseURL, providerScope, leaseID, slug string
 		metadataEndpointKey: superserveEndpointScope(baseURL),
 		metadataScopeKey:    providerScope,
 		metadataNameKey:     newSandboxName(repo),
-		metadataRepoKey:     repoScope(repo),
+		metadataRepoKey:     shared.SandboxRepositoryMetadataScope(repo),
 	}
 	if leaseID != "" {
 		out[metadataClaimKey] = leaseID
@@ -647,15 +646,6 @@ func newSandboxName(repo core.Repo) string {
 		base = strings.Trim(base[:40], "-")
 	}
 	return namePrefix + base + "-" + shared.RandomSuffix()
-}
-
-func repoScope(repo core.Repo) string {
-	value := strings.TrimSpace(repo.Root)
-	if value == "" {
-		value = strings.TrimSpace(repo.Name)
-	}
-	sum := sha256.Sum256([]byte(value))
-	return "repo-sha256:" + hex.EncodeToString(sum[:8])
 }
 
 func errorsJoin(errs ...error) error {

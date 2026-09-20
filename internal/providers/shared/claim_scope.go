@@ -1,11 +1,24 @@
 package shared
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/url"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+// SandboxRepositoryMetadataScope preserves the opaque repository marker used by
+// sandbox adapters: local root first, then name, without path normalization.
+func SandboxRepositoryMetadataScope(repo core.Repo) string {
+	value := strings.TrimSpace(repo.Root)
+	if value == "" {
+		value = strings.TrimSpace(repo.Name)
+	}
+	sum := sha256.Sum256([]byte(value))
+	return "repo-sha256:" + hex.EncodeToString(sum[:8])
+}
 
 // NormalizedSandboxClaimEndpoint preserves the existing E2B-compatible claim key.
 func NormalizedSandboxClaimEndpoint(raw string) string {

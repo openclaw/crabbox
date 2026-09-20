@@ -3,7 +3,6 @@ package vercelsandbox
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -426,7 +425,7 @@ func (b *backend) ownershipMetadata(providerScope, leaseID, slug string, repo co
 	out := map[string]string{
 		metadataProviderKey: providerName,
 		metadataScopeKey:    providerScope,
-		metadataRepoKey:     repoScope(repo),
+		metadataRepoKey:     shared.SandboxRepositoryMetadataScope(repo),
 	}
 	if leaseID != "" {
 		out[metadataClaimKey] = leaseID
@@ -656,15 +655,6 @@ func newSandboxName(repo core.Repo) string {
 		base = strings.Trim(base[:40], "-")
 	}
 	return "crabbox-" + base + "-" + shared.RandomSuffix()
-}
-
-func repoScope(repo core.Repo) string {
-	value := strings.TrimSpace(repo.Root)
-	if value == "" {
-		value = strings.TrimSpace(repo.Name)
-	}
-	sum := sha256.Sum256([]byte(value))
-	return "repo-sha256:" + hex.EncodeToString(sum[:8])
 }
 
 func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
