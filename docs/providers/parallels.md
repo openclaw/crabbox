@@ -67,6 +67,8 @@ Each source VM should already include:
 - an OpenSSH server listening on `ssh.port`;
 - Crabbox sync tools for the target OS (`git`, `rsync` or archive sync tools,
   and a shell/PowerShell);
+- for macOS, `/bin/bash` and a writable `/usr/local`, used to install the
+  Node/npm readiness baseline when the template does not already provide it;
 - a known-good power-off snapshot for fast linked clones.
 
 Linked clones require an explicit power-off snapshot. Crabbox rejects linked
@@ -81,6 +83,17 @@ For macOS templates, use a user with SSH login permission and a writable
 `parallels.workRoot`, for example `/Users/<user>/crabbox`. For Windows native
 templates, configure OpenSSH Server and PowerShell. For Windows WSL2 templates,
 make sure `wsl.exe` works for the SSH user.
+
+macOS readiness requires working `node` and `npm`, so the template does not have
+to ship them: guest preparation installs Node 24.19.0, matching the Linux
+developer recipe's LTS baseline, when either command is missing. Both Intel and
+Apple Silicon use checksum-pinned official `nodejs.org` archives, with versioned
+installations under `/usr/local/lib/crabbox` and command links in
+`/usr/local/bin`; Homebrew is not required. Healthy existing Node/npm
+installations are retained. Preparation installs this baseline before it checks
+`/usr/local/bin/crabbox-ready`, so templates that already ship a readiness helper
+still receive it. A template that provides its own Node 24 or newer on the
+default command PATH skips the download.
 
 ### macOS desktop credentials
 

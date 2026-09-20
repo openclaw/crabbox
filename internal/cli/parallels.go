@@ -756,11 +756,35 @@ func parallelsMacOSDesktopSetupScript(accountCredentials bool) string {
 `
 }
 
+// Guest preparation runs under /bin/sh on both the Parallels Tools path and
+// the SSH fallback, but the shared installer is bash with pipefail. Hand it to
+// bash through a file so its shell options stay contained and its exit 0 ends
+// only the installer, not preparation. The installer returns immediately once
+// node and npm already resolve, so healthy guest runtimes are left alone.
+func parallelsMacOSNodeBaselineStanza() string {
+	return fmt.Sprintf(`if command -v sw_vers >/dev/null 2>&1; then
+  crabbox_node_install=$(mktemp /tmp/crabbox-node-install.XXXXXX)
+  cat >"$crabbox_node_install" <<'CRABBOX_NODE_INSTALL'
+%s
+CRABBOX_NODE_INSTALL
+  if /bin/bash "$crabbox_node_install" </dev/null; then
+    rm -f "$crabbox_node_install"
+  else
+    crabbox_node_status=$?
+    rm -f "$crabbox_node_install"
+    echo "macOS Node baseline install failed (exit $crabbox_node_status)" >&2
+    exit "$crabbox_node_status"
+  fi
+fi
+`, sharedMacOSNodeInstall())
+}
+
 func parallelsPOSIXEnsureReadyScript(user, workRoot string, desktop, macOSAccountCredentials bool) string {
 	return fmt.Sprintf(`set -eu
 user=%s
 work_root=%s
 desktop=%t
+%s
 if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1; then
   if [ "$desktop" != true ]; then
     exit 0
@@ -857,8 +881,11 @@ if command -v sw_vers >/dev/null 2>&1; then
   cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/bin/sh
 set -eu
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 rsync --version >/dev/null
 curl --version >/dev/null
+node --version >/dev/null
+npm --version >/dev/null
 test -w %s
 READY
 else
@@ -875,7 +902,7 @@ fi
 chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped 2>/dev/null || true
 /usr/local/bin/crabbox-ready
-`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, parallelsMacOSDesktopReadyTest(macOSAccountCredentials), parallelsMacOSDesktopSetupScript(macOSAccountCredentials), shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0])
+`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, parallelsMacOSNodeBaselineStanza(), parallelsMacOSDesktopReadyTest(macOSAccountCredentials), parallelsMacOSDesktopSetupScript(macOSAccountCredentials), shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0])
 }
 
 func parallelsChildCommandEnv(extraEnv []string) []string {

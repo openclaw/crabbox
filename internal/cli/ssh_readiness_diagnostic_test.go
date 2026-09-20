@@ -49,14 +49,18 @@ exit 127
 		t.Fatal(err)
 	}
 
-	target := SSHTarget{User: "runner", Host: host, Port: port, TargetOS: targetMacOS, NoControlMaster: true}
+	// A Parallels macOS lease probes exactly one port, so no fallback noise.
+	target := SSHTarget{User: "runner", Host: host, Port: port, FallbackPorts: []string{}, TargetOS: targetMacOS, NoControlMaster: true}
 	var progress bytes.Buffer
-	err = waitForSSHReady(t.Context(), &target, &progress, "bootstrap", 200*time.Millisecond)
+	// Long enough for one full probe iteration to complete and record
+	// its evidence before the deadline fires.
+	err = waitForSSHReady(t.Context(), &target, &progress, "bootstrap", 2*time.Second)
 	if err == nil {
 		t.Fatal("readiness wait unexpectedly succeeded")
 	}
 	message := err.Error()
 
+	// Transport answered on this port, so readiness is the outstanding stage.
 	if !strings.Contains(message, "probe=readiness") {
 		t.Fatalf("timeout does not blame readiness: %s", message)
 	}

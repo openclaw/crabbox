@@ -303,6 +303,10 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 	profile := sshReadinessProfileForTarget(*target)
 	lastPorts := ""
 	lastProbe := "transport"
+	// A successful transport probe runs a remote command, so it proves both
+	// reachability and authentication. Recording that keeps a readiness-only
+	// failure from being reported as an unknown-authentication timeout.
+	authenticated := false
 	check := func(probeErr error) error {
 		if stopped := sshReadinessProbeContextError(ctx, lastProbe); stopped != nil {
 			return stopped.cause
@@ -316,7 +320,11 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 			if lastPorts != "" {
 				ports = " ports=" + lastPorts
 			}
-			return Exit(5, "timed out waiting for SSH on %s during %s probe=%s cause=deadline_exceeded authentication=unknown%s; %s", target.Host, phase, lastProbe, ports, sshWaitNextAction(phase))
+			authentication := "unknown"
+			if authenticated {
+				authentication = "ok"
+			}
+			return Exit(5, "timed out waiting for SSH on %s during %s probe=%s cause=deadline_exceeded authentication=%s%s; %s", target.Host, phase, lastProbe, authentication, ports, sshWaitNextAction(phase))
 		}
 		return nil
 	}
@@ -417,7 +425,12 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 				if transportPort == "" {
 					transportPort = probe.Port
 				}
-				probes = append(probes, port+":auth")
+				// Transport and authentication both answered on this port; the
+				// readiness command is what is still failing, so report that
+				// stage rather than the probe that just succeeded.
+				authenticated = true
+				lastProbe = "readiness"
+				probes = append(probes, port+":ready")
 			}
 			lastPorts = strings.Join(probes, ",")
 			fmt.Fprintln(stderr, sshWaitProgressMessage(target, phase, reachablePort, transportPort, lastPorts, time.Since(start), time.Until(deadline)))
