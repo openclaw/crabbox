@@ -1061,24 +1061,152 @@ func TestClaimConfigPinsStorage(t *testing.T) {
 	}
 }
 
-func TestTouchKeepsRouting(t *testing.T) {
-	cfg := configFor()
-	b := backendFor(cfg, &fake{})
-	server := core.Server{Labels: labels{
-		"storage":              "home",
-		"instance":             "worker-1",
-		"run_owner_pid":        "1234",
-		"run_owner_started_at": "2026-07-16T00:00:00Z",
-		"run_log":              "/tmp/worker-1.log",
-	}}
-	got, err := b.Touch(bg, core.TouchRequest{Lease: core.LeaseTarget{Server: server}, State: "ready"})
+type touchClock struct{ now time.Time }
+
+func (c touchClock) Now() time.Time { return c.now }
+
+func touchFixture(t *testing.T) (*backend, core.LeaseTarget, core.LeaseClaim, time.Time) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
+	const leaseID, name = "cbx_123456abcdef", "crabbox-touch-fixture"
+	putVM(t, home, name, "bHVtZS10b3VjaC1maXh0dXJl")
+	storage := join(home, ".lume")
+	storageID, err := ensureLumeStorageIdentity(storage)
 	must(t, err)
-	for key, want := range server.Labels {
-		if got.Labels[key] != want {
-			t.Fatalf("label %s=%q want %q", key, got.Labels[key], want)
+	cfg := configFor()
+	cfg.IdleTimeout = 5 * time.Minute
+	cfg.TTL = time.Hour
+	runner := &fake{responses: results{}}
+	b := backendFor(cfg, runner)
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	b.rt.Clock = touchClock{now}
+	inst := lumeVM{Name: name, Status: "running", IPAddress: "192.0.2.10", LocationName: storage}
+	inventory, err := json.Marshal([]lumeVM{inst})
+	must(t, err)
+	runner.responses["get"] = core.LocalCommandResult{Stdout: string(inventory)}
+	immutable, err := lumeVMImmutableID(cfg, inst)
+	must(t, err)
+	metadata := directLeaseLabels(cfg, leaseID, "touch", false, now.Add(-20*time.Minute))
+	for key, value := range (labels{"storage": storage, "storage_exact": "true", "storage_id": storageID, "instance": name, "state": "ready", "run_owner_pid": "1234", "run_owner_started_at": "2026-07-16T00:00:00Z", "run_log": "/tmp/fixture-run.log"}) {
+		metadata[key] = value
+	}
+	server := core.Server{Provider: providerName, CloudID: name, ImmutableID: immutable, Name: name, Labels: metadata}
+	must(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "touch", providerName, instanceScope(name), "", t.TempDir(), cfg.IdleTimeout, false, server, core.SSHTarget{}))
+	claim, err := core.ReadLeaseClaim(leaseID)
+	must(t, err)
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	return b, core.LeaseTarget{LeaseID: leaseID, Server: server}, claim, now
+}
+
+func TestTouchKeepsRouting(t *testing.T) {
+	b, lease, claim, now := touchFixture(t)
+	leaseID, server, metadata := lease.LeaseID, lease.Server, lease.Server.Labels
+	for _, override := range []*time.Duration{nil, ptrDuration(90 * time.Minute), nil} {
+		req := core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}, State: "ready", IdleTimeout: time.Minute, IdleTimeoutOverride: override}
+		got, err := b.Touch(bg, req)
+		must(t, err)
+		persisted, err := core.ReadLeaseClaim(leaseID)
+		must(t, err)
+		wantIdle := claim.IdleTimeoutSeconds
+		if override != nil {
+			wantIdle = int(override.Seconds())
 		}
+		if persisted.Revision == claim.Revision || persisted.LastUsedAt != now.Format(time.RFC3339) || persisted.IdleTimeoutSeconds != wantIdle || !maps.Equal(persisted.Labels, got.Labels) {
+			t.Fatalf("heartbeat did not publish its lifecycle policy: idle=%d want=%d revisionChanged=%v", persisted.IdleTimeoutSeconds, wantIdle, persisted.Revision != claim.Revision)
+		}
+		for _, key := range []string{"storage", "storage_id", "instance", "run_owner_pid", "run_owner_started_at", "run_log"} {
+			if got.Labels[key] != metadata[key] {
+				t.Fatalf("lost routing field %s", key)
+			}
+		}
+		snapshot, exists, set := core.ServerLeaseClaimSnapshot(got)
+		if !set || !exists || !reflect.DeepEqual(snapshot, persisted) {
+			t.Fatal("Touch did not return its committed snapshot")
+		}
+		if wantIdle == 5400 && got.Labels["expires_at"] != core.LeaseLabelTime(now.Add(40*time.Minute)) {
+			t.Fatal("heartbeat lost original TTL cap")
+		}
+		stale := req
+		_, err = b.Touch(bg, stale)
+		if err == nil {
+			t.Fatal("outdated touch unexpectedly published")
+		}
+		resolved, err := b.Resolve(bg, core.ResolveRequest{ID: leaseID, StatusOnly: true, NoLocalStateMutations: true})
+		must(t, err)
+		for key, value := range got.Labels {
+			if resolved.Server.Labels[key] != value {
+				t.Fatalf("fresh resolution lost persisted label %s", key)
+			}
+		}
+		afterRead, err := core.ReadLeaseClaim(leaseID)
+		must(t, err)
+		if !reflect.DeepEqual(afterRead, persisted) {
+			t.Fatal("status resolution mutated the claim")
+		}
+		server, claim = got, persisted
+	}
+	canceled, cancel := context.WithCancel(bg)
+	cancel()
+	_, err := b.Touch(canceled, core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}, State: "ready"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled touch: %v", err)
+	}
+	after, err := core.ReadLeaseClaim(leaseID)
+	must(t, err)
+	if !reflect.DeepEqual(after, claim) {
+		t.Fatal("canceled touch changed the claim")
 	}
 }
+
+func TestLumeResolveRefreshReturnsCommittedSnapshot(t *testing.T) {
+	b, lease, claim, _ := touchFixture(t)
+	writeLumeKnownHost(t, lease.LeaseID, lease.Server.Name, hostKey)
+	resolved, err := b.Resolve(bg, core.ResolveRequest{ID: lease.LeaseID, Repo: core.Repo{Root: claim.RepoRoot}})
+	must(t, err)
+	persisted, err := core.ReadLeaseClaim(lease.LeaseID)
+	must(t, err)
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(resolved.Server)
+	if !set || !exists || !reflect.DeepEqual(snapshot, persisted) || persisted.Revision == claim.Revision {
+		t.Fatal("reuse did not return its newly published snapshot")
+	}
+	_, err = b.Touch(bg, core.TouchRequest{Lease: resolved, State: "ready"})
+	must(t, err)
+}
+
+func TestLumeStoppedObservationOverridesReadyLabel(t *testing.T) {
+	b, lease, claim, _ := touchFixture(t)
+	view := b.serverFromInstance(lumeVM{Name: lease.Server.Name, Status: "stopped", IPAddress: "192.0.2.10"}, claim, b.configForRun())
+	if view.Status != "stopped" || view.Labels["state"] != "stopped" {
+		t.Fatal("stopped observation retained stale ready state")
+	}
+}
+
+func TestLumeTouchRetainsLegacyClaim(t *testing.T) {
+	b, lease, before, _ := touchFixture(t)
+	legacy := before
+	legacy.CloudImmutableID = ""
+	must(t, core.ReplaceLeaseClaimIfUnchanged(lease.LeaseID, before, legacy))
+	legacy, err := core.ReadLeaseClaim(lease.LeaseID)
+	must(t, err)
+	lease.Server.ImmutableID = ""
+	core.SetServerLeaseClaimSnapshot(&lease.Server, legacy, true)
+	want(t, b.AuthorizeStatusTouchClaim(bg, lease, legacy), "without an immutable machine identity")
+	_, err = b.Touch(bg, core.TouchRequest{Lease: lease, State: "ready"})
+	want(t, err, "without an immutable machine identity")
+	after, err := core.ReadLeaseClaim(lease.LeaseID)
+	must(t, err)
+	if !reflect.DeepEqual(after, legacy) {
+		t.Fatal("legacy lease was modified or adopted")
+	}
+	if len(b.rt.Exec.(*fake).calls) != 0 {
+		t.Fatal("legacy refusal invoked provider commands")
+	}
+}
+
+func ptrDuration(d time.Duration) *time.Duration { return &d }
 
 func TestStopRequiresExactOwner(t *testing.T) {
 	cfg := configFor()

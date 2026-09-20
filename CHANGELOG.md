@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Lume: persist heartbeat policy across fresh reads, honor explicit idle-timeout changes, and admit owned instance-scoped leases through the public heartbeat command.
+
 ### Features
 
 - Add opt-in direct-host Parallels capacity limits through `parallels.maxVMs` and `CRABBOX_PARALLELS_MAX_VMS`, preserve fleet-entry precedence, and let explicit YAML zero clear inherited limits. [PR 2392](https://github.com/openclaw/crabbox/pull/2392), [Issue 2386](https://github.com/openclaw/crabbox/issues/2386). Thanks @saariuslystoned.

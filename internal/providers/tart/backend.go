@@ -536,7 +536,7 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 		Authorize: b.AuthorizeStatusTouchClaim,
 		Prepare: func(claim core.LeaseClaim) (map[string]string, time.Time) {
 			now := core.ClockNow(b.rt.Clock).UTC()
-			labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(tartClaimLifecycleLabels(claim), b.configForRun(), req.State, now, req.IdleTimeoutOverride)
+			labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(shared.ClaimLifecycleLabels(claim), b.configForRun(), req.State, now, req.IdleTimeoutOverride)
 			return labels, now
 		},
 	})
@@ -850,24 +850,8 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst tartIn
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: claim.LeaseID}, nil
 }
 
-func tartClaimLifecycleLabels(claim core.LeaseClaim) map[string]string {
-	labels := shared.CloneLabels(claim.Labels)
-	if claim.IdleTimeoutSeconds > 0 {
-		labels["idle_timeout"] = strconv.Itoa(claim.IdleTimeoutSeconds)
-		labels["idle_timeout_secs"] = labels["idle_timeout"]
-	}
-	for key, value := range map[string]string{"created_at": claim.ClaimedAt, "last_touched_at": claim.LastUsedAt} {
-		if labels[key] == "" {
-			if stamp, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
-				labels[key] = core.LeaseLabelTime(stamp)
-			}
-		}
-	}
-	return labels
-}
-
 func (b *backend) serverFromInstance(inst tartInstance, claim core.LeaseClaim, cfg core.Config) core.Server {
-	labels := shared.LabelsWithDefaults(tartClaimLifecycleLabels(claim), map[string]string{
+	labels := shared.LabelsWithDefaults(shared.ClaimLifecycleLabels(claim), map[string]string{
 		"crabbox":     "true",
 		"provider":    providerName,
 		"instance":    inst.Name,

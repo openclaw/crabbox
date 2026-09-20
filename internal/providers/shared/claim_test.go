@@ -661,3 +661,27 @@ func TestFinishScopedLeaseAdmissionAndProjection(t *testing.T) {
 		})
 	}
 }
+
+func TestClaimLifecycleLabels(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		claim core.LeaseClaim
+		want  map[string]string
+	}{
+		{"empty", core.LeaseClaim{}, map[string]string{}},
+		{"persisted fallback", core.LeaseClaim{IdleTimeoutSeconds: 600, ClaimedAt: " 1970-01-01T00:01:40Z ", LastUsedAt: "1970-01-01T00:03:20.123Z", Labels: map[string]string{"idle_timeout_secs": "300", "private_metadata": "preserve: /exact/path"}}, map[string]string{"idle_timeout": "600", "idle_timeout_secs": "600", "created_at": "100", "last_touched_at": "200", "private_metadata": "preserve: /exact/path"}},
+		{"labels retained", core.LeaseClaim{IdleTimeoutSeconds: 0, ClaimedAt: "invalid", LastUsedAt: "invalid", Labels: map[string]string{"created_at": "100", "last_touched_at": "200", "idle_timeout_secs": "300"}}, map[string]string{"created_at": "100", "last_touched_at": "200", "idle_timeout_secs": "300"}},
+		{"invalid fallbacks", core.LeaseClaim{ClaimedAt: "invalid", LastUsedAt: "invalid", Labels: map[string]string{"created_at": ""}}, map[string]string{"created_at": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ClaimLifecycleLabels(tc.claim)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %#v want %#v", got, tc.want)
+			}
+			got["fixture"] = "changed"
+			if tc.claim.Labels["fixture"] != "" {
+				t.Fatal("projection aliases persisted metadata")
+			}
+		})
+	}
+}
