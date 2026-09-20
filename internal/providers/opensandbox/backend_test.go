@@ -42,6 +42,25 @@ func newOpenSandboxTestClient(t *testing.T, server *httptest.Server) openSandbox
 	return client
 }
 
+func TestNewSandboxName(t *testing.T) {
+	for _, tt := range []struct {
+		repo, base string
+	}{
+		{repo: "CRABBOX-My_App", base: "my-app"},
+		{repo: "", base: "crabbox"},
+		{repo: strings.Repeat("a", 48) + "b", base: strings.Repeat("a", 48)},
+		{repo: strings.Repeat("a", 47) + "-b", base: strings.Repeat("a", 47)},
+	} {
+		t.Run(tt.repo, func(t *testing.T) {
+			name := newSandboxName(core.Repo{Name: tt.repo})
+			prefix := "crabbox-" + tt.base + "-"
+			if !strings.HasPrefix(name, prefix) || len(name) != len(prefix)+6 || len(name) > 63 {
+				t.Fatalf("sandbox name = %q, want %q followed by six suffix characters within 63 bytes", name, prefix)
+			}
+		})
+	}
+}
+
 func TestOpenSandboxConfigShowCompletePassiveSection(t *testing.T) {
 	projector, ok := any(Provider{}).(core.ProviderConfigShowProjector)
 	if !ok {
