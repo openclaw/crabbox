@@ -48,7 +48,7 @@ func TestSnapshotArtifactFilesRejectsFIFOSwapWithoutBlocking(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	files, err := listArtifactBundleFilesRoot(root, dir)
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestSnapshotArtifactFilesRejectsFIFOSwapWithoutBlocking(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, cleanup, err := snapshotArtifactFiles(root, files)
+		_, cleanup, err := prepareArtifactFiles(root, files, true)
 		cleanup()
 		done <- err
 	}()
@@ -165,8 +165,7 @@ func TestArtifactPublishSummaryRejectsResolvedSuffixAfterDotDot(t *testing.T) {
 	if !inside {
 		t.Fatalf("resolved suffix alias classified external; targets=%#v", binding.symlinkTargets)
 	}
-	_, cleanup, err := artifactPublishSummaryText("", binding, inside, root, files)
-	defer cleanup()
+	_, err = artifactPublishSummaryText("", binding, inside, root, files)
 	if err == nil || !strings.Contains(err.Error(), "summary file changed") {
 		t.Fatalf("error=%v, want outside identity rejection", err)
 	}
@@ -183,11 +182,11 @@ func TestHostedArtifactUploadsStreamValidatedSnapshot(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer root.Close()
-			files, err := listArtifactBundleFilesRoot(root, bundle)
+			files, err := listArtifactBundleRoot(root, bundle)
 			if err != nil {
 				t.Fatal(err)
 			}
-			snapshots, cleanup, err := snapshotArtifactFiles(root, files)
+			snapshots, cleanup, err := prepareArtifactFiles(root, files, true)
 			if err != nil {
 				t.Fatal(err)
 			}

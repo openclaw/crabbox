@@ -531,7 +531,7 @@ type ParallelsHostConfig struct {
 }
 
 // DefaultTartImage is the immutable built-in image; the Tart adapter verifies its contents.
-const DefaultTartImage = "ghcr.io/cirruslabs/macos-sequoia-base@sha256:785c3acb40fa5af6dd5aab96cd60408372c26125e173c14ea417498d086f829c"
+const DefaultTartImage = "ghcr.io/cirruslabs/macos-sequoia-base@sha256:4947ac5ab1b2fdc46ab856132d2ba958f8e45b5f85192c66370dafc028c514dd"
 
 type ResultsConfig struct {
 	JUnit          []string

@@ -192,6 +192,18 @@ func providerClassCandidatesForConfig(cfg Config) ([]string, bool) {
 	return ProviderClassCandidatesForProfiles(source.ClassProfiles(), cfg)
 }
 
+// ProviderClassPrimaryTypeForProfiles preserves unsupported canonical selectors
+// as unresolved; only noncanonical input may use the provider's legacy fallback.
+func ProviderClassPrimaryTypeForProfiles(profiles []ProviderClassProfile, cfg Config, legacyFallback string) string {
+	if candidates, matched := ProviderClassCandidatesForProfiles(profiles, cfg); matched {
+		return candidates[0]
+	}
+	if IsCanonicalProviderClass(cfg.Class) {
+		return ""
+	}
+	return legacyFallback
+}
+
 func ProviderClassCandidatesForProfiles(profiles []ProviderClassProfile, cfg Config) ([]string, bool) {
 	class := cfg.Class
 	target := normalizeTargetOS(cfg.TargetOS)

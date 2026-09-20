@@ -53,13 +53,7 @@ func (p Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.Linode.Type != "" {
 		return cfg.Linode.Type
 	}
-	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
-		return candidates[0]
-	}
-	if core.IsCanonicalProviderClass(cfg.Class) {
-		return ""
-	}
-	return linodeServerTypeForClass(cfg.Class)
+	return core.ProviderClassPrimaryTypeForProfiles(classProfiles, cfg, linodeServerTypeForClass(cfg.Class))
 }
 
 func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {

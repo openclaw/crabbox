@@ -45,6 +45,11 @@ func (Provider) ApplyFlags(*core.Config, *flag.FlagSet, any) error {
 }
 
 func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, slug string, server core.Server, allowProviderMetadata bool) (core.Server, error) {
+	if existing.FixedCreateIntent != nil {
+		if err := validateFixedDroplet(existing, droplet{ID: server.ID, Name: server.Name, Tags: tagsFromLabels(server.Labels)}); err != nil {
+			return core.Server{}, err
+		}
+	}
 	if provider != providerName {
 		return core.Server{}, core.Exit(2, "refusing to rewrite digitalocean lease=%s as provider=%s", existing.LeaseID, provider)
 	}
@@ -86,13 +91,7 @@ func (p Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.ServerTypeExplicit && cfg.ServerType != "" {
 		return cfg.ServerType
 	}
-	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
-		return candidates[0]
-	}
-	if core.IsCanonicalProviderClass(cfg.Class) {
-		return ""
-	}
-	return digitalOceanServerTypeForClass(cfg.Class)
+	return core.ProviderClassPrimaryTypeForProfiles(classProfiles, cfg, digitalOceanServerTypeForClass(cfg.Class))
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

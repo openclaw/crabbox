@@ -73,14 +73,14 @@ func testWindowsClaimFirstNamespace(t *testing.T, producer string) {
 	if _, err := os.Stat(filepath.Join(state, "testboxes")); !os.IsNotExist(err) {
 		t.Fatalf("claim creation prepared SSH storage: %v", err)
 	}
-	key, _, err := ensureTestboxKey(leaseID)
+	key, _, err := EnsureTestboxKey(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := verifyPrivateWindowsPath(key, false); err != nil {
 		t.Fatal(err)
 	}
-	if reused, _, err := ensureTestboxKey(leaseID); err != nil || reused != key {
+	if reused, _, err := EnsureTestboxKey(leaseID); err != nil || reused != key {
 		t.Fatalf("reuse claim-first key: path=%q error=%v", reused, err)
 	}
 	after, err := windows.GetNamedSecurityInfo(dirs.StateHome, windows.SE_FILE_OBJECT, securityInfo)

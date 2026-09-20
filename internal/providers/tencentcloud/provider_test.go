@@ -68,6 +68,23 @@ func TestProviderFlagsApply(t *testing.T) {
 }
 
 func TestServerTypeForConfigHonorsClassAndTypeProvenance(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cfg  core.Config
+		want string
+	}{
+		{name: "unsupported target", cfg: core.Config{Class: "fast", TargetOS: core.TargetMacOS}},
+		{name: "unsupported architecture", cfg: core.Config{Class: "fast", TargetOS: core.TargetLinux, Architecture: core.ArchitectureARM64}},
+		{name: "legacy normalized fallback", cfg: core.Config{Class: " FAST ", TargetOS: core.TargetMacOS}, want: "SA5.LARGE8"},
+		{name: "unknown legacy fallback", cfg: core.Config{Class: "custom-shape"}, want: defaultType},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			core.MarkClassExplicit(&test.cfg)
+			if got := (Provider{}).ServerTypeForConfig(test.cfg); got != test.want {
+				t.Fatalf("type=%q want=%q", got, test.want)
+			}
+		})
+	}
 	provider := Provider{}
 	defaults := core.BaseConfig()
 	defaults.Provider = providerName
@@ -90,14 +107,14 @@ func TestServerTypeForConfigHonorsClassAndTypeProvenance(t *testing.T) {
 	}
 
 	explicitProviderType := explicitClass
-	explicitProviderType.TencentCloud.Type = "S5.SMALL2"
+	explicitProviderType.TencentCloud.Type = " S5.SMALL2 "
 	core.SetTencentCloudTypeExplicit(&explicitProviderType)
 	if got := provider.ServerTypeForConfig(explicitProviderType); got != "S5.SMALL2" {
 		t.Fatalf("explicit provider type=%q", got)
 	}
 
 	explicitGenericType := explicitProviderType
-	explicitGenericType.ServerType = "S6.MEDIUM4"
+	explicitGenericType.ServerType = " S6.MEDIUM4 "
 	explicitGenericType.ServerTypeExplicit = true
 	if got := provider.ServerTypeForConfig(explicitGenericType); got != "S6.MEDIUM4" {
 		t.Fatalf("explicit generic type=%q", got)

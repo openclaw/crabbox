@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-`CLAUDE.md` is a symlink to this file. Edit `AGENTS.md` and preserve the link so agent instructions stay in sync.
+Edit `AGENTS.md` directly; do not add `CLAUDE.md` aliases.
 
 ## Project Structure & Module Organization
 

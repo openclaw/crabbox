@@ -193,6 +193,15 @@ func TestProviderClassProfileSelectionIsExact(t *testing.T) {
 			if !reflect.DeepEqual(got, test.want) {
 				t.Fatalf("candidates=%v want %v", got, test.want)
 			}
+			primary := ""
+			if test.ok {
+				primary = test.want[0]
+			} else if test.cfg.Class == "custom" || test.cfg.Class == "STANDARD" || test.cfg.Class == " standard " {
+				primary = "legacy-type"
+			}
+			if got := ProviderClassPrimaryTypeForProfiles(provider.ClassProfiles(), test.cfg, "legacy-type"); got != primary {
+				t.Fatalf("primary=%q want %q", got, primary)
+			}
 		})
 	}
 }

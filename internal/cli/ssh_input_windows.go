@@ -44,7 +44,7 @@ func newReplayableSSHInputReaders(expectedSize int64, readers ...io.Reader) (*re
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(os.TempDir(), "crabbox-ssh-"+strings.TrimPrefix(newLeaseID(), "cbx_")+".tmp")
+	path := filepath.Join(os.TempDir(), "crabbox-ssh-"+strings.TrimPrefix(NewLeaseID(), "cbx_")+".tmp")
 	pathUTF16, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err

@@ -85,8 +85,8 @@ attempt so an interrupted operation can be safely replayed.
 it and may append a short suffix if an active lease already uses that slug.
 
 `--lease-id cbx_<12 lowercase hex>` is the automation idempotency contract for
-providers that explicitly support fixed identities. Direct AWS, Machine0, Daytona, Incus,
-and local-container leases, managed coordinator leases, and explicitly capable
+providers that explicitly support fixed identities. Direct AWS, Azure, DigitalOcean,
+Machine0, Daytona, Incus, and local-container leases, managed coordinator leases, and explicitly capable
 external providers accept it. Replaying the same normalized create intent
 returns or joins the same live lease, including after the creating process loses
 its response. A managed coordinator reports `fixed_lease_terminal` when that
@@ -117,7 +117,7 @@ create is confirmed, readiness uses the remaining original creation budget and
 honors caller cancellation. Fixed-ID leases remain available for explicit recovery
 or stop; ordinary creates keep their token-bound cancellation cleanup.
 
-A fixed lease ID is single-use. Direct AWS, Machine0, Daytona, Incus, and local-container
+A fixed lease ID is single-use. Direct AWS, Azure, DigitalOcean, Machine0, Daytona, Incus, and local-container
 acquisitions fail closed if their bound resource later disappears. Successful
 stop and missing-resource cleanup replace the live local claim with a compact
 terminal tombstone, so the ID remains rejected after release. Use a new

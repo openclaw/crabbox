@@ -90,6 +90,11 @@ func TestLocalContainerProviderE2E(t *testing.T) {
 	if leaseID == "" {
 		t.Fatalf("could not parse local-container lease id: stdout=%q stderr=%q", warmup.Stdout, warmup.Stderr)
 	}
+	warmClaim, err := cli.ReadLeaseClaim(leaseID)
+	if err != nil || strings.TrimSpace(warmClaim.Labels["bootstrap_dir"]) == "" {
+		t.Fatalf("warmup did not record its bootstrap directory: %v", err)
+	}
+	bootstrapDir := warmClaim.Labels["bootstrap_dir"]
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cleanupCancel()
@@ -126,6 +131,10 @@ func TestLocalContainerProviderE2E(t *testing.T) {
 	}
 	runCrabboxLocalContainerE2EMust(t, ctx, "stop", "--provider", "docker", leaseID)
 	assertNoLocalContainerLeaseState(t, ctx, leaseID, warmSlug)
+	if _, err := os.Stat(bootstrapDir); !os.IsNotExist(err) {
+		t.Fatalf("local-container e2e left bootstrap directory after cleanup: %v", err)
+	}
+	t.Log("native Docker warmup and SSH reuse passed; container, claim, key, and bootstrap directory are absent after stop")
 
 	staleWarmup := runCrabboxLocalContainerE2EMust(t, ctx,
 		"warmup",

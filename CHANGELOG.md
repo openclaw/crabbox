@@ -5,14 +5,46 @@
 ### Fixes
 
 - Build Apple VM cloud-init seed disks directly with the shared FAT16 writer, removing the host MS-DOS mount requirement while preserving the Firecracker and XCP-ng image formats. [PR 2343](https://github.com/openclaw/crabbox/pull/2343). Thanks @steipete.
-- Redact signed artifact URLs from upload, download, and manifest request setup and transport errors while preserving the operation and underlying failure. [PR 2340](https://github.com/openclaw/crabbox/pull/2340). Thanks @steipete.
-- Keep coordinator-managed lease claims aligned with the broker's idle timeout when resolving SSH access, instead of recording the local default; ordinary touches continue to preserve remote policy. [PR 2339](https://github.com/openclaw/crabbox/pull/2339). Thanks @steipete.
-- Raise production coordinator checkpoint limits to 100 globally, per owner, and per organization so retained worker caches do not exhaust the previous 10-checkpoint owner limit.
-- Finalize abandoned run admissions through bounded, authenticated pre-work bookkeeping, keeping late admission responses from leaving history running and reporting unresolved history honestly. [Issue 2223](https://github.com/openclaw/crabbox/issues/2223). [PR 2227](https://github.com/openclaw/crabbox/pull/2227). Thanks @steipete.
-- Recover abandoned external-provider slug reservation locks on Windows so later reservations can acquire and release normally. [PR 2292](https://github.com/openclaw/crabbox/pull/2292). Thanks @zozo123.
-- Clarify that configured Actions fields and workflow-input inspection belong to hydration, while standalone dispatch sends only explicitly supplied fields. ([#2330](https://github.com/openclaw/crabbox/pull/2330))
-- Let explicit broker heartbeats wait for provider access refreshes using the existing mutation budget, while preserving shorter automatic-heartbeat and foreground-touch deadlines, caller cancellation, and single-request behavior. [PR 2331](https://github.com/openclaw/crabbox/pull/2331). Thanks @steipete.
-- Let admin commands use an already-authorized GitHub broker session when no explicit admin token is configured, preserving token precedence and server denials. [PR 1714](https://github.com/openclaw/crabbox/pull/1714). Thanks @steipete.
+- Remove generated GCP and Azure SSH files after successful failed-acquisition rollback, preserving them on remote cleanup failure and stopping fresh retries when local cleanup fails. [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
+- Allow up to three minutes for GCP acquisition rollback to confirm remote deletion, including after caller cancellation, instead of abandoning the wait after 30 seconds. [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
+- Bound GCP public-IP discovery to two minutes, including in-flight observations, and stop before querying when the caller has already canceled. [PR 2357](https://github.com/openclaw/crabbox/pull/2357). Thanks @steipete.
+- Remove generated GCP lease SSH credentials and host-trust files after confirmed instance deletion or absence; retain the exact claim when SSH cleanup fails so cleanup can be retried. [PR 2357](https://github.com/openclaw/crabbox/pull/2357). Thanks @steipete.
+
+## 0.62.0 - 2026-09-18
+
+### Highlights
+
+- **Recover the same Azure VM or DigitalOcean Droplet.** Fixed lease IDs let direct provisioning recover the original allocation after a lost reply or readiness failure.
+- **Readiness probes now respect their deadlines.** Local Container endpoint checks, SSH inspections, and Tart/Scaleway IP discovery include running provider commands and requests in their timeout budgets.
+- **Keep signed artifact URLs out of errors.** Upload, download, and manifest request failures retain useful diagnostics without exposing signed request URLs.
+- **More reliable lease policy and run history.** SSH access preserves coordinator idle timeouts, explicit heartbeats can finish access refreshes, and abandoned admissions are finalized without replaying workloads.
+
+### Upgrade notes
+
+- Azure and DigitalOcean fixed lease IDs are single-use and require the original local state and per-lease SSH key. Preserve both through retries and cleanup; changed inputs or accounts are rejected, unresolved allocations retain their recovery state, and successful cleanup retires the ID. Azure fixed-ID creation uses one SKU in the configured location without SKU, market, or region fallback; snapshot forks and `ephemeral-preview` disks are unsupported on this path. Ordinary Azure provisioning keeps its existing fallback behavior. [PR 2351](https://github.com/openclaw/crabbox/pull/2351).
+
+### Changes
+
+- Add `warmup --lease-id` support for direct Azure and DigitalOcean leases. Persist the create intent before allocation, recover the same resource after interrupted provisioning, and reject replaced resources using immutable provider identities. [PR 2351](https://github.com/openclaw/crabbox/pull/2351). Thanks @steipete.
+- Raise checkpoint limits in the production Cloudflare coordinator configuration to 100 globally, per owner, and per organization, giving retained worker caches more room. Preview, lease, and checkpoint-use claim limits are unchanged. [PR 2338](https://github.com/openclaw/crabbox/pull/2338). Thanks @steipete.
+
+### Fixes
+
+- Bound each Local Container inspection during SSH readiness to 30 seconds, including final diagnostics, while preserving the overall SSH timeout, original SSH error, and exact-container identity checks. [PR 2352](https://github.com/openclaw/crabbox/pull/2352). Thanks @steipete.
+- Enforce readiness budgets for Local Container endpoint discovery (30 seconds), Tart IP discovery (five minutes), and Scaleway public-IP discovery (five minutes), including in-flight inspections and requests. Preserve each provider's retry behavior and diagnostics, and honor earlier cancellation. [PR 2350](https://github.com/openclaw/crabbox/pull/2350), [PR 2349](https://github.com/openclaw/crabbox/pull/2349), [PR 2348](https://github.com/openclaw/crabbox/pull/2348). Thanks @steipete.
+- Redact signed artifact request URLs from setup and transport errors for uploads, downloads, and manifests, while preserving the operation and underlying failure. [PR 2340](https://github.com/openclaw/crabbox/pull/2340). Thanks @steipete.
+- Preserve the coordinator's reported idle timeout when resolving SSH access and updating managed lease claims, so local defaults do not overwrite remote policy. [PR 2339](https://github.com/openclaw/crabbox/pull/2339). Thanks @steipete.
+- Give explicit broker heartbeats the existing mutation timeout to finish provider access refreshes, while retaining shorter automatic-heartbeat and foreground-touch deadlines, caller cancellation, and single-request behavior. [PR 2331](https://github.com/openclaw/crabbox/pull/2331). Thanks @steipete.
+- Finalize abandoned pre-work admissions against their original request and authentication, preventing late responses from reopening failed history. Bookkeeping may take up to 60 seconds across three attempts after the 10-second admission allowance; the original command error remains the result, and unresolved history is reported with its run ID. Workloads are not replayed, and older stranded records are not repaired automatically. [Issue 2223](https://github.com/openclaw/crabbox/issues/2223), [PR 2227](https://github.com/openclaw/crabbox/pull/2227). Thanks @steipete.
+- Recover abandoned external-provider slug reservation locks on Windows so subsequent reservations can acquire and release them normally. [PR 2292](https://github.com/openclaw/crabbox/pull/2292). Thanks @zozo123.
+- Let admin commands reuse an already-authorized GitHub broker session when no explicit admin token is configured. Explicit tokens retain precedence, and authorization remains with the coordinator. [PR 1714](https://github.com/openclaw/crabbox/pull/1714). Thanks @steipete.
+
+### Maintenance
+
+- Refresh the default Tart macOS Sequoia image to the publisher's September 5 image, with verified manifest and VM configuration hashes.
+- Consolidate configuration and flag ownership for Docker Sandbox, Tart, Codespaces, Islo, Boxd, Static, Hyper-V, Windows Sandbox, Local Container, and Actions while preserving configured values, input precedence, and saved settings. [PR 2327](https://github.com/openclaw/crabbox/pull/2327), [PR 2329](https://github.com/openclaw/crabbox/pull/2329), [PR 2332](https://github.com/openclaw/crabbox/pull/2332), [PR 2333](https://github.com/openclaw/crabbox/pull/2333), [PR 2334](https://github.com/openclaw/crabbox/pull/2334), [PR 2335](https://github.com/openclaw/crabbox/pull/2335).
+- Share primary machine-class selection across DigitalOcean, Linode, OVH, Scaleway, Hetzner, GCP, TencentCloud, Phala, Namespace Devbox, and Vultr while retaining provider-owned defaults, native overrides, and fallback mappings. [PR 2344](https://github.com/openclaw/crabbox/pull/2344), [PR 2345](https://github.com/openclaw/crabbox/pull/2345), [PR 2346](https://github.com/openclaw/crabbox/pull/2346).
+- Clarify that configured Actions fields and workflow-input inspection belong to hydration; standalone dispatch sends only explicitly supplied fields. [PR 2330](https://github.com/openclaw/crabbox/pull/2330).
 
 ## 0.61.0 - 2026-09-17
 

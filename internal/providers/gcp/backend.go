@@ -12,11 +12,13 @@ import (
 
 type gcpLeaseBackend struct{ shared.DirectSSHBackend }
 
+// On-demand guest shutdown can take 120 seconds before deletion completes.
+const gcpAcquireRollbackTimeout = 3 * time.Minute
+
 type gcpClient interface {
 	ListCrabboxServers(context.Context) ([]core.Server, error)
 	ListCrabboxServersComplete(context.Context) ([]core.Server, error)
 	CreateServerWithFallback(context.Context, core.Config, string, string, string, bool, func(string, ...any)) (core.Server, core.Config, error)
-	WaitForServerIP(context.Context, string) (core.Server, error)
 	GetServer(context.Context, string) (core.Server, error)
 	DeleteServer(context.Context, string) error
 	SetLabels(context.Context, string, map[string]string) error
@@ -72,7 +74,7 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		if !rollback || strings.TrimSpace(rollbackCloudID) == "" {
 			return
 		}
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), gcpAcquireRollbackTimeout)
 		defer cancel()
 		cleanupClient, cleanupClientErr := newGCPClient(cleanupCtx, cfg)
 		if cleanupClientErr != nil {
@@ -83,6 +85,10 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		if err := cleanupClient.DeleteServer(cleanupCtx, rollbackCloudID); err != nil {
 			fmt.Fprintf(b.RT.Stderr, "warning: cleanup gcp server %s after acquire failure: %v\n", rollbackCloudID, err)
 			retErr = shared.JoinAcquireCleanupError(retErr, fmt.Errorf("cleanup gcp server %s after acquire failure: %w", rollbackCloudID, err))
+			return
+		}
+		if err := core.RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
+			retErr = shared.JoinAcquireCleanupError(retErr, fmt.Errorf("remove SSH connection artifacts for lease %s after gcp rollback: %w", leaseID, err))
 		}
 	}()
 	client, err = newGCPClient(ctx, cfg)
@@ -91,7 +97,7 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	}
 	rollbackClient = client
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s type=%s zone=%s\n", leaseID, server.DisplayID(), cfg.ServerType, cfg.GCPZone)
-	server, err = client.WaitForServerIP(ctx, server.CloudID)
+	server, err = waitForServerIP(ctx, client, server.CloudID)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -105,6 +111,13 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		fmt.Fprintf(b.RT.Stderr, "warning: set labels: %v\n", err)
 	}
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+}
+
+func waitForServerIP(ctx context.Context, client gcpClient, name string) (core.Server, error) {
+	return shared.PollReady(ctx, 2*time.Minute, 5*time.Second,
+		func(ctx context.Context) (core.Server, error) { return client.GetServer(ctx, name) },
+		func(server core.Server) bool { return server.PublicNet.IPv4.IP != "" },
+		fmt.Errorf("timeout waiting for gcp public ip on %s", name))
 }
 
 func (b *gcpLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
@@ -190,7 +203,7 @@ func (b *gcpLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeas
 	live, err := client.GetServer(ctx, cloudID)
 	if err != nil {
 		if core.IsGCPNotFound(err) {
-			return core.RemoveLeaseClaimIfUnchanged(req.Lease.LeaseID, claim)
+			return shared.RemoveSSHLeaseClaimAfter(claim, nil)
 		}
 		return err
 	}
@@ -360,7 +373,7 @@ func validateExactGCPClaim(claim core.LeaseClaim, server core.Server, expectedLe
 }
 
 func deleteClaimedGCPServer(ctx context.Context, client gcpClient, server core.Server, claim core.LeaseClaim) error {
-	return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+	return shared.RemoveSSHLeaseClaimAfter(claim, func() error {
 		return client.DeleteServer(ctx, server.CloudID)
 	})
 }
@@ -417,7 +430,15 @@ func (b *gcpLeaseBackend) pruneStaleClaims(ctx context.Context, liveLeaseIDs map
 		}
 		fmt.Fprintf(b.RT.Stderr, "remove stale claim lease=%s slug=%s provider=gcp\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 		if !dryRun {
-			core.RemoveLeaseClaim(claim.LeaseID)
+			if strings.TrimSpace(claim.CloudID) == "" {
+				// No resource identity means no per-resource absence proof for SSH cleanup.
+				err = core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim)
+			} else {
+				err = shared.RemoveSSHLeaseClaimAfter(claim, nil)
+			}
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil

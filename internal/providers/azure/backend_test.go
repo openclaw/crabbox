@@ -39,6 +39,7 @@ type fakeAzureClient struct {
 	created           core.Server
 	createCfg         core.Config
 	createErr         error
+	fixedReplyErr     error
 	createFunc        func(core.Server) core.Server
 	waitFunc          func(core.Server) (core.Server, error)
 	waitCalls         int
@@ -176,6 +177,7 @@ func (c *fakeAzureClient) SetTags(_ context.Context, name string, _ map[string]s
 func TestAzureAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	ipErr := errors.New("ip unavailable")
 	fake := &fakeAzureClient{
 		created:   core.Server{CloudID: "crabbox-created", Name: "crabbox-created", Labels: map[string]string{"lease": "cbx_created"}},
@@ -195,6 +197,13 @@ func TestAzureAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != fake.created.CloudID {
 		t.Fatalf("deleted=%v, want created server cleanup", fake.deleted)
+	}
+	key, err := core.TestboxKeyPath(fake.createLeaseIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Dir(key)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("SSH artifacts remain after successful rollback: %v", err)
 	}
 }
 
@@ -295,6 +304,9 @@ func TestAzureAcquireDoesNotRollbackReadyServer(t *testing.T) {
 	}
 	if claim.ProviderScope != azureTestClaimScope || claim.CloudImmutableID != created.ImmutableID {
 		t.Fatalf("claim=%+v, want resolved Azure scope and immutable VM identity", claim)
+	}
+	if _, err := os.Stat(lease.SSH.Key); err != nil {
+		t.Fatalf("ready lease lost its SSH key: %v", err)
 	}
 }
 
@@ -916,36 +928,70 @@ func storeAzureTestClaim(t *testing.T, server core.Server) core.LeaseClaim {
 }
 
 func TestAzureAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
-	for _, failed := range []bool{false, true} {
-		t.Run(fmt.Sprint(failed), func(t *testing.T) {
+	for _, failure := range []string{"", "provider", "artifacts"} {
+		t.Run(failure, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			primary := core.Exit(5, "timed out waiting for SSH: fixture")
 			fake := &fakeAzureClient{createCfg: azureAcquireTestConfig()}
 			cleanupErr := errors.New("delete unavailable")
-			if failed {
+			if failure == "provider" {
 				fake.deleteOwnedFunc = func(core.Server) error { return cleanupErr }
 			}
 			oldClient, oldBootstrap := newAzureClient, bootstrapManagedWindowsDesktop
 			newAzureClient = func(context.Context, core.Config) (azureClient, error) { return fake, nil }
-			bootstrapManagedWindowsDesktop = func(context.Context, core.Config, *core.SSHTarget, string, io.Writer) error { return primary }
+			bootstrapManagedWindowsDesktop = func(context.Context, core.Config, *core.SSHTarget, string, io.Writer) error {
+				key, err := core.TestboxKeyPath(fake.createLeaseIDs[len(fake.createLeaseIDs)-1])
+				if err != nil {
+					t.Fatal(err)
+				}
+				dir := filepath.Dir(key)
+				if err := os.WriteFile(filepath.Join(dir, "known_hosts"), []byte("synthetic host trust\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if failure == "artifacts" {
+					if err := os.RemoveAll(dir); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return primary
+			}
 			t.Cleanup(func() { newAzureClient = oldClient; bootstrapManagedWindowsDesktop = oldBootstrap })
 			var stderr bytes.Buffer
 			b := NewAzureLeaseBackend(core.ProviderSpec{}, fake.createCfg, core.Runtime{Stderr: &stderr}).(*azureLeaseBackend)
 			_, err := b.Acquire(context.Background(), core.AcquireRequest{})
 			want := 2
-			if failed {
+			if failure != "" {
 				want = 1
 			}
 			if len(fake.createLeaseIDs) != want || len(fake.ownedExpected) != want || len(fake.plainDeletes) != 0 || !errors.Is(err, primary) {
 				t.Fatalf("creates=%v deletes=%v error=%v", fake.createLeaseIDs, fake.deleted, err)
 			}
-			if !failed && fake.createLeaseIDs[0] == fake.createLeaseIDs[1] {
+			if failure == "" && fake.createLeaseIDs[0] == fake.createLeaseIDs[1] {
 				t.Fatal("retry reused lease identity")
 			}
-			if failed && (!errors.Is(err, cleanupErr) || strings.Contains(stderr.String(), "retrying with fresh lease")) {
+			if failure == "provider" && !errors.Is(err, cleanupErr) {
 				t.Fatalf("cleanup debt lost: error=%v stderr=%s", err, stderr.String())
+			}
+			if failure != "" && strings.Contains(stderr.String(), "retrying with fresh lease") {
+				t.Fatalf("retried with cleanup debt: %v", err)
+			}
+			if failure == "artifacts" && !strings.Contains(err.Error(), "SSH connection artifacts") {
+				t.Fatalf("lost artifact cleanup error: %v", err)
+			}
+			for _, leaseID := range fake.createLeaseIDs {
+				key, pathErr := core.TestboxKeyPath(leaseID)
+				if pathErr != nil {
+					t.Fatal(pathErr)
+				}
+				_, statErr := os.Lstat(filepath.Dir(key))
+				if failure == "" && !errors.Is(statErr, os.ErrNotExist) || failure != "" && statErr != nil {
+					t.Fatalf("rollback artifact state: %v, failure=%q", statErr, failure)
+				}
 			}
 		})
 	}
@@ -1001,6 +1047,13 @@ func TestAzureAcquireRejectsChangedReadinessGenerationWithoutMutation(t *testing
 				}
 				if _, exists, e := core.ReadLeaseClaimWithPresence(fake.createLeaseIDs[0]); e != nil || exists {
 					t.Fatalf("unexpected claim: exists=%v err=%v", exists, e)
+				}
+				key, pathErr := core.TestboxKeyPath(fake.createLeaseIDs[0])
+				if pathErr != nil {
+					t.Fatal(pathErr)
+				}
+				if _, err := os.Stat(key); err != nil {
+					t.Fatalf("uncertain identity lost its SSH key: %v", err)
 				}
 			})
 		}

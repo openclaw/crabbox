@@ -45,7 +45,7 @@ func TestRunCoordinatorCleanupOutcomes(t *testing.T) {
 				provider := runReadyPoolPreflightTestProvider{}.Spec().Name
 				t.Setenv("CRABBOX_OWNER", "alice@example.com")
 				t.Setenv("CRABBOX_SSH_CONFIG_PROXY", "true")
-				key, err := testboxKeyPath(id)
+				key, err := TestboxKeyPath(id)
 				if err != nil {
 					t.Fatal(err)
 				}
