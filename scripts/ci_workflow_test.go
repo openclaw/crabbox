@@ -451,6 +451,14 @@ func TestCIGoContractRejectsMutations(t *testing.T) {
 			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test"))[6], "run")
 			run.Value = strings.Replace(run.Value, "    'TestWSL2ProductionCleanupKillsEntireStagingGroup',\n", "", 1)
 		}},
+		{"remove SSH skip assertion", func(d *yaml.Node) {
+			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test"))[7], "run")
+			run.Value = strings.Replace(run.Value, "assert not any", "# assert not any", 1)
+		}},
+		{"remove SSH proxy cases", func(d *yaml.Node) {
+			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test"))[7], "run")
+			run.Value = strings.Replace(run.Value, "for proxy in ('false', 'true')", "for proxy in ('false',)", 1)
+		}},
 		{"logging after predicate", func(d *yaml.Node) {
 			ciGoField(ciGoSteps(ciGoJob(d, "go"))[0], "run").Value += "echo done\n"
 		}},
@@ -632,6 +640,22 @@ for name in required:
     for action in ('run', 'pass'):
         assert any(r.get('Test') == name and r['Action'] == action for r in records), (name, action)
 assert not any(r['Action'] == 'skip' for r in records), 'native fixture skipped'
+PY
+`},
+	{"Require real SSH readiness diagnostics", "bash", `go test ./internal/cli -run '^TestWaitForSSHReadyRealSSHTimeoutDiagnostic$' -count=1 -json | tee "$RUNNER_TEMP/ssh-readiness-tests.jsonl"
+python3 - "$RUNNER_TEMP/ssh-readiness-tests.jsonl" <<'PY'
+import json, sys
+records = [json.loads(line) for line in open(sys.argv[1])]
+root = 'TestWaitForSSHReadyRealSSHTimeoutDiagnostic'
+required = [root] + [
+    f'{root}/proxy={proxy}/transport-success={success}'
+    for proxy in ('false', 'true')
+    for success in ('true', 'false')
+]
+for name in required:
+    for action in ('run', 'pass'):
+        assert any(r.get('Test') == name and r['Action'] == action for r in records), (name, action)
+assert not any(r['Action'] == 'skip' for r in records), 'real SSH fixture skipped'
 PY
 `},
 	{"Build", "", "go build -trimpath -o /tmp/crabbox ./cmd/crabbox"},

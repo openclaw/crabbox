@@ -445,7 +445,9 @@ func TestUseLeaseKnownHostsFailsClosedWhenDirectoryCannotBePrepared(t *testing.T
 // component is validated exactly like one this call created, so losing the race
 // is not a reason to fail.
 func TestEnsureLeaseSSHDirectoriesToleratesConcurrentCreation(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	prepareLeaseSSHTestStateRoot(t, root)
+	t.Setenv("XDG_STATE_HOME", root)
 
 	const workers = 8
 	start := make(chan struct{})
@@ -469,10 +471,10 @@ func TestEnsureLeaseSSHDirectoriesToleratesConcurrentCreation(t *testing.T) {
 	}
 }
 
-// A symlink planted at a component is still refused, whether this call created
-// the directory or lost the race to something else.
+// This fixture checks existing-component validation, not a replacement race.
 func TestEnsureLeaseSSHDirectoriesRefusesSymlinkComponent(t *testing.T) {
 	root := t.TempDir()
+	prepareLeaseSSHTestStateRoot(t, root)
 	t.Setenv("XDG_STATE_HOME", root)
 	if err := ensureLeaseSSHDirectories([]string{"crabbox", "testboxes"}); err != nil {
 		t.Fatal(err)
@@ -483,6 +485,9 @@ func TestEnsureLeaseSSHDirectoriesRefusesSymlinkComponent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(elsewhere, filepath.Join(testboxes, "cbx_abcdef123456")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink fixture unavailable: %v", err)
+		}
 		t.Fatal(err)
 	}
 	err := ensureLeaseSSHDirectories([]string{"crabbox", "testboxes", "cbx_abcdef123456"})
@@ -495,6 +500,7 @@ func TestEnsureLeaseSSHDirectoriesRefusesSymlinkComponent(t *testing.T) {
 // lost create race never admits a non-directory.
 func TestEnsureLeaseSSHDirectoriesRefusesFileComponent(t *testing.T) {
 	root := t.TempDir()
+	prepareLeaseSSHTestStateRoot(t, root)
 	t.Setenv("XDG_STATE_HOME", root)
 	if err := ensureLeaseSSHDirectories([]string{"crabbox", "testboxes"}); err != nil {
 		t.Fatal(err)
@@ -506,5 +512,25 @@ func TestEnsureLeaseSSHDirectoriesRefusesFileComponent(t *testing.T) {
 	err := ensureLeaseSSHDirectories([]string{"crabbox", "testboxes", "cbx_abcdef123456"})
 	if err == nil || !strings.Contains(err.Error(), "unsafe path component") {
 		t.Fatalf("file component err=%v, want an unsafe path component refusal", err)
+	}
+}
+
+func TestWalkDirectoryPathToleratesConcurrentCreation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "missing", "parent", "state")
+	const workers = 8
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	for range workers {
+		go func() {
+			<-start
+			errs <- walkDirectoryPathWithoutSymlinks(path, root, true)
+		}()
+	}
+	close(start)
+	for range workers {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent missing-parent creation: %v", err)
+		}
 	}
 }

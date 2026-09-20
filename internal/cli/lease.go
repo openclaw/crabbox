@@ -123,11 +123,7 @@ func ensureLeaseSSHDirectories(components []string) error {
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) {
-			// This is a check-then-create, so a concurrent first-time caller
-			// can win between the Lstat and the create. Losing that race is not
-			// a failure: whatever now occupies the path is validated below
-			// exactly as a directory this call created would be, so a symlink
-			// or a non-directory planted in the window is still refused.
+			// A concurrent caller may win creation; validate its result below.
 			if err := createPrivateSSHTransportDirectory(current); err != nil && !errors.Is(err, os.ErrExist) {
 				return Exit(2, "create private lease SSH directory: %v", err)
 			}
@@ -217,10 +213,7 @@ func walkDirectoryPathWithoutSymlinks(path, boundary string, create bool) error 
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) && create {
-			// Another caller may create this component between the Lstat and
-			// the Mkdir. The symlink and directory checks below run either way,
-			// so an existing component is admitted only on the same terms as
-			// one this call made.
+			// A concurrent caller may win creation; validate its result below.
 			if err := os.Mkdir(current, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 				return err
 			}

@@ -188,30 +188,24 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	if err != nil {
 		return core.StatusView{}, err
 	}
-	waitTimeout := req.WaitTimeout
-	if waitTimeout <= 0 {
-		waitTimeout = blaxelReadyTimeout
+	waitReq := req
+	if waitReq.WaitTimeout <= 0 {
+		waitReq.WaitTimeout = blaxelReadyTimeout
 	}
-	deadline := now(b.rt).Add(waitTimeout)
-	pollCtx := ctx
-	cancel := func() {}
-	if req.Wait {
-		pollCtx, cancel = context.WithTimeout(ctx, waitTimeout)
-	}
-	defer cancel()
-	for {
-		sb, getErr := client.GetSandbox(pollCtx, sandboxID)
+	wait := shared.NewStatusWait(ctx, waitReq, b.rt.Clock, func(id string) error {
+		return core.Exit(5, "timed out waiting for blaxel sandbox %s to become ready", id)
+	})
+	defer wait.Close()
+	return wait.Poll(sandboxID, blaxelStatusPoll, func(ctx context.Context) (core.StatusView, bool, error) {
+		sb, getErr := client.GetSandbox(ctx, sandboxID)
 		if getErr != nil {
-			if req.Wait && errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
+			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
+				return core.StatusView{}, false, ctxErr
 			}
-			if ctx.Err() != nil {
-				return core.StatusView{}, ctx.Err()
-			}
-			return core.StatusView{}, getErr
+			return core.StatusView{}, false, getErr
 		}
 		if err := validateBlaxelSandboxOwnership(claim, sb); err != nil {
-			return core.StatusView{}, err
+			return core.StatusView{}, false, err
 		}
 		state := strings.ToLower(strings.TrimSpace(sb.Status))
 		view := core.StatusView{
@@ -232,24 +226,11 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 				"state":    state,
 			},
 		}
-		if !req.Wait || view.Ready {
-			return view, nil
+		if req.Wait && !view.Ready && isTerminalState(state) {
+			return core.StatusView{}, false, core.Exit(5, "blaxel sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
 		}
-		if isTerminalState(state) {
-			return core.StatusView{}, core.Exit(5, "blaxel sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
-		}
-		if now(b.rt).After(deadline) {
-			return core.StatusView{}, core.Exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
-		}
-		select {
-		case <-pollCtx.Done():
-			if errors.Is(pollCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				return core.StatusView{}, core.Exit(5, "timed out waiting for blaxel sandbox %s to become ready", sandboxID)
-			}
-			return core.StatusView{}, pollCtx.Err()
-		case <-time.After(blaxelStatusPoll):
-		}
-	}
+		return view, false, nil
+	})
 }
 
 func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
