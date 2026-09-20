@@ -131,15 +131,7 @@ interface GCPOperation {
   error?: { errors?: { code?: string; message?: string }[] };
 }
 
-interface GCPMachineImage {
-  id?: string;
-  name?: string;
-  selfLink?: string;
-  status?: string;
-  labels?: Record<string, string>;
-}
-
-interface GCPSnapshot {
+interface GCPImageObservation {
   id?: string;
   name?: string;
   selfLink?: string;
@@ -972,10 +964,20 @@ export class GCPClient {
       return await this.getDiskSnapshot(name);
     }
     if (kind === "gcp-machine-image") {
-      const image = await this.gcp<GCPMachineImage>("GET", `/global/machineImages/${imageName}`);
-      return gcpMachineProviderImage(image, imageName, this.zone, this.project);
+      const image = await this.gcp<GCPImageObservation>(
+        "GET",
+        `/global/machineImages/${imageName}`,
+      );
+      return gcpProviderImage(
+        image,
+        imageName,
+        this.zone,
+        this.project,
+        "gcp-machine-image",
+        image.selfLink ?? gcpMachineImageRef(imageName, this.project),
+      );
     }
-    const image = await this.gcp<GCPMachineImage>(
+    const image = await this.gcp<GCPImageObservation>(
       "GET",
       `/global/machineImages/${imageName}`,
     ).catch((error) => {
@@ -983,7 +985,14 @@ export class GCPClient {
       throw error;
     });
     if (!image) return await this.getDiskSnapshot(name);
-    return gcpMachineProviderImage(image, imageName, this.zone, this.project);
+    return gcpProviderImage(
+      image,
+      imageName,
+      this.zone,
+      this.project,
+      "gcp-machine-image",
+      image.selfLink ?? gcpMachineImageRef(imageName, this.project),
+    );
   }
 
   async deleteImage(name: string, kind?: string): Promise<void> {
@@ -1019,24 +1028,21 @@ export class GCPClient {
 
   private async getDiskSnapshot(name: string): Promise<ProviderImage> {
     const snapshotName = lastPathPart(name);
-    const snapshot = await this.gcp<GCPSnapshot>("GET", `/global/snapshots/${snapshotName}`);
+    const snapshot = await this.gcp<GCPImageObservation>(
+      "GET",
+      `/global/snapshots/${snapshotName}`,
+    );
+    const resourceID = snapshot.selfLink ?? gcpSnapshotRef(snapshotName, this.project);
     return {
-      id: snapshot.name ?? snapshotName,
-      name: snapshot.name ?? snapshotName,
-      state: (snapshot.status ?? "READY").toLowerCase(),
-      provider: "gcp",
-      kind: "gcp-disk-snapshot",
-      region: this.zone,
-      project: this.project,
-      resourceID: snapshot.selfLink ?? gcpSnapshotRef(snapshotName, this.project),
-      ...(snapshot.id ? { immutableID: String(snapshot.id) } : {}),
-      ...(gcpCheckpointTokenHash(snapshot.labels)
-        ? { checkpointOwnershipHash: gcpCheckpointTokenHash(snapshot.labels)! }
-        : {}),
-      ...(snapshot.labels?.["crabbox_checkpoint_lease"]
-        ? { checkpointSourceLeaseID: snapshot.labels["crabbox_checkpoint_lease"] }
-        : {}),
-      snapshots: [snapshot.selfLink ?? gcpSnapshotRef(snapshotName, this.project)],
+      ...gcpProviderImage(
+        snapshot,
+        snapshotName,
+        this.zone,
+        this.project,
+        "gcp-disk-snapshot",
+        resourceID,
+      ),
+      snapshots: [resourceID],
     };
   }
 
@@ -1622,25 +1628,26 @@ function lastPathPart(value: string): string {
   return value.slice(value.lastIndexOf("/") + 1);
 }
 
-function gcpMachineProviderImage(
-  image: GCPMachineImage,
+function gcpProviderImage(
+  image: GCPImageObservation,
   fallbackName: string,
   zone: string,
   project: string,
+  kind: "gcp-machine-image" | "gcp-disk-snapshot",
+  resourceID: string,
 ): ProviderImage {
+  const checkpointOwnershipHash = gcpCheckpointTokenHash(image.labels);
   return {
     id: image.name ?? fallbackName,
     name: image.name ?? fallbackName,
     state: (image.status ?? "READY").toLowerCase(),
     provider: "gcp",
-    kind: "gcp-machine-image",
+    kind,
     region: zone,
     project,
-    resourceID: image.selfLink ?? gcpMachineImageRef(fallbackName, project),
+    resourceID,
     ...(image.id ? { immutableID: String(image.id) } : {}),
-    ...(gcpCheckpointTokenHash(image.labels)
-      ? { checkpointOwnershipHash: gcpCheckpointTokenHash(image.labels)! }
-      : {}),
+    ...(checkpointOwnershipHash ? { checkpointOwnershipHash } : {}),
     ...(image.labels?.["crabbox_checkpoint_lease"]
       ? { checkpointSourceLeaseID: image.labels["crabbox_checkpoint_lease"] }
       : {}),
