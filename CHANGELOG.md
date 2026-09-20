@@ -8,6 +8,7 @@
 
 ### Fixes
 
+- Persist Tart heartbeat timestamps and explicit idle-timeout changes in the lease claim, preserving them across fresh status reads and cleanup without losing SSH target details. [PR 2405](https://github.com/openclaw/crabbox/pull/2405).
 - Show the configured direct-host Parallels capacity in text and JSON config output, including zero and negative unlimited settings, without substituting a fleet limit. [PR 2400](https://github.com/openclaw/crabbox/pull/2400), follow-up to [PR 2392](https://github.com/openclaw/crabbox/pull/2392).
 - Prepare Node and npm before Parallels macOS readiness checks, preserving usable existing runtimes offline and installing the pinned baseline when needed. [PR 2387](https://github.com/openclaw/crabbox/pull/2387), [Issue 2381](https://github.com/openclaw/crabbox/issues/2381). Thanks @saariuslystoned.
 - Check macOS SSH listener availability during Parallels guest preparation, including older readiness helpers and configured fallback ports, so missing listeners fail earlier. [PR 2399](https://github.com/openclaw/crabbox/pull/2399), [Issue 2397](https://github.com/openclaw/crabbox/issues/2397). Thanks @saariuslystoned.
