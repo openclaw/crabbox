@@ -658,6 +658,72 @@ func TestParallelsEnsureGuestReadyEnablesMacOSRemoteLogin(t *testing.T) {
 	}
 }
 
+func TestParallelsEnsureGuestReadyVerifiesMacOSSSHListener(t *testing.T) {
+	runner := &parallelsFakeRunner{}
+	client := NewParallelsClient(Config{}, runner)
+	err := client.EnsureGuestReady(context.Background(), "vm1", Config{
+		SSHUser:  "runner",
+		WorkRoot: "/Users/runner/crabbox",
+		TargetOS: targetMacOS,
+		SSHPort:  "2222",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(runner.lastReq.Args, "\n")
+	// The readiness helper must prove sshd is actually serving. Every launchctl
+	// call above it is intentionally non-fatal, so without this the guest can be
+	// declared ready with no listener at all.
+	for _, want := range []string{
+		"nc -z 127.0.0.1",
+		"ssh_ready=1",
+		`test "$ssh_ready" -eq 1`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("macOS readiness helper missing %q:\n%s", want, got)
+		}
+	}
+	// The configured port is not necessarily the one sshd listens on: crabbox
+	// falls back to 22 on templates that serve there. Probing a single port
+	// would fail guests that work today, so both candidates must be tried.
+	for _, want := range []string{"2222", "22"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("macOS readiness helper missing candidate port %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestParallelsEnsureGuestReadyRechecksMacOSSSHListenerWhenHelperExists(t *testing.T) {
+	runner := &parallelsFakeRunner{}
+	client := NewParallelsClient(Config{}, runner)
+	err := client.EnsureGuestReady(context.Background(), "vm1", Config{
+		SSHUser:  "runner",
+		WorkRoot: "/Users/runner/crabbox",
+		TargetOS: targetMacOS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(runner.lastReq.Args, "\n")
+	// A guest prepared by an older crabbox carries a crabbox-ready that predates
+	// the listener probe. If the early exit trusts that helper alone, such a
+	// guest skips remote-login setup entirely and the new check never runs.
+	if !strings.Contains(got, "crabbox_ssh_listening") {
+		t.Fatalf("early exit does not re-verify the SSH listener:\n%s", got)
+	}
+	idx := strings.Index(got, "if [ -x /usr/local/bin/crabbox-ready ]")
+	if idx < 0 {
+		t.Fatalf("ready-helper short circuit not found:\n%s", got)
+	}
+	line := got[idx:]
+	if end := strings.Index(line, "\n"); end >= 0 {
+		line = line[:end]
+	}
+	if !strings.Contains(line, "crabbox_ssh_listening") {
+		t.Fatalf("ready-helper short circuit does not gate on the listener: %q", line)
+	}
+}
+
 func TestParallelsEnsureGuestReadyEnablesMacOSScreenSharing(t *testing.T) {
 	runner := &parallelsFakeRunner{}
 	client := NewParallelsClient(Config{}, runner)
