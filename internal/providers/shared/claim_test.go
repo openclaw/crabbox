@@ -424,3 +424,99 @@ func TestCommitClaimTouchOrdersAuthorizationAndPublication(t *testing.T) {
 		})
 	}
 }
+
+func TestRefreshRetainedLeaseActivityMissingAndMalformed(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const id = "cbx_123456abcdef"
+	if err := RefreshRetainedLeaseActivity(id, "example", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(id); err != nil || exists {
+		t.Fatalf("missing refresh created claim: exists=%v err=%v", exists, err)
+	}
+	state, err := core.CrabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(state, "claims", id+".json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const malformed = "not claim JSON\n"
+	if err := os.WriteFile(path, []byte(malformed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshRetainedLeaseActivity(id, "example", time.Minute); err == nil {
+		t.Fatal("malformed claim read error was swallowed")
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != malformed {
+		t.Fatalf("malformed claim changed: err=%v", err)
+	}
+}
+
+func TestRefreshRetainedLeaseActivityPreservesOwnershipAndIdlePolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		recorded   int
+		configured time.Duration
+		want       int
+	}{
+		{"recorded wins", 180, 9 * time.Minute, 180},
+		{"zero falls back", 180, 0, 180},
+		{"negative falls back", 180, -time.Minute, 180},
+		{"initialize missing", 0, 9 * time.Minute, 540},
+		{"both missing", 0, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const id = "cbx_123456abcdef"
+			server := core.Server{Provider: "example", CloudID: "sandbox-1", Labels: map[string]string{"lease": id, "slug": "alpha", "custom": "preserved"}}
+			target := core.SSHTarget{Host: "192.0.2.1", User: "fixture", Port: "2222"}
+			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(id, "alpha", "example", "scope-one", "pond-one", t.TempDir(), time.Duration(tc.recorded)*time.Second, false, server, target); err != nil {
+				t.Fatal(err)
+			}
+			before, err := core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			old := before
+			old.LastUsedAt = "2000-01-01T00:00:00Z"
+			old.IdleTimeoutSeconds = tc.recorded
+			if err := core.ReplaceLeaseClaimIfUnchanged(id, before, old); err != nil {
+				t.Fatal(err)
+			}
+			before, err = core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := time.Now().UTC().Truncate(time.Second)
+			if err := RefreshRetainedLeaseActivity(id, "example", tc.configured); err != nil {
+				t.Fatal(err)
+			}
+			after, err := core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			used, err := time.Parse(time.RFC3339, after.LastUsedAt)
+			if err != nil || used.Before(started) || used.After(time.Now().UTC()) {
+				t.Fatalf("last used=%q err=%v", after.LastUsedAt, err)
+			}
+			if after.IdleTimeoutSeconds != tc.want {
+				t.Fatalf("idle=%d want=%d", after.IdleTimeoutSeconds, tc.want)
+			}
+			if after.Revision == before.Revision {
+				t.Fatal("refresh did not publish a new revision")
+			}
+			// Core normalizes idle labels when a positive recorded policy exists.
+			before.LastUsedAt, before.Revision, before.IdleTimeoutSeconds = after.LastUsedAt, after.Revision, tc.want
+			if tc.recorded > 0 {
+				before.Labels = CloneLabels(before.Labels)
+				before.Labels["idle_timeout"] = "180"
+				before.Labels["idle_timeout_secs"] = "180"
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("refresh changed ownership or endpoint metadata: before=%#v after=%#v", before, after)
+			}
+		})
+	}
+}

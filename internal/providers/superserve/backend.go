@@ -209,7 +209,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			if !activated {
 				return nil
 			}
-			return b.refreshSuperserveLeaseActivity(leaseID)
+			return shared.RefreshRetainedLeaseActivity(leaseID, providerName, b.cfg.IdleTimeout)
 		},
 		Cleanup: func(ctx context.Context) error {
 			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isSuperserveNotFound(err) {
@@ -570,27 +570,6 @@ func validateSuperserveSandboxOwnership(claim core.LeaseClaim, sb superserveSand
 	return nil
 }
 
-func (b *backend) refreshSuperserveLeaseActivity(leaseID string) error {
-	claim, err := core.ReadLeaseClaim(leaseID)
-	if err != nil {
-		return err
-	}
-	if claim.LeaseID == "" {
-		return nil
-	}
-	idleTimeout := timeoutOrDefault(b.cfg.IdleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second)
-	return core.ClaimLeaseForRepoProviderScopePond(
-		claim.LeaseID,
-		claim.Slug,
-		providerName,
-		claim.ProviderScope,
-		claim.Pond,
-		claim.RepoRoot,
-		idleTimeout,
-		false,
-	)
-}
-
 func (b *backend) cleanupCreateFailure(ctx context.Context, api superserveClient, sandboxID string, cause error) error {
 	cleanupCtx, cancel := b.cleanupContext(ctx)
 	defer cancel()
@@ -685,13 +664,6 @@ func repoScope(repo core.Repo) string {
 	}
 	sum := sha256.Sum256([]byte(value))
 	return "repo-sha256:" + hex.EncodeToString(sum[:8])
-}
-
-func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
-	if primary > 0 {
-		return primary
-	}
-	return fallback
 }
 
 func errorsJoin(errs ...error) error {

@@ -484,6 +484,13 @@ type CleanupBackend interface {
 }
 ```
 
+Delegated adapters can use `shared.RefreshRetainedLeaseActivity` in their
+`Retained` callback to refresh an existing claim while still holding the
+provider operation lock. It preserves the stored scope, pond and repository,
+treats a missing claim as a no-op, and delegates idle-timeout policy to core.
+It does not perform admission or reclaim; provider-specific warnings and
+activation conditions stay in the adapter.
+
 Delegated adapters that expire local claims by last activity should use
 `shared.ClaimIdleCleanupDue`. It preserves the shared idle-deadline decision
 and skip reasons, including disabled timeouts and invalid timestamps. Absolute
