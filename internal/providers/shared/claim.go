@@ -80,14 +80,9 @@ func RequireExactClaim(want ClaimBinding) (core.LeaseClaim, error) {
 	return claim, nil
 }
 
-// RemoveExactClaimAfter keeps the exact claim fenced until the provider action
-// succeeds and its durable ownership record has been removed.
-func RemoveExactClaimAfter(claim core.LeaseClaim, want ClaimBinding, action func() error) error {
-	return RemoveExactClaimAfterContext(context.Background(), claim, want, action)
-}
-
-// RemoveExactClaimAfterContext also bounds waiting for the exact claim fence.
+// RemoveExactClaimAfterContext validates the binding and waits for the claim fence with ctx.
 // The action must honor ctx itself and must not reenter claim operations.
+// Successful actions still complete durable claim removal after cancellation.
 func RemoveExactClaimAfterContext(ctx context.Context, claim core.LeaseClaim, want ClaimBinding, action func() error) error {
 	if err := ValidateClaimBinding(claim, want); err != nil {
 		return core.Exit(2, "%s lease=%s has a stale exact local ownership claim: %v", want.Provider, want.LeaseID, err)

@@ -354,7 +354,7 @@ func (b *coderLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLe
 	if err != nil {
 		return err
 	}
-	return shared.RemoveExactClaimAfter(claim, binding, func() error {
+	return shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		expected := strings.TrimSpace(claim.Labels["coder_workspace_id"])
 		if !coderWorkspaceUUID.MatchString(expected) {
 			return core.Exit(2, "coder workspace %s has no canonical immutable workspace ID in its exact local ownership claim", name)

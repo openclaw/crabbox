@@ -3,9 +3,11 @@ package tart
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +20,104 @@ type cleanupRaceRunner struct {
 	responses map[string]core.LocalCommandResult
 	onceStop  sync.Once
 	onStop    func()
+}
+
+type cleanupWaitContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (c *cleanupWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}
+
+func TestCleanupCancellationWhileClaimLocked(t *testing.T) {
+	for _, mode := range []string{"live", "missing", "missing-with-later"} {
+		t.Run(mode, func(t *testing.T) {
+			b, runner, claim := cleanupFixture(t)
+			if mode != "live" {
+				if err := os.RemoveAll(filepath.Join(os.Getenv("TART_HOME"), "vms", cleanupVM)); err != nil {
+					t.Fatal(err)
+				}
+				runner.responses["list"] = core.LocalCommandResult{Stdout: "[]"}
+			}
+			const laterLease = "cbx_zzlater"
+			if mode == "missing-with-later" {
+				claimTartLease(t, t.TempDir(), laterLease, "crabbox-later", "stopped")
+				if err := os.RemoveAll(filepath.Join(os.Getenv("TART_HOME"), "vms", "crabbox-later")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			key, err := core.PrepareStoredTestboxKeyPath(claim.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(key, []byte("synthetic SSH key"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			held, release, ownerDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var ownerErr error
+			var unlock sync.Once
+			go func() {
+				defer close(ownerDone)
+				ownerErr = core.WithDurableLeaseClaimLock(claim.LeaseID, func(*core.LeaseClaim, bool, func() error) error {
+					close(held)
+					<-release
+					return nil
+				})
+			}()
+			defer func() { unlock.Do(func() { close(release) }); <-ownerDone }()
+			select {
+			case <-held:
+			case <-ownerDone:
+				t.Fatalf("claim owner failed: %v", ownerErr)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			observed := &cleanupWaitContext{Context: ctx, waiting: make(chan struct{})}
+			done := make(chan struct{})
+			var cleanupErr error
+			go func() {
+				defer close(done)
+				cleanupErr = b.Cleanup(observed, core.CleanupRequest{})
+			}()
+			defer func() { unlock.Do(func() { close(release) }); <-done }()
+			waitObserved := false
+			select {
+			case <-observed.waiting:
+				waitObserved = true
+			case <-time.After(time.Second):
+			}
+			cancel()
+			returnedWhileHeld := false
+			select {
+			case <-done:
+				returnedWhileHeld = true
+			case <-time.After(time.Second):
+			}
+			unlock.Do(func() { close(release) })
+			<-ownerDone
+			<-done
+			if ownerErr != nil || !waitObserved || !returnedWhileHeld || !errors.Is(cleanupErr, context.Canceled) {
+				t.Fatalf("wait observed=%v returned while held=%v owner=%v cleanup=%v", waitObserved, returnedWhileHeld, ownerErr, cleanupErr)
+			}
+			if len(runner.calls) != 1 || runner.calls[0].Args[0] != "list" {
+				t.Fatalf("commands entered after canceled lock admission: %v", runner.calls)
+			}
+			current, exists, err := core.ReadLeaseClaimWithPresence(claim.LeaseID)
+			if err != nil || !exists || !reflect.DeepEqual(current, claim) {
+				t.Fatalf("canceled cleanup changed claim: exists=%v err=%v", exists, err)
+			}
+			if _, err := os.Stat(key); err != nil {
+				t.Fatalf("canceled cleanup removed SSH key: %v", err)
+			}
+			if mode == "missing-with-later" {
+				assertTartClaim(t, laterLease, "stopped")
+			}
+		})
+	}
 }
 
 func (r *cleanupRaceRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {

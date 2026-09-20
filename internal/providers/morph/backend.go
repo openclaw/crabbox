@@ -380,7 +380,7 @@ func (b *morphLeaseBackend) releaseLease(ctx context.Context, req core.ReleaseLe
 		if claimErr != nil {
 			return claimErr
 		}
-		if claimErr = shared.RemoveExactClaimAfter(exact, binding, func() error {
+		if claimErr = shared.RemoveExactClaimAfterContext(ctx, exact, binding, func() error {
 			outcome.Terminal = true
 			return nil
 		}); claimErr != nil {
@@ -476,7 +476,7 @@ func (b *morphLeaseBackend) releaseLease(ctx context.Context, req core.ReleaseLe
 	}
 	deleteInstance := morphDeleteOnRelease(req.Lease, cfg)
 	if deleteInstance {
-		if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+		if err := shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 			if err := verifyLiveOwnership(); err != nil {
 				return err
 			}

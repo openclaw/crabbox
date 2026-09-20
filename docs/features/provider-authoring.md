@@ -391,6 +391,15 @@ required labels, and carry the returned full claim as the exact snapshot for
 later fenced updates. Recovery phases, account or key authorization, live
 resource validation, and every deletion decision remain adapter-owned.
 
+Use `shared.RemoveExactClaimAfterContext` for exact-claim terminal cleanup and
+pass the same lifecycle context that its provider action uses. There is no
+implicit background-context variant: waiting for the claim fence must honor the
+operation's cancellation policy. An acquisition rollback that intentionally
+outlives the acquisition must choose its independent context explicitly, without
+silently changing the provider's existing cleanup budget. A successful action
+still completes durable claim retirement after cancellation; do not add a
+post-action cancellation check that strands already-confirmed cleanup.
+
 `List` returns `[]LeaseView` (a type alias for `Server`). Do not print from
 `List` — core renders the table.
 

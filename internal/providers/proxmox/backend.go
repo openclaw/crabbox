@@ -459,7 +459,7 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 
 func (b *leaseBackend) cleanupClaimedServer(ctx context.Context, client proxmoxClient, server core.Server, claim core.LeaseClaim, binding shared.ClaimBinding) error {
 	var deleteErr error
-	err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+	err := shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		// Inventory is discovery only. Revalidate its node, lifecycle and native
 		// generation while the same claim revision is fenced through removal.
 		currentClaims, err := core.ListLeaseClaims()
