@@ -98,18 +98,39 @@ missing acquired container fails closed instead of starting another container.
 Its fixed claims use the downgrade-safe `local-container-fixed-v1` marker, so
 older clients cannot mistake them for ordinary local-container claims.
 
-Direct Parallels binds the intent to its resolved Parallels host, the normalized
-clone identity, and the host-unique `crabbox-<lease-id>-<slug>` VM name, all
-persisted before `prlctl clone`. That name is the idempotency key: `prlctl`
-refuses a duplicate name on a host, so a concurrent create of the same lease is
-rejected by Parallels even after a lost reply. Replay adopts only the VM at that
-exact recorded name, and only when its UUID, lease-bearing name, and host still
-match. A fixed Parallels lease never re-runs fleet selection; an unreadable
-inventory keeps custody instead of proving absence, and a vanished acquired VM
-fails closed rather than cloning another. Parallels fixed claims keep the
-ordinary `parallels` provider marker and are distinguished by their durable
-create intent, so existing exact-ownership, resolve, and cleanup checks continue
-to fence them.
+Direct Parallels binds the intent to an attested host connection identity, the
+immutable source VM UUID, the normalized clone identity, and the host-unique
+`crabbox-<lease-id>-<slug>` VM name, all persisted before `prlctl clone`. That
+name is the idempotency key: `prlctl` refuses a duplicate name on a host, so a
+concurrent create of the same lease is rejected by Parallels even after a lost
+reply. The host scope is a digest of the Parallels service's own server and
+hardware identifiers, so a fleet entry that keeps its display name while its
+host or account is repointed at another machine reaches a different service and
+is refused, while the same machine answering at a new address still owns and can
+still stop its leases; only attested values enter the scope, and hashing keeps
+host identifiers out of claims, labels, and errors. The
+source name is resolved to its immutable UUID before fingerprinting and before
+clone submission, so replacing a template under the same name is drift rather
+than a different fork.
+
+A Parallels VM name is host-unique but reusable, so replay requires the
+provider-issued incarnation as well: Crabbox pins the UUID a successful clone
+returns before any later reconciliation, and adoption, guest preparation, and
+deletion all require the observed VM to carry exactly that UUID. When a clone
+reply is lost before any UUID is observed, the attempt is unattested and the VM
+occupying its recorded name is not adopted, not credentialed, and not deleted —
+custody is retained and an operator adjudicates the name. A fixed Parallels
+lease never re-runs fleet selection; an unreadable inventory keeps custody
+instead of proving absence, a renamed acquired VM is found by its bound UUID
+rather than reported absent, and a vanished acquired VM fails closed rather than
+cloning another. `crabbox stop` reaches the durable release path through
+fixed-claim-aware resolution, so missing-resource finalization and idempotent
+terminal stop work through the CLI and not only through direct backend calls.
+Parallels fixed claims use the downgrade-safe `parallels-fixed-v1` marker
+alongside AWS's `aws-fixed-v1`, Machine0's `machine0-fixed-v1`, Daytona's
+`daytona-fixed-v1`, and local-container's `local-container-fixed-v1`; current
+clients map it back to runtime Parallels, while released clients cannot mistake
+it for an ordinary Parallels lease and delete its VM or prune its tombstone.
 
 After the direct AWS launch attempt is durable, Crabbox never submits that
 attempt again. An ambiguous replay with no visible tagged instance fails closed;

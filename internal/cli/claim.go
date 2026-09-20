@@ -84,6 +84,7 @@ const FixedAWSClaimProvider = "aws-fixed-v1"
 const FixedMachine0ClaimProvider = "machine0-fixed-v1"
 const FixedDaytonaClaimProvider = "daytona-fixed-v1"
 const FixedLocalContainerClaimProvider = "local-container-fixed-v1"
+const FixedParallelsClaimProvider = "parallels-fixed-v1"
 
 const maxLocalClaimInventoryFileBytes int64 = 1 * 1024 * 1024
 
@@ -1300,6 +1301,8 @@ func canonicalClaimProvider(provider string) string {
 		return "daytona"
 	case FixedLocalContainerClaimProvider:
 		return "local-container"
+	case FixedParallelsClaimProvider:
+		return "parallels"
 	case "exec-provider":
 		return "external"
 	}

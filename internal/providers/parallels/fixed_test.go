@@ -35,13 +35,38 @@ type parallelsFixedRunner struct {
 	cloneErr    error
 	cloneCommit bool
 	listErr     error
-	deleteErr   error
+	// listAllErr fails only the complete `prlctl list -a` inventory read, so a
+	// test can break reconciliation while `list -i` lookups still answer.
+	listAllErr error
+	deleteErr  error
 	// beforeClone observes durable state at the moment prlctl clone is invoked.
 	beforeClone func()
+	// afterClone runs once the clone has committed, so a test can break the
+	// reconciliation that follows a successful create. It is called with the
+	// runner lock already held and must not take it again.
+	afterClone func()
+	// serverID and hardwareID are the machine's attested Parallels service
+	// identity, which a fixed lease's provider scope is derived from.
+	serverID          string
+	hardwareID        string
+	serverIdentityErr error
 }
 
 func newParallelsFixedRunner(source string) *parallelsFixedRunner {
-	return &parallelsFixedRunner{vms: []core.ParallelsVM{{ID: "source-uuid", Name: source, State: "stopped"}}}
+	return &parallelsFixedRunner{
+		vms:        []core.ParallelsVM{{ID: "{source-uuid}", Name: source, State: "stopped"}},
+		serverID:   "local-server-id",
+		hardwareID: "local-hardware-id",
+	}
+}
+
+// seedSource registers an additional template VM the fleet can clone from.
+func (r *parallelsFixedRunner) seedSource(name string) core.ParallelsVM {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	vm := core.ParallelsVM{ID: "{" + name + "-uuid}", Name: name, State: "stopped"}
+	r.vms = append(r.vms, vm)
+	return vm
 }
 
 func (r *parallelsFixedRunner) seed(name string) core.ParallelsVM {
@@ -70,6 +95,18 @@ func (r *parallelsFixedRunner) findLocked(handle string) (core.ParallelsVM, bool
 		}
 	}
 	return core.ParallelsVM{}, false
+}
+
+// rename moves a VM to a different name while keeping its UUID, which is what
+// an out-of-band `prlctl set --name` does to an acquired lease VM.
+func (r *parallelsFixedRunner) rename(from, to string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.vms {
+		if r.vms[i].Name == from {
+			r.vms[i].Name = to
+		}
+	}
 }
 
 func (r *parallelsFixedRunner) replaceUUID(name, uuid string) {
@@ -101,6 +138,17 @@ func encodeParallelsVMs(vms []core.ParallelsVM) string {
 }
 
 func (r *parallelsFixedRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	if req.Name == "prlsrvctl" {
+		if len(req.Args) == 0 || req.Args[0] != "info" {
+			return core.LocalCommandResult{}, errors.New("unexpected prlsrvctl command")
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.serverIdentityErr != nil {
+			return core.LocalCommandResult{Stderr: r.serverIdentityErr.Error()}, r.serverIdentityErr
+		}
+		return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"ID":%q,"Hardware Id":%q}`, r.serverID, r.hardwareID)}, nil
+	}
 	if req.Name != "prlctl" || len(req.Args) == 0 {
 		return core.LocalCommandResult{}, errors.New("unexpected command")
 	}
@@ -121,8 +169,12 @@ func (r *parallelsFixedRunner) Run(_ context.Context, req core.LocalCommandReque
 			return core.LocalCommandResult{Stdout: encodeParallelsVMs([]core.ParallelsVM{vm})}, nil
 		}
 		r.mu.Lock()
+		listAllErr := r.listAllErr
 		out := encodeParallelsVMs(r.vms)
 		r.mu.Unlock()
+		if listAllErr != nil {
+			return core.LocalCommandResult{Stderr: listAllErr.Error()}, listAllErr
+		}
 		return core.LocalCommandResult{Stdout: out}, nil
 	case "snapshot-list":
 		return core.LocalCommandResult{Stdout: "[]"}, nil
@@ -152,6 +204,9 @@ func (r *parallelsFixedRunner) Run(_ context.Context, req core.LocalCommandReque
 		r.addLocked(name)
 		if r.cloneErr != nil {
 			return core.LocalCommandResult{Stderr: r.cloneErr.Error()}, r.cloneErr
+		}
+		if r.afterClone != nil {
+			defer r.afterClone()
 		}
 		return core.LocalCommandResult{}, nil
 	case "start":
@@ -287,8 +342,13 @@ func TestParallelsFixedAcquirePersistsIntentBeforeClone(t *testing.T) {
 	if intent.Attempt["name"] != wantName {
 		t.Fatalf("attempt name at clone time=%q, want %q", intent.Attempt["name"], wantName)
 	}
-	if intent.ProviderScope != "local" || atClone.ProviderScope != "local" {
-		t.Fatalf("provider scope=%q/%q, want local", intent.ProviderScope, atClone.ProviderScope)
+	// The scope is the attested Parallels service identity, never a fleet
+	// entry's display name, so repointing a name cannot pass as the same host.
+	if !strings.HasPrefix(intent.ProviderScope, "prlsrv1:") || intent.ProviderScope != atClone.ProviderScope {
+		t.Fatalf("provider scope=%q/%q, want an attested prlsrv1 connection identity", intent.ProviderScope, atClone.ProviderScope)
+	}
+	if strings.Contains(intent.ProviderScope, "local") {
+		t.Fatalf("provider scope %q still carries a host display name", intent.ProviderScope)
 	}
 	if strings.TrimSpace(intent.Fingerprint) == "" {
 		t.Fatal("intent fingerprint is empty")
@@ -390,6 +450,9 @@ func TestParallelsFixedIntentDriftFailsLeaseIDConflict(t *testing.T) {
 		apply func(*core.Config, *core.AcquireRequest)
 	}{
 		{"source", func(cfg *core.Config, _ *core.AcquireRequest) { cfg.Parallels.Source = "other-source" }},
+		// A mutable source name repointed at a different VM is drift too: the
+		// fingerprint is taken over the immutable UUID the host resolves.
+		{"source_vm_replaced_under_same_name", nil},
 		{"clone_mode", func(cfg *core.Config, _ *core.AcquireRequest) { cfg.Parallels.CloneMode = "unlink" }},
 		{"target_os", func(cfg *core.Config, _ *core.AcquireRequest) { cfg.TargetOS = core.TargetMacOS }},
 		{"windows_mode", func(cfg *core.Config, _ *core.AcquireRequest) { cfg.WindowsMode = core.WindowsModeWSL2 }},
@@ -400,10 +463,19 @@ func TestParallelsFixedIntentDriftFailsLeaseIDConflict(t *testing.T) {
 	} {
 		t.Run(drift.name, func(t *testing.T) {
 			backend, runner, req := fixedParallelsFixture(t)
+			if drift.name == "source" {
+				// The drifted source must exist, or the replay would fail on
+				// resolution instead of on the create identity.
+				runner.seedSource("other-source")
+			}
 			if _, err := backend.Acquire(context.Background(), req); err != nil {
 				t.Fatal(err)
 			}
-			drift.apply(&backend.Cfg, &req)
+			if drift.apply != nil {
+				drift.apply(&backend.Cfg, &req)
+			} else {
+				runner.replaceUUID(backend.Cfg.Parallels.Source, "{replacement-source-uuid}")
+			}
 			_, err := backend.Acquire(context.Background(), req)
 			if err == nil || !strings.Contains(err.Error(), "lease_id_conflict") {
 				t.Fatalf("drifted replay err=%v, want lease_id_conflict", err)
@@ -430,9 +502,23 @@ func TestParallelsFixedConflictingIdentityFailsClosed(t *testing.T) {
 			wantErr: "lease_id_conflict",
 		},
 		{
-			name: "provider_scope_outside_fleet",
+			// An unreachable candidate is not proof that the recorded
+			// connection left the fleet, so custody is retained rather than
+			// rebound or finalized.
+			name: "host_connection_unattestable",
 			corrupt: func(t *testing.T, backend *leaseBackend, _ *parallelsFixedRunner, _ string) {
 				backend.Cfg.Parallels.Hosts = []core.ParallelsHostConfig{{Name: "elsewhere", Host: "elsewhere.example"}}
+			},
+			wantErr: "claim and key retained",
+		},
+		{
+			// The same machine reporting a different service identity is a
+			// different connection, whatever the fleet entry is called.
+			name: "host_service_identity_replaced",
+			corrupt: func(t *testing.T, _ *leaseBackend, runner *parallelsFixedRunner, _ string) {
+				runner.mu.Lock()
+				runner.serverID = "replacement-server-id"
+				runner.mu.Unlock()
 			},
 			wantErr: "lease_id_conflict",
 		},
@@ -444,9 +530,16 @@ func TestParallelsFixedConflictingIdentityFailsClosed(t *testing.T) {
 			wantErr: "lease_id_conflict",
 		},
 		{
-			name: "claim_host_label_drift",
+			// The durable provider scope is the host binding. A claim pointing
+			// at a connection no configured host attests is refused; the `host`
+			// label is an operator-facing display name and is deliberately not
+			// an ownership check.
+			name: "claim_provider_scope_drift",
 			corrupt: func(t *testing.T, _ *leaseBackend, _ *parallelsFixedRunner, _ string) {
-				rewriteFixedClaim(t, fixedTestLeaseID, func(claim *core.LeaseClaim) { claim.Labels["host"] = "somewhere-else" })
+				rewriteFixedClaim(t, fixedTestLeaseID, func(claim *core.LeaseClaim) {
+					claim.ProviderScope = "prlsrv1:" + strings.Repeat("f", 64)
+					claim.FixedCreateIntent.ProviderScope = claim.ProviderScope
+				})
 			},
 			wantErr: "lease_id_conflict",
 		},
@@ -478,27 +571,40 @@ func TestParallelsFixedConflictingIdentityFailsClosed(t *testing.T) {
 
 // 6 — ambiguous or missing post-clone state does not issue a second clone.
 func TestParallelsFixedAmbiguousStateDoesNotReclone(t *testing.T) {
-	t.Run("lost_clone_reply_adopts_exact_vm", func(t *testing.T) {
+	t.Run("lost_clone_reply_retains_custody_without_adopting", func(t *testing.T) {
 		backend, runner, req := fixedParallelsFixture(t)
 		runner.cloneErr, runner.cloneCommit = errors.New("reply lost after commit"), true
 		if _, err := backend.Acquire(context.Background(), req); err == nil {
 			t.Fatal("a lost clone reply must remain uncertain")
 		}
 		name := fixedLeaseVMName(t, req.RequestedLeaseID)
-		created, ok := runner.find(name)
-		if !ok {
+		if _, ok := runner.find(name); !ok {
 			t.Fatalf("fixture did not commit VM %q", name)
 		}
 		runner.cloneErr, runner.cloneCommit = nil, false
-		lease, err := backend.Acquire(context.Background(), req)
-		if err != nil {
-			t.Fatalf("replay after lost reply: %v", err)
+
+		// The clone's UUID was never observed, so the VM occupying the recorded
+		// name is unattested. Replay must not adopt it, must not install the
+		// per-lease key into it, and must not clone a second VM.
+		_, err := backend.Acquire(context.Background(), req)
+		if err == nil || !strings.Contains(err.Error(), "lease_id_conflict") {
+			t.Fatalf("replay after an unattested lost reply err=%v, want lease_id_conflict", err)
 		}
-		if lease.Server.CloudID != created.ID {
-			t.Fatalf("adopted vm=%q, want %q", lease.Server.CloudID, created.ID)
+		if clones, deletes := runner.counts(); clones != 1 || deletes != 0 {
+			t.Fatalf("clone/delete calls=%d/%d, want 1/0", clones, deletes)
 		}
-		if clones, _ := runner.counts(); clones != 1 {
-			t.Fatalf("clone calls=%d, want 1", clones)
+		runner.mu.Lock()
+		execs := len(runner.execCalls)
+		runner.mu.Unlock()
+		if execs != 0 {
+			t.Fatalf("guest exec calls=%d, want 0: an unattested VM received guest mutation", execs)
+		}
+		claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+		if err != nil || !exists || claim.FixedCreateIntent == nil {
+			t.Fatalf("custody was not retained: exists=%t err=%v", exists, err)
+		}
+		if claim.FixedCreateIntent.Attempt["name"] != name {
+			t.Fatalf("attempt name=%q, want %q retained", claim.FixedCreateIntent.Attempt["name"], name)
 		}
 	})
 

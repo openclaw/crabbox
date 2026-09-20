@@ -249,6 +249,37 @@ func parallelsVMMatchesHandle(vm ParallelsVM, id string) bool {
 	return slug != "" && NormalizeLeaseSlug(slug) == NormalizeLeaseSlug(id)
 }
 
+// ParallelsServerIdentity is the Parallels service's own account of the machine
+// it runs on. Neither field is derived from configuration, so it attests which
+// machine a connection actually reached rather than which one it was labelled
+// with.
+type ParallelsServerIdentity struct {
+	ServerID   string `json:"serverId"`
+	HardwareID string `json:"hardwareId"`
+}
+
+// ServerIdentity reads the connected Parallels service identity. A fixed lease
+// binds to this, not to a fleet entry's display name: repointing an entry's
+// host or account at a different machine changes the reported identity.
+func (c *ParallelsClient) ServerIdentity(ctx context.Context) (ParallelsServerIdentity, error) {
+	result, err := c.prlsrvctl(ctx, "info", "--json")
+	if err != nil {
+		return ParallelsServerIdentity{}, commandOutputError("parallels server info", result, err)
+	}
+	var item map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(result.Stdout)), &item); err != nil {
+		return ParallelsServerIdentity{}, Exit(4, "parse Parallels server info: %v", err)
+	}
+	identity := ParallelsServerIdentity{
+		ServerID:   firstJSONField(item, "ID", "Id", "id"),
+		HardwareID: firstJSONField(item, "Hardware Id", "HardwareId", "hardware_id"),
+	}
+	if identity.ServerID == "" {
+		return ParallelsServerIdentity{}, Exit(4, "Parallels host reported no server ID; refusing to bind a fixed lease to an unattested host")
+	}
+	return identity, nil
+}
+
 func (c *ParallelsClient) ListCrabboxServers(ctx context.Context) ([]Server, error) {
 	vms, err := c.ListVMs(ctx)
 	if err != nil {
@@ -973,9 +1004,19 @@ func parallelsChildCommandEnv(extraEnv []string) []string {
 }
 
 func (c *ParallelsClient) prlctl(ctx context.Context, extraEnv []string, args ...string) (LocalCommandResult, error) {
+	return c.parallelsBinary(ctx, extraEnv, "prlctl", args...)
+}
+
+// prlsrvctl reaches the Parallels service rather than a VM. It carries the
+// host's own attested identity, which is what a fixed lease binds to.
+func (c *ParallelsClient) prlsrvctl(ctx context.Context, args ...string) (LocalCommandResult, error) {
+	return c.parallelsBinary(ctx, nil, "prlsrvctl", args...)
+}
+
+func (c *ParallelsClient) parallelsBinary(ctx context.Context, extraEnv []string, binary string, args ...string) (LocalCommandResult, error) {
 	env := parallelsChildCommandEnv(extraEnv)
 	if c.Cfg.Parallels.Host != "" {
-		remote := "PATH=/usr/local/bin:/opt/homebrew/bin:$PATH " + strings.Join(shellWords(append([]string{"prlctl"}, args...)), " ")
+		remote := "PATH=/usr/local/bin:/opt/homebrew/bin:$PATH " + strings.Join(shellWords(append([]string{binary}, args...)), " ")
 		sshArgs := []string{}
 		if c.Cfg.Parallels.HostKey != "" {
 			sshArgs = append(sshArgs, "-i", c.Cfg.Parallels.HostKey, "-o", "IdentitiesOnly=yes")
@@ -987,7 +1028,7 @@ func (c *ParallelsClient) prlctl(ctx context.Context, extraEnv []string, args ..
 		sshArgs = append(sshArgs, host, remote)
 		return c.Runner.Run(ctx, LocalCommandRequest{Name: directSSHExecutable(), Args: sshArgs, Env: env})
 	}
-	return c.Runner.Run(ctx, LocalCommandRequest{Name: "prlctl", Args: args, Env: env})
+	return c.Runner.Run(ctx, LocalCommandRequest{Name: binary, Args: args, Env: env})
 }
 
 func (c *ParallelsClient) hostCommand(ctx context.Context, stdin io.Reader, args ...string) (LocalCommandResult, error) {

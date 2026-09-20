@@ -314,42 +314,87 @@ crabbox warmup --provider parallels --lease-id cbx_abcdef123456 --parallels-temp
 
 The idempotency key is the VM name. Crabbox derives a host-unique
 `crabbox-<lease-id>-<slug>` name from the requested ID and records it, with the
-resolved Parallels host and a hash of the create identity, in the durable lease
-claim **before** it runs `prlctl clone`. `prlctl` refuses a second VM with that
-name on the same host, so a concurrent duplicate create is rejected by Parallels
-itself even when a clone reply is lost.
+attested host connection identity, the immutable source VM UUID, and a hash of
+the create identity, in the durable lease claim **before** it runs
+`prlctl clone`. `prlctl` refuses a second VM with that name on the same host, so
+a concurrent duplicate create is rejected by Parallels itself even when a clone
+reply is lost.
+
+A VM name is host-unique but reusable over time, so it identifies a slot rather
+than a resource. Ownership is therefore bound to two provider-issued identities
+that configuration cannot forge:
+
+- **The host.** The provider scope is a digest of the Parallels service's own
+  server and hardware identifiers, read from `prlsrvctl info`. A fleet entry
+  that keeps its `name:` while its `host:` or `user:` is repointed at a
+  different machine reaches a different service and is refused. Only attested
+  values enter the scope — not the entry's name, its configured address, or the
+  account used to reach it — so the same machine answering at a new address
+  still owns its leases and can still be stopped, and the hashed scope keeps
+  host identifiers out of claims, labels, and error messages. The `host` label
+  on a lease is an operator-facing display name and is deliberately not an
+  ownership check.
+- **The VM incarnation.** Parallels issues a fresh UUID for every clone and
+  never reuses one. Crabbox records the UUID a successful clone returns before
+  any further reconciliation, and every later adoption, guest mutation, and
+  deletion requires the observed VM to carry exactly that UUID.
 
 The reconciliation contract:
 
 - **Replay.** An identical request returns the same live lease. Crabbox adopts
   only the VM at the exact recorded name, and only after re-confirming that its
-  UUID, lease-bearing name, and Parallels host still match the claim.
+  UUID is the incarnation this attempt's clone produced, that its name carries
+  the lease, and that the host connection still attests the recorded identity.
 - **Drift.** A different source VM, source snapshot ID, clone mode, target OS,
   Windows mode, guest user, work root, VM root, or checkpoint ID is a different
-  create identity and fails `lease_id_conflict` instead of provisioning.
+  create identity and fails `lease_id_conflict` instead of provisioning. The
+  source is resolved to its immutable UUID before it enters the fingerprint and
+  before it is submitted to `prlctl clone`, so replacing a template VM under the
+  same name is drift rather than a silent provision from a different template.
 - **Host scope.** A fixed lease never re-runs fleet selection. It reconciles
-  against the host recorded in its intent; if that host is no longer in the
-  configured fleet, the replay fails closed.
-- **Absence.** Only a complete inventory listing proves a VM is gone. A failed
-  `prlctl list` keeps custody rather than cloning a second VM, and an already
-  acquired lease whose VM has disappeared fails closed instead of recreating it.
+  against the host recorded in its intent. A fleet whose hosts cannot be
+  attested keeps custody instead of rebinding; a fleet in which no host attests
+  the recorded identity fails `lease_id_conflict`.
+- **Absence.** Only a complete inventory listing proves a VM is gone, and only
+  the bound UUID being absent from it. A failed `prlctl list` keeps custody
+  rather than cloning a second VM; an acquired VM that has been renamed to
+  another `crabbox-<lease-id>-<slug>` is found by its UUID and keeps custody
+  rather than being reported as deleted; and an acquired lease whose VM has
+  disappeared fails closed instead of recreating it.
+- **Uncertain custody.** If a clone reply is lost before Crabbox observes the
+  new VM's UUID, the attempt is unattested. The VM occupying its recorded name
+  is then *not* adopted: nothing is started, no per-lease key is installed, and
+  nothing is deleted. `warmup` and `stop` both report `lease_id_conflict` and
+  name the VM to inspect. Remove that VM explicitly on the recorded host if it
+  is this lease's orphan, then replay the same lease ID. This is deliberate:
+  the VM name alone cannot prove which incarnation occupies it, and adopting it
+  would hand credentials and deletion authority to whatever is there.
 - **Failure.** A failed fixed acquisition keeps its claim, its recorded attempt,
   and its per-lease key. Retry the same lease ID, or stop it. Crabbox does not
   roll the VM back, because that would make a lost reply indistinguishable from
   a plain failure.
 - **Release.** `stop` deletes only the recorded VM after re-confirming its
-  identity, then keeps a terminal tombstone: the ID, slug, Parallels host scope,
-  intent hash, timestamps, and terminal state. Replaying a released ID never
-  creates another VM. Automatic cleanup never prunes tombstones, and there is no
-  reuse window — deleting local claim state forfeits the protection, so
-  automation must mint a new ID instead.
+  incarnation, then keeps a terminal tombstone: the ID, slug, connection scope,
+  intent hash, timestamps, and terminal state. Stopping a fixed lease whose VM
+  is already gone finalizes that tombstone, and stopping an already terminal
+  lease is an idempotent no-op — both through `crabbox stop`, not only through
+  the provider API. Replaying a released ID never creates another VM. Automatic
+  cleanup never prunes tombstones, and there is no reuse window — deleting local
+  claim state forfeits the protection, so automation must mint a new ID instead.
 
 No path uses the slug to decide replay ownership. A `crabbox-<slug>` VM, or
 another lease's VM carrying the same slug, is never adopted.
 
-A `prepared` intent whose VM is not visible is deliberately inconclusive: the
-clone may still be in flight, so `stop` refuses it. Replay the same lease ID
+A `prepared` intent whose VM was never observed is deliberately inconclusive:
+the clone may still be in flight, so `stop` refuses it. Replay the same lease ID
 first, then stop the lease it reconciles to.
+
+Fixed Parallels claims are stored under the downgrade-safe
+`parallels-fixed-v1` provider marker. Current clients map it back to the
+`parallels` runtime provider, so ownership checks, resolution, and cleanup keep
+routing it; a released client that does not know the marker cannot mistake the
+claim for an ordinary Parallels lease and therefore cannot delete its VM or
+prune its tombstone.
 
 ## Safety
 

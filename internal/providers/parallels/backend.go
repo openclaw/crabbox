@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -189,10 +190,20 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 	if id == "" {
 		return core.LeaseTarget{}, core.Exit(2, "parallels resolve requires lease id or slug")
 	}
-	if claim, ok, err := core.ResolveLeaseClaimForProvider(id, "parallels"); err != nil {
+	fixedClaim, fixedClaimFound, err := core.ResolveLeaseClaimForProvider(id, "parallels")
+	if err != nil {
 		return core.LeaseTarget{}, err
-	} else if ok {
-		id = claim.LeaseID
+	}
+	if fixedClaimFound {
+		id = fixedClaim.LeaseID
+	}
+	fixedClaimFound = fixedClaimFound && parallelsFixedLeaseKind.IsFixedClaim(fixedClaim)
+	// A terminal fixed lease has no resource and needs no host. Answering it
+	// before the inventory sweep is what makes `crabbox stop` on an already
+	// released fixed ID an idempotent no-op rather than an error, even when the
+	// fleet is unreachable.
+	if req.ReleaseOnly && fixedClaimFound && fixedClaim.FixedCreateIntent.State == "released" {
+		return parallelsFixedReleaseTarget(fixedClaim), nil
 	}
 	var hostErrs []error
 	for _, candidate := range core.ParallelsCandidateConfigs(b.Cfg) {
@@ -272,7 +283,32 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 	if len(hostErrs) > 0 {
 		return core.LeaseTarget{}, fmt.Errorf("parallels fleet inventory incomplete while resolving %s: %w", req.ID, errors.Join(hostErrs...))
 	}
+	// A fixed lease's durable claim is its own recovery route. Stop resolves
+	// before releasing, and an acquired VM that is already gone, or an
+	// unfinished attempt, has no live inventory match. Hand the claim to the
+	// release path instead of failing here: releaseFixed re-attests the host
+	// connection and the recorded VM incarnation, finalizes only a proven
+	// absence, and retains custody otherwise. A complete sweep reached this
+	// point, so absence is at least well-founded.
+	if req.ReleaseOnly && fixedClaimFound {
+		return parallelsFixedReleaseTarget(fixedClaim), nil
+	}
 	return core.LeaseTarget{}, core.Exit(4, "parallels lease not found: %s", req.ID)
+}
+
+// parallelsFixedReleaseTarget carries only the identity the durable release
+// path needs. It grants no SSH access and asserts no live resource: releaseFixed
+// reads the claim itself and performs every ownership and attestation check.
+func parallelsFixedReleaseTarget(claim core.LeaseClaim) core.LeaseTarget {
+	server := core.Server{
+		CloudID:  claim.CloudID,
+		Provider: parallelsProviderName,
+		Name:     strings.TrimSpace(claim.FixedCreateIntent.Attempt["name"]),
+		Status:   "unknown",
+		Labels:   maps.Clone(claim.Labels),
+	}
+	server.ImmutableID = claim.CloudImmutableID
+	return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}
 }
 
 func parallelsSSHTarget(cfg core.Config, host string) core.SSHTarget {
@@ -334,6 +370,20 @@ func authorizeParallelsResolve(req core.ResolveRequest, leaseID, vmID, host stri
 	readOnlyStatus := req.StatusOnly && !req.ReleaseOnly && !req.Reclaim
 	if owned || readOnlyStatus {
 		return false, nil
+	}
+	if req.ReleaseOnly {
+		// A fixed claim that has not yet bound a VM fails this exact-ownership
+		// check, which would end stop before the durable release path runs. Let
+		// releaseFixed answer instead: it re-attests the host connection and the
+		// recorded VM incarnation, so it is strictly stricter than this gate and
+		// reports uncertain custody in terms the operator can act on.
+		claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return false, err
+		}
+		if exists && parallelsFixedLeaseKind.IsFixedClaim(claim) {
+			return false, nil
+		}
 	}
 	if req.ReleaseOnly || !req.Reclaim {
 		return false, parallelsOwnershipError(leaseID, vmID, host)
