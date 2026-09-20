@@ -778,11 +778,22 @@ if command -v sw_vers >/dev/null 2>&1; then
     # root, crabbox-ready and the probe all look, so every caller agrees.
     crabbox_node_bin=$(su - "$user" -c 'bash -lc "command -v node"' </dev/null 2>/dev/null || true)
     crabbox_npm_bin=$(su - "$user" -c 'bash -lc "command -v npm"' </dev/null 2>/dev/null || true)
+    # Guard each destination on its own. The commands can sit in different
+    # prefixes -- node already at /usr/local/bin with npm only in the user's
+    # login PATH is a healthy template -- and a combined guard would reject
+    # preservation whenever either one already occupies its destination,
+    # downloading over a runtime that already satisfies readiness. If neither
+    # needs linking, the install at /usr/local/bin is the one that just failed
+    # the probe above, so fall through and let the installer replace it.
     if [ -x "$crabbox_node_bin" ] && [ -x "$crabbox_npm_bin" ] &&
-      [ "$crabbox_node_bin" != /usr/local/bin/node ] && [ "$crabbox_npm_bin" != /usr/local/bin/npm ]; then
+      { [ "$crabbox_node_bin" != /usr/local/bin/node ] || [ "$crabbox_npm_bin" != /usr/local/bin/npm ]; }; then
       install -d -m 0755 /usr/local/bin
-      ln -sfn "$crabbox_node_bin" /usr/local/bin/node
-      ln -sfn "$crabbox_npm_bin" /usr/local/bin/npm
+      if [ "$crabbox_node_bin" != /usr/local/bin/node ]; then
+        ln -sfn "$crabbox_node_bin" /usr/local/bin/node
+      fi
+      if [ "$crabbox_npm_bin" != /usr/local/bin/npm ]; then
+        ln -sfn "$crabbox_npm_bin" /usr/local/bin/npm
+      fi
       crabbox_npx_bin=$(su - "$user" -c 'bash -lc "command -v npx"' </dev/null 2>/dev/null || true)
       if [ -x "$crabbox_npx_bin" ] && [ "$crabbox_npx_bin" != /usr/local/bin/npx ]; then
         ln -sfn "$crabbox_npx_bin" /usr/local/bin/npx
