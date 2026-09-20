@@ -1,19 +1,18 @@
-package shared
+package fat16
 
 import (
 	"encoding/binary"
 	"fmt"
 	"strings"
-
-	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type FATFile struct {
+type File struct {
 	Name string
 	Data []byte
 }
 
-func BuildFAT16Image(label string, files []FATFile, shortNameFormat, errorPrefix string) ([]byte, error) {
+// Build creates a FAT16 image with long filenames in its root directory.
+func Build(label string, files []File, shortNameFormat string) ([]byte, error) {
 	const (
 		bytesPerSector    = 512
 		sectorsPerCluster = 4
@@ -67,7 +66,7 @@ func BuildFAT16Image(label string, files []FATFile, shortNameFormat, errorPrefix
 	rootOffset += 32
 	for i, file := range files {
 		if strings.TrimSpace(file.Name) == "" {
-			return nil, core.Exit(2, "%s file name is required", errorPrefix)
+			return nil, fmt.Errorf("file name is required")
 		}
 		cluster := nextCluster
 		clusterCount := (len(file.Data) + clusterSize - 1) / clusterSize
@@ -75,13 +74,13 @@ func BuildFAT16Image(label string, files []FATFile, shortNameFormat, errorPrefix
 			clusterCount = 1
 		}
 		if cluster-2+clusterCount > dataClusters || cluster+clusterCount > fatEntries {
-			return nil, core.Exit(2, "%s payload is too large", errorPrefix)
+			return nil, fmt.Errorf("payload is too large")
 		}
 		short := fmt.Sprintf(shortNameFormat, i+1)
 		checksum := fatShortChecksum([]byte(short))
 		lfnEntries := fatLongNameEntries(file.Name, checksum)
 		if rootOffset+(len(lfnEntries)+1)*32 > len(root) {
-			return nil, core.Exit(2, "%s directory is too large", errorPrefix)
+			return nil, fmt.Errorf("directory is too large")
 		}
 		for c := 0; c < clusterCount; c++ {
 			entry := (cluster + c) * 2
