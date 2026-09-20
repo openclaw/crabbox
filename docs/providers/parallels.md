@@ -235,9 +235,14 @@ host are therefore serialized against each other, which adds the clone time of
 the forks ahead in the queue. A host with no `maxVMs` has no limit to enforce
 and its forks stay fully parallel.
 
-The reservation is a local file lock, so it bounds forks driven from one
-machine. Two machines driving the same remote Parallels host still race against
-each other.
+The reservation is a local file lock shared by callers using the same Crabbox
+state directory and exact configured host/account (with surrounding whitespace
+trimmed). Display names and SSH key paths do not change the reservation identity;
+all local entries share one identity. SSH/DNS aliases are not resolved, so use the
+same host/account spelling for callers that must coordinate. Different state
+directories or machines driving the same Parallels host still race against each
+other. Advisory queries such as `doctor` and `checkpoint fork --dry-run` neither
+take a reservation nor write capacity-lock state.
 
 ### Environment variables
 

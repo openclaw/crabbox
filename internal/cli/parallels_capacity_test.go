@@ -3,7 +3,10 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -132,7 +135,7 @@ func parallelsCapacityTestConfig(source string, maxVMs int) Config {
 // the clone, or replacing it with the advisory SelectParallelsFleetConfig,
 // reproduces that failure.
 func TestParallelsFleetCapacityBoundsConcurrentForks(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateParallelsCapacityState(t)
 	const (
 		source = "linux-template"
 		forks  = 8
@@ -179,4 +182,114 @@ func TestParallelsFleetCapacityBoundsConcurrentForks(t *testing.T) {
 	if clones != maxVMs || refused != forks-maxVMs {
 		t.Fatalf("want %d clones and %d refusals, got clones=%d refused=%d peak=%d", maxVMs, forks-maxVMs, clones, refused, peak)
 	}
+}
+
+func isolateParallelsCapacityState(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+}
+
+func TestParallelsCapacityExecutionIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		host      string
+		user      string
+		otherHost string
+		otherUser string
+		shared    bool
+	}{
+		{name: "display aliases and keys share remote capacity", host: "mac.example", user: "alice", otherHost: " mac.example ", otherUser: " alice ", shared: true},
+		{name: "local aliases ignore remote account fields", user: "alice", otherUser: "bob", shared: true},
+		{name: "different destinations", host: "mac.example", user: "alice", otherHost: "other.example", otherUser: "alice"},
+		{name: "different accounts", host: "mac.example", user: "alice", otherHost: "mac.example", otherUser: "bob"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateParallelsCapacityState(t)
+			cfg := parallelsCapacityTestConfig("template", 1)
+			cfg.Parallels.Hosts[0].Name = "first-alias"
+			cfg.Parallels.Hosts[0].Host = tc.host
+			cfg.Parallels.Hosts[0].User = tc.user
+			cfg.Parallels.Hosts[0].Key = "first-key"
+			first := ParallelsCandidateConfigs(cfg)[0]
+			cfg.Parallels.Hosts[0].Name = "second-alias"
+			cfg.Parallels.Hosts[0].Host = tc.otherHost
+			cfg.Parallels.Hosts[0].User = tc.otherUser
+			cfg.Parallels.Hosts[0].Key = "second-key"
+			second := ParallelsCandidateConfigs(cfg)[0]
+			// Candidate configs retain Hosts; avoid changing the first candidate's
+			// capacity lookup while constructing the second display alias.
+			first.Parallels.Hosts = []ParallelsHostConfig{{Name: "first-alias", MaxVMs: 1}}
+			release, err := lockParallelsFleetCapacity(context.Background(), first)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			otherRelease, err := lockParallelsFleetCapacity(ctx, second)
+			if tc.shared {
+				if otherRelease != nil {
+					otherRelease()
+				}
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("same execution identity acquired a second reservation: %v", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("independent execution identity blocked: %v", err)
+				}
+				otherRelease()
+			}
+		})
+	}
+}
+
+func TestParallelsAdvisorySelectionDoesNotReserveCapacity(t *testing.T) {
+	isolateParallelsCapacityState(t)
+	const source = "template"
+	cfg := parallelsCapacityTestConfig(source, 1)
+	host := newParallelsCapacityFakeHost(source, 0)
+	_, release, err := ReserveParallelsFleetCapacity(context.Background(), cfg, host, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := SelectParallelsFleetConfig(ctx, cfg, host, source); err != nil {
+		t.Fatalf("advisory query blocked behind reservation: %v", err)
+	}
+
+	// A file in place of the state root makes any lock-state write fail even
+	// when the test runs with elevated filesystem permissions.
+	blockedState := filepath.Join(t.TempDir(), "state-file")
+	if err := os.WriteFile(blockedState, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", blockedState)
+	if _, err := SelectParallelsFleetConfig(context.Background(), cfg, host, source); err != nil {
+		t.Fatalf("advisory query required writable state: %v", err)
+	}
+}
+
+func TestParallelsUnlimitedCapacityBypassesReservation(t *testing.T) {
+	isolateParallelsCapacityState(t)
+	const source = "template"
+	cfg := parallelsCapacityTestConfig(source, 1)
+	host := newParallelsCapacityFakeHost(source, 0)
+	_, release, err := ReserveParallelsFleetCapacity(context.Background(), cfg, host, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	cfg.Parallels.Hosts[0].MaxVMs = 0
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, unlimitedRelease, err := ReserveParallelsFleetCapacity(ctx, cfg, host, source)
+	if err != nil {
+		t.Fatalf("unlimited host waited on capacity reservation: %v", err)
+	}
+	unlimitedRelease()
 }

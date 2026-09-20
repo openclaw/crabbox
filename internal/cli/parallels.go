@@ -107,7 +107,7 @@ func ParallelsCandidateConfigs(cfg Config) []Config {
 // returns. Callers that go on to create a VM must use ReserveParallelsFleetCapacity
 // so the count and the clone happen under one reservation.
 func SelectParallelsFleetConfig(ctx context.Context, cfg Config, runner CommandRunner, source string) (Config, error) {
-	selected, release, err := ReserveParallelsFleetCapacity(ctx, cfg, runner, source)
+	selected, release, err := selectParallelsFleetConfig(ctx, cfg, runner, source, false)
 	if err != nil {
 		return Config{}, err
 	}
@@ -123,16 +123,24 @@ func SelectParallelsFleetConfig(ctx context.Context, cfg Config, runner CommandR
 // can put 8 VMs on a host configured maxVMs: 2. Callers must hold the reservation
 // until their clone has completed and is visible to the next ListVMs.
 //
-// The lock is advisory and local to this machine: it bounds concurrent forks driven
-// from one host, which is what shard fan-out does. Two machines driving the same
-// remote Parallels host still race.
+// Reservations coordinate callers sharing a state directory and the same configured
+// host/account. Display names and keys do not affect lock identity; SSH aliases are
+// not resolved. Independent state directories or machines still race.
 func ReserveParallelsFleetCapacity(ctx context.Context, cfg Config, runner CommandRunner, source string) (Config, func(), error) {
+	return selectParallelsFleetConfig(ctx, cfg, runner, source, true)
+}
+
+func selectParallelsFleetConfig(ctx context.Context, cfg Config, runner CommandRunner, source string, reserve bool) (Config, func(), error) {
 	var lastErr error
 	for _, candidate := range ParallelsCandidateConfigs(cfg) {
-		release, err := lockParallelsFleetCapacity(ctx, candidate)
-		if err != nil {
-			lastErr = err
-			continue
+		release := func() {}
+		if reserve {
+			var err error
+			release, err = lockParallelsFleetCapacity(ctx, candidate)
+			if err != nil {
+				lastErr = err
+				continue
+			}
 		}
 		client := NewParallelsClient(candidate, runner)
 		vms, err := client.ListVMs(ctx)
@@ -166,7 +174,7 @@ func lockParallelsFleetCapacity(ctx context.Context, cfg Config) (func(), error)
 	if parallelsHostMaxVMs(cfg) <= 0 {
 		return func() {}, nil
 	}
-	path, err := parallelsCapacityLockPath(parallelsHostRefForConfig(cfg))
+	path, err := parallelsCapacityLockPath(parallelsCapacityIdentity(cfg))
 	if err != nil {
 		return nil, err
 	}
@@ -178,7 +186,15 @@ func lockParallelsFleetCapacity(ctx context.Context, cfg Config) (func(), error)
 	return func() { _ = lock.Close() }, nil
 }
 
-func parallelsCapacityLockPath(hostRef string) (string, error) {
+func parallelsCapacityIdentity(cfg Config) string {
+	host := strings.TrimSpace(cfg.Parallels.Host)
+	if host == "" {
+		return "local"
+	}
+	return "remote\x00" + host + "\x00" + strings.TrimSpace(cfg.Parallels.HostUser)
+}
+
+func parallelsCapacityLockPath(identity string) (string, error) {
 	dir, err := CrabboxStateDir()
 	if err != nil {
 		return "", err
@@ -187,9 +203,8 @@ func parallelsCapacityLockPath(hostRef string) (string, error) {
 	if err := makePrivateDurableDirectories(dir); err != nil {
 		return "", Exit(2, "create Parallels capacity lock directory: %v", err)
 	}
-	// Host refs are operator-supplied names or hostnames; digest them so the lock
-	// file name stays a safe path component.
-	digest := sha256.Sum256([]byte(hostRef))
+	// Digest the execution identity so operator-supplied values stay out of paths.
+	digest := sha256.Sum256([]byte(identity))
 	return filepath.Join(dir, hex.EncodeToString(digest[:])+".lock"), nil
 }
 
