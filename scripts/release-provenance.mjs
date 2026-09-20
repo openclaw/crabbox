@@ -4,15 +4,16 @@ import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { releaseToolchainPolicy } from "./release-policy.mjs";
 
 const REPOSITORY = "openclaw/crabbox";
 const TEAM_ID = "FWJYW4S8P8";
 const AUTHORITY = `Developer ID Application: OpenClaw Foundation (${TEAM_ID})`;
+const RUNTIME_ID = "org.openclaw.crabbox.runtime";
 const CLI_ID = "org.openclaw.crabbox";
 const HELPER_ID = "org.openclaw.crabbox.apple-vm-helper";
 const VMD_ID = "org.openclaw.crabbox.apple-vm-vmd";
-const GO_VERSION = "go1.26.4";
-const GORELEASER_VERSION = "2.17.0";
+const CURRENT_TOOLCHAIN = releaseToolchainPolicy(path.resolve(import.meta.dirname, ".."));
 const CANDIDATE_MANIFEST = ".components/candidate-manifest.json";
 const VMD_COMPONENT = ".components/crabbox-apple-vm-vmd";
 const VMD_ENTITLEMENTS_SHA256 = crypto
@@ -86,19 +87,36 @@ function releaseNotes(notesFile) {
 
 function runtimePackExpected(args, actual = false) {
   const requested = args["runtime-pack"];
-  if (requested !== undefined && requested !== "true" && requested !== "false") {
-    throw new Error("--runtime-pack must be true or false");
+  if (requested !== undefined && !["true", "false", "filesystem"].includes(requested)) {
+    throw new Error("--runtime-pack must be true, false or filesystem");
   }
-  if (requested !== undefined && (requested === "true") !== actual) {
+  const expected = requested === "filesystem" ? "filesystem" : requested === "true";
+  if ((requested !== undefined && expected !== actual) ||
+      (actual === "filesystem" && requested !== "filesystem")) {
     throw new Error("runtime pack layout does not match the frozen source capability");
   }
   return actual;
 }
 
+function runtimeMode(schemaVersion) {
+  return schemaVersion === 3 ? "filesystem" : schemaVersion === 2;
+}
+
+function releaseSchema(runtimePack) {
+  return runtimePack === "filesystem" ? 3 : runtimePack ? 2 : 1;
+}
+
+function filesystemBuildId(value) {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) {
+    throw new Error("filesystem build ID must be a full lowercase SHA-256");
+  }
+  return value;
+}
+
 // Reports are produced afresh by protected runtime-artifacts extraction in the
 // caller's private staging directory. Their archive identity prevents mixing
 // reports between payloads; they are not a substitute for that extraction gate.
-function runtimePackReport(directory, reports, name, platform, arch) {
+function runtimePackReport(directory, reports, name, platform, arch, buildId) {
   if (!reports) throw new Error("runtime pack layout requires --runtime-reports from protected extraction");
   const file = path.join(reports, `${name}.json`);
   const stat = fs.lstatSync(file);
@@ -113,8 +131,8 @@ function runtimePackReport(directory, reports, name, platform, arch) {
     throw new Error(`runtime extraction report does not match archive: ${name}`);
   }
   const pack = report.runtimePack;
-  assertExactKeys(pack, ["protocolVersion", "controllerSha256", "manifest", "artifacts"], "runtime pack");
-  if (pack.protocolVersion !== "CBX-REMOTE-1" || !/^[0-9a-f]{64}$/.test(pack.controllerSha256 ?? "")) {
+  assertExactKeys(pack, [buildId ? "schemaVersion" : "protocolVersion", "controllerSha256", "manifest", "artifacts"], "runtime pack");
+  if ((buildId ? pack.schemaVersion !== 2 : pack.protocolVersion !== "CBX-REMOTE-1") || !/^[0-9a-f]{64}$/.test(pack.controllerSha256 ?? "")) {
     throw new Error("runtime pack protocol or controller identity is invalid");
   }
   const assertFile = (entry, expectedPath, maximum, label, extra = []) => {
@@ -125,18 +143,53 @@ function runtimePackReport(directory, reports, name, platform, arch) {
     }
   };
   assertFile(pack.manifest, "crabbox-runtime/manifest.json", 65536, "runtime manifest");
-  if (!Array.isArray(pack.artifacts) || pack.artifacts.length !== 2) {
+  const targets = buildId
+    ? ["darwin", "linux", "windows"].flatMap((os) => ["amd64", "arm64"].map((arch) => ({ os, arch })))
+    : ["amd64", "arm64"].map((arch) => ({ os: "linux", arch }));
+  if (!Array.isArray(pack.artifacts) || pack.artifacts.length !== targets.length) {
     throw new Error("runtime artifact inventory is not exact");
   }
-  for (const [index, targetArch] of ["amd64", "arm64"].entries()) {
+  for (const [index, target] of targets.entries()) {
     const entry = pack.artifacts[index];
-    assertFile(entry, `crabbox-runtime/linux-${targetArch}`, 64 * 1024 * 1024, "runtime artifact", ["os", "arch"]);
-    if (entry.os !== "linux" || entry.arch !== targetArch) throw new Error("runtime artifact target is invalid");
+    const suffix = target.os === "windows" ? ".exe" : "";
+    assertFile(entry, `crabbox-runtime/${target.os}-${target.arch}${suffix}`, 64 * 1024 * 1024,
+      "runtime artifact", ["os", "arch", ...(buildId ? ["capabilities"] : [])]);
+    if (entry.os !== target.os || entry.arch !== target.arch) throw new Error("runtime artifact target is invalid");
+    if (buildId) {
+      const capabilities = [{ name: "filesystem", protocolVersion: "1", buildId }];
+      if (target.os === "linux") capabilities.push({ name: "supervisor", protocolVersion: "CBX-REMOTE-1" });
+      if (!Array.isArray(entry.capabilities) || entry.capabilities.length !== capabilities.length) {
+        throw new Error("runtime capability inventory is not exact");
+      }
+      for (const [position, expected] of capabilities.entries()) {
+        const actual = entry.capabilities[position];
+        assertExactKeys(actual, Object.keys(expected), "runtime capability");
+        if (Object.entries(expected).some(([key, value]) => actual[key] !== value)) {
+          throw new Error("runtime capability identity is invalid");
+        }
+      }
+    }
   }
   return pack;
 }
 
-function payloadFor(directory, name, version, embeddedVmd, notaryIds = {}, runtimeReports) {
+function runtimeSignatures(payloads, notaryIds) {
+  return ["amd64", "arm64"].map((arch) => {
+    const name = `crabbox-runtime/darwin-${arch}`;
+    const artifact = payloads[0]?.runtimePack?.artifacts.find((entry) => entry.path === name);
+    if (!artifact || !payloads.every((payload) => payload.runtimePack.artifacts.some(
+      (entry) => entry.path === name && entry.sha256 === artifact.sha256 && entry.size === artifact.size))) {
+      throw new Error("Darwin runtime companion identity differs between archives");
+    }
+    const notarizationSubmissionId = notaryIds[`runtime-${arch}`];
+    if (!isNotaryId(notarizationSubmissionId)) throw new Error("invalid runtime notarization submission ID");
+    return { name, arch, sha256: artifact.sha256, size: artifact.size,
+      identifier: RUNTIME_ID, teamId: TEAM_ID, hardenedRuntime: true,
+      timestamp: true, notarized: true, notarizationSubmissionId };
+  });
+}
+
+function payloadFor(directory, name, version, embeddedVmd, notaryIds = {}, runtimeReports, buildId) {
   const match = new RegExp(
     `^crabbox_${version.replaceAll(".", "\\.")}_(darwin|linux|windows)_(amd64|arm64)\\.(tar\\.gz|zip)$`,
   ).exec(name);
@@ -173,7 +226,7 @@ function payloadFor(directory, name, version, embeddedVmd, notaryIds = {}, runti
   }
   const file = path.join(directory, name);
   return { name, sha256: sha256(file), size: fs.statSync(file).size, platform, arch, format, binaries,
-    ...(runtimeReports ? { runtimePack: runtimePackReport(directory, runtimeReports, name, platform, arch) } : {}),
+    ...(runtimeReports ? { runtimePack: runtimePackReport(directory, runtimeReports, name, platform, arch, buildId) } : {}),
   };
 }
 
@@ -224,7 +277,7 @@ function assertCandidateInventory(directory, version, manifestPresent) {
   }
 }
 
-function assertProducer(value, expectedConfigSha256 = RELEASE_CONFIG_SHA256) {
+function assertProducer(value, expectedConfigSha256 = RELEASE_CONFIG_SHA256, policy = CURRENT_TOOLCHAIN) {
   assertExactKeys(
     value,
     [
@@ -243,8 +296,8 @@ function assertProducer(value, expectedConfigSha256 = RELEASE_CONFIG_SHA256) {
     typeof value.platform !== "string" ||
     !/^\d+(?:\.\d+){1,2}$/.test(value.platform) ||
     value.arch !== "arm64" ||
-    value.go !== GO_VERSION ||
-    value.goreleaser !== GORELEASER_VERSION ||
+    value.go !== policy.go ||
+    value.goreleaser !== policy.goreleaser ||
     typeof value.swift !== "string" ||
     !/^Apple Swift version [^\r\n]+$/.test(value.swift) ||
     typeof value.xcodeVersion !== "string" ||
@@ -257,7 +310,7 @@ function assertProducer(value, expectedConfigSha256 = RELEASE_CONFIG_SHA256) {
   }
 }
 
-function assertPackager(value) {
+function assertPackager(value, policy = CURRENT_TOOLCHAIN) {
   assertExactKeys(
     value,
     ["arch", "go", "platform", "xcodeBuild", "xcodeVersion"],
@@ -267,7 +320,7 @@ function assertPackager(value) {
     typeof value.platform !== "string" ||
     !/^\d+(?:\.\d+){1,2}$/.test(value.platform) ||
     value.arch !== "arm64" ||
-    value.go !== GO_VERSION ||
+    value.go !== policy.go ||
     typeof value.xcodeVersion !== "string" ||
     !/^\d+(?:\.\d+){0,2}$/.test(value.xcodeVersion) ||
     typeof value.xcodeBuild !== "string" ||
@@ -337,10 +390,12 @@ function assertFinalProducer(value, releaseIdentity, version, runtimePack) {
       "xcodeBuild",
       "xcodeVersion",
       ...(runtimePack ? ["runtimePack"] : []),
+      ...(runtimePack === "filesystem" ? ["filesystemBuildId"] : []),
     ],
     "release producer",
   );
-  const { inputs, manifestSha256, runtimePack: recordedRuntimePack, ...toolchain } = value;
+  const { inputs, manifestSha256, runtimePack: recordedRuntimePack, filesystemBuildId: buildId, ...toolchain } = value;
+  if (runtimePack === "filesystem") filesystemBuildId(buildId);
   if (runtimePack && recordedRuntimePack !== true) throw new Error("producer runtime capability is missing");
   // Reverification uses the original protected producer policy, not today's
   // working-tree config. Outer release gates establish this commit's ancestry.
@@ -349,13 +404,14 @@ function assertFinalProducer(value, releaseIdentity, version, runtimePack) {
     "--no-replace-objects", "--no-lazy-fetch", "-C", path.resolve(import.meta.dirname, ".."),
     "cat-file", "blob", `${releaseIdentity.verifierCommit}:.goreleaser.yaml`,
   ], { maxBuffer: 1024 * 1024 });
-  assertProducer(toolchain, crypto.createHash("sha256").update(producerConfig).digest("hex"));
+  const recordedPolicy = releaseToolchainPolicy(path.resolve(import.meta.dirname, ".."), releaseIdentity.verifierCommit);
+  assertProducer(toolchain, crypto.createHash("sha256").update(producerConfig).digest("hex"), recordedPolicy);
   assertRecordedCandidateInputs(inputs, version);
   if (!/^[0-9a-f]{64}$/.test(manifestSha256 ?? "")) {
     throw new Error("candidate manifest digest is invalid");
   }
   const originalManifest = {
-    schemaVersion: runtimePack ? 2 : 1,
+    schemaVersion: releaseSchema(runtimePack),
     repository: REPOSITORY,
     tag: releaseIdentity.tag,
     tagObject: releaseIdentity.tagObject,
@@ -364,15 +420,17 @@ function assertFinalProducer(value, releaseIdentity, version, runtimePack) {
     producer: toolchain,
     inputs,
     ...(runtimePack ? { runtimePack: true } : {}),
+    ...(runtimePack === "filesystem" ? { filesystemBuildId: buildId } : {}),
   };
   const actualManifestSha256 = crypto.createHash("sha256").update(exactJson(originalManifest)).digest("hex");
   if (manifestSha256 !== actualManifestSha256) {
     throw new Error("candidate manifest digest does not bind the recorded producer handoff");
   }
+  return recordedPolicy;
 }
 
 function validateCandidateManifest(value, directory, args) {
-  const runtimePack = runtimePackExpected(args, value.schemaVersion === 2);
+  const runtimePack = runtimePackExpected(args, runtimeMode(value.schemaVersion));
   assertExactKeys(
     value,
     [
@@ -385,12 +443,13 @@ function validateCandidateManifest(value, directory, args) {
       "tagObject",
       "verifierCommit",
       ...(runtimePack ? ["runtimePack"] : []),
+      ...(runtimePack === "filesystem" ? ["filesystemBuildId"] : []),
     ],
     "candidate manifest",
   );
   const version = args.tag?.slice(1);
   if (
-    value.schemaVersion !== (runtimePack ? 2 : 1) ||
+    value.schemaVersion !== releaseSchema(runtimePack) ||
     (runtimePack && value.runtimePack !== true) ||
     value.repository !== REPOSITORY ||
     value.tag !== args.tag ||
@@ -399,6 +458,12 @@ function validateCandidateManifest(value, directory, args) {
     value.verifierCommit !== args["verifier-commit"]
   ) {
     throw new Error("candidate manifest does not match the pinned release identity");
+  }
+  if (runtimePack === "filesystem") {
+    filesystemBuildId(value.filesystemBuildId);
+    if (args["filesystem-build-id"] !== undefined && value.filesystemBuildId !== filesystemBuildId(args["filesystem-build-id"])) {
+      throw new Error("candidate filesystem build ID does not match protected source");
+    }
   }
   assertProducer(value.producer);
   assertCandidateInputRecords(value.inputs, directory, version);
@@ -417,7 +482,8 @@ function candidateRequired(args) {
 
 function candidateWrite(args) {
   candidateRequired(args);
-  const runtimePack = runtimePackExpected(args, args["runtime-pack"] === "true");
+  const runtimePack = runtimePackExpected(args, args["runtime-pack"] === "filesystem" ? "filesystem" : args["runtime-pack"] === "true");
+  const buildId = runtimePack === "filesystem" ? filesystemBuildId(args["filesystem-build-id"]) : undefined;
   for (const required of [
     "producer-os",
     "producer-arch",
@@ -432,7 +498,7 @@ function candidateWrite(args) {
   const version = args.tag.slice(1);
   assertCandidateInventory(args.dir, version, false);
   const value = {
-    schemaVersion: runtimePack ? 2 : 1,
+    schemaVersion: releaseSchema(runtimePack),
     repository: REPOSITORY,
     tag: args.tag,
     tagObject: args["tag-object"],
@@ -450,6 +516,7 @@ function candidateWrite(args) {
     },
     inputs: candidateInputs(args.dir, version),
     ...(runtimePack ? { runtimePack: true } : {}),
+    ...(runtimePack === "filesystem" ? { filesystemBuildId: buildId } : {}),
   };
   assertProducer(value.producer);
   const file = path.join(args.dir, CANDIDATE_MANIFEST);
@@ -586,8 +653,9 @@ function write(args) {
     "source-commit": args["source-commit"],
     "verifier-commit": args["verifier-commit"],
     "runtime-pack": args["runtime-pack"],
+    "filesystem-build-id": args["filesystem-build-id"],
   });
-  const runtimePack = runtimePackExpected(args, candidate.value.schemaVersion === 2);
+  const runtimePack = runtimePackExpected(args, runtimeMode(candidate.value.schemaVersion));
   if (runtimePack && !args["runtime-reports"]) throw new Error("runtime pack layout requires --runtime-reports");
   if (
     !/^[0-9a-f]{64}$/.test(args["candidate-manifest-sha256"]) ||
@@ -604,7 +672,7 @@ function write(args) {
   };
   assertPackager(packager);
   const provenance = {
-    schemaVersion: runtimePack ? 2 : 1,
+    schemaVersion: releaseSchema(runtimePack),
     repository: REPOSITORY,
     version,
     source: {
@@ -621,20 +689,30 @@ function write(args) {
       hardenedRuntime: true,
       timestamp: true,
       onlineNotarization: true,
-      identifiers: { crabbox: CLI_ID, appleVmHelper: HELPER_ID, appleVmVmd: VMD_ID },
+      identifiers: { crabbox: CLI_ID, appleVmHelper: HELPER_ID, appleVmVmd: VMD_ID,
+        ...(runtimePack === "filesystem" ? { runtime: RUNTIME_ID } : {}) },
     },
     producer: {
       manifestSha256: candidate.sha256,
       ...candidate.value.producer,
       inputs: candidate.value.inputs,
       ...(runtimePack ? { runtimePack: true } : {}),
+      ...(runtimePack === "filesystem" ? { filesystemBuildId: candidate.value.filesystemBuildId } : {}),
     },
     packager,
     releaseAssets,
     payloads: archives.map((name) =>
-      payloadFor(args.dir, name, version, embeddedVmd, notaryIds, runtimePack ? args["runtime-reports"] : undefined),
+      payloadFor(args.dir, name, version, embeddedVmd, notaryIds, runtimePack ? args["runtime-reports"] : undefined, candidate.value.filesystemBuildId),
     ),
   };
+  if (runtimePack === "filesystem") {
+    notaryIds["runtime-amd64"] = args["notary-runtime-amd64"];
+    notaryIds["runtime-arm64"] = args["notary-runtime-arm64"];
+    provenance.runtimeSignatures = runtimeSignatures(provenance.payloads, notaryIds);
+    if (new Set(Object.values(notaryIds).map((id) => id.toLowerCase())).size !== 6) {
+      throw new Error("notarization provenance must contain six distinct submissions");
+    }
+  }
   fs.writeFileSync(path.join(args.dir, "provenance.json"), exactJson(provenance), {
     flag: "wx",
     mode: 0o644,
@@ -655,7 +733,7 @@ function verify(args) {
   const version = args.tag.slice(1);
   const file = path.join(args.dir, "provenance.json");
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
-  const runtimePack = runtimePackExpected(args, value.schemaVersion === 2);
+  const runtimePack = runtimePackExpected(args, runtimeMode(value.schemaVersion));
   if (runtimePack && !args["runtime-reports"]) throw new Error("runtime pack layout requires --runtime-reports");
   const archives = expectedArchives(version);
   const releaseAssets = [...archives, "checksums.txt", "provenance.json"].sort();
@@ -670,6 +748,7 @@ function verify(args) {
       "repository",
       "schemaVersion",
       "signaturePolicy",
+      ...(runtimePack === "filesystem" ? ["runtimeSignatures"] : []),
       "source",
       "verifier",
       "version",
@@ -686,10 +765,10 @@ function verify(args) {
   );
   assertExactKeys(
     value.signaturePolicy.identifiers,
-    ["appleVmHelper", "appleVmVmd", "crabbox"],
+    ["appleVmHelper", "appleVmVmd", "crabbox", ...(runtimePack === "filesystem" ? ["runtime"] : [])],
     "signature identifiers",
   );
-  assertFinalProducer(
+  const recordedToolchain = assertFinalProducer(
     value.producer,
     {
       tag: args.tag,
@@ -700,9 +779,13 @@ function verify(args) {
     version,
     runtimePack,
   );
-  assertPackager(value.packager);
+  if (runtimePack === "filesystem" && args["filesystem-build-id"] !== undefined &&
+      value.producer.filesystemBuildId !== filesystemBuildId(args["filesystem-build-id"])) {
+    throw new Error("producer filesystem build ID does not match protected source");
+  }
+  assertPackager(value.packager, recordedToolchain);
   if (
-    value.schemaVersion !== (runtimePack ? 2 : 1) ||
+    value.schemaVersion !== releaseSchema(runtimePack) ||
     value.repository !== REPOSITORY ||
     value.version !== version ||
     value.source?.tag !== args.tag ||
@@ -719,6 +802,7 @@ function verify(args) {
     value.signaturePolicy?.identifiers?.crabbox !== CLI_ID ||
     value.signaturePolicy?.identifiers?.appleVmHelper !== HELPER_ID ||
     value.signaturePolicy?.identifiers?.appleVmVmd !== VMD_ID ||
+    (runtimePack === "filesystem" && value.signaturePolicy.identifiers.runtime !== RUNTIME_ID) ||
     JSON.stringify(value.releaseAssets) !== JSON.stringify(releaseAssets)
   ) {
     throw new Error("release provenance metadata does not match the pinned contract");
@@ -747,6 +831,7 @@ function verify(args) {
       helperEntry?.embeddedVmd,
       notaryIds,
       runtimePack ? args["runtime-reports"] : undefined,
+      runtimePack === "filesystem" ? value.producer.filesystemBuildId : undefined,
     );
     if (JSON.stringify(actual) !== JSON.stringify(expected)) {
       throw new Error(`provenance payload mismatch: ${name}`);
@@ -766,8 +851,19 @@ function verify(args) {
       if (helperEntry) verifiedNotaryIds.push(helperEntry.embeddedVmd.notarizationSubmissionId);
     }
   }
-  if (new Set(verifiedNotaryIds).size !== 4 || verifiedNotaryIds.length !== 4) {
-    throw new Error("notarization provenance must contain four distinct submissions");
+  if (runtimePack === "filesystem") {
+    const records = value.runtimeSignatures;
+    if (!Array.isArray(records) || records.length !== 2) throw new Error("runtime signatures inventory is not exact");
+    const ids = Object.fromEntries(records.map((entry) => [`runtime-${entry.arch}`, entry.notarizationSubmissionId]));
+    if (JSON.stringify(records) !== JSON.stringify(runtimeSignatures(value.payloads, ids))) {
+      throw new Error("runtime signatures do not match the pinned contract");
+    }
+    verifiedNotaryIds.push(...records.map((entry) => entry.notarizationSubmissionId));
+  }
+  const expectedSubmissions = runtimePack === "filesystem" ? 6 : 4;
+  if (new Set(verifiedNotaryIds.map((id) => id.toLowerCase())).size !== expectedSubmissions ||
+      verifiedNotaryIds.length !== expectedSubmissions) {
+    throw new Error(`notarization provenance must contain ${expectedSubmissions} distinct submissions`);
   }
 }
 

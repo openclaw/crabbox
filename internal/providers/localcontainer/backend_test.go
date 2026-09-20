@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -74,9 +75,10 @@ func TestConcreteFlagInputAttribution(t *testing.T) {
 }
 
 type recordingRunner struct {
-	calls     []core.LocalCommandRequest
-	responses map[string]core.LocalCommandResult
-	run       func(core.LocalCommandRequest) (core.LocalCommandResult, error)
+	calls      []core.LocalCommandRequest
+	responses  map[string]core.LocalCommandResult
+	run        func(core.LocalCommandRequest) (core.LocalCommandResult, error)
+	runContext func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
 func TestLocalContainerImageEvidence(t *testing.T) {
@@ -366,8 +368,11 @@ type localContainerTestClock struct{ now time.Time }
 
 func (c localContainerTestClock) Now() time.Time { return c.now }
 
-func (r *recordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+func (r *recordingRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
+	if r.runContext != nil {
+		return r.runContext(ctx, req)
+	}
 	if r.run != nil {
 		return r.run(req)
 	}
@@ -3012,6 +3017,117 @@ func TestAcquireRunFailureKeepsExactPendingClaim(t *testing.T) {
 	_ = os.RemoveAll(bootstrapDir)
 }
 
+func TestWaitForContainerEndpointBudget(t *testing.T) {
+	const containerID, leaseID = "endpoint-container", "cbx_endpoint"
+	const ready = `[{"Id":"endpoint-container","State":{"Status":"running"},"NetworkSettings":{"Ports":{"2222/tcp":[{"HostIp":"127.0.0.1","HostPort":"49170"}]}}}]`
+	const pending = `[{"Id":"endpoint-container","State":{"Status":"running"}}]`
+	const stopped = `[{"Id":"endpoint-container","State":{"Status":"exited"}}]`
+	callerCause := errors.New("endpoint wait canceled by caller")
+	for _, tc := range []struct {
+		name         string
+		wantCalls    int
+		wantMaxCalls int
+		wantElapsed  time.Duration
+		wantCode     int
+		wantMessage  string
+		wantCause    error
+	}{
+		{name: "ready", wantCalls: 1},
+		{name: "pending port", wantCalls: 2, wantElapsed: 100 * time.Millisecond},
+		{name: "inspect retry", wantCalls: 2, wantElapsed: 100 * time.Millisecond},
+		{name: "client deadline", wantCalls: 2, wantElapsed: 100 * time.Millisecond},
+		{name: "pre-canceled", wantCause: callerCause},
+		{name: "cancel during inspect", wantCalls: 1, wantCause: callerCause},
+		{name: "caller deadline", wantCalls: 1, wantElapsed: 50 * time.Millisecond, wantCause: context.DeadlineExceeded},
+		{name: "blocked inspect", wantCalls: 1, wantElapsed: 30 * time.Second, wantCode: 5, wantMessage: "timed out waiting for SSH port on local-container endpoint-con: container inspect failed: context deadline exceeded", wantCause: context.DeadlineExceeded},
+		// The final sleep and deadline can wake together before cancellation is delivered.
+		{name: "pending timeout", wantCalls: 300, wantMaxCalls: 301, wantElapsed: 30 * time.Second, wantCode: 5, wantMessage: "timed out waiting for SSH port on local-container endpoint-con: container endpoint-con has no published SSH port", wantCause: context.DeadlineExceeded},
+		{name: "stopped", wantCalls: 1, wantCode: 5, wantMessage: "local-container lease cbx_endpoint container endpoint-con reached terminal runtime state exited before SSH readiness"},
+		{name: "late stopped observation", wantCalls: 1, wantElapsed: 31 * time.Second, wantCode: 5, wantMessage: "local-container lease cbx_endpoint container endpoint-con reached terminal runtime state exited before SSH readiness"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			synctest.Test(t, func(t *testing.T) {
+				parent, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				if tc.name == "pre-canceled" {
+					cancel(callerCause)
+				}
+				guard := 40 * time.Second
+				if tc.name == "caller deadline" {
+					guard = 50 * time.Millisecond
+				}
+				ctx, stop := context.WithTimeout(parent, guard)
+				defer stop()
+				started := time.Now()
+				runner := &recordingRunner{}
+				runner.runContext = func(commandCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					if req.Name != "docker" || !reflect.DeepEqual(req.Args, []string{"inspect", containerID}) {
+						t.Fatalf("unexpected command: %s %v", req.Name, req.Args)
+					}
+					switch tc.name {
+					case "pending port":
+						if len(runner.calls) == 1 {
+							return core.LocalCommandResult{Stdout: pending}, nil
+						}
+					case "inspect retry", "client deadline":
+						if len(runner.calls) == 1 {
+							if tc.name == "client deadline" {
+								return core.LocalCommandResult{}, context.DeadlineExceeded
+							}
+							return core.LocalCommandResult{}, errors.New("temporary inspection failure")
+						}
+					case "caller deadline", "pending timeout":
+						return core.LocalCommandResult{Stdout: pending}, nil
+					case "cancel during inspect":
+						cancel(callerCause)
+						<-commandCtx.Done()
+						return core.LocalCommandResult{}, commandCtx.Err()
+					case "blocked inspect":
+						deadline, ok := commandCtx.Deadline()
+						if !ok || !deadline.Equal(started.Add(30*time.Second)) {
+							t.Errorf("inspection deadline=%v bounded=%t, want 30-second readiness budget", deadline, ok)
+						}
+						<-commandCtx.Done()
+						return core.LocalCommandResult{}, commandCtx.Err()
+					case "stopped", "late stopped observation":
+						if tc.name == "late stopped observation" {
+							time.Sleep(31 * time.Second)
+						}
+						return core.LocalCommandResult{Stdout: stopped}, nil
+					}
+					return core.LocalCommandResult{Stdout: ready}, nil
+				}
+				b := testBackend(runner)
+				lease, err := b.waitForContainerEndpoint(ctx, b.configForRun(), containerID, leaseID, "endpoint")
+				if tc.wantCause == nil && tc.wantCode == 0 {
+					if err != nil || lease.LeaseID != leaseID || lease.Server.CloudID != containerID || lease.SSH.Host != "127.0.0.1" || lease.SSH.Port != "49170" {
+						t.Fatalf("unexpected endpoint lease=%+v error=%v", lease, err)
+					}
+				} else {
+					wantLease := core.LeaseTarget{LeaseID: leaseID, Server: core.Server{CloudID: containerID}}
+					if err == nil || !reflect.DeepEqual(lease, wantLease) {
+						t.Fatalf("lease=%+v error=%v, want partial lease on failure", lease, err)
+					}
+					if tc.wantCode != 0 {
+						var exit core.ExitError
+						if !core.AsExitError(err, &exit) || exit.Code != tc.wantCode || err.Error() != tc.wantMessage {
+							t.Fatalf("error=%v, want code=%d message=%q", err, tc.wantCode, tc.wantMessage)
+						}
+					}
+					if tc.wantCause != nil && !errors.Is(err, tc.wantCause) {
+						t.Fatalf("error=%v does not retain %v", err, tc.wantCause)
+					}
+				}
+				maxCalls := max(tc.wantCalls, tc.wantMaxCalls)
+				if elapsed := time.Since(started); elapsed != tc.wantElapsed || len(runner.calls) < tc.wantCalls || len(runner.calls) > maxCalls {
+					t.Fatalf("elapsed=%s calls=%d, want %s/%d..%d", elapsed, len(runner.calls), tc.wantElapsed, tc.wantCalls, maxCalls)
+				}
+			})
+		})
+	}
+}
+
 func TestAcquireInspectFailureKeepsExactPendingClaim(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
@@ -3619,6 +3735,91 @@ func TestAcquireTerminalContainerFailsPromptlyAndPreservesRecoveryPolicy(t *test
 			if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
 				t.Fatal(err)
 			}
+		})
+	}
+}
+
+func TestExactContainerReadinessBoundsInspections(t *testing.T) {
+	sshFailure := errors.New("synthetic SSH readiness failure")
+	for _, tc := range []struct {
+		name        string
+		blockAt     int
+		sshResult   error
+		periodic    bool
+		callerLimit time.Duration
+		sshTimeout  time.Duration
+		wantElapsed time.Duration
+	}{
+		{name: "initial", blockAt: 1, sshTimeout: time.Minute, wantElapsed: 30 * time.Second},
+		{name: "periodic", blockAt: 2, periodic: true, sshTimeout: time.Minute, wantElapsed: 30*time.Second + 250*time.Millisecond},
+		{name: "final success", blockAt: 2, sshTimeout: time.Minute, wantElapsed: 30 * time.Second},
+		{name: "final failure preserves SSH error", blockAt: 2, sshResult: sshFailure, sshTimeout: time.Minute, wantElapsed: 30 * time.Second},
+		{name: "earlier caller deadline", blockAt: 1, callerLimit: 50 * time.Millisecond, sshTimeout: time.Minute, wantElapsed: 50 * time.Millisecond},
+		{name: "ready", sshTimeout: time.Minute},
+		{name: "zero SSH budget", sshResult: sshFailure},
+		{name: "negative SSH budget", sshResult: sshFailure, sshTimeout: -time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			synctest.Test(t, func(t *testing.T) {
+				guard := time.Minute
+				if tc.callerLimit > 0 {
+					guard = tc.callerLimit
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), guard)
+				defer cancel()
+				runner := &recordingRunner{}
+				runner.runContext = func(observeCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					if !reflect.DeepEqual(req.Args, []string{"inspect", "claimed-container"}) {
+						t.Fatalf("unexpected command: %v", req.Args)
+					}
+					if len(runner.calls) == tc.blockAt {
+						<-observeCtx.Done()
+						return core.LocalCommandResult{}, observeCtx.Err()
+					}
+					return core.LocalCommandResult{Stdout: `[{"Id":"claimed-container","State":{"Status":"running","Running":true}}]`}, nil
+				}
+				b := testBackend(runner)
+				sshJoined := make(chan struct{})
+				b.waitForSSHReady = func(waitCtx context.Context, _ *core.SSHTarget, _ io.Writer, _ string, timeout time.Duration) error {
+					defer close(sshJoined)
+					if timeout != tc.sshTimeout {
+						t.Errorf("SSH timeout=%s, want unchanged %s", timeout, tc.sshTimeout)
+					}
+					if tc.periodic {
+						<-waitCtx.Done()
+						return context.Cause(waitCtx)
+					}
+					return tc.sshResult
+				}
+				lease := core.LeaseTarget{LeaseID: "cbx_exact_container", Server: core.Server{CloudID: "claimed-container"}}
+				started := time.Now()
+				err := b.waitForExactContainerSSHReady(ctx, &lease, tc.sshTimeout)
+				if elapsed := time.Since(started); elapsed != tc.wantElapsed {
+					t.Errorf("readiness elapsed=%s, want %s", elapsed, tc.wantElapsed)
+				}
+				switch {
+				case tc.sshResult != nil:
+					if err != tc.sshResult {
+						t.Errorf("diagnostic inspection replaced SSH error: %v", err)
+					}
+				case tc.blockAt != 0:
+					if err == nil || !strings.Contains(err.Error(), "container inspect failed: context deadline exceeded") {
+						t.Errorf("blocked inspection returned %v, want deadline", err)
+					}
+				default:
+					if err != nil {
+						t.Errorf("healthy readiness failed: %v", err)
+					}
+				}
+				if tc.blockAt != 1 {
+					select {
+					case <-sshJoined:
+					default:
+						t.Error("SSH readiness goroutine was not joined")
+					}
+				}
+			})
 		})
 	}
 }
@@ -8445,13 +8646,16 @@ func TestCreateContainerNoVolumesWhenEmpty(t *testing.T) {
 }
 
 func TestVolumeListFlagParsesRepeated(t *testing.T) {
-	var vols volumeListFlag
-	if err := vols.Set("/host/a:/guest/a:ro"); err != nil {
+	fs := flag.NewFlagSet("volumes", flag.ContinueOnError)
+	registerFlags(fs, core.Config{})
+	value := fs.Lookup("local-container-volume").Value
+	if err := value.Set("/host/a:/guest/a:ro"); err != nil {
 		t.Fatal(err)
 	}
-	if err := vols.Set("/host/b:/guest/b"); err != nil {
+	if err := value.Set("/host/b:/guest/b"); err != nil {
 		t.Fatal(err)
 	}
+	vols := value.(flag.Getter).Get().([]string)
 	if len(vols) != 2 {
 		t.Fatalf("expected 2 volumes, got %d", len(vols))
 	}

@@ -102,7 +102,7 @@ func TestValidateAzureCleanupVM(t *testing.T) {
 			"provider":     "azure",
 			"lease":        "cbx_123456abcdef",
 			"slug":         "live",
-			"provider_key": providerKeyForLease("cbx_123456abcdef"),
+			"provider_key": ProviderKeyForLease("cbx_123456abcdef"),
 			"expires_at":   LeaseLabelTime(now.Add(-time.Hour)),
 		},
 	}
@@ -140,7 +140,7 @@ func TestValidateAzureOwnedVMDoesNotRequireExpiry(t *testing.T) {
 			"provider":     "azure",
 			"lease":        "cbx_123456abcdef",
 			"slug":         "release",
-			"provider_key": providerKeyForLease("cbx_123456abcdef"),
+			"provider_key": ProviderKeyForLease("cbx_123456abcdef"),
 		},
 	}
 	if err := ValidateAzureOwnedVM(expected, expected); err != nil {

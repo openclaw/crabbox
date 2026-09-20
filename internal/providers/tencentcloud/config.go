@@ -19,23 +19,11 @@ func cfgForRun(cfg core.Config) core.Config {
 	if cfg.TargetOS == "" {
 		cfg.TargetOS = core.TargetLinux
 	}
-	if cfg.TencentCloud.Region == "" {
-		cfg.TencentCloud.Region = core.TencentCloudRegionFallback
-	}
-	if cfg.TencentCloud.Zone == "" {
-		cfg.TencentCloud.Zone = core.TencentCloudZoneFallback
-	}
+	// Resolve intent before filling a native type; an empty result can be an
+	// unsupported explicit class and must not be replaced by the fallback.
 	resolvedType := serverTypeForConfig(cfg)
+	applyNativeDefaults(&cfg.TencentCloud)
 	cfg.TencentCloud.Type = resolvedType
-	if cfg.TencentCloud.RootGB == 0 {
-		cfg.TencentCloud.RootGB = core.TencentCloudRootGBFallback
-	}
-	if cfg.TencentCloud.InternetChargeType == "" {
-		cfg.TencentCloud.InternetChargeType = core.TencentCloudInternetChargeTypeFallback
-	}
-	if cfg.TencentCloud.InternetMaxBandwidthOut == 0 {
-		cfg.TencentCloud.InternetMaxBandwidthOut = core.TencentCloudInternetMaxBandwidthOutFallback
-	}
 	if !core.IsSSHUserExplicit(&cfg) && (cfg.SSHUser == "" || cfg.SSHUser == core.BaseConfig().SSHUser) {
 		cfg.SSHUser = "ubuntu"
 	}
@@ -73,13 +61,7 @@ func serverTypeForConfig(cfg core.Config) string {
 		return value
 	}
 	if core.ClassWasExplicit(cfg) {
-		if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
-			return candidates[0]
-		}
-		if core.IsCanonicalProviderClass(cfg.Class) {
-			return ""
-		}
-		return serverTypeForClass(cfg.Class)
+		return core.ProviderClassPrimaryTypeForProfiles(classProfiles, cfg, serverTypeForClass(cfg.Class))
 	}
 	if value := strings.TrimSpace(cfg.TencentCloud.Type); value != "" {
 		return value
@@ -173,4 +155,32 @@ func normalizeEndpoint(value string) string {
 		return value
 	}
 	return "https://" + strings.TrimPrefix(value, "//")
+}
+
+func (Provider) ApplyConfigDefaults(cfg *core.Config) error {
+	applyNativeDefaults(&cfg.TencentCloud)
+	core.ApplyLinuxConnectionDefaults(cfg, "ubuntu", "22")
+	cfg.SSHFallbackPorts = nil
+	return nil
+}
+
+func applyNativeDefaults(cfg *core.TencentCloudConfig) {
+	if cfg.Region == "" {
+		cfg.Region = core.TencentCloudRegionFallback
+	}
+	if cfg.Zone == "" {
+		cfg.Zone = core.TencentCloudZoneFallback
+	}
+	if cfg.Type == "" {
+		cfg.Type = core.TencentCloudTypeFallback
+	}
+	if cfg.RootGB == 0 {
+		cfg.RootGB = core.TencentCloudRootGBFallback
+	}
+	if cfg.InternetChargeType == "" {
+		cfg.InternetChargeType = core.TencentCloudInternetChargeTypeFallback
+	}
+	if cfg.InternetMaxBandwidthOut == 0 {
+		cfg.InternetMaxBandwidthOut = core.TencentCloudInternetMaxBandwidthOutFallback
+	}
 }

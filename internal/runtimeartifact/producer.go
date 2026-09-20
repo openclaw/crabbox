@@ -79,6 +79,10 @@ func prepareEntry(ctx context.Context, dir string, input ArtifactInput) (entry, 
 	if !supported(input.Target) {
 		return entry{}, fmt.Errorf("unsupported artifact target %s/%s", input.Target.OS, input.Target.Arch)
 	}
+	return prepareExecutableEntry(ctx, dir, input)
+}
+
+func prepareExecutableEntry(ctx context.Context, dir string, input ArtifactInput) (entry, error) {
 	f, err := openPackFile(dir, input.Path)
 	if err != nil {
 		return entry{}, err

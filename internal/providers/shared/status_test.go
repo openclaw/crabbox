@@ -22,6 +22,7 @@ func TestPollStatusObservationPrecedesDeadlineAndCancellation(t *testing.T) {
 		{name: "ready observation", wait: true, view: core.StatusView{ID: "lease", Ready: true}},
 		{name: "terminal observation", wait: true, done: true, view: core.StatusView{ID: "lease", State: "stopped"}},
 		{name: "error with view", wait: true, view: core.StatusView{ID: "lease", Ready: true}, err: providerErr},
+		{name: "complete provider view", view: core.StatusView{ID: "lease", Slug: "raw slug", Provider: "fixture", State: "stopped", WorkRoot: "/provider/work", ProviderResourceID: "immutable", Host: "host.example", SSHPort: "0022", SSHFallbackPorts: []string{"2200"}, Labels: map[string]string{"slug": "provider slug"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())

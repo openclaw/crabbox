@@ -6,8 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { writeExecutable } from "./test-support/smoke-fixtures.mjs";
+import { releaseToolchainPolicy } from "./release-policy.mjs";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
+const currentToolchain = releaseToolchainPolicy(repoRoot);
 const read = (file) => fs.readFileSync(path.join(repoRoot, file), "utf8");
 
 test("release workflow is verifier-only, protected-default, dual-native, and token-bounded", () => {
@@ -292,7 +294,7 @@ test("GoReleaser is credential-free build-only with exact binary archives", () =
   assert.match(config, /release:\n\s+disable: true/);
   assert.doesNotMatch(config, /^brews:|HOMEBREW|github_token|GITHUB_TOKEN/m);
   assert.equal((config.match(/- -trimpath/g) ?? []).length, 2);
-  assert.match(config, /src: artifacts\/release-runtime\/linux-\*/);
+  assert.match(config, /src: artifacts\/release-runtime\/\*/);
   assert.match(config, /dst: crabbox-runtime/);
   assert.match(config, /allow_different_binary_count: true/);
   assert.match(config, /crabbox-apple-vm-helper[\s\S]*- -tags=vmdembed/);
@@ -658,7 +660,7 @@ test("release notes extraction ignores Unreleased, is exact, and rejects missing
   assert.notEqual(missing.status, 0);
 });
 
-for (const runtimePack of [false, true]) {
+for (const runtimePack of [false, true, "filesystem"]) {
   test(`provenance binds producer, packager and archive bytes (runtime=${runtimePack})`, () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-provenance-"));
     const candidate = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-candidate-"));
@@ -666,9 +668,12 @@ for (const runtimePack of [false, true]) {
     const tooling = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-provenance-tooling-"));
     fs.mkdirSync(path.join(tooling, "scripts"));
     fs.mkdirSync(path.join(tooling, "internal/applevmhelper"), { recursive: true });
-    for (const name of ["scripts/release-provenance.mjs", ".goreleaser.yaml", "internal/applevmhelper/vmd-entitlements.plist"]) {
+    for (const name of ["scripts/release-provenance.mjs", "scripts/release-policy.mjs", "scripts/release-config.sh", ".goreleaser.yaml", "internal/applevmhelper/vmd-entitlements.plist"]) {
       fs.copyFileSync(path.join(repoRoot, name), path.join(tooling, name));
     }
+    const goVersion = runtimePack === "filesystem" ? "go1.26.5" : "go1.26.4";
+    const policyFile = path.join(tooling, "scripts/release-config.sh");
+    fs.writeFileSync(policyFile, fs.readFileSync(policyFile, "utf8").replace(/^CRABBOX_RELEASE_GO_VERSION=.*$/m, `CRABBOX_RELEASE_GO_VERSION=${goVersion}`));
     const git = (...args) => execFileSync("git", ["-C", tooling, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.name=Release fixture", "-c", "user.email=release@example.invalid", ...args], {
       encoding: "utf8",
       env: { PATH: process.env.PATH, HOME: tooling, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull },
@@ -705,6 +710,7 @@ for (const runtimePack of [false, true]) {
         "candidate-write",
         "--runtime-pack",
         String(runtimePack),
+        ...(runtimePack === "filesystem" ? ["--filesystem-build-id", "a".repeat(64)] : []),
         "--dir",
         candidate,
         "--tag",
@@ -720,7 +726,7 @@ for (const runtimePack of [false, true]) {
         "--producer-arch",
         "arm64",
         "--go-version",
-        "go1.26.4",
+        goVersion,
         "--goreleaser-version",
         "2.17.0",
         "--swift-version",
@@ -767,8 +773,12 @@ for (const runtimePack of [false, true]) {
       "33333333-3333-4333-8333-333333333333",
       "--notary-vmd-arm64",
       "44444444-4444-4444-8444-444444444444",
+      ...(runtimePack === "filesystem" ? [
+        "--notary-runtime-amd64", "55555555-5555-4555-8555-555555555555",
+        "--notary-runtime-arm64", "66666666-6666-4666-8666-666666666666",
+      ] : []),
       "--packager-go-version",
-      "go1.26.4",
+      goVersion,
       "--packager-os",
       "15.5",
       "--packager-arch",
@@ -809,12 +819,16 @@ for (const runtimePack of [false, true]) {
             name, size: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
             os: match[1], arch: match[2],
             runtimePack: {
-              protocolVersion: "CBX-REMOTE-1", controllerSha256: "e".repeat(64),
+              ...(runtimePack === "filesystem" ? { schemaVersion: 2 } : { protocolVersion: "CBX-REMOTE-1" }), controllerSha256: "e".repeat(64),
               manifest: { path: "crabbox-runtime/manifest.json", size: 512, sha256: "f".repeat(64) },
-              artifacts: ["amd64", "arm64"].map((arch, index) => ({
-                os: "linux", arch, path: `crabbox-runtime/linux-${arch}`, size: 1024,
+              artifacts: (runtimePack === "filesystem" ? ["darwin", "linux", "windows"] : ["linux"]).flatMap((os) => ["amd64", "arm64"].map((arch, index) => ({
+                os, arch, path: `crabbox-runtime/${os}-${arch}${os === "windows" ? ".exe" : ""}`, size: 1024,
                 sha256: String(index + 1).repeat(64),
-              })),
+                ...(runtimePack === "filesystem" ? { capabilities: [
+                  { name: "filesystem", protocolVersion: "1", buildId: "a".repeat(64) },
+                  ...(os === "linux" ? [{ name: "supervisor", protocolVersion: "CBX-REMOTE-1" }] : []),
+                ] } : {}),
+              }))),
             },
           }));
         }
@@ -825,17 +839,48 @@ for (const runtimePack of [false, true]) {
       assert.equal(provenance.producer.manifestSha256, candidateManifestSha256);
       assert.equal(provenance.producer.swift, "Apple Swift version 6.1 (swiftlang-test)");
       assert.equal(provenance.producer.inputs.length, 7);
-      assert.equal(provenance.packager.go, "go1.26.4");
-      assert.equal(provenance.schemaVersion, runtimePack ? 2 : 1);
+      assert.equal(provenance.packager.go, goVersion);
+      assert.equal(provenance.schemaVersion, runtimePack === "filesystem" ? 3 : runtimePack ? 2 : 1);
+      if (runtimePack === "filesystem") {
+        assert.equal(provenance.producer.filesystemBuildId, "a".repeat(64));
+        assert.equal(provenance.signaturePolicy.identifiers.runtime, "org.openclaw.crabbox.runtime");
+        assert.equal(provenance.runtimeSignatures.length, 2);
+        const provenanceFile = path.join(directory, "provenance.json");
+        const original = fs.readFileSync(provenanceFile);
+        for (const mutate of [
+          (value) => { delete value.runtimeSignatures; },
+          (value) => { value.runtimeSignatures[0].sha256 = "0".repeat(64); },
+          (value) => { value.runtimeSignatures[0].identifier = "org.openclaw.crabbox"; },
+          (value) => { value.runtimeSignatures[0].notarizationSubmissionId = value.runtimeSignatures[1].notarizationSubmissionId; },
+          (value) => { value.runtimeSignatures[0].notarizationSubmissionId = "11111111-1111-4111-8111-111111111111"; },
+        ]) {
+          const altered = JSON.parse(original);
+          mutate(altered);
+          fs.writeFileSync(provenanceFile, JSON.stringify(altered));
+          assert.notEqual(spawnSync(process.execPath, [script, ...verifyArgs]).status, 0);
+        }
+        fs.writeFileSync(provenanceFile, original);
+        const reportFile = path.join(reports, `${archives[1]}.json`);
+        const reportOriginal = fs.readFileSync(reportFile);
+        const changedReport = JSON.parse(reportOriginal);
+        changedReport.runtimePack.artifacts[0].sha256 = "0".repeat(64);
+        fs.writeFileSync(reportFile, JSON.stringify(changedReport));
+        assert.notEqual(spawnSync(process.execPath, [script, ...verifyArgs]).status, 0);
+        fs.writeFileSync(reportFile, reportOriginal);
+        assert.equal(provenance.payloads.every((entry) => entry.runtimePack.artifacts.length === 6), true);
+      }
       // An ordinary protected-tooling update must not reinterpret the producer's
       // immutable configuration through the newer working tree.
       fs.appendFileSync(path.join(tooling, ".goreleaser.yaml"), "\n# later protected verifier configuration\n");
-      git("add", ".goreleaser.yaml");
+      fs.writeFileSync(policyFile, fs.readFileSync(policyFile, "utf8").replace(/^CRABBOX_RELEASE_GO_VERSION=.*$/m, "CRABBOX_RELEASE_GO_VERSION=go1.26.5"));
+      git("add", ".goreleaser.yaml", "scripts/release-config.sh");
       git("commit", "-qm", "later verifier configuration");
       assert.doesNotThrow(() => execFileSync(process.execPath, [script, ...verifyArgs]));
-      assert.equal(provenance.payloads.every((entry) => Boolean(entry.runtimePack) === runtimePack), true);
-      assert.notEqual(spawnSync(process.execPath, [script, ...verifyArgs, "--runtime-pack", String(!runtimePack)]).status, 0);
-      if (runtimePack) {
+      assert.equal(provenance.payloads.every((entry) => Boolean(entry.runtimePack) === Boolean(runtimePack)), true);
+      if (runtimePack !== "filesystem") {
+        assert.notEqual(spawnSync(process.execPath, [script, ...verifyArgs, "--runtime-pack", String(!runtimePack)]).status, 0);
+      }
+      if (runtimePack === true) {
         const reportFile = path.join(reports, `${archives[0]}.json`);
         const original = fs.readFileSync(reportFile);
         const report = JSON.parse(original);
@@ -850,8 +895,10 @@ for (const runtimePack of [false, true]) {
           .find((entry) => entry.name === "crabbox-apple-vm-helper").embeddedVmd.size,
         123456,
       );
-      fs.appendFileSync(path.join(directory, "crabbox_1.2.3_linux_arm64.tar.gz"), "drift");
-      assert.notEqual(spawnSync(process.execPath, [script, ...verifyArgs]).status, 0);
+      if (runtimePack !== "filesystem") {
+        fs.appendFileSync(path.join(directory, "crabbox_1.2.3_linux_arm64.tar.gz"), "drift");
+        assert.notEqual(spawnSync(process.execPath, [script, ...verifyArgs]).status, 0);
+      }
     } finally {
       fs.rmSync(directory, { recursive: true, force: true });
       fs.rmSync(candidate, { recursive: true, force: true });
@@ -913,7 +960,7 @@ test("candidate manifest rejects byte, mode, and pinned source drift before sign
       "--producer-arch",
       "arm64",
       "--go-version",
-      "go1.26.4",
+      currentToolchain.go,
       "--goreleaser-version",
       "2.17.0",
       "--swift-version",
@@ -1228,4 +1275,23 @@ test("draft creation performs static-only verification and never deletes or repl
   assert.doesNotMatch(script, /gh api --paginate/);
   assert.match(script, /refusing to delete or replace it/);
   assert.doesNotMatch(script, /--method (?:DELETE|PATCH|PUT)|gh release (?:delete|edit|upload)/);
+});
+
+
+test("filesystem packaging signs shared companions before final controller manifests", () => {
+  const packager = read("scripts/package-release.sh");
+  const config = read("scripts/release-config.sh");
+  assert.match(config, /CRABBOX_RELEASE_RUNTIME_IDENTIFIER=org\.openclaw\.crabbox\.runtime/);
+  assert.match(config, /CRABBOX_RELEASE_RUNTIME_IDENTIFIER:arm64/);
+  assert.match(config, /CRABBOX_RELEASE_RUNTIME_IDENTIFIER:x86_64/);
+  const identify = packager.indexOf('source-id --source-directory "$SOURCE"');
+  const candidate = packager.indexOf('candidate_manifest_sha=$(node');
+  const compare = packager.indexOf('cmp "$WORK/darwin-amd64/crabbox-runtime/$runtime_name"');
+  const sign = packager.indexOf('notary_runtime=$(sign_and_capture_notary_id');
+  const finalize = packager.indexOf('"$runtime_tool" prepare');
+  assert.ok(identify >= 0 && identify < candidate && candidate < compare && compare < sign && sign < finalize);
+  assert.match(packager, /cp -p "\$amd64_stage\/crabbox-runtime\/darwin-\$arch" "\$destination"/);
+  assert.match(packager, /unsigned-filesystem/);
+  assert.match(packager, /final-filesystem/);
+  assert.doesNotMatch(packager, /\$destination\/crabbox-runtime\/\$runtime_name"\s+--/);
 });

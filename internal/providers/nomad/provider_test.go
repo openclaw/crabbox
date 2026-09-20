@@ -2,8 +2,10 @@ package nomad
 
 import (
 	"flag"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -47,6 +49,9 @@ func TestFlagsApplyWithoutTokenArgv(t *testing.T) {
 	values := RegisterNomadProviderFlags(fs, cfg)
 	if fs.Lookup("nomad-token") != nil {
 		t.Fatal("nomad-token argv flag must not exist")
+	}
+	if got := fs.Lookup("nomad-datacenters").Usage; got != "comma-separated Nomad datacenters for later delegated runs" {
+		t.Fatalf("datacenters help=%q", got)
 	}
 	args := []string{
 		"--nomad-address", "https://nomad.example.test:4646",
@@ -166,5 +171,60 @@ func TestValidateConfigAllowsNonImageDriversAndTemplatesWithoutImage(t *testing.
 				t.Fatalf("validateConfig() error=%v", err)
 			}
 		})
+	}
+}
+
+func TestNomadBindingFlagPartialApplication(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterNomadProviderFlags(fs, cfg)
+	if err := fs.Parse([]string{"--nomad-task=", "--nomad-datacenters= first ,,first ", "--nomad-alloc-ready-timeout=invalid", "--nomad-eval-timeout=2m", "--nomad-exec-timeout-secs=12"}); err != nil {
+		t.Fatal(err)
+	}
+	want := cfg
+	want.Nomad.Task = ""
+	want.Nomad.Datacenters = []string{"first", "first"}
+	core.RecordProviderFlagInputs(&want, true, providerName)
+	err := ApplyNomadProviderFlags(&cfg, fs, values)
+	if err == nil || err.Error() != "nomad alloc ready timeout must be a positive duration" {
+		t.Fatalf("flag error=%v", err)
+	}
+	if !reflect.DeepEqual(cfg, want) || cfg.Nomad.EvalTimeout != 5*time.Minute {
+		t.Fatal("flag error changed partial assignment or provenance boundary")
+	}
+}
+
+func TestNomadBindingFlagsPreservePresenceAndLastList(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = providerName
+	cfg.Nomad.Address = "https://nomad.example.test"
+	cfg.Nomad.Datacenters = []string{"prior"}
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	values := RegisterNomadProviderFlags(fs, cfg)
+	before := cfg
+	if err := ApplyNomadProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("unvisited flags changed configuration or provenance")
+	}
+	if err := fs.Parse([]string{"--nomad-datacenters=first", "--nomad-datacenters= last ,,last "}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyNomadProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cfg.Nomad.Datacenters, []string{"last", "last"}) {
+		t.Fatalf("last scalar list flag=%v", cfg.Nomad.Datacenters)
+	}
+}
+
+func TestNomadTokenVariableNameFallback(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{{"", "NOMAD_TOKEN"}, {"  ", "NOMAD_TOKEN"}, {" NOMAD_TOKEN ", "NOMAD_TOKEN"}, {" CUSTOM_NAME ", "CUSTOM_NAME"}} {
+		cfg := core.Config{Nomad: core.NomadConfig{TokenEnv: tc.raw}}
+		if got := nomadTokenEnv(cfg); got != tc.want {
+			t.Fatalf("variable name=%q want=%q", got, tc.want)
+		}
 	}
 }

@@ -13,8 +13,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/openclaw/crabbox/internal/runner"
+	"github.com/openclaw/crabbox/internal/runner/runnerwire"
 )
 
 func TestArtifactChangePathValidation(t *testing.T) {
@@ -208,6 +212,9 @@ func TestRunArtifactChangeWithFailureDownloadsE2E(t *testing.T) {
 
 func runArtifactChangeE2E(t *testing.T, failureDownloads bool) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX local SSH fixture")
+	}
 	for _, tc := range []struct {
 		name, command, status string
 		code                  int
@@ -262,12 +269,16 @@ func runArtifactChangeE2E(t *testing.T, failureDownloads bool) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ssh := `#!/bin/sh
-cmd=""
+			self, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ssh := "#!/bin/sh\n" + synchronousHelperRacePrefix() + `cmd=""
 for arg do cmd="$arg"; done
 case "$cmd" in
   *TRANSPORT_BREAK*) exit 255 ;;
-  mkdir\ -p*|cd\ *|bash\ -lc*|/bin/bash\ -lc*) exec sh -c "$cmd" ;;
+  *"__filesystem"*) CRABBOX_ARTIFACT_CHANGE_RUNNER_HELPER=1 exec ` + shellQuote(self) + ` -test.run='^TestArtifactChangeRunnerHelper$' ;;
+  mkdir\ -p*|cd\ *|bash\ -lc*|/bin/bash\ -lc*|*"uname -m"*|*"/tmp/crabbox-runtime-"*) exec sh -c "$cmd" ;;
 esac
 exit 0
 `
@@ -436,4 +447,24 @@ exit 0
 			}
 		})
 	}
+}
+
+// TestArtifactChangeRunnerHelper runs the real filesystem server against the local
+// fixture files. Its Linux identity simulates the required artifact-change route;
+// it does not claim that the installed Linux executable runs on a macOS host.
+func TestArtifactChangeRunnerHelper(t *testing.T) {
+	if os.Getenv("CRABBOX_ARTIFACT_CHANGE_RUNNER_HELPER") != "1" {
+		return
+	}
+	buildID, err := runner.SourceID()
+	if err == nil {
+		err = runner.Serve(context.Background(), os.Stdin, os.Stdout, runner.Identity{
+			BuildID: buildID, OS: "linux", Arch: runtime.GOARCH, Protocol: runnerwire.Version,
+		})
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
 }

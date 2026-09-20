@@ -11,20 +11,14 @@ const staticProvider = "ssh"
 type targetFlagValues struct {
 	Target      *string
 	WindowsMode *string
-	StaticHost  *string
-	StaticUser  *string
-	StaticPort  *string
-	StaticRoot  *string
+	Static      StaticConfigFlagValues
 }
 
 func registerTargetFlags(fs *flag.FlagSet, defaults Config) targetFlagValues {
 	return targetFlagValues{
 		Target:      fs.String("target", defaults.TargetOS, "target OS: linux, macos, or windows"),
 		WindowsMode: fs.String("windows-mode", defaults.WindowsMode, "Windows mode: normal or wsl2"),
-		StaticHost:  fs.String("static-host", defaults.Static.Host, "static SSH host"),
-		StaticUser:  fs.String("static-user", defaults.Static.User, "static SSH user"),
-		StaticPort:  fs.String("static-port", defaults.Static.Port, "static SSH port"),
-		StaticRoot:  fs.String("static-work-root", defaults.Static.WorkRoot, "static target work root"),
+		Static:      RegisterStaticConfigFlags(fs, defaults.Static),
 	}
 }
 
@@ -48,22 +42,14 @@ func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagVa
 		recordConfigInput(cfg, configInputGeneric, configInputFlag, true)
 		cfg.credentialProvenance.externalDesktopMode = credentialSourceFlag
 	}
-	if flagWasSet(fs, "static-host") {
-		cfg.Static.Host = *values.StaticHost
-		recordConfigInput(cfg, "ssh", configInputFlag, true)
+	applied, err := values.Static.Apply(&cfg.Static, fs)
+	recordConfigInput(cfg, "ssh", configInputFlag, applied.InputAccepted)
+	// Target validation can fail after this explicit host approval has applied.
+	if applied.Host {
 		cfg.credentialProvenance.staticHost = credentialSourceFlag
 	}
-	if flagWasSet(fs, "static-user") {
-		cfg.Static.User = *values.StaticUser
-		recordConfigInput(cfg, "ssh", configInputFlag, true)
-	}
-	if flagWasSet(fs, "static-port") {
-		cfg.Static.Port = *values.StaticPort
-		recordConfigInput(cfg, "ssh", configInputFlag, true)
-	}
-	if flagWasSet(fs, "static-work-root") {
-		cfg.Static.WorkRoot = *values.StaticRoot
-		recordConfigInput(cfg, "ssh", configInputFlag, true)
+	if err != nil {
+		return err
 	}
 	normalizeTargetConfig(cfg)
 	return validateTargetConfig(*cfg)

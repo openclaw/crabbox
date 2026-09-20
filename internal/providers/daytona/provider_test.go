@@ -40,6 +40,36 @@ func TestProviderSupportsCoordinator(t *testing.T) {
 	}
 }
 
+func TestDaytonaServerTypeResolution(t *testing.T) {
+	if got := core.ServerTypeForProviderClass(daytonaProvider, "beast"); got != "snapshot" {
+		t.Fatalf("unmarked class server type=%q, want snapshot", got)
+	}
+	for _, tc := range []struct {
+		name        string
+		snapshot    string
+		coordinator string
+		mode        core.BrokerMode
+		want        string
+	}{
+		{name: "configured class", want: "daytona-medium"},
+		{name: "configured snapshot wins", snapshot: "custom-ci", want: "snapshot"},
+		{name: "blank snapshot", snapshot: "  ", want: "daytona-medium"},
+		{name: "broker selects snapshot", coordinator: "https://coordinator.example", want: "snapshot"},
+		{name: "registered class", coordinator: "https://coordinator.example", mode: core.BrokerModeRegistered, want: "daytona-medium"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider, cfg.Class = daytonaProvider, "standard"
+			cfg.Daytona.Snapshot = tc.snapshot
+			cfg.Coordinator, cfg.BrokerMode = tc.coordinator, tc.mode
+			core.MarkClassExplicit(&cfg)
+			if got := (Provider{}).ServerTypeForConfig(cfg); got != tc.want {
+				t.Fatalf("server type=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDaytonaBrokerPreservesConfiguredClasses(t *testing.T) {
 	for _, source := range []string{"yaml", "environment", "flag"} {
 		t.Run(source, func(t *testing.T) {

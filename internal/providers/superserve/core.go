@@ -8,8 +8,8 @@ const (
 	providerName   = "superserve"
 	leasePrefix    = "ssbx_"
 	namePrefix     = "crabbox-"
-	defaultBaseURL = "https://api.superserve.ai"
-	defaultWorkdir = "/workspace/crabbox"
+	defaultBaseURL = core.SuperserveConfigDefaultBaseURL
+	defaultWorkdir = core.SuperserveConfigDefaultWorkdir
 	targetLinux    = core.TargetLinux
 )
 

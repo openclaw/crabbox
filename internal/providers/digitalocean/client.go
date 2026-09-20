@@ -287,10 +287,21 @@ func (c *digitalOceanClient) AccountID(ctx context.Context) (string, error) {
 }
 
 func (c *digitalOceanClient) CreateDroplet(ctx context.Context, cfg core.Config, publicKey, leaseID, slug string, keep bool, now time.Time) (droplet, error) {
+	return c.createDroplet(ctx, cfg, publicKey, leaseID, slug, keep, now, nil)
+}
+
+func (c *digitalOceanClient) CreateFixedDroplet(ctx context.Context, cfg core.Config, publicKey, leaseID, slug string, keep bool, now time.Time, labels map[string]string) (droplet, error) {
+	return c.createDroplet(ctx, cfg, publicKey, leaseID, slug, keep, now, labels)
+}
+
+func (c *digitalOceanClient) createDroplet(ctx context.Context, cfg core.Config, publicKey, leaseID, slug string, keep bool, now time.Time, labels map[string]string) (droplet, error) {
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
 	tags := leaseTags(cfg, leaseID, slug, "provisioning", keep, now)
+	if labels != nil {
+		tags = tagsFromLabels(labels)
+	}
 	leaseTag := encodeTagKV("lease", leaseID)
 	leaseTagResolved := false
 	keyName := providerKeyForLease(leaseID)

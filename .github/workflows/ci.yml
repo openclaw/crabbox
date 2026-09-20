@@ -190,13 +190,22 @@ jobs:
           $code = $LASTEXITCODE
           $events | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { exit $code }
-          $records = @($events | ForEach-Object { $_ | ConvertFrom-Json })
-          foreach ($action in @('run', 'pass')) {
-            if (-not ($records | Where-Object { $_.Test -eq $name -and $_.Action -eq $action })) {
-              throw "required Windows PowerShell 5.1 architecture probe did not $action"
-            }
-          }
-          if ($records | Where-Object { $_.Action -eq 'skip' }) { throw 'Windows PowerShell 5.1 architecture probe was skipped' }
+          & ./scripts/verify-go-test-events.ps1 -Events $events -RequiredTests @($name) -Label 'Windows PowerShell 5.1 architecture probe'
+
+      - name: Require native Windows external slug reservation recovery and reuse
+        if: ${{ !cancelled() && steps.windows_go.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $required = @(
+            'TestLockSlugReservationAcquiresReclaimedAbandonedLock',
+            'TestWaitForSlugReservationLockRecoversAfterAbandonedLock',
+            'TestAllocateLeaseSlugWindowsReleaseAndReuse'
+          )
+          $events = @(go test ./internal/providers/external -run ('^(' + ($required -join '|') + ')$') -count=1 -timeout=2m -json)
+          $code = $LASTEXITCODE
+          $events | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { exit $code }
+          & ./scripts/verify-go-test-events.ps1 -Events $events -RequiredTests $required -Label 'native external slug reservation test'
 
       - name: Test user directory isolation
         run: go test ./internal/testutil ./internal/providers/aws ./internal/providers/daytona ./internal/providers/digitalocean ./internal/providers/hyperv ./internal/providers/namespace ./internal/providers/scaleway ./internal/providers/vast ./internal/providers/vultr -count=1
@@ -241,15 +250,7 @@ jobs:
           $code = $LASTEXITCODE
           $events | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { exit $code }
-          $records = @($events | ForEach-Object { $_ | ConvertFrom-Json })
-          foreach ($name in $required) {
-            foreach ($action in @('run', 'pass')) {
-              if (-not ($records | Where-Object { $_.Test -eq $name -and $_.Action -eq $action })) {
-                throw "required native root contract $name did not $action"
-              }
-            }
-          }
-          if ($records | Where-Object { $_.Action -eq 'skip' }) { throw 'required native root contract was skipped' }
+          & ./scripts/verify-go-test-events.ps1 -Events $events -RequiredTests $required -Label 'native root contract'
 
       - name: Test concurrent claim discovery and ownership
         run: go test ./internal/cli/ -run '^Test(ClaimMetadata|ClaimTransaction|RemoveControllerFile|ConfirmedAbsentStateCleanup|PrivateRunOutput)' -count=1 -v
@@ -293,15 +294,7 @@ jobs:
           $code = $LASTEXITCODE
           $events | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { exit $code }
-          $records = @($events | ForEach-Object { $_ | ConvertFrom-Json })
-          foreach ($name in $required) {
-            foreach ($action in @('run', 'pass')) {
-              if (-not ($records | Where-Object { $_.Test -eq $name -and $_.Action -eq $action })) {
-                throw "required native behavior $name did not $action"
-              }
-            }
-          }
-          if ($records | Where-Object { $_.Action -eq 'skip' }) { throw 'required native behavior was skipped' }
+          & ./scripts/verify-go-test-events.ps1 -Events $events -RequiredTests $required -Label 'native behavior'
 
       - name: Test native Windows failure captures and private outputs
         run: go test ./internal/cli/ -run '^(TestFailureBundle|TestNativeWindowsFailureBundle|TestPrivateRunOutput|TestManagedAttestKeyWindows|TestArtifactOutputWindows)' -count=1 -v

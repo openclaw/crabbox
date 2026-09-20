@@ -531,8 +531,12 @@ func (a App) artifactsList(ctx context.Context, args []string) error {
 	}
 	for _, file := range manifest.Files {
 		location := firstNonBlank(file.URL, file.Path, file.Name)
+		var size int64
+		if file.Size != nil {
+			size = *file.Size
+		}
 		fmt.Fprintf(a.Stdout, "%s name=%s size=%d sha256=%s content_type=%s access=%s url=%s\n",
-			file.Kind, file.Name, file.Size, blank(file.SHA256, "-"), blank(file.ContentType, "-"), blank(file.AccessPolicy, "-"), location)
+			file.Kind, file.Name, size, blank(file.SHA256, "-"), blank(file.ContentType, "-"), blank(file.AccessPolicy, "-"), location)
 	}
 	return nil
 }
@@ -621,19 +625,14 @@ func (a App) publishArtifactDirectory(ctx context.Context, opts artifactPublishO
 	publishFiles := files
 	cleanupSnapshots := func() {}
 	needsSnapshots := opts.Storage != "local" && !opts.DryRun
-	if needsSnapshots {
-		publishFiles, cleanupSnapshots, err = snapshotArtifactFiles(bundleRoot, files)
-		if err != nil {
-			return nil, "", "", err
-		}
-	} else if !opts.NoManifest || opts.Storage == "broker" {
-		publishFiles, err = hashValidatedArtifactFiles(bundleRoot, files)
+	if needsSnapshots || !opts.NoManifest || opts.Storage == "broker" {
+		publishFiles, cleanupSnapshots, err = prepareArtifactFiles(bundleRoot, files, needsSnapshots)
 		if err != nil {
 			return nil, "", "", err
 		}
 	}
 	defer cleanupSnapshots()
-	summary, cleanupSummarySnapshot, err := artifactPublishSummaryText(
+	summary, err := artifactPublishSummaryText(
 		opts.Summary,
 		summaryBinding,
 		artifactSummaryInsideBundle(absDirectory, resolvedDirectory, rootInfo, summaryBinding, files),
@@ -643,7 +642,6 @@ func (a App) publishArtifactDirectory(ctx context.Context, opts artifactPublishO
 	if err != nil {
 		return nil, "", "", err
 	}
-	defer cleanupSummarySnapshot()
 	var published []artifactFile
 	if opts.Storage == "broker" {
 		published, err = publishArtifactFilesBroker(ctx, coord, opts, publishFiles)
@@ -1008,8 +1006,7 @@ func copyLocalFileToTarget(ctx context.Context, target SSHTarget, localPath, rem
 		return err
 	}
 	defer func() { err = errors.Join(err, session.Close()) }()
-	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, "scp", resolvedSCPUploadArgs(session, target, localPath, remotePath)...).(*pondMeshExecHandle)
-	applyTargetChildEnvironment(handle.cmd, target)
+	handle := pondMeshExecCommand(ctx, target, "scp", resolvedSCPUploadArgs(session, target, localPath, remotePath)...)
 	var output bytes.Buffer
 	handle.cmd.Stdout = &output
 	handle.cmd.Stderr = &output

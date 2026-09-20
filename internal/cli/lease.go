@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func newLeaseID() string {
+func NewLeaseID() string {
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "cbx_" + strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000"), ".", "")
@@ -28,10 +28,6 @@ func newCreateAttemptID() string {
 		return "cat_" + (digits + "00000000000000000000000000000000")[:32]
 	}
 	return "cat_" + hex.EncodeToString(b[:])
-}
-
-func NewLeaseID() string {
-	return newLeaseID()
 }
 
 func newRunID() (string, error) {
@@ -74,7 +70,7 @@ func LooksLikeInlineSSHPublicKey(value string) bool {
 	}
 }
 
-func testboxKeyPath(leaseID string) (string, error) {
+func TestboxKeyPath(leaseID string) (string, error) {
 	if leaseID != strings.TrimSpace(leaseID) || !validLeaseClaimID(leaseID) {
 		return "", invalidLeaseClaimIDError{id: leaseID}
 	}
@@ -89,7 +85,7 @@ func testboxKeyPath(leaseID string) (string, error) {
 }
 
 func ensureTestboxLeaseDirectory(leaseID string) (string, error) {
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		return "", err
 	}
@@ -143,7 +139,7 @@ func ensureLeaseSSHDirectories(components []string) error {
 }
 
 func inspectTestboxLeaseDirectory(leaseID string) (string, error) {
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		return "", err
 	}
@@ -231,14 +227,10 @@ func walkDirectoryPathWithoutSymlinks(path, boundary string, create bool) error 
 	return nil
 }
 
-func TestboxKeyPath(leaseID string) (string, error) {
-	return testboxKeyPath(leaseID)
-}
-
 // StoredTestboxKeyPath admits existing material in an explicitly selected root.
 // A missing key retains its calculated path for callers' existing diagnostics.
 func StoredTestboxKeyPath(leaseID string) (string, error) {
-	path, err := testboxKeyPath(leaseID)
+	path, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		return "", err
 	}
@@ -255,27 +247,19 @@ func OptionalStoredTestboxKeyPath(leaseID string) (string, error) {
 	return path, err
 }
 
-func ensureTestboxKey(leaseID string) (string, string, error) {
+func EnsureTestboxKey(leaseID string) (string, string, error) {
 	return ensureTestboxKeyWithType(leaseID, "ed25519")
 }
 
-func EnsureTestboxKey(leaseID string) (string, string, error) {
-	return ensureTestboxKey(leaseID)
-}
-
-func ensureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {
+func EnsureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {
 	if (cfg.Provider == "aws" || cfg.Provider == "azure") && cfg.TargetOS == targetWindows {
 		return ensureTestboxKeyWithType(leaseID, "rsa")
 	}
-	return ensureTestboxKey(leaseID)
-}
-
-func EnsureTestboxKeyForConfig(cfg Config, leaseID string) (string, string, error) {
-	return ensureTestboxKeyForConfig(cfg, leaseID)
+	return EnsureTestboxKey(leaseID)
 }
 
 func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
-	privatePath, err := testboxKeyPath(leaseID)
+	privatePath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		return "", "", err
 	}
@@ -318,7 +302,7 @@ func ensureTestboxKeyWithType(leaseID, keyType string) (string, string, error) {
 	return privatePath, publicKey, err
 }
 
-func useStoredTestboxKey(target *SSHTarget, leaseID string) error {
+func UseStoredTestboxKey(target *SSHTarget, leaseID string) error {
 	keyPath, err := OptionalStoredTestboxKeyPath(leaseID)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -329,11 +313,7 @@ func useStoredTestboxKey(target *SSHTarget, leaseID string) error {
 	return nil
 }
 
-func UseStoredTestboxKey(target *SSHTarget, leaseID string) error {
-	return useStoredTestboxKey(target, leaseID)
-}
-
-func useLeaseKnownHosts(target *SSHTarget, leaseID string) error {
+func UseLeaseKnownHosts(target *SSHTarget, leaseID string) error {
 	dir, err := ensureTestboxLeaseDirectory(leaseID)
 	if err != nil {
 		return Exit(2, "prepare lease SSH host-key directory for %s: %v", leaseID, err)
@@ -344,16 +324,8 @@ func useLeaseKnownHosts(target *SSHTarget, leaseID string) error {
 	return nil
 }
 
-func UseLeaseKnownHosts(target *SSHTarget, leaseID string) error {
-	return useLeaseKnownHosts(target, leaseID)
-}
-
-func removeStoredTestboxKey(leaseID string) {
-	_ = removeStoredTestboxConnectionArtifacts(context.Background(), leaseID)
-}
-
 func RemoveStoredTestboxKey(leaseID string) {
-	removeStoredTestboxKey(leaseID)
+	_ = removeStoredTestboxConnectionArtifacts(context.Background(), leaseID)
 }
 
 // RemoveStoredTestboxConnectionArtifacts closes lease-owned SSH masters and removes canonical credentials.
@@ -361,10 +333,6 @@ func RemoveStoredTestboxConnectionArtifacts(leaseID string) error {
 	return removeStoredTestboxConnectionArtifacts(context.Background(), leaseID)
 }
 
-func providerKeyForLease(leaseID string) string {
-	return strings.ReplaceAll("crabbox-"+leaseID, "_", "-")
-}
-
 func ProviderKeyForLease(leaseID string) string {
-	return providerKeyForLease(leaseID)
+	return strings.ReplaceAll("crabbox-"+leaseID, "_", "-")
 }

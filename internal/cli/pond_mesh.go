@@ -68,127 +68,48 @@ const pondMeshEnvFileName = "env"
 // `pond disconnect <name>` can clean up this pond without broad process scans.
 const pondMeshDaemonFileName = "daemon.json"
 
-// pondMeshRunner abstracts os/exec.CommandContext so the connect orchestration
-// is testable without spawning real ssh processes. The production runner
-// returns a real *exec.Cmd; tests inject a recorder that captures arguments.
 type pondMeshRunner interface {
-	Command(ctx context.Context, name string, args ...string) pondMeshHandle
+	Command(ctx context.Context, target SSHTarget, name string, args ...string) pondMeshHandle
 }
 
-type pondMeshEnvironmentRunner interface {
-	CommandWithEnvironment(ctx context.Context, denied []string, name string, args ...string) pondMeshHandle
-}
-
-// pondMeshHandle is the minimal surface area the connect loop needs from a
-// spawned process: start it, wait for it to exit, and tear it down on context
-// cancellation. The real implementation wraps *exec.Cmd; tests substitute a
-// stub that records the invocation and exits when signaled.
 type pondMeshHandle interface {
 	Start() error
 	Wait() error
-	Process() processSignaler
-	PID() int
-	String() string
-	// WasTerminatedByOurCancel reports whether THIS process's Wait error is
-	// attributable solely to our own teardown rather than a genuine failure.
-	// Teardown is a hard kill of the isolated process group/tree, recorded
-	// per-member process by the ctx watchdog's Cancel hook. The connect loop never
-	// infers intent from the shared context,
-	// which under a race can misattribute one member's genuine failure to
-	// another member's cancellation. On Unix our SIGKILL is uncatchable, so our
-	// kill is always ProcessState.Signaled() while a peer that reached its own
-	// nonzero exit code is Exited() — unambiguous. On Windows there are no
-	// signals, so the Job Object's cancellation-only exit code provides the
-	// terminal provenance. A genuine failure therefore returns false even when
-	// the shared context was cancelled first.
+	// Cancellation provenance belongs to each process; the shared context cannot
+	// distinguish our teardown from a sibling's genuine failure.
 	WasTerminatedByOurCancel() bool
 }
 
-// processSignaler is the subset of *os.Process that the connect loop touches
-// when the operator presses Ctrl-C and the orchestrator tears down each
-// underlying ssh process in turn.
-type processSignaler interface {
-	Signal(os.Signal) error
-	Kill() error
-}
-
-// pondMeshExecRunner is the production pondMeshRunner. It wraps
-// exec.CommandContext directly so behaviour under ctx cancellation matches
-// every other Crabbox SSH invocation.
 type pondMeshExecRunner struct{}
 
-func (pondMeshExecRunner) Command(ctx context.Context, name string, args ...string) pondMeshHandle {
-	return pondMeshExecCommand(ctx, nil, name, args...)
+func (pondMeshExecRunner) Command(ctx context.Context, target SSHTarget, name string, args ...string) pondMeshHandle {
+	return pondMeshExecCommand(ctx, target, name, args...)
 }
 
-func (pondMeshExecRunner) CommandWithEnvironment(ctx context.Context, denied []string, name string, args ...string) pondMeshHandle {
-	return pondMeshExecCommand(ctx, denied, name, args...)
-}
-
-func pondMeshExecCommand(ctx context.Context, denied []string, name string, args ...string) pondMeshHandle {
+func pondMeshExecCommand(ctx context.Context, target SSHTarget, name string, args ...string) *pondMeshExecHandle {
 	cmd := exec.CommandContext(ctx, name, args...)
-	if len(denied) > 0 {
-		cmd.Env = childEnvironmentWithout(os.Environ(), denied...)
-	}
+	applyTargetChildEnvironment(cmd, target)
 	cmd.WaitDelay = pondMeshCancelWaitDelay
-	h := &pondMeshExecHandle{cmd: cmd, managed: true}
-	// Keep exec.CommandContext's hard-cancel semantics, but terminate the full
-	// isolated process group/tree so ProxyCommand and wrapper descendants cannot
-	// survive their SSH leader. We override Cancel to record provenance: mark
-	// that WE initiated this process's teardown before the kill lands, so a
-	// concurrent Wait observes the flag. We deliberately do NOT send a graceful,
-	// catchable signal first: an ssh that trapped SIGINT and exited
-	// non-zero would report ProcessState.Exited(), indistinguishable from a
-	// genuine tunnel failure. SIGKILL cannot be caught, so on Unix our own
-	// teardown is always Signaled() — letting WasTerminatedByOurCancel suppress
-	// it without ever consulting the shared context, so a different member's
-	// genuine failure is never misclassified as our cancellation.
+	h := &pondMeshExecHandle{cmd: cmd}
+	// Kill the owned process tree so ProxyCommand descendants cannot outlive SSH.
+	// A catchable signal could produce a nonzero exit indistinguishable from a
+	// genuine failure; platform hard-kill provenance keeps that distinction.
 	h.cmd.Cancel = h.cancelAndKill
 	return h
 }
 
-// pondMeshDaemonRunner creates SSH tunnel processes that survive the parent
-// CLI exit. It uses plain exec.Command (not CommandContext) so context
-// cancellation does not kill the tunnels, and sets Setpgid so the kernel
-// orphan-adopts them when crabbox exits. Used only by the --export path
-// so eval $(crabbox pond connect --export) works.
-type pondMeshDaemonRunner struct{}
-
-func (pondMeshDaemonRunner) Command(_ context.Context, name string, args ...string) pondMeshHandle {
+// Exported tunnels outlive the caller, so they have no CommandContext watchdog.
+func pondMeshDaemonCommand(target SSHTarget, name string, args ...string) *exec.Cmd {
 	cmd := exec.Command(name, args...)
+	applyTargetChildEnvironment(cmd, target)
 	configureDaemonCommand(cmd)
-	return &pondMeshExecHandle{cmd: cmd}
-}
-
-func (pondMeshDaemonRunner) CommandWithEnvironment(_ context.Context, denied []string, name string, args ...string) pondMeshHandle {
-	cmd := exec.Command(name, args...)
-	if len(denied) > 0 {
-		cmd.Env = childEnvironmentWithout(os.Environ(), denied...)
-	}
-	configureDaemonCommand(cmd)
-	return &pondMeshExecHandle{cmd: cmd}
-}
-
-func pondMeshRunnerCommand(ctx context.Context, runner pondMeshRunner, target SSHTarget, name string, args ...string) pondMeshHandle {
-	var handle pondMeshHandle
-	if environmentRunner, ok := runner.(pondMeshEnvironmentRunner); ok {
-		handle = environmentRunner.CommandWithEnvironment(ctx, target.ChildEnvDenylist, name, args...)
-	} else {
-		handle = runner.Command(ctx, name, args...)
-	}
-	if execHandle, ok := handle.(*pondMeshExecHandle); ok {
-		applyTargetChildEnvironment(execHandle.cmd, target)
-	}
-	return handle
+	return cmd
 }
 
 type pondMeshExecHandle struct {
 	cmd      *exec.Cmd
-	managed  bool
 	platform pondMeshPlatformState
-	// cancelled records that our own teardown (the ctx watchdog's Cancel hook)
-	// is terminating this process. It is set before the kill is delivered so a
-	// concurrent Wait always observes it.
+	// Set before delivering the kill so a concurrent Wait observes provenance.
 	cancelled atomic.Bool
 	// cancelFailed makes cleanup/inventory failures observable instead of
 	// suppressing them as an ordinary operator cancellation.
@@ -197,26 +118,6 @@ type pondMeshExecHandle struct {
 	cancelErr    error
 }
 
-func (h *pondMeshExecHandle) String() string { return h.cmd.String() }
-func (h *pondMeshExecHandle) PID() int {
-	if h.cmd.Process == nil {
-		return 0
-	}
-	return h.cmd.Process.Pid
-}
-func (h *pondMeshExecHandle) Process() processSignaler {
-	if h.cmd.Process == nil {
-		return nil
-	}
-	return h.cmd.Process
-}
-
-// cancelAndKill is the exec.CommandContext Cancel hook. It records that OUR
-// teardown initiated this process's termination, then hard-kills its complete
-// isolated process group/tree.
-// An os.ErrProcessDone from the kill means the process finished on its own
-// before our kill landed. The cancelled flag is stored before the kill so a
-// concurrent Wait observes it.
 func (h *pondMeshExecHandle) cancelAndKill() error {
 	h.cancelled.Store(true)
 	if h.cmd.Process == nil {
@@ -258,11 +159,6 @@ func (h *pondMeshExecHandle) WasTerminatedByOurCancel() bool {
 	}
 	return killAttributableToCancel(h.cmd.ProcessState)
 }
-
-// pondMeshDefaultRunner is overridden in tests via the package-level pointer
-// so the production pondMeshExecRunner never appears in unit tests. Reads are
-// guarded by the tests running serially per package.
-var pondMeshDefaultRunner pondMeshRunner = pondMeshExecRunner{}
 
 // requestedExposedPorts validates and normalizes the values from a repeated
 // `--expose` flag. Each entry must be a positive TCP port; comma-separated
@@ -452,7 +348,7 @@ func (a App) pondConnect(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stderr, "pond %q has no SSH-mesh-capable members\n", pond)
 		return nil
 	}
-	opts := pondConnectOptions{Stdout: a.Stdout, Stderr: a.Stderr, HomeDir: os.Getenv("HOME"), Runner: pondMeshDefaultRunner}
+	opts := pondConnectOptions{Stdout: a.Stdout, Stderr: a.Stderr, HomeDir: os.Getenv("HOME")}
 	summary, err := preparePondMeshSummary(pond, members, opts)
 	if err != nil {
 		return err
@@ -877,22 +773,7 @@ func writePondMeshStateFile(path, body string) error {
 	return os.WriteFile(path, []byte(body), 0o600)
 }
 
-// stopDaemonHandles kills every daemon process that was started before a
-// partial failure. Used by the --export path to avoid orphaned tunnels when
-// a later forward fails to start.
-func stopDaemonHandles(handles []pondMeshHandle) {
-	for _, h := range handles {
-		if proc := h.Process(); proc != nil {
-			if osProc, ok := proc.(*os.Process); ok {
-				_ = stopDaemonProcess(osProc, h.PID())
-			} else {
-				_ = proc.Kill()
-			}
-		}
-	}
-}
-
-func writePondMeshDaemonState(home, pond string, summary pondMeshSummary, groups []pondMeshForwardGroup, handles []pondMeshHandle) error {
+func writePondMeshDaemonState(home, pond string, summary pondMeshSummary, groups []pondMeshForwardGroup, handles []*exec.Cmd) error {
 	path, err := pondMeshDaemonStatePath(home, pond, true)
 	if err != nil {
 		return err
@@ -900,7 +781,7 @@ func writePondMeshDaemonState(home, pond string, summary pondMeshSummary, groups
 	pids := make([]int, 0, len(handles))
 	processes := make([]pondMeshDaemonProcess, 0, len(handles))
 	for i, handle := range handles {
-		if pid := handle.PID(); pid > 0 {
+		if pid := handle.Process.Pid; pid > 0 {
 			pids = append(pids, pid)
 			process := pondMeshDaemonProcess{PID: pid, Command: handle.String()}
 			if i < len(groups) && len(groups[i].Forwards) > 0 {
@@ -1111,7 +992,7 @@ func closePondMeshForwardSession(handle pondMeshHandle, session *sshTransportSes
 	if session == nil {
 		return nil
 	}
-	if h, ok := handle.(*pondMeshExecHandle); ok && h.managed {
+	if h, ok := handle.(*pondMeshExecHandle); ok {
 		// Wait has already finished the platform owner. Do not remove configs
 		// when that owner could not prove descendant teardown.
 		if err := h.finishPondMeshPlatform(); err != nil {
@@ -1130,7 +1011,7 @@ func runPondMeshForwards(ctx context.Context, opts pondConnectOptions, members [
 	defer stopTerminationSignals()
 	runner := opts.Runner
 	if runner == nil {
-		runner = pondMeshDefaultRunner
+		runner = pondMeshExecRunner{}
 	}
 	groups, err := pondMeshForwardGroups(members, summary.Forwards)
 	if err != nil {
@@ -1175,7 +1056,7 @@ func runPondMeshForwards(ctx context.Context, opts pondConnectOptions, members [
 			cancel()
 			return errors.Join(err, reapStarted())
 		}
-		handle := pondMeshRunnerCommand(ctx, runner, group.Target, directSSHExecutable(), args...)
+		handle := runner.Command(ctx, group.Target, directSSHExecutable(), args...)
 		if err := handle.Start(); err != nil {
 			closeErr := session.Close()
 			parentErr := terminationCtx.Err()
@@ -1208,15 +1089,6 @@ func runPondMeshForwards(ctx context.Context, opts pondConnectOptions, members [
 				closeErr = errors.Join(closeErr, err)
 				closeErrMu.Unlock()
 			}
-			// Classify by PER-MEMBER-PROCESS provenance, never the shared context.
-			// Reading ctx.Err() here is unsafe under a race: if a sibling
-			// forward or the caller cancels first, ctx.Err() is non-nil by the
-			// time THIS forward's genuine failure is classified, and its error
-			// would be silently discarded. Instead we suppress a Wait error
-			// only when OUR teardown terminated THIS specific process with the
-			// platform's hard process-group/tree kill.
-			// A genuine non-zero exit the peer reached on its own is still
-			// recorded even when the shared context was already cancelled.
 			terminatedByCancel := rf.handle.WasTerminatedByOurCancel()
 			if err == nil && !terminatedByCancel {
 				firstErrOnce.Do(func() {
@@ -1229,11 +1101,7 @@ func runPondMeshForwards(ctx context.Context, opts pondConnectOptions, members [
 		}(rf)
 	}
 	<-ctx.Done()
-	// Cancelling the derived context fires each handle's Cancel hook, which
-	// records provenance and hard-kills the complete platform process group/tree.
-	// We intentionally send no catchable signal
-	// of our own — an ssh that trapped SIGINT and exited non-zero would look
-	// like a genuine failure. Just wait for every waiter to finish reaping.
+	// Keep ownership until every process and its transport session have settled.
 	wg.Wait()
 	return errors.Join(firstErr, closeErr)
 }

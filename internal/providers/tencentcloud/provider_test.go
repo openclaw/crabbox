@@ -68,6 +68,23 @@ func TestProviderFlagsApply(t *testing.T) {
 }
 
 func TestServerTypeForConfigHonorsClassAndTypeProvenance(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cfg  core.Config
+		want string
+	}{
+		{name: "unsupported target", cfg: core.Config{Class: "fast", TargetOS: core.TargetMacOS}},
+		{name: "unsupported architecture", cfg: core.Config{Class: "fast", TargetOS: core.TargetLinux, Architecture: core.ArchitectureARM64}},
+		{name: "legacy normalized fallback", cfg: core.Config{Class: " FAST ", TargetOS: core.TargetMacOS}, want: "SA5.LARGE8"},
+		{name: "unknown legacy fallback", cfg: core.Config{Class: "custom-shape"}, want: defaultType},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			core.MarkClassExplicit(&test.cfg)
+			if got := (Provider{}).ServerTypeForConfig(test.cfg); got != test.want {
+				t.Fatalf("type=%q want=%q", got, test.want)
+			}
+		})
+	}
 	provider := Provider{}
 	defaults := core.BaseConfig()
 	defaults.Provider = providerName
@@ -90,14 +107,14 @@ func TestServerTypeForConfigHonorsClassAndTypeProvenance(t *testing.T) {
 	}
 
 	explicitProviderType := explicitClass
-	explicitProviderType.TencentCloud.Type = "S5.SMALL2"
+	explicitProviderType.TencentCloud.Type = " S5.SMALL2 "
 	core.SetTencentCloudTypeExplicit(&explicitProviderType)
 	if got := provider.ServerTypeForConfig(explicitProviderType); got != "S5.SMALL2" {
 		t.Fatalf("explicit provider type=%q", got)
 	}
 
 	explicitGenericType := explicitProviderType
-	explicitGenericType.ServerType = "S6.MEDIUM4"
+	explicitGenericType.ServerType = " S6.MEDIUM4 "
 	explicitGenericType.ServerTypeExplicit = true
 	if got := provider.ServerTypeForConfig(explicitGenericType); got != "S6.MEDIUM4" {
 		t.Fatalf("explicit generic type=%q", got)
@@ -796,6 +813,20 @@ func TestTencentBindingRuntimeAndClassContract(t *testing.T) {
 	cfg.ServerTypeExplicit = true
 	if serverTypeForConfig(cfg) != "S6.MEDIUM4" || cfgForRun(cfg).TencentCloud.Type != "S6.MEDIUM4" {
 		t.Fatal("generic type priority lost")
+	}
+	for _, tc := range []struct {
+		architecture, class, want string
+	}{
+		{core.ArchitectureAMD64, "fast", "SA5.LARGE8"},
+		{core.ArchitectureARM64, "standard", ""},
+	} {
+		cfg := core.Config{Provider: providerName, TargetOS: core.TargetLinux, Architecture: tc.architecture, Class: tc.class}
+		core.MarkClassExplicit(&cfg)
+		core.SetTencentCloudTypeExplicit(&cfg)
+		got := cfgForRun(cfg)
+		if got.TencentCloud.Type != tc.want || got.ServerType != tc.want {
+			t.Fatalf("explicit-empty native type with class=%s architecture=%s resolved=%q/%q want=%q", tc.class, tc.architecture, got.TencentCloud.Type, got.ServerType, tc.want)
+		}
 	}
 	for _, tc := range []struct {
 		market   string

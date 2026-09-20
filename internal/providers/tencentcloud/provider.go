@@ -15,6 +15,11 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
+	core.ApplyConfigShowSSHDefaults(&cfg, "ubuntu")
+	return cfg
+}
+
 var classProfiles = buildClassProfiles()
 
 var _ core.ProviderClassProfileProvider = Provider{}

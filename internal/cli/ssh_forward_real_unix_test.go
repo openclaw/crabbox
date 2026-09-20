@@ -268,7 +268,7 @@ func testCoordinatorReleaseJoinsSSHControlMasters(t *testing.T, modes ...string)
 			}
 			start := func(leaseID string, endpoint *forwardSSHServer, route string) masterIdentity {
 				t.Helper()
-				key, _, err := ensureTestboxKey(leaseID)
+				key, _, err := EnsureTestboxKey(leaseID)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -453,7 +453,7 @@ func TestSSHControlCleanupRejectsMalformedMuxWithoutNetworkFallback(t *testing.T
 	if err != nil {
 		t.Skip("OpenSSH is unavailable")
 	}
-	key, _, err := ensureTestboxKey("cbx_001122334455")
+	key, _, err := EnsureTestboxKey("cbx_001122334455")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,7 +542,7 @@ func TestSSHCommandRejectsUnsafeLeaseControlNamespace(t *testing.T) {
 	for _, kind := range []string{"symlink", "public directory"} {
 		t.Run(kind, func(t *testing.T) {
 			isolateTestUserDirs(t)
-			key, _, err := ensureTestboxKey("cbx_001122334455")
+			key, _, err := EnsureTestboxKey("cbx_001122334455")
 			if err != nil {
 				t.Fatal(err)
 			}

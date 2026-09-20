@@ -18,7 +18,7 @@ func applyConfigFileOverlay(config, input, report any, trusted bool, provider st
 	for i := 0; i < cfg.NumField(); i++ {
 		field := cfg.Type().Field(i)
 		switch field.Tag.Get("sources") {
-		case "user,repo,env,flag", "user,repo,env":
+		case "user,repo,env,flag", "user,repo,env", "user,repo,flag":
 		case "user,env,flag", "user,env":
 			if !trusted {
 				continue
@@ -51,6 +51,9 @@ func applyConfigFileField(dst, src reflect.Value, tags reflect.StructTag, provid
 		src = src.Elem()
 	}
 	if dst.Type() == reflect.TypeFor[time.Duration]() {
+		if tags.Get("duration") == "nonnegative-overlay" {
+			return applyNonNegativeLeaseDuration(dst.Addr().Interface().(*time.Duration), src.String()), nil
+		}
 		return applyLeaseDuration(dst.Addr().Interface().(*time.Duration), src.String()), nil
 	}
 	switch dst.Kind() {
@@ -76,6 +79,9 @@ func applyConfigFileField(dst, src reflect.Value, tags reflect.StructTag, provid
 			}
 		}
 	case reflect.Float64:
+		if tags.Get("fileFloat") == "nonnegative" && src.Float() < 0 {
+			return false, Exit(2, "%s %s must be non-negative", provider, tags.Get("config"))
+		}
 		if tags.Get("fileFloat") == "positive" && !(src.Float() > 0) {
 			return false, nil
 		}
@@ -91,13 +97,18 @@ func applyConfigFileField(dst, src reflect.Value, tags reflect.StructTag, provid
 			if len(value) == 0 {
 				return false, nil
 			}
+		case "present-normalized":
+			if value == nil {
+				return false, nil
+			}
+			value = NormalizeList(value)
 		case "nonempty-normalized":
 			if len(value) == 0 {
 				return false, nil
 			}
-			value = normalizeList(value)
+			value = NormalizeList(value)
 		default:
-			value = normalizeList(value)
+			value = NormalizeList(value)
 		}
 		src = reflect.ValueOf(value)
 	case reflect.Pointer:

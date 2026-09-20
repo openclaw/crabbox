@@ -95,15 +95,19 @@ crabbox actions dispatch -f testbox_id=cbx_abcdef123456
 
 ## Workflow inputs
 
-Every `-f` / `--field` value must be `key=value`. CLI values override matching
-`actions.fields` entries for that dispatch.
+Every `-f` / `--field` value must be `key=value`. During `actions hydrate`, CLI
+values override matching `actions.fields` entries. Automatic hydration also uses
+`actions.fields`.
 
-Crabbox inspects the selected workflow's `workflow_dispatch.inputs` (when the
-workflow path is available under `.github/workflows/`). It sends only declared
-inputs and requires `crabbox_id`, `crabbox_runner_label`, and
-`crabbox_keep_alive_minutes`; `crabbox_job` is optional. If a GitHub dispatch
-rejects `crabbox_job` as an unexpected input, Crabbox retries once without it so
-older workflow refs stay usable.
+Standalone `actions dispatch` sends only inputs explicitly supplied with `-f` /
+`--field`; it still uses configured repository, workflow, and ref defaults.
+
+For GitHub runner hydration, Crabbox inspects the selected workflow's
+`workflow_dispatch.inputs` (when the workflow path is available under
+`.github/workflows/`). It sends only declared inputs and requires `crabbox_id`,
+`crabbox_runner_label`, and `crabbox_keep_alive_minutes`; `crabbox_job` is optional.
+If that hydration dispatch rejects `crabbox_job` as an unexpected input, Crabbox
+retries once without it so older workflow refs stay usable.
 
 A hydrate workflow must accept these inputs:
 

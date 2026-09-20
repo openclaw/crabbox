@@ -187,6 +187,51 @@ func TestHeartbeatCoordinatorOmitsIdleTimeoutWithoutOverride(t *testing.T) {
 	}
 }
 
+func TestHeartbeatCoordinatorWaitsForAccessRefresh(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/leases/cbx_heartbeat/heartbeat" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		// Changed SSH sources can keep the broker's refresh attempt open beyond a read's deadline.
+		timer := time.NewTimer(31 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-r.Context().Done():
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{
+			ID: "cbx_heartbeat", Provider: "aws", State: "active", ExpiresAt: "2026-09-18T12:00:00Z",
+		}})
+	}))
+	defer server.Close()
+
+	configureHeartbeatCoordinatorTest(t, server.URL)
+	t.Setenv("CRABBOX_OWNER", "alice@example.com")
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	started := time.Now()
+	err := (App{Stdout: &stdout, Stderr: &stderr}).Run(ctx, []string{
+		"heartbeat", "--provider", "aws", "--id", "cbx_heartbeat", "--json",
+	})
+	if err != nil {
+		t.Fatalf("heartbeat error=%v requests=%d stderr=%q", err, requests.Load(), stderr.String())
+	}
+	var got leaseHeartbeatView
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 1 || got.ID != "cbx_heartbeat" || got.State != "active" || got.ExpiresAt != "2026-09-18T12:00:00Z" {
+		t.Fatalf("requests=%d heartbeat=%#v, want one completed heartbeat", requests.Load(), got)
+	}
+	t.Logf("one heartbeat POST completed after %s", time.Since(started))
+}
+
 func TestHeartbeatCoordinatorFailsClosed(t *testing.T) {
 	for _, test := range []struct {
 		name       string

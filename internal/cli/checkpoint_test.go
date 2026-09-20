@@ -2212,7 +2212,8 @@ func TestCheckpointCreateModeFallsBackToArchiveForSSH(t *testing.T) {
 	}
 }
 
-func TestCreateAWSAMICheckpointValidatesAdminBeforeCloudInit(t *testing.T) {
+func TestCreateAWSAMICheckpointRejectsMissingBrokerAuthBeforeCloudInit(t *testing.T) {
+	clearConfigEnv(t)
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "missing.yaml"))
 	t.Setenv("CRABBOX_COORDINATOR", "https://coordinator.example")
 	t.Setenv("CRABBOX_COORDINATOR_ADMIN_TOKEN", "")
@@ -2232,11 +2233,9 @@ func TestCreateAWSAMICheckpointValidatesAdminBeforeCloudInit(t *testing.T) {
 		NoReboot: true,
 		Stderr:   io.Discard,
 	})
-	if err == nil {
-		t.Fatal("expected missing admin token to fail")
-	}
-	if !strings.Contains(err.Error(), "adminToken") {
-		t.Fatalf("err=%v, want admin validation before cloud-init", err)
+	var exitErr ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 2 || !strings.Contains(err.Error(), "broker authentication") {
+		t.Fatalf("err=%v, want missing broker authentication before cloud-init", err)
 	}
 }
 

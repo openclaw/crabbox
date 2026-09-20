@@ -25,7 +25,7 @@ builds:
       - -trimpath
     mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags:
-      - -s -w -X github.com/openclaw/crabbox/internal/cli.version={{ .Version }}
+      - -s -w -X github.com/openclaw/crabbox/internal/cli.version={{ .Version }} -X github.com/openclaw/crabbox/internal/runtimeartifact.distribution=complete
     targets:
       - darwin_amd64
       - darwin_arm64
@@ -59,7 +59,7 @@ archives:
         formats:
           - zip
     files:
-      - src: artifacts/release-runtime/linux-*
+      - src: artifacts/release-runtime/*
         dst: crabbox-runtime
         strip_parent: true
 

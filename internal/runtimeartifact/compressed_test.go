@@ -20,7 +20,7 @@ func compressionFixture(t *testing.T, data []byte) *Artifact {
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifact := &Artifact{file: file, identity: Identity{Target{"linux", "amd64"}, "CBX-REMOTE-1", int64(len(data)), digest(data)}}
+	artifact := &Artifact{stream: file, identity: Identity{Target: Target{"linux", "amd64"}, ProtocolVersion: "CBX-REMOTE-1", Size: int64(len(data)), SHA256: digest(data), Capability: Supervisor}}
 	t.Cleanup(func() { artifact.Close() })
 	return artifact
 }

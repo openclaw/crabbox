@@ -106,11 +106,14 @@ resource and deletion evidence are preserved independently.
 ## CLI request budgets
 
 The CLI bounds individual lease reads (including authoritative provider
-metadata), health, identity, provider readiness, and HTTP heartbeat requests to
+metadata), health, identity, and provider readiness requests to
 30 seconds. The same deadline covers authentication, response-body reads, and
 any eligible read-only curl fallback; an earlier caller deadline still wins.
-Best-effort foreground lease touches retain their shorter 20-second budget.
-Provisioning and image operations retain the 30-minute HTTP budget.
+HTTP heartbeats use the existing 30-minute mutation budget because a changed
+source policy can require a provider access refresh before the response.
+Automatic heartbeats and best-effort foreground lease touches retain their
+shorter 20-second caller budgets. Provisioning and image operations retain the
+30-minute HTTP budget.
 
 Before releasing a lease, `stop` allows ten seconds for its preliminary lookup.
 If that lookup fails, ordinary stop can use the existing provider-scoped release

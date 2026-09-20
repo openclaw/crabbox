@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strconv"
 	"time"
 )
@@ -13,14 +14,16 @@ func startPondMeshDaemons(ctx context.Context, opts pondConnectOptions, pond str
 	if err != nil {
 		return err
 	}
-	var handles []pondMeshHandle
+	var handles []*exec.Cmd
 	var roots []sshForwardRoot
 	var sessions []*sshTransportSession
 	defer func() {
 		if err == nil {
 			return
 		}
-		stopDaemonHandles(handles)
+		for _, handle := range handles {
+			_ = stopDaemonProcess(handle.Process, handle.Process.Pid)
+		}
 		for i, root := range roots {
 			<-root.wait.done
 			// Wait only reaps the leader for daemon handles.
@@ -42,7 +45,7 @@ func startPondMeshDaemons(ctx context.Context, opts pondConnectOptions, pond str
 		}
 		sessions = append(sessions, session)
 		private = private || session != nil
-		handle := pondMeshRunnerCommand(ctx, pondMeshDaemonRunner{}, group.Target, directSSHExecutable(), args...)
+		handle := pondMeshDaemonCommand(group.Target, directSSHExecutable(), args...)
 		if err := handle.Start(); err != nil {
 			return fmt.Errorf("start ssh forwards for %s: %w", pondMeshForwardGroupLabel(group.Forwards), err)
 		}
@@ -50,7 +53,7 @@ func startPondMeshDaemons(ctx context.Context, opts pondConnectOptions, pond str
 		// when that member's session or Start subsequently fails.
 		wait := startSSHForwardWait(handle.Wait)
 		handles = append(handles, handle)
-		root := sshForwardRoot{pid: handle.PID(), wait: wait}
+		root := sshForwardRoot{pid: handle.Process.Pid, wait: wait}
 		for _, fwd := range group.Forwards {
 			root.ports = append(root.ports, strconv.Itoa(fwd.LocalPort))
 			fmt.Fprintf(opts.Stderr, "  -L 127.0.0.1:%d -> %s:%d\n", fwd.LocalPort, fwd.Peer, fwd.RemotePort)

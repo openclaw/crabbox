@@ -18,6 +18,29 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestNativeServerTypeProjection(t *testing.T) {
+	for _, name := range []string{"modal", " Modal "} {
+		if got := core.ServerTypeForProviderClass(name, "beast"); got != "python:3.13-slim" {
+			t.Fatalf("provider=%q default type=%q, want %q", name, got, "python:3.13-slim")
+		}
+		provider, err := core.ProviderFor(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolver, ok := provider.(core.ProviderServerTypeProvider)
+		if !ok {
+			t.Fatalf("provider=%q has no native type capability", name)
+		}
+		for _, tc := range []struct{ raw, want string }{{"", "python:3.13-slim"}, {"  ", "  "}, {"custom", "custom"}, {" custom ", " custom "}} {
+			cfg := core.Config{Provider: name, Class: "beast", ServerType: "unrelated-type", ServerTypeExplicit: true}
+			cfg.Modal.Image = tc.raw
+			if got := resolver.ServerTypeForConfig(cfg); got != tc.want {
+				t.Fatalf("provider=%q raw=%q type=%q, want %q", name, tc.raw, got, tc.want)
+			}
+		}
+	}
+}
+
 func TestProviderSpec(t *testing.T) {
 	p := Provider{}
 	if p.Spec().Name != "modal" {
@@ -412,6 +435,23 @@ func TestStatusMapsSandboxTags(t *testing.T) {
 	}
 	if view.ID != "cbx_123" || view.Slug != "blue-lobster" || !view.Ready || view.ServerID != "sb-123" {
 		t.Fatalf("view=%#v", view)
+	}
+}
+
+type modalStatusClock struct{ now time.Time }
+
+func (c *modalStatusClock) Now() time.Time { c.now = c.now.Add(time.Second); return c.now }
+
+func TestModalStatusNonreadyTerminalWaitsForDeadline(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeModalAPI{sandbox: modalSandbox{ID: "sb-123", Status: "stopped", Tags: map[string]string{"provider": "modal", "crabbox": "true", "lease": "cbx_123", "slug": "blue-lobster"}}}
+	withFakeModalAPI(t, fake)
+	rt := testRuntime()
+	rt.Clock = &modalStatusClock{now: time.Unix(0, 0)}
+	b := NewModalBackend(Provider{}.Spec(), newTestConfig(), rt).(*modalBackend)
+	view, err := b.Status(t.Context(), core.StatusRequest{ID: "cbx_123", Wait: true, WaitTimeout: time.Nanosecond})
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for modal sandbox sb-123 to become ready") || !reflect.DeepEqual(view, core.StatusView{}) {
+		t.Fatalf("view=%#v err=%v", view, err)
 	}
 }
 

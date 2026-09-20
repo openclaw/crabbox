@@ -37,6 +37,9 @@ func NewAzureLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runti
 }
 
 func (b *azureLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if req.RequestedLeaseID != "" {
+		return b.acquireFixed(ctx, req)
+	}
 	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
 	})
@@ -98,6 +101,11 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 		if err == nil {
 			err = client.DeleteOwnedServer(cleanupCtx, prepared)
 		}
+		if err == nil {
+			if cleanupErr := core.RemoveStoredTestboxConnectionArtifacts(leaseID); cleanupErr != nil {
+				err = fmt.Errorf("remove SSH connection artifacts for lease %s after azure rollback: %w", leaseID, cleanupErr)
+			}
+		}
 		if err != nil {
 			fmt.Fprintf(b.RT.Stderr, "warning: cleanup azure server %s after acquire failure: %v\n", created.CloudID, err)
 			retErr = shared.JoinAcquireCleanupError(retErr, fmt.Errorf("cleanup azure server %s after acquire failure: %w", created.CloudID, err))
@@ -135,6 +143,9 @@ func (b *azureLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if lease, handled, err := b.resolveFixed(ctx, client, req); handled {
+		return lease, err
+	}
 	if strings.HasPrefix(req.ID, "crabbox-") {
 		server, err := client.GetServer(ctx, req.ID)
 		if err != nil {
@@ -148,7 +159,7 @@ func (b *azureLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest
 		}
 		leaseID := server.Labels["lease"]
 		target := core.SSHTargetFromConfig(b.Cfg, core.AzureServerHost(server, b.Cfg.AzureNetwork))
-		return b.ResolvedLeaseTarget(server, target, leaseID, req.ReleaseOnly)
+		return b.resolvedAzureLease(server, target, leaseID, req.ReleaseOnly)
 	}
 	servers, err := listOwnedAzureServers(ctx, client)
 	if err != nil {
@@ -158,7 +169,7 @@ func (b *azureLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest
 		return core.LeaseTarget{}, err
 	} else if leaseID != "" {
 		target := core.SSHTargetFromConfig(b.Cfg, core.AzureServerHost(server, b.Cfg.AzureNetwork))
-		return b.ResolvedLeaseTarget(server, target, leaseID, req.ReleaseOnly)
+		return b.resolvedAzureLease(server, target, leaseID, req.ReleaseOnly)
 	}
 	if req.ReleaseOnly {
 		return resolveMissingAzureReleaseClaim(req.ID, client.LeaseClaimScope())
@@ -217,6 +228,9 @@ func (b *azureLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (c
 }
 
 func (b *azureLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	if handled, err := b.releaseFixedTerminal(req.Lease); handled {
+		return err
+	}
 	client, err := newAzureClient(ctx, b.Cfg)
 	if err != nil {
 		return err
@@ -236,7 +250,7 @@ func (b *azureLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLe
 	if err != nil {
 		return err
 	}
-	if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+	if err := fixedAzureLeaseKind.FinalizeAfterCleanup(claim, func() error {
 		return client.DeleteOwnedServer(ctx, prepared)
 	}); err != nil {
 		return err
@@ -372,7 +386,7 @@ func (b *azureLeaseBackend) applyAzureCleanup(ctx context.Context, client azureC
 	if err != nil {
 		return err
 	}
-	if err := core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+	if err := fixedAzureLeaseKind.FinalizeAfterCleanup(claim, func() error {
 		return client.DeleteCleanupServer(ctx, prepared, now)
 	}); err != nil {
 		if core.IsAzureCleanupSkipError(err) {
@@ -455,6 +469,11 @@ func requireExactAzureClaim(server core.Server, expectedLeaseID, providerScope s
 }
 
 func validateExactAzureClaim(claim core.LeaseClaim, server core.Server, expectedLeaseID, providerScope string) error {
+	if claim.FixedCreateIntent != nil {
+		if err := validateFixedAzureServer(claim, server); err != nil {
+			return err
+		}
+	}
 	serverSlug := strings.TrimSpace(server.Labels["slug"])
 	serverProviderKey := strings.TrimSpace(server.Labels["provider_key"])
 	if strings.TrimSpace(providerScope) == "" ||

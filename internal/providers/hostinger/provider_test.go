@@ -2782,3 +2782,73 @@ func TestCompactJSONRequestEnvelope(t *testing.T) {
 		})
 	}
 }
+
+func TestHostingerBindingFlagPresenceAndExactSelection(t *testing.T) {
+	for _, provider := range []string{"hostinger", "HOSTINGER", " hostinger ", "other"} {
+		for _, visited := range []bool{false, true} {
+			cfg := core.Config{Provider: provider, SSHUser: "generic-user", SSHPort: "2209", SSHFallbackPorts: []string{"2210"}, WorkRoot: "/generic/root"}
+			fs := flag.NewFlagSet("binding", flag.ContinueOnError)
+			values := RegisterHostingerProviderFlags(fs, cfg)
+			count := 0
+			fs.VisitAll(func(*flag.Flag) { count++ })
+			if count != 10 || fs.Lookup("hostinger-url") == nil || fs.Lookup("hostinger-api-url") != nil {
+				t.Fatal("public Hostinger flag surface changed")
+			}
+			if visited {
+				if err := fs.Parse([]string{"--hostinger-user=", "--hostinger-work-root=  ", "--hostinger-allow-purchase=false"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := cfg
+			if err := ApplyHostingerProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+				t.Fatal("foreign flag values changed configuration")
+			}
+			if err := ApplyHostingerProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if core.IsHostingerUserExplicit(&cfg) != visited || core.IsHostingerWorkRootExplicit(&cfg) != visited {
+				t.Fatal("visited empty flags lost explicit-field markers")
+			}
+			if provider == "hostinger" {
+				if cfg.SSHUser != "root" || cfg.Hostinger.User != "root" || cfg.SSHPort != "22" || cfg.SSHFallbackPorts != nil {
+					t.Fatal("exact-provider final defaults changed")
+				}
+			} else {
+				wantUser := "generic-user"
+				if visited {
+					wantUser = ""
+				}
+				if cfg.SSHUser != wantUser || cfg.SSHPort != before.SSHPort || !reflect.DeepEqual(cfg.SSHFallbackPorts, before.SSHFallbackPorts) || cfg.WorkRoot != before.WorkRoot {
+					t.Fatal("flag user effect or exact selection boundary changed")
+				}
+			}
+			if visited && cfg.Hostinger.WorkRoot != "  " {
+				t.Fatal("raw flag root was normalized")
+			}
+		}
+	}
+}
+
+func TestHostingerScalarFallbackValues(t *testing.T) {
+	for _, tc := range []struct{ raw, url, prefix, user, action, root string }{
+		{"", "https://developers.hostinger.com", "crabbox", "root", "stop", "/home/root/crabbox"},
+		{"  ", "  ", "  ", "  ", "  ", "/home/root/crabbox"},
+		{" custom ", " custom ", " custom ", " custom ", " custom ", "/home/custom/crabbox"},
+	} {
+		cfg := core.Config{Hostinger: core.HostingerConfig{APIURL: tc.raw, HostnamePrefix: tc.raw, User: tc.raw, ReleaseAction: tc.raw}}
+		applyDefaults(&cfg)
+		if cfg.Hostinger.APIURL != tc.url || cfg.Hostinger.HostnamePrefix != tc.prefix || cfg.Hostinger.User != tc.user || cfg.Hostinger.ReleaseAction != tc.action || cfg.Hostinger.WorkRoot != tc.root || cfg.WorkRoot != tc.root || cfg.SSHUser != tc.user {
+			t.Fatalf("raw=%q changed scalar or per-user fallback", tc.raw)
+		}
+	}
+	cfg := core.Config{WorkRoot: "/explicit/root", Hostinger: core.HostingerConfig{User: " alice "}}
+	core.MarkWorkRootExplicit(&cfg)
+	cfg.WorkRoot = "/derived/other"
+	if got := core.EffectiveHostingerWorkRoot(cfg); got != "/explicit/root" {
+		t.Fatalf("explicit generic root=%q", got)
+	}
+	cfg.Hostinger.WorkRoot = "  "
+	if got := core.EffectiveHostingerWorkRoot(cfg); got != "  " {
+		t.Fatalf("raw provider root=%q", got)
+	}
+}

@@ -568,8 +568,7 @@ func TestRedactBoxSecretsCoversBothKeyPrefixes(t *testing.T) {
 	}
 }
 
-// Readiness now waits for the advertised endpoint, so pin the connection
-// resolution itself: an advertised endpoint wins, and the ip:22 fallback stays
+// Pin connection resolution: an advertised endpoint wins, and the ip:22 fallback stays
 // available for a box that reports no endpoint at all.
 func TestBoxSSHConnectionPrefersAdvertisedEndpoint(t *testing.T) {
 	for _, tt := range []struct {

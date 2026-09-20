@@ -134,7 +134,7 @@ func TestNativeWSLFunctionalPreflightSelection(t *testing.T) {
 	scope := testNativeRuntimeScope()
 	scope.manifest = "synthetic selected artifact set"
 	installs := 0
-	scope.install = func(_ context.Context, target SSHTarget, _ *runtimeartifact.LocalSet) (*remoteNativeRuntime, error) {
+	scope.install = func(_ context.Context, target SSHTarget, _ runtimeartifact.Source) (*remoteNativeRuntime, error) {
 		installs++
 		runtime := nativeWSLStageTestRuntime("/tmp/runtime/crabbox")
 		runtime.target = target
@@ -191,7 +191,7 @@ func TestNativeWSLCommandCleanupOutcome(t *testing.T) {
 			}
 			native := &remoteNativeRuntime{target: target, path: runtimePath}
 			scope := testNativeRuntimeScope()
-			scope.install = func(context.Context, SSHTarget, *runtimeartifact.LocalSet) (*remoteNativeRuntime, error) {
+			scope.install = func(context.Context, SSHTarget, runtimeartifact.Source) (*remoteNativeRuntime, error) {
 				return native, nil
 			}
 			removed := 0

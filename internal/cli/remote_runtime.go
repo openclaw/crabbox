@@ -25,10 +25,11 @@ const runtimeArtifactsEnv = "CRABBOX_RUNTIME_ARTIFACTS"
 type nativeRuntimeContextKey struct{}
 
 type remoteNativeRuntime struct {
-	target SSHTarget
-	nonce  string
-	path   string
-	shell  wslStageShell
+	target   SSHTarget
+	nonce    string
+	path     string
+	shell    wslStageShell
+	identity runtimeartifact.Identity
 }
 
 func (r *remoteNativeRuntime) command(args ...string) string {
@@ -49,7 +50,12 @@ func (r *remoteNativeRuntime) runCommand(nonce string, commandBytes int, budget 
 func (r *remoteNativeRuntime) close(ctx context.Context) error {
 	cleanupCtx, cancel := wslStageCleanupContext(ctx, 15*time.Second, 5*time.Second)
 	defer cancel()
-	err := r.runPOSIX(cleanupCtx, nativeRuntimeRemoveScript(r.nonce), io.Discard)
+	var err error
+	if isWindowsNativeTarget(r.target) {
+		err = r.runWindows(cleanupCtx, windowsFilesystemRemoveScript(r), io.Discard)
+	} else {
+		err = r.runPOSIX(cleanupCtx, nativeRuntimeRemoveScript(r.nonce), io.Discard)
+	}
 	if err != nil {
 		return fmt.Errorf("remote runtime staging cleanup unconfirmed for %s: %w", r.path, err)
 	}
@@ -119,7 +125,13 @@ func nativeRuntimeTransportBudget(ctx context.Context) (time.Duration, error) {
 	return budget, nil
 }
 
-func prepareNativeRuntime(ctx context.Context, target SSHTarget, artifacts *runtimeartifact.LocalSet) (installed *remoteNativeRuntime, err error) {
+func prepareNativeRuntime(ctx context.Context, target SSHTarget, artifacts runtimeartifact.Source) (installed *remoteNativeRuntime, err error) {
+	return preparePOSIXRuntime(ctx, target, artifacts, runtimeartifact.Requirement{Capability: runtimeartifact.Supervisor, ProtocolVersion: remoteruntime.Protocol})
+}
+
+// preparePOSIXRuntime owns one temporary executable, regardless of capability.
+// Filesystem identity is checked by the first framed response, not a supervisor hello.
+func preparePOSIXRuntime(ctx context.Context, target SSHTarget, artifacts runtimeartifact.Source, required runtimeartifact.Requirement) (installed *remoteNativeRuntime, err error) {
 	var remote *remoteNativeRuntime
 	defer func() {
 		if err != nil && remote != nil {
@@ -127,8 +139,12 @@ func prepareNativeRuntime(ctx context.Context, target SSHTarget, artifacts *runt
 			installed = nil
 		}
 	}()
-	if target.TargetOS != targetLinux && !isWindowsWSL2Target(target) {
-		return nil, errors.New("native runtime installation requires a Linux or WSL2 SSH target")
+	artifactOS, err := posixRuntimeOS(target, required)
+	if err != nil {
+		return nil, err
+	}
+	if artifacts == nil {
+		return nil, errors.New("runtime artifact source is unavailable")
 	}
 	probeCtx, cancelProbe := context.WithTimeout(ctx, sshTransportPreparationTimeout)
 	defer cancelProbe()
@@ -156,12 +172,19 @@ func prepareNativeRuntime(ctx context.Context, target SSHTarget, artifacts *runt
 	default:
 		return nil, errors.New("unsupported native runtime architecture")
 	}
-	artifact, err := artifacts.Open(ctx, runtimeartifact.Target{OS: "linux", Arch: arch})
+	artifact, err := artifacts.Open(ctx, runtimeartifact.Target{OS: artifactOS, Arch: arch})
 	if err != nil {
 		return nil, err
 	}
+	if artifact == nil {
+		return nil, errors.New("runtime source returned no artifact")
+	}
 	defer func() { err = errors.Join(err, artifact.Close()) }()
 	identity := artifact.Identity()
+	if identity.Target != (runtimeartifact.Target{OS: artifactOS, Arch: arch}) || identity.Capability != required.Capability || identity.ProtocolVersion != required.ProtocolVersion || identity.BuildID != required.BuildID {
+		return nil, errors.New("runtime source does not fulfill the requested capability identity")
+	}
+	runtime.identity = identity
 	var payload io.ReadSeeker = artifact
 	transportSize, compressed := identity.Size, false
 	if capabilities[1] == "gzip" {
@@ -199,6 +222,9 @@ func prepareNativeRuntime(ctx context.Context, target SSHTarget, artifacts *runt
 	}
 	if err := verifyNativeRuntimeBytes(installCtx, runtime, identity); err != nil {
 		return nil, err
+	}
+	if required.Capability == runtimeartifact.Filesystem {
+		return runtime, nil
 	}
 	hello := newSynchronizedBuffer(4097)
 	if err := runtime.runMetadata(installCtx, []string{"identity"}, &hello); err != nil {
@@ -313,4 +339,27 @@ func validateNativeRuntimeIdentity(data []byte, arch string) error {
 		return errors.New("native runtime identity contains trailing output")
 	}
 	return nil
+}
+
+// Native Windows has a separate bootstrap; WSL always installs a Linux artifact.
+func posixRuntimeOS(target SSHTarget, required runtimeartifact.Requirement) (string, error) {
+	switch required.Capability {
+	case runtimeartifact.Supervisor:
+		if required.ProtocolVersion != remoteruntime.Protocol || required.BuildID != "" {
+			return "", errors.New("invalid supervisor requirement")
+		}
+	case runtimeartifact.Filesystem:
+		if required.ProtocolVersion != "1" || required.BuildID == "" {
+			return "", errors.New("invalid filesystem requirement")
+		}
+	default:
+		return "", errors.New("unsupported runtime capability")
+	}
+	if target.TargetOS == targetLinux || isWindowsWSL2Target(target) {
+		return "linux", nil
+	}
+	if target.TargetOS == targetMacOS && required.Capability == runtimeartifact.Filesystem {
+		return "darwin", nil
+	}
+	return "", errors.New("runtime capability is unavailable for this POSIX target")
 }

@@ -8,12 +8,14 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -2785,5 +2787,99 @@ exit 255
 				t.Fatal("hydration wait did not return within 3s after cancel; still blocked on bare sleep")
 			}
 		})
+	}
+}
+
+func TestActionsWorkflowHelperSelectors(t *testing.T) {
+	for _, surface := range []struct {
+		name     string
+		register func(*flag.FlagSet) actionsWorkflowFlagValues
+		names    []string
+	}{{"hydrate", registerActionsHydrateWorkflowFlags, []string{"repo", "workflow", "job", "ref"}}, {"dispatch", registerActionsDispatchWorkflowFlags, []string{"repo", "workflow", "ref"}}, {"register", registerActionsRepositoryFlags, []string{"repo"}}} {
+		for _, raw := range []*string{nil, new(""), new("prior"), new(" raw ")} {
+			for _, synthesized := range []bool{false, true} {
+				cfg := baseConfig()
+				cfg.Actions.Repo = "prior"
+				cfg.Actions.Workflow = "prior"
+				cfg.Actions.Job = "prior"
+				cfg.Actions.Ref = "prior"
+				cfg.Actions.Fields = []string{"config=1"}
+				markSynthesizedFlagInputs(&cfg, synthesized)
+				want := cfg
+				fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+				values := surface.register(fs)
+				var names []string
+				fs.VisitAll(func(f *flag.Flag) {
+					names = append(names, f.Name)
+					if f.DefValue != "" || f.Value.(flag.Getter).Get() != "" {
+						t.Fatal("selector did not register empty default")
+					}
+				})
+				if len(names) != len(surface.names) {
+					t.Fatal("surface gained flags")
+				}
+				for _, name := range surface.names {
+					if fs.Lookup(name) == nil {
+						t.Fatal("missing selector")
+					}
+					if raw != nil {
+						if err := fs.Set(name, *raw); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if raw != nil && *raw != "" {
+						switch name {
+						case "repo":
+							want.Actions.Repo = *raw
+						case "workflow":
+							want.Actions.Workflow = *raw
+						case "job":
+							want.Actions.Job = *raw
+						case "ref":
+							want.Actions.Ref = *raw
+						}
+					}
+				}
+				recordConfigInput(&want, configInputGeneric, configInputFlag, raw != nil && *raw != "")
+				values.Apply(&cfg)
+				if !reflect.DeepEqual(cfg, want) {
+					t.Fatalf("%s raw=%v synthesized=%v", surface.name, raw, synthesized)
+				}
+			}
+		}
+	}
+}
+
+func TestActionsWorkflowHelperFieldAliases(t *testing.T) {
+	fs := flag.NewFlagSet("fields", flag.ContinueOnError)
+	fields := registerActionsInputFields(fs)
+	if fields == nil || *fields == nil || fs.Lookup("f").Value != fs.Lookup("field").Value {
+		t.Fatal("aliases/storage shape")
+	}
+	cfg := baseConfig()
+	cfg.Actions.Fields = []string{"a=config", "keep=1"}
+	before := append([]string(nil), cfg.Actions.Fields...)
+	if err := fs.Parse([]string{"-f", "a=cli", "--field", " raw,field ", "-f", "", "--field", "a=last"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"a=cli", " raw,field ", "", "a=last"}
+	if !reflect.DeepEqual([]string(*fields), want) {
+		t.Fatal("raw aliases changed")
+	}
+	if !reflect.DeepEqual(cfg.Actions.Fields, before) {
+		t.Fatal("parsing merged into configuration")
+	}
+	hydrated := mergeWorkflowInputFields(cfg.Actions.Fields, *fields)
+	if !reflect.DeepEqual(hydrated, []string{"a=last", "keep=1", " raw,field ", ""}) {
+		t.Fatalf("hydration merge=%#v", hydrated)
+	}
+	// Standalone dispatch's boundary remains the raw list, without invoking the command.
+	if !reflect.DeepEqual([]string(*fields), want) {
+		t.Fatal("hydration mutated standalone input")
+	}
+	copy := fs.Lookup("field").Value.(flag.Getter).Get().([]string)
+	copy[0] = "changed"
+	if (*fields)[0] != "a=cli" {
+		t.Fatal("Getter shares")
 	}
 }

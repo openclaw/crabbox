@@ -12,32 +12,10 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type superserveFlagValues struct {
-	BaseURL         *string
-	Template        *string
-	Snapshot        *string
-	Workdir         *string
-	TimeoutSecs     *int
-	ExecTimeoutSecs *int
-	NetworkAllowOut *string
-	NetworkDenyOut  *string
-	ForgetMissing   *bool
-}
-
 const maxSuperserveSandboxTimeoutSecs = 7 * 24 * 60 * 60
 
 func RegisterSuperserveProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return superserveFlagValues{
-		BaseURL:         fs.String("superserve-base-url", defaults.Superserve.BaseURL, "Trusted Superserve API base URL"),
-		Template:        fs.String("superserve-template", defaults.Superserve.Template, "Superserve sandbox template"),
-		Snapshot:        fs.String("superserve-snapshot", defaults.Superserve.Snapshot, "Superserve snapshot ID or name"),
-		Workdir:         fs.String("superserve-workdir", defaults.Superserve.Workdir, "Absolute working directory inside the sandbox"),
-		TimeoutSecs:     fs.Int("superserve-timeout-secs", defaults.Superserve.TimeoutSecs, "Superserve sandbox lifetime cap in seconds (0 = Crabbox TTL)"),
-		ExecTimeoutSecs: fs.Int("superserve-exec-timeout-secs", defaults.Superserve.ExecTimeoutSecs, "Superserve command timeout in seconds (0 = service default)"),
-		NetworkAllowOut: fs.String("superserve-network-allow-out", strings.Join(defaults.Superserve.NetworkAllowOut, ","), "comma-separated outbound network allow list"),
-		NetworkDenyOut:  fs.String("superserve-network-deny-out", strings.Join(defaults.Superserve.NetworkDenyOut, ","), "comma-separated outbound network deny list"),
-		ForgetMissing:   fs.Bool("superserve-forget-missing", defaults.Superserve.ForgetMissing, "remove the local claim when stop gets 404 (explicit stale-claim cleanup)"),
-	}
+	return core.RegisterSuperserveConfigFlags(fs, defaults.Superserve)
 }
 
 func ApplySuperserveProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
@@ -46,45 +24,14 @@ func ApplySuperserveProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any
 			return err
 		}
 	}
-	v, ok := values.(superserveFlagValues)
+	v, ok := values.(core.SuperserveConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "superserve-base-url") {
-		cfg.Superserve.BaseURL = *v.BaseURL
-		core.RecordProviderFlagInputs(cfg, true, "superserve")
-	}
-	if core.FlagWasSet(fs, "superserve-template") {
-		cfg.Superserve.Template = *v.Template
-		core.RecordProviderFlagInputs(cfg, true, "superserve")
-	}
-	if core.FlagWasSet(fs, "superserve-snapshot") {
-		cfg.Superserve.Snapshot = *v.Snapshot
-		core.RecordProviderFlagInputs(cfg, true, "superserve")
-	}
-	if core.FlagWasSet(fs, "superserve-workdir") {
-		cfg.Superserve.Workdir = *v.Workdir
-		core.RecordProviderFlagInputs(cfg, true, "superserve")
-	}
-	if core.FlagWasSet(fs, "superserve-timeout-secs") {
-		cfg.Superserve.TimeoutSecs = *v.TimeoutSecs
-		core.RecordProviderFlagInputs(cfg, true, "superserve")
-	}
-	if core.FlagWasSet(fs, "superserve-exec-timeout-secs") {
-		cfg.Superserve.ExecTimeoutSecs = *v.ExecTimeoutSecs
-		core.RecordProviderFlagInputs(cfg, true, "superserve")
-	}
-	if core.FlagWasSet(fs, "superserve-network-allow-out") {
-		cfg.Superserve.NetworkAllowOut = splitSuperserveList(*v.NetworkAllowOut)
-		core.RecordProviderFlagInputs(cfg, true, "superserve")
-	}
-	if core.FlagWasSet(fs, "superserve-network-deny-out") {
-		cfg.Superserve.NetworkDenyOut = splitSuperserveList(*v.NetworkDenyOut)
-		core.RecordProviderFlagInputs(cfg, true, "superserve")
-	}
-	if core.FlagWasSet(fs, "superserve-forget-missing") {
-		cfg.Superserve.ForgetMissing = *v.ForgetMissing
-		core.RecordProviderFlagInputs(cfg, true, "superserve")
+	applied, err := v.Apply(&cfg.Superserve, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "superserve")
+	if err != nil {
+		return err
 	}
 	return validateSuperserveConfig(*cfg)
 }
@@ -165,16 +112,4 @@ func superserveWorkdir(cfg core.Config) (string, error) {
 		return "", core.Exit(2, "superserve workdir %q is too broad; choose a dedicated subdirectory", clean)
 	}
 	return clean, nil
-}
-
-func splitSuperserveList(value string) []string {
-	parts := strings.Split(value, ",")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
 }

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1166,4 +1167,90 @@ func (f *fakeRunner) Run(ctx context.Context, req core.LocalCommandRequest) (cor
 		return core.LocalCommandResult{}, errors.New("unexpected command")
 	}
 	return f.run(req)
+}
+
+func TestTenkiBindingFlagsNormalizeBeforeValidation(t *testing.T) {
+	for _, provider := range []string{"tenki", "TENKI", " tenki ", "other"} {
+		for _, visited := range []bool{false, true} {
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			cfg.Tenki.Image, cfg.Tenki.Snapshot = " prior ", "  "
+			fs := flag.NewFlagSet("binding", flag.ContinueOnError)
+			values := RegisterTenkiProviderFlags(fs, cfg)
+			count := 0
+			fs.VisitAll(func(*flag.Flag) { count++ })
+			if count != 11 {
+				t.Fatalf("flag count=%d want 11", count)
+			}
+			want := cfg
+			want.Tenki.Image, want.Tenki.Snapshot = "prior", ""
+			if visited {
+				if err := fs.Parse([]string{"--tenki-cli= raw-cli ", "--tenki-endpoint= raw-endpoint ", "--tenki-image= next ", "--tenki-cpus=-2"}); err != nil {
+					t.Fatal(err)
+				}
+				want.Tenki.CLIPath, want.Tenki.Endpoint, want.Tenki.Image, want.Tenki.CPUs = " raw-cli ", " raw-endpoint ", "next", -2
+				core.RecordProviderFlagInputs(&want, true, "tenki")
+			}
+			err := ApplyTenkiProviderFlags(&cfg, fs, values)
+			if provider == "tenki" && visited {
+				if err == nil || err.Error() != "tenki.cpus must be zero or greater" {
+					t.Fatalf("validation error=%v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("provider=%q visited=%t binding, normalization or accepted-input order changed", provider, visited)
+			}
+		}
+	}
+}
+
+func TestTenkiBindingGuardsPrecedeForeignValues(t *testing.T) {
+	for _, tc := range []struct {
+		args   []string
+		target string
+		want   string
+	}{
+		{args: []string{"--class=small", "--type=machine"}, want: "--class is not supported for provider=tenki; use --tenki-cpus/--tenki-memory-mb/--tenki-disk-gb"},
+		{args: []string{"--type=machine"}, want: "--type is not supported for provider=tenki; use --tenki-image or --tenki-snapshot"},
+		{target: "windows", want: "provider=tenki supports target=linux only"},
+		{},
+	} {
+		cfg := core.Config{Provider: "tenki", TargetOS: tc.target, Tenki: core.TenkiConfig{Image: " raw "}}
+		before := cfg
+		fs := flag.NewFlagSet("binding", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		if err := fs.Parse(tc.args); err != nil {
+			t.Fatal(err)
+		}
+		err := ApplyTenkiProviderFlags(&cfg, fs, struct{}{})
+		if tc.want == "" {
+			if err != nil {
+				t.Fatal(err)
+			}
+		} else if err == nil || err.Error() != tc.want {
+			t.Fatalf("guard error=%v want=%q", err, tc.want)
+		}
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("guard or foreign values mutated configuration")
+		}
+	}
+}
+
+func TestTenkiScalarFallbackValues(t *testing.T) {
+	for _, tc := range []struct{ cli, root, wantCLI, wantRoot string }{
+		{"", "", "tenki", "/home/tenki/crabbox"},
+		{"  ", "  ", "tenki", "/home/tenki/crabbox"},
+		{" custom-cli ", " /custom/root ", "custom-cli", "/custom/root"},
+	} {
+		cfg := core.Config{Tenki: core.TenkiConfig{CLIPath: tc.cli, WorkRoot: tc.root}}
+		if got := tenkiCLIPath(cfg); got != tc.wantCLI {
+			t.Fatalf("CLI fallback=%q want=%q", got, tc.wantCLI)
+		}
+		if got := tenkiWorkRoot(cfg); got != tc.wantRoot {
+			t.Fatalf("root fallback=%q want=%q", got, tc.wantRoot)
+		}
+	}
 }

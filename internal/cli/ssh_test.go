@@ -2244,7 +2244,7 @@ func TestNativeRuntimeNetworkProbeDoesNotRequireAdmission(t *testing.T) {
 	t.Setenv("CRABBOX_WSL_SHELL", wsl2ProbeCommand("exit 0", "/usr/bin/env BASH_ENV=/dev/null ENV=/dev/null /bin/sh -c"))
 	scope := testNativeRuntimeScope()
 	scope.manifest = "selected fixture"
-	scope.install = func(context.Context, SSHTarget, *runtimeartifact.LocalSet) (*remoteNativeRuntime, error) {
+	scope.install = func(context.Context, SSHTarget, runtimeartifact.Source) (*remoteNativeRuntime, error) {
 		t.Error("network discovery installed a runtime")
 		return nil, nil
 	}
@@ -2736,13 +2736,13 @@ func TestSSHControlPathIsScopedByKey(t *testing.T) {
 	}
 	t.Run("selected roots with the same endpoint", func(t *testing.T) {
 		dirs := isolateTestUserDirs(t)
-		keyA, err := testboxKeyPath("cbx_1516")
+		keyA, err := TestboxKeyPath("cbx_1516")
 		if err != nil {
 			t.Fatal(err)
 		}
 		left := sshControlPath(SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "2222", Key: keyA})
 		t.Setenv("XDG_STATE_HOME", filepath.Join(dirs.Root, "other-state"))
-		keyB, err := testboxKeyPath("cbx_1516")
+		keyB, err := TestboxKeyPath("cbx_1516")
 		if err != nil || keyA == keyB {
 			t.Fatalf("selected roots did not resolve distinct keys: %q %q %v", keyA, keyB, err)
 		}
@@ -6656,44 +6656,6 @@ func TestAWSExplicitARM64TypeInference(t *testing.T) {
 	}
 }
 
-func TestCloudflareContainerInstanceTypeMapping(t *testing.T) {
-	tests := []struct {
-		class string
-		want  string
-	}{
-		{class: "", want: "standard-4"},
-		{class: "tiny", want: "standard-4"},
-		{class: "small", want: "standard-4"},
-		{class: "standard", want: "standard-4"},
-		{class: "fast", want: "standard-4"},
-		{class: "large", want: "standard-4"},
-		{class: "beast", want: "standard-4"},
-		{class: "lite", want: "lite"},
-		{class: "basic", want: "basic"},
-		{class: "standard-3", want: "standard-3"},
-	}
-	for _, tt := range tests {
-		if got := cloudflareContainerInstanceTypeForClass(tt.class); got != tt.want {
-			t.Fatalf("cloudflareContainerInstanceTypeForClass(%q)=%q want %q", tt.class, got, tt.want)
-		}
-		if got := CloudflareContainerInstanceTypeForClass(tt.class); got != tt.want {
-			t.Fatalf("CloudflareContainerInstanceTypeForClass(%q)=%q want %q", tt.class, got, tt.want)
-		}
-	}
-}
-
-func TestNormalizeCloudflareContainerInstanceType(t *testing.T) {
-	for _, valid := range CloudflareContainerInstanceTypes() {
-		got, ok := NormalizeCloudflareContainerInstanceType(" " + strings.ToUpper(valid) + " ")
-		if !ok || got != valid {
-			t.Fatalf("NormalizeCloudflareContainerInstanceType(%q)=(%q,%t), want (%q,true)", valid, got, ok, valid)
-		}
-	}
-	if got, ok := NormalizeCloudflareContainerInstanceType("ccx63"); ok || got != "" {
-		t.Fatalf("NormalizeCloudflareContainerInstanceType(ccx63)=(%q,%t), want empty,false", got, ok)
-	}
-}
-
 func TestCloudflareServerTypeForConfig(t *testing.T) {
 	tests := []struct {
 		cfg  Config
@@ -6718,12 +6680,8 @@ func TestServerTypeForProviderClassDirectProviders(t *testing.T) {
 		{provider: "blacksmith-testbox", class: "beast", want: ""},
 		{provider: "ssh", class: "beast", want: ""},
 		{provider: "islo", class: "beast", want: ""},
-		{provider: "e2b", class: "beast", want: "base"},
-		{provider: "modal", class: "beast", want: "python:3.13-slim"},
-		{provider: "daytona", class: "beast", want: "snapshot"},
 		{provider: "namespace", class: "standard", want: "S"},
 		{provider: "namespace-devbox", class: " custom-xl ", want: "CUSTOM-XL"},
-		{provider: "proxmox", class: "beast", want: "template"},
 		{provider: "sprites", class: "beast", want: ""},
 		{provider: "cloudflare", class: "standard", want: "standard-4"},
 		{provider: "cf", class: "beast", want: "standard-4"},

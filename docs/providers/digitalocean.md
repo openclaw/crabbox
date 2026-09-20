@@ -155,6 +155,24 @@ not treated as proof that creation failed: while the outcome remains
 indeterminate, Crabbox retains the claim and credentials and asks the operator
 to retry rather than risk orphaning a billed Droplet without its SSH key.
 
+## Fixed operation IDs
+
+Direct leases accept `warmup --provider digitalocean --lease-id cbx_<12 lowercase hex>`.
+Repeating the same command recovers the same Droplet, including after a lost
+create reply or readiness failure. The durable local intent binds the API
+account, create inputs, per-lease SSH key, allocation nonce, and observed
+Droplet ID. Changed inputs, account changes, and replacement Droplets are
+rejected. No coordinator is needed.
+
+DigitalOcean has no create idempotency key: Crabbox records admission before
+the POST and never repeats it on replay. An unresolved attempt retains its
+claim and key, even when inventory is empty. Retry later when the original
+Droplet becomes visible. `stop` uses the existing account-, Droplet-, and
+SSH-key-bound cleanup checks. Successful cleanup retains a terminal tombstone,
+so a released ID cannot allocate another Droplet. Preserve the local state
+directory across invocations; fixed-ID resources cannot be reclaimed without
+their original create intent.
+
 ## Ownership And Cleanup
 
 DigitalOcean tags are flat strings, not key/value labels. Crabbox encodes owned

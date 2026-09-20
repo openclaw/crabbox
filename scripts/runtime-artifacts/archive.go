@@ -29,10 +29,12 @@ type runtimeRecord struct {
 	OS   string `json:"os"`
 	Arch string `json:"arch"`
 	fileRecord
+	Capabilities []runtimeartifact.CapabilityClaim `json:"capabilities,omitempty"`
 }
 
 type packRecord struct {
-	ProtocolVersion  string          `json:"protocolVersion"`
+	SchemaVersion    int             `json:"schemaVersion,omitempty"`
+	ProtocolVersion  string          `json:"protocolVersion,omitempty"`
 	ControllerSHA256 string          `json:"controllerSha256"`
 	Manifest         *fileRecord     `json:"manifest,omitempty"`
 	Artifacts        []runtimeRecord `json:"artifacts"`
@@ -52,7 +54,7 @@ func validArchiveTarget(platform, arch string) bool {
 }
 
 func validArchiveMode(mode string) bool {
-	return mode == "none" || mode == "unsigned" || mode == "final"
+	return mode == "none" || mode == "unsigned" || mode == "final" || mode == "unsigned-filesystem" || mode == "final-filesystem"
 }
 
 type contextReader struct {
@@ -80,12 +82,18 @@ func digestFile(ctx context.Context, file string) (fileRecord, error) {
 
 // The caller owns the archive's immutability. Extraction never executes its
 // contents and creates only the enumerated regular files in a new directory.
-func extractArchive(ctx context.Context, archive, directory, platform, arch, mode string) (report archiveRecord, err error) {
+func extractArchive(ctx context.Context, archive, directory, platform, arch, mode, buildID string) (report archiveRecord, err error) {
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
 	if !validArchiveTarget(platform, arch) || !validArchiveMode(mode) {
 		return report, fmt.Errorf("invalid release archive target or runtime mode")
+	}
+	filesystemPack := mode == "unsigned-filesystem" || mode == "final-filesystem"
+	finalPack := mode == "final" || mode == "final-filesystem"
+	unsignedPack := mode == "unsigned" || mode == "unsigned-filesystem"
+	if filesystemPack && !validBuildID(buildID) || !filesystemPack && buildID != "" {
+		return report, fmt.Errorf("filesystem archive mode requires its exact build ID; legacy modes do not accept it")
 	}
 	controller := "crabbox"
 	if platform == "windows" {
@@ -101,9 +109,18 @@ func extractArchive(ctx context.Context, archive, directory, platform, arch, mod
 		allowed["crabbox-apple-vm-helper"] = allowedEntry{"crabbox-apple-vm-helper", 512 << 20}
 	}
 	if mode != "none" {
-		allowed["crabbox-runtime/linux-amd64"] = allowedEntry{"crabbox-runtime/linux-amd64", 64 << 20}
-		allowed["crabbox-runtime/linux-arm64"] = allowedEntry{"crabbox-runtime/linux-arm64", 64 << 20}
-		if mode == "final" {
+		names := []string{"linux-amd64", "linux-arm64"}
+		if filesystemPack {
+			names = nil
+			for _, input := range filesystemInputs(buildID) {
+				names = append(names, input.Path)
+			}
+		}
+		for _, name := range names {
+			name = "crabbox-runtime/" + name
+			allowed[name] = allowedEntry{name, 64 << 20}
+		}
+		if finalPack {
 			allowed["crabbox-runtime/manifest.json"] = allowedEntry{"crabbox-runtime/manifest.json", 64 << 10}
 		}
 	}
@@ -140,7 +157,7 @@ func extractArchive(ctx context.Context, archive, directory, platform, arch, mod
 	seen := make(map[string]bool)
 	directorySeen := false
 	copyEntry := func(name string, size int64, kind os.FileMode, modified time.Time, reader io.Reader) error {
-		if kind.IsDir() && size == 0 && mode == "unsigned" && (name == "crabbox-runtime/" || name == "crabbox-runtime") && !directorySeen {
+		if kind.IsDir() && size == 0 && unsignedPack && (name == "crabbox-runtime/" || name == "crabbox-runtime") && !directorySeen {
 			directorySeen = true
 			return nil
 		}
@@ -237,12 +254,24 @@ func extractArchive(ctx context.Context, archive, directory, platform, arch, mod
 		packDirectory := filepath.Join(directory, "crabbox-runtime")
 		controllerPath := filepath.Join(directory, controller)
 		inputs := []runtimeartifact.ArtifactInput{{Target: runtimeartifact.Target{OS: "linux", Arch: "amd64"}, Path: "linux-amd64"}, {Target: runtimeartifact.Target{OS: "linux", Arch: "arm64"}, Path: "linux-arm64"}}
-		if mode == "final" {
-			if err := verify(ctx, packDirectory, controllerPath, inputs, io.Discard); err != nil {
+		var data []byte
+		if finalPack {
+			var err error
+			if filesystemPack {
+				data, err = verifyFilesystemPack(ctx, packDirectory, controllerPath, buildID)
+			} else {
+				err = verify(ctx, packDirectory, controllerPath, inputs, io.Discard)
+			}
+			if err != nil {
 				return report, err
 			}
 		}
-		data, err := runtimeartifact.MarshalLocal(ctx, packDirectory, controllerPath, inputs, remoteruntime.Protocol)
+		var err error
+		if filesystemPack && !finalPack {
+			data, err = prepareFilesystemPack(ctx, packDirectory, controllerPath, buildID)
+		} else if !filesystemPack {
+			data, err = runtimeartifact.MarshalLocal(ctx, packDirectory, controllerPath, inputs, remoteruntime.Protocol)
+		}
 		if err != nil {
 			return report, err
 		}
@@ -250,10 +279,13 @@ func extractArchive(ctx context.Context, archive, directory, platform, arch, mod
 		if err := json.Unmarshal(data, pack); err != nil {
 			return report, err
 		}
+		if !filesystemPack {
+			pack.SchemaVersion = 0 // Preserve the historical schema-2 report shape.
+		}
 		for i := range pack.Artifacts {
 			pack.Artifacts[i].Path = "crabbox-runtime/" + pack.Artifacts[i].Path
 		}
-		if mode == "final" {
+		if finalPack {
 			manifest, err := digestFile(ctx, filepath.Join(packDirectory, "manifest.json"))
 			if err != nil {
 				return report, err

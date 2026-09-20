@@ -254,6 +254,9 @@ is omitted for hosted publishing, the CLI derives a unique prefix from the PR
 number, bundle directory, and current time so later QA comments do not overwrite
 earlier evidence.
 
+Artifact request setup and transport errors retain the operation and underlying
+failure without printing the request URL, which may contain a signed capability.
+
 The coordinator scopes each new grant under versioned base64url encodings of
 the exact authenticated organization and owner. These values are reversible,
 not hashed or encrypted, and appear in object paths for both public and signed

@@ -54,7 +54,7 @@ test("matrix rows do not fail fast and are time-bounded", () => {
     /- name: local-container\n([\s\S]*?)(?=\n {10}- name:)/,
   )?.[1];
   assert.ok(localContainer, "local-container row exists");
-  assert.match(localContainer, /timeout-minutes: 30/);
+  assert.match(localContainer, /timeout-minutes: 40/);
   assert.equal((workflow.match(/^ {12}timeout-minutes:/gm) ?? []).length, 1);
 });
 
@@ -159,6 +159,39 @@ fs.appendFileSync(process.env.FIXTURE_CALLS, JSON.stringify({tool:path.basename(
       scenario.succeeds ? ["tar", "configure", "make", "make"] : []);
     if (scenario.succeeds) assert.equal(fs.readFileSync(path.join(dir, "rsync-3.4.4.tar.gz"), "utf8"), payload);
     else assert.equal(fs.existsSync(path.join(dir, "github-path")), false);
+  });
+}
+
+for (const scenario of [
+  { name: "executed successfully", actions: ["run", "pass"], succeeds: true },
+  { name: "skipped native fixture", actions: ["run", "skip"] },
+  { name: "missing native fixture", actions: [] },
+  { name: "Go fails after a passing test event", actions: ["run", "pass"], exit: 1 },
+]) {
+  test(`native lifecycle gate: ${scenario.name}`, (t) => {
+    const marker = "      - name: Verify native local-container lifecycle and cleanup\n";
+    const script = runScript(workflow.slice(workflow.indexOf(marker) + marker.length));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-native-lifecycle-gate-"));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const bin = path.join(dir, "bin");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, "go"), `#!${process.execPath}
+process.stdout.write(process.env.NATIVE_RECORDS);
+process.exit(Number(process.env.NATIVE_EXIT));
+`, { mode: 0o755 });
+    const records = scenario.actions.map((Action) => ({ Test: "TestLocalContainerProviderE2E", Action }));
+    // Match the implicit Actions bash shell; the step must own pipefail.
+    const result = spawnSync("bash", ["-e", "-c", script], {
+      encoding: "utf8", timeout: 10000,
+      env: {
+        PATH: `${bin}:${process.env.PATH}`, RUNNER_TEMP: dir,
+        NATIVE_RECORDS: records.map((record) => JSON.stringify(record)).join("\n"),
+        NATIVE_EXIT: String(scenario.exit ?? 0),
+      },
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.signal, null);
+    assert.equal(result.status === 0, Boolean(scenario.succeeds), result.stdout + result.stderr);
   });
 }
 

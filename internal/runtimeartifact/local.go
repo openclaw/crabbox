@@ -8,8 +8,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"debug/buildinfo"
-	"debug/elf"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -18,7 +16,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime/debug"
 	"strings"
 )
 
@@ -41,20 +38,26 @@ type Identity struct {
 	ProtocolVersion string
 	Size            int64
 	SHA256          string
+	Capability      Capability
+	// BuildID is an expected filesystem handshake value, not static proof that
+	// the executable implements it or shares the controller's complete source.
+	BuildID string
 }
 
 // Artifact is the already-open validated executable, initially positioned at
 // byte zero. Upload from this stream instead of reopening its manifest path.
 // The caller must Close it. Metadata is inspected without executing the file.
 type Artifact struct {
-	file     *os.File
+	stream   io.ReadSeekCloser
 	identity Identity
 }
 
-func (a *Artifact) Read(p []byte) (int, error)                   { return a.file.Read(p) }
-func (a *Artifact) Seek(offset int64, whence int) (int64, error) { return a.file.Seek(offset, whence) }
-func (a *Artifact) Close() error                                 { return a.file.Close() }
-func (a *Artifact) Identity() Identity                           { return a.identity }
+func (a *Artifact) Read(p []byte) (int, error) { return a.stream.Read(p) }
+func (a *Artifact) Seek(offset int64, whence int) (int64, error) {
+	return a.stream.Seek(offset, whence)
+}
+func (a *Artifact) Close() error       { return a.stream.Close() }
+func (a *Artifact) Identity() Identity { return a.identity }
 
 type manifest struct {
 	SchemaVersion    int     `json:"schemaVersion"`
@@ -78,6 +81,7 @@ type entry struct {
 type LocalSet struct {
 	directory string
 	manifest  *manifest
+	required  Requirement
 }
 
 // OpenLocalSet snapshots an explicitly trusted manifest and verifies its binding
@@ -101,6 +105,10 @@ func OpenLocalSet(ctx context.Context, manifestPath, controllerPath, expectedPro
 	if err := validateManifest(m, expectedProtocol); err != nil {
 		return nil, err
 	}
+	return bindLocalSet(ctx, manifestPath, controllerPath, m, Requirement{Capability: Supervisor, ProtocolVersion: expectedProtocol})
+}
+
+func bindLocalSet(ctx context.Context, manifestPath, controllerPath string, m *manifest, required Requirement) (*LocalSet, error) {
 	controller, err := os.Open(controllerPath)
 	if err != nil {
 		return nil, fmt.Errorf("open controller: %w", err)
@@ -113,7 +121,7 @@ func OpenLocalSet(ctx context.Context, manifestPath, controllerPath, expectedPro
 	if controllerHash != m.ControllerSHA256 {
 		return nil, fmt.Errorf("controller SHA-256 mismatch; produce an artifact set for this controller")
 	}
-	return &LocalSet{directory: filepath.Dir(manifestPath), manifest: m}, nil
+	return &LocalSet{directory: filepath.Dir(manifestPath), manifest: m, required: required}, nil
 }
 
 // OpenLocal selects and verifies one companion through a fresh LocalSet. Use
@@ -138,7 +146,7 @@ func (s *LocalSet) Open(ctx context.Context, target Target) (*Artifact, error) {
 	if s == nil || s.manifest == nil {
 		return nil, fmt.Errorf("a verified local artifact set is required")
 	}
-	if !supported(target) {
+	if !supported(target) && (s.required.Capability != Filesystem || !filesystemTarget(target)) {
 		return nil, fmt.Errorf("unsupported runtime target %s/%s", target.OS, target.Arch)
 	}
 	var selected *entry
@@ -175,7 +183,10 @@ func (s *LocalSet) Open(ctx context.Context, target Target) (*Artifact, error) {
 		return nil, err
 	}
 	ok = true
-	return &Artifact{file: f, identity: Identity{target, s.manifest.ProtocolVersion, selected.Size, digest}}, nil
+	return &Artifact{stream: f, identity: Identity{
+		Target: target, ProtocolVersion: s.manifest.ProtocolVersion,
+		Size: selected.Size, SHA256: digest, Capability: s.required.Capability, BuildID: s.required.BuildID,
+	}}, nil
 }
 
 func validateManifest(m *manifest, expectedProtocol string) error {
@@ -291,86 +302,7 @@ func (r *contextReader) Read(p []byte) (int, error) {
 	return r.r.Read(p)
 }
 
-type metadataReader struct {
-	ctx       context.Context
-	r         io.ReaderAt
-	remaining int
-}
-
-func (r *metadataReader) ReadAt(p []byte, off int64) (int, error) {
-	if err := r.ctx.Err(); err != nil {
-		return 0, err
-	}
-	if len(p) > r.remaining {
-		return 0, fmt.Errorf("executable metadata exceeds read limit")
-	}
-	r.remaining -= len(p)
-	return r.r.ReadAt(p, off)
-}
-
-func inspectExecutable(ctx context.Context, r io.ReaderAt, target Target) error {
-	bounded := &metadataReader{ctx, r, maxMetadataRead}
-	f, err := elf.NewFile(bounded)
-	if err != nil {
-		return fmt.Errorf("read ELF: %w", err)
-	}
-	defer f.Close()
-	if err := validateELF(f, target); err != nil {
-		return err
-	}
-	info, err := buildinfo.Read(bounded)
-	if err != nil {
-		return fmt.Errorf("read Go build metadata: %w", err)
-	}
-	return validateBuildInfo(info, target)
-}
-
-func validateELF(f *elf.File, target Target) error {
-	machine := elf.EM_X86_64
-	if target.Arch == "arm64" {
-		machine = elf.EM_AARCH64
-	}
-	if f.Class != elf.ELFCLASS64 || f.Data != elf.ELFDATA2LSB || f.Machine != machine {
-		return fmt.Errorf("ELF architecture does not match %s", target.Arch)
-	}
-	if f.Type != elf.ET_EXEC && f.Type != elf.ET_DYN {
-		return fmt.Errorf("ELF is not an executable")
-	}
-	for _, p := range f.Progs {
-		if p.Type == elf.PT_INTERP {
-			return fmt.Errorf("ELF requires an external interpreter")
-		}
-	}
-	libs, err := f.ImportedLibraries()
-	if err != nil {
-		return fmt.Errorf("read ELF dependencies: %w", err)
-	}
-	if len(libs) != 0 {
-		return fmt.Errorf("ELF requires shared libraries")
-	}
-	return nil
-}
-
-func validateBuildInfo(info *debug.BuildInfo, target Target) error {
-	if info.Path != runtimePackage {
-		return fmt.Errorf("Go package mismatch: got %q, want %q", info.Path, runtimePackage)
-	}
-	settings := make(map[string]string, len(info.Settings))
-	for _, s := range info.Settings {
-		if _, exists := settings[s.Key]; exists {
-			return fmt.Errorf("duplicate Go build setting %q", s.Key)
-		}
-		settings[s.Key] = s.Value
-	}
-	for key, want := range map[string]string{"GOOS": target.OS, "GOARCH": target.Arch, "CGO_ENABLED": "0"} {
-		if settings[key] != want {
-			return fmt.Errorf("Go build setting %s must be %q (got %q)", key, want, settings[key])
-		}
-	}
-	return nil
-}
-
-func readManifest(name string) (*manifest, error) {
+func readManifestData(name string) ([]byte, error) {
 	f, err := os.Open(name)
 	if err != nil {
 		return nil, err
@@ -397,6 +329,18 @@ func readManifest(name string) (*manifest, error) {
 	if _, err := decoder.Token(); err != io.EOF {
 		return nil, fmt.Errorf("trailing manifest data")
 	}
+	return data, nil
+}
+
+func readManifest(name string) (*manifest, error) {
+	data, err := readManifestData(name)
+	if err != nil {
+		return nil, err
+	}
+	return parseManifest(data)
+}
+
+func parseManifest(data []byte) (*manifest, error) {
 	if err := exactFields(data, "schemaVersion", "protocolVersion", "controllerSha256", "artifacts"); err != nil {
 		return nil, err
 	}

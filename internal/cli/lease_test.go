@@ -54,7 +54,7 @@ func TestLeaseOperationLockSerializesFixedIDKeyCreation(t *testing.T) {
 			ready.Done()
 			<-start
 			err := withLeaseIDOperationLock(leaseID, func() error {
-				path, _, err := ensureTestboxKey(leaseID)
+				path, _, err := EnsureTestboxKey(leaseID)
 				if err == nil {
 					paths <- path
 				}
@@ -80,8 +80,8 @@ func TestTestboxKeyPathRejectsTraversalIDs(t *testing.T) {
 	isolateTestUserDirs(t)
 
 	for _, leaseID := range []string{"../target", "nested/target", `nested\target`, " cbx_123 "} {
-		if path, err := testboxKeyPath(leaseID); err == nil {
-			t.Fatalf("testboxKeyPath(%q)=%q, want error", leaseID, path)
+		if path, err := TestboxKeyPath(leaseID); err == nil {
+			t.Fatalf("TestboxKeyPath(%q)=%q, want error", leaseID, path)
 		}
 	}
 }
@@ -90,7 +90,7 @@ func TestTestboxKeyPathAllowsSafeCustomIDs(t *testing.T) {
 	isolateTestUserDirs(t)
 	t.Setenv("XDG_STATE_HOME", "")
 
-	path, err := testboxKeyPath("morphvm_123")
+	path, err := TestboxKeyPath("morphvm_123")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestTestboxKeyPathAllowsSafeCustomIDs(t *testing.T) {
 	}
 	want := filepath.Join(configDir, "crabbox", "testboxes", "morphvm_123", "id_ed25519")
 	if path != want {
-		t.Fatalf("testboxKeyPath()=%q want %q", path, want)
+		t.Fatalf("TestboxKeyPath()=%q want %q", path, want)
 	}
 }
 
@@ -121,7 +121,7 @@ func TestUseStoredTestboxKeyPreservesOptionalFallback(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", "")
 			want := tc.fallback
 			if tc.stored {
-				path, err := testboxKeyPath(tc.leaseID)
+				path, err := TestboxKeyPath(tc.leaseID)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -154,7 +154,7 @@ func TestLeaseSSHRootSelection(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", tc.root)
-			got, err := testboxKeyPath("cbx_1516")
+			got, err := TestboxKeyPath("cbx_1516")
 			want := filepath.Join(tc.want, "crabbox", "testboxes", "cbx_1516", "id_ed25519")
 			if err != nil || got != want {
 				t.Fatalf("key path=%q err=%v want %q", got, err, want)
@@ -162,11 +162,11 @@ func TestLeaseSSHRootSelection(t *testing.T) {
 		})
 	}
 	t.Setenv("XDG_STATE_HOME", "relative-state")
-	if _, err := testboxKeyPath("cbx_1516"); err == nil {
+	if _, err := TestboxKeyPath("cbx_1516"); err == nil {
 		t.Fatal("relative explicit root accepted")
 	}
 	target := SSHTarget{Key: "external-key"}
-	if err := useStoredTestboxKey(&target, "cbx_1516"); err == nil || target.Key != "external-key" {
+	if err := UseStoredTestboxKey(&target, "cbx_1516"); err == nil || target.Key != "external-key" {
 		t.Fatalf("invalid root must return error without changing target: %+v, %v", target, err)
 	}
 }
@@ -257,7 +257,7 @@ func TestSelectedLeaseSSHRootReuseAndCleanup(t *testing.T) {
 	}
 	checkConfigUnchanged := makeLeaseSSHTestConfigReadOnly(t, configDir)
 	const leaseID = "cbx_1516"
-	key, _, err := ensureTestboxKey(leaseID)
+	key, _, err := EnsureTestboxKey(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func TestSelectedLeaseSSHRootReuseAndCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := ensureTestboxKey(leaseID); err != nil {
+	if _, _, err := EnsureTestboxKey(leaseID); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(key)
@@ -273,10 +273,10 @@ func TestSelectedLeaseSSHRootReuseAndCleanup(t *testing.T) {
 		t.Fatal("existing generated key changed")
 	}
 	target := SSHTarget{}
-	if err := useStoredTestboxKey(&target, leaseID); err != nil || target.Key != key {
+	if err := UseStoredTestboxKey(&target, leaseID); err != nil || target.Key != key {
 		t.Fatalf("reuse key=%q err=%v", target.Key, err)
 	}
-	if err := useLeaseKnownHosts(&target, leaseID); err != nil {
+	if err := UseLeaseKnownHosts(&target, leaseID); err != nil {
 		t.Fatal(err)
 	}
 	if target.KnownHostsFile != filepath.Join(filepath.Dir(key), "known_hosts") {
@@ -288,7 +288,7 @@ func TestSelectedLeaseSSHRootReuseAndCleanup(t *testing.T) {
 	otherState := filepath.Join(dirs.Root, "other-state")
 	t.Setenv("XDG_STATE_HOME", otherState)
 	external := SSHTarget{Key: "external-key"}
-	if err := useStoredTestboxKey(&external, leaseID); err != nil || external.Key != "external-key" {
+	if err := UseStoredTestboxKey(&external, leaseID); err != nil || external.Key != "external-key" {
 		t.Fatalf("root switch adopted an alternate key: %+v %v", external, err)
 	}
 	if _, err := os.Stat(key); err != nil {
@@ -361,18 +361,18 @@ func TestSelectedLeaseSSHExistingKeyRequiresPrivateMode(t *testing.T) {
 	}
 	isolateTestUserDirs(t)
 	const leaseID = "cbx_1516_mode"
-	key, _, err := ensureTestboxKey(leaseID)
+	key, _, err := EnsureTestboxKey(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(key, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := ensureTestboxKey(leaseID); err == nil {
+	if _, _, err := EnsureTestboxKey(leaseID); err == nil {
 		t.Fatal("existing-key fast path accepted a non-private generated key")
 	}
 	target := SSHTarget{}
-	if err := useStoredTestboxKey(&target, leaseID); err == nil || target.Key != "" {
+	if err := UseStoredTestboxKey(&target, leaseID); err == nil || target.Key != "" {
 		t.Fatalf("use must report invalid generated key without assigning it: %+v %v", target, err)
 	}
 	info, err := os.Stat(key)
@@ -387,10 +387,10 @@ func TestUseLeaseKnownHostsScopesAndEnforcesHostVerification(t *testing.T) {
 
 	const leaseID = "cbx_abcdef123456"
 	target := SSHTarget{User: "root", Host: "provider-resource", Port: "22"}
-	if err := useLeaseKnownHosts(&target, leaseID); err != nil {
+	if err := UseLeaseKnownHosts(&target, leaseID); err != nil {
 		t.Fatal(err)
 	}
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,8 +430,8 @@ func TestUseLeaseKnownHostsFailsClosedWhenDirectoryCannotBePrepared(t *testing.T
 		t.Fatal(err)
 	}
 	target := SSHTarget{KnownHostsFile: "unchanged"}
-	if err := useLeaseKnownHosts(&target, "cbx_abcdef123456"); err == nil {
-		t.Fatal("useLeaseKnownHosts succeeded with an unusable lease directory")
+	if err := UseLeaseKnownHosts(&target, "cbx_abcdef123456"); err == nil {
+		t.Fatal("UseLeaseKnownHosts succeeded with an unusable lease directory")
 	}
 	if target.KnownHostsFile != "unchanged" {
 		t.Fatalf("KnownHostsFile changed after preparation failure: %q", target.KnownHostsFile)

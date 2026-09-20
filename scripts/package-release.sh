@@ -129,13 +129,28 @@ runtime_pack_enabled=false
 if git -C "$ROOT" cat-file -e "$TAG_COMMIT:cmd/crabbox-runtime/main.go" 2>/dev/null; then
   runtime_pack_enabled=true
 fi
+filesystem_identity_args=()
+if git -C "$ROOT" cat-file -e "$TAG_COMMIT:internal/runner/development/main.go.txt" 2>/dev/null; then
+  runtime_pack_enabled=filesystem
+fi
+# Clone frozen source as data and build only the protected artifact reader.
+git clone --quiet --no-local --no-checkout "$ROOT" "$SOURCE"
+git -C "$SOURCE" checkout --quiet --detach "$TAG_COMMIT"
+"$ROOT/scripts/build-release-runtime-tool.sh" "$WORK/runtime-tool"
+runtime_tool="$WORK/runtime-tool/runtime-artifacts"
+if [[ "$runtime_pack_enabled" == filesystem ]]; then
+  filesystem_build_id=$("$runtime_tool" source-id --source-directory "$SOURCE")
+  [[ "$filesystem_build_id" =~ ^[0-9a-f]{64}$ ]]
+  filesystem_identity_args=(--filesystem-build-id "$filesystem_build_id")
+fi
 candidate_manifest_sha=$(node "$ROOT/scripts/release-provenance.mjs" candidate-verify \
   --dir "$CANDIDATE" \
   --tag "$TAG" \
   --tag-object "$TAG_OBJECT" \
   --source-commit "$TAG_COMMIT" \
   --verifier-commit "$VERIFIER_COMMIT" \
-  --runtime-pack "$runtime_pack_enabled")
+  --runtime-pack "$runtime_pack_enabled" \
+  ${filesystem_identity_args[@]+"${filesystem_identity_args[@]}"})
 [[ "$candidate_manifest_sha" =~ ^[0-9a-f]{64}$ ]] || {
   echo "candidate manifest verifier returned an invalid digest" >&2
   exit 1
@@ -177,8 +192,6 @@ packager_xcode_build=$(awk '$1 == "Build" && $2 == "version" { print $3 }' <<<"$
 # Protected tooling, not candidate scripts, rebuilds the official helper. The
 # signed daemon is copied into an ignored embed path so Go's VCS provenance
 # remains bound to the exact clean tag commit.
-git clone --quiet --no-local --no-checkout "$ROOT" "$SOURCE"
-git -C "$SOURCE" checkout --quiet --detach "$TAG_COMMIT"
 [[ "$(git -C "$SOURCE" rev-parse "refs/tags/$TAG")" == "$TAG_OBJECT" ]]
 [[ "$(git -C "$SOURCE" rev-parse HEAD)" == "$TAG_COMMIT" ]]
 [[ -z "$(git -C "$SOURCE" status --porcelain --untracked-files=all)" ]]
@@ -213,8 +226,13 @@ runtime_pack=none
 if git -C "$SOURCE" cat-file -e "$TAG_COMMIT:cmd/crabbox-runtime/main.go" 2>/dev/null; then
   runtime_pack=unsigned
 fi
-"$ROOT/scripts/build-release-runtime-tool.sh" "$WORK/runtime-tool"
-runtime_tool="$WORK/runtime-tool/runtime-artifacts"
+if [[ "$runtime_pack_enabled" == filesystem ]]; then
+  runtime_pack=unsigned-filesystem
+fi
+runtime_names=(linux-amd64 linux-arm64)
+if [[ "$runtime_pack_enabled" == filesystem ]]; then
+  runtime_names=(darwin-amd64 darwin-arm64 linux-amd64 linux-arm64 windows-amd64.exe windows-arm64.exe)
+fi
 
 # The protected reader validates bounded members before writing any file.
 for platform in darwin linux windows; do
@@ -225,13 +243,24 @@ for platform in darwin linux windows; do
     "$runtime_tool" extract \
       --archive "$CANDIDATE/crabbox_${version}_${platform}_${arch}.${extension}" \
       --directory "$destination" --os "$platform" --arch "$arch" \
-      --runtime-pack "$runtime_pack" >/dev/null
-    if [[ "$runtime_pack" == unsigned ]]; then
-      for runtime_arch in amd64 arm64; do
+      --runtime-pack "$runtime_pack" \
+      ${filesystem_identity_args[@]+"${filesystem_identity_args[@]}"} >/dev/null
+    if [[ "$runtime_pack" != none ]]; then
+      runtime_verification_args=()
+      [[ "$runtime_pack_enabled" != filesystem ]] || runtime_verification_args=(filesystem)
+      for runtime_name in "${runtime_names[@]}"; do
+        runtime_platform=${runtime_name%%-*}
+        runtime_arch=${runtime_name#*-}
+        runtime_arch=${runtime_arch%.exe}
         node "$ROOT/scripts/verify-go-release-binary.mjs" \
-          "$destination/crabbox-runtime/linux-$runtime_arch" \
+          "$destination/crabbox-runtime/$runtime_name" \
           github.com/openclaw/crabbox/cmd/crabbox-runtime \
-          "$TAG_COMMIT" linux "$runtime_arch" "$CRABBOX_RELEASE_GO_VERSION"
+          "$TAG_COMMIT" "$runtime_platform" "$runtime_arch" "$CRABBOX_RELEASE_GO_VERSION" \
+          ${runtime_verification_args[@]+"${runtime_verification_args[@]}"}
+        # Every archive must carry the same unsigned companions before signing.
+        if [[ "$destination" != "$WORK/darwin-amd64" ]]; then
+          cmp "$WORK/darwin-amd64/crabbox-runtime/$runtime_name" "$destination/crabbox-runtime/$runtime_name"
+        fi
       done
     fi
   done
@@ -320,6 +349,22 @@ notary_cli_arm64=$(sign_and_capture_notary_id \
 notary_helper_arm64=$(sign_and_capture_notary_id \
   "$CRABBOX_RELEASE_HELPER_IDENTIFIER" arm64 "$arm64_stage/crabbox-apple-vm-helper")
 
+runtime_notary_args=()
+if [[ "$runtime_pack_enabled" == filesystem ]]; then
+  for arch in amd64 arm64; do
+    notary_runtime=$(sign_and_capture_notary_id \
+      "$CRABBOX_RELEASE_RUNTIME_IDENTIFIER" "$arch" "$amd64_stage/crabbox-runtime/darwin-$arch")
+    runtime_notary_args+=("--notary-runtime-$arch" "$notary_runtime")
+    for platform in darwin linux windows; do
+      for destination_arch in amd64 arm64; do
+        destination="$WORK/$platform-$destination_arch/crabbox-runtime/darwin-$arch"
+        [[ "$destination" == "$amd64_stage/crabbox-runtime/darwin-$arch" ]] || \
+          cp -p "$amd64_stage/crabbox-runtime/darwin-$arch" "$destination"
+      done
+    done
+  done
+fi
+
 # Manifests bind the final signed controller bytes, so create them only here.
 for platform in darwin linux windows; do
   for arch in amd64 arm64; do
@@ -329,13 +374,18 @@ for platform in darwin linux windows; do
     [[ "$platform" == windows ]] && binary=crabbox.exe extension=zip
     members=("$binary")
     [[ "$platform" == darwin && "$arch" == arm64 ]] && members+=(crabbox-apple-vm-helper)
-    if [[ "$runtime_pack" == unsigned ]]; then
+    if [[ "$runtime_pack" != none ]]; then
       "$runtime_tool" prepare --directory "$destination/crabbox-runtime" \
-        --controller "$destination/$binary" >"$destination/crabbox-runtime/manifest.json.partial"
+        --controller "$destination/$binary" \
+        ${filesystem_identity_args[@]+"${filesystem_identity_args[@]}"} >"$destination/crabbox-runtime/manifest.json.partial"
       mv "$destination/crabbox-runtime/manifest.json.partial" "$destination/crabbox-runtime/manifest.json"
       "$runtime_tool" verify --directory "$destination/crabbox-runtime" \
-        --controller "$destination/$binary" >/dev/null
-      members+=(crabbox-runtime/linux-amd64 crabbox-runtime/linux-arm64 crabbox-runtime/manifest.json)
+        --controller "$destination/$binary" \
+        ${filesystem_identity_args[@]+"${filesystem_identity_args[@]}"} >/dev/null
+      for runtime_name in "${runtime_names[@]}"; do
+        members+=("crabbox-runtime/$runtime_name")
+      done
+      members+=(crabbox-runtime/manifest.json)
     fi
     archive="$PAYLOAD/crabbox_${version}_${platform}_${arch}.${extension}"
     if [[ "$runtime_pack" == none && "$platform" != darwin ]]; then
@@ -348,8 +398,10 @@ for platform in darwin linux windows; do
   done
 done
 
-provenance_runtime_args=(--runtime-pack "$runtime_pack_enabled")
-if [[ "$runtime_pack_enabled" == true ]]; then
+provenance_runtime_args=(--runtime-pack "$runtime_pack_enabled" ${filesystem_identity_args[@]+"${filesystem_identity_args[@]}"})
+if [[ "$runtime_pack_enabled" != false ]]; then
+  final_runtime_pack=final
+  [[ "$runtime_pack_enabled" != filesystem ]] || final_runtime_pack=final-filesystem
   mkdir -m 700 "$WORK/reports"
   for platform in darwin linux windows; do
     for arch in amd64 arm64; do
@@ -358,7 +410,8 @@ if [[ "$runtime_pack_enabled" == true ]]; then
       name="crabbox_${version}_${platform}_${arch}.${extension}"
       "$runtime_tool" extract --archive "$PAYLOAD/$name" \
         --directory "$WORK/report-${platform}-${arch}" --os "$platform" --arch "$arch" \
-        --runtime-pack final >"$WORK/reports/$name.json"
+        --runtime-pack "$final_runtime_pack" \
+        ${filesystem_identity_args[@]+"${filesystem_identity_args[@]}"} >"$WORK/reports/$name.json"
     done
   done
   provenance_runtime_args+=(--runtime-reports "$WORK/reports")
@@ -371,6 +424,7 @@ git -C "$ROOT" show "$TAG_COMMIT:CHANGELOG.md" >"$tagged_changelog"
   <"$tagged_changelog" >"$notes"
 
 node "$ROOT/scripts/release-provenance.mjs" write "${provenance_runtime_args[@]}" \
+  ${runtime_notary_args[@]+"${runtime_notary_args[@]}"} \
   --dir "$PAYLOAD" \
   --tag "$TAG" \
   --tag-object "$TAG_OBJECT" \

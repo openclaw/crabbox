@@ -77,7 +77,7 @@ func runWindowsSSHStdinCopy(t *testing.T, script string, payload []byte) ([]byte
 	command := windowsPowerShellScriptCommand(t, script)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	handle := pondMeshExecCommand(ctx, nil, command.Path, command.Args[1:]...).(*pondMeshExecHandle)
+	handle := pondMeshExecCommand(ctx, SSHTarget{}, command.Path, command.Args[1:]...)
 	var output bytes.Buffer
 	diagnostic := &windowsStdinReadyWriter{ready: make(chan struct{})}
 	handle.cmd.Stdin, handle.cmd.Stdout, handle.cmd.Stderr = input, &output, diagnostic

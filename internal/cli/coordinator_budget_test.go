@@ -39,11 +39,11 @@ func TestCoordinatorOperationBudgets(t *testing.T) {
 			_, err := c.ProviderReadiness(ctx, cfg)
 			return err
 		}},
-		{"heartbeat", 30 * time.Second, func(ctx context.Context, c *CoordinatorClient) error {
+		{"heartbeat", 30 * time.Minute, func(ctx context.Context, c *CoordinatorClient) error {
 			_, err := c.TouchLeaseForProvider(ctx, "cbx_budget", "aws")
 			return err
 		}},
-		{"idle timeout", 30 * time.Second, func(ctx context.Context, c *CoordinatorClient) error {
+		{"idle timeout", 30 * time.Minute, func(ctx context.Context, c *CoordinatorClient) error {
 			_, err := c.UpdateLeaseIdleTimeoutForProvider(ctx, "cbx_budget", "aws", time.Minute)
 			return err
 		}},

@@ -166,14 +166,16 @@ function runMockedHomebrewPhase({
     )}\n`,
   );
 
+  const packMembers = runtimePack === "filesystem"
+    ? ["manifest.json", "darwin-amd64", "darwin-arm64", "linux-amd64", "linux-arm64", "windows-amd64.exe", "windows-arm64.exe"]
+    : ["manifest.json", "linux-amd64", "linux-arm64"];
   if (runtimePack) {
     fs.mkdirSync(path.join(payload, "crabbox-runtime"));
-    for (const member of ["manifest.json", "linux-amd64", "linux-arm64"]) {
+    for (const member of packMembers) {
       fs.writeFileSync(path.join(payload, "crabbox-runtime", member), `synthetic ${member}`);
     }
   }
-  const runtimeMembers = runtimePack
-    ? ["crabbox-runtime/manifest.json", "crabbox-runtime/linux-amd64", "crabbox-runtime/linux-arm64"] : [];
+  const runtimeMembers = runtimePack ? packMembers.map((member) => `crabbox-runtime/${member}`) : [];
   const archivePaths = {
     darwinAmd64: path.join(assets, "crabbox_1.2.3_darwin_amd64.tar.gz"),
     darwinArm64: path.join(assets, "crabbox_1.2.3_darwin_arm64.tar.gz"),
@@ -203,7 +205,7 @@ function runMockedHomebrewPhase({
   fs.writeFileSync(
     path.join(assets, "provenance.json"),
     JSON.stringify({
-      schemaVersion: runtimePack ? 2 : 1,
+      schemaVersion: runtimePack === "filesystem" ? 3 : runtimePack ? 2 : 1,
       payloads: [
         {
           binaries: [
@@ -1072,3 +1074,12 @@ test("schema 2 Homebrew phase rejects formulae that omit the offline pack", () =
   assert.notEqual(result.status, 0);
   assert.doesNotMatch(result.calls, /brew:test/);
 });
+
+for (const nativeArch of ["arm64", "x86_64"]) {
+  test(`schema 3 Homebrew install preserves all six filesystem companions on ${nativeArch}`, () => {
+    const result = runMockedHomebrewPhase({ runtimePack: "filesystem", nativeArch });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.calls, /brew:--prefix\n/);
+    assert.match(result.stdout, /Verified Homebrew/);
+  });
+}

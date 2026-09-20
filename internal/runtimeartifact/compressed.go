@@ -60,7 +60,7 @@ func CompressGzip(ctx context.Context, artifact *Artifact) (result *CompressedPa
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if artifact == nil || artifact.file == nil {
+	if artifact == nil || artifact.stream == nil {
 		return nil, fmt.Errorf("a verified artifact is required")
 	}
 	if _, err := artifact.Seek(0, io.SeekStart); err != nil {

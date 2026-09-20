@@ -932,7 +932,7 @@ func (s *controllerService) createWorkspace(w http.ResponseWriter, r *http.Reque
 		ProviderRoute:              s.providerRoute,
 		ProviderScope:              s.providerScope,
 		CoordinatorRegistrationURL: s.coordinatorRegistrationURL,
-		AttemptLeaseID:             newLeaseID(),
+		AttemptLeaseID:             NewLeaseID(),
 		Status:                     "provisioning",
 		Slug:                       provisioningSlug,
 		Message:                    "workspace provisioning",

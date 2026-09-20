@@ -11,7 +11,6 @@ func SleepContext(ctx context.Context, delay time.Duration) error {
 }
 
 // sleepContext waits for delay or returns early when ctx is cancelled.
-// Matches the pattern used by GCP/Azure WaitForServerIP and provider backends.
 func sleepContext(ctx context.Context, delay time.Duration) error {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
