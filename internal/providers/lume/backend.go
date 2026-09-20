@@ -1727,7 +1727,7 @@ func (b *backend) serverFromInstance(inst lumeVM, claim core.LeaseClaim, cfg cor
 	labels["provider"] = providerName
 	labels["instance"] = inst.Name
 	state := normalizedState(inst.Status)
-	if labels["state"] == "" || labels["state"] == "running" || !instanceRunning(inst.Status) {
+	if labels["state"] == "" || labels["state"] == "running" || (labels["state"] == "ready" && !instanceRunning(inst.Status)) {
 		labels["state"] = state
 	}
 	if labels["storage"] == "" {

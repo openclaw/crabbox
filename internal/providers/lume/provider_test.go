@@ -1178,9 +1178,22 @@ func TestLumeResolveRefreshReturnsCommittedSnapshot(t *testing.T) {
 
 func TestLumeStoppedObservationOverridesReadyLabel(t *testing.T) {
 	b, lease, claim, _ := touchFixture(t)
-	view := b.serverFromInstance(lumeVM{Name: lease.Server.Name, Status: "stopped", IPAddress: "192.0.2.10"}, claim, b.configForRun())
-	if view.Status != "stopped" || view.Labels["state"] != "stopped" {
-		t.Fatal("stopped observation retained stale ready state")
+	for _, tc := range []struct{ stored, want string }{
+		{"ready", "stopped"},
+		{"running", "stopped"},
+		{"error", "error"},
+		{"starting", "starting"},
+	} {
+		t.Run(tc.stored, func(t *testing.T) {
+			claim.Labels["state"] = tc.stored
+			view := b.serverFromInstance(lumeVM{Name: lease.Server.Name, Status: "stopped", IPAddress: "192.0.2.10"}, claim, b.configForRun())
+			if view.Status != "stopped" || view.Labels["state"] != tc.want {
+				t.Fatalf("stored %s projected status=%s state=%s, want stopped/%s", tc.stored, view.Status, view.Labels["state"], tc.want)
+			}
+			if claim.Labels["state"] != tc.stored {
+				t.Fatal("projection modified stored recovery state")
+			}
+		})
 	}
 }
 
