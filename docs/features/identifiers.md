@@ -57,9 +57,10 @@ private token and generation never appear in public lease records. Fixed-ID
 to own replay, and caller cancellation never releases them.
 
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
-direct AWS, direct Machine0, direct Daytona, direct local-container, and managed coordinator
-leases, that ID is an immutable create identity: an identical semantic replay
-returns the same live lease, while intent drift returns `lease_id_conflict`.
+direct AWS, direct Machine0, direct Daytona, direct local-container, direct
+Parallels, and managed coordinator leases, that ID is an immutable create
+identity: an identical semantic replay returns the same live lease, while
+intent drift returns `lease_id_conflict`.
 Managed coordinator replay of the same terminal intent returns
 `fixed_lease_terminal`. External providers also accept requested IDs when their
 protocol explicitly advertises
@@ -97,6 +98,19 @@ missing acquired container fails closed instead of starting another container.
 Its fixed claims use the downgrade-safe `local-container-fixed-v1` marker, so
 older clients cannot mistake them for ordinary local-container claims.
 
+Direct Parallels binds the intent to its resolved Parallels host, the normalized
+clone identity, and the host-unique `crabbox-<lease-id>-<slug>` VM name, all
+persisted before `prlctl clone`. That name is the idempotency key: `prlctl`
+refuses a duplicate name on a host, so a concurrent create of the same lease is
+rejected by Parallels even after a lost reply. Replay adopts only the VM at that
+exact recorded name, and only when its UUID, lease-bearing name, and host still
+match. A fixed Parallels lease never re-runs fleet selection; an unreadable
+inventory keeps custody instead of proving absence, and a vanished acquired VM
+fails closed rather than cloning another. Parallels fixed claims keep the
+ordinary `parallels` provider marker and are distinguished by their durable
+create intent, so existing exact-ownership, resolve, and cleanup checks continue
+to fence them.
+
 After the direct AWS launch attempt is durable, Crabbox never submits that
 attempt again. An ambiguous replay with no visible tagged instance fails closed;
 a later replay can adopt the one instance after inventory converges only when
@@ -105,11 +119,11 @@ match the persisted attempt exactly. Fixed AWS
 claims use the downgrade-safe local discriminator `aws-fixed-v1`; current
 clients map it to runtime AWS, while older clients skip/refuse it.
 
-Fixed IDs are single-use operation identities. Direct AWS, Daytona, Machine0, and
-local-container keep a compact terminal claim tombstone after successful
-destroy release or exact missing-resource cleanup. Tombstones contain only the
-ID, slug, provider scope, versioned intent hash, timestamps, and terminal
-state; automatic provider cleanup never prunes them.
+Fixed IDs are single-use operation identities. Direct AWS, Daytona, Machine0,
+local-container, and Parallels keep a compact terminal claim tombstone after
+successful destroy release or exact missing-resource cleanup. Tombstones
+contain only the ID, slug, provider scope, versioned intent hash, timestamps,
+and terminal state; automatic provider cleanup never prunes them.
 There is no time-based reuse window. Explicitly deleting local Crabbox claim
 state forfeits this replay protection, so automation must instead mint a new
 operation ID.

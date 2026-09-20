@@ -1328,6 +1328,21 @@ func ParallelsLabelsFromName(name string) map[string]string {
 	return parallelsLabelsFromName(name)
 }
 
+// ParallelsLeaseVMName renders the host-unique VM name that carries a lease
+// identity. The name is the Parallels idempotency key: prlctl refuses a second
+// VM with the same name on a host, so a provider adapter can bind a fixed lease
+// ID to a create attempt without pre-allocating any other resource identifier.
+func ParallelsLeaseVMName(leaseID, slug string) string {
+	return parallelsLeaseVMName(leaseID, slug)
+}
+
+// ParallelsHostRefForConfig reports the resolved Parallels host identity used as
+// the provider scope of a lease: the selected fleet host, an explicit remote
+// host, or the local Mac.
+func ParallelsHostRefForConfig(cfg Config) string {
+	return parallelsHostRefForConfig(cfg)
+}
+
 func parallelsLeaseVMName(leaseID, slug string) string {
 	base := strings.ReplaceAll(leaseID, "_", "-")
 	if normalized := NormalizeLeaseSlug(slug); normalized != "" {

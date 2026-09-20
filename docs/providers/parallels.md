@@ -303,6 +303,54 @@ crabbox checkpoint delete --provider parallels --id blue-lobster --snapshot "cra
 Linked clones depend on the source VM and snapshot. Keep known-good template VMs
 and their base snapshots while any checkpoint or clone depends on them.
 
+## Fixed lease IDs
+
+An external orchestrator can name the lease itself so a repeated dispatch stays
+safe to replay:
+
+```sh
+crabbox warmup --provider parallels --lease-id cbx_abcdef123456 --parallels-template ubuntu-fast
+```
+
+The idempotency key is the VM name. Crabbox derives a host-unique
+`crabbox-<lease-id>-<slug>` name from the requested ID and records it, with the
+resolved Parallels host and a hash of the create identity, in the durable lease
+claim **before** it runs `prlctl clone`. `prlctl` refuses a second VM with that
+name on the same host, so a concurrent duplicate create is rejected by Parallels
+itself even when a clone reply is lost.
+
+The reconciliation contract:
+
+- **Replay.** An identical request returns the same live lease. Crabbox adopts
+  only the VM at the exact recorded name, and only after re-confirming that its
+  UUID, lease-bearing name, and Parallels host still match the claim.
+- **Drift.** A different source VM, source snapshot ID, clone mode, target OS,
+  Windows mode, guest user, work root, VM root, or checkpoint ID is a different
+  create identity and fails `lease_id_conflict` instead of provisioning.
+- **Host scope.** A fixed lease never re-runs fleet selection. It reconciles
+  against the host recorded in its intent; if that host is no longer in the
+  configured fleet, the replay fails closed.
+- **Absence.** Only a complete inventory listing proves a VM is gone. A failed
+  `prlctl list` keeps custody rather than cloning a second VM, and an already
+  acquired lease whose VM has disappeared fails closed instead of recreating it.
+- **Failure.** A failed fixed acquisition keeps its claim, its recorded attempt,
+  and its per-lease key. Retry the same lease ID, or stop it. Crabbox does not
+  roll the VM back, because that would make a lost reply indistinguishable from
+  a plain failure.
+- **Release.** `stop` deletes only the recorded VM after re-confirming its
+  identity, then keeps a terminal tombstone: the ID, slug, Parallels host scope,
+  intent hash, timestamps, and terminal state. Replaying a released ID never
+  creates another VM. Automatic cleanup never prunes tombstones, and there is no
+  reuse window — deleting local claim state forfeits the protection, so
+  automation must mint a new ID instead.
+
+No path uses the slug to decide replay ownership. A `crabbox-<slug>` VM, or
+another lease's VM carrying the same slug, is never adopted.
+
+A `prepared` intent whose VM is not visible is deliberately inconclusive: the
+clone may still be in flight, so `stop` refuses it. Replay the same lease ID
+first, then stop the lease it reconciles to.
+
 ## Safety
 
 Crabbox refuses to delete a Parallels VM unless an exact local claim binds the
