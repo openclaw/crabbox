@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -49,7 +50,10 @@ type parallelsFixedRunner struct {
 	// identity, which a fixed lease's provider scope is derived from.
 	serverID          string
 	hardwareID        string
+	vmHome            string
 	serverIdentityErr error
+	hostDirCalls      []string
+	cloneDst          string
 }
 
 func newParallelsFixedRunner(source string) *parallelsFixedRunner {
@@ -57,6 +61,7 @@ func newParallelsFixedRunner(source string) *parallelsFixedRunner {
 		vms:        []core.ParallelsVM{{ID: "{source-uuid}", Name: source, State: "stopped"}},
 		serverID:   "local-server-id",
 		hardwareID: "local-hardware-id",
+		vmHome:     "/vms",
 	}
 }
 
@@ -76,10 +81,29 @@ func (r *parallelsFixedRunner) seed(name string) core.ParallelsVM {
 }
 
 func (r *parallelsFixedRunner) addLocked(name string) core.ParallelsVM {
+	return r.addAtLocked(name, r.vmHome)
+}
+
+// addAtLocked registers a VM whose bundle lives under dir, mirroring how
+// prlctl places a clone under its --dst directory.
+func (r *parallelsFixedRunner) addAtLocked(name, dir string) core.ParallelsVM {
 	r.nextUUID++
-	vm := core.ParallelsVM{ID: fmt.Sprintf("{vm-uuid-%d}", r.nextUUID), Name: name, State: "stopped", IP: "10.211.55.9"}
+	vm := core.ParallelsVM{
+		ID:    fmt.Sprintf("{vm-uuid-%d}", r.nextUUID),
+		Name:  name,
+		State: "stopped",
+		IP:    "10.211.55.9",
+		Home:  strings.TrimRight(dir, "/") + "/" + name + ".pvm/",
+	}
 	r.vms = append(r.vms, vm)
 	return vm
+}
+
+// seedAt registers an unrelated VM at a name, outside any attempt directory.
+func (r *parallelsFixedRunner) seedAt(name string) core.ParallelsVM {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.addAtLocked(name, r.vmHome)
 }
 
 func (r *parallelsFixedRunner) find(name string) (core.ParallelsVM, bool) {
@@ -109,6 +133,19 @@ func (r *parallelsFixedRunner) rename(from, to string) {
 	}
 }
 
+// remove deletes a VM out of band, as another management operation would.
+func (r *parallelsFixedRunner) remove(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	kept := r.vms[:0]
+	for _, vm := range r.vms {
+		if vm.ID != id {
+			kept = append(kept, vm)
+		}
+	}
+	r.vms = kept
+}
+
 func (r *parallelsFixedRunner) replaceUUID(name, uuid string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -125,6 +162,10 @@ func (r *parallelsFixedRunner) counts() (clones, deletes int) {
 	return len(r.cloneCalls), len(r.deleteCalls)
 }
 
+// encodeParallelsVMs renders the plain `prlctl list` form, which reports only
+// uuid, name, status and address. encodeParallelsVMsDetailed adds the fields
+// that only the `-i` info form carries, so a caller that reads a bundle path
+// from the plain listing fails here exactly as it does against real prlctl.
 func encodeParallelsVMs(vms []core.ParallelsVM) string {
 	items := make([]map[string]any, 0, len(vms))
 	for _, vm := range vms {
@@ -137,7 +178,25 @@ func encodeParallelsVMs(vms []core.ParallelsVM) string {
 	return string(data)
 }
 
+func encodeParallelsVMsDetailed(vms []core.ParallelsVM) string {
+	items := make([]map[string]any, 0, len(vms))
+	for _, vm := range vms {
+		items = append(items, map[string]any{"ID": vm.ID, "Name": vm.Name, "State": vm.State, "ip_configured": vm.IP, "Home": vm.Home})
+	}
+	data, err := json.Marshal(items)
+	if err != nil {
+		panic(err)
+	}
+	return string(data)
+}
+
 func (r *parallelsFixedRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	if req.Name == "mkdir" || req.Name == "rmdir" {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.hostDirCalls = append(r.hostDirCalls, req.Name+" "+strings.Join(req.Args, " "))
+		return core.LocalCommandResult{}, nil
+	}
 	if req.Name == "prlsrvctl" {
 		if len(req.Args) == 0 || req.Args[0] != "info" {
 			return core.LocalCommandResult{}, errors.New("unexpected prlsrvctl command")
@@ -147,7 +206,7 @@ func (r *parallelsFixedRunner) Run(_ context.Context, req core.LocalCommandReque
 		if r.serverIdentityErr != nil {
 			return core.LocalCommandResult{Stderr: r.serverIdentityErr.Error()}, r.serverIdentityErr
 		}
-		return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"ID":%q,"Hardware Id":%q}`, r.serverID, r.hardwareID)}, nil
+		return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"ID":%q,"Hardware Id":%q,"VM home":%q}`, r.serverID, r.hardwareID, r.vmHome)}, nil
 	}
 	if req.Name != "prlctl" || len(req.Args) == 0 {
 		return core.LocalCommandResult{}, errors.New("unexpected command")
@@ -160,17 +219,21 @@ func (r *parallelsFixedRunner) Run(_ context.Context, req core.LocalCommandReque
 		if listErr != nil {
 			return core.LocalCommandResult{Stderr: listErr.Error()}, listErr
 		}
-		if len(req.Args) > 1 && req.Args[1] == "-i" {
+		if len(req.Args) > 1 && req.Args[1] == "-i" && !strings.HasPrefix(req.Args[len(req.Args)-1], "-") {
 			handle := req.Args[len(req.Args)-1]
 			vm, ok := r.find(handle)
 			if !ok {
 				return core.LocalCommandResult{Stderr: "The virtual machine could not be found."}, errors.New("prlctl list failed")
 			}
-			return core.LocalCommandResult{Stdout: encodeParallelsVMs([]core.ParallelsVM{vm})}, nil
+			return core.LocalCommandResult{Stdout: encodeParallelsVMsDetailed([]core.ParallelsVM{vm})}, nil
 		}
+		detailed := len(req.Args) > 1 && slices.Contains(req.Args, "-i")
 		r.mu.Lock()
 		listAllErr := r.listAllErr
 		out := encodeParallelsVMs(r.vms)
+		if detailed {
+			out = encodeParallelsVMsDetailed(r.vms)
+		}
 		r.mu.Unlock()
 		if listAllErr != nil {
 			return core.LocalCommandResult{Stderr: listAllErr.Error()}, listAllErr
@@ -182,10 +245,13 @@ func (r *parallelsFixedRunner) Run(_ context.Context, req core.LocalCommandReque
 		if r.beforeClone != nil {
 			r.beforeClone()
 		}
-		name := ""
+		name, dst := "", ""
 		for i := 0; i+1 < len(req.Args); i++ {
-			if req.Args[i] == "--name" {
+			switch req.Args[i] {
+			case "--name":
 				name = req.Args[i+1]
+			case "--dst":
+				dst = req.Args[i+1]
 			}
 		}
 		r.mu.Lock()
@@ -193,6 +259,7 @@ func (r *parallelsFixedRunner) Run(_ context.Context, req core.LocalCommandReque
 		if name == "" {
 			return core.LocalCommandResult{}, errors.New("clone without --name")
 		}
+		r.cloneDst = dst
 		if _, exists := r.findLocked(name); exists {
 			// prlctl refuses a duplicate host-unique VM name.
 			return core.LocalCommandResult{Stderr: "The virtual machine with this name already exists."}, errors.New("prlctl clone failed")
@@ -201,7 +268,7 @@ func (r *parallelsFixedRunner) Run(_ context.Context, req core.LocalCommandReque
 			return core.LocalCommandResult{Stderr: r.cloneErr.Error()}, r.cloneErr
 		}
 		r.cloneCalls = append(r.cloneCalls, name)
-		r.addLocked(name)
+		r.addAtLocked(name, blankString(dst, r.vmHome))
 		if r.cloneErr != nil {
 			return core.LocalCommandResult{Stderr: r.cloneErr.Error()}, r.cloneErr
 		}
@@ -249,6 +316,13 @@ func (r *parallelsFixedRunner) Run(_ context.Context, req core.LocalCommandReque
 	default:
 		return core.LocalCommandResult{}, errors.New("unexpected prlctl command: " + req.Args[0])
 	}
+}
+
+func blankString(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func fixedParallelsConfig() core.Config {
@@ -571,40 +645,69 @@ func TestParallelsFixedConflictingIdentityFailsClosed(t *testing.T) {
 
 // 6 — ambiguous or missing post-clone state does not issue a second clone.
 func TestParallelsFixedAmbiguousStateDoesNotReclone(t *testing.T) {
-	t.Run("lost_clone_reply_retains_custody_without_adopting", func(t *testing.T) {
+	t.Run("lost_clone_reply_recovers_its_own_vm", func(t *testing.T) {
 		backend, runner, req := fixedParallelsFixture(t)
 		runner.cloneErr, runner.cloneCommit = errors.New("reply lost after commit"), true
 		if _, err := backend.Acquire(context.Background(), req); err == nil {
-			t.Fatal("a lost clone reply must remain uncertain")
+			t.Fatal("a lost clone reply must not report a usable lease")
 		}
 		name := fixedLeaseVMName(t, req.RequestedLeaseID)
-		if _, ok := runner.find(name); !ok {
+		committed, ok := runner.find(name)
+		if !ok {
 			t.Fatalf("fixture did not commit VM %q", name)
 		}
 		runner.cloneErr, runner.cloneCommit = nil, false
 
-		// The clone's UUID was never observed, so the VM occupying the recorded
-		// name is unattested. Replay must not adopt it, must not install the
-		// per-lease key into it, and must not clone a second VM.
-		_, err := backend.Acquire(context.Background(), req)
-		if err == nil || !strings.Contains(err.Error(), "lease_id_conflict") {
-			t.Fatalf("replay after an unattested lost reply err=%v, want lease_id_conflict", err)
+		// The clone's UUID was never observed, but the bundle it was told to
+		// create is inside this attempt's own directory. That is provider-side
+		// evidence, so replay recovers the VM instead of cloning a second one.
+		lease, err := backend.Acquire(context.Background(), req)
+		if err != nil {
+			t.Fatalf("replay after a lost reply: %v", err)
+		}
+		if lease.Server.CloudID != committed.ID {
+			t.Fatalf("adopted vm=%q, want the committed clone %q", lease.Server.CloudID, committed.ID)
 		}
 		if clones, deletes := runner.counts(); clones != 1 || deletes != 0 {
 			t.Fatalf("clone/delete calls=%d/%d, want 1/0", clones, deletes)
+		}
+	})
+
+	t.Run("lost_clone_reply_with_a_foreign_name_occupant_fails_closed", func(t *testing.T) {
+		backend, runner, req := fixedParallelsFixture(t)
+		runner.cloneErr, runner.cloneCommit = errors.New("reply lost before commit"), false
+		if _, err := backend.Acquire(context.Background(), req); err == nil {
+			t.Fatal("a lost clone reply must not report a usable lease")
+		}
+		runner.cloneErr = nil
+
+		// Nothing was created in the attempt's directory, and a VM from some
+		// other operation now holds the name. Replay must neither adopt it nor
+		// clone over it.
+		name := fixedLeaseVMName(t, req.RequestedLeaseID)
+		foreign := runner.seedAt(name)
+		_, err := backend.Acquire(context.Background(), req)
+		if err == nil || !strings.Contains(err.Error(), "lease_id_conflict") {
+			t.Fatalf("replay onto a foreign name occupant err=%v, want lease_id_conflict", err)
+		}
+		if clones, deletes := runner.counts(); clones != 0 || deletes != 0 {
+			t.Fatalf("clone/delete calls=%d/%d, want 0/0", clones, deletes)
 		}
 		runner.mu.Lock()
 		execs := len(runner.execCalls)
 		runner.mu.Unlock()
 		if execs != 0 {
-			t.Fatalf("guest exec calls=%d, want 0: an unattested VM received guest mutation", execs)
+			t.Fatalf("guest exec calls=%d, want 0: a foreign VM received guest mutation", execs)
+		}
+		if _, ok := runner.find(name); !ok {
+			t.Fatalf("foreign VM %q was removed", name)
 		}
 		claim, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
 		if err != nil || !exists || claim.FixedCreateIntent == nil {
 			t.Fatalf("custody was not retained: exists=%t err=%v", exists, err)
 		}
-		if claim.FixedCreateIntent.Attempt["name"] != name {
-			t.Fatalf("attempt name=%q, want %q retained", claim.FixedCreateIntent.Attempt["name"], name)
+		if claim.CloudID == foreign.ID || claim.CloudImmutableID == foreign.ID {
+			t.Fatalf("the claim bound the foreign VM %q", foreign.ID)
 		}
 	})
 

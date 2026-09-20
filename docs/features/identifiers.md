@@ -113,13 +113,18 @@ source name is resolved to its immutable UUID before fingerprinting and before
 clone submission, so replacing a template under the same name is drift rather
 than a different fork.
 
-A Parallels VM name is host-unique but reusable, so replay requires the
-provider-issued incarnation as well: Crabbox pins the UUID a successful clone
-returns before any later reconciliation, and adoption, guest preparation, and
-deletion all require the observed VM to carry exactly that UUID. When a clone
-reply is lost before any UUID is observed, the attempt is unattested and the VM
-occupying its recorded name is not adopted, not credentialed, and not deleted —
-custody is retained and an operator adjudicates the name. A fixed Parallels
+A Parallels VM name is host-unique but reusable, so replay requires
+provider-side creation evidence as well. `prlctl clone` reports no UUID, so
+Crabbox clones into a per-lease directory named with a secret nonce, recorded
+before the clone and passed as `--dst`: a bundle there can only have come from
+that attempt. The VM found in it supplies the UUID, and adoption, guest
+preparation and deletion all require the observed VM to carry that UUID and
+still live in that directory. A lost clone reply is therefore recoverable —
+replay finds its own VM in the attempt directory instead of cloning a second
+one — while a VM the attempt did not create is never adopted, credentialed or
+deleted, whatever name it holds. Release resolves a fixed lease from its durable
+claim alone, reading no guest and building no SSH target before the host and
+incarnation are re-attested. A fixed Parallels
 lease never re-runs fleet selection; an unreadable inventory keeps custody
 instead of proving absence, a renamed acquired VM is found by its bound UUID
 rather than reported absent, and a vanished acquired VM fails closed rather than

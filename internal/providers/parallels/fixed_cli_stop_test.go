@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -31,10 +32,14 @@ const (
 	// per attempt, and never reaches a service.
 	fakeParallelsGuestIP   = "127.0.0.1"
 	fakeParallelsGuestPort = "9"
+	fakeParallelsVMHome    = "/vms"
 )
 
 type fakeParallelsState struct {
 	VMs []core.ParallelsVM `json:"vms"`
+	// GuestCalls records every prlctl subcommand that reaches into a guest, so
+	// a test can assert that authorization happened before any guest I/O.
+	GuestCalls []string `json:"guestCalls"`
 }
 
 func fakeParallelsStatePath() string { return os.Getenv(fakeParallelsStateEnv) }
@@ -65,10 +70,16 @@ func writeFakeParallelsState(path string, state fakeParallelsState) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
-func encodeFakeParallelsVMs(vms []core.ParallelsVM) string {
+// encodeFakeParallelsVMs mirrors real prlctl: the bundle path appears only in
+// the `-i` info form, never in the plain listing.
+func encodeFakeParallelsVMs(vms []core.ParallelsVM, detailed bool) string {
 	items := make([]map[string]any, 0, len(vms))
 	for _, vm := range vms {
-		items = append(items, map[string]any{"ID": vm.ID, "Name": vm.Name, "State": vm.State, "ip_configured": vm.IP})
+		item := map[string]any{"ID": vm.ID, "Name": vm.Name, "State": vm.State, "ip_configured": vm.IP}
+		if detailed {
+			item["Home"] = vm.Home
+		}
+		items = append(items, item)
 	}
 	data, _ := json.Marshal(items)
 	return string(data)
@@ -96,12 +107,14 @@ func runFakeParallelsBinary(statePath string, args []string) int {
 		return core.ParallelsVM{}, false
 	}
 	switch binary {
+	case "mkdir", "rmdir":
+		return 0
 	case "prlsrvctl":
 		if len(rest) == 0 || rest[0] != "info" {
 			fmt.Fprintln(os.Stderr, "unexpected prlsrvctl command")
 			return 2
 		}
-		fmt.Printf(`{"ID":%q,"Hardware Id":%q}`+"\n", fakeParallelsServerID, fakeParallelsHardware)
+		fmt.Printf(`{"ID":%q,"Hardware Id":%q,"VM home":%q}`+"\n", fakeParallelsServerID, fakeParallelsHardware, fakeParallelsVMHome)
 		return 0
 	case "prlctl":
 		if len(rest) == 0 {
@@ -110,26 +123,32 @@ func runFakeParallelsBinary(statePath string, args []string) int {
 		}
 		switch rest[0] {
 		case "list":
-			if len(rest) > 1 && rest[1] == "-i" {
+			if len(rest) > 1 && rest[1] == "-i" && !strings.HasPrefix(rest[len(rest)-1], "-") {
 				vm, ok := find(rest[len(rest)-1])
 				if !ok {
 					fmt.Fprintln(os.Stderr, "The virtual machine could not be found.")
 					return 1
 				}
-				fmt.Println(encodeFakeParallelsVMs([]core.ParallelsVM{vm}))
+				fmt.Println(encodeFakeParallelsVMs([]core.ParallelsVM{vm}, true))
 				return 0
 			}
-			fmt.Println(encodeFakeParallelsVMs(state.VMs))
+			fmt.Println(encodeFakeParallelsVMs(state.VMs, slices.Contains(rest, "-i")))
 			return 0
 		case "snapshot-list":
 			fmt.Println("[]")
 			return 0
 		case "clone":
-			name := ""
+			name, dst := "", ""
 			for i := 0; i+1 < len(rest); i++ {
-				if rest[i] == "--name" {
+				switch rest[i] {
+				case "--name":
 					name = rest[i+1]
+				case "--dst":
+					dst = rest[i+1]
 				}
+			}
+			if strings.TrimSpace(dst) == "" {
+				dst = fakeParallelsVMHome
 			}
 			if name == "" {
 				fmt.Fprintln(os.Stderr, "clone without --name")
@@ -141,6 +160,7 @@ func runFakeParallelsBinary(statePath string, args []string) int {
 			}
 			state.VMs = append(state.VMs, core.ParallelsVM{
 				ID: fmt.Sprintf("{cli-vm-%d}", len(state.VMs)), Name: name, State: "stopped", IP: fakeParallelsGuestIP,
+				Home: strings.TrimRight(dst, "/") + "/" + name + ".pvm/",
 			})
 			if err := writeFakeParallelsState(statePath, state); err != nil {
 				fmt.Fprintln(os.Stderr, err)
@@ -158,7 +178,14 @@ func runFakeParallelsBinary(statePath string, args []string) int {
 				return 2
 			}
 			return 0
-		case "stop", "exec":
+		case "stop":
+			return 0
+		case "exec":
+			state.GuestCalls = append(state.GuestCalls, strings.Join(rest, " "))
+			if err := writeFakeParallelsState(statePath, state); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 2
+			}
 			return 0
 		case "delete":
 			kept := state.VMs[:0]
@@ -194,7 +221,7 @@ func fixedParallelsCLIFixture(t *testing.T) (core.LeaseTarget, string, string) {
 	statePath := filepath.Join(root, "parallels-state.json")
 	const source = "source-vm"
 	if err := writeFakeParallelsState(statePath, fakeParallelsState{
-		VMs: []core.ParallelsVM{{ID: "{cli-source-uuid}", Name: source, State: "stopped"}},
+		VMs: []core.ParallelsVM{{ID: "{cli-source-uuid}", Name: source, State: "stopped", Home: fakeParallelsVMHome + "/" + source + ".pvm/"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +229,7 @@ func fixedParallelsCLIFixture(t *testing.T) (core.LeaseTarget, string, string) {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, binary := range []string{"prlctl", "prlsrvctl"} {
+	for _, binary := range []string{"prlctl", "prlsrvctl", "mkdir", "rmdir"} {
 		shim := fmt.Sprintf("#!/bin/sh\nexec %q __fake-parallels %s \"$@\"\n", self, binary)
 		if err := os.WriteFile(filepath.Join(binDir, binary), []byte(shim), 0o755); err != nil {
 			t.Fatal(err)
@@ -353,4 +380,53 @@ func TestParallelsFixedStopThroughCLIRetainsCustodyForUnboundAttempt(t *testing.
 		t.Fatal("a refused stop wrote a terminal tombstone")
 	}
 	_ = statePath
+}
+
+// R8 — stop authorizes a fixed lease before it touches any guest.
+//
+// The fixed-claim exception in release resolution let stop continue through the
+// ordinary inventory path, which reads guest files to discover the SSH user and
+// returns a usable SSH target; App.stop then runs remote connection cleanup
+// before ReleaseLease. A running replacement VM at the recorded name could
+// therefore be reached with the configured guest credentials before the
+// eventual lease_id_conflict. Nothing may reach the guest until the recorded
+// host and VM incarnation have been re-attested.
+func TestParallelsFixedStopThroughCLIRejectsReplacementBeforeGuestIO(t *testing.T) {
+	lease, statePath, source := fixedParallelsCLIFixture(t)
+	name := ""
+	for _, vm := range readFakeParallelsState(t).VMs {
+		if vm.ID == lease.Server.CloudID {
+			name = vm.Name
+		}
+	}
+	if name == "" {
+		t.Fatal("fixture did not record the acquired VM")
+	}
+
+	// A different, running VM now occupies the lease's recorded name.
+	if err := writeFakeParallelsState(statePath, fakeParallelsState{VMs: []core.ParallelsVM{
+		{ID: "{cli-source-uuid}", Name: source, State: "stopped"},
+		{ID: "{cli-replacement-uuid}", Name: name, State: "running", IP: fakeParallelsGuestIP},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := runCrabboxStop(t, lease.LeaseID)
+	if err == nil || !strings.Contains(err.Error(), "lease_id_conflict") {
+		t.Fatalf("crabbox stop onto a replacement err=%v output=%s", err, output)
+	}
+	state := readFakeParallelsState(t)
+	if len(state.GuestCalls) != 0 {
+		t.Fatalf("stop issued %d guest command(s) before rejecting the replacement: %v", len(state.GuestCalls), state.GuestCalls)
+	}
+	if len(state.VMs) != 2 {
+		t.Fatalf("host inventory changed: %+v", state.VMs)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists || claim.FixedCreateIntent == nil {
+		t.Fatalf("custody was not retained: exists=%t err=%v", exists, err)
+	}
+	if claim.FixedCreateIntent.State == "released" {
+		t.Fatal("a refused stop wrote a terminal tombstone")
+	}
 }

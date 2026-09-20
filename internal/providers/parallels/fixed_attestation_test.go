@@ -30,9 +30,12 @@ func TestParallelsFixedUnboundAttemptRejectsReplacementVM(t *testing.T) {
 	if !ok {
 		t.Fatalf("fixture did not commit VM %q", name)
 	}
-	// A different VM incarnation now occupies the recorded name.
-	runner.replaceUUID(name, "{replacement-vm-uuid}")
-	if replacement, ok := runner.find(name); !ok || replacement.ID == original.ID {
+	// The attempt's clone is removed and a VM created by some other operation
+	// takes its name. It lives in the host's ordinary VM directory rather than
+	// in this attempt's creation directory, which is what distinguishes it.
+	runner.remove(original.ID)
+	replacement := runner.seedAt(name)
+	if replacement.ID == original.ID {
 		t.Fatal("fixture did not replace the VM incarnation at the recorded name")
 	}
 
@@ -60,8 +63,8 @@ func TestParallelsFixedUnboundAttemptRejectsReplacementVM(t *testing.T) {
 	if err != nil || !exists || claim.FixedCreateIntent == nil {
 		t.Fatalf("custody was not retained: exists=%t err=%v", exists, err)
 	}
-	if claim.CloudID != "" || claim.CloudImmutableID != "" {
-		t.Fatalf("a refused replay bound resource identity: %q/%q", claim.CloudID, claim.CloudImmutableID)
+	if claim.CloudID == replacement.ID || claim.CloudImmutableID == replacement.ID {
+		t.Fatalf("a refused replay bound the replacement %q", replacement.ID)
 	}
 }
 
@@ -100,41 +103,55 @@ func TestParallelsFixedReleaseRefusesUnattestedVM(t *testing.T) {
 	}
 }
 
-// R3c — the UUID a successful clone returned is durable before any later read.
+// R3c — the creation evidence is durable before the clone, so a failed read
+// afterwards still leaves the attempt attributable.
 //
-// Reconciliation after the clone can fail; if the attempt were still unbound at
-// that point, a later replay would be unable to attest its own VM and would
-// fall into uncertain custody for a lease that in fact succeeded.
-func TestParallelsFixedBindsCloneUUIDBeforeReconciliation(t *testing.T) {
+// prlctl clone reports no UUID, so the UUID can only be learned by reading the
+// host back. What must be durable beforehand is the evidence that says which VM
+// this attempt created: its own --dst directory, recorded before the clone runs.
+func TestParallelsFixedCreationEvidenceIsDurableBeforeClone(t *testing.T) {
 	backend, runner, req := fixedParallelsFixture(t)
-	// The clone succeeds and reports its UUID; the complete inventory read that
-	// reconciles it afterwards does not. afterClone is invoked under the runner
-	// lock, so it writes directly.
+	var atClone string
+	runner.beforeClone = func() {
+		claim, _, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if claim.FixedCreateIntent != nil {
+			atClone = claim.FixedCreateIntent.Attempt["dst"]
+		}
+	}
+	// The clone succeeds; the complete inventory read that reconciles it
+	// afterwards does not. afterClone is invoked under the runner lock.
 	runner.afterClone = func() {
 		runner.listAllErr = errors.New("host unreachable after clone")
 	}
 	if _, err := backend.Acquire(context.Background(), req); err == nil {
 		t.Fatal("a failed post-clone reconcile must not report a usable lease")
 	}
+	if strings.TrimSpace(atClone) == "" {
+		t.Fatal("no creation directory was durable before prlctl clone ran")
+	}
 
 	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := claim.FixedCreateIntent.Attempt["dst"]; got != atClone {
+		t.Fatalf("creation directory changed after the clone: %q then %q", atClone, got)
 	}
 	name := core.ParallelsLeaseVMName(req.RequestedLeaseID, claim.FixedCreateIntent.Slug)
 	created, ok := runner.find(name)
 	if !ok {
 		t.Fatalf("fixture did not commit VM %q", name)
 	}
-	if got := claim.FixedCreateIntent.Attempt["vm_uuid"]; got != created.ID {
-		t.Fatalf("attempt vm_uuid=%q, want the clone's %q persisted before reconciliation", got, created.ID)
-	}
-	if claim.CloudImmutableID != created.ID {
-		t.Fatalf("claim immutable id=%q, want %q", claim.CloudImmutableID, created.ID)
+	if !strings.HasPrefix(created.Home, strings.TrimRight(atClone, "/")+"/") {
+		t.Fatalf("clone home=%q, want it inside the attempt directory %q", created.Home, atClone)
 	}
 
-	// With the incarnation bound, replay adopts its own VM rather than
-	// retaining uncertain custody.
+	// The evidence survives, so replay recovers its own VM rather than cloning
+	// a second one or retaining uncertain custody.
 	runner.afterClone = nil
 	runner.mu.Lock()
 	runner.listAllErr = nil
@@ -148,5 +165,61 @@ func TestParallelsFixedBindsCloneUUIDBeforeReconciliation(t *testing.T) {
 	}
 	if clones, _ := runner.counts(); clones != 1 {
 		t.Fatalf("clone calls=%d, want 1", clones)
+	}
+}
+
+// R9 — replay does not write to the guest again.
+//
+// An intent reaches `acquired` only after the per-lease key is installed and
+// the guest is ready. Repeating that on replay is redundant guest mutation, and
+// it makes an otherwise valid replay depend on the guest-tools channel being
+// available. Readiness is still re-proved over SSH.
+func TestParallelsFixedReplayDoesNotRewriteTheGuest(t *testing.T) {
+	backend, runner, req := fixedParallelsFixture(t)
+	if _, err := backend.Acquire(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	runner.mu.Lock()
+	afterAcquire := len(runner.execCalls)
+	runner.mu.Unlock()
+	if afterAcquire == 0 {
+		t.Fatal("acquisition did not prepare the guest at all")
+	}
+
+	if _, err := backend.Acquire(context.Background(), req); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	runner.mu.Lock()
+	afterReplay := len(runner.execCalls)
+	runner.mu.Unlock()
+	if afterReplay != afterAcquire {
+		t.Fatalf("replay issued %d additional guest command(s), want 0", afterReplay-afterAcquire)
+	}
+}
+
+// R9b — a lease that never finished preparing is still prepared on replay.
+func TestParallelsFixedReplayPreparesUnfinishedGuest(t *testing.T) {
+	backend, runner, req := fixedParallelsFixture(t)
+	rewriteFixedClaimAfter := func() {
+		rewriteFixedClaim(t, req.RequestedLeaseID, func(claim *core.LeaseClaim) {
+			claim.FixedCreateIntent.State = "prepared"
+		})
+	}
+	if _, err := backend.Acquire(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	rewriteFixedClaimAfter()
+	runner.mu.Lock()
+	before := len(runner.execCalls)
+	runner.mu.Unlock()
+
+	if _, err := backend.Acquire(context.Background(), req); err != nil {
+		t.Fatalf("replay of an unfinished lease: %v", err)
+	}
+	runner.mu.Lock()
+	after := len(runner.execCalls)
+	runner.mu.Unlock()
+	if after <= before {
+		t.Fatal("replay of a lease that never reached acquired skipped guest preparation")
 	}
 }

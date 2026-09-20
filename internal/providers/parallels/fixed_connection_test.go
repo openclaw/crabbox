@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +24,7 @@ type parallelsFixedMachine struct {
 	vms        []core.ParallelsVM
 	nextUUID   int
 	cloneCalls []string
+	vmHome     string
 }
 
 func (m *parallelsFixedMachine) findLocked(handle string) (core.ParallelsVM, bool) {
@@ -34,9 +36,15 @@ func (m *parallelsFixedMachine) findLocked(handle string) (core.ParallelsVM, boo
 	return core.ParallelsVM{}, false
 }
 
-func (m *parallelsFixedMachine) addLocked(name string) core.ParallelsVM {
+func (m *parallelsFixedMachine) addLocked(name, dir string) core.ParallelsVM {
 	m.nextUUID++
-	vm := core.ParallelsVM{ID: fmt.Sprintf("{%s-vm-%d}", m.serverID, m.nextUUID), Name: name, State: "stopped", IP: "10.211.55.9"}
+	if strings.TrimSpace(dir) == "" {
+		dir = m.vmHome
+	}
+	vm := core.ParallelsVM{
+		ID: fmt.Sprintf("{%s-vm-%d}", m.serverID, m.nextUUID), Name: name, State: "stopped", IP: "10.211.55.9",
+		Home: strings.TrimRight(dir, "/") + "/" + name + ".pvm/",
+	}
 	m.vms = append(m.vms, vm)
 	return vm
 }
@@ -58,8 +66,9 @@ func newParallelsFixedFleetRunner(source string, endpoints ...string) *parallels
 		machine := &parallelsFixedMachine{
 			serverID:   fmt.Sprintf("server-%d", i+1),
 			hardwareID: fmt.Sprintf("hardware-%d", i+1),
+			vmHome:     "/vms",
 		}
-		machine.vms = append(machine.vms, core.ParallelsVM{ID: fmt.Sprintf("{source-uuid-%d}", i+1), Name: source, State: "stopped"})
+		machine.vms = append(machine.vms, core.ParallelsVM{ID: fmt.Sprintf("{source-uuid-%d}", i+1), Name: source, State: "stopped", Home: "/vms/" + source + ".pvm/"})
 		runner.machines[endpoint] = machine
 	}
 	return runner
@@ -143,32 +152,40 @@ func (r *parallelsFixedFleetRunner) Run(_ context.Context, req core.LocalCommand
 		return core.LocalCommandResult{Stderr: "ssh: Could not resolve hostname " + target}, errors.New("ssh failed")
 	}
 	switch binary, args := words[0], words[1:]; binary {
+	case "mkdir", "rmdir":
+		return core.LocalCommandResult{}, nil
 	case "prlsrvctl":
 		if len(args) == 0 || args[0] != "info" {
 			return core.LocalCommandResult{}, errors.New("unexpected prlsrvctl command")
 		}
-		return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"ID":%q,"Hardware Id":%q}`, machine.serverID, machine.hardwareID)}, nil
+		return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"ID":%q,"Hardware Id":%q,"VM home":%q}`, machine.serverID, machine.hardwareID, machine.vmHome)}, nil
 	case "prlctl":
 		if len(args) == 0 {
 			return core.LocalCommandResult{}, errors.New("empty prlctl command")
 		}
 		switch args[0] {
 		case "list":
-			if len(args) > 1 && args[1] == "-i" {
+			if len(args) > 1 && args[1] == "-i" && !strings.HasPrefix(args[len(args)-1], "-") {
 				vm, found := machine.findLocked(args[len(args)-1])
 				if !found {
 					return core.LocalCommandResult{Stderr: "The virtual machine could not be found."}, errors.New("prlctl list failed")
 				}
-				return core.LocalCommandResult{Stdout: encodeParallelsVMs([]core.ParallelsVM{vm})}, nil
+				return core.LocalCommandResult{Stdout: encodeParallelsVMsDetailed([]core.ParallelsVM{vm})}, nil
+			}
+			if slices.Contains(args, "-i") {
+				return core.LocalCommandResult{Stdout: encodeParallelsVMsDetailed(machine.vms)}, nil
 			}
 			return core.LocalCommandResult{Stdout: encodeParallelsVMs(machine.vms)}, nil
 		case "snapshot-list":
 			return core.LocalCommandResult{Stdout: "[]"}, nil
 		case "clone":
-			name := ""
+			name, dst := "", ""
 			for i := 0; i+1 < len(args); i++ {
-				if args[i] == "--name" {
+				switch args[i] {
+				case "--name":
 					name = args[i+1]
+				case "--dst":
+					dst = args[i+1]
 				}
 			}
 			if name == "" {
@@ -178,7 +195,7 @@ func (r *parallelsFixedFleetRunner) Run(_ context.Context, req core.LocalCommand
 				return core.LocalCommandResult{Stderr: "The virtual machine with this name already exists."}, errors.New("prlctl clone failed")
 			}
 			machine.cloneCalls = append(machine.cloneCalls, name)
-			machine.addLocked(name)
+			machine.addLocked(name, dst)
 			if r.cloneErr != nil {
 				return core.LocalCommandResult{Stderr: r.cloneErr.Error()}, r.cloneErr
 			}

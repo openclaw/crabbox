@@ -256,6 +256,9 @@ func parallelsVMMatchesHandle(vm ParallelsVM, id string) bool {
 type ParallelsServerIdentity struct {
 	ServerID   string `json:"serverId"`
 	HardwareID string `json:"hardwareId"`
+	// VMHome is the service's default VM directory. It is the base a fixed
+	// lease clones into when no vmRoot is configured.
+	VMHome string `json:"-"`
 }
 
 // ServerIdentity reads the connected Parallels service identity. A fixed lease
@@ -273,6 +276,7 @@ func (c *ParallelsClient) ServerIdentity(ctx context.Context) (ParallelsServerId
 	identity := ParallelsServerIdentity{
 		ServerID:   firstJSONField(item, "ID", "Id", "id"),
 		HardwareID: firstJSONField(item, "Hardware Id", "HardwareId", "hardware_id"),
+		VMHome:     firstJSONField(item, "VM home", "VMHome", "vm_home"),
 	}
 	if identity.ServerID == "" {
 		return ParallelsServerIdentity{}, Exit(4, "Parallels host reported no server ID; refusing to bind a fixed lease to an unattested host")
@@ -303,6 +307,17 @@ func (c *ParallelsClient) ListVMs(ctx context.Context) ([]ParallelsVM, error) {
 	return parseParallelsVMs(result.Stdout)
 }
 
+// ListVMsDetailed returns the complete inventory with per-VM detail. The plain
+// listing reports only uuid, name, status and address; the bundle path a fixed
+// lease attests its VM by comes from the info form.
+func (c *ParallelsClient) ListVMsDetailed(ctx context.Context) ([]ParallelsVM, error) {
+	result, err := c.prlctl(ctx, nil, "list", "-a", "-i", "-f", "-j")
+	if err != nil {
+		return nil, commandOutputError("parallels list detail", result, err)
+	}
+	return parseParallelsVMs(result.Stdout)
+}
+
 func (c *ParallelsClient) GetVM(ctx context.Context, id string) (ParallelsVM, error) {
 	result, err := c.prlctl(ctx, nil, "list", "-i", "-f", "-j", id)
 	if err != nil {
@@ -318,9 +333,32 @@ func (c *ParallelsClient) GetVM(ctx context.Context, id string) (ParallelsVM, er
 	return vms[0], nil
 }
 
+// SubmitClone runs `prlctl clone` and nothing else. Callers that establish the
+// created VM's identity by other means use this directly: the name lookup Clone
+// performs afterwards resolves a mutable name and so cannot attest which
+// incarnation the clone produced.
+func (c *ParallelsClient) SubmitClone(ctx context.Context, source, snapshotID, leaseID, slug string, keep bool) error {
+	_, err := c.submitClone(ctx, source, snapshotID, leaseID, slug, keep)
+	return err
+}
+
 func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID, slug string, keep bool) (Server, error) {
+	labels, err := c.submitClone(ctx, source, snapshotID, leaseID, slug, keep)
+	if err != nil {
+		return Server{}, err
+	}
+	vm, err := c.GetVM(ctx, parallelsLeaseVMName(leaseID, slug))
+	if err != nil {
+		return Server{}, err
+	}
+	server := parallelsVMToServer(c.Cfg, vm, labels)
+	_ = writeParallelsLeaseLabels(leaseID, server.Labels)
+	return server, nil
+}
+
+func (c *ParallelsClient) submitClone(ctx context.Context, source, snapshotID, leaseID, slug string, keep bool) (map[string]string, error) {
 	if strings.TrimSpace(source) == "" {
-		return Server{}, Exit(2, "parallels.source or parallels.sourceId is required")
+		return nil, Exit(2, "parallels.source or parallels.sourceId is required")
 	}
 	name := parallelsLeaseVMName(leaseID, slug)
 	args := []string{"clone", source, "--name", name}
@@ -331,38 +369,38 @@ func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID
 	switch strings.ToLower(strings.TrimSpace(c.Cfg.Parallels.CloneMode)) {
 	case "", "linked":
 		if strings.TrimSpace(snapshotID) == "" {
-			return Server{}, Exit(2, "Parallels linked clones require --parallels-source-snapshot or --parallels-source-snapshot-id; otherwise prlctl creates a source-side linked-clone snapshot")
+			return nil, Exit(2, "Parallels linked clones require --parallels-source-snapshot or --parallels-source-snapshot-id; otherwise prlctl creates a source-side linked-clone snapshot")
 		}
 		if snapshotID != "" {
 			snapshot, ok, err := c.snapshotByID(ctx, source, snapshotID)
 			if err != nil {
-				return Server{}, err
+				return nil, err
 			}
 			if ok {
 				if err := validateParallelsSnapshotCloneMode(snapshot, c.Cfg.Parallels.CloneMode); err != nil {
-					return Server{}, err
+					return nil, err
 				}
 			}
 		}
 		args = append(args, "--linked")
 	case "full":
 		if snapshotID != "" {
-			return Server{}, Exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
+			return nil, Exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
 		}
 	case "unlink":
 		if snapshotID != "" {
-			return Server{}, Exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
+			return nil, Exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
 		}
 		args = append(args, "--unlink")
 	default:
-		return Server{}, Exit(2, "parallels.cloneMode must be linked, full, or unlink")
+		return nil, Exit(2, "parallels.cloneMode must be linked, full, or unlink")
 	}
 	if snapshotID != "" {
 		args = append(args, "-i", snapshotID)
 	}
 	result, err := c.prlctl(ctx, nil, args...)
 	if err != nil {
-		return Server{}, commandOutputError("parallels clone", result, err)
+		return nil, commandOutputError("parallels clone", result, err)
 	}
 	labels := DirectLeaseLabels(c.Cfg, leaseID, slug, parallelsProvider, "", keep, time.Now().UTC())
 	labels["source"] = source
@@ -370,13 +408,37 @@ func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID
 	if snapshotID != "" {
 		labels["source_snapshot"] = snapshotID
 	}
-	vm, err := c.GetVM(ctx, name)
-	if err != nil {
-		return Server{}, err
+	return labels, nil
+}
+
+// EnsureHostDir creates a directory on the Parallels host. A fixed lease clones
+// into a per-attempt directory, and prlctl requires --dst to exist already.
+func (c *ParallelsClient) EnsureHostDir(ctx context.Context, dir string) error {
+	if err := validParallelsHostDir(dir); err != nil {
+		return err
 	}
-	server := parallelsVMToServer(c.Cfg, vm, labels)
-	_ = writeParallelsLeaseLabels(leaseID, server.Labels)
-	return server, nil
+	result, err := c.hostCommand(ctx, nil, "mkdir", "-p", dir)
+	if err != nil {
+		return commandOutputError("parallels create host directory", result, err)
+	}
+	return nil
+}
+
+// RemoveHostDirIfEmpty clears a spent per-attempt directory. It never recurses:
+// only an empty directory is removed, so a surviving VM is never disturbed.
+func (c *ParallelsClient) RemoveHostDirIfEmpty(ctx context.Context, dir string) {
+	if validParallelsHostDir(dir) != nil {
+		return
+	}
+	_, _ = c.hostCommand(ctx, nil, "rmdir", dir)
+}
+
+func validParallelsHostDir(dir string) error {
+	dir = strings.TrimSpace(dir)
+	if !strings.HasPrefix(dir, "/") || strings.ContainsAny(dir, "\r\n\x00") {
+		return Exit(2, "Parallels host directory must be an absolute path")
+	}
+	return nil
 }
 
 func (c *ParallelsClient) Start(ctx context.Context, id string) error {

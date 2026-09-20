@@ -35,12 +35,16 @@ func (i parallelsConnectionIdentity) scope() string {
 	return fmt.Sprintf("prlsrv1:%x", sha256.Sum256(data))
 }
 
+func parallelsScopeFromIdentity(identity core.ParallelsServerIdentity) string {
+	return parallelsConnectionIdentity{ServerID: identity.ServerID, HardwareID: identity.HardwareID}.scope()
+}
+
 func parallelsConnectionScope(ctx context.Context, client *core.ParallelsClient, _ core.Config) (string, error) {
 	identity, err := client.ServerIdentity(ctx)
 	if err != nil {
 		return "", err
 	}
-	return parallelsConnectionIdentity{ServerID: identity.ServerID, HardwareID: identity.HardwareID}.scope(), nil
+	return parallelsScopeFromIdentity(identity), nil
 }
 
 // shortParallelsScope keeps errors diagnosable without printing the digest that
