@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -250,8 +252,9 @@ func TestTouchPreservesCleanupOwnershipThroughClaimUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := core.UpdateLeaseClaimEndpoint(cleanupLease, touched, core.SSHTarget{}); err != nil {
-		t.Fatal(err)
+	persisted, err := core.ReadLeaseClaim(cleanupLease)
+	if err != nil || !maps.Equal(persisted.Labels, touched.Labels) || persisted.Revision == claim.Revision {
+		t.Fatalf("Touch did not publish its labels: claim=%+v err=%v", persisted, err)
 	}
 	if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
 		t.Fatal(err)
@@ -262,6 +265,143 @@ func TestTouchPreservesCleanupOwnershipThroughClaimUpdate(t *testing.T) {
 		}
 	}
 	t.Fatal("touch lost the storage/marker binding needed to clean up the owned VM")
+}
+
+type heartbeatClock struct{ now time.Time }
+
+func (c heartbeatClock) Now() time.Time { return c.now }
+
+func TestTartHeartbeatPersistsAcrossFreshResolve(t *testing.T) {
+	for _, mode := range []string{"preserve", "replace"} {
+		t.Run(mode, func(t *testing.T) {
+			b, runner, original := cleanupFixture(t)
+			now := time.Now().UTC().Truncate(time.Second)
+			claim := original
+			claim.Labels = maps.Clone(original.Labels)
+			claim.Labels["state"] = "ready"
+			claim.Labels["ttl_secs"] = "3600"
+			claim.Labels["image"] = "fixture-image"
+			for _, key := range []string{"created_at", "last_touched_at", "expires_at", "idle_timeout", "idle_timeout_secs"} {
+				delete(claim.Labels, key)
+			}
+			claim.ClaimedAt = now.Add(-20 * time.Minute).Format(time.RFC3339)
+			claim.LastUsedAt = now.Add(-5 * time.Minute).Format(time.RFC3339)
+			claim.IdleTimeoutSeconds = 1800
+			if err := core.ReplaceLeaseClaimIfUnchanged(cleanupLease, original, claim); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := core.ReadLeaseClaim(cleanupLease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inventory, err := json.Marshal([]tartInstance{{Name: cleanupVM, State: "running", Running: true}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.responses["list"] = core.LocalCommandResult{Stdout: string(inventory)}
+			runner.responses["ip"] = core.LocalCommandResult{Stdout: "192.0.2.10\n"}
+			b.rt.Clock = heartbeatClock{now: now}
+			resolve := core.ResolveRequest{ID: cleanupLease, StatusOnly: true, NoLocalStateMutations: true, Repo: core.Repo{Root: t.TempDir()}}
+			lease, err := b.Resolve(context.Background(), resolve)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lease.SSH.Host != "192.0.2.10" || lease.SSH.Port != sshPort || lease.SSH.ReadyCheck == "" || !lease.SSH.SSHConfigProxy {
+				t.Fatalf("read-only Resolve lost its SSH target: %+v", lease.SSH)
+			}
+			if lease.Server.Labels["idle_timeout_secs"] != "1800" || lease.Server.Labels["created_at"] != core.LeaseLabelTime(now.Add(-20*time.Minute)) || lease.Server.Labels["last_touched_at"] != core.LeaseLabelTime(now.Add(-5*time.Minute)) || lease.Server.Labels["expires_at"] != "" {
+				t.Fatalf("legacy projection changed persisted policy: %v", lease.Server.Labels)
+			}
+			beforeTouch, err := core.ReadLeaseClaim(cleanupLease)
+			if err != nil || !reflect.DeepEqual(beforeTouch, claim) {
+				t.Fatalf("read-only Resolve changed the claim: %v", err)
+			}
+			req := core.TouchRequest{Lease: lease, State: "ready", IdleTimeout: 5 * time.Minute}
+			wantIdle := 1800
+			wantExpiry := now.Add(30 * time.Minute)
+			if mode == "replace" {
+				override := 90 * time.Minute
+				req.IdleTimeoutOverride = &override
+				wantIdle = 5400
+				wantExpiry = now.Add(40 * time.Minute)
+			}
+			touched, err := b.Touch(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			persisted, err := core.ReadLeaseClaim(cleanupLease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persisted.IdleTimeoutSeconds != wantIdle || persisted.LastUsedAt != now.Format(time.RFC3339) || persisted.Revision == claim.Revision || !maps.Equal(persisted.Labels, touched.Labels) || touched.Labels["expires_at"] != core.LeaseLabelTime(wantExpiry) || touched.Labels["image"] != "fixture-image" {
+				t.Fatalf("unexpected committed heartbeat: %+v", persisted)
+			}
+			snapshot, exists, set := core.ServerLeaseClaimSnapshot(touched)
+			if !set || !exists || !reflect.DeepEqual(snapshot, persisted) {
+				t.Fatal("Touch did not return the committed claim snapshot")
+			}
+			cfg := b.cfg
+			cfg.IdleTimeout = 5 * time.Minute
+			fresh := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner, Clock: heartbeatClock{now: now.Add(15 * time.Minute)}}).(*backend)
+			resolved, err := fresh.Resolve(context.Background(), resolve)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resolved.LeaseID != cleanupLease || resolved.Server.ImmutableID != claim.CloudImmutableID || resolved.Server.Labels["idle_timeout_secs"] != touched.Labels["idle_timeout_secs"] || resolved.Server.Labels["expires_at"] != touched.Labels["expires_at"] || resolved.Server.Labels["last_touched_at"] != touched.Labels["last_touched_at"] {
+				t.Fatalf("fresh Resolve lost committed policy: %+v", resolved.Server)
+			}
+			afterResolve, err := core.ReadLeaseClaim(cleanupLease)
+			if err != nil || !reflect.DeepEqual(afterResolve, persisted) {
+				t.Fatalf("fresh read-only Resolve changed the claim: %v", err)
+			}
+			runResolve := core.ResolveRequest{ID: cleanupLease, Repo: core.Repo{Root: claim.RepoRoot}}
+			forRun, err := fresh.Resolve(context.Background(), runResolve)
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterRunResolve, err := core.ReadLeaseClaim(cleanupLease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runSnapshot, exists, set := core.ServerLeaseClaimSnapshot(forRun.Server)
+			if !set || !exists || !reflect.DeepEqual(runSnapshot, afterRunResolve) || afterRunResolve.IdleTimeoutSeconds != wantIdle {
+				t.Fatal("run Resolve returned a stale snapshot or replaced stored idle policy")
+			}
+			for _, call := range runner.calls {
+				if call.Args[0] != "list" && call.Args[0] != "ip" {
+					t.Fatalf("heartbeat/status issued a non-observation command: %s", call.Args[0])
+				}
+			}
+		})
+	}
+}
+
+func TestTartTouchRejectsCanceledOrOutdatedSnapshot(t *testing.T) {
+	b, _, claim := cleanupFixture(t)
+	lease := core.LeaseTarget{LeaseID: cleanupLease, Server: b.serverFromInstance(tartInstance{Name: cleanupVM, State: "stopped"}, claim, b.configForRun())}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := b.Touch(ctx, core.TouchRequest{Lease: lease, State: "stopped"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled touch error=%v", err)
+	}
+	afterCancel, err := core.ReadLeaseClaim(cleanupLease)
+	if err != nil || !reflect.DeepEqual(afterCancel, claim) {
+		t.Fatalf("canceled touch changed claim: %v", err)
+	}
+	if _, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "stopped"}); err != nil {
+		t.Fatal(err)
+	}
+	committed, err := core.ReadLeaseClaim(cleanupLease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "ready"}); err == nil {
+		t.Fatal("accepted an outdated claim snapshot")
+	}
+	afterStale, err := core.ReadLeaseClaim(cleanupLease)
+	if err != nil || !reflect.DeepEqual(afterStale, committed) {
+		t.Fatalf("outdated touch changed claim: %v", err)
+	}
 }
 
 func TestTartOwnershipMarkerCannotAdoptOrFollowSymlinks(t *testing.T) {

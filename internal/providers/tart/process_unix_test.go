@@ -793,7 +793,8 @@ func TestAcquireStartupSuccessLifetime(t *testing.T) {
 			f := newProcessFixture(t, "")
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(nil)
-			result := acquireProcess(t, f, f.backend(), ctx, cancel, keep)
+			b := f.backend()
+			result := acquireProcess(t, f, b, ctx, cancel, keep)
 			child := result.next(t, f, "run")
 			awaitAcquisition(t, result.done)
 			if result.err != nil {
@@ -802,6 +803,13 @@ func TestAcquireStartupSuccessLifetime(t *testing.T) {
 			claims, err := core.ListLeaseClaims()
 			if err != nil || len(claims) != 1 || claims[0].LeaseID != result.lease.LeaseID || claims[0].CloudImmutableID == "" {
 				t.Fatalf("claim=%+v err=%v", claims, err)
+			}
+			snapshot, exists, set := core.ServerLeaseClaimSnapshot(result.lease.Server)
+			if !set || !exists || !reflect.DeepEqual(snapshot, claims[0]) {
+				t.Fatal("Acquire did not return its committed claim snapshot")
+			}
+			if _, err := b.Touch(ctx, core.TouchRequest{Lease: result.lease, State: "ready"}); err != nil {
+				t.Fatalf("first touch after Acquire: %v", err)
 			}
 			f.assertLogsRemoved(t)
 			cancel(errors.New("caller returned"))

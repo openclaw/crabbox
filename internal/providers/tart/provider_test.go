@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1860,30 +1861,49 @@ func TestResolveRejectsStoppedVMForRun(t *testing.T) {
 }
 
 func TestResolveAllowsStoppedVMForStatus(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	listJSON := `[{"Name":"crabbox-stopped-abc","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
-	runner := &recordingRunner{
-		responses: map[string]core.LocalCommandResult{
-			commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
-			commandKey([]string{"ip", "crabbox-stopped-abc"}):                     {Stdout: "\n"},
-		},
-	}
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	err := core.ClaimLeaseForRepoProviderScopePond(
-		"cbx_stopped2", "stopped2", providerName, "instance:crabbox-stopped-abc", "", t.TempDir(), 0, false,
-	)
-	if err != nil {
-		t.Fatalf("setup claim: %v", err)
-	}
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	for _, ip := range []string{"", "192.0.2.12"} {
+		t.Run("cached IP="+ip, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			listJSON := `[{"Name":"crabbox-stopped-abc","State":"stopped","Running":false,"Disk":50,"Size":12,"Source":"ghcr.io/test:latest"}]`
+			runner := &recordingRunner{
+				responses: map[string]core.LocalCommandResult{
+					commandKey([]string{"list", "--source", "local", "--format", "json"}): {Stdout: listJSON},
+					commandKey([]string{"ip", "crabbox-stopped-abc"}):                     {Stdout: ip + "\n"},
+				},
+			}
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			err := core.ClaimLeaseForRepoProviderScopePond(
+				"cbx_stopped2", "stopped2", providerName, "instance:crabbox-stopped-abc", "", t.TempDir(), 0, false,
+			)
+			if err != nil {
+				t.Fatalf("setup claim: %v", err)
+			}
+			claim, err := core.ReadLeaseClaim("cbx_stopped2")
+			if err != nil {
+				t.Fatal(err)
+			}
+			labels := maps.Clone(claim.Labels)
+			if labels == nil {
+				labels = map[string]string{}
+			}
+			labels["state"] = "ready"
+			if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); err != nil {
+				t.Fatal(err)
+			}
+			b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
 
-	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_stopped2", StatusOnly: true})
-	if err != nil {
-		t.Fatalf("Resolve should allow stopped VM for status (StatusOnly=true): %v", err)
-	}
-	if lease.Server.Status != "stopped" {
-		t.Fatalf("Server.Status = %q, want stopped", lease.Server.Status)
+			lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "cbx_stopped2", StatusOnly: true})
+			if err != nil {
+				t.Fatalf("Resolve should allow stopped VM for status (StatusOnly=true): %v", err)
+			}
+			if lease.Server.Status != "stopped" {
+				t.Fatalf("Server.Status = %q, want stopped", lease.Server.Status)
+			}
+			if lease.Server.Labels["state"] != "stopped" {
+				t.Fatal("stopped inventory retained a stale ready label")
+			}
+		})
 	}
 }
 
@@ -2315,22 +2335,19 @@ func TestGetIPStripsDoubleDash(t *testing.T) {
 }
 
 func TestTouchPreservesProviderLabels(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.Provider = providerName
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: &recordingRunner{}}).(*backend)
-
-	original := core.LeaseTarget{
-		Server: core.Server{
-			Labels: map[string]string{
-				"image":        "ghcr.io/test:latest",
-				"image_digest": "sha256:" + strings.Repeat("a", 64),
-				"instance":     "crabbox-blue-1234",
-				"ssh_user":     "admin",
-				"ssh_port":     "22",
-				"work_root":    "/Users/admin/crabbox",
-			},
-		},
+	b, _, claim := cleanupFixture(t)
+	labels := maps.Clone(claim.Labels)
+	for key, value := range map[string]string{
+		"image": "ghcr.io/test:latest", "image_digest": "sha256:" + strings.Repeat("a", 64),
+		"ssh_user": "admin", "ssh_port": "22", "work_root": "/Users/admin/crabbox",
+	} {
+		labels[key] = value
 	}
+	claim, err := core.UpdateLeaseClaimLabelsIfUnchanged(cleanupLease, claim, labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := core.LeaseTarget{LeaseID: cleanupLease, Server: b.serverFromInstance(tartInstance{Name: cleanupVM, State: "running"}, claim, b.configForRun())}
 	server, err := b.Touch(context.Background(), core.TouchRequest{
 		Lease: original,
 		State: "ready",

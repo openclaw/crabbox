@@ -14,6 +14,13 @@ executor, and deletes the VM on `stop`.
 
 The provider is local only. It never uses the coordinator or cloud credentials.
 
+`crabbox heartbeat --provider tart --id <lease>` durably refreshes the local
+lease claim. An explicit `--idle-timeout` replaces its idle window; omission
+preserves the recorded value, and any recorded TTL cap remains in force.
+Status reads reconstruct that persisted policy without extending it. Touching
+requires the exact claim and the matching VM ownership marker in the recorded
+Tart storage root; it cannot create or replace ownership of an existing VM.
+
 **Targets:** macOS.
 
 **Hosts:** Apple Silicon Macs with tart installed (`brew install cirruslabs/cli/tart`).
