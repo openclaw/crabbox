@@ -968,8 +968,28 @@ func TestParallelsEnsureReadyInstallsMacOSNodeBaseline(t *testing.T) {
 	}
 
 	// Only macOS guests get the baseline; the Linux branch must be untouched.
-	if !strings.Contains(script, "if command -v sw_vers >/dev/null 2>&1; then\n  if ! PATH=") {
+	// Matched without surrounding indentation so reindenting the generated
+	// script does not fail this for a no-op formatting change.
+	sw := strings.Index(script, "command -v sw_vers >/dev/null 2>&1")
+	if sw == -1 || sw > strings.Index(script, "crabbox_node_bin=") {
 		t.Fatal("Node handling is not guarded by the macOS sw_vers check")
+	}
+}
+
+// The script is delivered to `sudo -n /bin/sh -s` on stdin, so any child that
+// reads stdin silently swallows the remainder of the script -- and the shell
+// still exits 0, so the damage is invisible.
+func TestParallelsEnsureReadyKeepsStdinOffGuestChildren(t *testing.T) {
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false)
+	for _, want := range []string{
+		`-c 'bash -lc "command -v node"' </dev/null`,
+		`-c 'bash -lc "command -v npm"' </dev/null`,
+		`-c 'bash -lc "command -v npx"' </dev/null`,
+		`/bin/bash "$crabbox_node_installer" </dev/null`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("child may consume the script from stdin: missing %q", want)
+		}
 	}
 }
 
@@ -980,8 +1000,8 @@ func TestParallelsEnsureReadyPreservesUserManagedNode(t *testing.T) {
 	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false)
 
 	for _, want := range []string{
-		`crabbox_node_bin=$(su - "$user" -c 'bash -lc "command -v node"' 2>/dev/null || true)`,
-		`crabbox_npm_bin=$(su - "$user" -c 'bash -lc "command -v npm"' 2>/dev/null || true)`,
+		`crabbox_node_bin=$(su - "$user" -c 'bash -lc "command -v node"' </dev/null 2>/dev/null || true)`,
+		`crabbox_npm_bin=$(su - "$user" -c 'bash -lc "command -v npm"' </dev/null 2>/dev/null || true)`,
 		`ln -sfn "$crabbox_node_bin" /usr/local/bin/node`,
 		`ln -sfn "$crabbox_npm_bin" /usr/local/bin/npm`,
 	} {

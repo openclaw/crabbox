@@ -772,16 +772,18 @@ if command -v sw_vers >/dev/null 2>&1; then
     # would otherwise start needing nodejs.org to stay ready. Resolve it as
     # that user through bash -lc, matching the probe exactly rather than the
     # user's default login shell, which reads different rc files. Never source
-    # their login files as root. Link the result where
+    # their login files as root, and keep stdin off these children: this whole
+    # script arrives on stdin via sudo -n /bin/sh -s, so anything that reads
+    # stdin silently eats the rest of it. Link the result where
     # root, crabbox-ready and the probe all look, so every caller agrees.
-    crabbox_node_bin=$(su - "$user" -c 'bash -lc "command -v node"' 2>/dev/null || true)
-    crabbox_npm_bin=$(su - "$user" -c 'bash -lc "command -v npm"' 2>/dev/null || true)
+    crabbox_node_bin=$(su - "$user" -c 'bash -lc "command -v node"' </dev/null 2>/dev/null || true)
+    crabbox_npm_bin=$(su - "$user" -c 'bash -lc "command -v npm"' </dev/null 2>/dev/null || true)
     if [ -x "$crabbox_node_bin" ] && [ -x "$crabbox_npm_bin" ] &&
       [ "$crabbox_node_bin" != /usr/local/bin/node ] && [ "$crabbox_npm_bin" != /usr/local/bin/npm ]; then
       install -d -m 0755 /usr/local/bin
       ln -sfn "$crabbox_node_bin" /usr/local/bin/node
       ln -sfn "$crabbox_npm_bin" /usr/local/bin/npm
-      crabbox_npx_bin=$(su - "$user" -c 'bash -lc "command -v npx"' 2>/dev/null || true)
+      crabbox_npx_bin=$(su - "$user" -c 'bash -lc "command -v npx"' </dev/null 2>/dev/null || true)
       if [ -x "$crabbox_npx_bin" ] && [ "$crabbox_npx_bin" != /usr/local/bin/npx ]; then
         ln -sfn "$crabbox_npx_bin" /usr/local/bin/npx
       fi
@@ -791,7 +793,7 @@ if command -v sw_vers >/dev/null 2>&1; then
       cat >"$crabbox_node_installer" <<'CRABBOXNODEINSTALL'
 %s
 CRABBOXNODEINSTALL
-      /bin/bash "$crabbox_node_installer" || { rm -f "$crabbox_node_installer"; exit 1; }
+      /bin/bash "$crabbox_node_installer" </dev/null || { rm -f "$crabbox_node_installer"; exit 1; }
       rm -f "$crabbox_node_installer"
     fi
   fi
