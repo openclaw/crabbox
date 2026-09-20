@@ -6,10 +6,13 @@
 
 - Stop canceled terminal cleanup from waiting indefinitely for exact lease-claim locks across Tart, Coder, Modal, Namespace, and related adapters; preserve independent acquisition rollback and existing SSH-key retention policies.
 - Preserve generated Tart SSH credentials when failed-acquisition rollback cannot confirm ownership, delete the VM, or retire its claim; report local artifact-cleanup errors alongside the original failure. [PR 2360](https://github.com/openclaw/crabbox/pull/2360). Thanks @steipete.
+- Honor cancellation while GCP release and cleanup wait for a lease claim lock, preserving state before deletion while still completing local finalization after confirmed deletion. [PR 2361](https://github.com/openclaw/crabbox/pull/2361). Thanks @steipete.
 - Remove generated GCP and Azure SSH files after successful failed-acquisition rollback, preserving them on remote cleanup failure and stopping fresh retries when local cleanup fails. [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
 - Allow up to three minutes for GCP acquisition rollback to confirm remote deletion, including after caller cancellation, instead of abandoning the wait after 30 seconds. [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
 - Bound GCP public-IP discovery to two minutes, including in-flight observations, and stop before querying when the caller has already canceled. [PR 2357](https://github.com/openclaw/crabbox/pull/2357). Thanks @steipete.
+- Support the ASCII Box to Boat rename across CLI discovery, response envelopes, SSH keys, deletion operations, and secret redaction while preserving existing lease identities. [PR 2303](https://github.com/openclaw/crabbox/pull/2303). Thanks @zozo123.
 - Remove generated GCP lease SSH credentials and host-trust files after confirmed instance deletion or absence; retain the exact claim when SSH cleanup fails so cleanup can be retried. [PR 2357](https://github.com/openclaw/crabbox/pull/2357). Thanks @steipete.
+- Build Apple VM cloud-init seed disks directly with the shared FAT16 writer, removing the host MS-DOS mount requirement while preserving the Firecracker and XCP-ng image formats. [PR 2343](https://github.com/openclaw/crabbox/pull/2343). Thanks @steipete.
 
 ## 0.62.0 - 2026-09-18
 

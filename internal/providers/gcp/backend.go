@@ -203,7 +203,7 @@ func (b *gcpLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeas
 	live, err := client.GetServer(ctx, cloudID)
 	if err != nil {
 		if core.IsGCPNotFound(err) {
-			return shared.RemoveSSHLeaseClaimAfter(claim, nil)
+			return shared.RemoveSSHLeaseClaimAfter(ctx, claim, nil)
 		}
 		return err
 	}
@@ -373,7 +373,7 @@ func validateExactGCPClaim(claim core.LeaseClaim, server core.Server, expectedLe
 }
 
 func deleteClaimedGCPServer(ctx context.Context, client gcpClient, server core.Server, claim core.LeaseClaim) error {
-	return shared.RemoveSSHLeaseClaimAfter(claim, func() error {
+	return shared.RemoveSSHLeaseClaimAfter(ctx, claim, func() error {
 		return client.DeleteServer(ctx, server.CloudID)
 	})
 }
@@ -432,9 +432,9 @@ func (b *gcpLeaseBackend) pruneStaleClaims(ctx context.Context, liveLeaseIDs map
 		if !dryRun {
 			if strings.TrimSpace(claim.CloudID) == "" {
 				// No resource identity means no per-resource absence proof for SSH cleanup.
-				err = core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim)
+				err = core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, claim.LeaseID, claim, true, nil)
 			} else {
-				err = shared.RemoveSSHLeaseClaimAfter(claim, nil)
+				err = shared.RemoveSSHLeaseClaimAfter(ctx, claim, nil)
 			}
 			if err != nil {
 				return err

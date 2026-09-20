@@ -48,15 +48,17 @@ func (d DirectCleanupDecision) Apply(ctx context.Context, req core.CleanupReques
 		return nil
 	}
 	if d.Action == ForgetMissingCleanupServer {
-		return RemoveSSHLeaseClaimAfter(d.Claim, nil)
+		return RemoveSSHLeaseClaimAfter(ctx, d.Claim, nil)
 	}
 	return d.Mutate(ctx)
 }
 
-// RemoveSSHLeaseClaimAfter holds the unchanged-claim lock across provider cleanup,
-// SSH artifact cleanup, and claim removal. A nil action requires confirmed absence.
-func RemoveSSHLeaseClaimAfter(claim core.LeaseClaim, action func() error) error {
-	return core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+// RemoveSSHLeaseClaimAfter waits for the unchanged-claim lock with ctx, then holds
+// it through provider cleanup, SSH cleanup and claim removal. The action must
+// honor ctx itself; successful deletion still finalizes artifacts after cancellation.
+// A nil action requires confirmed absence.
+func RemoveSSHLeaseClaimAfter(ctx context.Context, claim core.LeaseClaim, action func() error) error {
+	return core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, claim.LeaseID, claim, true, func() error {
 		if action != nil {
 			if err := action(); err != nil {
 				return err

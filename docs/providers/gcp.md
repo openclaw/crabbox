@@ -361,6 +361,9 @@ files before retiring its claim. Both local steps share the unchanged-claim
 lock. A provider-deletion or SSH-artifact cleanup failure retains the claim for retry, and
 `--dry-run` leaves the claim and SSH material untouched. Stale records without
 a cloud resource identity retain their existing claim-only pruning behavior.
+Waiting for the claim lock honors caller cancellation and deadlines. Cancellation
+before lock admission preserves local state and does not begin deletion; after
+confirmed deletion, bounded SSH-artifact cleanup and claim retirement still finish.
 
 Direct cleanup:
 
