@@ -115,30 +115,9 @@ func resolveLeaseID(identifier, repoRoot string, reclaim bool, idleTimeout time.
 }
 
 func resolveBlaxelLeaseClaim(identifier, baseURL, workspace string) (core.LeaseClaim, bool, error) {
-	claims, err := listBlaxelLeaseClaims()
-	if err != nil {
-		return core.LeaseClaim{}, false, err
-	}
-	for _, claim := range claims {
-		if claim.Provider == providerName && claim.LeaseID == identifier {
-			if err := validateBlaxelClaimScope(claim, baseURL, workspace); err != nil {
-				return core.LeaseClaim{}, false, err
-			}
-			return claim, true, nil
-		}
-	}
-	slug := core.NormalizeLeaseSlug(identifier)
-	if slug != "" {
-		for _, claim := range claims {
-			if claim.Provider == providerName && core.NormalizeLeaseSlug(claim.Slug) == slug {
-				if err := validateBlaxelClaimScope(claim, baseURL, workspace); err != nil {
-					return core.LeaseClaim{}, false, err
-				}
-				return claim, true, nil
-			}
-		}
-	}
-	return core.LeaseClaim{}, false, nil
+	return shared.ResolveScopedLeaseClaim(identifier, providerName, listBlaxelLeaseClaims, func(claim core.LeaseClaim) error {
+		return validateBlaxelClaimScope(claim, baseURL, workspace)
+	})
 }
 
 func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL, workspace string) (string, string, string, error) {
