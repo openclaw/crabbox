@@ -51,3 +51,31 @@ func TestEndpointAdmissionRemainsSeparateFromClaimIdentity(t *testing.T) {
 func endpointTestErrors() EndpointURLErrors {
 	return EndpointURLErrors{Invalid: errors.New("invalid URL"), Components: errors.New("URL components"), Insecure: errors.New("insecure URL")}
 }
+
+func TestHTTPSBaseURLPreservesSerializationPolicy(t *testing.T) {
+	errs := endpointTestErrors()
+	for _, tt := range []struct {
+		input, want string
+		err         error
+	}{
+		{input: " HTTPS://EXAMPLE.test:443/api/// ", want: "https://example.test/api"},
+		{input: "https://example.test/api?", want: "https://example.test/api?"},
+		{input: "https://example.test/a%2Fb", want: "https://example.test/a%2Fb"},
+		{input: "https://example.test/a%2Fb/", want: "https://example.test/a/b"},
+		{input: "http://[::1]:80/", want: "http://[::1]"},
+		{input: "https://[2001:DB8::1]:8443/api/", want: "https://[2001:db8::1]:8443/api"},
+		{input: "//user@example.test/api", err: errs.Invalid},
+		{input: "ftp://user@example.test/api", err: errs.Components},
+		{input: "http://example.test/api?key=value", err: errs.Components},
+		{input: "https://example.test/#part", err: errs.Components},
+		{input: "http://example.test", err: errs.Insecure},
+		{input: "", err: errs.Invalid},
+	} {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := NormalizeHTTPSBaseURL(tt.input, errs)
+			if got != tt.want || err != tt.err {
+				t.Fatalf("endpoint=(%q, %v), want (%q, %v)", got, err, tt.want, tt.err)
+			}
+		})
+	}
+}

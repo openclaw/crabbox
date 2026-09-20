@@ -36,6 +36,26 @@ func NormalizeHTTPSURL(raw string, errs EndpointURLErrors) (string, error) {
 	return canonicalEndpointAddress(parsed), nil
 }
 
+// NormalizeHTTPSBaseURL preserves valid path escaping and an empty query marker.
+// Callers supply defaults before validation; unlike NormalizeHTTPSURL, this
+// policy retains RawPath and ForceQuery when serializing the base URL.
+func NormalizeHTTPSBaseURL(raw string, errs EndpointURLErrors) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", errs.Invalid
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errs.Components
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && IsLoopbackHost(parsed.Hostname())) {
+		return "", errs.Insecure
+	}
+	parsed.Host = CanonicalHostPort(parsed)
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	return parsed.String(), nil
+}
+
 // Callers own scheme admission and URL-component policy before canonicalizing
 // the lowercased scheme's address. Claim keys and live endpoints differ there.
 func canonicalEndpointAddress(parsed *url.URL) string {

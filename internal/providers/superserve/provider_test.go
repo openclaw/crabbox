@@ -110,6 +110,13 @@ func TestValidateSuperserveBaseURL(t *testing.T) {
 		wantErr string
 	}{
 		{name: "default", raw: "", want: defaultBaseURL},
+		{name: "whitespace default", raw: " \t ", want: defaultBaseURL},
+		{name: "empty query marker", raw: "https://EXAMPLE.test/api?", want: "https://example.test/api?"},
+		{name: "escaped slash", raw: "https://EXAMPLE.test/a%2Fb", want: "https://example.test/a%2Fb"},
+		{name: "escaped slash trailing slash", raw: "https://EXAMPLE.test/a%2Fb/", want: "https://example.test/a/b"},
+		{name: "custom IPv6 port", raw: "https://[2001:DB8::1]:8443/api///", want: "https://[2001:db8::1]:8443/api"},
+		{name: "components before scheme", raw: "ftp://user@example.test/api", wantErr: "must not contain userinfo"},
+		{name: "absolute before components", raw: "//user@example.test/api", wantErr: "must be an absolute URL"},
 		{name: "https default port", raw: "HTTPS://API.EXAMPLE.TEST:443/", want: "https://api.example.test"},
 		{name: "loopback http", raw: "http://localhost:8080/", want: "http://localhost:8080"},
 		{name: "IPv6 loopback", raw: "http://[::1]/", want: "http://[::1]"},

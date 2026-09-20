@@ -3,7 +3,6 @@ package superserve
 import (
 	"flag"
 	"net"
-	"net/url"
 	"path"
 	"strings"
 	"time"
@@ -82,20 +81,11 @@ func validateSuperserveBaseURL(raw string) (string, error) {
 	if raw == "" {
 		raw = defaultBaseURL
 	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", core.Exit(2, "provider=superserve base URL must be an absolute URL")
-	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", core.Exit(2, "provider=superserve base URL must not contain userinfo, query parameters, or a fragment")
-	}
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
-		return "", core.Exit(2, "provider=superserve base URL must use HTTPS except for loopback development endpoints")
-	}
-	parsed.Host = shared.CanonicalHostPort(parsed)
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	return parsed.String(), nil
+	return shared.NormalizeHTTPSBaseURL(raw, shared.EndpointURLErrors{
+		Invalid:    core.Exit(2, "provider=superserve base URL must be an absolute URL"),
+		Components: core.Exit(2, "provider=superserve base URL must not contain userinfo, query parameters, or a fragment"),
+		Insecure:   core.Exit(2, "provider=superserve base URL must use HTTPS except for loopback development endpoints"),
+	})
 }
 
 func superserveWorkdir(cfg core.Config) (string, error) {

@@ -2,7 +2,6 @@ package crownest
 
 import (
 	"flag"
-	"net/url"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -49,36 +48,9 @@ func validateBaseURL(raw string) (string, error) {
 	if raw == "" {
 		raw = core.CrownestConfigDefaultAPIURL
 	}
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", core.Exit(2, "provider=crownest base URL must be an absolute URL")
-	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", core.Exit(2, "provider=crownest base URL must not contain userinfo, query parameters, or a fragment")
-	}
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
-		return "", core.Exit(2, "provider=crownest base URL must use HTTPS except for loopback development endpoints")
-	}
-	parsed.Host = canonicalHostPort(parsed)
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	return parsed.String(), nil
-}
-
-func canonicalHostPort(parsed *url.URL) string {
-	host := strings.ToLower(parsed.Hostname())
-	port := parsed.Port()
-	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
-		port = ""
-	}
-	if port == "" {
-		if strings.Contains(host, ":") {
-			return "[" + host + "]"
-		}
-		return host
-	}
-	if strings.Contains(host, ":") {
-		host = "[" + host + "]"
-	}
-	return host + ":" + port
+	return shared.NormalizeHTTPSBaseURL(raw, shared.EndpointURLErrors{
+		Invalid:    core.Exit(2, "provider=crownest base URL must be an absolute URL"),
+		Components: core.Exit(2, "provider=crownest base URL must not contain userinfo, query parameters, or a fragment"),
+		Insecure:   core.Exit(2, "provider=crownest base URL must use HTTPS except for loopback development endpoints"),
+	})
 }
