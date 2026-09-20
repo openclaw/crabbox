@@ -968,8 +968,68 @@ func TestParallelsEnsureReadyInstallsMacOSNodeBaseline(t *testing.T) {
 	}
 
 	// Only macOS guests get the baseline; the Linux branch must be untouched.
-	if !strings.Contains(script, "if command -v sw_vers >/dev/null 2>&1; then\n  crabbox_node_installer=") {
-		t.Fatal("Node install is not guarded by the macOS sw_vers check")
+	if !strings.Contains(script, "if command -v sw_vers >/dev/null 2>&1; then\n  if ! PATH=") {
+		t.Fatal("Node handling is not guarded by the macOS sw_vers check")
+	}
+}
+
+// A template can already satisfy sshReadyCommand with Node supplied through the
+// SSH user's login shell (Homebrew, nvm, asdf). Downloading over the top of that
+// would make a previously working template depend on nodejs.org being reachable.
+func TestParallelsEnsureReadyPreservesUserManagedNode(t *testing.T) {
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false)
+
+	for _, want := range []string{
+		`crabbox_node_bin=$(su - "$user" -c 'bash -lc "command -v node"' 2>/dev/null || true)`,
+		`crabbox_npm_bin=$(su - "$user" -c 'bash -lc "command -v npm"' 2>/dev/null || true)`,
+		`ln -sfn "$crabbox_node_bin" /usr/local/bin/node`,
+		`ln -sfn "$crabbox_npm_bin" /usr/local/bin/npm`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("user-managed runtime is not preserved: missing %q", want)
+		}
+	}
+
+	// The lookup must drop to the guest user; sourcing their login files as root
+	// would run user-controlled shell setup with full privileges.
+	if !strings.Contains(script, `su - "$user" -c 'bash -lc`) {
+		t.Fatal("login environment must be probed as the guest user, not as root")
+	}
+
+	// It must use bash -lc like sshReadyCommand does. The user's default login
+	// shell (zsh on macOS) reads different rc files, so `su - user -c 'command
+	// -v node'` can miss a runtime the probe resolves, and vice versa.
+	if strings.Contains(script, `su - "$user" -c 'command -v`) {
+		t.Fatal("detection must mirror the probe's bash -lc, not the default login shell")
+	}
+
+	// Preservation has to be reached before the installer, or the download still
+	// happens and the healthy runtime is pointless.
+	preserve := strings.Index(script, "crabbox_node_bin=$(su")
+	install := strings.Index(script, "crabbox_node_installer=")
+	if preserve == -1 || install == -1 || preserve > install {
+		t.Fatalf("preservation must precede the installer: preserve=%d install=%d", preserve, install)
+	}
+
+	// Self-linking would break an existing standard install rather than heal it.
+	if !strings.Contains(script, `[ "$crabbox_node_bin" != /usr/local/bin/node ]`) {
+		t.Fatal("preservation must not link /usr/local/bin/node onto itself")
+	}
+}
+
+// The installer stays the fallback for a guest with no runtime at all.
+func TestParallelsEnsureReadyInstallsWhenNoRuntimeExists(t *testing.T) {
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false)
+
+	installer := sharedMacOSNodeInstall()
+	idx := strings.Index(script, installer)
+	if idx == -1 {
+		t.Fatal("shared installer is no longer embedded")
+	}
+	// It must sit in the else arm of the preservation check, not run unconditionally.
+	prefix := script[:idx]
+	if !strings.Contains(prefix, "    else\n      # No usable runtime anywhere") {
+		t.Fatal("installer is not the fallback arm of the preservation check")
 	}
 }
 

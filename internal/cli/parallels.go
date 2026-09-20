@@ -761,17 +761,40 @@ func parallelsPOSIXEnsureReadyScript(user, workRoot string, desktop, macOSAccoun
 user=%s
 work_root=%s
 desktop=%t
-# macOS readiness requires Node, so install the shared baseline before the gate
-# below. Running it ahead of the gate keeps a guest whose crabbox-ready predates
-# the Node checks from exiting early and skipping the install forever. The
-# installer returns immediately once node and npm already resolve.
+# macOS readiness requires Node, so settle it before the gate below. Running
+# ahead of the gate keeps a guest whose crabbox-ready predates the Node checks
+# from exiting early and skipping this forever.
 if command -v sw_vers >/dev/null 2>&1; then
-  crabbox_node_installer="$(mktemp /tmp/crabbox-node-install.XXXXXX)"
-  cat >"$crabbox_node_installer" <<'CRABBOXNODEINSTALL'
+  if ! PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin sh -c 'node --version >/dev/null 2>&1 && npm --version >/dev/null 2>&1'; then
+    # The readiness probe resolves Node through "$user"'s bash login shell, so a
+    # runtime that user already manages (Homebrew, nvm, asdf) satisfies
+    # readiness and must not be replaced by a download: an existing template
+    # would otherwise start needing nodejs.org to stay ready. Resolve it as
+    # that user through bash -lc, matching the probe exactly rather than the
+    # user's default login shell, which reads different rc files. Never source
+    # their login files as root. Link the result where
+    # root, crabbox-ready and the probe all look, so every caller agrees.
+    crabbox_node_bin=$(su - "$user" -c 'bash -lc "command -v node"' 2>/dev/null || true)
+    crabbox_npm_bin=$(su - "$user" -c 'bash -lc "command -v npm"' 2>/dev/null || true)
+    if [ -x "$crabbox_node_bin" ] && [ -x "$crabbox_npm_bin" ] &&
+      [ "$crabbox_node_bin" != /usr/local/bin/node ] && [ "$crabbox_npm_bin" != /usr/local/bin/npm ]; then
+      install -d -m 0755 /usr/local/bin
+      ln -sfn "$crabbox_node_bin" /usr/local/bin/node
+      ln -sfn "$crabbox_npm_bin" /usr/local/bin/npm
+      crabbox_npx_bin=$(su - "$user" -c 'bash -lc "command -v npx"' 2>/dev/null || true)
+      if [ -x "$crabbox_npx_bin" ] && [ "$crabbox_npx_bin" != /usr/local/bin/npx ]; then
+        ln -sfn "$crabbox_npx_bin" /usr/local/bin/npx
+      fi
+    else
+      # No usable runtime anywhere: fall back to the pinned shared installer.
+      crabbox_node_installer="$(mktemp /tmp/crabbox-node-install.XXXXXX)"
+      cat >"$crabbox_node_installer" <<'CRABBOXNODEINSTALL'
 %s
 CRABBOXNODEINSTALL
-  /bin/bash "$crabbox_node_installer" || { rm -f "$crabbox_node_installer"; exit 1; }
-  rm -f "$crabbox_node_installer"
+      /bin/bash "$crabbox_node_installer" || { rm -f "$crabbox_node_installer"; exit 1; }
+      rm -f "$crabbox_node_installer"
+    fi
+  fi
 fi
 if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1; then
   if [ "$desktop" != true ]; then
