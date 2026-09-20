@@ -1046,10 +1046,19 @@ func TestParallelsEnsureReadyInstallsWhenNoRuntimeExists(t *testing.T) {
 	if idx == -1 {
 		t.Fatal("shared installer is no longer embedded")
 	}
-	// It must sit in the else arm of the preservation check, not run unconditionally.
+	// It must be gated on preservation having failed, not run unconditionally.
 	prefix := script[:idx]
-	if !strings.Contains(prefix, "    else\n      # No usable runtime anywhere") {
-		t.Fatal("installer is not the fallback arm of the preservation check")
+	gate := `if [ "$crabbox_node_preserved" != true ]; then`
+	if !strings.Contains(prefix, gate) {
+		t.Fatal("installer is not gated on the preservation result")
+	}
+	// And preservation is only claimed once the linked runtime actually works on
+	// the PATH crabbox-ready uses, so a shim that needs its manager falls back.
+	if !strings.Contains(prefix, "crabbox_node_preserved=true") {
+		t.Fatal("preservation is never verified before the installer is skipped")
+	}
+	if strings.Index(script, "crabbox_node_preserved=true") > strings.Index(script, gate) {
+		t.Fatal("preservation must be proven before the installer gate is evaluated")
 	}
 }
 

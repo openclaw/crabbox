@@ -766,18 +766,33 @@ func parallelsMacOSNodeBaselineStanza() string {
 # from exiting early and skipping this forever.
 if command -v sw_vers >/dev/null 2>&1; then
   if ! PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin sh -c 'node --version >/dev/null 2>&1 && npm --version >/dev/null 2>&1'; then
-    # The readiness probe resolves Node through "$user"'s bash login shell, so a
-    # runtime that user already manages (Homebrew, nvm, asdf) satisfies
-    # readiness and must not be replaced by a download: an existing template
-    # would otherwise start needing nodejs.org to stay ready. Resolve it as
-    # that user through bash -lc, matching the probe exactly rather than the
-    # user's default login shell, which reads different rc files. Never source
-    # their login files as root, and keep stdin off these children: this whole
-    # script arrives on stdin via sudo -n /bin/sh -s, so anything that reads
-    # stdin silently eats the rest of it. Link the result where
-    # root, crabbox-ready and the probe all look, so every caller agrees.
-    crabbox_node_bin=$(su - "$user" -c 'bash -lc "command -v node"' </dev/null 2>/dev/null || true)
-    crabbox_npm_bin=$(su - "$user" -c 'bash -lc "command -v npm"' </dev/null 2>/dev/null || true)
+    # A runtime the guest user already manages (Homebrew, nvm, asdf) satisfies
+    # readiness, so preserve it rather than downloading over it: an existing
+    # template must not start needing nodejs.org to stay ready.
+    #
+    # Resolve it as that user through bash -lc, matching the probe exactly
+    # rather than the user's default login shell, which reads different rc
+    # files. Never source their login files as root, and keep stdin off these
+    # children -- this whole script arrives on stdin via sudo -n /bin/sh -s, so
+    # anything reading stdin silently eats the rest of it.
+    #
+    # Ask node for its own execPath rather than taking what command -v returns.
+    # An asdf-style shim re-execs through its manager, which is absent from the
+    # PATH crabbox-ready uses, so linking the shim would satisfy the probe's
+    # login shell and then fail the helper; execPath is the binary that shim
+    # ultimately runs, with npm and npx beside it.
+    crabbox_node_preserved=false
+    crabbox_node_bin=$(su - "$user" -c 'bash -lc "node -p process.execPath"' </dev/null 2>/dev/null || true)
+    if [ ! -x "$crabbox_node_bin" ]; then
+      crabbox_node_bin=$(su - "$user" -c 'bash -lc "command -v node"' </dev/null 2>/dev/null || true)
+    fi
+    crabbox_npm_bin=
+    if [ -x "$crabbox_node_bin" ]; then
+      crabbox_npm_bin=${crabbox_node_bin%%/*}/npm
+    fi
+    if [ ! -x "$crabbox_npm_bin" ]; then
+      crabbox_npm_bin=$(su - "$user" -c 'bash -lc "command -v npm"' </dev/null 2>/dev/null || true)
+    fi
     # Guard each destination on its own. The commands can sit in different
     # prefixes -- node already at /usr/local/bin with npm only in the user's
     # login PATH is a healthy template -- and a combined guard would reject
@@ -794,11 +809,22 @@ if command -v sw_vers >/dev/null 2>&1; then
       if [ "$crabbox_npm_bin" != /usr/local/bin/npm ]; then
         ln -sfn "$crabbox_npm_bin" /usr/local/bin/npm
       fi
-      crabbox_npx_bin=$(su - "$user" -c 'bash -lc "command -v npx"' </dev/null 2>/dev/null || true)
+      crabbox_npx_bin=${crabbox_node_bin%%/*}/npx
+      if [ ! -x "$crabbox_npx_bin" ]; then
+        crabbox_npx_bin=$(su - "$user" -c 'bash -lc "command -v npx"' </dev/null 2>/dev/null || true)
+      fi
       if [ -x "$crabbox_npx_bin" ] && [ "$crabbox_npx_bin" != /usr/local/bin/npx ]; then
         ln -sfn "$crabbox_npx_bin" /usr/local/bin/npx
       fi
-    else
+      # Only claim preservation if the result actually works in the environment
+      # crabbox-ready runs in. Anything that still needs the guest user's login
+      # context falls through to the pinned installer instead of leaving a
+      # helper that fails while the probe passes.
+      if PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin sh -c 'node --version >/dev/null 2>&1 && npm --version >/dev/null 2>&1'; then
+        crabbox_node_preserved=true
+      fi
+    fi
+    if [ "$crabbox_node_preserved" != true ]; then
       # No usable runtime anywhere: fall back to the pinned shared installer.
       crabbox_node_installer="$(mktemp /tmp/crabbox-node-install.XXXXXX)"
       cat >"$crabbox_node_installer" <<'CRABBOXNODEINSTALL'

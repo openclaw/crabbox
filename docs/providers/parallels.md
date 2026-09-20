@@ -98,7 +98,12 @@ readiness probe does, in this order:
    root. It resolves them through `bash -lc`, matching the readiness probe, so a
    runtime exported only from zsh-specific files such as `~/.zprofile` is not
    found here — export it from `~/.bash_profile`, `~/.profile` or
-   `/etc/paths.d` if a template relies on this case.
+   `/etc/paths.d` if a template relies on this case. Version-manager shims are
+   resolved to the executables they run, so an `asdf` or `nvm` runtime keeps
+   working under the fixed PATH that `crabbox-ready` uses, where the manager
+   itself is not present. If the preserved runtime still does not run there,
+   preparation falls back to the pinned installer rather than leaving a
+   readiness helper that fails.
 3. Neither: preparation installs Node 24.19.0, matching the Linux developer
    recipe's LTS baseline. Intel and Apple Silicon both use checksum-pinned
    official `nodejs.org` archives, with versioned installations under
