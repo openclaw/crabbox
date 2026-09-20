@@ -261,6 +261,23 @@ requested target, looks for the requested source VM, and picks the first host
 below its `maxVMs` limit. Host selection applies to `warmup`, `run`,
 `checkpoint fork`, `status`, `list`, `stop`, and `cleanup`.
 
+A host with a `maxVMs` limit counts its live VMs and clones into it under one
+reservation, so concurrent fan-out such as `crabbox shard --count 8` cannot
+exceed the limit: forks that arrive when the host is full fail with exit 5 and
+`host <name> is at maxVMs capacity` instead of cloning. Clones against a limited
+host are therefore serialized against each other, which adds the clone time of
+the forks ahead in the queue. A host with no `maxVMs` has no limit to enforce
+and its forks stay fully parallel.
+
+The reservation is a local file lock shared by callers using the same Crabbox
+state directory and exact configured host/account (with surrounding whitespace
+trimmed). Display names and SSH key paths do not change the reservation identity;
+all local entries share one identity. SSH/DNS aliases are not resolved, so use the
+same host/account spelling for callers that must coordinate. Different state
+directories or machines driving the same Parallels host still race against each
+other. Advisory queries such as `doctor` and `checkpoint fork --dry-run` neither
+take a reservation nor write capacity-lock state.
+
 ### Environment variables
 
 ```text

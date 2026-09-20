@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Prepare Node and npm before Parallels macOS readiness checks, preserving usable existing runtimes offline and installing the pinned baseline when needed. [PR 2387](https://github.com/openclaw/crabbox/pull/2387), [Issue 2381](https://github.com/openclaw/crabbox/issues/2381). Thanks @saariuslystoned.
+- Enforce Parallels fleet capacity across concurrent clones sharing local state, including differently named entries for the same host and account, while keeping doctor and checkpoint dry-run selection lock-free. [PR 2385](https://github.com/openclaw/crabbox/pull/2385), [Issue 2384](https://github.com/openclaw/crabbox/issues/2384). Thanks @saariuslystoned.
+
 ## 0.63.0 - 2026-09-20
 
 ### Highlights

@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,11 +16,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 const parallelsProvider = "parallels"
 const parallelsDHCPLeasesPath = "/Library/Preferences/Parallels/parallels_dhcp_leases"
 const parallelsPasswordEnvName = "CRABBOX_PARALLELS_PASSWORD"
+const parallelsCapacityLockRetryDelay = 100 * time.Millisecond
 
 var errParallelsDHCPLeaseAmbiguous = errors.New("ambiguous Parallels DHCP lease")
 
@@ -97,29 +102,110 @@ func ParallelsCandidateConfigs(cfg Config) []Config {
 	return out
 }
 
+// SelectParallelsFleetConfig picks a fleet host whose maxVMs still has room.
+// The result is only advisory: the count it is based on is stale the moment it
+// returns. Callers that go on to create a VM must use ReserveParallelsFleetCapacity
+// so the count and the clone happen under one reservation.
 func SelectParallelsFleetConfig(ctx context.Context, cfg Config, runner CommandRunner, source string) (Config, error) {
+	selected, release, err := selectParallelsFleetConfig(ctx, cfg, runner, source, false)
+	if err != nil {
+		return Config{}, err
+	}
+	release()
+	return selected, nil
+}
+
+// ReserveParallelsFleetCapacity picks a fleet host with room under maxVMs and holds
+// that host's reservation lock until the returned release func runs. Capacity is
+// enforced by counting the host's live crabbox- VMs and then cloning into it; with
+// no reservation spanning both steps, concurrent forks all observe the same
+// pre-clone count, all pass the gate, and all clone, so `crabbox shard --count 8`
+// can put 8 VMs on a host configured maxVMs: 2. Callers must hold the reservation
+// until their clone has completed and is visible to the next ListVMs.
+//
+// Reservations coordinate callers sharing a state directory and the same configured
+// host/account. Display names and keys do not affect lock identity; SSH aliases are
+// not resolved. Independent state directories or machines still race.
+func ReserveParallelsFleetCapacity(ctx context.Context, cfg Config, runner CommandRunner, source string) (Config, func(), error) {
+	return selectParallelsFleetConfig(ctx, cfg, runner, source, true)
+}
+
+func selectParallelsFleetConfig(ctx context.Context, cfg Config, runner CommandRunner, source string, reserve bool) (Config, func(), error) {
 	var lastErr error
 	for _, candidate := range ParallelsCandidateConfigs(cfg) {
+		release := func() {}
+		if reserve {
+			var err error
+			release, err = lockParallelsFleetCapacity(ctx, candidate)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+		}
 		client := NewParallelsClient(candidate, runner)
 		vms, err := client.ListVMs(ctx)
 		if err != nil {
+			release()
 			lastErr = err
 			continue
 		}
 		if source != "" && !parallelsVMListContains(vms, source) {
+			release()
 			lastErr = Exit(4, "Parallels source VM %q not found on host %s", source, parallelsHostRefForConfig(candidate))
 			continue
 		}
 		if !parallelsHostWithinCapacity(candidate, vms) {
+			release()
 			lastErr = Exit(5, "Parallels host %s is at maxVMs capacity", parallelsHostRefForConfig(candidate))
 			continue
 		}
-		return candidate, nil
+		return candidate, release, nil
 	}
 	if lastErr != nil {
-		return Config{}, lastErr
+		return Config{}, nil, lastErr
 	}
-	return cfg, nil
+	return cfg, func() {}, nil
+}
+
+// lockParallelsFleetCapacity serializes capacity reservations for one fleet host.
+// A host with no maxVMs has no capacity to protect, so it is left unserialized and
+// forks against it stay fully parallel.
+func lockParallelsFleetCapacity(ctx context.Context, cfg Config) (func(), error) {
+	if parallelsHostMaxVMs(cfg) <= 0 {
+		return func() {}, nil
+	}
+	path, err := parallelsCapacityLockPath(parallelsCapacityIdentity(cfg))
+	if err != nil {
+		return nil, err
+	}
+	// Never unlink this lock: a waiter must keep using the same inode after unlock.
+	lock := flock.New(path, flock.SetPermissions(0o600))
+	if _, err := lock.TryLockContext(ctx, parallelsCapacityLockRetryDelay); err != nil {
+		return nil, fmt.Errorf("wait for Parallels host %s capacity reservation: %w", parallelsHostRefForConfig(cfg), err)
+	}
+	return func() { _ = lock.Close() }, nil
+}
+
+func parallelsCapacityIdentity(cfg Config) string {
+	host := strings.TrimSpace(cfg.Parallels.Host)
+	if host == "" {
+		return "local"
+	}
+	return "remote\x00" + host + "\x00" + strings.TrimSpace(cfg.Parallels.HostUser)
+}
+
+func parallelsCapacityLockPath(identity string) (string, error) {
+	dir, err := CrabboxStateDir()
+	if err != nil {
+		return "", err
+	}
+	dir = filepath.Join(dir, "parallels", "capacity-locks")
+	if err := makePrivateDurableDirectories(dir); err != nil {
+		return "", Exit(2, "create Parallels capacity lock directory: %v", err)
+	}
+	// Digest the execution identity so operator-supplied values stay out of paths.
+	digest := sha256.Sum256([]byte(identity))
+	return filepath.Join(dir, hex.EncodeToString(digest[:])+".lock"), nil
 }
 
 func ResolveParallelsVM(ctx context.Context, cfg Config, runner CommandRunner, id string) (Config, ParallelsVM, error) {
@@ -1262,14 +1348,17 @@ func parallelsVMListContains(vms []ParallelsVM, id string) bool {
 	return false
 }
 
-func parallelsHostWithinCapacity(cfg Config, vms []ParallelsVM) bool {
-	limit := 0
+func parallelsHostMaxVMs(cfg Config) int {
 	for _, host := range cfg.Parallels.Hosts {
 		if cfg.Parallels.SelectedHost == firstNonBlank(host.Name, host.Host, "local") {
-			limit = host.MaxVMs
-			break
+			return host.MaxVMs
 		}
 	}
+	return 0
+}
+
+func parallelsHostWithinCapacity(cfg Config, vms []ParallelsVM) bool {
+	limit := parallelsHostMaxVMs(cfg)
 	if limit <= 0 {
 		return true
 	}
