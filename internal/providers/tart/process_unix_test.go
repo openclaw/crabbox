@@ -991,6 +991,72 @@ func TestAcquireStartupExitPreservesOwnershipFence(t *testing.T) {
 		if helperStage(args) == "stop" || helperStage(args) == "delete" {
 			t.Fatalf("cleanup crossed replaced marker: %q", args)
 		}
+		if helperStage(args) == "keygen" {
+			if _, err := os.Stat(args[len(args)-1]); err != nil {
+				t.Fatalf("SSH key removed despite rejected rollback: %v", err)
+			}
+		}
+	}
+}
+
+func TestAcquireStartupRollbackArtifactLifetime(t *testing.T) {
+	for _, mode := range []string{"success", "delete-failure", "artifact-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newProcessFixture(t, "delete")
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			result := acquireProcess(t, f, f.backend(), ctx, cancel, true)
+			child := result.next(t, f, "run")
+			cause := errors.New("synthetic acquisition cancellation")
+			cancel(cause)
+			deletion := result.next(t, f, "delete")
+			var keyPath string
+			f.mu.Lock()
+			for _, args := range f.calls {
+				if helperStage(args) == "keygen" {
+					keyPath = args[len(args)-1]
+				}
+			}
+			f.mu.Unlock()
+			if keyPath == "" {
+				t.Fatal("missing generated key path")
+			}
+			dir := filepath.Dir(keyPath)
+			if mode == "artifact-failure" {
+				if err := os.RemoveAll(dir); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(dir, []byte("synthetic cleanup obstruction"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			action := processAction{Exit: true}
+			if mode == "delete-failure" {
+				action.Code, action.Stderr = 1, "synthetic delete failure"
+			}
+			deletion.send(t, action)
+			awaitProcess(t, result.done)
+			if !errors.Is(result.err, cause) {
+				t.Fatalf("original failure lost: %v", result.err)
+			}
+			child.exited(t)
+			f.assertLogsRemoved(t)
+			switch mode {
+			case "delete-failure":
+				if !strings.Contains(result.err.Error(), "synthetic delete failure") {
+					t.Fatalf("rollback failure lost: %v", result.err)
+				}
+				if _, err := os.Stat(keyPath); err != nil {
+					t.Fatalf("SSH key removed despite failed deletion: %v", err)
+				}
+			case "artifact-failure":
+				if !strings.Contains(result.err.Error(), "remove SSH connection artifacts") {
+					t.Fatalf("artifact cleanup error discarded: %v", result.err)
+				}
+			case "success":
+				f.assertFailedAcquisitionCleaned(t, child)
+			}
+		})
 	}
 }
 

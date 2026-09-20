@@ -125,6 +125,12 @@ stop/delete of the new clone. `--keep` preserves a VM only after acquisition
 succeeds. After success, kept VMs survive caller cancellation; non-kept VMs
 remain tied to the caller's context.
 
+Failed acquisition removes generated SSH credentials and host-trust files only
+after ownership-verified VM rollback and any published-claim cleanup succeed.
+Uncertain cloning, ownership changes, or failed deletion/claim cleanup retain
+the SSH material for recovery. Local artifact-cleanup errors are reported
+alongside the original acquisition failure rather than silently discarded.
+
 ## Built-in image identity
 
 New leases without an image override use the immutable Sequoia image above.
