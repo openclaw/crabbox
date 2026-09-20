@@ -113,10 +113,12 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (target 
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	cleanupKey := true
+	cleanupKey := false
 	defer func() {
 		if cleanupKey {
-			core.RemoveStoredTestboxKey(leaseID)
+			if err := core.RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
+				acquireErr = errors.Join(acquireErr, fmt.Errorf("remove SSH connection artifacts for lease %s: %w", leaseID, err))
+			}
 		}
 	}()
 	cfg.SSHKey = keyPath
@@ -142,7 +144,11 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (target 
 		if err := verifyTartVMIdentity(name, storage, identity); err != nil {
 			return err
 		}
-		return b.deleteVM(context.Background(), name)
+		if err := b.deleteVM(context.Background(), name); err != nil {
+			return err
+		}
+		cleanupKey = true
+		return nil
 	}
 	if cfg.Tart.Image == core.DefaultTartImage {
 		fmt.Fprintln(b.rt.Stderr, "verifying built-in Tart image contents before boot (full disk read)")
@@ -180,7 +186,10 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (target 
 				return core.CleanupLeaseClaimIfUnchangedAfter(leaseID, publishedClaim, exists, cleanupUnclaimedVM)
 			}
 		}
-		acquireErr = errors.Join(acquireErr, cleanup())
+		cleanupErr := cleanup()
+		// Retain access material if deletion or retirement of our claim is incomplete.
+		cleanupKey = cleanupErr == nil
+		acquireErr = errors.Join(acquireErr, cleanupErr)
 	}()
 	ctx = startup.ctx
 	ip, err := b.waitForIP(ctx, name)
