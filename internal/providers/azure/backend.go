@@ -101,6 +101,11 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 		if err == nil {
 			err = client.DeleteOwnedServer(cleanupCtx, prepared)
 		}
+		if err == nil {
+			if cleanupErr := core.RemoveStoredTestboxConnectionArtifacts(leaseID); cleanupErr != nil {
+				err = fmt.Errorf("remove SSH connection artifacts for lease %s after azure rollback: %w", leaseID, cleanupErr)
+			}
+		}
 		if err != nil {
 			fmt.Fprintf(b.RT.Stderr, "warning: cleanup azure server %s after acquire failure: %v\n", created.CloudID, err)
 			retErr = shared.JoinAcquireCleanupError(retErr, fmt.Errorf("cleanup azure server %s after acquire failure: %w", created.CloudID, err))

@@ -22,19 +22,21 @@ import (
 )
 
 type fakeGCPDoctorClient struct {
-	listCalls   int
-	deleted     []string
-	mutated     bool
-	servers     []core.Server
-	complete    []core.Server
-	get         map[string]core.Server
-	getErr      error
-	observe     func(context.Context, string) (core.Server, error)
-	created     core.Server
-	createCfg   core.Config
-	createErr   error
-	deleteErr   error
-	createCalls int
+	listCalls      int
+	deleted        []string
+	mutated        bool
+	servers        []core.Server
+	complete       []core.Server
+	get            map[string]core.Server
+	getErr         error
+	observe        func(context.Context, string) (core.Server, error)
+	created        core.Server
+	createCfg      core.Config
+	createErr      error
+	deleteErr      error
+	deleteObserve  func(context.Context, string) error
+	createCalls    int
+	createLeaseIDs []string
 }
 
 func (c *fakeGCPDoctorClient) ListCrabboxServers(context.Context) ([]core.Server, error) {
@@ -50,8 +52,9 @@ func (c *fakeGCPDoctorClient) ListCrabboxServersComplete(context.Context) ([]cor
 	return c.servers, nil
 }
 
-func (c *fakeGCPDoctorClient) CreateServerWithFallback(context.Context, core.Config, string, string, string, bool, func(string, ...any)) (core.Server, core.Config, error) {
+func (c *fakeGCPDoctorClient) CreateServerWithFallback(_ context.Context, _ core.Config, _ string, leaseID, _ string, _ bool, _ func(string, ...any)) (core.Server, core.Config, error) {
 	c.createCalls++
+	c.createLeaseIDs = append(c.createLeaseIDs, leaseID)
 	c.mutated = true
 	if c.createErr != nil {
 		return core.Server{}, core.Config{}, c.createErr
@@ -77,9 +80,12 @@ func (c *fakeGCPDoctorClient) GetServer(ctx context.Context, name string) (core.
 	return core.Server{}, errors.New("gcp server not found: " + name)
 }
 
-func (c *fakeGCPDoctorClient) DeleteServer(_ context.Context, name string) error {
+func (c *fakeGCPDoctorClient) DeleteServer(ctx context.Context, name string) error {
 	c.deleted = append(c.deleted, name)
 	c.mutated = true
+	if c.deleteObserve != nil {
+		return c.deleteObserve(ctx, name)
+	}
 	return c.deleteErr
 }
 
@@ -295,6 +301,7 @@ func TestWaitForServerIPReadinessBudget(t *testing.T) {
 func TestGCPAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	ipErr := errors.New("ip unavailable")
 	fake := &fakeGCPDoctorClient{
 		created:   core.Server{CloudID: "crabbox-created", Name: "crabbox-created", Labels: map[string]string{"lease": "cbx_created"}},
@@ -314,6 +321,13 @@ func TestGCPAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {
 	}
 	if len(fake.deleted) != 1 || fake.deleted[0] != "crabbox-created" {
 		t.Fatalf("deleted=%v, want created server cleanup", fake.deleted)
+	}
+	key, err := core.TestboxKeyPath(fake.createLeaseIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Dir(key)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("SSH artifacts remain after successful rollback: %v", err)
 	}
 }
 
@@ -346,6 +360,41 @@ func TestGCPAcquireCleansUpCreatedServerOnFallbackClientFailure(t *testing.T) {
 	}
 	if calls < 3 {
 		t.Fatalf("newGCPClient calls=%d, want cleanup client rebuild attempt", calls)
+	}
+}
+
+func TestGCPAcquireRollbackWaitsWithFreshBoundedContextAfterCancellation(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var cleanupErr error
+	var remaining time.Duration
+	var bounded bool
+	fake := &fakeGCPDoctorClient{
+		created:   core.Server{CloudID: "crabbox-created"},
+		createCfg: core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-a"},
+		observe: func(context.Context, string) (core.Server, error) {
+			cancel()
+			return core.Server{}, context.Canceled
+		},
+		deleteObserve: func(cleanupCtx context.Context, _ string) error {
+			cleanupErr = cleanupCtx.Err()
+			deadline, ok := cleanupCtx.Deadline()
+			bounded = ok
+			remaining = time.Until(deadline)
+			return nil
+		},
+	}
+	old := newGCPClient
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) { return fake, nil }
+	t.Cleanup(func() { newGCPClient = old })
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, fake.createCfg, core.Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+	_, err := backend.Acquire(ctx, core.AcquireRequest{})
+	if !errors.Is(err, context.Canceled) || len(fake.deleted) != 1 || fake.createCalls != 1 {
+		t.Fatalf("error=%v creates=%d deletes=%v", err, fake.createCalls, fake.deleted)
+	}
+	if cleanupErr != nil || !bounded || remaining < 170*time.Second || remaining > 3*time.Minute {
+		t.Fatalf("cleanup context error=%v bounded=%v remaining=%s, want fresh three-minute operation budget", cleanupErr, bounded, remaining)
 	}
 }
 
@@ -846,21 +895,39 @@ func TestGCPDoctorListsInventoryOnly(t *testing.T) {
 }
 
 func TestGCPAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
-	for _, failed := range []bool{false, true} {
-		t.Run(fmt.Sprint(failed), func(t *testing.T) {
+	for _, failure := range []string{"", "provider", "artifacts"} {
+		t.Run(failure, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 			t.Setenv("XDG_STATE_HOME", t.TempDir())
 			bootstrapErr := core.Exit(5, "timed out waiting for SSH: fixture readiness failure")
-			oldWait := waitForSSHReady
-			waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error { return bootstrapErr }
-			t.Cleanup(func() { waitForSSHReady = oldWait })
 			server := core.Server{CloudID: "crabbox-created", Labels: map[string]string{}}
 			server.PublicNet.IPv4.IP = "192.0.2.10"
 			fake := &fakeGCPDoctorClient{created: server, get: map[string]core.Server{server.CloudID: server}, createCfg: core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-b"}}
-			if failed {
+			if failure == "provider" {
 				fake.deleteErr = errors.New("delete unavailable")
 			}
+			oldWait := waitForSSHReady
+			waitForSSHReady = func(context.Context, *core.SSHTarget, io.Writer, string, time.Duration) error {
+				key, err := core.TestboxKeyPath(fake.createLeaseIDs[len(fake.createLeaseIDs)-1])
+				if err != nil {
+					t.Fatal(err)
+				}
+				dir := filepath.Dir(key)
+				if err := os.WriteFile(filepath.Join(dir, "known_hosts"), []byte("synthetic host trust\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if failure == "artifacts" {
+					if err := os.RemoveAll(dir); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return bootstrapErr
+			}
+			t.Cleanup(func() { waitForSSHReady = oldWait })
 			old := newGCPClient
 			newGCPClient = func(context.Context, core.Config) (gcpClient, error) { return fake, nil }
 			t.Cleanup(func() { newGCPClient = old })
@@ -868,7 +935,7 @@ func TestGCPAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
 			backend := NewGCPLeaseBackend(core.ProviderSpec{}, fake.createCfg, core.Runtime{Stderr: &stderr}).(*gcpLeaseBackend)
 			_, err := backend.Acquire(context.Background(), core.AcquireRequest{})
 			want := 2
-			if failed {
+			if failure != "" {
 				want = 1
 			}
 			if fake.createCalls != want || len(fake.deleted) != want {
@@ -877,8 +944,24 @@ func TestGCPAcquireStopsFreshRetryAfterRollbackFailure(t *testing.T) {
 			if !core.IsBootstrapWaitError(err) {
 				t.Fatalf("lost original bootstrap cause: %v", err)
 			}
-			if failed && (!errors.Is(err, fake.deleteErr) || strings.Contains(stderr.String(), "retrying with fresh lease")) {
+			if failure == "provider" && !errors.Is(err, fake.deleteErr) {
 				t.Fatalf("lost cleanup debt or retried: error=%v stderr=%s", err, stderr.String())
+			}
+			if failure != "" && strings.Contains(stderr.String(), "retrying with fresh lease") {
+				t.Fatalf("retried with cleanup debt: %v", err)
+			}
+			if failure == "artifacts" && !strings.Contains(err.Error(), "SSH connection artifacts") {
+				t.Fatalf("lost artifact cleanup error: %v", err)
+			}
+			for _, leaseID := range fake.createLeaseIDs {
+				key, pathErr := core.TestboxKeyPath(leaseID)
+				if pathErr != nil {
+					t.Fatal(pathErr)
+				}
+				_, statErr := os.Lstat(filepath.Dir(key))
+				if failure == "" && !errors.Is(statErr, os.ErrNotExist) || failure != "" && statErr != nil {
+					t.Fatalf("rollback artifact state: %v, failure=%q", statErr, failure)
+				}
 			}
 		})
 	}

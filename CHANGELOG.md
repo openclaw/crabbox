@@ -4,7 +4,9 @@
 
 ### Fixes
 
+- Remove generated GCP and Azure SSH files after successful failed-acquisition rollback, preserving them on remote cleanup failure and stopping fresh retries when local cleanup fails. [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
 - Keep Linode lease claims until generated SSH credentials and host-trust files are removed, reporting local cleanup errors and allowing safe retries after instance deletion. [PR 2358](https://github.com/openclaw/crabbox/pull/2358). Thanks @steipete.
+- Allow up to three minutes for GCP acquisition rollback to confirm remote deletion, including after caller cancellation, instead of abandoning the wait after 30 seconds. [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
 - Bound GCP public-IP discovery to two minutes, including in-flight observations, and stop before querying when the caller has already canceled. [PR 2357](https://github.com/openclaw/crabbox/pull/2357). Thanks @steipete.
 - Remove generated GCP lease SSH credentials and host-trust files after confirmed instance deletion or absence; retain the exact claim when SSH cleanup fails so cleanup can be retried. [PR 2357](https://github.com/openclaw/crabbox/pull/2357). Thanks @steipete.
 

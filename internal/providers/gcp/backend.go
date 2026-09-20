@@ -12,6 +12,9 @@ import (
 
 type gcpLeaseBackend struct{ shared.DirectSSHBackend }
 
+// On-demand guest shutdown can take 120 seconds before deletion completes.
+const gcpAcquireRollbackTimeout = 3 * time.Minute
+
 type gcpClient interface {
 	ListCrabboxServers(context.Context) ([]core.Server, error)
 	ListCrabboxServersComplete(context.Context) ([]core.Server, error)
@@ -71,7 +74,7 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		if !rollback || strings.TrimSpace(rollbackCloudID) == "" {
 			return
 		}
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), gcpAcquireRollbackTimeout)
 		defer cancel()
 		cleanupClient, cleanupClientErr := newGCPClient(cleanupCtx, cfg)
 		if cleanupClientErr != nil {
@@ -82,6 +85,10 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		if err := cleanupClient.DeleteServer(cleanupCtx, rollbackCloudID); err != nil {
 			fmt.Fprintf(b.RT.Stderr, "warning: cleanup gcp server %s after acquire failure: %v\n", rollbackCloudID, err)
 			retErr = shared.JoinAcquireCleanupError(retErr, fmt.Errorf("cleanup gcp server %s after acquire failure: %w", rollbackCloudID, err))
+			return
+		}
+		if err := core.RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
+			retErr = shared.JoinAcquireCleanupError(retErr, fmt.Errorf("remove SSH connection artifacts for lease %s after gcp rollback: %w", leaseID, err))
 		}
 	}()
 	client, err = newGCPClient(ctx, cfg)
