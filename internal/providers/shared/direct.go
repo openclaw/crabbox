@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
@@ -120,8 +121,13 @@ func CleanupClaimEligible(err error) (bool, error) {
 	return false, err
 }
 
-func (b *DirectSSHBackend) Touch(ctx context.Context, server core.Server, state string) core.Server {
-	return core.TouchDirectLeaseBestEffort(ctx, b.Cfg, server, state, b.RT.Stderr)
+func (b *DirectSSHBackend) Touch(ctx context.Context, req core.TouchRequest, persist func(context.Context, core.Server) error) core.Server {
+	server := req.Lease.Server
+	server.Labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(server.Labels, b.Cfg, req.State, time.Now().UTC(), req.IdleTimeoutOverride)
+	if err := persist(ctx, server); err != nil {
+		fmt.Fprintf(b.RT.Stderr, "warning: direct touch state=%s: %v\n", req.State, err)
+	}
+	return server
 }
 
 // JoinAcquireCleanupError marks reported rollback failure as a fresh-allocation

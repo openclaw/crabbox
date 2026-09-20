@@ -264,7 +264,17 @@ func (b *azureLeaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 }
 
 func (b *azureLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
-	return b.DirectSSHBackend.Touch(ctx, req.Lease.Server, req.State), nil
+	return b.DirectSSHBackend.Touch(ctx, req, func(ctx context.Context, server core.Server) error {
+		client, err := newAzureClient(ctx, b.Cfg)
+		if err != nil {
+			return err
+		}
+		name := server.CloudID
+		if name == "" {
+			name = server.Name
+		}
+		return client.SetTags(ctx, name, server.Labels)
+	}), nil
 }
 
 func (b *azureLeaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) error {

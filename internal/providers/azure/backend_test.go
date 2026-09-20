@@ -34,6 +34,8 @@ type fakeAzureClient struct {
 	deleteOwnedFunc   func(core.Server) error
 	deleteCleanupFunc func(core.Server) error
 	tagged            []string
+	taggedLabels      []map[string]string
+	tagErr            error
 	servers           []core.Server
 	listErr           error
 	created           core.Server
@@ -166,12 +168,84 @@ func (c *fakeAzureClient) DeleteCleanupServer(_ context.Context, server core.Ser
 	return nil
 }
 
-func (c *fakeAzureClient) SetTags(_ context.Context, name string, _ map[string]string) error {
+func (c *fakeAzureClient) SetTags(_ context.Context, name string, labels map[string]string) error {
 	c.tagged = append(c.tagged, name)
+	c.taggedLabels = append(c.taggedLabels, maps.Clone(labels))
 	if c.setTagsFunc != nil {
 		c.setTagsFunc()
 	}
-	return nil
+	return c.tagErr
+}
+
+func TestAzureTouchUsesProviderClientBestEffort(t *testing.T) {
+	idleOverride := 90 * time.Minute
+	for _, tc := range []struct {
+		name      string
+		cloudID   string
+		clientErr bool
+		writeErr  bool
+		override  *time.Duration
+	}{
+		{name: "cloud ID", cloudID: "azure-vm"},
+		{name: "name fallback"},
+		{name: "AWS-shaped ID stays Azure", cloudID: "i-example"},
+		{name: "explicit idle timeout", cloudID: "azure-vm", override: &idleOverride},
+		{name: "client failure", cloudID: "azure-vm", clientErr: true},
+		{name: "write failure", cloudID: "azure-vm", writeErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			failure := errors.New("synthetic touch failure")
+			fake := &fakeAzureClient{}
+			if tc.writeErr {
+				fake.tagErr = failure
+			}
+			oldClient := newAzureClient
+			newAzureClient = func(_ context.Context, cfg core.Config) (azureClient, error) {
+				if cfg.Provider != "azure" {
+					t.Fatalf("provider=%q", cfg.Provider)
+				}
+				if tc.clientErr {
+					return nil, failure
+				}
+				return fake, nil
+			}
+			t.Cleanup(func() { newAzureClient = oldClient })
+			var stderr bytes.Buffer
+			backend := NewAzureLeaseBackend(core.ProviderSpec{Name: "azure"}, core.Config{}, core.Runtime{Stderr: &stderr}).(*azureLeaseBackend)
+			server := core.Server{CloudID: tc.cloudID, Name: "fallback-name", Provider: "azure", Labels: map[string]string{"idle_timeout_secs": "1800"}}
+			got, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{Server: server}, State: "ready", IdleTimeoutOverride: tc.override})
+			if err != nil || got.Labels["state"] != "ready" {
+				t.Fatalf("server=%+v err=%v", got, err)
+			}
+			wantIdle := "1800"
+			if tc.override != nil {
+				wantIdle = "5400"
+			}
+			if got.Labels["idle_timeout_secs"] != wantIdle {
+				t.Fatalf("idle_timeout_secs=%q want=%q", got.Labels["idle_timeout_secs"], wantIdle)
+			}
+			if tc.clientErr {
+				if len(fake.tagged) != 0 {
+					t.Fatal("wrote tags after client construction failed")
+				}
+			} else {
+				want := tc.cloudID
+				if want == "" {
+					want = server.Name
+				}
+				if !slices.Equal(fake.tagged, []string{want}) || !reflect.DeepEqual(fake.taggedLabels[0], got.Labels) {
+					t.Fatalf("tagged=%v labels=%v returned=%v", fake.tagged, fake.taggedLabels, got.Labels)
+				}
+			}
+			wantWarning := ""
+			if tc.clientErr || tc.writeErr {
+				wantWarning = "warning: direct touch state=ready: synthetic touch failure\n"
+			}
+			if stderr.String() != wantWarning {
+				t.Fatalf("warning=%q want=%q", stderr.String(), wantWarning)
+			}
+		})
+	}
 }
 
 func TestAzureAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {

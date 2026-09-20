@@ -418,6 +418,12 @@ by the provider's first acquisition step.
 the current lease timeout, while a non-nil value replaces it. Do not infer
 replacement intent from the effective `IdleTimeout` fallback.
 
+The adapter owns the metadata-write client and resource identifier; do not
+infer a different provider from an identifier's shape. For existing best-effort
+touch paths, `shared.DirectSSHBackend.Touch` accepts the complete touch request,
+preserves its explicit idle-timeout replacement intent, and shares label updates
+and warning output while its callback performs the provider-specific write.
+
 Static providers must commit touched lifecycle labels and any explicit timeout
 replacement to their durable local claim. `Resolve` must reconstruct lifecycle
 state from that claim, and `Touch` must compare-and-swap the exact canonical

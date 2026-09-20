@@ -269,7 +269,13 @@ func (b *hetznerLeaseBackend) ReleaseLeaseMessage(lease core.LeaseTarget) string
 }
 
 func (b *hetznerLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
-	return b.DirectSSHBackend.Touch(ctx, req.Lease.Server, req.State), nil
+	return b.DirectSSHBackend.Touch(ctx, req, func(ctx context.Context, server core.Server) error {
+		client, err := newHetznerClient()
+		if err != nil {
+			return err
+		}
+		return client.SetLabels(ctx, server.ID, server.Labels)
+	}), nil
 }
 
 func (b *hetznerLeaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) error {

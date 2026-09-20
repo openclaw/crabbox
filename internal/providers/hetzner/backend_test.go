@@ -35,6 +35,8 @@ type fakeHetznerClient struct {
 	deletedServers []int64
 	deletedKeys    []string
 	labeledServers []int64
+	labeledValues  []map[string]string
+	labelErr       error
 }
 
 func (f *fakeHetznerClient) ListCrabboxServers(context.Context) ([]core.Server, error) {
@@ -71,9 +73,61 @@ func (f *fakeHetznerClient) DeleteSSHKey(_ context.Context, name string) error {
 	return f.keyDeleteErr
 }
 
-func (f *fakeHetznerClient) SetLabels(_ context.Context, id int64, _ map[string]string) error {
+func (f *fakeHetznerClient) SetLabels(_ context.Context, id int64, labels map[string]string) error {
 	f.labeledServers = append(f.labeledServers, id)
-	return nil
+	f.labeledValues = append(f.labeledValues, maps.Clone(labels))
+	return f.labelErr
+}
+
+func TestHetznerTouchUsesProviderClientBestEffort(t *testing.T) {
+	for _, mode := range []string{"success", "explicit idle timeout", "client failure", "write failure"} {
+		t.Run(mode, func(t *testing.T) {
+			failure := errors.New("synthetic touch failure")
+			fake := &fakeHetznerClient{}
+			if mode == "write failure" {
+				fake.labelErr = failure
+			}
+			oldClient := newHetznerClient
+			newHetznerClient = func() (hetznerClient, error) {
+				if mode == "client failure" {
+					return nil, failure
+				}
+				return fake, nil
+			}
+			t.Cleanup(func() { newHetznerClient = oldClient })
+			var stderr bytes.Buffer
+			backend := NewHetznerLeaseBackend(core.ProviderSpec{Name: "hetzner"}, core.Config{}, core.Runtime{Stderr: &stderr}).(*hetznerLeaseBackend)
+			server := core.Server{ID: 42, CloudID: "42", Name: "not-the-ID", Provider: "hetzner", Labels: map[string]string{"idle_timeout_secs": "1800"}}
+			req := core.TouchRequest{Lease: core.LeaseTarget{Server: server}, State: "ready"}
+			wantIdle := "1800"
+			if mode == "explicit idle timeout" {
+				override := 90 * time.Minute
+				req.IdleTimeoutOverride = &override
+				wantIdle = "5400"
+			}
+			got, err := backend.Touch(context.Background(), req)
+			if err != nil || got.Labels["state"] != "ready" {
+				t.Fatalf("server=%+v err=%v", got, err)
+			}
+			if got.Labels["idle_timeout_secs"] != wantIdle {
+				t.Fatalf("idle_timeout_secs=%q want=%q", got.Labels["idle_timeout_secs"], wantIdle)
+			}
+			if mode == "client failure" {
+				if len(fake.labeledServers) != 0 {
+					t.Fatal("wrote labels after client construction failed")
+				}
+			} else if len(fake.labeledServers) != 1 || fake.labeledServers[0] != server.ID || !maps.Equal(fake.labeledValues[0], got.Labels) {
+				t.Fatalf("IDs=%v labels=%v returned=%v", fake.labeledServers, fake.labeledValues, got.Labels)
+			}
+			wantWarning := ""
+			if mode == "client failure" || mode == "write failure" {
+				wantWarning = "warning: direct touch state=ready: synthetic touch failure\n"
+			}
+			if stderr.String() != wantWarning {
+				t.Fatalf("warning=%q want=%q", stderr.String(), wantWarning)
+			}
+		})
+	}
 }
 
 func installHetznerTestHooks(t *testing.T, client *fakeHetznerClient) {

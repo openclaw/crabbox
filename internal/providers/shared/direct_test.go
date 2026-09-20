@@ -17,6 +17,48 @@ import (
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
+func TestDirectTouchPersistsUpdatedLabelsBestEffort(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			var stderr bytes.Buffer
+			backend := DirectSSHBackend{Cfg: core.Config{TTL: time.Hour, IdleTimeout: time.Minute}, RT: core.Runtime{Stderr: &stderr}}
+			server := core.Server{CloudID: "example-server"}
+			if fail {
+				server.Labels = map[string]string{"state": "starting", "provider_metadata": "unchanged"}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			var persisted core.Server
+			req := core.TouchRequest{Lease: core.LeaseTarget{Server: server}, State: "ready"}
+			got := backend.Touch(ctx, req, func(actual context.Context, updated core.Server) error {
+				if actual != ctx {
+					t.Fatal("persistence did not receive the caller context")
+				}
+				calls++
+				persisted = updated
+				if fail {
+					return errors.New("provider write failed")
+				}
+				return nil
+			})
+			if calls != 1 || !reflect.DeepEqual(persisted, got) || got.Labels["state"] != "ready" || got.Labels["last_touched_at"] == "" {
+				t.Fatalf("calls=%d persisted=%+v returned=%+v", calls, persisted, got)
+			}
+			if fail {
+				if got.Labels["provider_metadata"] != "unchanged" || server.Labels["state"] != "starting" {
+					t.Fatal("touch changed provider metadata or the input labels")
+				}
+				if stderr.String() != "warning: direct touch state=ready: provider write failed\n" {
+					t.Fatalf("warning=%q", stderr.String())
+				}
+			} else if stderr.Len() != 0 {
+				t.Fatalf("unexpected warning=%q", stderr.String())
+			}
+		})
+	}
+}
+
 func TestDirectCleanupDecisionPreviewsBeforeMutation(t *testing.T) {
 	for _, action := range []DirectCleanupAction{DeleteCleanupServer, ResumeCleanupServer} {
 		t.Run(fmt.Sprint(action), func(t *testing.T) {
