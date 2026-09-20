@@ -121,20 +121,17 @@ func resolveBlaxelLeaseClaim(identifier, baseURL, workspace string) (core.LeaseC
 }
 
 func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, baseURL, workspace string) (string, string, string, error) {
-	if err := validateBlaxelClaimScope(claim, baseURL, workspace); err != nil {
+	leaseID, _, slug, err := shared.FinishScopedLease(claim, shared.ScopedLeaseFinishOptions{
+		Provider: providerName, LeasePrefix: leasePrefix, RepoRoot: repoRoot,
+		Reclaim: reclaim, IdleTimeout: idleTimeout,
+		ValidateClaim: func(claim core.LeaseClaim) error {
+			return validateBlaxelClaimScope(claim, baseURL, workspace)
+		},
+	})
+	if err != nil {
 		return "", "", "", err
 	}
-	if repoRoot != "" {
-		if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, repoRoot,
-			timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
-			return "", "", "", err
-		}
-	}
-	slug := claim.Slug
-	if strings.TrimSpace(slug) == "" {
-		slug = core.NewLeaseSlug(claim.LeaseID)
-	}
-	return claim.LeaseID, blaxelSandboxID(claim.LeaseID), slug, nil
+	return leaseID, blaxelSandboxID(leaseID), slug, nil
 }
 
 func verifyBlaxelClaim(ctx context.Context, client Client, leaseID, sandboxID, workspace string) (Sandbox, error) {
@@ -170,11 +167,4 @@ func validateBlaxelSandboxOwnership(claim core.LeaseClaim, sb Sandbox) error {
 		return core.Exit(4, "blaxel sandbox %q ownership labels do not match its local claim", sb.ID)
 	}
 	return nil
-}
-
-func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
-	if primary > 0 {
-		return primary
-	}
-	return fallback
 }
