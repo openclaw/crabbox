@@ -17,6 +17,7 @@ import {
   azureVMSizeCandidatesForTargetClass,
   gcpMachineTypeCandidatesForClass,
   leaseConfig,
+  parseTarget,
   serverTypeCandidatesForClass,
   serverTypeForClass,
   serverTypeForProviderClass,
@@ -1601,6 +1602,31 @@ describe("lease config", () => {
     expect(leaseConfig({ hostID: "h-compat", sshPublicKey: "ssh-ed25519 test" }).hostID).toBe(
       "h-compat",
     );
+  });
+
+  it.each([
+    ["linux", ["", "   ", "linux", " UBUNTU "]],
+    ["macos", ["mac", "macos", " DARWIN ", "osx"]],
+    ["windows", ["win", " WINDOWS "]],
+  ] as const)("parses %s target aliases without changing lease validation", (target, aliases) => {
+    for (const alias of aliases) {
+      expect(parseTarget(alias)).toBe(target);
+      expect(
+        leaseConfig({
+          provider: "aws",
+          target: alias,
+          sshPublicKey: "ssh-ed25519 test",
+          ...(target === "macos" ? { capacity: { market: "on-demand" } } : {}),
+        }).target,
+      ).toBe(target);
+    }
+  });
+
+  it("keeps invalid target parsing nonthrowing and lease errors unchanged", () => {
+    expect(parseTarget("freebsd")).toBeUndefined();
+    expect(() =>
+      leaseConfig({ provider: "aws", target: "freebsd", sshPublicKey: "ssh-ed25519 test" }),
+    ).toThrow("target must be linux, macos, or windows");
   });
 
   it("allows AWS Windows leases", () => {

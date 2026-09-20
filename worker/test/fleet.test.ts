@@ -41521,21 +41521,25 @@ describe("fleet lease identity and idle", () => {
       }),
     );
 
-    const provider = new AzureProvider({} as Env, undefined, new MemoryStorage(), "westeurope");
-    const invalidTargetURL = new URL(
-      "https://crabbox.test/v1/images/snapshot-devtools/promote?provider=azure&target=macos",
+    await Promise.all(
+      ["macos", "mac", " DARWIN ", "osx", "freebsd"].map(async (target) => {
+        const provider = new AzureProvider({} as Env, undefined, new MemoryStorage(), "westeurope");
+        const invalidTargetURL = new URL(
+          `https://crabbox.test/v1/images/snapshot-devtools/promote?provider=azure&target=${encodeURIComponent(target)}`,
+        );
+        const invalidTarget = await provider.promoteImage(
+          snapshot.id,
+          snapshot,
+          new Request(invalidTargetURL, { method: "POST", body: "{}" }),
+          invalidTargetURL,
+        );
+        expect(invalidTarget).toBeInstanceOf(Response);
+        expect((invalidTarget as Response).status).toBe(400);
+        await expect((invalidTarget as Response).json()).resolves.toMatchObject({
+          error: "invalid_target",
+        });
+      }),
     );
-    const invalidTarget = await provider.promoteImage(
-      snapshot.id,
-      snapshot,
-      new Request(invalidTargetURL, { method: "POST", body: "{}" }),
-      invalidTargetURL,
-    );
-    expect(invalidTarget).toBeInstanceOf(Response);
-    expect((invalidTarget as Response).status).toBe(400);
-    await expect((invalidTarget as Response).json()).resolves.toMatchObject({
-      error: "invalid_target",
-    });
   });
 
   it("rejects Azure snapshot promotion without Crabbox catalog ownership", async () => {
@@ -42875,38 +42879,41 @@ describe("fleet lease identity and idle", () => {
     ).toBeUndefined();
   });
 
-  it("promotes AWS images with query metadata and no request body", async () => {
-    const storage = new MemoryStorage();
-    const fleet = testFleet(storage, {
-      aws: fakeProvider(undefined, {
-        onGetImage(imageID) {
-          return {
-            id: imageID,
-            name: "external-mac1",
-            state: "available",
-            provider: "aws",
-            kind: "aws-ami",
-            region: "us-east-1",
-            resourceID: imageID,
-            architecture: "x86_64_mac",
-          };
-        },
-      }),
-    });
+  it.each(["macos", "mac", " DARWIN ", "osx"])(
+    "promotes AWS images with query target %s and no request body",
+    async (target) => {
+      const storage = new MemoryStorage();
+      const fleet = testFleet(storage, {
+        aws: fakeProvider(undefined, {
+          onGetImage(imageID) {
+            return {
+              id: imageID,
+              name: "external-mac1",
+              state: "available",
+              provider: "aws",
+              kind: "aws-ami",
+              region: "us-east-1",
+              resourceID: imageID,
+              architecture: "x86_64_mac",
+            };
+          },
+        }),
+      });
 
-    const promoted = await fleet.fetch(
-      request(
-        "POST",
-        "/v1/images/ami-query/promote?target=macos&region=us-east-1&serverType=mac1.metal",
-        { headers: { "x-crabbox-admin": "true" } },
-      ),
-    );
+      const promoted = await fleet.fetch(
+        request(
+          "POST",
+          `/v1/images/ami-query/promote?target=${encodeURIComponent(target)}&region=us-east-1&serverType=mac1.metal`,
+          { headers: { "x-crabbox-admin": "true" } },
+        ),
+      );
 
-    expect(promoted.status).toBe(200);
-    expect(storage.value("image:aws:promoted:macos:x86_64_mac:mac1.metal:us-east-1")).toEqual(
-      expect.objectContaining({ id: "ami-query", serverType: "mac1.metal", target: "macos" }),
-    );
-  });
+      expect(promoted.status).toBe(200);
+      expect(storage.value("image:aws:promoted:macos:x86_64_mac:mac1.metal:us-east-1")).toEqual(
+        expect.objectContaining({ id: "ami-query", serverType: "mac1.metal", target: "macos" }),
+      );
+    },
+  );
 
   it("enables Fast Snapshot Restore when promoting an AWS image", async () => {
     const storage = new MemoryStorage();

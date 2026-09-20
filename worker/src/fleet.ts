@@ -151,6 +151,7 @@ import {
   azureLocationFor,
   leaseConfig,
   normalizeArchitecture,
+  parseTarget,
   validCIDRs,
   validatedCIDRs,
   workspaceProviderKeyPrefix,
@@ -20969,7 +20970,7 @@ function mergeAWSImageMetadata(
   image: ProviderImage,
   metadata?: Partial<ProviderImage>,
 ): ProviderImage {
-  const target = normalizeAWSImageTarget(metadata?.target ?? image.target ?? "linux") ?? "linux";
+  const target = parseTarget(metadata?.target ?? image.target ?? "linux") ?? "linux";
   const serverType = metadata?.serverType ?? image.serverType ?? "";
   const result: ProviderImage = {
     ...metadata,
@@ -21049,17 +21050,8 @@ function azureLeaseImageIdentity(
 }
 
 function normalizeAzureImageTarget(value: string | undefined): TargetOS | undefined {
-  switch ((value ?? "").trim().toLowerCase()) {
-    case "":
-    case "linux":
-    case "ubuntu":
-      return "linux";
-    case "windows":
-    case "win":
-      return "windows";
-    default:
-      return undefined;
-  }
+  const target = parseTarget(value ?? "");
+  return target === "macos" ? undefined : target;
 }
 
 function azureImageScopeMismatch(field: string, requested: string, recorded: string): Response {
@@ -21070,25 +21062,6 @@ function azureImageScopeMismatch(field: string, requested: string, recorded: str
     },
     { status: 409 },
   );
-}
-
-function normalizeAWSImageTarget(value: string | undefined): TargetOS | undefined {
-  switch ((value ?? "").trim().toLowerCase()) {
-    case "":
-    case "linux":
-    case "ubuntu":
-      return "linux";
-    case "mac":
-    case "macos":
-    case "darwin":
-    case "osx":
-      return "macos";
-    case "win":
-    case "windows":
-      return "windows";
-    default:
-      return undefined;
-  }
 }
 
 function awsImageArchitectureForTarget(target: TargetOS, serverType: string): string {
@@ -30152,7 +30125,7 @@ export class AWSProvider implements CloudProvider {
       : known?.region === historyRegion
         ? known
         : undefined;
-    const target = normalizeAWSImageTarget(
+    const target = parseTarget(
       input.target ?? url.searchParams.get("target") ?? prior?.target ?? "linux",
     );
     if (!target) {

@@ -647,6 +647,12 @@ export function normalizeTailscaleTags(values: string[]): string[] {
 }
 
 function normalizeTarget(value: string): TargetOS {
+  const target = parseTarget(value);
+  if (target) return target;
+  throw new Error(`target must be linux, macos, or windows`);
+}
+
+export function parseTarget(value: string): TargetOS | undefined {
   const normalized = value.trim().toLowerCase();
   if (normalized === "" || normalized === "linux" || normalized === "ubuntu") {
     return "linux";
@@ -662,7 +668,7 @@ function normalizeTarget(value: string): TargetOS {
   if (normalized === "win" || normalized === "windows") {
     return "windows";
   }
-  throw new Error(`target must be linux, macos, or windows`);
+  return undefined;
 }
 
 function normalizeWindowsMode(value: string): WindowsMode {
