@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,7 @@ type lifecycleFakeClient struct {
 	stopDeadline   bool
 	stopContextErr error
 	getProcess     func(context.Context) (Process, error)
+	getSandbox     func(context.Context, string) (Sandbox, error)
 	onGetSandbox   func()
 	onCreate       func()
 	onUpload       func(io.Reader) error
@@ -158,7 +160,10 @@ func (f *lifecycleFakeClient) CreateSandbox(_ context.Context, req CreateSandbox
 	f.sandboxes[id] = sb
 	return sb, nil
 }
-func (f *lifecycleFakeClient) GetSandbox(_ context.Context, id string) (Sandbox, error) {
+func (f *lifecycleFakeClient) GetSandbox(ctx context.Context, id string) (Sandbox, error) {
+	if f.getSandbox != nil {
+		return f.getSandbox(ctx, id)
+	}
 	if f.getErr != nil {
 		return Sandbox{}, f.getErr
 	}
@@ -259,6 +264,159 @@ func (f *lifecycleFakeClient) effectiveProcessStatus() string {
 		return f.processStatus
 	}
 	return "completed"
+}
+
+type statusTestClock struct{ current time.Time }
+
+func (c *statusTestClock) Now() time.Time { return c.current }
+
+func newStatusBackend(t *testing.T) (*backend, *lifecycleFakeClient, Sandbox) {
+	t.Helper()
+	b, fake, _, _, _ := newLifecycleBackend(t)
+	b.cfg.Pond = "test-pond"
+	if err := b.Warmup(context.Background(), core.WarmupRequest{Repo: testRepo(t), RequestedSlug: "status-one"}); err != nil {
+		t.Fatal(err)
+	}
+	sb := fake.sandboxes["sbx_1"]
+	sb.Endpoint = "https://sandbox.example.invalid"
+	return b, fake, sb
+}
+
+func TestStatusPreservesObservationsAndFailures(t *testing.T) {
+	nativeErr := errors.New("native observation failed")
+	for _, tt := range []struct {
+		name, state, wantMessage string
+		wait, advance, cancel    bool
+		badOwnership             bool
+		nativeErr                error
+		wantCode                 int
+	}{
+		{name: "no wait terminal", state: " STOPPED "},
+		{name: "ready before clock deadline and cancellation", state: " RUNNING ", wait: true, advance: true, cancel: true},
+		{name: "waiting terminal", state: "stopped", wait: true, wantCode: 5, wantMessage: `blaxel sandbox sbx_1 entered terminal state "stopped" before becoming ready`},
+		{name: "clock timeout", state: "pending", wait: true, advance: true, wantCode: 5, wantMessage: "timed out waiting for blaxel sandbox sbx_1 to become ready"},
+		{name: "native error", state: "pending", wait: true, nativeErr: nativeErr},
+		{name: "ownership before cancellation", state: "running", wait: true, cancel: true, badOwnership: true, wantCode: 4, wantMessage: `blaxel sandbox "sbx_1" ownership labels do not match its local claim`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			b, fake, sb := newStatusBackend(t)
+			clock := &statusTestClock{current: time.Now()}
+			b.rt.Clock = clock
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sb.Status = tt.state
+			if tt.badOwnership {
+				sb.Labels = nil
+			}
+			calls := 0
+			fake.getSandbox = func(gotCtx context.Context, id string) (Sandbox, error) {
+				calls++
+				if id != sb.ID {
+					t.Fatalf("requested ID = %q, want %q", id, sb.ID)
+				}
+				if !tt.wait {
+					if _, bounded := gotCtx.Deadline(); bounded {
+						t.Fatal("non-waiting observation acquired a deadline")
+					}
+				}
+				if tt.advance {
+					clock.current = clock.current.Add(2 * time.Minute)
+				}
+				if tt.cancel {
+					cancel()
+				}
+				return sb, tt.nativeErr
+			}
+			view, err := b.Status(ctx, core.StatusRequest{ID: "status-one", Wait: tt.wait, WaitTimeout: time.Minute})
+			if calls != 1 {
+				t.Fatalf("observation calls = %d, want 1", calls)
+			}
+			if tt.wantCode != 0 || tt.nativeErr != nil {
+				if !reflect.DeepEqual(view, core.StatusView{}) {
+					t.Fatalf("error returned populated view: %#v", view)
+				}
+				if tt.nativeErr != nil {
+					if !errors.Is(err, tt.nativeErr) {
+						t.Fatalf("error = %v, want native cause", err)
+					}
+				} else if core.ExitCodeForError(err, 1) != tt.wantCode || err == nil || err.Error() != tt.wantMessage {
+					t.Fatalf("error = %v, want code %d and %q", err, tt.wantCode, tt.wantMessage)
+				}
+				return
+			}
+			state := strings.ToLower(strings.TrimSpace(tt.state))
+			want := core.StatusView{
+				ID: "blx_sbx_1", Slug: "status-one", Provider: "blaxel", TargetOS: "linux",
+				State: state, ServerID: "sbx_1", Host: sb.Endpoint, Pond: "test-pond", Network: "public", Ready: tt.wait,
+				Labels: map[string]string{"provider": "blaxel", "lease": "blx_sbx_1", "pond": "test-pond", "state": state},
+			}
+			if err != nil || !reflect.DeepEqual(view, want) {
+				t.Fatalf("view = %#v, error = %v, want %#v", view, err, want)
+			}
+		})
+	}
+}
+
+func TestStatusWaitUsesProviderDefaultAndPolls(t *testing.T) {
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			b, fake, sb := newStatusBackend(t)
+			calls := 0
+			fake.getSandbox = func(ctx context.Context, _ string) (Sandbox, error) {
+				calls++
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) > 5*time.Minute || time.Until(deadline) < 4*time.Minute {
+					t.Fatalf("default deadline = %v, present = %t", deadline, ok)
+				}
+				sb.Status = "running"
+				if calls == 1 {
+					sb.Status = "pending"
+				}
+				return sb, nil
+			}
+			view, err := b.Status(context.Background(), core.StatusRequest{ID: "status-one", Wait: true, WaitTimeout: timeout})
+			if err != nil || !view.Ready || calls != 2 {
+				t.Fatalf("view = %#v, error = %v, calls = %d", view, err, calls)
+			}
+		})
+	}
+}
+
+func TestStatusWaitBoundsBlockedObservation(t *testing.T) {
+	for _, mode := range []string{"own deadline", "parent deadline", "parent cancellation"} {
+		t.Run(mode, func(t *testing.T) {
+			b, fake, _ := newStatusBackend(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			waitTimeout := time.Minute
+			if mode == "own deadline" {
+				waitTimeout = time.Millisecond
+			}
+			if mode == "parent deadline" {
+				var deadlineCancel context.CancelFunc
+				ctx, deadlineCancel = context.WithTimeout(ctx, time.Millisecond)
+				defer deadlineCancel()
+			}
+			fake.getSandbox = func(ctx context.Context, _ string) (Sandbox, error) {
+				if mode == "parent cancellation" {
+					cancel()
+				}
+				<-ctx.Done()
+				return Sandbox{}, errors.New("transport interrupted")
+			}
+			view, err := b.Status(ctx, core.StatusRequest{ID: "status-one", Wait: true, WaitTimeout: waitTimeout})
+			if !reflect.DeepEqual(view, core.StatusView{}) {
+				t.Fatalf("error returned populated view: %#v", view)
+			}
+			if mode == "own deadline" {
+				if core.ExitCodeForError(err, 1) != 5 || err == nil || err.Error() != "timed out waiting for blaxel sandbox sbx_1 to become ready" {
+					t.Fatalf("own deadline error = %v", err)
+				}
+			} else if !errors.Is(err, ctx.Err()) || ctx.Err() == nil {
+				t.Fatalf("parent error = %v, want %v", err, ctx.Err())
+			}
+		})
+	}
 }
 
 func TestWarmupCreatesClaimAndCompletesRemoteLabels(t *testing.T) {
