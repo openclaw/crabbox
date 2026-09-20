@@ -842,11 +842,93 @@ func parallelsMacOSDesktopSetupScript(accountCredentials bool) string {
 `
 }
 
+// The macOS Node handling is its own unit so a test can exercise it directly.
+// Both preparation paths drive this script through /bin/sh while the pinned
+// installer is bash with pipefail, and neither its shell options nor its
+// exit 0 may escape into preparation.
+func parallelsMacOSNodeBaselineStanza() string {
+	return fmt.Sprintf(`# macOS readiness requires Node, so settle it before the gate below. Running
+# ahead of the gate keeps a guest whose crabbox-ready predates the Node checks
+# from exiting early and skipping this forever.
+if command -v sw_vers >/dev/null 2>&1; then
+  if ! PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin sh -c 'node --version >/dev/null 2>&1 && npm --version >/dev/null 2>&1'; then
+    # A runtime the guest user already manages (Homebrew, nvm, asdf) satisfies
+    # readiness, so preserve it rather than downloading over it: an existing
+    # template must not start needing nodejs.org to stay ready.
+    #
+    # Resolve it as that user through bash -lc, matching the probe exactly
+    # rather than the user's default login shell, which reads different rc
+    # files. Never source their login files as root, and keep stdin off these
+    # children -- this whole script arrives on stdin via sudo -n /bin/sh -s, so
+    # anything reading stdin silently eats the rest of it.
+    #
+    # Ask node for its own execPath rather than taking what command -v returns.
+    # An asdf-style shim re-execs through its manager, which is absent from the
+    # PATH crabbox-ready uses, so linking the shim would satisfy the probe's
+    # login shell and then fail the helper; execPath is the binary that shim
+    # ultimately runs, with npm and npx beside it.
+    crabbox_node_preserved=false
+    crabbox_node_bin=$(su - "$user" -c 'bash -lc "node -p process.execPath"' </dev/null 2>/dev/null || true)
+    if [ ! -x "$crabbox_node_bin" ]; then
+      crabbox_node_bin=$(su - "$user" -c 'bash -lc "command -v node"' </dev/null 2>/dev/null || true)
+    fi
+    crabbox_npm_bin=
+    if [ -x "$crabbox_node_bin" ]; then
+      crabbox_npm_bin=${crabbox_node_bin%%/*}/npm
+    fi
+    if [ ! -x "$crabbox_npm_bin" ]; then
+      crabbox_npm_bin=$(su - "$user" -c 'bash -lc "command -v npm"' </dev/null 2>/dev/null || true)
+    fi
+    # Guard each destination on its own. The commands can sit in different
+    # prefixes -- node already at /usr/local/bin with npm only in the user's
+    # login PATH is a healthy template -- and a combined guard would reject
+    # preservation whenever either one already occupies its destination,
+    # downloading over a runtime that already satisfies readiness. If neither
+    # needs linking, the install at /usr/local/bin is the one that just failed
+    # the probe above, so fall through and let the installer replace it.
+    if [ -x "$crabbox_node_bin" ] && [ -x "$crabbox_npm_bin" ] &&
+      { [ "$crabbox_node_bin" != /usr/local/bin/node ] || [ "$crabbox_npm_bin" != /usr/local/bin/npm ]; }; then
+      install -d -m 0755 /usr/local/bin
+      if [ "$crabbox_node_bin" != /usr/local/bin/node ]; then
+        ln -sfn "$crabbox_node_bin" /usr/local/bin/node
+      fi
+      if [ "$crabbox_npm_bin" != /usr/local/bin/npm ]; then
+        ln -sfn "$crabbox_npm_bin" /usr/local/bin/npm
+      fi
+      crabbox_npx_bin=${crabbox_node_bin%%/*}/npx
+      if [ ! -x "$crabbox_npx_bin" ]; then
+        crabbox_npx_bin=$(su - "$user" -c 'bash -lc "command -v npx"' </dev/null 2>/dev/null || true)
+      fi
+      if [ -x "$crabbox_npx_bin" ] && [ "$crabbox_npx_bin" != /usr/local/bin/npx ]; then
+        ln -sfn "$crabbox_npx_bin" /usr/local/bin/npx
+      fi
+      # Only claim preservation if the result actually works in the environment
+      # crabbox-ready runs in. Anything that still needs the guest user's login
+      # context falls through to the pinned installer instead of leaving a
+      # helper that fails while the probe passes.
+      if PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin sh -c 'node --version >/dev/null 2>&1 && npm --version >/dev/null 2>&1'; then
+        crabbox_node_preserved=true
+      fi
+    fi
+    if [ "$crabbox_node_preserved" != true ]; then
+      # No usable runtime anywhere: fall back to the pinned shared installer.
+      crabbox_node_installer="$(mktemp /tmp/crabbox-node-install.XXXXXX)"
+      cat >"$crabbox_node_installer" <<'CRABBOXNODEINSTALL'
+%s
+CRABBOXNODEINSTALL
+      /bin/bash "$crabbox_node_installer" </dev/null || { rm -f "$crabbox_node_installer"; exit 1; }
+      rm -f "$crabbox_node_installer"
+    fi
+  fi
+fi`, sharedMacOSNodeInstall())
+}
+
 func parallelsPOSIXEnsureReadyScript(user, workRoot string, desktop, macOSAccountCredentials bool) string {
 	return fmt.Sprintf(`set -eu
 user=%s
 work_root=%s
 desktop=%t
+%s
 if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1; then
   if [ "$desktop" != true ]; then
     exit 0
@@ -943,8 +1025,11 @@ if command -v sw_vers >/dev/null 2>&1; then
   cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/bin/sh
 set -eu
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 rsync --version >/dev/null
 curl --version >/dev/null
+node --version >/dev/null
+npm --version >/dev/null
 test -w %s
 READY
 else
@@ -961,7 +1046,7 @@ fi
 chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped 2>/dev/null || true
 /usr/local/bin/crabbox-ready
-`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, parallelsMacOSDesktopReadyTest(macOSAccountCredentials), parallelsMacOSDesktopSetupScript(macOSAccountCredentials), shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0])
+`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, parallelsMacOSNodeBaselineStanza(), parallelsMacOSDesktopReadyTest(macOSAccountCredentials), parallelsMacOSDesktopSetupScript(macOSAccountCredentials), shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0])
 }
 
 func parallelsChildCommandEnv(extraEnv []string) []string {
@@ -1269,7 +1354,9 @@ func parallelsHostMaxVMs(cfg Config) int {
 			return host.MaxVMs
 		}
 	}
-	return 0
+	// No fleet entry selected, so this is the direct host. A matched fleet entry
+	// returns above even at zero, so this is not a default for fleet entries.
+	return cfg.Parallels.MaxVMs
 }
 
 func parallelsHostWithinCapacity(cfg Config, vms []ParallelsVM) bool {

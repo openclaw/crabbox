@@ -2,8 +2,13 @@
 
 ## Unreleased
 
+### Features
+
+- Add opt-in direct-host Parallels capacity limits through `parallels.maxVMs` and `CRABBOX_PARALLELS_MAX_VMS`, preserve fleet-entry precedence, and let explicit YAML zero clear inherited limits. [PR 2392](https://github.com/openclaw/crabbox/pull/2392), [Issue 2386](https://github.com/openclaw/crabbox/issues/2386). Thanks @saariuslystoned.
+
 ### Fixes
 
+- Prepare Node and npm before Parallels macOS readiness checks, preserving usable existing runtimes offline and installing the pinned baseline when needed. [PR 2387](https://github.com/openclaw/crabbox/pull/2387), [Issue 2381](https://github.com/openclaw/crabbox/issues/2381). Thanks @saariuslystoned.
 - Avoid spurious SSH-directory creation failures when concurrent leases share fresh local state, while retaining existing directory validation. [PR 2395](https://github.com/openclaw/crabbox/pull/2395). Thanks @saariuslystoned.
 - Enforce Parallels fleet capacity across concurrent clones sharing local state, including differently named entries for the same host and account, while keeping doctor and checkpoint dry-run selection lock-free. [PR 2385](https://github.com/openclaw/crabbox/pull/2385), [Issue 2384](https://github.com/openclaw/crabbox/issues/2384). Thanks @saariuslystoned.
 - Report successful SSH authentication when a readiness check still times out, including real proxy routes, so diagnostics distinguish missing guest readiness from connection or authentication failures. [PR 2391](https://github.com/openclaw/crabbox/pull/2391). Thanks @saariuslystoned.

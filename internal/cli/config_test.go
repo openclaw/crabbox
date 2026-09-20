@@ -10402,6 +10402,51 @@ func TestApplyFileParallelsHostConfig(t *testing.T) {
 	}
 }
 
+func TestParallelsDirectHostMaxVMsConfigLayers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		repo string
+		env  string
+		want int
+	}{
+		{name: "omitted inherits", repo: "{}", want: 4},
+		{name: "explicit zero clears", repo: "{maxVMs: 0}", want: 0},
+		{name: "positive overrides", repo: "{maxVMs: 2}", want: 2},
+		{name: "negative is unlimited", repo: "{maxVMs: -1}", want: -1},
+		{name: "environment zero clears", repo: "{maxVMs: 2}", env: "0", want: 0},
+		{name: "environment positive overrides", repo: "{maxVMs: 2}", env: "3", want: 3},
+		{name: "environment negative is unlimited", repo: "{maxVMs: 2}", env: "-1", want: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			var user, repo fileConfig
+			if err := yaml.Unmarshal([]byte("parallels: {maxVMs: 4}"), &user); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, user, true); err != nil {
+				t.Fatal(err)
+			}
+			if err := yaml.Unmarshal([]byte("parallels: "+tc.repo), &repo); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyFileConfigWithTrust(&cfg, repo, false); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_PARALLELS_MAX_VMS", tc.env)
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Parallels.MaxVMs != tc.want {
+				t.Fatalf("maxVMs=%d, want %d", cfg.Parallels.MaxVMs, tc.want)
+			}
+			if tc.want <= 0 && !parallelsHostWithinCapacity(cfg, []ParallelsVM{{Name: "crabbox-existing"}}) {
+				t.Fatal("nonpositive direct-host maxVMs should be unlimited")
+			}
+		})
+	}
+}
+
 func TestParallelsBootstrapKeyRequiresTrustedFileOrExplicitEnvironment(t *testing.T) {
 	file := fileConfig{Parallels: &fileParallelsConfig{BootstrapKey: "/Users/build/.ssh/bootstrap"}}
 
