@@ -541,6 +541,64 @@ func TestParallelsCandidateConfigsFiltersTarget(t *testing.T) {
 	}
 }
 
+func TestSelectParallelsFleetConfigAppliesDirectHostMaxVMs(t *testing.T) {
+	const twoCrabboxVMs = `[
+			{"ID":"vm1","Name":"crabbox-cbx-aaaaaaaaaaaa-one","State":"running"},
+			{"ID":"vm2","Name":"crabbox-cbx-bbbbbbbbbbbb-two","State":"running"}
+		]`
+	for _, tc := range []struct {
+		name      string
+		maxVMs    int
+		hosts     []ParallelsHostConfig
+		wantHost  string
+		wantAtCap bool
+	}{
+		{name: "direct host at limit", maxVMs: 1, wantAtCap: true},
+		{name: "direct host below limit", maxVMs: 3, wantHost: "mac.example"},
+		{name: "direct host unset stays unlimited", wantHost: "mac.example"},
+		{
+			name:     "fleet limit wins over top level",
+			maxVMs:   1,
+			hosts:    []ParallelsHostConfig{{Name: "fleet", Host: "fleet.example", MaxVMs: 5}},
+			wantHost: "fleet.example",
+		},
+		{
+			name:      "fleet limit applies over higher top level",
+			maxVMs:    9,
+			hosts:     []ParallelsHostConfig{{Name: "fleet", Host: "fleet.example", MaxVMs: 1}},
+			wantAtCap: true,
+		},
+		{
+			name:     "top level is not a fleet default",
+			maxVMs:   1,
+			hosts:    []ParallelsHostConfig{{Name: "fleet", Host: "fleet.example"}},
+			wantHost: "fleet.example",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = parallelsProvider
+			cfg.Parallels.Host = "mac.example"
+			cfg.Parallels.MaxVMs = tc.maxVMs
+			cfg.Parallels.Hosts = tc.hosts
+			runner := &parallelsFakeRunner{stdout: twoCrabboxVMs}
+			selected, err := SelectParallelsFleetConfig(context.Background(), cfg, runner, "")
+			if tc.wantAtCap {
+				if err == nil || !strings.Contains(err.Error(), "is at maxVMs capacity") {
+					t.Fatalf("err=%v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err=%v", err)
+			}
+			if selected.Parallels.Host != tc.wantHost {
+				t.Fatalf("host=%q want %q", selected.Parallels.Host, tc.wantHost)
+			}
+		})
+	}
+}
+
 func TestParallelsEnsureGuestReadyInstallsPOSIXReadyScript(t *testing.T) {
 	runner := &parallelsFakeRunner{}
 	client := NewParallelsClient(Config{}, runner)

@@ -1269,7 +1269,9 @@ func parallelsHostMaxVMs(cfg Config) int {
 			return host.MaxVMs
 		}
 	}
-	return 0
+	// No fleet entry selected, so this is the direct host. A matched fleet entry
+	// returns above even at zero, so this is not a default for fleet entries.
+	return cfg.Parallels.MaxVMs
 }
 
 func parallelsHostWithinCapacity(cfg Config, vms []ParallelsVM) bool {

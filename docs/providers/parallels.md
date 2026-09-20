@@ -200,6 +200,11 @@ destination explicitly with `--parallels-host` or `CRABBOX_PARALLELS_HOST`.
 Absolute, missing, and repository-escaping key paths require explicit host
 approval.
 
+An explicit `--parallels-host` or `CRABBOX_PARALLELS_HOST` is a direct-host
+override, so it discards any configured `hosts` fleet along with those entries'
+`maxVMs` limits. Set `parallels.maxVMs` or `CRABBOX_PARALLELS_MAX_VMS` to cap
+concurrent VMs on the overriding host.
+
 ### Fleet hosts
 
 ```yaml
@@ -244,6 +249,22 @@ directories or machines driving the same Parallels host still race against each
 other. Advisory queries such as `doctor` and `checkpoint fork --dry-run` neither
 take a reservation nor write capacity-lock state.
 
+A top-level `parallels.maxVMs` caps concurrent Crabbox VMs on a direct host:
+
+```yaml
+provider: parallels
+parallels:
+  host: mac-studio.tailnet
+  maxVMs: 4
+```
+
+Precedence: a selected fleet host's own `maxVMs` always wins, and the top-level
+`parallels.maxVMs` applies only when no fleet entry was selected (the direct-host
+path) rather than acting as a default for fleet entries that omit `maxVMs`.
+Leaving it unset means no limit, which is the default. A direct host with this
+limit set takes the same reservation as a limited fleet host, so concurrent
+fan-out cannot exceed it.
+
 ### Environment variables
 
 ```text
@@ -262,6 +283,7 @@ CRABBOX_PARALLELS_USER
 CRABBOX_PARALLELS_PASSWORD
 CRABBOX_PARALLELS_WORK_ROOT
 CRABBOX_PARALLELS_STARTUP_TIMEOUT
+CRABBOX_PARALLELS_MAX_VMS
 ```
 
 Provider flags mirror the same fields (`--parallels-source`,
