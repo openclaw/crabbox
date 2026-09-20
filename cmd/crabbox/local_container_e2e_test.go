@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -272,8 +273,12 @@ func testLocalContainerConcurrentCLIWarmups(t *testing.T, image string) {
 			t.Fatal(err)
 		}
 		info, err := os.Stat(key)
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-			t.Fatalf("CLI did not create private key for %s: %v", id, err)
+		if err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("CLI did not create SSH key for %s: %v", id, err)
+		}
+		// Windows privacy is ACL-based, covered by the native lease tests.
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+			t.Fatalf("CLI did not create a private POSIX key for %s", id)
 		}
 		for _, args := range [][]string{
 			{"run", "--provider", "local-container", "--id", id, "--no-sync", "--", "true"},

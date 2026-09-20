@@ -172,6 +172,7 @@ for (const scenario of [
   { name: "Go fails after a passing test event", actions: ["run", "pass"], concurrency: ["run", "pass"], exit: 1 },
   { name: "missing concurrency coverage", actions: ["run", "pass"] },
   { name: "skipped concurrency coverage", actions: ["run", "pass"], concurrency: ["run", "skip"] },
+  { name: "concurrency skip after pass", actions: ["run", "pass"], concurrency: ["run", "pass", "skip"] },
 ]) {
   test(`native lifecycle gate: ${scenario.name}`, (t) => {
     const marker = "      - name: Verify native local-container lifecycle and cleanup\n";
