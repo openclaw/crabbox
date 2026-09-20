@@ -84,6 +84,11 @@ For macOS templates, use a user with SSH login permission and a writable
 templates, configure OpenSSH Server and PowerShell. For Windows WSL2 templates,
 make sure `wsl.exe` works for the SSH user.
 
+macOS preparation checks for a local listener on the configured SSH port or an
+SSH fallback port, even when the template already has a readiness helper. This
+checks listener availability only; Crabbox still requires authenticated SSH
+readiness before accepting the lease. Linux preparation is unchanged.
+
 macOS readiness requires working `node` and `npm`, so a template does not have to
 ship them. Guest preparation settles the baseline before it checks
 `/usr/local/bin/crabbox-ready`, which means templates that already carry a
@@ -331,6 +336,9 @@ Provider flags mirror the same fields (`--parallels-source`,
 `--parallels-source-snapshot`, `--parallels-template`, `--parallels-host`, and
 so on) and never carry passwords. The direct-host `maxVMs` setting is available
 only through YAML and `CRABBOX_PARALLELS_MAX_VMS`, not a command-line flag.
+
+`crabbox config show` displays the loaded direct-host setting as `max_vms`
+(`parallels.maxVMs` in JSON), independently of each fleet entry's own limit.
 
 ## Checkpoints
 

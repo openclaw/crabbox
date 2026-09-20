@@ -671,9 +671,8 @@ func TestParallelsEnsureGuestReadyVerifiesMacOSSSHListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(runner.lastReq.Args, "\n")
-	// The readiness helper must prove sshd is actually serving. Every launchctl
-	// call above it is intentionally non-fatal, so without this the guest can be
-	// declared ready with no listener at all.
+	// Best-effort launchctl calls do not establish listener availability.
+	// Authenticated SSH readiness remains a separate, later check.
 	for _, want := range []string{
 		"nc -z 127.0.0.1",
 		"ssh_ready=1",

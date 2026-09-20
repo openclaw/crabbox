@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -435,5 +436,101 @@ func TestUseLeaseKnownHostsFailsClosedWhenDirectoryCannotBePrepared(t *testing.T
 	}
 	if target.KnownHostsFile != "unchanged" {
 		t.Fatalf("KnownHostsFile changed after preparation failure: %q", target.KnownHostsFile)
+	}
+}
+
+// Creating the per-lease SSH directories is a check-then-create: each component
+// is Lstat'd and then made only when it is missing. Concurrent first-time
+// callers therefore race, and the loser used to fail on EEXIST. An existing
+// component is validated exactly like one this call created, so losing the race
+// is not a reason to fail.
+func TestEnsureLeaseSSHDirectoriesToleratesConcurrentCreation(t *testing.T) {
+	root := t.TempDir()
+	prepareLeaseSSHTestStateRoot(t, root)
+	t.Setenv("XDG_STATE_HOME", root)
+
+	const workers = 8
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- ensureLeaseSSHDirectories([]string{"crabbox", "testboxes", fmt.Sprintf("cbx_00000000000%d", i)})
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent lease SSH directory creation: %v", err)
+		}
+	}
+}
+
+// This fixture checks existing-component validation, not a replacement race.
+func TestEnsureLeaseSSHDirectoriesRefusesSymlinkComponent(t *testing.T) {
+	root := t.TempDir()
+	prepareLeaseSSHTestStateRoot(t, root)
+	t.Setenv("XDG_STATE_HOME", root)
+	if err := ensureLeaseSSHDirectories([]string{"crabbox", "testboxes"}); err != nil {
+		t.Fatal(err)
+	}
+	testboxes := filepath.Join(root, "crabbox", "testboxes")
+	elsewhere := filepath.Join(root, "elsewhere")
+	if err := os.MkdirAll(elsewhere, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(testboxes, "cbx_abcdef123456")); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink fixture unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	err := ensureLeaseSSHDirectories([]string{"crabbox", "testboxes", "cbx_abcdef123456"})
+	if err == nil || !strings.Contains(err.Error(), "unsafe path component") {
+		t.Fatalf("symlink component err=%v, want an unsafe path component refusal", err)
+	}
+}
+
+// A plain file where a lease directory belongs is refused too, so tolerating a
+// lost create race never admits a non-directory.
+func TestEnsureLeaseSSHDirectoriesRefusesFileComponent(t *testing.T) {
+	root := t.TempDir()
+	prepareLeaseSSHTestStateRoot(t, root)
+	t.Setenv("XDG_STATE_HOME", root)
+	if err := ensureLeaseSSHDirectories([]string{"crabbox", "testboxes"}); err != nil {
+		t.Fatal(err)
+	}
+	occupied := filepath.Join(root, "crabbox", "testboxes", "cbx_abcdef123456")
+	if err := os.WriteFile(occupied, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := ensureLeaseSSHDirectories([]string{"crabbox", "testboxes", "cbx_abcdef123456"})
+	if err == nil || !strings.Contains(err.Error(), "unsafe path component") {
+		t.Fatalf("file component err=%v, want an unsafe path component refusal", err)
+	}
+}
+
+func TestWalkDirectoryPathToleratesConcurrentCreation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "missing", "parent", "state")
+	const workers = 8
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	for range workers {
+		go func() {
+			<-start
+			errs <- walkDirectoryPathWithoutSymlinks(path, root, true)
+		}()
+	}
+	close(start)
+	for range workers {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent missing-parent creation: %v", err)
+		}
 	}
 }

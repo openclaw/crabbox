@@ -123,7 +123,8 @@ func ensureLeaseSSHDirectories(components []string) error {
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) {
-			if err := createPrivateSSHTransportDirectory(current); err != nil {
+			// A concurrent caller may win creation; validate its result below.
+			if err := createPrivateSSHTransportDirectory(current); err != nil && !errors.Is(err, os.ErrExist) {
 				return Exit(2, "create private lease SSH directory: %v", err)
 			}
 			info, err = os.Lstat(current)
@@ -212,7 +213,8 @@ func walkDirectoryPathWithoutSymlinks(path, boundary string, create bool) error 
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) && create {
-			if err := os.Mkdir(current, 0o700); err != nil {
+			// A concurrent caller may win creation; validate its result below.
+			if err := os.Mkdir(current, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 				return err
 			}
 			info, err = os.Lstat(current)
