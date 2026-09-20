@@ -332,6 +332,9 @@ Provider flags mirror the same fields (`--parallels-source`,
 so on) and never carry passwords. The direct-host `maxVMs` setting is available
 only through YAML and `CRABBOX_PARALLELS_MAX_VMS`, not a command-line flag.
 
+`crabbox config show` displays the loaded direct-host setting as `max_vms`
+(`parallels.maxVMs` in JSON), independently of each fleet entry's own limit.
+
 ## Checkpoints
 
 Native Parallels checkpoints are backed by Parallels snapshots:
