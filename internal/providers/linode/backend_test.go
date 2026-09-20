@@ -1606,12 +1606,13 @@ func TestAmbiguousCreatePersistsRecoveryClaimAndRetainsKey(t *testing.T) {
 func TestRollbackCleanupClaimResolvesWithSnapshotAndReleases(t *testing.T) {
 	api := &fakeLinodeAPI{deleteErr: errors.New("rollback delete failed")}
 	backend := newTestBackend(t, api)
+	cause := core.Exit(5, "timed out waiting for SSH during bootstrap")
 	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
-		return errors.New("bootstrap failed")
+		return cause
 	}
 	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback"})
-	if err == nil || !strings.Contains(err.Error(), "rollback delete failed") {
-		t.Fatalf("Acquire err=%v", err)
+	if !errors.Is(err, cause) || !errors.Is(err, api.deleteErr) || len(api.createRequests) != 1 {
+		t.Fatalf("Acquire err=%v creates=%d", err, len(api.createRequests))
 	}
 	claim, exists, err := core.ResolveLeaseClaimForProvider("rollback", providerName)
 	if err != nil || !exists || claim.Labels["recovery"] != "rollback-cleanup" || claim.Revision == "" {
@@ -1620,6 +1621,9 @@ func TestRollbackCleanupClaimResolvesWithSnapshotAndReleases(t *testing.T) {
 	keyPath, err := core.TestboxKeyPath(claim.LeaseID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("stored key missing after rollback failure: %v", err)
 	}
 	api.deleteErr = nil
 	resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true})
@@ -1641,6 +1645,108 @@ func TestRollbackCleanupClaimResolvesWithSnapshotAndReleases(t *testing.T) {
 	}
 	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stored key retained after rollback cleanup: %v", err)
+	}
+}
+
+func TestAcquireRollbackFinalizesSSHArtifacts(t *testing.T) {
+	for _, artifactFailure := range []bool{false, true} {
+		t.Run(strconv.FormatBool(artifactFailure), func(t *testing.T) {
+			api := &fakeLinodeAPI{}
+			backend := newTestBackend(t, api)
+			cause := errors.New("synthetic readiness failure")
+			if artifactFailure {
+				cause = core.Exit(5, "timed out waiting for SSH during bootstrap")
+			}
+			var leaseID, dir string
+			backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+				leaseID = labelsFromTags(api.created[0].Tags)["lease"]
+				keyPath, err := core.TestboxKeyPath(leaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				dir = filepath.Dir(keyPath)
+				if artifactFailure {
+					if err := os.RemoveAll(dir); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(dir, []byte("synthetic cleanup obstruction"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(filepath.Join(dir, "known_hosts"), []byte("synthetic host trust\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return cause
+			}
+			_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback-artifacts"})
+			if !errors.Is(err, cause) || len(api.createRequests) != 1 || len(api.deleted) != 1 {
+				t.Fatalf("Acquire err=%v creates=%d deletes=%v", err, len(api.createRequests), api.deleted)
+			}
+			claim, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID)
+			if readErr != nil || exists != artifactFailure {
+				t.Fatalf("claim exists=%v err=%v", exists, readErr)
+			}
+			if artifactFailure {
+				if !strings.Contains(err.Error(), "remove SSH connection artifacts") || claim.Labels["recovery"] != "rollback-cleanup" {
+					t.Fatalf("err=%v claim=%#v", err, claim)
+				}
+				if err := os.Remove(dir); err != nil {
+					t.Fatal(err)
+				}
+				resolved, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshot, snapshotExists, set := core.ServerLeaseClaimSnapshot(resolved.Server)
+				if !set || !snapshotExists || !reflect.DeepEqual(snapshot, claim) {
+					t.Fatalf("retry snapshot=%#v exists=%v set=%v", snapshot, snapshotExists, set)
+				}
+				if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
+					t.Fatal(err)
+				}
+				if len(api.deleted) != 1 {
+					t.Fatalf("remote deletion repeated for absent instance: %v", api.deleted)
+				}
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
+				t.Fatalf("claim retained after cleanup: exists=%v err=%v", exists, err)
+			}
+			if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("SSH connection artifacts retained: %v", err)
+			}
+		})
+	}
+}
+
+func TestAcquireRollbackPreservesCompetingClaim(t *testing.T) {
+	api := &fakeLinodeAPI{}
+	backend := newTestBackend(t, api)
+	cause := core.Exit(5, "timed out waiting for SSH during bootstrap")
+	var expected core.LeaseClaim
+	var keyPath string
+	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+		server := serverFromLinode(api.created[0], backend.Cfg)
+		leaseID := server.Labels["lease"]
+		var err error
+		expected, err = core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, "competing-claim", backend.Cfg, server, core.SSHTarget{}, t.TempDir(), backend.Cfg.IdleTimeout, false, core.LeaseClaim{}, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyPath, err = core.TestboxKeyPath(leaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cause
+	}
+	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback-conflict"})
+	if !errors.Is(err, cause) || !strings.Contains(err.Error(), "persist linode rollback cleanup claim") || len(api.createRequests) != 1 || len(api.deleted) != 1 {
+		t.Fatalf("Acquire err=%v creates=%d deletes=%v", err, len(api.createRequests), api.deleted)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(expected.LeaseID)
+	if err != nil || !exists || !reflect.DeepEqual(claim, expected) {
+		t.Fatalf("competing claim=%#v exists=%v err=%v", claim, exists, err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("competing claim SSH key removed: %v", err)
 	}
 }
 

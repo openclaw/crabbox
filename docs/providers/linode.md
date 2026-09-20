@@ -164,6 +164,12 @@ credentials and host-trust files before retiring the local claim, under the same
 unchanged-claim lock. Provider or SSH-artifact cleanup failures retain the claim
 for retry; a retry after successful instance deletion only finalizes local state.
 
+Failed acquisition uses the same cleanup sequence after recording an exact
+recovery claim. Incomplete cleanup is reported alongside the acquisition error
+and prevents a fresh allocation retry. If another claim already exists, rollback
+still deletes the instance created by this attempt, but preserves that claim and
+the SSH files instead of replacing or retiring another owner's local state.
+
 Heartbeat and Tailscale metadata updates require the same exact account- and
 instance-bound local claim. Crabbox holds the claim lock while updating Linode
 tags, rejects replaced or stale claim snapshots, preserves the existing idle
