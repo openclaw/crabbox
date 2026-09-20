@@ -512,26 +512,28 @@ func (b *backend) cleanupInstance(ctx context.Context, cfg core.Config, inst tar
 	})
 }
 
+func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	name := instanceNameFromClaim(claim)
+	root := claim.Labels["tart_storage"]
+	if lease.LeaseID == "" || lease.LeaseID != claim.LeaseID || lease.Server.Provider != providerName || lease.Server.CloudID != name || lease.Server.Name != name || lease.Server.ImmutableID != claim.CloudImmutableID || lease.Server.Labels["instance"] != name || lease.Server.Labels["tart_storage"] != root {
+		return core.Exit(4, "tart lease %s touch identity does not match its claim", lease.LeaseID)
+	}
+	if _, err := tartCleanupBinding(claim, name, root); err != nil {
+		return core.Exit(4, "tart lease %s cannot authorize touch: %v", lease.LeaseID, err)
+	}
+	if err := verifyTartVMIdentity(name, root, claim.CloudImmutableID); err != nil {
+		return core.Exit(4, "tart lease %s cannot authorize touch: %v", lease.LeaseID, err)
+	}
+	return nil
+}
+
 func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
-		Provider: providerName,
-		Authorize: func(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			name := instanceNameFromClaim(claim)
-			root := claim.Labels["tart_storage"]
-			if lease.LeaseID == "" || lease.LeaseID != claim.LeaseID || lease.Server.Provider != providerName || lease.Server.CloudID != name || lease.Server.Name != name || lease.Server.ImmutableID != claim.CloudImmutableID || lease.Server.Labels["instance"] != name || lease.Server.Labels["tart_storage"] != root {
-				return core.Exit(4, "tart lease %s touch identity does not match its claim", lease.LeaseID)
-			}
-			if _, err := tartCleanupBinding(claim, name, root); err != nil {
-				return core.Exit(4, "tart lease %s cannot authorize touch: %v", lease.LeaseID, err)
-			}
-			if err := verifyTartVMIdentity(name, root, claim.CloudImmutableID); err != nil {
-				return core.Exit(4, "tart lease %s cannot authorize touch: %v", lease.LeaseID, err)
-			}
-			return nil
-		},
+		Provider:  providerName,
+		Authorize: b.AuthorizeStatusTouchClaim,
 		Prepare: func(claim core.LeaseClaim) (map[string]string, time.Time) {
 			now := core.ClockNow(b.rt.Clock).UTC()
 			labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(tartClaimLifecycleLabels(claim), b.configForRun(), req.State, now, req.IdleTimeoutOverride)
