@@ -1412,3 +1412,11 @@ Before landing a new backend:
 - [Authoring a provider](features/provider-authoring.md): step-by-step guide.
 - [Provider Reference](providers/README.md): the full provider catalog.
 - [Concepts](concepts.md): how providers fit the lease/run model.
+
+### Existing desktop admission
+
+`DesktopLeaseCapabilityProvider.DesktopLeaseWithoutLabel` can admit an existing
+macOS desktop without a creation-time desktop label. The provider owns the exact
+resource/claim checks; core retains the macOS gate and the existing coordinator
+fallback. Returning an error stops admission. An allowance does not set the
+lease's desktop label or bypass SSH/RFB authentication and readiness checks.
