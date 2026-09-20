@@ -148,7 +148,8 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 			// This attempt owns the new instance, but not a competing claim or its SSH files.
 			cleanupErr = errors.Join(claimErr, rollbackLinodeAcquire(client, created.ID))
 		} else {
-			cleanupErr = shared.RemoveSSHLeaseClaimAfter(claim, func() error {
+			// Rollback outlives acquisition; its provider timeout starts after admission.
+			cleanupErr = shared.RemoveSSHLeaseClaimAfter(context.Background(), claim, func() error {
 				return rollbackLinodeAcquire(client, created.ID)
 			})
 		}
@@ -807,7 +808,7 @@ func (b *linodeLeaseBackend) deleteServer(ctx context.Context, _ core.Config, se
 		}
 		return client.DeleteLinode(ctx, item.ID)
 	}
-	if err := shared.RemoveSSHLeaseClaimAfter(expectedClaim, action); err != nil {
+	if err := shared.RemoveSSHLeaseClaimAfter(ctx, expectedClaim, action); err != nil {
 		return fmt.Errorf("finalize linode cleanup claim: %w", err)
 	}
 	return nil

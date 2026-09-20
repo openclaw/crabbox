@@ -48,6 +48,13 @@ type ProviderSSHTargetConfigurer interface {
 	ConfigureSSHTarget(target *SSHTarget, readyCommand string)
 }
 
+// DesktopLeaseCapabilityProvider admits an existing macOS desktop without a
+// creation-time desktop label. Providers must verify ownership; normal SSH/RFB
+// authentication and desktop readiness checks still apply afterward.
+type DesktopLeaseCapabilityProvider interface {
+	DesktopLeaseWithoutLabel(cfg Config, server Server, leaseID string) (bool, error)
+}
+
 // ProviderArchitectureCapability owns admission of the complete target/mode/
 // architecture tuple (including amd64), within ProviderSpec.Targets. Providers
 // without this capability retain core's managed architecture restrictions.

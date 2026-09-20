@@ -105,8 +105,14 @@ func enforceManagedLeaseCapabilities(cfg Config, server Server, leaseID string) 
 	if isStaticProvider(cfg.Provider) || server.Provider == staticProvider {
 		return nil
 	}
-	if cfg.Desktop && !labelBool(server.Labels["desktop"]) && !macOSScreenSharingLease(cfg, server) {
-		return Exit(2, "lease %s was not created with desktop=true; warm a new lease with --desktop", leaseID)
+	if cfg.Desktop && !labelBool(server.Labels["desktop"]) {
+		ok, err := macOSScreenSharingLease(cfg, server, leaseID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return Exit(2, "lease %s was not created with desktop=true; warm a new lease with --desktop", leaseID)
+		}
 	}
 	if cfg.Desktop {
 		requestedDesktopEnv := normalizedDesktopEnv(cfg.DesktopEnv)
@@ -123,16 +129,24 @@ func enforceManagedLeaseCapabilities(cfg Config, server Server, leaseID string) 
 	return nil
 }
 
-func macOSScreenSharingLease(cfg Config, server Server) bool {
+func macOSScreenSharingLease(cfg Config, server Server, leaseID string) (bool, error) {
 	if cfg.TargetOS != targetMacOS && !strings.EqualFold(server.Labels["target"], targetMacOS) {
-		return false
+		return false, nil
 	}
 	providerName := firstNonBlank(server.Provider, cfg.Provider)
 	if providerName == "" {
-		return true
+		return true, nil
 	}
 	provider, err := ProviderFor(providerName)
-	return err != nil || provider.Spec().Coordinator != CoordinatorNever
+	if err != nil {
+		return true, nil
+	}
+	if capability, ok := provider.(DesktopLeaseCapabilityProvider); ok {
+		if allowed, err := capability.DesktopLeaseWithoutLabel(cfg, server, leaseID); err != nil || allowed {
+			return allowed, err
+		}
+	}
+	return provider.Spec().Coordinator != CoordinatorNever, nil
 }
 
 func labelBool(value string) bool {

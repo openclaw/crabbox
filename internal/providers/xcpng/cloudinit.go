@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/fat16"
 )
 
 type xcpNgCloudInitPayload struct {
@@ -444,13 +444,17 @@ func isoMediaLabels(base map[string]string) map[string]string {
 }
 
 func buildConfigDriveImage(payload xcpNgCloudInitPayload) ([]byte, error) {
-	files := []shared.FATFile{
+	files := []fat16.File{
 		{Name: "user-data", Data: []byte(payload.UserData)},
 		{Name: "meta-data", Data: []byte(payload.MetaData)},
 	}
 	return buildFAT16Image("cidata", files)
 }
 
-func buildFAT16Image(label string, files []shared.FATFile) ([]byte, error) {
-	return shared.BuildFAT16Image(label, files, "CRAB%04dTXT", "config-drive")
+func buildFAT16Image(label string, files []fat16.File) ([]byte, error) {
+	image, err := fat16.Build(label, files, "CRAB%04dTXT")
+	if err != nil {
+		return nil, core.Exit(2, "config-drive %v", err)
+	}
+	return image, nil
 }

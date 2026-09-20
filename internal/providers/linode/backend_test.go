@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -945,6 +946,76 @@ func TestClaimUpdateBlocksDuringDeleteThenFailsSafely(t *testing.T) {
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v", exists, err)
+	}
+}
+
+func TestCanceledReleaseAdmissionPreservesClaimAndKey(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(strconv.FormatBool(missing), func(t *testing.T) {
+			api := &fakeLinodeAPI{}
+			backend := newTestBackend(t, api)
+			lease, err := backend.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "canceled-release"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared, err := backend.prepareCleanupServer(t.Context(), lease.Server)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected, _, _ := core.ServerLeaseClaimSnapshot(prepared)
+			key, err := core.TestboxKeyPath(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if missing {
+				api.getErr = &linodeAPIError{Status: 404}
+			}
+			held, release, ownerDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var ownerErr error
+			var unlock sync.Once
+			go func() {
+				defer close(ownerDone)
+				ownerErr = core.WithDurableLeaseClaimLock(lease.LeaseID, func(*core.LeaseClaim, bool, func() error) error {
+					close(held)
+					<-release
+					return nil
+				})
+			}()
+			defer func() { unlock.Do(func() { close(release) }); <-ownerDone }()
+			select {
+			case <-held:
+			case <-ownerDone:
+				t.Fatal(ownerErr)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			done := make(chan struct{})
+			var releaseErr error
+			go func() {
+				defer close(done)
+				releaseErr = backend.ReleaseLease(ctx, core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: lease.LeaseID, Server: prepared}})
+			}()
+			defer func() { unlock.Do(func() { close(release) }); <-done }()
+			returnedWhileHeld := false
+			select {
+			case <-done:
+				returnedWhileHeld = true
+			case <-time.After(time.Second):
+			}
+			unlock.Do(func() { close(release) })
+			<-ownerDone
+			<-done
+			if ownerErr != nil || !returnedWhileHeld || !errors.Is(releaseErr, context.Canceled) || len(api.deleted) != 0 {
+				t.Fatalf("returned while held=%v release=%v owner=%v deletes=%v", returnedWhileHeld, releaseErr, ownerErr, api.deleted)
+			}
+			current, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+			if err != nil || !exists || !reflect.DeepEqual(current, expected) {
+				t.Fatal("canceled release changed claim")
+			}
+			if _, err := os.Stat(key); err != nil {
+				t.Fatalf("canceled release removed key: %v", err)
+			}
+		})
 	}
 }
 

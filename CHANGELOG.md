@@ -4,11 +4,17 @@
 
 ### Fixes
 
+- Preserve generated Tart SSH credentials when failed-acquisition rollback cannot confirm ownership, delete the VM, or retire its claim; report local artifact-cleanup errors alongside the original failure. [PR 2360](https://github.com/openclaw/crabbox/pull/2360). Thanks @steipete.
+- Honor cancellation while GCP release and cleanup wait for a lease claim lock, preserving state before deletion while still completing local finalization after confirmed deletion. [PR 2361](https://github.com/openclaw/crabbox/pull/2361). Thanks @steipete.
 - Remove generated GCP and Azure SSH files after successful failed-acquisition rollback, preserving them on remote cleanup failure and stopping fresh retries when local cleanup fails. [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
 - Keep Linode lease claims until generated SSH credentials and host-trust files are removed, including failed-acquisition rollback; report cleanup errors, stop fresh allocation retries, and allow safe cleanup retries after instance deletion. [PR 2358](https://github.com/openclaw/crabbox/pull/2358). Thanks @steipete.
 - Allow up to three minutes for GCP acquisition rollback to confirm remote deletion, including after caller cancellation, instead of abandoning the wait after 30 seconds. [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
+- Allow macOS Parallels clones to bootstrap through a trusted SSH image when Tools cannot report the guest, preserving exact DHCP identity and the saved SSH port. [PR 1745](https://github.com/openclaw/crabbox/pull/1745). Thanks @saariuslystoned.
+- Reuse configured Screen Sharing on an exactly owned Parallels macOS clone without a desktop lease label, and wait for authenticated RFB readiness before typing. [PR 1745](https://github.com/openclaw/crabbox/pull/1745). Thanks @saariuslystoned.
 - Bound GCP public-IP discovery to two minutes, including in-flight observations, and stop before querying when the caller has already canceled. [PR 2357](https://github.com/openclaw/crabbox/pull/2357). Thanks @steipete.
+- Support the ASCII Box to Boat rename across CLI discovery, response envelopes, SSH keys, deletion operations, and secret redaction while preserving existing lease identities. [PR 2303](https://github.com/openclaw/crabbox/pull/2303). Thanks @zozo123.
 - Remove generated GCP lease SSH credentials and host-trust files after confirmed instance deletion or absence; retain the exact claim when SSH cleanup fails so cleanup can be retried. [PR 2357](https://github.com/openclaw/crabbox/pull/2357). Thanks @steipete.
+- Build Apple VM cloud-init seed disks directly with the shared FAT16 writer, removing the host MS-DOS mount requirement while preserving the Firecracker and XCP-ng image formats. [PR 2343](https://github.com/openclaw/crabbox/pull/2343). Thanks @steipete.
 
 ## 0.62.0 - 2026-09-18
 
