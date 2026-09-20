@@ -67,6 +67,8 @@ Each source VM should already include:
 - an OpenSSH server listening on `ssh.port`;
 - Crabbox sync tools for the target OS (`git`, `rsync` or archive sync tools,
   and a shell/PowerShell);
+- for macOS, `/bin/bash` plus either a working Node runtime or a writable
+  `/usr/local`, so guest preparation can settle the Node readiness baseline;
 - a known-good power-off snapshot for fast linked clones.
 
 Linked clones require an explicit power-off snapshot. Crabbox rejects linked
@@ -81,6 +83,30 @@ For macOS templates, use a user with SSH login permission and a writable
 `parallels.workRoot`, for example `/Users/<user>/crabbox`. For Windows native
 templates, configure OpenSSH Server and PowerShell. For Windows WSL2 templates,
 make sure `wsl.exe` works for the SSH user.
+
+macOS readiness requires working `node` and `npm`, so a template does not have to
+ship them. Guest preparation settles the baseline before it checks
+`/usr/local/bin/crabbox-ready`, which means templates that already carry a
+readiness helper still receive it. Preparation resolves the runtime the way the
+readiness probe does, in this order:
+
+1. `node` and `npm` already resolve on the standard command PATH: nothing to do.
+2. The guest SSH user's login environment provides them — Homebrew, nvm, asdf or
+   any other user-managed install. Preparation links them into `/usr/local/bin`
+   so the probe, `crabbox-ready` and root all agree, and downloads nothing. The
+   lookup runs as that user, so a template's login setup is never sourced as
+   root.
+3. Neither: preparation installs Node 24.19.0, matching the Linux developer
+   recipe's LTS baseline. Intel and Apple Silicon both use checksum-pinned
+   official `nodejs.org` archives, with versioned installations under
+   `/usr/local/lib/crabbox` and command links in `/usr/local/bin`. Homebrew is
+   not required.
+
+A template that already satisfies readiness therefore keeps working offline: an
+existing runtime is preserved rather than replaced, so a template does not start
+depending on `nodejs.org` to stay ready. Only case 3 reaches the network, and a
+failure there stops preparation with the installer's own error rather than
+leaving the lease to time out at readiness.
 
 ### macOS desktop credentials
 
