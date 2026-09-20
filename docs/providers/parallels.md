@@ -227,6 +227,18 @@ requested target, looks for the requested source VM, and picks the first host
 below its `maxVMs` limit. Host selection applies to `warmup`, `run`,
 `checkpoint fork`, `status`, `list`, `stop`, and `cleanup`.
 
+A host with a `maxVMs` limit counts its live VMs and clones into it under one
+reservation, so concurrent fan-out such as `crabbox shard --count 8` cannot
+exceed the limit: forks that arrive when the host is full fail with exit 5 and
+`host <name> is at maxVMs capacity` instead of cloning. Clones against a limited
+host are therefore serialized against each other, which adds the clone time of
+the forks ahead in the queue. A host with no `maxVMs` has no limit to enforce
+and its forks stay fully parallel.
+
+The reservation is a local file lock, so it bounds forks driven from one
+machine. Two machines driving the same remote Parallels host still race against
+each other.
+
 ### Environment variables
 
 ```text

@@ -47,10 +47,20 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	if source == "" {
 		return core.LeaseTarget{}, core.Exit(2, "provider=parallels requires --parallels-source, --parallels-template, or parallels.source")
 	}
-	selected, err := core.SelectParallelsFleetConfig(ctx, cfg, b.RT.Exec, source)
+	// Hold the host's capacity reservation from the maxVMs count through the clone,
+	// so concurrent forks cannot all pass the gate on the same pre-clone count.
+	selected, releaseCapacity, err := core.ReserveParallelsFleetCapacity(ctx, cfg, b.RT.Exec, source)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	capacityHeld := true
+	releaseCapacityOnce := func() {
+		if capacityHeld {
+			capacityHeld = false
+			releaseCapacity()
+		}
+	}
+	defer releaseCapacityOnce()
 	cfg = selected
 	client := core.NewParallelsClient(cfg, b.RT.Exec)
 	if err := client.ValidateMacOSBootstrapKey(ctx); err != nil {
@@ -93,6 +103,9 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=parallels lease=%s slug=%s host=%s source=%s snapshot=%s clone_mode=%s keep=%v\n",
 		leaseID, slug, parallelsHostName(cfg), source, blank(snapshotID, "-"), blank(cfg.Parallels.CloneMode, "linked"), keep)
 	server, err := client.Clone(ctx, source, snapshotID, leaseID, slug, keep)
+	// The clone now counts against maxVMs for every later reservation, so the rest of
+	// bootstrap does not need to keep other forks waiting.
+	releaseCapacityOnce()
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
