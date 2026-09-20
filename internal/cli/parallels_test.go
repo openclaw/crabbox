@@ -1077,7 +1077,7 @@ func (r parallelsResolveFakeRunner) Run(_ context.Context, req LocalCommandReque
 }
 
 func TestParallelsEnsureReadyInstallsMacOSNodeBaseline(t *testing.T) {
-	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false)
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false, sshPortCandidates("22", nil))
 
 	installer := sharedMacOSNodeInstall()
 	if !strings.Contains(script, installer) {
@@ -1104,7 +1104,7 @@ func TestParallelsEnsureReadyInstallsMacOSNodeBaseline(t *testing.T) {
 // reads stdin silently swallows the remainder of the script -- and the shell
 // still exits 0, so the damage is invisible.
 func TestParallelsEnsureReadyKeepsStdinOffGuestChildren(t *testing.T) {
-	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false)
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false, sshPortCandidates("22", nil))
 	for _, want := range []string{
 		`-c 'bash -lc "command -v node"' </dev/null`,
 		`-c 'bash -lc "command -v npm"' </dev/null`,
@@ -1121,7 +1121,7 @@ func TestParallelsEnsureReadyKeepsStdinOffGuestChildren(t *testing.T) {
 // SSH user's login shell (Homebrew, nvm, asdf). Downloading over the top of that
 // would make a previously working template depend on nodejs.org being reachable.
 func TestParallelsEnsureReadyPreservesUserManagedNode(t *testing.T) {
-	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false)
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false, sshPortCandidates("22", nil))
 
 	for _, want := range []string{
 		`crabbox_node_bin=$(su - "$user" -c 'bash -lc "command -v node"' </dev/null 2>/dev/null || true)`,
@@ -1163,7 +1163,7 @@ func TestParallelsEnsureReadyPreservesUserManagedNode(t *testing.T) {
 
 // The installer stays the fallback for a guest with no runtime at all.
 func TestParallelsEnsureReadyInstallsWhenNoRuntimeExists(t *testing.T) {
-	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false)
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false, sshPortCandidates("22", nil))
 
 	installer := sharedMacOSNodeInstall()
 	idx := strings.Index(script, installer)
@@ -1187,7 +1187,7 @@ func TestParallelsEnsureReadyInstallsWhenNoRuntimeExists(t *testing.T) {
 }
 
 func TestParallelsMacOSReadyScriptMatchesReadinessContract(t *testing.T) {
-	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false)
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false, sshPortCandidates("22", nil))
 
 	macReady := `#!/bin/sh
 set -eu
@@ -1213,7 +1213,7 @@ test -w '/Users/parallels-01/crabbox'
 }
 
 func TestParallelsLinuxReadyScriptUnchangedByNodeBaseline(t *testing.T) {
-	script := parallelsPOSIXEnsureReadyScript("worker", "/work/crabbox", false, false)
+	script := parallelsPOSIXEnsureReadyScript("worker", "/work/crabbox", false, false, sshPortCandidates("22", nil))
 
 	linuxReady := `#!/usr/bin/env bash
 set -euo pipefail

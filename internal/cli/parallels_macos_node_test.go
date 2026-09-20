@@ -101,7 +101,7 @@ func TestParallelsEnsureReadyScriptParsesUnderPOSIXShell(t *testing.T) {
 		t.Skip("requires POSIX shell")
 	}
 	for _, desktop := range []bool{false, true} {
-		script := parallelsPOSIXEnsureReadyScript("guest", "/Users/guest/crabbox", desktop, false)
+		script := parallelsPOSIXEnsureReadyScript("guest", "/Users/guest/crabbox", desktop, false, sshPortCandidates("22", nil))
 		cmd := exec.Command("/bin/sh", "-n")
 		cmd.Stdin = strings.NewReader(script)
 		if out, err := cmd.CombinedOutput(); err != nil {

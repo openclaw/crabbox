@@ -453,7 +453,7 @@ func (c *ParallelsClient) BootstrapMacOSOverSSH(ctx context.Context, ip string, 
 	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 		return Exit(2, "invalid Parallels guest SSH port %q", port)
 	}
-	script := parallelsPOSIXInstallSSHKeyScript(user, publicKey) + "\n" + parallelsPOSIXEnsureReadyScript(user, cfg.WorkRoot, cfg.Desktop, cfg.Parallels.Password != "")
+	script := parallelsPOSIXInstallSSHKeyScript(user, publicKey) + "\n" + parallelsPOSIXEnsureReadyScript(user, cfg.WorkRoot, cfg.Desktop, cfg.Parallels.Password != "", sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
 	args := []string{
 		"/usr/bin/ssh",
 		"-i", bootstrapKey,
@@ -529,7 +529,7 @@ func (c *ParallelsClient) EnsureGuestReady(ctx context.Context, vmID string, cfg
 		workRoot = baseConfig().WorkRoot
 	}
 	desktop := cfg.Desktop
-	result, err := c.prlctl(ctx, nil, "exec", vmID, "/bin/sh", "-lc", parallelsPOSIXEnsureReadyScript(user, workRoot, desktop, cfg.TargetOS == targetMacOS && cfg.Parallels.Password != ""))
+	result, err := c.prlctl(ctx, nil, "exec", vmID, "/bin/sh", "-lc", parallelsPOSIXEnsureReadyScript(user, workRoot, desktop, cfg.TargetOS == targetMacOS && cfg.Parallels.Password != "", sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts)))
 	if err != nil {
 		return commandOutputError("parallels guest prep", result, err)
 	}
@@ -923,13 +923,47 @@ CRABBOXNODEINSTALL
 fi`, sharedMacOSNodeInstall())
 }
 
-func parallelsPOSIXEnsureReadyScript(user, workRoot string, desktop, macOSAccountCredentials bool) string {
+// parallelsShellPortList renders SSH port candidates as quoted shell words for
+// a `for ... in` list. Non-numeric entries are dropped rather than quoted into
+// the guest script, and an empty result falls back to the default SSH port.
+func parallelsShellPortList(ports []string) string {
+	valid := make([]string, 0, len(ports))
+	for _, port := range ports {
+		port = strings.TrimSpace(port)
+		if port == "" {
+			continue
+		}
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			continue
+		}
+		valid = append(valid, port)
+	}
+	if len(valid) == 0 {
+		valid = []string{"22"}
+	}
+	return strings.Join(shellWords(uniqueSSHPorts(valid)), " ")
+}
+
+func parallelsPOSIXEnsureReadyScript(user, workRoot string, desktop, macOSAccountCredentials bool, sshPorts []string) string {
 	return fmt.Sprintf(`set -eu
 user=%s
 work_root=%s
 desktop=%t
+# Only macOS guests gate on this. The Linux branch manages ssh through systemd
+# and is left exactly as it was.
+crabbox_ssh_listening() {
+  if ! command -v sw_vers >/dev/null 2>&1; then
+    return 0
+  fi
+  for port in %s; do
+    if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
 %s
-if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1; then
+if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1 && crabbox_ssh_listening; then
   if [ "$desktop" != true ]; then
     exit 0
   fi
@@ -1031,6 +1065,14 @@ curl --version >/dev/null
 node --version >/dev/null
 npm --version >/dev/null
 test -w %s
+ssh_ready=0
+for port in %s; do
+  if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+    ssh_ready=1
+    break
+  fi
+done
+test "$ssh_ready" -eq 1
 READY
 else
   cat >/usr/local/bin/crabbox-ready <<'READY'
@@ -1046,7 +1088,7 @@ fi
 chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped 2>/dev/null || true
 /usr/local/bin/crabbox-ready
-`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, parallelsMacOSNodeBaselineStanza(), parallelsMacOSDesktopReadyTest(macOSAccountCredentials), parallelsMacOSDesktopSetupScript(macOSAccountCredentials), shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0])
+`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, parallelsShellPortList(sshPorts), parallelsMacOSNodeBaselineStanza(), parallelsMacOSDesktopReadyTest(macOSAccountCredentials), parallelsMacOSDesktopSetupScript(macOSAccountCredentials), shellWords([]string{workRoot})[0], parallelsShellPortList(sshPorts), shellWords([]string{workRoot})[0])
 }
 
 func parallelsChildCommandEnv(extraEnv []string) []string {
