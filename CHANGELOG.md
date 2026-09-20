@@ -1,25 +1,35 @@
 # Changelog
 
-## Unreleased
+## 0.63.0 - 2026-09-20
+
+### Highlights
+
+- **Tenki works with the current CLI and rotating gateway certificates.** Sandbox creation uses supported lifetime flags, and SSH verifies the gateway's certificate authority instead of pinning individual gateway keys.
+- **More reliable macOS VM startup.** Prepared Parallels macOS images can bootstrap without guest Tools, and Apple VM builds cloud-init seed disks without mounting them on the host.
+- **Boat works after the ASCII Box rename.** Updated CLI discovery, response parsing, SSH keys, and cleanup preserve existing Crabbox lease identities.
+- **Safer cancellation and cleanup recovery.** Canceled operations stop waiting for lease locks, while failed deletion or local SSH cleanup retains the state needed for a safe retry.
+
+### Upgrade notes
+
+- Tenki host-authority discovery requires a workspace API key from `tenki onboard` or `TENKI_API_KEY` when the CLI does not report an authoritative trust file. Kept leases use sticky mode with no maximum duration; `warmup` defaults to keeping the lease. Use `--keep=false --ttl 15m` for a bounded test, and explicitly stop the lease afterward: Tenki's maximum duration pauses the sandbox rather than destroying it, and idle-timeout metadata does not enforce native expiry. [PR 2341](https://github.com/openclaw/crabbox/pull/2341).
 
 ### Fixes
 
-- Verify rotating Tenki gateway certificates using authoritative CLI trust or authenticated CA and gateway discovery; restore sandbox creation with current CLI lifetime flags. [PR 2341](https://github.com/openclaw/crabbox/pull/2341). Thanks @francoluxor.
-- Stop canceled terminal cleanup from waiting indefinitely for exact lease-claim locks across Tart, Coder, Modal, Namespace, and related adapters; preserve independent acquisition rollback and existing SSH-key retention policies. [PR 2363](https://github.com/openclaw/crabbox/pull/2363). Thanks @steipete.
-- Let canceled forget-missing cleanup release its operation lock in OpenSandbox, Vercel Sandbox, Crownest, and SuperServe without retiring the claim; preserve durable finalization after successful provider deletion. [PR 2365](https://github.com/openclaw/crabbox/pull/2365). Thanks @steipete.
-- Preserve generated Tart SSH credentials when failed-acquisition rollback cannot confirm ownership, delete the VM, or retire its claim; report local artifact-cleanup errors alongside the original failure. [PR 2360](https://github.com/openclaw/crabbox/pull/2360). Thanks @steipete.
-- Honor cancellation while Lume release and automatic cleanup wait for a lease claim, freeing capacity for other operations while preserving the VM, claim and SSH key before deletion. [PR 2364](https://github.com/openclaw/crabbox/pull/2364). Thanks @steipete.
-- Honor cancellation while GCP release and cleanup wait for a lease claim lock, preserving state before deletion while still completing local finalization after confirmed deletion. [PR 2361](https://github.com/openclaw/crabbox/pull/2361). Thanks @steipete.
-- Remove generated GCP and Azure SSH files after successful failed-acquisition rollback, preserving them on remote cleanup failure and stopping fresh retries when local cleanup fails. [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
-- Keep Linode lease claims until generated SSH credentials and host-trust files are removed, including failed-acquisition rollback; honor terminal cleanup cancellation, report cleanup errors, stop fresh allocation retries, and allow safe cleanup retries after instance deletion. [PR 2358](https://github.com/openclaw/crabbox/pull/2358). Thanks @steipete.
-- Preserve Lume's last successfully published claim when acquisition metadata updates fail, retaining recovery state instead of falling back to unguarded rollback. [PR 2366](https://github.com/openclaw/crabbox/pull/2366). Thanks @steipete.
-- Allow up to three minutes for GCP acquisition rollback to confirm remote deletion, including after caller cancellation, instead of abandoning the wait after 30 seconds. [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
-- Allow macOS Parallels clones to bootstrap through a trusted SSH image when Tools cannot report the guest, preserving exact DHCP identity and the saved SSH port. [PR 1745](https://github.com/openclaw/crabbox/pull/1745). Thanks @saariuslystoned.
-- Reuse configured Screen Sharing on an exactly owned Parallels macOS clone without a desktop lease label, and wait for authenticated RFB readiness before typing. [PR 1745](https://github.com/openclaw/crabbox/pull/1745). Thanks @saariuslystoned.
-- Bound GCP public-IP discovery to two minutes, including in-flight observations, and stop before querying when the caller has already canceled. [PR 2357](https://github.com/openclaw/crabbox/pull/2357). Thanks @steipete.
-- Support the ASCII Box to Boat rename across CLI discovery, response envelopes, SSH keys, deletion operations, and secret redaction while preserving existing lease identities. [PR 2303](https://github.com/openclaw/crabbox/pull/2303). Thanks @zozo123.
-- Remove generated GCP lease SSH credentials and host-trust files after confirmed instance deletion or absence; retain the exact claim when SSH cleanup fails so cleanup can be retried. [PR 2357](https://github.com/openclaw/crabbox/pull/2357). Thanks @steipete.
-- Build Apple VM cloud-init seed disks directly with the shared FAT16 writer, removing the host MS-DOS mount requirement while preserving the Firecracker and XCP-ng image formats. [PR 2343](https://github.com/openclaw/crabbox/pull/2343). Thanks @steipete.
+- Verify Tenki gateway certificates using authoritative CLI trust or authenticated CA and session-scoped gateway discovery. Reject missing or invalid trust without enrolling leaf keys, preserve native Tenki credentials, and restore sandbox creation with supported, mutually exclusive sticky and maximum-duration flags. [PR 2341](https://github.com/openclaw/crabbox/pull/2341). Thanks @francoluxor.
+- Support the ASCII Box to Boat rename across CLI discovery, mixed response envelopes, SSH key selection, deletion operations, and secret redaction while preserving existing provider and lease identities. [PR 2303](https://github.com/openclaw/crabbox/pull/2303). Thanks @zozo123.
+- Let prepared Parallels macOS clones bootstrap through an explicitly trusted host-side SSH key when Tools cannot report or prepare the guest. Match the exact clone's DHCP identity, preserve its SSH port, reuse configured Screen Sharing only on an exactly owned clone, and wait for authenticated RFB readiness before typing. [PR 1745](https://github.com/openclaw/crabbox/pull/1745), [PR 2362](https://github.com/openclaw/crabbox/pull/2362). Thanks @saariuslystoned.
+- Build Apple VM cloud-init seed disks directly with the shared FAT16 writer, removing the host MS-DOS mount requirement while preserving Firecracker and XCP-ng image formats. [PR 2343](https://github.com/openclaw/crabbox/pull/2343). Thanks @steipete.
+- Honor cancellation while terminal cleanup waits for exact lease-claim locks across GCP, Lume, Tart, Coder, Modal, Namespace, and related adapters. Release operation or capacity locks promptly, preserve state before deletion, and retain independent acquisition rollback and durable finalization after confirmed deletion. Apply the same cancellation boundary to explicit forget-missing cleanup in OpenSandbox, Vercel Sandbox, Crownest, and SuperServe. [PR 2361](https://github.com/openclaw/crabbox/pull/2361), [PR 2363](https://github.com/openclaw/crabbox/pull/2363), [PR 2364](https://github.com/openclaw/crabbox/pull/2364), [PR 2365](https://github.com/openclaw/crabbox/pull/2365). Thanks @steipete.
+- Remove generated GCP and Linode SSH credentials and host-trust files before retiring successfully deleted or absent leases. Keep the exact recovery claim if local cleanup fails. Complete local SSH cleanup after successful failed-acquisition rollback for GCP, Azure, and Linode; retain credentials when remote cleanup fails, report local cleanup errors, and stop fresh allocation retries when recovery is incomplete. Linode terminal cleanup also honors cancellation while waiting for the claim lock. [PR 2357](https://github.com/openclaw/crabbox/pull/2357), [PR 2358](https://github.com/openclaw/crabbox/pull/2358), [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
+- Bound GCP public-IP discovery to two minutes, including in-flight observations and caller cancellation. Give failed-acquisition rollback up to three minutes to confirm remote deletion, including after caller cancellation, so slower deletion operations can finish cleanup. [PR 2357](https://github.com/openclaw/crabbox/pull/2357), [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
+- Preserve generated Tart SSH credentials when failed-acquisition rollback cannot confirm ownership, delete the VM, or retire its claim, and report local artifact-cleanup errors alongside the original failure. [PR 2360](https://github.com/openclaw/crabbox/pull/2360). Thanks @steipete.
+- Preserve Lume's last successfully published claim when acquisition metadata updates fail, retaining the exact recovery state instead of falling back to unguarded rollback. [PR 2366](https://github.com/openclaw/crabbox/pull/2366). Thanks @steipete.
+
+### Maintenance
+
+- Consolidate Pond process and artifact preparation, retained sandbox activity updates, and remote sandbox ownership metadata checks while preserving provider-specific policy and existing behavior. [PR 2356](https://github.com/openclaw/crabbox/pull/2356), [PR 2367](https://github.com/openclaw/crabbox/pull/2367), [PR 2368](https://github.com/openclaw/crabbox/pull/2368). Thanks @steipete.
+- Share GCP and Hetzner implicit machine candidate selection in the coordinator while preserving explicit overrides, stored types, profile applicability, and stable ordering. [PR 2369](https://github.com/openclaw/crabbox/pull/2369). Thanks @steipete.
+- Keep Windows staged-launcher test helpers alive until final observation and confirm bounded teardown, removing timing-dependent failures without changing production transport behavior. [PR 2354](https://github.com/openclaw/crabbox/pull/2354), [Issue 2226](https://github.com/openclaw/crabbox/issues/2226). Thanks @steipete.
 
 ## 0.62.0 - 2026-09-18
 
