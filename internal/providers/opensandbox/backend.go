@@ -237,7 +237,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			}, nil
 		},
 		Retained: func(context.Context) error {
-			return b.refreshOpenSandboxLeaseActivity(leaseID)
+			return shared.RefreshRetainedLeaseActivity(leaseID, providerName, b.cfg.IdleTimeout)
 		},
 		Cleanup: func(ctx context.Context) error {
 			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isOpenSandboxNotFound(err) {
@@ -514,27 +514,6 @@ func openSandboxRecoveryExpired(claim core.LeaseClaim, now time.Time) (bool, err
 
 func openSandboxClaimMatchesEndpoint(claim core.LeaseClaim, baseURL string) bool {
 	return strings.HasPrefix(strings.TrimSpace(claim.ProviderScope), openSandboxEndpointScope(baseURL)+"-own-")
-}
-
-func (b *openSandboxBackend) refreshOpenSandboxLeaseActivity(leaseID string) error {
-	claim, err := core.ReadLeaseClaim(leaseID)
-	if err != nil {
-		return err
-	}
-	if claim.LeaseID == "" {
-		return nil
-	}
-	idleTimeout := timeoutOrDefault(b.cfg.IdleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second)
-	return core.ClaimLeaseForRepoProviderScopePond(
-		claim.LeaseID,
-		claim.Slug,
-		providerName,
-		claim.ProviderScope,
-		claim.Pond,
-		claim.RepoRoot,
-		idleTimeout,
-		false,
-	)
 }
 
 func (b *openSandboxBackend) createSandbox(ctx context.Context, api openSandboxClient, repo core.Repo, reclaim bool, requestedSlug string) (string, string, string, sandboxInfo, func(), error) {
@@ -858,13 +837,6 @@ func isTerminalState(state string) bool {
 	default:
 		return false
 	}
-}
-
-func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
-	if primary > 0 {
-		return primary
-	}
-	return fallback
 }
 
 func newSandboxName(repo core.Repo) string {

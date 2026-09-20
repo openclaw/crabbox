@@ -424,3 +424,153 @@ func TestCommitClaimTouchOrdersAuthorizationAndPublication(t *testing.T) {
 		})
 	}
 }
+
+func TestRefreshRetainedLeaseActivityMissingAndMalformed(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const id = "cbx_123456abcdef"
+	if err := RefreshRetainedLeaseActivity(id, "example", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(id); err != nil || exists {
+		t.Fatalf("missing refresh created claim: exists=%v err=%v", exists, err)
+	}
+	state, err := core.CrabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(state, "claims", id+".json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const malformed = "not claim JSON\n"
+	if err := os.WriteFile(path, []byte(malformed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshRetainedLeaseActivity(id, "example", time.Minute); err == nil {
+		t.Fatal("malformed claim read error was swallowed")
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != malformed {
+		t.Fatalf("malformed claim changed: err=%v", err)
+	}
+}
+
+func TestRefreshRetainedLeaseActivityPreservesOwnershipAndIdlePolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		recorded   int
+		configured time.Duration
+		want       int
+	}{
+		{"recorded wins", 180, 9 * time.Minute, 180},
+		{"zero falls back", 180, 0, 180},
+		{"negative falls back", 180, -time.Minute, 180},
+		{"initialize missing", 0, 9 * time.Minute, 540},
+		{"both missing", 0, 0, 0},
+		{"negative configuration without recorded timeout", 0, -time.Minute, 0},
+		{"negative recorded timeout", -10, 0, -10},
+		{"both negative", -10, -time.Minute, -10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const id = "cbx_123456abcdef"
+			server := core.Server{Provider: "example", CloudID: "sandbox-1", Labels: map[string]string{"lease": id, "slug": "alpha", "custom": "preserved"}}
+			target := core.SSHTarget{Host: "192.0.2.1", User: "fixture", Port: "2222"}
+			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(id, "alpha", "example", "scope-one", "pond-one", t.TempDir(), time.Duration(tc.recorded)*time.Second, false, server, target); err != nil {
+				t.Fatal(err)
+			}
+			before, err := core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			old := before
+			old.LastUsedAt = "2000-01-01T00:00:00Z"
+			old.IdleTimeoutSeconds = tc.recorded
+			if err := core.ReplaceLeaseClaimIfUnchanged(id, before, old); err != nil {
+				t.Fatal(err)
+			}
+			before, err = core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := time.Now().UTC().Truncate(time.Second)
+			if err := RefreshRetainedLeaseActivity(id, "example", tc.configured); err != nil {
+				t.Fatal(err)
+			}
+			after, err := core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			used, err := time.Parse(time.RFC3339, after.LastUsedAt)
+			if err != nil || used.Before(started) || used.After(time.Now().UTC()) {
+				t.Fatalf("last used=%q err=%v", after.LastUsedAt, err)
+			}
+			if after.IdleTimeoutSeconds != tc.want {
+				t.Fatalf("idle=%d want=%d", after.IdleTimeoutSeconds, tc.want)
+			}
+			if after.Revision == before.Revision {
+				t.Fatal("refresh did not publish a new revision")
+			}
+			// Core normalizes idle labels when a positive recorded policy exists.
+			before.LastUsedAt, before.Revision, before.IdleTimeoutSeconds = after.LastUsedAt, after.Revision, tc.want
+			if tc.recorded > 0 {
+				before.Labels = CloneLabels(before.Labels)
+				before.Labels["idle_timeout"] = "180"
+				before.Labels["idle_timeout_secs"] = "180"
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("refresh changed ownership or endpoint metadata: before=%#v after=%#v", before, after)
+			}
+		})
+	}
+}
+
+func TestValidateSandboxOwnershipMetadata(t *testing.T) {
+	const provider = "example-sandbox"
+	claim := core.LeaseClaim{LeaseID: "lease-1", ProviderScope: "scope-1"}
+	matching := map[string]string{"crabbox.provider": provider, "crabbox.scope": claim.ProviderScope, "crabbox.claim": claim.LeaseID}
+	for _, tc := range []struct {
+		name, id string
+		metadata map[string]string
+		claim    core.LeaseClaim
+		code     int
+		message  string
+	}{
+		{name: "matching", id: "sandbox-1", metadata: matching, claim: claim},
+		{name: "empty ID precedes metadata mismatch", metadata: nil, claim: claim, code: 5, message: "example-sandbox returned a sandbox without an id"},
+		{name: "empty ID with matching metadata", metadata: matching, claim: claim, code: 5, message: "example-sandbox returned a sandbox without an id"},
+		{name: "nil metadata", id: "sandbox-1", claim: claim, code: 4},
+		{name: "missing provider", id: "sandbox-1", metadata: map[string]string{"crabbox.scope": "scope-1", "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "wrong provider", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": "other", "crabbox.scope": "scope-1", "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "missing scope", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "scope compared exactly", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.scope": "scope-1 ", "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "missing lease", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.scope": "scope-1"}, claim: claim, code: 4},
+		{name: "lease compared exactly", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.scope": "scope-1", "crabbox.claim": " lease-1"}, claim: claim, code: 4},
+		{name: "provider compared exactly", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider + " ", "crabbox.scope": "scope-1", "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "missing keys match empty expectations", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider}},
+		{name: "explicit empty expectations", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.scope": "", "crabbox.claim": ""}},
+		{name: "empty expectations reject nonempty metadata", id: "sandbox-1", metadata: matching, code: 4},
+		{name: "whitespace ID accepted verbatim", id: " \t", metadata: matching, claim: claim},
+		{name: "whitespace ID diagnostic quoted", id: " \t", claim: claim, code: 4, message: "example-sandbox sandbox \" \\t\" ownership metadata does not match its local claim"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateSandboxOwnershipMetadata(provider, tc.id, tc.metadata, tc.claim)
+			if tc.code == 0 {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var exitErr core.ExitError
+			if !core.AsExitError(err, &exitErr) || exitErr.Code != tc.code {
+				t.Fatalf("error=%v, want exit %d", err, tc.code)
+			}
+			want := tc.message
+			if want == "" {
+				want = "example-sandbox sandbox \"sandbox-1\" ownership metadata does not match its local claim"
+			}
+			if err.Error() != want {
+				t.Fatalf("error=%q want=%q", err.Error(), want)
+			}
+		})
+	}
+}

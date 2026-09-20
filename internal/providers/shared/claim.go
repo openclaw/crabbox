@@ -36,6 +36,38 @@ type ScopedLeaseFinishOptions struct {
 	ValidateClaim                   func(core.LeaseClaim) error
 }
 
+// RefreshRetainedLeaseActivity refreshes an existing claim after an admitted
+// delegated run. The caller retains its provider operation lock; this does not
+// perform admission or replace the core's recorded idle-timeout policy.
+func RefreshRetainedLeaseActivity(leaseID, provider string, idleTimeout time.Duration) error {
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		return err
+	}
+	if claim.LeaseID == "" {
+		return nil
+	}
+	if idleTimeout <= 0 {
+		idleTimeout = time.Duration(claim.IdleTimeoutSeconds) * time.Second
+	}
+	return core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, provider, claim.ProviderScope, claim.Pond, claim.RepoRoot, idleTimeout, false)
+}
+
+// ValidateSandboxOwnershipMetadata checks the common remote sandbox markers.
+// Endpoint admission and binding the response ID to a requested resource remain
+// caller-owned; missing metadata keys retain their existing empty-value semantics.
+func ValidateSandboxOwnershipMetadata(provider, sandboxID string, metadata map[string]string, claim core.LeaseClaim) error {
+	if sandboxID == "" {
+		return core.Exit(5, "%s returned a sandbox without an id", provider)
+	}
+	if metadata["crabbox.provider"] != provider ||
+		metadata["crabbox.scope"] != claim.ProviderScope ||
+		metadata["crabbox.claim"] != claim.LeaseID {
+		return core.Exit(4, "%s sandbox %q ownership metadata does not match its local claim", provider, sandboxID)
+	}
+	return nil
+}
+
 // ValidateClaimBinding checks non-empty structural fields and exact required labels, including empty label values.
 func ValidateClaimBinding(claim core.LeaseClaim, want ClaimBinding) error {
 	fields := []struct{ name, got, want string }{
