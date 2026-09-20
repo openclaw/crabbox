@@ -466,6 +466,9 @@ func TestRefreshRetainedLeaseActivityPreservesOwnershipAndIdlePolicy(t *testing.
 		{"negative falls back", 180, -time.Minute, 180},
 		{"initialize missing", 0, 9 * time.Minute, 540},
 		{"both missing", 0, 0, 0},
+		{"negative configuration without recorded timeout", 0, -time.Minute, 0},
+		{"negative recorded timeout", -10, 0, -10},
+		{"both negative", -10, -time.Minute, -10},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("XDG_STATE_HOME", t.TempDir())

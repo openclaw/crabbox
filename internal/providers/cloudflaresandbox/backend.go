@@ -184,7 +184,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			}}, nil
 		},
 		Retained: func(context.Context) error {
-			return b.refreshLeaseActivity(leaseID)
+			return shared.RefreshRetainedLeaseActivity(leaseID, providerName, b.cfg.IdleTimeout)
 		},
 		Cleanup: func(ctx context.Context) error {
 			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isCloudflareSandboxNotFound(err) {
@@ -656,21 +656,6 @@ func validateSandboxOwnership(claim core.LeaseClaim, sb sandboxSummary) error {
 		return core.Exit(4, "cloudflare-sandbox sandbox %q ownership metadata does not match its local claim", sb.ID)
 	}
 	return nil
-}
-
-func (b *backend) refreshLeaseActivity(leaseID string) error {
-	claim, err := core.ReadLeaseClaim(leaseID)
-	if err != nil {
-		return err
-	}
-	if claim.LeaseID == "" {
-		return nil
-	}
-	idleTimeout := b.cfg.IdleTimeout
-	if idleTimeout <= 0 && claim.IdleTimeoutSeconds > 0 {
-		idleTimeout = time.Duration(claim.IdleTimeoutSeconds) * time.Second
-	}
-	return core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, claim.RepoRoot, idleTimeout, false)
 }
 
 func (b *backend) cleanupCreateFailure(ctx context.Context, api bridgeClient, sandboxID string, cause error) error {
