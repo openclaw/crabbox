@@ -6,6 +6,7 @@ import { finished } from "node:stream/promises";
 import type { AsyncMutex } from "../src/async-mutex";
 import { coordinatorRequestQueue, type CoordinatorRequestQueue } from "../src/coordinator-runtime";
 import { runtimeAdapterRelayBodyLimit } from "../src/runtime-adapter-relay";
+import type { AsyncOperationTracker } from "./async-operation-tracker";
 
 export const unauthenticatedRequestBodyBytes = 1024 * 1024;
 export const authenticatedRequestBodyBytes = 16 * 1024 * 1024;
@@ -36,27 +37,6 @@ export function nodeRequestAbortSignal(
       response.off("close", abortResponse);
     },
   };
-}
-
-export class AsyncOperationTracker {
-  private readonly active = new Set<Promise<unknown>>();
-
-  async run<T>(callback: () => Promise<T>): Promise<T> {
-    const operation = callback();
-    this.active.add(operation);
-    try {
-      return await operation;
-    } finally {
-      this.active.delete(operation);
-    }
-  }
-
-  async drain(): Promise<void> {
-    const active = [...this.active];
-    if (active.length === 0) return;
-    await Promise.allSettled(active);
-    return this.drain();
-  }
 }
 
 export type FleetRequestQueue = CoordinatorRequestQueue;

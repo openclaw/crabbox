@@ -18,6 +18,7 @@ import {
   type CoordinatorWebSocketUpgrade,
   type CoordinatorWebSocketUpgradeOptions,
 } from "../src/coordinator-runtime";
+import { AsyncOperationTracker } from "./async-operation-tracker";
 import { PostgresCoordinatorStorage } from "./postgres-storage";
 
 const alarmQueue = "coordinator-alarm";
@@ -52,7 +53,7 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
   private readonly sockets = new Set<NodeWebSocket>();
   private readonly socketAlive = new WeakMap<NodeWebSocket, boolean>();
   private readonly socketOperationTails = new WeakMap<NodeWebSocket, Promise<void>>();
-  private readonly activeSocketOperations = new Set<Promise<unknown>>();
+  private readonly activeSocketOperations = new AsyncOperationTracker();
   private socketClosures?: Promise<void>[];
   private shuttingDown = false;
   private alarmHandler?: () => Promise<void>;
@@ -64,7 +65,7 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
   private wakeHintRun: Promise<void> | undefined;
   private wakeHintPending = false;
   private provisioningScanner?: ReturnType<typeof setInterval>;
-  private readonly maintenance = new Set<Promise<void>>();
+  private readonly maintenance = new AsyncOperationTracker();
 
   constructor(connectionString: string) {
     this.storage = new PostgresCoordinatorStorage(connectionString);
@@ -141,10 +142,10 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
   async stop(): Promise<void> {
     this.beginShutdown();
     await Promise.allSettled(this.socketClosures ?? []);
-    await this.drainSocketOperations();
+    await this.activeSocketOperations.drain();
     await this.alarmRun;
     await this.provisioningRun;
-    await this.drainMaintenance();
+    await this.maintenance.drain();
     if (this.wakeHintRun) await boundedWakeHint(this.wakeHintRun);
     await this.boss.stop({ graceful: true, timeout: 10_000 });
     await this.storage.close();
@@ -315,11 +316,7 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
   }
 
   ownMaintenance(operation: Promise<void>): void {
-    this.maintenance.add(operation);
-    void operation.then(
-      () => this.maintenance.delete(operation),
-      () => this.maintenance.delete(operation),
-    );
+    this.maintenance.track(operation);
   }
 
   private async scanProvisioning(): Promise<void> {
@@ -360,13 +357,6 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     return run;
   }
 
-  private async drainMaintenance(): Promise<void> {
-    while (this.maintenance.size > 0) {
-      // oxlint-disable-next-line eslint/no-await-in-loop -- completion can latch a follow-up maintenance pass.
-      await Promise.allSettled(this.maintenance);
-    }
-  }
-
   private pingSockets(): void {
     for (const socket of this.sockets) {
       if (this.socketAlive.get(socket) === false) {
@@ -402,13 +392,13 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
     const kind = socketAttachmentKind(attachment);
     if (kind === "control" && controlMessageOwnsTransaction(message)) {
       // Heartbeats own the lifecycle transaction in shared fleet code.
-      return this.trackSocketOperation(operation());
+      return this.activeSocketOperations.track(operation());
     }
     // Data-plane frames and code-agent replies must be able to complete an HTTP
     // request that currently owns the lifecycle queue. Control frames mutate
     // lease state and stay serialized with HTTP requests and alarms.
     if (!kind || !bridgeDataAttachmentKinds.has(kind)) {
-      return this.trackSocketOperation(this.operationRunner(operation));
+      return this.activeSocketOperations.track(this.operationRunner(operation));
     }
     const run = (this.socketOperationTails.get(socket) ?? Promise.resolve()).then(operation);
     this.socketOperationTails.set(
@@ -418,23 +408,7 @@ export class NodeCoordinatorRuntime implements CoordinatorRuntime {
         () => undefined,
       ),
     );
-    return this.trackSocketOperation(run);
-  }
-
-  private trackSocketOperation<T>(operation: Promise<T>): Promise<T> {
-    this.activeSocketOperations.add(operation);
-    void operation.then(
-      () => this.activeSocketOperations.delete(operation),
-      () => this.activeSocketOperations.delete(operation),
-    );
-    return operation;
-  }
-
-  private async drainSocketOperations(): Promise<void> {
-    const active = [...this.activeSocketOperations];
-    if (active.length === 0) return;
-    await Promise.allSettled(active);
-    return this.drainSocketOperations();
+    return this.activeSocketOperations.track(run);
   }
 }
 

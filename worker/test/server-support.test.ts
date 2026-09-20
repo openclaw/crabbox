@@ -4,8 +4,8 @@ import { Writable } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { AsyncOperationTracker } from "../node/async-operation-tracker";
 import {
-  AsyncOperationTracker,
   RequestBodyTooLargeError,
   closeServer,
   createUntrustedForwardingDiagnostic,
@@ -133,6 +133,51 @@ describe("Node server support", () => {
     expect(drained).toBe(false);
     done.resolve();
     await operation;
+    await drain;
+    expect(drained).toBe(true);
+  });
+
+  it("preserves tracked promise identity and drains rejected operations", async () => {
+    const tracker = new AsyncOperationTracker();
+    const failure = new Error("operation failed");
+    const operation = Promise.reject(failure);
+    expect(tracker.track(operation)).toBe(operation);
+    await expect(operation).rejects.toBe(failure);
+    await tracker.drain();
+  });
+
+  it("starts callbacks synchronously but returns synchronous throws as rejections", async () => {
+    const tracker = new AsyncOperationTracker();
+    const failure = new Error("callback failed");
+    let started = false;
+    const operation = tracker.run(() => {
+      started = true;
+      throw failure;
+    });
+    expect(started).toBe(true);
+    await expect(operation).rejects.toBe(failure);
+    await tracker.drain();
+  });
+
+  it("drains follow-up work registered while an earlier operation settles", async () => {
+    const tracker = new AsyncOperationTracker();
+    const first = deferred<void>();
+    const second = deferred<void>();
+    tracker.track(first.promise);
+    const registered = first.promise.then(() => {
+      tracker.track(second.promise);
+      return undefined;
+    });
+    let drained = false;
+    const drain = tracker.drain().then(() => {
+      drained = true;
+      return undefined;
+    });
+    first.resolve();
+    await registered;
+    await Promise.resolve();
+    expect(drained).toBe(false);
+    second.resolve();
     await drain;
     expect(drained).toBe(true);
   });
