@@ -484,6 +484,12 @@ type CleanupBackend interface {
 }
 ```
 
+Adapters using the common `crabbox.provider`, `crabbox.scope` and `crabbox.claim`
+sandbox metadata can use `shared.ValidateSandboxOwnershipMetadata`. It preserves
+exact marker comparisons and the existing missing-ID and mismatch errors.
+Endpoint admission, requested-resource ID binding and different provider marker
+schemes remain adapter-owned; this check is not a replacement for those policies.
+
 Delegated adapters can use `shared.RefreshRetainedLeaseActivity` in their
 `Retained` callback to refresh an existing claim while still holding the
 provider operation lock. It preserves the stored scope, pond and repository,

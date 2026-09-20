@@ -586,15 +586,7 @@ func (b *backend) verifyClaim(ctx context.Context, api vercelSandboxClient, leas
 }
 
 func validateSandboxOwnership(claim core.LeaseClaim, sb sandboxSummary) error {
-	if sb.ID == "" {
-		return core.Exit(5, "vercel-sandbox returned a sandbox without an id")
-	}
-	if sb.Metadata[metadataProviderKey] != providerName ||
-		sb.Metadata[metadataScopeKey] != claim.ProviderScope ||
-		sb.Metadata[metadataClaimKey] != claim.LeaseID {
-		return core.Exit(4, "vercel-sandbox sandbox %q ownership metadata does not match its local claim", sb.ID)
-	}
-	return nil
+	return shared.ValidateSandboxOwnershipMetadata(providerName, sb.ID, sb.Metadata, claim)
 }
 
 func (b *backend) cleanupCreateFailure(ctx context.Context, api vercelSandboxClient, sandboxID string, cause error) error {

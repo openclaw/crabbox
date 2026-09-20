@@ -647,15 +647,7 @@ func (b *backend) verifyClaim(ctx context.Context, api bridgeClient, leaseID, sa
 }
 
 func validateSandboxOwnership(claim core.LeaseClaim, sb sandboxSummary) error {
-	if sb.ID == "" {
-		return core.Exit(5, "cloudflare-sandbox returned a sandbox without an id")
-	}
-	if sb.Metadata[metadataProviderKey] != providerName ||
-		sb.Metadata[metadataScopeKey] != claim.ProviderScope ||
-		sb.Metadata[metadataClaimKey] != claim.LeaseID {
-		return core.Exit(4, "cloudflare-sandbox sandbox %q ownership metadata does not match its local claim", sb.ID)
-	}
-	return nil
+	return shared.ValidateSandboxOwnershipMetadata(providerName, sb.ID, sb.Metadata, claim)
 }
 
 func (b *backend) cleanupCreateFailure(ctx context.Context, api bridgeClient, sandboxID string, cause error) error {

@@ -559,15 +559,7 @@ func verifySuperserveClaim(ctx context.Context, api superserveClient, leaseID, s
 }
 
 func validateSuperserveSandboxOwnership(claim core.LeaseClaim, sb superserveSandbox) error {
-	if sb.ID == "" {
-		return core.Exit(5, "superserve returned a sandbox without an id")
-	}
-	if sb.Metadata[metadataProviderKey] != providerName ||
-		sb.Metadata[metadataScopeKey] != claim.ProviderScope ||
-		sb.Metadata[metadataClaimKey] != claim.LeaseID {
-		return core.Exit(4, "superserve sandbox %q ownership metadata does not match its local claim", sb.ID)
-	}
-	return nil
+	return shared.ValidateSandboxOwnershipMetadata(providerName, sb.ID, sb.Metadata, claim)
 }
 
 func (b *backend) cleanupCreateFailure(ctx context.Context, api superserveClient, sandboxID string, cause error) error {

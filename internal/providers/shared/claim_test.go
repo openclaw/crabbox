@@ -523,3 +523,54 @@ func TestRefreshRetainedLeaseActivityPreservesOwnershipAndIdlePolicy(t *testing.
 		})
 	}
 }
+
+func TestValidateSandboxOwnershipMetadata(t *testing.T) {
+	const provider = "example-sandbox"
+	claim := core.LeaseClaim{LeaseID: "lease-1", ProviderScope: "scope-1"}
+	matching := map[string]string{"crabbox.provider": provider, "crabbox.scope": claim.ProviderScope, "crabbox.claim": claim.LeaseID}
+	for _, tc := range []struct {
+		name, id string
+		metadata map[string]string
+		claim    core.LeaseClaim
+		code     int
+		message  string
+	}{
+		{name: "matching", id: "sandbox-1", metadata: matching, claim: claim},
+		{name: "empty ID precedes metadata mismatch", metadata: nil, claim: claim, code: 5, message: "example-sandbox returned a sandbox without an id"},
+		{name: "empty ID with matching metadata", metadata: matching, claim: claim, code: 5, message: "example-sandbox returned a sandbox without an id"},
+		{name: "nil metadata", id: "sandbox-1", claim: claim, code: 4},
+		{name: "missing provider", id: "sandbox-1", metadata: map[string]string{"crabbox.scope": "scope-1", "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "wrong provider", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": "other", "crabbox.scope": "scope-1", "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "missing scope", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "scope compared exactly", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.scope": "scope-1 ", "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "missing lease", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.scope": "scope-1"}, claim: claim, code: 4},
+		{name: "lease compared exactly", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.scope": "scope-1", "crabbox.claim": " lease-1"}, claim: claim, code: 4},
+		{name: "provider compared exactly", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider + " ", "crabbox.scope": "scope-1", "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "missing keys match empty expectations", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider}},
+		{name: "explicit empty expectations", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.scope": "", "crabbox.claim": ""}},
+		{name: "empty expectations reject nonempty metadata", id: "sandbox-1", metadata: matching, code: 4},
+		{name: "whitespace ID accepted verbatim", id: " \t", metadata: matching, claim: claim},
+		{name: "whitespace ID diagnostic quoted", id: " \t", claim: claim, code: 4, message: "example-sandbox sandbox \" \\t\" ownership metadata does not match its local claim"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateSandboxOwnershipMetadata(provider, tc.id, tc.metadata, tc.claim)
+			if tc.code == 0 {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var exitErr core.ExitError
+			if !core.AsExitError(err, &exitErr) || exitErr.Code != tc.code {
+				t.Fatalf("error=%v, want exit %d", err, tc.code)
+			}
+			want := tc.message
+			if want == "" {
+				want = "example-sandbox sandbox \"sandbox-1\" ownership metadata does not match its local claim"
+			}
+			if err.Error() != want {
+				t.Fatalf("error=%q want=%q", err.Error(), want)
+			}
+		})
+	}
+}
