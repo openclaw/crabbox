@@ -352,7 +352,7 @@ func (b *backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 		claim = snapshot
 	}
 	confirmedAbsent := false
-	if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+	if err := shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		client := b.clientFactory(b.RT)
 		live, err := client.GetInstance(ctx, server.CloudID)
 		if err == nil {

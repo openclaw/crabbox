@@ -537,7 +537,7 @@ func (b *leaseBackend) deleteClaimedServer(ctx context.Context, client lifecycle
 	if err != nil {
 		return err
 	}
-	if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+	if err := shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		live, err := client.GetServer(ctx, server.CloudID)
 		if err != nil {
 			return err

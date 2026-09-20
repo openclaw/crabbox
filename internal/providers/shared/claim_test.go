@@ -220,7 +220,7 @@ func TestExactClaimOwnershipRejectsMissingAndStaleBindings(t *testing.T) {
 		t.Fatalf("stale claim err=%v", err)
 	}
 	called := false
-	if err := RemoveExactClaimAfter(claim, want, func() error { called = true; return nil }); err != nil || !called {
+	if err := RemoveExactClaimAfterContext(context.Background(), claim, want, func() error { called = true; return nil }); err != nil || !called {
 		t.Fatalf("fenced deletion called=%v err=%v", called, err)
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence(want.LeaseID); err != nil || exists {

@@ -233,7 +233,7 @@ func (b *backend) deleteClaimedBox(ctx context.Context, client api, leaseID, box
 	if err != nil {
 		return err
 	}
-	return shared.RemoveExactClaimAfter(claim, binding, func() error {
+	return shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		box, err := client.GetBox(ctx, boxID)
 		if err != nil {
 			if isNotFound(err) {

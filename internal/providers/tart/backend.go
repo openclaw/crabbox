@@ -385,6 +385,9 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	now := time.Now().UTC()
 	removed := 0
 	for _, inst := range instances {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		live[inst.Name] = struct{}{}
 		if !strings.HasPrefix(inst.Name, "crabbox-") {
 			continue
@@ -423,6 +426,9 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	}
 	claimsRemoved := 0
 	for _, claim := range orphanCandidates {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if claim.Provider != providerName || claim.LeaseID == "" {
 			continue
 		}
@@ -441,7 +447,13 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 		// Acquisition creates or reuses the key before publishing its claim, so
 		// missing-instance cleanup cannot safely delete that key without a wider fence.
-		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if err := core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, claim.LeaseID, claim, true, nil); err != nil {
+			if cancelErr := ctx.Err(); cancelErr != nil {
+				if errors.Is(err, cancelErr) {
+					return err
+				}
+				return errors.Join(cancelErr, err)
+			}
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, core.Blank(claim.Slug, "-"), err)
 			continue
 		}
@@ -459,7 +471,7 @@ func (b *backend) cleanupInstance(ctx context.Context, cfg core.Config, inst tar
 	if err != nil {
 		return err
 	}
-	return shared.RemoveExactClaimAfter(claim, binding, func() error {
+	return shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		// Re-read lifecycle state and the incarnation witness under the same
 		// claim fence that covers deletion and durable claim removal.
 		current, err := b.listInstances(ctx)

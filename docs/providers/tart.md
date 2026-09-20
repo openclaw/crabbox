@@ -175,6 +175,10 @@ otherwise Crabbox uses `~/.tart` and passes that same directory to Tart.
 The claim lock covers fresh inventory and marker checks, any required stop,
 deletion, and durable claim removal. A changed claim, missing or replaced marker,
 duplicate claim, different store, or inventory failure prevents deletion.
+Waiting for that lock honors cleanup cancellation, including when pruning a
+missing VM's claim. Cancellation stops the remaining scan rather than being
+treated as an ordinary stale-claim skip; confirmed successful deletion still
+finishes claim retirement.
 Legacy claims without this binding are retained for explicit operator inspection;
 they are not silently upgraded by cleanup. Inspect such VMs with Tart before
 choosing any manual `tart stop <name>` / `tart delete <name>` operation.
