@@ -615,9 +615,7 @@ func waitOwnedSSHTransportCommand(ctx context.Context, handle *pondMeshExecHandl
 }
 
 func newOwnedSSHTransportCommand(ctx context.Context, target SSHTarget, args []string) *pondMeshExecHandle {
-	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, directSSHExecutable(), args...).(*pondMeshExecHandle)
-	applyTargetChildEnvironment(handle.cmd, target)
-	return handle
+	return pondMeshExecCommand(ctx, target, directSSHExecutable(), args...)
 }
 
 func startOwnedSSHTransportSubsystem(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts, subsystem string, stderr io.Writer) (io.Reader, io.WriteCloser, func() error, error) {

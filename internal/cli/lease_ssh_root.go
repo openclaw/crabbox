@@ -48,7 +48,7 @@ func inspectSelectedLeaseSSHKey(leaseID string) error {
 	if _, err := inspectTestboxLeaseDirectory(leaseID); err != nil {
 		return err
 	}
-	key, err := testboxKeyPath(leaseID)
+	key, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		return err
 	}
@@ -79,7 +79,7 @@ func PreflightLeaseSSHStorage() error {
 // PrepareStoredTestboxKeyPath leaves imported key contents and publication
 // policy to the provider, but admits the canonical local destination first.
 func PrepareStoredTestboxKeyPath(leaseID string) (string, error) {
-	key, err := testboxKeyPath(leaseID)
+	key, err := TestboxKeyPath(leaseID)
 	if err != nil || os.Getenv("XDG_STATE_HOME") == "" {
 		return key, err
 	}

@@ -7,13 +7,27 @@ import (
 )
 
 func resolveInstanceType(candidate, fallback string, explicit bool) (string, error) {
-	if normalized, ok := core.NormalizeCloudflareContainerInstanceType(candidate); ok {
+	if normalized, ok := normalizeContainerInstanceType(candidate); ok {
 		return normalized, nil
 	}
 	if explicit {
-		return "", core.Exit(2, "%s --type must be one of %s", providerName, strings.Join(core.CloudflareContainerInstanceTypes(), ", "))
+		return "", core.Exit(2, "%s --type must be one of %s", providerName, strings.Join(containerInstanceTypes(), ", "))
 	}
 	return fallback, nil
+}
+
+func containerInstanceTypes() []string {
+	return []string{"lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"}
+}
+
+func normalizeContainerInstanceType(value string) (string, bool) {
+	trimmed := strings.ToLower(strings.TrimSpace(value))
+	for _, instanceType := range containerInstanceTypes() {
+		if trimmed == instanceType {
+			return instanceType, true
+		}
+	}
+	return "", false
 }
 
 const (

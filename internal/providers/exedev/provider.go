@@ -12,6 +12,10 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) ServerTypeForConfig(cfg core.Config) string {
+	return core.Blank(cfg.ExeDev.Image, core.ExeDevDefaultImageLabel)
+}
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Aliases:          []string{"exe", "exedev"},

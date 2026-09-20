@@ -1,11 +1,8 @@
 package cli
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestValidateCoordinatorLeaseCapabilitiesRequiresDesktopEcho(t *testing.T) {
@@ -164,198 +161,61 @@ func TestEnforceManagedLeaseCapabilitiesRequiresDesktopLabelForDirectMacOSProvid
 	}
 }
 
-func TestEnforceManagedLeaseCapabilitiesAllowsOwnedParallelsMacOSManualDesktop(t *testing.T) {
-	isolateLeaseClaimState(t)
-	leaseID := "cbx_abcdef123456"
-	server := Server{
-		CloudID:  "vm-clone",
-		Provider: "parallels",
-		Name:     "crabbox-cbx-abcdef123456-live",
-		Labels: map[string]string{
-			"provider": "parallels",
-			"lease":    leaseID,
-			"target":   targetMacOS,
-			"host":     "local",
-		},
-	}
-	if err := ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "live", "parallels", "", "", "/repo", time.Minute, false, server, SSHTarget{Port: "22"}); err != nil {
-		t.Fatal(err)
-	}
-	err := enforceManagedLeaseCapabilities(
-		Config{Desktop: true, Provider: "parallels", TargetOS: targetMacOS},
-		server,
-		leaseID,
-	)
-	if err != nil {
-		t.Fatalf("owned Parallels macOS clone without desktop label should allow Screen Sharing reuse: %v", err)
-	}
+type desktopCapabilityTestProvider struct {
+	Provider
+	allow bool
+	err   error
+	calls *int
 }
 
-func TestEnforceManagedLeaseCapabilitiesRejectsParallelsSourceAndUnownedDesktop(t *testing.T) {
-	isolateLeaseClaimState(t)
-	leaseID := "cbx_abcdef123456"
-	owned := Server{
-		CloudID:  "vm-clone",
-		Provider: "parallels",
-		Name:     "crabbox-cbx-abcdef123456-live",
-		Labels: map[string]string{
-			"provider": "parallels",
-			"lease":    leaseID,
-			"target":   targetMacOS,
-			"host":     "local",
-		},
-	}
-	if err := ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "live", "parallels", "", "", "/repo", time.Minute, false, owned, SSHTarget{Port: "22"}); err != nil {
-		t.Fatal(err)
-	}
+func (p desktopCapabilityTestProvider) DesktopLeaseWithoutLabel(Config, Server, string) (bool, error) {
+	*p.calls++
+	return p.allow, p.err
+}
 
-	tests := []struct {
-		name   string
-		cfg    Config
-		server Server
-		id     string
+func TestEnforceManagedLeaseCapabilitiesUsesProviderDesktopAllowance(t *testing.T) {
+	original := providerRegistry["tart"]
+	t.Cleanup(func() { providerRegistry["tart"] = original })
+	for _, tc := range []struct {
+		name                         string
+		allow, fail, nonMac, labeled bool
 	}{
-		{
-			name: "source-vm",
-			cfg:  Config{Desktop: true, Provider: "parallels", TargetOS: targetMacOS},
-			server: Server{
-				CloudID:  "source-id",
-				Provider: "parallels",
-				Name:     "source-vm",
-				Labels: map[string]string{
-					"provider": "parallels",
-					"target":   targetMacOS,
-					"host":     "local",
-				},
-			},
-			id: "source-vm",
-		},
-		{
-			name: "claimed-source-vm",
-			cfg:  Config{Desktop: true, Provider: "parallels", TargetOS: targetMacOS},
-			server: Server{
-				CloudID:  "vm-clone",
-				Provider: "parallels",
-				Name:     "source-vm",
-				Labels: map[string]string{
-					"provider": "parallels",
-					"lease":    leaseID,
-					"target":   targetMacOS,
-					"host":     "local",
-				},
-			},
-			id: leaseID,
-		},
-		{
-			name: "unowned-clone",
-			cfg:  Config{Desktop: true, Provider: "parallels", TargetOS: targetMacOS},
-			server: Server{
-				CloudID:  "vm-other",
-				Provider: "parallels",
-				Name:     "crabbox-cbx-ffffffffffff-live",
-				Labels: map[string]string{
-					"provider": "parallels",
-					"lease":    "cbx_ffffffffffff",
-					"target":   targetMacOS,
-					"host":     "local",
-				},
-			},
-			id: "cbx_ffffffffffff",
-		},
-		{
-			name: "claim-bound-to-other-vm",
-			cfg:  Config{Desktop: true, Provider: "parallels", TargetOS: targetMacOS},
-			server: Server{
-				CloudID:  "vm-other",
-				Provider: "parallels",
-				Name:     "crabbox-cbx-abcdef123456-live",
-				Labels: map[string]string{
-					"provider": "parallels",
-					"lease":    leaseID,
-					"target":   targetMacOS,
-					"host":     "local",
-				},
-			},
-			id: leaseID,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			err := enforceManagedLeaseCapabilities(test.cfg, test.server, test.id)
-			if err == nil || !strings.Contains(err.Error(), "was not created with desktop=true") {
-				t.Fatalf("err=%v, want source/unowned desktop rejection", err)
+		{name: "allowed", allow: true},
+		{name: "denied"},
+		{name: "provider error", fail: true},
+		{name: "non-mac never calls allowance", allow: true, nonMac: true},
+		{name: "existing label never calls allowance", labeled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			var providerErr error
+			if tc.fail {
+				providerErr = Exit(2, "synthetic desktop ownership failure")
+			}
+			providerRegistry["tart"] = desktopCapabilityTestProvider{Provider: original, allow: tc.allow, err: providerErr, calls: &calls}
+			cfg := Config{Desktop: true, Provider: "tart", TargetOS: targetMacOS}
+			server := Server{Provider: "tart", Labels: map[string]string{}}
+			if tc.nonMac {
+				cfg.TargetOS = targetLinux
+			}
+			if tc.labeled {
+				server.Labels["desktop"] = "true"
+			}
+			err := enforceManagedLeaseCapabilities(cfg, server, "cbx_fixture")
+			wantSuccess := tc.labeled || (tc.allow && !tc.nonMac && !tc.fail)
+			if (err == nil) != wantSuccess {
+				t.Fatalf("error=%v want success=%t", err, wantSuccess)
+			}
+			if tc.fail && err != providerErr {
+				t.Fatalf("provider error changed: %v", err)
+			}
+			wantCalls := 1
+			if tc.nonMac || tc.labeled {
+				wantCalls = 0
+			}
+			if calls != wantCalls {
+				t.Fatalf("calls=%d want=%d", calls, wantCalls)
 			}
 		})
-	}
-}
-
-func TestEnforceManagedLeaseCapabilitiesRequiresDesktopLabelForNonMacAndOtherProviders(t *testing.T) {
-	isolateLeaseClaimState(t)
-	leaseID := "cbx_abcdef123456"
-	linuxClone := Server{
-		CloudID:  "vm-linux",
-		Provider: "parallels",
-		Name:     "crabbox-cbx-abcdef123456-live",
-		Labels: map[string]string{
-			"provider": "parallels",
-			"lease":    leaseID,
-			"target":   targetLinux,
-			"host":     "local",
-		},
-	}
-	if err := ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "live", "parallels", "", "", "/repo", time.Minute, false, linuxClone, SSHTarget{Port: "22"}); err != nil {
-		t.Fatal(err)
-	}
-
-	tests := []struct {
-		name   string
-		cfg    Config
-		server Server
-		id     string
-	}{
-		{
-			name:   "parallels-linux",
-			cfg:    Config{Desktop: true, Provider: "parallels", TargetOS: targetLinux},
-			server: linuxClone,
-			id:     leaseID,
-		},
-		{
-			name: "tart-macos",
-			cfg:  Config{Desktop: true, Provider: "tart", TargetOS: targetMacOS},
-			server: Server{
-				Provider: "tart",
-				Name:     "crabbox-cbx-abcdef123456-live",
-				Labels:   map[string]string{"target": targetMacOS},
-			},
-			id: leaseID,
-		},
-		{
-			name: "local-container",
-			cfg:  Config{Desktop: true, Provider: "local-container", TargetOS: targetLinux},
-			server: Server{
-				Provider: "local-container",
-				Labels:   map[string]string{"target": targetLinux},
-			},
-			id: leaseID,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			err := enforceManagedLeaseCapabilities(test.cfg, test.server, test.id)
-			if err == nil || !strings.Contains(err.Error(), "was not created with desktop=true") {
-				t.Fatalf("err=%v, want desktop label required", err)
-			}
-		})
-	}
-}
-
-func isolateLeaseClaimState(t *testing.T) {
-	t.Helper()
-	root := t.TempDir()
-	t.Setenv("HOME", filepath.Join(root, "home"))
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
-	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
-	if err := os.MkdirAll(filepath.Join(root, "home"), 0o700); err != nil {
-		t.Fatal(err)
 	}
 }

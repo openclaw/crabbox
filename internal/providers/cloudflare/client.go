@@ -96,7 +96,7 @@ func newCloudflareClient(cfg core.Config, rt core.Runtime) (*cloudflareClient, e
 }
 
 func (c *cloudflareClient) useInstanceType(instanceType string) {
-	if normalized, ok := core.NormalizeCloudflareContainerInstanceType(instanceType); ok {
+	if normalized, ok := normalizeContainerInstanceType(instanceType); ok {
 		c.instanceType = normalized
 	}
 }

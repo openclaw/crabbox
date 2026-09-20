@@ -34,6 +34,17 @@ func isolateIsloTestHome(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 }
 
+func newIsloSDKHTTPTestClient(t *testing.T, server *httptest.Server) isloAPI {
+	t.Helper()
+	// The SDK cache is process-wide; isolate each invocation even if a server address is reused.
+	apiKey := "ak_test_" + t.TempDir()
+	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: apiKey, BaseURL: server.URL}}, core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return api
+}
+
 func TestParseIsloSSE(t *testing.T) {
 	body := strings.Join([]string{
 		"event: stdout",
@@ -2015,10 +2026,7 @@ func TestIsloSDKClientListUsesInjectedHTTPAndPaginates(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "ak_test", BaseURL: srv.URL}}, core.Runtime{HTTP: srv.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	api := newIsloSDKHTTPTestClient(t, srv)
 	items, err := api.ListSandboxes(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -2081,10 +2089,7 @@ func TestIsloSDKClientUploadArchiveStreamsMultipartTarball(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "ak_test", BaseURL: srv.URL}}, core.Runtime{HTTP: srv.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
+	api := newIsloSDKHTTPTestClient(t, srv)
 	if err := api.UploadArchive(t.Context(), "crabbox-test", "/workspace/repo", strings.NewReader("archive")); err != nil {
 		t.Fatal(err)
 	}
@@ -2948,5 +2953,39 @@ func TestIsloIncompleteCreateResponseReportsUnconfirmedAttempt(t *testing.T) {
 				t.Fatalf("incomplete response published claim: %v %v", entries, readErr)
 			}
 		})
+	}
+}
+
+func TestIsloFlagsCompleteAssignmentContract(t *testing.T) {
+	for _, provider := range []string{"islo", "other"} {
+		for _, number := range []int{-1, 0, 2} {
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			cfg.Islo.IdlePause = true
+			want := cfg
+			want.Islo.BaseURL, want.Islo.Image, want.Islo.Workdir = "", "", " raw "
+			want.Islo.GatewayProfile, want.Islo.SnapshotName = "gateway", "snapshot"
+			want.Islo.VCPUs, want.Islo.MemoryMB, want.Islo.DiskGB, want.Islo.IdlePause = number, number, number, false
+			core.MarkIsloImageExplicit(&want)
+			core.MarkIsloVCPUsExplicit(&want)
+			core.MarkIsloMemoryMBExplicit(&want)
+			core.MarkIsloDiskGBExplicit(&want)
+			core.RecordProviderFlagInputs(&want, true, "islo")
+			fs := flag.NewFlagSet("islo", flag.ContinueOnError)
+			values := RegisterIsloProviderFlags(fs, cfg)
+			if err := fs.Parse([]string{"--islo-base-url=", "--islo-image=", "--islo-workdir= raw ", "--islo-gateway-profile=gateway", "--islo-snapshot-name=snapshot", "--islo-vcpus=" + strconv.Itoa(number), "--islo-memory-mb=" + strconv.Itoa(number), "--islo-disk-gb=" + strconv.Itoa(number), "--islo-idle-pause=false"}); err != nil {
+				t.Fatal(err)
+			}
+			prior := cfg
+			if err := ApplyIsloProviderFlags(&cfg, fs, "wrong-type"); err != nil || !reflect.DeepEqual(cfg, prior) {
+				t.Fatal("wrong-type guard changed")
+			}
+			if err := ApplyIsloProviderFlags(&cfg, fs, values); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatal("accepted values, markers, ledger or provider changed")
+			}
+		}
 	}
 }

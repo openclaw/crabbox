@@ -1843,7 +1843,7 @@ func TestApplyFlagsDefersTargetValidation(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
 
-	if err := applyFlags(&cfg, fs, flagValues{}); err != nil {
+	if err := applyFlags(&cfg, fs, core.HyperVConfigFlagValues{}); err != nil {
 		t.Fatalf("applyFlags should defer target validation: %v", err)
 	}
 	if cfg.TargetOS != core.TargetLinux {
@@ -1865,7 +1865,7 @@ func TestApplyFlagsAllowsLaterWindowsOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := applyFlags(&cfg, fs, flagValues{})
+	err := applyFlags(&cfg, fs, core.HyperVConfigFlagValues{})
 	if err != nil {
 		t.Fatalf("applyFlags should not reject a target flag before it is applied: %v", err)
 	}
@@ -1885,7 +1885,7 @@ func TestApplyFlagsDefaultsImplicitTargetToWindows(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
 
-	if err := applyFlags(&cfg, fs, flagValues{}); err != nil {
+	if err := applyFlags(&cfg, fs, core.HyperVConfigFlagValues{}); err != nil {
 		t.Fatalf("applyFlags: %v", err)
 	}
 	if cfg.TargetOS != core.TargetWindows {
@@ -1902,7 +1902,7 @@ func TestApplyFlagsAcceptsExplicitConfigWindows(t *testing.T) {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("target", "linux", "")
 
-	if err := applyFlags(&cfg, fs, flagValues{}); err != nil {
+	if err := applyFlags(&cfg, fs, core.HyperVConfigFlagValues{}); err != nil {
 		t.Fatalf("applyFlags should accept explicit config target=windows: %v", err)
 	}
 	if cfg.TargetOS != core.TargetWindows {
@@ -2266,5 +2266,93 @@ func TestHyperVUnselectedSizingFlagsRemainRaw(t *testing.T) {
 	}
 	if cfg.HyperV.CPUs != -2 || cfg.HyperV.Memory != 0 || cfg.Provider != "unselected" || cfg.TargetOS != beforeTarget || cfg.SSHUser != beforeUser || cfg.WorkRoot != beforeRoot {
 		t.Fatal("unselected flags changed normalization contract")
+	}
+}
+
+func TestHyperVBindingFlagPhases(t *testing.T) {
+	for _, provider := range []string{"hyperv", " HyPeRv ", "unselected"} {
+		for _, targetMode := range []string{"implicit", "marker", "visited"} {
+			for _, n := range []int{-1, 0, 7} {
+				cfg := core.BaseConfig()
+				cfg.Provider = provider
+				cfg.HyperV.GuestPassword = "synthetic-retained"
+				cfg.HyperV.InitPassword = true
+				if targetMode == "marker" {
+					core.MarkTargetExplicit(&cfg)
+				}
+				want := cfg
+				want.HyperV.Image = ""
+				want.HyperV.User = " "
+				want.HyperV.WorkRoot = " "
+				want.HyperV.CPUs = n
+				want.HyperV.Memory = n
+				want.HyperV.Switch = ""
+				want.HyperV.InitPassword = false
+				core.RecordProviderFlagInputs(&want, true, providerName)
+				if provider != "unselected" {
+					want.Provider = "hyperv"
+					if targetMode == "implicit" {
+						want.TargetOS = core.TargetWindows
+					}
+					if n == 0 {
+						want.HyperV.CPUs = 4
+						want.HyperV.Memory = 8192
+					}
+					want.HyperV.Switch = "Default Switch"
+					want.SSHUser = " "
+					want.WorkRoot = " "
+					want.SSHPort = "22"
+					want.SSHFallbackPorts = []string{}
+				}
+				fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+				fs.String("target", "linux", "")
+				v := registerFlags(fs, cfg)
+				if targetMode == "visited" {
+					if err := fs.Set("target", "windows"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := fs.Parse([]string{"--hyperv-image=", "--hyperv-user= ", "--hyperv-work-root= ", "--hyperv-cpu=" + fmt.Sprint(n), "--hyperv-memory=" + fmt.Sprint(n), "--hyperv-switch=", "--hyperv-init-password=false"}); err != nil {
+					t.Fatal(err)
+				}
+				before := cfg
+				if err := applyFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+					t.Fatal("wrong type changed defaults")
+				}
+				if err := applyFlags(&cfg, fs, v); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(cfg, want) {
+					t.Fatalf("phase contract provider=%q target=%s n=%d", provider, targetMode, n)
+				}
+			}
+		}
+	}
+}
+
+func TestHyperVBindingFlagRegistration(t *testing.T) {
+	order := []string{"image", "user", "work-root", "cpu", "memory", "switch", "init-password"}
+	for i, duplicate := range order {
+		fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		fs.String("hyperv-"+duplicate, "", "")
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("duplicate flag not rejected")
+				}
+			}()
+			registerFlags(fs, core.BaseConfig())
+		}()
+		for j, name := range order {
+			if (fs.Lookup("hyperv-"+name) != nil) != (j <= i) {
+				t.Fatal("registration order changed")
+			}
+		}
+	}
+	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+	registerFlags(fs, core.BaseConfig())
+	if fs.Lookup("hyperv-guest-password") != nil || fs.Lookup("hyperv-password") != nil {
+		t.Fatal("unexpected password argv source")
 	}
 }

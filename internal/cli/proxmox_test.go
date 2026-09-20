@@ -1492,7 +1492,7 @@ func testProxmoxCreateServerFlow(t *testing.T, failBootstrap bool) {
 	cfg.Proxmox.Storage = "local-lvm"
 	cfg.Proxmox.Pool = "ci"
 	cfg.Proxmox.Bridge = "vmbr1"
-	cfg.ServerType = proxmoxServerTypeForConfig(cfg)
+	cfg.ServerType = "template-9000"
 	client, err := NewProxmoxClient(cfg)
 	if err != nil {
 		t.Fatal(err)

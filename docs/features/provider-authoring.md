@@ -335,8 +335,16 @@ accessors to preserve explicit inputs; `ApplyLinuxConnectionDefaults` restores
 explicit connection settings when applying Linux defaults across provider changes.
 Keep acquisition-only validation deferred: DigitalOcean and Linode preserve an
 unresolved explicit portable image until backend construction captures the error,
-before filling runtime fallbacks. Passive config-display hooks must not resolve
-defaults themselves.
+before filling runtime fallbacks. Passive config-display hooks must not invoke
+configuration-default phases. Implement `ProviderConfigShowNormalizer` for narrow,
+selected-provider display projections; use `ApplyConfigShowSSHDefaults` when
+projecting conventional SSH defaults without changing explicit connection inputs
+or provider-native configuration. Provider-owned config-show sections may derive
+pure effective display values from the supplied Config, including inactive
+providers' displayed work roots. They must not call ApplyConfigDefaults, load
+configuration, read environment or native state, resolve credentials, or mutate
+the supplied configuration. Selected top-level projections still belong in
+ProviderConfigShowNormalizer and require actionable provider selection.
 
 ## Step 6. Implement The Backend
 
@@ -390,7 +398,8 @@ Claim-publication helpers initialize a missing idle policy, but preserve an
 already-recorded positive idle duration during ordinary direct-lease preparation,
 repository reclaim, and endpoint publication. Their duration argument is not
 implicit replacement intent. Explicit idle changes belong to the run/Touch
-policy path; managed coordinator projections remain authoritative. This also
+policy path; managed coordinator projections use the resolved server's
+`idle_timeout_secs` label rather than the command's configured default. This also
 keeps acquisition finalization from reinitializing a policy already published
 by the provider's first acquisition step.
 

@@ -261,8 +261,20 @@ project plus either a complete service-account key pair or
    maintenance `TERMINATE`, automatic restart off, and termination action
    `DELETE`.
 6. Wait for the public IP, then for SSH and the Crabbox ready marker.
+   Public-IP observations and their five-second retry waits share a two-minute
+   budget. Earlier cancellation stops discovery, and API errors fail immediately;
+   this budget does not include the subsequent SSH readiness phase.
 7. Touch labels during active runs.
 8. Delete the VM on release unless the lease is kept.
+
+If acquisition fails after creating a VM, successful rollback also removes the
+lease's generated SSH credentials and host-trust files. Failed remote deletion
+retains those files; a local artifact-cleanup error is reported and prevents an
+automatic fresh-lease retry. Cleanup-client creation and remote deletion
+completion share a fresh three-minute budget, independent of cancellation of the
+acquisition request. [Compute Engine guest shutdown](https://docs.cloud.google.com/compute/docs/instances/suspend-stop-reset-instances-overview#stop_operation)
+can take 120 seconds before resource deletion, so the budget includes time to
+confirm completion. Uncertain creation outcomes are unchanged.
 
 ## Machine classes
 
@@ -342,6 +354,13 @@ provider key before deletion. Labels and deterministic names remain discovery
 hints, not destructive authority. Claimless or stale-claim resources are
 skipped; recover or remove them through an explicit operator-controlled GCP
 workflow instead of silently adopting cloud metadata.
+
+After deletion or an exact lookup confirming the instance is absent, direct
+release and cleanup remove the lease's generated SSH key and private host-trust
+files before retiring its claim. Both local steps share the unchanged-claim
+lock. A provider-deletion or SSH-artifact cleanup failure retains the claim for retry, and
+`--dry-run` leaves the claim and SSH material untouched. Stale records without
+a cloud resource identity retain their existing claim-only pruning behavior.
 
 Direct cleanup:
 

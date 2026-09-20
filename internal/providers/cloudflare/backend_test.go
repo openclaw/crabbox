@@ -2293,10 +2293,39 @@ func TestCloudflareInstanceTypeResolutionPhases(t *testing.T) {
 func TestCloudflareInstanceTypeCanonicalSizes(t *testing.T) {
 	for _, size := range []string{"lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"} {
 		t.Run(size, func(t *testing.T) {
-			got, err := resolveInstanceType(" "+strings.ToUpper(size)+" ", "unused-fallback", true)
+			input := " " + strings.ToUpper(size) + " "
+			if got, ok := normalizeContainerInstanceType(input); !ok || got != size {
+				t.Fatalf("normalized type = (%q,%t), want (%q,true)", got, ok, size)
+			}
+			got, err := resolveInstanceType(input, "unused-fallback", true)
 			if err != nil || got != size {
 				t.Fatalf("type = %q, error = %v; want %q", got, err, size)
 			}
 		})
+	}
+	if got, ok := normalizeContainerInstanceType("ccx63"); ok || got != "" {
+		t.Fatalf("normalized unsupported type = (%q,%t), want (empty,false)", got, ok)
+	}
+}
+
+func TestCloudflareContainerInstanceTypeMapping(t *testing.T) {
+	for _, tc := range []struct {
+		class string
+		want  string
+	}{
+		{class: "", want: "standard-4"},
+		{class: "tiny", want: "standard-4"},
+		{class: "small", want: "standard-4"},
+		{class: "standard", want: "standard-4"},
+		{class: "fast", want: "standard-4"},
+		{class: "large", want: "standard-4"},
+		{class: "beast", want: "standard-4"},
+		{class: "lite", want: "lite"},
+		{class: "basic", want: "basic"},
+		{class: "standard-3", want: "standard-3"},
+	} {
+		if got := cloudflareContainerInstanceTypeForClass(tc.class); got != tc.want {
+			t.Fatalf("class %q type = %q, want %q", tc.class, got, tc.want)
+		}
 	}
 }

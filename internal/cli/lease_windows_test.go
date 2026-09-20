@@ -172,7 +172,7 @@ func TestSelectedLeaseSSHWindowsPrivateKeyReuse(t *testing.T) {
 	dirs := isolateTestUserDirs(t)
 	prepareLeaseSSHTestStateRoot(t, dirs.StateHome)
 	const leaseID = "cbx_1516_windows_file"
-	key, _, err := ensureTestboxKey(leaseID)
+	key, _, err := EnsureTestboxKey(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestSelectedLeaseSSHWindowsPrivateKeyReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(before)
-	if _, _, err := ensureTestboxKey(leaseID); err != nil {
+	if _, _, err := EnsureTestboxKey(leaseID); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(key)
@@ -200,7 +200,7 @@ func TestSelectedLeaseSSHWindowsPrivateKeyReuse(t *testing.T) {
 	if err := setWindowsPathPermissive(t, key, false, other); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := ensureTestboxKey(leaseID); err == nil {
+	if _, _, err := EnsureTestboxKey(leaseID); err == nil {
 		t.Fatal("existing key with a non-private ACL was accepted")
 	}
 	if err := verifyPrivateWindowsPath(key, false); err == nil {

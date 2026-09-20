@@ -25,7 +25,7 @@ import (
 // v2 (spurious exit-255 error) and PASSES on v3.
 //
 // It drives the REAL production entry point runPondMeshForwards with the real
-// pondMeshExecRunner (opts.Runner == nil falls back to pondMeshDefaultRunner)
+// pondMeshExecRunner (opts.Runner == nil selects the production runner)
 // so the actual ProcessState logic is exercised — no handle is mocked. The only
 // substitution is a fake `ssh` binary injected via PATH so no network is
 // touched.

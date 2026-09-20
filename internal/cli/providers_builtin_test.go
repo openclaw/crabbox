@@ -20,15 +20,11 @@ func init() {
 	RegisterProvider(testBlaxelProvider{})
 	RegisterProvider(testGCPProvider{})
 	RegisterProvider(testIncusProvider{})
-	RegisterProvider(testProxmoxProvider{})
 	RegisterProvider(testFirecrackerProvider{})
 	RegisterProvider(testXCPNgProvider{})
 	RegisterProvider(testStaticSSHProvider{})
 	RegisterProvider(testExternalProvider{})
-	RegisterProvider(testExeDevProvider{})
 	RegisterProvider(testRunPodProvider{})
-	RegisterProvider(testVastProvider{})
-	RegisterProvider(testNvidiaBrevProvider{})
 	RegisterProvider(testBlacksmithProvider{})
 	RegisterProvider(testNamespaceProvider{})
 	RegisterProvider(testMorphProvider{})
@@ -37,7 +33,6 @@ func init() {
 	RegisterProvider(testFreestyleProvider{})
 	RegisterProvider(testE2BProvider{})
 	RegisterProvider(testModalProvider{})
-	RegisterProvider(testCloudflareProvider{})
 	RegisterProvider(testCloudflareDynamicWorkersProvider{})
 	RegisterProvider(testAgentSandboxProvider{})
 	RegisterProvider(testSpritesProvider{})
@@ -643,8 +638,6 @@ func (testParallelsProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpoin
 	return nil
 }
 
-type testProxmoxProvider struct{}
-
 type testFirecrackerProvider struct{}
 
 type testIncusProvider struct{}
@@ -728,66 +721,6 @@ type testIncusFlagValues struct {
 	User            *string
 	WorkRoot        *string
 	ProxyListenPort *string
-}
-
-func (testProxmoxProvider) Spec() ProviderSpec {
-	return ProviderSpec{
-		Name:        "proxmox",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
-		Coordinator: CoordinatorNever,
-	}
-}
-func (testProxmoxProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
-	return testProxmoxFlagValues{
-		APIURL:      fs.String("proxmox-api-url", defaults.Proxmox.APIURL, "Proxmox VE API URL"),
-		Node:        fs.String("proxmox-node", defaults.Proxmox.Node, "Proxmox VE node name"),
-		TemplateID:  fs.Int("proxmox-template-id", defaults.Proxmox.TemplateID, "Proxmox QEMU template VMID"),
-		User:        fs.String("proxmox-user", defaults.Proxmox.User, "Proxmox VM user"),
-		WorkRoot:    fs.String("proxmox-work-root", defaults.Proxmox.WorkRoot, "Proxmox VM work root"),
-		InsecureTLS: fs.Bool("proxmox-insecure-tls", defaults.Proxmox.InsecureTLS, "allow self-signed Proxmox TLS certificates"),
-	}
-}
-func (testProxmoxProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(testProxmoxFlagValues)
-	if !ok {
-		return nil
-	}
-	if flagWasSet(fs, "proxmox-api-url") {
-		cfg.Proxmox.APIURL = *v.APIURL
-	}
-	if flagWasSet(fs, "proxmox-node") {
-		cfg.Proxmox.Node = *v.Node
-	}
-	if flagWasSet(fs, "proxmox-template-id") {
-		cfg.Proxmox.TemplateID = *v.TemplateID
-		cfg.ServerType = proxmoxServerTypeForConfig(*cfg)
-	}
-	if flagWasSet(fs, "proxmox-user") {
-		cfg.Proxmox.User = *v.User
-		cfg.SSHUser = *v.User
-	}
-	if flagWasSet(fs, "proxmox-work-root") {
-		cfg.Proxmox.WorkRoot = *v.WorkRoot
-		cfg.WorkRoot = *v.WorkRoot
-	}
-	if flagWasSet(fs, "proxmox-insecure-tls") {
-		cfg.Proxmox.InsecureTLS = *v.InsecureTLS
-	}
-	return nil
-}
-func (p testProxmoxProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
-}
-
-type testProxmoxFlagValues struct {
-	APIURL      *string
-	Node        *string
-	TemplateID  *int
-	User        *string
-	WorkRoot    *string
-	InsecureTLS *bool
 }
 
 type testXCPNgProvider struct{}
@@ -939,58 +872,6 @@ func (b testStaticSSHBackend) Resolve(context.Context, ResolveRequest) (LeaseTar
 	return b.Acquire(context.Background(), AcquireRequest{})
 }
 
-type testExeDevProvider struct{}
-
-func (testExeDevProvider) Spec() ProviderSpec {
-	return ProviderSpec{
-		Aliases:     []string{"exe", "exedev"},
-		Name:        "exe-dev",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync},
-		Coordinator: CoordinatorNever,
-	}
-}
-func (testExeDevProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
-	return testExeDevFlagValues{
-		ControlHost: fs.String("exe-dev-control-host", defaults.ExeDev.ControlHost, "exe.dev SSH API host"),
-		Image:       fs.String("exe-dev-image", defaults.ExeDev.Image, "exe.dev VM image"),
-		User:        fs.String("exe-dev-user", defaults.ExeDev.User, "exe.dev VM SSH user"),
-		WorkRoot:    fs.String("exe-dev-work-root", defaults.ExeDev.WorkRoot, "exe.dev VM work root"),
-	}
-}
-func (testExeDevProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(testExeDevFlagValues)
-	if !ok {
-		return nil
-	}
-	if flagWasSet(fs, "exe-dev-control-host") {
-		cfg.ExeDev.ControlHost = *v.ControlHost
-	}
-	if flagWasSet(fs, "exe-dev-image") {
-		cfg.ExeDev.Image = *v.Image
-	}
-	if flagWasSet(fs, "exe-dev-user") {
-		cfg.ExeDev.User = *v.User
-		cfg.SSHUser = *v.User
-	}
-	if flagWasSet(fs, "exe-dev-work-root") {
-		cfg.ExeDev.WorkRoot = *v.WorkRoot
-		cfg.WorkRoot = *v.WorkRoot
-	}
-	return nil
-}
-func (p testExeDevProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
-}
-
-type testExeDevFlagValues struct {
-	ControlHost *string
-	Image       *string
-	User        *string
-	WorkRoot    *string
-}
-
 type testRunPodProvider struct{}
 
 func (testRunPodProvider) Spec() ProviderSpec {
@@ -1007,56 +888,6 @@ func (testRunPodProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
 	return nil
 }
 func (p testRunPodProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
-}
-
-type testVastProvider struct{}
-
-func (testVastProvider) Spec() ProviderSpec {
-	return ProviderSpec{
-		Aliases:     []string{"vast-ai", "vastai"},
-		Name:        "vast",
-		Family:      "vast",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
-		Coordinator: CoordinatorNever,
-	}
-}
-func (testVastProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
-	return struct{ APIURL *string }{
-		APIURL: fs.String("vast-api-url", defaults.Vast.APIURL, ""),
-	}
-}
-func (testVastProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) error {
-	v, _ := values.(struct{ APIURL *string })
-	if flagWasSet(fs, "vast-api-url") && v.APIURL != nil {
-		cfg.Vast.APIURL = *v.APIURL
-	}
-	return nil
-}
-func (p testVastProvider) Configure(Config, Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
-}
-
-type testNvidiaBrevProvider struct{}
-
-func (testNvidiaBrevProvider) Spec() ProviderSpec {
-	return ProviderSpec{
-		Aliases:     []string{"brev", "nvidia"},
-		Name:        "nvidia-brev",
-		Family:      "nvidia-brev",
-		Kind:        ProviderKindSSHLease,
-		Targets:     []TargetSpec{{OS: targetLinux}},
-		Features:    FeatureSet{FeatureSSH, FeatureCrabboxSync, FeatureCleanup},
-		Coordinator: CoordinatorNever,
-	}
-}
-func (testNvidiaBrevProvider) RegisterFlags(*flag.FlagSet, Config) any { return noProviderFlags{} }
-func (testNvidiaBrevProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
-	return nil
-}
-func (p testNvidiaBrevProvider) Configure(Config, Runtime) (Backend, error) {
 	return testSSHBackend{spec: p.Spec()}, nil
 }
 
@@ -1521,59 +1352,6 @@ func (testModalProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any) e
 }
 func (p testModalProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
 	return testDelegatedBackend{spec: p.Spec()}, nil
-}
-
-type testCloudflareProvider struct{}
-
-var testCloudflareDoctorResult *DoctorResult
-
-func (testCloudflareProvider) Spec() ProviderSpec {
-	return ProviderSpec{
-		Aliases:          []string{"cf"},
-		Name:             "cloudflare",
-		Kind:             ProviderKindDelegatedRun,
-		Targets:          []TargetSpec{{OS: targetLinux}},
-		Features:         FeatureSet{FeatureArchiveSync, FeatureCleanup},
-		Coordinator:      CoordinatorNever,
-		ClassDisposition: ProviderClassDispositionMapped,
-	}
-}
-func (testCloudflareProvider) RegisterFlags(*flag.FlagSet, Config) any {
-	return noProviderFlags{}
-}
-func (testCloudflareProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
-	return nil
-}
-func (testCloudflareProvider) ServerTypeForConfig(cfg Config) string {
-	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
-		return candidates[0]
-	}
-	if IsCanonicalProviderClass(cfg.Class) {
-		return ""
-	}
-	class := cfg.Class
-	cfg.Class = strings.ToLower(strings.TrimSpace(class))
-	if cfg.Class == "" {
-		cfg.Class = "standard"
-	}
-	if candidates, matched := providerClassCandidatesForConfig(cfg); matched {
-		return candidates[0]
-	}
-	if instanceType, ok := normalizeCloudflareContainerInstanceType(class); ok {
-		return instanceType
-	}
-	return strings.TrimSpace(class)
-}
-func (p testCloudflareProvider) Configure(cfg Config, rt Runtime) (Backend, error) {
-	return testDoctorDelegatedBackend{testDelegatedBackend{spec: p.Spec()}}, nil
-}
-
-func (p testCloudflareProvider) ConfigureDoctor(cfg Config, rt Runtime) (DoctorBackend, error) {
-	backend, err := p.Configure(cfg, rt)
-	if err != nil {
-		return nil, err
-	}
-	return backend.(DoctorBackend), nil
 }
 
 type testCloudflareDynamicWorkersProvider struct{}
@@ -2386,9 +2164,6 @@ type testDoctorDelegatedBackend struct {
 }
 
 func (b testDoctorDelegatedBackend) Doctor(context.Context, DoctorRequest) (DoctorResult, error) {
-	if testCloudflareDoctorResult != nil {
-		return *testCloudflareDoctorResult, nil
-	}
 	return DoctorResult{Provider: b.spec.Name, Message: "direct_check=ready"}, nil
 }
 

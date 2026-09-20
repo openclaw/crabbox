@@ -19,7 +19,7 @@ func TestCoordinatorAcquireRejectsUnrelatedLeaseBeforeBootstrapOrCleanup(t *test
 			t.Run(fmt.Sprintf("fixed=%v/kept=%v", fixed, kept), func(t *testing.T) {
 				isolateTestUserDirs(t)
 				const heldID = "cbx_111111111111"
-				heldKey, _, err := ensureTestboxKeyForConfig(baseConfig(), heldID)
+				heldKey, _, err := EnsureTestboxKeyForConfig(baseConfig(), heldID)
 				if err != nil {
 					t.Fatal(err)
 				}

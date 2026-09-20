@@ -93,6 +93,29 @@ for stateless leases that do not need native checkpoint/fork. Pass
 `--azure-os-disk ephemeral-preview` to opt into Azure's public-preview
 full-caching mode for ephemeral OS disks.
 
+## Fixed operation IDs
+
+Direct VM leases accept `warmup --lease-id cbx_<12 lowercase hex>` without a
+coordinator. Repeat the same command to recover the same VM after a lost reply
+or SSH-readiness failure. The local durable claim binds the subscription,
+resource group, create inputs, per-lease SSH key, allocation nonce, and observed
+immutable VM ID. Changed inputs or a replaced VM are rejected. Keep the local
+claim and SSH key until cleanup completes.
+
+Fixed creates submit one SKU in the configured location (the class's preferred
+SKU unless `--type` is explicit). They do not perform SKU, market, or region
+fallback, and do not roll back an ambiguous allocation. VM creation is
+create-only. Replay observes the original attempt and never submits a second
+allocation. This supports VM-image leases, including native Windows and WSL2;
+snapshot forks and `ephemeral-preview` disks are not supported on this direct
+fixed-ID path. Ordinary direct leases retain their existing fallback behavior.
+
+Use `stop --provider azure <lease-id>` for owned cleanup. Successful deletion
+retains a terminal tombstone; the ID cannot create another VM. If a failed
+attempt has not produced an identifiable VM, Crabbox retains the claim and key
+and refuses both replacement and unproven deletion. Inspect the named Azure
+resources and resolve the incomplete attempt before removing recovery state.
+
 ## Backend selection
 
 `azure.backend` (CLI `--azure-backend`, env `CRABBOX_AZURE_BACKEND`) selects the
@@ -272,6 +295,12 @@ until the required service-principal secrets are present.
     the shared infra remains. Brokered release and orphan cleanup use the
     coordinator's canonical-resource, quarantine, and fresh-preflight rules; see
     [Lifecycle and cleanup](../features/lifecycle-cleanup.md).
+
+For ordinary direct acquisition, successful owned rollback also removes the
+lease's generated SSH credentials and host-trust files. Failed deletion or
+uncertain VM ownership retains them; a local artifact-cleanup error prevents an
+automatic fresh-lease retry. Fixed-ID acquisition and its durable recovery
+records keep their existing lifecycle.
 
 ### Brokered checkpoint ownership
 

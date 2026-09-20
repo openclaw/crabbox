@@ -166,7 +166,9 @@ func TestReadyPoolRunBorrowInputForRunRequiresExactNoSyncCommit(t *testing.T) {
 		t.Fatalf("run borrow input did not negotiate heartbeat support: %#v", input)
 	}
 
-	_, err = readyPoolRunBorrowInputForRun(Config{Actions: ActionsConfig{Ref: "feature"}}, Repo{BaseRef: "main"}, "openclaw/openclaw", true)
+	refOnlyConfig := Config{}
+	refOnlyConfig.Actions.Ref = "feature"
+	_, err = readyPoolRunBorrowInputForRun(refOnlyConfig, Repo{BaseRef: "main"}, "openclaw/openclaw", true)
 	if err == nil {
 		t.Fatal("no-sync ref-only input succeeded")
 	}

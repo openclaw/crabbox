@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -174,6 +176,75 @@ func TestGCPSchedulingAppliesTTLDelete(t *testing.T) {
 	if got := gcpScheduling(Config{}); got != nil {
 		t.Fatalf("empty scheduling=%#v", got)
 	}
+}
+
+func TestGCPGetServerCancellationReachesHTTPTransport(t *testing.T) {
+	received := make(chan string, 1)
+	requestCanceled := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case received <- r.Method + " " + r.URL.Path:
+		default:
+		}
+		select {
+		case <-r.Context().Done():
+			select {
+			case requestCanceled <- struct{}{}:
+			default:
+			}
+		case <-release:
+			_, _ = io.WriteString(w, `{"name":"readiness-instance","status":"RUNNING"}`)
+		}
+	}))
+	defer server.Close()
+	instances, err := gcpcompute.NewInstancesRESTClient(context.Background(), option.WithoutAuthentication(), option.WithEndpoint(server.URL), option.WithHTTPClient(server.Client()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instances.Close()
+	client := &GCPClient{Project: "project", Zone: "us-central1-b", instances: instances}
+	ctx, cancel := context.WithCancel(context.Background())
+	var got Server
+	var gotErr error
+	done := make(chan struct{})
+	go func() {
+		got, gotErr = client.GetServer(ctx, "readiness-instance")
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		close(release)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("GCP observation did not return during cleanup")
+		}
+	}()
+	select {
+	case request := <-received:
+		if request != "GET /compute/v1/projects/project/zones/us-central1-b/instances/readiness-instance" {
+			t.Fatalf("unexpected request: %s", request)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("GCP observation did not reach the local HTTPS server")
+	}
+	started := time.Now()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("GCP observation did not return after caller cancellation")
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("local HTTPS request did not observe cancellation")
+	}
+	if !errors.Is(gotErr, context.Canceled) || !reflect.DeepEqual(got, Server{}) {
+		t.Fatalf("server=%+v error=%v, want zero server and cancellation", got, gotErr)
+	}
+	t.Logf("real Google SDK HTTPS request observed cancellation and returned in %s", time.Since(started))
 }
 
 func TestGCPListCrabboxServersAggregatesZones(t *testing.T) {

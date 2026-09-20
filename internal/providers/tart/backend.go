@@ -113,10 +113,12 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (target 
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	cleanupKey := true
+	cleanupKey := false
 	defer func() {
 		if cleanupKey {
-			core.RemoveStoredTestboxKey(leaseID)
+			if err := core.RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
+				acquireErr = errors.Join(acquireErr, fmt.Errorf("remove SSH connection artifacts for lease %s: %w", leaseID, err))
+			}
 		}
 	}()
 	cfg.SSHKey = keyPath
@@ -142,7 +144,11 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (target 
 		if err := verifyTartVMIdentity(name, storage, identity); err != nil {
 			return err
 		}
-		return b.deleteVM(context.Background(), name)
+		if err := b.deleteVM(context.Background(), name); err != nil {
+			return err
+		}
+		cleanupKey = true
+		return nil
 	}
 	if cfg.Tart.Image == core.DefaultTartImage {
 		fmt.Fprintln(b.rt.Stderr, "verifying built-in Tart image contents before boot (full disk read)")
@@ -180,7 +186,10 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (target 
 				return core.CleanupLeaseClaimIfUnchangedAfter(leaseID, publishedClaim, exists, cleanupUnclaimedVM)
 			}
 		}
-		acquireErr = errors.Join(acquireErr, cleanup())
+		cleanupErr := cleanup()
+		// Retain access material if deletion or retirement of our claim is incomplete.
+		cleanupKey = cleanupErr == nil
+		acquireErr = errors.Join(acquireErr, cleanupErr)
 	}()
 	ctx = startup.ctx
 	ip, err := b.waitForIP(ctx, name)
@@ -523,48 +532,53 @@ func (b *backend) configureVM(ctx context.Context, cfg core.Config, name string)
 
 // waitForIP polls `tart ip` until the VM has an IP address.
 func (b *backend) waitForIP(ctx context.Context, name string) (string, error) {
-	deadline := time.After(5 * time.Minute)
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
+	waitForTick := func(pollCtx context.Context, _ time.Duration) error {
+		select {
+		case <-pollCtx.Done():
+			return context.Cause(pollCtx)
+		case <-ticker.C:
+			return nil
+		}
+	}
 	type observation struct {
 		result core.LocalCommandResult
 		err    error
 	}
-	initial := true
-	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 3*time.Second,
-		func(context.Context, time.Duration) error {
-			select {
-			case <-ctx.Done():
-				return core.Exit(2, "tart ip %s: context cancelled", name)
-			case <-deadline:
-				return core.Exit(5, "tart ip %s: timed out waiting for IP address", name)
-			case <-ticker.C:
-				return nil
-			}
-		},
-		func(context.Context) (observation, error) {
-			if initial {
-				initial = false
-				return observation{}, nil
-			}
-			commandResult, commandErr := b.tart(ctx, []string{"ip", name}, nil, nil)
-			return observation{result: commandResult, err: commandErr}, nil
-		},
-		func(_ context.Context, current observation, fetchErr error) (bool, error) {
-			if fetchErr != nil {
-				return false, fetchErr
-			}
-			if current.err != nil {
-				stderr := strings.ToLower(strings.TrimSpace(current.result.Stderr))
-				if strings.Contains(stderr, "is your vm running") || strings.Contains(stderr, "not running") {
-					return false, core.Exit(2, "tart ip %s: %s", name, strings.TrimSpace(current.result.Stderr))
+	var result shared.PollResult[observation]
+	// Preserve the delayed first probe and the original ticker cadence.
+	err := waitForTick(waitCtx, 0)
+	if err == nil {
+		result, err = shared.Poll(waitCtx, 0, 3*time.Second, waitForTick,
+			func(pollCtx context.Context) (observation, error) {
+				commandResult, commandErr := b.tart(pollCtx, []string{"ip", name}, nil, nil)
+				return observation{result: commandResult, err: commandErr}, nil
+			},
+			func(_ context.Context, current observation, fetchErr error) (bool, error) {
+				if fetchErr != nil {
+					return false, fetchErr
 				}
-				return false, nil
-			}
-			ip := strings.TrimSpace(current.result.Stdout)
-			return ip != "" && ip != "--", nil
-		}, nil)
+				if current.err != nil {
+					stderr := strings.ToLower(strings.TrimSpace(current.result.Stderr))
+					if strings.Contains(stderr, "is your vm running") || strings.Contains(stderr, "not running") {
+						return false, core.Exit(2, "tart ip %s: %s", name, strings.TrimSpace(current.result.Stderr))
+					}
+					return false, nil
+				}
+				ip := strings.TrimSpace(current.result.Stdout)
+				return ip != "" && ip != "--", nil
+			}, nil)
+	}
 	if err != nil {
+		if cause := context.Cause(ctx); cause != nil && errors.Is(err, cause) {
+			return "", shared.PollTerminationError(ctx, err, core.Exit(2, "tart ip %s: context cancelled", name))
+		}
+		if waitCtx.Err() == context.DeadlineExceeded && errors.Is(err, context.DeadlineExceeded) {
+			return "", shared.PollTerminationError(waitCtx, err, core.Exit(5, "tart ip %s: timed out waiting for IP address", name))
+		}
 		return "", err
 	}
 	return strings.TrimSpace(result.Value.result.Stdout), nil

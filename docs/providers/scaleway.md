@@ -210,6 +210,11 @@ The provider implements a direct Linux SSH lease over Scaleway Instances:
    deletes only resources with complete Crabbox Scaleway ownership tags and an
    exact project-, zone-, and server-bound local claim.
 
+Public IPv4 readiness has a five-minute budget covering both API observations
+and waits. Earlier caller cancellation or deadlines take precedence; an
+already-canceled request does not start an observation. Immediate API errors
+retain their original cause rather than being reported as readiness timeouts.
+
 `list` uses all-pages Scaleway inventory. `resolve` may inspect complete,
 canonical live ownership tags without a claim, but reuse requires explicit
 supported `--reclaim` adoption. Recovery claims retain enough Scaleway identity

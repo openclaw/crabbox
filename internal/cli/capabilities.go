@@ -130,53 +130,23 @@ func enforceManagedLeaseCapabilities(cfg Config, server Server, leaseID string) 
 }
 
 func macOSScreenSharingLease(cfg Config, server Server, leaseID string) (bool, error) {
-	if !macOSLeaseTarget(cfg, server) {
+	if cfg.TargetOS != targetMacOS && !strings.EqualFold(server.Labels["target"], targetMacOS) {
 		return false, nil
-	}
-	if ok, err := parallelsOwnedMacOSDesktopLease(cfg, server, leaseID); err != nil || ok {
-		return ok, err
 	}
 	providerName := firstNonBlank(server.Provider, cfg.Provider)
 	if providerName == "" {
 		return true, nil
 	}
 	provider, err := ProviderFor(providerName)
-	return err != nil || provider.Spec().Coordinator != CoordinatorNever, nil
-}
-
-func macOSLeaseTarget(cfg Config, server Server) bool {
-	return cfg.TargetOS == targetMacOS || strings.EqualFold(server.Labels["target"], targetMacOS)
-}
-
-// parallelsOwnedMacOSDesktopLease allows desktop reuse on a Crabbox-owned
-// Parallels macOS clone without rewriting desktop=true. Native --desktop
-// grants ARD -all; already-configured Screen Sharing is proved later by
-// RFB/SSH. Source VM names and unowned claims stay outside this allowance.
-func parallelsOwnedMacOSDesktopLease(cfg Config, server Server, leaseID string) (bool, error) {
-	if firstNonBlank(server.Provider, cfg.Provider) != parallelsProvider {
-		return false, nil
-	}
-	leaseID = strings.TrimSpace(leaseID)
-	nameLeaseID, _ := parallelsLeaseFromVMName(server.Name)
-	if leaseID == "" || nameLeaseID == "" || nameLeaseID != leaseID {
-		return false, nil
-	}
-	if label := strings.TrimSpace(server.Labels["lease"]); label != "" && label != leaseID {
-		return false, nil
-	}
-	cloudID := strings.TrimSpace(server.CloudID)
-	host := strings.TrimSpace(server.Labels["host"])
-	if cloudID == "" || host == "" {
-		return false, nil
-	}
-	claim, ok, exact, err := ResolveLeaseClaimForProviderWithExact(leaseID, parallelsProvider)
 	if err != nil {
-		return false, err
+		return true, nil
 	}
-	if !ok || !exact || claim.LeaseID != leaseID || strings.TrimSpace(claim.CloudID) != cloudID || strings.TrimSpace(claim.Labels["host"]) != host {
-		return false, nil
+	if capability, ok := provider.(DesktopLeaseCapabilityProvider); ok {
+		if allowed, err := capability.DesktopLeaseWithoutLabel(cfg, server, leaseID); err != nil || allowed {
+			return allowed, err
+		}
 	}
-	return true, nil
+	return provider.Spec().Coordinator != CoordinatorNever, nil
 }
 
 func labelBool(value string) bool {

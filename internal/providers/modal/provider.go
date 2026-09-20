@@ -12,6 +12,10 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) ServerTypeForConfig(cfg core.Config) string {
+	return core.Blank(cfg.Modal.Image, core.ModalConfigDefaultImage)
+}
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Authentication:             core.DirectProviderAuthentication(core.ProviderAuthenticationSDKCredentials),

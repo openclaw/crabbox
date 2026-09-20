@@ -73,7 +73,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	}
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
-	cfg.ServerType = core.ProxmoxServerTypeForConfig(cfg)
+	cfg.ServerType = (Provider{}).ServerTypeForConfig(cfg)
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=proxmox lease=%s slug=%s node=%s template=%d keep=%v\n",
 		leaseID, slug, cfg.Proxmox.Node, cfg.Proxmox.TemplateID, keep)
 	server, err := client.CreateServer(ctx, cfg, publicKey, leaseID, slug, keep)

@@ -128,19 +128,6 @@ func normalizeArtifactStorage(storage string) string {
 	}
 }
 
-func listArtifactBundleFiles(dir string) ([]artifactFile, error) {
-	root, err := os.OpenRoot(dir)
-	if err != nil {
-		return nil, Exit(2, "read artifact directory: %v", err)
-	}
-	defer root.Close()
-	return listArtifactBundleFilesRoot(root, dir)
-}
-
-func listArtifactBundleFilesRoot(root *os.Root, dir string) ([]artifactFile, error) {
-	return listArtifactBundleRoot(root, dir)
-}
-
 func listArtifactBundleRoot(root *os.Root, dir string) ([]artifactFile, error) {
 	var files []artifactFile
 	var directoryInfos []os.FileInfo
@@ -236,90 +223,66 @@ func validateArtifactBundleRoot(root *os.Root, absDirectory string) (string, os.
 	return resolvedDirectory, rootInfo, nil
 }
 
-func snapshotArtifactFiles(root *os.Root, files []artifactFile) ([]artifactFile, func(), error) {
-	snapshot, cleanup, err := createArtifactSnapshotFile(root)
-	if err != nil {
-		return nil, func() {}, err
+func prepareArtifactFiles(root *os.Root, files []artifactFile, snapshot bool) (_ []artifactFile, cleanup func(), err error) {
+	cleanup = func() {}
+	var snapshotFile *os.File
+	if snapshot {
+		snapshotFile, cleanup, err = createArtifactSnapshotFile(root)
+		if err != nil {
+			return nil, cleanup, err
+		}
 	}
-	snapshots := make([]artifactFile, 0, len(files))
+	defer func() {
+		if err != nil {
+			cleanup()
+			cleanup = func() {}
+		}
+	}()
+	prepared := make([]artifactFile, 0, len(files))
 	var offset int64
 	for _, file := range files {
 		if strings.TrimSpace(file.rootName) == "" || file.sourceInfo == nil {
-			cleanup()
-			return nil, func() {}, Exit(2, "artifact %s is missing validated bundle identity", file.Name)
+			return nil, cleanup, Exit(2, "artifact %s is missing validated bundle identity", file.Name)
 		}
 		source, err := openArtifactRootReadOnly(root, file.rootName)
 		if err != nil {
-			cleanup()
-			return nil, func() {}, Exit(2, "open validated artifact %s: %v", file.Name, err)
+			return nil, cleanup, Exit(2, "open validated artifact %s: %v", file.Name, err)
 		}
 		info, statErr := source.Stat()
 		if statErr != nil {
 			_ = source.Close()
-			cleanup()
-			return nil, func() {}, Exit(2, "stat validated artifact %s: %v", file.Name, statErr)
+			return nil, cleanup, Exit(2, "stat validated artifact %s: %v", file.Name, statErr)
 		}
 		if !info.Mode().IsRegular() || !os.SameFile(file.sourceInfo, info) {
 			_ = source.Close()
-			cleanup()
-			return nil, func() {}, Exit(2, "artifact %s changed after validation", file.Name)
+			return nil, cleanup, Exit(2, "artifact %s changed after validation", file.Name)
 		}
 		hash := sha256.New()
-		size, copyErr := io.Copy(io.MultiWriter(snapshot, hash), source)
-		closeSourceErr := source.Close()
-		if copyErr != nil {
-			cleanup()
-			return nil, func() {}, Exit(2, "snapshot artifact %s: %v", file.Name, copyErr)
+		var writer io.Writer = hash
+		operation := "hash validated artifact"
+		if snapshotFile != nil {
+			writer = io.MultiWriter(snapshotFile, hash)
+			operation = "snapshot artifact"
 		}
-		if closeSourceErr != nil {
-			cleanup()
-			return nil, func() {}, Exit(2, "close validated artifact %s: %v", file.Name, closeSourceErr)
-		}
-		file.snapshotFile = snapshot
-		file.snapshotOffset = offset
-		file.snapshotSize = size
-		file.snapshotHash = hex.EncodeToString(hash.Sum(nil))
-		file.snapshotValid = true
-		snapshots = append(snapshots, file)
-		offset += size
-	}
-	return snapshots, cleanup, nil
-}
-
-func hashValidatedArtifactFiles(root *os.Root, files []artifactFile) ([]artifactFile, error) {
-	validated := make([]artifactFile, 0, len(files))
-	for _, file := range files {
-		if strings.TrimSpace(file.rootName) == "" || file.sourceInfo == nil {
-			return nil, Exit(2, "artifact %s is missing validated bundle identity", file.Name)
-		}
-		source, err := openArtifactRootReadOnly(root, file.rootName)
-		if err != nil {
-			return nil, Exit(2, "open validated artifact %s: %v", file.Name, err)
-		}
-		info, statErr := source.Stat()
-		if statErr != nil {
-			_ = source.Close()
-			return nil, Exit(2, "stat validated artifact %s: %v", file.Name, statErr)
-		}
-		if !info.Mode().IsRegular() || !os.SameFile(file.sourceInfo, info) {
-			_ = source.Close()
-			return nil, Exit(2, "artifact %s changed after validation", file.Name)
-		}
-		hash := sha256.New()
-		size, hashErr := io.Copy(hash, source)
+		size, copyErr := io.Copy(writer, source)
 		closeErr := source.Close()
-		if hashErr != nil {
-			return nil, Exit(2, "hash validated artifact %s: %v", file.Name, hashErr)
+		if copyErr != nil {
+			return nil, cleanup, Exit(2, "%s %s: %v", operation, file.Name, copyErr)
 		}
 		if closeErr != nil {
-			return nil, Exit(2, "close validated artifact %s: %v", file.Name, closeErr)
+			return nil, cleanup, Exit(2, "close validated artifact %s: %v", file.Name, closeErr)
+		}
+		if snapshotFile != nil {
+			file.snapshotFile = snapshotFile
+			file.snapshotOffset = offset
 		}
 		file.snapshotSize = size
 		file.snapshotHash = hex.EncodeToString(hash.Sum(nil))
 		file.snapshotValid = true
-		validated = append(validated, file)
+		prepared = append(prepared, file)
+		offset += size
 	}
-	return validated, nil
+	return prepared, cleanup, nil
 }
 
 func snapshotArtifactData(root *os.Root, file artifactFile, data []byte) ([]artifactFile, func(), error) {
@@ -386,10 +349,10 @@ func resolveArtifactSnapshotBase(rootInfo os.FileInfo, rootPath, path string) (s
 	if err != nil {
 		return "", Exit(2, "resolve private artifact snapshot: %v", err)
 	}
-	if artifactPathWithinExact(absRoot, absPath) {
+	if artifactPathWithin(absRoot, absPath) {
 		return "", Exit(2, "temporary directory must be outside artifact directory for safe publishing")
 	}
-	if resolvedRoot, resolveRootErr := filepath.EvalSymlinks(absRoot); resolveRootErr == nil && artifactPathWithinExact(resolvedRoot, resolvedPath) {
+	if resolvedRoot, resolveRootErr := filepath.EvalSymlinks(absRoot); resolveRootErr == nil && artifactPathWithin(resolvedRoot, resolvedPath) {
 		return "", Exit(2, "temporary directory must be outside artifact directory for safe publishing")
 	}
 	for current := filepath.Dir(resolvedPath); ; current = filepath.Dir(current) {
@@ -628,7 +591,7 @@ func uploadArtifactGrantReader(ctx context.Context, file io.ReaderAt, size int64
 	}
 	req, err := http.NewRequestWithContext(ctx, method, grant.Upload.URL, requestBody())
 	if err != nil {
-		return Exit(2, "create artifact upload request for %s: %v", grant.Name, err)
+		return Exit(2, "create artifact upload request for %s: %v", grant.Name, artifactRequestError(err))
 	}
 	req.ContentLength = contentLength
 	req.GetBody = func() (io.ReadCloser, error) {
@@ -1187,25 +1150,20 @@ func artifactSummaryRootName(directory, resolvedDirectory string, binding *artif
 }
 
 func artifactPathWithin(root, path string) bool {
-	return artifactPathWithinExact(root, path)
-}
-
-func artifactPathWithinExact(root, path string) bool {
 	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
 	return err == nil && rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func artifactPublishSummaryText(summary string, binding *artifactSummaryBinding, insideBundle bool, root *os.Root, files []artifactFile) (string, func(), error) {
-	cleanup := func() {}
+func artifactPublishSummaryText(summary string, binding *artifactSummaryBinding, insideBundle bool, root *os.Root, files []artifactFile) (string, error) {
 	if binding == nil {
-		return strings.TrimSpace(summary), cleanup, nil
+		return strings.TrimSpace(summary), nil
 	}
 	if !insideBundle {
 		data, err := io.ReadAll(binding.file)
 		if err != nil {
-			return "", cleanup, Exit(2, "read summary file: %v", err)
+			return "", Exit(2, "read summary file: %v", err)
 		}
-		return combineArtifactSummary(summary, data), cleanup, nil
+		return combineArtifactSummary(summary, data), nil
 	}
 	for _, file := range files {
 		if file.sourceInfo == nil || !os.SameFile(binding.fileInfo, file.sourceInfo) {
@@ -1215,46 +1173,45 @@ func artifactPublishSummaryText(summary string, binding *artifactSummaryBinding,
 		if summaryFile.snapshotFile == nil {
 			data, err := io.ReadAll(binding.file)
 			if err != nil {
-				return "", cleanup, Exit(2, "read validated summary file: %v", err)
+				return "", Exit(2, "read validated summary file: %v", err)
 			}
 			if summaryFile.snapshotValid {
 				hash := sha256.Sum256(data)
 				if int64(len(data)) != summaryFile.snapshotSize || !strings.EqualFold(hex.EncodeToString(hash[:]), summaryFile.snapshotHash) {
-					return "", cleanup, Exit(2, "summary file changed after artifact validation")
+					return "", Exit(2, "summary file changed after artifact validation")
 				}
 			}
-			return combineArtifactSummary(summary, data), cleanup, nil
+			return combineArtifactSummary(summary, data), nil
 		}
 		data, readErr := io.ReadAll(io.NewSectionReader(summaryFile.snapshotFile, summaryFile.snapshotOffset, summaryFile.snapshotSize))
 		if readErr != nil {
-			cleanup()
-			return "", func() {}, Exit(2, "read validated summary file: %v", readErr)
+			return "", Exit(2, "read validated summary file: %v", readErr)
 		}
-		return combineArtifactSummary(summary, data), cleanup, nil
+		return combineArtifactSummary(summary, data), nil
 	}
 	if binding.rootName != "" {
 		file, err := openArtifactRootReadOnly(root, binding.rootName)
 		if err != nil {
-			return "", cleanup, Exit(2, "summary file changed before artifact bundle validation: %v", err)
+			return "", Exit(2, "summary file changed before artifact bundle validation: %v", err)
 		}
 		info, statErr := file.Stat()
 		closeErr := file.Close()
 		if statErr != nil {
-			return "", cleanup, Exit(2, "stat validated summary file: %v", statErr)
+			return "", Exit(2, "stat validated summary file: %v", statErr)
 		}
 		if closeErr != nil {
-			return "", cleanup, Exit(2, "close validated summary file: %v", closeErr)
+			return "", Exit(2, "close validated summary file: %v", closeErr)
 		}
 		if !info.Mode().IsRegular() || !os.SameFile(binding.fileInfo, info) {
-			return "", cleanup, Exit(2, "summary file changed before artifact bundle validation")
+			return "", Exit(2, "summary file changed before artifact bundle validation")
 		}
 		data, err := io.ReadAll(binding.file)
 		if err != nil {
-			return "", cleanup, Exit(2, "read validated summary file: %v", err)
+			return "", Exit(2, "read validated summary file: %v", err)
 		}
-		return combineArtifactSummary(summary, data), cleanup, nil
+		return combineArtifactSummary(summary, data), nil
 	}
-	return "", cleanup, Exit(2, "summary file changed before artifact bundle validation")
+	return "", Exit(2, "summary file changed before artifact bundle validation")
 }
 
 func combineArtifactSummary(summary string, data []byte) string {
@@ -1272,10 +1229,7 @@ func summaryText(summary, summaryFile string) (string, error) {
 	if err != nil {
 		return "", Exit(2, "read summary file: %v", err)
 	}
-	if strings.TrimSpace(summary) != "" {
-		return strings.TrimSpace(summary) + "\n\n" + strings.TrimSpace(string(data)), nil
-	}
-	return strings.TrimSpace(string(data)), nil
+	return combineArtifactSummary(summary, data), nil
 }
 
 func postGitHubPRComment(ctx context.Context, opts artifactPublishOptions, body []byte) error {

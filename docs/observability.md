@@ -87,6 +87,24 @@ updated; the CLI does not fall back to anonymous record creation. Run IDs are
 single-invocation identities, and recovery relies on the existing record's
 retention. A new CLI invocation always uses a new ID.
 
+If this invocation abandons admission before any workload can start, the CLI
+separately reports a failed admission to the original authenticated coordinator.
+The first admission's effective authentication, owner, and organization headers
+are retained only in memory for this admission and its terminal bookkeeping;
+normal token refresh outside that invocation binding is unchanged.
+This bookkeeping may add up to 60 seconds and three attempts after the existing
+10-second admission allowance; it does not extend admission or replay the command.
+The coordinator checks the original owner, organization, and request, and refuses
+to change a record whose lifecycle has advanced. A matching absent admission can
+be recorded as failed atomically, so a late original admission cannot reopen it.
+This is failed pre-work history, not a signed workload receipt.
+
+The initiating command error remains the result. If terminal bookkeeping cannot
+be confirmed, the CLI explicitly reports unresolved history and the original run
+ID. Inspect that history without replaying the workload: there is no persistent
+retry queue or automatic repair of older stranded records. Acknowledged workload
+completion still uses the separate signed-receipt finish path.
+
 - **`history`** lists recorded runs. Filter with `--lease`, `--owner`, `--org`,
   `--state`, and `--limit` (default 50). It is intended for command debugging,
   not unbounded log archival.

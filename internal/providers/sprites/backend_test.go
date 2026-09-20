@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -830,5 +832,75 @@ func TestJSONRequestAdoptionEnvelope(t *testing.T) {
 				t.Fatalf("calls=%d", calls)
 			}
 		})
+	}
+}
+
+func TestSpritesBindingFlagsAndPrevalidation(t *testing.T) {
+	for _, provider := range []string{spritesProvider, "fixture-other", " Sprites "} {
+		for _, raw := range []string{"", "  ", "fixture"} {
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			before := cfg
+			fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+			values := RegisterSpritesProviderFlags(fs, cfg)
+			count := 0
+			fs.VisitAll(func(*flag.Flag) { count++ })
+			if count != 2 || fs.Lookup("sprites-token") != nil {
+				t.Fatal("flag surface changed")
+			}
+			if err := ApplySpritesProviderFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, before) {
+				t.Fatalf("unvisited flags changed configuration: %v", err)
+			}
+			if err := fs.Set("sprites-api-url", raw); err != nil {
+				t.Fatal(err)
+			}
+			if err := fs.Set("sprites-work-root", raw); err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplySpritesProviderFlags(&cfg, fs, struct{}{}); err != nil || !reflect.DeepEqual(cfg, before) {
+				t.Fatal("foreign values changed configuration")
+			}
+			want := before
+			want.Sprites.APIURL, want.Sprites.WorkRoot = raw, raw
+			core.RecordProviderFlagInputs(&want, true, "sprites")
+			if err := ApplySpritesProviderFlags(&cfg, fs, values); err != nil || !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("provider=%q raw=%q: assignment or validation phase changed: %v", provider, raw, err)
+			}
+		}
+	}
+	for _, name := range []string{"class", "type", "target", "tailscale", "root"} {
+		for _, foreign := range []bool{false, true} {
+			cfg := core.BaseConfig()
+			cfg.Provider = spritesProvider
+			fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+			fs.String("class", "", "")
+			fs.String("type", "", "")
+			values := RegisterSpritesProviderFlags(fs, cfg)
+			wantError := ""
+			switch name {
+			case "class", "type":
+				if err := fs.Set(name, "fixture"); err != nil {
+					t.Fatal(err)
+				}
+				wantError = "--" + name + " is not supported for provider=sprites"
+			case "target":
+				cfg.TargetOS, wantError = "windows", "provider=sprites supports target=linux only"
+			case "tailscale":
+				cfg.Tailscale.Enabled, wantError = true, "--tailscale is not supported"
+			case "root":
+				cfg.Sprites.WorkRoot, wantError = "relative-fixture", "sprites.workRoot"
+			}
+			if err := fs.Set("sprites-work-root", "/home/sprite/fixture"); err != nil {
+				t.Fatal(err)
+			}
+			before := cfg
+			if foreign {
+				values = struct{}{}
+			}
+			err := ApplySpritesProviderFlags(&cfg, fs, values)
+			if err == nil || !strings.Contains(err.Error(), wantError) || !reflect.DeepEqual(cfg, before) {
+				t.Fatalf("%s foreign=%v: prevalidation changed: %v", name, foreign, err)
+			}
+		}
 	}
 }

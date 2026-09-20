@@ -31,6 +31,10 @@ Cancellation by the caller stops the command without printing a successful
 result. Pass `--reclaim` when you are intentionally taking over a lease that is
 claimed by another repo checkout.
 
+For coordinator-managed leases, the local claim records the idle timeout
+reported by the coordinator. Printing an SSH command preserves that policy;
+it does not replace it with the local configuration's default.
+
 Before rebinding resolved access to a stored lease, Crabbox rejects conflicting
 known provider identities, including immutable generation IDs and numeric resource
 IDs. Missing identity fields remain unknown for compatibility with older claims;

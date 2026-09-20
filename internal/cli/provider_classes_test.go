@@ -141,10 +141,6 @@ func (testNamespaceProvider) ClassProfiles() []ProviderClassProfile {
 	return testLinuxProfiles([]string{"S", "S", "S", "M", "L", "XL"})
 }
 
-func (testCloudflareProvider) ClassProfiles() []ProviderClassProfile {
-	return UniformLinuxAMD64ClassProfiles(ProviderClassMachine{Type: "standard-4"})
-}
-
 func (selectorClassProfileProvider) Spec() ProviderSpec {
 	return ProviderSpec{
 		Aliases: []string{"selector-class-alias"},
@@ -196,6 +192,15 @@ func TestProviderClassProfileSelectionIsExact(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, test.want) {
 				t.Fatalf("candidates=%v want %v", got, test.want)
+			}
+			primary := ""
+			if test.ok {
+				primary = test.want[0]
+			} else if test.cfg.Class == "custom" || test.cfg.Class == "STANDARD" || test.cfg.Class == " standard " {
+				primary = "legacy-type"
+			}
+			if got := ProviderClassPrimaryTypeForProfiles(provider.ClassProfiles(), test.cfg, "legacy-type"); got != primary {
+				t.Fatalf("primary=%q want %q", got, primary)
 			}
 		})
 	}

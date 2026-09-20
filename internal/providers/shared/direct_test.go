@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -64,6 +65,96 @@ func TestDirectCleanupDecisionMissingClaimDryRun(t *testing.T) {
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence(leaseID); err != nil || exists {
 		t.Fatalf("claim exists=%v err=%v, want retired missing-server claim", exists, err)
+	}
+}
+
+func TestRemoveSSHLeaseClaimAfter(t *testing.T) {
+	for _, name := range []string{"success", "provider failure", "artifact failure", "changed claim"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			leaseID := "cbx_123456abcdef"
+			if err := core.ClaimLeaseForRepoProviderScope(leaseID, "example", "gcp", "project:example", t.TempDir(), time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := core.ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key, err := core.PrepareStoredTestboxKeyPath(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Dir(key)
+			for _, file := range []string{"id_ed25519", "id_ed25519.pub", "known_hosts"} {
+				if err := os.WriteFile(filepath.Join(dir, file), []byte("synthetic fixture\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			current := claim
+			if name == "changed claim" {
+				current, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, map[string]string{"state": "renewed"})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if name == "artifact failure" {
+				if err := os.RemoveAll(dir); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			failure := errors.New("provider cleanup failed")
+			calls := 0
+			err = RemoveSSHLeaseClaimAfter(claim, func() error {
+				calls++
+				state, stateErr := core.CrabboxStateDir()
+				if stateErr != nil {
+					t.Fatal(stateErr)
+				}
+				if _, statErr := os.Stat(filepath.Join(state, "claims", leaseID+".json")); statErr != nil {
+					t.Fatalf("claim removed before provider cleanup: %v", statErr)
+				}
+				if name != "artifact failure" {
+					if _, statErr := os.Stat(key); statErr != nil {
+						t.Fatalf("SSH material removed before provider cleanup: %v", statErr)
+					}
+				}
+				if name == "provider failure" {
+					return failure
+				}
+				return nil
+			})
+			if name == "success" {
+				if err != nil || calls != 1 {
+					t.Fatalf("calls=%d err=%v", calls, err)
+				}
+				if _, statErr := os.Lstat(dir); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("connection artifacts remain: %v", statErr)
+				}
+				if _, exists, readErr := core.ReadLeaseClaimWithPresence(leaseID); readErr != nil || exists {
+					t.Fatalf("claim exists=%v err=%v", exists, readErr)
+				}
+				return
+			}
+			if err == nil || name == "provider failure" && !errors.Is(err, failure) {
+				t.Fatalf("missing cleanup error: %v", err)
+			}
+			wantCalls := 1
+			if name == "changed claim" {
+				wantCalls = 0
+			}
+			if calls != wantCalls {
+				t.Fatalf("provider cleanup calls=%d want %d", calls, wantCalls)
+			}
+			if after, readErr := core.ReadLeaseClaim(leaseID); readErr != nil || !reflect.DeepEqual(after, current) {
+				t.Fatalf("retry claim changed: %+v err=%v", after, readErr)
+			}
+			if _, statErr := os.Lstat(dir); statErr != nil {
+				t.Fatalf("retry artifacts removed: %v", statErr)
+			}
+		})
 	}
 }
 

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"reflect"
 	"strconv"
@@ -16,7 +17,8 @@ func applyConfigEnvironment(config, report any, start, end int) error {
 	position := 0
 	for i := 0; i < cfg.NumField(); i++ {
 		field := cfg.Type().Field(i)
-		if field.Tag.Get("sources") == "runtime" {
+		sources := field.Tag.Get("sources")
+		if sources == "runtime" {
 			continue
 		}
 		selected := position >= start && position < end
@@ -24,7 +26,7 @@ func applyConfigEnvironment(config, report any, start, end int) error {
 		if !selected {
 			continue
 		}
-		if field.Tag.Get("sources") == "flag" {
+		if sources == "flag" || sources == "user,repo,flag" {
 			continue
 		}
 		accepted, err := applyConfigEnvironmentField(cfg.Field(i), field.Tag)
@@ -48,16 +50,29 @@ func recordConfigApplied(report reflect.Value, field reflect.StructField) {
 func applyConfigEnvironmentField(dst reflect.Value, tags reflect.StructTag) (bool, error) {
 	name, alias := tags.Get("env"), tags.Get("envAlias")
 	if dst.Type() == reflect.TypeFor[time.Duration]() {
+		if tags.Get("duration") == "nonnegative-overlay" {
+			return applyNonNegativeLeaseDuration(dst.Addr().Interface().(*time.Duration), os.Getenv(name)), nil
+		}
 		return applyLeaseDuration(dst.Addr().Interface().(*time.Duration), os.Getenv(name)), nil
 	}
 	switch dst.Kind() {
 	case reflect.String:
+		if tags.Get("envString") == "presence" {
+			value, accepted := os.LookupEnv(name)
+			if accepted {
+				dst.SetString(value)
+			}
+			return accepted, nil
+		}
 		names := []string{name}
 		if alias != "" && (tags.Get("envAliasAfterConfig") != "true" || dst.String() == "") {
 			names = append(names, alias)
 		}
 		if second := tags.Get("envAlias2"); second != "" {
 			names = append(names, second)
+		}
+		if third := tags.Get("envAlias3"); third != "" {
+			names = append(names, third)
 		}
 		value, accepted := firstNonEmptyEnv(names...)
 		if accepted {
@@ -96,6 +111,18 @@ func applyConfigEnvironmentField(dst reflect.Value, tags reflect.StructTag) (boo
 		dst.SetInt(int64(value))
 		return accepted, err
 	case reflect.Float64:
+		if tags.Get("envFloat") == "checked" {
+			raw := os.Getenv(name)
+			if raw == "" {
+				return false, nil
+			}
+			value, err := strconv.ParseFloat(raw, 64)
+			if err != nil {
+				return false, fmt.Errorf("parse %s: %w", name, err)
+			}
+			dst.SetFloat(value)
+			return true, nil
+		}
 		value, accepted := lookupEnvFloat(name)
 		if accepted {
 			dst.SetFloat(value)

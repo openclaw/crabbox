@@ -152,6 +152,34 @@ func TestInstanceTypeForClass(t *testing.T) {
 }
 
 func TestServerTypeForConfigHonorsExplicitClassAndProviderType(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		cfg            core.Config
+		classExplicit  bool
+		nativeExplicit bool
+		want           string
+	}{
+		{name: "unsupported target", cfg: core.Config{Class: "fast", TargetOS: core.TargetMacOS}, classExplicit: true},
+		{name: "unsupported architecture", cfg: core.Config{Class: "fast", TargetOS: core.TargetLinux, Architecture: core.ArchitectureARM64}, classExplicit: true},
+		{name: "legacy normalized fallback", cfg: core.Config{Class: " FAST ", TargetOS: core.TargetMacOS}, classExplicit: true, want: "tdx.medium"},
+		{name: "empty legacy class", classExplicit: true, want: "tdx.small"},
+		{name: "custom legacy fallback trims", cfg: core.Config{Class: " tdx.2xlarge "}, classExplicit: true, want: "tdx.2xlarge"},
+		{name: "generic override remains raw", cfg: core.Config{Class: "fast", ServerType: " tdx.2xlarge ", ServerTypeExplicit: true}, classExplicit: true, want: " tdx.2xlarge "},
+		{name: "native override remains raw", cfg: core.Config{Class: "fast", Phala: core.PhalaConfig{InstanceType: " tdx.large "}}, classExplicit: true, nativeExplicit: true, want: " tdx.large "},
+		{name: "implicit class preserves native default", cfg: core.Config{Class: "fast", Phala: core.PhalaConfig{InstanceType: " tdx.large "}}, want: " tdx.large "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.classExplicit {
+				core.MarkClassExplicit(&test.cfg)
+			}
+			if test.nativeExplicit {
+				core.MarkPhalaInstanceTypeExplicit(&test.cfg)
+			}
+			if got := (Provider{}).ServerTypeForConfig(test.cfg); got != test.want {
+				t.Fatalf("type=%q want=%q", got, test.want)
+			}
+		})
+	}
 	provider := Provider{}
 	defaults := core.BaseConfig()
 	defaults.Provider = providerName

@@ -5,10 +5,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -668,7 +671,12 @@ func TestListArtifactBundleFilesSkipsPublishedMarkdown(t *testing.T) {
 	mustWriteFile(t, filepath.Join(dir, artifactManifestFilename), "{}")
 	mustWriteFile(t, filepath.Join(dir, "nested", "logs.txt"), "logs")
 	mustWriteFile(t, filepath.Join(dir, "nested", "published-artifacts.md", "child.txt"), "child")
-	files, err := listArtifactBundleFiles(dir)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -724,7 +732,7 @@ func TestSnapshotArtifactFilesRejectsSymlinkSwapAfterValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	files, err := listArtifactBundleFilesRoot(root, dir)
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -737,7 +745,7 @@ func TestSnapshotArtifactFilesRejectsSymlinkSwapAfterValidation(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	_, cleanup, err := snapshotArtifactFiles(root, files)
+	_, cleanup, err := prepareArtifactFiles(root, files, true)
 	defer cleanup()
 	if err == nil || !strings.Contains(err.Error(), "screenshot.png") {
 		t.Fatalf("error=%v, want changed artifact rejection", err)
@@ -792,7 +800,7 @@ func TestSnapshotArtifactFilesRejectsNestedDirectorySwap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	files, err := listArtifactBundleFilesRoot(root, dir)
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -805,7 +813,7 @@ func TestSnapshotArtifactFilesRejectsNestedDirectorySwap(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	_, cleanup, err := snapshotArtifactFiles(root, files)
+	_, cleanup, err := prepareArtifactFiles(root, files, true)
 	defer cleanup()
 	if err == nil || !strings.Contains(err.Error(), "nested/safe.txt") {
 		t.Fatalf("error=%v, want nested swap rejection", err)
@@ -821,11 +829,11 @@ func TestSnapshotArtifactFilesSupportsMaximumLengthComponent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	files, err := listArtifactBundleFilesRoot(root, dir)
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, cleanup, err := snapshotArtifactFiles(root, files)
+	_, cleanup, err := prepareArtifactFiles(root, files, true)
 	defer cleanup()
 	if err != nil {
 		t.Fatal(err)
@@ -922,8 +930,7 @@ func TestArtifactPublishSummaryRejectsExternalAliasToSwappedBundleFile(t *testin
 	if !inside {
 		t.Fatal("external alias target inside the bundle was not classified as bundle input")
 	}
-	_, cleanup, err := artifactPublishSummaryText("", binding, inside, root, files)
-	defer cleanup()
+	_, err = artifactPublishSummaryText("", binding, inside, root, files)
 	if err == nil || !strings.Contains(err.Error(), "summary file changed") {
 		t.Fatalf("error=%v, want outside identity rejection", err)
 	}
@@ -988,8 +995,7 @@ func TestArtifactPublishSummaryRejectsSymlinkDotDotSwap(t *testing.T) {
 	if !inside {
 		t.Fatal("component-wise symlink target inside bundle was classified as external")
 	}
-	_, cleanup, err := artifactPublishSummaryText("", binding, inside, root, files)
-	defer cleanup()
+	_, err = artifactPublishSummaryText("", binding, inside, root, files)
 	if err == nil || !strings.Contains(err.Error(), "summary file changed") {
 		t.Fatalf("error=%v, want outside identity rejection", err)
 	}
@@ -1081,8 +1087,7 @@ func TestArtifactPublishSummaryRejectsCaseAliasToSwappedBundleDirectory(t *testi
 	if !inside {
 		t.Fatal("case-equivalent alias target inside the bundle was not classified as bundle input")
 	}
-	_, cleanup, err := artifactPublishSummaryText("", binding, inside, root, files)
-	defer cleanup()
+	_, err = artifactPublishSummaryText("", binding, inside, root, files)
 	if err == nil || !strings.Contains(err.Error(), "summary file changed") {
 		t.Fatalf("error=%v, want outside identity rejection", err)
 	}
@@ -1150,7 +1155,7 @@ func TestArtifactPublishSummaryUsesValidatedSnapshotThroughDirectoryAlias(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshots, cleanupSnapshots, err := snapshotArtifactFiles(root, files)
+	snapshots, cleanupSnapshots, err := prepareArtifactFiles(root, files, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1172,8 +1177,7 @@ func TestArtifactPublishSummaryUsesValidatedSnapshotThroughDirectoryAlias(t *tes
 	if !inside {
 		t.Fatal("canonical summary path should match symlinked bundle root")
 	}
-	got, cleanupSummary, err := artifactPublishSummaryText("prefix", binding, inside, root, snapshots)
-	defer cleanupSummary()
+	got, err := artifactPublishSummaryText("prefix", binding, inside, root, snapshots)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1266,8 +1270,7 @@ func TestArtifactPublishSummaryRejectsIdentityChangeBeforeValidation(t *testing.
 	if !inside {
 		t.Fatal("summary path should remain classified inside the bundle")
 	}
-	_, cleanup, err := artifactPublishSummaryText("", binding, inside, root, files)
-	defer cleanup()
+	_, err = artifactPublishSummaryText("", binding, inside, root, files)
 	if err == nil || !strings.Contains(err.Error(), "summary file changed") {
 		t.Fatalf("error=%v, want identity change rejection", err)
 	}
@@ -1309,8 +1312,7 @@ func TestArtifactPublishSummaryRejectsCanonicalNestedParentReswap(t *testing.T) 
 	if !inside {
 		t.Fatal("canonical nested summary should remain classified inside aliased bundle")
 	}
-	_, cleanup, err := artifactPublishSummaryText("", binding, inside, root, files)
-	defer cleanup()
+	_, err = artifactPublishSummaryText("", binding, inside, root, files)
 	if err == nil || !strings.Contains(err.Error(), "summary file changed") {
 		t.Fatalf("error=%v, want outside identity rejection", err)
 	}
@@ -1325,14 +1327,15 @@ func TestWriteArtifactManifestUsesValidatedHandleForLocalStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	files, err := listArtifactBundleFilesRoot(root, dir)
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	validated, err := hashValidatedArtifactFiles(root, files)
+	validated, cleanup, err := prepareArtifactFiles(root, files, false)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer cleanup()
 	if validated[0].snapshotFile != nil {
 		t.Fatal("local manifest unexpectedly copied file to a snapshot")
 	}
@@ -1360,7 +1363,7 @@ func TestWriteArtifactManifestUsesValidatedHandleForLocalStorage(t *testing.T) {
 		t.Fatalf("files=%#v", manifest.Files)
 	}
 	wantHash := fmt.Sprintf("%x", sha256.Sum256([]byte("safe-bytes")))
-	if got := manifest.Files[0]; got.SHA256 != wantHash || got.Size != int64(len("safe-bytes")) {
+	if got := manifest.Files[0]; got.SHA256 != wantHash || got.Size == nil || *got.Size != int64(len("safe-bytes")) {
 		t.Fatalf("manifest file=%#v, want safe snapshot hash=%s", got, wantHash)
 	}
 	if got, readErr := os.ReadFile(outside); readErr != nil || string(got) != "outside-secret" {
@@ -1411,11 +1414,11 @@ func TestPublishArtifactFilesBrokerUsesValidatedSnapshotAfterPathSwap(t *testing
 		t.Fatal(err)
 	}
 	defer root.Close()
-	files, err := listArtifactBundleFilesRoot(root, dir)
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshots, cleanup, err := snapshotArtifactFiles(root, files)
+	snapshots, cleanup, err := prepareArtifactFiles(root, files, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1798,7 +1801,7 @@ func TestArtifactsPublishWritesManifestByDefault(t *testing.T) {
 		t.Fatalf("manifest=%#v", manifest)
 	}
 	file := manifest.Files[0]
-	if file.Name != "screenshot.png" || file.ContentType != "image/png" || file.Size != int64(len(data)) || file.SHA256 == "" {
+	if file.Name != "screenshot.png" || file.ContentType != "image/png" || file.Size == nil || *file.Size != int64(len(data)) || file.SHA256 == "" {
 		t.Fatalf("file=%#v", file)
 	}
 	if file.URL != "https://artifacts.example.com/proof/screenshot.png" {
@@ -1905,11 +1908,11 @@ func TestPublishArtifactFilesBrokerUploadsViaGrantedURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	files, err := listArtifactBundleFilesRoot(root, dir)
+	files, err := listArtifactBundleRoot(root, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshots, cleanup, err := snapshotArtifactFiles(root, files)
+	snapshots, cleanup, err := prepareArtifactFiles(root, files, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2062,7 +2065,7 @@ func TestArtifactsPullDownloadsAndVerifiesManifest(t *testing.T) {
 			Name:        "nested/screenshot.png",
 			URL:         server.URL + "/screenshot.png",
 			ContentType: "image/png",
-			Size:        int64(len(payload)),
+			Size:        new(int64(len(payload))),
 			SHA256:      hash,
 		}},
 	}
@@ -2117,7 +2120,7 @@ func TestDownloadArtifactURLRejectsContentLengthAboveLimit(t *testing.T) {
 	_, _, _, err := downloadArtifactURL(context.Background(), artifactManifestFile{
 		Name: "artifact.bin",
 		URL:  server.URL,
-		Size: 4,
+		Size: new(int64(4)),
 	}, outPath)
 	if err == nil || !strings.Contains(err.Error(), "content-length 1024 exceeds limit 4") {
 		t.Fatalf("err=%v", err)
@@ -2144,7 +2147,7 @@ func TestDownloadArtifactURLStopsStreamingAboveDeclaredSize(t *testing.T) {
 	_, _, _, err := downloadArtifactURL(context.Background(), artifactManifestFile{
 		Name: "artifact.bin",
 		URL:  server.URL,
-		Size: 4,
+		Size: new(int64(4)),
 	}, outPath)
 	if err == nil || !strings.Contains(err.Error(), "response exceeds limit 4") {
 		t.Fatalf("err=%v", err)
@@ -2170,11 +2173,110 @@ func TestArtifactHTTPFlowsRejectCrossOriginRedirects(t *testing.T) {
 	}))
 	defer redirect.Close()
 
+	signedURL := redirect.URL + "/artifact?X-Amz-Signature=secret-signature"
+	for _, test := range artifactHTTPFailureFlows(t, signedURL) {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.run()
+			if err == nil || !strings.Contains(err.Error(), errArtifactCrossOriginRedirect.Error()) {
+				t.Fatalf("error=%v, want cross-origin redirect rejection", err)
+			}
+			if strings.Contains(err.Error(), "secret-signature") {
+				t.Fatalf("error leaked signed URL: %v", err)
+			}
+		})
+	}
+	if got := targetRequests.Load(); got != 0 {
+		t.Fatalf("cross-origin target received %d requests", got)
+	}
+}
+
+func TestArtifactHTTPFlowsRedactRequestErrorURLs(t *testing.T) {
+	const signedQuery = "?X-Amz-Credential=synthetic-credential&X-Amz-Signature=synthetic-signature&X-Amz-Security-Token=synthetic-token"
+	cause := errors.New("synthetic connection failure")
+	requests := 0
+	originalClient := http.DefaultClient
+	t.Cleanup(func() { http.DefaultClient = originalClient })
+	http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
+		return nil, &net.OpError{Op: "write", Net: "tcp", Err: cause}
+	})}
+	for _, failure := range []struct {
+		name         string
+		url          string
+		wantCause    string
+		wantRequests int
+	}{
+		{name: "transport", url: "https://artifacts.invalid/private-capability/object" + signedQuery, wantCause: cause.Error(), wantRequests: 1},
+		{name: "malformed URL", url: "https://artifacts.invalid/private-capability/%zz" + signedQuery, wantCause: "invalid URL escape", wantRequests: 0},
+	} {
+		t.Run(failure.name, func(t *testing.T) {
+			for _, flow := range artifactHTTPFailureFlows(t, failure.url) {
+				t.Run(flow.name, func(t *testing.T) {
+					before := requests
+					err := flow.run()
+					if err == nil || !strings.Contains(err.Error(), failure.wantCause) {
+						t.Fatalf("error=%v, want useful cause %q", err, failure.wantCause)
+					}
+					if got := requests - before; got != failure.wantRequests {
+						t.Fatalf("transport requests=%d, want %d", got, failure.wantRequests)
+					}
+					for _, sensitive := range []string{"artifacts.invalid", "private-capability", "X-Amz-", "synthetic-credential", "synthetic-signature", "synthetic-token"} {
+						if strings.Contains(err.Error(), sensitive) {
+							t.Fatalf("request error exposed signed URL component %q: %v", sensitive, err)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestArtifactRequestErrorPreservesTransportCause(t *testing.T) {
+	const signedURL = "https://artifacts.invalid/private-capability?X-Amz-Signature=synthetic-signature"
+	cause := errors.New("synthetic connection failure")
+	transportErr := &net.OpError{Op: "write", Net: "tcp", Err: cause}
+	for _, nested := range []bool{false, true} {
+		t.Run(fmt.Sprintf("nested=%t", nested), func(t *testing.T) {
+			var inner error = transportErr
+			if nested {
+				inner = &url.Error{Op: "connect", URL: signedURL, Err: transportErr}
+			}
+			original := &url.Error{Op: "Put", URL: signedURL, Err: inner}
+			originalText := original.Error()
+			redacted := artifactRequestError(original)
+			if !errors.Is(redacted, cause) {
+				t.Fatalf("redaction lost underlying cause: %v", redacted)
+			}
+			var gotTransport *net.OpError
+			if !errors.As(redacted, &gotTransport) || gotTransport != transportErr {
+				t.Fatalf("redaction lost transport error type: %v", redacted)
+			}
+			var gotURL *url.Error
+			if !errors.As(redacted, &gotURL) || gotURL.Op != original.Op {
+				t.Fatalf("redaction lost request operation: %v", redacted)
+			}
+			if strings.Contains(redacted.Error(), "artifacts.invalid") || strings.Contains(redacted.Error(), "synthetic-signature") {
+				t.Fatalf("redacted error retained a signed URL: %v", redacted)
+			}
+			if original.Error() != originalText || original.URL != signedURL || original.Err != inner {
+				t.Fatalf("redaction mutated the original request error: %v", original)
+			}
+		})
+	}
+}
+
+func artifactHTTPFailureFlows(t *testing.T, signedURL string) []struct {
+	name string
+	run  func() error
+} {
+	t.Helper()
 	dir := t.TempDir()
 	uploadPath := filepath.Join(dir, "upload.txt")
 	mustWriteFile(t, uploadPath, "private artifact")
-	signedURL := redirect.URL + "/artifact?X-Amz-Signature=secret-signature"
-	tests := []struct {
+	return []struct {
 		name string
 		run  func() error
 	}{
@@ -2191,7 +2293,7 @@ func TestArtifactHTTPFlowsRejectCrossOriginRedirects(t *testing.T) {
 				_, _, _, err := downloadArtifactURL(context.Background(), artifactManifestFile{
 					Name: "artifact.txt",
 					URL:  signedURL,
-					Size: 64,
+					Size: new(int64(64)),
 				}, filepath.Join(dir, "download.txt"))
 				return err
 			},
@@ -2210,21 +2312,6 @@ func TestArtifactHTTPFlowsRejectCrossOriginRedirects(t *testing.T) {
 				})
 			},
 		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			err := test.run()
-			if err == nil || !strings.Contains(err.Error(), errArtifactCrossOriginRedirect.Error()) {
-				t.Fatalf("error=%v, want cross-origin redirect rejection", err)
-			}
-			if strings.Contains(err.Error(), "secret-signature") {
-				t.Fatalf("error leaked signed URL: %v", err)
-			}
-		})
-	}
-	if got := targetRequests.Load(); got != 0 {
-		t.Fatalf("cross-origin target received %d requests", got)
 	}
 }
 
@@ -2264,7 +2351,7 @@ func TestArtifactHTTPFlowsAllowSameOriginRedirects(t *testing.T) {
 	_, size, _, err := downloadArtifactURL(context.Background(), artifactManifestFile{
 		Name: "artifact.txt",
 		URL:  server.URL + "/download-start",
-		Size: int64(len(payload)),
+		Size: new(int64(len(payload))),
 	}, filepath.Join(dir, "download.txt"))
 	if err != nil || size != int64(len(payload)) {
 		t.Fatalf("download size=%d err=%v", size, err)
@@ -2297,7 +2384,7 @@ func TestArtifactsPullRejectsNegativeManifestSize(t *testing.T) {
 		Files: []artifactManifestFile{{
 			Name: "screenshot.png",
 			Path: "screenshot.png",
-			Size: -1,
+			Size: new(int64(-1)),
 		}},
 	}
 	data, err := json.Marshal(manifest)
@@ -2512,7 +2599,7 @@ func TestArtifactsPullAllowsOutputAfterManifestRef(t *testing.T) {
 			Name:        "screenshot.png",
 			Path:        "screenshot.png",
 			ContentType: "image/png",
-			Size:        int64(len(payload)),
+			Size:        new(int64(len(payload))),
 			SHA256:      hash,
 		}},
 	}
@@ -2559,7 +2646,7 @@ func TestArtifactsPullUsesLocalPathForR2ManifestURL(t *testing.T) {
 			Path:        "screenshot.png",
 			URL:         "r2://qa-artifacts/runs/abc/screenshot.png",
 			ContentType: "image/png",
-			Size:        int64(len(payload)),
+			Size:        new(int64(len(payload))),
 			SHA256:      hash,
 		}},
 	}
@@ -2601,7 +2688,7 @@ func TestArtifactsPullRejectsHashMismatch(t *testing.T) {
 		Files: []artifactManifestFile{{
 			Name:   "screenshot.png",
 			URL:    server.URL,
-			Size:   int64(len("changed")),
+			Size:   new(int64(len("changed"))),
 			SHA256: strings.Repeat("0", 64),
 		}},
 	}
@@ -2744,7 +2831,7 @@ func TestArtifactsPullRejectsSymlinkedOutputParent(t *testing.T) {
 					Kind:   "screenshot",
 					Name:   "link/owned.txt",
 					URL:    "http://" + r.Host + "/owned.txt",
-					Size:   int64(len(payload)),
+					Size:   new(int64(len(payload))),
 					SHA256: hash,
 				}},
 			}

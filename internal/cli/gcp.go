@@ -312,27 +312,6 @@ func (c *GCPClient) GetServer(ctx context.Context, name string) (Server, error) 
 	return gcpInstanceToServer(c.Zone, instance), nil
 }
 
-func (c *GCPClient) WaitForServerIP(ctx context.Context, name string) (Server, error) {
-	deadline := time.Now().Add(2 * time.Minute)
-	for {
-		server, err := c.GetServer(ctx, name)
-		if err != nil {
-			return Server{}, err
-		}
-		if server.PublicNet.IPv4.IP != "" {
-			return server, nil
-		}
-		if time.Now().After(deadline) {
-			return Server{}, fmt.Errorf("timeout waiting for gcp public ip on %s", name)
-		}
-		select {
-		case <-ctx.Done():
-			return Server{}, ctx.Err()
-		case <-time.After(5 * time.Second):
-		}
-	}
-}
-
 func (c *GCPClient) ListCrabboxServers(ctx context.Context) ([]Server, error) {
 	return c.listCrabboxServers(ctx, true)
 }

@@ -65,6 +65,152 @@ representation. Replacing lists register before ordinary flags, and appending
 lists register afterward. Registration neither applies values to configuration
 nor records source provenance.
 
+Nomad's 23-field owner is `internal/cli/config_nomad.go`. Generated scalar
+defaults are combined with a fresh `dc1` datacenter slice in `initialNomadConfig`.
+All file fields remain trusted-user-only. Source-specific path expansion and
+address/token-variable-name provenance remain in the core wrappers; central
+post-success flag marking consumes the generated raw-visit report. Generic
+machine-flag rejection and final validation remain in the provider wrapper.
+File/environment durations keep positive-overlay behavior, while explicit
+duration flags retain trimmed positive parsing and partial-error ordering.
+
+Hostinger's eleven-field owner is `internal/cli/config_hostinger.go`. Its API
+token remains a trusted-file/environment field without an argv binding. A
+shallow file snapshot preserves the existing conditional boolean admission
+without mutating the DTO. Accepted user/root markers and the immediate generic
+SSH-user flag effect remain in wrappers, followed by the existing exact-provider
+default application. All compiled defaults are generated scalar values.
+
+Tenki's eleven-field owner is `internal/cli/config_tenki.go`. Raw file strings,
+positive-only file integers, and tolerant environment integers retain their
+existing source rules. Accepted endpoint/gateway provenance remains in core
+wrappers, while raw flag provenance uses the generated visitor at the existing
+central post-success phase. Provider guards still precede typed application;
+image/snapshot normalization and exact-provider validation remain afterward.
+
+Daytona's ten-field owner is `internal/cli/config_daytona.go`. Three strings stay
+environment-only, while seven file/flag fields preserve raw strings and the
+positive-file/tolerant-environment minute integer. Source provenance remains in
+core wrappers and its generated raw-flag visitor remains in the central
+post-success phase. The exact-provider type guard still precedes typed flag
+application; no normalization, final validation, or snapshot policy is added.
+
+Proxmox's complete twelve-field owner is `internal/cli/config_proxmox.go`.
+All existing file grants remain unchanged, including token fields without argv
+bindings. Raw strings ignore empty file input; TemplateID keeps positive-only
+file input and tolerant signed environment parsing; booleans retain presence.
+Accepted source reports remain in core wrappers, and raw URL/TLS visits remain
+in the central post-success phase. The initializer aliases the shared POSIX work
+root. Its non-fallible flag assignments precede the existing visited TemplateID
+projection, which depends only on that ID; accepted user/root flags alone mirror
+to generic connection fields. No provider-selection guard or validation is added.
+
+Sprites declares all three inputs in `internal/cli/config_sprites.go`. Its token
+keeps the four existing environment names in order and gains no file or argv
+source. URL/root file values ignore raw empty input, and configured defaults stay
+scalar. Exact-provider class/type/target guards and option validation still run
+before typed flag application, including before the wrong-type no-op. Accepted
+token/URL facts feed the existing provenance wrappers; raw URL flag presence stays
+in the central post-success phase.
+
+Unikraft Cloud declares all five inputs in `internal/cli/config_unikraft_cloud.go`.
+Its key retains all four environment names and existing user/repository file
+admission without an argv binding. Metro and the other strings keep their shorter
+alias chains and raw nonempty precedence. MemoryMB uses `user,repo,flag`: positive
+file values apply, visited flag values retain zero/negative integers, and there
+is no environment binding. The alias-aware selected-provider sizing guard still
+precedes typed application; API-key/URL provenance retains its existing owners.
+Metro-derived endpoints and runtime image/memory fallback policy remain separate.
+
+XCP-ng's thirteen-field owner is `internal/cli/config_xcpng.go`. URL, username,
+password and TLS file input remain trusted-user-only; password has no argv
+binding. Generated accepted-field reports feed explicit layer-pair policy:
+a nonempty name or UUID replaces both inherited members, while two empty inputs
+inherit both. File/environment input can retain both nonempty members. Flags
+have a different rule: a visited UUID wins over a visited name regardless of
+argv order, including an explicitly empty UUID. That rule stays in the provider
+wrapper, followed by template display projection and generic user/root effects.
+No pair-specific generator mode or new source-provenance tracking is added.
+
+`NormalizeList` is the shared value-only trim/drop-empty owner used by file and
+environment bindings, Superserve scalar list flags, and replace-append flags.
+It retains order and duplicates and returns independent, nonnil storage.
+Callers still own source presence, comma splitting, first-visit reset, append
+versus replacement, and any `none` sentinel. DockerSandbox's raw file lists and
+whole-occurrence repeated flags keep their different contracts.
+
+Superserve declares all nine fields in `internal/cli/config_superserve.go`.
+Its two value-backed YAML lists use `fileList:"present-normalized"` with
+`fileStorage:"value"`: nil inherits, every nonnil input normalizes into fresh
+storage, and explicit empty input clears to a nonnil empty list. Ordinary
+raw-nonempty environment input and joined-default scalar flags retain their
+separate comma-splitting and presence rules. The runtime API key stays absent
+from config, YAML and argv.
+
+A shallow file snapshot preserves trusted-only, trimmed-blank BaseURL admission
+without changing persistence. Checked file integers retain their previous value
+on failure, while strict environment integers clear the failing field to zero;
+wrappers record earlier accepted inputs before returning either error. The
+provider keeps its sizing guard before typed values and unconditional validation
+after all visited assignments. Configured URL/workdir fallback constants share
+generated values without moving runtime fallback or validation policy.
+
+Docker Sandbox declares all ten fields in `internal/cli/config_docker_sandbox.go`.
+Its checked raw environment float retains the previous CPU value on parse failure,
+and its present pointer-file float rejects only negative values before assignment.
+Both preserve earlier accepted inputs and stop before later fields. Final finite
+and whole-number validation remains in the provider, after visited flags and
+accepted-input recording. The exact-provider sizing guard still runs first.
+
+Its repeated list flags use `flagList:"append-trimmed-nonempty"`: registration
+snapshots inherited lists before ordinary flags, whole trimmed nonempty occurrences
+append without comma splitting, and blank visits still apply and record their
+snapshot. Getter and application copies remain independent. File lists stay raw
+pointer-backed copies; environment lists retain their presence/`none` behavior.
+`envFloat:"checked"` admits only environment float64 fields, and
+`fileFloat:"nonnegative"` requires pointer-backed file float64 fields. Neither
+changes existing tolerant float parsing or positive-only file float rules.
+The configured workdir stays empty; backend runtime defaults remain separate.
+
+GitHub Codespaces declares all twelve fields in
+`internal/cli/config_github_codespaces.go`, retaining its token-free shape and
+API URL without an argv binding. Its composed initializer supplies that no-flag
+URL default. Trusted-only file inputs remain API URL, GH path, repository, both
+durations and delete-on-release; the other file grants remain repository-safe.
+File GH-path expansion runs only for an accepted field, environment expansion
+runs unconditionally, and flags retain raw values. Explicit retention/delete
+markers consume accepted-field reports, including equal and zero/false values.
+Generic machine effects and final validation stay in the provider wrapper.
+
+`duration:"nonnegative-overlay"` uses the existing nonnegative-duration helper for
+file/environment inputs. Empty, malformed, padded and negative text is ignored;
+zero and equal values are accepted. Positive-overlay and native duration flags
+keep their existing behavior. `reportApplied:"true"` additionally admits `int`
+and `time.Duration`, reporting assignments accepted by their existing source
+rules; it does not broaden parsing, source admission or numeric validation.
+
+An optional type-declaration `//configgen:flag-order FieldA,FieldB` directive
+specifies a complete flag-field permutation when registration differs from
+config/DTO order. Unknown, repeated, missing and no-flag fields are rejected,
+as are misplaced, repeated and malformed directives. The list only chooses
+iteration order through the shared constructors. Declarations without it retain
+their existing three phases and unchanged generated output. Codespaces uses this
+to register GHPath near the end without changing config or YAML field order.
+
+Boxd declares all four fields in `internal/cli/config_boxd.go`. API URL and
+organization retain trusted-file-only admission and `envString:"presence"`:
+absent environment inputs inherit; present empty, equal and whitespace values
+assign and record accepted input without trimming. This fixed mode requires an
+environment-admitted string and rejects all alias composition. Ordinary string
+bindings keep their raw-nonempty environment semantics.
+
+File strings still ignore exact empty input. Work root and delete-on-release
+reports feed their existing explicit markers and source-intent records; URL and
+organization inputs record values only. Flag recording retains synthesized-input
+suppression. The selected-provider guards still precede typed application, and
+selected-provider defaults still follow assignments. No new final validation,
+token input, runtime fallback or credential policy is introduced.
+
 Generation owns mechanical bindings, not provider policy. Other providers retain
 their existing configuration code. Provider selection, command routing, config
 CLI presentation, and backend lifecycle are not part of generation.
@@ -125,6 +271,40 @@ phase untouched on that error. Environment path expansion remains unconditional
 on the final fallback values. Backend defaults and native operations stay
 outside the generated owner.
 
+Hyper-V's eight-field owner is `internal/cli/config_hyperv.go`. Its seven flags
+use automatic assignment before the unchanged selected-provider target/default
+phase. GuestPassword retains user/repository/environment input without an argv
+binding. File integers stay positive-only, environment integers retain tolerant
+signed parsing, and the nullable file bool preserves explicit false. The composed
+initializer combines generated scalar defaults with the existing Windows work
+root; runtime default repair and generic SSH projections remain separate.
+
+Static's six-field owner is `internal/cli/config_static.go`, with zero compiled
+defaults and canonical input owner `ssh`. Four generated flag bindings compose
+into the generic target flags, before target normalization and validation. Host
+provenance stays at both its early target-application phase and the existing
+central post-provider phase. ID and Name remain file/environment-only. Generic
+SSH credentials, explicit snapshots, target projections, aliases and claim
+routing are separate policies and do not move into this owner.
+
+Islo's ten-field owner is `internal/cli/config_islo.go`. Generated accepted
+integer facts preserve its resource markers: positive file numbers, successfully
+parsed raw environment integers, and visited integer flags mark explicit inputs,
+including accepted defaults. Malformed environment input preserves old markers
+and does not add intent facts. The initializer composes scalar defaults with the
+existing OS-derived image. Credential sources remain wrapper-owned, with BaseURL
+flag provenance at the existing central post-success phase. Automatic flag
+assignment introduces no validation or provider-selection guard.
+
+Tart's seven-field owner is `internal/cli/config_tart.go`. Manual flag application
+keeps the provider's ordered resource checks and partial-error effects, consuming
+all five generated raw-visit members. File numeric presence and raw environment
+numeric intent remain explicit wrapper policy: malformed nonempty input records
+intent without acceptance, and disk intent uses the resulting value. The composed
+initializer combines generated user/CPU/memory defaults with the existing single
+image constant and guest work root. Password and work root gain no argv binding;
+selected-provider normalization and runtime defaults remain in their existing phases.
+
 Incus uses a complete hybrid owner in `internal/cli/config_incus.go`. The exact
 type-doc directive `//configgen:flag-application manual` generates file/env
 application, flag storage and registration, and a typed raw-visit query for all
@@ -184,10 +364,10 @@ Kubeconfig even when no override was accepted. The delete marker stays outside
 generation and is applied only when its field was reached. Flag application
 copies all visited values before the provider's existing validation.
 
-Duration support is deliberately one fixed mode: canonical standard-library
-`time.Duration` with `duration:"positive-overlay"`. File-admitted fields must
+Duration support uses canonical standard-library `time.Duration` with the fixed
+`duration:"positive-overlay"` or `duration:"nonnegative-overlay"` modes. File-admitted fields must
 also declare `fileStorage:"value"`; their YAML fields remain raw strings, not
-parsed durations or pointers. File/env input calls the existing positive,
+parsed durations or pointers. Positive-overlay file/env input calls the existing positive,
 tolerant `applyLeaseDuration` helper without trimming. That wrapper delegates
 parsing and assignment to the strict `ApplyLeaseDuration` helper, discarding its
 error for file/environment overlays; flag callers retain their error policy.
@@ -198,7 +378,9 @@ zero/negative values before provider validation; they do not inherit file/env
 acceptance. The Namespace string-flag exceptions are described below.
 Declared defaults must parse to a positive duration and produce typed constants;
 an omitted default remains zero. Arbitrary qualified types, alternate parsers,
-callbacks and additional file/environment duration policies are not supported.
+callbacks and other file/environment duration policies are not supported.
+Nonnegative-overlay reuses `applyNonNegativeLeaseDuration` and accepts zero while
+retaining the same raw-text, ignored-invalid and equal-assignment behavior.
 
 Blacksmith uses all six bindings together, with four string flags and two
 file/environment-only fields: a positive-overlay duration and a pointer-backed
@@ -451,10 +633,10 @@ handling. An explicitly present empty provider block remains `{}`.
 | Kind | Required file rule |
 | --- | --- |
 | `string` | `fileIgnoreEmpty:"true"` |
-| `[]string` | `fileList:"nonempty-raw"`, `fileList:"nonempty-normalized"`, or nil-presence/cloning `fileList:"raw"` |
+| `[]string` | `fileList:"nonempty-raw"`, `fileList:"nonempty-normalized"`, `fileList:"present-normalized"`, or nil-presence/cloning `fileList:"raw"` |
 | `int`, `int64` | `fileInt:"positive"` or `fileInt:"nonzero"` |
 | `float64` | `fileFloat:"positive"` |
-| `time.Duration` | raw string with `duration:"positive-overlay"` |
+| `time.Duration` | raw string with `duration:"positive-overlay"` or `duration:"nonnegative-overlay"` |
 
 Apart from the explicit raw value-slice combination, presence-sensitive rules,
 booleans and fields without file input cannot use value storage. Existing
@@ -504,26 +686,32 @@ provider lookups remain separate from these raw-empty rules.
 Native mount filtering, lookup, credentials, class selection and OS mappings remain
 provider policy. The following field instructions apply to generated owners.
 
-## Local Container's concrete source owner
+## Local Container's complete binding owner
 
-`config_local_container.go` keeps eleven runtime members distinct from nine
-file/environment settings. The file type retains two pointer booleans and its
-existing omissions. CLI-only volumes and transient checkpoint metadata remain
-runtime data, not new persisted settings; their list/map identities survive
-ordinary source application. The initializer accepts the resolved image and
-keeps the raw work root empty without marking compiled defaults explicit.
+`config_local_container.go` declares all eleven runtime members. Generated file
+input retains the nine admitted fields, two pointer booleans, and existing
+omissions. NoHostname stays file/environment-only; volumes are flag-only;
+checkpoint metadata is runtime-only with its existing YAML/JSON omissions.
+Ordinary file/environment application leaves list/map runtime state untouched.
+The composed initializer accepts the resolved image, including empty, and keeps
+the configured work root empty without marking compiled defaults explicit.
 
-Three accepted-input operations pair Runtime, Image and WorkRoot assignments
-with their existing source markers. File/environment predicates and scalar flag
-visitation stay with their current callers. The flag work-root operation sets
-the provider bit before the independent generic root copy/snapshot; later
-observers see the same state, including the existing empty-snapshot semantics.
-No concurrency guarantee or callback layer is introduced.
+Accepted Runtime, Image and WorkRoot reports feed the existing marker operations.
+Manual flag application preserves scalar order, generic user/root effects and
+root snapshot timing. The provider still checks nonempty volumes against id
+before pool after scalar effects and before selected-provider defaults. Inherited
+unvisited volumes still reach these checks; only a successful explicit flag visit
+records volume input. The companion fork-flag mapper consumes the same generated
+storage and retains its existing copied volume assignment.
 
-Flag storage, raw volume-list behavior, creation-only checks and provider
-defaults remain provider-owned. NoHostname stays file/environment-only. This
-concrete owner needs neither generated runtime-state exclusions nor a new flag
-list framework; native, socket, mount and checkpoint behavior is unchanged.
+The fixed `flagList:"append-raw"` mode requires a flag-only string slice and
+manual flag application. Generated storage is `*[]string`; a private shared
+flag.Value wrapper appends whole occurrences without trimming, splitting or
+deduplication. Registration snapshots inherited values, preserving nil/empty
+shape; Getter returns an independent nonnil slice. Raw append flags register
+after ordinary scalars. Default-slice backing-array identity is not a public
+contract. No generic automatic application, callback, configurable parser,
+file/environment volume source or runtime behavior is added.
 
 ## Apple Container's shared concrete owner
 
@@ -546,6 +734,19 @@ a configurable prefix factory. Provider wrappers retain image markers, generic
 user/root propagation, and the exact selected Container defaults call. OS-image
 selection and native Container/Machine behavior remain outside this owner.
 
+## MXC's inert binding owner
+
+`config_mxc.go` declares all eleven file/environment/flag bindings and the four
+compiled string defaults. File lists retain value storage, ignore nil, and clone
+raw entries (an explicit empty list clears to nil). Environment lists accept raw
+nonempty input and normalize comma-separated values to a nonnil empty slice when
+blank; `none` is literal. Scalar flags use joined defaults and last-value-wins,
+normalizing an empty result to nil. These are distinct source contracts.
+
+Provider wrappers retain accepted-input recording and its synthesized-input
+suppression. No binding selects a provider or performs containment validation;
+MXC execution and runtime policy remain in the adapter.
+
 ## Adding a field
 
 1. Add an exported, singly named field to the provider's config struct. Supported types
@@ -561,6 +762,11 @@ selection and native Container/Machine behavior remain outside this owner.
    environment/flag-only field uses `sources:"env,flag"` and must omit the
    `config` tag entirely, including an empty tag. A CLI-only field uses
    `sources:"flag"` and must omit `config`, `env`, and `envAlias` tags entirely.
+   An existing file/flag binding without environment input uses exactly
+   `sources:"user,repo,flag"`. It retains existing file predicates and visited-flag
+   rules, and must omit `env`, all environment aliases, `envAliasAfterConfig`,
+   `envInt`, `envList`, and `envSplitBefore` tags, even empty ones. It still
+   occupies its schema position when environment application is split.
    An existing environment-only string uses `sources:"env"`: require its
    primary `env`, allow an existing alias, and omit `config`, `flag`, `help`, and
    `default` tags entirely. This mode retains a zero default and exposes no YAML
@@ -619,19 +825,20 @@ selection and native Container/Machine behavior remain outside this owner.
    environment input. Float default validation remains separate; `fileInt` and
    the integer-only nonnegative policy do not become float policies.
    A string field may name an existing fallback environment variable with
-   `envAlias`, and a second with `envAlias2` only when the first is present.
+   `envAlias`, a second with `envAlias2` only when the first is present,
+   and a third with `envAlias3` only when both earlier aliases are present.
    All names share collision checks; empty aliases and fields without environment
    admission are rejected. Integer fields permit exactly one `envAlias` only with
    `envInt:"fallback"`, using nested `getenvInt` calls so a malformed primary falls
    back to the alias and then the prior value; parsed zero and negatives still win.
    Strict integers and other non-string types reject aliases, and `envAlias2`
-   remains string-only. For string aliases, the primary value wins,
-   then the first alias, then the second, then the prior value. Empty values
+   and `envAlias3` remain string-only. For string aliases, the primary value wins,
+   then the first alias, then the second, then the third, then the prior value. Empty values
    fall through without trimming nonempty values. No arbitrary alias list or
    custom parser is accepted.
    An existing single-alias string binding whose configured value outranks the
    alias can declare `envAliasAfterConfig:"true"`. It requires environment
-   admission and exactly one alias, with no `envAlias2`. A raw nonempty primary
+   admission and exactly one alias, with no `envAlias2` or `envAlias3`. A raw nonempty primary
    assigns first; otherwise the alias assigns only when the current config value
    is exactly empty. Applied reports follow those accepted branches, not value
    changes. This fixed rule performs no trimming and is not a general precedence
@@ -648,6 +855,12 @@ selection and native Container/Machine behavior remain outside this owner.
    it adds an exact nonempty check without trimming, changing environment/flag
    behavior, or changing other fields' presence semantics.
    Existing list bindings can opt into fixed source-specific rules on `[]string`:
+   `fileList:"present-normalized"` requires explicit `fileStorage:"value"` and
+   file-admitted `[]string`. It ignores nil input and normalizes every nonnil
+   input, including an empty list, using `NormalizeList`. Accepted empty or
+   all-blank input yields fresh nonnil empty storage; values and source DTOs do
+   not share backing arrays. Value-slice `omitempty` remains unchanged. The mode
+   adds no environment or flag policy, and no new source grant.
    `fileList:"raw"` clones a supplied YAML list without normalization, preserving
    raw elements, order, and duplicates; omission/null preserves the prior value,
    while an explicit empty list clears it. `fileList:"nonempty-raw"` instead
@@ -671,7 +884,7 @@ selection and native Container/Machine behavior remain outside this owner.
    These modes require their corresponding admitted source and reject unsupported
    values or types. They accept no custom parser, separator, or expression and
    leave ordinary list bindings unchanged.
-   Use `reportApplied:"true"` only on string/bool fields whose accepted-input
+   Use `reportApplied:"true"` only on string, bool, int, or time.Duration fields whose accepted-input
    events are needed by an existing handwritten policy. See the report boundary
    below; this is not a new source grant.
    A file-admitted string can declare one `configAlias` YAML key. Its assignment
@@ -938,3 +1151,36 @@ Do not mark a sensitive field as repo-safe just to make generation succeed.
 Remaining providers can be considered individually after their existing
 contracts are captured. This pilot does not mandate converting the full catalog
 or moving provider types out of core.
+
+Windows Sandbox declares all ten fields in `internal/cli/config_windows_sandbox.go`.
+Only Workdir admits repository files; the nine host settings remain trusted-file
+inputs. Generated bindings retain raw enum strings and positive-only file memory
+versus tolerant signed environment memory. The file wrapper expands TempRoot only
+when accepted; the environment wrapper also expands an inherited TempRoot when no
+environment value was accepted. Flags retain raw paths.
+
+Its existing manual flag application keeps wrong-type handling before selection,
+exact provider aliases, sizing guards, target/mode assignments, then ordered enum
+validation and nonnegative memory validation. Earlier accepted fields and facts
+survive later errors; final defaults run only after success. Generated storage,
+registration and raw presence replace the duplicated mechanical lists without
+moving host policy enforcement, native operations or runtime defaults.
+
+## Actions' concrete workflow owner
+
+`config_actions.go` owns the five-field workflow record shared by global Actions
+and job overrides. Global runtime/file settings embed it inline; distinct named
+job and file-job records preserve their smaller shape. Supported file YAML and
+raw JSON remain flat, while runtime-only YAML is not a persistence contract.
+The shared file operation ignores empty strings and empty lists, and replaces
+nonempty field lists with fresh trimmed, unique entries. Nonempty all-blank
+input still clears to a nonnil empty list and records acceptance globally.
+Job overlays do not invent global input facts or runner settings.
+
+The early and late environment owners remain at their existing phases.
+`actions_flags.go` owns fixed hydrate/dispatch/register selector surfaces and
+raw-nonempty application, plus shared `-f`/`--field` storage. Defaults remain
+empty selector strings, and command guards, runner flags and execution stay in
+their original callers. Hydration alone merges configured fields; standalone
+dispatch forwards explicit fields unchanged. No generator, callback or
+configurable field grammar is introduced.

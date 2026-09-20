@@ -12,6 +12,10 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) ServerTypeForConfig(cfg core.Config) string {
+	return core.Blank(cfg.UpstashBox.Size, core.UpstashBoxConfigDefaultSize)
+}
+
 func (Provider) ClaimScope(cfg core.Config) string { return upstashBoxClaimScope(cfg) }
 
 func (Provider) Spec() core.ProviderSpec {
