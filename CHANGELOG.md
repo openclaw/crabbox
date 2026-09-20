@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Features
+
+- Add opt-in direct-host Parallels capacity limits through `parallels.maxVMs` and `CRABBOX_PARALLELS_MAX_VMS`, preserve fleet-entry precedence, and let explicit YAML zero clear inherited limits. [PR 2392](https://github.com/openclaw/crabbox/pull/2392), [Issue 2386](https://github.com/openclaw/crabbox/issues/2386). Thanks @saariuslystoned.
+
 ### Fixes
 
 - Enforce Parallels fleet capacity across concurrent clones sharing local state, including differently named entries for the same host and account, while keeping doctor and checkpoint dry-run selection lock-free. [PR 2385](https://github.com/openclaw/crabbox/pull/2385), [Issue 2384](https://github.com/openclaw/crabbox/issues/2384). Thanks @saariuslystoned.

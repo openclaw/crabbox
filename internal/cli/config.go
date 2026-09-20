@@ -1992,7 +1992,7 @@ type fileParallelsConfig struct {
 	Password         string                                 `yaml:"password,omitempty"`
 	WorkRoot         string                                 `yaml:"workRoot,omitempty"`
 	StartupTimeout   string                                 `yaml:"startupTimeout,omitempty"`
-	MaxVMs           int                                    `yaml:"maxVMs,omitempty"`
+	MaxVMs           *int                                   `yaml:"maxVMs,omitempty"`
 	Templates        map[string]fileParallelsTemplateConfig `yaml:"templates,omitempty"`
 	Hosts            []fileParallelsHostConfig              `yaml:"hosts,omitempty"`
 }
@@ -3106,8 +3106,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Parallels.WorkRoot = file.Parallels.WorkRoot
 			recordConfigInput(cfg, "parallels", inputSource, true)
 		}
-		if file.Parallels.MaxVMs != 0 {
-			cfg.Parallels.MaxVMs = file.Parallels.MaxVMs
+		if file.Parallels.MaxVMs != nil {
+			cfg.Parallels.MaxVMs = *file.Parallels.MaxVMs
 			recordConfigInput(cfg, "parallels", inputSource, true)
 		}
 		recordConfigInput(cfg, "parallels", inputSource, applyLeaseDuration(&cfg.Parallels.StartupTimeout, file.Parallels.StartupTimeout))

@@ -232,9 +232,12 @@ requested target, looks for the requested source VM, and picks the first host
 below its `maxVMs` limit. Host selection applies to `warmup`, `run`,
 `checkpoint fork`, `status`, `list`, `stop`, and `cleanup`.
 
-A host with a `maxVMs` limit counts its live VMs and clones into it under one
-reservation, so concurrent fan-out such as `crabbox shard --count 8` cannot
-exceed the limit: forks that arrive when the host is full fail with exit 5 and
+A positive `maxVMs` limits the host's inventoried VMs whose names start with
+`crabbox-`, including stopped VMs. Zero and negative values mean unlimited.
+A limited host counts these VMs and clones under one reservation, so callers
+sharing the reservation described below cannot exceed the limit through
+concurrent fan-out such as `crabbox shard --count 8`. Forks that arrive when the
+host is full fail with exit 5 and
 `host <name> is at maxVMs capacity` instead of cloning. Clones against a limited
 host are therefore serialized against each other, which adds the clone time of
 the forks ahead in the queue. A host with no `maxVMs` has no limit to enforce
@@ -249,7 +252,7 @@ directories or machines driving the same Parallels host still race against each
 other. Advisory queries such as `doctor` and `checkpoint fork --dry-run` neither
 take a reservation nor write capacity-lock state.
 
-A top-level `parallels.maxVMs` caps concurrent Crabbox VMs on a direct host:
+A top-level `parallels.maxVMs` caps inventoried Crabbox VMs on a direct host:
 
 ```yaml
 provider: parallels
@@ -261,9 +264,13 @@ parallels:
 Precedence: a selected fleet host's own `maxVMs` always wins, and the top-level
 `parallels.maxVMs` applies only when no fleet entry was selected (the direct-host
 path) rather than acting as a default for fleet entries that omit `maxVMs`.
-Leaving it unset means no limit, which is the default. A direct host with this
-limit set takes the same reservation as a limited fleet host, so concurrent
-fan-out cannot exceed it.
+The default is unlimited. An omitted value inherits an earlier config file's
+setting; an explicit zero or negative value clears that limit. The environment
+variable `CRABBOX_PARALLELS_MAX_VMS` overrides the YAML value, including with
+zero. A direct host with a positive limit takes the same reservation as a limited
+fleet host. Concurrent callers coordinate only when they use the same state
+directory and configured host/account; this is not a quota shared across
+controller machines or different SSH aliases.
 
 ### Environment variables
 
@@ -288,7 +295,8 @@ CRABBOX_PARALLELS_MAX_VMS
 
 Provider flags mirror the same fields (`--parallels-source`,
 `--parallels-source-snapshot`, `--parallels-template`, `--parallels-host`, and
-so on) and never carry passwords.
+so on) and never carry passwords. The direct-host `maxVMs` setting is available
+only through YAML and `CRABBOX_PARALLELS_MAX_VMS`, not a command-line flag.
 
 ## Checkpoints
 
