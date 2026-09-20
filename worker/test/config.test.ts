@@ -462,6 +462,23 @@ describe("machine class config", () => {
     ).toEqual([storedType, " custom-mac-type ", ...awsMacOSInstanceTypeCandidates]);
   });
 
+  it("preserves provider-specific empty and whitespace explicit-type handling", () => {
+    const config = {
+      class: "standard",
+      serverTypeExplicit: true,
+      target: "linux" as const,
+      architecture: "amd64" as const,
+    };
+    for (const serverType of ["", "   "]) {
+      expect(gcpProvisioningCandidatesForConfig({ ...config, serverType })).toEqual(
+        serverType ? [serverType] : gcpMachineTypeCandidatesForClass(config.class),
+      );
+      expect(hetznerProvisioningCandidatesForConfig({ ...config, serverType })).toEqual(
+        serverTypeCandidatesForClass(config.class),
+      );
+    }
+  });
+
   it("keeps custom class pass-through outside static selector coverage", () => {
     for (const machineClass of ["FAST", " fast ", "custom-shape"]) {
       expect(

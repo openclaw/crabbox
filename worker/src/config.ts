@@ -1228,6 +1228,18 @@ export function uniqueProviderMachineCandidates(values: string[]): string[] {
   return out;
 }
 
+export function implicitProviderMachineCandidates(
+  config: Pick<LeaseConfig, "class" | "serverType">,
+  profileCandidates: string[],
+): string[] {
+  const storedType = concreteStoredServerType(config.serverType, config.class);
+  if (profileCandidates.length === 0 && isCanonicalProviderClass(config.class)) {
+    return storedType ? [storedType] : [];
+  }
+  const candidates = profileCandidates.length > 0 ? profileCandidates : [config.class];
+  return storedType ? uniqueProviderMachineCandidates([storedType, ...candidates]) : candidates;
+}
+
 function providerClassLiteralCandidates(machineClass: string): string[] {
   return isCanonicalProviderClass(machineClass) ? [] : [machineClass];
 }

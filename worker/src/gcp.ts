@@ -1,11 +1,9 @@
 import { cloudInit } from "./bootstrap";
 import {
-  concreteStoredServerType,
   gcpMachineTypeCandidatesForClass,
-  isCanonicalProviderClass,
+  implicitProviderMachineCandidates,
   sshPorts,
   validatedCIDRs,
-  uniqueProviderMachineCandidates,
   type LeaseConfig,
 } from "./config";
 import { base64URL } from "./encoding";
@@ -1346,21 +1344,11 @@ export function gcpProvisioningCandidatesForConfig(
   if (config.serverTypeExplicit && config.serverType) {
     return [config.serverType];
   }
-  let profileCandidates =
+  const profileCandidates =
     config.target === "linux" && config.architecture === "amd64"
       ? gcpMachineTypeCandidatesForClass(config.class)
       : [];
-  if (profileCandidates.length === 0 && isCanonicalProviderClass(config.class)) {
-    const storedType = concreteStoredServerType(config.serverType, config.class);
-    return storedType ? [storedType] : [];
-  }
-  if (profileCandidates.length === 0) {
-    profileCandidates = [config.class];
-  }
-  const storedType = concreteStoredServerType(config.serverType, config.class);
-  return storedType
-    ? uniqueProviderMachineCandidates([storedType, ...profileCandidates])
-    : profileCandidates;
+  return implicitProviderMachineCandidates(config, profileCandidates);
 }
 
 async function serviceAccountAssertion(env: Env, now: number): Promise<string> {

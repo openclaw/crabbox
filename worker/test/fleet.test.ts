@@ -26454,6 +26454,8 @@ describe("fleet lease identity and idle", () => {
       );
       expect(actual).toEqual(expected);
     },
+    // Signing requests for 64 groups can exceed the default budget on a cold runtime.
+    30_000,
   );
 
   it.each(
