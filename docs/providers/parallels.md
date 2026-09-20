@@ -95,7 +95,10 @@ readiness probe does, in this order:
    any other user-managed install. Preparation links them into `/usr/local/bin`
    so the probe, `crabbox-ready` and root all agree, and downloads nothing. The
    lookup runs as that user, so a template's login setup is never sourced as
-   root.
+   root. It resolves them through `bash -lc`, matching the readiness probe, so a
+   runtime exported only from zsh-specific files such as `~/.zprofile` is not
+   found here — export it from `~/.bash_profile`, `~/.profile` or
+   `/etc/paths.d` if a template relies on this case.
 3. Neither: preparation installs Node 24.19.0, matching the Linux developer
    recipe's LTS baseline. Intel and Apple Silicon both use checksum-pinned
    official `nodejs.org` archives, with versioned installations under

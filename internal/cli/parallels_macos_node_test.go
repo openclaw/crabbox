@@ -109,3 +109,77 @@ func TestParallelsEnsureReadyScriptParsesUnderPOSIXShell(t *testing.T) {
 		}
 	}
 }
+
+// The preservation arm is the compatibility fix itself, and the stanza test
+// above stubs su to fail, so it never runs there. Drive it for real: a runtime
+// the guest user resolves through bash -lc but that is absent from the standard
+// PATH must be linked, not downloaded over.
+func TestParallelsMacOSNodeBaselineStanzaPreservesUserManagedRuntime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires POSIX shell")
+	}
+	root := t.TempDir()
+	local := filepath.Join(root, "local")
+	tools := filepath.Join(root, "tools")
+	// Deliberately NOT on PATH: this stands in for /opt/homebrew/bin or ~/.nvm.
+	managed := filepath.Join(root, "managed")
+	for _, dir := range []string{tools, managed} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(dir, name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"install", "mktemp", "rm", "rmdir", "mkdir", "cat", "uname", "sleep", "ln", "sh"} {
+		p, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(p, filepath.Join(tools, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(tools, "sw_vers", "#!/bin/sh\necho ProductName:\tmacOS\n")
+	for _, name := range []string{"node", "npm", "npx"} {
+		write(managed, name, "#!/bin/sh\necho stub\n")
+	}
+	// Stand in for the guest user's login shell resolving its own runtime.
+	write(tools, "su", "#!/bin/sh\ncase \"$*\" in\n  *'command -v node'*) echo "+quoteForShell(filepath.Join(managed, "node"))+" ;;\n  *'command -v npm'*) echo "+quoteForShell(filepath.Join(managed, "npm"))+" ;;\n  *'command -v npx'*) echo "+quoteForShell(filepath.Join(managed, "npx"))+" ;;\n  *) exit 1 ;;\nesac\n")
+	// Any download attempt is a failure of the behaviour under test.
+	write(tools, "curl", "#!/bin/sh\necho REACHED-nodejs.org >&2\nexit 22\n")
+
+	stanza := parallelsMacOSNodeBaselineStanza()
+	stanza = strings.ReplaceAll(stanza, "/usr/local", local)
+	stanza = strings.ReplaceAll(stanza, local+"/bin:/usr/bin:/bin:/usr/sbin:/sbin", local+"/bin:"+tools)
+
+	script := "set -eu\nuser=guest\n" + stanza + "\necho PREPARATION-CONTINUED\n"
+	cmd := exec.Command("/bin/sh", "-c", script)
+	cmd.Env = []string{"PATH=" + tools, "HOME=" + root}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("preservation arm failed: %v: %s", err, out)
+	}
+	if !strings.Contains(string(out), "PREPARATION-CONTINUED") {
+		t.Fatalf("preparation did not continue: %s", out)
+	}
+	if strings.Contains(string(out), "nodejs.org") {
+		t.Fatalf("downloaded over a working user-managed runtime: %s", out)
+	}
+	for _, name := range []string{"node", "npm", "npx"} {
+		got, lerr := os.Readlink(filepath.Join(local, "bin", name))
+		if lerr != nil {
+			t.Fatalf("%s was not linked into the standard location: %v: %s", name, lerr, out)
+		}
+		if want := filepath.Join(managed, name); got != want {
+			t.Fatalf("%s linked to %q, want the preserved runtime %q", name, got, want)
+		}
+	}
+}
+
+func quoteForShell(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
