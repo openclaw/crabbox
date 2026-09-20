@@ -498,20 +498,10 @@ func (b *backend) resolveVercelSandboxLeaseClaim(identifier string) (core.LeaseC
 }
 
 func (b *backend) finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {
-	if err := b.validateClaimScope(claim); err != nil {
-		return "", "", "", err
-	}
-	if repoRoot != "" {
-		if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, repoRoot,
-			timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
-			return "", "", "", err
-		}
-	}
-	slug := claim.Slug
-	if strings.TrimSpace(slug) == "" {
-		slug = core.NewLeaseSlug(claim.LeaseID)
-	}
-	return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, leasePrefix), slug, nil
+	return shared.FinishScopedLease(claim, shared.ScopedLeaseFinishOptions{
+		Provider: providerName, LeasePrefix: leasePrefix, RepoRoot: repoRoot,
+		Reclaim: reclaim, IdleTimeout: idleTimeout, ValidateClaim: b.validateClaimScope,
+	})
 }
 
 func (b *backend) newClaimScope() (string, error) {
@@ -665,13 +655,6 @@ func repoScope(repo core.Repo) string {
 	}
 	sum := sha256.Sum256([]byte(value))
 	return "repo-sha256:" + hex.EncodeToString(sum[:8])
-}
-
-func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
-	if primary > 0 {
-		return primary
-	}
-	return fallback
 }
 
 func vercelSandboxCommandEnv(env map[string]string) (map[string]string, []string) {

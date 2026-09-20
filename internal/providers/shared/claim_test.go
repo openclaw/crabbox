@@ -574,3 +574,68 @@ func TestValidateSandboxOwnershipMetadata(t *testing.T) {
 		})
 	}
 }
+
+func TestFinishScopedLeaseAdmissionAndProjection(t *testing.T) {
+	for _, mode := range []string{"observe", "invalid", "different repo", "reclaim"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const id = "fixture_resource"
+			repo := t.TempDir()
+			if err := core.ClaimLeaseForRepoProviderScopePond(id, "", "example", "scope", "pond", repo, 3*time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			before, err := core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			invalid := errors.New("adapter scope mismatch")
+			calls := 0
+			opts := ScopedLeaseFinishOptions{Provider: "example", LeasePrefix: "fixture_", IdleTimeout: 9 * time.Minute,
+				ValidateClaim: func(got core.LeaseClaim) error {
+					calls++
+					if !reflect.DeepEqual(got, before) {
+						t.Fatal("validation received different snapshot")
+					}
+					if mode == "invalid" {
+						return invalid
+					}
+					return nil
+				},
+			}
+			if mode != "observe" {
+				opts.RepoRoot = t.TempDir()
+			}
+			opts.Reclaim = mode == "reclaim"
+			lease, resource, slug, err := FinishScopedLease(before, opts)
+			if calls != 1 {
+				t.Fatalf("validation calls=%d", calls)
+			}
+			after, readErr := core.ReadLeaseClaim(id)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if mode == "invalid" || mode == "different repo" {
+				if err == nil || lease != "" || resource != "" || slug != "" {
+					t.Fatalf("rejected result=%q/%q/%q err=%v", lease, resource, slug, err)
+				}
+				if mode == "invalid" && !errors.Is(err, invalid) {
+					t.Fatalf("validation error lost: %v", err)
+				}
+				if !reflect.DeepEqual(after, before) {
+					t.Fatal("rejected admission changed claim")
+				}
+				return
+			}
+			if err != nil || lease != id || resource != "resource" || slug != core.NewLeaseSlug(id) {
+				t.Fatalf("projection=%q/%q/%q err=%v", lease, resource, slug, err)
+			}
+			if mode == "observe" {
+				if !reflect.DeepEqual(after, before) {
+					t.Fatal("empty repository root published claim")
+				}
+			} else if after.RepoRoot != opts.RepoRoot || after.ProviderScope != before.ProviderScope || after.Pond != before.Pond || after.Slug != before.Slug || after.IdleTimeoutSeconds != 180 {
+				t.Fatalf("reclaim changed preserved fields: %#v", after)
+			}
+		})
+	}
+}

@@ -716,19 +716,16 @@ func resolveLeaseID(id, repoRoot string, reclaim bool, idleTimeout time.Duration
 }
 
 func finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration, scope string) (string, string, string, error) {
-	if claim.ProviderScope != scope {
-		return "", "", "", core.Exit(4, "crownest lease %q belongs to a different API endpoint, project, or template", claim.LeaseID)
-	}
-	if repoRoot != "" {
-		if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, repoRoot, timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
-			return "", "", "", err
-		}
-	}
-	slug := claim.Slug
-	if strings.TrimSpace(slug) == "" {
-		slug = core.NewLeaseSlug(claim.LeaseID)
-	}
-	return claim.LeaseID, sandboxIDFromLease(claim.LeaseID), slug, nil
+	return shared.FinishScopedLease(claim, shared.ScopedLeaseFinishOptions{
+		Provider: providerName, LeasePrefix: leasePrefix, RepoRoot: repoRoot,
+		Reclaim: reclaim, IdleTimeout: idleTimeout,
+		ValidateClaim: func(claim core.LeaseClaim) error {
+			if claim.ProviderScope != scope {
+				return core.Exit(4, "crownest lease %q belongs to a different API endpoint, project, or template", claim.LeaseID)
+			}
+			return nil
+		},
+	})
 }
 
 func serverFromClaim(claim core.LeaseClaim, state string) core.Server {
