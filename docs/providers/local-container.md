@@ -531,10 +531,13 @@ history/log evidence when available, then stops only the lease it created. It
 uses `--ttl 15m --idle-timeout 5m` and the same cleanup path as normal
 `crabbox stop --provider local-container`.
 
-For lower-level Docker-backed E2E coverage, run:
+For lower-level Docker-backed E2E coverage, build the CLI first and point
+`CRABBOX_BIN` at it with an absolute path. Its concurrency subtest drives that
+exact binary, so it fails without one:
 
 ```sh
-go test -tags localcontainer ./cmd/crabbox
+go build -trimpath -o "$PWD/bin/crabbox" ./cmd/crabbox
+CRABBOX_BIN="$PWD/bin/crabbox" go test -tags localcontainer ./cmd/crabbox
 ```
 
 Set `CRABBOX_LOCAL_CONTAINER_E2E_IMAGE` to use a prebuilt image for faster
