@@ -412,7 +412,7 @@ func (b *leaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.S
 		return core.Server{}, err
 	}
 	server := req.Lease.Server
-	server.Labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(server.Labels, b.Cfg, req.State, time.Now().UTC(), req.IdleTimeoutOverride)
+	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.Cfg, req.State, time.Now().UTC())
 	node := core.Blank(server.HostID, b.Cfg.Proxmox.Node)
 	if err := client.SetLabelsOnNode(ctx, node, server.CloudID, server.Labels); err != nil {
 		return core.Server{}, err
