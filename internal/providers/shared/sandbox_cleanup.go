@@ -94,7 +94,7 @@ func (c SandboxClaimCleanup[T]) one(ctx context.Context, dryRun bool, listed cor
 			fmt.Fprintf(c.Runtime.Stdout, "would remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
 			return outcome, nil
 		}
-		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if err := core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, claim.LeaseID, claim, true, nil); err != nil {
 			return outcome, err
 		}
 		fmt.Fprintf(c.Runtime.Stdout, "remove claim lease=%s slug=%s reason=missing sandbox\n", claim.LeaseID, core.Blank(claim.Slug, "-"))
@@ -118,6 +118,7 @@ func (c SandboxClaimCleanup[T]) one(ctx context.Context, dryRun bool, listed cor
 	if err := c.Delete(ctx, sandboxID); err != nil && !c.IsNotFound(err) {
 		return outcome, err
 	}
+	// A successful provider action still needs durable finalization after cancellation.
 	if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 		return outcome, err
 	}

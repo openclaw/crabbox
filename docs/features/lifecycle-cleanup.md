@@ -428,6 +428,13 @@ Without a coordinator, the CLI talks to the provider API directly and owns
 cleanup itself. Releasing a direct lease (`crabbox stop` / `crabbox release`)
 deletes the backing machine immediately.
 
+OpenSandbox, Vercel Sandbox, Crownest, and SuperServe honor cancellation while
+their explicit forget-missing cleanup waits to retire a local claim, releasing
+the provider operation lock and preserving that claim. Each adapter's existing
+missing-or-inaccessible classification and forget-missing opt-in remain in force;
+this is not stronger evidence of remote deletion. After a successful provider
+delete, claim retirement still completes despite caller cancellation.
+
 Ordinary direct AWS, Azure, GCP, and Hetzner acquisition can retry a bootstrap
 timeout with a fresh lease. If rollback reports a cleanup failure, acquisition
 stops instead: the original failure and cleanup diagnostics remain available,
