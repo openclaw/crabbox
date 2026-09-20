@@ -807,13 +807,6 @@ func ttlMS(cfg core.Config) int64 {
 	return int64(cfg.TTL / time.Millisecond)
 }
 
-func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
-	if primary > 0 {
-		return primary
-	}
-	return fallback
-}
-
 func normalizedSandboxState(sb sandbox) string {
 	return strings.ToLower(core.Blank(strings.TrimSpace(sb.Status), "unknown"))
 }
