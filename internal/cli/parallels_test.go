@@ -951,3 +951,66 @@ func (r parallelsResolveFakeRunner) Run(_ context.Context, req LocalCommandReque
 	}
 	return LocalCommandResult{Stdout: r.stdout}, nil
 }
+
+func TestParallelsEnsureReadyInstallsMacOSNodeBaseline(t *testing.T) {
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false)
+
+	installer := sharedMacOSNodeInstall()
+	if !strings.Contains(script, installer) {
+		t.Fatal("ensure-ready script does not embed the shared macOS Node installer verbatim")
+	}
+
+	// The installer has to run before the readiness gate, otherwise a guest whose
+	// crabbox-ready predates the Node checks exits early and never installs Node.
+	gate := "if [ -x /usr/local/bin/crabbox-ready ]"
+	if got, want := strings.Index(script, installer), strings.Index(script, gate); got == -1 || want == -1 || got > want {
+		t.Fatalf("Node install must precede the readiness gate: install=%d gate=%d", got, want)
+	}
+
+	// Only macOS guests get the baseline; the Linux branch must be untouched.
+	if !strings.Contains(script, "if command -v sw_vers >/dev/null 2>&1; then\n  crabbox_node_installer=") {
+		t.Fatal("Node install is not guarded by the macOS sw_vers check")
+	}
+}
+
+func TestParallelsMacOSReadyScriptMatchesReadinessContract(t *testing.T) {
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false)
+
+	macReady := `#!/bin/sh
+set -eu
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+rsync --version >/dev/null
+curl --version >/dev/null
+node --version >/dev/null
+npm --version >/dev/null
+test -w '/Users/parallels-01/crabbox'
+`
+	if !strings.Contains(script, macReady) {
+		t.Fatal("macOS crabbox-ready does not assert the Node readiness contract on an explicit PATH")
+	}
+
+	// sshReadyCommand requires node and npm for macOS targets; crabbox-ready must
+	// agree, or the ensure-ready gate reports success while readiness still fails.
+	ready := sshReadyCommand(SSHTarget{TargetOS: targetMacOS})
+	for _, want := range []string{"node --version", "npm --version"} {
+		if !strings.Contains(ready, want) {
+			t.Fatalf("sshReadyCommand no longer requires %q; revisit crabbox-ready", want)
+		}
+	}
+}
+
+func TestParallelsLinuxReadyScriptUnchangedByNodeBaseline(t *testing.T) {
+	script := parallelsPOSIXEnsureReadyScript("worker", "/work/crabbox", false, false)
+
+	linuxReady := `#!/usr/bin/env bash
+set -euo pipefail
+git --version >/dev/null
+rsync --version >/dev/null
+curl --version >/dev/null
+jq --version >/dev/null
+test -w '/work/crabbox'
+`
+	if !strings.Contains(script, linuxReady) {
+		t.Fatal("Linux crabbox-ready changed; the Node baseline is macOS-only")
+	}
+}

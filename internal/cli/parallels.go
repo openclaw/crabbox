@@ -761,6 +761,18 @@ func parallelsPOSIXEnsureReadyScript(user, workRoot string, desktop, macOSAccoun
 user=%s
 work_root=%s
 desktop=%t
+# macOS readiness requires Node, so install the shared baseline before the gate
+# below. Running it ahead of the gate keeps a guest whose crabbox-ready predates
+# the Node checks from exiting early and skipping the install forever. The
+# installer returns immediately once node and npm already resolve.
+if command -v sw_vers >/dev/null 2>&1; then
+  crabbox_node_installer="$(mktemp /tmp/crabbox-node-install.XXXXXX)"
+  cat >"$crabbox_node_installer" <<'CRABBOXNODEINSTALL'
+%s
+CRABBOXNODEINSTALL
+  /bin/bash "$crabbox_node_installer" || { rm -f "$crabbox_node_installer"; exit 1; }
+  rm -f "$crabbox_node_installer"
+fi
 if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1; then
   if [ "$desktop" != true ]; then
     exit 0
@@ -857,8 +869,11 @@ if command -v sw_vers >/dev/null 2>&1; then
   cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/bin/sh
 set -eu
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 rsync --version >/dev/null
 curl --version >/dev/null
+node --version >/dev/null
+npm --version >/dev/null
 test -w %s
 READY
 else
@@ -875,7 +890,7 @@ fi
 chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped 2>/dev/null || true
 /usr/local/bin/crabbox-ready
-`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, parallelsMacOSDesktopReadyTest(macOSAccountCredentials), parallelsMacOSDesktopSetupScript(macOSAccountCredentials), shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0])
+`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, sharedMacOSNodeInstall(), parallelsMacOSDesktopReadyTest(macOSAccountCredentials), parallelsMacOSDesktopSetupScript(macOSAccountCredentials), shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0])
 }
 
 func parallelsChildCommandEnv(extraEnv []string) []string {
