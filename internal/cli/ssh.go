@@ -362,6 +362,17 @@ func waitForSSHReadyWithProbeContext(ctx, probeCtx context.Context, target *SSHT
 				return setupErr
 			}
 			lastPorts = "proxy"
+			// Readiness failed. A transport probe that still answers runs a
+			// remote command through the same proxy, so reachability and
+			// authentication are proven and readiness is the only thing left.
+			transportErr := runSSHReadinessProbe(probeCtx, *target, sshTransportProbeCommand(*target), profile.connectTimeout, profile.connectionAttempts)
+			if stopped := check(transportErr); stopped != nil {
+				return stopped
+			}
+			if transportErr == nil {
+				authenticated = true
+				lastPorts = "proxy:ready"
+			}
 			fmt.Fprintln(stderr, sshWaitProgressMessage(target, phase, target.Port, "", lastPorts, time.Since(start), time.Until(deadline)))
 		} else {
 			reachablePort := ""

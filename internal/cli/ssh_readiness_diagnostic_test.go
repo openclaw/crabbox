@@ -18,6 +18,18 @@ func TestWaitForSSHReadyTimeoutReportsProvenAuthentication(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell ssh fixture")
 	}
+	// A Parallels lease with a configured host reaches its guest through a
+	// ProxyCommand, so the proxy route has to report this as accurately as the
+	// direct one.
+	for _, proxy := range []bool{false, true} {
+		t.Run(map[bool]string{false: "direct", true: "proxy"}[proxy], func(t *testing.T) {
+			waitForSSHReadyProvenAuthentication(t, proxy)
+		})
+	}
+}
+
+func waitForSSHReadyProvenAuthentication(t *testing.T, proxy bool) {
+	t.Helper()
 	dir := t.TempDir()
 	script := `#!/bin/sh
 for remote; do :; done
@@ -51,6 +63,11 @@ exit 127
 
 	// A Parallels macOS lease probes exactly one port, so no fallback noise.
 	target := SSHTarget{User: "runner", Host: host, Port: port, FallbackPorts: []string{}, TargetOS: targetMacOS, NoControlMaster: true}
+	wantPorts := port + ":ready"
+	if proxy {
+		target.SSHConfigProxy = true
+		wantPorts = "proxy:ready"
+	}
 	var progress bytes.Buffer
 	// Long enough for one full probe iteration to complete and record
 	// its evidence before the deadline fires.
@@ -72,7 +89,7 @@ exit 127
 	if !strings.Contains(message, "authentication=ok") {
 		t.Fatalf("timeout does not record proven authentication: %s", message)
 	}
-	if !strings.Contains(message, port+":ready") {
+	if !strings.Contains(message, wantPorts) {
 		t.Fatalf("port status does not mark readiness as the failing stage: %s", message)
 	}
 }
