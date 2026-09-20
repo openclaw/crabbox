@@ -12,6 +12,8 @@ import (
 
 type gcpLeaseBackend struct{ shared.DirectSSHBackend }
 
+const gcpAcquireRollbackTimeout = 2 * time.Minute
+
 type gcpClient interface {
 	ListCrabboxServers(context.Context) ([]core.Server, error)
 	ListCrabboxServersComplete(context.Context) ([]core.Server, error)
@@ -71,7 +73,7 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		if !rollback || strings.TrimSpace(rollbackCloudID) == "" {
 			return
 		}
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), gcpAcquireRollbackTimeout)
 		defer cancel()
 		cleanupClient, cleanupClientErr := newGCPClient(cleanupCtx, cfg)
 		if cleanupClientErr != nil {

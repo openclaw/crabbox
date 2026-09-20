@@ -270,7 +270,9 @@ project plus either a complete service-account key pair or
 If acquisition fails after creating a VM, successful rollback also removes the
 lease's generated SSH credentials and host-trust files. Failed remote deletion
 retains those files; a local artifact-cleanup error is reported and prevents an
-automatic fresh-lease retry. Uncertain creation outcomes are unchanged.
+automatic fresh-lease retry. Cleanup-client creation and remote deletion
+completion share a fresh two-minute budget, independent of cancellation of the
+acquisition request. Uncertain creation outcomes are unchanged.
 
 ## Machine classes
 

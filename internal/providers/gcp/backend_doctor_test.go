@@ -34,6 +34,7 @@ type fakeGCPDoctorClient struct {
 	createCfg      core.Config
 	createErr      error
 	deleteErr      error
+	deleteObserve  func(context.Context, string) error
 	createCalls    int
 	createLeaseIDs []string
 }
@@ -79,9 +80,12 @@ func (c *fakeGCPDoctorClient) GetServer(ctx context.Context, name string) (core.
 	return core.Server{}, errors.New("gcp server not found: " + name)
 }
 
-func (c *fakeGCPDoctorClient) DeleteServer(_ context.Context, name string) error {
+func (c *fakeGCPDoctorClient) DeleteServer(ctx context.Context, name string) error {
 	c.deleted = append(c.deleted, name)
 	c.mutated = true
+	if c.deleteObserve != nil {
+		return c.deleteObserve(ctx, name)
+	}
 	return c.deleteErr
 }
 
@@ -356,6 +360,41 @@ func TestGCPAcquireCleansUpCreatedServerOnFallbackClientFailure(t *testing.T) {
 	}
 	if calls < 3 {
 		t.Fatalf("newGCPClient calls=%d, want cleanup client rebuild attempt", calls)
+	}
+}
+
+func TestGCPAcquireRollbackWaitsWithFreshBoundedContextAfterCancellation(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var cleanupErr error
+	var remaining time.Duration
+	var bounded bool
+	fake := &fakeGCPDoctorClient{
+		created:   core.Server{CloudID: "crabbox-created"},
+		createCfg: core.Config{Provider: "gcp", GCPProject: "project-a", GCPZone: "us-central1-a"},
+		observe: func(context.Context, string) (core.Server, error) {
+			cancel()
+			return core.Server{}, context.Canceled
+		},
+		deleteObserve: func(cleanupCtx context.Context, _ string) error {
+			cleanupErr = cleanupCtx.Err()
+			deadline, ok := cleanupCtx.Deadline()
+			bounded = ok
+			remaining = time.Until(deadline)
+			return nil
+		},
+	}
+	old := newGCPClient
+	newGCPClient = func(context.Context, core.Config) (gcpClient, error) { return fake, nil }
+	t.Cleanup(func() { newGCPClient = old })
+	backend := NewGCPLeaseBackend(core.ProviderSpec{}, fake.createCfg, core.Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+	_, err := backend.Acquire(ctx, core.AcquireRequest{})
+	if !errors.Is(err, context.Canceled) || len(fake.deleted) != 1 || fake.createCalls != 1 {
+		t.Fatalf("error=%v creates=%d deletes=%v", err, fake.createCalls, fake.deleted)
+	}
+	if cleanupErr != nil || !bounded || remaining < 110*time.Second || remaining > 2*time.Minute {
+		t.Fatalf("cleanup context error=%v bounded=%v remaining=%s, want fresh two-minute operation budget", cleanupErr, bounded, remaining)
 	}
 }
 
