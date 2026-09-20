@@ -4,7 +4,7 @@
 
 ### Fixes
 
-- Stop canceled terminal cleanup from waiting indefinitely for exact lease-claim locks across Tart, Coder, Modal, Namespace, and related adapters; preserve independent acquisition rollback and existing SSH-key retention policies.
+- Stop canceled terminal cleanup from waiting indefinitely for exact lease-claim locks across Tart, Coder, Modal, Namespace, and related adapters; preserve independent acquisition rollback and existing SSH-key retention policies. [PR 2363](https://github.com/openclaw/crabbox/pull/2363). Thanks @steipete.
 - Preserve generated Tart SSH credentials when failed-acquisition rollback cannot confirm ownership, delete the VM, or retire its claim; report local artifact-cleanup errors alongside the original failure. [PR 2360](https://github.com/openclaw/crabbox/pull/2360). Thanks @steipete.
 - Honor cancellation while GCP release and cleanup wait for a lease claim lock, preserving state before deletion while still completing local finalization after confirmed deletion. [PR 2361](https://github.com/openclaw/crabbox/pull/2361). Thanks @steipete.
 - Remove generated GCP and Azure SSH files after successful failed-acquisition rollback, preserving them on remote cleanup failure and stopping fresh retries when local cleanup fails. [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
