@@ -609,8 +609,11 @@ func TestParallelsEnsureGuestReadyInstallsPOSIXReadyScript(t *testing.T) {
 	if runner.lastReq.Name != "prlctl" {
 		t.Fatalf("name=%q", runner.lastReq.Name)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
-	for _, want := range []string{"exec", "vm1", "desktop=false", "cat >/usr/local/bin/crabbox-ready", "apt-get install", "test -w '/work/test'"} {
+	if argv := strings.Join(runner.lastReq.Args, " "); argv != "exec vm1 /bin/sh -s" {
+		t.Fatalf("argv=%q", argv)
+	}
+	got := runner.lastStdin
+	for _, want := range []string{"desktop=false", "cat >/usr/local/bin/crabbox-ready", "apt-get install", "test -w '/work/test'"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("guest prep command missing %q:\n%s", want, got)
 		}
@@ -624,7 +627,7 @@ func TestParallelsEnsureGuestReadyUpgradesReadyGuestForDesktop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
+	got := runner.lastStdin
 	for _, want := range []string{
 		"desktop=true",
 		"command -v websockify",
@@ -650,7 +653,7 @@ func TestParallelsEnsureGuestReadyEnablesMacOSRemoteLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
+	got := runner.lastStdin
 	for _, want := range []string{"launchctl load -w /System/Library/LaunchDaemons/ssh.plist", "launchctl enable system/com.openssh.sshd", "launchctl kickstart -k system/com.openssh.sshd"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("macOS guest prep missing %q:\n%s", want, got)
@@ -670,7 +673,7 @@ func TestParallelsEnsureGuestReadyVerifiesMacOSSSHListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
+	got := runner.lastStdin
 	// Best-effort launchctl calls do not establish listener availability.
 	// Authenticated SSH readiness remains a separate, later check.
 	for _, want := range []string{
@@ -703,7 +706,7 @@ func TestParallelsEnsureGuestReadyRechecksMacOSSSHListenerWhenHelperExists(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
+	got := runner.lastStdin
 	// A guest prepared by an older crabbox carries a crabbox-ready that predates
 	// the listener probe. If the early exit trusts that helper alone, such a
 	// guest skips remote-login setup entirely and the new check never runs.
@@ -730,7 +733,7 @@ func TestParallelsEnsureGuestReadyEnablesMacOSScreenSharing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
+	got := runner.lastStdin
 	for _, want := range []string{
 		"desktop=true",
 		"mkdir -p /var/db/crabbox",
@@ -770,7 +773,7 @@ func TestParallelsEnsureGuestReadyUsesMacOSAccountCredentialsWithoutReset(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
+	got := runner.lastStdin
 	for _, want := range []string{
 		"-access -on -users \"$user\" -privs -all",
 		"VNCAlwaysStartOnConsole -bool true",
