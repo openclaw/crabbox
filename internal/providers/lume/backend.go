@@ -258,12 +258,13 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		return core.LeaseTarget{}, errors.Join(err, readErr)
 	}
 	cleanupKey = false
-	cleanupUnclaimedVM := func(cause error) error {
+	// Rollback keeps the last successfully published snapshot, even if a refresh fails.
+	rollbackClaimedVM := func(cause error) error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		cleanup := func() error {
 			destroyClaim := claim
-			if persistedClaim.LeaseID != "" && strings.TrimSpace(persistedClaim.CloudImmutableID) != "" {
+			if strings.TrimSpace(persistedClaim.CloudImmutableID) != "" {
 				destroyClaim = persistedClaim
 			}
 			if strings.TrimSpace(destroyClaim.CloudImmutableID) == "" {
@@ -274,32 +275,17 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 			}
 			return nil
 		}
-		var cleanupErr error
-		if persistedClaim.LeaseID != "" {
-			cleanupErr = core.RemoveLeaseClaimIfUnchangedAfter(leaseID, persistedClaim, cleanup)
-		} else {
-			cleanupErr = cleanup()
-		}
+		cleanupErr := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, persistedClaim, cleanup)
 		if cleanupErr != nil {
 			labels["state"] = "error"
 			labels["recovery"] = "rollback-failed"
 			recoveryServer := b.serverFromInstance(lumeVM{Name: name, Status: "unknown"}, claim, cfg)
-			if persistedClaim.LeaseID == "" {
-				recoveryClaim, claimErr := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, cfg, instanceScope(name), recoveryServer, core.SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false)
-				if claimErr != nil {
-					return errors.Join(cause, cleanupErr, fmt.Errorf("persist Lume rollback recovery claim: %w", claimErr))
-				}
-				persistedClaim = recoveryClaim
-			} else {
-				updated, claimErr := core.ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug, cfg, instanceScope(name), recoveryServer, core.SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, persistedClaim, true)
-				if claimErr != nil {
-					return errors.Join(cause, cleanupErr, fmt.Errorf("mark Lume rollback recovery claim: %w", claimErr))
-				}
-				persistedClaim = updated
+			updated, claimErr := core.ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug, cfg, instanceScope(name), recoveryServer, core.SSHTarget{}, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, persistedClaim, true)
+			if claimErr != nil {
+				return errors.Join(cause, cleanupErr, fmt.Errorf("mark Lume rollback recovery claim: %w", claimErr))
 			}
-			if persistedClaim.LeaseID != "" {
-				cleanupKey = false
-			}
+			persistedClaim = updated
+			cleanupKey = false
 			return errors.Join(cause, cleanupErr)
 		}
 		cleanupKey = true
@@ -351,31 +337,32 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	labels["run_launch_token"] = launchToken
 	claim.CloudImmutableID, err = lumeVMImmutableID(cfg, lumeVM{Name: name, LocationName: cloneStorage})
 	if err != nil {
-		return core.LeaseTarget{}, cleanupUnclaimedVM(err)
+		return core.LeaseTarget{}, rollbackClaimedVM(err)
 	}
 	cloneInst, err := b.getInstance(ctx, cfg, name)
 	if err != nil {
-		return core.LeaseTarget{}, cleanupUnclaimedVM(err)
+		return core.LeaseTarget{}, rollbackClaimedVM(err)
 	}
 	cloneInst.Status = "starting"
 	provisional := core.LeaseTarget{Server: b.serverFromInstance(cloneInst, claim, cfg), LeaseID: leaseID}
 	if err := verifyLumeStorageIdentity(cfg, storageID); err != nil {
-		return core.LeaseTarget{}, cleanupUnclaimedVM(err)
+		return core.LeaseTarget{}, rollbackClaimedVM(err)
 	}
 	if req.OnAcquired != nil {
 		if err := req.OnAcquired(provisional); err != nil {
-			return core.LeaseTarget{}, cleanupUnclaimedVM(err)
+			return core.LeaseTarget{}, rollbackClaimedVM(err)
 		}
 	}
-	persistedClaim, err = core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, persistedClaim, provisional.Server, core.SSHTarget{}, func() error {
+	updatedClaim, err := core.UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, persistedClaim, provisional.Server, core.SSHTarget{}, func() error {
 		return verifyLumeStorageIdentity(cfg, storageID)
 	})
 	if err != nil {
-		return core.LeaseTarget{}, cleanupUnclaimedVM(err)
+		return core.LeaseTarget{}, rollbackClaimedVM(err)
 	}
+	persistedClaim = updatedClaim
 	trust, err := prepareBootstrapTrust(name, cfg.Lume.User, publicKey)
 	if err != nil {
-		return core.LeaseTarget{}, cleanupUnclaimedVM(err)
+		return core.LeaseTarget{}, rollbackClaimedVM(err)
 	}
 	defer removeBootstrapTrust(trust)
 	runOwner, err := b.startVM(ctx, cfg, name, trust, launchToken, func(started lumeRunOwner) error {
@@ -394,35 +381,36 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	})
 	owner = runOwner
 	if err != nil {
-		return core.LeaseTarget{}, cleanupUnclaimedVM(err)
+		return core.LeaseTarget{}, rollbackClaimedVM(err)
 	}
 	inst, err := b.waitForRunningVM(ctx, cfg, name, runOwner, releaseCapacity)
 	if err != nil {
-		return core.LeaseTarget{}, cleanupUnclaimedVM(err)
+		return core.LeaseTarget{}, rollbackClaimedVM(err)
 	}
 	target := core.SSHTarget{}
 	if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
-		return core.LeaseTarget{}, cleanupUnclaimedVM(err)
+		return core.LeaseTarget{}, rollbackClaimedVM(err)
 	}
 	platformUUID, err := b.waitForGuestIdentity(ctx, name, inst.IPAddress, trust, target.KnownHostsFile)
 	if err != nil {
-		return core.LeaseTarget{}, cleanupUnclaimedVM(err)
+		return core.LeaseTarget{}, rollbackClaimedVM(err)
 	}
 	labels["platform_uuid"] = platformUUID
-	persistedClaim, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, persistedClaim, labels)
+	updatedClaim, err = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, persistedClaim, labels)
 	if err != nil {
-		return core.LeaseTarget{}, cleanupUnclaimedVM(err)
+		return core.LeaseTarget{}, rollbackClaimedVM(err)
 	}
+	persistedClaim = updatedClaim
 	readyClaim := persistedClaim
 	readyClaim.Labels = shared.CloneLabels(persistedClaim.Labels)
 	readyClaim.Labels["state"] = "ready"
 	lease, err := b.prepareLease(ctx, cfg, inst, readyClaim, true)
 	if err != nil {
-		return core.LeaseTarget{}, cleanupUnclaimedVM(err)
+		return core.LeaseTarget{}, rollbackClaimedVM(err)
 	}
 	updatedClaim, updateErr := core.ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug, cfg, instanceScope(name), lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, persistedClaim, true)
 	if updateErr != nil {
-		return core.LeaseTarget{}, cleanupUnclaimedVM(updateErr)
+		return core.LeaseTarget{}, rollbackClaimedVM(updateErr)
 	}
 	persistedClaim = updatedClaim
 	cleanupKey = false

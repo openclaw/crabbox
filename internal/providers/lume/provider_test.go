@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -437,57 +438,94 @@ func TestAmbiguousCloneRetainsVM(t *testing.T) {
 }
 
 func TestAcquireControllerAcceptancePrecedesNormalClaimPublication(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", join(home, ".config"))
-	t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
-	storage := join(home, ".lume")
-	must(t, os.MkdirAll(storage, 0o700))
-	const leaseID = "cbx_controller_acceptance"
-	name := ""
-	runner := &fake{hook: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
-		if len(req.Args) == 0 {
-			return core.LocalCommandResult{}, nil, false
-		}
-		switch req.Args[0] {
-		case "ls":
-			return core.LocalCommandResult{Stdout: `[]`}, nil, true
-		case "clone":
-			name = req.Args[2]
-			putVMAt(t, storage, name, "Y29udHJvbGxlci1hY2NlcHRhbmNl")
-			return core.LocalCommandResult{}, nil, true
-		case "get":
-			return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)}, nil, true
-		default:
-			return core.LocalCommandResult{}, nil, false
-		}
-	}}
-	accepted := false
-	_, err := backendFor(configFor(), runner).Acquire(bg, core.AcquireRequest{
-		Repo:             core.Repo{Root: t.TempDir()},
-		RequestedLeaseID: leaseID,
-		RequestedSlug:    "controller-acceptance",
-		OnAcquired: func(acquired core.LeaseTarget) error {
-			accepted = true
-			if acquired.Server.ImmutableID == "" {
-				t.Fatal("OnAcquired received no immutable identity")
+	for _, mode := range []string{"rejected", "claim-changed"} {
+		t.Run(mode, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", join(home, ".config"))
+			t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
+			storage := join(home, ".lume")
+			must(t, os.MkdirAll(storage, 0o700))
+			const leaseID = "cbx_controller_acceptance"
+			name := ""
+			var changed core.LeaseClaim
+			rollbackProbes := 0
+			runner := &fake{hook: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+				if len(req.Args) == 0 {
+					return core.LocalCommandResult{}, nil, false
+				}
+				switch req.Args[0] {
+				case "ls":
+					return core.LocalCommandResult{Stdout: `[]`}, nil, true
+				case "clone":
+					name = req.Args[2]
+					putVMAt(t, storage, name, "Y29udHJvbGxlci1hY2NlcHRhbmNl")
+					return core.LocalCommandResult{}, nil, true
+				case "get":
+					if changed.LeaseID != "" {
+						rollbackProbes++
+						// Record unexpected cleanup admission without allowing any deletion.
+						return core.LocalCommandResult{}, errors.New("test blocks cleanup without the prior claim fence"), true
+					}
+					return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)}, nil, true
+				default:
+					return core.LocalCommandResult{}, nil, false
+				}
+			}}
+			accepted := false
+			_, err := backendFor(configFor(), runner).Acquire(bg, core.AcquireRequest{
+				Repo:             core.Repo{Root: t.TempDir()},
+				RequestedLeaseID: leaseID,
+				RequestedSlug:    "controller-acceptance",
+				OnAcquired: func(acquired core.LeaseTarget) error {
+					accepted = true
+					if acquired.Server.ImmutableID == "" {
+						t.Fatal("OnAcquired received no immutable identity")
+					}
+					pending, ok, claimErr := resolveLeaseClaimForProvider(leaseID)
+					if claimErr != nil || !ok || pending.Labels["recovery"] != "clone-pending" || pending.CloudImmutableID != "" {
+						t.Fatalf("claim during OnAcquired=%#v ok=%v err=%v", pending, ok, claimErr)
+					}
+					if mode == "claim-changed" {
+						updatedLabels := maps.Clone(pending.Labels)
+						updatedLabels["owner"] = "replacement-owner"
+						changed, claimErr = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, pending, updatedLabels)
+						must(t, claimErr)
+						return nil
+					}
+					return errors.New("controller rejected identity")
+				},
+			})
+			if !accepted {
+				t.Fatal("OnAcquired was not called")
 			}
-			pending, ok, claimErr := resolveLeaseClaimForProvider(leaseID)
-			if claimErr != nil || !ok || pending.Labels["recovery"] != "clone-pending" || pending.CloudImmutableID != "" {
-				t.Fatalf("claim during OnAcquired=%#v ok=%v err=%v", pending, ok, claimErr)
+			if mode == "claim-changed" {
+				want(t, err, "claim changed")
+				if rollbackProbes != 0 {
+					t.Fatalf("failed claim refresh admitted %d cleanup probes without the prior snapshot", rollbackProbes)
+				}
+				current, ok, claimErr := resolveLeaseClaimForProvider(leaseID)
+				if claimErr != nil || !ok || !reflect.DeepEqual(current, changed) {
+					t.Fatalf("failed refresh changed the replacement claim: ok=%v err=%v", ok, claimErr)
+				}
+				if _, statErr := os.Stat(join(storage, name)); statErr != nil {
+					t.Fatalf("failed refresh removed the VM fixture: %v", statErr)
+				}
+				key, keyErr := core.TestboxKeyPath(leaseID)
+				must(t, keyErr)
+				if _, statErr := os.Stat(key); statErr != nil {
+					t.Fatalf("failed refresh removed the lease key: %v", statErr)
+				}
+				return
 			}
-			return errors.New("controller rejected identity")
-		},
-	})
-	want(t, err, "controller rejected identity")
-	if !accepted {
-		t.Fatal("OnAcquired was not called")
-	}
-	if _, statErr := os.Stat(join(storage, name)); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("rejected VM was not rolled back: %v", statErr)
-	}
-	if current, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || ok {
-		t.Fatalf("rejected claim after rollback=%#v ok=%v err=%v", current, ok, claimErr)
+			want(t, err, "controller rejected identity")
+			if _, statErr := os.Stat(join(storage, name)); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("rejected VM was not rolled back: %v", statErr)
+			}
+			if current, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || ok {
+				t.Fatalf("rejected claim after rollback=%#v ok=%v err=%v", current, ok, claimErr)
+			}
+		})
 	}
 }
 

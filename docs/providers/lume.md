@@ -24,6 +24,14 @@ identity retains lease claims and keys for fail-closed recovery.
 
 Clone/start; SSH; run; clean; destroy; confirm absent.
 
+## Acquisition recovery
+
+Rollback uses the last successfully published exact lease claim. A failed
+metadata refresh does not replace that authority with an empty or uncertain
+result. If the stored claim has changed, Crabbox retains the VM and SSH key and
+reports the recovery failure rather than continuing without the claim fence.
+The existing rollback timeout and recovery-publication lifetime are unchanged.
+
 ## Configuration bindings
 
 The five non-secret settings use the shared typed configuration bindings:
