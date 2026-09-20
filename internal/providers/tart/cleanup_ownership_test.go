@@ -271,6 +271,51 @@ type heartbeatClock struct{ now time.Time }
 
 func (c heartbeatClock) Now() time.Time { return c.now }
 
+func TestTartTouchRetainsLegacyLeaseWithoutAdoption(t *testing.T) {
+	testutil.IsolateUserDirs(t)
+	storage := t.TempDir()
+	t.Setenv("TART_HOME", storage)
+	name := "crabbox-legacy-heartbeat"
+	leaseID := "cbx_legacyheartbeat"
+	vmDir := filepath.Join(storage, "vms", name)
+	if err := os.MkdirAll(vmDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(vmDir, "config.json")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := core.Server{Provider: providerName, CloudID: name, Name: name, Labels: map[string]string{
+		"provider": providerName, "instance": name, "lease": leaseID, "slug": "legacy-heartbeat", "state": "ready",
+	}}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "legacy-heartbeat", providerName, instanceScope(name), "", t.TempDir(), 30*time.Minute, false, server, core.SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	b := newBackend(Provider{}.Spec(), core.BaseConfig(), core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+	lease := core.LeaseTarget{LeaseID: leaseID, Server: b.serverFromInstance(tartInstance{Name: name, State: "running"}, claim, b.configForRun())}
+	if err := b.AuthorizeStatusTouchClaim(context.Background(), lease, claim); err == nil {
+		t.Fatal("public admission accepted a legacy ownership binding")
+	}
+	if _, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "ready"}); err == nil {
+		t.Fatal("legacy lease was renewed without ownership evidence")
+	}
+	after, err := core.ReadLeaseClaim(leaseID)
+	if err != nil || !reflect.DeepEqual(after, claim) {
+		t.Fatalf("legacy claim changed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(vmDir, tartOwnershipFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy touch created an ownership marker: %v", err)
+	}
+	if data, err := os.ReadFile(configPath); err != nil || string(data) != "{}\n" || len(runner.calls) != 0 {
+		t.Fatalf("legacy VM was changed: config=%q err=%v calls=%d", data, err, len(runner.calls))
+	}
+}
+
 func TestTartHeartbeatPersistsAcrossFreshResolve(t *testing.T) {
 	for _, mode := range []string{"preserve", "replace"} {
 		t.Run(mode, func(t *testing.T) {

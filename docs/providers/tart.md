@@ -21,6 +21,13 @@ Status reads reconstruct that persisted policy without extending it. Touching
 requires the exact claim and the matching VM ownership marker in the recorded
 Tart storage root; it cannot create or replace ownership of an existing VM.
 
+Older leases without a recorded ownership binding cannot be renewed: explicit
+heartbeat fails, and foreground touches report a warning rather than pretending
+to extend their lifetime. Their VMs and claims are retained, not adopted or
+deleted. Run `crabbox warmup --provider tart` and use the new lease ID to resume
+durable renewal; save or migrate work from the old VM before choosing to retire
+it manually. Status inspection and existing cleanup ownership rules are unchanged.
+
 **Targets:** macOS.
 
 **Hosts:** Apple Silicon Macs with tart installed (`brew install cirruslabs/cli/tart`).
