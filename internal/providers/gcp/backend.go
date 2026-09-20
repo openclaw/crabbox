@@ -12,7 +12,8 @@ import (
 
 type gcpLeaseBackend struct{ shared.DirectSSHBackend }
 
-const gcpAcquireRollbackTimeout = 2 * time.Minute
+// On-demand guest shutdown can take 120 seconds before deletion completes.
+const gcpAcquireRollbackTimeout = 3 * time.Minute
 
 type gcpClient interface {
 	ListCrabboxServers(context.Context) ([]core.Server, error)

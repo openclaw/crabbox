@@ -393,8 +393,8 @@ func TestGCPAcquireRollbackWaitsWithFreshBoundedContextAfterCancellation(t *test
 	if !errors.Is(err, context.Canceled) || len(fake.deleted) != 1 || fake.createCalls != 1 {
 		t.Fatalf("error=%v creates=%d deletes=%v", err, fake.createCalls, fake.deleted)
 	}
-	if cleanupErr != nil || !bounded || remaining < 110*time.Second || remaining > 2*time.Minute {
-		t.Fatalf("cleanup context error=%v bounded=%v remaining=%s, want fresh two-minute operation budget", cleanupErr, bounded, remaining)
+	if cleanupErr != nil || !bounded || remaining < 170*time.Second || remaining > 3*time.Minute {
+		t.Fatalf("cleanup context error=%v bounded=%v remaining=%s, want fresh three-minute operation budget", cleanupErr, bounded, remaining)
 	}
 }
 
