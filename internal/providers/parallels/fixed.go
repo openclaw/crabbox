@@ -361,6 +361,24 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			if occupant, taken := parallelsVMByName(vms, name); taken {
 				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Parallels lease %s cannot create VM %q: VM %q already occupies that name and was not created by this lease; custody is retained and nothing was changed or deleted", leaseID, name, occupant.ID)
 			}
+			// Capacity is enforced by counting the host's VMs and then cloning
+			// into it, so both must happen under one reservation: the per-lease
+			// claim locks do not serialize different lease IDs, and a prepared
+			// retry can reach this point long after its host filled up. The
+			// reservation is taken only for an actual submission, so replaying
+			// or releasing an existing VM still works at capacity.
+			releaseCapacity, err := core.ReserveParallelsHostCapacity(ctx, cfg, b.RT.Exec, sourceID)
+			if err != nil {
+				return core.LeaseTarget{}, err
+			}
+			capacityHeld := true
+			releaseCapacityOnce := func() {
+				if capacityHeld {
+					capacityHeld = false
+					releaseCapacity()
+				}
+			}
+			defer releaseCapacityOnce()
 			if err := client.EnsureHostDir(ctx, createDir); err != nil {
 				return core.LeaseTarget{}, err
 			}
@@ -373,8 +391,13 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			// resulting bundle inside this attempt's directory.
 			cloneCfg := cfg
 			cloneCfg.Parallels.VMRoot = createDir
-			if err := core.NewParallelsClient(cloneCfg, b.RT.Exec).SubmitClone(ctx, sourceID, snapshotID, leaseID, intent.Slug, req.Keep); err != nil {
-				return core.LeaseTarget{}, fmt.Errorf("Parallels clone outcome uncertain for lease=%s vm=%s; claim and key retained, retry the same lease ID or stop it: %w", leaseID, name, err)
+			cloneErr := core.NewParallelsClient(cloneCfg, b.RT.Exec).SubmitClone(ctx, sourceID, snapshotID, leaseID, intent.Slug, req.Keep)
+			// Whatever the reply said, a submitted clone may already count
+			// against maxVMs, and the reservation has done its job either way:
+			// the rest of bring-up need not keep other forks waiting.
+			releaseCapacityOnce()
+			if cloneErr != nil {
+				return core.LeaseTarget{}, fmt.Errorf("Parallels clone outcome uncertain for lease=%s vm=%s; claim and key retained, retry the same lease ID or stop it: %w", leaseID, name, cloneErr)
 			}
 			// Read the created VM back by its creation directory. `prlctl clone`
 			// reports no UUID and the name it was given is mutable, so a name

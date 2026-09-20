@@ -130,6 +130,28 @@ func ReserveParallelsFleetCapacity(ctx context.Context, cfg Config, runner Comma
 	return selectParallelsFleetConfig(ctx, cfg, runner, source, true)
 }
 
+// ReserveParallelsHostCapacity holds the capacity reservation for one already
+// chosen host, without re-running fleet selection. A fixed lease is pinned to
+// the host recorded in its durable intent and must never be moved to another
+// one, so it reserves that host alone rather than shopping the fleet.
+func ReserveParallelsHostCapacity(ctx context.Context, cfg Config, runner CommandRunner, source string) (func(), error) {
+	_, release, err := selectParallelsFleetConfig(ctx, parallelsPinnedFleetConfig(cfg), runner, source, true)
+	return release, err
+}
+
+// parallelsPinnedFleetConfig narrows a candidate's fleet to the entry it was
+// derived from. The entry has to survive: maxVMs is read from it by name.
+func parallelsPinnedFleetConfig(cfg Config) Config {
+	for _, host := range cfg.Parallels.Hosts {
+		if firstNonBlank(host.Name, host.Host, "local") == cfg.Parallels.SelectedHost {
+			pinned := cfg
+			pinned.Parallels.Hosts = []ParallelsHostConfig{host}
+			return pinned
+		}
+	}
+	return cfg
+}
+
 func selectParallelsFleetConfig(ctx context.Context, cfg Config, runner CommandRunner, source string, reserve bool) (Config, func(), error) {
 	var lastErr error
 	for _, candidate := range ParallelsCandidateConfigs(cfg) {

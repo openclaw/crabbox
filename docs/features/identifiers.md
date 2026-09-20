@@ -124,7 +124,9 @@ replay finds its own VM in the attempt directory instead of cloning a second
 one — while a VM the attempt did not create is never adopted, credentialed or
 deleted, whatever name it holds. Release resolves a fixed lease from its durable
 claim alone, reading no guest and building no SSH target before the host and
-incarnation are re-attested. A fixed Parallels
+incarnation are re-attested. Clone submission, including a prepared retry on the
+pinned host, holds that host's `maxVMs` reservation across the count and the
+clone, while replay and release of an existing VM stay possible at capacity. A fixed Parallels
 lease never re-runs fleet selection; an unreadable inventory keeps custody
 instead of proving absence, a renamed acquired VM is found by its bound UUID
 rather than reported absent, and a vanished acquired VM fails closed rather than

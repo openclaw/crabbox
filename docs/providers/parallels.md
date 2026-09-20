@@ -356,8 +356,15 @@ The reconciliation contract:
   source is resolved to its immutable UUID before it enters the fingerprint and
   before it is submitted to `prlctl clone`, so replacing a template VM under the
   same name is drift rather than a silent provision from a different template.
+- **Capacity.** A clone submission holds the recorded host's capacity
+  reservation across counting and cloning, so concurrent fixed-ID warmups cannot
+  each consume the same last `maxVMs` slot, and a prepared retry cannot
+  overcommit a host that filled up after its intent was recorded. The
+  reservation guards creation only: replaying or stopping a lease whose VM
+  already exists still works on a full host.
 - **Host scope.** A fixed lease never re-runs fleet selection. It reconciles
-  against the host recorded in its intent. A fleet whose hosts cannot be
+  against the host recorded in its intent, and reserves that host alone rather
+  than shopping the fleet. A fleet whose hosts cannot be
   attested keeps custody instead of rebinding; a fleet in which no host attests
   the recorded identity fails `lease_id_conflict`.
 - **Absence.** Only a complete inventory listing proves a VM is gone, and only
