@@ -240,7 +240,7 @@ func (b *gcpLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (cor
 		}
 	}
 	server := req.Lease.Server
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.Cfg, req.State, time.Now().UTC())
+	server.Labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(server.Labels, b.Cfg, req.State, time.Now().UTC(), req.IdleTimeoutOverride)
 	if err := client.SetLabels(ctx, server.CloudID, server.Labels); err != nil {
 		return core.Server{}, err
 	}

@@ -60,6 +60,11 @@ tags, while holding the unchanged local claim. Renewals preserve native
 ownership tags, including the full fixed-create fingerprint.
 Waiting for the mutation lock honors request cancellation.
 
+Direct GCP heartbeats persist the idle policy in instance labels; Proxmox
+heartbeats persist it in the VM's description labels on its current node.
+For both, `--idle-timeout` replaces the stored window, while omission preserves
+it. The lease's original TTL cap still applies.
+
 ## Delegated providers
 
 A delegated-run provider has no Crabbox-managed SSH lease to touch. Providers
