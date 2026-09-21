@@ -2,8 +2,6 @@ package incus
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -14,7 +12,7 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-var incusLeaseKind = core.FixedLeaseKind{ClaimProvider: providerName, IntentVersion: 1, Label: providerName}
+var incusLeaseKind = core.FixedLeaseKind{ClaimProvider: providerName, IntentVersion: 1, Label: providerName, DeletionState: "deleting"}
 
 func (*backend) SupportsRequestedLeaseID() bool      { return true }
 func (*backend) SupportsRequestedCheckpointID() bool { return true }
@@ -30,10 +28,10 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 		leaseID = core.NewLeaseID()
 	}
 	var publicKey string
-	lease, err := core.AcquireFixedLease(core.FixedAcquireOptions{
+	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
 		Kind: incusLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID, RepoRoot: req.Repo.Root,
 		Reclaim: req.Reclaim, TargetOS: cfg.TargetOS, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout,
-	}, func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
+	}, core.FixedLeaseOperations[*api.Instance]{DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		if exists && (claim.Provider != providerName || claim.FixedCreateIntent == nil) {
 			return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: lease already has another owner")
 		}
@@ -53,7 +51,7 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}
-		data, err := json.Marshal(struct {
+		fingerprint, err := core.FixedIntentFingerprint("", struct {
 			Incus                                       core.IncusConfig
 			Profile                                     api.ProfilePut
 			Bootstrap                                   string
@@ -64,7 +62,7 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}
-		binding := core.FixedLeaseBinding{ProviderScope: identity.scope(), Fingerprint: fmt.Sprintf("%x", sha256.Sum256(data))}
+		binding := core.FixedLeaseBinding{ProviderScope: identity.scope(), Fingerprint: fingerprint}
 		if exists {
 			return binding, nil
 		}
@@ -78,15 +76,16 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 		}
 		binding.Slug, err = core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
 		return binding, err
-	}, func(ctx context.Context, claim *core.LeaseClaim, intent *core.FixedCreateIntent, persist func() error) (core.LeaseTarget, error) {
+	}, PlanAttempt: func(ctx context.Context, tx *core.FixedTransaction) error {
+		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
 		name := core.LeaseProviderName(leaseID, intent.Slug)
 		if intent.Attempt == nil {
 			if intent.State != "prepared" || claim.CloudID != "" {
-				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Incus create intent has no attempt")
+				return core.Exit(4, "lease_id_conflict: Incus create intent has no attempt")
 			}
 			identity, err := client.Identity()
 			if err != nil {
-				return core.LeaseTarget{}, err
+				return err
 			}
 			intent.Attempt = map[string]string{"name": name, "uuid": uuid.NewString()}
 			cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
@@ -100,45 +99,68 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 				labels["proxy_port"], labels["proxy_host"] = cfg.Incus.ProxyListenPort, sshHostForConfig(cfg)
 			}
 			claim.Labels = labels
-			// Persist before submitting. Even a transport error can have created the instance.
-			if err := persist(); err != nil {
-				return core.LeaseTarget{}, err
-			}
 		}
-		if intent.Attempt["name"] != name || intent.Attempt["uuid"] == "" {
-			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Incus attempt identity changed")
+		return nil
+	}, ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[*api.Instance], error) {
+		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
+		name := core.LeaseProviderName(leaseID, intent.Slug)
+		var result core.FixedObservation[*api.Instance]
+		if intent.Attempt != nil && (intent.Attempt["name"] != name || intent.Attempt["uuid"] == "") {
+			return result, core.Exit(4, "lease_id_conflict: Incus attempt identity changed")
 		}
 		inst, _, err := client.GetInstance(name)
 		if api.StatusErrorCheck(err, 404) && intent.State == "prepared" && claim.CloudID == "" {
-			// A repeated submission uses the exact same daemon-unique name and UUID.
-			// Incus rejects a concurrent create of that name, even after reply loss.
-			create := api.InstancesPost{Name: name, Type: api.InstanceType(normalizeInstanceType(cfg.Incus.InstanceType)), InstancePut: api.InstancePut{
-				Config: instanceConfigForCreate(cfg, claim.Labels, publicKey), Profiles: profilesForConfig(cfg), Devices: devicesForCreate(cfg),
-			}, Source: imageSourceForConfig(cfg)}
-			create.Config["volatile.uuid"] = intent.Attempt["uuid"]
-			if len(cfg.Incus.CheckpointMetadata) != 0 {
-				// Only checkpoint clones must remain stopped until inherited credentials are replaced.
-				create.Config["boot.autostart"] = "false"
-				if err := validateForkImage(client, cfg); err != nil {
-					return core.LeaseTarget{}, err
-				}
-				create.Source = api.InstanceSource{Type: "image", Fingerprint: cfg.Incus.Image}
-			}
-			fmt.Fprintf(b.rt.Stderr, "provisioning provider=incus lease=%s slug=%s instance=%s\n", leaseID, intent.Slug, name)
-			if err := client.CreateInstance(create); err != nil {
-				return core.LeaseTarget{}, fmt.Errorf("Incus create outcome uncertain for lease=%s instance=%s; claim and key retained, retry the same lease ID or stop it: %w", leaseID, name, err)
-			}
-			inst, _, err = client.GetInstance(name)
+			result.CanSubmit = true
+			return result, nil
 		}
 		if err != nil {
-			return core.LeaseTarget{}, fmt.Errorf("reconcile Incus lease=%s instance=%s (claim and key retained): %w", leaseID, name, err)
+			return result, fmt.Errorf("reconcile Incus lease=%s instance=%s (claim and key retained): %w", leaseID, name, err)
 		}
+		if intent.Attempt == nil {
+			return result, core.Exit(4, "lease_id_conflict: Incus create intent has no attempt")
+		}
+		if err := validateClaimInstance(client, *claim, *inst); err != nil {
+			return result, err
+		}
+		return core.FixedObservation[*api.Instance]{Candidates: []*api.Instance{inst}}, nil
+	}, Submit: func(ctx context.Context, tx *core.FixedTransaction) (*api.Instance, error) {
+		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
+		name := intent.Attempt["name"]
+		// A repeated submission uses the exact same daemon-unique name and UUID.
+		// Incus rejects a concurrent create of that name, even after reply loss.
+		create := api.InstancesPost{Name: name, Type: api.InstanceType(normalizeInstanceType(cfg.Incus.InstanceType)), InstancePut: api.InstancePut{
+			Config: instanceConfigForCreate(cfg, claim.Labels, publicKey), Profiles: profilesForConfig(cfg), Devices: devicesForCreate(cfg),
+		}, Source: imageSourceForConfig(cfg)}
+		create.Config["volatile.uuid"] = intent.Attempt["uuid"]
+		if len(cfg.Incus.CheckpointMetadata) != 0 {
+			// Only checkpoint clones must remain stopped until inherited credentials are replaced.
+			create.Config["boot.autostart"] = "false"
+			if err := validateForkImage(client, cfg); err != nil {
+				return nil, err
+			}
+			create.Source = api.InstanceSource{Type: "image", Fingerprint: cfg.Incus.Image}
+		}
+		fmt.Fprintf(b.rt.Stderr, "provisioning provider=incus lease=%s slug=%s instance=%s\n", leaseID, intent.Slug, name)
+		if err := tx.Record("submitting"); err != nil {
+			return nil, err
+		}
+		if err := client.CreateInstance(create); err != nil {
+			return nil, fmt.Errorf("Incus create outcome uncertain for lease=%s instance=%s; claim and key retained, retry the same lease ID or stop it: %w", leaseID, name, err)
+		}
+		inst, _, err := client.GetInstance(name)
+		if err != nil {
+			return nil, fmt.Errorf("reconcile Incus lease=%s instance=%s (claim and key retained): %w", leaseID, name, err)
+		}
+		return inst, nil
+	}, PrepareAccess: func(ctx context.Context, tx *core.FixedTransaction, inst *api.Instance) (core.LeaseTarget, error) {
+		claim := tx.Claim
+		name := claim.FixedCreateIntent.Attempt["name"]
 
 		if err := validateClaimInstance(client, *claim, *inst); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		claim.CloudID, claim.CloudImmutableID = name, inst.Config["volatile.uuid"]
-		if err := persist(); err != nil {
+		if err := tx.Record("bound"); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		if len(cfg.Incus.CheckpointMetadata) != 0 && inst.Config[labelKey("fork_identity")] != "ready" {
@@ -159,7 +181,7 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 				return core.LeaseTarget{}, err
 			}
 		}
-		inst, _, err = b.waitForAddress(ctx, client, name)
+		inst, _, err := b.waitForAddress(ctx, client, name)
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
@@ -176,7 +198,7 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 			return core.LeaseTarget{}, err
 		}
 		return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
-	}, ctx)
+	}})
 	if err != nil {
 		// Fixed IDs keep their durable attempt on every failure. Generated IDs retain
 		// the historical Keep/bootstrap retry contract, with ownership-checked cleanup.
@@ -301,38 +323,39 @@ func (b *backend) deleteDurableWithOutcome(ctx context.Context, client instanceC
 	if name == "" {
 		return false, core.Exit(4, "Incus lease has no recorded creation attempt")
 	}
-	if claim.FixedCreateIntent.State != "deleting" {
-		deleting := claim
-		intent := *claim.FixedCreateIntent
-		intent.State = "deleting"
-		deleting.FixedCreateIntent = &intent
-		deleting.CloudID, deleting.CloudImmutableID = name, intent.Attempt["uuid"]
-		updated, err := core.ReplaceLeaseClaimIfUnchangedDurableAfter(claim.LeaseID, claim, deleting, func() error { _, err := lookup(); return err })
-		if err != nil {
-			return false, err
-		}
-		claim = updated
-	}
-	err := incusLeaseKind.FinalizeAfterCleanup(claim, func() error {
-		inst, err := lookup()
-		if err != nil || inst == nil {
-			outcome.Terminal = err == nil
-			return err
-		}
-		if inst.IsActive() {
-			if err := client.SetInstanceState(name, api.InstanceStatePut{Action: "stop", Force: force, Timeout: durationSecondsCeil(b.cfg.Incus.StartTimeout)}, ""); err != nil {
+	err := core.DeleteFixedResource(ctx, incusLeaseKind, claim, core.FixedLeaseOperations[*api.Instance]{
+		ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[*api.Instance], error) {
+			claim = *tx.Claim
+			inst, err := lookup()
+			if err != nil {
+				return core.FixedObservation[*api.Instance]{}, err
+			}
+			// Native name/UUID attestation authorizes this legacy binding.
+			tx.Claim.CloudID, tx.Claim.CloudImmutableID = name, tx.Claim.FixedCreateIntent.Attempt["uuid"]
+			if inst == nil {
+				return core.FixedObservation[*api.Instance]{AbsenceProven: true}, nil
+			}
+			return core.FixedObservation[*api.Instance]{Candidates: []*api.Instance{inst}}, nil
+		},
+		DeleteExact: func(ctx context.Context, tx *core.FixedTransaction, inst *api.Instance) error {
+			claim = *tx.Claim
+			if inst.IsActive() {
+				if err := client.SetInstanceState(name, api.InstanceStatePut{Action: "stop", Force: force, Timeout: durationSecondsCeil(b.cfg.Incus.StartTimeout)}, ""); err != nil {
+					return err
+				}
+			}
+			// Stop waits on a native operation; re-attest before name deletion.
+			if current, err := lookup(); err != nil || current == nil {
+				outcome.Terminal = err == nil
 				return err
 			}
-		}
-		// Stop may wait for a remote operation; recheck the same incarnation
-		// before the subsequent name-based deletion.
-		if current, err := lookup(); err != nil || current == nil {
+			err := client.DeleteInstance(name)
 			outcome.Terminal = err == nil
 			return err
-		}
-		err = client.DeleteInstance(name)
-		outcome.Terminal = err == nil
-		return err
+		},
 	})
+	if err == nil {
+		outcome.Terminal = true
+	}
 	return true, err
 }
