@@ -1295,6 +1295,16 @@ observation sequencing. Construct it at the adapter's existing resolution
 boundary; keep ownership validation, readiness, terminal states, retry policy,
 and status-view fields in the adapter.
 
+Vast and RunPod ordinary acquisition waits use `shared.PollReadiness` for the
+elapsed-time budget, interrupted-read classification, completed-observation
+precedence, and cause-preserving termination errors. Adapters supply their typed
+response-error predicate, readiness and retry decisions, optional sleep/backoff,
+and public diagnostic. A completed provider response is not replaced merely
+because cancellation happened concurrently. Interrupted reads do not reach the
+adapter's observation callback or overwrite its last completed retry diagnostic.
+The helper retains cancellation identity without automatically displaying its
+cause; diagnostic wording and disclosure policy remain adapter-owned.
+
 Observation-only status waits use `shared.PollStatus` for the polling deadline
 and two-second delay. Adapters return complete `StatusView` values and identify
 final observations, retaining their ownership checks, terminal-state behavior,
