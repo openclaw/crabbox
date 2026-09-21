@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -392,6 +394,123 @@ func TestWaitForServerIPPreservesCallerCauseAndClassification(t *testing.T) {
 					t.Fatalf("classification=%s/%s want=%s/%s", got.Status, got.ErrorKind, want.Status, want.ErrorKind)
 				}
 			})
+		})
+	}
+}
+
+func TestWaitForServerIPRealHTTPS(t *testing.T) {
+	for _, ownedBudget := range []bool{false, true} {
+		t.Run(fmt.Sprintf("owned_budget=%t", ownedBudget), func(t *testing.T) {
+			if ownedBudget && testing.Short() {
+				t.Skip("exercises the real two-minute readiness budget")
+			}
+			testutil.IsolateUserDirs(t)
+			credentials := filepath.Join(t.TempDir(), "synthetic-adc.json")
+			if err := os.WriteFile(credentials, []byte(`{"type":"authorized_user","client_id":"fixture","client_secret":"fixture","refresh_token":"fixture"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credentials)
+			t.Setenv("GOOGLE_API_USE_CLIENT_CERTIFICATE", "false")
+			t.Setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "never")
+			received := make(chan struct{}, 1)
+			requestCanceled := make(chan struct{}, 1)
+			release := make(chan struct{})
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/token" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"access_token":"fixture","token_type":"Bearer","expires_in":3600}`)
+					return
+				}
+				if r.Method != http.MethodGet || r.URL.Path != "/compute/v1/projects/project/zones/us-central1-b/instances/readiness-instance" || r.TLS == nil {
+					t.Errorf("unexpected SDK request: %s %s TLS=%t", r.Method, r.URL.Path, r.TLS != nil)
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+					return
+				}
+				select {
+				case received <- struct{}{}:
+				default:
+				}
+				select {
+				case <-r.Context().Done():
+					select {
+					case requestCanceled <- struct{}{}:
+					default:
+					}
+				case <-release:
+				}
+			}))
+			defer server.Close()
+			defer close(release)
+			// The SDK clones *http.Transport; a RoundTripper wrapper falls back
+			// to its default transport and would not isolate the real client.
+			transport := server.Client().Transport.(*http.Transport).Clone()
+			transport.Proxy = nil
+			transport.TLSClientConfig.ServerName = "example.com"
+			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				switch address {
+				case "oauth2.googleapis.com:443", "compute.googleapis.com:443":
+					return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+				default:
+					return nil, fmt.Errorf("unexpected SDK destination %q", address)
+				}
+			}
+			previous := http.DefaultTransport
+			http.DefaultTransport = transport
+			defer func() { http.DefaultTransport = previous; transport.CloseIdleConnections() }()
+			guard, stopGuard := context.WithTimeout(t.Context(), 3*time.Minute)
+			defer stopGuard()
+			client, err := core.NewGCPClient(guard, core.Config{GCPProject: "project", GCPZone: "us-central1-b"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancelCause(guard)
+			defer cancel(nil)
+			type result struct {
+				server core.Server
+				err    error
+			}
+			done := make(chan result, 1)
+			started := time.Now()
+			go func() {
+				got, err := waitForServerIP(ctx, client, "readiness-instance")
+				done <- result{got, err}
+			}()
+			select {
+			case <-received:
+			case got := <-done:
+				t.Fatalf("readiness returned before the SDK request reached the server: %v", got.err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("SDK request did not reach the HTTPS server")
+			}
+			cause := core.Exit(7, "caller stopped GCP readiness")
+			wantIdentity, wantCode, wantText := error(context.Canceled), 7, cause.Error()
+			if ownedBudget {
+				wantIdentity, wantCode, wantText = context.DeadlineExceeded, 1, "timeout waiting for gcp public ip on readiness-instance"
+			} else {
+				cancel(cause)
+			}
+			select {
+			case got := <-done:
+				if !reflect.DeepEqual(got.server, core.Server{}) || !errors.Is(got.err, wantIdentity) || core.ExitCodeForError(got.err, 1) != wantCode || got.err.Error() != wantText || !ownedBudget && !errors.Is(got.err, cause) {
+					t.Fatalf("server=%+v err=%v code=%d; want identity=%v code=%d text=%q", got.server, got.err, core.ExitCodeForError(got.err, 1), wantIdentity, wantCode, wantText)
+				}
+				if ownedBudget && (ctx.Err() != nil || time.Since(started) < 2*time.Minute) {
+					t.Fatalf("owned budget not reached independently of caller: caller=%v elapsed=%s", ctx.Err(), time.Since(started))
+				}
+				classified := core.FinalizeRunResult(core.RunResult{}, got.err)
+				want := core.FinalizeRunResult(core.RunResult{}, wantIdentity)
+				if classified.Status != want.Status || classified.ErrorKind != want.ErrorKind {
+					t.Fatalf("classification=%s/%s want=%s/%s", classified.Status, classified.ErrorKind, want.Status, want.ErrorKind)
+				}
+				t.Logf("real HTTPS through NewGCPClient -> GetServer -> waitForServerIP: ownedBudget=%t elapsed=%s identity=%v code=%d diagnostic=%q classification=%s/%s", ownedBudget, time.Since(started), wantIdentity, wantCode, got.err.Error(), classified.Status, classified.ErrorKind)
+			case <-guard.Done():
+				t.Fatal("readiness did not finish within the test guard")
+			}
+			select {
+			case <-requestCanceled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("HTTPS server did not observe request cancellation")
+			}
 		})
 	}
 }
