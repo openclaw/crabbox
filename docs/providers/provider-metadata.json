@@ -843,7 +843,7 @@
     "lifecycle": "Crabbox",
     "cleanup": "clone delete",
     "bestFit": "Local macOS, Linux, or Windows VM with snapshots",
-    "caveat": "Requires prepared Parallels source VMs and SSH",
+    "caveat": "Requires prepared source VMs and SSH; fixed lease IDs bind attested host and clone identity and remain single-use",
     "docs": "parallels.md"
   },
   "phala": {

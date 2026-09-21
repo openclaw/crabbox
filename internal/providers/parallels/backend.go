@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -36,6 +37,12 @@ func NewBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.B
 }
 
 func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	// A caller-supplied lease ID is a single create identity. Retrying it with a
+	// fresh lease would defeat the replay contract, so it never enters the
+	// generated-ID bootstrap retry loop.
+	if strings.TrimSpace(req.RequestedLeaseID) != "" {
+		return b.acquireFixed(ctx, req)
+	}
 	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
 	})
@@ -130,7 +137,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 	if cfg.TargetOS == core.TargetWindows && cfg.WindowsMode == core.WindowsModeNormal {
 		target.ReadyCheck = core.PowershellCommand(`$PSVersionTable.PSVersion | Out-Null`)
 	}
-	if err := core.WaitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
+	if err := waitForSSHReady(ctx, &target, b.RT.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 		cleanupVM(server.CloudID)
 		return core.LeaseTarget{}, err
 	}
@@ -183,10 +190,27 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 	if id == "" {
 		return core.LeaseTarget{}, core.Exit(2, "parallels resolve requires lease id or slug")
 	}
-	if claim, ok, err := core.ResolveLeaseClaimForProvider(id, "parallels"); err != nil {
+	fixedClaim, fixedClaimFound, err := core.ResolveLeaseClaimForProvider(id, "parallels")
+	if err != nil {
 		return core.LeaseTarget{}, err
-	} else if ok {
-		id = claim.LeaseID
+	}
+	if fixedClaimFound {
+		id = fixedClaim.LeaseID
+	}
+	// A fixed lease's durable claim is its own release route, and it is the only
+	// one. Resolution answers with a claim-only target before the inventory
+	// sweep, so nothing here inspects a guest, discovers an SSH user, or hands
+	// App.stop a usable SSH target for remote cleanup: all of that would reach a
+	// VM occupying the recorded name before its incarnation had been attested.
+	// releaseFixed re-attests the host and the VM and performs every ownership
+	// check. It also makes stop on a terminal tombstone, or on an acquired VM
+	// that is already gone, an idempotent no-op rather than an error, even when
+	// the fleet is unreachable.
+	if req.ReleaseOnly && fixedClaimFound && parallelsFixedLeaseKind.IsFixedClaim(fixedClaim) {
+		return parallelsFixedReleaseTarget(fixedClaim), nil
+	}
+	if fixedClaimFound && parallelsFixedLeaseKind.IsFixedClaim(fixedClaim) {
+		return b.resolveFixed(ctx, req, fixedClaim)
 	}
 	var hostErrs []error
 	for _, candidate := range core.ParallelsCandidateConfigs(b.Cfg) {
@@ -208,13 +232,20 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 			normalizedID := strings.ReplaceAll(id, "_", "-")
 			if vm.ID == id || vm.Name == id || leaseID == id || strings.ReplaceAll(leaseID, "_", "-") == normalizedID || core.NormalizeLeaseSlug(slug) == core.NormalizeLeaseSlug(id) {
 				leaseID = shared.FirstNonBlankTrimmed(leaseID, vm.ID)
-				adopt, err := authorizeParallelsResolve(req, leaseID, vm.ID, parallelsHostName(candidate))
-				if err != nil {
-					return core.LeaseTarget{}, err
-				}
 				claim, claimOK, claimExact, claimErr := core.ResolveLeaseClaimForProviderWithExact(leaseID, "parallels")
 				if claimErr != nil {
 					return core.LeaseTarget{}, claimErr
+				}
+				// Native VM handles must use the same attestation as lease IDs.
+				if claimOK && claimExact && parallelsFixedLeaseKind.IsFixedClaim(claim) {
+					if req.ReleaseOnly {
+						return parallelsFixedReleaseTarget(claim), nil
+					}
+					return b.resolveFixed(ctx, req, claim)
+				}
+				adopt, err := authorizeParallelsResolve(req, leaseID, vm.ID, parallelsHostName(candidate))
+				if err != nil {
+					return core.LeaseTarget{}, err
 				}
 				if claimOK && claimExact && applyParallelsClaimSSHPortToConfig(&candidate, claim, leaseID, vm.ID, parallelsHostName(candidate)) {
 					client = core.NewParallelsClient(candidate, b.RT.Exec)
@@ -267,6 +298,21 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 		return core.LeaseTarget{}, fmt.Errorf("parallels fleet inventory incomplete while resolving %s: %w", req.ID, errors.Join(hostErrs...))
 	}
 	return core.LeaseTarget{}, core.Exit(4, "parallels lease not found: %s", req.ID)
+}
+
+// parallelsFixedReleaseTarget carries only the identity the durable release
+// path needs. It grants no SSH access and asserts no live resource: releaseFixed
+// reads the claim itself and performs every ownership and attestation check.
+func parallelsFixedReleaseTarget(claim core.LeaseClaim) core.LeaseTarget {
+	server := core.Server{
+		CloudID:  claim.CloudID,
+		Provider: parallelsProviderName,
+		Name:     strings.TrimSpace(claim.FixedCreateIntent.Attempt["name"]),
+		Status:   "unknown",
+		Labels:   maps.Clone(claim.Labels),
+	}
+	server.ImmutableID = claim.CloudImmutableID
+	return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}
 }
 
 func parallelsSSHTarget(cfg core.Config, host string) core.SSHTarget {
@@ -329,8 +375,21 @@ func authorizeParallelsResolve(req core.ResolveRequest, leaseID, vmID, host stri
 	if owned || readOnlyStatus {
 		return false, nil
 	}
+	// Fixed leases never reach here on a release: resolution answered them from
+	// their durable claim before touching the inventory, so this gate keeps its
+	// original strictness for ordinary leases.
 	if req.ReleaseOnly || !req.Reclaim {
 		return false, parallelsOwnershipError(leaseID, vmID, host)
+	}
+	// A fixed lease ID is a single create identity. Adoption would rewrite its
+	// claim and discard the durable create intent, so the replay and tombstone
+	// guarantees must outrank an explicit --reclaim.
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return false, err
+	}
+	if exists && parallelsFixedLeaseKind.IsFixedClaim(claim) {
+		return false, core.Exit(4, "lease_id_conflict: Parallels lease %q has a durable fixed create intent; --reclaim cannot re-bind it to VM %q on host %q", strings.TrimSpace(leaseID), strings.TrimSpace(vmID), strings.TrimSpace(host))
 	}
 	if strings.TrimSpace(req.Repo.Root) == "" {
 		return false, core.Exit(2, "parallels --reclaim requires repository context before binding VM %q on host %q", strings.TrimSpace(vmID), strings.TrimSpace(host))
@@ -398,6 +457,26 @@ func (b *leaseBackend) Doctor(ctx context.Context, req core.DoctorRequest) (core
 }
 
 func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *leaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	var outcome core.ReleaseLeaseOutcome
+	err := b.releaseLease(ctx, req, &outcome)
+	return outcome, err
+}
+
+func (b *leaseBackend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
+	if leaseID := strings.TrimSpace(req.Lease.LeaseID); leaseID != "" {
+		claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return err
+		}
+		if exists && parallelsFixedLeaseKind.IsFixedClaim(claim) {
+			return b.releaseFixed(ctx, claim, outcome)
+		}
+	}
 	if req.Lease.Server.Name != "" && !strings.HasPrefix(req.Lease.Server.Name, "crabbox-") {
 		return core.Exit(2, "refusing to release non-Crabbox Parallels VM %q", req.Lease.Server.Name)
 	}
@@ -409,6 +488,7 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRe
 	if err := core.NewParallelsClient(cfg, b.RT.Exec).Delete(ctx, id); err != nil {
 		return err
 	}
+	outcome.Terminal = true
 	core.RemoveLeaseClaim(req.Lease.LeaseID)
 	core.RemoveStoredTestboxKey(req.Lease.LeaseID)
 	return nil
@@ -448,6 +528,19 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 		}
 		fmt.Fprintf(b.RT.Stderr, "delete vm id=%s name=%s\n", server.DisplayID(), server.Name)
 		if req.DryRun {
+			continue
+		}
+		claim, claimExists, err := core.ReadLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return err
+		}
+		if claimExists && parallelsFixedLeaseKind.IsFixedClaim(claim) {
+			// A fixed ID is a single-use operation identity: sweep the VM
+			// through the durable release path so its terminal tombstone
+			// survives and the ID can never be replayed into a second VM.
+			if err := b.releaseFixed(ctx, claim, &core.ReleaseLeaseOutcome{}); err != nil {
+				return err
+			}
 			continue
 		}
 		client := core.NewParallelsClient(cfg, b.RT.Exec)
@@ -522,7 +615,7 @@ func (b *leaseBackend) configForLease(ctx context.Context, lease core.LeaseTarge
 }
 
 func parallelsHostName(cfg core.Config) string {
-	return shared.FirstNonBlankTrimmed(cfg.Parallels.SelectedHost, cfg.Parallels.Host, "local")
+	return core.ParallelsHostRefForConfig(cfg)
 }
 
 func blank(value, fallback string) string {
