@@ -466,7 +466,8 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 				return core.LeaseTarget{}, err
 			}
 		}
-		ready, err := client.WaitForIP(ctx, vm.ID, cfg.Parallels.StartupTimeout)
+		// Fixed acquisitions retain failed VMs, so use existing-lease guidance.
+		ready, err := client.WaitForIP(ctx, vm.ID, cfg.Parallels.StartupTimeout, core.ParallelsIPWaitExisting)
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}

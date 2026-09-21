@@ -51,7 +51,7 @@ func (b *leaseBackend) resolveFixed(ctx context.Context, req core.ResolveRequest
 		cfg.SSHPort, cfg.SSHFallbackPorts = strconv.Itoa(claim.SSHPort), nil
 	}
 	if vm.IP == "" && strings.EqualFold(vm.State, "running") {
-		discovered, err := core.NewParallelsClient(cfg, b.RT.Exec).WaitForIP(ctx, vm.ID, 30*time.Second)
+		discovered, err := core.NewParallelsClient(cfg, b.RT.Exec).WaitForIP(ctx, vm.ID, 30*time.Second, core.ParallelsIPWaitExisting)
 		if err != nil && !req.StatusOnly {
 			return core.LeaseTarget{}, err
 		}
