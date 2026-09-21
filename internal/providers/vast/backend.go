@@ -49,16 +49,7 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) *backe
 		return core.WaitForSSHReady(ctx, target, b.stderr(), phase, timeout)
 	}
 	b.runSSH = core.RunSSHQuiet
-	b.sleep = func(ctx context.Context, d time.Duration) error {
-		timer := time.NewTimer(d)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
-			return nil
-		}
-	}
+	b.sleep = shared.SleepContext
 	return b
 }
 
@@ -377,26 +368,42 @@ func vastMatchingSSHKeyID(keys []vastInstanceSSHKey, publicKey string) string {
 }
 
 func (b *backend) waitForInstanceReady(ctx context.Context, client vastAPI, id int) (vastInstance, error) {
-	deadline := b.now().Add(b.pollTimeout)
-	result, err := shared.Poll(context.WithoutCancel(ctx), 0, vastPollInterval,
-		func(context.Context, time.Duration) error { return b.sleep(ctx, vastPollInterval) },
-		func(context.Context) (vastInstance, error) { return client.GetInstance(ctx, id) },
+	budgetExpired := errors.New("Vast SSH readiness deadline exceeded")
+	waitCtx, cancel := context.WithTimeoutCause(ctx, b.pollTimeout, budgetExpired)
+	defer cancel()
+	var observationError error
+	result, err := shared.Poll(waitCtx, 0, vastPollInterval, b.sleep,
+		func(ctx context.Context) (vastInstance, error) { return client.GetInstance(ctx, id) },
 		func(_ context.Context, instance vastInstance, fetchErr error) (bool, error) {
 			if fetchErr != nil {
+				var apiErr *vastAPIError
+				if cause := context.Cause(waitCtx); cause != nil && !errors.As(fetchErr, &apiErr) &&
+					(errors.Is(fetchErr, cause) || errors.Is(fetchErr, waitCtx.Err())) {
+					return false, errors.Join(cause, fetchErr)
+				}
+				observationError = fetchErr
 				return false, fetchErr
 			}
 			if isVastInstanceRunning(instance) && strings.TrimSpace(instance.SSHHost) != "" && instance.SSHPort > 0 {
 				return true, nil
 			}
 			if isTerminalVastStatus(instance.Status) {
-				return false, core.Exit(5, "vast instance %d reached terminal status %s", id, instance.Status)
-			}
-			if b.now().After(deadline) {
-				return false, core.Exit(5, "timed out waiting for Vast instance %d to expose SSH", id)
+				observationError = core.Exit(5, "vast instance %d reached terminal status %s", id, instance.Status)
+				return false, observationError
 			}
 			return false, nil
 		}, nil)
 	if err != nil {
+		// A completed provider response retains precedence over later cancellation.
+		if observationError != nil {
+			return vastInstance{}, observationError
+		}
+		if errors.Is(err, budgetExpired) {
+			return vastInstance{}, shared.PollTerminationError(waitCtx, err, core.Exit(5, "timed out waiting for Vast instance %d to expose SSH", id))
+		}
+		if cause := context.Cause(waitCtx); cause != nil && errors.Is(err, cause) {
+			return vastInstance{}, shared.PollTerminationError(waitCtx, err, waitCtx.Err())
+		}
 		return vastInstance{}, err
 	}
 	return result.Value, nil

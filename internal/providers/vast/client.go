@@ -169,7 +169,7 @@ func (c *vastClient) do(ctx context.Context, method, path string, body any, out 
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return redactVastString(err.Error(), c.apiKey)
+		return shared.ExitErrorWithCause(1, redactVastText(err.Error(), c.apiKey), err)
 	}
 	defer resp.Body.Close()
 	data, readErr := io.ReadAll(io.LimitReader(resp.Body, vastMaxResponseBytes+1))
@@ -620,10 +620,6 @@ func isLoopbackHTTPURL(parsed *url.URL) bool {
 	host := strings.ToLower(parsed.Hostname())
 	ip := net.ParseIP(host)
 	return host == "localhost" || host == "127.0.0.1" || host == "::1" || (ip != nil && ip.IsLoopback())
-}
-
-func redactVastString(value, apiKey string) error {
-	return errors.New(redactVastText(value, apiKey))
 }
 
 func redactVastText(value, apiKey string) string {
