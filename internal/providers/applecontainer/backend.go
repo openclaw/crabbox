@@ -818,17 +818,7 @@ func (b *backend) serverFromContainer(c inspectContainer, cfg core.Config) core.
 	})
 	labels["container_id"] = c.id()
 	labels["ssh_port"] = sshPort
-	status := c.status()
-	if c.running() && labels["state"] == "ready" {
-		status = "ready"
-	}
-	server := core.Server{
-		CloudID:  c.id(),
-		Provider: providerName,
-		Name:     c.id(),
-		Status:   status,
-		Labels:   labels,
-	}
+	server := shared.LocalInstanceServer(providerName, c.id(), c.status(), c.running(), labels)
 	server.PublicNet.IPv4.IP = c.ip()
 	server.ServerType.Name = shared.FirstNonBlank(labels["server_type"], cfg.AppleContainer.Image)
 	return server
@@ -883,18 +873,7 @@ func shouldCleanup(server core.Server, claim core.LeaseClaim, hasClaim bool, now
 	if !strings.EqualFold(server.Status, "running") && server.Status != "ready" {
 		return true, "container state=" + core.Blank(server.Status, "unknown")
 	}
-	lastUsed, err := time.Parse(time.RFC3339, claim.LastUsedAt)
-	if err != nil || lastUsed.IsZero() {
-		return false, "claim active"
-	}
-	idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
-	if idle <= 0 {
-		return false, "claim active"
-	}
-	if now.After(lastUsed.Add(idle).Add(12 * time.Hour)) {
-		return true, "claim expired"
-	}
-	return false, "claim active"
+	return shared.ClaimIdleExpiredAfterGrace(claim, now, 12*time.Hour)
 }
 
 func readyCheck(cfg core.Config) string {
