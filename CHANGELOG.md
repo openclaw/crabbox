@@ -9,7 +9,7 @@
 ### Fixes
 
 - Preserve canonical cancellation/deadline context and recognized release-denial states in workspace-owner error messages. Thanks @steipete.
-- Multipass: preserve ready status endpoints, persist heartbeat timeout changes across fresh reads, and retain recovery keys when failed provisioning cannot be rolled back.
+- Multipass: preserve ready status endpoints, persist heartbeat timeout changes across fresh reads, and retain recovery keys when failed provisioning cannot be rolled back. [PR 2414](https://github.com/openclaw/crabbox/pull/2414).
 
 - Restore Lume guest bootstrap with named shared directories, authenticated status readiness, and cleanup with quiet partial-match `lsof` output; existing golden images need refreshed hooks. [PR 2409](https://github.com/openclaw/crabbox/pull/2409).
 - Lume: persist heartbeat policy across fresh reads, honor explicit idle-timeout changes, and admit owned instance-scoped leases through the public heartbeat command. [PR 2407](https://github.com/openclaw/crabbox/pull/2407).
