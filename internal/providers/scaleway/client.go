@@ -74,6 +74,8 @@ type InstanceAPI interface {
 	CreateServer(req *instance.CreateServerRequest, opts ...scw.RequestOption) (*instance.CreateServerResponse, error)
 	UpdateServer(req *instance.UpdateServerRequest, opts ...scw.RequestOption) (*instance.UpdateServerResponse, error)
 	DeleteServer(req *instance.DeleteServerRequest, opts ...scw.RequestOption) error
+	GetVolume(req *instance.GetVolumeRequest, opts ...scw.RequestOption) (*instance.GetVolumeResponse, error)
+	DeleteVolume(req *instance.DeleteVolumeRequest, opts ...scw.RequestOption) error
 	SetServerUserData(req *instance.SetServerUserDataRequest, opts ...scw.RequestOption) error
 	ServerAction(req *instance.ServerActionRequest, opts ...scw.RequestOption) (*instance.ServerActionResponse, error)
 }

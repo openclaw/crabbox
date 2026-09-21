@@ -214,6 +214,26 @@ The provider implements a direct Linux SSH lease over Scaleway Instances:
    deletes only resources with complete Crabbox Scaleway ownership tags and an
    exact project-, zone-, and server-bound local claim.
 
+New leases also record the root disk returned by the original Instance creation
+in their local recovery claim and Instance tags. `stop` deletes only this recorded
+disk after verifying its project, zone, identity, and detachment. Disks attached
+later are not adopted or deleted. A disk moved to another Instance, changed
+allocation metadata, or failed disk deletion retains the claim and access key.
+If the Instance is already gone, retry `stop <lease-or-slug>` to finish recorded
+disk cleanup; bulk `cleanup` scans Instances, not orphaned disks.
+
+The allocation contract is marked before creation and journaled locally before
+tag publication or destructive rollback. An interrupted create with no recorded
+root identity stays unresolved rather than being mistaken for a legacy lease.
+An interrupted tag publication has a cleanup-only recovery path; it cannot
+authorize normal reuse or metadata updates. A crash between confirmed tag
+publication and its local acknowledgment can retain that pending state.
+
+Leases created before root-disk tracking retain their existing Instance/key
+cleanup contract and emit a warning that disk cleanup is not tracked. Crabbox
+never infers ownership of their currently attached or detached disks. Existing
+untracked disks require separate, explicit operator recovery.
+
 Public IPv4 readiness has a five-minute budget covering both API observations
 and waits. Earlier caller cancellation or deadlines take precedence; an
 already-canceled request does not start an observation. Immediate API errors

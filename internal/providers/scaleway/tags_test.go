@@ -42,6 +42,54 @@ func TestValidateScalewayLabelsRejectsNonCanonicalLease(t *testing.T) {
 	}
 }
 
+func TestRootVolumeTagsRejectConflictsAndDoNotImportLocalJournal(t *testing.T) {
+	labels := labelsFromTags(leaseTags(core.Config{Provider: providerName, TargetOS: core.TargetLinux}, "cbx_999999999999", "volume-tags", "ready", false, time.Now()))
+	labels[volumeContractLabel] = rootVolumeContract
+	labels[rootVolumeLabel] = "44444444-4444-4444-4444-444444444444"
+	tags := tagsFromLabels(labels)
+	got := labelsFromTags(append(tags, "crabbox:"+volumePendingLabel+":true"))
+	if got[volumePendingLabel] != "" || got[rootVolumeLabel] != labels[rootVolumeLabel] || got[volumeContractLabel] != rootVolumeContract {
+		t.Fatalf("unexpected manifest decoding: %v", got)
+	}
+	for key, value := range map[string]string{volumeContractLabel: "unknown-contract", rootVolumeLabel: "55555555-5555-5555-5555-555555555555"} {
+		conflict := labelsFromTags(append(append([]string{}, tags...), "crabbox:"+key+":"+value))
+		if err := validateScalewayLabels(conflict); err == nil {
+			t.Fatalf("accepted conflicting %s tags", key)
+		}
+	}
+}
+
+func TestRootVolumeManifestRejectsIncompleteAndMalformedIdentity(t *testing.T) {
+	for _, manifest := range []rootVolumeManifest{
+		{contract: rootVolumeContract},
+		{id: "44444444-4444-4444-4444-444444444444"},
+		{contract: "unknown", id: "44444444-4444-4444-4444-444444444444"},
+		{contract: rootVolumeContract, id: "not-a-uuid"},
+		{contract: rootVolumeContract, id: "00000000-0000-0000-0000-000000000000"},
+		{pending: true},
+	} {
+		if err := manifest.validate(); err == nil {
+			t.Fatalf("accepted invalid manifest %+v", manifest)
+		}
+	}
+}
+
+func TestRootVolumePendingJournalRejectsReuseEvenWithCompleteLiveTags(t *testing.T) {
+	labels := map[string]string{volumeContractLabel: rootVolumeContract, rootVolumeLabel: "44444444-4444-4444-4444-444444444444", volumePendingLabel: "true", "recovery": "rollback-cleanup"}
+	claim := core.LeaseClaim{Labels: labels}
+	server := core.Server{Labels: labelsFromTags(tagsFromLabels(labels))}
+	if err := validateRootVolumeIdentity(claim, server, false); err == nil {
+		t.Fatal("unacknowledged publication authorized reuse")
+	}
+	if err := validateRootVolumeIdentity(claim, server, true); err != nil {
+		t.Fatalf("completed live tags must still permit cleanup: %v", err)
+	}
+	labels["recovery"] = "unknown"
+	if err := validateRootVolumeIdentity(claim, server, true); err == nil {
+		t.Fatal("unknown recovery state authorized pending cleanup")
+	}
+}
+
 func TestExactTagsPreserveTailscaleValues(t *testing.T) {
 	labels := map[string]string{
 		"provider":           providerName,

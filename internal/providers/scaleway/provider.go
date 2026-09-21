@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -186,6 +187,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, cfg.Provider)
 	}
 	now := b.clockNow()
+	rootVolume := rootVolumeManifest{}
 	keyName := providerKeyName(leaseID)
 	sshKey, err := client.IAM().CreateSSHKey(&iam.CreateSSHKeyRequest{Name: keyName, PublicKey: publicKey, ProjectID: client.ProjectID()}, scw.WithContext(ctx))
 	if err != nil {
@@ -199,7 +201,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 				keyID = reconciled.ID
 				recovery = "rollback-key-cleanup"
 			}
-			if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, "", "", keyID, keyName, recovery, req.Keep, now); claimErr != nil {
+			if _, claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, "", "", keyID, keyName, recovery, rootVolume, req.Keep, now); claimErr != nil {
 				return core.LeaseTarget{}, errors.Join(err, reconcileErr, fmt.Errorf("persist Scaleway ambiguous key recovery: %w", claimErr))
 			}
 			cleanupKey = false
@@ -220,7 +222,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 			if cleanupKey {
 				keyErr := client.IAM().DeleteSSHKey(&iam.DeleteSSHKeyRequest{SSHKeyID: sshKey.ID}, scw.WithContext(cleanupCtx))
 				if keyErr != nil && !isScalewayNotFound(keyErr) {
-					claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, "", "", sshKey.ID, sshKey.Name, "rollback-key-cleanup", req.Keep, now)
+					_, claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, "", "", sshKey.ID, sshKey.Name, "rollback-key-cleanup", rootVolumeManifest{}, req.Keep, now)
 					cleanupKey = false
 					err = errors.Join(err, fmt.Errorf("scaleway rollback SSH key cleanup failed: %w", keyErr), claimErr)
 				}
@@ -232,17 +234,26 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		if keepOnFailure {
 			recovery = "kept-after-failure"
 		}
-		claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, created.ID, publicIPv4(created), sshKey.ID, sshKey.Name, recovery, keepOnFailure, now)
+		claim, claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, created.ID, publicIPv4(created), sshKey.ID, sshKey.Name, recovery, rootVolume, keepOnFailure, now)
+		if claimErr != nil {
+			cleanupKey = false
+			err = shared.JoinAcquireCleanupError(err, fmt.Errorf("persist Scaleway allocation recovery before cleanup: %w", claimErr))
+			return
+		}
 		if !keepOnFailure {
-			deleteErr := b.deleteServerResource(cleanupCtx, client, created.ID)
-			keyErr := client.IAM().DeleteSSHKey(&iam.DeleteSSHKeyRequest{SSHKeyID: sshKey.ID}, scw.WithContext(cleanupCtx))
-			if deleteErr != nil || keyErr != nil {
+			cleanupErr := core.CleanupLeaseClaimIfUnchangedAfterContext(cleanupCtx, leaseID, claim, true, func() error {
+				if err := b.deleteAllocationResources(cleanupCtx, client, created.ID, rootVolume); err != nil {
+					return err
+				}
+				if err := client.IAM().DeleteSSHKey(&iam.DeleteSSHKeyRequest{SSHKeyID: sshKey.ID}, scw.WithContext(cleanupCtx)); err != nil && !isScalewayNotFound(err) {
+					return err
+				}
+				return nil
+			})
+			if cleanupErr != nil {
 				cleanupKey = false
-				err = errors.Join(err, fmt.Errorf("scaleway rollback cleanup failed"), claimErr, deleteErr, keyErr, cleanupCtx.Err())
+				err = shared.JoinAcquireCleanupError(err, fmt.Errorf("scaleway rollback cleanup failed: %w", cleanupErr))
 				return
-			}
-			if claimErr == nil {
-				core.RemoveLeaseClaim(leaseID)
 			}
 		} else {
 			cleanupKey = false
@@ -263,6 +274,8 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	rootVolume = rootVolumeManifest{contract: rootVolumeContract, pending: true}
+	rootVolume.addLabels(labels)
 	createReq := &instance.CreateServerRequest{
 		Zone:              scw.Zone(client.Zone()),
 		Name:              core.LeaseProviderName(leaseID, slug),
@@ -278,7 +291,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	createResp, err := client.Instance().CreateServer(createReq, scw.WithContext(ctx))
 	if err != nil {
 		if isAmbiguousScalewayError(err) {
-			if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, "", "", sshKey.ID, sshKey.Name, "ambiguous-create", req.Keep, now); claimErr != nil {
+			if _, claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, "", "", sshKey.ID, sshKey.Name, "ambiguous-create", rootVolume, req.Keep, now); claimErr != nil {
 				return core.LeaseTarget{}, errors.Join(err, fmt.Errorf("persist Scaleway ambiguous-create recovery: %w", claimErr))
 			}
 			cleanupKey = false
@@ -288,12 +301,35 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	created = createResp.Server
 	if created == nil || created.ID == "" {
 		err = core.Exit(5, "Scaleway create server response omitted server id")
-		if claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, "", "", sshKey.ID, sshKey.Name, "ambiguous-create-response", req.Keep, now); claimErr != nil {
+		if _, claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, "", "", sshKey.ID, sshKey.Name, "ambiguous-create-response", rootVolume, req.Keep, now); claimErr != nil {
 			err = errors.Join(err, fmt.Errorf("persist Scaleway ambiguous-create-response recovery: %w", claimErr))
 		}
 		cleanupKey = false
 		return core.LeaseTarget{}, err
 	}
+	if root := created.Volumes["0"]; root != nil && len(created.Volumes) == 1 {
+		rootVolume.id = root.ID
+	}
+	if err := rootVolume.validate(); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	volumeClaim, err := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, client, created.ID, publicIPv4(created), sshKey.ID, sshKey.Name, "rollback-cleanup", rootVolume, req.Keep, now)
+	if err != nil {
+		return core.LeaseTarget{}, fmt.Errorf("persist Scaleway root-volume allocation identity: %w", err)
+	}
+	rootVolume.addLabels(labels)
+	confirmedLabels := maps.Clone(volumeClaim.Labels)
+	delete(confirmedLabels, volumePendingLabel)
+	if _, err := core.UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID, volumeClaim, confirmedLabels, func() error {
+		_, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{
+			Zone: scw.Zone(client.Zone()), ServerID: created.ID,
+			Tags: ptrTags(replaceCrabboxTags(created.Tags, tagsFromLabels(labels))),
+		}, scw.WithContext(ctx))
+		return err
+	}); err != nil {
+		return core.LeaseTarget{}, fmt.Errorf("confirm Scaleway root-volume tag publication: %w", err)
+	}
+	rootVolume.pending = false
 	if err := client.Instance().SetServerUserData(&instance.SetServerUserDataRequest{
 		Zone:     scw.Zone(client.Zone()),
 		ServerID: created.ID,
@@ -424,6 +460,9 @@ func (b *Backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 }
 
 func (b *Backend) StatusTouchClaimMatches(lease core.LeaseTarget, claim core.LeaseClaim) bool {
+	if validateRootVolumeIdentity(claim, lease.Server, false) != nil {
+		return false
+	}
 	for _, key := range []string{"scaleway_project", "scaleway_zone"} {
 		expected := strings.TrimSpace(claim.Labels[key])
 		if expected == "" || expected != strings.TrimSpace(lease.Server.Labels[key]) {
@@ -453,31 +492,33 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	if err := b.validateLiveServer(live, req.Lease.Server); err != nil {
 		return core.Server{}, err
 	}
-	cfg := b.cfgForRun()
-	now := b.clockNow()
-	labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(live.Labels, cfg, req.State, now, req.IdleTimeoutOverride)
-	updateResp, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{
-		Zone:     scw.Zone(client.Zone()),
-		ServerID: item.Server.ID,
-		Tags:     ptrTags(replaceCrabboxTags(item.Server.Tags, tagsFromLabels(labels))),
-	}, scw.WithContext(ctx))
-	if err != nil {
-		return core.Server{}, err
-	}
-	if updateResp != nil && updateResp.Server != nil {
-		live = b.serverFromScaleway(updateResp.Server)
-	}
-	live.Labels = labels
-	claim, ok, claimErr := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID)
+	claim, ok, claimErr := b.validateVolumeMutation(live)
 	if claimErr != nil {
 		return core.Server{}, claimErr
 	}
-	if ok {
-		if _, err := core.UpdateLeaseClaimTouchIfUnchanged(ctx, req.Lease.LeaseID, claim, labels, now, req.IdleTimeoutOverride); err != nil {
-			return core.Server{}, err
+	cfg := b.cfgForRun()
+	now := b.clockNow()
+	labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(live.Labels, cfg, req.State, now, req.IdleTimeoutOverride)
+	update := func() (core.Server, core.SSHTarget, bool, error) {
+		updateResp, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{
+			Zone: scw.Zone(client.Zone()), ServerID: item.Server.ID,
+			Tags: ptrTags(replaceCrabboxTags(item.Server.Tags, tagsFromLabels(labels))),
+		}, scw.WithContext(ctx))
+		if err != nil {
+			return core.Server{}, core.SSHTarget{}, false, err
 		}
+		if updateResp != nil && updateResp.Server != nil {
+			live = b.serverFromScaleway(updateResp.Server)
+		}
+		live.Labels = labels
+		return live, core.SSHTarget{}, true, nil
 	}
-	return live, nil
+	if ok {
+		_, live, _, err = core.UpdateLeaseClaimTouchIfUnchangedAction(ctx, req.Lease.LeaseID, claim, now, req.IdleTimeoutOverride, update)
+	} else {
+		live, _, _, err = update()
+	}
+	return live, err
 }
 
 func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseTarget, meta core.TailscaleMetadata) (core.Server, error) {
@@ -506,33 +547,32 @@ func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseT
 	if err := b.validateProviderIdentity(live.Labels, client); err != nil {
 		return core.Server{}, err
 	}
+	claim, exists, err := b.validateVolumeMutation(live)
+	if err != nil {
+		return core.Server{}, err
+	}
 	labels := live.Labels
 	shared.ApplyTailscaleMetadata(labels, meta)
-	updateResp, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{
-		Zone:     scw.Zone(client.Zone()),
-		ServerID: resp.Server.ID,
-		Tags:     ptrTags(replaceCrabboxTags(resp.Server.Tags, tagsFromLabels(labels))),
-	}, scw.WithContext(ctx))
-	if err != nil {
-		return core.Server{}, err
-	}
-	if updateResp != nil && updateResp.Server != nil {
-		live = b.serverFromScaleway(updateResp.Server)
-	}
-	live.Labels = labels
-	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
-	if err != nil {
-		return core.Server{}, err
+	update := func() error {
+		updateResp, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{
+			Zone: scw.Zone(client.Zone()), ServerID: resp.Server.ID,
+			Tags: ptrTags(replaceCrabboxTags(resp.Server.Tags, tagsFromLabels(labels))),
+		}, scw.WithContext(ctx))
+		if err != nil {
+			return err
+		}
+		if updateResp != nil && updateResp.Server != nil {
+			live = b.serverFromScaleway(updateResp.Server)
+		}
+		live.Labels = labels
+		return nil
 	}
 	if exists {
-		if claim.Provider != providerName || claim.CloudID != server.CloudID {
-			return core.Server{}, core.Exit(2, "refusing to update Tailscale metadata from stale Scaleway claim")
-		}
-		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels); err != nil {
-			return core.Server{}, err
-		}
+		_, err = core.UpdateLeaseClaimLabelsIfUnchangedAfter(lease.LeaseID, claim, labels, update)
+	} else {
+		err = update()
 	}
-	return live, nil
+	return live, err
 }
 
 func (b *Backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
@@ -675,7 +715,7 @@ func (b *Backend) targetFromServer(ctx context.Context, client Client, item *ins
 		return core.LeaseTarget{}, err
 	}
 	if exists && !req.IsReadOnlyStatus() {
-		if err := validateScalewayClaimIdentity(claim, server); err != nil {
+		if err := validateScalewayClaimIdentity(claim, server, req.ReleaseOnly); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		if err := b.validateProviderIdentity(claim.Labels, client); err != nil {
@@ -695,6 +735,9 @@ func (b *Backend) targetFromServer(ctx context.Context, client Client, item *ins
 		}
 		if req.Repo.Root == "" {
 			return core.LeaseTarget{}, core.Exit(2, "scaleway lease=%s cannot be reclaimed without a repository root", leaseID)
+		}
+		if err := rootVolumeFromLabels(server.Labels).validate(); err != nil {
+			return core.LeaseTarget{}, err
 		}
 	}
 	if req.ReleaseOnly {
@@ -792,35 +835,42 @@ func (b *Backend) deleteServer(ctx context.Context, client Client, server core.S
 		return core.Exit(4, "scaleway recovery claim for lease=%s has no server identity; credentials and claim retained", leaseID)
 	}
 	keyID := strings.TrimSpace(claim.Labels["scaleway_ssh_key_id"])
-	resp, err := client.Instance().GetServer(&instance.GetServerRequest{Zone: scw.Zone(client.Zone()), ServerID: server.CloudID}, scw.WithContext(ctx))
-	if err != nil && !isScalewayNotFound(err) {
+	err = core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, leaseID, claim, true, func() error {
+		rootVolume := rootVolumeFromLabels(claim.Labels)
+		resp, err := client.Instance().GetServer(&instance.GetServerRequest{Zone: scw.Zone(client.Zone()), ServerID: server.CloudID}, scw.WithContext(ctx))
+		if err != nil && !isScalewayNotFound(err) {
+			return err
+		}
+		if err == nil {
+			if resp == nil || resp.Server == nil {
+				return core.Exit(4, "scaleway server not found: %s", server.CloudID)
+			}
+			live := b.serverFromScaleway(resp.Server)
+			if err := b.validateLiveServer(live, server); err != nil {
+				return err
+			}
+			if err := b.validateProviderIdentity(live.Labels, client); err != nil {
+				return err
+			}
+			if err := validateScalewayClaimIdentity(claim, live, true); err != nil {
+				return err
+			}
+		}
+		if err := b.deleteAllocationResources(ctx, client, server.CloudID, rootVolume); err != nil {
+			return err
+		}
+		if rootVolume.contract == "" {
+			fmt.Fprintln(b.rt.Stderr, "warning: legacy Scaleway lease has no allocation-time root-volume record; volume cleanup is not tracked")
+		}
+		if keyID != "" {
+			if err := client.IAM().DeleteSSHKey(&iam.DeleteSSHKeyRequest{SSHKeyID: keyID}, scw.WithContext(ctx)); err != nil && !isScalewayNotFound(err) {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		return err
-	}
-	if err == nil {
-		if resp == nil || resp.Server == nil {
-			return core.Exit(4, "scaleway server not found: %s", server.CloudID)
-		}
-		live := b.serverFromScaleway(resp.Server)
-		if err := b.validateLiveServer(live, server); err != nil {
-			return err
-		}
-		if err := b.validateProviderIdentity(live.Labels, client); err != nil {
-			return err
-		}
-		if err := validateScalewayClaimIdentity(claim, live); err != nil {
-			return err
-		}
-		if err := b.deleteServerResource(ctx, client, server.CloudID); err != nil {
-			return err
-		}
-	}
-	if keyID != "" {
-		if err := client.IAM().DeleteSSHKey(&iam.DeleteSSHKeyRequest{SSHKeyID: keyID}, scw.WithContext(ctx)); err != nil && !isScalewayNotFound(err) {
-			return err
-		}
-	}
-	if err := core.RemoveLeaseClaimIfUnchanged(leaseID, claim); err != nil {
-		return fmt.Errorf("finalize Scaleway cleanup claim: %w", err)
 	}
 	core.RemoveStoredTestboxKey(leaseID)
 	return nil
@@ -835,7 +885,7 @@ func (b *Backend) cleanupClaim(client Client, server core.Server) (core.LeaseCla
 	if !exists {
 		return core.LeaseClaim{}, core.Exit(2, "scaleway lease=%s has no exact local claim; refusing cleanup", leaseID)
 	}
-	if err := validateScalewayClaimIdentity(claim, server); err != nil {
+	if err := validateScalewayClaimIdentity(claim, server, true); err != nil {
 		return core.LeaseClaim{}, err
 	}
 	if err := b.validateProviderIdentity(claim.Labels, client); err != nil {
@@ -858,7 +908,7 @@ func (b *Backend) bindPendingRecoveryServer(ctx context.Context, client Client, 
 	matches := make([]core.Server, 0, 1)
 	for _, item := range items {
 		candidate := b.serverFromScaleway(item)
-		if validateScalewayClaimIdentity(claim, candidate) == nil && b.validateProviderIdentity(candidate.Labels, client) == nil {
+		if validateScalewayClaimIdentity(claim, candidate, true) == nil && b.validateProviderIdentity(candidate.Labels, client) == nil {
 			matches = append(matches, candidate)
 		}
 	}
@@ -937,7 +987,7 @@ func (b *Backend) deleteIdentitylessRecoveryKey(ctx context.Context, client Clie
 	if !claimExists {
 		return core.Exit(2, "scaleway lease=%s has no exact local claim; refusing SSH key cleanup", leaseID)
 	}
-	if err := validateScalewayClaimIdentity(claim, server); err != nil {
+	if err := validateScalewayClaimIdentity(claim, server, true); err != nil {
 		return err
 	}
 	keyID := strings.TrimSpace(server.Labels["scaleway_ssh_key_id"])
@@ -977,7 +1027,7 @@ func (b *Backend) waitForPublicIPv4(ctx context.Context, client Client, serverID
 		})
 }
 
-func (b *Backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, repoRoot string, client Client, serverID, host, keyID, keyName, recovery string, keep bool, now time.Time) error {
+func (b *Backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, repoRoot string, client Client, serverID, host, keyID, keyName, recovery string, rootVolume rootVolumeManifest, keep bool, now time.Time) (core.LeaseClaim, error) {
 	labels := labelsFromTags(leaseTags(cfg, leaseID, slug, "provisioning", keep, now))
 	labels["recovery"] = recovery
 	labels["scaleway_project"] = client.ProjectID()
@@ -986,16 +1036,44 @@ func (b *Backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, re
 	labels["scaleway_zone"] = client.Zone()
 	labels["scaleway_ssh_key_id"] = keyID
 	labels["scaleway_ssh_key_name"] = keyName
+	rootVolume.addLabels(labels)
+	if rootVolume.pending && rootVolume.id != "" {
+		labels[volumePendingLabel] = "true"
+	}
 	server := core.Server{Provider: providerName, CloudID: serverID, Name: core.LeaseProviderName(leaseID, slug), Labels: labels}
 	server.PublicNet.IPv4.IP = host
 	if repoRoot == "" {
 		var err error
 		repoRoot, err = os.Getwd()
 		if err != nil {
-			return err
+			return core.LeaseClaim{}, err
 		}
 	}
-	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, repoRoot, cfg.IdleTimeout, false)
+	expected, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return core.LeaseClaim{}, err
+	}
+	if exists {
+		prior := rootVolumeFromLabels(expected.Labels)
+		if expected.LeaseID != leaseID || expected.Slug != slug || expected.Provider != providerName || expected.CloudID != "" && expected.CloudID != serverID ||
+			prior.id != "" && (prior.id != rootVolume.id || !prior.pending && rootVolume.pending) || prior.contract != "" && prior.contract != rootVolume.contract {
+			return core.LeaseClaim{}, core.Exit(2, "Scaleway allocation recovery identity changed; refusing to overwrite claim")
+		}
+		for _, key := range []string{"lease", "slug", "provider", "target", "provider_key", "scaleway_project", "scaleway_zone", "scaleway_ssh_key_name"} {
+			if expected.Labels[key] == "" || expected.Labels[key] != labels[key] {
+				return core.LeaseClaim{}, core.Exit(2, "Scaleway allocation recovery %s identity changed; refusing to overwrite claim", key)
+			}
+		}
+		for _, key := range []string{"scaleway_organization", "scaleway_region"} {
+			if expected.Labels[key] != "" && expected.Labels[key] != labels[key] {
+				return core.LeaseClaim{}, core.Exit(2, "Scaleway allocation recovery %s identity changed; refusing to overwrite claim", key)
+			}
+		}
+		if oldKey := expected.Labels["scaleway_ssh_key_id"]; oldKey != keyID && !(oldKey == "" && expected.Labels["recovery"] == "ambiguous-key-create") {
+			return core.LeaseClaim{}, core.Exit(2, "Scaleway allocation recovery SSH key identity changed; refusing to overwrite claim")
+		}
+	}
+	return core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, cfg, core.ProviderClaimScope(providerName, cfg), server, core.SSHTarget{}, repoRoot, cfg.IdleTimeout, false, expected, exists)
 }
 
 func (b *Backend) serverFromScaleway(item *instance.Server) core.Server {
@@ -1100,7 +1178,7 @@ func validateScalewayLabels(labels map[string]string) error {
 	return nil
 }
 
-func validateScalewayClaimIdentity(claim core.LeaseClaim, server core.Server) error {
+func validateScalewayClaimIdentity(claim core.LeaseClaim, server core.Server, cleanup bool) error {
 	leaseID := server.Labels["lease"]
 	slug := server.Labels["slug"]
 	if claim.LeaseID != leaseID ||
@@ -1135,7 +1213,7 @@ func validateScalewayClaimIdentity(claim core.LeaseClaim, server core.Server) er
 			return core.Exit(2, "scaleway lease claim has no server identity or valid recovery state for lease=%s", leaseID)
 		}
 	}
-	return nil
+	return validateRootVolumeIdentity(claim, server, cleanup)
 }
 
 func replaceCrabboxTags(existing, desired []string) []string {

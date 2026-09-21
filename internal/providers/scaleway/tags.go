@@ -27,6 +27,8 @@ var tagSchema = shared.LeaseTagSchema(append(shared.TailscaleTagFields(),
 	shared.TagLabelField{Key: "scaleway_zone"},
 	shared.TagLabelField{Key: "scaleway_ssh_key_id"},
 	shared.TagLabelField{Key: "scaleway_ssh_key_name"},
+	shared.TagLabelField{Key: volumeContractLabel},
+	shared.TagLabelField{Key: rootVolumeLabel},
 )...)
 
 func leaseTags(cfg core.Config, leaseID, slug, state string, keep bool, now time.Time) []string {
@@ -89,12 +91,15 @@ func labelsFromTags(tags []string) map[string]string {
 			}
 			key := strings.ToLower(parts[0])
 			value := parts[1]
+			if key == volumePendingLabel {
+				continue
+			} // Local allocation journal only.
 			if logical, ok := versionedExactTagValueKey(key); ok {
 				labels[logical] = shared.DecodeExactTagValue(value)
 				continue
 			}
 			switch key {
-			case "provider", "lease", "slug", "target":
+			case "provider", "lease", "slug", "target", volumeContractLabel, rootVolumeLabel:
 				if prior := labels[key]; prior != "" && prior != value {
 					ownershipConflicts[key] = true
 				}
