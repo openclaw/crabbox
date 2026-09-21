@@ -112,6 +112,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, box boxData, claim core.LeaseClaim, exists bool) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), boxReleaseTimeout)
 	defer cancel()
+	cleanupCtx = withBoxCleanupProgress(cleanupCtx, b.rt.Stderr)
 	if exists {
 		if claim.LeaseID != leaseID || box.ID != box.createdID || !concreteBoxID(box.createdID) {
 			return core.Exit(2, "ascii-box rollback has no matching original publication identity")
@@ -140,6 +141,9 @@ func (b *backend) rollbackBox(ctx context.Context, client api, leaseID string, b
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
+	if req.ReleaseOnly {
+		ctx = withBoxCleanupProgress(ctx, b.rt.Stderr)
+	}
 	cfg, err := b.configForRun()
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -302,6 +306,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	}
 	ctx, cancel := context.WithTimeout(ctx, boxReleaseTimeout)
 	defer cancel()
+	ctx = withBoxCleanupProgress(ctx, b.rt.Stderr)
 	return releaseClaimedBox(ctx, client, claim, func(box boxData) {
 		if req.GuardedRemoteCleanup != nil {
 			lease := req.Lease
@@ -654,15 +659,8 @@ func boxClaimsByID(cfg core.Config) (map[string]core.LeaseClaim, error) {
 }
 
 func isNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	var identityErr *boxIdentityError
-	if errors.As(err, &identityErr) {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "404") || strings.Contains(msg, "not found")
+	var missing *boxNotFoundError
+	return errors.As(err, &missing)
 }
 
 func workdir(cfg core.Config) string {
