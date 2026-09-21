@@ -192,17 +192,7 @@ func (c *vastClient) do(ctx context.Context, method, path string, body any, out 
 }
 
 func (c *vastClient) decodeAPIError(operation string, statusCode int, status string, data []byte, readErr error) error {
-	body := strings.TrimSpace(string(data))
-	if len(body) > 1600 {
-		body = body[:1600]
-	}
-	body = redactVastText(body, c.apiKey)
-	if readErr != nil {
-		if body != "" {
-			body += "; "
-		}
-		body += "response body read failed: " + readErr.Error()
-	}
+	body := shared.RedactedResponseBody(data, readErr, 1600, func(value string) string { return redactVastText(value, c.apiKey) })
 	return &vastAPIError{Operation: operation, StatusCode: statusCode, Status: status, Body: body}
 }
 

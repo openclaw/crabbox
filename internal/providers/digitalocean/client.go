@@ -160,16 +160,7 @@ func (c *digitalOceanClient) do(ctx context.Context, method, path string, body a
 	}
 	defer resp.Body.Close()
 	return shared.DecodeStatusFirstJSONResponse(resp, out, "digitalocean "+method+" "+path, func(status int, data []byte, readErr error) error {
-		body := shared.RedactErrorSecrets(strings.TrimSpace(string(data)), c.token)
-		if len(body) > 400 {
-			body = body[:400]
-		}
-		if readErr != nil {
-			if body != "" {
-				body += "; "
-			}
-			body += "response body read failed: " + readErr.Error()
-		}
+		body := shared.RedactedResponseBody(data, readErr, 400, func(value string) string { return shared.RedactErrorSecrets(value, c.token) })
 		return &digitalOceanAPIError{Operation: method + " " + path, Status: status, Body: body}
 	})
 }

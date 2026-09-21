@@ -409,16 +409,9 @@ func (c *Client) do(ctx context.Context, method, requestPath string, body any, o
 	}
 	defer resp.Body.Close()
 	return shared.DecodeStatusFirstJSONResponse(resp, out, "ovh "+method+" "+requestPath, func(status int, data []byte, readErr error) error {
-		body := redactSecrets(strings.TrimSpace(string(data)), c.applicationKey, c.applicationSecret, c.consumerKey)
-		if len(body) > 400 {
-			body = body[:400]
-		}
-		if readErr != nil {
-			if body != "" {
-				body += "; "
-			}
-			body += "response body read failed: " + readErr.Error()
-		}
+		body := shared.RedactedResponseBody(data, readErr, 400, func(value string) string {
+			return redactSecrets(value, c.applicationKey, c.applicationSecret, c.consumerKey)
+		})
 		return &APIError{Operation: method + " " + requestPath, Status: status, Body: body}
 	})
 }

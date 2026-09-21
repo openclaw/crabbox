@@ -629,6 +629,14 @@ the adapter. Only a zero-length body skips decoding; nonempty whitespace is
 decoded, and JSON errors remain unwrapped. This separate contract adds no
 response limit and does not apply to streams or alter the bounded decoder.
 
+DigitalOcean, Lambda, OVH, and Vast use `shared.RedactedResponseBody` for
+status-first API-error diagnostics. It applies the adapter's redaction policy
+before truncating the body and also sanitizes appended body-read errors. The
+adapter still selects its diagnostic limit, placeholder spelling, typed HTTP
+error, and status precedence. Read failures remain diagnostic text rather than
+new causes of a completed API error; this does not change successful-response
+decoding or transport-error handling.
+
 Provider adapters refer to core types and primitives directly, for example
 `core.Config`, `core.RunRequest`, and `core.ShellQuote`. Local helpers own
 provider-specific decisions such as claim scopes, recovery prefixes, and

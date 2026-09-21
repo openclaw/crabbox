@@ -11,6 +11,8 @@
 
 ### Fixes
 
+- Redact Lambda and Vast API-error bodies before truncation, and sanitize appended body-read diagnostics for DigitalOcean, Lambda, OVH, and Vast without changing HTTP-error classification.
+
 - Use EC2 instance metadata for AWS vCPU quota admission and readiness, including bare-metal types, and keep unknown instance costs out of capacity recommendations. [PR 2302](https://github.com/openclaw/crabbox/pull/2302). Thanks @vincentkoc.
 - Refresh the Cloudflare runner to Node 24.21.0, Go 1.26.8, GitHub CLI 2.101.0, and pnpm 12.5.1; unpinned projects inherit the pnpm 10-to-12 breaking default change on deployment and should migrate configuration or pin `packageManager` to `pnpm@10.24.0`. [PR 2379](https://github.com/openclaw/crabbox/pull/2379). Thanks @altaywtf.
 - Persist RunPod heartbeat activity and explicit idle-timeout changes, preserve stored lifecycle policy across fresh reads, and reject stale updates instead of reporting success. [PR 2441](https://github.com/openclaw/crabbox/pull/2441).

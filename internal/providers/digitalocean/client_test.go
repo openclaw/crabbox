@@ -1070,6 +1070,25 @@ func TestDigitalOceanClientRedactsReflectedToken(t *testing.T) {
 	}
 }
 
+func TestDigitalOceanAPIErrorDiagnosticRedaction(t *testing.T) {
+	const token = "fixture-digitalocean-secret"
+	readErr := errors.New("read interrupted with " + token)
+	c := &digitalOceanClient{token: token, baseURL: "https://example.test", client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Request: req, Body: io.NopCloser(&errorAfterReader{data: []byte("partial response"), err: readErr})}, nil
+	})}}
+	err := c.do(t.Context(), http.MethodGet, "/account", nil, nil)
+	var apiErr *digitalOceanAPIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusForbidden {
+		t.Fatalf("typed status changed: %v", err)
+	}
+	if strings.Contains(apiErr.Body, token) || !strings.Contains(apiErr.Body, "[redacted]") || !strings.Contains(apiErr.Body, "partial response; response body read failed:") {
+		t.Fatalf("unsafe or incomplete API diagnostic: %q", apiErr.Body)
+	}
+	if errors.Is(err, readErr) {
+		t.Fatal("read failure overrode API error classification")
+	}
+}
+
 func TestDigitalOceanClientRedactsSemanticDropletName(t *testing.T) {
 	const token = "digitalocean-droplet-secret"
 	const leaseID = "cbx_abcdef123456"

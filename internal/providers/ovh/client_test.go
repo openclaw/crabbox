@@ -14,8 +14,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestClientRefusesCrossOriginRedirectBeforeSignedHeaderReplay(t *testing.T) {
@@ -515,6 +517,29 @@ func TestClientPreservesStatusWhenResponseBodyIsTruncated(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestOVHAPIErrorDiagnosticRedaction(t *testing.T) {
+	readErr := errors.New("read interrupted with app-secret consumer-key")
+	c := newTestClientWithHTTP(t, "https://example.test", &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Request: req, Body: io.NopCloser(io.MultiReader(strings.NewReader("partial response"), iotest.ErrReader(readErr)))}, nil
+	})})
+	err := c.do(t.Context(), http.MethodGet, "/auth/time", nil, nil)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusForbidden {
+		t.Fatalf("typed status changed: %v", err)
+	}
+	for _, secret := range []string{"app-secret", "consumer-key"} {
+		if strings.Contains(apiErr.Body, secret) {
+			t.Fatalf("unsafe API diagnostic: %q", apiErr.Body)
+		}
+	}
+	if !strings.Contains(apiErr.Body, "partial response; response body read failed:") {
+		t.Fatalf("diagnostic context lost: %q", apiErr.Body)
+	}
+	if errors.Is(err, readErr) {
+		t.Fatal("read failure overrode API error classification")
 	}
 }
 

@@ -79,6 +79,33 @@ func TestRedactVastAPIErrorSecrets(t *testing.T) {
 	}
 }
 
+func TestVastAPIErrorDiagnosticRedaction(t *testing.T) {
+	const token = "fixture-vast-secret-token"
+	c := &vastClient{apiKey: token}
+	readErr := errors.New("read interrupted with " + token)
+	for _, tc := range []struct {
+		name, body string
+		readErr    error
+	}{
+		{name: "credential across cutoff", body: strings.Repeat("x", 1590) + token},
+		{name: "read diagnostic", body: "partial response", readErr: readErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := c.decodeAPIError("GET /instances/100/", http.StatusForbidden, "403 Forbidden", []byte(tc.body), tc.readErr)
+			var apiErr *vastAPIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden || apiErr.Status != "403 Forbidden" {
+				t.Fatalf("typed status changed: %v", err)
+			}
+			if strings.Contains(apiErr.Body, token[:10]) || !strings.Contains(apiErr.Body, "<redacted>") {
+				t.Fatalf("unsafe API diagnostic: %q", apiErr.Body)
+			}
+			if errors.Is(err, readErr) {
+				t.Fatal("read failure overrode API error classification")
+			}
+		})
+	}
+}
+
 func TestOfferSearchPayloadAndDecode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/v0/bundles/" {
