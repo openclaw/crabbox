@@ -394,10 +394,8 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	cfg := b.Cfg
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
-		delete(labels, "idle_timeout")
-		delete(labels, "idle_timeout_secs")
 	}
-	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, b.clockNow())
+	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, b.clockNow(), req.IdleTimeoutOverride)
 	if err := client.ReplaceInstanceTags(ctx, server.CloudID, item.Tags, tagsFromLabels(labels)); err != nil {
 		return core.Server{}, err
 	}

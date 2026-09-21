@@ -211,7 +211,7 @@ STS and `DescribeInstances`; it does not create resources.
 4. Replace Crabbox tags with ready-state ownership metadata and claim the lease
    locally.
 5. Run normal Crabbox sync/run/ssh workflows over SSH.
-6. Update timeout/Tailscale tags on touch.
+6. Update timeout/Tailscale tags on touch. An explicit heartbeat `--idle-timeout` replaces the remote timeout; omitting it preserves the live stored policy even when the current configuration differs. A fallback applies only when no stored policy exists, and the original TTL still caps expiry.
 7. Terminate the CVM instance on `stop`; `cleanup` deletes only expired
    resources with an exact local lease, instance, provider-key, and account
    claim. The claim remains locked across live-tag verification and termination;
