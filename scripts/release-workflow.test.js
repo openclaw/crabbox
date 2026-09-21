@@ -28,7 +28,7 @@ test("release workflow is verifier-only, protected-default, dual-native, and tok
   assert.match(workflow, /persist-credentials: false/);
   assert.match(
     workflow,
-    /name: Set up Go for Apple VM source verification\n\s+uses: actions\/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16[\s\S]*name: Verify shipped Apple VM image source[\s\S]*git show "\$RELEASE_COMMIT:internal\/cli\/os_image[.]go"[\s\S]*git show "\$RELEASE_COMMIT:internal\/providers\/applevm\/backend[.]go"[\s\S]*go run [.][/]scripts\/apple-vm-image-source "\$source_root"/,
+    /name: Set up Go for Apple VM source verification\n\s+uses: actions\/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e[\s\S]*name: Verify shipped Apple VM image source[\s\S]*git show "\$RELEASE_COMMIT:internal\/cli\/os_image[.]go"[\s\S]*git show "\$RELEASE_COMMIT:internal\/providers\/applevm\/backend[.]go"[\s\S]*go run [.][/]scripts\/apple-vm-image-source "\$source_root"/,
   );
   assert.match(workflow, /runner: macos-15\n\s+arch: arm64/);
   assert.match(workflow, /runner: macos-15-intel\n\s+arch: x86_64/);
