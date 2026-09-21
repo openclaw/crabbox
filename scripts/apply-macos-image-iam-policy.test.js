@@ -9,11 +9,19 @@ import test from "node:test";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
 const applyScript = path.join(scriptDir, "apply-macos-image-iam-policy.sh");
+const adminSource = await readFile(path.join(repoRoot, "internal/cli/admin.go"), "utf8");
+const baselinePolicy = JSON.parse(adminSource.match(/const awsProviderPolicyJSON = `([^`]+)`/)[1]);
+const hostPolicy = JSON.parse(adminSource.match(/const macHostLifecyclePolicyJSON = `([^`]+)`/)[1]);
+const combinedPolicy = {
+  Version: baselinePolicy.Version,
+  Statement: [...baselinePolicy.Statement, ...hostPolicy.Statement],
+};
 
 async function setup(targetType = "user", account = "123456789012") {
   const dir = await mkdtemp(path.join(os.tmpdir(), "crabbox-iam-apply-test-"));
   const bin = path.join(dir, "bin");
   const log = path.join(dir, "aws.log");
+  const appliedPolicy = path.join(dir, "applied-policy.json");
   const aws = path.join(bin, "aws");
   await mkdir(bin);
   await writeFile(
@@ -43,6 +51,13 @@ if [[ "$1" == "sts" && "$2" == "get-caller-identity" ]]; then
   exit 0
 fi
 if [[ "$1" == "iam" && ( "$2" == "put-user-policy" || "$2" == "put-role-policy" ) ]]; then
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--policy-document" ]]; then
+      cp "\${2#file://}" "${appliedPolicy}"
+      break
+    fi
+    shift
+  done
   printf '{"ok":true}\\n'
   exit 0
 fi
@@ -65,8 +80,8 @@ exit 2
       policyTarget: { type: targetType, name: "crabbox-runner", source: `iam-${targetType}` },
     }),
   );
-  await writeFile(policy, '{"Statement":[{"Action":["ec2:RunInstances","ec2:AllocateHosts"]}]}\n');
-  return { dir, bin, log, identity, policy };
+  await writeFile(policy, JSON.stringify(combinedPolicy));
+  return { dir, bin, log, identity, policy, appliedPolicy };
 }
 
 function runApply(ctx, args = [], env = {}) {
@@ -116,6 +131,10 @@ test("IAM apply helper writes user policy only with --apply", async () => {
   const log = await readFile(ctx.log, "utf8");
   assert.match(log, /--profile prod sts get-caller-identity --query Account --output text/);
   assert.match(log, /--profile prod iam put-user-policy --user-name crabbox-runner/);
+  const applied = JSON.parse(await readFile(ctx.appliedPolicy, "utf8"));
+  assert.deepEqual(applied, combinedPolicy);
+  assert.ok(applied.Statement.some((statement) =>
+    statement.Effect === "Allow" && statement.Action.includes("ec2:DescribeInstanceTypes")));
 });
 
 test("IAM apply helper auto-selects matching profile", async () => {
@@ -169,6 +188,10 @@ test("IAM apply helper writes role policy for role targets", async () => {
   assert.equal(result.code, 0, result.stdout + result.stderr);
   const log = await readFile(ctx.log, "utf8");
   assert.match(log, /iam put-role-policy --role-name crabbox-runner/);
+  const applied = JSON.parse(await readFile(ctx.appliedPolicy, "utf8"));
+  assert.deepEqual(applied, combinedPolicy);
+  assert.ok(applied.Statement.some((statement) =>
+    statement.Effect === "Allow" && statement.Action.includes("ec2:DescribeInstanceTypes")));
 });
 
 test("IAM apply helper refuses mismatched AWS account", async () => {

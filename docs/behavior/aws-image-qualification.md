@@ -125,6 +125,7 @@ ec2:DeleteSnapshot
 ec2:DeregisterImage
 ec2:DescribeImages
 ec2:DescribeInstances
+ec2:DescribeInstanceTypes
 ec2:DescribeKeyPairs
 ec2:DescribeSecurityGroups
 ec2:DescribeSnapshots

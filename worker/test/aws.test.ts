@@ -6,7 +6,6 @@ import {
   applyAWSRunInstanceTargetOptions,
   awsAvailabilityZoneForRegion,
   awsCapacityReadinessCheckForQuota,
-  awsInstanceTypeVCPUs,
   awsHostIDsFromSet,
   awsLeaseImageIdentity,
   awsLaunchCandidates,
@@ -359,9 +358,30 @@ describe("aws provider", () => {
       attempted: ["spot:t3.small"],
       reads: ["spot"],
     },
+    {
+      market: "on-demand" as const,
+      quota: 191,
+      types: ["c7a.metal-48xl"],
+      attempted: [],
+      reads: ["on-demand"],
+    },
+    {
+      market: "on-demand" as const,
+      quota: 192,
+      types: ["c7a.metal-48xl"],
+      attempted: ["on-demand:c7a.metal-48xl"],
+      reads: ["on-demand"],
+    },
+    {
+      market: "on-demand" as const,
+      quota: 32,
+      types: ["g4dn.metal"],
+      attempted: ["on-demand:g4dn.metal"],
+      reads: ["on-demand"],
+    },
   ])("keeps quota admission and market-scoped reuse ($market, quota=$quota)", async (scenario) => {
     const log = vi.spyOn(console, "info").mockImplementation(() => {});
-    const { client, config, attempted } = awsMarketFallbackHarness(
+    const { client, config, attempted, metadataReads } = awsMarketFallbackHarness(
       "",
       scenario.market,
       scenario.types,
@@ -391,11 +411,98 @@ describe("aws provider", () => {
     expect(outcome).toMatch(scenario.attempted.length ? /^created$/ : /quota/);
     expect(attempted).toEqual(scenario.attempted);
     expect(reads).toEqual(scenario.reads);
+    expect(metadataReads).toEqual([scenario.types]);
     const diagnostic = JSON.parse(String(log.mock.calls[0]![0]));
     expect(diagnostic.steps).toContainEqual(
       expect.objectContaining({ name: "quota", count: reads.length }),
     );
   });
+
+  it.each([
+    { name: "missing", metadata: {} },
+    { name: "zero", metadata: { "c7a.metal-48xl": 0 } },
+    { name: "malformed", metadata: { "c7a.metal-48xl": "invalid" } },
+    { name: "denied", metadata: "denied" as const },
+  ])(
+    "keeps $name instance metadata unknown without blocking ordinary launches",
+    async ({ metadata }) => {
+      const { client, config, attempted } = awsMarketFallbackHarness(
+        "",
+        "on-demand",
+        ["c7a.metal-48xl"],
+        metadata,
+      );
+      const [readiness] = await client.capacityReadinessChecks(config);
+      expect(readiness).toMatchObject({
+        status: "skip",
+        details: { default_needed_vcpus: "unknown", hint: "unknown_instance_vcpus" },
+      });
+      expect(readiness?.details).not.toHaveProperty("recommended_type");
+      await client.createServerWithFallback(
+        config,
+        "cbx_abcdef123456",
+        "violet-prawn",
+        "alice@example.com",
+      );
+      expect(attempted).toEqual(["on-demand:c7a.metal-48xl"]);
+    },
+  );
+
+  it("uses described vCPUs for readiness and omits candidates whose cost is unknown", async () => {
+    const { client, config, metadataReads } = awsMarketFallbackHarness(
+      "",
+      "on-demand",
+      ["c7a.metal-48xl"],
+      { "c7a.metal-48xl": 192 },
+    );
+    const baseFetch = globalThis.fetch;
+    let quota = 191;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      return new URL(request.url).hostname.startsWith("servicequotas.")
+        ? Response.json({ Quota: { Value: quota } })
+        : baseFetch(request);
+    });
+    const [warning] = await client.capacityReadinessChecks(config);
+    expect(warning).toMatchObject({ status: "warning", details: { default_needed_vcpus: "192" } });
+    expect(warning?.details).not.toHaveProperty("recommended_type");
+    quota = 192;
+    expect(await client.capacityReadinessChecks(config)).toMatchObject([{ status: "ok" }]);
+    expect(metadataReads).toHaveLength(2);
+  });
+
+  it.each(["im4gn.16xlarge", "is4gen.8xlarge"])(
+    "checks Standard-instance quotas for %s",
+    async (serverType) => {
+      const { client, config } = awsMarketFallbackHarness("", "on-demand", [serverType], {
+        [serverType]: 96,
+      });
+      expect(await client.capacityReadinessChecks(config)).toMatchObject([
+        { status: "ok", details: { default_needed_vcpus: "96", quota_code: "L-1216C47A" } },
+      ]);
+      expect(awsQuotaPreflightAttempt(serverType, "on-demand", "eu-west-1", 32, 96)).toMatchObject({
+        category: "quota",
+      });
+    },
+  );
+
+  it.each(["g4dn.metal", "p5.48xlarge", "trn1.32xlarge", "inf2.48xlarge", "hpc7a.96xlarge"])(
+    "does not compare %s against Standard-instance quotas",
+    async (serverType) => {
+      const { client, config } = awsMarketFallbackHarness("", "on-demand", [serverType], {
+        [serverType]: 96,
+      });
+      expect(await client.capacityReadinessChecks(config)).toMatchObject([
+        {
+          status: "skip",
+          details: { hint: "unsupported_instance_quota", default_needed_vcpus: "96" },
+        },
+      ]);
+      expect(
+        awsQuotaPreflightAttempt(serverType, "on-demand", "eu-west-1", 32, 96),
+      ).toBeUndefined();
+    },
+  );
 
   it("tags every checkpoint AMI backing snapshot with its exact ownership claim", async () => {
     let submitted: URLSearchParams | undefined;
@@ -1256,6 +1363,12 @@ describe("aws provider", () => {
       "spot",
       "eu-west-1",
       32,
+      new Map([
+        ["c7a.48xlarge", 192],
+        ["c7a.8xlarge", 32],
+        ["c7a.2xlarge", 8],
+        ["m7a.large", 2],
+      ]),
     );
 
     expect(check).toMatchObject({
@@ -1292,6 +1405,12 @@ describe("aws provider", () => {
         "spot",
         "eu-west-1",
         limit,
+        new Map([
+          ["c7a.48xlarge", 192],
+          ["c7a.8xlarge", 32],
+          ["c7a.2xlarge", 8],
+          ["m7a.large", 2],
+        ]),
       );
 
       expect(check).toMatchObject({
@@ -1331,6 +1450,12 @@ describe("aws provider", () => {
       "spot",
       "eu-west-1",
       undefined,
+      new Map([
+        ["c7a.48xlarge", 192],
+        ["c7a.8xlarge", 32],
+        ["c7a.2xlarge", 8],
+        ["m7a.large", 2],
+      ]),
     );
 
     expect(check).toMatchObject({
@@ -2294,6 +2419,21 @@ describe("aws provider", () => {
               `<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-rsa ${"a".repeat(724)}</publicKey></item></keySet></DescribeKeyPairsResponse>`,
             );
           }
+          if (action === "DescribeInstanceTypes") {
+            return ec2InstanceTypesResponse(params, {
+              "c7a.8xlarge": 32,
+              "c7i.8xlarge": 32,
+              "m7a.8xlarge": 32,
+              "m7i.8xlarge": 32,
+              "c7g.8xlarge": 32,
+              "m7g.8xlarge": 32,
+              "r7g.8xlarge": 32,
+              "c7a.4xlarge": 16,
+              "c7g.4xlarge": 16,
+              "t3.small": 2,
+              "t4g.small": 2,
+            });
+          }
           if (action === "DescribeImages") {
             return ec2XMLResponse(`<?xml version="1.0" encoding="UTF-8"?>
 <DescribeImagesResponse>
@@ -2403,6 +2543,9 @@ describe("aws provider", () => {
           return ec2XMLResponse(
             "<DescribeKeyPairsResponse><keySet><item><keyName>crabbox-cbx</keyName><publicKey>ssh-ed25519 test</publicKey></item></keySet></DescribeKeyPairsResponse>",
           );
+        }
+        if (action === "DescribeInstanceTypes") {
+          return ec2InstanceTypesResponse(params, { "t3.small": 2 });
         }
         if (action === "DescribeImages") {
           imageQueries += 1;
@@ -3378,6 +3521,13 @@ describe("aws provider", () => {
     };
     client.ec2 = async (action, params) => {
       calls.push(`${action}:${params?.ImageId ?? ""}`);
+      if (action === "DescribeInstanceTypes") {
+        return {
+          instanceTypeSet: {
+            item: { instanceType: "t3.small", vCpuInfo: { defaultVCpus: 2 } },
+          },
+        };
+      }
       if (action === "RunInstances") {
         userData = params?.UserData ?? "";
         return {
@@ -3412,6 +3562,7 @@ describe("aws provider", () => {
       "register-snapshot",
       "wait:ami-transient",
       "security-group",
+      "DescribeInstanceTypes:",
       "RunInstances:ami-transient",
       "DeregisterImage:ami-transient",
     ]);
@@ -3561,25 +3712,20 @@ describe("aws provider", () => {
     });
   });
 
-  it("maps AWS instance types to vCPU quota units", () => {
-    expect(awsInstanceTypeVCPUs("c7a.48xlarge")).toBe(192);
-    expect(awsInstanceTypeVCPUs("c7a.xlarge")).toBe(4);
-    expect(awsInstanceTypeVCPUs("t3.small")).toBe(2);
-    expect(awsInstanceTypeVCPUs("c7gn.metal")).toBeUndefined();
-  });
-
   it("builds quota preflight attempts when applied quota is too low", () => {
     expect(awsQuotaCodeForMarket("spot")).toBe("L-34B43A08");
     expect(awsQuotaCodeForMarket("on-demand")).toBe("L-1216C47A");
-    expect(awsQuotaPreflightAttempt("c7a.48xlarge", "on-demand", "eu-west-1", 32)).toEqual({
+    expect(awsQuotaPreflightAttempt("c7a.48xlarge", "on-demand", "eu-west-1", 32, 192)).toEqual({
       region: "eu-west-1",
       serverType: "c7a.48xlarge",
       market: "on-demand",
       category: "quota",
       message: "quota L-1216C47A in eu-west-1 is 32 vCPUs; c7a.48xlarge needs 192 vCPUs",
     });
-    expect(awsQuotaPreflightAttempt("t3.small", "on-demand", "eu-west-1", 32)).toBeUndefined();
-    expect(awsQuotaPreflightAttempt("c7gn.metal", "spot", "eu-west-1", 32)).toBeUndefined();
+    expect(awsQuotaPreflightAttempt("t3.small", "on-demand", "eu-west-1", 32, 2)).toBeUndefined();
+    expect(
+      awsQuotaPreflightAttempt("c7gn.metal", "spot", "eu-west-1", 32, undefined),
+    ).toBeUndefined();
   });
 
   it("retries snapshot deletion after deregistering an image", async () => {
@@ -3778,11 +3924,38 @@ function ec2XMLResponse(body: string, status = 200): Response {
   return new Response(body, { status, headers: { "content-type": "application/xml" } });
 }
 
+function ec2InstanceTypesResponse(
+  params: URLSearchParams,
+  metadata: Record<string, number | string>,
+): Response {
+  const requested = [...params]
+    .filter(([key]) => key.startsWith("InstanceType."))
+    .map(([, value]) => value);
+  return ec2XMLResponse(
+    `<DescribeInstanceTypesResponse><instanceTypeSet>${requested
+      .flatMap((name) =>
+        metadata[name] === undefined
+          ? []
+          : [
+              `<item><instanceType>${name}</instanceType><vCpuInfo><defaultVCpus>${metadata[name]}</defaultVCpus></vCpuInfo></item>`,
+            ],
+      )
+      .join("")}</instanceTypeSet></DescribeInstanceTypesResponse>`,
+  );
+}
+
 function awsMarketFallbackHarness(
   failureCode: string | string[],
   capacityMarket: "spot" | "on-demand" = "spot",
   instanceTypes: string[] = ["t3.small"],
+  metadata: Record<string, number | string> | "denied" = {
+    "t3.small": 2,
+    "c7a.48xlarge": 192,
+    "c7a.metal-48xl": 192,
+    "g4dn.metal": 96,
+  },
 ) {
+  const metadataReads: string[][] = [];
   const markets: string[] = [];
   const attempted: string[] = [];
   vi.stubGlobal(
@@ -3802,6 +3975,14 @@ function awsMarketFallbackHarness(
         return ec2XMLResponse(
           "<DescribeKeyPairsResponse><keySet><item><keyName>test-key</keyName><publicKey>ssh-ed25519 test</publicKey></item></keySet></DescribeKeyPairsResponse>",
         );
+      }
+      if (action === "DescribeInstanceTypes") {
+        const requested = [...params]
+          .filter(([key]) => key.startsWith("InstanceType."))
+          .map(([, value]) => value);
+        metadataReads.push(requested);
+        if (metadata === "denied") return ec2XMLResponse("<Response />", 403);
+        return ec2InstanceTypesResponse(params, metadata);
       }
       if (action === "RunInstances") {
         const market = params.has("InstanceMarketOptions.MarketType") ? "spot" : "on-demand";
@@ -3851,6 +4032,7 @@ function awsMarketFallbackHarness(
     }),
     markets,
     attempted,
+    metadataReads,
   };
 }
 
