@@ -10,6 +10,7 @@
 
 - Daytona: omit unverified default class labels from snapshot forks and document opt-in workload concurrency and memory limits. [PR 2114](https://github.com/openclaw/crabbox/pull/2114). Thanks @Patrick-Erichsen.
 - Wait for fresh exe.dev VMs to advertise their SSH route, preserve its user, port, and ambient SSH configuration, and bound inventory refreshes by the bootstrap timeout while retaining verified rollback. [PR 2271](https://github.com/openclaw/crabbox/pull/2271). Thanks @salmonumbrella.
+- Preserve NVIDIA Brev deletion recovery claims when the CLI returns blank inventory output; only valid inventory can confirm a workspace is gone. [PR 2426](https://github.com/openclaw/crabbox/pull/2426).
 - Preserve DigitalOcean leases' stored idle timeout on ordinary heartbeats and honor explicit timeout changes without extending the creation-based TTL. [PR 2418](https://github.com/openclaw/crabbox/pull/2418).
 - Preserve canonical cancellation/deadline context and recognized release-denial states in workspace-owner error messages. [PR 2412](https://github.com/openclaw/crabbox/pull/2412). Thanks @steipete.
 - Keep workspace-owner SSH control traffic separate from workload connections while preserving renewal deadlines and ownership checks. [PR 2419](https://github.com/openclaw/crabbox/pull/2419). Thanks @steipete.

@@ -287,9 +287,6 @@ type brevWorkspaceListJSON struct {
 
 func parseBrevWorkspaces(stdout string) ([]brevWorkspace, error) {
 	raw := strings.TrimSpace(stdout)
-	if raw == "" {
-		return nil, nil
-	}
 	if strings.HasPrefix(raw, "[") {
 		var out []brevWorkspace
 		if err := json.Unmarshal([]byte(raw), &out); err != nil {
