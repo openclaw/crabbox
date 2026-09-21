@@ -548,6 +548,15 @@ label/TTL representation, and public result projection; they update caches only
 after the committed claim is returned. The helper does not mutate a native
 resource, create a missing claim, or replace core's checkpoint-journal fence.
 
+`shared.ObservedClaimActivityState` owns the precedence between recorded claim
+activity and native runtime observations for RunPod and Vast. Logical activity
+holds win even over a running observation. Otherwise a known non-running state
+wins, while a running observation replaces only state the adapter classifies as
+obsolete. Empty and literal `unknown` observations preserve recorded activity.
+Adapters supply their existing running/obsolete classifications; vocabulary,
+case and whitespace rules, label projection, and exact snapshot attachment stay
+local. This pure projection neither persists a claim nor renews its lifetime.
+
 Lifecycle polling is the exception that belongs in
 `internal/providers/shared`, not command core. `shared.Poll` centralizes only
 the repeated read mechanics: last-success retention, attempt limits,

@@ -710,6 +710,31 @@ func TestClaimActivityHoldState(t *testing.T) {
 	}
 }
 
+func TestObservedClaimActivityState(t *testing.T) {
+	for _, tc := range []struct {
+		name, claimState, recorded, observed, want string
+		running, obsolete                          bool
+	}{
+		{"hold beats running", " RELEASED ", "busy", "running", "released", true, true},
+		{"hold beats stopped", "deleting", "ready", "stopped", "deleting", false, false},
+		{"running replaces obsolete", "", "provisioning", "ready", "ready", true, true},
+		{"running preserves activity", "", "busy", "running", "busy", true, false},
+		{"non-running wins", "", "busy", "loading", "loading", false, false},
+		{"empty observation", "", "busy", "", "busy", false, true},
+		{"unknown observation", "", "ready", "unknown", "ready", false, true},
+		{"unknown is literal", "", "busy", " UNKNOWN ", " UNKNOWN ", false, false},
+		{"raw recorded activity", "", " Busy ", "running", " Busy ", true, false},
+		{"projected state is separate", "failed", "busy", "ready", "busy", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claim := core.LeaseClaim{Labels: map[string]string{"state": tc.claimState}}
+			if got := ObservedClaimActivityState(claim, tc.recorded, tc.observed, tc.running, tc.obsolete); got != tc.want {
+				t.Fatalf("observed state=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLegacyLabelLifecycleLabels(t *testing.T) {
 	for _, tc := range []struct {
 		name, canonical, legacy string

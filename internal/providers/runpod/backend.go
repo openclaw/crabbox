@@ -808,19 +808,14 @@ func projectRunpodClaim(server core.Server, claim core.LeaseClaim) core.Server {
 		}
 		labels[key] = value
 	}
-	if hold := shared.ClaimActivityHoldState(claim); hold != "" {
-		labels["state"] = hold
-	} else {
-		switch server.Status {
-		case "running", "ready":
-			switch strings.ToLower(labels["state"]) {
-			case "provisioning", "stopped", "failed", "exited", "dead", "terminated", "stopped_with_code":
-				labels["state"] = server.Status
-			}
-		case "", "unknown":
-		default:
-			labels["state"] = server.Status
-		}
+	recordedObsolete := false
+	switch strings.ToLower(labels["state"]) {
+	case "provisioning", "stopped", "failed", "exited", "dead", "terminated", "stopped_with_code":
+		recordedObsolete = true
+	}
+	observedRunning := server.Status == "running" || server.Status == "ready"
+	if state := shared.ObservedClaimActivityState(claim, labels["state"], server.Status, observedRunning, recordedObsolete); state != labels["state"] {
+		labels["state"] = state
 	}
 	server.Labels = labels
 	core.SetServerLeaseClaimSnapshot(&server, claim, true)
