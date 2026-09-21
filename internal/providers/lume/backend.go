@@ -1775,11 +1775,8 @@ func (b *backend) serverFromInstance(inst lumeVM, claim core.LeaseClaim, cfg cor
 			labels["storage"] = strings.TrimSpace(cfg.Lume.Storage)
 		}
 	}
-	status := state
-	if instanceRunning(inst.Status) && labels["state"] == "ready" {
-		status = "ready"
-	}
-	server := core.Server{CloudID: inst.Name, ImmutableID: claim.CloudImmutableID, Provider: providerName, Name: inst.Name, Status: status, Labels: labels}
+	server := shared.LocalInstanceServer(providerName, inst.Name, state, instanceRunning(inst.Status), labels)
+	server.ImmutableID = claim.CloudImmutableID
 	server.PublicNet.IPv4.IP = inst.IPAddress
 	server.ServerType.Name = cfg.Lume.Base
 	return server
@@ -1942,15 +1939,8 @@ func shouldCleanup(server core.Server, claim core.LeaseClaim, now time.Time) (bo
 	if cleanup, reason := core.ShouldCleanupServer(server, now); cleanup {
 		return true, reason
 	}
-	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-	if err != nil || lastUsed.IsZero() {
-		return false, "claim active"
-	}
-	idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
-	if idle <= 0 || !now.After(lastUsed.Add(idle).Add(12*time.Hour)) {
-		return false, "claim active"
-	}
-	return true, "claim expired"
+	claim.LastUsedAt = strings.TrimSpace(claim.LastUsedAt)
+	return shared.ClaimIdleExpiredAfterGrace(claim, now, 12*time.Hour)
 }
 
 func clonePendingStale(claim core.LeaseClaim, now time.Time) bool {

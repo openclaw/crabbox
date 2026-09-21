@@ -798,18 +798,8 @@ func (b *backend) serverFromInstance(inst applevmhelper.Instance, claim core.Lea
 	if inst.SSHPort > 0 {
 		labels["ssh_port"] = strconv.Itoa(inst.SSHPort)
 	}
-	status := appleVMState(inst.Status)
-	if appleVMRunning(inst.Status) && labels["state"] == "ready" {
-		status = "ready"
-	}
-	labels["state"] = status
-	server := core.Server{
-		CloudID:  inst.Name,
-		Provider: providerName,
-		Name:     inst.Name,
-		Status:   status,
-		Labels:   labels,
-	}
+	server := shared.LocalInstanceServer(providerName, inst.Name, appleVMState(inst.Status), appleVMRunning(inst.Status), labels)
+	labels["state"] = server.Status
 	server.PublicNet.IPv4.IP = inst.SSHHost
 	server.ServerType.Name = applevmhelper.RedactImageRef(shared.FirstNonBlankTrimmed(labels["server_type"], imageIdentity))
 	return server
@@ -1005,18 +995,7 @@ func shouldCleanup(inst applevmhelper.Instance, server core.Server, claim core.L
 		return true, "instance state=" + core.Blank(server.Status, "unknown")
 	}
 	if hasClaim {
-		lastUsed, err := time.Parse(time.RFC3339, claim.LastUsedAt)
-		if err != nil || lastUsed.IsZero() {
-			return false, "claim active"
-		}
-		idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
-		if idle <= 0 {
-			return false, "claim active"
-		}
-		if now.After(lastUsed.Add(idle).Add(12 * time.Hour)) {
-			return true, "claim expired"
-		}
-		return false, "claim active"
+		return shared.ClaimIdleExpiredAfterGrace(claim, now, 12*time.Hour)
 	}
 	lifecycleAt := inst.CreatedAt
 	if inst.UpdatedAt.After(lifecycleAt) {

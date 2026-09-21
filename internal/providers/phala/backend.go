@@ -400,7 +400,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
-	if err := b.prepareSSH(ctx, cfg, &lease.SSH); err != nil {
+	if err := shared.PrepareSSHWithBootstrap(ctx, cfg, &lease.SSH, b.rt.Stderr, "Phala CVM", phalaToolBootstrapCommand()); err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
 	// TDX attestation gate: the box is reachable, so before trusting it as a
@@ -486,7 +486,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	// gateway_host on the lease target keeps that lightweight probe from paying a
 	// per-connection `phala cvms get`.
 	if !req.StatusOnly {
-		if err := b.prepareSSH(ctx, cfg, &lease.SSH); err != nil {
+		if err := shared.PrepareSSHWithBootstrap(ctx, cfg, &lease.SSH, b.rt.Stderr, "Phala CVM", phalaToolBootstrapCommand()); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -775,7 +775,7 @@ func (b *backend) createWithCompose(ctx context.Context, cfg core.Config, public
 		if ambiguousPhalaCreateOutcome(result, err) {
 			recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
-			if recovered, recoverErr := b.recoverByLease(recoveryCtx, cfg, leaseID, 30*time.Second); recoverErr == nil {
+			if recovered, recoverErr := shared.RetryLeaseLookup(recoveryCtx, cfg, leaseID, 30*time.Second, b.findByLease); recoverErr == nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: phala deploy returned an error, recovered phala_cvm=%s from lease name\n", recovered.cloudID())
 				return recovered.cloudID(), nil
 			}
@@ -787,7 +787,7 @@ func (b *backend) createWithCompose(ctx context.Context, cfg core.Config, public
 	if parseErr != nil {
 		recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
-		if recovered, recoverErr := b.recoverByLease(recoveryCtx, cfg, leaseID, 30*time.Second); recoverErr == nil {
+		if recovered, recoverErr := shared.RetryLeaseLookup(recoveryCtx, cfg, leaseID, 30*time.Second, b.findByLease); recoverErr == nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: recovered phala_cvm=%s after invalid phala deploy output\n", recovered.cloudID())
 			return recovered.cloudID(), nil
 		}
@@ -988,28 +988,6 @@ func (b *backend) findByLease(ctx context.Context, cfg core.Config, leaseID stri
 	return found[0], nil
 }
 
-func (b *backend) recoverByLease(ctx context.Context, cfg core.Config, leaseID string, timeout time.Duration) (instance, error) {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	var lastErr error
-	for {
-		item, err := b.findByLease(ctx, cfg, leaseID)
-		if err == nil {
-			return item, nil
-		}
-		lastErr = err
-		select {
-		case <-ticker.C:
-		case <-deadline.C:
-			return instance{}, lastErr
-		case <-ctx.Done():
-			return instance{}, ctx.Err()
-		}
-	}
-}
-
 func (b *backend) resolve(ctx context.Context, identifier string, cfg core.Config, allowMissing bool) (instance, string, error) {
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
@@ -1117,19 +1095,6 @@ func cachedGatewayHostNeedsRefresh(host string) bool {
 	// sanitizeProviderLabelValue caps values at exactly 63 bytes. Treat that
 	// boundary as suspect; refreshing a legitimately 63-byte hostname is safe.
 	return len(host) == 63
-}
-
-func (b *backend) prepareSSH(ctx context.Context, cfg core.Config, target *core.SSHTarget) error {
-	probe := *target
-	probe.ReadyCheck = "true"
-	if err := core.WaitForSSHReady(ctx, &probe, b.rt.Stderr, "phala cvm ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
-		return err
-	}
-	target.Port = probe.Port
-	if err := core.RunSSHQuiet(ctx, *target, phalaToolBootstrapCommand()); err != nil {
-		return core.Exit(1, "Phala CVM tool bootstrap failed: %v", err)
-	}
-	return core.WaitForSSHReady(ctx, target, b.rt.Stderr, "phala cvm tools", core.BootstrapWaitTimeout(cfg))
 }
 
 // phalaToolBootstrapCommand prepares a leased Phala CVM for crabbox's

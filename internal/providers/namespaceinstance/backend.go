@@ -226,7 +226,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
-	if err := b.prepareSSH(ctx, cfg, &lease.SSH); err != nil {
+	if err := shared.PrepareSSHWithBootstrap(ctx, cfg, &lease.SSH, b.rt.Stderr, "Namespace instance", namespaceToolBootstrapCommand()); err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
 	lease.Server.Status = "ready"
@@ -259,7 +259,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return core.LeaseTarget{}, core.Exit(4, "Namespace instance %s has no Crabbox lease id", item.ClusterID)
 	}
 	if req.ReadyProbe || !req.StatusOnly {
-		if err := b.prepareSSH(ctx, cfg, &lease.SSH); err != nil {
+		if err := shared.PrepareSSHWithBootstrap(ctx, cfg, &lease.SSH, b.rt.Stderr, "Namespace instance", namespaceToolBootstrapCommand()); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -558,7 +558,7 @@ func (b *backend) create(ctx context.Context, cfg core.Config, publicKeyPath str
 		if ambiguousNSCCreateError(result, err) {
 			recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
-			if recovered, recoverErr := b.recoverByLease(recoveryCtx, cfg, labels["lease"], 30*time.Second); recoverErr == nil {
+			if recovered, recoverErr := shared.RetryLeaseLookup(recoveryCtx, cfg, labels["lease"], 30*time.Second, b.findByLease); recoverErr == nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: nsc create returned an error, recovered namespace_instance=%s from lease label\n", recovered.ClusterID)
 				return recovered.ClusterID, nil
 			}
@@ -570,7 +570,7 @@ func (b *backend) create(ctx context.Context, cfg core.Config, publicKeyPath str
 	if err := json.Unmarshal([]byte(result.Stdout), &output); err != nil {
 		recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
-		if recovered, recoverErr := b.recoverByLease(recoveryCtx, cfg, labels["lease"], 30*time.Second); recoverErr == nil {
+		if recovered, recoverErr := shared.RetryLeaseLookup(recoveryCtx, cfg, labels["lease"], 30*time.Second, b.findByLease); recoverErr == nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: recovered namespace_instance=%s after invalid nsc create output\n", recovered.ClusterID)
 			return recovered.ClusterID, nil
 		}
@@ -583,7 +583,7 @@ func (b *backend) create(ctx context.Context, cfg core.Config, publicKeyPath str
 	if id == "" {
 		recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
-		if recovered, recoverErr := b.recoverByLease(recoveryCtx, cfg, labels["lease"], 30*time.Second); recoverErr == nil {
+		if recovered, recoverErr := shared.RetryLeaseLookup(recoveryCtx, cfg, labels["lease"], 30*time.Second, b.findByLease); recoverErr == nil {
 			fmt.Fprintf(b.rt.Stderr, "warning: recovered namespace_instance=%s after nsc create omitted its id\n", recovered.ClusterID)
 			return recovered.ClusterID, nil
 		}
@@ -673,28 +673,6 @@ func (b *backend) findByLease(ctx context.Context, cfg core.Config, leaseID stri
 		return instance{}, core.Exit(4, "expected one Namespace instance for lease %s, found %d", leaseID, len(found))
 	}
 	return found[0], nil
-}
-
-func (b *backend) recoverByLease(ctx context.Context, cfg core.Config, leaseID string, timeout time.Duration) (instance, error) {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	var lastErr error
-	for {
-		item, err := b.findByLease(ctx, cfg, leaseID)
-		if err == nil {
-			return item, nil
-		}
-		lastErr = err
-		select {
-		case <-ticker.C:
-		case <-deadline.C:
-			return instance{}, lastErr
-		case <-ctx.Done():
-			return instance{}, ctx.Err()
-		}
-	}
 }
 
 func (b *backend) resolve(ctx context.Context, identifier string, cfg core.Config, allowMissing bool) (instance, string, error) {
@@ -789,19 +767,6 @@ func (b *backend) lease(item instance, cfg core.Config, leaseID string, releaseO
 		mergeClaimLabels(&server, claim)
 	}
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
-}
-
-func (b *backend) prepareSSH(ctx context.Context, cfg core.Config, target *core.SSHTarget) error {
-	probe := *target
-	probe.ReadyCheck = "true"
-	if err := core.WaitForSSHReady(ctx, &probe, b.rt.Stderr, "namespace instance ssh", core.BootstrapWaitTimeout(cfg)); err != nil {
-		return err
-	}
-	target.Port = probe.Port
-	if err := core.RunSSHQuiet(ctx, *target, namespaceToolBootstrapCommand()); err != nil {
-		return core.Exit(1, "Namespace instance tool bootstrap failed: %v", err)
-	}
-	return core.WaitForSSHReady(ctx, target, b.rt.Stderr, "namespace instance tools", core.BootstrapWaitTimeout(cfg))
 }
 
 func namespaceToolBootstrapCommand() string {

@@ -103,6 +103,11 @@ With a configured custom snapshot or a checkpoint fork, an actual `--class`
 validates that snapshot's CPU, memory, disk and container type without replacing
 its contents. A YAML/environment class never constrains an existing snapshot;
 the explicitly selected snapshot retains its own sizing.
+New direct lease and sandbox labels omit `class` when no class was used to select
+or validate the snapshot, including implicit-class checkpoint forks. Adjacent
+classes share a native tier and custom snapshots may match none, so Crabbox does
+not infer a canonical class from resource counts. Explicit class selection keeps
+its validated label. Fixed-ID replay preserves the original intent and labels.
 The snapshot must be active and available in the requested Daytona target.
 Crabbox resolves its exact ID before allocation and verifies the created
 sandbox's resources and region. Daytona resolves target names or IDs and
@@ -145,6 +150,43 @@ daytona:
 | `daytona.apiUrl`           | `--daytona-api-url`            | `https://app.daytona.io/api` |
 
 A snapshot or explicit class is required for direct `warmup`/`run`.
+
+### Workload concurrency and memory
+
+Inside a Daytona container, `/proc/cpuinfo`, `/proc/meminfo`, `nproc`, or
+`os.cpus()` can expose host capacity while cgroups enforce the smaller sandbox
+limits. Size workloads from the selected snapshot and check the effective limits
+inside the sandbox, for example on cgroup v2:
+
+```sh
+cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/memory.max
+```
+
+For a 1-vCPU, 1-GiB snapshot, opt into a workload profile in `crabbox.yaml`:
+
+```yaml
+profiles:
+  daytona-small-build:
+    env:
+      GOMAXPROCS: "1"
+      MAKEFLAGS: "-j1"
+      UV_THREADPOOL_SIZE: "1"
+      NODE_OPTIONS: "--max-old-space-size=768"
+```
+
+```sh
+crabbox run --provider daytona --id swift-crab --profile daytona-small-build -- make test
+```
+
+Adjust these values for the actual snapshot and workload; Crabbox does not inject
+them automatically. [GOMAXPROCS](https://pkg.go.dev/runtime#hdr-Environment_Variables)
+limits Go execution parallelism. `MAKEFLAGS` sets make job concurrency, while
+`UV_THREADPOOL_SIZE` controls libuv's pool, not test-runner worker processes.
+[Node's heap limit](https://nodejs.org/api/cli.html#--max-old-space-sizesize-in-mib)
+is per process and leaves other memory allocations outside that budget. Set your
+test runner's worker limit explicitly too, leave room for those allocations and
+other processes, and include any existing `NODE_OPTIONS` in the profile value.
+See [profiles](configuration.md#profiles-and-presets) for reusable command presets.
 
 ## Examples
 

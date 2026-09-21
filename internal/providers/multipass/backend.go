@@ -226,15 +226,7 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 	if err != nil {
 		return nil, err
 	}
-	views := make([]core.LeaseView, 0, len(instances))
-	for _, inst := range instances {
-		claim := claims[inst.Name]
-		if claim.LeaseID == "" && !strings.HasPrefix(inst.Name, "crabbox-") {
-			continue
-		}
-		views = append(views, b.serverFromInstance(inst, claim, cfg))
-	}
-	return views, nil
+	return shared.LocalInstanceViews(instances, claims, cfg, func(inst multipassInstance) string { return inst.Name }, b.serverFromInstance), nil
 }
 
 func (b *backend) Doctor(ctx context.Context, req core.DoctorRequest) (core.DoctorResult, error) {
@@ -645,16 +637,7 @@ func (b *backend) serverFromInstance(inst multipassInstance, claim core.LeaseCla
 	if !instanceRunning(inst.State) {
 		labels["state"] = status
 	}
-	if instanceRunning(inst.State) && labels["state"] == "ready" {
-		status = "ready"
-	}
-	server := core.Server{
-		CloudID:  inst.Name,
-		Provider: providerName,
-		Name:     inst.Name,
-		Status:   status,
-		Labels:   labels,
-	}
+	server := shared.LocalInstanceServer(providerName, inst.Name, status, instanceRunning(inst.State), labels)
 	server.PublicNet.IPv4.IP = inst.ip()
 	server.ServerType.Name = shared.FirstNonBlank(labels["server_type"], cfg.Multipass.Image)
 	return server
@@ -693,18 +676,8 @@ func shouldCleanup(server core.Server, claim core.LeaseClaim, hasClaim bool, now
 	if !instanceRunning(server.Status) && server.Status != "ready" {
 		return true, "instance state=" + core.Blank(server.Status, "unknown")
 	}
-	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-	if err != nil || lastUsed.IsZero() {
-		return false, "claim active"
-	}
-	idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
-	if idle <= 0 {
-		return false, "claim active"
-	}
-	if now.After(lastUsed.Add(idle).Add(12 * time.Hour)) {
-		return true, "claim expired"
-	}
-	return false, "claim active"
+	claim.LastUsedAt = strings.TrimSpace(claim.LastUsedAt)
+	return shared.ClaimIdleExpiredAfterGrace(claim, now, 12*time.Hour)
 }
 
 func requireExactMultipassClaim(leaseID, instanceName string) error {

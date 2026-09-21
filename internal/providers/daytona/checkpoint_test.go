@@ -248,6 +248,15 @@ func TestDaytonaClassForkKeepsCapturedSnapshot(t *testing.T) {
 	if f.create.GetSnapshot() != result.Image.ID || f.sandboxCreates != 2 {
 		t.Fatalf("fork replaced captured filesystem: snapshot=%s creates=%d", f.create.GetSnapshot(), f.sandboxCreates)
 	}
+	forkClaim, err := core.ReadLeaseClaim(f.create.GetLabels()["lease"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for source, labels := range map[string]map[string]string{"create": f.create.GetLabels(), "sandbox": f.sandbox.GetLabels(), "claim": forkClaim.Labels} {
+		if labels["class"] != "standard" {
+			t.Errorf("%s lost the explicitly validated custom-snapshot class: %q", source, labels["class"])
+		}
+	}
 }
 
 func TestDaytonaDirectCheckpointClassRestoresRoutingBeforeValidation(t *testing.T) {

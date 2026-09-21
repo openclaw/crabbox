@@ -279,15 +279,7 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 	if err != nil {
 		return nil, err
 	}
-	views := make([]core.LeaseView, 0, len(instances))
-	for _, inst := range instances {
-		claim := claims[inst.Name]
-		if claim.LeaseID == "" && !strings.HasPrefix(inst.Name, "crabbox-") {
-			continue
-		}
-		views = append(views, b.serverFromInstance(inst, claim, cfg))
-	}
-	return views, nil
+	return shared.LocalInstanceViews(instances, claims, cfg, func(inst tartInstance) string { return inst.Name }, b.serverFromInstance), nil
 }
 
 func (b *backend) Doctor(ctx context.Context, req core.DoctorRequest) (core.DoctorResult, error) {
@@ -866,20 +858,11 @@ func (b *backend) serverFromInstance(inst tartInstance, claim core.LeaseClaim, c
 	// Native inventory's Source is a storage kind, not an image identity.
 	// Only acquisition records image provenance in the claim.
 	status := tartState(inst.State)
-	if instanceRunning(inst.State) && labels["state"] == "ready" {
-		status = "ready"
-	}
 	if !inst.Running && !instanceRunning(inst.State) {
 		labels["state"] = status
 	}
-	server := core.Server{
-		CloudID:     inst.Name,
-		ImmutableID: claim.CloudImmutableID,
-		Provider:    providerName,
-		Name:        inst.Name,
-		Status:      status,
-		Labels:      labels,
-	}
+	server := shared.LocalInstanceServer(providerName, inst.Name, status, instanceRunning(inst.State), labels)
+	server.ImmutableID = claim.CloudImmutableID
 	server.ServerType.Name = shared.FirstNonBlank(labels["server_type"], cfg.Tart.Image)
 	if claim.LeaseID != "" && claim.Provider == providerName {
 		core.SetServerLeaseClaimSnapshot(&server, claim, true)
@@ -924,21 +907,8 @@ func shouldCleanup(server core.Server, claim core.LeaseClaim, hasClaim bool, now
 	if !instanceRunning(server.Status) && server.Status != "ready" {
 		return true, "instance state=" + core.Blank(server.Status, "unknown")
 	}
-	if hasClaim {
-		lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-		if err != nil || lastUsed.IsZero() {
-			return false, "claim active"
-		}
-		idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
-		if idle <= 0 {
-			return false, "claim active"
-		}
-		if now.After(lastUsed.Add(idle).Add(12 * time.Hour)) {
-			return true, "claim expired"
-		}
-		return false, "claim active"
-	}
-	return false, "missing claim"
+	claim.LastUsedAt = strings.TrimSpace(claim.LastUsedAt)
+	return shared.ClaimIdleExpiredAfterGrace(claim, now, 12*time.Hour)
 }
 
 func (b *backend) tart(ctx context.Context, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {
