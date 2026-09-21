@@ -133,7 +133,13 @@ const (
 // FixedLeaseOperations separates native evidence and effects from core's
 // transaction. PlanAttempt only prepares evidence; Submit records admission at
 // the native mutation boundary through tx.Record("submitting").
+type FixedReleasePolicy struct {
+	Outcome *ReleaseLeaseOutcome
+	Binding *FixedResourceBinding
+}
+
 type FixedLeaseOperations[T any] struct {
+	Release *FixedReleasePolicy
 	// Some APIs resolve prerequisite IDs inside submission. Each resolved
 	// attempt must still be journaled before admitting the target allocation.
 	PlanDuringSubmit bool
@@ -315,6 +321,9 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 			if err := kind.ValidateTerminalClaim(*claim, expected, claim.LeaseID, nil); err != nil {
 				return err
 			}
+			if ops.Release != nil && ops.Release.Outcome != nil {
+				ops.Release.Outcome.Terminal = true
+			}
 			if kind.AfterTerminal != nil {
 				return kind.AfterTerminal(*claim)
 			}
@@ -323,6 +332,11 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 		if len(observed.Candidates) == 0 {
 			if !observed.AbsenceProven {
 				return Exit(4, "lease_id_conflict: fixed %s absence is unverified; claim retained", kind.Label)
+			}
+		}
+		if ops.Release != nil && ops.Release.Binding != nil {
+			if err := tx.applyBinding(*ops.Release.Binding); err != nil {
+				return err
 			}
 		}
 		if kind.DeletionState != "" {
@@ -335,6 +349,9 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 			if err := ops.DeleteExact(ctx, tx, observed.Candidates[0]); err != nil {
 				return err
 			}
+		}
+		if ops.Release != nil && ops.Release.Outcome != nil {
+			ops.Release.Outcome.Terminal = true
 		}
 		now := time.Now
 		if len(clock) != 0 && clock[0] != nil {

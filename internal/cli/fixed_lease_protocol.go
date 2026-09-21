@@ -517,3 +517,49 @@ func FixedIdentityLabels(provider, leaseID, slug, fingerprint string, native map
 	maps.Copy(labels, native)
 	return labels
 }
+
+// PrepareFixedSSHKey preserves the stricter replay-key contract selected by
+// each format before obtaining a key. It never recreates a required lost key.
+type FixedKeyPolicy struct{ RequireExisting, UseStored, PreserveProviderKey bool }
+
+func PrepareFixedSSHKey(cfg *Config, leaseID string, policy FixedKeyPolicy) (string, error) {
+	if policy.RequireExisting {
+		target := SSHTarget{}
+		if err := UseStoredTestboxKey(&target, leaseID); err != nil {
+			return "", err
+		}
+		if policy.UseStored {
+			cfg.SSHKey = target.Key
+		}
+	}
+	keyPath, publicKey, err := EnsureTestboxKeyForConfig(*cfg, leaseID)
+	if err != nil {
+		return "", err
+	}
+	cfg.SSHKey = keyPath
+	if !policy.PreserveProviderKey {
+		cfg.ProviderKey = ProviderKeyForLease(leaseID)
+	}
+	return publicKey, nil
+}
+
+func (k FixedLeaseKind) ReadTerminal(leaseID string) (bool, error) {
+	claim, exists, err := ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return true, err
+	}
+	if !exists || !k.IsFixedClaim(claim) || claim.FixedCreateIntent.State != "released" {
+		return false, nil
+	}
+	return true, k.ValidateTerminalClaim(claim, claim, leaseID, nil)
+}
+
+func (k FixedLeaseKind) ResolveTerminal(claim LeaseClaim, releaseOnly bool) (LeaseTarget, bool, error) {
+	if claim.FixedCreateIntent.State != "released" {
+		return LeaseTarget{}, false, nil
+	}
+	if !releaseOnly {
+		return LeaseTarget{}, true, Exit(4, "%s fixed lease is terminal", k.Label)
+	}
+	return LeaseTarget{LeaseID: claim.LeaseID}, true, k.ValidateTerminalClaim(claim, claim, claim.LeaseID, nil)
+}

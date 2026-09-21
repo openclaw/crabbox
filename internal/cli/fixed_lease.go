@@ -31,9 +31,13 @@ func lockFixedLeaseAcquisition(ctx context.Context, leaseID string) (func(), err
 }
 
 type FixedLeaseBinding struct {
-	ProviderScope string
-	Fingerprint   string
-	Slug          string
+	AllocateSlug        bool
+	RejectExistingLease bool
+	RequestedSlug       string
+	Inventory           []Server
+	ProviderScope       string
+	Fingerprint         string
+	Slug                string
 }
 
 type FixedAcquireOptions struct {
@@ -100,9 +104,25 @@ func AcquireFixedIntent(
 		if exists && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.CheckpointID != opts.CheckpointID {
 			return Exit(4, "lease_id_conflict: lease %s is bound to checkpoint %s, not checkpoint %s", opts.LeaseID, blank(claim.FixedCreateIntent.CheckpointID, "<none>"), blank(opts.CheckpointID, "<none>"))
 		}
+		if exists && claim.Provider != opts.Kind.ClaimProvider {
+			return Exit(4, "lease_id_conflict: lease %s already has another owner", opts.LeaseID)
+		}
 		binding, err := prepare(ctx, claim, exists)
 		if err != nil {
 			return err
+		}
+		if !exists && binding.AllocateSlug {
+			if binding.RejectExistingLease {
+				for _, server := range binding.Inventory {
+					if server.Labels["lease"] == opts.LeaseID {
+						return Exit(4, "lease_id_conflict: resource exists without its create intent")
+					}
+				}
+			}
+			binding.Slug, err = AllocateDirectLeaseSlug(opts.LeaseID, binding.RequestedSlug, binding.Inventory)
+			if err != nil {
+				return err
+			}
 		}
 		if exists {
 			if claim.FixedCreateIntent == nil ||

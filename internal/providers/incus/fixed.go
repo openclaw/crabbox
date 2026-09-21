@@ -31,10 +31,7 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
 		Kind: incusLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID, RepoRoot: req.Repo.Root,
 		Reclaim: req.Reclaim, TargetOS: cfg.TargetOS, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout,
-	}, core.FixedLeaseOperations[*api.Instance]{DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
-		if exists && (claim.Provider != providerName || claim.FixedCreateIntent == nil) {
-			return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: lease already has another owner")
-		}
+	}, core.FixedLeaseOperations[*api.Instance]{Admission: &core.FixedAdmission{RepeatSameIdentity: true}, DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		identity, err := client.Identity()
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
@@ -42,11 +39,10 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 		if exists && claim.ProviderScope != identity.scope() {
 			return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: Incus connection identity changed")
 		}
-		keyPath, key, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
+		publicKey, err = core.PrepareFixedSSHKey(&cfg, leaseID, core.FixedKeyPolicy{PreserveProviderKey: true})
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}
-		cfg.SSHKey, publicKey = keyPath, key
 		profile, err := client.Profile(core.Blank(cfg.Incus.Profile, "default"))
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
@@ -74,42 +70,37 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 		for _, inst := range instances {
 			servers = append(servers, serverFromInstance(inst, nil, cfg))
 		}
-		binding.Slug, err = core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
-		return binding, err
-	}, PlanAttempt: func(ctx context.Context, tx *core.FixedTransaction) error {
-		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
-		name := core.LeaseProviderName(leaseID, intent.Slug)
-		if intent.Attempt == nil {
-			if intent.State != "prepared" || claim.CloudID != "" {
-				return core.Exit(4, "lease_id_conflict: Incus create intent has no attempt")
-			}
-			identity, err := client.Identity()
-			if err != nil {
-				return err
-			}
-			intent.Attempt = map[string]string{"name": name, "uuid": uuid.NewString()}
-			cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
-			labels := core.DirectLeaseLabels(cfg, leaseID, intent.Slug, providerName, "", req.Keep, time.Now().UTC())
-			maps.Copy(labels, connectionMetadata(cfg, identity))
-			labels["instance"], labels["image"] = name, cfg.Incus.Image
-			labels["incus_uuid"] = intent.Attempt["uuid"]
-			labels["ssh_user"], labels["ssh_port"], labels["work_root"] = cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot
-			labels["release"], labels["fixed_intent_sha256"] = incusReleaseAction(cfg), intent.Fingerprint
-			if cfg.Incus.ProxyListenPort != "" {
-				labels["proxy_port"], labels["proxy_host"] = cfg.Incus.ProxyListenPort, sshHostForConfig(cfg)
-			}
-			claim.Labels = labels
+		binding.AllocateSlug, binding.RequestedSlug, binding.Inventory = true, req.RequestedSlug, servers
+		return binding, nil
+	}, Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
+		name := core.LeaseProviderName(leaseID, claim.Slug)
+		identity, err := client.Identity()
+		if err != nil {
+			return core.FixedAttemptPlan{}, err
 		}
-		return nil
+		cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
+		labels := connectionMetadata(cfg, identity)
+		labels["instance"], labels["image"] = name, cfg.Incus.Image
+		labels["ssh_user"], labels["ssh_port"], labels["work_root"] = cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot
+		labels["release"] = incusReleaseAction(cfg)
+		if cfg.Incus.ProxyListenPort != "" {
+			labels["proxy_port"], labels["proxy_host"] = cfg.Incus.ProxyListenPort, sshHostForConfig(cfg)
+		}
+		return core.FixedAttemptPlan{
+			Values: map[string]string{"name": name, "uuid": uuid.NewString()},
+			Labels: labels, DirectLabels: &core.FixedDirectLabels{Config: cfg, Provider: providerName, Keep: req.Keep, Now: time.Now().UTC()},
+			FingerprintLabel: "fixed_intent_sha256", AttemptLabels: map[string]string{"incus_uuid": "uuid"},
+		}, nil
 	}, ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[*api.Instance], error) {
 		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
 		name := core.LeaseProviderName(leaseID, intent.Slug)
 		var result core.FixedObservation[*api.Instance]
-		if intent.Attempt != nil && (intent.Attempt["name"] != name || intent.Attempt["uuid"] == "") {
-			return result, core.Exit(4, "lease_id_conflict: Incus attempt identity changed")
+		if _, err := core.ReadFixedAttempt[map[string]string](intent, core.FixedAttemptFormat{Equal: map[string]string{"name": name}, Required: []string{"uuid"}}); err != nil {
+			return result, err
 		}
+
 		inst, _, err := client.GetInstance(name)
-		if api.StatusErrorCheck(err, 404) && intent.State == "prepared" && claim.CloudID == "" {
+		if api.StatusErrorCheck(err, 404) {
 			result.CanSubmit = true
 			return result, nil
 		}
@@ -141,9 +132,6 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 			create.Source = api.InstanceSource{Type: "image", Fingerprint: cfg.Incus.Image}
 		}
 		fmt.Fprintf(b.rt.Stderr, "provisioning provider=incus lease=%s slug=%s instance=%s\n", leaseID, intent.Slug, name)
-		if err := tx.Record("submitting"); err != nil {
-			return nil, err
-		}
 		if err := client.CreateInstance(create); err != nil {
 			return nil, fmt.Errorf("Incus create outcome uncertain for lease=%s instance=%s; claim and key retained, retry the same lease ID or stop it: %w", leaseID, name, err)
 		}
@@ -159,8 +147,7 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 		if err := validateClaimInstance(client, *claim, *inst); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		claim.CloudID, claim.CloudImmutableID = name, inst.Config["volatile.uuid"]
-		if err := tx.Record("bound"); err != nil {
+		if err := tx.Bind(core.FixedResourceBinding{CloudID: name, ImmutableID: inst.Config["volatile.uuid"]}); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		if len(cfg.Incus.CheckpointMetadata) != 0 && inst.Config[labelKey("fork_identity")] != "ready" {
@@ -216,12 +203,7 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 		}
 		return core.LeaseTarget{}, err
 	}
-	if req.OnAcquired != nil {
-		if err := req.OnAcquired(lease); err != nil {
-			return core.LeaseTarget{}, err
-		}
-	}
-	return lease, nil
+	return core.CompleteFixedAcquisition(lease, nil, req)
 }
 
 func (b *backend) releaseDurable(ctx context.Context, client instanceClient, leaseID string, remove, force bool) error {
@@ -324,14 +306,13 @@ func (b *backend) deleteDurableWithOutcome(ctx context.Context, client instanceC
 		return false, core.Exit(4, "Incus lease has no recorded creation attempt")
 	}
 	err := core.DeleteFixedResource(ctx, incusLeaseKind, claim, core.FixedLeaseOperations[*api.Instance]{
+		Release: &core.FixedReleasePolicy{Outcome: outcome, Binding: &core.FixedResourceBinding{CloudID: name, ImmutableID: claim.FixedCreateIntent.Attempt["uuid"]}},
 		ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[*api.Instance], error) {
 			claim = *tx.Claim
 			inst, err := lookup()
 			if err != nil {
 				return core.FixedObservation[*api.Instance]{}, err
 			}
-			// Native name/UUID attestation authorizes this legacy binding.
-			tx.Claim.CloudID, tx.Claim.CloudImmutableID = name, tx.Claim.FixedCreateIntent.Attempt["uuid"]
 			if inst == nil {
 				return core.FixedObservation[*api.Instance]{AbsenceProven: true}, nil
 			}
@@ -346,16 +327,10 @@ func (b *backend) deleteDurableWithOutcome(ctx context.Context, client instanceC
 			}
 			// Stop waits on a native operation; re-attest before name deletion.
 			if current, err := lookup(); err != nil || current == nil {
-				outcome.Terminal = err == nil
 				return err
 			}
-			err := client.DeleteInstance(name)
-			outcome.Terminal = err == nil
-			return err
+			return client.DeleteInstance(name)
 		},
 	})
-	if err == nil {
-		outcome.Terminal = true
-	}
 	return true, err
 }
