@@ -9,12 +9,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	instance "github.com/scaleway/scaleway-sdk-go/api/instance/v1"
+	sdkerrors "github.com/scaleway/scaleway-sdk-go/errors"
 	scwlogger "github.com/scaleway/scaleway-sdk-go/logger"
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
@@ -299,22 +301,65 @@ func TestNewClientReportsPartialAuthWithoutSecretValue(t *testing.T) {
 }
 
 func TestNewClientSanitizesSDKValidationError(t *testing.T) {
-	clearScalewayEnv(t)
-	t.Setenv("SCW_ACCESS_KEY", "invalid-access-key")
-	t.Setenv("SCW_SECRET_KEY", "invalid-secret-key")
-	t.Setenv("CRABBOX_SCALEWAY_PROJECT_ID", "project-1")
-	_, err := newClient(core.Config{Scaleway: core.ScalewayConfig{ProjectID: "project-1"}}, core.Runtime{})
-	if err == nil {
-		t.Fatal("newClient unexpectedly succeeded")
+	for _, tc := range []struct {
+		name, accessKey, secretKey, want string
+	}{
+		{"access key", "invalid-access-key", "invalid-secret-key", "Scaleway SDK client configuration failed: scaleway-sdk-go: invalid access key format '<redacted>', expected SCWXXXXXXXXXXXXXXXXX format"},
+		{"secret key", testScalewayAccessKey, "invalid-secret-key", "Scaleway SDK client configuration failed: scaleway-sdk-go: invalid secret key format '<redacted>', expected a UUID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearScalewayEnv(t)
+			t.Setenv("SCW_ACCESS_KEY", tc.accessKey)
+			t.Setenv("SCW_SECRET_KEY", tc.secretKey)
+			_, err := newClient(core.Config{Scaleway: core.ScalewayConfig{ProjectID: "project-1"}}, core.Runtime{})
+			var cause *scw.InvalidClientOptionError
+			if err == nil || err.Error() != tc.want || core.ExitCodeForError(err, 1) != 3 || !errors.As(err, &cause) {
+				t.Fatalf("err=%v code=%d retained SDK cause=%v", err, core.ExitCodeForError(err, 1), cause != nil)
+			}
+			for _, secret := range []string{tc.accessKey, tc.secretKey} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatal("SDK error leaked a fixture credential")
+				}
+			}
+		})
 	}
-	text := err.Error()
-	for _, secret := range []string{"invalid-access-key", "invalid-secret-key"} {
-		if strings.Contains(text, secret) {
-			t.Fatalf("SDK error leaked %q: %v", secret, err)
-		}
-	}
-	if !strings.Contains(text, "<redacted>") {
-		t.Fatalf("SDK error did not include redaction marker: %v", err)
+}
+
+func TestNewClientRetainsSanitizedSDKConfigCauses(t *testing.T) {
+	for _, tc := range []struct {
+		name, config string
+		parseError   bool
+	}{
+		{name: "config load", config: "insecure: synthkey\n", parseError: true},
+		{name: "active profile", config: "active_profile: synthkey\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearScalewayEnv(t)
+			t.Setenv("SCW_ACCESS_KEY", "synthkey")
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("SCW_CONFIG_PATH", path)
+			want := "Scaleway SDK active profile load failed: scaleway-sdk-go: given profile <redacted> does not exist"
+			if tc.parseError {
+				want = fmt.Sprintf("Scaleway SDK config load failed: scaleway-sdk-go: content of config file %s is invalid: yaml: unmarshal errors:\n  line 1: cannot unmarshal !!str `<redacted>` into bool", path)
+			}
+			_, err := newClient(core.Config{}, core.Runtime{})
+			var cause *sdkerrors.Error
+			if err == nil || err.Error() != want || core.ExitCodeForError(err, 1) != 3 || !errors.As(err, &cause) {
+				t.Fatalf("err=%v code=%d retained SDK cause=%v", err, core.ExitCodeForError(err, 1), cause != nil)
+			}
+			if tc.parseError && (cause.Err == nil || !errors.Is(err, cause.Err)) {
+				t.Fatal("underlying YAML error identity lost")
+			}
+			if !tc.parseError && cause.Str != "given profile synthkey does not exist" {
+				t.Fatal("active profile cause changed")
+			}
+			if strings.Contains(err.Error(), "synthkey") {
+				t.Fatal("public config error leaked fixture credential")
+			}
+		})
 	}
 }
 

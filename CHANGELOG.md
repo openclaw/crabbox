@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+
+- Preserve underlying Scaleway SDK/configuration errors for diagnostics while retaining redacted messages and exit code 3.
+
 ## 0.64.0 - 2026-09-21
 
 ### Highlights

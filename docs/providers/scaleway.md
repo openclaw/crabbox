@@ -73,6 +73,10 @@ There is no separate Scaleway size flag for the generic lease commands.
 
 ## Configuration
 
+Local SDK/configuration failures retain their original error causes for
+diagnostics while keeping the public message redacted and exit code 3. Missing
+SDK configuration still falls back to environment-based credentials.
+
 ```yaml
 provider: scaleway
 target: linux
