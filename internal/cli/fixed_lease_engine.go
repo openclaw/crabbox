@@ -134,6 +134,9 @@ const (
 )
 
 type FixedReleasePolicy struct {
+	// Started distinguishes rejection by the ownership fence from failure after
+	// deletion admission. Cleanup must skip a freshly reclaimed candidate.
+	Started                 *bool
 	RepoRoot                string
 	CheckpointID            *string
 	PristineScopePrefix     string
@@ -287,6 +290,14 @@ func InspectFixedResource[T any](ctx context.Context, kind FixedLeaseKind, claim
 // deletion, and terminal publication. Native DeleteExact must attest completion,
 // including any child resources, before returning nil.
 func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expected LeaseClaim, ops FixedLeaseOperations[T], clock ...func() time.Time) error {
+	markStarted := func(started bool) {
+		if ops.Release != nil && ops.Release.Started != nil {
+			*ops.Release.Started = started
+		}
+	}
+	// An earlier durable admission stays started even if this invocation cannot
+	// regain the fence. Never downgrade its failure into a harmless cleanup skip.
+	markStarted(kind.DeletionState != "" && kind.IsFixedClaim(expected) && expected.FixedCreateIntent.State == kind.DeletionState)
 	if !kind.IsFixedClaim(expected) || expected.FixedCreateIntent.Version != kind.IntentVersion {
 		return Exit(4, "lease_id_conflict: fixed deletion has no matching ownership dialect")
 	}
@@ -307,6 +318,7 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 				if err := kind.ValidateTerminalClaim(*claim, expected, claim.LeaseID, nil); err != nil {
 					return err
 				}
+				markStarted(true)
 				if policy.Outcome != nil {
 					policy.Outcome.Terminal = true
 				}
@@ -346,6 +358,7 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 			if err := kind.ValidateTerminalClaim(*claim, expected, claim.LeaseID, nil); err != nil {
 				return err
 			}
+			markStarted(true)
 			if ops.Release != nil && ops.Release.Outcome != nil {
 				ops.Release.Outcome.Terminal = true
 			}
@@ -378,6 +391,9 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 				return err
 			}
 		}
+		// All ownership checks and durable deletion-entry writes have passed;
+		// failures from this point must retain/report the admitted cleanup.
+		markStarted(true)
 		if len(observed.Candidates) != 0 {
 			if err := ops.DeleteExact(ctx, tx, observed.Candidates[0]); err != nil {
 				return err

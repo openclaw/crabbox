@@ -284,6 +284,10 @@ native cleanup graphs remain reusable; a deletion callback must prove completion
 not merely request admission. `FixedLeaseKind.AfterTerminal`, when needed, cleans
 local lease artifacts after durable terminal publication while retaining that
 same claim fence. Native absence-only recovery is a separate proof path.
+Cleanup callers can request `FixedReleasePolicy.Started` to distinguish a stale
+claim rejected by the ownership fence from an admitted deletion that failed.
+A reclaimed or renewed candidate is skipped; an already-admitted deletion retains
+its failure and recovery state. A revision change alone never authorizes deletion.
 
 New writes add a versioned journal to the original intent envelope. Legacy records
 without a journal remain readable; their missing evidence never becomes permission

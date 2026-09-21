@@ -305,8 +305,9 @@ func (b *backend) deleteDurableWithOutcome(ctx context.Context, client instanceC
 	if name == "" {
 		return false, core.Exit(4, "Incus lease has no recorded creation attempt")
 	}
+	var started bool
 	err := core.DeleteFixedResource(ctx, incusLeaseKind, claim, core.FixedLeaseOperations[*api.Instance]{
-		Release: &core.FixedReleasePolicy{Outcome: outcome, Binding: &core.FixedResourceBinding{CloudID: name, ImmutableID: claim.FixedCreateIntent.Attempt["uuid"]}},
+		Release: &core.FixedReleasePolicy{Started: &started, Outcome: outcome, Binding: &core.FixedResourceBinding{CloudID: name, ImmutableID: claim.FixedCreateIntent.Attempt["uuid"]}},
 		ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[*api.Instance], error) {
 			claim = *tx.Claim
 			inst, err := lookup()
@@ -332,5 +333,5 @@ func (b *backend) deleteDurableWithOutcome(ctx context.Context, client instanceC
 			return client.DeleteInstance(name)
 		},
 	})
-	return true, err
+	return started, err
 }

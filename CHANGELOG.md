@@ -8,6 +8,7 @@
 
 ### Fixes
 
+- Preserve reclaimed fixed leases during cleanup by distinguishing ownership-fence rejection from an admitted deletion in the shared engine. [PR 2462](https://github.com/openclaw/crabbox/pull/2462).
 - Use Vast's native SSH endpoint and stored lease key for plain status readiness checks, avoiding false unready results while keeping observations read-only. [PR 2447](https://github.com/openclaw/crabbox/pull/2447).
 - Preserve GCP IP-readiness cancellation causes and deadline classification while retaining the budget-timeout diagnostic and completed-response precedence. [PR 2467](https://github.com/openclaw/crabbox/pull/2467).
 - Preserve underlying Scaleway SDK/configuration errors for diagnostics while retaining redacted messages and exit code 3. [PR 2466](https://github.com/openclaw/crabbox/pull/2466).
