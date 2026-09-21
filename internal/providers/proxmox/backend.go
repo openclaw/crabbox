@@ -22,6 +22,8 @@ type proxmoxClient interface {
 	ListCrabboxServers(context.Context) ([]core.Server, error)
 	ListCrabboxServersCluster(context.Context) ([]core.Server, error)
 	CreateServer(context.Context, core.Config, string, string, string, bool) (core.Server, error)
+	NextVMID(context.Context) (int, error)
+	CreateServerWithVMID(context.Context, core.Config, string, string, string, bool, int, map[string]string, func(core.Server) error) (core.Server, error)
 	GetServer(context.Context, string) (core.Server, error)
 	GetServerOnNode(context.Context, string, string) (core.Server, error)
 	VMExistsInCluster(context.Context, string) (bool, error)
@@ -43,7 +45,12 @@ func NewLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) c
 	return &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true}}
 }
 
+func (b *leaseBackend) SupportsRequestedLeaseID() bool { return true }
+
 func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if strings.TrimSpace(req.RequestedLeaseID) != "" {
+		return b.acquireFixed(ctx, req)
+	}
 	return shared.AcquireAttemptsRetry(b.RT, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req.Keep, req.RequestedSlug)
 	})
@@ -346,6 +353,34 @@ func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.D
 }
 
 func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *leaseBackend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
+	leaseID := strings.TrimSpace(req.Lease.LeaseID)
+	if leaseID == "" {
+		leaseID = proxmoxClaimLabelLeaseID(req.Lease.Server)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return core.ReleaseLeaseOutcome{}, err
+	}
+	if exists && fixedProxmoxLeaseKind.IsFixedClaim(claim) {
+		if label := proxmoxClaimLabelLeaseID(req.Lease.Server); label != "" && label != leaseID {
+			return core.ReleaseLeaseOutcome{}, core.Exit(4, "lease_id_conflict: fixed Proxmox release lease label %s does not match %s", label, leaseID)
+		}
+		err := b.releaseFixed(ctx, req, false)
+		return core.ReleaseLeaseOutcome{Terminal: err == nil}, err
+	}
+	if req.Lease.Server.Labels["fixed_intent_sha256"] != "" || exists && claim.Provider == core.FixedProxmoxClaimProvider {
+		return core.ReleaseLeaseOutcome{}, core.Exit(4, "lease_id_conflict: fixed Proxmox release has no valid durable claim")
+	}
+	err = b.releaseOrdinary(ctx, req)
+	return core.ReleaseLeaseOutcome{Terminal: err == nil}, err
+}
+
+func (b *leaseBackend) releaseOrdinary(ctx context.Context, req core.ReleaseLeaseRequest) error {
 	client, err := newClient(b.Cfg)
 	if err != nil {
 		return err
@@ -434,6 +469,32 @@ func (b *leaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) err
 		return err
 	}
 	for _, server := range servers {
+		var fixedClaim core.LeaseClaim
+		for _, claim := range claims {
+			if claim.LeaseID == proxmoxClaimLabelLeaseID(server) && fixedProxmoxLeaseKind.IsFixedClaim(claim) {
+				fixedClaim = claim
+				break
+			}
+		}
+		if fixedClaim.LeaseID != "" {
+			if err := b.validateFixedCleanupCandidate(fixedClaim, server, servers); err != nil {
+				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", server.DisplayID(), server.Name, err)
+				continue
+			}
+			if eligible, reason := core.ShouldCleanupServer(server, time.Now().UTC()); !eligible {
+				fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%s\n", server.DisplayID(), server.Name, reason)
+				continue
+			}
+			if req.DryRun {
+				fmt.Fprintf(b.RT.Stderr, "would delete server id=%s name=%s\n", server.DisplayID(), server.Name)
+				continue
+			}
+			if err := b.releaseFixed(ctx, core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: fixedClaim.LeaseID, Server: server}}, true); err != nil {
+				return err
+			}
+			fmt.Fprintf(b.RT.Stderr, "delete server id=%s name=%s fixed=true key_retained=true\n", server.DisplayID(), server.Name)
+			continue
+		}
 		claim, binding, err := b.cleanupClaim(server, servers, claims)
 		if err != nil {
 			fmt.Fprintf(b.RT.Stderr, "skip server id=%s name=%s reason=%v\n", server.DisplayID(), server.Name, err)

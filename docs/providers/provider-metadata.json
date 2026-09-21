@@ -872,7 +872,7 @@
     "lifecycle": "Crabbox",
     "cleanup": "VM delete",
     "bestFit": "Self-hosted Linux VM fleet",
-    "caveat": "Needs a prepared template, guest agent, and network",
+    "caveat": "Needs a prepared template, guest agent, and network; fixed lease IDs bind VMID and generation and retain uncertain attempts",
     "docs": "proxmox.md"
   },
   "railway": {

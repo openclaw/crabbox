@@ -58,9 +58,9 @@ to own replay, and caller cancellation never releases them.
 
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
 direct AWS, direct Machine0, direct Daytona, direct local-container, direct
-Parallels, and managed coordinator leases, that ID is an immutable create
-identity: an identical semantic replay returns the same live lease, while
-intent drift returns `lease_id_conflict`.
+Parallels, direct Proxmox, and managed coordinator leases, that ID is an
+immutable create identity: an identical semantic replay returns the same
+live lease, while intent drift returns `lease_id_conflict`.
 Managed coordinator replay of the same terminal intent returns
 `fixed_lease_terminal`. External providers also accept requested IDs when their
 protocol explicitly advertises
@@ -140,6 +140,15 @@ alongside AWS's `aws-fixed-v1`, Machine0's `machine0-fixed-v1`, Daytona's
 clients map it back to runtime Parallels, while released clients cannot mistake
 it for an ordinary Parallels lease and delete its VM or prune its tombstone.
 
+Direct Proxmox selects a free VMID through the cluster allocator, then durably
+binds that exact VMID, the normalized intent, source node, and cluster scope
+before submitting the template clone with an explicit `newid`. Replay inspects
+that VMID and requires matching lease labels, intent fingerprint, provider
+scope, and native `vmgenid`; it never derives a VMID from the lease ID or adopts
+by slug. Missing or ambiguous post-submit state retains the attempt and cannot
+issue another clone. Its fixed claims use the downgrade-safe
+`proxmox-fixed-v1` marker.
+
 After the direct AWS launch attempt is durable, Crabbox never submits that
 attempt again. An ambiguous replay with no visible tagged instance fails closed;
 a later replay can adopt the one instance after inventory converges only when
@@ -153,6 +162,9 @@ local-container, and Parallels keep a compact terminal claim tombstone after
 successful destroy release or exact missing-resource cleanup. Tombstones
 contain only the ID, slug, provider scope, versioned intent hash, timestamps,
 and terminal state; automatic provider cleanup never prunes them.
+Proxmox also keeps terminal tombstones, retaining the selected VMID and,
+when observed, its native generation identity so release reconciliation
+remains exact. Automatic provider cleanup never prunes these tombstones.
 There is no time-based reuse window. Explicitly deleting local Crabbox claim
 state forfeits this replay protection, so automation must instead mint a new
 operation ID.
