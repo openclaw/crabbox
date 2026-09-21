@@ -159,6 +159,68 @@ func TestParallelsWaitForIPDoesNotFallbackWithoutBootstrapIdentity(t *testing.T)
 	}
 }
 
+func TestParallelsWaitForIPTimeoutExplainsDiscovery(t *testing.T) {
+	running := `[{"ID":"vm1","Name":"macOS","State":"running","Hardware":{"net0":{"enabled":true,"mac":"001C425AA8E6"}}}]`
+	stopped := `[{"ID":"vm1","Name":"macOS","State":"stopped","Hardware":{"net0":{"enabled":true,"mac":"001C425AA8E6"}}}]`
+	otherLease := "[vnic0]\n10.211.55.79=\"" + strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10) + ",1800,001c426ad157,01001c426ad157\"\n"
+	bootstrap := "/Users/build/.ssh/bootstrap"
+	for _, test := range []struct {
+		name      string
+		vmJSON    string
+		leases    string
+		target    string
+		cloneMode string
+		bootstrap string
+		want      []string
+		reject    []string
+	}{
+		{
+			name: "linked macOS without fallback", vmJSON: running, target: targetMacOS,
+			want:   []string{"clone_mode=linked", "macs=001c425aa8e6", "tools_ip=none", "set parallels.bootstrapKey", "retry with parallels.cloneMode=full", "cannot select a source snapshot"},
+			reject: []string{"never obtained a DHCP lease"},
+		},
+		{
+			name: "linked macOS fallback with no lease for the clone", vmJSON: running, leases: otherLease, target: targetMacOS, bootstrap: bootstrap,
+			want:   []string{"DHCP fallback: no Parallels DHCP lease", "never obtained a DHCP lease", "prlctl capture vm1 --file <png>", "retry with parallels.cloneMode=full"},
+			reject: []string{"set parallels.bootstrapKey"},
+		},
+		{
+			name: "full clone omits clone mode advice", vmJSON: running, target: targetMacOS, cloneMode: "full", bootstrap: bootstrap, leases: otherLease,
+			want:   []string{"clone_mode=full", "never obtained a DHCP lease"},
+			reject: []string{"retry with parallels.cloneMode=full"},
+		},
+		{
+			name: "stopped VM gets no boot advice", vmJSON: stopped, target: targetMacOS, bootstrap: bootstrap, leases: otherLease,
+			want:   []string{"last_state=stopped", "clone_mode=linked"},
+			reject: []string{"never obtained a DHCP lease", "retry with parallels.cloneMode=full"},
+		},
+		{
+			name: "linux guest gets no macOS fallback advice", vmJSON: running, target: targetLinux,
+			want:   []string{"clone_mode=linked", "retry with parallels.cloneMode=full"},
+			reject: []string{"bootstrapKey"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &parallelsDHCPRunner{vmJSON: test.vmJSON, leases: test.leases}
+			cfg := Config{TargetOS: test.target, SSHPort: "22", Parallels: ParallelsConfig{CloneMode: test.cloneMode, BootstrapKey: test.bootstrap}}
+			_, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Nanosecond)
+			if err == nil {
+				t.Fatal("expected timeout")
+			}
+			for _, want := range test.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error missing %q: %v", want, err)
+				}
+			}
+			for _, reject := range test.reject {
+				if strings.Contains(err.Error(), reject) {
+					t.Errorf("error unexpectedly contains %q: %v", reject, err)
+				}
+			}
+		})
+	}
+}
+
 func TestParallelsWaitForGuestExecShortCircuitsOnlyForConfiguredMacOSFallback(t *testing.T) {
 	for _, test := range []struct {
 		name      string

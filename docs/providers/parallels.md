@@ -79,6 +79,22 @@ intentionally want to clone the current source VM state without a snapshot.
 Parallels also refuses to clone from a busy source VM, so keep template VMs shut
 down when they serve as local fleet bases.
 
+Some templates run as full clones but never boot as linked clones: Parallels
+reports the clone as `running`, yet the guest never gets a Tools session or a
+DHCP lease, and the lease fails after `parallels.startupTimeout` waiting for an
+IP. The timeout error names the clone mode and the clone's NIC MACs, and says
+whether the macOS DHCP fallback found no lease for them. To confirm a boot
+failure, capture the clone's console while it is still running:
+
+```sh
+prlctl capture <vm-id> --file /tmp/crabbox-clone.png
+```
+
+An all-black capture after several minutes means the guest OS did not boot.
+Retry with `cloneMode: full`, which does not select a source snapshot, or rebuild
+the template snapshot. Crabbox keeps `linked` as the default because full clones
+cannot select `parallels.sourceSnapshot`.
+
 For macOS templates, use a user with SSH login permission and a writable
 `parallels.workRoot`, for example `/Users/<user>/crabbox`. For Windows native
 templates, configure OpenSSH Server and PowerShell. For Windows WSL2 templates,
