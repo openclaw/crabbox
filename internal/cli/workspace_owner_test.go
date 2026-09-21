@@ -850,6 +850,9 @@ func TestSSHSingletonPortExecutesOnceWithoutProbe(t *testing.T) {
 			if text := "\n" + string(args); !strings.Contains(text, "\n-p\n"+test.port+"\n") || strings.Contains(text, "\n-p\n\n") {
 				t.Fatalf("SSH args=%q, want pinned port %s", text, test.port)
 			}
+			if runtime.GOOS != "windows" && !strings.Contains(string(args), "ControlMaster=auto") {
+				t.Fatalf("ordinary SSH command changed its multiplexing policy: %q", args)
+			}
 		})
 	}
 }
@@ -998,36 +1001,53 @@ func TestWorkspaceOwnerSSHProtocolResolvesFallbackBeforeSingleDelivery(t *testin
 		name   string
 		target SSHTarget
 	}{
-		{name: "POSIX", target: SSHTarget{TargetOS: targetLinux}},
+		{name: "Linux", target: SSHTarget{TargetOS: targetLinux}},
+		{name: "macOS", target: SSHTarget{TargetOS: targetMacOS}},
 		{name: "native Windows", target: SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			dir := installWorkspaceOwnerRecordingSSH(t)
-			t.Setenv("CRABBOX_OWNER_SSH_RETRY_CALL", "1")
-			t.Setenv("CRABBOX_OWNER_SSH_RETRY_STDOUT", "MISMATCH")
-			t.Setenv("CRABBOX_OWNER_SSH_RETRY_STDERR", "first port failed")
-			t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDOUT", "ACQUIRED")
-			t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDERR", "second port warning")
-			test.target.User, test.target.Host, test.target.Port = "crabbox", "127.0.0.1", "2222"
-			test.target.FallbackPorts = []string{"22"}
-			got, err := (sshWorkspaceOwnerTransport{target: test.target}).Do(context.Background(), workspaceOwnerRemoteRequest{
-				Action: workspaceOwnerAcquire,
-				Key:    workspaceOwnerKey("cbx_fallback_" + test.name),
-				Token:  strings.Repeat("c", 64),
-				TTL:    time.Minute,
-			})
-			if err != nil || got != "ACQUIRED" {
-				t.Fatalf("fallback response=%q err=%v", got, err)
-			}
-			if count, readErr := os.ReadFile(filepath.Join(dir, "count")); readErr != nil || string(count) != "3" {
-				t.Fatalf("SSH call count=%q err=%v", count, readErr)
-			}
-			requireWorkspaceOwnerSSHProbe(t, dir, 1, "2222")
-			requireWorkspaceOwnerSSHProbe(t, dir, 2, "22")
-			command, _ := readWorkspaceOwnerSSHCall(t, dir, 3)
-			if command == "exit 0" {
-				t.Fatal("owner delivery was replaced by another probe")
+			for _, action := range []struct {
+				action workspaceOwnerAction
+				want   string
+			}{
+				{workspaceOwnerAcquire, "ACQUIRED"},
+				{workspaceOwnerRenew, "RENEWED"},
+				{workspaceOwnerInspect, "OWNED"},
+				{workspaceOwnerRelease, "RELEASED"},
+			} {
+				t.Run(string(action.action), func(t *testing.T) {
+					dir := installWorkspaceOwnerRecordingSSH(t)
+					t.Setenv("CRABBOX_OWNER_SSH_RETRY_CALL", "1")
+					t.Setenv("CRABBOX_OWNER_SSH_RETRY_STDOUT", "MISMATCH")
+					t.Setenv("CRABBOX_OWNER_SSH_RETRY_STDERR", "first port failed")
+					t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDOUT", action.want)
+					t.Setenv("CRABBOX_OWNER_SSH_SUCCESS_STDERR", "second port warning")
+					test.target.User, test.target.Host, test.target.Port = "crabbox", "127.0.0.1", "2222"
+					test.target.FallbackPorts = []string{"22"}
+					got, err := (sshWorkspaceOwnerTransport{target: test.target}).Do(context.Background(), workspaceOwnerRemoteRequest{
+						Action: action.action,
+						Key:    workspaceOwnerKey("cbx_fallback_" + test.name),
+						Token:  strings.Repeat("c", 64),
+						TTL:    time.Minute,
+					})
+					if err != nil || got != action.want {
+						t.Fatalf("fallback response=%q err=%v", got, err)
+					}
+					if count, readErr := os.ReadFile(filepath.Join(dir, "count")); readErr != nil || string(count) != "3" {
+						t.Fatalf("SSH call count=%q err=%v", count, readErr)
+					}
+					requireWorkspaceOwnerSSHProbe(t, dir, 1, "2222")
+					requireWorkspaceOwnerSSHProbe(t, dir, 2, "22")
+					for index := 1; index <= 3; index++ {
+						requireWorkspaceOwnerSSHNoMux(t, dir, index)
+						requireWorkspaceOwnerSSHOptions(t, dir, index, "10", "3")
+					}
+					command, _ := readWorkspaceOwnerSSHCall(t, dir, 3)
+					if command == "exit 0" {
+						t.Fatal("owner delivery was replaced by another probe")
+					}
+				})
 			}
 		})
 	}

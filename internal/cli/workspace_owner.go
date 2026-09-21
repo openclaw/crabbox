@@ -109,11 +109,11 @@ func (t sshWorkspaceOwnerTransport) Do(ctx context.Context, req workspaceOwnerRe
 	ctx = contextWithoutWorkspaceOwner(ctx)
 	ctx, cancel := context.WithTimeout(ctx, workspaceOwnerTransportCallBudget(t))
 	defer cancel()
+	// Keep owner control independent of the workload's multiplexed connection.
+	t.target.NoControlMaster = true
 	remote := remoteWorkspaceOwnerCommand(t.target, req)
 	var input []byte
-	if isWindowsWSL2Target(t.target) {
-		t.target.NoControlMaster = true
-	} else if isWindowsNativeTarget(t.target) {
+	if isWindowsNativeTarget(t.target) {
 		script := remoteWorkspaceOwnerWindows(req)
 		input = []byte(script)
 		remote = windowsPowerShellStdinScriptCommand(len([]byte(script)))
