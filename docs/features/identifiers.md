@@ -58,7 +58,8 @@ to own replay, and caller cancellation never releases them.
 
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
 direct AWS, direct Machine0, direct Daytona, direct local-container, direct
-Parallels, direct Proxmox, and managed coordinator leases, that ID is an
+Tenki, direct Parallels, direct Proxmox, delegated Agent Sandbox, and managed
+coordinator leases, that ID is an
 immutable create identity: an identical semantic replay returns the same
 live lease, while intent drift returns `lease_id_conflict`.
 Managed coordinator replay of the same terminal intent returns
@@ -69,6 +70,15 @@ normalized request hash. Direct AWS durably stores the intent and current
 resolved EC2 attempt in the normal lease claim before `RunInstances`, then uses
 a deterministic regional/zonal client token. No path uses the slug to decide
 replay ownership.
+
+Tenki records its exact session and recovery attempt before reuse. See
+[Tenki fixed lease IDs](../providers/tenki.md#fixed-lease-ids-for-orchestration)
+for attestation, retained recovery state, and terminal receipt behavior.
+
+Agent Sandbox binds each fixed attempt to its Kubernetes resource identities and
+retains terminal receipts through adapter cleanup. See
+[Agent Sandbox fixed lease IDs](../providers/agent-sandbox.md#fixed-lease-ids)
+for scope checks and foreground deletion requirements.
 
 Direct Machine0 binds the intent to its deterministic VM name before creation;
 the durable attempt binds the first visible match to its Machine0 resource ID,
