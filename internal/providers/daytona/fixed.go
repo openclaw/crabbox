@@ -411,7 +411,7 @@ func (b *daytonaLeaseBackend) releaseFixedWithEngine(ctx context.Context, expect
 			}
 			return tx.Bind(core.FixedResourceBinding{CloudID: sandbox.GetId(), ImmutableID: sandbox.GetId()})
 		}, func(ctx context.Context, tx *core.FixedTransaction) error {
-			return deleteFixedDaytonaSandbox(ctx, client, tx.Claim, func() error { return tx.Record("deleting") }, false)
+			return deleteFixedDaytonaSandbox(ctx, client, tx.Claim, tx.PersistDeletionEvidence, false)
 		})
 }
 
@@ -522,8 +522,7 @@ func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionA
 		if err := validateFixedDaytonaDeletionIdentity(client, *claim, indexed); err != nil {
 			return err
 		}
-		intent.Attempt["deletion_indexed_id"] = claim.CloudID
-		if err := persist(); err != nil {
+		if err := core.RecordFixedWitness(claim, "deletion_indexed_id", claim.CloudID, persist); err != nil {
 			return err
 		}
 		if sandbox.GetDesiredState() != api.SANDBOXDESIREDSTATE_DESTROYED {
@@ -541,8 +540,7 @@ func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionA
 		if sandbox.GetDesiredState() != api.SANDBOXDESIREDSTATE_DESTROYED {
 			return core.Exit(4, "Daytona did not acknowledge destruction of the fixed resource")
 		}
-		intent.Attempt["deletion_acknowledged_id"] = claim.CloudID
-		if err := persist(); err != nil {
+		if err := core.RecordFixedWitness(claim, "deletion_acknowledged_id", claim.CloudID, persist); err != nil {
 			return err
 		}
 	}

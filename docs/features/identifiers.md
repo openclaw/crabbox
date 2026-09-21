@@ -82,8 +82,9 @@ for scope checks and foreground deletion requirements.
 
 The shared fixed-lease transaction engine records a versioned journal alongside
 the existing normalized intent, native attempt, and terminal receipt fields.
-These ten built-in adapters use this engine. Existing records remain
-readable; upgrading a record preserves its fingerprint and native ownership
+These ten built-in adapters use declarative admission and record formats with
+core-owned attempt encoding, binding publication, and terminal retention.
+Existing records remain readable; upgrading a record preserves its fingerprint and native ownership
 evidence. Uncertain submission and deletion retain custody, and a released ID
 cannot be allocated again. Native adapters still attest account scope, resource
 identity, and deletion completion. Only provider-certified definite failures

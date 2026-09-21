@@ -30,13 +30,13 @@ func FixedIntentFingerprint(domain string, intent any) (string, error) {
 }
 
 // FixedTransaction is valid only while core holds the durable claim lock.
-// Adapters assemble native evidence in Claim; Record checks immutable custody
-// before publishing it. An error never clears the last durable attempt.
+// Claim is a read-only view for adapters. Plans and binding evidence are applied
+// by core; an error never clears the last durable attempt.
 type FixedTransaction struct {
 	failedSet    map[string]bool
 	createLabels map[string]string
 	Claim        *LeaseClaim
-	Fresh        bool
+	fresh        bool
 	initial      FixedCreateIntent
 	cloudID      string
 	immutableID  string
@@ -52,7 +52,7 @@ func newFixedTransaction(claim *LeaseClaim, fresh bool, persist func() error) (*
 	if err := validateFixedJournal(claim.FixedCreateIntent); err != nil {
 		return nil, err
 	}
-	return &FixedTransaction{Claim: claim, Fresh: fresh, initial: *claim.FixedCreateIntent,
+	return &FixedTransaction{Claim: claim, fresh: fresh, initial: *claim.FixedCreateIntent,
 		cloudID: claim.CloudID, immutableID: claim.CloudImmutableID, leaseID: claim.LeaseID, provider: claim.Provider,
 		attempt: maps.Clone(claim.FixedCreateIntent.Attempt), failures: append([]string(nil), claim.FixedCreateIntent.FailedAttempts...), persist: persist}, nil
 }
@@ -133,9 +133,6 @@ const (
 	FixedObserveDelete
 )
 
-// FixedLeaseOperations separates native evidence and effects from core's
-// transaction. PlanAttempt only prepares evidence; Submit records admission at
-// the native mutation boundary through tx.Record("submitting").
 type FixedReleasePolicy struct {
 	RepoRoot                string
 	CheckpointID            *string
@@ -145,6 +142,8 @@ type FixedReleasePolicy struct {
 	Binding                 *FixedResourceBinding
 }
 
+// FixedLeaseOperations supplies native facts and effects. Core owns attempt
+// assembly, admission, publication, and compatibility through data descriptors.
 type FixedLeaseOperations[T any] struct {
 	Release *FixedReleasePolicy
 	// Some APIs resolve prerequisite IDs inside submission. Each resolved
@@ -156,7 +155,6 @@ type FixedLeaseOperations[T any] struct {
 	// DeferredAdmission fences native prerequisites before recording submission.
 	DeferredAdmission bool
 	DescribeIntent    func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error)
-	PlanAttempt       func(context.Context, *FixedTransaction) error
 	ObserveExact      func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[T], error)
 	Submit            func(context.Context, *FixedTransaction) (T, error)
 	PrepareAccess     func(context.Context, *FixedTransaction, T) (LeaseTarget, error)
@@ -166,7 +164,7 @@ type FixedLeaseOperations[T any] struct {
 // AcquireFixedResource keeps the existing claim envelope and all native
 // fingerprint/attempt dialects readable while writing the engine journal.
 func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, ops FixedLeaseOperations[T]) (LeaseTarget, error) {
-	if ops.DescribeIntent == nil || (ops.PlanAttempt == nil && ops.Plan == nil && !ops.PlanDuringSubmit) || ops.ObserveExact == nil || ops.Submit == nil || ops.PrepareAccess == nil {
+	if ops.Admission == nil || ops.DescribeIntent == nil || (ops.Plan == nil && !ops.PlanDuringSubmit) || ops.ObserveExact == nil || ops.Submit == nil || ops.PrepareAccess == nil {
 		return LeaseTarget{}, fmt.Errorf("fixed lease engine requires all acquisition operations")
 	}
 	fresh := false
@@ -199,11 +197,11 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 		if len(observation.Candidates) == 1 {
 			resource = observation.Candidates[0]
 		} else {
-			if !observation.CanSubmit || (ops.Admission != nil && !ops.Admission.permits(tx)) || claim.FixedCreateIntent.State != "prepared" || claim.CloudID != "" || claim.CloudNumericID != 0 || claim.CloudImmutableID != "" {
+			if !observation.CanSubmit || !ops.Admission.permits(tx) || claim.FixedCreateIntent.State != "prepared" || claim.CloudID != "" || claim.CloudNumericID != 0 || claim.CloudImmutableID != "" {
 				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed %s lease %s has an unresolved or missing resource; retain its claim for recovery", opts.Kind.Label, claim.LeaseID)
 			}
 			if ops.Plan != nil && len(claim.FixedCreateIntent.Attempt) == 0 {
-				plan, err := ops.Plan(ctx, *claim)
+				plan, err := ops.Plan(ctx, CloneLeaseClaim(*claim))
 				if err != nil {
 					return LeaseTarget{}, err
 				}
@@ -213,10 +211,6 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 				if err := tx.plan(plan); err != nil {
 					return LeaseTarget{}, err
 				}
-			} else if ops.PlanAttempt != nil {
-				if err := ops.PlanAttempt(ctx, tx); err != nil {
-					return LeaseTarget{}, err
-				}
 			}
 			if len(claim.FixedCreateIntent.Attempt) == 0 && !ops.PlanDuringSubmit {
 				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed lease submission has no native attempt")
@@ -224,7 +218,7 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 			if err := tx.Record("prepared"); err != nil {
 				return LeaseTarget{}, err
 			}
-			if ops.Admission != nil && !ops.DeferredAdmission {
+			if !ops.DeferredAdmission {
 				if err := tx.Admit(); err != nil {
 					return LeaseTarget{}, err
 				}
@@ -277,17 +271,7 @@ func InspectFixedResource[T any](ctx context.Context, kind FixedLeaseKind, claim
 	if !kind.IsFixedClaim(claim) || claim.FixedCreateIntent.Version != kind.IntentVersion || ops.ObserveExact == nil {
 		return FixedObservation[T]{}, Exit(4, "lease_id_conflict: fixed inspection has no matching ownership dialect")
 	}
-	claim.Labels = maps.Clone(claim.Labels)
-	if claim.FixedCreateIntent != nil {
-		i := *claim.FixedCreateIntent
-		i.Attempt = maps.Clone(i.Attempt)
-		i.FailedAttempts = append([]string(nil), i.FailedAttempts...)
-		if i.Journal != nil {
-			journal := *i.Journal
-			i.Journal = &journal
-		}
-		claim.FixedCreateIntent = &i
-	}
+	claim = CloneLeaseClaim(claim)
 	tx, err := newFixedTransaction(&claim, false, func() error { return Exit(4, "fixed lease inspection cannot mutate state") })
 	if err != nil {
 		return FixedObservation[T]{}, err

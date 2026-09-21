@@ -40,13 +40,13 @@ func TestFixedEngineReadsLegacyProviderRecords(t *testing.T) {
 				t.Fatalf("legacy read: %v", err)
 			}
 			kind := FixedLeaseKind{ClaimProvider: legacy.Provider, IntentVersion: 1, Label: provider}
-			ops := FixedLeaseOperations[string]{
+			ops := FixedLeaseOperations[string]{Admission: &FixedAdmission{FreshOnly: true},
 				DescribeIntent: func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error) {
 					return FixedLeaseBinding{ProviderScope: legacy.FixedCreateIntent.ProviderScope, Fingerprint: legacy.FixedCreateIntent.Fingerprint, Slug: legacy.Slug}, nil
 				},
-				PlanAttempt: func(context.Context, *FixedTransaction) error {
+				Plan: func(context.Context, LeaseClaim) (FixedAttemptPlan, error) {
 					t.Fatal("legacy acquired claim planned another attempt")
-					return nil
+					return FixedAttemptPlan{}, nil
 				},
 				ObserveExact: func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[string], error) {
 					return FixedObservation[string]{Candidates: []string{legacy.CloudID}}, nil
@@ -90,21 +90,17 @@ func TestFixedEngineRetainsUncertainAttemptAndRejectsDuplicates(t *testing.T) {
 	lost := errors.New("lost create reply")
 	calls := 0
 	observed := []string(nil)
-	ops := FixedLeaseOperations[string]{
+	ops := FixedLeaseOperations[string]{Admission: &FixedAdmission{FreshOnly: true},
 		DescribeIntent: func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error) {
 			return FixedLeaseBinding{ProviderScope: "scope", Fingerprint: "hash", Slug: "fixture"}, nil
 		},
-		PlanAttempt: func(_ context.Context, tx *FixedTransaction) error {
-			tx.Claim.FixedCreateIntent.Attempt = map[string]string{"nonce": "original"}
-			return nil
+		Plan: func(context.Context, LeaseClaim) (FixedAttemptPlan, error) {
+			return FixedAttemptPlan{Values: map[string]string{"nonce": "original"}}, nil
 		},
 		ObserveExact: func(_ context.Context, tx *FixedTransaction, _ FixedObserveMode) (FixedObservation[string], error) {
-			return FixedObservation[string]{Candidates: observed, CanSubmit: tx.Fresh}, nil
+			return FixedObservation[string]{Candidates: observed, CanSubmit: true}, nil
 		},
 		Submit: func(_ context.Context, tx *FixedTransaction) (string, error) {
-			if err := tx.Record("submitting"); err != nil {
-				return "", err
-			}
 			saved, err := ReadLeaseClaim(opts.LeaseID)
 			if err != nil || saved.FixedCreateIntent.Attempt["nonce"] != "original" || saved.FixedCreateIntent.Journal.Phase != "submitting" {
 				t.Fatal("mutation preceded durable admission")
@@ -112,9 +108,8 @@ func TestFixedEngineRetainsUncertainAttemptAndRejectsDuplicates(t *testing.T) {
 			calls++
 			return "", lost
 		},
+		Identity: func(id string) FixedResourceBinding { return FixedResourceBinding{CloudID: id, ImmutableID: id} },
 		PrepareAccess: func(_ context.Context, tx *FixedTransaction, id string) (LeaseTarget, error) {
-			tx.Claim.CloudID = id
-			tx.Claim.CloudImmutableID = id
 			return LeaseTarget{LeaseID: opts.LeaseID, Server: Server{CloudID: id, ImmutableID: id}}, nil
 		},
 	}
@@ -174,7 +169,7 @@ func TestFixedEngineNeverResubmitsBoundClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := ReadLeaseClaim(id)
-	ops := FixedLeaseOperations[string]{
+	ops := FixedLeaseOperations[string]{Admission: &FixedAdmission{FreshOnly: true},
 		DescribeIntent: func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error) {
 			return FixedLeaseBinding{ProviderScope: "scope", Fingerprint: "hash", Slug: "fixture"}, nil
 		},
@@ -182,9 +177,9 @@ func TestFixedEngineNeverResubmitsBoundClaim(t *testing.T) {
 		ObserveExact: func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[string], error) {
 			return FixedObservation[string]{CanSubmit: true}, nil
 		},
-		PlanAttempt: func(context.Context, *FixedTransaction) error {
+		Plan: func(context.Context, LeaseClaim) (FixedAttemptPlan, error) {
 			t.Fatal("planned a replacement for bound identity")
-			return nil
+			return FixedAttemptPlan{}, nil
 		},
 		Submit: func(context.Context, *FixedTransaction) (string, error) {
 			t.Fatal("resubmitted bound identity")

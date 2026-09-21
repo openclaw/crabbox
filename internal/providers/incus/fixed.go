@@ -95,7 +95,7 @@ func (b *backend) acquireDurable(ctx context.Context, req core.AcquireRequest) (
 		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
 		name := core.LeaseProviderName(leaseID, intent.Slug)
 		var result core.FixedObservation[*api.Instance]
-		if _, err := core.ReadFixedAttempt[map[string]string](intent, core.FixedAttemptFormat{Equal: map[string]string{"name": name}, Required: []string{"uuid"}}); err != nil {
+		if _, err := core.ReadFixedAttempt[map[string]string](intent, core.FixedAttemptFormat{RejectEmptyObject: true, Equal: map[string]string{"name": name}, Required: []string{"uuid"}}); err != nil {
 			return result, err
 		}
 

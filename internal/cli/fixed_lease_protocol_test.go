@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -119,5 +120,37 @@ func TestFixedBindingCASPreservesExpectedJournal(t *testing.T) {
 	current, err := ReadLeaseClaim(id)
 	if err != nil || !reflect.DeepEqual(current, bound) {
 		t.Fatalf("stale bind changed custody: %v", err)
+	}
+}
+
+func TestFixedLegacyEmptyAttemptPreservesMissingEvidence(t *testing.T) {
+	intent := &FixedCreateIntent{Attempt: map[string]string{}}
+	strict := FixedAttemptFormat{RejectEmptyObject: true, Required: []string{"uuid"}}
+	if _, err := ReadFixedAttempt[map[string]string](intent, strict); err == nil {
+		t.Fatal("explicit empty legacy object became a new-creation permission")
+	}
+	intent.Attempt = nil
+	if got, err := ReadFixedAttempt[map[string]string](intent, strict); err != nil || got != nil {
+		t.Fatal("pristine missing attempt was rewritten")
+	}
+	intent.Journal = &FixedLeaseJournal{Version: 2, Phase: "prepared", Revision: 1}
+	if _, err := ReadFixedAttempt[map[string]string](intent, strict); err == nil {
+		t.Fatal("unknown journal was accepted on an empty attempt")
+	}
+}
+
+func TestFixedPristineJournalCannotEraseSubmissionEvidence(t *testing.T) {
+	kind := FixedLeaseKind{ClaimProvider: "fixture", IntentVersion: 1}
+	scope := "fixture:" + strings.Repeat("a", 64)
+	claim := LeaseClaim{LeaseID: "cbx_abcdef123454", Provider: kind.ClaimProvider, Slug: "fixture", ProviderScope: scope,
+		FixedCreateIntent: &FixedCreateIntent{Version: 1, State: "prepared", Slug: "fixture", ProviderScope: scope, Fingerprint: strings.Repeat("b", 64), CreatedAt: "2026-09-21T00:00:00Z"}}
+	if !FixedPristineRecord(claim, kind, "fixture:") {
+		t.Fatal("valid legacy pristine record refused")
+	}
+	for _, phase := range []string{"prepared", "submitting", "observed", "bound", "acquired", "deleting", "released"} {
+		claim.FixedCreateIntent.Journal = &FixedLeaseJournal{Version: 1, Phase: phase, Revision: 1}
+		if got := FixedPristineRecord(claim, kind, "fixture:"); got != (phase == "prepared") {
+			t.Fatalf("phase %s granted submission=%v", phase, got)
+		}
 	}
 }

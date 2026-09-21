@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Consolidate built-in fixed-lease transactions on a shared engine with durable attempt journals, exact-resource replay, terminal receipts, and compatibility for existing records; retain the external provider’s delegated protocol.
+- Consolidate built-in fixed-lease admission, attempt codecs, claim binding, recovery policy, and terminal receipts in a shared engine; preserve native identity proofs and existing local records while retaining the external provider’s delegated protocol.
 
 ### Fixes
 

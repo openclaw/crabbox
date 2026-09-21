@@ -68,7 +68,7 @@ func (p FixedAdmission) permits(tx *FixedTransaction) bool {
 		return true
 	}
 	if p.FreshOnly {
-		return tx.Fresh && len(tx.Claim.FixedCreateIntent.Attempt) == 0
+		return tx.fresh && len(tx.Claim.FixedCreateIntent.Attempt) == 0
 	}
 	attempt := tx.Claim.FixedCreateIntent.Attempt
 	return len(attempt) == 0 || (p.PendingKey != "" && attempt[p.PendingKey] == p.PendingValue)
@@ -310,24 +310,28 @@ func (tx *FixedTransaction) Admit() error {
 // adapters provide the schema key, required fields and cardinality constraints.
 // Missing old evidence is returned as missing, never synthesized from inventory.
 type FixedAttemptFormat struct {
-	PositiveIntegers []string
-	Trimmed, SHA256  []string
-	JSONKey          string
-	ExactKeys        int
-	Required         []string
-	Equal            map[string]string
-	OptionalEqual    map[string]string
+	RejectEmptyObject bool
+	PositiveIntegers  []string
+	Trimmed, SHA256   []string
+	JSONKey           string
+	ExactKeys         int
+	Required          []string
+	Equal             map[string]string
+	OptionalEqual     map[string]string
 }
 
 func ReadFixedAttempt[T any](intent *FixedCreateIntent, format FixedAttemptFormat) (*T, error) {
 	if intent == nil {
 		return nil, Exit(4, "lease_id_conflict: missing fixed create intent")
 	}
-	if len(intent.Attempt) == 0 {
-		return nil, nil
-	}
 	if err := validateFixedJournal(intent); err != nil {
 		return nil, err
+	}
+	if len(intent.Attempt) == 0 {
+		if intent.Attempt != nil && format.RejectEmptyObject {
+			return nil, Exit(4, "lease_id_conflict: empty fixed attempt has no creation identity; claim retained")
+		}
+		return nil, nil
 	}
 	var result T
 	if format.ExactKeys != 0 && len(intent.Attempt) != format.ExactKeys {
@@ -616,6 +620,9 @@ func FixedPristineRecord(claim LeaseClaim, kind FixedLeaseKind, scopePrefix stri
 		claim.StaticHost != "" || claim.StaticUser != "" || claim.StaticPort != "" || claim.StaticWorkRoot != "" {
 		return false
 	}
+	if j := intent.Journal; j != nil && (j.Version != 1 || j.Revision == 0 || j.Phase != "prepared") {
+		return false
+	}
 	scope, ok := strings.CutPrefix(intent.ProviderScope, scopePrefix)
 	scopeHash, scopeErr := hex.DecodeString(scope)
 	fingerprint, fingerprintErr := hex.DecodeString(intent.Fingerprint)
@@ -698,3 +705,18 @@ func ReconcileFixedReadiness(p FixedReadinessRecovery) (bool, error) {
 	}
 	return p.Reconcile()
 }
+
+// RecordFixedWitness stores a native acknowledgement without allowing a known
+// witness to be retargeted. The owning transaction supplies the journal fence.
+func RecordFixedWitness(claim *LeaseClaim, key, value string, persist func() error) error {
+	if claim.FixedCreateIntent == nil || claim.FixedCreateIntent.Attempt == nil || key == "" || value == "" {
+		return Exit(4, "lease_id_conflict: incomplete fixed attempt witness")
+	}
+	if old := claim.FixedCreateIntent.Attempt[key]; old != "" && old != value {
+		return Exit(4, "lease_id_conflict: fixed attempt witness %s changed", key)
+	}
+	claim.FixedCreateIntent.Attempt[key] = value
+	return persist()
+}
+
+func (tx *FixedTransaction) PersistDeletionEvidence() error { return tx.Record("deleting") }

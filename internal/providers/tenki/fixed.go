@@ -221,7 +221,7 @@ func (b *tenkiBackend) resolveFixedSession(ctx context.Context, claim core.Lease
 
 func (b *tenkiBackend) observeFixedSession(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[tenkiSession], error) {
 	claim := *tx.Claim
-	result := core.FixedObservation[tenkiSession]{CanSubmit: tx.Fresh}
+	result := core.FixedObservation[tenkiSession]{CanSubmit: true}
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}

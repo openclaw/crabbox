@@ -257,20 +257,25 @@ leases support it through the coordinator wrapper. External
 backends support it only when their configured protocol explicitly advertises
 idempotent lease IDs. `crabbox warmup --lease-id` rejects other backends before
 provisioning. Built-in direct adapters use `core.AcquireFixedResource` and
-`core.FixedLeaseOperations[T]`: `DescribeIntent`, `PlanAttempt`, `ObserveExact`,
-`Submit`, `PrepareAccess`, and `DeleteExact`. Core persists the normalized intent,
-checks replay cardinality and bound identity, journals attempts, and publishes
-acquired and terminal records. Adapters project native create fields through
-`core.FixedIntentFingerprint` without changing their established JSON schemas or
-domain prefixes, and supply native scope, identity, and deletion evidence.
+`core.FixedLeaseOperations[T]`: `DescribeIntent`, `Plan`, `ObserveExact`,
+`Submit`, `PrepareAccess`, and `DeleteExact`. Plans return native input data;
+core assembles labels and nonces, persists attempts, applies binding evidence,
+and publishes acquired and terminal records. Adapters supply native scope,
+identity, readiness, and exact-deletion proofs. Ordered `FixedIntentFields`
+preserve existing fingerprint field order, names, omission rules, and hash domains.
+`ReadFixedAttempt` is the common compatibility reader; format descriptors select
+legacy envelopes and required identity fields.
 
-`CanSubmit` requires positive native evidence that submission is safe; an empty
-inventory alone never grants it. `Submit` must call `tx.Record("submitting")`
-before admitting allocation. APIs that resolve prerequisites during submission
-opt into `PlanDuringSubmit` and journal each resolved attempt before allocation.
-Only a provider-certified definite failure may call `tx.RejectAttempt`; unknown
-outcomes retain their attempt. A bound resource cannot be replaced even if an
-adapter reports submission eligibility.
+Each acquisition declares a `FixedAdmission` policy. Fresh-only admission,
+persisted non-submission witnesses, and safe same-identity resubmission are
+distinct contracts; empty inventory never grants create authority. Core journals
+admission before calling `Submit`. Native prerequisites that must be fenced first
+use `DeferredAdmission` and call `tx.Admit` at the mutation boundary. APIs resolving
+launch inputs during submission also declare `PlanDuringSubmit` and persist each
+payload with `WriteFixedAttempt` before allocation. Only a provider-certified
+definite failure may call `tx.RejectAttempt`; unknown outcomes retain custody.
+Adapters treat the transaction claim as read-only and publish returned evidence
+through `tx.Bind` or `tx.Observe`. Binding cannot retarget a known native identity.
 
 `core.InspectFixedResource` cannot persist or prepare access.
 `core.DeleteFixedResource` keeps claim comparison, native proof, and terminal
