@@ -839,6 +839,10 @@ func (c *ProxmoxClient) nextID(ctx context.Context) (int, error) {
 	}
 }
 
+func (c *ProxmoxClient) NextVMID(ctx context.Context) (int, error) {
+	return c.nextID(ctx)
+}
+
 type proxmoxVM struct {
 	VMID     int    `json:"vmid"`
 	Name     string `json:"name"`
@@ -1009,6 +1013,19 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 	if err != nil {
 		return Server{}, err
 	}
+	return c.CreateServerWithVMID(ctx, cfg, publicKey, leaseID, slug, keep, vmid, nil, nil)
+}
+
+func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, publicKey, leaseID, slug string, keep bool, vmid int, extraLabels map[string]string, bind func(Server) error) (Server, error) {
+	if cfg.TargetOS != targetLinux {
+		return Server{}, Exit(2, "proxmox provider currently supports target=linux only")
+	}
+	if cfg.Proxmox.TemplateID <= 0 {
+		return Server{}, Exit(3, "proxmox templateId is required (set proxmox.templateId or CRABBOX_PROXMOX_TEMPLATE_ID)")
+	}
+	if vmid <= 0 {
+		return Server{}, Exit(2, "proxmox VMID must be positive")
+	}
 	name := LeaseProviderName(leaseID, slug)
 	full := "1"
 	if !cfg.Proxmox.FullClone {
@@ -1025,12 +1042,28 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 	if cfg.Proxmox.Pool != "" {
 		clone.Set("pool", cfg.Proxmox.Pool)
 	}
+	labels := DirectLeaseLabels(cfg, leaseID, slug, "proxmox", "", keep, time.Now().UTC())
+	for key, value := range extraLabels {
+		labels[key] = value
+	}
+	labels["node"], labels["template_id"] = cfg.Proxmox.Node, strconv.Itoa(cfg.Proxmox.TemplateID)
+	fixed := extraLabels["fixed_intent_sha256"] != ""
+	if fixed {
+		if bind == nil {
+			return Server{}, fmt.Errorf("fixed Proxmox clone requires durable generation binding")
+		}
+		clone.Set("description", proxmoxDescription(labels))
+	}
 	var upid string
 	if err := c.doRequired(ctx, http.MethodPost, fmt.Sprintf("/nodes/%s/qemu/%d/clone", url.PathEscape(c.Node), cfg.Proxmox.TemplateID), clone, &upid); err != nil {
 		return Server{}, err
 	}
 	clonedVMID := strconv.Itoa(vmid)
 	cleanupClone := func() {
+		// An uncertain fixed attempt remains in custody for checked release.
+		if fixed {
+			return
+		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		_ = c.DeleteServer(cleanupCtx, clonedVMID)
@@ -1040,10 +1073,15 @@ func (c *ProxmoxClient) CreateServer(ctx context.Context, cfg Config, publicKey,
 		return Server{}, err
 	}
 
-	now := time.Now().UTC()
-	labels := DirectLeaseLabels(cfg, leaseID, slug, "proxmox", "", keep, now)
-	labels["node"] = cfg.Proxmox.Node
-	labels["template_id"] = strconv.Itoa(cfg.Proxmox.TemplateID)
+	if fixed {
+		server, err := c.getServer(ctx, clonedVMID, true)
+		if err != nil {
+			return Server{}, err
+		}
+		if err := bind(server); err != nil {
+			return Server{}, err
+		}
+	}
 	description := proxmoxDescription(labels)
 	config := url.Values{
 		"ciuser":      {cfg.SSHUser},
@@ -1434,7 +1472,7 @@ func proxmoxVMToServer(node string, vm proxmoxVM, labels map[string]string, ip s
 	if labels == nil {
 		labels = map[string]string{}
 	}
-	if labels["node"] == "" {
+	if labels["node"] == "" && labels["fixed_intent_sha256"] == "" {
 		labels["node"] = node
 	}
 	server := Server{

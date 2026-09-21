@@ -8,18 +8,21 @@ import (
 
 type fileBoxdConfig struct {
 	APIURL          string `yaml:"apiUrl,omitempty"`
+	GRPCURL         string `yaml:"grpcUrl,omitempty"`
 	Org             string `yaml:"org,omitempty"`
 	WorkRoot        string `yaml:"workRoot,omitempty"`
 	DeleteOnRelease *bool  `yaml:"deleteOnRelease,omitempty"`
 }
 
 const BoxdConfigDefaultAPIURL string = "https://app.boxd.sh"
+const BoxdConfigDefaultGRPCURL string = "boxd.sh:9443"
 const BoxdConfigDefaultWorkRoot string = "/home/boxd/crabbox"
 const BoxdConfigDefaultDeleteOnRelease bool = true
 
 func defaultBoxdConfig() BoxdConfig {
 	return BoxdConfig{
 		APIURL:          BoxdConfigDefaultAPIURL,
+		GRPCURL:         BoxdConfigDefaultGRPCURL,
 		WorkRoot:        BoxdConfigDefaultWorkRoot,
 		DeleteOnRelease: BoxdConfigDefaultDeleteOnRelease,
 	}
@@ -40,13 +43,14 @@ func (cfg *BoxdConfig) applyFile(file *fileBoxdConfig, trusted bool) (BoxdConfig
 
 func (cfg *BoxdConfig) applyEnv() (BoxdConfigApplied, error) {
 	var applied BoxdConfigApplied
-	err := applyConfigEnvironment(cfg, &applied, 0, 4)
+	err := applyConfigEnvironment(cfg, &applied, 0, 5)
 	return applied, err
 }
 
 // BoxdConfigFlagValues holds parsed values; only visited flags are applied.
 type BoxdConfigFlagValues struct {
 	APIURL          *string
+	GRPCURL         *string
 	Org             *string
 	WorkRoot        *string
 	DeleteOnRelease *bool
