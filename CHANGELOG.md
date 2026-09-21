@@ -56,7 +56,7 @@
 
 - Resolve NVIDIA Brev SSH routes with native OpenSSH, preserving certificate renewal and capturing validated routes across commands, sync, forwarding, and interactive connections. [PR 2429](https://github.com/openclaw/crabbox/pull/2429).
 
-- Report NVIDIA Brev readiness from the existing SSH route during ordinary status without refreshing, starting workspaces, or changing retained claims.
+- Report NVIDIA Brev readiness from the existing SSH route during ordinary status without refreshing, starting workspaces, or changing retained claims. [PR 2434](https://github.com/openclaw/crabbox/pull/2434).
 
 ### Maintenance
 
