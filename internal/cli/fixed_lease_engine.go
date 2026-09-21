@@ -33,6 +33,7 @@ func FixedIntentFingerprint(domain string, intent any) (string, error) {
 // Adapters assemble native evidence in Claim; Record checks immutable custody
 // before publishing it. An error never clears the last durable attempt.
 type FixedTransaction struct {
+	failedSet    map[string]bool
 	createLabels map[string]string
 	Claim        *LeaseClaim
 	Fresh        bool
@@ -165,7 +166,7 @@ type FixedLeaseOperations[T any] struct {
 // AcquireFixedResource keeps the existing claim envelope and all native
 // fingerprint/attempt dialects readable while writing the engine journal.
 func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, ops FixedLeaseOperations[T]) (LeaseTarget, error) {
-	if ops.DescribeIntent == nil || (ops.PlanAttempt == nil && ops.Plan == nil) || ops.ObserveExact == nil || ops.Submit == nil || ops.PrepareAccess == nil {
+	if ops.DescribeIntent == nil || (ops.PlanAttempt == nil && ops.Plan == nil && !ops.PlanDuringSubmit) || ops.ObserveExact == nil || ops.Submit == nil || ops.PrepareAccess == nil {
 		return LeaseTarget{}, fmt.Errorf("fixed lease engine requires all acquisition operations")
 	}
 	fresh := false
@@ -417,29 +418,41 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 }
 
 func (tx *FixedTransaction) FailedAttemptSet() map[string]bool {
-	failed := make(map[string]bool, len(tx.Claim.FixedCreateIntent.FailedAttempts))
-	for _, token := range tx.Claim.FixedCreateIntent.FailedAttempts {
-		failed[token] = true
+	if tx.failedSet == nil {
+		tx.failedSet = make(map[string]bool, len(tx.Claim.FixedCreateIntent.FailedAttempts))
+		for _, token := range tx.Claim.FixedCreateIntent.FailedAttempts {
+			tx.failedSet[token] = true
+		}
 	}
-	return failed
+	return tx.failedSet
 }
 
 // RejectAttempt requires a provider-certified definite failure. Transport
 // uncertainty must never call this: it retains the current attempt instead.
-func (tx *FixedTransaction) RejectAttempt(kind FixedLeaseKind, token string, terminal bool, now time.Time) error {
+func (tx *FixedTransaction) RejectAttempt(kind FixedLeaseKind, token string, terminal bool) error {
 	intent := tx.Claim.FixedCreateIntent
 	if !kind.IsFixedClaim(*tx.Claim) || intent.Version != kind.IntentVersion || intent.State != "prepared" || token == "" || tx.Claim.CloudID != "" || tx.Claim.CloudNumericID != 0 || tx.Claim.CloudImmutableID != "" {
 		return Exit(4, "lease_id_conflict: cannot reject a bound or unidentified fixed attempt")
 	}
 	if terminal {
-		*tx.Claim = kind.TerminalClaim(*tx.Claim, now)
-		return tx.persist()
+		*tx.Claim = kind.TerminalClaim(*tx.Claim, time.Now().UTC())
+		if err := tx.persist(); err != nil {
+			return err
+		}
+		if kind.RemoveKeyAfterRejection {
+			RemoveStoredTestboxKey(tx.Claim.LeaseID)
+		}
+		return nil
 	}
 	if !tx.FailedAttemptSet()[token] {
 		intent.FailedAttempts = append(intent.FailedAttempts, token)
 	}
 	intent.Attempt = nil
-	return tx.Record("prepared")
+	if err := tx.Record("prepared"); err != nil {
+		return err
+	}
+	tx.FailedAttemptSet()[token] = true
+	return nil
 }
 
 func finalizeFixedLeaseWithArtifacts(kind FixedLeaseKind, expected, terminal LeaseClaim, deleteExact func() error) error {

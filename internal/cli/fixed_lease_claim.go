@@ -9,9 +9,10 @@ import (
 )
 
 type FixedLeaseKind struct {
-	ClaimProvider string
-	IntentVersion int
-	Label         string
+	RemoveKeyAfterRejection bool
+	ClaimProvider           string
+	IntentVersion           int
+	Label                   string
 	// DeletionState retains native validators' existing on-disk cleanup marker.
 	DeletionState  string
 	ResourcePlural string

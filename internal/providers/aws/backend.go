@@ -2,11 +2,9 @@ package aws
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -140,10 +138,11 @@ const (
 )
 
 var fixedAWSLeaseKind = core.FixedLeaseKind{
-	ClaimProvider: core.FixedAWSClaimProvider,
-	IntentVersion: fixedAWSCreateIntentVersion,
-	Label:         "AWS",
-	AfterTerminal: func(claim core.LeaseClaim) error { return cleanupAWSLeaseSSH(claim.LeaseID) },
+	RemoveKeyAfterRejection: true,
+	ClaimProvider:           core.FixedAWSClaimProvider,
+	IntentVersion:           fixedAWSCreateIntentVersion,
+	Label:                   "AWS",
+	AfterTerminal:           func(claim core.LeaseClaim) error { return cleanupAWSLeaseSSH(claim.LeaseID) },
 	TerminalIdentityLabels: []string{
 		"crabbox", "created_by", "provider", "lease", "slug",
 		"aws_account_id", "aws_region", "fixed_intent_sha256", "provider_key", "aws_key_pair_id",
@@ -169,7 +168,7 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 		WindowsMode:  cfg.WindowsMode,
 		TTL:          cfg.TTL,
 		IdleTimeout:  cfg.IdleTimeout,
-	}, core.FixedLeaseOperations[core.Server]{PlanDuringSubmit: true, DescribeIntent: func(ctx context.Context, _ *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
+	}, core.FixedLeaseOperations[core.Server]{PlanDuringSubmit: true, Admission: &core.FixedAdmission{}, DeferredAdmission: true, DescribeIntent: func(ctx context.Context, _ *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		var err error
 		client, err = newAWSClient(ctx, cfg)
 		if err != nil {
@@ -180,13 +179,10 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 			return core.FixedLeaseBinding{}, fmt.Errorf("bind fixed AWS lease account: %w", err)
 		}
 		providerScope = "account:" + accountID
-		keyPath, key, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
+		publicKey, err = core.PrepareFixedSSHKey(&cfg, leaseID, core.FixedKeyPolicy{})
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}
-		publicKey = key
-		cfg.SSHKey = keyPath
-		cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
 		cfg.AWSSSHCIDRsPinned = len(cfg.AWSSSHCIDRs) > 0
 		ensureAWSSSHCIDRs(ctx, &cfg)
 		requestedSlug := core.NormalizeLeaseSlug(req.RequestedSlug)
@@ -248,30 +244,17 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 			return core.FixedObservation[core.Server]{}, core.Exit(4, "lease_id_conflict: fixed AWS lease %s has an unresolved launch attempt; retry after provider inventory converges", leaseID)
 		}
 		return core.FixedObservation[core.Server]{CanSubmit: true}, nil
-	}, PlanAttempt: func(context.Context, *core.FixedTransaction) error { return nil },
+	},
 		Submit: func(ctx context.Context, tx *core.FixedTransaction) (core.Server, error) {
 			intent := tx.Claim.FixedCreateIntent
 			createdAt, _ := time.Parse(time.RFC3339Nano, intent.CreatedAt)
 			failed := tx.FailedAttemptSet()
 			control := &core.AWSFixedCreateControl{CreatedAt: createdAt, IntentFingerprint: fingerprint, AccountID: accountID, FailedTokens: failed}
 			control.BeforeAttempt = func(attempt core.AWSLaunchAttempt) error {
-				data, err := json.Marshal(attempt)
-				if err != nil {
-					return err
-				}
-				intent.Attempt = map[string]string{"aws": string(data)}
-				return tx.Record("submitting")
+				return core.WriteFixedAttempt(intent, "aws", attempt, tx.Admit)
 			}
 			control.DefiniteFailure = func(attempt core.AWSLaunchAttempt) error {
-				if err := tx.RejectAttempt(fixedAWSLeaseKind, attempt.ClientToken, control.TerminalRejection, time.Now().UTC()); err != nil {
-					return err
-				}
-				if control.TerminalRejection {
-					core.RemoveStoredTestboxKey(leaseID)
-				} else {
-					failed[attempt.ClientToken] = true
-				}
-				return nil
+				return tx.RejectAttempt(fixedAWSLeaseKind, attempt.ClientToken, control.TerminalRejection)
 			}
 			fmt.Fprintf(b.RT.Stderr, "provisioning provider=aws lease=%s slug=%s class=%s preferred_type=%s region=%s keep=%v market=%s strategy=%s fixed=true\n", leaseID, intent.Slug, cfg.Class, cfg.ServerType, cfg.AWSRegion, req.Keep, cfg.Capacity.Market, cfg.Capacity.Strategy)
 			server, next, err := client.CreateServerWithFallbackControl(ctx, cfg, publicKey, leaseID, intent.Slug, req.Keep, func(format string, args ...any) { fmt.Fprintf(b.RT.Stderr, format, args...) }, control)
@@ -296,12 +279,7 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 				return core.LeaseTarget{}, err
 			}
 			if claim.CloudID == "" {
-				// Bind once before readiness can fail; replays retain the original cleanup
-				// identity. Prepared claims permit cleanup but cannot authorize normal use.
-				claim.CloudID = server.CloudID
-				claim.CloudImmutableID = server.ImmutableID
-				claim.Labels = maps.Clone(server.Labels)
-				if err := tx.Record("bound"); err != nil {
+				if err := tx.Bind(core.FixedResourceBinding{CloudID: server.CloudID, ImmutableID: server.ImmutableID, Labels: server.Labels}); err != nil {
 					return core.LeaseTarget{}, err
 				}
 			} else if err := validateExactAWSClaim(server, leaseID, *claim); err != nil {
@@ -336,15 +314,7 @@ func (b *awsLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequ
 			claim.ProviderScope = providerScope
 			return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 		}})
-	if err != nil {
-		return core.LeaseTarget{}, err
-	}
-	if req.OnAcquired != nil {
-		if err := req.OnAcquired(acquired); err != nil {
-			return core.LeaseTarget{}, fmt.Errorf("acknowledge fixed AWS acquisition: %w", err)
-		}
-	}
-	return acquired, nil
+	return core.CompleteFixedAcquisition(acquired, err, req)
 }
 
 func fixedAWSLeaseMatches(servers []core.LeaseView, leaseID string) []core.Server {
@@ -419,22 +389,9 @@ func validateFixedAWSAttemptProviderMetadata(server core.Server, attempt core.AW
 }
 
 func fixedAWSAttemptFromIntent(intent *core.FixedCreateIntent) (*core.AWSLaunchAttempt, error) {
-	if len(intent.Attempt) == 0 {
-		return nil, nil
-	}
-	value := intent.Attempt["aws"]
-	if value == "" {
-		return nil, errors.New("missing AWS attempt payload")
-	}
-	var attempt core.AWSLaunchAttempt
-	if err := json.Unmarshal([]byte(value), &attempt); err != nil {
-		return nil, err
-	}
-	if attempt.Region == "" || attempt.ServerType == "" || attempt.ImageID == "" ||
-		attempt.SecurityGroupID == "" || attempt.ClientToken == "" || attempt.ParametersSHA256 == "" {
-		return nil, errors.New("incomplete AWS attempt payload")
-	}
-	return &attempt, nil
+	return core.ReadFixedAttempt[core.AWSLaunchAttempt](intent, core.FixedAttemptFormat{JSONKey: "aws",
+		Required: []string{"region", "serverType", "imageID", "securityGroupID", "clientToken", "parametersSHA256"},
+	})
 }
 
 func (b *awsLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
