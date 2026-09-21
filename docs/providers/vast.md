@@ -261,6 +261,10 @@ heartbeat activity. Fresh status/list reads preserve those values without writin
 the claim; a stopped or failed native instance still reports its physical state.
 After a native restart, a saved runtime stop/failure no longer masks the running
 instance. Logical deletion and expiry holds remain intact.
+Plain `status` includes the available native SSH host, port, user, and stored
+lease key for core's readiness probe, just like `status --wait`; it does not
+prepare access or renew the claim. A missing or incomplete native SSH endpoint
+still permits a metadata-only status observation.
 An ordinary heartbeat preserves the recorded idle timeout, while an explicit
 `--idle-timeout` replaces it atomically with activity timestamps. Expiry remains
 capped by the recorded creation-based TTL. A stale or missing claim snapshot is
