@@ -504,6 +504,41 @@ func newTestScalewaySDKClient(t *testing.T, apiURL string, httpClient *http.Clie
 	return newTestScalewaySDKClientWithEnv(t, apiURL, httpClient, nil)
 }
 
+func TestScalewayResponseErrorUsesCompletedSDKResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		want       bool
+	}{
+		{"standard", `{"type":"permissions_denied","message":"fixture denied"}`, http.StatusForbidden, true},
+		{"legacy", `{"type":"unknown_resource","message":"fixture missing"}`, http.StatusNotFound, true},
+		{"fallback", `{"type":"fixture_unknown","message":"fixture response"}`, http.StatusTeapot, true},
+		{"malformed", `{`, http.StatusForbidden, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			client := newTestScalewaySDKClient(t, server.URL, server.Client())
+			_, err := client.Instance().GetServer(&instance.GetServerRequest{Zone: scw.Zone(client.Zone()), ServerID: "srv-1"}, scw.WithContext(t.Context()))
+			if err == nil {
+				t.Fatal("expected SDK error")
+			}
+			// A generic SDK wrapper must not hide a completed response beneath it.
+			wrapped := errors.Join(sdkerrors.Wrap(err, "observation"), context.Canceled)
+			if got := isScalewayResponseError(wrapped); got != tc.want {
+				t.Fatalf("response=%t want=%t error=%T %v", got, tc.want, err, err)
+			}
+		})
+	}
+	if isScalewayResponseError(sdkerrors.Wrap(context.Canceled, "transport interrupted")) {
+		t.Fatal("SDK transport wrapper is not a completed response")
+	}
+}
+
 func newTestScalewaySDKClientWithEnv(t *testing.T, apiURL string, httpClient *http.Client, env map[string]string) Client {
 	t.Helper()
 	clearScalewayEnv(t)

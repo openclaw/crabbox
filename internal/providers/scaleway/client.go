@@ -24,6 +24,26 @@ import (
 
 const defaultScalewayAPIURL = "https://api.scaleway.com"
 
+func isScalewayResponseError(err error) bool {
+	// SdkError also marks transport wrappers; only completed response types
+	// may take precedence over an interrupted readiness observation.
+	var response *scw.ResponseError
+	var invalid *scw.InvalidArgumentsError
+	var quota *scw.QuotasExceededError
+	var transient *scw.TransientStateError
+	var missing *scw.ResourceNotFoundError
+	var locked *scw.ResourceLockedError
+	var permission *scw.PermissionsDeniedError
+	var stock *scw.OutOfStockError
+	var expired *scw.ResourceExpiredError
+	var authentication *scw.DeniedAuthenticationError
+	var precondition *scw.PreconditionFailedError
+	return errors.As(err, &response) || errors.As(err, &invalid) || errors.As(err, &quota) ||
+		errors.As(err, &transient) || errors.As(err, &missing) || errors.As(err, &locked) ||
+		errors.As(err, &permission) || errors.As(err, &stock) || errors.As(err, &expired) ||
+		errors.As(err, &authentication) || errors.As(err, &precondition)
+}
+
 const (
 	scalewayRedirectMarkerHeader = "X-Crabbox-Scaleway-Redirect"
 	scalewaySafeRedirectLocation = "/.crabbox-refused-redirect"

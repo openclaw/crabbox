@@ -218,6 +218,10 @@ Public IPv4 readiness has a five-minute budget covering both API observations
 and waits. Earlier caller cancellation or deadlines take precedence; an
 already-canceled request does not start an observation. Immediate API errors
 retain their original cause rather than being reported as readiness timeouts.
+Interrupted observations retain the caller's custom cause and cancellation
+identity for diagnostics and run classification. Budget expiry retains deadline
+identity with the existing timeout message and exit code 5. Completed ready
+responses and typed API response errors take precedence over coincident stops.
 
 `list` uses all-pages Scaleway inventory. `resolve` may inspect complete,
 canonical live ownership tags without a claim, but reuse requires explicit

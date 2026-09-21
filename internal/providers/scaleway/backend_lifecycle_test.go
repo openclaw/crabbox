@@ -3,6 +3,7 @@ package scaleway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net"
@@ -29,7 +30,7 @@ func TestWaitForPublicIPv4HonorsCanceledCaller(t *testing.T) {
 	cause := errors.New("caller finished")
 	cancel(cause)
 	server, err := backend.waitForPublicIPv4(ctx, client, "srv-1")
-	if server != nil || !errors.Is(err, cause) || client.getCalls != 0 {
+	if server != nil || !errors.Is(err, cause) || !errors.Is(err, context.Canceled) || client.getCalls != 0 {
 		t.Fatalf("server=%v err=%v calls=%d; want caller cause without observation", server, err, client.getCalls)
 	}
 }
@@ -61,8 +62,10 @@ func TestWaitForPublicIPv4CancelsRealHTTPObservation(t *testing.T) {
 	httpClient := server.Client()
 	defer httpClient.CloseIdleConnections()
 	client := newTestScalewaySDKClient(t, server.URL, httpClient)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	guard, stopGuard := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stopGuard()
+	ctx, cancel := context.WithCancelCause(guard)
+	defer cancel(nil)
 	type result struct {
 		server *instance.Server
 		err    error
@@ -80,12 +83,19 @@ func TestWaitForPublicIPv4CancelsRealHTTPObservation(t *testing.T) {
 		t.Fatal("HTTPS observation did not reach the server")
 	}
 	started := time.Now()
-	cancel()
+	cause := core.Exit(7, "caller stopped Scaleway readiness")
+	cancel(cause)
 	select {
 	case got := <-done:
-		if got.server != nil || !errors.Is(got.err, context.Canceled) {
+		if got.server != nil || !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, cause) || core.ExitCodeForError(got.err, 1) != 7 || got.err.Error() != cause.Error() {
 			t.Fatalf("server=%v err=%v, want caller cancellation", got.server, got.err)
 		}
+		classified := core.FinalizeRunResult(core.RunResult{}, got.err)
+		want := core.FinalizeRunResult(core.RunResult{}, ctx.Err())
+		if classified.Status != want.Status || classified.ErrorKind != want.ErrorKind {
+			t.Fatalf("classification=%s/%s want=%s/%s", classified.Status, classified.ErrorKind, want.Status, want.ErrorKind)
+		}
+		t.Logf("real HTTPS SDK readiness: caller cause and cancellation retained, exit=7 diagnostic=%q classification=%s/%s", got.err.Error(), classified.Status, classified.ErrorKind)
 	case <-time.After(5 * time.Second):
 		t.Fatal("SDK observation did not return after cancellation")
 	}
@@ -153,8 +163,13 @@ func TestWaitForPublicIPv4SDKObservationBudget(t *testing.T) {
 					}
 				case "owned timeout":
 					var exit core.ExitError
-					if server != nil || !core.AsExitError(err, &exit) || exit.Code != 5 || exit.Message != "timed out waiting for Scaleway Instance public IPv4" {
+					if server != nil || !errors.Is(err, context.DeadlineExceeded) || !core.AsExitError(err, &exit) || exit.Code != 5 || exit.Message != "timed out waiting for Scaleway Instance public IPv4" {
 						t.Fatalf("server=%v err=%v; want readiness timeout", server, err)
+					}
+					classified := core.FinalizeRunResult(core.RunResult{}, err)
+					want := core.FinalizeRunResult(core.RunResult{}, context.DeadlineExceeded)
+					if classified.Status != want.Status || classified.ErrorKind != want.ErrorKind {
+						t.Fatalf("classification=%s/%s want=%s/%s", classified.Status, classified.ErrorKind, want.Status, want.ErrorKind)
 					}
 				case "caller deadline", "client deadline":
 					if server != nil || !errors.Is(err, context.DeadlineExceeded) {
@@ -176,6 +191,34 @@ func TestWaitForPublicIPv4SDKObservationBudget(t *testing.T) {
 					t.Fatalf("observations=%d, want %d", calls, wantCalls)
 				}
 			})
+		})
+	}
+}
+
+func TestWaitForPublicIPv4CompletedSDKResponseWinsCancellation(t *testing.T) {
+	for _, ready := range []bool{false, true} {
+		t.Run(fmt.Sprint(ready), func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			client := newTestScalewaySDKClient(t, "https://api.scaleway.com", &http.Client{Transport: scalewayRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				cancel(core.Exit(7, "caller stopped readiness"))
+				status, body := http.StatusForbidden, `{"type":"permissions_denied","message":"fixture denied"}`
+				if ready {
+					status, body = http.StatusOK, `{"server":{"id":"srv-1","state":"stopped","public_ips":[{"address":"203.0.113.10"}]}}`
+				}
+				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}}, ContentLength: int64(len(body)), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+			})})
+			server, err := (&Backend{}).waitForPublicIPv4(ctx, client, "srv-1")
+			if ready {
+				if err != nil || publicIPv4(server) != "203.0.113.10" {
+					t.Fatalf("server=%v err=%v; completed public IP must win without a running-state gate", server, err)
+				}
+			} else {
+				var denied *scw.PermissionsDeniedError
+				if server != nil || !errors.As(err, &denied) || errors.Is(err, context.Canceled) {
+					t.Fatalf("server=%v err=%v; completed API response must win", server, err)
+				}
+			}
 		})
 	}
 }

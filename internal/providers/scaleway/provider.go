@@ -955,16 +955,26 @@ func (b *Backend) deleteIdentitylessRecoveryKey(ctx context.Context, client Clie
 }
 
 func (b *Backend) waitForPublicIPv4(ctx context.Context, client Client, serverID string) (*instance.Server, error) {
-	return shared.PollReady(ctx, 5*time.Minute, 3*time.Second,
+	return shared.PollReadiness(ctx, shared.ReadinessOptions[*instance.Server]{
+		Timeout: 5 * time.Minute, Interval: 3 * time.Second,
+		IsResponseError: isScalewayResponseError,
+		Check: func(server *instance.Server, err error) (bool, error) {
+			return err == nil && server != nil && publicIPv4(server) != "", err
+		},
+		Diagnostic: func(stop shared.ReadinessStop) error {
+			if stop.BudgetExpired {
+				return core.Exit(5, "timed out waiting for Scaleway Instance public IPv4")
+			}
+			return stop.Cause
+		},
+	},
 		func(waitCtx context.Context) (*instance.Server, error) {
 			resp, err := client.Instance().GetServer(&instance.GetServerRequest{Zone: scw.Zone(client.Zone()), ServerID: serverID}, scw.WithContext(waitCtx))
 			if err != nil || resp == nil {
 				return nil, err
 			}
 			return resp.Server, nil
-		},
-		func(server *instance.Server) bool { return server != nil && publicIPv4(server) != "" },
-		core.Exit(5, "timed out waiting for Scaleway Instance public IPv4"))
+		})
 }
 
 func (b *Backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, repoRoot string, client Client, serverID, host, keyID, keyName, recovery string, keep bool, now time.Time) error {
