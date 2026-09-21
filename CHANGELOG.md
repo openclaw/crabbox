@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Consolidate Parallels fixed-lease acquisition and deletion on a shared transaction engine with versioned journals and compatibility for existing intent and receipt records.
+
 ### Fixes
 
 - Use Vast's native SSH endpoint and stored lease key for plain status readiness checks, avoiding false unready results while keeping observations read-only. [PR 2447](https://github.com/openclaw/crabbox/pull/2447).

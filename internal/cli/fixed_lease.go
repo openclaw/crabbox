@@ -47,6 +47,7 @@ type FixedAcquireOptions struct {
 	TTL          time.Duration
 	IdleTimeout  time.Duration
 	Now          func() time.Time
+	journal      bool
 }
 
 func AcquireFixedLease(
@@ -137,6 +138,9 @@ func AcquireFixedIntent(
 				CreatedAt:     current.Format(time.RFC3339Nano),
 				State:         "prepared",
 			}
+			if opts.journal {
+				claim.FixedCreateIntent.Journal = &FixedLeaseJournal{Version: 1, Phase: "prepared", Revision: 1}
+			}
 			if err := persist(); err != nil {
 				return err
 			}
@@ -159,6 +163,9 @@ func AcquireFixedIntent(
 		}
 		claim.LastUsedAt = now().UTC().Format(time.RFC3339)
 		intent.State = "acquired"
+		if intent.Journal != nil {
+			intent.Journal = &FixedLeaseJournal{Version: 1, Phase: "acquired", Revision: intent.Journal.Revision + 1}
+		}
 		if err := persist(); err != nil {
 			return err
 		}

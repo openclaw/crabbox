@@ -80,6 +80,19 @@ retains terminal receipts through adapter cleanup. See
 [Agent Sandbox fixed lease IDs](../providers/agent-sandbox.md#fixed-lease-ids)
 for scope checks and foreground deletion requirements.
 
+The shared fixed-lease transaction engine records a versioned journal alongside
+the existing normalized intent, native attempt, and terminal receipt fields.
+Parallels uses this engine for acquisition and deletion. Existing records remain
+readable; upgrading a record preserves its fingerprint and native ownership
+evidence. Uncertain submission and deletion retain custody, and a released ID
+cannot be allocated again. Native adapters still attest account scope, resource
+identity, and deletion completion.
+
+External providers retain their delegated protocol: controller acknowledgement
+precedes readiness, and rejection rolls back the exact resource even with
+`Keep=true`. Their legacy records lack the original intent fingerprint and are
+not converted into built-in fixed-lease transactions.
+
 Direct Machine0 binds the intent to its deterministic VM name before creation;
 the durable attempt binds the first visible match to its Machine0 resource ID,
 and every later adoption requires that exact recorded ID. Its fixed claims use

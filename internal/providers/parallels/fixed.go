@@ -3,8 +3,6 @@ package parallels
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"maps"
 	"strings"
@@ -22,7 +20,7 @@ import (
 // fixed ID create a second VM. Current clients map the marker back to the
 // runtime provider through canonicalClaimProvider, so exact-ownership checks,
 // resolution, and cleanup keep routing it.
-var parallelsFixedLeaseKind = core.FixedLeaseKind{ClaimProvider: core.FixedParallelsClaimProvider, IntentVersion: 1, Label: "Parallels"}
+var parallelsFixedLeaseKind = core.FixedLeaseKind{ClaimProvider: core.FixedParallelsClaimProvider, IntentVersion: 1, Label: "Parallels", DeletionState: "deleting"}
 
 const parallelsProviderName = "parallels"
 
@@ -56,7 +54,7 @@ type parallelsFixedIdentity struct {
 }
 
 func parallelsFixedFingerprint(cfg core.Config, req core.AcquireRequest, source, snapshotID, publicKey string) (string, error) {
-	data, err := json.Marshal(parallelsFixedIdentity{
+	return core.FixedIntentFingerprint("", parallelsFixedIdentity{
 		Source:         source,
 		SourceSnapshot: snapshotID,
 		CloneMode:      strings.ToLower(strings.TrimSpace(core.Blank(cfg.Parallels.CloneMode, "linked"))),
@@ -76,10 +74,6 @@ func parallelsFixedFingerprint(cfg core.Config, req core.AcquireRequest, source,
 		TTL:            cfg.TTL,
 		IdleTimeout:    cfg.IdleTimeout,
 	})
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
 }
 
 // parallelsVMByID searches the complete inventory for a bound UUID. Parallels
@@ -242,11 +236,11 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 	var client *core.ParallelsClient
 	var publicKey, snapshotID, sourceID, hostLabel, vmBase string
 
-	lease, err := core.AcquireFixedLease(core.FixedAcquireOptions{
+	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
 		Kind: parallelsFixedLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID,
 		RepoRoot: req.Repo.Root, Reclaim: req.Reclaim, TargetOS: b.Cfg.TargetOS, WindowsMode: b.Cfg.WindowsMode,
 		TTL: b.Cfg.TTL, IdleTimeout: b.Cfg.IdleTimeout,
-	}, func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
+	}, core.FixedLeaseOperations[core.ParallelsVM]{DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		var err error
 		var scope string
 		if exists {
@@ -322,11 +316,13 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		}
 		binding.Slug, err = core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
 		return binding, err
-	}, func(ctx context.Context, claim *core.LeaseClaim, intent *core.FixedCreateIntent, persist func() error) (core.LeaseTarget, error) {
+
+	}, PlanAttempt: func(ctx context.Context, tx *core.FixedTransaction) error {
+		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
 		name := core.ParallelsLeaseVMName(leaseID, intent.Slug)
 		if intent.Attempt == nil {
 			if intent.State != "prepared" || claim.CloudID != "" {
-				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Parallels create intent for lease %s has no attempt", leaseID)
+				return core.Exit(4, "lease_id_conflict: Parallels create intent for lease %s has no attempt", leaseID)
 			}
 			// A per-attempt directory, named with a secret nonce, is what makes
 			// the resulting bundle attributable to this attempt. It is recorded
@@ -346,115 +342,134 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 				labels["source_snapshot"] = snapshotID
 			}
 			claim.Labels = labels
-			// Persist the host-unique VM name before prlctl clone. A lost reply
-			// can still have created the VM, and only this record lets a replay
-			// find it instead of cloning a second one.
-			if err := persist(); err != nil {
-				return core.LeaseTarget{}, err
-			}
 		}
-		if intent.Attempt["name"] != name || intent.Attempt["host"] != intent.ProviderScope ||
+		return nil
+	}, ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.ParallelsVM], error) {
+		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
+		name := core.ParallelsLeaseVMName(leaseID, intent.Slug)
+		var result core.FixedObservation[core.ParallelsVM]
+		if intent.Attempt == nil {
+			if intent.State != "prepared" || claim.CloudID != "" {
+				return result, core.Exit(4, "lease_id_conflict: Parallels create intent for lease %s has no attempt", leaseID)
+			}
+		} else if intent.Attempt["name"] != name || intent.Attempt["host"] != intent.ProviderScope ||
 			(intent.Attempt["source_id"] != "" && intent.Attempt["source_id"] != sourceID) {
-			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Parallels attempt identity changed for lease %s", leaseID)
+			return result, core.Exit(4, "lease_id_conflict: Parallels attempt identity changed for lease %s", leaseID)
 		}
 		createDir := parallelsFixedCreationDir(intent)
-		if createDir == "" {
-			return core.LeaseTarget{}, parallelsUncertainCustody(leaseID, name)
+		if intent.Attempt != nil && createDir == "" {
+			return result, parallelsUncertainCustody(leaseID, name)
 		}
-
-		// A complete inventory read is the only unambiguous absence proof, and
-		// it must carry per-VM detail: the plain listing omits the bundle path
-		// this attempt identifies its VM by. A failed listing keeps custody
-		// instead of provisioning a second VM.
 		vms, err := client.ListVMsDetailed(ctx)
 		if err != nil {
-			return core.LeaseTarget{}, fmt.Errorf("reconcile Parallels lease=%s vm=%s (claim and key retained): %w", leaseID, name, err)
+			return result, fmt.Errorf("reconcile Parallels lease=%s vm=%s (claim and key retained): %w", leaseID, name, err)
 		}
-		// The attempt's own creation directory, not the mutable name, decides
-		// which VM this attempt produced.
-		vm, found, err := parallelsCreatedVM(vms, createDir)
-		if err != nil {
-			return core.LeaseTarget{}, err
-		}
-		if !found {
-			if intent.State != "prepared" || claim.CloudID != "" {
-				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Parallels lease %s no longer has VM %q on host %s; stop the lease instead of replaying it", leaseID, name, shortParallelsScope(intent.ProviderScope))
-			}
-			if occupant, taken := parallelsVMByName(vms, name); taken {
-				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Parallels lease %s cannot create VM %q: VM %q already occupies that name and was not created by this lease; custody is retained and nothing was changed or deleted", leaseID, name, occupant.ID)
-			}
-			// A submitted clone may have vanished before its UUID was recorded.
-			// Missing submission evidence is equally inconclusive; never recreate it.
-			if intent.Attempt["submission"] != "pending" {
-				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Parallels lease %s has no recoverable VM for its submitted or uncertain attempt; claim and key retained, no replacement created", leaseID)
-			}
-			// Capacity is enforced by counting the host's VMs and then cloning
-			// into it, so both must happen under one reservation: the per-lease
-			// claim locks do not serialize different lease IDs, and a prepared
-			// retry can reach this point long after its host filled up. The
-			// reservation is taken only for an actual submission, so replaying
-			// or releasing an existing VM still works at capacity.
-			releaseCapacity, err := core.ReserveParallelsHostCapacity(ctx, cfg, b.RT.Exec, sourceID)
-			if err != nil {
-				return core.LeaseTarget{}, err
-			}
-			capacityHeld := true
-			releaseCapacityOnce := func() {
-				if capacityHeld {
-					capacityHeld = false
-					releaseCapacity()
+		if createDir != "" {
+			for _, vm := range vms {
+				if parallelsVMInCreationDir(vm, createDir) {
+					result.Candidates = append(result.Candidates, vm)
 				}
 			}
-			defer releaseCapacityOnce()
-			if err := client.EnsureHostDir(ctx, createDir); err != nil {
-				return core.LeaseTarget{}, err
+		}
+		if len(result.Candidates) != 0 {
+			if len(result.Candidates) == 1 {
+				projected := *claim
+				projectedIntent := *intent
+				projectedIntent.Attempt = maps.Clone(intent.Attempt)
+				projected.FixedCreateIntent = &projectedIntent
+				vm := result.Candidates[0]
+				if err := bindParallelsFixedIncarnation(&projected, &projectedIntent, vm.ID, name, leaseID); err != nil {
+					return result, err
+				}
+				if err := validateParallelsFixedVM(projected, &projectedIntent, vm, name); err != nil {
+					return result, err
+				}
 			}
-			fmt.Fprintf(b.RT.Stderr, "provisioning provider=parallels lease=%s slug=%s host=%s source=%s snapshot=%s clone_mode=%s keep=%v\n",
-				leaseID, intent.Slug, hostLabel, sourceID, blank(snapshotID, "-"), blank(cfg.Parallels.CloneMode, "linked"), req.Keep)
-			// The VM name is host-unique: prlctl refuses a concurrent duplicate
-			// create of this exact lease-derived name even after a lost reply.
-			// Submitting the resolved source UUID keeps the clone bound to the
-			// template the fingerprint was taken over, and --dst keeps the
-			// resulting bundle inside this attempt's directory.
-			cloneCfg := cfg
-			cloneCfg.Parallels.VMRoot = createDir
-			cloneErr := core.NewParallelsClient(cloneCfg, b.RT.Exec).SubmitClone(ctx, sourceID, snapshotID, leaseID, intent.Slug, req.Keep, func() error {
-				intent.Attempt["submission"] = "submitted"
-				return persist()
-			})
-			// Whatever the reply said, a submitted clone may already count
-			// against maxVMs, and the reservation has done its job either way:
-			// the rest of bring-up need not keep other forks waiting.
-			releaseCapacityOnce()
-			if cloneErr != nil {
-				return core.LeaseTarget{}, fmt.Errorf("Parallels clone outcome uncertain for lease=%s vm=%s; claim and key retained, retry the same lease ID or stop it: %w", leaseID, name, cloneErr)
-			}
-			// Read the created VM back by its creation directory. `prlctl clone`
-			// reports no UUID and the name it was given is mutable, so a name
-			// lookup here could bind whatever has taken that name since.
-			if vms, err = client.ListVMsDetailed(ctx); err != nil {
-				return core.LeaseTarget{}, fmt.Errorf("reconcile Parallels lease=%s vm=%s after clone (claim and key retained): %w", leaseID, name, err)
-			}
-			if vm, found, err = parallelsCreatedVM(vms, createDir); err != nil {
-				return core.LeaseTarget{}, err
-			} else if !found {
-				return core.LeaseTarget{}, fmt.Errorf("Parallels clone reported success but no VM is present in the creation directory for lease=%s; claim and key retained", leaseID)
+			return result, nil
+		}
+		if intent.State != "prepared" || claim.CloudID != "" {
+			return result, core.Exit(4, "lease_id_conflict: Parallels lease %s no longer has VM %q on host %s; stop the lease instead of replaying it", leaseID, name, shortParallelsScope(intent.ProviderScope))
+		}
+		if occupant, taken := parallelsVMByName(vms, name); taken {
+			return result, core.Exit(4, "lease_id_conflict: Parallels lease %s cannot create VM %q: VM %q already occupies that name and was not created by this lease; custody is retained and nothing was changed or deleted", leaseID, name, occupant.ID)
+		}
+		result.CanSubmit = intent.Attempt == nil || intent.Attempt["submission"] == "pending"
+		return result, nil
+	}, Submit: func(ctx context.Context, tx *core.FixedTransaction) (core.ParallelsVM, error) {
+		intent := tx.Claim.FixedCreateIntent
+		name, createDir := intent.Attempt["name"], parallelsFixedCreationDir(intent)
+		// Capacity is enforced by counting the host's VMs and then cloning
+		// into it, so both must happen under one reservation: the per-lease
+		// claim locks do not serialize different lease IDs, and a prepared
+		// retry can reach this point long after its host filled up. The
+		// reservation is taken only for an actual submission, so replaying
+		// or releasing an existing VM still works at capacity.
+		releaseCapacity, err := core.ReserveParallelsHostCapacity(ctx, cfg, b.RT.Exec, sourceID)
+		if err != nil {
+			return core.ParallelsVM{}, err
+		}
+		capacityHeld := true
+		releaseCapacityOnce := func() {
+			if capacityHeld {
+				capacityHeld = false
+				releaseCapacity()
 			}
 		}
+		defer releaseCapacityOnce()
+		if err := client.EnsureHostDir(ctx, createDir); err != nil {
+			return core.ParallelsVM{}, err
+		}
+		fmt.Fprintf(b.RT.Stderr, "provisioning provider=parallels lease=%s slug=%s host=%s source=%s snapshot=%s clone_mode=%s keep=%v\n",
+			leaseID, intent.Slug, hostLabel, sourceID, blank(snapshotID, "-"), blank(cfg.Parallels.CloneMode, "linked"), req.Keep)
+		// The VM name is host-unique: prlctl refuses a concurrent duplicate
+		// create of this exact lease-derived name even after a lost reply.
+		// Submitting the resolved source UUID keeps the clone bound to the
+		// template the fingerprint was taken over, and --dst keeps the
+		// resulting bundle inside this attempt's directory.
+		cloneCfg := cfg
+		cloneCfg.Parallels.VMRoot = createDir
+		cloneErr := core.NewParallelsClient(cloneCfg, b.RT.Exec).SubmitClone(ctx, sourceID, snapshotID, leaseID, intent.Slug, req.Keep, func() error {
+			intent.Attempt["submission"] = "submitted"
+			return tx.Record("submitting")
+		})
+		// Whatever the reply said, a submitted clone may already count
+		// against maxVMs, and the reservation has done its job either way:
+		// the rest of bring-up need not keep other forks waiting.
+		releaseCapacityOnce()
+		if cloneErr != nil {
+			return core.ParallelsVM{}, fmt.Errorf("Parallels clone outcome uncertain for lease=%s vm=%s; claim and key retained, retry the same lease ID or stop it: %w", leaseID, name, cloneErr)
+		}
+		// Read the created VM back by its creation directory. `prlctl clone`
+		// reports no UUID and the name it was given is mutable, so a name
+		// lookup here could bind whatever has taken that name since.
+		vms, err := client.ListVMsDetailed(ctx)
+		if err != nil {
+			return core.ParallelsVM{}, fmt.Errorf("reconcile Parallels lease=%s vm=%s after clone (claim and key retained): %w", leaseID, name, err)
+		}
+		vm, found, err := parallelsCreatedVM(vms, createDir)
+		if err != nil {
+			return core.ParallelsVM{}, err
+		} else if !found {
+			return core.ParallelsVM{}, fmt.Errorf("Parallels clone reported success but no VM is present in the creation directory for lease=%s; claim and key retained", leaseID)
+		}
+		return vm, nil
+	}, PrepareAccess: func(ctx context.Context, tx *core.FixedTransaction, vm core.ParallelsVM) (core.LeaseTarget, error) {
+		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
+		name := intent.Attempt["name"]
 		// Pin the incarnation this attempt created before anything else touches
 		// it. Parallels never reuses a VM UUID, so from here on adoption, guest
 		// preparation and deletion all act on this VM and no other.
 		if err := bindParallelsFixedIncarnation(claim, intent, vm.ID, name, leaseID); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		if err := persist(); err != nil {
+		if err := tx.Record("bound"); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		if err := validateParallelsFixedVM(*claim, intent, vm, name); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		claim.CloudID, claim.CloudImmutableID = vm.ID, vm.ID
-		if err := persist(); err != nil {
+		if err := tx.Record("bound"); err != nil {
 			return core.LeaseTarget{}, err
 		}
 
@@ -500,7 +515,7 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		client.SetLeaseLabels(leaseID, server.Labels)
 		fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s vm=%s ip=%s\n", leaseID, server.DisplayID(), ready.IP)
 		return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
-	}, ctx)
+	}})
 	if err != nil {
 		// A fixed ID keeps its durable attempt and per-lease key on every
 		// failure. Rolling the VM back here would make a lost reply
@@ -561,37 +576,34 @@ func (b *leaseBackend) releaseFixed(ctx context.Context, claim core.LeaseClaim, 
 		}
 		return &vm, nil
 	}
-	if claim.FixedCreateIntent.State != "deleting" {
-		// Commit the validated deletion phase before the remote effect, so a
-		// later absence is safe to finalize rather than ambiguous.
-		deleting := claim
-		intent := *claim.FixedCreateIntent
-		intent.State = "deleting"
-		deleting.FixedCreateIntent = &intent
-		updated, err := core.ReplaceLeaseClaimIfUnchangedDurableAfter(claim.LeaseID, claim, deleting, func() error {
-			_, err := lookup()
-			return err
-		})
-		if err != nil {
-			return err
-		}
-		claim = updated
-	}
-	err = parallelsFixedLeaseKind.FinalizeAfterCleanup(claim, func() error {
-		vm, err := lookup()
-		if err != nil || vm == nil {
+	err = core.DeleteFixedResource(ctx, parallelsFixedLeaseKind, claim, core.FixedLeaseOperations[core.ParallelsVM]{
+		ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.ParallelsVM], error) {
+			claim = *tx.Claim
+			vm, err := lookup()
+			result := core.FixedObservation[core.ParallelsVM]{AbsenceProven: err == nil && vm == nil}
+			if vm != nil {
+				result.Candidates = []core.ParallelsVM{*vm}
+			}
+			return result, err
+		},
+		DeleteExact: func(ctx context.Context, tx *core.FixedTransaction, vm core.ParallelsVM) error {
+			claim = *tx.Claim
+			current, err := lookup()
+			if err != nil || current == nil {
+				outcome.Terminal = err == nil
+				return err
+			}
+			err = client.Delete(ctx, current.ID)
 			outcome.Terminal = err == nil
+			if err == nil {
+				client.RemoveHostDirIfEmpty(ctx, parallelsFixedCreationDir(claim.FixedCreateIntent))
+			}
 			return err
-		}
-		err = client.Delete(ctx, vm.ID)
-		outcome.Terminal = err == nil
-		if err == nil {
-			// The attempt's directory is spent. Remove it only while empty, so
-			// anything unexpected still living there is left untouched.
-			client.RemoveHostDirIfEmpty(ctx, parallelsFixedCreationDir(claim.FixedCreateIntent))
-		}
-		return err
+		},
 	})
+	if err == nil {
+		outcome.Terminal = true
+	}
 	if err != nil {
 		return err
 	}
