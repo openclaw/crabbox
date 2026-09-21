@@ -155,6 +155,12 @@ not treated as proof that creation failed: while the outcome remains
 indeterminate, Crabbox retains the claim and credentials and asks the operator
 to retry rather than risk orphaning a billed Droplet without its SSH key.
 
+Heartbeat reads the current idle policy from the Droplet's remote tags. Ordinary
+touches preserve that policy even when local configuration differs; only an
+explicit `heartbeat --idle-timeout` changes it. A lease without a stored policy
+uses the configured fallback. The creation-based TTL still caps expiry, and a
+failed tag update is reported as a failure rather than a successful heartbeat.
+
 ## Fixed operation IDs
 
 Direct leases accept `warmup --provider digitalocean --lease-id cbx_<12 lowercase hex>`.

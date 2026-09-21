@@ -168,7 +168,8 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	}
 	displayImage := applevmhelper.ImageIdentity(cfg.AppleVM.Image, cfg.AppleVM.ImageSHA256)
 	fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s image=%s cpus=%d memory=%dMiB disk=%dGiB keep=%v\n", providerName, leaseID, slug, displayImage, cfg.AppleVM.CPUs, cfg.AppleVM.MemoryMiB, cfg.AppleVM.DiskGiB, req.Keep)
-	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	initialClaim, err := core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false)
+	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
 	inst, err := b.startInstance(ctx, cfg, name, leaseID, slug, publicKey)
@@ -189,9 +190,11 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
-	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
+	updated, err := core.ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug, cfg, instanceScope(name), lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, initialClaim, true)
+	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
+	core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
 	return lease, nil
@@ -213,31 +216,40 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if leaseID == "" {
 		return core.LeaseTarget{}, core.Exit(4, "apple-vm instance %q has no Crabbox lease metadata; clean it up with `crabbox cleanup --provider apple-vm`", inst.Name)
 	}
-	owned, conflict, err := appleVMClaimStatus(leaseID, inst.Name)
+	expected, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	owned, conflict := appleVMClaimBindingStatus(expected, exists, leaseID, inst.Name)
 	readOnlyStatus := req.StatusOnly && !req.ReleaseOnly
-	if (conflict && (!readOnlyStatus || req.Reclaim)) || (!owned && !readOnlyStatus && (req.ReleaseOnly || !req.Reclaim)) {
+	if (conflict && (!readOnlyStatus || req.Reclaim)) || (!owned && !readOnlyStatus && (req.ReleaseOnly || !req.Reclaim || req.NoLocalStateMutations)) {
 		return core.LeaseTarget{}, appleVMOwnershipError(leaseID, inst.Name)
 	}
+	if owned {
+		claim = expected
+	}
+	server := b.serverFromInstance(inst, claim, cfg)
+	core.SetServerLeaseClaimSnapshot(&server, expected, owned)
 	if req.ReleaseOnly {
-		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	if !appleVMRunning(inst.Status) && !req.StatusOnly {
 		return core.LeaseTarget{}, core.Exit(5, "apple-vm instance %s is %s; start a new lease with `crabbox run` or clean it up with `crabbox cleanup --provider apple-vm`", inst.Name, core.Blank(inst.Status, "stopped"))
 	}
 	if req.StatusOnly && (inst.SSHHost == "" || inst.SSHPort <= 0) {
-		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: leaseID}, nil
+		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	lease, err := b.prepareLease(ctx, cfg, inst, claim, false)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if req.Repo.Root != "" && (!readOnlyStatus || req.Reclaim) {
-		if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
+	core.SetServerLeaseClaimSnapshot(&lease.Server, expected, owned)
+	if req.Repo.Root != "" && !req.StatusOnly && !req.NoLocalStateMutations {
+		updated, err := core.ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug, cfg, instanceScope(inst.Name), lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, expected, exists)
+		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
 	}
 	return lease, nil
 }
@@ -345,20 +357,25 @@ func appleVMClaimStatus(leaseID, instanceName string) (owned, conflict bool, err
 	if err != nil {
 		return false, false, err
 	}
-	if !ok || !exact || claim.LeaseID != leaseID {
-		return false, false, nil
+	owned, conflict = appleVMClaimBindingStatus(claim, ok && exact, leaseID, instanceName)
+	return owned, conflict, nil
+}
+
+func appleVMClaimBindingStatus(claim core.LeaseClaim, exists bool, leaseID, instanceName string) (owned, conflict bool) {
+	if !exists || claim.Provider != providerName || claim.LeaseID != leaseID {
+		return false, false
 	}
 	binding := strings.TrimSpace(claim.ProviderScope)
 	if binding == "" {
 		binding = strings.TrimSpace(claim.Labels["instance"])
 	}
 	if binding == "" {
-		return false, false, nil
+		return false, false
 	}
 	if binding != instanceScope(instanceName) {
-		return false, true, nil
+		return false, true
 	}
-	return true, false, nil
+	return true, false
 }
 
 func appleVMOwnershipError(leaseID, instanceName string) error {
@@ -484,9 +501,40 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	return nil
 }
 
-func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
+func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	name := lease.Server.CloudID
+	owned, _ := appleVMClaimBindingStatus(claim, true, lease.LeaseID, name)
+	if !owned || name == "" || lease.LeaseID == "" || lease.Server.Provider != providerName || lease.Server.Name != name || lease.Server.Labels["instance"] != name || (claim.CloudID != "" && claim.CloudID != name) {
+		return core.Exit(4, "apple-vm lease %s touch identity does not match its claim", lease.LeaseID)
+	}
+	if (claim.Labels["state"] != "ready" && claim.Labels["state"] != "running") || claim.Labels["recovery"] != "" || (lease.Server.Status != "ready" && lease.Server.Status != "running") {
+		return core.Exit(4, "apple-vm lease %s acquisition is incomplete or instance is inactive; refusing touch", lease.LeaseID)
+	}
+	return nil
+}
+
+func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
+	if req.State != "" && req.State != "ready" && req.State != "running" {
+		return core.Server{}, core.Exit(2, "apple-vm touch cannot publish acquisition state %q", req.State)
+	}
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider:  providerName,
+		Authorize: b.AuthorizeStatusTouchClaim,
+		Prepare: func(claim core.LeaseClaim) (map[string]string, time.Time) {
+			now := core.ClockNow(b.rt.Clock).UTC()
+			return core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(shared.ClaimLifecycleLabels(claim), b.configForRun(), req.State, now, req.IdleTimeoutOverride), now
+		},
+	})
+	if err != nil {
+		return core.Server{}, err
+	}
 	server := req.Lease.Server
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.configForRun(), req.State, time.Now().UTC())
+	server.Labels = shared.CloneLabels(updated.Labels)
+	server.Status = server.Labels["state"]
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 
@@ -733,7 +781,7 @@ func (e *missingInstanceError) Unwrap() error {
 
 func (b *backend) serverFromInstance(inst applevmhelper.Instance, claim core.LeaseClaim, cfg core.Config) core.Server {
 	imageIdentity := applevmhelper.ImageIdentity(cfg.AppleVM.Image, cfg.AppleVM.ImageSHA256)
-	labels := shared.LabelsWithDefaults(claim.Labels, map[string]string{
+	labels := shared.LabelsWithDefaults(shared.ClaimLifecycleLabels(claim), map[string]string{
 		"crabbox":     "true",
 		"provider":    providerName,
 		"instance":    inst.Name,

@@ -2873,6 +2873,95 @@ func writeStoredTestboxKey(t *testing.T, leaseID string) string {
 	return keyPath
 }
 
+func TestTouchIdleTimeoutIntent(t *testing.T) {
+	created := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	now := created.Add(10 * time.Minute)
+	override := 90 * time.Minute
+	for _, tc := range []struct {
+		name     string
+		stored   string
+		legacy   bool
+		fallback time.Duration
+		override *time.Duration
+		want     time.Duration
+		writeErr bool
+	}{
+		{name: "omitted preserves remote policy", stored: "300", fallback: time.Minute, want: 5 * time.Minute},
+		{name: "omitted preserves legacy policy", stored: "300", legacy: true, fallback: time.Minute, want: 5 * time.Minute},
+		{name: "missing policy uses request fallback", fallback: 2 * time.Minute, want: 2 * time.Minute},
+		{name: "explicit policy beats fallback and TTL caps expiry", stored: "300", fallback: time.Minute, override: &override, want: override},
+		{name: "explicit policy without fallback", stored: "300", override: &override, want: override},
+		{name: "failed write does not publish policy", stored: "300", override: &override, writeErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.Provider = providerName
+			cfg.TargetOS = core.TargetLinux
+			cfg.TTL = time.Hour
+			labels := labelsFromTags(leaseTags(cfg, "cbx_abcdef123456", "touch-me", "ready", false, created))
+			delete(labels, "idle_timeout")
+			delete(labels, "idle_timeout_secs")
+			if tc.stored != "" {
+				key := "idle_timeout_secs"
+				if tc.legacy {
+					key = "idle_timeout"
+				}
+				labels[key] = tc.stored
+			}
+			item := droplet{ID: 99, Name: "touch", Status: "active", Tags: tagsFromLabels(labels)}
+			api := &fakeDigitalOceanAPI{droplets: []droplet{item}}
+			writeErr := errors.New("tag replacement failed")
+			if tc.writeErr {
+				api.replaceErr = writeErr
+			}
+			backend := newTestBackend(t, api)
+			backend.RT.Clock = fixedClock{t: now}
+			server := serverFromDroplet(item, cfg)
+			server.Labels["idle_timeout"] = "7200"
+			server.Labels["idle_timeout_secs"] = "7200"
+			before := maps.Clone(server.Labels)
+			touched, err := backend.Touch(context.Background(), core.TouchRequest{
+				Lease: core.LeaseTarget{Server: server, LeaseID: "cbx_abcdef123456"},
+				State: "running", IdleTimeout: tc.fallback, IdleTimeoutOverride: tc.override,
+			})
+			if !maps.Equal(server.Labels, before) {
+				t.Fatal("input server labels changed")
+			}
+			if api.getCalls != 1 || len(api.replaced) != 1 || api.replaced[0] != item.ID {
+				t.Fatalf("provider calls: reads=%d replacements=%v", api.getCalls, api.replaced)
+			}
+			persisted, readErr := api.GetDroplet(context.Background(), item.ID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if tc.writeErr {
+				if !errors.Is(err, writeErr) || !reflect.DeepEqual(touched, core.Server{}) || !slices.Equal(persisted.Tags, item.Tags) {
+					t.Fatalf("failed write published a result: error=%v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			expires := now.Add(tc.want)
+			if cap := created.Add(time.Hour); cap.Before(expires) {
+				expires = cap
+			}
+			for _, got := range []map[string]string{touched.Labels, labelsFromTags(persisted.Tags)} {
+				for key, want := range map[string]string{
+					"idle_timeout": strconv.Itoa(int(tc.want.Seconds())), "idle_timeout_secs": strconv.Itoa(int(tc.want.Seconds())),
+					"created_at": core.LeaseLabelTime(created), "last_touched_at": core.LeaseLabelTime(now),
+					"expires_at": core.LeaseLabelTime(expires), "ttl_secs": "3600", "state": "running",
+				} {
+					if got[key] != want {
+						t.Errorf("%s=%q want %q", key, got[key], want)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestTouchPreservesLiveTailscaleTags(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
@@ -2902,10 +2991,12 @@ func TestTouchPreservesLiveTailscaleTags(t *testing.T) {
 	backend := newTestBackend(t, api)
 	backend.RT.Clock = fixedClock{t: time.Date(2026, 6, 10, 12, 10, 0, 0, time.UTC)}
 
+	idleTimeout := 20 * time.Minute
 	touched, err := backend.Touch(context.Background(), core.TouchRequest{
-		Lease:       core.LeaseTarget{Server: server, LeaseID: "cbx_abcdef123456"},
-		State:       "running",
-		IdleTimeout: 20 * time.Minute,
+		Lease:               core.LeaseTarget{Server: server, LeaseID: "cbx_abcdef123456"},
+		State:               "running",
+		IdleTimeout:         idleTimeout,
+		IdleTimeoutOverride: &idleTimeout,
 	})
 	if err != nil {
 		t.Fatal(err)
