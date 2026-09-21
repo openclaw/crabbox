@@ -2462,6 +2462,82 @@ func TestHyperVLifecycleObservation(t *testing.T) {
 	}
 }
 
+func TestHyperVLifecycleLegacyPlainStatusIsReadOnly(t *testing.T) {
+	for _, state := range []string{"ready", "running"} {
+		t.Run(state, func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			const id, name = "cbx_hypervlegacy", "crabbox-legacy-test"
+			before, err := core.ClaimLeaseForRepoProviderScopePondWithLabels(id, "legacy", providerName, "", "", t.TempDir(), 30*time.Minute, map[string]string{
+				"instance": name, "state": state, "ssh_user": "original", "work_root": `C:\original`,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if before.CloudID != "" || before.ProviderScope != "" {
+				t.Fatal("fixture must retain legacy identity fields")
+			}
+			key, _, err := core.EnsureTestboxKey(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			keyBefore, err := os.ReadFile(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			infoBefore, err := os.Stat(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := testBackend(&recordingRunner{respond: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+				script := req.Args[len(req.Args)-1]
+				if !strings.HasPrefix(script, "Get-VM ") {
+					t.Fatalf("metadata-only observation issued %s", script)
+				}
+				return core.LocalCommandResult{Stdout: `{"Name":"crabbox-legacy-test","State":2}`}, nil, true
+			}})
+			for _, readOnly := range []bool{false, true} {
+				for _, reclaim := range []bool{false, true} {
+					got, err := b.Resolve(t.Context(), core.ResolveRequest{ID: id, Repo: core.Repo{Root: t.TempDir()}, StatusOnly: true, NoLocalStateMutations: readOnly, Reclaim: reclaim})
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got.LeaseID != id || got.Server.Name != name || got.Server.CloudID != name || !reflect.DeepEqual(got.SSH, core.SSHTarget{}) {
+						t.Fatal("legacy status must return only lease metadata")
+					}
+					snapshot, exists, set := core.ServerLeaseClaimSnapshot(got.Server)
+					if !set || !exists || !reflect.DeepEqual(snapshot, before) {
+						t.Fatal("legacy status lost its claim snapshot")
+					}
+					if _, err := b.Touch(t.Context(), core.TouchRequest{Lease: got, State: "ready"}); err == nil {
+						t.Fatal("legacy observation authorized heartbeat")
+					}
+				}
+			}
+			for _, req := range []core.ResolveRequest{
+				{ID: id, StatusOnly: true, ReadyProbe: true},
+				{ID: id, NoLocalStateMutations: true, Reclaim: true},
+				{ID: id},
+			} {
+				if _, err := b.Resolve(t.Context(), req); err == nil || !strings.Contains(err.Error(), "legacy claim") {
+					t.Fatalf("endpoint access must retain ownership admission: %v", err)
+				}
+			}
+			after, err := core.ReadLeaseClaim(id)
+			if err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("observation or rejected access changed claim: %v", err)
+			}
+			keyAfter, err := os.ReadFile(key)
+			if err != nil || !bytes.Equal(keyAfter, keyBefore) {
+				t.Fatalf("observation changed key bytes: %v", err)
+			}
+			infoAfter, err := os.Stat(key)
+			if err != nil || infoAfter.Mode() != infoBefore.Mode() || infoAfter.ModTime() != infoBefore.ModTime() {
+				t.Fatalf("observation changed key metadata: %v", err)
+			}
+		})
+	}
+}
+
 func TestHyperVLifecycleHeartbeat(t *testing.T) {
 	b, lease, claim := lifecycleFixture(t)
 	original := claim

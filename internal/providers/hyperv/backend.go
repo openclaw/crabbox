@@ -282,6 +282,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if !owned && req.StatusOnly && !req.ReadyProbe {
+		return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
+	}
 	if !owned && (!req.Reclaim || observing) {
 		return core.LeaseTarget{}, core.Exit(4, "hyperv lease %q has a legacy claim not bound to VM %q; adopt it with an explicit --reclaim reuse", claim.LeaseID, inst.Name)
 	}
