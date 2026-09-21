@@ -331,9 +331,11 @@ For fixed leases, the resource identity reported by status is the immutable
 `claim`. Acquisition reports that exact identity only after recording it durably,
 and before readiness/completion. An acknowledgment or readiness failure retains
 the fixed handle for replay or explicit stop.
+Status and list also check the recorded Sandbox and Pod UIDs before reporting
+readiness; a replacement workload cannot silently become the fixed lease.
 
-Fixed stop uses UID-preconditioned **Foreground** deletion with a two-minute
-budget for deletion and completion confirmation, including normal pod termination.
+Fixed stop and run-triggered TTL cleanup use UID-preconditioned **Foreground**
+deletion with a two-minute budget for completion, including normal pod termination.
 An earlier caller deadline or cancellation still ends the wait. If confirmation
 does not finish, the fixed handle remains available for a later stop retry.
 It retains local custody until the original claim disappears under the verified
@@ -342,11 +344,15 @@ The supported controller's normal foreground contract is the completion signal;
 this is not an unconditional guarantee under unavailable garbage-collection
 discovery or modified controllers. Unknown creation/deletion outcomes remain
 unresolved. `forgetMissing` is not a fixed-lease completion mechanism.
+A run against a missing fixed claim fails and retains its recovery state even
+when `forgetMissing` is enabled.
 
 The warm-pool UID is a conservative object-incarnation anchor, not a universal
 cluster ID. A missing or replaced pool does not authorize using a different
 cluster or finalizing an uncertain claim. The existing warm-pool GET permission
 is sufficient for this anchor; no new Namespace GET permission is required.
+Acquisition rechecks that UID after creation or reconciliation and before
+publishing readiness, so replacement during either phase retains unresolved intent.
 
 Completed fixed leases retain a terminal tombstone. Repeated stop and terminal
 status validate the local receipt and original configured scope without requiring

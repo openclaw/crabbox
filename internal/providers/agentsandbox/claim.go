@@ -294,6 +294,9 @@ func authorizeAgentSandboxRepoClaim(claim core.LeaseClaim, repoRoot string, recl
 }
 
 func retainMissingClaim(cfg core.Config, claim core.LeaseClaim) error {
+	if isFixedClaim(claim) {
+		return core.Exit(4, "agent-sandbox fixed claim %s is missing in Kubernetes; local custody retained, command not run", claim.LeaseID)
+	}
 	if cfg.AgentSandbox.ForgetMissing {
 		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 			return fmt.Errorf("remove forgotten agent-sandbox lease %s: %w", claim.LeaseID, err)

@@ -231,6 +231,9 @@ func (b *backend) WarmupFixed(ctx context.Context, req core.FixedWarmupRequest) 
 		if err := validateClaimRecoveryNonce(live, nonce); err != nil {
 			return err
 		}
+		if err := b.fixedAnchor(ctx, client, *claim); err != nil {
+			return err
+		}
 		claim.CloudID, claim.CloudImmutableID = uid, uid
 		claim.Labels[claimLabelClaimUID], claim.Labels[claimLabelClaimUIDPending] = uid, "false"
 		if err := persist(); err != nil {
@@ -247,6 +250,9 @@ func (b *backend) WarmupFixed(ctx context.Context, req core.FixedWarmupRequest) 
 			return core.Exit(4, "agent-sandbox fixed lease reached its original TTL before readiness publication")
 		}
 		if err := validateFixedWorkloadPins(*claim, ready); err != nil {
+			return err
+		}
+		if err := b.fixedAnchor(ctx, client, *claim); err != nil {
 			return err
 		}
 		claim.Labels = claimReadinessLabels(claim.Labels, ready)

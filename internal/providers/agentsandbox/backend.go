@@ -155,9 +155,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (result core.Run
 				}
 			}
 			if shouldStop {
-				cleanupCtx, cancel := b.cleanupContext(ctx)
-				cleanupErr := b.deleteCurrentRunClaim(cleanupCtx, client, leaseID, claimName)
-				cancel()
+				cleanupErr := b.deleteCurrentRunClaim(ctx, client, leaseID, claimName)
 				if cleanupErr == nil {
 					custody = runClaimReleased
 				} else {
@@ -324,6 +322,11 @@ func (b *backend) deleteCurrentRunClaim(ctx context.Context, client kubernetesCl
 	if claim.LeaseID == "" {
 		return core.Exit(4, "agent-sandbox lease %s disappeared before release", leaseID)
 	}
+	if !isFixedClaim(claim) {
+		cleanupCtx, cancel := b.cleanupContext(ctx)
+		defer cancel()
+		ctx = cleanupCtx
+	}
 	return b.deleteOwnedClaim(ctx, client, claim, leaseID, claimName, false)
 }
 
@@ -489,6 +492,11 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		view := baseView
 		view.Labels = shared.CloneLabels(baseView.Labels)
 		if readyErr == nil {
+			if isFixedClaim(claim) {
+				if err := validateFixedWorkloadPins(claim, ready); err != nil {
+					return core.StatusView{}, err
+				}
+			}
 			view.State = statusViewReady
 			view.Ready = true
 			view.Labels["sandbox"] = ready.SandboxName
