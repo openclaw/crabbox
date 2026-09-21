@@ -155,7 +155,7 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		_ = b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, key, instanceID, "rollback-cleanup", req.Keep, now)
 		cleanupErr := rollbackLambdaAcquire(client, instanceID, key)
 		if cleanupErr != nil {
-			err = fmt.Errorf("%v; lambda cleanup failed: %w", err, cleanupErr)
+			err = shared.JoinAcquireCleanupError(err, fmt.Errorf("lambda cleanup failed: %w", cleanupErr))
 			return
 		}
 		core.RemoveLeaseClaim(leaseID)

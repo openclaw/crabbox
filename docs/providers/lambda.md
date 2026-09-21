@@ -160,6 +160,11 @@ lost. Empty provider inventory is not treated as proof that creation failed
 while the outcome remains indeterminate: Crabbox retains the recovery claim so a
 late-created billable instance can still be reconciled.
 
+When acquisition rollback fails, Crabbox retains the original failure cause and
+exit-code precedence and reports the cleanup failure separately. It does not
+automatically retry that acquisition with a fresh instance after failed cleanup;
+successful rollback still permits the existing bootstrap retry behavior.
+
 ## Ownership And Cleanup
 
 Crabbox encodes owned Lambda leases in local claims with flat labels such as:

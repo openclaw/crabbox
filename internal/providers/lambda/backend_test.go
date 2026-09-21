@@ -1,11 +1,13 @@
 package lambda
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -925,6 +927,71 @@ func TestAmbiguousLaunchRecoveryPersistsBindingBeforePartialCleanup(t *testing.T
 	}
 	if _, ok, err := core.ResolveLeaseClaimForProvider("ambiguous-retry", providerName); err != nil || ok {
 		t.Fatalf("claim ok=%v err=%v", ok, err)
+	}
+}
+
+func TestAcquireCleanupErrorPreservesCausesAndVetoesRetry(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		for _, tc := range []struct {
+			name             string
+			primary, cleanup error
+			keyFailure       bool
+			wantCode         int
+		}{
+			{name: "timeout and termination", primary: core.Exit(5, "timed out waiting for SSH"), cleanup: errors.New("cleanup unavailable"), wantCode: 5},
+			{name: "timeout and key", primary: core.Exit(5, "timed out waiting for SSH"), cleanup: errors.New("cleanup unavailable"), keyFailure: true, wantCode: 5},
+			{name: "cancellation", primary: context.Canceled, cleanup: errors.New("cleanup unavailable"), wantCode: 1},
+			{name: "primary exit wins", primary: core.Exit(5, "timed out waiting for SSH"), cleanup: core.Exit(9, "cleanup unavailable"), wantCode: 5},
+		} {
+			t.Run(tc.name+"/keep="+strconv.FormatBool(keep), func(t *testing.T) {
+				api := &fakeLambdaAPI{}
+				if tc.keyFailure {
+					api.deleteKeyErr = tc.cleanup
+				} else {
+					api.terminateErr = tc.cleanup
+				}
+				b := newTestBackend(t, api)
+				var stderr bytes.Buffer
+				b.rt.Stderr = &stderr
+				b.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error { return tc.primary }
+				_, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "cause-retained", Keep: keep})
+				if !errors.Is(err, tc.primary) || !errors.Is(err, tc.cleanup) || core.ExitCodeForError(err, 1) != tc.wantCode || len(api.launchRequests) != 1 {
+					t.Fatalf("err=%v code=%d wantCode=%d launches=%d", err, core.ExitCodeForError(err, 1), tc.wantCode, len(api.launchRequests))
+				}
+				if !strings.Contains(stderr.String(), "lambda cleanup failed:") || !strings.Contains(stderr.String(), "cleanup unavailable") || !strings.Contains(stderr.String(), "refusing a fresh lease retry") || strings.Contains(stderr.String(), "retrying with fresh lease") {
+					t.Fatalf("cleanup warning=%q", stderr.String())
+				}
+				claim, ok, claimErr := core.ResolveLeaseClaimForProvider("cause-retained", providerName)
+				if claimErr != nil || !ok || claim.CloudID != "i-100" || claim.Labels[lambdaRecoveryKeyLabel] != "rollback-cleanup" {
+					t.Fatalf("claim=%#v exists=%v err=%v", claim, ok, claimErr)
+				}
+				keyPath, pathErr := core.TestboxKeyPath(claim.LeaseID)
+				if pathErr != nil {
+					t.Fatal(pathErr)
+				}
+				if _, statErr := os.Stat(keyPath); statErr != nil {
+					t.Fatalf("retained key missing: %v", statErr)
+				}
+			})
+		}
+	}
+}
+
+func TestAcquireStillRetriesAfterSuccessfulRollback(t *testing.T) {
+	// Give the retry a distinct instance ID in the existing fake.
+	api := &fakeLambdaAPI{nextInstanceID: 1}
+	b := newTestBackend(t, api)
+	calls := 0
+	b.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+		calls++
+		if calls == 1 {
+			return core.Exit(5, "timed out waiting for SSH")
+		}
+		return nil
+	}
+	lease, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "safe-retry"})
+	if err != nil || lease.Server.CloudID != "i-2" || calls != 2 || len(api.launchRequests) != 2 || len(api.terminatedIDs) != 1 || len(api.deletedKeyIDs) != 1 {
+		t.Fatalf("err=%v cloudID=%s calls=%d launches=%d terminated=%v keys=%v", err, lease.Server.CloudID, calls, len(api.launchRequests), api.terminatedIDs, api.deletedKeyIDs)
 	}
 }
 
