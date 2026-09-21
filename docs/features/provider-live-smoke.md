@@ -155,7 +155,7 @@ hermetic lifecycle tests, `scripts/live-smoke.sh`, dedicated live runners, and
 `//go:build smoke` tests. Regenerate it with
 `node scripts/generate-provider-matrix.mjs`; docs CI rejects drift.
 
-Current coverage: 81 providers; 9 with convention-named hermetic lifecycle tests, 61 with a live runner, 8 with tagged Go smoke tests, and 18 with none of those lifecycle surfaces.
+Current coverage: 81 providers; 10 with convention-named hermetic lifecycle tests, 61 with a live runner, 8 with tagged Go smoke tests, and 18 with none of those lifecycle surfaces.
 
 | Provider | Hermetic lifecycle | Live runner | Tagged Go smoke |
 | --- | --- | --- | --- |
@@ -211,7 +211,7 @@ Current coverage: 81 providers; 9 with convention-named hermetic lifecycle tests
 | [namespace-instance](../providers/namespace-instance.md) | — | matrix | — |
 | [nebius](../providers/nebius.md) | yes (`nebius`) | dedicated + matrix | — |
 | [nomad](../providers/nomad.md) | yes (`nomad`) | dedicated + matrix | — |
-| [nvidia-brev](../providers/nvidia-brev.md) | — | dedicated + matrix | — |
+| [nvidia-brev](../providers/nvidia-brev.md) | yes (`nvidiabrev`) | dedicated + matrix | — |
 | [opencomputer](../providers/opencomputer.md) | — | — | — |
 | [opensandbox](../providers/opensandbox.md) | — | dedicated + matrix | — |
 | [orgo](../providers/orgo.md) | — | matrix | yes |
