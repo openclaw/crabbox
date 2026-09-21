@@ -1144,6 +1144,53 @@ Host provider-alias
 			t.Fatal(err)
 		}
 	}
+	for _, owner := range []string{"pond", "vnc"} {
+		t.Run(owner, func(t *testing.T) {
+			invoke := func() ([]string, *sshTransportSession, error) {
+				if owner == "pond" {
+					return pondMeshForwardInvocation(t.Context(), pondMeshForwardGroup{Target: target, Forwards: []pondMeshForward{{LocalPort: 42001, RemotePort: 8080}}})
+				}
+				return vncTunnelInvocation(t.Context(), target, "42001", "127.0.0.1", "8080")
+			}
+			if owner == "vnc" {
+				line := vncTunnelCommandTo(target, "42001", "127.0.0.1", "8080")
+				if !strings.Contains(line, path) || !strings.Contains(line, "alice@provider-alias") {
+					t.Fatalf("printed tunnel lost provider route: %s", line)
+				}
+			}
+			args, session, err := invoke()
+			if err != nil || session == nil {
+				t.Fatalf("private forwarding session missing: %v", err)
+			}
+			t.Cleanup(func() { _ = session.Close() })
+			output, err := exec.Command(ssh, append([]string{"-G"}, args...)...).CombinedOutput()
+			if err != nil {
+				t.Fatalf("ssh -G forwarding: %v: %s", err, output)
+			}
+			var rest []string
+			found := false
+			for _, line := range strings.Split(string(output), "\n") {
+				if strings.HasPrefix(line, "localforward ") && strings.Contains(line, "42001") && strings.Contains(line, "8080") {
+					found = true
+					continue
+				}
+				rest = append(rest, line)
+			}
+			if !found {
+				t.Fatalf("requested listener missing: %s", output)
+			}
+			assertConfig([]byte(strings.Join(rest, "\n")))
+			if err := os.WriteFile(path, []byte(strings.Replace(config, "echo renewed >> "+minted, "false", 1)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if args, session, err := invoke(); err == nil || len(args) != 0 || session != nil {
+				t.Fatalf("failed renewal dispatched forwarding: args=%v session=%v err=%v", args, session, err)
+			}
+			if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 	// Exercise ordinary command dispatch with the same private config. The
 	// fixture asks native OpenSSH to show its effective config, never to connect.
 	wrapper := fmt.Sprintf("#!/bin/sh\nfor arg do if [ \"$arg\" = -G ]; then exec %q \"$@\"; fi; done\nexec %q -G \"$@\"\n", ssh, ssh)
