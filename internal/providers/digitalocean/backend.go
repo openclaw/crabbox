@@ -1185,29 +1185,7 @@ func (b *digitalOceanLeaseBackend) deleteServer(ctx context.Context, _ core.Conf
 		}
 		return nil
 	}
-	var deleteErr error
-	if fixedLeaseKind.IsFixedClaim(expectedClaim) {
-		deleteErr = core.DeleteFixedResource(ctx, fixedLeaseKind, expectedClaim, core.FixedLeaseOperations[digitalOceanDeletionEvidence]{
-			ObserveExact: func(context.Context, *core.FixedTransaction, core.FixedObserveMode) (core.FixedObservation[digitalOceanDeletionEvidence], error) {
-				evidence, err := attest()
-				if err != nil {
-					return core.FixedObservation[digitalOceanDeletionEvidence]{}, err
-				}
-				return core.FixedObservation[digitalOceanDeletionEvidence]{Candidates: []digitalOceanDeletionEvidence{evidence}}, nil
-			},
-			DeleteExact: func(_ context.Context, _ *core.FixedTransaction, evidence digitalOceanDeletionEvidence) error {
-				return deleteExact(evidence)
-			},
-		})
-	} else {
-		deleteErr = fixedLeaseKind.FinalizeAfterCleanup(expectedClaim, func() error {
-			evidence, err := attest()
-			if err != nil {
-				return err
-			}
-			return deleteExact(evidence)
-		})
-	}
+	deleteErr := core.DeleteClaimedEvidence(ctx, fixedLeaseKind, expectedClaim, attest, deleteExact)
 	if deleteErr != nil {
 		return fmt.Errorf("finalize digitalocean cleanup claim: %w", deleteErr)
 	}

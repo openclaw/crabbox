@@ -77,6 +77,7 @@ func (p FixedAdmission) permits(tx *FixedTransaction) bool {
 // Core generates nonces, assembles identity labels, and commits this plan before
 // admitting the provider mutation. Existing attempts are never regenerated.
 type FixedAttemptPlan struct {
+	PrivateLabels                map[string]string
 	UniqueLabel                  string
 	UniqueProviders              []string
 	AttemptLabels                map[string]string
@@ -165,6 +166,8 @@ func (tx *FixedTransaction) plan(plan FixedAttemptPlan) error {
 	for label, key := range plan.AttemptLabels {
 		labels[label] = attempt[key]
 	}
+	tx.createLabels = maps.Clone(labels)
+	maps.Copy(labels, plan.PrivateLabels)
 	if len(labels) != 0 {
 		tx.Claim.Labels = labels
 	}
@@ -476,7 +479,7 @@ func SelectFixedCandidate[T any](kind FixedLeaseKind, leaseID string, items []T,
 }
 
 func FixedUncertainCustody(leaseID string) error {
-	return Exit(4, "lease_id_conflict: lease %s has an unattested creation attempt; claim, attempt and key retained; inspect the original provider resource before retrying", leaseID)
+	return Exit(4, "lease_id_conflict: lease %s has an unresolved or unattested creation attempt; no replacement allocated; claim, attempt and key retained; inspect the original provider resource before retrying", leaseID)
 }
 
 func BindFixedClaim(claim *LeaseClaim, binding FixedResourceBinding, persist func() error) error {
@@ -562,4 +565,19 @@ func (k FixedLeaseKind) ResolveTerminal(claim LeaseClaim, releaseOnly bool) (Lea
 		return LeaseTarget{}, true, Exit(4, "%s fixed lease is terminal", k.Label)
 	}
 	return LeaseTarget{LeaseID: claim.LeaseID}, true, k.ValidateTerminalClaim(claim, claim, claim.LeaseID, nil)
+}
+
+func (tx *FixedTransaction) CreateLabels() map[string]string { return maps.Clone(tx.createLabels) }
+
+func FixedCreateTime(claim LeaseClaim) time.Time {
+	created, _ := time.Parse(time.RFC3339Nano, claim.FixedCreateIntent.CreatedAt)
+	return created
+}
+
+// Observe retains partial native evidence before further attestation or errors.
+func (tx *FixedTransaction) Observe(binding FixedResourceBinding) error {
+	if err := tx.applyBinding(binding); err != nil {
+		return err
+	}
+	return tx.Record("observed")
 }

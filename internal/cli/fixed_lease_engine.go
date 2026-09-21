@@ -33,17 +33,18 @@ func FixedIntentFingerprint(domain string, intent any) (string, error) {
 // Adapters assemble native evidence in Claim; Record checks immutable custody
 // before publishing it. An error never clears the last durable attempt.
 type FixedTransaction struct {
-	Claim       *LeaseClaim
-	Fresh       bool
-	initial     FixedCreateIntent
-	cloudID     string
-	immutableID string
-	leaseID     string
-	provider    string
-	attempt     map[string]string
-	failures    []string
-	persist     func() error
-	admission   *FixedAdmission
+	createLabels map[string]string
+	Claim        *LeaseClaim
+	Fresh        bool
+	initial      FixedCreateIntent
+	cloudID      string
+	immutableID  string
+	leaseID      string
+	provider     string
+	attempt      map[string]string
+	failures     []string
+	persist      func() error
+	admission    *FixedAdmission
 }
 
 func newFixedTransaction(claim *LeaseClaim, fresh bool, persist func() error) (*FixedTransaction, error) {
@@ -481,4 +482,25 @@ func FixedLookupObservation[T any](kind FixedLeaseKind, claim LeaseClaim, resour
 		return FixedObservation[T]{}, err
 	}
 	return FixedObservation[T]{Candidates: []T{resource}}, nil
+}
+
+// DeleteClaimedEvidence adapts native attestation/deletion of an exact resource
+// graph to the common claim fence and terminal publication.
+func DeleteClaimedEvidence[T any](ctx context.Context, kind FixedLeaseKind, claim LeaseClaim, attest func() (T, error), deleteExact func(T) error) error {
+	if !kind.IsFixedClaim(claim) {
+		return kind.FinalizeAfterCleanup(claim, func() error {
+			evidence, err := attest()
+			if err != nil {
+				return err
+			}
+			return deleteExact(evidence)
+		})
+	}
+	return DeleteFixedResource(ctx, kind, claim, FixedLeaseOperations[T]{
+		ObserveExact: func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[T], error) {
+			evidence, err := attest()
+			return FixedObservation[T]{Candidates: []T{evidence}}, err
+		},
+		DeleteExact: func(_ context.Context, _ *FixedTransaction, evidence T) error { return deleteExact(evidence) },
+	})
 }
