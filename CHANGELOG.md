@@ -8,6 +8,7 @@
 
 ### Fixes
 
+- Preserve Vast leases' recorded heartbeat policy across fresh reads and upgrades, honor explicit idle-timeout changes without extending the stored TTL, and report stale claim updates as failures.
 - Preserve DigitalOcean leases' stored idle timeout on ordinary heartbeats and honor explicit timeout changes without extending the creation-based TTL. [PR 2418](https://github.com/openclaw/crabbox/pull/2418).
 - Preserve canonical cancellation/deadline context and recognized release-denial states in workspace-owner error messages. [PR 2412](https://github.com/openclaw/crabbox/pull/2412). Thanks @steipete.
 - Explain Parallels IP discovery timeouts with clone mode, NIC details, and retry-time console guidance while preserving cleanup and clone defaults. [PR 2415](https://github.com/openclaw/crabbox/pull/2415), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.

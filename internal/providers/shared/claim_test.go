@@ -3,6 +3,7 @@ package shared
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -681,6 +682,46 @@ func TestClaimLifecycleLabels(t *testing.T) {
 			got["fixture"] = "changed"
 			if tc.claim.Labels["fixture"] != "" {
 				t.Fatal("projection aliases persisted metadata")
+			}
+		})
+	}
+}
+
+func TestLegacyLabelLifecycleLabels(t *testing.T) {
+	for _, tc := range []struct {
+		name, canonical, legacy string
+		want                    int
+		migrate                 bool
+	}{
+		{"released override", "7200", "7200", 7200, true},
+		{"duration format", "90m", "300", 5400, true},
+		{"canonical wins", "300", "7200", 300, false},
+		{"legacy fallback", "invalid", "2h", 7200, true},
+		{"invalid", "-1", "invalid", 300, false},
+		{"subsecond", "0.1s", "300", 300, false},
+		{"round seconds", "1.6s", "300", 2, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claim := core.LeaseClaim{IdleTimeoutSeconds: 300, Labels: map[string]string{
+				"idle_timeout_secs": tc.canonical, "idle_timeout": tc.legacy,
+				"created_at": "100", "last_touched_at": "200", "ttl_secs": "3600", "keep": "true", "metadata": "preserved",
+			}}
+			override := LegacyLabelIdleTimeout(claim)
+			if (override != nil) != tc.migrate || override != nil && *override != time.Duration(tc.want)*time.Second {
+				t.Fatalf("override=%v want seconds=%d migrate=%v", override, tc.want, tc.migrate)
+			}
+			labels := LegacyLabelLifecycleLabels(claim)
+			if labels["idle_timeout_secs"] != fmt.Sprint(tc.want) || labels["idle_timeout"] != fmt.Sprint(tc.want) {
+				t.Fatalf("policy=%v", labels)
+			}
+			for _, key := range []string{"created_at", "last_touched_at", "ttl_secs", "keep", "metadata"} {
+				if labels[key] != claim.Labels[key] {
+					t.Fatalf("changed %s", key)
+				}
+			}
+			labels["metadata"] = "changed"
+			if claim.IdleTimeoutSeconds != 300 || claim.Labels["idle_timeout_secs"] != tc.canonical || claim.Labels["metadata"] != "preserved" {
+				t.Fatal("projection changed original CAS snapshot")
 			}
 		})
 	}

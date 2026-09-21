@@ -573,8 +573,19 @@ func ClaimLeaseTargetForConfigScopeIfUnchanged(leaseID, slug string, cfg Config,
 }
 
 func ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	return ClaimLeaseTargetForRepoConfigWithIdleTimeoutOverrideIfUnchanged(leaseID, slug, cfg, server, target, repoRoot, idleTimeout, nil, reclaim, expected, expectedExists)
+}
+
+// ClaimLeaseTargetForRepoConfigWithIdleTimeoutOverrideIfUnchanged lets an adapter
+// reconcile recorded policy in the same guarded transaction as repo admission.
+func ClaimLeaseTargetForRepoConfigWithIdleTimeoutOverrideIfUnchanged(leaseID, slug string, cfg Config, server Server, target SSHTarget, repoRoot string, idleTimeout time.Duration, idleTimeoutOverride *time.Duration, reclaim bool, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
 	provider, _ := claimProviderDetailsForConfig(cfg)
-	return ClaimLeaseTargetForRepoConfigScopeIfUnchanged(leaseID, slug, cfg, providerClaimScope(provider, cfg), server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists)
+	options := leaseClaimTargetOptions{}
+	if idleTimeoutOverride != nil {
+		idleTimeout = *idleTimeoutOverride
+		options.idle = claimIdleReplaceExplicitly
+	}
+	return claimLeaseTargetForRepoConfigScopeIfUnchangedMode(leaseID, slug, cfg, providerClaimScope(provider, cfg), server, target, repoRoot, idleTimeout, reclaim, expected, expectedExists, options)
 }
 
 // ClaimLeaseTargetForRepoConfigScopeIfUnchanged lets a provider bind a

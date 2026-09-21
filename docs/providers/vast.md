@@ -251,6 +251,21 @@ Runtime state updates preserve that exact non-secret routing metadata. Generated
 stop commands include the credential-free API endpoint and never include the API
 key.
 
+The local claim also owns idle timeout, creation time, TTL, keep policy, and
+heartbeat activity. Fresh status/list reads preserve those values without writing
+the claim; a stopped or failed native instance still reports its physical state.
+An ordinary heartbeat preserves the recorded idle timeout, while an explicit
+`--idle-timeout` replaces it atomically with activity timestamps. Expiry remains
+capped by the recorded creation-based TTL. A stale or missing claim snapshot is
+an error, not a successful heartbeat.
+
+Upgrades preserve valid policy labels written by older releases, including a
+timeout stored only in labels. The next authorized heartbeat or repository reuse
+reconciles the structured timeout in the same claim transaction. Earlier releases
+could already have reset creation, TTL, or keep labels during resolution; those
+lost historical values cannot be reconstructed. Unclaimed observations do not
+invent lifecycle history; explicit `--reclaim` initializes a new policy.
+
 ## Guarded Live Smoke
 
 The repeatable live check is opt-in and billable:

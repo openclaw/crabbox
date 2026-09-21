@@ -2119,6 +2119,73 @@ func TestClaimLeaseForRepoConfigIfUnchangedPreservesEndpoint(t *testing.T) {
 	}
 }
 
+func TestClaimLeaseTargetIdleOverrideIsAtomicWithAdmission(t *testing.T) {
+	for _, scenario := range []string{"preserve", "replace", "different repo", "stale", "invalid"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			cfg := baseConfig()
+			cfg.Provider = "external"
+			leaseID := "cbx_idle_admission"
+			server := Server{Provider: "external", CloudID: "fixture-instance", Labels: map[string]string{
+				"provider": "external", "lease": leaseID, "slug": "policy", "idle_timeout_secs": "300", "idle_timeout": "300",
+			}}
+			target := SSHTarget{Host: "192.0.2.130", Port: "22"}
+			if err := ClaimLeaseTargetForRepoConfig(leaseID, "policy", cfg, server, target, "/repo-a", 5*time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			expected, err := ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			labels := cloneStringMap(expected.Labels)
+			labels["idle_timeout"], labels["idle_timeout_secs"] = "7200", "7200"
+			expected, err = UpdateLeaseClaimLabelsIfUnchanged(leaseID, expected, labels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := expected
+			server.Labels = labels
+			target.Host = "192.0.2.131"
+			override := 2 * time.Hour
+			requested := &override
+			repo := "/repo-a"
+			wantIdle := 7200
+			switch scenario {
+			case "preserve":
+				requested, wantIdle = nil, 300
+			case "different repo":
+				repo = "/repo-b"
+			case "stale":
+				newer := cloneStringMap(expected.Labels)
+				newer["profile"] = "concurrent"
+				before, err = UpdateLeaseClaimLabelsIfUnchanged(leaseID, expected, newer)
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "invalid":
+				override = 0
+			}
+			updated, claimErr := ClaimLeaseTargetForRepoConfigWithIdleTimeoutOverrideIfUnchanged(leaseID, "policy", cfg, server, target, repo, time.Minute, requested, false, expected, true)
+			after, readErr := ReadLeaseClaim(leaseID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if scenario == "different repo" || scenario == "stale" || scenario == "invalid" {
+				if claimErr == nil || !reflect.DeepEqual(after, before) {
+					t.Fatal("refused admission partially replaced idle policy or endpoint")
+				}
+				return
+			}
+			if claimErr != nil {
+				t.Fatal(claimErr)
+			}
+			if !reflect.DeepEqual(updated, after) || after.IdleTimeoutSeconds != wantIdle || after.Labels["idle_timeout_secs"] != fmt.Sprint(wantIdle) || after.Labels["idle_timeout"] != fmt.Sprint(wantIdle) || after.SSHHost != target.Host || after.ClaimedAt != expected.ClaimedAt {
+				t.Fatal("admission did not commit the selected idle policy and endpoint together")
+			}
+		})
+	}
+}
+
 func TestClaimLeaseTargetForRepoConfigScopeReplacingEndpointClearsPublishedRoute(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := baseConfig()

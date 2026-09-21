@@ -53,3 +53,33 @@ func ClaimLifecycleLabels(claim core.LeaseClaim) map[string]string {
 	}
 	return labels
 }
+
+// LegacyLabelIdleTimeout is opt-in for adapters whose released heartbeat writer
+// updated labels without updating the structured timeout. Reconcile it only in
+// the next authorized transaction, using the original claim as the CAS snapshot.
+func LegacyLabelIdleTimeout(claim core.LeaseClaim) *time.Duration {
+	for _, key := range []string{"idle_timeout_secs", "idle_timeout"} {
+		idle, ok := core.LeaseLabelDuration(claim.Labels[key])
+		if !ok || idle <= 0 {
+			continue
+		}
+		idle = idle.Round(time.Second)
+		if idle < time.Second {
+			continue
+		}
+		if int(idle/time.Second) != claim.IdleTimeoutSeconds {
+			return &idle
+		}
+		return nil
+	}
+	return nil
+}
+
+// LegacyLabelLifecycleLabels preserves policy recorded by label-only writers
+// without changing the persisted claim or renewing its activity and expiry.
+func LegacyLabelLifecycleLabels(claim core.LeaseClaim) map[string]string {
+	if legacy := LegacyLabelIdleTimeout(claim); legacy != nil {
+		claim.IdleTimeoutSeconds = int(*legacy / time.Second)
+	}
+	return ClaimLifecycleLabels(claim)
+}
