@@ -65,7 +65,7 @@ func TestManagedWSLConfigPreservesOtherSettings(t *testing.T) {
 	if start < 0 || end <= start {
 		t.Fatal("bootstrap does not configure the managed WSL runtime")
 	}
-	for _, test := range []struct{ name, section, setting, input, want string }{
+	tests := []struct{ name, section, setting, input, want string }{
 		{"missing file", "wsl2", "guiApplications=false", "", "[wsl2]\nguiApplications=false"},
 		{"already disabled", "wsl2", "guiApplications=false", "[wsl2]\nguiApplications=false\n", "[wsl2]\nguiApplications=false\n"},
 		{"preserve memory", "wsl2", "guiApplications=false", "[wsl2]\nmemory=4GB\nguiApplications=true\n", "[wsl2]\nmemory=4GB\nguiApplications=false\n"},
@@ -82,22 +82,35 @@ func TestManagedWSLConfigPreservesOtherSettings(t *testing.T) {
 		{"lifetime case whitespace comments", "general", "instanceIdleTimeout=-1", "; keep\r\n [GENERAL] ; keep\r\n INSTANCEIDLETIMEOUT = 15000", "; keep\n [GENERAL] ; keep\ninstanceIdleTimeout=-1"},
 		{"lifetime same key in other section", "general", "instanceIdleTimeout=-1", "[other]\ninstanceIdleTimeout=15000\n[general]\ninstanceIdleTimeout=1000", "[other]\ninstanceIdleTimeout=15000\n[general]\ninstanceIdleTimeout=-1"},
 		{"lifetime duplicate sections and keys", "general", "instanceIdleTimeout=-1", "[general]\n[general]\ninstanceIdleTimeout=1000\ninstanceIdleTimeout=15000", "[general]\ninstanceIdleTimeout=-1\n[general]\ninstanceIdleTimeout=-1\ninstanceIdleTimeout=-1"},
-	} {
+	}
+	// The transformer is pure PowerShell. Load it once instead of starting an
+	// interpreter per input; retain both idempotence assertions for every case.
+	var script strings.Builder
+	script.WriteString(bootstrap[start:end])
+	script.WriteString("\n$results = @(\n")
+	for _, test := range tests {
+		arguments := " " + psQuote(test.section) + " " + psQuote(test.setting)
+		script.WriteString("$first = Set-CrabboxWSLConfigValue " + psQuote(test.input) + arguments +
+			"\n$second = Set-CrabboxWSLConfigValue $first" + arguments +
+			"\n@{first=$first;second=$second}\n")
+	}
+	script.WriteString(")\nConvertTo-Json -InputObject $results -Compress")
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, powerShell, "-NoProfile", "-NonInteractive", "-Command", script.String()).CombinedOutput()
+	if err != nil {
+		t.Fatalf("config conversion: %v: %s", err, out)
+	}
+	var results []struct{ First, Second string }
+	if err := json.Unmarshal(out, &results); err != nil {
+		t.Fatalf("invalid config results: %v: %s", err, out)
+	}
+	if len(results) != len(tests) {
+		t.Fatalf("got %d config results, want %d", len(results), len(tests))
+	}
+	for i, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			arguments := " " + psQuote(test.section) + " " + psQuote(test.setting)
-			script := bootstrap[start:end] + "\n$first = Set-CrabboxWSLConfigValue " + psQuote(test.input) + arguments +
-				"\n$second = Set-CrabboxWSLConfigValue $first" + arguments +
-				"\n@{first=$first;second=$second} | ConvertTo-Json -Compress"
-			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-			defer cancel()
-			out, err := exec.CommandContext(ctx, powerShell, "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
-			if err != nil {
-				t.Fatalf("config conversion: %v: %s", err, out)
-			}
-			var got struct{ First, Second string }
-			if err := json.Unmarshal(out, &got); err != nil {
-				t.Fatalf("invalid config result: %v: %s", err, out)
-			}
+			got := results[i]
 			if got.First != test.want || got.Second != test.want {
 				t.Fatalf("first=%q second=%q, want %q on both passes", got.First, got.Second, test.want)
 			}

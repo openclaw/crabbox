@@ -219,6 +219,12 @@ func (c *client) GetBox(ctx context.Context, id string) (boxData, error) {
 
 func nativeBoxNotFound(result core.LocalCommandResult) bool {
 	message := strings.TrimSpace(core.Blank(result.Stderr, result.Stdout))
+	if strings.HasPrefix(message, "{") {
+		duplicate, err := core.JSONHasDuplicateKeys(json.NewDecoder(strings.NewReader(message)))
+		if err != nil || duplicate {
+			return false
+		}
+	}
 	var response struct {
 		Status int `json:"status"`
 	}
@@ -886,6 +892,12 @@ func decodeBox(data []byte) (boxData, error) {
 }
 
 func decodeBoxes(data []byte, requireComplete bool) ([]boxData, error) {
+	if requireComplete {
+		duplicate, err := core.JSONHasDuplicateKeys(json.NewDecoder(bytes.NewReader(data)))
+		if err != nil || duplicate {
+			return nil, fmt.Errorf("ascii-box inventory is malformed or has duplicate fields")
+		}
+	}
 	var wrapped struct {
 		Sandboxes []boxData `json:"sandboxes"`
 		Boxes     []boxData `json:"boxes"`

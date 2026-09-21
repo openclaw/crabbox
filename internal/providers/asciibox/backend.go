@@ -177,12 +177,17 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		var box boxData
 		if req.ReleaseOnly {
 			var absent bool
-			box, absent, err = exactBoxForRelease(ctx, client, boxFromClaim(claim))
+			absent, err = core.VerifyClaimResourceAbsence(ctx, boxAbsenceVerifier(client), claim)
 			if err != nil {
 				return err
 			}
 			if absent {
 				box = boxFromClaim(claim)
+			} else {
+				box, err = exactBoxForRelease(ctx, client, boxFromClaim(claim))
+				if err != nil {
+					return err
+				}
 			}
 		} else {
 			box, err = client.GetBox(ctx, claim.CloudID)
@@ -283,31 +288,36 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 }
 
 func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	_, err := b.ReleaseLeaseWithOutcome(ctx, req)
+	return err
+}
+
+func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseLeaseRequest) (core.ReleaseLeaseOutcome, error) {
 	cfg, err := b.configForRun()
 	if err != nil {
-		return err
+		return core.ReleaseLeaseOutcome{}, err
 	}
 	client, err := newAPI(cfg, b.rt)
 	if err != nil {
-		return err
+		return core.ReleaseLeaseOutcome{}, err
 	}
 	if err := core.ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
-		return err
+		return core.ReleaseLeaseOutcome{}, err
 	}
 	claim, err := shared.RequireClaimSnapshot(req.Lease.Server, providerName)
 	if err != nil {
-		return err
+		return core.ReleaseLeaseOutcome{}, err
 	}
 	if _, err := boxClaimBinding(cfg, claim); err != nil {
-		return err
+		return core.ReleaseLeaseOutcome{}, err
 	}
 	if req.Lease.LeaseID != claim.LeaseID || req.Lease.Server.CloudID != claim.CloudID || req.Lease.Server.Labels["box_id"] != claim.CloudID {
-		return core.Exit(2, "ascii-box release target differs from its original claim")
+		return core.ReleaseLeaseOutcome{}, core.Exit(2, "ascii-box release target differs from its original claim")
 	}
 	ctx, cancel := context.WithTimeout(ctx, boxReleaseTimeout)
 	defer cancel()
 	ctx = withBoxCleanupProgress(ctx, b.rt.Stderr)
-	return releaseClaimedBox(ctx, client, claim, func(box boxData) {
+	return releaseClaimedBoxWithOutcome(ctx, client, claim, func(box boxData) {
 		if req.GuardedRemoteCleanup != nil {
 			lease := req.Lease
 			lease.Server = boxToServer(cfg, box, claim.LeaseID, claim.Slug, true)

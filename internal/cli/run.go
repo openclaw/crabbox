@@ -5002,7 +5002,15 @@ func (a App) stop(ctx context.Context, args []string) error {
 			return nil
 		})
 	}
-	if *forceRecovery {
+	verifiedClaim := false
+	if expectedIdentity.empty() && !*reclaim {
+		handled, verified, err := a.recoverAbsentStopClaim(ctx, backend, *id, *forceRecovery)
+		if err != nil || handled {
+			return err
+		}
+		verifiedClaim = verified
+	}
+	if *forceRecovery && !verifiedClaim {
 		if reclaimer, ok := backend.(StopReclaimBackend); ok {
 			return reclaimer.ReclaimAndStop(ctx, StopRequest{Options: leaseOptionsFromConfig(cfg), ID: *id})
 		}
@@ -5090,8 +5098,18 @@ func (a App) stop(ctx context.Context, args []string) error {
 	if !connectionCleanupSafe {
 		request.GuardedRemoteCleanup = a.cleanupBackendLeaseRemoteConnectionsBestEffort
 	}
-	if err := sshBackend.ReleaseLease(ctx, request); err != nil {
+	var outcome ReleaseLeaseOutcome
+	if reporter, ok := sshBackend.(ReleaseLeaseOutcomeBackend); ok {
+		outcome, err = reporter.ReleaseLeaseWithOutcome(ctx, request)
+	} else {
+		err = sshBackend.ReleaseLease(ctx, request)
+	}
+	if err != nil {
 		return err
+	}
+	if outcome.ForgottenLocally {
+		fmt.Fprintf(a.Stderr, "lease=%s forgotten locally (resource absent)\n", lease.LeaseID)
+		return nil
 	}
 	if !connectionCleanupSafe {
 		a.cleanupBackendLeaseLocalConnectionsBestEffort(ctx, *id, lease.LeaseID)

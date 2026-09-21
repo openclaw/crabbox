@@ -596,6 +596,7 @@ func daytonaSandboxToServer(sandbox *daytona.Sandbox) core.Server {
 	server := core.Server{Provider: daytonaProvider, Labels: labels}
 	if sandbox != nil {
 		server.CloudID = sandbox.GetId()
+		server.ImmutableID = sandbox.GetId()
 		server.Name = sandbox.GetName()
 		server.Status = daytonaSandboxState(sandbox)
 	}

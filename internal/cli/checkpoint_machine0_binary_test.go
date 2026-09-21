@@ -71,6 +71,9 @@ func TestNativeCheckpointMachine0ConfiguredCLI(t *testing.T) {
 		{name: "post_remove_version_replaced", postRemove: "version_replacement", deleteError: "mismatched crabbox_source metadata"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// Cases own their child environment and store; delete/prune below
+			// deliberately remain sequential because they reuse that store.
+			t.Parallel()
 			root := t.TempDir()
 			home, state, configDir := filepath.Join(root, "home"), filepath.Join(root, "state"), filepath.Join(root, "config")
 			emptyPath := filepath.Join(root, "empty-path")

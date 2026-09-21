@@ -53,7 +53,7 @@ type daytonaLifecycleFixture struct {
 func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLeaseBackend, core.Repo) {
 	t.Helper()
 	testutil.IsolateUserDirs(t)
-	f := &daytonaLifecycleFixture{createState: api.SANDBOXSTATE_STARTED}
+	f := &daytonaLifecycleFixture{createState: api.SANDBOXSTATE_STARTED, identityOrganization: "org-test"}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()

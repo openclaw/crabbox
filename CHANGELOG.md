@@ -22,7 +22,9 @@
 
 - Refresh optional desktop and browser package indexes on prepared Linux images, retry mirror rollovers with bounded deadlines, and reject partial refreshes instead of installing from stale package URLs.
 - Wait for desktop startup readiness and automatically hand off managed Wayland resizing only after verifying retirement of the previous remote client; retain manual guidance for ambiguous or unavailable control. [Issue 2076](https://github.com/openclaw/crabbox/issues/2076).
+- Shorten Go CI feedback with parallel CLI race-test shards and cached Go builds, preserving the required checks and complete test coverage.
 - Bound Vast SSH-endpoint readiness requests and retry waits by the startup deadline, preserving cancellation causes without exposing redacted transport secrets. [PR 2448](https://github.com/openclaw/crabbox/pull/2448).
+- Recover absent direct-provider claims through shared, claim-fenced `stop --force` evidence verification; bind new Daytona leases to their authenticated account, retain unbound legacy claims, and preserve ASCII Box ordinary-stop reconciliation. [PR 2115](https://github.com/openclaw/crabbox/pull/2115), [Issue 2108](https://github.com/openclaw/crabbox/issues/2108). Thanks @Patrick-Erichsen for the report and PR, and @mislavivanda for the issue.
 - Preserve RunPod SSH-readiness cancellation causes, distinguish startup deadlines from caller cancellation, and retain completed provider errors. [PR 2449](https://github.com/openclaw/crabbox/pull/2449).
 
 - Use EC2 instance metadata for AWS vCPU quota admission and readiness, including bare-metal types, and keep unknown instance costs out of capacity recommendations. [PR 2302](https://github.com/openclaw/crabbox/pull/2302). Thanks @vincentkoc.

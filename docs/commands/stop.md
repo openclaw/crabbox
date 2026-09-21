@@ -286,6 +286,22 @@ failures never fall back to releasing an unverified ID. Providers without a
 verified recovery contract reject `--force` and direct the operator to their
 native provider CLI. `cleanup` does not support `--force`.
 
+For direct Daytona and ASCII Box/Boat claims, `stop --force --provider <provider>
+--id <canonical-cbx-id>` can also forget a resource that the provider has already
+removed. Core requires an exact native not-found and complete, unfiltered
+inventory absence in the claim's original provider scope, then removes only the
+unchanged local claim under its lock. It reports `forgotten locally (resource
+absent)`, sends no deletion or guest cleanup, and leaves keys and registrations
+alone. Failed or partial inventory, authentication failures, identity mismatch,
+and cancellation retain the claim. Fixed-ID replay records, checkpoint-held
+claims, and coordinator/runtime-adapter registrations cannot use this path.
+
+ASCII Box opts into the same recovery for ordinary `stop`, preserving its
+existing behavior. Ordinary Daytona `stop` still fails closed on initial
+absence; forced recovery requires a claim created with account binding. See
+[Daytona recovery](../providers/daytona.md#recovering-pre-binding-claims) and the
+[ASCII Box account limitation](../providers/ascii-box.md#absence-recovery-scope).
+
 `--reclaim` remains the existing provider-specific adoption interface where
 supported. `--force` is the consistent cross-provider recovery interface for
 one exact resource: it reuses verified adoption for supported direct providers
