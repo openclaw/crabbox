@@ -1071,7 +1071,7 @@ func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if strings.TrimSpace(lease.Server.Labels["fixed_intent_sha256"]) != "" && !fixedLocalContainerLeaseKind.IsFixedClaim(claim) {
 		return core.Exit(4, "lease_id_conflict: refusing to release fixed local-container lease %s without its durable create intent", lease.LeaseID)
 	}
-	err = fixedLocalContainerLeaseKind.FinalizeAfterCleanup(claim, func() error {
+	deleteExact := func() error {
 		if err := core.AuthorizeCheckpointRelease(claim, req.CheckpointID); err != nil {
 			return err
 		}
@@ -1080,7 +1080,20 @@ func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 		}
 		outcome.Terminal = true
 		return b.cleanupContainerSidecars(lease.LeaseID, lease.Server.Labels, true)
-	})
+	}
+	if fixedLocalContainerLeaseKind.IsFixedClaim(claim) {
+		err = core.DeleteFixedResource(ctx, fixedLocalContainerLeaseKind, claim, core.FixedLeaseOperations[string]{
+			ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[string], error) {
+				if err := b.validateExactLocalContainerClaim(ctx, *tx.Claim, lease.LeaseID, id); err != nil {
+					return core.FixedObservation[string]{}, err
+				}
+				return core.FixedObservation[string]{Candidates: []string{id}}, nil
+			},
+			DeleteExact: func(context.Context, *core.FixedTransaction, string) error { return deleteExact() },
+		})
+	} else {
+		err = fixedLocalContainerLeaseKind.FinalizeAfterCleanup(claim, deleteExact)
+	}
 	if b.afterClaimCleanup != nil {
 		b.afterClaimCleanup(lease.LeaseID)
 	}

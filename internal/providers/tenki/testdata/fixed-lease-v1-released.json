@@ -1,0 +1,26 @@
+{
+  "leaseID": "cbx_abcdef123456",
+  "revision": "527ae7dc0cd8fc8bb7f45c907f870941",
+  "slug": "build-linux",
+  "provider": "tenki",
+  "cloudID": "session-1",
+  "cloudImmutableID": "session-1",
+  "providerScope": "endpoint:default|workspace:|project:",
+  "repoRoot": "/fixture/repo",
+  "claimedAt": "2026-09-21T17:53:47Z",
+  "lastUsedAt": "2026-09-21T17:53:47Z",
+  "labels": {
+    "fixed_intent_sha256": "9632f2436f0b063f5b3f68d8c6032093c14e1f6cf6017554af3b66cf4c23032c",
+    "project_id": "project-owned",
+    "tenki_fixed_route": "2ad15b244b3cd92f79cc4b24b440f5f1e337d43c3112e67e961e68a0473a5215",
+    "tenki_session_id": "session-1"
+  },
+  "fixedCreateIntent": {
+    "version": 1,
+    "fingerprint": "9632f2436f0b063f5b3f68d8c6032093c14e1f6cf6017554af3b66cf4c23032c",
+    "providerScope": "endpoint:default|workspace:|project:",
+    "slug": "build-linux",
+    "createdAt": "2026-09-21T17:53:47.782687Z",
+    "state": "released"
+  }
+}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -55,7 +56,7 @@ func TestFixedEngineReadsLegacyProviderRecords(t *testing.T) {
 					return "", nil
 				},
 				PrepareAccess: func(_ context.Context, tx *FixedTransaction, id string) (LeaseTarget, error) {
-					return LeaseTarget{LeaseID: legacy.LeaseID, Server: Server{CloudID: id, ImmutableID: legacy.CloudImmutableID, Labels: maps.Clone(legacy.Labels)}}, nil
+					return LeaseTarget{LeaseID: legacy.LeaseID, Server: Server{CloudID: id, ImmutableID: legacy.CloudImmutableID, Labels: maps.Clone(legacy.Labels)}, SSH: SSHTarget{Host: legacy.SSHHost, Port: strconv.Itoa(legacy.SSHPort)}}, nil
 				},
 			}
 			_, err = AcquireFixedResource(t.Context(), FixedAcquireOptions{Kind: kind, LeaseID: legacy.LeaseID, RepoRoot: legacy.RepoRoot}, ops)

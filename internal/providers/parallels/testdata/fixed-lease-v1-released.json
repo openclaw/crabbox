@@ -1,0 +1,18 @@
+{
+  "leaseID": "cbx_0123456789ab",
+  "revision": "5f13a9c3e668982d2de8fed3d597b2b8",
+  "slug": "quiet-lobster",
+  "provider": "parallels-fixed-v1",
+  "providerScope": "prlsrv1:56d0fdf359ed22604b29760876678003d976799ec79a9330efd4a69cef117eb8",
+  "repoRoot": "",
+  "claimedAt": "2026-09-21T17:53:47Z",
+  "lastUsedAt": "2026-09-21T17:53:48Z",
+  "fixedCreateIntent": {
+    "version": 1,
+    "fingerprint": "94874f478c045d707835f208b36e54a72fab2b1437fc85609a59d3fc2c10c1a7",
+    "providerScope": "prlsrv1:56d0fdf359ed22604b29760876678003d976799ec79a9330efd4a69cef117eb8",
+    "slug": "quiet-lobster",
+    "createdAt": "2026-09-21T17:53:47.906308Z",
+    "state": "released"
+  }
+}

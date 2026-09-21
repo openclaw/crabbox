@@ -2,8 +2,6 @@ package localcontainer
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/openclaw/crabbox/internal/providers/shared"
@@ -16,9 +14,10 @@ import (
 const fixedLocalContainerIntentVersion = 1
 
 var fixedLocalContainerLeaseKind = core.FixedLeaseKind{
-	ClaimProvider: core.FixedLocalContainerClaimProvider,
-	IntentVersion: fixedLocalContainerIntentVersion,
-	Label:         "local-container",
+	ClaimProvider:  core.FixedLocalContainerClaimProvider,
+	IntentVersion:  fixedLocalContainerIntentVersion,
+	Label:          "local-container",
+	ResourcePlural: "local containers",
 }
 
 func isLocalContainerClaimProvider(provider string) bool {
@@ -91,16 +90,17 @@ func fixedLocalContainerFingerprint(cfg core.Config, req core.AcquireRequest, pu
 	if core.IsArchitectureExplicit(cfg) {
 		intent.Architecture = cfg.Architecture
 	}
-	data, err := json.Marshal(intent)
+	fingerprint, err := core.FixedIntentFingerprint("", intent)
 	if err != nil {
 		return "", fmt.Errorf("fingerprint fixed local-container create intent: %w", err)
 	}
-	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
+	return fingerprint, nil
 }
 
 func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg core.Config) (core.LeaseTarget, error) {
 	leaseID := strings.TrimSpace(req.RequestedLeaseID)
 	var fingerprint, publicKey string
+	var recoveringUnboundAttempt bool
 	var pendingClaim core.LeaseClaim
 	var pendingLease core.LeaseTarget
 	rememberPending := func(claim *core.LeaseClaim, lease core.LeaseTarget) {
@@ -117,7 +117,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		}
 		pendingLease = lease
 	}
-	acquired, err := core.AcquireFixedLease(core.FixedAcquireOptions{
+	acquired, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
 		Kind:         fixedLocalContainerLeaseKind,
 		LeaseID:      leaseID,
 		CheckpointID: req.RequestedCheckpointID,
@@ -127,7 +127,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		WindowsMode:  cfg.WindowsMode,
 		TTL:          cfg.TTL,
 		IdleTimeout:  cfg.IdleTimeout,
-	}, func(ctx context.Context, _ *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
+	}, core.FixedLeaseOperations[inspectContainer]{DescribeIntent: func(ctx context.Context, _ *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		providerScope := strings.TrimSpace(b.claimScope(ctx))
 		if providerScope == "" {
 			return core.FixedLeaseBinding{}, core.Exit(2, "local-container runtime scope is unavailable; refusing to create an unscoped lease")
@@ -155,78 +155,88 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		}
 		binding.Slug, err = core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
 		return binding, err
-	}, func(ctx context.Context, claim *core.LeaseClaim, intent *core.FixedCreateIntent, persist func() error) (core.LeaseTarget, error) {
+	}, ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[inspectContainer], error) {
+		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
+		var result core.FixedObservation[inspectContainer]
 		containers, err := b.listContainers(ctx)
 		if err != nil {
-			return core.LeaseTarget{}, err
+			return result, err
 		}
-		var matches []inspectContainer
 		for _, container := range containers {
 			if container.Config.Labels["lease"] == leaseID {
-				matches = append(matches, container)
+				result.Candidates = append(result.Candidates, container)
 			}
 		}
-		if len(matches) > 1 {
-			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: multiple local containers match fixed lease %s", leaseID)
+		if len(result.Candidates) > 1 {
+			return result, nil
 		}
-		recoveringUnboundAttempt := len(matches) == 1 && claim.CloudID == ""
+		recoveringUnboundAttempt = len(result.Candidates) == 1 && claim.CloudID == ""
 		name := core.LeaseProviderName(leaseID, intent.Slug)
 		if intent.Attempt != nil && intent.Attempt["container_name"] != name {
-			return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed local-container lease %s has an invalid durable create attempt", leaseID)
+			return result, core.Exit(4, "lease_id_conflict: fixed local-container lease %s has an invalid durable create attempt", leaseID)
 		}
-		var container inspectContainer
-		if len(matches) == 1 {
-			container = matches[0]
+		if len(result.Candidates) == 1 {
+			container := result.Candidates[0]
 			if intent.Attempt == nil {
-				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed local-container lease %s has no durable create attempt", leaseID)
+				return result, core.Exit(4, "lease_id_conflict: fixed local-container lease %s has no durable create attempt", leaseID)
 			}
 			if (intent.State == "acquired" || claim.CloudID != "") && claim.CloudID != container.ID {
-				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed local-container lease %s does not match its bound container %s", leaseID, blank(claim.CloudID, "<empty>"))
+				return result, core.Exit(4, "lease_id_conflict: fixed local-container lease %s does not match its bound container %s", leaseID, blank(claim.CloudID, "<empty>"))
 			}
 			if err := validateFixedLocalContainer(container, cfg, leaseID, intent.Slug, fingerprint); err != nil {
-				return core.LeaseTarget{}, err
+				return result, err
 			}
 			if container.State.Running {
 				if err := validateLocalContainerInspectedMounts(container); err != nil {
-					return core.LeaseTarget{}, err
+					return result, err
 				}
 			}
-		} else {
-			if intent.State == "acquired" || claim.CloudID != "" {
-				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: acquired fixed local-container lease %s is missing its bound container", leaseID)
-			}
-			if intent.Attempt != nil {
-				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed local-container lease %s has an unresolved create attempt", leaseID)
-			}
-			intent.Attempt = map[string]string{"container_name": name}
-			if err := persist(); err != nil {
-				return core.LeaseTarget{}, err
-			}
-			fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s runtime=%s image=%s keep=%v fixed=true\n", providerName, leaseID, intent.Slug, cfg.LocalContainer.Runtime, cfg.LocalContainer.Image, req.Keep)
-			containerID, bootstrapDir, createErr := b.createContainerWithFixedIntent(ctx, cfg, name, leaseID, intent.Slug, publicKey, fingerprint, req.Keep)
-			if containerID == "" {
-				return core.LeaseTarget{}, createErr
-			}
-			pending := createdPendingLease(cfg, containerID, leaseID, intent.Slug, bootstrapDir, req.Keep)
-			pending.Server.Labels["fixed_intent_sha256"] = fingerprint
-			core.SetLeaseClaimResourceIdentity(claim, containerID, claim.CloudNumericID, claim.CloudImmutableID, nil)
-			claim.Labels = shared.CloneLabels(pending.Server.Labels)
-			intent.Attempt["container_id"] = containerID
-			if err := persist(); err != nil {
-				return core.LeaseTarget{}, err
-			}
-			rememberPending(claim, pending)
-			if createErr != nil {
-				return core.LeaseTarget{}, createErr
-			}
-			container, err = b.inspectContainer(ctx, containerID)
-			if err != nil {
-				return core.LeaseTarget{}, err
-			}
-			if err := validateFixedLocalContainer(container, cfg, leaseID, intent.Slug, fingerprint); err != nil {
-				return core.LeaseTarget{}, err
-			}
+			return result, nil
 		}
+		if intent.State == "acquired" || claim.CloudID != "" {
+			return result, core.Exit(4, "lease_id_conflict: acquired fixed local-container lease %s is missing its bound container", leaseID)
+		}
+		if intent.Attempt != nil {
+			return result, core.Exit(4, "lease_id_conflict: fixed local-container lease %s has an unresolved create attempt", leaseID)
+		}
+		result.CanSubmit = true
+		return result, nil
+	}, PlanAttempt: func(ctx context.Context, tx *core.FixedTransaction) error {
+		tx.Claim.FixedCreateIntent.Attempt = map[string]string{"container_name": core.LeaseProviderName(leaseID, tx.Claim.FixedCreateIntent.Slug)}
+		return nil
+	}, Submit: func(ctx context.Context, tx *core.FixedTransaction) (inspectContainer, error) {
+		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
+		name := intent.Attempt["container_name"]
+		if err := tx.Record("submitting"); err != nil {
+			return inspectContainer{}, err
+		}
+		fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s runtime=%s image=%s keep=%v fixed=true\n", providerName, leaseID, intent.Slug, cfg.LocalContainer.Runtime, cfg.LocalContainer.Image, req.Keep)
+		containerID, bootstrapDir, createErr := b.createContainerWithFixedIntent(ctx, cfg, name, leaseID, intent.Slug, publicKey, fingerprint, req.Keep)
+		if containerID == "" {
+			return inspectContainer{}, createErr
+		}
+		pending := createdPendingLease(cfg, containerID, leaseID, intent.Slug, bootstrapDir, req.Keep)
+		pending.Server.Labels["fixed_intent_sha256"] = fingerprint
+		core.SetLeaseClaimResourceIdentity(claim, containerID, claim.CloudNumericID, claim.CloudImmutableID, nil)
+		claim.Labels = shared.CloneLabels(pending.Server.Labels)
+		intent.Attempt["container_id"] = containerID
+		if err := tx.Record("observed"); err != nil {
+			return inspectContainer{}, err
+		}
+		rememberPending(claim, pending)
+		if createErr != nil {
+			return inspectContainer{}, createErr
+		}
+		container, err := b.inspectContainer(ctx, containerID)
+		if err != nil {
+			return inspectContainer{}, err
+		}
+		if err := validateFixedLocalContainer(container, cfg, leaseID, intent.Slug, fingerprint); err != nil {
+			return inspectContainer{}, err
+		}
+		return container, nil
+	}, PrepareAccess: func(ctx context.Context, tx *core.FixedTransaction, container inspectContainer) (core.LeaseTarget, error) {
+		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
 		if containerID := intent.Attempt["container_id"]; containerID != "" && containerID != container.ID {
 			return core.LeaseTarget{}, fmt.Errorf("%w: %w", errContainerIdentityMismatch,
 				core.Exit(4, "lease_id_conflict: fixed local-container lease %s does not match its durable container identity", leaseID))
@@ -237,7 +247,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			core.SetLeaseClaimResourceIdentity(claim, container.ID, claim.CloudNumericID, claim.CloudImmutableID, nil)
 			claim.Labels = shared.CloneLabels(pending.Server.Labels)
 			intent.Attempt["container_id"] = container.ID
-			if err := persist(); err != nil {
+			if err := tx.Record("bound"); err != nil {
 				return core.LeaseTarget{}, err
 			}
 		}
@@ -275,7 +285,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			if port, parseErr := strconv.Atoi(strings.TrimSpace(lease.SSH.Port)); parseErr == nil && port > 0 {
 				claim.SSHPort = port
 			}
-			if err := persist(); err != nil {
+			if err := tx.Record("bound"); err != nil {
 				return core.LeaseTarget{}, err
 			}
 			rememberPending(claim, lease)
@@ -293,7 +303,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 			}
 		}
 		return lease, nil
-	}, ctx)
+	}})
 	if err != nil {
 		if pendingClaim.LeaseID == leaseID && pendingLease.Server.CloudID == pendingClaim.CloudID {
 			bootstrapDir := strings.TrimSpace(pendingClaim.Labels["bootstrap_dir"])

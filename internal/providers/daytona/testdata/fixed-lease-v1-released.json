@@ -1,0 +1,18 @@
+{
+  "leaseID": "cbx_012345abcdef",
+  "revision": "c2af56a423be1065a56348517192768c",
+  "slug": "fixed-project",
+  "provider": "daytona-fixed-v1",
+  "providerScope": "daytona:organization:v1:479b10377e144f9158ccd79772beddea775487b4293f0a150774eef2fd4d6aa8",
+  "repoRoot": "",
+  "claimedAt": "2026-09-21T17:58:35Z",
+  "lastUsedAt": "2026-09-21T17:58:35Z",
+  "fixedCreateIntent": {
+    "version": 1,
+    "fingerprint": "150d407d7d3f667a6ec98cbe88a628c6bd801eb629d7b654cdc7d33b50e747e1",
+    "providerScope": "daytona:organization:v1:479b10377e144f9158ccd79772beddea775487b4293f0a150774eef2fd4d6aa8",
+    "slug": "fixed-project",
+    "createdAt": "2026-09-21T17:58:35.24287Z",
+    "state": "released"
+  }
+}
