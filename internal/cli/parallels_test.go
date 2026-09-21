@@ -163,6 +163,7 @@ func TestParallelsWaitForIPTimeoutExplainsDiscovery(t *testing.T) {
 	running := `[{"ID":"vm1","Name":"macOS","State":"running","Hardware":{"net0":{"enabled":true,"mac":"001C425AA8E6"}}}]`
 	stopped := `[{"ID":"vm1","Name":"macOS","State":"stopped","Hardware":{"net0":{"enabled":true,"mac":"001C425AA8E6"}}}]`
 	otherLease := "[vnic0]\n10.211.55.79=\"" + strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10) + ",1800,001c426ad157,01001c426ad157\"\n"
+	staleLease := "[vnic0]\n10.211.55.79=\"" + strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10) + ",1800,001c425aa8e6,01001c425aa8e6\"\n"
 	bootstrap := "/Users/build/.ssh/bootstrap"
 	for _, test := range []struct {
 		name      string
@@ -177,13 +178,13 @@ func TestParallelsWaitForIPTimeoutExplainsDiscovery(t *testing.T) {
 	}{
 		{
 			name: "linked macOS without fallback", vmJSON: running, target: targetMacOS,
-			want:   []string{"clone_mode=linked", "macs=001c425aa8e6", "tools_ip=none", "set parallels.bootstrapKey", "retry with parallels.cloneMode=full", "cannot select a source snapshot"},
+			want:   []string{"clone_mode=linked", "macs=001c425aa8e6", "tools_ip=none", "set parallels.bootstrapKey", "retry with parallels.cloneMode=full", "clear parallels.sourceSnapshot and parallels.sourceSnapshotId", "source VM's current state", "cannot select a source snapshot"},
 			reject: []string{"no matching DHCP lease was found"},
 		},
 		{
 			name: "linked macOS fallback with no lease for the clone", vmJSON: running, leases: otherLease, target: targetMacOS, bootstrap: bootstrap,
-			want:   []string{"DHCP fallback: no Parallels DHCP lease", "no matching DHCP lease was found", "prlctl capture <new-vm-id> --file <png>", "acquisition cleans up failed clones", "on the Parallels host while IP discovery is still waiting", "retry with parallels.cloneMode=full"},
-			reject: []string{"set parallels.bootstrapKey", "prlctl capture vm1"},
+			want:   []string{"DHCP fallback: no Parallels DHCP lease", "no matching DHCP lease was found in the Parallels host lease file", "check guest boot and network configuration", "prlctl capture <new-vm-id> --file <png>", "acquisition cleans up failed clones", "on the Parallels host while IP discovery is still waiting", "retry with parallels.cloneMode=full"},
+			reject: []string{"set parallels.bootstrapKey", "prlctl capture vm1", "may not have booted"},
 		},
 		{
 			name: "full clone omits clone mode advice", vmJSON: running, target: targetMacOS, cloneMode: "full", bootstrap: bootstrap, leases: otherLease,
@@ -205,6 +206,31 @@ func TestParallelsWaitForIPTimeoutExplainsDiscovery(t *testing.T) {
 			want:   []string{"clone_mode=unknown", "no matching DHCP lease was found", "inspect the existing VM", "prlctl capture <existing-vm-id> --file <png>"},
 			reject: []string{"clone_mode=linked", "retry with parallels.cloneMode=full", "cleans up failed clones", "capture <new-vm-id>"},
 		},
+		{
+			name: "expired lease is not missing", vmJSON: running, target: targetMacOS, bootstrap: bootstrap, leases: staleLease,
+			want:   []string{"DHCP fallback: no fresh Parallels DHCP lease"},
+			reject: []string{"no matching DHCP lease was found", "check guest boot"},
+		},
+		{
+			name: "malformed lease file is not missing", vmJSON: running, target: targetMacOS, bootstrap: bootstrap, leases: "10.211.55.79=bad\n",
+			want:   []string{"DHCP fallback: parse Parallels DHCP leases"},
+			reject: []string{"no matching DHCP lease was found", "check guest boot"},
+		},
+		{
+			name: "unknown MAC is not a missing lease", vmJSON: `[{"ID":"vm1","State":"running"}]`, target: targetMacOS, bootstrap: bootstrap,
+			want:   []string{"macs=-", "tools_ip=none", "no usable NIC MAC"},
+			reject: []string{"no matching DHCP lease was found", "check guest boot"},
+		},
+		{
+			name: "failed VM query leaves Tools IP unknown", vmJSON: "invalid JSON", target: targetMacOS, bootstrap: bootstrap,
+			want:   []string{"last_state=-", "clone_mode=linked", "macs=-", "tools_ip=unknown"},
+			reject: []string{"tools_ip=none", "DHCP fallback:", "retry with parallels.cloneMode=full"},
+		},
+		{
+			name: "missing existing VM leaves Tools IP unknown", vmJSON: "[]", target: targetMacOS, bootstrap: bootstrap, existing: true,
+			want:   []string{"last_state=-", "clone_mode=unknown", "tools_ip=unknown"},
+			reject: []string{"tools_ip=none", "DHCP fallback:", "retry with parallels.cloneMode=full", "cleans up failed clones"},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &parallelsDHCPRunner{vmJSON: test.vmJSON, leases: test.leases}
@@ -214,8 +240,8 @@ func TestParallelsWaitForIPTimeoutExplainsDiscovery(t *testing.T) {
 				purpose = ParallelsIPWaitExisting
 			}
 			_, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Nanosecond, purpose)
-			if err == nil {
-				t.Fatal("expected timeout")
+			if err == nil || ExitCodeForError(err, 1) != 5 {
+				t.Fatalf("expected timeout with exit code 5, got %v", err)
 			}
 			for _, want := range test.want {
 				if !strings.Contains(err.Error(), want) {
