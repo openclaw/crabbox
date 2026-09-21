@@ -13,7 +13,8 @@ type FixedLeaseKind struct {
 	IntentVersion int
 	Label         string
 	// DeletionState retains native validators' existing on-disk cleanup marker.
-	DeletionState string
+	DeletionState  string
+	ResourcePlural string
 	// TerminalIdentityLabels opts into retaining resource/repository identity
 	// and only these immutable labels. Other kinds keep compact tombstones.
 	TerminalIdentityLabels []string

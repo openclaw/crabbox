@@ -203,7 +203,11 @@ func fixedObservationConflict[T any](kind FixedLeaseKind, leaseID string, observ
 		return Exit(4, "lease_id_conflict: %s", observation.Conflict)
 	}
 	if len(observation.Candidates) > 1 {
-		return Exit(4, "lease_id_conflict: multiple %s resources match fixed lease %s", kind.Label, leaseID)
+		resources := kind.ResourcePlural
+		if resources == "" {
+			resources = kind.Label + " resources"
+		}
+		return Exit(4, "lease_id_conflict: multiple %s match fixed lease %s", resources, leaseID)
 	}
 	return nil
 }

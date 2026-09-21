@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Consolidate Parallels and Tenki fixed-lease acquisition and deletion on a shared transaction engine with versioned journals and compatibility for existing intent and receipt records.
+- Consolidate Parallels, Tenki, and Proxmox fixed-lease acquisition and deletion on a shared transaction engine with versioned journals and compatibility for existing intent and receipt records.
 
 ### Fixes
 
