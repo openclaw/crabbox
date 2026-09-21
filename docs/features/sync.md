@@ -39,8 +39,9 @@ and remains subject to that adapter's validation and path translation.
 
 POSIX workspace paths are literal paths: relative paths resolve from the remote
 shell's initial directory, including names beginning with `-`. Shell `CDPATH`
-and `OLDPWD` do not redirect workspace selection, and environment files or login
-startup commands cannot change the selected command directory.
+and `OLDPWD` do not redirect workspace selection. Ordinary commands return to
+the selected directory after environment files or login startup run; uploaded
+scripts retain their login startup directory semantics.
 
 Actions hydration has final authority over the exact workspace. When a lease
 has a valid hydration marker, Crabbox uses the marker's canonical `WORKSPACE`

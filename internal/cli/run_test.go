@@ -5946,8 +5946,8 @@ $current"
 done
 if [ -n "$decoded_view" ]; then remote=$decoded_view; fi
 # Match the dedicated probe, not metadata programs which also contain pwd -P.
-# The decoded witness quotes its registrar's exec line once.
-if [ "$current" = 'pwd -P' ] || printf '%s\n' "$current" | grep -Fqx -- ` + shellQuote(`exec sh -c '\''pwd -P'\''`) + `; then
+# The decoded witness quotes its registrar's command assignment once.
+if [ "$current" = 'pwd -P' ] || printf '%s\n' "$current" | grep -Fqx -- ` + shellQuote(`owner_command='\''pwd -P'\''`) + `; then
   printf 'bind-workspace\n' >> "$CRABBOX_FAKE_EVENTS"
   if [ "${CRABBOX_FAKE_BINDING_FAIL:-0}" = "1" ]; then exit 41; fi
   printf '/fixture-root\n'
@@ -6831,7 +6831,7 @@ func TestPackageManagerPreflightEnvironment(t *testing.T) {
 				}
 			}
 			files := map[string]string{
-				"bash":    "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then exec /bin/bash --noprofile --norc -c \"$2\"; fi\nexec /bin/bash \"$@\"\n",
+				"bash":    "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then shift; exec /bin/bash --noprofile --norc -c \"$@\"; fi\nexec /bin/bash \"$@\"\n",
 				"python3": "#!/bin/sh\nprintf '%s|%s|%s|%s|%s|%s|%s\\n' \"$COREPACK_ENABLE_NETWORK\" \"$COREPACK_DEFAULT_TO_LATEST\" \"$COREPACK_ENABLE_AUTO_PIN\" \"${COREPACK_ENABLE_DOWNLOAD_PROMPT-unset}\" \"$COREPACK_ENABLE_PROJECT_SPEC\" \"$PNPM_CONFIG_PM_ON_FAIL\" \"$pnpm_config_pm_on_fail\"\n",
 			}
 			for _, tool := range []string{"npm", "pnpm", "yarn"} {
@@ -7476,7 +7476,7 @@ func TestCMakePreflightPOSIXPresentFirstLineAndMissing(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			binDir := t.TempDir()
-			bash := "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then exec /bin/bash --noprofile --norc -c \"$2\"; fi\nexec /bin/bash \"$@\"\n"
+			bash := "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then shift; exec /bin/bash --noprofile --norc -c \"$@\"; fi\nexec /bin/bash \"$@\"\n"
 			if err := os.WriteFile(filepath.Join(binDir, "bash"), []byte(bash), 0o700); err != nil {
 				t.Fatal(err)
 			}

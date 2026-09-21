@@ -608,6 +608,10 @@ func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo 
 			return actionsHydrationState{}, err
 		}
 	}
+	// Sync may fall back to plain metadata; invalidate again using its final mode.
+	if _, err := runIdempotentSSHCombinedOutput(ctx, target, remoteInvalidateSyncFingerprintForTarget(target, plan.workdir, plainManifest), idempotentSSHRetryDelay); err != nil {
+		return actionsHydrationState{}, Exit(7, "invalidate reusable sync fingerprint before Actions hydration: %v", err)
+	}
 	stdout := io.Discard
 	stderr := io.Discard
 	if streamOutput {

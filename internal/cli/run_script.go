@@ -148,11 +148,22 @@ if ($hasBom) {
 }
 
 func remoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, envFiles []string, script *RunScriptSpec, args []string) string {
-	command := append([]string{script.RemotePath}, args...)
-	if !script.Shebang {
-		command = append([]string{"bash"}, command...)
+	var b strings.Builder
+	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
+	// Uploaded scripts retain their login startup directory semantics.
+	arguments := append([]string{script.RemotePath}, args...)
+	if script.Shebang {
+		b.WriteString(remotePortableShellInvocation(`exec "$@"`, arguments))
+	} else {
+		b.WriteString("bash -lc ")
+		b.WriteString(shellQuote(`exec bash "$@"`))
+		b.WriteString(" bash")
+		for _, argument := range arguments {
+			b.WriteByte(' ')
+			b.WriteString(shellQuote(argument))
+		}
 	}
-	return remoteCommandWithEnvFiles(workdir, env, envFiles, command)
+	return b.String() + ")"
 }
 
 func windowsRemoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, envFiles []string, script *RunScriptSpec, args []string) string {
