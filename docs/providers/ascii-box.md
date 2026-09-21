@@ -197,6 +197,22 @@ mutation. Failed or partial inventory, an observable matching ID, a replacement
 identity, cancellation, and missing or malformed native responses retain the
 claim. Command startup, output-capture, and transport failures do not count as
 native 404 evidence, even when their text mentions `404` or `not found`.
+
+### Absence recovery scope
+
+Ordinary `stop` and `stop --force --provider boat --id <canonical-cbx-id>` use
+the same core absence-evidence transaction. It verifies the original endpoint
+and organization selector, exact native not-found, and complete unfiltered
+inventory before removing only the unchanged local claim under its lock. The
+result is `forgotten locally (resource absent)`, distinct from a native release.
+Fixed-ID records, checkpoint holds, and coordinator/runtime-adapter registrations
+remain with their existing lifecycle owners.
+
+ASCII Box exposes no authenticated account-attestation operation. Its claim
+scope is the endpoint plus `BOX_ORG`, defaulting to `personal`. Two personal
+account keys on the same endpoint are indistinguishable by this evidence; keep
+the original account selected when recovering an absent resource. Crabbox does
+not infer an account identity from an empty inventory.
 Missing, malformed, changed, or incomplete operation-record bindings are
 rejected before native lookups. There is no automatic adoption
 of an external deletion receipt, replacement of a recorded operation, or

@@ -332,38 +332,46 @@ func TestReleaseBoxPendingOperationHonorsDeadline(t *testing.T) {
 }
 
 func TestReleaseBoxReportsLastDeletionStatusWhenNativeLookupTimesOut(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	lookups := 0
-	runner := &releaseCommandRunner{configPath: filepath.Join(t.TempDir(), "config.json"), outcomes: map[string][]commandOutcome{
-		"stop":   {{result: core.LocalCommandResult{}}},
-		"delete": {deletionOutcome(testDeletionID, "bx_guard", "box", "pending")},
-		"deletion": {
-			deletionOutcome(testDeletionID, "bx_guard", "box", "blocked"),
-			{err: context.DeadlineExceeded},
-		},
-	}, onAction: func(action string) {
-		if action == "deletion" {
-			lookups++
-			if lookups == 2 {
-				<-ctx.Done()
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		lookups := 0
+		runner := &releaseCommandRunner{configPath: filepath.Join(t.TempDir(), "config.json"), outcomes: map[string][]commandOutcome{
+			"stop":     {{result: core.LocalCommandResult{}}},
+			"delete":   {deletionOutcome(testDeletionID, "bx_guard", "box", "pending")},
+			"deletion": {deletionOutcome(testDeletionID, "bx_guard", "box", "blocked")},
+		}}
+		native := boxCommandRunnerFunc(func(commandCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+			if boxCLIAction(req.Args) == "deletion" {
+				lookups++
+				if lookups == 2 {
+					// A real command observes its own context. The caller's Done
+					// can close before cancellation reaches ReleaseBox's child.
+					<-commandCtx.Done()
+					return core.LocalCommandResult{}, commandCtx.Err()
+				}
+			}
+			return runner.Run(commandCtx, req)
+		})
+		c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: native, releasePollInterval: 100 * time.Millisecond}
+		started := time.Now()
+		err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("lost deadline cause: %v", err)
+		}
+		if lookups != 2 || time.Since(started) != 500*time.Millisecond {
+			t.Fatalf("deadline did not interrupt the second lookup: lookups=%d elapsed=%s", lookups, time.Since(started))
+		}
+		for _, want := range []string{"phase=deletion-operation", testDeletionID, "last_observed_status=blocked", "retaining claim"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("missing %q in %v", want, err)
 			}
 		}
-	}}
-	c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner, releasePollInterval: time.Nanosecond}
-	err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("lost deadline cause: %v", err)
-	}
-	for _, want := range []string{"phase=deletion-operation", testDeletionID, "last_observed_status=blocked", "retaining claim"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("missing %q in %v", want, err)
+		var incomplete *boxDeletionIncompleteError
+		if !errors.As(err, &incomplete) || incomplete.operation.ID != testDeletionID || incomplete.operation.Status != "pending" {
+			t.Fatalf("lost original accepted operation: %v", err)
 		}
-	}
-	var incomplete *boxDeletionIncompleteError
-	if !errors.As(err, &incomplete) || incomplete.operation.ID != testDeletionID || incomplete.operation.Status != "pending" {
-		t.Fatalf("lost original accepted operation: %v", err)
-	}
+	})
 }
 
 func TestBoxCleanupProgressReportsDuringNativeCallAndJoins(t *testing.T) {

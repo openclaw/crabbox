@@ -10,6 +10,7 @@ export interface AWSCredentials {
 export type AWSCredentialProvider = () => Promise<AWSCredentials>;
 
 export interface Env {
+  CRABBOX_PORTABLE_POOLS_ENABLED?: string;
   FLEET: DurableObjectNamespace;
   CF_VERSION_METADATA?: {
     id: string;
@@ -454,6 +455,7 @@ export interface HetznerCleanupEvidence {
 export type ProviderCleanupEvidence = HetznerCleanupEvidence;
 
 export interface LeaseRecord {
+  portablePoolAccess?: true;
   id: string;
   slug?: string;
   fixedCreateIntentVersion?: number;
@@ -572,6 +574,7 @@ export interface ReadyPoolIdentityV1 {
 }
 
 export interface ReadyPoolEntry {
+  portableAccess?: true;
   key: string;
   leaseID: string;
   state: ReadyPoolEntryState;
@@ -598,6 +601,7 @@ export interface ReadyPoolEntry {
   borrowHeartbeatRequired?: boolean;
   borrowHeartbeatAt?: string;
   borrowExpiresAt?: string;
+  borrowHardDeadline?: string;
   borrowToken?: string;
   lastReadyAt?: string;
   lastUsedAt?: string;
@@ -625,6 +629,8 @@ export interface ReadyPoolRegisterRequest {
 }
 
 export interface ReadyPoolBorrowRequest {
+  class?: string;
+  serverType?: string;
   repo?: string;
   ref?: string;
   commit?: string;
@@ -677,6 +683,19 @@ export interface ReadyPoolCapacityCounts {
 }
 
 export interface ReadyPoolCounters {
+  borrowLatencyMsTotal?: number;
+  readyAgeMsTotal?: number;
+  completionReports?: number;
+  firstCommandMsTotal?: number;
+  scrubMsTotal?: number;
+  scrubFailures?: number;
+  ttlRotations?: number;
+  grantsIssued?: number;
+  grantsAcknowledged?: number;
+  grantsRevoked?: number;
+  grantsFenced?: number;
+  grantsExpired?: number;
+  fencingFailures?: number;
   borrowRequests: number;
   warmHits: number;
   warmMisses: number;

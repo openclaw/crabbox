@@ -398,6 +398,18 @@ required labels, and carry the returned full claim as the exact snapshot for
 later fenced updates. Recovery phases, account or key authorization, live
 resource validation, and every deletion decision remain adapter-owned.
 
+Optional `core.AbsenceVerifier` observes the exact claim-bound resource without
+mutating it. Return zero evidence for a present resource, an error for uncertain
+absence, or `AbsenceEvidence` containing the unchanged claim and both proof
+flags after verifying scope, exact structured not-found, and complete unfiltered
+inventory where available. Core owns local forgetting through
+`ForgetAbsentLeaseClaim`, including the exclusive claim fence and exclusions for
+fixed, checkpoint, coordinator, and adapter owners. Targeted `stop --force`
+uses this capability; `OrdinaryStopAbsenceRecovery` additionally opts in an
+existing ordinary-stop contract. Report `ReleaseLeaseOutcome.ForgottenLocally`
+when an adapter's release entry point delegates to this transaction, so core
+skips release cleanup and reports local forgetting distinctly.
+
 Use `shared.RemoveExactClaimAfterContext` for exact-claim terminal cleanup and
 pass the same lifecycle context that its provider action uses. There is no
 implicit background-context variant: waiting for the claim fence must honor the
@@ -792,3 +804,20 @@ to the rest of Crabbox.
 - [Source map](../source-map.md): files behind documented behavior.
 - [Architecture](../architecture.md): system overview and lease flow.
 - [Coordinator](coordinator.md): brokered lease contract.
+
+### Bounded ready-pool access
+
+`CloudProvider.poolAccess()` is an optional capability separate from typed image
+identity. Core journals grants, generations, receipt hashes, immutable deadlines,
+and cleanup intent in transactions; adapters perform external mutations after
+those transactions commit. Implement `enroll`, `install`, and `revoke` from
+`worker/src/ready-pool-access.ts`. Bind every operation to the immutable resource
+and lease. A replay or delayed install must not restore a revoked generation.
+
+`revoke` must prove both exact key removal and active-session fencing, or
+confirmed resource destruction. An accepted API request is insufficient.
+Enrollment must establish guest expiry enforcement that survives coordinator
+outages and guest reboot. AWS uses SSM, root-owned generation tombstones,
+persistent expiry timers, and observed boot-ID changes. Whole-instance reboot
+cannot preserve a replacement grant's sessions, so v1 has no in-place renewal.
+Unsupported adapters must leave this capability absent.

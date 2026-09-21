@@ -59,20 +59,20 @@ hydration, Tailscale, or the normal SSH/rsync data plane.
 
 ## Supported Agent Sandbox Version
 
-Crabbox currently targets the Agent Sandbox `v0.5.0rc1` prerelease API:
+Crabbox uses the Agent Sandbox beta API:
 
 - `agents.x-k8s.io/v1beta1`
 - `extensions.agents.x-k8s.io/v1beta1`
 
-This is intentional because `v0.5.0` is expected to promote the same beta API
-soon. Crabbox does not carry `v1alpha1` compatibility. Until stable `v0.5.0`
-ships, pin the controller and CRDs to `v0.5.0rc1` or a newer release that still
-serves these `v1beta1` resources.
+The fixed lease-ID lifecycle is natively qualified against Agent Sandbox
+`v1.0.0`. Pin the controller and CRDs together to that release. Merely serving
+the same resource versions does not qualify another controller's foreground
+deletion behavior. Crabbox does not carry `v1alpha1` compatibility.
 
 Official project and release references:
 
 - [Agent Sandbox project](https://github.com/kubernetes-sigs/agent-sandbox)
-- [Agent Sandbox v0.5.0rc1 release](https://github.com/kubernetes-sigs/agent-sandbox/releases/tag/v0.5.0rc1)
+- [Agent Sandbox v1.0.0 release](https://github.com/kubernetes-sigs/agent-sandbox/releases/tag/v1.0.0)
 
 ## Commands
 
@@ -308,6 +308,72 @@ successful cleanup removes that recovery lease.
 `cleanup` uses Crabbox's local idle-time policy. It deletes due live claims
 after ownership validation, skips missing claims unless `forgetMissing` is
 enabled, and reports every skipped or removed claim.
+
+## Fixed lease IDs
+
+Agent Sandbox supports `warmup --lease-id cbx_<12 lowercase hex characters>` through
+its explicit delegated fixed-acquisition capability. Ordinary generated `asbx_`
+leases retain their existing behavior. A fixed lease records its intent, recovery
+identity, deterministic claim name, original absolute TTL and selected warm-pool
+UID before creating a Kubernetes resource. Repeating the same request, including
+after restarting the CLI, resolves that same attempt instead of allocating a
+replacement. Changed intent or unresolved creation fails without replacement.
+
+```sh
+crabbox warmup --provider agent-sandbox --lease-id cbx_0123456789ab --slug my-build
+crabbox status --provider agent-sandbox --id cbx_0123456789ab
+crabbox run --provider agent-sandbox --id cbx_0123456789ab --keep -- echo ready
+crabbox stop --provider agent-sandbox --id cbx_0123456789ab
+```
+
+For fixed leases, the resource identity reported by status is the immutable
+`SandboxClaim` UID; the reusable Kubernetes name is retained separately as
+`claim`. Acquisition reports that exact identity only after recording it durably,
+and before readiness/completion. An acknowledgment or readiness failure retains
+the fixed handle for replay or explicit stop.
+Status and list also check the recorded Sandbox and Pod UIDs before reporting
+readiness; a replacement workload cannot silently become the fixed lease.
+
+Fixed stop and run-triggered TTL cleanup use UID-preconditioned **Foreground**
+deletion with a two-minute budget for completion, including normal pod termination.
+An earlier caller deadline or cancellation still ends the wait. If confirmation
+does not finish, the fixed handle remains available for a later stop retry.
+It retains local custody until the original claim disappears under the verified
+scope and warm-pool incarnation, and checks already-known Sandbox/Pod handles.
+The supported controller's normal foreground contract is the completion signal;
+this is not an unconditional guarantee under unavailable garbage-collection
+discovery or modified controllers. Unknown creation/deletion outcomes remain
+unresolved. `forgetMissing` is not a fixed-lease completion mechanism.
+A run against a missing fixed claim fails and retains its recovery state even
+when `forgetMissing` is enabled.
+
+The warm-pool UID is a conservative object-incarnation anchor, not a universal
+cluster ID. A missing or replaced pool does not authorize using a different
+cluster or finalizing an uncertain claim. The existing warm-pool GET permission
+is sufficient for this anchor; no new Namespace GET permission is required.
+Acquisition rechecks that UID after creation or reconciliation and before
+publishing readiness, so replacement during either phase retains unresolved intent.
+
+Completed fixed leases retain a terminal tombstone. Repeated stop and terminal
+status validate the local receipt and original configured scope without requiring
+the pool or transport to remain available. A released fixed ID cannot allocate
+again. A new lease needs a new ID. Validated terminal receipts are excluded from
+active `list` inventory; live and unresolved fixed claims remain visible or return
+an inventory error. Runtime adapters can therefore confirm absence after a normal
+fixed stop. Their confirmed-absence cleanup validates the full expected lease ID,
+attempt ID, slug, resource UID and original scope, then retains the unchanged
+terminal receipt under the claim lock across coordinator deregistration. This
+local completion step does not call Kubernetes or delete the receipt.
+
+Once creation has been submitted, this implementation does not automatically
+resubmit the same attempt, even after a definite create rejection. The recorded
+attempt remains available for diagnosis; use a new fixed ID for a new allocation
+only after resolving the previous outcome. Ambiguous creation never allocates a
+replacement. Replaying acquired readiness also preserves recorded Sandbox/Pod
+UIDs and the selected container rather than silently adopting a replacement.
+Ordinary `asbx_` Background deletion and the configured TTL `Retain` policy are
+unchanged. Fixed leases use a distinct versioned claim kind; older ordinary
+readers cannot mutate them as ordinary `asbx_` leases.
 
 ## Capabilities
 

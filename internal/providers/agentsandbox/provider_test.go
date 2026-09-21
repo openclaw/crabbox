@@ -270,3 +270,30 @@ func TestConfigShowIncludesAgentSandboxRoute(t *testing.T) {
 		}
 	}
 }
+
+func TestProviderExposesFixedControllerContract(t *testing.T) {
+	cfg := testAgentSandboxConfig(t)
+	cfg.AgentSandbox.Kubeconfig = filepath.Join(t.TempDir(), "unused-kubeconfig")
+	before := cfg
+	registered, err := core.ProviderFor(providerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, ok := registered.(core.ControllerProviderContract)
+	if !ok {
+		t.Fatal("registered provider has no controller contract")
+	}
+	scope, err := contract.ControllerProviderScope(cfg)
+	if err != nil || scope != claimScope(cfg) || !contract.SupportsControllerFixedLeaseID(cfg) {
+		t.Fatalf("scope=%q err=%v", scope, err)
+	}
+	if !registered.Spec().Features.Has(core.FeatureFixedCurrentRepoStop) {
+		t.Fatal("fixed repository stop is not discoverable")
+	}
+	if !reflect.DeepEqual(cfg, before) {
+		t.Fatal("controller contract mutated config")
+	}
+	if _, err := os.Stat(cfg.AgentSandbox.Kubeconfig); !os.IsNotExist(err) {
+		t.Fatal("scope discovery unexpectedly required a kubeconfig file")
+	}
+}

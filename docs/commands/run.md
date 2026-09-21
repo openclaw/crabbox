@@ -558,12 +558,15 @@ created before this bootstrap change need to be recreated.
 
 Use `--script <file>` or `--script-stdin` for multi-line remote commands. On
 POSIX SSH leases, Crabbox uploads a standalone, content-hashed copy into
-`.crabbox/scripts/` under the remote workdir and executes that copy with the
-workdir as its process PWD. `$0` identifies the generated upload path, so
+`.crabbox/scripts/` under the remote workdir and resolves that copy's absolute
+path before starting the login shell. The process starts in the remote workdir;
+Bash login startup files may select a different directory, which the script
+inherits. `$0` identifies the generated upload path, so
 `dirname "$0"` resolves to `.crabbox/scripts/`, not the script's original local
 directory. That directory component is not preserved in the uploaded copy and
 cannot be recovered from `$0`. Standalone uploaded scripts should resolve
-synced project assets from `$PWD`.
+synced project assets from `$PWD` when startup leaves it in the remote workdir,
+or explicitly select that workdir when startup changes it.
 
 If a Git-managed script needs its synced repository path or adjacent assets,
 invoke it as trailing argv so the project copy runs in place:
@@ -1242,3 +1245,20 @@ Run-specific flags:
 --timing-record default|off|path
 --record-local
 ```
+
+For portable typed-pool access, add `--pool-access` alongside
+`--pool-identity-file` and use `--pool-duration` to request up to 30 minutes:
+
+```sh
+crabbox run --pool builders --pool-identity-file pool-identity.json \
+  --pool-access --pool-duration 20m --pool-compatibility-key linux-16-vcpu -- go test ./...
+```
+
+The CLI prints pending/active grant state, a protected receipt path, and the
+immutable hard deadline before execution. It uses a fresh local key, sends
+liveness heartbeats, and cancels the command at that deadline. Heartbeats never
+renew access. Cleanup preserves the original command failure; when the command
+succeeds, a fencing or return failure fails the run. Failed cleanup retains the
+receipt for `pool return --receipt-file <path> --result drain`. AWS v1 removes the
+grant key and observes a reboot before returning a scrubbed machine to ready.
+A longer job must return and borrow again; uninterrupted renewal is deferred.

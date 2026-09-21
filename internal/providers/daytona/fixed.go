@@ -34,13 +34,17 @@ func (b *daytonaLeaseBackend) SupportsRequestedCheckpointID() bool {
 }
 
 func fixedDaytonaContext(ctx context.Context, client daytonaAPI) (string, string, error) {
+	return daytonaAccountContext(ctx, client, true)
+}
+
+func daytonaAccountContext(ctx context.Context, client daytonaAPI, allowResourceIdentity bool) (string, string, error) {
 	identity, ok := client.(interface {
 		fixedOrganization(context.Context, bool) (string, string, error)
 	})
 	if !ok {
 		return "", "", core.Exit(4, "Daytona client has no organization identity contract")
 	}
-	endpoint, organization, err := identity.fixedOrganization(ctx, true)
+	endpoint, organization, err := identity.fixedOrganization(ctx, allowResourceIdentity)
 	if err != nil {
 		return "", "", err
 	}
@@ -609,6 +613,9 @@ func (b *daytonaLeaseBackend) RetainLeaseClaimAfterReleaseWithClaim(lease core.L
 }
 
 func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, slug string, server core.Server, _ bool) (core.Server, error) {
+	if existing.FixedCreateIntent == nil && existing.ProviderScope != "" && (provider != daytonaProvider || server.CloudID != existing.CloudID || server.ImmutableID != existing.CloudImmutableID) {
+		return core.Server{}, core.Exit(4, "refusing to retarget account-bound Daytona claim")
+	}
 	if existing.FixedCreateIntent != nil {
 		if err := core.AuthorizeCheckpointRelease(existing, ""); err != nil {
 			return core.Server{}, err
@@ -625,7 +632,18 @@ func (b *daytonaLeaseBackend) AuthorizeStatusTouchClaim(ctx context.Context, lea
 		return core.Exit(4, "Daytona lifecycle touch requires an exact source lease claim")
 	}
 	if claim.FixedCreateIntent == nil {
-		if claim.ProviderScope != core.ProviderClaimScope(daytonaProvider, b.cfg) {
+		if claim.ProviderScope == "" {
+			return nil
+		}
+		client, err := newDaytonaClient(b.cfg, b.rt)
+		if err != nil {
+			return err
+		}
+		scope, _, err := daytonaAccountContext(ctx, client, false)
+		if err != nil {
+			return err
+		}
+		if scope != claim.ProviderScope {
 			return core.Exit(4, "Daytona lifecycle touch provider scope mismatch")
 		}
 		return nil

@@ -2,10 +2,12 @@ package cli
 
 //go:generate go run ../../scripts/configgen -source config_boxd.go -output config_boxd_generated.go -type BoxdConfig -provider boxd
 
-// BoxdConfig contains non-secret HTTPS console routing and lease settings.
-// Interactive session tokens are read only from the environment by the provider.
+// BoxdConfig contains non-secret routing and lease settings: the TLS gRPC
+// endpoint for lifecycle calls and the HTTPS console origin for the API-key
+// exchange. API keys are read only from the environment by the provider.
 type BoxdConfig struct {
-	APIURL          string `config:"apiUrl" env:"CRABBOX_BOXD_API_URL" flag:"boxd-api-url" sources:"user,env,flag" help:"boxd HTTPS console origin (default https://app.boxd.sh)" default:"https://app.boxd.sh" fileIgnoreEmpty:"true" fileStorage:"value" envString:"presence"`
+	APIURL          string `config:"apiUrl" env:"CRABBOX_BOXD_API_URL" flag:"boxd-api-url" sources:"user,env,flag" help:"boxd HTTPS console origin for the API-key exchange (default https://app.boxd.sh)" default:"https://app.boxd.sh" fileIgnoreEmpty:"true" fileStorage:"value" envString:"presence"`
+	GRPCURL         string `config:"grpcUrl" env:"CRABBOX_BOXD_GRPC_URL" flag:"boxd-grpc-url" sources:"user,env,flag" help:"boxd TLS gRPC endpoint as host:port (default boxd.sh:9443)" default:"boxd.sh:9443" fileIgnoreEmpty:"true" fileStorage:"value" envString:"presence"`
 	Org             string `config:"org" env:"CRABBOX_BOXD_ORG" flag:"boxd-org" sources:"user,env,flag" help:"boxd organization (empty = personal account)" fileIgnoreEmpty:"true" fileStorage:"value" envString:"presence"` // Empty selects the fixed personal account context.
 	WorkRoot        string `config:"workRoot" env:"CRABBOX_BOXD_WORK_ROOT" flag:"boxd-work-root" sources:"user,repo,env,flag" help:"remote Crabbox work root" default:"/home/boxd/crabbox" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
 	DeleteOnRelease bool   `config:"deleteOnRelease" env:"CRABBOX_BOXD_DELETE_ON_RELEASE" flag:"boxd-delete-on-release" sources:"user,repo,env,flag" help:"destroy boxd machines on release instead of stopping them (default true)" default:"true" reportApplied:"true"`

@@ -15,6 +15,7 @@ import (
 func (a App) readyPoolList(ctx context.Context, args []string) error {
 	fs := newFlagSet("pool ready", a.Stderr)
 	jsonOut := fs.Bool("json", false, "print JSON")
+	portableAccess := fs.Bool("access", false, "list portable typed pools")
 	identityFile := fs.String("identity-file", "", "generated typed ready-pool identity JSON")
 	args, key := extractFirstPositionalArg(args, map[string]bool{"identity-file": true})
 	if err := parseFlags(fs, args); err != nil {
@@ -23,6 +24,12 @@ func (a App) readyPoolList(ctx context.Context, args []string) error {
 	coord, err := readyPoolCoordinator()
 	if err != nil {
 		return err
+	}
+	if *portableAccess {
+		if !flagWasSet(fs, "identity-file") {
+			return Exit(2, "--access requires typed pool identity")
+		}
+		coord.portablePool = true
 	}
 	var entries []CoordinatorReadyPoolEntry
 	if flagWasSet(fs, "identity-file") {
@@ -109,6 +116,7 @@ func (a App) readyPoolRegister(ctx context.Context, args []string) error {
 	fingerprint := fs.String("fingerprint", "", "repo setup fingerprint")
 	compatibilityKey := fs.String("compatibility-key", "", "provider-neutral capability and size key")
 	identityFile := fs.String("identity-file", "", "generated typed ready-pool identity JSON")
+	portableAccess := fs.Bool("access", false, "opt in to bounded portable access (requires typed identity)")
 	cacheCompatibility := fs.String("cache-compatibility", "", "derive typed identity using this operator-declared cache compatibility")
 	image := fs.String("image", "", "base image id or name")
 	sshHost := fs.String("ssh-host", "", "proven SSH host")
@@ -164,6 +172,12 @@ func (a App) readyPoolRegister(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if *portableAccess {
+		if !flagWasSet(fs, "identity-file") && !flagWasSet(fs, "cache-compatibility") {
+			return Exit(2, "--access requires typed pool identity")
+		}
+		coord.portablePool = true
+	}
 	var res CoordinatorReadyPoolResponse
 	if flagWasSet(fs, "cache-compatibility") {
 		generationInput := mapsCloneAny(input)
@@ -204,6 +218,11 @@ func (a App) readyPoolBorrow(ctx context.Context, args []string) error {
 	fingerprint := fs.String("fingerprint", "", "repo setup fingerprint")
 	compatibilityKey := fs.String("compatibility-key", "", "provider-neutral capability and size key")
 	identityFile := fs.String("identity-file", "", "generated typed ready-pool identity JSON")
+	receiptFile := fs.String("receipt-file", "", "owner-only access receipt file (created exclusively)")
+	requiredClass := fs.String("class", "", "required lease size class")
+	requiredType := fs.String("type", "", "required exact provider machine type")
+	duration := fs.Duration("duration", 30*time.Minute, "bounded borrow duration, maximum 30m")
+	portableAccess := fs.Bool("access", false, "opt in to bounded portable access (requires typed identity)")
 	provider := fs.String("provider", "", "provider filter")
 	target := fs.String("target", "", "target OS filter")
 	jsonOut := fs.Bool("json", false, "print JSON")
@@ -233,7 +252,15 @@ func (a App) readyPoolBorrow(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if *portableAccess {
+		if !flagWasSet(fs, "identity-file") && !flagWasSet(fs, "cache-compatibility") {
+			return Exit(2, "--access requires typed pool identity")
+		}
+		coord.portablePool = true
+	}
 	input := readyPoolBorrowInput(*repo, *ref, *commit, *fingerprint, *compatibilityKey, *provider, *target)
+	addStringInput(input, "class", *requiredClass)
+	addStringInput(input, "serverType", *requiredType)
 	var res CoordinatorReadyPoolResponse
 	if identity != nil {
 		localRepo, _ := findRepo()
@@ -245,7 +272,15 @@ func (a App) readyPoolBorrow(ctx context.Context, args []string) error {
 			return providerErr
 		}
 		input["identity"] = *identity
-		res, err = borrowValidatedTypedReadyPoolLease(ctx, coord, key, input, *identity)
+		if *portableAccess {
+			var receiptPath string
+			res, receiptPath, err = borrowPortablePool(ctx, coord, key, input, *identity, *receiptFile, *duration, a.Stderr)
+			if err != nil && receiptPath != "" {
+				fmt.Fprintf(a.Stderr, "access cleanup receipt retained: %s\n", receiptPath)
+			}
+		} else {
+			res, err = borrowValidatedTypedReadyPoolLease(ctx, coord, key, input, *identity)
+		}
 	} else {
 		res, err = coord.BorrowReadyPoolLease(ctx, key, input)
 	}
@@ -255,19 +290,45 @@ func (a App) readyPoolBorrow(ctx context.Context, args []string) error {
 	if *jsonOut {
 		return json.NewEncoder(a.Stdout).Encode(res)
 	}
+	if *portableAccess {
+		fmt.Fprintf(a.Stdout, "borrowed pool=%s lease=%s hard_deadline=%s ssh=%s@%s:%s\n", res.Entry.Key, res.Entry.LeaseID, res.Grant.ExpiresAt, blank(res.Entry.SSHUser, res.Lease.SSHUser), blank(res.Entry.SSHHost, res.Lease.Host), blank(res.Entry.SSHPort, res.Lease.SSHPort))
+		return nil
+	}
 	fmt.Fprintf(a.Stdout, "borrowed pool=%s lease=%s state=%s token=%s ssh=%s@%s:%s\n", res.Entry.Key, res.Entry.LeaseID, res.Entry.State, res.Entry.BorrowToken, blank(res.Entry.SSHUser, res.Lease.SSHUser), blank(res.Entry.SSHHost, res.Lease.Host), blank(res.Entry.SSHPort, res.Lease.SSHPort))
 	return nil
 }
 
 func (a App) readyPoolHeartbeat(ctx context.Context, args []string) error {
 	fs := newFlagSet("pool heartbeat", a.Stderr)
+	receiptFile := fs.String("receipt-file", "", "protected portable access receipt")
 	id := fs.String("id", "", "borrowed lease id")
 	borrowToken := fs.String("borrow-token", "", "borrow token from pool borrow")
 	identityFile := fs.String("identity-file", "", "generated typed ready-pool identity JSON")
 	jsonOut := fs.Bool("json", false, "print JSON")
-	args, key := extractFirstPositionalArg(args, map[string]bool{"id": true, "borrow-token": true, "identity-file": true})
+	args, key := extractFirstPositionalArg(args, map[string]bool{"id": true, "borrow-token": true, "identity-file": true, "receipt-file": true})
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if *receiptFile != "" {
+		if flagWasSet(fs, "borrow-token") || flagWasSet(fs, "id") {
+			return Exit(2, "--receipt-file cannot be combined with --id or --borrow-token")
+		}
+		receipt, err := readPoolAccessReceipt(*receiptFile)
+		if err != nil {
+			return err
+		}
+		if key != "" && key != receipt.Pool {
+			return Exit(2, "receipt pool does not match requested pool")
+		}
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		coord, err := readyPoolCoordinatorFromConfig(cfg)
+		if err != nil {
+			return err
+		}
+		return heartbeatPortablePool(ctx, coord, *receiptFile)
 	}
 	if key == "" || *id == "" || *borrowToken == "" {
 		return Exit(2, "usage: crabbox pool heartbeat <key> --id <lease-id> --borrow-token <token>")
@@ -298,14 +359,38 @@ func (a App) readyPoolHeartbeat(ctx context.Context, args []string) error {
 func (a App) readyPoolReturn(ctx context.Context, args []string) error {
 	fs := newFlagSet("pool return", a.Stderr)
 	id := fs.String("id", "", "lease id")
+	receiptFile := fs.String("receipt-file", "", "protected portable access receipt")
 	result := fs.String("result", "ready", "return result: ready, drain, or release")
 	reason := fs.String("reason", "", "short reason")
 	borrowToken := fs.String("borrow-token", "", "borrow token from pool borrow")
 	identityFile := fs.String("identity-file", "", "generated typed ready-pool identity JSON")
 	jsonOut := fs.Bool("json", false, "print JSON")
-	args, key := extractFirstPositionalArg(args, map[string]bool{"id": true, "result": true, "reason": true, "borrow-token": true, "identity-file": true})
+	args, key := extractFirstPositionalArg(args, map[string]bool{"id": true, "result": true, "reason": true, "borrow-token": true, "identity-file": true, "receipt-file": true})
 	if err := parseFlags(fs, args); err != nil {
 		return err
+	}
+	if *receiptFile != "" {
+		if flagWasSet(fs, "borrow-token") || flagWasSet(fs, "id") {
+			return Exit(2, "--receipt-file cannot be combined with --id or --borrow-token")
+		}
+		receipt, err := readPoolAccessReceipt(*receiptFile)
+		if err != nil {
+			return err
+		}
+		if key != "" && key != receipt.Pool {
+			return Exit(2, "receipt pool does not match requested pool")
+		}
+		cfg, err := loadConfig()
+		if err != nil {
+			return err
+		}
+		coord, err := readyPoolCoordinatorFromConfig(cfg)
+		if err != nil {
+			return err
+		}
+		returnCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+		defer cancel()
+		return returnPortablePool(returnCtx, coord, *receiptFile, *result)
 	}
 	if key == "" || *id == "" {
 		return Exit(2, "usage: crabbox pool return <key> --id <lease-id>")
@@ -355,6 +440,7 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 	maxReady := fs.Int("max-ready", -1, "maximum ready, busy, and in-flight leases (default min-ready)")
 	compatibilityKey := fs.String("compatibility-key", "", "provider-neutral capability and size key")
 	identityFile := fs.String("identity-file", "", "generated typed ready-pool identity JSON")
+	portableAccess := fs.Bool("access", false, "opt in to bounded portable access (requires typed identity)")
 	create := fs.Bool("create", false, "claim and create missing ready leases with prewarm")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	args, key := extractFirstPositionalArg(args, map[string]bool{"min-ready": true, "max-ready": true, "compatibility-key": true, "identity-file": true})
@@ -403,6 +489,12 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if *portableAccess {
+		if !flagWasSet(fs, "identity-file") && !flagWasSet(fs, "cache-compatibility") {
+			return Exit(2, "--access requires typed pool identity")
+		}
+		coord.portablePool = true
+	}
 	repo, err := findRepo()
 	if err != nil {
 		return err
@@ -428,6 +520,9 @@ func (a App) readyPoolEnsure(ctx context.Context, args []string) error {
 	}
 	prewarmArgs := append([]string{}, fs.Args()...)
 	prewarmArgs = append(prewarmArgs, "--pool", key)
+	if *portableAccess {
+		prewarmArgs = append(prewarmArgs, "--pool-access")
+	}
 	if strings.TrimSpace(*compatibilityKey) != "" {
 		prewarmArgs = append(prewarmArgs, "--pool-compatibility-key", strings.TrimSpace(*compatibilityKey))
 	}
@@ -839,7 +934,7 @@ func poolRegisterValueFlags() map[string]bool {
 func poolBorrowValueFlags() map[string]bool {
 	return map[string]bool{
 		"repo": true, "ref": true, "commit": true, "fingerprint": true,
-		"compatibility-key": true, "identity-file": true, "provider": true, "target": true,
+		"compatibility-key": true, "identity-file": true, "provider": true, "target": true, "receipt-file": true, "duration": true, "class": true, "type": true,
 	}
 }
 

@@ -95,6 +95,40 @@ func TestFixedMachine0ClaimProviderCanonicalizes(t *testing.T) {
 	}
 }
 
+func TestFixedParallelsClaimProviderCanonicalizesWithoutOverwritingMarker(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_abcdef123467"
+	err := WithDurableLeaseClaimLock(leaseID, func(claim *leaseClaim, _ bool, persist func() error) error {
+		claim.LeaseID = leaseID
+		claim.Slug = "fixed-parallels"
+		claim.Provider = FixedParallelsClaimProvider
+		claim.ProviderScope = strings.Repeat("b", 64)
+		claim.RepoRoot = "/repo"
+		claim.FixedCreateIntent = &FixedCreateIntent{
+			Version: 1, Fingerprint: strings.Repeat("a", 64), ProviderScope: claim.ProviderScope,
+			Slug: claim.Slug, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), State: "acquired",
+		}
+		return persist()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := canonicalClaimProvider(FixedParallelsClaimProvider); got != "parallels" {
+		t.Fatalf("fixed Parallels marker canonicalized to %q", got)
+	}
+	resolved, ok, exact, err := ResolveLeaseClaimForProviderWithExact(leaseID, "parallels")
+	if err != nil || !ok || !exact || resolved.Provider != FixedParallelsClaimProvider {
+		t.Fatalf("resolved=%#v ok=%t exact=%t err=%v", resolved, ok, exact, err)
+	}
+	if err := ClaimLeaseForRepoProvider(leaseID, "fixed-parallels", "parallels", "/repo", time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	after, exists, err := ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists || after.Provider != FixedParallelsClaimProvider {
+		t.Fatalf("runtime parallels claim update overwrote marker: claim=%#v exists=%t err=%v", after, exists, err)
+	}
+}
+
 func TestFixedLocalContainerClaimProviderCanonicalizesWithoutOverwritingMarker(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	const leaseID = "cbx_abcdef123465"
@@ -130,6 +164,12 @@ func TestFixedLocalContainerClaimProviderCanonicalizesWithoutOverwritingMarker(t
 	peer := bridgePeerFromClaim(after, TransportNone)
 	if peer.Provider != "local-container" {
 		t.Fatalf("fixed marker displayed as provider %q", peer.Provider)
+	}
+}
+
+func TestFixedProxmoxClaimProviderCanonicalizes(t *testing.T) {
+	if got := canonicalClaimProvider(FixedProxmoxClaimProvider); got != "proxmox" {
+		t.Fatalf("fixed Proxmox marker canonicalized to %q", got)
 	}
 }
 

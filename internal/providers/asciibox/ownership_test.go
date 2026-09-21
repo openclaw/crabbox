@@ -131,7 +131,7 @@ func TestReleaseAcceptedNativeDeletionDoesNotRecordCompletion(t *testing.T) {
 			defer cancel()
 			info := commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"box":{"id":%q,"createdAt":%q}}`, claim.CloudID, claim.Labels[boxCreationLabel])}}
 			runner := &releaseCommandRunner{configPath: t.TempDir() + "/config.json", outcomes: map[string][]commandOutcome{
-				"info": {info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
+				"info": {info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
 				"delete":   {deletionOutcome(testDeletionID, claim.CloudID, "box", "pending")},
 				"deletion": {test.poll},
 				"list":     {{result: core.LocalCommandResult{Stderr: "confirmation unavailable"}, err: errors.New("exit status 1")}},
@@ -153,7 +153,7 @@ func TestReleaseCompletedNativeDeletionRetainsWitnessUntilConfirmation(t *testin
 	_, _, claim, _ := ownedFixture(t)
 	info := commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"box":{"id":%q,"createdAt":%q}}`, claim.CloudID, claim.Labels[boxCreationLabel])}}
 	runner := &releaseCommandRunner{configPath: t.TempDir() + "/config.json", outcomes: map[string][]commandOutcome{
-		"info": {info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
+		"info": {info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
 		"delete":   {deletionOutcome(testDeletionID, claim.CloudID, "box", "pending")},
 		"deletion": {deletionOutcome(testDeletionID, claim.CloudID, "box", "blocked"), deletionOutcome(testDeletionID, claim.CloudID, "box", "completed")},
 		"list":     {{result: core.LocalCommandResult{Stderr: "confirmation unavailable"}, err: errors.New("exit status 1")}},
@@ -186,7 +186,7 @@ func TestReleaseMalformedAcceptanceDoesNotRecordOperation(t *testing.T) {
 			_, _, claim, _ := ownedFixture(t)
 			info := commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"box":{"id":%q,"createdAt":%q}}`, claim.CloudID, claim.Labels[boxCreationLabel])}}
 			runner := &releaseCommandRunner{configPath: t.TempDir() + "/config.json", outcomes: map[string][]commandOutcome{
-				"info": {info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}}, "delete": {{result: core.LocalCommandResult{Stdout: response}}},
+				"info": {info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}}, "delete": {{result: core.LocalCommandResult{Stdout: response}}},
 			}}
 			c := &client{apiKey: "box_test", apiURL: "https://ascii.dev", home: t.TempDir(), cliPath: "box", runner: runner}
 			if err := releaseClaimedBox(context.Background(), c, claim, nil); err == nil {
@@ -260,7 +260,7 @@ func TestReleasePendingReferenceRechecksObservableBoxInsideFence(t *testing.T) {
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease, GuardedRemoteCleanup: func(context.Context, core.LeaseTarget) { teardown = true }}); err == nil {
 		t.Fatal("earlier completion read replaced release-fence verification")
 	}
-	if lookups != 2 || reads != 1 || teardown || len(f.deletedIDs) != 0 || len(f.prepareIDs) != 0 {
+	if lookups != 3 || reads != 1 || teardown || len(f.deletedIDs) != 0 || len(f.prepareIDs) != 0 {
 		t.Fatalf("unsafe pending retry: reads=%d teardown=%t deleted=%v prepared=%v", reads, teardown, f.deletedIDs, f.prepareIDs)
 	}
 	assertClaimRetained(t, claim)
@@ -305,7 +305,7 @@ func TestReleasePendingDeletionSurvivesTimeoutAndRetries(t *testing.T) {
 		b, _, claim, _ := ownedFixture(t)
 		info := commandOutcome{result: core.LocalCommandResult{Stdout: fmt.Sprintf(`{"box":{"id":%q,"createdAt":%q}}`, claim.CloudID, claim.Labels[boxCreationLabel])}}
 		runner := &releaseCommandRunner{configPath: t.TempDir() + "/config.json", outcomes: map[string][]commandOutcome{
-			"info": {info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
+			"info": {info, info, info, info, info}, "stop": {{result: core.LocalCommandResult{}}},
 			"delete": {deletionOutcome(testDeletionID, claim.CloudID, "box", "pending")},
 		}}
 		c := &client{apiKey: "box_test", apiURL: "https://ascii.dev", home: t.TempDir(), cliPath: "box", runner: runner, releasePollInterval: time.Hour}
@@ -317,7 +317,7 @@ func TestReleasePendingDeletionSurvivesTimeoutAndRetries(t *testing.T) {
 		}
 		pending := assertPendingDeletionRetained(t, claim, testDeletionID)
 		runner.outcomes["deletion"] = []commandOutcome{deletionOutcome(testDeletionID, claim.CloudID, "box", "blocked")}
-		runner.outcomes["info"] = []commandOutcome{info}
+		runner.outcomes["info"] = []commandOutcome{info, info}
 		commandCount := len(runner.commands)
 		if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: claim.LeaseID, ReleaseOnly: true}); err == nil || !strings.Contains(err.Error(), "phase=deletion-operation") || !strings.Contains(err.Error(), "last_observed_status=blocked") {
 			t.Fatalf("blocked operation lost its diagnostic or was treated as completed: %v", err)

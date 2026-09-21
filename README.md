@@ -426,13 +426,17 @@ CRABBOX_BIN=./bin/crabbox scripts/live-firecracker-smoke.sh
 CI runs the full gate (gofmt, vet, race tests, all Go modules, coverage
 threshold, repository script tests, docs link/build check, GoReleaser snapshot, and Worker
 lint/typecheck/tests/build) on every push and PR. The required `Go` check aggregates
-three independent 30-minute jobs: `Go test` (formatting, vet, deadcode, full race
-suite, Linux supervision proof, and build), `Go modules` (normal tests in every
-module, including the root), and `Go coverage` (90% core coverage threshold).
-The race suite and coverage collection use a 20-minute package timeout;
-all-module normal tests use a 15-minute package timeout.
-Use the explicit timeout locally too: the CLI race suite can exceed Go's default
-10-minute package deadline even when its individual tests pass.
+`Go test`, `Go modules` (normal tests in every module, including the root), and
+`Go coverage` (90% core coverage threshold). `Go test` requires four parallel CLI
+race shards and `Go core` (all other race tests, formatting, vet, deadcode,
+Linux supervision proof, and build). Shards discover tests from Go's test list,
+including examples and fuzz seeds; new tests need no manual assignment.
+Each race shard has a 10-minute package timeout. Coverage uses 20 minutes and
+all-module normal tests use 15 minutes. The full local race command above keeps
+a 20-minute timeout because it runs the CLI package without sharding.
+Go build and module caches are keyed by runner OS/architecture, Go version, and
+all module dependency checksums. Failed, canceled, or skipped lanes fail their
+aggregate check; required check names remain stable.
 Production releases use a serialized, draft-first process: preserve and verify
 the signed tag, build and
 Developer ID sign/notarize the macOS candidates locally, verify the exact draft

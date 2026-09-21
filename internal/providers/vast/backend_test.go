@@ -27,6 +27,7 @@ type fakeVastAPI struct {
 	listErr                 error
 	createErr               error
 	getErr                  error
+	getFn                   func(context.Context, int) (vastInstance, error)
 	manageErr               error
 	destroyErr              error
 	destroyFn               func()
@@ -109,7 +110,10 @@ func (f *fakeVastAPI) CreateInstance(_ context.Context, offerID int, input vastC
 	return vastCreateInstanceResponse{Success: true, NewContract: item.ID, Instance: item}, nil
 }
 
-func (f *fakeVastAPI) GetInstance(_ context.Context, id int) (vastInstance, error) {
+func (f *fakeVastAPI) GetInstance(ctx context.Context, id int) (vastInstance, error) {
+	if f.getFn != nil {
+		return f.getFn(ctx, id)
+	}
 	if f.getErr != nil {
 		return vastInstance{}, f.getErr
 	}
@@ -206,7 +210,7 @@ func (f *fakeVastAPI) DetachInstanceSSHKey(_ context.Context, id int, keyID stri
 	return f.detachErr
 }
 
-func newTestBackend(t *testing.T, api *fakeVastAPI) *backend {
+func newTestBackend(t *testing.T, api vastAPI) *backend {
 	t.Helper()
 	testutil.IsolateUserDirs(t)
 	cfg := core.BaseConfig()
@@ -230,6 +234,129 @@ func newTestBackend(t *testing.T, api *fakeVastAPI) *backend {
 	b.runSSH = func(context.Context, core.SSHTarget, string) error { return nil }
 	b.sleep = func(context.Context, time.Duration) error { return nil }
 	return b
+}
+
+func TestWaitForInstanceReadyStopsBeforeCanceledRead(t *testing.T) {
+	cause := errors.New("caller stopped")
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(cause)
+	api := &fakeVastAPI{getFn: func(context.Context, int) (vastInstance, error) {
+		t.Fatal("canceled readiness initiated a read")
+		return vastInstance{}, nil
+	}}
+	b := newTestBackend(t, api)
+	_, err := b.waitForInstanceReady(ctx, api, 100)
+	if !errors.Is(err, cause) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err=%v, want caller cause and cancellation", err)
+	}
+}
+
+func TestWaitForInstanceReadyBoundsObservationsAndSleep(t *testing.T) {
+	for _, phase := range []string{"read Err", "read Cause", "sleep"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			api := &fakeVastAPI{getFn: func(ctx context.Context, _ int) (vastInstance, error) {
+				if phase == "sleep" {
+					return vastInstance{Status: "loading"}, nil
+				}
+				<-ctx.Done()
+				if phase == "read Cause" {
+					return vastInstance{}, context.Cause(ctx)
+				}
+				return vastInstance{}, ctx.Err()
+			}}
+			b := newTestBackend(t, api)
+			b.pollTimeout = 20 * time.Millisecond
+			b.rt.Clock = &lifecycleClock{current: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+			b.sleep = func(ctx context.Context, _ time.Duration) error {
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			_, err := b.waitForInstanceReady(ctx, api, 100)
+			var exit core.ExitError
+			if !core.AsExitError(err, &exit) || exit.Code != 5 || !strings.Contains(err.Error(), "timed out waiting for Vast instance 100 to expose SSH") || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("err=%v, want bounded readiness timeout with deadline identity", err)
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("parent guard expired before readiness budget: %v", ctx.Err())
+			}
+		})
+	}
+}
+
+func TestWaitForInstanceReadyPreservesCallerCause(t *testing.T) {
+	for _, phase := range []string{"read", "sleep"} {
+		t.Run(phase, func(t *testing.T) {
+			cause := errors.New("private caller cancellation")
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			api := &fakeVastAPI{getFn: func(ctx context.Context, _ int) (vastInstance, error) {
+				if phase == "read" {
+					cancel(cause)
+					return vastInstance{}, ctx.Err()
+				}
+				return vastInstance{Status: "loading"}, nil
+			}}
+			b := newTestBackend(t, api)
+			b.sleep = func(ctx context.Context, _ time.Duration) error {
+				cancel(cause)
+				return ctx.Err()
+			}
+			_, err := b.waitForInstanceReady(ctx, api, 100)
+			if !errors.Is(err, cause) || !errors.Is(err, context.Canceled) {
+				t.Fatalf("err=%v, want custom cause and context cancellation", err)
+			}
+			if strings.Contains(err.Error(), cause.Error()) {
+				t.Fatalf("diagnostic exposed private context cause: %v", err)
+			}
+		})
+	}
+}
+
+func TestWaitForInstanceReadyPreservesCompletedObservation(t *testing.T) {
+	for _, outcome := range []string{"ready", "terminal", "API failure", "client deadline"} {
+		t.Run(outcome, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			apiErr := &vastAPIError{StatusCode: 403, Status: "403 Forbidden"}
+			api := &fakeVastAPI{getFn: func(context.Context, int) (vastInstance, error) {
+				if outcome != "client deadline" {
+					cancel()
+				}
+				switch outcome {
+				case "ready":
+					return vastInstance{ID: 100, Status: "running", SSHHost: "203.0.113.1", SSHPort: 2222}, nil
+				case "terminal":
+					return vastInstance{ID: 100, Status: "exited"}, nil
+				case "API failure":
+					return vastInstance{}, apiErr
+				default:
+					return vastInstance{}, context.DeadlineExceeded
+				}
+			}}
+			b := newTestBackend(t, api)
+			got, err := b.waitForInstanceReady(ctx, api, 100)
+			switch outcome {
+			case "ready":
+				if err != nil || got.ID != 100 {
+					t.Fatalf("got=%+v err=%v", got, err)
+				}
+			case "terminal":
+				if err == nil || !strings.Contains(err.Error(), "reached terminal status exited") {
+					t.Fatalf("err=%v", err)
+				}
+			case "API failure":
+				if err != apiErr {
+					t.Fatalf("err=%v, want original API response", err)
+				}
+			case "client deadline":
+				if err != context.DeadlineExceeded {
+					t.Fatalf("err=%v, want independent client deadline", err)
+				}
+			}
+		})
+	}
 }
 
 func TestNewBackendPreservesExplicitGenericSSHUser(t *testing.T) {

@@ -80,10 +80,14 @@ type FixedCreateIntent struct {
 	FailedAttempts []string          `json:"failedAttempts,omitempty"`
 }
 
+const FixedAgentSandboxClaimProvider = "agent-sandbox-fixed-v1"
+
 const FixedAWSClaimProvider = "aws-fixed-v1"
 const FixedMachine0ClaimProvider = "machine0-fixed-v1"
 const FixedDaytonaClaimProvider = "daytona-fixed-v1"
 const FixedLocalContainerClaimProvider = "local-container-fixed-v1"
+const FixedParallelsClaimProvider = "parallels-fixed-v1"
+const FixedProxmoxClaimProvider = "proxmox-fixed-v1"
 
 const maxLocalClaimInventoryFileBytes int64 = 1 * 1024 * 1024
 
@@ -1308,6 +1312,8 @@ func fsyncDir(dir string) {
 
 func canonicalClaimProvider(provider string) string {
 	switch strings.TrimSpace(provider) {
+	case FixedAgentSandboxClaimProvider:
+		return "agent-sandbox"
 	case FixedAWSClaimProvider:
 		return "aws"
 	case FixedMachine0ClaimProvider:
@@ -1316,6 +1322,10 @@ func canonicalClaimProvider(provider string) string {
 		return "daytona"
 	case FixedLocalContainerClaimProvider:
 		return "local-container"
+	case FixedParallelsClaimProvider:
+		return "parallels"
+	case FixedProxmoxClaimProvider:
+		return "proxmox"
 	case "exec-provider":
 		return "external"
 	}

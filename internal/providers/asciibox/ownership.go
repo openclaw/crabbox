@@ -209,11 +209,20 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 func (b *backend) ReleaseLeaseConnectionCleanupSafe() bool { return false }
 
 func releaseClaimedBox(ctx context.Context, client api, claim core.LeaseClaim, beforeRelease func(boxData)) error {
+	_, err := releaseClaimedBoxWithOutcome(ctx, client, claim, beforeRelease)
+	return err
+}
+
+func releaseClaimedBoxWithOutcome(ctx context.Context, client api, claim core.LeaseClaim, beforeRelease func(boxData)) (core.ReleaseLeaseOutcome, error) {
+	forgotten, err := core.ForgetAbsentLeaseClaim(ctx, boxAbsenceVerifier(client), claim)
+	if err != nil || forgotten {
+		return core.ReleaseLeaseOutcome{Terminal: forgotten, ForgottenLocally: forgotten}, err
+	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return core.ReleaseLeaseOutcome{}, err
 	}
 	nativeCompleted := false
-	_, _, _, err := core.ResolveLeaseClaimAfterActionIfUnchanged(claim.LeaseID, claim, func() error {
+	_, _, _, err = core.ResolveLeaseClaimAfterActionIfUnchanged(claim.LeaseID, claim, func() error {
 		return releaseExactBox(ctx, client, boxFromClaim(claim), beforeRelease, func() {
 			nativeCompleted = true
 		})
@@ -237,16 +246,13 @@ func releaseClaimedBox(ctx context.Context, client api, claim core.LeaseClaim, b
 		labels[boxDeletionOperationBindingLabel] = boxDeletionOperationBinding(claim, incomplete.operation.ID)
 		return labels, false
 	})
-	return err
+	return core.ReleaseLeaseOutcome{Terminal: err == nil}, err
 }
 
 func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRelease func(boxData), onDeletionCompleted func()) error {
-	fresh, absent, err := exactBoxForRelease(ctx, client, expected)
+	fresh, err := exactBoxForRelease(ctx, client, expected)
 	if err != nil {
 		return err
-	}
-	if absent {
-		return nil
 	}
 	if err := validateBoxIdentity(fresh, expected); err != nil {
 		return err
@@ -281,7 +287,7 @@ func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRe
 		onDeletionCompleted()
 	}
 	// This attempt must finish its accepted operation before confirmation.
-	// A later release can independently reconcile exact absence.
+	// A later release uses core to reconcile exact absence.
 	for {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("ascii-box cleanup phase=inventory-confirmation; retaining claim: %w", err)
@@ -313,62 +319,40 @@ func releaseExactBox(ctx context.Context, client api, expected boxData, beforeRe
 	}
 }
 
-func exactBoxForRelease(ctx context.Context, client api, expected boxData) (boxData, bool, error) {
+func exactBoxForRelease(ctx context.Context, client api, expected boxData) (boxData, error) {
 	if err := ctx.Err(); err != nil {
-		return boxData{}, false, err
+		return boxData{}, err
 	}
 	fresh, err := client.GetBox(ctx, expected.ID)
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return boxData{}, false, fmt.Errorf("ascii-box cleanup phase=ownership-check; retaining claim: %w", ctxErr)
+		return boxData{}, fmt.Errorf("ascii-box cleanup phase=ownership-check; retaining claim: %w", ctxErr)
 	}
 	if err == nil {
 		if err := validateBoxIdentity(fresh, expected); err != nil {
-			return boxData{}, false, err
+			return boxData{}, err
 		}
 		if expected.deletionOperationID != "" {
 			operation, operationErr := client.GetDeletionOperation(ctx, expected.ID, expected.deletionOperationID)
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return boxData{}, false, fmt.Errorf("ascii-box cleanup phase=deletion-operation; retaining claim: %w", ctxErr)
+				return boxData{}, fmt.Errorf("ascii-box cleanup phase=deletion-operation; retaining claim: %w", ctxErr)
 			}
 			if operationErr != nil {
-				return boxData{}, false, fmt.Errorf("ascii-box cleanup phase=deletion-operation lookup; retaining claim: %w", operationErr)
+				return boxData{}, fmt.Errorf("ascii-box cleanup phase=deletion-operation lookup; retaining claim: %w", operationErr)
 			}
 			if err := validateBoxDeletionOperation(operation, expected.ID, expected.deletionOperationID); err != nil {
-				return boxData{}, false, err
+				return boxData{}, err
 			}
 			if operation.Status != "completed" {
-				return boxData{}, false, core.Exit(2, "ascii-box cleanup phase=deletion-operation operation=%s last_observed_status=%s; retaining claim", operation.ID, operation.Status)
+				return boxData{}, core.Exit(2, "ascii-box cleanup phase=deletion-operation operation=%s last_observed_status=%s; retaining claim", operation.ID, operation.Status)
 			}
 			// Recheck the recorded operation inside the release fence; a reference
 			// or an earlier resolution read is not completion authority.
 			expected.deletionCompleted = true
 		}
 		if expected.deletionCompleted {
-			return boxData{}, false, core.Exit(2, "ascii-box %s is still observable after recorded deletion completion; retaining claim", expected.ID)
+			return boxData{}, core.Exit(2, "ascii-box %s is still observable after recorded deletion completion; retaining claim", expected.ID)
 		}
-		return fresh, false, nil
+		return fresh, nil
 	}
-	if !isNotFound(err) {
-		return boxData{}, false, fmt.Errorf("ascii-box ownership lookup; retaining claim: %w", err)
-	}
-	// Exact native not-found plus complete inventory absence permits removal
-	// of this unchanged local claim without
-	// repeating a mutation or waiting on an obsolete operation record.
-	boxes, listErr := client.ListBoxes(ctx, true)
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return boxData{}, false, fmt.Errorf("ascii-box cleanup phase=inventory-confirmation; retaining claim: %w", ctxErr)
-	}
-	if listErr != nil {
-		return boxData{}, false, fmt.Errorf("ascii-box cleanup phase=inventory-confirmation; retaining claim: %w", listErr)
-	}
-	for _, box := range boxes {
-		if box.ID != expected.ID {
-			continue
-		}
-		if identityErr := validateBoxIdentity(box, expected); identityErr != nil {
-			return boxData{}, false, identityErr
-		}
-		return boxData{}, false, fmt.Errorf("ascii-box ownership lookup; retaining claim: %w", err)
-	}
-	return boxData{}, true, nil
+	return boxData{}, fmt.Errorf("ascii-box ownership lookup; retaining claim: %w", err)
 }

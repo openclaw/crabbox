@@ -20,7 +20,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	regexp2syntax "github.com/dlclark/regexp2/syntax"
+	regexp2syntax "github.com/dlclark/regexp2/v2/syntax"
 	jsonschema "github.com/steipete/jsonschema/v6"
 )
 
@@ -681,7 +681,7 @@ func boundedRegexpProgramWork(expression string) (int, error) {
 const ecmaWhitespaceClass = `\x{0009}-\x{000D}\x{0020}\x{00A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}`
 
 func translateECMARegexp(expression string) (string, error) {
-	if _, err := regexp2syntax.Parse(expression, regexp2syntax.ECMAScript|regexp2syntax.Unicode); err != nil {
+	if _, err := regexp2syntax.Parse(expression, regexp2syntax.ParseOptions{RegexOptions: regexp2syntax.ECMAScript | regexp2syntax.Unicode}); err != nil {
 		return "", err
 	}
 	var translated strings.Builder

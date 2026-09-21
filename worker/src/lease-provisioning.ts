@@ -268,6 +268,8 @@ export class LeaseProvisioningController {
           await transaction.delete(key);
           continue;
         }
+        // Pool access has its own controller but shares the runtime's ordered wake index.
+        if (entry.kind === "pool-access") continue;
         const leaseID =
           typeof entry.operationID === "string"
             ? entry.operationID

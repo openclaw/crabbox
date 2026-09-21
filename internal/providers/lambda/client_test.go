@@ -96,6 +96,34 @@ func TestClientPreservesErrorCodeAndRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestClientAPIErrorDiagnosticRedaction(t *testing.T) {
+	const token = "fixture-lambda-secret-token"
+	c := &Client{token: token}
+	readErr := errors.New("read interrupted with " + token)
+	for _, tc := range []struct {
+		name, body, code string
+		readErr          error
+	}{
+		{name: "credential across cutoff", body: strings.Repeat("x", 390) + token},
+		{name: "plain read diagnostic", body: "partial response", readErr: readErr},
+		{name: "structured read diagnostic", body: `{"error":{"code":"rate-limit","message":"retry later"}}`, code: "rate-limit", readErr: readErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := c.decodeAPIError("GET /regions", http.StatusForbidden, []byte(tc.body), tc.readErr)
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.Status != http.StatusForbidden || apiErr.Code != tc.code {
+				t.Fatalf("typed status/code changed: %v", err)
+			}
+			if strings.Contains(apiErr.Body, token[:10]) || !strings.Contains(apiErr.Body, "<redacted>") {
+				t.Fatalf("unsafe API diagnostic: %q", apiErr.Body)
+			}
+			if errors.Is(err, readErr) {
+				t.Fatal("read failure overrode API error classification")
+			}
+		})
+	}
+}
+
 func TestLaunchRequestShape(t *testing.T) {
 	req := LaunchInstanceRequest{
 		RegionName:          "us-west-1",

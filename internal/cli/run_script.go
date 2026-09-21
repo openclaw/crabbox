@@ -151,17 +151,22 @@ func remoteRunScriptCommandWithEnvFiles(workdir string, env map[string]string, e
 	var b strings.Builder
 	writeRemoteCommandPrefix(&b, workdir, env, envFiles)
 	// Uploaded scripts retain their login startup directory semantics.
-	arguments := append([]string{script.RemotePath}, args...)
 	if script.Shebang {
-		b.WriteString(remotePortableShellInvocation(`exec "$@"`, arguments))
+		b.WriteString(remotePortableShellInvocation(`exec "$@"`, nil))
 	} else {
 		b.WriteString("bash -lc ")
 		b.WriteString(shellQuote(`exec bash "$@"`))
 		b.WriteString(" bash")
-		for _, argument := range arguments {
-			b.WriteByte(' ')
-			b.WriteString(shellQuote(argument))
-		}
+	}
+	b.WriteByte(' ')
+	if !strings.HasPrefix(script.RemotePath, "/") {
+		// Use the workspace captured before env files or login startup change cwd.
+		b.WriteString(`"$1"/`)
+	}
+	b.WriteString(shellQuote(script.RemotePath))
+	for _, arg := range args {
+		b.WriteByte(' ')
+		b.WriteString(shellQuote(arg))
 	}
 	return b.String() + ")"
 }

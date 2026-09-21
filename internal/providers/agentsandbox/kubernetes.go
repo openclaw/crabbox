@@ -362,6 +362,14 @@ func (c *kubectlKubernetesClient) Delete(
 	ref resourceRef,
 	namespace, name, uid string,
 ) error {
+	return c.deleteWithPropagation(ctx, ref, namespace, name, uid, "Background")
+}
+
+func (c *kubectlKubernetesClient) DeleteForeground(ctx context.Context, ref resourceRef, namespace, name, uid string) error {
+	return c.deleteWithPropagation(ctx, ref, namespace, name, uid, "Foreground")
+}
+
+func (c *kubectlKubernetesClient) deleteWithPropagation(ctx context.Context, ref resourceRef, namespace, name, uid, propagation string) error {
 	if err := validateKubernetesObjectName(ref.qualifiedResource(), name); err != nil {
 		return err
 	}
@@ -375,7 +383,7 @@ func (c *kubectlKubernetesClient) Delete(
 		"preconditions": map[string]string{
 			"uid": uid,
 		},
-		"propagationPolicy": "Background",
+		"propagationPolicy": propagation,
 	})
 	if err != nil {
 		return fmt.Errorf("encode delete options for %s/%s: %w", ref.qualifiedResource(), name, err)

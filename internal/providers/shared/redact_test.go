@@ -1,9 +1,33 @@
 package shared
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestRedactedResponseBodyPreservesFormattingAndAdapterPolicy(t *testing.T) {
+	redact := func(value string) string { return strings.ReplaceAll(value, "synthetic-secret", "<hidden>") }
+	for _, tc := range []struct {
+		name, body string
+		readErr    error
+		limit      int
+		want       string
+	}{
+		{name: "trimmed body", body: "  quota exceeded \n", limit: 400, want: "quota exceeded"},
+		{name: "redact before cutoff", body: "prefix synthetic-secret", limit: 15, want: "prefix <hidden>"},
+		{name: "no cutoff", body: "synthetic-secret", want: "<hidden>"},
+		{name: "read error only", readErr: errors.New("synthetic-secret interrupted"), limit: 400, want: "response body read failed: <hidden> interrupted"},
+		{name: "body and read error", body: "partial", readErr: errors.New("synthetic-secret interrupted"), limit: 400, want: "partial; response body read failed: <hidden> interrupted"},
+		{name: "read diagnostic outside cutoff", body: "long body", readErr: errors.New("unexpected EOF"), limit: 4, want: "long; response body read failed: unexpected EOF"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RedactedResponseBody([]byte(tc.body), tc.readErr, tc.limit, redact); got != tc.want {
+				t.Fatalf("got=%q want=%q", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestRedactErrorSecrets(t *testing.T) {
 	secret := "provider-secret-token"

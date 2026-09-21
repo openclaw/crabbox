@@ -73,6 +73,7 @@ import {
 } from "../src/provider-provisioning";
 import { providerReconciliationFingerprint } from "../src/provider-reconciliation";
 import { ProvisioningAttemptsError } from "../src/provisioning-attempts";
+import { setPoolWake } from "../src/ready-pool-wake";
 import { verifyTerminalReceipt } from "../src/run-receipt";
 import {
   runtimeAdapterDesktopRelayTimeoutMs,
@@ -52789,3 +52790,422 @@ function hetznerDeleteRetryFixture() {
     },
   };
 }
+
+describe("portable bounded ready-pool access", () => {
+  const publicKey =
+    "ssh-ed25519 " +
+    Buffer.concat([
+      Buffer.from("0000000b7373682d6564323535313900000020", "hex"),
+      Buffer.alloc(32, 7),
+    ]).toString("base64");
+
+  async function fixture() {
+    const storage = new MemoryStorage();
+    const lease = typedReadyPoolLease();
+    storage.seed(`lease:${lease.id}`, lease);
+    const identity = await typedReadyPoolIdentity();
+    const capability = {
+      enroll: vi.fn<() => Promise<import("../src/ready-pool-access").PoolAccessBinding>>(
+        async () => ({
+          leaseID: lease.id,
+          provider: "aws",
+          resourceID: lease.cloudID,
+          scope: lease.region!,
+          user: lease.sshUser,
+        }),
+      ),
+      install: vi.fn<() => Promise<void>>(async () => {}),
+      revoke: vi.fn<() => Promise<{ destroyed: boolean }>>(async () => ({ destroyed: false })),
+    };
+    const provider = {
+      ...fakeProvider(undefined, { provider: "aws" }),
+      poolAccess: () => capability,
+    };
+    const fleet = testFleet(storage, { aws: provider }, { CRABBOX_PORTABLE_POOLS_ENABLED: "true" });
+    const headers = typedReadyPoolHeaders();
+    const post = (action: string, body: Record<string, unknown> = {}, overrides = headers) =>
+      fleet.fetch(
+        request("POST", `/v1/ready-pools/builders/${action}`, { headers: overrides, body }),
+      );
+    const criteria = { ...typedReadyPoolMetadata(), identity, compatibilityKey: "linux-16-vcpu" };
+    const register = () => post("register-access", { ...criteria, leaseID: lease.id });
+    const borrow = () => post("borrow-access", { ...criteria, publicKey });
+    const issue = async () => {
+      expect((await register()).status).toBe(200);
+      const response = await borrow();
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        borrowToken: string;
+        receiptToken: string;
+        grant: { id: string; expiresAt: string };
+        entry: ReadyPoolEntry;
+      };
+      const receipt = {
+        leaseID: lease.id,
+        borrowToken: body.borrowToken,
+        receiptToken: body.receiptToken,
+        publicKey,
+      };
+      return { body, receipt };
+    };
+    return {
+      storage,
+      lease,
+      identity,
+      capability,
+      fleet,
+      headers,
+      post,
+      criteria,
+      register,
+      borrow,
+      issue,
+      provider,
+    };
+  }
+
+  it("issues hashed pending authority, acknowledges once, and never renews through heartbeat", async () => {
+    const f = await fixture();
+    const { body, receipt } = await f.issue();
+    expect(f.capability.install).not.toHaveBeenCalled();
+    const persisted = JSON.stringify([
+      ...(await f.storage.list({ prefix: "portable-ready-pool-v1" })),
+    ]);
+    expect(persisted).not.toContain(body.borrowToken);
+    expect(persisted).not.toContain(body.receiptToken);
+    expect(persisted).not.toContain("PRIVATE KEY");
+    expect((await f.post("ack-access", receipt)).status).toBe(200);
+    expect((await f.post("ack-access", receipt)).status).toBe(200);
+    expect(f.capability.install).toHaveBeenCalledTimes(1);
+    const heartbeat = await f.post("heartbeat-access", receipt);
+    expect(heartbeat.status).toBe(200);
+    expect(await heartbeat.json()).toMatchObject({
+      grant: { expiresAt: body.grant.expiresAt, state: "active" },
+    });
+    expect((await f.borrow()).status).toBe(409);
+    expect([...(await f.storage.list({ prefix: "typed-ready-pool" }))]).toEqual([]);
+    expect([...(await f.storage.list({ prefix: "ready-pool:" }))]).toEqual([]);
+  });
+
+  it("binds receipts to owner, lease, public key and current authorization", async () => {
+    const f = await fixture();
+    const { receipt } = await f.issue();
+    expect((await f.post("ack-access", { ...receipt, leaseID: "cbx_000000000001" })).status).toBe(
+      403,
+    );
+    expect((await f.post("ack-access", { ...receipt, receiptToken: "wrong" })).status).toBe(403);
+    expect(
+      (await f.post("ack-access", { ...receipt, publicKey: publicKey.replace("BwcH", "AAAA") }))
+        .status,
+    ).toBe(409);
+    expect(
+      (await f.post("ack-access", receipt, { ...f.headers, "x-crabbox-owner": "bob@example.com" }))
+        .status,
+    ).toBe(403);
+    f.storage.seed(`lease:${f.lease.id}`, { ...f.lease, owner: "bob@example.com" });
+    expect((await f.post("ack-access", receipt)).status).toBe(403);
+    expect(f.capability.install).not.toHaveBeenCalled();
+    expect(f.storage.value(`portable-ready-pool-v1-grant:${f.lease.id}`)).toMatchObject({
+      state: "revoking",
+    });
+  });
+
+  it("retains capacity and cleanup across uncertain installation and expired display retention", async () => {
+    const f = await fixture();
+    const { receipt } = await f.issue();
+    f.capability.install.mockRejectedValue(new Error("SSM reply lost"));
+    f.capability.revoke.mockRejectedValue(new Error("fencing uncertain"));
+    expect((await f.post("ack-access", receipt)).status).toBe(502);
+    const entryKey = `portable-ready-pool-v1:builders:${f.lease.id}`;
+    f.storage.seed(entryKey, {
+      ...f.storage.value<ReadyPoolEntry>(entryKey),
+      updatedAt: new Date(Date.now() - 25 * 60 * 60_000).toISOString(),
+    });
+    const response = await f.post("reconcile-access", {
+      ...f.criteria,
+      minReady: 1,
+      maxReady: 1,
+      claim: true,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      capped: true,
+      counts: { quarantined: 1, inFlight: 0 },
+    });
+    expect(f.storage.value(entryKey)).toBeDefined();
+    expect((await f.post("register-identity", { ...f.criteria, leaseID: f.lease.id })).status).toBe(
+      409,
+    );
+    await f.storage.transaction((storage) => setPoolWake(storage, f.lease.id, Date.now() - 1));
+    await f.fleet.alarm();
+    expect(f.capability.revoke).toHaveBeenCalled();
+    expect(f.storage.value(`portable-ready-pool-v1-grant:${f.lease.id}`)).toMatchObject({
+      state: "revoking",
+    });
+  });
+
+  it("requires provider fencing before return becomes ready, then issues a fresh generation", async () => {
+    const f = await fixture();
+    const { body, receipt } = await f.issue();
+    await f.post("ack-access", receipt);
+    f.capability.revoke.mockRejectedValueOnce(new Error("reboot accepted, boot not yet changed"));
+    const returning = await f.post("return-access", { ...receipt, identity: f.identity });
+    expect(returning.status).toBe(202);
+    expect((await f.borrow()).status).toBe(409);
+    const returned = await f.post("return-access", { ...receipt, identity: f.identity });
+    expect(await returned.json()).toMatchObject({
+      entry: { state: "ready" },
+      grant: { state: "revoked" },
+    });
+    const reborrowed = await f.borrow();
+    expect(reborrowed.status).toBe(200);
+    const next = (await reborrowed.json()) as {
+      grant: { id: string; generation: number };
+      borrowToken: string;
+    };
+    expect(next.grant).toMatchObject({ generation: 2 });
+    expect(next.grant.id).not.toBe(body.grant.id);
+    expect(next.borrowToken).not.toBe(receipt.borrowToken);
+    expect((await f.post("ack-access", receipt)).status).toBe(403);
+  });
+
+  it("fences delayed installation invalidated by return without publishing it", async () => {
+    const f = await fixture();
+    const { receipt } = await f.issue();
+    let started!: () => void;
+    const start = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let complete!: () => void;
+    f.capability.install.mockImplementation(async () => {
+      started();
+      await new Promise<void>((resolve) => {
+        complete = resolve;
+      });
+    });
+    const ack = f.post("ack-access", receipt);
+    await start;
+    f.capability.revoke.mockRejectedValueOnce(new Error("cleanup in progress"));
+    expect((await f.post("return-access", { ...receipt, identity: f.identity })).status).toBe(202);
+    complete();
+    expect((await ack).status).toBe(409);
+    expect(f.storage.value(`portable-ready-pool-v1-grant:${f.lease.id}`)).toMatchObject({
+      state: "revoking",
+      result: "drain",
+    });
+  });
+
+  it("expires at equality despite healthy heartbeats and caps authority by token expiry", async () => {
+    const f = await fixture();
+    expect((await f.register()).status).toBe(200);
+    const deadline = new Date(Math.floor(Date.now() / 1000) * 1000 + 30_000).toISOString();
+    const response = await f.post(
+      "borrow-access",
+      { ...f.criteria, publicKey },
+      { ...f.headers, "x-crabbox-token-expires-at": deadline },
+    );
+    const body = (await response.json()) as {
+      borrowToken: string;
+      receiptToken: string;
+      grant: { expiresAt: string };
+    };
+    expect(body.grant.expiresAt).toBe(deadline);
+    const receipt = {
+      leaseID: f.lease.id,
+      borrowToken: body.borrowToken,
+      receiptToken: body.receiptToken,
+      publicKey,
+    };
+    expect((await f.post("ack-access", receipt)).status).toBe(200);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.parse(deadline));
+    try {
+      expect((await f.post("heartbeat-access", receipt)).status).toBe(409);
+      expect(f.storage.value(`portable-ready-pool-v1-grant:${f.lease.id}`)).toMatchObject({
+        expiresAt: deadline,
+        state: "revoking",
+      });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("rolls back grant, entry, generation, counters and wake on a compound write failure", async () => {
+    const f = await fixture();
+    await f.register();
+    const beforeDue = [...(await f.storage.list({ prefix: "provisioning-due:" }))];
+    let counterWrites = 0;
+    f.storage.beforePut = async (key) => {
+      if (key.startsWith("portable-ready-pool-v1-counters:") && ++counterWrites === 2)
+        throw new Error("simulated storage failure");
+    };
+    expect((await f.borrow()).status).toBe(500);
+    expect([...(await f.storage.list({ prefix: "provisioning-due:" }))]).toEqual(beforeDue);
+    expect(f.storage.value(`portable-ready-pool-v1-grant:${f.lease.id}`)).toBeUndefined();
+    expect(f.storage.value(`portable-ready-pool-v1:builders:${f.lease.id}`)).toMatchObject({
+      state: "ready",
+    });
+    expect(f.storage.value(`portable-ready-pool-v1-lease:${f.lease.id}`)).toMatchObject({
+      generation: 0,
+    });
+  });
+
+  it("reuses concurrent capacity claims, hashes them, and checks size at registration and borrow", async () => {
+    const f = await fixture();
+    const responses = await Promise.all(
+      [1, 2, 3].map(() =>
+        f.post("reconcile-access", {
+          ...f.criteria,
+          serverType: f.lease.serverType,
+          minReady: 1,
+          maxReady: 1,
+          claim: true,
+        }),
+      ),
+    );
+    const bodies = (await Promise.all(responses.map((response) => response.json()))) as Array<{
+      claim?: { token: string };
+    }>;
+    const claims = bodies.flatMap((body) => (body.claim ? [body.claim] : []));
+    expect(claims).toHaveLength(1);
+    expect(
+      JSON.stringify([...(await f.storage.list({ prefix: "portable-ready-pool-v1-fill-claim:" }))]),
+    ).not.toContain(claims[0]!.token);
+    expect(
+      (
+        await f.post("register-access", {
+          ...f.criteria,
+          leaseID: f.lease.id,
+          fillClaimToken: claims[0]!.token,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (await f.post("borrow-access", { ...f.criteria, publicKey, serverType: "different-size" }))
+        .status,
+    ).toBe(409);
+    expect((await f.borrow()).status).toBe(200);
+  });
+
+  it("quarantines unacknowledged receipts, rotates near-TTL capacity, and retains cleanup after restart", async () => {
+    const f = await fixture();
+    const { receipt } = await f.issue();
+    const grantKey = `portable-ready-pool-v1-grant:${f.lease.id}`;
+    const stored = f.storage.value<import("../src/ready-pool-access").PoolAccessGrant>(grantKey)!;
+    f.storage.seed(grantKey, {
+      ...stored,
+      acknowledgementDeadline: new Date(Date.now() - 1).toISOString(),
+    });
+    f.capability.revoke.mockRejectedValue(new Error("provider unavailable"));
+    const restarted = testFleet(
+      f.storage,
+      { aws: f.provider },
+      { CRABBOX_PORTABLE_POOLS_ENABLED: "true" },
+    );
+    await f.storage.transaction((storage) => setPoolWake(storage, f.lease.id, Date.now() - 1));
+    await restarted.alarm();
+    expect(f.storage.value(grantKey)).toMatchObject({ state: "revoking" });
+    expect(f.capability.install).not.toHaveBeenCalled();
+    expect((await f.post("ack-access", receipt)).status).toBe(409);
+    const second = await fixture();
+    await second.register();
+    second.storage.seed(`lease:${second.lease.id}`, {
+      ...second.lease,
+      expiresAt: new Date(Date.now() + 30_000).toISOString(),
+    });
+    expect((await second.borrow()).status).toBe(409);
+    await second.storage.transaction((storage) =>
+      setPoolWake(storage, second.lease.id, Date.now() - 1),
+    );
+    await second.fleet.alarm();
+    expect(
+      second.storage.value<ReadyPoolEntry>(`portable-ready-pool-v1:builders:${second.lease.id}`)
+        ?.state,
+    ).not.toBe("ready");
+  });
+
+  it("rejects acknowledgement under shorter authorization and validates completion telemetry", async () => {
+    const f = await fixture();
+    const { receipt } = await f.issue();
+    const shorter = new Date(Date.now() + 10_000).toISOString();
+    expect(
+      (await f.post("ack-access", receipt, { ...f.headers, "x-crabbox-token-expires-at": shorter }))
+        .status,
+    ).toBe(403);
+    expect(f.capability.install).not.toHaveBeenCalled();
+    const other = await fixture();
+    const issued = await other.issue();
+    await other.post("ack-access", issued.receipt);
+    expect(
+      (
+        await other.post("return-access", {
+          ...issued.receipt,
+          identity: other.identity,
+          timing: { scrubMs: -1 },
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await other.post("return-access", {
+          ...issued.receipt,
+          identity: other.identity,
+          timing: { firstCommandMs: 100, scrubMs: 25, scrubFailed: false },
+        })
+      ).status,
+    ).toBe(200);
+    const metrics = await other.fleet.fetch(
+      request("GET", "/v1/ready-pools/builders/metrics-access", { headers: other.headers }),
+    );
+    expect(await metrics.json()).toMatchObject({
+      counters: { completionReports: 1, firstCommandMsTotal: 100, scrubMsTotal: 25 },
+    });
+  });
+
+  it("keeps cleanup retries scheduled and rejects re-registration of draining capacity", async () => {
+    const f = await fixture();
+    const { receipt } = await f.issue();
+    await f.post("ack-access", receipt);
+    f.storage.beforePut = async (key) => {
+      if (key === `lease:${f.lease.id}`) throw new Error("lease cleanup storage unavailable");
+    };
+    const returned = await f.post("return-access", { ...receipt, result: "drain" });
+    expect(returned.status).toBe(202);
+    expect(f.storage.value(`portable-ready-pool-v1-grant:${f.lease.id}`)).toMatchObject({
+      state: "revoking",
+    });
+    expect(
+      f.storage.value<{ at: number }>(`portable-ready-pool-v1-wake:${f.lease.id}`)!.at,
+    ).toBeGreaterThan(Date.now());
+    const other = await fixture();
+    await other.register();
+    const entryKey = `portable-ready-pool-v1:builders:${other.lease.id}`;
+    other.storage.seed(entryKey, {
+      ...other.storage.value<ReadyPoolEntry>(entryKey),
+      state: "draining",
+    });
+    const registered = await other.register();
+    expect(registered.status).toBe(409);
+    expect(await registered.json()).toMatchObject({ error: "portable_pool_cleanup_pending" });
+    expect(other.storage.value(entryKey)).toMatchObject({ state: "draining" });
+  });
+
+  it("fails closed on protocol conflicts, absent opt-in and unsupported providers", async () => {
+    const f = await fixture();
+    expect((await f.post("register-identity", { ...f.criteria, leaseID: f.lease.id })).status).toBe(
+      200,
+    );
+    expect((await f.register()).status).toBe(409);
+    expect(f.capability.enroll).not.toHaveBeenCalled();
+    const disabled = testFleet(f.storage, { aws: fakeProvider(undefined, { provider: "aws" }) });
+    expect(
+      (
+        await disabled.fetch(
+          request("POST", "/v1/ready-pools/builders/borrow-access", {
+            headers: f.headers,
+            body: { ...f.criteria, publicKey },
+          }),
+        )
+      ).status,
+    ).toBe(409);
+  });
+});

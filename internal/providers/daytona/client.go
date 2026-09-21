@@ -77,7 +77,7 @@ var newDaytonaClient = func(cfg core.Config, rt core.Runtime) (daytonaAPI, error
 func (c *daytonaSDKClient) fixedOrganization(ctx context.Context, allowResourceIdentity bool) (string, string, error) {
 	if !c.apiKey {
 		if c.orgID == "" {
-			return "", "", core.Exit(4, "Daytona fixed leases require a selected organization")
+			return "", "", core.Exit(4, "Daytona account binding requires a selected organization")
 		}
 		organization, _, err := c.api.OrganizationsAPI.GetOrganization(c.ctx(ctx), c.orgID).Execute()
 		if err != nil {
@@ -108,7 +108,7 @@ func (c *daytonaSDKClient) fixedOrganization(ctx context.Context, allowResourceI
 		return c.apiURL, organization, nil
 	}
 	if !allowResourceIdentity {
-		return "", "", core.Exit(4, "Daytona current API-key response does not expose organizationId; this API deployment cannot attest fixed cleanup with an API key; use an OAuth organization profile")
+		return "", "", core.Exit(4, "Daytona current API-key response does not expose organizationId; this API deployment cannot attest cleanup with an API key; use an OAuth organization profile")
 	}
 	// The public v0.190.0 server omits organizationId from current-key metadata.
 	// Preserve its resource-backed acquisition contract, never absence proof.
@@ -121,7 +121,7 @@ func (c *daytonaSDKClient) fixedOrganization(ctx context.Context, allowResourceI
 		return "", "", c.redactError(err)
 	}
 	if items == nil || len(items.GetItems()) != 1 {
-		return "", "", core.Exit(4, "Daytona API-key fixed leases need an existing sandbox to establish organization identity; use an authenticated Daytona CLI organization profile, or ordinary warmup without --lease-id")
+		return "", "", core.Exit(4, "Daytona API-key fixed leases need an existing sandbox to establish organization identity; use an authenticated Daytona CLI organization profile")
 	}
 	item := items.GetItems()[0]
 	if item.GetId() == "" || item.GetOrganizationId() == "" {

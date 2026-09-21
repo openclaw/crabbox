@@ -108,7 +108,7 @@ runcmd:
 %[10]s
 %[8]s
     touch /var/lib/crabbox/bootstrapped
-    crabbox-ready
+    retry crabbox-ready
     BOOT
 `, yamlSSHUser, yamlPublicKey, shellWorkRoot, portLines, readyChecks, writeFiles, shellSSHUser, bootstrap, readinessBootstrap, indentCloudInitRuncmd(sharedLinuxSSHRestart()), additionalConfig)
 }

@@ -155,9 +155,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (result core.Run
 				}
 			}
 			if shouldStop {
-				cleanupCtx, cancel := b.cleanupContext(ctx)
-				cleanupErr := b.deleteCurrentRunClaim(cleanupCtx, client, leaseID, claimName)
-				cancel()
+				cleanupErr := b.deleteCurrentRunClaim(ctx, client, leaseID, claimName)
 				if cleanupErr == nil {
 					custody = runClaimReleased
 				} else {
@@ -220,6 +218,11 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (result core.Run
 		if err := authorizeClaimScope(b.cfg, claim); err != nil {
 			return core.RunResult{}, err
 		}
+		if isFixedClaim(claim) {
+			if err := b.fixedReusable(ctx, client, claim); err != nil {
+				return core.RunResult{}, err
+			}
+		}
 		if err := authorizeAgentSandboxRepoClaim(claim, req.Repo.Root, req.Reclaim); err != nil {
 			return core.RunResult{}, err
 		}
@@ -251,6 +254,11 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (result core.Run
 			}
 			custody, err = b.readinessRunError(ctx, client, claim, claimName, err)
 			return core.RunResult{}, err
+		}
+		if isFixedClaim(claim) {
+			if err := validateFixedWorkloadPins(claim, ready); err != nil {
+				return core.RunResult{}, err
+			}
 		}
 		if err := claimLeaseForRepo(b.cfg, claim.LeaseID, claim.Slug, req.Repo, req.Reclaim); err != nil {
 			return core.RunResult{}, err
@@ -314,22 +322,47 @@ func (b *backend) deleteCurrentRunClaim(ctx context.Context, client kubernetesCl
 	if claim.LeaseID == "" {
 		return core.Exit(4, "agent-sandbox lease %s disappeared before release", leaseID)
 	}
+	if !isFixedClaim(claim) {
+		cleanupCtx, cancel := b.cleanupContext(ctx)
+		defer cancel()
+		ctx = cleanupCtx
+	}
 	return b.deleteOwnedClaim(ctx, client, claim, leaseID, claimName, false)
 }
 
 func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseView, error) {
-	client, err := b.client(ctx)
-	if err != nil {
-		return nil, err
-	}
+	var client kubernetesClient
 	claims, err := listAgentSandboxLeaseClaims()
 	if err != nil {
 		return nil, err
 	}
 	servers := make([]core.Server, 0, len(claims))
 	for _, claim := range claims {
-		if claim.Provider != providerName || claim.ProviderScope != claimScope(b.cfg) {
+		if (claim.Provider != providerName && !isFixedClaim(claim)) || claim.ProviderScope != claimScope(b.cfg) {
 			continue
+		}
+		if isFixedClaim(claim) {
+			if err := authorizeClaimScope(b.cfg, claim); err != nil {
+				return nil, err
+			}
+			if claim.FixedCreateIntent.State == "released" {
+				continue
+			}
+			view, err := b.Status(ctx, core.StatusRequest{ID: claim.LeaseID})
+			if err != nil {
+				return nil, err
+			}
+			if view.State == "released" {
+				continue
+			}
+			servers = append(servers, core.Server{Provider: providerName, CloudID: view.ServerID, Name: claimNameFromLocalClaim(claim), Status: view.State, Labels: view.Labels})
+			continue
+		}
+		if client == nil {
+			client, err = b.client(ctx)
+			if err != nil {
+				return nil, err
+			}
 		}
 		claimName := claimNameFromLocalClaim(claim)
 		ready := sandboxReadiness{}
@@ -384,6 +417,12 @@ func (b *backend) List(ctx context.Context, _ core.ListRequest) ([]core.LeaseVie
 }
 
 func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.StatusView, error) {
+	if claim, err := resolveLocalClaim(req.ID); err == nil && isFixedClaim(claim) && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == "released" {
+		if err := authorizeClaimScope(b.cfg, claim); err != nil {
+			return core.StatusView{}, err
+		}
+		return core.StatusView{ID: claim.LeaseID, Slug: claim.Slug, Provider: providerName, ServerID: claim.CloudImmutableID, State: "released", Labels: claim.Labels}, nil
+	}
 	client, err := b.client(ctx)
 	if err != nil {
 		return core.StatusView{}, err
@@ -394,6 +433,14 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	}
 	if err := authorizeClaimScope(b.cfg, claim); err != nil {
 		return core.StatusView{}, err
+	}
+	if isFixedClaim(claim) {
+		if err := b.fixedAnchor(ctx, client, claim); err != nil {
+			return core.StatusView{}, err
+		}
+		if claim.FixedCreateIntent.State == "released" {
+			return core.StatusView{ID: claim.LeaseID, Slug: claim.Slug, Provider: providerName, ServerID: claim.CloudImmutableID, State: "released", Labels: claim.Labels}, nil
+		}
 	}
 	waitTimeout := req.WaitTimeout
 	if waitTimeout <= 0 {
@@ -414,6 +461,9 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		"namespace": b.cfg.AgentSandbox.Namespace,
 		"warm_pool": b.cfg.AgentSandbox.WarmPool,
 	}}
+	if isFixedClaim(claim) {
+		baseView.ServerID, baseView.Slug = claim.CloudImmutableID, claim.Slug
+	}
 	for {
 		liveClaim, err := client.Get(pollCtx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
 		if err != nil {
@@ -442,6 +492,11 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 		view := baseView
 		view.Labels = shared.CloneLabels(baseView.Labels)
 		if readyErr == nil {
+			if isFixedClaim(claim) {
+				if err := validateFixedWorkloadPins(claim, ready); err != nil {
+					return core.StatusView{}, err
+				}
+			}
 			view.State = statusViewReady
 			view.Ready = true
 			view.Labels["sandbox"] = ready.SandboxName
@@ -490,6 +545,9 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 }
 
 func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
+	if claim, err := resolveLocalClaim(req.ID); err == nil && isFixedClaim(claim) {
+		return b.stopFixed(ctx, req.ID, core.ProviderIdentityExpectation{}, "")
+	}
 	client, err := b.client(ctx)
 	if err != nil {
 		return err
@@ -497,6 +555,9 @@ func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
 	claim, err := resolveLocalClaim(req.ID)
 	if err != nil {
 		return err
+	}
+	if isFixedClaim(claim) {
+		return b.stopFixed(ctx, req.ID, core.ProviderIdentityExpectation{}, "")
 	}
 	unlockOperation, err := lockAgentSandboxLeaseOperation(ctx, claim.LeaseID)
 	if err != nil {
@@ -530,7 +591,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	now := core.ClockNow(b.rt.Clock).UTC()
 	checked, removed, claimsRemoved := 0, 0, 0
 	for _, listedClaim := range claims {
-		if listedClaim.Provider != providerName || listedClaim.ProviderScope != claimScope(b.cfg) {
+		if (listedClaim.Provider != providerName && !isFixedClaim(listedClaim)) || listedClaim.ProviderScope != claimScope(b.cfg) {
 			continue
 		}
 		var checkedOne, removedOne, claimRemovedOne bool
@@ -544,7 +605,25 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			if err != nil {
 				return err
 			}
-			if claim.LeaseID == "" || claim.Provider != providerName || claim.ProviderScope != claimScope(b.cfg) {
+			if claim.LeaseID == "" || (claim.Provider != providerName && !isFixedClaim(claim)) || claim.ProviderScope != claimScope(b.cfg) {
+				return nil
+			}
+			if isFixedClaim(claim) {
+				if err := validateFixedClaimShape(claim); err != nil {
+					return err
+				}
+				if claim.FixedCreateIntent.State == "released" {
+					return nil
+				}
+				checkedOne = true
+				due, _ := claimCleanupDue(claim, now)
+				if !due || req.DryRun {
+					return nil
+				}
+				if err := b.releaseFixedLocked(ctx, client, claim, core.ProviderIdentityExpectation{}, ""); err != nil {
+					return err
+				}
+				removedOne = true
 				return nil
 			}
 			checkedOne = true
@@ -936,6 +1015,9 @@ func (b *backend) claimIdentityForLiveClaim(claim core.LeaseClaim, live *kuberne
 }
 
 func (b *backend) deleteOwnedClaim(ctx context.Context, client kubernetesClient, claim core.LeaseClaim, leaseID, claimName string, forgetMissing bool) error {
+	if isFixedClaim(claim) {
+		return b.releaseFixedLocked(ctx, client, claim, core.ProviderIdentityExpectation{}, "")
+	}
 	live, err := client.Get(ctx, sandboxClaimGVR(), b.cfg.AgentSandbox.Namespace, claimName)
 	if err != nil {
 		if isNotFound(err) {
@@ -1068,6 +1150,9 @@ func sandboxClaimControllerExpiry(obj *kubernetesObject) (string, bool) {
 }
 
 func (b *backend) missingClaimRunError(claim core.LeaseClaim) (runClaimCustody, error) {
+	if isFixedClaim(claim) {
+		return runClaimRetained, retainMissingClaim(b.cfg, claim)
+	}
 	if b.cfg.AgentSandbox.ForgetMissing {
 		if err := b.removeLocalClaim(claim.LeaseID, claim); err != nil {
 			return runClaimRetained, errors.Join(core.Exit(4, "agent-sandbox claim %s is missing in Kubernetes; command not run", claim.LeaseID), fmt.Errorf("remove local agent-sandbox lease %s: %w", claim.LeaseID, err))
@@ -1092,6 +1177,9 @@ func (b *backend) readinessRunError(ctx context.Context, client kubernetesClient
 }
 
 func (b *backend) removeLocalClaim(leaseID string, claim core.LeaseClaim) error {
+	if isFixedClaim(claim) {
+		return core.Exit(4, "fixed agent-sandbox claims require a confirmed terminal receipt")
+	}
 	if b.removeClaim != nil {
 		return b.removeClaim(leaseID, claim)
 	}

@@ -90,7 +90,8 @@ it and may append a short suffix if an active lease already uses that slug.
 
 `--lease-id cbx_<12 lowercase hex>` is the automation idempotency contract for
 providers that explicitly support fixed identities. Direct AWS, Azure, DigitalOcean,
-Machine0, Daytona, Incus, and local-container leases, managed coordinator leases, and explicitly capable
+Machine0, Daytona, Incus, Tenki, Parallels, Proxmox, and local-container leases,
+Agent Sandbox delegated leases, managed coordinator leases, and explicitly capable
 external providers accept it. Replaying the same normalized create intent
 returns or joins the same live lease, including after the creating process loses
 its response. A managed coordinator reports `fixed_lease_terminal` when that
@@ -121,7 +122,8 @@ create is confirmed, readiness uses the remaining original creation budget and
 honors caller cancellation. Fixed-ID leases remain available for explicit recovery
 or stop; ordinary creates keep their token-bound cancellation cleanup.
 
-A fixed lease ID is single-use. Direct AWS, Azure, DigitalOcean, Machine0, Daytona, Incus, and local-container
+A fixed lease ID is single-use. Direct AWS, Azure, DigitalOcean, Machine0, Daytona,
+Incus, Tenki, Parallels, Proxmox, and local-container
 acquisitions fail closed if their bound resource later disappears. Successful
 stop and missing-resource cleanup replace the live local claim with a compact
 terminal tombstone, so the ID remains rejected after release. Use a new
@@ -129,6 +131,10 @@ operation ID for every later lease. If an AWS launch or local-container create
 attempt was durably recorded but its resource is not yet visible, replay fails
 closed without resubmitting it; retry later to adopt the resource after
 provider inventory converges.
+
+Agent Sandbox retains its fixed acquisition and terminal receipts through delegated
+execution and adapter cleanup. See [Agent Sandbox fixed lease IDs](../providers/agent-sandbox.md#fixed-lease-ids)
+for Kubernetes identity checks and foreground deletion requirements.
 
 `--pond <name>` tags a new lease into a named pond (stored as a reserved
 provider label); `crabbox list --pond <name>` filters by it. When combined with

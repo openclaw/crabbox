@@ -24,5 +24,8 @@
     "maxWarnings": 0,
     "reportUnusedDisableDirectives": "deny"
   },
-  "plugins": ["typescript", "unicorn", "import", "vitest", "promise", "node"]
+  "plugins": ["typescript", "unicorn", "import", "vitest", "promise", "node"],
+  "rules": {
+    "unicorn/consistent-function-scoping": "off"
+  }
 }

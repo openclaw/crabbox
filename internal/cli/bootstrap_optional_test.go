@@ -12,6 +12,51 @@ import (
 	"time"
 )
 
+func TestOptionalPackagesRefreshStaleIndexes(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode, want string
+		fails            bool
+	}{
+		{"stale image", "stale", "update\ninstall\n", false},
+		{"mirror rollover", "rollover", "update\ninstall\nupdate\ninstall\n", false},
+		{"partial update", "update-fails", "update\nupdate\nupdate\n", true},
+		{"install fails", "install-fails", strings.Repeat("update\ninstall\n", 3), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Execute the generated fragment with no real package-manager access.
+			script := `set -eu
+dpkg-query() { return 1; }
+sleep() { :; }
+timeout() { shift; "$@"; }
+updated=0
+apt-get() {
+  case " $* " in
+    *" update "*)
+      case " $* " in *" APT::Update::Error-Mode=any "*) ;; *) return 99 ;; esac
+      echo update
+      [ "$MODE" != update-fails ] || return 42
+      updated=$((updated + 1)) ;;
+    *" install "*)
+      echo install
+      [ "$updated" -gt 0 ] || return 99
+      [ "$MODE" != install-fails ] || return 43
+      [ "$MODE" != rollover ] || [ "$updated" -gt 1 ] ;;
+    *) return 99 ;;
+  esac
+}
+` + sharedLinuxOptionalPackages() + "\ncrabbox_install_packages labwc wayvnc libinput10\n"
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "bash", "-c", script)
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "MODE=" + tc.mode}
+			output, err := cmd.CombinedOutput()
+			if (err != nil) != tc.fails || string(output) != tc.want {
+				t.Fatalf("got %q, %v; want %q, fails=%t", output, err, tc.want, tc.fails)
+			}
+		})
+	}
+}
+
 func TestPreparedBrowserBootstrapAvoidsPackageAndNetworkWork(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Browser = true
@@ -54,7 +99,10 @@ func TestPreparedBrowserBootstrapAvoidsPackageAndNetworkWork(t *testing.T) {
 			}
 			want := ""
 			if tc.wantAPT {
-				want = "apt-get install -y --no-install-recommends gnupg build-essential python3\n"
+				want = "apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Languages=none -o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false -o Acquire::IndexTargets::deb::CNF::DefaultEnabled=false update\napt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends gnupg build-essential python3\n"
+				if tc.wantCode != 0 {
+					want = strings.Repeat(want, 3)
+				}
 			}
 			if string(calls) != want {
 				t.Fatalf("package/network calls: got %q, want %q", calls, want)

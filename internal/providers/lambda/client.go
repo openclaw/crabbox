@@ -91,7 +91,6 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 }
 
 func (c *Client) decodeAPIError(operation string, status int, data []byte, readErr error) error {
-	body := strings.TrimSpace(string(data))
 	var envelope apiErrorEnvelope
 	if err := json.Unmarshal(data, &envelope); err == nil && (envelope.Error.Code != "" || envelope.Error.Message != "") {
 		apiErr := &APIError{
@@ -100,23 +99,11 @@ func (c *Client) decodeAPIError(operation string, status int, data []byte, readE
 			Code:       envelope.Error.Code,
 			Message:    c.redact(envelope.Error.Message),
 			Suggestion: c.redact(envelope.Error.Suggestion),
-			Body:       c.redact(body),
-		}
-		if readErr != nil {
-			apiErr.Body = strings.TrimSpace(apiErr.Body + "; response body read failed: " + readErr.Error())
+			Body:       shared.RedactedResponseBody(data, readErr, 0, c.redact),
 		}
 		return apiErr
 	}
-	if len(body) > 400 {
-		body = body[:400]
-	}
-	body = c.redact(body)
-	if readErr != nil {
-		if body != "" {
-			body += "; "
-		}
-		body += "response body read failed: " + readErr.Error()
-	}
+	body := shared.RedactedResponseBody(data, readErr, 400, c.redact)
 	return &APIError{Operation: operation, Status: status, Body: body}
 }
 

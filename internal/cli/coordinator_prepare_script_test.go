@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -31,16 +32,15 @@ func TestCoordinatorPrepareRecoveryPrecedesScriptAndDoesNotReplayFailure(t *test
 	p, b, dir := setupSSHScriptRun(t)
 	started := time.Now()
 	entered, release := make(chan struct{}), make(chan struct{})
-	calls := 0
+	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		t.Logf("HTTP request=%d method=%s path=%s elapsed=%s", calls, r.Method, r.URL.Path, time.Since(started))
+		attempt := calls.Add(1)
+		t.Logf("HTTP request=%d method=%s path=%s elapsed=%s", attempt, r.Method, r.URL.Path, time.Since(started))
 		if r.Method != "GET" || r.URL.Path != "/v1/leases/"+b.lease.LeaseID {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		if calls == 1 {
-			t.Logf("HTTP response=500 elapsed=%s", time.Since(started))
-			http.Error(w, "temporary", 500)
+		if attempt <= 2 {
+			<-r.Context().Done()
 			return
 		}
 		close(entered)
@@ -49,7 +49,7 @@ func TestCoordinatorPrepareRecoveryPrecedesScriptAndDoesNotReplayFailure(t *test
 		json.NewEncoder(w).Encode(map[string]any{"lease": CoordinatorLease{ID: b.lease.LeaseID, Provider: p.Spec().Name, State: "active"}})
 	}))
 	defer server.Close()
-	p.backend = &coordinatorPrepareScriptBackend{sshScriptTestBackend: b, observation: &coordinatorLeaseBackend{cfg: Config{Provider: p.Spec().Name}, coord: &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}}}
+	p.backend = &coordinatorPrepareScriptBackend{sshScriptTestBackend: b, observation: &coordinatorLeaseBackend{cfg: Config{Provider: p.Spec().Name}, coord: &CoordinatorClient{BaseURL: server.URL, Client: &http.Client{Timeout: 500 * time.Millisecond}}}}
 	marker := filepath.Join(dir, "script-executions")
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -88,8 +88,8 @@ func TestCoordinatorPrepareRecoveryPrecedesScriptAndDoesNotReplayFailure(t *test
 		t.Fatalf("run error=%v stderr=%s", err, stderr.String())
 	}
 	body, readErr := os.ReadFile(marker)
-	t.Logf("terminal: HTTP requests=%d script executions=%d script exit=%d activity joins=%d elapsed=%s", calls, len(body), ExitCodeForError(err, 0), b.joined, time.Since(started))
-	if readErr != nil || string(body) != "x" || calls != 2 || b.starts != 1 || b.joined != 1 {
-		t.Fatalf("script=%q read=%v GETs=%d activity=%d/%d", body, readErr, calls, b.starts, b.joined)
+	t.Logf("terminal: HTTP requests=%d script executions=%d script exit=%d activity joins=%d elapsed=%s", calls.Load(), len(body), ExitCodeForError(err, 0), b.joined, time.Since(started))
+	if readErr != nil || string(body) != "x" || calls.Load() != 3 || b.starts != 1 || b.joined != 1 {
+		t.Fatalf("script=%q read=%v GETs=%d activity=%d/%d", body, readErr, calls.Load(), b.starts, b.joined)
 	}
 }

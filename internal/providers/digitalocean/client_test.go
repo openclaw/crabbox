@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1070,6 +1071,25 @@ func TestDigitalOceanClientRedactsReflectedToken(t *testing.T) {
 	}
 }
 
+func TestDigitalOceanAPIErrorDiagnosticRedaction(t *testing.T) {
+	const token = "fixture-digitalocean-secret"
+	readErr := errors.New("read interrupted with " + token)
+	c := &digitalOceanClient{token: token, baseURL: "https://example.test", client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusForbidden, Header: make(http.Header), Request: req, Body: io.NopCloser(&errorAfterReader{data: []byte("partial response"), err: readErr})}, nil
+	})}}
+	err := c.do(t.Context(), http.MethodGet, "/account", nil, nil)
+	var apiErr *digitalOceanAPIError
+	if !errors.As(err, &apiErr) || apiErr.Status != http.StatusForbidden {
+		t.Fatalf("typed status changed: %v", err)
+	}
+	if strings.Contains(apiErr.Body, token) || !strings.Contains(apiErr.Body, "[redacted]") || !strings.Contains(apiErr.Body, "partial response; response body read failed:") {
+		t.Fatalf("unsafe or incomplete API diagnostic: %q", apiErr.Body)
+	}
+	if errors.Is(err, readErr) {
+		t.Fatal("read failure overrode API error classification")
+	}
+}
+
 func TestDigitalOceanClientRedactsSemanticDropletName(t *testing.T) {
 	const token = "digitalocean-droplet-secret"
 	const leaseID = "cbx_abcdef123456"
@@ -1588,4 +1608,63 @@ func TestDigitalOceanClientRequestEnvelope(t *testing.T) {
 			t.Fatalf("transport calls=%d", calls)
 		}
 	})
+}
+
+func TestAcquireRollbackHTTPStopsBeforeKeyOnDropletDeleteFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name                                 string
+		dropletStatus, keyStatus, wantStatus int
+		wantPaths                            []string
+	}{
+		{name: "droplet failure", dropletStatus: 500, keyStatus: 204, wantStatus: 500, wantPaths: []string{"/droplets/42"}},
+		{name: "droplet absent", dropletStatus: 404, keyStatus: 204, wantPaths: []string{"/droplets/42", "/account/keys/700"}},
+		{name: "deleted", dropletStatus: 204, keyStatus: 204, wantPaths: []string{"/droplets/42", "/account/keys/700"}},
+		{name: "key failure", dropletStatus: 204, keyStatus: 403, wantStatus: 403, wantPaths: []string{"/droplets/42", "/account/keys/700"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var paths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete {
+					t.Errorf("method=%s", r.Method)
+				}
+				paths = append(paths, r.URL.Path)
+				switch r.URL.Path {
+				case "/droplets/42":
+					w.WriteHeader(tc.dropletStatus)
+				case "/account/keys/700":
+					w.WriteHeader(tc.keyStatus)
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(500)
+				}
+			}))
+			defer server.Close()
+			client := newDigitalOceanTestClient(t, server, "fixture-token")
+			err := rollbackDigitalOceanAcquire(client, 42, 700)
+			var apiErr *digitalOceanAPIError
+			if tc.wantStatus == 0 && err != nil || tc.wantStatus != 0 && (!errors.As(err, &apiErr) || apiErr.Status != tc.wantStatus) || !reflect.DeepEqual(paths, tc.wantPaths) {
+				t.Fatalf("err=%v paths=%v wantStatus=%d wantPaths=%v", err, paths, tc.wantStatus, tc.wantPaths)
+			}
+		})
+	}
+}
+
+func TestDigitalOceanReadinessDeadlineCancelsNativeHTTPClient(t *testing.T) {
+	received := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(received)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client := newDigitalOceanTestClient(t, server, "fixture-token")
+	_, err := new(digitalOceanLeaseBackend).waitForDropletIP(t.Context(), client, 42, 100*time.Millisecond)
+	select {
+	case <-received:
+	default:
+		t.Fatal("request did not reach native HTTP handler")
+	}
+	var exit core.ExitError
+	if !errors.Is(err, context.DeadlineExceeded) || !core.AsExitError(err, &exit) || exit.Code != 5 || err.Error() != "timed out waiting for DigitalOcean Droplet IP" {
+		t.Fatalf("err=%v exit=%#v", err, exit)
+	}
 }

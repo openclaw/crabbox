@@ -57,9 +57,11 @@ private token and generation never appear in public lease records. Fixed-ID
 to own replay, and caller cancellation never releases them.
 
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
-direct AWS, direct Machine0, direct Daytona, direct local-container, and managed coordinator
-leases, that ID is an immutable create identity: an identical semantic replay
-returns the same live lease, while intent drift returns `lease_id_conflict`.
+direct AWS, direct Machine0, direct Daytona, direct local-container, direct
+Tenki, direct Parallels, direct Proxmox, delegated Agent Sandbox, and managed
+coordinator leases, that ID is an
+immutable create identity: an identical semantic replay returns the same
+live lease, while intent drift returns `lease_id_conflict`.
 Managed coordinator replay of the same terminal intent returns
 `fixed_lease_terminal`. External providers also accept requested IDs when their
 protocol explicitly advertises
@@ -68,6 +70,15 @@ normalized request hash. Direct AWS durably stores the intent and current
 resolved EC2 attempt in the normal lease claim before `RunInstances`, then uses
 a deterministic regional/zonal client token. No path uses the slug to decide
 replay ownership.
+
+Tenki records its exact session and recovery attempt before reuse. See
+[Tenki fixed lease IDs](../providers/tenki.md#fixed-lease-ids-for-orchestration)
+for attestation, retained recovery state, and terminal receipt behavior.
+
+Agent Sandbox binds each fixed attempt to its Kubernetes resource identities and
+retains terminal receipts through adapter cleanup. See
+[Agent Sandbox fixed lease IDs](../providers/agent-sandbox.md#fixed-lease-ids)
+for scope checks and foreground deletion requirements.
 
 Direct Machine0 binds the intent to its deterministic VM name before creation;
 the durable attempt binds the first visible match to its Machine0 resource ID,
@@ -97,6 +108,57 @@ missing acquired container fails closed instead of starting another container.
 Its fixed claims use the downgrade-safe `local-container-fixed-v1` marker, so
 older clients cannot mistake them for ordinary local-container claims.
 
+Direct Parallels binds the intent to an attested host connection identity, the
+immutable source VM UUID, the normalized clone identity, and the host-unique
+`crabbox-<lease-id>-<slug>` VM name, all persisted before `prlctl clone`. That
+name is the idempotency key: `prlctl` refuses a duplicate name on a host, so a
+concurrent create of the same lease is rejected by Parallels even after a lost
+reply. The host scope is a digest of the Parallels service's own server and
+hardware identifiers and the host account UID, so a fleet entry that keeps its
+display name while reaching another machine or account is refused. An inventory
+read through another account cannot prove the original VM absent. The same
+machine/account answering at a new address still owns and can
+still stop its leases; only attested values enter the scope, and hashing keeps
+host identifiers out of claims, labels, and errors. The
+source name is resolved to its immutable UUID before fingerprinting and before
+clone submission, so replacing a template under the same name is drift rather
+than a different fork.
+
+A Parallels VM name is host-unique but reusable, so replay requires
+provider-side creation evidence as well. `prlctl clone` reports no UUID, so
+Crabbox clones into a per-lease directory named with a secret nonce, recorded
+before the clone and passed as `--dst`: a bundle there can only have come from
+that attempt. The VM found in it supplies the UUID, and adoption, guest
+preparation and deletion all require the observed VM to carry that UUID and
+still live in that directory. A lost clone reply is therefore recoverable —
+replay finds its own VM in the attempt directory instead of cloning a second
+one — while a VM the attempt did not create is never adopted, credentialed or
+deleted, whatever name it holds. Release resolves a fixed lease from its durable
+claim alone, reading no guest and building no SSH target before the host and
+incarnation are re-attested. Clone submission, including a prepared retry on the
+pinned host, holds that host's `maxVMs` reservation across the count and the
+clone, while replay and release of an existing VM stay possible at capacity. A fixed Parallels
+lease never re-runs fleet selection; an unreadable inventory keeps custody
+instead of proving absence, a renamed acquired VM is found by its bound UUID
+rather than reported absent, and a vanished acquired VM fails closed rather than
+cloning another. `crabbox stop` reaches the durable release path through
+fixed-claim-aware resolution, so missing-resource finalization and idempotent
+terminal stop work through the CLI and not only through direct backend calls.
+Parallels fixed claims use the downgrade-safe `parallels-fixed-v1` marker
+alongside AWS's `aws-fixed-v1`, Machine0's `machine0-fixed-v1`, Daytona's
+`daytona-fixed-v1`, and local-container's `local-container-fixed-v1`; current
+clients map it back to runtime Parallels, while released clients cannot mistake
+it for an ordinary Parallels lease and delete its VM or prune its tombstone.
+
+Direct Proxmox selects a free VMID through the cluster allocator, then durably
+binds that exact VMID, the normalized intent, source node, and cluster scope
+before submitting the template clone with an explicit `newid`. Replay inspects
+that VMID and requires matching lease labels, intent fingerprint, provider
+scope, and native `vmgenid`; it never derives a VMID from the lease ID or adopts
+by slug. Missing or ambiguous post-submit state retains the attempt and cannot
+issue another clone. Its fixed claims use the downgrade-safe
+`proxmox-fixed-v1` marker.
+
 After the direct AWS launch attempt is durable, Crabbox never submits that
 attempt again. An ambiguous replay with no visible tagged instance fails closed;
 a later replay can adopt the one instance after inventory converges only when
@@ -105,11 +167,14 @@ match the persisted attempt exactly. Fixed AWS
 claims use the downgrade-safe local discriminator `aws-fixed-v1`; current
 clients map it to runtime AWS, while older clients skip/refuse it.
 
-Fixed IDs are single-use operation identities. Direct AWS, Daytona, Machine0, and
-local-container keep a compact terminal claim tombstone after successful
-destroy release or exact missing-resource cleanup. Tombstones contain only the
-ID, slug, provider scope, versioned intent hash, timestamps, and terminal
-state; automatic provider cleanup never prunes them.
+Fixed IDs are single-use operation identities. Direct AWS, Daytona, Machine0,
+local-container, and Parallels keep a compact terminal claim tombstone after
+successful destroy release or exact missing-resource cleanup. Tombstones
+contain only the ID, slug, provider scope, versioned intent hash, timestamps,
+and terminal state; automatic provider cleanup never prunes them.
+Proxmox also keeps terminal tombstones, retaining the selected VMID and,
+when observed, its native generation identity so release reconciliation
+remains exact. Automatic provider cleanup never prunes these tombstones.
 There is no time-based reuse window. Explicitly deleting local Crabbox claim
 state forfeits this replay protection, so automation must instead mint a new
 operation ID.

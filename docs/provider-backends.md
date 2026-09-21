@@ -251,7 +251,7 @@ type IdempotentLeaseIDBackend interface {
 }
 ```
 
-Direct AWS, Machine0, and local-container backends implement this capability;
+Direct AWS, Machine0, local-container, and Proxmox backends implement this capability;
 coordinator-backed leases support it through the coordinator wrapper. External
 backends support it only when their configured protocol explicitly advertises
 idempotent lease IDs. `crabbox warmup --lease-id` rejects other backends before
@@ -628,6 +628,14 @@ before interpreting status, and leaves typed API errors and body redaction to
 the adapter. Only a zero-length body skips decoding; nonempty whitespace is
 decoded, and JSON errors remain unwrapped. This separate contract adds no
 response limit and does not apply to streams or alter the bounded decoder.
+
+DigitalOcean, Lambda, OVH, and Vast use `shared.RedactedResponseBody` for
+status-first API-error diagnostics. It applies the adapter's redaction policy
+before truncating the body and also sanitizes appended body-read errors. The
+adapter still selects its diagnostic limit, placeholder spelling, typed HTTP
+error, and status precedence. Read failures remain diagnostic text rather than
+new causes of a completed API error; this does not change successful-response
+decoding or transport-error handling.
 
 Provider adapters refer to core types and primitives directly, for example
 `core.Config`, `core.RunRequest`, and `core.ShellQuote`. Local helpers own
@@ -1294,6 +1302,16 @@ wait context, deadline, and cancellation precedence, then its `Poll` method for
 observation sequencing. Construct it at the adapter's existing resolution
 boundary; keep ownership validation, readiness, terminal states, retry policy,
 and status-view fields in the adapter.
+
+DigitalOcean, Vast, and RunPod ordinary acquisition waits use `shared.PollReadiness` for the
+elapsed-time budget, interrupted-read classification, completed-observation
+precedence, and cause-preserving termination errors. Adapters supply their typed
+response-error predicate, readiness and retry decisions, optional sleep/backoff,
+and public diagnostic. A completed provider response is not replaced merely
+because cancellation happened concurrently. Interrupted reads do not reach the
+adapter's observation callback or overwrite its last completed retry diagnostic.
+The helper retains cancellation identity without automatically displaying its
+cause; diagnostic wording and disclosure policy remain adapter-owned.
 
 Observation-only status waits use `shared.PollStatus` for the polling deadline
 and two-second delay. Adapters return complete `StatusView` values and identify

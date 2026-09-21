@@ -21,6 +21,7 @@ export const provisioningDuePrefix = "provisioning-due:";
 export const legacyAlarmKey = "runtime:legacy-alarm";
 
 export interface ProvisioningDueRecord {
+  kind?: "pool-access";
   operationID: string;
   at: number;
 }

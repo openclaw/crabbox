@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM mcr.microsoft.com/devcontainers/go:1.26-bookworm@sha256:de99286e746c99e359edddaf0c47cbfbed34f4d6a3cd6310c99c87fa27c3c341 AS runner-build
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/devcontainers/go:1.26-bookworm@sha256:5b40bf0530204ec28eac4bd95b0398b15bfbef337d47ed77d7b29daca9fac18a AS runner-build
 
 ARG TARGETOS=linux
 ARG TARGETARCH
@@ -7,7 +7,7 @@ COPY cloudflare-container-runner/go.mod cloudflare-container-runner/*.go ./
 RUN target_arch="${TARGETARCH:-$(go env GOARCH)}" \
   && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH="$target_arch" go build -trimpath -ldflags="-s -w" -o /out/crabbox-container-runner .
 
-FROM mcr.microsoft.com/dotnet/runtime-deps:9.0-bookworm-slim@sha256:608b519f61bce1ad7496a2544041d6c1538a5c48d056adf55af7fdc35f924283
+FROM mcr.microsoft.com/dotnet/runtime-deps:9.0-bookworm-slim@sha256:92eda3f0c5172c8b3741233933c86b6393b2402e6bcc507f5c645f5ba682c54c
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates curl git jq ripgrep tar \

@@ -10,7 +10,7 @@ import (
 )
 
 func lockAgentSandboxLeaseOperation(ctx context.Context, leaseID string) (func(), error) {
-	if !strings.HasPrefix(leaseID, leasePrefix) || strings.TrimPrefix(leaseID, leasePrefix) == "" || filepath.Base(leaseID) != leaseID || leaseID == "." {
+	if (!strings.HasPrefix(leaseID, leasePrefix) && !core.IsCanonicalLeaseID(leaseID)) || strings.TrimPrefix(leaseID, leasePrefix) == "" || filepath.Base(leaseID) != leaseID || leaseID == "." {
 		return nil, core.Exit(2, "invalid agent-sandbox lease id %q", leaseID)
 	}
 	return lockAgentSandboxOperationPath(ctx, leaseID+".agent-sandbox-operation.lock")

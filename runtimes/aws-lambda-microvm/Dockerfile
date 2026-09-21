@@ -1,9 +1,9 @@
-FROM --platform=linux/arm64 golang:1.26-alpine@sha256:5d9aa9fa75b776600e0972ac9d324bb260fdb403b8905202c7576d103a450361 AS build
+FROM --platform=linux/arm64 golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS build
 WORKDIR /src
 COPY main.go .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/crabbox-lambda-microvm-runner ./main.go
 
-FROM --platform=linux/arm64 ubuntu:24.04@sha256:ea0b2b8607a61f981b2461f21edc27c0b37ddd53d23d4d350936480adf5de28c
+FROM --platform=linux/arm64 ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl git gzip tar \
     && rm -rf /var/lib/apt/lists/*

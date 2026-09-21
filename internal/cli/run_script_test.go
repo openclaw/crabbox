@@ -191,6 +191,64 @@ func TestRemoteRunScriptPreservesLoginStartupDirectory(t *testing.T) {
 	}
 }
 
+func TestRemoteRunScriptLocatesUploadAfterShellStartup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell execution")
+	}
+	for _, relative := range []bool{false, true} {
+		for _, shebang := range []bool{false, true} {
+			t.Run(fmt.Sprintf("relative=%t/shebang=%t", relative, shebang), func(t *testing.T) {
+				root, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				workdir := filepath.Join(root, "-worker ' workspace")
+				workdirArg := workdir
+				if relative {
+					workdirArg = filepath.Base(workdir)
+				}
+				home := filepath.Join(root, "home")
+				for _, dir := range []string{workdir, home} {
+					if err := os.MkdirAll(dir, 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				startup := filepath.Join(root, "shell-startup")
+				envFile := filepath.Join(root, "environment")
+				mustWriteTestFile(t, envFile, "cd "+shellQuote(root)+"\n")
+				if err := os.WriteFile(startup, []byte("if shopt -q login_shell; then cd "+shellQuote(home)+"; fi\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				env := []string{"HOME=" + home, "PATH=" + os.Getenv("PATH"), "BASH_ENV=" + startup}
+				data := "set -eu\n[ \"$PWD\" = \"$1\" ]\n[ \"$2\" = \"argument with ' quotes\" ]\n[ \"$0\" = \"$3\" ]\nprintf 'uploaded-script-executed\\n'\n"
+				if shebang {
+					data = "#!/bin/sh\n" + data
+				}
+				spec, err := loadRunScript("", true, strings.NewReader(data))
+				if err != nil {
+					t.Fatal(err)
+				}
+				upload := exec.Command("sh", "-c", remoteUploadRunScriptCommand(workdirArg, spec.RemotePath))
+				upload.Dir = root
+				upload.Env, upload.Stdin = env, strings.NewReader(data)
+				if output, err := upload.CombinedOutput(); err != nil {
+					t.Fatalf("upload script: %v\n%s", err, output)
+				}
+				if uploaded, err := os.ReadFile(filepath.Join(workdir, filepath.FromSlash(spec.RemotePath))); err != nil || string(uploaded) != data {
+					t.Fatalf("script upload did not reach the workdir: data=%q err=%v", uploaded, err)
+				}
+				run := exec.Command("sh", "-c", remoteRunScriptCommandWithEnvFiles(workdirArg, nil, []string{envFile}, spec, []string{home, "argument with ' quotes", filepath.Join(workdir, filepath.FromSlash(spec.RemotePath))}))
+				run.Dir = root
+				run.Env = env
+				output, err := run.CombinedOutput()
+				if err != nil || !strings.Contains(string(output), "uploaded-script-executed") {
+					t.Fatalf("uploaded script execution after startup cd: %v\n%s", err, output)
+				}
+			})
+		}
+	}
+}
+
 func TestWindowsRunScriptForTargetUsesPowerShellExtension(t *testing.T) {
 	spec := runScriptForTarget(&RunScriptSpec{RemotePath: ".crabbox/scripts/abc-script"}, SSHTarget{TargetOS: targetWindows, WindowsMode: windowsModeNormal})
 	if spec.RemotePath != ".crabbox/scripts/abc-script.ps1" {

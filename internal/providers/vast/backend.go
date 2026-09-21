@@ -49,16 +49,7 @@ func newBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) *backe
 		return core.WaitForSSHReady(ctx, target, b.stderr(), phase, timeout)
 	}
 	b.runSSH = core.RunSSHQuiet
-	b.sleep = func(ctx context.Context, d time.Duration) error {
-		timer := time.NewTimer(d)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
-			return nil
-		}
-	}
+	b.sleep = shared.SleepContext
 	return b
 }
 
@@ -377,11 +368,13 @@ func vastMatchingSSHKeyID(keys []vastInstanceSSHKey, publicKey string) string {
 }
 
 func (b *backend) waitForInstanceReady(ctx context.Context, client vastAPI, id int) (vastInstance, error) {
-	deadline := b.now().Add(b.pollTimeout)
-	result, err := shared.Poll(context.WithoutCancel(ctx), 0, vastPollInterval,
-		func(context.Context, time.Duration) error { return b.sleep(ctx, vastPollInterval) },
-		func(context.Context) (vastInstance, error) { return client.GetInstance(ctx, id) },
-		func(_ context.Context, instance vastInstance, fetchErr error) (bool, error) {
+	return shared.PollReadiness(ctx, shared.ReadinessOptions[vastInstance]{
+		Timeout: b.pollTimeout, Interval: vastPollInterval, Sleep: b.sleep,
+		IsResponseError: func(err error) bool {
+			var apiErr *vastAPIError
+			return errors.As(err, &apiErr)
+		},
+		Check: func(instance vastInstance, fetchErr error) (bool, error) {
 			if fetchErr != nil {
 				return false, fetchErr
 			}
@@ -391,15 +384,15 @@ func (b *backend) waitForInstanceReady(ctx context.Context, client vastAPI, id i
 			if isTerminalVastStatus(instance.Status) {
 				return false, core.Exit(5, "vast instance %d reached terminal status %s", id, instance.Status)
 			}
-			if b.now().After(deadline) {
-				return false, core.Exit(5, "timed out waiting for Vast instance %d to expose SSH", id)
-			}
 			return false, nil
-		}, nil)
-	if err != nil {
-		return vastInstance{}, err
-	}
-	return result.Value, nil
+		},
+		Diagnostic: func(stop shared.ReadinessStop) error {
+			if stop.BudgetExpired {
+				return core.Exit(5, "timed out waiting for Vast instance %d to expose SSH", id)
+			}
+			return stop.Err
+		},
+	}, func(ctx context.Context) (vastInstance, error) { return client.GetInstance(ctx, id) })
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {

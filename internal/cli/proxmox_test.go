@@ -1581,6 +1581,43 @@ func TestProxmoxCreateServerCleansUpCloneOnConfigFailure(t *testing.T) {
 	}
 }
 
+func TestProxmoxCreateServerWithVMIDSkipsNextIDAndUsesExplicitCloneTarget(t *testing.T) {
+	nextIDCalls := 0
+	var clone url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api2/json/cluster/nextid":
+			nextIDCalls++
+			t.Fatal("explicit VMID create queried /cluster/nextid")
+		case r.Method == http.MethodPost && r.URL.Path == "/api2/json/nodes/pve1/qemu/9000/clone":
+			clone = readForm(t, r)
+			http.Error(w, "stop after clone request", http.StatusInternalServerError)
+		default:
+			t.Fatalf("%s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer server.Close()
+
+	cfg := baseConfig()
+	cfg.Provider = "proxmox"
+	cfg.Proxmox.APIURL = server.URL
+	cfg.Proxmox.TokenID = "runner@pve!crabbox"
+	cfg.Proxmox.TokenSecret = "secret"
+	cfg.Proxmox.Node = "pve1"
+	cfg.Proxmox.TemplateID = 9000
+	client, err := NewProxmoxClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.CreateServerWithVMID(context.Background(), cfg, "ssh-ed25519 AAAA test", "cbx_123456abcdef", "blue-crab", false, 417, nil, nil)
+	if err == nil {
+		t.Fatal("expected fixture clone failure")
+	}
+	if nextIDCalls != 0 || clone.Get("newid") != "417" {
+		t.Fatalf("nextIDCalls=%d clone=%v", nextIDCalls, clone)
+	}
+}
+
 func testProxmoxClient(t *testing.T, serverURL string) *ProxmoxClient {
 	t.Helper()
 	cfg := baseConfig()
@@ -1603,4 +1640,26 @@ func readForm(t *testing.T, r *http.Request) url.Values {
 		t.Fatal(err)
 	}
 	return r.Form
+}
+
+func TestProxmoxFixedCloneTaskFailurePreservesAttempt(t *testing.T) {
+	mutations := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/clone") {
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": "UPID:pve1:clone"})
+			return
+		}
+		if r.Method != http.MethodGet {
+			mutations++
+		}
+		http.Error(w, "uncertain task state", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	client := testProxmoxClient(t, server.URL)
+	cfg := baseConfig()
+	cfg.Proxmox.Node, cfg.Proxmox.TemplateID = "pve1", 9000
+	_, err := client.CreateServerWithVMID(context.Background(), cfg, "ssh-ed25519 AAAA test", "cbx_123456abcdef", "fixed", false, 417, map[string]string{"fixed_intent_sha256": "fixture"}, func(Server) error { return nil })
+	if err == nil || mutations != 0 {
+		t.Fatalf("err=%v post-clone mutations=%d; uncertain fixed attempt must be retained", err, mutations)
+	}
 }

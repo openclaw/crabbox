@@ -165,7 +165,12 @@ reports every required package fully installed. A supported, package-installed
 browser must also pass a bounded `--version` probe before bootstrap skips its
 repository and download work. These checks read current machine state without
 creating another capability marker. Missing or broken prerequisites still use
-the installation path, and installation failures remain failures. Bootstrap
+the installation path. Before installing them, bootstrap refreshes package
+indexes even when the image's base readiness manifest is valid. Partial index
+updates fail closed; a failed refresh or install retries the complete pair up
+to three times, with each update limited to three minutes and install to five
+minutes. This avoids stale package URLs from prebaked images, including Ubuntu
+26.04's optimized architecture packages. Exhausted failures remain failures. Bootstrap
 always configures the requested services and runs the complete readiness check;
 reusing an image does not implicitly update its working browser.
 

@@ -420,34 +420,36 @@ func (b *runpodLeaseBackend) waitForPodSSH(ctx context.Context, client runpodAPI
 	if b.pollInitialOverride > 0 {
 		initial = b.pollInitialOverride
 	}
-	deadlineCtx, cancel := context.WithTimeout(ctx, overall)
-	defer cancel()
 	interval := initial
-	for {
-		pod, err := client.GetPod(deadlineCtx, podID)
-		if err != nil {
-			if deadlineCtx.Err() != nil {
-				return runpodPod{}, fmt.Errorf("runpod pod %s ssh wait cancelled: %w", podID, deadlineCtx.Err())
+	return shared.PollReadiness(ctx, shared.ReadinessOptions[runpodPod]{
+		Timeout: overall, Interval: initial,
+		Sleep: func(ctx context.Context, _ time.Duration) error {
+			if err := shared.SleepContext(ctx, runpodJitter(interval)); err != nil {
+				return err
 			}
-			return runpodPod{}, err
-		}
-		endpoint := pod.SSHEndpoint()
-		if endpoint.Host != "" && endpoint.Port != 0 && (endpoint.Public || strings.EqualFold(pod.DesiredStatus, "RUNNING")) {
-			return pod, nil
-		}
-		sleepFor := runpodJitter(interval)
-		select {
-		case <-deadlineCtx.Done():
-			return runpodPod{}, fmt.Errorf("runpod pod %s ssh endpoint not exposed within %s", podID, overall)
-		case <-time.After(sleepFor):
-		}
-		if interval < runpodSSHPollMax {
-			interval *= 2
-			if interval > runpodSSHPollMax {
-				interval = runpodSSHPollMax
+			if interval < runpodSSHPollMax {
+				interval = min(interval*2, runpodSSHPollMax)
 			}
-		}
-	}
+			return nil
+		},
+		IsResponseError: func(err error) bool {
+			var apiErr *runpodAPIError
+			return errors.As(err, &apiErr)
+		},
+		Check: func(pod runpodPod, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				return false, fetchErr
+			}
+			endpoint := pod.SSHEndpoint()
+			return endpoint.Host != "" && endpoint.Port != 0 && (endpoint.Public || strings.EqualFold(pod.DesiredStatus, "RUNNING")), nil
+		},
+		Diagnostic: func(stop shared.ReadinessStop) error {
+			if stop.BudgetExpired {
+				return fmt.Errorf("runpod pod %s ssh endpoint not exposed within %s", podID, overall)
+			}
+			return fmt.Errorf("runpod pod %s ssh wait cancelled: %w", podID, stop.Err)
+		},
+	}, func(ctx context.Context) (runpodPod, error) { return client.GetPod(ctx, podID) })
 }
 
 func (b *runpodLeaseBackend) prepareLease(ctx context.Context, cfg core.Config, pod runpodPod, leaseID, slug string, wait bool) (core.LeaseTarget, error) {

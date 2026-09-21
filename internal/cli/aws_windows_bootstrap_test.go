@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -116,7 +117,7 @@ func TestCoordinatorFreshWindowsBootstrapDelivery(t *testing.T) {
 		t.Skip("fake SSH executable requires a POSIX shell")
 	}
 	for _, mode := range []string{windowsModeNormal, windowsModeWSL2} {
-		t.Run(mode, func(t *testing.T) {
+		run := func(t *testing.T) {
 			cfg, lease := freshWindowsBootstrapFixture(t, mode, "2222")
 			backend := &coordinatorLeaseBackend{cfg: cfg}
 			workload, initial, err := backend.prepareCoordinatorLeaseAcquisition(lease, cfg)
@@ -184,7 +185,10 @@ func TestCoordinatorFreshWindowsBootstrapDelivery(t *testing.T) {
 					t.Fatalf("failed workload replayed or tried another port: %s, %v", after, readErr)
 				}
 			}
-		})
+		}
+		// Keep the real SSH delivery and all three stability probes, but advance
+		// the two ten-second settling intervals on the virtual test clock.
+		t.Run(mode, func(t *testing.T) { synctest.Test(t, run) })
 	}
 }
 

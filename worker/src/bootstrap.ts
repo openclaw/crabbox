@@ -162,7 +162,7 @@ ${bootstrap}
     systemctl enable crabbox-workspace-ready.service
     systemctl start --no-block crabbox-workspace-ready.service
     touch /var/lib/crabbox/bootstrapped
-    crabbox-ready
+    retry crabbox-ready
     BOOT
 `;
 }

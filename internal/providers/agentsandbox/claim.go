@@ -137,6 +137,28 @@ func safeLabelValue(value string) string {
 }
 
 func claimLeaseForRepo(cfg core.Config, leaseID, slug string, repo core.Repo, reclaim bool) error {
+	if core.IsCanonicalLeaseID(leaseID) {
+		claim, err := core.ReadLeaseClaim(leaseID)
+		if err != nil {
+			return err
+		}
+		if err := validateFixedClaimShape(claim); err != nil {
+			return err
+		}
+		if err := authorizeClaimScope(cfg, claim); err != nil {
+			return err
+		}
+		if claim.FixedCreateIntent.State != "acquired" || claim.FixedCreateIntent.Attempt["delete_pending"] != "" {
+			return core.Exit(4, "agent-sandbox fixed lease is not reusable")
+		}
+		if err := authorizeAgentSandboxRepoClaim(claim, repo.Root, reclaim); err != nil {
+			return err
+		}
+		updated := claim
+		updated.RepoRoot = repo.Root
+		err = core.ReplaceLeaseClaimIfUnchanged(leaseID, claim, updated)
+		return err
+	}
 	return core.ClaimLeaseForRepoProviderScopePond(leaseID, slug, providerName, claimScope(cfg), cfg.Pond, repo.Root, cfg.IdleTimeout, reclaim)
 }
 
@@ -250,7 +272,12 @@ func claimIdentityFromLocalClaimWithUID(claim core.LeaseClaim, uid string) (clai
 }
 
 func authorizeClaimScope(cfg core.Config, claim core.LeaseClaim) error {
-	if claim.Provider != "" && claim.Provider != providerName {
+	if core.IsCanonicalLeaseID(claim.LeaseID) || isFixedClaim(claim) {
+		if err := validateFixedClaimShape(claim); err != nil {
+			return err
+		}
+	}
+	if claim.Provider != "" && claim.Provider != providerName && !isFixedClaim(claim) {
 		return core.Exit(2, "lease %s belongs to provider=%s, not %s", claim.LeaseID, claim.Provider, providerName)
 	}
 	if got, want := strings.TrimSpace(claim.ProviderScope), claimScope(cfg); got != "" && got != want {
@@ -267,6 +294,9 @@ func authorizeAgentSandboxRepoClaim(claim core.LeaseClaim, repoRoot string, recl
 }
 
 func retainMissingClaim(cfg core.Config, claim core.LeaseClaim) error {
+	if isFixedClaim(claim) {
+		return core.Exit(4, "agent-sandbox fixed claim %s is missing in Kubernetes; local custody retained, command not run", claim.LeaseID)
+	}
 	if cfg.AgentSandbox.ForgetMissing {
 		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
 			return fmt.Errorf("remove forgotten agent-sandbox lease %s: %w", claim.LeaseID, err)
@@ -316,7 +346,20 @@ func resolveLocalClaimByClaimName(identifier string) (core.LeaseClaim, bool, err
 }
 
 func listAgentSandboxLeaseClaims() ([]core.LeaseClaim, error) {
-	return core.ListLeaseClaimsWithPrefix(leasePrefix)
+	ordinary, err := core.ListLeaseClaimsWithPrefix(leasePrefix)
+	if err != nil {
+		return nil, err
+	}
+	fixed, err := core.ListLeaseClaimsWithPrefix("cbx_")
+	if err != nil {
+		return nil, err
+	}
+	for _, claim := range fixed {
+		if isFixedClaim(claim) {
+			ordinary = append(ordinary, claim)
+		}
+	}
+	return ordinary, nil
 }
 
 func claimCleanupDue(claim core.LeaseClaim, now time.Time) (bool, string) {

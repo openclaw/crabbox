@@ -140,6 +140,28 @@ func ReserveParallelsFleetCapacity(ctx context.Context, cfg Config, runner Comma
 	return selectParallelsFleetConfig(ctx, cfg, runner, source, true)
 }
 
+// ReserveParallelsHostCapacity holds the capacity reservation for one already
+// chosen host, without re-running fleet selection. A fixed lease is pinned to
+// the host recorded in its durable intent and must never be moved to another
+// one, so it reserves that host alone rather than shopping the fleet.
+func ReserveParallelsHostCapacity(ctx context.Context, cfg Config, runner CommandRunner, source string) (func(), error) {
+	_, release, err := selectParallelsFleetConfig(ctx, parallelsPinnedFleetConfig(cfg), runner, source, true)
+	return release, err
+}
+
+// parallelsPinnedFleetConfig narrows a candidate's fleet to the entry it was
+// derived from. The entry has to survive: maxVMs is read from it by name.
+func parallelsPinnedFleetConfig(cfg Config) Config {
+	for _, host := range cfg.Parallels.Hosts {
+		if firstNonBlank(host.Name, host.Host, "local") == cfg.Parallels.SelectedHost {
+			pinned := cfg
+			pinned.Parallels.Hosts = []ParallelsHostConfig{host}
+			return pinned
+		}
+	}
+	return cfg
+}
+
 func selectParallelsFleetConfig(ctx context.Context, cfg Config, runner CommandRunner, source string, reserve bool) (Config, func(), error) {
 	var lastErr error
 	for _, candidate := range ParallelsCandidateConfigs(cfg) {
@@ -259,6 +281,52 @@ func parallelsVMMatchesHandle(vm ParallelsVM, id string) bool {
 	return slug != "" && NormalizeLeaseSlug(slug) == NormalizeLeaseSlug(id)
 }
 
+// ParallelsServerIdentity is the Parallels service's own account of the machine
+// it runs on. Neither field is derived from configuration, so it attests which
+// machine a connection actually reached rather than which one it was labelled
+// with.
+type ParallelsServerIdentity struct {
+	ServerID   string `json:"serverId"`
+	HardwareID string `json:"hardwareId"`
+	AccountID  string `json:"accountId"`
+	// VMHome is the service's default VM directory. It is the base a fixed
+	// lease clones into when no vmRoot is configured.
+	VMHome string `json:"-"`
+}
+
+// ServerIdentity reads the connected Parallels service identity. A fixed lease
+// binds to this, not to a fleet entry's display name: repointing an entry's
+// host or account at a different machine changes the reported identity.
+func (c *ParallelsClient) ServerIdentity(ctx context.Context) (ParallelsServerIdentity, error) {
+	result, err := c.prlsrvctl(ctx, "info", "--json")
+	if err != nil {
+		return ParallelsServerIdentity{}, commandOutputError("parallels server info", result, err)
+	}
+	var item map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(result.Stdout)), &item); err != nil {
+		return ParallelsServerIdentity{}, Exit(4, "parse Parallels server info: %v", err)
+	}
+	identity := ParallelsServerIdentity{
+		ServerID:   firstJSONField(item, "ID", "Id", "id"),
+		HardwareID: firstJSONField(item, "Hardware Id", "HardwareId", "hardware_id"),
+		VMHome:     firstJSONField(item, "VM home", "VMHome", "vm_home"),
+	}
+	if identity.ServerID == "" {
+		return ParallelsServerIdentity{}, Exit(4, "Parallels host reported no server ID; refusing to bind a fixed lease to an unattested host")
+	}
+	// Another account's empty inventory cannot prove this account's VM is gone.
+	account, err := c.hostCommand(ctx, nil, "id", "-u")
+	if err != nil {
+		return ParallelsServerIdentity{}, commandOutputError("parallels host account identity", account, err)
+	}
+	uid, err := strconv.ParseUint(strings.TrimSpace(account.Stdout), 10, 32)
+	if err != nil {
+		return ParallelsServerIdentity{}, Exit(4, "Parallels host reported no valid account ID; refusing to bind a fixed lease to an unattested account")
+	}
+	identity.AccountID = strconv.FormatUint(uid, 10)
+	return identity, nil
+}
+
 func (c *ParallelsClient) ListCrabboxServers(ctx context.Context) ([]Server, error) {
 	vms, err := c.ListVMs(ctx)
 	if err != nil {
@@ -282,6 +350,17 @@ func (c *ParallelsClient) ListVMs(ctx context.Context) ([]ParallelsVM, error) {
 	return parseParallelsVMs(result.Stdout)
 }
 
+// ListVMsDetailed returns the complete inventory with per-VM detail. The plain
+// listing reports only uuid, name, status and address; the bundle path a fixed
+// lease attests its VM by comes from the info form.
+func (c *ParallelsClient) ListVMsDetailed(ctx context.Context) ([]ParallelsVM, error) {
+	result, err := c.prlctl(ctx, nil, "list", "-a", "-i", "-f", "-j")
+	if err != nil {
+		return nil, commandOutputError("parallels list detail", result, err)
+	}
+	return parseParallelsVMs(result.Stdout)
+}
+
 func (c *ParallelsClient) GetVM(ctx context.Context, id string) (ParallelsVM, error) {
 	result, err := c.prlctl(ctx, nil, "list", "-i", "-f", "-j", id)
 	if err != nil {
@@ -297,9 +376,31 @@ func (c *ParallelsClient) GetVM(ctx context.Context, id string) (ParallelsVM, er
 	return vms[0], nil
 }
 
+// SubmitClone validates the request, calls beforeSubmit immediately before
+// `prlctl clone`, and leaves resource discovery to the caller. A mutable-name
+// lookup cannot attest which incarnation the clone produced.
+func (c *ParallelsClient) SubmitClone(ctx context.Context, source, snapshotID, leaseID, slug string, keep bool, beforeSubmit func() error) error {
+	_, err := c.submitClone(ctx, source, snapshotID, leaseID, slug, keep, beforeSubmit)
+	return err
+}
+
 func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID, slug string, keep bool) (Server, error) {
+	labels, err := c.submitClone(ctx, source, snapshotID, leaseID, slug, keep, nil)
+	if err != nil {
+		return Server{}, err
+	}
+	vm, err := c.GetVM(ctx, parallelsLeaseVMName(leaseID, slug))
+	if err != nil {
+		return Server{}, err
+	}
+	server := parallelsVMToServer(c.Cfg, vm, labels)
+	_ = writeParallelsLeaseLabels(leaseID, server.Labels)
+	return server, nil
+}
+
+func (c *ParallelsClient) submitClone(ctx context.Context, source, snapshotID, leaseID, slug string, keep bool, beforeSubmit func() error) (map[string]string, error) {
 	if strings.TrimSpace(source) == "" {
-		return Server{}, Exit(2, "parallels.source or parallels.sourceId is required")
+		return nil, Exit(2, "parallels.source or parallels.sourceId is required")
 	}
 	name := parallelsLeaseVMName(leaseID, slug)
 	args := []string{"clone", source, "--name", name}
@@ -310,38 +411,43 @@ func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID
 	switch strings.ToLower(strings.TrimSpace(c.Cfg.Parallels.CloneMode)) {
 	case "", "linked":
 		if strings.TrimSpace(snapshotID) == "" {
-			return Server{}, Exit(2, "Parallels linked clones require --parallels-source-snapshot or --parallels-source-snapshot-id; otherwise prlctl creates a source-side linked-clone snapshot")
+			return nil, Exit(2, "Parallels linked clones require --parallels-source-snapshot or --parallels-source-snapshot-id; otherwise prlctl creates a source-side linked-clone snapshot")
 		}
 		if snapshotID != "" {
 			snapshot, ok, err := c.snapshotByID(ctx, source, snapshotID)
 			if err != nil {
-				return Server{}, err
+				return nil, err
 			}
 			if ok {
 				if err := validateParallelsSnapshotCloneMode(snapshot, c.Cfg.Parallels.CloneMode); err != nil {
-					return Server{}, err
+					return nil, err
 				}
 			}
 		}
 		args = append(args, "--linked")
 	case "full":
 		if snapshotID != "" {
-			return Server{}, Exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
+			return nil, Exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
 		}
 	case "unlink":
 		if snapshotID != "" {
-			return Server{}, Exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
+			return nil, Exit(2, "Parallels snapshot forks require cloneMode=linked; prlctl selects snapshots only for linked clones")
 		}
 		args = append(args, "--unlink")
 	default:
-		return Server{}, Exit(2, "parallels.cloneMode must be linked, full, or unlink")
+		return nil, Exit(2, "parallels.cloneMode must be linked, full, or unlink")
 	}
 	if snapshotID != "" {
 		args = append(args, "-i", snapshotID)
 	}
+	if beforeSubmit != nil {
+		if err := beforeSubmit(); err != nil {
+			return nil, err
+		}
+	}
 	result, err := c.prlctl(ctx, nil, args...)
 	if err != nil {
-		return Server{}, commandOutputError("parallels clone", result, err)
+		return nil, commandOutputError("parallels clone", result, err)
 	}
 	labels := DirectLeaseLabels(c.Cfg, leaseID, slug, parallelsProvider, "", keep, time.Now().UTC())
 	labels["source"] = source
@@ -349,13 +455,37 @@ func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID
 	if snapshotID != "" {
 		labels["source_snapshot"] = snapshotID
 	}
-	vm, err := c.GetVM(ctx, name)
-	if err != nil {
-		return Server{}, err
+	return labels, nil
+}
+
+// EnsureHostDir creates a directory on the Parallels host. A fixed lease clones
+// into a per-attempt directory, and prlctl requires --dst to exist already.
+func (c *ParallelsClient) EnsureHostDir(ctx context.Context, dir string) error {
+	if err := validParallelsHostDir(dir); err != nil {
+		return err
 	}
-	server := parallelsVMToServer(c.Cfg, vm, labels)
-	_ = writeParallelsLeaseLabels(leaseID, server.Labels)
-	return server, nil
+	result, err := c.hostCommand(ctx, nil, "mkdir", "-p", dir)
+	if err != nil {
+		return commandOutputError("parallels create host directory", result, err)
+	}
+	return nil
+}
+
+// RemoveHostDirIfEmpty clears a spent per-attempt directory. It never recurses:
+// only an empty directory is removed, so a surviving VM is never disturbed.
+func (c *ParallelsClient) RemoveHostDirIfEmpty(ctx context.Context, dir string) {
+	if validParallelsHostDir(dir) != nil {
+		return
+	}
+	_, _ = c.hostCommand(ctx, nil, "rmdir", dir)
+}
+
+func validParallelsHostDir(dir string) error {
+	dir = strings.TrimSpace(dir)
+	if !strings.HasPrefix(dir, "/") || strings.ContainsAny(dir, "\r\n\x00") {
+		return Exit(2, "Parallels host directory must be an absolute path")
+	}
+	return nil
 }
 
 func (c *ParallelsClient) Start(ctx context.Context, id string) error {
@@ -1166,9 +1296,19 @@ func (c *ParallelsClient) prlctl(ctx context.Context, extraEnv []string, args ..
 // both routes deliver the same bytes.
 // https://github.com/openclaw/crabbox/issues/2396
 func (c *ParallelsClient) prlctlWithStdin(ctx context.Context, stdin io.Reader, extraEnv []string, args ...string) (LocalCommandResult, error) {
+	return c.parallelsBinary(ctx, stdin, extraEnv, "prlctl", args...)
+}
+
+// prlsrvctl reaches the Parallels service rather than a VM. It carries the
+// host's own attested identity, which is what a fixed lease binds to.
+func (c *ParallelsClient) prlsrvctl(ctx context.Context, args ...string) (LocalCommandResult, error) {
+	return c.parallelsBinary(ctx, nil, nil, "prlsrvctl", args...)
+}
+
+func (c *ParallelsClient) parallelsBinary(ctx context.Context, stdin io.Reader, extraEnv []string, binary string, args ...string) (LocalCommandResult, error) {
 	env := parallelsChildCommandEnv(extraEnv)
 	if c.Cfg.Parallels.Host != "" {
-		remote := "PATH=/usr/local/bin:/opt/homebrew/bin:$PATH " + strings.Join(shellWords(append([]string{"prlctl"}, args...)), " ")
+		remote := "PATH=/usr/local/bin:/opt/homebrew/bin:$PATH " + strings.Join(shellWords(append([]string{binary}, args...)), " ")
 		sshArgs := []string{}
 		if c.Cfg.Parallels.HostKey != "" {
 			sshArgs = append(sshArgs, "-i", c.Cfg.Parallels.HostKey, "-o", "IdentitiesOnly=yes")
@@ -1180,7 +1320,7 @@ func (c *ParallelsClient) prlctlWithStdin(ctx context.Context, stdin io.Reader, 
 		sshArgs = append(sshArgs, host, remote)
 		return c.Runner.Run(ctx, LocalCommandRequest{Name: directSSHExecutable(), Args: sshArgs, Stdin: stdin, Env: env})
 	}
-	return c.Runner.Run(ctx, LocalCommandRequest{Name: "prlctl", Args: args, Stdin: stdin, Env: env})
+	return c.Runner.Run(ctx, LocalCommandRequest{Name: binary, Args: args, Stdin: stdin, Env: env})
 }
 
 func (c *ParallelsClient) hostCommand(ctx context.Context, stdin io.Reader, args ...string) (LocalCommandResult, error) {
@@ -1521,6 +1661,21 @@ func parallelsLabelsFromName(name string) map[string]string {
 
 func ParallelsLabelsFromName(name string) map[string]string {
 	return parallelsLabelsFromName(name)
+}
+
+// ParallelsLeaseVMName renders the host-unique VM name that carries a lease
+// identity. The name is the Parallels idempotency key: prlctl refuses a second
+// VM with the same name on a host, so a provider adapter can bind a fixed lease
+// ID to a create attempt without pre-allocating any other resource identifier.
+func ParallelsLeaseVMName(leaseID, slug string) string {
+	return parallelsLeaseVMName(leaseID, slug)
+}
+
+// ParallelsHostRefForConfig reports the resolved Parallels host identity used as
+// the provider scope of a lease: the selected fleet host, an explicit remote
+// host, or the local Mac.
+func ParallelsHostRefForConfig(cfg Config) string {
+	return parallelsHostRefForConfig(cfg)
 }
 
 func parallelsLeaseVMName(leaseID, slug string) string {

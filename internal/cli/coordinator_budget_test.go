@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -106,7 +107,7 @@ func TestCoordinatorLeaseReadStallsAreBounded(t *testing.T) {
 			}))
 			defer func() { close(release); server.Close() }()
 			client := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
-			ctx, cancel := context.WithTimeout(t.Context(), 40*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 70*time.Second)
 			defer cancel()
 			var err error
 			if bodyStall {
@@ -114,8 +115,8 @@ func TestCoordinatorLeaseReadStallsAreBounded(t *testing.T) {
 			} else {
 				_, err = client.GetLease(ctx, "cbx_budget")
 			}
-			if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil || calls.Load() != 1 {
-				t.Fatalf("read err=%v parent=%v requests=%d; want own deadline and no retry", err, ctx.Err(), calls.Load())
+			if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil || calls.Load() != 2 {
+				t.Fatalf("read err=%v parent=%v requests=%d; want total read deadline and two attempts", err, ctx.Err(), calls.Load())
 			}
 		})
 	}
@@ -365,6 +366,51 @@ func TestStopCoordinatorStalledLookup(t *testing.T) {
 					t.Fatalf("canceled stop err=%v releases=%d", err, releases.Load())
 				}
 			}
+		})
+	}
+}
+
+func TestCoordinatorFinishRequestsKeepCallerBudgetWithoutReadRetries(t *testing.T) {
+	t.Setenv("CRABBOX_OWNER", "alice@example.com")
+	for _, test := range []struct {
+		name, method, path string
+		call               func(context.Context, *CoordinatorClient) error
+	}{
+		{"finish", http.MethodPost, "/v1/runs/run_123/finish", func(ctx context.Context, c *CoordinatorClient) error {
+			_, err := c.FinishRun(ctx, "run_123", 1, 0, 0, "", false, nil, nil, FailureClassification{}, nil)
+			return err
+		}},
+		{"receipt verification", http.MethodGet, "/v1/runs/run_123/receipt", func(ctx context.Context, c *CoordinatorClient) error {
+			_, err := c.RunReceipt(ctx, "run_123")
+			return err
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				start := time.Now()
+				deadline := start.Add(90 * time.Second)
+				ctx, cancel := context.WithDeadline(t.Context(), deadline)
+				defer cancel()
+				calls := 0
+				client := &CoordinatorClient{BaseURL: "https://example.test", Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+					if got, ok := req.Context().Deadline(); !ok || !got.Equal(deadline) {
+						t.Fatalf("%s deadline=%v, want caller deadline=%v", req.Method, got, deadline)
+					}
+					if req.Method != test.method || req.URL.Path != test.path {
+						t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+					}
+					if err := sleepContext(req.Context(), 45*time.Second); err != nil {
+						return nil, err
+					}
+					return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("unavailable"))}, nil
+				})}}
+				err := test.call(ctx, client)
+				var response CoordinatorHTTPError
+				if !errors.As(err, &response) || response.StatusCode != http.StatusServiceUnavailable || calls != 1 || time.Since(start) != 45*time.Second || ctx.Err() != nil {
+					t.Fatalf("err=%v requests=%d elapsed=%s caller=%v", err, calls, time.Since(start), ctx.Err())
+				}
+			})
 		})
 	}
 }

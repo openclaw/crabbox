@@ -272,6 +272,34 @@ timeout, including response-body reads. Earlier caller cancellation or deadlines
 still apply. Toolbox execution and archive uploads keep their caller-controlled
 lifetimes rather than inheriting this control-plane budget.
 
+New ordinary leases record the API endpoint and authenticated organization in
+their local claim before readiness, using current-key organization metadata or
+the authenticated OAuth organization. Acquisition fails before creating a
+sandbox if that identity cannot be attested. Credential rotation within the
+same organization preserves the binding.
+
+If native TTL or external deletion removes such a sandbox, use
+`crabbox stop --force --provider daytona --id <canonical-cbx-id>`. Crabbox verifies
+the current endpoint/organization against the original binding, an exact
+structured not-found, and complete inventory without a Crabbox label filter.
+Inventory is bounded to 100 pages of 100 sandboxes and 8 MiB per response;
+malformed, null, repeated, oversized, or failed pages retain the claim. Recovery
+has a three-minute total budget and reports `forgotten locally (resource absent)`
+without sending a delete. Ordinary `stop` and fixed-ID replay keep their existing
+ownership rules.
+
+### Recovering pre-binding claims
+
+Older ordinary claims lack the original authenticated account binding. Forced
+recovery reports `claim predates account binding; manual recovery per docs` and
+retains them, even if the currently selected account reports not-found. Inspect
+the exact sandbox ID with the original Daytona endpoint and owning account,
+complete any native cleanup there, and retain the claim until that cleanup is
+independently verified. With no concurrent Crabbox operation and no checkpoint,
+fixed-ID, or registration owner, remove only its exact file from the
+[local claims directory](../features/identifiers.md#local-claims); changing a claim's scope to the current
+account is not a supported recovery procedure.
+
 1. Create or resolve a Daytona sandbox from `daytona.snapshot` or an explicitly
    selected class's default snapshot.
 2. Create private previews, configure Daytona's native wall-clock TTL and idle

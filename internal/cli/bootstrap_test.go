@@ -273,6 +273,9 @@ func TestCloudInitWaylandDesktopProfile(t *testing.T) {
 	cfg.Browser = true
 	cfg.DesktopEnv = "wayland"
 	got := cloudInit(cfg, "ssh-ed25519 test")
+	if !strings.Contains(got, "    retry crabbox-ready\n") {
+		t.Fatal("Wayland bootstrap must wait for the compositor and VNC listener")
+	}
 	for _, want := range []string{
 		"labwc wayvnc foot grim slurp wtype wl-clipboard wlr-randr",
 		"xdg-desktop-portal-wlr",

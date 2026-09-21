@@ -35,6 +35,11 @@ at `root@<publicIp>:<publicPort>` and uses its standard SSH transport. RunPod's
 basic SSH proxy is not used, because rsync needs the SCP/SFTP support the proxy
 lacks.
 
+SSH-endpoint discovery has a ten-minute budget covering both API requests and
+jittered retry waits. Caller cancellation stops discovery and retains its error
+cause; a completed provider response is not replaced by a simultaneous
+cancellation. An independent API-client timeout remains a request failure.
+
 **SSH auth is public-key only.** Crabbox reads the public key matching its
 configured SSH key and supplies it to the pod as `PUBLIC_KEY`. The default image
 installs that key for SSH; a custom image must honor `PUBLIC_KEY` and start SSH.

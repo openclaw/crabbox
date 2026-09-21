@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
@@ -76,6 +78,73 @@ func TestRedactVastAPIErrorSecrets(t *testing.T) {
 	}
 	if !strings.Contains(text, "<redacted>") {
 		t.Fatalf("error was not redacted: %q", text)
+	}
+}
+
+func TestVastAPIErrorDiagnosticRedaction(t *testing.T) {
+	const token = "fixture-vast-secret-token"
+	c := &vastClient{apiKey: token}
+	readErr := errors.New("read interrupted with " + token)
+	for _, tc := range []struct {
+		name, body string
+		readErr    error
+	}{
+		{name: "credential across cutoff", body: strings.Repeat("x", 1590) + token},
+		{name: "read diagnostic", body: "partial response", readErr: readErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := c.decodeAPIError("GET /instances/100/", http.StatusForbidden, "403 Forbidden", []byte(tc.body), tc.readErr)
+			var apiErr *vastAPIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden || apiErr.Status != "403 Forbidden" {
+				t.Fatalf("typed status changed: %v", err)
+			}
+			if strings.Contains(apiErr.Body, token[:10]) || !strings.Contains(apiErr.Body, "<redacted>") {
+				t.Fatalf("unsafe API diagnostic: %q", apiErr.Body)
+			}
+			if errors.Is(err, readErr) {
+				t.Fatal("read failure overrode API error classification")
+			}
+		})
+	}
+}
+
+func TestTransportErrorPreservesCauseWithoutDisplayingSecrets(t *testing.T) {
+	cause := fmt.Errorf("failed with vast-secret: %w", context.DeadlineExceeded)
+	client, err := newVastClient(core.VastConfig{APIKey: "vast-secret", APIURL: "https://example.test"}, core.Runtime{HTTP: &http.Client{Transport: testutil.RoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, cause
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GetInstance(t.Context(), 100)
+	if !errors.Is(err, cause) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v, want original transport cause", err)
+	}
+	if strings.Contains(err.Error(), "vast-secret") || !strings.Contains(err.Error(), "<redacted>") {
+		t.Fatalf("transport diagnostic not redacted: %v", err)
+	}
+}
+
+func TestReadinessDeadlineCancelsNativeHTTPClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-t.Context().Done():
+		}
+	}))
+	defer server.Close()
+	client, err := newVastClient(core.VastConfig{APIKey: "fixture-key", APIURL: server.URL}, core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := newTestBackend(t, client)
+	b.pollTimeout = 50 * time.Millisecond
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	_, err = b.waitForInstanceReady(ctx, client, 100)
+	var exit core.ExitError
+	if !core.AsExitError(err, &exit) || exit.Code != 5 || !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		t.Fatalf("err=%v parent=%v, want own readiness deadline from real HTTP request", err, ctx.Err())
 	}
 }
 

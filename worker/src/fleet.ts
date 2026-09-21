@@ -1,6 +1,20 @@
 import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 
 import { AsyncMutex, KeyedAsyncMutex } from "./async-mutex";
+import { AWSPoolAccess } from "./aws-pool-access";
+import {
+  ReadyPoolAccess,
+  portablePoolPrefix,
+  portablePoolReservationKey,
+  portablePoolGrantKey,
+  poolTokenHash,
+  type PoolAccessBinding,
+  type PoolAccessReservation,
+  type PoolAccessGrant,
+  type ProviderPoolAccess,
+} from "./ready-pool-access";
+import { setPoolWake } from "./ready-pool-wake";
+type ReadyPoolMode = boolean | "portable";
 import { AzureResumableProvisioning } from "./azure-provisioning";
 import {
   clearHostReservations,
@@ -34,6 +48,7 @@ import {
   sealProvisioningMaterial,
 } from "./provisioning-material";
 import { coordinatorStorageEntries } from "./storage-scan";
+import { WayVNCRetirement } from "./wayvnc-retirement";
 
 const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 
@@ -1104,6 +1119,11 @@ export class FleetCoordinator {
   private readonly webVNCAgentCapabilities = new Map<string, Map<string, Set<string>>>();
   private readonly webVNCViewers = new Map<string, Map<string, WebVNCViewerSession>>();
   private readonly webVNCControllers = new Map<string, string>();
+  private readonly wayVNCRetirement = new WayVNCRetirement();
+  private readonly webVNCHandoffs = new Map<
+    string,
+    { viewerID: string; status: "pending" | "verified" | "manual" }
+  >();
   private readonly pendingWebVNCToViewer = new Map<string, WebVNCBuffer>();
   private readonly webVNCEvents = new Map<string, WebVNCEvent[]>();
   private readonly codeAgents = new Map<string, WebSocket>();
@@ -1136,6 +1156,7 @@ export class FleetCoordinator {
   private currentAdminGrantVersion: string | undefined;
   private bridgeRestoreReady: Promise<boolean> | undefined;
   private readonly readyPoolBorrowLock = new AsyncMutex();
+  private readonly poolAccess: ReadyPoolAccess;
   private readonly bridgeTicketLock = new AsyncMutex();
   private readonly bridgeTickets: BridgeTickets;
   private readonly awsIngressOperationLock = new AsyncMutex();
@@ -1152,6 +1173,35 @@ export class FleetCoordinator {
     private readonly authContext: AuthRequestContext = {},
     private readonly coordinatorGeneration: string = crypto.randomUUID(),
   ) {
+    this.poolAccess = new ReadyPoolAccess(state, {
+      owner: requestOwner,
+      org: (request) => requestOrg(request, env),
+      authorized: (lease, request) =>
+        this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
+      matches: readyPoolEntryMatches,
+      identityEqual: readyPoolIdentityEqual,
+      identityMatches: (entry, lease) =>
+        Boolean(entry.identity && this.readyPoolIdentityMatchesLease(entry.identity, lease)),
+      heartbeatDeadline: readyPoolBorrowDeadline,
+      withoutBorrow: withoutReadyPoolBorrow,
+      heartbeatMs: readyPoolBorrowTimeoutMs,
+      provider: (binding) =>
+        isCoordinatorProvider(binding.provider)
+          ? this.provider(binding.provider, binding.scope).poolAccess?.()
+          : undefined,
+      counters: (storage, entry, delta) =>
+        this.incrementReadyPoolCountersForScope(
+          entry.owner,
+          entry.org,
+          entry.key,
+          delta,
+          "portable",
+          storage,
+        ),
+      release: async (lease) => {
+        await this.releaseResolvedLease(lease, { deleteServer: true, keep: false });
+      },
+    });
     this.leaseProvisioning = new LeaseProvisioningController(
       state,
       env,
@@ -1189,7 +1239,10 @@ export class FleetCoordinator {
           });
       },
     );
-    state.provisioning?.registerProvisioningTick(() => this.leaseProvisioning.tick());
+    state.provisioning?.registerProvisioningTick(async () => {
+      await this.leaseProvisioning.tick();
+      await this.poolAccess.maintain();
+    });
     this.bridgeTickets = new BridgeTickets(state.storage, {
       withLock: (operation) => this.bridgeTicketLock.run(operation),
       getLease: (id) => this.getLease(id),
@@ -2828,6 +2881,7 @@ export class FleetCoordinator {
     }
     switch (attachment.kind) {
       case "webvnc-agent":
+        if (this.wayVNCRetirement.handle(socket, message)) break;
         await forwardOrBufferWebVNC(
           message,
           await this.currentBridgeRecipient(
@@ -3196,6 +3250,7 @@ export class FleetCoordinator {
       return candidates;
     });
     await this.reconcileInterruptedLeaseProvisioning(leaseIDs);
+    await this.poolAccess.maintain();
     await this.expireLeases(leaseIDs);
     await this.webVNCCredentialHandoffs.cleanupExpired();
     await this.cleanupExpiredWebVNCPortalViewerAuth();
@@ -11151,6 +11206,11 @@ export class FleetCoordinator {
       viewerCount: viewers.length,
       observerCount: Math.max(0, viewers.length - (controller ? 1 : 0)),
       availableViewerSlots: availableAgents.length,
+      remoteRetirementProtocol: 1,
+      wayvncHandoff:
+        this.webVNCHandoffs.get(lease.id)?.viewerID === controllerID
+          ? this.webVNCHandoffs.get(lease.id)?.status
+          : "manual",
       viewerID,
       viewerRole: currentViewer
         ? currentViewer.id === controllerID
@@ -11334,6 +11394,31 @@ export class FleetCoordinator {
     const previousID = this.activeWebVNCControllerID(lease.id);
     this.webVNCControllers.set(lease.id, viewerID);
     if (previousID !== viewerID) {
+      const previousHandoff = this.webVNCHandoffs.get(lease.id);
+      // A failed or overlapping handoff can leave an older observer owning layout.
+      const ownershipContinuous = !previousHandoff || previousHandoff.status === "verified";
+      const handoff = { viewerID, status: "pending" as "pending" | "verified" | "manual" };
+      this.webVNCHandoffs.set(lease.id, handoff);
+      const previous = this.webVNCViewers.get(lease.id)?.get(previousID);
+      const oldAgent = previous && this.webVNCAgents.get(lease.id)?.get(previous.agentID);
+      const newAgent = this.webVNCAgents.get(lease.id)?.get(viewer.agentID);
+      const retired =
+        ownershipContinuous && oldAgent && newAgent
+          ? await this.wayVNCRetirement.retire(
+              oldAgent,
+              newAgent,
+              this.openWebVNCAgents(lease.id).map(([, socket]) => socket),
+            )
+          : false;
+      // Reconnects and overlapping takeovers invalidate the pending generation.
+      if (this.webVNCHandoffs.get(lease.id) === handoff) {
+        handoff.status =
+          retired &&
+          this.activeWebVNCControllerID(lease.id) === viewerID &&
+          this.webVNCViewers.get(lease.id)?.get(viewerID) === viewer
+            ? "verified"
+            : "manual";
+      }
       this.recordWebVNCEvent(lease.id, "control_taken", `${viewer.label} took control`);
     }
     return await this.webVNCStatus(
@@ -12524,6 +12609,7 @@ export class FleetCoordinator {
     if (!viewers || viewers.size === 0) {
       this.webVNCViewers.delete(leaseID);
       this.webVNCControllers.delete(leaseID);
+      this.webVNCHandoffs.delete(leaseID);
       return;
     }
     if (this.webVNCControllers.get(leaseID) === viewerID) {
@@ -12542,6 +12628,7 @@ export class FleetCoordinator {
     }
     this.webVNCViewers.delete(leaseID);
     this.webVNCControllers.delete(leaseID);
+    this.webVNCHandoffs.delete(leaseID);
   }
 
   private async consumeRuntimeAdapterTicket(
@@ -12746,6 +12833,39 @@ export class FleetCoordinator {
     if (method === "GET" && !action) {
       return json({ pool: (await this.readyPoolStatus(key, request)).map(publicReadyPoolEntry) });
     }
+    if (action?.endsWith("-access")) {
+      if (!envFlagEnabled(this.env.CRABBOX_PORTABLE_POOLS_ENABLED) || !this.state.provisioning)
+        return json({ error: "portable_pools_disabled" }, { status: 409 });
+      if (request.method === "GET" && action === "capabilities-access")
+        return json({ schema: "crabbox-pool-access/v1", maxDurationSeconds: 1800, renewal: false });
+      if (request.method === "GET" && action === "metrics-access")
+        return this.readyPoolMetrics(request, key, "portable");
+      if (request.method === "GET" && action === "entries-access")
+        return json({
+          pool: (await this.readyPoolStatus(key, request, "portable")).map(publicReadyPoolEntry),
+        });
+      if (request.method === "POST") {
+        if (action === "register-access")
+          return this.registerReadyPoolLease(request, key, "portable");
+        if (action === "reconcile-access")
+          return this.reconcileReadyPoolCapacity(request, key, "portable");
+        if (action === "release-fill-claim-access")
+          return this.releaseReadyPoolFillClaim(request, key, "portable");
+        if (action === "borrow-access") {
+          const input = await readJson<ReadyPoolBorrowRequest>(request);
+          const error =
+            readyPoolIdentityRequestError(input.identity, true) ??
+            (await readyPoolSeedIdentityRequestError(input.identity, input)) ??
+            normalizeReadyPoolIdentityProvider(input);
+          if (error) return error;
+          return this.poolAccess.borrow(request, key, input);
+        }
+        const operation = action.slice(0, -7);
+        if (operation === "ack" || operation === "heartbeat" || operation === "return")
+          return this.poolAccess.act(request, key, operation, await readJson(request));
+      }
+      return notFound();
+    }
     if (method === "GET" && action === "identity") {
       return json({ schema: readyPoolIdentitySchemaV1 });
     }
@@ -12802,7 +12922,7 @@ export class FleetCoordinator {
   private async readyPoolStatus(
     key: string,
     request: Request,
-    typed = false,
+    typed: ReadyPoolMode = false,
   ): Promise<ReadyPoolEntry[]> {
     return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(() => this.readyPoolStatusSnapshot(request, key, typed)),
@@ -12818,7 +12938,7 @@ export class FleetCoordinator {
   private async readyPoolStatusSnapshot(
     request: Request,
     key?: string,
-    typed = false,
+    typed: ReadyPoolMode = false,
   ): Promise<ReadyPoolEntry[]> {
     const entries = await this.readyPoolEntries(typed);
     const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
@@ -12897,13 +13017,22 @@ export class FleetCoordinator {
     ).readyPoolImageIdentity?.(lease);
   }
 
+  private readyPoolTransaction<T>(
+    mode: ReadyPoolMode,
+    callback: (storage: CoordinatorStorageView) => Promise<T>,
+  ): Promise<T> {
+    return mode === "portable"
+      ? this.poolAccess.transaction(callback)
+      : this.state.storage.transaction(callback);
+  }
+
   private async registerReadyPoolLease(
     request: Request,
     key: string,
-    typed = false,
+    typed: ReadyPoolMode = false,
   ): Promise<Response> {
     const input = await readJson<ReadyPoolRegisterRequest>(request);
-    const identityError = readyPoolIdentityRequestError(input.identity, typed);
+    const identityError = readyPoolIdentityRequestError(input.identity, Boolean(typed));
     if (identityError) return identityError;
     const seedError = await readyPoolSeedIdentityRequestError(input.identity, input);
     if (seedError) return seedError;
@@ -12958,151 +13087,213 @@ export class FleetCoordinator {
         { status: 409 },
       );
     }
-    return await this.readyPoolBorrowLock.run(() =>
-      this.state.runExclusive(async () => {
-        const lease = await this.getLease(leaseID);
-        if (!lease) return notFound();
-        if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
-          return json(
-            { error: "forbidden", message: "lease manage access required" },
-            { status: 403 },
-          );
-        }
-        if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
-          return json({ error: "lease_not_active" }, { status: 409 });
-        }
-        if (typed && !sameReadyPoolObservationLease(lease, checkedLease)) {
-          return json(
-            {
-              error: "ready_pool_image_observation_conflict",
-              message: "lease changed after immutable image evidence was observed",
-            },
-            { status: 409 },
-          );
-        }
-        if (typed && !this.readyPoolIdentityMatchesLease(input.identity!, lease)) {
-          return json({ error: "ready_pool_lease_identity_mismatch" }, { status: 409 });
-        }
-        const fillClaimToken = nonSecretString(input.fillClaimToken);
-        const fillClaim = fillClaimToken
-          ? await this.state.storage.get<ReadyPoolFillClaim>(
-              readyPoolFillClaimKey(fillClaimToken, typed),
-            )
-          : undefined;
-        if (fillClaimToken && !fillClaim) {
-          return json({ error: "fill_claim_not_found" }, { status: 409 });
-        }
-        if (
-          fillClaim &&
-          (fillClaim.key !== key ||
-            fillClaim.owner !== requestOwner(request) ||
-            fillClaim.org !== requestOrg(request, this.env))
-        ) {
-          return json({ error: "fill_claim_mismatch" }, { status: 409 });
-        }
-        if (fillClaim && Date.parse(fillClaim.expiresAt) <= Date.now()) {
-          await this.state.storage.delete(readyPoolFillClaimKey(fillClaim.token, typed));
-          return json({ error: "fill_claim_expired" }, { status: 409 });
-        }
-        if (
-          fillClaim?.compatibilityKey &&
-          compatibilityKey &&
-          fillClaim.compatibilityKey !== compatibilityKey
-        ) {
-          return json({ error: "fill_claim_compatibility_mismatch" }, { status: 409 });
-        }
-        const existingPoolEntries = [
-          ...(await this.readyPoolEntries()),
-          ...(await this.readyPoolEntries(true)),
-        ].filter((entry) => entry.leaseID === leaseID);
-        if (existingPoolEntries.some((entry) => entry.state === "busy")) {
-          return json(
-            {
-              error: "lease_pool_busy",
-              message: "lease is currently borrowed from a ready pool",
-            },
-            { status: 409 },
-          );
-        }
-        if (existingPoolEntries.some((entry) => entry.state === "quarantined")) {
-          return json(
-            { error: "pool_entry_quarantined", message: "quarantined leases must be drained" },
-            { status: 409 },
-          );
-        }
-        const now = new Date().toISOString();
-        const entry: ReadyPoolEntry = {
-          key,
-          leaseID,
-          state: "ready",
-          owner: lease.owner,
-          org: lease.org,
-          provider: lease.provider,
-          target: lease.target,
-          class: lease.class,
-          serverType: lease.serverType,
-          lastReadyAt: now,
-          createdAt: now,
-          updatedAt: now,
-          expiresAt: lease.expiresAt,
-        };
-        if (typed) {
-          for (const field of ["repo", "ref", "commit", "fingerprint"] as const) {
-            const value = input[field];
-            if (typeof value === "string" && value !== "") entry[field] = value;
+    let accessBinding: PoolAccessBinding | undefined;
+    if (typed === "portable") {
+      if (!isCoordinatorProvider(checkedLease.provider))
+        return json({ error: "unsupported_pool_access_provider" }, { status: 409 });
+      const capability = this.provider(
+        checkedLease.provider!,
+        checkedLease.region,
+        checkedLease.providerProject,
+      ).poolAccess?.();
+      if (!capability) return json({ error: "unsupported_pool_access_provider" }, { status: 409 });
+      if (!compatibilityKey) return json({ error: "compatibility_key_required" }, { status: 400 });
+      const existing = [...(await this.readyPoolEntries()), ...(await this.readyPoolEntries(true))];
+      if (existing.some((entry) => entry.leaseID === leaseID))
+        return json({ error: "lease_pool_protocol_conflict" }, { status: 409 });
+      accessBinding = await capability.enroll(checkedLease);
+    }
+    const claimHash =
+      typed === "portable" && input.fillClaimToken
+        ? await poolTokenHash("fill", input.fillClaimToken)
+        : input.fillClaimToken;
+    const response = await this.readyPoolBorrowLock.run(() =>
+      this.state.runExclusive(() =>
+        this.readyPoolTransaction(typed, async (storage) => {
+          const lease = await storage.get<LeaseRecord>(leaseKey(leaseID));
+          if (!lease) return notFound();
+          if (!this.leaseManageableByRequest(lease, request, isAdminRequest(request))) {
+            return json(
+              { error: "forbidden", message: "lease manage access required" },
+              { status: 403 },
+            );
           }
-        } else {
-          addReadyPoolEntryString(entry, "repo", input.repo);
-          addReadyPoolEntryString(entry, "ref", input.ref);
-          addReadyPoolEntryString(entry, "commit", input.commit);
-          addReadyPoolEntryString(entry, "fingerprint", input.fingerprint);
-        }
-        addReadyPoolEntryString(
-          entry,
-          "compatibilityKey",
-          fillClaim?.compatibilityKey ?? compatibilityKey,
-        );
-        addReadyPoolEntryString(entry, "image", input.image);
-        addReadyPoolEntryString(entry, "sshHost", readyPoolLeaseSSHHost(lease, input.sshHost));
-        addReadyPoolEntryString(entry, "sshUser", readyPoolLeaseSSHUser(lease, input.sshUser));
-        addReadyPoolEntryString(entry, "sshPort", readyPoolLeaseSSHPort(lease, input.sshPort));
-        addReadyPoolEntryString(entry, "workRoot", readyPoolLeaseWorkRoot(lease, input.workRoot));
-        if (typed) entry.identity = input.identity!;
-        if (lease.windowsMode) {
-          entry.windowsMode = lease.windowsMode;
-        }
-        if (fillClaim && !readyPoolEntryMatches(entry, fillClaim.criteria)) {
-          return json(
-            {
-              error: "fill_claim_criteria_mismatch",
-              message: "registered lease does not satisfy the claimed compatibility criteria",
-            },
-            { status: 409 },
+          if (lease.state !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
+            return json({ error: "lease_not_active" }, { status: 409 });
+          }
+          if (typed && !sameReadyPoolObservationLease(lease, checkedLease)) {
+            return json(
+              {
+                error: "ready_pool_image_observation_conflict",
+                message: "lease changed after immutable image evidence was observed",
+              },
+              { status: 409 },
+            );
+          }
+          if (typed && !this.readyPoolIdentityMatchesLease(input.identity!, lease)) {
+            return json({ error: "ready_pool_lease_identity_mismatch" }, { status: 409 });
+          }
+          const fillClaimToken = nonSecretString(claimHash);
+          const fillClaim = fillClaimToken
+            ? await storage.get<ReadyPoolFillClaim>(readyPoolFillClaimKey(fillClaimToken, typed))
+            : undefined;
+          if (fillClaimToken && !fillClaim) {
+            return json({ error: "fill_claim_not_found" }, { status: 409 });
+          }
+          if (
+            fillClaim &&
+            (fillClaim.key !== key ||
+              fillClaim.owner !== requestOwner(request) ||
+              fillClaim.org !== requestOrg(request, this.env))
+          ) {
+            return json({ error: "fill_claim_mismatch" }, { status: 409 });
+          }
+          if (fillClaim && Date.parse(fillClaim.expiresAt) <= Date.now()) {
+            await storage.delete(readyPoolFillClaimKey(fillClaim.token, typed));
+            if (typed === "portable") await setPoolWake(storage, `claim-${fillClaim.token}`);
+            return json({ error: "fill_claim_expired" }, { status: 409 });
+          }
+          if (
+            fillClaim?.compatibilityKey &&
+            compatibilityKey &&
+            fillClaim.compatibilityKey !== compatibilityKey
+          ) {
+            return json({ error: "fill_claim_compatibility_mismatch" }, { status: 409 });
+          }
+          const existingPoolEntries = [
+            ...(await this.readyPoolEntries(false, storage)),
+            ...(await this.readyPoolEntries(true, storage)),
+            ...(await this.readyPoolEntries("portable", storage)),
+          ].filter((entry) => entry.leaseID === leaseID);
+          const reservation = await storage.get<PoolAccessReservation>(
+            portablePoolReservationKey(leaseID),
           );
-        }
-        await Promise.all(
-          existingPoolEntries
-            .filter((existing) => existing.key !== key || Boolean(existing.identity) !== typed)
-            .map((existing) => this.deleteReadyPoolEntry(existing, Boolean(existing.identity))),
-        );
-        await this.putReadyPoolEntry(entry, typed);
-        if (fillClaim) {
-          await this.state.storage.delete(readyPoolFillClaimKey(fillClaim.token, typed));
-          await this.incrementReadyPoolCounters(request, key, { fillClaimsCompleted: 1 }, typed);
-        }
-        await this.scheduleAlarm();
-        return json({ entry: publicReadyPoolEntry(entry), lease: publicLeaseRecord(lease) });
-      }),
+          if (
+            (typed !== "portable" && reservation) ||
+            (typed === "portable" && existingPoolEntries.some((entry) => !entry.portableAccess))
+          )
+            return json({ error: "lease_pool_protocol_conflict" }, { status: 409 });
+          if (typed === "portable" && existingPoolEntries.some((entry) => entry.state !== "ready"))
+            return json({ error: "portable_pool_cleanup_pending" }, { status: 409 });
+          if (existingPoolEntries.some((entry) => entry.state === "busy")) {
+            return json(
+              {
+                error: "lease_pool_busy",
+                message: "lease is currently borrowed from a ready pool",
+              },
+              { status: 409 },
+            );
+          }
+          if (existingPoolEntries.some((entry) => entry.state === "quarantined")) {
+            return json(
+              { error: "pool_entry_quarantined", message: "quarantined leases must be drained" },
+              { status: 409 },
+            );
+          }
+          const now = new Date().toISOString();
+          const entry: ReadyPoolEntry = {
+            key,
+            leaseID,
+            state: "ready",
+            owner: lease.owner,
+            org: lease.org,
+            provider: lease.provider,
+            target: lease.target,
+            class: lease.class,
+            serverType: lease.serverType,
+            lastReadyAt: now,
+            createdAt: now,
+            updatedAt: now,
+            expiresAt: lease.expiresAt,
+          };
+          if (typed) {
+            for (const field of ["repo", "ref", "commit", "fingerprint"] as const) {
+              const value = input[field];
+              if (typeof value === "string" && value !== "") entry[field] = value;
+            }
+          } else {
+            addReadyPoolEntryString(entry, "repo", input.repo);
+            addReadyPoolEntryString(entry, "ref", input.ref);
+            addReadyPoolEntryString(entry, "commit", input.commit);
+            addReadyPoolEntryString(entry, "fingerprint", input.fingerprint);
+          }
+          addReadyPoolEntryString(
+            entry,
+            "compatibilityKey",
+            fillClaim?.compatibilityKey ?? compatibilityKey,
+          );
+          addReadyPoolEntryString(entry, "image", input.image);
+          addReadyPoolEntryString(entry, "sshHost", readyPoolLeaseSSHHost(lease, input.sshHost));
+          addReadyPoolEntryString(entry, "sshUser", readyPoolLeaseSSHUser(lease, input.sshUser));
+          addReadyPoolEntryString(entry, "sshPort", readyPoolLeaseSSHPort(lease, input.sshPort));
+          addReadyPoolEntryString(entry, "workRoot", readyPoolLeaseWorkRoot(lease, input.workRoot));
+          if (typed) entry.identity = input.identity!;
+          if (accessBinding) {
+            entry.portableAccess = true;
+          }
+          if (lease.windowsMode) {
+            entry.windowsMode = lease.windowsMode;
+          }
+          if (fillClaim && !readyPoolEntryMatches(entry, fillClaim.criteria)) {
+            return json(
+              {
+                error: "fill_claim_criteria_mismatch",
+                message: "registered lease does not satisfy the claimed compatibility criteria",
+              },
+              { status: 409 },
+            );
+          }
+          await Promise.all(
+            existingPoolEntries
+              .filter(
+                (existing) =>
+                  existing.key !== key ||
+                  (existing.portableAccess ? "portable" : Boolean(existing.identity)) !== typed,
+              )
+              .map((existing) =>
+                this.deleteReadyPoolEntry(
+                  existing,
+                  existing.portableAccess ? "portable" : Boolean(existing.identity),
+                  storage,
+                ),
+              ),
+          );
+          if (accessBinding) {
+            await storage.put(leaseKey(leaseID), { ...lease, portablePoolAccess: true });
+            await storage.put(portablePoolReservationKey(leaseID), {
+              key,
+              binding: accessBinding,
+              generation: reservation?.generation ?? 0,
+            });
+            await setPoolWake(storage, leaseID, Date.parse(lease.expiresAt) - 60_000);
+          }
+          await this.putReadyPoolEntry(entry, typed, storage);
+          if (fillClaim) {
+            await storage.delete(readyPoolFillClaimKey(fillClaim.token, typed));
+            if (typed === "portable") await setPoolWake(storage, `claim-${fillClaim.token}`);
+            await this.incrementReadyPoolCounters(
+              request,
+              key,
+              { fillClaimsCompleted: 1 },
+              typed,
+              storage,
+            );
+          }
+          return json({ entry: publicReadyPoolEntry(entry), lease: publicLeaseRecord(lease) });
+        }),
+      ),
     );
+    await this.state.runExclusive(() => this.scheduleAlarm());
+    return response;
   }
 
   private async borrowReadyPoolLease(
     request: Request,
     key: string,
-    typed = false,
+    typed: ReadyPoolMode = false,
   ): Promise<Response> {
     const input = await readJson<ReadyPoolBorrowRequest>(request);
-    const identityError = readyPoolIdentityRequestError(input.identity, typed);
+    const identityError = readyPoolIdentityRequestError(input.identity, Boolean(typed));
     if (identityError) return identityError;
     const providerError = normalizeReadyPoolIdentityProvider(input);
     if (providerError) return providerError;
@@ -13143,6 +13334,8 @@ export class FleetCoordinator {
             lease.state === "active" &&
             Date.parse(lease.expiresAt) > nowMs
           ) {
+            // oxlint-disable-next-line eslint/no-await-in-loop -- check the reservation before selecting each candidate.
+            if (await this.state.storage.get(portablePoolReservationKey(lease.id))) continue;
             if (typed && !this.readyPoolIdentityMatchesLease(entry.identity!, lease)) {
               // oxlint-disable-next-line eslint/no-await-in-loop -- mismatch must be durably drained before another candidate can be borrowed.
               await this.drainMismatchedReadyPoolEntry(entry, typed);
@@ -13209,7 +13402,7 @@ export class FleetCoordinator {
   private async heartbeatReadyPoolBorrow(
     request: Request,
     key: string,
-    typed = false,
+    typed: ReadyPoolMode = false,
   ): Promise<Response> {
     const input = await readJson<ReadyPoolBorrowHeartbeatRequest>(request);
     const leaseID = input.leaseID ?? "";
@@ -13288,10 +13481,10 @@ export class FleetCoordinator {
   private async reconcileReadyPoolCapacity(
     request: Request,
     key: string,
-    typed = false,
+    typed: ReadyPoolMode = false,
   ): Promise<Response> {
     const input = await readJson<ReadyPoolReconcileRequest>(request);
-    const identityError = readyPoolIdentityRequestError(input.identity, typed);
+    const identityError = readyPoolIdentityRequestError(input.identity, Boolean(typed));
     if (identityError) return identityError;
     const providerError = normalizeReadyPoolIdentityProvider(input);
     if (providerError) return providerError;
@@ -13334,157 +13527,189 @@ export class FleetCoordinator {
       ...input,
       ...(compatibilityKey ? { compatibilityKey } : {}),
     });
+    const rawClaimToken = crypto.randomUUID();
+    const storedClaimToken =
+      typed === "portable" ? await poolTokenHash("fill", rawClaimToken) : rawClaimToken;
     const nowMs = Date.now();
-    return await this.readyPoolBorrowLock.run(() =>
+    const response = await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(async () => {
         await this.maintainReadyPools(nowMs);
-        const owner = requestOwner(request);
-        const org = requestOrg(request, this.env);
-        let policyKey: string;
-        let previous: ReadyPoolDesiredCapacity | undefined;
-        let legacyPolicyKey: string | undefined;
-        if (input.identity) {
-          policyKey = await readyPoolDesiredCapacityKeyV2({
-            org,
-            owner,
-            key,
-            compatibilityKey,
-            identity: input.identity,
-          });
-          const current = await this.state.storage.get<ReadyPoolDesiredCapacity>(policyKey);
-          const candidateLegacyKey = readyPoolLegacyTypedDesiredKey(
-            owner,
-            org,
-            key,
-            compatibilityKey,
-            input.identity,
-          );
-          const legacy = storageKeyWithinLimit(candidateLegacyKey)
-            ? await this.state.storage.get<ReadyPoolDesiredCapacity>(candidateLegacyKey)
-            : undefined;
-          for (const [storedKey, stored] of [
-            [policyKey, current],
-            [candidateLegacyKey, legacy],
-          ] as const) {
-            if (!stored) continue;
-            const storedProvider = stored.criteria.provider;
-            if (
-              !readyPoolDesiredCapacityScopeMatches(stored, owner, org, key, compatibilityKey) ||
-              !readyPoolIdentityEqual(stored.criteria.identity, input.identity) ||
-              (storedProvider !== undefined && storedProvider !== input.identity.image.provider) ||
-              (storedKey === policyKey && !readyPoolIdentityEqual(stored.identity, input.identity))
-            ) {
-              return json(
-                {
-                  error: "typed_ready_pool_desired_identity_mismatch",
-                  message:
-                    "stored typed desired capacity does not match the requested provider identity",
-                },
-                { status: 409 },
+        return this.readyPoolTransaction(typed, async (storage) => {
+          const owner = requestOwner(request);
+          const org = requestOrg(request, this.env);
+          let policyKey: string;
+          let previous: ReadyPoolDesiredCapacity | undefined;
+          let legacyPolicyKey: string | undefined;
+          if (input.identity) {
+            policyKey = await readyPoolDesiredCapacityKeyV2({
+              org,
+              owner,
+              key,
+              compatibilityKey,
+              identity: input.identity,
+            });
+            if (typed === "portable")
+              policyKey = policyKey.replace(
+                "typed-ready-pool-v2-desired:",
+                "portable-ready-pool-v1-desired:",
               );
+            const current = await storage.get<ReadyPoolDesiredCapacity>(policyKey);
+            const candidateLegacyKey = readyPoolLegacyTypedDesiredKey(
+              owner,
+              org,
+              key,
+              compatibilityKey,
+              input.identity,
+            );
+            const legacy =
+              typed !== "portable" && storageKeyWithinLimit(candidateLegacyKey)
+                ? await storage.get<ReadyPoolDesiredCapacity>(candidateLegacyKey)
+                : undefined;
+            for (const [storedKey, stored] of [
+              [policyKey, current],
+              [candidateLegacyKey, legacy],
+            ] as const) {
+              if (!stored) continue;
+              const storedProvider = stored.criteria.provider;
+              if (
+                !readyPoolDesiredCapacityScopeMatches(stored, owner, org, key, compatibilityKey) ||
+                !readyPoolIdentityEqual(stored.criteria.identity, input.identity) ||
+                (storedProvider !== undefined &&
+                  storedProvider !== input.identity.image.provider) ||
+                (storedKey === policyKey &&
+                  !readyPoolIdentityEqual(stored.identity, input.identity))
+              ) {
+                return json(
+                  {
+                    error: "typed_ready_pool_desired_identity_mismatch",
+                    message:
+                      "stored typed desired capacity does not match the requested provider identity",
+                  },
+                  { status: 409 },
+                );
+              }
+              previous ??= stored;
+              if (storedKey !== policyKey) legacyPolicyKey = storedKey;
             }
-            previous ??= stored;
-            if (storedKey !== policyKey) legacyPolicyKey = storedKey;
+          } else {
+            policyKey = readyPoolLegacyDesiredKey(owner, org, key, compatibilityKey);
+            previous = await storage.get<ReadyPoolDesiredCapacity>(policyKey);
           }
-        } else {
-          policyKey = readyPoolLegacyDesiredKey(owner, org, key, compatibilityKey);
-          previous = await this.state.storage.get<ReadyPoolDesiredCapacity>(policyKey);
-        }
-        const now = new Date(nowMs).toISOString();
-        const desired: ReadyPoolDesiredCapacity = {
-          key,
-          owner,
-          org,
-          criteria,
-          ...(input.identity ? { identity: input.identity } : {}),
-          minReady,
-          maxReady,
-          createdAt: previous?.createdAt ?? now,
-          updatedAt: now,
-          ...(compatibilityKey ? { compatibilityKey } : {}),
-        };
-        await this.state.storage.put(policyKey, desired);
-        if (legacyPolicyKey) {
-          await this.state.storage.delete(legacyPolicyKey);
-        }
-
-        const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
-        const entries = (await this.readyPoolEntries(typed)).filter((entry) => {
-          const lease = leases.get(entry.leaseID);
-          return (
-            entry.key === key &&
-            Boolean(
-              lease && this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
-            ) &&
-            readyPoolEntryMatches(entry, criteria)
-          );
-        });
-        const claims = (await this.readyPoolFillClaims(typed)).filter(
-          (claim) =>
-            claim.key === key &&
-            claim.owner === owner &&
-            claim.org === org &&
-            claim.compatibilityKey === compatibilityKey &&
-            readyPoolCriteriaEqual(claim.criteria, criteria),
-        );
-        const counts = readyPoolCapacityCounts(entries, claims.length);
-        const activeCapacity = counts.ready + counts.busy + counts.inFlight;
-        let claim: ReadyPoolFillClaim | undefined;
-        if (input.claim === true && counts.ready < minReady && activeCapacity < maxReady) {
-          claim = {
-            token: crypto.randomUUID(),
+          const now = new Date(nowMs).toISOString();
+          const desired: ReadyPoolDesiredCapacity = {
             key,
             owner,
             org,
             criteria,
-            createdAt: now,
-            expiresAt: new Date(nowMs + readyPoolFillClaimTimeoutMs).toISOString(),
+            ...(input.identity ? { identity: input.identity } : {}),
+            minReady,
+            maxReady,
+            createdAt: previous?.createdAt ?? now,
+            updatedAt: now,
             ...(compatibilityKey ? { compatibilityKey } : {}),
           };
-          await this.state.storage.put(readyPoolFillClaimKey(claim.token, typed), claim);
-          counts.inFlight++;
-          await this.incrementReadyPoolCounters(request, key, { fillClaimsCreated: 1 }, typed);
-        }
-        await this.scheduleAlarm();
-        const counters = await this.readyPoolCounters(request, key, typed);
-        return json({
-          desired: {
-            key: desired.key,
-            criteria: desired.criteria,
-            minReady: desired.minReady,
-            maxReady: desired.maxReady,
-            createdAt: desired.createdAt,
-            updatedAt: desired.updatedAt,
-            ...(desired.compatibilityKey ? { compatibilityKey: desired.compatibilityKey } : {}),
-          },
-          counts,
-          satisfied: counts.ready >= minReady,
-          reconciling: counts.ready + counts.inFlight >= minReady,
-          capped:
-            counts.ready < minReady && counts.ready + counts.busy + counts.inFlight >= maxReady,
-          claim: claim
-            ? {
-                token: claim.token,
-                key: claim.key,
-                criteria: claim.criteria,
-                createdAt: claim.createdAt,
-                expiresAt: claim.expiresAt,
-                ...(claim.compatibilityKey ? { compatibilityKey: claim.compatibilityKey } : {}),
-              }
-            : undefined,
-          counters,
+          await storage.put(policyKey, desired);
+          if (legacyPolicyKey) {
+            await storage.delete(legacyPolicyKey);
+          }
+
+          const leases = new Map(
+            [...(await storage.list<LeaseRecord>({ prefix: "lease:" })).values()].map((lease) => [
+              lease.id,
+              lease,
+            ]),
+          );
+          const entries = (await this.readyPoolEntries(typed, storage)).filter((entry) => {
+            const lease = leases.get(entry.leaseID);
+            return (
+              entry.key === key &&
+              Boolean(
+                lease && this.leaseManageableByRequest(lease, request, isAdminRequest(request)),
+              ) &&
+              readyPoolEntryMatches(entry, criteria)
+            );
+          });
+          const claims = (await this.readyPoolFillClaims(typed, storage)).filter(
+            (claim) =>
+              claim.key === key &&
+              claim.owner === owner &&
+              claim.org === org &&
+              claim.compatibilityKey === compatibilityKey &&
+              readyPoolCriteriaEqual(claim.criteria, criteria),
+          );
+          const counts = readyPoolCapacityCounts(entries, claims.length);
+          const activeCapacity =
+            counts.ready +
+            counts.busy +
+            counts.inFlight +
+            (typed === "portable" ? counts.quarantined + counts.draining : 0);
+          let claim: ReadyPoolFillClaim | undefined;
+          if (input.claim === true && counts.ready < minReady && activeCapacity < maxReady) {
+            claim = {
+              token: storedClaimToken,
+              key,
+              owner,
+              org,
+              criteria,
+              createdAt: now,
+              expiresAt: new Date(nowMs + readyPoolFillClaimTimeoutMs).toISOString(),
+              ...(compatibilityKey ? { compatibilityKey } : {}),
+            };
+            await storage.put(readyPoolFillClaimKey(claim.token, typed), claim);
+            if (typed === "portable")
+              await setPoolWake(storage, `claim-${claim.token}`, Date.parse(claim.expiresAt));
+            counts.inFlight++;
+            await this.incrementReadyPoolCounters(
+              request,
+              key,
+              { fillClaimsCreated: 1 },
+              typed,
+              storage,
+            );
+          }
+
+          const counters = await this.readyPoolCounters(request, key, typed, storage);
+          return json({
+            desired: {
+              key: desired.key,
+              criteria: desired.criteria,
+              minReady: desired.minReady,
+              maxReady: desired.maxReady,
+              createdAt: desired.createdAt,
+              updatedAt: desired.updatedAt,
+              ...(desired.compatibilityKey ? { compatibilityKey: desired.compatibilityKey } : {}),
+            },
+            counts,
+            satisfied: counts.ready >= minReady,
+            reconciling: counts.ready + counts.inFlight >= minReady,
+            capped: counts.ready < minReady && activeCapacity >= maxReady,
+            claim: claim
+              ? {
+                  token: rawClaimToken,
+                  key: claim.key,
+                  criteria: claim.criteria,
+                  createdAt: claim.createdAt,
+                  expiresAt: claim.expiresAt,
+                  ...(claim.compatibilityKey ? { compatibilityKey: claim.compatibilityKey } : {}),
+                }
+              : undefined,
+            counters,
+          });
         });
       }),
     );
+    await this.state.runExclusive(() => this.scheduleAlarm());
+    return response;
   }
 
   private async releaseReadyPoolFillClaim(
     request: Request,
     key: string,
-    typed = false,
+    typed: ReadyPoolMode = false,
   ): Promise<Response> {
     const input = await readJson<{ claimToken?: string }>(request);
-    const token = nonSecretString(input.claimToken);
+    const rawToken = nonSecretString(input.claimToken);
+    const token = typed === "portable" ? await poolTokenHash("fill", rawToken) : rawToken;
     if (!token) {
       return json({ error: "fill_claim_token_required" }, { status: 400 });
     }
@@ -13501,23 +13726,30 @@ export class FleetCoordinator {
         ) {
           return notFound();
         }
-        await this.state.storage.delete(readyPoolFillClaimKey(token, typed));
+        await this.readyPoolTransaction(typed, async (storage) => {
+          await storage.delete(readyPoolFillClaimKey(token, typed));
+          if (typed === "portable") await setPoolWake(storage, `claim-${token}`);
+        });
         await this.scheduleAlarm();
         return json({ released: true });
       }),
     );
   }
 
-  private async readyPoolMetrics(request: Request, key: string): Promise<Response> {
+  private async readyPoolMetrics(
+    request: Request,
+    key: string,
+    typed: ReadyPoolMode = false,
+  ): Promise<Response> {
     return await this.readyPoolBorrowLock.run(() =>
       this.state.runExclusive(async () => {
         await this.maintainReadyPools(Date.now());
         const leases = new Map((await this.leaseRecords()).map((lease) => [lease.id, lease]));
-        const entries = (await this.readyPoolEntries()).filter((entry) => {
+        const entries = (await this.readyPoolEntries(typed)).filter((entry) => {
           const lease = leases.get(entry.leaseID);
           return entry.key === key && this.readyPoolEntryVisibleToRequest(entry, request, lease);
         });
-        const claims = (await this.readyPoolFillClaims()).filter(
+        const claims = (await this.readyPoolFillClaims(typed)).filter(
           (claim) =>
             claim.key === key &&
             claim.owner === requestOwner(request) &&
@@ -13526,7 +13758,7 @@ export class FleetCoordinator {
         return json({
           key,
           counts: readyPoolCapacityCounts(entries, claims.length),
-          counters: await this.readyPoolCounters(request, key),
+          counters: await this.readyPoolCounters(request, key, typed),
         });
       }),
     );
@@ -13535,7 +13767,7 @@ export class FleetCoordinator {
   private async returnReadyPoolLease(
     request: Request,
     key: string,
-    typed = false,
+    typed: ReadyPoolMode = false,
   ): Promise<Response> {
     const input = await readJson<ReadyPoolReturnRequest>(request);
     if (!typed && input.identity !== undefined) {
@@ -13705,6 +13937,7 @@ export class FleetCoordinator {
   private async maintainReadyPools(nowMs: number): Promise<void> {
     const entries: ReadyPoolEntry[] = [];
     const typedEntries: ReadyPoolEntry[] = [];
+    const portableEntries = await this.readyPoolEntries("portable");
     const leases = new Map<string, LeaseRecord>();
     await Promise.all([
       this.visitStorageRecords<ReadyPoolEntry>(readyPoolPrefix, async (entry) => {
@@ -13714,13 +13947,27 @@ export class FleetCoordinator {
         typedEntries.push(entry);
       }),
     ]);
-    for (const leaseID of new Set([...entries, ...typedEntries].map((entry) => entry.leaseID))) {
+    for (const leaseID of new Set(
+      [...entries, ...typedEntries, ...portableEntries].map((entry) => entry.leaseID),
+    )) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- bound retained-pool hydration to one referenced lease at a time.
       const lease = await this.getLease(leaseID, { noCache: true });
       if (lease) leases.set(leaseID, lease);
     }
     await this.maintainReadyPoolEntries(entries, leases, nowMs);
     await this.maintainReadyPoolEntries(typedEntries, leases, nowMs, true);
+    await this.maintainReadyPoolEntries(portableEntries, leases, nowMs, "portable");
+    await this.visitStorageRecords<ReadyPoolFillClaim>(
+      "portable-ready-pool-v1-fill-claim:",
+      async (claim) => {
+        if (Date.parse(claim.expiresAt) <= nowMs) {
+          await this.poolAccess.transaction(async (storage) => {
+            await storage.delete(readyPoolFillClaimKey(claim.token, "portable"));
+            await setPoolWake(storage, `claim-${claim.token}`);
+          });
+        }
+      },
+    );
     await this.visitStorageRecords<ReadyPoolFillClaim>(readyPoolFillClaimPrefix, async (claim) => {
       if (Date.parse(claim.expiresAt) <= nowMs) {
         await this.state.storage.delete(readyPoolFillClaimKey(claim.token));
@@ -13740,10 +13987,19 @@ export class FleetCoordinator {
     entries: ReadyPoolEntry[],
     leases: Map<string, LeaseRecord>,
     nowMs: number,
-    typed = false,
+    typed: ReadyPoolMode = false,
   ): Promise<void> {
     for (const entry of entries) {
       const lease = leases.get(entry.leaseID);
+      if (typed === "portable") {
+        // oxlint-disable-next-line eslint/no-await-in-loop -- pending cleanup retains its capacity and binding.
+        const grant = await this.state.storage.get<PoolAccessGrant>(
+          portablePoolGrantKey(entry.leaseID),
+        );
+        if (grant && grant.state !== "revoked") continue;
+        // Never prune the only resource binding while provider cleanup is outstanding.
+        if (entry.state !== "ready" && lease && !leaseProviderCleanupConfirmed(lease)) continue;
+      }
       const backingLeaseExpiresAt = Date.parse(lease?.expiresAt ?? "");
       const leaseStale =
         !lease ||
@@ -13795,6 +14051,31 @@ export class FleetCoordinator {
         (entry.state === "stale" || entry.state === "quarantined" || entry.state === "draining") &&
         Date.parse(entry.updatedAt) + readyPoolTerminalRetentionMs <= nowMs
       ) {
+        if (typed === "portable") {
+          // oxlint-disable-next-line eslint/no-await-in-loop -- terminal metadata and counters retire atomically after provider proof.
+          await this.poolAccess.transaction(async (storage) => {
+            const grant = await storage.get<PoolAccessGrant>(portablePoolGrantKey(entry.leaseID));
+            const currentLease = await storage.get<LeaseRecord>(leaseKey(entry.leaseID));
+            if (
+              (grant && grant.state !== "revoked") ||
+              (currentLease && !leaseProviderCleanupConfirmed(currentLease))
+            )
+              return;
+            await this.deleteReadyPoolEntry(entry, typed, storage);
+            await storage.delete(portablePoolGrantKey(entry.leaseID));
+            await storage.delete(portablePoolReservationKey(entry.leaseID));
+            await setPoolWake(storage, entry.leaseID);
+            await this.incrementReadyPoolCountersForScope(
+              entry.owner,
+              entry.org,
+              entry.key,
+              { stalePruned: 1 },
+              typed,
+              storage,
+            );
+          });
+          continue;
+        }
         // oxlint-disable-next-line eslint/no-await-in-loop -- pruning is serialized with counter persistence for this entry.
         await this.deleteReadyPoolEntry(entry, typed);
         // oxlint-disable-next-line eslint/no-await-in-loop -- counters sharing a scope must not lose concurrent increments.
@@ -13815,7 +14096,7 @@ export class FleetCoordinator {
     entry: ReadyPoolEntry,
     reason: string,
     nowMs: number,
-    typed = false,
+    typed: ReadyPoolMode = false,
   ): Promise<void> {
     await this.putReadyPoolEntry(
       withoutReadyPoolBorrow({
@@ -13924,7 +14205,7 @@ export class FleetCoordinator {
 
   private async drainMismatchedReadyPoolEntry(
     entry: ReadyPoolEntry,
-    typed: boolean,
+    typed: ReadyPoolMode,
   ): Promise<void> {
     if (entry.state === "draining") return;
     await this.putReadyPoolEntry(
@@ -18294,16 +18575,28 @@ export class FleetCoordinator {
     return active;
   }
 
-  private async readyPoolEntries(typed = false): Promise<ReadyPoolEntry[]> {
-    const entries = await this.state.storage.list<ReadyPoolEntry>({
-      prefix: typed ? typedReadyPoolPrefix : readyPoolPrefix,
+  private async readyPoolEntries(
+    typed: ReadyPoolMode = false,
+    storage: CoordinatorStorageView = this.state.storage,
+  ): Promise<ReadyPoolEntry[]> {
+    const entries = await storage.list<ReadyPoolEntry>({
+      prefix:
+        typed === "portable" ? portablePoolPrefix : typed ? typedReadyPoolPrefix : readyPoolPrefix,
     });
     return [...entries.values()];
   }
 
-  private async readyPoolFillClaims(typed = false): Promise<ReadyPoolFillClaim[]> {
-    const claims = await this.state.storage.list<ReadyPoolFillClaim>({
-      prefix: typed ? typedReadyPoolFillClaimPrefix : readyPoolFillClaimPrefix,
+  private async readyPoolFillClaims(
+    typed: ReadyPoolMode = false,
+    storage: CoordinatorStorageView = this.state.storage,
+  ): Promise<ReadyPoolFillClaim[]> {
+    const claims = await storage.list<ReadyPoolFillClaim>({
+      prefix:
+        typed === "portable"
+          ? "portable-ready-pool-v1-fill-claim:"
+          : typed
+            ? typedReadyPoolFillClaimPrefix
+            : readyPoolFillClaimPrefix,
     });
     return [...claims.values()];
   }
@@ -18311,13 +18604,15 @@ export class FleetCoordinator {
   private async readyPoolCounters(
     request: Request,
     key: string,
-    typed = false,
+    typed: ReadyPoolMode = false,
+    storage: CoordinatorStorageView = this.state.storage,
   ): Promise<ReadyPoolCounters> {
     return await this.readyPoolCountersForScope(
       requestOwner(request),
       requestOrg(request, this.env),
       key,
       typed,
+      storage,
     );
   }
 
@@ -18325,12 +18620,12 @@ export class FleetCoordinator {
     owner: string,
     org: string,
     key: string,
-    typed = false,
+    typed: ReadyPoolMode = false,
+    storage: CoordinatorStorageView = this.state.storage,
   ): Promise<ReadyPoolCounters> {
     return (
-      (await this.state.storage.get<ReadyPoolCounters>(
-        readyPoolCountersKey(owner, org, key, typed),
-      )) ?? emptyReadyPoolCounters()
+      (await storage.get<ReadyPoolCounters>(readyPoolCountersKey(owner, org, key, typed))) ??
+      emptyReadyPoolCounters()
     );
   }
 
@@ -18338,7 +18633,8 @@ export class FleetCoordinator {
     request: Request,
     key: string,
     delta: Partial<Record<keyof Omit<ReadyPoolCounters, "updatedAt">, number>>,
-    typed = false,
+    typed: ReadyPoolMode = false,
+    storage: CoordinatorStorageView = this.state.storage,
   ): Promise<void> {
     await this.incrementReadyPoolCountersForScope(
       requestOwner(request),
@@ -18346,6 +18642,7 @@ export class FleetCoordinator {
       key,
       delta,
       typed,
+      storage,
     );
   }
 
@@ -18354,32 +18651,42 @@ export class FleetCoordinator {
     org: string,
     key: string,
     delta: Partial<Record<keyof Omit<ReadyPoolCounters, "updatedAt">, number>>,
-    typed = false,
+    typed: ReadyPoolMode = false,
+    storage: CoordinatorStorageView = this.state.storage,
   ): Promise<void> {
-    const counters = await this.readyPoolCountersForScope(owner, org, key, typed);
+    const counters = await this.readyPoolCountersForScope(owner, org, key, typed, storage);
     for (const [name, amount] of Object.entries(delta) as Array<
       [keyof Omit<ReadyPoolCounters, "updatedAt">, number]
     >) {
-      counters[name] += amount;
+      counters[name] = (counters[name] ?? 0) + amount;
     }
     counters.updatedAt = new Date().toISOString();
-    await this.state.storage.put(readyPoolCountersKey(owner, org, key, typed), counters);
+    await storage.put(readyPoolCountersKey(owner, org, key, typed), counters);
   }
 
   private async getReadyPoolEntry(
     key: string,
     leaseID: string,
-    typed = false,
+    typed: ReadyPoolMode = false,
+    storage: CoordinatorStorageView = this.state.storage,
   ): Promise<ReadyPoolEntry | undefined> {
-    return this.state.storage.get<ReadyPoolEntry>(readyPoolKey(key, leaseID, typed));
+    return storage.get<ReadyPoolEntry>(readyPoolKey(key, leaseID, typed));
   }
 
-  private async putReadyPoolEntry(entry: ReadyPoolEntry, typed = false): Promise<void> {
-    await this.state.storage.put(readyPoolKey(entry.key, entry.leaseID, typed), entry);
+  private async putReadyPoolEntry(
+    entry: ReadyPoolEntry,
+    typed: ReadyPoolMode = false,
+    storage: CoordinatorStorageView = this.state.storage,
+  ): Promise<void> {
+    await storage.put(readyPoolKey(entry.key, entry.leaseID, typed), entry);
   }
 
-  private async deleteReadyPoolEntry(entry: ReadyPoolEntry, typed = false): Promise<void> {
-    await this.state.storage.delete(readyPoolKey(entry.key, entry.leaseID, typed));
+  private async deleteReadyPoolEntry(
+    entry: ReadyPoolEntry,
+    typed: ReadyPoolMode = false,
+    storage: CoordinatorStorageView = this.state.storage,
+  ): Promise<void> {
+    await storage.delete(readyPoolKey(entry.key, entry.leaseID, typed));
   }
 
   private async recentRuns(
@@ -18993,6 +19300,8 @@ export class FleetCoordinator {
   }
 
   private async deleteLeaseServer(lease: LeaseRecord): Promise<void> {
+    if (lease.portablePoolAccess)
+      await this.poolAccess.invalidateLease(lease.id, "lease timeout or provider cleanup");
     const provider = managedLeaseProvider(lease);
     if (!provider) {
       return;
@@ -19347,6 +19656,8 @@ export class FleetCoordinator {
     ) {
       return current;
     }
+    if (current.portablePoolAccess)
+      await this.poolAccess.invalidateLease(current.id, "lease released");
     if (this.state.provisioning) {
       const released = await this.state.provisioning.commitAndWake(async (transaction) => {
         const latest = await transaction.get<LeaseRecord>(leaseKey(current.id));
@@ -20006,13 +20317,24 @@ function readyPoolEntryMatches(entry: ReadyPoolEntry, input: ReadyPoolBorrowRequ
     readyPoolFieldMatches(entry.fingerprint, input.fingerprint, false, exactSeed) &&
     readyPoolFieldMatches(entry.compatibilityKey, input.compatibilityKey) &&
     readyPoolFieldMatches(entry.provider, input.provider) &&
-    readyPoolFieldMatches(entry.target, input.target)
+    readyPoolFieldMatches(entry.target, input.target) &&
+    readyPoolFieldMatches(entry.class, input.class) &&
+    readyPoolFieldMatches(entry.serverType, input.serverType)
   );
 }
 
 function readyPoolCriteria(input: ReadyPoolBorrowRequest): ReadyPoolBorrowRequest {
   const criteria: ReadyPoolBorrowRequest = {};
-  for (const key of ["repo", "ref", "commit", "fingerprint", "provider", "target"] as const) {
+  for (const key of [
+    "repo",
+    "ref",
+    "commit",
+    "fingerprint",
+    "provider",
+    "target",
+    "class",
+    "serverType",
+  ] as const) {
     const value =
       input.identity && key !== "provider" && key !== "target"
         ? typeof input[key] === "string"
@@ -20056,6 +20378,8 @@ function readyPoolCriteriaEqual(
     "compatibilityKey",
     "provider",
     "target",
+    "class",
+    "serverType",
   ] as const) {
     if (normalizedLeft[key] !== normalizedRight[key]) return false;
   }
@@ -20102,6 +20426,7 @@ function withoutReadyPoolBorrow(entry: ReadyPoolEntry): ReadyPoolEntry {
     borrowHeartbeatRequired: _borrowHeartbeatRequired,
     borrowHeartbeatAt: _borrowHeartbeatAt,
     borrowExpiresAt: _borrowExpiresAt,
+    borrowHardDeadline: _borrowHardDeadline,
     borrowToken: _borrowToken,
     ...rest
   } = entry;
@@ -20110,6 +20435,7 @@ function withoutReadyPoolBorrow(entry: ReadyPoolEntry): ReadyPoolEntry {
   void _borrowHeartbeatRequired;
   void _borrowHeartbeatAt;
   void _borrowExpiresAt;
+  void _borrowHardDeadline;
   void _borrowToken;
   return rest;
 }
@@ -20192,8 +20518,8 @@ function readyPoolFieldMatches(
   return got === want || (allowMissing && got === "");
 }
 
-function readyPoolKey(key: string, leaseID: string, typed = false): string {
-  return `${typed ? typedReadyPoolPrefix : readyPoolPrefix}${key}:${leaseID}`;
+function readyPoolKey(key: string, leaseID: string, typed: ReadyPoolMode = false): string {
+  return `${typed === "portable" ? portablePoolPrefix : typed ? typedReadyPoolPrefix : readyPoolPrefix}${key}:${leaseID}`;
 }
 
 function readyPoolLegacyDesiredKey(
@@ -20276,12 +20602,21 @@ function storageKeyWithinLimit(key: string): boolean {
   return textEncoder.encode(key).byteLength <= durableObjectStorageKeyMaxBytes;
 }
 
-function readyPoolFillClaimKey(token: string, typed = false): string {
-  return `${typed ? typedReadyPoolFillClaimPrefix : readyPoolFillClaimPrefix}${token}`;
+function readyPoolFillClaimKey(token: string, typed: ReadyPoolMode = false): string {
+  return `${typed === "portable" ? "portable-ready-pool-v1-fill-claim:" : typed ? typedReadyPoolFillClaimPrefix : readyPoolFillClaimPrefix}${token}`;
 }
 
-function readyPoolCountersKey(owner: string, org: string, key: string, typed = false): string {
-  return `${typed ? typedReadyPoolCountersPrefix : readyPoolCountersPrefix}${[org, owner, key]
+function readyPoolCountersKey(
+  owner: string,
+  org: string,
+  key: string,
+  typed: ReadyPoolMode = false,
+): string {
+  return `${typed === "portable" ? "portable-ready-pool-v1-counters:" : typed ? typedReadyPoolCountersPrefix : readyPoolCountersPrefix}${[
+    org,
+    owner,
+    key,
+  ]
     .map((part) => encodeURIComponent(part))
     .join(":")}`;
 }
@@ -22955,7 +23290,10 @@ function isReservedWebVNCControlFrame(message: unknown): boolean {
   }
   try {
     const parsed = JSON.parse(message) as { type?: unknown };
-    return parsed.type === "desktop_theme";
+    return (
+      parsed.type === "desktop_theme" ||
+      (typeof parsed.type === "string" && parsed.type.startsWith("wayvnc_"))
+    );
   } catch {
     return false;
   }
@@ -26550,6 +26888,7 @@ function parseProviderLabelTime(value: string | undefined): number {
 }
 
 interface CloudProvider {
+  poolAccess?(): ProviderPoolAccess;
   resumableProvisioning?(): ProviderResumableProvisioning;
   readyPoolImageIdentity?(lease: LeaseRecord): ReadyPoolImageIdentity | undefined;
   observeReadyPoolImageIdentity?(lease: LeaseRecord): Promise<LeaseImageIdentity | undefined>;
@@ -28318,6 +28657,10 @@ export class AWSProvider implements CloudProvider {
   private get client(): EC2SpotClient {
     this.clientValue ??= new EC2SpotClient(this.env, this.region);
     return this.clientValue;
+  }
+
+  poolAccess(): ProviderPoolAccess {
+    return new AWSPoolAccess(this.client);
   }
 
   async authorizeHostPin(config: LeaseConfig, org: string): Promise<boolean> {

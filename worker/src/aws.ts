@@ -1889,6 +1889,38 @@ export class EC2SpotClient {
     throw new Error(`timed out waiting for AWS SSM workspace bootstrap: ${commandID}`);
   }
 
+  // The portable-pool adapter owns binding, generation and script validation.
+  async runPoolAccessCommand(instanceID: string, command: string): Promise<string> {
+    const sent = await this.ssm("SendCommand", {
+      DocumentName: "AWS-RunShellScript",
+      InstanceIds: [instanceID],
+      TimeoutSeconds: 30,
+      Parameters: { commands: [`/bin/bash -c ${shellQuote(command)}`], executionTimeout: ["30"] },
+    });
+    const commandID = asString(record(sent["Command"])["CommandId"]);
+    if (!commandID) throw new Error("pool SSM command outcome unknown");
+    const deadline = Date.now() + 30_000;
+    /* oxlint-disable eslint/no-await-in-loop -- bounded SSM completion observation. */
+    while (Date.now() < deadline) {
+      try {
+        const invocation = await this.ssm("GetCommandInvocation", {
+          CommandId: commandID,
+          InstanceId: instanceID,
+        });
+        if (invocation["Status"] === "Success")
+          return asString(invocation["StandardOutputContent"]).trim();
+        if (["Failed", "Cancelled", "TimedOut"].includes(asString(invocation["Status"])))
+          throw new Error("pool SSM command failed");
+      } catch (error) {
+        if (!(error instanceof Error) || !error.message.includes("InvocationDoesNotExist"))
+          throw error;
+      }
+      await sleep(1_000);
+    }
+    /* oxlint-enable eslint/no-await-in-loop */
+    throw new Error("pool SSM command completion uncertain");
+  }
+
   async hourlySpotPriceUSD(instanceType: string): Promise<number | undefined> {
     const root = await this.ec2("DescribeSpotPriceHistory", {
       "InstanceType.1": instanceType,

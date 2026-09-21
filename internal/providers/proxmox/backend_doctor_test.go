@@ -75,6 +75,14 @@ func (c *fakeProxmoxDoctorClient) CreateServer(_ context.Context, _ core.Config,
 	return core.Server{}, nil
 }
 
+func (c *fakeProxmoxDoctorClient) NextVMID(context.Context) (int, error) {
+	return 101, nil
+}
+
+func (c *fakeProxmoxDoctorClient) CreateServerWithVMID(ctx context.Context, cfg core.Config, publicKey, leaseID, slug string, keep bool, _ int, _ map[string]string, _ func(core.Server) error) (core.Server, error) {
+	return c.CreateServer(ctx, cfg, publicKey, leaseID, slug, keep)
+}
+
 func (c *fakeProxmoxDoctorClient) GetServer(_ context.Context, id string) (core.Server, error) {
 	c.getCalls++
 	if c.getCallsByID == nil {
@@ -291,6 +299,14 @@ func TestProxmoxTouchUsesMigratedVMNode(t *testing.T) {
 				t.Fatal("touch changed the input labels")
 			}
 		})
+	}
+}
+
+func TestProxmoxAdvertisesRequestedLeaseIDSupport(t *testing.T) {
+	backend := NewLeaseBackend(Provider{}.Spec(), core.Config{}, core.Runtime{})
+	fixed, ok := backend.(core.IdempotentLeaseIDBackend)
+	if !ok || !fixed.SupportsRequestedLeaseID() {
+		t.Fatalf("backend=%T fixed=%t, want requested lease ID support", backend, ok)
 	}
 }
 
