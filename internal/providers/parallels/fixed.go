@@ -373,15 +373,16 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		}
 		if len(result.Candidates) != 0 {
 			if len(result.Candidates) == 1 {
-				projected := *claim
-				projectedIntent := *intent
-				projectedIntent.Attempt = maps.Clone(intent.Attempt)
-				projected.FixedCreateIntent = &projectedIntent
 				vm := result.Candidates[0]
-				if err := bindParallelsFixedIncarnation(&projected, &projectedIntent, vm.ID, name, leaseID); err != nil {
+				// The creation directory proves which incarnation we produced even
+				// when a later name check refuses use. Keep that cleanup evidence.
+				if err := bindParallelsFixedIncarnation(claim, intent, vm.ID, name, leaseID); err != nil {
 					return result, err
 				}
-				if err := validateParallelsFixedVM(projected, &projectedIntent, vm, name); err != nil {
+				if err := tx.Record("bound"); err != nil {
+					return result, err
+				}
+				if err := validateParallelsFixedVM(*claim, intent, vm, name); err != nil {
 					return result, err
 				}
 			}
