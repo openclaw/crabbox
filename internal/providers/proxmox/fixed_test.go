@@ -314,7 +314,9 @@ func TestProxmoxFixedReplayRefusesUnboundGeneration(t *testing.T) {
 	intent := *before.FixedCreateIntent
 	intent.State = "prepared"
 	unbound.FixedCreateIntent, unbound.CloudImmutableID = &intent, ""
-	if err := core.ReplaceLeaseClaimIfUnchanged(before.LeaseID, before, unbound); err != nil {
+	// The setup write advances the revision; compare replay with that exact persisted snapshot.
+	unbound, err := core.ReplaceLeaseClaimIfUnchangedDurableReturning(before.LeaseID, before, unbound)
+	if err != nil {
 		t.Fatal(err)
 	}
 	client.servers[0].ImmutableID = replacementGeneration

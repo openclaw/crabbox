@@ -28,15 +28,16 @@ func TestProxmoxFixedReplayAndConflictThroughHTTPAPI(t *testing.T) {
 			backend, fake, req := fixedProxmoxFixture(t)
 			var remote core.Server
 			var mutations int
+			var configReads int
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var data any
 				switch {
 				case r.URL.Path == "/api2/json/access/permissions":
 					data = map[string]any{r.URL.Query().Get("path"): map[string]int{"VM.Audit": 1}}
 				case r.URL.Path == "/api2/json/cluster/resources":
-					entries := []map[string]any{{"vmid": 417, "node": "pve1", "type": "qemu", "template": 0}}
+					entries := []map[string]any{{"vmid": 417, "name": remote.Name, "node": "pve1", "type": "qemu", "template": 0}}
 					if scenario == "multiple" {
-						entries = append(entries, map[string]any{"vmid": 418, "node": "pve1", "type": "qemu", "template": 0})
+						entries = append(entries, map[string]any{"vmid": 418, "name": "crabbox-duplicate", "node": "pve1", "type": "qemu", "template": 0})
 					}
 					data = entries
 				case strings.HasSuffix(r.URL.Path, "/status/current"):
@@ -46,6 +47,7 @@ func TestProxmoxFixedReplayAndConflictThroughHTTPAPI(t *testing.T) {
 					}
 					data = map[string]any{"vmid": id, "name": remote.Name, "status": "running"}
 				case strings.HasSuffix(r.URL.Path, "/config") && r.Method == http.MethodGet:
+					configReads++
 					description := "crabbox labels\n"
 					for key, value := range remote.Labels {
 						description += key + "=" + value + "\n"
@@ -82,12 +84,26 @@ func TestProxmoxFixedReplayAndConflictThroughHTTPAPI(t *testing.T) {
 			}
 			newClient = func(cfg core.Config) (proxmoxClient, error) { return core.NewProxmoxClient(cfg) }
 			replay, err := backend.Acquire(context.Background(), req)
+			if configReads == 0 {
+				t.Fatal("replay never inspected the VM configuration")
+			}
 			if scenario == "replay" {
-				if err != nil || replay.Server.CloudID != first.Server.CloudID || replay.Server.ImmutableID != first.Server.ImmutableID {
-					t.Fatalf("replay=%+v err=%v", replay, err)
+				if err != nil {
+					t.Fatalf("replay failed: %v", err)
 				}
-			} else if err == nil || !strings.Contains(err.Error(), "lease_id_conflict") || mutations != 0 {
-				t.Fatalf("scenario=%s err=%v mutations=%d", scenario, err, mutations)
+				if replay.Server.CloudID != first.Server.CloudID || replay.Server.ImmutableID != first.Server.ImmutableID {
+					t.Fatalf("replay identity=%s/%s, want %s/%s", replay.Server.CloudID, replay.Server.ImmutableID, first.Server.CloudID, first.Server.ImmutableID)
+				}
+			} else {
+				want := map[string]string{
+					"generation":          "bound VMID and vmgenid",
+					"fingerprint":         "durable fixed identity",
+					"missing source node": "durable fixed identity",
+					"multiple":            "multiple Proxmox VMs",
+				}[scenario]
+				if err == nil || !strings.Contains(err.Error(), "lease_id_conflict") || !strings.Contains(err.Error(), want) || mutations != 0 {
+					t.Fatalf("scenario=%s err=%v want=%q mutations=%d", scenario, err, want, mutations)
+				}
 			}
 			if fake.fixedCreates != 1 {
 				t.Fatal("replay cloned a second VM")
