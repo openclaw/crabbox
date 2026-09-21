@@ -88,3 +88,36 @@ func TestFixedAttemptReaderPreservesLegacyPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestFixedBindingCASPreservesExpectedJournal(t *testing.T) {
+	isolateTestUserDirs(t)
+	const id = "cbx_abcdef123455"
+	err := WithDurableLeaseClaimLock(id, func(claim *LeaseClaim, _ bool, persist func() error) error {
+		*claim = LeaseClaim{LeaseID: id, Provider: "fixture", Slug: "fixture", FixedCreateIntent: &FixedCreateIntent{Version: 1, Fingerprint: "hash", Slug: "fixture", State: "prepared", Attempt: map[string]string{"name": "fixture"}, Journal: &FixedLeaseJournal{Version: 1, Phase: "prepared", Revision: 1}}}
+		return persist()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := ReadLeaseClaim(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind := func(claim *LeaseClaim, persist func() error) error {
+		return BindFixedClaim(claim, FixedResourceBinding{CloudID: "native-id", ImmutableID: "generation", AttemptIdentityKey: "native-id"}, persist)
+	}
+	bound, err := CompareAndBindFixedClaim(expected, bind)
+	if err != nil || bound.CloudID != "native-id" {
+		t.Fatalf("recovery binding failed: %+v %v", bound, err)
+	}
+	if expected.CloudID != "" || expected.FixedCreateIntent.Journal.Phase != "prepared" || expected.FixedCreateIntent.Attempt["native-id"] != "" {
+		t.Fatal("CAS expected record was mutated")
+	}
+	if _, err := CompareAndBindFixedClaim(expected, bind); err == nil {
+		t.Fatal("stale expected claim crossed the CAS fence")
+	}
+	current, err := ReadLeaseClaim(id)
+	if err != nil || !reflect.DeepEqual(current, bound) {
+		t.Fatalf("stale bind changed custody: %v", err)
+	}
+}

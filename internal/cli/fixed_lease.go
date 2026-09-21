@@ -105,7 +105,7 @@ func AcquireFixedIntent(
 			return Exit(4, "lease_id_conflict: lease %s is bound to checkpoint %s, not checkpoint %s", opts.LeaseID, blank(claim.FixedCreateIntent.CheckpointID, "<none>"), blank(opts.CheckpointID, "<none>"))
 		}
 		if exists && claim.Provider != opts.Kind.ClaimProvider {
-			return Exit(4, "lease_id_conflict: lease %s already has another owner", opts.LeaseID)
+			return Exit(4, "lease_id_conflict: lease %s is bound to provider=%s; it already has another owner", opts.LeaseID, claim.Provider)
 		}
 		binding, err := prepare(ctx, claim, exists)
 		if err != nil {

@@ -400,11 +400,13 @@ func ValidateFixedClaim(c LeaseClaim, r FixedClaimRules) error {
 	i := c.FixedCreateIntent
 	if !r.Kind.IsFixedClaim(c) || i.Version != r.Kind.IntentVersion || i.Fingerprint == "" || i.Slug != c.Slug ||
 		(len(r.States) != 0 && !slices.Contains(r.States, i.State)) ||
-		(r.Scope != "" && c.ProviderScope != r.Scope) || (r.IntentScope != "" && i.ProviderScope != r.IntentScope) ||
+		(r.IntentScope != "" && i.ProviderScope != r.IntentScope) ||
 		(r.RequireCanonicalID && !IsCanonicalLeaseID(c.LeaseID)) || (r.RequireSlug && i.Slug == "") ||
-		(r.NoCheckpoint && i.CheckpointID != "") || (r.NoFailedAttempts && len(i.FailedAttempts) != 0) ||
-		(r.NoNumericID && c.CloudNumericID != 0) || (r.SameImmutableID && c.CloudImmutableID != c.CloudID) {
+		(r.NoCheckpoint && i.CheckpointID != "") || (r.NoFailedAttempts && len(i.FailedAttempts) != 0) {
 		return Exit(4, "lease_id_conflict: invalid fixed %s identity or provider scope for %s", r.Kind.Label, c.LeaseID)
+	}
+	if (r.Scope != "" && c.ProviderScope != r.Scope) || (r.NoNumericID && c.CloudNumericID != 0) || (r.SameImmutableID && c.CloudImmutableID != c.CloudID) {
+		return Exit(4, "lease_id_conflict: fixed %s lease %s has inconsistent immutable identity or provider scope", r.Kind.Label, c.LeaseID)
 	}
 	if (r.RequireIntentScope && i.ProviderScope == "") || (r.ExpectedID != "" && c.CloudID != r.ExpectedID) ||
 		(r.NumericMatchesID && c.CloudID != strconv.FormatInt(c.CloudNumericID, 10)) ||
@@ -494,7 +496,12 @@ func BindFixedClaim(claim *LeaseClaim, binding FixedResourceBinding, persist fun
 	if err != nil {
 		return err
 	}
-	return tx.Bind(binding)
+	// The caller owns the publication phase: acquisition journals the bind,
+	// while a resolution CAS preserves the existing create-intent receipt.
+	if err := tx.applyBinding(binding); err != nil {
+		return err
+	}
+	return persist()
 }
 
 // ValidateFixedLocalClaimUniqueness rejects another local owner, including an
@@ -615,4 +622,27 @@ func CheckFixedAttemptActive(claim LeaseClaim, identityKey string, cleanupKeys .
 		}
 	}
 	return nil
+}
+
+// CloneLeaseClaim snapshots all custody and access evidence, including journals.
+func CloneLeaseClaim(claim LeaseClaim) LeaseClaim {
+	claim = cloneLeaseClaim(claim)
+	if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.Journal != nil {
+		journal := *claim.FixedCreateIntent.Journal
+		claim.FixedCreateIntent.Journal = &journal
+	}
+	return claim
+}
+
+// CompareAndBindFixedClaim keeps the expected CAS record separate from the
+// journal the binding callback advances. A shallow intent copy loses that fence.
+func CompareAndBindFixedClaim(claim LeaseClaim, bind func(*LeaseClaim, func() error) error) (LeaseClaim, error) {
+	expected := CloneLeaseClaim(claim)
+	claim = CloneLeaseClaim(claim)
+	err := bind(&claim, func() error {
+		var err error
+		claim, err = ReplaceLeaseClaimIfUnchangedDurableReturning(claim.LeaseID, expected, claim)
+		return err
+	})
+	return claim, err
 }

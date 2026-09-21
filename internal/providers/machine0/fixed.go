@@ -2,7 +2,6 @@ package machine0
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -53,7 +52,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest) (co
 		TTL:          cfg.TTL,
 		IdleTimeout:  cfg.IdleTimeout,
 		Now:          func() time.Time { return core.ClockNow(b.rt.Clock).UTC() },
-	}, core.FixedLeaseOperations[machine]{DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
+	}, core.FixedLeaseOperations[machine]{Admission: &core.FixedAdmission{FreshOnly: true}, DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		var err error
 		fingerprint, err = core.FixedMachine0CreateIntentFingerprint(cfg, core.FixedMachine0CreateIntentRequest{
 			RequestedSlug: core.NormalizeLeaseSlug(req.RequestedSlug),
@@ -106,18 +105,18 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest) (co
 			if tx.Claim.CloudID != "" {
 				return result, core.Exit(4, "lease_id_conflict: acquired fixed lease %s is missing its bound Machine0 machine", leaseID)
 			}
-			result.CanSubmit = tx.Fresh
+			result.CanSubmit = true
 		}
 		return result, nil
-	}, PlanAttempt: func(ctx context.Context, tx *core.FixedTransaction) error {
-		intent := tx.Claim.FixedCreateIntent
+	}, Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
+		intent := claim.FixedCreateIntent
 		name := machine0MachineName(leaseID, intent.Slug)
 		// Capacity gates new creation, never replay of an attested VM.
 		if err := b.validateCatalogSelection(ctx, cfg.Machine0.Size, cfg.Machine0.Region); err != nil {
-			return err
+			return core.FixedAttemptPlan{}, err
 		}
 		if err := b.preflightSSHKey(ctx, cfg.Machine0.Key); err != nil {
-			return err
+			return core.FixedAttemptPlan{}, err
 		}
 		image := cfg.Machine0.Image
 		if req.Options.Desktop && strings.TrimSpace(cfg.Machine0.DesktopImage) != "" {
@@ -128,19 +127,11 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest) (co
 			Image: image, ImageVersion: cfg.Machine0.ImageVersion, Key: cfg.Machine0.Key,
 			CreatedAt: core.ClockNow(b.rt.Clock).UTC().Format(time.RFC3339Nano),
 		}
-		data, err := json.Marshal(attempt)
-		if err != nil {
-			return err
-		}
-		intent.Attempt = map[string]string{"machine0": string(data)}
-		return nil
+		return core.FixedAttemptPlan{JSONKey: "machine0", Payload: attempt}, nil
 	}, Submit: func(ctx context.Context, tx *core.FixedTransaction) (machine, error) {
 		intent := tx.Claim.FixedCreateIntent
 		attempt, err := fixedMachine0ClaimAttempt(*tx.Claim)
 		if err != nil {
-			return machine{}, err
-		}
-		if err := tx.Record("submitting"); err != nil {
 			return machine{}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s name=%s size=%s region=%s image=%s keep=%v fixed=true\n", providerName, leaseID, intent.Slug, attempt.Name, attempt.Size, attempt.Region, attempt.Image, req.Keep)
@@ -180,12 +171,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest) (co
 		return core.LeaseTarget{}, err
 	}
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s machine=%s resource=%s state=ready\n", leaseID, acquired.Server.Name, acquired.Server.CloudID)
-	if req.OnAcquired != nil {
-		if err := req.OnAcquired(acquired); err != nil {
-			return core.LeaseTarget{}, fmt.Errorf("acknowledge fixed Machine0 acquisition: %w", err)
-		}
-	}
-	return acquired, nil
+	return core.CompleteFixedAcquisition(acquired, nil, req)
 }
 
 func machine0NameScope(name string) string {
@@ -257,34 +243,21 @@ func (b *backend) resolveFixedMachine0(ctx context.Context, claim core.LeaseClai
 }
 
 func fixedMachine0ClaimAttempt(claim core.LeaseClaim) (*machine0CreateAttempt, error) {
-	intent := claim.FixedCreateIntent
 	name := machine0MachineName(claim.LeaseID, claim.Slug)
-	if !core.IsCanonicalLeaseID(claim.LeaseID) || !fixedMachine0LeaseKind.IsFixedClaim(claim) ||
-		intent.Version != fixedMachine0CreateIntentVersion || intent.Fingerprint == "" || intent.Slug != claim.Slug ||
-		intent.ProviderScope != machine0NameScope(name) ||
-		(intent.State != fixedMachine0IntentPrepared && intent.State != fixedMachine0IntentAcquired) {
-		return nil, core.Exit(4, "lease_id_conflict: invalid fixed Machine0 create intent for lease %s", claim.LeaseID)
+	scope := machine0NameScope(name)
+	if claim.CloudID != "" {
+		scope = machineScope(claim.CloudID)
 	}
-	if claim.CloudNumericID != 0 || claim.CloudImmutableID != claim.CloudID ||
-		(claim.CloudID == "" && (claim.ProviderScope != intent.ProviderScope || intent.State == fixedMachine0IntentAcquired)) ||
-		(claim.CloudID != "" && claim.ProviderScope != machineScope(claim.CloudID)) {
-		return nil, core.Exit(4, "lease_id_conflict: fixed Machine0 lease %s has inconsistent immutable identity or provider scope", claim.LeaseID)
+	if err := core.ValidateFixedClaim(claim, core.FixedClaimRules{Kind: fixedMachine0LeaseKind,
+		States: []string{fixedMachine0IntentPrepared, fixedMachine0IntentAcquired}, Scope: scope, IntentScope: machine0NameScope(name),
+		RequireCanonicalID: true, RequireTimestamp: true, NoNumericID: true, SameImmutableID: true,
+		NoFailedAttempts: true, EmptyAttemptMustBePristine: true, GenerationAfterPrepared: true,
+	}); err != nil {
+		return nil, err
 	}
-	if _, err := time.Parse(time.RFC3339Nano, intent.CreatedAt); err != nil || len(intent.FailedAttempts) != 0 {
-		return nil, core.Exit(4, "lease_id_conflict: invalid fixed Machine0 attempt history for lease %s", claim.LeaseID)
-	}
-	if len(intent.Attempt) == 0 {
-		if claim.CloudID != "" || len(claim.Labels) != 0 || claim.SSHHost != "" || claim.SSHPort != 0 {
-			return nil, core.Exit(4, "lease_id_conflict: fixed Machine0 lease %s has no durable create attempt", claim.LeaseID)
-		}
-		return nil, nil
-	}
-	var attempt machine0CreateAttempt
-	if err := json.Unmarshal([]byte(intent.Attempt["machine0"]), &attempt); err != nil ||
-		attempt.Name != name || attempt.Size == "" || attempt.Region == "" || attempt.Image == "" {
-		return nil, core.Exit(4, "lease_id_conflict: invalid fixed Machine0 attempt for lease %s", claim.LeaseID)
-	}
-	return &attempt, nil
+	return core.ReadFixedAttempt[machine0CreateAttempt](claim.FixedCreateIntent, core.FixedAttemptFormat{
+		JSONKey: "machine0", Equal: map[string]string{"name": name}, Required: []string{"size", "region", "image"},
+	})
 }
 
 func validateFixedMachine0Ownership(claim core.LeaseClaim, item machine) error {
@@ -311,23 +284,16 @@ func (b *backend) bindFixedMachine0(claim *core.LeaseClaim, item machine, keep b
 	if err := validateFixedMachine0Ownership(*claim, item); err != nil {
 		return err
 	}
-	if claim.CloudID != "" {
-		return nil
-	}
-	claim.CloudID, claim.CloudImmutableID = item.ID, item.ID
-	claim.ProviderScope = machineScope(item.ID)
-	claim.Labels = machineLabels(b.configForRun(), item, claim.LeaseID, claim.Slug, keep, core.ClockNow(b.rt.Clock).UTC())
-	return persist()
+	return core.BindFixedClaim(claim, core.FixedResourceBinding{OnlyUnbound: true,
+		CloudID: item.ID, ImmutableID: item.ID, ProviderScope: machineScope(item.ID),
+		Labels: machineLabels(b.configForRun(), item, claim.LeaseID, claim.Slug, keep, core.ClockNow(b.rt.Clock).UTC()),
+	}, persist)
 }
 
 func (b *backend) bindFixedMachine0Claim(claim core.LeaseClaim, item machine) (core.LeaseClaim, error) {
-	expected := claim
-	err := b.bindFixedMachine0(&claim, item, false, func() error {
-		var err error
-		claim, err = core.ReplaceLeaseClaimIfUnchangedDurableReturning(claim.LeaseID, expected, claim)
-		return err
+	return core.CompareAndBindFixedClaim(claim, func(next *core.LeaseClaim, persist func() error) error {
+		return b.bindFixedMachine0(next, item, false, persist)
 	})
-	return claim, err
 }
 
 func (b *backend) destroyClaimedMachine(ctx context.Context, expected core.LeaseClaim, lease core.LeaseTarget) error {
