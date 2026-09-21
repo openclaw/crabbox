@@ -1639,7 +1639,7 @@ func TestNvidiaBrevOrdinarySourcesAndWriter(t *testing.T) {
 					t.Fatalf("raw values or input changed: got %#v want %#v", cfg.NvidiaBrev, want)
 				}
 				accepted := value != ""
-				if DeleteOnReleaseExplicit(cfg, "nvidia-brev") != accepted || IsNvidiaBrevWorkRootExplicit(&cfg) != accepted {
+				if DeleteOnReleaseExplicit(cfg, "nvidia-brev") != accepted || IsNvidiaBrevWorkRootExplicit(&cfg) != accepted || IsNvidiaBrevTargetExplicit(&cfg) != accepted {
 					t.Fatal("accepted marker mismatch")
 				}
 				var expected configInputLedger
@@ -20480,5 +20480,30 @@ func TestActionsWorkflowOwnerJobArguments(t *testing.T) {
 	fields := views["demo"].(map[string]any)["actions"].(map[string]any)["fields"]
 	if !reflect.DeepEqual(fields, job.Actions.Fields) {
 		t.Fatal("job fields view")
+	}
+}
+
+func TestNvidiaBrevExplicitDefaultTargetSources(t *testing.T) {
+	for _, source := range []string{"file", "env"} {
+		t.Run(source, func(t *testing.T) {
+			clearConfigEnv(t)
+			cfg := baseConfig()
+			if IsNvidiaBrevTargetExplicit(&cfg) {
+				t.Fatal("default marked explicit")
+			}
+			if source == "file" {
+				if err := applyFileConfig(&cfg, fileConfig{NvidiaBrev: &fileNvidiaBrevConfig{Target: "container"}}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				t.Setenv("CRABBOX_NVIDIA_BREV_TARGET", "container")
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !IsNvidiaBrevTargetExplicit(&cfg) || cfg.NvidiaBrev.Target != "container" {
+				t.Fatalf("explicit default lost: %#v", cfg.NvidiaBrev)
+			}
+		})
 	}
 }

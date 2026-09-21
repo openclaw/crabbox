@@ -11,7 +11,7 @@ func (Provider) CommandRouting(cfg core.Config, _ core.CommandRoutingRequest) co
 	if cli := strings.TrimSpace(cfg.NvidiaBrev.CLI); cli != "" {
 		args = append(args, "--nvidia-brev-cli", cli)
 	}
-	if target := strings.TrimSpace(cfg.NvidiaBrev.Target); target != "" && target != "container" {
+	if target := strings.TrimSpace(cfg.NvidiaBrev.Target); target != "" && (target != "container" || core.IsNvidiaBrevTargetExplicit(&cfg)) {
 		args = append(args, "--nvidia-brev-target", target)
 	}
 	if user := strings.TrimSpace(cfg.NvidiaBrev.User); user != "" {

@@ -74,6 +74,7 @@ func TestNvidiaBrevOrdinaryFlagMetadata(t *testing.T) {
 		core.RecordProviderFlagInputs(&want, true, "nvidia-brev")
 		markReleaseActionExplicit(&want)
 		core.MarkNvidiaBrevWorkRootExplicit(&want)
+		core.MarkNvidiaBrevTargetExplicit(&want)
 		if !reflect.DeepEqual(cfg, want) {
 			t.Fatalf("visited %q: got %#v want %#v", value, cfg, want)
 		}

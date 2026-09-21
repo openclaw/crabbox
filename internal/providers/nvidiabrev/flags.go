@@ -28,6 +28,9 @@ func ApplyNvidiaBrevProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any
 	if applied.ReleaseAction {
 		markReleaseActionExplicit(cfg)
 	}
+	if applied.Target {
+		core.MarkNvidiaBrevTargetExplicit(cfg)
+	}
 	if applied.WorkRoot {
 		core.MarkNvidiaBrevWorkRootExplicit(cfg)
 	}
