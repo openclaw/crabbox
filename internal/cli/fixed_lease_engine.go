@@ -167,7 +167,7 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 			resource = observation.Candidates[0]
 		} else {
 			if !observation.CanSubmit || claim.FixedCreateIntent.State != "prepared" {
-				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed %s lease %s has an unresolved or missing resource; claim retained", opts.Kind.Label, claim.LeaseID)
+				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed %s lease %s has an unresolved or missing resource; retain its claim for recovery", opts.Kind.Label, claim.LeaseID)
 			}
 			if err := ops.PlanAttempt(ctx, tx); err != nil {
 				return LeaseTarget{}, err
