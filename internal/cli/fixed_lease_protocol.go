@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"reflect"
@@ -187,6 +188,8 @@ func (tx *FixedTransaction) plan(plan FixedAttemptPlan) error {
 // FixedResourceBinding is evidence supplied by a native operation. Identity is
 // monotonic; even a rejected readiness check cannot erase a returned native ID.
 type FixedResourceBinding struct {
+	ImageEvidence        *ImageEvidence
+	SSH                  *SSHTarget
 	AttemptJSONKey       string
 	OnlyUnbound          bool
 	FingerprintLabel     string
@@ -238,15 +241,24 @@ func (tx *FixedTransaction) applyBinding(b FixedResourceBinding) error {
 		}
 	}
 
+	cloudID, numericID, immutableID := c.CloudID, c.CloudNumericID, c.CloudImmutableID
 	if b.CloudID != "" {
-		c.CloudID = b.CloudID
-	}
-	if b.ImmutableID != "" {
-		c.CloudImmutableID = b.ImmutableID
+		cloudID = b.CloudID
 	}
 	if b.NumericID != 0 {
-		c.CloudNumericID = b.NumericID
+		numericID = b.NumericID
 	}
+	if b.ImmutableID != "" {
+		immutableID = b.ImmutableID
+	}
+	SetLeaseClaimResourceIdentity(c, cloudID, numericID, immutableID, b.ImageEvidence)
+	if b.SSH != nil {
+		c.SSHHost = b.SSH.Host
+		if port, err := strconv.Atoi(strings.TrimSpace(b.SSH.Port)); err == nil && port > 0 {
+			c.SSHPort = port
+		}
+	}
+
 	if len(values) != 0 {
 		if c.FixedCreateIntent.Attempt == nil {
 			c.FixedCreateIntent.Attempt = map[string]string{}
@@ -645,4 +657,44 @@ func CompareAndBindFixedClaim(claim LeaseClaim, bind func(*LeaseClaim, func() er
 		return err
 	})
 	return claim, err
+}
+
+func (k FixedLeaseKind) RetainMatchingFingerprint(leaseID string, previous LeaseClaim, fingerprint string) (bool, error) {
+	return k.RetainClaimAfterRelease(leaseID, previous, fingerprint != "", nil, func(claim LeaseClaim) error {
+		if fingerprint != "" && fingerprint != claim.FixedCreateIntent.Fingerprint {
+			return Exit(4, "lease_id_conflict: fixed lease %s resource label differs from its terminal tombstone", leaseID)
+		}
+		return nil
+	})
+}
+
+// FixedReadinessRecovery keeps uncertainty and Keep policy in core while native
+// callbacks prove exact rollback and reconcile runtime-specific residue.
+type FixedReadinessRecovery struct {
+	Expected               LeaseClaim
+	Keep, IdentityConflict bool
+	Prepare                func()
+	RollbackExact          func() error
+	Reconcile              func() (bool, error)
+}
+
+func ReconcileFixedReadiness(p FixedReadinessRecovery) (bool, error) {
+	if p.IdentityConflict {
+		if err := VerifyLeaseClaimUnchanged(p.Expected.LeaseID, p.Expected); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if p.Prepare != nil {
+		p.Prepare()
+	}
+	if !p.Keep {
+		rollbackErr := p.RollbackExact()
+		if rollbackErr == nil {
+			return false, nil
+		}
+		retained, reconcileErr := p.Reconcile()
+		return retained, errors.Join(rollbackErr, reconcileErr)
+	}
+	return p.Reconcile()
 }

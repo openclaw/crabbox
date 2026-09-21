@@ -658,25 +658,16 @@ func (b *backend) reconcileChangedClaim(lease core.LeaseTarget, bootstrapDir str
 }
 
 func (b *backend) reconcileReadinessFailure(keep bool, expected core.LeaseClaim, lease core.LeaseTarget, bootstrapDir string, failure error) (bool, error) {
-	if errors.Is(failure, errContainerIdentityMismatch) {
-		if err := core.VerifyLeaseClaimUnchanged(expected.LeaseID, expected); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	lease.Server = mergeLocalContainerClaim(lease.Server, expected)
-	if lease.Server.CloudID == "" {
-		lease.Server.CloudID = expected.CloudID
-	}
-	if !keep {
-		rollbackErr := b.rollbackPendingLease(expected, lease, bootstrapDir)
-		if rollbackErr == nil {
-			return false, nil
-		}
-		retained, reconcileErr := b.reconcileChangedClaim(lease, bootstrapDir)
-		return retained, errors.Join(rollbackErr, reconcileErr)
-	}
-	return b.reconcileChangedClaim(lease, bootstrapDir)
+	return core.ReconcileFixedReadiness(core.FixedReadinessRecovery{Expected: expected, Keep: keep, IdentityConflict: errors.Is(failure, errContainerIdentityMismatch),
+		Prepare: func() {
+			lease.Server = mergeLocalContainerClaim(lease.Server, expected)
+			if lease.Server.CloudID == "" {
+				lease.Server.CloudID = expected.CloudID
+			}
+		},
+		RollbackExact: func() error { return b.rollbackPendingLease(expected, lease, bootstrapDir) },
+		Reconcile:     func() (bool, error) { return b.reconcileChangedClaim(lease, bootstrapDir) },
+	})
 }
 
 func (b *backend) rollbackPendingLease(expected core.LeaseClaim, lease core.LeaseTarget, bootstrapDir string) error {

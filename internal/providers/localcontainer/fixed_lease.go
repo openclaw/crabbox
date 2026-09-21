@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/openclaw/crabbox/internal/providers/shared"
-	"strconv"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -28,32 +27,6 @@ func isReleasedFixedLocalContainerClaim(claim core.LeaseClaim) bool {
 	return fixedLocalContainerLeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State == "released"
 }
 
-type fixedLocalContainerCreateIntent struct {
-	Runtime         string          `json:"runtime"`
-	RuntimeScope    checkpointScope `json:"runtimeScope"`
-	Image           string          `json:"image"`
-	ForkImageID     string          `json:"forkImageID,omitempty"`
-	User            string          `json:"user"`
-	WorkRoot        string          `json:"workRoot"`
-	CPUs            int             `json:"cpus"`
-	Memory          string          `json:"memory"`
-	Network         string          `json:"network"`
-	DockerSocket    bool            `json:"dockerSocket"`
-	NoHostname      bool            `json:"noHostname,omitempty"` // Omit false to preserve persisted v1 fingerprints.
-	HostVolumes     []string        `json:"hostVolumes,omitempty"`
-	CacheVolumes    []string        `json:"cacheVolumes,omitempty"`
-	Desktop         bool            `json:"desktop"`
-	DesktopEnv      string          `json:"desktopEnv"`
-	Browser         bool            `json:"browser"`
-	Architecture    string          `json:"architecture,omitempty"`
-	RequestedSlug   string          `json:"requestedSlug,omitempty"`
-	Pond            string          `json:"pond,omitempty"`
-	Keep            bool            `json:"keep"`
-	TTLNanoseconds  int64           `json:"ttlNanoseconds"`
-	IdleNanoseconds int64           `json:"idleNanoseconds"`
-	SSHPublicKey    string          `json:"sshPublicKey"`
-}
-
 func fixedLocalContainerFingerprint(cfg core.Config, req core.AcquireRequest, publicKey string) (string, error) {
 	cacheVolumes, err := localContainerCacheVolumeMounts(cfg.Cache.Volumes)
 	if err != nil {
@@ -63,32 +36,34 @@ func fixedLocalContainerFingerprint(cfg core.Config, req core.AcquireRequest, pu
 	for i, volume := range cfg.LocalContainer.Volumes {
 		volumes[i] = strings.TrimSpace(volume)
 	}
-	intent := fixedLocalContainerCreateIntent{
-		Runtime:         strings.TrimSpace(cfg.LocalContainer.Runtime),
-		RuntimeScope:    checkpointScopeFromMetadata(cfg.LocalContainer.CheckpointMetadata, cfg.LocalContainer.Runtime),
-		Image:           strings.TrimSpace(cfg.LocalContainer.Image),
-		ForkImageID:     strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[checkpointMetadataForkID]),
-		User:            strings.TrimSpace(cfg.LocalContainer.User),
-		WorkRoot:        strings.TrimSpace(cfg.LocalContainer.WorkRoot),
-		CPUs:            cfg.LocalContainer.CPUs,
-		Memory:          strings.TrimSpace(cfg.LocalContainer.Memory),
-		Network:         strings.TrimSpace(cfg.LocalContainer.Network),
-		DockerSocket:    cfg.LocalContainer.DockerSocket,
-		NoHostname:      cfg.LocalContainer.NoHostname,
-		HostVolumes:     volumes,
-		CacheVolumes:    cacheVolumes,
-		Desktop:         cfg.Desktop,
-		DesktopEnv:      core.NormalizedDesktopEnv(cfg.DesktopEnv),
-		Browser:         cfg.Browser,
-		RequestedSlug:   core.NormalizeLeaseSlug(req.RequestedSlug),
-		Pond:            core.NormalizePondName(cfg.Pond),
-		Keep:            req.Keep,
-		TTLNanoseconds:  cfg.TTL.Nanoseconds(),
-		IdleNanoseconds: cfg.IdleTimeout.Nanoseconds(),
-		SSHPublicKey:    strings.TrimSpace(publicKey),
-	}
+	architecture := ""
 	if core.IsArchitectureExplicit(cfg) {
-		intent.Architecture = cfg.Architecture
+		architecture = cfg.Architecture
+	}
+	intent := core.FixedIntentFields{
+		{Name: "runtime", Value: strings.TrimSpace(cfg.LocalContainer.Runtime)},
+		{Name: "runtimeScope", Value: checkpointScopeFromMetadata(cfg.LocalContainer.CheckpointMetadata, cfg.LocalContainer.Runtime)},
+		{Name: "image", Value: strings.TrimSpace(cfg.LocalContainer.Image)},
+		{Name: "forkImageID", Value: strings.TrimSpace(cfg.LocalContainer.CheckpointMetadata[checkpointMetadataForkID]), OmitEmpty: true},
+		{Name: "user", Value: strings.TrimSpace(cfg.LocalContainer.User)},
+		{Name: "workRoot", Value: strings.TrimSpace(cfg.LocalContainer.WorkRoot)},
+		{Name: "cpus", Value: cfg.LocalContainer.CPUs},
+		{Name: "memory", Value: strings.TrimSpace(cfg.LocalContainer.Memory)},
+		{Name: "network", Value: strings.TrimSpace(cfg.LocalContainer.Network)},
+		{Name: "dockerSocket", Value: cfg.LocalContainer.DockerSocket},
+		{Name: "noHostname", Value: cfg.LocalContainer.NoHostname, OmitEmpty: true},
+		{Name: "hostVolumes", Value: volumes, OmitEmpty: true},
+		{Name: "cacheVolumes", Value: cacheVolumes, OmitEmpty: true},
+		{Name: "desktop", Value: cfg.Desktop},
+		{Name: "desktopEnv", Value: core.NormalizedDesktopEnv(cfg.DesktopEnv)},
+		{Name: "browser", Value: cfg.Browser},
+		{Name: "architecture", Value: architecture, OmitEmpty: true},
+		{Name: "requestedSlug", Value: core.NormalizeLeaseSlug(req.RequestedSlug), OmitEmpty: true},
+		{Name: "pond", Value: core.NormalizePondName(cfg.Pond), OmitEmpty: true},
+		{Name: "keep", Value: req.Keep},
+		{Name: "ttlNanoseconds", Value: cfg.TTL.Nanoseconds()},
+		{Name: "idleNanoseconds", Value: cfg.IdleTimeout.Nanoseconds()},
+		{Name: "sshPublicKey", Value: strings.TrimSpace(publicKey)},
 	}
 	fingerprint, err := core.FixedIntentFingerprint("", intent)
 	if err != nil {
@@ -107,14 +82,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		if !isPendingLocalContainerClaim(*claim) || claim.CloudID != lease.Server.CloudID {
 			return
 		}
-		pendingClaim = *claim
-		pendingClaim.Labels = shared.CloneLabels(claim.Labels)
-		if claim.FixedCreateIntent != nil {
-			intent := *claim.FixedCreateIntent
-			intent.Attempt = shared.CloneLabels(claim.FixedCreateIntent.Attempt)
-			intent.FailedAttempts = append([]string(nil), claim.FixedCreateIntent.FailedAttempts...)
-			pendingClaim.FixedCreateIntent = &intent
-		}
+		pendingClaim = core.CloneLeaseClaim(*claim)
 		pendingLease = lease
 	}
 	acquired, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
@@ -127,7 +95,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		WindowsMode:  cfg.WindowsMode,
 		TTL:          cfg.TTL,
 		IdleTimeout:  cfg.IdleTimeout,
-	}, core.FixedLeaseOperations[inspectContainer]{DescribeIntent: func(ctx context.Context, _ *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
+	}, core.FixedLeaseOperations[inspectContainer]{Admission: &core.FixedAdmission{}, DescribeIntent: func(ctx context.Context, _ *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		providerScope := strings.TrimSpace(b.claimScope(ctx))
 		if providerScope == "" {
 			return core.FixedLeaseBinding{}, core.Exit(2, "local-container runtime scope is unavailable; refusing to create an unscoped lease")
@@ -201,15 +169,11 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		}
 		result.CanSubmit = true
 		return result, nil
-	}, PlanAttempt: func(ctx context.Context, tx *core.FixedTransaction) error {
-		tx.Claim.FixedCreateIntent.Attempt = map[string]string{"container_name": core.LeaseProviderName(leaseID, tx.Claim.FixedCreateIntent.Slug)}
-		return nil
+	}, Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
+		return core.FixedAttemptPlan{Values: map[string]string{"container_name": core.LeaseProviderName(leaseID, claim.Slug)}}, nil
 	}, Submit: func(ctx context.Context, tx *core.FixedTransaction) (inspectContainer, error) {
 		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
 		name := intent.Attempt["container_name"]
-		if err := tx.Record("submitting"); err != nil {
-			return inspectContainer{}, err
-		}
 		fmt.Fprintf(b.rt.Stderr, "provisioning provider=%s lease=%s slug=%s runtime=%s image=%s keep=%v fixed=true\n", providerName, leaseID, intent.Slug, cfg.LocalContainer.Runtime, cfg.LocalContainer.Image, req.Keep)
 		containerID, bootstrapDir, createErr := b.createContainerWithFixedIntent(ctx, cfg, name, leaseID, intent.Slug, publicKey, fingerprint, req.Keep)
 		if containerID == "" {
@@ -217,12 +181,10 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		}
 		pending := createdPendingLease(cfg, containerID, leaseID, intent.Slug, bootstrapDir, req.Keep)
 		pending.Server.Labels["fixed_intent_sha256"] = fingerprint
-		core.SetLeaseClaimResourceIdentity(claim, containerID, claim.CloudNumericID, claim.CloudImmutableID, nil)
-		claim.Labels = shared.CloneLabels(pending.Server.Labels)
-		intent.Attempt["container_id"] = containerID
-		if err := tx.Record("observed"); err != nil {
+		if err := tx.Observe(core.FixedResourceBinding{CloudID: containerID, AttemptIdentityKey: "container_id", Labels: pending.Server.Labels}); err != nil {
 			return inspectContainer{}, err
 		}
+
 		rememberPending(claim, pending)
 		if createErr != nil {
 			return inspectContainer{}, createErr
@@ -244,10 +206,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		if claim.CloudID == "" {
 			pending := createdPendingLease(cfg, container.ID, leaseID, intent.Slug, container.Config.Labels["bootstrap_dir"], req.Keep)
 			pending.Server.Labels["fixed_intent_sha256"] = fingerprint
-			core.SetLeaseClaimResourceIdentity(claim, container.ID, claim.CloudNumericID, claim.CloudImmutableID, nil)
-			claim.Labels = shared.CloneLabels(pending.Server.Labels)
-			intent.Attempt["container_id"] = container.ID
-			if err := tx.Record("bound"); err != nil {
+			if err := tx.Bind(core.FixedResourceBinding{CloudID: container.ID, AttemptIdentityKey: "container_id", Labels: pending.Server.Labels}); err != nil {
 				return core.LeaseTarget{}, err
 			}
 		}
@@ -280,14 +239,10 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		}
 		lease.Server.ImageEvidence = imageEvidence
 		if isPendingLocalContainerClaim(*claim) {
-			claim.ImageEvidence = core.CloneImageEvidence(imageEvidence)
-			claim.SSHHost = lease.SSH.Host
-			if port, parseErr := strconv.Atoi(strings.TrimSpace(lease.SSH.Port)); parseErr == nil && port > 0 {
-				claim.SSHPort = port
-			}
-			if err := tx.Record("bound"); err != nil {
+			if err := tx.Bind(core.FixedResourceBinding{ImageEvidence: imageEvidence, SSH: &lease.SSH}); err != nil {
 				return core.LeaseTarget{}, err
 			}
+
 			rememberPending(claim, lease)
 		}
 		if err := b.waitForExactContainerSSHReady(ctx, &lease, core.BootstrapWaitTimeout(cfg)); err != nil {
@@ -317,12 +272,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 	}
 	acquired.Server.Labels = publicLocalContainerClaimLabels(acquired.Server.Labels)
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s container=%s state=ready\n", leaseID, shortID(acquired.Server.CloudID))
-	if req.OnAcquired != nil {
-		if err := req.OnAcquired(acquired); err != nil {
-			return core.LeaseTarget{}, fmt.Errorf("acknowledge fixed local-container acquisition: %w", err)
-		}
-	}
-	return acquired, nil
+	return core.CompleteFixedAcquisition(acquired, nil, req)
 }
 
 func validateFixedLocalContainer(container inspectContainer, cfg core.Config, leaseID, slug, fingerprint string) error {
@@ -342,11 +292,5 @@ func validateFixedLocalContainer(container inspectContainer, cfg core.Config, le
 }
 
 func (b *backend) RetainLeaseClaimAfterReleaseWithClaim(lease core.LeaseTarget, previous core.LeaseClaim) (bool, error) {
-	fingerprint := strings.TrimSpace(lease.Server.Labels["fixed_intent_sha256"])
-	return fixedLocalContainerLeaseKind.RetainClaimAfterRelease(lease.LeaseID, previous, fingerprint != "", nil, func(claim core.LeaseClaim) error {
-		if fingerprint != "" && fingerprint != claim.FixedCreateIntent.Fingerprint {
-			return core.Exit(4, "lease_id_conflict: fixed local-container lease %s container label differs from its terminal tombstone", lease.LeaseID)
-		}
-		return nil
-	})
+	return fixedLocalContainerLeaseKind.RetainMatchingFingerprint(lease.LeaseID, previous, strings.TrimSpace(lease.Server.Labels["fixed_intent_sha256"]))
 }
