@@ -334,7 +334,8 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			// reply still leaves the evidence behind.
 			intent.Attempt = map[string]string{
 				"name": name, "host": intent.ProviderScope, "source_id": sourceID,
-				"dst": strings.TrimRight(vmBase, "/") + "/" + name + "-" + strings.ToLower(rand.Text()),
+				"dst":        strings.TrimRight(vmBase, "/") + "/" + name + "-" + strings.ToLower(rand.Text()),
+				"submission": "pending",
 			}
 			labels := core.DirectLeaseLabels(cfg, leaseID, intent.Slug, parallelsProviderName, "", req.Keep, time.Now().UTC())
 			labels["source"], labels["host"] = source, hostLabel
@@ -382,6 +383,11 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			if occupant, taken := parallelsVMByName(vms, name); taken {
 				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Parallels lease %s cannot create VM %q: VM %q already occupies that name and was not created by this lease; custody is retained and nothing was changed or deleted", leaseID, name, occupant.ID)
 			}
+			// A submitted clone may have vanished before its UUID was recorded.
+			// Missing submission evidence is equally inconclusive; never recreate it.
+			if intent.Attempt["submission"] != "pending" {
+				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Parallels lease %s has no recoverable VM for its submitted or uncertain attempt; claim and key retained, no replacement created", leaseID)
+			}
 			// Capacity is enforced by counting the host's VMs and then cloning
 			// into it, so both must happen under one reservation: the per-lease
 			// claim locks do not serialize different lease IDs, and a prepared
@@ -412,7 +418,10 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			// resulting bundle inside this attempt's directory.
 			cloneCfg := cfg
 			cloneCfg.Parallels.VMRoot = createDir
-			cloneErr := core.NewParallelsClient(cloneCfg, b.RT.Exec).SubmitClone(ctx, sourceID, snapshotID, leaseID, intent.Slug, req.Keep)
+			cloneErr := core.NewParallelsClient(cloneCfg, b.RT.Exec).SubmitClone(ctx, sourceID, snapshotID, leaseID, intent.Slug, req.Keep, func() error {
+				intent.Attempt["submission"] = "submitted"
+				return persist()
+			})
 			// Whatever the reply said, a submitted clone may already count
 			// against maxVMs, and the reservation has done its job either way:
 			// the rest of bring-up need not keep other forks waiting.

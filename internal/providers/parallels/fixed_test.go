@@ -38,8 +38,9 @@ type parallelsFixedRunner struct {
 	listErr     error
 	// listAllErr fails only the complete `prlctl list -a` inventory read, so a
 	// test can break reconciliation while `list -i` lookups still answer.
-	listAllErr error
-	deleteErr  error
+	listAllErr  error
+	snapshotErr error
+	deleteErr   error
 	// beforeClone observes durable state at the moment prlctl clone is invoked.
 	beforeClone func()
 	// afterClone runs once the clone has committed, so a test can break the
@@ -53,6 +54,7 @@ type parallelsFixedRunner struct {
 	vmHome            string
 	serverIdentityErr error
 	hostDirCalls      []string
+	hostDirErr        error
 	cloneDst          string
 }
 
@@ -198,6 +200,9 @@ func (r *parallelsFixedRunner) Run(_ context.Context, req core.LocalCommandReque
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		r.hostDirCalls = append(r.hostDirCalls, req.Name+" "+strings.Join(req.Args, " "))
+		if req.Name == "mkdir" && r.hostDirErr != nil {
+			return core.LocalCommandResult{}, r.hostDirErr
+		}
 		return core.LocalCommandResult{}, nil
 	}
 	if req.Name == "prlsrvctl" {
@@ -243,6 +248,11 @@ func (r *parallelsFixedRunner) Run(_ context.Context, req core.LocalCommandReque
 		}
 		return core.LocalCommandResult{Stdout: out}, nil
 	case "snapshot-list":
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.snapshotErr != nil {
+			return core.LocalCommandResult{}, r.snapshotErr
+		}
 		return core.LocalCommandResult{Stdout: "[]"}, nil
 	case "clone":
 		if r.beforeClone != nil {
@@ -414,6 +424,9 @@ func TestParallelsFixedAcquirePersistsIntentBeforeClone(t *testing.T) {
 	intent := atClone.FixedCreateIntent
 	if intent.State != "prepared" {
 		t.Fatalf("intent state at clone time=%q, want prepared", intent.State)
+	}
+	if intent.Attempt["submission"] != "submitted" {
+		t.Fatalf("submission at clone time=%q, want submitted", intent.Attempt["submission"])
 	}
 	wantName := core.ParallelsLeaseVMName(req.RequestedLeaseID, intent.Slug)
 	if intent.Attempt["name"] != wantName {

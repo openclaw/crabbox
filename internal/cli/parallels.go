@@ -376,17 +376,16 @@ func (c *ParallelsClient) GetVM(ctx context.Context, id string) (ParallelsVM, er
 	return vms[0], nil
 }
 
-// SubmitClone runs `prlctl clone` and nothing else. Callers that establish the
-// created VM's identity by other means use this directly: the name lookup Clone
-// performs afterwards resolves a mutable name and so cannot attest which
-// incarnation the clone produced.
-func (c *ParallelsClient) SubmitClone(ctx context.Context, source, snapshotID, leaseID, slug string, keep bool) error {
-	_, err := c.submitClone(ctx, source, snapshotID, leaseID, slug, keep)
+// SubmitClone validates the request, calls beforeSubmit immediately before
+// `prlctl clone`, and leaves resource discovery to the caller. A mutable-name
+// lookup cannot attest which incarnation the clone produced.
+func (c *ParallelsClient) SubmitClone(ctx context.Context, source, snapshotID, leaseID, slug string, keep bool, beforeSubmit func() error) error {
+	_, err := c.submitClone(ctx, source, snapshotID, leaseID, slug, keep, beforeSubmit)
 	return err
 }
 
 func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID, slug string, keep bool) (Server, error) {
-	labels, err := c.submitClone(ctx, source, snapshotID, leaseID, slug, keep)
+	labels, err := c.submitClone(ctx, source, snapshotID, leaseID, slug, keep, nil)
 	if err != nil {
 		return Server{}, err
 	}
@@ -399,7 +398,7 @@ func (c *ParallelsClient) Clone(ctx context.Context, source, snapshotID, leaseID
 	return server, nil
 }
 
-func (c *ParallelsClient) submitClone(ctx context.Context, source, snapshotID, leaseID, slug string, keep bool) (map[string]string, error) {
+func (c *ParallelsClient) submitClone(ctx context.Context, source, snapshotID, leaseID, slug string, keep bool, beforeSubmit func() error) (map[string]string, error) {
 	if strings.TrimSpace(source) == "" {
 		return nil, Exit(2, "parallels.source or parallels.sourceId is required")
 	}
@@ -440,6 +439,11 @@ func (c *ParallelsClient) submitClone(ctx context.Context, source, snapshotID, l
 	}
 	if snapshotID != "" {
 		args = append(args, "-i", snapshotID)
+	}
+	if beforeSubmit != nil {
+		if err := beforeSubmit(); err != nil {
+			return nil, err
+		}
 	}
 	result, err := c.prlctl(ctx, nil, args...)
 	if err != nil {

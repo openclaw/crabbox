@@ -11,8 +11,6 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-var errCloneRejected = errors.New("clone rejected")
-
 // fixedParallelsCapacityFixture gives the fixture's host a maxVMs limit, so the
 // capacity gate is live.
 func fixedParallelsCapacityFixture(t *testing.T, maxVMs int) (*leaseBackend, *parallelsFixedRunner, core.AcquireRequest) {
@@ -92,19 +90,22 @@ func TestParallelsFixedCloneHoldsHostCapacityReservation(t *testing.T) {
 func TestParallelsFixedPreparedRetryRespectsCapacity(t *testing.T) {
 	backend, runner, req := fixedParallelsCapacityFixture(t, 1)
 
-	// The attempt is recorded, but its clone never lands.
-	runner.cloneErr, runner.cloneCommit = errCloneRejected, false
+	// Fail before submission, so retrying this intent may still create a VM.
+	runner.hostDirErr = errors.New("cannot create clone directory")
 	if _, err := backend.Acquire(context.Background(), req); err == nil {
-		t.Fatal("a rejected clone must not report a usable lease")
+		t.Fatal("failed directory creation must not report a usable lease")
 	}
-	runner.cloneErr = nil
+	runner.hostDirErr = nil
 	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
 	if err != nil || claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "prepared" {
 		t.Fatalf("intent is not prepared for retry: %#v err=%v", claim.FixedCreateIntent, err)
 	}
+	if claim.FixedCreateIntent.Attempt["submission"] != "pending" {
+		t.Fatalf("attempt was submitted before directory creation succeeded: %+v", claim.FixedCreateIntent.Attempt)
+	}
 
 	// Meanwhile another lease fills the host.
-	runner.seedAt("crabbox-cbx-ffffffffffff-other")
+	other := runner.seedAt("crabbox-cbx-ffffffffffff-other")
 
 	_, err = backend.Acquire(context.Background(), req)
 	if err == nil || !strings.Contains(err.Error(), "maxVMs capacity") {
@@ -112,6 +113,13 @@ func TestParallelsFixedPreparedRetryRespectsCapacity(t *testing.T) {
 	}
 	if clones, _ := runner.counts(); clones != 0 {
 		t.Fatalf("clone calls=%d, want 0: the retry overcommitted the host", clones)
+	}
+	runner.remove(other.ID)
+	if _, err := backend.Acquire(context.Background(), req); err != nil {
+		t.Fatalf("unsubmitted attempt could not retry after capacity returned: %v", err)
+	}
+	if clones, _ := runner.counts(); clones != 1 {
+		t.Fatalf("clone calls=%d, want 1 after retry", clones)
 	}
 }
 

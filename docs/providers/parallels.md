@@ -483,6 +483,13 @@ The reconciliation contract:
   another `crabbox-<lease-id>-<slug>` is found by its UUID and keeps custody
   rather than being reported as deleted; and an acquired lease whose VM has
   disappeared fails closed instead of recreating it.
+- **Submission.** The attempt records submission durably before invoking the
+  clone. If its VM is absent afterward, replay retains custody without another
+  submission, even if the UUID was never read back. Only an attempt explicitly
+  recorded as not yet submitted may create a VM; missing submission evidence
+  also fails closed. Failures before submission, such as a capacity or clone
+  directory error or a snapshot preflight lookup failure, can be retried with
+  the same ID.
 - **Lost replies.** A lost clone reply leaves the VM, if it was created, inside
   the attempt's own directory, so replay recovers it there rather than cloning a
   second one — even though its UUID was never reported. If instead a VM that
@@ -511,8 +518,10 @@ No path uses the slug to decide replay ownership. A `crabbox-<slug>` VM, or
 another lease's VM carrying the same slug, is never adopted.
 
 A `prepared` intent whose VM was never observed is deliberately inconclusive:
-the clone may still be in flight, so `stop` refuses it. Replay the same lease ID
-first, then stop the lease it reconciles to.
+the clone may still be in flight, so `stop` refuses it. Replay can recover a
+submitted clone once its VM appears, then stop the lease it reconciles to. If
+that VM never appears or was removed before being observed, inspect the host;
+replay will not replace it. Use a new lease ID for any later creation.
 
 A fixed lease's VM bundle lives at
 `<vmRoot or the host's VM directory>/crabbox-<lease-id>-<slug>-<nonce>/`, one
