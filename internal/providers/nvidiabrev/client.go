@@ -83,6 +83,15 @@ func (c *brevClient) list(ctx context.Context, all bool) ([]brevWorkspace, error
 }
 
 func (c *brevClient) activeOrg(ctx context.Context) (brevOrg, error) {
+	if strings.TrimSpace(os.Getenv("BREV_API_KEY")) != "" {
+		// Environment API keys override saved credentials. Brev owns their org
+		// lookup; its JSON org command supports OAuth only, so use the native table.
+		result, err := c.run(ctx, "org", "ls")
+		if err != nil {
+			return brevOrg{}, fmt.Errorf("brev API-key organization lookup failed: %w", err)
+		}
+		return parseBrevActiveOrgTable(result.Stdout)
+	}
 	org, found, err := readLocalEffectiveBrevOrg()
 	if err != nil {
 		return brevOrg{}, err
@@ -118,6 +127,24 @@ func (c *brevClient) activeOrg(ctx context.Context) (brevOrg, error) {
 			return brevOrg{}, core.Exit(2, "brev returned no accessible organization")
 		}
 		return brevOrg{}, core.Exit(2, "brev has no active organization; run `brev set` before nvidia-brev lifecycle operations")
+	}
+	return active, nil
+}
+
+func parseBrevActiveOrgTable(stdout string) (brevOrg, error) {
+	var active brevOrg
+	for _, line := range strings.Split(stdout, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "*" {
+			continue
+		}
+		if len(fields) < 3 || active.ID != "" {
+			return brevOrg{}, core.Exit(2, "brev returned an invalid active organization table")
+		}
+		active = brevOrg{ID: fields[len(fields)-1], Name: strings.Join(fields[1:len(fields)-1], " "), IsActive: true}
+	}
+	if active.ID == "" {
+		return brevOrg{}, core.Exit(2, "brev returned no active API-key organization; verify BREV_API_KEY with `brev org ls`")
 	}
 	return active, nil
 }
@@ -264,6 +291,7 @@ func (c *brevClient) run(ctx context.Context, args ...string) (core.LocalCommand
 	result, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{
 		Name: strings.TrimSpace(c.cfg.NvidiaBrev.CLI),
 		Args: append([]string(nil), args...),
+		Env:  append(os.Environ(), "NO_COLOR=1"),
 	})
 	if err == nil {
 		return result, nil

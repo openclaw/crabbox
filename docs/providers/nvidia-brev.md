@@ -14,6 +14,12 @@ transport for sync, `run`, `ssh`, `status`, `list`, and `stop`.
 Crabbox does not store or accept Brev secrets. Authentication stays in the Brev
 CLI's own credential store.
 
+For headless use, Brev also accepts `BREV_API_KEY` in the environment. This
+overrides saved Brev credentials. Crabbox asks `brev org ls` for that key's
+effective organization before lifecycle operations; the key never becomes a
+Crabbox flag or config value. Verify the account with `brev org ls` before
+creating a workspace.
+
 ## Prerequisites
 
 - Install the Brev CLI and authenticate it:

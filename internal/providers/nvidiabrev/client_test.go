@@ -249,6 +249,7 @@ func TestNvidiaBrevClientRejectsOrgScopedMutations(t *testing.T) {
 
 func isolateBrevContextFiles(t *testing.T) {
 	t.Helper()
+	t.Setenv("BREV_API_KEY", "")
 	dir := t.TempDir()
 	oldMeta := brevWorkspaceMetaPath
 	brevWorkspaceMetaPath = filepath.Join(dir, "workspace.json")
