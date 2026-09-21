@@ -5,6 +5,7 @@ import {
   CloudflareCoordinatorRuntime,
   coordinatorRequestQueue,
   legacyAlarmKey,
+  mergedCoordinatorWake,
   setLegacyWake,
   type CoordinatorRuntime,
   type CoordinatorSocketHandlers,
@@ -15,6 +16,7 @@ import {
 import { FleetCoordinator } from "../src/fleet";
 import { githubAuthRoute } from "../src/oauth";
 import { orgKeyForLabel } from "../src/org-identity";
+import { setPoolWake } from "../src/ready-pool-wake";
 import { runtimeAdapterRelayFrameLimit } from "../src/runtime-adapter-relay";
 import type { Env, LeaseRecord } from "../src/types";
 import { ProvisioningTestStorage } from "./provisioning-fixtures";
@@ -997,5 +999,28 @@ describe("coordinator runtimes", () => {
     expect(socket.accept).toHaveBeenCalledOnce();
     expect(acceptWebSocket).not.toHaveBeenCalled();
     expect([...listeners.keys()]).toEqual(expect.arrayContaining(["message", "close", "error"]));
+  });
+});
+
+describe("portable pool wake integration", () => {
+  it("shares the bounded due lookup and replaces or removes deadlines without stale wakes", async () => {
+    const storage = new MemoryStorage();
+    await storage.put("provisioning-due:0000000000003000:lease", {
+      operationID: "lease",
+      at: 3000,
+    });
+    await setPoolWake(storage, "pool-lease", 2000);
+    await setPoolWake(storage, "later-pool-lease", 4000);
+    const list = vi.spyOn(storage, "list");
+    expect(await mergedCoordinatorWake(storage)).toBe(2000);
+    expect(list.mock.calls).toEqual([[{ prefix: "provisioning-due:", limit: 1 }]]);
+    await setPoolWake(storage, "pool-lease", 5000);
+    expect(await mergedCoordinatorWake(storage)).toBe(3000);
+    await setPoolWake(storage, "pool-lease", 1000);
+    expect(await mergedCoordinatorWake(storage)).toBe(1000);
+    await setPoolWake(storage, "pool-lease");
+    expect(await mergedCoordinatorWake(storage)).toBe(3000);
+    const all = await storage.list({ prefix: "provisioning-due:" });
+    expect(all.size).toBe(2);
   });
 });

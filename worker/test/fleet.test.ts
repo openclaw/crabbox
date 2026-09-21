@@ -73,6 +73,7 @@ import {
 } from "../src/provider-provisioning";
 import { providerReconciliationFingerprint } from "../src/provider-reconciliation";
 import { ProvisioningAttemptsError } from "../src/provisioning-attempts";
+import { setPoolWake } from "../src/ready-pool-wake";
 import { verifyTerminalReceipt } from "../src/run-receipt";
 import {
   runtimeAdapterDesktopRelayTimeoutMs,
@@ -52935,6 +52936,7 @@ describe("portable bounded ready-pool access", () => {
     expect((await f.post("register-identity", { ...f.criteria, leaseID: f.lease.id })).status).toBe(
       409,
     );
+    await f.storage.transaction((storage) => setPoolWake(storage, f.lease.id, Date.now() - 1));
     await f.fleet.alarm();
     expect(f.capability.revoke).toHaveBeenCalled();
     expect(f.storage.value(`portable-ready-pool-v1-grant:${f.lease.id}`)).toMatchObject({
@@ -53030,11 +53032,14 @@ describe("portable bounded ready-pool access", () => {
   it("rolls back grant, entry, generation, counters and wake on a compound write failure", async () => {
     const f = await fixture();
     await f.register();
+    const beforeDue = [...(await f.storage.list({ prefix: "provisioning-due:" }))];
+    let counterWrites = 0;
     f.storage.beforePut = async (key) => {
-      if (key.startsWith("portable-ready-pool-v1-counters:"))
+      if (key.startsWith("portable-ready-pool-v1-counters:") && ++counterWrites === 2)
         throw new Error("simulated storage failure");
     };
     expect((await f.borrow()).status).toBe(500);
+    expect([...(await f.storage.list({ prefix: "provisioning-due:" }))]).toEqual(beforeDue);
     expect(f.storage.value(`portable-ready-pool-v1-grant:${f.lease.id}`)).toBeUndefined();
     expect(f.storage.value(`portable-ready-pool-v1:builders:${f.lease.id}`)).toMatchObject({
       state: "ready",
@@ -53096,6 +53101,7 @@ describe("portable bounded ready-pool access", () => {
       { aws: f.provider },
       { CRABBOX_PORTABLE_POOLS_ENABLED: "true" },
     );
+    await f.storage.transaction((storage) => setPoolWake(storage, f.lease.id, Date.now() - 1));
     await restarted.alarm();
     expect(f.storage.value(grantKey)).toMatchObject({ state: "revoking" });
     expect(f.capability.install).not.toHaveBeenCalled();
@@ -53107,6 +53113,9 @@ describe("portable bounded ready-pool access", () => {
       expiresAt: new Date(Date.now() + 30_000).toISOString(),
     });
     expect((await second.borrow()).status).toBe(409);
+    await second.storage.transaction((storage) =>
+      setPoolWake(storage, second.lease.id, Date.now() - 1),
+    );
     await second.fleet.alarm();
     expect(
       second.storage.value<ReadyPoolEntry>(`portable-ready-pool-v1:builders:${second.lease.id}`)

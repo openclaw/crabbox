@@ -455,6 +455,7 @@ export interface HetznerCleanupEvidence {
 export type ProviderCleanupEvidence = HetznerCleanupEvidence;
 
 export interface LeaseRecord {
+  portablePoolAccess?: true;
   id: string;
   slug?: string;
   fixedCreateIntentVersion?: number;

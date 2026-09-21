@@ -234,7 +234,9 @@ Unit tests and a design document cannot establish that provider behavior.
 ## Implementation locations
 
 `worker/src/ready-pool-access.ts` owns transactional grant state and cleanup
-journals. The existing pool reconciler in `fleet.ts` supplies capacity claims,
+journals. Pool deadlines share the runtime’s ordered durable due index; normal
+heartbeats retain a bounded lookup, and the pool controller visits only due
+bindings. The existing pool reconciler in `fleet.ts` supplies capacity claims,
 compatibility filtering, heartbeat deadlines, counters, and terminal pruning;
 portable records use separate namespaces. `aws-pool-access.ts` owns the SSM guest
 contract. `internal/cli/ready_pool_access.go` owns ephemeral keys and receipts.

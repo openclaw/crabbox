@@ -13,6 +13,7 @@ import {
   type PoolAccessGrant,
   type ProviderPoolAccess,
 } from "./ready-pool-access";
+import { setPoolWake } from "./ready-pool-wake";
 type ReadyPoolMode = boolean | "portable";
 import { AzureResumableProvisioning } from "./azure-provisioning";
 import {
@@ -13149,8 +13150,7 @@ export class FleetCoordinator {
           }
           if (fillClaim && Date.parse(fillClaim.expiresAt) <= Date.now()) {
             await storage.delete(readyPoolFillClaimKey(fillClaim.token, typed));
-            if (typed === "portable")
-              await storage.delete(`portable-ready-pool-v1-wake:claim-${fillClaim.token}`);
+            if (typed === "portable") await setPoolWake(storage, `claim-${fillClaim.token}`);
             return json({ error: "fill_claim_expired" }, { status: 409 });
           }
           if (
@@ -13259,20 +13259,18 @@ export class FleetCoordinator {
               ),
           );
           if (accessBinding) {
+            await storage.put(leaseKey(leaseID), { ...lease, portablePoolAccess: true });
             await storage.put(portablePoolReservationKey(leaseID), {
               key,
               binding: accessBinding,
               generation: reservation?.generation ?? 0,
             });
-            await storage.put(`portable-ready-pool-v1-wake:${leaseID}`, {
-              at: Date.parse(lease.expiresAt) - 60_000,
-            });
+            await setPoolWake(storage, leaseID, Date.parse(lease.expiresAt) - 60_000);
           }
           await this.putReadyPoolEntry(entry, typed, storage);
           if (fillClaim) {
             await storage.delete(readyPoolFillClaimKey(fillClaim.token, typed));
-            if (typed === "portable")
-              await storage.delete(`portable-ready-pool-v1-wake:claim-${fillClaim.token}`);
+            if (typed === "portable") await setPoolWake(storage, `claim-${fillClaim.token}`);
             await this.incrementReadyPoolCounters(
               request,
               key,
@@ -13659,9 +13657,7 @@ export class FleetCoordinator {
             };
             await storage.put(readyPoolFillClaimKey(claim.token, typed), claim);
             if (typed === "portable")
-              await storage.put(`portable-ready-pool-v1-wake:claim-${claim.token}`, {
-                at: Date.parse(claim.expiresAt),
-              });
+              await setPoolWake(storage, `claim-${claim.token}`, Date.parse(claim.expiresAt));
             counts.inFlight++;
             await this.incrementReadyPoolCounters(
               request,
@@ -13732,8 +13728,7 @@ export class FleetCoordinator {
         }
         await this.readyPoolTransaction(typed, async (storage) => {
           await storage.delete(readyPoolFillClaimKey(token, typed));
-          if (typed === "portable")
-            await storage.delete(`portable-ready-pool-v1-wake:claim-${token}`);
+          if (typed === "portable") await setPoolWake(storage, `claim-${token}`);
         });
         await this.scheduleAlarm();
         return json({ released: true });
@@ -13968,7 +13963,7 @@ export class FleetCoordinator {
         if (Date.parse(claim.expiresAt) <= nowMs) {
           await this.poolAccess.transaction(async (storage) => {
             await storage.delete(readyPoolFillClaimKey(claim.token, "portable"));
-            await storage.delete(`portable-ready-pool-v1-wake:claim-${claim.token}`);
+            await setPoolWake(storage, `claim-${claim.token}`);
           });
         }
       },
@@ -14069,7 +14064,7 @@ export class FleetCoordinator {
             await this.deleteReadyPoolEntry(entry, typed, storage);
             await storage.delete(portablePoolGrantKey(entry.leaseID));
             await storage.delete(portablePoolReservationKey(entry.leaseID));
-            await storage.delete(`portable-ready-pool-v1-wake:${entry.leaseID}`);
+            await setPoolWake(storage, entry.leaseID);
             await this.incrementReadyPoolCountersForScope(
               entry.owner,
               entry.org,
@@ -19305,7 +19300,8 @@ export class FleetCoordinator {
   }
 
   private async deleteLeaseServer(lease: LeaseRecord): Promise<void> {
-    await this.poolAccess.invalidateLease(lease.id, "lease timeout or provider cleanup");
+    if (lease.portablePoolAccess)
+      await this.poolAccess.invalidateLease(lease.id, "lease timeout or provider cleanup");
     const provider = managedLeaseProvider(lease);
     if (!provider) {
       return;
@@ -19660,7 +19656,8 @@ export class FleetCoordinator {
     ) {
       return current;
     }
-    await this.poolAccess.invalidateLease(current.id, "lease released");
+    if (current.portablePoolAccess)
+      await this.poolAccess.invalidateLease(current.id, "lease released");
     if (this.state.provisioning) {
       const released = await this.state.provisioning.commitAndWake(async (transaction) => {
         const latest = await transaction.get<LeaseRecord>(leaseKey(current.id));

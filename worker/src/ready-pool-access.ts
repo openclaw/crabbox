@@ -6,7 +6,8 @@ import { publicLeaseRecord, publicReadyPoolEntry } from "./org-records";
 import type { LeaseRecord, ReadyPoolEntry, ReadyPoolBorrowRequest } from "./types";
 
 export const portablePoolPrefix = "portable-ready-pool-v1:";
-export const portablePoolWakePrefix = "portable-ready-pool-v1-wake:";
+import { provisioningDuePrefix, type ProvisioningDueRecord } from "./coordinator-runtime";
+import { portablePoolWakePrefix, setPoolWake } from "./ready-pool-wake";
 export const portablePoolReservationKey = (id: string) => `portable-ready-pool-v1-lease:${id}`;
 export const portablePoolGrantKey = (id: string) => `portable-ready-pool-v1-grant:${id}`;
 export const portablePoolMaxDurationMs = 30 * 60_000;
@@ -143,14 +144,9 @@ export class ReadyPoolAccess {
             );
     if (grant.state === "revoked") {
       if (entry.state === "ready")
-        await storage.put(`${portablePoolWakePrefix}${grant.leaseID}`, {
-          at: Date.parse(entry.expiresAt) - ttlMarginMs,
-        });
-      else
-        await storage.put(`${portablePoolWakePrefix}${grant.leaseID}`, {
-          at: Date.now() + retryMs,
-        });
-    } else await storage.put(`${portablePoolWakePrefix}${grant.leaseID}`, { at: wake });
+        await setPoolWake(storage, grant.leaseID, Date.parse(entry.expiresAt) - ttlMarginMs);
+      else await setPoolWake(storage, grant.leaseID, Date.now() + retryMs);
+    } else await setPoolWake(storage, grant.leaseID, wake);
   }
 
   private validLease(
@@ -564,7 +560,7 @@ export class ReadyPoolAccess {
       await this.transaction(async (storage) => {
         const current = await storage.get<PoolAccessGrant>(portablePoolGrantKey(leaseID));
         if (current?.id !== grant.id || current.state !== "revoking") return;
-        await storage.put(`${portablePoolWakePrefix}${leaseID}`, { at: Date.now() + retryMs });
+        await setPoolWake(storage, leaseID, Date.now() + retryMs);
         const entry = await storage.get<ReadyPoolEntry>(
           `${portablePoolPrefix}${grant.key}:${leaseID}`,
         );
@@ -603,18 +599,48 @@ export class ReadyPoolAccess {
       try {
         await this.hooks.release(release);
       } catch {
-        await this.transaction((storage) =>
-          storage.put(`${portablePoolWakePrefix}${leaseID}`, { at: Date.now() + retryMs }),
-        );
+        await this.transaction((storage) => setPoolWake(storage, leaseID, Date.now() + retryMs));
       }
     }
   }
 
   async maintain(): Promise<void> {
     /* oxlint-disable eslint/no-await-in-loop -- reconcile each durable generation before advancing to the next binding. */
-    const reservations = await this.runtime.storage.list<PoolAccessReservation>({
-      prefix: "portable-ready-pool-v1-lease:",
+    const due = await this.runtime.storage.list<ProvisioningDueRecord>({
+      prefix: provisioningDuePrefix,
+      limit: 8,
     });
+    const ids: string[] = [];
+    for (const [indexKey, record] of due) {
+      if (record.kind !== "pool-access" || record.at > Date.now()) continue;
+      const accepted = await this.transaction(async (storage) => {
+        const pointer = await storage.get<{ at: number }>(
+          `${portablePoolWakePrefix}${record.operationID}`,
+        );
+        if (pointer?.at !== record.at) {
+          await storage.delete(indexKey);
+          return false;
+        }
+        if (record.operationID.startsWith("claim-")) {
+          const claimKey = `portable-ready-pool-v1-fill-claim:${record.operationID.slice(6)}`;
+          const claim = await storage.get<{ expiresAt: string }>(claimKey);
+          if (!claim || Date.parse(claim.expiresAt) <= Date.now()) {
+            await storage.delete(claimKey);
+            await setPoolWake(storage, record.operationID);
+          } else await setPoolWake(storage, record.operationID, Date.parse(claim.expiresAt));
+          return false;
+        }
+        return true;
+      });
+      if (accepted) ids.push(record.operationID);
+    }
+    const reservations = new Map<string, PoolAccessReservation>();
+    for (const id of ids) {
+      const reservation = await this.runtime.storage.get<PoolAccessReservation>(
+        portablePoolReservationKey(id),
+      );
+      if (reservation) reservations.set(id, reservation);
+    }
     for (const reservation of reservations.values()) {
       const id = reservation.binding.leaseID;
       const retiring = await this.transaction(async (storage) => {
@@ -634,7 +660,7 @@ export class ReadyPoolAccess {
             updatedAt: new Date().toISOString(),
             lastResult: "hard TTL rotation",
           });
-          await storage.put(`${portablePoolWakePrefix}${id}`, { at: Date.now() + retryMs });
+          await setPoolWake(storage, id, Date.now() + retryMs);
           await this.hooks.counters(storage, entry, { ttlRotations: 1 });
           return lease;
         }
@@ -643,15 +669,12 @@ export class ReadyPoolAccess {
             ...entry,
             expiresAt: lease.expiresAt,
           });
-          await storage.put(`${portablePoolWakePrefix}${id}`, {
-            at: Date.parse(lease.expiresAt) - ttlMarginMs,
-          });
+          await setPoolWake(storage, id, Date.parse(lease.expiresAt) - ttlMarginMs);
         }
         if (entry.state === "draining" && lease?.state === "active") return lease;
         if (entry.state !== "ready") {
-          if (!lease || leaseProviderCleanupConfirmed(lease))
-            await storage.delete(`${portablePoolWakePrefix}${id}`);
-          else await storage.put(`${portablePoolWakePrefix}${id}`, { at: Date.now() + retryMs });
+          if (!lease || leaseProviderCleanupConfirmed(lease)) await setPoolWake(storage, id);
+          else await setPoolWake(storage, id, Date.now() + retryMs);
         }
         return undefined;
       });
@@ -663,15 +686,16 @@ export class ReadyPoolAccess {
         }
         await this.transaction(async (storage) => {
           const lease = await storage.get<LeaseRecord>(`lease:${id}`);
-          if (!lease || leaseProviderCleanupConfirmed(lease))
-            await storage.delete(`${portablePoolWakePrefix}${id}`);
-          else await storage.put(`${portablePoolWakePrefix}${id}`, { at: Date.now() + retryMs });
+          if (!lease || leaseProviderCleanupConfirmed(lease)) await setPoolWake(storage, id);
+          else await setPoolWake(storage, id, Date.now() + retryMs);
         });
       }
     }
-    const records = await this.runtime.storage.list<PoolAccessGrant>({
-      prefix: "portable-ready-pool-v1-grant:",
-    });
+    const records = new Map<string, PoolAccessGrant>();
+    for (const id of ids) {
+      const grant = await this.runtime.storage.get<PoolAccessGrant>(portablePoolGrantKey(id));
+      if (grant) records.set(id, grant);
+    }
     for (const grant of records.values()) {
       await this.transaction(async (storage) => {
         const current = await storage.get<PoolAccessGrant>(portablePoolGrantKey(grant.leaseID));
