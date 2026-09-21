@@ -398,6 +398,18 @@ required labels, and carry the returned full claim as the exact snapshot for
 later fenced updates. Recovery phases, account or key authorization, live
 resource validation, and every deletion decision remain adapter-owned.
 
+Optional `core.AbsenceVerifier` observes the exact claim-bound resource without
+mutating it. Return zero evidence for a present resource, an error for uncertain
+absence, or `AbsenceEvidence` containing the unchanged claim and both proof
+flags after verifying scope, exact structured not-found, and complete unfiltered
+inventory where available. Core owns local forgetting through
+`ForgetAbsentLeaseClaim`, including the exclusive claim fence and exclusions for
+fixed, checkpoint, coordinator, and adapter owners. Targeted `stop --force`
+uses this capability; `OrdinaryStopAbsenceRecovery` additionally opts in an
+existing ordinary-stop contract. Report `ReleaseLeaseOutcome.ForgottenLocally`
+when an adapter's release entry point delegates to this transaction, so core
+skips release cleanup and reports local forgetting distinctly.
+
 Use `shared.RemoveExactClaimAfterContext` for exact-claim terminal cleanup and
 pass the same lifecycle context that its provider action uses. There is no
 implicit background-context variant: waiting for the claim fence must honor the

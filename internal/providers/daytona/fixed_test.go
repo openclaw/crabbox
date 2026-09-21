@@ -204,7 +204,7 @@ func TestDaytonaFixedInterruptedAcquisitionNeedsPinnedSource(t *testing.T) {
 	}
 }
 
-func TestDaytonaFixedAPIKeyScopeAdmissionPreservesOrdinaryMode(t *testing.T) {
+func TestDaytonaFixedAPIKeyScopeAdmission(t *testing.T) {
 	for _, scenario := range []string{"empty inventory", "missing organization", "selected organization mismatch", "legacy identity", "legacy empty inventory", "null organization", "numeric organization"} {
 		t.Run(scenario, func(t *testing.T) {
 			f, b, req := newFixedDaytonaFixture(t)
@@ -245,8 +245,8 @@ func TestDaytonaFixedAPIKeyScopeAdmissionPreservesOrdinaryMode(t *testing.T) {
 				t.Fatalf("unattested scope published an intent: %v", err)
 			}
 			if scenario == "missing organization" {
-				if _, _, _, err := b.createDaytonaSandbox(t.Context(), req.Repo, true, false, "ordinary"); err != nil || f.sandboxCreates != 1 {
-					t.Fatalf("ordinary API-key mode regressed: %v", err)
+				if _, _, _, err := b.createDaytonaSandbox(t.Context(), req.Repo, true, false, "ordinary"); err == nil || f.sandboxCreates != 0 {
+					t.Fatalf("ordinary acquisition bypassed account attestation: %v", err)
 				}
 			}
 		})

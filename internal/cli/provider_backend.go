@@ -492,6 +492,8 @@ type ReleaseLeaseReporter interface {
 type ReleaseLeaseOutcome struct {
 	// Terminal means the release owner confirmed the end of the recoverable lease.
 	Terminal bool
+	// ForgottenLocally means verified absence removed only the local claim.
+	ForgottenLocally bool
 }
 
 // ReleaseLeaseOutcomeBackend performs the same guarded operation as ReleaseLease

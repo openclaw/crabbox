@@ -74,6 +74,10 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo cor
 			return nil, "", "", err
 		}
 	}
+	scope, organization, err := daytonaAccountContext(ctx, client, false)
+	if err != nil {
+		return nil, "", "", err
+	}
 	existing, err := client.ListCrabboxSandboxes(ctx)
 	if err != nil {
 		return nil, "", "", daytonaError("list sandboxes", err)
@@ -111,13 +115,21 @@ func (b *daytonaLeaseBackend) createDaytonaSandbox(ctx context.Context, repo cor
 		}
 	}
 	resourceID := created.GetId()
+	accountMatches := created.GetOrganizationId() == organization
+	if !accountMatches {
+		// Retain cleanup custody, but never attest an inconsistent response.
+		scope = ""
+	}
 	defer func() {
-		if err != nil {
+		if err != nil && accountMatches {
 			err = b.rollbackDaytonaSandbox(resourceID, leaseID, err)
 		}
 	}()
-	if err = core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, core.Server{Provider: daytonaProvider, CloudID: resourceID, Labels: labels}, core.SSHTarget{}, repo.Root, cfg.IdleTimeout, reclaim); err != nil {
+	if _, err = core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurable(leaseID, slug, cfg, scope, core.Server{Provider: daytonaProvider, CloudID: resourceID, ImmutableID: resourceID, Labels: labels}, core.SSHTarget{}, repo.Root, cfg.IdleTimeout, reclaim, core.LeaseClaim{}, false); err != nil {
 		return nil, leaseID, slug, err
+	}
+	if !accountMatches {
+		return nil, leaseID, slug, core.Exit(4, "Daytona created sandbox organization differs from authenticated acquisition scope; claim and resource %s retained for manual recovery", resourceID)
 	}
 	if createErr != nil {
 		return nil, leaseID, slug, daytonaError("create sandbox", createErr)
