@@ -70,6 +70,11 @@ and changed pod identity are errors rather than successful updates. Earlier
 releases returned heartbeat changes without persisting them; repeat an intended
 timeout change after upgrading if it was not recorded in the claim.
 
+Release uses the exact claim observed during acquisition or resolution. If that
+claim changes before deletion, release refuses the stale target without deleting
+the pod; resolve it again before retrying. It never substitutes a newer claim for
+the observed one.
+
 ## Capabilities
 
 | Capability | Supported |

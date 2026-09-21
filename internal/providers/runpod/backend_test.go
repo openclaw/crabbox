@@ -228,6 +228,42 @@ func TestRunpodRunningObservationClearsOnlyStoredRuntimeTerminalState(t *testing
 	}
 }
 
+func TestRunpodLogicalActivityHoldsSurviveNativeTransitions(t *testing.T) {
+	for _, nativeState := range []string{"RUNNING", "STARTING", "EXITED"} {
+		for _, hold := range []string{"cleanup", "deleting", "expired", "released"} {
+			t.Run(nativeState+"/"+hold, func(t *testing.T) {
+				b, lease, original, repo, _ := runpodLifecycleFixture(t)
+				labels := maps.Clone(original.Labels)
+				labels["state"] = hold
+				stored, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, original, labels)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fake := b.client.(*fakeRunpodAPI)
+				fake.listPods[0].DesiredStatus = nativeState
+				fake.getPod = func(string) (runpodPod, error) { return fake.listPods[0], nil }
+				observed, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, NoLocalStateMutations: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if observed.Server.Labels["state"] != hold {
+					t.Errorf("native %s erased %s hold", nativeState, hold)
+				}
+				if updated, err := b.Touch(t.Context(), core.TouchRequest{Lease: observed, State: "busy"}); err == nil || !reflect.DeepEqual(updated, core.Server{}) {
+					t.Errorf("held claim accepted activity: %v", err)
+				}
+				if _, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo}); err == nil {
+					t.Error("held claim accepted repository admission")
+				}
+				after, err := core.ReadLeaseClaim(lease.LeaseID)
+				if err != nil || !reflect.DeepEqual(after, stored) {
+					t.Errorf("held claim changed: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestRunpodProviderSpec(t *testing.T) {
 	spec := Provider{}.Spec()
 	if spec.Name != providerName {
@@ -1107,15 +1143,61 @@ func TestRunpodReleaseLeaseRechecksBoundClaimAndTerminatesPod(t *testing.T) {
 	claimRunpodPod(t, "rpod_abcdef12", "blue", pod)
 	fake := &fakeRunpodAPI{getPod: func(string) (runpodPod, error) { return pod, nil }}
 	backend := &runpodLeaseBackend{cfg: core.Config{Runpod: core.RunpodConfig{APIKey: "k"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
-	req := core.ReleaseLeaseRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: pod.ID}, LeaseID: "rpod_abcdef12"}}
+	lease, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: "rpod_abcdef12", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := core.ReleaseLeaseRequest{Lease: lease}
 	if err := backend.ReleaseLease(context.Background(), req); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.getCalls) != 1 || fake.getCalls[0] != pod.ID || len(fake.terminated) != 1 || fake.terminated[0] != pod.ID {
+	if len(fake.getCalls) != 2 || fake.getCalls[0] != pod.ID || fake.getCalls[1] != pod.ID || len(fake.terminated) != 1 || fake.terminated[0] != pod.ID {
 		t.Fatalf("getCalls=%v terminated=%v", fake.getCalls, fake.terminated)
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence("rpod_abcdef12"); err != nil || exists {
 		t.Fatalf("claim after release: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestRunpodReleaseRequiresObservedClaim(t *testing.T) {
+	for _, scenario := range []string{"missing snapshot", "absent snapshot", "changed claim"} {
+		t.Run(scenario, func(t *testing.T) {
+			b, initial, original, _, _ := runpodLifecycleFixture(t)
+			lease, err := b.Resolve(t.Context(), core.ResolveRequest{ID: initial.LeaseID, ReleaseOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := original
+			switch scenario {
+			case "missing snapshot":
+				lease.Server = core.Server{Provider: providerName, CloudID: lease.Server.CloudID, Name: lease.Server.Name, Labels: lease.Server.Labels}
+			case "absent snapshot":
+				core.SetServerLeaseClaimSnapshot(&lease.Server, core.LeaseClaim{}, false)
+			case "changed claim":
+				labels := maps.Clone(original.Labels)
+				labels["state"] = "busy"
+				expected, err = core.UpdateLeaseClaimLabelsIfUnchanged(initial.LeaseID, original, labels)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			fake := b.client.(*fakeRunpodAPI)
+			reads := len(fake.getCalls)
+			if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err == nil {
+				t.Error("release accepted an unobserved or changed claim")
+			}
+			persisted, readErr := core.ReadLeaseClaim(initial.LeaseID)
+			if len(fake.terminated) != 0 || len(fake.getCalls) != reads || readErr != nil || !reflect.DeepEqual(persisted, expected) {
+				t.Fatalf("refused release touched provider or claim: reads=%v terminated=%v err=%v", fake.getCalls, fake.terminated, readErr)
+			}
+			fresh, err := b.Resolve(t.Context(), core.ResolveRequest{ID: initial.LeaseID, ReleaseOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: fresh}); err != nil || len(fake.terminated) != 1 {
+				t.Fatalf("freshly observed release failed: err=%v terminated=%v", err, fake.terminated)
+			}
+		})
 	}
 }
 
@@ -1126,14 +1208,16 @@ func TestRunpodReleaseLeaseRejectsResourceOutsideBoundClaim(t *testing.T) {
 	fake := &fakeRunpodAPI{getPod: func(string) (runpodPod, error) { return pod, nil }}
 	backend := &runpodLeaseBackend{cfg: core.Config{Runpod: core.RunpodConfig{APIKey: "k"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
 
-	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
-		Server:  core.Server{CloudID: "pod_other"},
-		LeaseID: "rpod_abcdef12",
-	}})
-	if err == nil || !strings.Contains(err.Error(), "does not match bound claim pod") {
+	lease, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: "rpod_abcdef12", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease.Server.CloudID = "pod_other"
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
+	if err == nil || !strings.Contains(err.Error(), "cloud ID mismatch") {
 		t.Fatalf("err=%v, want forged resource refusal", err)
 	}
-	if len(fake.getCalls) != 0 || len(fake.terminated) != 0 {
+	if len(fake.getCalls) != 1 || len(fake.terminated) != 0 {
 		t.Fatalf("getCalls=%v terminated=%v, want no provider mutation", fake.getCalls, fake.terminated)
 	}
 }
@@ -1144,13 +1228,15 @@ func TestRunpodReleaseLeaseRejectsProviderNameMismatch(t *testing.T) {
 	claimRunpodPod(t, "rpod_abcdef12", "blue", claimed)
 	changed := claimed
 	changed.Name = "renamed-outside-crabbox"
-	fake := &fakeRunpodAPI{getPod: func(string) (runpodPod, error) { return changed, nil }}
+	fake := &fakeRunpodAPI{getPod: func(string) (runpodPod, error) { return claimed, nil }}
 	backend := &runpodLeaseBackend{cfg: core.Config{Runpod: core.RunpodConfig{APIKey: "k"}}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, client: fake}
 
-	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
-		Server:  core.Server{CloudID: claimed.ID},
-		LeaseID: "rpod_abcdef12",
-	}})
+	lease, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: "rpod_abcdef12", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.getPod = func(string) (runpodPod, error) { return changed, nil }
+	err = backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease})
 	if err == nil || !strings.Contains(err.Error(), "expects pod name") {
 		t.Fatalf("err=%v, want provider identity mismatch", err)
 	}

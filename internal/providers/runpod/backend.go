@@ -228,6 +228,11 @@ func (b *runpodLeaseBackend) Resolve(ctx context.Context, req core.ResolveReques
 		core.SetServerLeaseClaimSnapshot(&lease.Server, core.LeaseClaim{}, false)
 	}
 	if admit {
+		if claimed {
+			if err := shared.AuthorizeClaimActivity(claim); err != nil {
+				return core.LeaseTarget{}, err
+			}
+		}
 		updated, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, claim, claimed)
 		if err != nil {
 			return core.LeaseTarget{}, err
@@ -267,31 +272,24 @@ func (b *runpodLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (
 }
 
 func (b *runpodLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
-	client, err := b.api()
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	identifier := strings.TrimSpace(req.Lease.LeaseID)
-	if identifier == "" {
-		identifier = strings.TrimSpace(req.Lease.Server.CloudID)
-	}
-	if identifier == "" {
-		identifier = strings.TrimSpace(req.Lease.Server.Name)
-	}
-	claim, ok, err := resolveRunpodClaim(identifier)
-	if err != nil {
+	if err := core.ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
 		return err
 	}
-	if !ok || !runpodClaimIsBound(claim) {
-		return unclaimedRunpodError(identifier)
+	claim, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server)
+	if !set || !exists {
+		return core.Exit(4, "runpod lease=%s has no exact observed claim snapshot; refusing release", req.Lease.LeaseID)
 	}
-	if leaseID := strings.TrimSpace(req.Lease.LeaseID); leaseID != "" && leaseID != claim.LeaseID {
-		return core.Exit(2, "runpod release lease %s does not match bound claim %s", leaseID, claim.LeaseID)
+	if err := b.validateLeaseClaim(req.Lease, claim); err != nil {
+		return err
 	}
-	if podID := strings.TrimSpace(req.Lease.Server.CloudID); podID != "" && podID != claim.CloudID {
-		return core.Exit(2, "runpod release pod %s does not match bound claim pod %s", podID, claim.CloudID)
-	}
-	err = core.RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, func() error {
+	err := shared.RemoveExactClaimAfterContext(ctx, claim, b.claimBinding(req.Lease), func() error {
+		client, err := b.api()
+		if err != nil {
+			return err
+		}
 		pod, err := b.resolveClaimedPod(ctx, client, claim, true)
 		if err != nil {
 			return err
@@ -312,17 +310,22 @@ func (b *runpodLeaseBackend) AuthorizeStatusTouchClaim(ctx context.Context, leas
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	server := lease.Server
-	if !runpodClaimIsBound(claim) || server.Provider != providerName || lease.LeaseID != claim.LeaseID || server.Labels["lease"] != claim.LeaseID || server.CloudID != claim.CloudID || server.Name != claim.Labels["name"] || server.Labels["name"] != claim.Labels["name"] {
-		return core.Exit(4, "runpod lease=%s target does not match the exact pod claim", lease.LeaseID)
-	}
-	if err := shared.ValidateClaimBinding(claim, shared.ClaimBinding{Provider: providerName, ProviderScope: core.ProviderClaimScope(providerName, b.cfg), LeaseID: lease.LeaseID, Slug: server.Labels["slug"], CloudID: server.CloudID}); err != nil {
+	if err := b.validateLeaseClaim(lease, claim); err != nil {
 		return err
 	}
-	if claim.Labels["state"] == "cleanup" {
-		return core.Exit(4, "runpod lease=%s cleanup is already in progress", claim.LeaseID)
+	return shared.AuthorizeClaimActivity(claim)
+}
+
+func (b *runpodLeaseBackend) claimBinding(lease core.LeaseTarget) shared.ClaimBinding {
+	return shared.ClaimBinding{Provider: providerName, ProviderScope: core.ProviderClaimScope(providerName, b.cfg), LeaseID: lease.LeaseID, Slug: lease.Server.Labels["slug"], CloudID: lease.Server.CloudID, RequiredLabels: map[string]string{"name": lease.Server.Name}}
+}
+
+func (b *runpodLeaseBackend) validateLeaseClaim(lease core.LeaseTarget, claim core.LeaseClaim) error {
+	server := lease.Server
+	if !runpodClaimIsBound(claim) || server.Provider != providerName || lease.LeaseID == "" || server.CloudID == "" || server.Name == "" || server.Labels["lease"] != lease.LeaseID || server.Labels["name"] != server.Name {
+		return core.Exit(4, "runpod lease=%s target does not match the exact pod claim", lease.LeaseID)
 	}
-	return core.AuthorizeCheckpointRelease(claim, "")
+	return shared.ValidateClaimBinding(claim, b.claimBinding(lease))
 }
 
 func (b *runpodLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
@@ -805,15 +808,19 @@ func projectRunpodClaim(server core.Server, claim core.LeaseClaim) core.Server {
 		}
 		labels[key] = value
 	}
-	switch server.Status {
-	case "running", "ready":
-		switch strings.ToLower(labels["state"]) {
-		case "stopped", "failed", "exited", "dead", "terminated", "stopped_with_code":
+	if hold := shared.ClaimActivityHoldState(claim); hold != "" {
+		labels["state"] = hold
+	} else {
+		switch server.Status {
+		case "running", "ready":
+			switch strings.ToLower(labels["state"]) {
+			case "stopped", "failed", "exited", "dead", "terminated", "stopped_with_code":
+				labels["state"] = server.Status
+			}
+		case "", "unknown":
+		default:
 			labels["state"] = server.Status
 		}
-	case "", "unknown":
-	default:
-		labels["state"] = server.Status
 	}
 	server.Labels = labels
 	core.SetServerLeaseClaimSnapshot(&server, claim, true)
