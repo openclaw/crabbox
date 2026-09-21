@@ -189,7 +189,7 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 			if !observation.CanSubmit || (ops.Admission != nil && !ops.Admission.permits(tx)) || claim.FixedCreateIntent.State != "prepared" || claim.CloudID != "" || claim.CloudNumericID != 0 || claim.CloudImmutableID != "" {
 				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed %s lease %s has an unresolved or missing resource; retain its claim for recovery", opts.Kind.Label, claim.LeaseID)
 			}
-			if ops.Plan != nil {
+			if ops.Plan != nil && len(claim.FixedCreateIntent.Attempt) == 0 {
 				plan, err := ops.Plan(ctx, *claim)
 				if err != nil {
 					return LeaseTarget{}, err
@@ -200,8 +200,10 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 				if err := tx.plan(plan); err != nil {
 					return LeaseTarget{}, err
 				}
-			} else if err := ops.PlanAttempt(ctx, tx); err != nil {
-				return LeaseTarget{}, err
+			} else if ops.PlanAttempt != nil {
+				if err := ops.PlanAttempt(ctx, tx); err != nil {
+					return LeaseTarget{}, err
+				}
 			}
 			if len(claim.FixedCreateIntent.Attempt) == 0 && !ops.PlanDuringSubmit {
 				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed lease submission has no native attempt")
@@ -397,4 +399,27 @@ func terminalFixedJournal(intent *FixedCreateIntent) {
 		revision = intent.Journal.Revision + 1
 	}
 	intent.Journal = &FixedLeaseJournal{Version: 1, Phase: "released", Revision: revision}
+}
+
+// InspectFixedCandidate applies the same read-only journal and cardinality
+// checks to native inventory lookups used outside acquisition.
+func InspectFixedCandidate[T any](ctx context.Context, kind FixedLeaseKind, claim LeaseClaim, inventory func(context.Context) ([]T, error), match func(T) bool) (T, bool, error) {
+	observed, err := InspectFixedResource(ctx, kind, claim, FixedLeaseOperations[T]{ObserveExact: func(ctx context.Context, _ *FixedTransaction, _ FixedObserveMode) (FixedObservation[T], error) {
+		items, err := inventory(ctx)
+		if err != nil {
+			return FixedObservation[T]{}, err
+		}
+		var candidates []T
+		for _, item := range items {
+			if match(item) {
+				candidates = append(candidates, item)
+			}
+		}
+		return FixedObservation[T]{Candidates: candidates}, nil
+	}})
+	if err != nil || len(observed.Candidates) == 0 {
+		var zero T
+		return zero, false, err
+	}
+	return observed.Candidates[0], true, nil
 }

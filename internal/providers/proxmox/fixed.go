@@ -25,39 +25,19 @@ var fixedProxmoxLeaseKind = core.FixedLeaseKind{
 	},
 }
 
-type fixedProxmoxCreateIntent struct {
-	Labels         map[string]string `json:"labels"`
-	SSHPort        string            `json:"sshPort"`
-	ProviderScope  string            `json:"providerScope"`
-	Node           string            `json:"node"`
-	TemplateID     int               `json:"templateId"`
-	Storage        string            `json:"storage,omitempty"`
-	Pool           string            `json:"pool,omitempty"`
-	Bridge         string            `json:"bridge,omitempty"`
-	User           string            `json:"user"`
-	WorkRoot       string            `json:"workRoot"`
-	FullClone      bool              `json:"fullClone"`
-	ServerType     string            `json:"serverType"`
-	TargetOS       string            `json:"targetOS"`
-	RequestedSlug  string            `json:"requestedSlug,omitempty"`
-	Keep           bool              `json:"keep"`
-	TTLNanoseconds int64             `json:"ttlNanoseconds"`
-	IdleNanos      int64             `json:"idleNanoseconds"`
-	SSHPublicKey   string            `json:"sshPublicKey"`
-}
-
 func fixedProxmoxFingerprint(cfg core.Config, req core.AcquireRequest, providerScope, publicKey string) (string, error) {
-	return core.FixedIntentFingerprint("", fixedProxmoxCreateIntent{
-		Labels:        core.DirectLeaseLabels(cfg, req.RequestedLeaseID, core.NormalizeLeaseSlug(req.RequestedSlug), "proxmox", "", req.Keep, time.Unix(0, 0)),
-		SSHPort:       cfg.SSHPort,
-		ProviderScope: providerScope, Node: strings.TrimSpace(cfg.Proxmox.Node),
-		TemplateID: cfg.Proxmox.TemplateID, Storage: strings.TrimSpace(cfg.Proxmox.Storage),
-		Pool: strings.TrimSpace(cfg.Proxmox.Pool), Bridge: strings.TrimSpace(cfg.Proxmox.Bridge),
-		User: strings.TrimSpace(cfg.SSHUser), WorkRoot: strings.TrimSpace(cfg.WorkRoot),
-		FullClone: cfg.Proxmox.FullClone, ServerType: strings.TrimSpace(cfg.ServerType),
-		TargetOS: strings.TrimSpace(cfg.TargetOS), RequestedSlug: core.NormalizeLeaseSlug(req.RequestedSlug),
-		Keep: req.Keep, TTLNanoseconds: cfg.TTL.Nanoseconds(), IdleNanos: cfg.IdleTimeout.Nanoseconds(),
-		SSHPublicKey: strings.TrimSpace(publicKey),
+	return core.FixedIntentFingerprint("", core.FixedIntentFields{
+		{Name: "labels", Value: core.DirectLeaseLabels(cfg, req.RequestedLeaseID, core.NormalizeLeaseSlug(req.RequestedSlug), "proxmox", "", req.Keep, time.Unix(0, 0))},
+		{Name: "sshPort", Value: cfg.SSHPort}, {Name: "providerScope", Value: providerScope},
+		{Name: "node", Value: strings.TrimSpace(cfg.Proxmox.Node)}, {Name: "templateId", Value: cfg.Proxmox.TemplateID},
+		{Name: "storage", Value: strings.TrimSpace(cfg.Proxmox.Storage), OmitEmpty: true},
+		{Name: "pool", Value: strings.TrimSpace(cfg.Proxmox.Pool), OmitEmpty: true},
+		{Name: "bridge", Value: strings.TrimSpace(cfg.Proxmox.Bridge), OmitEmpty: true},
+		{Name: "user", Value: strings.TrimSpace(cfg.SSHUser)}, {Name: "workRoot", Value: strings.TrimSpace(cfg.WorkRoot)},
+		{Name: "fullClone", Value: cfg.Proxmox.FullClone}, {Name: "serverType", Value: strings.TrimSpace(cfg.ServerType)},
+		{Name: "targetOS", Value: strings.TrimSpace(cfg.TargetOS)}, {Name: "requestedSlug", Value: core.NormalizeLeaseSlug(req.RequestedSlug), OmitEmpty: true},
+		{Name: "keep", Value: req.Keep}, {Name: "ttlNanoseconds", Value: cfg.TTL.Nanoseconds()},
+		{Name: "idleNanoseconds", Value: cfg.IdleTimeout.Nanoseconds()}, {Name: "sshPublicKey", Value: strings.TrimSpace(publicKey)},
 	})
 }
 
@@ -84,7 +64,7 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		Kind: fixedProxmoxLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID,
 		RepoRoot: req.Repo.Root, Reclaim: req.Reclaim, TargetOS: cfg.TargetOS,
 		WindowsMode: cfg.WindowsMode, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout,
-	}, core.FixedLeaseOperations[core.Server]{DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
+	}, core.FixedLeaseOperations[core.Server]{Admission: &core.FixedAdmission{}, DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		if exists {
 			if !fixedProxmoxLeaseKind.IsFixedClaim(*claim) || claim.ProviderScope != providerScope {
 				return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: fixed Proxmox claim scope changed")
@@ -152,37 +132,34 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			result.CanSubmit = true
 		}
 		return result, nil
-	}, PlanAttempt: func(ctx context.Context, tx *core.FixedTransaction) error {
-		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
+	}, Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
 		vmid, err := client.NextVMID(ctx)
 		if err != nil {
-			return err
+			return core.FixedAttemptPlan{}, err
 		}
 		if vmid <= 0 {
-			return core.Exit(4, "lease_id_conflict: Proxmox selected invalid VMID %d", vmid)
+			return core.FixedAttemptPlan{}, core.Exit(4, "lease_id_conflict: Proxmox selected invalid VMID %d", vmid)
 		}
 		node := strings.TrimSpace(cfg.Proxmox.Node)
-		intent.Attempt = map[string]string{"vmid": strconv.Itoa(vmid), "node": node}
-		claim.CloudID, claim.CloudNumericID = strconv.Itoa(vmid), int64(vmid)
-		claim.Labels = fixedProxmoxIdentityLabels(cfg, leaseID, intent.Slug, fingerprint, node)
-		return validateFixedProxmoxLocalBinding(*claim)
+		return core.FixedAttemptPlan{
+			Values:          map[string]string{"vmid": strconv.Itoa(vmid), "node": node},
+			UniqueProviders: []string{"proxmox", core.FixedProxmoxClaimProvider}, UniqueLabel: "Proxmox",
+			Identity: core.FixedResourceBinding{CloudID: strconv.Itoa(vmid), NumericID: int64(vmid)},
+			Labels:   fixedProxmoxIdentityLabels(cfg, leaseID, claim.Slug, fingerprint, node),
+		}, nil
 	}, Submit: func(ctx context.Context, tx *core.FixedTransaction) (core.Server, error) {
 		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
 		vmid, node, err := fixedProxmoxAttempt(*claim)
 		if err != nil {
 			return core.Server{}, err
 		}
-		if err := tx.Record("submitting"); err != nil {
-			return core.Server{}, err
-		}
+
 		fmt.Fprintf(b.RT.Stderr, "provisioning provider=proxmox lease=%s slug=%s node=%s template=%d vmid=%d keep=%v fixed=true\n", leaseID, intent.Slug, cfg.Proxmox.Node, cfg.Proxmox.TemplateID, vmid, req.Keep)
 		return client.CreateServerWithVMID(ctx, cfg, publicKey, leaseID, intent.Slug, req.Keep, vmid, maps.Clone(claim.Labels), func(created core.Server) error {
 			if err := validateFixedProxmoxServer(created, *claim, vmid, node); err != nil {
 				return err
 			}
-			claim.CloudImmutableID = created.ImmutableID
-			claim.Labels = maps.Clone(created.Labels)
-			return tx.Record("bound")
+			return tx.Bind(core.FixedResourceBinding{ImmutableID: created.ImmutableID, Labels: created.Labels})
 		})
 	}, PrepareAccess: func(ctx context.Context, tx *core.FixedTransaction, server core.Server) (core.LeaseTarget, error) {
 		claim := tx.Claim
@@ -207,84 +184,40 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		}
 		return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 	}})
-	if err != nil {
-		return core.LeaseTarget{}, err
-	}
-	if req.OnAcquired != nil {
-		if err := req.OnAcquired(acquired); err != nil {
-			return core.LeaseTarget{}, fmt.Errorf("acknowledge fixed Proxmox acquisition: %w", err)
-		}
-	}
-	return acquired, nil
+	return core.CompleteFixedAcquisition(acquired, err, req)
 }
 
 func fixedProxmoxIdentityLabels(cfg core.Config, leaseID, slug, fingerprint, node string) map[string]string {
-	return map[string]string{
-		"crabbox":             "true",
-		"provider":            "proxmox",
-		"lease":               leaseID,
-		"slug":                slug,
-		"provider_key":        core.ProviderKeyForLease(leaseID),
-		"fixed_intent_sha256": fingerprint,
-		"node":                node,
-		"template_id":         strconv.Itoa(cfg.Proxmox.TemplateID),
-	}
+	return core.FixedIdentityLabels("proxmox", leaseID, slug, fingerprint, map[string]string{"node": node, "template_id": strconv.Itoa(cfg.Proxmox.TemplateID)})
 }
 
 func fixedProxmoxAttempt(claim core.LeaseClaim) (int, string, error) {
-	intent := claim.FixedCreateIntent
-	if !fixedProxmoxLeaseKind.IsFixedClaim(claim) || intent.Version != fixedProxmoxCreateIntentVersion ||
-		intent.Fingerprint == "" || intent.Slug != claim.Slug || intent.ProviderScope == "" ||
-		(intent.State != "prepared" && intent.State != "acquired" && intent.State != "deleting") || len(intent.FailedAttempts) != 0 {
-		return 0, "", core.Exit(4, "lease_id_conflict: invalid fixed Proxmox create intent for lease %s", claim.LeaseID)
+	rules := core.FixedClaimRules{Kind: fixedProxmoxLeaseKind, States: []string{"prepared", "acquired", "deleting"},
+		NoFailedAttempts: true, EmptyAttemptMustBePristine: true, RequireIntentScope: true}
+	if err := core.ValidateFixedClaim(claim, rules); err != nil {
+		return 0, "", err
 	}
-	if len(intent.Attempt) == 0 {
-		if intent.State != "prepared" || claim.CloudID != "" || claim.CloudNumericID != 0 || claim.CloudImmutableID != "" || len(claim.Labels) != 0 {
-			return 0, "", core.Exit(4, "lease_id_conflict: fixed Proxmox lease %s has no durable clone attempt", claim.LeaseID)
-		}
-		return 0, "", nil
+	attempt, err := core.ReadFixedAttempt[map[string]string](claim.FixedCreateIntent, core.FixedAttemptFormat{ExactKeys: 2, Required: []string{"node"}, PositiveIntegers: []string{"vmid"}})
+	if err != nil || attempt == nil {
+		return 0, "", err
 	}
-	vmid, err := strconv.Atoi(intent.Attempt["vmid"])
-	node := strings.TrimSpace(intent.Attempt["node"])
-	if err != nil || vmid <= 0 || strconv.Itoa(vmid) != intent.Attempt["vmid"] || node == "" || len(intent.Attempt) != 2 {
-		return 0, "", core.Exit(4, "lease_id_conflict: invalid fixed Proxmox clone attempt for lease %s", claim.LeaseID)
-	}
-	if claim.CloudID != strconv.Itoa(vmid) || claim.CloudNumericID != int64(vmid) ||
-		claim.ProviderScope != intent.ProviderScope ||
-		claim.Labels["crabbox"] != "true" || claim.Labels["provider"] != "proxmox" ||
-		claim.Labels["lease"] != claim.LeaseID || claim.Labels["slug"] != claim.Slug ||
-		claim.Labels["provider_key"] != core.ProviderKeyForLease(claim.LeaseID) ||
-		claim.Labels["fixed_intent_sha256"] != intent.Fingerprint ||
-		claim.Labels["node"] != node || claim.Labels["template_id"] == "" ||
-		intent.State != "prepared" && claim.CloudImmutableID == "" {
-		return 0, "", core.Exit(4, "lease_id_conflict: fixed Proxmox lease %s durable VM identity is inconsistent", claim.LeaseID)
+	vmid, _ := strconv.Atoi((*attempt)["vmid"])
+	node := strings.TrimSpace((*attempt)["node"])
+	rules.Scope, rules.ExpectedID, rules.NumericMatchesID = claim.FixedCreateIntent.ProviderScope, strconv.Itoa(vmid), true
+	rules.GenerationAfterPrepared = true
+	rules.RequiredLabels = []string{"template_id", "node"}
+	rules.BoundLabels = fixedProxmoxIdentityLabels(core.Config{}, claim.LeaseID, claim.Slug, claim.FixedCreateIntent.Fingerprint, node)
+	delete(rules.BoundLabels, "template_id")
+	if err := core.ValidateFixedClaim(claim, rules); err != nil {
+		return 0, "", err
 	}
 	return vmid, node, nil
 }
 
 func (b *leaseBackend) findFixedProxmoxServer(ctx context.Context, client proxmoxClient, claim core.LeaseClaim) (core.Server, bool, error) {
-	observed, err := core.InspectFixedResource(ctx, fixedProxmoxLeaseKind, claim, core.FixedLeaseOperations[core.Server]{
-		ObserveExact: func(ctx context.Context, _ *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.Server], error) {
-			servers, err := client.ListCrabboxServersCluster(ctx)
-			if err != nil {
-				return core.FixedObservation[core.Server]{}, err
-			}
-			var found []core.Server
-			for _, server := range servers {
-				if strings.TrimSpace(server.Labels["lease"]) == claim.LeaseID || server.CloudID == claim.CloudID || server.Labels["provider_key"] == core.ProviderKeyForLease(claim.LeaseID) {
-					found = append(found, server)
-				}
-			}
-			return core.FixedObservation[core.Server]{Candidates: found}, nil
-		},
+	return core.InspectFixedCandidate(ctx, fixedProxmoxLeaseKind, claim, client.ListCrabboxServersCluster, func(server core.Server) bool {
+		return strings.TrimSpace(server.Labels["lease"]) == claim.LeaseID || server.CloudID == claim.CloudID || server.Labels["provider_key"] == core.ProviderKeyForLease(claim.LeaseID)
 	})
-	if err != nil {
-		return core.Server{}, false, err
-	}
-	if len(observed.Candidates) == 0 {
-		return core.Server{}, false, nil
-	}
-	return observed.Candidates[0], true, nil
 }
 
 func validateFixedProxmoxServer(server core.Server, claim core.LeaseClaim, vmid int, attemptNode string) error {
@@ -441,26 +374,7 @@ func (b *leaseBackend) retainLeaseClaimAfterRelease(lease core.LeaseTarget, prev
 // Another local owner of this VMID makes lifecycle mutations ambiguous, even
 // when the remote labels still point at this fixed operation.
 func validateFixedProxmoxLocalBinding(claim core.LeaseClaim) error {
-	claims, err := core.ListLeaseClaims()
-	if err != nil {
-		return err
-	}
-	for _, other := range claims {
-		if other.LeaseID == claim.LeaseID || other.CloudID != claim.CloudID {
-			continue
-		}
-		if other.Provider != "proxmox" && other.Provider != core.FixedProxmoxClaimProvider {
-			continue
-		}
-		if other.ProviderScope != "" && other.ProviderScope != claim.ProviderScope {
-			continue
-		}
-		if fixedProxmoxLeaseKind.IsFixedClaim(other) && other.FixedCreateIntent.State == "released" {
-			continue
-		}
-		return core.Exit(4, "lease_id_conflict: multiple local Proxmox claims bind VMID %s", claim.CloudID)
-	}
-	return nil
+	return core.ValidateFixedLocalClaimUniqueness(fixedProxmoxLeaseKind, claim, "proxmox", core.FixedProxmoxClaimProvider)
 }
 
 func (b *leaseBackend) validateFixedCleanupCandidate(claim core.LeaseClaim, server core.Server, inventory []core.Server) error {

@@ -9,6 +9,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -76,6 +77,9 @@ func (p FixedAdmission) permits(tx *FixedTransaction) bool {
 // Core generates nonces, assembles identity labels, and commits this plan before
 // admitting the provider mutation. Existing attempts are never regenerated.
 type FixedAttemptPlan struct {
+	UniqueLabel                  string
+	UniqueProviders              []string
+	AttemptLabels                map[string]string
 	JSONKey                      string
 	Payload                      any
 	NonceBytes                   int
@@ -158,10 +162,19 @@ func (tx *FixedTransaction) plan(plan FixedAttemptPlan) error {
 	if plan.NonceLabel != "" {
 		labels[plan.NonceLabel] = attempt[plan.NonceKey]
 	}
+	for label, key := range plan.AttemptLabels {
+		labels[label] = attempt[key]
+	}
 	if len(labels) != 0 {
 		tx.Claim.Labels = labels
 	}
-	return tx.applyBinding(plan.Identity)
+	if err := tx.applyBinding(plan.Identity); err != nil {
+		return err
+	}
+	if len(plan.UniqueProviders) != 0 {
+		return ValidateFixedLocalClaimUniqueness(FixedLeaseKind{ClaimProvider: tx.Claim.Provider, Label: plan.UniqueLabel}, *tx.Claim, plan.UniqueProviders...)
+	}
+	return nil
 }
 
 // FixedResourceBinding is evidence supplied by a native operation. Identity is
@@ -278,12 +291,13 @@ func (tx *FixedTransaction) Admit() error {
 // adapters provide the schema key, required fields and cardinality constraints.
 // Missing old evidence is returned as missing, never synthesized from inventory.
 type FixedAttemptFormat struct {
-	Trimmed, SHA256 []string
-	JSONKey         string
-	ExactKeys       int
-	Required        []string
-	Equal           map[string]string
-	OptionalEqual   map[string]string
+	PositiveIntegers []string
+	Trimmed, SHA256  []string
+	JSONKey          string
+	ExactKeys        int
+	Required         []string
+	Equal            map[string]string
+	OptionalEqual    map[string]string
 }
 
 func ReadFixedAttempt[T any](intent *FixedCreateIntent, format FixedAttemptFormat) (*T, error) {
@@ -315,6 +329,13 @@ func ReadFixedAttempt[T any](intent *FixedCreateIntent, format FixedAttemptForma
 		return nil, err
 	}
 	stringValue := func(key string) string { var s string; _ = json.Unmarshal(fields[key], &s); return s }
+	for _, key := range format.PositiveIntegers {
+		value := stringValue(key)
+		number, err := strconv.Atoi(value)
+		if err != nil || number <= 0 || strconv.Itoa(number) != value {
+			return nil, Exit(4, "lease_id_conflict: fixed attempt %s is not a canonical positive integer", key)
+		}
+	}
 	for _, key := range format.Trimmed {
 		if value := stringValue(key); value != strings.TrimSpace(value) {
 			return nil, Exit(4, "lease_id_conflict: fixed attempt %s is not canonical", key)
@@ -355,6 +376,9 @@ func WriteFixedAttempt(intent *FixedCreateIntent, key string, value any, persist
 // FixedClaimRules validates the local envelope independently of native reads.
 // Provider descriptors retain stricter legacy checks without private readers.
 type FixedClaimRules struct {
+	RequireIntentScope, NumericMatchesID, GenerationAfterPrepared    bool
+	ExpectedID                                                       string
+	RequiredLabels                                                   []string
 	BoundLabels                                                      map[string]string
 	RequireBound, UnboundMustBeBare                                  bool
 	Kind                                                             FixedLeaseKind
@@ -374,6 +398,16 @@ func ValidateFixedClaim(c LeaseClaim, r FixedClaimRules) error {
 		(r.NoCheckpoint && i.CheckpointID != "") || (r.NoFailedAttempts && len(i.FailedAttempts) != 0) ||
 		(r.NoNumericID && c.CloudNumericID != 0) || (r.SameImmutableID && c.CloudImmutableID != c.CloudID) {
 		return Exit(4, "lease_id_conflict: invalid fixed %s identity or provider scope for %s", r.Kind.Label, c.LeaseID)
+	}
+	if (r.RequireIntentScope && i.ProviderScope == "") || (r.ExpectedID != "" && c.CloudID != r.ExpectedID) ||
+		(r.NumericMatchesID && c.CloudID != strconv.FormatInt(c.CloudNumericID, 10)) ||
+		(r.GenerationAfterPrepared && i.State != "prepared" && c.CloudImmutableID == "") {
+		return Exit(4, "lease_id_conflict: fixed lease %s has inconsistent durable identity", c.LeaseID)
+	}
+	for _, key := range r.RequiredLabels {
+		if c.Labels[key] == "" {
+			return Exit(4, "lease_id_conflict: fixed lease %s has no durable %s", c.LeaseID, key)
+		}
 	}
 	if r.RequireTimestamp {
 		if _, err := time.Parse(time.RFC3339Nano, i.CreatedAt); err != nil {
@@ -454,4 +488,32 @@ func BindFixedClaim(claim *LeaseClaim, binding FixedResourceBinding, persist fun
 		return err
 	}
 	return tx.Bind(binding)
+}
+
+// ValidateFixedLocalClaimUniqueness rejects another local owner, including an
+// owner with unknown scope. A terminal record no longer owns a live resource.
+func ValidateFixedLocalClaimUniqueness(kind FixedLeaseKind, claim LeaseClaim, providers ...string) error {
+	claims, err := ListLeaseClaims()
+	if err != nil {
+		return err
+	}
+	for _, other := range claims {
+		if other.LeaseID == claim.LeaseID || other.CloudID != claim.CloudID || !slices.Contains(providers, other.Provider) {
+			continue
+		}
+		if other.ProviderScope != "" && other.ProviderScope != claim.ProviderScope {
+			continue
+		}
+		if kind.IsFixedClaim(other) && other.FixedCreateIntent.State == "released" {
+			continue
+		}
+		return Exit(4, "lease_id_conflict: multiple local %s claims bind resource %s", kind.Label, claim.CloudID)
+	}
+	return nil
+}
+
+func FixedIdentityLabels(provider, leaseID, slug, fingerprint string, native map[string]string) map[string]string {
+	labels := map[string]string{"crabbox": "true", "provider": provider, "lease": leaseID, "slug": slug, "provider_key": ProviderKeyForLease(leaseID), "fixed_intent_sha256": fingerprint}
+	maps.Copy(labels, native)
+	return labels
 }
