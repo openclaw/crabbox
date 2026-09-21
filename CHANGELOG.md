@@ -5,7 +5,7 @@
 ### Fixes
 
 - Use Vast's native SSH endpoint and stored lease key for plain status readiness checks, avoiding false unready results while keeping observations read-only. [PR 2447](https://github.com/openclaw/crabbox/pull/2447).
-- Preserve underlying Scaleway SDK/configuration errors for diagnostics while retaining redacted messages and exit code 3.
+- Preserve underlying Scaleway SDK/configuration errors for diagnostics while retaining redacted messages and exit code 3. [PR 2466](https://github.com/openclaw/crabbox/pull/2466).
 
 ## 0.64.0 - 2026-09-21
 
