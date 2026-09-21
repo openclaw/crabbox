@@ -83,20 +83,22 @@ Some templates run as full clones but never boot as linked clones: Parallels
 reports the clone as `running`, yet the guest never gets a Tools session or a
 DHCP lease, and the lease fails after `parallels.startupTimeout` waiting for an
 IP. The timeout error names the clone mode and the clone's NIC MACs, and says
-whether the macOS DHCP fallback found no lease for them. Crabbox deletes the
-failed clone before it reports the timeout, so the VM named in the error no
-longer exists. To confirm a boot failure, retry the lease and, on the Parallels
-host, capture the new clone's console while Crabbox is still waiting for its IP:
+whether the macOS DHCP fallback found no matching lease for them. Failed
+acquisitions clean up their clone before returning the error. To investigate,
+retry and capture the new clone's console on the Parallels host while IP
+discovery is still waiting. Use `prlctl list -a` there to identify the new VM:
 
 ```sh
-prlctl list --all            # find the new crabbox-cbx-... clone
-prlctl capture <vm-id> --file /tmp/crabbox-clone.png
+prlctl capture <new-vm-id> --file /tmp/crabbox-clone.png
 ```
 
-An all-black capture after several minutes means the guest OS did not boot.
-Retry with `cloneMode: full`, which does not select a source snapshot, or rebuild
-the template snapshot. Crabbox keeps `linked` as the default because full clones
-cannot select `parallels.sourceSnapshot`.
+A persistently black capture can indicate a boot or display problem, but does
+not by itself prove that the guest OS failed to boot. Compare with
+`cloneMode: full`, which does not select a source snapshot, or investigate the
+template snapshot. Crabbox keeps `linked` as the default because full clones
+cannot select `parallels.sourceSnapshot`. When resolving an existing VM, the
+clone mode is reported as unknown rather than inferred from current configuration,
+and the capture hint targets that existing VM instead of a new acquisition.
 
 For macOS templates, use a user with SSH login permission and a writable
 `parallels.workRoot`, for example `/Users/<user>/crabbox`. For Windows native
