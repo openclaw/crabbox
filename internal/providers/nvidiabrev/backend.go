@@ -593,7 +593,7 @@ func verifyActiveBrevOrgScope(ctx context.Context, client *brevClient, claim cor
 	}
 	stored := strings.TrimSpace(claim.Labels["brev_org_id"])
 	if stored != "" && stored != active.ID {
-		return "", core.Exit(2, "active Brev organization changed; run `brev set` for the lease organization before lifecycle operations")
+		return "", core.Exit(2, "active Brev organization changed; verify `brev org ls` and use credentials for the lease organization (BREV_API_KEY overrides `brev set`); local claim retained")
 	}
 	return active.ID, nil
 }
@@ -604,7 +604,7 @@ func requireActiveBrevOrg(ctx context.Context, client *brevClient, orgID string)
 		return err
 	}
 	if strings.TrimSpace(orgID) == "" || active.ID != strings.TrimSpace(orgID) {
-		return core.Exit(2, "active Brev organization changed; run `brev set` for the lease organization before retrying")
+		return core.Exit(2, "active Brev organization changed; verify `brev org ls` and use credentials for the lease organization (BREV_API_KEY overrides `brev set`) before retrying")
 	}
 	return nil
 }

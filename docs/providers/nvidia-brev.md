@@ -20,6 +20,25 @@ effective organization before lifecycle operations; the key never becomes a
 Crabbox flag or config value. Verify the account with `brev org ls` before
 creating a workspace.
 
+## Existing claims after an authentication upgrade
+
+Older Crabbox versions could record the saved credentials' organization while
+Brev used `BREV_API_KEY` for a different organization. These mismatched claims
+remain blocked and unchanged after upgrade. Crabbox does not automatically
+rewrite their ownership.
+
+Run `brev org ls` and `brev ls --json --all` with the credentials you used to
+create the workspace. Verify the workspace ID and organization in the Brev
+console against the retained claim before taking action. Manage that exact
+workspace directly through Brev until the claim has been reconciled; use Brev's
+stop or delete operation when you intend to stop or remove it. Preserve
+the local claim for diagnosis rather than changing its organization to bypass
+the check. New Crabbox leases record the effective key's organization correctly.
+
+If the claim belongs to another valid account, use that account's credentials.
+`brev set` cannot override `BREV_API_KEY`; unset or replace the environment key
+first. Automatic repair of misbound claims is outside this fix.
+
 ## Prerequisites
 
 - Install the Brev CLI and authenticate it:
