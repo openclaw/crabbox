@@ -331,6 +331,16 @@ func TestWaitForServerIPReadinessBudget(t *testing.T) {
 					if tc.wantTimeout && err.Error() != "timeout waiting for gcp public ip on "+name {
 						t.Fatalf("timeout diagnostic changed: %v", err)
 					}
+					if tc.wantTimeout && (!errors.Is(err, context.DeadlineExceeded) || core.ExitCodeForError(err, 1) != 1) {
+						t.Fatalf("timeout identity/code lost: err=%v code=%d", err, core.ExitCodeForError(err, 1))
+					}
+					if tc.wantTimeout {
+						got := core.FinalizeRunResult(core.RunResult{}, err)
+						want := core.FinalizeRunResult(core.RunResult{}, context.DeadlineExceeded)
+						if got.Status != want.Status || got.ErrorKind != want.ErrorKind {
+							t.Fatalf("timeout classification=%s/%s want=%s/%s", got.Status, got.ErrorKind, want.Status, want.ErrorKind)
+						}
+					}
 					if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 						t.Fatalf("err=%v, want %v", err, tc.wantErr)
 					}
@@ -344,6 +354,84 @@ func TestWaitForServerIPReadinessBudget(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestWaitForServerIPPreservesCallerCauseAndClassification(t *testing.T) {
+	for _, phase := range []string{"before read", "read", "wait"} {
+		t.Run(phase, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				cause := core.Exit(7, "caller stopped GCP readiness")
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+				if phase == "before read" {
+					cancel(cause)
+				}
+				if phase == "wait" {
+					time.AfterFunc(time.Second, func() { cancel(cause) })
+				}
+				calls := 0
+				client := &fakeGCPDoctorClient{observe: func(observeCtx context.Context, _ string) (core.Server, error) {
+					calls++
+					if phase == "read" {
+						cancel(cause)
+						return core.Server{}, observeCtx.Err()
+					}
+					return core.Server{}, nil
+				}}
+				_, err := waitForServerIP(ctx, client, "readiness-instance")
+				wantCalls := 1
+				if phase == "before read" {
+					wantCalls = 0
+				}
+				if !errors.Is(err, cause) || !errors.Is(err, context.Canceled) || err.Error() != cause.Error() || core.ExitCodeForError(err, 1) != 7 || calls != wantCalls {
+					t.Fatalf("err=%v code=%d calls=%d wantCalls=%d", err, core.ExitCodeForError(err, 1), calls, wantCalls)
+				}
+				got := core.FinalizeRunResult(core.RunResult{}, err)
+				want := core.FinalizeRunResult(core.RunResult{}, ctx.Err())
+				if got.Status != want.Status || got.ErrorKind != want.ErrorKind {
+					t.Fatalf("classification=%s/%s want=%s/%s", got.Status, got.ErrorKind, want.Status, want.ErrorKind)
+				}
+			})
+		})
+	}
+}
+
+func TestWaitForServerIPCompletedResponseWinsCancellation(t *testing.T) {
+	for _, ready := range []bool{false, true} {
+		t.Run(fmt.Sprint(ready), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			responseErr := errors.Join(&googleapi.Error{Code: http.StatusForbidden, Message: "fixture denied"}, context.Canceled)
+			client := &fakeGCPDoctorClient{observe: func(context.Context, string) (core.Server, error) {
+				cancel()
+				if !ready {
+					return core.Server{}, responseErr
+				}
+				server := core.Server{Status: "stopped"}
+				server.PublicNet.IPv4.IP = " 192.0.2.10 "
+				return server, nil
+			}}
+			got, err := waitForServerIP(ctx, client, "readiness-instance")
+			if ready && (err != nil || got.PublicNet.IPv4.IP != " 192.0.2.10 ") || !ready && err != responseErr {
+				t.Fatalf("server=%#v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestWaitForServerIPAcceptsCompletedReadyResponseAfterBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := &fakeGCPDoctorClient{observe: func(context.Context, string) (core.Server, error) {
+			time.Sleep(2*time.Minute + time.Second)
+			server := core.Server{}
+			server.PublicNet.IPv4.IP = "192.0.2.10"
+			return server, nil
+		}}
+		got, err := waitForServerIP(t.Context(), client, "readiness-instance")
+		if err != nil || got.PublicNet.IPv4.IP != "192.0.2.10" {
+			t.Fatalf("server=%#v err=%v", got, err)
+		}
+	})
 }
 
 func TestGCPAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {

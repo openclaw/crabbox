@@ -5,6 +5,7 @@
 ### Fixes
 
 - Use Vast's native SSH endpoint and stored lease key for plain status readiness checks, avoiding false unready results while keeping observations read-only. [PR 2447](https://github.com/openclaw/crabbox/pull/2447).
+- Preserve GCP IP-readiness cancellation causes and deadline classification while retaining the budget-timeout diagnostic and completed-response precedence.
 
 ## 0.64.0 - 2026-09-21
 
