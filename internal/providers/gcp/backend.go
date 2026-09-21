@@ -2,12 +2,14 @@ package gcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"google.golang.org/api/googleapi"
 )
 
 type gcpLeaseBackend struct{ shared.DirectSSHBackend }
@@ -114,10 +116,24 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 }
 
 func waitForServerIP(ctx context.Context, client gcpClient, name string) (core.Server, error) {
-	return shared.PollReady(ctx, 2*time.Minute, 5*time.Second,
-		func(ctx context.Context) (core.Server, error) { return client.GetServer(ctx, name) },
-		func(server core.Server) bool { return server.PublicNet.IPv4.IP != "" },
-		fmt.Errorf("timeout waiting for gcp public ip on %s", name))
+	return shared.PollReadiness(ctx, shared.ReadinessOptions[core.Server]{
+		Timeout: 2 * time.Minute, Interval: 5 * time.Second,
+		IsResponseError: func(err error) bool {
+			var responseErr *googleapi.Error
+			return errors.As(err, &responseErr)
+		},
+		Check: func(server core.Server, err error) (bool, error) {
+			return err == nil && server.PublicNet.IPv4.IP != "", err
+		},
+		Diagnostic: func(stop shared.ReadinessStop) error {
+			if stop.BudgetExpired {
+				return fmt.Errorf("timeout waiting for gcp public ip on %s", name)
+			}
+			return stop.Cause
+		},
+	}, func(observeCtx context.Context) (core.Server, error) {
+		return client.GetServer(observeCtx, name)
+	})
 }
 
 func (b *gcpLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {

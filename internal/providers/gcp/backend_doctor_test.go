@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -331,6 +333,16 @@ func TestWaitForServerIPReadinessBudget(t *testing.T) {
 					if tc.wantTimeout && err.Error() != "timeout waiting for gcp public ip on "+name {
 						t.Fatalf("timeout diagnostic changed: %v", err)
 					}
+					if tc.wantTimeout && (!errors.Is(err, context.DeadlineExceeded) || core.ExitCodeForError(err, 1) != 1) {
+						t.Fatalf("timeout identity/code lost: err=%v code=%d", err, core.ExitCodeForError(err, 1))
+					}
+					if tc.wantTimeout {
+						got := core.FinalizeRunResult(core.RunResult{}, err)
+						want := core.FinalizeRunResult(core.RunResult{}, context.DeadlineExceeded)
+						if got.Status != want.Status || got.ErrorKind != want.ErrorKind {
+							t.Fatalf("timeout classification=%s/%s want=%s/%s", got.Status, got.ErrorKind, want.Status, want.ErrorKind)
+						}
+					}
 					if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 						t.Fatalf("err=%v, want %v", err, tc.wantErr)
 					}
@@ -344,6 +356,201 @@ func TestWaitForServerIPReadinessBudget(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestWaitForServerIPPreservesCallerCauseAndClassification(t *testing.T) {
+	for _, phase := range []string{"before read", "read", "wait"} {
+		t.Run(phase, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				cause := core.Exit(7, "caller stopped GCP readiness")
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+				if phase == "before read" {
+					cancel(cause)
+				}
+				if phase == "wait" {
+					time.AfterFunc(time.Second, func() { cancel(cause) })
+				}
+				calls := 0
+				client := &fakeGCPDoctorClient{observe: func(observeCtx context.Context, _ string) (core.Server, error) {
+					calls++
+					if phase == "read" {
+						cancel(cause)
+						return core.Server{}, observeCtx.Err()
+					}
+					return core.Server{}, nil
+				}}
+				_, err := waitForServerIP(ctx, client, "readiness-instance")
+				wantCalls := 1
+				if phase == "before read" {
+					wantCalls = 0
+				}
+				if !errors.Is(err, cause) || !errors.Is(err, context.Canceled) || err.Error() != cause.Error() || core.ExitCodeForError(err, 1) != 7 || calls != wantCalls {
+					t.Fatalf("err=%v code=%d calls=%d wantCalls=%d", err, core.ExitCodeForError(err, 1), calls, wantCalls)
+				}
+				got := core.FinalizeRunResult(core.RunResult{}, err)
+				want := core.FinalizeRunResult(core.RunResult{}, ctx.Err())
+				if got.Status != want.Status || got.ErrorKind != want.ErrorKind {
+					t.Fatalf("classification=%s/%s want=%s/%s", got.Status, got.ErrorKind, want.Status, want.ErrorKind)
+				}
+			})
+		})
+	}
+}
+
+func TestWaitForServerIPRealHTTPS(t *testing.T) {
+	for _, ownedBudget := range []bool{false, true} {
+		t.Run(fmt.Sprintf("owned_budget=%t", ownedBudget), func(t *testing.T) {
+			if ownedBudget && testing.Short() {
+				t.Skip("exercises the real two-minute readiness budget")
+			}
+			testutil.IsolateUserDirs(t)
+			credentials := filepath.Join(t.TempDir(), "synthetic-adc.json")
+			if err := os.WriteFile(credentials, []byte(`{"type":"authorized_user","client_id":"fixture","client_secret":"fixture","refresh_token":"fixture"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credentials)
+			t.Setenv("GOOGLE_API_USE_CLIENT_CERTIFICATE", "false")
+			t.Setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "never")
+			received := make(chan struct{}, 1)
+			requestCanceled := make(chan struct{}, 1)
+			release := make(chan struct{})
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost && r.URL.Path == "/token" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"access_token":"fixture","token_type":"Bearer","expires_in":3600}`)
+					return
+				}
+				if r.Method != http.MethodGet || r.URL.Path != "/compute/v1/projects/project/zones/us-central1-b/instances/readiness-instance" || r.TLS == nil {
+					t.Errorf("unexpected SDK request: %s %s TLS=%t", r.Method, r.URL.Path, r.TLS != nil)
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+					return
+				}
+				select {
+				case received <- struct{}{}:
+				default:
+				}
+				select {
+				case <-r.Context().Done():
+					select {
+					case requestCanceled <- struct{}{}:
+					default:
+					}
+				case <-release:
+				}
+			}))
+			defer server.Close()
+			defer close(release)
+			// The SDK clones *http.Transport; a RoundTripper wrapper falls back
+			// to its default transport and would not isolate the real client.
+			transport := server.Client().Transport.(*http.Transport).Clone()
+			transport.Proxy = nil
+			transport.TLSClientConfig.ServerName = "example.com"
+			transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				switch address {
+				case "oauth2.googleapis.com:443", "compute.googleapis.com:443":
+					return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+				default:
+					return nil, fmt.Errorf("unexpected SDK destination %q", address)
+				}
+			}
+			previous := http.DefaultTransport
+			http.DefaultTransport = transport
+			defer func() { http.DefaultTransport = previous; transport.CloseIdleConnections() }()
+			guard, stopGuard := context.WithTimeout(t.Context(), 3*time.Minute)
+			defer stopGuard()
+			client, err := core.NewGCPClient(guard, core.Config{GCPProject: "project", GCPZone: "us-central1-b"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancelCause(guard)
+			defer cancel(nil)
+			type result struct {
+				server core.Server
+				err    error
+			}
+			done := make(chan result, 1)
+			started := time.Now()
+			go func() {
+				got, err := waitForServerIP(ctx, client, "readiness-instance")
+				done <- result{got, err}
+			}()
+			select {
+			case <-received:
+			case got := <-done:
+				t.Fatalf("readiness returned before the SDK request reached the server: %v", got.err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("SDK request did not reach the HTTPS server")
+			}
+			cause := core.Exit(7, "caller stopped GCP readiness")
+			wantIdentity, wantCode, wantText := error(context.Canceled), 7, cause.Error()
+			if ownedBudget {
+				wantIdentity, wantCode, wantText = context.DeadlineExceeded, 1, "timeout waiting for gcp public ip on readiness-instance"
+			} else {
+				cancel(cause)
+			}
+			select {
+			case got := <-done:
+				if !reflect.DeepEqual(got.server, core.Server{}) || !errors.Is(got.err, wantIdentity) || core.ExitCodeForError(got.err, 1) != wantCode || got.err.Error() != wantText || !ownedBudget && !errors.Is(got.err, cause) {
+					t.Fatalf("server=%+v err=%v code=%d; want identity=%v code=%d text=%q", got.server, got.err, core.ExitCodeForError(got.err, 1), wantIdentity, wantCode, wantText)
+				}
+				if ownedBudget && (ctx.Err() != nil || time.Since(started) < 2*time.Minute) {
+					t.Fatalf("owned budget not reached independently of caller: caller=%v elapsed=%s", ctx.Err(), time.Since(started))
+				}
+				classified := core.FinalizeRunResult(core.RunResult{}, got.err)
+				want := core.FinalizeRunResult(core.RunResult{}, wantIdentity)
+				if classified.Status != want.Status || classified.ErrorKind != want.ErrorKind {
+					t.Fatalf("classification=%s/%s want=%s/%s", classified.Status, classified.ErrorKind, want.Status, want.ErrorKind)
+				}
+				t.Logf("real HTTPS through NewGCPClient -> GetServer -> waitForServerIP: ownedBudget=%t elapsed=%s identity=%v code=%d diagnostic=%q classification=%s/%s", ownedBudget, time.Since(started), wantIdentity, wantCode, got.err.Error(), classified.Status, classified.ErrorKind)
+			case <-guard.Done():
+				t.Fatal("readiness did not finish within the test guard")
+			}
+			select {
+			case <-requestCanceled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("HTTPS server did not observe request cancellation")
+			}
+		})
+	}
+}
+
+func TestWaitForServerIPCompletedResponseWinsCancellation(t *testing.T) {
+	for _, ready := range []bool{false, true} {
+		t.Run(fmt.Sprint(ready), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			responseErr := errors.Join(&googleapi.Error{Code: http.StatusForbidden, Message: "fixture denied"}, context.Canceled)
+			client := &fakeGCPDoctorClient{observe: func(context.Context, string) (core.Server, error) {
+				cancel()
+				if !ready {
+					return core.Server{}, responseErr
+				}
+				server := core.Server{Status: "stopped"}
+				server.PublicNet.IPv4.IP = " 192.0.2.10 "
+				return server, nil
+			}}
+			got, err := waitForServerIP(ctx, client, "readiness-instance")
+			if ready && (err != nil || got.PublicNet.IPv4.IP != " 192.0.2.10 ") || !ready && err != responseErr {
+				t.Fatalf("server=%#v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestWaitForServerIPAcceptsCompletedReadyResponseAfterBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		client := &fakeGCPDoctorClient{observe: func(context.Context, string) (core.Server, error) {
+			time.Sleep(2*time.Minute + time.Second)
+			server := core.Server{}
+			server.PublicNet.IPv4.IP = "192.0.2.10"
+			return server, nil
+		}}
+		got, err := waitForServerIP(t.Context(), client, "readiness-instance")
+		if err != nil || got.PublicNet.IPv4.IP != "192.0.2.10" {
+			t.Fatalf("server=%#v err=%v", got, err)
+		}
+	})
 }
 
 func TestGCPAcquireCleansUpCreatedServerOnIPFailure(t *testing.T) {

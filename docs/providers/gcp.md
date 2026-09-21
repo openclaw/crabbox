@@ -264,6 +264,11 @@ project plus either a complete service-account key pair or
    Public-IP observations and their five-second retry waits share a two-minute
    budget. Earlier cancellation stops discovery, and API errors fail immediately;
    this budget does not include the subsequent SSH readiness phase.
+   Readiness cancellation retains the caller's original cause and diagnostic,
+   including interrupted reads, while exposing the canonical cancellation or
+   deadline for run classification. Budget expiry keeps the existing timeout
+   message and CLI exit code 1. Completed ready responses and typed API errors
+   retain precedence when they coincide with cancellation.
 7. Touch labels during active runs.
 8. Delete the VM on release unless the lease is kept.
 
