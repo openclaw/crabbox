@@ -37,6 +37,21 @@ Apple VM is not a claim that containers lack VM-backed isolation. Its
 difference is full-machine Linux boot and disk semantics under direct
 `Virtualization.framework` control.
 
+## Heartbeat and status
+
+`crabbox heartbeat --provider apple-vm --id <lease> --idle-timeout 90m`
+updates the saved lease timeout and touch timestamp. Omit `--idle-timeout` to
+retain the recorded timeout, independently of current configuration. The original
+lease TTL still caps expiry. Fresh status reads see the committed policy.
+
+Renewal requires the existing name-bound local claim and a completed, active
+lease; stale snapshots and incomplete acquisition are not renewed. Ordinary
+status can still observe helper instances without a claim, but cannot adopt them.
+Provider status/controller resolution does not rewrite claims, even with repo
+context or `--reclaim`; adoption remains an explicit ordinary reuse operation.
+`status --wait` may separately renew an acquired lease through the guarded
+heartbeat path. This does not introduce a VM-generation ownership scheme.
+
 ## Requirements
 
 - Apple Silicon Mac running macOS 13 or newer;
