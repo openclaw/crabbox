@@ -207,6 +207,10 @@ grace period.
 - `container` (default) selects the workspace host alias.
 - `host` selects the `<workspace-name>-host` alias.
 
+A retained lease remembers this choice across new Crabbox processes and stop/start.
+An explicit `nvidiaBrev.target` setting, environment override, or flag changes it;
+omitting the setting preserves the stored target.
+
 Brev may emit either a direct `HostName`/`Port` target or a `ProxyCommand`.
 Crabbox uses native OpenSSH to interpret the generated config, including
 certificate-only `Match exec` entries and optional certificate/static-key fallback.

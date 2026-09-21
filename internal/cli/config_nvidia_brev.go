@@ -18,7 +18,7 @@ type NvidiaBrevConfig struct {
 	// applyNvidiaBrevFileConfig owns the additional startup-script file admission.
 	StartupScript string `config:"startupScript" env:"CRABBOX_NVIDIA_BREV_STARTUP_SCRIPT" flag:"nvidia-brev-startup-script" sources:"user,repo,env,flag" help:"NVIDIA Brev startup script inline command or @file path" fileIgnoreEmpty:"true" fileStorage:"value"`
 	ReleaseAction string `config:"releaseAction" env:"CRABBOX_NVIDIA_BREV_RELEASE_ACTION" flag:"nvidia-brev-release-action" sources:"user,repo,env,flag" help:"NVIDIA Brev release action: delete or stop" default:"delete" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
-	Target        string `config:"target" env:"CRABBOX_NVIDIA_BREV_TARGET" flag:"nvidia-brev-target" sources:"user,repo,env,flag" help:"NVIDIA Brev SSH target: container or host" default:"container" fileIgnoreEmpty:"true" fileStorage:"value"`
+	Target        string `config:"target" env:"CRABBOX_NVIDIA_BREV_TARGET" flag:"nvidia-brev-target" sources:"user,repo,env,flag" help:"NVIDIA Brev SSH target: container or host" default:"container" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
 	User          string `config:"user" env:"CRABBOX_NVIDIA_BREV_USER" flag:"nvidia-brev-user" sources:"user,repo,env,flag" help:"SSH user for NVIDIA Brev workspaces" fileIgnoreEmpty:"true" fileStorage:"value"`
 	WorkRoot      string `config:"workRoot" env:"CRABBOX_NVIDIA_BREV_WORK_ROOT" flag:"nvidia-brev-work-root" sources:"user,repo,env,flag" help:"remote Crabbox work root on NVIDIA Brev workspaces" default:"/tmp/crabbox" fileIgnoreEmpty:"true" fileStorage:"value" reportApplied:"true"`
 }
@@ -58,6 +58,9 @@ func applyNvidiaBrevFileConfig(cfg *Config, file *fileNvidiaBrevConfig, trusted 
 	recordConfigInput(cfg, "nvidia-brev", source, applied.InputAccepted)
 	if applied.ReleaseAction {
 		MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")
+	}
+	if applied.Target {
+		MarkNvidiaBrevTargetExplicit(cfg)
 	}
 	if applied.WorkRoot {
 		MarkNvidiaBrevWorkRootExplicit(cfg)

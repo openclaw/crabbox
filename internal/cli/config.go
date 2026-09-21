@@ -164,6 +164,7 @@ type Config struct {
 	vastWorkRootExplicit          bool
 	NvidiaBrev                    NvidiaBrevConfig
 	nvidiaBrevWorkRootExplicit    bool
+	nvidiaBrevTargetExplicit      bool
 	Hostinger                     HostingerConfig
 	hostingerUserExplicit         bool
 	hostingerWorkRootExplicit     bool
@@ -1409,6 +1410,14 @@ func MarkHostingerUserExplicit(cfg *Config) {
 
 func MarkHostingerWorkRootExplicit(cfg *Config) {
 	cfg.hostingerWorkRootExplicit = true
+}
+
+func IsNvidiaBrevTargetExplicit(cfg *Config) bool {
+	return cfg.nvidiaBrevTargetExplicit
+}
+
+func MarkNvidiaBrevTargetExplicit(cfg *Config) {
+	cfg.nvidiaBrevTargetExplicit = true
 }
 
 func IsNvidiaBrevWorkRootExplicit(cfg *Config) bool {
@@ -4416,6 +4425,9 @@ func applyEnv(cfg *Config) error {
 	}
 	{
 		applied, err := cfg.NvidiaBrev.applyEnv()
+		if applied.Target {
+			MarkNvidiaBrevTargetExplicit(cfg)
+		}
 		recordConfigInput(cfg, "nvidia-brev", configInputEnvironment, applied.InputAccepted)
 		if applied.ReleaseAction {
 			MarkDeleteOnReleaseExplicit(cfg, "nvidia-brev")

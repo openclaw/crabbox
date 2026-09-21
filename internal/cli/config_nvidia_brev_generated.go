@@ -43,6 +43,7 @@ func defaultNvidiaBrevConfig() NvidiaBrevConfig {
 type NvidiaBrevConfigApplied struct {
 	InputAccepted bool
 	ReleaseAction bool
+	Target        bool
 	WorkRoot      bool
 }
 
@@ -84,6 +85,7 @@ func RegisterNvidiaBrevConfigFlags(fs *flag.FlagSet, defaults NvidiaBrevConfig) 
 // NvidiaBrevConfigVisitedFlags records raw flag visits, independently of application.
 type NvidiaBrevConfigVisitedFlags struct {
 	ReleaseAction bool
+	Target        bool
 	WorkRoot      bool
 }
 

@@ -163,6 +163,7 @@ func (b *nvidiaBrevBackend) Resolve(ctx context.Context, req core.ResolveRequest
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	cfg.NvidiaBrev.Target = effectiveBrevTarget(cfg, claim.Labels)
 	lease := core.LeaseTarget{Server: workspaceToClaimedServer(cfg, workspace, leaseID, slug, claim), LeaseID: leaseID}
 	activeOrgID := ""
 	if strings.TrimSpace(cfg.NvidiaBrev.Org) == "" && !req.ReleaseOnly {
@@ -1336,7 +1337,18 @@ func workspaceToServer(cfg core.Config, workspace brevWorkspace, leaseID, slug s
 	return server
 }
 
+// Target is a retained connection choice. A fresh default must not move a
+// lease between the host and container; explicit input may deliberately do so.
+func effectiveBrevTarget(cfg core.Config, labels map[string]string) string {
+	target := strings.TrimSpace(cfg.NvidiaBrev.Target)
+	if core.IsNvidiaBrevTargetExplicit(&cfg) || (target != "" && target != "container") {
+		return target
+	}
+	return shared.FirstNonBlankTrimmed(labels["brev_target"], target, "container")
+}
+
 func workspaceToClaimedServer(cfg core.Config, workspace brevWorkspace, leaseID, slug string, claim core.LeaseClaim) core.Server {
+	cfg.NvidiaBrev.Target = effectiveBrevTarget(cfg, claim.Labels)
 	server := workspaceToServer(cfg, workspace, leaseID, slug, false)
 	if workspace.InstanceType == "" && workspace.WorkspaceClass == "" {
 		if storedType := strings.TrimSpace(claim.Labels["server_type"]); storedType != "" {
@@ -1365,7 +1377,6 @@ func serverWithClaimLabels(server core.Server, claim core.LeaseClaim) core.Serve
 		"brev_workspace_id",
 		"brev_workspace_name",
 		"brev_status",
-		"brev_target",
 	} {
 		delete(labels, key)
 		if value := server.Labels[key]; value != "" {
@@ -1373,6 +1384,7 @@ func serverWithClaimLabels(server core.Server, claim core.LeaseClaim) core.Serve
 		}
 	}
 	for _, key := range []string{
+		"brev_target",
 		"server_type",
 		"brev_build_status",
 		"brev_shell_status",
