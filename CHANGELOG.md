@@ -8,10 +8,10 @@
 
 ### Fixes
 
-- Resolve NVIDIA Brev environment API keys against their effective organization instead of stale saved credentials, preserving organization-scoped lifecycle checks for headless runs. [PR 2427](https://github.com/openclaw/crabbox/pull/2427). Thanks @vincentkoc.
 - Preserve Vast leases' recorded heartbeat policy across fresh reads and upgrades, honor explicit idle-timeout changes without extending the stored TTL, and report stale claim updates as failures. [PR 2433](https://github.com/openclaw/crabbox/pull/2433).
 - Daytona: omit unverified default class labels from snapshot forks and document opt-in workload concurrency and memory limits. [PR 2114](https://github.com/openclaw/crabbox/pull/2114). Thanks @Patrick-Erichsen.
 - Wait for fresh exe.dev VMs to advertise their SSH route, preserve its user, port, and ambient SSH configuration, and bound inventory refreshes by the bootstrap timeout while retaining verified rollback. [PR 2271](https://github.com/openclaw/crabbox/pull/2271). Thanks @salmonumbrella.
+- Resolve NVIDIA Brev environment API keys against their effective organization instead of stale saved credentials, preserving organization-scoped lifecycle checks for headless runs. [PR 2427](https://github.com/openclaw/crabbox/pull/2427). Thanks @vincentkoc.
 - Preserve NVIDIA Brev deletion recovery claims when the CLI returns blank inventory output; only valid inventory can confirm a workspace is gone. [PR 2426](https://github.com/openclaw/crabbox/pull/2426). Thanks @vincentkoc.
 - Deliver Parallels POSIX guest preparation and SSH-key installation scripts over stdin on local and remote hosts, preserving fail-fast shell checks and preventing child commands from consuming the script. [PR 2401](https://github.com/openclaw/crabbox/pull/2401), [Issue 2396](https://github.com/openclaw/crabbox/issues/2396). Thanks @saariuslystoned.
 - Report ASCII Box/Boat cleanup phase and remaining deadline, preserve the last deletion status on timeout, and reconcile unchanged claims after exact native 404 plus complete inventory absence without repeating teardown; failed or partial inventory retains the claim. [Issue 1730](https://github.com/openclaw/crabbox/issues/1730). Thanks @shunkakinoki.
