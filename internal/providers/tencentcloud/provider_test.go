@@ -1,6 +1,7 @@
 package tencentcloud
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -330,6 +331,72 @@ func TestInvalidExplicitMarketRejectsBeforeClientOrKey(t *testing.T) {
 	}
 }
 
+func newAcquireTestBackend(t *testing.T, api *fakeTencentCloudAPI, stderr io.Writer) *Backend {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	cfg := core.BaseConfig()
+	cfg.TencentCloud.Image = "img-test"
+	b := NewBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: stderr}).(*Backend)
+	b.clientFactory = func(core.Config, core.Runtime) (tencentCloudAPI, error) { return api, nil }
+	return b
+}
+
+func TestAcquireCleanupErrorPreservesCausesAndVetoesRetry(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		for _, tc := range []struct {
+			name             string
+			primary, cleanup error
+			wantCode         int
+		}{
+			{name: "bootstrap timeout", primary: core.Exit(5, "timed out waiting for SSH"), cleanup: errors.New("terminate unavailable"), wantCode: 5},
+			{name: "cancellation", primary: context.Canceled, cleanup: errors.New("terminate unavailable"), wantCode: 1},
+			{name: "primary exit wins", primary: core.Exit(5, "timed out waiting for SSH"), cleanup: core.Exit(9, "terminate unavailable"), wantCode: 5},
+			{name: "cleanup timeout cannot trigger retry", primary: context.Canceled, cleanup: core.Exit(5, "timed out waiting for SSH during cleanup"), wantCode: 5},
+		} {
+			t.Run(tc.name+"/keep="+strconv.FormatBool(keep), func(t *testing.T) {
+				api := &fakeTencentCloudAPI{item: instance{InstanceID: "ins-test", PublicIPAddresses: []string{"203.0.113.25"}}, terminateErr: tc.cleanup}
+				var stderr bytes.Buffer
+				b := newAcquireTestBackend(t, api, &stderr)
+				b.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error { return tc.primary }
+				_, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "cause-retained", Keep: keep})
+				if !errors.Is(err, tc.primary) || !errors.Is(err, tc.cleanup) || core.ExitCodeForError(err, 1) != tc.wantCode {
+					t.Errorf("err=%v code=%d wantCode=%d", err, core.ExitCodeForError(err, 1), tc.wantCode)
+				}
+				if api.runCalls != 1 || len(api.terminated) != 1 || api.terminated[0] != "ins-test" || api.replaceCalls != 0 {
+					t.Errorf("creates=%d terminated=%v tagUpdates=%d", api.runCalls, api.terminated, api.replaceCalls)
+				}
+				if !strings.Contains(stderr.String(), "tencentcloud cleanup failed:") || !strings.Contains(stderr.String(), tc.cleanup.Error()) || !strings.Contains(stderr.String(), "refusing a fresh lease retry") || strings.Contains(stderr.String(), "retrying with fresh lease") {
+					t.Errorf("cleanup warning=%q", stderr.String())
+				}
+			})
+		}
+	}
+}
+
+func TestAcquireStillRetriesAfterSuccessfulRollback(t *testing.T) {
+	api := &fakeTencentCloudAPI{item: instance{InstanceID: "ins-test", PublicIPAddresses: []string{"203.0.113.25"}}}
+	var stderr bytes.Buffer
+	b := newAcquireTestBackend(t, api, &stderr)
+	waits := 0
+	b.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+		waits++
+		if waits == 1 {
+			return core.Exit(5, "timed out waiting for SSH")
+		}
+		return nil
+	}
+	lease, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "safe-retry"})
+	if err != nil || lease.Server.CloudID != "ins-test" || waits != 2 || api.runCalls != 2 || len(api.terminated) != 1 || api.replaceCalls != 1 {
+		t.Fatalf("err=%v lease=%#v waits=%d creates=%d terminated=%v tagUpdates=%d", err, lease, waits, api.runCalls, api.terminated, api.replaceCalls)
+	}
+	if !strings.Contains(stderr.String(), "retrying with fresh lease") || strings.Contains(stderr.String(), "refusing a fresh lease retry") {
+		t.Fatalf("retry warning=%q", stderr.String())
+	}
+}
+
 func TestSignTencentCloudRequest(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://cvm.tencentcloudapi.com", strings.NewReader("{}"))
 	if err != nil {
@@ -623,6 +690,8 @@ func TestTencentCloudTerminationFencesConcurrentClaimMutation(t *testing.T) {
 }
 
 type fakeTencentCloudAPI struct {
+	runCalls        int
+	terminateErr    error
 	item            instance
 	replacedCurrent []tag
 	replacedDesired []tag
@@ -645,6 +714,7 @@ func (f *fakeTencentCloudAPI) GetInstance(context.Context, string) (instance, er
 }
 
 func (f *fakeTencentCloudAPI) RunInstance(context.Context, runInstanceRequest) (string, error) {
+	f.runCalls++
 	return "ins-test", nil
 }
 
@@ -653,7 +723,7 @@ func (f *fakeTencentCloudAPI) TerminateInstance(_ context.Context, id string) er
 	if f.terminateFn != nil {
 		f.terminateFn()
 	}
-	return nil
+	return f.terminateErr
 }
 
 func (f *fakeTencentCloudAPI) ReplaceInstanceTags(_ context.Context, _ string, current, desired []tag) error {

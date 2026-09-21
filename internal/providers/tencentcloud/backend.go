@@ -118,7 +118,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 			cleanupErr := client.TerminateInstance(cleanupCtx, createdID)
 			cancel()
 			if cleanupErr != nil {
-				err = fmt.Errorf("%v; tencentcloud cleanup failed: %w", err, cleanupErr)
+				err = shared.JoinAcquireCleanupError(err, fmt.Errorf("tencentcloud cleanup failed: %w", cleanupErr))
 			}
 		}
 		core.RemoveStoredTestboxKey(leaseID)

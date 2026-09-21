@@ -217,6 +217,12 @@ STS and `DescribeInstances`; it does not create resources.
    claim. The claim remains locked across live-tag verification and termination;
    matching provider tags without that local claim are never deletion authority.
 
+If acquisition rollback reports a termination failure, Crabbox preserves the
+original acquisition cause and typed exit-code precedence, reports the cleanup
+failure, and refuses an automatic fresh-instance retry for that acquisition.
+A successful rollback still permits the existing bootstrap retry behavior.
+This error-reporting policy does not change termination or local-key cleanup.
+
 ## Network And Security Groups
 
 Phase 1 does not create or mutate Tencent Cloud security groups. Operators own
