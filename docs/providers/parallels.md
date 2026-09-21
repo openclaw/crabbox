@@ -18,6 +18,12 @@ The provider is local-first: by default it drives the `prlctl` on the same Mac
 that runs Crabbox. Set `parallels.host` to drive a Parallels Desktop install on
 another Mac over SSH.
 
+Linux and macOS guest preparation streams its scripts over stdin through
+`prlctl exec`, including when the Parallels host is reached over SSH. Required
+preparation steps fail immediately on error; a later successful readiness check
+cannot hide an earlier failure. Commands intended to be best-effort, such as
+starting SSH services, retain their existing handling.
+
 **Targets:** Linux, macOS, and Windows (`--windows-mode normal` or
 `--windows-mode wsl2`).
 
