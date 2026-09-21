@@ -34,6 +34,8 @@ format is `bxd_` followed by 43 base62 characters; anything else is rejected
 before any request. Create one in the Boxd console (API keys page), or with
 the vendor CLI if you already use it: `boxd auth keys create crabbox`.
 
+With an org-fenced key, set `CRABBOX_BOXD_ORG` to that organization; otherwise, `list` and `cleanup` refuse org-billed machines that match local claims (fail-closed by design).
+
 Crabbox exchanges the key over HTTPS at the console origin
 (`POST /api/v1/auth/token`) for a JWT that lives about an hour, re-exchanges
 before expiry, and sends only the JWT — as gRPC bearer metadata over TLS.
