@@ -168,7 +168,7 @@
 
 ### Fixes
 
-- Preserve Tencent Cloud acquisition causes and exit codes after rollback failure, and prevent cleanup errors from triggering fresh-instance retries.
+- Bound Tencent Cloud IP-readiness reads and retry waits, preserve cancellation and acquisition causes after rollback failure, and prevent cleanup errors from triggering fresh-instance retries. [PR 2464](https://github.com/openclaw/crabbox/pull/2464).
 
 - Retain DigitalOcean managed SSH keys and recovery credentials when acquisition rollback cannot delete the Droplet, allowing cleanup to be retried safely. [PR 2459](https://github.com/openclaw/crabbox/pull/2459).
 - Preserve DigitalOcean acquisition cancellation causes and timeout exit codes, including failed rollback, and suppress automatic fresh-allocation retries after cleanup failure. [PR 2460](https://github.com/openclaw/crabbox/pull/2460).

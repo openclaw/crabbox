@@ -3,6 +3,7 @@ package tencentcloud
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -510,31 +511,24 @@ func (b *Backend) deleteServer(ctx context.Context, _ core.Config, server core.S
 }
 
 func (b *Backend) waitForInstanceIP(ctx context.Context, client tencentCloudAPI, id string) (instance, error) {
-	deadline := b.clockNow().Add(5 * time.Minute)
-	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 3*time.Second,
-		func(context.Context, time.Duration) error {
-			if err := shared.SleepContext(ctx, 3*time.Second); err != nil {
-				return ctx.Err()
-			}
-			return nil
+	return shared.PollReadiness(ctx, shared.ReadinessOptions[instance]{
+		Timeout: 5 * time.Minute, Interval: 3 * time.Second,
+		IsResponseError: func(err error) bool {
+			var responseErr *apiError
+			return errors.As(err, &responseErr)
 		},
-		func(context.Context) (instance, error) { return client.GetInstance(ctx, id) },
-		func(_ context.Context, item instance, fetchErr error) (bool, error) {
-			if fetchErr != nil {
-				return false, fetchErr
+		Check: func(item instance, err error) (bool, error) {
+			return err == nil && publicIPv4(item) != "", err
+		},
+		Diagnostic: func(stop shared.ReadinessStop) error {
+			if stop.BudgetExpired {
+				return core.Exit(5, "timed out waiting for Tencent Cloud instance IP")
 			}
-			if publicIPv4(item) != "" {
-				return true, nil
-			}
-			if b.clockNow().After(deadline) {
-				return false, core.Exit(5, "timed out waiting for Tencent Cloud instance IP")
-			}
-			return false, nil
-		}, nil)
-	if err != nil {
-		return instance{}, err
-	}
-	return result.Value, nil
+			return stop.Err
+		},
+	}, func(observeCtx context.Context) (instance, error) {
+		return client.GetInstance(observeCtx, id)
+	})
 }
 
 func (b *Backend) clockNow() time.Time {

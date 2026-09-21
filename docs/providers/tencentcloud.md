@@ -217,6 +217,15 @@ STS and `DescribeInstances`; it does not create resources.
    claim. The claim remains locked across live-tag verification and termination;
    matching provider tags without that local claim are never deletion authority.
 
+The IP-readiness wait applies a five-minute elapsed budget to cooperative API
+reads and the three-second retry interval. Budget expiry retains exit code 5
+and the existing timeout message. Caller cancellation stops the wait without
+losing its original cause; public cancellation diagnostics remain canonical.
+Readiness still requires only a public IPv4 address, and API response errors
+fail immediately. A completed ready response or API error retains precedence
+when it coincides with cancellation; an API client that ignores its context can
+still finish late. Lifecycle timestamp clocks do not control this wait budget.
+
 If acquisition rollback reports a termination failure, Crabbox preserves the
 original acquisition cause and typed exit-code precedence, reports the cleanup
 failure, and refuses an automatic fresh-instance retry for that acquisition.
