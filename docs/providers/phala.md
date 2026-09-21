@@ -35,6 +35,22 @@ Crabbox injects a per-lease SSH public key into the CVM at deploy time, connects
 over SSH through the Phala TLS gateway, uses the normal SSH/rsync data plane, and
 deletes the CVM on release.
 
+## Status and prepared access
+
+Status and controller identity lookups observe existing connection material;
+they do not create or repair SSH directories, learn host keys, run the guest
+tool bootstrap, or re-claim the lease. A prepared status endpoint uses only its
+managed key and existing host-trust file, with strict verification and no host-key
+updates or fallback to global trust. Gateway routing is still resolved normally.
+
+When managed connection material is absent or empty, status reports provider
+metadata but cannot report SSH readiness. A controller lookup requiring usable
+access fails explicitly instead. Invalid or unsafe material is not repaired by
+observation. Use a normal warmup/run/reuse operation to prepare access; those
+paths retain first-contact setup. `status --wait` may still perform the existing
+explicit lifecycle heartbeat after resolution, but cannot prepare access while
+probing readiness.
+
 The SSH transport uses Crabbox's native TLS client to tunnel through the
 gateway's authenticated TLS endpoint rather than dialing a raw TCP port (see
 [Lifecycle](#lifecycle)).

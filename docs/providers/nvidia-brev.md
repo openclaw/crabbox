@@ -224,6 +224,11 @@ crabbox stop --provider nvidia-brev gpu-smoke
 workspace is absent. The local claim remains available for a later `stop` or
 `cleanup` retry if polling is interrupted.
 
+Blank, whitespace-only, or malformed inventory output is an error, even when
+the Brev process exits successfully. Crabbox retains the deleting claim until
+a retry receives valid inventory confirming absence; that reconciliation does
+not repeat the delete request.
+
 Crabbox stores the active Brev organization ID in each claim. Because Brev
 mutations do not accept an organization selector, lifecycle commands reject an
 active-org mismatch and retain the claim. Run `brev set` for the lease's

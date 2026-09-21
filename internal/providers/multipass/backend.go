@@ -142,6 +142,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 			return cause
 		}
 		if err := b.removeInstance(context.Background(), name); err != nil {
+			cleanupKey = false
 			return errors.Join(cause, fmt.Errorf("multipass cleanup failed for instance %s: %w", name, err))
 		}
 		if claimCreated {
@@ -164,16 +165,16 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, rollbackProvisioned(err)
 	}
-	if err := claimLeaseForRepoProviderScopePond(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	initialClaim, err := core.ClaimLeaseForRepoProviderScopePondIfUnchanged(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false)
+	if err != nil {
 		return core.LeaseTarget{}, rollbackProvisioned(err)
 	}
 	claimCreated = true
-	if err := updateLeaseClaimEndpoint(leaseID, lease.Server, lease.SSH); err != nil {
+	updated, err := claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug, cfg, instanceScope(name), lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, initialClaim, true)
+	if err != nil {
 		return core.LeaseTarget{}, rollbackProvisioned(err)
 	}
-	if err := updateLeaseClaimCacheVolumes(leaseID, core.CacheVolumeStickyDiskSpecs(cfg.Cache.Volumes)); err != nil {
-		return core.LeaseTarget{}, rollbackProvisioned(err)
-	}
+	core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
 	return lease, nil
@@ -185,18 +186,21 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	server := b.serverFromInstance(inst, claim, cfg)
+	core.SetServerLeaseClaimSnapshot(&server, claim, claim.LeaseID != "")
 	if req.ReleaseOnly {
-		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil
+		return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
 	}
 	if claim.LeaseID == "" {
 		return core.LeaseTarget{}, core.Exit(4, "multipass instance %q has no Crabbox lease claim; use `crabbox stop --provider multipass %s` to delete it or warm a new lease", inst.Name, inst.Name)
 	}
-	if req.StatusOnly && !req.ReadyProbe {
-		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil
-	}
 	owned, err := exactMultipassClaimOwned(claim.LeaseID, inst.Name)
 	if err != nil {
 		return core.LeaseTarget{}, err
+	}
+	observing := req.StatusOnly || req.NoLocalStateMutations
+	if observing && (!owned || !instanceRunning(inst.State) || inst.ip() == "") {
+		return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
 	}
 	if !owned && !req.Reclaim {
 		return core.LeaseTarget{}, core.Exit(4, "multipass lease %q has a legacy claim not bound to instance %q; adopt it with an explicit --reclaim reuse", claim.LeaseID, inst.Name)
@@ -208,10 +212,13 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if req.Repo.Root != "" {
-		if err := claimLeaseForRepoProviderScopePondEndpoint(claim.LeaseID, claim.Slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
+	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+	if !observing && req.Repo.Root != "" {
+		updated, err := core.ClaimLeaseForRepoProviderScopePondEndpointIfUnchanged(claim.LeaseID, claim.Slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH, claim, true)
+		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
 	}
 	return lease, nil
 }
@@ -352,18 +359,39 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	return nil
 }
 
-func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
+func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	name := instanceNameFromClaim(claim)
+	if name == "" || claim.Provider != providerName || claim.CloudID != name || claim.ProviderScope != instanceScope(name) || lease.LeaseID == "" || lease.LeaseID != claim.LeaseID || lease.Server.Provider != providerName || lease.Server.CloudID != name || lease.Server.Name != name || lease.Server.Labels["instance"] != name {
+		return core.Exit(4, "multipass lease %s touch identity does not match its claim", lease.LeaseID)
+	}
+	if (claim.Labels["state"] != "ready" && claim.Labels["state"] != "running") || claim.Labels["recovery"] != "" || (lease.Server.Status != "ready" && lease.Server.Status != "running") {
+		return core.Exit(4, "multipass lease %s acquisition is incomplete or instance is inactive; refusing touch", lease.LeaseID)
+	}
+	return nil
+}
+
+func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
+	if req.State != "" && req.State != "ready" && req.State != "running" {
+		return core.Server{}, core.Exit(2, "multipass touch cannot publish acquisition state %q", req.State)
+	}
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider:  providerName,
+		Authorize: b.AuthorizeStatusTouchClaim,
+		Prepare: func(claim core.LeaseClaim) (map[string]string, time.Time) {
+			now := core.ClockNow(b.rt.Clock).UTC()
+			return core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(shared.ClaimLifecycleLabels(claim), b.configForRun(), req.State, now, req.IdleTimeoutOverride), now
+		},
+	})
+	if err != nil {
+		return core.Server{}, err
+	}
 	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
-	}
-	original := server.Labels
-	server.Labels = core.TouchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	for _, key := range []string{"image", "instance", "ssh_user", "ssh_port", "work_root"} {
-		if value := strings.TrimSpace(original[key]); value != "" {
-			server.Labels[key] = value
-		}
-	}
+	server.Labels = shared.CloneLabels(updated.Labels)
+	server.Status = server.Labels["state"]
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 
@@ -620,7 +648,7 @@ func (b *backend) removeInstance(ctx context.Context, name string) error {
 }
 
 func (b *backend) serverFromInstance(inst multipassInstance, claim core.LeaseClaim, cfg core.Config) core.Server {
-	labels := shared.LabelsWithDefaults(claim.Labels, map[string]string{
+	labels := shared.LabelsWithDefaults(shared.ClaimLifecycleLabels(claim), map[string]string{
 		"crabbox":     "true",
 		"provider":    providerName,
 		"instance":    inst.Name,

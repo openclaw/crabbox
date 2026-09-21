@@ -18,6 +18,27 @@ type ClaimTouchPolicy struct {
 	Prepare   func(core.LeaseClaim) (map[string]string, time.Time)
 }
 
+// ClaimActivityHoldState identifies logical holds that native runtime status
+// cannot clear. Adapters must retain them in observations and reject activity.
+func ClaimActivityHoldState(claim core.LeaseClaim) string {
+	state := strings.ToLower(strings.TrimSpace(claim.Labels["state"]))
+	switch state {
+	case "cleanup", "deleting", "expired", "released":
+		return state
+	default:
+		return ""
+	}
+}
+
+// AuthorizeClaimActivity checks lifecycle holds and checkpoint exclusion;
+// resource ownership and exact-snapshot checks remain the adapter's responsibility.
+func AuthorizeClaimActivity(claim core.LeaseClaim) error {
+	if hold := ClaimActivityHoldState(claim); hold != "" {
+		return core.Exit(4, "%s lease=%s activity is held in state %s", claim.Provider, claim.LeaseID, hold)
+	}
+	return core.AuthorizeCheckpointRelease(claim, "")
+}
+
 // CommitClaimTouch publishes one prepared touch through the existing claim CAS.
 // The returned claim is the committed snapshot; projection and runtime caches
 // must be updated by the adapter only after this succeeds.
@@ -52,4 +73,34 @@ func ClaimLifecycleLabels(claim core.LeaseClaim) map[string]string {
 		}
 	}
 	return labels
+}
+
+// LegacyLabelIdleTimeout is opt-in for adapters whose released heartbeat writer
+// updated labels without updating the structured timeout. Reconcile it only in
+// the next authorized transaction, using the original claim as the CAS snapshot.
+func LegacyLabelIdleTimeout(claim core.LeaseClaim) *time.Duration {
+	for _, key := range []string{"idle_timeout_secs", "idle_timeout"} {
+		idle, ok := core.LeaseLabelDuration(claim.Labels[key])
+		if !ok || idle <= 0 {
+			continue
+		}
+		idle = idle.Round(time.Second)
+		if idle < time.Second {
+			continue
+		}
+		if int(idle/time.Second) != claim.IdleTimeoutSeconds {
+			return &idle
+		}
+		return nil
+	}
+	return nil
+}
+
+// LegacyLabelLifecycleLabels preserves policy recorded by label-only writers
+// without changing the persisted claim or renewing its activity and expiry.
+func LegacyLabelLifecycleLabels(claim core.LeaseClaim) map[string]string {
+	if legacy := LegacyLabelIdleTimeout(claim); legacy != nil {
+		claim.IdleTimeoutSeconds = int(*legacy / time.Second)
+	}
+	return ClaimLifecycleLabels(claim)
 }

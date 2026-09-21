@@ -470,9 +470,20 @@ func TestIsloCreateCallerCancellationBeforeRequest(t *testing.T) {
 	}
 }
 
+type isloStreamSignalWriter chan struct{}
+
+func (w isloStreamSignalWriter) Write(p []byte) (int, error) {
+	select {
+	case w <- struct{}{}:
+	default:
+	}
+	return len(p), nil
+}
+
 func TestIsloCreateTransportKeepsStreamingBodyUnbounded(t *testing.T) {
 	original := http.DefaultTransport
 	originalHeader := original.(*http.Transport).ResponseHeaderTimeout
+	releaseBody := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/auth/token" {
 			io.WriteString(w, `{"session_token":"synthetic-token"}`)
@@ -484,7 +495,7 @@ func TestIsloCreateTransportKeepsStreamingBodyUnbounded(t *testing.T) {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-time.After(100 * time.Millisecond):
+		case <-releaseBody:
 		}
 		io.WriteString(w, "event: exit\ndata: 0\n\n")
 	}))
@@ -494,15 +505,47 @@ func TestIsloCreateTransportKeepsStreamingBodyUnbounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := api.(*isloSDKClient)
-	if _, err := client.auth.Token(context.Background()); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := client.auth.Token(ctx); err != nil {
 		t.Fatal(err)
 	}
-	client.httpClient.Transport.(*http.Transport).ResponseHeaderTimeout = 10 * time.Millisecond
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	code, err := client.ExecStream(ctx, "crabbox-proof-abcdef", &gosdk.ExecRequest{}, io.Discard, io.Discard)
-	if err != nil || code != 0 {
-		t.Fatalf("stream body stopped at header bound: %d %v", code, err)
+	const headerBound = time.Second
+	client.httpClient.Transport.(*http.Transport).ResponseHeaderTimeout = headerBound
+	observed := make(isloStreamSignalWriter, 1)
+	type streamResult struct {
+		code int
+		err  error
+	}
+	finished := make(chan streamResult, 1)
+	go func() {
+		code, err := client.ExecStream(ctx, "crabbox-proof-abcdef", &gosdk.ExecRequest{}, observed, io.Discard)
+		finished <- streamResult{code, err}
+	}()
+	select {
+	case <-observed:
+	case result := <-finished:
+		t.Fatalf("stream ended before the client observed its first record: %+v", result)
+	case <-ctx.Done():
+		t.Fatal("client did not observe the first streamed record")
+	}
+	// Start the body-duration proof only after the client has received headers
+	// and consumed data; server-side Flush alone does not establish that boundary.
+	select {
+	case result := <-finished:
+		t.Fatalf("stream ended while the remaining body was held: %+v", result)
+	case <-time.After(2 * headerBound):
+	case <-ctx.Done():
+		t.Fatal("stream harness deadline expired during body hold")
+	}
+	close(releaseBody)
+	select {
+	case result := <-finished:
+		if result.err != nil || result.code != 0 {
+			t.Fatalf("stream body stopped at header bound: %d %v", result.code, result.err)
+		}
+	case <-ctx.Done():
+		t.Fatal("stream did not complete after releasing its remaining body")
 	}
 	if http.DefaultTransport != original || original.(*http.Transport).ResponseHeaderTimeout != originalHeader {
 		t.Fatal("global transport mutated")

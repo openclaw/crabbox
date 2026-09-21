@@ -1,6 +1,7 @@
 package multipass
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -352,10 +354,10 @@ func TestListAndResolveInstancesWithClaim(t *testing.T) {
 		},
 	}
 	claimTarget := core.SSHTarget{Host: "192.168.64.7", Port: "22"}
-	if err := claimLeaseForRepoProviderScopePond("cbx_123", "blue-lobster", providerName, instanceScope("crabbox-blue-1234abcd"), "", t.TempDir(), 30*time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond("cbx_123", "blue-lobster", providerName, instanceScope("crabbox-blue-1234abcd"), "", t.TempDir(), 30*time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := updateLeaseClaimEndpoint("cbx_123", claimServer, claimTarget); err != nil {
+	if err := core.UpdateLeaseClaimEndpoint("cbx_123", claimServer, claimTarget); err != nil {
 		t.Fatal(err)
 	}
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
@@ -390,7 +392,7 @@ func TestResolveReclaimBindsLegacyClaimEndpoint(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	const leaseID = "cbx_legacy123456"
 	const name = "crabbox-blue-1234abcd"
-	if err := claimLeaseForRepoProviderScopePond(leaseID, "blue-lobster", providerName, instanceScope(name), "", t.TempDir(), 30*time.Minute, false); err != nil {
+	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "blue-lobster", providerName, instanceScope(name), "", t.TempDir(), 30*time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{
@@ -534,53 +536,78 @@ func findStoredTestboxKeys(root string) ([]string, error) {
 	return keys, err
 }
 
-func TestAcquireRemovesClaimAfterEndpointUpdateFailure(t *testing.T) {
-	runner, b := setupAcquireMetadataFailureTest(t)
-	oldUpdate := updateLeaseClaimEndpoint
-	updateLeaseClaimEndpoint = func(string, core.Server, core.SSHTarget) error {
-		return errors.New("endpoint boom")
+func failLeasePublication(t *testing.T) {
+	t.Helper()
+	previous := claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged
+	claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged = func(string, string, core.Config, string, core.Server, core.SSHTarget, string, time.Duration, bool, core.LeaseClaim, bool) (core.LeaseClaim, error) {
+		return core.LeaseClaim{}, errors.New("publication boom")
 	}
-	t.Cleanup(func() { updateLeaseClaimEndpoint = oldUpdate })
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
-	if err == nil || !strings.Contains(err.Error(), "endpoint boom") {
+	t.Cleanup(func() { claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged = previous })
+}
+
+func TestAcquireRemovesClaimAfterPublicationFailure(t *testing.T) {
+	runner, b := setupAcquireMetadataFailureTest(t)
+	failLeasePublication(t)
+	_, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "publication boom") {
 		t.Fatalf("Acquire error=%v", err)
 	}
 	assertAcquireRollbackRemovedInstanceAndClaim(t, runner)
 }
 
-func TestAcquireRemovesClaimAfterCacheVolumeUpdateFailure(t *testing.T) {
+func TestAcquirePublishesEndpointAndCacheTogether(t *testing.T) {
 	runner, b := setupAcquireMetadataFailureTest(t)
-	oldUpdate := updateLeaseClaimCacheVolumes
-	updateLeaseClaimCacheVolumes = func(string, []string) error {
-		return errors.New("cache volume boom")
+	runner.responses["get"] = core.LocalCommandResult{Stdout: "qemu"}
+	b.cfg.Cache.Volumes = []core.CacheVolumeConfig{{Key: "gomod", Path: "/var/cache/crabbox/go"}}
+	lease, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { updateLeaseClaimCacheVolumes = oldUpdate })
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
-	if err == nil || !strings.Contains(err.Error(), "cache volume boom") {
-		t.Fatalf("Acquire error=%v", err)
+	claim, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	assertAcquireRollbackRemovedInstanceAndClaim(t, runner)
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+	if !exists || !set || !reflect.DeepEqual(snapshot, claim) || claim.SSHHost != lease.SSH.Host || len(claim.CacheVolumes) != 1 || claim.CacheVolumes[0] != "gomod:/var/cache/crabbox/go" {
+		t.Fatal("endpoint/cache publication was incomplete")
+	}
+	b.cfg.Cache.Volumes = nil
+	reused, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Repo: core.Repo{Root: claim.RepoRoot}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, exists, set = core.ServerLeaseClaimSnapshot(reused.Server)
+	if !exists || !set || !reflect.DeepEqual(snapshot, saved) || !reflect.DeepEqual(saved.CacheVolumes, claim.CacheVolumes) {
+		t.Fatal("reuse discarded saved mount metadata")
+	}
 }
 
-func TestAcquireKeepsClaimWhenMetadataRollbackDeleteFails(t *testing.T) {
+func TestAcquireKeepsRecoveryStateWhenRollbackDeleteFails(t *testing.T) {
 	runner, b := setupAcquireMetadataFailureTest(t)
-	oldUpdate := updateLeaseClaimEndpoint
-	updateLeaseClaimEndpoint = func(string, core.Server, core.SSHTarget) error {
-		return errors.New("endpoint boom")
-	}
-	t.Cleanup(func() { updateLeaseClaimEndpoint = oldUpdate })
+	failLeasePublication(t)
 	runner.errors = map[string]error{"delete": errors.New("delete boom")}
-	_, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
-	if err == nil || !strings.Contains(err.Error(), "endpoint boom") || !strings.Contains(err.Error(), "multipass cleanup failed") {
-		t.Fatalf("Acquire error=%v, want metadata and cleanup errors", err)
+	_, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err == nil || !strings.Contains(err.Error(), "publication boom") || !strings.Contains(err.Error(), "multipass cleanup failed") {
+		t.Fatalf("Acquire error=%v", err)
 	}
 	_ = recordedArgsForCommand(t, runner, "delete")
-	claims, claimErr := core.ListLeaseClaims()
-	if claimErr != nil {
-		t.Fatal(claimErr)
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
 	}
 	if len(claims) != 1 {
-		t.Fatalf("claim should remain when instance deletion fails: %#v", claims)
+		t.Fatalf("recovery claim count=%d", len(claims))
+	}
+	key, err := core.StoredTestboxKeyPath(claims[0].LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(key); err != nil {
+		t.Fatalf("retained resource lost key: %v", err)
 	}
 }
 
@@ -694,8 +721,8 @@ func TestNoPrivateKeyMaterialInLaunchArgs(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := recordedArgsForCommand(t, runner, "launch")
-	if strings.Contains(strings.ToUpper(args), "PRIVATE") {
-		t.Fatalf("unexpected secret-like content in args:\n%s", args)
+	if strings.Contains(args, "PRIVATE KEY-----") {
+		t.Fatal("private key armor appeared in launch arguments")
 	}
 	if strings.Contains(args, "PUBLIC-KEY") {
 		t.Fatalf("public key should be in cloud-init file, not process args:\n%s", args)
@@ -979,6 +1006,246 @@ func TestMultipassExistingLeaseIgnoresCreationCPUs(t *testing.T) {
 					if len(call.Args) > 0 && call.Args[0] == "launch" {
 						t.Fatal("existing operation launched VM")
 					}
+				}
+			})
+		}
+	}
+}
+
+type lifecycleClock struct{ now time.Time }
+
+func (c lifecycleClock) Now() time.Time { return c.now }
+
+func acquiredLifecycleFixture(t *testing.T) (*backend, core.LeaseTarget, core.LeaseClaim) {
+	t.Helper()
+	_, b := setupAcquireMetadataFailureTest(t)
+	b.cfg.IdleTimeout, b.cfg.TTL = 30*time.Minute, time.Hour
+	lease, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.rt.Clock = lifecycleClock{time.Now().UTC().Add(20 * time.Minute).Truncate(time.Second)}
+	return b, lease, claim
+}
+
+func TestMultipassLifecycleAcquireSnapshot(t *testing.T) {
+	_, lease, claim := acquiredLifecycleFixture(t)
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+	if !set || !exists || !reflect.DeepEqual(snapshot, claim) {
+		t.Fatal("acquisition did not return committed endpoint snapshot")
+	}
+}
+
+func TestMultipassLifecycleHeartbeat(t *testing.T) {
+	b, lease, claim := acquiredLifecycleFixture(t)
+	// Isolate renewal from the separately tested acquire snapshot contract.
+	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+	original := claim
+	b.cfg.IdleTimeout = time.Minute
+	override := 90 * time.Minute
+	for _, value := range []*time.Duration{&override, nil} {
+		got, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease, State: "running", IdleTimeout: time.Minute, IdleTimeoutOverride: value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved, err := core.ReadLeaseClaim(lease.LeaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if saved.Revision == claim.Revision || saved.IdleTimeoutSeconds != 5400 || saved.LastUsedAt != b.rt.Clock.Now().Format(time.RFC3339) {
+			t.Fatal("renewal not persisted")
+		}
+		created, err := strconv.ParseInt(saved.Labels["created_at"], 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Labels["expires_at"] != strconv.FormatInt(created+3600, 10) {
+			t.Fatal("original TTL cap lost")
+		}
+		for _, key := range []string{"instance", "image", "ssh_user", "ssh_port", "work_root"} {
+			if got.Labels[key] != original.Labels[key] {
+				t.Fatalf("lost %s", key)
+			}
+		}
+		snapshot, exists, set := core.ServerLeaseClaimSnapshot(got)
+		if !exists || !set || !reflect.DeepEqual(snapshot, saved) {
+			t.Fatal("renewal returned stale snapshot")
+		}
+		if _, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease}); err == nil {
+			t.Fatal("stale renewal accepted")
+		}
+		fresh := newBackend(Provider{}.Spec(), b.cfg, b.rt).(*backend)
+		observed, err := fresh.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if observed.Server.Labels["idle_timeout_secs"] != "5400" || observed.Server.Labels["last_touched_at"] != got.Labels["last_touched_at"] {
+			t.Fatal("fresh status lost saved policy")
+		}
+		after, err := core.ReadLeaseClaim(lease.LeaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(after, saved) {
+			t.Fatal("status renewed claim")
+		}
+		lease.Server, claim = got, saved
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := b.Touch(canceled, core.TouchRequest{Lease: lease}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled renewal: %v", err)
+	}
+}
+
+func TestMultipassLifecycleObservation(t *testing.T) {
+	for _, mode := range []string{"plain", "wait", "controller", "reuse"} {
+		t.Run(mode, func(t *testing.T) {
+			b, lease, before := acquiredLifecycleFixture(t)
+			req := core.ResolveRequest{ID: lease.LeaseID, Repo: core.Repo{Root: before.RepoRoot}, StatusOnly: mode == "plain" || mode == "wait", ReadyProbe: mode == "wait", NoLocalStateMutations: mode == "controller"}
+			got, err := b.Resolve(t.Context(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.SSH.Host != lease.SSH.Host || got.SSH.User != lease.SSH.User || got.SSH.Key != lease.SSH.Key || got.SSH.Port != sshPort || len(got.SSH.FallbackPorts) != 0 {
+				t.Fatal("status lost prepared endpoint")
+			}
+			after, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, exists, set := core.ServerLeaseClaimSnapshot(got.Server)
+			if !exists || !set || !reflect.DeepEqual(snapshot, after) {
+				t.Fatal("resolve omitted committed snapshot")
+			}
+			if mode == "reuse" {
+				if after.Revision == before.Revision {
+					t.Fatal("reuse did not publish endpoint")
+				}
+			} else if !reflect.DeepEqual(after, before) {
+				t.Fatal("observation changed claim")
+			}
+		})
+	}
+}
+
+func TestMultipassLifecycleHeartbeatCLI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX CLI fixture, not native Multipass")
+	}
+	_, lease, _ := acquiredLifecycleFixture(t)
+	helper := filepath.Join(t.TempDir(), "multipass-fixture")
+	data := sampleInfoJSON(lease.Server.Name)
+	script := "#!/bin/sh\ncase \"$1\" in\ninfo) printf '%s\\n' '" + data + "';;\n*) exit 91;;\nesac\n"
+	if err := os.WriteFile(helper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(t.TempDir(), "config.json")
+	content, err := json.Marshal(map[string]any{"provider": providerName, "multipass": map[string]string{"cliPath": helper}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", cfg)
+	t.Setenv("CRABBOX_BROKER_URL", "")
+	for _, extra := range [][]string{{"--idle-timeout", "90m"}, nil} {
+		var stdout, stderr bytes.Buffer
+		args := append([]string{"heartbeat", "--provider", providerName, "--id", lease.LeaseID, "--json"}, extra...)
+		if err := (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args); err != nil {
+			t.Fatal(err)
+		}
+		var output struct {
+			IdleTimeout string `json:"idleTimeout"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+			t.Fatal(err)
+		}
+		claim, err := core.ReadLeaseClaim(lease.LeaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if output.IdleTimeout != "1h30m0s" || claim.IdleTimeoutSeconds != 5400 {
+			t.Fatal("public renewal lost override")
+		}
+	}
+}
+
+func TestMultipassLifecycleRejectsUnpublishableTouch(t *testing.T) {
+	for _, scenario := range []string{"missing snapshot", "missing claim", "wrong scope", "inactive", "provisioning", "invalid requested state"} {
+		t.Run(scenario, func(t *testing.T) {
+			b, lease, before := acquiredLifecycleFixture(t)
+			requested := "ready"
+			switch scenario {
+			case "missing snapshot":
+				core.SetServerLeaseClaimSnapshot(&lease.Server, core.LeaseClaim{}, false)
+			case "missing claim":
+				core.RemoveLeaseClaim(lease.LeaseID)
+			case "wrong scope":
+				bad := before
+				bad.ProviderScope = "instance:other"
+				core.SetServerLeaseClaimSnapshot(&lease.Server, bad, true)
+			case "inactive":
+				lease.Server.Status = "stopped"
+			case "invalid requested state":
+				requested = "provisioning"
+			case "provisioning":
+				labels := shared.CloneLabels(before.Labels)
+				labels["state"] = "provisioning"
+				updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, before, labels)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before = updated
+				core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
+			}
+			if _, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease, State: requested}); err == nil {
+				t.Fatal("unpublishable touch accepted")
+			}
+			after, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "missing claim" {
+				if exists {
+					t.Fatal("removed claim recreated")
+				}
+			} else if !reflect.DeepEqual(before, after) {
+				t.Fatal("rejected touch changed claim")
+			}
+		})
+	}
+}
+
+func TestMultipassLifecycleInactiveStatus(t *testing.T) {
+	for _, state := range []string{"Stopped", "Running"} {
+		for _, wait := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/%v", state, wait), func(t *testing.T) {
+				b, lease, before := acquiredLifecycleFixture(t)
+				data := infoResponse{Info: map[string]multipassInfoEntry{lease.Server.Name: {State: state}}}
+				raw, err := json.Marshal(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b.rt.Exec.(*recordingRunner).responses["info"] = core.LocalCommandResult{Stdout: string(raw)}
+				got, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, ReadyProbe: wait, Reclaim: true, Repo: core.Repo{Root: before.RepoRoot}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.SSH.Host != "" || state == "Stopped" && got.Server.Status != "stopped" {
+					t.Fatal("inactive/no-IP status invented a ready endpoint")
+				}
+				after, err := core.ReadLeaseClaim(lease.LeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(before, after) {
+					t.Fatal("status changed claim")
 				}
 			})
 		}

@@ -64,6 +64,10 @@ Direct GCP heartbeats persist the idle policy in instance labels.
 `--idle-timeout` replaces the stored window, while omission preserves it.
 The lease's original TTL cap still applies.
 
+Direct Proxmox heartbeats persist the idle policy in the VM's description labels
+on its current node. `--idle-timeout` replaces the stored window, while omission
+preserves it. The lease's original TTL cap still applies.
+
 ## Delegated providers
 
 A delegated-run provider has no Crabbox-managed SSH lease to touch. Providers

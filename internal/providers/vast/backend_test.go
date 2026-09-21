@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -22,6 +23,7 @@ type fakeVastAPI struct {
 	offers                  []vastOffer
 	instances               []vastInstance
 	authErr                 error
+	authFn                  func()
 	listErr                 error
 	createErr               error
 	getErr                  error
@@ -58,6 +60,9 @@ type fakeVastAPI struct {
 }
 
 func (f *fakeVastAPI) CheckAuth(context.Context) (vastUser, error) {
+	if f.authFn != nil {
+		f.authFn()
+	}
 	if f.authErr != nil {
 		return vastUser{}, f.authErr
 	}
@@ -649,6 +654,9 @@ func TestResolveNumericIDReclaimCreatesClaimForProviderLabel(t *testing.T) {
 		SSHPort: 22,
 	}}}
 	b := newTestBackend(t, api)
+	clock := &lifecycleClock{current: time.Now().UTC().Truncate(time.Second)}
+	b.rt.Clock = clock
+	b.cfg.IdleTimeout, b.cfg.TTL = 5*time.Minute, time.Hour
 
 	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "8", Repo: core.Repo{Root: t.TempDir()}, Reclaim: true})
 	if err != nil {
@@ -660,6 +668,13 @@ func TestResolveNumericIDReclaimCreatesClaimForProviderLabel(t *testing.T) {
 	claim, exists, readErr := core.ReadLeaseClaimWithPresence("cbx_orphan")
 	if readErr != nil || !exists || claim.Provider != providerName || claim.CloudID != "8" || claim.Slug != "orphan" || claim.Labels[vastAccountIDLabel] != "7" || claim.Labels[vastAPIURLLabel] != "https://console.vast.ai/api/v0" {
 		t.Fatalf("claim=%#v exists=%v err=%v", claim, exists, readErr)
+	}
+	if claim.IdleTimeoutSeconds != 300 || claim.Labels["created_at"] != core.LeaseLabelTime(clock.current) || claim.Labels["ttl_secs"] != "3600" || claim.Labels["keep"] != "false" {
+		t.Fatalf("adoption did not initialize policy: %+v", claim)
+	}
+	snapshot, present, set := core.ServerLeaseClaimSnapshot(lease.Server)
+	if !set || !present || !reflect.DeepEqual(snapshot, claim) {
+		t.Fatal("adoption did not return committed snapshot")
 	}
 }
 
@@ -695,6 +710,14 @@ func TestResolveStatusOnlyAllowsInstanceWithoutSSHEndpoint(t *testing.T) {
 	}
 	if lease.LeaseID != "cbx_status" || lease.SSH.Host != "" {
 		t.Fatalf("lease=%#v", lease)
+	}
+	for _, key := range []string{"created_at", "last_touched_at", "expires_at", "idle_timeout", "idle_timeout_secs", "ttl_secs", "keep"} {
+		if _, exists := lease.Server.Labels[key]; exists {
+			t.Errorf("unclaimed observation invented %s", key)
+		}
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+		t.Fatalf("observation wrote claim: exists=%v err=%v", exists, err)
 	}
 }
 
@@ -982,6 +1005,10 @@ func TestReleaseStopIsExplicitAndTested(t *testing.T) {
 
 	b.cfg.Vast.ReleaseAction = "destroy"
 	core.MarkDeleteOnReleaseExplicit(&b.cfg, providerName)
+	lease, err = b.Resolve(context.Background(), core.ResolveRequest{ID: "stop-me", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if outcome, err := b.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil || !outcome.Terminal {
 		t.Fatalf("destroy outcome=%+v err=%v", outcome, err)
 	}
@@ -1067,6 +1094,264 @@ func TestManualUnownedCleanupIsRejected(t *testing.T) {
 	}
 	if len(api.destroyed) != 0 {
 		t.Fatalf("destroyed=%v", api.destroyed)
+	}
+}
+
+type lifecycleClock struct{ current time.Time }
+
+func (c *lifecycleClock) Now() time.Time { return c.current }
+
+func TestHeartbeatLifecycleSurvivesFreshReads(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(strconv.FormatBool(legacy), func(t *testing.T) {
+			api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
+			b := newTestBackend(t, api)
+			clock := &lifecycleClock{current: time.Now().UTC().Truncate(time.Second)}
+			b.rt.Clock = clock
+			b.cfg.IdleTimeout, b.cfg.TTL = 5*time.Minute, time.Hour
+			repo := core.Repo{Root: t.TempDir()}
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: repo, RequestedSlug: "policy", Keep: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			initial, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+			if !set || !exists || !reflect.DeepEqual(snapshot, initial) {
+				t.Error("acquisition did not return its committed snapshot")
+			}
+			wantIdle := 300
+			if legacy {
+				// Reproduce v0.63.0 Resolve -> label-only Touch persistence.
+				oldConfig := b.cfg
+				oldConfig.IdleTimeout = 2 * time.Hour
+				old := core.Server{Labels: vastLeaseLabels(oldConfig, lease.LeaseID, "policy", "ready", false, clock.current)}
+				old.Labels = preserveVastClaimMetadata(old.Labels, initial.Labels)
+				clock.current = clock.current.Add(10 * time.Minute)
+				old.Labels = core.TouchDirectLeaseLabels(old.Labels, oldConfig, "busy", clock.current)
+				initial, err = core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, initial, old.Labels)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if initial.IdleTimeoutSeconds != 300 || initial.Labels["idle_timeout_secs"] != "7200" {
+					t.Fatal("released writer fixture is not the expected mixed-format record")
+				}
+				wantIdle = 7200
+			}
+			freshConfig := b.cfg
+			freshConfig.IdleTimeout, freshConfig.TTL = time.Minute, 15*time.Minute
+			fresh := newBackend(Provider{}.Spec(), freshConfig, b.rt)
+			fresh.apiFactory = b.apiFactory
+			assertPolicy := func(labels map[string]string, idle int) {
+				t.Helper()
+				if labels["idle_timeout_secs"] != strconv.Itoa(idle) || labels["idle_timeout"] != strconv.Itoa(idle) {
+					t.Errorf("idle policy=%q/%q want%d", labels["idle_timeout_secs"], labels["idle_timeout"], idle)
+				}
+				for _, key := range []string{"created_at", "ttl_secs", "keep", vastAccountIDLabel, vastAPIURLLabel, vastKeyIDLabel, vastKeyOwnedLabel, vastOfferIDLabel, vastReleaseActionLabel} {
+					if labels[key] != initial.Labels[key] {
+						t.Errorf("%s changed from %q to %q", key, initial.Labels[key], labels[key])
+					}
+				}
+			}
+			for _, ready := range []bool{false, true} {
+				observed, resolveErr := fresh.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo, StatusOnly: true, ReadyProbe: ready, NoLocalStateMutations: true})
+				if resolveErr != nil {
+					t.Fatal(resolveErr)
+				}
+				assertPolicy(observed.Server.Labels, wantIdle)
+				if observed.Server.Labels["last_touched_at"] != initial.Labels["last_touched_at"] || observed.Server.Labels["expires_at"] != initial.Labels["expires_at"] {
+					t.Error("observation reset stored activity or expiry")
+				}
+				after, readErr := core.ReadLeaseClaim(lease.LeaseID)
+				if readErr != nil || !reflect.DeepEqual(after, initial) {
+					t.Fatal("observation changed the durable claim")
+				}
+			}
+			views, err := fresh.List(context.Background(), core.ListRequest{})
+			if err != nil || len(views) != 1 {
+				t.Fatalf("list: err=%v count=%d", err, len(views))
+			}
+			assertPolicy(views[0].Labels, wantIdle)
+			reused, err := fresh.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertPolicy(reused.Server.Labels, wantIdle)
+			for _, explicit := range []bool{false, true, false} {
+				clock.current = clock.current.Add(time.Minute)
+				req := core.TouchRequest{Lease: reused, State: "busy", IdleTimeout: time.Minute}
+				if explicit {
+					override := 90 * time.Minute
+					req.IdleTimeoutOverride, wantIdle = &override, 5400
+				}
+				reused.Server, err = fresh.Touch(context.Background(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				after, readErr := core.ReadLeaseClaim(lease.LeaseID)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				assertPolicy(after.Labels, wantIdle)
+				if after.IdleTimeoutSeconds != wantIdle || after.LastUsedAt != clock.current.Format(time.RFC3339) || after.Labels["last_touched_at"] != core.LeaseLabelTime(clock.current) {
+					t.Error("touch did not atomically commit activity and idle policy")
+				}
+				created, _ := strconv.ParseInt(initial.Labels["created_at"], 10, 64)
+				expires := min(created+3600, clock.current.Unix()+int64(wantIdle))
+				if after.Labels["expires_at"] != strconv.FormatInt(expires, 10) {
+					t.Error("touch lost creation-based TTL cap")
+				}
+				snapshot, exists, set = core.ServerLeaseClaimSnapshot(reused.Server)
+				if !exists || !set || !reflect.DeepEqual(snapshot, after) {
+					t.Error("touch did not return the committed snapshot")
+				}
+			}
+			api.instances[0].Status = "stopped"
+			stopped, err := fresh.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, NoLocalStateMutations: true})
+			if err != nil || stopped.Server.Labels["state"] != "stopped" {
+				t.Fatalf("stored activity hid physical stopped state: err=%v state=%s", err, stopped.Server.Labels["state"])
+			}
+		})
+	}
+}
+
+func TestRunningObservationClearsOnlyStoredRuntimeState(t *testing.T) {
+	for _, state := range []string{"provisioning", "stopped", "failed", "exited", "busy", "ready", "deleting", "expired"} {
+		t.Run(state, func(t *testing.T) {
+			api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
+			b := newTestBackend(t, api)
+			lease, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "restart-policy", Keep: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			labels := make(map[string]string, len(claim.Labels))
+			for key, value := range claim.Labels {
+				labels[key] = value
+			}
+			labels["state"] = state
+			stored, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			observed, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, NoLocalStateMutations: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := state
+			if state == "provisioning" || state == "stopped" || state == "failed" || state == "exited" {
+				want = "ready"
+			}
+			if observed.Server.Labels["state"] != want {
+				t.Errorf("native running projected as %q, want %q", observed.Server.Labels["state"], want)
+			}
+			after, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil || !reflect.DeepEqual(after, stored) {
+				t.Errorf("read-only observation changed claim: %v", err)
+			}
+		})
+	}
+}
+
+func TestLogicalActivityHoldsSurviveNativeTransitions(t *testing.T) {
+	for _, nativeState := range []string{"running", "loading", "stopped"} {
+		for _, hold := range []string{"cleanup", "deleting", "expired", "released"} {
+			t.Run(nativeState+"/"+hold, func(t *testing.T) {
+				api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
+				b := newTestBackend(t, api)
+				repo := core.Repo{Root: t.TempDir()}
+				lease, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: repo, RequestedSlug: "held", Keep: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				claim, err := core.ReadLeaseClaim(lease.LeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				labels := make(map[string]string, len(claim.Labels))
+				for key, value := range claim.Labels {
+					labels[key] = value
+				}
+				labels["state"] = hold
+				stored, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels)
+				if err != nil {
+					t.Fatal(err)
+				}
+				api.instances[0].Status = nativeState
+				observed, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, NoLocalStateMutations: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if observed.Server.Labels["state"] != hold {
+					t.Errorf("native %s erased %s hold", nativeState, hold)
+				}
+				if updated, err := b.Touch(t.Context(), core.TouchRequest{Lease: observed, State: "busy"}); err == nil || !reflect.DeepEqual(updated, core.Server{}) {
+					t.Errorf("held claim accepted activity: err=%v", err)
+				}
+				if _, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo}); err == nil {
+					t.Error("held claim accepted repository admission")
+				}
+				after, err := core.ReadLeaseClaim(lease.LeaseID)
+				if err != nil || !reflect.DeepEqual(after, stored) {
+					t.Errorf("held claim changed: err=%v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestTouchRefusesUncommittableClaim(t *testing.T) {
+	for _, scenario := range []string{"missing snapshot", "stale", "canceled", "invalid override", "account", "endpoint", "during auth"} {
+		t.Run(scenario, func(t *testing.T) {
+			api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
+			b := newTestBackend(t, api)
+			lease, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "touch-policy"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req := core.TouchRequest{Lease: lease, State: "busy"}
+			changeClaim := func() {
+				labels := maps.Clone(before.Labels)
+				labels["profile"] = "newer"
+				before, err = core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, before, labels)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			switch scenario {
+			case "missing snapshot":
+				core.SetServerLeaseClaimSnapshot(&req.Lease.Server, core.LeaseClaim{}, false)
+			case "stale":
+				changeClaim()
+			case "canceled":
+				cancel()
+			case "invalid override":
+				zero := time.Duration(0)
+				req.IdleTimeoutOverride = &zero
+			case "account":
+				api.user.ID = 8
+			case "endpoint":
+				b.cfg.Vast.APIURL = "https://other.example.test/api/v0"
+			case "during auth":
+				api.authFn = changeClaim
+			}
+			got, touchErr := b.Touch(ctx, req)
+			after, readErr := core.ReadLeaseClaim(lease.LeaseID)
+			if touchErr == nil || !reflect.DeepEqual(got, core.Server{}) || readErr != nil || !reflect.DeepEqual(after, before) {
+				t.Fatal("uncommittable touch published success or changed the claim")
+			}
+		})
 	}
 }
 
