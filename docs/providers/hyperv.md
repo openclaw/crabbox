@@ -183,6 +183,8 @@ installation.
    Plain and waiting status retain an existing SSH endpoint for acquired, running
    leases. Status and controller observations never adopt a legacy claim or rewrite
    local claim/key state; inactive or incomplete leases remain metadata-only.
+   Plain status also remains metadata-only for legacy claims; endpoint access and
+   heartbeat require an exactly bound claim or explicit reclaim through reuse.
    The public `status --wait` command can separately renew an acquired lease
    through the same guarded heartbeat path; plain status does not renew it.
 3. **List**: Lists all VMs with the `crabbox-` name prefix.

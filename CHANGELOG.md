@@ -11,8 +11,6 @@
 - Preserve DigitalOcean leases' stored idle timeout on ordinary heartbeats and honor explicit timeout changes without extending the creation-based TTL. [PR 2418](https://github.com/openclaw/crabbox/pull/2418).
 - Preserve canonical cancellation/deadline context and recognized release-denial states in workspace-owner error messages. [PR 2412](https://github.com/openclaw/crabbox/pull/2412). Thanks @steipete.
 - Explain Parallels IP discovery timeouts with clone mode, NIC details, and retry-time console guidance while preserving cleanup and clone defaults. [PR 2415](https://github.com/openclaw/crabbox/pull/2415), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
-- Hyper-V: retain ready SSH endpoints during read-only status and persist heartbeat timestamps and idle-timeout overrides across fresh reads. [PR 2411](https://github.com/openclaw/crabbox/pull/2411).
-
 - Restore Lume guest bootstrap with named shared directories, authenticated status readiness, and cleanup with quiet partial-match `lsof` output; existing golden images need refreshed hooks. [PR 2409](https://github.com/openclaw/crabbox/pull/2409).
 - Lume: persist heartbeat policy across fresh reads, honor explicit idle-timeout changes, and admit owned instance-scoped leases through the public heartbeat command. [PR 2407](https://github.com/openclaw/crabbox/pull/2407).
 - Persist Tart heartbeat timestamps and explicit idle-timeout changes in the lease claim, preserving them across fresh status reads and cleanup without losing SSH target details. [PR 2405](https://github.com/openclaw/crabbox/pull/2405).
@@ -26,6 +24,7 @@
 
 - Honor explicit idle-timeout changes in direct Parallels heartbeats while preserving the stored window when the flag is omitted. [PR 2406](https://github.com/openclaw/crabbox/pull/2406). Thanks @saariuslystoned.
 - Apple VM: persist heartbeat timestamps and explicit idle-timeout changes across fresh status reads, preserving recorded timeout and TTL policy when the flag is omitted. [PR 2413](https://github.com/openclaw/crabbox/pull/2413). Thanks @steipete.
+- Hyper-V: retain ready SSH endpoints for exactly owned leases, preserve metadata-only plain status for legacy claims, and persist heartbeat timestamps and idle-timeout overrides across fresh reads. [PR 2411](https://github.com/openclaw/crabbox/pull/2411). Thanks @steipete.
 
 ## 0.63.0 - 2026-09-20
 
