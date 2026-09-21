@@ -851,14 +851,10 @@ func mergeVastClaimLabels(server core.Server) core.Server {
 
 func projectVastClaim(server core.Server, claim core.LeaseClaim) core.Server {
 	server.Labels = shared.LegacyLabelLifecycleLabels(claim)
-	// Physical non-running state wins over recorded activity; a generic running
-	// response must not erase the claim's more precise busy/ready state.
-	if hold := shared.ClaimActivityHoldState(claim); hold != "" {
-		server.Labels["state"] = hold
-	} else if server.Status == "ready" && (server.Labels["state"] == "provisioning" || server.Labels["state"] == "stopped" || isTerminalVastStatus(server.Labels["state"])) {
-		server.Labels["state"] = server.Status
-	} else if server.Status != "ready" && server.Status != "unknown" && server.Status != "" {
-		server.Labels["state"] = server.Status
+	recorded := server.Labels["state"]
+	recordedObsolete := recorded == "provisioning" || recorded == "stopped" || isTerminalVastStatus(recorded)
+	if state := shared.ObservedClaimActivityState(claim, recorded, server.Status, server.Status == "ready", recordedObsolete); state != recorded {
+		server.Labels["state"] = state
 	}
 	core.SetServerLeaseClaimSnapshot(&server, claim, true)
 	return server

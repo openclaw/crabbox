@@ -218,6 +218,7 @@ func TestAdminAWSPolicyPrintsProviderPermissions(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		`"ec2:RunInstances"`,
+		`"ec2:DescribeInstanceTypes"`,
 		`"ec2:TerminateInstances"`,
 		`"ec2:CreateSecurityGroup"`,
 		`"ec2:CreateImage"`,
@@ -241,6 +242,7 @@ func TestAdminAWSPolicyCanIncludeMacHostPermissions(t *testing.T) {
 	out := stdout.String()
 	for _, want := range []string{
 		`"ec2:RunInstances"`,
+		`"ec2:DescribeInstanceTypes"`,
 		`"ec2:AllocateHosts"`,
 		`"ec2:ReleaseHosts"`,
 		`"ec2:CreateAction": "AllocateHosts"`,
@@ -257,6 +259,49 @@ func TestAdminAWSPolicyCanIncludeMacHostPermissions(t *testing.T) {
 	}
 	if len(doc.Statement) < 6 {
 		t.Fatalf("combined policy statements=%d, want provider plus mac-host statements", len(doc.Statement))
+	}
+}
+
+func TestAdminProviderPoliciesAllowInstanceMetadata(t *testing.T) {
+	for _, command := range []string{"aws-policy", "providers"} {
+		for _, option := range [][]string{nil, {"--mac-hosts"}, {"--host-lifecycle"}, {"--target", "macos"}} {
+			t.Run(command+"/"+strings.Join(option, "_"), func(t *testing.T) {
+				var stdout bytes.Buffer
+				app := App{Stdout: &stdout, Stderr: io.Discard}
+				var err error
+				if command == "aws-policy" {
+					err = app.adminAWSPolicy(option)
+				} else {
+					err = app.adminProviders(context.Background(), append([]string{"policy", "--provider", "aws"}, option...))
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				var policy struct {
+					Statement []struct {
+						Effect   string
+						Action   any
+						Resource string
+					}
+				}
+				if err := json.Unmarshal(stdout.Bytes(), &policy); err != nil {
+					t.Fatal(err)
+				}
+				for _, statement := range policy.Statement {
+					if statement.Effect != "Allow" || statement.Resource != "*" {
+						continue
+					}
+					if actions, ok := statement.Action.([]any); ok {
+						for _, action := range actions {
+							if action == "ec2:DescribeInstanceTypes" {
+								return
+							}
+						}
+					}
+				}
+				t.Fatal("policy does not allow ec2:DescribeInstanceTypes on all resources")
+			})
+		}
 	}
 }
 

@@ -77,6 +77,7 @@ const allowedEC2Actions = new Set([
   "DeregisterImage",
   "DescribeImages",
   "DescribeInstances",
+  "DescribeInstanceTypes",
   "DescribeKeyPairs",
   "DescribeSecurityGroups",
   "DescribeSnapshots",
@@ -2069,6 +2070,24 @@ function authorizeEC2(
 ): Record<string, unknown> {
   const input = stringParameters(request.parameters);
   switch (request.action) {
+    case "DescribeInstanceTypes": {
+      const instanceTypes = indexedValues(input, "InstanceType");
+      if (
+        instanceTypes.length === 0 ||
+        instanceTypes.length > 100 ||
+        Object.keys(input).length !== instanceTypes.length ||
+        Object.keys(input).some((key) => !/^InstanceType\.[1-9][0-9]*$/.test(key)) ||
+        instanceTypes.some(
+          (instanceType) =>
+            !awsQualificationInstanceTypes.some((allowed) => allowed === instanceType),
+        )
+      ) {
+        throw new Error("AWS qualification instance type metadata read is outside policy");
+      }
+      return Object.fromEntries(
+        instanceTypes.map((instanceType, index) => [`InstanceType.${index + 1}`, instanceType]),
+      );
+    }
     case "DescribeSecurityGroups":
       requireExact(input["GroupId.1"], policy.securityGroupId, "security group");
       return { "GroupId.1": policy.securityGroupId };

@@ -8,10 +8,11 @@
 
 ### Fixes
 
-- Use Vast's native SSH endpoint and stored lease key for plain status readiness checks, avoiding false unready results while keeping observations read-only.
+- Use EC2 instance metadata for AWS vCPU quota admission and readiness, including bare-metal types, and keep unknown instance costs out of capacity recommendations. [PR 2302](https://github.com/openclaw/crabbox/pull/2302). Thanks @vincentkoc.
 - Refresh the Cloudflare runner to Node 24.21.0, Go 1.26.8, GitHub CLI 2.101.0, and pnpm 12.5.1; unpinned projects inherit the pnpm 10-to-12 breaking default change on deployment and should migrate configuration or pin `packageManager` to `pnpm@10.24.0`. [PR 2379](https://github.com/openclaw/crabbox/pull/2379). Thanks @altaywtf.
 - Persist RunPod heartbeat activity and explicit idle-timeout changes, preserve stored lifecycle policy across fresh reads, and reject stale updates instead of reporting success. [PR 2441](https://github.com/openclaw/crabbox/pull/2441).
 - Preserve Vast leases' recorded heartbeat policy across fresh reads and upgrades, honor explicit idle-timeout changes without extending the stored TTL, and report stale claim updates as failures. [PR 2433](https://github.com/openclaw/crabbox/pull/2433).
+- Use Vast's native SSH endpoint and stored lease key for plain status readiness checks, avoiding false unready results while keeping observations read-only.
 - Preserve literal relative and dash-prefixed workspace paths across shell commands and sync, and prepare immutable local Actions hydration before invalidating reusable state. [PR 1739](https://github.com/openclaw/crabbox/pull/1739). Thanks @steipete.
 - Daytona: omit unverified default class labels from snapshot forks and document opt-in workload concurrency and memory limits. [PR 2114](https://github.com/openclaw/crabbox/pull/2114). Thanks @Patrick-Erichsen.
 - Wait for fresh exe.dev VMs to advertise their SSH route, preserve its user, port, and ambient SSH configuration, and bound inventory refreshes by the bootstrap timeout while retaining verified rollback. [PR 2271](https://github.com/openclaw/crabbox/pull/2271). Thanks @salmonumbrella.

@@ -513,8 +513,17 @@ In brokered mode you can promote and warm AMIs:
   `--type` when you want fallback.
 - Run `crabbox doctor --provider aws` before the first warmup in a new or
   unfunded account. Doctor reads EC2 vCPU Service Quotas for the effective
-  class/type and recommends a smaller class/type when `beast` would exceed the
-  account cap.
+  class/type and `ec2:DescribeInstanceTypes` for its default vCPU count, including
+  bare-metal types. It recommends only smaller types with known metadata when
+  `beast` would exceed the account cap. Missing, invalid, or denied metadata stays
+  unknown; it never counts as zero-vCPU capacity. Grant `ec2:DescribeInstanceTypes`
+  and `servicequotas:GetServiceQuota` to the caller (the coordinator in brokered
+  mode), as included in `crabbox admin providers policy --provider aws`.
+  Ordinary launches can still let EC2 decide when these advisory reads fail;
+  private workspace resource caps require successful metadata inspection.
+  These checks cover Standard-instance quotas (A, C, D, H, I, M, R, T, and Z
+  families). Types using separate buckets, such as GPU and HPC instances, report
+  `unsupported_instance_quota` and leave launch quota enforcement to EC2.
 - `beast` starts at 48xlarge candidates and can consume up to 192 vCPUs per
   request. Under capacity pressure, prefer `standard` or `fast` plus several
   `CRABBOX_CAPACITY_REGIONS`.

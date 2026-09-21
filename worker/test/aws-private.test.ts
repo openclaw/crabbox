@@ -103,6 +103,11 @@ describe("private AWS workspaces", () => {
         authorizations.push(request.headers.get("authorization") ?? "");
         sessionTokens.push(request.headers.get("x-amz-security-token") ?? "");
         if (action === "GetCallerIdentity") return stsIdentityResponse("001234567890");
+        if (action === "DescribeInstanceTypes") {
+          return ec2XMLResponse(
+            "<DescribeInstanceTypesResponse><instanceTypeSet><item><instanceType>t3.small</instanceType><vCpuInfo><defaultVCpus>2</defaultVCpus></vCpuInfo></item></instanceTypeSet></DescribeInstanceTypesResponse>",
+          );
+        }
         if (action === "DescribeInstances") {
           if (terminated) {
             return ec2XMLResponse(
@@ -168,6 +173,7 @@ describe("private AWS workspaces", () => {
       "DescribeInstances",
       "DescribeKeyPairs",
       "DeleteKeyPair",
+      "DescribeInstanceTypes",
       "GetServiceQuota",
       "DescribeInstanceInformation",
     ]);
@@ -610,32 +616,35 @@ describe("private AWS workspaces", () => {
     expect(runInstances?.get("BlockDeviceMapping.1.Ebs.VolumeSize")).toBe("20");
   });
 
-  it("rejects an allowlisted instance that exceeds the configured size cap", async () => {
-    const policy = privatePolicy();
-    const actions: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const request = requestFrom(input, init);
-        const host = new URL(request.url).hostname;
-        if (host.startsWith("sts.")) return stsIdentityResponse(expectedAccountID);
-        const params = new URLSearchParams(await request.clone().text());
-        actions.push(params.get("Action") ?? "");
-        return ec2XMLResponse(`<DescribeInstanceTypesResponse><instanceTypeSet><item>
+  it.each(["4", "0", "-1", "1.5", "invalid", ""])(
+    "rejects an allowlisted instance with over-cap or unknown vCPUs (%j)",
+    async (vcpus) => {
+      const policy = privatePolicy();
+      const actions: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const request = requestFrom(input, init);
+          const host = new URL(request.url).hostname;
+          if (host.startsWith("sts.")) return stsIdentityResponse(expectedAccountID);
+          const params = new URLSearchParams(await request.clone().text());
+          actions.push(params.get("Action") ?? "");
+          return ec2XMLResponse(`<DescribeInstanceTypesResponse><instanceTypeSet><item>
           <instanceType>t3a.small</instanceType>
           <processorInfo><supportedArchitectures><item>x86_64</item></supportedArchitectures></processorInfo>
-          <vCpuInfo><defaultVCpus>4</defaultVCpus></vCpuInfo>
+          <vCpuInfo><defaultVCpus>${vcpus}</defaultVCpus></vCpuInfo>
           <memoryInfo><sizeInMiB>2048</sizeInMiB></memoryInfo>
         </item></instanceTypeSet></DescribeInstanceTypesResponse>`);
-      }),
-    );
-    const client = new EC2SpotClient(expectedEnv(), region);
+        }),
+      );
+      const client = new EC2SpotClient(expectedEnv(), region);
 
-    await expect(client.privateWorkspacePreflight(privateLeaseConfig(), policy)).rejects.toThrow(
-      "AWS private workspace instance type t3a.small exceeds 2 vCPUs",
-    );
-    expect(actions).toEqual(["DescribeInstanceTypes"]);
-  });
+      await expect(client.privateWorkspacePreflight(privateLeaseConfig(), policy)).rejects.toThrow(
+        "AWS private workspace instance type t3a.small exceeds 2 vCPUs",
+      );
+      expect(actions).toEqual(["DescribeInstanceTypes"]);
+    },
+  );
 
   it("waits for SSM registration and returns command evidence", async () => {
     const targets: string[] = [];

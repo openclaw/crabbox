@@ -407,12 +407,17 @@ Grant the Worker AWS principal EC2 launch/list/tag/terminate permissions for
 instances, key pairs, and managed security groups, plus the image lifecycle
 permissions (`CreateImage`, `DeregisterImage`, `RegisterImage`,
 `DescribeSnapshots`, `DeleteSnapshot`, `DescribeFastSnapshotRestores`,
-`EnableFastSnapshotRestores`) and `servicequotas:GetServiceQuota`. The image
+`EnableFastSnapshotRestores`), `ec2:DescribeInstanceTypes`, and
+`servicequotas:GetServiceQuota`. The image
 permissions cover `crabbox image`, native AWS checkpoints, macOS image bake
-validation, and Fast Snapshot Restore promotion. Service Quotas access is
-best-effort: when available, Crabbox skips known quota-impossible instance types
-before calling `RunInstances`; when missing, launch errors are still classified
-after the call.
+validation, and Fast Snapshot Restore promotion. Quota admission and readiness
+use the default vCPU count returned by EC2 for each exact instance type,
+including bare metal. Metadata and Service Quotas reads are best-effort for
+ordinary launches: when both are available, Crabbox skips known quota-impossible
+instance types before calling `RunInstances`; when either is missing, launch
+errors are still classified after the call. Readiness reports unknown metadata
+and recommends only instance types with a known vCPU count. Private workspace
+resource caps still require successful metadata inspection.
 
 Print the baseline provider policy with:
 

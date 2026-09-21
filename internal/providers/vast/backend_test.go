@@ -1241,8 +1241,13 @@ func TestHeartbeatLifecycleSurvivesFreshReads(t *testing.T) {
 }
 
 func TestRunningObservationClearsOnlyStoredRuntimeState(t *testing.T) {
-	for _, state := range []string{"provisioning", "stopped", "failed", "exited", "busy", "ready", "deleting", "expired"} {
-		t.Run(state, func(t *testing.T) {
+	for _, tc := range []struct{ state, want string }{
+		{"provisioning", "ready"}, {"stopped", "ready"}, {"failed", "ready"}, {"exited", "ready"},
+		{"busy", "busy"}, {"ready", "ready"}, {"deleting", "deleting"}, {"expired", "expired"},
+		{"FAILED", "ready"}, {" FAILED ", "ready"}, {"PROVISIONING", "PROVISIONING"},
+		{"stopped_with_code", "stopped_with_code"}, {"error", "ready"},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
 			api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
 			b := newTestBackend(t, api)
 			lease, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "restart-policy", Keep: true})
@@ -1257,7 +1262,7 @@ func TestRunningObservationClearsOnlyStoredRuntimeState(t *testing.T) {
 			for key, value := range claim.Labels {
 				labels[key] = value
 			}
-			labels["state"] = state
+			labels["state"] = tc.state
 			stored, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels)
 			if err != nil {
 				t.Fatal(err)
@@ -1266,16 +1271,24 @@ func TestRunningObservationClearsOnlyStoredRuntimeState(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := state
-			if state == "provisioning" || state == "stopped" || state == "failed" || state == "exited" {
-				want = "ready"
-			}
-			if observed.Server.Labels["state"] != want {
-				t.Errorf("native running projected as %q, want %q", observed.Server.Labels["state"], want)
+			if observed.Server.Labels["state"] != tc.want {
+				t.Errorf("native running projected as %q, want %q", observed.Server.Labels["state"], tc.want)
 			}
 			after, err := core.ReadLeaseClaim(lease.LeaseID)
 			if err != nil || !reflect.DeepEqual(after, stored) {
 				t.Errorf("read-only observation changed claim: %v", err)
+			}
+		})
+	}
+}
+
+func TestClaimObservationPreservesAbsentActivity(t *testing.T) {
+	for _, state := range []string{"", "unknown", "ready"} {
+		t.Run(state, func(t *testing.T) {
+			claim := core.LeaseClaim{LeaseID: "cbx_abcdef123456", Provider: providerName}
+			observed := projectVastClaim(core.Server{Status: state}, claim)
+			if _, exists := observed.Labels["state"]; exists {
+				t.Fatalf("observation invented recorded activity: %v", observed.Labels)
 			}
 		})
 	}

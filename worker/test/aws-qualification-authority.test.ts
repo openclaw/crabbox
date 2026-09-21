@@ -953,6 +953,53 @@ describe("AWS qualification authority", () => {
     },
   );
 
+  it("signs only exact allowed instance types for metadata reads", async () => {
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    await expect(
+      fixture.run.execute(
+        identity,
+        request(
+          "DescribeInstanceTypes",
+          {
+            "InstanceType.2": "t3a.small",
+            "InstanceType.1": "t3.small",
+          },
+          "ec2",
+        ),
+      ),
+    ).resolves.toMatchObject({ status: 200 });
+    expect(fixture.signer.calls.filter((call) => call.action === "DescribeInstanceTypes")).toEqual([
+      {
+        service: "ec2",
+        action: "DescribeInstanceTypes",
+        region: "us-east-1",
+        parameters: {
+          "InstanceType.1": "t3.small",
+          "InstanceType.2": "t3a.small",
+        },
+      },
+    ]);
+    expect(fixture.signer.calls.some((call) => call.action === "RunInstances")).toBe(false);
+  });
+
+  it.each([
+    {},
+    { "InstanceType.1": "c7a.metal-48xl" },
+    { "InstanceType.1": "t3.small", IncludeUnsupportedInRegion: "true" },
+    { "InstanceType.1": "t3.small", "InstanceType.2": "" },
+    { "InstanceType.1": "t3.small", "InstanceType.129": "c7a.metal-48xl" },
+  ])("rejects metadata requests outside the exact type policy: %j", async (parameters) => {
+    const fixture = authorityFixture();
+    await fixture.run.enroll(controller, identity);
+    await expect(
+      fixture.run.execute(identity, request("DescribeInstanceTypes", parameters, "ec2")),
+    ).rejects.toThrow("outside policy");
+    expect(fixture.signer.calls.some((call) => call.action === "DescribeInstanceTypes")).toBe(
+      false,
+    );
+  });
+
   it("reserves the final eight minutes for retained cleanup", async () => {
     vi.useFakeTimers();
     const retained = retainedIdentity();
@@ -975,6 +1022,21 @@ describe("AWS qualification authority", () => {
         ),
       ),
     ).rejects.toThrow("work window expired");
+    await expect(
+      fixture.run.execute(
+        retained,
+        request(
+          "DescribeInstanceTypes",
+          {
+            "InstanceType.1": "t3.small",
+          },
+          "ec2",
+        ),
+      ),
+    ).rejects.toThrow("work window expired");
+    expect(
+      fixture.signer.calls.filter((call) => call.action === "DescribeInstanceTypes"),
+    ).toHaveLength(0);
     await expect(
       fixture.run.execute(retained, request("GetCallerIdentity", {}, "sts")),
     ).resolves.toMatchObject({ status: 200 });

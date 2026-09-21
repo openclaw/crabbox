@@ -200,11 +200,16 @@ func TestRunpodUnclaimedObservationDoesNotInventLifecycle(t *testing.T) {
 }
 
 func TestRunpodRunningObservationClearsOnlyStoredRuntimeState(t *testing.T) {
-	for _, state := range []string{"provisioning", "stopped", "failed", "exited", "busy", "ready", "deleting", "expired"} {
-		t.Run(state, func(t *testing.T) {
+	for _, tc := range []struct{ state, want string }{
+		{"provisioning", "running"}, {"stopped", "running"}, {"failed", "running"}, {"exited", "running"},
+		{"busy", "busy"}, {"ready", "ready"}, {"deleting", "deleting"}, {"expired", "expired"},
+		{"FAILED", "running"}, {" FAILED ", " FAILED "}, {"PROVISIONING", "running"},
+		{"stopped_with_code", "running"}, {"error", "error"},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
 			b, lease, original, _, _ := runpodLifecycleFixture(t)
 			labels := maps.Clone(original.Labels)
-			labels["state"] = state
+			labels["state"] = tc.state
 			stored, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, original, labels)
 			if err != nil {
 				t.Fatal(err)
@@ -213,12 +218,8 @@ func TestRunpodRunningObservationClearsOnlyStoredRuntimeState(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := state
-			if state == "provisioning" || state == "stopped" || state == "failed" || state == "exited" {
-				want = "running"
-			}
-			if observed.Server.Labels["state"] != want {
-				t.Errorf("native running state projected as %q, want %q", observed.Server.Labels["state"], want)
+			if observed.Server.Labels["state"] != tc.want {
+				t.Errorf("native running state projected as %q, want %q", observed.Server.Labels["state"], tc.want)
 			}
 			after, err := core.ReadLeaseClaim(lease.LeaseID)
 			if err != nil || !reflect.DeepEqual(after, stored) {

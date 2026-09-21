@@ -221,6 +221,14 @@ Failures swap the leading `ok` for `failed` (or `missing` for absent tools) and
 add a class plus remediation hint. AWS quota warnings are advisory: doctor still
 exits `0` unless another check fails.
 
+AWS quota checks use `ec2:DescribeInstanceTypes` metadata for the exact type's
+default vCPU count, including bare metal. Missing, invalid, or denied metadata
+produces `capacity=unknown` with `default_needed_vcpus=unknown`; recommendations
+include only types with a known positive vCPU count. The baseline AWS provider
+policy includes `ec2:DescribeInstanceTypes` and `servicequotas:GetServiceQuota`.
+Types outside the supported Standard-instance quota bucket report
+`capacity=unknown` with `hint=unsupported_instance_quota`.
+
 `--json` prints the same checks as a structured object with `ok`, `provider`,
 and `checks` fields. Each check includes `status`, `check`, `message`, and
 parsed `details` when available; the `provider-selection` details include

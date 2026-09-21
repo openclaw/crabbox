@@ -25,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/servicequotas"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
@@ -806,6 +807,105 @@ func TestApplyAWSRunInstanceTargetOptionsLeavesNativeWindowsDefault(t *testing.T
 	}
 }
 
+func TestAWSCapacityDoctorUsesInstanceMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name, vcpus, wantStatus, wantNeeded string
+		quota                               int
+		denied                              bool
+	}{
+		{name: "below metal quota", vcpus: "192", quota: 191, wantStatus: "warning", wantNeeded: "192"},
+		{name: "exact metal quota", vcpus: "192", quota: 192, wantStatus: "ok", wantNeeded: "192"},
+		{name: "missing metadata", quota: 192, wantStatus: "skip", wantNeeded: "unknown"},
+		{name: "zero metadata", vcpus: "0", quota: 192, wantStatus: "skip", wantNeeded: "unknown"},
+		{name: "malformed metadata", vcpus: "invalid", quota: 192, wantStatus: "skip", wantNeeded: "unknown"},
+		{name: "denied metadata", denied: true, quota: 192, wantStatus: "skip", wantNeeded: "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metadataReads, quotaReads := 0, 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.Header.Get("X-Amz-Target"), ".GetServiceQuota") {
+					quotaReads++
+					w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+					_ = json.NewEncoder(w).Encode(map[string]any{"Quota": map[string]any{"Value": tc.quota}})
+					return
+				}
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+					return
+				}
+				if r.Form.Get("Action") != "DescribeInstanceTypes" || r.Form.Get("InstanceType.1") != "c7a.metal-48xl" {
+					t.Errorf("unexpected EC2 request: %v", r.Form)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				metadataReads++
+				if tc.denied {
+					writeEC2Error(w, "UnauthorizedOperation", "metadata denied", http.StatusForbidden)
+					return
+				}
+				item := ""
+				if tc.vcpus != "" {
+					item = "<item><instanceType>c7a.metal-48xl</instanceType><vCpuInfo><defaultVCpus>" + tc.vcpus + "</defaultVCpus></vCpuInfo></item>"
+				}
+				writeEC2XML(w, "<DescribeInstanceTypesResponse><instanceTypeSet>"+item+"</instanceTypeSet></DescribeInstanceTypesResponse>")
+			}))
+			defer server.Close()
+			client := testAWSClient(server.URL)
+			client.serviceQuotas = servicequotas.NewFromConfig(aws.Config{
+				Region: "eu-west-1", BaseEndpoint: aws.String(server.URL),
+				Credentials: credentials.NewStaticCredentialsProvider("test", "secret", ""),
+			})
+			cfg := defaultConfig()
+			cfg.Provider, cfg.TargetOS, cfg.ServerType = "aws", targetLinux, "c7a.metal-48xl"
+			cfg.Capacity.Market, cfg.Capacity.Fallback = "spot", "on-demand-after-120s"
+			checks := client.CapacityDoctorChecks(context.Background(), cfg)
+			if len(checks) != 2 {
+				t.Fatalf("got %d checks, want both markets", len(checks))
+			}
+			for _, check := range checks {
+				if check.Status != tc.wantStatus || check.Details["default_needed_vcpus"] != tc.wantNeeded {
+					t.Errorf("check=%+v, want %s with needed=%s", check, tc.wantStatus, tc.wantNeeded)
+				}
+				if check.Details["recommended_type"] != "" {
+					t.Errorf("recommended an undescribed type: %+v", check)
+				}
+			}
+			if metadataReads != 1 || quotaReads != 2 {
+				t.Errorf("reads metadata=%d quota=%d, want 1 and 2", metadataReads, quotaReads)
+			}
+		})
+	}
+}
+
+func TestAWSCapacityDoctorChecksMultiLetterStandardFamilies(t *testing.T) {
+	for _, serverType := range []string{"im4gn.16xlarge", "is4gen.8xlarge"} {
+		t.Run(serverType, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.ServerType = serverType
+			check := awsCapacityDoctorCheckForQuota(cfg, "on-demand", 32, true, nil, map[string]int{serverType: 96})
+			if check.Status != "warning" || check.Details["quota_code"] != awsOnDemandQuotaCode {
+				t.Fatalf("did not compare Standard instance against quota: %+v", check)
+			}
+		})
+	}
+}
+
+func TestAWSCapacityDoctorSkipsNonStandardQuotaFamilies(t *testing.T) {
+	for _, serverType := range []string{"g4dn.metal", "p5.48xlarge", "trn1.32xlarge", "inf2.48xlarge", "hpc7a.96xlarge"} {
+		t.Run(serverType, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.ServerType = serverType
+			check := awsCapacityDoctorCheckForQuota(cfg, "on-demand", 32, true, nil, map[string]int{serverType: 96})
+			if check.Status != "skip" || check.Details["hint"] != "unsupported_instance_quota" || check.Details["default_needed_vcpus"] != "96" {
+				t.Fatalf("compared a non-Standard instance against Standard quota: %+v", check)
+			}
+			if check.Details["quota_code"] != "" || check.Details["recommended_type"] != "" {
+				t.Fatalf("reported Standard quota or recommendation for a non-Standard instance: %+v", check)
+			}
+		})
+	}
+}
+
 func TestAWSCapacityDoctorCheckWarnsWhenQuotaBelowDefaultClass(t *testing.T) {
 	cfg := defaultConfig()
 	cfg.Provider = "aws"
@@ -813,7 +913,7 @@ func TestAWSCapacityDoctorCheckWarnsWhenQuotaBelowDefaultClass(t *testing.T) {
 	cfg.Class = "beast"
 	cfg.ServerType = serverTypeForConfig(cfg)
 
-	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 32, true, nil)
+	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 32, true, nil, map[string]int{cfg.ServerType: 192, "c7a.8xlarge": 32, "c7g.8xlarge": 32})
 
 	if check.Status != "warning" {
 		t.Fatalf("status=%q, want warning", check.Status)
@@ -846,7 +946,7 @@ func TestAWSRecommendedClassForQuotaIncludesSmallClasses(t *testing.T) {
 		{limitVCPUs: 2, wantClass: "tiny", wantType: "m7a.large"},
 		{limitVCPUs: 8, wantClass: "small", wantType: "c7a.2xlarge"},
 	} {
-		gotClass, gotType := awsRecommendedClassForQuota(cfg, tt.limitVCPUs)
+		gotClass, gotType := awsRecommendedClassForQuota(cfg, tt.limitVCPUs, map[string]int{"m7a.large": 2, "c7a.2xlarge": 8})
 		if gotClass != tt.wantClass || gotType != tt.wantType {
 			t.Fatalf("limit=%d got=(%q,%q) want=(%q,%q)", tt.limitVCPUs, gotClass, gotType, tt.wantClass, tt.wantType)
 		}
@@ -862,7 +962,7 @@ func TestAWSCapacityDoctorCheckRecommendsARM64Types(t *testing.T) {
 	cfg.architectureExplicit = true
 	cfg.ServerType = serverTypeForConfig(cfg)
 
-	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 32, true, nil)
+	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 32, true, nil, map[string]int{cfg.ServerType: 192, "c7a.8xlarge": 32, "c7g.8xlarge": 32})
 
 	if check.Status != "warning" {
 		t.Fatalf("status=%q, want warning", check.Status)
@@ -879,7 +979,7 @@ func TestAWSCapacityDoctorCheckRecommendsTinyClassForTwoVCPUQuota(t *testing.T) 
 	cfg.Class = "beast"
 	cfg.ServerType = serverTypeForConfig(cfg)
 
-	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 2, true, nil)
+	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 2, true, nil, map[string]int{cfg.ServerType: 192, "m7a.large": 2})
 
 	if check.Status != "warning" {
 		t.Fatalf("status=%q, want warning", check.Status)
@@ -896,7 +996,7 @@ func TestAWSCapacityDoctorCheckPassesWhenQuotaCoversDefaultClass(t *testing.T) {
 	cfg.Class = "beast"
 	cfg.ServerType = serverTypeForConfig(cfg)
 
-	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 256, true, nil)
+	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 256, true, nil, map[string]int{cfg.ServerType: 192})
 
 	if check.Status != "ok" {
 		t.Fatalf("status=%q, want ok", check.Status)
@@ -913,7 +1013,7 @@ func TestAWSCapacityDoctorCheckSkipsWhenQuotaUnknown(t *testing.T) {
 	cfg.Class = "beast"
 	cfg.ServerType = serverTypeForConfig(cfg)
 
-	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 0, false, nil)
+	check := awsCapacityDoctorCheckForQuota(cfg, "spot", 0, false, nil, map[string]int{cfg.ServerType: 192})
 
 	if check.Status != "skip" {
 		t.Fatalf("status=%q, want skip", check.Status)

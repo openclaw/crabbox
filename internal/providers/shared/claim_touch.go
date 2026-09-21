@@ -30,6 +30,25 @@ func ClaimActivityHoldState(claim core.LeaseClaim) string {
 	}
 }
 
+// ObservedClaimActivityState preserves logical holds and precise activity while
+// replacing obsolete runtime state. Adapters classify running/obsolete states;
+// recorded and observed strings retain their provider-specific normalization.
+func ObservedClaimActivityState(claim core.LeaseClaim, recorded, observed string, observedRunning, recordedObsolete bool) string {
+	if hold := ClaimActivityHoldState(claim); hold != "" {
+		return hold
+	}
+	if observedRunning {
+		if recordedObsolete {
+			return observed
+		}
+		return recorded
+	}
+	if observed != "" && observed != "unknown" {
+		return observed
+	}
+	return recorded
+}
+
 // AuthorizeClaimActivity checks lifecycle holds and checkpoint exclusion;
 // resource ownership and exact-snapshot checks remain the adapter's responsibility.
 func AuthorizeClaimActivity(claim core.LeaseClaim) error {

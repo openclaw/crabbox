@@ -407,6 +407,22 @@ async function capacityTransport(options: {
         action === "AuthorizeSecurityGroupIngress"
       ) {
         response.end(`<${action}Response />`);
+      } else if (action === "DescribeInstanceTypes") {
+        const requested = [...params]
+          .filter(([key]) => key.startsWith("InstanceType."))
+          .map(([, value]) => value);
+        const vcpus: Record<string, number> = { "t3.small": 2, "t3.medium": 2, "c7i.2xlarge": 8 };
+        response.end(
+          `<DescribeInstanceTypesResponse><instanceTypeSet>${requested
+            .flatMap((name) =>
+              vcpus[name] === undefined
+                ? []
+                : [
+                    `<item><instanceType>${name}</instanceType><vCpuInfo><defaultVCpus>${vcpus[name]}</defaultVCpus></vCpuInfo></item>`,
+                  ],
+            )
+            .join("")}</instanceTypeSet></DescribeInstanceTypesResponse>`,
+        );
       } else if (action === "DescribeHosts") {
         response.end(
           "<DescribeHostsResponse><hostSet><item><hostId>h-pinned</hostId><hostState>available</hostState><hostProperties><instanceType>mac1.metal</instanceType></hostProperties></item></hostSet></DescribeHostsResponse>",
