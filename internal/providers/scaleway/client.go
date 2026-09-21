@@ -19,6 +19,7 @@ import (
 	"github.com/scaleway/scaleway-sdk-go/scw"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const defaultScalewayAPIURL = "https://api.scaleway.com"
@@ -122,7 +123,7 @@ func newClient(cfg core.Config, rt core.Runtime) (Client, error) {
 	}
 	client, err := scw.NewClient(opts...)
 	if err != nil {
-		return nil, core.Exit(3, "Scaleway SDK client configuration failed: %s", sanitizeSDKError(err, accessKey, secretKey))
+		return nil, shared.ExitErrorWithCause(3, fmt.Sprintf("Scaleway SDK client configuration failed: %s", sanitizeSDKError(err, accessKey, secretKey)), err)
 	}
 	out := &sdkClient{
 		client:         client,
@@ -285,11 +286,11 @@ func scalewayProfileFromSDKConfig() (*scw.Profile, error) {
 		if errors.As(err, &notFound) {
 			return &scw.Profile{}, nil
 		}
-		return nil, core.Exit(3, "Scaleway SDK config load failed: %s", sanitizeSDKError(err))
+		return nil, shared.ExitErrorWithCause(3, fmt.Sprintf("Scaleway SDK config load failed: %s", sanitizeSDKError(err)), err)
 	}
 	profile, err := cfg.GetActiveProfile()
 	if err != nil {
-		return nil, core.Exit(3, "Scaleway SDK active profile load failed: %s", sanitizeSDKError(err))
+		return nil, shared.ExitErrorWithCause(3, fmt.Sprintf("Scaleway SDK active profile load failed: %s", sanitizeSDKError(err)), err)
 	}
 	return profile, nil
 }
