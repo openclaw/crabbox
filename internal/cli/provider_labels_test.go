@@ -167,7 +167,7 @@ func TestProviderLabelDisplayAndDurationHelpers(t *testing.T) {
 		{"bad", 0, false},
 		{"", 0, false},
 	} {
-		got, ok := parseDurationSecondsLabel(tc.value)
+		got, ok := LeaseLabelDuration(tc.value)
 		if got != tc.want || ok != tc.ok {
 			t.Fatalf("parseDurationSecondsLabel(%q)=%s,%v want %s,%v", tc.value, got, ok, tc.want, tc.ok)
 		}

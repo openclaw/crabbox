@@ -3,6 +3,8 @@ package multipass
 import (
 	"context"
 	"io"
+	"maps"
+	"reflect"
 	"testing"
 	"time"
 
@@ -46,13 +48,16 @@ func TestD2CleanupIdleBoundaries(t *testing.T) {
 func TestD2ObservationPrecedence(t *testing.T) {
 	b := &backend{}
 	cfg := core.BaseConfig()
+	lastUsed := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	for _, running := range []bool{true, false} {
 		for _, stored := range []string{"", "ready", "error", "running", " "} {
 			native := "running"
 			if !running {
 				native = "stopped"
 			}
-			claim := core.LeaseClaim{Provider: providerName, LeaseID: "cbx_d2", CloudImmutableID: "immutable", SSHHost: "192.0.2.1", LastUsedAt: "2026-09-01T00:00:00Z", IdleTimeoutSeconds: 60, Labels: map[string]string{"state": stored, "provider": "stored-provider", "custom": "value"}}
+			claim := core.LeaseClaim{Provider: providerName, LeaseID: "cbx_d2", CloudImmutableID: "immutable", SSHHost: "192.0.2.1", LastUsedAt: lastUsed.Format(time.RFC3339), IdleTimeoutSeconds: 60, Labels: map[string]string{"state": stored, "provider": "stored-provider", "custom": "value"}}
+			before := claim
+			before.Labels = maps.Clone(claim.Labels)
 			view := b.serverFromInstance(multipassInstance{Name: "crabbox-d2", State: native, IPv4: []string{"192.0.2.1"}}, claim, cfg)
 			wantStatus := "stopped"
 			if running {
@@ -71,14 +76,19 @@ func TestD2ObservationPrecedence(t *testing.T) {
 			if view.CloudID != "crabbox-d2" || view.Name != view.CloudID || view.Provider != providerName || view.Labels["custom"] != "value" {
 				t.Fatalf("view=%#v", view)
 			}
-			if (view.Labels["last_touched_at"] != "") != false {
-				t.Fatalf("unexpected lifecycle synthesis: %v", view.Labels)
+			if view.Labels["last_touched_at"] != core.LeaseLabelTime(lastUsed) || view.Labels["idle_timeout"] != "60" || view.Labels["idle_timeout_secs"] != "60" {
+				t.Fatalf("persisted lifecycle was not projected: %v", view.Labels)
+			}
+			for _, key := range []string{"created_at", "expires_at"} {
+				if _, exists := view.Labels[key]; exists {
+					t.Fatalf("projection invented %s: %v", key, view.Labels)
+				}
 			}
 			if view.Labels["provider"] != "stored-provider" {
 				t.Fatalf("provider label=%q", view.Labels["provider"])
 			}
 			view.Labels["custom"] = "changed"
-			if claim.Labels["custom"] != "value" || claim.Labels["state"] != stored {
+			if !reflect.DeepEqual(claim, before) {
 				t.Fatal("projection mutated input")
 			}
 		}

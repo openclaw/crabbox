@@ -199,8 +199,8 @@ func TestRunpodUnclaimedObservationDoesNotInventLifecycle(t *testing.T) {
 	}
 }
 
-func TestRunpodRunningObservationClearsOnlyStoredRuntimeTerminalState(t *testing.T) {
-	for _, state := range []string{"stopped", "failed", "exited", "busy", "ready", "deleting", "expired"} {
+func TestRunpodRunningObservationClearsOnlyStoredRuntimeState(t *testing.T) {
+	for _, state := range []string{"provisioning", "stopped", "failed", "exited", "busy", "ready", "deleting", "expired"} {
 		t.Run(state, func(t *testing.T) {
 			b, lease, original, _, _ := runpodLifecycleFixture(t)
 			labels := maps.Clone(original.Labels)
@@ -214,7 +214,7 @@ func TestRunpodRunningObservationClearsOnlyStoredRuntimeTerminalState(t *testing
 				t.Fatal(err)
 			}
 			want := state
-			if state == "stopped" || state == "failed" || state == "exited" {
+			if state == "provisioning" || state == "stopped" || state == "failed" || state == "exited" {
 				want = "running"
 			}
 			if observed.Server.Labels["state"] != want {

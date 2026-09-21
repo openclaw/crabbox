@@ -469,6 +469,37 @@ func TestExistingLeaseKnownHostsPathDoesNotCreateMaterial(t *testing.T) {
 	}
 }
 
+func TestExistingLeaseKnownHostsPathDefaultRootDoesNotRepairPrivacy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission fixture; Windows uses native ACL admission")
+	}
+	isolateTestUserDirs(t)
+	t.Setenv("XDG_STATE_HOME", "")
+	target := SSHTarget{}
+	const leaseID = "cbx_default_hosts"
+	if err := UseLeaseKnownHosts(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Dir(target.KnownHostsFile)
+	for _, path := range []string{filepath.Dir(filepath.Dir(dir)), filepath.Dir(dir), dir} {
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ExistingLeaseKnownHostsPath(leaseID); err == nil {
+			t.Fatal("observation admitted non-private managed storage")
+		}
+		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o755 {
+			t.Fatalf("observation repaired permissions: %v", err)
+		}
+		if err := os.Chmod(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := ExistingLeaseKnownHostsPath(leaseID); err != nil || got != target.KnownHostsFile {
+		t.Fatalf("private default-root path=%q err=%v", got, err)
+	}
+}
+
 // Creating the per-lease SSH directories is a check-then-create: each component
 // is Lstat'd and then made only when it is missing. Concurrent first-time
 // callers therefore race, and the loser used to fail on EEXIST. An existing

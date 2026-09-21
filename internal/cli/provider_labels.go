@@ -157,6 +157,10 @@ func durationSecondsLabel(duration time.Duration) string {
 	return strconv.FormatInt(int64(duration.Round(time.Second)/time.Second), 10)
 }
 
+func LeaseLabelDuration(value string) (time.Duration, bool) {
+	return parseDurationSecondsLabel(value)
+}
+
 func parseDurationSecondsLabel(value string) (time.Duration, bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {

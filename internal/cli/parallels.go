@@ -429,8 +429,8 @@ func (c *ParallelsClient) InstallSSHKey(ctx context.Context, vmID string, cfg Co
 	if cfg.TargetOS == targetWindows {
 		return c.runWindowsPowerShellFile(ctx, vmID, "install-ssh", WindowsBootstrapPowerShell(cfg, publicKey))
 	}
-	args := []string{"/bin/sh", "-lc", parallelsPOSIXInstallSSHKeyScript(user, publicKey)}
-	result, err := c.prlctl(ctx, nil, append([]string{"exec", vmID}, args...)...)
+	script := parallelsPOSIXInstallSSHKeyScript(user, publicKey)
+	result, err := c.prlctlWithStdin(ctx, strings.NewReader(script), nil, "exec", vmID, "/bin/sh", "-s")
 	if err != nil {
 		return commandOutputError("parallels install ssh key", result, err)
 	}
@@ -539,7 +539,8 @@ func (c *ParallelsClient) EnsureGuestReady(ctx context.Context, vmID string, cfg
 		workRoot = baseConfig().WorkRoot
 	}
 	desktop := cfg.Desktop
-	result, err := c.prlctl(ctx, nil, "exec", vmID, "/bin/sh", "-lc", parallelsPOSIXEnsureReadyScript(user, workRoot, desktop, cfg.TargetOS == targetMacOS && cfg.Parallels.Password != "", sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts)))
+	script := parallelsPOSIXEnsureReadyScript(user, workRoot, desktop, cfg.TargetOS == targetMacOS && cfg.Parallels.Password != "", sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
+	result, err := c.prlctlWithStdin(ctx, strings.NewReader(script), nil, "exec", vmID, "/bin/sh", "-s")
 	if err != nil {
 		return commandOutputError("parallels guest prep", result, err)
 	}
@@ -581,7 +582,7 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 			}
 		}
 		if time.Now().After(deadline) {
-			hint := parallelsIPTimeoutHint(c.Cfg, last, useDHCPFallback, lastDHCPError, purpose)
+			hint := parallelsIPTimeoutHint(c.Cfg, last, err == nil, useDHCPFallback, lastDHCPError, purpose)
 			if lastDHCPError != nil {
 				return ParallelsVM{}, Exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s; DHCP fallback: %v; %s", id, blank(last.State, "-"), lastDHCPError, hint)
 			}
@@ -597,7 +598,7 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 
 // parallelsIPTimeoutHint explains an IP discovery timeout in terms of the
 // clone mode, the discovery routes that ran, and the next check to make.
-func parallelsIPTimeoutHint(cfg Config, last ParallelsVM, dhcpFallback bool, dhcpErr error, purpose ParallelsIPWaitPurpose) string {
+func parallelsIPTimeoutHint(cfg Config, last ParallelsVM, vmObserved, dhcpFallback bool, dhcpErr error, purpose ParallelsIPWaitPurpose) string {
 	mode := "unknown"
 	if purpose == ParallelsIPWaitAcquisition {
 		mode = strings.ToLower(strings.TrimSpace(cfg.Parallels.CloneMode))
@@ -609,13 +610,17 @@ func parallelsIPTimeoutHint(cfg Config, last ParallelsVM, dhcpFallback bool, dhc
 	if len(last.MACs) > 0 {
 		macs = strings.Join(last.MACs, ",")
 	}
-	parts := []string{"clone_mode=" + mode + " macs=" + macs + " tools_ip=none"}
+	toolsIP := "unknown"
+	if vmObserved {
+		toolsIP = "none"
+	}
+	parts := []string{"clone_mode=" + mode + " macs=" + macs + " tools_ip=" + toolsIP}
 	if !dhcpFallback && cfg.TargetOS == targetMacOS {
 		parts = append(parts, "for macOS guests without working Parallels Tools, set parallels.bootstrapKey to enable DHCP/SSH discovery")
 	}
 	running := strings.EqualFold(strings.TrimSpace(last.State), "running")
 	if running && errors.Is(dhcpErr, errParallelsDHCPLeaseMissing) {
-		parts = append(parts, "no matching DHCP lease was found for the VM's MACs; the guest may not have booted")
+		parts = append(parts, "no matching DHCP lease was found in the Parallels host lease file for the VM's MACs; check guest boot and network configuration")
 		if purpose == ParallelsIPWaitAcquisition {
 			parts = append(parts, "acquisition cleans up failed clones: retry and capture the new VM on the Parallels host while IP discovery is still waiting (`prlctl capture <new-vm-id> --file <png>`)")
 		} else {
@@ -623,7 +628,7 @@ func parallelsIPTimeoutHint(cfg Config, last ParallelsVM, dhcpFallback bool, dhc
 		}
 	}
 	if running && purpose == ParallelsIPWaitAcquisition && mode == "linked" {
-		parts = append(parts, "if the console stays blank, the template may not boot as a linked clone; retry with parallels.cloneMode=full (full clones cannot select a source snapshot)")
+		parts = append(parts, "if the console stays blank, the template may not boot as a linked clone; retry with parallels.cloneMode=full and clear parallels.sourceSnapshot and parallels.sourceSnapshotId (full clones use the source VM's current state and cannot select a source snapshot)")
 	}
 	return "hint: " + strings.Join(parts, "; ")
 }
@@ -806,13 +811,19 @@ func (c *ParallelsClient) probeHostTCP(ctx context.Context, ip, port string) err
 	return nil
 }
 
+// Both preparation scripts are handed to the guest shell on stdin, never as an
+// argv element: `prlctl exec` flattens argv and re-parses it guest-side, which
+// silently drops the leading `set -eu`. Every child either script runs must
+// therefore take its stdin from /dev/null, or it eats the rest of the script
+// while the shell still exits 0.
+// https://github.com/openclaw/crabbox/issues/2396
 func parallelsPOSIXInstallSSHKeyScript(user, publicKey string) string {
 	return fmt.Sprintf(`set -eu
 user=%s
 key=%s
-home=$(getent passwd "$user" 2>/dev/null | cut -d: -f6 || true)
+home=$(getent passwd "$user" </dev/null 2>/dev/null | cut -d: -f6 || true)
 if [ -z "$home" ]; then
-  home=$(dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2}' || true)
+  home=$(dscl . -read "/Users/$user" NFSHomeDirectory </dev/null 2>/dev/null | awk '{print $2}' || true)
 fi
 if [ -z "$home" ]; then
   echo "user home not found: $user" >&2
@@ -831,9 +842,9 @@ printf '%%s\n' "$user" >/var/lib/crabbox/ssh.username 2>/dev/null || true
 
 func parallelsMacOSDesktopReadyTest(accountCredentials bool) string {
 	if accountCredentials {
-		return "[ -f /var/db/crabbox/vnc.console ] && nc -z 127.0.0.1 5900"
+		return "[ -f /var/db/crabbox/vnc.console ] && nc -z 127.0.0.1 5900 </dev/null"
 	}
-	return "[ -s /var/db/crabbox/vnc.password ] && [ -f /var/db/crabbox/vnc.console ] && nc -z 127.0.0.1 5900"
+	return "[ -s /var/db/crabbox/vnc.password ] && [ -f /var/db/crabbox/vnc.console ] && nc -z 127.0.0.1 5900 </dev/null"
 }
 
 func parallelsMacOSDesktopSetupScript(accountCredentials bool) string {
@@ -846,7 +857,7 @@ func parallelsMacOSDesktopSetupScript(accountCredentials bool) string {
     fi
     case "$vnc_password" in
       ????????) ;;
-      *) vnc_password="$(/usr/bin/openssl rand -hex 4)" ;;
+      *) vnc_password="$(/usr/bin/openssl rand -hex 4 </dev/null)" ;;
     esac
     case "$vnc_password" in
       *[!A-Za-z0-9]*) echo "invalid generated VNC password" >&2; exit 1 ;;
@@ -856,23 +867,23 @@ func parallelsMacOSDesktopSetupScript(accountCredentials bool) string {
     mkdir -p /etc/sudoers.d
     printf '%s ALL=(root) NOPASSWD: /bin/cat /var/db/crabbox/vnc.password\n' "$user" >/etc/sudoers.d/crabbox-vnc-password
     chmod 0440 /etc/sudoers.d/crabbox-vnc-password
-    /usr/sbin/visudo -cf /etc/sudoers.d/crabbox-vnc-password >/dev/null
+    /usr/sbin/visudo -cf /etc/sudoers.d/crabbox-vnc-password </dev/null >/dev/null
 `
-		clientOptions = `    "$kickstart" -configure -clientopts -setdirlogins -dirlogins no -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$vnc_password" >/dev/null 2>&1
+		clientOptions = `    "$kickstart" -configure -clientopts -setdirlogins -dirlogins no -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$vnc_password" </dev/null >/dev/null 2>&1
 `
 	}
 	return `    mkdir -p /var/db/crabbox
 ` + credentialSetup + `    kickstart=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
     [ -x "$kickstart" ]
-    /usr/bin/defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
-    "$kickstart" -activate -configure -allowAccessFor -specifiedUsers >/dev/null 2>&1
-    "$kickstart" -configure -access -on -users "$user" -privs -all >/dev/null 2>&1
-` + clientOptions + `    "$kickstart" -restart -agent >/dev/null 2>&1
-    /bin/launchctl enable system/com.apple.screensharing >/dev/null 2>&1 || true
-    /bin/launchctl kickstart -k system/com.apple.screensharing >/dev/null 2>&1 || true
+    /usr/bin/defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true </dev/null
+    "$kickstart" -activate -configure -allowAccessFor -specifiedUsers </dev/null >/dev/null 2>&1
+    "$kickstart" -configure -access -on -users "$user" -privs -all </dev/null >/dev/null 2>&1
+` + clientOptions + `    "$kickstart" -restart -agent </dev/null >/dev/null 2>&1
+    /bin/launchctl enable system/com.apple.screensharing </dev/null >/dev/null 2>&1 || true
+    /bin/launchctl kickstart -k system/com.apple.screensharing </dev/null >/dev/null 2>&1 || true
     vnc_ready=false
     for _ in $(jot 60 1); do
-      if nc -z 127.0.0.1 5900; then
+      if nc -z 127.0.0.1 5900 </dev/null; then
         vnc_ready=true
         break
       fi
@@ -903,7 +914,7 @@ if command -v sw_vers >/dev/null 2>&1; then
     # Resolve it as that user through bash -lc, matching the probe exactly
     # rather than the user's default login shell, which reads different rc
     # files. Never source their login files as root, and keep stdin off these
-    # children -- this whole script arrives on stdin via sudo -n /bin/sh -s, so
+    # children -- this whole script arrives on the guest shell's stdin, so
     # anything reading stdin silently eats the rest of it.
     #
     # Ask node for its own execPath rather than taking what command -v returns.
@@ -1000,14 +1011,14 @@ crabbox_ssh_listening() {
     return 0
   fi
   for port in %s; do
-    if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+    if nc -z 127.0.0.1 "$port" </dev/null >/dev/null 2>&1; then
       return 0
     fi
   done
   return 1
 }
 %s
-if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1 && crabbox_ssh_listening; then
+if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready </dev/null >/tmp/crabbox-ready.log 2>&1 && crabbox_ssh_listening; then
   if [ "$desktop" != true ]; then
     exit 0
   fi
@@ -1015,7 +1026,7 @@ if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready >/tmp/cra
     if %s; then
       exit 0
     fi
-  elif command -v websockify >/dev/null 2>&1 && command -v x11vnc >/dev/null 2>&1 && { [ -f /usr/share/novnc/vnc.html ] || [ -f /usr/share/novnc/core/vnc.html ] || [ -f /usr/share/novnc/html/vnc.html ]; } && systemctl is-active --quiet crabbox-x11vnc.service; then
+  elif command -v websockify >/dev/null 2>&1 && command -v x11vnc >/dev/null 2>&1 && { [ -f /usr/share/novnc/vnc.html ] || [ -f /usr/share/novnc/core/vnc.html ] || [ -f /usr/share/novnc/html/vnc.html ]; } && systemctl is-active --quiet crabbox-x11vnc.service </dev/null; then
     exit 0
   fi
 fi
@@ -1035,13 +1046,13 @@ Acquire::Retries "8";
 Acquire::http::Timeout "30";
 Acquire::https::Timeout "30";
 APT
-  apt-get update
-  apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq
+  apt-get update </dev/null
+  apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq </dev/null
   if [ "$desktop" = true ]; then
-    apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl util-linux novnc websockify
+    apt-get install -y --no-install-recommends xvfb xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-terminal xfconf xfce4-settings x11vnc xauth dbus-x11 x11-xserver-utils xterm scrot ffmpeg xdotool wmctrl xclip xsel fonts-dejavu-core fonts-liberation iproute2 openssl util-linux novnc websockify </dev/null
     if [ ! -s /var/lib/crabbox/vnc.password ]; then
       umask 077
-      openssl rand -hex 16 >/var/lib/crabbox/vnc.password
+      openssl rand -hex 16 </dev/null >/var/lib/crabbox/vnc.password
     fi
     { head -c 8 /var/lib/crabbox/vnc.password; printf '\n'; head -c 8 /var/lib/crabbox/vnc.password; printf '\n\n'; } | x11vnc -storepasswd /var/lib/crabbox/vnc.pass >/dev/null 2>&1
     chown "$user:$group" /var/lib/crabbox/vnc.password /var/lib/crabbox/vnc.pass
@@ -1084,19 +1095,19 @@ RestartSec=1
 [Install]
 WantedBy=multi-user.target
 UNIT
-    systemctl daemon-reload
-    systemctl enable --now crabbox-xvfb.service crabbox-desktop.service crabbox-x11vnc.service
+    systemctl daemon-reload </dev/null
+    systemctl enable --now crabbox-xvfb.service crabbox-desktop.service crabbox-x11vnc.service </dev/null
   fi
-  systemctl enable ssh >/dev/null 2>&1 || true
-  systemctl restart ssh >/dev/null 2>&1 || systemctl restart ssh.socket >/dev/null 2>&1 || true
+  systemctl enable ssh </dev/null >/dev/null 2>&1 || true
+  systemctl restart ssh </dev/null >/dev/null 2>&1 || systemctl restart ssh.socket </dev/null >/dev/null 2>&1 || true
 fi
 if command -v sw_vers >/dev/null 2>&1; then
 	mkdir -p /usr/local/bin
 	remote_login_log=/tmp/crabbox-remote-login.log
-  /bin/launchctl load -w /System/Library/LaunchDaemons/ssh.plist >"$remote_login_log" 2>&1 ||
-    /bin/launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist >>"$remote_login_log" 2>&1 || true
-  /bin/launchctl enable system/com.openssh.sshd >>"$remote_login_log" 2>&1 || true
-  /bin/launchctl kickstart -k system/com.openssh.sshd >>"$remote_login_log" 2>&1 || true
+  /bin/launchctl load -w /System/Library/LaunchDaemons/ssh.plist </dev/null >"$remote_login_log" 2>&1 ||
+    /bin/launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist </dev/null >>"$remote_login_log" 2>&1 || true
+  /bin/launchctl enable system/com.openssh.sshd </dev/null >>"$remote_login_log" 2>&1 || true
+  /bin/launchctl kickstart -k system/com.openssh.sshd </dev/null >>"$remote_login_log" 2>&1 || true
   if [ "$desktop" = true ]; then
 %s
   fi
@@ -1131,7 +1142,7 @@ READY
 fi
 chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped 2>/dev/null || true
-/usr/local/bin/crabbox-ready
+/usr/local/bin/crabbox-ready </dev/null
 `, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, parallelsShellPortList(sshPorts), parallelsMacOSNodeBaselineStanza(), parallelsMacOSDesktopReadyTest(macOSAccountCredentials), parallelsMacOSDesktopSetupScript(macOSAccountCredentials), shellWords([]string{workRoot})[0], parallelsShellPortList(sshPorts), shellWords([]string{workRoot})[0])
 }
 
@@ -1144,6 +1155,17 @@ func parallelsChildCommandEnv(extraEnv []string) []string {
 }
 
 func (c *ParallelsClient) prlctl(ctx context.Context, extraEnv []string, args ...string) (LocalCommandResult, error) {
+	return c.prlctlWithStdin(ctx, nil, extraEnv, args...)
+}
+
+// prlctlWithStdin is prlctl with a reader attached to the guest command's
+// standard input. `prlctl exec` does not preserve argv boundaries -- it joins
+// its arguments into one string and re-parses that string with a shell inside
+// the guest -- so anything that has to survive verbatim, a shell script above
+// all, travels on stdin instead. ssh forwards stdin to the remote prlctl, so
+// both routes deliver the same bytes.
+// https://github.com/openclaw/crabbox/issues/2396
+func (c *ParallelsClient) prlctlWithStdin(ctx context.Context, stdin io.Reader, extraEnv []string, args ...string) (LocalCommandResult, error) {
 	env := parallelsChildCommandEnv(extraEnv)
 	if c.Cfg.Parallels.Host != "" {
 		remote := "PATH=/usr/local/bin:/opt/homebrew/bin:$PATH " + strings.Join(shellWords(append([]string{"prlctl"}, args...)), " ")
@@ -1156,9 +1178,9 @@ func (c *ParallelsClient) prlctl(ctx context.Context, extraEnv []string, args ..
 			host = c.Cfg.Parallels.HostUser + "@" + host
 		}
 		sshArgs = append(sshArgs, host, remote)
-		return c.Runner.Run(ctx, LocalCommandRequest{Name: directSSHExecutable(), Args: sshArgs, Env: env})
+		return c.Runner.Run(ctx, LocalCommandRequest{Name: directSSHExecutable(), Args: sshArgs, Stdin: stdin, Env: env})
 	}
-	return c.Runner.Run(ctx, LocalCommandRequest{Name: "prlctl", Args: args, Env: env})
+	return c.Runner.Run(ctx, LocalCommandRequest{Name: "prlctl", Args: args, Stdin: stdin, Env: env})
 }
 
 func (c *ParallelsClient) hostCommand(ctx context.Context, stdin io.Reader, args ...string) (LocalCommandResult, error) {

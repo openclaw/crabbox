@@ -814,7 +814,7 @@ func projectRunpodClaim(server core.Server, claim core.LeaseClaim) core.Server {
 		switch server.Status {
 		case "running", "ready":
 			switch strings.ToLower(labels["state"]) {
-			case "stopped", "failed", "exited", "dead", "terminated", "stopped_with_code":
+			case "provisioning", "stopped", "failed", "exited", "dead", "terminated", "stopped_with_code":
 				labels["state"] = server.Status
 			}
 		case "", "unknown":

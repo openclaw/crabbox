@@ -295,8 +295,12 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 			return core.LeaseTarget{}, err
 		}
 	}
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	claim, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false)
+	if err != nil {
 		return core.LeaseTarget{}, err
+	}
+	if claim.LeaseID != "" {
+		core.SetServerLeaseClaimSnapshot(&target.Server, claim, true)
 	}
 	committed = true
 	fmt.Fprintf(b.stderr(), "provisioned lease=%s vast=%d gpu=%s state=ready\n", leaseID, instanceID, server.ServerType.Name)
@@ -516,7 +520,6 @@ func (b *backend) targetFromInstance(ctx context.Context, client vastAPI, item v
 		return core.LeaseTarget{}, core.Exit(5, "vast instance %d reached terminal status %s", item.ID, item.Status)
 	}
 	server := serverFromInstance(item, b.cfg)
-	server = mergeVastClaimMetadata(server)
 	leaseID := server.Labels["lease"]
 	claim, claimExists, err := core.ReadLeaseClaimWithPresence(leaseID)
 	if err != nil {
@@ -529,6 +532,7 @@ func (b *backend) targetFromInstance(ctx context.Context, client vastAPI, item v
 		if err := b.validateVastClaimProviderIdentity(ctx, client, claim, "resolve"); err != nil {
 			return core.LeaseTarget{}, err
 		}
+		server = projectVastClaim(server, claim)
 	} else if req.ReleaseOnly {
 		return core.LeaseTarget{}, core.Exit(2, "vast lease=%s has no exact local claim; refusing release", leaseID)
 	} else if !req.NoLocalStateMutations && !req.StatusOnly {
@@ -538,9 +542,14 @@ func (b *backend) targetFromInstance(ctx context.Context, client vastAPI, item v
 		if req.Repo.Root == "" {
 			return core.LeaseTarget{}, core.Exit(2, "vast lease=%s cannot be reclaimed without a repository root", leaseID)
 		}
+		server.Labels = vastLeaseLabels(b.cfg, leaseID, server.Labels["slug"], server.Labels["state"], false, b.now())
+		server.Labels["provider_key"] = core.ProviderKeyForLease(leaseID)
 		if err := b.populateVastClaimProviderIdentity(ctx, client, server.Labels); err != nil {
 			return core.LeaseTarget{}, err
 		}
+	}
+	if !claimExists {
+		core.SetServerLeaseClaimSnapshot(&server, core.LeaseClaim{}, false)
 	}
 	target := core.LeaseTarget{Server: server, LeaseID: leaseID}
 	if !req.ReleaseOnly && (!req.StatusOnly || req.ReadyProbe) {
@@ -553,10 +562,17 @@ func (b *backend) targetFromInstance(ctx context.Context, client vastAPI, item v
 		}
 		target.SSH = ssh
 	}
-	if req.Repo.Root != "" && !req.NoLocalStateMutations {
-		if _, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.cfg, target.Server, target.SSH, req.Repo.Root, b.cfg.IdleTimeout, req.Reclaim, claim, claimExists); err != nil {
+	if req.Repo.Root != "" && !req.NoLocalStateMutations && !req.StatusOnly && !req.ReleaseOnly {
+		if claimExists {
+			if err := shared.AuthorizeClaimActivity(claim); err != nil {
+				return core.LeaseTarget{}, err
+			}
+		}
+		updated, err := core.ClaimLeaseTargetForRepoConfigWithIdleTimeoutOverrideIfUnchanged(leaseID, server.Labels["slug"], b.cfg, target.Server, target.SSH, req.Repo.Root, b.cfg.IdleTimeout, shared.LegacyLabelIdleTimeout(claim), req.Reclaim, claim, claimExists)
+		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		target.Server = projectVastClaim(target.Server, updated)
 	}
 	return target, nil
 }
@@ -595,21 +611,59 @@ func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("destroyed lease=%s vast=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
-func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
-	server := req.Lease.Server
+func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	server := lease.Server
 	if err := validateVastServer(server); err != nil {
-		return core.Server{}, err
+		return err
 	}
-	cfg := b.cfg
-	if req.IdleTimeout > 0 {
-		cfg.IdleTimeout = req.IdleTimeout
+	if _, ok := parseVastInstanceID(server.CloudID); !ok || lease.LeaseID != server.Labels["lease"] {
+		return core.Exit(4, "vast lease=%s target identity does not match the claim", lease.LeaseID)
 	}
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, req.State, b.now())
-	if claim, ok, err := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID); err == nil && ok {
-		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(req.Lease.LeaseID, claim, server.Labels); err != nil {
-			return core.Server{}, err
+	if err := validateVastClaimIdentity(claim, lease.LeaseID, server.Labels["slug"], server.CloudID); err != nil {
+		return err
+	}
+	if err := shared.ValidateClaimBinding(claim, b.vastClaimBinding(server)); err != nil {
+		return err
+	}
+	return shared.AuthorizeClaimActivity(claim)
+}
+
+func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
+	if req.IdleTimeoutOverride == nil {
+		if expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server); exists && set {
+			req.IdleTimeoutOverride = shared.LegacyLabelIdleTimeout(expected)
 		}
 	}
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider: providerName,
+		Authorize: func(ctx context.Context, lease core.LeaseTarget, expected core.LeaseClaim) error {
+			if err := b.AuthorizeStatusTouchClaim(ctx, lease, expected); err != nil {
+				return err
+			}
+			client, err := b.api()
+			if err != nil {
+				return err
+			}
+			return b.validateVastClaimProviderIdentity(ctx, client, expected, "touch")
+		},
+		Prepare: func(expected core.LeaseClaim) (map[string]string, time.Time) {
+			cfg := b.cfg
+			if req.IdleTimeout > 0 {
+				cfg.IdleTimeout = req.IdleTimeout
+			}
+			now := b.now()
+			return core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(shared.LegacyLabelLifecycleLabels(expected), cfg, req.State, now, req.IdleTimeoutOverride), now
+		},
+	})
+	if err != nil {
+		return core.Server{}, err
+	}
+	server := req.Lease.Server
+	server.Labels = shared.CloneLabels(updated.Labels)
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 
@@ -784,28 +838,28 @@ func mergeVastClaimLabels(server core.Server) core.Server {
 	if err != nil || !ok || claim.Provider != providerName {
 		return server
 	}
-	if claim.CloudID != "" && claim.CloudID != server.CloudID {
+	cloudID := server.CloudID
+	if claim.CloudID == "" {
+		cloudID = "" // Recovery claims may not have bound the instance yet.
+	}
+	if validateVastClaimIdentity(claim, leaseID, server.Labels["slug"], cloudID) != nil {
 		return server
 	}
-	if len(claim.Labels) > 0 {
-		server.Labels = claim.Labels
-	}
-	return server
+	return projectVastClaim(server, claim)
 }
 
-func mergeVastClaimMetadata(server core.Server) core.Server {
-	leaseID := strings.TrimSpace(server.Labels["lease"])
-	if leaseID == "" {
-		return server
+func projectVastClaim(server core.Server, claim core.LeaseClaim) core.Server {
+	server.Labels = shared.LegacyLabelLifecycleLabels(claim)
+	// Physical non-running state wins over recorded activity; a generic running
+	// response must not erase the claim's more precise busy/ready state.
+	if hold := shared.ClaimActivityHoldState(claim); hold != "" {
+		server.Labels["state"] = hold
+	} else if server.Status == "ready" && (server.Labels["state"] == "stopped" || isTerminalVastStatus(server.Labels["state"])) {
+		server.Labels["state"] = server.Status
+	} else if server.Status != "ready" && server.Status != "unknown" && server.Status != "" {
+		server.Labels["state"] = server.Status
 	}
-	claim, ok, err := core.ReadLeaseClaimWithPresence(leaseID)
-	if err != nil || !ok || claim.Provider != providerName {
-		return server
-	}
-	if claim.CloudID != "" && server.CloudID != "" && claim.CloudID != server.CloudID {
-		return server
-	}
-	server.Labels = preserveVastClaimMetadata(server.Labels, claim.Labels)
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
 	return server
 }
 
@@ -825,7 +879,10 @@ func serverFromInstance(item vastInstance, cfg core.Config) core.Server {
 
 func labelsFromVastInstance(item vastInstance, cfg core.Config) map[string]string {
 	if owner, ok := decodeVastOwnershipLabel(item.Label); ok {
-		labels := vastLeaseLabels(cfg, owner.LeaseID, owner.Slug, owner.State, false, time.Now().UTC())
+		labels := map[string]string{"crabbox": "true", "created_by": "crabbox", "provider": providerName, "lease": owner.LeaseID, "slug": owner.Slug, "state": owner.State}
+		if state := normalizeVastStatus(item.Status); state != "ready" && state != "unknown" {
+			labels["state"] = state
+		}
 		labels["provider_key"] = core.ProviderKeyForLease(owner.LeaseID)
 		labels[vastReleaseActionLabel] = normalizeVastReleaseAction(cfg.Vast.ReleaseAction)
 		return labels
@@ -973,8 +1030,9 @@ func claimTarget(claim core.LeaseClaim) (core.LeaseTarget, error) {
 		Provider: providerName,
 		Name:     claim.Slug,
 		Status:   claim.Labels["state"],
-		Labels:   claim.Labels,
+		Labels:   shared.LegacyLabelLifecycleLabels(claim),
 	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
 	server.PublicNet.IPv4.IP = claim.SSHHost
 	target := core.SSHTarget{Host: claim.SSHHost, Port: strconv.Itoa(claim.SSHPort), TargetOS: core.TargetLinux}
 	return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server, SSH: target}, nil

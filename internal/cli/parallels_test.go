@@ -163,6 +163,7 @@ func TestParallelsWaitForIPTimeoutExplainsDiscovery(t *testing.T) {
 	running := `[{"ID":"vm1","Name":"macOS","State":"running","Hardware":{"net0":{"enabled":true,"mac":"001C425AA8E6"}}}]`
 	stopped := `[{"ID":"vm1","Name":"macOS","State":"stopped","Hardware":{"net0":{"enabled":true,"mac":"001C425AA8E6"}}}]`
 	otherLease := "[vnic0]\n10.211.55.79=\"" + strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10) + ",1800,001c426ad157,01001c426ad157\"\n"
+	staleLease := "[vnic0]\n10.211.55.79=\"" + strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10) + ",1800,001c425aa8e6,01001c425aa8e6\"\n"
 	bootstrap := "/Users/build/.ssh/bootstrap"
 	for _, test := range []struct {
 		name      string
@@ -177,13 +178,13 @@ func TestParallelsWaitForIPTimeoutExplainsDiscovery(t *testing.T) {
 	}{
 		{
 			name: "linked macOS without fallback", vmJSON: running, target: targetMacOS,
-			want:   []string{"clone_mode=linked", "macs=001c425aa8e6", "tools_ip=none", "set parallels.bootstrapKey", "retry with parallels.cloneMode=full", "cannot select a source snapshot"},
+			want:   []string{"clone_mode=linked", "macs=001c425aa8e6", "tools_ip=none", "set parallels.bootstrapKey", "retry with parallels.cloneMode=full", "clear parallels.sourceSnapshot and parallels.sourceSnapshotId", "source VM's current state", "cannot select a source snapshot"},
 			reject: []string{"no matching DHCP lease was found"},
 		},
 		{
 			name: "linked macOS fallback with no lease for the clone", vmJSON: running, leases: otherLease, target: targetMacOS, bootstrap: bootstrap,
-			want:   []string{"DHCP fallback: no Parallels DHCP lease", "no matching DHCP lease was found", "prlctl capture <new-vm-id> --file <png>", "acquisition cleans up failed clones", "on the Parallels host while IP discovery is still waiting", "retry with parallels.cloneMode=full"},
-			reject: []string{"set parallels.bootstrapKey", "prlctl capture vm1"},
+			want:   []string{"DHCP fallback: no Parallels DHCP lease", "no matching DHCP lease was found in the Parallels host lease file", "check guest boot and network configuration", "prlctl capture <new-vm-id> --file <png>", "acquisition cleans up failed clones", "on the Parallels host while IP discovery is still waiting", "retry with parallels.cloneMode=full"},
+			reject: []string{"set parallels.bootstrapKey", "prlctl capture vm1", "may not have booted"},
 		},
 		{
 			name: "full clone omits clone mode advice", vmJSON: running, target: targetMacOS, cloneMode: "full", bootstrap: bootstrap, leases: otherLease,
@@ -205,6 +206,31 @@ func TestParallelsWaitForIPTimeoutExplainsDiscovery(t *testing.T) {
 			want:   []string{"clone_mode=unknown", "no matching DHCP lease was found", "inspect the existing VM", "prlctl capture <existing-vm-id> --file <png>"},
 			reject: []string{"clone_mode=linked", "retry with parallels.cloneMode=full", "cleans up failed clones", "capture <new-vm-id>"},
 		},
+		{
+			name: "expired lease is not missing", vmJSON: running, target: targetMacOS, bootstrap: bootstrap, leases: staleLease,
+			want:   []string{"DHCP fallback: no fresh Parallels DHCP lease"},
+			reject: []string{"no matching DHCP lease was found", "check guest boot"},
+		},
+		{
+			name: "malformed lease file is not missing", vmJSON: running, target: targetMacOS, bootstrap: bootstrap, leases: "10.211.55.79=bad\n",
+			want:   []string{"DHCP fallback: parse Parallels DHCP leases"},
+			reject: []string{"no matching DHCP lease was found", "check guest boot"},
+		},
+		{
+			name: "unknown MAC is not a missing lease", vmJSON: `[{"ID":"vm1","State":"running"}]`, target: targetMacOS, bootstrap: bootstrap,
+			want:   []string{"macs=-", "tools_ip=none", "no usable NIC MAC"},
+			reject: []string{"no matching DHCP lease was found", "check guest boot"},
+		},
+		{
+			name: "failed VM query leaves Tools IP unknown", vmJSON: "invalid JSON", target: targetMacOS, bootstrap: bootstrap,
+			want:   []string{"last_state=-", "clone_mode=linked", "macs=-", "tools_ip=unknown"},
+			reject: []string{"tools_ip=none", "DHCP fallback:", "retry with parallels.cloneMode=full"},
+		},
+		{
+			name: "missing existing VM leaves Tools IP unknown", vmJSON: "[]", target: targetMacOS, bootstrap: bootstrap, existing: true,
+			want:   []string{"last_state=-", "clone_mode=unknown", "tools_ip=unknown"},
+			reject: []string{"tools_ip=none", "DHCP fallback:", "retry with parallels.cloneMode=full", "cleans up failed clones"},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runner := &parallelsDHCPRunner{vmJSON: test.vmJSON, leases: test.leases}
@@ -214,8 +240,8 @@ func TestParallelsWaitForIPTimeoutExplainsDiscovery(t *testing.T) {
 				purpose = ParallelsIPWaitExisting
 			}
 			_, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Nanosecond, purpose)
-			if err == nil {
-				t.Fatal("expected timeout")
+			if err == nil || ExitCodeForError(err, 1) != 5 {
+				t.Fatalf("expected timeout with exit code 5, got %v", err)
 			}
 			for _, want := range test.want {
 				if !strings.Contains(err.Error(), want) {
@@ -681,8 +707,11 @@ func TestParallelsEnsureGuestReadyInstallsPOSIXReadyScript(t *testing.T) {
 	if runner.lastReq.Name != "prlctl" {
 		t.Fatalf("name=%q", runner.lastReq.Name)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
-	for _, want := range []string{"exec", "vm1", "desktop=false", "cat >/usr/local/bin/crabbox-ready", "apt-get install", "test -w '/work/test'"} {
+	if argv := strings.Join(runner.lastReq.Args, " "); argv != "exec vm1 /bin/sh -s" {
+		t.Fatalf("argv=%q", argv)
+	}
+	got := runner.lastStdin
+	for _, want := range []string{"desktop=false", "cat >/usr/local/bin/crabbox-ready", "apt-get install", "test -w '/work/test'"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("guest prep command missing %q:\n%s", want, got)
 		}
@@ -696,7 +725,7 @@ func TestParallelsEnsureGuestReadyUpgradesReadyGuestForDesktop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
+	got := runner.lastStdin
 	for _, want := range []string{
 		"desktop=true",
 		"command -v websockify",
@@ -722,7 +751,7 @@ func TestParallelsEnsureGuestReadyEnablesMacOSRemoteLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
+	got := runner.lastStdin
 	for _, want := range []string{"launchctl load -w /System/Library/LaunchDaemons/ssh.plist", "launchctl enable system/com.openssh.sshd", "launchctl kickstart -k system/com.openssh.sshd"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("macOS guest prep missing %q:\n%s", want, got)
@@ -742,7 +771,7 @@ func TestParallelsEnsureGuestReadyVerifiesMacOSSSHListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
+	got := runner.lastStdin
 	// Best-effort launchctl calls do not establish listener availability.
 	// Authenticated SSH readiness remains a separate, later check.
 	for _, want := range []string{
@@ -775,7 +804,7 @@ func TestParallelsEnsureGuestReadyRechecksMacOSSSHListenerWhenHelperExists(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
+	got := runner.lastStdin
 	// A guest prepared by an older crabbox carries a crabbox-ready that predates
 	// the listener probe. If the early exit trusts that helper alone, such a
 	// guest skips remote-login setup entirely and the new check never runs.
@@ -802,7 +831,7 @@ func TestParallelsEnsureGuestReadyEnablesMacOSScreenSharing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
+	got := runner.lastStdin
 	for _, want := range []string{
 		"desktop=true",
 		"mkdir -p /var/db/crabbox",
@@ -842,7 +871,7 @@ func TestParallelsEnsureGuestReadyUsesMacOSAccountCredentialsWithoutReset(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(runner.lastReq.Args, "\n")
+	got := runner.lastStdin
 	for _, want := range []string{
 		"-access -on -users \"$user\" -privs -all",
 		"VNCAlwaysStartOnConsole -bool true",
@@ -1124,12 +1153,25 @@ type parallelsFakeRunner struct {
 	stdout       string
 	deleteCalled bool
 	lastReq      LocalCommandRequest
+	lastStdin    string
 	requests     []LocalCommandRequest
+	stdins       []string
 }
 
 func (r *parallelsFakeRunner) Run(_ context.Context, req LocalCommandRequest) (LocalCommandResult, error) {
+	// Drain stdin the way a real child would, so a test can assert on what the
+	// command was handed rather than on a reader nobody consumed.
+	r.lastStdin = ""
+	if req.Stdin != nil {
+		data, err := io.ReadAll(req.Stdin)
+		if err != nil {
+			return LocalCommandResult{}, err
+		}
+		r.lastStdin = string(data)
+	}
 	r.lastReq = req
 	r.requests = append(r.requests, req)
+	r.stdins = append(r.stdins, r.lastStdin)
 	if len(req.Args) > 0 && req.Args[0] == "delete" {
 		r.deleteCalled = true
 	}
@@ -1296,5 +1338,142 @@ test -w '/work/crabbox'
 `
 	if !strings.Contains(script, linuxReady) {
 		t.Fatal("Linux crabbox-ready changed; the Node baseline is macOS-only")
+	}
+}
+
+// `prlctl exec` does not preserve argv boundaries: it joins its arguments into
+// one string and re-parses that string with a shell inside the guest, so a
+// script handed over as a single argv element loses its word boundaries and its
+// leading `set -eu` is swallowed as arguments to an inner shell. stdin is
+// preserved verbatim, so both preparation scripts have to travel there.
+// https://github.com/openclaw/crabbox/issues/2396
+//
+// The runner is mocked, so this cannot observe the guest-side reconstruction
+// itself; it pins the transport crabbox chooses, which is the part that is
+// wrong today.
+func TestParallelsGuestPrepScriptsTravelOnStdinNotArgv(t *testing.T) {
+	steps := []struct {
+		name   string
+		run    func(*ParallelsClient) error
+		marker string
+	}{
+		{
+			name: "install ssh key",
+			run: func(c *ParallelsClient) error {
+				return c.InstallSSHKey(context.Background(), "vm1", Config{SSHUser: "runner", TargetOS: targetLinux}, "ssh-ed25519 AAAAlease")
+			},
+			marker: `chmod 600 "$home/.ssh/authorized_keys"`,
+		},
+		{
+			name: "ensure guest ready",
+			run: func(c *ParallelsClient) error {
+				return c.EnsureGuestReady(context.Background(), "vm1", Config{SSHUser: "runner", WorkRoot: "/work/test", TargetOS: targetLinux})
+			},
+			marker: "cat >/usr/local/bin/crabbox-ready",
+		},
+	}
+	routes := []struct {
+		name     string
+		cfg      Config
+		wantName string
+	}{
+		{name: "local", cfg: Config{}, wantName: "prlctl"},
+		{
+			name:     "remote",
+			cfg:      Config{Parallels: ParallelsConfig{Host: "mac.example", HostUser: "build", HostKey: "/Users/build/.ssh/host"}},
+			wantName: directSSHExecutable(),
+		},
+	}
+	for _, route := range routes {
+		for _, step := range steps {
+			t.Run(route.name+"/"+step.name, func(t *testing.T) {
+				runner := &parallelsFakeRunner{}
+				client := NewParallelsClient(route.cfg, runner)
+				if err := step.run(client); err != nil {
+					t.Fatal(err)
+				}
+				req := runner.lastReq
+				if req.Name != route.wantName {
+					t.Fatalf("name=%q want %q", req.Name, route.wantName)
+				}
+
+				script := runner.lastStdin
+				if !strings.HasPrefix(script, "set -eu\n") {
+					t.Fatalf("script does not reach the guest shell on stdin; got %d bytes: %q", len(script), script)
+				}
+				if !strings.Contains(script, step.marker) {
+					t.Fatalf("script on stdin is missing %q:\n%s", step.marker, script)
+				}
+
+				argv := strings.Join(append([]string{req.Name}, req.Args...), "\n")
+				for _, banned := range []string{"set -eu", step.marker, "-lc"} {
+					if strings.Contains(argv, banned) {
+						t.Fatalf("script body travels in argv, where prlctl exec re-parses it: %q present in\n%s", banned, argv)
+					}
+				}
+
+				if route.wantName == "prlctl" {
+					if got, want := strings.Join(req.Args, " "), "exec vm1 /bin/sh -s"; got != want {
+						t.Fatalf("local prlctl argv=%q want %q", got, want)
+					}
+					return
+				}
+				// The remote route keeps its host selection, key handling and the
+				// PATH prefix prlctl needs on a non-login shell.
+				if len(req.Args) < 2 {
+					t.Fatalf("remote ssh argv too short: %#v", req.Args)
+				}
+				if got, want := req.Args[len(req.Args)-2], "build@mac.example"; got != want {
+					t.Fatalf("remote host=%q want %q", got, want)
+				}
+				remote := req.Args[len(req.Args)-1]
+				for _, want := range []string{"PATH=/usr/local/bin:", `'prlctl' 'exec' 'vm1' '/bin/sh' '-s'`} {
+					if !strings.Contains(remote, want) {
+						t.Fatalf("remote command missing %q: %s", want, remote)
+					}
+				}
+			})
+		}
+	}
+}
+
+// Both preparation scripts now arrive on stdin on the prlctl routes too, so the
+// same rule PR https://github.com/openclaw/crabbox/pull/2387 established for the
+// macOS Node children applies to every child either script runs: one that reads
+// stdin silently eats the remainder of the script while the shell still exits 0.
+// The Linux branch was never reachable over stdin before, and `apt-get` is the
+// obvious offender.
+func TestParallelsPrepScriptsKeepStdinOffEveryChild(t *testing.T) {
+	ready := parallelsPOSIXEnsureReadyScript("parallels-01", "/work/test", true, false, []string{"22", "2222"})
+	for _, want := range []string{
+		// The readiness gate runs mid-script; anything it consumes is lost. So
+		// does the SSH-listener probe from
+		// https://github.com/openclaw/crabbox/pull/2399 that guards it.
+		"/usr/local/bin/crabbox-ready </dev/null >/tmp/crabbox-ready.log 2>&1",
+		`nc -z 127.0.0.1 "$port" </dev/null >/dev/null 2>&1`,
+		"nc -z 127.0.0.1 5900 </dev/null",
+		"systemctl is-active --quiet crabbox-x11vnc.service </dev/null",
+		// Linux branch.
+		"apt-get update </dev/null",
+		"apt-get install -y --no-install-recommends openssh-server ca-certificates curl git rsync jq </dev/null",
+		"systemctl daemon-reload </dev/null",
+		"systemctl enable --now crabbox-xvfb.service crabbox-desktop.service crabbox-x11vnc.service </dev/null",
+		// macOS branch.
+		`/bin/launchctl load -w /System/Library/LaunchDaemons/ssh.plist </dev/null >"$remote_login_log" 2>&1`,
+		`"$kickstart" -activate -configure -allowAccessFor -specifiedUsers </dev/null >/dev/null 2>&1`,
+	} {
+		if !strings.Contains(ready, want) {
+			t.Fatalf("child may consume the script from stdin: missing %q", want)
+		}
+	}
+
+	install := parallelsPOSIXInstallSSHKeyScript("parallels-01", "ssh-ed25519 AAAAlease")
+	for _, want := range []string{
+		`getent passwd "$user" </dev/null 2>/dev/null`,
+		`dscl . -read "/Users/$user" NFSHomeDirectory </dev/null 2>/dev/null`,
+	} {
+		if !strings.Contains(install, want) {
+			t.Fatalf("child may consume the script from stdin: missing %q", want)
+		}
 	}
 }
