@@ -1245,3 +1245,20 @@ Run-specific flags:
 --timing-record default|off|path
 --record-local
 ```
+
+For portable typed-pool access, add `--pool-access` alongside
+`--pool-identity-file` and use `--pool-duration` to request up to 30 minutes:
+
+```sh
+crabbox run --pool builders --pool-identity-file pool-identity.json \
+  --pool-access --pool-duration 20m --pool-compatibility-key linux-16-vcpu -- go test ./...
+```
+
+The CLI prints pending/active grant state, a protected receipt path, and the
+immutable hard deadline before execution. It uses a fresh local key, sends
+liveness heartbeats, and cancels the command at that deadline. Heartbeats never
+renew access. Cleanup preserves the original command failure; when the command
+succeeds, a fencing or return failure fails the run. Failed cleanup retains the
+receipt for `pool return --receipt-file <path> --result drain`. AWS v1 removes the
+grant key and observes a reboot before returning a scrubbed machine to ready.
+A longer job must return and borrow again; uninterrupted renewal is deferred.

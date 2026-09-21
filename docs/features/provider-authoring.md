@@ -804,3 +804,20 @@ to the rest of Crabbox.
 - [Source map](../source-map.md): files behind documented behavior.
 - [Architecture](../architecture.md): system overview and lease flow.
 - [Coordinator](coordinator.md): brokered lease contract.
+
+### Bounded ready-pool access
+
+`CloudProvider.poolAccess()` is an optional capability separate from typed image
+identity. Core journals grants, generations, receipt hashes, immutable deadlines,
+and cleanup intent in transactions; adapters perform external mutations after
+those transactions commit. Implement `enroll`, `install`, and `revoke` from
+`worker/src/ready-pool-access.ts`. Bind every operation to the immutable resource
+and lease. A replay or delayed install must not restore a revoked generation.
+
+`revoke` must prove both exact key removal and active-session fencing, or
+confirmed resource destruction. An accepted API request is insufficient.
+Enrollment must establish guest expiry enforcement that survives coordinator
+outages and guest reboot. AWS uses SSM, root-owned generation tombstones,
+persistent expiry timers, and observed boot-ID changes. Whole-instance reboot
+cannot preserve a replacement grant's sessions, so v1 has no in-place renewal.
+Unsupported adapters must leave this capability absent.

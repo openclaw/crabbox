@@ -1,6 +1,6 @@
 # Portable ready-pool access: v1 design
 
-Status: accepted v1 bounded-borrow design; Phase 2 implementation follows.
+Status: accepted v1 bounded-borrow design; experimental Phase 2 implementation.
 This document specifies the portable access contract; availability requires the
 explicit client opt-in and coordinator capability described below.
 
@@ -142,7 +142,7 @@ portable access must not silently merge distinct typed image identities.
 
 ## Reconciler state machine
 
-The proposed lifecycle is:
+The lifecycle is:
 
 ```text
 fill claim -> provisioning/hydration -> enrollment -> ready
@@ -181,7 +181,7 @@ resource binding or revocation/fencing work for a still-existing machine.
 
 Extend existing state and hit/miss counters with grant issue, acknowledgement,
 expiry, revocation, fencing failure, and TTL-rotation outcomes. Record borrow
-latency and queue age in the broker, and first-command latency and scrub
+latency and ready-queue age in the broker, and first-command latency and scrub
 duration/failure through validated client completion reports. Client timings
 are operational telemetry, never authorization or reuse proof. Avoid token,
 key, or unconstrained repository labels in metrics.
@@ -203,9 +203,9 @@ left borrowable in an older pool namespace. A namespace split alone does not
 provide a remote revocation or maintenance service after rollback: drain and
 verify portable cleanup before disabling its controller.
 
-Proposed CLI surfaces should add a separate portable opt-in alongside typed
-identity, print pending versus active access distinctly, and report the hard
-deadline and fencing/cleanup status. Manual operations need a protected receipt
+The CLI adds `--access` to manual typed pool commands and `--pool-access` to
+`run`/`prewarm`, prints pending versus active access distinctly, and reports the
+hard deadline and fencing/cleanup status. Manual operations need a protected receipt
 file instead of tokens on argv. `run --pool` must preserve command failures
 while reporting cleanup failure and deleting local ephemeral keys only after
 retaining enough receipt state to retry remote cleanup. V1 reports an immutable hard deadline and does not expose a renewal command.
@@ -230,3 +230,13 @@ pool without sharing a private key. Provider proof must include usable access,
 return/reborrow, an already-open session fenced on revocation, killed-borrower
 cleanup, ambiguous SSM completion, and confirmed zero remaining paid resources.
 Unit tests and a design document cannot establish that provider behavior.
+
+## Implementation locations
+
+`worker/src/ready-pool-access.ts` owns transactional grant state and cleanup
+journals. The existing pool reconciler in `fleet.ts` supplies capacity claims,
+compatibility filtering, heartbeat deadlines, counters, and terminal pruning;
+portable records use separate namespaces. `aws-pool-access.ts` owns the SSM guest
+contract. `internal/cli/ready_pool_access.go` owns ephemeral keys and receipts.
+The live provider proof above remains a prerequisite for production rollout; mocked
+provider tests do not establish that live AWS session fencing works.

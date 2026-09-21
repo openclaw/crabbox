@@ -263,6 +263,8 @@ type runFlagValues struct {
 	LeaseOutput            *string
 	ReadyPool              *string
 	ReadyPoolCompatibility *string
+	ReadyPoolAccess        *bool
+	ReadyPoolDuration      *time.Duration
 	ReadyPoolIdentity      *string
 	ReadyPoolReturn        *string
 	Downloads              *stringListFlag
@@ -318,6 +320,8 @@ func registerRunFlags(fs *flag.FlagSet, defaults Config, options leaseCreateFlag
 		LeaseOutput:            fs.String("lease-output", "", "write a retained JSON lease handle for orchestrators on supported providers"),
 		ReadyPool:              fs.String("pool", "", "borrow a broker ready-pool lease"),
 		ReadyPoolCompatibility: fs.String("pool-compatibility-key", "", "provider-neutral ready-pool capability and size key"),
+		ReadyPoolAccess:        fs.Bool("pool-access", false, "use bounded portable typed-pool access"),
+		ReadyPoolDuration:      fs.Duration("pool-duration", 30*time.Minute, "immutable borrow duration, maximum 30m"),
 		ReadyPoolIdentity:      fs.String("pool-identity-file", "", "generated typed ready-pool identity JSON"),
 		ReadyPoolReturn:        fs.String("pool-return", "auto", "ready-pool return policy: auto, ready, drain, release"),
 		Downloads:              &stringListFlag{},
@@ -629,6 +633,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		return Exit(2, "--pool cannot be combined with --full-resync or --fresh-sync")
 	}
 
+	if *runFlags.ReadyPoolAccess && (strings.TrimSpace(*readyPool) == "" || strings.TrimSpace(*runFlags.ReadyPoolIdentity) == "") {
+		return Exit(2, "--pool-access requires --pool and --pool-identity-file")
+	}
+	var portableReceiptPath string
+	var portableBorrowStarted time.Time
+	var portableTimings poolAccessTimings
 	var readyPoolIdentity *CoordinatorReadyPoolIdentityV1
 	if flagWasSet(fs, "pool-identity-file") {
 		identity, identityErr := loadReadyPoolIdentity(*runFlags.ReadyPoolIdentity)
@@ -1055,7 +1065,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if readyPoolRunShouldScrub(*readyPoolReturn, failure) {
 			scrubCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 			var hydrationCompatible bool
+			scrubStarted := time.Now()
 			preparedCommit, hydrationCompatible, scrubErr = a.scrubReadyPoolLease(scrubCtx, target, borrowedPool.Entry, workdir, trustedPoolRemoteURL, readyPoolRunRequiresHydrationProof(borrowedPool.Entry, hydratedByActions))
+			portableTimings.ScrubMs = time.Since(scrubStarted).Milliseconds()
+			portableTimings.ScrubFailed = scrubErr != nil
 			cancel()
 			if scrubErr != nil {
 				fmt.Fprintf(a.Stderr, "warning: ready-pool scrub failed for %s: %v\n", borrowedPool.Entry.LeaseID, scrubErr)
@@ -1088,7 +1101,11 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 				return runtimeErr
 			}
 			var err error
-			if borrowedPool.Entry.Identity != nil {
+			if portableReceiptPath != "" {
+				fenceCtx, cancel := context.WithTimeout(context.WithoutCancel(returnCtx), 3*time.Minute)
+				defer cancel()
+				err = returnPortablePool(fenceCtx, coord, portableReceiptPath, result, portableTimings)
+			} else if borrowedPool.Entry.Identity != nil {
 				_, err = coord.ReturnTypedReadyPoolLease(returnCtx, borrowedPool.Entry.Key, map[string]any{
 					"leaseID": borrowedPool.Entry.LeaseID, "result": result, "reason": reason,
 					"borrowToken": borrowedPool.Entry.BorrowToken, "identity": *borrowedPool.Entry.Identity,
@@ -1318,6 +1335,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 		addStringInput(borrowInput, "compatibilityKey", *readyPoolCompatibilityKey)
+		if flagWasSet(fs, "class") {
+			addStringInput(borrowInput, "class", cfg.Class)
+		}
+		if flagWasSet(fs, "type") {
+			addStringInput(borrowInput, "serverType", cfg.ServerType)
+		}
 		if readyPoolIdentity != nil {
 			if providerErr := bindReadyPoolIdentityProvider(borrowInput, *readyPoolIdentity); providerErr != nil {
 				return providerErr
@@ -1328,7 +1351,15 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if readyPoolIdentity != nil {
 			delete(borrowInput, "allowMissingCommit")
 			borrowInput["identity"] = *readyPoolIdentity
-			res, err = borrowValidatedTypedReadyPoolLease(ctx, coord, strings.TrimSpace(*readyPool), borrowInput, *readyPoolIdentity)
+			if *runFlags.ReadyPoolAccess {
+				portableBorrowStarted = time.Now()
+				res, portableReceiptPath, err = borrowPortablePool(ctx, coord, strings.TrimSpace(*readyPool), borrowInput, *readyPoolIdentity, "", *runFlags.ReadyPoolDuration, a.Stderr)
+				if err != nil && portableReceiptPath != "" {
+					fmt.Fprintf(a.Stderr, "access cleanup receipt retained: %s\n", portableReceiptPath)
+				}
+			} else {
+				res, err = borrowValidatedTypedReadyPoolLease(ctx, coord, strings.TrimSpace(*readyPool), borrowInput, *readyPoolIdentity)
+			}
 		} else {
 			res, err = coord.BorrowReadyPoolLease(ctx, strings.TrimSpace(*readyPool), borrowInput)
 		}
@@ -1337,7 +1368,23 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			return err
 		}
 		borrowedPool = &res
-		stopReadyPoolHeartbeat = startReadyPoolBorrowHeartbeat(context.WithoutCancel(ctx), coord, res.Entry, a.Stderr)
+		if portableReceiptPath != "" {
+			deadline, parseErr := time.Parse(time.RFC3339Nano, res.Grant.ExpiresAt)
+			if parseErr != nil {
+				return parseErr
+			}
+			var cancelDeadline context.CancelFunc
+			ctx, cancelDeadline = context.WithDeadline(ctx, deadline)
+			defer cancelDeadline()
+			defer func() {
+				if time.Now().After(deadline) {
+					err = errors.Join(err, Exit(7, "portable pool borrow hard deadline reached: %s", res.Grant.ExpiresAt))
+				}
+			}()
+			stopReadyPoolHeartbeat = startPortablePoolHeartbeat(ctx, coord, portableReceiptPath, a.Stderr)
+		} else {
+			stopReadyPoolHeartbeat = startReadyPoolBorrowHeartbeat(context.WithoutCancel(ctx), coord, res.Entry, a.Stderr)
+		}
 		*leaseIDFlag = res.Entry.LeaseID
 		fmt.Fprintf(a.Stderr, "borrowed pool=%s lease=%s\n", res.Entry.Key, res.Entry.LeaseID)
 	}
@@ -1499,6 +1546,10 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		applyResolvedLeaseConfig(&cfg, server, &target)
 		if borrowedPool != nil {
 			target = applyReadyPoolEndpoint(target, borrowedPool.Entry)
+			if portableReceiptPath != "" {
+				target.Key = portableReceiptPath + ".key"
+				target.NoControlMaster = true
+			}
 		}
 		if resolved, resolveErr := resolveNetworkTarget(ctx, cfg, server, target); resolveErr != nil {
 			return resolveErr
@@ -2657,6 +2708,9 @@ afterSync:
 		return recordFailure(bootstrapErr)
 	}
 	commandStart := time.Now()
+	if !portableBorrowStarted.IsZero() {
+		portableTimings.FirstCommandMs = min(time.Since(portableBorrowStarted).Milliseconds(), int64((30*time.Minute)/time.Millisecond))
+	}
 	a.refreshTailscaleMetadata(ctx, cfg, sshBackend, coord, useCoordinator, &server, target, leaseID)
 	refreshRunLeaseClaimEndpoint(leaseID, &server, target)
 	if resolved, err := resolveNetworkTarget(ctx, cfg, server, target); err != nil {

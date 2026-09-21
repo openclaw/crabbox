@@ -42,9 +42,11 @@ export async function mergedCoordinatorWake(
   storage: CoordinatorStorageView,
 ): Promise<number | undefined> {
   const legacy = await storage.get<number | null>(legacyAlarmKey);
+  const poolWakes = await storage.list<{ at: number }>({ prefix: "portable-ready-pool-v1-wake:" });
+  const poolWake = Math.min(...[...poolWakes.values()].map((wake) => wake.at));
   const provisioning = await earliestProvisioningWake(storage);
-  if (legacy == null) return provisioning;
-  return provisioning === undefined ? legacy : Math.min(legacy, provisioning);
+  const next = Math.min(legacy ?? Infinity, provisioning ?? Infinity, poolWake);
+  return Number.isFinite(next) ? next : undefined;
 }
 
 export async function setLegacyWake(storage: CoordinatorStorageView, time?: number): Promise<void> {

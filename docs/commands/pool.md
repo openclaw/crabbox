@@ -111,3 +111,57 @@ to legacy capacity.
 - [run](run.md)
 - [prewarm](prewarm.md)
 - [Broker ready pools](../spec/broker.md)
+
+## Portable access (experimental opt-in)
+
+`--access` adds bounded access grants to the typed protocol; it requires
+`--identity-file` (or `register --cache-compatibility`) and a coordinator with
+`CRABBOX_PORTABLE_POOLS_ENABLED=true`. It never falls back to legacy or ordinary
+typed pools. The first adapter supports AWS public Linux SSH leases whose
+instance profile already permits SSM management. Coordinator deployment
+credentials need EC2 instance observation/termination and SSM
+`SendCommand`/`GetCommandInvocation` for those instances. Enrollment verifies
+systemd, OpenSSH, the guest user, and the exact instance/lease binding; it does
+not attach IAM policies or enable SSM on an unprepared machine.
+
+```sh
+crabbox pool register builders --id cbx_0123456789ab \
+  --identity-file pool-identity.json --compatibility-key linux-16-vcpu --access
+crabbox pool ensure builders --identity-file pool-identity.json --access \
+  --compatibility-key linux-16-vcpu --min-ready 1 --max-ready 2 --create -- \
+  --provider aws --type c6i.4xlarge
+crabbox pool borrow builders --identity-file pool-identity.json --access \
+  --compatibility-key linux-16-vcpu --type c6i.4xlarge \
+  --duration 20m --receipt-file ./borrow-receipt.json
+crabbox pool heartbeat builders --receipt-file ./borrow-receipt.json
+crabbox pool return builders --receipt-file ./borrow-receipt.json --result ready
+```
+
+Each borrow creates a new local Ed25519 key. The broker stores hashes of receipt,
+borrow, and fill-claim tokens. The protected receipt file and adjacent `.key`
+file are mode `0600`; tokens never appear in portable JSON/text output or argv.
+The CLI saves the pending receipt before acknowledging installation. SSH can
+use `-i ./borrow-receipt.json.key` with the returned endpoint. Manual callers
+must send heartbeats within two minutes and scrub their checkout before
+requesting `--result ready`; otherwise use `drain` or `release`.
+
+The grant expiry **is the immutable borrow hard deadline**. The default and
+maximum duration is 30 minutes, capped by lease TTL and caller authorization,
+with second precision. Heartbeats prove liveness only. They never extend access.
+There is no in-place renewal: return and borrow again for a fresh grant,
+possibly on another machine. Pending receipts expire after at most one minute.
+
+Return removes the exact grant key and requires an observed AWS reboot before
+reuse. Timeout, abandonment, or uncertain installation drains the machine and
+requires confirmed destruction. Until cleanup succeeds, the entry remains
+unavailable and consumes capacity. A failed return retains the receipt/key for
+retry; a confirmed terminal grant removes both local files. Guest timers enforce
+expiry during a coordinator outage. Reusable pools still assume trusted guest
+workloads, including root; reboot is session fencing, not a hostile-tenant reset.
+
+`pool ready --identity-file ... --access` lists this separate protocol.
+`prewarm --pool ... --pool-identity-file ... --pool-access` enrolls a hydrated
+lease. `pool borrow --class` and `--type` additionally require exact stored size
+metadata. See the [design and proof requirements](../features/ready-pools.md)
+before enabling this experimental controller. Drain and verify all portable
+cleanup before disabling it or rolling back the coordinator.

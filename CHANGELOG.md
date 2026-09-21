@@ -8,6 +8,8 @@
 
 ### Features
 
+- Add experimental opt-in portable typed ready-pool access with immutable bounded grants, private local receipts, AWS SSM installation and reboot fencing, and retained cleanup capacity. [Issue 1074](https://github.com/openclaw/crabbox/issues/1074).
+
 - Support retry-safe Tenki fixed lease IDs with durable attempt recovery, exact-session attestation, read-only inspection, and single-use terminal receipts; honor acquisition cancellation and locate uploaded scripts after login startup changes directory. [PR 2021](https://github.com/openclaw/crabbox/pull/2021). Thanks @eddiewang.
 - Add replay-safe fixed Parallels lease IDs with durable creation intent, attested host and VM identity, recovery after lost replies without resubmission, and single-use release tombstones. [PR 2383](https://github.com/openclaw/crabbox/pull/2383), [Issue 2382](https://github.com/openclaw/crabbox/issues/2382). Thanks @saariuslystoned.
 - Add replay-safe fixed Proxmox lease IDs with durable VMID/generation binding, conflict checks, retained uncertain attempts, and terminal release tombstones. [PR 1861](https://github.com/openclaw/crabbox/pull/1861), [Issue 1847](https://github.com/openclaw/crabbox/issues/1847). Thanks @devinkuhn.
