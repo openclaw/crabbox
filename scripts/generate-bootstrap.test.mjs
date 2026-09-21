@@ -158,11 +158,12 @@ test("shell and PowerShell literals preserve quoting-sensitive data without eval
 test("optional Linux packages reuse installed capabilities and preserve failures", { skip: process.platform === "win32" }, async (t) => {
   const fixture = await readFile(resolve(repoRoot, "testdata/bootstrap/installed-browser-fixture.sh"), "utf8");
   const packages = "tigervnc-standalone-server xfce4-session";
+  const installCalls = `apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Languages=none -o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false -o Acquire::IndexTargets::deb::CNF::DefaultEnabled=false update\napt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends ${packages}\n`;
   for (const entry of [
     { name: "desktop installed", command: `crabbox_install_packages ${packages}`, env: {}, code: 0, calls: "" },
     { name: "installed package held", command: `crabbox_install_packages ${packages}`, env: { HELD_PACKAGE: "xfce4-session" }, code: 0, calls: "" },
-    { name: "desktop package missing", command: `crabbox_install_packages ${packages}`, env: { MISSING_PACKAGE: "xfce4-session", INSTALL_ALLOWED: "1" }, code: 0, calls: `apt-get install -y --no-install-recommends ${packages}\n` },
-    { name: "desktop install fails", command: `crabbox_install_packages ${packages}`, env: { MISSING_PACKAGE: "xfce4-session", INSTALL_ALLOWED: "1", INSTALL_FAIL: "1" }, code: 47, calls: `apt-get install -y --no-install-recommends ${packages}\n` },
+    { name: "desktop package missing", command: `crabbox_install_packages ${packages}`, env: { MISSING_PACKAGE: "xfce4-session", INSTALL_ALLOWED: "1" }, code: 0, calls: installCalls },
+    { name: "desktop install fails", command: `crabbox_install_packages ${packages}`, env: { MISSING_PACKAGE: "xfce4-session", INSTALL_ALLOWED: "1", INSTALL_FAIL: "1" }, code: 47, calls: installCalls.repeat(3) },
     { name: "Chrome works", command: "crabbox_existing_browser", env: {}, code: 0, browser: "google-chrome", calls: "" },
     { name: "Chromium works", command: "crabbox_existing_browser", env: { BROWSER_PACKAGE: "chromium" }, code: 0, browser: "chromium", calls: "" },
     { name: "browser package missing", command: "crabbox_existing_browser", env: { MISSING_PACKAGE: "google-chrome-stable" }, code: 1, calls: "" },

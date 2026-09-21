@@ -5,7 +5,12 @@ import { describe, expect, it } from "vitest";
 import { portalVNC } from "../src/portal";
 import type { LeaseRecord, TargetOS } from "../src/types";
 
-type State = { viewerRole?: string; controllerID?: string; controllerLabel?: string };
+type State = {
+  wayvncHandoff?: string;
+  viewerRole?: string;
+  controllerID?: string;
+  controllerLabel?: string;
+};
 
 function settle() {
   return new Promise<void>((resolve) => setImmediate(resolve));
@@ -259,6 +264,24 @@ describe("emitted WebVNC sizing policy", () => {
     expect(v.clients).toHaveLength(2);
     expect(v.clients[1]!.resizeSession).toBe(true);
     expect(notice.hidden).toBe(false);
+  });
+
+  it("waits for remote retirement before resizing and preserves manual fallback", async () => {
+    const v = await viewer();
+    await v.connect();
+    const rfb = v.clients[0]!;
+    v.setState({ viewerRole: "controller", controllerID: "self", wayvncHandoff: "pending" });
+    await v.poll();
+    expect(rfb.resizeSession).toBe(false);
+    v.setState({ viewerRole: "controller", controllerID: "self", wayvncHandoff: "verified" });
+    await v.poll();
+    expect(rfb.resizeSession).toBe(true);
+    expect(v.elements.get("vnc-sizing-notice")!.hidden).toBe(true);
+    v.setState({ viewerRole: "observer", controllerID: "other", wayvncHandoff: "manual" });
+    await v.poll();
+    v.setState({ viewerRole: "controller", controllerID: "self", wayvncHandoff: "manual" });
+    await v.poll();
+    expect(v.elements.get("vnc-sizing-notice")!.hidden).toBe(false);
   });
 
   it("does not show a Wayland warning for known XFCE", async () => {

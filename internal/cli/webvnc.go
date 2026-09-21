@@ -529,6 +529,23 @@ func serveWebVNCBridgePool(ctx context.Context, cfg webVNCBridgePoolConfig) erro
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if cfg.Coord != nil && cfg.RescueCtx.Target.TargetOS == targetLinux {
+		probeCtx, stopProbe := context.WithTimeout(ctx, 10*time.Second)
+		state, err := cfg.Coord.WebVNCStatus(probeCtx, cfg.LeaseID)
+		if err == nil && state.RemoteRetirementProtocol == 1 && runSSHQuiet(probeCtx, cfg.RescueCtx.Target, "grep -Eq '^CRABBOX_DESKTOP_ENV=(wayland|gnome)$' /var/lib/crabbox/desktop.env && command -v python3 >/dev/null") == nil {
+			fallback := cfg.DialVNC
+			cfg.DialVNC = func(ctx context.Context) (net.Conn, error) {
+				if relay, err := dialWayVNCRelay(ctx, cfg.RescueCtx.Target); err == nil {
+					return relay, nil
+				}
+				if fallback != nil {
+					return fallback(ctx)
+				}
+				return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(cfg.Host, cfg.Port))
+			}
+		}
+		stopProbe()
+	}
 	if !cfg.DisableHeartbeat && cfg.Coord != nil && strings.TrimSpace(cfg.LeaseID) != "" {
 		stopHeartbeat, err := startCoordinatorHeartbeat(ctx, cfg.Coord, cfg.LeaseID, cfg.ExpectedProvider, cfg.IdleTimeout, nil, cfg.Telemetry, cfg.Log)
 		if err != nil {
@@ -2804,6 +2821,7 @@ func startedTunnelListenerReady(ctx context.Context, localPort string, processID
 }
 
 type webVNCBridge struct {
+	remoteRetirement      sync.Mutex
 	tcp                   net.Conn
 	ws                    *websocket.Conn
 	target                SSHTarget
@@ -2871,6 +2889,14 @@ func connectWebVNCBridgeWithDial(ctx context.Context, coord *CoordinatorClient, 
 	if err != nil {
 		_ = tcp.Close()
 		return nil, err
+	}
+	if relay, ok := tcp.(*wayVNCRelayConn); ok {
+		binding, _ := json.Marshal(map[string]string{"type": "wayvnc_binding", "client": relay.binding.Client, "server": relay.binding.Server})
+		if err := ws.Write(ctx, websocket.MessageText, binding); err != nil {
+			_ = tcp.Close()
+			_ = ws.CloseNow()
+			return nil, err
+		}
 	}
 	return &webVNCBridge{
 		tcp:                 tcp,
@@ -3006,7 +3032,11 @@ func validWebVNCOriginPort(host string) bool {
 }
 
 func (b *webVNCBridge) Serve(ctx context.Context) error {
-	defer b.Close()
+	defer func() {
+		b.remoteRetirement.Lock()
+		defer b.remoteRetirement.Unlock()
+		b.Close()
+	}()
 	if b.desktopThemeUpdates == nil {
 		b.desktopThemeUpdates = make(chan string, 1)
 	}
@@ -4272,6 +4302,9 @@ func (b *webVNCBridge) copyWebSocketToTCP(ctx context.Context) error {
 			return err
 		}
 		if typ == websocket.MessageText {
+			if b.retireWayVNC(ctx, data) {
+				continue
+			}
 			handled, err := b.handleControlFrame(data)
 			if err != nil && b.log != nil {
 				fmt.Fprintf(b.log, "bridge: %v\n", err)

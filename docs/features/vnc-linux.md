@@ -81,9 +81,17 @@ to an Ubuntu 24.04 image.
 
 WayVNC gives layout ownership to the first client that requests a resize,
 until that client disconnects. Changing to Fit, becoming an observer, or
-transferring Crabbox input control does not release that ownership. After a
-takeover, close the previous sizing viewer, then reconnect the new controller.
-The portal shows this reminder independently of connection-status messages.
+transferring Crabbox input control does not release that ownership. With a
+compatible coordinator, managed Wayland portal bridges automatically retire
+the previous controller's exact remote client and wait for WayVNC's
+acknowledgement before enabling the new controller's resize requests. This
+disconnects the previous viewer, which may reconnect as an observer.
+If the control socket is unavailable, another unmanaged client is present, or
+retirement cannot be verified within the deadline, the portal retains the
+manual reminder: close the previous sizing viewer, then reconnect the new
+controller. Older coordinators and ordinary SSH/native viewers retain this
+manual behavior. See [WayVNC handoff](wayvnc-handoff.md) for the identity and
+acknowledgement contract.
 GNOME applications use Xwayland inside labwc, not a full GNOME Shell session.
 
 Direct Linux SSH viewers keep noVNC's **Local scaling** default so fixed-size

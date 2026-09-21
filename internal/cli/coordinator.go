@@ -566,17 +566,18 @@ type CoordinatorWebVNCEvent struct {
 }
 
 type CoordinatorWebVNCStatus struct {
-	LeaseID              string                   `json:"leaseID"`
-	Slug                 string                   `json:"slug,omitempty"`
-	BridgeConnected      bool                     `json:"bridgeConnected"`
-	ViewerConnected      bool                     `json:"viewerConnected"`
-	ViewerCount          int                      `json:"viewerCount,omitempty"`
-	ObserverCount        int                      `json:"observerCount,omitempty"`
-	AvailableViewerSlots int                      `json:"availableViewerSlots,omitempty"`
-	ControllerLabel      string                   `json:"controllerLabel,omitempty"`
-	Command              string                   `json:"command"`
-	Message              string                   `json:"message,omitempty"`
-	Events               []CoordinatorWebVNCEvent `json:"events,omitempty"`
+	RemoteRetirementProtocol int                      `json:"remoteRetirementProtocol,omitempty"`
+	LeaseID                  string                   `json:"leaseID"`
+	Slug                     string                   `json:"slug,omitempty"`
+	BridgeConnected          bool                     `json:"bridgeConnected"`
+	ViewerConnected          bool                     `json:"viewerConnected"`
+	ViewerCount              int                      `json:"viewerCount,omitempty"`
+	ObserverCount            int                      `json:"observerCount,omitempty"`
+	AvailableViewerSlots     int                      `json:"availableViewerSlots,omitempty"`
+	ControllerLabel          string                   `json:"controllerLabel,omitempty"`
+	Command                  string                   `json:"command"`
+	Message                  string                   `json:"message,omitempty"`
+	Events                   []CoordinatorWebVNCEvent `json:"events,omitempty"`
 }
 
 type CoordinatorWebVNCReset struct {

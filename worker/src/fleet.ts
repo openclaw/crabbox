@@ -34,6 +34,7 @@ import {
   sealProvisioningMaterial,
 } from "./provisioning-material";
 import { coordinatorStorageEntries } from "./storage-scan";
+import { WayVNCRetirement } from "./wayvnc-retirement";
 
 const { Client: SSHClientConstructor, utils: sshUtils } = ssh2;
 
@@ -1104,6 +1105,11 @@ export class FleetCoordinator {
   private readonly webVNCAgentCapabilities = new Map<string, Map<string, Set<string>>>();
   private readonly webVNCViewers = new Map<string, Map<string, WebVNCViewerSession>>();
   private readonly webVNCControllers = new Map<string, string>();
+  private readonly wayVNCRetirement = new WayVNCRetirement();
+  private readonly webVNCHandoffs = new Map<
+    string,
+    { viewerID: string; status: "pending" | "verified" | "manual" }
+  >();
   private readonly pendingWebVNCToViewer = new Map<string, WebVNCBuffer>();
   private readonly webVNCEvents = new Map<string, WebVNCEvent[]>();
   private readonly codeAgents = new Map<string, WebSocket>();
@@ -2828,6 +2834,7 @@ export class FleetCoordinator {
     }
     switch (attachment.kind) {
       case "webvnc-agent":
+        if (this.wayVNCRetirement.handle(socket, message)) break;
         await forwardOrBufferWebVNC(
           message,
           await this.currentBridgeRecipient(
@@ -11151,6 +11158,11 @@ export class FleetCoordinator {
       viewerCount: viewers.length,
       observerCount: Math.max(0, viewers.length - (controller ? 1 : 0)),
       availableViewerSlots: availableAgents.length,
+      remoteRetirementProtocol: 1,
+      wayvncHandoff:
+        this.webVNCHandoffs.get(lease.id)?.viewerID === controllerID
+          ? this.webVNCHandoffs.get(lease.id)?.status
+          : "manual",
       viewerID,
       viewerRole: currentViewer
         ? currentViewer.id === controllerID
@@ -11334,6 +11346,31 @@ export class FleetCoordinator {
     const previousID = this.activeWebVNCControllerID(lease.id);
     this.webVNCControllers.set(lease.id, viewerID);
     if (previousID !== viewerID) {
+      const previousHandoff = this.webVNCHandoffs.get(lease.id);
+      // A failed or overlapping handoff can leave an older observer owning layout.
+      const ownershipContinuous = !previousHandoff || previousHandoff.status === "verified";
+      const handoff = { viewerID, status: "pending" as "pending" | "verified" | "manual" };
+      this.webVNCHandoffs.set(lease.id, handoff);
+      const previous = this.webVNCViewers.get(lease.id)?.get(previousID);
+      const oldAgent = previous && this.webVNCAgents.get(lease.id)?.get(previous.agentID);
+      const newAgent = this.webVNCAgents.get(lease.id)?.get(viewer.agentID);
+      const retired =
+        ownershipContinuous && oldAgent && newAgent
+          ? await this.wayVNCRetirement.retire(
+              oldAgent,
+              newAgent,
+              this.openWebVNCAgents(lease.id).map(([, socket]) => socket),
+            )
+          : false;
+      // Reconnects and overlapping takeovers invalidate the pending generation.
+      if (this.webVNCHandoffs.get(lease.id) === handoff) {
+        handoff.status =
+          retired &&
+          this.activeWebVNCControllerID(lease.id) === viewerID &&
+          this.webVNCViewers.get(lease.id)?.get(viewerID) === viewer
+            ? "verified"
+            : "manual";
+      }
       this.recordWebVNCEvent(lease.id, "control_taken", `${viewer.label} took control`);
     }
     return await this.webVNCStatus(
@@ -12524,6 +12561,7 @@ export class FleetCoordinator {
     if (!viewers || viewers.size === 0) {
       this.webVNCViewers.delete(leaseID);
       this.webVNCControllers.delete(leaseID);
+      this.webVNCHandoffs.delete(leaseID);
       return;
     }
     if (this.webVNCControllers.get(leaseID) === viewerID) {
@@ -12542,6 +12580,7 @@ export class FleetCoordinator {
     }
     this.webVNCViewers.delete(leaseID);
     this.webVNCControllers.delete(leaseID);
+    this.webVNCHandoffs.delete(leaseID);
   }
 
   private async consumeRuntimeAdapterTicket(
@@ -22955,7 +22994,10 @@ function isReservedWebVNCControlFrame(message: unknown): boolean {
   }
   try {
     const parsed = JSON.parse(message) as { type?: unknown };
-    return parsed.type === "desktop_theme";
+    return (
+      parsed.type === "desktop_theme" ||
+      (typeof parsed.type === "string" && parsed.type.startsWith("wayvnc_"))
+    );
   } catch {
     return false;
   }

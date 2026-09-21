@@ -30,9 +30,12 @@ dpkg-query() {
 apt-get() {
   printf 'apt-get %s\n' "$*" >>"$FIXTURE_LOG"
   test "${INSTALL_ALLOWED:-0}" = 1 || return 99
+  case " $* " in *" update "*) return 0 ;; esac
   test "${INSTALL_FAIL:-0}" = 0 || return 47
 }
 curl() { printf 'network forbidden\n' >>"$FIXTURE_LOG"; return 98; }
 retry() { "$@"; }
 systemctl() { return 0; }
 timeout() { shift; "$@"; }
+
+sleep() { :; }

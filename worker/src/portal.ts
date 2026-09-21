@@ -1358,6 +1358,7 @@ export function portalVNC(
       let isController = false;
       let controllerID = "";
       let sizingOwnerChanged = false;
+      let sizingHandoffPending = false;
       let connectionEpoch = 0;
       let collaborationRequest = 0;
       let statusPending = false;
@@ -1375,7 +1376,7 @@ export function portalVNC(
         if (rfb) {
           const controlling = connected && isController;
           rfb.viewOnly = !controlling;
-          const resize = controlling && sizing.value === "match";
+          const resize = controlling && !sizingHandoffPending && sizing.value === "match";
           // The noVNC setter sends a resize; unchanged status polls must not resend it.
           if (rfb.resizeSession !== resize) rfb.resizeSession = resize;
         }
@@ -1502,6 +1503,8 @@ export function portalVNC(
         const nextControllerID = state.controllerID || "";
         if (controllerID && nextControllerID && controllerID !== nextControllerID) sizingOwnerChanged = true;
         if (nextControllerID) controllerID = nextControllerID;
+        sizingHandoffPending = state.wayvncHandoff === "pending";
+        if (state.wayvncHandoff === "verified") sizingOwnerChanged = false;
         const controlling = role === "controller";
         const connectedViewer = role === "controller" || role === "observer";
         isController = controlling;
