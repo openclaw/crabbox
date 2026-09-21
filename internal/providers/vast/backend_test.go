@@ -701,27 +701,38 @@ func TestResolveRejectsTerminalStatusForRunButAllowsRelease(t *testing.T) {
 }
 
 func TestResolveStatusOnlyAllowsInstanceWithoutSSHEndpoint(t *testing.T) {
-	api := &fakeVastAPI{instances: []vastInstance{{ID: 10, Label: encodeVastOwnershipLabel("cbx_status", "status-me", "stopped"), Status: "stopped"}}}
-	b := newTestBackend(t, api)
-
-	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "status-me", StatusOnly: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lease.LeaseID != "cbx_status" || lease.SSH.Host != "" {
-		t.Fatalf("lease=%#v", lease)
-	}
-	for _, key := range []string{"created_at", "last_touched_at", "expires_at", "idle_timeout", "idle_timeout_secs", "ttl_secs", "keep"} {
-		if _, exists := lease.Server.Labels[key]; exists {
-			t.Errorf("unclaimed observation invented %s", key)
-		}
-	}
-	if _, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
-		t.Fatalf("observation wrote claim: exists=%v err=%v", exists, err)
+	for _, tc := range []struct {
+		name, host string
+		port       int
+	}{
+		{"absent", "", 0},
+		{"host only", "203.0.113.10", 0},
+		{"port only", "", 2201},
+		{"blank host", " \t", 2201},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeVastAPI{instances: []vastInstance{{ID: 10, Label: encodeVastOwnershipLabel("cbx_status", "status-me", "stopped"), Status: "stopped", SSHHost: tc.host, SSHPort: tc.port}}}
+			b := newTestBackend(t, api)
+			lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "status-me", StatusOnly: true, NoLocalStateMutations: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lease.LeaseID != "cbx_status" || lease.SSH.Host != "" {
+				t.Fatalf("lease=%#v", lease)
+			}
+			for _, key := range []string{"created_at", "last_touched_at", "expires_at", "idle_timeout", "idle_timeout_secs", "ttl_secs", "keep"} {
+				if _, exists := lease.Server.Labels[key]; exists {
+					t.Errorf("unclaimed observation invented %s", key)
+				}
+			}
+			if _, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || exists {
+				t.Fatalf("observation wrote claim: exists=%v err=%v", exists, err)
+			}
+		})
 	}
 }
 
-func TestResolveStatusOnlyReadyProbeIncludesSSHTarget(t *testing.T) {
+func TestResolveStatusOnlyIncludesSSHTarget(t *testing.T) {
 	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
 	b := newTestBackend(t, api)
 	acquired, err := b.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "status-wait", Keep: true})
@@ -729,15 +740,27 @@ func TestResolveStatusOnlyReadyProbeIncludesSSHTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "status-wait", StatusOnly: true, ReadyProbe: true})
+	before, err := core.ReadLeaseClaim(acquired.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.LeaseID != acquired.LeaseID || lease.SSH.Host != acquired.SSH.Host || lease.SSH.Key != acquired.SSH.Key {
-		t.Fatalf("lease=%#v acquired=%#v", lease, acquired)
-	}
-	if lease.SSH.ReadyCheck != vastReadyCheck {
-		t.Fatalf("ready check=%q", lease.SSH.ReadyCheck)
+	for _, readyProbe := range []bool{false, true} {
+		t.Run(strconv.FormatBool(readyProbe), func(t *testing.T) {
+			lease, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "status-wait", StatusOnly: true, ReadyProbe: readyProbe, NoLocalStateMutations: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lease.LeaseID != acquired.LeaseID || lease.SSH.Host != acquired.SSH.Host || lease.SSH.Port != acquired.SSH.Port || lease.SSH.User != acquired.SSH.User || lease.SSH.Key != acquired.SSH.Key {
+				t.Fatalf("status target differs from acquired target: leaseMatches=%t host=%q port=%q user=%q keyMatches=%t", lease.LeaseID == acquired.LeaseID, lease.SSH.Host, lease.SSH.Port, lease.SSH.User, lease.SSH.Key == acquired.SSH.Key)
+			}
+			if lease.SSH.ReadyCheck != vastReadyCheck {
+				t.Fatalf("ready check=%q", lease.SSH.ReadyCheck)
+			}
+			after, err := core.ReadLeaseClaim(acquired.LeaseID)
+			if err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("status observation changed claim: %v", err)
+			}
+		})
 	}
 }
 

@@ -552,7 +552,8 @@ func (b *backend) targetFromInstance(ctx context.Context, client vastAPI, item v
 		core.SetServerLeaseClaimSnapshot(&server, core.LeaseClaim{}, false)
 	}
 	target := core.LeaseTarget{Server: server, LeaseID: leaseID}
-	if !req.ReleaseOnly && (!req.StatusOnly || req.ReadyProbe) {
+	hasSSHEndpoint := strings.TrimSpace(item.SSHHost) != "" && item.SSHPort > 0
+	if !req.ReleaseOnly && (!req.StatusOnly || req.ReadyProbe || hasSSHEndpoint) {
 		ssh, err := sshTargetFromInstance(b.cfg, item)
 		if err != nil {
 			return core.LeaseTarget{}, err
