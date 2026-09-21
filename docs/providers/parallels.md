@@ -83,10 +83,13 @@ Some templates run as full clones but never boot as linked clones: Parallels
 reports the clone as `running`, yet the guest never gets a Tools session or a
 DHCP lease, and the lease fails after `parallels.startupTimeout` waiting for an
 IP. The timeout error names the clone mode and the clone's NIC MACs, and says
-whether the macOS DHCP fallback found no lease for them. To confirm a boot
-failure, capture the clone's console while it is still running:
+whether the macOS DHCP fallback found no lease for them. Crabbox deletes the
+failed clone before it reports the timeout, so the VM named in the error no
+longer exists. To confirm a boot failure, retry the lease and, on the Parallels
+host, capture the new clone's console while Crabbox is still waiting for its IP:
 
 ```sh
+prlctl list --all            # find the new crabbox-cbx-... clone
 prlctl capture <vm-id> --file /tmp/crabbox-clone.png
 ```
 

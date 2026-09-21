@@ -181,8 +181,8 @@ func TestParallelsWaitForIPTimeoutExplainsDiscovery(t *testing.T) {
 		},
 		{
 			name: "linked macOS fallback with no lease for the clone", vmJSON: running, leases: otherLease, target: targetMacOS, bootstrap: bootstrap,
-			want:   []string{"DHCP fallback: no Parallels DHCP lease", "never obtained a DHCP lease", "prlctl capture vm1 --file <png>", "retry with parallels.cloneMode=full"},
-			reject: []string{"set parallels.bootstrapKey"},
+			want:   []string{"DHCP fallback: no Parallels DHCP lease", "never obtained a DHCP lease", "failed clones are deleted", "prlctl capture <vm-id> --file <png>", "against the new clone while IP discovery is still waiting", "retry with parallels.cloneMode=full"},
+			reject: []string{"set parallels.bootstrapKey", "prlctl capture vm1"},
 		},
 		{
 			name: "full clone omits clone mode advice", vmJSON: running, target: targetMacOS, cloneMode: "full", bootstrap: bootstrap, leases: otherLease,

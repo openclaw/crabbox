@@ -573,7 +573,7 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 			}
 		}
 		if time.Now().After(deadline) {
-			hint := parallelsIPTimeoutHint(c.Cfg, id, last, useDHCPFallback, lastDHCPError)
+			hint := parallelsIPTimeoutHint(c.Cfg, last, useDHCPFallback, lastDHCPError)
 			if lastDHCPError != nil {
 				return ParallelsVM{}, Exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s; DHCP fallback: %v; %s", id, blank(last.State, "-"), lastDHCPError, hint)
 			}
@@ -589,7 +589,7 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 
 // parallelsIPTimeoutHint explains an IP discovery timeout in terms of the
 // clone mode, the discovery routes that ran, and the next check to make.
-func parallelsIPTimeoutHint(cfg Config, id string, last ParallelsVM, dhcpFallback bool, dhcpErr error) string {
+func parallelsIPTimeoutHint(cfg Config, last ParallelsVM, dhcpFallback bool, dhcpErr error) string {
 	mode := strings.ToLower(strings.TrimSpace(cfg.Parallels.CloneMode))
 	if mode == "" {
 		mode = "linked"
@@ -604,7 +604,7 @@ func parallelsIPTimeoutHint(cfg Config, id string, last ParallelsVM, dhcpFallbac
 	}
 	running := strings.EqualFold(strings.TrimSpace(last.State), "running")
 	if running && errors.Is(dhcpErr, errParallelsDHCPLeaseMissing) {
-		parts = append(parts, "the clone's MAC never obtained a DHCP lease, so the guest may not have booted; check its console with `prlctl capture "+id+" --file <png>`")
+		parts = append(parts, "the clone's MAC never obtained a DHCP lease, so the guest may not have booted; failed clones are deleted, so to inspect one, retry and run `prlctl capture <vm-id> --file <png>` on the Parallels host against the new clone while IP discovery is still waiting")
 	}
 	if running && mode == "linked" {
 		parts = append(parts, "if the console stays blank, the template may not boot as a linked clone; retry with parallels.cloneMode=full (full clones cannot select a source snapshot)")
