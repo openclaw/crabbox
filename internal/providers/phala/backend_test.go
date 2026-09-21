@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -29,6 +30,27 @@ type fakeRunner struct {
 }
 
 type fixedClock struct{ now time.Time }
+
+func prepareObservedSSH(t *testing.T, leaseID, host string) (string, string) {
+	t.Helper()
+	target := core.SSHTarget{}
+	if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	key, err := core.TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, contents := range map[string]string{
+		key:                   "synthetic fixture key\n",
+		target.KnownHostsFile: host + " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOCh4W5YA0Lp2pvT+yWIG/tC7BrQalNUIHSqfjYkJei6\n",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return key, target.KnownHostsFile
+}
 
 func (c fixedClock) Now() time.Time { return c.now }
 
@@ -855,6 +877,7 @@ func TestResolveRepairsTruncatedGatewayHostClaim(t *testing.T) {
 	if err := core.ClaimLeaseTargetForConfig(leaseID, "blue-box", cfg, server, core.SSHTarget{Host: cloudID, Port: "22"}, cfg.IdleTimeout); err != nil {
 		t.Fatal(err)
 	}
+	prepareObservedSSH(t, leaseID, cloudID)
 	runner := &fakeRunner{results: []core.LocalCommandResult{
 		{Stdout: `{"success":true,"total":1,"items":[{"appId":"` + cloudID + `","cvmName":"crabbox-cbx-abcdef123456","status":"running"}]}`},
 		{Stdout: `{"success":true,"app_id":"` + cloudID + `","gateway":{"base_domain":"dstack-pha-prod5.phala.network"}}`},
@@ -1266,6 +1289,124 @@ func TestReleaseOnlyResolveAllowsExpiredClaim(t *testing.T) {
 // context, a Resolve that returns NIL proves prepareSSH was skipped, while a
 // non-status Resolve returns that context error. The fakeRunner ignores the
 // context, so the `cvms list` inside resolve() still succeeds.
+func TestResolveObservationUsesExistingAccess(t *testing.T) {
+	for _, layout := range []string{"selected", "default"} {
+		for _, mode := range []string{"status", "wait", "controller"} {
+			for _, material := range []string{"absent", "prepared", "missing-key", "missing-pin", "empty-pin", "unsafe-directory", "pin-directory"} {
+				t.Run(layout+"/"+mode+"/"+material, func(t *testing.T) {
+					if material == "unsafe-directory" && runtime.GOOS == "windows" {
+						t.Skip("Unix permission fixture; Windows uses native ACL admission")
+					}
+					root := t.TempDir()
+					home := t.TempDir()
+					t.Setenv("HOME", home)
+					t.Setenv("USERPROFILE", home)
+					t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+					t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+					t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+					t.Setenv("XDG_STATE_HOME", root)
+					if layout == "default" {
+						t.Setenv("XDG_STATE_HOME", "")
+					}
+					cfg := core.BaseConfig()
+					cfg.Provider, cfg.SSHKey = providerName, "must-not-use-configured-fallback"
+					applyDefaults(&cfg)
+					const leaseID, host, gateway = "cbx_abcdef123456", "owned", "owned-22.example.test"
+					labels := core.DirectLeaseLabels(cfg, leaseID, "blue-box", providerName, "", false, time.Now())
+					labels["phala_cvm"], labels["gateway_host"] = host, gateway
+					server := core.Server{CloudID: host, Provider: providerName, Name: "blue-box", Labels: labels}
+					repo := t.TempDir()
+					if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "blue-box", cfg, server, core.SSHTarget{}, repo, cfg.IdleTimeout, false); err != nil {
+						t.Fatal(err)
+					}
+					key, err := core.TestboxKeyPath(leaseID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					pin, dir := filepath.Join(filepath.Dir(key), "known_hosts"), filepath.Dir(key)
+					if material != "absent" {
+						prepareObservedSSH(t, leaseID, host)
+					}
+					switch material {
+					case "missing-key":
+						err = os.Remove(key)
+					case "missing-pin":
+						err = os.Remove(pin)
+					case "empty-pin":
+						err = os.WriteFile(pin, nil, 0o600)
+					case "unsafe-directory":
+						err = os.Chmod(dir, 0o755)
+					case "pin-directory":
+						if err = os.Remove(pin); err == nil {
+							err = os.Mkdir(pin, 0o700)
+						}
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					snapshot := func() map[string]string {
+						result := map[string]string{}
+						err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+							if os.IsNotExist(err) {
+								return nil
+							}
+							if err != nil {
+								return err
+							}
+							contents := ""
+							if info.Mode().IsRegular() {
+								data, err := os.ReadFile(path)
+								if err != nil {
+									return err
+								}
+								contents = string(data)
+							}
+							result[path] = info.Mode().String() + ":" + contents
+							return nil
+						})
+						if err != nil {
+							t.Fatal(err)
+						}
+						return result
+					}
+					beforeFiles := snapshot()
+					before, err := core.ReadLeaseClaim(leaseID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					runner := &fakeRunner{results: []core.LocalCommandResult{{Stdout: `{"success":true,"items":[{"appId":"owned","cvmName":"crabbox-cbx-abcdef123456","status":"running"}]}`}}}
+					b := &backend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+					ctx, cancel := context.WithCancel(context.Background())
+					cancel()
+					req := core.ResolveRequest{ID: leaseID, StatusOnly: mode != "controller", ReadyProbe: mode == "wait", NoLocalStateMutations: mode == "controller", Repo: core.Repo{Root: repo}}
+					lease, err := b.Resolve(ctx, req)
+					wantError := material == "unsafe-directory" || material == "pin-directory" || mode == "controller" && material != "prepared"
+					if (err != nil) != wantError {
+						t.Fatalf("resolve error=%v", err)
+					}
+					if err == nil && material == "prepared" {
+						if lease.SSH.Host != host || lease.SSH.Key != key || lease.SSH.KnownHostsFile != pin || !lease.SSH.AuthoritativeKnownHosts || !strings.Contains(lease.SSH.ProxyCommand, "--gateway-host "+gateway) || lease.SSH.User != "root" || lease.SSH.ReadyCheck == "" {
+							t.Fatalf("prepared observation lost strict endpoint: %#v", lease.SSH)
+						}
+					} else if err == nil && !reflect.DeepEqual(lease.SSH, core.SSHTarget{}) {
+						t.Fatal("unprepared status exposed a fallback SSH endpoint")
+					}
+					after, readErr := core.ReadLeaseClaim(leaseID)
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if !reflect.DeepEqual(before, after) || !reflect.DeepEqual(beforeFiles, snapshot()) {
+						t.Fatal("observation changed claim or connection material")
+					}
+					if len(runner.calls) != 1 {
+						t.Fatalf("unexpected provider preparation calls: %d", len(runner.calls))
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestResolveStatusOnlyReadyProbeSkipsBootstrap(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	cfg := core.BaseConfig()
@@ -1281,6 +1422,7 @@ func TestResolveStatusOnlyReadyProbeSkipsBootstrap(t *testing.T) {
 	if err := core.ClaimLeaseTargetForConfig(leaseID, "blue-box", cfg, server, core.SSHTarget{Host: "owned", User: "root", Port: "22"}, cfg.IdleTimeout); err != nil {
 		t.Fatal(err)
 	}
+	prepareObservedSSH(t, leaseID, "owned")
 	listPayload := `{"success":true,"items":[{"appId":"owned","cvmName":"crabbox-cbx-abcdef123456","status":"running"}]}`
 
 	// status --wait: StatusOnly + ReadyProbe, cancelled context. prepareSSH is
@@ -1415,15 +1557,16 @@ func TestSlugRoundTripsThroughResolveAndList(t *testing.T) {
 		t.Fatalf("List did not surface slug=%q: views=%#v", slug, views)
 	}
 
-	// (3) A Resolve re-claim (with a repo root) must NOT blank the stored slug.
-	// The resolve path returns a synthetic/list item whose labels may lack slug;
-	// the re-claim must prefer the authoritative slug, not overwrite it with blank.
+	// (3) Status with repository context preserves the stored slug and claim;
+	// it must not accidentally become a re-claim path.
+	before, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	runner3 := &fakeRunner{results: []core.LocalCommandResult{{Stdout: listPayload}}}
 	b3 := &backend{cfg: cfg, rt: core.Runtime{Exec: runner3, Stdout: io.Discard, Stderr: io.Discard}}
-	// ReadyProbe:true gets past the status-only early return; StatusOnly:true still
-	// skips the SSH bootstrap (FIX F), so the re-claim block runs without SSH.
 	if _, err := b3.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, StatusOnly: true, ReadyProbe: true, Repo: core.Repo{Root: repoRoot}}); err != nil {
-		t.Fatalf("Resolve re-claim failed: %v", err)
+		t.Fatalf("status resolution failed: %v", err)
 	}
 	claim, ok, err := resolvePhalaClaim(leaseID, cfg)
 	if err != nil || !ok {
@@ -1432,7 +1575,10 @@ func TestSlugRoundTripsThroughResolveAndList(t *testing.T) {
 	if claim.Slug != slug {
 		t.Fatalf("Resolve re-claim blanked the slug: claim.Slug=%q want %q", claim.Slug, slug)
 	}
-	// And resolve-by-slug must STILL work after the re-claim.
+	if !reflect.DeepEqual(claim, before) {
+		t.Fatal("status with repository context changed the claim")
+	}
+	// And resolve-by-slug must still work after observation.
 	runner4 := &fakeRunner{results: []core.LocalCommandResult{{Stdout: listPayload}}}
 	b4 := &backend{cfg: cfg, rt: core.Runtime{Exec: runner4, Stdout: io.Discard, Stderr: io.Discard}}
 	if _, lease2, err := b4.resolve(context.Background(), slug, cfg, false); err != nil || lease2 != leaseID {
@@ -1761,7 +1907,7 @@ func TestPhalaLeaseReadyCheckDropsGit(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
-	lease, err := b.lease(instance{ID: "appid123", Labels: map[string]string{"lease": "cbx_test"}}, cfg, "cbx_test", false)
+	lease, err := b.lease(instance{ID: "appid123", Labels: map[string]string{"lease": "cbx_test"}}, cfg, "cbx_test", leaseAccessPrepare)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1783,7 +1929,7 @@ func TestPhalaLeasePinsProxyHostKeyPerLease(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
 	applyDefaults(&cfg)
-	lease, err := (&backend{}).lease(instance{ID: "cvm-id", Labels: map[string]string{"lease": leaseID}}, cfg, leaseID, false)
+	lease, err := (&backend{}).lease(instance{ID: "cvm-id", Labels: map[string]string{"lease": leaseID}}, cfg, leaseID, leaseAccessPrepare)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1794,6 +1940,12 @@ func TestPhalaLeasePinsProxyHostKeyPerLease(t *testing.T) {
 	wantKnownHosts := filepath.Join(filepath.Dir(keyPath), "known_hosts")
 	if lease.SSH.DisableHostKeyChecking || lease.SSH.KnownHostsFile != wantKnownHosts {
 		t.Fatalf("phala SSH target does not pin its lease host key: %#v", lease.SSH)
+	}
+	if info, err := os.Stat(filepath.Dir(wantKnownHosts)); err != nil || !info.IsDir() {
+		t.Fatalf("ordinary lease preparation did not create connection storage: %v", err)
+	}
+	if lease.SSH.AuthoritativeKnownHosts {
+		t.Fatal("ordinary first contact unexpectedly requires pre-existing trust")
 	}
 	if !lease.SSH.SSHConfigProxy || lease.SSH.ProxyCommand == "" {
 		t.Fatalf("phala SSH proxy routing was lost: %#v", lease.SSH)
@@ -2258,7 +2410,7 @@ func TestGatewayHostRoundTripsThroughClaimToProxyCommand(t *testing.T) {
 		t.Fatalf("gateway_host not surfaced from claim: labels=%v", item.Labels)
 	}
 	b := &backend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-	lease, err := b.lease(item, cfg, leaseID, false)
+	lease, err := b.lease(item, cfg, leaseID, leaseAccessPrepare)
 	if err != nil {
 		t.Fatal(err)
 	}

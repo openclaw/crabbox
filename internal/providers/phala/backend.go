@@ -19,6 +19,14 @@ import (
 
 const providerName = "phala"
 
+type leaseAccessMode uint8
+
+const (
+	leaseAccessNone leaseAccessMode = iota
+	leaseAccessPrepare
+	leaseAccessObserve
+)
+
 // defaultComposeYAML is the Compose file crabbox supplies when the lease has no
 // configured compose. The Phala CLI v1.1.19 deploy handler refuses to provision
 // a CVM in non-interactive mode without a Compose file, so a confidential
@@ -338,7 +346,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		recoveryLabels["recovery"] = recovery
 		recoveryLabels["state"] = "provisioning"
 		item := instance{ID: id, Name: phalaCVMName(leaseID), Labels: recoveryLabels}
-		lease, err := b.lease(item, cfg, leaseID, false)
+		lease, err := b.lease(item, cfg, leaseID, leaseAccessPrepare)
 		if err != nil {
 			return err
 		}
@@ -396,7 +404,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if slug != "" {
 		item.Labels["slug"] = slug
 	}
-	lease, err := b.lease(item, cfg, leaseID, false)
+	lease, err := b.lease(item, cfg, leaseID, leaseAccessPrepare)
 	if err != nil {
 		return core.LeaseTarget{}, rollback(err)
 	}
@@ -468,7 +476,13 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 			item.Labels["gateway_host"] = gatewayHost
 		}
 	}
-	lease, err := b.lease(item, cfg, leaseID, req.ReleaseOnly)
+	access := leaseAccessPrepare
+	if req.ReleaseOnly {
+		access = leaseAccessNone
+	} else if req.StatusOnly || req.NoLocalStateMutations {
+		access = leaseAccessObserve
+	}
+	lease, err := b.lease(item, cfg, leaseID, access)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -478,17 +492,19 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if leaseID == "" {
 		return core.LeaseTarget{}, core.Exit(4, "Phala CVM %s has no Crabbox lease id", item.cloudID())
 	}
-	// prepareSSH re-runs the FULL tool bootstrap over SSH. That belongs ONLY to a
-	// non-status acquire/run resolve. For status checks (StatusOnly, including
-	// `status --wait` which sets ReadyProbe) readiness is decided by the caller's
-	// lightweight probeSSHReady in statusViewFromLeaseTarget -- re-bootstrapping on
-	// every status poll re-runs apt/dnf over SSH and times the poll out. The cached
-	// gateway_host on the lease target keeps that lightweight probe from paying a
-	// per-connection `phala cvms get`.
-	if !req.StatusOnly {
-		if err := b.prepareSSH(ctx, cfg, &lease.SSH); err != nil {
-			return core.LeaseTarget{}, err
+	if req.StatusOnly {
+		return lease, nil
+	}
+	if req.NoLocalStateMutations {
+		if lease.SSH.Host == "" {
+			return core.LeaseTarget{}, core.Exit(4, "Phala lease %s has no prepared SSH access; prepare it through a normal lease operation first", leaseID)
 		}
+		return lease, nil
+	}
+	// Tool bootstrap and first-contact trust belong to explicit access, not
+	// status probes or controller observations before identity acceptance.
+	if err := b.prepareSSH(ctx, cfg, &lease.SSH); err != nil {
+		return core.LeaseTarget{}, err
 	}
 	if req.Repo.Root != "" {
 		// The slug is stored in BOTH the claim.Slug field and the claim labels, but
@@ -1079,7 +1095,7 @@ func (b *backend) resolve(ctx context.Context, identifier string, cfg core.Confi
 	return instance{}, "", core.Exit(4, "Phala CVM lease not found: %s", identifier)
 }
 
-func (b *backend) lease(item instance, cfg core.Config, leaseID string, releaseOnly bool) (core.LeaseTarget, error) {
+func (b *backend) lease(item instance, cfg core.Config, leaseID string, access leaseAccessMode) (core.LeaseTarget, error) {
 	target := core.SSHTarget{
 		User:            "root",
 		Host:            item.cloudID(),
@@ -1092,14 +1108,6 @@ func (b *backend) lease(item instance, cfg core.Config, leaseID string, releaseO
 		SSHConfigProxy:  true,
 		ProxyCommand:    proxyCommand(cfg, item.cloudID(), item.Labels["gateway_host"]),
 	}
-	if leaseID != "" && !releaseOnly {
-		if err := core.UseLeaseKnownHosts(&target, leaseID); err != nil {
-			return core.LeaseTarget{}, err
-		}
-		if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
-			return core.LeaseTarget{}, err
-		}
-	}
 	server := b.server(item, cfg)
 	if claim, ok, _ := resolvePhalaClaim(leaseID, cfg); ok {
 		mergeClaimLabels(&server, claim)
@@ -1109,7 +1117,57 @@ func (b *backend) lease(item instance, cfg core.Config, leaseID string, releaseO
 	if gatewayHost := strings.TrimSpace(item.Labels["gateway_host"]); gatewayHost != "" {
 		server.Labels["gateway_host"] = gatewayHost
 	}
-	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
+	lease := core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}
+	if access == leaseAccessPrepare && leaseID != "" {
+		if err := b.RebindResolvedLeaseTarget(&lease, leaseID); err != nil {
+			return core.LeaseTarget{}, err
+		}
+	} else if access == leaseAccessObserve {
+		available, err := observeLeaseAccess(&lease.SSH, leaseID)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if !available {
+			lease.SSH = core.SSHTarget{}
+		}
+	}
+	return lease, nil
+}
+
+func observeLeaseAccess(target *core.SSHTarget, leaseID string) (bool, error) {
+	if leaseID == "" {
+		return false, nil
+	}
+	knownHosts, err := core.ExistingLeaseKnownHostsPath(leaseID)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	key, err := core.StoredTestboxKeyPath(leaseID)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	for _, path := range []string{key, knownHosts} {
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if !info.Mode().IsRegular() {
+			return false, core.Exit(2, "Phala lease %s has non-regular managed SSH material", leaseID)
+		}
+		if info.Size() == 0 {
+			return false, nil
+		}
+	}
+	target.Key, target.KnownHostsFile = key, knownHosts
+	// A readiness probe may verify existing trust, but must never learn keys.
+	target.AuthoritativeKnownHosts = true
+	return true, nil
 }
 
 func cachedGatewayHostNeedsRefresh(host string) bool {

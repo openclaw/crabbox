@@ -333,6 +333,15 @@ func ExistingLeaseKnownHostsPath(leaseID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if os.Getenv("XDG_STATE_HOME") == "" {
+		// Default-root preparation also secures these managed components. An
+		// observer must validate that protection without repairing permissions.
+		for _, path := range []string{filepath.Dir(filepath.Dir(dir)), filepath.Dir(dir), dir} {
+			if err := verifySelectedLeaseSSHPath(path, true); err != nil {
+				return "", err
+			}
+		}
+	}
 	return filepath.Join(dir, "known_hosts"), nil
 }
 
