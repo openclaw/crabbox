@@ -13,13 +13,7 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 }
 
 func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(core.LumeConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.Lume, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
-	if err != nil {
+	if ok, err := core.ApplyProviderConfigFlags[core.LumeConfigFlagValues](cfg, fs, values, &cfg.Lume, providerName); !ok || err != nil {
 		return err
 	}
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {

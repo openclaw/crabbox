@@ -21,13 +21,7 @@ func ApplyRunpodProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) er
 			return err
 		}
 	}
-	v, ok := values.(core.RunpodConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.Runpod, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
-	if err != nil {
+	if ok, err := core.ApplyProviderConfigFlags[core.RunpodConfigFlagValues](cfg, fs, values, &cfg.Runpod, providerName); !ok || err != nil {
 		return err
 	}
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {

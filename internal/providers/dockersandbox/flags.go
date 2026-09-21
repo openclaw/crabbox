@@ -21,13 +21,7 @@ func ApplyDockerSandboxProviderFlags(cfg *core.Config, fs *flag.FlagSet, values 
 			return err
 		}
 	}
-	v, ok := values.(core.DockerSandboxConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.DockerSandbox, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "docker-sandbox")
-	if err != nil {
+	if ok, err := core.ApplyProviderConfigFlags[core.DockerSandboxConfigFlagValues](cfg, fs, values, &cfg.DockerSandbox, "docker-sandbox"); !ok || err != nil {
 		return err
 	}
 	return validateConfig(*cfg)

@@ -11,13 +11,7 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 }
 
 func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(core.HyperVConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.HyperV, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
-	if err != nil {
+	if ok, err := core.ApplyProviderConfigFlags[core.HyperVConfigFlagValues](cfg, fs, values, &cfg.HyperV, providerName); !ok || err != nil {
 		return err
 	}
 	if core.ProviderNameMatches(cfg.Provider, Provider{}) {

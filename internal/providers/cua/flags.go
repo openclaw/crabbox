@@ -21,13 +21,7 @@ func ApplyProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
 			return err
 		}
 	}
-	v, ok := values.(core.CuaConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.Cua, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
-	if err != nil {
+	if ok, err := core.ApplyProviderConfigFlags[core.CuaConfigFlagValues](cfg, fs, values, &cfg.Cua, providerName); !ok || err != nil {
 		return err
 	}
 	return validateProviderConfig(*cfg)

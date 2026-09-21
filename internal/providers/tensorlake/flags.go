@@ -11,11 +11,6 @@ func RegisterTensorlakeProviderFlags(fs *flag.FlagSet, defaults core.Config) any
 }
 
 func ApplyTensorlakeProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(core.TensorlakeConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.Tensorlake, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	_, err := core.ApplyProviderConfigFlags[core.TensorlakeConfigFlagValues](cfg, fs, values, &cfg.Tensorlake, providerName)
 	return err
 }

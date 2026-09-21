@@ -2584,10 +2584,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.credentialProvenance.repositoryRoot = root
 		}
 	}
-	if file.Profile != "" {
-		cfg.Profile = file.Profile
-		recordConfigInput(cfg, configInputGeneric, inputSource, true)
-	}
+	configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Profile, file.Profile)
 	if file.Provider != "" {
 		setProviderSelection(cfg, file.Provider, providerSource)
 		cfg.brokerProvider = ""
@@ -2622,10 +2619,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		recordConfigInput(cfg, configInputGeneric, inputSource, true)
 	}
 	recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Desktop, file.Desktop))
-	if file.DesktopEnv != "" {
-		cfg.DesktopEnv = file.DesktopEnv
-		recordConfigInput(cfg, configInputGeneric, inputSource, true)
-	}
+	configInputFileString(cfg, configInputGeneric, inputSource, &cfg.DesktopEnv, file.DesktopEnv)
 	recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Browser, file.Browser))
 	recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Code, file.Code))
 	if file.Network != "" {
@@ -2652,10 +2646,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		recordConfigInput(cfg, configInputGeneric, inputSource, true)
 		cfg.credentialProvenance.coordToken = credentialSource
 	}
-	if file.HostID != "" {
-		cfg.HostID = file.HostID
-		recordConfigInput(cfg, configInputGeneric, inputSource, true)
-	}
+	configInputFileString(cfg, configInputGeneric, inputSource, &cfg.HostID, file.HostID)
 	if file.Broker != nil {
 		if file.Broker.URL != "" {
 			cfg.Coordinator = file.Broker.URL
@@ -2714,10 +2705,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "hetzner", inputSource, true)
 			cfg.imageExplicit = true
 		}
-		if file.Hetzner.SSHKey != "" {
-			cfg.ProviderKey = file.Hetzner.SSHKey
-			recordConfigInput(cfg, "hetzner", inputSource, true)
-		}
+		configInputFileString(cfg, "hetzner", inputSource, &cfg.ProviderKey, file.Hetzner.SSHKey)
 	}
 	{
 		applied, err := cfg.DigitalOcean.applyFile(file.DigitalOcean)
@@ -2805,22 +2793,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "aws", inputSource, true)
 			recordConfigInput(cfg, "aws-lambda-microvm", inputSource, true)
 		}
-		if file.AWS.AMI != "" {
-			cfg.AWSAMI = file.AWS.AMI
-			recordConfigInput(cfg, "aws", inputSource, true)
-		}
-		if file.AWS.SecurityGroupID != "" {
-			cfg.AWSSGID = file.AWS.SecurityGroupID
-			recordConfigInput(cfg, "aws", inputSource, true)
-		}
-		if file.AWS.SubnetID != "" {
-			cfg.AWSSubnetID = file.AWS.SubnetID
-			recordConfigInput(cfg, "aws", inputSource, true)
-		}
-		if file.AWS.InstanceProfile != "" {
-			cfg.AWSProfile = file.AWS.InstanceProfile
-			recordConfigInput(cfg, "aws", inputSource, true)
-		}
+		configInputFileString(cfg, "aws", inputSource, &cfg.AWSAMI, file.AWS.AMI)
+		configInputFileString(cfg, "aws", inputSource, &cfg.AWSSGID, file.AWS.SecurityGroupID)
+		configInputFileString(cfg, "aws", inputSource, &cfg.AWSSubnetID, file.AWS.SubnetID)
+		configInputFileString(cfg, "aws", inputSource, &cfg.AWSProfile, file.AWS.InstanceProfile)
 		if file.AWS.RootGB > 0 {
 			cfg.AWSRootGB = file.AWS.RootGB
 			recordConfigInput(cfg, "aws", inputSource, true)
@@ -2845,10 +2821,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		}
 	}
 	if file.Azure != nil {
-		if file.Azure.Backend != "" {
-			cfg.AzureBackend = file.Azure.Backend
-			recordConfigInput(cfg, "azure", inputSource, true)
-		}
+		configInputFileString(cfg, "azure", inputSource, &cfg.AzureBackend, file.Azure.Backend)
 		if file.Azure.SubscriptionID != "" {
 			cfg.AzureSubscription = file.Azure.SubscriptionID
 			recordConfigInput(cfg, "azure", inputSource, true)
@@ -2859,18 +2832,9 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "azure", inputSource, true)
 			recordConfigInput(cfg, "azure-dynamic-sessions", inputSource, true)
 		}
-		if file.Azure.ClientID != "" {
-			cfg.AzureClientID = file.Azure.ClientID
-			recordConfigInput(cfg, "azure", inputSource, true)
-		}
-		if file.Azure.Location != "" {
-			cfg.AzureLocation = file.Azure.Location
-			recordConfigInput(cfg, "azure", inputSource, true)
-		}
-		if file.Azure.ResourceGroup != "" {
-			cfg.AzureResourceGroup = file.Azure.ResourceGroup
-			recordConfigInput(cfg, "azure", inputSource, true)
-		}
+		configInputFileString(cfg, "azure", inputSource, &cfg.AzureClientID, file.Azure.ClientID)
+		configInputFileString(cfg, "azure", inputSource, &cfg.AzureLocation, file.Azure.Location)
+		configInputFileString(cfg, "azure", inputSource, &cfg.AzureResourceGroup, file.Azure.ResourceGroup)
 		if file.Azure.Image != "" {
 			cfg.AzureImage = file.Azure.Image
 			recordConfigInput(cfg, "azure", inputSource, true)
@@ -2881,34 +2845,16 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "azure", inputSource, true)
 			cfg.AzureOSDiskExplicit = true
 		}
-		if file.Azure.SnapshotSKU != "" {
-			cfg.AzureSnapshotSKU = file.Azure.SnapshotSKU
-			recordConfigInput(cfg, "azure", inputSource, true)
-		}
-		if file.Azure.OSDiskSKU != "" {
-			cfg.AzureOSDiskSKU = file.Azure.OSDiskSKU
-			recordConfigInput(cfg, "azure", inputSource, true)
-		}
-		if file.Azure.VNet != "" {
-			cfg.AzureVNet = file.Azure.VNet
-			recordConfigInput(cfg, "azure", inputSource, true)
-		}
-		if file.Azure.Subnet != "" {
-			cfg.AzureSubnet = file.Azure.Subnet
-			recordConfigInput(cfg, "azure", inputSource, true)
-		}
-		if file.Azure.NSG != "" {
-			cfg.AzureNSG = file.Azure.NSG
-			recordConfigInput(cfg, "azure", inputSource, true)
-		}
+		configInputFileString(cfg, "azure", inputSource, &cfg.AzureSnapshotSKU, file.Azure.SnapshotSKU)
+		configInputFileString(cfg, "azure", inputSource, &cfg.AzureOSDiskSKU, file.Azure.OSDiskSKU)
+		configInputFileString(cfg, "azure", inputSource, &cfg.AzureVNet, file.Azure.VNet)
+		configInputFileString(cfg, "azure", inputSource, &cfg.AzureSubnet, file.Azure.Subnet)
+		configInputFileString(cfg, "azure", inputSource, &cfg.AzureNSG, file.Azure.NSG)
 		if len(file.Azure.SSHCIDRs) > 0 {
 			cfg.AzureSSHCIDRs = file.Azure.SSHCIDRs
 			recordConfigInput(cfg, "azure", inputSource, true)
 		}
-		if file.Azure.Network != "" {
-			cfg.AzureNetwork = file.Azure.Network
-			recordConfigInput(cfg, "azure", inputSource, true)
-		}
+		configInputFileString(cfg, "azure", inputSource, &cfg.AzureNetwork, file.Azure.Network)
 	}
 	{
 		applied, err := cfg.AzureDynamicSessions.applyFile(file.AzureDynamicSessions)
@@ -2941,10 +2887,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "gcp", inputSource, true)
 			cfg.gcpNetworkExplicit = true
 		}
-		if file.GCP.Subnet != "" {
-			cfg.GCPSubnet = file.GCP.Subnet
-			recordConfigInput(cfg, "gcp", inputSource, true)
-		}
+		configInputFileString(cfg, "gcp", inputSource, &cfg.GCPSubnet, file.GCP.Subnet)
 		if len(file.GCP.Tags) > 0 {
 			cfg.GCPTags = file.GCP.Tags
 			recordConfigInput(cfg, "gcp", inputSource, true)
@@ -2959,10 +2902,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "gcp", inputSource, true)
 			cfg.gcpRootGBExplicit = true
 		}
-		if file.GCP.ServiceAccount != "" {
-			cfg.GCPServiceAccount = file.GCP.ServiceAccount
-			recordConfigInput(cfg, "gcp", inputSource, true)
-		}
+		configInputFileString(cfg, "gcp", inputSource, &cfg.GCPServiceAccount, file.GCP.ServiceAccount)
 	}
 	{
 		applied, err := cfg.Incus.applyFile(file.Incus)
@@ -2994,39 +2934,18 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		return err
 	}
 	if file.Parallels != nil {
-		if file.Parallels.Template != "" {
-			cfg.Parallels.Template = file.Parallels.Template
-			recordConfigInput(cfg, "parallels", inputSource, true)
-		}
-		if file.Parallels.Source != "" {
-			cfg.Parallels.Source = file.Parallels.Source
-			recordConfigInput(cfg, "parallels", inputSource, true)
-		}
-		if file.Parallels.SourceID != "" {
-			cfg.Parallels.SourceID = file.Parallels.SourceID
-			recordConfigInput(cfg, "parallels", inputSource, true)
-		}
-		if file.Parallels.SourceSnapshot != "" {
-			cfg.Parallels.SourceSnapshot = file.Parallels.SourceSnapshot
-			recordConfigInput(cfg, "parallels", inputSource, true)
-		}
-		if file.Parallels.SourceSnapshotID != "" {
-			cfg.Parallels.SourceSnapshotID = file.Parallels.SourceSnapshotID
-			recordConfigInput(cfg, "parallels", inputSource, true)
-		}
-		if file.Parallels.CloneMode != "" {
-			cfg.Parallels.CloneMode = file.Parallels.CloneMode
-			recordConfigInput(cfg, "parallels", inputSource, true)
-		}
+		configInputFileString(cfg, "parallels", inputSource, &cfg.Parallels.Template, file.Parallels.Template)
+		configInputFileString(cfg, "parallels", inputSource, &cfg.Parallels.Source, file.Parallels.Source)
+		configInputFileString(cfg, "parallels", inputSource, &cfg.Parallels.SourceID, file.Parallels.SourceID)
+		configInputFileString(cfg, "parallels", inputSource, &cfg.Parallels.SourceSnapshot, file.Parallels.SourceSnapshot)
+		configInputFileString(cfg, "parallels", inputSource, &cfg.Parallels.SourceSnapshotID, file.Parallels.SourceSnapshotID)
+		configInputFileString(cfg, "parallels", inputSource, &cfg.Parallels.CloneMode, file.Parallels.CloneMode)
 		if file.Parallels.Host != "" {
 			cfg.Parallels.Host = file.Parallels.Host
 			recordConfigInput(cfg, "parallels", inputSource, true)
 			cfg.credentialProvenance.parallelsHost = credentialSource
 		}
-		if file.Parallels.HostUser != "" {
-			cfg.Parallels.HostUser = file.Parallels.HostUser
-			recordConfigInput(cfg, "parallels", inputSource, true)
-		}
+		configInputFileString(cfg, "parallels", inputSource, &cfg.Parallels.HostUser, file.Parallels.HostUser)
 		if file.Parallels.HostKey != "" {
 			cfg.Parallels.HostKey = expandUserPath(file.Parallels.HostKey)
 			recordConfigInput(cfg, "parallels", inputSource, true)
@@ -3044,10 +2963,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Parallels.VMRoot = expandUserPath(file.Parallels.VMRoot)
 			recordConfigInput(cfg, "parallels", inputSource, true)
 		}
-		if file.Parallels.User != "" {
-			cfg.Parallels.User = file.Parallels.User
-			recordConfigInput(cfg, "parallels", inputSource, true)
-		}
+		configInputFileString(cfg, "parallels", inputSource, &cfg.Parallels.User, file.Parallels.User)
 		// The macOS account password authenticates the local ARD viewer. A
 		// repository must not supply or replace it; use trusted user config or
 		// the environment, matching the Tart desktop credential boundary.
@@ -3055,10 +2971,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Parallels.Password = file.Parallels.Password
 			recordConfigInput(cfg, "parallels", inputSource, true)
 		}
-		if file.Parallels.WorkRoot != "" {
-			cfg.Parallels.WorkRoot = file.Parallels.WorkRoot
-			recordConfigInput(cfg, "parallels", inputSource, true)
-		}
+		configInputFileString(cfg, "parallels", inputSource, &cfg.Parallels.WorkRoot, file.Parallels.WorkRoot)
 		if file.Parallels.MaxVMs != nil {
 			cfg.Parallels.MaxVMs = *file.Parallels.MaxVMs
 			recordConfigInput(cfg, "parallels", inputSource, true)
@@ -3135,10 +3048,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyLeaseDuration(&cfg.IdleTimeout, file.Lease.IdleTimeout))
 	}
 	if file.Sync != nil {
-		if file.Sync.Source != "" {
-			cfg.Sync.Source = file.Sync.Source
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
+		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Sync.Source, file.Sync.Source)
 		{
 			var accepted bool
 			cfg.Sync.Excludes, accepted = appendOrderedStringsAccepted(cfg.Sync.Excludes, file.Sync.Exclude...)
@@ -3162,16 +3072,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Sync.Delete, file.Sync.Delete))
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Sync.Checksum, file.Sync.Checksum))
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Sync.GitSeed, file.Sync.GitSeed))
-		if file.Sync.GitSeedSource != "" {
-			cfg.Sync.GitSeedSource = file.Sync.GitSeedSource
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
+		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Sync.GitSeedSource, file.Sync.GitSeedSource)
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Sync.GitOverlay, file.Sync.GitOverlay))
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyOptional(&cfg.Sync.Fingerprint, file.Sync.Fingerprint))
-		if file.Sync.BaseRef != "" {
-			cfg.Sync.BaseRef = file.Sync.BaseRef
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
+		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Sync.BaseRef, file.Sync.BaseRef)
 		if file.Sync.Timeout != "" {
 			if timeout, err := time.ParseDuration(file.Sync.Timeout); err == nil {
 				cfg.Sync.Timeout = timeout
@@ -3210,14 +3114,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, configInputGeneric, inputSource, true)
 			MarkCapacityMarketExplicit(cfg)
 		}
-		if file.Capacity.Strategy != "" {
-			cfg.Capacity.Strategy = file.Capacity.Strategy
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
-		if file.Capacity.Fallback != "" {
-			cfg.Capacity.Fallback = file.Capacity.Fallback
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
+		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Capacity.Strategy, file.Capacity.Strategy)
+		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Capacity.Fallback, file.Capacity.Fallback)
 		if len(file.Capacity.Regions) > 0 {
 			cfg.Capacity.Regions = appendUniqueStrings(nil, file.Capacity.Regions...)
 			recordConfigInput(cfg, configInputGeneric, inputSource, true)
@@ -3257,10 +3155,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 		return err
 	}
 	if file.External != nil {
-		if file.External.Command != "" {
-			cfg.External.Command = file.External.Command
-			recordConfigInput(cfg, "external", inputSource, true)
-		}
+		configInputFileString(cfg, "external", inputSource, &cfg.External.Command, file.External.Command)
 		if len(file.External.Args) > 0 {
 			cfg.External.Args = append([]string(nil), file.External.Args...)
 			recordConfigInput(cfg, "external", inputSource, true)
@@ -3331,10 +3226,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 				cfg.credentialProvenance.externalSSHAllowEnv = credentialSourceTrustedFile
 			}
 		}
-		if file.External.WorkRoot != "" {
-			cfg.External.WorkRoot = file.External.WorkRoot
-			recordConfigInput(cfg, "external", inputSource, true)
-		}
+		configInputFileString(cfg, "external", inputSource, &cfg.External.WorkRoot, file.External.WorkRoot)
 		if file.External.RoutingFile != "" {
 			cfg.External.RoutingFile = file.External.RoutingFile
 			recordConfigInput(cfg, "external", inputSource, true)
@@ -3440,18 +3332,9 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "cubesandbox", inputSource, true)
 			cfg.credentialProvenance.cubeSandboxDomain = credentialSource
 		}
-		if file.CubeSandbox.Template != "" {
-			cfg.CubeSandbox.Template = file.CubeSandbox.Template
-			recordConfigInput(cfg, "cubesandbox", inputSource, true)
-		}
-		if file.CubeSandbox.Workdir != "" {
-			cfg.CubeSandbox.Workdir = file.CubeSandbox.Workdir
-			recordConfigInput(cfg, "cubesandbox", inputSource, true)
-		}
-		if file.CubeSandbox.User != "" {
-			cfg.CubeSandbox.User = file.CubeSandbox.User
-			recordConfigInput(cfg, "cubesandbox", inputSource, true)
-		}
+		configInputFileString(cfg, "cubesandbox", inputSource, &cfg.CubeSandbox.Template, file.CubeSandbox.Template)
+		configInputFileString(cfg, "cubesandbox", inputSource, &cfg.CubeSandbox.Workdir, file.CubeSandbox.Workdir)
+		configInputFileString(cfg, "cubesandbox", inputSource, &cfg.CubeSandbox.User, file.CubeSandbox.User)
 		if file.CubeSandbox.ProxyNodeIP != "" {
 			cfg.CubeSandbox.ProxyNodeIP = file.CubeSandbox.ProxyNodeIP
 			recordConfigInput(cfg, "cubesandbox", inputSource, true)
@@ -3684,14 +3567,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			recordConfigInput(cfg, "ascii-box", inputSource, true)
 			cfg.credentialProvenance.asciiBoxBaseURL = credentialSource
 		}
-		if file.AsciiBox.CLIPath != "" {
-			cfg.AsciiBox.CLIPath = file.AsciiBox.CLIPath
-			recordConfigInput(cfg, "ascii-box", inputSource, true)
-		}
-		if file.AsciiBox.Workdir != "" {
-			cfg.AsciiBox.Workdir = file.AsciiBox.Workdir
-			recordConfigInput(cfg, "ascii-box", inputSource, true)
-		}
+		configInputFileString(cfg, "ascii-box", inputSource, &cfg.AsciiBox.CLIPath, file.AsciiBox.CLIPath)
+		configInputFileString(cfg, "ascii-box", inputSource, &cfg.AsciiBox.Workdir, file.AsciiBox.Workdir)
 	}
 	{
 		applied, err := cfg.Cloudflare.applyFile(file.Cloudflare)
@@ -3810,14 +3687,8 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			cfg.Tailscale.Tags = normalizeTailscaleTags(file.Tailscale.Tags)
 			recordConfigInput(cfg, configInputGeneric, inputSource, true)
 		}
-		if file.Tailscale.HostnameTemplate != "" {
-			cfg.Tailscale.HostnameTemplate = file.Tailscale.HostnameTemplate
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
-		if file.Tailscale.AuthKeyEnv != "" {
-			cfg.Tailscale.AuthKeyEnv = file.Tailscale.AuthKeyEnv
-			recordConfigInput(cfg, configInputGeneric, inputSource, true)
-		}
+		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Tailscale.HostnameTemplate, file.Tailscale.HostnameTemplate)
+		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Tailscale.AuthKeyEnv, file.Tailscale.AuthKeyEnv)
 		if file.Tailscale.ExitNode != "" {
 			cfg.Tailscale.ExitNode = strings.TrimSpace(file.Tailscale.ExitNode)
 			recordConfigInput(cfg, configInputGeneric, inputSource, true)

@@ -11,11 +11,6 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 }
 
 func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(core.MXCConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.MXC, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	_, err := core.ApplyProviderConfigFlags[core.MXCConfigFlagValues](cfg, fs, values, &cfg.MXC, providerName)
 	return err
 }

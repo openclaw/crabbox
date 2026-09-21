@@ -18,11 +18,6 @@ func applyUnikraftCloudProviderFlags(cfg *core.Config, fs *flag.FlagSet, values 
 			return err
 		}
 	}
-	v, ok := values.(core.UnikraftCloudConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.UnikraftCloud, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "unikraft-cloud")
+	_, err := core.ApplyProviderConfigFlags[core.UnikraftCloudConfigFlagValues](cfg, fs, values, &cfg.UnikraftCloud, "unikraft-cloud")
 	return err
 }

@@ -18,13 +18,7 @@ func ApplyBlaxelProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) er
 			return err
 		}
 	}
-	v, ok := values.(core.BlaxelConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.Blaxel, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
-	if err != nil {
+	if ok, err := core.ApplyProviderConfigFlags[core.BlaxelConfigFlagValues](cfg, fs, values, &cfg.Blaxel, providerName); !ok || err != nil {
 		return err
 	}
 	return validateBlaxelConfig(*cfg)

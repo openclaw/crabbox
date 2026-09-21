@@ -17,11 +17,6 @@ func ApplyModalProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 			return err
 		}
 	}
-	v, ok := values.(core.ModalConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.Modal, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	_, err := core.ApplyProviderConfigFlags[core.ModalConfigFlagValues](cfg, fs, values, &cfg.Modal, providerName)
 	return err
 }

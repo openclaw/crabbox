@@ -20,13 +20,7 @@ func ApplyNomadProviderFlags(cfg *Config, fs *flag.FlagSet, values any) error {
 			return exit(2, "--type is not supported for provider=nomad; use --nomad-image")
 		}
 	}
-	v, ok := values.(core.NomadConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.Nomad, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
-	if err != nil {
+	if ok, err := core.ApplyProviderConfigFlags[core.NomadConfigFlagValues](cfg, fs, values, &cfg.Nomad, providerName); !ok || err != nil {
 		return err
 	}
 	return validateConfig(*cfg)

@@ -24,11 +24,6 @@ func ApplyCloudflareProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any
 		cfg.ServerType = normalized
 		cfg.ServerTypeExplicit = core.FlagWasSet(fs, "type") || cfg.ServerTypeExplicit
 	}
-	v, ok := values.(core.CloudflareConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.Cloudflare, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	_, err := core.ApplyProviderConfigFlags[core.CloudflareConfigFlagValues](cfg, fs, values, &cfg.Cloudflare, providerName)
 	return err
 }

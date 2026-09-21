@@ -23,13 +23,7 @@ func ApplyVercelSandboxProviderFlags(cfg *core.Config, fs *flag.FlagSet, values 
 			return err
 		}
 	}
-	v, ok := values.(core.VercelSandboxConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.VercelSandbox, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
-	if err != nil {
+	if ok, err := core.ApplyProviderConfigFlags[core.VercelSandboxConfigFlagValues](cfg, fs, values, &cfg.VercelSandbox, providerName); !ok || err != nil {
 		return err
 	}
 	return validateVercelSandboxConfig(*cfg)

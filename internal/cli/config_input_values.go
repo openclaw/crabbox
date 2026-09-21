@@ -4,6 +4,13 @@ import "strconv"
 
 // These helpers record accepted input, not the provenance of a fallback or a
 // later provider-specific normalization. They never retain the input value.
+func configInputFileString(cfg *Config, owner configInputOwner, source configInputSource, dst *string, value string) {
+	if value != "" {
+		*dst = value
+		recordConfigInput(cfg, owner, source, true)
+	}
+}
+
 func configInputEnvString(cfg *Config, owner configInputOwner, fallback string, names ...string) string {
 	if value, accepted := firstNonEmptyEnv(names...); accepted {
 		recordConfigInput(cfg, owner, configInputEnvironment, true)

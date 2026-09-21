@@ -17,11 +17,6 @@ func ApplyOpenComputerProviderFlags(cfg *core.Config, fs *flag.FlagSet, values a
 			return err
 		}
 	}
-	v, ok := values.(core.OpenComputerConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.OpenComputer, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	_, err := core.ApplyProviderConfigFlags[core.OpenComputerConfigFlagValues](cfg, fs, values, &cfg.OpenComputer, providerName)
 	return err
 }

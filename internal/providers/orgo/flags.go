@@ -19,11 +19,6 @@ func ApplyOrgoProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) erro
 			return err
 		}
 	}
-	v, ok := values.(core.OrgoConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.Orgo, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
+	_, err := core.ApplyProviderConfigFlags[core.OrgoConfigFlagValues](cfg, fs, values, &cfg.Orgo, providerName)
 	return err
 }

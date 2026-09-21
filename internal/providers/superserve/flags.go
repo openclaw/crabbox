@@ -23,13 +23,7 @@ func ApplySuperserveProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any
 			return err
 		}
 	}
-	v, ok := values.(core.SuperserveConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.Superserve, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "superserve")
-	if err != nil {
+	if ok, err := core.ApplyProviderConfigFlags[core.SuperserveConfigFlagValues](cfg, fs, values, &cfg.Superserve, "superserve"); !ok || err != nil {
 		return err
 	}
 	return validateSuperserveConfig(*cfg)

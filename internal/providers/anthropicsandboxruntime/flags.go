@@ -12,13 +12,7 @@ func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
 }
 
 func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(core.AnthropicSRTConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.AnthropicSRT, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, providerName)
-	if err != nil {
+	if ok, err := core.ApplyProviderConfigFlags[core.AnthropicSRTConfigFlagValues](cfg, fs, values, &cfg.AnthropicSRT, providerName); !ok || err != nil {
 		return err
 	}
 	return validateConfig(*cfg)
