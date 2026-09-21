@@ -386,12 +386,23 @@ if (tool === "git") {
 `);
     for (const tool of ["git", "go", "zip", "sleep", "cp"]) writeExecutable(path.join(bin, tool), wrapper(tool));
     if (escapeToolFailure) writeExecutable(path.join(bin, "sed"), wrapper("sed"));
+    // Allow process-launch overhead for the many inert Node tools without
+    // changing the production script's bounded retry contract.
     const result = spawnSync("/bin/bash", [entrypoint, "v1.2.3", "fixture-source"], {
-      encoding: "utf8", timeout: 20_000,
+      encoding: "utf8", timeout: 60_000,
       env: { PATH: `${bin}:/usr/bin:/bin`, HOME: path.join(root, "home"), TMPDIR: tmp },
     });
-    assert.equal(result.error, undefined, result.error?.message);
-    const calls = fs.readFileSync(callsFile, "utf8").trim().split("\n").map(JSON.parse);
+    const callsText = fs.existsSync(callsFile) ? fs.readFileSync(callsFile, "utf8") : "";
+    assert.equal(result.error, undefined, result.error && JSON.stringify({
+      error: result.error.message,
+      code: result.error.code,
+      status: result.status,
+      signal: result.signal,
+      stdout: result.stdout?.slice(-4096),
+      stderr: result.stderr?.slice(-4096),
+      recentRecordedCalls: callsText.slice(-8192),
+    }, null, 2));
+    const calls = callsText.trim().split("\n").map(JSON.parse);
     assert.deepEqual(fs.readdirSync(tmp), [], "entrypoint must clean its private WORK directory");
     return { result, calls };
   } finally {
