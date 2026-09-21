@@ -173,8 +173,9 @@ func (b *nvidiaBrevBackend) Resolve(ctx context.Context, req core.ResolveRequest
 		lease.Server.Labels["brev_org_id"] = activeOrgID
 	}
 	if req.ReleaseOnly || req.StatusOnly {
-		if req.ReadyProbe && brevWorkspaceReady(workspace) {
-			target, targetErr := b.resolveSSHTarget(ctx, client, cfg, workspace, shared.FirstNonBlankTrimmed(activeOrgID, claim.Labels["brev_org_id"]))
+		// Ordinary status probes an existing route; only --wait prepares it.
+		if brevWorkspaceReady(workspace) && (req.ReadyProbe || (req.StatusOnly && !req.ReleaseOnly && strings.TrimSpace(cfg.NvidiaBrev.Org) == "")) {
+			target, targetErr := b.resolveSSHTarget(ctx, client, cfg, workspace, shared.FirstNonBlankTrimmed(activeOrgID, claim.Labels["brev_org_id"]), req.ReadyProbe)
 			if targetErr != nil {
 				return core.LeaseTarget{}, targetErr
 			}
@@ -212,7 +213,7 @@ func (b *nvidiaBrevBackend) Resolve(ctx context.Context, req core.ResolveRequest
 		lease.Server = workspaceToClaimedServer(cfg, workspace, leaseID, slug, claim)
 		lease.Server.Labels["brev_org_id"] = activeOrgID
 	}
-	target, err := b.resolveSSHTarget(ctx, client, cfg, workspace, activeOrgID)
+	target, err := b.resolveSSHTarget(ctx, client, cfg, workspace, activeOrgID, true)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -930,7 +931,7 @@ func (b *nvidiaBrevBackend) waitForWorkspaceReady(ctx context.Context, client *b
 }
 
 func (b *nvidiaBrevBackend) prepareLease(ctx context.Context, client *brevClient, cfg core.Config, workspace brevWorkspace, orgID, leaseID, slug string, keep, probeSSH bool) (core.LeaseTarget, error) {
-	target, err := b.resolveSSHTarget(ctx, client, cfg, workspace, orgID)
+	target, err := b.resolveSSHTarget(ctx, client, cfg, workspace, orgID, true)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -959,18 +960,23 @@ func (b *nvidiaBrevBackend) startStoppedWorkspace(ctx context.Context, client *b
 	return workspace, err
 }
 
-func (b *nvidiaBrevBackend) resolveSSHTarget(ctx context.Context, client *brevClient, cfg core.Config, workspace brevWorkspace, orgID string) (core.SSHTarget, error) {
+func (b *nvidiaBrevBackend) resolveSSHTarget(ctx context.Context, client *brevClient, cfg core.Config, workspace brevWorkspace, orgID string, refresh bool) (core.SSHTarget, error) {
 	if strings.TrimSpace(cfg.NvidiaBrev.Org) != "" {
 		return core.SSHTarget{}, core.Exit(2, "nvidiaBrev.org scopes read-only Brev inventory only; brev refresh does not support --org, so SSH lifecycle resolution is unsafe. Run `brev set` for the desired active org or remove nvidiaBrev.org before using nvidia-brev SSH lifecycle commands")
 	}
 	if err := requireActiveBrevOrg(ctx, client, orgID); err != nil {
 		return core.SSHTarget{}, err
 	}
-	if err := client.refresh(ctx); err != nil {
-		return core.SSHTarget{}, err
+	if refresh {
+		if err := client.refresh(ctx); err != nil {
+			return core.SSHTarget{}, err
+		}
 	}
 	path := defaultBrevSSHConfigPath()
 	data, err := os.ReadFile(path)
+	if !refresh && errors.Is(err, os.ErrNotExist) {
+		return core.SSHTarget{}, nil
+	}
 	if err != nil {
 		return core.SSHTarget{}, core.Exit(2, "read nvidia-brev SSH config %s: %v", path, err)
 	}

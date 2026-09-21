@@ -56,6 +56,8 @@
 
 - Resolve NVIDIA Brev SSH routes with native OpenSSH, preserving certificate renewal and capturing validated routes across commands, sync, forwarding, and interactive connections. [PR 2429](https://github.com/openclaw/crabbox/pull/2429).
 
+- Report NVIDIA Brev readiness from the existing SSH route during ordinary status without refreshing, starting workspaces, or changing retained claims.
+
 ### Maintenance
 
 - Consolidate Pond process and artifact preparation, retained sandbox activity updates, and remote sandbox ownership metadata checks while preserving provider-specific policy and existing behavior. [PR 2356](https://github.com/openclaw/crabbox/pull/2356), [PR 2367](https://github.com/openclaw/crabbox/pull/2367), [PR 2368](https://github.com/openclaw/crabbox/pull/2368). Thanks @steipete.

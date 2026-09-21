@@ -455,7 +455,7 @@ func TestNvidiaBrevResolveSSHTargetRejectsOrganizationChangeDuringRefresh(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = backend.resolveSSHTarget(context.Background(), client, backend.configForRun(), brevWorkspace{Name: "crabbox-org-race"}, "org-test")
+	_, err = backend.resolveSSHTarget(context.Background(), client, backend.configForRun(), brevWorkspace{Name: "crabbox-org-race"}, "org-test", true)
 	if err == nil || !strings.Contains(err.Error(), "active Brev organization changed") {
 		t.Fatalf("err=%v, want organization change rejection", err)
 	}
