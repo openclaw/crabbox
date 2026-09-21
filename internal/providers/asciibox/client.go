@@ -377,6 +377,15 @@ type boxDeletionIncompleteError struct {
 func (e *boxDeletionIncompleteError) Error() string { return e.err.Error() }
 func (e *boxDeletionIncompleteError) Unwrap() error { return e.err }
 
+// Keep the sanitized diagnostic separate from the native runner's error chain.
+type boxDeletionLookupError struct {
+	message string
+	cause   error
+}
+
+func (e *boxDeletionLookupError) Error() string { return e.message }
+func (e *boxDeletionLookupError) Unwrap() error { return e.cause }
+
 var boxDeletionIDRE = regexp.MustCompile(`^bdop_[a-f0-9]{32}$`)
 
 func decodeBoxDeletionOperation(output, targetID, operationID string) (boxDeletionOperation, error) {
@@ -433,7 +442,10 @@ func (c *client) GetDeletionOperation(ctx context.Context, targetID, operationID
 		return boxDeletionOperation{}, ctxErr
 	}
 	if err != nil {
-		return boxDeletionOperation{}, fmt.Errorf("ascii-box deletion operation %s lookup failed; retaining claim: %s", operationID, c.formatError(result, err))
+		return boxDeletionOperation{}, &boxDeletionLookupError{
+			message: fmt.Sprintf("ascii-box deletion operation %s lookup failed; retaining claim: %s", operationID, c.formatError(result, err)),
+			cause:   err,
+		}
 	}
 	return decodeBoxDeletionOperation(result.Stdout, targetID, operationID)
 }

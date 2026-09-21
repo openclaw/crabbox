@@ -332,28 +332,26 @@ func TestReleaseBoxPendingOperationHonorsDeadline(t *testing.T) {
 }
 
 func TestReleaseBoxReportsLastDeletionStatusWhenNativeLookupTimesOut(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	lookups := 0
+	ctx := t.Context()
+	lookupErr := fmt.Errorf("native lookup box_key: %w", context.DeadlineExceeded)
 	runner := &releaseCommandRunner{configPath: filepath.Join(t.TempDir(), "config.json"), outcomes: map[string][]commandOutcome{
 		"stop":   {{result: core.LocalCommandResult{}}},
 		"delete": {deletionOutcome(testDeletionID, "bx_guard", "box", "pending")},
 		"deletion": {
 			deletionOutcome(testDeletionID, "bx_guard", "box", "blocked"),
-			{err: context.DeadlineExceeded},
+			{err: lookupErr},
 		},
-	}, onAction: func(action string) {
-		if action == "deletion" {
-			lookups++
-			if lookups == 2 {
-				<-ctx.Done()
-			}
-		}
 	}}
 	c := &client{apiKey: "box_key", apiURL: "https://ascii.dev", cliPath: "box", home: t.TempDir(), runner: runner, releasePollInterval: time.Nanosecond}
 	err := c.ReleaseBox(ctx, "bx_guard", func(context.Context) error { return nil })
-	if !errors.Is(err, context.DeadlineExceeded) {
+	if ctx.Err() != nil {
+		t.Fatalf("native timeout canceled the caller: %v", ctx.Err())
+	}
+	if !errors.Is(err, lookupErr) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("lost deadline cause: %v", err)
+	}
+	if strings.Contains(err.Error(), "box_key") || !strings.Contains(err.Error(), "box_REDACTED") {
+		t.Fatalf("lookup diagnostic lost redaction: %v", err)
 	}
 	for _, want := range []string{"phase=deletion-operation", testDeletionID, "last_observed_status=blocked", "retaining claim"} {
 		if !strings.Contains(err.Error(), want) {

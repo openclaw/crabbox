@@ -151,7 +151,9 @@ budget is shown only when that command's context has a deadline; progress does
 not extend it or impose a new whole-command timeout. Claim-lock waits and
 best-effort remote teardown are outside this native-call progress reporter.
 Deletion-wait failures retain the exact operation and its last validated status
-in the error. Native command capture is capped at 8 MiB per stream; oversized or
+in the error. A native lookup timeout remains recognizable as a timeout even
+when the overall cleanup deadline has not expired; diagnostics stay redacted.
+Native command capture is capped at 8 MiB per stream; oversized or
 incomplete output is an error, never evidence of completed deletion.
 
 SSH host trust is separate from the shared native authentication key. Readiness,
