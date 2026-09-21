@@ -251,7 +251,7 @@ type IdempotentLeaseIDBackend interface {
 }
 ```
 
-Direct AWS, Machine0, and local-container backends implement this capability;
+Direct AWS, Machine0, local-container, and Proxmox backends implement this capability;
 coordinator-backed leases support it through the coordinator wrapper. External
 backends support it only when their configured protocol explicitly advertises
 idempotent lease IDs. `crabbox warmup --lease-id` rejects other backends before
