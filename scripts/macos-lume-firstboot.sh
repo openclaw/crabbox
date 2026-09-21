@@ -4,6 +4,10 @@ set -euo pipefail
 marker="/var/db/crabbox-lume-machine-id"
 lease_user_marker="/var/db/crabbox-lume-ssh-user"
 trust_mount="/Volumes/My Shared Files"
+# Current Lume uses named shares; retain older single-share guest layouts.
+if [[ -d "$trust_mount/crabbox-bootstrap" ]]; then
+  trust_mount="$trust_mount/crabbox-bootstrap"
+fi
 challenge_path="$trust_mount/challenge"
 identity_path="$trust_mount/identity"
 ssh_user_path="$trust_mount/ssh_user"

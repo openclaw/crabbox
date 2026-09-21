@@ -36,9 +36,9 @@ func NormalizeHTTPSURL(raw string, errs EndpointURLErrors) (string, error) {
 	return canonicalEndpointAddress(parsed), nil
 }
 
-// NormalizeHTTPSBaseURL preserves valid path escaping and an empty query marker.
-// Callers supply defaults before validation; unlike NormalizeHTTPSURL, this
-// policy retains RawPath and ForceQuery when serializing the base URL.
+// NormalizeHTTPSBaseURL retains an empty query marker and uses RawPath when it
+// still matches Path after trailing slashes are trimmed. Callers supply defaults
+// before validation; unlike NormalizeHTTPSURL, this policy keeps those URL hints.
 func NormalizeHTTPSBaseURL(raw string, errs EndpointURLErrors) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {

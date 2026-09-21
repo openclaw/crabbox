@@ -19,6 +19,7 @@ func (Provider) ConfigShowSection(cfg core.Config) core.ProviderConfigShowSectio
 			{JSONName: "sourceSnapshotId", JSONValue: c.SourceSnapshotID, TextName: "snapshot_id", TextValue: core.Blank(c.SourceSnapshotID, "-")},
 			{JSONName: "cloneMode", JSONValue: c.CloneMode, TextName: "clone_mode", TextValue: c.CloneMode},
 			{JSONName: "host", JSONValue: c.Host, TextName: "host", TextValue: core.Blank(c.Host, "local")},
+			{JSONName: "maxVMs", JSONValue: c.MaxVMs, TextName: "max_vms", TextValue: strconv.Itoa(c.MaxVMs)},
 			{JSONName: "hostUser", JSONValue: c.HostUser},
 			{JSONName: "hostKey", JSONValue: core.ConfigShowSecretState(c.HostKey)},
 			{JSONName: "bootstrapKey", JSONValue: core.ConfigShowSecretState(c.BootstrapKey)},

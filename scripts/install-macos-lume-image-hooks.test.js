@@ -1,15 +1,40 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 const files = ["install-macos-lume-image-hooks.sh", "macos-lume-firstboot.sh", "macos-lume-firstboot-launchdaemon.plist"].map((name) => path.join(import.meta.dirname, name));
 const contains = (text, needles) => needles.forEach((needle) => assert.ok(text.includes(needle), needle));
 
+test("Lume bootstrap resolves named and legacy share layouts", async () => {
+  const boot = await readFile(files[1], "utf8");
+  const end = boot.indexOf('sshd_config_path=');
+  assert.ok(end > 0);
+  const prefix = boot.slice(0, end).replace('trust_mount="/Volumes/My Shared Files"', 'trust_mount="$CRABBOX_TEST_SHARE"');
+  const root = await mkdtemp(path.join(os.tmpdir(), "lume-share-"));
+  try {
+    await writeFile(path.join(root, "challenge"), "legacy-fixture\n");
+    for (const named of [false, true]) {
+      if (named) await mkdir(path.join(root, "crabbox-bootstrap"));
+      const result = spawnSync("bash", ["-c", `${prefix}\nprintf '%s\\n' "$challenge_path" "$identity_path" "$ssh_user_path" "$authorized_key_path"`], {
+        encoding: "utf8", env: { ...process.env, CRABBOX_TEST_SHARE: root },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const selected = named ? path.join(root, "crabbox-bootstrap") : root;
+      assert.deepEqual(result.stdout.trim().split("\n"), ["challenge", "identity", "ssh_user", "authorized_key"].map((name) => path.join(selected, name)));
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Lume image hooks preserve the secure bootstrap contract", async () => {
-  const syntax = spawnSync("bash", ["-n", files[0], files[1]], { encoding: "utf8" });
-  assert.equal(syntax.status, 0, syntax.stderr || syntax.stdout);
+  for (const file of files.slice(0, 2)) {
+    const syntax = spawnSync("bash", ["-n", file], { encoding: "utf8" });
+    assert.equal(syntax.status, 0, syntax.stderr || syntax.stdout);
+  }
   const [install, boot, daemon] = await Promise.all(files.map((file) => readFile(file, "utf8")));
   const ordered = ["/bin/rm -f /etc/ssh/ssh_host_*", "/usr/bin/ssh-keygen -A", "AuthorizedKeysFile none",
     "Include /etc/ssh/sshd_config.d/00-crabbox-lease.conf", "launchctl kickstart -k system/com.openssh.sshd",
@@ -25,7 +50,8 @@ test("Lume image hooks preserve the secure bootstrap contract", async () => {
     "Lume first-boot identity hook did not become ready"]);
   for (const pattern of [/<string>dev\.crabbox\.lume-firstboot<\/string>/,
     /<string>\/usr\/local\/libexec\/crabbox-lume-firstboot<\/string>/, /<key>RunAtLoad<\/key>\s*<true\/>/,
-    /<key>SuccessfulExit<\/key>\s*<false\/>/, /<key>PathState<\/key>[\s\S]*\/Volumes\/My Shared Files\/challenge/])
+    /<key>SuccessfulExit<\/key>\s*<false\/>/, /<key>PathState<\/key>[\s\S]*\/Volumes\/My Shared Files\/challenge/,
+    /<key>\/Volumes\/My Shared Files\/crabbox-bootstrap\/challenge<\/key>\s*<true\/>/])
     assert.match(daemon, pattern);
   contains(boot, ['trust_mount="/Volumes/My Shared Files"', '/bin/rm -f "$challenge_path"',
     'dscl . -read "/Users/$ssh_user" NFSHomeDirectory', 'authorized_key_path" "$ssh_home/.ssh/authorized_keys',

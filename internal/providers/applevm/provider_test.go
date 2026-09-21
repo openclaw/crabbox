@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -879,18 +880,8 @@ func TestAcquireRedactsSignedImageFromLogsAndLeaseMetadata(t *testing.T) {
 }
 
 func TestTouchPreservesSafeServerTypeIdentity(t *testing.T) {
-	b := testBackend(t, &recordingRunner{})
-	identity := "remote:sha256:aaaaaaaaaaaa"
-	server := core.Server{
-		Labels: map[string]string{
-			"image":       identity,
-			"server_type": identity,
-		},
-	}
-	server.ServerType.Name = identity
-	lease := core.LeaseTarget{
-		Server: server,
-	}
+	b, lease, _ := lifecycleFixture(t)
+	identity := lease.Server.ServerType.Name
 
 	server, err := b.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running"})
 	if err != nil {
@@ -938,6 +929,14 @@ func TestAcquireResolveListAndRelease(t *testing.T) {
 	lease, err := b.Acquire(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
+	}
+	persisted, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+	if !exists || !set || !reflect.DeepEqual(snapshot, persisted) {
+		t.Fatal("acquisition did not return its ready committed snapshot")
 	}
 	if lease.Server.CloudID != name || lease.SSH.Port != "43022" || lease.SSH.Host != "127.0.0.1" {
 		t.Fatalf("unexpected lease target: %#v", lease)
@@ -1716,4 +1715,248 @@ func argumentValue(args []string, name string) string {
 		}
 	}
 	return ""
+}
+
+type lifecycleClock struct{ now time.Time }
+
+func (c lifecycleClock) Now() time.Time { return c.now }
+
+func lifecycleFixture(t *testing.T) (*backend, core.LeaseTarget, core.LeaseClaim) {
+	t.Helper()
+	runner := &recordingRunner{responses: map[string]core.LocalCommandResult{}}
+	b := testBackend(t, runner)
+	b.cfg.IdleTimeout, b.cfg.TTL = 30*time.Minute, time.Hour
+	now := time.Now().UTC().Truncate(time.Second)
+	b.rt.Clock = lifecycleClock{now}
+	const id, name = "cbx_applevmlifecycle", "crabbox-lifecycle-test"
+	cfg := b.configForRun()
+	inst := applevmhelper.Instance{Name: name, LeaseID: id, Slug: "lifecycle", Status: applevmhelper.StatusRunning, Image: "remote:sha256:aaaaaaaaaaaa", SSHUser: "recorded", WorkRoot: "/recorded", SSHHost: "127.0.0.1", SSHPort: 43022, CreatedAt: now.Add(-20 * time.Minute), UpdatedAt: now}
+	root, _ := b.stateRoot()
+	runner.responses[commandKey("helper", []string{"list", "--state-root", root})] = core.LocalCommandResult{Stdout: mustJSON(t, applevmhelper.ListResponse{Instances: []applevmhelper.Instance{inst}})}
+	labels := core.DirectLeaseLabels(cfg, id, "lifecycle", providerName, "", false, inst.CreatedAt)
+	for k, v := range map[string]string{"state": "ready", "instance": name, "image": inst.Image, "server_type": inst.Image, "ssh_user": inst.SSHUser, "work_root": inst.WorkRoot, "ssh_port": "43022"} {
+		labels[k] = v
+	}
+	server := b.serverFromInstance(inst, core.LeaseClaim{LeaseID: id, Slug: "lifecycle", Labels: labels}, cfg)
+	target := core.SSHTargetFromConfig(cfg, inst.SSHHost)
+	target.Port = "43022"
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(id, "lifecycle", providerName, instanceScope(name), "", t.TempDir(), cfg.IdleTimeout, false, server, target); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	return b, core.LeaseTarget{LeaseID: id, Server: server, SSH: target}, claim
+}
+
+func TestAppleVMLifecycleHeartbeat(t *testing.T) {
+	b, lease, claim := lifecycleFixture(t)
+	original := claim
+	b.cfg.IdleTimeout = time.Minute
+	override := 90 * time.Minute
+	for _, value := range []*time.Duration{&override, nil} {
+		got, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease, State: "running", IdleTimeout: time.Minute, IdleTimeoutOverride: value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		persisted, err := core.ReadLeaseClaim(lease.LeaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if persisted.Revision == claim.Revision || persisted.IdleTimeoutSeconds != 5400 || persisted.LastUsedAt != b.rt.Clock.Now().Format(time.RFC3339) {
+			t.Fatal("heartbeat did not commit timestamp/timeout")
+		}
+		if got.Labels["expires_at"] != core.LeaseLabelTime(b.rt.Clock.Now().Add(40*time.Minute)) {
+			t.Fatal("original TTL cap lost")
+		}
+		for _, key := range []string{"instance", "image", "server_type", "ssh_user", "work_root", "ssh_port"} {
+			if got.Labels[key] != original.Labels[key] {
+				t.Fatalf("lost %s", key)
+			}
+		}
+		snapshot, exists, set := core.ServerLeaseClaimSnapshot(got)
+		if !exists || !set || !reflect.DeepEqual(snapshot, persisted) {
+			t.Fatal("touch returned noncommitted snapshot")
+		}
+		if _, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease}); err == nil {
+			t.Fatal("stale touch accepted")
+		}
+		fresh := newBackend(Provider{}.Spec(), b.cfg, b.rt).(*backend)
+		fresh.prepareHelper = b.prepareHelper
+		fresh.stateRoot = b.stateRoot
+		observed, err := fresh.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if observed.Server.Labels["idle_timeout_secs"] != "5400" || observed.Server.Labels["last_touched_at"] != got.Labels["last_touched_at"] {
+			t.Fatal("fresh observation lost policy")
+		}
+		after, err := core.ReadLeaseClaim(lease.LeaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(after, persisted) {
+			t.Fatal("observation renewed claim")
+		}
+		lease.Server, claim = got, persisted
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := b.Touch(canceled, core.TouchRequest{Lease: lease}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled touch: %v", err)
+	}
+}
+
+func TestAppleVMLifecycleObservationAndReuse(t *testing.T) {
+	for _, mode := range []string{"plain", "waiting", "status-reclaim", "controller", "reuse"} {
+		t.Run(mode, func(t *testing.T) {
+			b, lease, before := lifecycleFixture(t)
+			req := core.ResolveRequest{ID: lease.LeaseID, Repo: core.Repo{Root: before.RepoRoot}, StatusOnly: mode == "plain" || mode == "waiting" || mode == "status-reclaim", ReadyProbe: mode == "waiting", Reclaim: mode == "status-reclaim", NoLocalStateMutations: mode == "controller"}
+			got, err := b.Resolve(t.Context(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.SSH.Host != "127.0.0.1" || got.SSH.Port != "43022" || got.SSH.User != "recorded" || got.Server.Labels["work_root"] != "/recorded" {
+				t.Fatal("lost recorded endpoint")
+			}
+			after, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, exists, set := core.ServerLeaseClaimSnapshot(got.Server)
+			if !exists || !set || !reflect.DeepEqual(snapshot, after) {
+				t.Fatal("resolve did not return persisted snapshot")
+			}
+			if mode == "reuse" {
+				if after.Revision == before.Revision {
+					t.Fatal("reuse did not publish endpoint")
+				}
+			} else if !reflect.DeepEqual(after, before) {
+				t.Fatal("observation changed claim")
+			}
+		})
+	}
+}
+
+func TestAppleVMLifecycleHeartbeatCLI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX helper fixture; native proof is separate")
+	}
+	b, lease, _ := lifecycleFixture(t)
+	root, _ := b.stateRoot()
+	data := b.rt.Exec.(*recordingRunner).responses[commandKey("helper", []string{"list", "--state-root", root})].Stdout
+	helper := filepath.Join(t.TempDir(), "helper")
+	if err := os.WriteFile(helper, []byte("#!/bin/sh\ncase \"$1\" in\nlist) printf '%s\\n' '"+data+"';;\n*) exit 91;;\nesac\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(config, []byte(mustJSON(t, map[string]any{"provider": providerName, "appleVM": map[string]string{"helperPath": helper}})), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", config)
+	t.Setenv("CRABBOX_BROKER_URL", "")
+	for _, extra := range [][]string{{"--idle-timeout", "90m"}, nil} {
+		var out, errout bytes.Buffer
+		args := append([]string{"heartbeat", "--provider", providerName, "--id", lease.LeaseID, "--json"}, extra...)
+		if err := (core.App{Stdout: &out, Stderr: &errout}).Run(t.Context(), args); err != nil {
+			t.Fatal(err)
+		}
+		var result struct {
+			IdleTimeout string `json:"idleTimeout"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		claim, err := core.ReadLeaseClaim(lease.LeaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.IdleTimeout != "1h30m0s" || claim.IdleTimeoutSeconds != 5400 {
+			t.Fatal("public heartbeat lost timeout")
+		}
+	}
+}
+
+func TestAppleVMLifecycleRejectsUnpublishableTouch(t *testing.T) {
+	for _, scenario := range []string{"missing snapshot", "missing claim", "wrong scope", "wrong instance", "provisioning", "recovery", "stopped", "invalid requested state"} {
+		t.Run(scenario, func(t *testing.T) {
+			b, lease, before := lifecycleFixture(t)
+			requested := "ready"
+			switch scenario {
+			case "missing snapshot":
+				core.SetServerLeaseClaimSnapshot(&lease.Server, core.LeaseClaim{}, false)
+			case "missing claim":
+				core.RemoveLeaseClaim(lease.LeaseID)
+			case "wrong scope":
+				bad := before
+				bad.ProviderScope = "other-instance"
+				core.SetServerLeaseClaimSnapshot(&lease.Server, bad, true)
+			case "wrong instance":
+				lease.Server.CloudID = "other-instance"
+			case "stopped":
+				lease.Server.Status = "stopped"
+			case "invalid requested state":
+				requested = "provisioning"
+			case "provisioning", "recovery":
+				labels := map[string]string{}
+				for k, v := range before.Labels {
+					labels[k] = v
+				}
+				if scenario == "provisioning" {
+					labels["state"] = "provisioning"
+				} else {
+					labels["recovery"] = "incomplete"
+				}
+				updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, before, labels)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before = updated
+				core.SetServerLeaseClaimSnapshot(&lease.Server, before, true)
+			}
+			if _, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease, State: requested}); err == nil {
+				t.Fatal("unpublishable touch accepted")
+			}
+			after, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "missing claim" {
+				if exists {
+					t.Fatal("touch recreated claim")
+				}
+			} else if !reflect.DeepEqual(after, before) {
+				t.Fatal("rejected touch changed claim")
+			}
+		})
+	}
+}
+
+func TestAppleVMLifecycleClaimlessStatusNeverAdopts(t *testing.T) {
+	for _, wait := range []bool{false, true} {
+		t.Run(fmt.Sprint(wait), func(t *testing.T) {
+			b, lease, _ := lifecycleFixture(t)
+			core.RemoveLeaseClaim(lease.LeaseID)
+			got, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.Server.Name, Repo: core.Repo{Root: t.TempDir()}, StatusOnly: true, ReadyProbe: wait, Reclaim: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.SSH.Host == "" {
+				t.Fatal("claimless observation lost published endpoint")
+			}
+			_, exists, _ := core.ServerLeaseClaimSnapshot(got.Server)
+			if exists {
+				t.Fatal("claimless status fabricated an exact snapshot")
+			}
+			_, exists, err = core.ReadLeaseClaimWithPresence(lease.LeaseID)
+			if err != nil || exists {
+				t.Fatalf("status adopted claim: exists=%v err=%v", exists, err)
+			}
+			if _, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.Server.Name, Repo: core.Repo{Root: t.TempDir()}, Reclaim: true, NoLocalStateMutations: true}); err == nil {
+				t.Fatal("controller silently adopted raw instance")
+			}
+		})
+	}
 }

@@ -2,9 +2,27 @@
 
 ## Unreleased
 
+### Features
+
+- Add opt-in direct-host Parallels capacity limits through `parallels.maxVMs` and `CRABBOX_PARALLELS_MAX_VMS`, preserve fleet-entry precedence, and let explicit YAML zero clear inherited limits. [PR 2392](https://github.com/openclaw/crabbox/pull/2392), [Issue 2386](https://github.com/openclaw/crabbox/issues/2386). Thanks @saariuslystoned.
+
 ### Fixes
 
+- Preserve canonical cancellation/deadline context and recognized release-denial states in workspace-owner error messages. [PR 2412](https://github.com/openclaw/crabbox/pull/2412). Thanks @steipete.
+- Explain Parallels IP discovery timeouts with clone mode, NIC details, and retry-time console guidance while preserving cleanup and clone defaults. [PR 2415](https://github.com/openclaw/crabbox/pull/2415), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
+- Restore Lume guest bootstrap with named shared directories, authenticated status readiness, and cleanup with quiet partial-match `lsof` output; existing golden images need refreshed hooks. [PR 2409](https://github.com/openclaw/crabbox/pull/2409).
+- Lume: persist heartbeat policy across fresh reads, honor explicit idle-timeout changes, and admit owned instance-scoped leases through the public heartbeat command. [PR 2407](https://github.com/openclaw/crabbox/pull/2407).
+- Persist Tart heartbeat timestamps and explicit idle-timeout changes in the lease claim, preserving them across fresh status reads and cleanup without losing SSH target details. [PR 2405](https://github.com/openclaw/crabbox/pull/2405).
+- Show the configured direct-host Parallels capacity in text and JSON config output, including zero and negative unlimited settings, without substituting a fleet limit. [PR 2400](https://github.com/openclaw/crabbox/pull/2400), follow-up to [PR 2392](https://github.com/openclaw/crabbox/pull/2392).
+- Prepare Node and npm before Parallels macOS readiness checks, preserving usable existing runtimes offline and installing the pinned baseline when needed. [PR 2387](https://github.com/openclaw/crabbox/pull/2387), [Issue 2381](https://github.com/openclaw/crabbox/issues/2381). Thanks @saariuslystoned.
+- Check macOS SSH listener availability during Parallels guest preparation, including older readiness helpers and configured fallback ports, so missing listeners fail earlier. [PR 2399](https://github.com/openclaw/crabbox/pull/2399), [Issue 2397](https://github.com/openclaw/crabbox/issues/2397). Thanks @saariuslystoned.
+- Avoid spurious SSH-directory creation failures when concurrent leases share fresh local state, while retaining existing directory validation. [PR 2395](https://github.com/openclaw/crabbox/pull/2395). Thanks @saariuslystoned.
 - Enforce Parallels fleet capacity across concurrent clones sharing local state, including differently named entries for the same host and account, while keeping doctor and checkpoint dry-run selection lock-free. [PR 2385](https://github.com/openclaw/crabbox/pull/2385), [Issue 2384](https://github.com/openclaw/crabbox/issues/2384). Thanks @saariuslystoned.
+- Persist explicit idle-timeout changes in GCP heartbeats while preserving omitted limits, legacy labels, and the lease TTL cap. [PR 2404](https://github.com/openclaw/crabbox/pull/2404).
+- Report successful SSH authentication when a readiness check still times out, including real proxy routes, so diagnostics distinguish missing guest readiness from connection or authentication failures. [PR 2391](https://github.com/openclaw/crabbox/pull/2391). Thanks @saariuslystoned.
+
+- Honor explicit idle-timeout changes in direct Parallels heartbeats while preserving the stored window when the flag is omitted. [PR 2406](https://github.com/openclaw/crabbox/pull/2406). Thanks @saariuslystoned.
+- Apple VM: persist heartbeat timestamps and explicit idle-timeout changes across fresh status reads, preserving recorded timeout and TTL policy when the flag is omitted. [PR 2413](https://github.com/openclaw/crabbox/pull/2413). Thanks @steipete.
 
 ## 0.63.0 - 2026-09-20
 

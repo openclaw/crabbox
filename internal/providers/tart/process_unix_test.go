@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -641,6 +642,45 @@ func processFileDescriptors(t *testing.T) map[int]uint64 {
 	return out
 }
 
+func TestTartHeartbeatCLIUsesNativeClaimScope(t *testing.T) {
+	_, _, claim := cleanupFixture(t)
+	labels := maps.Clone(claim.Labels)
+	labels["state"] = "ready"
+	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(cleanupLease, claim, labels); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	inventory := fmt.Sprintf(`[{"Name":%q,"State":"running","Running":true}]`, cleanupVM)
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\nlist) printf '%%s\\n' '%s';;\nip) printf '192.0.2.10\\n';;\n*) exit 91;;\nesac\n", inventory)
+	if err := os.WriteFile(filepath.Join(bin, "tart"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(config, []byte("provider: tart\ntarget: macos\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", config)
+	t.Setenv("CRABBOX_BROKER_URL", "")
+	for _, extra := range [][]string{{"--idle-timeout", "10m"}, nil} {
+		var stdout, stderr bytes.Buffer
+		args := append([]string{"heartbeat", "--provider", "tart", "--id", cleanupLease, "--json"}, extra...)
+		if err := (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args); err != nil {
+			t.Fatalf("heartbeat failed: %v; stderr=%s", err, &stderr)
+		}
+		var result struct {
+			IdleTimeout string `json:"idleTimeout"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		persisted, err := core.ReadLeaseClaim(cleanupLease)
+		if err != nil || persisted.IdleTimeoutSeconds != 600 || result.IdleTimeout != "10m0s" {
+			t.Fatalf("persisted idle=%d output idle=%q err=%v", persisted.IdleTimeoutSeconds, result.IdleTimeout, err)
+		}
+	}
+}
+
 type acquisitionResult struct {
 	lease core.LeaseTarget
 	err   error
@@ -793,7 +833,8 @@ func TestAcquireStartupSuccessLifetime(t *testing.T) {
 			f := newProcessFixture(t, "")
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(nil)
-			result := acquireProcess(t, f, f.backend(), ctx, cancel, keep)
+			b := f.backend()
+			result := acquireProcess(t, f, b, ctx, cancel, keep)
 			child := result.next(t, f, "run")
 			awaitAcquisition(t, result.done)
 			if result.err != nil {
@@ -802,6 +843,13 @@ func TestAcquireStartupSuccessLifetime(t *testing.T) {
 			claims, err := core.ListLeaseClaims()
 			if err != nil || len(claims) != 1 || claims[0].LeaseID != result.lease.LeaseID || claims[0].CloudImmutableID == "" {
 				t.Fatalf("claim=%+v err=%v", claims, err)
+			}
+			snapshot, exists, set := core.ServerLeaseClaimSnapshot(result.lease.Server)
+			if !set || !exists || !reflect.DeepEqual(snapshot, claims[0]) {
+				t.Fatal("Acquire did not return its committed claim snapshot")
+			}
+			if _, err := b.Touch(ctx, core.TouchRequest{Lease: result.lease, State: "ready"}); err != nil {
+				t.Fatalf("first touch after Acquire: %v", err)
 			}
 			f.assertLogsRemoved(t)
 			cancel(errors.New("caller returned"))

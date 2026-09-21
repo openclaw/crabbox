@@ -67,6 +67,8 @@ Each source VM should already include:
 - an OpenSSH server listening on `ssh.port`;
 - Crabbox sync tools for the target OS (`git`, `rsync` or archive sync tools,
   and a shell/PowerShell);
+- for macOS, `/bin/bash` plus either a working Node runtime or a writable
+  `/usr/local`, so guest preparation can settle the Node readiness baseline;
 - a known-good power-off snapshot for fast linked clones.
 
 Linked clones require an explicit power-off snapshot. Crabbox rejects linked
@@ -77,10 +79,68 @@ intentionally want to clone the current source VM state without a snapshot.
 Parallels also refuses to clone from a busy source VM, so keep template VMs shut
 down when they serve as local fleet bases.
 
+Some templates run as full clones but never boot as linked clones: Parallels
+reports the clone as `running`, yet the guest never gets a Tools session or a
+DHCP lease, and the lease fails after `parallels.startupTimeout` waiting for an
+IP. The timeout error names the clone mode and the clone's NIC MACs, and says
+whether the macOS DHCP fallback found no matching lease for them. Failed
+acquisitions clean up their clone before returning the error. To investigate,
+retry and capture the new clone's console on the Parallels host while IP
+discovery is still waiting. Use `prlctl list -a` there to identify the new VM:
+
+```sh
+prlctl capture <new-vm-id> --file /tmp/crabbox-clone.png
+```
+
+A persistently black capture can indicate a boot or display problem, but does
+not by itself prove that the guest OS failed to boot. Compare with
+`cloneMode: full`, which does not select a source snapshot, or investigate the
+template snapshot. Crabbox keeps `linked` as the default because full clones
+cannot select `parallels.sourceSnapshot`. When resolving an existing VM, the
+clone mode is reported as unknown rather than inferred from current configuration,
+and the capture hint targets that existing VM instead of a new acquisition.
+
 For macOS templates, use a user with SSH login permission and a writable
 `parallels.workRoot`, for example `/Users/<user>/crabbox`. For Windows native
 templates, configure OpenSSH Server and PowerShell. For Windows WSL2 templates,
 make sure `wsl.exe` works for the SSH user.
+
+macOS preparation checks for a local listener on the configured SSH port or an
+SSH fallback port, even when the template already has a readiness helper. This
+checks listener availability only; Crabbox still requires authenticated SSH
+readiness before accepting the lease. Linux preparation is unchanged.
+
+macOS readiness requires working `node` and `npm`, so a template does not have to
+ship them. Guest preparation settles the baseline before it checks
+`/usr/local/bin/crabbox-ready`, which means templates that already carry a
+readiness helper still receive it. Preparation resolves the runtime the way the
+readiness probe does, in this order:
+
+1. `node` and `npm` already resolve on the standard command PATH: nothing to do.
+2. The guest SSH user's login environment provides them — Homebrew, nvm, asdf or
+   any other user-managed install. Preparation links them into `/usr/local/bin`
+   so the probe, `crabbox-ready` and root all agree, and downloads nothing. The
+   lookup runs as that user, so a template's login setup is never sourced as
+   root. It resolves them through `bash -lc`, matching the readiness probe, so a
+   runtime exported only from zsh-specific files such as `~/.zprofile` is not
+   found here — export it from `~/.bash_profile`, `~/.profile` or
+   `/etc/paths.d` if a template relies on this case. Version-manager shims are
+   resolved to the executables they run, so an `asdf` or `nvm` runtime keeps
+   working under the fixed PATH that `crabbox-ready` uses, where the manager
+   itself is not present. If the preserved runtime still does not run there,
+   preparation falls back to the pinned installer rather than leaving a
+   readiness helper that fails.
+3. Neither: preparation installs Node 24.19.0, matching the Linux developer
+   recipe's LTS baseline. Intel and Apple Silicon both use checksum-pinned
+   official `nodejs.org` archives, with versioned installations under
+   `/usr/local/lib/crabbox` and command links in `/usr/local/bin`. Homebrew is
+   not required.
+
+A template that already satisfies readiness therefore keeps working offline: an
+existing runtime is preserved rather than replaced, so a template does not start
+depending on `nodejs.org` to stay ready. Only case 3 reaches the network, and a
+failure there stops preparation with the installer's own error rather than
+leaving the lease to time out at readiness.
 
 ### macOS desktop credentials
 
@@ -200,6 +260,11 @@ destination explicitly with `--parallels-host` or `CRABBOX_PARALLELS_HOST`.
 Absolute, missing, and repository-escaping key paths require explicit host
 approval.
 
+An explicit `--parallels-host` or `CRABBOX_PARALLELS_HOST` is a direct-host
+override, so it discards any configured `hosts` fleet along with those entries'
+`maxVMs` limits. Set `parallels.maxVMs` or `CRABBOX_PARALLELS_MAX_VMS` to cap
+concurrent VMs on the overriding host.
+
 ### Fleet hosts
 
 ```yaml
@@ -227,9 +292,12 @@ requested target, looks for the requested source VM, and picks the first host
 below its `maxVMs` limit. Host selection applies to `warmup`, `run`,
 `checkpoint fork`, `status`, `list`, `stop`, and `cleanup`.
 
-A host with a `maxVMs` limit counts its live VMs and clones into it under one
-reservation, so concurrent fan-out such as `crabbox shard --count 8` cannot
-exceed the limit: forks that arrive when the host is full fail with exit 5 and
+A positive `maxVMs` limits the host's inventoried VMs whose names start with
+`crabbox-`, including stopped VMs. Zero and negative values mean unlimited.
+A limited host counts these VMs and clones under one reservation, so callers
+sharing the reservation described below cannot exceed the limit through
+concurrent fan-out such as `crabbox shard --count 8`. Forks that arrive when the
+host is full fail with exit 5 and
 `host <name> is at maxVMs capacity` instead of cloning. Clones against a limited
 host are therefore serialized against each other, which adds the clone time of
 the forks ahead in the queue. A host with no `maxVMs` has no limit to enforce
@@ -243,6 +311,26 @@ same host/account spelling for callers that must coordinate. Different state
 directories or machines driving the same Parallels host still race against each
 other. Advisory queries such as `doctor` and `checkpoint fork --dry-run` neither
 take a reservation nor write capacity-lock state.
+
+A top-level `parallels.maxVMs` caps inventoried Crabbox VMs on a direct host:
+
+```yaml
+provider: parallels
+parallels:
+  host: mac-studio.tailnet
+  maxVMs: 4
+```
+
+Precedence: a selected fleet host's own `maxVMs` always wins, and the top-level
+`parallels.maxVMs` applies only when no fleet entry was selected (the direct-host
+path) rather than acting as a default for fleet entries that omit `maxVMs`.
+The default is unlimited. An omitted value inherits an earlier config file's
+setting; an explicit zero or negative value clears that limit. The environment
+variable `CRABBOX_PARALLELS_MAX_VMS` overrides the YAML value, including with
+zero. A direct host with a positive limit takes the same reservation as a limited
+fleet host. Concurrent callers coordinate only when they use the same state
+directory and configured host/account; this is not a quota shared across
+controller machines or different SSH aliases.
 
 ### Environment variables
 
@@ -262,11 +350,16 @@ CRABBOX_PARALLELS_USER
 CRABBOX_PARALLELS_PASSWORD
 CRABBOX_PARALLELS_WORK_ROOT
 CRABBOX_PARALLELS_STARTUP_TIMEOUT
+CRABBOX_PARALLELS_MAX_VMS
 ```
 
 Provider flags mirror the same fields (`--parallels-source`,
 `--parallels-source-snapshot`, `--parallels-template`, `--parallels-host`, and
-so on) and never carry passwords.
+so on) and never carry passwords. The direct-host `maxVMs` setting is available
+only through YAML and `CRABBOX_PARALLELS_MAX_VMS`, not a command-line flag.
+
+`crabbox config show` displays the loaded direct-host setting as `max_vms`
+(`parallels.maxVMs` in JSON), independently of each fleet entry's own limit.
 
 ## Checkpoints
 

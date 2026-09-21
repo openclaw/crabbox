@@ -27,6 +27,16 @@ const parallelsCapacityLockRetryDelay = 100 * time.Millisecond
 
 var errParallelsDHCPLeaseAmbiguous = errors.New("ambiguous Parallels DHCP lease")
 
+var errParallelsDHCPLeaseMissing = errors.New("no Parallels DHCP lease for VM MACs")
+
+// Acquisition owns clone mode and rollback; resolving an existing VM does not.
+type ParallelsIPWaitPurpose uint8
+
+const (
+	ParallelsIPWaitExisting ParallelsIPWaitPurpose = iota
+	ParallelsIPWaitAcquisition
+)
+
 type ParallelsClient struct {
 	Cfg    Config
 	Runner CommandRunner
@@ -453,7 +463,7 @@ func (c *ParallelsClient) BootstrapMacOSOverSSH(ctx context.Context, ip string, 
 	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 		return Exit(2, "invalid Parallels guest SSH port %q", port)
 	}
-	script := parallelsPOSIXInstallSSHKeyScript(user, publicKey) + "\n" + parallelsPOSIXEnsureReadyScript(user, cfg.WorkRoot, cfg.Desktop, cfg.Parallels.Password != "")
+	script := parallelsPOSIXInstallSSHKeyScript(user, publicKey) + "\n" + parallelsPOSIXEnsureReadyScript(user, cfg.WorkRoot, cfg.Desktop, cfg.Parallels.Password != "", sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts))
 	args := []string{
 		"/usr/bin/ssh",
 		"-i", bootstrapKey,
@@ -529,14 +539,14 @@ func (c *ParallelsClient) EnsureGuestReady(ctx context.Context, vmID string, cfg
 		workRoot = baseConfig().WorkRoot
 	}
 	desktop := cfg.Desktop
-	result, err := c.prlctl(ctx, nil, "exec", vmID, "/bin/sh", "-lc", parallelsPOSIXEnsureReadyScript(user, workRoot, desktop, cfg.TargetOS == targetMacOS && cfg.Parallels.Password != ""))
+	result, err := c.prlctl(ctx, nil, "exec", vmID, "/bin/sh", "-lc", parallelsPOSIXEnsureReadyScript(user, workRoot, desktop, cfg.TargetOS == targetMacOS && cfg.Parallels.Password != "", sshPortCandidates(cfg.SSHPort, cfg.SSHFallbackPorts)))
 	if err != nil {
 		return commandOutputError("parallels guest prep", result, err)
 	}
 	return nil
 }
 
-func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time.Duration) (ParallelsVM, error) {
+func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time.Duration, purpose ParallelsIPWaitPurpose) (ParallelsVM, error) {
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
 	}
@@ -571,10 +581,11 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 			}
 		}
 		if time.Now().After(deadline) {
+			hint := parallelsIPTimeoutHint(c.Cfg, last, useDHCPFallback, lastDHCPError, purpose)
 			if lastDHCPError != nil {
-				return ParallelsVM{}, Exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s; DHCP fallback: %v", id, blank(last.State, "-"), lastDHCPError)
+				return ParallelsVM{}, Exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s; DHCP fallback: %v; %s", id, blank(last.State, "-"), lastDHCPError, hint)
 			}
-			return ParallelsVM{}, Exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s", id, blank(last.State, "-"))
+			return ParallelsVM{}, Exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s; %s", id, blank(last.State, "-"), hint)
 		}
 		select {
 		case <-ctx.Done():
@@ -582,6 +593,39 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 		case <-time.After(5 * time.Second):
 		}
 	}
+}
+
+// parallelsIPTimeoutHint explains an IP discovery timeout in terms of the
+// clone mode, the discovery routes that ran, and the next check to make.
+func parallelsIPTimeoutHint(cfg Config, last ParallelsVM, dhcpFallback bool, dhcpErr error, purpose ParallelsIPWaitPurpose) string {
+	mode := "unknown"
+	if purpose == ParallelsIPWaitAcquisition {
+		mode = strings.ToLower(strings.TrimSpace(cfg.Parallels.CloneMode))
+		if mode == "" {
+			mode = "linked"
+		}
+	}
+	macs := "-"
+	if len(last.MACs) > 0 {
+		macs = strings.Join(last.MACs, ",")
+	}
+	parts := []string{"clone_mode=" + mode + " macs=" + macs + " tools_ip=none"}
+	if !dhcpFallback && cfg.TargetOS == targetMacOS {
+		parts = append(parts, "for macOS guests without working Parallels Tools, set parallels.bootstrapKey to enable DHCP/SSH discovery")
+	}
+	running := strings.EqualFold(strings.TrimSpace(last.State), "running")
+	if running && errors.Is(dhcpErr, errParallelsDHCPLeaseMissing) {
+		parts = append(parts, "no matching DHCP lease was found for the VM's MACs; the guest may not have booted")
+		if purpose == ParallelsIPWaitAcquisition {
+			parts = append(parts, "acquisition cleans up failed clones: retry and capture the new VM on the Parallels host while IP discovery is still waiting (`prlctl capture <new-vm-id> --file <png>`)")
+		} else {
+			parts = append(parts, "inspect the existing VM on the Parallels host with `prlctl capture <existing-vm-id> --file <png>`")
+		}
+	}
+	if running && purpose == ParallelsIPWaitAcquisition && mode == "linked" {
+		parts = append(parts, "if the console stays blank, the template may not boot as a linked clone; retry with parallels.cloneMode=full (full clones cannot select a source snapshot)")
+	}
+	return "hint: " + strings.Join(parts, "; ")
 }
 
 func (c *ParallelsClient) WaitForGuestExec(ctx context.Context, id string, cfg Config, timeout time.Duration) error {
@@ -842,12 +886,128 @@ func parallelsMacOSDesktopSetupScript(accountCredentials bool) string {
 `
 }
 
-func parallelsPOSIXEnsureReadyScript(user, workRoot string, desktop, macOSAccountCredentials bool) string {
+// The macOS Node handling is its own unit so a test can exercise it directly.
+// Both preparation paths drive this script through /bin/sh while the pinned
+// installer is bash with pipefail, and neither its shell options nor its
+// exit 0 may escape into preparation.
+func parallelsMacOSNodeBaselineStanza() string {
+	return fmt.Sprintf(`# macOS readiness requires Node, so settle it before the gate below. Running
+# ahead of the gate keeps a guest whose crabbox-ready predates the Node checks
+# from exiting early and skipping this forever.
+if command -v sw_vers >/dev/null 2>&1; then
+  if ! PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin sh -c 'node --version >/dev/null 2>&1 && npm --version >/dev/null 2>&1'; then
+    # A runtime the guest user already manages (Homebrew, nvm, asdf) satisfies
+    # readiness, so preserve it rather than downloading over it: an existing
+    # template must not start needing nodejs.org to stay ready.
+    #
+    # Resolve it as that user through bash -lc, matching the probe exactly
+    # rather than the user's default login shell, which reads different rc
+    # files. Never source their login files as root, and keep stdin off these
+    # children -- this whole script arrives on stdin via sudo -n /bin/sh -s, so
+    # anything reading stdin silently eats the rest of it.
+    #
+    # Ask node for its own execPath rather than taking what command -v returns.
+    # An asdf-style shim re-execs through its manager, which is absent from the
+    # PATH crabbox-ready uses, so linking the shim would satisfy the probe's
+    # login shell and then fail the helper; execPath is the binary that shim
+    # ultimately runs, with npm and npx beside it.
+    crabbox_node_preserved=false
+    crabbox_node_bin=$(su - "$user" -c 'bash -lc "node -p process.execPath"' </dev/null 2>/dev/null || true)
+    if [ ! -x "$crabbox_node_bin" ]; then
+      crabbox_node_bin=$(su - "$user" -c 'bash -lc "command -v node"' </dev/null 2>/dev/null || true)
+    fi
+    crabbox_npm_bin=
+    if [ -x "$crabbox_node_bin" ]; then
+      crabbox_npm_bin=${crabbox_node_bin%%/*}/npm
+    fi
+    if [ ! -x "$crabbox_npm_bin" ]; then
+      crabbox_npm_bin=$(su - "$user" -c 'bash -lc "command -v npm"' </dev/null 2>/dev/null || true)
+    fi
+    # Guard each destination on its own. The commands can sit in different
+    # prefixes -- node already at /usr/local/bin with npm only in the user's
+    # login PATH is a healthy template -- and a combined guard would reject
+    # preservation whenever either one already occupies its destination,
+    # downloading over a runtime that already satisfies readiness. If neither
+    # needs linking, the install at /usr/local/bin is the one that just failed
+    # the probe above, so fall through and let the installer replace it.
+    if [ -x "$crabbox_node_bin" ] && [ -x "$crabbox_npm_bin" ] &&
+      { [ "$crabbox_node_bin" != /usr/local/bin/node ] || [ "$crabbox_npm_bin" != /usr/local/bin/npm ]; }; then
+      install -d -m 0755 /usr/local/bin
+      if [ "$crabbox_node_bin" != /usr/local/bin/node ]; then
+        ln -sfn "$crabbox_node_bin" /usr/local/bin/node
+      fi
+      if [ "$crabbox_npm_bin" != /usr/local/bin/npm ]; then
+        ln -sfn "$crabbox_npm_bin" /usr/local/bin/npm
+      fi
+      crabbox_npx_bin=${crabbox_node_bin%%/*}/npx
+      if [ ! -x "$crabbox_npx_bin" ]; then
+        crabbox_npx_bin=$(su - "$user" -c 'bash -lc "command -v npx"' </dev/null 2>/dev/null || true)
+      fi
+      if [ -x "$crabbox_npx_bin" ] && [ "$crabbox_npx_bin" != /usr/local/bin/npx ]; then
+        ln -sfn "$crabbox_npx_bin" /usr/local/bin/npx
+      fi
+      # Only claim preservation if the result actually works in the environment
+      # crabbox-ready runs in. Anything that still needs the guest user's login
+      # context falls through to the pinned installer instead of leaving a
+      # helper that fails while the probe passes.
+      if PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin sh -c 'node --version >/dev/null 2>&1 && npm --version >/dev/null 2>&1'; then
+        crabbox_node_preserved=true
+      fi
+    fi
+    if [ "$crabbox_node_preserved" != true ]; then
+      # No usable runtime anywhere: fall back to the pinned shared installer.
+      crabbox_node_installer="$(mktemp /tmp/crabbox-node-install.XXXXXX)"
+      cat >"$crabbox_node_installer" <<'CRABBOXNODEINSTALL'
+%s
+CRABBOXNODEINSTALL
+      /bin/bash "$crabbox_node_installer" </dev/null || { rm -f "$crabbox_node_installer"; exit 1; }
+      rm -f "$crabbox_node_installer"
+    fi
+  fi
+fi`, sharedMacOSNodeInstall())
+}
+
+// parallelsShellPortList renders SSH port candidates as quoted shell words for
+// a `for ... in` list. Non-numeric entries are dropped rather than quoted into
+// the guest script, and an empty result falls back to the default SSH port.
+func parallelsShellPortList(ports []string) string {
+	valid := make([]string, 0, len(ports))
+	for _, port := range ports {
+		port = strings.TrimSpace(port)
+		if port == "" {
+			continue
+		}
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			continue
+		}
+		valid = append(valid, port)
+	}
+	if len(valid) == 0 {
+		valid = []string{"22"}
+	}
+	return strings.Join(shellWords(uniqueSSHPorts(valid)), " ")
+}
+
+func parallelsPOSIXEnsureReadyScript(user, workRoot string, desktop, macOSAccountCredentials bool, sshPorts []string) string {
 	return fmt.Sprintf(`set -eu
 user=%s
 work_root=%s
 desktop=%t
-if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1; then
+# Only macOS guests gate on this. The Linux branch manages ssh through systemd
+# and is left exactly as it was.
+crabbox_ssh_listening() {
+  if ! command -v sw_vers >/dev/null 2>&1; then
+    return 0
+  fi
+  for port in %s; do
+    if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+%s
+if [ -x /usr/local/bin/crabbox-ready ] && /usr/local/bin/crabbox-ready >/tmp/crabbox-ready.log 2>&1 && crabbox_ssh_listening; then
   if [ "$desktop" != true ]; then
     exit 0
   fi
@@ -943,9 +1103,20 @@ if command -v sw_vers >/dev/null 2>&1; then
   cat >/usr/local/bin/crabbox-ready <<'READY'
 #!/bin/sh
 set -eu
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 rsync --version >/dev/null
 curl --version >/dev/null
+node --version >/dev/null
+npm --version >/dev/null
 test -w %s
+ssh_ready=0
+for port in %s; do
+  if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+    ssh_ready=1
+    break
+  fi
+done
+test "$ssh_ready" -eq 1
 READY
 else
   cat >/usr/local/bin/crabbox-ready <<'READY'
@@ -961,7 +1132,7 @@ fi
 chmod 0755 /usr/local/bin/crabbox-ready
 touch /var/lib/crabbox/bootstrapped 2>/dev/null || true
 /usr/local/bin/crabbox-ready
-`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, parallelsMacOSDesktopReadyTest(macOSAccountCredentials), parallelsMacOSDesktopSetupScript(macOSAccountCredentials), shellWords([]string{workRoot})[0], shellWords([]string{workRoot})[0])
+`, shellWords([]string{user})[0], shellWords([]string{workRoot})[0], desktop, parallelsShellPortList(sshPorts), parallelsMacOSNodeBaselineStanza(), parallelsMacOSDesktopReadyTest(macOSAccountCredentials), parallelsMacOSDesktopSetupScript(macOSAccountCredentials), shellWords([]string{workRoot})[0], parallelsShellPortList(sshPorts), shellWords([]string{workRoot})[0])
 }
 
 func parallelsChildCommandEnv(extraEnv []string) []string {
@@ -1180,7 +1351,7 @@ func resolveParallelsDHCPLeaseIP(data string, macs []string, now time.Time) (str
 	if stale {
 		return "", fmt.Errorf("no fresh Parallels DHCP lease for VM MACs")
 	}
-	return "", fmt.Errorf("no Parallels DHCP lease for VM MACs")
+	return "", errParallelsDHCPLeaseMissing
 }
 
 func parseParallelsSnapshots(data string) ([]ParallelsSnapshot, error) {
@@ -1269,7 +1440,9 @@ func parallelsHostMaxVMs(cfg Config) int {
 			return host.MaxVMs
 		}
 	}
-	return 0
+	// No fleet entry selected, so this is the direct host. A matched fleet entry
+	// returns above even at zero, so this is not a default for fleet entries.
+	return cfg.Parallels.MaxVMs
 }
 
 func parallelsHostWithinCapacity(cfg Config, vms []ParallelsVM) bool {

@@ -231,6 +231,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (target 
 	if err := startup.handoff(); err != nil {
 		return core.LeaseTarget{}, err
 	}
+	core.SetServerLeaseClaimSnapshot(&lease.Server, publishedClaim, true)
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
 	return lease, nil
@@ -248,6 +249,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if req.ReleaseOnly {
 		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil
 	}
+	if req.StatusOnly && !req.ReadyProbe {
+		return b.prepareLease(ctx, cfg, inst, ip, claim, false)
+	}
 	if !inst.Running && !instanceRunning(inst.State) && !req.StatusOnly {
 		return core.LeaseTarget{}, core.Exit(5, "tart instance %s is stopped; start a new lease with `crabbox run` or clean up with `crabbox cleanup --provider tart`", inst.Name)
 	}
@@ -255,10 +259,12 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if req.Repo.Root != "" {
-		if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	if req.Repo.Root != "" && !req.NoLocalStateMutations {
+		updated, err := core.ClaimLeaseForRepoProviderScopePondIfUnchanged(claim.LeaseID, claim.Slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, claim, true)
+		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
 	}
 	return lease, nil
 }
@@ -506,9 +512,43 @@ func (b *backend) cleanupInstance(ctx context.Context, cfg core.Config, inst tar
 	})
 }
 
-func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
+func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	name := instanceNameFromClaim(claim)
+	root := claim.Labels["tart_storage"]
+	if lease.LeaseID == "" || lease.LeaseID != claim.LeaseID || lease.Server.Provider != providerName || lease.Server.CloudID != name || lease.Server.Name != name || lease.Server.ImmutableID != claim.CloudImmutableID || lease.Server.Labels["instance"] != name || lease.Server.Labels["tart_storage"] != root {
+		return core.Exit(4, "tart lease %s touch identity does not match its claim", lease.LeaseID)
+	}
+	if _, err := tartCleanupBinding(claim, name, root); err != nil {
+		return core.Exit(4, "tart lease %s cannot authorize touch: %v", lease.LeaseID, err)
+	}
+	if err := verifyTartVMIdentity(name, root, claim.CloudImmutableID); err != nil {
+		return core.Exit(4, "tart lease %s cannot authorize touch: %v", lease.LeaseID, err)
+	}
+	return nil
+}
+
+func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider:  providerName,
+		Authorize: b.AuthorizeStatusTouchClaim,
+		Prepare: func(claim core.LeaseClaim) (map[string]string, time.Time) {
+			now := core.ClockNow(b.rt.Clock).UTC()
+			labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(shared.ClaimLifecycleLabels(claim), b.configForRun(), req.State, now, req.IdleTimeoutOverride)
+			return labels, now
+		},
+	})
+	if err != nil {
+		return core.Server{}, err
+	}
 	server := req.Lease.Server
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.configForRun(), req.State, time.Now().UTC())
+	server.Labels = shared.CloneLabels(updated.Labels)
+	if state := server.Labels["state"]; state != "" {
+		server.Status = state
+	}
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 
@@ -811,7 +851,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst tartIn
 }
 
 func (b *backend) serverFromInstance(inst tartInstance, claim core.LeaseClaim, cfg core.Config) core.Server {
-	labels := shared.LabelsWithDefaults(claim.Labels, map[string]string{
+	labels := shared.LabelsWithDefaults(shared.ClaimLifecycleLabels(claim), map[string]string{
 		"crabbox":     "true",
 		"provider":    providerName,
 		"instance":    inst.Name,
@@ -829,6 +869,9 @@ func (b *backend) serverFromInstance(inst tartInstance, claim core.LeaseClaim, c
 	if instanceRunning(inst.State) && labels["state"] == "ready" {
 		status = "ready"
 	}
+	if !inst.Running && !instanceRunning(inst.State) {
+		labels["state"] = status
+	}
 	server := core.Server{
 		CloudID:     inst.Name,
 		ImmutableID: claim.CloudImmutableID,
@@ -838,6 +881,9 @@ func (b *backend) serverFromInstance(inst tartInstance, claim core.LeaseClaim, c
 		Labels:      labels,
 	}
 	server.ServerType.Name = shared.FirstNonBlank(labels["server_type"], cfg.Tart.Image)
+	if claim.LeaseID != "" && claim.Provider == providerName {
+		core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	}
 	return server
 }
 

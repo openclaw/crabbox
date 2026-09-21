@@ -162,11 +162,17 @@ fs.appendFileSync(process.env.FIXTURE_CALLS, JSON.stringify({tool:path.basename(
   });
 }
 
+// The gate requires the concurrency subtest to run and pass alongside its
+// parent, so a successful fixture has to emit both. The negative scenarios keep
+// the subtest's own missing and skipped cases covered.
 for (const scenario of [
-  { name: "executed successfully", actions: ["run", "pass"], succeeds: true },
-  { name: "skipped native fixture", actions: ["run", "skip"] },
+  { name: "executed successfully", actions: ["run", "pass"], concurrency: ["run", "pass"], succeeds: true },
+  { name: "skipped native fixture", actions: ["run", "skip"], concurrency: ["run", "skip"] },
   { name: "missing native fixture", actions: [] },
-  { name: "Go fails after a passing test event", actions: ["run", "pass"], exit: 1 },
+  { name: "Go fails after a passing test event", actions: ["run", "pass"], concurrency: ["run", "pass"], exit: 1 },
+  { name: "missing concurrency coverage", actions: ["run", "pass"] },
+  { name: "skipped concurrency coverage", actions: ["run", "pass"], concurrency: ["run", "skip"] },
+  { name: "concurrency skip after pass", actions: ["run", "pass"], concurrency: ["run", "pass", "skip"] },
 ]) {
   test(`native lifecycle gate: ${scenario.name}`, (t) => {
     const marker = "      - name: Verify native local-container lifecycle and cleanup\n";
@@ -179,7 +185,13 @@ for (const scenario of [
 process.stdout.write(process.env.NATIVE_RECORDS);
 process.exit(Number(process.env.NATIVE_EXIT));
 `, { mode: 0o755 });
-    const records = scenario.actions.map((Action) => ({ Test: "TestLocalContainerProviderE2E", Action }));
+    const records = [
+      ...scenario.actions.map((Action) => ({ Test: "TestLocalContainerProviderE2E", Action })),
+      ...(scenario.concurrency ?? []).map((Action) => ({
+        Test: "TestLocalContainerProviderE2E/concurrent-cli-warmups",
+        Action,
+      })),
+    ];
     // Match the implicit Actions bash shell; the step must own pipefail.
     const result = spawnSync("bash", ["-e", "-c", script], {
       encoding: "utf8", timeout: 10000,

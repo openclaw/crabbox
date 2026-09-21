@@ -123,7 +123,8 @@ func ensureLeaseSSHDirectories(components []string) error {
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) {
-			if err := createPrivateSSHTransportDirectory(current); err != nil {
+			// A concurrent caller may win creation; validate its result below.
+			if err := createPrivateSSHTransportDirectory(current); err != nil && !errors.Is(err, os.ErrExist) {
 				return Exit(2, "create private lease SSH directory: %v", err)
 			}
 			info, err = os.Lstat(current)
@@ -212,7 +213,8 @@ func walkDirectoryPathWithoutSymlinks(path, boundary string, create bool) error 
 		current = filepath.Join(current, component)
 		info, err := os.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) && create {
-			if err := os.Mkdir(current, 0o700); err != nil {
+			// A concurrent caller may win creation; validate its result below.
+			if err := os.Mkdir(current, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 				return err
 			}
 			info, err = os.Lstat(current)
@@ -322,6 +324,16 @@ func UseLeaseKnownHosts(target *SSHTarget, leaseID string) error {
 	// cleanup removes both and identical provider hostnames cannot share trust.
 	target.KnownHostsFile = filepath.Join(dir, "known_hosts")
 	return nil
+}
+
+// ExistingLeaseKnownHostsPath inspects the managed directory without creating or
+// repairing it. The caller still validates the host-key file and its contents.
+func ExistingLeaseKnownHostsPath(leaseID string) (string, error) {
+	dir, err := inspectTestboxLeaseDirectory(leaseID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "known_hosts"), nil
 }
 
 func RemoveStoredTestboxKey(leaseID string) {

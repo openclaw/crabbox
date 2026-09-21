@@ -87,6 +87,25 @@ jobs:
           assert not any(r['Action'] == 'skip' for r in records), 'native fixture skipped'
           PY
 
+      - name: Require real SSH readiness diagnostics
+        shell: bash
+        run: |
+          go test ./internal/cli -run '^TestWaitForSSHReadyRealSSHTimeoutDiagnostic$' -count=1 -json | tee "$RUNNER_TEMP/ssh-readiness-tests.jsonl"
+          python3 - "$RUNNER_TEMP/ssh-readiness-tests.jsonl" <<'PY'
+          import json, sys
+          records = [json.loads(line) for line in open(sys.argv[1])]
+          root = 'TestWaitForSSHReadyRealSSHTimeoutDiagnostic'
+          required = [root] + [
+              f'{root}/proxy={proxy}/transport-success={success}'
+              for proxy in ('false', 'true')
+              for success in ('true', 'false')
+          ]
+          for name in required:
+              for action in ('run', 'pass'):
+                  assert any(r.get('Test') == name and r['Action'] == action for r in records), (name, action)
+          assert not any(r['Action'] == 'skip' for r in records), 'real SSH fixture skipped'
+          PY
+
       - name: Build
         run: go build -trimpath -o /tmp/crabbox ./cmd/crabbox
 
@@ -241,12 +260,14 @@ jobs:
             'TestSelectedLeaseSSHWindowsClaimFirstNamespace',
             'TestSelectedLeaseSSHWindowsPrivateKeyReuse',
             'TestEnsureTestboxLeaseDirectoryCreatesPrivateWindowsComponents',
+            'TestEnsureLeaseSSHDirectoriesToleratesConcurrentCreation',
+            'TestWalkDirectoryPathToleratesConcurrentCreation',
             'TestTestboxKeyPathAllowsSafeCustomIDs',
             'TestUseLeaseKnownHostsScopesAndEnforcesHostVerification',
             'TestSSHControlPathIsScopedByKey'
           )
           # POSIX mode tests are excluded; the native Windows ACL equivalents above must pass.
-          $events = @(go test ./internal/cli -run '^(Test(LeaseSSH|SelectedLeaseSSH|ManagedState)|Test(EnsureTestboxLeaseDirectoryCreatesPrivateWindowsComponents|TestboxKeyPathAllowsSafeCustomIDs|UseLeaseKnownHostsScopesAndEnforcesHostVerification|SSHControlPathIsScopedByKey)$)' -skip '^TestSelectedLeaseSSH(RootDoesNotRepairCallerDirectory|ExistingKeyRequiresPrivateMode)$' -count=1 -timeout=5m -json)
+          $events = @(go test ./internal/cli -run '^(Test(LeaseSSH|SelectedLeaseSSH|ManagedState)|Test(EnsureTestboxLeaseDirectoryCreatesPrivateWindowsComponents|EnsureLeaseSSHDirectoriesToleratesConcurrentCreation|WalkDirectoryPathToleratesConcurrentCreation|TestboxKeyPathAllowsSafeCustomIDs|UseLeaseKnownHostsScopesAndEnforcesHostVerification|SSHControlPathIsScopedByKey)$)' -skip '^TestSelectedLeaseSSH(RootDoesNotRepairCallerDirectory|ExistingKeyRequiresPrivateMode)$' -count=1 -timeout=5m -json)
           $code = $LASTEXITCODE
           $events | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { exit $code }
@@ -365,7 +386,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test -race ./internal/cli -run '^(Test(LeaseSSH|SelectedLeaseSSH|ManagedState)|Test(TestboxKeyPathAllowsSafeCustomIDs|UseLeaseKnownHostsScopesAndEnforcesHostVerification|SSHControlPathIsScopedByKey)$)' -count=1 -timeout=5m -json | tee "$RUNNER_TEMP/lease-ssh-root-macos.jsonl"
+          go test -race ./internal/cli -run '^(Test(LeaseSSH|SelectedLeaseSSH|ManagedState)|Test(EnsureLeaseSSHDirectoriesToleratesConcurrentCreation|WalkDirectoryPathToleratesConcurrentCreation|TestboxKeyPathAllowsSafeCustomIDs|UseLeaseKnownHostsScopesAndEnforcesHostVerification|SSHControlPathIsScopedByKey)$)' -count=1 -timeout=5m -json | tee "$RUNNER_TEMP/lease-ssh-root-macos.jsonl"
           node - "$RUNNER_TEMP/lease-ssh-root-macos.jsonl" <<'NODE'
           const fs = require('node:fs');
           const records = fs.readFileSync(process.argv[2], 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
@@ -384,6 +405,8 @@ jobs:
             'TestSelectedLeaseSSHRootReuseAndCleanup',
             'TestSelectedLeaseSSHRootDoesNotRepairCallerDirectory',
             'TestSelectedLeaseSSHExistingKeyRequiresPrivateMode',
+            'TestEnsureLeaseSSHDirectoriesToleratesConcurrentCreation',
+            'TestWalkDirectoryPathToleratesConcurrentCreation',
             'TestTestboxKeyPathAllowsSafeCustomIDs',
             'TestUseLeaseKnownHostsScopesAndEnforcesHostVerification',
             'TestSSHControlPathIsScopedByKey',

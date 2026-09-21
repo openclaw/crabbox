@@ -3,6 +3,8 @@
 package lume
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -145,5 +147,33 @@ func TestSignalRejectsWrongOwner(t *testing.T) {
 	}
 	if ownerSafeToSignal(lumeRunOwner{PID: 2147483647, StartIdentity: "unverifiable"}) {
 		t.Fatal("unverifiable process identity was eligible for signaling")
+	}
+}
+
+func TestLumeHeartbeatCLIUsesNativeClaimScope(t *testing.T) {
+	b, lease, _, _ := touchFixture(t)
+	writeLumeKnownHost(t, lease.LeaseID, lease.Server.Name, hostKey)
+	data := b.rt.Exec.(*fake).responses["get"].Stdout
+	cliPath := join(t.TempDir(), "lume-fixture")
+	must(t, os.WriteFile(cliPath, []byte("#!/bin/sh\ncase \"$1\" in\nget) printf '%s\\n' '"+data+"';;\n*) exit 91;;\nesac\n"), 0o700))
+	config := join(t.TempDir(), "config.json")
+	cfg, err := json.Marshal(map[string]any{"provider": "lume", "target": "macos", "lume": map[string]string{"cliPath": cliPath}})
+	must(t, err)
+	must(t, os.WriteFile(config, cfg, 0o600))
+	t.Setenv("CRABBOX_CONFIG", config)
+	t.Setenv("CRABBOX_BROKER_URL", "")
+	for _, extra := range [][]string{{"--idle-timeout", "10m"}, nil} {
+		var stdout, stderr bytes.Buffer
+		args := append([]string{"heartbeat", "--provider", "lume", "--id", lease.LeaseID, "--json"}, extra...)
+		must(t, (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args))
+		var output struct {
+			IdleTimeout string `json:"idleTimeout"`
+		}
+		must(t, json.Unmarshal(stdout.Bytes(), &output))
+		persisted, err := core.ReadLeaseClaim(lease.LeaseID)
+		must(t, err)
+		if persisted.IdleTimeoutSeconds != 600 || output.IdleTimeout != "10m0s" {
+			t.Fatalf("public heartbeat policy=%d output=%s", persisted.IdleTimeoutSeconds, output.IdleTimeout)
+		}
 	}
 }

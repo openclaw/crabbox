@@ -19,6 +19,8 @@
     <dict>
       <key>/Volumes/My Shared Files/challenge</key>
       <true/>
+      <key>/Volumes/My Shared Files/crabbox-bootstrap/challenge</key>
+      <true/>
     </dict>
   </dict>
   <key>ThrottleInterval</key>

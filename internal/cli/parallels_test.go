@@ -94,7 +94,7 @@ func TestParallelsWaitForIPPrefersToolsDiscovery(t *testing.T) {
 		"Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}}
 	}]`}
 	cfg := Config{TargetOS: targetMacOS, SSHPort: "22", Parallels: ParallelsConfig{BootstrapKey: "/Users/runner/.ssh/bootstrap"}}
-	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second)
+	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second, ParallelsIPWaitExisting)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestParallelsWaitForIPUsesDHCPFallbackAndVerifiesSSH(t *testing.T) {
 		"Network":{"ipAddresses":[]}
 	}]`, leases: "[vnic0]\n10.211.55.9=\"" + strconv.FormatInt(expiry, 10) + ",1800,001c4233eedd,01001c4233eedd\"\n"}
 	cfg := Config{TargetOS: targetMacOS, SSHPort: "22", Parallels: ParallelsConfig{BootstrapKey: "/Users/runner/.ssh/bootstrap"}}
-	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second)
+	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second, ParallelsIPWaitExisting)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestParallelsDHCPFallbackRunsOnRemoteHost(t *testing.T) {
 	expiry := time.Now().Add(time.Hour).Unix()
 	runner := &parallelsDHCPRunner{vmJSON: `[{"ID":"vm1","Name":"macOS","State":"running","Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}}}]`, leases: "[vnic0]\n10.211.55.9=\"" + strconv.FormatInt(expiry, 10) + ",1800,001c4233eedd,01001c4233eedd\"\n"}
 	cfg := Config{TargetOS: targetMacOS, SSHPort: "22", Parallels: ParallelsConfig{Host: "mac.example", HostUser: "build", BootstrapKey: "/Users/build/.ssh/bootstrap"}}
-	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second)
+	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second, ParallelsIPWaitExisting)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,9 +153,81 @@ func TestParallelsDHCPFallbackRunsOnRemoteHost(t *testing.T) {
 
 func TestParallelsWaitForIPDoesNotFallbackWithoutBootstrapIdentity(t *testing.T) {
 	runner := &parallelsDHCPRunner{vmJSON: `[{"ID":"vm1","Name":"macOS","State":"running","Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}}}]`}
-	_, err := NewParallelsClient(Config{TargetOS: targetMacOS}, runner).WaitForIP(context.Background(), "vm1", time.Nanosecond)
+	_, err := NewParallelsClient(Config{TargetOS: targetMacOS}, runner).WaitForIP(context.Background(), "vm1", time.Nanosecond, ParallelsIPWaitExisting)
 	if err == nil || len(runner.requests) != 1 {
 		t.Fatalf("err=%v requests=%#v", err, runner.requests)
+	}
+}
+
+func TestParallelsWaitForIPTimeoutExplainsDiscovery(t *testing.T) {
+	running := `[{"ID":"vm1","Name":"macOS","State":"running","Hardware":{"net0":{"enabled":true,"mac":"001C425AA8E6"}}}]`
+	stopped := `[{"ID":"vm1","Name":"macOS","State":"stopped","Hardware":{"net0":{"enabled":true,"mac":"001C425AA8E6"}}}]`
+	otherLease := "[vnic0]\n10.211.55.79=\"" + strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10) + ",1800,001c426ad157,01001c426ad157\"\n"
+	bootstrap := "/Users/build/.ssh/bootstrap"
+	for _, test := range []struct {
+		name      string
+		vmJSON    string
+		leases    string
+		target    string
+		cloneMode string
+		bootstrap string
+		existing  bool
+		want      []string
+		reject    []string
+	}{
+		{
+			name: "linked macOS without fallback", vmJSON: running, target: targetMacOS,
+			want:   []string{"clone_mode=linked", "macs=001c425aa8e6", "tools_ip=none", "set parallels.bootstrapKey", "retry with parallels.cloneMode=full", "cannot select a source snapshot"},
+			reject: []string{"no matching DHCP lease was found"},
+		},
+		{
+			name: "linked macOS fallback with no lease for the clone", vmJSON: running, leases: otherLease, target: targetMacOS, bootstrap: bootstrap,
+			want:   []string{"DHCP fallback: no Parallels DHCP lease", "no matching DHCP lease was found", "prlctl capture <new-vm-id> --file <png>", "acquisition cleans up failed clones", "on the Parallels host while IP discovery is still waiting", "retry with parallels.cloneMode=full"},
+			reject: []string{"set parallels.bootstrapKey", "prlctl capture vm1"},
+		},
+		{
+			name: "full clone omits clone mode advice", vmJSON: running, target: targetMacOS, cloneMode: "full", bootstrap: bootstrap, leases: otherLease,
+			want:   []string{"clone_mode=full", "no matching DHCP lease was found"},
+			reject: []string{"retry with parallels.cloneMode=full"},
+		},
+		{
+			name: "stopped VM gets no boot advice", vmJSON: stopped, target: targetMacOS, bootstrap: bootstrap, leases: otherLease,
+			want:   []string{"last_state=stopped", "clone_mode=linked"},
+			reject: []string{"no matching DHCP lease was found", "retry with parallels.cloneMode=full"},
+		},
+		{
+			name: "linux guest gets no macOS fallback advice", vmJSON: running, target: targetLinux,
+			want:   []string{"clone_mode=linked", "retry with parallels.cloneMode=full"},
+			reject: []string{"bootstrapKey"},
+		},
+		{
+			name: "existing VM does not inherit configured clone mode", vmJSON: running, target: targetMacOS, cloneMode: "linked", bootstrap: bootstrap, leases: otherLease, existing: true,
+			want:   []string{"clone_mode=unknown", "no matching DHCP lease was found", "inspect the existing VM", "prlctl capture <existing-vm-id> --file <png>"},
+			reject: []string{"clone_mode=linked", "retry with parallels.cloneMode=full", "cleans up failed clones", "capture <new-vm-id>"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &parallelsDHCPRunner{vmJSON: test.vmJSON, leases: test.leases}
+			cfg := Config{TargetOS: test.target, SSHPort: "22", Parallels: ParallelsConfig{CloneMode: test.cloneMode, BootstrapKey: test.bootstrap}}
+			purpose := ParallelsIPWaitAcquisition
+			if test.existing {
+				purpose = ParallelsIPWaitExisting
+			}
+			_, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Nanosecond, purpose)
+			if err == nil {
+				t.Fatal("expected timeout")
+			}
+			for _, want := range test.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error missing %q: %v", want, err)
+				}
+			}
+			for _, reject := range test.reject {
+				if strings.Contains(err.Error(), reject) {
+					t.Errorf("error unexpectedly contains %q: %v", reject, err)
+				}
+			}
+		})
 	}
 }
 
@@ -541,6 +613,64 @@ func TestParallelsCandidateConfigsFiltersTarget(t *testing.T) {
 	}
 }
 
+func TestSelectParallelsFleetConfigAppliesDirectHostMaxVMs(t *testing.T) {
+	const twoCrabboxVMs = `[
+			{"ID":"vm1","Name":"crabbox-cbx-aaaaaaaaaaaa-one","State":"running"},
+			{"ID":"vm2","Name":"crabbox-cbx-bbbbbbbbbbbb-two","State":"running"}
+		]`
+	for _, tc := range []struct {
+		name      string
+		maxVMs    int
+		hosts     []ParallelsHostConfig
+		wantHost  string
+		wantAtCap bool
+	}{
+		{name: "direct host at limit", maxVMs: 1, wantAtCap: true},
+		{name: "direct host below limit", maxVMs: 3, wantHost: "mac.example"},
+		{name: "direct host unset stays unlimited", wantHost: "mac.example"},
+		{
+			name:     "fleet limit wins over top level",
+			maxVMs:   1,
+			hosts:    []ParallelsHostConfig{{Name: "fleet", Host: "fleet.example", MaxVMs: 5}},
+			wantHost: "fleet.example",
+		},
+		{
+			name:      "fleet limit applies over higher top level",
+			maxVMs:    9,
+			hosts:     []ParallelsHostConfig{{Name: "fleet", Host: "fleet.example", MaxVMs: 1}},
+			wantAtCap: true,
+		},
+		{
+			name:     "top level is not a fleet default",
+			maxVMs:   1,
+			hosts:    []ParallelsHostConfig{{Name: "fleet", Host: "fleet.example"}},
+			wantHost: "fleet.example",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Provider = parallelsProvider
+			cfg.Parallels.Host = "mac.example"
+			cfg.Parallels.MaxVMs = tc.maxVMs
+			cfg.Parallels.Hosts = tc.hosts
+			runner := &parallelsFakeRunner{stdout: twoCrabboxVMs}
+			selected, err := SelectParallelsFleetConfig(context.Background(), cfg, runner, "")
+			if tc.wantAtCap {
+				if err == nil || !strings.Contains(err.Error(), "is at maxVMs capacity") {
+					t.Fatalf("err=%v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err=%v", err)
+			}
+			if selected.Parallels.Host != tc.wantHost {
+				t.Fatalf("host=%q want %q", selected.Parallels.Host, tc.wantHost)
+			}
+		})
+	}
+}
+
 func TestParallelsEnsureGuestReadyInstallsPOSIXReadyScript(t *testing.T) {
 	runner := &parallelsFakeRunner{}
 	client := NewParallelsClient(Config{}, runner)
@@ -597,6 +727,71 @@ func TestParallelsEnsureGuestReadyEnablesMacOSRemoteLogin(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("macOS guest prep missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestParallelsEnsureGuestReadyVerifiesMacOSSSHListener(t *testing.T) {
+	runner := &parallelsFakeRunner{}
+	client := NewParallelsClient(Config{}, runner)
+	err := client.EnsureGuestReady(context.Background(), "vm1", Config{
+		SSHUser:  "runner",
+		WorkRoot: "/Users/runner/crabbox",
+		TargetOS: targetMacOS,
+		SSHPort:  "2222",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(runner.lastReq.Args, "\n")
+	// Best-effort launchctl calls do not establish listener availability.
+	// Authenticated SSH readiness remains a separate, later check.
+	for _, want := range []string{
+		"nc -z 127.0.0.1",
+		"ssh_ready=1",
+		`test "$ssh_ready" -eq 1`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("macOS readiness helper missing %q:\n%s", want, got)
+		}
+	}
+	// The configured port is not necessarily the one sshd listens on: crabbox
+	// falls back to 22 on templates that serve there. Probing a single port
+	// would fail guests that work today, so both candidates must be tried.
+	for _, want := range []string{"2222", "22"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("macOS readiness helper missing candidate port %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestParallelsEnsureGuestReadyRechecksMacOSSSHListenerWhenHelperExists(t *testing.T) {
+	runner := &parallelsFakeRunner{}
+	client := NewParallelsClient(Config{}, runner)
+	err := client.EnsureGuestReady(context.Background(), "vm1", Config{
+		SSHUser:  "runner",
+		WorkRoot: "/Users/runner/crabbox",
+		TargetOS: targetMacOS,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(runner.lastReq.Args, "\n")
+	// A guest prepared by an older crabbox carries a crabbox-ready that predates
+	// the listener probe. If the early exit trusts that helper alone, such a
+	// guest skips remote-login setup entirely and the new check never runs.
+	if !strings.Contains(got, "crabbox_ssh_listening") {
+		t.Fatalf("early exit does not re-verify the SSH listener:\n%s", got)
+	}
+	idx := strings.Index(got, "if [ -x /usr/local/bin/crabbox-ready ]")
+	if idx < 0 {
+		t.Fatalf("ready-helper short circuit not found:\n%s", got)
+	}
+	line := got[idx:]
+	if end := strings.Index(line, "\n"); end >= 0 {
+		line = line[:end]
+	}
+	if !strings.Contains(line, "crabbox_ssh_listening") {
+		t.Fatalf("ready-helper short circuit does not gate on the listener: %q", line)
 	}
 }
 
@@ -950,4 +1145,156 @@ func (r parallelsResolveFakeRunner) Run(_ context.Context, req LocalCommandReque
 		return LocalCommandResult{Stderr: "not found"}, errors.New("not found")
 	}
 	return LocalCommandResult{Stdout: r.stdout}, nil
+}
+
+func TestParallelsEnsureReadyInstallsMacOSNodeBaseline(t *testing.T) {
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false, sshPortCandidates("22", nil))
+
+	installer := sharedMacOSNodeInstall()
+	if !strings.Contains(script, installer) {
+		t.Fatal("ensure-ready script does not embed the shared macOS Node installer verbatim")
+	}
+
+	// The installer has to run before the readiness gate, otherwise a guest whose
+	// crabbox-ready predates the Node checks exits early and never installs Node.
+	gate := "if [ -x /usr/local/bin/crabbox-ready ]"
+	if got, want := strings.Index(script, installer), strings.Index(script, gate); got == -1 || want == -1 || got > want {
+		t.Fatalf("Node install must precede the readiness gate: install=%d gate=%d", got, want)
+	}
+
+	// Only macOS guests get the baseline; the Linux branch must be untouched.
+	// Matched without surrounding indentation so reindenting the generated
+	// script does not fail this for a no-op formatting change.
+	sw := strings.Index(script, "command -v sw_vers >/dev/null 2>&1")
+	if sw == -1 || sw > strings.Index(script, "crabbox_node_bin=") {
+		t.Fatal("Node handling is not guarded by the macOS sw_vers check")
+	}
+}
+
+// The script is delivered to `sudo -n /bin/sh -s` on stdin, so any child that
+// reads stdin silently swallows the remainder of the script -- and the shell
+// still exits 0, so the damage is invisible.
+func TestParallelsEnsureReadyKeepsStdinOffGuestChildren(t *testing.T) {
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false, sshPortCandidates("22", nil))
+	for _, want := range []string{
+		`-c 'bash -lc "command -v node"' </dev/null`,
+		`-c 'bash -lc "command -v npm"' </dev/null`,
+		`-c 'bash -lc "command -v npx"' </dev/null`,
+		`/bin/bash "$crabbox_node_installer" </dev/null`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("child may consume the script from stdin: missing %q", want)
+		}
+	}
+}
+
+// A template can already satisfy sshReadyCommand with Node supplied through the
+// SSH user's login shell (Homebrew, nvm, asdf). Downloading over the top of that
+// would make a previously working template depend on nodejs.org being reachable.
+func TestParallelsEnsureReadyPreservesUserManagedNode(t *testing.T) {
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false, sshPortCandidates("22", nil))
+
+	for _, want := range []string{
+		`crabbox_node_bin=$(su - "$user" -c 'bash -lc "command -v node"' </dev/null 2>/dev/null || true)`,
+		`crabbox_npm_bin=$(su - "$user" -c 'bash -lc "command -v npm"' </dev/null 2>/dev/null || true)`,
+		`ln -sfn "$crabbox_node_bin" /usr/local/bin/node`,
+		`ln -sfn "$crabbox_npm_bin" /usr/local/bin/npm`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("user-managed runtime is not preserved: missing %q", want)
+		}
+	}
+
+	// The lookup must drop to the guest user; sourcing their login files as root
+	// would run user-controlled shell setup with full privileges.
+	if !strings.Contains(script, `su - "$user" -c 'bash -lc`) {
+		t.Fatal("login environment must be probed as the guest user, not as root")
+	}
+
+	// It must use bash -lc like sshReadyCommand does. The user's default login
+	// shell (zsh on macOS) reads different rc files, so `su - user -c 'command
+	// -v node'` can miss a runtime the probe resolves, and vice versa.
+	if strings.Contains(script, `su - "$user" -c 'command -v`) {
+		t.Fatal("detection must mirror the probe's bash -lc, not the default login shell")
+	}
+
+	// Preservation has to be reached before the installer, or the download still
+	// happens and the healthy runtime is pointless.
+	preserve := strings.Index(script, "crabbox_node_bin=$(su")
+	install := strings.Index(script, "crabbox_node_installer=")
+	if preserve == -1 || install == -1 || preserve > install {
+		t.Fatalf("preservation must precede the installer: preserve=%d install=%d", preserve, install)
+	}
+
+	// Self-linking would break an existing standard install rather than heal it.
+	if !strings.Contains(script, `[ "$crabbox_node_bin" != /usr/local/bin/node ]`) {
+		t.Fatal("preservation must not link /usr/local/bin/node onto itself")
+	}
+}
+
+// The installer stays the fallback for a guest with no runtime at all.
+func TestParallelsEnsureReadyInstallsWhenNoRuntimeExists(t *testing.T) {
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false, sshPortCandidates("22", nil))
+
+	installer := sharedMacOSNodeInstall()
+	idx := strings.Index(script, installer)
+	if idx == -1 {
+		t.Fatal("shared installer is no longer embedded")
+	}
+	// It must be gated on preservation having failed, not run unconditionally.
+	prefix := script[:idx]
+	gate := `if [ "$crabbox_node_preserved" != true ]; then`
+	if !strings.Contains(prefix, gate) {
+		t.Fatal("installer is not gated on the preservation result")
+	}
+	// And preservation is only claimed once the linked runtime actually works on
+	// the PATH crabbox-ready uses, so a shim that needs its manager falls back.
+	if !strings.Contains(prefix, "crabbox_node_preserved=true") {
+		t.Fatal("preservation is never verified before the installer is skipped")
+	}
+	if strings.Index(script, "crabbox_node_preserved=true") > strings.Index(script, gate) {
+		t.Fatal("preservation must be proven before the installer gate is evaluated")
+	}
+}
+
+func TestParallelsMacOSReadyScriptMatchesReadinessContract(t *testing.T) {
+	script := parallelsPOSIXEnsureReadyScript("parallels-01", "/Users/parallels-01/crabbox", false, false, sshPortCandidates("22", nil))
+
+	macReady := `#!/bin/sh
+set -eu
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+rsync --version >/dev/null
+curl --version >/dev/null
+node --version >/dev/null
+npm --version >/dev/null
+test -w '/Users/parallels-01/crabbox'
+`
+	if !strings.Contains(script, macReady) {
+		t.Fatal("macOS crabbox-ready does not assert the Node readiness contract on an explicit PATH")
+	}
+
+	// sshReadyCommand requires node and npm for macOS targets; crabbox-ready must
+	// agree, or the ensure-ready gate reports success while readiness still fails.
+	ready := sshReadyCommand(SSHTarget{TargetOS: targetMacOS})
+	for _, want := range []string{"node --version", "npm --version"} {
+		if !strings.Contains(ready, want) {
+			t.Fatalf("sshReadyCommand no longer requires %q; revisit crabbox-ready", want)
+		}
+	}
+}
+
+func TestParallelsLinuxReadyScriptUnchangedByNodeBaseline(t *testing.T) {
+	script := parallelsPOSIXEnsureReadyScript("worker", "/work/crabbox", false, false, sshPortCandidates("22", nil))
+
+	linuxReady := `#!/usr/bin/env bash
+set -euo pipefail
+git --version >/dev/null
+rsync --version >/dev/null
+curl --version >/dev/null
+jq --version >/dev/null
+test -w '/work/crabbox'
+`
+	if !strings.Contains(script, linuxReady) {
+		t.Fatal("Linux crabbox-ready changed; the Node baseline is macOS-only")
+	}
 }

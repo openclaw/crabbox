@@ -293,3 +293,99 @@ func TestParallelsUnlimitedCapacityBypassesReservation(t *testing.T) {
 	}
 	unlimitedRelease()
 }
+
+func parallelsDirectHostCapacityTestConfig(source string, maxVMs int) Config {
+	cfg := baseConfig()
+	cfg.Provider = "parallels"
+	cfg.TargetOS = targetLinux
+	cfg.Parallels.Source = source
+	cfg.Parallels.CloneMode = "full"
+	// No hosts fleet, which is what an explicit --parallels-host or
+	// CRABBOX_PARALLELS_HOST override leaves behind: the direct-host path.
+	cfg.Parallels.MaxVMs = maxVMs
+	return cfg
+}
+
+// TestParallelsDirectHostCapacityBoundsConcurrentForks is the regression test for
+// the direct host having no capacity limit at all. maxVMs used to live only on
+// parallels.hosts[] entries, and an explicit host override discards that fleet, so
+// parallelsHostMaxVMs returned 0 and every fork cloned unchecked.
+//
+// It runs the same reserve-count-clone sequence as its fleet counterpart
+// TestParallelsFleetCapacityBoundsConcurrentForks, so it covers both halves of the
+// resolver: the top-level limit has to reach parallelsHostMaxVMs for the count to
+// refuse forks, and it has to reach it before lockParallelsFleetCapacity decides
+// whether to reserve at all. Supplying the limit only to the inventory check leaves
+// the reservation skipped and all 8 forks clone onto a host configured maxVMs: 2.
+func TestParallelsDirectHostCapacityBoundsConcurrentForks(t *testing.T) {
+	isolateParallelsCapacityState(t)
+	const (
+		source = "linux-template"
+		forks  = 8
+		maxVMs = 2
+	)
+	host := newParallelsCapacityFakeHost(source, 50*time.Millisecond)
+	cfg := parallelsDirectHostCapacityTestConfig(source, maxVMs)
+
+	var wg sync.WaitGroup
+	refusals := make([]error, forks)
+	for i := 0; i < forks; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			ctx := context.Background()
+			selected, release, err := ReserveParallelsFleetCapacity(ctx, cfg, host, source)
+			if err != nil {
+				refusals[index] = err
+				return
+			}
+			defer release()
+			leaseID := fmt.Sprintf("cbx_%012d", index)
+			if _, err := NewParallelsClient(selected, host).Clone(ctx, source, "", leaseID, fmt.Sprintf("fork-%d", index), false); err != nil {
+				t.Errorf("fork %d clone: %v", index, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	refused := 0
+	for _, err := range refusals {
+		if err == nil {
+			continue
+		}
+		refused++
+		if !strings.Contains(err.Error(), "at maxVMs capacity") {
+			t.Fatalf("fork refused for the wrong reason: %v", err)
+		}
+	}
+	peak, clones := host.stats()
+	if peak > maxVMs {
+		t.Fatalf("direct host overfilled: peak crabbox VMs=%d maxVMs=%d clones=%d refused=%d", peak, maxVMs, clones, refused)
+	}
+	if clones != maxVMs || refused != forks-maxVMs {
+		t.Fatalf("want %d clones and %d refusals, got clones=%d refused=%d peak=%d", maxVMs, forks-maxVMs, clones, refused, peak)
+	}
+}
+
+// TestParallelsDirectHostUnlimitedBypassesReservation keeps the new setting opt-in:
+// a direct host that does not set it must stay lock-free and fully parallel, which
+// is how every direct host behaves today.
+func TestParallelsDirectHostUnlimitedBypassesReservation(t *testing.T) {
+	isolateParallelsCapacityState(t)
+	const source = "template"
+	cfg := parallelsDirectHostCapacityTestConfig(source, 1)
+	host := newParallelsCapacityFakeHost(source, 0)
+	_, release, err := ReserveParallelsFleetCapacity(context.Background(), cfg, host, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	cfg.Parallels.MaxVMs = 0
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, unlimitedRelease, err := ReserveParallelsFleetCapacity(ctx, cfg, host, source)
+	if err != nil {
+		t.Fatalf("unset direct host waited on capacity reservation: %v", err)
+	}
+	unlimitedRelease()
+}

@@ -113,7 +113,7 @@ func (b *leaseBackend) acquireOnce(ctx context.Context, keep bool, requestedSlug
 		cleanupVM(server.CloudID)
 		return core.LeaseTarget{}, err
 	}
-	vm, err := client.WaitForIP(ctx, server.CloudID, cfg.Parallels.StartupTimeout)
+	vm, err := client.WaitForIP(ctx, server.CloudID, cfg.Parallels.StartupTimeout, core.ParallelsIPWaitAcquisition)
 	if err != nil {
 		cleanupVM(server.CloudID)
 		return core.LeaseTarget{}, err
@@ -220,7 +220,7 @@ func (b *leaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (co
 					client = core.NewParallelsClient(candidate, b.RT.Exec)
 				}
 				if vm.IP == "" && strings.EqualFold(vm.State, "running") {
-					discovered, err := client.WaitForIP(ctx, vm.ID, 30*time.Second)
+					discovered, err := client.WaitForIP(ctx, vm.ID, 30*time.Second, core.ParallelsIPWaitExisting)
 					if err != nil {
 						if !req.ReleaseOnly && !req.StatusOnly {
 							return core.LeaseTarget{}, err
@@ -416,7 +416,8 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRe
 
 func (b *leaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.Cfg, req.State, time.Now().UTC())
+	// Preserve stored policy only when the caller omitted an override.
+	server.Labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(server.Labels, b.Cfg, req.State, time.Now().UTC(), req.IdleTimeoutOverride)
 	core.NewParallelsClient(b.configForLease(ctx, req.Lease), b.RT.Exec).SetLeaseLabels(shared.FirstNonBlankTrimmed(req.Lease.LeaseID, server.Labels["lease"]), server.Labels)
 	return server, nil
 }

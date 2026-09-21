@@ -2,6 +2,8 @@ package shared
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -32,4 +34,22 @@ func CommitClaimTouch(ctx context.Context, req core.TouchRequest, policy ClaimTo
 	}
 	labels, now := policy.Prepare(expected)
 	return core.UpdateLeaseClaimTouchIfUnchanged(ctx, req.Lease.LeaseID, expected, labels, now, req.IdleTimeoutOverride)
+}
+
+// ClaimLifecycleLabels restores persisted lifecycle policy without renewing it.
+// It retains all internal provider metadata; it is not a public-label filter.
+func ClaimLifecycleLabels(claim core.LeaseClaim) map[string]string {
+	labels := CloneLabels(claim.Labels)
+	if claim.IdleTimeoutSeconds > 0 {
+		labels["idle_timeout"] = strconv.Itoa(claim.IdleTimeoutSeconds)
+		labels["idle_timeout_secs"] = labels["idle_timeout"]
+	}
+	for key, value := range map[string]string{"created_at": claim.ClaimedAt, "last_touched_at": claim.LastUsedAt} {
+		if labels[key] == "" {
+			if stamp, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
+				labels[key] = core.LeaseLabelTime(stamp)
+			}
+		}
+	}
+	return labels
 }

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -977,9 +978,9 @@ func TestParallelsConfigShowCompleteRawFields(t *testing.T) {
 		name   string
 		config core.ParallelsConfig
 		fields []core.ProviderConfigShowField
-	}{{name: "zero", config: core.ParallelsConfig{Template: "", Source: "", SourceID: "", SourceSnapshot: "", SourceSnapshotID: "", CloneMode: "", Host: "", HostUser: "", HostKey: "", VMRoot: "", User: "", WorkRoot: "", SelectedHost: "internal-selected-host", StartupTimeout: 0}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: "", TextName: "template", TextValue: "-"}, {JSONName: "source", JSONValue: "", TextName: "source", TextValue: "-"}, {JSONName: "sourceId", JSONValue: "", TextName: "source_id", TextValue: "-"}, {JSONName: "sourceSnapshot", JSONValue: "", TextName: "snapshot", TextValue: "-"}, {JSONName: "sourceSnapshotId", JSONValue: "", TextName: "snapshot_id", TextValue: "-"}, {JSONName: "cloneMode", JSONValue: "", TextName: "clone_mode", TextValue: ""}, {JSONName: "host", JSONValue: "", TextName: "host", TextValue: "local"}, {JSONName: "hostUser", JSONValue: ""}, {JSONName: "hostKey", JSONValue: "missing"}, {JSONName: "bootstrapKey", JSONValue: "missing"}, {JSONName: "vmRoot", JSONValue: ""}, {JSONName: "user", JSONValue: "", TextName: "user", TextValue: ""}, {JSONName: "auth", JSONValue: "missing", TextName: "auth", TextValue: "missing"}, {JSONName: "workRoot", JSONValue: "", TextName: "work_root", TextValue: ""}, {JSONName: "startupTimeout", JSONValue: "0s", TextName: "startup_timeout", TextValue: "0s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}},
-		{name: "raw", config: core.ParallelsConfig{Template: " Template reference ", Source: " Source reference ", SourceID: " SourceID reference ", SourceSnapshot: " SourceSnapshot reference ", SourceSnapshotID: " SourceSnapshotID reference ", CloneMode: " CloneMode reference ", Host: " Host reference ", HostUser: " HostUser reference ", HostKey: " HostKey reference ", VMRoot: " VMRoot reference ", User: " User reference ", WorkRoot: " WorkRoot reference ", SelectedHost: "internal-selected-host", StartupTimeout: -1500 * time.Millisecond}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: " Template reference ", TextName: "template", TextValue: " Template reference "}, {JSONName: "source", JSONValue: " Source reference ", TextName: "source", TextValue: " Source reference "}, {JSONName: "sourceId", JSONValue: " SourceID reference ", TextName: "source_id", TextValue: " SourceID reference "}, {JSONName: "sourceSnapshot", JSONValue: " SourceSnapshot reference ", TextName: "snapshot", TextValue: " SourceSnapshot reference "}, {JSONName: "sourceSnapshotId", JSONValue: " SourceSnapshotID reference ", TextName: "snapshot_id", TextValue: " SourceSnapshotID reference "}, {JSONName: "cloneMode", JSONValue: " CloneMode reference ", TextName: "clone_mode", TextValue: " CloneMode reference "}, {JSONName: "host", JSONValue: " Host reference ", TextName: "host", TextValue: " Host reference "}, {JSONName: "hostUser", JSONValue: " HostUser reference "}, {JSONName: "hostKey", JSONValue: "configured"}, {JSONName: "bootstrapKey", JSONValue: "missing"}, {JSONName: "vmRoot", JSONValue: " VMRoot reference "}, {JSONName: "user", JSONValue: " User reference ", TextName: "user", TextValue: " User reference "}, {JSONName: "auth", JSONValue: "missing", TextName: "auth", TextValue: "missing"}, {JSONName: "workRoot", JSONValue: " WorkRoot reference ", TextName: "work_root", TextValue: " WorkRoot reference "}, {JSONName: "startupTimeout", JSONValue: "-1.5s", TextName: "startup_timeout", TextValue: "-1.5s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}},
-		{name: "whitespace", config: core.ParallelsConfig{Template: " \t ", Source: " \t ", SourceID: " \t ", SourceSnapshot: " \t ", SourceSnapshotID: " \t ", CloneMode: " \t ", Host: " \t ", HostUser: " \t ", HostKey: " \t ", VMRoot: " \t ", User: " \t ", WorkRoot: " \t ", SelectedHost: "internal-selected-host", StartupTimeout: -1500 * time.Millisecond}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: " \t ", TextName: "template", TextValue: " \t "}, {JSONName: "source", JSONValue: " \t ", TextName: "source", TextValue: " \t "}, {JSONName: "sourceId", JSONValue: " \t ", TextName: "source_id", TextValue: " \t "}, {JSONName: "sourceSnapshot", JSONValue: " \t ", TextName: "snapshot", TextValue: " \t "}, {JSONName: "sourceSnapshotId", JSONValue: " \t ", TextName: "snapshot_id", TextValue: " \t "}, {JSONName: "cloneMode", JSONValue: " \t ", TextName: "clone_mode", TextValue: " \t "}, {JSONName: "host", JSONValue: " \t ", TextName: "host", TextValue: " \t "}, {JSONName: "hostUser", JSONValue: " \t "}, {JSONName: "hostKey", JSONValue: "configured"}, {JSONName: "bootstrapKey", JSONValue: "missing"}, {JSONName: "vmRoot", JSONValue: " \t "}, {JSONName: "user", JSONValue: " \t ", TextName: "user", TextValue: " \t "}, {JSONName: "auth", JSONValue: "missing", TextName: "auth", TextValue: "missing"}, {JSONName: "workRoot", JSONValue: " \t ", TextName: "work_root", TextValue: " \t "}, {JSONName: "startupTimeout", JSONValue: "-1.5s", TextName: "startup_timeout", TextValue: "-1.5s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}}} {
+	}{{name: "zero", config: core.ParallelsConfig{Template: "", Source: "", SourceID: "", SourceSnapshot: "", SourceSnapshotID: "", CloneMode: "", Host: "", HostUser: "", HostKey: "", VMRoot: "", User: "", WorkRoot: "", SelectedHost: "internal-selected-host", StartupTimeout: 0}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: "", TextName: "template", TextValue: "-"}, {JSONName: "source", JSONValue: "", TextName: "source", TextValue: "-"}, {JSONName: "sourceId", JSONValue: "", TextName: "source_id", TextValue: "-"}, {JSONName: "sourceSnapshot", JSONValue: "", TextName: "snapshot", TextValue: "-"}, {JSONName: "sourceSnapshotId", JSONValue: "", TextName: "snapshot_id", TextValue: "-"}, {JSONName: "cloneMode", JSONValue: "", TextName: "clone_mode", TextValue: ""}, {JSONName: "host", JSONValue: "", TextName: "host", TextValue: "local"}, {JSONName: "maxVMs", JSONValue: 0, TextName: "max_vms", TextValue: "0"}, {JSONName: "hostUser", JSONValue: ""}, {JSONName: "hostKey", JSONValue: "missing"}, {JSONName: "bootstrapKey", JSONValue: "missing"}, {JSONName: "vmRoot", JSONValue: ""}, {JSONName: "user", JSONValue: "", TextName: "user", TextValue: ""}, {JSONName: "auth", JSONValue: "missing", TextName: "auth", TextValue: "missing"}, {JSONName: "workRoot", JSONValue: "", TextName: "work_root", TextValue: ""}, {JSONName: "startupTimeout", JSONValue: "0s", TextName: "startup_timeout", TextValue: "0s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}},
+		{name: "raw", config: core.ParallelsConfig{Template: " Template reference ", Source: " Source reference ", SourceID: " SourceID reference ", SourceSnapshot: " SourceSnapshot reference ", SourceSnapshotID: " SourceSnapshotID reference ", CloneMode: " CloneMode reference ", Host: " Host reference ", HostUser: " HostUser reference ", HostKey: " HostKey reference ", VMRoot: " VMRoot reference ", User: " User reference ", WorkRoot: " WorkRoot reference ", SelectedHost: "internal-selected-host", MaxVMs: 4, StartupTimeout: -1500 * time.Millisecond}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: " Template reference ", TextName: "template", TextValue: " Template reference "}, {JSONName: "source", JSONValue: " Source reference ", TextName: "source", TextValue: " Source reference "}, {JSONName: "sourceId", JSONValue: " SourceID reference ", TextName: "source_id", TextValue: " SourceID reference "}, {JSONName: "sourceSnapshot", JSONValue: " SourceSnapshot reference ", TextName: "snapshot", TextValue: " SourceSnapshot reference "}, {JSONName: "sourceSnapshotId", JSONValue: " SourceSnapshotID reference ", TextName: "snapshot_id", TextValue: " SourceSnapshotID reference "}, {JSONName: "cloneMode", JSONValue: " CloneMode reference ", TextName: "clone_mode", TextValue: " CloneMode reference "}, {JSONName: "host", JSONValue: " Host reference ", TextName: "host", TextValue: " Host reference "}, {JSONName: "maxVMs", JSONValue: 4, TextName: "max_vms", TextValue: "4"}, {JSONName: "hostUser", JSONValue: " HostUser reference "}, {JSONName: "hostKey", JSONValue: "configured"}, {JSONName: "bootstrapKey", JSONValue: "missing"}, {JSONName: "vmRoot", JSONValue: " VMRoot reference "}, {JSONName: "user", JSONValue: " User reference ", TextName: "user", TextValue: " User reference "}, {JSONName: "auth", JSONValue: "missing", TextName: "auth", TextValue: "missing"}, {JSONName: "workRoot", JSONValue: " WorkRoot reference ", TextName: "work_root", TextValue: " WorkRoot reference "}, {JSONName: "startupTimeout", JSONValue: "-1.5s", TextName: "startup_timeout", TextValue: "-1.5s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}},
+		{name: "whitespace", config: core.ParallelsConfig{Template: " \t ", Source: " \t ", SourceID: " \t ", SourceSnapshot: " \t ", SourceSnapshotID: " \t ", CloneMode: " \t ", Host: " \t ", HostUser: " \t ", HostKey: " \t ", VMRoot: " \t ", User: " \t ", WorkRoot: " \t ", SelectedHost: "internal-selected-host", MaxVMs: -1, StartupTimeout: -1500 * time.Millisecond}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: " \t ", TextName: "template", TextValue: " \t "}, {JSONName: "source", JSONValue: " \t ", TextName: "source", TextValue: " \t "}, {JSONName: "sourceId", JSONValue: " \t ", TextName: "source_id", TextValue: " \t "}, {JSONName: "sourceSnapshot", JSONValue: " \t ", TextName: "snapshot", TextValue: " \t "}, {JSONName: "sourceSnapshotId", JSONValue: " \t ", TextName: "snapshot_id", TextValue: " \t "}, {JSONName: "cloneMode", JSONValue: " \t ", TextName: "clone_mode", TextValue: " \t "}, {JSONName: "host", JSONValue: " \t ", TextName: "host", TextValue: " \t "}, {JSONName: "maxVMs", JSONValue: -1, TextName: "max_vms", TextValue: "-1"}, {JSONName: "hostUser", JSONValue: " \t "}, {JSONName: "hostKey", JSONValue: "configured"}, {JSONName: "bootstrapKey", JSONValue: "missing"}, {JSONName: "vmRoot", JSONValue: " \t "}, {JSONName: "user", JSONValue: " \t ", TextName: "user", TextValue: " \t "}, {JSONName: "auth", JSONValue: "missing", TextName: "auth", TextValue: "missing"}, {JSONName: "workRoot", JSONValue: " \t ", TextName: "work_root", TextValue: " \t "}, {JSONName: "startupTimeout", JSONValue: "-1.5s", TextName: "startup_timeout", TextValue: "-1.5s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}}} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := core.Config{Parallels: tc.config}
 			want := core.ProviderConfigShowSection{JSONKey: "parallels", TextLabel: "parallels", Providers: []string{"parallels"}, Fields: tc.fields}
@@ -1004,11 +1005,13 @@ func TestParallelsConfigShowTypedCollections(t *testing.T) {
 			cfg := core.Config{}
 			cfg.Parallels.Templates = map[string]core.ParallelsTemplateConfig{}
 			cfg.Parallels.Hosts = []core.ParallelsHostConfig{}
+			cfg.Parallels.MaxVMs = 7
 			if !empty {
 				cfg.Parallels.Templates["raw template key"] = core.ParallelsTemplateConfig{Source: "source", SourceID: "source-id", SourceSnapshot: "snapshot", SourceSnapshotID: "snapshot-id", TargetOS: "linux", WindowsMode: "normal", CloneMode: "linked", Host: "host", HostUser: "host-user", HostKey: "loaded-template-key", VMRoot: "/vm", User: "user", WorkRoot: "/work"}
 				first := core.ParallelsHostConfig{Name: "first", Host: "first-host", User: "host-user", Key: "loaded-host-key", VMRoot: "/vm", Targets: []string{"linux", "linux", "macos"}, MaxVMs: 3}
 				second := core.ParallelsHostConfig{Name: "second", Host: "second-host", Targets: []string{}, MaxVMs: 0}
 				cfg.Parallels.Hosts = []core.ParallelsHostConfig{first, second, first}
+				cfg.Parallels.SelectedHost = "first"
 			}
 			before, err := json.Marshal(cfg.Parallels)
 			if err != nil {
@@ -1023,8 +1026,11 @@ func TestParallelsConfigShowTypedCollections(t *testing.T) {
 					texts[field.TextName] = field.TextValue
 				}
 			}
-			if len(values) != 17 || len(texts) != 13 {
+			if len(values) != 18 || len(texts) != 14 {
 				t.Fatalf("field counts=%d/%d", len(values), len(texts))
+			}
+			if values["maxVMs"] != 7 || texts["max_vms"] != "7" {
+				t.Fatal("direct-host display substituted a selected fleet limit")
 			}
 			for _, omitted := range []string{"hostUser", "hostKey", "bootstrapKey", "vmRoot", "selectedHost", "SelectedHost"} {
 				if _, ok := texts[omitted]; ok {
@@ -1218,4 +1224,92 @@ func commandRequestPlacesValueOnArgv(req core.LocalCommandRequest, value string)
 		}
 	}
 	return false
+}
+
+// parallelsTouchRunner fails every command so the test proves Touch resolves the
+// lease host from its label instead of probing candidate hosts with prlctl.
+type parallelsTouchRunner struct {
+	calls int
+}
+
+func (r *parallelsTouchRunner) Run(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	r.calls++
+	return core.LocalCommandResult{}, errors.New("unexpected command")
+}
+
+func TestParallelsTouchPersistsIdlePolicyOverride(t *testing.T) {
+	override := 45 * time.Minute
+	for _, tc := range []struct {
+		name      string
+		storedKey string
+		override  *time.Duration
+		want      string
+	}{
+		{"preserve", "idle_timeout_secs", nil, "1800"},
+		{"replace", "idle_timeout_secs", &override, "2700"},
+		{"preserve legacy", "idle_timeout", nil, "1800"},
+		{"replace legacy", "idle_timeout", &override, "2700"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", filepath.Join(root, "home"))
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+			t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+			leaseID := "cbx_touch_idle"
+			server := core.Server{
+				CloudID:  "vm-touch",
+				Provider: "parallels",
+				Name:     "crabbox-cbx-touch-idle-blue",
+				Labels: map[string]string{
+					"provider":   "parallels",
+					"lease":      leaseID,
+					"slug":       "blue",
+					"host":       "local",
+					tc.storedKey: "1800",
+				},
+			}
+			before := maps.Clone(server.Labels)
+			runner := &parallelsTouchRunner{}
+			cfg := core.BaseConfig()
+			cfg.Provider = "parallels"
+			cfg.TargetOS = core.TargetLinux
+			cfg.IdleTimeout = 5 * time.Minute
+			backend := &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{Cfg: cfg, RT: core.Runtime{Exec: runner, Stderr: io.Discard}}}
+
+			got, err := backend.Touch(context.Background(), core.TouchRequest{
+				Lease:               core.LeaseTarget{LeaseID: leaseID, Server: server},
+				State:               "ready",
+				IdleTimeout:         cfg.IdleTimeout,
+				IdleTimeoutOverride: tc.override,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Labels["idle_timeout_secs"] != tc.want || got.Labels["idle_timeout"] != tc.want {
+				t.Fatalf("returned idle policy=%v, want both idle_timeout keys=%s", got.Labels, tc.want)
+			}
+			if !maps.Equal(persistedParallelsLeaseLabels(t, leaseID), got.Labels) {
+				t.Fatalf("persisted=%v, want the returned labels %v", persistedParallelsLeaseLabels(t, leaseID), got.Labels)
+			}
+			if !maps.Equal(server.Labels, before) {
+				t.Fatalf("touch mutated the input labels: %v, want %v", server.Labels, before)
+			}
+			if runner.calls != 0 {
+				t.Fatalf("runner calls=%d, want 0 for a labeled host", runner.calls)
+			}
+		})
+	}
+}
+
+func persistedParallelsLeaseLabels(t *testing.T, leaseID string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "parallels", "leases", leaseID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var labels map[string]string
+	if err := json.Unmarshal(data, &labels); err != nil {
+		t.Fatal(err)
+	}
+	return labels
 }
