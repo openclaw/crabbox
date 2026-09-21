@@ -687,6 +687,29 @@ func TestClaimLifecycleLabels(t *testing.T) {
 	}
 }
 
+func TestClaimActivityHoldState(t *testing.T) {
+	for _, state := range []string{"cleanup", "deleting", "expired", "released"} {
+		claim := core.LeaseClaim{Labels: map[string]string{"state": " " + strings.ToUpper(state) + " "}}
+		if got := ClaimActivityHoldState(claim); got != state {
+			t.Errorf("hold %q projected as %q", state, got)
+		}
+		if err := AuthorizeClaimActivity(claim); err == nil {
+			t.Errorf("hold %q authorized activity", state)
+		}
+	}
+	for _, state := range []string{"", "ready", "busy", "running", "stopped", "failed", "loading"} {
+		if got := ClaimActivityHoldState(core.LeaseClaim{Labels: map[string]string{"state": state}}); got != "" {
+			t.Errorf("runtime/activity state %q became logical hold %q", state, got)
+		}
+	}
+	if err := AuthorizeClaimActivity(core.LeaseClaim{Labels: map[string]string{"state": "busy"}}); err != nil {
+		t.Fatalf("ordinary activity refused: %v", err)
+	}
+	if err := AuthorizeClaimActivity(core.LeaseClaim{CheckpointCapture: &core.CheckpointCaptureBinding{ID: "capture"}}); err == nil {
+		t.Fatal("activity lost checkpoint exclusion")
+	}
+}
+
 func TestLegacyLabelLifecycleLabels(t *testing.T) {
 	for _, tc := range []struct {
 		name, canonical, legacy string

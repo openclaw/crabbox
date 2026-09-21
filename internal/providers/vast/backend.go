@@ -563,6 +563,11 @@ func (b *backend) targetFromInstance(ctx context.Context, client vastAPI, item v
 		target.SSH = ssh
 	}
 	if req.Repo.Root != "" && !req.NoLocalStateMutations && !req.StatusOnly && !req.ReleaseOnly {
+		if claimExists {
+			if err := shared.AuthorizeClaimActivity(claim); err != nil {
+				return core.LeaseTarget{}, err
+			}
+		}
 		updated, err := core.ClaimLeaseTargetForRepoConfigWithIdleTimeoutOverrideIfUnchanged(leaseID, server.Labels["slug"], b.cfg, target.Server, target.SSH, req.Repo.Root, b.cfg.IdleTimeout, shared.LegacyLabelIdleTimeout(claim), req.Reclaim, claim, claimExists)
 		if err != nil {
 			return core.LeaseTarget{}, err
@@ -623,10 +628,7 @@ func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.Leas
 	if err := shared.ValidateClaimBinding(claim, b.vastClaimBinding(server)); err != nil {
 		return err
 	}
-	if claim.Labels["state"] == "cleanup" {
-		return core.Exit(4, "vast lease=%s cleanup is already in progress", claim.LeaseID)
-	}
-	return core.AuthorizeCheckpointRelease(claim, "")
+	return shared.AuthorizeClaimActivity(claim)
 }
 
 func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
@@ -850,7 +852,9 @@ func projectVastClaim(server core.Server, claim core.LeaseClaim) core.Server {
 	server.Labels = shared.LegacyLabelLifecycleLabels(claim)
 	// Physical non-running state wins over recorded activity; a generic running
 	// response must not erase the claim's more precise busy/ready state.
-	if server.Status == "ready" && (server.Labels["state"] == "stopped" || isTerminalVastStatus(server.Labels["state"])) {
+	if hold := shared.ClaimActivityHoldState(claim); hold != "" {
+		server.Labels["state"] = hold
+	} else if server.Status == "ready" && (server.Labels["state"] == "stopped" || isTerminalVastStatus(server.Labels["state"])) {
 		server.Labels["state"] = server.Status
 	} else if server.Status != "ready" && server.Status != "unknown" && server.Status != "" {
 		server.Labels["state"] = server.Status

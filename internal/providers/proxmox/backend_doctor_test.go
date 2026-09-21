@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,19 +252,45 @@ func TestProxmoxDoctorReportsReadinessChecksWithoutMutation(t *testing.T) {
 }
 
 func TestProxmoxTouchUsesMigratedVMNode(t *testing.T) {
-	fake := &fakeProxmoxDoctorClient{}
-	oldClient := newClient
-	newClient = func(core.Config) (proxmoxClient, error) { return fake, nil }
-	t.Cleanup(func() { newClient = oldClient })
-
-	server := expiredProxmoxServer("101", "cbx_migrated_touch")
-	server.HostID = "pve2"
-	backend := NewLeaseBackend(Provider{}.Spec(), core.Config{Proxmox: core.ProxmoxConfig{Node: "pve1"}}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
-	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: "cbx_migrated_touch", Server: server}, State: "running"}); err != nil {
-		t.Fatal(err)
-	}
-	if len(fake.labelNodes) != 1 || fake.labelNodes[0] != "pve2" {
-		t.Fatalf("labelNodes=%v, want [pve2]", fake.labelNodes)
+	override := 90 * time.Minute
+	for _, tc := range []struct {
+		name      string
+		storedKey string
+		override  *time.Duration
+		want      string
+	}{
+		{"preserve", "idle_timeout_secs", nil, "1800"},
+		{"replace", "idle_timeout_secs", &override, "5400"},
+		{"preserve legacy", "idle_timeout", nil, "1800"},
+		{"replace legacy", "idle_timeout", &override, "5400"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeProxmoxDoctorClient{}
+			oldClient := newClient
+			newClient = func(core.Config) (proxmoxClient, error) { return fake, nil }
+			t.Cleanup(func() { newClient = oldClient })
+			server := expiredProxmoxServer("101", "cbx_migrated_touch")
+			server.HostID = "pve2"
+			delete(server.Labels, "idle_timeout")
+			delete(server.Labels, "idle_timeout_secs")
+			server.Labels[tc.storedKey] = "1800"
+			before := maps.Clone(server.Labels)
+			cfg := core.Config{Proxmox: core.ProxmoxConfig{Node: "pve1"}, IdleTimeout: 5 * time.Minute}
+			backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*leaseBackend)
+			got, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: "cbx_migrated_touch", Server: server}, State: "running", IdleTimeout: cfg.IdleTimeout, IdleTimeoutOverride: tc.override})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(fake.labelNodes) != 1 || fake.labelNodes[0] != "pve2" {
+				t.Fatalf("labelNodes=%v, want [pve2]", fake.labelNodes)
+			}
+			if !maps.Equal(fake.setLabels[0], got.Labels) || got.Labels["idle_timeout_secs"] != tc.want || got.Labels["idle_timeout"] != tc.want {
+				t.Fatalf("written=%v returned=%v want timeout=%s", fake.setLabels, got.Labels, tc.want)
+			}
+			if !maps.Equal(server.Labels, before) {
+				t.Fatal("touch changed the input labels")
+			}
+		})
 	}
 }
 

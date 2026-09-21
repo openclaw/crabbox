@@ -18,6 +18,27 @@ type ClaimTouchPolicy struct {
 	Prepare   func(core.LeaseClaim) (map[string]string, time.Time)
 }
 
+// ClaimActivityHoldState identifies logical holds that native runtime status
+// cannot clear. Adapters must retain them in observations and reject activity.
+func ClaimActivityHoldState(claim core.LeaseClaim) string {
+	state := strings.ToLower(strings.TrimSpace(claim.Labels["state"]))
+	switch state {
+	case "cleanup", "deleting", "expired", "released":
+		return state
+	default:
+		return ""
+	}
+}
+
+// AuthorizeClaimActivity checks lifecycle holds and checkpoint exclusion;
+// resource ownership and exact-snapshot checks remain the adapter's responsibility.
+func AuthorizeClaimActivity(claim core.LeaseClaim) error {
+	if hold := ClaimActivityHoldState(claim); hold != "" {
+		return core.Exit(4, "%s lease=%s activity is held in state %s", claim.Provider, claim.LeaseID, hold)
+	}
+	return core.AuthorizeCheckpointRelease(claim, "")
+}
+
 // CommitClaimTouch publishes one prepared touch through the existing claim CAS.
 // The returned claim is the committed snapshot; projection and runtime caches
 // must be updated by the adapter only after this succeeds.

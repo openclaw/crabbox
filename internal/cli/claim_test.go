@@ -2238,6 +2238,29 @@ func TestClaimLeaseForRepoProviderScopePondEndpointStoresInitialClaim(t *testing
 	if claim.SSHHost != "192.0.2.44" || claim.SSHPort != 2222 || claim.Labels["instance"] != "crabbox-cache-1234" {
 		t.Fatalf("endpoint metadata not stored in initial claim: %#v", claim)
 	}
+	if err := UpdateLeaseClaimCacheVolumes("cbx_tart", []string{"gomod:/cache/go"}); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := ReadLeaseClaim("cbx_tart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.Port = "2233"
+	updated, err := ClaimLeaseForRepoProviderScopePondEndpointIfUnchanged("cbx_tart", "mac", "tart", "instance:crabbox-cache-1234", "Mac Pond", repo, 30*time.Minute, false, server, target, expected, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := ReadLeaseClaim("cbx_tart")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(updated, saved) || saved.SSHPort != 2233 || !reflect.DeepEqual(saved.CacheVolumes, expected.CacheVolumes) {
+		t.Fatal("guarded endpoint publication lost unrelated metadata or returned a noncommitted snapshot")
+	}
+	if _, err := ClaimLeaseForRepoProviderScopePondEndpointIfUnchanged("cbx_tart", "mac", "tart", "instance:crabbox-cache-1234", "Mac Pond", repo, 30*time.Minute, false, server, target, expected, true); err == nil {
+		t.Fatal("stale endpoint publication was accepted")
+	}
+
 }
 
 func TestLeaseClaimConcurrentMutationsRemainAtomic(t *testing.T) {

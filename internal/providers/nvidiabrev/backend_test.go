@@ -1295,6 +1295,40 @@ func TestNvidiaBrevReleaseDeleteRemovesClaimAfterProviderSuccess(t *testing.T) {
 	}
 }
 
+func TestNvidiaBrevReleaseDeleteRequiresAuthoritativeInventory(t *testing.T) {
+	isolateNvidiaBrevState(t)
+	leaseID := "cbx_123456789abd"
+	workspace := brevWorkspace{ID: "ws-delete-pending", Name: "crabbox-delete-pending-123456789abd", Status: "RUNNING"}
+	server := workspaceToServer(core.Config{}, workspace, leaseID, "delete-pending", false)
+	if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "delete-pending", core.Config{Provider: providerName}, server, core.SSHTarget{Host: "203.0.113.9", Port: "22", User: "brev"}, t.TempDir(), false); err != nil {
+		t.Fatal(err)
+	}
+	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
+		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-delete-pending","name":"crabbox-delete-pending-123456789abd","status":"RUNNING"}]}`},
+		{args: "delete ws-delete-pending"},
+		{args: "ls --json --all", stdout: ""},
+	}}
+	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+	req := core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), req); err == nil || !strings.Contains(err.Error(), "parse brev ls JSON") || outcome.Terminal {
+		t.Fatalf("blank inventory confirmed deletion: outcome=%+v err=%v", outcome, err)
+	}
+	claim, exists, err := resolveLeaseClaimForProvider(leaseID)
+	if err != nil || !exists || claim.Labels["state"] != "deleting" || claim.SSHHost != "" {
+		t.Fatalf("deletion claim not retained: exists=%v state=%q host=%q err=%v", exists, claim.Labels["state"], claim.SSHHost, err)
+	}
+	runner.responses = append(runner.responses, scriptedBrevResponse{args: "ls --json --all", stdout: `{"workspaces":[]}`})
+	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), req); err != nil || !outcome.Terminal {
+		t.Fatalf("valid inventory did not reconcile deletion: outcome=%+v err=%v", outcome, err)
+	}
+	if _, exists, err := resolveLeaseClaimForProvider(leaseID); err != nil || exists {
+		t.Fatalf("reconciled claim retained: exists=%v err=%v", exists, err)
+	}
+	if strings.Count(runner.joinedCalls(), "delete ws-delete-pending") != 1 {
+		t.Fatalf("reconciliation repeated deletion: %s", runner.joinedCalls())
+	}
+}
+
 func TestNvidiaBrevReleaseDeleteRetainsClaimUntilWorkspaceDisappears(t *testing.T) {
 	isolateNvidiaBrevState(t)
 	leaseID := "cbx_123456789abd"

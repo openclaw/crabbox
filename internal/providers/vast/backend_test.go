@@ -1258,6 +1258,53 @@ func TestRunningObservationClearsOnlyStoredRuntimeTerminalState(t *testing.T) {
 	}
 }
 
+func TestLogicalActivityHoldsSurviveNativeTransitions(t *testing.T) {
+	for _, nativeState := range []string{"running", "loading", "stopped"} {
+		for _, hold := range []string{"cleanup", "deleting", "expired", "released"} {
+			t.Run(nativeState+"/"+hold, func(t *testing.T) {
+				api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
+				b := newTestBackend(t, api)
+				repo := core.Repo{Root: t.TempDir()}
+				lease, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: repo, RequestedSlug: "held", Keep: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				claim, err := core.ReadLeaseClaim(lease.LeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				labels := make(map[string]string, len(claim.Labels))
+				for key, value := range claim.Labels {
+					labels[key] = value
+				}
+				labels["state"] = hold
+				stored, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels)
+				if err != nil {
+					t.Fatal(err)
+				}
+				api.instances[0].Status = nativeState
+				observed, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, NoLocalStateMutations: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if observed.Server.Labels["state"] != hold {
+					t.Errorf("native %s erased %s hold", nativeState, hold)
+				}
+				if updated, err := b.Touch(t.Context(), core.TouchRequest{Lease: observed, State: "busy"}); err == nil || !reflect.DeepEqual(updated, core.Server{}) {
+					t.Errorf("held claim accepted activity: err=%v", err)
+				}
+				if _, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo}); err == nil {
+					t.Error("held claim accepted repository admission")
+				}
+				after, err := core.ReadLeaseClaim(lease.LeaseID)
+				if err != nil || !reflect.DeepEqual(after, stored) {
+					t.Errorf("held claim changed: err=%v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestTouchRefusesUncommittableClaim(t *testing.T) {
 	for _, scenario := range []string{"missing snapshot", "stale", "canceled", "invalid override", "account", "endpoint", "during auth"} {
 		t.Run(scenario, func(t *testing.T) {

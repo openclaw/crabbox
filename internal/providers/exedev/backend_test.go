@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os/user"
 	"reflect"
 	"slices"
 	"strings"
@@ -18,12 +19,16 @@ import (
 )
 
 type exeDevRecordingRunner struct {
-	calls []core.LocalCommandRequest
-	fn    func(core.LocalCommandRequest) (core.LocalCommandResult, error)
+	calls     []core.LocalCommandRequest
+	fn        func(core.LocalCommandRequest) (core.LocalCommandResult, error)
+	fnContext func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error)
 }
 
-func (r *exeDevRecordingRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+func (r *exeDevRecordingRunner) Run(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	r.calls = append(r.calls, req)
+	if r.fnContext != nil {
+		return r.fnContext(ctx, req)
+	}
 	if r.fn != nil {
 		return r.fn(req)
 	}
@@ -136,12 +141,165 @@ func TestExeDevCreateVMUsesSSHControlAPI(t *testing.T) {
 		NoEmail: true,
 	}}
 	backend := &exeDevLeaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-	vm, err := backend.createVM(context.Background(), backend.configForRun(), "crabbox-blue-12345678", "cbx_lease", "blue", "cbx_111111111111")
+	vm, _, err := backend.createVM(context.Background(), backend.configForRun(), "crabbox-blue-12345678", "cbx_lease", "blue", "cbx_111111111111")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if vm.Name() != "crabbox-blue-12345678" || vm.SSHHost() != "crabbox-blue-12345678.exe.xyz" {
 		t.Fatalf("vm=%#v", vm)
+	}
+}
+
+func TestExeDevCreateVMRefreshesMissingAdvertisedSSHRoute(t *testing.T) {
+	inventoryCalls := 0
+	var routeDeadline time.Time
+	runner := &exeDevRecordingRunner{fnContext: func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		got := strings.Join(req.Args, " ")
+		switch {
+		case strings.Contains(got, "exe.dev new"):
+			return core.LocalCommandResult{Stdout: `{"vm_name":"fixture-vm","status":"running"}`}, nil
+		case strings.Contains(got, "exe.dev ls --l --json"):
+			deadline, ok := ctx.Deadline()
+			if !ok || time.Until(deadline) > core.BootstrapWaitTimeout(core.Config{}) {
+				t.Fatal("inventory request must use the bootstrap deadline")
+			}
+			if !routeDeadline.IsZero() && !deadline.Equal(routeDeadline) {
+				t.Fatal("inventory refresh reset the bootstrap deadline")
+			}
+			routeDeadline = deadline
+			inventoryCalls++
+			switch inventoryCalls {
+			case 1:
+				return core.LocalCommandResult{Stdout: `{"vms":[{"vm_name":"fixture-other","ssh_dest":"wrong-route"}]}`}, nil
+			case 2:
+				return core.LocalCommandResult{Stdout: `{"vms":[{"vm_name":"fixture-vm","status":"running"}]}`}, nil
+			default:
+				return core.LocalCommandResult{Stdout: `{"vms":[{"vm_name":"fixture-vm","ssh_dest":"builder@advertised-alias:2207","status":"running"}]}`}, nil
+			}
+		default:
+			t.Fatalf("unexpected command: %v", req.Args)
+			return core.LocalCommandResult{}, nil
+		}
+	}}
+	backend := &exeDevLeaseBackend{cfg: core.Config{}, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
+	vm, _, err := backend.createVM(t.Context(), backend.configForRun(), "fixture-vm", "cbx_fixture", "fixture", "cbx_generation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vm.SSHDest != "builder@advertised-alias:2207" {
+		t.Fatalf("ssh_dest=%q want provider-advertised alias", vm.SSHDest)
+	}
+	target := exeDevSSHTarget(backend.configForRun(), vm)
+	if target.Host != "advertised-alias" || target.User != "builder" || target.Port != "2207" || !target.SSHConfigProxy {
+		t.Fatalf("target=%#v, want the advertised route with ambient SSH configuration", target)
+	}
+	if inventoryCalls != 3 || len(runner.calls) != 4 {
+		t.Fatalf("recorded calls=%d inventory=%d, want new plus three inventory refreshes", len(runner.calls), inventoryCalls)
+	}
+}
+
+func TestExeDevSSHRouteWaitStopsBetweenInventoryRequests(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled=%v", canceled), func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			cause := errors.New("caller stopped route discovery")
+			runner := &exeDevRecordingRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				if canceled {
+					cancel(cause)
+				}
+				return core.LocalCommandResult{Stdout: `{"vms":[{"vm_name":"fixture-vm"}]}`}, nil
+			}}
+			backend := newExeDevTestBackend(core.Config{}, runner)
+			_, err := backend.waitForExeDevSSHRoute(ctx, "fixture-vm", 100*time.Millisecond)
+			wantCode, wantCause := 5, context.DeadlineExceeded
+			if canceled {
+				wantCode, wantCause = 2, context.Canceled
+				if !errors.Is(err, cause) {
+					t.Fatalf("error=%v, want caller cancellation cause", err)
+				}
+			}
+			if core.ExitCodeForError(err, 0) != wantCode || !errors.Is(err, wantCause) {
+				t.Fatalf("route wait error=%v, want exit %d and %v", err, wantCode, wantCause)
+			}
+			if len(runner.calls) != 1 {
+				t.Fatalf("inventory calls=%d, want no refresh after termination", len(runner.calls))
+			}
+		})
+	}
+}
+
+func TestExeDevSSHRouteWaitBoundsInventoryRequest(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("canceled=%v", canceled), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runner := &exeDevRecordingRunner{fnContext: func(callCtx context.Context, _ core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				if _, ok := callCtx.Deadline(); !ok {
+					t.Fatal("inventory request has no deadline")
+				}
+				if canceled {
+					cancel()
+				}
+				<-callCtx.Done()
+				return core.LocalCommandResult{ExitCode: 1}, callCtx.Err()
+			}}
+			backend := newExeDevTestBackend(core.Config{}, runner)
+			_, err := backend.waitForExeDevSSHRoute(ctx, "fixture-vm", 10*time.Millisecond)
+			wantCode, wantCause := 5, context.DeadlineExceeded
+			if canceled {
+				wantCode, wantCause = 2, context.Canceled
+			}
+			if core.ExitCodeForError(err, 0) != wantCode || !errors.Is(err, wantCause) {
+				t.Fatalf("route wait error=%v, want exit %d and %v", err, wantCode, wantCause)
+			}
+			if len(runner.calls) != 1 {
+				t.Fatalf("inventory calls=%d, want one bounded request", len(runner.calls))
+			}
+		})
+	}
+}
+
+func TestExeDevAcquireRouteFailureUsesCreationRollback(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		t.Run(fmt.Sprintf("keep=%v", keep), func(t *testing.T) {
+			runner := newExeDevAcquireRollbackRunner()
+			original := runner.fn
+			routePending := false
+			primaryErr := errors.New("inventory temporarily unavailable")
+			runner.fn = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				cmd := strings.Join(req.Args, " ")
+				if routePending && strings.Contains(cmd, " ls ") {
+					routePending = false
+					return core.LocalCommandResult{ExitCode: 1}, primaryErr
+				}
+				result, err := original(req)
+				if strings.Contains(cmd, " new ") && err == nil {
+					vm, parseErr := parseExeDevVM(result.Stdout)
+					if parseErr != nil {
+						t.Fatal(parseErr)
+					}
+					vm.SSHDest = ""
+					payload, marshalErr := json.Marshal(vm)
+					if marshalErr != nil {
+						t.Fatal(marshalErr)
+					}
+					result.Stdout = string(payload)
+					routePending = true
+				}
+				return result, err
+			}
+			backend := newExeDevTestBackend(core.Config{}, runner)
+			_, err := backend.Acquire(t.Context(), core.AcquireRequest{Keep: keep, Repo: core.Repo{Root: t.TempDir()}})
+			if !keep {
+				assertExeDevRollbackFailure(t, err, primaryErr, runner)
+			} else {
+				if err == nil || !strings.Contains(err.Error(), primaryErr.Error()) {
+					t.Fatalf("error=%v, want inventory failure", err)
+				}
+				assertNoExeDevRM(t, runner)
+			}
+		})
 	}
 }
 
@@ -1145,6 +1303,24 @@ func TestExeDevSSHTargetUsesSSHDestUserPortAndWorkRootLabel(t *testing.T) {
 	}
 }
 
+func TestExeDevSSHTargetUsesOSAccountForUnqualifiedAdvertisedHost(t *testing.T) {
+	account, err := user.Current()
+	if err != nil || strings.TrimSpace(account.Username) == "" {
+		t.Skipf("current OS account is unavailable: %v", err)
+	}
+	t.Setenv("USER", "wrong-environment-user")
+	cfg := core.BaseConfig()
+	applyExeDevDefaults(&cfg)
+	vm := exeDevVM{VMName: "crabbox-blue-12345678", SSHDest: "crabbox-blue-12345678.exe.xyz", Status: "running"}
+	target := exeDevSSHTarget(cfg, vm)
+	if target.User != account.Username {
+		t.Fatalf("target user=%q, want current OS account %q", target.User, account.Username)
+	}
+	if !target.SSHConfigProxy {
+		t.Fatal("exe.dev target must preserve the ambient SSH config route")
+	}
+}
+
 func TestExeDevConfigFlagContract(t *testing.T) {
 	t.Setenv("USER", "fixture-user")
 	for _, provider := range []string{"exe-dev", "exe", "exedev", " EXE-DEV ", "aws"} {
@@ -1285,7 +1461,7 @@ func TestExeDevConfigCreateArgumentsContract(t *testing.T) {
 				cfg.ExeDev.Disk = "  "
 			}
 			backend := &exeDevLeaseBackend{cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}}
-			if _, err := backend.createVM(t.Context(), backend.configForRun(), "fixture-vm", "cbx_fixture", "fixture", "cbx_generation"); err != nil {
+			if _, _, err := backend.createVM(t.Context(), backend.configForRun(), "fixture-vm", "cbx_fixture", "fixture", "cbx_generation"); err != nil {
 				t.Fatal(err)
 			}
 			want := "new --name fixture-vm --json --tag crabbox --tag crabbox-lease-cbx_fixture --tag crabbox-slug-fixture --tag crabbox-claim-cbx_generation"
