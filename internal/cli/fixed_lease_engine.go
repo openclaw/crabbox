@@ -79,9 +79,16 @@ func (tx *FixedTransaction) Record(phase string) error {
 		(tx.immutableID != "" && tx.Claim.CloudImmutableID != tx.immutableID) {
 		return Exit(4, "lease_id_conflict: bound fixed resource identity changed during transaction")
 	}
+	// Re-observing an acquired identity renews access, not the create intent.
+	if i.State == "acquired" && phase == "bound" {
+		phase = "acquired"
+	}
 	revision := uint64(1)
 	if i.Journal != nil {
-		revision = i.Journal.Revision + 1
+		revision = i.Journal.Revision
+		if i.Journal.Phase != phase {
+			revision++
+		}
 	}
 	i.Journal = &FixedLeaseJournal{Version: 1, Phase: phase, Revision: revision}
 	if err := validateFixedJournal(i); err != nil {
@@ -229,7 +236,7 @@ func InspectFixedResource[T any](ctx context.Context, kind FixedLeaseKind, claim
 // DeleteFixedResource holds the same claim CAS across attestation, native
 // deletion, and terminal publication. Native DeleteExact must attest completion,
 // including any child resources, before returning nil.
-func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expected LeaseClaim, ops FixedLeaseOperations[T]) error {
+func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expected LeaseClaim, ops FixedLeaseOperations[T], clock ...func() time.Time) error {
 	if ops.ObserveExact == nil || ops.DeleteExact == nil {
 		return fmt.Errorf("fixed lease engine requires observation and exact deletion")
 	}
@@ -248,6 +255,9 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 		if err := fixedObservationConflict(kind, claim.LeaseID, observed); err != nil {
 			return err
 		}
+		if claim.FixedCreateIntent.State == "released" {
+			return kind.ValidateTerminalClaim(*claim, expected, claim.LeaseID, nil)
+		}
 		if len(observed.Candidates) == 0 {
 			if !observed.AbsenceProven {
 				return Exit(4, "lease_id_conflict: fixed %s absence is unverified; claim retained", kind.Label)
@@ -255,16 +265,20 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 		}
 		if kind.DeletionState != "" {
 			claim.FixedCreateIntent.State = kind.DeletionState
-		}
-		if err := tx.Record("deleting"); err != nil {
-			return err
+			if err := tx.Record("deleting"); err != nil {
+				return err
+			}
 		}
 		if len(observed.Candidates) != 0 {
 			if err := ops.DeleteExact(ctx, tx, observed.Candidates[0]); err != nil {
 				return err
 			}
 		}
-		*claim = kind.TerminalClaim(*claim, time.Now().UTC())
+		now := time.Now
+		if len(clock) != 0 && clock[0] != nil {
+			now = clock[0]
+		}
+		*claim = kind.TerminalClaim(*claim, now().UTC())
 		return persist()
 	})
 }

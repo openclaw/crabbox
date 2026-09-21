@@ -84,7 +84,7 @@ func TestFixedEngineReadsLegacyProviderRecords(t *testing.T) {
 
 func TestFixedEngineRetainsUncertainAttemptAndRejectsDuplicates(t *testing.T) {
 	isolateTestUserDirs(t)
-	kind := FixedLeaseKind{ClaimProvider: "fixture-fixed", IntentVersion: 1, Label: "fixture"}
+	kind := FixedLeaseKind{ClaimProvider: "fixture-fixed", IntentVersion: 1, Label: "fixture", DeletionState: "deleting"}
 	opts := FixedAcquireOptions{Kind: kind, LeaseID: "cbx_abcdef123405", RepoRoot: "/fixture"}
 	lost := errors.New("lost create reply")
 	calls := 0

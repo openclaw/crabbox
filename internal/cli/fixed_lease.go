@@ -163,7 +163,7 @@ func AcquireFixedIntent(
 		}
 		claim.LastUsedAt = now().UTC().Format(time.RFC3339)
 		intent.State = "acquired"
-		if intent.Journal != nil {
+		if intent.Journal != nil && intent.Journal.Phase != "acquired" {
 			intent.Journal = &FixedLeaseJournal{Version: 1, Phase: "acquired", Revision: intent.Journal.Revision + 1}
 		}
 		if err := persist(); err != nil {
