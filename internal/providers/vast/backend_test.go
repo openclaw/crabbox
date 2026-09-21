@@ -1217,6 +1217,47 @@ func TestHeartbeatLifecycleSurvivesFreshReads(t *testing.T) {
 	}
 }
 
+func TestRunningObservationClearsOnlyStoredRuntimeTerminalState(t *testing.T) {
+	for _, state := range []string{"stopped", "failed", "exited", "busy", "ready", "deleting", "expired"} {
+		t.Run(state, func(t *testing.T) {
+			api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
+			b := newTestBackend(t, api)
+			lease, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "restart-policy", Keep: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			labels := make(map[string]string, len(claim.Labels))
+			for key, value := range claim.Labels {
+				labels[key] = value
+			}
+			labels["state"] = state
+			stored, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			observed, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, NoLocalStateMutations: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := state
+			if state == "stopped" || state == "failed" || state == "exited" {
+				want = "ready"
+			}
+			if observed.Server.Labels["state"] != want {
+				t.Errorf("native running projected as %q, want %q", observed.Server.Labels["state"], want)
+			}
+			after, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil || !reflect.DeepEqual(after, stored) {
+				t.Errorf("read-only observation changed claim: %v", err)
+			}
+		})
+	}
+}
+
 func TestTouchRefusesUncommittableClaim(t *testing.T) {
 	for _, scenario := range []string{"missing snapshot", "stale", "canceled", "invalid override", "account", "endpoint", "during auth"} {
 		t.Run(scenario, func(t *testing.T) {

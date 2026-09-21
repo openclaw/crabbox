@@ -146,6 +146,11 @@ func statusLeaseExactClaim(ctx context.Context, backend Backend, lease LeaseTarg
 	if err != nil {
 		return leaseClaim{}, false, fmt.Errorf("read exact %s lease claim: %w", provider, err)
 	}
+	if observed, observedExists, set := ServerLeaseClaimSnapshot(lease.Server); set {
+		if err := unchangedLeaseClaimGuard(lease.LeaseID, observed, observedExists)(claim, claimed && exact); err != nil {
+			return leaseClaim{}, false, err
+		}
+	}
 	if !claimed || !exact {
 		return leaseClaim{}, false, nil
 	}

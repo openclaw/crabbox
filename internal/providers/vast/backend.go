@@ -548,6 +548,9 @@ func (b *backend) targetFromInstance(ctx context.Context, client vastAPI, item v
 			return core.LeaseTarget{}, err
 		}
 	}
+	if !claimExists {
+		core.SetServerLeaseClaimSnapshot(&server, core.LeaseClaim{}, false)
+	}
 	target := core.LeaseTarget{Server: server, LeaseID: leaseID}
 	if !req.ReleaseOnly && (!req.StatusOnly || req.ReadyProbe) {
 		ssh, err := sshTargetFromInstance(b.cfg, item)
@@ -847,7 +850,9 @@ func projectVastClaim(server core.Server, claim core.LeaseClaim) core.Server {
 	server.Labels = shared.LegacyLabelLifecycleLabels(claim)
 	// Physical non-running state wins over recorded activity; a generic running
 	// response must not erase the claim's more precise busy/ready state.
-	if server.Status != "ready" && server.Status != "unknown" && server.Status != "" {
+	if server.Status == "ready" && (server.Labels["state"] == "stopped" || isTerminalVastStatus(server.Labels["state"])) {
+		server.Labels["state"] = server.Status
+	} else if server.Status != "ready" && server.Status != "unknown" && server.Status != "" {
 		server.Labels["state"] = server.Status
 	}
 	core.SetServerLeaseClaimSnapshot(&server, claim, true)

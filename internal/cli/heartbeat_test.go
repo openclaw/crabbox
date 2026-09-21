@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -435,6 +436,7 @@ type heartbeatDirectBackend struct {
 	requests   []ResolveRequest
 	touches    []TouchRequest
 	touchFn    func(TouchRequest) (Server, error)
+	resolveFn  func() (LeaseTarget, error)
 }
 
 func (*heartbeatDirectBackend) Spec() ProviderSpec { return heartbeatDirectProvider{}.Spec() }
@@ -446,6 +448,9 @@ func (b *heartbeatDirectBackend) Resolve(_ context.Context, req ResolveRequest) 
 	b.requests = append(b.requests, req)
 	if req.ID != b.lease.LeaseID && req.ID != ServerSlug(b.lease.Server) {
 		return LeaseTarget{}, fmt.Errorf("lease %s not found", req.ID)
+	}
+	if b.resolveFn != nil {
+		return b.resolveFn()
 	}
 	return b.lease, nil
 }
@@ -515,6 +520,64 @@ func TestHeartbeatDirectProviderRejectsClaimlessLease(t *testing.T) {
 	}
 	if len(backend.touches) != 0 {
 		t.Fatalf("claimless heartbeat touched lease: %#v", backend.touches)
+	}
+}
+
+func TestHeartbeatAndStatusKeepResolvedClaimSnapshot(t *testing.T) {
+	for _, command := range []string{"heartbeat", "status wait"} {
+		t.Run(command, func(t *testing.T) {
+			backend := configureHeartbeatDirectTest(t, true)
+			observed, err := ReadLeaseClaim(backend.lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			SetServerLeaseClaimSnapshot(&backend.lease.Server, observed, true)
+			var replacement LeaseClaim
+			backend.resolveFn = func() (LeaseTarget, error) {
+				labels := cloneStringMap(observed.Labels)
+				labels["state"] = "busy"
+				var err error
+				replacement, err = UpdateLeaseClaimLabelsIfUnchanged(observed.LeaseID, observed, labels)
+				return backend.lease, err
+			}
+			var stderr bytes.Buffer
+			app := App{Stdout: io.Discard, Stderr: &stderr}
+			args := []string{"--provider", heartbeatDirectProviderName, "--id", "direct-heartbeat"}
+			if command == "heartbeat" {
+				err = app.heartbeat(t.Context(), args)
+			} else {
+				err = app.status(t.Context(), append(args, "--wait", "--wait-timeout", "1ns"))
+			}
+			if err == nil || !strings.Contains(err.Error()+stderr.String(), "claim changed") || len(backend.touches) != 0 {
+				t.Fatalf("stale CLI observation touched lease: err=%v stderr=%q touches=%d", err, stderr.String(), len(backend.touches))
+			}
+			persisted, readErr := ReadLeaseClaim(observed.LeaseID)
+			if readErr != nil || !reflect.DeepEqual(persisted, replacement) {
+				t.Fatalf("CLI changed replacement claim: err=%v", readErr)
+			}
+		})
+	}
+}
+
+func TestStatusLeaseExactClaimPreservesObservedPresence(t *testing.T) {
+	for _, observedExists := range []bool{false, true} {
+		t.Run(strconv.FormatBool(observedExists), func(t *testing.T) {
+			backend := configureHeartbeatDirectTest(t, true)
+			observed, err := ReadLeaseClaim(backend.lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			SetServerLeaseClaimSnapshot(&backend.lease.Server, observed, observedExists)
+			labels := cloneStringMap(observed.Labels)
+			labels["state"] = "busy"
+			if _, err := UpdateLeaseClaimLabelsIfUnchanged(observed.LeaseID, observed, labels); err != nil {
+				t.Fatal(err)
+			}
+			authorizer := &statusTouchClaimAuthorizingBackend{}
+			if _, claimed, err := statusLeaseExactClaim(t.Context(), authorizer, backend.lease, heartbeatDirectProviderName, ""); err == nil || claimed || authorizer.calls != 0 {
+				t.Fatalf("observed snapshot replaced before provider authorization: err=%v claimed=%v calls=%d", err, claimed, authorizer.calls)
+			}
+		})
 	}
 }
 

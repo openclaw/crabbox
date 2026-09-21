@@ -254,6 +254,8 @@ key.
 The local claim also owns idle timeout, creation time, TTL, keep policy, and
 heartbeat activity. Fresh status/list reads preserve those values without writing
 the claim; a stopped or failed native instance still reports its physical state.
+After a native restart, a saved runtime stop/failure no longer masks the running
+instance. Logical deletion and expiry holds remain intact.
 An ordinary heartbeat preserves the recorded idle timeout, while an explicit
 `--idle-timeout` replaces it atomically with activity timestamps. Expiry remains
 capped by the recorded creation-based TTL. A stale or missing claim snapshot is
