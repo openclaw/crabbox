@@ -161,7 +161,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			if err != nil {
 				return handle(unlock), err
 			}
-			if _, err := verifySuperserveClaim(ctx, api, leaseID, sandboxID); err != nil {
+			if _, err := shared.VerifySandboxClaim(ctx, leaseID, sandboxID, func(claim core.LeaseClaim) error { return validateSuperserveClaimScope(claim, api.BaseURL()) }, api.GetSandbox, validateSuperserveSandboxOwnership); err != nil {
 				return handle(unlock), err
 			}
 			claim, err := core.ReadLeaseClaim(leaseID)
@@ -271,42 +271,17 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	wait := shared.NewStatusWait(ctx, req, b.rt.Clock, func(id string) error {
 		return core.Exit(5, "timed out waiting for superserve sandbox %s to become ready", id)
 	})
-	defer wait.Close()
-	return wait.Poll(sandboxID, 2*time.Second, func(ctx context.Context) (core.StatusView, bool, error) {
-		sb, getErr := api.GetSandbox(ctx, sandboxID)
-		if getErr != nil {
-			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
-				return core.StatusView{}, false, ctxErr
-			}
-			return core.StatusView{}, false, getErr
-		}
-		if err := validateSuperserveSandboxOwnership(claim, sb); err != nil {
-			return core.StatusView{}, false, err
-		}
-		state := normalizedSandboxState(sb)
-		view := core.StatusView{
-			ID:       leaseID,
-			Slug:     slug,
-			Provider: providerName,
-			TargetOS: targetLinux,
-			State:    state,
-			ServerID: sandboxID,
-			Pond:     claim.Pond,
-			Network:  NetworkPublic,
-			Ready:    isReadyState(state),
-			Labels: map[string]string{
-				"provider": providerName,
-				"lease":    leaseID,
-				"slug":     slug,
-				"pond":     claim.Pond,
-				"state":    state,
-			},
-		}
-		if req.Wait && !view.Ready && isTerminalState(state) {
-			return core.StatusView{}, false, core.Exit(5, "superserve sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
-		}
-		return view, false, nil
-	})
+	return shared.ObserveSandboxStatus(wait, sandboxID, 2*time.Second, api.GetSandbox,
+		func(sb superserveSandbox) error { return validateSuperserveSandboxOwnership(claim, sb) },
+		func(_ context.Context, sb superserveSandbox) (core.StatusView, error) {
+			state := normalizedSandboxState(sb)
+			view := shared.SandboxStatusView(providerName, leaseID, slug, sandboxID, claim.Pond, state, isReadyState(state))
+			view.Labels["slug"] = slug
+			return view, nil
+		}, isTerminalState,
+		func(id, state string) error {
+			return core.Exit(5, "superserve sandbox %s entered terminal state %q before becoming ready", id, state)
+		})
 }
 
 func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
@@ -327,7 +302,7 @@ func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
 	if err != nil {
 		return err
 	}
-	if _, err := verifySuperserveClaim(ctx, api, leaseID, sandboxID); err != nil {
+	if _, err := shared.VerifySandboxClaim(ctx, leaseID, sandboxID, func(claim core.LeaseClaim) error { return validateSuperserveClaimScope(claim, api.BaseURL()) }, api.GetSandbox, validateSuperserveSandboxOwnership); err != nil {
 		if !isSuperserveNotFound(err) || !b.cfg.Superserve.ForgetMissing {
 			return err
 		}
@@ -537,24 +512,6 @@ func validateSuperserveClaimScope(claim core.LeaseClaim, baseURL string) error {
 
 func superserveClaimMatchesEndpoint(claim core.LeaseClaim, baseURL string) bool {
 	return strings.HasPrefix(strings.TrimSpace(claim.ProviderScope), superserveEndpointScope(baseURL)+"/ownership:")
-}
-
-func verifySuperserveClaim(ctx context.Context, api superserveClient, leaseID, sandboxID string) (superserveSandbox, error) {
-	claim, err := core.ReadLeaseClaim(leaseID)
-	if err != nil {
-		return superserveSandbox{}, err
-	}
-	if err := validateSuperserveClaimScope(claim, api.BaseURL()); err != nil {
-		return superserveSandbox{}, err
-	}
-	sb, err := api.GetSandbox(ctx, sandboxID)
-	if err != nil {
-		return superserveSandbox{}, err
-	}
-	if err := validateSuperserveSandboxOwnership(claim, sb); err != nil {
-		return superserveSandbox{}, err
-	}
-	return sb, nil
 }
 
 func validateSuperserveSandboxOwnership(claim core.LeaseClaim, sb superserveSandbox) error {

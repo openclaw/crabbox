@@ -115,7 +115,7 @@ func (b *openComputerBackend) Run(ctx context.Context, req core.RunRequest) (cor
 			if err != nil {
 				return shared.DelegatedSandbox{}, err
 			}
-			if _, err := verifyOpenComputerClaim(ctx, api, leaseID, sandboxID); err != nil {
+			if _, err := shared.VerifySandboxClaim(ctx, leaseID, sandboxID, func(claim core.LeaseClaim) error { return validateOpenComputerClaimScope(claim, api.baseURL) }, api.getSandboxWithTags, validateOpenComputerSandboxOwnership); err != nil {
 				return shared.DelegatedSandbox{}, err
 			}
 			claim, err := core.ReadLeaseClaim(leaseID)
@@ -233,43 +233,15 @@ func (b *openComputerBackend) Status(ctx context.Context, req core.StatusRequest
 	wait := shared.NewStatusWait(ctx, req, b.rt.Clock, func(id string) error {
 		return core.Exit(5, "timed out waiting for opencomputer sandbox %s to become ready", id)
 	})
-	defer wait.Close()
-	return wait.Poll(sandboxID, 2*time.Second, func(ctx context.Context) (core.StatusView, bool, error) {
-		sb, getErr := api.getSandboxWithTags(ctx, sandboxID)
-		if getErr != nil {
-			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
-				return core.StatusView{}, false, ctxErr
-			}
-			// Surface real API failures (auth, 5xx, sandbox gone) instead of
-			// masking them as a not-ready status.
-			return core.StatusView{}, false, getErr
-		}
-		if err := validateOpenComputerSandboxOwnership(claim, sb); err != nil {
-			return core.StatusView{}, false, err
-		}
-		state := strings.ToLower(strings.TrimSpace(sb.Status))
-		view := core.StatusView{
-			ID:       leaseID,
-			Slug:     slug,
-			Provider: providerName,
-			TargetOS: targetLinux,
-			State:    state,
-			ServerID: sandboxID,
-			Pond:     claim.Pond,
-			Network:  NetworkPublic,
-			Ready:    isReadyState(state),
-			Labels: map[string]string{
-				"provider": providerName,
-				"lease":    leaseID,
-				"pond":     claim.Pond,
-				"state":    state,
-			},
-		}
-		if req.Wait && !view.Ready && isTerminalState(state) {
-			return core.StatusView{}, false, core.Exit(5, "opencomputer sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
-		}
-		return view, false, nil
-	})
+	return shared.ObserveSandboxStatus(wait, sandboxID, 2*time.Second, api.getSandboxWithTags,
+		func(sb sandbox) error { return validateOpenComputerSandboxOwnership(claim, sb) },
+		func(_ context.Context, sb sandbox) (core.StatusView, error) {
+			state := strings.ToLower(strings.TrimSpace(sb.Status))
+			return shared.SandboxStatusView(providerName, leaseID, slug, sandboxID, claim.Pond, state, isReadyState(state)), nil
+		}, isTerminalState,
+		func(id, state string) error {
+			return core.Exit(5, "opencomputer sandbox %s entered terminal state %q before becoming ready", id, state)
+		})
 }
 
 func (b *openComputerBackend) Stop(ctx context.Context, req core.StopRequest) error {
@@ -281,7 +253,7 @@ func (b *openComputerBackend) Stop(ctx context.Context, req core.StopRequest) er
 	if err != nil {
 		return err
 	}
-	if _, err := verifyOpenComputerClaim(ctx, api, leaseID, sandboxID); err != nil {
+	if _, err := shared.VerifySandboxClaim(ctx, leaseID, sandboxID, func(claim core.LeaseClaim) error { return validateOpenComputerClaimScope(claim, api.baseURL) }, api.getSandboxWithTags, validateOpenComputerSandboxOwnership); err != nil {
 		if !isOCNotFound(err) || !b.cfg.OpenComputer.ForgetMissing {
 			return err
 		}
@@ -426,24 +398,6 @@ func newOpenComputerClaimScope(baseURL string) (string, error) {
 func openComputerEndpointScope(baseURL string) string {
 	digest := sha256.Sum256([]byte(baseURL))
 	return "endpoint-sha256:" + hex.EncodeToString(digest[:])
-}
-
-func verifyOpenComputerClaim(ctx context.Context, api *ocAPIClient, leaseID, sandboxID string) (sandbox, error) {
-	claim, err := core.ReadLeaseClaim(leaseID)
-	if err != nil {
-		return sandbox{}, err
-	}
-	if err := validateOpenComputerClaimScope(claim, api.baseURL); err != nil {
-		return sandbox{}, err
-	}
-	sb, err := api.getSandboxWithTags(ctx, sandboxID)
-	if err != nil {
-		return sandbox{}, err
-	}
-	if err := validateOpenComputerSandboxOwnership(claim, sb); err != nil {
-		return sandbox{}, err
-	}
-	return sb, nil
 }
 
 func validateOpenComputerSandboxOwnership(claim core.LeaseClaim, sb sandbox) error {

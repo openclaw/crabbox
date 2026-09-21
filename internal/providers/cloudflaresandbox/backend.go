@@ -155,7 +155,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			}
 			leaseID, sandboxID, slug, err = b.resolveLeaseID(leaseID, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout)
 			if err == nil {
-				_, err = b.verifyClaim(ctx, api, leaseID, sandboxID)
+				_, err = shared.VerifySandboxClaim(ctx, leaseID, sandboxID, b.validateClaimScope, api.GetSandbox, validateSandboxOwnership)
 			}
 			return handle(), err
 		},
@@ -261,42 +261,17 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	wait := shared.NewStatusWait(ctx, req, b.rt.Clock, func(id string) error {
 		return core.Exit(5, "timed out waiting for cloudflare-sandbox sandbox %s to become ready", id)
 	})
-	defer wait.Close()
-	return wait.Poll(sandboxID, 2*time.Second, func(ctx context.Context) (core.StatusView, bool, error) {
-		sb, getErr := api.GetSandbox(ctx, sandboxID)
-		if getErr != nil {
-			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
-				return core.StatusView{}, false, ctxErr
-			}
-			return core.StatusView{}, false, getErr
-		}
-		if err := validateSandboxOwnership(claim, sb); err != nil {
-			return core.StatusView{}, false, err
-		}
-		state := normalizedSandboxState(sb)
-		view := core.StatusView{
-			ID:       leaseID,
-			Slug:     slug,
-			Provider: providerName,
-			TargetOS: targetLinux,
-			State:    state,
-			ServerID: sandboxID,
-			Pond:     claim.Pond,
-			Network:  NetworkPublic,
-			Ready:    isReadyState(state),
-			Labels: map[string]string{
-				"provider": providerName,
-				"lease":    leaseID,
-				"slug":     slug,
-				"pond":     claim.Pond,
-				"state":    state,
-			},
-		}
-		if req.Wait && !view.Ready && isTerminalState(state) {
-			return core.StatusView{}, false, core.Exit(5, "cloudflare-sandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
-		}
-		return view, false, nil
-	})
+	return shared.ObserveSandboxStatus(wait, sandboxID, 2*time.Second, api.GetSandbox,
+		func(sb sandboxSummary) error { return validateSandboxOwnership(claim, sb) },
+		func(_ context.Context, sb sandboxSummary) (core.StatusView, error) {
+			state := normalizedSandboxState(sb)
+			view := shared.SandboxStatusView(providerName, leaseID, slug, sandboxID, claim.Pond, state, isReadyState(state))
+			view.Labels["slug"] = slug
+			return view, nil
+		}, isTerminalState,
+		func(id, state string) error {
+			return core.Exit(5, "cloudflare-sandbox sandbox %s entered terminal state %q before becoming ready", id, state)
+		})
 }
 
 func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
@@ -317,7 +292,7 @@ func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {
 	if err != nil {
 		return err
 	}
-	if _, err := b.verifyClaim(ctx, api, leaseID, sandboxID); err != nil {
+	if _, err := shared.VerifySandboxClaim(ctx, leaseID, sandboxID, b.validateClaimScope, api.GetSandbox, validateSandboxOwnership); err != nil {
 		if !isCloudflareSandboxNotFound(err) || !b.cfg.CloudflareSandbox.ForgetMissing {
 			return err
 		}
@@ -626,24 +601,6 @@ func (b *backend) validateClaimScope(claim core.LeaseClaim) error {
 
 func (b *backend) claimMatchesActiveScope(claim core.LeaseClaim) bool {
 	return strings.HasPrefix(strings.TrimSpace(claim.ProviderScope), b.providerScopeBase()+"/ownership:")
-}
-
-func (b *backend) verifyClaim(ctx context.Context, api bridgeClient, leaseID, sandboxID string) (sandboxSummary, error) {
-	claim, err := core.ReadLeaseClaim(leaseID)
-	if err != nil {
-		return sandboxSummary{}, err
-	}
-	if err := b.validateClaimScope(claim); err != nil {
-		return sandboxSummary{}, err
-	}
-	sb, err := api.GetSandbox(ctx, sandboxID)
-	if err != nil {
-		return sandboxSummary{}, err
-	}
-	if err := validateSandboxOwnership(claim, sb); err != nil {
-		return sandboxSummary{}, err
-	}
-	return sb, nil
 }
 
 func validateSandboxOwnership(claim core.LeaseClaim, sb sandboxSummary) error {

@@ -66,7 +66,7 @@ func (b *openSandboxBackend) Warmup(ctx context.Context, req core.WarmupRequest)
 	}
 	defer unlockOperation()
 	if sb.ExpiresAt == nil || sb.ExpiresAt.IsZero() {
-		sb, err = verifyOpenSandboxClaim(ctx, api, leaseID, sandboxID)
+		sb, err = shared.VerifySandboxClaim(ctx, leaseID, sandboxID, func(claim core.LeaseClaim) error { return validateOpenSandboxClaimScope(claim, api.BaseURL()) }, api.GetSandbox, validateOpenSandboxOwnership)
 		if err != nil {
 			return b.cleanupClaimedSandboxFailure(ctx, api, leaseID, sandboxID, err)
 		}
@@ -106,7 +106,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 	checkLifetime := func(ctx context.Context) error {
 		var err error
 		if sb.ExpiresAt == nil || sb.ExpiresAt.IsZero() {
-			sb, err = verifyOpenSandboxClaim(ctx, api, leaseID, sandboxID)
+			sb, err = shared.VerifySandboxClaim(ctx, leaseID, sandboxID, func(claim core.LeaseClaim) error { return validateOpenSandboxClaimScope(claim, api.BaseURL()) }, api.GetSandbox, validateOpenSandboxOwnership)
 			if err != nil {
 				return err
 			}
@@ -167,7 +167,7 @@ func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			if err != nil {
 				return resolved, err
 			}
-			sb, err = verifyOpenSandboxClaim(ctx, api, leaseID, sandboxID)
+			sb, err = shared.VerifySandboxClaim(ctx, leaseID, sandboxID, func(claim core.LeaseClaim) error { return validateOpenSandboxClaimScope(claim, api.BaseURL()) }, api.GetSandbox, validateOpenSandboxOwnership)
 			if err != nil {
 				return resolved, err
 			}
@@ -324,56 +324,30 @@ func (b *openSandboxBackend) Status(ctx context.Context, req core.StatusRequest)
 	wait := shared.NewStatusWait(ctx, req, b.rt.Clock, func(id string) error {
 		return core.Exit(5, "timed out waiting for opensandbox sandbox %s to become ready", id)
 	})
-	defer wait.Close()
-	return wait.Poll(sandboxID, b.statusPollInterval(), func(ctx context.Context) (core.StatusView, bool, error) {
-		sb, getErr := api.GetSandbox(ctx, sandboxID)
-		if getErr != nil {
-			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
-				return core.StatusView{}, false, ctxErr
-			}
-			return core.StatusView{}, false, getErr
-		}
-		if err := validateOpenSandboxOwnership(claim, sb); err != nil {
-			return core.StatusView{}, false, err
-		}
-		state := strings.ToLower(strings.TrimSpace(sb.State))
-		ready := false
-		if isReadyState(state) {
-			probeCtx, probeCancel := context.WithTimeout(ctx, b.statusProbeTimeout())
-			pingErr := api.PingSandbox(probeCtx, sandboxID)
-			probeCancel()
-			ready = pingErr == nil
-			if pingErr != nil {
-				if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
-					return core.StatusView{}, false, ctxErr
+	return shared.ObserveSandboxStatus(wait, sandboxID, b.statusPollInterval(), api.GetSandbox,
+		func(sb sandboxInfo) error { return validateOpenSandboxOwnership(claim, sb) },
+		func(ctx context.Context, sb sandboxInfo) (core.StatusView, error) {
+			state := strings.ToLower(strings.TrimSpace(sb.State))
+			ready := false
+			if isReadyState(state) {
+				probeCtx, probeCancel := context.WithTimeout(ctx, b.statusProbeTimeout())
+				pingErr := api.PingSandbox(probeCtx, sandboxID)
+				probeCancel()
+				ready = pingErr == nil
+				if pingErr != nil {
+					if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
+						return core.StatusView{}, ctxErr
+					}
+				}
+				if pingErr != nil && !isOpenSandboxReadinessPending(pingErr) {
+					return core.StatusView{}, fmt.Errorf("opensandbox status execd health: %w", pingErr)
 				}
 			}
-			if pingErr != nil && !isOpenSandboxReadinessPending(pingErr) {
-				return core.StatusView{}, false, fmt.Errorf("opensandbox status execd health: %w", pingErr)
-			}
-		}
-		view := core.StatusView{
-			ID:       leaseID,
-			Slug:     slug,
-			Provider: providerName,
-			TargetOS: targetLinux,
-			State:    state,
-			ServerID: sandboxID,
-			Pond:     claim.Pond,
-			Network:  NetworkPublic,
-			Ready:    ready,
-			Labels: map[string]string{
-				"provider": providerName,
-				"lease":    leaseID,
-				"pond":     claim.Pond,
-				"state":    state,
-			},
-		}
-		if req.Wait && !view.Ready && isTerminalState(state) {
-			return core.StatusView{}, false, core.Exit(5, "opensandbox sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
-		}
-		return view, false, nil
-	})
+			return shared.SandboxStatusView(providerName, leaseID, slug, sandboxID, claim.Pond, state, ready), nil
+		}, isTerminalState,
+		func(id, state string) error {
+			return core.Exit(5, "opensandbox sandbox %s entered terminal state %q before becoming ready", id, state)
+		})
 }
 
 func (b *openSandboxBackend) Stop(ctx context.Context, req core.StopRequest) error {
@@ -394,7 +368,7 @@ func (b *openSandboxBackend) Stop(ctx context.Context, req core.StopRequest) err
 	if err != nil {
 		return err
 	}
-	if _, err := verifyOpenSandboxClaim(ctx, api, leaseID, sandboxID); err != nil {
+	if _, err := shared.VerifySandboxClaim(ctx, leaseID, sandboxID, func(claim core.LeaseClaim) error { return validateOpenSandboxClaimScope(claim, api.BaseURL()) }, api.GetSandbox, validateOpenSandboxOwnership); err != nil {
 		if !isOpenSandboxNotFound(err) || !b.cfg.OpenSandbox.ForgetMissing {
 			return err
 		}
@@ -766,24 +740,6 @@ func newOpenSandboxClaimScope(baseURL string) (string, error) {
 func openSandboxEndpointScope(baseURL string) string {
 	digest := sha256.Sum256([]byte(baseURL))
 	return "ep-" + hex.EncodeToString(digest[:8])
-}
-
-func verifyOpenSandboxClaim(ctx context.Context, api openSandboxClient, leaseID, sandboxID string) (sandboxInfo, error) {
-	claim, err := core.ReadLeaseClaim(leaseID)
-	if err != nil {
-		return sandboxInfo{}, err
-	}
-	if err := validateOpenSandboxClaimScope(claim, api.BaseURL()); err != nil {
-		return sandboxInfo{}, err
-	}
-	sb, err := api.GetSandbox(ctx, sandboxID)
-	if err != nil {
-		return sandboxInfo{}, err
-	}
-	if err := validateOpenSandboxOwnership(claim, sb); err != nil {
-		return sandboxInfo{}, err
-	}
-	return sb, nil
 }
 
 func validateOpenSandboxOwnership(claim core.LeaseClaim, sb sandboxInfo) error {

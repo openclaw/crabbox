@@ -195,42 +195,17 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	wait := shared.NewStatusWait(ctx, waitReq, b.rt.Clock, func(id string) error {
 		return core.Exit(5, "timed out waiting for blaxel sandbox %s to become ready", id)
 	})
-	defer wait.Close()
-	return wait.Poll(sandboxID, blaxelStatusPoll, func(ctx context.Context) (core.StatusView, bool, error) {
-		sb, getErr := client.GetSandbox(ctx, sandboxID)
-		if getErr != nil {
-			if ctxErr := wait.ContextError(sandboxID); ctxErr != nil {
-				return core.StatusView{}, false, ctxErr
-			}
-			return core.StatusView{}, false, getErr
-		}
-		if err := validateBlaxelSandboxOwnership(claim, sb); err != nil {
-			return core.StatusView{}, false, err
-		}
-		state := strings.ToLower(strings.TrimSpace(sb.Status))
-		view := core.StatusView{
-			ID:       leaseID,
-			Slug:     slug,
-			Provider: providerName,
-			TargetOS: targetLinux,
-			State:    state,
-			ServerID: sandboxID,
-			Host:     sb.Endpoint,
-			Pond:     claim.Pond,
-			Network:  networkPublic,
-			Ready:    isReadyState(state),
-			Labels: map[string]string{
-				"provider": providerName,
-				"lease":    leaseID,
-				"pond":     claim.Pond,
-				"state":    state,
-			},
-		}
-		if req.Wait && !view.Ready && isTerminalState(state) {
-			return core.StatusView{}, false, core.Exit(5, "blaxel sandbox %s entered terminal state %q before becoming ready", sandboxID, state)
-		}
-		return view, false, nil
-	})
+	return shared.ObserveSandboxStatus(wait, sandboxID, blaxelStatusPoll, client.GetSandbox,
+		func(sb Sandbox) error { return validateBlaxelSandboxOwnership(claim, sb) },
+		func(_ context.Context, sb Sandbox) (core.StatusView, error) {
+			state := strings.ToLower(strings.TrimSpace(sb.Status))
+			view := shared.SandboxStatusView(providerName, leaseID, slug, sandboxID, claim.Pond, state, isReadyState(state))
+			view.Host = sb.Endpoint
+			return view, nil
+		}, isTerminalState,
+		func(id, state string) error {
+			return core.Exit(5, "blaxel sandbox %s entered terminal state %q before becoming ready", id, state)
+		})
 }
 
 func (b *backend) Stop(ctx context.Context, req core.StopRequest) error {

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -179,35 +178,11 @@ func newOpenSandboxClient(cfg core.Config, rt core.Runtime) (openSandboxClient, 
 }
 
 func validateOpenSandboxAPIURL(raw string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
-		return "", core.Exit(2, "provider=opensandbox API URL must be an absolute HTTP(S) URL")
-	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
-		return "", core.Exit(2, "provider=opensandbox API URL must not contain userinfo, query parameters, or a fragment")
-	}
-	parsed.Scheme = strings.ToLower(parsed.Scheme)
-	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && shared.IsLoopbackHost(parsed.Hostname())) {
-		return "", core.Exit(2, "provider=opensandbox API URL must use HTTPS except for loopback development endpoints")
-	}
-	host := shared.LowercaseHostname(parsed.Hostname())
-	port := parsed.Port()
-	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
-		port = ""
-	}
-	if port != "" {
-		parsed.Host = net.JoinHostPort(host, port)
-	} else if strings.Contains(host, ":") {
-		parsed.Host = "[" + host + "]"
-	} else {
-		parsed.Host = host
-	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/")
-	if strings.HasSuffix(parsed.Path, "/v1") {
-		parsed.Path = strings.TrimSuffix(parsed.Path, "/v1")
-	}
-	parsed.RawPath = ""
-	return strings.TrimRight(parsed.String(), "/"), nil
+	return shared.NormalizeSandboxAPIURL(raw, shared.EndpointURLErrors{
+		Invalid:    core.Exit(2, "provider=opensandbox API URL must be an absolute HTTP(S) URL"),
+		Components: core.Exit(2, "provider=opensandbox API URL must not contain userinfo, query parameters, or a fragment"),
+		Insecure:   core.Exit(2, "provider=opensandbox API URL must use HTTPS except for loopback development endpoints"),
+	}, func(path string) string { return strings.TrimSuffix(path, "/v1") })
 }
 
 func secureOpenSandboxHTTPClient(source *http.Client) *http.Client {
