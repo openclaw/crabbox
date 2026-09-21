@@ -355,7 +355,8 @@ CRABBOX_PUBLIC_URL=https://broker.example.com \
 npm run start:node --prefix worker
 ```
 
-Or build the OCI image with `worker/` as context:
+Or build the OCI image with `worker/` as context. The image uses Node.js 24 LTS,
+matching `.node-version`; direct installations still support Node.js 22.12+:
 
 ```sh
 docker build -f worker/Dockerfile.node -t crabbox-coordinator:local worker
