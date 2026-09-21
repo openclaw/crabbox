@@ -39,6 +39,16 @@ func newSSHTransportSession(ctx context.Context, target SSHTarget, localForward 
 		_ = os.RemoveAll(dir)
 		return nil, cause
 	}
+	if target.SSHConfigData != nil {
+		// ProxyJump also reads this snapshot; retain it until the session closes.
+		target.SSHConfigFile = filepath.Join(dir, "provider_config")
+		if err := os.WriteFile(target.SSHConfigFile, target.SSHConfigData, 0o600); err != nil {
+			return fail(fmt.Errorf("write provider SSH config snapshot: %w", err))
+		}
+		if err := secureSSHTransportPath(target.SSHConfigFile, false); err != nil {
+			return fail(fmt.Errorf("secure provider SSH config snapshot: %w", err))
+		}
+	}
 	userPercentExpansion := false
 	if strings.Contains(target.User, "%") {
 		userPercentExpansion, err = probeSSHTransportUserPercentExpansion(ctx, target, dir)

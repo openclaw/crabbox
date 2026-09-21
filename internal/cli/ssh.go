@@ -48,6 +48,7 @@ type SSHTarget struct {
 	NetworkKind             NetworkMode
 	SSHConfigProxy          bool
 	SSHConfigFile           string // Provider-owned IdentitiesOnly route; bypass ambient SSH config.
+	SSHConfigData           []byte `json:"-"` // Captured provider config; keep resolution and transport on the same bytes.
 	ProxyCommand            string
 	ChildEnvDenylist        []string
 	// Transport-only overrides can contain credentials; never serialize them.

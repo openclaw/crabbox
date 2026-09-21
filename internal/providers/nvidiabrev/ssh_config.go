@@ -2,6 +2,7 @@ package nvidiabrev
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,11 +24,20 @@ func defaultBrevSSHConfigPath() string {
 
 // Brev emits Match exec certificate hooks, including entries with no Host stanza.
 // Let OpenSSH interpret its own config, retaining the alias for later renewal.
-func (c *brevClient) resolveSSHConfig(ctx context.Context, cfg core.Config, path, alias string) (core.SSHTarget, error) {
+func (c *brevClient) resolveSSHConfig(ctx context.Context, cfg core.Config, path, alias string, data []byte) (core.SSHTarget, error) {
 	if !brevSSHNamePattern.MatchString(alias) {
 		return core.SSHTarget{}, core.Exit(2, "invalid nvidia-brev SSH alias %q", alias)
 	}
-	args := []string{"-G", "-F", path}
+	file, err := os.CreateTemp("", "crabbox-brev-ssh-*")
+	if err != nil {
+		return core.SSHTarget{}, err
+	}
+	defer os.Remove(file.Name())
+	_, writeErr := file.Write(data)
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		return core.SSHTarget{}, err
+	}
+	args := []string{"-G", "-F", file.Name()}
 	if user := strings.TrimSpace(cfg.NvidiaBrev.User); user != "" {
 		if !brevSSHNamePattern.MatchString(user) {
 			return core.SSHTarget{}, core.Exit(2, "invalid nvidia-brev SSH User %q", user)
@@ -62,7 +72,7 @@ func (c *brevClient) resolveSSHConfig(ctx context.Context, cfg core.Config, path
 	}
 	return core.SSHTarget{
 		User: values["user"], Host: alias, Port: values["port"],
-		SSHConfigFile: path, SSHConfigProxy: true, NoControlMaster: true,
+		SSHConfigFile: path, SSHConfigData: data, SSHConfigProxy: true, NoControlMaster: true,
 		KnownHostsFile: values["userknownhostsfile"],
 		TargetOS:       targetLinux, NetworkKind: networkPublic,
 		ReadyCheck: "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null",

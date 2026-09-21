@@ -204,6 +204,77 @@ func newForwardSSHServerWithSigner(t *testing.T, user string, signer ssh.Signer,
 
 func (s *forwardSSHServer) port() int { return s.listener.Addr().(*net.TCPAddr).Port }
 
+func TestSSHTransportCapturedConfigPreventsAliasReassignment(t *testing.T) {
+	isolateTestUserDirs(t)
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Fatal("real OpenSSH is required:", err)
+	}
+	nc, err := exec.LookPath("nc")
+	if err != nil {
+		t.Fatal("loopback proxy fixture requires nc:", err)
+	}
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const user = "synthetic-route"
+	allowed := newForwardSSHServerWithSigner(t, user, signer)
+	replacement := newForwardSSHServerWithSigner(t, user, signer)
+	root := t.TempDir()
+	mu, observations := allowed.enableReadinessSessions(t, root, true)
+	replacement.enableReadinessSessions(t, root, true)
+	close(allowed.release)
+	close(replacement.release)
+	knownHosts := filepath.Join(root, "known_hosts")
+	if err := os.WriteFile(knownHosts, []byte(fmt.Sprintf("[127.0.0.1]:%d %s\n", allowed.port(), allowed.hostKey)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "provider_config")
+	config := fmt.Sprintf("Host workspace\n HostName 127.0.0.1\n Port %d\n User %s\n IdentitiesOnly yes\n IdentityFile none\n CertificateFile none\n IdentityAgent none\n", allowed.port(), user)
+	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	target := SSHTarget{Host: "workspace", User: user, Port: strconv.Itoa(allowed.port()), SSHConfigFile: path, SSHConfigData: []byte(config), SSHConfigProxy: true, KnownHostsFile: knownHosts, SSHHostKey: allowed.hostKey, NoControlMaster: true}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	if output, err := runSSHCombinedOutput(ctx, target, realSSHRouteCommand); err != nil || !strings.Contains(output, "captured-route") {
+		t.Fatalf("allowed command: %v: %s", err, output)
+	}
+	// Both endpoints accept the same fixture identity and host key. A later
+	// provider refresh changes the alias's proxy, not the captured target.
+	reassigned := config + fmt.Sprintf(" ProxyCommand %s 127.0.0.1 %d\n", nc, replacement.port())
+	if err := os.WriteFile(path, []byte(reassigned), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := runSSHCombinedOutput(ctx, target, realSSHRouteCommand); err != nil || !strings.Contains(output, "captured-route") {
+		t.Fatalf("captured command after reassignment: %v: %s", err, output)
+	}
+	if err := runInteractiveSSHOnce(ctx, target, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatalf("captured interactive connection after reassignment: %v", err)
+	}
+	mu.Lock()
+	commands, shells := 0, 0
+	for _, observation := range *observations {
+		if observation.command == realSSHRouteCommand {
+			commands++
+		} else if observation.command == "shell" {
+			shells++
+		}
+	}
+	mu.Unlock()
+	replacement.mu.Lock()
+	replacementConnections := len(replacement.conns)
+	replacement.mu.Unlock()
+	if commands != 2 || shells != 1 || replacementConnections != 0 {
+		t.Fatalf("captured dispatch: allowed commands=%d shells=%d replacement connections=%d", commands, shells, replacementConnections)
+	}
+	t.Log("real SSH proof: captured commands and interactive shell executed on A; reassigned B received zero connections")
+}
+
 func TestWaitForSSHReadyRejectsChangedHostKeyWithoutWaiting(t *testing.T) {
 	isolateTestUserDirs(t)
 	if _, err := exec.LookPath("ssh"); err != nil {
@@ -887,6 +958,7 @@ func TestSSHForwardRealPondWaitsForEveryGroup(t *testing.T) {
 }
 
 const realSSHFailingReadiness = "exit 127"
+const realSSHRouteCommand = "printf captured-route"
 
 type realSSHExecObservation struct {
 	user    string
@@ -908,7 +980,10 @@ func (s *forwardSSHServer) enableReadinessSessions(t *testing.T, root string, tr
 		defer ch.Close()
 		for request := range requests {
 			var payload struct{ Command string }
-			if request.Type != "exec" || ssh.Unmarshal(request.Payload, &payload) != nil {
+			if request.Type == "shell" {
+				// Interactive tests run only this fixed builtin, never client input.
+				payload.Command = "exit 0"
+			} else if request.Type != "exec" || ssh.Unmarshal(request.Payload, &payload) != nil {
 				_ = request.Reply(false, nil)
 				continue
 			}
@@ -920,6 +995,8 @@ func (s *forwardSSHServer) enableReadinessSessions(t *testing.T, root string, tr
 				}
 			case realSSHFailingReadiness:
 				fixedCommand = realSSHFailingReadiness
+			case realSSHRouteCommand:
+				fixedCommand = realSSHRouteCommand
 			}
 			if fixedCommand == "" {
 				_ = request.Reply(false, nil)
@@ -931,6 +1008,7 @@ func (s *forwardSSHServer) enableReadinessSessions(t *testing.T, root string, tr
 			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", fixedCommand)
 			cmd.Dir = root
+			cmd.Stdout = ch
 			cmd.Env = []string{"HOME=" + root, "XDG_CONFIG_HOME=" + root, "PATH=/usr/bin:/bin"}
 			err = cmd.Run()
 			cancel()
@@ -944,7 +1022,11 @@ func (s *forwardSSHServer) enableReadinessSessions(t *testing.T, root string, tr
 				code = uint32(exitErr.ExitCode())
 			}
 			mu.Lock()
-			observed = append(observed, realSSHExecObservation{user, fixedCommand, code})
+			observedCommand := fixedCommand
+			if request.Type == "shell" {
+				observedCommand = "shell"
+			}
+			observed = append(observed, realSSHExecObservation{user, observedCommand, code})
 			mu.Unlock()
 			_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{code}))
 			return

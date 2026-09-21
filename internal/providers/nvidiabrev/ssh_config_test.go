@@ -1,7 +1,9 @@
 package nvidiabrev
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,7 +85,7 @@ Host gpu-host
 			}
 			cfg := core.Config{SSHUser: "generic-default", NvidiaBrev: core.NvidiaBrevConfig{User: tt.override}}
 			c := &brevClient{rt: core.Runtime{Exec: &fakeRunner{run: nativeSSHConfig}}}
-			target, err := c.resolveSSHConfig(t.Context(), cfg, path, tt.alias)
+			target, err := c.resolveSSHConfig(t.Context(), cfg, path, tt.alias, []byte("UserKnownHostsFile /dev/null\n"+tt.config))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -110,12 +112,12 @@ func TestNvidiaBrevNativeSSHConfigRejectsMissingRoutes(t *testing.T) {
 			t.Fatal(err)
 		}
 		c := &brevClient{rt: core.Runtime{Exec: &fakeRunner{run: nativeSSHConfig}}}
-		if _, err := c.resolveSSHConfig(t.Context(), core.Config{}, path, "gpu"); err == nil || !strings.Contains(err.Error(), "route not found") {
+		if _, err := c.resolveSSHConfig(t.Context(), core.Config{}, path, "gpu", []byte(config)); err == nil || !strings.Contains(err.Error(), "route not found") {
 			t.Fatalf("err=%v", err)
 		}
 	}
 	c := &brevClient{rt: core.Runtime{Exec: &fakeRunner{run: nativeSSHConfig}}}
-	if _, err := c.resolveSSHConfig(t.Context(), core.Config{}, filepath.Join(t.TempDir(), "absent"), "gpu"); err == nil {
+	if _, err := c.resolveSSHConfig(t.Context(), core.Config{}, filepath.Join(t.TempDir(), "absent"), "gpu", nil); err == nil {
 		t.Fatal("missing config accepted")
 	}
 }
@@ -127,11 +129,32 @@ func TestNvidiaBrevNativeSSHConfigRejectsArgumentsBeforeExec(t *testing.T) {
 			return core.LocalCommandResult{}, nil
 		}}
 		c := &brevClient{rt: core.Runtime{Exec: runner}}
-		if _, err := c.resolveSSHConfig(context.Background(), core.Config{}, "unused", value); err == nil {
+		if _, err := c.resolveSSHConfig(context.Background(), core.Config{}, "unused", value, nil); err == nil {
 			t.Fatalf("alias %q accepted", value)
 		}
-		if _, err := c.resolveSSHConfig(context.Background(), core.Config{NvidiaBrev: core.NvidiaBrevConfig{User: value}}, "unused", "gpu"); err == nil {
+		if _, err := c.resolveSSHConfig(context.Background(), core.Config{NvidiaBrev: core.NvidiaBrevConfig{User: value}}, "unused", "gpu", nil); err == nil {
 			t.Fatalf("user %q accepted", value)
 		}
+	}
+}
+
+func TestNvidiaBrevMetadataUsesCapturedConfig(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX OpenSSH fixture")
+	}
+	_, home := isolateNvidiaBrevState(t)
+	config := "Host gpu\n HostName expected.example.test\n User brev\n IdentitiesOnly yes\n"
+	writeBrevSSHConfig(t, home, config)
+	c := &brevClient{rt: core.Runtime{Exec: &fakeRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		writeBrevSSHConfig(t, home, "Match host gpu exec \"exit 99\"\n HostName replaced.example.test\n User replaced\n IdentitiesOnly yes\n")
+		return nativeSSHConfig(req)
+	}}}}
+	target, err := c.resolveSSHConfig(t.Context(), core.Config{}, defaultBrevSSHConfigPath(), "gpu", []byte(config))
+	if err != nil || target.User != "brev" || string(target.SSHConfigData) != config {
+		t.Fatalf("metadata followed replaced file: err=%v target=%#v", err, target)
+	}
+	encoded, err := json.Marshal(target)
+	if err != nil || bytes.Contains(encoded, []byte("expected.example.test")) {
+		t.Fatalf("provider config escaped transport: err=%v json=%s", err, encoded)
 	}
 }

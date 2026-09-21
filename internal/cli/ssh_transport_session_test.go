@@ -1232,6 +1232,42 @@ Host provider-alias
 	}
 }
 
+func TestSSHTransportCapturedConfigOwnsProxyJumpLifetime(t *testing.T) {
+	ssh, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("OpenSSH client required")
+	}
+	path := filepath.Join(t.TempDir(), "provider_config")
+	config := []byte("Host gpu\n HostName expected.example.test\n User brev\n IdentitiesOnly yes\n IdentityFile none\n ProxyJump jump\nHost jump\n HostName gateway.example.test\n User brev\n IdentitiesOnly yes\n IdentityFile none\n")
+	if err := os.WriteFile(path, []byte("Host *\n HostName replaced.example.test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := newSSHTransportSession(t.Context(), SSHTarget{Host: "gpu", User: "brev", Port: "22", SSHConfigFile: path, SSHConfigData: config, SSHConfigProxy: true}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ config, host, want string }{
+		{session.configPath, session.host(), "hostname expected.example.test\n"},
+		{filepath.Join(session.dir, "jump_config"), "jump", "hostname gateway.example.test\n"},
+	} {
+		out, err := exec.Command(ssh, "-G", "-F", tc.config, tc.host).CombinedOutput()
+		if err != nil || !strings.Contains(string(out), tc.want) || strings.Contains(string(out), "replaced.example.test") {
+			t.Fatalf("snapshot unavailable during transport: err=%v output=%s", err, out)
+		}
+	}
+	snapshot := filepath.Join(session.dir, "provider_config")
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(snapshot); !os.IsNotExist(err) {
+		t.Fatalf("config snapshot survived session close: %v", err)
+	}
+}
+
 func TestSSHTransportExplicitConfigRequiresReadableFile(t *testing.T) {
 	for _, path := range []string{filepath.Join(t.TempDir(), "absent"), t.TempDir()} {
 		_, err := newSSHTransportSession(t.Context(), SSHTarget{Host: "provider-alias", User: "alice", Port: "22", SSHConfigFile: path, SSHConfigProxy: true}, false)
