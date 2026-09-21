@@ -124,19 +124,6 @@ export function costLimits(env: Env): CostLimits {
   };
 }
 
-export function enforceCostLimits(
-  leases: LeaseRecord[],
-  candidate: LeaseRecord,
-  limits: CostLimits,
-  now: Date,
-): string {
-  const usage = createCostLimitUsage(candidate, now);
-  for (const lease of leases) {
-    addLeaseToCostLimitUsage(usage, lease, now);
-  }
-  return enforceCostLimitUsage(usage, candidate, limits);
-}
-
 export function createCostLimitUsage(
   candidate: Pick<LeaseRecord, "owner" | "org">,
   now: Date,

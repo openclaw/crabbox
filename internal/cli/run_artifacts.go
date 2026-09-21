@@ -254,10 +254,6 @@ func runArtifactCollectScript(workdir, remotePath string, globs []string) string
 	return b.String()
 }
 
-func DelegatedRunArtifactScript(requiredGlobs, artifactGlobs []string, maxFiles int, maxBytes int64) string {
-	return delegatedRunArtifactScript(requiredGlobs, artifactGlobs, maxFiles, maxBytes, false)
-}
-
 // DelegatedRunArtifactFileScript finalizes an archive at the single absolute path
 // passed as $1. The caller owns an existing, exclusive transfer directory and the
 // finalized file's lifetime. Collection keeps its original working directory.

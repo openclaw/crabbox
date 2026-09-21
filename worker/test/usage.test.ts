@@ -14,7 +14,28 @@ import {
   sameOrgIdentityKey,
 } from "../src/org-identity";
 import type { LeaseRecord } from "../src/types";
-import { costLimits, enforceCostLimits, leaseCost, usageSummary } from "../src/usage";
+import {
+  addLeaseToCostLimitUsage,
+  costLimits,
+  createCostLimitUsage,
+  enforceCostLimitUsage,
+  leaseCost,
+  usageSummary,
+  type CostLimits,
+} from "../src/usage";
+
+function enforceCostLimits(
+  leases: LeaseRecord[],
+  candidate: LeaseRecord,
+  limits: CostLimits,
+  now: Date,
+): string {
+  const usage = createCostLimitUsage(candidate, now);
+  for (const lease of leases) {
+    addLeaseToCostLimitUsage(usage, lease, now);
+  }
+  return enforceCostLimitUsage(usage, candidate, limits);
+}
 
 describe("organization identity", () => {
   it("keeps colliding legacy labels distinct in authorization keys", () => {

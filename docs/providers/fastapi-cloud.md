@@ -154,8 +154,10 @@ crabbox doctor --provider fastapi-cloud
   Cloud owns app lifecycle and sizing.
 - Sync options are rejected: `--no-sync` is required, and `--sync-only`,
   `--checksum`, `--force-sync-large`, and `--full-resync` all error out.
-- `--shell` is rejected (no interactive session) and `--env-summary` is rejected
-  (this provider cannot forward per-run environment variables).
+- `--shell` is rejected (no interactive session). This provider cannot forward
+  per-run environment variables: `--allow-env`, `--env-from-profile`, or a
+  nonblank `CRABBOX_ENV_ALLOW` requests an environment summary and is rejected,
+  even when no variables are selected.
 - App listing needs a team ID; status can use either `--id` or a configured app
   ID.
 - API compatibility is based on the app and deployment endpoints used by the

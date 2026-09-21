@@ -156,7 +156,7 @@ One logical `FleetCoordinator` (`worker/src/fleet.ts`) owns:
   Azure, and GCP identity verification and deletion remain adapter-owned.
   Manual retention is the default and local checkpoint records are caches,
   never ownership authority.
-- **Cost and spend caps** (`worker/src/usage.ts`) — `enforceCostLimits` checks
+- **Cost and spend caps** (`worker/src/usage.ts`) — `enforceCostLimitUsage` checks
   active-lease counts and monthly reserved-USD budgets (global / per-owner /
   per-org) from `CRABBOX_MAX_*` env. Over-limit requests get HTTP 429
   `cost_limit_exceeded`. Cost = hourly rate × TTL, where the rate comes from a

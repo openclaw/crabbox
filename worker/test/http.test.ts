@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import coordinator, { isAuthorized } from "../src";
+import coordinator from "../src";
 import {
   adminGrantVersion,
   authenticateRequest,
@@ -506,7 +506,7 @@ describe("coordinator auth", () => {
 
   it("denies requests when no shared token is configured", async () => {
     const request = new Request("https://example.test/v1/pool");
-    await expect(isAuthorized(request, {})).resolves.toBe(false);
+    await expect(authenticateRequest(request, {})).resolves.toBeUndefined();
   });
 
   it("requires the configured bearer token", async () => {
@@ -520,14 +520,16 @@ describe("coordinator auth", () => {
     const allowed = new Request("https://example.test/v1/pool", {
       headers: { authorization: "Bearer secret" },
     });
-    await expect(isAuthorized(denied, { CRABBOX_SHARED_TOKEN: "secret" })).resolves.toBe(false);
-    await expect(isAuthorized(wrongSameLength, { CRABBOX_SHARED_TOKEN: "secret" })).resolves.toBe(
-      false,
+    await Promise.all(
+      [denied, wrongSameLength, wrongLength].map((request) =>
+        expect(
+          authenticateRequest(request, { CRABBOX_SHARED_TOKEN: "secret" }),
+        ).resolves.toBeUndefined(),
+      ),
     );
-    await expect(isAuthorized(wrongLength, { CRABBOX_SHARED_TOKEN: "secret" })).resolves.toBe(
-      false,
-    );
-    await expect(isAuthorized(allowed, { CRABBOX_SHARED_TOKEN: "secret" })).resolves.toBe(true);
+    await expect(
+      authenticateRequest(allowed, { CRABBOX_SHARED_TOKEN: "secret" }),
+    ).resolves.toMatchObject({ authorized: true, admin: false, auth: "bearer" });
   });
 
   it("accepts a reverse-proxy identity only from a trusted proxy source", async () => {

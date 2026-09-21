@@ -1,4 +1,4 @@
-import { authenticateRequest, requestWithAdminGrantVersion } from "./auth";
+import { requestWithAdminGrantVersion } from "./auth";
 import { routeCoordinatorRequest } from "./coordinator-entry";
 import { FleetDurableObject } from "./fleet";
 import type { Env } from "./types";
@@ -30,19 +30,3 @@ export default {
     );
   },
 };
-
-export async function isAuthorized(
-  request: Request,
-  env: Pick<
-    Env,
-    | "CRABBOX_SHARED_TOKEN"
-    | "CRABBOX_SHARED_OWNER"
-    | "CRABBOX_ADMIN_TOKEN"
-    | "CRABBOX_SESSION_SECRET"
-    | "CRABBOX_DEFAULT_ORG"
-    | "CRABBOX_ACCESS_TEAM_DOMAIN"
-    | "CRABBOX_ACCESS_AUD"
-  >,
-): Promise<boolean> {
-  return Boolean((await authenticateRequest(request, env))?.authorized);
-}
