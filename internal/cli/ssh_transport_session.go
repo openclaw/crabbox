@@ -331,7 +331,7 @@ type sshTransportRouteCapabilities struct {
 }
 
 func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, localForward, userPercentExpansion bool) (_ sshTransportConfigRoute, err error) {
-	if !target.SSHConfigProxy {
+	if !target.SSHConfigProxy && target.SSHConfigFile == "" {
 		return sshTransportConfigRoute{}, nil
 	}
 	dir, err := os.MkdirTemp("", "crabbox-ssh-route-*")
@@ -343,8 +343,14 @@ func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, local
 		return sshTransportConfigRoute{}, fmt.Errorf("secure private SSH route directory: %w", err)
 	}
 	seedPath := filepath.Join(dir, "ssh_config")
-	userConfigPath := ""
-	if home, homeErr := os.UserHomeDir(); homeErr == nil {
+	userConfigPath := target.SSHConfigFile
+	if userConfigPath != "" {
+		// Include silently ignores missing files. An explicit provider route must
+		// fail rather than falling back to ambient identities or a literal alias.
+		if _, readErr := os.ReadFile(userConfigPath); readErr != nil {
+			return sshTransportConfigRoute{}, fmt.Errorf("read explicit SSH config: %w", readErr)
+		}
+	} else if home, homeErr := os.UserHomeDir(); homeErr == nil {
 		candidate := filepath.Join(home, ".ssh", "config")
 		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
 			userConfigPath = candidate
@@ -384,6 +390,9 @@ func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, local
 	}
 	route := parseSSHTransportConfigRoute(stdout.String(), userConfigPath)
 	route.capabilities = capabilities
+	if target.SSHConfigFile != "" && !route.identitiesOnly {
+		return sshTransportConfigRoute{}, Exit(2, "explicit SSH config did not select a route with IdentitiesOnly yes; refresh provider authentication before retrying")
+	}
 	if target.Key == "" {
 		route.identityFiles, err = resolveSSHTransportAuthenticationPaths(ctx, target, localForward, capabilities, seedPath, route.identityFiles)
 		if err != nil {

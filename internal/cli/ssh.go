@@ -47,6 +47,7 @@ type SSHTarget struct {
 	DisableHostKeyChecking  bool
 	NetworkKind             NetworkMode
 	SSHConfigProxy          bool
+	SSHConfigFile           string // Provider-owned IdentitiesOnly route; bypass ambient SSH config.
 	ProxyCommand            string
 	ChildEnvDenylist        []string
 	// Transport-only overrides can contain credentials; never serialize them.
@@ -919,7 +920,7 @@ func (p *sshTransportPreparation) run(ctx context.Context, target *SSHTarget, co
 	if err := resolveSSHPortNoInput(ctx, target, connectTimeout, connectionAttempts, stderr); err != nil {
 		return err
 	}
-	multiplexed := runtime.GOOS != "windows" && !target.AuthSecret && !target.NoControlMaster && !target.AuthoritativeKnownHosts
+	multiplexed := runtime.GOOS != "windows" && !target.AuthSecret && !target.NoControlMaster && !target.AuthoritativeKnownHosts && target.SSHConfigFile == ""
 	for attempt := 0; ; attempt++ {
 		probe := *target
 		if attempt == 2 {
@@ -937,7 +938,7 @@ func (p *sshTransportPreparation) runOnce(ctx context.Context, target SSHTarget,
 	if p.direct != nil || p.replay != nil {
 		args = sshArgsWithOptions(target, p.command, connectTimeout, connectionAttempts)
 	}
-	if target.AuthSecret {
+	if target.AuthSecret || target.SSHConfigFile != "" {
 		// Every command, including probes and workspace witnesses, needs the same
 		// private identity config as copy/forward transports. Keep it until Wait.
 		session, sessionErr := newSSHTransportSession(ctx, target, false)
@@ -1353,8 +1354,12 @@ func sshBaseArgsWithOptions(target SSHTarget, connectTimeout, connectionAttempts
 		"-o", "ServerAliveCountMax=2",
 		"-p", target.Port,
 	)
+	if target.SSHConfigFile != "" {
+		args = append(args, "-F", target.SSHConfigFile,
+			"-o", "RemoteCommand=none", "-o", "RequestTTY=auto", "-o", "ClearAllForwardings=yes")
+	}
 	args = append(args, sshHostKeyVerificationArgs(target)...)
-	if target.AuthSecret || target.NoControlMaster || target.AuthoritativeKnownHosts {
+	if target.AuthSecret || target.NoControlMaster || target.AuthoritativeKnownHosts || target.SSHConfigFile != "" {
 		args = append(args,
 			"-o", "ControlMaster=no",
 			"-o", "ControlPath=none",

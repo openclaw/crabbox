@@ -418,7 +418,7 @@ func TestNvidiaBrevAcquireCreatesRefreshesParsesSSHAndClaims(t *testing.T) {
 	if lease.LeaseID == "" || lease.Server.CloudID != "ws-123" || lease.Server.Labels["brev_workspace_id"] != "ws-123" {
 		t.Fatalf("unexpected lease: %#v", lease)
 	}
-	if lease.SSH.Host != "203.0.113.10" || lease.SSH.Port != "2222" || lease.SSH.User != "ubuntu" || lease.SSH.Key == "" {
+	if lease.SSH.Host != name || lease.SSH.Port != "2222" || lease.SSH.User != "ubuntu" || lease.SSH.SSHConfigFile == "" {
 		t.Fatalf("unexpected SSH target: %#v", lease.SSH)
 	}
 	if lease.SSH.ReadyCheck == "" || strings.Contains(lease.SSH.ReadyCheck, "crabbox-ready") {
@@ -974,7 +974,7 @@ func TestNvidiaBrevResolveStartsStoppedWorkspaceBeforeSSH(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.Server.Status != "ready" || lease.SSH.Host != "203.0.113.10" {
+	if lease.Server.Status != "ready" || lease.SSH.Host != lease.Server.Name {
 		t.Fatalf("stopped workspace not restarted and resolved: server=%#v ssh=%#v", lease.Server, lease.SSH)
 	}
 	if got := runner.joinedCalls(); !strings.Contains(got, "start ws-stop --detached") || !strings.Contains(got, "refresh") {
@@ -1104,6 +1104,9 @@ func TestNvidiaBrevResolveDoesNotOverwriteConcurrentTouch(t *testing.T) {
   IdentityFile "`+filepath.Join(home, ".brev", "brev.pem")+`"
 `)
 	runner := &fakeRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		if req.Name == "ssh" {
+			return nativeSSHConfig(req)
+		}
 		switch strings.Join(req.Args, " ") {
 		case "ls --json --all":
 			return core.LocalCommandResult{Stdout: `{"workspaces":[{"id":"ws-concurrent","name":"crabbox-concurrent-abcdef123456","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`}, nil
@@ -1202,7 +1205,7 @@ func TestNvidiaBrevResolveParsesProxySSHConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !lease.SSH.SSHConfigProxy || lease.SSH.ProxyCommand == "" || lease.SSH.Host != "crabbox-proxy-cbx123456789" {
+	if !lease.SSH.SSHConfigProxy || lease.SSH.SSHConfigFile == "" || lease.SSH.Host != "crabbox-proxy-cbx123456789" {
 		t.Fatalf("proxy target not preserved: %#v", lease.SSH)
 	}
 }
@@ -2095,6 +2098,9 @@ type scriptedBrevRunner struct {
 }
 
 func (r *scriptedBrevRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	if req.Name == "ssh" {
+		return nativeSSHConfig(req)
+	}
 	r.calls = append(r.calls, req)
 	if req.Name != "brev" {
 		return core.LocalCommandResult{}, errors.New("unexpected command name " + req.Name)
@@ -2172,7 +2178,7 @@ func writeBrevSSHConfig(t *testing.T, home, data string) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "ssh_config"), []byte(data), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "ssh_config"), []byte("IdentitiesOnly yes\nUserKnownHostsFile /dev/null\n"+data), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }

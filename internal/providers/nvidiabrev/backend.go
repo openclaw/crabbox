@@ -970,7 +970,7 @@ func (b *nvidiaBrevBackend) resolveSSHTarget(ctx context.Context, client *brevCl
 		return core.SSHTarget{}, err
 	}
 	path := defaultBrevSSHConfigPath()
-	data, err := os.ReadFile(path)
+	_, err := os.ReadFile(path)
 	if err != nil {
 		return core.SSHTarget{}, core.Exit(2, "read nvidia-brev SSH config %s: %v", path, err)
 	}
@@ -978,7 +978,7 @@ func (b *nvidiaBrevBackend) resolveSSHTarget(ctx context.Context, client *brevCl
 		return core.SSHTarget{}, err
 	}
 	alias := brevSSHConfigAlias(workspace.Name, cfg.NvidiaBrev.Target)
-	target, err := selectBrevSSHTarget(cfg, string(data), alias)
+	target, err := client.resolveSSHConfig(ctx, cfg, path, alias)
 	if err != nil {
 		return core.SSHTarget{}, err
 	}

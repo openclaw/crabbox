@@ -1,196 +1,137 @@
 package nvidiabrev
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-func TestNvidiaBrevSSHConfigParsesDirectTarget(t *testing.T) {
-	target, err := selectBrevSSHTarget(core.Config{}, `Host my-gpu-box
-  HostName 10.0.0.5
-  User brev
-  Port 2222
-  IdentityFile "/home/test/.brev/brev.pem"
-  UserKnownHostsFile /dev/null
-`, "my-gpu-box")
-	if err != nil {
-		t.Fatal(err)
+// This runner only evaluates fixture configs; it never connects to a host.
+func nativeSSHConfig(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	if req.Name != "ssh" || len(req.Args) < 5 || req.Args[0] != "-G" || req.Args[1] != "-F" {
+		panic("unexpected SSH fixture command")
 	}
-	if target.Host != "10.0.0.5" || target.Port != "2222" || target.User != "brev" || target.Key != "/home/test/.brev/brev.pem" {
-		t.Fatalf("target=%#v", target)
-	}
-	if target.SSHConfigProxy || target.ProxyCommand != "" {
-		t.Fatalf("direct target unexpectedly proxy-backed: %#v", target)
-	}
-	if target.KnownHostsFile != "/dev/null" || target.NetworkKind != networkPublic {
-		t.Fatalf("target metadata=%#v", target)
-	}
-	for _, command := range []string{"git", "rsync", "tar"} {
-		if !strings.Contains(target.ReadyCheck, "command -v "+command) {
-			t.Fatalf("ready check missing %q: %q", command, target.ReadyCheck)
-		}
-	}
+	cmd := exec.Command(req.Name, req.Args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	return core.LocalCommandResult{Stdout: string(stdout), Stderr: stderr.String()}, err
 }
 
-func TestNvidiaBrevSSHConfigParsesProxyTarget(t *testing.T) {
-	target, err := selectBrevSSHTarget(core.Config{}, `Host my-gpu-box
-  User brev
-  IdentityFile "/home/test/.brev/brev.pem"
-  ProxyCommand /home/test/.brev/cloudflared access ssh --hostname proxy.example
-  UserKnownHostsFile /dev/null
-`, "my-gpu-box")
-	if err != nil {
-		t.Fatal(err)
+func TestNvidiaBrevNativeSSHConfig(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX Match exec fixture")
 	}
-	if target.Host != "my-gpu-box" || target.Port != "22" || !target.SSHConfigProxy {
-		t.Fatalf("target=%#v", target)
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("OpenSSH client required")
 	}
-	if target.ProxyCommand != "/home/test/.brev/cloudflared access ssh --hostname proxy.example" {
-		t.Fatalf("proxy command=%q", target.ProxyCommand)
-	}
-}
-
-func TestNvidiaBrevSSHConfigSelectsHostAlias(t *testing.T) {
-	data := `Host gpu-box
-  HostName 10.0.0.5
-  User brev
-  Port 2222
-  IdentityFile "/home/test/.brev/brev.pem"
-
-Host gpu-box-host
-  HostName 10.0.0.6
-  User ubuntu
-  Port 22
-  IdentityFile "/home/test/.brev/brev.pem"
-`
-	alias := brevSSHConfigAlias("gpu-box", "host")
-	target, err := selectBrevSSHTarget(core.Config{}, data, alias)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if target.Host != "10.0.0.6" || target.User != "ubuntu" {
-		t.Fatalf("target=%#v", target)
-	}
-}
-
-func TestNvidiaBrevSSHConfigPrefersConfiguredUser(t *testing.T) {
-	target, err := selectBrevSSHTarget(core.Config{NvidiaBrev: core.NvidiaBrevConfig{User: "alice"}}, `Host gpu-box
-  HostName 10.0.0.5
-  User brev
-  IdentityFile "/home/test/.brev/brev.pem"
-`, "gpu-box")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if target.User != "alice" {
-		t.Fatalf("user=%q want alice", target.User)
-	}
-}
-
-func TestNvidiaBrevSSHConfigPrefersGeneratedUserOverGenericDefault(t *testing.T) {
-	target, err := selectBrevSSHTarget(core.Config{SSHUser: "crabbox"}, `Host gpu-box
-  HostName 10.0.0.5
-  User brev
-  IdentityFile "/home/test/.brev/brev.pem"
-`, "gpu-box")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if target.User != "brev" {
-		t.Fatalf("user=%q want brev", target.User)
-	}
-}
-
-func TestNvidiaBrevSSHConfigReportsMissingFields(t *testing.T) {
-	tests := []struct {
-		name string
-		data string
-		want string
+	for _, tt := range []struct {
+		name, config, alias, override, wantUser, wantPort string
 	}{
-		{name: "missing user", data: `Host gpu
-  HostName 10.0.0.5
-  IdentityFile "/home/test/.brev/brev.pem"
-`, want: "missing User"},
-		{name: "missing identity", data: `Host gpu
-  HostName 10.0.0.5
-  User brev
-`, want: "missing IdentityFile"},
-		{name: "missing host and proxy", data: `Host gpu
-  User brev
-  IdentityFile "/home/test/.brev/brev.pem"
-`, want: "missing HostName or ProxyCommand"},
-		{name: "missing alias", data: `Host other
-  HostName 10.0.0.5
-  User brev
-  IdentityFile "/home/test/.brev/brev.pem"
-`, want: "not found"},
-	}
-	for _, tt := range tests {
+		{name: "direct certificate", config: `Match host gpu exec "true"
+ HostName direct.example.test
+ User brev
+ Port 2222
+ IdentityFile /test/cert-key
+ IdentitiesOnly yes
+`, alias: "gpu", wantUser: "brev", wantPort: "2222"},
+		{name: "proxy certificate and user override", config: `Match host gpu exec "true"
+ User brev
+ IdentityFile /test/cert-key
+ IdentitiesOnly yes
+ ProxyCommand proxy %n %h %p
+`, alias: "gpu", override: "alice", wantUser: "alice", wantPort: "22"},
+		{name: "optional certificate with native first value", config: `Match host gpu exec "true"
+ IdentityFile /test/cert-key
+Host gpu
+ HostName direct.example.test
+ User brev
+ IdentityFile /test/static-key
+ IdentitiesOnly yes
+Host gpu
+ User ignored
+`, alias: "gpu", wantUser: "brev", wantPort: "22"},
+		{name: "optional certificate failure", config: `Match host gpu exec "false"
+ IdentityFile /test/cert-key
+Host gpu
+ HostName direct.example.test
+ User brev
+ IdentityFile /test/static-key
+ IdentitiesOnly yes
+`, alias: "gpu", wantUser: "brev", wantPort: "22"},
+		{name: "host target", config: `Host gpu
+ HostName container.example.test
+ User brev
+ IdentityFile /test/static-key
+ IdentitiesOnly yes
+Host gpu-host
+ HostName host.example.test
+ User ubuntu
+ IdentityFile /test/static-key
+ IdentitiesOnly yes
+`, alias: brevSSHConfigAlias("gpu", "host"), wantUser: "ubuntu", wantPort: "22"},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := selectBrevSSHTarget(core.Config{}, tt.data, "gpu")
-			if err == nil || !strings.Contains(err.Error(), tt.want) {
-				t.Fatalf("err=%v, want %q", err, tt.want)
+			path := filepath.Join(t.TempDir(), "ssh_config")
+			if err := os.WriteFile(path, []byte("UserKnownHostsFile /dev/null\n"+tt.config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := core.Config{SSHUser: "generic-default", NvidiaBrev: core.NvidiaBrevConfig{User: tt.override}}
+			c := &brevClient{rt: core.Runtime{Exec: &fakeRunner{run: nativeSSHConfig}}}
+			target, err := c.resolveSSHConfig(t.Context(), cfg, path, tt.alias)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target.Host != tt.alias || target.User != tt.wantUser || target.Port != tt.wantPort || target.SSHConfigFile != path || !target.SSHConfigProxy || !target.NoControlMaster || target.Key != "" || target.CertificateFile != "" || target.KnownHostsFile != "/dev/null" {
+				t.Fatalf("target=%#v", target)
 			}
 		})
 	}
 }
 
-func TestNvidiaBrevSSHConfigRejectsInvalidUsers(t *testing.T) {
-	for _, user := range []string{"-oProxyCommand=sh", "alice@example.com", "alice bob"} {
-		data := `Host gpu
-  HostName 10.0.0.5
-  User ` + user + `
-  IdentityFile "/home/test/.brev/brev.pem"
-`
-		for _, cfg := range []core.Config{{NvidiaBrev: core.NvidiaBrevConfig{User: user}}, {}} {
-			_, err := selectBrevSSHTarget(cfg, data, "gpu")
-			if err == nil || !strings.Contains(err.Error(), "invalid User") {
-				t.Fatalf("user=%q cfg=%#v err=%v", user, cfg.NvidiaBrev, err)
-			}
+func TestNvidiaBrevNativeSSHConfigRejectsMissingRoutes(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX Match exec fixture")
+	}
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("OpenSSH client required")
+	}
+	for _, config := range []string{
+		"Host other\n HostName other.example.test\n User brev\n IdentitiesOnly yes\n",
+		"Match host gpu exec \"false\"\n HostName direct.example.test\n User brev\n IdentitiesOnly yes\n IdentityFile /test/key\n",
+	} {
+		path := filepath.Join(t.TempDir(), "ssh_config")
+		if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+			t.Fatal(err)
+		}
+		c := &brevClient{rt: core.Runtime{Exec: &fakeRunner{run: nativeSSHConfig}}}
+		if _, err := c.resolveSSHConfig(t.Context(), core.Config{}, path, "gpu"); err == nil || !strings.Contains(err.Error(), "route not found") {
+			t.Fatalf("err=%v", err)
 		}
 	}
-	data := `Host gpu
-  HostName 10.0.0.5
-  User brev
-  IdentityFile "/home/test/.brev/brev.pem"
-`
-	for _, user := range []string{"alice\nbob", "alice\tbob"} {
-		_, err := selectBrevSSHTarget(core.Config{NvidiaBrev: core.NvidiaBrevConfig{User: user}}, data, "gpu")
-		if err == nil || !strings.Contains(err.Error(), "invalid User") {
-			t.Fatalf("configured user=%q err=%v", user, err)
-		}
+	c := &brevClient{rt: core.Runtime{Exec: &fakeRunner{run: nativeSSHConfig}}}
+	if _, err := c.resolveSSHConfig(t.Context(), core.Config{}, filepath.Join(t.TempDir(), "absent"), "gpu"); err == nil {
+		t.Fatal("missing config accepted")
 	}
 }
 
-func TestNvidiaBrevSSHConfigAllowsOpenSSHUsernames(t *testing.T) {
-	user := "1" + strings.Repeat("a", 64)
-	target, err := selectBrevSSHTarget(core.Config{NvidiaBrev: core.NvidiaBrevConfig{User: user}}, `Host gpu
-  HostName 10.0.0.5
-  User brev
-  IdentityFile "/home/test/.brev/brev.pem"
-`, "gpu")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if target.User != user {
-		t.Fatalf("user=%q want %q", target.User, user)
-	}
-}
-
-func TestNvidiaBrevSSHConfigRejectsAmbiguousAlias(t *testing.T) {
-	_, err := selectBrevSSHTarget(core.Config{}, `Host gpu
-  HostName 10.0.0.5
-  User brev
-  IdentityFile "/home/test/.brev/brev.pem"
-
-Host gpu
-  HostName 10.0.0.6
-  User brev
-  IdentityFile "/home/test/.brev/brev.pem"
-`, "gpu")
-	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
-		t.Fatalf("err=%v", err)
+func TestNvidiaBrevNativeSSHConfigRejectsArgumentsBeforeExec(t *testing.T) {
+	for _, value := range []string{"-oProxyCommand=sh", "alice@example.test", "alice bob", "alice;id", "alice\nbob", "$(id)", "gpu%h"} {
+		runner := &fakeRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+			t.Fatal("unsafe argument reached Match exec")
+			return core.LocalCommandResult{}, nil
+		}}
+		c := &brevClient{rt: core.Runtime{Exec: runner}}
+		if _, err := c.resolveSSHConfig(context.Background(), core.Config{}, "unused", value); err == nil {
+			t.Fatalf("alias %q accepted", value)
+		}
+		if _, err := c.resolveSSHConfig(context.Background(), core.Config{NvidiaBrev: core.NvidiaBrevConfig{User: value}}, "unused", "gpu"); err == nil {
+			t.Fatalf("user %q accepted", value)
+		}
 	}
 }

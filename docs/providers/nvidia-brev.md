@@ -182,8 +182,10 @@ grace period.
 - `host` selects the `<workspace-name>-host` alias.
 
 Brev may emit either a direct `HostName`/`Port` target or a `ProxyCommand`.
-Crabbox supports both forms as long as the SSH config entry includes a user and
-identity file.
+Crabbox uses native OpenSSH to interpret the generated config, including
+certificate-only `Match exec` entries and optional certificate/static-key fallback.
+Each new transport reevaluates Brev's certificate hook. Run, sync, and forwarding
+retain Crabbox's session policy instead of inheriting remote commands or forwards.
 
 ### Release and cleanup
 
