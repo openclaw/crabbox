@@ -8,6 +8,7 @@
 
 ### Fixes
 
+- Persist RunPod heartbeat activity and explicit idle-timeout changes, preserve stored lifecycle policy across fresh reads, and reject stale updates instead of reporting success.
 - Daytona: omit unverified default class labels from snapshot forks and document opt-in workload concurrency and memory limits. [PR 2114](https://github.com/openclaw/crabbox/pull/2114). Thanks @Patrick-Erichsen.
 - Wait for fresh exe.dev VMs to advertise their SSH route, preserve its user, port, and ambient SSH configuration, and bound inventory refreshes by the bootstrap timeout while retaining verified rollback. [PR 2271](https://github.com/openclaw/crabbox/pull/2271). Thanks @salmonumbrella.
 - Preserve DigitalOcean leases' stored idle timeout on ordinary heartbeats and honor explicit timeout changes without extending the creation-based TTL. [PR 2418](https://github.com/openclaw/crabbox/pull/2418).

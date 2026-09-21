@@ -7,10 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +20,213 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+type lifecycleClock struct{ current time.Time }
+
+func (c *lifecycleClock) Now() time.Time { return c.current }
+
+func runpodLifecycleFixture(t *testing.T) (*runpodLeaseBackend, core.LeaseTarget, core.LeaseClaim, core.Repo, *lifecycleClock) {
+	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	clock := &lifecycleClock{current: time.Now().UTC().Truncate(time.Second)}
+	const leaseID, slug = "cbx_abcdef123456", "policy"
+	pod := runpodPod{ID: "pod-policy", Name: core.LeaseProviderName(leaseID, slug), DesiredStatus: "RUNNING"}
+	fake := &fakeRunpodAPI{listPods: []runpodPod{pod}, getPod: func(string) (runpodPod, error) { return pod, nil }}
+	cfg := core.Config{Provider: providerName, IdleTimeout: 5 * time.Minute, TTL: time.Hour, Runpod: core.RunpodConfig{APIKey: "test-key"}}
+	applyRunpodDefaults(&cfg)
+	server := initializeRunpodLifecycle(runpodServer(pod, leaseID, slug, cfg), cfg, false, clock.current)
+	created := clock.current.Add(-2 * time.Minute)
+	server.Labels["created_at"] = core.LeaseLabelTime(created)
+	server.Labels["last_touched_at"] = core.LeaseLabelTime(created)
+	server.Labels["expires_at"] = core.LeaseLabelTime(created.Add(cfg.IdleTimeout))
+	server.Labels["provider_metadata"] = "retained"
+	repo := core.Repo{Root: t.TempDir()}
+	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, repo.Root, cfg.IdleTimeout, false); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	cfg.IdleTimeout, cfg.TTL = time.Minute, 15*time.Minute
+	b := &runpodLeaseBackend{cfg: cfg, rt: core.Runtime{Clock: clock, Stdout: io.Discard, Stderr: io.Discard}, client: fake}
+	return b, core.LeaseTarget{LeaseID: leaseID, Server: server}, claim, repo, clock
+}
+
+func TestRunpodObservationPreservesClaimLifecycle(t *testing.T) {
+	for _, operation := range []string{"status", "status-only flag", "ready probe", "release", "list"} {
+		t.Run(operation, func(t *testing.T) {
+			b, lease, original, repo, _ := runpodLifecycleFixture(t)
+			var server core.Server
+			if operation == "list" {
+				items, err := b.List(t.Context(), core.ListRequest{})
+				if err != nil || len(items) != 1 {
+					t.Fatalf("list count=%d err=%v", len(items), err)
+				}
+				server = items[0]
+			} else {
+				got, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo, StatusOnly: operation != "release", ReleaseOnly: operation == "release", ReadyProbe: operation == "ready probe", NoLocalStateMutations: operation != "status-only flag"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				server = got.Server
+			}
+			for _, key := range []string{"created_at", "last_touched_at", "expires_at", "idle_timeout", "idle_timeout_secs", "ttl_secs", "keep", "provider_metadata"} {
+				if server.Labels[key] != original.Labels[key] {
+					t.Errorf("%s changed from %q to %q", key, original.Labels[key], server.Labels[key])
+				}
+			}
+			snapshot, exists, set := core.ServerLeaseClaimSnapshot(server)
+			if !set || !exists || !reflect.DeepEqual(snapshot, original) {
+				t.Error("observation did not return the exact observed claim snapshot")
+			}
+			persisted, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil || !reflect.DeepEqual(persisted, original) {
+				t.Errorf("read-only observation changed claim: err=%v", err)
+			}
+		})
+	}
+}
+
+func TestRunpodTouchCommitsLifecyclePolicy(t *testing.T) {
+	b, lease, original, _, clock := runpodLifecycleFixture(t)
+	override := 90 * time.Minute
+	for i, intent := range []*time.Duration{nil, &override, nil} {
+		clock.current = clock.current.Add(time.Minute)
+		updated, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease, State: "busy", IdleTimeout: time.Minute, IdleTimeoutOverride: intent})
+		if err != nil {
+			t.Fatal(err)
+		}
+		idle := 300
+		if i > 0 {
+			idle = 5400
+		}
+		claim, err := core.ReadLeaseClaim(lease.LeaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if claim.IdleTimeoutSeconds != idle || claim.Labels["idle_timeout"] != strconv.Itoa(idle) || claim.Labels["idle_timeout_secs"] != strconv.Itoa(idle) || claim.Labels["last_touched_at"] != core.LeaseLabelTime(clock.current) || claim.LastUsedAt != clock.current.Format(time.RFC3339Nano) {
+			t.Errorf("touch %d did not atomically persist timeout and activity", i)
+		}
+		for _, key := range []string{"created_at", "ttl_secs", "keep", "provider_metadata", "name", "pod_id"} {
+			if claim.Labels[key] != original.Labels[key] {
+				t.Errorf("touch changed %s", key)
+			}
+		}
+		if i > 0 {
+			created, _ := strconv.ParseInt(original.Labels["created_at"], 10, 64)
+			if claim.Labels["expires_at"] != strconv.FormatInt(created+3600, 10) {
+				t.Error("touch lost original TTL cap")
+			}
+		}
+		snapshot, exists, set := core.ServerLeaseClaimSnapshot(updated)
+		if !set || !exists || !reflect.DeepEqual(snapshot, claim) {
+			t.Error("touch returned an uncommitted snapshot")
+		}
+		lease.Server = updated
+	}
+}
+
+func TestRunpodTouchRefusesUncommittableClaim(t *testing.T) {
+	for _, scenario := range []string{"missing snapshot", "stale", "canceled", "invalid override", "wrong lease", "renamed pod", "changed during observation"} {
+		t.Run(scenario, func(t *testing.T) {
+			b, lease, original, _, _ := runpodLifecycleFixture(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			before := original
+			changeClaim := func() {
+				labels := maps.Clone(original.Labels)
+				labels["profile"] = "new-owner-state"
+				var err error
+				before, err = core.UpdateLeaseClaimLabelsIfUnchanged(original.LeaseID, original, labels)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			req := core.TouchRequest{Lease: lease, State: "busy"}
+			switch scenario {
+			case "missing snapshot":
+				req.Lease.Server = core.Server{Provider: providerName, CloudID: lease.Server.CloudID, Name: lease.Server.Name, Labels: lease.Server.Labels}
+			case "stale":
+				changeClaim()
+			case "canceled":
+				cancel()
+			case "invalid override":
+				invalid := time.Duration(0)
+				req.IdleTimeoutOverride = &invalid
+			case "wrong lease":
+				req.Lease.LeaseID = "cbx_000000000000"
+			case "renamed pod", "changed during observation":
+				fake := b.client.(*fakeRunpodAPI)
+				getPod := fake.getPod
+				fake.getPod = func(id string) (runpodPod, error) {
+					pod, err := getPod(id)
+					if scenario == "renamed pod" {
+						pod.Name = "renamed-outside-crabbox"
+					} else {
+						changeClaim()
+					}
+					return pod, err
+				}
+			}
+			server, err := b.Touch(ctx, req)
+			if err == nil || !reflect.DeepEqual(server, core.Server{}) {
+				t.Errorf("uncommittable touch returned success: err=%v", err)
+			}
+			after, readErr := core.ReadLeaseClaim(original.LeaseID)
+			if readErr != nil || !reflect.DeepEqual(after, before) {
+				t.Errorf("failed touch changed claim: err=%v", readErr)
+			}
+		})
+	}
+}
+
+func TestRunpodUnclaimedObservationDoesNotInventLifecycle(t *testing.T) {
+	b, lease, _, repo, _ := runpodLifecycleFixture(t)
+	core.RemoveLeaseClaim(lease.LeaseID)
+	observed, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.Server.CloudID, Repo: repo, StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"created_at", "last_touched_at", "expires_at", "idle_timeout", "idle_timeout_secs", "ttl_secs", "keep"} {
+		if _, exists := observed.Server.Labels[key]; exists {
+			t.Errorf("unclaimed observation invented %s", key)
+		}
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(observed.LeaseID); err != nil || exists {
+		t.Fatalf("observation created a claim: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestRunpodRunningObservationClearsOnlyStoredRuntimeTerminalState(t *testing.T) {
+	for _, state := range []string{"stopped", "failed", "exited", "busy", "ready", "deleting", "expired"} {
+		t.Run(state, func(t *testing.T) {
+			b, lease, original, _, _ := runpodLifecycleFixture(t)
+			labels := maps.Clone(original.Labels)
+			labels["state"] = state
+			stored, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, original, labels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			observed, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, NoLocalStateMutations: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := state
+			if state == "stopped" || state == "failed" || state == "exited" {
+				want = "running"
+			}
+			if observed.Server.Labels["state"] != want {
+				t.Errorf("native running state projected as %q, want %q", observed.Server.Labels["state"], want)
+			}
+			after, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil || !reflect.DeepEqual(after, stored) {
+				t.Errorf("read-only projection changed persisted state: %v", err)
+			}
+		})
+	}
+}
 
 func TestRunpodProviderSpec(t *testing.T) {
 	spec := Provider{}.Spec()
@@ -957,7 +1166,7 @@ func claimRunpodPod(t *testing.T, leaseID, slug string, pod runpodPod) {
 	t.Helper()
 	cfg := core.Config{Provider: providerName}
 	applyRunpodDefaults(&cfg)
-	server := runpodServer(pod, leaseID, slug, cfg, true)
+	server := initializeRunpodLifecycle(runpodServer(pod, leaseID, slug, cfg), cfg, true, time.Now().UTC())
 	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, runpodSSHTarget(cfg, pod), t.TempDir(), 0, false); err != nil {
 		t.Fatal(err)
 	}

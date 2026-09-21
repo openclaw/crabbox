@@ -55,6 +55,21 @@ not manage that key.
 - **Doctor** — runs read-only identity and pod-list checks; it never creates a
   pod, so it is safe to run on every CI invocation.
 
+The local claim owns heartbeat activity, idle timeout, creation time, TTL, and
+keep policy. Read-only status and list preserve recorded lifecycle values without
+renewing the claim or replacing them with current configuration. Unclaimed pods
+have no inferred lifecycle history; explicit adoption initializes that policy.
+Native stopped or failed state still takes precedence over stored activity.
+After a native restart, a saved runtime stop/failure no longer masks the running
+pod. Logical deletion and expiry holds remain intact.
+
+An ordinary heartbeat preserves the recorded idle timeout. An explicit
+`--idle-timeout` commits the new timeout together with activity, without extending
+the recorded creation-based TTL. Missing or stale claim snapshots, cancellation,
+and changed pod identity are errors rather than successful updates. Earlier
+releases returned heartbeat changes without persisting them; repeat an intended
+timeout change after upgrading if it was not recorded in the claim.
+
 ## Capabilities
 
 | Capability | Supported |
