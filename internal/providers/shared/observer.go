@@ -45,6 +45,61 @@ type PollResult[T any] struct {
 	Remaining time.Duration
 }
 
+type ReadinessStop struct {
+	BudgetExpired bool
+	Err           error
+	Cause         error
+}
+
+type ReadinessOptions[T any] struct {
+	Timeout, Interval time.Duration
+	Sleep             func(context.Context, time.Duration) error
+	IsResponseError   func(error) bool
+	Check             func(T, error) (bool, error)
+	Diagnostic        func(ReadinessStop) error
+}
+
+// PollReadiness owns the elapsed-time budget and context-stop classification.
+// Adapters own completed-response recognition, readiness/retry policy and public
+// diagnostics. Check and Diagnostic are required; Sleep defaults to SleepContext.
+func PollReadiness[T any](ctx context.Context, options ReadinessOptions[T], fetch func(context.Context) (T, error)) (T, error) {
+	budgetExpired := errors.New("readiness budget expired")
+	waitCtx, cancel := context.WithTimeoutCause(ctx, options.Timeout, budgetExpired)
+	defer cancel()
+	sleep := options.Sleep
+	if sleep == nil {
+		sleep = SleepContext
+	}
+	var observationError error
+	result, err := Poll(waitCtx, 0, options.Interval, sleep, fetch,
+		func(_ context.Context, value T, fetchErr error) (bool, error) {
+			if fetchErr != nil {
+				response := options.IsResponseError != nil && options.IsResponseError(fetchErr)
+				if cause := context.Cause(waitCtx); cause != nil && !response &&
+					(errors.Is(fetchErr, cause) || errors.Is(fetchErr, waitCtx.Err())) {
+					return false, errors.Join(cause, fetchErr)
+				}
+			}
+			ready, checkErr := options.Check(value, fetchErr)
+			observationError = checkErr
+			return ready, checkErr
+		}, nil)
+	if err != nil {
+		var zero T
+		if observationError != nil {
+			return zero, observationError
+		}
+		if cause := context.Cause(waitCtx); cause != nil && errors.Is(err, cause) {
+			diagnostic := options.Diagnostic(ReadinessStop{
+				BudgetExpired: errors.Is(cause, budgetExpired), Err: waitCtx.Err(), Cause: cause,
+			})
+			return zero, PollTerminationError(waitCtx, err, diagnostic)
+		}
+		return zero, err
+	}
+	return result.Value, nil
+}
+
 // PollReady bounds acquisition observations and waits, stops on the first fetch
 // error, and returns a value only when ready. The adapter owns the readiness
 // predicate and timeout diagnostic; client deadlines and caller causes survive.

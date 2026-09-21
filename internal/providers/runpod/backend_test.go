@@ -615,6 +615,7 @@ type fakeRunpodAPI struct {
 	terminated   []string
 	listPods     []runpodPod
 	getPod       func(string) (runpodPod, error)
+	getPodCtx    func(context.Context, string) (runpodPod, error)
 	terminatePod func(context.Context, string) error
 	deployPod    runpodPod
 }
@@ -648,12 +649,16 @@ func (f *fakeRunpodAPI) DeployPod(_ context.Context, input runpodDeployInput) (r
 	f.deployCalls = append(f.deployCalls, input)
 	return f.deployPod, nil
 }
-func (f *fakeRunpodAPI) GetPod(_ context.Context, podID string) (runpodPod, error) {
+func (f *fakeRunpodAPI) GetPod(ctx context.Context, podID string) (runpodPod, error) {
 	f.mu.Lock()
 	f.getCalls = append(f.getCalls, podID)
 	getPod := f.getPod
+	getPodCtx := f.getPodCtx
 	deployPod := f.deployPod
 	f.mu.Unlock()
+	if getPodCtx != nil {
+		return getPodCtx(ctx, podID)
+	}
 	if getPod != nil {
 		return getPod(podID)
 	}
@@ -785,6 +790,119 @@ func TestRunpodListFiltersCrabboxPodsByDefault(t *testing.T) {
 	}
 	if len(views) != 2 {
 		t.Fatalf("views=%#v", views)
+	}
+}
+
+func TestRunpodSSHWaitPreservesCallerTermination(t *testing.T) {
+	for _, phase := range []string{"before read", "during read", "after observation"} {
+		t.Run(phase, func(t *testing.T) {
+			cause := errors.New("private cancellation cause")
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			if phase == "before read" {
+				cancel(cause)
+			}
+			fake := &fakeRunpodAPI{getPodCtx: func(ctx context.Context, _ string) (runpodPod, error) {
+				if phase == "before read" {
+					t.Fatal("initiated read after caller cancellation")
+				}
+				cancel(cause)
+				if phase == "during read" {
+					return runpodPod{}, ctx.Err()
+				}
+				return runpodPod{DesiredStatus: "PROVISIONING"}, nil
+			}}
+			backend := &runpodLeaseBackend{pollTimeoutOverride: time.Second}
+			_, err := backend.waitForPodSSH(ctx, fake, "pod_a")
+			if !errors.Is(err, cause) || !errors.Is(err, context.Canceled) {
+				t.Fatalf("err=%v, want caller cause and cancellation", err)
+			}
+			if strings.Contains(err.Error(), cause.Error()) || strings.Contains(err.Error(), "not exposed within") {
+				t.Fatalf("wrong cancellation diagnostic: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunpodSSHWaitPreservesDeadlineIdentity(t *testing.T) {
+	for _, phase := range []string{"read Err", "read Cause", "sleep"} {
+		t.Run(phase, func(t *testing.T) {
+			fake := &fakeRunpodAPI{getPodCtx: func(ctx context.Context, _ string) (runpodPod, error) {
+				if phase == "sleep" {
+					return runpodPod{DesiredStatus: "PROVISIONING"}, nil
+				}
+				<-ctx.Done()
+				if phase == "read Cause" {
+					return runpodPod{}, context.Cause(ctx)
+				}
+				return runpodPod{}, ctx.Err()
+			}}
+			backend := &runpodLeaseBackend{pollTimeoutOverride: 20 * time.Millisecond}
+			_, err := backend.waitForPodSSH(t.Context(), fake, "pod_a")
+			if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "ssh endpoint not exposed within") {
+				t.Fatalf("err=%v, want readiness timeout and deadline identity", err)
+			}
+		})
+	}
+}
+
+func TestRunpodSSHWaitPreservesCompletedObservation(t *testing.T) {
+	for _, outcome := range []string{"ready", "API failure", "client deadline"} {
+		t.Run(outcome, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			apiErr := &runpodAPIError{StatusCode: 403, Status: "403 Forbidden"}
+			fake := &fakeRunpodAPI{getPodCtx: func(context.Context, string) (runpodPod, error) {
+				if outcome != "client deadline" {
+					cancel()
+				}
+				switch outcome {
+				case "ready":
+					return runpodPod{ID: "pod_a", PublicIP: "203.0.113.9", PortMappings: map[string]int{"22": 41200}}, nil
+				case "API failure":
+					return runpodPod{}, apiErr
+				default:
+					return runpodPod{}, context.DeadlineExceeded
+				}
+			}}
+			backend := &runpodLeaseBackend{pollTimeoutOverride: time.Second}
+			pod, err := backend.waitForPodSSH(ctx, fake, "pod_a")
+			switch outcome {
+			case "ready":
+				if err != nil || pod.ID != "pod_a" {
+					t.Fatalf("pod=%+v err=%v", pod, err)
+				}
+			case "API failure":
+				if err != apiErr {
+					t.Fatalf("err=%v, want completed API failure", err)
+				}
+			case "client deadline":
+				if err != context.DeadlineExceeded {
+					t.Fatalf("err=%v, want independent client deadline", err)
+				}
+			}
+		})
+	}
+}
+
+func TestRunpodSSHWaitBoundsNativeHTTPClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-t.Context().Done():
+		}
+	}))
+	defer server.Close()
+	client, err := newRunpodClient(core.Config{Runpod: core.RunpodConfig{APIKey: "fixture-key", APIURL: server.URL}}, core.Runtime{HTTP: server.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &runpodLeaseBackend{pollTimeoutOverride: 50 * time.Millisecond}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	_, err = backend.waitForPodSSH(ctx, client, "pod_a")
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "ssh endpoint not exposed within") || ctx.Err() != nil {
+		t.Fatalf("err=%v parent=%v, want own readiness deadline from real HTTP request", err, ctx.Err())
 	}
 }
 

@@ -81,6 +81,172 @@ func TestPollTerminationErrorPreservesDiagnosticAndTerminalClassification(t *tes
 	}
 }
 
+func TestPollReadinessTerminationAndObservationPrecedence(t *testing.T) {
+	for _, scenario := range []string{
+		"ready", "pre-canceled", "read canceled Err", "read canceled Cause", "between observations",
+		"budget during read Err", "budget during read Cause", "budget during sleep", "late ready",
+		"completed response", "response with context error", "independent deadline", "terminal observation", "sleep failure",
+	} {
+		t.Run(scenario, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				cause := errors.New("private caller cause")
+				response := errors.New("completed provider response")
+				terminal := errors.New("terminal native state")
+				sleepErr := errors.New("sleep failed")
+				ctx, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				if scenario == "pre-canceled" {
+					cancel(cause)
+				}
+				reads, checks, diagnostics := 0, 0, 0
+				var responseErr error
+				var stop ReadinessStop
+				options := ReadinessOptions[int]{
+					Timeout: time.Second, Interval: 3 * time.Second,
+					IsResponseError: func(err error) bool { return errors.Is(err, response) },
+					Check: func(value int, err error) (bool, error) {
+						checks++
+						if value == -1 {
+							return false, terminal
+						}
+						return value == 7, err
+					},
+					Diagnostic: func(s ReadinessStop) error {
+						diagnostics++
+						stop = s
+						return core.Exit(5, "safe readiness stop")
+					},
+				}
+				if scenario == "sleep failure" {
+					options.Sleep = func(context.Context, time.Duration) error { return sleepErr }
+				}
+				got, err := PollReadiness(ctx, options, func(ctx context.Context) (int, error) {
+					reads++
+					if scenario == "pre-canceled" {
+						t.Fatal("fetch after cancellation")
+					}
+					switch scenario {
+					case "ready":
+						return 7, nil
+					case "read canceled Err":
+						cancel(cause)
+						return 0, ctx.Err()
+					case "read canceled Cause":
+						cancel(cause)
+						return 0, context.Cause(ctx)
+					case "between observations":
+						cancel(cause)
+						return 0, nil
+					case "budget during read Err":
+						<-ctx.Done()
+						return 0, ctx.Err()
+					case "budget during read Cause":
+						<-ctx.Done()
+						return 0, context.Cause(ctx)
+					case "late ready":
+						<-ctx.Done()
+						return 7, nil
+					case "completed response":
+						cancel(cause)
+						responseErr = response
+						return 0, responseErr
+					case "response with context error":
+						cancel(cause)
+						responseErr = errors.Join(response, ctx.Err())
+						return 0, responseErr
+					case "independent deadline":
+						return 0, context.DeadlineExceeded
+					case "terminal observation":
+						cancel(cause)
+						return -1, nil
+					default:
+						return 0, nil
+					}
+				})
+				switch scenario {
+				case "ready", "late ready":
+					if err != nil || got != 7 || diagnostics != 0 {
+						t.Fatalf("got=%d err=%v diagnostics=%d", got, err, diagnostics)
+					}
+				case "completed response", "response with context error":
+					if err != responseErr || diagnostics != 0 {
+						t.Fatalf("err=%v, want original response", err)
+					}
+				case "independent deadline":
+					if err != context.DeadlineExceeded || diagnostics != 0 {
+						t.Fatalf("err=%v, want independent deadline", err)
+					}
+				case "terminal observation":
+					if err != terminal || diagnostics != 0 {
+						t.Fatalf("err=%v, want terminal observation", err)
+					}
+				case "sleep failure":
+					if err != sleepErr || diagnostics != 0 {
+						t.Fatalf("err=%v, want sleeper failure", err)
+					}
+				default:
+					budget := scenario == "budget during read Err" || scenario == "budget during read Cause" || scenario == "budget during sleep"
+					wantState := error(context.Canceled)
+					if budget {
+						wantState = context.DeadlineExceeded
+					}
+					if err == nil || err.Error() != "safe readiness stop" || !errors.Is(err, wantState) || diagnostics != 1 || stop.BudgetExpired != budget || stop.Err != wantState || !errors.Is(err, stop.Cause) {
+						t.Fatalf("err=%v stop=%+v diagnostics=%d", err, stop, diagnostics)
+					}
+					if !budget && !errors.Is(err, cause) {
+						t.Fatal("lost custom caller cause")
+					}
+				}
+				if scenario == "pre-canceled" && (reads != 0 || checks != 0) {
+					t.Fatal("observed pre-canceled request")
+				}
+				if (scenario == "read canceled Err" || scenario == "read canceled Cause" || scenario == "budget during read Err" || scenario == "budget during read Cause") && checks != 0 {
+					t.Fatal("interrupted fetch reached provider observation callback")
+				}
+			})
+		})
+	}
+}
+
+func TestPollReadinessRetainsOnlyCompletedRetryDiagnostics(t *testing.T) {
+	for _, clear := range []bool{false, true} {
+		t.Run(fmt.Sprintf("successful observation clears=%v", clear), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				transient := errors.New("transient response")
+				var last error
+				reads, checks := 0, 0
+				_, err := PollReadiness(context.Background(), ReadinessOptions[int]{
+					Timeout: time.Second, Interval: time.Millisecond,
+					Check: func(_ int, err error) (bool, error) { checks++; last = err; return false, nil },
+					Diagnostic: func(ReadinessStop) error {
+						if clear && last != nil || !clear && last != transient {
+							t.Fatalf("last=%v clear=%v", last, clear)
+						}
+						return core.Exit(5, "timed out")
+					},
+				}, func(ctx context.Context) (int, error) {
+					reads++
+					if reads == 1 {
+						return 0, transient
+					}
+					if reads == 2 && clear {
+						return 0, nil
+					}
+					<-ctx.Done()
+					return 0, ctx.Err()
+				})
+				wantChecks := 1
+				if clear {
+					wantChecks = 2
+				}
+				if !errors.Is(err, context.DeadlineExceeded) || checks != wantChecks {
+					t.Fatalf("err=%v checks=%d", err, checks)
+				}
+			})
+		})
+	}
+}
+
 func TestPollReadyAcquisitionLifecycle(t *testing.T) {
 	readError := errors.New("read failed")
 	callerCause := errors.New("caller stopped acquisition")
