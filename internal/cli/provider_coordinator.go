@@ -859,33 +859,18 @@ const coordinatorReleaseResolveTimeout = 10 * time.Second
 func (b *coordinatorLeaseBackend) Resolve(ctx context.Context, req ResolveRequest) (LeaseTarget, error) {
 	cfg := b.cfg
 	prepare := req.Prepare && !req.ReleaseOnly && IsCanonicalLeaseID(req.ID)
+	// Include any existing admin-auth lookup in the same read budget.
+	timeout := coordinatorReadBudget
 	if req.ReleaseOnly {
 		// Provider cleanup must not depend on an optional guest route selection.
 		cfg.explicitSSHPort = ""
 		// Leave the caller's budget available for the provider-scoped release fallback.
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, coordinatorReleaseResolveTimeout)
-		defer cancel()
-	} else if prepare {
-		// GetLease owns a control deadline beneath the HTTP-client timeout.
-		// Share that original budget across both observations, including auth/curl.
-		timeout := coordinatorControlTimeout
-		if httpTimeout := b.coord.secureHTTPClient().Timeout; httpTimeout > 0 {
-			timeout = min(timeout, httpTimeout)
-		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
+		timeout = coordinatorReleaseResolveTimeout
 	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	coord := b.coord
 	lease, err := coord.GetLease(ctx, req.ID)
-	var serviceError CoordinatorHTTPError
-	if prepare && ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
-		errors.As(err, &serviceError) && serviceError.StatusCode >= 500 && serviceError.StatusCode < 600 {
-		// Only repeat the exact read before run preparation; never replay SSH or
-		// infer lease absence from a failed coordinator observation.
-		lease, err = b.coord.GetLease(ctx, req.ID)
-	}
 	if prepare && ctx.Err() != nil {
 		return LeaseTarget{}, errors.Join(err, ctx.Err())
 	}

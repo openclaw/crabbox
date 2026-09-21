@@ -106,7 +106,7 @@ func TestCoordinatorLeaseReadStallsAreBounded(t *testing.T) {
 			}))
 			defer func() { close(release); server.Close() }()
 			client := &CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
-			ctx, cancel := context.WithTimeout(t.Context(), 40*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 70*time.Second)
 			defer cancel()
 			var err error
 			if bodyStall {
@@ -114,8 +114,8 @@ func TestCoordinatorLeaseReadStallsAreBounded(t *testing.T) {
 			} else {
 				_, err = client.GetLease(ctx, "cbx_budget")
 			}
-			if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil || calls.Load() != 1 {
-				t.Fatalf("read err=%v parent=%v requests=%d; want own deadline and no retry", err, ctx.Err(), calls.Load())
+			if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil || calls.Load() != 2 {
+				t.Fatalf("read err=%v parent=%v requests=%d; want total read deadline and two attempts", err, ctx.Err(), calls.Load())
 			}
 		})
 	}

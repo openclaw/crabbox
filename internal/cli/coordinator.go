@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -27,6 +28,7 @@ type CoordinatorClient struct {
 	TokenCommand           []string
 	Access                 AccessConfig
 	Client                 *http.Client
+	readRetryWriter        io.Writer
 	ChildEnvDenylist       []string
 	admissionAuth          *coordinatorAdmissionAuth
 	checkpointSupportMu    sync.Mutex
@@ -55,6 +57,7 @@ type CoordinatorHTTPError struct {
 	Path       string
 	StatusCode int
 	Message    string
+	retryAfter time.Duration
 }
 
 func (e CoordinatorHTTPError) Error() string {
@@ -1307,7 +1310,7 @@ func (c *CoordinatorClient) getLease(ctx context.Context, id string, providerMet
 	if providerMetadata {
 		path += "?providerMetadata=authoritative"
 	}
-	err := c.doControl(ctx, http.MethodGet, path, nil, &res)
+	err := c.doRead(ctx, path, &res)
 	return res.Lease, err
 }
 
@@ -1495,7 +1498,7 @@ func (c *CoordinatorClient) Pool(ctx context.Context, cfg Config) ([]Coordinator
 	if cfg.Provider != "" {
 		path += "?provider=" + url.QueryEscape(cfg.Provider)
 	}
-	err := c.do(ctx, http.MethodGet, path, nil, &res)
+	err := c.doRead(ctx, path, &res)
 	return res.Machines, err
 }
 
@@ -1524,7 +1527,7 @@ func (c *CoordinatorClient) listLeases(ctx context.Context, state string, limit 
 	if encoded := values.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
-	err := c.do(ctx, http.MethodGet, path, nil, &res)
+	err := c.doRead(ctx, path, &res)
 	return res.Leases, err
 }
 
@@ -1740,7 +1743,7 @@ func (c *CoordinatorClient) MarketplaceQuote(ctx context.Context, input Coordina
 
 func (c *CoordinatorClient) Whoami(ctx context.Context) (CoordinatorWhoami, error) {
 	var res CoordinatorWhoami
-	err := c.doControl(ctx, http.MethodGet, "/v1/whoami", nil, &res)
+	err := c.doRead(ctx, "/v1/whoami", &res)
 	return res, err
 }
 
@@ -1763,7 +1766,7 @@ func (c *CoordinatorClient) ProviderReadiness(ctx context.Context, cfg Config) (
 	if encoded := values.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
-	err = c.doControl(ctx, http.MethodGet, path, nil, &res)
+	err = c.doRead(ctx, path, &res)
 	return res, err
 }
 
@@ -1878,7 +1881,7 @@ func (c *CoordinatorClient) AdminLeases(ctx context.Context, state, owner, org s
 	if encoded := values.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
-	err := c.do(ctx, http.MethodGet, path, nil, &res)
+	err := c.doRead(ctx, path, &res)
 	return res.Leases, err
 }
 
@@ -1906,7 +1909,7 @@ func (c *CoordinatorClient) AdminLeaseAudit(ctx context.Context, state, provider
 	if encoded := values.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
-	err := c.do(ctx, http.MethodGet, path, nil, &res)
+	err := c.doRead(ctx, path, &res)
 	return res.Audits, err
 }
 
@@ -2467,7 +2470,7 @@ func (c *CoordinatorClient) RunEvents(ctx context.Context, runID string, after, 
 	if encoded := values.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
-	err := c.do(ctx, http.MethodGet, path, nil, &res)
+	err := c.doRead(ctx, path, &res)
 	return res.Events, err
 }
 
@@ -2493,19 +2496,19 @@ func (c *CoordinatorClient) Runs(ctx context.Context, leaseID, owner, org, state
 	if encoded := values.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
-	err := c.do(ctx, http.MethodGet, path, nil, &res)
+	err := c.doRead(ctx, path, &res)
 	return res.Runs, err
 }
 
 func (c *CoordinatorClient) Run(ctx context.Context, runID string) (CoordinatorRun, error) {
 	var res CoordinatorRunResponse
-	err := c.do(ctx, http.MethodGet, "/v1/runs/"+url.PathEscape(runID), nil, &res)
+	err := c.doRead(ctx, "/v1/runs/"+url.PathEscape(runID), &res)
 	return res.Run, err
 }
 
 func (c *CoordinatorClient) RunLogs(ctx context.Context, runID string) (string, error) {
 	var buf bytes.Buffer
-	err := c.do(ctx, http.MethodGet, "/v1/runs/"+url.PathEscape(runID)+"/logs", nil, &buf)
+	err := c.doRead(ctx, "/v1/runs/"+url.PathEscape(runID)+"/logs", &buf)
 	return buf.String(), err
 }
 
@@ -2513,7 +2516,7 @@ func (c *CoordinatorClient) RunReceipt(ctx context.Context, runID string) (termi
 	var res struct {
 		Receipt json.RawMessage `json:"receipt"`
 	}
-	if err := c.do(ctx, http.MethodGet, "/v1/runs/"+url.PathEscape(runID)+"/receipt", nil, &res); err != nil {
+	if err := c.doRead(ctx, "/v1/runs/"+url.PathEscape(runID)+"/receipt", &res); err != nil {
 		return terminalRunReceipt{}, err
 	}
 	receipt, err := decodeTerminalRunReceipt(res.Receipt)
@@ -2525,7 +2528,7 @@ func (c *CoordinatorClient) RunReceipt(ctx context.Context, runID string) (termi
 
 func (c *CoordinatorClient) Health(ctx context.Context) error {
 	var res map[string]any
-	return c.doControl(ctx, http.MethodGet, "/v1/health", nil, &res)
+	return c.doRead(ctx, "/v1/health", &res)
 }
 
 // Control requests share one deadline across authentication, HTTP response bodies,
@@ -2559,7 +2562,8 @@ func (c *CoordinatorClient) doWithHeaders(ctx context.Context, method, path stri
 	if curlErr := c.doCurl(ctx, method, path, data, body != nil, out); curlErr == nil {
 		return nil
 	} else {
-		return fmt.Errorf("%w; curl fallback failed: %v", err, curlErr)
+		// Keep both diagnostics and the typed fallback status for read retry policy.
+		return fmt.Errorf("%w; curl fallback failed: %w", err, curlErr)
 	}
 }
 
@@ -2586,7 +2590,13 @@ func (c *CoordinatorClient) doHTTPWithHeaders(ctx context.Context, method, path 
 		return err
 	}
 	defer resp.Body.Close()
-	return decodeCoordinatorResponse(method, path, resp.StatusCode, resp.Body, out)
+	err = decodeCoordinatorResponse(method, path, resp.StatusCode, resp.Body, out)
+	var response CoordinatorHTTPError
+	if errors.As(err, &response) {
+		response.retryAfter = coordinatorReadRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		return response
+	}
+	return err
 }
 
 func (c *CoordinatorClient) secureHTTPClient() *http.Client {
@@ -2678,6 +2688,17 @@ func (c *CoordinatorClient) doCurl(ctx context.Context, method, path string, dat
 	}
 	defer cleanup()
 
+	// Retain response metadata for read retries without mixing headers into logs.
+	headers, err := os.CreateTemp("", "crabbox-curl-headers-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(headers.Name())
+	defer headers.Close()
+	var extra strings.Builder
+	curlConfigValue(&extra, "dump-header", headers.Name())
+	config += extra.String()
+
 	// -q must be curl's first argument so ambient curlrc settings cannot
 	// re-enable redirects or otherwise change credential handling.
 	cmd := exec.CommandContext(ctx, "curl", "-q", "--config", "-")
@@ -2697,7 +2718,24 @@ func (c *CoordinatorClient) doCurl(ctx context.Context, method, path string, dat
 	if err != nil {
 		return err
 	}
-	return decodeCoordinatorResponse(method, path, status, bytes.NewReader(body), out)
+	err = decodeCoordinatorResponse(method, path, status, bytes.NewReader(body), out)
+	var response CoordinatorHTTPError
+	if errors.As(err, &response) {
+		scanner := bufio.NewScanner(io.LimitReader(headers, 64*1024))
+		var retryAfter string
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "HTTP/") {
+				retryAfter = "" // Ignore proxy and informational response headers.
+			}
+			if name, value, ok := strings.Cut(line, ":"); ok && strings.EqualFold(name, "Retry-After") {
+				retryAfter = strings.TrimSpace(value)
+			}
+		}
+		response.retryAfter = coordinatorReadRetryAfter(retryAfter, time.Now())
+		return response
+	}
+	return err
 }
 
 func (c *CoordinatorClient) curlConfig(ctx context.Context, method, path string, data []byte, hasBody bool) (string, func(), error) {
