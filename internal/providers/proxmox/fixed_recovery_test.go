@@ -178,3 +178,63 @@ func TestProxmoxFixedUnreadyReplayDoesNotSkipBootstrap(t *testing.T) {
 		t.Fatalf("incomplete bootstrap adopted: %v", err)
 	}
 }
+
+func TestProxmoxFixedAcquireChecksLocalVMIDOwnershipBeforeClone(t *testing.T) {
+	for _, owner := range []string{"fixed", "ordinary", "released"} {
+		t.Run(owner, func(t *testing.T) {
+			backend, client, req := fixedProxmoxFixture(t)
+			lease, err := backend.Acquire(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := readFixedProxmoxClaim(t, lease.LeaseID)
+			switch owner {
+			case "ordinary":
+				replacement := previous
+				replacement.Provider, replacement.FixedCreateIntent = "proxmox", nil
+				if _, err := core.ReplaceLeaseClaimIfUnchangedDurableReturning(lease.LeaseID, previous, replacement); err != nil {
+					t.Fatal(err)
+				}
+			case "released":
+				if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			previous = readFixedProxmoxClaim(t, lease.LeaseID)
+			// The cluster allocator may recycle the VMID after external deletion.
+			client.servers = nil
+			clones, deletes, labelWrites := client.fixedCreates, client.deleteCalls, len(client.setLabels)
+			req.RequestedLeaseID, req.RequestedSlug = "cbx_aaaaaaaaaaaa", "replacement"
+			replacement, err := backend.Acquire(context.Background(), req)
+			if owner == "released" {
+				if err != nil || replacement.Server.CloudID != lease.Server.CloudID || client.fixedCreates != clones+1 {
+					t.Fatalf("terminal tombstone blocked VMID reuse: err=%v VMID=%s clones=%d", err, replacement.Server.CloudID, client.fixedCreates)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), "lease_id_conflict: multiple local Proxmox claims") {
+					t.Fatalf("active local owner was not rejected before clone: %v", err)
+				}
+				if client.fixedCreates != clones || client.deleteCalls != deletes || len(client.setLabels) != labelWrites {
+					t.Fatal("conflicting allocation mutated provider resources")
+				}
+				claim := readFixedProxmoxClaim(t, req.RequestedLeaseID)
+				if claim.CloudID != "" || len(claim.FixedCreateIntent.Attempt) != 0 {
+					t.Fatal("conflicting VMID was published as a clone attempt")
+				}
+			}
+			if !reflect.DeepEqual(previous, readFixedProxmoxClaim(t, lease.LeaseID)) {
+				t.Fatal("allocation changed the previous owner's claim")
+			}
+			if owner != "released" {
+				// Reconcile the stale local owner after the simulated cluster absence.
+				if err := core.RemoveLeaseClaimIfUnchanged(lease.LeaseID, previous); err != nil {
+					t.Fatal(err)
+				}
+				retried, err := backend.Acquire(context.Background(), req)
+				if err != nil || retried.LeaseID != req.RequestedLeaseID || retried.Server.CloudID != lease.Server.CloudID || client.fixedCreates != clones+1 {
+					t.Fatalf("unsubmitted operation could not retry: err=%v lease=%s VMID=%s clones=%d", err, retried.LeaseID, retried.Server.CloudID, client.fixedCreates)
+				}
+			}
+		})
+	}
+}

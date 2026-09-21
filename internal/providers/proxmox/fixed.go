@@ -84,13 +84,11 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		return core.LeaseTarget{}, err
 	}
 	var publicKey, fingerprint string
-	freshClaim := false
 	acquired, err := core.AcquireFixedLease(core.FixedAcquireOptions{
 		Kind: fixedProxmoxLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID,
 		RepoRoot: req.Repo.Root, Reclaim: req.Reclaim, TargetOS: cfg.TargetOS,
 		WindowsMode: cfg.WindowsMode, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout,
 	}, func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
-		freshClaim = !exists
 		if exists {
 			if !fixedProxmoxLeaseKind.IsFixedClaim(*claim) || claim.ProviderScope != providerScope {
 				return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: fixed Proxmox claim scope changed")
@@ -151,9 +149,8 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 				}
 				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed Proxmox lease %s has an unresolved clone attempt; retain its claim for recovery", leaseID)
 			}
-			if !freshClaim {
-				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: fixed Proxmox lease %s has no provably unsubmitted attempt; retain its claim", leaseID)
-			}
+			// This version never clears a submitted attempt. A validated prepared
+			// claim without one can safely retry allocation after a pre-submit failure.
 			attemptVMID, err = client.NextVMID(ctx)
 			if err != nil {
 				return core.LeaseTarget{}, err
@@ -169,6 +166,9 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			claim.CloudID = strconv.Itoa(attemptVMID)
 			claim.CloudNumericID = int64(attemptVMID)
 			claim.Labels = maps.Clone(labels)
+			if err := validateFixedProxmoxLocalBinding(*claim); err != nil {
+				return core.LeaseTarget{}, err
+			}
 			if err := persist(); err != nil {
 				return core.LeaseTarget{}, err
 			}
@@ -235,7 +235,7 @@ func fixedProxmoxAttempt(claim core.LeaseClaim) (int, string, error) {
 		return 0, "", core.Exit(4, "lease_id_conflict: invalid fixed Proxmox create intent for lease %s", claim.LeaseID)
 	}
 	if len(intent.Attempt) == 0 {
-		if claim.CloudID != "" || claim.CloudImmutableID != "" || len(claim.Labels) != 0 {
+		if intent.State != "prepared" || claim.CloudID != "" || claim.CloudNumericID != 0 || claim.CloudImmutableID != "" || len(claim.Labels) != 0 {
 			return 0, "", core.Exit(4, "lease_id_conflict: fixed Proxmox lease %s has no durable clone attempt", claim.LeaseID)
 		}
 		return 0, "", nil
