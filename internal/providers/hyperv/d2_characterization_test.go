@@ -71,8 +71,8 @@ func TestD2ObservationPrecedence(t *testing.T) {
 			if view.CloudID != "crabbox-d2" || view.Name != view.CloudID || view.Provider != providerName || view.Labels["custom"] != "value" {
 				t.Fatalf("view=%#v", view)
 			}
-			if (view.Labels["last_touched_at"] != "") != false {
-				t.Fatalf("unexpected lifecycle synthesis: %v", view.Labels)
+			if view.Labels["last_touched_at"] != "1788220800" || view.Labels["idle_timeout"] != "60" || view.Labels["idle_timeout_secs"] != "60" {
+				t.Fatalf("claim lifecycle policy was not projected: %v", view.Labels)
 			}
 			if view.Labels["provider"] != "stored-provider" {
 				t.Fatalf("provider label=%q", view.Labels["provider"])
@@ -80,6 +80,9 @@ func TestD2ObservationPrecedence(t *testing.T) {
 			view.Labels["custom"] = "changed"
 			if claim.Labels["custom"] != "value" || claim.Labels["state"] != stored {
 				t.Fatal("projection mutated input")
+			}
+			if claim.Labels["last_touched_at"] != "" || claim.Labels["idle_timeout"] != "" || claim.Labels["idle_timeout_secs"] != "" {
+				t.Fatal("projection wrote lifecycle labels into the claim")
 			}
 		}
 	}
