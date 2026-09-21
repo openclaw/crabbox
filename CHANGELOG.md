@@ -22,7 +22,7 @@
 - Multipass: preserve ready status endpoints, persist heartbeat timeout changes across fresh reads, and retain recovery keys when failed provisioning cannot be rolled back. [PR 2414](https://github.com/openclaw/crabbox/pull/2414).
 
 - Keep Phala status and controller observations from preparing SSH access or rewriting claims, while preserving existing gateway routes and strict host-key verification. [PR 2410](https://github.com/openclaw/crabbox/pull/2410).
-- Tencent Cloud: preserve the live stored idle timeout during ordinary touches and apply explicit heartbeat overrides without changing the original TTL cap.
+- Tencent Cloud: preserve the live stored idle timeout during ordinary touches and apply explicit heartbeat overrides without changing the original TTL cap. [PR 2416](https://github.com/openclaw/crabbox/pull/2416).
 
 - Restore Lume guest bootstrap with named shared directories, authenticated status readiness, and cleanup with quiet partial-match `lsof` output; existing golden images need refreshed hooks. [PR 2409](https://github.com/openclaw/crabbox/pull/2409).
 - Lume: persist heartbeat policy across fresh reads, honor explicit idle-timeout changes, and admit owned instance-scoped leases through the public heartbeat command. [PR 2407](https://github.com/openclaw/crabbox/pull/2407).
