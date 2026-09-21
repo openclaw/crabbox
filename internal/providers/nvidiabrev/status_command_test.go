@@ -23,9 +23,10 @@ func TestNvidiaBrevOrdinaryStatusProbesWithoutPreparing(t *testing.T) {
 		t.Skip("OpenSSH client required")
 	}
 	for _, tc := range []struct {
-		name, state           string
-		missing, scoped, fail bool
-		wantHost, wantReady   bool
+		name, state                               string
+		missing, scoped, fail                     bool
+		noDigest, stale, missingAlias, failedMint bool
+		wantHost, wantReady                       bool
 	}{
 		{name: "healthy", state: "RUNNING", wantHost: true, wantReady: true},
 		{name: "failed probe", state: "RUNNING", fail: true, wantHost: true},
@@ -33,6 +34,10 @@ func TestNvidiaBrevOrdinaryStatusProbesWithoutPreparing(t *testing.T) {
 		{name: "deleting", state: "DELETING"},
 		{name: "unprepared", state: "RUNNING", missing: true},
 		{name: "inventory organization", state: "RUNNING", scoped: true},
+		{name: "no provenance", state: "RUNNING", noDigest: true},
+		{name: "changed config", state: "RUNNING", stale: true},
+		{name: "missing alias", state: "RUNNING", missingAlias: true},
+		{name: "failed mint", state: "RUNNING", failedMint: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, entry := range os.Environ() {
@@ -50,14 +55,7 @@ func TestNvidiaBrevOrdinaryStatusProbesWithoutPreparing(t *testing.T) {
 			leaseID := "cbx_123456789abc"
 			workspace := brevWorkspace{ID: "ws-status", Name: "crabbox-status-123456789abc", Status: tc.state, BuildStatus: "READY", ShellStatus: "READY", HealthStatus: "HEALTHY"}
 			server := workspaceToServer(core.Config{}, workspace, leaseID, "status", true)
-			if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "status", core.Config{Provider: providerName}, server, core.SSHTarget{}, dir, false); err != nil {
-				t.Fatal(err)
-			}
-			claimPath := filepath.Join(state, "crabbox", "claims", leaseID+".json")
-			before, err := os.ReadFile(claimPath)
-			if err != nil {
-				t.Fatal(err)
-			}
+
 			inventory, err := json.Marshal(map[string]any{"workspaces": []brevWorkspace{workspace}})
 			if err != nil {
 				t.Fatal(err)
@@ -68,6 +66,26 @@ func TestNvidiaBrevOrdinaryStatusProbesWithoutPreparing(t *testing.T) {
 			}
 			if !tc.missing {
 				writeBrevSSHConfig(t, home, "Host "+workspace.Name+"\n User brev\n Port 2222\n IdentityFile /test/brev-key\n IdentitiesOnly yes\n ProxyCommand unused-fixture-proxy\n UserKnownHostsFile /dev/null\n")
+			}
+			if tc.missingAlias {
+				writeBrevSSHConfig(t, home, "Host other\n HostName other.example.test\n User brev\n IdentitiesOnly yes\n")
+			}
+			if tc.failedMint {
+				writeBrevSSHConfig(t, home, "Match host "+workspace.Name+" exec \"false\"\n HostName workspace.example.test\n User brev\n IdentitiesOnly yes\n")
+			}
+			if data, err := os.ReadFile(defaultBrevSSHConfigPath()); err == nil && !tc.noDigest {
+				server.Labels[brevSSHConfigDigestLabel] = brevSSHConfigDigest(data)
+			}
+			if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "status", core.Config{Provider: providerName}, server, core.SSHTarget{}, dir, false); err != nil {
+				t.Fatal(err)
+			}
+			claimPath := filepath.Join(state, "crabbox", "claims", leaseID+".json")
+			before, err := os.ReadFile(claimPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.stale {
+				writeBrevSSHConfig(t, home, "Host "+workspace.Name+"\n HostName old-organization.example.test\n User previous\n IdentitiesOnly yes\n")
 			}
 			calls := filepath.Join(dir, "ssh-calls")
 			code := 0
@@ -108,6 +126,53 @@ func TestNvidiaBrevOrdinaryStatusProbesWithoutPreparing(t *testing.T) {
 			after, err := os.ReadFile(claimPath)
 			if err != nil || !bytes.Equal(before, after) {
 				t.Fatalf("ordinary status mutated claim: %v", err)
+			}
+			if tc.missingAlias {
+				if err := app.Run(t.Context(), []string{"heartbeat", "--provider", providerName, "--id", leaseID, "--json"}); err != nil {
+					t.Fatalf("missing alias broke heartbeat: %v", err)
+				}
+			}
+
+		})
+	}
+}
+
+func TestNvidiaBrevPreparedRouteReplacesProvenanceWithClaimFence(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprint(changed), func(t *testing.T) {
+			state, home := isolateNvidiaBrevState(t)
+			leaseID := "cbx_123456789abc"
+			workspace := brevWorkspace{ID: "ws", Name: "gpu", Status: "RUNNING", BuildStatus: "READY", ShellStatus: "READY", HealthStatus: "HEALTHY"}
+			server := workspaceToServer(core.Config{}, workspace, leaseID, "gpu", true)
+			server.Labels[brevSSHConfigDigestLabel] = "old-preparation"
+			if err := claimTestNvidiaBrevLeaseTargetForRepoConfig(leaseID, "gpu", core.Config{Provider: providerName}, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
+				t.Fatal(err)
+			}
+			config := "Host gpu\n HostName workspace.example.test\n User brev\n IdentityFile /test/key\n IdentitiesOnly yes\n"
+			writeBrevSSHConfig(t, home, config)
+			runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
+				{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws","name":"gpu","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`},
+				{args: "refresh"},
+			}}
+			backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+			lease, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: leaseID, StatusOnly: true, ReadyProbe: true, NoLocalStateMutations: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if changed {
+				updateNvidiaBrevClaim(t, state, leaseID, func(claim map[string]any) { claim["labels"].(map[string]any)["keep"] = "false" })
+			}
+			_, err = backend.Touch(t.Context(), core.TouchRequest{Lease: lease, State: "ready"})
+			claim, _, claimErr := resolveLeaseClaimForProvider(leaseID)
+			if claimErr != nil {
+				t.Fatal(claimErr)
+			}
+			if changed {
+				if err == nil || claim.Labels[brevSSHConfigDigestLabel] != "old-preparation" {
+					t.Fatalf("stale preparation published: err=%v labels=%v", err, claim.Labels)
+				}
+			} else if err != nil || claim.Labels[brevSSHConfigDigestLabel] != brevSSHConfigDigest([]byte("IdentitiesOnly yes\nUserKnownHostsFile /dev/null\n"+config)) {
+				t.Fatalf("new preparation lost: err=%v labels=%v", err, claim.Labels)
 			}
 		})
 	}

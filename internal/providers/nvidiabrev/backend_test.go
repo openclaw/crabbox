@@ -455,7 +455,7 @@ func TestNvidiaBrevResolveSSHTargetRejectsOrganizationChangeDuringRefresh(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = backend.resolveSSHTarget(context.Background(), client, backend.configForRun(), brevWorkspace{Name: "crabbox-org-race"}, "org-test", true)
+	_, err = backend.resolveSSHTarget(context.Background(), client, backend.configForRun(), brevWorkspace{Name: "crabbox-org-race"}, "org-test", true, "")
 	if err == nil || !strings.Contains(err.Error(), "active Brev organization changed") {
 		t.Fatalf("err=%v, want organization change rejection", err)
 	}
@@ -1954,7 +1954,7 @@ func TestNvidiaBrevTouchRefreshesClaimBeforeCleanup(t *testing.T) {
 	var stderr strings.Builder
 	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: &stderr}).(*nvidiaBrevBackend)
 	override := 3 * time.Hour
-	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server, SSH: core.SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}}, State: "ready", IdleTimeout: override, IdleTimeoutOverride: &override}); err != nil {
+	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: nvidiaBrevTouchSnapshot(t, leaseID, server), SSH: core.SSHTarget{Host: "203.0.113.8", Port: "22", User: "brev"}}, State: "ready", IdleTimeout: override, IdleTimeoutOverride: &override}); err != nil {
 		t.Fatal(err)
 	}
 	claim, ok, err := resolveLeaseClaimForProvider(leaseID)
@@ -1964,7 +1964,7 @@ func TestNvidiaBrevTouchRefreshesClaimBeforeCleanup(t *testing.T) {
 	if claim.IdleTimeoutSeconds != int((3 * time.Hour).Seconds()) {
 		t.Fatalf("idle timeout seconds=%d", claim.IdleTimeoutSeconds)
 	}
-	touched, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}, State: "ready", IdleTimeout: time.Minute})
+	touched, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: nvidiaBrevTouchSnapshot(t, leaseID, server)}, State: "ready", IdleTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1997,7 +1997,7 @@ func TestNvidiaBrevTouchRefusesStoppedClaim(t *testing.T) {
 		labels["state"] = "stopped"
 	})
 	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: &scriptedBrevRunner{}, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server, SSH: target}, State: "ready"})
+	_, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: nvidiaBrevTouchSnapshot(t, leaseID, server), SSH: target}, State: "ready"})
 	if err == nil || !strings.Contains(err.Error(), "is stopped") {
 		t.Fatalf("err=%v, want stopped claim rejection", err)
 	}
@@ -2023,7 +2023,7 @@ func TestNvidiaBrevTouchRefusesDeletingClaim(t *testing.T) {
 		labels["state"] = "deleting"
 	})
 	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: &scriptedBrevRunner{}, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
-	_, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}, State: "ready"})
+	_, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: nvidiaBrevTouchSnapshot(t, leaseID, server)}, State: "ready"})
 	if err == nil || !strings.Contains(err.Error(), "is deleting") {
 		t.Fatalf("err=%v, want deleting claim rejection", err)
 	}
@@ -2234,4 +2234,15 @@ func assertNoNvidiaBrevSecretArgs(t *testing.T, calls []core.LocalCommandRequest
 			}
 		}
 	}
+}
+
+func nvidiaBrevTouchSnapshot(t *testing.T, leaseID string, server core.Server) core.Server {
+	t.Helper()
+	claim, ok, err := resolveLeaseClaimForProvider(leaseID)
+	if err != nil || !ok {
+		t.Fatalf("touch claim: exists=%v err=%v", ok, err)
+	}
+	server.Labels["brev_org_id"] = claim.Labels["brev_org_id"]
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	return server
 }

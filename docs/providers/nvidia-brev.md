@@ -176,10 +176,12 @@ grace period.
 
 Ordinary `status` reads inventory and probes an existing generated SSH route without
 refreshing Brev configuration, starting the workspace, or changing the lease claim.
-If no local SSH config exists, it reports no endpoint and remains unready. Use
-`status --wait` to prepare the route and wait for readiness. An explicitly selected
-read-only organization remains inventory-only because local SSH routes belong to
-the active Brev organization.
+The route must match the configuration recorded when Crabbox prepared this workspace
+in its organization. Missing provenance, a changed config, a missing alias, or failed
+required certificate renewal reports no endpoint and remains unready. Use
+`status --wait --id <lease>` to refresh the route and record its preparation. This
+also applies to older claims and after Brev rewrites the file for another workspace.
+An explicitly selected read-only organization remains inventory-only.
 
 ### SSH target selection
 
