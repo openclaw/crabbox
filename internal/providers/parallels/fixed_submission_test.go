@@ -64,6 +64,7 @@ func TestParallelsFixedSnapshotPreflightFailureCanRetry(t *testing.T) {
 	backend, runner, req := fixedParallelsFixture(t)
 	backend.Cfg.Parallels.CloneMode = "linked"
 	backend.Cfg.Parallels.SourceSnapshotID = "snapshot-ready"
+	runner.snapshotsJSON = `{"snapshot-ready":{"name":"ready","state":"poweroff"}}`
 	runner.snapshotErr = errors.New("snapshot inventory unavailable")
 	if _, err := backend.Acquire(context.Background(), req); err == nil {
 		t.Fatal("failed snapshot preflight returned a usable lease")

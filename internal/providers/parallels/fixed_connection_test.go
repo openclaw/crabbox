@@ -188,7 +188,7 @@ func (r *parallelsFixedFleetRunner) Run(_ context.Context, req core.LocalCommand
 			}
 			return core.LocalCommandResult{Stdout: encodeParallelsVMs(machine.vms)}, nil
 		case "snapshot-list":
-			return core.LocalCommandResult{Stdout: "[]"}, nil
+			return core.LocalCommandResult{Stdout: "{}"}, nil
 		case "clone":
 			name, dst := "", ""
 			for i := 0; i+1 < len(args); i++ {

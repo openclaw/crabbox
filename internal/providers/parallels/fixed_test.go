@@ -38,9 +38,10 @@ type parallelsFixedRunner struct {
 	listErr     error
 	// listAllErr fails only the complete `prlctl list -a` inventory read, so a
 	// test can break reconciliation while `list -i` lookups still answer.
-	listAllErr  error
-	snapshotErr error
-	deleteErr   error
+	listAllErr    error
+	snapshotErr   error
+	snapshotsJSON string
+	deleteErr     error
 	// beforeClone observes durable state at the moment prlctl clone is invoked.
 	beforeClone func()
 	// afterClone runs once the clone has committed, so a test can break the
@@ -253,7 +254,7 @@ func (r *parallelsFixedRunner) Run(_ context.Context, req core.LocalCommandReque
 		if r.snapshotErr != nil {
 			return core.LocalCommandResult{}, r.snapshotErr
 		}
-		return core.LocalCommandResult{Stdout: "[]"}, nil
+		return core.LocalCommandResult{Stdout: blankString(r.snapshotsJSON, "{}")}, nil
 	case "clone":
 		if r.beforeClone != nil {
 			r.beforeClone()

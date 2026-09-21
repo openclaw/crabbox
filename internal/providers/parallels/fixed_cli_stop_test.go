@@ -138,7 +138,7 @@ func runFakeParallelsBinary(statePath string, args []string) int {
 			fmt.Println(encodeFakeParallelsVMs(state.VMs, slices.Contains(rest, "-i")))
 			return 0
 		case "snapshot-list":
-			fmt.Println("[]")
+			fmt.Println("{}")
 			return 0
 		case "clone":
 			name, dst := "", ""
