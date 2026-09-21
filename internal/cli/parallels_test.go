@@ -94,7 +94,7 @@ func TestParallelsWaitForIPPrefersToolsDiscovery(t *testing.T) {
 		"Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}}
 	}]`}
 	cfg := Config{TargetOS: targetMacOS, SSHPort: "22", Parallels: ParallelsConfig{BootstrapKey: "/Users/runner/.ssh/bootstrap"}}
-	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second)
+	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second, ParallelsIPWaitExisting)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestParallelsWaitForIPUsesDHCPFallbackAndVerifiesSSH(t *testing.T) {
 		"Network":{"ipAddresses":[]}
 	}]`, leases: "[vnic0]\n10.211.55.9=\"" + strconv.FormatInt(expiry, 10) + ",1800,001c4233eedd,01001c4233eedd\"\n"}
 	cfg := Config{TargetOS: targetMacOS, SSHPort: "22", Parallels: ParallelsConfig{BootstrapKey: "/Users/runner/.ssh/bootstrap"}}
-	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second)
+	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second, ParallelsIPWaitExisting)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestParallelsDHCPFallbackRunsOnRemoteHost(t *testing.T) {
 	expiry := time.Now().Add(time.Hour).Unix()
 	runner := &parallelsDHCPRunner{vmJSON: `[{"ID":"vm1","Name":"macOS","State":"running","Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}}}]`, leases: "[vnic0]\n10.211.55.9=\"" + strconv.FormatInt(expiry, 10) + ",1800,001c4233eedd,01001c4233eedd\"\n"}
 	cfg := Config{TargetOS: targetMacOS, SSHPort: "22", Parallels: ParallelsConfig{Host: "mac.example", HostUser: "build", BootstrapKey: "/Users/build/.ssh/bootstrap"}}
-	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second)
+	vm, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Second, ParallelsIPWaitExisting)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,9 +153,81 @@ func TestParallelsDHCPFallbackRunsOnRemoteHost(t *testing.T) {
 
 func TestParallelsWaitForIPDoesNotFallbackWithoutBootstrapIdentity(t *testing.T) {
 	runner := &parallelsDHCPRunner{vmJSON: `[{"ID":"vm1","Name":"macOS","State":"running","Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}}}]`}
-	_, err := NewParallelsClient(Config{TargetOS: targetMacOS}, runner).WaitForIP(context.Background(), "vm1", time.Nanosecond)
+	_, err := NewParallelsClient(Config{TargetOS: targetMacOS}, runner).WaitForIP(context.Background(), "vm1", time.Nanosecond, ParallelsIPWaitExisting)
 	if err == nil || len(runner.requests) != 1 {
 		t.Fatalf("err=%v requests=%#v", err, runner.requests)
+	}
+}
+
+func TestParallelsWaitForIPTimeoutExplainsDiscovery(t *testing.T) {
+	running := `[{"ID":"vm1","Name":"macOS","State":"running","Hardware":{"net0":{"enabled":true,"mac":"001C425AA8E6"}}}]`
+	stopped := `[{"ID":"vm1","Name":"macOS","State":"stopped","Hardware":{"net0":{"enabled":true,"mac":"001C425AA8E6"}}}]`
+	otherLease := "[vnic0]\n10.211.55.79=\"" + strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10) + ",1800,001c426ad157,01001c426ad157\"\n"
+	bootstrap := "/Users/build/.ssh/bootstrap"
+	for _, test := range []struct {
+		name      string
+		vmJSON    string
+		leases    string
+		target    string
+		cloneMode string
+		bootstrap string
+		existing  bool
+		want      []string
+		reject    []string
+	}{
+		{
+			name: "linked macOS without fallback", vmJSON: running, target: targetMacOS,
+			want:   []string{"clone_mode=linked", "macs=001c425aa8e6", "tools_ip=none", "set parallels.bootstrapKey", "retry with parallels.cloneMode=full", "cannot select a source snapshot"},
+			reject: []string{"no matching DHCP lease was found"},
+		},
+		{
+			name: "linked macOS fallback with no lease for the clone", vmJSON: running, leases: otherLease, target: targetMacOS, bootstrap: bootstrap,
+			want:   []string{"DHCP fallback: no Parallels DHCP lease", "no matching DHCP lease was found", "prlctl capture <new-vm-id> --file <png>", "acquisition cleans up failed clones", "on the Parallels host while IP discovery is still waiting", "retry with parallels.cloneMode=full"},
+			reject: []string{"set parallels.bootstrapKey", "prlctl capture vm1"},
+		},
+		{
+			name: "full clone omits clone mode advice", vmJSON: running, target: targetMacOS, cloneMode: "full", bootstrap: bootstrap, leases: otherLease,
+			want:   []string{"clone_mode=full", "no matching DHCP lease was found"},
+			reject: []string{"retry with parallels.cloneMode=full"},
+		},
+		{
+			name: "stopped VM gets no boot advice", vmJSON: stopped, target: targetMacOS, bootstrap: bootstrap, leases: otherLease,
+			want:   []string{"last_state=stopped", "clone_mode=linked"},
+			reject: []string{"no matching DHCP lease was found", "retry with parallels.cloneMode=full"},
+		},
+		{
+			name: "linux guest gets no macOS fallback advice", vmJSON: running, target: targetLinux,
+			want:   []string{"clone_mode=linked", "retry with parallels.cloneMode=full"},
+			reject: []string{"bootstrapKey"},
+		},
+		{
+			name: "existing VM does not inherit configured clone mode", vmJSON: running, target: targetMacOS, cloneMode: "linked", bootstrap: bootstrap, leases: otherLease, existing: true,
+			want:   []string{"clone_mode=unknown", "no matching DHCP lease was found", "inspect the existing VM", "prlctl capture <existing-vm-id> --file <png>"},
+			reject: []string{"clone_mode=linked", "retry with parallels.cloneMode=full", "cleans up failed clones", "capture <new-vm-id>"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &parallelsDHCPRunner{vmJSON: test.vmJSON, leases: test.leases}
+			cfg := Config{TargetOS: test.target, SSHPort: "22", Parallels: ParallelsConfig{CloneMode: test.cloneMode, BootstrapKey: test.bootstrap}}
+			purpose := ParallelsIPWaitAcquisition
+			if test.existing {
+				purpose = ParallelsIPWaitExisting
+			}
+			_, err := NewParallelsClient(cfg, runner).WaitForIP(context.Background(), "vm1", time.Nanosecond, purpose)
+			if err == nil {
+				t.Fatal("expected timeout")
+			}
+			for _, want := range test.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error missing %q: %v", want, err)
+				}
+			}
+			for _, reject := range test.reject {
+				if strings.Contains(err.Error(), reject) {
+					t.Errorf("error unexpectedly contains %q: %v", reject, err)
+				}
+			}
+		})
 	}
 }
 
