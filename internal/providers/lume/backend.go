@@ -48,6 +48,13 @@ type bootstrapTrust struct {
 	Challenge string
 }
 
+func (t bootstrapTrust) sharedDir() string {
+	if t.Dir == "" {
+		return ""
+	}
+	return filepath.Join(t.Dir, "crabbox-bootstrap")
+}
+
 type lumeVM struct {
 	Name           string `json:"name"`
 	OS             string `json:"os"`
@@ -120,7 +127,7 @@ func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID st
 		return core.Exit(5, "Lume lease %s has no VM identity for SSH host-key binding", leaseID)
 	}
 	target.SSH.HostKeyAlias = lumeHostKeyAlias(name)
-	return requireAuthenticatedLumeHostKey(target.SSH, target.Server.Labels["state"], name)
+	return requireAuthenticatedLumeHostKey(target.SSH, target.Server.Labels, name)
 }
 
 func (b *backend) configForRun() core.Config {
@@ -438,7 +445,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		}
 		return lease, nil
 	}
-	if req.StatusOnly {
+	if req.StatusOnly && (!instanceRunning(inst.Status) || inst.IPAddress == "" || !completedAcquisition(claim.Labels)) {
 		return lease, nil
 	}
 	if !instanceRunning(inst.Status) {
@@ -449,7 +456,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return core.LeaseTarget{}, err
 	}
 	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
-	if req.Repo.Root != "" && !req.NoLocalStateMutations {
+	if !req.StatusOnly && req.Repo.Root != "" && !req.NoLocalStateMutations {
 		updated, err := core.ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(claim.LeaseID, claim.Slug, cfg, instanceScope(inst.Name), lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, claim, true)
 		if err != nil {
 			return core.LeaseTarget{}, err
@@ -736,6 +743,9 @@ func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.Leas
 	if name == "" || claim.Provider != providerName || claim.ProviderScope != instanceScope(name) || claim.CloudID != name || lease.LeaseID == "" || lease.LeaseID != claim.LeaseID || lease.Server.Provider != providerName || lease.Server.CloudID != name || lease.Server.Name != name || lease.Server.ImmutableID != claim.CloudImmutableID || lease.Server.Labels["instance"] != name || lease.Server.Labels["storage"] != claim.Labels["storage"] {
 		return core.Exit(4, "lume lease %s touch identity does not match its claim", lease.LeaseID)
 	}
+	if !completedAcquisition(claim.Labels) {
+		return core.Exit(4, "lume lease %s acquisition is incomplete or requires recovery; refusing touch", lease.LeaseID)
+	}
 	storageID := strings.TrimSpace(claim.Labels["storage_id"])
 	if storageID == "" {
 		return core.Exit(4, "lume lease %s has no recorded storage identity; refusing touch", lease.LeaseID)
@@ -748,6 +758,13 @@ func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.Leas
 }
 
 func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
+	if err := ctx.Err(); err != nil {
+		return core.Server{}, err
+	}
+	req.State = normalizedState(req.State)
+	if req.State != "" && !acquiredState(req.State) {
+		return core.Server{}, core.Exit(2, "lume touch cannot publish acquisition state %q", req.State)
+	}
 	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
 		Provider:  providerName,
 		Authorize: b.AuthorizeStatusTouchClaim,
@@ -783,7 +800,7 @@ func (b *backend) cloneVM(ctx context.Context, cfg core.Config, name string) err
 func (b *backend) startVM(ctx context.Context, cfg core.Config, name string, trust bootstrapTrust, launchToken string, onStarted ...func(lumeRunOwner) error) (lumeRunOwner, error) {
 	args := []string{"run", name, "--no-display"}
 	if trust.Dir != "" {
-		args = append(args, "--shared-dir", trust.Dir+":rw")
+		args = append(args, "--shared-dir", trust.sharedDir()+":rw")
 	}
 	if storage := strings.TrimSpace(cfg.Lume.Storage); storage != "" {
 		args = append(args, "--storage", storage)
@@ -1012,9 +1029,15 @@ func prepareBootstrapTrust(name, user, publicKey string) (bootstrapTrust, error)
 		_ = os.RemoveAll(dir)
 		return bootstrapTrust{}, core.Exit(2, "secure fresh Lume bootstrap trust directory %s: %v", dir, err)
 	}
+	// Lume exposes each share under its basename, even when only one is mounted.
+	trust := bootstrapTrust{Dir: dir}
+	if err := os.Mkdir(trust.sharedDir(), 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return bootstrapTrust{}, core.Exit(2, "create named Lume bootstrap share: %v", err)
+	}
 	challengeBytes := make([]byte, 32)
 	if _, err := rand.Read(challengeBytes); err != nil {
-		_ = os.Remove(dir)
+		_ = os.RemoveAll(dir)
 		return bootstrapTrust{}, core.Exit(2, "generate Lume bootstrap trust challenge: %v", err)
 	}
 	challenge := base64.RawURLEncoding.EncodeToString(challengeBytes)
@@ -1024,12 +1047,13 @@ func prepareBootstrapTrust(name, user, publicKey string) (bootstrapTrust, error)
 		"authorized_key": strings.TrimSpace(publicKey) + "\n",
 	}
 	for name, value := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(trust.sharedDir(), name), []byte(value), 0o600); err != nil {
 			_ = os.RemoveAll(dir)
 			return bootstrapTrust{}, core.Exit(2, "write Lume bootstrap trust input %s: %v", name, err)
 		}
 	}
-	return bootstrapTrust{Dir: dir, Challenge: challenge}, nil
+	trust.Challenge = challenge
+	return trust, nil
 }
 
 func removeBootstrapTrust(trust bootstrapTrust) {
@@ -1042,7 +1066,7 @@ func pinBootstrapHostKey(host, hostKeyAlias string, trust bootstrapTrust, knownH
 	if net.ParseIP(host) == nil {
 		return "", fmt.Errorf("Lume returned invalid guest IP address %q", host)
 	}
-	identityPath := filepath.Join(trust.Dir, "identity")
+	identityPath := filepath.Join(trust.sharedDir(), "identity")
 	info, err := os.Lstat(identityPath)
 	if err != nil {
 		return "", err
@@ -1669,10 +1693,12 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst lumeVM
 	target.ReadyCheck = "uname -s | grep -qx Darwin && test -d \"$HOME\""
 	target.SSHConfigProxy = true
 	if claim.LeaseID != "" {
-		if err := core.UseLeaseKnownHosts(&target, claim.LeaseID); err != nil {
+		knownHosts, err := core.ExistingLeaseKnownHostsPath(claim.LeaseID)
+		if err != nil {
 			return core.LeaseTarget{}, err
 		}
-		if err := requireAuthenticatedLumeHostKey(target, claim.Labels["state"], inst.Name); err != nil {
+		target.KnownHostsFile = knownHosts
+		if err := requireAuthenticatedLumeHostKey(target, claim.Labels, inst.Name); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -1691,8 +1717,8 @@ func lumeHostKeyAlias(name string) string {
 	return "crabbox-lume-" + hex.EncodeToString(sum[:16])
 }
 
-func requireAuthenticatedLumeHostKey(target core.SSHTarget, state, name string) error {
-	if normalizedState(state) != "ready" {
+func requireAuthenticatedLumeHostKey(target core.SSHTarget, labels map[string]string, name string) error {
+	if !completedAcquisition(labels) {
 		return core.Exit(5, "refusing Lume SSH for VM %q before authenticated bootstrap completed", name)
 	}
 	info, err := os.Lstat(target.KnownHostsFile)
@@ -1711,6 +1737,17 @@ func requireAuthenticatedLumeHostKey(target core.SSHTarget, state, name string) 
 		}
 	}
 	return core.Exit(5, "refusing Lume SSH for VM %q without its authenticated host-key pin", name)
+}
+
+func acquiredState(state string) bool {
+	state = normalizedState(state)
+	return state == "ready" || state == "running"
+}
+
+// Acquisition publishes ready only with its final authenticated endpoint CAS;
+// running is subsequent workload activity, not the VM's provisional native state.
+func completedAcquisition(labels map[string]string) bool {
+	return acquiredState(labels["state"]) && strings.TrimSpace(labels["recovery"]) == ""
 }
 
 func (b *backend) serverFromInstance(inst lumeVM, claim core.LeaseClaim, cfg core.Config) core.Server {

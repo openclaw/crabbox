@@ -326,6 +326,16 @@ func UseLeaseKnownHosts(target *SSHTarget, leaseID string) error {
 	return nil
 }
 
+// ExistingLeaseKnownHostsPath inspects the managed directory without creating or
+// repairing it. The caller still validates the host-key file and its contents.
+func ExistingLeaseKnownHostsPath(leaseID string) (string, error) {
+	dir, err := inspectTestboxLeaseDirectory(leaseID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "known_hosts"), nil
+}
+
 func RemoveStoredTestboxKey(leaseID string) {
 	_ = removeStoredTestboxConnectionArtifacts(context.Background(), leaseID)
 }

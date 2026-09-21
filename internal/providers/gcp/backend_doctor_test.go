@@ -37,6 +37,8 @@ type fakeGCPDoctorClient struct {
 	deleteObserve  func(context.Context, string) error
 	createCalls    int
 	createLeaseIDs []string
+	labeledNames   []string
+	labeledValues  []map[string]string
 }
 
 func (c *fakeGCPDoctorClient) ListCrabboxServers(context.Context) ([]core.Server, error) {
@@ -89,9 +91,55 @@ func (c *fakeGCPDoctorClient) DeleteServer(ctx context.Context, name string) err
 	return c.deleteErr
 }
 
-func (c *fakeGCPDoctorClient) SetLabels(context.Context, string, map[string]string) error {
+func (c *fakeGCPDoctorClient) SetLabels(_ context.Context, name string, labels map[string]string) error {
 	c.mutated = true
+	c.labeledNames = append(c.labeledNames, name)
+	c.labeledValues = append(c.labeledValues, maps.Clone(labels))
 	return nil
+}
+
+func TestGCPTouchPreservesZoneAndIdlePolicy(t *testing.T) {
+	override := 90 * time.Minute
+	for _, tc := range []struct {
+		name      string
+		storedKey string
+		override  *time.Duration
+		want      string
+	}{
+		{"preserve", "idle_timeout_secs", nil, "1800"},
+		{"replace", "idle_timeout_secs", &override, "5400"},
+		{"preserve legacy", "idle_timeout", nil, "1800"},
+		{"replace legacy", "idle_timeout", &override, "5400"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeGCPDoctorClient{}
+			var zones []string
+			old := newGCPClient
+			newGCPClient = func(_ context.Context, cfg core.Config) (gcpClient, error) {
+				zones = append(zones, cfg.GCPZone)
+				return fake, nil
+			}
+			t.Cleanup(func() { newGCPClient = old })
+			server := canonicalGCPTestServer("cbx_123456abcdef", "idle-policy")
+			server.Labels[tc.storedKey] = "1800"
+			before := maps.Clone(server.Labels)
+			cfg := core.Config{GCPZone: "us-central1-a", IdleTimeout: 5 * time.Minute}
+			backend := NewGCPLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*gcpLeaseBackend)
+			got, err := backend.Touch(context.Background(), core.TouchRequest{Lease: core.LeaseTarget{Server: server}, State: "ready", IdleTimeout: cfg.IdleTimeout, IdleTimeoutOverride: tc.override})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(zones, []string{"us-central1-a", "us-central1-b"}) || !reflect.DeepEqual(fake.labeledNames, []string{server.CloudID}) {
+				t.Fatalf("zones=%v names=%v", zones, fake.labeledNames)
+			}
+			if !maps.Equal(fake.labeledValues[0], got.Labels) || got.Labels["idle_timeout_secs"] != tc.want || got.Labels["idle_timeout"] != tc.want {
+				t.Fatalf("written=%v returned=%v want timeout=%s", fake.labeledValues, got.Labels, tc.want)
+			}
+			if !maps.Equal(server.Labels, before) || got.Labels["zone"] != before["zone"] {
+				t.Fatal("touch changed input labels or the provider zone")
+			}
+		})
+	}
 }
 
 func canonicalGCPTestServer(leaseID, slug string) core.Server {

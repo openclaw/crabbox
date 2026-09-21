@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -436,6 +437,35 @@ func TestUseLeaseKnownHostsFailsClosedWhenDirectoryCannotBePrepared(t *testing.T
 	}
 	if target.KnownHostsFile != "unchanged" {
 		t.Fatalf("KnownHostsFile changed after preparation failure: %q", target.KnownHostsFile)
+	}
+}
+
+func TestExistingLeaseKnownHostsPathDoesNotCreateMaterial(t *testing.T) {
+	dirs := isolateTestUserDirs(t)
+	prepareLeaseSSHTestStateRoot(t, dirs.StateHome)
+	const leaseID = "cbx_existing_hosts"
+	key, err := TestboxKeyPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ExistingLeaseKnownHostsPath(leaseID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(key)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("inspection created a lease directory: %v", err)
+	}
+	target := SSHTarget{}
+	if err := UseLeaseKnownHosts(&target, leaseID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ExistingLeaseKnownHostsPath(leaseID)
+	if err != nil || got != target.KnownHostsFile {
+		t.Fatalf("existing path=%q err=%v", got, err)
+	}
+	for _, path := range []string{key, got} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("inspection created connection material: %v", err)
+		}
 	}
 }
 

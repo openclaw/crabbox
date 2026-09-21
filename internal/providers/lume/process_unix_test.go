@@ -152,6 +152,7 @@ func TestSignalRejectsWrongOwner(t *testing.T) {
 
 func TestLumeHeartbeatCLIUsesNativeClaimScope(t *testing.T) {
 	b, lease, _, _ := touchFixture(t)
+	writeLumeKnownHost(t, lease.LeaseID, lease.Server.Name, hostKey)
 	data := b.rt.Exec.(*fake).responses["get"].Stdout
 	cliPath := join(t.TempDir(), "lume-fixture")
 	must(t, os.WriteFile(cliPath, []byte("#!/bin/sh\ncase \"$1\" in\nget) printf '%s\\n' '"+data+"';;\n*) exit 91;;\nesac\n"), 0o700))

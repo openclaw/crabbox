@@ -416,7 +416,8 @@ func (b *leaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRe
 
 func (b *leaseBackend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
 	server := req.Lease.Server
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.Cfg, req.State, time.Now().UTC())
+	// Preserve stored policy only when the caller omitted an override.
+	server.Labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(server.Labels, b.Cfg, req.State, time.Now().UTC(), req.IdleTimeoutOverride)
 	core.NewParallelsClient(b.configForLease(ctx, req.Lease), b.RT.Exec).SetLeaseLabels(shared.FirstNonBlankTrimmed(req.Lease.LeaseID, server.Labels["lease"]), server.Labels)
 	return server, nil
 }
