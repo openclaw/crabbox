@@ -2,7 +2,6 @@ package azure
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"maps"
 	"time"
@@ -49,22 +48,15 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
 		Kind: fixedAzureLeaseKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
 		TargetOS: cfg.TargetOS, WindowsMode: cfg.WindowsMode, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout,
-	}, core.FixedLeaseOperations[core.Server]{DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
+	}, core.FixedLeaseOperations[core.Server]{Admission: &core.FixedAdmission{}, DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		if exists && (!fixedAzureLeaseKind.IsFixedClaim(*claim) || claim.ProviderScope != scope) {
 			return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: Azure owner or account scope changed")
 		}
-		if exists && claim.FixedCreateIntent.Attempt != nil {
-			target := core.SSHTarget{}
-			if err := core.UseStoredTestboxKey(&target, req.RequestedLeaseID); err != nil {
-				return core.FixedLeaseBinding{}, err
-			}
-		}
 		var err error
-		cfg.SSHKey, publicKey, err = core.EnsureTestboxKeyForConfig(cfg, req.RequestedLeaseID)
+		publicKey, err = core.PrepareFixedSSHKey(&cfg, req.RequestedLeaseID, core.FixedKeyPolicy{RequireExisting: exists && claim.FixedCreateIntent.Attempt != nil})
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}
-		cfg.ProviderKey = core.ProviderKeyForLease(req.RequestedLeaseID)
 		bootstrap := core.CloudInitUserData(cfg, publicKey)
 		if cfg.TargetOS == core.TargetWindows {
 			bootstrap = core.WindowsBootstrapPowerShell(cfg, publicKey)
@@ -87,15 +79,10 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 		if err != nil {
 			return binding, err
 		}
-		for _, server := range servers {
-			if server.Labels["lease"] == req.RequestedLeaseID {
-				return binding, core.Exit(4, "lease_id_conflict: Azure VM exists without its create intent")
-			}
-		}
-		binding.Slug, err = core.AllocateDirectLeaseSlug(req.RequestedLeaseID, req.RequestedSlug, servers)
-		return binding, err
+		binding.AllocateSlug, binding.RejectExistingLease, binding.RequestedSlug, binding.Inventory = true, true, req.RequestedSlug, servers
+		return binding, nil
 	}, ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.Server], error) {
-		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
+		claim := tx.Claim
 		var result core.FixedObservation[core.Server]
 		if core.HasAzureCleanupBinding(claim.Labels) {
 			return result, core.Exit(4, "Azure fixed lease has entered cleanup; retry stop")
@@ -105,35 +92,14 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 			cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, claim.LeaseID, claim.Slug, cfg.Provider)
 		}
 		server, err := client.GetServer(ctx, name)
-		if intent.Attempt == nil {
-			if err == nil {
-				return result, core.Exit(4, "lease_id_conflict: Azure VM name already exists")
-			}
-			if !isAzureCleanupNotFound(err) {
-				return result, err
-			}
-			result.CanSubmit = true
-			return result, nil
-		}
-		if err != nil {
-			return result, fmt.Errorf("Azure fixed create unresolved; no replacement allocated: %w", err)
-		}
-		if err := validateFixedAzureServer(*claim, server); err != nil {
-			return result, err
-		}
-		return core.FixedObservation[core.Server]{Candidates: []core.Server{server}}, nil
-	}, PlanAttempt: func(ctx context.Context, tx *core.FixedTransaction) error {
-		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
-		createdAt, _ := time.Parse(time.RFC3339Nano, intent.CreatedAt)
-		intent.Attempt = map[string]string{"name": core.LeaseProviderName(claim.LeaseID, claim.Slug), "nonce": rand.Text()}
-		claim.Labels = core.DirectLeaseLabels(cfg, claim.LeaseID, claim.Slug, "azure", cfg.Capacity.Market, req.Keep, createdAt)
-		claim.Labels["fixed_intent_sha256"], claim.Labels["fixed_attempt"] = intent.Fingerprint, intent.Attempt["nonce"]
-		return nil
+		return core.FixedLookupObservation(fixedAzureLeaseKind, *claim, server, err, isAzureCleanupNotFound, validateFixedAzureServer)
+	}, Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
+		return core.FixedAttemptPlan{Values: map[string]string{"name": core.LeaseProviderName(claim.LeaseID, claim.Slug)},
+			NonceKey: "nonce", FingerprintLabel: "fixed_intent_sha256", NonceLabel: "fixed_attempt",
+			DirectLabels: &core.FixedDirectLabels{Config: cfg, Provider: "azure", Market: cfg.Capacity.Market, Keep: req.Keep},
+		}, nil
 	}, Submit: func(ctx context.Context, tx *core.FixedTransaction) (core.Server, error) {
 		claim := tx.Claim
-		if err := tx.Record("submitting"); err != nil {
-			return core.Server{}, err
-		}
 		server, err := creator.CreateFixedServer(ctx, cfg, publicKey, claim.LeaseID, claim.Slug, maps.Clone(claim.Labels))
 		if err != nil {
 			return core.Server{}, fmt.Errorf("Azure fixed create unresolved; replay or stop lease %s: %w", claim.LeaseID, err)
@@ -145,8 +111,7 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 		if err := validateFixedAzureServer(*claim, server); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		claim.CloudID, claim.CloudImmutableID = server.CloudID, server.ImmutableID
-		if err := tx.Record("bound"); err != nil {
+		if err := tx.Bind(core.FixedResourceBinding{CloudID: server.CloudID, ImmutableID: server.ImmutableID}); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		server, err := client.WaitForServerIP(ctx, name)
@@ -195,24 +160,16 @@ func (b *azureLeaseBackend) resolveFixed(ctx context.Context, client azureClient
 	if claim.ProviderScope != client.LeaseClaimScope() {
 		return core.LeaseTarget{}, true, core.Exit(4, "Azure fixed lease account scope changed")
 	}
-	if claim.FixedCreateIntent.State == "released" {
-		if !req.ReleaseOnly {
-			return core.LeaseTarget{}, true, core.Exit(4, "Azure fixed lease is terminal")
-		}
-		err := fixedAzureLeaseKind.ValidateTerminalClaim(claim, claim, claim.LeaseID, nil)
-		return core.LeaseTarget{LeaseID: claim.LeaseID}, true, err
+	if lease, terminal, err := fixedAzureLeaseKind.ResolveTerminal(claim, req.ReleaseOnly); terminal {
+		return lease, true, err
 	}
-	observed, err := core.InspectFixedResource(ctx, fixedAzureLeaseKind, claim, core.FixedLeaseOperations[core.Server]{
-		ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.Server], error) {
-			server, err := client.GetServer(ctx, tx.Claim.FixedCreateIntent.Attempt["name"])
-			if err != nil {
-				return core.FixedObservation[core.Server]{}, err
-			}
-			if err := validateFixedAzureServer(*tx.Claim, server); err != nil {
-				return core.FixedObservation[core.Server]{}, err
-			}
-			return core.FixedObservation[core.Server]{Candidates: []core.Server{server}}, nil
-		},
+
+	server, err := core.LookupFixedResource(ctx, fixedAzureLeaseKind, claim, func(ctx context.Context, claim core.LeaseClaim) (core.Server, error) {
+		server, err := client.GetServer(ctx, claim.FixedCreateIntent.Attempt["name"])
+		if err == nil {
+			err = validateFixedAzureServer(claim, server)
+		}
+		return server, err
 	})
 	if err != nil {
 		if req.ReleaseOnly && claim.CloudID != "" && isAzureCleanupNotFound(err) {
@@ -221,7 +178,6 @@ func (b *azureLeaseBackend) resolveFixed(ctx context.Context, client azureClient
 		}
 		return core.LeaseTarget{}, true, err
 	}
-	server := observed.Candidates[0]
 	if claim.CloudImmutableID == "" && req.ReleaseOnly {
 		next := claim
 		next.CloudID, next.CloudImmutableID = server.CloudID, server.ImmutableID
@@ -234,14 +190,7 @@ func (b *azureLeaseBackend) resolveFixed(ctx context.Context, client azureClient
 }
 
 func (b *azureLeaseBackend) releaseFixedTerminal(lease core.LeaseTarget) (bool, error) {
-	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
-	if err != nil {
-		return true, err
-	}
-	if !exists || !fixedAzureLeaseKind.IsFixedClaim(claim) || claim.FixedCreateIntent.State != "released" {
-		return false, nil
-	}
-	return true, fixedAzureLeaseKind.ValidateTerminalClaim(claim, claim, lease.LeaseID, nil)
+	return fixedAzureLeaseKind.ReadTerminal(lease.LeaseID)
 }
 
 func (b *azureLeaseBackend) RetainLeaseClaimAfterReleaseWithClaim(lease core.LeaseTarget, previous core.LeaseClaim) (bool, error) {

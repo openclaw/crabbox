@@ -249,11 +249,7 @@ func (b *azureLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLe
 				if err := validateExactAzureClaim(*tx.Claim, prepared, req.Lease.LeaseID, client.LeaseClaimScope()); err != nil {
 					return core.FixedObservation[core.Server]{}, err
 				}
-				tx.Claim.Labels = prepared.Labels
-				if err := tx.Record("deleting"); err != nil {
-					return core.FixedObservation[core.Server]{}, err
-				}
-				return core.FixedObservation[core.Server]{Candidates: []core.Server{prepared}}, nil
+				return core.FixedObservation[core.Server]{Candidates: []core.Server{prepared}, Binding: &core.FixedResourceBinding{Labels: prepared.Labels}}, nil
 			},
 			DeleteExact: func(ctx context.Context, _ *core.FixedTransaction, prepared core.Server) error {
 				return client.DeleteOwnedServer(ctx, prepared)

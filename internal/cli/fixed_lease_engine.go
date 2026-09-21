@@ -116,6 +116,7 @@ func (tx *FixedTransaction) Record(phase string) error {
 // proof of non-submission (or safe same-identity resubmission), never inferred
 // from an empty inventory. AbsenceProven applies only to release.
 type FixedObservation[T any] struct {
+	Binding       *FixedResourceBinding
 	Candidates    []T
 	CanSubmit     bool
 	AbsenceProven bool
@@ -329,6 +330,14 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 			}
 			return nil
 		}
+		if observed.Binding != nil {
+			if err := tx.applyBinding(*observed.Binding); err != nil {
+				return err
+			}
+			if err := tx.Record("deleting"); err != nil {
+				return err
+			}
+		}
 		if len(observed.Candidates) == 0 {
 			if !observed.AbsenceProven {
 				return Exit(4, "lease_id_conflict: fixed %s absence is unverified; claim retained", kind.Label)
@@ -439,4 +448,37 @@ func InspectFixedCandidate[T any](ctx context.Context, kind FixedLeaseKind, clai
 		return zero, false, err
 	}
 	return observed.Candidates[0], true, nil
+}
+
+// LookupFixedResource runs a single native lookup through the read-only engine.
+func LookupFixedResource[T any](ctx context.Context, kind FixedLeaseKind, claim LeaseClaim, lookup func(context.Context, LeaseClaim) (T, error)) (T, error) {
+	var resource T
+	_, err := InspectFixedResource(ctx, kind, claim, FixedLeaseOperations[T]{ObserveExact: func(ctx context.Context, tx *FixedTransaction, _ FixedObserveMode) (FixedObservation[T], error) {
+		var err error
+		resource, err = lookup(ctx, *tx.Claim)
+		return FixedObservation[T]{Candidates: []T{resource}}, err
+	}})
+	return resource, err
+}
+
+// FixedLookupObservation separates a native not-found observation from the
+// decision to create. Only pristine attempts may submit, and an existing name
+// without durable provenance is never adopted.
+func FixedLookupObservation[T any](kind FixedLeaseKind, claim LeaseClaim, resource T, lookupErr error, notFound func(error) bool, attest func(LeaseClaim, T) error) (FixedObservation[T], error) {
+	if claim.FixedCreateIntent.Attempt == nil {
+		if lookupErr == nil {
+			return FixedObservation[T]{}, Exit(4, "lease_id_conflict: %s resource already exists without its create intent", kind.Label)
+		}
+		if notFound != nil && notFound(lookupErr) {
+			return FixedObservation[T]{CanSubmit: true}, nil
+		}
+		return FixedObservation[T]{}, lookupErr
+	}
+	if lookupErr != nil {
+		return FixedObservation[T]{}, fmt.Errorf("%s fixed create unresolved; no replacement allocated: %w", kind.Label, lookupErr)
+	}
+	if err := attest(claim, resource); err != nil {
+		return FixedObservation[T]{}, err
+	}
+	return FixedObservation[T]{Candidates: []T{resource}}, nil
 }
