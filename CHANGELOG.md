@@ -11,7 +11,7 @@
 
 ### Fixes
 
-- Redact Lambda and Vast API-error bodies before truncation, and sanitize appended body-read diagnostics for DigitalOcean, Lambda, OVH, and Vast without changing HTTP-error classification.
+- Preserve RunPod SSH-readiness cancellation causes, distinguish startup deadlines from caller cancellation, and retain completed provider errors. [PR 2449](https://github.com/openclaw/crabbox/pull/2449).
 
 - Use EC2 instance metadata for AWS vCPU quota admission and readiness, including bare-metal types, and keep unknown instance costs out of capacity recommendations. [PR 2302](https://github.com/openclaw/crabbox/pull/2302). Thanks @vincentkoc.
 - Refresh the Cloudflare runner to Node 24.21.0, Go 1.26.8, GitHub CLI 2.101.0, and pnpm 12.5.1; unpinned projects inherit the pnpm 10-to-12 breaking default change on deployment and should migrate configuration or pin `packageManager` to `pnpm@10.24.0`. [PR 2379](https://github.com/openclaw/crabbox/pull/2379). Thanks @altaywtf.
@@ -26,6 +26,7 @@
 - Report ASCII Box/Boat cleanup phase and remaining deadline, preserve the last deletion status on timeout, and reconcile unchanged claims after exact native 404 plus complete inventory absence without repeating teardown; failed or partial inventory retains the claim. [Issue 1730](https://github.com/openclaw/crabbox/issues/1730). Thanks @shunkakinoki.
 - Isolate ASCII Box SSH host trust per lease so recycled IPs and gateway endpoints do not block new boxes, while retaining same-lease host-key checks and the native authentication key. [PR 1785](https://github.com/openclaw/crabbox/pull/1785), [Issue 1748](https://github.com/openclaw/crabbox/issues/1748). Thanks @shunkakinoki.
 - Preserve DigitalOcean leases' stored idle timeout on ordinary heartbeats and honor explicit timeout changes without extending the creation-based TTL. [PR 2418](https://github.com/openclaw/crabbox/pull/2418).
+- Redact Lambda and Vast API-error bodies before truncation, and sanitize appended body-read diagnostics for DigitalOcean, Lambda, OVH, and Vast without changing HTTP-error classification.
 - Preserve canonical cancellation/deadline context and recognized release-denial states in workspace-owner error messages. [PR 2412](https://github.com/openclaw/crabbox/pull/2412). Thanks @steipete.
 - Keep workspace-owner SSH control traffic separate from workload connections while preserving renewal deadlines and ownership checks. [PR 2419](https://github.com/openclaw/crabbox/pull/2419). Thanks @steipete.
 - Explain Parallels IP discovery timeouts with clone mode, NIC details, and retry-time console guidance while preserving cleanup and clone defaults. [PR 2415](https://github.com/openclaw/crabbox/pull/2415), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
