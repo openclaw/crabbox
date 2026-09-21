@@ -3,8 +3,6 @@ package digitalocean
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -45,10 +43,11 @@ func (b *digitalOceanLeaseBackend) acquireFixed(ctx context.Context, req core.Ac
 		return core.LeaseTarget{}, core.Exit(2, "DigitalOcean account identity is missing")
 	}
 	var publicKey string
-	lease, err := core.AcquireFixedLease(core.FixedAcquireOptions{
+	var createLabels map[string]string
+	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
 		Kind: fixedLeaseKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
 		TargetOS: core.TargetLinux, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout, Now: func() time.Time { return core.ClockNow(b.RT.Clock) },
-	}, func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
+	}, core.FixedLeaseOperations[droplet]{DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		if exists && (!fixedLeaseKind.IsFixedClaim(*claim) || claim.ProviderScope != account) {
 			return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: DigitalOcean owner or account changed")
 		}
@@ -65,7 +64,7 @@ func (b *digitalOceanLeaseBackend) acquireFixed(ctx context.Context, req core.Ac
 			return core.FixedLeaseBinding{}, err
 		}
 		cfg.ProviderKey = providerKeyForLease(req.RequestedLeaseID)
-		data, err := json.Marshal(struct {
+		fingerprint, err := core.FixedIntentFingerprint("", struct {
 			Labels                                                    map[string]string
 			Provider                                                  core.DigitalOceanConfig
 			Type, Architecture, Bootstrap, Slug, User, Port, WorkRoot string
@@ -75,7 +74,7 @@ func (b *digitalOceanLeaseBackend) acquireFixed(ctx context.Context, req core.Ac
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}
-		binding := core.FixedLeaseBinding{ProviderScope: account, Fingerprint: fmt.Sprintf("%x", sha256.Sum256(data))}
+		binding := core.FixedLeaseBinding{ProviderScope: account, Fingerprint: fingerprint}
 		if exists {
 			return binding, nil
 		}
@@ -93,44 +92,56 @@ func (b *digitalOceanLeaseBackend) acquireFixed(ctx context.Context, req core.Ac
 		}
 		binding.Slug, err = core.AllocateDirectLeaseSlug(req.RequestedLeaseID, req.RequestedSlug, servers)
 		return binding, err
-	}, func(ctx context.Context, claim *core.LeaseClaim, intent *core.FixedCreateIntent, persist func() error) (core.LeaseTarget, error) {
-		var item droplet
+	}, ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[droplet], error) {
+		claim := tx.Claim
 		if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 			cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, claim.LeaseID, claim.Slug, cfg.Provider)
 		}
-		if intent.Attempt == nil {
-			createdAt, _ := time.Parse(time.RFC3339Nano, intent.CreatedAt)
-			intent.Attempt = map[string]string{"nonce": rand.Text()}
-			labels := labelsFromTags(leaseTags(cfg, claim.LeaseID, claim.Slug, "provisioning", req.Keep, createdAt))
-			labels["fixed_intent_sha256"], labels["fixed_attempt"] = intent.Fingerprint, intent.Attempt["nonce"]
-			claim.Labels = maps.Clone(labels)
-			claim.Labels[digitalOceanAccountLabel], claim.Labels["recovery"] = account, "ambiguous-create"
-			// The POST has no idempotency key. Once admitted, replay only observes it.
-			if err := persist(); err != nil {
-				return core.LeaseTarget{}, err
-			}
-			var err error
-			item, err = creator.CreateFixedDroplet(ctx, cfg, publicKey, claim.LeaseID, claim.Slug, req.Keep, createdAt, labels)
-			if err != nil {
-				var ambiguous *ambiguousDropletCreateError
-				if errors.As(err, &ambiguous) {
-					setDigitalOceanKeyIdentity(claim.Labels, ambiguous.keyID, ambiguous.keyCreated, ambiguous.keyOwnershipKnown)
-				}
-				return core.LeaseTarget{}, errors.Join(fmt.Errorf("DigitalOcean fixed create unresolved; replay or stop lease %s: %w", claim.LeaseID, err), persist())
-			}
-			setDigitalOceanKeyIdentity(claim.Labels, item.SSHKeyID, item.SSHKeyCreated, true)
-		} else {
-			var err error
-			item, err = loadFixedDroplet(ctx, client, *claim)
-			if err != nil {
-				return core.LeaseTarget{}, err
-			}
+		if claim.FixedCreateIntent.Attempt == nil {
+			return core.FixedObservation[droplet]{CanSubmit: true}, nil
 		}
+		item, err := loadFixedDroplet(ctx, client, *claim)
+		if err != nil {
+			return core.FixedObservation[droplet]{}, err
+		}
+		if err := validateFixedDroplet(*claim, item); err != nil {
+			return core.FixedObservation[droplet]{}, err
+		}
+		return core.FixedObservation[droplet]{Candidates: []droplet{item}}, nil
+	}, PlanAttempt: func(ctx context.Context, tx *core.FixedTransaction) error {
+		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
+		createdAt, _ := time.Parse(time.RFC3339Nano, intent.CreatedAt)
+		intent.Attempt = map[string]string{"nonce": rand.Text()}
+		labels := labelsFromTags(leaseTags(cfg, claim.LeaseID, claim.Slug, "provisioning", req.Keep, createdAt))
+		labels["fixed_intent_sha256"], labels["fixed_attempt"] = intent.Fingerprint, intent.Attempt["nonce"]
+		createLabels = labels
+		claim.Labels = maps.Clone(labels)
+		claim.Labels[digitalOceanAccountLabel], claim.Labels["recovery"] = account, "ambiguous-create"
+		return nil
+	}, Submit: func(ctx context.Context, tx *core.FixedTransaction) (droplet, error) {
+		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
+		createdAt, _ := time.Parse(time.RFC3339Nano, intent.CreatedAt)
+		labels := maps.Clone(createLabels)
+		if err := tx.Record("submitting"); err != nil {
+			return droplet{}, err
+		}
+		item, err := creator.CreateFixedDroplet(ctx, cfg, publicKey, claim.LeaseID, claim.Slug, req.Keep, createdAt, labels)
+		if err != nil {
+			var ambiguous *ambiguousDropletCreateError
+			if errors.As(err, &ambiguous) {
+				setDigitalOceanKeyIdentity(claim.Labels, ambiguous.keyID, ambiguous.keyCreated, ambiguous.keyOwnershipKnown)
+			}
+			return droplet{}, errors.Join(fmt.Errorf("DigitalOcean fixed create unresolved; replay or stop lease %s: %w", claim.LeaseID, err), tx.Record("submitting"))
+		}
+		setDigitalOceanKeyIdentity(claim.Labels, item.SSHKeyID, item.SSHKeyCreated, true)
+		return item, nil
+	}, PrepareAccess: func(ctx context.Context, tx *core.FixedTransaction, item droplet) (core.LeaseTarget, error) {
+		claim := tx.Claim
 		if err := validateFixedDroplet(*claim, item); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		claim.CloudID, claim.CloudNumericID, claim.CloudImmutableID = dropletIDString(item.ID), item.ID, dropletIDString(item.ID)
-		if err := persist(); err != nil {
+		if err := tx.Record("bound"); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		item, err := b.waitForDropletIP(ctx, client, item.ID, 5*time.Minute)
@@ -155,7 +166,7 @@ func (b *digitalOceanLeaseBackend) acquireFixed(ctx context.Context, req core.Ac
 		preserveDigitalOceanKeyIdentity(labels, claim.Labels)
 		server.Labels, server.Status = labels, "ready"
 		return core.LeaseTarget{Server: server, SSH: target, LeaseID: claim.LeaseID}, nil
-	}, ctx)
+	}})
 	if err == nil && req.OnAcquired != nil {
 		err = req.OnAcquired(lease)
 	}
@@ -176,27 +187,40 @@ func validateFixedDroplet(claim core.LeaseClaim, item droplet) error {
 }
 
 func loadFixedDroplet(ctx context.Context, client digitalOceanAPI, claim core.LeaseClaim) (droplet, error) {
-	if claim.CloudID != "" {
-		id, ok := parseDropletID(claim.CloudID)
-		if !ok {
-			return droplet{}, core.Exit(4, "invalid fixed Droplet identity")
+	observed, err := core.InspectFixedResource(ctx, fixedLeaseKind, claim, core.FixedLeaseOperations[droplet]{ObserveExact: func(ctx context.Context, _ *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[droplet], error) {
+		if claim.CloudID != "" {
+			id, ok := parseDropletID(claim.CloudID)
+			if !ok {
+				return core.FixedObservation[droplet]{}, core.Exit(4, "invalid fixed Droplet identity")
+			}
+			item, err := client.GetDroplet(ctx, id)
+			if err != nil {
+				return core.FixedObservation[droplet]{}, err
+			}
+			if err := validateFixedDroplet(claim, item); err != nil {
+				return core.FixedObservation[droplet]{}, err
+			}
+			return core.FixedObservation[droplet]{Candidates: []droplet{item}}, nil
 		}
-		return client.GetDroplet(ctx, id)
-	}
-	items, err := client.ListCrabboxDroplets(ctx)
+		items, err := client.ListCrabboxDroplets(ctx)
+		if err != nil {
+			return core.FixedObservation[droplet]{}, err
+		}
+		var matches []droplet
+		for _, item := range items {
+			if validateFixedDroplet(claim, item) == nil {
+				matches = append(matches, item)
+			}
+		}
+		if len(matches) != 1 {
+			return core.FixedObservation[droplet]{Conflict: fmt.Sprintf("DigitalOcean fixed create remains unresolved (%d matches); no replacement allocated", len(matches))}, nil
+		}
+		return core.FixedObservation[droplet]{Candidates: matches}, nil
+	}})
 	if err != nil {
 		return droplet{}, err
 	}
-	var matches []droplet
-	for _, item := range items {
-		if validateFixedDroplet(claim, item) == nil {
-			matches = append(matches, item)
-		}
-	}
-	if len(matches) != 1 {
-		return droplet{}, core.Exit(4, "DigitalOcean fixed create remains unresolved (%d matches); no replacement allocated", len(matches))
-	}
-	return matches[0], nil
+	return observed.Candidates[0], nil
 }
 
 func (b *digitalOceanLeaseBackend) RetainLeaseClaimAfterReleaseWithClaim(lease core.LeaseTarget, previous core.LeaseClaim) (bool, error) {
