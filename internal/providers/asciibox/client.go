@@ -41,11 +41,20 @@ type client struct {
 	releasePollInterval time.Duration
 }
 
+// Native inventories may be large, but partial output cannot prove cleanup.
+const boxCommandOutputLimit = 8 << 20
+
 type createRequest struct {
 	TTL time.Duration
 }
 
 type boxIdentityError struct{ id string }
+
+type boxNotFoundError struct{ id string }
+
+func (e *boxNotFoundError) Error() string {
+	return fmt.Sprintf("ascii-box %s not found (404)", e.id)
+}
 
 func (e *boxIdentityError) Error() string {
 	return fmt.Sprintf("ascii-box info returned a different Box ID for %q", e.id)
@@ -190,8 +199,15 @@ func (c *client) PrepareSSH(ctx context.Context, id string) error {
 }
 
 func (c *client) GetBox(ctx context.Context, id string) (boxData, error) {
-	result, err := c.run(ctx, "info", id)
+	ctx = boxCleanupPhaseContext(ctx, "ownership-check")
+	if err := c.ensureConfig(ctx); err != nil {
+		return boxData{}, err
+	}
+	result, err := c.runPrepared(ctx, "info", id)
 	if err != nil {
+		if ctx.Err() == nil && core.IsPlainLocalCommandExit(result, err) && nativeBoxNotFound(result) {
+			return boxData{}, &boxNotFoundError{id: id}
+		}
 		return boxData{}, fmt.Errorf("ascii-box CLI info failed: %s", c.formatError(result, err))
 	}
 	box, err := decodeBox([]byte(result.Stdout))
@@ -201,7 +217,20 @@ func (c *client) GetBox(ctx context.Context, id string) (boxData, error) {
 	return box, err
 }
 
+func nativeBoxNotFound(result core.LocalCommandResult) bool {
+	message := strings.TrimSpace(core.Blank(result.Stderr, result.Stdout))
+	var response struct {
+		Status int `json:"status"`
+	}
+	if json.Unmarshal([]byte(message), &response) == nil {
+		return response.Status == 404
+	}
+	// Older native CLIs report this diagnostic as plain text.
+	return strings.EqualFold(message, "box not found (404)") || strings.EqualFold(message, "sandbox not found (404)")
+}
+
 func (c *client) ListBoxes(ctx context.Context, requireComplete bool) ([]boxData, error) {
+	ctx = boxCleanupPhaseContext(ctx, "inventory-confirmation")
 	result, err := c.run(ctx, "list", "--all")
 	if err != nil {
 		return nil, fmt.Errorf("ascii-box CLI list failed: %s", c.formatError(result, err))
@@ -255,6 +284,7 @@ func (c *client) releaseAfterSnapshotGuard(
 	}
 	recoveryCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	recoveryCtx = boxCleanupPhaseContext(recoveryCtx, "snapshot-recovery")
 
 	if err := validate(recoveryCtx); err != nil {
 		return err
@@ -391,6 +421,7 @@ func validateBoxDeletionOperation(operation boxDeletionOperation, targetID, oper
 }
 
 func (c *client) GetDeletionOperation(ctx context.Context, targetID, operationID string) (boxDeletionOperation, error) {
+	ctx = boxCleanupPhaseContext(ctx, "deletion-operation")
 	if !concreteBoxID(targetID) || !boxDeletionIDRE.MatchString(operationID) {
 		return boxDeletionOperation{}, fmt.Errorf("ascii-box deletion lookup requires exact Box and operation IDs")
 	}
@@ -415,7 +446,10 @@ func (c *client) waitForDeletion(ctx context.Context, targetID, output string) (
 	accepted := operation
 	defer func() {
 		if resultErr != nil {
-			resultErr = &boxDeletionIncompleteError{operation: accepted, err: resultErr}
+			resultErr = &boxDeletionIncompleteError{operation: accepted, err: fmt.Errorf(
+				"ascii-box cleanup phase=deletion-operation operation=%s last_observed_status=%s; retaining claim: %w",
+				accepted.ID, operation.Status, resultErr,
+			)}
 		}
 	}()
 	operationID := operation.ID
@@ -427,25 +461,26 @@ func (c *client) waitForDeletion(ctx context.Context, targetID, output string) (
 	defer ticker.Stop()
 	for {
 		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("ascii-box deletion operation %s did not complete; retaining claim: %w", operationID, err)
+			return err
 		}
 		if operation.Status == "completed" {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("ascii-box deletion operation %s did not complete; retaining claim: %w", operationID, ctx.Err())
+			return ctx.Err()
 		case <-ticker.C:
 		}
 		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("ascii-box deletion operation %s did not complete; retaining claim: %w", operationID, err)
+			return err
 		}
 		// Accepted deletion hides normal Box reads, so poll only its exact
 		// operation. Native exit zero alone can still mean pending or blocked.
-		operation, err = c.GetDeletionOperation(ctx, targetID, operationID)
+		nextOperation, err := c.GetDeletionOperation(ctx, targetID, operationID)
 		if err != nil {
 			return err
 		}
+		operation = nextOperation
 	}
 }
 
@@ -511,10 +546,13 @@ func (c *client) runPreparedWithEnv(ctx context.Context, env []string, args ...s
 		argv = append(argv, "--api-url", c.apiURL)
 	}
 	argv = append(argv, args...)
+	stopProgress := startBoxCommandProgress(ctx, boxCommandPhase(args))
+	defer stopProgress()
 	return c.runner.Run(ctx, core.LocalCommandRequest{
-		Name: c.cliPath,
-		Args: argv,
-		Env:  env,
+		Name:                   c.cliPath,
+		Args:                   argv,
+		Env:                    env,
+		MaxCapturedOutputBytes: boxCommandOutputLimit,
 	})
 }
 
@@ -538,11 +576,7 @@ func (c *client) ensureConfig(ctx context.Context) error {
 		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 	}
-	result, err := c.runner.Run(ctx, core.LocalCommandRequest{
-		Name: c.cliPath,
-		Args: []string{"--no-update", "--json", "--org", core.Blank(c.org, "personal"), "--api-url", c.apiURL, "status"},
-		Env:  c.env(),
-	})
+	result, err := c.runPrepared(ctx, "status")
 	if err != nil {
 		return fmt.Errorf("ascii-box CLI status failed: %s", c.formatError(result, err))
 	}

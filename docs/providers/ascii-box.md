@@ -145,18 +145,31 @@ BOX_ORG
    cancellation retain the claim without recording completion. The shared native
    CLI SSH key is retained.
 
+Cleanup reports its current native-call phase and elapsed time at roughly
+ten-second intervals, including while a native command is blocked. A remaining
+budget is shown only when that command's context has a deadline; progress does
+not extend it or impose a new whole-command timeout. Claim-lock waits and
+best-effort remote teardown are outside this native-call progress reporter.
+Deletion-wait failures retain the exact operation and its last validated status
+in the error. Native command capture is capped at 8 MiB per stream; oversized or
+incomplete output is an error, never evidence of completed deletion.
+
 If this release observes a valid native deletion acceptance but cannot finish
 waiting because of a timeout, cancellation, or operation lookup failure, it
 durably records the exact operation ID and its claim binding before returning
 the error. The binding covers the original provider scope, Box ID, creation
-timestamp, and repository owner. This records acceptance, not completion. A
-later `crabbox stop` first reads that same operation. Pending, processing, or
-blocked operations retain the claim without normal Box lookups, SSH teardown, or
-another deletion request. Only a matching operation that explicitly reports
-`completed` with a valid completion timestamp can proceed to `box info`
-not-found and complete inventory absence checks. Crabbox repeats these operation
-and absence checks inside the actual release fence before removing the claim; an
-earlier lookup during lease resolution does not authorize finalization.
+timestamp, and repository owner. This records acceptance, not completion. A later
+`crabbox stop` first checks the exact Box identity. If the Box remains observable,
+Crabbox validates any recorded operation before proceeding. Pending, processing,
+or blocked operations retain the claim without SSH teardown or another deletion
+request. A matching operation that reports `completed` also retains the claim
+while the Box remains observable because those native results are inconsistent.
+If `box info` instead returns a recognized native 404 and complete
+`box list --all` inventory also omits the exact Box ID, Crabbox reconciles the
+unchanged local claim without reading a stale operation or repeating native
+deletion. Crabbox repeats these checks inside the actual release fence before
+removing the claim; an earlier lookup during lease resolution does not authorize
+finalization.
 
 If Crabbox finishes waiting for native deletion but final inventory confirmation
 fails or is canceled, it durably records that completed deletion in the
@@ -170,15 +183,16 @@ changed claims, or an observable sandbox retain the claim.
 Completion records from earlier unreleased builds that proved only native
 request acceptance are rejected, not upgraded into operation-completion evidence.
 
-Not-found and empty inventory alone are not deletion-completion evidence: the
-service can hide a sandbox while its deletion operation is still pending or
-blocked. Claims without either Crabbox's completion record or its bound
-accepted-operation reference stay retained, including external deletions, native
-commands interrupted before valid acceptance was observed, and a process
-termination before the record was durably written. Missing, malformed, changed,
-or incomplete record bindings are rejected. There is no automatic adoption of
-an external deletion receipt, replacement of a recorded operation, or conversion
-of an old claim into completed-deletion authority.
+Exact native 404 plus complete inventory absence independently proves absence;
+it authorizes only removal of the unchanged local claim and never another native
+mutation. Failed or partial inventory, an observable matching ID, a replacement
+identity, cancellation, and missing or malformed native responses retain the
+claim. Command startup, output-capture, and transport failures do not count as
+native 404 evidence, even when their text mentions `404` or `not found`.
+Missing, malformed, changed, or incomplete operation-record bindings are
+rejected before native lookups. There is no automatic adoption
+of an external deletion receipt, replacement of a recorded operation, or
+conversion of an old claim into completed-deletion authority.
 
 Raw IDs, provider aliases, and legacy claims without the full ownership binding
 remain inspectable but cannot authorize reuse or deletion. Missing or changed
