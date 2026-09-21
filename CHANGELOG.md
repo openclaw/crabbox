@@ -19,6 +19,7 @@
 
 - Refresh optional desktop and browser package indexes on prepared Linux images, retry mirror rollovers with bounded deadlines, and reject partial refreshes instead of installing from stale package URLs.
 - Wait for desktop startup readiness and automatically hand off managed Wayland resizing only after verifying retirement of the previous remote client; retain manual guidance for ambiguous or unavailable control. [Issue 2076](https://github.com/openclaw/crabbox/issues/2076).
+- Shorten Go CI feedback with parallel CLI race-test shards and cached Go builds, preserving the required checks and complete test coverage.
 - Bound Vast SSH-endpoint readiness requests and retry waits by the startup deadline, preserving cancellation causes without exposing redacted transport secrets. [PR 2448](https://github.com/openclaw/crabbox/pull/2448).
 - Preserve RunPod SSH-readiness cancellation causes, distinguish startup deadlines from caller cancellation, and retain completed provider errors. [PR 2449](https://github.com/openclaw/crabbox/pull/2449).
 

@@ -22,6 +22,44 @@ env:
 jobs:
   go-test:
     name: Go test
+    needs: [go-test-core, go-test-cli]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all race shards
+        shell: bash
+        env:
+          CORE_RESULT: ${{ needs['go-test-core'].result }}
+          CLI_RESULT: ${{ needs['go-test-cli'].result }}
+        run: |
+          printf 'Go core: %s\nGo CLI shards: %s\n' "${CORE_RESULT:-missing}" "${CLI_RESULT:-missing}"
+          [[ "${CORE_RESULT:-}" == success && "${CLI_RESULT:-}" == success ]]
+
+  go-test-cli:
+    name: Go CLI shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: '**/go.sum'
+
+      - name: Test CLI shard
+        run: python3 scripts/test-go-shard.py ${{ matrix.shard }} 4
+
+  go-test-core:
+    name: Go core
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -33,7 +71,8 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: false
+          cache: true
+          cache-dependency-path: '**/go.sum'
 
       - name: Check formatting
         shell: bash
@@ -60,8 +99,11 @@ jobs:
           fi
 
       - name: Test
-        # Leave room for the CLI suite's final parallel timeout fixtures.
-        run: go test -race -timeout=20m ./...
+        shell: bash
+        run: |
+          packages=$(go list ./...)
+          mapfile -t packages < <(printf '%s\n' "$packages" | sed '\|^github.com/openclaw/crabbox/internal/cli$|d')
+          go test -race -count=1 -timeout=10m "${packages[@]}"
 
       - name: Require executed Linux supervision fixtures
         shell: bash
@@ -122,7 +164,8 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: false
+          cache: true
+          cache-dependency-path: '**/go.sum'
 
       - name: Test all Go modules
         run: scripts/test-go-modules.sh
@@ -140,7 +183,8 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: false
+          cache: true
+          cache-dependency-path: '**/go.sum'
 
       - name: Coverage
         run: scripts/check-go-coverage.sh 90.0
