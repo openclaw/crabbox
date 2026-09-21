@@ -87,3 +87,23 @@ func ResolveFixedLeaseTarget(ctx context.Context, opts FixedResolveOptions,
 	})
 	return lease, err
 }
+
+// ReclaimFixedLease transfers an attested resource under the original claim CAS.
+// Native lookup must not mutate the resource or local ownership record.
+func ReclaimFixedLease(ctx context.Context, claim LeaseClaim, cfg Config, repoRoot string, reclaim bool, lookup func(context.Context, LeaseClaim) (Server, error)) (LeaseClaim, error) {
+	if !reclaim {
+		return claim, nil
+	}
+	if repoRoot == "" {
+		return claim, Exit(2, "fixed reclaim requires the current repository")
+	}
+	if err := AuthorizeCheckpointRelease(claim, ""); err != nil {
+		return claim, err
+	}
+	server, err := lookup(ctx, claim)
+	if err != nil {
+		return claim, err
+	}
+	return ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(ctx, claim.LeaseID, claim.Slug, cfg, claim.ProviderScope, server, SSHTarget{}, repoRoot, cfg.IdleTimeout, true, claim, true,
+		func() error { return AuthorizeCheckpointRelease(claim, "") })
+}

@@ -136,8 +136,12 @@ const (
 // transaction. PlanAttempt only prepares evidence; Submit records admission at
 // the native mutation boundary through tx.Record("submitting").
 type FixedReleasePolicy struct {
-	Outcome *ReleaseLeaseOutcome
-	Binding *FixedResourceBinding
+	RepoRoot                string
+	CheckpointID            *string
+	PristineScopePrefix     string
+	SkipTerminalObservation bool
+	Outcome                 *ReleaseLeaseOutcome
+	Binding                 *FixedResourceBinding
 }
 
 type FixedLeaseOperations[T any] struct {
@@ -312,7 +316,41 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 		if err != nil {
 			return err
 		}
-		observed, err := ops.ObserveExact(ctx, tx, FixedObserveDelete)
+		policy := ops.Release
+		if policy != nil {
+			if policy.SkipTerminalObservation && claim.FixedCreateIntent.State == "released" {
+				if err := kind.ValidateTerminalClaim(*claim, expected, claim.LeaseID, nil); err != nil {
+					return err
+				}
+				if policy.Outcome != nil {
+					policy.Outcome.Terminal = true
+				}
+				if kind.AfterTerminal != nil {
+					return kind.AfterTerminal(*claim)
+				}
+				return nil
+			}
+			if policy.RepoRoot != "" {
+				if claim.RepoRoot == "" {
+					return Exit(4, "%s fixed lease %s has no current repository owner", kind.Label, claim.LeaseID)
+				}
+				if err := CheckLeaseClaimRepositoryOwner(claim.LeaseID, *claim, policy.RepoRoot, false); err != nil {
+					return err
+				}
+			}
+			if policy.CheckpointID != nil {
+				if err := AuthorizeCheckpointRelease(*claim, *policy.CheckpointID); err != nil {
+					return err
+				}
+			}
+		}
+		var observed FixedObservation[T]
+		if policy != nil && policy.PristineScopePrefix != "" && FixedPristineRecord(*claim, kind, policy.PristineScopePrefix) {
+			observed.AbsenceProven = true
+		} else {
+			observed, err = ops.ObserveExact(ctx, tx, FixedObserveDelete)
+		}
+
 		if err != nil {
 			return err
 		}
@@ -502,5 +540,18 @@ func DeleteClaimedEvidence[T any](ctx context.Context, kind FixedLeaseKind, clai
 			return FixedObservation[T]{Candidates: []T{evidence}}, err
 		},
 		DeleteExact: func(_ context.Context, _ *FixedTransaction, evidence T) error { return deleteExact(evidence) },
+	})
+}
+
+// DeleteFixedClaim handles APIs whose exact deletion operation performs its own
+// native lookup/attestation. Prepare establishes routing and returned-ID custody;
+// deleteExact must attest every native effect before reporting completion.
+func DeleteFixedClaim(ctx context.Context, kind FixedLeaseKind, claim LeaseClaim, policy *FixedReleasePolicy, prepare func(context.Context, *FixedTransaction) error, deleteExact func(context.Context, *FixedTransaction) error) error {
+	return DeleteFixedResource(ctx, kind, claim, FixedLeaseOperations[struct{}]{Release: policy,
+		ObserveExact: func(ctx context.Context, tx *FixedTransaction, _ FixedObserveMode) (FixedObservation[struct{}], error) {
+			err := prepare(ctx, tx)
+			return FixedObservation[struct{}]{Candidates: []struct{}{{}}}, err
+		},
+		DeleteExact: func(ctx context.Context, tx *FixedTransaction, _ struct{}) error { return deleteExact(ctx, tx) },
 	})
 }

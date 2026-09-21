@@ -77,6 +77,7 @@ func (p FixedAdmission) permits(tx *FixedTransaction) bool {
 // Core generates nonces, assembles identity labels, and commits this plan before
 // admitting the provider mutation. Existing attempts are never regenerated.
 type FixedAttemptPlan struct {
+	OwnerLabel                   string
 	PrivateLabels                map[string]string
 	UniqueLabel                  string
 	UniqueProviders              []string
@@ -156,6 +157,9 @@ func (tx *FixedTransaction) plan(plan FixedAttemptPlan) error {
 	}
 	if labels == nil {
 		labels = map[string]string{}
+	}
+	if plan.OwnerLabel != "" {
+		labels[plan.OwnerLabel] = tx.Claim.Provider
 	}
 	if plan.FingerprintLabel != "" {
 		labels[plan.FingerprintLabel] = tx.Claim.FixedCreateIntent.Fingerprint
@@ -580,4 +584,35 @@ func (tx *FixedTransaction) Observe(binding FixedResourceBinding) error {
 		return err
 	}
 	return tx.Record("observed")
+}
+
+// FixedPristineRecord recognizes formats that never erased submitted attempts.
+// Other formats must use fresh-invocation admission instead of this predicate.
+func FixedPristineRecord(claim LeaseClaim, kind FixedLeaseKind, scopePrefix string) bool {
+	intent := claim.FixedCreateIntent
+	if !kind.IsFixedClaim(claim) || intent.Version != kind.IntentVersion || intent.State != "prepared" ||
+		!IsCanonicalLeaseID(claim.LeaseID) || intent.Slug == "" || claim.Slug != intent.Slug || claim.ProviderScope != intent.ProviderScope ||
+		len(intent.Attempt) != 0 || len(intent.FailedAttempts) != 0 || len(claim.Labels) != 0 ||
+		claim.CloudID != "" || claim.CloudImmutableID != "" || claim.CloudNumericID != 0 || claim.SSHHost != "" || claim.SSHPort != 0 ||
+		claim.StaticHost != "" || claim.StaticUser != "" || claim.StaticPort != "" || claim.StaticWorkRoot != "" {
+		return false
+	}
+	scope, ok := strings.CutPrefix(intent.ProviderScope, scopePrefix)
+	scopeHash, scopeErr := hex.DecodeString(scope)
+	fingerprint, fingerprintErr := hex.DecodeString(intent.Fingerprint)
+	_, timeErr := time.Parse(time.RFC3339Nano, intent.CreatedAt)
+	return ok && scopeErr == nil && len(scopeHash) == 32 && fingerprintErr == nil && len(fingerprint) == 32 && timeErr == nil
+}
+
+func CheckFixedAttemptActive(claim LeaseClaim, identityKey string, cleanupKeys ...string) error {
+	intent := claim.FixedCreateIntent
+	if intent == nil || intent.State == "released" || intent.Attempt[identityKey] == "" {
+		return Exit(4, "fixed lease %s has no active create attempt; it cannot allocate a replacement", claim.LeaseID)
+	}
+	for _, key := range cleanupKeys {
+		if intent.Attempt[key] != "" {
+			return Exit(4, "fixed lease %s has entered cleanup and cannot be reused; retry stop to reconcile deletion", claim.LeaseID)
+		}
+	}
+	return nil
 }
