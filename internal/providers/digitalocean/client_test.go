@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1607,4 +1608,43 @@ func TestDigitalOceanClientRequestEnvelope(t *testing.T) {
 			t.Fatalf("transport calls=%d", calls)
 		}
 	})
+}
+
+func TestAcquireRollbackHTTPStopsBeforeKeyOnDropletDeleteFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name                                 string
+		dropletStatus, keyStatus, wantStatus int
+		wantPaths                            []string
+	}{
+		{name: "droplet failure", dropletStatus: 500, keyStatus: 204, wantStatus: 500, wantPaths: []string{"/droplets/42"}},
+		{name: "droplet absent", dropletStatus: 404, keyStatus: 204, wantPaths: []string{"/droplets/42", "/account/keys/700"}},
+		{name: "deleted", dropletStatus: 204, keyStatus: 204, wantPaths: []string{"/droplets/42", "/account/keys/700"}},
+		{name: "key failure", dropletStatus: 204, keyStatus: 403, wantStatus: 403, wantPaths: []string{"/droplets/42", "/account/keys/700"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var paths []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete {
+					t.Errorf("method=%s", r.Method)
+				}
+				paths = append(paths, r.URL.Path)
+				switch r.URL.Path {
+				case "/droplets/42":
+					w.WriteHeader(tc.dropletStatus)
+				case "/account/keys/700":
+					w.WriteHeader(tc.keyStatus)
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					w.WriteHeader(500)
+				}
+			}))
+			defer server.Close()
+			client := newDigitalOceanTestClient(t, server, "fixture-token")
+			err := rollbackDigitalOceanAcquire(client, 42, 700)
+			var apiErr *digitalOceanAPIError
+			if tc.wantStatus == 0 && err != nil || tc.wantStatus != 0 && (!errors.As(err, &apiErr) || apiErr.Status != tc.wantStatus) || !reflect.DeepEqual(paths, tc.wantPaths) {
+				t.Fatalf("err=%v paths=%v wantStatus=%d wantPaths=%v", err, paths, tc.wantStatus, tc.wantPaths)
+			}
+		})
+	}
 }

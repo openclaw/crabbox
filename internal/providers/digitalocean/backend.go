@@ -1307,18 +1307,15 @@ func rollbackDigitalOceanAcquire(client digitalOceanAPI, dropletID, keyID int64)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	var errs []error
 	if dropletID != 0 {
 		if err := client.DeleteDroplet(ctx, dropletID); err != nil {
-			errs = append(errs, err)
+			return err
 		}
 	}
 	if keyID > 0 {
-		if err := client.DeleteSSHKey(ctx, keyID); err != nil {
-			errs = append(errs, err)
-		}
+		return client.DeleteSSHKey(ctx, keyID)
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 func validateLiveDroplet(item droplet, expected core.Server) error {

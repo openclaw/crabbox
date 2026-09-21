@@ -741,11 +741,50 @@ func TestAcquireRetainsLocalKeyWhenRollbackFails(t *testing.T) {
 	}
 }
 
+func TestAcquireRetainsManagedKeyWhenDropletRollbackFails(t *testing.T) {
+	deleteErr := errors.New("droplet cleanup failed")
+	api := &fakeDigitalOceanAPI{deleteErr: deleteErr}
+	backend := newTestBackend(t, api)
+	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+		return errors.New("ssh unavailable")
+	}
+	_, err := backend.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback-order"})
+	if !errors.Is(err, deleteErr) || len(api.createRequests) != 1 || len(api.created) != 1 || len(api.sshKeys) != 1 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("err=%v creates=%d droplets=%d keys=%d deletedKeys=%v", err, len(api.createRequests), len(api.created), len(api.sshKeys), api.deletedKeyIDs)
+	}
+	claim, ok, err := core.ResolveLeaseClaimForProvider("rollback-order", providerName)
+	if err != nil || !ok || claim.CloudID != "100" || claim.Labels[digitalOceanRecoveryKeyIDLabel] != "700" || claim.Labels[digitalOceanKeyOwnedLabel] != "true" {
+		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, err)
+	}
+	keyPath, err := core.TestboxKeyPath(claim.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("recovery credentials missing: %v", err)
+	}
+	api.deleteErr = nil
+	lease, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: "rollback-order", ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+	if len(api.created) != 0 || len(api.sshKeys) != 0 || len(api.deletedKeyIDs) != 1 || api.deletedKeyIDs[0] != 700 {
+		t.Fatalf("droplets=%v keys=%v deletedKeys=%v", api.created, api.sshKeys, api.deletedKeyIDs)
+	}
+	if _, ok, err := core.ResolveLeaseClaimForProvider("rollback-order", providerName); err != nil || ok {
+		t.Fatalf("claim remains: exists=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("local key remains: %v", err)
+	}
+}
+
 func TestRollbackRetryRefusesReplacedManagedKey(t *testing.T) {
 	api := &fakeDigitalOceanAPI{
-		deleteErr:      errors.New("droplet cleanup failed"),
-		keyDeleteErr:   errors.New("lost key delete response"),
-		deleteKeyOnErr: true,
+		deleteErr: errors.New("droplet cleanup failed"),
 		sshKeys: []sshKey{{
 			ID:        700,
 			Name:      "original",
@@ -758,14 +797,14 @@ func TestRollbackRetryRefusesReplacedManagedKey(t *testing.T) {
 	}
 
 	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "live-rollback"})
-	if err == nil || !strings.Contains(err.Error(), "droplet cleanup failed") || !strings.Contains(err.Error(), "lost key delete response") {
+	if err == nil || !strings.Contains(err.Error(), "droplet cleanup failed") {
 		t.Fatalf("Acquire err=%v", err)
 	}
 	claim, ok, claimErr := core.ResolveLeaseClaimForProvider("live-rollback", providerName)
 	if claimErr != nil || !ok || claim.CloudID != "100" || claim.Labels[digitalOceanRecoveryKeyIDLabel] != "700" {
 		t.Fatalf("cleanup claim=%#v ok=%v err=%v", claim, ok, claimErr)
 	}
-	if len(api.created) != 1 || len(api.sshKeys) != 0 {
+	if len(api.created) != 1 || len(api.sshKeys) != 1 || len(api.deletedKeyIDs) != 0 {
 		t.Fatalf("created=%v sshKeys=%v", api.created, api.sshKeys)
 	}
 
@@ -786,7 +825,7 @@ func TestRollbackRetryRefusesReplacedManagedKey(t *testing.T) {
 	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: lease}); err == nil || !strings.Contains(err.Error(), "different public key") {
 		t.Fatalf("ReleaseLease err=%v", err)
 	}
-	if len(api.deletedKeyIDs) != 1 || api.deletedKeyIDs[0] != 700 || len(api.deletedKeys) != 0 {
+	if len(api.deletedKeyIDs) != 0 || len(api.deletedKeys) != 0 {
 		t.Fatalf("deletedKeyIDs=%v deletedKeys=%v", api.deletedKeyIDs, api.deletedKeys)
 	}
 	if len(api.sshKeys) != 1 || api.sshKeys[0].ID != 701 {

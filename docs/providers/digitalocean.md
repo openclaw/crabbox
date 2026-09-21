@@ -146,6 +146,8 @@ explicit VPC. Do not broaden scopes inside scripts.
 7. Delete the Droplet and managed SSH key on `stop`; `cleanup` deletes only
    resources authorized by the exact revisioned account- and Droplet-bound
    local claim. The Droplet is deleted before a provider-managed SSH key.
+   Acquisition rollback uses the same order: a failed Droplet deletion retains
+   its managed SSH key, local credentials, and cleanup claim for a later retry.
 
 If Droplet creation returns an indeterminate transport or server failure,
 Crabbox retains the SSH credentials and records a pending local recovery claim.

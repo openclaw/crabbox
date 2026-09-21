@@ -17,6 +17,8 @@
 
 ### Fixes
 
+- Retain DigitalOcean managed SSH keys and recovery credentials when acquisition rollback cannot delete the Droplet, allowing cleanup to be retried safely.
+
 - Refresh optional desktop and browser package indexes on prepared Linux images, retry mirror rollovers with bounded deadlines, and reject partial refreshes instead of installing from stale package URLs.
 - Wait for desktop startup readiness and automatically hand off managed Wayland resizing only after verifying retirement of the previous remote client; retain manual guidance for ambiguous or unavailable control. [Issue 2076](https://github.com/openclaw/crabbox/issues/2076).
 - Bound Vast SSH-endpoint readiness requests and retry waits by the startup deadline, preserving cancellation causes without exposing redacted transport secrets. [PR 2448](https://github.com/openclaw/crabbox/pull/2448).
