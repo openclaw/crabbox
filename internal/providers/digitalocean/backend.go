@@ -154,7 +154,7 @@ func (b *digitalOceanLeaseBackend) acquireOnce(ctx context.Context, req core.Acq
 		)
 		claimPersisted := claimErr == nil
 		if cleanupErr := rollbackDigitalOceanAcquire(client, created.ID, cleanupKeyID); cleanupErr != nil {
-			err = fmt.Errorf("%v; digitalocean cleanup failed: %w", err, errors.Join(claimErr, cleanupErr))
+			err = shared.JoinAcquireCleanupError(err, fmt.Errorf("digitalocean cleanup failed: %w", errors.Join(claimErr, cleanupErr)))
 			return
 		}
 		if keyCleanup != nil {
@@ -1295,12 +1295,24 @@ func authorizeDigitalOceanSSHKeyDelete(ctx context.Context, client digitalOceanA
 }
 
 func (b *digitalOceanLeaseBackend) waitForDropletIP(ctx context.Context, client digitalOceanAPI, id int64, timeout time.Duration) (droplet, error) {
-	return shared.PollReady(ctx, timeout, 3*time.Second,
-		func(observeCtx context.Context) (droplet, error) {
-			return client.GetDroplet(observeCtx, id)
+	return shared.PollReadiness(ctx, shared.ReadinessOptions[droplet]{
+		Timeout: timeout, Interval: 3 * time.Second,
+		IsResponseError: func(err error) bool {
+			var apiErr *digitalOceanAPIError
+			return errors.As(err, &apiErr)
 		},
-		func(item droplet) bool { return publicIPv4(item) != "" },
-		core.Exit(5, "timed out waiting for DigitalOcean Droplet IP"))
+		Check: func(item droplet, err error) (bool, error) {
+			return err == nil && publicIPv4(item) != "", err
+		},
+		Diagnostic: func(stop shared.ReadinessStop) error {
+			if stop.BudgetExpired {
+				return core.Exit(5, "timed out waiting for DigitalOcean Droplet IP")
+			}
+			return stop.Cause
+		},
+	}, func(observeCtx context.Context) (droplet, error) {
+		return client.GetDroplet(observeCtx, id)
+	})
 }
 
 func rollbackDigitalOceanAcquire(client digitalOceanAPI, dropletID, keyID int64) error {

@@ -741,6 +741,92 @@ func TestAcquireRetainsLocalKeyWhenRollbackFails(t *testing.T) {
 	}
 }
 
+func TestAcquireCleanupErrorPreservesCausesAndVetoesRetry(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		for _, tc := range []struct {
+			name             string
+			primary, cleanup error
+			wantCode         int
+		}{
+			{name: "timeout", primary: core.Exit(5, "timed out waiting for SSH"), cleanup: errors.New("key cleanup denied"), wantCode: 5},
+			{name: "cancellation", primary: context.Canceled, cleanup: errors.New("key cleanup denied"), wantCode: 1},
+			{name: "primary exit wins", primary: core.Exit(5, "timed out waiting for SSH"), cleanup: core.Exit(9, "key cleanup denied"), wantCode: 5},
+		} {
+			t.Run(tc.name+"/keep="+strconv.FormatBool(keep), func(t *testing.T) {
+				api := &fakeDigitalOceanAPI{keyDeleteErr: tc.cleanup}
+				backend := newTestBackend(t, api)
+				var stderr bytes.Buffer
+				backend.RT.Stderr = &stderr
+				backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error { return tc.primary }
+				_, err := backend.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "cause-retained", Keep: keep})
+				code := 1
+				var exit core.ExitError
+				if core.AsExitError(err, &exit) {
+					code = exit.Code
+				}
+				if !errors.Is(err, tc.primary) || !errors.Is(err, tc.cleanup) || code != tc.wantCode || len(api.createRequests) != 1 {
+					t.Fatalf("err=%v code=%d wantCode=%d attempts=%d", err, code, tc.wantCode, len(api.createRequests))
+				}
+				if !strings.Contains(stderr.String(), "key cleanup denied") || !strings.Contains(stderr.String(), "refusing a fresh lease retry") || strings.Contains(stderr.String(), "retrying with fresh lease") {
+					t.Fatalf("cleanup warning=%q", stderr.String())
+				}
+				claim, ok, claimErr := core.ResolveLeaseClaimForProvider("cause-retained", providerName)
+				if claimErr != nil || !ok || claim.CloudID != "100" {
+					t.Fatalf("claim=%#v exists=%v err=%v", claim, ok, claimErr)
+				}
+				keyPath, pathErr := core.TestboxKeyPath(claim.LeaseID)
+				if pathErr != nil {
+					t.Fatal(pathErr)
+				}
+				if _, statErr := os.Stat(keyPath); statErr != nil {
+					t.Fatalf("retained key missing: %v", statErr)
+				}
+			})
+		}
+	}
+}
+
+func TestAcquireReadinessCancellationWinsSecondaryCleanupTimeout(t *testing.T) {
+	primary := core.Exit(7, "caller stopped acquisition")
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	api := &fakeDigitalOceanAPI{deleteErr: context.DeadlineExceeded, getFn: func(observeCtx context.Context, _ int64) (droplet, error) {
+		cancel(primary)
+		return droplet{}, observeCtx.Err()
+	}}
+	backend := newTestBackend(t, api)
+	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+		t.Fatal("canceled IP wait reached SSH bootstrap")
+		return nil
+	}
+	_, err := backend.Acquire(ctx, core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "cancel-cleanup"})
+	if !errors.Is(err, primary) || !errors.Is(err, context.Canceled) || !errors.Is(err, context.DeadlineExceeded) || core.ExitCodeForError(err, 1) != 7 || len(api.createRequests) != 1 || len(api.deletedKeyIDs) != 0 {
+		t.Fatalf("err=%v code=%d creates=%d deletedKeys=%v", err, core.ExitCodeForError(err, 1), len(api.createRequests), api.deletedKeyIDs)
+	}
+	got := core.FinalizeRunResult(core.RunResult{}, err)
+	want := core.FinalizeRunResult(core.RunResult{}, context.Canceled)
+	if got.Status != want.Status || got.ErrorKind != want.ErrorKind {
+		t.Fatalf("outcome=%s/%s want=%s/%s", got.Status, got.ErrorKind, want.Status, want.ErrorKind)
+	}
+}
+
+func TestAcquireStillRetriesAfterSuccessfulRollback(t *testing.T) {
+	api := &fakeDigitalOceanAPI{}
+	backend := newTestBackend(t, api)
+	calls := 0
+	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+		calls++
+		if calls == 1 {
+			return core.Exit(5, "timed out waiting for SSH")
+		}
+		return nil
+	}
+	_, err := backend.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "safe-retry"})
+	if err != nil || calls != 2 || len(api.createRequests) != 2 || len(api.deleted) != 1 || len(api.deletedKeyIDs) != 1 {
+		t.Fatalf("err=%v calls=%d creates=%d deleted=%v keys=%v", err, calls, len(api.createRequests), api.deleted, api.deletedKeyIDs)
+	}
+}
+
 func TestAcquireRetainsManagedKeyWhenDropletRollbackFails(t *testing.T) {
 	deleteErr := errors.New("droplet cleanup failed")
 	api := &fakeDigitalOceanAPI{deleteErr: deleteErr}

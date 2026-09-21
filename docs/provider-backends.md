@@ -1303,7 +1303,7 @@ observation sequencing. Construct it at the adapter's existing resolution
 boundary; keep ownership validation, readiness, terminal states, retry policy,
 and status-view fields in the adapter.
 
-Vast and RunPod ordinary acquisition waits use `shared.PollReadiness` for the
+DigitalOcean, Vast, and RunPod ordinary acquisition waits use `shared.PollReadiness` for the
 elapsed-time budget, interrupted-read classification, completed-observation
 precedence, and cause-preserving termination errors. Adapters supply their typed
 response-error predicate, readiness and retry decisions, optional sleep/backoff,

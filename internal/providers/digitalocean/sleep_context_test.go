@@ -3,8 +3,10 @@ package digitalocean
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -103,5 +105,76 @@ func TestPendingRecoveryUsesExactPollCount(t *testing.T) {
 	_, found, err := backend.reconcilePendingRecovery(context.Background(), api, core.LeaseClaim{LeaseID: "cbx_abcdef123456", Slug: "late"}, "team:test")
 	if err != nil || found || listCalls != 4 {
 		t.Fatalf("found=%v err=%v listCalls=%d", found, err, listCalls)
+	}
+}
+
+func TestWaitForDropletIPPreservesCallerCauseDuringRead(t *testing.T) {
+	for _, returnCause := range []bool{false, true} {
+		t.Run(fmt.Sprint(returnCause), func(t *testing.T) {
+			cause := core.Exit(7, "caller stopped acquisition")
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			api := &fakeDigitalOceanAPI{getFn: func(observeCtx context.Context, _ int64) (droplet, error) {
+				cancel(cause)
+				if returnCause {
+					return droplet{}, context.Cause(observeCtx)
+				}
+				return droplet{}, observeCtx.Err()
+			}}
+			got, err := new(digitalOceanLeaseBackend).waitForDropletIP(ctx, api, 42, time.Minute)
+			var exit core.ExitError
+			if got.ID != 0 || !errors.Is(err, cause) || !errors.Is(err, context.Canceled) || !core.AsExitError(err, &exit) || exit.Code != 7 || err.Error() != cause.Error() || api.getCalls != 1 {
+				t.Fatalf("droplet=%#v err=%v exit=%#v calls=%d", got, err, exit, api.getCalls)
+			}
+		})
+	}
+}
+
+func TestWaitForDropletIPPreservesBudgetCause(t *testing.T) {
+	for _, phase := range []string{"read", "sleep"} {
+		t.Run(phase, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				api := &fakeDigitalOceanAPI{getFn: func(ctx context.Context, _ int64) (droplet, error) {
+					if phase == "read" {
+						<-ctx.Done()
+						return droplet{}, ctx.Err()
+					}
+					return droplet{ID: 42}, nil
+				}}
+				parent := t.Context()
+				got, err := new(digitalOceanLeaseBackend).waitForDropletIP(parent, api, 42, time.Second)
+				var exit core.ExitError
+				if got.ID != 0 || !errors.Is(err, context.DeadlineExceeded) || !core.AsExitError(err, &exit) || exit.Code != 5 || err.Error() != "timed out waiting for DigitalOcean Droplet IP" || api.getCalls != 1 || parent.Err() != nil {
+					t.Fatalf("droplet=%#v err=%v exit=%#v calls=%d parent=%v", got, err, exit, api.getCalls, parent.Err())
+				}
+			})
+		})
+	}
+}
+
+func TestWaitForDropletIPCompletedResponseWinsCancellation(t *testing.T) {
+	for _, ready := range []bool{false, true} {
+		t.Run(fmt.Sprint(ready), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			responseErr := errors.Join(&digitalOceanAPIError{Status: 403}, context.Canceled)
+			api := &fakeDigitalOceanAPI{getFn: func(context.Context, int64) (droplet, error) {
+				cancel()
+				if !ready {
+					return droplet{}, responseErr
+				}
+				var item droplet
+				item.ID = 42
+				item.Networks.V4 = append(item.Networks.V4, struct {
+					IPAddress string `json:"ip_address"`
+					Type      string `json:"type"`
+				}{IPAddress: "203.0.113.42", Type: "public"})
+				return item, nil
+			}}
+			got, err := new(digitalOceanLeaseBackend).waitForDropletIP(ctx, api, 42, time.Minute)
+			if ready && (err != nil || got.ID != 42) || !ready && err != responseErr || api.getCalls != 1 {
+				t.Fatalf("droplet=%#v err=%v calls=%d", got, err, api.getCalls)
+			}
+		})
 	}
 }

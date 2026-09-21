@@ -1648,3 +1648,23 @@ func TestAcquireRollbackHTTPStopsBeforeKeyOnDropletDeleteFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestDigitalOceanReadinessDeadlineCancelsNativeHTTPClient(t *testing.T) {
+	received := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(received)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	client := newDigitalOceanTestClient(t, server, "fixture-token")
+	_, err := new(digitalOceanLeaseBackend).waitForDropletIP(t.Context(), client, 42, 100*time.Millisecond)
+	select {
+	case <-received:
+	default:
+		t.Fatal("request did not reach native HTTP handler")
+	}
+	var exit core.ExitError
+	if !errors.Is(err, context.DeadlineExceeded) || !core.AsExitError(err, &exit) || exit.Code != 5 || err.Error() != "timed out waiting for DigitalOcean Droplet IP" {
+		t.Fatalf("err=%v exit=%#v", err, exit)
+	}
+}

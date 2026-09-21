@@ -149,6 +149,17 @@ explicit VPC. Do not broaden scopes inside scripts.
    Acquisition rollback uses the same order: a failed Droplet deletion retains
    its managed SSH key, local credentials, and cleanup claim for a later retry.
 
+When rollback fails, the original acquisition error and cleanup errors remain
+inspectable, and the original exit code keeps precedence. Crabbox reports the
+cleanup failure and does not automatically retry that failed acquisition with
+a fresh allocation. A successful rollback still permits the existing bootstrap
+retry behavior.
+
+The public-IP wait bounds both API reads and polling delays. Its own timeout
+retains exit code 5 and the existing timeout message while preserving deadline
+identity. Caller cancellation retains its original cause and diagnostic, including
+when it interrupts a lookup; completed provider responses keep precedence.
+
 If Droplet creation returns an indeterminate transport or server failure,
 Crabbox retains the SSH credentials and records a pending local recovery claim.
 `crabbox stop --provider digitalocean <lease-or-slug>` reconciles that claim and
