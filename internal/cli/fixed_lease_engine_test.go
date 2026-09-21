@@ -161,3 +161,45 @@ func TestFixedEngineRetainsUncertainAttemptAndRejectsDuplicates(t *testing.T) {
 		t.Fatal("terminal ID reopened")
 	}
 }
+
+func TestFixedEngineNeverResubmitsBoundClaim(t *testing.T) {
+	isolateTestUserDirs(t)
+	kind := FixedLeaseKind{ClaimProvider: "fixture-fixed", IntentVersion: 1, Label: "fixture"}
+	const id = "cbx_abcdef123409"
+	err := WithDurableLeaseClaimLock(id, func(c *LeaseClaim, _ bool, persist func() error) error {
+		*c = LeaseClaim{LeaseID: id, Provider: kind.ClaimProvider, ProviderScope: "scope", Slug: "fixture", CloudID: "bound", CloudImmutableID: "generation", FixedCreateIntent: &FixedCreateIntent{Version: 1, Fingerprint: "hash", ProviderScope: "scope", Slug: "fixture", CreatedAt: "2026-09-20T00:00:00Z", State: "prepared"}}
+		return persist()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := ReadLeaseClaim(id)
+	ops := FixedLeaseOperations[string]{
+		DescribeIntent: func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error) {
+			return FixedLeaseBinding{ProviderScope: "scope", Fingerprint: "hash", Slug: "fixture"}, nil
+		},
+		// Even an adapter reporting eligible absence cannot replace a bound ID.
+		ObserveExact: func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[string], error) {
+			return FixedObservation[string]{CanSubmit: true}, nil
+		},
+		PlanAttempt: func(context.Context, *FixedTransaction) error {
+			t.Fatal("planned a replacement for bound identity")
+			return nil
+		},
+		Submit: func(context.Context, *FixedTransaction) (string, error) {
+			t.Fatal("resubmitted bound identity")
+			return "", nil
+		},
+		PrepareAccess: func(context.Context, *FixedTransaction, string) (LeaseTarget, error) {
+			t.Fatal("prepared access without observation")
+			return LeaseTarget{}, nil
+		},
+	}
+	if _, err := AcquireFixedResource(t.Context(), FixedAcquireOptions{Kind: kind, LeaseID: id}, ops); err == nil || !strings.Contains(err.Error(), "lease_id_conflict") {
+		t.Fatal(err)
+	}
+	after, _ := ReadLeaseClaim(id)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("rejected replacement changed custody")
+	}
+}

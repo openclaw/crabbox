@@ -251,13 +251,41 @@ type IdempotentLeaseIDBackend interface {
 }
 ```
 
-Direct AWS, Machine0, local-container, and Proxmox backends implement this capability;
-coordinator-backed leases support it through the coordinator wrapper. External
+The AWS, Azure, DigitalOcean, Daytona, Incus, Machine0, local-container, Parallels,
+Proxmox, and Tenki direct backends implement this capability; coordinator-backed
+leases support it through the coordinator wrapper. External
 backends support it only when their configured protocol explicitly advertises
 idempotent lease IDs. `crabbox warmup --lease-id` rejects other backends before
-provisioning. Built-in direct adapters reuse `core.AcquireFixedLease` for
-durable intent and replay mechanics while keeping resource creation,
-reconciliation, and identity validation provider-owned.
+provisioning. Built-in direct adapters use `core.AcquireFixedResource` and
+`core.FixedLeaseOperations[T]`: `DescribeIntent`, `PlanAttempt`, `ObserveExact`,
+`Submit`, `PrepareAccess`, and `DeleteExact`. Core persists the normalized intent,
+checks replay cardinality and bound identity, journals attempts, and publishes
+acquired and terminal records. Adapters project native create fields through
+`core.FixedIntentFingerprint` without changing their established JSON schemas or
+domain prefixes, and supply native scope, identity, and deletion evidence.
+
+`CanSubmit` requires positive native evidence that submission is safe; an empty
+inventory alone never grants it. `Submit` must call `tx.Record("submitting")`
+before admitting allocation. APIs that resolve prerequisites during submission
+opt into `PlanDuringSubmit` and journal each resolved attempt before allocation.
+Only a provider-certified definite failure may call `tx.RejectAttempt`; unknown
+outcomes retain their attempt. A bound resource cannot be replaced even if an
+adapter reports submission eligibility.
+
+`core.InspectFixedResource` cannot persist or prepare access.
+`core.DeleteFixedResource` keeps claim comparison, native proof, and terminal
+publication under one durable claim lock. Existing shared claim resolvers and
+native cleanup graphs remain reusable; a deletion callback must prove completion,
+not merely request admission. `FixedLeaseKind.AfterTerminal`, when needed, cleans
+local lease artifacts after durable terminal publication while retaining that
+same claim fence. Native absence-only recovery is a separate proof path.
+
+New writes add a versioned journal to the original intent envelope. Legacy records
+without a journal remain readable; their missing evidence never becomes permission
+to submit. Native attempt payloads, hashes, provider markers, and selected receipt
+identity labels retain their existing meaning. External providers keep their
+controller-acknowledged delegated protocol and exact-resource rollback contract;
+their legacy records are not promoted into this engine.
 
 Cleanup is optional:
 

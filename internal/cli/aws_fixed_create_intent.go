@@ -3,7 +3,6 @@ package cli
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -90,12 +89,11 @@ func FixedAWSCreateIntentFingerprint(cfg Config, req FixedAWSCreateIntentRequest
 	if err != nil {
 		return "", err
 	}
-	data, err := json.Marshal(intent)
+	fingerprint, err := FixedIntentFingerprint("crabbox-fixed-aws-create-intent-v2\x00", intent)
 	if err != nil {
 		return "", fmt.Errorf("encode fixed AWS create intent: %w", err)
 	}
-	digest := sha256.Sum256(append([]byte("crabbox-fixed-aws-create-intent-v2\x00"), data...))
-	return hex.EncodeToString(digest[:]), nil
+	return fingerprint, nil
 }
 
 func fixedAWSCreateIntentForConfig(cfg Config, req FixedAWSCreateIntentRequest) (fixedAWSCreateIntent, error) {

@@ -40,6 +40,8 @@ type FixedTransaction struct {
 	immutableID string
 	leaseID     string
 	provider    string
+	attempt     map[string]string
+	failures    []string
 	persist     func() error
 }
 
@@ -48,7 +50,8 @@ func newFixedTransaction(claim *LeaseClaim, fresh bool, persist func() error) (*
 		return nil, err
 	}
 	return &FixedTransaction{Claim: claim, Fresh: fresh, initial: *claim.FixedCreateIntent,
-		cloudID: claim.CloudID, immutableID: claim.CloudImmutableID, leaseID: claim.LeaseID, provider: claim.Provider, persist: persist}, nil
+		cloudID: claim.CloudID, immutableID: claim.CloudImmutableID, leaseID: claim.LeaseID, provider: claim.Provider,
+		attempt: maps.Clone(claim.FixedCreateIntent.Attempt), failures: append([]string(nil), claim.FixedCreateIntent.FailedAttempts...), persist: persist}, nil
 }
 
 func validateFixedJournal(intent *FixedCreateIntent) error {
@@ -70,10 +73,16 @@ func validateFixedJournal(intent *FixedCreateIntent) error {
 
 func (tx *FixedTransaction) Record(phase string) error {
 	i := tx.Claim.FixedCreateIntent
-	if tx.Claim.LeaseID != tx.leaseID || tx.Claim.Provider != tx.provider || i == nil || i.Version != tx.initial.Version || i.Fingerprint != tx.initial.Fingerprint ||
+	if tx.Claim.LeaseID != tx.leaseID || tx.Claim.Provider != tx.provider || tx.Claim.Slug != tx.initial.Slug || i == nil || i.Version != tx.initial.Version || i.Fingerprint != tx.initial.Fingerprint ||
 		i.ProviderScope != tx.initial.ProviderScope || i.CheckpointID != tx.initial.CheckpointID ||
 		i.Slug != tx.initial.Slug || i.CreatedAt != tx.initial.CreatedAt {
 		return Exit(4, "lease_id_conflict: fixed intent changed during transaction")
+	}
+	if err := validateFixedJournal(i); err != nil {
+		return err
+	}
+	if phase == "submitting" && (i.State != "prepared" || len(i.Attempt) == 0) {
+		return Exit(4, "lease_id_conflict: submission has no prepared native attempt")
 	}
 	if (tx.cloudID != "" && tx.Claim.CloudID != tx.cloudID) ||
 		(tx.immutableID != "" && tx.Claim.CloudImmutableID != tx.immutableID) {
@@ -86,7 +95,7 @@ func (tx *FixedTransaction) Record(phase string) error {
 	revision := uint64(1)
 	if i.Journal != nil {
 		revision = i.Journal.Revision
-		if i.Journal.Phase != phase {
+		if i.Journal.Phase != phase || !maps.Equal(i.Attempt, tx.attempt) || !reflect.DeepEqual(i.FailedAttempts, tx.failures) {
 			revision++
 		}
 	}
@@ -98,6 +107,7 @@ func (tx *FixedTransaction) Record(phase string) error {
 		return err
 	}
 	tx.cloudID, tx.immutableID = tx.Claim.CloudID, tx.Claim.CloudImmutableID
+	tx.attempt, tx.failures = maps.Clone(i.Attempt), append([]string(nil), i.FailedAttempts...)
 	return nil
 }
 
@@ -123,12 +133,15 @@ const (
 // transaction. PlanAttempt only prepares evidence; Submit records admission at
 // the native mutation boundary through tx.Record("submitting").
 type FixedLeaseOperations[T any] struct {
-	DescribeIntent func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error)
-	PlanAttempt    func(context.Context, *FixedTransaction) error
-	ObserveExact   func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[T], error)
-	Submit         func(context.Context, *FixedTransaction) (T, error)
-	PrepareAccess  func(context.Context, *FixedTransaction, T) (LeaseTarget, error)
-	DeleteExact    func(context.Context, *FixedTransaction, T) error
+	// Some APIs resolve prerequisite IDs inside submission. Each resolved
+	// attempt must still be journaled before admitting the target allocation.
+	PlanDuringSubmit bool
+	DescribeIntent   func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error)
+	PlanAttempt      func(context.Context, *FixedTransaction) error
+	ObserveExact     func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[T], error)
+	Submit           func(context.Context, *FixedTransaction) (T, error)
+	PrepareAccess    func(context.Context, *FixedTransaction, T) (LeaseTarget, error)
+	DeleteExact      func(context.Context, *FixedTransaction, T) error
 }
 
 // AcquireFixedResource keeps the existing claim envelope and all native
@@ -166,13 +179,13 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 		if len(observation.Candidates) == 1 {
 			resource = observation.Candidates[0]
 		} else {
-			if !observation.CanSubmit || claim.FixedCreateIntent.State != "prepared" {
+			if !observation.CanSubmit || claim.FixedCreateIntent.State != "prepared" || claim.CloudID != "" || claim.CloudNumericID != 0 || claim.CloudImmutableID != "" {
 				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed %s lease %s has an unresolved or missing resource; retain its claim for recovery", opts.Kind.Label, claim.LeaseID)
 			}
 			if err := ops.PlanAttempt(ctx, tx); err != nil {
 				return LeaseTarget{}, err
 			}
-			if len(claim.FixedCreateIntent.Attempt) == 0 {
+			if len(claim.FixedCreateIntent.Attempt) == 0 && !ops.PlanDuringSubmit {
 				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed lease submission has no native attempt")
 			}
 			if err := tx.Record("prepared"); err != nil {
@@ -181,6 +194,9 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 			resource, err = ops.Submit(ctx, tx)
 			if err != nil {
 				return LeaseTarget{}, err
+			}
+			if len(claim.FixedCreateIntent.Attempt) == 0 {
+				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed %s lease %s has no valid durable launch attempt after provisioning", opts.Kind.Label, claim.LeaseID)
 			}
 		}
 		lease, err := ops.PrepareAccess(ctx, tx, resource)
@@ -266,7 +282,13 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 			return err
 		}
 		if claim.FixedCreateIntent.State == "released" {
-			return kind.ValidateTerminalClaim(*claim, expected, claim.LeaseID, nil)
+			if err := kind.ValidateTerminalClaim(*claim, expected, claim.LeaseID, nil); err != nil {
+				return err
+			}
+			if kind.AfterTerminal != nil {
+				return kind.AfterTerminal(*claim)
+			}
+			return nil
 		}
 		if len(observed.Candidates) == 0 {
 			if !observed.AbsenceProven {
@@ -289,7 +311,55 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 			now = clock[0]
 		}
 		*claim = kind.TerminalClaim(*claim, now().UTC())
-		return persist()
+		if err := persist(); err != nil {
+			return err
+		}
+		if kind.AfterTerminal != nil {
+			return kind.AfterTerminal(*claim)
+		}
+		return nil
+	})
+}
+
+func (tx *FixedTransaction) FailedAttemptSet() map[string]bool {
+	failed := make(map[string]bool, len(tx.Claim.FixedCreateIntent.FailedAttempts))
+	for _, token := range tx.Claim.FixedCreateIntent.FailedAttempts {
+		failed[token] = true
+	}
+	return failed
+}
+
+// RejectAttempt requires a provider-certified definite failure. Transport
+// uncertainty must never call this: it retains the current attempt instead.
+func (tx *FixedTransaction) RejectAttempt(kind FixedLeaseKind, token string, terminal bool, now time.Time) error {
+	intent := tx.Claim.FixedCreateIntent
+	if !kind.IsFixedClaim(*tx.Claim) || intent.Version != kind.IntentVersion || intent.State != "prepared" || token == "" || tx.Claim.CloudID != "" || tx.Claim.CloudNumericID != 0 || tx.Claim.CloudImmutableID != "" {
+		return Exit(4, "lease_id_conflict: cannot reject a bound or unidentified fixed attempt")
+	}
+	if terminal {
+		*tx.Claim = kind.TerminalClaim(*tx.Claim, now)
+		return tx.persist()
+	}
+	if !tx.FailedAttemptSet()[token] {
+		intent.FailedAttempts = append(intent.FailedAttempts, token)
+	}
+	intent.Attempt = nil
+	return tx.Record("prepared")
+}
+
+func finalizeFixedLeaseWithArtifacts(kind FixedLeaseKind, expected, terminal LeaseClaim, deleteExact func() error) error {
+	return WithDurableLeaseClaimLock(expected.LeaseID, func(claim *LeaseClaim, exists bool, persist func() error) error {
+		if !exists || !reflect.DeepEqual(*claim, expected) {
+			return Exit(2, "lease %s claim changed; retry", expected.LeaseID)
+		}
+		if err := deleteExact(); err != nil {
+			return err
+		}
+		*claim = terminal
+		if err := persist(); err != nil {
+			return err
+		}
+		return kind.AfterTerminal(*claim)
 	})
 }
 

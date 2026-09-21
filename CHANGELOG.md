@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Consolidate Parallels, Tenki, Proxmox, Incus, Azure, DigitalOcean, Daytona, Machine0, and local-container fixed-lease acquisition and deletion on a shared transaction engine with versioned journals and compatibility for existing intent and receipt records.
+- Consolidate built-in fixed-lease transactions on a shared engine with durable attempt journals, exact-resource replay, terminal receipts, and compatibility for existing records; retain the external provider’s delegated protocol.
 
 ### Fixes
 

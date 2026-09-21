@@ -15,6 +15,9 @@ type FixedLeaseKind struct {
 	// DeletionState retains native validators' existing on-disk cleanup marker.
 	DeletionState  string
 	ResourcePlural string
+	// AfterTerminal cleans local lease-owned artifacts under the claim fence,
+	// after the receipt is durable. Failure must not undo remote completion.
+	AfterTerminal func(LeaseClaim) error
 	// TerminalIdentityLabels opts into retaining resource/repository identity
 	// and only these immutable labels. Other kinds keep compact tombstones.
 	TerminalIdentityLabels []string
@@ -61,6 +64,9 @@ func (k FixedLeaseKind) FinalizeAfterCleanup(claim LeaseClaim, action func() err
 		return RemoveLeaseClaimIfUnchangedAfter(claim.LeaseID, claim, action)
 	}
 	tombstone := k.TerminalClaim(claim, time.Now().UTC())
+	if k.AfterTerminal != nil {
+		return finalizeFixedLeaseWithArtifacts(k, claim, tombstone, action)
+	}
 	_, err := ReplaceLeaseClaimIfUnchangedDurableAfter(claim.LeaseID, claim, tombstone, action)
 	return err
 }
