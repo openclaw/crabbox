@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -481,6 +482,39 @@ func TestClientErrorRedactsSecrets(t *testing.T) {
 		if strings.Contains(msg, leaked) {
 			t.Fatalf("error leaked %q: %s", leaked, msg)
 		}
+	}
+}
+
+func TestClientPreservesStatusWhenResponseBodyIsTruncated(t *testing.T) {
+	for _, code := range []int{http.StatusOK, http.StatusNotFound} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Length", "1024")
+				w.WriteHeader(code)
+				_, _ = w.Write([]byte("app-secret consumer-key"))
+			}))
+			defer server.Close()
+			client := newTestClient(t, server.URL)
+			_, err := client.ListProjects(context.Background())
+			if code == http.StatusOK {
+				if !errors.Is(err, io.ErrUnexpectedEOF) || err.Error() != "ovh GET /cloud/project response body: unexpected EOF" {
+					t.Fatalf("success-body read error=%v", err)
+				}
+				return
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.Status != code || apiErr.Operation != "GET /cloud/project" {
+				t.Fatalf("typed status was lost: %v", err)
+			}
+			if !strings.HasSuffix(apiErr.Body, "; response body read failed: unexpected EOF") {
+				t.Fatalf("partial-read diagnostic=%q", apiErr.Body)
+			}
+			for _, secret := range []string{"app-secret", "consumer-key"} {
+				if strings.Contains(apiErr.Body, secret) {
+					t.Fatalf("partial body retained credential fixture %q", secret)
+				}
+			}
+		})
 	}
 }
 

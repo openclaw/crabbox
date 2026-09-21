@@ -98,6 +98,80 @@ type responseBodyProbe struct {
 	closed  int
 }
 
+func TestDecodeStatusFirstJSONResponse(t *testing.T) {
+	readErr := errors.New("ordinary read failure")
+	apiErr := errors.New("typed adapter error")
+	for _, tc := range []struct {
+		name, body, wantValue string
+		code                  int
+		nilOutput             bool
+		readErr               error
+		wantAPI, wantSyntax   bool
+	}{
+		{name: "json", code: 200, body: `{"value":"new"}`, wantValue: "new"},
+		{name: "empty", code: 204, wantValue: "old"},
+		{name: "whitespace", code: 200, body: " \t\n", wantValue: "old", wantSyntax: true},
+		{name: "null", code: 200, body: "null", wantValue: "old"},
+		{name: "nil output", code: 200, body: "not JSON", nilOutput: true, wantValue: "old"},
+		{name: "last success", code: 299, body: `{"value":"new"}`, wantValue: "new"},
+		{name: "malformed", code: 200, body: "{", wantValue: "old", wantSyntax: true},
+		{name: "trailing JSON", code: 200, body: "{} {}", wantValue: "old", wantSyntax: true},
+		{name: "success read failure", code: 200, body: `{"value":"new"}`, readErr: readErr, wantValue: "old"},
+		{name: "nil output read failure", code: 204, nilOutput: true, readErr: readErr, wantValue: "old"},
+		{name: "below success", code: 199, body: " raw error \n", wantAPI: true, wantValue: "old"},
+		{name: "above success", code: 300, body: " raw error \n", wantAPI: true, wantValue: "old"},
+		{name: "status before partial read failure", code: 404, body: " partial error \n", readErr: readErr, wantAPI: true, wantValue: "old"},
+		{name: "status before empty read failure", code: 500, readErr: readErr, wantAPI: true, wantValue: "old"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := &responseBodyProbe{Reader: strings.NewReader(tc.body), readErr: tc.readErr}
+			resp := &http.Response{StatusCode: tc.code, Body: body}
+			value := struct{ Value string }{Value: "old"}
+			var out any = &value
+			if tc.nilOutput {
+				out = nil
+			}
+			calls := 0
+			err := DecodeStatusFirstJSONResponse(resp, out, "example GET /resource", func(code int, data []byte, cause error) error {
+				calls++
+				if code != tc.code || !bytes.Equal(data, []byte(tc.body)) || cause != tc.readErr {
+					t.Fatalf("adapter arguments changed: code=%d data=%q cause=%v", code, data, cause)
+				}
+				if body.closed != 0 {
+					t.Fatal("body closed before adapter error factory")
+				}
+				return apiErr
+			})
+			switch {
+			case tc.wantAPI:
+				if err != apiErr || calls != 1 {
+					t.Fatalf("typed adapter error lost: err=%v calls=%d", err, calls)
+				}
+			case tc.readErr != nil:
+				if !errors.Is(err, readErr) || err.Error() != "example GET /resource response body: ordinary read failure" {
+					t.Fatalf("read error changed: %v", err)
+				}
+			case tc.wantSyntax:
+				var syntax *json.SyntaxError
+				if !errors.As(err, &syntax) || !strings.HasPrefix(err.Error(), "example GET /resource decode: ") {
+					t.Fatalf("decode error changed: %v", err)
+				}
+			default:
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !tc.wantAPI && calls != 0 {
+				t.Fatalf("API factory called on success status: %d", calls)
+			}
+			if value.Value != tc.wantValue || body.read != len(tc.body) || body.closed != 0 {
+				t.Fatalf("value=%q read=%d closed=%d", value.Value, body.read, body.closed)
+			}
+			_ = body.Close()
+		})
+	}
+}
+
 func (b *responseBodyProbe) Read(p []byte) (int, error) {
 	n, err := b.Reader.Read(p)
 	b.read += n

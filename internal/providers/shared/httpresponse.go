@@ -28,6 +28,27 @@ func DecodeUnboundedJSONResponse(resp *http.Response, out any, apiError func(int
 	return nil
 }
 
+// DecodeStatusFirstJSONResponse borrows an unbounded body; the caller closes it.
+// Non-2xx status takes precedence over read errors so the adapter can preserve
+// its typed API error, partial body, and redaction policy. Successful responses
+// wrap read/decode errors with the operation and skip only zero-length bodies.
+func DecodeStatusFirstJSONResponse(resp *http.Response, out any, operation string, apiError func(int, []byte, error) error) error {
+	data, readErr := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return apiError(resp.StatusCode, data, readErr)
+	}
+	if readErr != nil {
+		return fmt.Errorf("%s response body: %w", operation, readErr)
+	}
+	if out == nil || len(data) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("%s decode: %w", operation, err)
+	}
+	return nil
+}
+
 // DecodeBoundedJSONResponse consumes and closes a finite control-plane response.
 // Read failures and overflow take precedence over HTTP status; adapters retain
 // their typed API errors and redaction policy. limit must be positive and below

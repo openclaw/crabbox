@@ -2,10 +2,8 @@ package digitalocean
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"net/http"
 	"net/url"
@@ -161,8 +159,7 @@ func (c *digitalOceanClient) do(ctx context.Context, method, path string, body a
 		return err
 	}
 	defer resp.Body.Close()
-	data, readErr := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	return shared.DecodeStatusFirstJSONResponse(resp, out, "digitalocean "+method+" "+path, func(status int, data []byte, readErr error) error {
 		body := shared.RedactErrorSecrets(strings.TrimSpace(string(data)), c.token)
 		if len(body) > 400 {
 			body = body[:400]
@@ -173,18 +170,8 @@ func (c *digitalOceanClient) do(ctx context.Context, method, path string, body a
 			}
 			body += "response body read failed: " + readErr.Error()
 		}
-		return &digitalOceanAPIError{Operation: method + " " + path, Status: resp.StatusCode, Body: body}
-	}
-	if readErr != nil {
-		return fmt.Errorf("digitalocean %s %s response body: %w", method, path, readErr)
-	}
-	if out == nil || len(data) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("digitalocean %s %s decode: %w", method, path, err)
-	}
-	return nil
+		return &digitalOceanAPIError{Operation: method + " " + path, Status: status, Body: body}
+	})
 }
 
 func (c *digitalOceanClient) ListCrabboxDroplets(ctx context.Context) ([]droplet, error) {

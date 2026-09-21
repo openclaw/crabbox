@@ -67,3 +67,18 @@ whitespace-only bodies skip JSON decoding while retaining their original bytes;
 JSON errors remain unwrapped. Request construction, client selection, multipart
 uploads and transport-error handling stay in their existing callers. This is a
 provider-local contract, not an option added to the shared response helpers.
+
+## Status-first JSON responses
+
+DigitalOcean and OVH share `shared.DecodeStatusFirstJSONResponse` for unbounded
+control-plane bodies. A non-2xx status reaches the adapter's typed API-error
+factory even when reading the body fails; reconciliation must not lose the
+HTTP status to a partial-read error. The adapter receives the original bytes
+and read error and retains its redaction, truncation, and diagnostic policy.
+
+For successful responses, read failures precede JSON decoding. Only a
+zero-length body or nil output skips decoding; whitespace alone is not empty
+JSON. Read and decode errors retain their causes and operation-specific labels.
+The caller still closes the response body. Signing, request construction,
+transport, retries, and provider lifecycle behavior do not move into the helper.
+The existing read-first and bounded decoders retain their distinct contracts.

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 var (
@@ -408,8 +408,7 @@ func (c *Client) do(ctx context.Context, method, requestPath string, body any, o
 		return sanitizeOVHClientError(err)
 	}
 	defer resp.Body.Close()
-	data, readErr := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	return shared.DecodeStatusFirstJSONResponse(resp, out, "ovh "+method+" "+requestPath, func(status int, data []byte, readErr error) error {
 		body := redactSecrets(strings.TrimSpace(string(data)), c.applicationKey, c.applicationSecret, c.consumerKey)
 		if len(body) > 400 {
 			body = body[:400]
@@ -420,18 +419,8 @@ func (c *Client) do(ctx context.Context, method, requestPath string, body any, o
 			}
 			body += "response body read failed: " + readErr.Error()
 		}
-		return &APIError{Operation: method + " " + requestPath, Status: resp.StatusCode, Body: body}
-	}
-	if readErr != nil {
-		return fmt.Errorf("ovh %s %s response body: %w", method, requestPath, readErr)
-	}
-	if out == nil || len(data) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("ovh %s %s decode: %w", method, requestPath, err)
-	}
-	return nil
+		return &APIError{Operation: method + " " + requestPath, Status: status, Body: body}
+	})
 }
 
 func (c *Client) ensureServerTime(ctx context.Context) error {
