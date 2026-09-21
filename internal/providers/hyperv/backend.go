@@ -183,9 +183,10 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		Server:  b.serverFromInstance(hypervVM{Name: name, State: 2}, claim, cfg),
 		LeaseID: leaseID,
 	}
-	if err := persistLease(leaseID, slug, name, cfg, req, provisional); err != nil {
+	if err := persistLease(leaseID, slug, name, cfg, req, &provisional); err != nil {
 		return core.LeaseTarget{}, fmt.Errorf("persist hyperv lease before bootstrap: %w", err)
 	}
+	claim, _, _ = core.ServerLeaseClaimSnapshot(provisional.Server)
 	cleanupKey = false
 	if err := b.createVM(ctx, cfg, name); err != nil {
 		cleanupErr := b.removeVM(context.Background(), name)
@@ -237,7 +238,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
-	if err := persistLease(leaseID, slug, name, cfg, req, lease); err != nil {
+	if err := persistLease(leaseID, slug, name, cfg, req, &lease); err != nil {
 		return core.LeaseTarget{}, errors.Join(err, cleanupFailedLease())
 	}
 	cleanupKey = false
@@ -247,8 +248,13 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 
 // persistLease records ownership before VM creation, then atomically updates
 // the same claim with its SSH endpoint after bootstrap.
-func persistLease(leaseID, slug, name string, cfg core.Config, req core.AcquireRequest, lease core.LeaseTarget) error {
-	return core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, providerName, instanceScope(name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH)
+func persistLease(leaseID, slug, name string, cfg core.Config, req core.AcquireRequest, lease *core.LeaseTarget) error {
+	expected, exists, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+	updated, err := core.ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged(leaseID, slug, cfg, instanceScope(name), lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, expected, exists)
+	if err == nil {
+		core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
+	}
+	return err
 }
 
 func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
@@ -257,8 +263,10 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	server := b.serverFromInstance(inst, claim, cfg)
+	core.SetServerLeaseClaimSnapshot(&server, claim, claim.LeaseID != "")
 	if req.ReleaseOnly {
-		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil
+		return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
 	}
 	if inst.State == hypervMissingState {
 		return core.LeaseTarget{}, core.Exit(4, "hyperv VM %s from claim %s no longer exists; run `crabbox stop --provider hyperv %s` to prune local lease state", inst.Name, claim.LeaseID, claim.LeaseID)
@@ -266,14 +274,15 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if claim.LeaseID == "" {
 		return core.LeaseTarget{}, core.Exit(4, "hyperv instance %q has no Crabbox lease claim; use `crabbox stop --provider hyperv %s` to delete it or warm a new lease", inst.Name, inst.Name)
 	}
-	if req.StatusOnly && !req.ReadyProbe {
-		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil
+	observing := req.StatusOnly || req.NoLocalStateMutations
+	if observing && (inst.State != 2 || !completedAcquisition(claim.Labels)) {
+		return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
 	}
 	owned, err := exactHyperVClaimOwned(claim.LeaseID, inst.Name)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if !owned && !req.Reclaim {
+	if !owned && (!req.Reclaim || observing) {
 		return core.LeaseTarget{}, core.Exit(4, "hyperv lease %q has a legacy claim not bound to VM %q; adopt it with an explicit --reclaim reuse", claim.LeaseID, inst.Name)
 	}
 	if !owned && req.Repo.Root == "" {
@@ -283,12 +292,16 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if ip == "" {
 		ip = b.getIPFromClaim(claim)
 	}
+	if observing && ip == "" {
+		return core.LeaseTarget{Server: server, LeaseID: claim.LeaseID}, nil
+	}
 	lease, err := b.prepareLease(ctx, cfg, inst, ip, claim, false)
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if req.Repo.Root != "" {
-		if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(claim.LeaseID, claim.Slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, lease.Server, lease.SSH); err != nil {
+	core.SetServerLeaseClaimSnapshot(&lease.Server, claim, true)
+	if !observing && req.Repo.Root != "" {
+		if err := persistLease(claim.LeaseID, claim.Slug, inst.Name, cfg, core.AcquireRequest{Repo: req.Repo, Reclaim: req.Reclaim}, &lease); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -450,18 +463,43 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	return nil
 }
 
-func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
+func completedAcquisition(labels map[string]string) bool {
+	return (labels["state"] == "ready" || labels["state"] == "running") && labels["recovery"] == ""
+}
+
+func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	name := instanceNameFromClaim(claim)
+	if name == "" || claim.Provider != providerName || claim.ProviderScope != instanceScope(name) || claim.CloudID != name || lease.LeaseID == "" || lease.LeaseID != claim.LeaseID || lease.Server.Provider != providerName || lease.Server.CloudID != name || lease.Server.Name != name || lease.Server.Labels["instance"] != name {
+		return core.Exit(4, "hyperv lease %s touch identity does not match its claim", lease.LeaseID)
+	}
+	if !completedAcquisition(claim.Labels) || (lease.Server.Status != "ready" && lease.Server.Status != "running") {
+		return core.Exit(4, "hyperv lease %s acquisition is incomplete or instance is inactive; refusing touch", lease.LeaseID)
+	}
+	return nil
+}
+
+func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
+	if req.State != "" && req.State != "ready" && req.State != "running" {
+		return core.Server{}, core.Exit(2, "hyperv touch cannot publish acquisition state %q", req.State)
+	}
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider:  providerName,
+		Authorize: b.AuthorizeStatusTouchClaim,
+		Prepare: func(claim core.LeaseClaim) (map[string]string, time.Time) {
+			now := core.ClockNow(b.rt.Clock).UTC()
+			return core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(shared.ClaimLifecycleLabels(claim), b.configForRun(), req.State, now, req.IdleTimeoutOverride), now
+		},
+	})
+	if err != nil {
+		return core.Server{}, err
+	}
 	server := req.Lease.Server
-	if server.Labels == nil {
-		server.Labels = map[string]string{}
-	}
-	original := server.Labels
-	server.Labels = core.TouchDirectLeaseLabels(original, b.configForRun(), req.State, time.Now().UTC())
-	for _, key := range []string{"image", "instance", "ssh_user", "ssh_port", "work_root"} {
-		if value := strings.TrimSpace(original[key]); value != "" {
-			server.Labels[key] = value
-		}
-	}
+	server.Labels = shared.CloneLabels(updated.Labels)
+	server.Status = server.Labels["state"]
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 
@@ -1213,7 +1251,7 @@ func (b *backend) queryVHDPaths(ctx context.Context, name string) []string {
 }
 
 func (b *backend) serverFromInstance(inst hypervVM, claim core.LeaseClaim, cfg core.Config) core.Server {
-	labels := shared.LabelsWithDefaults(claim.Labels, map[string]string{
+	labels := shared.LabelsWithDefaults(shared.ClaimLifecycleLabels(claim), map[string]string{
 		"crabbox":   "true",
 		"provider":  providerName,
 		"instance":  inst.Name,
@@ -1232,6 +1270,9 @@ func (b *backend) serverFromInstance(inst hypervVM, claim core.LeaseClaim, cfg c
 	server.ServerType.Name = "hyperv"
 	if claim.SSHHost != "" {
 		server.PublicNet.IPv4.IP = claim.SSHHost
+	}
+	if claim.Revision != "" {
+		core.SetServerLeaseClaimSnapshot(&server, claim, true)
 	}
 	return server
 }
