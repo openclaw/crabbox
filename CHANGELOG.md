@@ -4,7 +4,7 @@
 
 ### Fixes
 
-- Preserve caller cancellation causes and timeout classification during Scaleway public-IP readiness without changing its five-minute budget or timeout exit code.
+- Preserve caller cancellation causes and timeout classification during Scaleway public-IP readiness without changing its five-minute budget or timeout exit code. [PR 2468](https://github.com/openclaw/crabbox/pull/2468).
 - Use Vast's native SSH endpoint and stored lease key for plain status readiness checks, avoiding false unready results while keeping observations read-only. [PR 2447](https://github.com/openclaw/crabbox/pull/2447).
 - Preserve underlying Scaleway SDK/configuration errors for diagnostics while retaining redacted messages and exit code 3. [PR 2466](https://github.com/openclaw/crabbox/pull/2466).
 
