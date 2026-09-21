@@ -8,6 +8,8 @@
 
 ### Fixes
 
+- Apple VM: persist heartbeat timestamps and explicit idle-timeout changes across fresh status reads, preserving recorded timeout and TTL policy when the flag is omitted.
+
 - Restore Lume guest bootstrap with named shared directories, authenticated status readiness, and cleanup with quiet partial-match `lsof` output; existing golden images need refreshed hooks. [PR 2409](https://github.com/openclaw/crabbox/pull/2409).
 - Lume: persist heartbeat policy across fresh reads, honor explicit idle-timeout changes, and admit owned instance-scoped leases through the public heartbeat command. [PR 2407](https://github.com/openclaw/crabbox/pull/2407).
 - Persist Tart heartbeat timestamps and explicit idle-timeout changes in the lease claim, preserving them across fresh status reads and cleanup without losing SSH target details. [PR 2405](https://github.com/openclaw/crabbox/pull/2405).
