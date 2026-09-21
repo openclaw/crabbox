@@ -834,11 +834,8 @@ func (b *digitalOceanLeaseBackend) Touch(ctx context.Context, req core.TouchRequ
 	}
 	if req.IdleTimeout > 0 {
 		cfg.IdleTimeout = req.IdleTimeout
-		labels = shared.CloneLabels(labels)
-		delete(labels, "idle_timeout")
-		delete(labels, "idle_timeout_secs")
 	}
-	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, core.ClockNow(b.RT.Clock).UTC())
+	labels = core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(labels, cfg, req.State, core.ClockNow(b.RT.Clock).UTC(), req.IdleTimeoutOverride)
 	for key, value := range liveTailscale {
 		labels[key] = value
 	}
