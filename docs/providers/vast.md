@@ -177,6 +177,11 @@ URLs.
 10. Wait for Crabbox SSH bootstrap readiness and write a local lease claim.
 11. Run normal Crabbox SSH sync, command execution, status, list, and cleanup.
 
+The initial native SSH-endpoint wait has a ten-minute elapsed-time budget that
+bounds both API requests and the gaps between observations. Caller cancellation
+stops the wait without extending that budget; lifecycle timestamps do not control
+it. A completed ready response or terminal provider error retains precedence.
+
 The provider requires Linux. It does not advertise desktop, browser, code-server,
 Tailscale, coordinator, or provider-managed sync support in this release.
 Actions hydration works only as normal command execution on the resulting Linux
