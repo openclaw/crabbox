@@ -43,6 +43,7 @@ type FixedTransaction struct {
 	attempt     map[string]string
 	failures    []string
 	persist     func() error
+	admission   *FixedAdmission
 }
 
 func newFixedTransaction(claim *LeaseClaim, fresh bool, persist func() error) (*FixedTransaction, error) {
@@ -136,18 +137,23 @@ type FixedLeaseOperations[T any] struct {
 	// Some APIs resolve prerequisite IDs inside submission. Each resolved
 	// attempt must still be journaled before admitting the target allocation.
 	PlanDuringSubmit bool
-	DescribeIntent   func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error)
-	PlanAttempt      func(context.Context, *FixedTransaction) error
-	ObserveExact     func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[T], error)
-	Submit           func(context.Context, *FixedTransaction) (T, error)
-	PrepareAccess    func(context.Context, *FixedTransaction, T) (LeaseTarget, error)
-	DeleteExact      func(context.Context, *FixedTransaction, T) error
+	Admission        *FixedAdmission
+	Plan             func(context.Context, LeaseClaim) (FixedAttemptPlan, error)
+	Identity         func(T) FixedResourceBinding
+	// DeferredAdmission fences native prerequisites before recording submission.
+	DeferredAdmission bool
+	DescribeIntent    func(context.Context, *LeaseClaim, bool) (FixedLeaseBinding, error)
+	PlanAttempt       func(context.Context, *FixedTransaction) error
+	ObserveExact      func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[T], error)
+	Submit            func(context.Context, *FixedTransaction) (T, error)
+	PrepareAccess     func(context.Context, *FixedTransaction, T) (LeaseTarget, error)
+	DeleteExact       func(context.Context, *FixedTransaction, T) error
 }
 
 // AcquireFixedResource keeps the existing claim envelope and all native
 // fingerprint/attempt dialects readable while writing the engine journal.
 func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, ops FixedLeaseOperations[T]) (LeaseTarget, error) {
-	if ops.DescribeIntent == nil || ops.PlanAttempt == nil || ops.ObserveExact == nil || ops.Submit == nil || ops.PrepareAccess == nil {
+	if ops.DescribeIntent == nil || (ops.PlanAttempt == nil && ops.Plan == nil) || ops.ObserveExact == nil || ops.Submit == nil || ops.PrepareAccess == nil {
 		return LeaseTarget{}, fmt.Errorf("fixed lease engine requires all acquisition operations")
 	}
 	fresh := false
@@ -168,6 +174,7 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 		if err != nil {
 			return LeaseTarget{}, err
 		}
+		tx.admission = ops.Admission
 		observation, err := ops.ObserveExact(ctx, tx, FixedObserveAcquire)
 		if err != nil {
 			return LeaseTarget{}, err
@@ -179,10 +186,18 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 		if len(observation.Candidates) == 1 {
 			resource = observation.Candidates[0]
 		} else {
-			if !observation.CanSubmit || claim.FixedCreateIntent.State != "prepared" || claim.CloudID != "" || claim.CloudNumericID != 0 || claim.CloudImmutableID != "" {
+			if !observation.CanSubmit || (ops.Admission != nil && !ops.Admission.permits(tx)) || claim.FixedCreateIntent.State != "prepared" || claim.CloudID != "" || claim.CloudNumericID != 0 || claim.CloudImmutableID != "" {
 				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed %s lease %s has an unresolved or missing resource; retain its claim for recovery", opts.Kind.Label, claim.LeaseID)
 			}
-			if err := ops.PlanAttempt(ctx, tx); err != nil {
+			if ops.Plan != nil {
+				plan, err := ops.Plan(ctx, *claim)
+				if err != nil {
+					return LeaseTarget{}, err
+				}
+				if err := tx.plan(plan); err != nil {
+					return LeaseTarget{}, err
+				}
+			} else if err := ops.PlanAttempt(ctx, tx); err != nil {
 				return LeaseTarget{}, err
 			}
 			if len(claim.FixedCreateIntent.Attempt) == 0 && !ops.PlanDuringSubmit {
@@ -191,12 +206,22 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 			if err := tx.Record("prepared"); err != nil {
 				return LeaseTarget{}, err
 			}
+			if ops.Admission != nil && !ops.DeferredAdmission {
+				if err := tx.Admit(); err != nil {
+					return LeaseTarget{}, err
+				}
+			}
 			resource, err = ops.Submit(ctx, tx)
 			if err != nil {
 				return LeaseTarget{}, err
 			}
 			if len(claim.FixedCreateIntent.Attempt) == 0 {
 				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed %s lease %s has no valid durable launch attempt after provisioning", opts.Kind.Label, claim.LeaseID)
+			}
+		}
+		if ops.Identity != nil {
+			if err := tx.Bind(ops.Identity(resource)); err != nil {
+				return LeaseTarget{}, err
 			}
 		}
 		lease, err := ops.PrepareAccess(ctx, tx, resource)
