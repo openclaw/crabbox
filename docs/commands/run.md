@@ -558,12 +558,15 @@ created before this bootstrap change need to be recreated.
 
 Use `--script <file>` or `--script-stdin` for multi-line remote commands. On
 POSIX SSH leases, Crabbox uploads a standalone, content-hashed copy into
-`.crabbox/scripts/` under the remote workdir and executes that copy with the
-workdir as its process PWD. `$0` identifies the generated upload path, so
+`.crabbox/scripts/` under the remote workdir and resolves that copy's absolute
+path before starting the login shell. The process starts in the remote workdir;
+Bash login startup files may select a different directory, which the script
+inherits. `$0` identifies the generated upload path, so
 `dirname "$0"` resolves to `.crabbox/scripts/`, not the script's original local
 directory. That directory component is not preserved in the uploaded copy and
 cannot be recovered from `$0`. Standalone uploaded scripts should resolve
-synced project assets from `$PWD`.
+synced project assets from `$PWD` when startup leaves it in the remote workdir,
+or explicitly select that workdir when startup changes it.
 
 If a Git-managed script needs its synced repository path or adjacent assets,
 invoke it as trailing argv so the project copy runs in place:

@@ -1047,8 +1047,8 @@
     "gpu": "unknown",
     "lifecycle": "Tenki",
     "cleanup": "sandbox release",
-    "bestFit": "Managed Linux sandbox with SSH proxy and retry-safe fixed lease IDs",
-    "caveat": "Fixed IDs require persistent local claims; gateway auth uses Tenki-managed keys and certificates with host-CA verification",
+    "bestFit": "Managed Linux sandbox with SSH proxy",
+    "caveat": "Gateway auth uses Tenki-managed key and certificate files",
     "auth": "Tenki CLI browser auth and Tenki-managed SSH key/cert files; managed remote sandbox provider",
     "docs": "tenki.md"
   },

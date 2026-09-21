@@ -4,7 +4,7 @@
 
 ### Features
 
-- Support retry-safe Tenki fixed lease IDs with durable attempt recovery, exact-session attestation, read-only inspection, and single-use terminal receipts; honor acquisition cancellation and restore uploaded-script workdirs after login-shell startup. [PR 2021](https://github.com/openclaw/crabbox/pull/2021). Thanks @eddiewang.
+- Support retry-safe Tenki fixed lease IDs with durable attempt recovery, exact-session attestation, read-only inspection, and single-use terminal receipts; honor acquisition cancellation and locate uploaded scripts after login startup changes directory. [PR 2021](https://github.com/openclaw/crabbox/pull/2021). Thanks @eddiewang.
 - Add opt-in direct-host Parallels capacity limits through `parallels.maxVMs` and `CRABBOX_PARALLELS_MAX_VMS`, preserve fleet-entry precedence, and let explicit YAML zero clear inherited limits. [PR 2392](https://github.com/openclaw/crabbox/pull/2392), [Issue 2386](https://github.com/openclaw/crabbox/issues/2386). Thanks @saariuslystoned.
 
 ### Fixes
