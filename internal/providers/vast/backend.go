@@ -854,7 +854,7 @@ func projectVastClaim(server core.Server, claim core.LeaseClaim) core.Server {
 	// response must not erase the claim's more precise busy/ready state.
 	if hold := shared.ClaimActivityHoldState(claim); hold != "" {
 		server.Labels["state"] = hold
-	} else if server.Status == "ready" && (server.Labels["state"] == "stopped" || isTerminalVastStatus(server.Labels["state"])) {
+	} else if server.Status == "ready" && (server.Labels["state"] == "provisioning" || server.Labels["state"] == "stopped" || isTerminalVastStatus(server.Labels["state"])) {
 		server.Labels["state"] = server.Status
 	} else if server.Status != "ready" && server.Status != "unknown" && server.Status != "" {
 		server.Labels["state"] = server.Status

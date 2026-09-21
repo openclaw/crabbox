@@ -1217,8 +1217,8 @@ func TestHeartbeatLifecycleSurvivesFreshReads(t *testing.T) {
 	}
 }
 
-func TestRunningObservationClearsOnlyStoredRuntimeTerminalState(t *testing.T) {
-	for _, state := range []string{"stopped", "failed", "exited", "busy", "ready", "deleting", "expired"} {
+func TestRunningObservationClearsOnlyStoredRuntimeState(t *testing.T) {
+	for _, state := range []string{"provisioning", "stopped", "failed", "exited", "busy", "ready", "deleting", "expired"} {
 		t.Run(state, func(t *testing.T) {
 			api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
 			b := newTestBackend(t, api)
@@ -1244,7 +1244,7 @@ func TestRunningObservationClearsOnlyStoredRuntimeTerminalState(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := state
-			if state == "stopped" || state == "failed" || state == "exited" {
+			if state == "provisioning" || state == "stopped" || state == "failed" || state == "exited" {
 				want = "ready"
 			}
 			if observed.Server.Labels["state"] != want {
