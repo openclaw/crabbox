@@ -106,9 +106,10 @@ resource and deletion evidence are preserved independently.
 ## CLI request budgets
 
 Read-only lease lookups (including authoritative provider metadata), lease
-lists and audits, pool inventory, run history/events/logs/receipts, health, identity, and provider readiness
-use a 60-second total read budget. Each attempt allows 30 seconds, including
-authentication, response-body reads, and any eligible read-only curl fallback.
+lists and audits, pool inventory, run history/events/logs, health, identity, and
+provider readiness use a 60-second total read budget. Each attempt allows
+30 seconds, including authentication, response-body reads, and any eligible
+read-only curl fallback.
 An earlier caller deadline always wins, and cancellation interrupts both requests
 and backoff waits.
 
@@ -121,8 +122,11 @@ HTTP 400/401/403/404/409 and other terminal errors return immediately.
 
 The per-attempt deadline stays at 30 seconds to leave room for a fresh request
 within the total budget. Mutations never gain retries through this policy;
-their existing token-bound replay contracts are unchanged. HTTP heartbeats
-retain the 30-minute mutation budget because a changed source policy can require
+their existing token-bound replay contracts are unchanged. Terminal receipt
+verification also keeps its single-request behavior: the run finalization owner
+controls retries and shares its original 60-second deadline with the finish POST
+and receipt GET, without adding the read policy's 30-second attempt cap.
+HTTP heartbeats retain the 30-minute mutation budget because a changed source policy can require
 a provider access refresh. Automatic heartbeats and best-effort foreground
 lease touches retain their shorter 20-second caller budgets. Provisioning and
 image operations retain the 30-minute HTTP budget.

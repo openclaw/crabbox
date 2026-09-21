@@ -1141,6 +1141,54 @@ func TestRunRecorderFinishFailureDiagnostics(t *testing.T) {
 	}
 }
 
+func TestRunRecorderFinishAndReceiptShareOriginalDeadlineBeyondReadAttempt(t *testing.T) {
+	receipt := runRecorderTestReceipt(t)
+	t.Setenv("CRABBOX_OWNER", "alice@example.com")
+	for _, slowPhase := range []string{"finish", "receipt"} {
+		t.Run(slowPhase, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				start := time.Now()
+				var finishRequests, receiptRequests int
+				var progress bytes.Buffer
+				client := &CoordinatorClient{BaseURL: "https://example.test", readRetryWriter: &progress, Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					deadline, ok := req.Context().Deadline()
+					if !ok || !deadline.Equal(start.Add(runRecorderFinishTimeout)) {
+						t.Fatalf("%s %s deadline=%v, want original finish deadline", req.Method, req.URL.Path, deadline)
+					}
+					var phase, body string
+					var code int
+					switch {
+					case req.Method == http.MethodPost && req.URL.Path == "/v1/runs/run_123/finish":
+						finishRequests++
+						phase, code, body = "finish", http.StatusServiceUnavailable, "finish unavailable"
+					case req.Method == http.MethodGet && req.URL.Path == "/v1/runs/run_123/receipt":
+						receiptRequests++
+						phase, code = "receipt", http.StatusOK
+						encoded, err := json.Marshal(map[string]any{"receipt": receipt})
+						if err != nil {
+							t.Fatal(err)
+						}
+						body = string(encoded)
+					default:
+						t.Fatalf("unexpected request %s %s", req.Method, req.URL.Path)
+					}
+					if phase == slowPhase {
+						if err := sleepContext(req.Context(), 35*time.Second); err != nil {
+							return nil, err
+						}
+					}
+					return &http.Response{StatusCode: code, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+				})}}
+				rec := &runRecorder{coord: client, runID: "run_123", stderr: io.Discard}
+				err := rec.Finish(t.Context(), SSHTarget{}, 1, 0, 100*time.Millisecond, "", false, nil, FailureClassification{}, &receipt)
+				if err != nil || !rec.finished || !rec.terminalConfirmed || finishRequests != 1 || receiptRequests != 1 || time.Since(start) != 35*time.Second || progress.Len() != 0 {
+					t.Fatalf("err=%v finished=%v confirmed=%v finish=%d receipt=%d elapsed=%s retries=%q", err, rec.finished, rec.terminalConfirmed, finishRequests, receiptRequests, time.Since(start), progress.String())
+				}
+			})
+		})
+	}
+}
+
 func TestRunRecorderFinishRetriesIdenticalCommit(t *testing.T) {
 	var attempts int
 	var bodies [][]byte

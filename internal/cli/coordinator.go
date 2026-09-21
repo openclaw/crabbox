@@ -2512,11 +2512,13 @@ func (c *CoordinatorClient) RunLogs(ctx context.Context, runID string) (string, 
 	return buf.String(), err
 }
 
+// RunReceipt participates in terminal-commit verification; its owner controls
+// the deadline and replay policy, even though the transport is a GET.
 func (c *CoordinatorClient) RunReceipt(ctx context.Context, runID string) (terminalRunReceipt, error) {
 	var res struct {
 		Receipt json.RawMessage `json:"receipt"`
 	}
-	if err := c.doRead(ctx, "/v1/runs/"+url.PathEscape(runID)+"/receipt", &res); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/v1/runs/"+url.PathEscape(runID)+"/receipt", nil, &res); err != nil {
 		return terminalRunReceipt{}, err
 	}
 	receipt, err := decodeTerminalRunReceipt(res.Receipt)
