@@ -11,57 +11,8 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type stringListFlag []string
-
-func (f *stringListFlag) String() string {
-	return strings.Join(*f, ",")
-}
-
-func (f *stringListFlag) Set(value string) error {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	*f = append(*f, value)
-	return nil
-}
-
-func (f *stringListFlag) Get() any {
-	return append([]string{}, (*f)...)
-}
-
-type flagValues struct {
-	CLIPath         *string
-	Agent           *string
-	Template        *string
-	CPUs            *float64
-	Memory          *string
-	Clone           *bool
-	Workdir         *string
-	ExtraWorkspaces *stringListFlag
-	MCP             *stringListFlag
-	Kit             *stringListFlag
-}
-
 func RegisterDockerSandboxProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
-	extraWorkspaces := stringListFlag(append([]string(nil), defaults.DockerSandbox.ExtraWorkspaces...))
-	mcp := stringListFlag(append([]string(nil), defaults.DockerSandbox.MCP...))
-	kit := stringListFlag(append([]string(nil), defaults.DockerSandbox.Kit...))
-	fs.Var(&extraWorkspaces, "docker-sandbox-extra-workspace", "additional host workspace path for Docker Sandbox; repeatable")
-	fs.Var(&mcp, "docker-sandbox-mcp", "Docker Sandbox MCP server reference; repeatable")
-	fs.Var(&kit, "docker-sandbox-kit", "Docker Sandbox kit reference to attach; repeatable")
-	return flagValues{
-		CLIPath:         fs.String("docker-sandbox-cli", defaults.DockerSandbox.CLIPath, "path to the sbx CLI binary"),
-		Agent:           fs.String("docker-sandbox-agent", defaults.DockerSandbox.Agent, "Docker Sandbox agent; v1 supports shell only"),
-		Template:        fs.String("docker-sandbox-template", defaults.DockerSandbox.Template, "Docker Sandbox template"),
-		CPUs:            fs.Float64("docker-sandbox-cpus", defaults.DockerSandbox.CPUs, "Docker Sandbox CPU count"),
-		Memory:          fs.String("docker-sandbox-memory", defaults.DockerSandbox.Memory, "Docker Sandbox memory size"),
-		Clone:           fs.Bool("docker-sandbox-clone", defaults.DockerSandbox.Clone, "use sbx create --clone for a Git repository workspace"),
-		Workdir:         fs.String("docker-sandbox-workdir", defaults.DockerSandbox.Workdir, "absolute working directory inside the Docker Sandbox"),
-		ExtraWorkspaces: &extraWorkspaces,
-		MCP:             &mcp,
-		Kit:             &kit,
-	}
+	return core.RegisterDockerSandboxConfigFlags(fs, defaults.DockerSandbox)
 }
 
 func ApplyDockerSandboxProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
@@ -70,49 +21,14 @@ func ApplyDockerSandboxProviderFlags(cfg *core.Config, fs *flag.FlagSet, values 
 			return err
 		}
 	}
-	v, ok := values.(flagValues)
+	v, ok := values.(core.DockerSandboxConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "docker-sandbox-cli") {
-		cfg.DockerSandbox.CLIPath = *v.CLIPath
-		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
-	}
-	if core.FlagWasSet(fs, "docker-sandbox-agent") {
-		cfg.DockerSandbox.Agent = *v.Agent
-		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
-	}
-	if core.FlagWasSet(fs, "docker-sandbox-template") {
-		cfg.DockerSandbox.Template = *v.Template
-		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
-	}
-	if core.FlagWasSet(fs, "docker-sandbox-cpus") {
-		cfg.DockerSandbox.CPUs = *v.CPUs
-		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
-	}
-	if core.FlagWasSet(fs, "docker-sandbox-memory") {
-		cfg.DockerSandbox.Memory = *v.Memory
-		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
-	}
-	if core.FlagWasSet(fs, "docker-sandbox-clone") {
-		cfg.DockerSandbox.Clone = *v.Clone
-		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
-	}
-	if core.FlagWasSet(fs, "docker-sandbox-workdir") {
-		cfg.DockerSandbox.Workdir = *v.Workdir
-		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
-	}
-	if core.FlagWasSet(fs, "docker-sandbox-extra-workspace") {
-		cfg.DockerSandbox.ExtraWorkspaces = append([]string(nil), (*v.ExtraWorkspaces)...)
-		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
-	}
-	if core.FlagWasSet(fs, "docker-sandbox-mcp") {
-		cfg.DockerSandbox.MCP = append([]string(nil), (*v.MCP)...)
-		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
-	}
-	if core.FlagWasSet(fs, "docker-sandbox-kit") {
-		cfg.DockerSandbox.Kit = append([]string(nil), (*v.Kit)...)
-		core.RecordProviderFlagInputs(cfg, true, "docker-sandbox")
+	applied, err := v.Apply(&cfg.DockerSandbox, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "docker-sandbox")
+	if err != nil {
+		return err
 	}
 	return validateConfig(*cfg)
 }

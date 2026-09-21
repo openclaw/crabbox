@@ -188,6 +188,12 @@ path admission rules keep those checks in their own adapter.
 Resolve class defaults and explicit native size selectors from that request;
 providers do not need a separate class-only resolver. `ClassProfiles` remains
 the declarative catalog for supported target and architecture combinations.
+After handling explicit generic and native overrides, adapters can use
+`ProviderClassPrimaryTypeForProfiles` to select the matched primary type. It
+returns an empty type for an unsupported canonical selector and uses the
+adapter's supplied legacy fallback only for noncanonical input. Existing override
+precedence, fallback mappings, and input normalization remain with their current
+owners; do not add provider-local overrides where the caller already owns them.
 
 Add optional capabilities as small interfaces instead of widening every backend.
 
@@ -1418,3 +1424,11 @@ Before landing a new backend:
 - [Authoring a provider](features/provider-authoring.md): step-by-step guide.
 - [Provider Reference](providers/README.md): the full provider catalog.
 - [Concepts](concepts.md): how providers fit the lease/run model.
+
+### Existing desktop admission
+
+`DesktopLeaseCapabilityProvider.DesktopLeaseWithoutLabel` can admit an existing
+macOS desktop without a creation-time desktop label. The provider owns the exact
+resource/claim checks; core retains the macOS gate and the existing coordinator
+fallback. Returning an error stops admission. An allowance does not set the
+lease's desktop label or bypass SSH/RFB authentication and readiness checks.

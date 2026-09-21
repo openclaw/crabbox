@@ -3,7 +3,6 @@ package superserve
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -209,7 +208,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			if !activated {
 				return nil
 			}
-			return b.refreshSuperserveLeaseActivity(leaseID)
+			return shared.RefreshRetainedLeaseActivity(leaseID, providerName, b.cfg.IdleTimeout)
 		},
 		Cleanup: func(ctx context.Context) error {
 			if err := api.DeleteSandbox(ctx, sandboxID); err != nil && !isSuperserveNotFound(err) {
@@ -459,7 +458,7 @@ func (b *backend) ownershipMetadata(baseURL, providerScope, leaseID, slug string
 		metadataEndpointKey: superserveEndpointScope(baseURL),
 		metadataScopeKey:    providerScope,
 		metadataNameKey:     newSandboxName(repo),
-		metadataRepoKey:     repoScope(repo),
+		metadataRepoKey:     shared.SandboxRepositoryMetadataScope(repo),
 	}
 	if leaseID != "" {
 		out[metadataClaimKey] = leaseID
@@ -559,36 +558,7 @@ func verifySuperserveClaim(ctx context.Context, api superserveClient, leaseID, s
 }
 
 func validateSuperserveSandboxOwnership(claim core.LeaseClaim, sb superserveSandbox) error {
-	if sb.ID == "" {
-		return core.Exit(5, "superserve returned a sandbox without an id")
-	}
-	if sb.Metadata[metadataProviderKey] != providerName ||
-		sb.Metadata[metadataScopeKey] != claim.ProviderScope ||
-		sb.Metadata[metadataClaimKey] != claim.LeaseID {
-		return core.Exit(4, "superserve sandbox %q ownership metadata does not match its local claim", sb.ID)
-	}
-	return nil
-}
-
-func (b *backend) refreshSuperserveLeaseActivity(leaseID string) error {
-	claim, err := core.ReadLeaseClaim(leaseID)
-	if err != nil {
-		return err
-	}
-	if claim.LeaseID == "" {
-		return nil
-	}
-	idleTimeout := timeoutOrDefault(b.cfg.IdleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second)
-	return core.ClaimLeaseForRepoProviderScopePond(
-		claim.LeaseID,
-		claim.Slug,
-		providerName,
-		claim.ProviderScope,
-		claim.Pond,
-		claim.RepoRoot,
-		idleTimeout,
-		false,
-	)
+	return shared.ValidateSandboxOwnershipMetadata(providerName, sb.ID, sb.Metadata, claim)
 }
 
 func (b *backend) cleanupCreateFailure(ctx context.Context, api superserveClient, sandboxID string, cause error) error {
@@ -676,22 +646,6 @@ func newSandboxName(repo core.Repo) string {
 		base = strings.Trim(base[:40], "-")
 	}
 	return namePrefix + base + "-" + shared.RandomSuffix()
-}
-
-func repoScope(repo core.Repo) string {
-	value := strings.TrimSpace(repo.Root)
-	if value == "" {
-		value = strings.TrimSpace(repo.Name)
-	}
-	sum := sha256.Sum256([]byte(value))
-	return "repo-sha256:" + hex.EncodeToString(sum[:8])
-}
-
-func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
-	if primary > 0 {
-		return primary
-	}
-	return fallback
 }
 
 func errorsJoin(errs ...error) error {

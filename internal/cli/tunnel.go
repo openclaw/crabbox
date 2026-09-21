@@ -96,13 +96,10 @@ func runSSHLocalForward(ctx context.Context, target SSHTarget, requestedLocalPor
 	forwardCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	args := resolvedSSHTunnelArgs(session, reservation.port, remotePort)
-	handle := pondMeshExecCommand(forwardCtx, target.ChildEnvDenylist, directSSHExecutable(), args...)
+	handle := pondMeshExecCommand(forwardCtx, target, directSSHExecutable(), args...)
 	output := newSynchronizedTailBuffer(failureTailLines)
-	if execHandle, ok := handle.(*pondMeshExecHandle); ok {
-		applyTargetChildEnvironment(execHandle.cmd, target)
-		execHandle.cmd.Stdout = output
-		execHandle.cmd.Stderr = output
-	}
+	handle.cmd.Stdout = output
+	handle.cmd.Stderr = output
 	if err := handle.Start(); err != nil {
 		return fmt.Errorf("start SSH local forward: %w", err)
 	}
@@ -143,7 +140,7 @@ func runSSHLocalForward(ctx context.Context, target SSHTarget, requestedLocalPor
 			}
 			return Exit(5, "SSH tunnel did not become ready on %s:%s: %v", sshTunnelLoopbackHost, reservation.port, readinessErr)
 		case <-ticker.C:
-			ready, probeErr := sshLocalForwardReady(forwardCtx, reservation.port, handle.PID(), target.ChildEnvDenylist...)
+			ready, probeErr := sshLocalForwardReady(forwardCtx, reservation.port, handle.cmd.Process.Pid, target.ChildEnvDenylist...)
 			if !ready {
 				readinessErr = probeErr
 				continue

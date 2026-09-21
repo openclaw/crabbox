@@ -160,3 +160,62 @@ func TestEnforceManagedLeaseCapabilitiesRequiresDesktopLabelForDirectMacOSProvid
 		t.Fatal("direct macOS lease without desktop label should be rejected")
 	}
 }
+
+type desktopCapabilityTestProvider struct {
+	Provider
+	allow bool
+	err   error
+	calls *int
+}
+
+func (p desktopCapabilityTestProvider) DesktopLeaseWithoutLabel(Config, Server, string) (bool, error) {
+	*p.calls++
+	return p.allow, p.err
+}
+
+func TestEnforceManagedLeaseCapabilitiesUsesProviderDesktopAllowance(t *testing.T) {
+	original := providerRegistry["tart"]
+	t.Cleanup(func() { providerRegistry["tart"] = original })
+	for _, tc := range []struct {
+		name                         string
+		allow, fail, nonMac, labeled bool
+	}{
+		{name: "allowed", allow: true},
+		{name: "denied"},
+		{name: "provider error", fail: true},
+		{name: "non-mac never calls allowance", allow: true, nonMac: true},
+		{name: "existing label never calls allowance", labeled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			var providerErr error
+			if tc.fail {
+				providerErr = Exit(2, "synthetic desktop ownership failure")
+			}
+			providerRegistry["tart"] = desktopCapabilityTestProvider{Provider: original, allow: tc.allow, err: providerErr, calls: &calls}
+			cfg := Config{Desktop: true, Provider: "tart", TargetOS: targetMacOS}
+			server := Server{Provider: "tart", Labels: map[string]string{}}
+			if tc.nonMac {
+				cfg.TargetOS = targetLinux
+			}
+			if tc.labeled {
+				server.Labels["desktop"] = "true"
+			}
+			err := enforceManagedLeaseCapabilities(cfg, server, "cbx_fixture")
+			wantSuccess := tc.labeled || (tc.allow && !tc.nonMac && !tc.fail)
+			if (err == nil) != wantSuccess {
+				t.Fatalf("error=%v want success=%t", err, wantSuccess)
+			}
+			if tc.fail && err != providerErr {
+				t.Fatalf("provider error changed: %v", err)
+			}
+			wantCalls := 1
+			if tc.nonMac || tc.labeled {
+				wantCalls = 0
+			}
+			if calls != wantCalls {
+				t.Fatalf("calls=%d want=%d", calls, wantCalls)
+			}
+		})
+	}
+}

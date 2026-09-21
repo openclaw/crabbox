@@ -113,10 +113,12 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (target 
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	cleanupKey := true
+	cleanupKey := false
 	defer func() {
 		if cleanupKey {
-			core.RemoveStoredTestboxKey(leaseID)
+			if err := core.RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
+				acquireErr = errors.Join(acquireErr, fmt.Errorf("remove SSH connection artifacts for lease %s: %w", leaseID, err))
+			}
 		}
 	}()
 	cfg.SSHKey = keyPath
@@ -142,7 +144,11 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (target 
 		if err := verifyTartVMIdentity(name, storage, identity); err != nil {
 			return err
 		}
-		return b.deleteVM(context.Background(), name)
+		if err := b.deleteVM(context.Background(), name); err != nil {
+			return err
+		}
+		cleanupKey = true
+		return nil
 	}
 	if cfg.Tart.Image == core.DefaultTartImage {
 		fmt.Fprintln(b.rt.Stderr, "verifying built-in Tart image contents before boot (full disk read)")
@@ -180,7 +186,10 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (target 
 				return core.CleanupLeaseClaimIfUnchangedAfter(leaseID, publishedClaim, exists, cleanupUnclaimedVM)
 			}
 		}
-		acquireErr = errors.Join(acquireErr, cleanup())
+		cleanupErr := cleanup()
+		// Retain access material if deletion or retirement of our claim is incomplete.
+		cleanupKey = cleanupErr == nil
+		acquireErr = errors.Join(acquireErr, cleanupErr)
 	}()
 	ctx = startup.ctx
 	ip, err := b.waitForIP(ctx, name)
@@ -222,6 +231,7 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (target 
 	if err := startup.handoff(); err != nil {
 		return core.LeaseTarget{}, err
 	}
+	core.SetServerLeaseClaimSnapshot(&lease.Server, publishedClaim, true)
 	cleanupKey = false
 	fmt.Fprintf(b.rt.Stderr, "provisioned lease=%s instance=%s state=ready\n", leaseID, name)
 	return lease, nil
@@ -239,6 +249,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if req.ReleaseOnly {
 		return core.LeaseTarget{Server: b.serverFromInstance(inst, claim, cfg), LeaseID: claim.LeaseID}, nil
 	}
+	if req.StatusOnly && !req.ReadyProbe {
+		return b.prepareLease(ctx, cfg, inst, ip, claim, false)
+	}
 	if !inst.Running && !instanceRunning(inst.State) && !req.StatusOnly {
 		return core.LeaseTarget{}, core.Exit(5, "tart instance %s is stopped; start a new lease with `crabbox run` or clean up with `crabbox cleanup --provider tart`", inst.Name)
 	}
@@ -246,10 +259,12 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if req.Repo.Root != "" {
-		if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	if req.Repo.Root != "" && !req.NoLocalStateMutations {
+		updated, err := core.ClaimLeaseForRepoProviderScopePondIfUnchanged(claim.LeaseID, claim.Slug, providerName, instanceScope(inst.Name), cfg.Pond, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, claim, true)
+		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		core.SetServerLeaseClaimSnapshot(&lease.Server, updated, true)
 	}
 	return lease, nil
 }
@@ -376,6 +391,9 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	now := time.Now().UTC()
 	removed := 0
 	for _, inst := range instances {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		live[inst.Name] = struct{}{}
 		if !strings.HasPrefix(inst.Name, "crabbox-") {
 			continue
@@ -414,6 +432,9 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 	}
 	claimsRemoved := 0
 	for _, claim := range orphanCandidates {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if claim.Provider != providerName || claim.LeaseID == "" {
 			continue
 		}
@@ -432,7 +453,13 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 		}
 		// Acquisition creates or reuses the key before publishing its claim, so
 		// missing-instance cleanup cannot safely delete that key without a wider fence.
-		if err := core.RemoveLeaseClaimIfUnchanged(claim.LeaseID, claim); err != nil {
+		if err := core.CleanupLeaseClaimIfUnchangedAfterContext(ctx, claim.LeaseID, claim, true, nil); err != nil {
+			if cancelErr := ctx.Err(); cancelErr != nil {
+				if errors.Is(err, cancelErr) {
+					return err
+				}
+				return errors.Join(cancelErr, err)
+			}
 			fmt.Fprintf(b.rt.Stderr, "skip claim lease=%s slug=%s reason=changed-during-cleanup err=%v\n", claim.LeaseID, core.Blank(claim.Slug, "-"), err)
 			continue
 		}
@@ -450,7 +477,7 @@ func (b *backend) cleanupInstance(ctx context.Context, cfg core.Config, inst tar
 	if err != nil {
 		return err
 	}
-	return shared.RemoveExactClaimAfter(claim, binding, func() error {
+	return shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		// Re-read lifecycle state and the incarnation witness under the same
 		// claim fence that covers deletion and durable claim removal.
 		current, err := b.listInstances(ctx)
@@ -485,9 +512,43 @@ func (b *backend) cleanupInstance(ctx context.Context, cfg core.Config, inst tar
 	})
 }
 
-func (b *backend) Touch(_ context.Context, req core.TouchRequest) (core.Server, error) {
+func (b *backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	name := instanceNameFromClaim(claim)
+	root := claim.Labels["tart_storage"]
+	if lease.LeaseID == "" || lease.LeaseID != claim.LeaseID || lease.Server.Provider != providerName || lease.Server.CloudID != name || lease.Server.Name != name || lease.Server.ImmutableID != claim.CloudImmutableID || lease.Server.Labels["instance"] != name || lease.Server.Labels["tart_storage"] != root {
+		return core.Exit(4, "tart lease %s touch identity does not match its claim", lease.LeaseID)
+	}
+	if _, err := tartCleanupBinding(claim, name, root); err != nil {
+		return core.Exit(4, "tart lease %s cannot authorize touch: %v", lease.LeaseID, err)
+	}
+	if err := verifyTartVMIdentity(name, root, claim.CloudImmutableID); err != nil {
+		return core.Exit(4, "tart lease %s cannot authorize touch: %v", lease.LeaseID, err)
+	}
+	return nil
+}
+
+func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider:  providerName,
+		Authorize: b.AuthorizeStatusTouchClaim,
+		Prepare: func(claim core.LeaseClaim) (map[string]string, time.Time) {
+			now := core.ClockNow(b.rt.Clock).UTC()
+			labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(shared.ClaimLifecycleLabels(claim), b.configForRun(), req.State, now, req.IdleTimeoutOverride)
+			return labels, now
+		},
+	})
+	if err != nil {
+		return core.Server{}, err
+	}
 	server := req.Lease.Server
-	server.Labels = core.TouchDirectLeaseLabels(server.Labels, b.configForRun(), req.State, time.Now().UTC())
+	server.Labels = shared.CloneLabels(updated.Labels)
+	if state := server.Labels["state"]; state != "" {
+		server.Status = state
+	}
+	core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	return server, nil
 }
 
@@ -523,48 +584,53 @@ func (b *backend) configureVM(ctx context.Context, cfg core.Config, name string)
 
 // waitForIP polls `tart ip` until the VM has an IP address.
 func (b *backend) waitForIP(ctx context.Context, name string) (string, error) {
-	deadline := time.After(5 * time.Minute)
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
+	waitForTick := func(pollCtx context.Context, _ time.Duration) error {
+		select {
+		case <-pollCtx.Done():
+			return context.Cause(pollCtx)
+		case <-ticker.C:
+			return nil
+		}
+	}
 	type observation struct {
 		result core.LocalCommandResult
 		err    error
 	}
-	initial := true
-	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 3*time.Second,
-		func(context.Context, time.Duration) error {
-			select {
-			case <-ctx.Done():
-				return core.Exit(2, "tart ip %s: context cancelled", name)
-			case <-deadline:
-				return core.Exit(5, "tart ip %s: timed out waiting for IP address", name)
-			case <-ticker.C:
-				return nil
-			}
-		},
-		func(context.Context) (observation, error) {
-			if initial {
-				initial = false
-				return observation{}, nil
-			}
-			commandResult, commandErr := b.tart(ctx, []string{"ip", name}, nil, nil)
-			return observation{result: commandResult, err: commandErr}, nil
-		},
-		func(_ context.Context, current observation, fetchErr error) (bool, error) {
-			if fetchErr != nil {
-				return false, fetchErr
-			}
-			if current.err != nil {
-				stderr := strings.ToLower(strings.TrimSpace(current.result.Stderr))
-				if strings.Contains(stderr, "is your vm running") || strings.Contains(stderr, "not running") {
-					return false, core.Exit(2, "tart ip %s: %s", name, strings.TrimSpace(current.result.Stderr))
+	var result shared.PollResult[observation]
+	// Preserve the delayed first probe and the original ticker cadence.
+	err := waitForTick(waitCtx, 0)
+	if err == nil {
+		result, err = shared.Poll(waitCtx, 0, 3*time.Second, waitForTick,
+			func(pollCtx context.Context) (observation, error) {
+				commandResult, commandErr := b.tart(pollCtx, []string{"ip", name}, nil, nil)
+				return observation{result: commandResult, err: commandErr}, nil
+			},
+			func(_ context.Context, current observation, fetchErr error) (bool, error) {
+				if fetchErr != nil {
+					return false, fetchErr
 				}
-				return false, nil
-			}
-			ip := strings.TrimSpace(current.result.Stdout)
-			return ip != "" && ip != "--", nil
-		}, nil)
+				if current.err != nil {
+					stderr := strings.ToLower(strings.TrimSpace(current.result.Stderr))
+					if strings.Contains(stderr, "is your vm running") || strings.Contains(stderr, "not running") {
+						return false, core.Exit(2, "tart ip %s: %s", name, strings.TrimSpace(current.result.Stderr))
+					}
+					return false, nil
+				}
+				ip := strings.TrimSpace(current.result.Stdout)
+				return ip != "" && ip != "--", nil
+			}, nil)
+	}
 	if err != nil {
+		if cause := context.Cause(ctx); cause != nil && errors.Is(err, cause) {
+			return "", shared.PollTerminationError(ctx, err, core.Exit(2, "tart ip %s: context cancelled", name))
+		}
+		if waitCtx.Err() == context.DeadlineExceeded && errors.Is(err, context.DeadlineExceeded) {
+			return "", shared.PollTerminationError(waitCtx, err, core.Exit(5, "tart ip %s: timed out waiting for IP address", name))
+		}
 		return "", err
 	}
 	return strings.TrimSpace(result.Value.result.Stdout), nil
@@ -785,7 +851,7 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst tartIn
 }
 
 func (b *backend) serverFromInstance(inst tartInstance, claim core.LeaseClaim, cfg core.Config) core.Server {
-	labels := shared.LabelsWithDefaults(claim.Labels, map[string]string{
+	labels := shared.LabelsWithDefaults(shared.ClaimLifecycleLabels(claim), map[string]string{
 		"crabbox":     "true",
 		"provider":    providerName,
 		"instance":    inst.Name,
@@ -803,6 +869,9 @@ func (b *backend) serverFromInstance(inst tartInstance, claim core.LeaseClaim, c
 	if instanceRunning(inst.State) && labels["state"] == "ready" {
 		status = "ready"
 	}
+	if !inst.Running && !instanceRunning(inst.State) {
+		labels["state"] = status
+	}
 	server := core.Server{
 		CloudID:     inst.Name,
 		ImmutableID: claim.CloudImmutableID,
@@ -812,6 +881,9 @@ func (b *backend) serverFromInstance(inst tartInstance, claim core.LeaseClaim, c
 		Labels:      labels,
 	}
 	server.ServerType.Name = shared.FirstNonBlank(labels["server_type"], cfg.Tart.Image)
+	if claim.LeaseID != "" && claim.Provider == providerName {
+		core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	}
 	return server
 }
 

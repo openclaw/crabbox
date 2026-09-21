@@ -25,6 +25,23 @@ func TestProviderSpec(t *testing.T) {
 }
 
 func TestProviderServerTypeDefaults(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		cfg  core.Config
+		want string
+	}{
+		{name: "unsupported target", cfg: core.Config{Class: "standard", TargetOS: core.TargetWindows}},
+		{name: "unsupported architecture", cfg: core.Config{Class: "standard", TargetOS: core.TargetLinux, Architecture: core.ArchitectureARM64}},
+		{name: "legacy input", cfg: core.Config{Class: " STANDARD "}, want: defaultType},
+		{name: "native type preserves spelling", cfg: core.Config{Class: "standard", TargetOS: core.TargetWindows, Linode: core.LinodeConfig{Type: " native-type "}}, want: " native-type "},
+		{name: "explicit type precedes native", cfg: core.Config{Class: "standard", TargetOS: core.TargetWindows, ServerTypeExplicit: true, ServerType: " custom-type ", Linode: core.LinodeConfig{Type: "native-type"}}, want: " custom-type "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := (Provider{}).ServerTypeForConfig(test.cfg); got != test.want {
+				t.Fatalf("type=%q want=%q", got, test.want)
+			}
+		})
+	}
 	if got := (Provider{}).ServerTypeForConfig(core.Config{Class: "standard"}); got != defaultType {
 		t.Fatalf("ServerTypeForConfig standard=%q", got)
 	}

@@ -268,10 +268,6 @@ func ClaimLeaseForRepoProviderScope(leaseID, slug, provider, providerScope, repo
 	return ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, providerScope, "", repoRoot, idleTimeout, reclaim)
 }
 
-func claimLeaseForRepoProviderWithPond(leaseID, slug, provider, pond, repoRoot string, idleTimeout time.Duration, reclaim bool) error {
-	return ClaimLeaseForRepoProviderScopePond(leaseID, slug, provider, "", pond, repoRoot, idleTimeout, reclaim)
-}
-
 // ClaimLeaseForRepoProviderScopePond combines a provider scope (e.g. Docker
 // context for local-container claim isolation) with the pond label so both
 // features coexist in the same claim sidecar without one overwriting the other.
@@ -473,6 +469,11 @@ func transformLeaseClaimForRepo(existing *leaseClaim, leaseID, slug, provider, p
 	recordedIdle := 0
 	if hadExisting {
 		recordedIdle = original.IdleTimeoutSeconds
+	}
+	if metadata.idlePolicy == claimIdleCoordinatorProjection {
+		if projected, ok := parseDurationSecondsLabel(metadata.server.Labels["idle_timeout_secs"]); ok {
+			idleTimeout = projected
+		}
 	}
 	idleTimeout, normalizeIdle, err := selectClaimIdleTimeout(recordedIdle, idleTimeout, metadata.idlePolicy)
 	if err != nil {
@@ -1369,32 +1370,7 @@ func ResolveLeaseClaim(identifier string) (leaseClaim, bool, error) {
 	} else if claim.LeaseID != "" {
 		return claim, true, nil
 	}
-	dir, err := CrabboxStateDir()
-	if err != nil {
-		return leaseClaim{}, false, err
-	}
-	entries, err := os.ReadDir(filepath.Join(dir, "claims"))
-	if errors.Is(err, os.ErrNotExist) {
-		return leaseClaim{}, false, nil
-	}
-	if err != nil {
-		return leaseClaim{}, false, Exit(2, "read claims directory: %v", err)
-	}
-	slug := claimLookupSlug(identifier)
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		leaseID := strings.TrimSuffix(entry.Name(), ".json")
-		claim, err := ReadLeaseClaim(leaseID)
-		if err != nil {
-			return leaseClaim{}, false, err
-		}
-		if claim.LeaseID == identifier || (slug != "" && NormalizeLeaseSlug(claim.Slug) == slug) {
-			return claim, true, nil
-		}
-	}
-	return leaseClaim{}, false, nil
+	return findLeaseClaim(identifier, func(leaseClaim) bool { return true })
 }
 
 func ResolveLeaseClaimForProvider(identifier, provider string) (leaseClaim, bool, error) {

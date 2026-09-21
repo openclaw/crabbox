@@ -1344,7 +1344,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	timingRecordCommand = recordCommand
 	recorder = newRunRecorder(ctx, coord, cfg, recordCommand, runLabelValue, a.Stderr, strings.TrimSpace(*leaseIDFlag) != "", executionRunID)
 	if recorder.createErr != nil && !recorder.createPending && !*syncOnly {
-		return recorder.requireHandle()
+		return recordFailure(recorder.requireHandle())
 	}
 	if useCoordinator {
 		recorder.Event("leasing.started", "leasing", "")
@@ -5212,7 +5212,7 @@ func ServerProviderKey(server Server) string {
 		return server.Labels["provider_key"]
 	}
 	if server.Labels != nil && server.Labels["lease"] != "" {
-		return providerKeyForLease(server.Labels["lease"])
+		return ProviderKeyForLease(server.Labels["lease"])
 	}
 	return ""
 }

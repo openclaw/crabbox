@@ -39,7 +39,7 @@ func (f workspaceOwnerTransportFunc) Do(ctx context.Context, req workspaceOwnerR
 func TestWorkspaceOwnerTransportErrorDiagnostics(t *testing.T) {
 	original := errors.New("ordinary transport error")
 	for _, response := range []string{"MISMATCH", "EXPIRED", "AMBIGUOUS", "", "unrecognized response", "CHILD", "OWNED"} {
-		recognized := response == "MISMATCH" || response == "EXPIRED" || response == "AMBIGUOUS"
+		recognized := response == "MISMATCH" || response == "EXPIRED" || response == "AMBIGUOUS" || response == "CHILD"
 		annotated := workspaceOwnerProtocolError(response, original)
 		if !errors.Is(annotated, original) {
 			t.Fatal("annotation lost original error")
@@ -47,7 +47,7 @@ func TestWorkspaceOwnerTransportErrorDiagnostics(t *testing.T) {
 		if !recognized && annotated != original {
 			t.Fatal("unknown response changed original error")
 		}
-		for _, operation := range []string{"renew", "inspect", "wait"} {
+		for _, operation := range []string{"renew", "inspect", "wait", "release"} {
 			t.Run(operation+"/"+response, func(t *testing.T) {
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
@@ -59,6 +59,8 @@ func TestWorkspaceOwnerTransportErrorDiagnostics(t *testing.T) {
 						wantAction := workspaceOwnerInspect
 						if operation == "renew" {
 							wantAction = workspaceOwnerRenew
+						} else if operation == "release" {
+							wantAction = workspaceOwnerRelease
 						}
 						if req.Action != wantAction {
 							t.Fatalf("action=%v", req.Action)
@@ -88,6 +90,10 @@ func TestWorkspaceOwnerTransportErrorDiagnostics(t *testing.T) {
 				case "wait":
 					err = owner.WaitForChild(ctx, time.Second)
 					prefix = "confirm remote workspace phase witness: ambiguous remote state: "
+				case "release":
+					close(owner.done)
+					err = owner.Close(ctx)
+					prefix = "release remote workspace owner: ambiguous remote state: "
 				}
 				want := prefix + original.Error()
 				if recognized {
@@ -102,6 +108,51 @@ func TestWorkspaceOwnerTransportErrorDiagnostics(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestWorkspaceOwnerTransportContextDiagnostics(t *testing.T) {
+	original := errors.New("signal: killed")
+	privateCause := errors.New("private-cancellation-cause-must-not-appear")
+	for _, scenario := range []string{"call deadline", "caller deadline", "caller cancellation", "uncanceled transport error"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := t.Context()
+			timeout := time.Minute
+			wantState := ""
+			switch scenario {
+			case "call deadline":
+				timeout = 0
+				wantState = "deadline-exceeded"
+			case "caller deadline":
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadlineCause(ctx, time.Now().Add(-time.Second), privateCause)
+				defer cancel()
+				wantState = "deadline-exceeded"
+			case "caller cancellation":
+				var cancel context.CancelCauseFunc
+				ctx, cancel = context.WithCancelCause(ctx)
+				cancel(privateCause)
+				wantState = "canceled"
+			}
+			calls := 0
+			transport := workspaceOwnerTransportFunc(func(context.Context, workspaceOwnerRemoteRequest) (string, error) {
+				calls++
+				return "unchanged-response", original
+			})
+			response, err := callWorkspaceOwnerTransport(ctx, timeout, transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerRenew})
+			if calls != 1 || response != "unchanged-response" || !errors.Is(err, original) {
+				t.Fatalf("transport outcome changed: calls=%d response=%q err=%v", calls, response, err)
+			}
+			want := original.Error()
+			if wantState != "" {
+				want = "workspace owner call context=" + wantState + ": " + want
+			} else if err != original {
+				t.Fatal("uncanceled transport error acquired a context classification")
+			}
+			if err.Error() != want || strings.Contains(err.Error(), privateCause.Error()) {
+				t.Fatalf("unsafe or incorrect context diagnostic: %v", err)
+			}
+		})
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -2052,6 +2053,163 @@ func TestProviderNameMatchesExactMetadataOnly(t *testing.T) {
 	}
 	if specCalls == 0 || len(providerRegistry) != registrySize {
 		t.Fatal("metadata consultation or registry boundary changed")
+	}
+}
+
+func TestProviderOwnedConfigShowConnectionProjection(t *testing.T) {
+	for _, provider := range []struct {
+		name string
+		user string
+	}{
+		{"digitalocean", "root"},
+		{"linode", "root"},
+		{"vultr", "root"},
+		{"lambda", "ubuntu"},
+		{"scaleway", "root"},
+		{"tencentcloud", "ubuntu"},
+	} {
+		t.Run(provider.name, func(t *testing.T) {
+			for _, mode := range []string{"compiled_defaults", "empty", "custom", "explicit_defaults"} {
+				t.Run(mode, func(t *testing.T) {
+					cfg := baseConfig()
+					setProviderSelection(&cfg, provider.name, providerSelectionFlag)
+					// These unresolved and provider-specific settings must remain passive.
+					cfg.DigitalOcean.Image = ""
+					cfg.Linode.Image = ""
+					cfg.Vultr.UserScheme = "limited"
+					cfg.SSHFallbackPorts = []string{"2200", "2201"}
+					wantUser, wantPort := provider.user, "22"
+					switch mode {
+					case "empty":
+						cfg.SSHUser, cfg.SSHPort = "", ""
+					case "custom":
+						cfg.SSHUser, cfg.SSHPort = "operator", "2202"
+						wantUser, wantPort = cfg.SSHUser, cfg.SSHPort
+					case "explicit_defaults":
+						cfg.explicitSSHUser, cfg.explicitSSHPort = cfg.SSHUser, cfg.SSHPort
+						wantUser, wantPort = cfg.SSHUser, cfg.SSHPort
+					}
+					adapter, err := ProviderFor(cfg.Provider)
+					if err != nil {
+						t.Fatal(err)
+					}
+					normalizer, ok := adapter.(ProviderConfigShowNormalizer)
+					if !ok {
+						t.Fatal("registered provider does not own config-show normalization")
+					}
+					want := cfg
+					want.SSHUser, want.SSHPort, want.SSHFallbackPorts = wantUser, wantPort, nil
+					if got := normalizer.NormalizeConfigForShow(cfg); !reflect.DeepEqual(got, want) {
+						t.Fatal("display projection changed fields beyond the expected connection defaults")
+					}
+					if got := effectiveConfigForShow(cfg); got.SSHUser != wantUser || got.SSHPort != wantPort || got.SSHFallbackPorts != nil {
+						t.Fatalf("display connection = %q:%q fallbacks=%v", got.SSHUser, got.SSHPort, got.SSHFallbackPorts)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestConfigBindingCentralFlagSourcePhase(t *testing.T) {
+	cases := []struct {
+		name       string
+		flags      [2]string
+		secondBool bool
+		sources    func(*Config) [2]*credentialValueSource
+	}{
+		{
+			name: "tenki", flags: [2]string{"tenki-endpoint", "tenki-gateway"},
+			sources: func(cfg *Config) [2]*credentialValueSource {
+				return [2]*credentialValueSource{&cfg.credentialProvenance.tenkiEndpoint, &cfg.credentialProvenance.tenkiGateway}
+			},
+		},
+		{
+			name: "daytona", flags: [2]string{"daytona-api-url", "daytona-ssh-gateway-host"},
+			sources: func(cfg *Config) [2]*credentialValueSource {
+				return [2]*credentialValueSource{&cfg.credentialProvenance.daytonaAPIURL, &cfg.credentialProvenance.daytonaSSHGateway}
+			},
+		},
+		{
+			name: "proxmox", flags: [2]string{"proxmox-api-url", "proxmox-insecure-tls"}, secondBool: true,
+			sources: func(cfg *Config) [2]*credentialValueSource {
+				return [2]*credentialValueSource{&cfg.credentialProvenance.proxmoxAPIURL, &cfg.credentialProvenance.proxmoxInsecureTLS}
+			},
+		},
+		{
+			name: "sprites-unikraft", flags: [2]string{"sprites-api-url", "unikraft-cloud-url"},
+			sources: func(cfg *Config) [2]*credentialValueSource {
+				return [2]*credentialValueSource{&cfg.credentialProvenance.spritesAPIURL, &cfg.credentialProvenance.unikraftCloudAPIURL}
+			},
+		},
+		{
+			name: "islo-tenki", flags: [2]string{"islo-base-url", "tenki-endpoint"},
+			sources: func(cfg *Config) [2]*credentialValueSource {
+				return [2]*credentialValueSource{&cfg.credentialProvenance.isloBaseURL, &cfg.credentialProvenance.tenkiEndpoint}
+			},
+		},
+		{
+			name: "static-tenki", flags: [2]string{"static-host", "tenki-endpoint"},
+			sources: func(cfg *Config) [2]*credentialValueSource {
+				return [2]*credentialValueSource{&cfg.credentialProvenance.staticHost, &cfg.credentialProvenance.tenkiEndpoint}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			original := providerRegistry["aws"]
+			t.Cleanup(func() { providerRegistry["aws"] = original })
+			for _, fail := range []bool{false, true} {
+				for _, visited := range [][2]bool{{false, false}, {true, false}, {false, true}, {true, true}} {
+					cfg := baseConfig()
+					cfg.Provider = "aws"
+					for _, source := range tc.sources(&cfg) {
+						*source = credentialSourceTrustedFile
+					}
+					var seen [2]credentialValueSource
+					var applyErr error
+					if fail {
+						applyErr = Exit(2, "synthetic flag rejection")
+					}
+					providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(observed Config) {
+						for i, source := range tc.sources(&observed) {
+							seen[i] = *source
+						}
+					}}
+					fs := newFlagSet("test", io.Discard)
+					fs.String(tc.flags[0], "", "")
+					values := [2]string{"", ""}
+					if tc.secondBool {
+						fs.Bool(tc.flags[1], true, "")
+						values[1] = "false"
+					} else {
+						fs.String(tc.flags[1], "", "")
+					}
+					var args []string
+					for i, visit := range visited {
+						if visit {
+							args = append(args, "--"+tc.flags[i]+"="+values[i])
+						}
+					}
+					if err := fs.Parse(args); err != nil {
+						t.Fatal(err)
+					}
+					err := applyProviderFlags(&cfg, fs, providerFlagValues{})
+					if (err != nil) != fail {
+						t.Fatalf("fail=%t visited=%v central flag error=%v", fail, visited, err)
+					}
+					for i, source := range tc.sources(&cfg) {
+						want := credentialSourceTrustedFile
+						if visited[i] && !fail {
+							want = credentialSourceFlag
+						}
+						if seen[i] != credentialSourceTrustedFile || *source != want {
+							t.Fatalf("fail=%t visited=%v flag=%s central marking moved from its post-success phase", fail, visited, tc.flags[i])
+						}
+					}
+				}
+			}
+		})
 	}
 }
 

@@ -15,6 +15,11 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
+	core.ApplyConfigShowSSHDefaults(&cfg, defaultUser)
+	return cfg
+}
+
 func (Provider) Spec() core.ProviderSpec {
 	return core.ProviderSpec{
 		Authentication:   core.DirectProviderAuthentication(core.ProviderAuthenticationAPIKey),

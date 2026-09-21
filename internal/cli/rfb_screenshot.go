@@ -28,7 +28,20 @@ const (
 	rfbSecurityARD   = 30
 	rfbEncodingRaw   = 0
 	rfbKeyEventDelay = 5 * time.Millisecond
+
+	// defaultRFBInputReadySettle is a documented delay, not a protocol
+	// handshake. RFB 3.8 and Apple ARD type 30 finish ServerInit and can
+	// emit a framebuffer before Screen Sharing has attached input control
+	// to the console session. Tight/QEMU fence and continuous-update
+	// messages are not advertised. The same-session helper that landed a
+	// full nonce waited ~2s after the first frame (Spotlight 500ms +
+	// launch 1200ms + key I/O) before the first text that actually
+	// appeared. Tests may shorten rfbInputReadySettle; do not treat the
+	// wait, the drain frame, or the byte count as glyph proof.
+	defaultRFBInputReadySettle = 2 * time.Second
 )
+
+var rfbInputReadySettle = defaultRFBInputReadySettle
 
 type rfbCredentials struct {
 	Username string
@@ -99,6 +112,46 @@ func clickRemoteMacVNC(ctx context.Context, cfg Config, target SSHTarget, x, y i
 	defer conn.Close()
 	if err := clickRFBPointerFromConn(ctx, conn, creds, authMode, x, y); err != nil {
 		return fmt.Errorf("click macOS VNC pointer: %w", err)
+	}
+	return nil
+}
+
+func applyRFBConnDeadline(ctx context.Context, conn net.Conn) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+		return nil
+	}
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	return nil
+}
+
+func waitRFBKeyEventDelay(ctx context.Context) error {
+	return waitRFBDuration(ctx, rfbKeyEventDelay)
+}
+
+func waitRFBDuration(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func waitRFBInputReady(ctx context.Context) error {
+	if err := waitRFBDuration(ctx, rfbInputReadySettle); err != nil {
+		return fmt.Errorf("wait for RFB input ready: %w", err)
 	}
 	return nil
 }
@@ -215,15 +268,34 @@ func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredential
 	if !utf8.ValidString(text) {
 		return fmt.Errorf("RFB text is not valid UTF-8")
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	} else {
-		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	if err := applyRFBConnDeadline(ctx, conn); err != nil {
+		return err
 	}
-	if _, _, err := initializeRFBConnection(conn, creds, authMode); err != nil {
+	width, height, err := initializeRFBConnection(conn, creds, authMode, true)
+	if err != nil {
+		return err
+	}
+	if err := prepareRFBFramebufferClient(conn); err != nil {
+		return err
+	}
+	// Apple Screen Sharing can emit the first framebuffer immediately after
+	// ServerInit. If that data is unread, a single-threaded server blocks on
+	// the write and never consumes later KeyEvents. Closing the SSH tunnel
+	// after a short sleep then drops those unread events, which is the
+	// first-character-only delivery failure.
+	if _, err := requestAndReadRFBFramebuffer(conn, width, height); err != nil {
+		return fmt.Errorf("wait for RFB session ready: %w", err)
+	}
+	// A readable framebuffer is not input-control readiness. Apple grants
+	// session control asynchronously after ClientInit; keys sent in that
+	// window are accepted on the socket and discarded by the console.
+	if err := waitRFBInputReady(ctx); err != nil {
 		return err
 	}
 	for _, r := range text {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		key, err := rfbKeysymForRune(r)
 		if err != nil {
 			return err
@@ -231,13 +303,19 @@ func typeRFBTextFromConn(ctx context.Context, conn net.Conn, creds rfbCredential
 		if err := writeRFBKeyEvent(conn, true, key); err != nil {
 			return err
 		}
-		time.Sleep(rfbKeyEventDelay)
+		if err := waitRFBKeyEventDelay(ctx); err != nil {
+			return err
+		}
 		if err := writeRFBKeyEvent(conn, false, key); err != nil {
 			return err
 		}
-		time.Sleep(rfbKeyEventDelay)
+		if err := waitRFBKeyEventDelay(ctx); err != nil {
+			return err
+		}
 	}
-	time.Sleep(50 * time.Millisecond)
+	if _, err := requestAndReadRFBFramebuffer(conn, width, height); err != nil {
+		return fmt.Errorf("drain RFB session after typing: %w", err)
+	}
 	return nil
 }
 
@@ -260,13 +338,11 @@ func rfbKeysymForRune(r rune) (uint32, error) {
 }
 
 func clickRFBPointerFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode, x, y int) error {
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	} else {
-		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	if err := applyRFBConnDeadline(ctx, conn); err != nil {
+		return err
 	}
 
-	width, height, err := initializeRFBConnection(conn, creds, authMode)
+	width, height, err := initializeRFBConnection(conn, creds, authMode, false)
 	if err != nil {
 		return err
 	}
@@ -284,30 +360,35 @@ func clickRFBPointerFromConn(ctx context.Context, conn net.Conn, creds rfbCreden
 }
 
 func captureRFBFrameFromConn(ctx context.Context, conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode) (image.Image, error) {
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	} else {
-		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	if err := applyRFBConnDeadline(ctx, conn); err != nil {
+		return nil, err
 	}
 
-	width, height, err := initializeRFBConnection(conn, creds, authMode)
+	width, height, err := initializeRFBConnection(conn, creds, authMode, false)
 	if err != nil {
 		return nil, err
 	}
+	if err := prepareRFBFramebufferClient(conn); err != nil {
+		return nil, err
+	}
+	return requestAndReadRFBFramebuffer(conn, width, height)
+}
 
+func prepareRFBFramebufferClient(conn net.Conn) error {
 	if err := writeRFBPixelFormat(conn); err != nil {
-		return nil, err
+		return err
 	}
-	if err := writeRFBSetEncodings(conn); err != nil {
-		return nil, err
-	}
+	return writeRFBSetEncodings(conn)
+}
+
+func requestAndReadRFBFramebuffer(conn net.Conn, width, height uint16) (image.Image, error) {
 	if err := writeRFBFramebufferUpdateRequest(conn, width, height); err != nil {
 		return nil, err
 	}
 	return readRFBFramebufferUpdate(conn, int(width), int(height))
 }
 
-func initializeRFBConnection(conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode) (uint16, uint16, error) {
+func initializeRFBConnection(conn net.Conn, creds rfbCredentials, authMode localWebVNCAuthenticationMode, requireAuth bool) (uint16, uint16, error) {
 	protocol, err := negotiateRFBClientProtocol(conn)
 	if err != nil {
 		return 0, 0, err
@@ -318,6 +399,9 @@ func initializeRFBConnection(conn net.Conn, creds rfbCredentials, authMode local
 	}
 	switch securityType {
 	case rfbSecurityNone:
+		if requireAuth {
+			return 0, 0, fmt.Errorf("RFB server did not require credential authentication")
+		}
 	case rfbSecurityVNC:
 		if err := negotiateRFBVNCAuth(conn, creds); err != nil {
 			return 0, 0, err

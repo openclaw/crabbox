@@ -1,9 +1,7 @@
 import { cloudInit } from "./bootstrap";
 import {
-  concreteStoredServerType,
-  isCanonicalProviderClass,
+  implicitProviderMachineCandidates,
   serverTypeCandidatesForClass,
-  uniqueProviderMachineCandidates,
   workspaceProviderKeyPrefix,
   type LeaseConfig,
 } from "./config";
@@ -541,20 +539,11 @@ export function hetznerProvisioningCandidatesForConfig(
   if (config.serverTypeExplicit && config.serverType.trim()) {
     return [config.serverType];
   }
-  const storedType = concreteStoredServerType(config.serverType, config.class);
-  let profileCandidates =
+  const profileCandidates =
     config.target === "linux" && config.architecture === "amd64"
       ? serverTypeCandidatesForClass(config.class)
       : [];
-  if (profileCandidates.length === 0 && isCanonicalProviderClass(config.class)) {
-    return storedType ? [storedType] : [];
-  }
-  if (profileCandidates.length === 0) {
-    profileCandidates = [config.class];
-  }
-  return storedType
-    ? uniqueProviderMachineCandidates([storedType, ...profileCandidates])
-    : profileCandidates;
+  return implicitProviderMachineCandidates(config, profileCandidates);
 }
 
 export function isRetryableProvisioningError(message: string): boolean {

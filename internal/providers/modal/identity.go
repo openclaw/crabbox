@@ -172,7 +172,7 @@ func removeModalClaim(ctx context.Context, client modalAPI, claim core.LeaseClai
 	if err != nil {
 		return err
 	}
-	return shared.RemoveExactClaimAfter(claim, want, func() error {
+	return shared.RemoveExactClaimAfterContext(ctx, claim, want, func() error {
 		ctx, cancel := context.WithTimeout(ctx, modalCleanupTimeout)
 		defer cancel()
 		if err := client.Terminate(ctx, binding); err != nil {

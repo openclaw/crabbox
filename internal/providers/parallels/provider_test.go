@@ -8,10 +8,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -166,6 +168,301 @@ func TestResolvePreservesVMWhenIPDiscoveryFails(t *testing.T) {
 			}
 			if !reflect.DeepEqual(runner.execVMIDs, []string{"vm-good"}) {
 				t.Fatalf("guest metadata lookup lost VM identity: %v", runner.execVMIDs)
+			}
+		})
+	}
+}
+
+func TestApplyFlagsSetsMacOSBootstrapKey(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.Provider = "parallels"
+	cfg.TargetOS = core.TargetMacOS
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	provider := Provider{}
+	values := provider.RegisterFlags(fs, cfg)
+	if err := fs.Parse([]string{"--parallels-bootstrap-key", "/Users/build/.ssh/bootstrap"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Parallels.BootstrapKey != "/Users/build/.ssh/bootstrap" {
+		t.Fatalf("bootstrap key=%q", cfg.Parallels.BootstrapKey)
+	}
+}
+
+func TestDesktopCredentialsUseConfiguredMacOSAccount(t *testing.T) {
+	cfg := core.BaseConfig()
+	cfg.TargetOS = core.TargetMacOS
+	cfg.Parallels.User = "configured-user"
+	cfg.Parallels.Password = " account password with spaces "
+
+	credentials, ok := (Provider{}).DesktopCredentials(cfg, core.SSHTarget{TargetOS: core.TargetMacOS, User: "lease-user"})
+	if !ok {
+		t.Fatal("Parallels should provide configured macOS account credentials")
+	}
+	if credentials.Username != "lease-user" || credentials.Password != cfg.Parallels.Password {
+		t.Fatalf("credentials=%#v", credentials)
+	}
+
+	cfg.Parallels.Password = ""
+	if credentials, ok = (Provider{}).DesktopCredentials(cfg, core.SSHTarget{TargetOS: core.TargetMacOS}); ok || credentials != (core.DesktopCredentials{}) {
+		t.Fatalf("empty password unexpectedly enabled account credentials: %#v", credentials)
+	}
+	cfg.Parallels.Password = "configured"
+	cfg.TargetOS = core.TargetLinux
+	if credentials, ok = (Provider{}).DesktopCredentials(cfg, core.SSHTarget{TargetOS: core.TargetLinux}); ok || credentials != (core.DesktopCredentials{}) {
+		t.Fatalf("Linux unexpectedly received macOS account credentials: %#v", credentials)
+	}
+}
+
+func TestParallelsSSHTargetScrubsDesktopPasswordEnvironment(t *testing.T) {
+	target := parallelsSSHTarget(core.BaseConfig(), "192.0.2.10")
+	if len(target.ChildEnvDenylist) != 1 || target.ChildEnvDenylist[0] != "CRABBOX_PARALLELS_PASSWORD" {
+		t.Fatalf("child environment denylist=%v", target.ChildEnvDenylist)
+	}
+	leaseTarget := parallelsLeaseSSHTarget(core.BaseConfig(), "192.0.2.10")
+	if len(leaseTarget.ChildEnvDenylist) != 1 || leaseTarget.ChildEnvDenylist[0] != "CRABBOX_PARALLELS_PASSWORD" {
+		t.Fatalf("lease child environment denylist=%v", leaseTarget.ChildEnvDenylist)
+	}
+}
+
+func TestApplyParallelsClaimSSHPort(t *testing.T) {
+	target := core.SSHTarget{Port: "2222", FallbackPorts: []string{"22"}}
+	claim := core.LeaseClaim{
+		LeaseID: "cbx_example",
+		CloudID: "vm-id",
+		SSHPort: 22,
+		Labels:  map[string]string{"host": "mac.example"},
+	}
+	if !applyParallelsClaimSSHPort(&target, claim, "cbx_example", "vm-id", "mac.example") {
+		t.Fatal("exact Parallels claim endpoint was not applied")
+	}
+	if target.Port != "22" || len(target.FallbackPorts) != 0 {
+		t.Fatalf("target endpoint=%#v", target)
+	}
+
+	wrong := core.SSHTarget{Port: "2222", FallbackPorts: []string{"22"}}
+	if applyParallelsClaimSSHPort(&wrong, claim, "cbx_other", "vm-id", "mac.example") {
+		t.Fatal("mismatched claim endpoint was applied")
+	}
+	if wrong.Port != "2222" || len(wrong.FallbackPorts) != 1 {
+		t.Fatalf("mismatched target was mutated: %#v", wrong)
+	}
+
+	cfg := core.BaseConfig()
+	if cfg.SSHPort != "2222" {
+		t.Fatalf("base SSHPort=%q, want generic 2222 default", cfg.SSHPort)
+	}
+	if !applyParallelsClaimSSHPortToConfig(&cfg, claim, "cbx_example", "vm-id", "mac.example") {
+		t.Fatal("exact Parallels claim port was not applied to config")
+	}
+	if cfg.SSHPort != "22" || len(cfg.SSHFallbackPorts) != 0 {
+		t.Fatalf("config endpoint port=%q fallback=%v", cfg.SSHPort, cfg.SSHFallbackPorts)
+	}
+	if applyParallelsClaimSSHPortToConfig(&cfg, claim, "cbx_other", "vm-id", "mac.example") {
+		t.Fatal("mismatched claim port was applied to config")
+	}
+	if applyParallelsClaimSSHPortToConfig(&cfg, claim, "cbx_example", "other-vm", "mac.example") {
+		t.Fatal("claim port from a different VM was applied to config")
+	}
+	if applyParallelsClaimSSHPortToConfig(&cfg, claim, "cbx_example", "vm-id", "other.example") {
+		t.Fatal("claim port from a different Parallels host was applied to config")
+	}
+}
+
+func TestResolveReusesSavedSSHPortWhenToolsReportsNoIP(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+
+	leaseID := "cbx_good"
+	server := core.Server{
+		CloudID:  "vm-good",
+		Provider: "parallels",
+		Name:     "crabbox-cbx-good-blue",
+		Labels:   map[string]string{"provider": "parallels", "lease": leaseID, "slug": "blue", "host": "local"},
+	}
+	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "blue", "parallels", "", "", "/repo", time.Minute, false, server, core.SSHTarget{Port: "22"}); err != nil {
+		t.Fatal(err)
+	}
+
+	expiry := time.Now().Add(time.Hour).Unix()
+	runner := &parallelsReuseDHCPRunner{
+		vmJSON: `[{
+			"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"running",
+			"Hardware":{"net0":{"enabled":true,"mac":"001C4233EEDD"}},
+			"Network":{"ipAddresses":[]}
+		}]`,
+		leases: "[vnic0]\n10.211.55.9=\"" + strconv.FormatInt(expiry, 10) + ",1800,001c4233eedd,01001c4233eedd\"\n",
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = "parallels"
+	cfg.TargetOS = core.TargetMacOS
+	cfg.SSHPort = "2222"
+	cfg.Parallels.BootstrapKey = "/Users/build/.ssh/bootstrap"
+	backend := &leaseBackend{DirectSSHBackend: sharedBackend(cfg, runner)}
+
+	lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "blue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.LeaseID != leaseID || lease.Server.PublicNet.IPv4.IP != "10.211.55.9" || lease.SSH.Host != "10.211.55.9" || lease.SSH.Port != "22" {
+		t.Fatalf("reuse lease=%#v ssh=%#v", lease.Server, lease.SSH)
+	}
+	if lease.Server.Labels["ip_source"] != "dhcp-mac" {
+		t.Fatalf("ip_source=%q, want dhcp-mac", lease.Server.Labels["ip_source"])
+	}
+	if !reflect.DeepEqual(runner.probedPorts, []string{"22"}) {
+		t.Fatalf("probed ports=%v, want saved port 22 only", runner.probedPorts)
+	}
+}
+
+func TestResolvePreservesExactClaimSSHPortWhenIPDiscoveryFails(t *testing.T) {
+	for _, mode := range []struct {
+		name      string
+		request   core.ResolveRequest
+		wantError bool
+	}{
+		{name: "connection", request: core.ResolveRequest{ID: "blue"}, wantError: true},
+		{name: "release", request: core.ResolveRequest{ID: "blue", ReleaseOnly: true}},
+		{name: "status", request: core.ResolveRequest{ID: "blue", StatusOnly: true, NoLocalStateMutations: true}},
+		{name: "status readiness", request: core.ResolveRequest{ID: "blue", StatusOnly: true, ReadyProbe: true, NoLocalStateMutations: true}},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", filepath.Join(root, "home"))
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+			t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+
+			leaseID := "cbx_good"
+			server := core.Server{
+				CloudID:  "vm-good",
+				Provider: "parallels",
+				Name:     "crabbox-cbx-good-blue",
+				Labels:   map[string]string{"provider": "parallels", "lease": leaseID, "slug": "blue", "host": "local"},
+			}
+			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "blue", "parallels", "", "", "/repo", time.Minute, false, server, core.SSHTarget{Port: "22"}); err != nil {
+				t.Fatal(err)
+			}
+
+			runner := &parallelsCleanupRunner{vmJSON: `[{"ID":"vm-good","Name":"crabbox-cbx-good-blue","State":"running"}]`}
+			cfg := testParallelsCleanupConfig()
+			cfg.SSHPort = "2222"
+			cfg.SSHFallbackPorts = []string{"22"}
+			backend := &leaseBackend{DirectSSHBackend: sharedBackend(cfg, runner)}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			lease, err := backend.Resolve(ctx, mode.request)
+			if mode.wantError {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("Resolve error=%v, want original discovery cancellation after exact-claim SSH port restore", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lease.Server.CloudID != "vm-good" || lease.LeaseID != leaseID || lease.SSH.Host != "" {
+				t.Fatalf("unexpected resolved lease=%#v ssh=%#v", lease.Server, lease.SSH)
+			}
+			if lease.SSH.Port != "22" || len(lease.SSH.FallbackPorts) != 0 {
+				t.Fatalf("status/release endpoint=%#v, want saved claim port 22", lease.SSH)
+			}
+			if !reflect.DeepEqual(runner.execVMIDs, []string{"vm-good"}) {
+				t.Fatalf("guest metadata lookup lost VM identity: %v", runner.execVMIDs)
+			}
+		})
+	}
+}
+
+func TestDoctorHostAndProbePathsOmitPasswordFromChildEnvironment(t *testing.T) {
+	const password = "synthetic-parallels-password"
+	t.Setenv("CRABBOX_PARALLELS_PASSWORD", password)
+	runner := &parallelsReuseDHCPRunner{
+		vmJSON: `[{"ID":"source-vm","Name":"source-vm","State":"running"}]`,
+	}
+	cfg := core.BaseConfig()
+	cfg.Provider = "parallels"
+	cfg.TargetOS = core.TargetMacOS
+	cfg.Parallels.Source = "source-vm"
+	backend := &leaseBackend{DirectSSHBackend: sharedBackend(cfg, runner)}
+
+	_, _ = backend.Doctor(context.Background(), core.DoctorRequest{ProbeSSH: true})
+	if len(runner.requests) == 0 {
+		t.Fatal("doctor issued no host commands")
+	}
+	for _, req := range runner.requests {
+		if req.Env == nil {
+			t.Fatal("doctor host command inherited the process environment")
+		}
+		if commandRequestHasEnvName(req, "CRABBOX_PARALLELS_PASSWORD") {
+			t.Fatal("CRABBOX_PARALLELS_PASSWORD was present in a doctor child environment")
+		}
+		if commandRequestPlacesValueOnArgv(req, password) {
+			t.Fatal("password value was placed on argv")
+		}
+	}
+	target := parallelsLeaseSSHTarget(cfg, "192.0.2.10")
+	if len(target.ChildEnvDenylist) != 1 || target.ChildEnvDenylist[0] != "CRABBOX_PARALLELS_PASSWORD" {
+		t.Fatalf("doctor SSH target denylist=%v", target.ChildEnvDenylist)
+	}
+}
+
+func TestValidateConfigRestrictsBootstrapFallback(t *testing.T) {
+	tests := []struct {
+		name    string
+		target  string
+		key     string
+		wantErr string
+	}{
+		{name: "macOS absolute", target: core.TargetMacOS, key: "/Users/build/.ssh/bootstrap"},
+		{name: "macOS unset", target: core.TargetMacOS},
+		{name: "Linux rejected", target: core.TargetLinux, key: "/Users/build/.ssh/bootstrap", wantErr: "only for macOS"},
+		{name: "relative rejected", target: core.TargetMacOS, key: ".ssh/bootstrap", wantErr: "absolute path"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.TargetOS = test.target
+			cfg.Parallels.BootstrapKey = test.key
+			err := (Provider{}).ValidateConfig(cfg)
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("err=%v, want %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestParallelsMacOSBootstrapFallbackGate(t *testing.T) {
+	toolsErr := errors.New("PRL_ERR_VM_EXEC_GUEST_TOOL_NOT_AVAILABLE")
+	tests := []struct {
+		name   string
+		target string
+		key    string
+		err    error
+		want   bool
+	}{
+		{name: "macOS tools unavailable", target: core.TargetMacOS, key: "/Users/build/.ssh/bootstrap", err: toolsErr, want: true},
+		{name: "no bootstrap key", target: core.TargetMacOS, err: toolsErr},
+		{name: "Linux", target: core.TargetLinux, key: "/Users/build/.ssh/bootstrap", err: toolsErr},
+		{name: "Windows", target: core.TargetWindows, key: "/Users/build/.ssh/bootstrap", err: toolsErr},
+		{name: "unrelated error", target: core.TargetMacOS, key: "/Users/build/.ssh/bootstrap", err: errors.New("permission denied")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := core.BaseConfig()
+			cfg.TargetOS = test.target
+			cfg.Parallels.BootstrapKey = test.key
+			if got := parallelsMacOSBootstrapFallbackAllowed(cfg, test.err); got != test.want {
+				t.Fatalf("got=%t want=%t", got, test.want)
 			}
 		})
 	}
@@ -372,6 +669,7 @@ func TestAcquireRemovesStoredKeyAfterPostKeyFailure(t *testing.T) {
 	cfg.TargetOS = core.TargetLinux
 	cfg.Parallels.Source = "source-vm"
 	cfg.Parallels.SourceSnapshot = "missing-snapshot"
+	cfg.Parallels.Hosts = []core.ParallelsHostConfig{{Name: "fixture-host", MaxVMs: 2}}
 	runner := &parallelsAcquireRunner{snapshotErr: errors.New("snapshot lookup failed")}
 	backend := &leaseBackend{
 		DirectSSHBackend: sharedBackend(cfg, runner),
@@ -384,6 +682,57 @@ func TestAcquireRemovesStoredKeyAfterPostKeyFailure(t *testing.T) {
 	keyMatches := storedTestboxKeyMatches(t)
 	if len(keyMatches) != 0 {
 		t.Fatalf("stored keys remain after failed acquire: %v", keyMatches)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, release, err := core.ReserveParallelsFleetCapacity(ctx, cfg, runner, "source-vm")
+	if err != nil {
+		t.Fatalf("failed acquisition retained its capacity reservation: %v", err)
+	}
+	release()
+}
+
+func TestAcquireHoldsCapacityThroughCloneOnly(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skip("ssh-keygen not available")
+	}
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+	cfg := core.BaseConfig()
+	cfg.Provider = "parallels"
+	cfg.TargetOS = core.TargetLinux
+	cfg.Parallels.Source = "source-vm"
+	cfg.Parallels.CloneMode = "full"
+	cfg.Parallels.Hosts = []core.ParallelsHostConfig{{Name: "fixture-host", MaxVMs: 2}}
+	var observed []string
+	runner := &parallelsAcquireRunner{startErr: errors.New("stop after clone")}
+	runner.beforeCommand = func(command string) {
+		if command != "clone" && command != "start" {
+			return
+		}
+		observed = append(observed, command)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_, release, err := core.ReserveParallelsFleetCapacity(ctx, cfg, &parallelsAcquireRunner{}, "source-vm")
+		if release != nil {
+			release()
+		}
+		if command == "clone" {
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("clone ran without retaining the capacity reservation: %v", err)
+			}
+		} else if err != nil {
+			t.Fatalf("capacity reservation remained held during startup: %v", err)
+		}
+	}
+	backend := &leaseBackend{DirectSSHBackend: sharedBackend(cfg, runner)}
+	if _, err := backend.acquireOnce(context.Background(), false, ""); err == nil || !strings.Contains(err.Error(), "stop after clone") {
+		t.Fatalf("acquireOnce err=%v, want controlled post-clone stop", err)
+	}
+	if strings.Join(observed, ",") != "clone,start" {
+		t.Fatalf("observed acquisition stages=%v, want clone and start", observed)
 	}
 }
 
@@ -563,17 +912,21 @@ func (r *parallelsCleanupRunner) Run(_ context.Context, req core.LocalCommandReq
 }
 
 type parallelsAcquireRunner struct {
-	snapshotErr error
-	startErr    error
-	deleteErr   error
-	cloneID     string
-	cloneName   string
-	cloneArgs   []string
+	beforeCommand func(string)
+	snapshotErr   error
+	startErr      error
+	deleteErr     error
+	cloneID       string
+	cloneName     string
+	cloneArgs     []string
 }
 
 func (r *parallelsAcquireRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
 	if req.Name != "prlctl" || len(req.Args) == 0 {
 		return core.LocalCommandResult{}, errors.New("unexpected command")
+	}
+	if r.beforeCommand != nil {
+		r.beforeCommand(req.Args[0])
 	}
 	switch req.Args[0] {
 	case "list":
@@ -625,9 +978,9 @@ func TestParallelsConfigShowCompleteRawFields(t *testing.T) {
 		name   string
 		config core.ParallelsConfig
 		fields []core.ProviderConfigShowField
-	}{{name: "zero", config: core.ParallelsConfig{Template: "", Source: "", SourceID: "", SourceSnapshot: "", SourceSnapshotID: "", CloneMode: "", Host: "", HostUser: "", HostKey: "", VMRoot: "", User: "", WorkRoot: "", SelectedHost: "internal-selected-host", StartupTimeout: 0}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: "", TextName: "template", TextValue: "-"}, {JSONName: "source", JSONValue: "", TextName: "source", TextValue: "-"}, {JSONName: "sourceId", JSONValue: "", TextName: "source_id", TextValue: "-"}, {JSONName: "sourceSnapshot", JSONValue: "", TextName: "snapshot", TextValue: "-"}, {JSONName: "sourceSnapshotId", JSONValue: "", TextName: "snapshot_id", TextValue: "-"}, {JSONName: "cloneMode", JSONValue: "", TextName: "clone_mode", TextValue: ""}, {JSONName: "host", JSONValue: "", TextName: "host", TextValue: "local"}, {JSONName: "hostUser", JSONValue: ""}, {JSONName: "hostKey", JSONValue: "missing"}, {JSONName: "vmRoot", JSONValue: ""}, {JSONName: "user", JSONValue: "", TextName: "user", TextValue: ""}, {JSONName: "workRoot", JSONValue: "", TextName: "work_root", TextValue: ""}, {JSONName: "startupTimeout", JSONValue: "0s", TextName: "startup_timeout", TextValue: "0s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}},
-		{name: "raw", config: core.ParallelsConfig{Template: " Template reference ", Source: " Source reference ", SourceID: " SourceID reference ", SourceSnapshot: " SourceSnapshot reference ", SourceSnapshotID: " SourceSnapshotID reference ", CloneMode: " CloneMode reference ", Host: " Host reference ", HostUser: " HostUser reference ", HostKey: " HostKey reference ", VMRoot: " VMRoot reference ", User: " User reference ", WorkRoot: " WorkRoot reference ", SelectedHost: "internal-selected-host", StartupTimeout: -1500 * time.Millisecond}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: " Template reference ", TextName: "template", TextValue: " Template reference "}, {JSONName: "source", JSONValue: " Source reference ", TextName: "source", TextValue: " Source reference "}, {JSONName: "sourceId", JSONValue: " SourceID reference ", TextName: "source_id", TextValue: " SourceID reference "}, {JSONName: "sourceSnapshot", JSONValue: " SourceSnapshot reference ", TextName: "snapshot", TextValue: " SourceSnapshot reference "}, {JSONName: "sourceSnapshotId", JSONValue: " SourceSnapshotID reference ", TextName: "snapshot_id", TextValue: " SourceSnapshotID reference "}, {JSONName: "cloneMode", JSONValue: " CloneMode reference ", TextName: "clone_mode", TextValue: " CloneMode reference "}, {JSONName: "host", JSONValue: " Host reference ", TextName: "host", TextValue: " Host reference "}, {JSONName: "hostUser", JSONValue: " HostUser reference "}, {JSONName: "hostKey", JSONValue: "configured"}, {JSONName: "vmRoot", JSONValue: " VMRoot reference "}, {JSONName: "user", JSONValue: " User reference ", TextName: "user", TextValue: " User reference "}, {JSONName: "workRoot", JSONValue: " WorkRoot reference ", TextName: "work_root", TextValue: " WorkRoot reference "}, {JSONName: "startupTimeout", JSONValue: "-1.5s", TextName: "startup_timeout", TextValue: "-1.5s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}},
-		{name: "whitespace", config: core.ParallelsConfig{Template: " \t ", Source: " \t ", SourceID: " \t ", SourceSnapshot: " \t ", SourceSnapshotID: " \t ", CloneMode: " \t ", Host: " \t ", HostUser: " \t ", HostKey: " \t ", VMRoot: " \t ", User: " \t ", WorkRoot: " \t ", SelectedHost: "internal-selected-host", StartupTimeout: -1500 * time.Millisecond}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: " \t ", TextName: "template", TextValue: " \t "}, {JSONName: "source", JSONValue: " \t ", TextName: "source", TextValue: " \t "}, {JSONName: "sourceId", JSONValue: " \t ", TextName: "source_id", TextValue: " \t "}, {JSONName: "sourceSnapshot", JSONValue: " \t ", TextName: "snapshot", TextValue: " \t "}, {JSONName: "sourceSnapshotId", JSONValue: " \t ", TextName: "snapshot_id", TextValue: " \t "}, {JSONName: "cloneMode", JSONValue: " \t ", TextName: "clone_mode", TextValue: " \t "}, {JSONName: "host", JSONValue: " \t ", TextName: "host", TextValue: " \t "}, {JSONName: "hostUser", JSONValue: " \t "}, {JSONName: "hostKey", JSONValue: "configured"}, {JSONName: "vmRoot", JSONValue: " \t "}, {JSONName: "user", JSONValue: " \t ", TextName: "user", TextValue: " \t "}, {JSONName: "workRoot", JSONValue: " \t ", TextName: "work_root", TextValue: " \t "}, {JSONName: "startupTimeout", JSONValue: "-1.5s", TextName: "startup_timeout", TextValue: "-1.5s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}}} {
+	}{{name: "zero", config: core.ParallelsConfig{Template: "", Source: "", SourceID: "", SourceSnapshot: "", SourceSnapshotID: "", CloneMode: "", Host: "", HostUser: "", HostKey: "", VMRoot: "", User: "", WorkRoot: "", SelectedHost: "internal-selected-host", StartupTimeout: 0}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: "", TextName: "template", TextValue: "-"}, {JSONName: "source", JSONValue: "", TextName: "source", TextValue: "-"}, {JSONName: "sourceId", JSONValue: "", TextName: "source_id", TextValue: "-"}, {JSONName: "sourceSnapshot", JSONValue: "", TextName: "snapshot", TextValue: "-"}, {JSONName: "sourceSnapshotId", JSONValue: "", TextName: "snapshot_id", TextValue: "-"}, {JSONName: "cloneMode", JSONValue: "", TextName: "clone_mode", TextValue: ""}, {JSONName: "host", JSONValue: "", TextName: "host", TextValue: "local"}, {JSONName: "maxVMs", JSONValue: 0, TextName: "max_vms", TextValue: "0"}, {JSONName: "hostUser", JSONValue: ""}, {JSONName: "hostKey", JSONValue: "missing"}, {JSONName: "bootstrapKey", JSONValue: "missing"}, {JSONName: "vmRoot", JSONValue: ""}, {JSONName: "user", JSONValue: "", TextName: "user", TextValue: ""}, {JSONName: "auth", JSONValue: "missing", TextName: "auth", TextValue: "missing"}, {JSONName: "workRoot", JSONValue: "", TextName: "work_root", TextValue: ""}, {JSONName: "startupTimeout", JSONValue: "0s", TextName: "startup_timeout", TextValue: "0s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}},
+		{name: "raw", config: core.ParallelsConfig{Template: " Template reference ", Source: " Source reference ", SourceID: " SourceID reference ", SourceSnapshot: " SourceSnapshot reference ", SourceSnapshotID: " SourceSnapshotID reference ", CloneMode: " CloneMode reference ", Host: " Host reference ", HostUser: " HostUser reference ", HostKey: " HostKey reference ", VMRoot: " VMRoot reference ", User: " User reference ", WorkRoot: " WorkRoot reference ", SelectedHost: "internal-selected-host", MaxVMs: 4, StartupTimeout: -1500 * time.Millisecond}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: " Template reference ", TextName: "template", TextValue: " Template reference "}, {JSONName: "source", JSONValue: " Source reference ", TextName: "source", TextValue: " Source reference "}, {JSONName: "sourceId", JSONValue: " SourceID reference ", TextName: "source_id", TextValue: " SourceID reference "}, {JSONName: "sourceSnapshot", JSONValue: " SourceSnapshot reference ", TextName: "snapshot", TextValue: " SourceSnapshot reference "}, {JSONName: "sourceSnapshotId", JSONValue: " SourceSnapshotID reference ", TextName: "snapshot_id", TextValue: " SourceSnapshotID reference "}, {JSONName: "cloneMode", JSONValue: " CloneMode reference ", TextName: "clone_mode", TextValue: " CloneMode reference "}, {JSONName: "host", JSONValue: " Host reference ", TextName: "host", TextValue: " Host reference "}, {JSONName: "maxVMs", JSONValue: 4, TextName: "max_vms", TextValue: "4"}, {JSONName: "hostUser", JSONValue: " HostUser reference "}, {JSONName: "hostKey", JSONValue: "configured"}, {JSONName: "bootstrapKey", JSONValue: "missing"}, {JSONName: "vmRoot", JSONValue: " VMRoot reference "}, {JSONName: "user", JSONValue: " User reference ", TextName: "user", TextValue: " User reference "}, {JSONName: "auth", JSONValue: "missing", TextName: "auth", TextValue: "missing"}, {JSONName: "workRoot", JSONValue: " WorkRoot reference ", TextName: "work_root", TextValue: " WorkRoot reference "}, {JSONName: "startupTimeout", JSONValue: "-1.5s", TextName: "startup_timeout", TextValue: "-1.5s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}},
+		{name: "whitespace", config: core.ParallelsConfig{Template: " \t ", Source: " \t ", SourceID: " \t ", SourceSnapshot: " \t ", SourceSnapshotID: " \t ", CloneMode: " \t ", Host: " \t ", HostUser: " \t ", HostKey: " \t ", VMRoot: " \t ", User: " \t ", WorkRoot: " \t ", SelectedHost: "internal-selected-host", MaxVMs: -1, StartupTimeout: -1500 * time.Millisecond}, fields: []core.ProviderConfigShowField{{JSONName: "template", JSONValue: " \t ", TextName: "template", TextValue: " \t "}, {JSONName: "source", JSONValue: " \t ", TextName: "source", TextValue: " \t "}, {JSONName: "sourceId", JSONValue: " \t ", TextName: "source_id", TextValue: " \t "}, {JSONName: "sourceSnapshot", JSONValue: " \t ", TextName: "snapshot", TextValue: " \t "}, {JSONName: "sourceSnapshotId", JSONValue: " \t ", TextName: "snapshot_id", TextValue: " \t "}, {JSONName: "cloneMode", JSONValue: " \t ", TextName: "clone_mode", TextValue: " \t "}, {JSONName: "host", JSONValue: " \t ", TextName: "host", TextValue: " \t "}, {JSONName: "maxVMs", JSONValue: -1, TextName: "max_vms", TextValue: "-1"}, {JSONName: "hostUser", JSONValue: " \t "}, {JSONName: "hostKey", JSONValue: "configured"}, {JSONName: "bootstrapKey", JSONValue: "missing"}, {JSONName: "vmRoot", JSONValue: " \t "}, {JSONName: "user", JSONValue: " \t ", TextName: "user", TextValue: " \t "}, {JSONName: "auth", JSONValue: "missing", TextName: "auth", TextValue: "missing"}, {JSONName: "workRoot", JSONValue: " \t ", TextName: "work_root", TextValue: " \t "}, {JSONName: "startupTimeout", JSONValue: "-1.5s", TextName: "startup_timeout", TextValue: "-1.5s"}, {JSONName: "templates", JSONValue: map[string]core.ParallelsTemplateConfig(nil), TextName: "templates", TextValue: "0"}, {JSONName: "hosts", JSONValue: []core.ParallelsHostConfig(nil), TextName: "hosts", TextValue: "0"}}}} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := core.Config{Parallels: tc.config}
 			want := core.ProviderConfigShowSection{JSONKey: "parallels", TextLabel: "parallels", Providers: []string{"parallels"}, Fields: tc.fields}
@@ -652,11 +1005,13 @@ func TestParallelsConfigShowTypedCollections(t *testing.T) {
 			cfg := core.Config{}
 			cfg.Parallels.Templates = map[string]core.ParallelsTemplateConfig{}
 			cfg.Parallels.Hosts = []core.ParallelsHostConfig{}
+			cfg.Parallels.MaxVMs = 7
 			if !empty {
 				cfg.Parallels.Templates["raw template key"] = core.ParallelsTemplateConfig{Source: "source", SourceID: "source-id", SourceSnapshot: "snapshot", SourceSnapshotID: "snapshot-id", TargetOS: "linux", WindowsMode: "normal", CloneMode: "linked", Host: "host", HostUser: "host-user", HostKey: "loaded-template-key", VMRoot: "/vm", User: "user", WorkRoot: "/work"}
 				first := core.ParallelsHostConfig{Name: "first", Host: "first-host", User: "host-user", Key: "loaded-host-key", VMRoot: "/vm", Targets: []string{"linux", "linux", "macos"}, MaxVMs: 3}
 				second := core.ParallelsHostConfig{Name: "second", Host: "second-host", Targets: []string{}, MaxVMs: 0}
 				cfg.Parallels.Hosts = []core.ParallelsHostConfig{first, second, first}
+				cfg.Parallels.SelectedHost = "first"
 			}
 			before, err := json.Marshal(cfg.Parallels)
 			if err != nil {
@@ -671,10 +1026,13 @@ func TestParallelsConfigShowTypedCollections(t *testing.T) {
 					texts[field.TextName] = field.TextValue
 				}
 			}
-			if len(values) != 15 || len(texts) != 12 {
+			if len(values) != 18 || len(texts) != 14 {
 				t.Fatalf("field counts=%d/%d", len(values), len(texts))
 			}
-			for _, omitted := range []string{"hostUser", "hostKey", "vmRoot", "selectedHost", "SelectedHost"} {
+			if values["maxVMs"] != 7 || texts["max_vms"] != "7" {
+				t.Fatal("direct-host display substituted a selected fleet limit")
+			}
+			for _, omitted := range []string{"hostUser", "hostKey", "bootstrapKey", "vmRoot", "selectedHost", "SelectedHost"} {
 				if _, ok := texts[omitted]; ok {
 					t.Fatalf("JSON-only/internal field in text: %s", omitted)
 				}
@@ -742,9 +1100,11 @@ func TestConfigShowRedactsParallelsSSHKeys(t *testing.T) {
 		topLevelKey = "top-level-private-key-sentinel"
 		templateKey = "template-private-key-sentinel"
 		hostKey     = "host-private-key-sentinel"
+		password    = "guest-account-password-sentinel"
 	)
 	cfg := core.Config{}
 	cfg.Parallels.HostKey = topLevelKey
+	cfg.Parallels.Password = password
 	cfg.Parallels.Templates = map[string]core.ParallelsTemplateConfig{
 		"macos": {
 			Source:  "macOS Tahoe",
@@ -774,7 +1134,7 @@ func TestConfigShowRedactsParallelsSSHKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, output := range map[string]string{"text": text.String(), "json": string(jsonData)} {
-		for _, secret := range []string{topLevelKey, templateKey, hostKey} {
+		for _, secret := range []string{topLevelKey, templateKey, hostKey, password} {
 			if strings.Contains(output, secret) {
 				t.Fatalf("%s config output leaked %q: %s", name, secret, output)
 			}
@@ -789,6 +1149,9 @@ func TestConfigShowRedactsParallelsSSHKeys(t *testing.T) {
 	if parallels["hostKey"] != "configured" {
 		t.Fatalf("top-level hostKey=%#v, want configured", parallels["hostKey"])
 	}
+	if parallels["auth"] != "configured" {
+		t.Fatalf("parallels auth=%#v, want configured", parallels["auth"])
+	}
 	templates := parallels["templates"].(map[string]any)
 	template := templates["macos"].(map[string]any)
 	if template["HostKey"] != "configured" || template["Source"] != "macOS Tahoe" {
@@ -800,10 +1163,153 @@ func TestConfigShowRedactsParallelsSSHKeys(t *testing.T) {
 		t.Fatalf("host view=%#v", host)
 	}
 
-	if cfg.Parallels.HostKey != topLevelKey || cfg.Parallels.Templates["macos"].HostKey != templateKey || cfg.Parallels.Hosts[0].Key != hostKey {
+	if cfg.Parallels.HostKey != topLevelKey || cfg.Parallels.Password != password || cfg.Parallels.Templates["macos"].HostKey != templateKey || cfg.Parallels.Hosts[0].Key != hostKey {
 		t.Fatal("config-show redaction mutated the effective Parallels config")
 	}
 	if redactedParallelsTemplateConfigs(nil) != nil || redactedParallelsHostConfigs(nil) != nil {
 		t.Fatal("config-show redaction changed nil Parallels collections")
 	}
+}
+
+type parallelsReuseDHCPRunner struct {
+	vmJSON      string
+	leases      string
+	requests    []core.LocalCommandRequest
+	probedPorts []string
+}
+
+func (r *parallelsReuseDHCPRunner) Run(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	r.requests = append(r.requests, req)
+	rendered := req.Name + " " + strings.Join(req.Args, " ")
+	switch {
+	case strings.Contains(rendered, "prlctl") && strings.Contains(rendered, "list"):
+		return core.LocalCommandResult{Stdout: r.vmJSON}, nil
+	case strings.Contains(rendered, "parallels_dhcp_leases"):
+		return core.LocalCommandResult{Stdout: r.leases}, nil
+	case req.Name == "/usr/bin/nc" || strings.Contains(rendered, "/usr/bin/nc"):
+		port := ""
+		if len(req.Args) > 0 {
+			port = req.Args[len(req.Args)-1]
+		}
+		r.probedPorts = append(r.probedPorts, port)
+		if port != "22" {
+			return core.LocalCommandResult{Stderr: "connection refused"}, errors.New("connection refused")
+		}
+		return core.LocalCommandResult{}, nil
+	default:
+		return core.LocalCommandResult{}, nil
+	}
+}
+
+func commandRequestHasEnvName(req core.LocalCommandRequest, name string) bool {
+	prefix := strings.ToUpper(name) + "="
+	for _, entry := range req.Env {
+		if strings.HasPrefix(strings.ToUpper(entry), prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandRequestPlacesValueOnArgv(req core.LocalCommandRequest, value string) bool {
+	if value == "" {
+		return false
+	}
+	if strings.Contains(req.Name, value) {
+		return true
+	}
+	for _, arg := range req.Args {
+		if strings.Contains(arg, value) {
+			return true
+		}
+	}
+	return false
+}
+
+// parallelsTouchRunner fails every command so the test proves Touch resolves the
+// lease host from its label instead of probing candidate hosts with prlctl.
+type parallelsTouchRunner struct {
+	calls int
+}
+
+func (r *parallelsTouchRunner) Run(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
+	r.calls++
+	return core.LocalCommandResult{}, errors.New("unexpected command")
+}
+
+func TestParallelsTouchPersistsIdlePolicyOverride(t *testing.T) {
+	override := 45 * time.Minute
+	for _, tc := range []struct {
+		name      string
+		storedKey string
+		override  *time.Duration
+		want      string
+	}{
+		{"preserve", "idle_timeout_secs", nil, "1800"},
+		{"replace", "idle_timeout_secs", &override, "2700"},
+		{"preserve legacy", "idle_timeout", nil, "1800"},
+		{"replace legacy", "idle_timeout", &override, "2700"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", filepath.Join(root, "home"))
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+			t.Setenv("XDG_STATE_HOME", filepath.Join(root, "state"))
+			leaseID := "cbx_touch_idle"
+			server := core.Server{
+				CloudID:  "vm-touch",
+				Provider: "parallels",
+				Name:     "crabbox-cbx-touch-idle-blue",
+				Labels: map[string]string{
+					"provider":   "parallels",
+					"lease":      leaseID,
+					"slug":       "blue",
+					"host":       "local",
+					tc.storedKey: "1800",
+				},
+			}
+			before := maps.Clone(server.Labels)
+			runner := &parallelsTouchRunner{}
+			cfg := core.BaseConfig()
+			cfg.Provider = "parallels"
+			cfg.TargetOS = core.TargetLinux
+			cfg.IdleTimeout = 5 * time.Minute
+			backend := &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{Cfg: cfg, RT: core.Runtime{Exec: runner, Stderr: io.Discard}}}
+
+			got, err := backend.Touch(context.Background(), core.TouchRequest{
+				Lease:               core.LeaseTarget{LeaseID: leaseID, Server: server},
+				State:               "ready",
+				IdleTimeout:         cfg.IdleTimeout,
+				IdleTimeoutOverride: tc.override,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Labels["idle_timeout_secs"] != tc.want || got.Labels["idle_timeout"] != tc.want {
+				t.Fatalf("returned idle policy=%v, want both idle_timeout keys=%s", got.Labels, tc.want)
+			}
+			if !maps.Equal(persistedParallelsLeaseLabels(t, leaseID), got.Labels) {
+				t.Fatalf("persisted=%v, want the returned labels %v", persistedParallelsLeaseLabels(t, leaseID), got.Labels)
+			}
+			if !maps.Equal(server.Labels, before) {
+				t.Fatalf("touch mutated the input labels: %v, want %v", server.Labels, before)
+			}
+			if runner.calls != 0 {
+				t.Fatalf("runner calls=%d, want 0 for a labeled host", runner.calls)
+			}
+		})
+	}
+}
+
+func persistedParallelsLeaseLabels(t *testing.T, leaseID string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "parallels", "leases", leaseID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var labels map[string]string
+	if err := json.Unmarshal(data, &labels); err != nil {
+		t.Fatal(err)
+	}
+	return labels
 }

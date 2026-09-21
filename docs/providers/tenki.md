@@ -11,6 +11,20 @@ sandbox sessions, then runs normal Crabbox sync/commands over SSH through
 Tenki's sandbox SSH WebSocket proxy using the Tenki-managed SSH key and
 per-session cert.
 
+Crabbox verifies gateway host certificates against Tenki's certificate authority.
+If the Tenki CLI reports a `known_hosts_file`, that file is authoritative. When
+the CLI omits it, Crabbox uses the same workspace key and API endpoint as the CLI
+to retrieve the CA and discover the session's gateway identity. It writes a
+separate authority file alongside the native session certificate, without
+changing Tenki's private keys or certificates. This path requires a workspace
+API key from `tenki onboard` or `TENKI_API_KEY`.
+
+Gateway certificates signed by the trusted CA can rotate without enrolling
+individual leaf keys. Failed discovery, unknown authorities, or missing trust
+files fail closed; Crabbox does not enroll leaf keys or consult other host-trust
+sources. Each new SSH connection rereads the authority file instead of reusing
+a multiplexed connection. Existing connections are not retroactively revoked.
+
 ## When To Use
 
 Use Tenki when the remote Linux machine should be a Tenki sandbox session but
@@ -39,8 +53,14 @@ Authenticate with the Tenki CLI's browser flow:
 tenki login
 ```
 
-Crabbox shells out to `tenki`, so it reuses the Tenki CLI's normal config and
-auth state. The current Tenki CLI selects the workspace from the authenticated
+Crabbox reuses the Tenki CLI's normal config and auth state. For host-authority
+discovery, it reads `~/.config/tenki/config.yaml` (or the basename selected by
+`TENKI_CONFIG_FILE`), with the CLI's `TENKI_AUTH_TOKEN`, `TENKI_API_KEY`, and
+`TENKI_API_ENDPOINT` overrides. The API endpoint must use HTTPS; Crabbox never
+follows authority requests to another origin. `TENKI_API_URL` and
+`XDG_CONFIG_HOME` do not change the native CLI's credential context.
+
+The current Tenki CLI selects the workspace from the authenticated
 API key; it does not accept separate sandbox `--workspace` or `--project`
 selectors. Run `tenki login` again when you need a different workspace. Do not
 pass Tenki auth tokens as command-line arguments.
@@ -158,9 +178,22 @@ All SSH traffic goes through Tenki's supported cert-backed `ssh-proxy` path.
 - Crabbox sync: yes, normal SSH/rsync sync.
 - Desktop / browser / code: no.
 - Actions hydration: yes, as a normal Linux SSH lease.
-- Cleanup: no. Tenki TTL/idle timeout own stale-session cleanup; `stop`
-  terminates known Crabbox leases.
+- Cleanup: no. Explicit `stop` terminates known Crabbox leases; paused sessions
+  still require cleanup according to Tenki's retention policy.
 - Coordinator (broker): no — always direct from the CLI.
+
+## Lifetime
+
+Current Tenki sandboxes do not auto-pause or stop on inactivity. Crabbox retains
+idle-timeout and timing metadata for claim compatibility, but these values are
+bookkeeping and do not enforce native idle expiry. A touch does not extend
+Tenki's maximum duration.
+
+Kept leases use Tenki's `--sticky` mode and have no maximum duration. In
+particular, `warmup` defaults to `--keep=true`, so its TTL does not bound a sticky
+sandbox. Use `--keep=false --ttl 15m` for a bounded test. For non-kept leases,
+Crabbox passes TTL as `--max-duration`; reaching that limit pauses the sandbox,
+not destroys it. Always finish with `crabbox stop --provider tenki <lease>`.
 
 ## Live Smoke
 
@@ -168,7 +201,7 @@ All SSH traffic goes through Tenki's supported cert-backed `ssh-proxy` path.
 tenki login
 go build -trimpath -o bin/crabbox ./cmd/crabbox
 
-bin/crabbox warmup --provider tenki --timing-json
+bin/crabbox warmup --provider tenki --keep=false --ttl 15m --timing-json
 lease=<slug-or-cbx_id-from-warmup-output>
 
 bin/crabbox status --provider tenki --id "$lease" --wait

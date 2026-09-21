@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
-	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/fat16"
 )
 
 type cloudInitPayload struct {
@@ -25,7 +25,7 @@ func buildCloudInitPayload(cfg core.Config, leaseID, slug, publicKey string) (cl
 }
 
 func writeCloudInitDrive(path string, payload cloudInitPayload) error {
-	image, err := buildFAT16Image("cidata", []shared.FATFile{
+	image, err := buildFAT16Image("cidata", []fat16.File{
 		{Name: "user-data", Data: []byte(payload.UserData)},
 		{Name: "meta-data", Data: []byte(payload.MetaData)},
 	})
@@ -38,6 +38,10 @@ func writeCloudInitDrive(path string, payload cloudInitPayload) error {
 	return nil
 }
 
-func buildFAT16Image(label string, files []shared.FATFile) ([]byte, error) {
-	return shared.BuildFAT16Image(label, files, "FC%06dTXT", "firecracker cloud-init")
+func buildFAT16Image(label string, files []fat16.File) ([]byte, error) {
+	image, err := fat16.Build(label, files, "FC%06dTXT")
+	if err != nil {
+		return nil, core.Exit(2, "firecracker cloud-init %v", err)
+	}
+	return image, nil
 }

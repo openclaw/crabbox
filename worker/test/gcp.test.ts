@@ -2339,48 +2339,109 @@ describe("gcp provider", () => {
     expect(createCalls).toEqual(["us-central1-a", "us-central1-b"]);
   });
 
-  it("creates and deletes machine images through Compute Engine", async () => {
-    const client = new GCPClient(env);
-    primeAccessToken(client, "test-token");
-    const calls: Array<{ method: string; path: string; body: unknown }> = [];
-    client.fetcher = async (input, init) => {
-      const url = new URL(String(input));
-      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-      calls.push({ method: init?.method ?? "GET", path: url.pathname + url.search, body });
-      if (url.pathname.endsWith("/global/operations/op-1/wait")) {
-        return Response.json({ name: "op-1", status: "DONE" });
-      }
-      if (url.pathname.endsWith("/global/machineImages/checkpoint-gcp") && init?.method === "GET") {
-        return Response.json({
-          name: "checkpoint-gcp",
-          selfLink: "projects/default-project/global/machineImages/checkpoint-gcp",
-          status: "READY",
-        });
-      }
-      return Response.json({ name: "op-1", status: "PENDING" });
-    };
+  const imageObservationCases = [
+    {
+      label: "populated provenance",
+      observation: {
+        id: "12345",
+        name: "checkpoint-gcp",
+        status: "READY",
+        selfLink: "projects/observed-project/global/observed-resource",
+        labels: {
+          crabbox_checkpoint_token_a: "first",
+          crabbox_checkpoint_token_b: "second",
+          crabbox_checkpoint_lease: "cbx_000000000001",
+        },
+      },
+      expected: {
+        id: "checkpoint-gcp",
+        name: "checkpoint-gcp",
+        state: "ready",
+        immutableID: "12345",
+        checkpointOwnershipHash: "firstsecond",
+        checkpointSourceLeaseID: "cbx_000000000001",
+      },
+    },
+    {
+      label: "missing fields",
+      observation: {},
+      expected: { id: "checkpoint-gcp", name: "checkpoint-gcp", state: "ready" },
+    },
+    {
+      label: "null fields",
+      observation: { id: null, name: null, status: null, selfLink: null },
+      expected: { id: "checkpoint-gcp", name: "checkpoint-gcp", state: "ready" },
+    },
+    {
+      label: "empty fields",
+      observation: {
+        id: "",
+        name: "",
+        status: "",
+        selfLink: "",
+        labels: {
+          crabbox_checkpoint_token_a: "",
+          crabbox_checkpoint_token_b: "second",
+          crabbox_checkpoint_lease: "",
+        },
+      },
+      expected: { id: "", name: "", state: "" },
+    },
+    {
+      label: "partial token",
+      observation: { labels: { crabbox_checkpoint_token_a: "first" } },
+      expected: { id: "checkpoint-gcp", name: "checkpoint-gcp", state: "ready" },
+    },
+  ];
 
-    const image = await client.createImage("crabbox-source", "checkpoint-gcp");
-    await client.deleteImage("checkpoint-gcp");
+  it.each(imageObservationCases)(
+    "creates and deletes machine images through Compute Engine ($label)",
+    async ({ observation, expected }) => {
+      const client = new GCPClient(env);
+      primeAccessToken(client, "test-token");
+      const calls: Array<{ method: string; path: string; body: unknown }> = [];
+      client.fetcher = async (input, init) => {
+        const url = new URL(String(input));
+        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        calls.push({ method: init?.method ?? "GET", path: url.pathname + url.search, body });
+        if (url.pathname.endsWith("/global/operations/op-1/wait")) {
+          return Response.json({ name: "op-1", status: "DONE" });
+        }
+        if (
+          url.pathname.endsWith("/global/machineImages/checkpoint-gcp") &&
+          init?.method === "GET"
+        ) {
+          return Response.json(observation);
+        }
+        return Response.json({ name: "op-1", status: "PENDING" });
+      };
 
-    expect(image).toMatchObject({
-      id: "checkpoint-gcp",
-      provider: "gcp",
-      kind: "gcp-machine-image",
-      state: "ready",
-    });
-    expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual([
-      "POST /compute/v1/projects/default-project/global/machineImages",
-      "POST /compute/v1/projects/default-project/global/operations/op-1/wait",
-      "GET /compute/v1/projects/default-project/global/machineImages/checkpoint-gcp",
-      "DELETE /compute/v1/projects/default-project/global/machineImages/checkpoint-gcp",
-      "POST /compute/v1/projects/default-project/global/operations/op-1/wait",
-    ]);
-    expect(calls[0]?.body).toMatchObject({
-      name: "checkpoint-gcp",
-      sourceInstance: "zones/us-central1-a/instances/crabbox-source",
-    });
-  });
+      const image = await client.createImage("crabbox-source", "checkpoint-gcp");
+      await client.deleteImage("checkpoint-gcp");
+
+      const resourceID =
+        observation.selfLink ?? "projects/default-project/global/machineImages/checkpoint-gcp";
+      expect(image).toEqual({
+        ...expected,
+        provider: "gcp",
+        kind: "gcp-machine-image",
+        region: "us-central1-a",
+        project: "default-project",
+        resourceID,
+      });
+      expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual([
+        "POST /compute/v1/projects/default-project/global/machineImages",
+        "POST /compute/v1/projects/default-project/global/operations/op-1/wait",
+        "GET /compute/v1/projects/default-project/global/machineImages/checkpoint-gcp",
+        "DELETE /compute/v1/projects/default-project/global/machineImages/checkpoint-gcp",
+        "POST /compute/v1/projects/default-project/global/operations/op-1/wait",
+      ]);
+      expect(calls[0]?.body).toMatchObject({
+        name: "checkpoint-gcp",
+        sourceInstance: "zones/us-central1-a/instances/crabbox-source",
+      });
+    },
+  );
 
   it.each(["chk_owned_gcp", `chk_${"a".repeat(124)}`])(
     "encodes bounded GCP ownership labels for checkpoint id %s",
@@ -2452,46 +2513,54 @@ describe("gcp provider", () => {
     expect(gcpMachineImageNotFound(failure, "default-project", "checkpoint-gcp")).toBe(false);
   });
 
-  it("routes kind-specific snapshot reads and deletes to GCP snapshots", async () => {
-    const client = new GCPClient(env);
-    primeAccessToken(client, "test-token");
-    const calls: Array<{ method: string; path: string }> = [];
-    client.fetcher = async (input, init) => {
-      const url = new URL(String(input));
-      calls.push({ method: init?.method ?? "GET", path: url.pathname + url.search });
-      if (url.pathname.endsWith("/global/operations/op-1/wait")) {
-        return Response.json({ name: "op-1", status: "DONE" });
-      }
-      if (url.pathname.endsWith("/global/snapshots/checkpoint-gcp") && init?.method !== "DELETE") {
-        return Response.json({
-          name: "checkpoint-gcp",
-          selfLink: "projects/default-project/global/snapshots/checkpoint-gcp",
-          status: "READY",
-        });
-      }
-      return Response.json({ name: "op-1", status: "PENDING" });
-    };
+  it.each(imageObservationCases)(
+    "routes kind-specific snapshot reads and deletes to GCP snapshots ($label)",
+    async ({ observation, expected }) => {
+      const client = new GCPClient(env);
+      primeAccessToken(client, "test-token");
+      const calls: Array<{ method: string; path: string }> = [];
+      client.fetcher = async (input, init) => {
+        const url = new URL(String(input));
+        calls.push({ method: init?.method ?? "GET", path: url.pathname + url.search });
+        if (url.pathname.endsWith("/global/operations/op-1/wait")) {
+          return Response.json({ name: "op-1", status: "DONE" });
+        }
+        if (
+          url.pathname.endsWith("/global/snapshots/checkpoint-gcp") &&
+          init?.method !== "DELETE"
+        ) {
+          return Response.json(observation);
+        }
+        return Response.json({ name: "op-1", status: "PENDING" });
+      };
 
-    const image = await client.getImage(
-      "projects/default-project/global/snapshots/checkpoint-gcp",
-      "gcp-disk-snapshot",
-    );
-    await client.deleteImage(
-      "projects/default-project/global/snapshots/checkpoint-gcp",
-      "gcp-disk-snapshot",
-    );
+      const image = await client.getImage(
+        "projects/default-project/global/snapshots/checkpoint-gcp",
+        "gcp-disk-snapshot",
+      );
+      await client.deleteImage(
+        "projects/default-project/global/snapshots/checkpoint-gcp",
+        "gcp-disk-snapshot",
+      );
 
-    expect(image).toMatchObject({
-      id: "checkpoint-gcp",
-      provider: "gcp",
-      kind: "gcp-disk-snapshot",
-    });
-    expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual([
-      "GET /compute/v1/projects/default-project/global/snapshots/checkpoint-gcp",
-      "DELETE /compute/v1/projects/default-project/global/snapshots/checkpoint-gcp",
-      "POST /compute/v1/projects/default-project/global/operations/op-1/wait",
-    ]);
-  });
+      const resourceID =
+        observation.selfLink ?? "projects/default-project/global/snapshots/checkpoint-gcp";
+      expect(image).toEqual({
+        ...expected,
+        provider: "gcp",
+        kind: "gcp-disk-snapshot",
+        region: "us-central1-a",
+        project: "default-project",
+        resourceID,
+        snapshots: [resourceID],
+      });
+      expect(calls.map((call) => `${call.method} ${call.path}`)).toEqual([
+        "GET /compute/v1/projects/default-project/global/snapshots/checkpoint-gcp",
+        "DELETE /compute/v1/projects/default-project/global/snapshots/checkpoint-gcp",
+        "POST /compute/v1/projects/default-project/global/operations/op-1/wait",
+      ]);
+    },
+  );
 
   it("creates instances from machine images without boot disk initialization", async () => {
     const client = new GCPClient(env);

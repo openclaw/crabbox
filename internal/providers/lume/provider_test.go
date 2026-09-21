@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -437,57 +438,94 @@ func TestAmbiguousCloneRetainsVM(t *testing.T) {
 }
 
 func TestAcquireControllerAcceptancePrecedesNormalClaimPublication(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", join(home, ".config"))
-	t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
-	storage := join(home, ".lume")
-	must(t, os.MkdirAll(storage, 0o700))
-	const leaseID = "cbx_controller_acceptance"
-	name := ""
-	runner := &fake{hook: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
-		if len(req.Args) == 0 {
-			return core.LocalCommandResult{}, nil, false
-		}
-		switch req.Args[0] {
-		case "ls":
-			return core.LocalCommandResult{Stdout: `[]`}, nil, true
-		case "clone":
-			name = req.Args[2]
-			putVMAt(t, storage, name, "Y29udHJvbGxlci1hY2NlcHRhbmNl")
-			return core.LocalCommandResult{}, nil, true
-		case "get":
-			return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)}, nil, true
-		default:
-			return core.LocalCommandResult{}, nil, false
-		}
-	}}
-	accepted := false
-	_, err := backendFor(configFor(), runner).Acquire(bg, core.AcquireRequest{
-		Repo:             core.Repo{Root: t.TempDir()},
-		RequestedLeaseID: leaseID,
-		RequestedSlug:    "controller-acceptance",
-		OnAcquired: func(acquired core.LeaseTarget) error {
-			accepted = true
-			if acquired.Server.ImmutableID == "" {
-				t.Fatal("OnAcquired received no immutable identity")
+	for _, mode := range []string{"rejected", "claim-changed"} {
+		t.Run(mode, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", join(home, ".config"))
+			t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
+			storage := join(home, ".lume")
+			must(t, os.MkdirAll(storage, 0o700))
+			const leaseID = "cbx_controller_acceptance"
+			name := ""
+			var changed core.LeaseClaim
+			rollbackProbes := 0
+			runner := &fake{hook: func(req core.LocalCommandRequest) (core.LocalCommandResult, error, bool) {
+				if len(req.Args) == 0 {
+					return core.LocalCommandResult{}, nil, false
+				}
+				switch req.Args[0] {
+				case "ls":
+					return core.LocalCommandResult{Stdout: `[]`}, nil, true
+				case "clone":
+					name = req.Args[2]
+					putVMAt(t, storage, name, "Y29udHJvbGxlci1hY2NlcHRhbmNl")
+					return core.LocalCommandResult{}, nil, true
+				case "get":
+					if changed.LeaseID != "" {
+						rollbackProbes++
+						// Record unexpected cleanup admission without allowing any deletion.
+						return core.LocalCommandResult{}, errors.New("test blocks cleanup without the prior claim fence"), true
+					}
+					return core.LocalCommandResult{Stdout: fmt.Sprintf(`[{"name":%q,"os":"macOS","status":"stopped","locationName":%q}]`, name, storage)}, nil, true
+				default:
+					return core.LocalCommandResult{}, nil, false
+				}
+			}}
+			accepted := false
+			_, err := backendFor(configFor(), runner).Acquire(bg, core.AcquireRequest{
+				Repo:             core.Repo{Root: t.TempDir()},
+				RequestedLeaseID: leaseID,
+				RequestedSlug:    "controller-acceptance",
+				OnAcquired: func(acquired core.LeaseTarget) error {
+					accepted = true
+					if acquired.Server.ImmutableID == "" {
+						t.Fatal("OnAcquired received no immutable identity")
+					}
+					pending, ok, claimErr := resolveLeaseClaimForProvider(leaseID)
+					if claimErr != nil || !ok || pending.Labels["recovery"] != "clone-pending" || pending.CloudImmutableID != "" {
+						t.Fatalf("claim during OnAcquired=%#v ok=%v err=%v", pending, ok, claimErr)
+					}
+					if mode == "claim-changed" {
+						updatedLabels := maps.Clone(pending.Labels)
+						updatedLabels["owner"] = "replacement-owner"
+						changed, claimErr = core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, pending, updatedLabels)
+						must(t, claimErr)
+						return nil
+					}
+					return errors.New("controller rejected identity")
+				},
+			})
+			if !accepted {
+				t.Fatal("OnAcquired was not called")
 			}
-			pending, ok, claimErr := resolveLeaseClaimForProvider(leaseID)
-			if claimErr != nil || !ok || pending.Labels["recovery"] != "clone-pending" || pending.CloudImmutableID != "" {
-				t.Fatalf("claim during OnAcquired=%#v ok=%v err=%v", pending, ok, claimErr)
+			if mode == "claim-changed" {
+				want(t, err, "claim changed")
+				if rollbackProbes != 0 {
+					t.Fatalf("failed claim refresh admitted %d cleanup probes without the prior snapshot", rollbackProbes)
+				}
+				current, ok, claimErr := resolveLeaseClaimForProvider(leaseID)
+				if claimErr != nil || !ok || !reflect.DeepEqual(current, changed) {
+					t.Fatalf("failed refresh changed the replacement claim: ok=%v err=%v", ok, claimErr)
+				}
+				if _, statErr := os.Stat(join(storage, name)); statErr != nil {
+					t.Fatalf("failed refresh removed the VM fixture: %v", statErr)
+				}
+				key, keyErr := core.TestboxKeyPath(leaseID)
+				must(t, keyErr)
+				if _, statErr := os.Stat(key); statErr != nil {
+					t.Fatalf("failed refresh removed the lease key: %v", statErr)
+				}
+				return
 			}
-			return errors.New("controller rejected identity")
-		},
-	})
-	want(t, err, "controller rejected identity")
-	if !accepted {
-		t.Fatal("OnAcquired was not called")
-	}
-	if _, statErr := os.Stat(join(storage, name)); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("rejected VM was not rolled back: %v", statErr)
-	}
-	if current, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || ok {
-		t.Fatalf("rejected claim after rollback=%#v ok=%v err=%v", current, ok, claimErr)
+			want(t, err, "controller rejected identity")
+			if _, statErr := os.Stat(join(storage, name)); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("rejected VM was not rolled back: %v", statErr)
+			}
+			if current, ok, claimErr := resolveLeaseClaimForProvider(leaseID); claimErr != nil || ok {
+				t.Fatalf("rejected claim after rollback=%#v ok=%v err=%v", current, ok, claimErr)
+			}
+		})
 	}
 }
 
@@ -1023,24 +1061,220 @@ func TestClaimConfigPinsStorage(t *testing.T) {
 	}
 }
 
-func TestTouchKeepsRouting(t *testing.T) {
-	cfg := configFor()
-	b := backendFor(cfg, &fake{})
-	server := core.Server{Labels: labels{
-		"storage":              "home",
-		"instance":             "worker-1",
-		"run_owner_pid":        "1234",
-		"run_owner_started_at": "2026-07-16T00:00:00Z",
-		"run_log":              "/tmp/worker-1.log",
-	}}
-	got, err := b.Touch(bg, core.TouchRequest{Lease: core.LeaseTarget{Server: server}, State: "ready"})
+type touchClock struct{ now time.Time }
+
+func (c touchClock) Now() time.Time { return c.now }
+
+func touchFixture(t *testing.T) (*backend, core.LeaseTarget, core.LeaseClaim, time.Time) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", join(home, ".local", "state"))
+	const leaseID, name = "cbx_123456abcdef", "crabbox-touch-fixture"
+	putVM(t, home, name, "bHVtZS10b3VjaC1maXh0dXJl")
+	storage := join(home, ".lume")
+	storageID, err := ensureLumeStorageIdentity(storage)
 	must(t, err)
-	for key, want := range server.Labels {
-		if got.Labels[key] != want {
-			t.Fatalf("label %s=%q want %q", key, got.Labels[key], want)
+	cfg := configFor()
+	cfg.IdleTimeout = 5 * time.Minute
+	cfg.TTL = time.Hour
+	runner := &fake{responses: results{}}
+	b := backendFor(cfg, runner)
+	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	b.rt.Clock = touchClock{now}
+	inst := lumeVM{Name: name, Status: "running", IPAddress: "192.0.2.10", LocationName: storage}
+	inventory, err := json.Marshal([]lumeVM{inst})
+	must(t, err)
+	runner.responses["get"] = core.LocalCommandResult{Stdout: string(inventory)}
+	immutable, err := lumeVMImmutableID(cfg, inst)
+	must(t, err)
+	metadata := directLeaseLabels(cfg, leaseID, "touch", false, now.Add(-20*time.Minute))
+	for key, value := range (labels{"storage": storage, "storage_exact": "true", "storage_id": storageID, "instance": name, "state": "ready", "run_owner_pid": "1234", "run_owner_started_at": "2026-07-16T00:00:00Z", "run_log": "/tmp/fixture-run.log"}) {
+		metadata[key] = value
+	}
+	server := core.Server{Provider: providerName, CloudID: name, ImmutableID: immutable, Name: name, Labels: metadata}
+	must(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "touch", providerName, instanceScope(name), "", t.TempDir(), cfg.IdleTimeout, false, server, core.SSHTarget{}))
+	claim, err := core.ReadLeaseClaim(leaseID)
+	must(t, err)
+	core.SetServerLeaseClaimSnapshot(&server, claim, true)
+	return b, core.LeaseTarget{LeaseID: leaseID, Server: server}, claim, now
+}
+
+func TestTouchKeepsRouting(t *testing.T) {
+	b, lease, claim, now := touchFixture(t)
+	writeLumeKnownHost(t, lease.LeaseID, lease.Server.Name, hostKey)
+	leaseID, server, metadata := lease.LeaseID, lease.Server, lease.Server.Labels
+	for _, override := range []*time.Duration{nil, ptrDuration(90 * time.Minute), nil} {
+		req := core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}, State: "ready", IdleTimeout: time.Minute, IdleTimeoutOverride: override}
+		got, err := b.Touch(bg, req)
+		must(t, err)
+		persisted, err := core.ReadLeaseClaim(leaseID)
+		must(t, err)
+		wantIdle := claim.IdleTimeoutSeconds
+		if override != nil {
+			wantIdle = int(override.Seconds())
 		}
+		if persisted.Revision == claim.Revision || persisted.LastUsedAt != now.Format(time.RFC3339) || persisted.IdleTimeoutSeconds != wantIdle || !maps.Equal(persisted.Labels, got.Labels) {
+			t.Fatalf("heartbeat did not publish its lifecycle policy: idle=%d want=%d revisionChanged=%v", persisted.IdleTimeoutSeconds, wantIdle, persisted.Revision != claim.Revision)
+		}
+		for _, key := range []string{"storage", "storage_id", "instance", "run_owner_pid", "run_owner_started_at", "run_log"} {
+			if got.Labels[key] != metadata[key] {
+				t.Fatalf("lost routing field %s", key)
+			}
+		}
+		snapshot, exists, set := core.ServerLeaseClaimSnapshot(got)
+		if !set || !exists || !reflect.DeepEqual(snapshot, persisted) {
+			t.Fatal("Touch did not return its committed snapshot")
+		}
+		if wantIdle == 5400 && got.Labels["expires_at"] != core.LeaseLabelTime(now.Add(40*time.Minute)) {
+			t.Fatal("heartbeat lost original TTL cap")
+		}
+		stale := req
+		_, err = b.Touch(bg, stale)
+		if err == nil {
+			t.Fatal("outdated touch unexpectedly published")
+		}
+		resolved, err := b.Resolve(bg, core.ResolveRequest{ID: leaseID, StatusOnly: true, NoLocalStateMutations: true})
+		must(t, err)
+		for key, value := range got.Labels {
+			if resolved.Server.Labels[key] != value {
+				t.Fatalf("fresh resolution lost persisted label %s", key)
+			}
+		}
+		afterRead, err := core.ReadLeaseClaim(leaseID)
+		must(t, err)
+		if !reflect.DeepEqual(afterRead, persisted) {
+			t.Fatal("status resolution mutated the claim")
+		}
+		server, claim = got, persisted
+	}
+	canceled, cancel := context.WithCancel(bg)
+	cancel()
+	_, err := b.Touch(canceled, core.TouchRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}, State: "ready"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled touch: %v", err)
+	}
+	after, err := core.ReadLeaseClaim(leaseID)
+	must(t, err)
+	if !reflect.DeepEqual(after, claim) {
+		t.Fatal("canceled touch changed the claim")
 	}
 }
+
+func TestLumeTouchRespectsAcquisitionBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		state, recovery, requested string
+		wantError                  bool
+	}{
+		{"starting", "", "ready", true},
+		{"provisioning", "clone-pending", "ready", true},
+		{"error", "rollback-failed", "ready", true},
+		{"ready", "rollback-failed", "ready", true},
+		{"running", "clone-ambiguous", "running", true},
+		{"ready", "", "starting", true},
+		{"ready", "", "running", false},
+		{"running", "", "ready", false},
+		{"running", "", "", false},
+	} {
+		t.Run(tc.state+"/"+tc.recovery+"/"+tc.requested, func(t *testing.T) {
+			b, lease, claim, _ := touchFixture(t)
+			labels := maps.Clone(claim.Labels)
+			labels["state"], labels["recovery"] = tc.state, tc.recovery
+			current, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, labels)
+			must(t, err)
+			lease.Server.Labels = maps.Clone(current.Labels)
+			core.SetServerLeaseClaimSnapshot(&lease.Server, current, true)
+			_, err = b.Touch(bg, core.TouchRequest{Lease: lease, State: tc.requested})
+			if (err != nil) != tc.wantError {
+				t.Fatalf("touch error=%v", err)
+			}
+			if !tc.wantError {
+				after, err := core.ReadLeaseClaim(lease.LeaseID)
+				must(t, err)
+				want := tc.requested
+				if want == "" {
+					want = tc.state
+				}
+				if after.Labels["state"] != want || after.Revision == current.Revision {
+					t.Fatal("active-state touch did not publish the requested activity state")
+				}
+			}
+			if tc.wantError {
+				after, err := core.ReadLeaseClaim(lease.LeaseID)
+				must(t, err)
+				if !reflect.DeepEqual(after, current) {
+					t.Fatal("rejected touch changed the lifecycle owner's snapshot")
+				}
+				if tc.state == "starting" {
+					labels["state"] = "ready"
+					_, err = core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, current, labels)
+					must(t, err)
+				}
+			}
+		})
+	}
+}
+
+func TestLumeResolveRefreshReturnsCommittedSnapshot(t *testing.T) {
+	b, lease, claim, _ := touchFixture(t)
+	writeLumeKnownHost(t, lease.LeaseID, lease.Server.Name, hostKey)
+	resolved, err := b.Resolve(bg, core.ResolveRequest{ID: lease.LeaseID, Repo: core.Repo{Root: claim.RepoRoot}})
+	must(t, err)
+	persisted, err := core.ReadLeaseClaim(lease.LeaseID)
+	must(t, err)
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(resolved.Server)
+	if !set || !exists || !reflect.DeepEqual(snapshot, persisted) || persisted.Revision == claim.Revision {
+		t.Fatal("reuse did not return its newly published snapshot")
+	}
+	_, err = b.Touch(bg, core.TouchRequest{Lease: resolved, State: "ready"})
+	must(t, err)
+}
+
+func TestLumeStoppedObservationOverridesReadyLabel(t *testing.T) {
+	b, lease, claim, _ := touchFixture(t)
+	for _, tc := range []struct{ stored, want string }{
+		{"ready", "stopped"},
+		{"running", "stopped"},
+		{"error", "error"},
+		{"starting", "starting"},
+	} {
+		t.Run(tc.stored, func(t *testing.T) {
+			claim.Labels["state"] = tc.stored
+			view := b.serverFromInstance(lumeVM{Name: lease.Server.Name, Status: "stopped", IPAddress: "192.0.2.10"}, claim, b.configForRun())
+			if view.Status != "stopped" || view.Labels["state"] != tc.want {
+				t.Fatalf("stored %s projected status=%s state=%s, want stopped/%s", tc.stored, view.Status, view.Labels["state"], tc.want)
+			}
+			if claim.Labels["state"] != tc.stored {
+				t.Fatal("projection modified stored recovery state")
+			}
+		})
+	}
+}
+
+func TestLumeTouchRetainsLegacyClaim(t *testing.T) {
+	b, lease, before, _ := touchFixture(t)
+	legacy := before
+	legacy.CloudImmutableID = ""
+	must(t, core.ReplaceLeaseClaimIfUnchanged(lease.LeaseID, before, legacy))
+	legacy, err := core.ReadLeaseClaim(lease.LeaseID)
+	must(t, err)
+	lease.Server.ImmutableID = ""
+	core.SetServerLeaseClaimSnapshot(&lease.Server, legacy, true)
+	want(t, b.AuthorizeStatusTouchClaim(bg, lease, legacy), "without an immutable machine identity")
+	_, err = b.Touch(bg, core.TouchRequest{Lease: lease, State: "ready"})
+	want(t, err, "without an immutable machine identity")
+	after, err := core.ReadLeaseClaim(lease.LeaseID)
+	must(t, err)
+	if !reflect.DeepEqual(after, legacy) {
+		t.Fatal("legacy lease was modified or adopted")
+	}
+	if len(b.rt.Exec.(*fake).calls) != 0 {
+		t.Fatal("legacy refusal invoked provider commands")
+	}
+}
+
+func ptrDuration(d time.Duration) *time.Duration { return &d }
 
 func TestStopRequiresExactOwner(t *testing.T) {
 	cfg := configFor()
@@ -1158,6 +1392,92 @@ func TestPrepareLeaseUsesKnownHosts(t *testing.T) {
 	}
 }
 
+func TestLumeStatusPreservesAuthenticatedEndpointWithoutMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name, vmState, claimState, ip                                       string
+		probe, prepared, directory, allowLocalMutations, wantSSH, wantError bool
+	}{
+		{name: "ready", vmState: "running", claimState: "ready", ip: "192.0.2.10", prepared: true, wantSSH: true},
+		{name: "running", vmState: "running", claimState: "running", ip: "192.0.2.10", prepared: true, wantSSH: true},
+		{name: "ready wait", vmState: "running", claimState: "ready", ip: "192.0.2.10", probe: true, prepared: true, wantSSH: true},
+		{name: "ready status without mutation flag", vmState: "running", claimState: "ready", ip: "192.0.2.10", prepared: true, allowLocalMutations: true, wantSSH: true},
+		{name: "stopped", vmState: "stopped", claimState: "ready", ip: "192.0.2.10"},
+		{name: "starting", vmState: "running", claimState: "starting", ip: "192.0.2.10"},
+		{name: "no IP", vmState: "running", claimState: "ready"},
+		{name: "missing directory", vmState: "running", claimState: "ready", ip: "192.0.2.10", wantError: true},
+		{name: "missing pin", vmState: "running", claimState: "ready", ip: "192.0.2.10", directory: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", join(home, "config"))
+			t.Setenv("XDG_STATE_HOME", join(home, "state"))
+			const leaseID, name = "cbx_status_endpoint", "crabbox-status-endpoint"
+			server := core.Server{CloudID: name, Provider: providerName, Labels: labels{
+				"instance": name, "state": tc.claimState, "ssh_user": "alice", "work_root": "/Users/alice/work",
+			}}
+			repo := t.TempDir()
+			must(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "status-endpoint", providerName, instanceScope(name), "", repo, time.Minute, false, server, core.SSHTarget{}))
+			key, err := core.TestboxKeyPath(leaseID)
+			must(t, err)
+			if tc.prepared {
+				writeLumeKnownHost(t, leaseID, name, hostKey)
+				must(t, os.WriteFile(key, []byte("synthetic fixture key\n"), 0o600))
+			} else if tc.directory {
+				must(t, core.UseLeaseKnownHosts(&core.SSHTarget{}, leaseID))
+			}
+			claimPath := join(home, "state", "crabbox", "claims", leaseID+".json")
+			before, err := os.ReadFile(claimPath)
+			must(t, err)
+			runner := &fake{responses: results{"get": {Stdout: fmt.Sprintf(`[{"name":%q,"status":%q,"ipAddress":%q}]`, name, tc.vmState, tc.ip)}}}
+			lease, err := backendFor(configFor(), runner).Resolve(bg, core.ResolveRequest{ID: leaseID, StatusOnly: true, ReadyProbe: tc.probe, NoLocalStateMutations: !tc.allowLocalMutations, Repo: core.Repo{Root: repo}})
+			if (err != nil) != tc.wantError {
+				t.Fatalf("resolve error=%v", err)
+			}
+			if err == nil {
+				var stored core.LeaseClaim
+				must(t, json.Unmarshal(before, &stored))
+				snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+				if !set || !exists || !reflect.DeepEqual(snapshot, stored) {
+					t.Fatal("status lost its exact committed claim snapshot")
+				}
+			}
+			if tc.wantSSH {
+				if lease.SSH.Host != tc.ip || lease.SSH.User != "alice" || lease.SSH.Port != "22" || lease.SSH.Key != key || lease.SSH.KnownHostsFile != join(filepath.Dir(key), "known_hosts") || lease.SSH.HostKeyAlias != lumeHostKeyAlias(name) || !lease.SSH.SSHConfigProxy || lease.SSH.ReadyCheck == "" || lease.SSH.DisableHostKeyChecking {
+					t.Fatalf("status lost authenticated SSH endpoint: %#v", lease.SSH)
+				}
+			} else if lease.SSH.Host != "" {
+				t.Fatal("incomplete observation acquired an SSH endpoint")
+			}
+			after, err := os.ReadFile(claimPath)
+			must(t, err)
+			if string(before) != string(after) {
+				t.Fatal("status changed the claim")
+			}
+			if tc.prepared {
+				for path, expected := range map[string]string{
+					key:                                    "synthetic fixture key\n",
+					join(filepath.Dir(key), "known_hosts"): lumeHostKeyAlias(name) + " ssh-ed25519 " + hostKey + "\n",
+				} {
+					data, err := os.ReadFile(path)
+					if err != nil || string(data) != expected {
+						t.Fatalf("status changed connection material: %v", err)
+					}
+				}
+			} else if tc.directory {
+				entries, err := os.ReadDir(filepath.Dir(key))
+				if err != nil || len(entries) != 0 {
+					t.Fatalf("status created connection material: %v", err)
+				}
+			} else {
+				if _, err := os.Stat(filepath.Dir(key)); !os.IsNotExist(err) {
+					t.Fatalf("status created connection storage: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestRebindHostAlias(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const leaseID = "cbx_rebind123456"
@@ -1263,23 +1583,32 @@ func TestBootstrapKeyOnly(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("trust directory info=%#v err=%v", info, err)
 	}
+	info, err = os.Stat(trust.sharedDir())
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("shared directory info=%#v err=%v", info, err)
+	}
 	for name, want := range (labels{
 		"challenge":      trust.Challenge,
 		"ssh_user":       "lume",
 		"authorized_key": publicKey,
 	}) {
-		data, readErr := os.ReadFile(join(trust.Dir, name))
+		data, readErr := os.ReadFile(join(trust.Dir, "crabbox-bootstrap", name))
 		if readErr != nil || strings.TrimSpace(string(data)) != want {
 			t.Fatalf("%s=%q err=%v want %q", name, data, readErr, want)
 		}
+	}
+	removeBootstrapTrust(trust)
+	if _, err := os.Stat(trust.Dir); !os.IsNotExist(err) {
+		t.Fatalf("bootstrap root survived cleanup: %v", err)
 	}
 }
 
 func TestGuestIdentityPin(t *testing.T) {
 	dir := t.TempDir()
 	trust := bootstrapTrust{Dir: dir, Challenge: "test-challenge"}
+	must(t, os.Mkdir(trust.sharedDir(), 0o700))
 	identity := "test-challenge 00112233-4455-6677-8899-AABBCCDDEEFF ssh-ed25519 " + hostKey + "\n"
-	must(t, os.WriteFile(join(dir, "identity"), []byte(identity), 0o600))
+	must(t, os.WriteFile(join(trust.sharedDir(), "identity"), []byte(identity), 0o600))
 	knownHosts := join(dir, "known_hosts")
 	b := &backend{}
 	platformUUID, err := b.waitForGuestIdentity(bg, "worker-1", "192.0.2.10", trust, knownHosts)
@@ -1294,7 +1623,7 @@ func TestGuestIdentityPin(t *testing.T) {
 		t.Fatalf("known_hosts=%q", got)
 	}
 	identity = "test-challenge 00112233-4455-6677-8899-AABBCCDDEEFF ssh-ed25519 AQ==\n"
-	must(t, os.WriteFile(join(dir, "identity"), []byte(identity), 0o600))
+	must(t, os.WriteFile(join(trust.sharedDir(), "identity"), []byte(identity), 0o600))
 	if _, err := pinBootstrapHostKey("192.0.2.10", lumeHostKeyAlias("worker-1"), trust, join(dir, "known_hosts")); err == nil {
 		t.Fatal("accepted malformed SSH key blob from bootstrap identity")
 	}

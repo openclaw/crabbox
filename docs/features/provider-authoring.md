@@ -86,9 +86,12 @@ import _ "github.com/openclaw/crabbox/internal/providers/example"
 `cmd/crabbox/main.go` already imports `internal/providers/all`, so nothing else
 needs to change for the binary to see the new provider.
 
-Tests inside `internal/cli` cannot import `internal/providers/all` because that
-creates an import cycle. If you need a test provider for core dispatch, register
-it from a same-package test file.
+Same-package tests in `internal/cli` cannot import provider adapters because that
+creates an import cycle. Register a synthetic provider there only to test core
+dispatch. To test actual provider policy, use an external `cli_test` package,
+which can import and register the real adapter without an import cycle. Use
+scoped backend injection when needed to keep execution local; do not reproduce
+the adapter's policy in a fake provider.
 
 ## Step 3. Register The Provider
 
@@ -339,8 +342,16 @@ accessors to preserve explicit inputs; `ApplyLinuxConnectionDefaults` restores
 explicit connection settings when applying Linux defaults across provider changes.
 Keep acquisition-only validation deferred: DigitalOcean and Linode preserve an
 unresolved explicit portable image until backend construction captures the error,
-before filling runtime fallbacks. Passive config-display hooks must not resolve
-defaults themselves.
+before filling runtime fallbacks. Passive config-display hooks must not invoke
+configuration-default phases. Implement `ProviderConfigShowNormalizer` for narrow,
+selected-provider display projections; use `ApplyConfigShowSSHDefaults` when
+projecting conventional SSH defaults without changing explicit connection inputs
+or provider-native configuration. Provider-owned config-show sections may derive
+pure effective display values from the supplied Config, including inactive
+providers' displayed work roots. They must not call ApplyConfigDefaults, load
+configuration, read environment or native state, resolve credentials, or mutate
+the supplied configuration. Selected top-level projections still belong in
+ProviderConfigShowNormalizer and require actionable provider selection.
 
 ## Step 6. Implement The Backend
 
@@ -387,6 +398,15 @@ required labels, and carry the returned full claim as the exact snapshot for
 later fenced updates. Recovery phases, account or key authorization, live
 resource validation, and every deletion decision remain adapter-owned.
 
+Use `shared.RemoveExactClaimAfterContext` for exact-claim terminal cleanup and
+pass the same lifecycle context that its provider action uses. There is no
+implicit background-context variant: waiting for the claim fence must honor the
+operation's cancellation policy. An acquisition rollback that intentionally
+outlives the acquisition must choose its independent context explicitly, without
+silently changing the provider's existing cleanup budget. A successful action
+still completes durable claim retirement after cancellation; do not add a
+post-action cancellation check that strands already-confirmed cleanup.
+
 `List` returns `[]LeaseView` (a type alias for `Server`). Do not print from
 `List` — core renders the table.
 
@@ -394,7 +414,8 @@ Claim-publication helpers initialize a missing idle policy, but preserve an
 already-recorded positive idle duration during ordinary direct-lease preparation,
 repository reclaim, and endpoint publication. Their duration argument is not
 implicit replacement intent. Explicit idle changes belong to the run/Touch
-policy path; managed coordinator projections remain authoritative. This also
+policy path; managed coordinator projections use the resolved server's
+`idle_timeout_secs` label rather than the command's configured default. This also
 keeps acquisition finalization from reinitializing a policy already published
 by the provider's first acquisition step.
 
@@ -469,6 +490,19 @@ type CleanupBackend interface {
 	Cleanup(ctx context.Context, req CleanupRequest) error
 }
 ```
+
+Adapters using the common `crabbox.provider`, `crabbox.scope` and `crabbox.claim`
+sandbox metadata can use `shared.ValidateSandboxOwnershipMetadata`. It preserves
+exact marker comparisons and the existing missing-ID and mismatch errors.
+Endpoint admission, requested-resource ID binding and different provider marker
+schemes remain adapter-owned; this check is not a replacement for those policies.
+
+Delegated adapters can use `shared.RefreshRetainedLeaseActivity` in their
+`Retained` callback to refresh an existing claim while still holding the
+provider operation lock. It preserves the stored scope, pond and repository,
+treats a missing claim as a no-op, and delegates idle-timeout policy to core.
+It does not perform admission or reclaim; provider-specific warnings and
+activation conditions stay in the adapter.
 
 Delegated adapters that expire local claims by last activity should use
 `shared.ClaimIdleCleanupDue`. It preserves the shared idle-deadline decision

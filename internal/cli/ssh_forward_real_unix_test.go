@@ -63,15 +63,17 @@ func init() {
 // account keys, agent, external destinations, or subprocess argv wrapper.
 // All direct-tcpip requests must name a fixture-owned loopback endpoint.
 type forwardSSHServer struct {
-	listener net.Listener
-	entered  chan struct{}
-	release  chan struct{}
-	mu       sync.Mutex
-	conns    []net.Conn
-	users    []string
-	wg       sync.WaitGroup
-	allowed  map[uint32]bool
-	hostKey  string
+	listener       net.Listener
+	entered        chan struct{}
+	release        chan struct{}
+	mu             sync.Mutex
+	conns          []net.Conn
+	users          []string
+	wg             sync.WaitGroup
+	allowed        map[uint32]bool
+	hostKey        string
+	forwarded      int
+	sessionHandler func(ssh.NewChannel, string)
 }
 
 func newForwardSSHServer(t *testing.T, user string, allowedPorts ...int) *forwardSSHServer {
@@ -84,6 +86,11 @@ func newForwardSSHServer(t *testing.T, user string, allowedPorts ...int) *forwar
 	if err != nil {
 		t.Fatal(err)
 	}
+	return newForwardSSHServerWithSigner(t, user, signer, allowedPorts...)
+}
+
+func newForwardSSHServerWithSigner(t *testing.T, user string, signer ssh.Signer, allowedPorts ...int) *forwardSSHServer {
+	t.Helper()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -127,6 +134,17 @@ func newForwardSSHServer(t *testing.T, user string, allowedPorts ...int) *forwar
 				defer transport.Close()
 				go ssh.DiscardRequests(requests)
 				for incoming := range channels {
+					s.mu.Lock()
+					handleSession := s.sessionHandler
+					s.mu.Unlock()
+					if incoming.ChannelType() == "session" && handleSession != nil {
+						s.wg.Add(1)
+						go func() {
+							defer s.wg.Done()
+							handleSession(incoming, transport.User())
+						}()
+						continue
+					}
 					var dest struct {
 						Host       string
 						Port       uint32
@@ -148,6 +166,9 @@ func newForwardSSHServer(t *testing.T, user string, allowedPorts ...int) *forwar
 						continue
 					}
 					go ssh.DiscardRequests(reqs)
+					s.mu.Lock()
+					s.forwarded++
+					s.mu.Unlock()
 					s.wg.Add(1)
 					go func() {
 						defer s.wg.Done()
@@ -268,10 +289,15 @@ func testCoordinatorReleaseJoinsSSHControlMasters(t *testing.T, modes ...string)
 			}
 			start := func(leaseID string, endpoint *forwardSSHServer, route string) masterIdentity {
 				t.Helper()
-				key, _, err := ensureTestboxKey(leaseID)
+				key, _, err := EnsureTestboxKey(leaseID)
 				if err != nil {
 					t.Fatal(err)
 				}
+				t.Cleanup(func() {
+					if err := RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
+						t.Errorf("cleanup synthetic lease: %v", err)
+					}
+				})
 				target := SSHTarget{User: "synthetic-mux-owner", Host: "127.0.0.1", Port: strconv.Itoa(endpoint.port()),
 					Key: key, SSHHostKey: endpoint.hostKey, TargetOS: targetLinux}
 				config := os.DevNull
@@ -320,9 +346,6 @@ func testCoordinatorReleaseJoinsSSHControlMasters(t *testing.T, modes ...string)
 				}
 				t.Cleanup(func() {
 					_, _ = control(identity.path, "exit")
-					if err := RemoveStoredTestboxConnectionArtifacts(leaseID); err != nil {
-						t.Errorf("cleanup synthetic lease: %v", err)
-					}
 				})
 				checked, err := control(identity.path, "check")
 				if err != nil {
@@ -453,7 +476,7 @@ func TestSSHControlCleanupRejectsMalformedMuxWithoutNetworkFallback(t *testing.T
 	if err != nil {
 		t.Skip("OpenSSH is unavailable")
 	}
-	key, _, err := ensureTestboxKey("cbx_001122334455")
+	key, _, err := EnsureTestboxKey("cbx_001122334455")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,7 +565,7 @@ func TestSSHCommandRejectsUnsafeLeaseControlNamespace(t *testing.T) {
 	for _, kind := range []string{"symlink", "public directory"} {
 		t.Run(kind, func(t *testing.T) {
 			isolateTestUserDirs(t)
-			key, _, err := ensureTestboxKey("cbx_001122334455")
+			key, _, err := EnsureTestboxKey("cbx_001122334455")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -860,5 +883,197 @@ func TestSSHForwardRealPondWaitsForEveryGroup(t *testing.T) {
 				t.Fatal("group sessions retained after barrier/teardown")
 			}
 		})
+	}
+}
+
+const realSSHFailingReadiness = "exit 127"
+
+type realSSHExecObservation struct {
+	user    string
+	command string
+	status  uint32
+}
+
+// Only these fixture-owned shell builtins may execute. Never run the incoming
+// command string, even after matching it, or inherit the runner's environment.
+func (s *forwardSSHServer) enableReadinessSessions(t *testing.T, root string, transportSucceeds bool) (*sync.Mutex, *[]realSSHExecObservation) {
+	t.Helper()
+	var mu sync.Mutex
+	var observed []realSSHExecObservation
+	handler := func(incoming ssh.NewChannel, user string) {
+		ch, requests, err := incoming.Accept()
+		if err != nil {
+			return
+		}
+		defer ch.Close()
+		for request := range requests {
+			var payload struct{ Command string }
+			if request.Type != "exec" || ssh.Unmarshal(request.Payload, &payload) != nil {
+				_ = request.Reply(false, nil)
+				continue
+			}
+			var fixedCommand string
+			switch payload.Command {
+			case "exit 0":
+				if transportSucceeds {
+					fixedCommand = "exit 0"
+				}
+			case realSSHFailingReadiness:
+				fixedCommand = realSSHFailingReadiness
+			}
+			if fixedCommand == "" {
+				_ = request.Reply(false, nil)
+				return
+			}
+			if err := request.Reply(true, nil); err != nil {
+				return
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", fixedCommand)
+			cmd.Dir = root
+			cmd.Env = []string{"HOME=" + root, "XDG_CONFIG_HOME=" + root, "PATH=/usr/bin:/bin"}
+			err = cmd.Run()
+			cancel()
+			var code uint32
+			if err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() < 0 {
+					t.Errorf("fixed readiness fixture command failed: %v", err)
+					return
+				}
+				code = uint32(exitErr.ExitCode())
+			}
+			mu.Lock()
+			observed = append(observed, realSSHExecObservation{user, fixedCommand, code})
+			mu.Unlock()
+			_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{code}))
+			return
+		}
+	}
+	s.mu.Lock()
+	s.sessionHandler = handler
+	s.mu.Unlock()
+	return &mu, &observed
+}
+
+func TestWaitForSSHReadyRealSSHTimeoutDiagnostic(t *testing.T) {
+	// Resolve before changing PATH: the client must be installed OpenSSH, not
+	// a command recorder. Missing CI prerequisites are failures, not proof skips.
+	sshExecutable, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Fatal("real OpenSSH is required:", err)
+	}
+	for _, proxy := range []bool{false, true} {
+		for _, transportSucceeds := range []bool{true, false} {
+			t.Run(fmt.Sprintf("proxy=%t/transport-success=%t", proxy, transportSucceeds), func(t *testing.T) {
+				dirs := isolateTestUserDirs(t)
+				root := t.TempDir()
+				bin := filepath.Join(root, "bin")
+				for _, dir := range []string{bin, filepath.Join(dirs.Home, ".ssh")} {
+					if err := os.MkdirAll(dir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.Symlink(sshExecutable, filepath.Join(bin, "ssh")); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", bin+":/usr/bin:/bin")
+				t.Setenv("SSH_AUTH_SOCK", "")
+				t.Setenv("SSH_AGENT_PID", "")
+				version, err := exec.Command(sshExecutable, "-V").CombinedOutput()
+				if err != nil || !strings.Contains(string(version), "OpenSSH") {
+					t.Fatalf("installed client is not OpenSSH: %q, %v", version, err)
+				}
+				t.Logf("client: %s", strings.TrimSpace(string(version)))
+				const user = "synthetic-readiness"
+				server := newForwardSSHServer(t, user)
+				mu, observed := server.enableReadinessSessions(t, root, transportSucceeds)
+				close(server.release)
+				knownHosts := filepath.Join(root, "known_hosts")
+				pins := fmt.Sprintf("[127.0.0.1]:%d %s\n", server.port(), server.hostKey)
+				config := ""
+				var jump *forwardSSHServer
+				if proxy {
+					jump = newForwardSSHServer(t, "synthetic-jump", server.port())
+					close(jump.release)
+					pins += fmt.Sprintf("[127.0.0.1]:%d %s\n", jump.port(), jump.hostKey)
+					config = fmt.Sprintf("Host 127.0.0.1\n ProxyJump readiness-jump\nHost readiness-jump\n HostName 127.0.0.1\n Port %d\n User synthetic-jump\n", jump.port())
+				}
+				config += "Host *\n IdentityFile none\n CertificateFile none\n IdentityAgent none\n IdentitiesOnly yes\n BatchMode yes\n ControlMaster no\n ControlPath none\n ControlPersist no\n StrictHostKeyChecking yes\n GlobalKnownHostsFile none\n UserKnownHostsFile " + strconv.Quote(knownHosts) + "\n"
+				if err := os.WriteFile(knownHosts, []byte(pins), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dirs.Home, ".ssh", "config"), []byte(config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				// Select the private config path without supplying any credentials.
+				target := SSHTarget{User: user, Host: "127.0.0.1", Port: strconv.Itoa(server.port()),
+					KnownHostsFile: knownHosts, SSHHostKey: server.hostKey, NoControlMaster: true, AuthSecret: true,
+					FallbackPorts: []string{}, SSHConfigProxy: proxy, ReadyCheck: realSSHFailingReadiness}
+				closedFallback := ""
+				if !proxy && transportSucceeds {
+					listener, err := net.Listen("tcp4", "127.0.0.1:0")
+					if err != nil {
+						t.Fatal(err)
+					}
+					closedFallback = strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+					if err := listener.Close(); err != nil {
+						t.Fatal(err)
+					}
+					target.FallbackPorts = []string{closedFallback}
+				}
+				var progress strings.Builder
+				err = waitForSSHReady(t.Context(), &target, &progress, "bootstrap", 8*time.Second)
+				if err == nil {
+					t.Fatal("failing readiness unexpectedly succeeded")
+				}
+				message := err.Error()
+				t.Logf("timeout: %s; progress: %s", message, progress.String())
+				wantAuth, wantProbe, wantPorts := "unknown", "transport", target.Port+":tcp"
+				if proxy {
+					wantPorts = "proxy"
+				}
+				if transportSucceeds {
+					wantAuth, wantProbe = "ok", "readiness"
+					wantPorts = target.Port + ":ready"
+					if closedFallback != "" {
+						wantPorts += "," + closedFallback + ":closed"
+					}
+					if proxy {
+						wantPorts = "proxy:ready"
+					}
+				}
+				for _, want := range []string{"cause=deadline_exceeded", "authentication=" + wantAuth, "probe=" + wantProbe, "ports=" + wantPorts + ";"} {
+					if !strings.Contains(message, want) {
+						t.Errorf("timeout missing %q: %s", want, message)
+					}
+				}
+				mu.Lock()
+				evidence := append([]realSSHExecObservation(nil), (*observed)...)
+				mu.Unlock()
+				ready, transport := false, false
+				for _, observation := range evidence {
+					if observation.user != user {
+						t.Errorf("unexpected authenticated user: %q", observation.user)
+					}
+					ready = ready || observation.command == realSSHFailingReadiness && observation.status == 127
+					transport = transport || observation.command == "exit 0" && observation.status == 0
+				}
+				if !ready || transport != transportSucceeds {
+					t.Fatalf("missing real authenticated execution evidence: %+v", evidence)
+				}
+				t.Logf("authenticated executions: %+v", evidence)
+				if jump != nil {
+					jump.mu.Lock()
+					forwarded := jump.forwarded
+					users := append([]string(nil), jump.users...)
+					jump.mu.Unlock()
+					if forwarded < 2 || len(users) < 2 {
+						t.Fatalf("readiness and transport did not use real jump sessions: forwards=%d users=%v", forwarded, users)
+					}
+					t.Logf("real proxy forwards=%d authenticated users=%v", forwarded, users)
+				}
+			})
+		}
 	}
 }

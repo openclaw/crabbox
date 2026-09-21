@@ -10,6 +10,33 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestLsofVMUseResult(t *testing.T) {
+	for _, tc := range []struct {
+		name, output, diagnostics, busy string
+		exitCode                        int
+		wantError                       bool
+	}{
+		{name: "none", exitCode: 1},
+		{name: "own handles", output: "p123\nf8\nf10\n", exitCode: 1},
+		{name: "own success", output: "p123\nf8\n"},
+		{name: "foreign handles", output: "p123\nf8\np456\nf4\n", exitCode: 1, busy: "process 456"},
+		{name: "foreign success", output: "p456\nf4\n", busy: "process 456"},
+		{name: "warning with records", output: "p123\nf8\n", diagnostics: "inspection incomplete", exitCode: 1, wantError: true},
+		{name: "warning without records", diagnostics: "inspection incomplete", wantError: true},
+		{name: "other exit", output: "p123\nf8\n", exitCode: 2, wantError: true},
+		{name: "bad pid", output: "punknown\n", exitCode: 1, wantError: true},
+		{name: "orphan file", output: "f8\n", exitCode: 1, wantError: true},
+		{name: "unexpected output", output: "p123\nf8\nwarning\n", wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			busy, err := lsofVMUseResult(tc.output, tc.diagnostics, tc.exitCode, 123)
+			if (err != nil) != tc.wantError || busy != tc.busy {
+				t.Fatalf("busy=%q err=%v", busy, err)
+			}
+		})
+	}
+}
+
 func newDeleteFence(t *testing.T, name, machineID string) (string, os.FileInfo, *os.File, os.FileInfo, string) {
 	t.Helper()
 	home := t.TempDir()

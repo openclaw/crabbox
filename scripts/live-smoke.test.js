@@ -1449,7 +1449,7 @@ esac
 
   const crabboxCalls = fs.readFileSync(crabboxLog, "utf8");
   assert.match(crabboxCalls, /doctor --provider tenki/);
-  assert.match(crabboxCalls, /warmup --provider tenki --slug tenki-smoke-/);
+  assert.match(crabboxCalls, /warmup --provider tenki --keep=false --slug tenki-smoke-/);
   assert.match(crabboxCalls, /status --provider tenki --id tenki-smoke-test --wait --wait-timeout 120s/);
   assert.match(crabboxCalls, /run --provider tenki --id tenki-smoke-test --no-sync -- echo crabbox-tenki-ok/);
   assert.match(crabboxCalls, /^list --provider tenki --json$/m);

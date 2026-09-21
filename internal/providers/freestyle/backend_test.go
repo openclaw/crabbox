@@ -243,6 +243,7 @@ func TestFreestyleStatusReady(t *testing.T) {
 }
 
 func TestFreestyleStatusWaitFailsOnTerminalState(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	client := &fakeFreestyleClient{getVM: freestyleVM{
 		ID:    "vm123",
 		Name:  "crabbox-repo-abc123",
@@ -262,6 +263,10 @@ func TestFreestyleStatusWaitFailsOnTerminalState(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), `terminal state "stopped"`) {
 		t.Fatalf("Status err=%v, want terminal-state failure", err)
+	}
+	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "fsb_vm123"})
+	if err != nil || view.State != "stopped" || view.Ready {
+		t.Fatalf("non-waiting terminal status=%#v err=%v", view, err)
 	}
 }
 

@@ -27,6 +27,11 @@ func init() {
 
 type Provider struct{}
 
+func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
+	core.ApplyConfigShowSSHDefaults(&cfg, "root")
+	return cfg
+}
+
 var _ core.ProviderClassProfileProvider = Provider{}
 
 var classProfiles = core.UniformLinuxAMD64ClassProfiles(core.ProviderClassMachine{Type: "DEV1-S"})
@@ -74,13 +79,7 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 	if cfg.Scaleway.Type != "" {
 		return cfg.Scaleway.Type
 	}
-	if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
-		return candidates[0]
-	}
-	if core.IsCanonicalProviderClass(cfg.Class) {
-		return ""
-	}
-	return scalewayServerTypeForClass(cfg.Class)
+	return core.ProviderClassPrimaryTypeForProfiles(classProfiles, cfg, scalewayServerTypeForClass(cfg.Class))
 }
 
 func (Provider) ServerTypeOverrideForConfig(cfg core.Config) (string, bool) {
@@ -956,37 +955,16 @@ func (b *Backend) deleteIdentitylessRecoveryKey(ctx context.Context, client Clie
 }
 
 func (b *Backend) waitForPublicIPv4(ctx context.Context, client Client, serverID string) (*instance.Server, error) {
-	deadline := b.clockNow().Add(5 * time.Minute)
-	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 3*time.Second,
-		func(context.Context, time.Duration) error {
-			if err := shared.SleepContext(ctx, 3*time.Second); err != nil {
-				return ctx.Err()
-			}
-			return nil
-		},
-		func(context.Context) (*instance.Server, error) {
-			resp, err := client.Instance().GetServer(&instance.GetServerRequest{Zone: scw.Zone(client.Zone()), ServerID: serverID}, scw.WithContext(ctx))
+	return shared.PollReady(ctx, 5*time.Minute, 3*time.Second,
+		func(waitCtx context.Context) (*instance.Server, error) {
+			resp, err := client.Instance().GetServer(&instance.GetServerRequest{Zone: scw.Zone(client.Zone()), ServerID: serverID}, scw.WithContext(waitCtx))
 			if err != nil || resp == nil {
 				return nil, err
 			}
 			return resp.Server, nil
 		},
-		func(_ context.Context, server *instance.Server, fetchErr error) (bool, error) {
-			if fetchErr != nil {
-				return false, fetchErr
-			}
-			if server != nil && publicIPv4(server) != "" {
-				return true, nil
-			}
-			if b.clockNow().After(deadline) {
-				return false, core.Exit(5, "timed out waiting for Scaleway Instance public IPv4")
-			}
-			return false, nil
-		}, nil)
-	if err != nil {
-		return nil, err
-	}
-	return result.Value, nil
+		func(server *instance.Server) bool { return server != nil && publicIPv4(server) != "" },
+		core.Exit(5, "timed out waiting for Scaleway Instance public IPv4"))
 }
 
 func (b *Backend) persistRecoveryClaim(leaseID, slug string, cfg core.Config, repoRoot string, client Client, serverID, host, keyID, keyName, recovery string, keep bool, now time.Time) error {

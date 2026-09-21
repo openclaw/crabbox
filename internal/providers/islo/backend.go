@@ -31,78 +31,19 @@ const (
 
 const isloRunFileReadTimeout = 20 * time.Second
 
-type isloFlagValues struct {
-	BaseURL        *string
-	Image          *string
-	Workdir        *string
-	GatewayProfile *string
-	SnapshotName   *string
-	VCPUs          *int
-	MemoryMB       *int
-	DiskGB         *int
-	IdlePause      *bool
-}
-
 func RegisterIsloProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return isloFlagValues{
-		BaseURL:        fs.String("islo-base-url", defaults.Islo.BaseURL, "Islo API base URL"),
-		Image:          fs.String("islo-image", defaults.Islo.Image, "Islo sandbox image"),
-		Workdir:        fs.String("islo-workdir", defaults.Islo.Workdir, "Islo sandbox working directory under /workspace"),
-		GatewayProfile: fs.String("islo-gateway-profile", defaults.Islo.GatewayProfile, "Islo gateway profile name or id"),
-		SnapshotName:   fs.String("islo-snapshot-name", defaults.Islo.SnapshotName, "Islo snapshot name"),
-		VCPUs:          fs.Int("islo-vcpus", defaults.Islo.VCPUs, "Islo sandbox vCPUs"),
-		MemoryMB:       fs.Int("islo-memory-mb", defaults.Islo.MemoryMB, "Islo sandbox memory in MB"),
-		DiskGB:         fs.Int("islo-disk-gb", defaults.Islo.DiskGB, "Islo sandbox disk in GB"),
-		IdlePause:      fs.Bool("islo-idle-pause", defaults.Islo.IdlePause, "ask Islo to pause the sandbox after --idle-timeout of inactivity (off by default)"),
-	}
+	return core.RegisterIsloConfigFlags(fs, defaults.Islo)
 }
 
 func ApplyIsloProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(isloFlagValues)
+	v, ok := values.(core.IsloConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "islo-base-url") {
-		cfg.Islo.BaseURL = *v.BaseURL
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-	}
-	if core.FlagWasSet(fs, "islo-image") {
-		cfg.Islo.Image = *v.Image
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-		core.MarkIsloImageExplicit(cfg)
-	}
-	if core.FlagWasSet(fs, "islo-workdir") {
-		cfg.Islo.Workdir = *v.Workdir
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-	}
-	if core.FlagWasSet(fs, "islo-gateway-profile") {
-		cfg.Islo.GatewayProfile = *v.GatewayProfile
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-	}
-	if core.FlagWasSet(fs, "islo-snapshot-name") {
-		cfg.Islo.SnapshotName = *v.SnapshotName
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-	}
-	if core.FlagWasSet(fs, "islo-vcpus") {
-		cfg.Islo.VCPUs = *v.VCPUs
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-		core.MarkIsloVCPUsExplicit(cfg)
-	}
-	if core.FlagWasSet(fs, "islo-memory-mb") {
-		cfg.Islo.MemoryMB = *v.MemoryMB
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-		core.MarkIsloMemoryMBExplicit(cfg)
-	}
-	if core.FlagWasSet(fs, "islo-disk-gb") {
-		cfg.Islo.DiskGB = *v.DiskGB
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-		core.MarkIsloDiskGBExplicit(cfg)
-	}
-	if core.FlagWasSet(fs, "islo-idle-pause") {
-		cfg.Islo.IdlePause = *v.IdlePause
-		core.RecordProviderFlagInputs(cfg, true, isloProvider)
-	}
-	return nil
+	applied, err := v.Apply(&cfg.Islo, fs)
+	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, isloProvider)
+	core.MarkIsloConfigExplicit(cfg, applied)
+	return err
 }
 
 func NewIsloBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {

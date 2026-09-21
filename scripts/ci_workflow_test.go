@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -16,6 +19,81 @@ import (
 func TestCIGoContract(t *testing.T) {
 	if err := checkCIGoContract(readCIGoWorkflow(t)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCIGoNativeEventVerifier(t *testing.T) {
+	pwsh, err := exec.LookPath("pwsh")
+	if err != nil {
+		t.Skip("PowerShell is not installed")
+	}
+	verifier, err := filepath.Abs("verify-go-test-events.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete := []string{
+		`{"Action":"run","Test":"TestAlpha"}`,
+		`{"Action":"pass","Test":"TestAlpha"}`,
+		`{"Action":"run","Test":"TestBeta"}`,
+		`{"Action":"pass","Test":"TestBeta"}`,
+		`{"Action":"pass","Package":"example.test/synthetic"}`,
+	}
+	for _, tc := range []struct {
+		name    string
+		events  []string
+		wantErr string
+	}{
+		{"complete", complete, ""},
+		{"missing run", complete[1:], "TestAlpha did not run"},
+		{"missing pass", append([]string{complete[0]}, complete[2:]...), "TestAlpha did not pass"},
+		{"missing test", complete[:2], "TestBeta did not run"},
+		{"empty", []string{}, "TestAlpha did not run"},
+		{"required skip", append(append([]string{}, complete...), `{"Action":"skip","Test":"TestAlpha"}`), "was skipped"},
+		{"unrelated skip", append(append([]string{}, complete...), `{"Action":"skip","Test":"TestOther"}`), "was skipped"},
+		{"package skip", append(append([]string{}, complete...), `{"Action":"skip","Package":"example.test/other"}`), "was skipped"},
+		{"malformed JSON", append(append([]string{}, complete...), `{`), "ConvertFrom-Json"},
+		{"PowerShell comparison semantics", []string{
+			`{"Action":"RUN","Test":"testalpha"}`,
+			`{"Action":"PASS","Test":"testalpha"}`,
+			`{"Action":"run","Test":"TESTBETA"}`,
+			`{"Action":"pass","Test":"TESTBETA"}`,
+		}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			input, err := json.Marshal(struct {
+				Events        []string `json:"events"`
+				RequiredTests []string `json:"requiredTests"`
+			}{tc.events, []string{"TestAlpha", "TestBeta"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, dir, "events.json", string(input))
+			writeTestFile(t, dir, "verify.ps1", `param([string]$Verifier, [string]$InputPath)
+$ErrorActionPreference = 'Stop'
+$fixture = Get-Content -Raw -LiteralPath $InputPath | ConvertFrom-Json
+& $Verifier -Events $fixture.events -RequiredTests $fixture.requiredTests -Label 'synthetic native test'
+`)
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
+				filepath.Join(dir, "verify.ps1"), verifier, filepath.Join(dir, "events.json"))
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "POWERSHELL_TELEMETRY_OPTOUT=1"}
+			output, err := cmd.CombinedOutput()
+			if ctx.Err() != nil {
+				t.Fatalf("verifier timed out: %v\n%s", ctx.Err(), output)
+			}
+			if tc.wantErr == "" {
+				if err != nil || len(output) != 0 {
+					t.Fatalf("successful verifier must be silent: err=%v output=%s", err, output)
+				}
+				return
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || !strings.Contains(string(output), tc.wantErr) {
+				t.Fatalf("want failed verifier containing %q, got err=%v output=%s", tc.wantErr, err, output)
+			}
+		})
 	}
 }
 
@@ -373,6 +451,14 @@ func TestCIGoContractRejectsMutations(t *testing.T) {
 			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test"))[6], "run")
 			run.Value = strings.Replace(run.Value, "    'TestWSL2ProductionCleanupKillsEntireStagingGroup',\n", "", 1)
 		}},
+		{"remove SSH skip assertion", func(d *yaml.Node) {
+			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test"))[7], "run")
+			run.Value = strings.Replace(run.Value, "assert not any", "# assert not any", 1)
+		}},
+		{"remove SSH proxy cases", func(d *yaml.Node) {
+			run := ciGoField(ciGoSteps(ciGoJob(d, "go-test"))[7], "run")
+			run.Value = strings.Replace(run.Value, "for proxy in ('false', 'true')", "for proxy in ('false',)", 1)
+		}},
 		{"logging after predicate", func(d *yaml.Node) {
 			ciGoField(ciGoSteps(ciGoJob(d, "go"))[0], "run").Value += "echo done\n"
 		}},
@@ -554,6 +640,22 @@ for name in required:
     for action in ('run', 'pass'):
         assert any(r.get('Test') == name and r['Action'] == action for r in records), (name, action)
 assert not any(r['Action'] == 'skip' for r in records), 'native fixture skipped'
+PY
+`},
+	{"Require real SSH readiness diagnostics", "bash", `go test ./internal/cli -run '^TestWaitForSSHReadyRealSSHTimeoutDiagnostic$' -count=1 -json | tee "$RUNNER_TEMP/ssh-readiness-tests.jsonl"
+python3 - "$RUNNER_TEMP/ssh-readiness-tests.jsonl" <<'PY'
+import json, sys
+records = [json.loads(line) for line in open(sys.argv[1])]
+root = 'TestWaitForSSHReadyRealSSHTimeoutDiagnostic'
+required = [root] + [
+    f'{root}/proxy={proxy}/transport-success={success}'
+    for proxy in ('false', 'true')
+    for success in ('true', 'false')
+]
+for name in required:
+    for action in ('run', 'pass'):
+        assert any(r.get('Test') == name and r['Action'] == action for r in records), (name, action)
+assert not any(r['Action'] == 'skip' for r in records), 'real SSH fixture skipped'
 PY
 `},
 	{"Build", "", "go build -trimpath -o /tmp/crabbox ./cmd/crabbox"},

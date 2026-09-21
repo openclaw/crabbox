@@ -169,7 +169,7 @@ func useCoordinatorStoredSSHKey(target *SSHTarget, provider, leaseID string) err
 	if provider == "daytona" {
 		return nil
 	}
-	return useStoredTestboxKey(target, leaseID)
+	return UseStoredTestboxKey(target, leaseID)
 }
 
 func selectCoordinatorLeaseSSHPort(lease CoordinatorLease, cfg Config) (CoordinatorLease, error) {
@@ -238,7 +238,7 @@ func (b *coordinatorLeaseBackend) acquireOnce(ctx context.Context, keep bool, re
 func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, keep bool, requestedLeaseID, requestedSlug string) (LeaseTarget, error) {
 	leaseID := requestedLeaseID
 	if leaseID == "" {
-		leaseID = newLeaseID()
+		leaseID = NewLeaseID()
 	}
 	var slug string
 	var err error
@@ -256,7 +256,7 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 	var keyPath, publicKey string
 	keyAction := func() error {
 		var keyErr error
-		keyPath, publicKey, keyErr = ensureTestboxKeyForConfig(b.cfg, leaseID)
+		keyPath, publicKey, keyErr = EnsureTestboxKeyForConfig(b.cfg, leaseID)
 		return keyErr
 	}
 	if requestedLeaseID != "" {
@@ -269,7 +269,7 @@ func (b *coordinatorLeaseBackend) acquireOnceWithLeaseID(ctx context.Context, ke
 	}
 	cfg := b.cfg
 	cfg.SSHKey = keyPath
-	cfg.ProviderKey = providerKeyForLease(leaseID)
+	cfg.ProviderKey = ProviderKeyForLease(leaseID)
 	if cfg.Tailscale.Enabled && cfg.Tailscale.Hostname == "" {
 		cfg.Tailscale.Hostname = cfg.Tailscale.HostnameTemplate
 	}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -369,6 +370,36 @@ func startProcess(t *testing.T, f *processFixture, ctx context.Context, keep boo
 	return p, f.next(t, "run")
 }
 
+func TestWaitForIPCancellationJoinsRealCommand(t *testing.T) {
+	f := newProcessFixture(t, "ip")
+	b := f.backend()
+	b.rt.Exec = core.RuntimeForProviderOperation(io.Discard).Exec
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	var ip string
+	var err error
+	done := make(chan struct{})
+	go func() {
+		ip, err = b.waitForIP(ctx, "crabbox-ip-cancel")
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel(nil)
+		awaitProcess(t, done)
+	})
+	child := f.next(t, "ip")
+	cause := errors.New("IP readiness canceled by caller")
+	started := time.Now()
+	cancel(cause)
+	awaitProcess(t, done)
+	var exit core.ExitError
+	if ip != "" || !core.AsExitError(err, &exit) || exit.Code != 2 || err.Error() != "tart ip crabbox-ip-cancel: context cancelled" || !errors.Is(err, cause) {
+		t.Fatalf("ip=%q err=%v, want caller cancellation with the existing diagnostic", ip, err)
+	}
+	child.exited(t)
+	t.Logf("real command handshake observed; readiness returned caller cancellation, command joined and control descriptor closed in %s", time.Since(started))
+}
+
 func TestDetachCommandCreatesSession(t *testing.T) {
 	cmd := exec.Command("tart", "run", "test")
 	detachCommand(cmd)
@@ -611,6 +642,45 @@ func processFileDescriptors(t *testing.T) map[int]uint64 {
 	return out
 }
 
+func TestTartHeartbeatCLIUsesNativeClaimScope(t *testing.T) {
+	_, _, claim := cleanupFixture(t)
+	labels := maps.Clone(claim.Labels)
+	labels["state"] = "ready"
+	if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(cleanupLease, claim, labels); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	inventory := fmt.Sprintf(`[{"Name":%q,"State":"running","Running":true}]`, cleanupVM)
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\nlist) printf '%%s\\n' '%s';;\nip) printf '192.0.2.10\\n';;\n*) exit 91;;\nesac\n", inventory)
+	if err := os.WriteFile(filepath.Join(bin, "tart"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(config, []byte("provider: tart\ntarget: macos\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_CONFIG", config)
+	t.Setenv("CRABBOX_BROKER_URL", "")
+	for _, extra := range [][]string{{"--idle-timeout", "10m"}, nil} {
+		var stdout, stderr bytes.Buffer
+		args := append([]string{"heartbeat", "--provider", "tart", "--id", cleanupLease, "--json"}, extra...)
+		if err := (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args); err != nil {
+			t.Fatalf("heartbeat failed: %v; stderr=%s", err, &stderr)
+		}
+		var result struct {
+			IdleTimeout string `json:"idleTimeout"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		persisted, err := core.ReadLeaseClaim(cleanupLease)
+		if err != nil || persisted.IdleTimeoutSeconds != 600 || result.IdleTimeout != "10m0s" {
+			t.Fatalf("persisted idle=%d output idle=%q err=%v", persisted.IdleTimeoutSeconds, result.IdleTimeout, err)
+		}
+	}
+}
+
 type acquisitionResult struct {
 	lease core.LeaseTarget
 	err   error
@@ -763,7 +833,8 @@ func TestAcquireStartupSuccessLifetime(t *testing.T) {
 			f := newProcessFixture(t, "")
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(nil)
-			result := acquireProcess(t, f, f.backend(), ctx, cancel, keep)
+			b := f.backend()
+			result := acquireProcess(t, f, b, ctx, cancel, keep)
 			child := result.next(t, f, "run")
 			awaitAcquisition(t, result.done)
 			if result.err != nil {
@@ -772,6 +843,13 @@ func TestAcquireStartupSuccessLifetime(t *testing.T) {
 			claims, err := core.ListLeaseClaims()
 			if err != nil || len(claims) != 1 || claims[0].LeaseID != result.lease.LeaseID || claims[0].CloudImmutableID == "" {
 				t.Fatalf("claim=%+v err=%v", claims, err)
+			}
+			snapshot, exists, set := core.ServerLeaseClaimSnapshot(result.lease.Server)
+			if !set || !exists || !reflect.DeepEqual(snapshot, claims[0]) {
+				t.Fatal("Acquire did not return its committed claim snapshot")
+			}
+			if _, err := b.Touch(ctx, core.TouchRequest{Lease: result.lease, State: "ready"}); err != nil {
+				t.Fatalf("first touch after Acquire: %v", err)
 			}
 			f.assertLogsRemoved(t)
 			cancel(errors.New("caller returned"))
@@ -961,6 +1039,72 @@ func TestAcquireStartupExitPreservesOwnershipFence(t *testing.T) {
 		if helperStage(args) == "stop" || helperStage(args) == "delete" {
 			t.Fatalf("cleanup crossed replaced marker: %q", args)
 		}
+		if helperStage(args) == "keygen" {
+			if _, err := os.Stat(args[len(args)-1]); err != nil {
+				t.Fatalf("SSH key removed despite rejected rollback: %v", err)
+			}
+		}
+	}
+}
+
+func TestAcquireStartupRollbackArtifactLifetime(t *testing.T) {
+	for _, mode := range []string{"success", "delete-failure", "artifact-failure"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newProcessFixture(t, "delete")
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			result := acquireProcess(t, f, f.backend(), ctx, cancel, true)
+			child := result.next(t, f, "run")
+			cause := errors.New("synthetic acquisition cancellation")
+			cancel(cause)
+			deletion := result.next(t, f, "delete")
+			var keyPath string
+			f.mu.Lock()
+			for _, args := range f.calls {
+				if helperStage(args) == "keygen" {
+					keyPath = args[len(args)-1]
+				}
+			}
+			f.mu.Unlock()
+			if keyPath == "" {
+				t.Fatal("missing generated key path")
+			}
+			dir := filepath.Dir(keyPath)
+			if mode == "artifact-failure" {
+				if err := os.RemoveAll(dir); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(dir, []byte("synthetic cleanup obstruction"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			action := processAction{Exit: true}
+			if mode == "delete-failure" {
+				action.Code, action.Stderr = 1, "synthetic delete failure"
+			}
+			deletion.send(t, action)
+			awaitProcess(t, result.done)
+			if !errors.Is(result.err, cause) {
+				t.Fatalf("original failure lost: %v", result.err)
+			}
+			child.exited(t)
+			f.assertLogsRemoved(t)
+			switch mode {
+			case "delete-failure":
+				if !strings.Contains(result.err.Error(), "synthetic delete failure") {
+					t.Fatalf("rollback failure lost: %v", result.err)
+				}
+				if _, err := os.Stat(keyPath); err != nil {
+					t.Fatalf("SSH key removed despite failed deletion: %v", err)
+				}
+			case "artifact-failure":
+				if !strings.Contains(result.err.Error(), "remove SSH connection artifacts") {
+					t.Fatalf("artifact cleanup error discarded: %v", result.err)
+				}
+			case "success":
+				f.assertFailedAcquisitionCleaned(t, child)
+			}
+		})
 	}
 }
 

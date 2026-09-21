@@ -49,8 +49,7 @@ func resolvedRsyncCommandForGOOS(ctx context.Context, goos string, target SSHTar
 			}
 		}
 	}
-	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, name, commandArgs...).(*pondMeshExecHandle)
-	applyTargetChildEnvironment(handle.cmd, target)
+	handle := pondMeshExecCommand(ctx, target, name, commandArgs...)
 	if nativeWindows {
 		applyWindowsNativeRsyncEnvironment(handle.cmd)
 	}

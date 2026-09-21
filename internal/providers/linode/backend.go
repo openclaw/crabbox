@@ -142,16 +142,18 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 			core.RemoveStoredTestboxKey(leaseID)
 			return
 		}
-		claimErr := b.persistAcquireCleanupClaim(leaseID, slug, cfg, created, req.Repo.Root, accountID, req.Keep, now)
-		claimPersisted := claimErr == nil
-		if cleanupErr := rollbackLinodeAcquire(client, created.ID); cleanupErr != nil {
-			err = fmt.Errorf("%v; linode cleanup failed: %w", err, errors.Join(claimErr, cleanupErr))
-			return
+		claim, claimErr := b.persistAcquireCleanupClaim(leaseID, slug, cfg, created, req.Repo.Root, accountID, req.Keep, now)
+		var cleanupErr error
+		if claimErr != nil {
+			// This attempt owns the new instance, but not a competing claim or its SSH files.
+			cleanupErr = errors.Join(claimErr, rollbackLinodeAcquire(client, created.ID))
+		} else {
+			// Rollback outlives acquisition; its provider timeout starts after admission.
+			cleanupErr = shared.RemoveSSHLeaseClaimAfter(context.Background(), claim, func() error {
+				return rollbackLinodeAcquire(client, created.ID)
+			})
 		}
-		if claimPersisted {
-			core.RemoveLeaseClaim(leaseID)
-		}
-		core.RemoveStoredTestboxKey(leaseID)
+		err = shared.JoinAcquireCleanupError(err, cleanupErr)
 	}()
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = providerKeyForLease(leaseID)
@@ -244,7 +246,7 @@ func (b *linodeLeaseBackend) persistAcquireRecoveryClaim(leaseID, slug string, c
 	return core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, repoRoot, cfg.IdleTimeout, false)
 }
 
-func (b *linodeLeaseBackend) persistAcquireCleanupClaim(leaseID, slug string, cfg core.Config, created linodeInstance, repoRoot, accountID string, keep bool, now time.Time) error {
+func (b *linodeLeaseBackend) persistAcquireCleanupClaim(leaseID, slug string, cfg core.Config, created linodeInstance, repoRoot, accountID string, keep bool, now time.Time) (core.LeaseClaim, error) {
 	server := core.Server{Provider: providerName, Name: core.LeaseProviderName(leaseID, slug)}
 	if created.ID != 0 {
 		server = serverFromLinode(created, cfg)
@@ -259,13 +261,14 @@ func (b *linodeLeaseBackend) persistAcquireCleanupClaim(leaseID, slug string, cf
 		var err error
 		repoRoot, err = os.Getwd()
 		if err != nil {
-			return fmt.Errorf("resolve rollback cleanup working directory: %w", err)
+			return core.LeaseClaim{}, fmt.Errorf("resolve rollback cleanup working directory: %w", err)
 		}
 	}
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, core.SSHTarget{}, repoRoot, cfg.IdleTimeout, false); err != nil {
-		return fmt.Errorf("persist linode rollback cleanup claim: %w", err)
+	claim, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, core.SSHTarget{}, repoRoot, cfg.IdleTimeout, false, core.LeaseClaim{}, false)
+	if err != nil {
+		return core.LeaseClaim{}, fmt.Errorf("persist linode rollback cleanup claim: %w", err)
 	}
-	return nil
+	return claim, nil
 }
 
 func (b *linodeLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest) (core.LeaseTarget, error) {
@@ -805,10 +808,9 @@ func (b *linodeLeaseBackend) deleteServer(ctx context.Context, _ core.Config, se
 		}
 		return client.DeleteLinode(ctx, item.ID)
 	}
-	if err := core.RemoveLeaseClaimIfUnchangedAfter(leaseID, expectedClaim, action); err != nil {
+	if err := shared.RemoveSSHLeaseClaimAfter(ctx, expectedClaim, action); err != nil {
 		return fmt.Errorf("finalize linode cleanup claim: %w", err)
 	}
-	core.RemoveStoredTestboxKey(leaseID)
 	return nil
 }
 

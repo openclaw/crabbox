@@ -61,13 +61,7 @@ func serverTypeForConfig(cfg core.Config) string {
 		return value
 	}
 	if core.ClassWasExplicit(cfg) {
-		if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
-			return candidates[0]
-		}
-		if core.IsCanonicalProviderClass(cfg.Class) {
-			return ""
-		}
-		return serverTypeForClass(cfg.Class)
+		return core.ProviderClassPrimaryTypeForProfiles(classProfiles, cfg, serverTypeForClass(cfg.Class))
 	}
 	if value := strings.TrimSpace(cfg.TencentCloud.Type); value != "" {
 		return value

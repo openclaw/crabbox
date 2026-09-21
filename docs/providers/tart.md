@@ -14,6 +14,20 @@ executor, and deletes the VM on `stop`.
 
 The provider is local only. It never uses the coordinator or cloud credentials.
 
+`crabbox heartbeat --provider tart --id <lease>` durably refreshes the local
+lease claim. An explicit `--idle-timeout` replaces its idle window; omission
+preserves the recorded value, and any recorded TTL cap remains in force.
+Status reads reconstruct that persisted policy without extending it. Touching
+requires the exact claim and the matching VM ownership marker in the recorded
+Tart storage root; it cannot create or replace ownership of an existing VM.
+
+Older leases without a recorded ownership binding cannot be renewed: explicit
+heartbeat fails, and foreground touches report a warning rather than pretending
+to extend their lifetime. Their VMs and claims are retained, not adopted or
+deleted. Run `crabbox warmup --provider tart` and use the new lease ID to resume
+durable renewal; save or migrate work from the old VM before choosing to retire
+it manually. Status inspection and existing cleanup ownership rules are unchanged.
+
 **Targets:** macOS.
 
 **Hosts:** Apple Silicon Macs with tart installed (`brew install cirruslabs/cli/tart`).
@@ -40,7 +54,7 @@ CLI flags:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--tart-image` | `ghcr.io/cirruslabs/macos-sequoia-base@sha256:785c3acb40fa5af6dd5aab96cd60408372c26125e173c14ea417498d086f829c` | OCI base image to clone |
+| `--tart-image` | `ghcr.io/cirruslabs/macos-sequoia-base@sha256:4947ac5ab1b2fdc46ab856132d2ba958f8e45b5f85192c66370dafc028c514dd` | OCI base image to clone |
 | `--tart-cpu` | 4 | Guest CPU count |
 | `--tart-memory` | 8192 | Guest memory in MB |
 | `--tart-disk` | (clone default) | Guest disk size in GB; only applied when explicitly set |
@@ -81,6 +95,9 @@ and process metadata.
 2. `tart set crabbox-<slug> --cpu N --memory N` configures resources (disk size is only resized when `--tart-disk` is explicitly set).
 3. `tart run crabbox-<slug> --no-graphics --no-clipboard --no-audio` starts the VM headless with Tart's automatic host clipboard and audio passthrough disabled.
 4. `tart ip crabbox-<slug>` polls for the guest IP (DHCP, typically ~10s).
+   A five-minute context covers both the commands and the waits between probes;
+   earlier caller cancellation stops readiness. The first probe remains delayed
+   by three seconds, with retries following the same three-second ticker cadence.
 5. Crabbox waits up to two minutes for the Tart Guest Agent using a harmless
    `tart exec crabbox-<slug> /usr/bin/true` probe, then injects the SSH public key
    with `tart exec crabbox-<slug> bash -c "..."`. An IP alone is not guest-agent
@@ -122,11 +139,19 @@ stop/delete of the new clone. `--keep` preserves a VM only after acquisition
 succeeds. After success, kept VMs survive caller cancellation; non-kept VMs
 remain tied to the caller's context.
 
+Failed acquisition removes generated SSH credentials and host-trust files only
+after ownership-verified VM rollback and any published-claim cleanup succeed.
+Uncertain cloning, ownership changes, or failed deletion/claim cleanup retain
+the SSH material for recovery. Local artifact-cleanup errors are reported
+alongside the original acquisition failure rather than silently discarded.
+
 ## Built-in image identity
 
 New leases without an image override use the immutable Sequoia image above.
 The original registry manifest and its VM configuration are checked in under
-`internal/providers/tart/images`. Crabbox hashes the manifest against the pin,
+`internal/providers/tart/images`. The pin was reviewed on 2026-09-18
+against the publisher’s 2026-09-05 image; its VM configuration SHA-256 is
+`1bbd9f74ddc3b6bffa892f89b8ea9444cf6634af3593e6bdfc6762952a08d8a7`. Crabbox hashes the manifest against the pin,
 then checks the cloned disk's exact size and every uncompressed chunk digest,
 the NVRAM size and digest, and the configuration before guest execution. Native
 Tart MAC-address regeneration and JSON formatting changes are allowed; other
@@ -164,6 +189,10 @@ otherwise Crabbox uses `~/.tart` and passes that same directory to Tart.
 The claim lock covers fresh inventory and marker checks, any required stop,
 deletion, and durable claim removal. A changed claim, missing or replaced marker,
 duplicate claim, different store, or inventory failure prevents deletion.
+Waiting for that lock honors cleanup cancellation, including when pruning a
+missing VM's claim. Cancellation stops the remaining scan rather than being
+treated as an ordinary stale-claim skip; confirmed successful deletion still
+finishes claim retirement.
 Legacy claims without this binding are retained for explicit operator inspection;
 they are not silently upgraded by cleanup. Inspect such VMs with Tart before
 choosing any manual `tart stop <name>` / `tart delete <name>` operation.

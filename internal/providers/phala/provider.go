@@ -105,13 +105,7 @@ func (Provider) ServerTypeForConfig(cfg core.Config) string {
 		return cfg.Phala.InstanceType
 	}
 	if core.ClassWasExplicit(cfg) {
-		if candidates, matched := core.ProviderClassCandidatesForProfiles(classProfiles, cfg); matched {
-			return candidates[0]
-		}
-		if core.IsCanonicalProviderClass(cfg.Class) {
-			return ""
-		}
-		return instanceTypeForClass(cfg.Class)
+		return core.ProviderClassPrimaryTypeForProfiles(classProfiles, cfg, instanceTypeForClass(cfg.Class))
 	}
 	// Preserve Phala's inexpensive provider default when the generic Crabbox
 	// class is only the inherited global default.

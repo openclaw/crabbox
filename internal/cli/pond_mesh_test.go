@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -24,9 +25,6 @@ import (
 // the argv at Start() and blocks Wait() on the signal channel so the orchestration
 // loop can be terminated deterministically without real ssh processes.
 type pondMeshRecordingHandle struct {
-	name      string
-	args      []string
-	pid       int
 	started   bool
 	signal    chan struct{}
 	ctx       context.Context
@@ -64,37 +62,10 @@ func (h *pondMeshRecordingHandle) Wait() error {
 	return nil
 }
 
-func (h *pondMeshRecordingHandle) String() string {
-	return h.name + " " + strings.Join(h.args, " ")
-}
-
-func (h *pondMeshRecordingHandle) PID() int { return h.pid }
-
-func (h *pondMeshRecordingHandle) Process() processSignaler { return testProcessSignaler{h.signal} }
-
 // WasTerminatedByOurCancel mirrors the production classifier for the recording
 // double: this stub's Wait() only returns nil (a healthy tunnel torn down by
 // the connect loop), so a set cancelled flag always denotes our teardown.
 func (h *pondMeshRecordingHandle) WasTerminatedByOurCancel() bool { return h.cancelled.Load() }
-
-// testProcessSignaler closes the underlying channel on the first signal so
-// the handle's Wait() returns.
-type testProcessSignaler struct {
-	signal chan struct{}
-}
-
-func (p testProcessSignaler) Signal(_ os.Signal) error {
-	select {
-	case <-p.signal:
-	default:
-		close(p.signal)
-	}
-	return nil
-}
-
-func (p testProcessSignaler) Kill() error {
-	return p.Signal(nil)
-}
 
 // pondMeshRecordingRunner mirrors the exedev backend's pattern: it captures
 // every (name, args) invocation it sees so tests can assert on the full SSH
@@ -107,12 +78,12 @@ type pondMeshRecordingRunner struct {
 	waitErrs  map[int]error
 }
 
-func (r *pondMeshRecordingRunner) Command(ctx context.Context, name string, args ...string) pondMeshHandle {
+func (r *pondMeshRecordingRunner) Command(ctx context.Context, _ SSHTarget, name string, args ...string) pondMeshHandle {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, append([]string{name}, args...))
 	index := len(r.handles)
-	h := &pondMeshRecordingHandle{name: name, args: append([]string{}, args...), pid: 1000 + index, signal: make(chan struct{}), ctx: ctx}
+	h := &pondMeshRecordingHandle{signal: make(chan struct{}), ctx: ctx}
 	if r.startHook != nil {
 		h.startHook = func() error { return r.startHook(index, ctx) }
 	}
@@ -126,21 +97,26 @@ func (r *pondMeshRecordingRunner) Command(ctx context.Context, name string, args
 func TestPondMeshProductionRunnersScrubTargetEnvironment(t *testing.T) {
 	t.Setenv("TEST_ARD_PASSWORD", "must-not-reach-pond-ssh")
 	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
-	target := SSHTarget{ChildEnvDenylist: []string{"TEST_ARD_PASSWORD"}}
-	for name, runner := range map[string]pondMeshRunner{
-		"foreground": pondMeshExecRunner{},
-		"daemon":     pondMeshDaemonRunner{},
+	t.Setenv("CRABBOX_TEST_OVERRIDE", "old")
+	target := SSHTarget{
+		ChildEnvDenylist: []string{"TEST_ARD_PASSWORD"},
+		ChildEnv:         map[string]string{"CRABBOX_TEST_OVERRIDE": "new"},
+	}
+	foreground := pondMeshExecRunner{}.Command(context.Background(), target, "ssh", "example.test").(*pondMeshExecHandle)
+	for name, cmd := range map[string]*exec.Cmd{
+		"foreground": foreground.cmd,
+		"daemon":     pondMeshDaemonCommand(target, "ssh", "example.test"),
 	} {
 		t.Run(name, func(t *testing.T) {
-			handle := pondMeshRunnerCommand(context.Background(), runner, target, "ssh", "example.test")
-			execHandle := handle.(*pondMeshExecHandle)
-			cmd := execHandle.cmd
 			env := strings.Join(cmd.Env, "\n")
 			if strings.Contains(env, "TEST_ARD_PASSWORD=") || !strings.Contains(env, "CRABBOX_TEST_KEEP=preserved") {
-				t.Fatalf("child environment=%q", env)
+				t.Fatal("child environment leaked a blocked key or dropped a retained key")
 			}
-			if name == "foreground" && (!execHandle.managed || cmd.Cancel == nil || cmd.WaitDelay != pondMeshCancelWaitDelay) {
-				t.Fatalf("environment-aware foreground runner lost managed cancellation: managed=%v cancel=%v waitDelay=%v", execHandle.managed, cmd.Cancel != nil, cmd.WaitDelay)
+			if strings.Contains(env, "CRABBOX_TEST_OVERRIDE=old") || !strings.Contains(env, "CRABBOX_TEST_OVERRIDE=new") {
+				t.Fatal("child environment did not apply the target override")
+			}
+			if name == "foreground" && (cmd.Cancel == nil || cmd.WaitDelay != pondMeshCancelWaitDelay) {
+				t.Fatalf("foreground runner lost cancellation: cancel=%v waitDelay=%v", cmd.Cancel != nil, cmd.WaitDelay)
 			}
 		})
 	}
@@ -599,7 +575,7 @@ func TestRunPondMeshForwardsReportsUnexpectedCleanExit(t *testing.T) {
 		if len(runner.handles) == 1 {
 			handle := runner.handles[0]
 			runner.mu.Unlock()
-			_ = handle.Process().Signal(os.Interrupt)
+			close(handle.signal)
 			break
 		}
 		runner.mu.Unlock()
@@ -937,32 +913,45 @@ func TestDisambiguatePondMemberNamesAvoidsShellExportCollisions(t *testing.T) {
 	}
 }
 
+func assertSyntheticExeDevListCall(t *testing.T, runner *recordingCommandRunner) {
+	t.Helper()
+	if len(runner.calls) != 1 {
+		t.Fatalf("process calls=%d, want one exe.dev list", len(runner.calls))
+	}
+	call := runner.calls[0]
+	wantTail := []string{"exe.example.test", "ls --l --json"}
+	if call.Name != "ssh" || len(call.Args) < len(wantTail) || !reflect.DeepEqual(call.Args[len(call.Args)-len(wantTail):], wantTail) {
+		t.Fatalf("process=%q args=%q, want only synthetic exe.dev list", call.Name, call.Args)
+	}
+}
+
 // TestCollectPondMembersAcrossProvidersFiltersByCapability is the cross-
 // provider gating test for the capability refactor. It seeds claims for a
-// mix of SSH-mesh-capable (Hetzner, RunPod) and URL-only (Islo, Modal)
+// mix of SSH-mesh-capable (Hetzner, exe.dev) and URL-only (Islo, Modal)
 // providers in the same pond, then asserts that `collectPondMembersAcrossProviders`:
 //
-//   - includes Hetzner and RunPod in the iteration (both advertise FeatureSSH);
+//   - includes Hetzner and exe.dev in the iteration (both advertise FeatureSSH);
 //   - lands Islo and Modal in the `ineligible` slice (URLBridge-only, no SSH);
 //   - and filters out claims that belong to a different pond.
 //
-// The actual `pondMember` list comes back empty because the test SSH backend's
-// List() returns nil — the test is about the capability gate, not the member
-// projection.
+// Empty synthetic inventories keep this focused on the capability gate; the
+// real exe.dev adapter lists through the recording command runner.
 func TestCollectPondMembersAcrossProvidersFiltersByCapability(t *testing.T) {
-	stubPondExeDevBackend(t)
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "cbx_hetzner", Slug: "api", Provider: "hetzner", Pond: "alpha", RepoRoot: "/r"},
-		{LeaseID: "cbx_runpod", Slug: "edge", Provider: "exe-dev", Pond: "alpha", RepoRoot: "/r"},
+		{LeaseID: "cbx_exedev", Slug: "edge", Provider: "exe-dev", Pond: "alpha", RepoRoot: "/r"},
 		{LeaseID: "isb_modal", Slug: "fn", Provider: "modal", Pond: "alpha", RepoRoot: "/r"},
 		{LeaseID: "isb_islo", Slug: "share", Provider: "islo", Pond: "alpha", RepoRoot: "/r"},
 		{LeaseID: "cbx_beta", Slug: "noise", Provider: "hetzner", Pond: "beta", RepoRoot: "/r"},
 	})
 	cfg := defaultConfig()
-	_, ineligible, err := collectPondMembersAcrossProviders(context.Background(), Runtime{}, cfg, "alpha", "")
+	cfg.ExeDev.ControlHost = "exe.example.test"
+	runner := &recordingCommandRunner{result: LocalCommandResult{Stdout: `{ "vms": [] }`}}
+	_, ineligible, err := collectPondMembersAcrossProviders(context.Background(), testRuntimeWithRunner(runner), cfg, "alpha", "")
 	if err != nil {
 		t.Fatalf("collectPondMembersAcrossProviders: %v", err)
 	}
+	assertSyntheticExeDevListCall(t, runner)
 	sort.Strings(ineligible)
 	want := []string{"islo", "modal"}
 	if !reflect.DeepEqual(ineligible, want) {
@@ -974,16 +963,18 @@ func TestCollectPondMembersAcrossProvidersFiltersByCapability(t *testing.T) {
 // `--provider X` still narrows the iteration to a single provider, even
 // though the function now defaults to cross-provider mode.
 func TestCollectPondMembersAcrossProvidersHonorsProviderFilter(t *testing.T) {
-	stubPondExeDevBackend(t)
 	withTempClaims(t, []leaseClaim{
 		{LeaseID: "cbx_hetzner", Slug: "api", Provider: "hetzner", Pond: "alpha", RepoRoot: "/r"},
-		{LeaseID: "cbx_runpod", Slug: "edge", Provider: "exe-dev", Pond: "alpha", RepoRoot: "/r"},
+		{LeaseID: "cbx_exedev", Slug: "edge", Provider: "exe-dev", Pond: "alpha", RepoRoot: "/r"},
 	})
 	cfg := defaultConfig()
-	_, ineligible, err := collectPondMembersAcrossProviders(context.Background(), Runtime{}, cfg, "alpha", "exe-dev")
+	cfg.ExeDev.ControlHost = "exe.example.test"
+	runner := &recordingCommandRunner{result: LocalCommandResult{Stdout: `{ "vms": [] }`}}
+	_, ineligible, err := collectPondMembersAcrossProviders(context.Background(), testRuntimeWithRunner(runner), cfg, "alpha", "exe-dev")
 	if err != nil {
 		t.Fatalf("collectPondMembersAcrossProviders: %v", err)
 	}
+	assertSyntheticExeDevListCall(t, runner)
 	if len(ineligible) != 0 {
 		t.Fatalf("expected no ineligible when filter excludes other providers, got %v", ineligible)
 	}
@@ -1048,17 +1039,4 @@ func TestProviderCapabilitiesAvailable(t *testing.T) {
 			t.Errorf("providerCapabilities(%q).Available() = %v, want %v", tc.provider, got, tc.want)
 		}
 	}
-}
-
-// These capability tests need an empty local List result, not a provider query.
-func stubPondExeDevBackend(t *testing.T) {
-	original := providerRegistry["exe-dev"]
-	t.Cleanup(func() { providerRegistry["exe-dev"] = original })
-	providerRegistry["exe-dev"] = pondEmptySSHProvider{original}
-}
-
-type pondEmptySSHProvider struct{ Provider }
-
-func (p pondEmptySSHProvider) Configure(Config, Runtime) (Backend, error) {
-	return testSSHBackend{spec: p.Spec()}, nil
 }

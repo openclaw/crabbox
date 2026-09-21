@@ -340,7 +340,7 @@ func (b *semaphoreBackend) ReleaseLease(ctx context.Context, req core.ReleaseLea
 	if err := shared.ValidateClaimBinding(claim, binding); err != nil {
 		return core.Exit(2, "semaphore lease=%s has a missing or stale exact local ownership claim for job=%s: %v", leaseID, jobID, err)
 	}
-	if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+	if err := shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		live, err := verifyLiveJob()
 		if err != nil {
 			return err

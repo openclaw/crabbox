@@ -31,6 +31,28 @@ func TestCloneLabels(t *testing.T) {
 	}
 }
 
+func TestSandboxRepositoryMetadataScope(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		repo core.Repo
+		want string
+	}{
+		{"empty", core.Repo{}, "repo-sha256:e3b0c44298fc1c14"},
+		{"whitespace empty", core.Repo{Root: " \t\n", Name: " \n"}, "repo-sha256:e3b0c44298fc1c14"},
+		{"root before name and remote", core.Repo{Root: "abc", Name: "hello", RemoteURL: "https://example.com/repo.git"}, "repo-sha256:ba7816bf8f01cfea"},
+		{"trim root", core.Repo{Root: " \tabc\n", Name: "hello"}, "repo-sha256:ba7816bf8f01cfea"},
+		{"name fallback", core.Repo{Name: "hello"}, "repo-sha256:2cf24dba5fb0a30e"},
+		{"trim name fallback", core.Repo{Root: "\t", Name: " hello\n"}, "repo-sha256:2cf24dba5fb0a30e"},
+		{"remote alone ignored", core.Repo{RemoteURL: "https://example.com/repo.git"}, "repo-sha256:e3b0c44298fc1c14"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SandboxRepositoryMetadataScope(tc.repo); got != tc.want {
+				t.Fatalf("scope=%q want=%q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIndexProviderClaimsPreservesFilteringAndLastKeyWinner(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	ids := []string{"cbx_000000000001", "cbx_000000000002", "cbx_000000000003", "cbx_000000000004"}
@@ -220,7 +242,7 @@ func TestExactClaimOwnershipRejectsMissingAndStaleBindings(t *testing.T) {
 		t.Fatalf("stale claim err=%v", err)
 	}
 	called := false
-	if err := RemoveExactClaimAfter(claim, want, func() error { called = true; return nil }); err != nil || !called {
+	if err := RemoveExactClaimAfterContext(context.Background(), claim, want, func() error { called = true; return nil }); err != nil || !called {
 		t.Fatalf("fenced deletion called=%v err=%v", called, err)
 	}
 	if _, exists, err := core.ReadLeaseClaimWithPresence(want.LeaseID); err != nil || exists {
@@ -420,6 +442,245 @@ func TestCommitClaimTouchOrdersAuthorizationAndPublication(t *testing.T) {
 				} else if !reflect.DeepEqual(actual, expected) {
 					t.Fatal("refused touch changed durable claim")
 				}
+			}
+		})
+	}
+}
+
+func TestRefreshRetainedLeaseActivityMissingAndMalformed(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const id = "cbx_123456abcdef"
+	if err := RefreshRetainedLeaseActivity(id, "example", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(id); err != nil || exists {
+		t.Fatalf("missing refresh created claim: exists=%v err=%v", exists, err)
+	}
+	state, err := core.CrabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(state, "claims", id+".json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const malformed = "not claim JSON\n"
+	if err := os.WriteFile(path, []byte(malformed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RefreshRetainedLeaseActivity(id, "example", time.Minute); err == nil {
+		t.Fatal("malformed claim read error was swallowed")
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != malformed {
+		t.Fatalf("malformed claim changed: err=%v", err)
+	}
+}
+
+func TestRefreshRetainedLeaseActivityPreservesOwnershipAndIdlePolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		recorded   int
+		configured time.Duration
+		want       int
+	}{
+		{"recorded wins", 180, 9 * time.Minute, 180},
+		{"zero falls back", 180, 0, 180},
+		{"negative falls back", 180, -time.Minute, 180},
+		{"initialize missing", 0, 9 * time.Minute, 540},
+		{"both missing", 0, 0, 0},
+		{"negative configuration without recorded timeout", 0, -time.Minute, 0},
+		{"negative recorded timeout", -10, 0, -10},
+		{"both negative", -10, -time.Minute, -10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const id = "cbx_123456abcdef"
+			server := core.Server{Provider: "example", CloudID: "sandbox-1", Labels: map[string]string{"lease": id, "slug": "alpha", "custom": "preserved"}}
+			target := core.SSHTarget{Host: "192.0.2.1", User: "fixture", Port: "2222"}
+			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(id, "alpha", "example", "scope-one", "pond-one", t.TempDir(), time.Duration(tc.recorded)*time.Second, false, server, target); err != nil {
+				t.Fatal(err)
+			}
+			before, err := core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			old := before
+			old.LastUsedAt = "2000-01-01T00:00:00Z"
+			old.IdleTimeoutSeconds = tc.recorded
+			if err := core.ReplaceLeaseClaimIfUnchanged(id, before, old); err != nil {
+				t.Fatal(err)
+			}
+			before, err = core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := time.Now().UTC().Truncate(time.Second)
+			if err := RefreshRetainedLeaseActivity(id, "example", tc.configured); err != nil {
+				t.Fatal(err)
+			}
+			after, err := core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			used, err := time.Parse(time.RFC3339, after.LastUsedAt)
+			if err != nil || used.Before(started) || used.After(time.Now().UTC()) {
+				t.Fatalf("last used=%q err=%v", after.LastUsedAt, err)
+			}
+			if after.IdleTimeoutSeconds != tc.want {
+				t.Fatalf("idle=%d want=%d", after.IdleTimeoutSeconds, tc.want)
+			}
+			if after.Revision == before.Revision {
+				t.Fatal("refresh did not publish a new revision")
+			}
+			// Core normalizes idle labels when a positive recorded policy exists.
+			before.LastUsedAt, before.Revision, before.IdleTimeoutSeconds = after.LastUsedAt, after.Revision, tc.want
+			if tc.recorded > 0 {
+				before.Labels = CloneLabels(before.Labels)
+				before.Labels["idle_timeout"] = "180"
+				before.Labels["idle_timeout_secs"] = "180"
+			}
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("refresh changed ownership or endpoint metadata: before=%#v after=%#v", before, after)
+			}
+		})
+	}
+}
+
+func TestValidateSandboxOwnershipMetadata(t *testing.T) {
+	const provider = "example-sandbox"
+	claim := core.LeaseClaim{LeaseID: "lease-1", ProviderScope: "scope-1"}
+	matching := map[string]string{"crabbox.provider": provider, "crabbox.scope": claim.ProviderScope, "crabbox.claim": claim.LeaseID}
+	for _, tc := range []struct {
+		name, id string
+		metadata map[string]string
+		claim    core.LeaseClaim
+		code     int
+		message  string
+	}{
+		{name: "matching", id: "sandbox-1", metadata: matching, claim: claim},
+		{name: "empty ID precedes metadata mismatch", metadata: nil, claim: claim, code: 5, message: "example-sandbox returned a sandbox without an id"},
+		{name: "empty ID with matching metadata", metadata: matching, claim: claim, code: 5, message: "example-sandbox returned a sandbox without an id"},
+		{name: "nil metadata", id: "sandbox-1", claim: claim, code: 4},
+		{name: "missing provider", id: "sandbox-1", metadata: map[string]string{"crabbox.scope": "scope-1", "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "wrong provider", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": "other", "crabbox.scope": "scope-1", "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "missing scope", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "scope compared exactly", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.scope": "scope-1 ", "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "missing lease", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.scope": "scope-1"}, claim: claim, code: 4},
+		{name: "lease compared exactly", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.scope": "scope-1", "crabbox.claim": " lease-1"}, claim: claim, code: 4},
+		{name: "provider compared exactly", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider + " ", "crabbox.scope": "scope-1", "crabbox.claim": "lease-1"}, claim: claim, code: 4},
+		{name: "missing keys match empty expectations", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider}},
+		{name: "explicit empty expectations", id: "sandbox-1", metadata: map[string]string{"crabbox.provider": provider, "crabbox.scope": "", "crabbox.claim": ""}},
+		{name: "empty expectations reject nonempty metadata", id: "sandbox-1", metadata: matching, code: 4},
+		{name: "whitespace ID accepted verbatim", id: " \t", metadata: matching, claim: claim},
+		{name: "whitespace ID diagnostic quoted", id: " \t", claim: claim, code: 4, message: "example-sandbox sandbox \" \\t\" ownership metadata does not match its local claim"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateSandboxOwnershipMetadata(provider, tc.id, tc.metadata, tc.claim)
+			if tc.code == 0 {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			var exitErr core.ExitError
+			if !core.AsExitError(err, &exitErr) || exitErr.Code != tc.code {
+				t.Fatalf("error=%v, want exit %d", err, tc.code)
+			}
+			want := tc.message
+			if want == "" {
+				want = "example-sandbox sandbox \"sandbox-1\" ownership metadata does not match its local claim"
+			}
+			if err.Error() != want {
+				t.Fatalf("error=%q want=%q", err.Error(), want)
+			}
+		})
+	}
+}
+
+func TestFinishScopedLeaseAdmissionAndProjection(t *testing.T) {
+	for _, mode := range []string{"observe", "invalid", "different repo", "reclaim"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			const id = "fixture_resource"
+			repo := t.TempDir()
+			if err := core.ClaimLeaseForRepoProviderScopePond(id, "", "example", "scope", "pond", repo, 3*time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			before, err := core.ReadLeaseClaim(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			invalid := errors.New("adapter scope mismatch")
+			calls := 0
+			opts := ScopedLeaseFinishOptions{Provider: "example", LeasePrefix: "fixture_", IdleTimeout: 9 * time.Minute,
+				ValidateClaim: func(got core.LeaseClaim) error {
+					calls++
+					if !reflect.DeepEqual(got, before) {
+						t.Fatal("validation received different snapshot")
+					}
+					if mode == "invalid" {
+						return invalid
+					}
+					return nil
+				},
+			}
+			if mode != "observe" {
+				opts.RepoRoot = t.TempDir()
+			}
+			opts.Reclaim = mode == "reclaim"
+			lease, resource, slug, err := FinishScopedLease(before, opts)
+			if calls != 1 {
+				t.Fatalf("validation calls=%d", calls)
+			}
+			after, readErr := core.ReadLeaseClaim(id)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if mode == "invalid" || mode == "different repo" {
+				if err == nil || lease != "" || resource != "" || slug != "" {
+					t.Fatalf("rejected result=%q/%q/%q err=%v", lease, resource, slug, err)
+				}
+				if mode == "invalid" && !errors.Is(err, invalid) {
+					t.Fatalf("validation error lost: %v", err)
+				}
+				if !reflect.DeepEqual(after, before) {
+					t.Fatal("rejected admission changed claim")
+				}
+				return
+			}
+			if err != nil || lease != id || resource != "resource" || slug != core.NewLeaseSlug(id) {
+				t.Fatalf("projection=%q/%q/%q err=%v", lease, resource, slug, err)
+			}
+			if mode == "observe" {
+				if !reflect.DeepEqual(after, before) {
+					t.Fatal("empty repository root published claim")
+				}
+			} else if after.RepoRoot != opts.RepoRoot || after.ProviderScope != before.ProviderScope || after.Pond != before.Pond || after.Slug != before.Slug || after.IdleTimeoutSeconds != 180 {
+				t.Fatalf("reclaim changed preserved fields: %#v", after)
+			}
+		})
+	}
+}
+
+func TestClaimLifecycleLabels(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		claim core.LeaseClaim
+		want  map[string]string
+	}{
+		{"empty", core.LeaseClaim{}, map[string]string{}},
+		{"persisted fallback", core.LeaseClaim{IdleTimeoutSeconds: 600, ClaimedAt: " 1970-01-01T00:01:40Z ", LastUsedAt: "1970-01-01T00:03:20.123Z", Labels: map[string]string{"idle_timeout_secs": "300", "private_metadata": "preserve: /exact/path"}}, map[string]string{"idle_timeout": "600", "idle_timeout_secs": "600", "created_at": "100", "last_touched_at": "200", "private_metadata": "preserve: /exact/path"}},
+		{"labels retained", core.LeaseClaim{IdleTimeoutSeconds: 0, ClaimedAt: "invalid", LastUsedAt: "invalid", Labels: map[string]string{"created_at": "100", "last_touched_at": "200", "idle_timeout_secs": "300"}}, map[string]string{"created_at": "100", "last_touched_at": "200", "idle_timeout_secs": "300"}},
+		{"invalid fallbacks", core.LeaseClaim{ClaimedAt: "invalid", LastUsedAt: "invalid", Labels: map[string]string{"created_at": ""}}, map[string]string{"created_at": ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ClaimLifecycleLabels(tc.claim)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %#v want %#v", got, tc.want)
+			}
+			got["fixture"] = "changed"
+			if tc.claim.Labels["fixture"] != "" {
+				t.Fatal("projection aliases persisted metadata")
 			}
 		})
 	}

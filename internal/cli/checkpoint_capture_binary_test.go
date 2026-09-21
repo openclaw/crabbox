@@ -833,7 +833,7 @@ func (f *checkpointCaptureFixture) start(marker string, args ...string) *checkpo
 		cancel()
 		f.t.Fatal(err)
 	}
-	p.owner = &pondMeshExecHandle{cmd: p.cmd, managed: true}
+	p.owner = &pondMeshExecHandle{cmd: p.cmd}
 	p.output.marker, p.output.matched = marker, make(chan struct{})
 	p.cmd.Dir, p.cmd.Env = f.repo, append(append([]string(nil), f.env...), "CRABBOX_CAPTURE_LIFETIME="+lifetime)
 	// Cancel must only signal: Cmd.Wait receives the context watcher's result.

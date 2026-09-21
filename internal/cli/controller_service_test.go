@@ -1330,72 +1330,77 @@ func TestControllerImmediateDeleteCancelsBeforeWarmup(t *testing.T) {
 }
 
 func TestControllerDeleteCancelsActiveWarmup(t *testing.T) {
-	runner := newFakeControllerWorkspaceRunner()
-	runner.started = make(chan string, 1)
-	runner.blockWarmup = make(chan struct{})
-	service, cancel := testControllerService(t, runner, 1)
-	defer cancel()
-	created := controllerHTTP(service, http.MethodPost, "/v1/workspaces", "test-token", controllerWorkspaceRequest{ID: "active-cancel-box"})
-	if created.Code != http.StatusAccepted {
-		t.Fatalf("create status=%d", created.Code)
-	}
-	select {
-	case <-runner.started:
-	case <-time.After(time.Second):
-		t.Fatal("warmup did not start")
-	}
-	ageControllerCreateRecoveryWindow(t, service, "active-cancel-box")
-	deleted := controllerHTTP(service, http.MethodDelete, "/v1/workspaces/active-cancel-box", "test-token", nil)
-	if deleted.Code != http.StatusAccepted {
-		t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
-	}
-	waitControllerWorkspaceStatus(t, service, "active-cancel-box", "stopped")
-	service.mu.Lock()
-	_, tracked := service.createOps["active-cancel-box"]
-	service.mu.Unlock()
-	if tracked {
-		t.Fatal("completed warmup cancellation remained in active create map")
-	}
-	warmups, stops, _ := runner.counts()
-	if warmups != 1 || stops != 0 {
-		t.Fatalf("warmup cancellation calls warmups=%d stops=%d", warmups, stops)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		runner := newFakeControllerWorkspaceRunner()
+		runner.started = make(chan string, 1)
+		runner.blockWarmup = make(chan struct{})
+		service, cancel := testControllerService(t, runner, 1)
+		defer cancel()
+		created := controllerHTTP(service, http.MethodPost, "/v1/workspaces", "test-token", controllerWorkspaceRequest{ID: "active-cancel-box"})
+		if created.Code != http.StatusAccepted {
+			t.Fatalf("create status=%d", created.Code)
+		}
+		select {
+		case <-runner.started:
+		case <-time.After(time.Second):
+			t.Fatal("warmup did not start")
+		}
+		ageControllerCreateRecoveryWindow(t, service, "active-cancel-box")
+		deleted := controllerHTTP(service, http.MethodDelete, "/v1/workspaces/active-cancel-box", "test-token", nil)
+		if deleted.Code != http.StatusAccepted {
+			t.Fatalf("delete status=%d body=%s", deleted.Code, deleted.Body.String())
+		}
+		waitControllerWorkspaceStatus(t, service, "active-cancel-box", "stopped")
+		service.mu.Lock()
+		_, tracked := service.createOps["active-cancel-box"]
+		service.mu.Unlock()
+		if tracked {
+			t.Fatal("completed warmup cancellation remained in active create map")
+		}
+		warmups, stops, _ := runner.counts()
+		if warmups != 1 || stops != 0 {
+			t.Fatalf("warmup cancellation calls warmups=%d stops=%d", warmups, stops)
+		}
+	})
 }
 
 func TestControllerExpiryTransitionCancelsActiveWarmup(t *testing.T) {
-	runner := newFakeControllerWorkspaceRunner()
-	runner.started = make(chan string, 1)
-	runner.blockWarmup = make(chan struct{})
-	service, cancel := testControllerService(t, runner, 1)
-	defer cancel()
-	created := controllerHTTP(service, http.MethodPost, "/v1/workspaces", "test-token", controllerWorkspaceRequest{ID: "active-expiry-box"})
-	if created.Code != http.StatusAccepted {
-		t.Fatalf("create status=%d", created.Code)
-	}
-	select {
-	case <-runner.started:
-	case <-time.After(time.Second):
-		t.Fatal("warmup did not start")
-	}
-	ageControllerCreateRecoveryWindow(t, service, "active-expiry-box")
-	if err := service.updateRecord("active-expiry-box", func(record *controllerWorkspaceRecord) bool {
-		record.Status = "stopping"
-		record.StatusAfterCleanup = "expired"
-		record.FailureAfterCleanup = "workspace TTL expired during provisioning"
-		record.Message = "workspace TTL expired during provisioning; cleanup requested"
-		record.UpdatedAt = service.now().UTC().Format(time.RFC3339Nano)
-		return true
-	}); err != nil {
-		t.Fatal(err)
-	}
-	service.enqueue("active-expiry-box")
-	waitControllerWorkspaceStatus(t, service, "active-expiry-box", "expired")
-	service.mu.Lock()
-	_, tracked := service.createOps["active-expiry-box"]
-	service.mu.Unlock()
-	if tracked {
-		t.Fatal("expired warmup remained in active create map")
-	}
+	// Keep scheduling and state-file I/O latency out of the logical deadlines.
+	synctest.Test(t, func(t *testing.T) {
+		runner := newFakeControllerWorkspaceRunner()
+		runner.started = make(chan string, 1)
+		runner.blockWarmup = make(chan struct{})
+		service, cancel := testControllerService(t, runner, 1)
+		defer cancel()
+		created := controllerHTTP(service, http.MethodPost, "/v1/workspaces", "test-token", controllerWorkspaceRequest{ID: "active-expiry-box"})
+		if created.Code != http.StatusAccepted {
+			t.Fatalf("create status=%d", created.Code)
+		}
+		select {
+		case <-runner.started:
+		case <-time.After(time.Second):
+			t.Fatal("warmup did not start")
+		}
+		ageControllerCreateRecoveryWindow(t, service, "active-expiry-box")
+		if err := service.updateRecord("active-expiry-box", func(record *controllerWorkspaceRecord) bool {
+			record.Status = "stopping"
+			record.StatusAfterCleanup = "expired"
+			record.FailureAfterCleanup = "workspace TTL expired during provisioning"
+			record.Message = "workspace TTL expired during provisioning; cleanup requested"
+			record.UpdatedAt = service.now().UTC().Format(time.RFC3339Nano)
+			return true
+		}); err != nil {
+			t.Fatal(err)
+		}
+		service.enqueue("active-expiry-box")
+		waitControllerWorkspaceStatus(t, service, "active-expiry-box", "expired")
+		service.mu.Lock()
+		_, tracked := service.createOps["active-expiry-box"]
+		service.mu.Unlock()
+		if tracked {
+			t.Fatal("expired warmup remained in active create map")
+		}
+	})
 }
 
 func TestControllerShutdownCancelsActiveCleanup(t *testing.T) {
@@ -2824,6 +2829,8 @@ func TestControllerTerminalTransitionWriteFailureRevokesDesktopBeforeProvider(t 
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("desktop reopened through memory-backed terminal barrier: status=%d body=%s", response.Code, response.Body.String())
 	}
+	// Finish the reconciliation queued by the 503 response before advancing fixture phases.
+	waitControllerWorkspaceInactive(t, service, record.Request.ID)
 	runner.mu.Lock()
 	connections := runner.connectionCalls
 	runner.mu.Unlock()

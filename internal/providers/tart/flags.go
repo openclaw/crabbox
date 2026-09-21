@@ -8,53 +8,40 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
-type flagValues struct {
-	Image  *string
-	User   *string
-	CPUs   *int
-	Memory *int
-	Disk   *int
-}
-
 func registerFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return flagValues{
-		Image:  fs.String("tart-image", defaults.Tart.Image, "tart base image to clone from"),
-		User:   fs.String("tart-user", defaults.Tart.User, "guest user account for SSH and desktop/VNC"),
-		CPUs:   fs.Int("tart-cpu", defaults.Tart.CPUs, "CPU count for tart VMs"),
-		Memory: fs.Int("tart-memory", defaults.Tart.Memory, "memory in MB for tart VMs"),
-		Disk:   fs.Int("tart-disk", defaults.Tart.Disk, "disk size in GB for tart VMs (0 = use clone default)"),
-	}
+	return core.RegisterTartConfigFlags(fs, defaults.Tart)
 }
 
 func applyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(flagValues)
+	v, ok := values.(core.TartConfigFlagValues)
 	if !ok {
 		return nil
 	}
-	if core.FlagWasSet(fs, "tart-image") {
+	visited := core.TartConfigFlagPresence(fs)
+	if visited.Image {
 		cfg.Tart.Image = *v.Image
 		core.MarkTartImageExplicit(cfg)
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if core.FlagWasSet(fs, "tart-user") {
+	if visited.User {
 		cfg.Tart.User = *v.User
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if core.FlagWasSet(fs, "tart-cpu") {
+	if visited.CPUs {
 		if *v.CPUs < 4 {
 			return core.Exit(2, "--tart-cpu must be at least 4 (got %d)", *v.CPUs)
 		}
 		cfg.Tart.CPUs = *v.CPUs
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if core.FlagWasSet(fs, "tart-memory") {
+	if visited.Memory {
 		if *v.Memory < 4096 {
 			return core.Exit(2, "--tart-memory must be at least 4096 MB (got %d)", *v.Memory)
 		}
 		cfg.Tart.Memory = *v.Memory
 		core.RecordProviderFlagInputs(cfg, true, providerName)
 	}
-	if core.FlagWasSet(fs, "tart-disk") {
+	if visited.Disk {
 		if *v.Disk < 0 {
 			return core.Exit(2, "--tart-disk must be non-negative (got %d)", *v.Disk)
 		}

@@ -5,9 +5,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +93,11 @@ func TestLocalContainerProviderE2E(t *testing.T) {
 	if leaseID == "" {
 		t.Fatalf("could not parse local-container lease id: stdout=%q stderr=%q", warmup.Stdout, warmup.Stderr)
 	}
+	warmClaim, err := cli.ReadLeaseClaim(leaseID)
+	if err != nil || strings.TrimSpace(warmClaim.Labels["bootstrap_dir"]) == "" {
+		t.Fatalf("warmup did not record its bootstrap directory: %v", err)
+	}
+	bootstrapDir := warmClaim.Labels["bootstrap_dir"]
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cleanupCancel()
@@ -126,6 +134,10 @@ func TestLocalContainerProviderE2E(t *testing.T) {
 	}
 	runCrabboxLocalContainerE2EMust(t, ctx, "stop", "--provider", "docker", leaseID)
 	assertNoLocalContainerLeaseState(t, ctx, leaseID, warmSlug)
+	if _, err := os.Stat(bootstrapDir); !os.IsNotExist(err) {
+		t.Fatalf("local-container e2e left bootstrap directory after cleanup: %v", err)
+	}
+	t.Log("native Docker warmup and SSH reuse passed; container, claim, key, and bootstrap directory are absent after stop")
 
 	staleWarmup := runCrabboxLocalContainerE2EMust(t, ctx,
 		"warmup",
@@ -157,6 +169,140 @@ func TestLocalContainerProviderE2E(t *testing.T) {
 		t.Fatalf("stale key still exists after stop: %v", err)
 	}
 	assertNoLocalContainerForSlug(t, ctx, staleSlug)
+	t.Run("concurrent-cli-warmups", func(t *testing.T) {
+		testLocalContainerConcurrentCLIWarmups(t, image)
+	})
+}
+
+func testLocalContainerConcurrentCLIWarmups(t *testing.T, image string) {
+	binary := os.Getenv("CRABBOX_BIN")
+	if !filepath.IsAbs(binary) {
+		t.Fatal("CRABBOX_BIN must name the exact built CLI with an absolute path")
+	}
+	home := t.TempDir()
+	state := filepath.Join(home, "fresh", "state")
+	config := filepath.Join(home, "config.yaml")
+	repo := filepath.Join(home, "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_STATE_HOME", state)
+	t.Setenv("CRABBOX_CONFIG", config)
+	childEnv := []string{
+		"PATH=" + os.Getenv("PATH"), "HOME=" + home,
+		"XDG_CONFIG_HOME=" + filepath.Join(home, "config"), "XDG_STATE_HOME=" + state,
+		"CRABBOX_CONFIG=" + config,
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+	defer cancel()
+	init := exec.CommandContext(ctx, "git", "init", "--quiet", repo)
+	init.Env = childEnv
+	if out, err := init.CombinedOutput(); err != nil {
+		t.Fatalf("initialize fixture repo: %v: %s", err, out)
+	}
+	run := func(ctx context.Context, args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, binary, args...)
+		cmd.Dir, cmd.Env = repo, childEnv
+		return cmd.CombinedOutput()
+	}
+	const workers = 4
+	ids, slugs := make([]string, workers), make([]string, workers)
+	stopped := make([]bool, workers)
+	for i := range workers {
+		var nonce [6]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			t.Fatal(err)
+		}
+		ids[i], slugs[i] = fmt.Sprintf("cbx_%x", nonce), fmt.Sprintf("directory-race-%x", nonce)
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cleanupCancel()
+		for i, id := range ids {
+			if !stopped[i] {
+				out, err := run(cleanupCtx, "stop", "--provider", "local-container", id)
+				if err != nil {
+					t.Logf("cleanup for %s: %v: %s", id, err, out)
+				}
+			}
+		}
+		for _, slug := range slugs {
+			assertNoLocalContainerForSlug(t, cleanupCtx, slug)
+		}
+	})
+	type result struct {
+		index  int
+		output []byte
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan result, workers)
+	if _, err := os.Stat(state); !os.IsNotExist(err) {
+		t.Fatalf("concurrency fixture state was not fresh: %v", err)
+	}
+	for i := range workers {
+		go func() {
+			<-start
+			out, err := run(ctx, "warmup", "--provider", "local-container",
+				"--local-container-runtime", "docker", "--local-container-image", image,
+				"--lease-id", ids[i], "--slug", slugs[i], "--keep")
+			results <- result{i, out, err}
+		}()
+	}
+	close(start)
+	failed := false
+	for range workers {
+		r := <-results
+		t.Logf("concurrent CLI warmup %s: %s", ids[r.index], r.output)
+		if r.err != nil {
+			t.Errorf("concurrent CLI warmup %s failed: %v", ids[r.index], r.err)
+			failed = true
+		}
+	}
+	if failed {
+		return
+	}
+	for i, id := range ids {
+		key, err := cli.TestboxKeyPath(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(key)
+		if err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("CLI did not create SSH key for %s: %v", id, err)
+		}
+		// Windows privacy is ACL-based, covered by the native lease tests.
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+			t.Fatalf("CLI did not create a private POSIX key for %s", id)
+		}
+		for _, args := range [][]string{
+			{"run", "--provider", "local-container", "--id", id, "--no-sync", "--", "true"},
+			{"stop", "--provider", "local-container", id},
+		} {
+			if out, err := run(ctx, args...); err != nil {
+				t.Fatalf("CLI %s: %v: %s", strings.Join(args, " "), err, out)
+			}
+		}
+		assertNoLocalContainerForSlug(t, ctx, slugs[i])
+		claim, exists, err := cli.ReadLeaseClaimWithPresence(id)
+		if err != nil || !exists || claim.LeaseID != id || claim.Provider != cli.FixedLocalContainerClaimProvider ||
+			claim.FixedCreateIntent == nil || claim.FixedCreateIntent.State != "released" {
+			t.Fatalf("fixed lease %s did not retain its released tombstone: %v", id, err)
+		}
+		if claim.CloudID != "" || claim.SSHHost != "" || len(claim.Labels) != 0 {
+			t.Fatalf("fixed lease %s retained live resource metadata", id)
+		}
+		if _, err := os.Stat(key); !os.IsNotExist(err) {
+			t.Fatalf("fixed lease %s retained its SSH key: %v", id, err)
+		}
+		stopped[i] = true
+	}
+	t.Log("four built-CLI warmups shared fresh SSH storage, ran commands, and stopped; containers and keys are absent, with only released fixed-ID tombstones retained")
 }
 
 type localContainerE2EResult struct {

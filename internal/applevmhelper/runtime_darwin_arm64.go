@@ -23,6 +23,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/openclaw/crabbox/internal/fat16"
+
 	"github.com/lima-vm/go-qcow2reader"
 	"golang.org/x/sys/unix"
 )
@@ -44,13 +46,7 @@ const (
 	qcow2MaxRefcountBytes    = 8 << 20
 	qcow2MinSnapshotHdrBytes = 40
 	maxVSOCKProxyChannels    = 32
-	seedImageCommandTimeout  = 10 * time.Second
-	seedImageCleanupTimeout  = 15 * time.Second
 )
-
-var execSeedImageCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
-}
 
 var errRedirectToNonLoopbackHTTP = errors.New("redirect to non-loopback HTTP is not allowed")
 
@@ -1169,101 +1165,25 @@ func allZero(buf []byte) bool {
 	return true
 }
 
-func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workRoot string) (returnErr error) {
-	tmpDir, err := os.MkdirTemp("", "crabbox-apple-vm-seed-*")
+func createSeedImage(ctx context.Context, path, hostName, user, publicKey, workRoot string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	image, err := fat16.Build("cidata", []fat16.File{
+		{Name: "meta-data", Data: []byte(fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", hostName, hostName))},
+		{Name: "user-data", Data: []byte(seedUserData(user, publicKey, workRoot))},
+	}, "AV%06dTXT")
 	if err != nil {
-		return fmt.Errorf("create seed temp dir: %w", err)
+		return fmt.Errorf("build seed image: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
-	if err := os.WriteFile(filepath.Join(tmpDir, "meta-data"), []byte(fmt.Sprintf("instance-id: %s\nlocal-hostname: %s\n", hostName, hostName)), 0o644); err != nil {
-		return fmt.Errorf("write seed meta-data: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpDir, "user-data"), []byte(seedUserData(user, publicKey, workRoot)), 0o644); err != nil {
-		return fmt.Errorf("write seed user-data: %w", err)
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	_ = os.Remove(path)
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("create seed image: %w", err)
-	}
-	if err := file.Truncate(8 * 1024 * 1024); err != nil {
-		return errors.Join(fmt.Errorf("size seed image: %w", err), file.Close())
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("create seed image: %w", err)
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// Finish the bounded attach after cancellation so any returned device can
-	// be registered and detached before the helper exits.
-	attachOut, err := runSeedImageCommand(context.WithoutCancel(ctx), "hdiutil", "attach", "-imagekey", "diskimage-class=CRawDiskImage", "-nomount", path)
-	device := attachedDevice(string(attachOut))
-	if err != nil {
-		attachErr := fmt.Errorf("attach seed image: %w: %s", err, strings.TrimSpace(string(attachOut)))
-		if device == "" {
-			return attachErr
-		}
-		return errors.Join(attachErr, cleanupSeedImage("", device, false))
-	}
-	if device == "" {
-		return fmt.Errorf("attach seed image: missing device name")
-	}
-	mounted := false
-	mountDir := ""
-	defer func() {
-		returnErr = errors.Join(returnErr, cleanupSeedImage(mountDir, device, mounted))
-	}()
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if out, err := runSeedImageCommand(ctx, "newfs_msdos", "-F", "16", "-v", "cidata", device); err != nil {
-		return fmt.Errorf("format seed image: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	mountDir = filepath.Join(tmpDir, "mnt")
-	if err := os.MkdirAll(mountDir, 0o755); err != nil {
-		return fmt.Errorf("create seed mount dir: %w", err)
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	// Finish the bounded mount after cancellation so deferred cleanup always
-	// knows whether an unmount is required.
-	out, err := runSeedImageCommand(context.WithoutCancel(ctx), "mount", "-t", "msdos", device, mountDir)
-	mounted = true
-	if err != nil {
-		return fmt.Errorf("mount seed image: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	for _, name := range []string{"meta-data", "user-data"} {
-		if err := copyPlainFile(filepath.Join(tmpDir, name), filepath.Join(mountDir, name), 0o644); err != nil {
-			return fmt.Errorf("populate seed image: %w", err)
-		}
+	if err := os.WriteFile(path, image, 0o600); err != nil {
+		return fmt.Errorf("write seed image: %w", err)
 	}
 	return nil
-}
-
-func runSeedImageCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
-	commandCtx, cancel := context.WithTimeout(ctx, seedImageCommandTimeout)
-	defer cancel()
-	return execSeedImageCommand(commandCtx, name, args...)
-}
-
-func cleanupSeedImage(mountDir, device string, mounted bool) error {
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), seedImageCleanupTimeout)
-	defer cancel()
-	var cleanupErrors []error
-	if mounted {
-		if out, err := runSeedImageCommand(cleanupCtx, "umount", mountDir); err != nil {
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("unmount seed image: %w: %s", err, strings.TrimSpace(string(out))))
-		}
-	}
-	if out, err := runSeedImageCommand(cleanupCtx, "hdiutil", "detach", device); err != nil {
-		cleanupErrors = append(cleanupErrors, fmt.Errorf("detach seed image: %w: %s", err, strings.TrimSpace(string(out))))
-	}
-	return errors.Join(cleanupErrors...)
 }
 
 func seedUserData(user, publicKey, workRoot string) string {
@@ -1429,12 +1349,6 @@ func validateRuntimeConfig(stateRoot, image, expectedSHA256 string) (map[string]
 			return nil, err
 		}
 	}
-	if _, err := exec.LookPath("hdiutil"); err != nil {
-		return nil, fmt.Errorf("hdiutil is required")
-	}
-	if _, err := exec.LookPath("newfs_msdos"); err != nil {
-		return nil, fmt.Errorf("newfs_msdos is required")
-	}
 	if err := requireHardwareVirtualization(); err != nil {
 		return nil, err
 	}
@@ -1455,22 +1369,4 @@ func requireHardwareVirtualization() error {
 		return fmt.Errorf("virtualization is not available on this hardware (kern.hv_support=%s)", strings.TrimSpace(string(output)))
 	}
 	return nil
-}
-
-func attachedDevice(output string) string {
-	for _, line := range strings.Split(output, "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) > 0 && strings.HasPrefix(fields[0], "/dev/disk") {
-			return fields[0]
-		}
-	}
-	return ""
-}
-
-func copyPlainFile(sourcePath, targetPath string, mode os.FileMode) error {
-	data, err := os.ReadFile(sourcePath)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(targetPath, data, mode)
 }

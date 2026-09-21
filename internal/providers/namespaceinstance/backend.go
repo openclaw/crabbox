@@ -335,7 +335,7 @@ func (b *backend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 	if err != nil {
 		return err
 	}
-	if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+	if err := shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		present, err := b.validateDestroyTarget(ctx, cfg, id, leaseID, claim.Slug)
 		if err != nil {
 			return err
@@ -487,7 +487,7 @@ func (b *backend) Cleanup(ctx context.Context, req core.CleanupRequest) error {
 			fmt.Fprintf(b.rt.Stdout, "would destroy namespace_instance=%s lease=%s reason=%s\n", item.ClusterID, item.Labels["lease"], reason)
 			continue
 		}
-		if err := shared.RemoveExactClaimAfter(exactClaim, binding, func() error {
+		if err := shared.RemoveExactClaimAfterContext(ctx, exactClaim, binding, func() error {
 			present, err := b.validateDestroyTarget(ctx, cfg, item.ClusterID, leaseID, exactClaim.Slug)
 			if err != nil {
 				return err

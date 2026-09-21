@@ -58,7 +58,7 @@ func runParallelCLIContract(t *testing.T, childTimeout time.Duration) bool {
 	if childTimeout > 0 {
 		args = append(args, "-test.timeout="+childTimeout.String())
 	}
-	owner := pondMeshExecCommand(ctx, nil, os.Args[0], args...).(*pondMeshExecHandle)
+	owner := pondMeshExecCommand(ctx, SSHTarget{}, os.Args[0], args...)
 	owner.cmd.Env = append(os.Environ(), childEnvironment+"="+t.Name())
 	var output bytes.Buffer
 	owner.cmd.Stdout, owner.cmd.Stderr = &output, &output

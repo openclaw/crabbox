@@ -17,6 +17,7 @@ import {
   azureVMSizeCandidatesForTargetClass,
   gcpMachineTypeCandidatesForClass,
   leaseConfig,
+  parseTarget,
   serverTypeCandidatesForClass,
   serverTypeForClass,
   serverTypeForProviderClass,
@@ -460,6 +461,23 @@ describe("machine class config", () => {
         architecture: "amd64",
       }),
     ).toEqual([storedType, " custom-mac-type ", ...awsMacOSInstanceTypeCandidates]);
+  });
+
+  it("preserves provider-specific empty and whitespace explicit-type handling", () => {
+    const config = {
+      class: "standard",
+      serverTypeExplicit: true,
+      target: "linux" as const,
+      architecture: "amd64" as const,
+    };
+    for (const serverType of ["", "   "]) {
+      expect(gcpProvisioningCandidatesForConfig({ ...config, serverType })).toEqual(
+        serverType ? [serverType] : gcpMachineTypeCandidatesForClass(config.class),
+      );
+      expect(hetznerProvisioningCandidatesForConfig({ ...config, serverType })).toEqual(
+        serverTypeCandidatesForClass(config.class),
+      );
+    }
   });
 
   it("keeps custom class pass-through outside static selector coverage", () => {
@@ -1584,6 +1602,31 @@ describe("lease config", () => {
     expect(leaseConfig({ hostID: "h-compat", sshPublicKey: "ssh-ed25519 test" }).hostID).toBe(
       "h-compat",
     );
+  });
+
+  it.each([
+    ["linux", ["", "   ", "linux", " UBUNTU "]],
+    ["macos", ["mac", "macos", " DARWIN ", "osx"]],
+    ["windows", ["win", " WINDOWS "]],
+  ] as const)("parses %s target aliases without changing lease validation", (target, aliases) => {
+    for (const alias of aliases) {
+      expect(parseTarget(alias)).toBe(target);
+      expect(
+        leaseConfig({
+          provider: "aws",
+          target: alias,
+          sshPublicKey: "ssh-ed25519 test",
+          ...(target === "macos" ? { capacity: { market: "on-demand" } } : {}),
+        }).target,
+      ).toBe(target);
+    }
+  });
+
+  it("keeps invalid target parsing nonthrowing and lease errors unchanged", () => {
+    expect(parseTarget("freebsd")).toBeUndefined();
+    expect(() =>
+      leaseConfig({ provider: "aws", target: "freebsd", sshPublicKey: "ssh-ed25519 test" }),
+    ).toThrow("target must be linux, macos, or windows");
   });
 
   it("allows AWS Windows leases", () => {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path"
 	"regexp"
 	"strings"
@@ -538,8 +539,24 @@ func boxSSHConnection(box boxData) (string, string, error) {
 	return host, "22", nil
 }
 
+// The CLI owns this key. The renamed CLI mints ascii_sandbox_ed25519 where
+// older Box CLIs minted ascii_box_ed25519, so fall forward to the renamed name
+// only when the legacy key is absent. Whenever the legacy key exists it is
+// used, exactly as before the rename, so no existing setup can change which
+// credential Crabbox presents. Choosing between two present keys would need a
+// signal the CLI does not expose: file order says nothing about which key the
+// configured CLI actually authorized.
 func boxSSHKey(cfg core.Config) string {
-	return path.Join(asciiBoxCLIHome(), ".ssh", "ascii_box_ed25519")
+	dir := path.Join(asciiBoxCLIHome(), ".ssh")
+	legacy := path.Join(dir, "ascii_box_ed25519")
+	if info, err := os.Stat(legacy); err == nil && info.Mode().IsRegular() {
+		return legacy
+	}
+	renamed := path.Join(dir, "ascii_sandbox_ed25519")
+	if info, err := os.Stat(renamed); err == nil && info.Mode().IsRegular() {
+		return renamed
+	}
+	return legacy
 }
 
 func boxHost(box boxData) string {

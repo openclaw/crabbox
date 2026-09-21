@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -227,72 +228,79 @@ func TestTenkiLegacyReleaseRequiresExplicitAdoption(t *testing.T) {
 }
 
 func TestTenkiCreateUsesCredentialBoundScopeAndAddsMetadata(t *testing.T) {
-	runner := &fakeRunner{}
-	runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-		runner.calls = append(runner.calls, req)
-		args := strings.Join(req.Args, " ")
-		if strings.Contains(args, "--workspace") || strings.Contains(args, "--project") {
-			t.Fatalf("legacy scope selector leaked into current Tenki CLI args: %s", args)
-		}
-		if strings.HasPrefix(args, "sandbox create --endpoint https://api.tenki.test --no-wait --output json --name crabbox-blue ") {
-			for _, want := range []string{
-				"--metadata crabbox_provider=tenki",
-				"--metadata crabbox_lease_id=cbx_123",
-				"--metadata crabbox_slug=blue",
-				"--metadata crabbox_idle_timeout_secs=1800",
-				"--metadata crabbox_ttl_secs=3600",
-				"--metadata crabbox_server_type=ubuntu:tenki",
-				"--tags crabbox,crabbox-provider-tenki",
-				"--sticky",
-				"--max-duration 1h0m0s",
-				"--idle-timeout 30m0s",
-				"--cpu 4",
-				"--memory-mb 8192",
-				"--disk-size-gb 40",
-				"--image ubuntu:tenki",
-			} {
-				if !strings.Contains(args, want) {
-					t.Fatalf("create args missing %q:\n%s", want, args)
+	for _, keep := range []bool{false, true} {
+		t.Run(fmt.Sprintf("keep=%t", keep), func(t *testing.T) {
+			runner := &fakeRunner{}
+			runner.run = func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				runner.calls = append(runner.calls, req)
+				args := strings.Join(req.Args, " ")
+				if strings.Contains(args, "--workspace") || strings.Contains(args, "--project") {
+					t.Fatalf("legacy scope selector leaked into current Tenki CLI args: %s", args)
 				}
+				if strings.HasPrefix(args, "sandbox create --endpoint https://api.tenki.test --no-wait --output json --name crabbox-blue ") {
+					for _, want := range []string{
+						"--metadata crabbox_provider=tenki",
+						"--metadata crabbox_lease_id=cbx_123",
+						"--metadata crabbox_slug=blue",
+						"--metadata crabbox_idle_timeout_secs=1800",
+						"--metadata crabbox_ttl_secs=3600",
+						"--metadata crabbox_server_type=ubuntu:tenki",
+						"--tags crabbox,crabbox-provider-tenki",
+						"--cpu 4",
+						"--memory-mb 8192",
+						"--disk-size-gb 40",
+						"--image ubuntu:tenki",
+					} {
+						if !strings.Contains(args, want) {
+							t.Fatalf("create args missing %q:\n%s", want, args)
+						}
+					}
+					if strings.Contains(args, "--idle-timeout") {
+						t.Fatalf("obsolete idle timeout flag: %s", args)
+					}
+					if strings.Contains(args, "--sticky") != keep || strings.Contains(args, "--max-duration 1h0m0s") == keep {
+						t.Fatalf("wrong native lifetime for keep=%t: %s", keep, args)
+					}
+					return core.LocalCommandResult{Stdout: `{"id":"00000000-0000-0000-0000-000000000001"}`, ExitCode: 0}, nil
+				}
+				switch args {
+				case "sandbox get --endpoint https://api.tenki.test --output json 00000000-0000-0000-0000-000000000001":
+					return core.LocalCommandResult{Stdout: `{"id":"00000000-0000-0000-0000-000000000001","name":"crabbox-blue","state":"RUNNING","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}`}, nil
+				default:
+					t.Fatalf("unexpected command: %s %s", req.Name, args)
+				}
+				return core.LocalCommandResult{}, nil
 			}
-			return core.LocalCommandResult{Stdout: `{"id":"00000000-0000-0000-0000-000000000001"}`, ExitCode: 0}, nil
-		}
-		switch args {
-		case "sandbox get --endpoint https://api.tenki.test --output json 00000000-0000-0000-0000-000000000001":
-			return core.LocalCommandResult{Stdout: `{"id":"00000000-0000-0000-0000-000000000001","name":"crabbox-blue","state":"RUNNING","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}`}, nil
-		default:
-			t.Fatalf("unexpected command: %s %s", req.Name, args)
-		}
-		return core.LocalCommandResult{}, nil
-	}
-	backend := &tenkiBackend{
-		cfg: core.Config{
-			TTL:         time.Hour,
-			IdleTimeout: 30 * time.Minute,
-			Tenki: core.TenkiConfig{
-				CLIPath:   "tenki",
-				Endpoint:  "https://api.tenki.test",
-				Workspace: "ws_1",
-				Project:   "proj_1",
-				Image:     "ubuntu:tenki",
-				CPUs:      4,
-				MemoryMB:  8192,
-				DiskGB:    40,
-				WorkRoot:  "/home/tenki/crabbox",
-			},
-		},
-		rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
-	}
+			backend := &tenkiBackend{
+				cfg: core.Config{
+					TTL:         time.Hour,
+					IdleTimeout: 30 * time.Minute,
+					Tenki: core.TenkiConfig{
+						CLIPath:   "tenki",
+						Endpoint:  "https://api.tenki.test",
+						Workspace: "ws_1",
+						Project:   "proj_1",
+						Image:     "ubuntu:tenki",
+						CPUs:      4,
+						MemoryMB:  8192,
+						DiskGB:    40,
+						WorkRoot:  "/home/tenki/crabbox",
+					},
+				},
+				rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+			}
 
-	session, err := backend.createSession(context.Background(), backend.configForRun(), "crabbox-blue", "cbx_123", "blue", true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if session.ID != "00000000-0000-0000-0000-000000000001" {
-		t.Fatalf("session id=%q", session.ID)
-	}
-	if len(runner.calls) != 2 {
-		t.Fatalf("calls=%d want 2", len(runner.calls))
+			session, err := backend.createSession(context.Background(), backend.configForRun(), "crabbox-blue", "cbx_123", "blue", keep)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if session.ID != "00000000-0000-0000-0000-000000000001" {
+				t.Fatalf("session id=%q", session.ID)
+			}
+			if len(runner.calls) != 2 {
+				t.Fatalf("calls=%d want 2", len(runner.calls))
+			}
+		})
 	}
 }
 
@@ -478,7 +486,7 @@ func TestTenkiResolveReadyProbePreparesSSH(t *testing.T) {
 		case "sandbox list --output json --tags crabbox,crabbox-provider-tenki":
 			return core.LocalCommandResult{Stdout: `[{"id":"session-1","name":"crabbox-blue","state":"RUNNING","metadata":{"crabbox_provider":"tenki","crabbox_lease_id":"cbx_123","crabbox_slug":"blue"},"tags":["crabbox-provider-tenki"]}]`}, nil
 		case "sandbox ssh-command --output json --session session-1 --user tenki --batch-mode --connect-timeout 10s":
-			return core.LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","proxy_command":"tenki sandbox ssh-proxy --session session-1"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","known_hosts_file":"` + keyPath + `.known_hosts","proxy_command":"tenki sandbox ssh-proxy --session session-1"}`}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
 		}
@@ -590,7 +598,7 @@ func TestTenkiResolveReclaimPersistsSessionEndpoint(t *testing.T) {
 		case "sandbox get --output json session-1":
 			return core.LocalCommandResult{Stdout: `{"id":"session-1","name":"unmanaged","state":"RUNNING"}`}, nil
 		case "sandbox ssh-command --output json --session session-1 --user tenki --batch-mode --connect-timeout 10s":
-			return core.LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","proxy_command":"tenki proxy session-1"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","known_hosts_file":"` + keyPath + `.known_hosts","proxy_command":"tenki proxy session-1"}`}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, command)
 		}
@@ -863,6 +871,23 @@ func TestTenkiEnsureSessionReadyPreservesUnknownCreateStates(t *testing.T) {
 	}
 }
 
+func TestTenkiSSHTargetUsesPreparedAuthority(t *testing.T) {
+	backend := &tenkiBackend{}
+	for _, alias := range []string{"", "gateway-one"} {
+		t.Run(core.Blank(alias, "reported-file"), func(t *testing.T) {
+			output := tenkiSSHCommandOutput{SessionID: "session-1", User: "tenki", Host: "sandbox", Port: 22,
+				IdentityFile: "/tmp/native-key", CertificateFile: "/tmp/native-cert", ProxyCommand: "tenki sandbox ssh-proxy --session session-1"}
+			target := backend.sshTarget(output, "/tmp/authority", alias)
+			if target.KnownHostsFile != "/tmp/authority" || target.HostKeyAlias != alias || !target.AuthoritativeKnownHosts || target.DisableHostKeyChecking {
+				t.Fatalf("prepared authority changed: %#v", target)
+			}
+			if target.Key != output.IdentityFile || target.CertificateFile != output.CertificateFile || target.SSHHostKey != "" {
+				t.Fatal("native credentials were replaced")
+			}
+		})
+	}
+}
+
 func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 	backend := &tenkiBackend{cfg: core.Config{Tenki: core.TenkiConfig{
 		CLIPath:  "/opt/Tenki CLI/tenki",
@@ -877,14 +902,14 @@ func TestTenkiSSHTargetUsesProxyCommand(t *testing.T) {
 		IdentityFile:    "/tmp/id_ed25519",
 		CertificateFile: "/tmp/session-cert.pub",
 		ProxyCommand:    "'/opt/Tenki CLI/tenki' sandbox ssh-proxy --session 00000000-0000-0000-0000-000000000001 --endpoint https://api.tenki.test --gateway wss://gateway.tenki.test",
-	})
+	}, "/tmp/tenki-authority", "")
 	if !target.SSHConfigProxy || target.Host != "sandbox" || target.User != "tenki" || target.Key != "/tmp/id_ed25519" || target.CertificateFile != "/tmp/session-cert.pub" {
 		t.Fatalf("unexpected target: %#v", target)
 	}
 	if target.NoControlMaster || target.DisableHostKeyChecking {
-		t.Fatalf("tenki target should keep SSH mux and host-key checks enabled: %#v", target)
+		t.Fatalf("tenki target should keep host-key checking enabled: %#v", target)
 	}
-	if target.KnownHostsFile != "/tmp/known_hosts_00000000-0000-0000-0000-000000000001" {
+	if target.KnownHostsFile != "/tmp/tenki-authority" {
 		t.Fatalf("known_hosts=%q", target.KnownHostsFile)
 	}
 	for _, want := range []string{
@@ -1133,7 +1158,7 @@ func TestTenkiWaitForSSHCommandUsesStructuredOutput(t *testing.T) {
 		runner.calls = append(runner.calls, req)
 		switch strings.Join(req.Args, " ") {
 		case "sandbox ssh-command --output json --session session-1 --user tenki --batch-mode --connect-timeout 10s":
-			return core.LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","proxy_command":"tenki sandbox ssh-proxy --session session-1"}`}, nil
+			return core.LocalCommandResult{Stdout: `{"session_id":"session-1","user":"tenki","host":"sandbox","port":22,"identity_file":"` + keyPath + `","certificate_file":"` + certPath + `","known_hosts_file":"` + keyPath + `.known_hosts","proxy_command":"tenki sandbox ssh-proxy --session session-1"}`}, nil
 		default:
 			t.Fatalf("unexpected command: %s %s", req.Name, strings.Join(req.Args, " "))
 		}
@@ -1166,4 +1191,90 @@ func (f *fakeRunner) Run(ctx context.Context, req core.LocalCommandRequest) (cor
 		return core.LocalCommandResult{}, errors.New("unexpected command")
 	}
 	return f.run(req)
+}
+
+func TestTenkiBindingFlagsNormalizeBeforeValidation(t *testing.T) {
+	for _, provider := range []string{"tenki", "TENKI", " tenki ", "other"} {
+		for _, visited := range []bool{false, true} {
+			cfg := core.BaseConfig()
+			cfg.Provider = provider
+			cfg.Tenki.Image, cfg.Tenki.Snapshot = " prior ", "  "
+			fs := flag.NewFlagSet("binding", flag.ContinueOnError)
+			values := RegisterTenkiProviderFlags(fs, cfg)
+			count := 0
+			fs.VisitAll(func(*flag.Flag) { count++ })
+			if count != 11 {
+				t.Fatalf("flag count=%d want 11", count)
+			}
+			want := cfg
+			want.Tenki.Image, want.Tenki.Snapshot = "prior", ""
+			if visited {
+				if err := fs.Parse([]string{"--tenki-cli= raw-cli ", "--tenki-endpoint= raw-endpoint ", "--tenki-image= next ", "--tenki-cpus=-2"}); err != nil {
+					t.Fatal(err)
+				}
+				want.Tenki.CLIPath, want.Tenki.Endpoint, want.Tenki.Image, want.Tenki.CPUs = " raw-cli ", " raw-endpoint ", "next", -2
+				core.RecordProviderFlagInputs(&want, true, "tenki")
+			}
+			err := ApplyTenkiProviderFlags(&cfg, fs, values)
+			if provider == "tenki" && visited {
+				if err == nil || err.Error() != "tenki.cpus must be zero or greater" {
+					t.Fatalf("validation error=%v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, want) {
+				t.Fatalf("provider=%q visited=%t binding, normalization or accepted-input order changed", provider, visited)
+			}
+		}
+	}
+}
+
+func TestTenkiBindingGuardsPrecedeForeignValues(t *testing.T) {
+	for _, tc := range []struct {
+		args   []string
+		target string
+		want   string
+	}{
+		{args: []string{"--class=small", "--type=machine"}, want: "--class is not supported for provider=tenki; use --tenki-cpus/--tenki-memory-mb/--tenki-disk-gb"},
+		{args: []string{"--type=machine"}, want: "--type is not supported for provider=tenki; use --tenki-image or --tenki-snapshot"},
+		{target: "windows", want: "provider=tenki supports target=linux only"},
+		{},
+	} {
+		cfg := core.Config{Provider: "tenki", TargetOS: tc.target, Tenki: core.TenkiConfig{Image: " raw "}}
+		before := cfg
+		fs := flag.NewFlagSet("binding", flag.ContinueOnError)
+		fs.String("class", "", "")
+		fs.String("type", "", "")
+		if err := fs.Parse(tc.args); err != nil {
+			t.Fatal(err)
+		}
+		err := ApplyTenkiProviderFlags(&cfg, fs, struct{}{})
+		if tc.want == "" {
+			if err != nil {
+				t.Fatal(err)
+			}
+		} else if err == nil || err.Error() != tc.want {
+			t.Fatalf("guard error=%v want=%q", err, tc.want)
+		}
+		if !reflect.DeepEqual(cfg, before) {
+			t.Fatal("guard or foreign values mutated configuration")
+		}
+	}
+}
+
+func TestTenkiScalarFallbackValues(t *testing.T) {
+	for _, tc := range []struct{ cli, root, wantCLI, wantRoot string }{
+		{"", "", "tenki", "/home/tenki/crabbox"},
+		{"  ", "  ", "tenki", "/home/tenki/crabbox"},
+		{" custom-cli ", " /custom/root ", "custom-cli", "/custom/root"},
+	} {
+		cfg := core.Config{Tenki: core.TenkiConfig{CLIPath: tc.cli, WorkRoot: tc.root}}
+		if got := tenkiCLIPath(cfg); got != tc.wantCLI {
+			t.Fatalf("CLI fallback=%q want=%q", got, tc.wantCLI)
+		}
+		if got := tenkiWorkRoot(cfg); got != tc.wantRoot {
+			t.Fatalf("root fallback=%q want=%q", got, tc.wantRoot)
+		}
+	}
 }

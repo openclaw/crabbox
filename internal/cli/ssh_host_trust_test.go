@@ -310,7 +310,7 @@ func TestPrepareLeaseSSHTrustRejectsLegacyHostKeyAlgorithm(t *testing.T) {
 func TestNoAuthoritativeSSHHostKeyKeepsAcceptNewBehavior(t *testing.T) {
 	isolateTestUserDirs(t)
 	target := SSHTarget{User: "crabbox", Host: "192.0.2.28", Port: "22"}
-	if err := useLeaseKnownHosts(&target, "cbx_abcdef123456"); err != nil {
+	if err := UseLeaseKnownHosts(&target, "cbx_abcdef123456"); err != nil {
 		t.Fatal(err)
 	}
 	if err := prepareLeaseSSHTrust(&target, "cbx_abcdef123456"); err != nil {
@@ -393,7 +393,7 @@ func TestCoordinatorReleaseRemovesOnlyPerLeaseConnectionArtifacts(t *testing.T) 
 	isolateTestUserDirs(t)
 	configureCoordinatorReleaseTestTiming(t, time.Second, 0)
 	const leaseID = "cbx_abcdef123456"
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func TestCoordinatorReleaseObservesPendingCreation(t *testing.T) {
 			isolateTestUserDirs(t)
 			configureCoordinatorReleaseTestTiming(t, 5*time.Minute, 0)
 			const leaseID = "cbx_abcdef123456"
-			keyPath, err := testboxKeyPath(leaseID)
+			keyPath, err := TestboxKeyPath(leaseID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -585,7 +585,7 @@ func TestCoordinatorReleasePreservesArtifactsWithoutConfirmedDestroy(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			isolateTestUserDirs(t)
 			const leaseID = "cbx_abcdef123456"
-			keyPath, err := testboxKeyPath(leaseID)
+			keyPath, err := TestboxKeyPath(leaseID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -670,7 +670,7 @@ func TestCoordinatorReleaseCancellationDuringObservationPreservesLocalState(t *t
 	isolateTestUserDirs(t)
 	configureCoordinatorReleaseTestTiming(t, time.Second, 0)
 	const leaseID = "cbx_abcdef123456"
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -722,7 +722,7 @@ func TestCoordinatorReleaseObservationProviderMismatchFailsClosed(t *testing.T) 
 	isolateTestUserDirs(t)
 	configureCoordinatorReleaseTestTiming(t, time.Second, 0)
 	const leaseID = "cbx_abcdef123456"
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -768,7 +768,7 @@ func TestCoordinatorReleaseObservationProviderMismatchFailsClosed(t *testing.T) 
 func TestCoordinatorReleasePreservesRemoteOutcomeWhenLocalArtifactCleanupFails(t *testing.T) {
 	isolateTestUserDirs(t)
 	const leaseID = "cbx_abcdef123456"
-	keyPath, err := testboxKeyPath(leaseID)
+	keyPath, err := TestboxKeyPath(leaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1002,4 +1002,31 @@ func infoMode(info os.FileInfo) os.FileMode {
 func sshKeyWithoutComment(value string) string {
 	fields := strings.Fields(value)
 	return strings.Join(fields[:2], " ")
+}
+
+func TestAuthoritativeKnownHostsOptionsPreserveCertificateNegotiation(t *testing.T) {
+	target := SSHTarget{User: "builder", Host: "gateway.example.test", Port: "22",
+		KnownHostsFile: "/tmp/provider_trust", AuthoritativeKnownHosts: true}
+	config, err := renderSSHTransportConfig(target, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, rendered := range map[string]string{
+		"argv":   strings.Join(sshBaseArgs(target), " "),
+		"vnc":    strings.Join(vncTunnelArgs(target, "5901", "127.0.0.1", "5900"), " "),
+		"config": config,
+	} {
+		t.Run(name, func(t *testing.T) {
+			normalized := strings.ReplaceAll(rendered, "=", " ")
+			for _, want := range []string{"StrictHostKeyChecking yes", "GlobalKnownHostsFile none", "KnownHostsCommand none",
+				"VerifyHostKeyDNS no", "UpdateHostKeys no", "CheckHostIP no", "ControlMaster no", "ControlPath none", "ControlPersist no"} {
+				if !strings.Contains(normalized, want) {
+					t.Fatalf("missing %q: %s", want, rendered)
+				}
+			}
+			if strings.Contains(rendered, "HostKeyAlias") || strings.Contains(rendered, "HostKeyAlgorithms") {
+				t.Fatalf("certificate negotiation was restricted: %s", rendered)
+			}
+		})
+	}
 }

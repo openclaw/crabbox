@@ -2,43 +2,142 @@
 
 ## Unreleased
 
-- Use one native filesystem engine for POSIX archive copies and cross-platform JUnit collection, preserving report bytes and deduplicating paths to the same file. Complete installations include matching Linux, macOS, and Windows companions. [PR 1556](https://github.com/openclaw/crabbox/pull/1556).
-- Add explicit `cp --recover keep-destination|restore-backup` recovery for interrupted legacy archive copies, retaining unselected destination and backup data instead of inferring an outcome from old sidecars. [PR 1556](https://github.com/openclaw/crabbox/pull/1556).
+### Features
 
-- Add opt-in Bash preflight reporting on Linux, macOS, and WSL2 without changing default probes; complete runtime installations can report missing Bash and continue independent commands. [PR 2300](https://github.com/openclaw/crabbox/pull/2300). Thanks @coygeek.
-- Bundle small Linux runtime companions with complete CLI archives so managed execution can operate without Bash; discover installed companions automatically and explain how CLI-only installations can obtain the complete runtime pack. [PR 2300](https://github.com/openclaw/crabbox/pull/2300).
+- Add opt-in direct-host Parallels capacity limits through `parallels.maxVMs` and `CRABBOX_PARALLELS_MAX_VMS`, preserve fleet-entry precedence, and let explicit YAML zero clear inherited limits. [PR 2392](https://github.com/openclaw/crabbox/pull/2392), [Issue 2386](https://github.com/openclaw/crabbox/issues/2386). Thanks @saariuslystoned.
 
-- Report discovered Parallels lease addresses consistently and surface IP-discovery failures when connecting, while preserving VM identity for best-effort status and cleanup. [PR 2301](https://github.com/openclaw/crabbox/pull/2301). Thanks @saariuslystoned.
+### Fixes
 
-- Preserve terminal heredocs and significant trailing whitespace in Blacksmith Testbox shell commands while retaining command output and exit status. [PR 2295](https://github.com/openclaw/crabbox/pull/2295). Thanks @shakkernerd.
+- Preserve canonical cancellation/deadline context and recognized release-denial states in workspace-owner error messages. [PR 2412](https://github.com/openclaw/crabbox/pull/2412). Thanks @steipete.
+- Explain Parallels IP discovery timeouts with clone mode, NIC details, and retry-time console guidance while preserving cleanup and clone defaults. [PR 2415](https://github.com/openclaw/crabbox/pull/2415), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
+- Restore Lume guest bootstrap with named shared directories, authenticated status readiness, and cleanup with quiet partial-match `lsof` output; existing golden images need refreshed hooks. [PR 2409](https://github.com/openclaw/crabbox/pull/2409).
+- Lume: persist heartbeat policy across fresh reads, honor explicit idle-timeout changes, and admit owned instance-scoped leases through the public heartbeat command. [PR 2407](https://github.com/openclaw/crabbox/pull/2407).
+- Persist Tart heartbeat timestamps and explicit idle-timeout changes in the lease claim, preserving them across fresh status reads and cleanup without losing SSH target details. [PR 2405](https://github.com/openclaw/crabbox/pull/2405).
+- Show the configured direct-host Parallels capacity in text and JSON config output, including zero and negative unlimited settings, without substituting a fleet limit. [PR 2400](https://github.com/openclaw/crabbox/pull/2400), follow-up to [PR 2392](https://github.com/openclaw/crabbox/pull/2392).
+- Prepare Node and npm before Parallels macOS readiness checks, preserving usable existing runtimes offline and installing the pinned baseline when needed. [PR 2387](https://github.com/openclaw/crabbox/pull/2387), [Issue 2381](https://github.com/openclaw/crabbox/issues/2381). Thanks @saariuslystoned.
+- Check macOS SSH listener availability during Parallels guest preparation, including older readiness helpers and configured fallback ports, so missing listeners fail earlier. [PR 2399](https://github.com/openclaw/crabbox/pull/2399), [Issue 2397](https://github.com/openclaw/crabbox/issues/2397). Thanks @saariuslystoned.
+- Avoid spurious SSH-directory creation failures when concurrent leases share fresh local state, while retaining existing directory validation. [PR 2395](https://github.com/openclaw/crabbox/pull/2395). Thanks @saariuslystoned.
+- Enforce Parallels fleet capacity across concurrent clones sharing local state, including differently named entries for the same host and account, while keeping doctor and checkpoint dry-run selection lock-free. [PR 2385](https://github.com/openclaw/crabbox/pull/2385), [Issue 2384](https://github.com/openclaw/crabbox/issues/2384). Thanks @saariuslystoned.
+- Persist explicit idle-timeout changes in GCP heartbeats while preserving omitted limits, legacy labels, and the lease TTL cap. [PR 2404](https://github.com/openclaw/crabbox/pull/2404).
+- Report successful SSH authentication when a readiness check still times out, including real proxy routes, so diagnostics distinguish missing guest readiness from connection or authentication failures. [PR 2391](https://github.com/openclaw/crabbox/pull/2391). Thanks @saariuslystoned.
 
-- Preserve local GCP lease claims during cleanup dry-runs when an instance disappears, and share the cleanup mutation boundary with Azure recovery. [PR 2297](https://github.com/openclaw/crabbox/pull/2297).
+- Honor explicit idle-timeout changes in direct Parallels heartbeats while preserving the stored window when the flag is omitted. [PR 2406](https://github.com/openclaw/crabbox/pull/2406). Thanks @saariuslystoned.
+- Apple VM: persist heartbeat timestamps and explicit idle-timeout changes across fresh status reads, preserving recorded timeout and TTL policy when the flag is omitted. [PR 2413](https://github.com/openclaw/crabbox/pull/2413). Thanks @steipete.
 
-- Run generated managed-runner readiness checks with POSIX sh while preserving tool, bootstrap marker, workroot, and desktop readiness checks. [PR 2296](https://github.com/openclaw/crabbox/pull/2296).
+## 0.63.0 - 2026-09-20
 
-- Report the effective Linode machine type in doctor diagnostics, honoring configured native types and explicit generic overrides. [PR 2298](https://github.com/openclaw/crabbox/pull/2298).
+### Highlights
+
+- **Tenki works with the current CLI and rotating gateway certificates.** Sandbox creation uses supported lifetime flags, and SSH verifies the gateway's certificate authority instead of pinning individual gateway keys.
+- **More reliable macOS VM startup.** Prepared Parallels macOS images can bootstrap without guest Tools, and Apple VM builds cloud-init seed disks without mounting them on the host.
+- **Boat works after the ASCII Box rename.** Updated CLI discovery, response parsing, SSH keys, and cleanup preserve existing Crabbox lease identities.
+- **Safer cancellation and cleanup recovery.** Canceled operations stop waiting for lease locks, while failed deletion or local SSH cleanup retains the state needed for a safe retry.
+
+### Upgrade notes
+
+- Tenki host-authority discovery requires a workspace API key from `tenki onboard` or `TENKI_API_KEY` when the CLI does not report an authoritative trust file. Kept leases use sticky mode with no maximum duration; `warmup` defaults to keeping the lease. Use `--keep=false --ttl 15m` for a bounded test, and explicitly stop the lease afterward: Tenki's maximum duration pauses the sandbox rather than destroying it, and idle-timeout metadata does not enforce native expiry. [PR 2341](https://github.com/openclaw/crabbox/pull/2341).
+
+### Fixes
+
+- Verify Tenki gateway certificates using authoritative CLI trust or authenticated CA and session-scoped gateway discovery. Reject missing or invalid trust without enrolling leaf keys, preserve native Tenki credentials, and restore sandbox creation with supported, mutually exclusive sticky and maximum-duration flags. [PR 2341](https://github.com/openclaw/crabbox/pull/2341). Thanks @francoluxor.
+- Support the ASCII Box to Boat rename across CLI discovery, mixed response envelopes, SSH key selection, deletion operations, and secret redaction while preserving existing provider and lease identities. [PR 2303](https://github.com/openclaw/crabbox/pull/2303). Thanks @zozo123.
+- Let prepared Parallels macOS clones bootstrap through an explicitly trusted host-side SSH key when Tools cannot report or prepare the guest. Match the exact clone's DHCP identity, preserve its SSH port, reuse configured Screen Sharing only on an exactly owned clone, and wait for authenticated RFB readiness before typing. [PR 1745](https://github.com/openclaw/crabbox/pull/1745), [PR 2362](https://github.com/openclaw/crabbox/pull/2362). Thanks @saariuslystoned.
+- Build Apple VM cloud-init seed disks directly with the shared FAT16 writer, removing the host MS-DOS mount requirement while preserving Firecracker and XCP-ng image formats. [PR 2343](https://github.com/openclaw/crabbox/pull/2343). Thanks @steipete.
+- Honor cancellation while terminal cleanup waits for exact lease-claim locks across GCP, Lume, Tart, Coder, Modal, Namespace, and related adapters. Release operation or capacity locks promptly, preserve state before deletion, and retain independent acquisition rollback and durable finalization after confirmed deletion. Apply the same cancellation boundary to explicit forget-missing cleanup in OpenSandbox, Vercel Sandbox, Crownest, and SuperServe. [PR 2361](https://github.com/openclaw/crabbox/pull/2361), [PR 2363](https://github.com/openclaw/crabbox/pull/2363), [PR 2364](https://github.com/openclaw/crabbox/pull/2364), [PR 2365](https://github.com/openclaw/crabbox/pull/2365). Thanks @steipete.
+- Remove generated GCP and Linode SSH credentials and host-trust files before retiring successfully deleted or absent leases. Keep the exact recovery claim if local cleanup fails. Complete local SSH cleanup after successful failed-acquisition rollback for GCP, Azure, and Linode; retain credentials when remote cleanup fails, report local cleanup errors, and stop fresh allocation retries when recovery is incomplete. Linode terminal cleanup also honors cancellation while waiting for the claim lock. [PR 2357](https://github.com/openclaw/crabbox/pull/2357), [PR 2358](https://github.com/openclaw/crabbox/pull/2358), [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
+- Bound GCP public-IP discovery to two minutes, including in-flight observations and caller cancellation. Give failed-acquisition rollback up to three minutes to confirm remote deletion, including after caller cancellation, so slower deletion operations can finish cleanup. [PR 2357](https://github.com/openclaw/crabbox/pull/2357), [PR 2359](https://github.com/openclaw/crabbox/pull/2359). Thanks @steipete.
+- Preserve generated Tart SSH credentials when failed-acquisition rollback cannot confirm ownership, delete the VM, or retire its claim, and report local artifact-cleanup errors alongside the original failure. [PR 2360](https://github.com/openclaw/crabbox/pull/2360). Thanks @steipete.
+- Preserve Lume's last successfully published claim when acquisition metadata updates fail, retaining the exact recovery state instead of falling back to unguarded rollback. [PR 2366](https://github.com/openclaw/crabbox/pull/2366). Thanks @steipete.
+
+### Maintenance
+
+- Consolidate Pond process and artifact preparation, retained sandbox activity updates, and remote sandbox ownership metadata checks while preserving provider-specific policy and existing behavior. [PR 2356](https://github.com/openclaw/crabbox/pull/2356), [PR 2367](https://github.com/openclaw/crabbox/pull/2367), [PR 2368](https://github.com/openclaw/crabbox/pull/2368). Thanks @steipete.
+- Share GCP and Hetzner implicit machine candidate selection in the coordinator while preserving explicit overrides, stored types, profile applicability, and stable ordering. [PR 2369](https://github.com/openclaw/crabbox/pull/2369). Thanks @steipete.
+- Keep Windows staged-launcher test helpers alive until final observation and confirm bounded teardown, removing timing-dependent failures without changing production transport behavior. [PR 2354](https://github.com/openclaw/crabbox/pull/2354), [Issue 2226](https://github.com/openclaw/crabbox/issues/2226). Thanks @steipete.
+
+## 0.62.0 - 2026-09-18
+
+### Highlights
+
+- **Recover the same Azure VM or DigitalOcean Droplet.** Fixed lease IDs let direct provisioning recover the original allocation after a lost reply or readiness failure.
+- **Readiness probes now respect their deadlines.** Local Container endpoint checks, SSH inspections, and Tart/Scaleway IP discovery include running provider commands and requests in their timeout budgets.
+- **Keep signed artifact URLs out of errors.** Upload, download, and manifest request failures retain useful diagnostics without exposing signed request URLs.
+- **More reliable lease policy and run history.** SSH access preserves coordinator idle timeouts, explicit heartbeats can finish access refreshes, and abandoned admissions are finalized without replaying workloads.
+
+### Upgrade notes
+
+- Azure and DigitalOcean fixed lease IDs are single-use and require the original local state and per-lease SSH key. Preserve both through retries and cleanup; changed inputs or accounts are rejected, unresolved allocations retain their recovery state, and successful cleanup retires the ID. Azure fixed-ID creation uses one SKU in the configured location without SKU, market, or region fallback; snapshot forks and `ephemeral-preview` disks are unsupported on this path. Ordinary Azure provisioning keeps its existing fallback behavior. [PR 2351](https://github.com/openclaw/crabbox/pull/2351).
+
+### Changes
+
+- Add `warmup --lease-id` support for direct Azure and DigitalOcean leases. Persist the create intent before allocation, recover the same resource after interrupted provisioning, and reject replaced resources using immutable provider identities. [PR 2351](https://github.com/openclaw/crabbox/pull/2351). Thanks @steipete.
+- Raise checkpoint limits in the production Cloudflare coordinator configuration to 100 globally, per owner, and per organization, giving retained worker caches more room. Preview, lease, and checkpoint-use claim limits are unchanged. [PR 2338](https://github.com/openclaw/crabbox/pull/2338). Thanks @steipete.
+
+### Fixes
+
+- Bound each Local Container inspection during SSH readiness to 30 seconds, including final diagnostics, while preserving the overall SSH timeout, original SSH error, and exact-container identity checks. [PR 2352](https://github.com/openclaw/crabbox/pull/2352). Thanks @steipete.
+- Enforce readiness budgets for Local Container endpoint discovery (30 seconds), Tart IP discovery (five minutes), and Scaleway public-IP discovery (five minutes), including in-flight inspections and requests. Preserve each provider's retry behavior and diagnostics, and honor earlier cancellation. [PR 2350](https://github.com/openclaw/crabbox/pull/2350), [PR 2349](https://github.com/openclaw/crabbox/pull/2349), [PR 2348](https://github.com/openclaw/crabbox/pull/2348). Thanks @steipete.
+- Redact signed artifact request URLs from setup and transport errors for uploads, downloads, and manifests, while preserving the operation and underlying failure. [PR 2340](https://github.com/openclaw/crabbox/pull/2340). Thanks @steipete.
+- Preserve the coordinator's reported idle timeout when resolving SSH access and updating managed lease claims, so local defaults do not overwrite remote policy. [PR 2339](https://github.com/openclaw/crabbox/pull/2339). Thanks @steipete.
+- Give explicit broker heartbeats the existing mutation timeout to finish provider access refreshes, while retaining shorter automatic-heartbeat and foreground-touch deadlines, caller cancellation, and single-request behavior. [PR 2331](https://github.com/openclaw/crabbox/pull/2331). Thanks @steipete.
+- Finalize abandoned pre-work admissions against their original request and authentication, preventing late responses from reopening failed history. Bookkeeping may take up to 60 seconds across three attempts after the 10-second admission allowance; the original command error remains the result, and unresolved history is reported with its run ID. Workloads are not replayed, and older stranded records are not repaired automatically. [Issue 2223](https://github.com/openclaw/crabbox/issues/2223), [PR 2227](https://github.com/openclaw/crabbox/pull/2227). Thanks @steipete.
+- Recover abandoned external-provider slug reservation locks on Windows so subsequent reservations can acquire and release them normally. [PR 2292](https://github.com/openclaw/crabbox/pull/2292). Thanks @zozo123.
+- Let admin commands reuse an already-authorized GitHub broker session when no explicit admin token is configured. Explicit tokens retain precedence, and authorization remains with the coordinator. [PR 1714](https://github.com/openclaw/crabbox/pull/1714). Thanks @steipete.
+
+### Maintenance
+
+- Refresh the default Tart macOS Sequoia image to the publisher's September 5 image, with verified manifest and VM configuration hashes.
+- Consolidate configuration and flag ownership for Docker Sandbox, Tart, Codespaces, Islo, Boxd, Static, Hyper-V, Windows Sandbox, Local Container, and Actions while preserving configured values, input precedence, and saved settings. [PR 2327](https://github.com/openclaw/crabbox/pull/2327), [PR 2329](https://github.com/openclaw/crabbox/pull/2329), [PR 2332](https://github.com/openclaw/crabbox/pull/2332), [PR 2333](https://github.com/openclaw/crabbox/pull/2333), [PR 2334](https://github.com/openclaw/crabbox/pull/2334), [PR 2335](https://github.com/openclaw/crabbox/pull/2335).
+- Share primary machine-class selection across DigitalOcean, Linode, OVH, Scaleway, Hetzner, GCP, TencentCloud, Phala, Namespace Devbox, and Vultr while retaining provider-owned defaults, native overrides, and fallback mappings. [PR 2344](https://github.com/openclaw/crabbox/pull/2344), [PR 2345](https://github.com/openclaw/crabbox/pull/2345), [PR 2346](https://github.com/openclaw/crabbox/pull/2346).
+- Clarify that configured Actions fields and workflow-input inspection belong to hydration; standalone dispatch sends only explicitly supplied fields. [PR 2330](https://github.com/openclaw/crabbox/pull/2330).
+
+## 0.61.0 - 2026-09-17
+
+### Highlights
+
+- **Complete installations now include a native runtime pack.** Matching Linux, macOS, and Windows companions handle supported filesystem operations, and the Linux companions let independent Linux and WSL2 SSH commands run without Bash.
+- **Safer file copies and more accurate test results.** Archive copies validate before replacing the destination and record recovery decisions durably. JUnit collection preserves report bytes and counts paths to the same file only once.
+- **Inspect macOS toolchains before running tests.** Preflight reports the platform and effective developer-tool selection, with opt-in Swift, Xcode, Homebrew, and Bash version probes.
+- **More reliable lease reuse and sync.** Preserve recorded idle policy, refresh workspace ownership when replacing leases, and avoid retaining stale nested caches or losing track of previously synced files.
+
+### Upgrade notes
+
+- Keep the complete `crabbox-runtime/` directory beside the real CLI executable when installing a release archive; Homebrew installs the complete distribution. Every pack contains amd64 and arm64 companions for Linux, macOS, and Windows and is bound to its matching controller. Reinstall the matching archive or Homebrew package if an official installation's pack is missing or incomplete; do not mix packs between builds. `go install` remains CLI-only: a source-built CLI can compile the filesystem helper locally with Go 1.26 or newer, but retains shell-backed command supervision. [PR 1556](https://github.com/openclaw/crabbox/pull/1556), [PR 2300](https://github.com/openclaw/crabbox/pull/2300).
+- Running an independent argv command without Bash requires the complete runtime pack and a Linux or WSL2 SSH target. Existing Bash login behavior is retained when Bash is available; explicit `--shell` and Bash scripts still require it. Newly generated Linux readiness scripts use POSIX `sh`, but existing images and readiness scripts are not upgraded in place, and initial provisioning retains its own prerequisites. The new `bash` preflight probe is opt-in through `--preflight --preflight-tools default,bash`; missing Bash is diagnostic, not a request to install it. [PR 2300](https://github.com/openclaw/crabbox/pull/2300), [PR 2296](https://github.com/openclaw/crabbox/pull/2296).
+- Interrupted archive copies from older releases now stop when they encounter `.crabbox-cp-transaction` or `.crabbox-cp-backup` sidecars. Inspect the destination and backup, then use `cp --recover keep-destination` or `cp --recover restore-backup` for that exact destination; recovery retains the old marker and unselected data and prints their location. New copies use a private persistent journal outside the transferred tree; keep it until recovery completes. Archive fallback remains limited to POSIX operator hosts and native Linux/macOS SSH targets; native Windows copy still needs a provider-native backend. SSH copy from Windows operators or to WSL2 targets still requires rsync 3.4.3 or newer on both ends. [PR 1556](https://github.com/openclaw/crabbox/pull/1556).
+- Managed SSH JUnit collection now deduplicates by opened-file identity across explicit and automatic paths, so aliases no longer inflate totals; separate files with identical contents remain separate reports. Explicit collection accepts up to 4,096 paths, 64 MiB per report, and 256 MiB total. Automatic discovery keeps its 50-report, 16 MiB-per-report, and 64 MiB-total limits. Provider-native result APIs retain their existing contracts. [PR 1556](https://github.com/openclaw/crabbox/pull/1556).
+
+### Changes
+
+- Use one native filesystem engine for POSIX archive-copy fallback and managed SSH JUnit collection on POSIX and native Windows targets. Validate complete archives before publication, preserve report bytes, and deduplicate aliases by opened-file identity. Complete installations include all six matching filesystem companions, without requiring Go on the target. [PR 1556](https://github.com/openclaw/crabbox/pull/1556). Thanks @steipete.
+- Record archive-copy publication and cleanup in destination-bound durable journals, and add explicit `cp --recover keep-destination|restore-backup` recovery for legacy sidecars. Preserve unselected destination and backup data instead of inferring an outcome from historical markers. [PR 1556](https://github.com/openclaw/crabbox/pull/1556).
+- Bundle Linux command-supervision companions with complete CLI installations, discover and validate the matching runtime pack automatically, and support independent Linux/WSL2 SSH commands when Bash is absent. Add opt-in Bash version and missing-state preflight reporting on Linux, macOS, and WSL2, and generate managed-runner readiness checks with POSIX `sh` while retaining tool, bootstrap-marker, workroot, and desktop checks. [PR 2300](https://github.com/openclaw/crabbox/pull/2300), [PR 2296](https://github.com/openclaw/crabbox/pull/2296). Thanks @coygeek.
+- Add `macos_platform` to default macOS preflight, reporting OS version/build, architecture, and effective developer-tool selection. Offer opt-in `swift`, `xcodebuild`, and `brew` probes with bounded execution and confirmed cleanup before the workload continues. [PR 2281](https://github.com/openclaw/crabbox/pull/2281). Thanks @coygeek.
+- Keep running Islo sandboxes active through a provider-owned heartbeat capability, using a bounded no-op after observing the live state and reporting the provider's current idle policy. Paused and terminal sandboxes are not resumed by heartbeat, `--idle-timeout` is rejected, and absolute lifetime is not extended. [PR 1707](https://github.com/openclaw/crabbox/pull/1707). Thanks @zozo123.
+
+### Fixes
 
 - Finish the old workspace owner before replacing an unavailable lease, acquire fresh ownership before retrying sync, and avoid repeating completed cleanup when replacement acquisition fails. [PR 2293](https://github.com/openclaw/crabbox/pull/2293).
-
-- Scope Git-overlay cache preservation to each verified directory, so root-only ignore rules do not retain stale nested dependency caches. [PR 2291](https://github.com/openclaw/crabbox/pull/2291).
-
-- Keep concurrent AWS heartbeats responsive when SSH sources are unchanged, while retaining durable ingress repair, alarm arming, and normal access setup for changed sources. [PR 2290](https://github.com/openclaw/crabbox/pull/2290).
-
-- Preserve recorded direct-lease idle timeouts across provider preparation, reuse, and repository reclaim; honor explicit run and heartbeat replacements while keeping claim labels and coordinator registration consistent without overriding managed-coordinator policy. [PR 2288](https://github.com/openclaw/crabbox/pull/2288).
-
-- Preserve ownership of previously synced files when attaching local Git metadata to a raw workspace, so later syncs can remove obsolete files without importing stale readiness markers. Keep local Git pruning on the safe manifest path, rejecting directory symlinks before deleting files outside the workspace. [PR 2285](https://github.com/openclaw/crabbox/pull/2285).
-
+- Preserve ownership of previously synced files when attaching local Git metadata to a raw workspace, so later syncs can remove obsolete files without importing stale readiness markers. Keep pruning on the guarded manifest path, reject directory symlinks before deletion, and preserve Git-overlay caches only in individually verified directories so root-only ignore rules do not retain stale nested caches. [PR 2285](https://github.com/openclaw/crabbox/pull/2285), [PR 2291](https://github.com/openclaw/crabbox/pull/2291).
+- Preserve recorded direct-lease idle timeouts across provider preparation, reuse, and repository reclaim. Honor explicit run and heartbeat replacements while keeping claim labels and coordinator registration consistent and preserving managed-coordinator policy. [PR 2288](https://github.com/openclaw/crabbox/pull/2288).
 - Keep Upstash Box status age and runtime metadata tied to native observations, preserve recorded local lease policy across reuse, and omit unknown policy instead of inventing current defaults or expiry. [PR 2283](https://github.com/openclaw/crabbox/pull/2283).
-
+- Keep concurrent AWS heartbeats responsive when SSH sources are unchanged, while retaining durable ingress repair, alarm arming, and normal access setup for changed sources. [PR 2290](https://github.com/openclaw/crabbox/pull/2290).
+- Preserve local GCP lease claims during cleanup dry-runs when an instance disappears, and share the cleanup mutation boundary with Azure recovery. [PR 2297](https://github.com/openclaw/crabbox/pull/2297).
+- Report discovered Parallels lease addresses consistently and surface IP-discovery failures when connecting, while preserving VM identity for best-effort status and cleanup. [PR 2301](https://github.com/openclaw/crabbox/pull/2301). Thanks @saariuslystoned.
+- Preserve terminal heredocs and significant trailing whitespace in Blacksmith Testbox shell commands while retaining command output and exit status. [PR 2295](https://github.com/openclaw/crabbox/pull/2295). Thanks @shakkernerd.
+- Report the effective Linode machine type in doctor diagnostics, honoring configured native types and explicit generic overrides. [PR 2298](https://github.com/openclaw/crabbox/pull/2298).
 - Bound retained POSIX preflight version output before extracting its first line, while draining excess output so verbose tools finish normally. [PR 2282](https://github.com/openclaw/crabbox/pull/2282).
-
-- Keep delegated leases active through a provider-owned heartbeat capability, with Islo sending a bounded no-op only after observing a running sandbox and reporting its live idle policy. [PR 1707](https://github.com/openclaw/crabbox/pull/1707). Thanks @zozo123.
-- Show macOS platform and effective developer-tool selection during preflight, with opt-in Swift, Xcode, and Homebrew versions, bounded execution, and confirmed cleanup before workload continuation. [PR 2281](https://github.com/openclaw/crabbox/pull/2281). Thanks @coygeek.
+- Preserve caller cancellation consistently in Crownest status waits while sharing request deadlines and polling with other providers. [PR 2276](https://github.com/openclaw/crabbox/pull/2276).
 - Reject overflowing day durations before checkpoint pruning or benchmark filtering, preventing very large retention ages from wrapping into short deletion windows or incorrect report cutoffs. [PR 2280](https://github.com/openclaw/crabbox/pull/2280).
-- Crownest status waits consistently preserve caller cancellation while sharing request deadlines and polling with other providers. [PR 2276](https://github.com/openclaw/crabbox/pull/2276).
-- Make first runs easier with a task-first README, tested Docker and Node examples, warm-reuse guidance, and responsive desktop/mobile banners. [PR 2275](https://github.com/openclaw/crabbox/pull/2275). Thanks @zozo123.
-- Keep CodeSandbox runtime fallback defaults aligned with declared configuration while preserving the fixed SDK workspace boundary and operation-specific budgets. [PR 1991](https://github.com/openclaw/crabbox/pull/1991). Thanks @steipete.
 
+### Maintenance
+
+- Consolidate provider-owned defaults and native machine-type projections behind adapters while preserving configured values, explicit overrides, and existing selection behavior. [PR 2307](https://github.com/openclaw/crabbox/pull/2307), [PR 2308](https://github.com/openclaw/crabbox/pull/2308), [PR 2309](https://github.com/openclaw/crabbox/pull/2309), [PR 2311](https://github.com/openclaw/crabbox/pull/2311), [PR 2313](https://github.com/openclaw/crabbox/pull/2313), [PR 2314](https://github.com/openclaw/crabbox/pull/2314), [PR 2315](https://github.com/openclaw/crabbox/pull/2315), [PR 2316](https://github.com/openclaw/crabbox/pull/2316).
+- Move provider-specific diagnostic connections and native display values into their adapters, and share Upstash Box/SmolVM configuration displays and Runpod/SmolVM JSON request construction while retaining ordinary loaded-config output and provider-owned transport policy. [PR 2312](https://github.com/openclaw/crabbox/pull/2312), [PR 2317](https://github.com/openclaw/crabbox/pull/2317), [PR 2318](https://github.com/openclaw/crabbox/pull/2318).
+- Consolidate provider configuration bindings and value ownership for Nomad, Hostinger, Tenki, Daytona, Proxmox, Sprites, Unikraft Cloud, XCP-ng, Superserve, and MXC, while preserving input precedence, explicit values, validation, and saved configuration. [PR 2320](https://github.com/openclaw/crabbox/pull/2320), [PR 2321](https://github.com/openclaw/crabbox/pull/2321), [PR 2322](https://github.com/openclaw/crabbox/pull/2322), [PR 2323](https://github.com/openclaw/crabbox/pull/2323), [PR 2324](https://github.com/openclaw/crabbox/pull/2324), [PR 2325](https://github.com/openclaw/crabbox/pull/2325).
+- Share bounded acquisition polling and cancellation-aware retry delays across providers while retaining provider-owned readiness rules, request budgets, and diagnostics. [PR 2278](https://github.com/openclaw/crabbox/pull/2278), [PR 2279](https://github.com/openclaw/crabbox/pull/2279).
+- Keep CodeSandbox runtime fallback defaults aligned with declared configuration while preserving the fixed SDK workspace boundary and operation-specific budgets. [PR 1991](https://github.com/openclaw/crabbox/pull/1991). Thanks @steipete.
+- Make first runs easier with a task-first README, tested Docker and Node examples, warm-reuse guidance, and responsive desktop/mobile banners. [PR 2275](https://github.com/openclaw/crabbox/pull/2275). Thanks @zozo123.
 - Cancel superseded pull-request CI runs while preserving independent main-branch and manual runs. [PR 2286](https://github.com/openclaw/crabbox/pull/2286).
 
 ## 0.60.0 - 2026-09-14

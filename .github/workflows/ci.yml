@@ -87,6 +87,25 @@ jobs:
           assert not any(r['Action'] == 'skip' for r in records), 'native fixture skipped'
           PY
 
+      - name: Require real SSH readiness diagnostics
+        shell: bash
+        run: |
+          go test ./internal/cli -run '^TestWaitForSSHReadyRealSSHTimeoutDiagnostic$' -count=1 -json | tee "$RUNNER_TEMP/ssh-readiness-tests.jsonl"
+          python3 - "$RUNNER_TEMP/ssh-readiness-tests.jsonl" <<'PY'
+          import json, sys
+          records = [json.loads(line) for line in open(sys.argv[1])]
+          root = 'TestWaitForSSHReadyRealSSHTimeoutDiagnostic'
+          required = [root] + [
+              f'{root}/proxy={proxy}/transport-success={success}'
+              for proxy in ('false', 'true')
+              for success in ('true', 'false')
+          ]
+          for name in required:
+              for action in ('run', 'pass'):
+                  assert any(r.get('Test') == name and r['Action'] == action for r in records), (name, action)
+          assert not any(r['Action'] == 'skip' for r in records), 'real SSH fixture skipped'
+          PY
+
       - name: Build
         run: go build -trimpath -o /tmp/crabbox ./cmd/crabbox
 
@@ -190,13 +209,22 @@ jobs:
           $code = $LASTEXITCODE
           $events | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { exit $code }
-          $records = @($events | ForEach-Object { $_ | ConvertFrom-Json })
-          foreach ($action in @('run', 'pass')) {
-            if (-not ($records | Where-Object { $_.Test -eq $name -and $_.Action -eq $action })) {
-              throw "required Windows PowerShell 5.1 architecture probe did not $action"
-            }
-          }
-          if ($records | Where-Object { $_.Action -eq 'skip' }) { throw 'Windows PowerShell 5.1 architecture probe was skipped' }
+          & ./scripts/verify-go-test-events.ps1 -Events $events -RequiredTests @($name) -Label 'Windows PowerShell 5.1 architecture probe'
+
+      - name: Require native Windows external slug reservation recovery and reuse
+        if: ${{ !cancelled() && steps.windows_go.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $required = @(
+            'TestLockSlugReservationAcquiresReclaimedAbandonedLock',
+            'TestWaitForSlugReservationLockRecoversAfterAbandonedLock',
+            'TestAllocateLeaseSlugWindowsReleaseAndReuse'
+          )
+          $events = @(go test ./internal/providers/external -run ('^(' + ($required -join '|') + ')$') -count=1 -timeout=2m -json)
+          $code = $LASTEXITCODE
+          $events | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { exit $code }
+          & ./scripts/verify-go-test-events.ps1 -Events $events -RequiredTests $required -Label 'native external slug reservation test'
 
       - name: Test user directory isolation
         run: go test ./internal/testutil ./internal/providers/aws ./internal/providers/daytona ./internal/providers/digitalocean ./internal/providers/hyperv ./internal/providers/namespace ./internal/providers/scaleway ./internal/providers/vast ./internal/providers/vultr -count=1
@@ -232,24 +260,18 @@ jobs:
             'TestSelectedLeaseSSHWindowsClaimFirstNamespace',
             'TestSelectedLeaseSSHWindowsPrivateKeyReuse',
             'TestEnsureTestboxLeaseDirectoryCreatesPrivateWindowsComponents',
+            'TestEnsureLeaseSSHDirectoriesToleratesConcurrentCreation',
+            'TestWalkDirectoryPathToleratesConcurrentCreation',
             'TestTestboxKeyPathAllowsSafeCustomIDs',
             'TestUseLeaseKnownHostsScopesAndEnforcesHostVerification',
             'TestSSHControlPathIsScopedByKey'
           )
           # POSIX mode tests are excluded; the native Windows ACL equivalents above must pass.
-          $events = @(go test ./internal/cli -run '^(Test(LeaseSSH|SelectedLeaseSSH|ManagedState)|Test(EnsureTestboxLeaseDirectoryCreatesPrivateWindowsComponents|TestboxKeyPathAllowsSafeCustomIDs|UseLeaseKnownHostsScopesAndEnforcesHostVerification|SSHControlPathIsScopedByKey)$)' -skip '^TestSelectedLeaseSSH(RootDoesNotRepairCallerDirectory|ExistingKeyRequiresPrivateMode)$' -count=1 -timeout=5m -json)
+          $events = @(go test ./internal/cli -run '^(Test(LeaseSSH|SelectedLeaseSSH|ManagedState)|Test(EnsureTestboxLeaseDirectoryCreatesPrivateWindowsComponents|EnsureLeaseSSHDirectoriesToleratesConcurrentCreation|WalkDirectoryPathToleratesConcurrentCreation|TestboxKeyPathAllowsSafeCustomIDs|UseLeaseKnownHostsScopesAndEnforcesHostVerification|SSHControlPathIsScopedByKey)$)' -skip '^TestSelectedLeaseSSH(RootDoesNotRepairCallerDirectory|ExistingKeyRequiresPrivateMode)$' -count=1 -timeout=5m -json)
           $code = $LASTEXITCODE
           $events | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { exit $code }
-          $records = @($events | ForEach-Object { $_ | ConvertFrom-Json })
-          foreach ($name in $required) {
-            foreach ($action in @('run', 'pass')) {
-              if (-not ($records | Where-Object { $_.Test -eq $name -and $_.Action -eq $action })) {
-                throw "required native root contract $name did not $action"
-              }
-            }
-          }
-          if ($records | Where-Object { $_.Action -eq 'skip' }) { throw 'required native root contract was skipped' }
+          & ./scripts/verify-go-test-events.ps1 -Events $events -RequiredTests $required -Label 'native root contract'
 
       - name: Test concurrent claim discovery and ownership
         run: go test ./internal/cli/ -run '^Test(ClaimMetadata|ClaimTransaction|RemoveControllerFile|ConfirmedAbsentStateCleanup|PrivateRunOutput)' -count=1 -v
@@ -293,15 +315,7 @@ jobs:
           $code = $LASTEXITCODE
           $events | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { exit $code }
-          $records = @($events | ForEach-Object { $_ | ConvertFrom-Json })
-          foreach ($name in $required) {
-            foreach ($action in @('run', 'pass')) {
-              if (-not ($records | Where-Object { $_.Test -eq $name -and $_.Action -eq $action })) {
-                throw "required native behavior $name did not $action"
-              }
-            }
-          }
-          if ($records | Where-Object { $_.Action -eq 'skip' }) { throw 'required native behavior was skipped' }
+          & ./scripts/verify-go-test-events.ps1 -Events $events -RequiredTests $required -Label 'native behavior'
 
       - name: Test native Windows failure captures and private outputs
         run: go test ./internal/cli/ -run '^(TestFailureBundle|TestNativeWindowsFailureBundle|TestPrivateRunOutput|TestManagedAttestKeyWindows|TestArtifactOutputWindows)' -count=1 -v
@@ -372,7 +386,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test -race ./internal/cli -run '^(Test(LeaseSSH|SelectedLeaseSSH|ManagedState)|Test(TestboxKeyPathAllowsSafeCustomIDs|UseLeaseKnownHostsScopesAndEnforcesHostVerification|SSHControlPathIsScopedByKey)$)' -count=1 -timeout=5m -json | tee "$RUNNER_TEMP/lease-ssh-root-macos.jsonl"
+          go test -race ./internal/cli -run '^(Test(LeaseSSH|SelectedLeaseSSH|ManagedState)|Test(EnsureLeaseSSHDirectoriesToleratesConcurrentCreation|WalkDirectoryPathToleratesConcurrentCreation|TestboxKeyPathAllowsSafeCustomIDs|UseLeaseKnownHostsScopesAndEnforcesHostVerification|SSHControlPathIsScopedByKey)$)' -count=1 -timeout=5m -json | tee "$RUNNER_TEMP/lease-ssh-root-macos.jsonl"
           node - "$RUNNER_TEMP/lease-ssh-root-macos.jsonl" <<'NODE'
           const fs = require('node:fs');
           const records = fs.readFileSync(process.argv[2], 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
@@ -391,6 +405,8 @@ jobs:
             'TestSelectedLeaseSSHRootReuseAndCleanup',
             'TestSelectedLeaseSSHRootDoesNotRepairCallerDirectory',
             'TestSelectedLeaseSSHExistingKeyRequiresPrivateMode',
+            'TestEnsureLeaseSSHDirectoriesToleratesConcurrentCreation',
+            'TestWalkDirectoryPathToleratesConcurrentCreation',
             'TestTestboxKeyPathAllowsSafeCustomIDs',
             'TestUseLeaseKnownHostsScopesAndEnforcesHostVerification',
             'TestSSHControlPathIsScopedByKey',

@@ -584,7 +584,7 @@ func (b *orgoBackend) deleteLease(ctx context.Context, client orgoAPI, lease org
 	if err != nil {
 		return err
 	}
-	return shared.RemoveExactClaimAfter(claim, binding, func() error {
+	return shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 		if lease.Computer.ID != "" {
 			computer, err := client.GetComputer(ctx, lease.Computer.ID)
 			if err != nil {

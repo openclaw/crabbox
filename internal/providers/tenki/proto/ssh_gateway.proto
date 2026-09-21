@@ -1,0 +1,27 @@
+// Public Tenki SSH gateway protocol subset, preserving the published wire fields.
+// Source: https://github.com/LuxorLabs/tenki-sdk-go/tree/sandbox/v1.2.0
+// Copyright (c) 2026 TenkiCloud. MIT license; see LICENSE in this directory.
+syntax = "proto3";
+package tenki.sandbox.v1;
+option go_package = "github.com/openclaw/crabbox/internal/providers/tenki/proto;tenkiproto";
+message IssueSandboxSSHCertRequest {
+  string session_id = 1;
+  string public_key = 2;
+}
+message IssueSandboxSSHCertResponse {
+  string ssh_cert = 1;
+  string ca_pub = 2;
+}
+message ListActiveSSHGatewaysRequest {
+  string region = 1;
+  string session_id = 2;
+}
+message ListActiveSSHGatewaysResponse {
+  repeated ActiveSSHGateway gateways = 1;
+}
+message ActiveSSHGateway {
+  string gateway_id = 1;
+  string public_endpoint = 3;
+  bool healthy = 6;
+  string ws_bridge_endpoint = 7;
+}

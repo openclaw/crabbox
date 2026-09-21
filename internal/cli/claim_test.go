@@ -2040,7 +2040,7 @@ func TestLeaseClaimTailscaleSettingsIgnoreEmptyOrMissingClaim(t *testing.T) {
 func TestClaimLeaseForRepoProviderStoresPond(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := filepath.Join(t.TempDir(), "repo")
-	if err := claimLeaseForRepoProviderWithPond("isb_crabbox-test", "web", "islo", "Alpha Pond", repo, 30*time.Minute, false); err != nil {
+	if err := ClaimLeaseForRepoProviderPond("isb_crabbox-test", "web", "islo", "Alpha Pond", repo, 30*time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
 	claim, err := ReadLeaseClaim("isb_crabbox-test")

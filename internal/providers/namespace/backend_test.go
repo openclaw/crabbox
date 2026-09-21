@@ -42,6 +42,13 @@ func TestProviderServerTypeResolution(t *testing.T) {
 		{name: "canonical class", cfg: core.Config{Provider: namespaceProvider, TargetOS: targetLinux, Architecture: "amd64", Class: "large"}, want: "L"},
 		{name: "empty default", cfg: core.Config{Provider: namespaceProvider}, want: "M"},
 		{name: "custom class", cfg: core.Config{Provider: namespaceProvider, Class: "gpu"}, want: "GPU"},
+		{name: "native size precedes generic", cfg: core.Config{Provider: namespaceProvider, Namespace: core.NamespaceConfig{Size: " s "}, ServerType: "xl", ServerTypeExplicit: true, Class: "beast"}, want: "S"},
+		{name: "blank native falls through", cfg: core.Config{Provider: namespaceProvider, Namespace: core.NamespaceConfig{Size: " "}, ServerType: " l ", ServerTypeExplicit: true}, want: "L"},
+		{name: "unsupported target", cfg: core.Config{Provider: namespaceProvider, Class: "large", TargetOS: core.TargetMacOS}},
+		{name: "unsupported architecture", cfg: core.Config{Provider: namespaceProvider, Class: "large", TargetOS: core.TargetLinux, Architecture: core.ArchitectureARM64}},
+		{name: "normalized legacy class", cfg: core.Config{Provider: namespaceProvider, Class: " LARGE ", TargetOS: core.TargetMacOS}, want: "L"},
+		{name: "whitespace is not empty default", cfg: core.Config{Provider: namespaceProvider, Class: " "}},
+		{name: "custom class trims", cfg: core.Config{Provider: namespaceProvider, Class: " gpu "}, want: "GPU"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := provider.ServerTypeForConfig(test.cfg); got != test.want {

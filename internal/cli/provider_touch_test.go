@@ -8,12 +8,119 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestSSHManagedLeasePreservesCoordinatorIdlePolicy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses the POSIX recording SSH fixture")
+	}
+	for _, tc := range []struct {
+		name         string
+		recordedIdle int
+	}{
+		{name: "existing policy", recordedIdle: 10800},
+		{name: "stale policy", recordedIdle: 1800},
+		{name: "fresh claim"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lease := CoordinatorLease{
+				ID: "cbx_abcdef123456", Slug: "managed-idle", Provider: "aws", TargetOS: targetLinux,
+				CloudID: "i-managed-idle", Host: "127.0.0.1", SSHUser: "runner", SSHPort: "2222",
+				State: "active", IdleTimeoutSeconds: 10800,
+			}
+			requests := make(chan map[string]any, 1)
+			coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer user-token" {
+					t.Error("coordinator request did not use the fixture token")
+				}
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+lease.ID:
+				case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+lease.ID+"/heartbeat":
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+						http.Error(w, "invalid heartbeat", http.StatusBadRequest)
+						return
+					}
+					select {
+					case requests <- body:
+					default:
+						t.Error("SSH sent more than one heartbeat")
+					}
+				default:
+					t.Errorf("unexpected coordinator request: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"lease": lease})
+			}))
+			defer coordinator.Close()
+			configureHeartbeatCoordinatorTest(t, coordinator.URL)
+			t.Setenv("CRABBOX_IDLE_TIMEOUT", "")
+			t.Setenv("CRABBOX_OWNER", "alice@example.test")
+			t.Setenv("CRABBOX_ADAPTER_ID", "")
+			t.Setenv(controllerWorkspaceIDEnv, "")
+			dir := t.TempDir()
+			t.Chdir(dir)
+			installRecordingSSH(t, dir)
+			key := filepath.Join(dir, "fixture-key")
+			if err := os.WriteFile(key, []byte("synthetic SSH key\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CRABBOX_SSH_KEY", key)
+			cfg, err := loadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.IdleTimeout != 30*time.Minute {
+				t.Fatalf("fixture idle timeout=%s, want the 30-minute CLI default", cfg.IdleTimeout)
+			}
+			setProviderSelection(&cfg, lease.Provider, providerSelectionFlag)
+			if tc.recordedIdle > 0 {
+				seed := lease
+				seed.IdleTimeoutSeconds = tc.recordedIdle
+				server, target, _ := leaseToServerTarget(seed, cfg)
+				repo, err := findRepo()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := ClaimLeaseTargetForRepoConfig(lease.ID, lease.Slug, cfg, server, target, repo.Root, time.Duration(tc.recordedIdle)*time.Second, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			if err := (App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), []string{"ssh", "--provider", "aws", "--network", "public", lease.ID}); err != nil {
+				t.Fatalf("ssh error=%v stderr=%q", err, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), "runner@127.0.0.1") || stderr.Len() != 0 {
+				t.Fatalf("ssh stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+			select {
+			case body := <-requests:
+				if _, overridden := body["idleTimeoutSeconds"]; overridden || body["expectedProvider"] != "aws" {
+					t.Fatalf("ordinary SSH changed broker idle policy: heartbeat=%v", body)
+				}
+			default:
+				t.Fatal("SSH did not send its lease heartbeat")
+			}
+			claim, err := ReadLeaseClaim(lease.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if claim.IdleTimeoutSeconds != 10800 || claim.Labels["idle_timeout_secs"] != "10800" {
+				t.Fatalf("SSH replaced coordinator idle policy with a local default: idle=%d label=%q", claim.IdleTimeoutSeconds, claim.Labels["idle_timeout_secs"])
+			}
+		})
+	}
+}
 
 func TestBestEffortLeaseTouchHTTPBudget(t *testing.T) {
 	// Each case owns its config and HTTP server, not process-wide environment.

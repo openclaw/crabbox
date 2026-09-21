@@ -49,7 +49,10 @@ require (
 	nhooyr.io/websocket v1.8.17
 )
 
-require github.com/steipete/jsonschema/v6 v6.0.3-0.20260817142523-966654abed4a
+require (
+	connectrpc.com/connect v1.20.0
+	github.com/steipete/jsonschema/v6 v6.0.3-0.20260817142523-966654abed4a
+)
 
 require golang.org/x/sync v0.22.0 // indirect
 

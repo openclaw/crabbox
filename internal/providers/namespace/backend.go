@@ -258,7 +258,7 @@ func (b *namespaceLeaseBackend) releaseLease(ctx context.Context, req core.Relea
 	}
 	deleteDevbox := namespaceDeleteOnRelease(req.Lease, b.namespaceConfigForRun())
 	if deleteDevbox {
-		if err := shared.RemoveExactClaimAfter(claim, binding, func() error {
+		if err := shared.RemoveExactClaimAfterContext(ctx, claim, binding, func() error {
 			err := b.deleteDevbox(ctx, name)
 			outcome.Terminal = err == nil
 			return err

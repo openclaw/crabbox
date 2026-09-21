@@ -3,7 +3,6 @@ package vercelsandbox
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -155,7 +154,7 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			}}, nil
 		},
 		Retained: func(context.Context) error {
-			err := b.refreshLeaseActivity(leaseID)
+			err := shared.RefreshRetainedLeaseActivity(leaseID, providerName, b.cfg.IdleTimeout)
 			if err != nil {
 				fmt.Fprintf(b.rt.Stderr, "warning: refresh vercel-sandbox lease activity failed lease=%s: %v\n", leaseID, err)
 			}
@@ -426,7 +425,7 @@ func (b *backend) ownershipMetadata(providerScope, leaseID, slug string, repo co
 	out := map[string]string{
 		metadataProviderKey: providerName,
 		metadataScopeKey:    providerScope,
-		metadataRepoKey:     repoScope(repo),
+		metadataRepoKey:     shared.SandboxRepositoryMetadataScope(repo),
 	}
 	if leaseID != "" {
 		out[metadataClaimKey] = leaseID
@@ -498,20 +497,10 @@ func (b *backend) resolveVercelSandboxLeaseClaim(identifier string) (core.LeaseC
 }
 
 func (b *backend) finishResolvedLease(claim core.LeaseClaim, repoRoot string, reclaim bool, idleTimeout time.Duration) (string, string, string, error) {
-	if err := b.validateClaimScope(claim); err != nil {
-		return "", "", "", err
-	}
-	if repoRoot != "" {
-		if err := core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, repoRoot,
-			timeoutOrDefault(idleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second), reclaim); err != nil {
-			return "", "", "", err
-		}
-	}
-	slug := claim.Slug
-	if strings.TrimSpace(slug) == "" {
-		slug = core.NewLeaseSlug(claim.LeaseID)
-	}
-	return claim.LeaseID, strings.TrimPrefix(claim.LeaseID, leasePrefix), slug, nil
+	return shared.FinishScopedLease(claim, shared.ScopedLeaseFinishOptions{
+		Provider: providerName, LeasePrefix: leasePrefix, RepoRoot: repoRoot,
+		Reclaim: reclaim, IdleTimeout: idleTimeout, ValidateClaim: b.validateClaimScope,
+	})
 }
 
 func (b *backend) newClaimScope() (string, error) {
@@ -586,27 +575,7 @@ func (b *backend) verifyClaim(ctx context.Context, api vercelSandboxClient, leas
 }
 
 func validateSandboxOwnership(claim core.LeaseClaim, sb sandboxSummary) error {
-	if sb.ID == "" {
-		return core.Exit(5, "vercel-sandbox returned a sandbox without an id")
-	}
-	if sb.Metadata[metadataProviderKey] != providerName ||
-		sb.Metadata[metadataScopeKey] != claim.ProviderScope ||
-		sb.Metadata[metadataClaimKey] != claim.LeaseID {
-		return core.Exit(4, "vercel-sandbox sandbox %q ownership metadata does not match its local claim", sb.ID)
-	}
-	return nil
-}
-
-func (b *backend) refreshLeaseActivity(leaseID string) error {
-	claim, err := core.ReadLeaseClaim(leaseID)
-	if err != nil {
-		return err
-	}
-	if claim.LeaseID == "" {
-		return nil
-	}
-	idleTimeout := timeoutOrDefault(b.cfg.IdleTimeout, time.Duration(claim.IdleTimeoutSeconds)*time.Second)
-	return core.ClaimLeaseForRepoProviderScopePond(claim.LeaseID, claim.Slug, providerName, claim.ProviderScope, claim.Pond, claim.RepoRoot, idleTimeout, false)
+	return shared.ValidateSandboxOwnershipMetadata(providerName, sb.ID, sb.Metadata, claim)
 }
 
 func (b *backend) cleanupCreateFailure(ctx context.Context, api vercelSandboxClient, sandboxID string, cause error) error {
@@ -676,22 +645,6 @@ func newSandboxName(repo core.Repo) string {
 		base = strings.Trim(base[:40], "-")
 	}
 	return "crabbox-" + base + "-" + shared.RandomSuffix()
-}
-
-func repoScope(repo core.Repo) string {
-	value := strings.TrimSpace(repo.Root)
-	if value == "" {
-		value = strings.TrimSpace(repo.Name)
-	}
-	sum := sha256.Sum256([]byte(value))
-	return "repo-sha256:" + hex.EncodeToString(sum[:8])
-}
-
-func timeoutOrDefault(primary, fallback time.Duration) time.Duration {
-	if primary > 0 {
-		return primary
-	}
-	return fallback
 }
 
 func vercelSandboxCommandEnv(env map[string]string) (map[string]string, []string) {

@@ -987,6 +987,7 @@ tenki_smoke() {
   local out
   capture_run out run_in_repo "$cb" warmup \
     --provider tenki \
+    --keep=false \
     --slug "${CRABBOX_LIVE_TENKI_SLUG:-tenki-smoke-$(date +%Y%m%d%H%M%S)-$$}" \
     --ttl "${CRABBOX_LIVE_TENKI_TTL:-15m}" \
     --idle-timeout "${CRABBOX_LIVE_TENKI_IDLE_TIMEOUT:-5m}" \

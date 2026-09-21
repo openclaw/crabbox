@@ -615,9 +615,7 @@ func waitOwnedSSHTransportCommand(ctx context.Context, handle *pondMeshExecHandl
 }
 
 func newOwnedSSHTransportCommand(ctx context.Context, target SSHTarget, args []string) *pondMeshExecHandle {
-	handle := pondMeshExecCommand(ctx, target.ChildEnvDenylist, directSSHExecutable(), args...).(*pondMeshExecHandle)
-	applyTargetChildEnvironment(handle.cmd, target)
-	return handle
+	return pondMeshExecCommand(ctx, target, directSSHExecutable(), args...)
 }
 
 func startOwnedSSHTransportSubsystem(ctx context.Context, target SSHTarget, connectTimeout, connectionAttempts, subsystem string, stderr io.Writer) (io.Reader, io.WriteCloser, func() error, error) {
@@ -953,13 +951,13 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 		writeSSHTransportLiteralConfigValue(&b, "UserKnownHostsFile", "/dev/null")
 		b.WriteString("  LogLevel ERROR\n")
 	} else {
-		if target.HostKeyAlias != "" || strings.TrimSpace(target.SSHHostKey) != "" {
+		if target.HostKeyAlias != "" || strings.TrimSpace(target.SSHHostKey) != "" || target.AuthoritativeKnownHosts {
 			b.WriteString("  StrictHostKeyChecking yes\n")
 		} else {
 			b.WriteString("  StrictHostKeyChecking accept-new\n")
 		}
 		writeSSHTransportLiteralConfigValue(&b, "UserKnownHostsFile", knownHostsFile(target))
-		if strings.TrimSpace(target.SSHHostKey) != "" {
+		if strings.TrimSpace(target.SSHHostKey) != "" || target.AuthoritativeKnownHosts {
 			b.WriteString("  GlobalKnownHostsFile none\n")
 			b.WriteString("  KnownHostsCommand none\n")
 			b.WriteString("  VerifyHostKeyDNS no\n")
@@ -987,7 +985,7 @@ func renderSSHTransportConfigWithRoute(target SSHTarget, localForward bool, rout
 	if hostKeyAlias != "" {
 		writeSSHTransportLiteralConfigValue(&b, "HostKeyAlias", hostKeyAlias)
 	}
-	if target.HostKeyAlias != "" || strings.TrimSpace(target.SSHHostKey) != "" {
+	if !target.AuthoritativeKnownHosts && (target.HostKeyAlias != "" || strings.TrimSpace(target.SSHHostKey) != "") {
 		writeSSHTransportLiteralConfigValue(&b, "HostKeyAlgorithms", sshHostKeyAlgorithms(target))
 	}
 	if proxyCommand != "" {
