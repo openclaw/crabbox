@@ -76,6 +76,9 @@ func (p FixedAdmission) permits(tx *FixedTransaction) bool {
 // Core generates nonces, assembles identity labels, and commits this plan before
 // admitting the provider mutation. Existing attempts are never regenerated.
 type FixedAttemptPlan struct {
+	JSONKey                      string
+	Payload                      any
+	NonceBytes                   int
 	Values                       map[string]string
 	NonceKey                     string
 	LowerNonce                   bool
@@ -103,12 +106,39 @@ func (tx *FixedTransaction) plan(plan FixedAttemptPlan) error {
 	}
 	if plan.NonceKey != "" {
 		nonce := rand.Text()
+		if plan.NonceBytes > 0 {
+			data := make([]byte, plan.NonceBytes)
+			if _, err := rand.Read(data); err != nil {
+				return err
+			}
+			nonce = hex.EncodeToString(data)
+		}
 		if plan.LowerNonce {
 			nonce = strings.ToLower(nonce)
 		}
 		attempt[plan.NonceKey] = plan.NoncePrefix + nonce
 	}
-	tx.Claim.FixedCreateIntent.Attempt = attempt
+	if plan.JSONKey != "" {
+		data, err := json.Marshal(plan.Payload)
+		if err != nil {
+			return err
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			return err
+		}
+		for key, value := range attempt {
+			data, _ := json.Marshal(value)
+			fields[key] = data
+		}
+		data, err = json.Marshal(fields)
+		if err != nil {
+			return err
+		}
+		tx.Claim.FixedCreateIntent.Attempt = map[string]string{plan.JSONKey: string(data)}
+	} else {
+		tx.Claim.FixedCreateIntent.Attempt = attempt
+	}
 	labels := maps.Clone(plan.Labels)
 	if plan.DirectLabels != nil {
 		d := plan.DirectLabels
@@ -137,6 +167,9 @@ func (tx *FixedTransaction) plan(plan FixedAttemptPlan) error {
 // FixedResourceBinding is evidence supplied by a native operation. Identity is
 // monotonic; even a rejected readiness check cannot erase a returned native ID.
 type FixedResourceBinding struct {
+	AttemptJSONKey       string
+	OnlyUnbound          bool
+	FingerprintLabel     string
 	CloudID, ImmutableID string
 	NumericID            int64
 	AttemptIdentityKey   string
@@ -147,6 +180,9 @@ type FixedResourceBinding struct {
 
 func (tx *FixedTransaction) applyBinding(b FixedResourceBinding) error {
 	c := tx.Claim
+	if b.OnlyUnbound && c.CloudID != "" {
+		return nil
+	}
 	if (b.CloudID != "" && c.CloudID != "" && c.CloudID != b.CloudID) ||
 		(b.ImmutableID != "" && c.CloudImmutableID != "" && c.CloudImmutableID != b.ImmutableID) ||
 		(b.NumericID != 0 && c.CloudNumericID != 0 && c.CloudNumericID != b.NumericID) {
@@ -162,11 +198,26 @@ func (tx *FixedTransaction) applyBinding(b FixedResourceBinding) error {
 		}
 		values[b.AttemptIdentityKey] = b.CloudID
 	}
+	attempt := c.FixedCreateIntent.Attempt
+	var payload map[string]json.RawMessage
+	if b.AttemptJSONKey != "" {
+		if err := json.Unmarshal([]byte(attempt[b.AttemptJSONKey]), &payload); err != nil {
+			return Exit(4, "lease_id_conflict: invalid fixed attempt payload")
+		}
+		attempt = map[string]string{}
+		for key, data := range payload {
+			var value string
+			if json.Unmarshal(data, &value) == nil {
+				attempt[key] = value
+			}
+		}
+	}
 	for key, value := range values {
-		if old := c.FixedCreateIntent.Attempt[key]; old != "" && old != value {
+		if old := attempt[key]; old != "" && old != value {
 			return Exit(4, "lease_id_conflict: fixed lease %s attempt %s changed", c.LeaseID, key)
 		}
 	}
+
 	if b.CloudID != "" {
 		c.CloudID = b.CloudID
 	}
@@ -180,10 +231,28 @@ func (tx *FixedTransaction) applyBinding(b FixedResourceBinding) error {
 		if c.FixedCreateIntent.Attempt == nil {
 			c.FixedCreateIntent.Attempt = map[string]string{}
 		}
-		maps.Copy(c.FixedCreateIntent.Attempt, values)
+		if b.AttemptJSONKey != "" {
+			for key, value := range values {
+				data, _ := json.Marshal(value)
+				payload[key] = data
+			}
+			data, err := json.Marshal(payload)
+			if err != nil {
+				return err
+			}
+			c.FixedCreateIntent.Attempt[b.AttemptJSONKey] = string(data)
+		} else {
+			maps.Copy(c.FixedCreateIntent.Attempt, values)
+		}
 	}
 	if b.Labels != nil {
 		c.Labels = maps.Clone(b.Labels)
+	}
+	if b.FingerprintLabel != "" {
+		if c.Labels == nil {
+			c.Labels = map[string]string{}
+		}
+		c.Labels[b.FingerprintLabel] = c.FixedCreateIntent.Fingerprint
 	}
 	if b.ProviderScope != "" {
 		c.ProviderScope = b.ProviderScope
@@ -209,11 +278,12 @@ func (tx *FixedTransaction) Admit() error {
 // adapters provide the schema key, required fields and cardinality constraints.
 // Missing old evidence is returned as missing, never synthesized from inventory.
 type FixedAttemptFormat struct {
-	JSONKey       string
-	ExactKeys     int
-	Required      []string
-	Equal         map[string]string
-	OptionalEqual map[string]string
+	Trimmed, SHA256 []string
+	JSONKey         string
+	ExactKeys       int
+	Required        []string
+	Equal           map[string]string
+	OptionalEqual   map[string]string
 }
 
 func ReadFixedAttempt[T any](intent *FixedCreateIntent, format FixedAttemptFormat) (*T, error) {
@@ -245,6 +315,16 @@ func ReadFixedAttempt[T any](intent *FixedCreateIntent, format FixedAttemptForma
 		return nil, err
 	}
 	stringValue := func(key string) string { var s string; _ = json.Unmarshal(fields[key], &s); return s }
+	for _, key := range format.Trimmed {
+		if value := stringValue(key); value != strings.TrimSpace(value) {
+			return nil, Exit(4, "lease_id_conflict: fixed attempt %s is not canonical", key)
+		}
+	}
+	for _, key := range format.SHA256 {
+		if !FixedSHA256(stringValue(key)) {
+			return nil, Exit(4, "lease_id_conflict: fixed attempt %s is not a canonical digest", key)
+		}
+	}
 	for _, key := range format.Required {
 		if stringValue(key) == "" {
 			return nil, Exit(4, "lease_id_conflict: fixed attempt is missing %s", key)
@@ -275,6 +355,8 @@ func WriteFixedAttempt(intent *FixedCreateIntent, key string, value any, persist
 // FixedClaimRules validates the local envelope independently of native reads.
 // Provider descriptors retain stricter legacy checks without private readers.
 type FixedClaimRules struct {
+	BoundLabels                                                      map[string]string
+	RequireBound, UnboundMustBeBare                                  bool
 	Kind                                                             FixedLeaseKind
 	States                                                           []string
 	Scope, IntentScope                                               string
@@ -303,6 +385,19 @@ func ValidateFixedClaim(c LeaseClaim, r FixedClaimRules) error {
 	}
 	if r.EmptyAttemptMustBePristine && len(i.Attempt) == 0 && (i.State != "prepared" || c.CloudID != "" || c.CloudNumericID != 0 || c.CloudImmutableID != "" || len(c.Labels) != 0 || c.SSHHost != "" || c.SSHPort != 0) {
 		return Exit(4, "lease_id_conflict: fixed lease %s has no durable attempt", c.LeaseID)
+	}
+	if r.RequireBound && c.CloudID == "" {
+		return Exit(4, "lease_id_conflict: fixed lease %s has no bound identity", c.LeaseID)
+	}
+	if c.CloudID == "" && r.UnboundMustBeBare && (i.State == "acquired" || len(c.Labels) != 0 || c.SSHHost != "" || c.SSHPort != 0) {
+		return Exit(4, "lease_id_conflict: fixed lease %s has inconsistent unbound identity", c.LeaseID)
+	}
+	if c.CloudID != "" {
+		for key, value := range r.BoundLabels {
+			if c.Labels[key] != value {
+				return Exit(4, "lease_id_conflict: fixed lease %s has inconsistent bound label %s", c.LeaseID, key)
+			}
+		}
 	}
 	return validateFixedJournal(i)
 }
@@ -348,4 +443,15 @@ func SelectFixedCandidate[T any](kind FixedLeaseKind, leaseID string, items []T,
 
 func FixedUncertainCustody(leaseID string) error {
 	return Exit(4, "lease_id_conflict: lease %s has an unattested creation attempt; claim, attempt and key retained; inspect the original provider resource before retrying", leaseID)
+}
+
+func BindFixedClaim(claim *LeaseClaim, binding FixedResourceBinding, persist func() error) error {
+	if binding.OnlyUnbound && claim.CloudID != "" {
+		return nil
+	}
+	tx, err := newFixedTransaction(claim, false, persist)
+	if err != nil {
+		return err
+	}
+	return tx.Bind(binding)
 }

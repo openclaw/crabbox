@@ -2,15 +2,12 @@ package tenki
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"reflect"
-	"strconv"
 	"strings"
 	"time"
 
@@ -88,7 +85,7 @@ func (b *tenkiBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
 		Kind: tenkiFixedKind, LeaseID: leaseID, RepoRoot: req.Repo.Root,
 		TargetOS: targetLinux, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout, Now: tenkiNow,
-	}, core.FixedLeaseOperations[tenkiSession]{DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
+	}, core.FixedLeaseOperations[tenkiSession]{Admission: &core.FixedAdmission{FreshOnly: true}, DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		if err := ctx.Err(); err != nil {
 			return core.FixedLeaseBinding{}, err
 		}
@@ -109,25 +106,14 @@ func (b *tenkiBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			return core.FixedObservation[tenkiSession]{}, err
 		}
 		return b.observeFixedSession(ctx, tx, mode)
-	}, PlanAttempt: func(ctx context.Context, tx *core.FixedTransaction) error {
-		var token [32]byte
-		if _, err := rand.Read(token[:]); err != nil {
-			return err
-		}
-		intent := tx.Claim.FixedCreateIntent
-		attempt := tenkiCreateAttempt{Name: core.LeaseProviderName(leaseID, intent.Slug), Token: hex.EncodeToString(token[:]), Route: tenkiFixedRoute(cfg),
-			Image: cfg.Tenki.Image, Snapshot: cfg.Tenki.Snapshot, CPUs: cfg.Tenki.CPUs, MemoryMB: cfg.Tenki.MemoryMB, DiskGB: cfg.Tenki.DiskGB, Keep: req.Keep}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		return saveTenkiAttempt(intent, attempt, func() error { return nil })
+	}, Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
+		return core.FixedAttemptPlan{JSONKey: "tenki", NonceKey: "token", NonceBytes: 32,
+			Payload: tenkiCreateAttempt{Name: core.LeaseProviderName(leaseID, claim.Slug), Route: tenkiFixedRoute(cfg),
+				Image: cfg.Tenki.Image, Snapshot: cfg.Tenki.Snapshot, CPUs: cfg.Tenki.CPUs, MemoryMB: cfg.Tenki.MemoryMB, DiskGB: cfg.Tenki.DiskGB, Keep: req.Keep}}, ctx.Err()
 	}, Submit: func(ctx context.Context, tx *core.FixedTransaction) (tenkiSession, error) {
 		intent := tx.Claim.FixedCreateIntent
 		attempt, err := b.fixedAttempt(*tx.Claim)
 		if err != nil {
-			return tenkiSession{}, err
-		}
-		if err := tx.Record("submitting"); err != nil {
 			return tenkiSession{}, err
 		}
 		fmt.Fprintf(b.rt.Stderr, "provisioning provider=tenki lease=%s slug=%s session=%s keep=%v fixed=true\n", leaseID, intent.Slug, attempt.Name, req.Keep)
@@ -136,8 +122,7 @@ func (b *tenkiBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		})
 		if created.ID != "" {
 			// Returned-ID evidence must survive cancellation before full attestation.
-			attempt.SessionID = created.ID
-			if err := saveTenkiAttempt(intent, *attempt, func() error { return tx.Record("submitting") }); err != nil {
+			if err := tx.Bind(core.FixedResourceBinding{AttemptJSONKey: "tenki", AttemptValues: map[string]string{"sessionId": created.ID}}); err != nil {
 				return tenkiSession{}, errors.Join(createErr, err)
 			}
 		}
@@ -157,63 +142,33 @@ func (b *tenkiBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		}
 		return b.prepareFixedLease(ctx, *tx.Claim, session)
 	}})
-	if err != nil {
-		fmt.Fprintf(b.rt.Stderr, "fixed Tenki lease %s acquisition failed; any recorded attempt is retained. Retry the same request or inspect/stop this ID after provider inventory converges\n", leaseID)
-		return core.LeaseTarget{}, err
-	}
-	// The callback can use claim APIs. It must run after the acquisition fence
-	// is released, and failure must not delete this single-use identity.
-	if req.OnAcquired != nil {
-		if err := req.OnAcquired(lease); err != nil {
-			return core.LeaseTarget{}, fmt.Errorf("acknowledge fixed Tenki acquisition: %w", err)
-		}
-	}
-	return lease, nil
+	return core.CompleteFixedAcquisition(lease, err, req)
 }
 
-func saveTenkiAttempt(intent *core.FixedCreateIntent, attempt tenkiCreateAttempt, persist func() error) error {
-	data, err := json.Marshal(attempt)
-	if err != nil {
-		return err
+func (b *tenkiBackend) fixedClaimRules(claim core.LeaseClaim) core.FixedClaimRules {
+	return core.FixedClaimRules{Kind: tenkiFixedKind, States: []string{"prepared", "acquired"},
+		Scope: (Provider{}).ClaimScope(b.configForRun()), IntentScope: claim.ProviderScope,
+		RequireCanonicalID: true, RequireSlug: true, RequireTimestamp: true, RequireSHA256: true,
+		NoCheckpoint: true, NoFailedAttempts: true, NoNumericID: true, SameImmutableID: true,
+		EmptyAttemptMustBePristine: true, UnboundMustBeBare: true,
+		BoundLabels: map[string]string{"tenki_session_id": claim.CloudID, tenkiFixedIntentLabel: claim.FixedCreateIntent.Fingerprint, tenkiFixedRouteLabel: tenkiFixedRoute(b.configForRun())},
 	}
-	intent.Attempt = map[string]string{"tenki": string(data)}
-	return persist()
-}
-
-func tenkiSHA256(value string) bool {
-	decoded, err := hex.DecodeString(value)
-	return err == nil && len(decoded) == sha256.Size && value == strings.ToLower(value)
 }
 
 func (b *tenkiBackend) fixedAttempt(claim core.LeaseClaim) (*tenkiCreateAttempt, error) {
-	intent := claim.FixedCreateIntent
-	if !core.IsCanonicalLeaseID(claim.LeaseID) || !tenkiFixedKind.IsFixedClaim(claim) || intent.Version != 1 || !tenkiSHA256(intent.Fingerprint) ||
-		intent.CheckpointID != "" || intent.Slug == "" || intent.Slug != claim.Slug || intent.ProviderScope != claim.ProviderScope ||
-		claim.ProviderScope != (Provider{}).ClaimScope(b.configForRun()) || (intent.State != "prepared" && intent.State != "acquired") ||
-		claim.CloudNumericID != 0 || claim.CloudImmutableID != claim.CloudID || len(intent.FailedAttempts) != 0 {
-		return nil, core.Exit(4, "lease_id_conflict: invalid fixed Tenki identity or provider scope for %s", claim.LeaseID)
+	if claim.FixedCreateIntent == nil {
+		return nil, core.FixedUncertainCustody(claim.LeaseID)
 	}
-	if _, err := time.Parse(time.RFC3339Nano, intent.CreatedAt); err != nil {
-		return nil, core.Exit(4, "lease_id_conflict: invalid fixed Tenki timestamp for %s", claim.LeaseID)
+	if err := core.ValidateFixedClaim(claim, b.fixedClaimRules(claim)); err != nil {
+		return nil, err
 	}
-	if len(intent.Attempt) == 0 {
-		if intent.State != "prepared" || claim.CloudID != "" || len(claim.Labels) != 0 || claim.SSHHost != "" || claim.SSHPort != 0 {
-			return nil, core.Exit(4, "lease_id_conflict: fixed Tenki lease %s has no durable attempt", claim.LeaseID)
-		}
-		return nil, nil
+	equal := map[string]string{"name": core.LeaseProviderName(claim.LeaseID, claim.Slug), "route": tenkiFixedRoute(b.configForRun())}
+	if claim.CloudID != "" {
+		equal["sessionId"] = claim.CloudID
 	}
-	var attempt tenkiCreateAttempt
-	if len(intent.Attempt) != 1 || json.Unmarshal([]byte(intent.Attempt["tenki"]), &attempt) != nil ||
-		attempt.Name != core.LeaseProviderName(claim.LeaseID, claim.Slug) || !tenkiSHA256(attempt.Token) || attempt.Route != tenkiFixedRoute(b.configForRun()) ||
-		(attempt.SessionID != "" && strings.TrimSpace(attempt.SessionID) != attempt.SessionID) ||
-		(claim.CloudID != "" && attempt.SessionID != claim.CloudID) ||
-		(claim.CloudID == "" && (intent.State == "acquired" || len(claim.Labels) != 0 || claim.SSHHost != "" || claim.SSHPort != 0)) {
-		return nil, core.Exit(4, "lease_id_conflict: invalid fixed Tenki attempt or changed connection configuration for %s", claim.LeaseID)
-	}
-	if claim.CloudID != "" && (claim.Labels["tenki_session_id"] != claim.CloudID || claim.Labels[tenkiFixedIntentLabel] != intent.Fingerprint || claim.Labels[tenkiFixedRouteLabel] != attempt.Route) {
-		return nil, core.Exit(4, "lease_id_conflict: fixed Tenki lease %s has inconsistent bound labels", claim.LeaseID)
-	}
-	return &attempt, nil
+	return core.ReadFixedAttempt[tenkiCreateAttempt](claim.FixedCreateIntent, core.FixedAttemptFormat{
+		JSONKey: "tenki", ExactKeys: 1, Equal: equal, SHA256: []string{"token"}, Trimmed: []string{"sessionId"},
+	})
 }
 
 func (b *tenkiBackend) validateFixedSession(claim core.LeaseClaim, session tenkiSession) error {
@@ -282,21 +237,18 @@ func (b *tenkiBackend) observeFixedSession(ctx context.Context, tx *core.FixedTr
 		return result, err
 	}
 	name := core.LeaseProviderName(claim.LeaseID, claim.Slug)
-	var candidate *tenkiSession
-	for _, session := range sessions {
-		matches := session.Name == name || session.Metadata[tenkiMetadataLease] == claim.LeaseID || (claim.CloudID != "" && session.ID == claim.CloudID)
-		if attempt != nil {
-			matches = matches || session.Metadata[tenkiMetadataAttempt] == attempt.Token || (attempt.SessionID != "" && session.ID == attempt.SessionID)
-		}
-		if !matches {
-			continue
-		}
-		if candidate != nil {
-			return result, core.Exit(4, "lease_id_conflict: multiple Tenki sessions match fixed lease %s", claim.LeaseID)
-		}
-		copy := session
-		candidate = &copy
+	selected, found, err := core.SelectFixedCandidate(tenkiFixedKind, claim.LeaseID, sessions, func(session tenkiSession) bool {
+		return session.Name == name || session.Metadata[tenkiMetadataLease] == claim.LeaseID || (claim.CloudID != "" && session.ID == claim.CloudID) ||
+			(attempt != nil && (session.Metadata[tenkiMetadataAttempt] == attempt.Token || (attempt.SessionID != "" && session.ID == attempt.SessionID)))
+	})
+	if err != nil {
+		return result, err
 	}
+	var candidate *tenkiSession
+	if found {
+		candidate = &selected
+	}
+
 	if attempt == nil {
 		if candidate != nil {
 			return result, core.Exit(4, "lease_id_conflict: Tenki session matches %s without a durable local attempt", claim.LeaseID)
@@ -336,18 +288,16 @@ func (b *tenkiBackend) bindFixedSession(claim *core.LeaseClaim, session tenkiSes
 	if err := b.validateFixedSession(*claim, session); err != nil {
 		return err
 	}
-	if claim.CloudID != "" {
-		return nil
-	}
 	attempt, err := b.fixedAttempt(*claim)
 	if err != nil {
 		return err
 	}
-	attempt.SessionID = session.ID
-	claim.CloudID, claim.CloudImmutableID = session.ID, session.ID
-	claim.Labels = b.sessionToServer(b.configForRun(), session, claim.LeaseID, claim.Slug, attempt.Keep).Labels
-	claim.Labels[tenkiFixedIntentLabel], claim.Labels[tenkiFixedRouteLabel] = claim.FixedCreateIntent.Fingerprint, attempt.Route
-	return saveTenkiAttempt(claim.FixedCreateIntent, *attempt, persist)
+	labels := b.sessionToServer(b.configForRun(), session, claim.LeaseID, claim.Slug, attempt.Keep).Labels
+	labels[tenkiFixedRouteLabel] = attempt.Route
+	return core.BindFixedClaim(claim, core.FixedResourceBinding{OnlyUnbound: true,
+		CloudID: session.ID, ImmutableID: session.ID, AttemptJSONKey: "tenki", AttemptIdentityKey: "sessionId",
+		Labels: labels, FingerprintLabel: tenkiFixedIntentLabel,
+	}, persist)
 }
 
 func (b *tenkiBackend) fixedServer(claim core.LeaseClaim, session tenkiSession) core.Server {
@@ -424,95 +374,58 @@ func (b *tenkiBackend) fixedClaimForIdentifier(identifier string) (core.LeaseCla
 }
 
 func (b *tenkiBackend) resolveFixed(ctx context.Context, req core.ResolveRequest, expected core.LeaseClaim) (core.LeaseTarget, error) {
-	var lease core.LeaseTarget
-	err := core.WithDurableLeaseClaimLockContext(ctx, expected.LeaseID, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
-		if !exists || !reflect.DeepEqual(*claim, expected) {
-			return core.Exit(4, "lease_id_conflict: fixed Tenki claim changed during resolution; retry")
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if req.Repo.Root != "" && claim.RepoRoot != req.Repo.Root {
-			return core.Exit(4, "lease_id_conflict: fixed Tenki lease %s belongs to another repository", claim.LeaseID)
-		}
-		if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.State == "released" {
-			if err := tenkiFixedKind.ValidateTerminalClaim(*claim, core.LeaseClaim{}, claim.LeaseID, b.validateTerminalClaim); err != nil {
-				return err
-			}
-			if !req.StatusOnly && !req.ReleaseOnly {
-				return core.Exit(4, "lease_id_conflict: fixed Tenki lease %s is terminal", claim.LeaseID)
-			}
-			labels := maps.Clone(claim.Labels)
-			labels["lease"], labels["slug"], labels["provider"], labels["state"] = claim.LeaseID, claim.Slug, tenkiProvider, "terminated"
-			lease = core.LeaseTarget{LeaseID: claim.LeaseID, Server: core.Server{CloudID: claim.CloudID, ImmutableID: claim.CloudImmutableID, Provider: tenkiProvider, Name: core.LeaseProviderName(claim.LeaseID, claim.Slug), Status: "terminated", Labels: labels}}
-			core.SetServerLeaseClaimSnapshot(&lease.Server, *claim, true)
-			return nil
-		}
+	return core.ResolveFixedLeaseTarget(ctx, core.FixedResolveOptions{Kind: tenkiFixedKind, Request: req, Expected: expected,
+		Provider: tenkiProvider, ResourceName: core.LeaseProviderName(expected.LeaseID, expected.Slug), TerminalState: "terminated",
+		ValidateTerminal: b.validateTerminalClaim, Now: tenkiNow,
+	}, func(ctx context.Context, claim *core.LeaseClaim, persist func() error) (core.LeaseTarget, error) {
 		session, err := b.resolveFixedSession(ctx, *claim)
 		if err != nil {
-			return err
+			return core.LeaseTarget{}, err
 		}
 		if session.ID == "" {
-			return core.Exit(4, "lease_id_conflict: fixed Tenki lease %s has no observed session; retain its claim", claim.LeaseID)
+			return core.LeaseTarget{}, core.FixedUncertainCustody(claim.LeaseID)
 		}
-		if !req.StatusOnly && !req.ReleaseOnly {
-			if err := rejectTerminalTenkiSession(session); err != nil {
-				return err
-			}
-			if req.NoLocalStateMutations {
-				return core.Exit(4, "fixed Tenki command preparation requires durable identity binding")
-			}
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := core.AuthorizeCheckpointRelease(*claim, ""); err != nil {
-				return err
-			}
-			if err := b.bindFixedSession(claim, session, persist); err != nil {
-				return err
-			}
-			lease, err = b.prepareFixedLease(ctx, *claim, session)
-			if err != nil {
-				return err
-			}
-			claim.Labels, claim.SSHHost = maps.Clone(lease.Server.Labels), lease.SSH.Host
-			claim.SSHPort, _ = strconv.Atoi(lease.SSH.Port)
-			claim.LastUsedAt = tenkiNow().UTC().Format(time.RFC3339)
-			claim.FixedCreateIntent.State = "acquired"
-			if err := persist(); err != nil {
-				return err
-			}
-		} else {
-			// Inspection and release resolution do not resume, bind, or renew a claim.
-			lease = core.LeaseTarget{LeaseID: claim.LeaseID, Server: b.fixedServer(*claim, session)}
-			if claim.CloudID != "" && (req.ReadyProbe || req.IncludeDiagnostics) && tenkiSessionReady(session) {
-				lease.SSH, err = b.resolveSSHTarget(ctx, b.configForRun(), session.ID)
-				if err != nil {
-					return err
-				}
-				observed, err := b.getSession(ctx, session.ID)
-				if err != nil {
-					return err
-				}
-				if observed.ID != session.ID {
-					return core.Exit(4, "lease_id_conflict: Tenki inspection session identity changed")
-				}
-				if err := b.validateFixedSession(*claim, observed); err != nil {
-					return err
-				}
-				lease.Server = b.fixedServer(*claim, observed)
-				if !tenkiSessionReady(observed) {
-					lease.SSH = core.SSHTarget{}
-				}
-			}
+		if err := rejectTerminalTenkiSession(session); err != nil {
+			return core.LeaseTarget{}, err
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return core.LeaseTarget{}, err
 		}
-		core.SetServerLeaseClaimSnapshot(&lease.Server, *claim, true)
-		return nil
+		if err := b.bindFixedSession(claim, session, persist); err != nil {
+			return core.LeaseTarget{}, err
+		}
+		return b.prepareFixedLease(ctx, *claim, session)
+	}, func(ctx context.Context, claim core.LeaseClaim) (core.LeaseTarget, error) {
+		session, err := b.resolveFixedSession(ctx, claim)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if session.ID == "" {
+			return core.LeaseTarget{}, core.FixedUncertainCustody(claim.LeaseID)
+		}
+		lease := core.LeaseTarget{LeaseID: claim.LeaseID, Server: b.fixedServer(claim, session)}
+		if claim.CloudID != "" && (req.ReadyProbe || req.IncludeDiagnostics) && tenkiSessionReady(session) {
+			lease.SSH, err = b.resolveSSHTarget(ctx, b.configForRun(), session.ID)
+			if err != nil {
+				return core.LeaseTarget{}, err
+			}
+			observed, err := b.getSession(ctx, session.ID)
+			if err != nil {
+				return core.LeaseTarget{}, err
+			}
+			if observed.ID != session.ID {
+				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Tenki inspection session identity changed")
+			}
+			if err := b.validateFixedSession(claim, observed); err != nil {
+				return core.LeaseTarget{}, err
+			}
+			lease.Server = b.fixedServer(claim, observed)
+			if !tenkiSessionReady(observed) {
+				lease.SSH = core.SSHTarget{}
+			}
+		}
+		return lease, nil
 	})
-	return lease, err
 }
 
 // Renew only the exact durable local claim after a fresh identity check.
@@ -549,16 +462,10 @@ func (b *tenkiBackend) touchFixed(ctx context.Context, req core.TouchRequest) (c
 }
 
 func (b *tenkiBackend) validateTerminalClaim(claim core.LeaseClaim) error {
-	if !core.IsCanonicalLeaseID(claim.LeaseID) || claim.CloudID == "" || claim.CloudImmutableID != claim.CloudID || claim.CloudNumericID != 0 ||
-		claim.ProviderScope != (Provider{}).ClaimScope(b.configForRun()) || claim.Labels["tenki_session_id"] != claim.CloudID ||
-		claim.Labels[tenkiFixedIntentLabel] != claim.FixedCreateIntent.Fingerprint || !tenkiSHA256(claim.FixedCreateIntent.Fingerprint) ||
-		claim.Labels[tenkiFixedRouteLabel] != tenkiFixedRoute(b.configForRun()) || claim.FixedCreateIntent.CheckpointID != "" {
-		return core.Exit(4, "lease_id_conflict: fixed Tenki lease %s has an invalid terminal receipt or changed connection configuration", claim.LeaseID)
-	}
-	if _, err := time.Parse(time.RFC3339Nano, claim.FixedCreateIntent.CreatedAt); err != nil {
-		return core.Exit(4, "lease_id_conflict: invalid terminal Tenki create timestamp")
-	}
-	return nil
+	rules := b.fixedClaimRules(claim)
+	rules.States, rules.RequireBound, rules.EmptyAttemptMustBePristine = []string{"released"}, true, false
+	rules.RequireSlug = false
+	return core.ValidateFixedClaim(claim, rules)
 }
 
 func (b *tenkiBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {

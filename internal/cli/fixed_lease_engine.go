@@ -194,6 +194,9 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 				if err != nil {
 					return LeaseTarget{}, err
 				}
+				if err := ctx.Err(); err != nil {
+					return LeaseTarget{}, err
+				}
 				if err := tx.plan(plan); err != nil {
 					return LeaseTarget{}, err
 				}
