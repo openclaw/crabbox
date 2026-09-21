@@ -163,7 +163,11 @@ late-created billable instance can still be reconciled.
 When acquisition rollback fails, Crabbox retains the original failure cause and
 exit-code precedence and reports the cleanup failure separately. It does not
 automatically retry that acquisition with a fresh instance after failed cleanup;
-successful rollback still permits the existing bootstrap retry behavior.
+successful rollback still permits the existing bootstrap retry behavior. If the
+recovery claim also cannot be saved, that failure is included in the cleanup
+diagnostic. Typed acquisition errors take precedence over cleanup errors, which
+take precedence over claim-write errors; an otherwise untyped failure can thus
+report the claim-write exit code (2).
 
 ## Ownership And Cleanup
 

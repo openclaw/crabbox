@@ -977,6 +977,76 @@ func TestAcquireCleanupErrorPreservesCausesAndVetoesRetry(t *testing.T) {
 	}
 }
 
+func TestAcquireRetainsRecoveryClaimFailureWhenRollbackFails(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		primary, cleanup error
+		wantCode         int
+	}{
+		{name: "primary exit wins", primary: core.Exit(5, "timed out waiting for SSH"), cleanup: core.Exit(9, "cleanup unavailable"), wantCode: 5},
+		{name: "cleanup exit wins over claim", primary: context.Canceled, cleanup: core.Exit(9, "cleanup unavailable"), wantCode: 9},
+		{name: "claim exit surfaced", primary: context.Canceled, cleanup: errors.New("cleanup unavailable"), wantCode: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeLambdaAPI{terminateErr: tc.cleanup}
+			b := newTestBackend(t, api)
+			var stderr bytes.Buffer
+			b.rt.Stderr = &stderr
+			var keyPath string
+			_, err := b.Acquire(t.Context(), core.AcquireRequest{
+				Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "claim-failure",
+				OnAcquired: func(acquired core.LeaseTarget) error {
+					keyPath = acquired.SSH.Key
+					stateDir, pathErr := core.CrabboxStateDir()
+					if pathErr != nil {
+						t.Fatal(pathErr)
+					}
+					if writeErr := os.WriteFile(filepath.Join(stateDir, "claims"), []byte("block claim directory"), 0o600); writeErr != nil {
+						t.Fatal(writeErr)
+					}
+					return tc.primary
+				},
+			})
+			if !errors.Is(err, tc.primary) || !errors.Is(err, tc.cleanup) || core.ExitCodeForError(err, 1) != tc.wantCode || len(api.launchRequests) != 1 {
+				t.Fatalf("err=%v code=%d wantCode=%d launches=%d", err, core.ExitCodeForError(err, 1), tc.wantCode, len(api.launchRequests))
+			}
+			if !strings.Contains(err.Error(), "persist lambda rollback cleanup claim: create claim directory:") || !strings.Contains(stderr.String(), "refusing a fresh lease retry") || !strings.Contains(stderr.String(), "create claim directory:") || strings.Contains(stderr.String(), "retrying with fresh lease") {
+				t.Fatalf("err=%v warning=%q", err, stderr.String())
+			}
+			if _, statErr := os.Stat(keyPath); statErr != nil {
+				t.Fatalf("retained key missing: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestAcquireIgnoresRecoveryClaimFailureAfterSuccessfulRollback(t *testing.T) {
+	api := &fakeLambdaAPI{}
+	b := newTestBackend(t, api)
+	primary := core.Exit(5, "timed out waiting for SSH")
+	var keyPath string
+	_, err := b.acquireOnce(t.Context(), core.AcquireRequest{
+		Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "claim-cleaned",
+		OnAcquired: func(acquired core.LeaseTarget) error {
+			keyPath = acquired.SSH.Key
+			stateDir, pathErr := core.CrabboxStateDir()
+			if pathErr != nil {
+				t.Fatal(pathErr)
+			}
+			if writeErr := os.WriteFile(filepath.Join(stateDir, "claims"), []byte("block claim directory"), 0o600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			return primary
+		},
+	})
+	if err != primary || !core.IsBootstrapWaitError(err) || len(api.terminatedIDs) != 1 || len(api.deletedKeyIDs) != 1 {
+		t.Fatalf("err=%v terminated=%v keys=%v", err, api.terminatedIDs, api.deletedKeyIDs)
+	}
+	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("key should be removed after successful rollback: %v", statErr)
+	}
+}
+
 func TestAcquireStillRetriesAfterSuccessfulRollback(t *testing.T) {
 	// Give the retry a distinct instance ID in the existing fake.
 	api := &fakeLambdaAPI{nextInstanceID: 1}

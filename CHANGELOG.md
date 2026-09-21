@@ -166,7 +166,7 @@
 
 ### Fixes
 
-- Preserve Lambda acquisition failure causes and exit codes when rollback fails, and explicitly block automatic fresh-allocation retries after failed cleanup.
+- Preserve Lambda acquisition causes when rollback fails, report recovery-claim write failures, and block automatic fresh-allocation retries after failed cleanup. [PR 2463](https://github.com/openclaw/crabbox/pull/2463).
 
 - Retain DigitalOcean managed SSH keys and recovery credentials when acquisition rollback cannot delete the Droplet, allowing cleanup to be retried safely. [PR 2459](https://github.com/openclaw/crabbox/pull/2459).
 - Preserve DigitalOcean acquisition cancellation causes and timeout exit codes, including failed rollback, and suppress automatic fresh-allocation retries after cleanup failure. [PR 2460](https://github.com/openclaw/crabbox/pull/2460).

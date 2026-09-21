@@ -152,9 +152,12 @@ func (b *backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 			core.RemoveStoredTestboxKey(leaseID)
 			return
 		}
-		_ = b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, key, instanceID, "rollback-cleanup", req.Keep, now)
+		claimErr := b.persistRecoveryClaim(leaseID, slug, cfg, req.Repo.Root, key, instanceID, "rollback-cleanup", req.Keep, now)
 		cleanupErr := rollbackLambdaAcquire(client, instanceID, key)
 		if cleanupErr != nil {
+			if claimErr != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("persist lambda rollback cleanup claim: %w", claimErr))
+			}
 			err = shared.JoinAcquireCleanupError(err, fmt.Errorf("lambda cleanup failed: %w", cleanupErr))
 			return
 		}
