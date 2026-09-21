@@ -50,7 +50,7 @@ func TestD2ObservationPrecedence(t *testing.T) {
 			if !running {
 				native = "stopped"
 			}
-			claim := core.LeaseClaim{Provider: providerName, LeaseID: "cbx_d2", CloudImmutableID: "immutable", SSHHost: "192.0.2.1", LastUsedAt: "2026-09-01T00:00:00Z", IdleTimeoutSeconds: 60, Labels: map[string]string{"state": stored, "provider": "stored-provider", "custom": "value"}}
+			claim := core.LeaseClaim{Provider: providerName, LeaseID: "cbx_d2", CloudImmutableID: "immutable", SSHHost: "192.0.2.1", LastUsedAt: "2026-09-01T00:00:00Z", IdleTimeoutSeconds: 60, Labels: map[string]string{"state": stored, "provider": "stored-provider", "custom": "value", "last_touched_at": "1788220740"}}
 			view := b.serverFromInstance(applevmhelper.Instance{Name: "crabbox-d2", Status: native, SSHHost: "192.0.2.1"}, claim, cfg)
 			wantStatus := "stopped"
 			if running {
@@ -66,8 +66,8 @@ func TestD2ObservationPrecedence(t *testing.T) {
 			if view.CloudID != "crabbox-d2" || view.Name != view.CloudID || view.Provider != providerName || view.Labels["custom"] != "value" {
 				t.Fatalf("view=%#v", view)
 			}
-			if (view.Labels["last_touched_at"] != "") != false {
-				t.Fatalf("unexpected lifecycle synthesis: %v", view.Labels)
+			if view.Labels["last_touched_at"] != "1788220740" {
+				t.Fatalf("stored last-use label was replaced: %v", view.Labels)
 			}
 			if view.Labels["provider"] != "stored-provider" {
 				t.Fatalf("provider label=%q", view.Labels["provider"])
