@@ -215,6 +215,9 @@ func fixedObservationConflict[T any](kind FixedLeaseKind, leaseID string, observ
 // InspectFixedResource does not journal or prepare access. Provider observations
 // cannot accidentally publish a binding through a read-only operation.
 func InspectFixedResource[T any](ctx context.Context, kind FixedLeaseKind, claim LeaseClaim, ops FixedLeaseOperations[T]) (FixedObservation[T], error) {
+	if !kind.IsFixedClaim(claim) || claim.FixedCreateIntent.Version != kind.IntentVersion || ops.ObserveExact == nil {
+		return FixedObservation[T]{}, Exit(4, "lease_id_conflict: fixed inspection has no matching ownership dialect")
+	}
 	claim.Labels = maps.Clone(claim.Labels)
 	if claim.FixedCreateIntent != nil {
 		i := *claim.FixedCreateIntent
@@ -241,6 +244,9 @@ func InspectFixedResource[T any](ctx context.Context, kind FixedLeaseKind, claim
 // deletion, and terminal publication. Native DeleteExact must attest completion,
 // including any child resources, before returning nil.
 func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expected LeaseClaim, ops FixedLeaseOperations[T], clock ...func() time.Time) error {
+	if !kind.IsFixedClaim(expected) || expected.FixedCreateIntent.Version != kind.IntentVersion {
+		return Exit(4, "lease_id_conflict: fixed deletion has no matching ownership dialect")
+	}
 	if ops.ObserveExact == nil || ops.DeleteExact == nil {
 		return fmt.Errorf("fixed lease engine requires observation and exact deletion")
 	}

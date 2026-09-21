@@ -82,7 +82,7 @@ for scope checks and foreground deletion requirements.
 
 The shared fixed-lease transaction engine records a versioned journal alongside
 the existing normalized intent, native attempt, and terminal receipt fields.
-Parallels, Tenki, Proxmox, and Incus use this engine for acquisition and deletion. Existing records remain
+Parallels, Tenki, Proxmox, Incus, and Azure use this engine for acquisition and deletion. Existing records remain
 readable; upgrading a record preserves its fingerprint and native ownership
 evidence. Uncertain submission and deletion retain custody, and a released ID
 cannot be allocated again. Native adapters still attest account scope, resource
