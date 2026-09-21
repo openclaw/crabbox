@@ -11,8 +11,8 @@ to the local `brev` CLI to create, list, refresh, stop, and delete Brev
 workspaces. After Brev writes its SSH config, Crabbox uses the normal SSH
 transport for sync, `run`, `ssh`, `status`, `list`, and `stop`.
 
-Crabbox does not store or accept Brev secrets. Authentication stays in the Brev
-CLI's own credential store.
+Crabbox does not store Brev credentials or accept them as flags. Authentication
+stays with the Brev CLI.
 
 For headless use, Brev also accepts `BREV_API_KEY` in the environment. This
 overrides saved Brev credentials. Crabbox asks `brev org ls` for that key's
@@ -152,8 +152,9 @@ CRABBOX_NVIDIA_BREV_WORK_ROOT
 
 `nvidiaBrev.org` scopes read-only inventory through `brev ls --org`. Brev's
 mutating commands and `brev refresh` do not accept that selector, so Crabbox
-rejects lifecycle and SSH resolution when `org` is configured. Use `brev set`
-to select the active organization before running mutating Crabbox commands.
+rejects lifecycle and SSH resolution when `org` is configured. Use credentials
+for the desired organization before running mutating Crabbox commands. OAuth
+users select it with `brev set`; an environment `BREV_API_KEY` takes precedence.
 
 ## Lifecycle
 
