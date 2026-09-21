@@ -311,17 +311,22 @@ func ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, slug, provider, provide
 	})
 }
 
+// ClaimLeaseForRepoProviderScopePondEndpointIfUnchanged publishes an endpoint
+// and repository binding without replacing unrelated metadata such as mounts.
+func ClaimLeaseForRepoProviderScopePondEndpointIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	return claimLeaseForRepoProviderScopePondEndpointIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target, expected, expectedExists, claimMetadata{})
+}
+
 func ClaimLeaseForRepoProviderScopePondEndpointReservationIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget, reservationLabel string, reservationDuration time.Duration, expected leaseClaim, expectedExists bool) (leaseClaim, error) {
+	return claimLeaseForRepoProviderScopePondEndpointIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot, idleTimeout, reclaim, server, target, expected, expectedExists, claimMetadata{reservationLabel: reservationLabel, reservationDuration: reservationDuration})
+}
+
+func claimLeaseForRepoProviderScopePondEndpointIfUnchanged(leaseID, slug, provider, providerScope, pond, repoRoot string, idleTimeout time.Duration, reclaim bool, server Server, target SSHTarget, expected leaseClaim, expectedExists bool, metadata claimMetadata) (leaseClaim, error) {
 	var updated leaseClaim
-	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, claimMetadata{
-		setEndpoint:         true,
-		server:              server,
-		target:              target,
-		reservationLabel:    reservationLabel,
-		reservationDuration: reservationDuration,
-		guard:               unchangedLeaseClaimGuard(leaseID, expected, expectedExists),
-		result:              &updated,
-	})
+	metadata.setEndpoint, metadata.server, metadata.target = true, server, target
+	metadata.guard = unchangedLeaseClaimGuard(leaseID, expected, expectedExists)
+	metadata.result = &updated
+	err := claimLeaseForRepoProviderScopePondDetailsMetadata(leaseID, slug, provider, providerScope, pond, staticClaimDetails{}, repoRoot, idleTimeout, reclaim, metadata)
 	return updated, err
 }
 

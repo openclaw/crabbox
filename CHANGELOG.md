@@ -15,6 +15,8 @@
 - Keep workspace-owner SSH control traffic separate from workload connections while preserving renewal deadlines and ownership checks. [PR 2419](https://github.com/openclaw/crabbox/pull/2419). Thanks @steipete.
 - Explain Parallels IP discovery timeouts with clone mode, NIC details, and retry-time console guidance while preserving cleanup and clone defaults. [PR 2415](https://github.com/openclaw/crabbox/pull/2415), [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
 - Distinguish unavailable Parallels IP observations from missing DHCP records and explain how to clear snapshot selectors for full-clone retries. [PR 2422](https://github.com/openclaw/crabbox/pull/2422).
+- Multipass: preserve ready status endpoints, persist heartbeat timeout changes across fresh reads, and retain recovery keys when failed provisioning cannot be rolled back.
+
 - Restore Lume guest bootstrap with named shared directories, authenticated status readiness, and cleanup with quiet partial-match `lsof` output; existing golden images need refreshed hooks. [PR 2409](https://github.com/openclaw/crabbox/pull/2409).
 - Lume: persist heartbeat policy across fresh reads, honor explicit idle-timeout changes, and admit owned instance-scoped leases through the public heartbeat command. [PR 2407](https://github.com/openclaw/crabbox/pull/2407).
 - Persist Tart heartbeat timestamps and explicit idle-timeout changes in the lease claim, preserving them across fresh status reads and cleanup without losing SSH target details. [PR 2405](https://github.com/openclaw/crabbox/pull/2405).
