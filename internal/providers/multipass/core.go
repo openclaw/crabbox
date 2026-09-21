@@ -10,14 +10,8 @@ const (
 	sshPort      = "22"
 )
 
-var claimLeaseForRepoProviderScopePond = core.ClaimLeaseForRepoProviderScopePond
-
-var claimLeaseForRepoProviderScopePondEndpoint = core.ClaimLeaseForRepoProviderScopePondEndpoint
+var claimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged = core.ClaimLeaseTargetForRepoConfigScopeReplacingEndpointIfUnchanged
 
 var removeLeaseClaim = core.RemoveLeaseClaim
-
-var updateLeaseClaimEndpoint = core.UpdateLeaseClaimEndpoint
-
-var updateLeaseClaimCacheVolumes = core.UpdateLeaseClaimCacheVolumes
 
 var waitForSSHReady = core.WaitForSSHReady
