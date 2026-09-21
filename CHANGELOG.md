@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Refresh Go and Worker dependencies, including current Azure SDK majors, regexp2 v2, and Vitest 5; update SHA-pinned CI actions and runtime image digests, and move the Node coordinator image to Node 24 LTS while retaining Go 1.26.5 compatibility.
+
 ### Features
 
 - Support retry-safe Tenki fixed lease IDs with durable attempt recovery, exact-session attestation, read-only inspection, and single-use terminal receipts; honor acquisition cancellation and locate uploaded scripts after login startup changes directory. [PR 2021](https://github.com/openclaw/crabbox/pull/2021). Thanks @eddiewang.
