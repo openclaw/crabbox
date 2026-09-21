@@ -35,9 +35,11 @@ at `root@<publicIp>:<publicPort>` and uses its standard SSH transport. RunPod's
 basic SSH proxy is not used, because rsync needs the SCP/SFTP support the proxy
 lacks.
 
-**SSH auth is public-key only.** Upload your ED25519 public key on the RunPod
-settings page once; RunPod injects it into every pod you launch. Crabbox does
-not manage that key.
+**SSH auth is public-key only.** Crabbox reads the public key matching its
+configured SSH key and supplies it to the pod as `PUBLIC_KEY`. The default image
+installs that key for SSH; a custom image must honor `PUBLIC_KEY` and start SSH.
+Provide an existing key with `ssh.key` in config or `CRABBOX_SSH_KEY`; the default is
+`~/.ssh/id_ed25519`. A matching public-key file must exist alongside it.
 
 ### Lifecycle
 
@@ -207,8 +209,6 @@ it directly in RunPod.
 - A funded RunPod account is required. `crabbox doctor --provider runpod`
   succeeds on a zero-balance account because it only reads the pod list — the
   balance shortfall only surfaces when an `Acquire` runs.
-- Upload your ED25519 public key to RunPod once before any pod bootstrap will
-  accept your SSH session.
 - The pod's public SSH port is allocated at runtime and changes between pods;
   never hard-code `--ssh-port`.
 - RunPod's basic SSH proxy is not a Crabbox transport, because rsync needs
