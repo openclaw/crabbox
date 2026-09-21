@@ -483,8 +483,7 @@ const leaseCleanupBatchSize = 16;
 const interruptedProvisioningDeploySettleMs = 5 * 60 * 1000;
 const interruptedProvisioningAbsenceConfirmationMs = 30 * 60 * 1000;
 const interruptedProvisioningRecoveryBatchSize = 16;
-const awsOrphanSweepInitialDelayMs = 60 * 1000;
-const azureOrphanSweepInitialDelayMs = 60 * 1000;
+const orphanSweepInitialDelayMs = 60 * 1000;
 const defaultAWSOrphanSweepIntervalSeconds = 60 * 60;
 const defaultAWSOrphanSweepGraceSeconds = 15 * 60;
 const defaultAzureOrphanSweepIntervalSeconds = 60 * 60;
@@ -883,16 +882,11 @@ interface LeaseCloudAudit {
   message?: string;
 }
 
-interface AWSOrphanSweepConfig {
-  enabled: boolean;
-  deleteEnabled: boolean;
+interface AWSOrphanSweepConfig extends CloudOrphanSweepConfig {
   macHostReleaseEnabled: boolean;
-  intervalSeconds: number;
-  graceSeconds: number;
-  regions: string[];
 }
 
-interface AzureOrphanSweepConfig {
+interface CloudOrphanSweepConfig {
   enabled: boolean;
   deleteEnabled: boolean;
   intervalSeconds: number;
@@ -976,24 +970,13 @@ interface AWSMacHostSweepCandidate {
   error?: string;
 }
 
-interface AWSOrphanSweepRecord {
-  startedAt: string;
-  finishedAt: string;
-  mode: "report" | "delete";
-  trigger: "alarm" | "admin";
-  enabled: boolean;
-  regions: string[];
-  scanned: number;
-  candidates: AWSOrphanSweepCandidate[];
-  terminated: number;
+interface AWSOrphanSweepRecord extends CloudOrphanSweepRecord {
   macHostsScanned?: number;
   macHostCandidates?: AWSMacHostSweepCandidate[];
   macHostsReleased?: number;
-  errors: Array<{ region: string; message: string }>;
-  nextRunAt?: string;
 }
 
-interface AzureOrphanSweepRecord {
+interface CloudOrphanSweepRecord {
   startedAt: string;
   finishedAt: string;
   mode: "report" | "delete";
@@ -1840,37 +1823,16 @@ export class FleetCoordinator {
     return await entry.load;
   }
 
-  private async activeOwnerDevices(owner: string, org: string): Promise<DeviceTokenRecord[]> {
-    const indexes = await this.state.storage.list<DeviceOwnerIndexRecord>({
+  private activeOwnerDevices(owner: string, org: string): Promise<DeviceTokenRecord[]> {
+    return this.activeOwnerIndexedRecords(owner, org, {
       prefix: deviceOwnerIndexPrefix(owner, org),
-      limit: maxDeviceTokensPerOwner + 1,
-      noCache: true,
+      max: maxDeviceTokensPerOwner,
+      id: (index: DeviceOwnerIndexRecord) => index.deviceID,
+      validIndex: validDeviceOwnerIndexRecord,
+      recordKey: deviceTokenKey,
+      validRecord: validStoredDeviceTokenRecord,
+      now: () => Date.now(),
     });
-    const records = await Promise.all(
-      [...indexes.entries()].map(async ([indexKey, index]) => {
-        if (!validDeviceOwnerIndexRecord(index, index.deviceID)) {
-          await this.state.storage.delete(indexKey);
-          return undefined;
-        }
-        const key = deviceTokenKey(index.deviceID);
-        const record = await this.state.storage.get<DeviceTokenRecord>(key, { noCache: true });
-        if (
-          !record ||
-          !validStoredDeviceTokenRecord(record, index.deviceID) ||
-          record.owner !== owner ||
-          record.org !== org
-        ) {
-          await this.state.storage.delete(indexKey);
-          return undefined;
-        }
-        if (Date.parse(record.expiresAt) <= Date.now()) {
-          await Promise.all([this.state.storage.delete(indexKey), this.state.storage.delete(key)]);
-          return undefined;
-        }
-        return record;
-      }),
-    );
-    return records.filter((record): record is DeviceTokenRecord => record !== undefined);
   }
 
   private async revokeDeviceRecord(record: DeviceTokenRecord): Promise<void> {
@@ -1879,41 +1841,69 @@ export class FleetCoordinator {
     await this.state.storage.delete(deviceOwnerIndexKey(record.owner, record.org, record.id));
   }
 
-  private async activeOwnerPairingGrants(
+  private activeOwnerPairingGrants(
     owner: string,
     org: string,
     now: number,
   ): Promise<PairingGrantRecord[]> {
-    const indexes = await this.state.storage.list<PairingGrantOwnerIndexRecord>({
+    return this.activeOwnerIndexedRecords(owner, org, {
       prefix: pairingGrantOwnerIndexPrefix(owner, org),
-      limit: maxPairingGrantsPerOwner + 1,
+      max: maxPairingGrantsPerOwner,
+      id: (index: PairingGrantOwnerIndexRecord) => index.grantHash,
+      validIndex: validPairingGrantOwnerIndexRecord,
+      recordKey: pairingGrantKey,
+      validRecord: validPairingGrantRecord,
+      now: () => now,
+    });
+  }
+
+  private async activeOwnerIndexedRecords<
+    I,
+    R extends { owner: string; org: string; expiresAt: string },
+  >(
+    owner: string,
+    org: string,
+    options: {
+      prefix: string;
+      max: number;
+      id: (index: I) => string;
+      validIndex: (index: I, id: string) => boolean;
+      recordKey: (id: string) => string;
+      validRecord: (record: R, id: string) => boolean;
+      now: () => number;
+    },
+  ): Promise<R[]> {
+    const indexes = await this.state.storage.list<I>({
+      prefix: options.prefix,
+      limit: options.max + 1,
       noCache: true,
     });
     const records = await Promise.all(
       [...indexes.entries()].map(async ([indexKey, index]) => {
-        if (!validPairingGrantOwnerIndexRecord(index, index.grantHash)) {
+        const id = options.id(index);
+        if (!options.validIndex(index, id)) {
           await this.state.storage.delete(indexKey);
           return undefined;
         }
-        const key = pairingGrantKey(index.grantHash);
-        const record = await this.state.storage.get<PairingGrantRecord>(key, { noCache: true });
+        const key = options.recordKey(id);
+        const record = await this.state.storage.get<R>(key, { noCache: true });
         if (
           !record ||
-          !validPairingGrantRecord(record, index.grantHash) ||
+          !options.validRecord(record, id) ||
           record.owner !== owner ||
           record.org !== org
         ) {
           await this.state.storage.delete(indexKey);
           return undefined;
         }
-        if (Date.parse(record.expiresAt) <= now) {
+        if (Date.parse(record.expiresAt) <= options.now()) {
           await Promise.all([this.state.storage.delete(indexKey), this.state.storage.delete(key)]);
           return undefined;
         }
         return record;
       }),
     );
-    return records.filter((record): record is PairingGrantRecord => record !== undefined);
+    return records.filter((record) => record !== undefined);
   }
 
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -14453,7 +14443,7 @@ export class FleetCoordinator {
   private async adminAzureOrphanSweep(request: Request): Promise<Response> {
     const config = this.azureOrphanSweepConfig();
     const lastRun =
-      (await this.state.storage.get<AzureOrphanSweepRecord>(azureOrphanSweepRecordKey)) ?? null;
+      (await this.state.storage.get<CloudOrphanSweepRecord>(azureOrphanSweepRecordKey)) ?? null;
     if (request.method.toUpperCase() === "GET") {
       return json({ config, lastRun });
     }
@@ -17219,9 +17209,15 @@ export class FleetCoordinator {
         if (Number.isFinite(expiresAt)) retainAlarm(Math.max(now + 1, expiresAt));
       },
     );
-    const orphanSweepAlarm = await this.nextAWSOrphanSweepAlarmTime();
+    const orphanSweepAlarm = await this.nextOrphanSweepAlarmTime(
+      "aws",
+      this.awsOrphanSweepConfig(),
+    );
     retainAlarm(orphanSweepAlarm);
-    const azureOrphanSweepAlarm = await this.nextAzureOrphanSweepAlarmTime();
+    const azureOrphanSweepAlarm = await this.nextOrphanSweepAlarmTime(
+      "azure",
+      this.azureOrphanSweepConfig(),
+    );
     retainAlarm(azureOrphanSweepAlarm);
     const azureCleanupAlarm = await this.nextAzureDeferredCleanupAlarmTime();
     retainAlarm(azureCleanupAlarm);
@@ -17493,24 +17489,44 @@ export class FleetCoordinator {
     );
   }
 
-  private async nextAWSOrphanSweepAlarmTime(): Promise<number | undefined> {
-    const config = this.awsOrphanSweepConfig();
-    if (!config.enabled) {
-      return undefined;
-    }
-    const lastRun = await this.state.storage.get<AWSOrphanSweepRecord>(awsOrphanSweepRecordKey);
+  private async nextOrphanSweepAlarmTime(
+    provider: "aws" | "azure",
+    config: CloudOrphanSweepConfig,
+  ): Promise<number | undefined> {
+    if (!config.enabled) return undefined;
+    const lastRun = await this.state.storage.get<CloudOrphanSweepRecord>(
+      `${provider}-orphan-sweep:last`,
+    );
     const lastFinishedAt = Date.parse(lastRun?.finishedAt ?? "");
     const now = Date.now();
     if (!Number.isFinite(lastFinishedAt)) {
-      const stored = await this.state.storage.get<number>(awsOrphanSweepFirstAlarmKey);
+      const firstAlarmKey = `${provider}-orphan-sweep:first-alarm`;
+      const stored = await this.state.storage.get<number>(firstAlarmKey);
       if (typeof stored === "number" && Number.isFinite(stored)) {
         return Math.max(now + 1000, stored);
       }
-      const next = now + Math.min(config.intervalSeconds * 1000, awsOrphanSweepInitialDelayMs);
-      await this.state.storage.put(awsOrphanSweepFirstAlarmKey, next);
+      const next = now + Math.min(config.intervalSeconds * 1000, orphanSweepInitialDelayMs);
+      await this.state.storage.put(firstAlarmKey, next);
       return next;
     }
     return Math.max(now + 1000, lastFinishedAt + config.intervalSeconds * 1000);
+  }
+
+  private async orphanSweepDue(
+    key: string,
+    trigger: "alarm" | "admin",
+    config: CloudOrphanSweepConfig,
+  ): Promise<boolean> {
+    if (!config.enabled) return false;
+    const lastRun = await this.state.runExclusive(() =>
+      this.state.storage.get<CloudOrphanSweepRecord>(key),
+    );
+    const lastFinishedAt = Date.parse(lastRun?.finishedAt ?? "");
+    return !(
+      trigger !== "admin" &&
+      Number.isFinite(lastFinishedAt) &&
+      Date.now() < lastFinishedAt + config.intervalSeconds * 1000
+    );
   }
 
   private async runAWSOrphanSweepIfDue(
@@ -17519,20 +17535,7 @@ export class FleetCoordinator {
   ): Promise<AWSOrphanSweepRecord | undefined> {
     return this.providerMaintenanceLock.run(async () => {
       const config = requestedConfig ?? this.awsOrphanSweepConfig();
-      if (!config.enabled) {
-        return undefined;
-      }
-      const lastRun = await this.state.runExclusive(() =>
-        this.state.storage.get<AWSOrphanSweepRecord>(awsOrphanSweepRecordKey),
-      );
-      const lastFinishedAt = Date.parse(lastRun?.finishedAt ?? "");
-      if (
-        trigger !== "admin" &&
-        Number.isFinite(lastFinishedAt) &&
-        Date.now() < lastFinishedAt + config.intervalSeconds * 1000
-      ) {
-        return undefined;
-      }
+      if (!(await this.orphanSweepDue(awsOrphanSweepRecordKey, trigger, config))) return undefined;
       return await this.runAWSOrphanSweep(trigger, config);
     });
   }
@@ -17642,7 +17645,7 @@ export class FleetCoordinator {
     const activeLeases = new Map(activeAWSLeases.map((lease) => [lease.id, lease]));
     const activeCloudIDs = new Set(activeAWSLeases.map((lease) => lease.cloudID).filter(Boolean));
     for (const { machine, region } of inventory) {
-      const candidate = awsOrphanSweepCandidate(
+      const candidate = cloudOrphanSweepCandidate(
         machine,
         activeLeases,
         activeCloudIDs,
@@ -17658,49 +17661,22 @@ export class FleetCoordinator {
         ownershipLease && providerMachineOwnedByLease(machine, ownershipLease, "aws")
           ? ownershipLease
           : undefined;
-      recordCloudOrphanSweepOwnership(candidate, exactOwnershipLease);
-      const scopeObservedKeys = reconciliationObservedKeys.get(region);
-      const observation =
-        exactOwnershipLease && scopeObservedKeys
-          ? // oxlint-disable-next-line eslint/no-await-in-loop -- candidate state is read before its provider release decision.
-            await this.observeStoredProviderReconciliationCandidate({
-              provider: "aws",
-              scope: region,
-              resourceID: cloudID,
-              fingerprint: providerReconciliationFingerprint("aws", region, machine),
-              now,
-              quarantineSeconds: config.graceSeconds,
-            })
-          : undefined;
-      if (observation && scopeObservedKeys) {
-        scopeObservedKeys.add(observation.key);
-        candidate.action = "quarantined";
-      }
-      let released = false;
-      if (config.deleteEnabled && exactOwnershipLease && observation?.action === "release") {
-        try {
-          // AWS release re-reads canonical ownership and deletes the exact instance; success means absent or terminated.
-          // oxlint-disable-next-line eslint/no-await-in-loop -- release failures must stay attached to the candidate.
-          await this.provider("aws", region).releaseLease(exactOwnershipLease);
-          candidate.action = "terminated";
-          released = true;
-        } catch (error) {
-          candidate.action = "terminate_failed";
-          candidate.error = coordinatorErrorMessage(this.env, error);
+      // oxlint-disable-next-line eslint/no-await-in-loop -- persist each candidate before advancing.
+      await this.reconcileOrphanSweepCandidate(candidate, {
+        provider: "aws",
+        machine,
+        cloudID,
+        region,
+        now,
+        config,
+        lease: exactOwnershipLease,
+        observedKeys: reconciliationObservedKeys.get(region),
+        release: (lease) => this.provider("aws", region).releaseLease(lease),
+        reportError: (error) =>
           console.warn(
-            `aws orphan sweep terminate failed region=${region} cloud=${machine.cloudID}: ${candidate.error}`,
-          );
-        }
-      }
-      if (observation) {
-        if (released) {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- persist each candidate's final state before advancing.
-          await this.state.storage.delete(observation.key);
-        } else {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- persist each candidate's final state before advancing.
-          await this.state.storage.put(observation.key, observation.quarantine);
-        }
-      }
+            `aws orphan sweep terminate failed region=${region} cloud=${machine.cloudID}: ${error}`,
+          ),
+      });
       candidates.push(candidate);
     }
     for (const [region, observedKeys] of reconciliationObservedKeys) {
@@ -17767,6 +17743,50 @@ export class FleetCoordinator {
     return record;
   }
 
+  private async reconcileOrphanSweepCandidate(
+    candidate: CloudOrphanSweepCandidate,
+    input: {
+      provider: "aws" | "azure";
+      machine: ProviderMachine;
+      cloudID: string;
+      region: string;
+      now: number;
+      config: CloudOrphanSweepConfig;
+      lease: LeaseRecord | undefined;
+      observedKeys: Set<string> | undefined;
+      release: (lease: LeaseRecord) => Promise<void>;
+      reportError: (message: string) => void;
+    },
+  ): Promise<void> {
+    const { provider, machine, cloudID, region, now, config, lease, observedKeys } = input;
+    recordCloudOrphanSweepOwnership(candidate, lease);
+    if (!lease || !observedKeys) return;
+    const observation = await this.observeStoredProviderReconciliationCandidate({
+      provider,
+      scope: region,
+      resourceID: cloudID,
+      fingerprint: providerReconciliationFingerprint(provider, region, machine),
+      now,
+      quarantineSeconds: config.graceSeconds,
+    });
+    observedKeys.add(observation.key);
+    candidate.action = "quarantined";
+    let released = false;
+    if (config.deleteEnabled && observation.action === "release") {
+      try {
+        await input.release(lease);
+        candidate.action = "terminated";
+        released = true;
+      } catch (error) {
+        candidate.action = "terminate_failed";
+        candidate.error = coordinatorErrorMessage(this.env, error);
+        input.reportError(candidate.error);
+      }
+    }
+    if (released) await this.state.storage.delete(observation.key);
+    else await this.state.storage.put(observation.key, observation.quarantine);
+  }
+
   private awsOrphanSweepConfig(): AWSOrphanSweepConfig {
     const hasAWSCredentials = awsOrphanSweepCredentialsConfigured(this.env);
     const enabled =
@@ -17794,46 +17814,14 @@ export class FleetCoordinator {
     };
   }
 
-  private async nextAzureOrphanSweepAlarmTime(): Promise<number | undefined> {
-    const config = this.azureOrphanSweepConfig();
-    if (!config.enabled) {
-      return undefined;
-    }
-    const lastRun = await this.state.storage.get<AzureOrphanSweepRecord>(azureOrphanSweepRecordKey);
-    const lastFinishedAt = Date.parse(lastRun?.finishedAt ?? "");
-    const now = Date.now();
-    if (!Number.isFinite(lastFinishedAt)) {
-      const stored = await this.state.storage.get<number>(azureOrphanSweepFirstAlarmKey);
-      if (typeof stored === "number" && Number.isFinite(stored)) {
-        return Math.max(now + 1000, stored);
-      }
-      const next = now + Math.min(config.intervalSeconds * 1000, azureOrphanSweepInitialDelayMs);
-      await this.state.storage.put(azureOrphanSweepFirstAlarmKey, next);
-      return next;
-    }
-    return Math.max(now + 1000, lastFinishedAt + config.intervalSeconds * 1000);
-  }
-
   private async runAzureOrphanSweepIfDue(
     trigger: "alarm" | "admin",
-    requestedConfig?: AzureOrphanSweepConfig,
-  ): Promise<AzureOrphanSweepRecord | undefined> {
+    requestedConfig?: CloudOrphanSweepConfig,
+  ): Promise<CloudOrphanSweepRecord | undefined> {
     return this.providerMaintenanceLock.run(async () => {
       const config = requestedConfig ?? this.azureOrphanSweepConfig();
-      if (!config.enabled) {
+      if (!(await this.orphanSweepDue(azureOrphanSweepRecordKey, trigger, config)))
         return undefined;
-      }
-      const lastRun = await this.state.runExclusive(() =>
-        this.state.storage.get<AzureOrphanSweepRecord>(azureOrphanSweepRecordKey),
-      );
-      const lastFinishedAt = Date.parse(lastRun?.finishedAt ?? "");
-      if (
-        trigger !== "admin" &&
-        Number.isFinite(lastFinishedAt) &&
-        Date.now() < lastFinishedAt + config.intervalSeconds * 1000
-      ) {
-        return undefined;
-      }
       return await this.runAzureOrphanSweep(trigger, config);
     });
   }
@@ -17841,11 +17829,11 @@ export class FleetCoordinator {
   private async runAzureOrphanSweep(
     trigger: "alarm" | "admin",
     config = this.azureOrphanSweepConfig(),
-  ): Promise<AzureOrphanSweepRecord> {
+  ): Promise<CloudOrphanSweepRecord> {
     const startedAt = new Date().toISOString();
     const now = Date.now();
     const candidates: AzureOrphanSweepCandidate[] = [];
-    const errors: AzureOrphanSweepRecord["errors"] = [];
+    const errors: CloudOrphanSweepRecord["errors"] = [];
     const inventory: Array<{ machine: ProviderMachine; region: string }> = [];
     const reconciliationObservedKeys = new Set<string>();
     let inventorySucceeded = false;
@@ -17934,50 +17922,25 @@ export class FleetCoordinator {
         ownershipLease && providerMachineOwnedByLease(machine, ownershipLease, "azure")
           ? ownershipLease
           : undefined;
-      recordCloudOrphanSweepOwnership(candidate, exactOwnershipLease);
-      const observation =
-        exactOwnershipLease && inventorySucceeded
-          ? // oxlint-disable-next-line eslint/no-await-in-loop -- candidate state is read before its provider release decision.
-            await this.observeStoredProviderReconciliationCandidate({
-              provider: "azure",
-              scope: region,
-              resourceID: cloudID,
-              fingerprint: providerReconciliationFingerprint("azure", region, machine),
-              now,
-              quarantineSeconds: config.graceSeconds,
-            })
-          : undefined;
-      if (observation) {
-        reconciliationObservedKeys.add(observation.key);
-        candidate.action = "quarantined";
-      }
-      let released = false;
-      if (config.deleteEnabled && exactOwnershipLease && observation?.action === "release") {
-        try {
-          // Azure release uses the persisted provider scope and resumable owned-resource deletion.
-          // oxlint-disable-next-line eslint/no-await-in-loop -- release failures must stay attached to the candidate.
-          await this.withLegacyProviderMutation(exactOwnershipLease.id, () =>
-            this.provider("azure", region).releaseLease(exactOwnershipLease, {
+      // oxlint-disable-next-line eslint/no-await-in-loop -- persist each candidate before advancing.
+      await this.reconcileOrphanSweepCandidate(candidate, {
+        provider: "azure",
+        machine,
+        cloudID,
+        region,
+        now,
+        config,
+        lease: exactOwnershipLease,
+        observedKeys: inventorySucceeded ? reconciliationObservedKeys : undefined,
+        release: (lease) =>
+          this.withLegacyProviderMutation(lease.id, () =>
+            this.provider("azure", region).releaseLease(lease, {
               resourceIdentity: machine.resourceIdentity ?? "",
             }),
-          );
-          candidate.action = "terminated";
-          released = true;
-        } catch (error) {
-          candidate.action = "terminate_failed";
-          candidate.error = coordinatorErrorMessage(this.env, error);
-          console.warn("azure orphan sweep terminate failed; inspect the sweep record for details");
-        }
-      }
-      if (observation) {
-        if (released) {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- persist each candidate's final state before advancing.
-          await this.state.storage.delete(observation.key);
-        } else {
-          // oxlint-disable-next-line eslint/no-await-in-loop -- persist each candidate's final state before advancing.
-          await this.state.storage.put(observation.key, observation.quarantine);
-        }
-      }
+          ),
+        reportError: () =>
+          console.warn("azure orphan sweep terminate failed; inspect the sweep record for details"),
+      });
       candidates.push(candidate);
     }
     if (inventorySucceeded) {
@@ -17990,7 +17953,7 @@ export class FleetCoordinator {
       );
     }
     const finishedAt = new Date().toISOString();
-    const record: AzureOrphanSweepRecord = {
+    const record: CloudOrphanSweepRecord = {
       startedAt,
       finishedAt,
       mode: config.deleteEnabled ? "delete" : "report",
@@ -18015,7 +17978,7 @@ export class FleetCoordinator {
     return record;
   }
 
-  private azureOrphanSweepConfig(): AzureOrphanSweepConfig {
+  private azureOrphanSweepConfig(): CloudOrphanSweepConfig {
     const hasAzureCredentials = Boolean(
       this.env.AZURE_TENANT_ID &&
       this.env.AZURE_CLIENT_ID &&
@@ -26405,16 +26368,6 @@ function hasUnknownActiveAWSSSHSource(leases: LeaseRecord[]): boolean {
       (lease.network?.sshSourceCIDRs?.length ?? 0) === 0 &&
       !lease.network?.sshSourceCIDRsComplete,
   );
-}
-
-function awsOrphanSweepCandidate(
-  machine: ProviderMachine,
-  activeLeases: Map<string, LeaseRecord>,
-  activeCloudIDs: Set<string>,
-  region: string,
-  graceSeconds: number,
-): AWSOrphanSweepCandidate | undefined {
-  return cloudOrphanSweepCandidate(machine, activeLeases, activeCloudIDs, region, graceSeconds);
 }
 
 function cloudOrphanSweepCandidate(

@@ -1,5 +1,7 @@
 import { Container, getContainer } from "@cloudflare/containers";
 
+import { authorize, isRecord, json, stringField } from "./runner-http";
+
 const leaseMetaKey = "crabbox:lease";
 const cleanupCallback = "expireIfIdle";
 const defaultInstanceType = "standard-4";
@@ -411,7 +413,7 @@ export default {
       return json({ ok: true, runner: "cloudflare" });
     }
 
-    const auth = authorize(request, env);
+    const auth = authorize(request, env.CRABBOX_RUNNER_TOKEN);
     if (auth) return auth;
 
     if (url.pathname === "/v1/readiness" && request.method === "GET") return runnerReadiness(env);
@@ -600,15 +602,6 @@ function requestedInstanceType(url: URL): InstanceType | Response | undefined {
   return instanceType || json({ error: "instanceType is not supported" }, 400);
 }
 
-function authorize(request: Request, env: Env): Response | null {
-  const expected = env.CRABBOX_RUNNER_TOKEN;
-  if (!expected) return json({ error: "runner token is not configured" }, 503);
-  const header = request.headers.get("Authorization") ?? "";
-  const actual = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
-  if (!tokenEquals(actual, expected)) return json({ error: "unauthorized" }, 401);
-  return null;
-}
-
 async function readObject(request: Request): Promise<Record<string, unknown> | Response> {
   let value: unknown;
   try {
@@ -617,10 +610,6 @@ async function readObject(request: Request): Promise<Record<string, unknown> | R
     return json({ error: "invalid json" }, 400);
   }
   return isRecord(value) ? value : {};
-}
-
-function json(value: unknown, status = 200): Response {
-  return Response.json(value, { status });
 }
 
 function internalRequest(path: string, source?: Request, init: RequestInit = {}): Request {
@@ -688,11 +677,6 @@ function sanitizeEnv(value: unknown): Record<string, string> | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function stringField(value: Record<string, unknown>, key: string): string | undefined {
-  const field = value[key];
-  return typeof field === "string" ? field : undefined;
-}
-
 function numberField(value: Record<string, unknown>, key: string): number | undefined {
   const field = value[key];
   return typeof field === "number" ? field : undefined;
@@ -701,22 +685,6 @@ function numberField(value: Record<string, unknown>, key: string): number | unde
 function positiveIntegerField(value: Record<string, unknown>, key: string): number | undefined {
   const field = numberField(value, key);
   return field !== undefined && Number.isInteger(field) && field > 0 ? field : undefined;
-}
-
-function tokenEquals(actual: string, expected: string): boolean {
-  const encoder = new TextEncoder();
-  const actualBytes = encoder.encode(actual);
-  const expectedBytes = encoder.encode(expected);
-  let diff = actualBytes.length ^ expectedBytes.length;
-  const length = Math.max(actualBytes.length, expectedBytes.length);
-  for (let i = 0; i < length; i += 1) {
-    diff |= (actualBytes[i] ?? 0) ^ (expectedBytes[i] ?? 0);
-  }
-  return diff === 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function leaseExpiresAtMs(meta: LeaseMetadata): number | undefined {

@@ -1,5 +1,7 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 
+import { authorize, isRecord, json, stringField } from "./runner-http";
+
 const runnerName = "cloudflare-dynamic-workers";
 const defaultCompatibilityDate = "2026-06-12";
 const runMetadataPrefix = "runs:";
@@ -1008,7 +1010,7 @@ export default {
       return json({ ok: true, runner: runnerName });
     }
 
-    const auth = authorize(request, env);
+    const auth = authorize(request, tokenValue(env));
     if (auth) return auth;
 
     if (url.pathname === "/v1/readiness" && request.method === "GET") {
@@ -1794,15 +1796,6 @@ function isJsonRequest(request: Request): boolean {
   return (request.headers.get("Content-Type") ?? "").toLowerCase().includes("application/json");
 }
 
-function authorize(request: Request, env: Env): Response | null {
-  const expected = tokenValue(env);
-  if (!expected) return json({ error: "runner token is not configured" }, 503);
-  const header = request.headers.get("Authorization") ?? "";
-  const actual = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
-  if (!tokenEquals(actual, expected)) return json({ error: "unauthorized" }, 401);
-  return null;
-}
-
 function tokenValue(env: Env): string | undefined {
   return env.CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN ?? env.CRABBOX_RUNNER_TOKEN;
 }
@@ -1811,18 +1804,6 @@ function tokenSource(env: Env): string {
   return env.CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN
     ? "CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN"
     : "CRABBOX_RUNNER_TOKEN";
-}
-
-function tokenEquals(actual: string, expected: string): boolean {
-  const encoder = new TextEncoder();
-  const actualBytes = encoder.encode(actual);
-  const expectedBytes = encoder.encode(expected);
-  let diff = actualBytes.length ^ expectedBytes.length;
-  const length = Math.max(actualBytes.length, expectedBytes.length);
-  for (let i = 0; i < length; i += 1) {
-    diff |= (actualBytes[i] ?? 0) ^ (expectedBytes[i] ?? 0);
-  }
-  return diff === 0;
 }
 
 function redactSecrets(message: string, env: Env): string {
@@ -2520,17 +2501,4 @@ function validHttpUrl(value: string): boolean {
 
 function bodylessMethod(method: string): boolean {
   return method === "GET" || method === "HEAD";
-}
-
-function json(value: unknown, status = 200): Response {
-  return Response.json(value, { status });
-}
-
-function stringField(value: Record<string, unknown>, key: string): string | undefined {
-  const field = value[key];
-  return typeof field === "string" ? field : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
