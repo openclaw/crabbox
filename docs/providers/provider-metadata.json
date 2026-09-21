@@ -181,11 +181,11 @@
     "ssh": "crabbox-managed",
     "sync": "crabbox-sync",
     "gpu": "no",
-    "lifecycle": "HTTPS console API + WSS bootstrap",
+    "lifecycle": "TLS gRPC API + exec bootstrap",
     "cleanup": "machine destroy (claim-gated)",
     "bestFit": "Experimental isolated Linux microVM SSH leases",
-    "caveat": "2026-08-27: production ignores isolated=true; Crabbox rejects guest access and rolls back; guest execution unverified; guest port 8000 is public",
-    "auth": "BOXD_TOKEN or CRABBOX_BOXD_TOKEN interactive session from HTTPS device login; API-key sessions cannot mutate",
+    "caveat": "2026-09-01: isolated creation verified over the gRPC API; guest port 8000 is publicly proxied without authentication",
+    "auth": "CRABBOX_BOXD_API_KEY or BOXD_API_KEY bxd_ key, exchanged over HTTPS for short-lived JWTs",
     "docs": "boxd.md"
   },
   "cloud-run-sandbox": {

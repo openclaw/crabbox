@@ -4,12 +4,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"encoding/base64"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -19,8 +17,12 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/boxd/boxdapi"
 	"golang.org/x/crypto/ssh"
-	"nhooyr.io/websocket"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 func fixturePublicKey(t *testing.T) string {
@@ -36,161 +38,239 @@ func fixturePublicKey(t *testing.T) string {
 	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
 }
 
-type fakeAPI struct {
-	createCode                                                               int
-	createMalformed, createDisconnect                                        bool
-	mu                                                                       sync.Mutex
-	user                                                                     string
-	rows                                                                     []consoleMachine
-	calls                                                                    []string
-	hostKey                                                                  string
-	createMissingID, notIsolated, bootstrapFail, destroyFail, destroyRemains bool
-	beforeCreate                                                             func()
+type fakeVM struct {
+	ID, Name, Status, PublicIP          string
+	Isolated                            bool
+	SharedOrg, BillingOrg, BillingOrgID string
 }
 
-func (f *fakeAPI) serve(w http.ResponseWriter, r *http.Request) {
+// fakeAPI implements the boxd gRPC surface Crabbox uses, with production's
+// observed semantics: id-addressed reads, NOT_FOUND for unknown ids, and a
+// readable "destroyed" tombstone after destroy.
+type fakeAPI struct {
+	boxdapi.UnimplementedBoxdApiServer
+	mu                                         sync.Mutex
+	user                                       string
+	rows                                       []fakeVM
+	calls                                      []string
+	hostKey                                    string
+	createStatus                               codes.Code
+	createMissingID, createUnavailable         bool
+	notIsolated, bootstrapFail                 bool
+	destroyFail, destroyRemains, destroyVanish bool
+	beforeCreate                               func()
+}
+
+func (f *fakeAPI) record(call string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
-	if strings.HasSuffix(r.URL.Path, "/term") {
-		if r.URL.Query().Get("token") != testJWT {
-			w.WriteHeader(401)
-			return
-		}
-		ws, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer ws.CloseNow()
-		_, _, err = ws.Read(r.Context())
-		if err != nil {
-			return
-		}
-		ws.Write(r.Context(), websocket.MessageBinary, []byte("\r\n"+hostKeyMarker+f.hostKey+"\r\n"))
-		if f.bootstrapFail {
-			ws.Write(r.Context(), websocket.MessageText, []byte(`{"type":"exit","code":1}`))
-		} else {
-			ws.Write(r.Context(), websocket.MessageText, []byte(`{"type":"exit","code":0}`))
-		}
-		return
-	}
-	if r.Header.Get("Authorization") != "Bearer "+testJWT {
-		w.WriteHeader(401)
-		return
-	}
-	switch r.URL.Path {
-	case "/api/v1/whoami":
-		json.NewEncoder(w).Encode(map[string]string{"user_id": f.user})
-	case "/api/v1/vms":
-		if r.Method == "GET" {
-			json.NewEncoder(w).Encode(f.rows)
-			return
-		}
-		if f.beforeCreate != nil {
-			f.beforeCreate()
-		}
-		if f.createCode != 0 {
-			w.WriteHeader(f.createCode)
-			io.WriteString(w, "console mutations require an interactive session — API-key and in-VM sessions are read-only here "+testJWT)
-			return
-		}
-		if f.createMalformed {
-			io.WriteString(w, "unsafe-body")
-			return
-		}
-		if f.createDisconnect {
-			conn, _, err := w.(http.Hijacker).Hijack()
-			if err == nil {
-				conn.Close()
-			}
-			return
-		}
-		var body struct {
-			Name     string `json:"name"`
-			Org      string `json:"org"`
-			Isolated bool   `json:"isolated"`
-		}
-		json.NewDecoder(r.Body).Decode(&body)
-		if !body.Isolated {
-			w.WriteHeader(400)
-			return
-		}
-		vm := consoleMachine{ID: "vm-1", Name: body.Name, Status: "running", PublicIP: "192.0.2.1", OwnerID: f.user, Isolated: !f.notIsolated}
-		f.rows = append(f.rows, vm)
-		if f.createMissingID {
-			vm.ID = ""
-		}
-		json.NewEncoder(w).Encode(map[string]string{
-			"name": vm.Name, "public_ip": vm.PublicIP, "status": vm.Status,
-			"url": "https://" + vm.Name + ".boxd.sh", "vm_id": vm.ID,
-		})
-	case "/api/v1/vms/vm-1/expose":
-		var body consoleForward
-		json.NewDecoder(r.Body).Decode(&body)
-		if body.VMPort != 2222 || body.Protocol != "tcp" {
-			w.WriteHeader(400)
-			return
-		}
-		json.NewEncoder(w).Encode(consoleForward{Endpoint: "https://untrusted.invalid/?token=" + testJWT, PublicPort: 32222, VMPort: 2222, Protocol: "tcp"})
-	case "/api/v1/vms/vm-1/start":
-		for i := range f.rows {
-			if f.rows[i].ID == "vm-1" {
-				f.rows[i].Status = "running"
-			}
-		}
-		w.WriteHeader(204)
-	case "/api/v1/vms/vm-1/stop":
-		for i := range f.rows {
-			if f.rows[i].ID == "vm-1" {
-				f.rows[i].Status = "stopped"
-			}
-		}
-		w.WriteHeader(204)
-	case "/api/v1/vms/vm-1/destroy":
-		if f.destroyFail {
-			w.WriteHeader(500)
-			return
-		}
-		if !f.destroyRemains {
-			out := make([]consoleMachine, 0)
-			for _, vm := range f.rows {
-				if vm.ID != "vm-1" {
-					out = append(out, vm)
-				}
-			}
-			f.rows = out
-		}
-		w.WriteHeader(204)
-	default:
-		w.WriteHeader(404)
-	}
+	f.calls = append(f.calls, call)
 }
 func (f *fakeAPI) mutate(fn func()) { f.mu.Lock(); defer f.mu.Unlock(); fn() }
-func (f *fakeAPI) count(route string) int {
+func (f *fakeAPI) count(call string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	n := 0
 	for _, c := range f.calls {
-		if c == route {
+		if c == call {
 			n++
 		}
 	}
 	return n
 }
+func (f *fakeAPI) find(id string) (int, bool) {
+	for i := range f.rows {
+		if f.rows[i].ID == id {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func authorized(ctx context.Context) error {
+	md, _ := metadata.FromIncomingContext(ctx)
+	if values := md.Get("authorization"); len(values) != 1 || values[0] != "Bearer "+testJWT {
+		return status.Error(codes.Unauthenticated, "missing exchanged session")
+	}
+	return nil
+}
+
+func (f *fakeAPI) Whoami(ctx context.Context, _ *boxdapi.WhoamiRequest) (*boxdapi.WhoamiResponse, error) {
+	f.record("Whoami")
+	if err := authorized(ctx); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return &boxdapi.WhoamiResponse{UserId: f.user}, nil
+}
+
+func (f *fakeAPI) GetVm(ctx context.Context, req *boxdapi.GetVmRequest) (*boxdapi.GetVmResponse, error) {
+	f.record("GetVm " + req.GetVmId())
+	if err := authorized(ctx); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	i, found := f.find(req.GetVmId())
+	if !found {
+		return nil, status.Error(codes.NotFound, "no such vm")
+	}
+	vm := f.rows[i]
+	return &boxdapi.GetVmResponse{
+		VmId: vm.ID, Name: vm.Name, PublicIp: vm.PublicIP, Status: vm.Status,
+		Isolated: vm.Isolated, Org: vm.SharedOrg, BillingOrg: vm.BillingOrg, BillingOrgId: vm.BillingOrgID,
+	}, nil
+}
+
+func (f *fakeAPI) CreateVm(ctx context.Context, req *boxdapi.CreateVmRequest) (*boxdapi.CreateVmResponse, error) {
+	f.record("CreateVm")
+	if err := authorized(ctx); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	hook := f.beforeCreate
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.createStatus != codes.OK {
+		return nil, status.Error(f.createStatus, "create refused; details include a session echo "+testJWT)
+	}
+	if f.createUnavailable {
+		return nil, status.Error(codes.Unavailable, "connection reset")
+	}
+	if !req.GetIsolated() || req.GetOrg() != "" {
+		return nil, status.Error(codes.InvalidArgument, "unexpected create request shape")
+	}
+	vm := fakeVM{ID: "vm-1", Name: req.GetName(), Status: "running", PublicIP: "192.0.2.1", Isolated: !f.notIsolated}
+	f.rows = append(f.rows, vm)
+	id := vm.ID
+	if f.createMissingID {
+		id = ""
+	}
+	return &boxdapi.CreateVmResponse{VmId: id, Name: vm.Name, PublicIp: vm.PublicIP, Status: vm.Status, Url: vm.Name + ".boxd.sh"}, nil
+}
+
+func (f *fakeAPI) StartVm(ctx context.Context, req *boxdapi.StartVmRequest) (*boxdapi.StartVmResponse, error) {
+	f.record("StartVm " + req.GetVmId())
+	if err := authorized(ctx); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i, found := f.find(req.GetVmId()); found {
+		f.rows[i].Status = "running"
+	}
+	return &boxdapi.StartVmResponse{}, nil
+}
+
+func (f *fakeAPI) StopVm(ctx context.Context, req *boxdapi.StopVmRequest) (*boxdapi.StopVmResponse, error) {
+	f.record("StopVm " + req.GetVmId())
+	if err := authorized(ctx); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if i, found := f.find(req.GetVmId()); found {
+		f.rows[i].Status = "stopped"
+	}
+	return &boxdapi.StopVmResponse{}, nil
+}
+
+func (f *fakeAPI) DestroyVm(ctx context.Context, req *boxdapi.DestroyVmRequest) (*boxdapi.DestroyVmResponse, error) {
+	f.record("DestroyVm " + req.GetVmId())
+	if err := authorized(ctx); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.destroyFail {
+		return nil, status.Error(codes.Internal, "destroy failed")
+	}
+	i, found := f.find(req.GetVmId())
+	if !found {
+		return nil, status.Error(codes.NotFound, "no such vm")
+	}
+	switch {
+	case f.destroyRemains:
+	case f.destroyVanish:
+		f.rows = append(f.rows[:i], f.rows[i+1:]...)
+	default:
+		// Production keeps a readable tombstone and frees the name.
+		f.rows[i].Status = "destroyed"
+		f.rows[i].Name = f.rows[i].Name + ":" + f.rows[i].ID
+	}
+	return &boxdapi.DestroyVmResponse{}, nil
+}
+
+func (f *fakeAPI) ExposePort(ctx context.Context, req *boxdapi.ExposePortRequest) (*boxdapi.ExposePortResponse, error) {
+	f.record("ExposePort " + req.GetVm())
+	if err := authorized(ctx); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	i, found := f.find(req.GetVm())
+	if !found {
+		return nil, status.Error(codes.NotFound, "no such vm")
+	}
+	if req.GetVmPort() != 2222 || req.GetProtocol() != "tcp" {
+		return nil, status.Error(codes.InvalidArgument, "unexpected forward request")
+	}
+	return &boxdapi.ExposePortResponse{VmName: f.rows[i].Name, Dns: f.rows[i].Name + ".boxd.sh", PublicPort: 32222, VmPort: 2222, Protocol: "tcp", VmId: f.rows[i].ID}, nil
+}
+
+func (f *fakeAPI) Exec(stream grpc.BidiStreamingServer[boxdapi.ExecChunk, boxdapi.ExecChunk]) error {
+	if err := authorized(stream.Context()); err != nil {
+		return err
+	}
+	first, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	f.record("Exec " + first.GetVmId())
+	f.mu.Lock()
+	fail := f.bootstrapFail
+	hostKey := f.hostKey
+	f.mu.Unlock()
+	if fail {
+		if err := stream.Send(&boxdapi.ExecChunk{Data: []byte("bootstrap refused\n"), IsStderr: true}); err != nil {
+			return err
+		}
+		return stream.Send(&boxdapi.ExecChunk{ExitCode: 1})
+	}
+	if err := stream.Send(&boxdapi.ExecChunk{Data: []byte("\r\n" + hostKeyMarker + hostKey + "\r\n")}); err != nil {
+		return err
+	}
+	return stream.Send(&boxdapi.ExecChunk{ExitCode: 0})
+}
+
 func fixtureBackend(t *testing.T) (*backend, *fakeAPI) {
 	t.Helper()
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
-	t.Setenv("CRABBOX_BOXD_TOKEN", testJWT)
-	t.Setenv("BOXD_TOKEN", testJWT)
-	f := &fakeAPI{user: "alice", rows: []consoleMachine{}, hostKey: fixturePublicKey(t)}
-	server := httptest.NewTLSServer(http.HandlerFunc(f.serve))
-	t.Cleanup(server.Close)
+	t.Setenv("CRABBOX_BOXD_API_KEY", testAPIKey)
+	t.Setenv("BOXD_API_KEY", "")
+	f := &fakeAPI{user: "alice", rows: []fakeVM{}, hostKey: fixturePublicKey(t)}
+	exchange := httptest.NewTLSServer(validExchange(t, nil))
+	t.Cleanup(exchange.Close)
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: exchange.TLS.Certificates, NextProtos: []string{"h2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	boxdapi.RegisterBoxdApiServer(server, f)
+	go server.Serve(listener)
+	t.Cleanup(server.Stop)
 	cfg := core.BaseConfig()
 	cfg.Provider = providerName
-	cfg.Boxd.APIURL = server.URL
+	cfg.Boxd.APIURL = exchange.URL
+	cfg.Boxd.GRPCURL = listener.Addr().String()
 	applyDefaults(&cfg)
-	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard})
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{HTTP: exchange.Client(), Stdout: io.Discard, Stderr: io.Discard})
 	b.readyTimeout = 3 * time.Second
 	b.pollInterval = time.Millisecond
 	b.absenceGrace = 3 * time.Millisecond
@@ -230,6 +310,17 @@ func assertNoClaims(t *testing.T) {
 		t.Fatalf("remaining claims=%d err=%v", len(claims), err)
 	}
 }
+func liveRows(f *fakeAPI) []fakeVM {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []fakeVM{}
+	for _, vm := range f.rows {
+		if vm.Status != "destroyed" {
+			out = append(out, vm)
+		}
+	}
+	return out
+}
 
 func TestAcquirePinsHostKeyAndClaimsBeforeCreate(t *testing.T) {
 	b, f := fixtureBackend(t)
@@ -258,30 +349,11 @@ func TestAcquirePinsHostKeyAndClaimsBeforeCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoClaims(t)
-	if f.count("POST /api/v1/vms/vm-1/destroy") != 1 {
+	if f.count("DestroyVm vm-1") != 1 {
 		t.Fatal("expected exact immutable destroy")
 	}
 }
-func TestBootstrapScriptUsesOnlyLeaseKey(t *testing.T) {
-	key := fixturePublicKey(t)
-	command, err := bootstrapCommand(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded := strings.Split(strings.Split(command, "printf %s ")[1], " ")[0]
-	script, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"PasswordAuthentication no", "KbdInteractiveAuthentication no", "AuthenticationMethods publickey", "AllowUsers boxd", "AuthorizedKeysFile /etc/crabbox-ssh/authorized_keys", "HostKey /etc/ssh/ssh_host_ed25519_key", "sudo -n bash"} {
-		if !strings.Contains(string(script)+command, want) {
-			t.Errorf("missing %s", want)
-		}
-	}
-	if strings.Contains(command, hostKeyMarker) {
-		t.Fatal("echo could spoof host-key marker")
-	}
-}
+
 func TestAmbiguousCreateNeverAdoptsByName(t *testing.T) {
 	b, f := fixtureBackend(t)
 	f.createMissingID = true
@@ -300,7 +372,7 @@ func TestAmbiguousCreateNeverAdoptsByName(t *testing.T) {
 		t.Fatal(err)
 	}
 	onlyClaim(t)
-	if f.count("POST /api/v1/vms/vm-1/destroy") != 0 {
+	if f.count("DestroyVm vm-1") != 0 {
 		t.Fatal("deleted unbound VM")
 	}
 }
@@ -311,7 +383,7 @@ func TestBootstrapFailureRollbackAndRetention(t *testing.T) {
 			f.bootstrapFail = mode != "not-isolated"
 			f.notIsolated = mode == "not-isolated"
 			f.destroyFail = mode == "cleanup-fails"
-			preexisting := consoleMachine{ID: "unrelated-vm", Name: "preexisting", Status: "running", PublicIP: "192.0.2.2", OwnerID: "alice", Isolated: true}
+			preexisting := fakeVM{ID: "unrelated-vm", Name: "preexisting", Status: "running", PublicIP: "192.0.2.2", Isolated: true}
 			if mode == "not-isolated" {
 				f.rows = append(f.rows, preexisting)
 				b.ensureKey = func(string) (string, string, error) {
@@ -345,36 +417,38 @@ func TestBootstrapFailureRollbackAndRetention(t *testing.T) {
 				if !strings.Contains(err.Error(), "not isolated") {
 					t.Fatalf("expected isolation rejection, got %v", err)
 				}
-				if f.count("POST /api/v1/vms/vm-1/destroy") != 1 {
+				if f.count("DestroyVm vm-1") != 1 {
 					t.Fatal("did not delete exactly the task-created immutable VM")
 				}
 				f.mutate(func() {
 					for _, call := range f.calls {
-						if strings.HasSuffix(call, "/term") || strings.HasSuffix(call, "/expose") {
+						if strings.HasPrefix(call, "Exec") || strings.HasPrefix(call, "ExposePort") {
 							t.Errorf("guest access before isolation proof: %s", call)
 						}
 					}
-					if len(f.rows) != 1 || f.rows[0] != preexisting {
-						t.Errorf("rollback did not preserve only the unchanged preexisting VM: %#v", f.rows)
-					}
 				})
+				if live := liveRows(f); len(live) != 1 || live[0] != preexisting {
+					t.Errorf("rollback did not preserve only the unchanged preexisting VM: %#v", live)
+				}
 			}
-			if mode == "keep" && f.count("POST /api/v1/vms/vm-1/destroy") != 0 {
+			if mode == "keep" && f.count("DestroyVm vm-1") != 0 {
 				t.Fatal("deleted kept VM")
 			}
 		})
 	}
 }
 func TestReleaseOwnershipFences(t *testing.T) {
-	for _, mode := range []string{"account", "owner", "org", "origin", "unclaimed", "stale", "same-name"} {
+	for _, mode := range []string{"account", "shared", "billing", "org", "origin", "unclaimed", "stale", "same-name"} {
 		t.Run(mode, func(t *testing.T) {
 			b, f := fixtureBackend(t)
 			lease := acquireFixture(t, b, false)
 			switch mode {
 			case "account":
 				f.mutate(func() { f.user = "mallory" })
-			case "owner":
-				f.mutate(func() { f.rows[0].OwnerID = "mallory" })
+			case "shared":
+				f.mutate(func() { f.rows[0].SharedOrg = "mallory-org" })
+			case "billing":
+				f.mutate(func() { f.rows[0].BillingOrg = "mallory-org" })
 			case "org":
 				b.cfg.Boxd.Org = "another-org"
 			case "origin":
@@ -406,13 +480,13 @@ func TestReleaseOwnershipFences(t *testing.T) {
 			} else if err == nil {
 				t.Fatal("ownership fence accepted")
 			}
-			if f.count("POST /api/v1/vms/vm-1/destroy") != 0 {
+			if f.count("DestroyVm vm-1") != 0 {
 				t.Fatal("crossed ownership fence")
 			}
 		})
 	}
 }
-func TestDeletionRequiresInventoryProof(t *testing.T) {
+func TestDeletionRequiresTombstoneOrSustainedAbsence(t *testing.T) {
 	b, f := fixtureBackend(t)
 	lease := acquireFixture(t, b, false)
 	f.mutate(func() { f.destroyRemains = true })
@@ -420,6 +494,21 @@ func TestDeletionRequiresInventoryProof(t *testing.T) {
 		t.Fatalf("expected bounded verification: %v", err)
 	}
 	onlyClaim(t)
+	// The tombstone that production leaves behind is definitive proof.
+	f.mutate(func() { f.destroyRemains = false })
+	resolved, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, ReleaseOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
+		t.Fatal(err)
+	}
+	assertNoClaims(t)
+	f.mutate(func() {
+		if _, found := f.find("vm-1"); !found || f.rows[0].Status != "destroyed" {
+			t.Errorf("expected a destroyed tombstone: %#v", f.rows)
+		}
+	})
 }
 func TestRetainedReuseAndTouchIdleOverride(t *testing.T) {
 	b, f := fixtureBackend(t)
@@ -437,7 +526,7 @@ func TestRetainedReuseAndTouchIdleOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.count("POST /api/v1/vms/vm-1/start") != 1 {
+	if f.count("StartVm vm-1") != 1 {
 		t.Fatal("did not restart exact VM")
 	}
 	prior := onlyClaim(t)
@@ -465,12 +554,12 @@ func TestCleanupDryRunAndClaimSnapshot(t *testing.T) {
 	if _, err := b.Acquire(context.Background(), core.AcquireRequest{}); err == nil {
 		t.Fatal("expected failure")
 	}
-	before := f.count("POST /api/v1/vms/vm-1/destroy")
+	before := f.count("DestroyVm vm-1")
 	prior := onlyClaim(t)
 	if err := b.Cleanup(context.Background(), core.CleanupRequest{DryRun: true}); err != nil {
 		t.Fatal(err)
 	}
-	if f.count("POST /api/v1/vms/vm-1/destroy") != before || onlyClaim(t).Revision != prior.Revision {
+	if f.count("DestroyVm vm-1") != before || onlyClaim(t).Revision != prior.Revision {
 		t.Fatal("dry run mutated")
 	}
 	f.mutate(func() { f.destroyFail = false })
@@ -484,12 +573,12 @@ func TestReadOnlyStatusWaitDoesNotBootstrapOrTouch(t *testing.T) {
 	b, f := fixtureBackend(t)
 	lease := acquireFixture(t, b, false)
 	before := onlyClaim(t)
-	termCalls := f.count("GET /api/v1/vms/vm-1/term")
+	execCalls := f.count("Exec vm-1")
 	_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, ReadyProbe: true, NoLocalStateMutations: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if onlyClaim(t).Revision != before.Revision || f.count("GET /api/v1/vms/vm-1/term") != termCalls || f.count("POST /api/v1/vms/vm-1/start") != 0 {
+	if onlyClaim(t).Revision != before.Revision || f.count("Exec vm-1") != execCalls || f.count("StartVm vm-1") != 0 {
 		t.Fatal("status probe mutated lease")
 	}
 }
@@ -498,7 +587,7 @@ func TestUnclaimedNamesCannotBeAdoptedAndRenameKeepsID(t *testing.T) {
 	lease := acquireFixture(t, b, false)
 	f.mutate(func() {
 		f.rows[0].Name = "renamed"
-		f.rows = append(f.rows, consoleMachine{ID: "foreign", Name: "crabbox-other", OwnerID: "alice", Isolated: true})
+		f.rows = append(f.rows, fakeVM{ID: "foreign", Name: "crabbox-other", Status: "running", PublicIP: "192.0.2.3", Isolated: true})
 	})
 	if _, err := b.Resolve(context.Background(), core.ResolveRequest{ID: "crabbox-other"}); err == nil {
 		t.Fatal("adopted unclaimed machine")
@@ -507,6 +596,9 @@ func TestUnclaimedNamesCannotBeAdoptedAndRenameKeepsID(t *testing.T) {
 	if err != nil || resolved.Server.CloudID != "vm-1" {
 		t.Fatal(err)
 	}
+	// Vanish on destroy: deletion proof must also work through sustained
+	// absence when no tombstone is left behind.
+	f.mutate(func() { f.destroyVanish = true })
 	if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +609,7 @@ func TestUnclaimedNamesCannotBeAdoptedAndRenameKeepsID(t *testing.T) {
 	})
 }
 func TestTouchUsesSnapshotAndAccountFence(t *testing.T) {
-	for _, mode := range []string{"stale", "account", "owner", "missing"} {
+	for _, mode := range []string{"stale", "account", "billing", "missing"} {
 		t.Run(mode, func(t *testing.T) {
 			b, f := fixtureBackend(t)
 			lease := acquireFixture(t, b, false)
@@ -530,10 +622,10 @@ func TestTouchUsesSnapshotAndAccountFence(t *testing.T) {
 				switch mode {
 				case "account":
 					f.user = "other"
-				case "owner":
-					f.rows[0].OwnerID = "other"
+				case "billing":
+					f.rows[0].BillingOrg = "other-org"
 				case "missing":
-					f.rows = []consoleMachine{}
+					f.rows = []fakeVM{}
 				}
 			})
 			prior := onlyClaim(t)
@@ -610,7 +702,7 @@ func TestKeptFailureCleanupDoesNotDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	onlyClaim(t)
-	if f.count("POST /api/v1/vms/vm-1/destroy") != 0 {
+	if f.count("DestroyVm vm-1") != 0 {
 		t.Fatal("cleanup deleted a kept failure")
 	}
 }
@@ -626,19 +718,19 @@ func TestReadOnlyStatusDoesNotStartStoppedMachine(t *testing.T) {
 	if err == nil {
 		t.Fatal("stopped VM reported ready")
 	}
-	if onlyClaim(t).Revision != prior.Revision || f.count("POST /api/v1/vms/vm-1/start") != 0 {
+	if onlyClaim(t).Revision != prior.Revision || f.count("StartVm vm-1") != 0 {
 		t.Fatal("read-only probe restarted VM")
 	}
 }
 
 func TestCreateRejectionRemovesOnlyPendingClaim(t *testing.T) {
-	for _, code := range []int{400, 401, 403, 422, 500} {
-		t.Run(fmt.Sprint(code), func(t *testing.T) {
+	for _, code := range []codes.Code{codes.InvalidArgument, codes.Unauthenticated, codes.PermissionDenied, codes.ResourceExhausted, codes.Internal} {
+		t.Run(code.String(), func(t *testing.T) {
 			b, f := fixtureBackend(t)
-			f.createCode = code
+			f.createStatus = code
 			_, err := b.Acquire(context.Background(), core.AcquireRequest{Keep: true})
 			noSecrets(t, err)
-			if code == 500 {
+			if code == codes.Internal {
 				onlyClaim(t)
 				if !strings.Contains(err.Error(), "ambiguous") {
 					t.Fatal("server error lost recovery guidance")
@@ -648,22 +740,22 @@ func TestCreateRejectionRemovesOnlyPendingClaim(t *testing.T) {
 				if strings.Contains(err.Error(), "ambiguous") {
 					t.Fatal("definite rejection reported as ambiguous")
 				}
-				if (code == 401 || code == 403) && !strings.Contains(err.Error(), "interactive BOXD_TOKEN") {
-					t.Fatal("missing interactive session guidance")
+				if (code == codes.Unauthenticated || code == codes.PermissionDenied) && !strings.Contains(err.Error(), "BOXD_API_KEY") {
+					t.Fatal("missing API-key guidance")
 				}
 			}
-			if f.count("POST /api/v1/vms") != 1 || f.count("POST /api/v1/vms/vm-1/destroy") != 0 {
+			if f.count("CreateVm") != 1 || f.count("DestroyVm vm-1") != 0 {
 				t.Fatal("retried or attempted cleanup of rejected create")
 			}
 		})
 	}
 }
 func TestAmbiguousCreateFailuresRetainIntent(t *testing.T) {
-	for _, mode := range []string{"disconnect", "malformed-success"} {
+	for _, mode := range []string{"unavailable", "missing-id"} {
 		t.Run(mode, func(t *testing.T) {
 			b, f := fixtureBackend(t)
-			f.createDisconnect = mode == "disconnect"
-			f.createMalformed = mode == "malformed-success"
+			f.createUnavailable = mode == "unavailable"
+			f.createMissingID = mode == "missing-id"
 			_, err := b.Acquire(context.Background(), core.AcquireRequest{})
 			if err == nil || !strings.Contains(err.Error(), "ambiguous") {
 				t.Fatal("ambiguous failure lost")
@@ -680,7 +772,7 @@ func TestCreateAuthRejectionPreservesExistingLease(t *testing.T) {
 	b, f := fixtureBackend(t)
 	existing := acquireFixture(t, b, false)
 	before := onlyClaim(t)
-	f.mutate(func() { f.createCode = 401 })
+	f.mutate(func() { f.createStatus = codes.Unauthenticated })
 	_, err := b.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "rejected"})
 	if err == nil || strings.Contains(err.Error(), "ambiguous") {
 		t.Fatal("auth rejection was not reported directly")
@@ -689,7 +781,135 @@ func TestCreateAuthRejectionPreservesExistingLease(t *testing.T) {
 	if after.LeaseID != existing.LeaseID || after.Revision != before.Revision {
 		t.Fatal("auth rejection changed an existing claim")
 	}
-	if f.count("POST /api/v1/vms/vm-1/destroy") != 0 {
+	if f.count("DestroyVm vm-1") != 0 {
 		t.Fatal("auth rejection deleted existing VM")
+	}
+}
+
+// rewriteClaimScope rewrites the stored claim to the exact serialization the
+// earlier console-based provider used, simulating an upgrade over it.
+func rewriteClaimScope(t *testing.T, leaseID, scope string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", "*.json"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("claims=%v err=%v", files, err)
+	}
+	data, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["lease_id"] != leaseID && raw["LeaseID"] != leaseID {
+		// Field naming is an implementation detail; find the scope key by value.
+		found := false
+		for key, value := range raw {
+			if s, ok := value.(string); ok && s == leaseID {
+				found = true
+				_ = key
+			}
+		}
+		if !found {
+			t.Fatalf("claim file does not reference lease %s: %s", leaseID, data)
+		}
+	}
+	rewritten := false
+	for key, value := range raw {
+		if s, ok := value.(string); ok && json.Valid([]byte(s)) && strings.HasPrefix(s, "[\"") {
+			raw[key] = scope
+			rewritten = true
+		}
+	}
+	if !rewritten {
+		t.Fatalf("no provider scope found in claim: %s", data)
+	}
+	out, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(files[0], out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLegacyClaimsRemainVisibleForCleanupAndRelease(t *testing.T) {
+	for _, mode := range []string{"release", "cleanup", "guest-refused", "account-fence"} {
+		t.Run(mode, func(t *testing.T) {
+			b, f := fixtureBackend(t)
+			lease := acquireFixture(t, b, false)
+			legacy := legacyClaimScope(b.cfg)
+			if legacy == b.scope() {
+				t.Fatal("legacy scope must differ from the current scope")
+			}
+			rewriteClaimScope(t, lease.LeaseID, legacy)
+			claim := onlyClaim(t)
+			if claim.ProviderScope != legacy {
+				t.Fatalf("scope rewrite failed: %q", claim.ProviderScope)
+			}
+			views, err := b.List(context.Background(), core.ListRequest{})
+			if err != nil || len(views) != 1 {
+				t.Fatalf("legacy claim invisible: views=%d err=%v", len(views), err)
+			}
+			switch mode {
+			case "release":
+				resolved, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, ReleaseOnly: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err != nil {
+					t.Fatal(err)
+				}
+				assertNoClaims(t)
+				if f.count("DestroyVm vm-1") != 1 {
+					t.Fatal("legacy release did not destroy the exact immutable VM")
+				}
+			case "cleanup":
+				// A failed-cleanup claim from before the migration must stay
+				// reachable by cleanup after the upgrade.
+				failed := map[string]string{}
+				for k, v := range claim.Labels {
+					failed[k] = v
+				}
+				failed["recovery"] = "failed"
+				if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, failed); err != nil {
+					t.Fatal(err)
+				}
+				if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				assertNoClaims(t)
+				if f.count("DestroyVm vm-1") != 1 {
+					t.Fatal("legacy cleanup did not destroy the exact immutable VM")
+				}
+			case "guest-refused":
+				_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID})
+				if err == nil || !strings.Contains(err.Error(), "predates") {
+					t.Fatalf("legacy claim allowed guest access: %v", err)
+				}
+				_, err = b.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, ReadyProbe: true})
+				if err == nil || !strings.Contains(err.Error(), "predates") {
+					t.Fatalf("legacy claim allowed a ready probe: %v", err)
+				}
+				onlyClaim(t)
+			case "account-fence":
+				f.mutate(func() { f.user = "mallory" })
+				resolved := core.LeaseTarget{LeaseID: lease.LeaseID, Server: lease.Server}
+				if err := b.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: resolved}); err == nil {
+					t.Fatal("legacy claim crossed the account fence")
+				}
+				if f.count("DestroyVm vm-1") != 0 {
+					t.Fatal("fenced legacy release mutated the machine")
+				}
+				onlyClaim(t)
+			}
+		})
+	}
+	// New acquisitions must always write the current scope.
+	b, _ := fixtureBackend(t)
+	acquireFixture(t, b, false)
+	if onlyClaim(t).ProviderScope != b.scope() {
+		t.Fatal("acquisition wrote a non-current scope")
 	}
 }
