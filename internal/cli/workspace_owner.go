@@ -74,7 +74,17 @@ type workspaceOwnerTransport interface {
 func callWorkspaceOwnerTransport(ctx context.Context, timeout time.Duration, transport workspaceOwnerTransport, req workspaceOwnerRemoteRequest) (string, error) {
 	callCtx, cancel := context.WithTimeout(ctx, min(timeout, workspaceOwnerTransportCallBudget(transport)))
 	defer cancel()
-	return transport.Do(callCtx, req)
+	response, err := transport.Do(callCtx, req)
+	if err != nil {
+		// Report canonical context state without exposing a caller's cancellation cause.
+		switch callCtx.Err() {
+		case context.DeadlineExceeded:
+			err = fmt.Errorf("workspace owner call context=deadline-exceeded: %w", err)
+		case context.Canceled:
+			err = fmt.Errorf("workspace owner call context=canceled: %w", err)
+		}
+	}
+	return response, err
 }
 
 type sshWorkspaceOwnerTransport struct {
@@ -413,7 +423,7 @@ func (o *workspaceOwner) renewLoopWithTicks(ticks <-chan time.Time, callTimeout 
 // Only recognized states are safe to add to transport diagnostics.
 func workspaceOwnerProtocolError(response string, err error) error {
 	switch response {
-	case "MISMATCH", "EXPIRED", "AMBIGUOUS":
+	case "MISMATCH", "EXPIRED", "AMBIGUOUS", "CHILD":
 		return fmt.Errorf("protocol state %s: %w", response, err)
 	}
 	return err
@@ -528,6 +538,7 @@ func (o *workspaceOwner) Close(ctx context.Context) error {
 	renewErr := o.Err()
 	response, releaseErr := callWorkspaceOwnerTransport(ctx, o.callTimeout(), o.transport, workspaceOwnerRemoteRequest{Action: workspaceOwnerRelease, Key: o.key, Token: o.token, TTL: o.ttl})
 	if releaseErr != nil {
+		releaseErr = workspaceOwnerProtocolError(response, releaseErr)
 		releaseErr = Exit(7, "release remote workspace owner: ambiguous remote state: %v", releaseErr)
 	} else if response != "RELEASED" {
 		releaseErr = Exit(7, "release remote workspace owner failed closed: %s", strings.ToLower(firstNonBlank(response, "ambiguous")))
