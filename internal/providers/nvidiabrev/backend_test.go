@@ -778,6 +778,7 @@ func TestNvidiaBrevKeptAmbiguousCreateHonorsStopPolicy(t *testing.T) {
 	runner.responses = append(runner.responses,
 		scriptedBrevResponse{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-create-stop","name":"crabbox-create-stop-123456789abc","status":"RUNNING"}]}`},
 		scriptedBrevResponse{args: "stop ws-create-stop"},
+		scriptedBrevResponse{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-create-stop","name":"crabbox-create-stop-123456789abc","status":"STOPPED"}]}`},
 	)
 	if err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: "cbx_123456789abc"}}); err != nil {
 		t.Fatal(err)
@@ -979,6 +980,48 @@ func TestNvidiaBrevResolveStartsStoppedWorkspaceBeforeSSH(t *testing.T) {
 	}
 	if got := runner.joinedCalls(); !strings.Contains(got, "start ws-stop --detached") || !strings.Contains(got, "refresh") {
 		t.Fatalf("resolve did not start before SSH refresh: %s", got)
+	}
+}
+
+func TestNvidiaBrevResolveWaitsForStoppingWorkspaceBeforeRestart(t *testing.T) {
+	for _, pendingClaim := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pending-claim=%v", pendingClaim), func(t *testing.T) {
+			_, home := isolateNvidiaBrevState(t)
+			writeBrevSSHConfig(t, home, `Host crabbox-stopped-cbx123456789
+  HostName 203.0.113.10
+  User brev
+  IdentityFile "`+filepath.Join(home, ".brev", "brev.pem")+`"
+`)
+			runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
+				{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop","name":"crabbox-stopped-cbx123456789","status":"STOPPING"}]}`},
+				{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop","name":"crabbox-stopped-cbx123456789","status":"STOPPED"}]}`},
+				{args: "start ws-stop --detached"},
+				{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop","name":"crabbox-stopped-cbx123456789","status":"RUNNING","build_status":"READY","shell_status":"READY","health_status":"HEALTHY"}]}`},
+				{args: "refresh"},
+			}}
+			if pendingClaim {
+				cfg := core.Config{Provider: providerName}
+				workspace := brevWorkspace{ID: "ws-stop", Name: "crabbox-stopped-cbx123456789", Status: "STOPPING"}
+				server := workspaceToServer(cfg, workspace, "cbx_cbx123456789", "stopped", true)
+				if err := claimTestNvidiaBrevLeaseTargetForRepoConfig("cbx_cbx123456789", "stopped", cfg, server, core.SSHTarget{}, t.TempDir(), false); err != nil {
+					t.Fatal(err)
+				}
+				// The provider may still report RUNNING after accepting the stop.
+				runner.responses = append([]scriptedBrevResponse{{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop","name":"crabbox-stopped-cbx123456789","status":"RUNNING"}]}`}}, runner.responses...)
+			}
+			backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
+			lease, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: "ws-stop"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lease.Server.Status != "ready" || lease.SSH.Host != "203.0.113.10" {
+				t.Fatalf("stopped workspace not restarted and resolved: server=%#v ssh=%#v", lease.Server, lease.SSH)
+			}
+			if got := runner.joinedCalls(); !strings.Contains(got, "start ws-stop --detached") || !strings.Contains(got, "refresh") {
+				t.Fatalf("resolve did not start before SSH refresh: %s", got)
+			}
+
+		})
 	}
 }
 
@@ -1645,6 +1688,7 @@ func TestNvidiaBrevReleaseStopRetainsStoppedClaimOnSuccess(t *testing.T) {
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop","name":"crabbox-stop-111122223333","status":"RUNNING"}]}`},
 		{args: "stop ws-stop"},
+		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop","name":"crabbox-stop-111122223333","status":"STOPPED"}]}`},
 	}}
 	backend := NewNvidiaBrevBackend(Provider{}.Spec(), core.Config{}, core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}).(*nvidiaBrevBackend)
 	if outcome, err := backend.ReleaseLeaseWithOutcome(context.Background(), core.ReleaseLeaseRequest{Lease: core.LeaseTarget{LeaseID: leaseID, Server: server}}); err != nil || outcome.Terminal {
@@ -1692,6 +1736,7 @@ func TestNvidiaBrevExplicitStopOverridesAndReplacesStoredDeletePolicy(t *testing
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop-override","name":"crabbox-stop-override-555566667777","status":"RUNNING"}]}`},
 		{args: "stop ws-stop-override"},
+		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop-override","name":"crabbox-stop-override-555566667777","status":"STOPPED"}]}`},
 	}}
 	cfg := core.Config{NvidiaBrev: core.NvidiaBrevConfig{ReleaseAction: "stop"}}
 	markReleaseActionExplicit(&cfg)
@@ -1825,6 +1870,7 @@ func TestNvidiaBrevCleanupStopRetainsStoppedClaim(t *testing.T) {
 	runner := &scriptedBrevRunner{responses: []scriptedBrevResponse{
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop-cleanup","name":"crabbox-stop-cleanup-777788889999","status":"RUNNING"}]}`},
 		{args: "stop ws-stop-cleanup"},
+		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop-cleanup","name":"crabbox-stop-cleanup-777788889999","status":"STOPPED"}]}`},
 		{args: "ls --json --all", stdout: `{"workspaces":[{"id":"ws-stop-cleanup","name":"crabbox-stop-cleanup-777788889999","status":"STOPPED"}]}`},
 	}}
 	var stderr strings.Builder

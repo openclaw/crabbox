@@ -209,7 +209,10 @@ claim with both observed organization IDs for manual reconciliation, avoiding
 deletion of an unrelated same-named workspace.
 
 If `nvidiaBrev.releaseAction` is `stop`, Crabbox runs `brev stop`, keeps the
-local claim, and records the lease as stopped for later reuse or cleanup.
+local claim as `stopping`, and clears its SSH endpoint. It reports `stopped`
+only after Brev inventory confirms completion. An interrupted wait retains the
+claim; retry `crabbox stop` to reconcile it. Reuse waits for an in-flight stop
+before starting the workspace again.
 
 `cleanup` only mutates Brev workspaces that have matching local Crabbox claims:
 

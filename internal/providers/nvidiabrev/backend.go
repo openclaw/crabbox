@@ -182,6 +182,12 @@ func (b *nvidiaBrevBackend) Resolve(ctx context.Context, req core.ResolveRequest
 		}
 		return lease, nil
 	}
+	if strings.EqualFold(workspace.Status, "STOPPING") || strings.EqualFold(claim.Labels["state"], "stopping") {
+		workspace, err = b.waitForWorkspaceStopped(ctx, client, workspace, activeOrgID)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+	}
 	if brevWorkspaceStopped(workspace) {
 		if claim.LeaseID != "" {
 			starting := workspace
@@ -328,7 +334,7 @@ func (b *nvidiaBrevBackend) Touch(ctx context.Context, req core.TouchRequest) (c
 		}
 		if claimed {
 			switch state := strings.ToLower(strings.TrimSpace(claim.Labels["state"])); state {
-			case "stopped", "deleting":
+			case "stopping", "stopped", "deleting":
 				return server, core.Exit(4, "nvidia-brev lease=%s is %s", claim.LeaseID, state)
 			}
 			server = serverWithClaimLabels(server, claim)
@@ -434,7 +440,7 @@ func (b *nvidiaBrevBackend) Cleanup(ctx context.Context, req core.CleanupRequest
 				fmt.Fprintf(b.rt.Stderr, "would reconcile provider=%s lease=%s slug=%s workspace=%s state=stopped\n", providerName, leaseID, slug, safeWorkspaceRef(workspace))
 				continue
 			}
-			if err := b.persistStoppedClaim(workspace, claim, nil); err != nil {
+			if err := b.persistStoppedClaim(workspace, claim); err != nil {
 				errs = append(errs, err)
 			}
 			continue
@@ -512,12 +518,64 @@ func (b *nvidiaBrevBackend) stopWorkspaceAndPersistClaim(ctx context.Context, cl
 		return err
 	}
 	claim = updated
-	return b.persistStoppedClaim(workspace, claim, func() error {
+	if brevWorkspaceStopped(workspace) {
+		return b.persistStoppedClaim(workspace, claim)
+	}
+	// Brev accepts stop asynchronously. Clear the endpoint and retain a pending
+	// claim until inventory confirms STOPPED, so interruptions remain retryable.
+	stopping := workspaceToClaimedServer(b.configForRun(), workspace, claim.LeaseID, claim.Slug, claim)
+	stopping.Status = "stopping"
+	stopping.Labels["state"] = "stopping"
+	stopping.Labels["release"] = "stop"
+	claim, err = core.UpdateLeaseClaimEndpointIfUnchanged(claim.LeaseID, claim, stopping, core.SSHTarget{})
+	if err != nil {
+		return err
+	}
+	err = core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
 		if err := requireActiveBrevOrg(ctx, client, claim.Labels["brev_org_id"]); err != nil {
 			return err
 		}
+		if strings.EqualFold(workspace.Status, "STOPPING") {
+			return nil
+		}
 		return b.releaseWorkspace(ctx, client, workspace, "stop")
 	})
+	if err != nil {
+		return err
+	}
+	workspace, err = b.waitForWorkspaceStopped(ctx, client, workspace, claim.Labels["brev_org_id"])
+	if err != nil {
+		return fmt.Errorf("nvidia-brev stop pending; local claim retained: %w", err)
+	}
+	return b.persistStoppedClaim(workspace, claim)
+}
+
+func (b *nvidiaBrevBackend) waitForWorkspaceStopped(ctx context.Context, client *brevClient, workspace brevWorkspace, orgID string) (brevWorkspace, error) {
+	return shared.PollReady(ctx, brevAcquirePollTimeout, brevAcquirePollInterval,
+		func(ctx context.Context) (brevWorkspace, error) {
+			if err := requireActiveBrevOrg(ctx, client, orgID); err != nil {
+				return brevWorkspace{}, err
+			}
+			workspaces, err := client.list(ctx, true)
+			if err != nil {
+				return brevWorkspace{}, err
+			}
+			current, found, err := findBrevWorkspace(workspaces, workspaceIdentifier(workspace))
+			if err != nil {
+				return brevWorkspace{}, err
+			}
+			if err := requireActiveBrevOrg(ctx, client, orgID); err != nil {
+				return brevWorkspace{}, err
+			}
+			if !found {
+				return brevWorkspace{}, core.Exit(4, "nvidia-brev workspace %s disappeared while stopping", safeWorkspaceRef(workspace))
+			}
+			if normalizeBrevState(current) == "failed" {
+				return brevWorkspace{}, core.Exit(1, "nvidia-brev workspace %s failed while stopping", safeWorkspaceRef(workspace))
+			}
+			return current, nil
+		}, brevWorkspaceStopped,
+		core.Exit(5, "timed out waiting for nvidia-brev workspace %s to stop; retry stop to reconcile the retained claim", safeWorkspaceRef(workspace)))
 }
 
 func (b *nvidiaBrevBackend) deleteWorkspaceAndRemoveClaim(ctx context.Context, client *brevClient, workspace brevWorkspace, claim core.LeaseClaim) error {
@@ -787,12 +845,12 @@ func (b *nvidiaBrevBackend) waitForWorkspaceDeleted(ctx context.Context, client 
 	return err
 }
 
-func (b *nvidiaBrevBackend) persistStoppedClaim(workspace brevWorkspace, claim core.LeaseClaim, action func() error) error {
+func (b *nvidiaBrevBackend) persistStoppedClaim(workspace brevWorkspace, claim core.LeaseClaim) error {
 	stopped := workspaceToClaimedServer(b.configForRun(), workspace, claim.LeaseID, claim.Slug, claim)
 	stopped.Status = "stopped"
 	stopped.Labels["state"] = "stopped"
 	stopped.Labels["release"] = "stop"
-	if _, err := core.UpdateLeaseClaimEndpointIfUnchangedAfter(claim.LeaseID, claim, stopped, core.SSHTarget{}, action); err != nil {
+	if _, err := core.UpdateLeaseClaimEndpointIfUnchanged(claim.LeaseID, claim, stopped, core.SSHTarget{}); err != nil {
 		return fmt.Errorf("persist stopped nvidia-brev lease claim: %w", err)
 	}
 	return nil

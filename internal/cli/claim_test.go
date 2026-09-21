@@ -1596,43 +1596,48 @@ func TestUpdateLeaseClaimTouchIfUnchangedActionHoldsFenceDuringCallback(t *testi
 func durationPointer(value time.Duration) *time.Duration { return &value }
 
 func TestConditionalClaimEndpointActionUpdatesAtomically(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	leaseID := "cbx_conditionalendpoint123"
-	cfg := Config{Provider: "aws"}
-	server := Server{Provider: "aws", CloudID: "i-123", Labels: map[string]string{"provider": "aws", "state": "running"}}
-	if err := ClaimLeaseTargetForRepoConfig(leaseID, "endpoint", cfg, server, SSHTarget{Host: "203.0.113.10", Port: "22"}, "/repo", time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
-	expected, err := ReadLeaseClaim(leaseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stopped := server
-	stopped.Labels = map[string]string{"provider": "aws", "state": "stopped"}
-	actionCalled := false
-	updated, err := UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, expected, stopped, SSHTarget{}, func() error {
-		actionCalled = true
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !actionCalled || updated.Labels["state"] != "stopped" || updated.SSHHost != "" || updated.SSHPort != 0 {
-		t.Fatalf("updated=%#v actionCalled=%v", updated, actionCalled)
-	}
+	for _, state := range []string{"stopping", "stopped"} {
+		t.Run(state, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			leaseID := "cbx_conditionalendpoint123"
+			cfg := Config{Provider: "aws"}
+			server := Server{Provider: "aws", CloudID: "i-123", Labels: map[string]string{"provider": "aws", "state": "running"}}
+			if err := ClaimLeaseTargetForRepoConfig(leaseID, "endpoint", cfg, server, SSHTarget{Host: "203.0.113.10", Port: "22"}, "/repo", time.Minute, false); err != nil {
+				t.Fatal(err)
+			}
+			expected, err := ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stopped := server
+			stopped.Labels = map[string]string{"provider": "aws", "state": state}
+			actionCalled := false
+			updated, err := UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, expected, stopped, SSHTarget{}, func() error {
+				actionCalled = true
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !actionCalled || updated.Labels["state"] != state || updated.SSHHost != "" || updated.SSHPort != 0 {
+				t.Fatalf("updated=%#v actionCalled=%v", updated, actionCalled)
+			}
 
-	if err := UpdateLeaseClaimEndpoint(leaseID, Server{Provider: "aws", CloudID: "i-456"}, SSHTarget{}); err != nil {
-		t.Fatal(err)
-	}
-	actionCalled = false
-	if _, err := UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, updated, stopped, SSHTarget{}, func() error {
-		actionCalled = true
-		return nil
-	}); err == nil || !strings.Contains(err.Error(), "claim changed") {
-		t.Fatalf("conditional endpoint update err=%v", err)
-	}
-	if actionCalled {
-		t.Fatal("conditional endpoint update ran action for changed claim")
+			if err := UpdateLeaseClaimEndpoint(leaseID, Server{Provider: "aws", CloudID: "i-456"}, SSHTarget{}); err != nil {
+				t.Fatal(err)
+			}
+			actionCalled = false
+			if _, err := UpdateLeaseClaimEndpointIfUnchangedAfter(leaseID, updated, stopped, SSHTarget{}, func() error {
+				actionCalled = true
+				return nil
+			}); err == nil || !strings.Contains(err.Error(), "claim changed") {
+				t.Fatalf("conditional endpoint update err=%v", err)
+			}
+			if actionCalled {
+				t.Fatal("conditional endpoint update ran action for changed claim")
+			}
+
+		})
 	}
 }
 
