@@ -13,6 +13,14 @@ Packaged: set `tag="v$(crabbox --version)"`; fetch
 `https://raw.githubusercontent.com/openclaw/crabbox/$tag/scripts/`. Copy/run in
 base; stop it. No `main`/`latest`.
 
+Current Lume versions expose each shared directory beneath its basename. Crabbox
+uses the fixed guest path `/Volumes/My Shared Files/crabbox-bootstrap` inside a
+fresh private host directory for each acquisition. Updated image hooks also
+accept the mount-root layout used by older single-share runtimes; they do not
+search other shared directories. Reinstall the matching image hooks in existing
+golden images before using a named-share Lume runtime. Updating only the host CLI
+does not update the guest hook or its launchd watch paths.
+
 Defaults: `lume`; base `crabbox-macos-golden`; storage; user `lume`; root
 `/Users/lume/crabbox`.
 

@@ -1301,23 +1301,32 @@ func TestBootstrapKeyOnly(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("trust directory info=%#v err=%v", info, err)
 	}
+	info, err = os.Stat(trust.sharedDir())
+	if err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("shared directory info=%#v err=%v", info, err)
+	}
 	for name, want := range (labels{
 		"challenge":      trust.Challenge,
 		"ssh_user":       "lume",
 		"authorized_key": publicKey,
 	}) {
-		data, readErr := os.ReadFile(join(trust.Dir, name))
+		data, readErr := os.ReadFile(join(trust.Dir, "crabbox-bootstrap", name))
 		if readErr != nil || strings.TrimSpace(string(data)) != want {
 			t.Fatalf("%s=%q err=%v want %q", name, data, readErr, want)
 		}
+	}
+	removeBootstrapTrust(trust)
+	if _, err := os.Stat(trust.Dir); !os.IsNotExist(err) {
+		t.Fatalf("bootstrap root survived cleanup: %v", err)
 	}
 }
 
 func TestGuestIdentityPin(t *testing.T) {
 	dir := t.TempDir()
 	trust := bootstrapTrust{Dir: dir, Challenge: "test-challenge"}
+	must(t, os.Mkdir(trust.sharedDir(), 0o700))
 	identity := "test-challenge 00112233-4455-6677-8899-AABBCCDDEEFF ssh-ed25519 " + hostKey + "\n"
-	must(t, os.WriteFile(join(dir, "identity"), []byte(identity), 0o600))
+	must(t, os.WriteFile(join(trust.sharedDir(), "identity"), []byte(identity), 0o600))
 	knownHosts := join(dir, "known_hosts")
 	b := &backend{}
 	platformUUID, err := b.waitForGuestIdentity(bg, "worker-1", "192.0.2.10", trust, knownHosts)
@@ -1332,7 +1341,7 @@ func TestGuestIdentityPin(t *testing.T) {
 		t.Fatalf("known_hosts=%q", got)
 	}
 	identity = "test-challenge 00112233-4455-6677-8899-AABBCCDDEEFF ssh-ed25519 AQ==\n"
-	must(t, os.WriteFile(join(dir, "identity"), []byte(identity), 0o600))
+	must(t, os.WriteFile(join(trust.sharedDir(), "identity"), []byte(identity), 0o600))
 	if _, err := pinBootstrapHostKey("192.0.2.10", lumeHostKeyAlias("worker-1"), trust, join(dir, "known_hosts")); err == nil {
 		t.Fatal("accepted malformed SSH key blob from bootstrap identity")
 	}
