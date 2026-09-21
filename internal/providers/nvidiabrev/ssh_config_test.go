@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -135,6 +136,50 @@ func TestNvidiaBrevNativeSSHConfigRejectsArgumentsBeforeExec(t *testing.T) {
 		if _, err := c.resolveSSHConfig(context.Background(), core.Config{NvidiaBrev: core.NvidiaBrevConfig{User: value}}, "unused", "gpu", nil); err == nil {
 			t.Fatalf("user %q accepted", value)
 		}
+	}
+}
+
+func TestNvidiaBrevNativeSSHConfigReportsMintFailure(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX Match exec fixture")
+	}
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("OpenSSH client required")
+	}
+	t.Setenv("BREV_API_KEY", "sensitive-fixture-value")
+	dir := t.TempDir()
+	mint := filepath.Join(dir, "mint")
+	if err := os.WriteFile(mint, []byte("#!/bin/sh\nprintf 'certificate denied: %s\\n' \"$BREV_API_KEY\" >&2\nexit 1\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := []byte("Match host gpu exec \"" + mint + "\"\n HostName direct.example.test\n User brev\n IdentitiesOnly yes\n")
+	c := &brevClient{rt: core.Runtime{Exec: &fakeRunner{run: nativeSSHConfig}}}
+	_, err := c.resolveSSHConfig(t.Context(), core.Config{}, filepath.Join(dir, "config"), "gpu", config)
+	if err == nil || !strings.Contains(err.Error(), "certificate denied: [redacted]") || strings.Contains(err.Error(), os.Getenv("BREV_API_KEY")) {
+		t.Fatalf("mint diagnostic missing or credential exposed: %v", err)
+	}
+}
+
+func TestNvidiaBrevNativeSSHConfigBoundsMintDiagnostic(t *testing.T) {
+	credential := "sensitive-fixture-value"
+	t.Setenv("BREV_API_KEY", credential)
+	c := &brevClient{rt: core.Runtime{Exec: &fakeRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{Stdout: "hostname gpu\nidentitiesonly no\n", Stderr: strings.Repeat("x", 4090) + credential + strings.Repeat("y", 4096)}, nil
+	}}}}
+	_, err := c.resolveSSHConfig(t.Context(), core.Config{}, "unused", "gpu", nil)
+	if err == nil || len(err.Error()) > 4300 || !strings.HasSuffix(err.Error(), "...") || strings.Contains(err.Error(), "sensitive-") {
+		t.Fatalf("mint diagnostic was not bounded and redacted before truncation: %v", err)
+	}
+}
+
+func TestNvidiaBrevNativeSSHConfigReportsParseFailure(t *testing.T) {
+	execErr := errors.New("exit status 255")
+	c := &brevClient{rt: core.Runtime{Exec: &fakeRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+		return core.LocalCommandResult{Stderr: "invalid SSH configuration"}, execErr
+	}}}}
+	_, err := c.resolveSSHConfig(t.Context(), core.Config{}, "unused", "gpu", nil)
+	if !errors.Is(err, execErr) || !strings.Contains(err.Error(), "invalid SSH configuration") {
+		t.Fatalf("SSH failure lost its cause or diagnostic: %v", err)
 	}
 }
 

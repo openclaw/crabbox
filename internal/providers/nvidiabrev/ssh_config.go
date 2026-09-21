@@ -47,7 +47,7 @@ func (c *brevClient) resolveSSHConfig(ctx context.Context, cfg core.Config, path
 	args = append(args, "--", alias)
 	result, err := c.rt.Exec.Run(ctx, core.LocalCommandRequest{Name: "ssh", Args: args})
 	if err != nil {
-		return core.SSHTarget{}, fmt.Errorf("resolve nvidia-brev OpenSSH config for %q: %w", alias, err)
+		return core.SSHTarget{}, fmt.Errorf("resolve nvidia-brev OpenSSH config for %q: %w%s", alias, err, brevSSHDiagnostic(result.Stderr))
 	}
 	values := make(map[string]string)
 	for _, line := range strings.Split(result.Stdout, "\n") {
@@ -61,7 +61,7 @@ func (c *brevClient) resolveSSHConfig(ctx context.Context, cfg core.Config, path
 	proxy := values["proxycommand"]
 	if values["identitiesonly"] != "yes" ||
 		((values["hostname"] == "" || values["hostname"] == alias) && (proxy == "" || proxy == "none")) {
-		return core.SSHTarget{}, core.Exit(4, "nvidia-brev SSH route not found for %q; run `brev refresh` and check certificate authentication", alias)
+		return core.SSHTarget{}, core.Exit(4, "nvidia-brev SSH route not found for %q; run `brev refresh` and check certificate authentication%s", alias, brevSSHDiagnostic(result.Stderr))
 	}
 	if !brevSSHNamePattern.MatchString(values["user"]) {
 		return core.SSHTarget{}, core.Exit(2, "invalid nvidia-brev SSH User %q", values["user"])
@@ -77,6 +77,17 @@ func (c *brevClient) resolveSSHConfig(ctx context.Context, cfg core.Config, path
 		TargetOS:       targetLinux, NetworkKind: networkPublic,
 		ReadyCheck: "command -v git >/dev/null && command -v rsync >/dev/null && command -v tar >/dev/null",
 	}, nil
+}
+
+func brevSSHDiagnostic(stderr string) string {
+	detail := strings.TrimSpace(core.RedactDiagnosticSecrets(stderr, os.Getenv("BREV_API_KEY")))
+	if len(detail) > 4096 {
+		detail = detail[:4096] + "..."
+	}
+	if detail != "" {
+		return ": " + detail
+	}
+	return ""
 }
 
 var brevSSHNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$`)

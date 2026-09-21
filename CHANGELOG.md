@@ -54,7 +54,7 @@
 - Preserve generated Tart SSH credentials when failed-acquisition rollback cannot confirm ownership, delete the VM, or retire its claim, and report local artifact-cleanup errors alongside the original failure. [PR 2360](https://github.com/openclaw/crabbox/pull/2360). Thanks @steipete.
 - Preserve Lume's last successfully published claim when acquisition metadata updates fail, retaining the exact recovery state instead of falling back to unguarded rollback. [PR 2366](https://github.com/openclaw/crabbox/pull/2366). Thanks @steipete.
 
-- Resolve NVIDIA Brev SSH routes with native OpenSSH, preserving certificate renewal and capturing validated routes across commands, sync, forwarding, and interactive connections. [PR 2429](https://github.com/openclaw/crabbox/pull/2429).
+- Resolve NVIDIA Brev SSH routes with native OpenSSH, preserving certificate renewal, reporting certificate-hook failures during route discovery, and capturing validated routes across commands, sync, forwarding, and interactive connections. [PR 2429](https://github.com/openclaw/crabbox/pull/2429).
 
 ### Maintenance
 
