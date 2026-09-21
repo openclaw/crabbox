@@ -29,9 +29,9 @@ require (
 	github.com/hashicorp/nomad/api v0.0.0-20260921134951-9e1409fc523a
 	github.com/islo-labs/go-sdk v0.0.0-20260902083704-1464faf8f1fd
 	github.com/lima-vm/go-qcow2reader v0.8.0
-	github.com/lxc/incus/v7 v7.3.0
+	github.com/lxc/incus/v7 v7.1.0
 	github.com/pkg/sftp v1.13.11
-	github.com/scaleway/scaleway-sdk-go v1.0.0-beta.37
+	github.com/scaleway/scaleway-sdk-go v1.0.0-beta.36
 	github.com/sirupsen/logrus v1.10.2
 	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f
 	github.com/zitadel/oidc/v3 v3.51.3
@@ -56,7 +56,6 @@ require (
 )
 
 require (
-	github.com/flosch/pongo2/v6 v6.1.0 // indirect
 	github.com/go-openapi/runtime/server-middleware v0.33.2 // indirect
 	github.com/go-openapi/swag/cmdutils v0.29.2 // indirect
 	github.com/go-openapi/swag/conv v0.29.2 // indirect
@@ -70,7 +69,6 @@ require (
 	github.com/go-openapi/swag/typeutils v0.29.2 // indirect
 	github.com/go-openapi/swag/yamlutils v0.29.2 // indirect
 	github.com/oklog/ulid/v2 v2.1.2 // indirect
-	github.com/pkg/xattr v0.4.12 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 )
@@ -170,7 +168,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.46.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.yaml.in/yaml/v4 v4.0.0-rc.6 // indirect
+	go.yaml.in/yaml/v4 v4.0.0-rc.4 // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/term v0.46.0
 	golang.org/x/text v0.42.0 // indirect

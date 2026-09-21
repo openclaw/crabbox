@@ -53,7 +53,7 @@ jobs:
       - name: Deadcode
         run: |
           output_file=$(mktemp)
-          go run golang.org/x/tools/cmd/deadcode@v0.50.0 -test ./... > "$output_file"
+          go run golang.org/x/tools/cmd/deadcode@v0.45.0 -test ./... > "$output_file"
           if [ -s "$output_file" ]; then
             cat "$output_file"
             exit 1
