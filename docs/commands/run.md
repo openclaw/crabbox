@@ -387,6 +387,9 @@ protocol; the small sync-finalization lock remains nested inside it.
 
 Renewal errors retain recognized `MISMATCH`, `EXPIRED`, and `AMBIGUOUS` protocol
 states alongside transport errors. Unrecognized response text is omitted.
+Release errors also retain recognized denial states, including `CHILD`.
+Owner-call errors identify canceled or expired call contexts without printing
+caller-provided cancellation causes; the original transport error is preserved.
 WSL2 renewal uses a compact marker-only helper with a 60-second execution
 allowance for CPU and disk contention. It retries confirmed lock contention at
 most twice within the original bounded call deadline; that deadline is included
