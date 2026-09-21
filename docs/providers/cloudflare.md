@@ -47,6 +47,26 @@ The Worker entrypoint is `worker/src/cloudflare-container-runner.ts`. The
 container image is built from `worker/cloudflare-container.Dockerfile` and runs
 the Go HTTP runner in `worker/cloudflare-container-runner`.
 
+## Runner toolchain and pnpm upgrades
+
+The bundled image pins Node 24.21.0, Go 1.26.8, GitHub CLI 2.101.0, and
+pnpm 12.5.1. These versions take effect when the runner image is deployed;
+updating the local Crabbox CLI does not update an existing deployment.
+
+The pnpm default advances from 10.24.0 to 12.5.1. Projects without a
+`packageManager` field in `package.json` inherit the new default. Corepack
+continues to honor explicit project pins: set `"packageManager": "pnpm@10.24.0"`
+before deployment if a project still requires pnpm 10.
+
+Before adopting pnpm 12, follow the [pnpm migration guide](https://pnpm.io/migration)
+and [v12 release notes](https://github.com/pnpm/pnpm/releases/tag/v12.0.0).
+Configuration under `package.json#pnpm` and non-registry/auth settings in
+`.npmrc` move to `pnpm-workspace.yaml`; build-approval settings consolidate
+into `allowBuilds`, and `npm_config_*` environment variables become
+`pnpm_config_*`. Test dependency installation, frozen-lockfile reinstallation,
+and the project's own build/test commands with the selected pnpm version before
+deploying. Crabbox does not migrate project configuration automatically.
+
 ## Configuration
 
 Repo config should select the runner URL and remote workdir only. Keep the

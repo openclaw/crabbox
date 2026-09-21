@@ -7,11 +7,16 @@ const dockerfile = await readFile("worker/cloudflare-container.Dockerfile", "utf
 test("Cloudflare image pins GitHub CLI artifacts for each supported architecture", () => {
   assert.match(dockerfile, /^ARG TARGETARCH$/m);
   assert.doesNotMatch(dockerfile, /^ARG TARGETARCH=/m);
-  assert.match(dockerfile, /^ARG GH_VERSION=2\.92\.0$/m);
+  assert.match(dockerfile, /^ARG GH_VERSION=2\.101\.0$/m);
   assert.match(dockerfile, /^ARG GH_SHA256_AMD64=[0-9a-f]{64}$/m);
   assert.match(dockerfile, /^ARG GH_SHA256_ARM64=[0-9a-f]{64}$/m);
   assert.match(dockerfile, /amd64\) gh_arch="amd64"; gh_sha256="\$\{GH_SHA256_AMD64\}" ;;/);
   assert.match(dockerfile, /arm64\) gh_arch="arm64"; gh_sha256="\$\{GH_SHA256_ARM64\}" ;;/);
+});
+
+test("Cloudflare image pins pnpm", () => {
+  assert.match(dockerfile, /^ARG PNPM_VERSION=12\.5\.1$/m);
+  assert.match(dockerfile, /corepack prepare "pnpm@\$\{PNPM_VERSION\}" --activate/);
 });
 
 test("Cloudflare image verifies GitHub CLI before extraction", () => {

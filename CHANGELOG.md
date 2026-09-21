@@ -8,6 +8,7 @@
 
 ### Fixes
 
+- Refresh the Cloudflare runner to Node 24.21.0, Go 1.26.8, GitHub CLI 2.101.0, and pnpm 12.5.1; unpinned projects inherit the pnpm 10-to-12 breaking default change on deployment and should migrate configuration or pin `packageManager` to `pnpm@10.24.0`. [PR 2379](https://github.com/openclaw/crabbox/pull/2379). Thanks @altaywtf.
 - Preserve canonical cancellation/deadline context and recognized release-denial states in workspace-owner error messages. Thanks @steipete.
 - Restore Lume guest bootstrap with named shared directories, authenticated status readiness, and cleanup with quiet partial-match `lsof` output; existing golden images need refreshed hooks. [PR 2409](https://github.com/openclaw/crabbox/pull/2409).
 - Lume: persist heartbeat policy across fresh reads, honor explicit idle-timeout changes, and admit owned instance-scoped leases through the public heartbeat command. [PR 2407](https://github.com/openclaw/crabbox/pull/2407).
