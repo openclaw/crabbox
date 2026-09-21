@@ -8,6 +8,7 @@
 
 ### Fixes
 
+- Deliver Parallels POSIX guest preparation and SSH-key installation scripts over stdin on local and remote hosts, preserving fail-fast shell checks and preventing child commands from consuming the script. [PR 2401](https://github.com/openclaw/crabbox/pull/2401), [Issue 2396](https://github.com/openclaw/crabbox/issues/2396). Thanks @saariuslystoned.
 - Restore Lume guest bootstrap with named shared directories, authenticated status readiness, and cleanup with quiet partial-match `lsof` output; existing golden images need refreshed hooks. [PR 2409](https://github.com/openclaw/crabbox/pull/2409).
 - Lume: persist heartbeat policy across fresh reads, honor explicit idle-timeout changes, and admit owned instance-scoped leases through the public heartbeat command. [PR 2407](https://github.com/openclaw/crabbox/pull/2407).
 - Persist Tart heartbeat timestamps and explicit idle-timeout changes in the lease claim, preserving them across fresh status reads and cleanup without losing SSH target details. [PR 2405](https://github.com/openclaw/crabbox/pull/2405).
