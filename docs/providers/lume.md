@@ -21,6 +21,13 @@ search other shared directories. Reinstall the matching image hooks in existing
 golden images before using a named-share Lume runtime. Updating only the host CLI
 does not update the guest hook or its launchd watch paths.
 
+Status reads retain an already authenticated guest endpoint so `status --wait`
+can probe readiness, without creating connection material or updating the claim.
+Inactive or incomplete guests remain metadata-only; a ready guest with missing
+or invalid host-key material is not silently trusted. Cleanup treats quiet
+`lsof` exit code 1 as a partial match, while warnings, unexpected records, and
+other processes' open files still prevent VM deletion.
+
 Defaults: `lume`; base `crabbox-macos-golden`; storage; user `lume`; root
 `/Users/lume/crabbox`.
 

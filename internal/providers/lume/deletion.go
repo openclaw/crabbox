@@ -2,9 +2,11 @@ package lume
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -12,6 +14,35 @@ import (
 
 var removeVMDir = os.RemoveAll
 var foreignVMUse = systemForeignVMUse
+
+func lsofVMUseResult(output, diagnostics string, exitCode, self int) (string, error) {
+	if diagnostics = strings.TrimSpace(diagnostics); diagnostics != "" {
+		return "", fmt.Errorf("lsof inspection diagnostic: %s", diagnostics)
+	}
+	// With +D, closed files can produce exit 1 alongside valid open-file records.
+	if exitCode != 0 && exitCode != 1 {
+		return "", fmt.Errorf("lsof inspection exited with status %d", exitCode)
+	}
+	hasProcess := false
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "p") {
+			pid, err := strconv.Atoi(line[1:])
+			if err != nil || pid <= 0 {
+				return "", fmt.Errorf("invalid lsof process record")
+			}
+			if pid != self {
+				return fmt.Sprintf("process %d", pid), nil
+			}
+			hasProcess = true
+		} else if !hasProcess || !strings.HasPrefix(line, "f") || len(line) < 2 {
+			return "", fmt.Errorf("unexpected lsof inspection record")
+		}
+	}
+	return "", nil
+}
 
 // Lume delete accepts a mutable name. Lock, quarantine, and recheck the exact
 // directory and config inodes before removing the claimed VM.

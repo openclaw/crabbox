@@ -1196,6 +1196,82 @@ func TestPrepareLeaseUsesKnownHosts(t *testing.T) {
 	}
 }
 
+func TestLumeStatusPreservesAuthenticatedEndpointWithoutMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name, vmState, claimState, ip                  string
+		probe, prepared, directory, wantSSH, wantError bool
+	}{
+		{name: "ready", vmState: "running", claimState: "ready", ip: "192.0.2.10", prepared: true, wantSSH: true},
+		{name: "ready wait", vmState: "running", claimState: "ready", ip: "192.0.2.10", probe: true, prepared: true, wantSSH: true},
+		{name: "stopped", vmState: "stopped", claimState: "ready", ip: "192.0.2.10"},
+		{name: "starting", vmState: "running", claimState: "starting", ip: "192.0.2.10"},
+		{name: "no IP", vmState: "running", claimState: "ready"},
+		{name: "missing directory", vmState: "running", claimState: "ready", ip: "192.0.2.10", wantError: true},
+		{name: "missing pin", vmState: "running", claimState: "ready", ip: "192.0.2.10", directory: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("XDG_CONFIG_HOME", join(home, "config"))
+			t.Setenv("XDG_STATE_HOME", join(home, "state"))
+			const leaseID, name = "cbx_status_endpoint", "crabbox-status-endpoint"
+			server := core.Server{CloudID: name, Provider: providerName, Labels: labels{
+				"instance": name, "state": tc.claimState, "ssh_user": "alice", "work_root": "/Users/alice/work",
+			}}
+			repo := t.TempDir()
+			must(t, core.ClaimLeaseForRepoProviderScopePondEndpoint(leaseID, "status-endpoint", providerName, instanceScope(name), "", repo, time.Minute, false, server, core.SSHTarget{}))
+			key, err := core.TestboxKeyPath(leaseID)
+			must(t, err)
+			if tc.prepared {
+				writeLumeKnownHost(t, leaseID, name, hostKey)
+				must(t, os.WriteFile(key, []byte("synthetic fixture key\n"), 0o600))
+			} else if tc.directory {
+				must(t, core.UseLeaseKnownHosts(&core.SSHTarget{}, leaseID))
+			}
+			claimPath := join(home, "state", "crabbox", "claims", leaseID+".json")
+			before, err := os.ReadFile(claimPath)
+			must(t, err)
+			runner := &fake{responses: results{"get": {Stdout: fmt.Sprintf(`[{"name":%q,"status":%q,"ipAddress":%q}]`, name, tc.vmState, tc.ip)}}}
+			lease, err := backendFor(configFor(), runner).Resolve(bg, core.ResolveRequest{ID: leaseID, StatusOnly: true, ReadyProbe: tc.probe, NoLocalStateMutations: true, Repo: core.Repo{Root: repo}})
+			if (err != nil) != tc.wantError {
+				t.Fatalf("resolve error=%v", err)
+			}
+			if tc.wantSSH {
+				if lease.SSH.Host != tc.ip || lease.SSH.User != "alice" || lease.SSH.Port != "22" || lease.SSH.Key != key || lease.SSH.KnownHostsFile != join(filepath.Dir(key), "known_hosts") || lease.SSH.HostKeyAlias != lumeHostKeyAlias(name) || !lease.SSH.SSHConfigProxy || lease.SSH.ReadyCheck == "" || lease.SSH.DisableHostKeyChecking {
+					t.Fatalf("status lost authenticated SSH endpoint: %#v", lease.SSH)
+				}
+			} else if lease.SSH.Host != "" {
+				t.Fatal("incomplete observation acquired an SSH endpoint")
+			}
+			after, err := os.ReadFile(claimPath)
+			must(t, err)
+			if string(before) != string(after) {
+				t.Fatal("status changed the claim")
+			}
+			if tc.prepared {
+				for path, expected := range map[string]string{
+					key:                                    "synthetic fixture key\n",
+					join(filepath.Dir(key), "known_hosts"): lumeHostKeyAlias(name) + " ssh-ed25519 " + hostKey + "\n",
+				} {
+					data, err := os.ReadFile(path)
+					if err != nil || string(data) != expected {
+						t.Fatalf("status changed connection material: %v", err)
+					}
+				}
+			} else if tc.directory {
+				entries, err := os.ReadDir(filepath.Dir(key))
+				if err != nil || len(entries) != 0 {
+					t.Fatalf("status created connection material: %v", err)
+				}
+			} else {
+				if _, err := os.Stat(filepath.Dir(key)); !os.IsNotExist(err) {
+					t.Fatalf("status created connection storage: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestRebindHostAlias(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	const leaseID = "cbx_rebind123456"

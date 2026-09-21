@@ -8,7 +8,7 @@
 
 ### Fixes
 
-- Restore Lume guest bootstrap with named shared directories, keeping private per-acquisition staging and support for older single-share image layouts; existing golden images need refreshed hooks. [PR 2409](https://github.com/openclaw/crabbox/pull/2409).
+- Restore Lume guest bootstrap with named shared directories, authenticated status readiness, and cleanup with quiet partial-match `lsof` output; existing golden images need refreshed hooks. [PR 2409](https://github.com/openclaw/crabbox/pull/2409).
 - Persist Tart heartbeat timestamps and explicit idle-timeout changes in the lease claim, preserving them across fresh status reads and cleanup without losing SSH target details. [PR 2405](https://github.com/openclaw/crabbox/pull/2405).
 - Show the configured direct-host Parallels capacity in text and JSON config output, including zero and negative unlimited settings, without substituting a fleet limit. [PR 2400](https://github.com/openclaw/crabbox/pull/2400), follow-up to [PR 2392](https://github.com/openclaw/crabbox/pull/2392).
 - Prepare Node and npm before Parallels macOS readiness checks, preserving usable existing runtimes offline and installing the pinned baseline when needed. [PR 2387](https://github.com/openclaw/crabbox/pull/2387), [Issue 2381](https://github.com/openclaw/crabbox/issues/2381). Thanks @saariuslystoned.

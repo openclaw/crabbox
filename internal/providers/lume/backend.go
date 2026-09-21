@@ -444,6 +444,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		return lease, nil
 	}
 	if req.StatusOnly {
+		if instanceRunning(inst.Status) && inst.IPAddress != "" && normalizedState(claim.Labels["state"]) == "ready" {
+			return b.prepareLease(ctx, cfg, inst, claim, false)
+		}
 		return lease, nil
 	}
 	if !instanceRunning(inst.Status) {
@@ -1653,9 +1656,11 @@ func (b *backend) prepareLease(ctx context.Context, cfg core.Config, inst lumeVM
 	target.ReadyCheck = "uname -s | grep -qx Darwin && test -d \"$HOME\""
 	target.SSHConfigProxy = true
 	if claim.LeaseID != "" {
-		if err := core.UseLeaseKnownHosts(&target, claim.LeaseID); err != nil {
+		knownHosts, err := core.ExistingLeaseKnownHostsPath(claim.LeaseID)
+		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		target.KnownHostsFile = knownHosts
 		if err := requireAuthenticatedLumeHostKey(target, claim.Labels["state"], inst.Name); err != nil {
 			return core.LeaseTarget{}, err
 		}
