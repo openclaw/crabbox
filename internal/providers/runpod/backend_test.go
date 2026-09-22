@@ -16,9 +16,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type lifecycleClock struct{ current time.Time }
@@ -877,21 +879,23 @@ func TestRunpodSSHWaitPreservesCallerTermination(t *testing.T) {
 func TestRunpodSSHWaitPreservesDeadlineIdentity(t *testing.T) {
 	for _, phase := range []string{"read Err", "read Cause", "sleep"} {
 		t.Run(phase, func(t *testing.T) {
-			fake := &fakeRunpodAPI{getPodCtx: func(ctx context.Context, _ string) (runpodPod, error) {
-				if phase == "sleep" {
-					return runpodPod{DesiredStatus: "PROVISIONING"}, nil
+			synctest.Test(t, func(t *testing.T) {
+				fake := &fakeRunpodAPI{getPodCtx: func(ctx context.Context, _ string) (runpodPod, error) {
+					if phase == "sleep" {
+						return runpodPod{DesiredStatus: "PROVISIONING"}, nil
+					}
+					<-ctx.Done()
+					if phase == "read Cause" {
+						return runpodPod{}, context.Cause(ctx)
+					}
+					return runpodPod{}, ctx.Err()
+				}}
+				backend := &runpodLeaseBackend{pollTimeoutOverride: 20 * time.Millisecond}
+				_, err := backend.waitForPodSSH(t.Context(), fake, "pod_a")
+				if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "ssh endpoint not exposed within") {
+					t.Fatalf("err=%v, want readiness timeout and deadline identity", err)
 				}
-				<-ctx.Done()
-				if phase == "read Cause" {
-					return runpodPod{}, context.Cause(ctx)
-				}
-				return runpodPod{}, ctx.Err()
-			}}
-			backend := &runpodLeaseBackend{pollTimeoutOverride: 20 * time.Millisecond}
-			_, err := backend.waitForPodSSH(t.Context(), fake, "pod_a")
-			if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "ssh endpoint not exposed within") {
-				t.Fatalf("err=%v, want readiness timeout and deadline identity", err)
-			}
+			})
 		})
 	}
 }
@@ -936,24 +940,26 @@ func TestRunpodSSHWaitPreservesCompletedObservation(t *testing.T) {
 }
 
 func TestRunpodSSHWaitBoundsNativeHTTPClient(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-r.Context().Done():
-		case <-t.Context().Done():
+	synctest.Test(t, func(t *testing.T) {
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-t.Context().Done():
+			}
+		}))
+		defer server.Close()
+		client, err := newRunpodClient(core.Config{Runpod: core.RunpodConfig{APIKey: "fixture-key", APIURL: server.URL}}, core.Runtime{HTTP: server.Client()})
+		if err != nil {
+			t.Fatal(err)
 		}
-	}))
-	defer server.Close()
-	client, err := newRunpodClient(core.Config{Runpod: core.RunpodConfig{APIKey: "fixture-key", APIURL: server.URL}}, core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	backend := &runpodLeaseBackend{pollTimeoutOverride: 50 * time.Millisecond}
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	_, err = backend.waitForPodSSH(ctx, client, "pod_a")
-	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "ssh endpoint not exposed within") || ctx.Err() != nil {
-		t.Fatalf("err=%v parent=%v, want own readiness deadline from real HTTP request", err, ctx.Err())
-	}
+		backend := &runpodLeaseBackend{pollTimeoutOverride: 50 * time.Millisecond}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		_, err = backend.waitForPodSSH(ctx, client, "pod_a")
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "ssh endpoint not exposed within") || ctx.Err() != nil {
+			t.Fatalf("err=%v parent=%v, want own readiness deadline from real HTTP request", err, ctx.Err())
+		}
+	})
 }
 
 func TestRunpodWaitForPodSSHReturnsWhenPublicPortReady(t *testing.T) {
@@ -1002,66 +1008,70 @@ func TestRunpodWaitForSSHRejectsProxyOnlyPods(t *testing.T) {
 }
 
 func TestRunpodAcquireRollbackUsesBoundedCleanup(t *testing.T) {
-	terminateErr := errors.New("terminate failed")
-	fake := &fakeRunpodAPI{
-		deployPod: runpodPod{ID: "pod_failed", Name: "crabbox-blue-12345678", DesiredStatus: "PROVISIONING"},
-		getPod: func(id string) (runpodPod, error) {
-			return runpodPod{ID: id, Name: "crabbox-blue-12345678", DesiredStatus: "PROVISIONING"}, nil
-		},
-		terminatePod: func(ctx context.Context, podID string) error {
-			if podID != "pod_failed" {
-				t.Fatalf("podID=%q, want pod_failed", podID)
-			}
-			if _, ok := ctx.Deadline(); !ok {
-				t.Fatal("cleanup context should have a deadline")
-			}
-			return terminateErr
-		},
-	}
-	backend := &runpodLeaseBackend{
-		cfg:                    testRunpodConfig(t),
-		rt:                     core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		client:                 fake,
-		pollInitialOverride:    time.Millisecond,
-		pollTimeoutOverride:    5 * time.Millisecond,
-		cleanupTimeoutOverride: 20 * time.Millisecond,
-	}
+	synctest.Test(t, func(t *testing.T) {
+		terminateErr := errors.New("terminate failed")
+		fake := &fakeRunpodAPI{
+			deployPod: runpodPod{ID: "pod_failed", Name: "crabbox-blue-12345678", DesiredStatus: "PROVISIONING"},
+			getPod: func(id string) (runpodPod, error) {
+				return runpodPod{ID: id, Name: "crabbox-blue-12345678", DesiredStatus: "PROVISIONING"}, nil
+			},
+			terminatePod: func(ctx context.Context, podID string) error {
+				if podID != "pod_failed" {
+					t.Fatalf("podID=%q, want pod_failed", podID)
+				}
+				if _, ok := ctx.Deadline(); !ok {
+					t.Fatal("cleanup context should have a deadline")
+				}
+				return terminateErr
+			},
+		}
+		backend := &runpodLeaseBackend{
+			cfg:                    testRunpodConfig(t),
+			rt:                     core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+			client:                 fake,
+			pollInitialOverride:    time.Millisecond,
+			pollTimeoutOverride:    5 * time.Millisecond,
+			cleanupTimeoutOverride: 20 * time.Millisecond,
+		}
 
-	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
-	if err == nil || !strings.Contains(err.Error(), "ssh endpoint not exposed") || !strings.Contains(err.Error(), "cleanup failed") || !errors.Is(err, terminateErr) {
-		t.Fatalf("err=%v, want original wait failure plus cleanup failure", err)
-	}
-	if len(fake.terminated) != 1 || fake.terminated[0] != "pod_failed" {
-		t.Fatalf("terminated=%v", fake.terminated)
-	}
+		_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+		if err == nil || !strings.Contains(err.Error(), "ssh endpoint not exposed") || !strings.Contains(err.Error(), "cleanup failed") || !errors.Is(err, terminateErr) {
+			t.Fatalf("err=%v, want original wait failure plus cleanup failure", err)
+		}
+		if len(fake.terminated) != 1 || fake.terminated[0] != "pod_failed" {
+			t.Fatalf("terminated=%v", fake.terminated)
+		}
+	})
 }
 
 func TestRunpodAcquireRollbackCannotBlockForever(t *testing.T) {
-	fake := &fakeRunpodAPI{
-		deployPod: runpodPod{ID: "pod_blocked", Name: "crabbox-blue-12345678", DesiredStatus: "PROVISIONING"},
-		getPod: func(id string) (runpodPod, error) {
-			return runpodPod{ID: id, Name: "crabbox-blue-12345678", DesiredStatus: "PROVISIONING"}, nil
-		},
-		terminatePod: func(ctx context.Context, _ string) error {
-			<-ctx.Done()
-			return ctx.Err()
-		},
-	}
-	backend := &runpodLeaseBackend{
-		cfg:                    testRunpodConfig(t),
-		rt:                     core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
-		client:                 fake,
-		pollInitialOverride:    time.Millisecond,
-		pollTimeoutOverride:    5 * time.Millisecond,
-		cleanupTimeoutOverride: 20 * time.Millisecond,
-	}
-	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
-	if err == nil || !strings.Contains(err.Error(), "cleanup failed") || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err=%v, want bounded cleanup deadline error", err)
-	}
-	if len(fake.terminated) != 1 || fake.terminated[0] != "pod_blocked" {
-		t.Fatalf("terminated=%v", fake.terminated)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		fake := &fakeRunpodAPI{
+			deployPod: runpodPod{ID: "pod_blocked", Name: "crabbox-blue-12345678", DesiredStatus: "PROVISIONING"},
+			getPod: func(id string) (runpodPod, error) {
+				return runpodPod{ID: id, Name: "crabbox-blue-12345678", DesiredStatus: "PROVISIONING"}, nil
+			},
+			terminatePod: func(ctx context.Context, _ string) error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		}
+		backend := &runpodLeaseBackend{
+			cfg:                    testRunpodConfig(t),
+			rt:                     core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+			client:                 fake,
+			pollInitialOverride:    time.Millisecond,
+			pollTimeoutOverride:    5 * time.Millisecond,
+			cleanupTimeoutOverride: 20 * time.Millisecond,
+		}
+		_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}})
+		if err == nil || !strings.Contains(err.Error(), "cleanup failed") || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err=%v, want bounded cleanup deadline error", err)
+		}
+		if len(fake.terminated) != 1 || fake.terminated[0] != "pod_blocked" {
+			t.Fatalf("terminated=%v", fake.terminated)
+		}
+	})
 }
 
 func TestRunpodAcquireRejectsMismatchedReadyPodAndRollsBack(t *testing.T) {

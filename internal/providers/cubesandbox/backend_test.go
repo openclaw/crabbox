@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -213,47 +214,50 @@ func TestCubeSandboxInjectedHTTPClientIsPreservedForBothPlanes(t *testing.T) {
 }
 
 func TestCubeSandboxDataPlaneStreamOutlivesControlTimeout(t *testing.T) {
-	const controlTimeout = 20 * time.Millisecond
-	managementClient, dataPlaneClient := shared.ControlAndDataHTTPClients(nil, controlTimeout)
+	synctest.Test(t, func(t *testing.T) {
+		const controlTimeout = 20 * time.Millisecond
+		managementClient, dataPlaneClient := shared.ControlAndDataHTTPClients(nil, controlTimeout)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(io.Discard, r.Body)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}))
-		if flusher, ok := w.(http.Flusher); ok {
-			flusher.Flush()
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}))
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			time.Sleep(3 * controlTimeout)
+			_, _ = w.Write(testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 0, "exited": true}}}))
+			_, _ = w.Write(testutil.GRPCWebEnvelope(2, map[string]any{}))
+		}))
+		defer server.Close()
+		managementClient.Transport, dataPlaneClient.Transport = server.Client().Transport, server.Client().Transport
+		serverURL, err := url.Parse(server.URL)
+		if err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(3 * controlTimeout)
-		_, _ = w.Write(testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 0, "exited": true}}}))
-		_, _ = w.Write(testutil.GRPCWebEnvelope(2, map[string]any{}))
-	}))
-	defer server.Close()
-	serverURL, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, err := strconv.Atoi(serverURL.Port())
-	if err != nil {
-		t.Fatal(err)
-	}
-	routedDataPlaneClient, err := cubeSandboxDataPlaneHTTPClient(dataPlaneClient, serverURL.Hostname(), port)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &cubesandboxClient{
-		domain:      "cube.test",
-		proxyScheme: "http",
-		httpClient:  managementClient,
-		envdClient:  routedDataPlaneClient,
-	}
-	started := time.Now()
-	code, err := client.StartProcess(t.Context(), shared.EnvdSandboxSession{SandboxID: "sbx_1", Domain: "cube.test"}, shared.EnvdSandboxProcessRequest{Command: "true"})
-	if err != nil || code != 0 {
-		t.Fatalf("StartProcess code=%d err=%v", code, err)
-	}
-	if elapsed := time.Since(started); elapsed <= controlTimeout {
-		t.Fatalf("stream completed in %v, want it to remain active beyond %v", elapsed, controlTimeout)
-	}
+		port, err := strconv.Atoi(serverURL.Port())
+		if err != nil {
+			t.Fatal(err)
+		}
+		routedDataPlaneClient, err := cubeSandboxDataPlaneHTTPClient(dataPlaneClient, serverURL.Hostname(), port)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client := &cubesandboxClient{
+			domain:      "cube.test",
+			proxyScheme: "http",
+			httpClient:  managementClient,
+			envdClient:  routedDataPlaneClient,
+		}
+		started := time.Now()
+		code, err := client.StartProcess(t.Context(), shared.EnvdSandboxSession{SandboxID: "sbx_1", Domain: "cube.test"}, shared.EnvdSandboxProcessRequest{Command: "true"})
+		if err != nil || code != 0 {
+			t.Fatalf("StartProcess code=%d err=%v", code, err)
+		}
+		if elapsed := time.Since(started); elapsed <= controlTimeout {
+			t.Fatalf("stream completed in %v, want it to remain active beyond %v", elapsed, controlTimeout)
+		}
+	})
 }
 
 func TestCubeSandboxWorkspacePath(t *testing.T) {
@@ -685,18 +689,20 @@ func TestCubeSandboxClientPreservesCallerRedirectPolicy(t *testing.T) {
 }
 
 func TestCubeSandboxUploadFileRejectsMalformedDomainBeforeProducer(t *testing.T) {
-	client := &cubesandboxClient{apiKey: "cubesandbox_test", domain: "%zz", httpClient: http.DefaultClient}
-	err := client.UploadFile(context.Background(), shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/tmp/archive.tgz", strings.NewReader("archive"))
-	if err == nil {
-		t.Fatal("UploadFile err=nil, want malformed URL error")
-	}
-	runtime.Gosched()
-	time.Sleep(10 * time.Millisecond)
-	buf := make([]byte, 1<<20)
-	n := runtime.Stack(buf, true)
-	if bytes.Contains(buf[:n], []byte("github.com/openclaw/crabbox/internal/providers/cubesandbox.(*cubesandboxClient).UploadFile.func1")) {
-		t.Fatalf("multipart producer goroutine still running after malformed URL:\n%s", buf[:n])
-	}
+	synctest.Test(t, func(t *testing.T) {
+		client := &cubesandboxClient{apiKey: "cubesandbox_test", domain: "%zz", httpClient: http.DefaultClient}
+		err := client.UploadFile(context.Background(), shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/tmp/archive.tgz", strings.NewReader("archive"))
+		if err == nil {
+			t.Fatal("UploadFile err=nil, want malformed URL error")
+		}
+		runtime.Gosched()
+		synctest.Wait()
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		if bytes.Contains(buf[:n], []byte("github.com/openclaw/crabbox/internal/providers/cubesandbox.(*cubesandboxClient).UploadFile.func1")) {
+			t.Fatalf("multipart producer goroutine still running after malformed URL:\n%s", buf[:n])
+		}
+	})
 }
 
 func TestCubeSandboxSyncWorkspaceUploadsRepoArchive(t *testing.T) {

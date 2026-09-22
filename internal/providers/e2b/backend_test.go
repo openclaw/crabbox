@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -172,137 +173,149 @@ func TestE2BInjectedHTTPClientIsPreservedForBothPlanes(t *testing.T) {
 }
 
 func TestE2BControlClientBoundsStalledResponseBody(t *testing.T) {
-	const controlTimeout = 40 * time.Millisecond
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"sandboxID":`)
-		w.(http.Flusher).Flush()
-		<-req.Context().Done()
-	}))
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		const controlTimeout = 40 * time.Millisecond
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"sandboxID":`)
+			w.(http.Flusher).Flush()
+			<-req.Context().Done()
+		}))
+		defer server.Close()
 
-	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
-	client := &e2bClient{apiKey: "e2b_test", apiURL: server.URL, httpClient: controlClient}
-	started := time.Now()
-	_, err := client.GetSandbox(context.Background(), "sbx_1")
-	elapsed := time.Since(started)
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("GetSandbox error=%v, want whole-request deadline", err)
-	}
-	if elapsed > time.Second {
-		t.Fatalf("stalled response body bounded after %s, want under 1s", elapsed)
-	}
-	t.Logf("control response-body stall bounded: elapsed=%s timeout=%s", elapsed.Round(time.Millisecond), controlTimeout)
+		controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
+		controlClient.Transport = server.Client().Transport
+		client := &e2bClient{apiKey: "e2b_test", apiURL: server.URL, httpClient: controlClient}
+		started := time.Now()
+		_, err := client.GetSandbox(context.Background(), "sbx_1")
+		elapsed := time.Since(started)
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("GetSandbox error=%v, want whole-request deadline", err)
+		}
+		if elapsed > time.Second {
+			t.Fatalf("stalled response body bounded after %s, want under 1s", elapsed)
+		}
+		t.Logf("control response-body stall bounded: elapsed=%s timeout=%s", elapsed.Round(time.Millisecond), controlTimeout)
+	})
 }
 
 func TestE2BControlClientBoundsWithheldHeaders(t *testing.T) {
-	const controlTimeout = 40 * time.Millisecond
-	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
-		<-req.Context().Done()
-	}))
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		const controlTimeout = 40 * time.Millisecond
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
+			<-req.Context().Done()
+		}))
+		defer server.Close()
 
-	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
-	client := &e2bClient{apiKey: "e2b_test", apiURL: server.URL, httpClient: controlClient}
-	started := time.Now()
-	_, err := client.GetSandbox(context.Background(), "sbx_1")
-	elapsed := time.Since(started)
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("GetSandbox error=%v, want whole-request deadline", err)
-	}
-	if elapsed > time.Second {
-		t.Fatalf("withheld headers bounded after %s, want under 1s", elapsed)
-	}
-	t.Logf("control withheld headers bounded: elapsed=%s timeout=%s", elapsed.Round(time.Millisecond), controlTimeout)
+		controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
+		controlClient.Transport = server.Client().Transport
+		client := &e2bClient{apiKey: "e2b_test", apiURL: server.URL, httpClient: controlClient}
+		started := time.Now()
+		_, err := client.GetSandbox(context.Background(), "sbx_1")
+		elapsed := time.Since(started)
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("GetSandbox error=%v, want whole-request deadline", err)
+		}
+		if elapsed > time.Second {
+			t.Fatalf("withheld headers bounded after %s, want under 1s", elapsed)
+		}
+		t.Logf("control withheld headers bounded: elapsed=%s timeout=%s", elapsed.Round(time.Millisecond), controlTimeout)
+	})
 }
 
 func TestE2BDataPlaneStreamOutlivesControlTimeout(t *testing.T) {
-	const controlTimeout = 30 * time.Millisecond
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		_, _ = io.Copy(io.Discard, req.Body)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}))
-		w.(http.Flusher).Flush()
-		time.Sleep(3 * controlTimeout)
-		_, _ = w.Write(testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 0, "exited": true}}}))
-		_, _ = w.Write(testutil.GRPCWebEnvelope(2, map[string]any{}))
-	}))
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		const controlTimeout = 30 * time.Millisecond
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			_, _ = io.Copy(io.Discard, req.Body)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"start": map[string]any{"pid": 42}}}))
+			w.(http.Flusher).Flush()
+			time.Sleep(3 * controlTimeout)
+			_, _ = w.Write(testutil.GRPCWebEnvelope(0, map[string]any{"event": map[string]any{"end": map[string]any{"exitCode": 0, "exited": true}}}))
+			_, _ = w.Write(testutil.GRPCWebEnvelope(2, map[string]any{}))
+		}))
+		defer server.Close()
 
-	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
-	client := &e2bClient{
-		domain:     "e2b.test",
-		httpClient: controlClient,
-		envdClient: e2bLoopbackClient(t, server, 0),
-	}
-	started := time.Now()
-	code, err := client.StartProcess(context.Background(), shared.EnvdSandboxSession{SandboxID: "sbx_1", Domain: "e2b.test"}, shared.EnvdSandboxProcessRequest{Command: "true"})
-	elapsed := time.Since(started)
-	if err != nil || code != 0 {
-		t.Fatalf("StartProcess code=%d err=%v", code, err)
-	}
-	if elapsed <= controlTimeout {
-		t.Fatalf("stream completed in %s, want it active beyond %s", elapsed, controlTimeout)
-	}
-	t.Logf("envd stream survived control deadline: elapsed=%s control_timeout=%s", elapsed.Round(time.Millisecond), controlTimeout)
+		controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
+		controlClient.Transport = server.Client().Transport
+		client := &e2bClient{
+			domain:     "e2b.test",
+			httpClient: controlClient,
+			envdClient: e2bLoopbackClient(t, server, 0),
+		}
+		started := time.Now()
+		code, err := client.StartProcess(context.Background(), shared.EnvdSandboxSession{SandboxID: "sbx_1", Domain: "e2b.test"}, shared.EnvdSandboxProcessRequest{Command: "true"})
+		elapsed := time.Since(started)
+		if err != nil || code != 0 {
+			t.Fatalf("StartProcess code=%d err=%v", code, err)
+		}
+		if elapsed <= controlTimeout {
+			t.Fatalf("stream completed in %s, want it active beyond %s", elapsed, controlTimeout)
+		}
+		t.Logf("envd stream survived control deadline: elapsed=%s control_timeout=%s", elapsed.Round(time.Millisecond), controlTimeout)
+	})
 }
 
 func TestE2BDataPlaneUploadOutlivesControlTimeout(t *testing.T) {
-	const controlTimeout = 30 * time.Millisecond
-	type uploadResult struct {
-		data []byte
-		err  error
-	}
-	uploaded := make(chan uploadResult, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		reader, err := req.MultipartReader()
-		if err != nil {
-			uploaded <- uploadResult{err: err}
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
+	synctest.Test(t, func(t *testing.T) {
+		const controlTimeout = 30 * time.Millisecond
+		type uploadResult struct {
+			data []byte
+			err  error
 		}
-		part, err := reader.NextPart()
-		if err != nil {
-			uploaded <- uploadResult{err: err}
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		data, err := io.ReadAll(part)
-		uploaded <- uploadResult{data: data, err: err}
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
+		uploaded := make(chan uploadResult, 1)
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			reader, err := req.MultipartReader()
+			if err != nil {
+				uploaded <- uploadResult{err: err}
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			part, err := reader.NextPart()
+			if err != nil {
+				uploaded <- uploadResult{err: err}
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			data, err := io.ReadAll(part)
+			uploaded <- uploadResult{data: data, err: err}
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer server.Close()
 
-	payload := []byte("before-after")
-	controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
-	client := &e2bClient{
-		domain:     "e2b.test",
-		httpClient: controlClient,
-		envdClient: e2bLoopbackClient(t, server, 0),
-	}
-	reader := &e2bDelayedReader{data: payload, split: len("before-"), delay: 3 * controlTimeout}
-	started := time.Now()
-	err := client.UploadFile(context.Background(), shared.EnvdSandboxSession{SandboxID: "sbx_1", Domain: "e2b.test"}, "/tmp/archive.tgz", reader)
-	elapsed := time.Since(started)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := <-uploaded
-	if result.err != nil {
-		t.Fatal(result.err)
-	}
-	if !bytes.Equal(result.data, payload) {
-		t.Fatalf("uploaded=%q, want %q", result.data, payload)
-	}
-	if elapsed <= controlTimeout {
-		t.Fatalf("upload completed in %s, want it active beyond %s", elapsed, controlTimeout)
-	}
-	t.Logf("envd upload completed without truncation: bytes=%d elapsed=%s control_timeout=%s", len(result.data), elapsed.Round(time.Millisecond), controlTimeout)
+		payload := []byte("before-after")
+		controlClient, _ := shared.ControlAndDataHTTPClients(nil, controlTimeout)
+		controlClient.Transport = server.Client().Transport
+		client := &e2bClient{
+			domain:     "e2b.test",
+			httpClient: controlClient,
+			envdClient: e2bLoopbackClient(t, server, 0),
+		}
+		reader := &e2bDelayedReader{data: payload, split: len("before-"), delay: 3 * controlTimeout}
+		started := time.Now()
+		err := client.UploadFile(context.Background(), shared.EnvdSandboxSession{SandboxID: "sbx_1", Domain: "e2b.test"}, "/tmp/archive.tgz", reader)
+		elapsed := time.Since(started)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := <-uploaded
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if !bytes.Equal(result.data, payload) {
+			t.Fatalf("uploaded=%q, want %q", result.data, payload)
+		}
+		if elapsed <= controlTimeout {
+			t.Fatalf("upload completed in %s, want it active beyond %s", elapsed, controlTimeout)
+		}
+		t.Logf("envd upload completed without truncation: bytes=%d elapsed=%s control_timeout=%s", len(result.data), elapsed.Round(time.Millisecond), controlTimeout)
+	})
 }
 
 func TestValidateE2BAPIURL(t *testing.T) {
@@ -898,18 +911,20 @@ func TestE2BClientPreservesCallerRedirectPolicy(t *testing.T) {
 }
 
 func TestE2BUploadFileRejectsMalformedDomainBeforeProducer(t *testing.T) {
-	client := &e2bClient{apiKey: "e2b_test", domain: "%zz", httpClient: http.DefaultClient}
-	err := client.UploadFile(context.Background(), shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/tmp/archive.tgz", strings.NewReader("archive"))
-	if err == nil {
-		t.Fatal("UploadFile err=nil, want malformed URL error")
-	}
-	runtime.Gosched()
-	time.Sleep(10 * time.Millisecond)
-	buf := make([]byte, 1<<20)
-	n := runtime.Stack(buf, true)
-	if bytes.Contains(buf[:n], []byte("github.com/openclaw/crabbox/internal/providers/e2b.(*e2bClient).UploadFile.func1")) {
-		t.Fatalf("multipart producer goroutine still running after malformed URL:\n%s", buf[:n])
-	}
+	synctest.Test(t, func(t *testing.T) {
+		client := &e2bClient{apiKey: "e2b_test", domain: "%zz", httpClient: http.DefaultClient}
+		err := client.UploadFile(context.Background(), shared.EnvdSandboxSession{SandboxID: "sbx_1"}, "/tmp/archive.tgz", strings.NewReader("archive"))
+		if err == nil {
+			t.Fatal("UploadFile err=nil, want malformed URL error")
+		}
+		runtime.Gosched()
+		synctest.Wait()
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		if bytes.Contains(buf[:n], []byte("github.com/openclaw/crabbox/internal/providers/e2b.(*e2bClient).UploadFile.func1")) {
+			t.Fatalf("multipart producer goroutine still running after malformed URL:\n%s", buf[:n])
+		}
+	})
 }
 
 func TestE2BSyncWorkspaceUploadsRepoArchive(t *testing.T) {
@@ -1039,27 +1054,29 @@ func TestE2BSyncDeletePreservesWorkspaceWhenReplacementFails(t *testing.T) {
 }
 
 func TestE2BSyncWorkspaceHonorsConfiguredTimeout(t *testing.T) {
-	root := newE2BSyncTestRepo(t)
-	client := &fakeE2BSyncClient{uploadWaitForCancel: true}
-	backend := &e2bBackend{rt: core.Runtime{Stderr: io.Discard}}
-	backend.cfg.Sync.Timeout = 500 * time.Millisecond
-	started := time.Now()
+	synctest.Test(t, func(t *testing.T) {
+		root := newE2BSyncTestRepo(t)
+		client := &fakeE2BSyncClient{uploadWaitForCancel: true}
+		backend := &e2bBackend{rt: core.Runtime{Stderr: io.Discard}}
+		backend.cfg.Sync.Timeout = 500 * time.Millisecond
+		started := time.Now()
 
-	_, _, err := workspaceForConfig(backend.cfg, backend.rt).Bind(client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
-		Repo: core.Repo{Root: root, Name: "repo"},
-	}, "/home/user/repo").Sync(t.Context())
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("sync err=%v, want deadline exceeded", err)
-	}
-	if elapsed := time.Since(started); elapsed > 5*time.Second {
-		t.Fatalf("sync timeout returned after %s", elapsed)
-	}
-	if !client.uploadDeadlineSet {
-		t.Fatal("upload did not receive the configured sync deadline")
-	}
-	if !client.cleanupDeadlineSet {
-		t.Fatal("timed-out sync cleanup did not use an independent bounded context")
-	}
+		_, _, err := workspaceForConfig(backend.cfg, backend.rt).Bind(client, shared.EnvdSandboxSession{SandboxID: "sbx_1"}, core.RunRequest{
+			Repo: core.Repo{Root: root, Name: "repo"},
+		}, "/home/user/repo").Sync(t.Context())
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("sync err=%v, want deadline exceeded", err)
+		}
+		if elapsed := time.Since(started); elapsed > 5*time.Second {
+			t.Fatalf("sync timeout returned after %s", elapsed)
+		}
+		if !client.uploadDeadlineSet {
+			t.Fatal("upload did not receive the configured sync deadline")
+		}
+		if !client.cleanupDeadlineSet {
+			t.Fatal("timed-out sync cleanup did not use an independent bounded context")
+		}
+	})
 }
 
 func TestE2BPrepareWorkspaceRejectsUnsafePath(t *testing.T) {
@@ -1114,30 +1131,32 @@ func TestE2BStatusWaitBoundsInFlightSandboxLookup(t *testing.T) {
 		{name: "readiness poll", getWaitAfterCalls: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			client := &fakeE2BSyncClient{}
-			restore := swapNewE2BClient(client)
-			defer restore()
-			backend := &e2bBackend{
-				cfg: core.Config{E2B: core.E2BConfig{APIURL: "https://api.example.test", Template: "base"}},
-				rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
-			}
-			leaseID, _, _, err := backend.createSandbox(t.Context(), client, core.Repo{Root: t.TempDir()}, true, false, "")
-			if err != nil {
-				t.Fatal(err)
-			}
-			client.getWaitForCancel = true
-			client.getWaitAfterCalls = tc.getWaitAfterCalls
-			started := time.Now()
+			synctest.Test(t, func(t *testing.T) {
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				client := &fakeE2BSyncClient{}
+				restore := swapNewE2BClient(client)
+				defer restore()
+				backend := &e2bBackend{
+					cfg: core.Config{E2B: core.E2BConfig{APIURL: "https://api.example.test", Template: "base"}},
+					rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+				}
+				leaseID, _, _, err := backend.createSandbox(t.Context(), client, core.Repo{Root: t.TempDir()}, true, false, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				client.getWaitForCancel = true
+				client.getWaitAfterCalls = tc.getWaitAfterCalls
+				started := time.Now()
 
-			_, err = backend.Status(t.Context(), core.StatusRequest{ID: leaseID, Wait: true, WaitTimeout: 30 * time.Millisecond})
-			var exitErr core.ExitError
-			if !errors.As(err, &exitErr) || exitErr.Code != 5 || !strings.Contains(err.Error(), "timed out waiting for sandbox") {
-				t.Fatalf("status err=%v, want sandbox wait timeout with exit code 5", err)
-			}
-			if elapsed := time.Since(started); elapsed > time.Second {
-				t.Fatalf("in-flight sandbox lookup returned after %s", elapsed)
-			}
+				_, err = backend.Status(t.Context(), core.StatusRequest{ID: leaseID, Wait: true, WaitTimeout: 30 * time.Millisecond})
+				var exitErr core.ExitError
+				if !errors.As(err, &exitErr) || exitErr.Code != 5 || !strings.Contains(err.Error(), "timed out waiting for sandbox") {
+					t.Fatalf("status err=%v, want sandbox wait timeout with exit code 5", err)
+				}
+				if elapsed := time.Since(started); elapsed > time.Second {
+					t.Fatalf("in-flight sandbox lookup returned after %s", elapsed)
+				}
+			})
 		})
 	}
 }

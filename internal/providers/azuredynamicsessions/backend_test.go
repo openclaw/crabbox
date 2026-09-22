@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -74,38 +75,40 @@ func TestRunStopsNewSessionByDefault(t *testing.T) {
 }
 
 func TestRunCleanupUsesBoundedContext(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	oldTimeout := azureDynamicSessionsDeleteTimeout
-	azureDynamicSessionsDeleteTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { azureDynamicSessionsDeleteTimeout = oldTimeout })
-	fake := &recordingAzureDynamicSessionsAPI{deleteWaitForCancel: true}
-	restoreAzureDynamicSessionsClient(t, fake)
-	backend := testAzureDynamicSessionsBackend()
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		oldTimeout := azureDynamicSessionsDeleteTimeout
+		azureDynamicSessionsDeleteTimeout = 200 * time.Millisecond
+		t.Cleanup(func() { azureDynamicSessionsDeleteTimeout = oldTimeout })
+		fake := &recordingAzureDynamicSessionsAPI{deleteWaitForCancel: true}
+		restoreAzureDynamicSessionsClient(t, fake)
+		backend := testAzureDynamicSessionsBackend()
 
-	started := time.Now()
-	result, err := backend.Run(context.Background(), core.RunRequest{
-		Repo:       core.Repo{Root: t.TempDir(), Name: "repo"},
-		NoSync:     true,
-		Command:    []string{"printf", "ok"},
-		TimingJSON: true,
+		started := time.Now()
+		result, err := backend.Run(context.Background(), core.RunRequest{
+			Repo:       core.Repo{Root: t.TempDir(), Name: "repo"},
+			NoSync:     true,
+			Command:    []string{"printf", "ok"},
+			TimingJSON: true,
+		})
+		if err == nil || result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider {
+			t.Fatalf("cleanup failure reported success: result=%#v err=%v", result, err)
+		}
+		if time.Since(started) > time.Second {
+			t.Fatal("bounded cleanup did not return promptly")
+		}
+		if result.Session == nil || !result.Session.Kept {
+			t.Fatalf("session=%#v, want retained session after cleanup failure", result.Session)
+		}
+		if len(fake.deleted) != 1 || fake.deleted[0] != result.LeaseID {
+			t.Fatalf("deleted sessions = %#v, want %s", fake.deleted, result.LeaseID)
+		}
+		var report core.TimingReport
+		lines := strings.Split(strings.TrimSpace(backend.rt.Stderr.(*bytes.Buffer).String()), "\n")
+		if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil || report.ExitCode != 1 || report.ErrorKind != core.RunErrorProvider {
+			t.Fatalf("final cleanup timing=%#v err=%v", report, err)
+		}
 	})
-	if err == nil || result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider {
-		t.Fatalf("cleanup failure reported success: result=%#v err=%v", result, err)
-	}
-	if time.Since(started) > time.Second {
-		t.Fatal("bounded cleanup did not return promptly")
-	}
-	if result.Session == nil || !result.Session.Kept {
-		t.Fatalf("session=%#v, want retained session after cleanup failure", result.Session)
-	}
-	if len(fake.deleted) != 1 || fake.deleted[0] != result.LeaseID {
-		t.Fatalf("deleted sessions = %#v, want %s", fake.deleted, result.LeaseID)
-	}
-	var report core.TimingReport
-	lines := strings.Split(strings.TrimSpace(backend.rt.Stderr.(*bytes.Buffer).String()), "\n")
-	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil || report.ExitCode != 1 || report.ErrorKind != core.RunErrorProvider {
-		t.Fatalf("final cleanup timing=%#v err=%v", report, err)
-	}
 }
 
 func TestRunCleanupPreservesReplacedSessionClaim(t *testing.T) {
@@ -301,23 +304,25 @@ func TestSyncDeletePreservesWorkspaceWhenReplacementFails(t *testing.T) {
 }
 
 func TestStatusWaitBoundsInFlightSessionLookup(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	claimAzureDynamicSessionsLease(t, "azds-wait", "waiting-session", t.TempDir(), time.Minute)
-	fake := &recordingAzureDynamicSessionsAPI{getWaitForCancel: true}
-	restoreAzureDynamicSessionsClient(t, fake)
-	backend := testAzureDynamicSessionsBackend()
-	started := time.Now()
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		claimAzureDynamicSessionsLease(t, "azds-wait", "waiting-session", t.TempDir(), time.Minute)
+		fake := &recordingAzureDynamicSessionsAPI{getWaitForCancel: true}
+		restoreAzureDynamicSessionsClient(t, fake)
+		backend := testAzureDynamicSessionsBackend()
+		started := time.Now()
 
-	_, err := backend.Status(t.Context(), core.StatusRequest{
-		ID: "waiting-session", Wait: true, WaitTimeout: 30 * time.Millisecond,
+		_, err := backend.Status(t.Context(), core.StatusRequest{
+			ID: "waiting-session", Wait: true, WaitTimeout: 30 * time.Millisecond,
+		})
+		var exitErr core.ExitError
+		if !errors.As(err, &exitErr) || exitErr.Code != 5 || !strings.Contains(err.Error(), "timed out waiting for session azds-wait") {
+			t.Fatalf("status err=%v, want session wait timeout with exit code 5", err)
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("in-flight session lookup returned after %s", elapsed)
+		}
 	})
-	var exitErr core.ExitError
-	if !errors.As(err, &exitErr) || exitErr.Code != 5 || !strings.Contains(err.Error(), "timed out waiting for session azds-wait") {
-		t.Fatalf("status err=%v, want session wait timeout with exit code 5", err)
-	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("in-flight session lookup returned after %s", elapsed)
-	}
 }
 
 func TestRunReusesClaimWithoutStoppingSession(t *testing.T) {

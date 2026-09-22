@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -1162,112 +1163,116 @@ func TestListFiltersToCrabboxOwnedDockerSandboxes(t *testing.T) {
 }
 
 func TestStatusReadyMissingWaitAndTimeout(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	leaseID := leasePrefix + "crabbox-my-app-status"
-	if err := core.ClaimLeaseForRepoProviderPond(leaseID, "status", providerName, "", t.TempDir(), time.Hour, false); err != nil {
-		t.Fatal(err)
-	}
-	readyRunner := newRunner(map[string]scriptedReply{
-		"ls": {stdout: `[{"name":"crabbox-my-app-status","status":"running","agent":"shell","workspace":"/repo"}]`},
-	}, nil)
-	view, err := newTestBackend(newTestConfig(), readyRunner, io.Discard, io.Discard).Status(context.Background(), core.StatusRequest{ID: "status"})
-	if err != nil {
-		t.Fatalf("Status ready err=%v", err)
-	}
-	if !view.Ready || view.ServerType != providerName || view.Labels["workspace"] != "/repo" {
-		t.Fatalf("view=%#v", view)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		leaseID := leasePrefix + "crabbox-my-app-status"
+		if err := core.ClaimLeaseForRepoProviderPond(leaseID, "status", providerName, "", t.TempDir(), time.Hour, false); err != nil {
+			t.Fatal(err)
+		}
+		readyRunner := newRunner(map[string]scriptedReply{
+			"ls": {stdout: `[{"name":"crabbox-my-app-status","status":"running","agent":"shell","workspace":"/repo"}]`},
+		}, nil)
+		view, err := newTestBackend(newTestConfig(), readyRunner, io.Discard, io.Discard).Status(context.Background(), core.StatusRequest{ID: "status"})
+		if err != nil {
+			t.Fatalf("Status ready err=%v", err)
+		}
+		if !view.Ready || view.ServerType != providerName || view.Labels["workspace"] != "/repo" {
+			t.Fatalf("view=%#v", view)
+		}
 
-	missingRunner := newRunner(map[string]scriptedReply{"ls": {stdout: `[]`}}, nil)
-	_, err = newTestBackend(newTestConfig(), missingRunner, io.Discard, io.Discard).Status(context.Background(), core.StatusRequest{ID: "status"})
-	if err == nil || !strings.Contains(err.Error(), "not present") {
-		t.Fatalf("missing status err=%v", err)
-	}
+		missingRunner := newRunner(map[string]scriptedReply{"ls": {stdout: `[]`}}, nil)
+		_, err = newTestBackend(newTestConfig(), missingRunner, io.Discard, io.Discard).Status(context.Background(), core.StatusRequest{ID: "status"})
+		if err == nil || !strings.Contains(err.Error(), "not present") {
+			t.Fatalf("missing status err=%v", err)
+		}
 
-	terminalRunner := newRunner(map[string]scriptedReply{
-		"ls": {stdout: `[{"name":"crabbox-my-app-status","status":"stopped"}]`},
-	}, nil)
-	view, err = newTestBackend(newTestConfig(), terminalRunner, io.Discard, io.Discard).Status(context.Background(), core.StatusRequest{
-		ID:          "status",
-		Wait:        true,
-		WaitTimeout: time.Nanosecond,
-	})
-	if err != nil || view.Ready || view.State != "stopped" {
-		t.Fatalf("terminal stopped status view=%#v err=%v", view, err)
-	}
+		terminalRunner := newRunner(map[string]scriptedReply{
+			"ls": {stdout: `[{"name":"crabbox-my-app-status","status":"stopped"}]`},
+		}, nil)
+		view, err = newTestBackend(newTestConfig(), terminalRunner, io.Discard, io.Discard).Status(context.Background(), core.StatusRequest{
+			ID:          "status",
+			Wait:        true,
+			WaitTimeout: time.Nanosecond,
+		})
+		if err != nil || view.Ready || view.State != "stopped" {
+			t.Fatalf("terminal stopped status view=%#v err=%v", view, err)
+		}
 
-	oldPoll := statusPollInterval
-	statusPollInterval = time.Nanosecond
-	defer func() { statusPollInterval = oldPoll }()
-	waitRunner := newRunner(nil, map[string][]scriptedReply{
-		"ls": {
-			{stdout: `[{"name":"crabbox-my-app-status","status":"provisioning"}]`},
-			{stdout: `[{"name":"crabbox-my-app-status","status":"running"}]`},
-		},
-	})
-	view, err = newTestBackend(newTestConfig(), waitRunner, io.Discard, io.Discard).Status(context.Background(), core.StatusRequest{
-		ID:          "status",
-		Wait:        true,
-		WaitTimeout: time.Second,
-	})
-	if err != nil || !view.Ready {
-		t.Fatalf("wait ready view=%#v err=%v", view, err)
-	}
+		oldPoll := statusPollInterval
+		statusPollInterval = 100 * time.Microsecond
+		defer func() { statusPollInterval = oldPoll }()
+		waitRunner := newRunner(nil, map[string][]scriptedReply{
+			"ls": {
+				{stdout: `[{"name":"crabbox-my-app-status","status":"provisioning"}]`},
+				{stdout: `[{"name":"crabbox-my-app-status","status":"running"}]`},
+			},
+		})
+		view, err = newTestBackend(newTestConfig(), waitRunner, io.Discard, io.Discard).Status(context.Background(), core.StatusRequest{
+			ID:          "status",
+			Wait:        true,
+			WaitTimeout: time.Second,
+		})
+		if err != nil || !view.Ready {
+			t.Fatalf("wait ready view=%#v err=%v", view, err)
+		}
 
-	timeoutRunner := newRunner(map[string]scriptedReply{
-		"ls": {stdout: `[{"name":"crabbox-my-app-status","status":"provisioning"}]`},
-	}, nil)
-	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer timeoutCancel()
-	_, err = newTestBackend(newTestConfig(), timeoutRunner, io.Discard, io.Discard).Status(timeoutCtx, core.StatusRequest{
-		ID:          "status",
-		Wait:        true,
-		WaitTimeout: time.Nanosecond,
-	})
-	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
-		t.Fatalf("timeout status err=%v", err)
-	}
+		timeoutRunner := newRunner(map[string]scriptedReply{
+			"ls": {stdout: `[{"name":"crabbox-my-app-status","status":"provisioning"}]`},
+		}, nil)
+		timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), time.Millisecond)
+		defer timeoutCancel()
+		_, err = newTestBackend(newTestConfig(), timeoutRunner, io.Discard, io.Discard).Status(timeoutCtx, core.StatusRequest{
+			ID:          "status",
+			Wait:        true,
+			WaitTimeout: time.Nanosecond,
+		})
+		if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
+			t.Fatalf("timeout status err=%v", err)
+		}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancel()
-	_, err = newTestBackend(newTestConfig(), timeoutRunner, io.Discard, io.Discard).Status(ctx, core.StatusRequest{
-		ID:   "status",
-		Wait: true,
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		defer cancel()
+		_, err = newTestBackend(newTestConfig(), timeoutRunner, io.Discard, io.Discard).Status(ctx, core.StatusRequest{
+			ID:   "status",
+			Wait: true,
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("default wait context err=%v", err)
+		}
 	})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("default wait context err=%v", err)
-	}
 }
 
 func TestStatusWaitTimeoutDoesNotSleepPastDeadline(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	leaseID := leasePrefix + "crabbox-my-app-short-timeout"
-	if err := core.ClaimLeaseForRepoProviderPond(leaseID, "short-timeout", providerName, "", t.TempDir(), time.Hour, false); err != nil {
-		t.Fatal(err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		leaseID := leasePrefix + "crabbox-my-app-short-timeout"
+		if err := core.ClaimLeaseForRepoProviderPond(leaseID, "short-timeout", providerName, "", t.TempDir(), time.Hour, false); err != nil {
+			t.Fatal(err)
+		}
 
-	oldPoll := statusPollInterval
-	statusPollInterval = 2 * time.Second
-	defer func() { statusPollInterval = oldPoll }()
+		oldPoll := statusPollInterval
+		statusPollInterval = 2 * time.Second
+		defer func() { statusPollInterval = oldPoll }()
 
-	runner := newRunner(map[string]scriptedReply{
-		"ls": {stdout: `[{"name":"crabbox-my-app-short-timeout","status":"provisioning"}]`},
-	}, nil)
-	backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
+		runner := newRunner(map[string]scriptedReply{
+			"ls": {stdout: `[{"name":"crabbox-my-app-short-timeout","status":"provisioning"}]`},
+		}, nil)
+		backend := newTestBackend(newTestConfig(), runner, io.Discard, io.Discard)
 
-	start := time.Now()
-	_, err := backend.Status(context.Background(), core.StatusRequest{
-		ID:          "short-timeout",
-		Wait:        true,
-		WaitTimeout: 20 * time.Millisecond,
+		start := time.Now()
+		_, err := backend.Status(context.Background(), core.StatusRequest{
+			ID:          "short-timeout",
+			Wait:        true,
+			WaitTimeout: 20 * time.Millisecond,
+		})
+		elapsed := time.Since(start)
+		if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
+			t.Fatalf("Status err=%v want timeout", err)
+		}
+		if elapsed >= statusPollInterval/2 {
+			t.Fatalf("status wait elapsed=%s, want it bounded by the 20ms wait timeout rather than the 2s poll interval", elapsed)
+		}
 	})
-	elapsed := time.Since(start)
-	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
-		t.Fatalf("Status err=%v want timeout", err)
-	}
-	if elapsed >= statusPollInterval/2 {
-		t.Fatalf("status wait elapsed=%s, want it bounded by the 20ms wait timeout rather than the 2s poll interval", elapsed)
-	}
 }
 
 func TestStopRejectsUnclaimedIDBeforeCallingRM(t *testing.T) {

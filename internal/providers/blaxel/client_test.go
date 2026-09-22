@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -320,62 +321,65 @@ func TestUploadFileRewindsArchiveAfterNativeMultipartFailure(t *testing.T) {
 }
 
 func TestBlaxelFallbackBoundsControlAndPreservesUpload(t *testing.T) {
-	const controlTimeout = 30 * time.Millisecond
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v0/sandboxes":
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `[{"metadata":`)
-			w.(http.Flusher).Flush()
-			<-r.Context().Done()
-		case r.Method == http.MethodGet && r.URL.Path == "/v0/sandboxes/sbx-1":
-			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{
-				"name": "sbx-1",
-				"url":  serverURL(r) + "/sandbox/sbx-1",
-			}})
-		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/filesystem-multipart/initiate/"):
-			_ = json.NewEncoder(w).Encode(map[string]any{"uploadId": "upload-1"})
-		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/filesystem-multipart/upload-1/part"):
-			if err := r.ParseMultipartForm(1024); err != nil {
-				t.Error(err)
+	synctest.Test(t, func(t *testing.T) {
+		const controlTimeout = 30 * time.Millisecond
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/v0/sandboxes":
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `[{"metadata":`)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			case r.Method == http.MethodGet && r.URL.Path == "/v0/sandboxes/sbx-1":
+				_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{
+					"name": "sbx-1",
+					"url":  serverURL(r) + "/sandbox/sbx-1",
+				}})
+			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/filesystem-multipart/initiate/"):
+				_ = json.NewEncoder(w).Encode(map[string]any{"uploadId": "upload-1"})
+			case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/filesystem-multipart/upload-1/part"):
+				if err := r.ParseMultipartForm(1024); err != nil {
+					t.Error(err)
+				}
+				time.Sleep(3 * controlTimeout)
+				_ = json.NewEncoder(w).Encode(map[string]any{"etag": "etag-1", "partNumber": 1})
+			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/filesystem-multipart/upload-1/complete"):
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			default:
+				http.NotFound(w, r)
 			}
-			time.Sleep(3 * controlTimeout)
-			_ = json.NewEncoder(w).Encode(map[string]any{"etag": "etag-1", "partNumber": 1})
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/filesystem-multipart/upload-1/complete"):
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-		default:
-			http.NotFound(w, r)
+		}))
+		defer server.Close()
+
+		control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
+		control.Transport, data.Transport = server.Client().Transport, server.Client().Transport
+		client := &restClient{
+			base:     server.URL,
+			apiKey:   "test-key",
+			version:  defaultAPIVersion,
+			http:     secureHTTPClient(control),
+			dataHTTP: secureHTTPClient(data),
 		}
-	}))
-	defer server.Close()
+		started := time.Now()
+		err := client.Probe(context.Background())
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Probe error=%v, want whole-request deadline", err)
+		}
+		controlElapsed := time.Since(started)
+		if controlElapsed >= time.Second {
+			t.Fatalf("stalled control response bounded after %s, want under 1s", controlElapsed)
+		}
 
-	control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
-	client := &restClient{
-		base:     server.URL,
-		apiKey:   "test-key",
-		version:  defaultAPIVersion,
-		http:     secureHTTPClient(control),
-		dataHTTP: secureHTTPClient(data),
-	}
-	started := time.Now()
-	err := client.Probe(context.Background())
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Probe error=%v, want whole-request deadline", err)
-	}
-	controlElapsed := time.Since(started)
-	if controlElapsed >= time.Second {
-		t.Fatalf("stalled control response bounded after %s, want under 1s", controlElapsed)
-	}
-
-	started = time.Now()
-	if err := client.UploadFile(context.Background(), "sbx-1", "/tmp/archive.tgz", strings.NewReader("archive")); err != nil {
-		t.Fatal(err)
-	}
-	dataElapsed := time.Since(started)
-	if dataElapsed <= controlTimeout {
-		t.Fatalf("upload completed in %s, want beyond %s", dataElapsed, controlTimeout)
-	}
-	t.Logf("Blaxel control body bounded in %s; multipart upload completed in %s beyond %s control deadline", controlElapsed.Round(time.Millisecond), dataElapsed.Round(time.Millisecond), controlTimeout)
+		started = time.Now()
+		if err := client.UploadFile(context.Background(), "sbx-1", "/tmp/archive.tgz", strings.NewReader("archive")); err != nil {
+			t.Fatal(err)
+		}
+		dataElapsed := time.Since(started)
+		if dataElapsed <= controlTimeout {
+			t.Fatalf("upload completed in %s, want beyond %s", dataElapsed, controlTimeout)
+		}
+		t.Logf("Blaxel control body bounded in %s; multipart upload completed in %s beyond %s control deadline", controlElapsed.Round(time.Millisecond), dataElapsed.Round(time.Millisecond), controlTimeout)
+	})
 }
 
 func TestBlaxelInjectedHTTPSettingsArePreservedForBothPlanes(t *testing.T) {

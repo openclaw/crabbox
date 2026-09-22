@@ -420,25 +420,9 @@ func (b *e2bBackend) deleteClaimedSandbox(ctx context.Context, client shared.Env
 	if claim.ProviderScope != providerClaimScope(cfg) || claim.CloudID != sandboxID {
 		return core.Exit(4, "e2b lease %q is not bound to sandbox %q on this API endpoint; refusing deletion", leaseID, sandboxID)
 	}
-	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
-		sandbox, err := client.GetSandbox(ctx, sandboxID)
-		if err != nil {
-			if isNotFoundError(err) {
-				return nil
-			}
-			return e2bError("get sandbox before delete", err)
-		}
-		if err := validateE2BClaim(cfg, claim, sandbox); err != nil {
-			return err
-		}
-		if err := client.DeleteSandbox(ctx, sandboxID); err != nil {
-			if isNotFoundError(err) {
-				return nil
-			}
-			return e2bError("delete sandbox", err)
-		}
-		return nil
-	})
+	return shared.DeleteClaimedEnvdSandbox(ctx, client, leaseID, sandboxID, claim,
+		func(sandbox shared.EnvdSandbox) error { return validateE2BClaim(cfg, claim, sandbox) },
+		isNotFoundError, e2bError)
 }
 
 func validateE2BReclaimCollision(leaseID, sandboxID string, previous core.LeaseClaim, previousExists bool) error {

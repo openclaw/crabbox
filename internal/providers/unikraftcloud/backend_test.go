@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -452,16 +453,18 @@ func TestStatusWaitPollsUntilRunning(t *testing.T) {
 }
 
 func TestStatusWaitTimesOut(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	api := &fakeUnikraftCloudAPI{
-		baseURL:    "https://api.fra.unikraft.cloud",
-		getResults: []ukcInstance{{UUID: testInstanceUUID, State: "starting"}},
-	}
-	b := testBackend(api, nil, nil)
-	_, err := b.Status(context.Background(), core.StatusRequest{ID: testInstanceUUID, Wait: true, WaitTimeout: 300 * time.Millisecond})
-	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
-		t.Fatalf("err = %v, want wait timeout", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		api := &fakeUnikraftCloudAPI{
+			baseURL:    "https://api.fra.unikraft.cloud",
+			getResults: []ukcInstance{{UUID: testInstanceUUID, State: "starting"}},
+		}
+		b := testBackend(api, nil, nil)
+		_, err := b.Status(context.Background(), core.StatusRequest{ID: testInstanceUUID, Wait: true, WaitTimeout: 300 * time.Millisecond})
+		if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
+			t.Fatalf("err = %v, want wait timeout", err)
+		}
+	})
 }
 
 func TestListMergesRemoteInstancesWithLocalClaims(t *testing.T) {
@@ -893,20 +896,22 @@ func TestConcurrentWarmupsReserveDistinctRequestedSlugs(t *testing.T) {
 }
 
 func TestStatusWaitFailsImmediatelyOnTerminalState(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	api := &fakeUnikraftCloudAPI{
-		baseURL:    "https://api.fra.unikraft.cloud",
-		getResults: []ukcInstance{{UUID: testInstanceUUID, Name: testInstanceUUID, State: "stopped"}},
-	}
-	b := testBackend(api, nil, nil)
-	started := time.Now()
-	_, err := b.Status(context.Background(), core.StatusRequest{ID: testInstanceUUID, Wait: true, WaitTimeout: time.Second})
-	if err == nil || !strings.Contains(err.Error(), "terminal state=stopped") {
-		t.Fatalf("Status err = %v", err)
-	}
-	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
-		t.Fatalf("terminal status took %s", elapsed)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		api := &fakeUnikraftCloudAPI{
+			baseURL:    "https://api.fra.unikraft.cloud",
+			getResults: []ukcInstance{{UUID: testInstanceUUID, Name: testInstanceUUID, State: "stopped"}},
+		}
+		b := testBackend(api, nil, nil)
+		started := time.Now()
+		_, err := b.Status(context.Background(), core.StatusRequest{ID: testInstanceUUID, Wait: true, WaitTimeout: time.Second})
+		if err == nil || !strings.Contains(err.Error(), "terminal state=stopped") {
+			t.Fatalf("Status err = %v", err)
+		}
+		if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+			t.Fatalf("terminal status took %s", elapsed)
+		}
+	})
 }
 
 func TestCleanupResumesAcceptedDeletionWithoutReissuingDelete(t *testing.T) {

@@ -14,7 +14,9 @@ import (
 	"time"
 
 	gosdk "github.com/islo-labs/go-sdk"
+	"github.com/islo-labs/go-sdk/customauth"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 // TestIsloClientDeleteSandboxHandlesEmptyAndMissing verifies the raw DELETE
@@ -362,97 +364,119 @@ func TestIsloCreateHasBoundedOperationContext(t *testing.T) {
 }
 
 func TestIsloCreateSeparatesDefaultHeaderBudget(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/auth/token" {
-			io.WriteString(w, `{"session_token":"synthetic-token"}`)
-			return
+	synctest.Test(t, func(t *testing.T) {
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/auth/token" {
+				io.WriteString(w, `{"session_token":"synthetic-token"}`)
+				return
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+			io.WriteString(w, `{"id":"synthetic-id","name":"crabbox-proof-abcdef"}`)
+		}))
+		defer server.Close()
+		api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, core.Runtime{})
+		if err != nil {
+			t.Fatal(err)
 		}
-		select {
-		case <-r.Context().Done():
-			return
-		case <-time.After(100 * time.Millisecond):
+		client := api.(*isloSDKClient)
+		for _, httpClient := range []*http.Client{client.httpClient, client.createHTTPClient} {
+			if httpClient != nil {
+				transport := httpClient.Transport
+				if auth, ok := transport.(*customauth.Transport); ok {
+					transport = auth.Base
+				}
+				transport.(*http.Transport).DialContext = server.Client().Transport.(*http.Transport).DialContext
+			}
 		}
-		io.WriteString(w, `{"id":"synthetic-id","name":"crabbox-proof-abcdef"}`)
-	}))
-	defer server.Close()
-	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, core.Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := api.(*isloSDKClient)
-	if _, err := client.auth.Token(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	// Scale the ordinary API guard without weakening the create transport.
-	normal := client.httpClient.Transport.(*http.Transport)
-	normal.ResponseHeaderTimeout = 10 * time.Millisecond
-	sandbox, err := client.CreateSandbox(context.Background(), &gosdk.CreateSandboxRequest{})
-	if err != nil || sandbox.GetID() != "synthetic-id" {
-		t.Fatalf("create did not survive ordinary header bound: sandbox=%v err=%v", sandbox, err)
-	}
-	if _, err := client.GetSandbox(context.Background(), "crabbox-proof-abcdef"); err == nil {
-		t.Fatal("ordinary read lost header bound")
-	}
-	if normal.ResponseHeaderTimeout != 10*time.Millisecond {
-		t.Fatal("create mutated ordinary transport")
-	}
+		if _, err := client.auth.Token(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		// Scale the ordinary API guard without weakening the create transport.
+		normal := client.httpClient.Transport.(*http.Transport)
+		normal.ResponseHeaderTimeout = 10 * time.Millisecond
+		sandbox, err := client.CreateSandbox(context.Background(), &gosdk.CreateSandboxRequest{})
+		if err != nil || sandbox.GetID() != "synthetic-id" {
+			t.Fatalf("create did not survive ordinary header bound: sandbox=%v err=%v", sandbox, err)
+		}
+		if _, err := client.GetSandbox(context.Background(), "crabbox-proof-abcdef"); err == nil {
+			t.Fatal("ordinary read lost header bound")
+		}
+		if normal.ResponseHeaderTimeout != 10*time.Millisecond {
+			t.Fatal("create mutated ordinary transport")
+		}
+	})
 }
 
 func TestIsloCreatePreservesAuthAndInjectedTimeouts(t *testing.T) {
 	for _, mode := range []string{"default auth", "injected create"} {
 		t.Run(mode, func(t *testing.T) {
-			var creates atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/auth/token" {
-					creates.Add(1)
+			synctest.Test(t, func(t *testing.T) {
+				var creates atomic.Int32
+				server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/auth/token" {
+						creates.Add(1)
+					}
+					if (mode == "default auth" && r.URL.Path == "/auth/token") || r.URL.Path != "/auth/token" {
+						select {
+						case <-r.Context().Done():
+							return
+						case <-time.After(100 * time.Millisecond):
+						}
+					}
+					if r.URL.Path == "/auth/token" {
+						io.WriteString(w, `{"session_token":"synthetic-token"}`)
+					} else {
+						io.WriteString(w, `{"id":"synthetic-id","name":"crabbox-proof-abcdef"}`)
+					}
+				}))
+				defer server.Close()
+				rt := core.Runtime{}
+				var injected *http.Client
+				if mode == "injected create" {
+					injected = server.Client()
+					injected.Timeout = 10 * time.Millisecond
+					rt.HTTP = injected
 				}
-				if (mode == "default auth" && r.URL.Path == "/auth/token") || r.URL.Path != "/auth/token" {
-					select {
-					case <-r.Context().Done():
-						return
-					case <-time.After(100 * time.Millisecond):
+				api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, rt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				client := api.(*isloSDKClient)
+				for _, httpClient := range []*http.Client{client.httpClient, client.createHTTPClient} {
+					if httpClient != nil {
+						transport := httpClient.Transport
+						if auth, ok := transport.(*customauth.Transport); ok {
+							transport = auth.Base
+						}
+						transport.(*http.Transport).DialContext = server.Client().Transport.(*http.Transport).DialContext
 					}
 				}
-				if r.URL.Path == "/auth/token" {
-					io.WriteString(w, `{"session_token":"synthetic-token"}`)
+				if injected == nil {
+					client.httpClient.Transport.(*http.Transport).ResponseHeaderTimeout = 10 * time.Millisecond
 				} else {
-					io.WriteString(w, `{"id":"synthetic-id","name":"crabbox-proof-abcdef"}`)
+					if client.createHTTPClient != nil || client.httpClient.Transport != injected.Transport || injected.Timeout != 10*time.Millisecond {
+						t.Fatal("explicit HTTP client changed")
+					}
+					// Prime auth outside the deliberately tiny create deadline.
+					authTimeout := client.httpClient.Timeout
+					client.httpClient.Timeout = time.Second
+					_, authErr := client.auth.Token(context.Background())
+					client.httpClient.Timeout = authTimeout
+					if authErr != nil {
+						t.Fatal(authErr)
+					}
 				}
-			}))
-			defer server.Close()
-			rt := core.Runtime{}
-			var injected *http.Client
-			if mode == "injected create" {
-				injected = server.Client()
-				injected.Timeout = 10 * time.Millisecond
-				rt.HTTP = injected
-			}
-			api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, rt)
-			if err != nil {
-				t.Fatal(err)
-			}
-			client := api.(*isloSDKClient)
-			if injected == nil {
-				client.httpClient.Transport.(*http.Transport).ResponseHeaderTimeout = 10 * time.Millisecond
-			} else {
-				if client.createHTTPClient != nil || client.httpClient.Transport != injected.Transport || injected.Timeout != 10*time.Millisecond {
-					t.Fatal("explicit HTTP client changed")
+				if _, err := client.CreateSandbox(context.Background(), &gosdk.CreateSandboxRequest{}); err == nil {
+					t.Fatal("create relaxed existing auth/injected timeout")
 				}
-				// Prime auth outside the deliberately tiny create deadline.
-				authTimeout := client.httpClient.Timeout
-				client.httpClient.Timeout = time.Second
-				_, authErr := client.auth.Token(context.Background())
-				client.httpClient.Timeout = authTimeout
-				if authErr != nil {
-					t.Fatal(authErr)
+				if mode == "default auth" && creates.Load() != 0 {
+					t.Fatal("create followed failed authentication")
 				}
-			}
-			if _, err := client.CreateSandbox(context.Background(), &gosdk.CreateSandboxRequest{}); err == nil {
-				t.Fatal("create relaxed existing auth/injected timeout")
-			}
-			if mode == "default auth" && creates.Load() != 0 {
-				t.Fatal("create followed failed authentication")
-			}
+			})
 		})
 	}
 }
@@ -481,73 +505,84 @@ func (w isloStreamSignalWriter) Write(p []byte) (int, error) {
 }
 
 func TestIsloCreateTransportKeepsStreamingBodyUnbounded(t *testing.T) {
-	original := http.DefaultTransport
-	originalHeader := original.(*http.Transport).ResponseHeaderTimeout
-	releaseBody := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/auth/token" {
-			io.WriteString(w, `{"session_token":"synthetic-token"}`)
-			return
+	synctest.Test(t, func(t *testing.T) {
+		original := http.DefaultTransport
+		originalHeader := original.(*http.Transport).ResponseHeaderTimeout
+		releaseBody := make(chan struct{})
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/auth/token" {
+				io.WriteString(w, `{"session_token":"synthetic-token"}`)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, "event: stdout\ndata: started\n\n")
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-releaseBody:
+			}
+			io.WriteString(w, "event: exit\ndata: 0\n\n")
+		}))
+		defer server.Close()
+		api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, core.Runtime{})
+		if err != nil {
+			t.Fatal(err)
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		io.WriteString(w, "event: stdout\ndata: started\n\n")
-		w.(http.Flusher).Flush()
+		client := api.(*isloSDKClient)
+		for _, httpClient := range []*http.Client{client.httpClient, client.createHTTPClient} {
+			if httpClient != nil {
+				transport := httpClient.Transport
+				if auth, ok := transport.(*customauth.Transport); ok {
+					transport = auth.Base
+				}
+				transport.(*http.Transport).DialContext = server.Client().Transport.(*http.Transport).DialContext
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := client.auth.Token(ctx); err != nil {
+			t.Fatal(err)
+		}
+		const headerBound = time.Second
+		client.httpClient.Transport.(*http.Transport).ResponseHeaderTimeout = headerBound
+		observed := make(isloStreamSignalWriter, 1)
+		type streamResult struct {
+			code int
+			err  error
+		}
+		finished := make(chan streamResult, 1)
+		go func() {
+			code, err := client.ExecStream(ctx, "crabbox-proof-abcdef", &gosdk.ExecRequest{}, observed, io.Discard)
+			finished <- streamResult{code, err}
+		}()
 		select {
-		case <-r.Context().Done():
-			return
-		case <-releaseBody:
+		case <-observed:
+		case result := <-finished:
+			t.Fatalf("stream ended before the client observed its first record: %+v", result)
+		case <-ctx.Done():
+			t.Fatal("client did not observe the first streamed record")
 		}
-		io.WriteString(w, "event: exit\ndata: 0\n\n")
-	}))
-	defer server.Close()
-	api, err := newIsloClient(core.Config{Islo: core.IsloConfig{APIKey: "synthetic-key", BaseURL: server.URL}}, core.Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := api.(*isloSDKClient)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if _, err := client.auth.Token(ctx); err != nil {
-		t.Fatal(err)
-	}
-	const headerBound = time.Second
-	client.httpClient.Transport.(*http.Transport).ResponseHeaderTimeout = headerBound
-	observed := make(isloStreamSignalWriter, 1)
-	type streamResult struct {
-		code int
-		err  error
-	}
-	finished := make(chan streamResult, 1)
-	go func() {
-		code, err := client.ExecStream(ctx, "crabbox-proof-abcdef", &gosdk.ExecRequest{}, observed, io.Discard)
-		finished <- streamResult{code, err}
-	}()
-	select {
-	case <-observed:
-	case result := <-finished:
-		t.Fatalf("stream ended before the client observed its first record: %+v", result)
-	case <-ctx.Done():
-		t.Fatal("client did not observe the first streamed record")
-	}
-	// Start the body-duration proof only after the client has received headers
-	// and consumed data; server-side Flush alone does not establish that boundary.
-	select {
-	case result := <-finished:
-		t.Fatalf("stream ended while the remaining body was held: %+v", result)
-	case <-time.After(2 * headerBound):
-	case <-ctx.Done():
-		t.Fatal("stream harness deadline expired during body hold")
-	}
-	close(releaseBody)
-	select {
-	case result := <-finished:
-		if result.err != nil || result.code != 0 {
-			t.Fatalf("stream body stopped at header bound: %d %v", result.code, result.err)
+		// Start the body-duration proof only after the client has received headers
+		// and consumed data; server-side Flush alone does not establish that boundary.
+		select {
+		case result := <-finished:
+			t.Fatalf("stream ended while the remaining body was held: %+v", result)
+		case <-time.After(2 * headerBound):
+		case <-ctx.Done():
+			t.Fatal("stream harness deadline expired during body hold")
 		}
-	case <-ctx.Done():
-		t.Fatal("stream did not complete after releasing its remaining body")
-	}
-	if http.DefaultTransport != original || original.(*http.Transport).ResponseHeaderTimeout != originalHeader {
-		t.Fatal("global transport mutated")
-	}
+		close(releaseBody)
+		select {
+		case result := <-finished:
+			if result.err != nil || result.code != 0 {
+				t.Fatalf("stream body stopped at header bound: %d %v", result.code, result.err)
+			}
+		case <-ctx.Done():
+			t.Fatal("stream did not complete after releasing its remaining body")
+		}
+		if http.DefaultTransport != original || original.(*http.Transport).ResponseHeaderTimeout != originalHeader {
+			t.Fatal("global transport mutated")
+		}
+	})
 }

@@ -507,23 +507,25 @@ func TestSandboxReadinessPreservesDiagnostics(t *testing.T) {
 }
 
 func TestWaitForSandboxReadinessRetriesTransientKubernetesErrors(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.AgentSandbox.Context = "agent-context"
-	cfg.AgentSandbox.Namespace = "sandboxes"
-	cfg.AgentSandbox.WarmPool = "linux-pool"
-	fake := readyFakeClient(cfg)
-	fake.getErrs = []error{errors.New("temporary API read failure")}
-	fake.podListErrs = []error{errors.New("temporary pod list failure")}
+	synctest.Test(t, func(t *testing.T) {
+		cfg := core.BaseConfig()
+		cfg.AgentSandbox.Context = "agent-context"
+		cfg.AgentSandbox.Namespace = "sandboxes"
+		cfg.AgentSandbox.WarmPool = "linux-pool"
+		fake := readyFakeClient(cfg)
+		fake.getErrs = []error{errors.New("temporary API read failure")}
+		fake.podListErrs = []error{errors.New("temporary pod list failure")}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	ready, err := waitForSandboxReadinessWithTimeouts(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), 0, 0, time.Millisecond)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ready.SandboxName != "sandbox-a" || ready.PodName != "pod-a" {
-		t.Fatalf("ready=%#v", ready)
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		ready, err := waitForSandboxReadinessWithTimeouts(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), 0, 0, time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready.SandboxName != "sandbox-a" || ready.PodName != "pod-a" {
+			t.Fatalf("ready=%#v", ready)
+		}
+	})
 }
 
 func TestWaitForSandboxReadinessRejectsTerminalStates(t *testing.T) {
@@ -584,45 +586,49 @@ func TestWaitForSandboxReadinessRejectsTerminalStates(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := core.BaseConfig()
-			cfg.AgentSandbox.Context = "agent-context"
-			cfg.AgentSandbox.Namespace = "sandboxes"
-			cfg.AgentSandbox.WarmPool = "linux-pool"
-			fake := readyFakeClient(cfg)
-			tt.mutate(fake)
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-			defer cancel()
-			_, err := waitForSandboxReadinessWithTimeouts(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), 0, 0, time.Millisecond)
-			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
-				t.Fatalf("err=%v want substring %q", err, tt.wantError)
-			}
-			if strings.Contains(err.Error(), "timed out") {
-				t.Fatalf("terminal state was retried: %v", err)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				cfg := core.BaseConfig()
+				cfg.AgentSandbox.Context = "agent-context"
+				cfg.AgentSandbox.Namespace = "sandboxes"
+				cfg.AgentSandbox.WarmPool = "linux-pool"
+				fake := readyFakeClient(cfg)
+				tt.mutate(fake)
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				defer cancel()
+				_, err := waitForSandboxReadinessWithTimeouts(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), 0, 0, time.Millisecond)
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("err=%v want substring %q", err, tt.wantError)
+				}
+				if strings.Contains(err.Error(), "timed out") {
+					t.Fatalf("terminal state was retried: %v", err)
+				}
+			})
 		})
 	}
 }
 
 func TestWaitForSandboxPodReadinessRefreshesSandboxTerminalState(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.AgentSandbox.Context = "agent-context"
-	cfg.AgentSandbox.Namespace = "sandboxes"
-	cfg.AgentSandbox.WarmPool = "linux-pool"
-	fake := readyFakeClient(cfg)
-	sandbox := cloneKubernetesObject(fake.objects[sandboxResource+"/sandboxes/sandbox-a"])
-	fake.objects[sandboxResource+"/sandboxes/sandbox-a"].Status.Conditions = []conditionState{{
-		Type: "Finished", Status: "True", Reason: "PodFailed", Message: "exit 1",
-	}}
+	synctest.Test(t, func(t *testing.T) {
+		cfg := core.BaseConfig()
+		cfg.AgentSandbox.Context = "agent-context"
+		cfg.AgentSandbox.Namespace = "sandboxes"
+		cfg.AgentSandbox.WarmPool = "linux-pool"
+		fake := readyFakeClient(cfg)
+		sandbox := cloneKubernetesObject(fake.objects[sandboxResource+"/sandboxes/sandbox-a"])
+		fake.objects[sandboxResource+"/sandboxes/sandbox-a"].Status.Conditions = []conditionState{{
+			Type: "Finished", Status: "True", Reason: "PodFailed", Message: "exit 1",
+		}}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	_, err := waitForSandboxPodReadiness(ctx, fake, "sandboxes", "claim-a", sandbox, fakeClaimIdentity(cfg), time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "Sandbox sandbox-a finished reason=PodFailed") {
-		t.Fatalf("err=%v", err)
-	}
-	if strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("terminal state was retried: %v", err)
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		_, err := waitForSandboxPodReadiness(ctx, fake, "sandboxes", "claim-a", sandbox, fakeClaimIdentity(cfg), time.Millisecond)
+		if err == nil || !strings.Contains(err.Error(), "Sandbox sandbox-a finished reason=PodFailed") {
+			t.Fatalf("err=%v", err)
+		}
+		if strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("terminal state was retried: %v", err)
+		}
+	})
 }
 
 func TestSandboxReadinessRejectsDownstreamIdentityMismatch(t *testing.T) {
@@ -676,21 +682,23 @@ func TestSandboxReadinessRejectsDownstreamIdentityMismatch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := core.BaseConfig()
-			cfg.AgentSandbox.Context = "agent-context"
-			cfg.AgentSandbox.Namespace = "sandboxes"
-			cfg.AgentSandbox.WarmPool = "linux-pool"
-			fake := readyFakeClient(cfg)
-			tt.mutate(fake)
-			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-			defer cancel()
-			_, err := waitForSandboxReadinessWithTimeouts(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), 0, 0, time.Millisecond)
-			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
-				t.Fatalf("err=%v want substring %q", err, tt.wantError)
-			}
-			if strings.Contains(err.Error(), "timed out") {
-				t.Fatalf("identity mismatch was retried: %v", err)
-			}
+			synctest.Test(t, func(t *testing.T) {
+				cfg := core.BaseConfig()
+				cfg.AgentSandbox.Context = "agent-context"
+				cfg.AgentSandbox.Namespace = "sandboxes"
+				cfg.AgentSandbox.WarmPool = "linux-pool"
+				fake := readyFakeClient(cfg)
+				tt.mutate(fake)
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				defer cancel()
+				_, err := waitForSandboxReadinessWithTimeouts(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), 0, 0, time.Millisecond)
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("err=%v want substring %q", err, tt.wantError)
+				}
+				if strings.Contains(err.Error(), "timed out") {
+					t.Fatalf("identity mismatch was retried: %v", err)
+				}
+			})
 		})
 	}
 }
@@ -902,18 +910,20 @@ func TestDoctorRBACRulesMatchRuntimeOperations(t *testing.T) {
 }
 
 func TestWaitForSandboxReadinessTimesOut(t *testing.T) {
-	cfg := core.BaseConfig()
-	cfg.AgentSandbox.Context = "agent-context"
-	cfg.AgentSandbox.Namespace = "sandboxes"
-	cfg.AgentSandbox.WarmPool = "linux-pool"
-	fake := readyFakeClient(cfg)
-	delete(fake.objects, sandboxClaimResource+"/sandboxes/claim-a")
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancel()
-	_, err := waitForSandboxReadinessWithTimeouts(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), 0, 0, time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "claim-a") {
-		t.Fatalf("err=%v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		cfg := core.BaseConfig()
+		cfg.AgentSandbox.Context = "agent-context"
+		cfg.AgentSandbox.Namespace = "sandboxes"
+		cfg.AgentSandbox.WarmPool = "linux-pool"
+		fake := readyFakeClient(cfg)
+		delete(fake.objects, sandboxClaimResource+"/sandboxes/claim-a")
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		defer cancel()
+		_, err := waitForSandboxReadinessWithTimeouts(ctx, fake, "sandboxes", "claim-a", fakeClaimIdentity(cfg), 0, 0, time.Millisecond)
+		if err == nil || !strings.Contains(err.Error(), "claim-a") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestKubectlClientUsesConfiguredBinaryContextAndStdinManifest(t *testing.T) {

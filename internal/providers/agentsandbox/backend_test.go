@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -304,53 +305,55 @@ func TestListReportsPendingClaimAsNotReady(t *testing.T) {
 }
 
 func TestListAndStatusReportTerminalClaim(t *testing.T) {
-	cfg := testAgentSandboxConfig(t)
-	fake := readyFakeClient(cfg)
-	backend := testBackend(cfg, fake, nil, nil)
-	repo := testGitRepo(t)
-	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "finished"}); err != nil {
-		t.Fatal(err)
-	}
-	claims, err := listAgentSandboxLeaseClaims()
-	if err != nil {
-		t.Fatal(err)
-	}
-	claim, ok := claimBySlug(claims, "finished")
-	if !ok {
-		t.Fatalf("claims=%#v", claims)
-	}
-	sandboxName := claim.Labels[claimLabelSandboxName]
-	fake.objects[sandboxResource+"/"+cfg.AgentSandbox.Namespace+"/"+sandboxName].Status.Conditions = []conditionState{{
-		Type: "Finished", Status: "True", Reason: "PodFailed", Message: "exit 1",
-	}}
-
-	views, err := backend.List(context.Background(), core.ListRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var terminal core.LeaseView
-	for _, view := range views {
-		if view.Labels["slug"] == "finished" {
-			terminal = view
-			break
+	synctest.Test(t, func(t *testing.T) {
+		cfg := testAgentSandboxConfig(t)
+		fake := readyFakeClient(cfg)
+		backend := testBackend(cfg, fake, nil, nil)
+		repo := testGitRepo(t)
+		if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "finished"}); err != nil {
+			t.Fatal(err)
 		}
-	}
-	if terminal.Status != "failed" || !strings.Contains(terminal.Labels["reason"], "PodFailed") {
-		t.Fatalf("terminal view=%#v", terminal)
-	}
-	for _, wait := range []bool{false, true} {
-		start := time.Now()
-		status, err := backend.Status(context.Background(), core.StatusRequest{ID: claim.LeaseID, Wait: wait, WaitTimeout: time.Second})
+		claims, err := listAgentSandboxLeaseClaims()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if status.State != "failed" || status.Ready || !strings.Contains(status.Labels["reason"], "PodFailed") {
-			t.Fatalf("wait=%v status=%#v", wait, status)
+		claim, ok := claimBySlug(claims, "finished")
+		if !ok {
+			t.Fatalf("claims=%#v", claims)
 		}
-		if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-			t.Fatalf("wait=%v terminal status took %s", wait, elapsed)
+		sandboxName := claim.Labels[claimLabelSandboxName]
+		fake.objects[sandboxResource+"/"+cfg.AgentSandbox.Namespace+"/"+sandboxName].Status.Conditions = []conditionState{{
+			Type: "Finished", Status: "True", Reason: "PodFailed", Message: "exit 1",
+		}}
+
+		views, err := backend.List(context.Background(), core.ListRequest{})
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
+		var terminal core.LeaseView
+		for _, view := range views {
+			if view.Labels["slug"] == "finished" {
+				terminal = view
+				break
+			}
+		}
+		if terminal.Status != "failed" || !strings.Contains(terminal.Labels["reason"], "PodFailed") {
+			t.Fatalf("terminal view=%#v", terminal)
+		}
+		for _, wait := range []bool{false, true} {
+			start := time.Now()
+			status, err := backend.Status(context.Background(), core.StatusRequest{ID: claim.LeaseID, Wait: wait, WaitTimeout: time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.State != "failed" || status.Ready || !strings.Contains(status.Labels["reason"], "PodFailed") {
+				t.Fatalf("wait=%v status=%#v", wait, status)
+			}
+			if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+				t.Fatalf("wait=%v terminal status took %s", wait, elapsed)
+			}
+		}
+	})
 }
 
 func TestListDisplayedClaimIDResolvesForStatus(t *testing.T) {
@@ -496,28 +499,30 @@ func TestRunKeepOnFailureHintsPreserveProviderRoute(t *testing.T) {
 }
 
 func TestRunKeepOnFailureRefreshesLeaseActivity(t *testing.T) {
-	cfg := testAgentSandboxConfig(t)
-	fake := readyFakeClient(cfg)
-	fake.execDelays = []time.Duration{0, 1100 * time.Millisecond}
-	fake.execErrs = []error{nil, testExitError{code: 42}}
-	backend := testBackend(cfg, fake, nil, nil)
+	synctest.Test(t, func(t *testing.T) {
+		cfg := testAgentSandboxConfig(t)
+		fake := readyFakeClient(cfg)
+		fake.execDelays = []time.Duration{0, 1100 * time.Millisecond}
+		fake.execErrs = []error{nil, testExitError{code: 42}}
+		backend := testBackend(cfg, fake, nil, nil)
 
-	result, err := backend.Run(context.Background(), core.RunRequest{
-		Repo:          testGitRepo(t),
-		KeepOnFailure: true,
-		NoSync:        true,
-		Command:       []string{"false"},
+		result, err := backend.Run(context.Background(), core.RunRequest{
+			Repo:          testGitRepo(t),
+			KeepOnFailure: true,
+			NoSync:        true,
+			Command:       []string{"false"},
+		})
+		if err == nil || result.ExitCode != 42 {
+			t.Fatalf("result=%#v err=%v", result, err)
+		}
+		claim, resolveErr := resolveLocalClaim(result.LeaseID)
+		if resolveErr != nil {
+			t.Fatal(resolveErr)
+		}
+		if claim.LastUsedAt == claim.ClaimedAt {
+			t.Fatalf("kept failed lease activity was not refreshed: %#v", claim)
+		}
 	})
-	if err == nil || result.ExitCode != 42 {
-		t.Fatalf("result=%#v err=%v", result, err)
-	}
-	claim, resolveErr := resolveLocalClaim(result.LeaseID)
-	if resolveErr != nil {
-		t.Fatal(resolveErr)
-	}
-	if claim.LastUsedAt == claim.ClaimedAt {
-		t.Fatalf("kept failed lease activity was not refreshed: %#v", claim)
-	}
 }
 
 func TestRunKeepOnFailureRefreshesLeaseActivityAfterSetupFailure(t *testing.T) {
@@ -529,28 +534,30 @@ func TestRunKeepOnFailureRefreshesLeaseActivityAfterSetupFailure(t *testing.T) {
 		{name: "no-sync", noSync: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := testAgentSandboxConfig(t)
-			fake := readyFakeClient(cfg)
-			fake.execDelays = []time.Duration{1100 * time.Millisecond}
-			fake.execErrs = []error{errors.New("setup failed")}
-			backend := testBackend(cfg, fake, nil, nil)
+			synctest.Test(t, func(t *testing.T) {
+				cfg := testAgentSandboxConfig(t)
+				fake := readyFakeClient(cfg)
+				fake.execDelays = []time.Duration{1100 * time.Millisecond}
+				fake.execErrs = []error{errors.New("setup failed")}
+				backend := testBackend(cfg, fake, nil, nil)
 
-			result, err := backend.Run(context.Background(), core.RunRequest{
-				Repo:          testGitRepo(t),
-				KeepOnFailure: true,
-				NoSync:        tc.noSync,
-				Command:       []string{"true"},
+				result, err := backend.Run(context.Background(), core.RunRequest{
+					Repo:          testGitRepo(t),
+					KeepOnFailure: true,
+					NoSync:        tc.noSync,
+					Command:       []string{"true"},
+				})
+				if err == nil || !strings.Contains(err.Error(), "setup failed") {
+					t.Fatalf("result=%#v err=%v", result, err)
+				}
+				claim, resolveErr := resolveLocalClaim(result.LeaseID)
+				if resolveErr != nil {
+					t.Fatal(resolveErr)
+				}
+				if claim.LastUsedAt == claim.ClaimedAt {
+					t.Fatalf("retained setup-failure lease activity was not refreshed: %#v", claim)
+				}
 			})
-			if err == nil || !strings.Contains(err.Error(), "setup failed") {
-				t.Fatalf("result=%#v err=%v", result, err)
-			}
-			claim, resolveErr := resolveLocalClaim(result.LeaseID)
-			if resolveErr != nil {
-				t.Fatal(resolveErr)
-			}
-			if claim.LastUsedAt == claim.ClaimedAt {
-				t.Fatalf("retained setup-failure lease activity was not refreshed: %#v", claim)
-			}
 		})
 	}
 }
@@ -894,107 +901,113 @@ func (e testExitError) ExitStatus() int {
 }
 
 func TestRunExistingLeaseReadinessIsBounded(t *testing.T) {
-	cfg := testAgentSandboxConfig(t)
-	cfg.AgentSandbox.SandboxReadyTimeout = time.Minute
-	fake := readyFakeClient(cfg)
-	backend := testBackend(cfg, fake, nil, nil)
-	repo := testGitRepo(t)
-	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "slow"}); err != nil {
-		t.Fatal(err)
-	}
-	claims, err := listAgentSandboxLeaseClaims()
-	if err != nil {
-		t.Fatal(err)
-	}
-	claim, ok := claimBySlug(claims, "slow")
-	if !ok {
-		t.Fatalf("claims=%#v", claims)
-	}
-	claimName := claim.Labels[claimLabelClaimName]
-	podKey := cfg.AgentSandbox.Namespace + "/claim=" + claimName
-	pod := fake.pods[podKey][0]
-	pod.Phase = "Pending"
-	pod.Ready = false
-	fake.pods[podKey] = []podState{pod}
-	backend.cfg.AgentSandbox.PodReadyTimeout = time.Millisecond
-	start := time.Now()
-	_, err = backend.Run(context.Background(), core.RunRequest{Repo: repo, ID: claim.LeaseID, NoSync: true, Command: []string{"true"}})
-	if err == nil || !strings.Contains(err.Error(), "readiness timed out") {
-		t.Fatalf("expected bounded readiness error, got %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("readiness wait was not bounded: %s", elapsed)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		cfg := testAgentSandboxConfig(t)
+		cfg.AgentSandbox.SandboxReadyTimeout = time.Minute
+		fake := readyFakeClient(cfg)
+		backend := testBackend(cfg, fake, nil, nil)
+		repo := testGitRepo(t)
+		if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "slow"}); err != nil {
+			t.Fatal(err)
+		}
+		claims, err := listAgentSandboxLeaseClaims()
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim, ok := claimBySlug(claims, "slow")
+		if !ok {
+			t.Fatalf("claims=%#v", claims)
+		}
+		claimName := claim.Labels[claimLabelClaimName]
+		podKey := cfg.AgentSandbox.Namespace + "/claim=" + claimName
+		pod := fake.pods[podKey][0]
+		pod.Phase = "Pending"
+		pod.Ready = false
+		fake.pods[podKey] = []podState{pod}
+		backend.cfg.AgentSandbox.PodReadyTimeout = time.Millisecond
+		start := time.Now()
+		_, err = backend.Run(context.Background(), core.RunRequest{Repo: repo, ID: claim.LeaseID, NoSync: true, Command: []string{"true"}})
+		if err == nil || !strings.Contains(err.Error(), "readiness timed out") {
+			t.Fatalf("expected bounded readiness error, got %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("readiness wait was not bounded: %s", elapsed)
+		}
+	})
 }
 
 func TestClaimReadinessStopsAtPinnedTTL(t *testing.T) {
-	cfg := testAgentSandboxConfig(t)
-	cfg.AgentSandbox.SandboxReadyTimeout = time.Minute
-	fake := readyFakeClient(cfg)
-	claim := fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/claim-a"]
-	claim.Status.Sandbox.Name = ""
-	now := time.Date(2026, time.June, 13, 12, 0, 0, 990_000_000, time.UTC)
-	expiresAt := now.Add(10 * time.Millisecond).Format(time.RFC3339)
-	claim.Spec["lifecycle"] = map[string]any{"shutdownTime": expiresAt, "shutdownPolicy": "Retain"}
-	backend := testBackend(cfg, fake, nil, nil)
-	backend.rt.Clock = fixedClock{now: now}
-	identity := fakeClaimIdentity(cfg)
-	identity.ExpiresAt = expiresAt
+	synctest.Test(t, func(t *testing.T) {
+		cfg := testAgentSandboxConfig(t)
+		cfg.AgentSandbox.SandboxReadyTimeout = time.Minute
+		fake := readyFakeClient(cfg)
+		claim := fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/claim-a"]
+		claim.Status.Sandbox.Name = ""
+		now := time.Date(2026, time.June, 13, 12, 0, 0, 990_000_000, time.UTC)
+		expiresAt := now.Add(10 * time.Millisecond).Format(time.RFC3339)
+		claim.Spec["lifecycle"] = map[string]any{"shutdownTime": expiresAt, "shutdownPolicy": "Retain"}
+		backend := testBackend(cfg, fake, nil, nil)
+		backend.rt.Clock = fixedClock{now: now}
+		identity := fakeClaimIdentity(cfg)
+		identity.ExpiresAt = expiresAt
 
-	start := time.Now()
-	_, err := backend.waitForClaimReadiness(context.Background(), fake, "claim-a", identity)
-	if err == nil || !strings.Contains(err.Error(), "TTL expiry before becoming ready") {
-		t.Fatalf("err=%v", err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("TTL-bounded readiness took %s", elapsed)
-	}
+		start := time.Now()
+		_, err := backend.waitForClaimReadiness(context.Background(), fake, "claim-a", identity)
+		if err == nil || !strings.Contains(err.Error(), "TTL expiry before becoming ready") {
+			t.Fatalf("err=%v", err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("TTL-bounded readiness took %s", elapsed)
+		}
+	})
 }
 
 func TestExistingRunReleasesClaimExpiringDuringReadiness(t *testing.T) {
-	cfg := testAgentSandboxConfig(t)
-	cfg.AgentSandbox.SandboxReadyTimeout = time.Minute
-	fake := readyFakeClient(cfg)
-	backend := testBackend(cfg, fake, nil, nil)
-	now := time.Date(2026, time.June, 13, 12, 0, 0, 990_000_000, time.UTC)
-	backend.rt.Clock = fixedClock{now: now}
-	repo := testGitRepo(t)
-	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "expiry-readiness"}); err != nil {
-		t.Fatal(err)
-	}
-	claim, err := resolveLocalClaim("expiry-readiness")
-	if err != nil {
-		t.Fatal(err)
-	}
-	expiresAt := now.Add(10 * time.Millisecond).Format(time.RFC3339)
-	labels := shared.CloneLabels(claim.Labels)
-	labels[claimLabelExpiresAt] = expiresAt
-	claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
-	if err != nil {
-		t.Fatal(err)
-	}
-	claimName := claimNameFromLocalClaim(claim)
-	liveClaim := fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimName]
-	liveClaim.Spec["lifecycle"] = map[string]any{"shutdownTime": expiresAt, "shutdownPolicy": "Retain"}
-	liveClaim.Status.Sandbox.Name = ""
+	synctest.Test(t, func(t *testing.T) {
+		cfg := testAgentSandboxConfig(t)
+		cfg.AgentSandbox.SandboxReadyTimeout = time.Minute
+		fake := readyFakeClient(cfg)
+		backend := testBackend(cfg, fake, nil, nil)
+		now := time.Date(2026, time.June, 13, 12, 0, 0, 990_000_000, time.UTC)
+		backend.rt.Clock = fixedClock{now: now}
+		repo := testGitRepo(t)
+		if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "expiry-readiness"}); err != nil {
+			t.Fatal(err)
+		}
+		claim, err := resolveLocalClaim("expiry-readiness")
+		if err != nil {
+			t.Fatal(err)
+		}
+		expiresAt := now.Add(10 * time.Millisecond).Format(time.RFC3339)
+		labels := shared.CloneLabels(claim.Labels)
+		labels[claimLabelExpiresAt] = expiresAt
+		claim, err = core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+		if err != nil {
+			t.Fatal(err)
+		}
+		claimName := claimNameFromLocalClaim(claim)
+		liveClaim := fake.objects[sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimName]
+		liveClaim.Spec["lifecycle"] = map[string]any{"shutdownTime": expiresAt, "shutdownPolicy": "Retain"}
+		liveClaim.Status.Sandbox.Name = ""
 
-	result, err := backend.Run(context.Background(), core.RunRequest{Repo: repo, ID: claim.LeaseID, NoSync: true, TimingJSON: true, Command: []string{"true"}})
-	if err == nil || !strings.Contains(err.Error(), "TTL expiry before becoming ready") {
-		t.Fatalf("result=%#v err=%v", result, err)
-	}
-	report := decodeLastTimingReport(t, backend.rt.Stderr.(*bytes.Buffer).String())
-	if result.ExitCode != 4 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider || report.ExitCode != result.ExitCode || report.ErrorKind != result.ErrorKind || result.Session == nil || result.Session.Kept {
-		t.Fatalf("readiness expiry result=%+v report=%+v", result, report)
-	}
-	if fake.deletes != 1 {
-		t.Fatalf("deletes=%d want=1", fake.deletes)
-	}
-	if retained, readErr := core.ReadLeaseClaim(claim.LeaseID); readErr != nil || retained.LeaseID != "" {
-		t.Fatalf("expired local claim retained: claim=%#v err=%v", retained, readErr)
-	}
-	if len(fake.execs) != 0 {
-		t.Fatalf("expired claim reached exec: %#v", fake.execs)
-	}
+		result, err := backend.Run(context.Background(), core.RunRequest{Repo: repo, ID: claim.LeaseID, NoSync: true, TimingJSON: true, Command: []string{"true"}})
+		if err == nil || !strings.Contains(err.Error(), "TTL expiry before becoming ready") {
+			t.Fatalf("result=%#v err=%v", result, err)
+		}
+		report := decodeLastTimingReport(t, backend.rt.Stderr.(*bytes.Buffer).String())
+		if result.ExitCode != 4 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider || report.ExitCode != result.ExitCode || report.ErrorKind != result.ErrorKind || result.Session == nil || result.Session.Kept {
+			t.Fatalf("readiness expiry result=%+v report=%+v", result, report)
+		}
+		if fake.deletes != 1 {
+			t.Fatalf("deletes=%d want=1", fake.deletes)
+		}
+		if retained, readErr := core.ReadLeaseClaim(claim.LeaseID); readErr != nil || retained.LeaseID != "" {
+			t.Fatalf("expired local claim retained: claim=%#v err=%v", retained, readErr)
+		}
+		if len(fake.execs) != 0 {
+			t.Fatalf("expired claim reached exec: %#v", fake.execs)
+		}
+	})
 }
 
 func TestStatusAndListReportRetainedTTLExpiry(t *testing.T) {
@@ -1077,40 +1090,42 @@ func TestStatusReportsControllerClaimExpiredCondition(t *testing.T) {
 }
 
 func TestStatusAndListReportDirectSandboxExpiry(t *testing.T) {
-	cfg := testAgentSandboxConfig(t)
-	fake := readyFakeClient(cfg)
-	backend := testBackend(cfg, fake, nil, nil)
-	repo := testGitRepo(t)
-	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "sandbox-expired"}); err != nil {
-		t.Fatal(err)
-	}
-	claim, err := resolveLocalClaim("sandbox-expired")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sandboxName := claim.Labels[claimLabelSandboxName]
-	fake.objects[sandboxResource+"/"+cfg.AgentSandbox.Namespace+"/"+sandboxName].Status.Conditions = []conditionState{{
-		Type: "Ready", Status: "False", Reason: "SandboxExpired", Message: "lifetime elapsed",
-	}}
+	synctest.Test(t, func(t *testing.T) {
+		cfg := testAgentSandboxConfig(t)
+		fake := readyFakeClient(cfg)
+		backend := testBackend(cfg, fake, nil, nil)
+		repo := testGitRepo(t)
+		if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "sandbox-expired"}); err != nil {
+			t.Fatal(err)
+		}
+		claim, err := resolveLocalClaim("sandbox-expired")
+		if err != nil {
+			t.Fatal(err)
+		}
+		sandboxName := claim.Labels[claimLabelSandboxName]
+		fake.objects[sandboxResource+"/"+cfg.AgentSandbox.Namespace+"/"+sandboxName].Status.Conditions = []conditionState{{
+			Type: "Ready", Status: "False", Reason: "SandboxExpired", Message: "lifetime elapsed",
+		}}
 
-	start := time.Now()
-	view, err := backend.Status(context.Background(), core.StatusRequest{ID: claim.LeaseID, Wait: true, WaitTimeout: time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if time.Since(start) > time.Second {
-		t.Fatalf("direct sandbox expiry was retried")
-	}
-	if view.State != "expired" || !strings.Contains(view.Labels["reason"], "SandboxExpired") {
-		t.Fatalf("view=%#v", view)
-	}
-	views, err := backend.List(context.Background(), core.ListRequest{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(views) != 1 || views[0].Status != "expired" || !strings.Contains(views[0].Labels["reason"], "SandboxExpired") {
-		t.Fatalf("views=%#v", views)
-	}
+		start := time.Now()
+		view, err := backend.Status(context.Background(), core.StatusRequest{ID: claim.LeaseID, Wait: true, WaitTimeout: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if time.Since(start) > time.Second {
+			t.Fatalf("direct sandbox expiry was retried")
+		}
+		if view.State != "expired" || !strings.Contains(view.Labels["reason"], "SandboxExpired") {
+			t.Fatalf("view=%#v", view)
+		}
+		views, err := backend.List(context.Background(), core.ListRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(views) != 1 || views[0].Status != "expired" || !strings.Contains(views[0].Labels["reason"], "SandboxExpired") {
+			t.Fatalf("views=%#v", views)
+		}
+	})
 }
 
 func TestWarmupRetainsRecoverableClaimWhenReadinessCleanupFails(t *testing.T) {
@@ -1418,34 +1433,36 @@ func TestRunReportsAndReleasesClaimThatExpiresDuringCommand(t *testing.T) {
 }
 
 func TestRunExistingLeaseRetainsClaimWhenOnlyDownstreamResourceIsMissing(t *testing.T) {
-	cfg := testAgentSandboxConfig(t)
-	cfg.AgentSandbox.ForgetMissing = true
-	fake := readyFakeClient(cfg)
-	backend := testBackend(cfg, fake, nil, nil)
-	repo := testGitRepo(t)
-	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "downstream-gone"}); err != nil {
-		t.Fatal(err)
-	}
-	claims, err := listAgentSandboxLeaseClaims()
-	if err != nil {
-		t.Fatal(err)
-	}
-	claim, ok := claimBySlug(claims, "downstream-gone")
-	if !ok {
-		t.Fatalf("claims=%#v", claims)
-	}
-	sandboxName := claim.Labels[claimLabelSandboxName]
-	delete(fake.objects, sandboxResource+"/"+cfg.AgentSandbox.Namespace+"/"+sandboxName)
-	backend.cfg.AgentSandbox.SandboxReadyTimeout = 20 * time.Millisecond
+	synctest.Test(t, func(t *testing.T) {
+		cfg := testAgentSandboxConfig(t)
+		cfg.AgentSandbox.ForgetMissing = true
+		fake := readyFakeClient(cfg)
+		backend := testBackend(cfg, fake, nil, nil)
+		repo := testGitRepo(t)
+		if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "downstream-gone"}); err != nil {
+			t.Fatal(err)
+		}
+		claims, err := listAgentSandboxLeaseClaims()
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim, ok := claimBySlug(claims, "downstream-gone")
+		if !ok {
+			t.Fatalf("claims=%#v", claims)
+		}
+		sandboxName := claim.Labels[claimLabelSandboxName]
+		delete(fake.objects, sandboxResource+"/"+cfg.AgentSandbox.Namespace+"/"+sandboxName)
+		backend.cfg.AgentSandbox.SandboxReadyTimeout = 20 * time.Millisecond
 
-	result, err := backend.Run(context.Background(), core.RunRequest{Repo: repo, ID: claim.LeaseID, NoSync: true, Command: []string{"true"}})
-	if err == nil || !strings.Contains(err.Error(), "readiness timed out") {
-		t.Fatalf("result=%#v err=%v", result, err)
-	}
-	retained, readErr := core.ReadLeaseClaim(claim.LeaseID)
-	if readErr != nil || retained.LeaseID == "" {
-		t.Fatalf("downstream miss forgot live root claim: claim=%#v err=%v", retained, readErr)
-	}
+		result, err := backend.Run(context.Background(), core.RunRequest{Repo: repo, ID: claim.LeaseID, NoSync: true, Command: []string{"true"}})
+		if err == nil || !strings.Contains(err.Error(), "readiness timed out") {
+			t.Fatalf("result=%#v err=%v", result, err)
+		}
+		retained, readErr := core.ReadLeaseClaim(claim.LeaseID)
+		if readErr != nil || retained.LeaseID == "" {
+			t.Fatalf("downstream miss forgot live root claim: claim=%#v err=%v", retained, readErr)
+		}
+	})
 }
 
 func TestReadinessRunErrorForgetsOnlyAfterRootClaimRecheck(t *testing.T) {
@@ -1648,79 +1665,85 @@ func TestCleanupContextIgnoresCancelledParent(t *testing.T) {
 }
 
 func TestStatusMissingClaimDoesNotWaitAsNotReady(t *testing.T) {
-	cfg := testAgentSandboxConfig(t)
-	fake := readyFakeClient(cfg)
-	backend := testBackend(cfg, fake, nil, nil)
-	repo := testGitRepo(t)
-	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "status-gone"}); err != nil {
-		t.Fatal(err)
-	}
-	claims, err := listAgentSandboxLeaseClaims()
-	if err != nil {
-		t.Fatal(err)
-	}
-	claim, ok := claimBySlug(claims, "status-gone")
-	if !ok {
-		t.Fatalf("claims=%#v", claims)
-	}
-	claimName := claim.Labels[claimLabelClaimName]
-	delete(fake.objects, sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimName)
-	view, err := backend.Status(context.Background(), core.StatusRequest{ID: claim.LeaseID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if view.State != "missing-or-inaccessible" {
-		t.Fatalf("view=%#v", view)
-	}
-	start := time.Now()
-	_, err = backend.Status(context.Background(), core.StatusRequest{ID: claim.LeaseID, Wait: true, WaitTimeout: time.Second})
-	if err == nil || !strings.Contains(err.Error(), "missing in Kubernetes") {
-		t.Fatalf("expected missing wait error, got %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("status waited despite missing claim: %s", elapsed)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		cfg := testAgentSandboxConfig(t)
+		fake := readyFakeClient(cfg)
+		backend := testBackend(cfg, fake, nil, nil)
+		repo := testGitRepo(t)
+		if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "status-gone"}); err != nil {
+			t.Fatal(err)
+		}
+		claims, err := listAgentSandboxLeaseClaims()
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim, ok := claimBySlug(claims, "status-gone")
+		if !ok {
+			t.Fatalf("claims=%#v", claims)
+		}
+		claimName := claim.Labels[claimLabelClaimName]
+		delete(fake.objects, sandboxClaimResource+"/"+cfg.AgentSandbox.Namespace+"/"+claimName)
+		view, err := backend.Status(context.Background(), core.StatusRequest{ID: claim.LeaseID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if view.State != "missing-or-inaccessible" {
+			t.Fatalf("view=%#v", view)
+		}
+		start := time.Now()
+		_, err = backend.Status(context.Background(), core.StatusRequest{ID: claim.LeaseID, Wait: true, WaitTimeout: time.Second})
+		if err == nil || !strings.Contains(err.Error(), "missing in Kubernetes") {
+			t.Fatalf("expected missing wait error, got %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+			t.Fatalf("status waited despite missing claim: %s", elapsed)
+		}
+	})
 }
 
 func TestStatusWaitReturnsWhenClaimDisappearsDuringPolling(t *testing.T) {
-	cfg := testAgentSandboxConfig(t)
-	fake := readyFakeClient(cfg)
-	backend := testBackend(cfg, fake, nil, nil)
-	repo := testGitRepo(t)
-	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "status-disappears"}); err != nil {
-		t.Fatal(err)
-	}
-	fake.getErrs = []error{nil, errKubernetesNotFound}
+	synctest.Test(t, func(t *testing.T) {
+		cfg := testAgentSandboxConfig(t)
+		fake := readyFakeClient(cfg)
+		backend := testBackend(cfg, fake, nil, nil)
+		repo := testGitRepo(t)
+		if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "status-disappears"}); err != nil {
+			t.Fatal(err)
+		}
+		fake.getErrs = []error{nil, errKubernetesNotFound}
 
-	start := time.Now()
-	_, err := backend.Status(context.Background(), core.StatusRequest{ID: "status-disappears", Wait: true, WaitTimeout: time.Second})
-	if err == nil || !strings.Contains(err.Error(), "missing in Kubernetes") {
-		t.Fatalf("status err=%v", err)
-	}
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("status waited after root claim disappeared: %s", elapsed)
-	}
+		start := time.Now()
+		_, err := backend.Status(context.Background(), core.StatusRequest{ID: "status-disappears", Wait: true, WaitTimeout: time.Second})
+		if err == nil || !strings.Contains(err.Error(), "missing in Kubernetes") {
+			t.Fatalf("status err=%v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+			t.Fatalf("status waited after root claim disappeared: %s", elapsed)
+		}
+	})
 }
 
 func TestStatusWaitTimeoutBoundsInitialLookup(t *testing.T) {
-	cfg := testAgentSandboxConfig(t)
-	fake := readyFakeClient(cfg)
-	backend := testBackend(cfg, fake, nil, nil)
-	repo := testGitRepo(t)
-	if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "status-timeout"}); err != nil {
-		t.Fatal(err)
-	}
-	fake.getStarted = make(chan struct{}, 1)
-	fake.getRelease = make(chan struct{})
+	synctest.Test(t, func(t *testing.T) {
+		cfg := testAgentSandboxConfig(t)
+		fake := readyFakeClient(cfg)
+		backend := testBackend(cfg, fake, nil, nil)
+		repo := testGitRepo(t)
+		if err := backend.Warmup(context.Background(), core.WarmupRequest{Repo: repo, RequestedSlug: "status-timeout"}); err != nil {
+			t.Fatal(err)
+		}
+		fake.getStarted = make(chan struct{}, 1)
+		fake.getRelease = make(chan struct{})
 
-	start := time.Now()
-	_, err := backend.Status(context.Background(), core.StatusRequest{ID: "status-timeout", Wait: true, WaitTimeout: 20 * time.Millisecond})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("status err=%v, want deadline exceeded", err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("initial lookup ignored wait timeout: %s", elapsed)
-	}
+		start := time.Now()
+		_, err := backend.Status(context.Background(), core.StatusRequest{ID: "status-timeout", Wait: true, WaitTimeout: 20 * time.Millisecond})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("status err=%v, want deadline exceeded", err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("initial lookup ignored wait timeout: %s", elapsed)
+		}
+	})
 }
 
 func TestStatusReturnsUnexpectedReadinessError(t *testing.T) {

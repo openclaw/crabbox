@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -62,35 +63,37 @@ func TestInjectSSHKeyDoesNotRetryMutation(t *testing.T) {
 func TestGuestAgentWaitStopsOnCancellationAndPermanentError(t *testing.T) {
 	for _, mode := range []string{"deadline", "canceled", "permanent"} {
 		t.Run(mode, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-			defer cancel()
-			detail := "GRPCConnectionPoolError"
-			if mode == "canceled" {
-				cancel()
-			}
-			if mode == "permanent" {
-				detail = "permission denied"
-			}
-			runner := &recordingRunner{errors: map[string]error{"exec": fmt.Errorf("exec failed")}, responses: map[string]core.LocalCommandResult{"exec": {Stderr: detail}}}
-			b := newBackend((Provider{}).Spec(), core.BaseConfig(), core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
-			err := b.injectSSHKey(ctx, "vm", "admin", "ssh-ed25519 AAAA test")
-			if err == nil {
-				t.Fatal("unavailable agent was accepted")
-			}
-			if mode == "deadline" && !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("deadline lost: %v", err)
-			}
-			if mode == "canceled" && (!errors.Is(err, context.Canceled) || len(runner.calls) != 0) {
-				t.Fatalf("canceled: err=%v calls=%d", err, len(runner.calls))
-			}
-			if mode == "permanent" && len(runner.calls) != 1 {
-				t.Fatalf("permanent error retried: %d calls", len(runner.calls))
-			}
-			for _, call := range runner.calls {
-				if len(call.Args) != 3 || call.Args[2] != "/usr/bin/true" {
-					t.Fatalf("injected key before readiness: %v", call.Args)
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+				defer cancel()
+				detail := "GRPCConnectionPoolError"
+				if mode == "canceled" {
+					cancel()
 				}
-			}
+				if mode == "permanent" {
+					detail = "permission denied"
+				}
+				runner := &recordingRunner{errors: map[string]error{"exec": fmt.Errorf("exec failed")}, responses: map[string]core.LocalCommandResult{"exec": {Stderr: detail}}}
+				b := newBackend((Provider{}).Spec(), core.BaseConfig(), core.Runtime{Stdout: io.Discard, Stderr: io.Discard, Exec: runner}).(*backend)
+				err := b.injectSSHKey(ctx, "vm", "admin", "ssh-ed25519 AAAA test")
+				if err == nil {
+					t.Fatal("unavailable agent was accepted")
+				}
+				if mode == "deadline" && !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("deadline lost: %v", err)
+				}
+				if mode == "canceled" && (!errors.Is(err, context.Canceled) || len(runner.calls) != 0) {
+					t.Fatalf("canceled: err=%v calls=%d", err, len(runner.calls))
+				}
+				if mode == "permanent" && len(runner.calls) != 1 {
+					t.Fatalf("permanent error retried: %d calls", len(runner.calls))
+				}
+				for _, call := range runner.calls {
+					if len(call.Args) != 3 || call.Args[2] != "/usr/bin/true" {
+						t.Fatalf("injected key before readiness: %v", call.Args)
+					}
+				}
+			})
 		})
 	}
 }

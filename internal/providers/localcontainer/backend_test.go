@@ -1809,89 +1809,91 @@ func TestRunFailureMemoryContextFreezesRuntime(t *testing.T) {
 func TestRunFailureMemoryContextOptionalFailures(t *testing.T) {
 	for _, failure := range []string{"error", "empty", "malformed", "overflow", "oversized", "identity", "timeout", "unknown route", "budget spent", "ordinary", "reset"} {
 		t.Run(failure, func(t *testing.T) {
-			b := testBackend(&recordingRunner{})
-			b.cfg.LocalContainer.CheckpointMetadata = testCapturedScopeLabels(nil)
-			if failure == "unknown route" {
-				b.cfg.LocalContainer.CheckpointMetadata = nil
-			}
-			reads, infos := 0, 0
-			b.rt.Exec = memoryEvidenceCommandRunner(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-				switch req.Args[0] {
-				case "exec":
-					reads++
-					count := reads + 4
-					if failure == "ordinary" {
-						count = 5
-					}
-					if failure == "reset" && reads > 1 {
-						count = 0
-					}
-					return core.LocalCommandResult{Stdout: fmt.Sprintf("oom_kill %d\n", count)}, nil
-				case "inspect":
-					return core.LocalCommandResult{Stdout: `[{"Id":"container-123","HostConfig":{"Memory":1024,"MemorySwap":0}}]`}, nil
-				case "info":
-					infos++
-					deadline, ok := ctx.Deadline()
-					if !ok || time.Until(deadline) > 500*time.Millisecond {
-						t.Fatal("optional probe has no bounded sub-budget")
-					}
-					switch failure {
-					case "error":
-						return core.LocalCommandResult{}, errors.New("synthetic optional error")
-					case "empty":
-						return core.LocalCommandResult{}, nil
-					case "malformed":
-						return core.LocalCommandResult{Stdout: "daemon-test\nnot-a-number"}, nil
-					case "overflow":
-						return core.LocalCommandResult{Stdout: "daemon-test\n18446744073709551616"}, nil
-					case "oversized":
-						return core.LocalCommandResult{Stdout: strings.Repeat("x", 4097)}, nil
-					case "identity":
-						return core.LocalCommandResult{Stdout: "different-daemon\n8388608"}, nil
-					case "timeout":
-						<-ctx.Done()
-						return core.LocalCommandResult{}, ctx.Err()
-					}
+			synctest.Test(t, func(t *testing.T) {
+				b := testBackend(&recordingRunner{})
+				b.cfg.LocalContainer.CheckpointMetadata = testCapturedScopeLabels(nil)
+				if failure == "unknown route" {
+					b.cfg.LocalContainer.CheckpointMetadata = nil
 				}
-				t.Fatalf("unexpected capacity probe after %s", failure)
-				return core.LocalCommandResult{}, nil
+				reads, infos := 0, 0
+				b.rt.Exec = memoryEvidenceCommandRunner(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					switch req.Args[0] {
+					case "exec":
+						reads++
+						count := reads + 4
+						if failure == "ordinary" {
+							count = 5
+						}
+						if failure == "reset" && reads > 1 {
+							count = 0
+						}
+						return core.LocalCommandResult{Stdout: fmt.Sprintf("oom_kill %d\n", count)}, nil
+					case "inspect":
+						return core.LocalCommandResult{Stdout: `[{"Id":"container-123","HostConfig":{"Memory":1024,"MemorySwap":0}}]`}, nil
+					case "info":
+						infos++
+						deadline, ok := ctx.Deadline()
+						if !ok || time.Until(deadline) > 500*time.Millisecond {
+							t.Fatal("optional probe has no bounded sub-budget")
+						}
+						switch failure {
+						case "error":
+							return core.LocalCommandResult{}, errors.New("synthetic optional error")
+						case "empty":
+							return core.LocalCommandResult{}, nil
+						case "malformed":
+							return core.LocalCommandResult{Stdout: "daemon-test\nnot-a-number"}, nil
+						case "overflow":
+							return core.LocalCommandResult{Stdout: "daemon-test\n18446744073709551616"}, nil
+						case "oversized":
+							return core.LocalCommandResult{Stdout: strings.Repeat("x", 4097)}, nil
+						case "identity":
+							return core.LocalCommandResult{Stdout: "different-daemon\n8388608"}, nil
+						case "timeout":
+							<-ctx.Done()
+							return core.LocalCommandResult{}, ctx.Err()
+						}
+					}
+					t.Fatalf("unexpected capacity probe after %s", failure)
+					return core.LocalCommandResult{}, nil
+				})
+				collector, err := b.BeginRunFailureEvidence(t.Context(), core.RunFailureEvidenceRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				budget := time.Second
+				if failure == "budget spent" {
+					budget = 30 * time.Millisecond
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), budget)
+				defer cancel()
+				evidence, err := collector(ctx)
+				if err != nil {
+					t.Fatalf("optional failure replaced primary evidence: %v", err)
+				}
+				if failure == "ordinary" || failure == "reset" {
+					if evidence.ResourceExhaustion != "" || infos != 0 {
+						t.Fatal("non-OOM acquired capacity evidence")
+					}
+					return
+				}
+				if evidence.ResourceExhaustion != core.ResourceExhaustionMemory {
+					t.Fatal("lost verified OOM")
+				}
+				wantInfos := 1
+				if failure == "budget spent" || failure == "unknown route" {
+					wantInfos = 0
+				}
+				if infos != wantInfos {
+					t.Fatalf("optional calls=%d want %d", infos, wantInfos)
+				}
+				data, _ := json.Marshal(evidence)
+				var got struct{ Details map[string]string }
+				_ = json.Unmarshal(data, &got)
+				if got.Details["capacity_status"] != "unknown" || got.Details["runtime_memory_total_bytes"] != "" {
+					t.Fatalf("optional failure manufactured capacity: %s", data)
+				}
 			})
-			collector, err := b.BeginRunFailureEvidence(t.Context(), core.RunFailureEvidenceRequest{Lease: core.LeaseTarget{Server: core.Server{CloudID: "container-123"}}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			budget := time.Second
-			if failure == "budget spent" {
-				budget = 30 * time.Millisecond
-			}
-			ctx, cancel := context.WithTimeout(t.Context(), budget)
-			defer cancel()
-			evidence, err := collector(ctx)
-			if err != nil {
-				t.Fatalf("optional failure replaced primary evidence: %v", err)
-			}
-			if failure == "ordinary" || failure == "reset" {
-				if evidence.ResourceExhaustion != "" || infos != 0 {
-					t.Fatal("non-OOM acquired capacity evidence")
-				}
-				return
-			}
-			if evidence.ResourceExhaustion != core.ResourceExhaustionMemory {
-				t.Fatal("lost verified OOM")
-			}
-			wantInfos := 1
-			if failure == "budget spent" || failure == "unknown route" {
-				wantInfos = 0
-			}
-			if infos != wantInfos {
-				t.Fatalf("optional calls=%d want %d", infos, wantInfos)
-			}
-			data, _ := json.Marshal(evidence)
-			var got struct{ Details map[string]string }
-			_ = json.Unmarshal(data, &got)
-			if got.Details["capacity_status"] != "unknown" || got.Details["runtime_memory_total_bytes"] != "" {
-				t.Fatalf("optional failure manufactured capacity: %s", data)
-			}
 		})
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -635,21 +636,23 @@ func TestDirectTransportLifecycle(t *testing.T) {
 
 func TestDirectTransportExecHonorsTimeout(t *testing.T) {
 	t.Parallel()
-	transport := &directTransport{
-		cfg: core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/bin/sandbox"}},
-		rt: core.Runtime{Exec: contextLocalExec{run: func(ctx context.Context, _ core.LocalCommandRequest) (core.LocalCommandResult, error) {
-			<-ctx.Done()
-			return core.LocalCommandResult{ExitCode: 124}, ctx.Err()
-		}}},
-	}
-	started := time.Now()
-	code, err := transport.Exec(context.Background(), "box", "sleep 10", execOptions{Timeout: 20 * time.Millisecond}, nil, nil)
-	if !errors.Is(err, context.DeadlineExceeded) || code != 124 {
-		t.Fatalf("code=%d err=%v", code, err)
-	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("timeout took %s", elapsed)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		transport := &directTransport{
+			cfg: core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/bin/sandbox"}},
+			rt: core.Runtime{Exec: contextLocalExec{run: func(ctx context.Context, _ core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				<-ctx.Done()
+				return core.LocalCommandResult{ExitCode: 124}, ctx.Err()
+			}}},
+		}
+		started := time.Now()
+		code, err := transport.Exec(context.Background(), "box", "sleep 10", execOptions{Timeout: 20 * time.Millisecond}, nil, nil)
+		if !errors.Is(err, context.DeadlineExceeded) || code != 124 {
+			t.Fatalf("code=%d err=%v", code, err)
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("timeout took %s", elapsed)
+		}
+	})
 }
 
 func TestDirectTransportBoundsControlCommands(t *testing.T) {

@@ -8,15 +8,43 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestBlacksmithArtifactWriterHelper(t *testing.T) {
+	address := os.Getenv("CRABBOX_ARTIFACT_WRITER_ADDRESS")
+	if address == "" {
+		return
+	}
+	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
+	if err != nil {
+		os.Exit(90)
+	}
+	defer conn.Close()
+	path := os.Getenv("CRABBOX_ARTIFACT_WRITER_PATH")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		os.Exit(91)
+	}
+	if _, err := conn.Write([]byte("ready")); err != nil {
+		os.Exit(92)
+	}
+	// Remain alive until cancellation. A surviving child writes again when
+	// the controller releases this barrier, exposing a missing group join.
+	var signal [1]byte
+	_, _ = conn.Read(signal[:])
+	if err := os.WriteFile(path, []byte("xx"), 0o600); err != nil {
+		os.Exit(93)
+	}
+}
 
 func TestBlacksmithArtifactRefusesControllerOwnedGroup(t *testing.T) {
 	for _, boundary := range []string{"run-options", "artifact-supervisor"} {
@@ -52,15 +80,25 @@ func TestBlacksmithDownloadCancellationRetainsClaimUntilClosure(t *testing.T) {
 	}
 	t.Setenv("PATH", toolsDir+":/usr/bin:/bin")
 	t.Setenv("TMPDIR", root)
-	ready, writes := filepath.Join(root, "ready"), filepath.Join(root, "writes")
-	// These are local fixtures, not native Blacksmith or scp. The finite child
-	// writes at most sixteen bytes, including if cancellation regresses.
+	writes := filepath.Join(root, "writes")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := listener.(*net.TCPListener).SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CRABBOX_ARTIFACT_WRITER_ADDRESS", listener.Addr().String())
+	t.Setenv("CRABBOX_ARTIFACT_WRITER_PATH", writes)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// These are local fixtures, not native Blacksmith or scp. The child writes
+	// at most two bytes and waits for an explicit handshake instead of sleeping.
 	fakeNative := "#!/bin/sh\nfor arg do destination=$arg; done\nscp \"$destination\"\n"
-	fakeSCP := "#!/bin/sh\nprintf x > \"$1\"\n(\n" +
-		"  i=0\n  while [ \"$i\" -lt 16 ]; do\n" +
-		"    printf x >> " + core.ShellQuote(writes) + "\n" +
-		"    if [ \"$i\" -eq 0 ]; then printf ready > " + core.ShellQuote(ready) + "; fi\n" +
-		"    sleep 0.02\n    i=$((i + 1))\n  done\n) &\nwait\n"
+	fakeSCP := "#!/bin/sh\nprintf x > \"$1\"\n" + core.ShellQuote(executable) + " -test.run=^TestBlacksmithArtifactWriterHelper$ &\nwait\n"
 	for name, source := range map[string]string{"blacksmith": fakeNative, "scp": fakeSCP} {
 		if err := os.WriteFile(filepath.Join(toolsDir, name), []byte(source), 0o700); err != nil {
 			t.Fatal(err)
@@ -99,17 +137,22 @@ func TestBlacksmithDownloadCancellationRetainsClaimUntilClosure(t *testing.T) {
 			return err
 		})
 	}()
-	for {
-		if _, err := os.Stat(ready); err == nil {
-			break
-		}
-		select {
-		case err := <-done:
-			t.Fatalf("download closed before its tiny writer started: %v", err)
-		case <-deadline.Done():
-			t.Fatal("tiny writer did not become ready")
-		case <-time.After(5 * time.Millisecond):
-		}
+	child, err := listener.Accept()
+	if err != nil {
+		t.Fatalf("tiny writer did not connect: %v", err)
+	}
+	defer child.Close()
+	if err := child.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var ready [5]byte
+	if _, err := io.ReadFull(child, ready[:]); err != nil || string(ready[:]) != "ready" {
+		t.Fatalf("tiny writer readiness=%q err=%v", ready, err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("download closed before its tiny writer started: %v", err)
+	default:
 	}
 	type writerOutcome struct {
 		bytes int64
@@ -129,6 +172,20 @@ func TestBlacksmithDownloadCancellationRetainsClaimUntilClosure(t *testing.T) {
 				return err
 			}
 			size = info.Size()
+			// Release the descendant's write barrier at claim admission. A
+			// surviving writer must change the file before closing its socket.
+			_, _ = child.Write([]byte("x"))
+			var signal [1]byte
+			if _, err := child.Read(signal[:]); !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
+				return errors.New("tiny writer survived claim release")
+			}
+			info, err = os.Stat(writes)
+			if err != nil {
+				return err
+			}
+			if info.Size() != size {
+				return errors.New("tiny writer wrote after claim release")
+			}
 			current.RepoRoot = filepath.Join(root, "replacement")
 			return save()
 		})
@@ -158,7 +215,6 @@ func TestBlacksmithDownloadCancellationRetainsClaimUntilClosure(t *testing.T) {
 	case <-deadline.Done():
 		t.Fatal("claim writer remained blocked after download closure")
 	}
-	time.Sleep(100 * time.Millisecond)
 	info, err := os.Stat(writes)
 	if err != nil || info.Size() != outcome.bytes || info.Size() < 1 || info.Size() > 16 || downloads.Load() != 1 {
 		t.Fatalf("tiny writer continued after claim release: before=%d after=%v downloads=%d err=%v", outcome.bytes, info, downloads.Load(), err)

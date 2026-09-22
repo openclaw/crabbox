@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -197,73 +198,85 @@ func TestLinodeDoctorEffectiveType(t *testing.T) {
 
 func TestWaitForLinodeIP(t *testing.T) {
 	t.Run("pending to ready", func(t *testing.T) {
-		calls := 0
-		api := &fakeLinodeAPI{getFn: func(context.Context, int64) (linodeInstance, error) {
-			calls++
-			if calls == 1 {
-				return linodeInstance{ID: 42, Status: "provisioning"}, nil
+		synctest.Test(t, func(t *testing.T) {
+			calls := 0
+			api := &fakeLinodeAPI{getFn: func(context.Context, int64) (linodeInstance, error) {
+				calls++
+				if calls == 1 {
+					return linodeInstance{ID: 42, Status: "provisioning"}, nil
+				}
+				return linodeInstance{ID: 42, Status: "offline", IPv4: []string{"203.0.113.42"}}, nil
+			}}
+			got, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, time.Minute)
+			if err != nil || got.ID != 42 || calls != 2 {
+				t.Fatalf("instance=%#v err=%v calls=%d", got, err, calls)
 			}
-			return linodeInstance{ID: 42, Status: "offline", IPv4: []string{"203.0.113.42"}}, nil
-		}}
-		got, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, time.Minute)
-		if err != nil || got.ID != 42 || calls != 2 {
-			t.Fatalf("instance=%#v err=%v calls=%d", got, err, calls)
-		}
+		})
 	})
 
 	t.Run("read error", func(t *testing.T) {
-		wantErr := errors.New("read denied")
-		calls := 0
-		api := &fakeLinodeAPI{getFn: func(context.Context, int64) (linodeInstance, error) {
-			calls++
-			return linodeInstance{}, wantErr
-		}}
-		_, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, time.Minute)
-		if !errors.Is(err, wantErr) || calls != 1 {
-			t.Fatalf("err=%v calls=%d", err, calls)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			wantErr := errors.New("read denied")
+			calls := 0
+			api := &fakeLinodeAPI{getFn: func(context.Context, int64) (linodeInstance, error) {
+				calls++
+				return linodeInstance{}, wantErr
+			}}
+			_, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, time.Minute)
+			if !errors.Is(err, wantErr) || calls != 1 {
+				t.Fatalf("err=%v calls=%d", err, calls)
+			}
+		})
 	})
 
 	t.Run("client deadline", func(t *testing.T) {
-		api := &fakeLinodeAPI{getErr: context.DeadlineExceeded}
-		_, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, time.Minute)
-		if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out waiting") {
-			t.Fatalf("err=%v", err)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			api := &fakeLinodeAPI{getErr: context.DeadlineExceeded}
+			_, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, time.Minute)
+			if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out waiting") {
+				t.Fatalf("err=%v", err)
+			}
+		})
 	})
 
 	t.Run("read error at deadline", func(t *testing.T) {
-		wantErr := errors.New("late read denied")
-		api := &fakeLinodeAPI{getFn: func(ctx context.Context, _ int64) (linodeInstance, error) {
-			<-ctx.Done()
-			return linodeInstance{}, wantErr
-		}}
-		_, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, 10*time.Millisecond)
-		if !errors.Is(err, wantErr) || strings.Contains(err.Error(), "timed out") {
-			t.Fatalf("err=%v", err)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			wantErr := errors.New("late read denied")
+			api := &fakeLinodeAPI{getFn: func(ctx context.Context, _ int64) (linodeInstance, error) {
+				<-ctx.Done()
+				return linodeInstance{}, wantErr
+			}}
+			_, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, 10*time.Millisecond)
+			if !errors.Is(err, wantErr) || strings.Contains(err.Error(), "timed out") {
+				t.Fatalf("err=%v", err)
+			}
+		})
 	})
 
 	t.Run("cancellation during delay", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		calls := 0
-		api := &fakeLinodeAPI{getFn: func(context.Context, int64) (linodeInstance, error) {
-			calls++
-			time.AfterFunc(time.Millisecond, cancel)
-			return linodeInstance{ID: 42, Status: "provisioning"}, nil
-		}}
-		_, err := newTestBackend(t, api).waitForLinodeIP(ctx, api, 42, time.Minute)
-		if !errors.Is(err, context.Canceled) || calls != 1 {
-			t.Fatalf("err=%v calls=%d", err, calls)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			calls := 0
+			api := &fakeLinodeAPI{getFn: func(context.Context, int64) (linodeInstance, error) {
+				calls++
+				time.AfterFunc(time.Millisecond, cancel)
+				return linodeInstance{ID: 42, Status: "provisioning"}, nil
+			}}
+			_, err := newTestBackend(t, api).waitForLinodeIP(ctx, api, 42, time.Minute)
+			if !errors.Is(err, context.Canceled) || calls != 1 {
+				t.Fatalf("err=%v calls=%d", err, calls)
+			}
+		})
 	})
 
 	t.Run("timeout", func(t *testing.T) {
-		api := &fakeLinodeAPI{linodes: []linodeInstance{{ID: 42, Status: "provisioning"}}}
-		_, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, 10*time.Millisecond)
-		if err == nil || err.Error() != "timed out waiting for Linode instance IP" {
-			t.Fatalf("err=%v", err)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			api := &fakeLinodeAPI{linodes: []linodeInstance{{ID: 42, Status: "provisioning"}}}
+			_, err := newTestBackend(t, api).waitForLinodeIP(context.Background(), api, 42, 10*time.Millisecond)
+			if err == nil || err.Error() != "timed out waiting for Linode instance IP" {
+				t.Fatalf("err=%v", err)
+			}
+		})
 	})
 }
 
@@ -1502,44 +1515,46 @@ func TestFencedLinodeTouchReconcilesLiveTimeoutWithClaim(t *testing.T) {
 func TestFencedLinodeProviderFailureAndCancellationRetainClaim(t *testing.T) {
 	for _, mode := range []string{"touch", "metadata", "cancellation"} {
 		t.Run(mode, func(t *testing.T) {
-			backend, api, lease := setupFencedLinodeLease(t)
-			before, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
-			keyPath, err := core.TestboxKeyPath(lease.LeaseID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			ctx := context.Background()
-			if mode == "cancellation" {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, 20*time.Millisecond)
-				defer cancel()
-				api.getFn = func(ctx context.Context, _ int64) (linodeInstance, error) {
-					<-ctx.Done()
-					return linodeInstance{}, ctx.Err()
+			synctest.Test(t, func(t *testing.T) {
+				backend, api, lease := setupFencedLinodeLease(t)
+				before, _, _ := core.ServerLeaseClaimSnapshot(lease.Server)
+				keyPath, err := core.TestboxKeyPath(lease.LeaseID)
+				if err != nil {
+					t.Fatal(err)
 				}
-			} else {
-				api.updateErr = errors.New("linode provider tag update failed")
-			}
-			if mode == "metadata" {
-				_, err = backend.UpdateTailscaleMetadata(ctx, lease, core.TailscaleMetadata{Enabled: true, IPv4: "100.64.1.9"})
-			} else {
-				override := time.Hour
-				_, err = backend.Touch(ctx, core.TouchRequest{Lease: lease, IdleTimeoutOverride: &override})
-			}
-			after, readErr := core.ReadLeaseClaim(lease.LeaseID)
-			wantUpdateCalls := 1
-			if mode == "cancellation" {
-				wantUpdateCalls = 0
-			}
-			if err == nil || readErr != nil || !reflect.DeepEqual(after, before) || api.updateCalls != wantUpdateCalls || len(api.updated) != 0 {
-				t.Fatalf("error=%v before=%#v after=%#v attempted provider writes=%d successful writes=%v readErr=%v", err, before, after, api.updateCalls, api.updated, readErr)
-			}
-			if _, err := os.Stat(keyPath); err != nil {
-				t.Fatalf("lease SSH key was not retained: %v", err)
-			}
-			if mode == "cancellation" && !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("cancellation error=%v", err)
-			}
+				ctx := context.Background()
+				if mode == "cancellation" {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, 20*time.Millisecond)
+					defer cancel()
+					api.getFn = func(ctx context.Context, _ int64) (linodeInstance, error) {
+						<-ctx.Done()
+						return linodeInstance{}, ctx.Err()
+					}
+				} else {
+					api.updateErr = errors.New("linode provider tag update failed")
+				}
+				if mode == "metadata" {
+					_, err = backend.UpdateTailscaleMetadata(ctx, lease, core.TailscaleMetadata{Enabled: true, IPv4: "100.64.1.9"})
+				} else {
+					override := time.Hour
+					_, err = backend.Touch(ctx, core.TouchRequest{Lease: lease, IdleTimeoutOverride: &override})
+				}
+				after, readErr := core.ReadLeaseClaim(lease.LeaseID)
+				wantUpdateCalls := 1
+				if mode == "cancellation" {
+					wantUpdateCalls = 0
+				}
+				if err == nil || readErr != nil || !reflect.DeepEqual(after, before) || api.updateCalls != wantUpdateCalls || len(api.updated) != 0 {
+					t.Fatalf("error=%v before=%#v after=%#v attempted provider writes=%d successful writes=%v readErr=%v", err, before, after, api.updateCalls, api.updated, readErr)
+				}
+				if _, err := os.Stat(keyPath); err != nil {
+					t.Fatalf("lease SSH key was not retained: %v", err)
+				}
+				if mode == "cancellation" && !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("cancellation error=%v", err)
+				}
+			})
 		})
 	}
 }

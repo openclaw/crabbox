@@ -365,6 +365,127 @@ func TestRemoveExactClaimAfterContext(t *testing.T) {
 	}
 }
 
+type claimedEnvdDeletionClient struct {
+	EnvdSandboxAPI
+	get    func(context.Context, string) (EnvdSandbox, error)
+	remove func(context.Context, string) error
+}
+
+func (c claimedEnvdDeletionClient) GetSandbox(ctx context.Context, id string) (EnvdSandbox, error) {
+	return c.get(ctx, id)
+}
+func (c claimedEnvdDeletionClient) DeleteSandbox(ctx context.Context, id string) error {
+	return c.remove(ctx, id)
+}
+
+func TestDeleteClaimedEnvdSandbox(t *testing.T) {
+	for _, scenario := range []string{"stale claim", "get missing", "get failure", "validation failure", "delete missing", "delete failure", "deleted", "canceled read", "completed after cancel"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			want := ClaimBinding{Provider: "example", ProviderScope: "endpoint", LeaseID: "cbx_aaaaaaaaaaaa", Slug: "alpha", CloudID: "sandbox-1"}
+			server := core.Server{Provider: want.Provider, CloudID: want.CloudID, Labels: map[string]string{"lease": want.LeaseID, "slug": want.Slug, "provider": want.Provider}}
+			if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(want.LeaseID, want.Slug, want.Provider, want.ProviderScope, "", t.TempDir(), time.Minute, false, server, core.SSHTarget{}); err != nil {
+				t.Fatal(err)
+			}
+			claim, err := RequireExactClaim(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := claim
+			if scenario == "stale claim" {
+				expected, err = core.ReplaceLeaseClaimIfUnchangedDurableReturning(claim.LeaseID, claim, claim)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if scenario == "canceled read" {
+				cancel()
+			}
+			missing, failed := errors.New("missing"), errors.New("failed")
+			var calls []string
+			checkLiveClaim := func() {
+				t.Helper()
+				got, readErr := core.ReadLeaseClaim(claim.LeaseID)
+				if readErr != nil || !reflect.DeepEqual(got, claim) {
+					t.Fatal("claim removed or changed before remote operation")
+				}
+			}
+			client := claimedEnvdDeletionClient{
+				get: func(gotCtx context.Context, id string) (EnvdSandbox, error) {
+					calls = append(calls, "get")
+					if gotCtx != ctx || id != want.CloudID {
+						t.Fatal("get lost context or sandbox binding")
+					}
+					checkLiveClaim()
+					switch scenario {
+					case "get missing":
+						return EnvdSandbox{}, missing
+					case "get failure":
+						return EnvdSandbox{}, failed
+					case "canceled read":
+						return EnvdSandbox{}, ctx.Err()
+					}
+					return EnvdSandbox{SandboxID: id}, nil
+				},
+				remove: func(gotCtx context.Context, id string) error {
+					calls = append(calls, "delete")
+					if gotCtx != ctx || id != want.CloudID {
+						t.Fatal("delete lost context or sandbox binding")
+					}
+					checkLiveClaim()
+					switch scenario {
+					case "delete missing":
+						return missing
+					case "delete failure":
+						return failed
+					case "completed after cancel":
+						cancel()
+					}
+					return nil
+				},
+			}
+			err = DeleteClaimedEnvdSandbox(ctx, client, claim.LeaseID, want.CloudID, claim, func(sandbox EnvdSandbox) error {
+				calls = append(calls, "validate")
+				if sandbox.SandboxID != want.CloudID {
+					t.Fatal("validation received a different observation")
+				}
+				if scenario == "validation failure" {
+					return failed
+				}
+				return nil
+			}, func(err error) bool { return errors.Is(err, missing) }, func(op string, err error) error { return fmt.Errorf("%s: %w", op, err) })
+			wantCalls := []string{"get", "validate", "delete"}
+			switch scenario {
+			case "stale claim":
+				wantCalls = nil
+			case "get missing", "get failure", "canceled read":
+				wantCalls = []string{"get"}
+			case "validation failure":
+				wantCalls = []string{"get", "validate"}
+			}
+			if !reflect.DeepEqual(calls, wantCalls) {
+				t.Fatalf("calls=%v want=%v", calls, wantCalls)
+			}
+			removed := scenario == "get missing" || scenario == "delete missing" || scenario == "deleted" || scenario == "completed after cancel"
+			got, exists, readErr := core.ReadLeaseClaimWithPresence(claim.LeaseID)
+			if readErr != nil || exists == removed || (err == nil) != removed {
+				t.Fatalf("removed=%t exists=%t err=%v read=%v", removed, exists, err, readErr)
+			}
+			if !removed && !reflect.DeepEqual(got, expected) {
+				t.Fatal("failed deletion changed the durable claim")
+			}
+			if strings.HasSuffix(scenario, "failure") && !errors.Is(err, failed) {
+				t.Fatalf("failure lost cause: %v", err)
+			}
+			if scenario == "canceled read" && !errors.Is(err, context.Canceled) {
+				t.Fatalf("read lost cancellation: %v", err)
+			}
+		})
+	}
+}
+
 func TestRequireClaimSnapshot(t *testing.T) {
 	claim := core.LeaseClaim{LeaseID: "cbx_aaaaaaaaaaaa", Provider: "example", Revision: "revision-1"}
 	server := core.Server{Labels: map[string]string{"lease": claim.LeaseID}}

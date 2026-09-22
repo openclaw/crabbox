@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+	"testing/synctest"
 	"time"
 
 	gosdk "github.com/islo-labs/go-sdk"
@@ -984,41 +985,43 @@ func TestIsloRunTimingJSONClassifiesCommandFailure(t *testing.T) {
 }
 
 func TestIsloRunCleanupDeleteUsesBoundedContext(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	withIsloCleanupTimeout(t, 20*time.Millisecond)
-	client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef", blockDelete: true}
-	restore := swapNewIsloClient(client)
-	defer restore()
-	var stderr bytes.Buffer
-	backend := &isloBackend{
-		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  core.Runtime{Stdout: io.Discard, Stderr: &stderr},
-	}
-	start := time.Now()
-	result, err := backend.Run(context.Background(), core.RunRequest{
-		Repo:    core.Repo{Root: t.TempDir(), Name: "repo"},
-		NoSync:  true,
-		Command: []string{"true"},
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		withIsloCleanupTimeout(t, 20*time.Millisecond)
+		client := &fakeIsloSyncClient{createName: "crabbox-repo-abcdef", blockDelete: true}
+		restore := swapNewIsloClient(client)
+		defer restore()
+		var stderr bytes.Buffer
+		backend := &isloBackend{
+			cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+			rt:  core.Runtime{Stdout: io.Discard, Stderr: &stderr},
+		}
+		start := time.Now()
+		result, err := backend.Run(context.Background(), core.RunRequest{
+			Repo:    core.Repo{Root: t.TempDir(), Name: "repo"},
+			NoSync:  true,
+			Command: []string{"true"},
+		})
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("cleanup err=%v, want retained timeout cause", err)
+		}
+		if result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider || result.Session == nil || !result.Session.Kept {
+			t.Fatalf("result=%#v", result)
+		}
+		if client.deleteCalls != 1 {
+			t.Fatalf("delete calls=%d want 1", client.deleteCalls)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("Run took %s, want bounded cleanup", elapsed)
+		}
+		var public core.ExitError
+		if !core.AsExitError(err, &public) || public.Code != 1 || !strings.Contains(public.Message, "islo stop failed") {
+			t.Fatalf("public code=%d message=%q, want cleanup failure", public.Code, public.Message)
+		}
+		if _, ok, claimErr := core.ResolveLeaseClaim(result.Session.LeaseID); claimErr != nil || !ok {
+			t.Fatalf("recovery claim retained=%v err=%v", ok, claimErr)
+		}
 	})
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("cleanup err=%v, want retained timeout cause", err)
-	}
-	if result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider || result.Session == nil || !result.Session.Kept {
-		t.Fatalf("result=%#v", result)
-	}
-	if client.deleteCalls != 1 {
-		t.Fatalf("delete calls=%d want 1", client.deleteCalls)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
-	}
-	var public core.ExitError
-	if !core.AsExitError(err, &public) || public.Code != 1 || !strings.Contains(public.Message, "islo stop failed") {
-		t.Fatalf("public code=%d message=%q, want cleanup failure", public.Code, public.Message)
-	}
-	if _, ok, claimErr := core.ResolveLeaseClaim(result.Session.LeaseID); claimErr != nil || !ok {
-		t.Fatalf("recovery claim retained=%v err=%v", ok, claimErr)
-	}
 }
 
 func TestIsloRunRetrievesRequiredArtifactAndDownloadBeforeStop(t *testing.T) {
@@ -1094,27 +1097,29 @@ func TestIsloFetchRunFileUsesWorkloadUser(t *testing.T) {
 }
 
 func TestIsloFetchRunFileHonorsContextDeadline(t *testing.T) {
-	client := &fakeIsloSyncClient{blockArtifactRead: true}
-	restore := swapNewIsloClient(client)
-	defer restore()
-	backend := &isloBackend{
-		cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
-		rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	_, err := backend.fetchRunFileAs(ctx, core.DelegatedRunDownloadRequest{
-		LeaseID:    "isb_crabbox-repo-abcdef",
-		RemotePath: "reports/proof.txt",
-		MaxBytes:   core.DelegatedRunDownloadMaxBytes,
-	}, "")
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err=%v, want deadline exceeded", err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("artifact read took %s, want bounded cancellation", elapsed)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		client := &fakeIsloSyncClient{blockArtifactRead: true}
+		restore := swapNewIsloClient(client)
+		defer restore()
+		backend := &isloBackend{
+			cfg: core.Config{Islo: core.IsloConfig{APIKey: "test", Workdir: "repo"}},
+			rt:  core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		_, err := backend.fetchRunFileAs(ctx, core.DelegatedRunDownloadRequest{
+			LeaseID:    "isb_crabbox-repo-abcdef",
+			RemotePath: "reports/proof.txt",
+			MaxBytes:   core.DelegatedRunDownloadMaxBytes,
+		}, "")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err=%v, want deadline exceeded", err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("artifact read took %s, want bounded cancellation", elapsed)
+		}
+	})
 }
 
 func TestIsloRunPreservesLocalDownloadExitCode(t *testing.T) {

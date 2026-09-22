@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -130,79 +131,81 @@ func TestBlacksmithStopRejectsUnownedIdentity(t *testing.T) {
 func TestBlacksmithStopRequiresTerminalConfirmation(t *testing.T) {
 	for _, mode := range []string{"success", "hydration-failed", "already-terminal", "stop-error", "missing", "duplicate", "changed-workflow", "still-running", "post-status-error"} {
 		t.Run(mode, func(t *testing.T) {
-			isolateBlacksmithOwnership(t)
-			const id = "tbx_terminal123"
-			claim := testOwnedBlacksmithClaim(t, id, "jade-krill", "/repo")
-			key, _, err := core.EnsureTestboxKey(id)
-			if err != nil {
-				t.Fatal(err)
-			}
-			statusCalls, stopCalls := 0, 0
-			cfg := core.BaseConfig()
-			cfg.Blacksmith.Org = "example-org"
-			backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-				if testBlacksmithFlag(req.Args, "--org") != "example-org" || testBlacksmithFlag(req.Args, "--api-url") != "https://backend.blacksmith.sh" {
-					t.Fatalf("unbound route: %v", req.Args)
+			synctest.Test(t, func(t *testing.T) {
+				isolateBlacksmithOwnership(t)
+				const id = "tbx_terminal123"
+				claim := testOwnedBlacksmithClaim(t, id, "jade-krill", "/repo")
+				key, _, err := core.EnsureTestboxKey(id)
+				if err != nil {
+					t.Fatal(err)
 				}
-				args := req.Args
-				if args[0] == "--org" {
-					args = args[2:]
-				}
-				if args[1] == "stop" {
-					stopCalls++
-					if mode == "stop-error" {
-						return core.LocalCommandResult{ExitCode: 1}, errors.New("uncertain stop")
+				statusCalls, stopCalls := 0, 0
+				cfg := core.BaseConfig()
+				cfg.Blacksmith.Org = "example-org"
+				backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					if testBlacksmithFlag(req.Args, "--org") != "example-org" || testBlacksmithFlag(req.Args, "--api-url") != "https://backend.blacksmith.sh" {
+						t.Fatalf("unbound route: %v", req.Args)
 					}
-					return core.LocalCommandResult{}, nil
-				}
-				if args[1] != "status" {
-					t.Fatalf("unexpected action: %v", req.Args)
-				}
-				statusCalls++
-				state := "ready"
-				if mode == "hydration-failed" {
-					state = "hydration_failed"
-				}
-				if mode == "already-terminal" || (stopCalls > 0 && mode != "still-running" && mode != "stop-error") {
-					state = "completed"
-				}
-				output := testBlacksmithStatus(id, state)
-				switch mode {
-				case "missing":
-					output = "ID STATUS IP WORKFLOW JOB REF CREATED RUN URL\n"
-				case "duplicate":
-					output += strings.Split(output, "\n")[1] + "\n"
-				case "changed-workflow":
-					output = strings.ReplaceAll(output, "testbox.yml", "foreign.yml")
-				case "post-status-error":
-					if stopCalls > 0 {
-						return core.LocalCommandResult{ExitCode: 1}, errors.New("status unavailable")
+					args := req.Args
+					if args[0] == "--org" {
+						args = args[2:]
 					}
+					if args[1] == "stop" {
+						stopCalls++
+						if mode == "stop-error" {
+							return core.LocalCommandResult{ExitCode: 1}, errors.New("uncertain stop")
+						}
+						return core.LocalCommandResult{}, nil
+					}
+					if args[1] != "status" {
+						t.Fatalf("unexpected action: %v", req.Args)
+					}
+					statusCalls++
+					state := "ready"
+					if mode == "hydration-failed" {
+						state = "hydration_failed"
+					}
+					if mode == "already-terminal" || (stopCalls > 0 && mode != "still-running" && mode != "stop-error") {
+						state = "completed"
+					}
+					output := testBlacksmithStatus(id, state)
+					switch mode {
+					case "missing":
+						output = "ID STATUS IP WORKFLOW JOB REF CREATED RUN URL\n"
+					case "duplicate":
+						output += strings.Split(output, "\n")[1] + "\n"
+					case "changed-workflow":
+						output = strings.ReplaceAll(output, "testbox.yml", "foreign.yml")
+					case "post-status-error":
+						if stopCalls > 0 {
+							return core.LocalCommandResult{ExitCode: 1}, errors.New("status unavailable")
+						}
+					}
+					return core.LocalCommandResult{Stdout: output}, nil
+				}))
+				ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+				defer cancel()
+				err = backend.Stop(ctx, core.StopRequest{ID: id})
+				got, readErr := core.ReadLeaseClaim(id)
+				if readErr != nil {
+					t.Fatal(readErr)
 				}
-				return core.LocalCommandResult{Stdout: output}, nil
-			}))
-			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-			defer cancel()
-			err = backend.Stop(ctx, core.StopRequest{ID: id})
-			got, readErr := core.ReadLeaseClaim(id)
-			if readErr != nil {
-				t.Fatal(readErr)
-			}
-			_, keyErr := os.Stat(key)
-			success := mode == "success" || mode == "already-terminal" || mode == "hydration-failed"
-			if success {
-				if err != nil || got.LeaseID != "" || !os.IsNotExist(keyErr) {
-					t.Fatalf("cleanup err=%v claim=%+v key=%v", err, got, keyErr)
+				_, keyErr := os.Stat(key)
+				success := mode == "success" || mode == "already-terminal" || mode == "hydration-failed"
+				if success {
+					if err != nil || got.LeaseID != "" || !os.IsNotExist(keyErr) {
+						t.Fatalf("cleanup err=%v claim=%+v key=%v", err, got, keyErr)
+					}
+				} else if err == nil || got.Revision != claim.Revision || keyErr != nil {
+					t.Fatalf("uncertain cleanup changed ownership err=%v claim=%+v key=%v", err, got, keyErr)
 				}
-			} else if err == nil || got.Revision != claim.Revision || keyErr != nil {
-				t.Fatalf("uncertain cleanup changed ownership err=%v claim=%+v key=%v", err, got, keyErr)
-			}
-			if mode == "already-terminal" && stopCalls != 0 {
-				t.Fatal("repeated terminal stop")
-			}
-			if (mode == "success" || mode == "hydration-failed") && (stopCalls != 1 || statusCalls != 3) {
-				t.Fatalf("calls stop=%d status=%d", stopCalls, statusCalls)
-			}
+				if mode == "already-terminal" && stopCalls != 0 {
+					t.Fatal("repeated terminal stop")
+				}
+				if (mode == "success" || mode == "hydration-failed") && (stopCalls != 1 || statusCalls != 3) {
+					t.Fatalf("calls stop=%d status=%d", stopCalls, statusCalls)
+				}
+			})
 		})
 	}
 }
@@ -503,92 +506,94 @@ func TestBlacksmithStopFencesConcurrentWriter(t *testing.T) {
 func TestBlacksmithStopCancelsActiveRun(t *testing.T) {
 	for _, hung := range []bool{false, true} {
 		t.Run(fmt.Sprintf("hung=%t", hung), func(t *testing.T) {
-			isolateBlacksmithOwnership(t)
-			const id = "tbx_cancel123"
-			repo := t.TempDir()
-			testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
-			key, _, err := core.EnsureTestboxKey(id)
-			if err != nil {
-				t.Fatal(err)
-			}
-			entered, remoteStopped := make(chan struct{}), make(chan struct{})
-			var stopped atomic.Bool
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-			defer cancel()
-			cfg := core.BaseConfig()
-			cfg.Blacksmith.Org = "example-org"
-			backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(runCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-				args := req.Args
-				if args[0] == "--org" {
-					args = args[2:]
+			synctest.Test(t, func(t *testing.T) {
+				isolateBlacksmithOwnership(t)
+				const id = "tbx_cancel123"
+				repo := t.TempDir()
+				testOwnedBlacksmithClaim(t, id, "jade-krill", repo)
+				key, _, err := core.EnsureTestboxKey(id)
+				if err != nil {
+					t.Fatal(err)
 				}
-				switch args[1] {
-				case "status":
-					state := "ready"
-					if stopped.Load() {
-						state = "completed"
+				entered, remoteStopped := make(chan struct{}), make(chan struct{})
+				var stopped atomic.Bool
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				cfg := core.BaseConfig()
+				cfg.Blacksmith.Org = "example-org"
+				backend := newTestBlacksmithBackend(cfg, ownershipRunner(func(runCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					args := req.Args
+					if args[0] == "--org" {
+						args = args[2:]
 					}
-					return core.LocalCommandResult{Stdout: testBlacksmithStatus(id, state)}, nil
-				case "run":
-					close(entered)
-					if hung {
-						<-runCtx.Done()
-					} else {
-						select {
-						case <-remoteStopped:
-						case <-runCtx.Done():
+					switch args[1] {
+					case "status":
+						state := "ready"
+						if stopped.Load() {
+							state = "completed"
 						}
+						return core.LocalCommandResult{Stdout: testBlacksmithStatus(id, state)}, nil
+					case "run":
+						close(entered)
+						if hung {
+							<-runCtx.Done()
+						} else {
+							select {
+							case <-remoteStopped:
+							case <-runCtx.Done():
+							}
+						}
+						return core.LocalCommandResult{ExitCode: 7}, errors.New("remote workload cancelled")
+					case "stop":
+						stopped.Store(true)
+						close(remoteStopped)
+						return core.LocalCommandResult{}, nil
+					default:
+						return core.LocalCommandResult{}, fmt.Errorf("unexpected native operation: %v", args)
 					}
-					return core.LocalCommandResult{ExitCode: 7}, errors.New("remote workload cancelled")
-				case "stop":
-					stopped.Store(true)
-					close(remoteStopped)
-					return core.LocalCommandResult{}, nil
-				default:
-					return core.LocalCommandResult{}, fmt.Errorf("unexpected native operation: %v", args)
+				}))
+				backend.rt.Stdout, backend.rt.Stderr = io.Discard, io.Discard
+				runDone := make(chan error, 1)
+				go func() {
+					_, err := backend.Run(ctx, core.RunRequest{ID: id, Repo: core.Repo{Root: repo}, Command: []string{"long-running"}})
+					runDone <- err
+				}()
+				select {
+				case <-entered:
+				case <-ctx.Done():
+					t.Fatal("run never entered")
 				}
-			}))
-			backend.rt.Stdout, backend.rt.Stderr = io.Discard, io.Discard
-			runDone := make(chan error, 1)
-			go func() {
-				_, err := backend.Run(ctx, core.RunRequest{ID: id, Repo: core.Repo{Root: repo}, Command: []string{"long-running"}})
-				runDone <- err
-			}()
-			select {
-			case <-entered:
-			case <-ctx.Done():
-				t.Fatal("run never entered")
-			}
-			// A second run must wait to touch the claim, but cannot block stop.
-			admissionDone := make(chan error, 1)
-			go func() { _, _, err := backend.ownedTestbox(ctx, id, repo, false); admissionDone <- err }()
-			select {
-			case err := <-admissionDone:
-				t.Fatalf("admission crossed active command: %v", err)
-			case <-time.After(30 * time.Millisecond):
-			}
-			stopCtx, cancelStop := context.WithTimeout(ctx, 250*time.Millisecond)
-			stopErr := backend.Stop(stopCtx, core.StopRequest{ID: id})
-			cancelStop()
-			if !stopped.Load() {
-				t.Fatal("stop could not reach active workload")
-			}
-			if hung {
-				claim, err := core.ReadLeaseClaim(id)
-				_, keyErr := os.Stat(key)
-				if !errors.Is(stopErr, context.DeadlineExceeded) || err != nil || claim.LeaseID != id || keyErr != nil {
-					t.Fatalf("hung command cleanup lost state: stop=%v claim=%+v err=%v key=%v", stopErr, claim, err, keyErr)
+				// A second run must wait to touch the claim, but cannot block stop.
+				admissionDone := make(chan error, 1)
+				go func() { _, _, err := backend.ownedTestbox(ctx, id, repo, false); admissionDone <- err }()
+				select {
+				case err := <-admissionDone:
+					t.Fatalf("admission crossed active command: %v", err)
+				case <-time.After(30 * time.Millisecond):
 				}
-			} else if stopErr != nil {
-				t.Fatal(stopErr)
-			}
-			cancel()
-			if err := <-runDone; err == nil {
-				t.Fatal("cancelled command reported success")
-			}
-			if err := <-admissionDone; err == nil {
-				t.Fatal("admitted run on terminated Testbox")
-			}
+				stopCtx, cancelStop := context.WithTimeout(ctx, 250*time.Millisecond)
+				stopErr := backend.Stop(stopCtx, core.StopRequest{ID: id})
+				cancelStop()
+				if !stopped.Load() {
+					t.Fatal("stop could not reach active workload")
+				}
+				if hung {
+					claim, err := core.ReadLeaseClaim(id)
+					_, keyErr := os.Stat(key)
+					if !errors.Is(stopErr, context.DeadlineExceeded) || err != nil || claim.LeaseID != id || keyErr != nil {
+						t.Fatalf("hung command cleanup lost state: stop=%v claim=%+v err=%v key=%v", stopErr, claim, err, keyErr)
+					}
+				} else if stopErr != nil {
+					t.Fatal(stopErr)
+				}
+				cancel()
+				if err := <-runDone; err == nil {
+					t.Fatal("cancelled command reported success")
+				}
+				if err := <-admissionDone; err == nil {
+					t.Fatal("admitted run on terminated Testbox")
+				}
+			})
 		})
 	}
 }

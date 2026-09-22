@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -254,33 +255,35 @@ func TestWaitForInstanceReadyStopsBeforeCanceledRead(t *testing.T) {
 func TestWaitForInstanceReadyBoundsObservationsAndSleep(t *testing.T) {
 	for _, phase := range []string{"read Err", "read Cause", "sleep"} {
 		t.Run(phase, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-			defer cancel()
-			api := &fakeVastAPI{getFn: func(ctx context.Context, _ int) (vastInstance, error) {
-				if phase == "sleep" {
-					return vastInstance{Status: "loading"}, nil
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				api := &fakeVastAPI{getFn: func(ctx context.Context, _ int) (vastInstance, error) {
+					if phase == "sleep" {
+						return vastInstance{Status: "loading"}, nil
+					}
+					<-ctx.Done()
+					if phase == "read Cause" {
+						return vastInstance{}, context.Cause(ctx)
+					}
+					return vastInstance{}, ctx.Err()
+				}}
+				b := newTestBackend(t, api)
+				b.pollTimeout = 20 * time.Millisecond
+				b.rt.Clock = &lifecycleClock{current: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+				b.sleep = func(ctx context.Context, _ time.Duration) error {
+					<-ctx.Done()
+					return ctx.Err()
 				}
-				<-ctx.Done()
-				if phase == "read Cause" {
-					return vastInstance{}, context.Cause(ctx)
+				_, err := b.waitForInstanceReady(ctx, api, 100)
+				var exit core.ExitError
+				if !core.AsExitError(err, &exit) || exit.Code != 5 || !strings.Contains(err.Error(), "timed out waiting for Vast instance 100 to expose SSH") || !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("err=%v, want bounded readiness timeout with deadline identity", err)
 				}
-				return vastInstance{}, ctx.Err()
-			}}
-			b := newTestBackend(t, api)
-			b.pollTimeout = 20 * time.Millisecond
-			b.rt.Clock = &lifecycleClock{current: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-			b.sleep = func(ctx context.Context, _ time.Duration) error {
-				<-ctx.Done()
-				return ctx.Err()
-			}
-			_, err := b.waitForInstanceReady(ctx, api, 100)
-			var exit core.ExitError
-			if !core.AsExitError(err, &exit) || exit.Code != 5 || !strings.Contains(err.Error(), "timed out waiting for Vast instance 100 to expose SSH") || !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("err=%v, want bounded readiness timeout with deadline identity", err)
-			}
-			if ctx.Err() != nil {
-				t.Fatalf("parent guard expired before readiness budget: %v", ctx.Err())
-			}
+				if ctx.Err() != nil {
+					t.Fatalf("parent guard expired before readiness budget: %v", ctx.Err())
+				}
+			})
 		})
 	}
 }

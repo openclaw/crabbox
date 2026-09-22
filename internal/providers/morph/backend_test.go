@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -115,92 +116,106 @@ func (f *fakeMorphAPI) DeleteInstance(ctx context.Context, instanceID string) er
 
 func TestMorphWaitForInstanceReady(t *testing.T) {
 	t.Run("pending to ready", func(t *testing.T) {
-		calls := 0
-		api := &fakeMorphAPI{getInstance: func(context.Context, string) (morphInstance, error) {
-			calls++
-			if calls == 1 {
-				return morphInstance{ID: "inst_1", Status: "starting"}, nil
+		synctest.Test(t, func(t *testing.T) {
+			calls := 0
+			api := &fakeMorphAPI{getInstance: func(context.Context, string) (morphInstance, error) {
+				calls++
+				if calls == 1 {
+					return morphInstance{ID: "inst_1", Status: "starting"}, nil
+				}
+				return morphInstance{ID: "inst_1", Status: "ready"}, nil
+			}}
+			backend := &morphLeaseBackend{readyPollInterval: time.Nanosecond, readyTimeout: time.Second}
+			got, err := backend.waitForInstanceReady(context.Background(), api, "inst_1", false)
+			if err != nil || got.Status != "ready" || calls != 2 {
+				t.Fatalf("instance=%#v err=%v calls=%d", got, err, calls)
 			}
-			return morphInstance{ID: "inst_1", Status: "ready"}, nil
-		}}
-		backend := &morphLeaseBackend{readyPollInterval: time.Nanosecond, readyTimeout: time.Second}
-		got, err := backend.waitForInstanceReady(context.Background(), api, "inst_1", false)
-		if err != nil || got.Status != "ready" || calls != 2 {
-			t.Fatalf("instance=%#v err=%v calls=%d", got, err, calls)
-		}
+		})
 	})
 
 	t.Run("read error", func(t *testing.T) {
-		calls := 0
-		api := &fakeMorphAPI{getInstance: func(context.Context, string) (morphInstance, error) {
-			calls++
-			return morphInstance{}, errors.New("read denied")
-		}}
-		backend := &morphLeaseBackend{readyPollInterval: time.Nanosecond, readyTimeout: time.Second}
-		_, err := backend.waitForInstanceReady(context.Background(), api, "inst_1", false)
-		if err == nil || !strings.Contains(err.Error(), "morph get instance inst_1 failed: read denied") || calls != 1 {
-			t.Fatalf("err=%v calls=%d", err, calls)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			calls := 0
+			api := &fakeMorphAPI{getInstance: func(context.Context, string) (morphInstance, error) {
+				calls++
+				return morphInstance{}, errors.New("read denied")
+			}}
+			backend := &morphLeaseBackend{readyPollInterval: time.Nanosecond, readyTimeout: time.Second}
+			_, err := backend.waitForInstanceReady(context.Background(), api, "inst_1", false)
+			if err == nil || !strings.Contains(err.Error(), "morph get instance inst_1 failed: read denied") || calls != 1 {
+				t.Fatalf("err=%v calls=%d", err, calls)
+			}
+		})
 	})
 
 	t.Run("cancellation during delay", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		calls := 0
-		api := &fakeMorphAPI{getInstance: func(context.Context, string) (morphInstance, error) {
-			calls++
-			time.AfterFunc(time.Millisecond, cancel)
-			return morphInstance{ID: "inst_1", Status: "starting"}, nil
-		}}
-		backend := &morphLeaseBackend{readyPollInterval: time.Hour}
-		_, err := backend.waitForInstanceReady(ctx, api, "inst_1", false)
-		if !errors.Is(err, context.Canceled) || calls != 1 {
-			t.Fatalf("err=%v calls=%d", err, calls)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			calls := 0
+			api := &fakeMorphAPI{getInstance: func(context.Context, string) (morphInstance, error) {
+				calls++
+				time.AfterFunc(time.Millisecond, cancel)
+				return morphInstance{ID: "inst_1", Status: "starting"}, nil
+			}}
+			backend := &morphLeaseBackend{readyPollInterval: time.Hour}
+			_, err := backend.waitForInstanceReady(ctx, api, "inst_1", false)
+			if !errors.Is(err, context.Canceled) || calls != 1 {
+				t.Fatalf("err=%v calls=%d", err, calls)
+			}
+		})
 	})
 
 	t.Run("timeout", func(t *testing.T) {
-		api := &fakeMorphAPI{getInstance: func(context.Context, string) (morphInstance, error) {
-			return morphInstance{ID: "inst_1", Status: "starting"}, nil
-		}}
-		backend := &morphLeaseBackend{readyPollInterval: time.Hour, readyTimeout: 10 * time.Millisecond}
-		_, err := backend.waitForInstanceReady(context.Background(), api, "inst_1", false)
-		if err == nil || err.Error() != "timed out waiting for morph instance inst_1 to become ready" {
-			t.Fatalf("err=%v", err)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			api := &fakeMorphAPI{getInstance: func(context.Context, string) (morphInstance, error) {
+				return morphInstance{ID: "inst_1", Status: "starting"}, nil
+			}}
+			backend := &morphLeaseBackend{readyPollInterval: time.Hour, readyTimeout: 10 * time.Millisecond}
+			_, err := backend.waitForInstanceReady(context.Background(), api, "inst_1", false)
+			if err == nil || err.Error() != "timed out waiting for morph instance inst_1 to become ready" {
+				t.Fatalf("err=%v", err)
+			}
+		})
 	})
 
 	t.Run("terminal state", func(t *testing.T) {
-		api := &fakeMorphAPI{getInstance: func(context.Context, string) (morphInstance, error) {
-			return morphInstance{ID: "inst_1", Status: "failed"}, nil
-		}}
-		backend := &morphLeaseBackend{readyPollInterval: time.Nanosecond, readyTimeout: time.Second}
-		_, err := backend.waitForInstanceReady(context.Background(), api, "inst_1", false)
-		if err == nil || !strings.Contains(err.Error(), `entered terminal state "failed"`) {
-			t.Fatalf("err=%v", err)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			api := &fakeMorphAPI{getInstance: func(context.Context, string) (morphInstance, error) {
+				return morphInstance{ID: "inst_1", Status: "failed"}, nil
+			}}
+			backend := &morphLeaseBackend{readyPollInterval: time.Nanosecond, readyTimeout: time.Second}
+			_, err := backend.waitForInstanceReady(context.Background(), api, "inst_1", false)
+			if err == nil || !strings.Contains(err.Error(), `entered terminal state "failed"`) {
+				t.Fatalf("err=%v", err)
+			}
+		})
 	})
 
 	t.Run("terminal state at deadline", func(t *testing.T) {
-		api := &fakeMorphAPI{getInstance: func(ctx context.Context, _ string) (morphInstance, error) {
-			<-ctx.Done()
-			return morphInstance{ID: "inst_1", Status: "failed"}, nil
-		}}
-		backend := &morphLeaseBackend{readyPollInterval: time.Hour, readyTimeout: 10 * time.Millisecond}
-		_, err := backend.waitForInstanceReady(context.Background(), api, "inst_1", false)
-		if err == nil || !strings.Contains(err.Error(), `entered terminal state "failed"`) || strings.Contains(err.Error(), "timed out") {
-			t.Fatalf("err=%v", err)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			api := &fakeMorphAPI{getInstance: func(ctx context.Context, _ string) (morphInstance, error) {
+				<-ctx.Done()
+				return morphInstance{ID: "inst_1", Status: "failed"}, nil
+			}}
+			backend := &morphLeaseBackend{readyPollInterval: time.Hour, readyTimeout: 10 * time.Millisecond}
+			_, err := backend.waitForInstanceReady(context.Background(), api, "inst_1", false)
+			if err == nil || !strings.Contains(err.Error(), `entered terminal state "failed"`) || strings.Contains(err.Error(), "timed out") {
+				t.Fatalf("err=%v", err)
+			}
+		})
 	})
 
 	t.Run("paused allowed", func(t *testing.T) {
-		api := &fakeMorphAPI{getInstance: func(context.Context, string) (morphInstance, error) {
-			return morphInstance{ID: "inst_1", Status: "paused"}, nil
-		}}
-		backend := &morphLeaseBackend{readyPollInterval: time.Nanosecond, readyTimeout: time.Second}
-		got, err := backend.waitForInstanceReady(context.Background(), api, "inst_1", true)
-		if err != nil || got.Status != "paused" {
-			t.Fatalf("instance=%#v err=%v", got, err)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			api := &fakeMorphAPI{getInstance: func(context.Context, string) (morphInstance, error) {
+				return morphInstance{ID: "inst_1", Status: "paused"}, nil
+			}}
+			backend := &morphLeaseBackend{readyPollInterval: time.Nanosecond, readyTimeout: time.Second}
+			got, err := backend.waitForInstanceReady(context.Background(), api, "inst_1", true)
+			if err != nil || got.Status != "paused" {
+				t.Fatalf("instance=%#v err=%v", got, err)
+			}
+		})
 	})
 }
 
@@ -476,54 +491,56 @@ func TestMorphAcquireRequiresSnapshot(t *testing.T) {
 }
 
 func TestMorphAcquireRollbackIsBounded(t *testing.T) {
-	configureMorphTestHome(t)
-	cfg := testMorphConfig()
-	var stderr bytes.Buffer
-	deleteFinished := make(chan struct{})
-	fake := &fakeMorphAPI{
-		getSnapshot: func(_ context.Context, snapshotID string) (morphSnapshot, error) {
-			return morphSnapshot{ID: snapshotID}, nil
-		},
-		listInstances: func(_ context.Context, _ map[string]string) ([]morphInstance, error) {
-			return nil, nil
-		},
-		bootSnapshot: func(_ context.Context, _ string, _ morphBootSnapshotRequest) (morphInstance, error) {
-			return morphInstance{ID: "inst_rollback", Status: "starting"}, nil
-		},
-		setInstanceMetadata: func(_ context.Context, _ string, _ map[string]string) error {
-			return errors.New("metadata failed")
-		},
-		deleteInstance: func(ctx context.Context, _ string) error {
-			defer close(deleteFinished)
-			<-ctx.Done()
-			return ctx.Err()
-		},
-	}
-	backend := &morphLeaseBackend{
-		spec:            Provider{}.Spec(),
-		cfg:             cfg,
-		rt:              core.Runtime{Stdout: io.Discard, Stderr: &stderr},
-		client:          fake,
-		now:             time.Now,
-		rollbackTimeout: 20 * time.Millisecond,
-	}
+	synctest.Test(t, func(t *testing.T) {
+		configureMorphTestHome(t)
+		cfg := testMorphConfig()
+		var stderr bytes.Buffer
+		deleteFinished := make(chan struct{})
+		fake := &fakeMorphAPI{
+			getSnapshot: func(_ context.Context, snapshotID string) (morphSnapshot, error) {
+				return morphSnapshot{ID: snapshotID}, nil
+			},
+			listInstances: func(_ context.Context, _ map[string]string) ([]morphInstance, error) {
+				return nil, nil
+			},
+			bootSnapshot: func(_ context.Context, _ string, _ morphBootSnapshotRequest) (morphInstance, error) {
+				return morphInstance{ID: "inst_rollback", Status: "starting"}, nil
+			},
+			setInstanceMetadata: func(_ context.Context, _ string, _ map[string]string) error {
+				return errors.New("metadata failed")
+			},
+			deleteInstance: func(ctx context.Context, _ string) error {
+				defer close(deleteFinished)
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		}
+		backend := &morphLeaseBackend{
+			spec:            Provider{}.Spec(),
+			cfg:             cfg,
+			rt:              core.Runtime{Stdout: io.Discard, Stderr: &stderr},
+			client:          fake,
+			now:             time.Now,
+			rollbackTimeout: 20 * time.Millisecond,
+		}
 
-	started := time.Now()
-	_, err := backend.Acquire(context.Background(), core.AcquireRequest{})
-	if err == nil || !strings.Contains(err.Error(), "metadata failed") {
-		t.Fatalf("Acquire error=%v", err)
-	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("Acquire rollback took %s, want bounded timeout", elapsed)
-	}
-	select {
-	case <-deleteFinished:
-	default:
-		t.Fatal("rollback delete did not finish")
-	}
-	if !strings.Contains(stderr.String(), "context deadline exceeded") {
-		t.Fatalf("stderr=%q, want rollback timeout warning", stderr.String())
-	}
+		started := time.Now()
+		_, err := backend.Acquire(context.Background(), core.AcquireRequest{})
+		if err == nil || !strings.Contains(err.Error(), "metadata failed") {
+			t.Fatalf("Acquire error=%v", err)
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("Acquire rollback took %s, want bounded timeout", elapsed)
+		}
+		select {
+		case <-deleteFinished:
+		default:
+			t.Fatal("rollback delete did not finish")
+		}
+		if !strings.Contains(stderr.String(), "context deadline exceeded") {
+			t.Fatalf("stderr=%q, want rollback timeout warning", stderr.String())
+		}
+	})
 }
 
 func TestMorphResolveResumesPausedInstanceWithoutWakeOnSSH(t *testing.T) {
