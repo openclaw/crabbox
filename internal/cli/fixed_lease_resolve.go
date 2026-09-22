@@ -50,6 +50,9 @@ func ResolveFixedLeaseTarget(ctx context.Context, opts FixedResolveOptions,
 			labels["lease"], labels["slug"], labels["provider"], labels["state"] = claim.LeaseID, claim.Slug, opts.Provider, opts.TerminalState
 			lease = LeaseTarget{LeaseID: claim.LeaseID, Server: Server{CloudID: claim.CloudID, ImmutableID: claim.CloudImmutableID, Provider: opts.Provider, Name: opts.ResourceName, Status: opts.TerminalState, Labels: labels}}
 		} else if !req.StatusOnly && !req.ReleaseOnly {
+			if intent := claim.FixedCreateIntent; intent != nil && ((opts.Kind.DeletionState != "" && intent.State == opts.Kind.DeletionState) || (intent.Journal != nil && intent.Journal.Phase == "deleting")) {
+				return Exit(4, "lease_id_conflict: fixed lease has entered cleanup; retry stop")
+			}
 			if req.NoLocalStateMutations {
 				return Exit(4, "fixed command preparation requires durable identity binding")
 			}

@@ -109,6 +109,10 @@ func (a App) recoverAbsentStopClaim(ctx context.Context, backend Backend, id str
 	if claim.Provider != backend.Spec().Name || force && claim.LeaseID != id {
 		return false, false, Exit(4, "absence recovery claim identity does not match the selected provider and ID")
 	}
+	// Fixed leases retain their own deletion fence and terminal tombstone.
+	if !force && claim.FixedCreateIntent != nil {
+		return false, false, nil
+	}
 	forgotten, err := ForgetAbsentLeaseClaim(ctx, verifier, claim)
 	if forgotten {
 		fmt.Fprintf(a.Stderr, "lease=%s forgotten locally (resource absent)\n", claim.LeaseID)
