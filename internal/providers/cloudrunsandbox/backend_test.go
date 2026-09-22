@@ -9,10 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -422,32 +426,80 @@ func TestCloudRunSandboxCreateTimeoutRetainsRecoveryClaim(t *testing.T) {
 }
 
 func TestCloudRunSandboxStatusProbesProviderLiveness(t *testing.T) {
-	isolateLeaseHome(t)
-	transport := &fakeTransport{mode: "direct", onProbe: func(string, string) error {
-		return errSandboxNotFound
-	}}
-	previousTransport := newTransport
-	newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
-	t.Cleanup(func() { newTransport = previousTransport })
-	b := NewBackend(Provider{}.Spec(), core.Config{
-		CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"},
-		IdleTimeout:     time.Minute,
-	}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*backend)
-	scope, err := b.claimScope()
-	if err != nil {
-		t.Fatal(err)
-	}
-	const leaseID = leasePrefix + "crabbox-missing"
-	if err := claimTestCloudRunSandboxLease(leaseID, "missing", scope, t.TempDir(), time.Minute); err != nil {
-		t.Fatal(err)
-	}
-	status, err := b.Status(context.Background(), core.StatusRequest{ID: leaseID})
-	if err != nil || status.Ready || status.State != "missing" {
-		t.Fatalf("status=%#v err=%v", status, err)
-	}
-	leases, err := b.List(context.Background(), core.ListRequest{})
-	if err != nil || len(leases) != 1 || leases[0].Status != "missing" {
-		t.Fatalf("leases=%#v err=%v", leases, err)
+	for _, tc := range []struct {
+		name  string
+		code  int
+		state string
+		ready bool
+	}{
+		{name: "ready", code: http.StatusOK, state: "running", ready: true},
+		{name: "missing", code: http.StatusNotFound, state: "missing"},
+		{name: "probe failure", code: http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateLeaseHome(t)
+			t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_SECRET", "synthetic-test-secret")
+			t.Setenv("CLOUD_RUN_SANDBOX_SECRET", "")
+			t.Setenv("CRABBOX_CLOUD_RUN_SANDBOX_AUTH_TOKEN", "")
+			t.Setenv("CLOUD_RUN_AUTH_TOKEN", "")
+			const sandboxID = "status-proof"
+			const leaseID = leasePrefix + sandboxID
+			const ownership = "synthetic-owner"
+			var probes atomic.Int32
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				probes.Add(1)
+				var body struct {
+					SandboxID      string `json:"sandboxId"`
+					OwnershipToken string `json:"ownershipToken"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil || r.Method != http.MethodPost || r.URL.Path != "/v1/sandbox/status" || body.SandboxID != sandboxID || body.OwnershipToken != ownership || r.Header.Get("X-ComputeSDK-Cloud-Run-Secret") != "synthetic-test-secret" {
+					t.Error("unexpected production status request")
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.code)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": tc.code == http.StatusOK, "status": "running", "sandboxId": sandboxID,
+					"ownershipToken": ownership, "code": "sandbox_not_found", "error": "synthetic probe response",
+				})
+			}))
+			t.Cleanup(server.Close)
+			b := NewBackend(Provider{}.Spec(), core.Config{
+				CloudRunSandbox: core.CloudRunSandboxConfig{GatewayURL: server.URL, Workdir: "/tmp/crabbox"},
+			}, core.Runtime{Stdout: io.Discard, Stderr: io.Discard, HTTP: server.Client()}).(*backend)
+			scope, err := b.claimScope()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := core.ClaimLeaseForRepoProviderScopePondWithLabels(leaseID, "status-proof", providerName, scope, "pool-a", t.TempDir(), time.Minute, map[string]string{claimOwnershipLabel: ownership}); err != nil {
+				t.Fatal(err)
+			}
+			before, err := core.ReadLeaseClaim(leaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, err := b.Status(context.Background(), core.StatusRequest{ID: leaseID})
+			if tc.code == http.StatusServiceUnavailable {
+				if err == nil || !reflect.DeepEqual(status, core.StatusView{}) || probes.Load() != 1 {
+					t.Fatalf("failed probe status=%#v err=%v probes=%d", status, err, probes.Load())
+				}
+			} else {
+				want := core.StatusView{ID: leaseID, Slug: "status-proof", Provider: providerName, TargetOS: core.TargetLinux, State: tc.state, ServerID: sandboxID, Pond: "pool-a", Network: core.NetworkPublic, Ready: tc.ready, Labels: map[string]string{"provider": providerName, "lease": leaseID, "pond": "pool-a", "state": tc.state}}
+				if err != nil || !reflect.DeepEqual(status, want) {
+					t.Fatalf("status=%#v want=%#v err=%v", status, want, err)
+				}
+				leases, err := b.List(context.Background(), core.ListRequest{})
+				if err != nil || len(leases) != 1 || leases[0].Status != tc.state || probes.Load() != 2 {
+					t.Fatalf("leases=%#v err=%v probes=%d", leases, err, probes.Load())
+				}
+			}
+			after, err := core.ReadLeaseClaim(leaseID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("status/list changed the claim: err=%v", err)
+			}
+			t.Logf("production HTTPS status/list: response=%d probes=%d claimUnchanged=true", tc.code, probes.Load())
+		})
 	}
 }
 

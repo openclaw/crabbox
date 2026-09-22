@@ -1374,6 +1374,10 @@ E2B-compatible adapters use `shared.EnvdSandboxViews` to project their common
 wire metadata. Provider identity and legacy ID prefixes stay explicit; resource
 ownership validation remains in each adapter.
 
+Cloud Run Sandbox uses `shared.SandboxStatusView` for its public Linux sandbox
+status fields. Claim expiry, gateway ownership probes, and missing-resource
+classification remain in the adapter; ownership tokens never enter public labels.
+
 RunPod and Vast use `shared.AdmitResolvedLease` for the common resolved-lease
 admission transaction: authorize activity on the observed claim, then commit
 repository admission only if that exact claim still matches. The returned claim
