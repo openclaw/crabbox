@@ -21,9 +21,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 const testImageARN = "arn:aws:lambda:eu-west-1:123456789012:microvm-image:crabbox-runner"
@@ -475,100 +477,109 @@ func TestNewRunnerClientAcceptsExplicitClientWithUnsupportedDefault(t *testing.T
 }
 
 func TestDefaultRunnerHTTPClientTimesOutBeforeResponseHeaders(t *testing.T) {
-	const bound = 40 * time.Millisecond
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		time.Sleep(5 * bound)
-	}))
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		const bound = 40 * time.Millisecond
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			time.Sleep(5 * bound)
+		}))
+		defer server.Close()
 
-	started := time.Now()
-	client := mustDefaultRunnerHTTPClient(t, bound)
-	_, err := client.Get(server.URL)
-	elapsed := time.Since(started)
-	if err == nil {
-		t.Fatal("request with withheld response headers unexpectedly succeeded")
-	}
-	var timeoutError interface{ Timeout() bool }
-	if !errors.As(err, &timeoutError) || !timeoutError.Timeout() {
-		t.Fatalf("error=%v, want timeout", err)
-	}
-	if elapsed >= time.Second {
-		t.Fatalf("withheld response headers failed after %s, want near %s", elapsed, bound)
-	}
-	t.Logf("withheld response headers failed after %s (configured bound %s)", elapsed.Round(time.Millisecond), bound)
+		started := time.Now()
+		client := mustDefaultRunnerHTTPClient(t, bound)
+		client.Transport.(*http.Transport).DialContext = server.Client().Transport.(*http.Transport).DialContext
+		_, err := client.Get(server.URL)
+		elapsed := time.Since(started)
+		if err == nil {
+			t.Fatal("request with withheld response headers unexpectedly succeeded")
+		}
+		var timeoutError interface{ Timeout() bool }
+		if !errors.As(err, &timeoutError) || !timeoutError.Timeout() {
+			t.Fatalf("error=%v, want timeout", err)
+		}
+		if elapsed >= time.Second {
+			t.Fatalf("withheld response headers failed after %s, want near %s", elapsed, bound)
+		}
+		t.Logf("withheld response headers failed after %s (configured bound %s)", elapsed.Round(time.Millisecond), bound)
+	})
 }
 
 func TestDefaultRunnerHTTPClientStreamsPastResponseHeaderTimeout(t *testing.T) {
-	const bound = 30 * time.Millisecond
-	const streamDelay = 3 * bound
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.(http.Flusher).Flush()
-		time.Sleep(streamDelay)
-		_, _ = io.WriteString(w, "stream-complete")
-	}))
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		const bound = 30 * time.Millisecond
+		const streamDelay = 3 * bound
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			time.Sleep(streamDelay)
+			_, _ = io.WriteString(w, "stream-complete")
+		}))
+		defer server.Close()
 
-	started := time.Now()
-	client := mustDefaultRunnerHTTPClient(t, bound)
-	resp, err := client.Get(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	elapsed := time.Since(started)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(body) != "stream-complete" {
-		t.Fatalf("body=%q want stream-complete", body)
-	}
-	if elapsed <= bound {
-		t.Fatalf("stream completed in %s, want it readable beyond %s", elapsed, bound)
-	}
-	t.Logf("response headers flushed promptly; body remained readable through %s, past the %s header bound", elapsed.Round(time.Millisecond), bound)
+		started := time.Now()
+		client := mustDefaultRunnerHTTPClient(t, bound)
+		client.Transport.(*http.Transport).DialContext = server.Client().Transport.(*http.Transport).DialContext
+		resp, err := client.Get(server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		elapsed := time.Since(started)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(body) != "stream-complete" {
+			t.Fatalf("body=%q want stream-complete", body)
+		}
+		if elapsed <= bound {
+			t.Fatalf("stream completed in %s, want it readable beyond %s", elapsed, bound)
+		}
+		t.Logf("response headers flushed promptly; body remained readable through %s, past the %s header bound", elapsed.Round(time.Millisecond), bound)
+	})
 }
 
 func TestDefaultRunnerHTTPClientUploadsPastResponseHeaderTimeout(t *testing.T) {
-	const bound = 30 * time.Millisecond
-	const uploadDelay = 3 * bound
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			t.Errorf("read upload: %v", err)
-			return
-		}
-		if string(body) != "upload-complete" {
-			t.Errorf("upload body=%q want upload-complete", body)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		const bound = 30 * time.Millisecond
+		const uploadDelay = 3 * bound
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Errorf("read upload: %v", err)
+				return
+			}
+			if string(body) != "upload-complete" {
+				t.Errorf("upload body=%q want upload-complete", body)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer server.Close()
 
-	reader, writer := io.Pipe()
-	go func() {
-		_, _ = io.WriteString(writer, "upload-")
-		time.Sleep(uploadDelay)
-		_, _ = io.WriteString(writer, "complete")
-		_ = writer.Close()
-	}()
-	started := time.Now()
-	client := mustDefaultRunnerHTTPClient(t, bound)
-	resp, err := client.Post(server.URL, "application/gzip", reader)
-	elapsed := time.Since(started)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("status=%d want %d", resp.StatusCode, http.StatusNoContent)
-	}
-	if elapsed <= bound {
-		t.Fatalf("upload completed in %s, want it to outlive %s", elapsed, bound)
-	}
-	t.Logf("upload completed after %s, beyond the %s response-header bound", elapsed.Round(time.Millisecond), bound)
+		reader, writer := io.Pipe()
+		go func() {
+			_, _ = io.WriteString(writer, "upload-")
+			time.Sleep(uploadDelay)
+			_, _ = io.WriteString(writer, "complete")
+			_ = writer.Close()
+		}()
+		started := time.Now()
+		client := mustDefaultRunnerHTTPClient(t, bound)
+		client.Transport.(*http.Transport).DialContext = server.Client().Transport.(*http.Transport).DialContext
+		resp, err := client.Post(server.URL, "application/gzip", reader)
+		elapsed := time.Since(started)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("status=%d want %d", resp.StatusCode, http.StatusNoContent)
+		}
+		if elapsed <= bound {
+			t.Fatalf("upload completed in %s, want it to outlive %s", elapsed, bound)
+		}
+		t.Logf("upload completed after %s, beyond the %s response-header bound", elapsed.Round(time.Millisecond), bound)
+	})
 }
 
 func TestNewRunnerClientPreservesInjectedHTTPSettingsOnClone(t *testing.T) {

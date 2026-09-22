@@ -25,6 +25,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestSmolvmFlagPresenceAndValidationOrder(t *testing.T) {
@@ -382,51 +383,54 @@ func TestNewAPINormalizesBaseURL(t *testing.T) {
 }
 
 func TestSmolVMFallbackBoundsControlAndPreservesCommand(t *testing.T) {
-	const controlTimeout = 30 * time.Millisecond
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/machines/mach_1":
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{"id":`)
-			w.(http.Flusher).Flush()
-			<-r.Context().Done()
-		case "/v1/machines/mach_1/exec":
-			time.Sleep(3 * controlTimeout)
-			_ = json.NewEncoder(w).Encode(map[string]any{"stdout": "ok", "exitCode": 0})
-		default:
-			http.NotFound(w, r)
+	synctest.Test(t, func(t *testing.T) {
+		const controlTimeout = 30 * time.Millisecond
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/machines/mach_1":
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{"id":`)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			case "/v1/machines/mach_1/exec":
+				time.Sleep(3 * controlTimeout)
+				_ = json.NewEncoder(w).Encode(map[string]any{"stdout": "ok", "exitCode": 0})
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
+		control.Transport, data.Transport = server.Client().Transport, server.Client().Transport
+		trusted, _ := url.Parse(server.URL)
+		client := &client{
+			apiKey:   "smk_key",
+			base:     server.URL,
+			http:     shared.SecureHTTPClient(control, trusted, smolvmRedirectError),
+			dataHTTP: shared.SecureHTTPClient(data, trusted, smolvmRedirectError),
 		}
-	}))
-	defer server.Close()
-	control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
-	trusted, _ := url.Parse(server.URL)
-	client := &client{
-		apiKey:   "smk_key",
-		base:     server.URL,
-		http:     shared.SecureHTTPClient(control, trusted, smolvmRedirectError),
-		dataHTTP: shared.SecureHTTPClient(data, trusted, smolvmRedirectError),
-	}
-	started := time.Now()
-	_, err := client.GetMachine(context.Background(), "mach_1")
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("GetMachine error=%v, want whole-request deadline", err)
-	}
-	controlElapsed := time.Since(started)
-	if controlElapsed >= time.Second {
-		t.Fatalf("stalled control response bounded after %s, want under 1s", controlElapsed)
-	}
+		started := time.Now()
+		_, err := client.GetMachine(context.Background(), "mach_1")
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("GetMachine error=%v, want whole-request deadline", err)
+		}
+		controlElapsed := time.Since(started)
+		if controlElapsed >= time.Second {
+			t.Fatalf("stalled control response bounded after %s, want under 1s", controlElapsed)
+		}
 
-	started = time.Now()
-	result, err := client.Exec(context.Background(), "mach_1", "true", "/workspace")
-	if err != nil || result.ExitCode != 0 {
-		t.Fatalf("Exec result=%#v err=%v", result, err)
-	}
-	dataElapsed := time.Since(started)
-	if dataElapsed <= controlTimeout {
-		t.Fatalf("command completed in %s, want beyond %s", dataElapsed, controlTimeout)
-	}
-	t.Logf("SmolVM control body bounded in %s; synchronous command completed in %s beyond %s control deadline", controlElapsed.Round(time.Millisecond), dataElapsed.Round(time.Millisecond), controlTimeout)
+		started = time.Now()
+		result, err := client.Exec(context.Background(), "mach_1", "true", "/workspace")
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("Exec result=%#v err=%v", result, err)
+		}
+		dataElapsed := time.Since(started)
+		if dataElapsed <= controlTimeout {
+			t.Fatalf("command completed in %s, want beyond %s", dataElapsed, controlTimeout)
+		}
+		t.Logf("SmolVM control body bounded in %s; synchronous command completed in %s beyond %s control deadline", controlElapsed.Round(time.Millisecond), dataElapsed.Round(time.Millisecond), controlTimeout)
+	})
 }
 
 func TestSmolVMInjectedHTTPSettingsArePreservedForBothPlanes(t *testing.T) {

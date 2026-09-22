@@ -14,10 +14,12 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestFastAPICloudProviderSpec(t *testing.T) {
@@ -153,26 +155,29 @@ func TestFastAPICloudFallbackHTTPClientIsBounded(t *testing.T) {
 }
 
 func TestFastAPICloudFallbackHTTPClientTimesOutStalledControlResponse(t *testing.T) {
-	const timeout = 20 * time.Millisecond
-	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-	defer server.Close()
-	fallback := fastAPICloudHTTPClient(nil, timeout)
-	trusted, _ := url.Parse(server.URL)
-	client := &fastAPICloudClient{
-		token:      "test-token",
-		apiURL:     server.URL,
-		httpClient: shared.SecureHTTPClient(fallback, trusted, newFastAPICloudRedirectError),
-	}
-	started := time.Now()
-	_, err := client.GetApp(context.Background(), "app-1")
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("GetApp error = %v, want deadline exceeded", err)
-	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("stalled control request timed out after %v", elapsed)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		const timeout = 20 * time.Millisecond
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		}))
+		defer server.Close()
+		fallback := fastAPICloudHTTPClient(nil, timeout)
+		fallback.Transport = server.Client().Transport
+		trusted, _ := url.Parse(server.URL)
+		client := &fastAPICloudClient{
+			token:      "test-token",
+			apiURL:     server.URL,
+			httpClient: shared.SecureHTTPClient(fallback, trusted, newFastAPICloudRedirectError),
+		}
+		started := time.Now()
+		_, err := client.GetApp(context.Background(), "app-1")
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("GetApp error = %v, want deadline exceeded", err)
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("stalled control request timed out after %v", elapsed)
+		}
+	})
 }
 
 func TestFastAPICloudClientRejectsBareHTTPURL(t *testing.T) {

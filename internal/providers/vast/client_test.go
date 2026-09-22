@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -126,26 +127,28 @@ func TestTransportErrorPreservesCauseWithoutDisplayingSecrets(t *testing.T) {
 }
 
 func TestReadinessDeadlineCancelsNativeHTTPClient(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-r.Context().Done():
-		case <-t.Context().Done():
+	synctest.Test(t, func(t *testing.T) {
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-t.Context().Done():
+			}
+		}))
+		defer server.Close()
+		client, err := newVastClient(core.VastConfig{APIKey: "fixture-key", APIURL: server.URL}, core.Runtime{HTTP: server.Client()})
+		if err != nil {
+			t.Fatal(err)
 		}
-	}))
-	defer server.Close()
-	client, err := newVastClient(core.VastConfig{APIKey: "fixture-key", APIURL: server.URL}, core.Runtime{HTTP: server.Client()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	b := newTestBackend(t, client)
-	b.pollTimeout = 50 * time.Millisecond
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	_, err = b.waitForInstanceReady(ctx, client, 100)
-	var exit core.ExitError
-	if !core.AsExitError(err, &exit) || exit.Code != 5 || !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
-		t.Fatalf("err=%v parent=%v, want own readiness deadline from real HTTP request", err, ctx.Err())
-	}
+		b := newTestBackend(t, client)
+		b.pollTimeout = 50 * time.Millisecond
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		_, err = b.waitForInstanceReady(ctx, client, 100)
+		var exit core.ExitError
+		if !core.AsExitError(err, &exit) || exit.Code != 5 || !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+			t.Fatalf("err=%v parent=%v, want own readiness deadline from real HTTP request", err, ctx.Err())
+		}
+	})
 }
 
 func TestOfferSearchPayloadAndDecode(t *testing.T) {

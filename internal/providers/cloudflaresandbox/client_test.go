@@ -11,63 +11,68 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/shared"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestBridgeFallbackBoundsControlAndPreservesExecStream(t *testing.T) {
-	const controlTimeout = 30 * time.Millisecond
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/sandbox/sb_123":
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{"id":`)
-			w.(http.Flusher).Flush()
-			<-r.Context().Done()
-		case "/v1/sandbox/sb_123/exec":
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, "event: stdout\n"+`data: {"chunk":"started"}`+"\n\n")
-			w.(http.Flusher).Flush()
-			time.Sleep(3 * controlTimeout)
-			_, _ = io.WriteString(w, "event: exit\n"+`data: {"exitCode":0}`+"\n\n")
-		default:
-			http.NotFound(w, r)
+	synctest.Test(t, func(t *testing.T) {
+		const controlTimeout = 30 * time.Millisecond
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/sandbox/sb_123":
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, `{"id":`)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			case "/v1/sandbox/sb_123/exec":
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, "event: stdout\n"+`data: {"chunk":"started"}`+"\n\n")
+				w.(http.Flusher).Flush()
+				time.Sleep(3 * controlTimeout)
+				_, _ = io.WriteString(w, "event: exit\n"+`data: {"exitCode":0}`+"\n\n")
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
+		control.Transport, data.Transport = server.Client().Transport, server.Client().Transport
+		trusted, _ := url.Parse(server.URL)
+		client := &client{
+			baseURL:  server.URL,
+			token:    "test-token",
+			http:     shared.SecureHTTPClient(control, trusted, cloudflareSandboxRedirectError),
+			dataHTTP: shared.SecureHTTPClient(data, trusted, cloudflareSandboxRedirectError),
 		}
-	}))
-	defer server.Close()
+		started := time.Now()
+		_, err := client.GetSandbox(context.Background(), "sb_123")
+		if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+			t.Fatalf("GetSandbox error=%v, want whole-request deadline", err)
+		}
+		controlElapsed := time.Since(started)
+		if controlElapsed >= time.Second {
+			t.Fatalf("stalled control response bounded after %s, want under 1s", controlElapsed)
+		}
 
-	control, data := shared.ControlAndDataHTTPClients(nil, controlTimeout)
-	trusted, _ := url.Parse(server.URL)
-	client := &client{
-		baseURL:  server.URL,
-		token:    "test-token",
-		http:     shared.SecureHTTPClient(control, trusted, cloudflareSandboxRedirectError),
-		dataHTTP: shared.SecureHTTPClient(data, trusted, cloudflareSandboxRedirectError),
-	}
-	started := time.Now()
-	_, err := client.GetSandbox(context.Background(), "sb_123")
-	if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
-		t.Fatalf("GetSandbox error=%v, want whole-request deadline", err)
-	}
-	controlElapsed := time.Since(started)
-	if controlElapsed >= time.Second {
-		t.Fatalf("stalled control response bounded after %s, want under 1s", controlElapsed)
-	}
-
-	started = time.Now()
-	result, err := client.Exec(context.Background(), "sb_123", execRequest{Command: "true"}, io.Discard, io.Discard)
-	if err != nil || result.ExitCode != 0 {
-		t.Fatalf("Exec result=%#v err=%v", result, err)
-	}
-	dataElapsed := time.Since(started)
-	if dataElapsed <= controlTimeout {
-		t.Fatalf("exec stream completed in %s, want beyond %s", dataElapsed, controlTimeout)
-	}
-	t.Logf("Cloudflare Sandbox control body bounded in %s; SSE exec completed in %s beyond %s control deadline", controlElapsed.Round(time.Millisecond), dataElapsed.Round(time.Millisecond), controlTimeout)
+		started = time.Now()
+		result, err := client.Exec(context.Background(), "sb_123", execRequest{Command: "true"}, io.Discard, io.Discard)
+		if err != nil || result.ExitCode != 0 {
+			t.Fatalf("Exec result=%#v err=%v", result, err)
+		}
+		dataElapsed := time.Since(started)
+		if dataElapsed <= controlTimeout {
+			t.Fatalf("exec stream completed in %s, want beyond %s", dataElapsed, controlTimeout)
+		}
+		t.Logf("Cloudflare Sandbox control body bounded in %s; SSE exec completed in %s beyond %s control deadline", controlElapsed.Round(time.Millisecond), dataElapsed.Round(time.Millisecond), controlTimeout)
+	})
 }
 
 func TestBridgeInjectedHTTPSettingsArePreservedForBothPlanes(t *testing.T) {

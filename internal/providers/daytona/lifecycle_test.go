@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	api "github.com/daytonaio/daytona/libs/api-client-go"
@@ -52,9 +53,16 @@ type daytonaLifecycleFixture struct {
 
 func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLeaseBackend, core.Repo) {
 	t.Helper()
+	return newDaytonaLifecycleFixtureWithServer(t, func(_ *testing.T, handler http.Handler) *httptest.Server {
+		return httptest.NewServer(handler)
+	})
+}
+
+func newDaytonaLifecycleFixtureWithServer(t *testing.T, newServer func(*testing.T, http.Handler) *httptest.Server) (*daytonaLifecycleFixture, *daytonaLeaseBackend, core.Repo) {
+	t.Helper()
 	testutil.IsolateUserDirs(t)
 	f := &daytonaLifecycleFixture{createState: api.SANDBOXSTATE_STARTED, identityOrganization: "org-test"}
-	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f.server = newServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.paths = append(f.paths, r.Method+" "+r.URL.Path)
@@ -473,55 +481,57 @@ func TestDaytonaClassKeepsNativeTargetResolution(t *testing.T) {
 func TestDaytonaAllocationFailureRollsBack(t *testing.T) {
 	for _, failure := range []string{"startup failure", "lost create response", "allocated bad request", "create response timeout"} {
 		t.Run(failure, func(t *testing.T) {
-			f, b, repo := newDaytonaLifecycleFixture(t)
-			f.createState = api.SANDBOXSTATE_ERROR
-			if failure == "lost create response" || failure == "allocated bad request" {
-				f.createErrorStatus = http.StatusBadGateway
-				if failure == "allocated bad request" {
-					f.createErrorStatus = http.StatusBadRequest
+			synctest.Test(t, func(t *testing.T) {
+				f, b, repo := newDaytonaLifecycleFixtureWithServer(t, testutil.NewPipeHTTPServer)
+				f.createState = api.SANDBOXSTATE_ERROR
+				if failure == "lost create response" || failure == "allocated bad request" {
+					f.createErrorStatus = http.StatusBadGateway
+					if failure == "allocated bad request" {
+						f.createErrorStatus = http.StatusBadRequest
+					}
+					f.recoveryDelay = 2
 				}
-				f.recoveryDelay = 2
-			}
-			ctx := t.Context()
-			if failure == "create response timeout" {
-				f.createState = api.SANDBOXSTATE_STARTED
-				f.createCanceled = make(chan struct{})
-				b.rt.HTTP.Timeout = 250 * time.Millisecond
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
-				defer cancel()
-			}
-			_, leaseID, _, err := b.createDaytonaToolboxSandbox(ctx, repo, false, false, "")
-			if err == nil {
-				t.Fatal("expected allocation failure")
-			}
-			if failure == "create response timeout" {
-				if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
-					t.Fatalf("create must fail from HTTP timeout, not caller cancellation: err=%v context=%v", err, ctx.Err())
+				ctx := t.Context()
+				if failure == "create response timeout" {
+					f.createState = api.SANDBOXSTATE_STARTED
+					f.createCanceled = make(chan struct{})
+					b.rt.HTTP.Timeout = 250 * time.Millisecond
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+					defer cancel()
 				}
-				select {
-				case <-f.createCanceled:
-				default:
-					t.Fatal("accepted create request did not observe HTTP client cancellation")
+				_, leaseID, _, err := b.createDaytonaToolboxSandbox(ctx, repo, false, false, "")
+				if err == nil {
+					t.Fatal("expected allocation failure")
 				}
-			}
-			f.mu.Lock()
-			defer f.mu.Unlock()
-			if f.sandboxCreates != 1 {
-				t.Fatalf("create requests=%d, want one allocation attempt", f.sandboxCreates)
-			}
-			if f.deletes != 1 {
-				t.Fatalf("deletes=%d, error=%v", f.deletes, err)
-			}
-			if f.createErrorStatus != 0 && f.recoveryReads != 3 {
-				t.Fatalf("recoveryReads=%d, want delayed allocation recovery", f.recoveryReads)
-			}
-			if failure == "create response timeout" && (f.recoveryReads != 1 || f.sandbox.GetId() != "sandbox-test" || f.sandbox.GetLabels()["lease"] != leaseID || f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED) {
-				t.Fatalf("accepted allocation was not recovered and deleted exactly: reads=%d sandbox=%s lease=%s state=%s", f.recoveryReads, f.sandbox.GetId(), f.sandbox.GetLabels()["lease"], f.sandbox.GetState())
-			}
-			if _, exists, err := core.ResolveLeaseClaimForProvider(leaseID, daytonaProvider); err != nil || exists {
-				t.Fatalf("claim retained after confirmed cleanup: %v %v", exists, err)
-			}
+				if failure == "create response timeout" {
+					if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+						t.Fatalf("create must fail from HTTP timeout, not caller cancellation: err=%v context=%v", err, ctx.Err())
+					}
+					select {
+					case <-f.createCanceled:
+					default:
+						t.Fatal("accepted create request did not observe HTTP client cancellation")
+					}
+				}
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				if f.sandboxCreates != 1 {
+					t.Fatalf("create requests=%d, want one allocation attempt", f.sandboxCreates)
+				}
+				if f.deletes != 1 {
+					t.Fatalf("deletes=%d, error=%v", f.deletes, err)
+				}
+				if f.createErrorStatus != 0 && f.recoveryReads != 3 {
+					t.Fatalf("recoveryReads=%d, want delayed allocation recovery", f.recoveryReads)
+				}
+				if failure == "create response timeout" && (f.recoveryReads != 1 || f.sandbox.GetId() != "sandbox-test" || f.sandbox.GetLabels()["lease"] != leaseID || f.sandbox.GetState() != api.SANDBOXSTATE_DESTROYED) {
+					t.Fatalf("accepted allocation was not recovered and deleted exactly: reads=%d sandbox=%s lease=%s state=%s", f.recoveryReads, f.sandbox.GetId(), f.sandbox.GetLabels()["lease"], f.sandbox.GetState())
+				}
+				if _, exists, err := core.ResolveLeaseClaimForProvider(leaseID, daytonaProvider); err != nil || exists {
+					t.Fatalf("claim retained after confirmed cleanup: %v %v", exists, err)
+				}
+			})
 		})
 	}
 }
@@ -529,40 +539,42 @@ func TestDaytonaAllocationFailureRollsBack(t *testing.T) {
 func TestDaytonaFailedRollbackRetainsRecoveryClaim(t *testing.T) {
 	for _, failure := range []string{"startup failure", "create response timeout"} {
 		t.Run(failure, func(t *testing.T) {
-			f, b, repo := newDaytonaLifecycleFixture(t)
-			f.createState = api.SANDBOXSTATE_ERROR
-			f.deleteError = true
-			ctx := t.Context()
-			if failure == "create response timeout" {
-				f.createState = api.SANDBOXSTATE_STARTED
-				f.createCanceled = make(chan struct{})
-				b.rt.HTTP.Timeout = 250 * time.Millisecond
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
-				defer cancel()
-			}
-			_, leaseID, _, err := b.createDaytonaToolboxSandbox(ctx, repo, false, false, "")
-			if err == nil || !strings.Contains(err.Error(), "cleanup failed") || !strings.Contains(err.Error(), leaseID) {
-				t.Fatalf("recovery error=%v", err)
-			}
-			if failure == "create response timeout" {
-				if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
-					t.Fatalf("create must fail from HTTP timeout, not caller cancellation: err=%v context=%v", err, ctx.Err())
+			synctest.Test(t, func(t *testing.T) {
+				f, b, repo := newDaytonaLifecycleFixtureWithServer(t, testutil.NewPipeHTTPServer)
+				f.createState = api.SANDBOXSTATE_ERROR
+				f.deleteError = true
+				ctx := t.Context()
+				if failure == "create response timeout" {
+					f.createState = api.SANDBOXSTATE_STARTED
+					f.createCanceled = make(chan struct{})
+					b.rt.HTTP.Timeout = 250 * time.Millisecond
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+					defer cancel()
 				}
-				select {
-				case <-f.createCanceled:
-				default:
-					t.Fatal("accepted create request did not observe HTTP client cancellation")
+				_, leaseID, _, err := b.createDaytonaToolboxSandbox(ctx, repo, false, false, "")
+				if err == nil || !strings.Contains(err.Error(), "cleanup failed") || !strings.Contains(err.Error(), leaseID) {
+					t.Fatalf("recovery error=%v", err)
 				}
-				f.mu.Lock()
-				defer f.mu.Unlock()
-				if f.sandboxCreates != 1 || f.recoveryReads != 1 || f.deletes != 1 || f.sandbox.GetState() != api.SANDBOXSTATE_STARTED {
-					t.Fatalf("failed rollback lost allocation: creates=%d recovery=%d deletes=%d state=%s", f.sandboxCreates, f.recoveryReads, f.deletes, f.sandbox.GetState())
+				if failure == "create response timeout" {
+					if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+						t.Fatalf("create must fail from HTTP timeout, not caller cancellation: err=%v context=%v", err, ctx.Err())
+					}
+					select {
+					case <-f.createCanceled:
+					default:
+						t.Fatal("accepted create request did not observe HTTP client cancellation")
+					}
+					f.mu.Lock()
+					defer f.mu.Unlock()
+					if f.sandboxCreates != 1 || f.recoveryReads != 1 || f.deletes != 1 || f.sandbox.GetState() != api.SANDBOXSTATE_STARTED {
+						t.Fatalf("failed rollback lost allocation: creates=%d recovery=%d deletes=%d state=%s", f.sandboxCreates, f.recoveryReads, f.deletes, f.sandbox.GetState())
+					}
 				}
-			}
-			if err := requireExactDaytonaResourceClaim(leaseID, "sandbox-test"); err != nil {
-				t.Fatal(err)
-			}
+				if err := requireExactDaytonaResourceClaim(leaseID, "sandbox-test"); err != nil {
+					t.Fatal(err)
+				}
+			})
 		})
 	}
 }
@@ -580,43 +592,47 @@ func TestDaytonaAllocationRecoveryRejectsForeignOwnership(t *testing.T) {
 }
 
 func TestDaytonaAllocationRecoveryIsBounded(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
-	defer cancel()
-	client := &fakeDaytonaDoctorAPI{}
-	_, err := recoverDaytonaAllocation(ctx, client, "missing-name", "cbx_111111111111")
-	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "allocation unconfirmed") || client.mutated {
-		t.Fatalf("recovery must stop without retrying allocation: err=%v mutated=%v", err, client.mutated)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+		defer cancel()
+		client := &fakeDaytonaDoctorAPI{}
+		_, err := recoverDaytonaAllocation(ctx, client, "missing-name", "cbx_111111111111")
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "allocation unconfirmed") || client.mutated {
+			t.Fatalf("recovery must stop without retrying allocation: err=%v mutated=%v", err, client.mutated)
+		}
+	})
 }
 
 func TestDaytonaDeleteWaitsForAlreadyDestroyingSandbox(t *testing.T) {
-	f, b, repo := newDaytonaLifecycleFixture(t)
-	sandbox, leaseID, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.mu.Lock()
-	f.sandbox.SetState(api.SANDBOXSTATE_DESTROYING)
-	f.deleteError = true
-	f.mu.Unlock()
-	timer := time.AfterFunc(20*time.Millisecond, func() {
+	synctest.Test(t, func(t *testing.T) {
+		f, b, repo := newDaytonaLifecycleFixtureWithServer(t, testutil.NewPipeHTTPServer)
+		sandbox, leaseID, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
+		if err != nil {
+			t.Fatal(err)
+		}
 		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
+		f.sandbox.SetState(api.SANDBOXSTATE_DESTROYING)
+		f.deleteError = true
+		f.mu.Unlock()
+		timer := time.AfterFunc(20*time.Millisecond, func() {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.sandbox.SetState(api.SANDBOXSTATE_DESTROYED)
+		})
+		defer timer.Stop()
+		client, err := newDaytonaClient(b.cfg, b.rt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		if err := deleteOwnedDaytonaSandbox(ctx, client, sandbox.GetId(), leaseID); err != nil {
+			t.Fatal(err)
+		}
+		if f.deletes != 0 {
+			t.Fatalf("must not repeat DELETE while already destroying, got %d calls", f.deletes)
+		}
 	})
-	defer timer.Stop()
-	client, err := newDaytonaClient(b.cfg, b.rt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	if err := deleteOwnedDaytonaSandbox(ctx, client, sandbox.GetId(), leaseID); err != nil {
-		t.Fatal(err)
-	}
-	if f.deletes != 0 {
-		t.Fatalf("must not repeat DELETE while already destroying, got %d calls", f.deletes)
-	}
 }
 
 func TestDaytonaReadinessIgnoresStaleLabels(t *testing.T) {
@@ -693,54 +709,56 @@ func TestDaytonaStatusWaitFailsOnTerminalProviderState(t *testing.T) {
 func TestDaytonaActivityRefreshStopsWithRun(t *testing.T) {
 	for _, sshRun := range []bool{false, true} {
 		t.Run(fmt.Sprintf("ssh=%t", sshRun), func(t *testing.T) {
-			f, b, repo := newDaytonaLifecycleFixture(t)
-			sandbox, leaseID, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
-			if err != nil {
-				t.Fatal(err)
-			}
-			sandbox.SetAutoStopInterval(0)
-			f.mu.Lock()
-			f.sandbox.SetAutoStopInterval(0)
-			f.mu.Unlock()
-			b.cfg.IdleTimeout = 3 * time.Second
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			var stop func()
-			if sshRun {
-				stop, err = b.BeginSSHRunActivity(ctx, core.LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox)})
-			} else {
-				stop, err = b.startDaytonaActivity(ctx, sandbox)
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			deadline := time.Now().Add(5 * time.Second)
-			for {
+			synctest.Test(t, func(t *testing.T) {
+				f, b, repo := newDaytonaLifecycleFixtureWithServer(t, testutil.NewPipeHTTPServer)
+				sandbox, leaseID, _, err := b.createDaytonaSandbox(t.Context(), repo, true, false, "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				sandbox.SetAutoStopInterval(0)
+				f.mu.Lock()
+				f.sandbox.SetAutoStopInterval(0)
+				f.mu.Unlock()
+				b.cfg.IdleTimeout = 3 * time.Second
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				var stop func()
+				if sshRun {
+					stop, err = b.BeginSSHRunActivity(ctx, core.LeaseTarget{LeaseID: leaseID, Server: daytonaSandboxToServer(sandbox)})
+				} else {
+					stop, err = b.startDaytonaActivity(ctx, sandbox)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				deadline := time.Now().Add(5 * time.Second)
+				for {
+					f.mu.Lock()
+					calls := f.activity
+					f.mu.Unlock()
+					if calls >= 2 {
+						break
+					}
+					if time.Now().After(deadline) {
+						stop()
+						t.Fatal("activity was not refreshed")
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				if sshRun {
+					cancel()
+				}
+				stop()
 				f.mu.Lock()
 				calls := f.activity
 				f.mu.Unlock()
-				if calls >= 2 {
-					break
+				time.Sleep(1100 * time.Millisecond)
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				if f.activity != calls {
+					t.Fatal("activity continued after run stopped")
 				}
-				if time.Now().After(deadline) {
-					stop()
-					t.Fatal("activity was not refreshed")
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			if sshRun {
-				cancel()
-			}
-			stop()
-			f.mu.Lock()
-			calls := f.activity
-			f.mu.Unlock()
-			time.Sleep(1100 * time.Millisecond)
-			f.mu.Lock()
-			defer f.mu.Unlock()
-			if f.activity != calls {
-				t.Fatal("activity continued after run stopped")
-			}
+			})
 		})
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -342,19 +343,21 @@ func TestAcquireLeavesSuccessfulMachineContextAlive(t *testing.T) {
 }
 
 func TestAcquireCancelsMachineWhenLaunchTimeoutExpires(t *testing.T) {
-	cfg := lifecycleConfig(t)
-	cfg.Firecracker.LaunchTimeout = time.Nanosecond
-	test := newLifecycleTestBackend(t, cfg)
-	test.factory.machine.block = true
-	test.factory.machine.cancelCh = make(chan struct{})
+	synctest.Test(t, func(t *testing.T) {
+		cfg := lifecycleConfig(t)
+		cfg.Firecracker.LaunchTimeout = time.Nanosecond
+		test := newLifecycleTestBackend(t, cfg)
+		test.factory.machine.block = true
+		test.factory.machine.cancelCh = make(chan struct{})
 
-	_, err := test.backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: test.repoRoot}})
-	if err == nil || !strings.Contains(err.Error(), "firecracker launch timed out") {
-		t.Fatalf("Acquire err=%v want launch timeout", err)
-	}
-	if test.factory.machine.canceled.Load() == 0 {
-		t.Fatal("machine was not canceled after launch timeout")
-	}
+		_, err := test.backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: test.repoRoot}})
+		if err == nil || !strings.Contains(err.Error(), "firecracker launch timed out") {
+			t.Fatalf("Acquire err=%v want launch timeout", err)
+		}
+		if test.factory.machine.canceled.Load() == 0 {
+			t.Fatal("machine was not canceled after launch timeout")
+		}
+	})
 }
 
 func TestAcquireRecordsEffectiveTopLevelSSHUser(t *testing.T) {

@@ -19,6 +19,7 @@ import (
 
 	api "github.com/daytonaio/daytona/libs/api-client-go"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type snapshotFixture struct {
@@ -36,7 +37,14 @@ type snapshotFixture struct {
 
 func newSnapshotFixture(t *testing.T) *snapshotFixture {
 	t.Helper()
-	f, b, repo := newDaytonaLifecycleFixture(t)
+	return newSnapshotFixtureWithServer(t, func(_ *testing.T, handler http.Handler) *httptest.Server {
+		return httptest.NewServer(handler)
+	})
+}
+
+func newSnapshotFixtureWithServer(t *testing.T, newServer func(*testing.T, http.Handler) *httptest.Server) *snapshotFixture {
+	t.Helper()
+	f, b, repo := newDaytonaLifecycleFixtureWithServer(t, newServer)
 	sandbox, leaseID, _, err := b.createDaytonaToolboxSandbox(t.Context(), repo, true, false, "")
 	if err != nil {
 		t.Fatal(err)
@@ -307,72 +315,79 @@ func TestDaytonaDirectCheckpointClassRestoresRoutingBeforeValidation(t *testing.
 func TestDaytonaSnapshotFailureRetainsIdentityAndRestoresSource(t *testing.T) {
 	for _, failure := range []string{"lost-response", "http-timeout", "http-timeout-unconfirmed", "snapshot-error", "unconfirmed"} {
 		t.Run(failure, func(t *testing.T) {
-			f := newSnapshotFixture(t)
-			f.lostResponse = failure == "lost-response"
-			f.failSnapshot = failure == "snapshot-error"
-			httpTimeout := strings.HasPrefix(failure, "http-timeout")
-			if httpTimeout {
-				f.snapshotResponseCanceled = make(chan struct{})
-				f.stallSnapshotReads = failure == "http-timeout-unconfirmed"
-			}
-			var stalled *snapshotDeadlineClient
-			if failure == "unconfirmed" || httpTimeout {
-				original := newDaytonaClient
-				newDaytonaClient = func(cfg core.Config, rt core.Runtime) (daytonaAPI, error) {
-					client, err := original(cfg, rt)
-					if err != nil {
-						return nil, err
+			synctest.Test(t, func(t *testing.T) {
+				f := newSnapshotFixtureWithServer(t, testutil.NewPipeHTTPServer)
+				// Checkpoint operations construct their own runtime, including the
+				// toolbox client. Route those transports through the same pipe server.
+				defaultTransport := http.DefaultTransport
+				http.DefaultTransport = f.server.Client().Transport
+				t.Cleanup(func() { http.DefaultTransport = defaultTransport })
+				f.lostResponse = failure == "lost-response"
+				f.failSnapshot = failure == "snapshot-error"
+				httpTimeout := strings.HasPrefix(failure, "http-timeout")
+				if httpTimeout {
+					f.snapshotResponseCanceled = make(chan struct{})
+					f.stallSnapshotReads = failure == "http-timeout-unconfirmed"
+				}
+				var stalled *snapshotDeadlineClient
+				if failure == "unconfirmed" || httpTimeout {
+					original := newDaytonaClient
+					newDaytonaClient = func(cfg core.Config, rt core.Runtime) (daytonaAPI, error) {
+						client, err := original(cfg, rt)
+						if err != nil {
+							return nil, err
+						}
+						if httpTimeout {
+							client.(*daytonaSDKClient).api.GetConfig().HTTPClient.Timeout = 250 * time.Millisecond
+							return client, nil
+						}
+						stalled = &snapshotDeadlineClient{daytonaSnapshotAPI: client.(daytonaSnapshotAPI)}
+						return stalled, nil
 					}
-					if httpTimeout {
-						client.(*daytonaSDKClient).api.GetConfig().HTTPClient.Timeout = 250 * time.Millisecond
-						return client, nil
+					t.Cleanup(func() { newDaytonaClient = original })
+				}
+				ctx := t.Context()
+				if httpTimeout {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+					defer cancel()
+				}
+				result, err := (Provider{}).CreateNativeCheckpoint(ctx, f.request)
+				if httpTimeout {
+					if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+						t.Fatalf("snapshot request did not reach its client timeout before the caller deadline: %v", err)
 					}
-					stalled = &snapshotDeadlineClient{daytonaSnapshotAPI: client.(daytonaSnapshotAPI)}
-					return stalled, nil
+					select {
+					case <-f.snapshotResponseCanceled:
+					case <-ctx.Done():
+						t.Fatal("accepted snapshot request did not observe HTTP cancellation")
+					}
 				}
-				t.Cleanup(func() { newDaytonaClient = original })
-			}
-			ctx := t.Context()
-			if httpTimeout {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
-				defer cancel()
-			}
-			result, err := (Provider{}).CreateNativeCheckpoint(ctx, f.request)
-			if httpTimeout {
-				if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
-					t.Fatalf("snapshot request did not reach its client timeout before the caller deadline: %v", err)
+				f.snapshotMu.Lock()
+				defer f.snapshotMu.Unlock()
+				if err == nil || result.Image.ID == "" || result.Metadata["source"] == "" {
+					t.Fatalf("result=%+v err=%v", result, err)
 				}
-				select {
-				case <-f.snapshotResponseCanceled:
-				case <-ctx.Done():
-					t.Fatal("accepted snapshot request did not observe HTTP cancellation")
+				if f.creates != 1 {
+					t.Fatal("allocation was retried")
 				}
-			}
-			f.snapshotMu.Lock()
-			defer f.snapshotMu.Unlock()
-			if err == nil || result.Image.ID == "" || result.Metadata["source"] == "" {
-				t.Fatalf("result=%+v err=%v", result, err)
-			}
-			if f.creates != 1 {
-				t.Fatal("allocation was retried")
-			}
-			if httpTimeout && (result.Image.ID != "snapshot-exact-id" || result.Image.Name != "crabbox-"+f.request.CheckpointID || result.Metadata["snapshot_id"] != result.Image.ID || result.Metadata["source"] != f.request.Server.CloudID) {
-				t.Fatalf("accepted snapshot lost its exact recovery identity: %+v", result)
-			}
-			if failure == "unconfirmed" || f.stallSnapshotReads {
-				if f.starts != 0 || f.stops != 1 || f.sandbox.GetState() != api.SANDBOXSTATE_STOPPED || !strings.Contains(err.Error(), "left stopped") {
-					t.Fatalf("unsafe restart: %v", err)
+				if httpTimeout && (result.Image.ID != "snapshot-exact-id" || result.Image.Name != "crabbox-"+f.request.CheckpointID || result.Metadata["snapshot_id"] != result.Image.ID || result.Metadata["source"] != f.request.Server.CloudID) {
+					t.Fatalf("accepted snapshot lost its exact recovery identity: %+v", result)
 				}
-				if failure == "unconfirmed" && (stalled == nil || stalled.deadlineReads != 2 || !errors.Is(err, context.DeadlineExceeded)) {
-					t.Fatalf("snapshot polling and recovery did not both observe the injected deadline: %v", err)
+				if failure == "unconfirmed" || f.stallSnapshotReads {
+					if f.starts != 0 || f.stops != 1 || f.sandbox.GetState() != api.SANDBOXSTATE_STOPPED || !strings.Contains(err.Error(), "left stopped") {
+						t.Fatalf("unsafe restart: %v", err)
+					}
+					if failure == "unconfirmed" && (stalled == nil || stalled.deadlineReads != 2 || !errors.Is(err, context.DeadlineExceeded)) {
+						t.Fatalf("snapshot polling and recovery did not both observe the injected deadline: %v", err)
+					}
+					if f.stallSnapshotReads && (f.reads != 4 || result.Image.State != "pending") {
+						t.Fatalf("snapshot polling and recovery did not preserve pending identity: reads=%d result=%+v", f.reads, result)
+					}
+				} else if f.starts != 1 || result.Image.ID != "snapshot-exact-id" {
+					t.Fatalf("source not restored or identity lost: %+v %v", result, err)
 				}
-				if f.stallSnapshotReads && (f.reads != 4 || result.Image.State != "pending") {
-					t.Fatalf("snapshot polling and recovery did not preserve pending identity: reads=%d result=%+v", f.reads, result)
-				}
-			} else if f.starts != 1 || result.Image.ID != "snapshot-exact-id" {
-				t.Fatalf("source not restored or identity lost: %+v %v", result, err)
-			}
+			})
 		})
 	}
 }

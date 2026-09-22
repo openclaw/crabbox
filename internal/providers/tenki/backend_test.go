@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -96,97 +97,99 @@ func TestTenkiReleaseRequiresExactScopedClaimAndLiveOwnership(t *testing.T) {
 		{name: "cancel during acknowledgement retains claim", claimedSessionID: "session-owned", liveSessionID: "session-owned", liveLeaseID: "cbx_abcdef123456", cancelOnAck: true, wantErr: "context canceled", wantTerminated: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			cfg := core.Config{Provider: tenkiProvider, Tenki: core.TenkiConfig{CLIPath: "tenki", Workspace: "workspace-owned"}}
-			if tc.claimedSessionID != "" {
-				claimCfg := cfg
-				if tc.claimedEndpoint != "" {
-					claimCfg.Tenki.Endpoint = tc.claimedEndpoint
-				}
-				if tc.claimedWorkspace != "" {
-					claimCfg.Tenki.Workspace = tc.claimedWorkspace
-				}
-				server := core.Server{Provider: tenkiProvider, CloudID: tc.claimedSessionID, Name: "owned", Labels: map[string]string{
-					"provider": tenkiProvider, "lease": "cbx_abcdef123456", "slug": "owned", "tenki_session_id": tc.claimedSessionID,
-				}}
-				if err := core.ClaimLeaseTargetForRepoConfig("cbx_abcdef123456", "owned", claimCfg, server, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
-					t.Fatal(err)
-				}
-			}
-			terminated := false
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			runner := &fakeRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-				command := strings.Join(req.Args, " ")
-				switch {
-				case strings.HasPrefix(command, "sandbox get "):
-					metadata := "{}"
-					if tc.liveLeaseID != "" {
-						metadata = fmt.Sprintf(`{"crabbox_provider":"tenki","crabbox_lease_id":"%s","crabbox_slug":"owned"}`, tc.liveLeaseID)
-					}
-					state := "RUNNING"
-					id := tc.liveSessionID
-					if terminated {
-						if tc.cancelOnAck {
-							cancel()
-						}
-						if tc.postTerminateError != "" {
-							return core.LocalCommandResult{ExitCode: 1, Stderr: tc.postTerminateError}, errors.New("exit status 1")
-						}
-						if tc.postTerminateID != nil {
-							id = *tc.postTerminateID
-						}
-						state = core.Blank(tc.postTerminateState, "TERMINATING")
-					}
-					return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"id":"%s","name":"owned","state":"%s","metadata":%s}`, id, state, metadata)}, nil
-				case strings.HasPrefix(command, "sandbox terminate "):
-					if strings.Contains(command, "--workspace") || strings.Contains(command, "--project") {
-						t.Fatalf("legacy scope selector leaked into terminate command: %s", command)
-					}
-					if tc.exitZeroUsage {
-						return core.LocalCommandResult{Stderr: "Incorrect Usage: flag provided but not defined: -future-flag"}, nil
-					}
-					if tc.terminateErr != nil {
-						return core.LocalCommandResult{ExitCode: 1, Stderr: tc.terminateStderr}, tc.terminateErr
-					}
-					terminated = true
-					return core.LocalCommandResult{}, nil
-				default:
-					t.Fatalf("unexpected command: %s", command)
-					return core.LocalCommandResult{}, nil
-				}
-			}}
-			backend := &tenkiBackend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
-			if tc.ackTimeout > 0 {
-				backend.terminationAckTimeout = tc.ackTimeout
-				backend.sleep = func(ctx context.Context, _ time.Duration) error {
-					<-ctx.Done()
-					return context.Cause(ctx)
-				}
-			}
-			err := backend.ReleaseLease(ctx, core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
-				LeaseID: "cbx_abcdef123456", Server: core.Server{CloudID: "session-owned", Labels: map[string]string{"slug": "owned"}},
-			}})
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err=%v, want %q", err, tc.wantErr)
-				}
+			synctest.Test(t, func(t *testing.T) {
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				cfg := core.Config{Provider: tenkiProvider, Tenki: core.TenkiConfig{CLIPath: "tenki", Workspace: "workspace-owned"}}
 				if tc.claimedSessionID != "" {
-					if _, exists, claimErr := core.ReadLeaseClaimWithPresence("cbx_abcdef123456"); claimErr != nil || !exists {
-						t.Fatalf("claim exists=%t err=%v", exists, claimErr)
+					claimCfg := cfg
+					if tc.claimedEndpoint != "" {
+						claimCfg.Tenki.Endpoint = tc.claimedEndpoint
+					}
+					if tc.claimedWorkspace != "" {
+						claimCfg.Tenki.Workspace = tc.claimedWorkspace
+					}
+					server := core.Server{Provider: tenkiProvider, CloudID: tc.claimedSessionID, Name: "owned", Labels: map[string]string{
+						"provider": tenkiProvider, "lease": "cbx_abcdef123456", "slug": "owned", "tenki_session_id": tc.claimedSessionID,
+					}}
+					if err := core.ClaimLeaseTargetForRepoConfig("cbx_abcdef123456", "owned", claimCfg, server, core.SSHTarget{}, t.TempDir(), time.Minute, false); err != nil {
+						t.Fatal(err)
 					}
 				}
-			} else if err != nil {
-				t.Fatal(err)
-			} else if _, exists, claimErr := core.ReadLeaseClaimWithPresence("cbx_abcdef123456"); claimErr != nil || exists {
-				t.Fatalf("successful release retained claim: exists=%t err=%v", exists, claimErr)
-			}
-			if tc.cancelOnAck && !errors.Is(err, context.Canceled) {
-				t.Fatalf("cancellation identity lost: %v", err)
-			}
-			if terminated != tc.wantTerminated {
-				t.Fatalf("terminated=%t want=%t", terminated, tc.wantTerminated)
-			}
+				terminated := false
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				runner := &fakeRunner{run: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					command := strings.Join(req.Args, " ")
+					switch {
+					case strings.HasPrefix(command, "sandbox get "):
+						metadata := "{}"
+						if tc.liveLeaseID != "" {
+							metadata = fmt.Sprintf(`{"crabbox_provider":"tenki","crabbox_lease_id":"%s","crabbox_slug":"owned"}`, tc.liveLeaseID)
+						}
+						state := "RUNNING"
+						id := tc.liveSessionID
+						if terminated {
+							if tc.cancelOnAck {
+								cancel()
+							}
+							if tc.postTerminateError != "" {
+								return core.LocalCommandResult{ExitCode: 1, Stderr: tc.postTerminateError}, errors.New("exit status 1")
+							}
+							if tc.postTerminateID != nil {
+								id = *tc.postTerminateID
+							}
+							state = core.Blank(tc.postTerminateState, "TERMINATING")
+						}
+						return core.LocalCommandResult{Stdout: fmt.Sprintf(`{"id":"%s","name":"owned","state":"%s","metadata":%s}`, id, state, metadata)}, nil
+					case strings.HasPrefix(command, "sandbox terminate "):
+						if strings.Contains(command, "--workspace") || strings.Contains(command, "--project") {
+							t.Fatalf("legacy scope selector leaked into terminate command: %s", command)
+						}
+						if tc.exitZeroUsage {
+							return core.LocalCommandResult{Stderr: "Incorrect Usage: flag provided but not defined: -future-flag"}, nil
+						}
+						if tc.terminateErr != nil {
+							return core.LocalCommandResult{ExitCode: 1, Stderr: tc.terminateStderr}, tc.terminateErr
+						}
+						terminated = true
+						return core.LocalCommandResult{}, nil
+					default:
+						t.Fatalf("unexpected command: %s", command)
+						return core.LocalCommandResult{}, nil
+					}
+				}}
+				backend := &tenkiBackend{cfg: cfg, rt: core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard}}
+				if tc.ackTimeout > 0 {
+					backend.terminationAckTimeout = tc.ackTimeout
+					backend.sleep = func(ctx context.Context, _ time.Duration) error {
+						<-ctx.Done()
+						return context.Cause(ctx)
+					}
+				}
+				err := backend.ReleaseLease(ctx, core.ReleaseLeaseRequest{Lease: core.LeaseTarget{
+					LeaseID: "cbx_abcdef123456", Server: core.Server{CloudID: "session-owned", Labels: map[string]string{"slug": "owned"}},
+				}})
+				if tc.wantErr != "" {
+					if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+						t.Fatalf("err=%v, want %q", err, tc.wantErr)
+					}
+					if tc.claimedSessionID != "" {
+						if _, exists, claimErr := core.ReadLeaseClaimWithPresence("cbx_abcdef123456"); claimErr != nil || !exists {
+							t.Fatalf("claim exists=%t err=%v", exists, claimErr)
+						}
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				} else if _, exists, claimErr := core.ReadLeaseClaimWithPresence("cbx_abcdef123456"); claimErr != nil || exists {
+					t.Fatalf("successful release retained claim: exists=%t err=%v", exists, claimErr)
+				}
+				if tc.cancelOnAck && !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancellation identity lost: %v", err)
+				}
+				if terminated != tc.wantTerminated {
+					t.Fatalf("terminated=%t want=%t", terminated, tc.wantTerminated)
+				}
+			})
 		})
 	}
 }
@@ -783,18 +786,20 @@ func TestTenkiSessionObserverRejectsTerminalStates(t *testing.T) {
 }
 
 func TestTenkiSessionObserverPreservesTerminalStateAtDeadline(t *testing.T) {
-	runner := &fakeRunner{runCtx: func(ctx context.Context, _ core.LocalCommandRequest) (core.LocalCommandResult, error) {
-		<-ctx.Done()
-		return core.LocalCommandResult{Stdout: `{"id":"session-1","state":"TERMINATED"}`}, nil
-	}}
-	backend := &tenkiBackend{
-		cfg: core.Config{Tenki: core.TenkiConfig{CLIPath: "tenki"}},
-		rt:  core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
-	}
-	_, err := backend.waitForSessionReady(context.Background(), "session-1", 10*time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "terminated") || strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("err=%v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		runner := &fakeRunner{runCtx: func(ctx context.Context, _ core.LocalCommandRequest) (core.LocalCommandResult, error) {
+			<-ctx.Done()
+			return core.LocalCommandResult{Stdout: `{"id":"session-1","state":"TERMINATED"}`}, nil
+		}}
+		backend := &tenkiBackend{
+			cfg: core.Config{Tenki: core.TenkiConfig{CLIPath: "tenki"}},
+			rt:  core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+		}
+		_, err := backend.waitForSessionReady(context.Background(), "session-1", 10*time.Millisecond)
+		if err == nil || !strings.Contains(err.Error(), "terminated") || strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestTenkiSessionObserverReturnsParentCancellation(t *testing.T) {
@@ -817,21 +822,23 @@ func TestTenkiSessionObserverReturnsParentCancellation(t *testing.T) {
 }
 
 func TestTenkiSessionObserverTimeoutIncludesLastGetError(t *testing.T) {
-	runner := &fakeRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
-		return core.LocalCommandResult{ExitCode: 1}, errors.New("control plane unavailable")
-	}}
-	backend := &tenkiBackend{
-		cfg: core.Config{Tenki: core.TenkiConfig{CLIPath: "tenki"}},
-		rt:  core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
-		sleep: func(ctx context.Context, _ time.Duration) error {
-			<-ctx.Done()
-			return context.Cause(ctx)
-		},
-	}
-	_, err := backend.waitForSessionReady(context.Background(), "session-1", 10*time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "control plane unavailable") {
-		t.Fatalf("err=%v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		runner := &fakeRunner{run: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+			return core.LocalCommandResult{ExitCode: 1}, errors.New("control plane unavailable")
+		}}
+		backend := &tenkiBackend{
+			cfg: core.Config{Tenki: core.TenkiConfig{CLIPath: "tenki"}},
+			rt:  core.Runtime{Exec: runner, Stdout: io.Discard, Stderr: io.Discard},
+			sleep: func(ctx context.Context, _ time.Duration) error {
+				<-ctx.Done()
+				return context.Cause(ctx)
+			},
+		}
+		_, err := backend.waitForSessionReady(context.Background(), "session-1", 10*time.Millisecond)
+		if err == nil || !strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "control plane unavailable") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestTenkiSessionObserverProgress(t *testing.T) {

@@ -1977,53 +1977,57 @@ func readinessProbe(req core.LocalCommandRequest) bool {
 
 // A blocked readiness probe must time out and retry.
 func TestWaitGuestReadyRetriesThroughBlockingBoot(t *testing.T) {
-	runner := &recordingRunner{}
-	blocked := 0
-	runner.blockUntilCtx = func(req core.LocalCommandRequest) bool {
-		if readinessProbe(req) && blocked < 2 {
-			blocked++
-			return true
+	synctest.Test(t, func(t *testing.T) {
+		runner := &recordingRunner{}
+		blocked := 0
+		runner.blockUntilCtx = func(req core.LocalCommandRequest) bool {
+			if readinessProbe(req) && blocked < 2 {
+				blocked++
+				return true
+			}
+			return false
 		}
-		return false
-	}
-	b := testBackend(runner)
-	b.guestReadyProbeTimeout = 20 * time.Millisecond
-	b.guestReadyBudget = 5 * time.Second
-	b.guestRetryBackoff = time.Millisecond
+		b := testBackend(runner)
+		b.guestReadyProbeTimeout = 20 * time.Millisecond
+		b.guestReadyBudget = 5 * time.Second
+		b.guestRetryBackoff = time.Millisecond
 
-	if err := b.waitGuestReady(context.Background(), "crabbox-blue-1234", "crabbox"); err != nil {
-		t.Fatalf("waitGuestReady should succeed after transient boot blocking: %v", err)
-	}
-	if blocked != 2 {
-		t.Fatalf("expected 2 blocked probes before success, got %d", blocked)
-	}
-	probes := 0
-	for _, c := range runner.calls {
-		if readinessProbe(c) {
-			probes++
+		if err := b.waitGuestReady(context.Background(), "crabbox-blue-1234", "crabbox"); err != nil {
+			t.Fatalf("waitGuestReady should succeed after transient boot blocking: %v", err)
 		}
-	}
-	if probes < 3 {
-		t.Fatalf("expected >=3 readiness probes (2 blocked + 1 success), got %d", probes)
-	}
+		if blocked != 2 {
+			t.Fatalf("expected 2 blocked probes before success, got %d", blocked)
+		}
+		probes := 0
+		for _, c := range runner.calls {
+			if readinessProbe(c) {
+				probes++
+			}
+		}
+		if probes < 3 {
+			t.Fatalf("expected >=3 readiness probes (2 blocked + 1 success), got %d", probes)
+		}
+	})
 }
 
 // An unresponsive guest must fail at the boot budget.
 func TestWaitGuestReadyFailsAfterBudget(t *testing.T) {
-	runner := &recordingRunner{}
-	runner.blockUntilCtx = func(req core.LocalCommandRequest) bool { return readinessProbe(req) }
-	b := testBackend(runner)
-	b.guestReadyProbeTimeout = 15 * time.Millisecond
-	b.guestReadyBudget = 60 * time.Millisecond
-	b.guestRetryBackoff = time.Millisecond
+	synctest.Test(t, func(t *testing.T) {
+		runner := &recordingRunner{}
+		runner.blockUntilCtx = func(req core.LocalCommandRequest) bool { return readinessProbe(req) }
+		b := testBackend(runner)
+		b.guestReadyProbeTimeout = 15 * time.Millisecond
+		b.guestReadyBudget = 60 * time.Millisecond
+		b.guestRetryBackoff = time.Millisecond
 
-	err := b.waitGuestReady(context.Background(), "crabbox-blue-1234", "crabbox")
-	if err == nil {
-		t.Fatal("waitGuestReady should fail once the boot budget is exceeded")
-	}
-	if !strings.Contains(err.Error(), "did not accept PowerShell Direct") {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		err := b.waitGuestReady(context.Background(), "crabbox-blue-1234", "crabbox")
+		if err == nil {
+			t.Fatal("waitGuestReady should fail once the boot budget is exceeded")
+		}
+		if !strings.Contains(err.Error(), "did not accept PowerShell Direct") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
 }
 
 func TestWaitGuestReadyAbortsOnContextCancel(t *testing.T) {
@@ -2043,25 +2047,27 @@ func TestWaitGuestReadyAbortsOnContextCancel(t *testing.T) {
 
 // A blocked guest call must time out and retry.
 func TestInvokeInGuestBoundsBlockingAttempt(t *testing.T) {
-	runner := &recordingRunner{}
-	first := true
-	runner.blockUntilCtx = func(core.LocalCommandRequest) bool {
-		if first {
-			first = false
-			return true
+	synctest.Test(t, func(t *testing.T) {
+		runner := &recordingRunner{}
+		first := true
+		runner.blockUntilCtx = func(core.LocalCommandRequest) bool {
+			if first {
+				first = false
+				return true
+			}
+			return false
 		}
-		return false
-	}
-	b := testBackend(runner)
-	b.guestInvokeTimeout = 20 * time.Millisecond
-	b.guestRetryBackoff = time.Millisecond
+		b := testBackend(runner)
+		b.guestInvokeTimeout = 20 * time.Millisecond
+		b.guestRetryBackoff = time.Millisecond
 
-	if err := b.invokeInGuest(context.Background(), "crabbox-blue-1234", "crabbox", "1", "probe"); err != nil {
-		t.Fatalf("invokeInGuest should retry past a wedged attempt: %v", err)
-	}
-	if len(runner.calls) < 2 {
-		t.Fatalf("expected a retry after the bounded attempt, got %d calls", len(runner.calls))
-	}
+		if err := b.invokeInGuest(context.Background(), "crabbox-blue-1234", "crabbox", "1", "probe"); err != nil {
+			t.Fatalf("invokeInGuest should retry past a wedged attempt: %v", err)
+		}
+		if len(runner.calls) < 2 {
+			t.Fatalf("expected a retry after the bounded attempt, got %d calls", len(runner.calls))
+		}
+	})
 }
 
 func TestInvokeInGuestAbortsOnContextCancel(t *testing.T) {

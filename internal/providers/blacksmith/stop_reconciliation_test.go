@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"text/tabwriter"
 	"time"
 
@@ -272,60 +273,68 @@ func TestBlacksmithStopReconciliationFailsClosed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			isolateBlacksmithOwnership(t)
-			claim := seedStopClaim(t, id)
-			unrelated := seedStopClaim(t, "tbx_unrelated123")
-			var stdout, stderr bytes.Buffer
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			if tt.deadline {
-				var done context.CancelFunc
-				ctx, done = context.WithTimeout(ctx, 100*time.Millisecond)
-				defer done()
-			}
-			stopped := false
-			var operations []string
-			cfg := core.BaseConfig()
-			cfg.Blacksmith.Org = "example-org"
-			backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(_ context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-				operations = append(operations, req.Args[1])
-				if req.Args[1] == "status" && !stopped {
-					return core.LocalCommandResult{Stdout: nativeStopStatus(id, "ready", "")}, nil
+			synctest.Test(t, func(t *testing.T) {
+				isolateBlacksmithOwnership(t)
+				claim := seedStopClaim(t, id)
+				unrelated := seedStopClaim(t, "tbx_unrelated123")
+				var stdout, stderr bytes.Buffer
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				if tt.deadline {
+					var done context.CancelFunc
+					ctx, done = context.WithTimeout(ctx, 100*time.Millisecond)
+					defer done()
 				}
-				if req.Args[1] == tt.cancelAt {
-					cancel()
-				}
-				switch req.Args[1] {
-				case "stop":
-					stopped = true
-					return core.LocalCommandResult{ExitCode: 1, Stdout: "stop stdout\n", Stderr: stopDiagnostic}, errors.New("exit status 1")
-				case "status":
-					if tt.deadline {
-						<-ctx.Done()
+				stopped := false
+				var operations []string
+				cfg := core.BaseConfig()
+				cfg.Blacksmith.Org = "example-org"
+				backend := newTestBlacksmithBackend(cfg, reconciliationRunner(t, func(commandCtx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					operations = append(operations, req.Args[1])
+					if req.Args[1] == "status" && !stopped {
+						return core.LocalCommandResult{Stdout: nativeStopStatus(id, "ready", "")}, nil
 					}
-					return core.LocalCommandResult{ExitCode: tt.code, Stdout: tt.stdout, Stderr: tt.stderr}, tt.err
-				default:
-					return core.LocalCommandResult{}, errors.New("unexpected operation")
+					if req.Args[1] == tt.cancelAt {
+						cancel()
+					}
+					switch req.Args[1] {
+					case "stop":
+						stopped = true
+						return core.LocalCommandResult{ExitCode: 1, Stdout: "stop stdout\n", Stderr: stopDiagnostic}, errors.New("exit status 1")
+					case "status":
+						if tt.deadline {
+							// Parent cancellation can precede cancellation of the command.
+							<-commandCtx.Done()
+							return core.LocalCommandResult{ExitCode: tt.code, Stdout: tt.stdout, Stderr: tt.stderr}, commandCtx.Err()
+						}
+						return core.LocalCommandResult{ExitCode: tt.code, Stdout: tt.stdout, Stderr: tt.stderr}, tt.err
+					default:
+						return core.LocalCommandResult{}, errors.New("unexpected operation")
+					}
+				}))
+				backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
+				started := time.Now()
+				err := backend.Stop(ctx, core.StopRequest{ID: id})
+				if tt.deadline && time.Since(started) != 100*time.Millisecond {
+					t.Fatalf("verification elapsed=%s, want the caller deadline", time.Since(started))
 				}
-			}))
-			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
-			err := backend.Stop(ctx, core.StopRequest{ID: id})
-			var exitErr core.ExitError
-			if !core.AsExitError(err, &exitErr) || exitErr.Code != 1 || !strings.Contains(exitErr.Message, "blacksmith failed: exit status 1") || !strings.Contains(exitErr.Message, "verification") {
-				t.Fatalf("original stop error lost: %v", err)
-			}
-			want := []string{"status", "stop", "status"}
-			if tt.cancelAt == "stop" {
-				want = want[:2]
-			}
-			if !reflect.DeepEqual(operations, want) {
-				t.Fatalf("operations=%v want=%v", operations, want)
-			}
-			assertStopState(t, claim, true)
-			assertStopState(t, unrelated, true)
-			if stdout.String() != "stop stdout\n" || stderr.String() != stopDiagnostic {
-				t.Fatalf("original diagnostics lost: %q %q", stdout.String(), stderr.String())
-			}
+				var exitErr core.ExitError
+				if !core.AsExitError(err, &exitErr) || exitErr.Code != 1 || !strings.Contains(exitErr.Message, "blacksmith failed: exit status 1") || !strings.Contains(exitErr.Message, "verification") {
+					t.Fatalf("original stop error lost: %v", err)
+				}
+				want := []string{"status", "stop", "status"}
+				if tt.cancelAt == "stop" {
+					want = want[:2]
+				}
+				if !reflect.DeepEqual(operations, want) {
+					t.Fatalf("operations=%v want=%v", operations, want)
+				}
+				assertStopState(t, claim, true)
+				assertStopState(t, unrelated, true)
+				if stdout.String() != "stop stdout\n" || stderr.String() != stopDiagnostic {
+					t.Fatalf("original diagnostics lost: %q %q", stdout.String(), stderr.String())
+				}
+			})
 		})
 	}
 }

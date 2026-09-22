@@ -375,66 +375,70 @@ func TestReleaseBoxReportsLastDeletionStatusWhenNativeLookupTimesOut(t *testing.
 }
 
 func TestBoxCleanupProgressReportsDuringNativeCallAndJoins(t *testing.T) {
-	output := make(boxProgressOutput, 32)
-	ctx, cancel := context.WithTimeout(withBoxCleanupProgress(context.Background(), output), time.Second)
-	defer cancel()
-	ctx.Value(boxCleanupProgressKey{}).(*boxCleanupProgress).interval = 5 * time.Millisecond
-	entered := make(chan struct{})
-	runner := boxCommandRunnerFunc(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-		close(entered)
-		<-ctx.Done()
-		return core.LocalCommandResult{Stdout: "native output must not become progress"}, ctx.Err()
-	})
-	c := &client{cliPath: "box", runner: runner}
-	done := make(chan error, 1)
-	go func() { _, err := c.runPrepared(ctx, "delete", "bx_guard", "--yes"); done <- err }()
-	<-entered
-	for range 2 {
+	synctest.Test(t, func(t *testing.T) {
+		output := make(boxProgressOutput, 32)
+		ctx, cancel := context.WithTimeout(withBoxCleanupProgress(context.Background(), output), time.Second)
+		defer cancel()
+		ctx.Value(boxCleanupProgressKey{}).(*boxCleanupProgress).interval = 5 * time.Millisecond
+		entered := make(chan struct{})
+		runner := boxCommandRunnerFunc(func(ctx context.Context, req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+			close(entered)
+			<-ctx.Done()
+			return core.LocalCommandResult{Stdout: "native output must not become progress"}, ctx.Err()
+		})
+		c := &client{cliPath: "box", runner: runner}
+		done := make(chan error, 1)
+		go func() { _, err := c.runPrepared(ctx, "delete", "bx_guard", "--yes"); done <- err }()
+		<-entered
+		for range 2 {
+			select {
+			case line := <-output:
+				if !strings.Contains(line, "phase=native-delete") || !strings.Contains(line, "remaining=") || strings.Contains(line, "native output") {
+					t.Fatalf("unexpected progress: %s", line)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("no progress while native command was blocked")
+			}
+		}
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("native cancellation lost: %v", err)
+		}
+		for len(output) > 0 {
+			<-output
+		}
 		select {
 		case line := <-output:
-			if !strings.Contains(line, "phase=native-delete") || !strings.Contains(line, "remaining=") || strings.Contains(line, "native output") {
-				t.Fatalf("unexpected progress: %s", line)
-			}
-		case <-time.After(time.Second):
-			t.Fatal("no progress while native command was blocked")
+			t.Fatalf("progress after native command returned: %s", line)
+		case <-time.After(15 * time.Millisecond):
 		}
-	}
-	cancel()
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("native cancellation lost: %v", err)
-	}
-	for len(output) > 0 {
-		<-output
-	}
-	select {
-	case line := <-output:
-		t.Fatalf("progress after native command returned: %s", line)
-	case <-time.After(15 * time.Millisecond):
-	}
+	})
 }
 
 func TestBoxCleanupProgressRetainsCadenceAcrossFastPolls(t *testing.T) {
-	output := make(boxProgressOutput, 32)
-	ctx := withBoxCleanupProgress(context.Background(), output)
-	ctx.Value(boxCleanupProgressKey{}).(*boxCleanupProgress).interval = 5 * time.Millisecond
-	c := &client{cliPath: "box", runner: boxCommandRunnerFunc(func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
-		return core.LocalCommandResult{}, nil
-	})}
-	deadline := time.Now().Add(time.Second)
-	for len(output) < 2 && time.Now().Before(deadline) {
-		if _, err := c.runPrepared(ctx, "deletion", "status", testDeletionID); err != nil {
-			t.Fatal(err)
+	synctest.Test(t, func(t *testing.T) {
+		output := make(boxProgressOutput, 32)
+		ctx := withBoxCleanupProgress(context.Background(), output)
+		ctx.Value(boxCleanupProgressKey{}).(*boxCleanupProgress).interval = 5 * time.Millisecond
+		c := &client{cliPath: "box", runner: boxCommandRunnerFunc(func(context.Context, core.LocalCommandRequest) (core.LocalCommandResult, error) {
+			return core.LocalCommandResult{}, nil
+		})}
+		deadline := time.Now().Add(time.Second)
+		for len(output) < 2 && time.Now().Before(deadline) {
+			if _, err := c.runPrepared(ctx, "deletion", "status", testDeletionID); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(2 * time.Millisecond)
 		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	if len(output) < 2 {
-		t.Fatal("fast native calls reset progress cadence")
-	}
-	for len(output) > 0 {
-		if line := <-output; !strings.Contains(line, "phase=deletion-operation") || strings.Contains(line, "remaining=-") {
-			t.Fatalf("unexpected progress: %s", line)
+		if len(output) < 2 {
+			t.Fatal("fast native calls reset progress cadence")
 		}
-	}
+		for len(output) > 0 {
+			if line := <-output; !strings.Contains(line, "phase=deletion-operation") || strings.Contains(line, "remaining=-") {
+				t.Fatalf("unexpected progress: %s", line)
+			}
+		}
+	})
 }
 
 func TestNativeCaptureErrorCannotAuthorizeCleanupJSON(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -801,72 +802,76 @@ func TestCleanupSkipsClaimRenewedBeforeTransition(t *testing.T) {
 }
 
 func TestFailedRollbackRecoveryIsImmediatelyCleanupEligible(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	fake := &fakeAPI{
-		flavors:           []Flavor{{ID: "flavor-id", Name: "b3-8"}},
-		images:            []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
-		deleteInstanceErr: errors.New("temporary delete failure"),
-	}
-	backend := testBackend(fake)
-	backend.rollbackTimeout = 5 * time.Millisecond
-	backend.rollbackInterval = time.Nanosecond
-	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
-		return core.Exit(5, "timed out waiting for SSH on 203.0.113.10 during ovh bootstrap")
-	}
-	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback-cleanup", Keep: true})
-	if err == nil || !strings.Contains(err.Error(), "temporary delete failure") {
-		t.Fatalf("err=%v", err)
-	}
-	if len(fake.createInstances) != 1 {
-		t.Fatalf("create instances=%d; cleanup failure must suppress acquire retry", len(fake.createInstances))
-	}
-	claims, err := core.ListLeaseClaims()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(claims) != 1 || claims[0].Labels["recovery"] != "rollback-cleanup" || claims[0].Labels["keep"] != "false" || claims[0].Labels["state"] != "failed" {
-		t.Fatalf("claims=%#v", claims)
-	}
-	fake.deleteInstanceErr = nil
-	fake.deletedInstances = nil
-	fake.deletedKeys = nil
-	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
-		t.Fatal(err)
-	}
-	if len(fake.deletedInstances) != 1 || len(fake.deletedKeys) != 1 {
-		t.Fatalf("deleted instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		fake := &fakeAPI{
+			flavors:           []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+			images:            []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+			deleteInstanceErr: errors.New("temporary delete failure"),
+		}
+		backend := testBackend(fake)
+		backend.rollbackTimeout = 5 * time.Millisecond
+		backend.rollbackInterval = time.Millisecond
+		backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+			return core.Exit(5, "timed out waiting for SSH on 203.0.113.10 during ovh bootstrap")
+		}
+		_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "rollback-cleanup", Keep: true})
+		if err == nil || !strings.Contains(err.Error(), "temporary delete failure") {
+			t.Fatalf("err=%v", err)
+		}
+		if len(fake.createInstances) != 1 {
+			t.Fatalf("create instances=%d; cleanup failure must suppress acquire retry", len(fake.createInstances))
+		}
+		claims, err := core.ListLeaseClaims()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(claims) != 1 || claims[0].Labels["recovery"] != "rollback-cleanup" || claims[0].Labels["keep"] != "false" || claims[0].Labels["state"] != "failed" {
+			t.Fatalf("claims=%#v", claims)
+		}
+		fake.deleteInstanceErr = nil
+		fake.deletedInstances = nil
+		fake.deletedKeys = nil
+		if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+			t.Fatal(err)
+		}
+		if len(fake.deletedInstances) != 1 || len(fake.deletedKeys) != 1 {
+			t.Fatalf("deleted instances=%v keys=%v", fake.deletedInstances, fake.deletedKeys)
+		}
+	})
 }
 
 func TestRollbackRetainsRecoveryWhenCreatedInstanceDeleteStaysNotFound(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	fake := &fakeAPI{
-		flavors:           []Flavor{{ID: "flavor-id", Name: "b3-8"}},
-		images:            []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
-		deleteInstanceErr: &APIError{Operation: "delete instance", Status: 404, Body: "not visible yet"},
-	}
-	backend := testBackend(fake)
-	backend.rollbackTimeout = 5 * time.Millisecond
-	backend.rollbackInterval = time.Nanosecond
-	backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
-		return core.Exit(5, "timed out waiting for SSH on 203.0.113.10 during ovh bootstrap")
-	}
-	_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "delete-not-visible"})
-	if err == nil || !strings.Contains(err.Error(), "could not confirm deletion") {
-		t.Fatalf("err=%v", err)
-	}
-	claims, claimErr := core.ListLeaseClaims()
-	if claimErr != nil {
-		t.Fatal(claimErr)
-	}
-	if len(claims) != 1 || claims[0].CloudID == "" {
-		t.Fatalf("claims=%#v", claims)
-	}
-	if len(fake.deletedKeys) != 0 {
-		t.Fatalf("deleted keys=%v", fake.deletedKeys)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		fake := &fakeAPI{
+			flavors:           []Flavor{{ID: "flavor-id", Name: "b3-8"}},
+			images:            []Image{{ID: "image-id", Name: "Ubuntu 24.04"}},
+			deleteInstanceErr: &APIError{Operation: "delete instance", Status: 404, Body: "not visible yet"},
+		}
+		backend := testBackend(fake)
+		backend.rollbackTimeout = 5 * time.Millisecond
+		backend.rollbackInterval = time.Millisecond
+		backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+			return core.Exit(5, "timed out waiting for SSH on 203.0.113.10 during ovh bootstrap")
+		}
+		_, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "delete-not-visible"})
+		if err == nil || !strings.Contains(err.Error(), "could not confirm deletion") {
+			t.Fatalf("err=%v", err)
+		}
+		claims, claimErr := core.ListLeaseClaims()
+		if claimErr != nil {
+			t.Fatal(claimErr)
+		}
+		if len(claims) != 1 || claims[0].CloudID == "" {
+			t.Fatalf("claims=%#v", claims)
+		}
+		if len(fake.deletedKeys) != 0 {
+			t.Fatalf("deleted keys=%v", fake.deletedKeys)
+		}
+	})
 }
 
 func TestCleanupRetriesPersistedCleanupStateAfterTransientDeleteFailure(t *testing.T) {

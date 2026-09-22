@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	nomadapi "github.com/hashicorp/nomad/api"
@@ -128,65 +129,69 @@ func TestNomadControlTransportDeadlinePolicy(t *testing.T) {
 }
 
 func TestNomadRegionsStalledHostHonorsCallerDeadline(t *testing.T) {
-	server := stalledNomadJSONServer()
-	t.Cleanup(func() {
-		server.CloseClientConnections()
-		server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(stalledNomadJSON))
+		t.Cleanup(func() {
+			server.CloseClientConnections()
+			server.Close()
+		})
+
+		client, err := newNomadClient(nomadTestConfig(server.URL), Runtime{HTTP: server.Client()})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		_, err = client.Regions(ctx)
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Regions error=%v, want caller deadline", err)
+		}
+		if elapsed := time.Since(started); elapsed >= time.Second {
+			t.Fatalf("Regions returned after %s, want under 1s", elapsed)
+		}
 	})
-
-	client, err := newNomadClient(nomadTestConfig(server.URL), Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
-	defer cancel()
-	started := time.Now()
-	_, err = client.Regions(ctx)
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Regions error=%v, want caller deadline", err)
-	}
-	if elapsed := time.Since(started); elapsed >= time.Second {
-		t.Fatalf("Regions returned after %s, want under 1s", elapsed)
-	}
 }
 
 func TestNomadFallbackBoundsControlJSONWithoutClientTimeout(t *testing.T) {
-	const controlTimeout = 40 * time.Millisecond
-	old := nomadControlRequestTimeout
-	nomadControlRequestTimeout = controlTimeout
-	t.Cleanup(func() { nomadControlRequestTimeout = old })
+	synctest.Test(t, func(t *testing.T) {
+		const controlTimeout = 40 * time.Millisecond
+		old := nomadControlRequestTimeout
+		nomadControlRequestTimeout = controlTimeout
+		t.Cleanup(func() { nomadControlRequestTimeout = old })
 
-	server := stalledNomadJSONServer()
-	t.Cleanup(func() {
-		server.CloseClientConnections()
-		server.Close()
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(stalledNomadJSON))
+		t.Cleanup(func() {
+			server.CloseClientConnections()
+			server.Close()
+		})
+
+		client, err := newNomadClient(nomadTestConfig(server.URL), Runtime{HTTP: server.Client()})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		started := time.Now()
+		_, err = client.JobInfo(context.Background(), "job-stall")
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("JobInfo error=%v, want control deadline", err)
+		}
+		if elapsed := time.Since(started); elapsed >= time.Second {
+			t.Fatalf("JobInfo returned after %s, want under 1s", elapsed)
+		}
+
+		apiConfig, err := newNomadAPIConfig(nomadTestConfig(server.URL), func(string) string { return "" })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := configureNomadHTTPClient(apiConfig, nil); err != nil {
+			t.Fatal(err)
+		}
+		if apiConfig.HttpClient.Timeout != 0 {
+			t.Fatalf("shared Nomad HTTP client Timeout=%s, want 0 so exec streams are not cut", apiConfig.HttpClient.Timeout)
+		}
 	})
-
-	client, err := newNomadClient(nomadTestConfig(server.URL), Runtime{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	started := time.Now()
-	_, err = client.JobInfo(context.Background(), "job-stall")
-	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("JobInfo error=%v, want control deadline", err)
-	}
-	if elapsed := time.Since(started); elapsed >= time.Second {
-		t.Fatalf("JobInfo returned after %s, want under 1s", elapsed)
-	}
-
-	apiConfig, err := newNomadAPIConfig(nomadTestConfig(server.URL), func(string) string { return "" })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := configureNomadHTTPClient(apiConfig, nil); err != nil {
-		t.Fatal(err)
-	}
-	if apiConfig.HttpClient.Timeout != 0 {
-		t.Fatalf("shared Nomad HTTP client Timeout=%s, want 0 so exec streams are not cut", apiConfig.HttpClient.Timeout)
-	}
 }
 
 func TestNomadJobInfoHonorsCallerCancel(t *testing.T) {
@@ -209,13 +214,15 @@ func TestNomadJobInfoHonorsCallerCancel(t *testing.T) {
 }
 
 func stalledNomadJSONServer() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"`))
-		w.(http.Flusher).Flush()
-		<-r.Context().Done()
-	}))
+	return httptest.NewServer(http.HandlerFunc(stalledNomadJSON))
+}
+
+func stalledNomadJSON(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"`))
+	w.(http.Flusher).Flush()
+	<-r.Context().Done()
 }
 
 func TestNomadClientRefusesCrossOriginRedirectBeforeTokenReplay(t *testing.T) {

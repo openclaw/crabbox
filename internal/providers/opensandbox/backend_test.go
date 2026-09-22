@@ -29,6 +29,7 @@ import (
 
 	sdk "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func newOpenSandboxTestClient(t *testing.T, server *httptest.Server) openSandboxClient {
@@ -458,29 +459,31 @@ func TestRunReconcilesAmbiguousCreateAfterDelayedVisibility(t *testing.T) {
 }
 
 func TestRunRetriesTransientAmbiguousCreateReconciliationFailures(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	fake := newFakeClient()
-	fake.createErr = &ambiguousOpenSandboxCreateError{cause: context.DeadlineExceeded}
-	fake.listErr = context.DeadlineExceeded
-	fake.listErrCount = 1
-	fake.deleteErr = context.DeadlineExceeded
-	fake.deleteErrCount = 1
-	backend := newTestBackend(fake)
-	backend.cleanupTimeoutOverride = 200 * time.Millisecond
-	backend.reconcilePollOverride = time.Millisecond
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		fake := newFakeClient()
+		fake.createErr = &ambiguousOpenSandboxCreateError{cause: context.DeadlineExceeded}
+		fake.listErr = context.DeadlineExceeded
+		fake.listErrCount = 1
+		fake.deleteErr = context.DeadlineExceeded
+		fake.deleteErrCount = 1
+		backend := newTestBackend(fake)
+		backend.cleanupTimeoutOverride = 200 * time.Millisecond
+		backend.reconcilePollOverride = time.Millisecond
 
-	_, err := backend.Run(context.Background(), core.RunRequest{
-		Repo: core.Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},
+		_, err := backend.Run(context.Background(), core.RunRequest{
+			Repo: core.Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err=%v, want ambiguous create cause", err)
+		}
+		if len(fake.listFilters) != 3 {
+			t.Fatalf("list filters=%#v, want retries after transient list and delete failures", fake.listFilters)
+		}
+		if len(fake.deleted) != 2 {
+			t.Fatalf("deleted=%#v, want delete retry", fake.deleted)
+		}
 	})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err=%v, want ambiguous create cause", err)
-	}
-	if len(fake.listFilters) != 3 {
-		t.Fatalf("list filters=%#v, want retries after transient list and delete failures", fake.listFilters)
-	}
-	if len(fake.deleted) != 2 {
-		t.Fatalf("deleted=%#v, want delete retry", fake.deleted)
-	}
 }
 
 func TestRunDoesNotReconcileUnmarkedCreateFailure(t *testing.T) {
@@ -501,80 +504,84 @@ func TestRunDoesNotReconcileUnmarkedCreateFailure(t *testing.T) {
 }
 
 func TestRunRetainsAmbiguousCreateRecoveryForLaterCleanup(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	fake := newFakeClient()
-	fake.createErr = &ambiguousOpenSandboxCreateError{cause: context.DeadlineExceeded}
-	fake.listEmptyCount = 1000
-	backend := newTestBackend(fake)
-	backend.cleanupTimeoutOverride = 5 * time.Millisecond
-	backend.reconcilePollOverride = time.Millisecond
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		fake := newFakeClient()
+		fake.createErr = &ambiguousOpenSandboxCreateError{cause: context.DeadlineExceeded}
+		fake.listEmptyCount = 1000
+		backend := newTestBackend(fake)
+		backend.cleanupTimeoutOverride = 5 * time.Millisecond
+		backend.reconcilePollOverride = time.Millisecond
 
-	_, err := backend.Run(context.Background(), core.RunRequest{
-		Repo: core.Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},
+		_, err := backend.Run(context.Background(), core.RunRequest{
+			Repo: core.Repo{Name: "my-app", Root: tempGitRepo(t)}, NoSync: true, Command: []string{"true"},
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err=%v, want ambiguous create cause", err)
+		}
+		if claims, claimErr := listOpenSandboxLeaseClaims(); claimErr != nil {
+			t.Fatal(claimErr)
+		} else if len(claims) != 0 {
+			t.Fatalf("claims=%#v, recovery must not appear as a normal lease", claims)
+		}
+		claims, claimErr := listOpenSandboxCleanupClaims()
+		if claimErr != nil {
+			t.Fatal(claimErr)
+		}
+		if len(claims) != 1 || !strings.HasPrefix(claims[0].LeaseID, recoveryPrefix) {
+			t.Fatalf("claims=%#v, want retained recovery", claims)
+		}
+		if claims[0].ProviderScope != fake.created.Metadata[openSandboxClaimKey] || !strings.Contains(err.Error(), claims[0].LeaseID) {
+			t.Fatalf("claim=%#v err=%v, want discoverable ownership recovery", claims[0], err)
+		}
+		if claims[0].Pond != "" {
+			t.Fatalf("claim=%#v, recovery must not join a pond", claims[0])
+		}
+		if claim, ok, resolveErr := resolveOpenSandboxLeaseClaim(claims[0].LeaseID, fake.BaseURL()); resolveErr != nil || ok {
+			t.Fatalf("claim=%#v ok=%t err=%v, recovery must not resolve as a normal lease", claim, ok, resolveErr)
+		}
+
+		fake.listEmptyCount = 0
+		if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+			t.Fatal(err)
+		}
+		if len(fake.deleted) != 1 || fake.deleted[0] != fake.sandbox.ID {
+			t.Fatalf("deleted=%#v, want recovered sandbox cleanup", fake.deleted)
+		}
+		if claims, claimErr = listOpenSandboxCleanupClaims(); claimErr != nil {
+			t.Fatal(claimErr)
+		} else if len(claims) != 0 {
+			t.Fatalf("claims=%#v, want recovery removed after cleanup", claims)
+		}
 	})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err=%v, want ambiguous create cause", err)
-	}
-	if claims, claimErr := listOpenSandboxLeaseClaims(); claimErr != nil {
-		t.Fatal(claimErr)
-	} else if len(claims) != 0 {
-		t.Fatalf("claims=%#v, recovery must not appear as a normal lease", claims)
-	}
-	claims, claimErr := listOpenSandboxCleanupClaims()
-	if claimErr != nil {
-		t.Fatal(claimErr)
-	}
-	if len(claims) != 1 || !strings.HasPrefix(claims[0].LeaseID, recoveryPrefix) {
-		t.Fatalf("claims=%#v, want retained recovery", claims)
-	}
-	if claims[0].ProviderScope != fake.created.Metadata[openSandboxClaimKey] || !strings.Contains(err.Error(), claims[0].LeaseID) {
-		t.Fatalf("claim=%#v err=%v, want discoverable ownership recovery", claims[0], err)
-	}
-	if claims[0].Pond != "" {
-		t.Fatalf("claim=%#v, recovery must not join a pond", claims[0])
-	}
-	if claim, ok, resolveErr := resolveOpenSandboxLeaseClaim(claims[0].LeaseID, fake.BaseURL()); resolveErr != nil || ok {
-		t.Fatalf("claim=%#v ok=%t err=%v, recovery must not resolve as a normal lease", claim, ok, resolveErr)
-	}
-
-	fake.listEmptyCount = 0
-	if err := backend.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
-		t.Fatal(err)
-	}
-	if len(fake.deleted) != 1 || fake.deleted[0] != fake.sandbox.ID {
-		t.Fatalf("deleted=%#v, want recovered sandbox cleanup", fake.deleted)
-	}
-	if claims, claimErr = listOpenSandboxCleanupClaims(); claimErr != nil {
-		t.Fatal(claimErr)
-	} else if len(claims) != 0 {
-		t.Fatalf("claims=%#v, want recovery removed after cleanup", claims)
-	}
 }
 
 func TestAmbiguousCreateReconciliationUsesRecoveryOperationLock(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	fake := newFakeClient()
-	backend := newTestBackend(fake)
-	backend.cleanupTimeoutOverride = 5 * time.Millisecond
-	scope := testOpenSandboxScope(t, fake.BaseURL())
-	recoveryLeaseID, err := backend.recordAmbiguousCreate(scope, core.Repo{Root: tempGitRepo(t)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	unlock, err := lockOpenSandboxLeaseOperation(context.Background(), recoveryLeaseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unlock()
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		fake := newFakeClient()
+		backend := newTestBackend(fake)
+		backend.cleanupTimeoutOverride = 5 * time.Millisecond
+		scope := testOpenSandboxScope(t, fake.BaseURL())
+		recoveryLeaseID, err := backend.recordAmbiguousCreate(scope, core.Repo{Root: tempGitRepo(t)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		unlock, err := lockOpenSandboxLeaseOperation(context.Background(), recoveryLeaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer unlock()
 
-	cause := &ambiguousOpenSandboxCreateError{cause: context.DeadlineExceeded}
-	err = backend.reconcileAmbiguousCreateFailure(context.Background(), fake, scope, recoveryLeaseID, cause)
-	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "lock opensandbox create recovery") {
-		t.Fatalf("err=%v, want retained cause and lock failure", err)
-	}
-	if len(fake.listFilters) != 0 || len(fake.deleted) != 0 {
-		t.Fatalf("list filters=%#v deleted=%#v, reconciliation must not run without the recovery lock", fake.listFilters, fake.deleted)
-	}
+		cause := &ambiguousOpenSandboxCreateError{cause: context.DeadlineExceeded}
+		err = backend.reconcileAmbiguousCreateFailure(context.Background(), fake, scope, recoveryLeaseID, cause)
+		if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "lock opensandbox create recovery") {
+			t.Fatalf("err=%v, want retained cause and lock failure", err)
+		}
+		if len(fake.listFilters) != 0 || len(fake.deleted) != 0 {
+			t.Fatalf("list filters=%#v deleted=%#v, reconciliation must not run without the recovery lock", fake.listFilters, fake.deleted)
+		}
+	})
 }
 
 func TestOpenSandboxCreateAmbiguityClassification(t *testing.T) {
@@ -1557,29 +1564,31 @@ func TestStatusWaitsForExecdHealth(t *testing.T) {
 }
 
 func TestStatusWithoutWaitBoundsExecdHealthProbe(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	fake := newFakeClient()
-	fake.pingWaitForCancel = true
-	backend := newTestBackend(fake)
-	backend.statusProbeOverride = 20 * time.Millisecond
-	leaseID := leasePrefix + fake.sandbox.ID
-	scope := testOpenSandboxScope(t, fake.baseURL)
-	if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "status-bounded", providerName, scope, "", "/repo", time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
-	fake.sandbox.Metadata[openSandboxClaimKey] = scope
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		fake := newFakeClient()
+		fake.pingWaitForCancel = true
+		backend := newTestBackend(fake)
+		backend.statusProbeOverride = 20 * time.Millisecond
+		leaseID := leasePrefix + fake.sandbox.ID
+		scope := testOpenSandboxScope(t, fake.baseURL)
+		if err := core.ClaimLeaseForRepoProviderScopePond(leaseID, "status-bounded", providerName, scope, "", "/repo", time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		fake.sandbox.Metadata[openSandboxClaimKey] = scope
 
-	start := time.Now()
-	view, err := backend.Status(context.Background(), core.StatusRequest{ID: "status-bounded"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if view.Ready {
-		t.Fatalf("view=%#v want not ready after timed out health probe", view)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("status probe took %s, want under 1s", elapsed)
-	}
+		start := time.Now()
+		view, err := backend.Status(context.Background(), core.StatusRequest{ID: "status-bounded"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if view.Ready {
+			t.Fatalf("view=%#v want not ready after timed out health probe", view)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("status probe took %s, want under 1s", elapsed)
+		}
+	})
 }
 
 func TestStatusSurfacesHardExecdHealthFailure(t *testing.T) {
@@ -1783,48 +1792,52 @@ func TestSDKClientCreateUsesHeadersAndRequestBody(t *testing.T) {
 }
 
 func TestSDKClientLifecycleRequestsAreBounded(t *testing.T) {
-	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
-	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		}))
+		defer server.Close()
 
-	client := newOpenSandboxTestClient(t, server)
-	sdkClient := client.(*sdkOpenSandboxClient)
-	sdkClient.requestTimeoutOverride = 20 * time.Millisecond
+		client := newOpenSandboxTestClient(t, server)
+		sdkClient := client.(*sdkOpenSandboxClient)
+		sdkClient.requestTimeoutOverride = 20 * time.Millisecond
 
-	start := time.Now()
-	err := client.Probe(context.Background())
-	if err == nil {
-		t.Fatal("expected stalled lifecycle request to time out")
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("lifecycle timeout took %s, want under 1s", elapsed)
-	}
+		start := time.Now()
+		err := client.Probe(context.Background())
+		if err == nil {
+			t.Fatal("expected stalled lifecycle request to time out")
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("lifecycle timeout took %s, want under 1s", elapsed)
+		}
+	})
 }
 
 func TestSDKClientMarksCreateRequestTimeoutAsAmbiguous(t *testing.T) {
-	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
-	release := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		select {
-		case <-r.Context().Done():
-		case <-release:
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+		release := make(chan struct{})
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		}))
+		defer server.Close()
+		defer close(release)
+
+		client := newOpenSandboxTestClient(t, server)
+		client.(*sdkOpenSandboxClient).requestTimeoutOverride = 20 * time.Millisecond
+
+		_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
+			Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+		})
+		var ambiguous *ambiguousOpenSandboxCreateError
+		if !errors.As(err, &ambiguous) {
+			t.Fatalf("err=%v, want ambiguous create marker", err)
 		}
-	}))
-	defer server.Close()
-	defer close(release)
-
-	client := newOpenSandboxTestClient(t, server)
-	client.(*sdkOpenSandboxClient).requestTimeoutOverride = 20 * time.Millisecond
-
-	_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
-		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
 	})
-	var ambiguous *ambiguousOpenSandboxCreateError
-	if !errors.As(err, &ambiguous) {
-		t.Fatalf("err=%v, want ambiguous create marker", err)
-	}
 }
 
 func TestSDKClientMarksSuccessfulCreateDecodeFailuresAsAmbiguous(t *testing.T) {
@@ -1988,205 +2001,215 @@ func TestSDKClientReadyTimeoutUsesProviderBudget(t *testing.T) {
 }
 
 func TestSDKClientRunningWaitHonorsDiscoveredExpiration(t *testing.T) {
-	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
-	deleted := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"id":"sb-expiring","status":{"state":"Pending"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-expiring":
-			w.Header().Set("Content-Type", "application/json")
-			expiresAt := time.Now().Add(250 * time.Millisecond).UTC().Format(time.RFC3339Nano)
-			_, _ = io.WriteString(w, `{"id":"sb-expiring","status":{"state":"Pending"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"`+expiresAt+`"}`)
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-expiring":
-			deleted++
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+		deleted := 0
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"sb-expiring","status":{"state":"Pending"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z"}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-expiring":
+				w.Header().Set("Content-Type", "application/json")
+				expiresAt := time.Now().Add(250 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+				_, _ = io.WriteString(w, `{"id":"sb-expiring","status":{"state":"Pending"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"`+expiresAt+`"}`)
+			case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-expiring":
+				deleted++
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
 
-	client := newOpenSandboxTestClient(t, server)
-	start := time.Now()
-	_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
-		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+		client := newOpenSandboxTestClient(t, server)
+		start := time.Now()
+		_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
+			Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "expired before reaching Running") {
+			t.Fatalf("err=%v, want discovered expiration failure", err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("expiration wait took %s", elapsed)
+		}
+		if deleted != 1 {
+			t.Fatalf("deleted=%d want rollback", deleted)
+		}
 	})
-	if err == nil || !strings.Contains(err.Error(), "expired before reaching Running") {
-		t.Fatalf("err=%v, want discovered expiration failure", err)
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("expiration wait took %s", elapsed)
-	}
-	if deleted != 1 {
-		t.Fatalf("deleted=%d want rollback", deleted)
-	}
 }
 
 func TestSDKClientRefreshesMissingCreateExpirationBeforeReadiness(t *testing.T) {
-	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
-	getHits := 0
-	deleted := 0
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"id":"sb-missing-expiry","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-missing-expiry":
-			getHits++
-			w.Header().Set("Content-Type", "application/json")
-			expiresAt := time.Now().Add(250 * time.Millisecond).UTC().Format(time.RFC3339Nano)
-			_, _ = io.WriteString(w, `{"id":"sb-missing-expiry","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"`+expiresAt+`"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-missing-expiry/endpoints/44772":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/ping":
-			http.Error(w, "starting", http.StatusServiceUnavailable)
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-missing-expiry":
-			deleted++
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+		getHits := 0
+		deleted := 0
+		var server *httptest.Server
+		server = testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"sb-missing-expiry","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z"}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-missing-expiry":
+				getHits++
+				w.Header().Set("Content-Type", "application/json")
+				expiresAt := time.Now().Add(250 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+				_, _ = io.WriteString(w, `{"id":"sb-missing-expiry","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"`+expiresAt+`"}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-missing-expiry/endpoints/44772":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/ping":
+				http.Error(w, "starting", http.StatusServiceUnavailable)
+			case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-missing-expiry":
+				deleted++
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
 
-	client := newOpenSandboxTestClient(t, server)
-	start := time.Now()
-	_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
-		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+		client := newOpenSandboxTestClient(t, server)
+		start := time.Now()
+		_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
+			Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "did not become ready") {
+			t.Fatalf("err=%v, want readiness expiration", err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("missing expiration readiness took %s", elapsed)
+		}
+		if getHits != 1 || deleted != 1 {
+			t.Fatalf("getHits=%d deleted=%d want expiration refresh and rollback", getHits, deleted)
+		}
 	})
-	if err == nil || !strings.Contains(err.Error(), "did not become ready") {
-		t.Fatalf("err=%v, want readiness expiration", err)
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("missing expiration readiness took %s", elapsed)
-	}
-	if getHits != 1 || deleted != 1 {
-		t.Fatalf("getHits=%d deleted=%d want expiration refresh and rollback", getHits, deleted)
-	}
 }
 
 func TestSDKClientUsesRefreshedExpirationForSecondRunningWait(t *testing.T) {
-	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
-	var getHits atomic.Int32
-	var deleted atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"id":"sb-refresh-pending","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-refresh-pending":
-			if getHits.Add(1) > 1 {
-				<-r.Context().Done()
-				return
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+		var getHits atomic.Int32
+		var deleted atomic.Int32
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"sb-refresh-pending","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z"}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-refresh-pending":
+				if getHits.Add(1) > 1 {
+					<-r.Context().Done()
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				expiresAt := time.Now().Add(250 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+				_, _ = io.WriteString(w, `{"id":"sb-refresh-pending","status":{"state":"Pending"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"`+expiresAt+`"}`)
+			case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-refresh-pending":
+				deleted.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.NotFound(w, r)
 			}
-			w.Header().Set("Content-Type", "application/json")
-			expiresAt := time.Now().Add(250 * time.Millisecond).UTC().Format(time.RFC3339Nano)
-			_, _ = io.WriteString(w, `{"id":"sb-refresh-pending","status":{"state":"Pending"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"`+expiresAt+`"}`)
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-refresh-pending":
-			deleted.Add(1)
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+		}))
+		defer server.Close()
 
-	client := newOpenSandboxTestClient(t, server)
-	start := time.Now()
-	_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
-		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+		client := newOpenSandboxTestClient(t, server)
+		start := time.Now()
+		_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
+			Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "wait for running after expiration refresh") {
+			t.Fatalf("err=%v, want bounded second running wait", err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("refreshed expiration wait took %s", elapsed)
+		}
+		if getHits.Load() != 2 || deleted.Load() != 1 {
+			t.Fatalf("getHits=%d deleted=%d want two status requests and rollback", getHits.Load(), deleted.Load())
+		}
 	})
-	if err == nil || !strings.Contains(err.Error(), "wait for running after expiration refresh") {
-		t.Fatalf("err=%v, want bounded second running wait", err)
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("refreshed expiration wait took %s", elapsed)
-	}
-	if getHits.Load() != 2 || deleted.Load() != 1 {
-		t.Fatalf("getHits=%d deleted=%d want two status requests and rollback", getHits.Load(), deleted.Load())
-	}
 }
 
 func TestSDKClientCreateDeletesSandboxWhenReadinessFails(t *testing.T) {
-	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
-	deleted := 0
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"id":"sb-cleanup","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"2099-01-01T00:00:00Z"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-cleanup/endpoints/44772":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/ping":
-			http.Error(w, "not ready", http.StatusServiceUnavailable)
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-cleanup":
-			deleted++
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+		deleted := 0
+		var server *httptest.Server
+		server = testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"sb-cleanup","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"2099-01-01T00:00:00Z"}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-cleanup/endpoints/44772":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"endpoint":"`+server.URL+`","headers":{"X-EXECD-ACCESS-TOKEN":"exec-token"}}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/ping":
+				http.Error(w, "not ready", http.StatusServiceUnavailable)
+			case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-cleanup":
+				deleted++
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
 
-	client := newOpenSandboxTestClient(t, server)
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	_, err := client.CreateSandbox(ctx, createSandboxOptions{
-		Image:    "ubuntu:test",
-		CPU:      "500m",
-		Memory:   "512Mi",
-		Metadata: map[string]string{openSandboxClaimKey: "scope"},
+		client := newOpenSandboxTestClient(t, server)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		_, err := client.CreateSandbox(ctx, createSandboxOptions{
+			Image:    "ubuntu:test",
+			CPU:      "500m",
+			Memory:   "512Mi",
+			Metadata: map[string]string{openSandboxClaimKey: "scope"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "wait until ready") {
+			t.Fatalf("err=%v, want readiness failure", err)
+		}
+		if deleted != 1 {
+			t.Fatalf("deleted=%d want 1 cleanup delete", deleted)
+		}
 	})
-	if err == nil || !strings.Contains(err.Error(), "wait until ready") {
-		t.Fatalf("err=%v, want readiness failure", err)
-	}
-	if deleted != 1 {
-		t.Fatalf("deleted=%d want 1 cleanup delete", deleted)
-	}
 }
 
 func TestSDKClientCreateSurfacesPermanentReadinessFailureImmediately(t *testing.T) {
-	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
-	deleted := 0
-	endpointHits := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"id":"sb-hard-failure","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"2099-01-01T00:00:00Z"}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-hard-failure/endpoints/44772":
-			endpointHits++
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"endpoint":"http://198.51.100.10:44772","headers":{"X-EXECD-ACCESS-TOKEN":"secret"}}`)
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-hard-failure":
-			deleted++
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+		deleted := 0
+		endpointHits := 0
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"sb-hard-failure","status":{"state":"Running"},"metadata":{"crabbox.claim":"scope"},"createdAt":"2026-06-11T00:00:00Z","expiresAt":"2099-01-01T00:00:00Z"}`)
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-hard-failure/endpoints/44772":
+				endpointHits++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"endpoint":"http://198.51.100.10:44772","headers":{"X-EXECD-ACCESS-TOKEN":"secret"}}`)
+			case r.Method == http.MethodDelete && r.URL.Path == "/v1/sandboxes/sb-hard-failure":
+				deleted++
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
 
-	client := newOpenSandboxTestClient(t, server)
-	start := time.Now()
-	_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
-		Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+		client := newOpenSandboxTestClient(t, server)
+		start := time.Now()
+		_, err := client.CreateSandbox(context.Background(), createSandboxOptions{
+			Image: "ubuntu:test", Metadata: map[string]string{openSandboxClaimKey: "scope"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "must use HTTPS unless it is loopback") {
+			t.Fatalf("err=%v, want permanent readiness failure", err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("permanent readiness failure took %s", elapsed)
+		}
+		if endpointHits != 1 || deleted != 1 {
+			t.Fatalf("endpointHits=%d deleted=%d want one probe and rollback", endpointHits, deleted)
+		}
 	})
-	if err == nil || !strings.Contains(err.Error(), "must use HTTPS unless it is loopback") {
-		t.Fatalf("err=%v, want permanent readiness failure", err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("permanent readiness failure took %s", elapsed)
-	}
-	if endpointHits != 1 || deleted != 1 {
-		t.Fatalf("endpointHits=%d deleted=%d want one probe and rollback", endpointHits, deleted)
-	}
 }
 
 func TestSDKClientProxyExecdAddsAccessTokenWhenEndpointOmitsIt(t *testing.T) {
@@ -2391,38 +2414,40 @@ func TestSDKClientRunCommandRejectsPrematureEOF(t *testing.T) {
 }
 
 func TestSDKClientRunCommandBoundsEndpointDiscovery(t *testing.T) {
-	t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
-	commandHit := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-discovery-stalled/endpoints/44772":
-			<-r.Context().Done()
-		case r.Method == http.MethodPost && r.URL.Path == "/command":
-			commandHit = true
-			http.Error(w, "unexpected command", http.StatusInternalServerError)
-		default:
-			http.NotFound(w, r)
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("CRABBOX_OPENSANDBOX_API_KEY", "test-key")
+		commandHit := false
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-discovery-stalled/endpoints/44772":
+				<-r.Context().Done()
+			case r.Method == http.MethodPost && r.URL.Path == "/command":
+				commandHit = true
+				http.Error(w, "unexpected command", http.StatusInternalServerError)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		client := newOpenSandboxTestClient(t, server)
+		client.(*sdkOpenSandboxClient).execTimeoutOverride = 20 * time.Millisecond
+
+		start := time.Now()
+		_, err := client.RunCommand(context.Background(), "sb-discovery-stalled", runCommandRequest{
+			Command:     "true",
+			TimeoutSecs: 3600,
+		})
+		if err == nil {
+			t.Fatal("expected stalled endpoint discovery to time out")
 		}
-	}))
-	defer server.Close()
-
-	client := newOpenSandboxTestClient(t, server)
-	client.(*sdkOpenSandboxClient).execTimeoutOverride = 20 * time.Millisecond
-
-	start := time.Now()
-	_, err := client.RunCommand(context.Background(), "sb-discovery-stalled", runCommandRequest{
-		Command:     "true",
-		TimeoutSecs: 3600,
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("endpoint discovery timeout took %s, want under 1s", elapsed)
+		}
+		if commandHit {
+			t.Fatal("command request started after endpoint discovery timed out")
+		}
 	})
-	if err == nil {
-		t.Fatal("expected stalled endpoint discovery to time out")
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("endpoint discovery timeout took %s, want under 1s", elapsed)
-	}
-	if commandHit {
-		t.Fatal("command request started after endpoint discovery timed out")
-	}
 }
 
 func TestSDKClientRunCommandBoundsStreamingRequest(t *testing.T) {
@@ -2438,7 +2463,7 @@ func TestSDKClientRunCommandBoundsStreamingRequest(t *testing.T) {
 				var interrupted []string
 				streamCanceled := make(chan struct{})
 				var server *httptest.Server
-				server = newOpenSandboxPipeServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				server = testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					switch {
 					case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sb-stalled/endpoints/44772":
 						w.Header().Set("Content-Type", "application/json")
@@ -2532,56 +2557,6 @@ func (b *openSandboxDelayedInitBody) Read(p []byte) (int, error) {
 		*b.held = true
 	}
 	return n, err
-}
-
-// Keep HTTP transport cancellation real while making connection reads durably
-// block under synctest's clock. Loopback sockets cannot provide that guarantee.
-func newOpenSandboxPipeServer(t *testing.T, handler http.Handler) *httptest.Server {
-	t.Helper()
-	listener := &openSandboxPipeListener{connections: make(chan net.Conn), done: make(chan struct{})}
-	server := &httptest.Server{Listener: listener, Config: &http.Server{Handler: handler}}
-	server.Start()
-	server.Client().Transport.(*http.Transport).DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
-		clientConn, serverConn := net.Pipe()
-		select {
-		case listener.connections <- serverConn:
-			return clientConn, nil
-		case <-ctx.Done():
-			clientConn.Close()
-			serverConn.Close()
-			return nil, ctx.Err()
-		case <-listener.done:
-			clientConn.Close()
-			serverConn.Close()
-			return nil, net.ErrClosed
-		}
-	}
-	t.Cleanup(server.Close)
-	return server
-}
-
-type openSandboxPipeListener struct {
-	connections chan net.Conn
-	done        chan struct{}
-	closeOnce   sync.Once
-}
-
-func (l *openSandboxPipeListener) Accept() (net.Conn, error) {
-	select {
-	case conn := <-l.connections:
-		return conn, nil
-	case <-l.done:
-		return nil, net.ErrClosed
-	}
-}
-
-func (l *openSandboxPipeListener) Close() error {
-	l.closeOnce.Do(func() { close(l.done) })
-	return nil
-}
-
-func (*openSandboxPipeListener) Addr() net.Addr {
-	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 80}
 }
 
 func TestSDKClientRunCommandAddsConfiguredSchemeToBareEndpoint(t *testing.T) {

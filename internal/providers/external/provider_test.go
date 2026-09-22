@@ -3990,33 +3990,35 @@ func TestAcquireRollbackReleaseUsesBoundedDetachedContext(t *testing.T) {
 }
 
 func TestAcquireRollbackReleasePreservesCanceledPrimaryError(t *testing.T) {
-	isolateCrabboxState(t)
-	oldTimeout := lifecycleRollbackTimeout
-	lifecycleRollbackTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { lifecycleRollbackTimeout = oldTimeout })
+	synctest.Test(t, func(t *testing.T) {
+		isolateCrabboxState(t)
+		oldTimeout := lifecycleRollbackTimeout
+		lifecycleRollbackTimeout = 10 * time.Millisecond
+		t.Cleanup(func() { lifecycleRollbackTimeout = oldTimeout })
 
-	runner := &blockingAcquireRollbackRunner{acquireResponse: `{"protocolVersion":1,"lease":{"slug":"invalid","name":"created-with-ssh","ssh":{"host":"127.0.0.1","user":"tester","port":"1"}}}`}
-	backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+		runner := &blockingAcquireRollbackRunner{acquireResponse: `{"protocolVersion":1,"lease":{"slug":"invalid","name":"created-with-ssh","ssh":{"host":"127.0.0.1","user":"tester","port":"1"}}}`}
+		backend := &leaseBackend{cfg: testConfig(), rt: core.Runtime{Stderr: io.Discard, Exec: runner}}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
 
-	_, err := backend.Acquire(ctx, core.AcquireRequest{RequestedSlug: "invalid", Keep: false})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err=%v, want context.Canceled in error chain", err)
-	}
-	if !strings.Contains(err.Error(), "external provider cleanup failed") || !strings.Contains(err.Error(), "context deadline exceeded") {
-		t.Fatalf("err=%v, want bounded cleanup failure message", err)
-	}
-	var exit core.ExitError
-	if core.AsExitError(err, &exit) {
-		t.Fatalf("exit=%#v, want non-ExitError primary to keep fallback classification", exit)
-	}
-	if len(runner.operations) != 2 || runner.operations[0] != "acquire" || runner.operations[1] != "release" {
-		t.Fatalf("operations=%#v", runner.operations)
-	}
-	if !runner.releaseHasDeadline {
-		t.Fatal("release rollback did not receive a deadline")
-	}
+		_, err := backend.Acquire(ctx, core.AcquireRequest{RequestedSlug: "invalid", Keep: false})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err=%v, want context.Canceled in error chain", err)
+		}
+		if !strings.Contains(err.Error(), "external provider cleanup failed") || !strings.Contains(err.Error(), "context deadline exceeded") {
+			t.Fatalf("err=%v, want bounded cleanup failure message", err)
+		}
+		var exit core.ExitError
+		if core.AsExitError(err, &exit) {
+			t.Fatalf("exit=%#v, want non-ExitError primary to keep fallback classification", exit)
+		}
+		if len(runner.operations) != 2 || runner.operations[0] != "acquire" || runner.operations[1] != "release" {
+			t.Fatalf("operations=%#v", runner.operations)
+		}
+		if !runner.releaseHasDeadline {
+			t.Fatal("release rollback did not receive a deadline")
+		}
+	})
 }
 
 func TestResolveRejectsReplacementLeaseIdentity(t *testing.T) {

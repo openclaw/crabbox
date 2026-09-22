@@ -424,23 +424,7 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 			}
 		}
 	}
-	return core.StatusView{
-		ID:       leaseID,
-		Slug:     slug,
-		Provider: providerName,
-		TargetOS: targetLinux,
-		State:    state,
-		ServerID: sandboxID,
-		Pond:     claim.Pond,
-		Network:  NetworkPublic,
-		Ready:    ready,
-		Labels: map[string]string{
-			"provider": providerName,
-			"lease":    leaseID,
-			"pond":     claim.Pond,
-			"state":    state,
-		},
-	}, nil
+	return shared.SandboxStatusView(providerName, leaseID, slug, sandboxID, claim.Pond, state, ready), nil
 }
 
 func (b *backend) claimStatus(claim core.LeaseClaim) (string, bool) {

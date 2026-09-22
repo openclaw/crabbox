@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -550,21 +551,24 @@ func TestWandbStatusWaitReturnsTerminalState(t *testing.T) {
 }
 
 func TestWandbStatusWaitHonorsTimeout(t *testing.T) {
-	api := &fakeWandbAPI{
-		listValue:   []wandbSandbox{{ID: "sb-abc"}},
-		statusValue: wandbSandbox{ID: "sb-abc", Status: "CREATING"},
-	}
-	backend := newWandbBackendForTest(t, api)
-	seedWandbClaim(t, backend, "sb-abc")
+	synctest.Test(t, func(t *testing.T) {
+		api := &fakeWandbAPI{
+			listValue:   []wandbSandbox{{ID: "sb-abc"}},
+			statusValue: wandbSandbox{ID: "sb-abc", Status: "CREATING"},
+		}
+		backend := newWandbBackendForTest(t, api)
+		seedWandbClaim(t, backend, "sb-abc")
 
-	_, err := backend.Status(context.Background(), core.StatusRequest{ID: "sb-abc", Wait: true, WaitTimeout: 10 * time.Millisecond})
-	var exitErr core.ExitError
-	if !errors.As(err, &exitErr) || exitErr.Code != 5 || !strings.Contains(err.Error(), "sb-abc") {
-		t.Fatalf("Status err=%v, want sandbox-specific timeout exit", err)
-	}
-	if api.statusCalls != 1 {
-		t.Fatalf("status calls=%d, want one bounded probe", api.statusCalls)
-	}
+		_, err := backend.Status(context.Background(), core.StatusRequest{ID: "sb-abc", Wait: true, WaitTimeout: 10 * time.Millisecond})
+		var exitErr core.ExitError
+		if !errors.As(err, &exitErr) || exitErr.Code != 5 || !strings.Contains(err.Error(), "sb-abc") {
+			t.Fatalf("Status err=%v, want sandbox-specific timeout exit", err)
+		}
+		if api.statusCalls != 1 {
+			t.Fatalf("status calls=%d, want one bounded probe", api.statusCalls)
+		}
+
+	})
 }
 
 func TestWandbStatusWithoutWaitReturnsImmediately(t *testing.T) {

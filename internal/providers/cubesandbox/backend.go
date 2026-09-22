@@ -567,25 +567,9 @@ func (b *cubesandboxBackend) deleteClaimedSandbox(ctx context.Context, client sh
 	if claim.ProviderScope != providerClaimScope(cfg) || claim.CloudID != sandboxID {
 		return core.Exit(4, "cubesandbox lease %q is not bound to sandbox %q on this API endpoint; refusing deletion", leaseID, sandboxID)
 	}
-	return core.RemoveLeaseClaimIfUnchangedAfter(leaseID, claim, func() error {
-		sandbox, err := client.GetSandbox(ctx, sandboxID)
-		if err != nil {
-			if isNotFoundError(err) {
-				return nil
-			}
-			return cubesandboxError("get sandbox before delete", err)
-		}
-		if err := validateCubeSandboxClaim(cfg, claim, sandbox); err != nil {
-			return err
-		}
-		if err := client.DeleteSandbox(ctx, sandboxID); err != nil {
-			if isNotFoundError(err) {
-				return nil
-			}
-			return cubesandboxError("delete sandbox", err)
-		}
-		return nil
-	})
+	return shared.DeleteClaimedEnvdSandbox(ctx, client, leaseID, sandboxID, claim,
+		func(sandbox shared.EnvdSandbox) error { return validateCubeSandboxClaim(cfg, claim, sandbox) },
+		isNotFoundError, cubesandboxError)
 }
 
 type cubesandboxClaimedSandboxMissingError struct {
