@@ -436,6 +436,8 @@ func TestWaitForServerIPRealHTTPS(t *testing.T) {
 					case requestCanceled <- struct{}{}:
 					default:
 					}
+					// Returning here can race cancellation with an implicit empty 200.
+					<-release
 				case <-release:
 				}
 			}))

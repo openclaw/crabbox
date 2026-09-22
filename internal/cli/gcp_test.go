@@ -193,6 +193,8 @@ func TestGCPGetServerCancellationReachesHTTPTransport(t *testing.T) {
 			case requestCanceled <- struct{}{}:
 			default:
 			}
+			// Keep the response incomplete until cancellation assertions finish.
+			<-release
 		case <-release:
 			_, _ = io.WriteString(w, `{"name":"readiness-instance","status":"RUNNING"}`)
 		}

@@ -1,3 +1,6 @@
+import { once } from "node:events";
+import { createServer } from "node:http";
+
 import { describe, expect, it, vi } from "vitest";
 
 import coordinator from "../src";
@@ -933,6 +936,7 @@ describe("coordinator auth", () => {
       });
       expect(fetchMock).toHaveBeenCalledWith(
         "https://team.example.cloudflareaccess.com/cdn-cgi/access/certs",
+        { signal: expect.any(AbortSignal) },
       );
     } finally {
       fetchMock.mockRestore();
@@ -1006,6 +1010,200 @@ describe("coordinator auth", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       fetchMock.mockRestore();
+    }
+  });
+
+  it.each(["headers", "body"] as const)(
+    "bounds stalled Access key %s while preserving shared and admin authentication",
+    async (phase) => {
+      vi.useFakeTimers();
+      let signal: AbortSignal | undefined;
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+        signal = init?.signal ?? undefined;
+        return phase === "headers"
+          ? new Promise<Response>(() => {})
+          : Promise.resolve({ ok: true, json: () => new Promise(() => {}) } as Response);
+      });
+      try {
+        const env = {
+          CRABBOX_SHARED_TOKEN: "shared",
+          CRABBOX_SHARED_OWNER: "automation@example.com",
+          CRABBOX_ADMIN_TOKEN: "admin",
+          CRABBOX_ACCESS_TEAM_DOMAIN: `timeout-${phase}.example.cloudflareaccess.com`,
+          CRABBOX_ACCESS_AUD: "access-aud",
+        };
+        let completed = false;
+        const pending = Promise.all(
+          ["shared", "admin"].map((token) =>
+            authenticateRequest(
+              new Request("https://example.test/v1/whoami", {
+                headers: {
+                  authorization: `Bearer ${token}`,
+                  "x-crabbox-owner": "operator@example.com",
+                  "cf-access-authenticated-user-email": "spoof@example.com",
+                  "cf-access-jwt-assertion": accessJwtShape("missing"),
+                },
+              }),
+              env,
+            ),
+          ),
+        ).then((results) => {
+          completed = true;
+          return results;
+        });
+        await vi.advanceTimersByTimeAsync(14_999);
+        expect(completed).toBe(false);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(completed).toBe(true);
+        expect(signal?.aborted).toBe(true);
+        expect(await pending).toMatchObject([
+          { authorized: true, admin: false, owner: "automation@example.com" },
+          { authorized: true, admin: true, owner: "operator@example.com" },
+        ]);
+      } finally {
+        fetchMock.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["headers", "body"] as const)(
+    "preserves the Access refresh budget and fences late %s from newer loads",
+    async (phase) => {
+      const domain = `late-${phase}.example.cloudflareaccess.com`;
+      const current = await accessJwt({
+        kid: "current",
+        aud: "access-aud",
+        iss: `https://${domain}`,
+        email: "verified@example.com",
+      });
+      const stale = { ...current.publicJwk, kid: "stale" };
+      const finishRequests: Array<(key: JsonWebKey) => void> = [];
+      const signals: Array<AbortSignal | null | undefined> = [];
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+        signals.push(init?.signal);
+        if (phase === "headers") {
+          return new Promise<Response>((resolve) => {
+            finishRequests.push((key) => resolve(Response.json({ keys: [key] })));
+          });
+        }
+        const body = new Promise<{ keys: JsonWebKey[] }>((resolve) => {
+          finishRequests.push((key) => resolve({ keys: [key] }));
+        });
+        return Promise.resolve({ ok: true, json: () => body } as Response);
+      });
+      const authenticate = () =>
+        authenticateRequest(
+          new Request("https://example.test/v1/whoami", {
+            headers: {
+              authorization: "Bearer shared",
+              "cf-access-jwt-assertion": current.jwt,
+            },
+          }),
+          {
+            CRABBOX_SHARED_TOKEN: "shared",
+            CRABBOX_SHARED_OWNER: "automation@example.com",
+            CRABBOX_ACCESS_TEAM_DOMAIN: domain,
+            CRABBOX_ACCESS_AUD: "access-aud",
+          },
+        );
+      vi.useFakeTimers();
+      try {
+        const initial = authenticate();
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect((await initial)?.owner).toBe("automation@example.com");
+        // A cached miss retains the existing one-refresh allowance after initial failure.
+        const refresh = authenticate();
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect((await refresh)?.owner).toBe("automation@example.com");
+        expect(signals.map((signal) => signal?.aborted)).toEqual([true, true]);
+        await vi.advanceTimersByTimeAsync(29_999);
+        expect((await authenticate())?.owner).toBe("automation@example.com");
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(1);
+        const recovered = authenticate();
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+        finishRequests[0](stale);
+        await vi.advanceTimersByTimeAsync(0);
+        const concurrent = authenticate();
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+        finishRequests[2](current.publicJwk);
+        expect((await recovered)?.owner).toBe("verified@example.com");
+        expect((await concurrent)?.owner).toBe("verified@example.com");
+        finishRequests[1](stale);
+        await vi.advanceTimersByTimeAsync(0);
+        expect((await authenticate())?.owner).toBe("verified@example.com");
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+      } finally {
+        fetchMock.mockRestore();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("aborts a real HTTP Access key body and retains bearer authentication", async () => {
+    const nativeFetch = fetch;
+    let requests = 0;
+    let connectionClosed = false;
+    const server = createServer((request, response) => {
+      requests += 1;
+      request.resume();
+      response.on("close", () => {
+        connectionClosed = true;
+      });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write('{"keys":[');
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("loopback server required");
+    let headersReceived!: () => void;
+    const received = new Promise<void>((resolve) => {
+      headersReceived = resolve;
+    });
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      expect(String(input)).toBe(
+        "https://native-timeout.example.cloudflareaccess.com/cdn-cgi/access/certs",
+      );
+      const response = await nativeFetch(`http://127.0.0.1:${address.port}/certs`, init);
+      headersReceived();
+      return response;
+    });
+    try {
+      const pending = authenticateRequest(
+        new Request("https://example.test/v1/whoami", {
+          headers: {
+            authorization: "Bearer shared",
+            "cf-access-jwt-assertion": accessJwtShape("missing"),
+          },
+        }),
+        {
+          CRABBOX_SHARED_TOKEN: "shared",
+          CRABBOX_SHARED_OWNER: "automation@example.com",
+          CRABBOX_ACCESS_TEAM_DOMAIN: "native-timeout.example.cloudflareaccess.com",
+          CRABBOX_ACCESS_AUD: "access-aud",
+        },
+      );
+      await received;
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(await pending).toMatchObject({
+        authorized: true,
+        admin: false,
+        owner: "automation@example.com",
+      });
+      vi.useRealTimers();
+      await vi.waitFor(() => expect(connectionClosed).toBe(true));
+      expect(requests).toBe(1);
+    } finally {
+      fetchMock.mockRestore();
+      vi.useRealTimers();
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
     }
   });
 
@@ -1122,6 +1320,7 @@ describe("coordinator auth", () => {
       expect(auth.owner).toBe("verified@example.com");
       expect(fetchMock).toHaveBeenCalledWith(
         "https://team-url.example.cloudflareaccess.com/cdn-cgi/access/certs",
+        { signal: expect.any(AbortSignal) },
       );
     } finally {
       fetchMock.mockRestore();
