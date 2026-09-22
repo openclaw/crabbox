@@ -2839,19 +2839,7 @@ func shouldCleanupLocalContainer(server core.Server, claim core.LeaseClaim, hasC
 		return true, "container state=" + blank(server.Status, "unknown")
 	}
 	if hasClaim {
-		lastUsed, err := time.Parse(time.RFC3339, claim.LastUsedAt)
-		if err != nil || lastUsed.IsZero() {
-			return false, "claim active"
-		}
-		idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
-		if idle <= 0 {
-			return false, "claim active"
-		}
-		expires := lastUsed.Add(idle)
-		if now.After(expires.Add(12 * time.Hour)) {
-			return true, "claim expired"
-		}
-		return false, "claim active"
+		return shared.ClaimIdleExpiredAfterGrace(claim, now, 12*time.Hour)
 	}
 	if expires, ok := localContainerLabelTime(labels["expires_at"]); ok {
 		if now.After(expires.Add(12 * time.Hour)) {

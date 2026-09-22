@@ -7602,24 +7602,30 @@ func TestCleanupClaimlessContainerSkipsClaimCreatedBeforeMutation(t *testing.T) 
 }
 
 func TestCleanupExactExpiredClaimRemovesOwnershipOnce(t *testing.T) {
-	fixture := newCleanupClaimFixture(t, "cbx_cleanup_exact_expired", "cleanup-exact-container", "running", false)
-	fixture.expire(t)
-	if err := fixture.b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
-		t.Fatal(err)
-	}
-	if got := recordedCommandCount(fixture.runner, "rm"); got != 1 {
-		t.Fatalf("container remove calls=%d, want 1", got)
-	}
-	if claim, err := core.ReadLeaseClaim(fixture.leaseID); err != nil || claim.LeaseID != "" {
-		t.Fatalf("claim=%#v err=%v", claim, err)
-	}
-	for name, path := range map[string]string{"key": fixture.keyPath, "bootstrap": fixture.bootstrapDir, "host root": fixture.hostLeaseRoot} {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatalf("%s remains after cleanup: %v", name, err)
-		}
-	}
-	if got := strings.Count(fixture.output.String(), "remove container id="); got != 1 {
-		t.Fatalf("remove output count=%d, want 1: %s", got, fixture.output.String())
+	for _, age := range []time.Duration{48 * time.Hour, 12*time.Hour + time.Minute + time.Nanosecond} {
+		t.Run(age.String(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				fixture := newCleanupClaimFixture(t, "cbx_cleanup_exact_expired", "cleanup-exact-container", "running", false)
+				time.Sleep(age)
+				if err := fixture.b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				if got := recordedCommandCount(fixture.runner, "rm"); got != 1 {
+					t.Fatalf("container remove calls=%d, want 1", got)
+				}
+				if claim, err := core.ReadLeaseClaim(fixture.leaseID); err != nil || claim.LeaseID != "" {
+					t.Fatalf("claim=%#v err=%v", claim, err)
+				}
+				for name, path := range map[string]string{"key": fixture.keyPath, "bootstrap": fixture.bootstrapDir, "host root": fixture.hostLeaseRoot} {
+					if _, err := os.Stat(path); !os.IsNotExist(err) {
+						t.Fatalf("%s remains after cleanup: %v", name, err)
+					}
+				}
+				if got := strings.Count(fixture.output.String(), "remove container id="); got != 1 {
+					t.Fatalf("remove output count=%d, want 1: %s", got, fixture.output.String())
+				}
+			})
+		})
 	}
 }
 
@@ -7672,26 +7678,44 @@ func TestCleanupPreservesKeepAndActiveClaimedContainers(t *testing.T) {
 		status string
 		keep   bool
 		reason string
+		age    time.Duration
+		mutate func(*core.LeaseClaim)
 	}{
 		{name: "keep", status: "exited", keep: true, reason: "keep=true"},
 		{name: "active claim", status: "running", reason: "claim active"},
+		{name: "grace boundary", status: "running", reason: "claim active", age: 12*time.Hour + time.Minute},
+		{name: "invalid timestamp", status: "running", reason: "claim active", age: 48 * time.Hour, mutate: func(c *core.LeaseClaim) { c.LastUsedAt = "invalid" }},
+		{name: "whitespace timestamp", status: "running", reason: "claim active", age: 48 * time.Hour, mutate: func(c *core.LeaseClaim) { c.LastUsedAt = " " + c.LastUsedAt }},
+		{name: "zero timestamp", status: "running", reason: "claim active", age: 48 * time.Hour, mutate: func(c *core.LeaseClaim) { c.LastUsedAt = time.Time{}.Format(time.RFC3339) }},
+		{name: "disabled idle", status: "running", reason: "claim active", age: 48 * time.Hour, mutate: func(c *core.LeaseClaim) { c.IdleTimeoutSeconds = 0 }},
+		{name: "negative idle", status: "running", reason: "claim active", age: 48 * time.Hour, mutate: func(c *core.LeaseClaim) { c.IdleTimeoutSeconds = -1 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fixture := newCleanupClaimFixture(t, "cbx_cleanup_preserve_"+strings.ReplaceAll(tc.name, " ", "_"), "cleanup-preserve-container", tc.status, tc.keep)
-			if err := fixture.b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
-				t.Fatal(err)
-			}
-			if recordedCommandCount(fixture.runner, "rm") != 0 {
-				t.Fatalf("cleanup removed preserved container: %s", fixture.output.String())
-			}
-			claim, err := core.ReadLeaseClaim(fixture.leaseID)
-			if err != nil || claim.LeaseID != fixture.leaseID {
-				t.Fatalf("claim=%#v err=%v", claim, err)
-			}
-			fixture.assertOwnershipPresent(t)
-			if !strings.Contains(fixture.output.String(), "reason="+tc.reason) {
-				t.Fatalf("cleanup skip reason missing: %s", fixture.output.String())
-			}
+			synctest.Test(t, func(t *testing.T) {
+				fixture := newCleanupClaimFixture(t, "cbx_cleanup_preserve_"+strings.ReplaceAll(tc.name, " ", "_"), "cleanup-preserve-container", tc.status, tc.keep)
+				if tc.mutate != nil {
+					replacement := fixture.claim
+					tc.mutate(&replacement)
+					if err := core.ReplaceLeaseClaimIfUnchanged(fixture.leaseID, fixture.claim, replacement); err != nil {
+						t.Fatal(err)
+					}
+				}
+				time.Sleep(tc.age)
+				if err := fixture.b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				if recordedCommandCount(fixture.runner, "rm") != 0 {
+					t.Fatalf("cleanup removed preserved container: %s", fixture.output.String())
+				}
+				claim, err := core.ReadLeaseClaim(fixture.leaseID)
+				if err != nil || claim.LeaseID != fixture.leaseID {
+					t.Fatalf("claim=%#v err=%v", claim, err)
+				}
+				fixture.assertOwnershipPresent(t)
+				if !strings.Contains(fixture.output.String(), "reason="+tc.reason) {
+					t.Fatalf("cleanup skip reason missing: %s", fixture.output.String())
+				}
+			})
 		})
 	}
 }
