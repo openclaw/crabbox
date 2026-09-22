@@ -8,7 +8,6 @@
 
 ### Changed
 
-- Require positive, representable persisted timeout seconds in shared claim idle-expiry checks and reuse that policy for Machine0 cleanup; preserve valid timeout behavior, grace periods, and earlier provider lifecycle guards.
 - Keep GCP configuration and explicit-input intent under one provider-specific owner while preserving file/environment precedence, OS-image defaults, and coordinator requests. [PR 2488](https://github.com/openclaw/crabbox/pull/2488). Thanks @steipete.
 - Reuse shared claim idle-expiry policy for Coder cleanup while preserving its twelve-hour grace period, timestamp normalization, and ownership safeguards. [PR 2490](https://github.com/openclaw/crabbox/pull/2490). Thanks @steipete.
 - Reuse Local Container's shared idle-expiry rule for legacy unscoped orphan claims while preserving strict twelve-hour grace, runtime identity checks, and stored-key retention. [PR 2489](https://github.com/openclaw/crabbox/pull/2489).
@@ -24,6 +23,7 @@
 
 ### Fixes
 
+- Preserve running leases with malformed idle timeouts instead of letting duration overflow trigger cleanup; share the bounded expiry check with Machine0 while retaining provider ownership and lifecycle safeguards. [PR 2492](https://github.com/openclaw/crabbox/pull/2492). Thanks @steipete.
 - Bound GitHub membership verification to 15 seconds, including stalled response bodies and team pagination, so authentication fails closed without leaving shared checks stuck indefinitely. [PR 2481](https://github.com/openclaw/crabbox/pull/2481).
 - Bound GitHub OAuth code exchange and post-exchange verification while preserving one-use-code handling, the existing verification retry, and encrypted credential reuse on callback retries. [PR 2482](https://github.com/openclaw/crabbox/pull/2482).
 - Bound Cloudflare Access signing-key loads to 15 seconds so stalled responses cannot hold bearer authentication indefinitely; preserve identity fallback, key rotation, and failure caching. [PR 2483](https://github.com/openclaw/crabbox/pull/2483).
