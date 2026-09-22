@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	gosdk "github.com/islo-labs/go-sdk"
@@ -612,47 +613,49 @@ func TestIsloRunCleanupBoundsTheWholeTeardown(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			t.Setenv("XDG_STATE_HOME", t.TempDir())
-			isolateIsloTestHome(t)
-			withIsloCleanupTimeout(t, budget)
-			var acquired core.LeaseClaim
-			if tc.idBound {
-				acquired = claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
-			} else {
-				acquired = claimIsloLegacyLease(t, isloTeardownLeaseID)
-			}
-			client := &fakeIsloSyncClient{blockReads: true, blockDelete: true}
-			client.registerSandbox(isloTeardownName, isloTestResourceID)
-			backend := newIsloTeardownBackend(t, client, io.Discard)
-
-			done := make(chan error, 1)
-			go func() { done <- backend.releaseIsloLease(client, acquired, isloTeardownName) }()
-			var err error
-			select {
-			case err = <-done:
-			case <-time.After(2 * budget):
-				t.Fatalf("cleanup did not return within %s, want the whole teardown bounded by one %s budget", 2*budget, budget)
-			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("err=%v, want %q when nothing answers", err, tc.wantErr)
-			}
-			if client.deleteCalls != tc.wantDeletes {
-				t.Fatalf("delete calls=%d, want %d", client.deleteCalls, tc.wantDeletes)
-			}
-			// Counting the call is not enough. Without the reserved slice the
-			// pre-flight read consumes the whole budget and the DELETE is
-			// dispatched on an already cancelled context, which a real transport
-			// refuses to send - the sandbox then keeps billing even though
-			// deleteCalls says the delete was attempted.
-			if len(client.deleteCtxErrs) != tc.wantDeletes {
-				t.Fatalf("delete context observations=%d, want %d", len(client.deleteCtxErrs), tc.wantDeletes)
-			}
-			for _, ctxErr := range client.deleteCtxErrs {
-				if ctxErr != nil {
-					t.Fatalf("delete dispatched on an expired context (%v), want the reserved slice of the budget to keep it live", ctxErr)
+			synctest.Test(t, func(t *testing.T) {
+				t.Setenv("XDG_STATE_HOME", t.TempDir())
+				isolateIsloTestHome(t)
+				withIsloCleanupTimeout(t, budget)
+				var acquired core.LeaseClaim
+				if tc.idBound {
+					acquired = claimIsloLeaseWithIdentity(t, isloTeardownLeaseID, "web", isloTeardownName, isloTestResourceID, isloTestClaimScope)
+				} else {
+					acquired = claimIsloLegacyLease(t, isloTeardownLeaseID)
 				}
-			}
-			requireIsloClaimRetained(t, isloTeardownLeaseID)
+				client := &fakeIsloSyncClient{blockReads: true, blockDelete: true}
+				client.registerSandbox(isloTeardownName, isloTestResourceID)
+				backend := newIsloTeardownBackend(t, client, io.Discard)
+
+				done := make(chan error, 1)
+				go func() { done <- backend.releaseIsloLease(client, acquired, isloTeardownName) }()
+				var err error
+				select {
+				case err = <-done:
+				case <-time.After(2 * budget):
+					t.Fatalf("cleanup did not return within %s, want the whole teardown bounded by one %s budget", 2*budget, budget)
+				}
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err=%v, want %q when nothing answers", err, tc.wantErr)
+				}
+				if client.deleteCalls != tc.wantDeletes {
+					t.Fatalf("delete calls=%d, want %d", client.deleteCalls, tc.wantDeletes)
+				}
+				// Counting the call is not enough. Without the reserved slice the
+				// pre-flight read consumes the whole budget and the DELETE is
+				// dispatched on an already cancelled context, which a real transport
+				// refuses to send - the sandbox then keeps billing even though
+				// deleteCalls says the delete was attempted.
+				if len(client.deleteCtxErrs) != tc.wantDeletes {
+					t.Fatalf("delete context observations=%d, want %d", len(client.deleteCtxErrs), tc.wantDeletes)
+				}
+				for _, ctxErr := range client.deleteCtxErrs {
+					if ctxErr != nil {
+						t.Fatalf("delete dispatched on an expired context (%v), want the reserved slice of the budget to keep it live", ctxErr)
+					}
+				}
+				requireIsloClaimRetained(t, isloTeardownLeaseID)
+			})
 		})
 	}
 }
