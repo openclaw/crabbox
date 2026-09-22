@@ -140,6 +140,12 @@ the request:
   has `CRABBOX_ACCESS_TEAM_DOMAIN` and `CRABBOX_ACCESS_AUD` set, overrides the
   `owner` with the email from the assertion.
 
+Cloudflare Access signing-key loads share a 15-second deadline across response
+headers and body consumption. A timeout aborts the request and uses the existing
+short failure cache and one-refresh allowance for key rotation. Access identity
+is optional enrichment: a failed key lookup preserves normal shared/admin bearer
+authentication and its owner fallback, without trusting unverified Access headers.
+
 ## Identity commands
 
 ```sh
