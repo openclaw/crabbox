@@ -32416,6 +32416,139 @@ describe("fleet lease identity and idle", () => {
     },
   );
 
+  it("recovers a canceled legacy create after runtime reconstruction without a deployment change", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const storage = new MemoryStorage();
+    const createStarted = deferred<void>();
+    const finishCreate = deferred<void>();
+    const leaseID = "cbx_ca1100000051";
+    const createAttemptID = "cat_51000000000000000000000000000051";
+    let visible = false;
+    let recoveryReads = 0;
+    const deleted: string[] = [];
+    const provider = fakeProvider(
+      async () => {
+        createStarted.resolve();
+        await finishCreate.promise;
+        throw new Error("interrupted synthetic create");
+      },
+      {
+        provider: "azure",
+        onRecoverServer: (lease) => {
+          recoveryReads++;
+          return visible
+            ? {
+                provider: "azure",
+                id: 123,
+                cloudID: "vm-canceled-runtime-reset",
+                name: "crabbox-canceled-runtime-reset",
+                status: "running",
+                serverType: "Standard_D2ads_v6",
+                host: "192.0.2.44",
+                region: "eastus2",
+                labels: {
+                  crabbox: "true",
+                  created_by: "crabbox",
+                  lease: leaseID,
+                  owner: "alice_example.com",
+                  provider: "azure",
+                  slug: lease.slug,
+                },
+              }
+            : undefined;
+        },
+        onReleaseLease: (lease) => deleted.push(lease.cloudID),
+      },
+    );
+    provider.attachStorage(storage);
+    const env = {
+      CRABBOX_DEFAULT_ORG: "default-org",
+      CF_VERSION_METADATA: { id: "unchanged-deployment", timestamp: new Date().toISOString() },
+    } as Env;
+    // Unlike testCoordinator, use the production-default runtime generation.
+    const first = new FleetCoordinator(new FakeCoordinatorRuntime(storage), env, {
+      azure: provider,
+    });
+    const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+    const creating = first.fetch(
+      request("POST", "/v1/leases", {
+        headers,
+        body: {
+          leaseID,
+          createAttemptID,
+          provider: "azure",
+          sshPublicKey: "ssh-ed25519 runtime-reset",
+        },
+      }),
+    );
+    try {
+      await createStarted.promise;
+      const original = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+      expect(original.provisioningCoordinatorVersion).toEqual(expect.any(String));
+      expect(original.cloudID).toBeFalsy();
+      vi.setSystemTime(Date.now() + 10 * 60_000);
+      await first.alarm();
+      expect(recoveryReads).toBe(0);
+      expect(deleted).toEqual([]);
+      expect(
+        storage.value<LeaseRecord>(`lease:${leaseID}`)?.provisioningRecoveryObservedAt,
+      ).toBeUndefined();
+
+      const canceled = await first.fetch(
+        request("POST", `/v1/leases/${leaseID}/cancel-create`, {
+          headers,
+          body: { createAttemptID },
+        }),
+      );
+      expect(canceled.status).toBe(200);
+      await first.alarm();
+      expect(recoveryReads).toBe(0);
+      expect(deleted).toEqual([]);
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+        state: "released",
+        releaseDeletesServer: true,
+        provisioningResourceMayExist: true,
+        provisioningCoordinatorVersion: original.provisioningCoordinatorVersion,
+      });
+
+      const reconstructed = new FleetCoordinator(new FakeCoordinatorRuntime(storage), env, {
+        azure: provider,
+      });
+      await reconstructed.alarm();
+      const observed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+      expect(observed.provisioningRecoveryObservedAt).toEqual(expect.any(String));
+      expect(recoveryReads).toBe(0);
+      expect(deleted).toEqual([]);
+
+      vi.setSystemTime(Date.parse(observed.provisioningRecoveryObservedAt!) + 5 * 60_000 + 1);
+      await reconstructed.alarm();
+      const missing = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+      expect(recoveryReads).toBe(1);
+      expect(deleted).toEqual([]);
+      expect(missing.provisioningResourceMayExist).toBe(true);
+      expect(missing.cleanupRetryAt).toEqual(expect.any(String));
+      visible = true;
+      vi.setSystemTime(Date.parse(missing.cleanupRetryAt!) + 1);
+      await reconstructed.alarm();
+      expect(recoveryReads).toBe(2);
+      expect(deleted).toEqual(["vm-canceled-runtime-reset"]);
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)).toMatchObject({
+        state: "released",
+        cloudID: "vm-canceled-runtime-reset",
+        owner: original.owner,
+        org: original.org,
+      });
+      expect(storage.value<LeaseRecord>(`lease:${leaseID}`)?.cleanupStartedAt).toBeUndefined();
+    } finally {
+      finishCreate.resolve();
+      try {
+        await creating;
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  });
+
   it("persists the cancel tombstone and cleanup claim before deletion so maintenance can resume", async () => {
     const storage = new MemoryStorage();
     const deletionStarted = deferred<void>();

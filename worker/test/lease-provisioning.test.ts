@@ -791,7 +791,7 @@ describe("durable Azure admission and reconstruction", () => {
       properties: { storageProfile: { imageReference: { id: `${imageID}/versions/2.10.0` } } },
     });
   });
-  it.each(["scope", "key"])(
+  it.each(["scope", "key", "missing-lease"])(
     "blocks %s drift while retaining the journal and sealed material",
     async (drift) => {
       vi.useFakeTimers({ toFake: ["Date"] });
@@ -805,9 +805,15 @@ describe("durable Azure admission and reconstruction", () => {
           providerScope: "/subscriptions/other/resourceGroups/other",
         });
       }
+      if (drift === "missing-lease") await storage.delete(`lease:${id}`);
+      const readsBefore = azure.reads.length;
       await step(storage, azure, drift === "key" ? { CRABBOX_SESSION_SECRET: "" } : {});
       const operation = await storage.get<LeaseProvisioningOperation>(provisioningOperationKey(id));
       expect(operation?.step.phase).toBe("blocked");
+      expect(operation?.step.blockedReason).toBe(
+        drift === "key" ? "continuation_unavailable" : "lease_binding_changed",
+      );
+      expect(azure.reads).toHaveLength(readsBefore);
       expect(await storage.get(provisioningMaterialKey(operation!.operationID))).toBeDefined();
       expect(azure.mutations).toHaveLength(0);
     },
