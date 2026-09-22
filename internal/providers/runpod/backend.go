@@ -228,12 +228,7 @@ func (b *runpodLeaseBackend) Resolve(ctx context.Context, req core.ResolveReques
 		core.SetServerLeaseClaimSnapshot(&lease.Server, core.LeaseClaim{}, false)
 	}
 	if admit {
-		if claimed {
-			if err := shared.AuthorizeClaimActivity(claim); err != nil {
-				return core.LeaseTarget{}, err
-			}
-		}
-		updated, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, lease.Server, lease.SSH, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, claim, claimed)
+		updated, err := shared.AdmitResolvedLease(cfg, req, lease, slug, claim, claimed, nil)
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}

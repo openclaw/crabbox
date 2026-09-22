@@ -1305,8 +1305,17 @@ func TestHeartbeatLifecycleSurvivesFreshReads(t *testing.T) {
 					}
 				}
 			}
-			for _, ready := range []bool{false, true} {
-				observed, resolveErr := fresh.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo, StatusOnly: true, ReadyProbe: ready, NoLocalStateMutations: true})
+			for _, req := range []core.ResolveRequest{
+				{Repo: repo, StatusOnly: true, NoLocalStateMutations: true},
+				{Repo: repo, StatusOnly: true, ReadyProbe: true, NoLocalStateMutations: true},
+				{Repo: repo, StatusOnly: true},
+				{Repo: repo, NoLocalStateMutations: true},
+				{Repo: repo, ReleaseOnly: true, NoLocalStateMutations: true},
+				{Repo: repo, ReleaseOnly: true},
+				{},
+			} {
+				req.ID = lease.LeaseID
+				observed, resolveErr := fresh.Resolve(t.Context(), req)
 				if resolveErr != nil {
 					t.Fatal(resolveErr)
 				}
@@ -1329,6 +1338,11 @@ func TestHeartbeatLifecycleSurvivesFreshReads(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertPolicy(reused.Server.Labels, wantIdle)
+			admitted, readErr := core.ReadLeaseClaim(lease.LeaseID)
+			snapshot, exists, set = core.ServerLeaseClaimSnapshot(reused.Server)
+			if readErr != nil || admitted.IdleTimeoutSeconds != wantIdle || !exists || !set || !reflect.DeepEqual(snapshot, admitted) {
+				t.Fatal("admission did not return committed legacy-aware idle policy")
+			}
 			for _, explicit := range []bool{false, true, false} {
 				clock.current = clock.current.Add(time.Minute)
 				req := core.TouchRequest{Lease: reused, State: "busy", IdleTimeout: time.Minute}
@@ -1465,6 +1479,36 @@ func TestLogicalActivityHoldsSurviveNativeTransitions(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestResolveRejectsClaimChangedDuringAuth(t *testing.T) {
+	api := &fakeVastAPI{offers: []vastOffer{{ID: 42, Rentable: true}}}
+	b := newTestBackend(t, api)
+	repo := core.Repo{Root: t.TempDir()}
+	lease, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: repo, RequestedSlug: "admission-policy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replacement core.LeaseClaim
+	api.authFn = func() {
+		api.authFn = nil
+		labels := maps.Clone(before.Labels)
+		labels["profile"] = "newer"
+		var updateErr error
+		replacement, updateErr = core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, before, labels)
+		if updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	}
+	got, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo})
+	after, readErr := core.ReadLeaseClaim(lease.LeaseID)
+	if err == nil || !reflect.DeepEqual(got, core.LeaseTarget{}) || readErr != nil || !reflect.DeepEqual(after, replacement) {
+		t.Fatalf("stale admission published success or changed claim: resolve=%v read=%v", err, readErr)
 	}
 }
 
