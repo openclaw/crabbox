@@ -1383,14 +1383,8 @@ func shouldCleanupMachine0(server core.Server, claim core.LeaseClaim, hasClaim b
 	if machineStopped(server.Labels["machine0_status"]) || machineTerminal(server.Labels["machine0_status"]) {
 		return true, "machine state=" + core.Blank(server.Labels["machine0_status"], "unknown")
 	}
-	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-	if err != nil || lastUsed.IsZero() || claim.IdleTimeoutSeconds <= 0 {
-		return false, "claim active"
-	}
-	if now.After(lastUsed.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second).Add(12 * time.Hour)) {
-		return true, "claim expired"
-	}
-	return false, "claim active"
+	claim.LastUsedAt = strings.TrimSpace(claim.LastUsedAt)
+	return shared.ClaimIdleExpiredAfterGrace(claim, now, 12*time.Hour)
 }
 
 func normalizeReleasePolicy(value string) string {

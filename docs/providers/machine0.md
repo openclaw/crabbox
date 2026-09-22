@@ -282,6 +282,15 @@ Use `--keep` to keep a normal Crabbox run lease for later reuse. Adopt an
 existing unclaimed Machine0 VM only through an explicit `--reclaim` reuse;
 destructive release requires an exact local claim bound to the Machine0 ID.
 
+Cleanup preserves incomplete fixed creation, kept machines, and machines without
+a local claim before considering stopped or terminal states. Other machines use
+the shared claim idle-expiry policy: the current time must be strictly past the
+trimmed last-used timestamp plus a positive idle timeout and twelve-hour grace.
+The shared policy requires persisted timeout seconds to be positive and fit in
+a duration without overflow. Malformed values do not qualify through idle
+expiry; valid timeout behavior and the earlier cleanup guards remain unchanged.
+Supported duration inputs do not produce out-of-range persisted values.
+
 If a local claim is missing, a canonical Crabbox lease ID can suggest a
 Crabbox-named VM from Machine0 inventory, but the short name hash cannot prove
 the full lease identity. Even a unique match fails closed with a candidate-name

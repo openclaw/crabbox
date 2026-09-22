@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Require positive, representable persisted timeout seconds in shared claim idle-expiry checks and reuse that policy for Machine0 cleanup; preserve valid timeout behavior, grace periods, and earlier provider lifecycle guards.
 - Keep GCP configuration and explicit-input intent under one provider-specific owner while preserving file/environment precedence, OS-image defaults, and coordinator requests. [PR 2488](https://github.com/openclaw/crabbox/pull/2488). Thanks @steipete.
 - Reuse shared claim idle-expiry policy for Coder cleanup while preserving its twelve-hour grace period, timestamp normalization, and ownership safeguards. [PR 2490](https://github.com/openclaw/crabbox/pull/2490). Thanks @steipete.
 - Reuse Local Container's shared idle-expiry rule for legacy unscoped orphan claims while preserving strict twelve-hour grace, runtime identity checks, and stored-key retention. [PR 2489](https://github.com/openclaw/crabbox/pull/2489).

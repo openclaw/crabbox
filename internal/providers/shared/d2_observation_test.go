@@ -3,6 +3,7 @@ package shared
 import (
 	"context"
 	"errors"
+	"math"
 	"reflect"
 	"testing"
 	"testing/synctest"
@@ -56,6 +57,57 @@ func TestD2ClaimIdleGraceIsIndependentOfTTLAndParsingPolicy(t *testing.T) {
 	claim.LastUsedAt = " " + claim.LastUsedAt
 	if expired, _ := ClaimIdleExpiredAfterGrace(claim, deadline.Add(time.Hour), 0); expired {
 		t.Fatal("helper must not trim a caller's timestamp")
+	}
+}
+
+func TestD2ClaimIdleGraceRejectsUnrepresentableTimeouts(t *testing.T) {
+	lastUsed := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		seconds int64
+	}{
+		{"disabled", 0},
+		{"negative", -1},
+		{"negative wraps positive", -18446744073},
+		{"above maximum duration", 9223372037},
+		{"positive wraps positive", 18446744074},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seconds := int(tc.seconds)
+			if int64(seconds) != tc.seconds {
+				t.Skip("persisted timeout is not representable on this architecture")
+			}
+			claim := core.LeaseClaim{LastUsedAt: lastUsed.Format(time.RFC3339), IdleTimeoutSeconds: seconds}
+			expired, reason := ClaimIdleExpiredAfterGrace(claim, lastUsed.AddDate(400, 0, 0), 12*time.Hour)
+			if expired || reason != "claim active" {
+				t.Fatalf("expiry=(%v, %q), want (false, claim active)", expired, reason)
+			}
+		})
+	}
+}
+
+func TestD2ClaimIdleGraceMaximumDurationBoundary(t *testing.T) {
+	maxSeconds := int64(math.MaxInt64) / int64(time.Second)
+	seconds := int(maxSeconds)
+	if int64(seconds) != maxSeconds {
+		t.Skip("maximum duration seconds are not representable on this architecture")
+	}
+	lastUsed := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	grace := 12 * time.Hour
+	deadline := lastUsed.Add(time.Duration(maxSeconds) * time.Second).Add(grace)
+	claim := core.LeaseClaim{LastUsedAt: lastUsed.Format(time.RFC3339), IdleTimeoutSeconds: seconds}
+	for _, offset := range []time.Duration{-time.Nanosecond, 0, time.Nanosecond} {
+		t.Run(offset.String(), func(t *testing.T) {
+			expired, reason := ClaimIdleExpiredAfterGrace(claim, deadline.Add(offset), grace)
+			wantExpired := offset > 0
+			wantReason := "claim active"
+			if wantExpired {
+				wantReason = "claim expired"
+			}
+			if expired != wantExpired || reason != wantReason {
+				t.Fatalf("expiry=(%v, %q), want (%v, %q)", expired, reason, wantExpired, wantReason)
+			}
+		})
 	}
 }
 

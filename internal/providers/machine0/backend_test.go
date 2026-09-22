@@ -1751,6 +1751,79 @@ func TestDoctorProbeFailureCancelsSiblingProbes(t *testing.T) {
 	}
 }
 
+func TestShouldCleanupMachine0IdlePolicyAndGuardPrecedence(t *testing.T) {
+	lastUsed := time.Date(2026, 9, 22, 10, 0, 0, 123, time.UTC)
+	boundary := lastUsed.Add(30*time.Minute + 12*time.Hour)
+	for _, tc := range []struct {
+		name, timestamp, state, keep string
+		idleSeconds                  int
+		offset                       time.Duration
+		missing, prepared, want      bool
+		reason                       string
+	}{
+		{name: "after boundary", idleSeconds: 1800, offset: time.Nanosecond, want: true, reason: "claim expired"},
+		{name: "equal boundary", idleSeconds: 1800, reason: "claim active"},
+		{name: "before boundary", idleSeconds: 1800, offset: -time.Nanosecond, reason: "claim active"},
+		{name: "whitespace timestamp", timestamp: " \t" + lastUsed.Format(time.RFC3339Nano) + "\n", idleSeconds: 1800, offset: time.Nanosecond, want: true, reason: "claim expired"},
+		{name: "invalid timestamp", timestamp: "invalid", idleSeconds: 1800, offset: time.Hour, reason: "claim active"},
+		{name: "zero timestamp", timestamp: time.Time{}.Format(time.RFC3339), idleSeconds: 1800, offset: time.Hour, reason: "claim active"},
+		{name: "disabled idle", offset: time.Hour, reason: "claim active"},
+		{name: "negative idle", idleSeconds: -1, offset: time.Hour, reason: "claim active"},
+		{name: "missing before stopped", missing: true, state: "STOPPED", reason: "missing claim"},
+		{name: "keep before missing and stopped", missing: true, state: "STOPPED", keep: "TRUE", reason: "keep=true"},
+		{name: "prepared before keep and missing", prepared: true, missing: true, state: "STOPPED", keep: "true", reason: "fixed creation incomplete; use stop with its lease ID"},
+		{name: "stopped before invalid idle", timestamp: "invalid", state: "STOPPED", want: true, reason: "machine state=STOPPED"},
+		{name: "terminal before disabled idle", state: "ERRORED", want: true, reason: "machine state=ERRORED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			timestamp := tc.timestamp
+			if timestamp == "" {
+				timestamp = lastUsed.Format(time.RFC3339Nano)
+			}
+			state := tc.state
+			if state == "" {
+				state = "RUNNING"
+			}
+			server := core.Server{Labels: map[string]string{"machine0_status": state, "keep": tc.keep}}
+			claim := core.LeaseClaim{LeaseID: "cbx_idle", Provider: providerName, LastUsedAt: timestamp, IdleTimeoutSeconds: tc.idleSeconds}
+			if tc.prepared {
+				claim.Provider = core.FixedMachine0ClaimProvider
+				claim.FixedCreateIntent = &core.FixedCreateIntent{Version: fixedMachine0CreateIntentVersion, State: fixedMachine0IntentPrepared}
+			}
+			got, reason := shouldCleanupMachine0(server, claim, !tc.missing, boundary.Add(tc.offset))
+			if got != tc.want || reason != tc.reason {
+				t.Fatalf("cleanup=%v reason=%q; want %v %q", got, reason, tc.want, tc.reason)
+			}
+		})
+	}
+}
+
+func TestShouldCleanupMachine0RejectsMalformedPersistedIdleOverflow(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		seconds int64
+	}{
+		{"positive seconds wrapping negative", 9223372037},
+		{"negative seconds wrapping positive", -18446744073},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if int64(int(tc.seconds)) != tc.seconds {
+				t.Skip("malformed timeout requires a 64-bit claim integer")
+			}
+			now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+			server := core.Server{Labels: map[string]string{"machine0_status": "RUNNING"}}
+			claim := core.LeaseClaim{
+				LeaseID: "cbx_idle", Provider: providerName,
+				LastUsedAt: now.Add(-13 * time.Hour).Format(time.RFC3339), IdleTimeoutSeconds: int(tc.seconds),
+			}
+			got, reason := shouldCleanupMachine0(server, claim, true, now)
+			if got || reason != "claim active" {
+				t.Fatalf("malformed persisted timeout authorized cleanup=%v reason=%q", got, reason)
+			}
+		})
+	}
+}
+
 func TestCleanupDestroysStoppedClaimByDefault(t *testing.T) {
 	repo := setupState(t)
 	api := &fakeAPI{sizes: []machineSize{testSize()}, getSequence: []machine{readyMachine("203.0.113.10")}}

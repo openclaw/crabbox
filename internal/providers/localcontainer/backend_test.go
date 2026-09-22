@@ -8107,11 +8107,13 @@ func TestCleanupKeepsClaimFromDifferentDockerHostSameContext(t *testing.T) {
 func TestLegacyClaimScopeAdmissionPreservesStrictIdleGrace(t *testing.T) {
 	lastUsed := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	deadline := lastUsed.Add(time.Minute + 12*time.Hour)
+	maxIdleSeconds := int64((1<<63 - 1) / int64(time.Second))
+	maxDeadline := lastUsed.Add(time.Duration(maxIdleSeconds) * time.Second).Add(12 * time.Hour)
 	stamp := lastUsed.Format(time.RFC3339)
 	scope := "runtime:docker/context:fixture/host:unix:///tmp/fixture.sock"
 	for _, tc := range []struct {
 		name, lastUsed, claimScope, currentScope string
-		idle                                     int
+		idle                                     int64
 		now                                      time.Time
 		want                                     bool
 	}{
@@ -8123,12 +8125,20 @@ func TestLegacyClaimScopeAdmissionPreservesStrictIdleGrace(t *testing.T) {
 		{"zero timestamp", time.Time{}.Format(time.RFC3339), "", scope, 60, deadline, false},
 		{"disabled timeout", stamp, "", scope, 0, deadline.Add(time.Hour), false},
 		{"negative timeout", stamp, "", scope, -1, deadline.Add(time.Hour), false},
+		{"negative timeout wraps positive", stamp, "", scope, -18446744073, deadline.Add(time.Hour), false},
+		{"oversized timeout wraps positive", stamp, "", scope, 18446744074, deadline.Add(time.Hour), false},
+		{"largest valid timeout at boundary", stamp, "", scope, maxIdleSeconds, maxDeadline, false},
+		{"largest valid timeout after boundary", stamp, "", scope, maxIdleSeconds, maxDeadline.Add(time.Nanosecond), true},
 		{"different scope", stamp, "runtime:docker/context:other", scope, 60, deadline.Add(time.Hour), false},
 		{"matching scope needs no expiry", "invalid", " " + scope + " ", "\t" + scope, 0, deadline, true},
 		{"expired without current scope", stamp, "", "", 60, deadline.Add(time.Nanosecond), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			claim := core.LeaseClaim{LastUsedAt: tc.lastUsed, ProviderScope: tc.claimScope, IdleTimeoutSeconds: tc.idle}
+			idle := int(tc.idle)
+			if int64(idle) != tc.idle {
+				t.Skip("idle timeout is not representable as int on this architecture")
+			}
+			claim := core.LeaseClaim{LastUsedAt: tc.lastUsed, ProviderScope: tc.claimScope, IdleTimeoutSeconds: idle}
 			if got := localContainerClaimMatchesScope(claim, tc.currentScope, tc.now); got != tc.want {
 				t.Fatalf("scope admission=%t, want %t", got, tc.want)
 			}
