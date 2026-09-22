@@ -542,37 +542,39 @@ func TestCloudflareClientRedactsStreamError(t *testing.T) {
 }
 
 func TestCloudflareDoctorTimesOutStalledRunnerReadiness(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/readiness" || r.Method != http.MethodGet {
-			http.NotFound(w, r)
-			return
+	synctest.Test(t, func(t *testing.T) {
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/readiness" || r.Method != http.MethodGet {
+				http.NotFound(w, r)
+				return
+			}
+			<-r.Context().Done()
+		}))
+		defer server.Close()
+
+		oldTimeout := cloudflareDoctorTimeout
+		cloudflareDoctorTimeout = 20 * time.Millisecond
+		t.Cleanup(func() {
+			cloudflareDoctorTimeout = oldTimeout
+		})
+
+		cfg := core.Config{Provider: providerName}
+		cfg.Cloudflare.APIURL = server.URL
+		cfg.Cloudflare.Token = "token"
+		backend := NewCloudflareBackend(Provider{}.Spec(), cfg, core.Runtime{HTTP: server.Client(), Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		started := time.Now()
+		_, err := backend.Doctor(ctx, core.DoctorRequest{})
+		elapsed := time.Since(started)
+		if err == nil {
+			t.Fatal("doctor succeeded against stalled runner")
 		}
-		<-r.Context().Done()
-	}))
-	defer server.Close()
-
-	oldTimeout := cloudflareDoctorTimeout
-	cloudflareDoctorTimeout = 20 * time.Millisecond
-	t.Cleanup(func() {
-		cloudflareDoctorTimeout = oldTimeout
+		if elapsed >= time.Second {
+			t.Fatalf("doctor took %s, want bounded timeout", elapsed)
+		}
 	})
-
-	cfg := core.Config{Provider: providerName}
-	cfg.Cloudflare.APIURL = server.URL
-	cfg.Cloudflare.Token = "token"
-	backend := NewCloudflareBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*cloudflareBackend)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	started := time.Now()
-	_, err := backend.Doctor(ctx, core.DoctorRequest{})
-	elapsed := time.Since(started)
-	if err == nil {
-		t.Fatal("doctor succeeded against stalled runner")
-	}
-	if elapsed >= time.Second {
-		t.Fatalf("doctor took %s, want bounded timeout", elapsed)
-	}
 }
 
 func TestCloudflareDoctorRejectsInvalidReadinessPayload(t *testing.T) {
