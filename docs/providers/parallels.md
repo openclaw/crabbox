@@ -105,7 +105,10 @@ diagnostic included.
 Both failure messages name the clone mode and the clone's NIC MACs, and say
 whether the macOS DHCP fallback found no matching lease for them in the host's
 lease file; a missing record alone does not establish a boot failure. If the
-last VM query fails, the Tools IP is reported as unknown. Failed
+last VM query fails, the timeout includes that query's error and reports the
+Tools IP as unknown. State and MACs are explicitly identified as the last
+successful observation, if any; older DHCP or clone-mode advice is suppressed
+until inventory access works again. Failed
 acquisitions clean up their clone before returning the error. To investigate,
 retry and capture the new clone's console on the Parallels host while IP
 discovery is still waiting. Use `prlctl list -a` there to identify the new VM:

@@ -699,6 +699,7 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 	var last ParallelsVM
 	var vmObserved bool
 	var lastDHCPError error
+	var lastQueryError error
 	useDHCPFallback := c.Cfg.TargetOS == targetMacOS && strings.TrimSpace(c.Cfg.Parallels.BootstrapKey) != ""
 	waitError := func(reason string) error {
 		if parentDeadline, ok := ctx.Deadline(); ok && !time.Now().Before(parentDeadline) {
@@ -708,6 +709,9 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 			return context.Cause(ctx)
 		}
 		hint := parallelsIPTimeoutHint(c.Cfg, last, vmObserved, useDHCPFallback, lastDHCPError, purpose)
+		if lastQueryError != nil {
+			return Exit(5, "%s Parallels VM %s IP; last_state=%s; VM query: %v; %s", reason, id, blank(last.State, "-"), lastQueryError, hint)
+		}
 		if lastDHCPError != nil {
 			return Exit(5, "%s Parallels VM %s IP; last_state=%s; DHCP fallback: %v; %s", reason, id, blank(last.State, "-"), lastDHCPError, hint)
 		}
@@ -730,6 +734,7 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 		}
 		vm, err := c.GetVM(waitCtx, id)
 		vmObserved = err == nil
+		lastQueryError = err
 		if ctx.Err() != nil {
 			return ParallelsVM{}, context.Cause(ctx)
 		}
@@ -841,6 +846,9 @@ func parallelsIPTimeoutHint(cfg Config, last ParallelsVM, vmObserved, dhcpFallba
 	}
 	parts := []string{"clone_mode=" + mode + " macs=" + macs + " tools_ip=" + toolsIP}
 	parts = append(parts, "--parallels-startup-timeout bounds the overall IP wait; increasing it does not disable Tools fail-fast")
+	if !vmObserved {
+		return "hint: " + strings.Join(parts, "; ") + "; last_state and macs reflect the last successful VM observation, if any; verify Parallels host inventory access before diagnosing guest boot or networking"
+	}
 	if !dhcpFallback && cfg.TargetOS == targetMacOS {
 		parts = append(parts, "for macOS guests without working Parallels Tools, set parallels.bootstrapKey to enable DHCP/SSH discovery")
 	}
