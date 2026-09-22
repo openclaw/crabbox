@@ -228,6 +228,10 @@ root identity stays unresolved rather than being mistaken for a legacy lease.
 An interrupted tag publication has a cleanup-only recovery path; it cannot
 authorize normal reuse or metadata updates. A crash between confirmed tag
 publication and its local acknowledgment can retain that pending state.
+Successful acquisition keeps that exact acknowledged claim snapshot through
+bootstrap, the acquisition observer, and the final ready-tag/claim transaction.
+An intervening claim change prevents ready publication and rollback; stale
+acquisition cannot overwrite the new owner's claim or delete its resources.
 
 Leases created before root-disk tracking retain their existing Instance/key
 cleanup contract and emit a warning that disk cleanup is not tracked. Crabbox

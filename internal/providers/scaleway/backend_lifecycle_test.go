@@ -620,6 +620,121 @@ func TestScalewayRollbackCannotOverwriteChangedAllocationIdentity(t *testing.T) 
 	}
 }
 
+func TestScalewayAcquireCannotPublishAfterClaimReplacement(t *testing.T) {
+	for _, phase := range []string{"bootstrap", "callback"} {
+		for _, field := range []string{rootVolumeLabel, "concurrent-owner-note"} {
+			t.Run(phase+"/"+field, func(t *testing.T) {
+				backend, fake := newTestBackend(t)
+				var claimPath string
+				var changed []byte
+				changeClaim := func() {
+					leaseID := labelsFromTags(fake.server.Tags)["lease"]
+					claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+					if err != nil || !exists {
+						t.Fatalf("claim unavailable: %v", err)
+					}
+					labels := maps.Clone(claim.Labels)
+					labels[field] = "55555555-5555-5555-5555-555555555555"
+					if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, labels); err != nil {
+						t.Fatal(err)
+					}
+					state, err := core.CrabboxStateDir()
+					if err != nil {
+						t.Fatal(err)
+					}
+					claimPath = filepath.Join(state, "claims", leaseID+".json")
+					changed, err = os.ReadFile(claimPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+					if phase == "bootstrap" {
+						changeClaim()
+					}
+					return nil
+				}
+				callbacks := 0
+				_, err := backend.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "stale-publication", OnAcquired: func(core.LeaseTarget) error {
+					callbacks++
+					if phase == "callback" {
+						changeClaim()
+					}
+					return nil
+				}})
+				wantCallbacks := 0
+				if phase == "callback" {
+					wantCallbacks = 1
+				}
+				if err == nil || claimPath == "" || fake.updateCalls != 1 || fake.deletedServer || fake.deletedKey || callbacks != wantCallbacks {
+					t.Fatalf("stale acquisition acted: err=%v updates=%d serverDeleted=%t keyDeleted=%t callbacks=%d want=%d", err, fake.updateCalls, fake.deletedServer, fake.deletedKey, callbacks, wantCallbacks)
+				}
+				after, readErr := os.ReadFile(claimPath)
+				if readErr != nil || string(after) != string(changed) {
+					t.Fatalf("new owner's claim overwritten: %v", readErr)
+				}
+			})
+		}
+	}
+}
+
+func TestScalewayAcquireObserverCannotRewriteRootOwnership(t *testing.T) {
+	backend, fake := newTestBackend(t)
+	lease, err := backend.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "observer-copy", OnAcquired: func(observed core.LeaseTarget) error {
+		observed.Server.Labels[rootVolumeLabel] = "55555555-5555-5555-5555-555555555555"
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID := fake.server.Volumes["0"].ID
+	claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+	if err != nil || !exists || lease.Server.Labels[rootVolumeLabel] != rootID || claim.Labels[rootVolumeLabel] != rootID || labelsFromTags(fake.server.Tags)[rootVolumeLabel] != rootID {
+		t.Fatalf("observer rewrote ownership: exists=%t err=%v", exists, err)
+	}
+	if err := backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestScalewayAcquireEmptyRepoRootStillFencesCompletion(t *testing.T) {
+	for _, replaceClaim := range []bool{false, true} {
+		t.Run(fmt.Sprint(replaceClaim), func(t *testing.T) {
+			backend, fake := newTestBackend(t)
+			backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+				if replaceClaim {
+					id := labelsFromTags(fake.server.Tags)["lease"]
+					claim, _, err := core.ReadLeaseClaimWithPresence(id)
+					if err != nil {
+						t.Fatal(err)
+					}
+					labels := maps.Clone(claim.Labels)
+					labels["concurrent-owner-note"] = "changed"
+					if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(id, claim, labels); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return nil
+			}
+			lease, err := backend.Acquire(t.Context(), core.AcquireRequest{RequestedSlug: "empty-root"})
+			if replaceClaim {
+				if err == nil || fake.updateCalls != 1 || fake.deletedServer || fake.deletedKey {
+					t.Fatalf("empty-root stale publication escaped guard: err=%v updates=%d", err, fake.updateCalls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim, exists, err := core.ReadLeaseClaimWithPresence(lease.LeaseID)
+			cwd, cwdErr := os.Getwd()
+			if err != nil || cwdErr != nil || !exists || claim.RepoRoot != cwd || claim.Labels["state"] != "ready" || claim.Labels["recovery"] != "" || labelsFromTags(fake.server.Tags)["state"] != "ready" || fake.updateCalls != 2 {
+				t.Fatalf("empty-root completion not published: exists=%t state=%q recovery=%q updates=%d err=%v cwdErr=%v", exists, claim.Labels["state"], claim.Labels["recovery"], fake.updateCalls, err, cwdErr)
+			}
+		})
+	}
+}
+
 func TestScalewayNoMutationResolveDoesNotBindAmbiguousRecovery(t *testing.T) {
 	backend, fake := newTestBackend(t)
 	cfg := backend.cfgForRun()
