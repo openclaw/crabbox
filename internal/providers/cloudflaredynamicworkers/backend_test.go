@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -292,51 +293,55 @@ func TestNewLoaderAPIAcceptsExplicitClientWithUnsupportedDefault(t *testing.T) {
 }
 
 func TestClientTimeoutCoversResponseBody(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":`))
-		w.(http.Flusher).Flush()
-		<-r.Context().Done()
-	}))
-	defer server.Close()
-	client := &client{
-		baseURL:             server.URL,
-		token:               "test-token",
-		http:                server.Client(),
-		responseBodyTimeout: 25 * time.Millisecond,
-	}
+	synctest.Test(t, func(t *testing.T) {
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":`))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}))
+		defer server.Close()
+		client := &client{
+			baseURL:             server.URL,
+			token:               "test-token",
+			http:                server.Client(),
+			responseBodyTimeout: 25 * time.Millisecond,
+		}
 
-	_, err := client.Readiness(context.Background())
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("readiness error=%v, want deadline exceeded", err)
-	}
+		_, err := client.Readiness(context.Background())
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("readiness error=%v, want deadline exceeded", err)
+		}
+	})
 }
 
 func TestClientTimeoutPreservesErrorStatus(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":"invalid`))
-		w.(http.Flusher).Flush()
-		<-r.Context().Done()
-	}))
-	defer server.Close()
-	client := &client{
-		baseURL:             server.URL,
-		token:               "test-token",
-		http:                server.Client(),
-		responseBodyTimeout: 25 * time.Millisecond,
-	}
+	synctest.Test(t, func(t *testing.T) {
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid`))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}))
+		defer server.Close()
+		client := &client{
+			baseURL:             server.URL,
+			token:               "test-token",
+			http:                server.Client(),
+			responseBodyTimeout: 25 * time.Millisecond,
+		}
 
-	_, err := client.Run(context.Background(), runRequest{})
-	var apiErr *apiError
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
-		t.Fatalf("run error=%v, want typed HTTP 400", err)
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("run error=%v, want wrapped deadline exceeded", err)
-	}
+		_, err := client.Run(context.Background(), runRequest{})
+		var apiErr *apiError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+			t.Fatalf("run error=%v, want typed HTTP 400", err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("run error=%v, want wrapped deadline exceeded", err)
+		}
+	})
 }
 
 func TestClientRejectsRunResponseIdentityMismatch(t *testing.T) {
@@ -538,61 +543,65 @@ func TestClientPreservesOrdinaryJSONAPIErrors(t *testing.T) {
 }
 
 func TestClientRejectsIncompleteNon2xxLifecycleResponse(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write([]byte(`{"id":"run_expected","status":"failed","exitCode":1}`))
-		w.(http.Flusher).Flush()
-		<-r.Context().Done()
-	}))
-	defer server.Close()
-	client := &client{
-		baseURL:             server.URL,
-		token:               "test-token",
-		http:                server.Client(),
-		responseBodyTimeout: 25 * time.Millisecond,
-	}
+	synctest.Test(t, func(t *testing.T) {
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"id":"run_expected","status":"failed","exitCode":1}`))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}))
+		defer server.Close()
+		client := &client{
+			baseURL:             server.URL,
+			token:               "test-token",
+			http:                server.Client(),
+			responseBodyTimeout: 25 * time.Millisecond,
+		}
 
-	out, err := client.Run(context.Background(), runRequest{ID: "run_expected"})
-	if out.ID != "run_expected" {
-		t.Fatalf("run id=%q, want buffered lifecycle identity", out.ID)
-	}
-	var apiErr *apiError
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway {
-		t.Fatalf("run error=%v, want typed HTTP 502", err)
-	}
-	var contractErr *responseContractError
-	if !errors.As(err, &contractErr) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("run error=%v, want contract and deadline errors", err)
-	}
+		out, err := client.Run(context.Background(), runRequest{ID: "run_expected"})
+		if out.ID != "run_expected" {
+			t.Fatalf("run id=%q, want buffered lifecycle identity", out.ID)
+		}
+		var apiErr *apiError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway {
+			t.Fatalf("run error=%v, want typed HTTP 502", err)
+		}
+		var contractErr *responseContractError
+		if !errors.As(err, &contractErr) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("run error=%v, want contract and deadline errors", err)
+		}
+	})
 }
 
 func TestClientRecoversRunIdentityFromTruncatedNon2xxLifecycleResponse(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write([]byte(`{"id":"run_generated","status":"failed","message":"truncated`))
-		w.(http.Flusher).Flush()
-		<-r.Context().Done()
-	}))
-	defer server.Close()
-	client := &client{
-		baseURL:             server.URL,
-		token:               "test-token",
-		http:                server.Client(),
-		responseBodyTimeout: 25 * time.Millisecond,
-	}
+	synctest.Test(t, func(t *testing.T) {
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"id":"run_generated","status":"failed","message":"truncated`))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}))
+		defer server.Close()
+		client := &client{
+			baseURL:             server.URL,
+			token:               "test-token",
+			http:                server.Client(),
+			responseBodyTimeout: 25 * time.Millisecond,
+		}
 
-	out, err := client.Run(context.Background(), runRequest{})
-	if out.ID != "run_generated" {
-		t.Fatalf("run id=%q, want buffered lifecycle identity", out.ID)
-	}
-	var apiErr *apiError
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway {
-		t.Fatalf("run error=%v, want typed HTTP 502", err)
-	}
-	var contractErr *responseContractError
-	if !errors.As(err, &contractErr) || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("run error=%v, want contract and deadline errors", err)
-	}
+		out, err := client.Run(context.Background(), runRequest{})
+		if out.ID != "run_generated" {
+			t.Fatalf("run id=%q, want buffered lifecycle identity", out.ID)
+		}
+		var apiErr *apiError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway {
+			t.Fatalf("run error=%v, want typed HTTP 502", err)
+		}
+		var contractErr *responseContractError
+		if !errors.As(err, &contractErr) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("run error=%v, want contract and deadline errors", err)
+		}
+	})
 }
 
 func TestClientRejectsMalformedNon2xxLifecycleResponse(t *testing.T) {
