@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -385,36 +386,38 @@ func TestStatusWaitUsesProviderDefaultAndPolls(t *testing.T) {
 func TestStatusWaitBoundsBlockedObservation(t *testing.T) {
 	for _, mode := range []string{"own deadline", "parent deadline", "parent cancellation"} {
 		t.Run(mode, func(t *testing.T) {
-			b, fake, _ := newStatusBackend(t)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			waitTimeout := time.Minute
-			if mode == "own deadline" {
-				waitTimeout = time.Millisecond
-			}
-			if mode == "parent deadline" {
-				var deadlineCancel context.CancelFunc
-				ctx, deadlineCancel = context.WithTimeout(ctx, time.Millisecond)
-				defer deadlineCancel()
-			}
-			fake.getSandbox = func(ctx context.Context, _ string) (Sandbox, error) {
-				if mode == "parent cancellation" {
-					cancel()
+			synctest.Test(t, func(t *testing.T) {
+				b, fake, _ := newStatusBackend(t)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				waitTimeout := time.Minute
+				if mode == "own deadline" {
+					waitTimeout = time.Millisecond
 				}
-				<-ctx.Done()
-				return Sandbox{}, errors.New("transport interrupted")
-			}
-			view, err := b.Status(ctx, core.StatusRequest{ID: "status-one", Wait: true, WaitTimeout: waitTimeout})
-			if !reflect.DeepEqual(view, core.StatusView{}) {
-				t.Fatalf("error returned populated view: %#v", view)
-			}
-			if mode == "own deadline" {
-				if core.ExitCodeForError(err, 1) != 5 || err == nil || err.Error() != "timed out waiting for blaxel sandbox sbx_1 to become ready" {
-					t.Fatalf("own deadline error = %v", err)
+				if mode == "parent deadline" {
+					var deadlineCancel context.CancelFunc
+					ctx, deadlineCancel = context.WithTimeout(ctx, time.Millisecond)
+					defer deadlineCancel()
 				}
-			} else if !errors.Is(err, ctx.Err()) || ctx.Err() == nil {
-				t.Fatalf("parent error = %v, want %v", err, ctx.Err())
-			}
+				fake.getSandbox = func(ctx context.Context, _ string) (Sandbox, error) {
+					if mode == "parent cancellation" {
+						cancel()
+					}
+					<-ctx.Done()
+					return Sandbox{}, errors.New("transport interrupted")
+				}
+				view, err := b.Status(ctx, core.StatusRequest{ID: "status-one", Wait: true, WaitTimeout: waitTimeout})
+				if !reflect.DeepEqual(view, core.StatusView{}) {
+					t.Fatalf("error returned populated view: %#v", view)
+				}
+				if mode == "own deadline" {
+					if core.ExitCodeForError(err, 1) != 5 || err == nil || err.Error() != "timed out waiting for blaxel sandbox sbx_1 to become ready" {
+						t.Fatalf("own deadline error = %v", err)
+					}
+				} else if !errors.Is(err, ctx.Err()) || ctx.Err() == nil {
+					t.Fatalf("parent error = %v, want %v", err, ctx.Err())
+				}
+			})
 		})
 	}
 }
@@ -868,27 +871,29 @@ func TestWaitProcessStopsRemoteWhenGetProcessReturnsCancellation(t *testing.T) {
 		}, want: context.DeadlineExceeded},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			backend, fake, _, _, _ := newLifecycleBackend(t)
-			ctx, cancel := tc.newContext()
-			defer cancel()
-			fake.getProcess = func(ctx context.Context) (Process, error) {
-				if tc.cancelDuringGet {
-					cancel()
+			synctest.Test(t, func(t *testing.T) {
+				backend, fake, _, _, _ := newLifecycleBackend(t)
+				ctx, cancel := tc.newContext()
+				defer cancel()
+				fake.getProcess = func(ctx context.Context) (Process, error) {
+					if tc.cancelDuringGet {
+						cancel()
+					}
+					<-ctx.Done()
+					return Process{}, ctx.Err()
 				}
-				<-ctx.Done()
-				return Process{}, ctx.Err()
-			}
 
-			_, err := backend.waitProcess(ctx, fake, "sbx_1", Process{ID: "proc_1", Status: "running"})
-			if !errors.Is(err, tc.want) {
-				t.Fatalf("waitProcess err=%v, want %v", err, tc.want)
-			}
-			if len(fake.stopped) != 1 || fake.stopped[0] != "proc_1" {
-				t.Fatalf("stopped=%#v, want remote cancellation", fake.stopped)
-			}
-			if !fake.stopDeadline || fake.stopContextErr != nil {
-				t.Fatalf("StopProcess context deadline=%t err=%v", fake.stopDeadline, fake.stopContextErr)
-			}
+				_, err := backend.waitProcess(ctx, fake, "sbx_1", Process{ID: "proc_1", Status: "running"})
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("waitProcess err=%v, want %v", err, tc.want)
+				}
+				if len(fake.stopped) != 1 || fake.stopped[0] != "proc_1" {
+					t.Fatalf("stopped=%#v, want remote cancellation", fake.stopped)
+				}
+				if !fake.stopDeadline || fake.stopContextErr != nil {
+					t.Fatalf("StopProcess context deadline=%t err=%v", fake.stopDeadline, fake.stopContextErr)
+				}
+			})
 		})
 	}
 }
