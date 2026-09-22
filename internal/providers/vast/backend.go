@@ -557,12 +557,7 @@ func (b *backend) targetFromInstance(ctx context.Context, client vastAPI, item v
 		target.SSH = ssh
 	}
 	if req.Repo.Root != "" && !req.NoLocalStateMutations && !req.StatusOnly && !req.ReleaseOnly {
-		if claimExists {
-			if err := shared.AuthorizeClaimActivity(claim); err != nil {
-				return core.LeaseTarget{}, err
-			}
-		}
-		updated, err := core.ClaimLeaseTargetForRepoConfigWithIdleTimeoutOverrideIfUnchanged(leaseID, server.Labels["slug"], b.cfg, target.Server, target.SSH, req.Repo.Root, b.cfg.IdleTimeout, shared.LegacyLabelIdleTimeout(claim), req.Reclaim, claim, claimExists)
+		updated, err := shared.AdmitResolvedLease(b.cfg, req, target, server.Labels["slug"], claim, claimExists, shared.LegacyLabelIdleTimeout(claim))
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}

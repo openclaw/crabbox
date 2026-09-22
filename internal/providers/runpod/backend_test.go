@@ -55,18 +55,36 @@ func runpodLifecycleFixture(t *testing.T) (*runpodLeaseBackend, core.LeaseTarget
 }
 
 func TestRunpodObservationPreservesClaimLifecycle(t *testing.T) {
-	for _, operation := range []string{"status", "status-only flag", "ready probe", "release", "list"} {
-		t.Run(operation, func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		req       core.ResolveRequest
+		emptyRoot bool
+	}{
+		{"status", core.ResolveRequest{StatusOnly: true, NoLocalStateMutations: true}, false},
+		{"status-only flag", core.ResolveRequest{StatusOnly: true}, false},
+		{"ready probe", core.ResolveRequest{StatusOnly: true, ReadyProbe: true, NoLocalStateMutations: true}, false},
+		{"release", core.ResolveRequest{ReleaseOnly: true, NoLocalStateMutations: true}, false},
+		{"release-only flag", core.ResolveRequest{ReleaseOnly: true}, false},
+		{"no local mutations", core.ResolveRequest{NoLocalStateMutations: true}, false},
+		{"empty root", core.ResolveRequest{}, true},
+		{"list", core.ResolveRequest{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			b, lease, original, repo, _ := runpodLifecycleFixture(t)
 			var server core.Server
-			if operation == "list" {
+			if tc.name == "list" {
 				items, err := b.List(t.Context(), core.ListRequest{})
 				if err != nil || len(items) != 1 {
 					t.Fatalf("list count=%d err=%v", len(items), err)
 				}
 				server = items[0]
 			} else {
-				got, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo, StatusOnly: operation != "release", ReleaseOnly: operation == "release", ReadyProbe: operation == "ready probe", NoLocalStateMutations: operation != "status-only flag"})
+				req := tc.req
+				req.ID = lease.LeaseID
+				if !tc.emptyRoot {
+					req.Repo = repo
+				}
+				got, err := b.Resolve(t.Context(), req)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -89,8 +107,40 @@ func TestRunpodObservationPreservesClaimLifecycle(t *testing.T) {
 	}
 }
 
+func TestRunpodResolveRejectsClaimChangedDuringObservation(t *testing.T) {
+	b, lease, original, repo, _ := runpodLifecycleFixture(t)
+	fake := b.client.(*fakeRunpodAPI)
+	getPod := fake.getPod
+	var replacement core.LeaseClaim
+	fake.getPod = func(id string) (runpodPod, error) {
+		pod, err := getPod(id)
+		labels := maps.Clone(original.Labels)
+		labels["profile"] = "newer"
+		var updateErr error
+		replacement, updateErr = core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, original, labels)
+		if updateErr != nil {
+			t.Fatal(updateErr)
+		}
+		return pod, err
+	}
+	got, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo})
+	after, readErr := core.ReadLeaseClaim(lease.LeaseID)
+	if err == nil || !reflect.DeepEqual(got, core.LeaseTarget{}) || readErr != nil || !reflect.DeepEqual(after, replacement) {
+		t.Fatalf("stale admission published success or changed claim: resolve=%v read=%v", err, readErr)
+	}
+}
+
 func TestRunpodTouchCommitsLifecyclePolicy(t *testing.T) {
-	b, lease, original, _, clock := runpodLifecycleFixture(t)
+	b, lease, original, repo, clock := runpodLifecycleFixture(t)
+	lease, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted, readErr := core.ReadLeaseClaim(lease.LeaseID)
+	snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+	if readErr != nil || admitted.IdleTimeoutSeconds != 300 || !exists || !set || !reflect.DeepEqual(snapshot, admitted) {
+		t.Fatal("admission did not preserve and return committed idle policy")
+	}
 	override := 90 * time.Minute
 	for i, intent := range []*time.Duration{nil, &override, nil} {
 		clock.current = clock.current.Add(time.Minute)

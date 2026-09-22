@@ -5,6 +5,7 @@
 ### Changed
 
 - Consolidate built-in fixed-lease admission, attempt codecs, claim binding, recovery policy, and terminal receipts in a shared engine; preserve native identity proofs and existing local records while retaining the external provider’s delegated protocol.
+- Share RunPod and Vast lease-reuse admission while preserving read-only observations, stale-claim rejection, and recorded idle-timeout policy. [PR 2469](https://github.com/openclaw/crabbox/pull/2469).
 
 ### Fixes
 

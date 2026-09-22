@@ -36,6 +36,18 @@ type ScopedLeaseFinishOptions struct {
 	ValidateClaim                   func(core.LeaseClaim) error
 }
 
+// AdmitResolvedLease authorizes activity on the observed claim and conditionally
+// commits repository admission. Callers own eligibility, provider identity checks,
+// and projection of the returned committed claim; observations must not call this.
+func AdmitResolvedLease(cfg core.Config, req core.ResolveRequest, target core.LeaseTarget, slug string, expected core.LeaseClaim, exists bool, idleOverride *time.Duration) (core.LeaseClaim, error) {
+	if exists {
+		if err := AuthorizeClaimActivity(expected); err != nil {
+			return core.LeaseClaim{}, err
+		}
+	}
+	return core.ClaimLeaseTargetForRepoConfigWithIdleTimeoutOverrideIfUnchanged(target.LeaseID, slug, cfg, target.Server, target.SSH, req.Repo.Root, cfg.IdleTimeout, idleOverride, req.Reclaim, expected, exists)
+}
+
 // RefreshRetainedLeaseActivity refreshes an existing claim after an admitted
 // delegated run. The caller retains its provider operation lock; this does not
 // perform admission or replace the core's recorded idle-timeout policy.
