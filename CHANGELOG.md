@@ -20,7 +20,7 @@
 
 - Bound GitHub membership verification to 15 seconds, including stalled response bodies and team pagination, so authentication fails closed without leaving shared checks stuck indefinitely. [PR 2481](https://github.com/openclaw/crabbox/pull/2481).
 - Bound GitHub OAuth code exchange and post-exchange verification while preserving one-use-code handling, the existing verification retry, and encrypted credential reuse on callback retries. [PR 2482](https://github.com/openclaw/crabbox/pull/2482).
-- Bound Cloudflare Access signing-key loads to 15 seconds so stalled responses cannot hold bearer authentication indefinitely; preserve identity fallback, key rotation, and failure caching.
+- Bound Cloudflare Access signing-key loads to 15 seconds so stalled responses cannot hold bearer authentication indefinitely; preserve identity fallback, key rotation, and failure caching. [PR 2483](https://github.com/openclaw/crabbox/pull/2483).
 - Delete each new Scaleway lease's allocation-recorded root disk on release, preserve recovery state after cleanup failures, and leave later-attached and legacy untracked disks untouched. [PR 2468](https://github.com/openclaw/crabbox/pull/2468).
 - Preserve caller cancellation causes and timeout classification during Scaleway public-IP readiness without changing its five-minute budget or timeout exit code. [PR 2468](https://github.com/openclaw/crabbox/pull/2468).
 - Preserve reclaimed fixed leases during cleanup by distinguishing ownership-fence rejection from an admitted deletion in the shared engine. [PR 2462](https://github.com/openclaw/crabbox/pull/2462).
