@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -787,23 +788,25 @@ func TestResolveWaitsForShutdownThenRestartsCodespace(t *testing.T) {
 }
 
 func TestResolveShuttingDownCodespaceUsesReadyTimeout(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	fc := newFakeCodespacesClient()
-	fc.items["cs-stopping"] = fakeCodespace("cs-stopping", "ShuttingDown")
-	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
-	b := newTestBackend(t, fc, fg)
-	b.readyTimeout = time.Nanosecond
-	b.pollInterval = time.Hour
-	leaseID := "cbx_123456789ad1"
-	server := b.serverFromCodespace(fc.items["cs-stopping"], b.labelsFor(leaseID, "stopping-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-stopping"], "stopping"))
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "stopping-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
-		t.Fatal(err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		fc := newFakeCodespacesClient()
+		fc.items["cs-stopping"] = fakeCodespace("cs-stopping", "ShuttingDown")
+		fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+		b := newTestBackend(t, fc, fg)
+		b.readyTimeout = time.Nanosecond
+		b.pollInterval = time.Hour
+		leaseID := "cbx_123456789ad1"
+		server := b.serverFromCodespace(fc.items["cs-stopping"], b.labelsFor(leaseID, "stopping-box", "example-org/my-app", "alice", true, releaseStop, fc.items["cs-stopping"], "stopping"))
+		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "stopping-box", b.cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, false); err != nil {
+			t.Fatal(err)
+		}
 
-	_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReadyProbe: true})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err=%v", err)
-	}
+		_, err := b.Resolve(context.Background(), core.ResolveRequest{ID: leaseID, ReadyProbe: true})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestResolveWaitsForTransitionalCodespaceBeforeSSH(t *testing.T) {
@@ -1620,18 +1623,20 @@ func TestControlPlaneUsesEnterpriseTokenForCustomAPIHost(t *testing.T) {
 }
 
 func TestWaitForAvailableUsesReadyTimeout(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	fc := newFakeCodespacesClient()
-	fc.items["cs-slow"] = fakeCodespace("cs-slow", "Provisioning")
-	fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
-	b := newTestBackend(t, fc, fg)
-	b.readyTimeout = time.Nanosecond
-	b.pollInterval = time.Hour
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		fc := newFakeCodespacesClient()
+		fc.items["cs-slow"] = fakeCodespace("cs-slow", "Provisioning")
+		fg := &fakeGH{login: "alice", token: "ghp_this_token_value_is_redacted"}
+		b := newTestBackend(t, fc, fg)
+		b.readyTimeout = time.Nanosecond
+		b.pollInterval = time.Hour
 
-	_, err := b.waitForAvailable(context.Background(), fc, "cs-slow")
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err=%v", err)
-	}
+		_, err := b.waitForAvailable(context.Background(), fc, "cs-slow")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestEffectiveWorkRootHonorsExplicitGenericWorkRoot(t *testing.T) {
