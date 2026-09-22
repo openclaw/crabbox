@@ -7465,17 +7465,6 @@ func newCleanupClaimFixture(t *testing.T, leaseID, containerID, status string, k
 	}
 }
 
-func (f *cleanupClaimFixture) expire(t *testing.T) {
-	t.Helper()
-	updated, err := core.UpdateLeaseClaimLabelsAndLastUsedIfUnchanged(
-		f.leaseID, f.claim, f.claim.Labels, time.Now().Add(-48*time.Hour),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.claim = updated
-}
-
 func (f *cleanupClaimFixture) assertOwnershipPresent(t *testing.T) {
 	t.Helper()
 	if _, err := os.Stat(f.keyPath); err != nil {
