@@ -1,11 +1,14 @@
+import {
+  GitHubTransientError,
+  withGitHubRequestDeadline,
+  type GitHubRequestDeadline,
+} from "./github-request";
 import type { Env } from "./types";
 
-const githubAPIURL = "https://api.github.com";
 const defaultMembershipCacheSeconds = 5 * 60;
 const maxMembershipCacheSeconds = 60 * 60;
 const maxGitHubTeamPages = 10;
 const membershipCacheMaxEntries = 1024;
-const membershipVerificationTimeoutMS = 15_000;
 
 interface GitHubTeam {
   slug?: string;
@@ -52,63 +55,12 @@ export type GitHubMembershipEnv = Pick<
 const membershipCache = new Map<string, number>();
 const membershipLoads = new Map<string, Promise<void>>();
 
-class GitHubMembershipDeadline {
-  private readonly controller = new AbortController();
-  private readonly timer: ReturnType<typeof setTimeout>;
-  private readonly expired: Promise<never>;
-
-  constructor() {
-    let expire!: (error: GitHubTransientError) => void;
-    this.expired = new Promise((_, reject) => {
-      expire = reject;
-    });
-    this.timer = setTimeout(() => {
-      const error = new GitHubTransientError("GitHub membership verification timed out.");
-      expire(error);
-      this.controller.abort(error);
-    }, membershipVerificationTimeoutMS);
-  }
-
-  async wait<T>(operation: () => Promise<T>): Promise<T> {
-    this.controller.signal.throwIfAborted();
-    return await Promise.race([operation(), this.expired]);
-  }
-
-  fetch(path: string, accessToken: string): Promise<Response> {
-    return this.wait(() =>
-      fetch(`${githubAPIURL}${path}`, {
-        headers: githubHeaders(accessToken),
-        signal: this.controller.signal,
-      }),
-    );
-  }
-
-  json<T>(response: Response): Promise<T> {
-    return this.wait(() => response.json() as Promise<T>);
-  }
-
-  close(): void {
-    clearTimeout(this.timer);
-    this.controller.abort();
-  }
-}
-
-async function withMembershipDeadline<T>(
-  operation: (deadline: GitHubMembershipDeadline) => Promise<T>,
-): Promise<T> {
-  const deadline = new GitHubMembershipDeadline();
-  try {
-    return await deadline.wait(() => operation(deadline));
-  } finally {
-    deadline.close();
-  }
-}
-
 export async function requireGitHubLoginMembership(
   accessToken: string,
   identity: Pick<GitHubMembershipIdentity, "owner" | "login">,
   requestedOrg: string,
   env: GitHubMembershipEnv,
+  deadline: GitHubRequestDeadline,
 ): Promise<string> {
   requireSafeGitHubRevocationConfig(env);
   if (githubUserIsRevoked(identity, env)) {
@@ -121,9 +73,7 @@ export async function requireGitHubLoginMembership(
     throw new GitHubAuthorizationError("GitHub login is not configured with an allowed org.");
   }
   const policy = githubMembershipPolicy({ ...identity, org }, env);
-  return withMembershipDeadline((deadline) =>
-    requireExactGitHubMembership(accessToken, identity.login, policy, deadline),
-  );
+  return requireExactGitHubMembership(accessToken, identity.login, policy, deadline);
 }
 
 export async function requireCurrentGitHubMembership(
@@ -162,7 +112,7 @@ export async function requireFreshGitHubMembership(
   normalizedPolicy?: GitHubMembershipPolicy,
 ): Promise<void> {
   const policy = normalizedPolicy ?? githubMembershipPolicy(identity, env);
-  await withMembershipDeadline(async (deadline) => {
+  await withGitHubRequestDeadline(async (deadline) => {
     await requireExactGitHubAccount(identity.accessToken, identity.owner, identity.login, deadline);
     await requireExactGitHubMembership(identity.accessToken, identity.login, policy, deadline);
   });
@@ -229,7 +179,7 @@ async function requireExactGitHubAccount(
   accessToken: string,
   owner: string,
   login: string,
-  deadline: GitHubMembershipDeadline,
+  deadline: GitHubRequestDeadline,
 ): Promise<void> {
   const expectedID = githubAccountID(owner);
   if (expectedID === undefined) {
@@ -237,7 +187,7 @@ async function requireExactGitHubAccount(
       "This GitHub session uses a legacy mutable identity. Log in again.",
     );
   }
-  const response = await deadline.fetch("/user", accessToken);
+  const response = await deadline.api("/user", accessToken);
   if (!response.ok) {
     throw await githubResponseError(
       response,
@@ -262,10 +212,10 @@ async function requireExactGitHubMembership(
   accessToken: string,
   login: string,
   policy: GitHubMembershipPolicy,
-  deadline: GitHubMembershipDeadline,
+  deadline: GitHubRequestDeadline,
 ): Promise<string> {
   const exactOrg = policy.org;
-  const response = await deadline.fetch(
+  const response = await deadline.api(
     `/user/memberships/orgs/${encodeURIComponent(exactOrg)}`,
     accessToken,
   );
@@ -293,7 +243,7 @@ async function requireAllowedTeamMembership(
   accessToken: string,
   login: string,
   policy: GitHubMembershipPolicy,
-  deadline: GitHubMembershipDeadline,
+  deadline: GitHubRequestDeadline,
 ): Promise<void> {
   if (policy.allowedTeams.length === 0) return;
   const allowedKeys = new Set(policy.allowedTeams);
@@ -355,12 +305,12 @@ function invalidAllowedTeamConfig(): GitHubAuthorizationError {
 
 async function userGitHubTeams(
   accessToken: string,
-  deadline: GitHubMembershipDeadline,
+  deadline: GitHubRequestDeadline,
 ): Promise<GitHubTeam[]> {
   const teams: GitHubTeam[] = [];
   for (let page = 1; page <= maxGitHubTeamPages; page += 1) {
     // oxlint-disable-next-line eslint/no-await-in-loop -- each page determines whether another exists.
-    const response = await deadline.fetch(`/user/teams?per_page=100&page=${page}`, accessToken);
+    const response = await deadline.api(`/user/teams?per_page=100&page=${page}`, accessToken);
     if (!response.ok) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- classify the current page response before advancing.
       throw await githubResponseError(
@@ -420,19 +370,10 @@ function teamKey(org: string, slug: string): string {
   return `${org.toLowerCase()}/${slug.toLowerCase()}`;
 }
 
-function githubHeaders(accessToken: string): Record<string, string> {
-  return {
-    accept: "application/vnd.github+json",
-    authorization: `Bearer ${accessToken}`,
-    "user-agent": "crabbox-coordinator",
-    "x-github-api-version": "2022-11-28",
-  };
-}
-
 async function githubResponseError(
   response: Response,
   message: string,
-  deadline: GitHubMembershipDeadline,
+  deadline: GitHubRequestDeadline,
 ): Promise<Error> {
   if (response.status === 429 || response.status >= 500) {
     return new GitHubTransientError(message);
@@ -451,7 +392,7 @@ async function githubResponseError(
 
 async function githubErrorDetails(
   response: Response,
-  deadline: GitHubMembershipDeadline,
+  deadline: GitHubRequestDeadline,
 ): Promise<{ message: string; documentationURL: string }> {
   try {
     const body = await deadline.json<{ message?: unknown; documentation_url?: unknown }>(response);
@@ -493,5 +434,3 @@ function github403RequiresReauthentication(details: {
 export class GitHubAuthorizationError extends Error {}
 
 export class GitHubCredentialError extends GitHubAuthorizationError {}
-
-export class GitHubTransientError extends Error {}

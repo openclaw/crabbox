@@ -6,11 +6,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { authenticateRequest, issueUserToken } from "../src/auth";
 import { prepareCoordinatorRequest, routeCoordinatorRequest } from "../src/coordinator-entry";
 import {
-  GitHubTransientError,
   githubMembershipPolicy,
   requireCurrentGitHubMembership,
   requireFreshGitHubMembership,
 } from "../src/github-membership";
+import { GitHubTransientError } from "../src/github-request";
 import type { Env } from "../src/types";
 
 const accessToken = "github-access-token-for-tests";

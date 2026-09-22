@@ -1,3 +1,6 @@
+import { once } from "node:events";
+import { createServer } from "node:http";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CoordinatorStorage, CoordinatorStorageView } from "../src/coordinator-runtime";
@@ -191,6 +194,44 @@ function runRetryDelayImmediately(): ReturnType<typeof vi.fn> {
   return retryDelay;
 }
 
+function stalledGitHubResponse(
+  mode: "headers" | "body",
+  value: unknown,
+  status = 200,
+): { response: Promise<Response>; finish: () => void } {
+  let finish!: () => void;
+  let finished = false;
+  const response =
+    mode === "headers"
+      ? new Promise<Response>((resolve) => {
+          finish = () => resolve(Response.json(value, { status }));
+        })
+      : Promise.resolve(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                const bytes = new TextEncoder().encode(JSON.stringify(value));
+                controller.enqueue(bytes.slice(0, 1));
+                finish = () => {
+                  controller.enqueue(bytes.slice(1));
+                  controller.close();
+                };
+              },
+            }),
+            { status },
+          ),
+        );
+  return {
+    response,
+    finish() {
+      if (!finished) {
+        finished = true;
+        finish();
+      }
+    },
+  };
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -367,6 +408,192 @@ describe("portal OAuth browser binding", () => {
 });
 
 describe("GitHub OAuth transient failures", () => {
+  it.each([
+    { mode: "headers", status: 200 },
+    { mode: "body", status: 200 },
+    { mode: "body", status: 403 },
+  ] as const)(
+    "bounds stalled OAuth exchange $mode/$status without retrying or late credential writes",
+    async ({ mode, status }) => {
+      const storage = new MemoryStorage();
+      const { callbackURL, loginID } = await startCLILogin(storage);
+      const fetchMock = stubSuccessfulGitHubOAuth();
+      vi.useFakeTimers();
+      let started!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const stalled = stalledGitHubResponse(
+        mode,
+        status === 200 ? { access_token: "github-access-token" } : { error: "upstream-error" },
+        status,
+      );
+      fetchMock.mockImplementationOnce(() => {
+        started();
+        return stalled.response;
+      });
+      let callbackStatus: number | undefined;
+      const callback = githubAuthRoute(
+        new Request(callbackURL),
+        "callback",
+        testRuntime(storage),
+        env,
+      ).then((response) => {
+        callbackStatus = response.status;
+        return response;
+      });
+      try {
+        await entered;
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(callbackStatus).toBe(503);
+        expect(fetchMock).toHaveBeenCalledOnce();
+        const pending = structuredClone(
+          await storage.get<Record<string, unknown>>(`oauth:${loginID}`),
+        );
+        expect(pending).toMatchObject({ id: loginID });
+        expect(pending?.githubCredential).toBeUndefined();
+        expect(pending?.token).toBeUndefined();
+        expect(pending?.callbackClaim).toBeUndefined();
+        stalled.finish();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(await storage.get(`oauth:${loginID}`)).toEqual(pending);
+        expect(fetchMock).toHaveBeenCalledOnce();
+      } finally {
+        stalled.finish();
+        await callback;
+      }
+    },
+  );
+
+  it("shares each post-exchange deadline across identity, email, and membership checks", async () => {
+    const storage = new MemoryStorage();
+    const { callbackURL, loginID } = await startCLILogin(storage);
+    const fetchMock = stubSuccessfulGitHubOAuth();
+    const successful = fetchMock.getMockImplementation();
+    if (!successful) throw new Error("GitHub fixture required");
+    vi.useFakeTimers();
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    fetchMock.mockImplementation((input: string | URL | Request) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://github.com/login/oauth/access_token") return successful(input);
+      started();
+      return new Promise<Response>((resolve) =>
+        setTimeout(() => resolve(successful(input)), 6_000),
+      );
+    });
+    let callbackStatus: number | undefined;
+    const callback = githubAuthRoute(
+      new Request(callbackURL),
+      "callback",
+      testRuntime(storage),
+      env,
+    ).then((response) => {
+      callbackStatus = response.status;
+      return response;
+    });
+    try {
+      await entered;
+      await vi.advanceTimersByTimeAsync(30_200);
+      expect(callbackStatus).toBe(503);
+      expect(fetchCallCount(fetchMock, "https://github.com/login/oauth/access_token")).toBe(1);
+      for (const path of [
+        "/user",
+        "/user/emails",
+        `/user/memberships/orgs/${env.CRABBOX_DEFAULT_ORG}`,
+      ]) {
+        expect(fetchCallCount(fetchMock, `https://api.github.com${path}`)).toBe(2);
+      }
+      const pending = structuredClone(
+        await storage.get<Record<string, unknown>>(`oauth:${loginID}`),
+      );
+      expect(pending).toMatchObject({ id: loginID, githubCredential: expect.any(String) });
+      expect(JSON.stringify(pending)).not.toContain("github-access-token");
+      expect(pending?.token).toBeUndefined();
+      expect(pending?.callbackClaim).toBeUndefined();
+      await vi.runOnlyPendingTimersAsync();
+      expect(await storage.get(`oauth:${loginID}`)).toEqual(pending);
+      fetchMock.mockImplementation(successful);
+      const resumed = await githubAuthRoute(
+        new Request(callbackURL),
+        "callback",
+        testRuntime(storage),
+        env,
+      );
+      expect(resumed.status).toBe(303);
+      expect(fetchCallCount(fetchMock, "https://github.com/login/oauth/access_token")).toBe(1);
+    } finally {
+      await vi.runAllTimersAsync();
+      await callback;
+    }
+  });
+
+  it("aborts a real HTTP OAuth exchange without retrying or persisting partial credentials", async () => {
+    const storage = new MemoryStorage();
+    const { callbackURL, loginID } = await startCLILogin(storage);
+    const nativeFetch = fetch;
+    let requests = 0;
+    let connectionClosed = false;
+    const server = createServer((request, response) => {
+      requests += 1;
+      request.resume();
+      response.on("close", () => {
+        connectionClosed = true;
+      });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write('{"access_token":');
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("loopback server required");
+    let headersReceived!: () => void;
+    const received = new Promise<void>((resolve) => {
+      headersReceived = resolve;
+    });
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        expect(String(input)).toBe("https://github.com/login/oauth/access_token");
+        expect(init?.method).toBe("POST");
+        const response = await nativeFetch(
+          `http://127.0.0.1:${address.port}/login/oauth/access_token`,
+          init,
+        );
+        headersReceived();
+        return response;
+      }),
+    );
+    const callback = githubAuthRoute(
+      new Request(callbackURL),
+      "callback",
+      testRuntime(storage),
+      env,
+    );
+    try {
+      await received;
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect((await callback).status).toBe(503);
+      vi.useRealTimers();
+      await vi.waitFor(() => expect(connectionClosed).toBe(true));
+      expect(requests).toBe(1);
+      const pending = await storage.get<Record<string, unknown>>(`oauth:${loginID}`);
+      expect(pending).toMatchObject({ id: loginID });
+      expect(pending?.githubCredential).toBeUndefined();
+      expect(pending?.token).toBeUndefined();
+      expect(pending?.callbackClaim).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
   it("does not automatically retry a transient OAuth code exchange", async () => {
     const storage = new MemoryStorage();
     const { callbackURL, loginID } = await startCLILogin(storage);

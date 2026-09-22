@@ -10,11 +10,12 @@ import {
 import { legacyPortalSessionCookieName, portalSessionCookieName } from "./cookies";
 import type { CoordinatorRuntime, CoordinatorStorage } from "./coordinator-runtime";
 import { bytesToHex, sha256Hex } from "./encoding";
+import { GitHubAuthorizationError, requireGitHubLoginMembership } from "./github-membership";
 import {
-  GitHubAuthorizationError,
   GitHubTransientError,
-  requireGitHubLoginMembership,
-} from "./github-membership";
+  withGitHubRequestDeadline,
+  type GitHubRequestDeadline,
+} from "./github-request";
 import { errorMessage, json, readJson } from "./http";
 import { requestOrgLabel } from "./org-identity";
 import { timingSafeEqual } from "./timing-safe";
@@ -22,7 +23,6 @@ import type { Env, Provider } from "./types";
 
 const githubAuthorizeURL = "https://github.com/login/oauth/authorize";
 const githubTokenURL = "https://github.com/login/oauth/access_token";
-const githubAPIURL = "https://api.github.com";
 const portalOAuthCookiePrefix = "__Host-crabbox_oauth_";
 const pendingOAuthTTLSeconds = 10 * 60;
 const maxPendingOAuthLogins = 100;
@@ -341,7 +341,9 @@ async function githubAuthCallback(
       if (!opened) throw new Error("Stored GitHub credential is invalid");
       accessToken = opened;
     } else {
-      accessToken = await exchangeGitHubCode(code, pending.redirectURI, env);
+      accessToken = await withGitHubRequestDeadline((deadline) =>
+        exchangeGitHubCode(code, pending.redirectURI, env, deadline),
+      );
       // The OAuth code is one-use, so retain the credential securely for callback retries.
       const githubCredential = await sealPendingGitHubCredential(env, accessToken);
       const stored = await storeClaimedGitHubCredential(
@@ -355,16 +357,19 @@ async function githubAuthCallback(
       }
     }
     const requestedOrg = requestOrgLabel(new Request(request.url), env);
-    const { identity, org } = await retryGitHubPostExchange(async () => {
-      const resolvedIdentity = await githubIdentity(accessToken);
-      const resolvedOrg = await requireGitHubLoginMembership(
-        accessToken,
-        resolvedIdentity,
-        requestedOrg,
-        env,
-      );
-      return { identity: resolvedIdentity, org: resolvedOrg };
-    });
+    const { identity, org } = await retryGitHubPostExchange(() =>
+      withGitHubRequestDeadline(async (deadline) => {
+        const resolvedIdentity = await githubIdentity(accessToken, deadline);
+        const resolvedOrg = await requireGitHubLoginMembership(
+          accessToken,
+          resolvedIdentity,
+          requestedOrg,
+          env,
+          deadline,
+        );
+        return { identity: resolvedIdentity, org: resolvedOrg };
+      }),
+    );
     const ttlSeconds = userTokenTTLSeconds(env);
     const tokenInput = {
       owner: identity.owner,
@@ -714,14 +719,19 @@ function githubOAuthConfiguration(
   return { redirectURI: `${publicURL.origin}/v1/auth/github/callback` };
 }
 
-async function exchangeGitHubCode(code: string, redirectURI: string, env: Env): Promise<string> {
+async function exchangeGitHubCode(
+  code: string,
+  redirectURI: string,
+  env: Env,
+  deadline: GitHubRequestDeadline,
+): Promise<string> {
   const body = new URLSearchParams({
     client_id: env.CRABBOX_GITHUB_CLIENT_ID ?? "",
     client_secret: env.CRABBOX_GITHUB_CLIENT_SECRET ?? "",
     code,
     redirect_uri: redirectURI,
   });
-  const response = await fetch(githubTokenURL, {
+  const response = await deadline.fetch(githubTokenURL, {
     method: "POST",
     headers: {
       accept: "application/json",
@@ -731,55 +741,53 @@ async function exchangeGitHubCode(code: string, redirectURI: string, env: Env): 
     body,
   });
   if (!response.ok) {
-    let error = "";
+    let errorCode = "";
     try {
-      const data = (await response.json()) as { error?: string };
-      error = data.error ?? "";
-    } catch {
+      const data = await deadline.json<{ error?: string }>(response);
+      errorCode = data.error ?? "";
+    } catch (error) {
+      if (error instanceof GitHubTransientError) throw error;
       // GitHub may return an HTML or empty body during an upstream outage.
     }
-    const message = error || `github token exchange failed: ${response.status}`;
+    const message = errorCode || `github token exchange failed: ${response.status}`;
     throw githubLookupError(message, response.status);
   }
-  const data = (await response.json()) as { access_token?: string };
+  const data = await deadline.json<{ access_token?: string }>(response);
   if (!data.access_token) {
     throw new Error("github token exchange failed: missing access token");
   }
   return data.access_token;
 }
 
-async function githubIdentity(accessToken: string): Promise<{
+async function githubIdentity(
+  accessToken: string,
+  deadline: GitHubRequestDeadline,
+): Promise<{
   owner: string;
   ownerSource: "github-verified-email";
   login: string;
   name?: string;
 }> {
-  const headers = {
-    accept: "application/vnd.github+json",
-    authorization: `Bearer ${accessToken}`,
-    "user-agent": "crabbox-coordinator",
-    "x-github-api-version": "2022-11-28",
-  };
-  const userResponse = await fetch(`${githubAPIURL}/user`, { headers });
+  const userResponse = await deadline.api("/user", accessToken);
   if (!userResponse.ok) {
     throw githubLookupError(
       `github user lookup failed: ${userResponse.status}`,
       userResponse.status,
     );
   }
-  const user = (await userResponse.json()) as GitHubUser;
+  const user = await deadline.json<GitHubUser>(userResponse);
   if (typeof user.id !== "number" || !Number.isSafeInteger(user.id) || user.id <= 0) {
     throw new GitHubAuthorizationError("GitHub account did not provide a stable numeric identity.");
   }
   const login = user.login || "unknown";
-  const emailResponse = await fetch(`${githubAPIURL}/user/emails`, { headers });
+  const emailResponse = await deadline.api("/user/emails", accessToken);
   if (!emailResponse.ok) {
     throw githubLookupError(
       `github email lookup failed: ${emailResponse.status}`,
       emailResponse.status,
     );
   }
-  const emails = (await emailResponse.json()) as GitHubEmail[];
+  const emails = await deadline.json<GitHubEmail[]>(emailResponse);
   const verifiedEmails = emails.filter(
     (email) => email.verified && typeof email.email === "string" && email.email.trim(),
   );

@@ -443,6 +443,11 @@ service account, or `DAYTONA_CRABBOX_KEY`. Node additionally requires
 
 GitHub OAuth start routes remain unauthenticated so a new user can bootstrap login.
 GitHub membership verification shares a 15-second deadline across account, organization, and team-page requests, including response bodies. A stalled check fails closed and releases its shared in-flight entry so later requests can retry; it never extends an expired success-cache entry.
+OAuth uses the same deadline owner: code exchange gets its own 15-second budget,
+and each post-exchange attempt shares 15 seconds across identity, verified-email,
+and membership lookups. Code exchange is never automatically retried; a timeout
+leaves its remote outcome unknown and may require a new login. Post-exchange
+verification retains the existing single retry and encrypted credential reuse.
 The coordinator limits active attempts to ten per caller source and 100 globally for
 both CLI and portal login, after removing expired attempts. Node deployments behind a
 reverse proxy must configure `CRABBOX_TRUSTED_PROXY_CIDRS`; otherwise caller limits use
