@@ -8,7 +8,7 @@
 
 ### Changed
 
-- Consolidate Azure configuration under one typed owner while preserving VM and dynamic-session routing, shared input provenance, disk policy, and coordinator request fields.
+- Consolidate Azure configuration under one typed owner while preserving VM and dynamic-session routing, shared input provenance, disk policy, and coordinator request fields. [PR 2491](https://github.com/openclaw/crabbox/pull/2491). Thanks @steipete.
 - Keep GCP configuration and explicit-input intent under one provider-specific owner while preserving file/environment precedence, OS-image defaults, and coordinator requests. [PR 2488](https://github.com/openclaw/crabbox/pull/2488). Thanks @steipete.
 - Reuse shared claim idle-expiry policy for Coder cleanup while preserving its twelve-hour grace period, timestamp normalization, and ownership safeguards. [PR 2490](https://github.com/openclaw/crabbox/pull/2490). Thanks @steipete.
 - Reuse Local Container's shared idle-expiry rule for legacy unscoped orphan claims while preserving strict twelve-hour grace, runtime identity checks, and stored-key retention. [PR 2489](https://github.com/openclaw/crabbox/pull/2489).
