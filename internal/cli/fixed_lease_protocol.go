@@ -57,13 +57,36 @@ func (fields FixedIntentFields) MarshalJSON() ([]byte, error) {
 // FixedAdmission describes the persisted evidence that permits submission.
 // Inventory absence alone never grants authority to repeat an ambiguous create.
 type FixedAdmission struct {
+	KeyedRetry               *FixedKeyedRetry
 	FreshOnly                bool
 	RepeatSameIdentity       bool
 	PendingKey, PendingValue string
 	SubmittedValue           string
 }
 
+// FixedKeyedRetry permits one recovery submission of an unbound attempt under
+// a provider's expiring idempotency key. The engine owns its clock and counter.
+type FixedKeyedRetry struct {
+	AttemptKey string
+	Window     time.Duration
+}
+
 func (p FixedAdmission) permits(tx *FixedTransaction) bool {
+	if retry := p.KeyedRetry; retry != nil {
+		if !p.FreshOnly || p.RepeatSameIdentity || retry.AttemptKey == "" || retry.Window <= 0 {
+			return false
+		}
+		if tx.fresh && len(tx.Claim.FixedCreateIntent.Attempt) == 0 {
+			return true
+		}
+		j := tx.Claim.FixedCreateIntent.Journal
+		if j == nil || j.Submission == nil || j.Submission.Count != 1 || j.Submission.Key != tx.Claim.FixedCreateIntent.Attempt[retry.AttemptKey] {
+			return false
+		}
+		first, err := time.Parse(time.RFC3339Nano, j.Submission.FirstSubmittedAt)
+		now := tx.now()
+		return err == nil && !now.Before(first) && now.Before(first.Add(retry.Window))
+	}
 	if p.RepeatSameIdentity {
 		return true
 	}
@@ -300,6 +323,27 @@ func (tx *FixedTransaction) Bind(b FixedResourceBinding) error {
 }
 
 func (tx *FixedTransaction) Admit() error {
+	if tx.admission != nil && tx.admission.KeyedRetry != nil {
+		intent := tx.Claim.FixedCreateIntent
+		key := intent.Attempt[tx.admission.KeyedRetry.AttemptKey]
+		if key == "" {
+			return FixedUncertainCustody(tx.Claim.LeaseID)
+		}
+		var submission FixedKeyedSubmission
+		if intent.Journal.Submission == nil {
+			if !tx.fresh {
+				return FixedUncertainCustody(tx.Claim.LeaseID)
+			}
+			submission = FixedKeyedSubmission{Key: key, FirstSubmittedAt: tx.now().UTC().Format(time.RFC3339Nano), Count: 1}
+		} else {
+			if !tx.admission.permits(tx) {
+				return FixedUncertainCustody(tx.Claim.LeaseID)
+			}
+			submission = *intent.Journal.Submission
+			submission.Count++
+		}
+		intent.Journal.Submission = &submission
+	}
 	if tx.admission != nil && tx.admission.PendingKey != "" {
 		tx.Claim.FixedCreateIntent.Attempt[tx.admission.PendingKey] = tx.admission.SubmittedValue
 	}
@@ -648,6 +692,10 @@ func CloneLeaseClaim(claim LeaseClaim) LeaseClaim {
 	claim = cloneLeaseClaim(claim)
 	if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.Journal != nil {
 		journal := *claim.FixedCreateIntent.Journal
+		if journal.Submission != nil {
+			submission := *journal.Submission
+			journal.Submission = &submission
+		}
 		claim.FixedCreateIntent.Journal = &journal
 	}
 	return claim

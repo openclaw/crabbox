@@ -251,7 +251,7 @@ type IdempotentLeaseIDBackend interface {
 }
 ```
 
-The AWS, Azure, DigitalOcean, Daytona, Incus, Machine0, local-container, Parallels,
+The ASCII Box, AWS, Azure, DigitalOcean, Daytona, Incus, Machine0, local-container, Parallels,
 Proxmox, and Tenki direct backends implement this capability; coordinator-backed
 leases support it through the coordinator wrapper. External
 backends support it only when their configured protocol explicitly advertises
@@ -276,6 +276,17 @@ payload with `WriteFixedAttempt` before allocation. Only a provider-certified
 definite failure may call `tx.RejectAttempt`; unknown outcomes retain custody.
 Adapters treat the transaction claim as read-only and publish returned evidence
 through `tx.Bind` or `tx.Observe`. Binding cannot retarget a known native identity.
+
+Providers with expiring idempotency keys can combine `FreshOnly` with
+`FixedAdmission.KeyedRetry`, specifying the native attempt key and retention
+window. Core journals the key, first submission time, and submission count before
+each call. Only one recovery submission is permitted, for an unbound attempt
+inside the original window, with a context capped at that deadline. A missing
+journal, changed key, backward clock, expired window, or consumed recovery
+allowance retains the attempt without resubmission. Keyed recovery requires a
+pre-submission plan and cannot use deferred admission. `ObserveExact` can return
+an inventory-discovered candidate only when native evidence attests the attempt;
+an empty list or matching display name grants no authority.
 
 `core.InspectFixedResource` cannot persist or prepare access.
 `core.DeleteFixedResource` keeps claim comparison, native proof, and terminal

@@ -14,9 +14,18 @@ import (
 // attempt dialect. Native submission/deletion witnesses remain authoritative;
 // in particular, a legacy empty attempt is not proof of non-submission.
 type FixedLeaseJournal struct {
-	Version  int    `json:"version"`
-	Phase    string `json:"phase"`
-	Revision uint64 `json:"revision"`
+	Version    int                   `json:"version"`
+	Phase      string                `json:"phase"`
+	Revision   uint64                `json:"revision"`
+	Submission *FixedKeyedSubmission `json:"submission,omitempty"`
+}
+
+// FixedKeyedSubmission is written before each admitted native call. Losing a
+// reply (or crashing before sending) consumes that submission permanently.
+type FixedKeyedSubmission struct {
+	Key              string `json:"key"`
+	FirstSubmittedAt string `json:"firstSubmittedAt"`
+	Count            int    `json:"count"`
 }
 
 // FixedIntentFingerprint hashes a provider's canonical schema without changing
@@ -46,6 +55,7 @@ type FixedTransaction struct {
 	failures     []string
 	persist      func() error
 	admission    *FixedAdmission
+	now          func() time.Time
 }
 
 func newFixedTransaction(claim *LeaseClaim, fresh bool, persist func() error) (*FixedTransaction, error) {
@@ -64,6 +74,11 @@ func validateFixedJournal(intent *FixedCreateIntent) error {
 	if j := intent.Journal; j != nil {
 		if j.Version != 1 || j.Revision == 0 {
 			return Exit(4, "lease_id_conflict: unsupported fixed lease journal")
+		}
+		if s := j.Submission; s != nil {
+			if _, err := time.Parse(time.RFC3339Nano, s.FirstSubmittedAt); err != nil || s.Key == "" || s.Count < 1 || s.Count > 2 {
+				return Exit(4, "lease_id_conflict: invalid keyed submission journal")
+			}
 		}
 		switch j.Phase {
 		case "prepared", "observed", "submitting", "bound", "acquired", "deleting", "released":
@@ -96,13 +111,15 @@ func (tx *FixedTransaction) Record(phase string) error {
 		phase = "acquired"
 	}
 	revision := uint64(1)
+	var submission *FixedKeyedSubmission
 	if i.Journal != nil {
+		submission = i.Journal.Submission
 		revision = i.Journal.Revision
 		if i.Journal.Phase != phase || !maps.Equal(i.Attempt, tx.attempt) || !reflect.DeepEqual(i.FailedAttempts, tx.failures) {
 			revision++
 		}
 	}
-	i.Journal = &FixedLeaseJournal{Version: 1, Phase: phase, Revision: revision}
+	i.Journal = &FixedLeaseJournal{Version: 1, Phase: phase, Revision: revision, Submission: submission}
 	if err := validateFixedJournal(i); err != nil {
 		return err
 	}
@@ -170,6 +187,9 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 	if ops.Admission == nil || ops.DescribeIntent == nil || (ops.Plan == nil && !ops.PlanDuringSubmit) || ops.ObserveExact == nil || ops.Submit == nil || ops.PrepareAccess == nil {
 		return LeaseTarget{}, fmt.Errorf("fixed lease engine requires all acquisition operations")
 	}
+	if ops.Admission.KeyedRetry != nil && (ops.DeferredAdmission || ops.PlanDuringSubmit || !ops.Admission.FreshOnly || ops.Admission.RepeatSameIdentity || ops.Admission.PendingKey != "" || ops.Admission.KeyedRetry.AttemptKey == "" || ops.Admission.KeyedRetry.Window <= 0) {
+		return LeaseTarget{}, fmt.Errorf("keyed recovery requires fresh-only admission and a pre-submission plan")
+	}
 	fresh := false
 	opts.journal = true
 	return AcquireFixedLease(opts, func(ctx context.Context, claim *LeaseClaim, exists bool) (FixedLeaseBinding, error) {
@@ -189,6 +209,10 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 			return LeaseTarget{}, err
 		}
 		tx.admission = ops.Admission
+		tx.now = opts.Now
+		if tx.now == nil {
+			tx.now = time.Now
+		}
 		observation, err := ops.ObserveExact(ctx, tx, FixedObserveAcquire)
 		if err != nil {
 			return LeaseTarget{}, err
@@ -225,6 +249,19 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 				if err := tx.Admit(); err != nil {
 					return LeaseTarget{}, err
 				}
+			}
+			if policy := ops.Admission.KeyedRetry; policy != nil {
+				first, _ := time.Parse(time.RFC3339Nano, claim.FixedCreateIntent.Journal.Submission.FirstSubmittedAt)
+				remaining := first.Add(policy.Window).Sub(tx.now())
+				if remaining <= 0 {
+					return LeaseTarget{}, FixedUncertainCustody(claim.LeaseID)
+				}
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, remaining)
+				defer cancel()
+			}
+			if err := ctx.Err(); err != nil {
+				return LeaseTarget{}, err
 			}
 			resource, err = ops.Submit(ctx, tx)
 			if err != nil {

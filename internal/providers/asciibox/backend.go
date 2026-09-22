@@ -43,6 +43,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if req.RequestedLeaseID != "" {
+		return b.acquireFixed(ctx, cfg, client, req)
+	}
 	leaseID := core.NewLeaseID()
 	slug, err := core.AllocateClaimLeaseSlug(leaseID, req.RequestedSlug)
 	if err != nil {
@@ -152,6 +155,11 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if claim, ok, err := core.ResolveLeaseClaimForProvider(req.ID, providerName); err != nil {
+		return core.LeaseTarget{}, err
+	} else if ok && fixedBoxKind.IsFixedClaim(claim) {
+		return b.resolveFixed(ctx, cfg, client, claim, req)
+	}
 	if req.IsReadOnlyStatus() {
 		leaseID, boxID, slug, err := b.resolveBoxID(ctx, client, req.ID)
 		if err != nil {
@@ -166,6 +174,9 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 	claim, err := resolveOwnedBox(cfg, req.ID)
 	if err != nil {
 		return core.LeaseTarget{}, err
+	}
+	if fixedBoxKind.IsFixedClaim(claim) {
+		return b.resolveFixed(ctx, cfg, client, claim, req)
 	}
 	var lease core.LeaseTarget
 	err = core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
@@ -271,6 +282,11 @@ func (b *backend) Status(ctx context.Context, req core.StatusRequest) (core.Stat
 	if err != nil {
 		return core.StatusView{}, err
 	}
+	if claim, ok, err := core.ResolveLeaseClaimForProvider(req.ID, providerName); err != nil {
+		return core.StatusView{}, err
+	} else if ok && fixedBoxKind.IsFixedClaim(claim) {
+		return b.statusFixed(ctx, cfg, client, claim, req)
+	}
 	leaseID, boxID, slug, err := b.resolveBoxID(ctx, client, req.ID)
 	if err != nil {
 		return core.StatusView{}, err
@@ -307,6 +323,24 @@ func (b *backend) ReleaseLeaseWithOutcome(ctx context.Context, req core.ReleaseL
 	claim, err := shared.RequireClaimSnapshot(req.Lease.Server, providerName)
 	if err != nil {
 		return core.ReleaseLeaseOutcome{}, err
+	}
+	if fixedBoxKind.IsFixedClaim(claim) {
+		if req.Lease.LeaseID != claim.LeaseID || req.Lease.Server.CloudID != claim.CloudID {
+			return core.ReleaseLeaseOutcome{}, core.Exit(4, "lease_id_conflict: ascii-box release target changed")
+		}
+		ctx, cancel := context.WithTimeout(ctx, boxReleaseTimeout)
+		defer cancel()
+		ctx = withBoxCleanupProgress(ctx, b.rt.Stderr)
+		return b.releaseFixed(ctx, cfg, client, claim, func(box boxData) {
+			if req.GuardedRemoteCleanup != nil {
+				lease := req.Lease
+				lease.Server = fixedBoxServer(cfg, box, claim, true)
+				if target, err := boxSSHTarget(cfg, box, claim.LeaseID); err == nil {
+					lease.SSH = target
+					req.GuardedRemoteCleanup(ctx, lease)
+				}
+			}
+		})
 	}
 	if _, err := boxClaimBinding(cfg, claim); err != nil {
 		return core.ReleaseLeaseOutcome{}, err

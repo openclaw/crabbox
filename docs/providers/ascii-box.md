@@ -18,8 +18,8 @@ Read when:
 > migration.
 
 [Boat](https://boat.dev) (by ASCII) provides persistent Ubuntu sandbox VMs.
-Crabbox currently uses the documented legacy `box --json` automation surface as
-the control plane, lets `box ssh` prepare the CLI-managed SSH key, and then runs
+Crabbox uses the documented legacy `box --json` automation surface and the public
+Box API for keyed fixed-ID creation, lets `box ssh` prepare the CLI-managed SSH key, and then runs
 normal Crabbox sync and commands over SSH. The provider does not depend on
 private exec, upload, or command-stream REST endpoints.
 
@@ -78,6 +78,55 @@ CLI.
 `BOX_ORG` selects an organization by ID or name. Without it, Crabbox explicitly
 uses `personal`; the native CLI's sticky organization selection is not inherited.
 Keep the same endpoint and organization selector when reusing or stopping a lease.
+For fixed-ID API creation, use an organization **ID**, rather than its display
+name, in `BOX_ORG`; omit it or use `personal` for personal billing.
+
+## Fixed lease IDs
+
+```sh
+crabbox warmup --provider boat --lease-id cbx_123456789abc
+crabbox warmup --provider boat --lease-id cbx_123456789abc
+crabbox stop --provider boat cbx_123456789abc
+```
+
+The shared fixed-lease engine durably records the normalized intent, endpoint and
+organization-or-personal scope, and an `Idempotency-Key` derived from the lease ID
+and intent fingerprint before sending `POST /api/box/v1/boxes`. The API chooses
+the immutable Box ID; there is no caller-chosen native ID or create-time name.
+Crabbox stores the returned ID before readiness or SSH preparation. Identical
+replays look up that exact ID and verify its creation timestamp and recorded
+scope. Changed intent, scope, or native identity produces `lease_id_conflict`.
+
+The [public API](https://docs.boat.dev/openapi/box-v1.yaml) retains idempotency keys
+for **24 hours** (`asciiBoxIdempotencyWindow`). If the response is lost before
+Crabbox records a Box ID, the engine permits **one** recovery submission with the
+same key and body, strictly before 24 hours have elapsed from its recorded first
+submission. The existing intent TTL may expire earlier. The engine records the
+recovery submission before sending it and bounds its context to the remaining
+window; the HTTP client also limits each call to 30 seconds. Redirects and hidden
+HTTP transport replays are disabled. A crash after admission consumes that
+submission even if the request never reached the service.
+
+After that one recovery attempt, at or beyond the window boundary, or if the
+clock moves behind the original submission time, Crabbox retains the unresolved
+attempt and never submits another create. A returned Box ID also permanently
+ends create submission, including when that Box is temporarily absent or fails
+readiness. Complete inventory has no idempotency-key attribution, so Crabbox
+does not adopt a Box from its name or a coincidental inventory match. Preserve
+local Crabbox state and inspect unresolved resources with the provider tools.
+
+Release uses the existing exact-ID deletion-operation checks and complete
+inventory confirmation. The engine retains a single-use terminal tombstone;
+repeating `stop` is safe, and the lease ID can never allocate another Box. Use a
+new lease ID for later work. Native 404 plus complete inventory absence can
+finalize a known Box; an uncertain attempt without a returned ID stays retained.
+
+Account identity remains a limitation: scope evidence is only the endpoint and
+organization selector. Two personal account keys on the same endpoint are
+indistinguishable, while native idempotency keys are account-scoped. Keep the
+original account selected for recovery, replay, and release; switching accounts
+invalidates the provider's same-key guarantee. Credentials are not persisted in
+the engine's attempt or fingerprint.
 
 ## Config
 
@@ -112,6 +161,9 @@ BOX_ORG
 ```
 
 ## Lifecycle
+
+The following describes ordinary, generated lease IDs. Fixed IDs use the shared
+engine described above and retain terminal records instead of removing claims.
 
 1. `crabbox warmup --provider boat` creates a sandbox through `box new --json`,
    verifies the original Box ID and creation timestamp through `box info`, stores
