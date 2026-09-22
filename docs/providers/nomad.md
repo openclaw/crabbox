@@ -276,6 +276,10 @@ ID is unused, so a collision cannot retarget an existing job.
    deregisters TTL-expired or idle-expired Crabbox-owned jobs, removes missing
    stale claims, and skips active claims. `--dry-run` prints the planned action
    without mutating Nomad or local claim state.
+   Idle expiry requires positive persisted seconds that fit in a duration; malformed
+   values remain retained by the idle rule, while the independent TTL rule still
+   applies first. Valid idle deadlines continue to expire at equality, and the
+   stored last-used timestamp is not whitespace-normalized.
 
 Destructive remote work under the claim lock shares one `nomad.evalTimeout`
 budget (default `5m`), including ownership lookup, deregistration evaluation,

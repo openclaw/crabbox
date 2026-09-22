@@ -7,6 +7,7 @@ import (
 	"time"
 
 	nomadapi "github.com/hashicorp/nomad/api"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -147,9 +148,9 @@ func claimCleanupDue(claim LeaseClaim, now time.Time) (bool, string) {
 			return true, "ttl_expired"
 		}
 	}
-	if claim.IdleTimeoutSeconds > 0 && claim.LastUsedAt != "" {
+	if idle, valid := shared.PositiveIdleDuration(claim.IdleTimeoutSeconds); valid && claim.LastUsedAt != "" {
 		usedAt, err := time.Parse(time.RFC3339, claim.LastUsedAt)
-		if err == nil && !usedAt.Add(time.Duration(claim.IdleTimeoutSeconds)*time.Second).After(now) {
+		if err == nil && !usedAt.Add(idle).After(now) {
 			return true, "idle_expired"
 		}
 	}

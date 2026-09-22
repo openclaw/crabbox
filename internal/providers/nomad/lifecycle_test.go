@@ -589,6 +589,44 @@ func markRegistrationClaim(t *testing.T, claim LeaseClaim, job *nomadapi.Job, st
 	return updated
 }
 
+func TestClaimCleanupDuePreservesIdleBoundsAndTTLPrecedence(t *testing.T) {
+	now := time.Date(2026, 6, 24, 20, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		name      string
+		seconds   int64
+		lastUsed  string
+		expiresAt string
+		checkAt   time.Time
+		wantDue   bool
+		wantWhy   string
+	}{
+		{name: "overflowing positive remains retained", seconds: 9223372037, lastUsed: now.Format(time.RFC3339), wantWhy: "retained"},
+		{name: "TTL still expires with malformed idle", seconds: 9223372037, lastUsed: now.Format(time.RFC3339), expiresAt: now.Format(time.RFC3339), wantDue: true, wantWhy: "ttl_expired"},
+		{name: "negative wrapping positive remains retained", seconds: -18446744073, lastUsed: now.Add(-time.Hour).Format(time.RFC3339), wantWhy: "retained"},
+		{name: "disabled idle remains retained", lastUsed: now.Add(-time.Hour).Format(time.RFC3339), wantWhy: "retained"},
+		{name: "idle expires at equality", seconds: 60, lastUsed: now.Add(-time.Minute).Format(time.RFC3339), wantDue: true, wantWhy: "idle_expired"},
+		{name: "idle retained before equality", seconds: 60, lastUsed: now.Add(-time.Minute).Format(time.RFC3339), checkAt: now.Add(-time.Nanosecond), wantWhy: "retained"},
+		{name: "timestamp remains untrimmed", seconds: 60, lastUsed: " " + now.Add(-time.Hour).Format(time.RFC3339) + " ", wantWhy: "retained"},
+		{name: "TTL precedes invalid timestamp", seconds: 60, lastUsed: "invalid", expiresAt: now.Format(time.RFC3339), wantDue: true, wantWhy: "ttl_expired"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			seconds := int(tt.seconds)
+			if int64(seconds) != tt.seconds {
+				t.Skip("persisted timeout is not representable on this architecture")
+			}
+			checkAt := tt.checkAt
+			if checkAt.IsZero() {
+				checkAt = now
+			}
+			claim := LeaseClaim{IdleTimeoutSeconds: seconds, LastUsedAt: tt.lastUsed, Labels: map[string]string{claimLabelExpiresAt: tt.expiresAt}}
+			due, why := claimCleanupDue(claim, checkAt)
+			if due != tt.wantDue || why != tt.wantWhy {
+				t.Fatalf("claimCleanupDue() = (%v, %q), want (%v, %q)", due, why, tt.wantDue, tt.wantWhy)
+			}
+		})
+	}
+}
+
 func TestCleanupDryRunAndLiveOwnedExpiredClaims(t *testing.T) {
 	fake := newLifecycleFakeClient()
 	b, stdout, _ := testBackend(t, fake)

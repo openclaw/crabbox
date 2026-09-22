@@ -1427,6 +1427,14 @@ keeps resource identity validation and error diagnostics local.
 `Stop` should stop the provider resource, remove local claims, and remove local
 per-resource keys if the backend created them.
 
+Persisted claim idle seconds are converted by `shared.PositiveIdleDuration`,
+which rejects nonpositive values and values exceeding the largest representable
+whole-second duration. Both shared idle-expiry helpers use this conversion.
+`ClaimIdleCleanupDue` trims timestamps and expires at equality without grace;
+`ClaimIdleExpiredAfterGrace` retains caller-owned timestamp normalization and
+strict expiry after separately adding idle time and grace. Invalid values never
+authorize idle cleanup; adapter TTL and terminal-state decisions remain separate.
+
 Local Container uses `shared.ClaimIdleExpiredAfterGrace` for claimed-container
 idle expiry, retaining its twelve-hour grace and strict expiry boundary. Keep
 labels, terminal states, claimless label timestamps, and fenced deletion remain

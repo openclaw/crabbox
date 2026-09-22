@@ -1,7 +1,6 @@
 package shared
 
 import (
-	"math"
 	"strings"
 	"time"
 
@@ -41,15 +40,14 @@ func LocalInstanceServer(provider, name, state string, running bool, labels map[
 // ClaimIdleExpiredAfterGrace preserves strict expiry and active-claim reasons.
 // Callers own timestamp whitespace normalization and all deletion policy.
 func ClaimIdleExpiredAfterGrace(claim core.LeaseClaim, now time.Time, grace time.Duration) (bool, string) {
-	seconds := int64(claim.IdleTimeoutSeconds)
-	if seconds <= 0 || seconds > math.MaxInt64/int64(time.Second) {
+	idle, valid := PositiveIdleDuration(claim.IdleTimeoutSeconds)
+	if !valid {
 		return false, "claim active"
 	}
 	lastUsed, err := time.Parse(time.RFC3339, claim.LastUsedAt)
 	if err != nil || lastUsed.IsZero() {
 		return false, "claim active"
 	}
-	idle := time.Duration(seconds) * time.Second
 	if now.After(lastUsed.Add(idle).Add(grace)) {
 		return true, "claim expired"
 	}
