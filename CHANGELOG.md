@@ -7,7 +7,7 @@
 - Consolidate built-in fixed-lease admission, attempt codecs, claim binding, recovery policy, and terminal receipts in a shared engine; preserve native identity proofs and existing local records while retaining the external provider’s delegated protocol.
 - Share RunPod and Vast lease-reuse admission while preserving read-only observations, stale-claim rejection, and recorded idle-timeout policy. [PR 2469](https://github.com/openclaw/crabbox/pull/2469).
 - Share AWS and Azure endpoint-refresh identity policy while preserving recorded cleanup authority and legacy-claim behavior. [PR 2470](https://github.com/openclaw/crabbox/pull/2470).
-- Reuse shared claim idle-expiry policy for Local Container cleanup while preserving its twelve-hour grace period and ownership safeguards.
+- Reuse shared claim idle-expiry policy for Local Container cleanup while preserving its twelve-hour grace period and ownership safeguards. [PR 2475](https://github.com/openclaw/crabbox/pull/2475).
 
 ### Fixes
 
