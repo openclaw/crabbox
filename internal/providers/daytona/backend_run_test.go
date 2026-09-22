@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
@@ -60,99 +61,101 @@ func TestManualConfigInputFlags(t *testing.T) {
 }
 
 func TestDaytonaCommandRunnerPreservesCallerExecutionBudget(t *testing.T) {
-	var requests []map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Errorf("decode request: %v", err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
+	synctest.Test(t, func(t *testing.T) {
+		var requests []map[string]any
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var request map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			requests = append(requests, request)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"result":"done","exitCode":0}`)
+		}))
+		defer server.Close()
+
+		toolboxConfig := toolbox.NewConfiguration()
+		toolboxConfig.Servers = toolbox.ServerConfigurations{{URL: server.URL}}
+		sharedHTTPClient := server.Client()
+		sharedHTTPClient.Timeout = time.Minute
+		toolboxConfig.HTTPClient = sharedHTTPClient
+		toolboxClient := toolbox.NewAPIClient(toolboxConfig)
+		sandbox := &sdkdaytona.Sandbox{
+			ToolboxClient: toolboxClient,
+			Process:       sdkdaytona.NewProcessService(toolboxClient, nil, sdktypes.CodeLanguage("")),
 		}
-		requests = append(requests, request)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"result":"done","exitCode":0}`)
-	}))
-	defer server.Close()
 
-	toolboxConfig := toolbox.NewConfiguration()
-	toolboxConfig.Servers = toolbox.ServerConfigurations{{URL: server.URL}}
-	sharedHTTPClient := server.Client()
-	sharedHTTPClient.Timeout = time.Minute
-	toolboxConfig.HTTPClient = sharedHTTPClient
-	toolboxClient := toolbox.NewAPIClient(toolboxConfig)
-	sandbox := &sdkdaytona.Sandbox{
-		ToolboxClient: toolboxClient,
-		Process:       sdkdaytona.NewProcessService(toolboxClient, nil, sdktypes.CodeLanguage("")),
-	}
+		runner := newDaytonaCommandRunner(sandbox)
+		if toolboxConfig.HTTPClient == sharedHTTPClient {
+			t.Fatal("process commands reused the shared Daytona control-plane HTTP client")
+		}
+		if got, want := sharedHTTPClient.Timeout, time.Minute; got != want {
+			t.Fatalf("shared Daytona control-plane HTTP timeout=%s, want %s", got, want)
+		}
+		if _, err := runner.ExecuteCommand(t.Context(), "sleep 65"); err != nil {
+			t.Fatal(err)
+		}
 
-	runner := newDaytonaCommandRunner(sandbox)
-	if toolboxConfig.HTTPClient == sharedHTTPClient {
-		t.Fatal("process commands reused the shared Daytona control-plane HTTP client")
-	}
-	if got, want := sharedHTTPClient.Timeout, time.Minute; got != want {
-		t.Fatalf("shared Daytona control-plane HTTP timeout=%s, want %s", got, want)
-	}
-	if _, err := runner.ExecuteCommand(t.Context(), "sleep 65"); err != nil {
-		t.Fatal(err)
-	}
+		if got, want := toolboxConfig.HTTPClient.Timeout, time.Duration(0); got != want {
+			t.Fatalf("HTTP timeout=%s, want %s", got, want)
+		}
+		if got, want := requests[0]["timeout"], float64(math.MaxInt32); got != want {
+			t.Fatalf("remote timeout=%v, want %v", got, want)
+		}
+		t.Logf("caller deadline=none remote timeout=%.0fs HTTP client timeout=%s", requests[0]["timeout"], toolboxConfig.HTTPClient.Timeout)
 
-	if got, want := toolboxConfig.HTTPClient.Timeout, time.Duration(0); got != want {
-		t.Fatalf("HTTP timeout=%s, want %s", got, want)
-	}
-	if got, want := requests[0]["timeout"], float64(math.MaxInt32); got != want {
-		t.Fatalf("remote timeout=%v, want %v", got, want)
-	}
-	t.Logf("caller deadline=none remote timeout=%.0fs HTTP client timeout=%s", requests[0]["timeout"], toolboxConfig.HTTPClient.Timeout)
+		longContext, cancelLong := context.WithTimeout(t.Context(), 90*time.Minute)
+		defer cancelLong()
+		if _, err := runner.ExecuteCommand(longContext, "sleep 4500"); err != nil {
+			t.Fatal(err)
+		}
+		if got := requests[1]["timeout"].(float64); got < 5399 || got > 5400 {
+			t.Fatalf("90-minute context remote timeout=%v, want approximately 5400 seconds", got)
+		}
+		t.Logf("caller deadline=90m remote timeout=%.0fs HTTP client timeout=%s", requests[1]["timeout"], toolboxConfig.HTTPClient.Timeout)
 
-	longContext, cancelLong := context.WithTimeout(t.Context(), 90*time.Minute)
-	defer cancelLong()
-	if _, err := runner.ExecuteCommand(longContext, "sleep 4500"); err != nil {
-		t.Fatal(err)
-	}
-	if got := requests[1]["timeout"].(float64); got < 5399 || got > 5400 {
-		t.Fatalf("90-minute context remote timeout=%v, want approximately 5400 seconds", got)
-	}
-	t.Logf("caller deadline=90m remote timeout=%.0fs HTTP client timeout=%s", requests[1]["timeout"], toolboxConfig.HTTPClient.Timeout)
+		shortContext, cancelShort := context.WithTimeout(t.Context(), 1500*time.Millisecond)
+		defer cancelShort()
+		if _, err := runner.ExecuteCommand(shortContext, "sleep 1"); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := requests[2]["timeout"], float64(2); got != want {
+			t.Fatalf("rounded context remote timeout=%v, want %v", got, want)
+		}
+		t.Logf("caller deadline=1.5s remote timeout=%.0fs", requests[2]["timeout"])
 
-	shortContext, cancelShort := context.WithTimeout(t.Context(), 1500*time.Millisecond)
-	defer cancelShort()
-	if _, err := runner.ExecuteCommand(shortContext, "sleep 1"); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := requests[2]["timeout"], float64(2); got != want {
-		t.Fatalf("rounded context remote timeout=%v, want %v", got, want)
-	}
-	t.Logf("caller deadline=1.5s remote timeout=%.0fs", requests[2]["timeout"])
+		subsecondContext, cancelSubsecond := context.WithTimeout(t.Context(), 900*time.Millisecond)
+		defer cancelSubsecond()
+		if _, err := runner.ExecuteCommand(subsecondContext, "true"); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := requests[3]["timeout"], float64(1); got != want {
+			t.Fatalf("subsecond context remote timeout=%v, want %v", got, want)
+		}
+		t.Logf("caller deadline=900ms remote timeout=%.0fs", requests[3]["timeout"])
 
-	subsecondContext, cancelSubsecond := context.WithTimeout(t.Context(), 900*time.Millisecond)
-	defer cancelSubsecond()
-	if _, err := runner.ExecuteCommand(subsecondContext, "true"); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := requests[3]["timeout"], float64(1); got != want {
-		t.Fatalf("subsecond context remote timeout=%v, want %v", got, want)
-	}
-	t.Logf("caller deadline=900ms remote timeout=%.0fs", requests[3]["timeout"])
+		overflowContext, cancelOverflow := context.WithTimeout(t.Context(), (time.Duration(math.MaxInt32)+1)*time.Second)
+		defer cancelOverflow()
+		if _, err := runner.ExecuteCommand(overflowContext, "true"); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := requests[4]["timeout"], float64(math.MaxInt32); got != want {
+			t.Fatalf("overflow context remote timeout=%v, want capped %v", got, want)
+		}
+		t.Logf("caller deadline exceeds int32 remote timeout=%.0fs", requests[4]["timeout"])
 
-	overflowContext, cancelOverflow := context.WithTimeout(t.Context(), (time.Duration(math.MaxInt32)+1)*time.Second)
-	defer cancelOverflow()
-	if _, err := runner.ExecuteCommand(overflowContext, "true"); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := requests[4]["timeout"], float64(math.MaxInt32); got != want {
-		t.Fatalf("overflow context remote timeout=%v, want capped %v", got, want)
-	}
-	t.Logf("caller deadline exceeds int32 remote timeout=%.0fs", requests[4]["timeout"])
-
-	expiredContext, cancelExpired := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
-	defer cancelExpired()
-	if _, err := runner.ExecuteCommand(expiredContext, "should-not-run"); err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
-		t.Fatalf("expired context error=%v, want deadline exceeded", err)
-	}
-	if got, want := len(requests), 5; got != want {
-		t.Fatalf("expired context sent a remote request: requests=%d, want %d", got, want)
-	}
-	t.Log("expired caller deadline rejected before a remote request was sent")
+		expiredContext, cancelExpired := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		defer cancelExpired()
+		if _, err := runner.ExecuteCommand(expiredContext, "should-not-run"); err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+			t.Fatalf("expired context error=%v, want deadline exceeded", err)
+		}
+		if got, want := len(requests), 5; got != want {
+			t.Fatalf("expired context sent a remote request: requests=%d, want %d", got, want)
+		}
+		t.Log("expired caller deadline rejected before a remote request was sent")
+	})
 }
 
 func TestDaytonaCommandRunnerCancelsHTTPWithCallerContext(t *testing.T) {
@@ -284,104 +287,106 @@ func TestDaytonaExtractArchiveCommandCleansArchiveOnFailure(t *testing.T) {
 }
 
 func TestUploadDaytonaFileStreamDoesNotPrebuffer(t *testing.T) {
-	sourceReader, sourceWriter := io.Pipe()
-	requestStarted := make(chan struct{})
-	bodyRead := make(chan []byte, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("method=%s, want POST", r.Method)
-		}
-		if r.URL.Path != "/sbx-123/files/upload" {
-			t.Errorf("path=%s", r.URL.Path)
-		}
-		if r.URL.Query().Get("path") != "/tmp/archive.tgz" {
-			t.Errorf("query path=%q", r.URL.Query().Get("path"))
-		}
-		if r.Header.Get("Authorization") != "Bearer token" {
-			t.Errorf("authorization=%q", r.Header.Get("Authorization"))
-		}
-		close(requestStarted)
-		reader, err := r.MultipartReader()
-		if err != nil {
-			t.Errorf("multipart reader: %v", err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		part, err := reader.NextPart()
-		if err != nil {
-			t.Errorf("next part: %v", err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		if part.FormName() != "file" {
-			t.Errorf("form name=%q", part.FormName())
-		}
-		data, err := io.ReadAll(part)
-		if err != nil {
-			t.Errorf("read part: %v", err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		bodyRead <- data
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer func() {
-		_ = sourceWriter.Close()
-		_ = sourceReader.Close()
-		srv.Close()
-	}()
+	synctest.Test(t, func(t *testing.T) {
+		sourceReader, sourceWriter := io.Pipe()
+		requestStarted := make(chan struct{})
+		bodyRead := make(chan []byte, 1)
+		srv := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				t.Errorf("method=%s, want POST", r.Method)
+			}
+			if r.URL.Path != "/sbx-123/files/upload" {
+				t.Errorf("path=%s", r.URL.Path)
+			}
+			if r.URL.Query().Get("path") != "/tmp/archive.tgz" {
+				t.Errorf("query path=%q", r.URL.Query().Get("path"))
+			}
+			if r.Header.Get("Authorization") != "Bearer token" {
+				t.Errorf("authorization=%q", r.Header.Get("Authorization"))
+			}
+			close(requestStarted)
+			reader, err := r.MultipartReader()
+			if err != nil {
+				t.Errorf("multipart reader: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			part, err := reader.NextPart()
+			if err != nil {
+				t.Errorf("next part: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if part.FormName() != "file" {
+				t.Errorf("form name=%q", part.FormName())
+			}
+			data, err := io.ReadAll(part)
+			if err != nil {
+				t.Errorf("read part: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			bodyRead <- data
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer func() {
+			_ = sourceWriter.Close()
+			_ = sourceReader.Close()
+			srv.Close()
+		}()
 
-	dataClient, err := daytonaHTTPClient(nil, srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	transport := dataClient.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	callerDeadline, callerBounded := t.Context().Deadline()
-	dataClient.Transport = daytonaDeadlineRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		deadline, bounded := req.Context().Deadline()
-		if bounded != callerBounded || (bounded && !deadline.Equal(callerDeadline)) {
-			t.Error("archive upload acquired an independent control deadline")
-		}
-		return transport.RoundTrip(req)
-	})
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- uploadDaytonaFileStream(t.Context(), dataClient, srv.URL+"/sbx-123/files/upload?path=%2Ftmp%2Farchive.tgz", map[string]string{
-			"Authorization": "Bearer token",
-		}, sourceReader, "archive.tgz")
-	}()
-	select {
-	case <-requestStarted:
-	case <-time.After(time.Second):
-		t.Fatal("upload did not start until the source reader completed")
-	}
-	// The upload remains active beyond the budget used by the control stall test.
-	time.Sleep(3 * daytonaControlTestTimeout)
-	if _, err := sourceWriter.Write([]byte("hello archive")); err != nil {
-		t.Fatal(err)
-	}
-	if err := sourceWriter.Close(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-errCh:
+		dataClient, err := daytonaHTTPClient(srv.Client(), srv.URL)
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("upload did not finish")
-	}
-	select {
-	case got := <-bodyRead:
-		if string(got) != "hello archive" {
-			t.Fatalf("body=%q", got)
+		transport := dataClient.Transport
+		if transport == nil {
+			transport = http.DefaultTransport
 		}
-	default:
-		t.Fatal("server did not read body")
-	}
+		callerDeadline, callerBounded := t.Context().Deadline()
+		dataClient.Transport = daytonaDeadlineRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			deadline, bounded := req.Context().Deadline()
+			if bounded != callerBounded || (bounded && !deadline.Equal(callerDeadline)) {
+				t.Error("archive upload acquired an independent control deadline")
+			}
+			return transport.RoundTrip(req)
+		})
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- uploadDaytonaFileStream(t.Context(), dataClient, srv.URL+"/sbx-123/files/upload?path=%2Ftmp%2Farchive.tgz", map[string]string{
+				"Authorization": "Bearer token",
+			}, sourceReader, "archive.tgz")
+		}()
+		select {
+		case <-requestStarted:
+		case <-time.After(time.Second):
+			t.Fatal("upload did not start until the source reader completed")
+		}
+		// The upload remains active beyond the budget used by the control stall test.
+		time.Sleep(3 * daytonaControlTestTimeout)
+		if _, err := sourceWriter.Write([]byte("hello archive")); err != nil {
+			t.Fatal(err)
+		}
+		if err := sourceWriter.Close(); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("upload did not finish")
+		}
+		select {
+		case got := <-bodyRead:
+			if string(got) != "hello archive" {
+				t.Fatalf("body=%q", got)
+			}
+		default:
+			t.Fatal("server did not read body")
+		}
+	})
 }
 
 func TestUploadDaytonaFileStreamRedactsAuthorizationFromError(t *testing.T) {
@@ -555,37 +560,39 @@ func (a *blockingDeleteDaytonaAPI) DeleteSandbox(ctx context.Context, _ string) 
 }
 
 func TestDeleteDaytonaToolboxSandboxUsesBoundedContext(t *testing.T) {
-	oldTimeout := daytonaCleanupTimeout
-	daytonaCleanupTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { daytonaCleanupTimeout = oldTimeout })
-	fake := &blockingDeleteDaytonaAPI{canceled: make(chan struct{})}
-	sandbox := &apidaytona.Sandbox{}
-	sandbox.SetId("sandbox-one")
-	sandbox.SetLabels(map[string]string{"crabbox": "true", "provider": daytonaProvider, "lease": "cbx_111111111111"})
-	fake.getSandboxes = map[string]*apidaytona.Sandbox{"sandbox-one": sandbox}
-	oldClient := newDaytonaClient
-	newDaytonaClient = func(core.Config, core.Runtime) (daytonaAPI, error) {
-		return fake, nil
-	}
-	t.Cleanup(func() { newDaytonaClient = oldClient })
+	synctest.Test(t, func(t *testing.T) {
+		oldTimeout := daytonaCleanupTimeout
+		daytonaCleanupTimeout = 10 * time.Millisecond
+		t.Cleanup(func() { daytonaCleanupTimeout = oldTimeout })
+		fake := &blockingDeleteDaytonaAPI{canceled: make(chan struct{})}
+		sandbox := &apidaytona.Sandbox{}
+		sandbox.SetId("sandbox-one")
+		sandbox.SetLabels(map[string]string{"crabbox": "true", "provider": daytonaProvider, "lease": "cbx_111111111111"})
+		fake.getSandboxes = map[string]*apidaytona.Sandbox{"sandbox-one": sandbox}
+		oldClient := newDaytonaClient
+		newDaytonaClient = func(core.Config, core.Runtime) (daytonaAPI, error) {
+			return fake, nil
+		}
+		t.Cleanup(func() { newDaytonaClient = oldClient })
 
-	var stderr bytes.Buffer
-	backend := &daytonaLeaseBackend{cfg: core.BaseConfig(), rt: core.Runtime{Stderr: &stderr}}
-	started := time.Now()
-	ctx, cancel := daytonaCleanupContext()
-	defer cancel()
-	backend.deleteDaytonaToolboxSandbox(ctx, "sandbox-one", "cbx_111111111111")
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("delete cleanup took %s, want bounded timeout", elapsed)
-	}
-	select {
-	case <-fake.canceled:
-	default:
-		t.Fatal("delete did not observe cleanup context cancellation")
-	}
-	if !strings.Contains(stderr.String(), "context deadline exceeded") {
-		t.Fatalf("stderr=%q, want timeout warning", stderr.String())
-	}
+		var stderr bytes.Buffer
+		backend := &daytonaLeaseBackend{cfg: core.BaseConfig(), rt: core.Runtime{Stderr: &stderr}}
+		started := time.Now()
+		ctx, cancel := daytonaCleanupContext()
+		defer cancel()
+		backend.deleteDaytonaToolboxSandbox(ctx, "sandbox-one", "cbx_111111111111")
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("delete cleanup took %s, want bounded timeout", elapsed)
+		}
+		select {
+		case <-fake.canceled:
+		default:
+			t.Fatal("delete did not observe cleanup context cancellation")
+		}
+		if !strings.Contains(stderr.String(), "context deadline exceeded") {
+			t.Fatalf("stderr=%q, want timeout warning", stderr.String())
+		}
+	})
 }
 
 func TestDaytonaStopRequiresExactResourceClaim(t *testing.T) {
@@ -738,80 +745,82 @@ func (a *runAdmissionDaytonaAPI) CreateSSHAccess(_ context.Context, id string, t
 func TestDaytonaRunResolutionPreparesWithoutPublishingClaim(t *testing.T) {
 	for _, scenario := range []string{"ready", "lagging inventory", "stopped", "canceled start", "wrong repository", "replacement resource", "checkpoint hold"} {
 		t.Run(scenario, func(t *testing.T) {
-			testutil.IsolateUserDirs(t)
-			const leaseID = "cbx_454545454545"
-			sandbox := apidaytona.Sandbox{}
-			sandbox.SetId("sandbox-run-owned")
-			sandbox.SetState(apidaytona.SANDBOXSTATE_STOPPED)
-			if scenario == "ready" || scenario == "lagging inventory" {
-				sandbox.SetState(apidaytona.SANDBOXSTATE_STARTED)
-			}
-			sandbox.SetLabels(map[string]string{"crabbox": "true", "provider": daytonaProvider, "lease": leaseID, "slug": "run-owned"})
-			cfg := core.BaseConfig()
-			cfg.Provider, cfg.Daytona.SSHAccessMinutes = daytonaProvider, 17
-			repoRoot := t.TempDir()
-			server := daytonaSandboxToServer(&sandbox)
-			if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "run-owned", cfg, server, core.SSHTarget{}, repoRoot, time.Hour, false); err != nil {
-				t.Fatal(err)
-			}
-			if scenario == "checkpoint hold" {
-				if err := core.WithDurableLeaseClaimLock(leaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
-					claim.CheckpointCapture = &core.CheckpointCaptureBinding{ID: "chk_runhold", Revision: claim.Revision, BoundRevision: claim.Revision}
-					return persist()
-				}); err != nil {
+			synctest.Test(t, func(t *testing.T) {
+				testutil.IsolateUserDirs(t)
+				const leaseID = "cbx_454545454545"
+				sandbox := apidaytona.Sandbox{}
+				sandbox.SetId("sandbox-run-owned")
+				sandbox.SetState(apidaytona.SANDBOXSTATE_STOPPED)
+				if scenario == "ready" || scenario == "lagging inventory" {
+					sandbox.SetState(apidaytona.SANDBOXSTATE_STARTED)
+				}
+				sandbox.SetLabels(map[string]string{"crabbox": "true", "provider": daytonaProvider, "lease": leaseID, "slug": "run-owned"})
+				cfg := core.BaseConfig()
+				cfg.Provider, cfg.Daytona.SSHAccessMinutes = daytonaProvider, 17
+				repoRoot := t.TempDir()
+				server := daytonaSandboxToServer(&sandbox)
+				if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "run-owned", cfg, server, core.SSHTarget{}, repoRoot, time.Hour, false); err != nil {
 					t.Fatal(err)
 				}
-			}
-			before, err := core.ReadLeaseClaim(leaseID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if scenario == "replacement resource" {
-				sandbox.SetId("sandbox-replacement")
-			}
-			fake := &runAdmissionDaytonaAPI{fakeDaytonaDoctorAPI: fakeDaytonaDoctorAPI{
-				sandboxes: []apidaytona.Sandbox{sandbox}, getSandboxes: map[string]*apidaytona.Sandbox{sandbox.GetId(): &sandbox},
-			}, blockStart: scenario == "canceled start"}
-			if scenario == "lagging inventory" {
-				fake.sandboxes = nil
-			}
-			oldClient := newDaytonaClient
-			newDaytonaClient = func(core.Config, core.Runtime) (daytonaAPI, error) { return fake, nil }
-			t.Cleanup(func() { newDaytonaClient = oldClient })
-			req := core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: repoRoot}, Prepare: true}
-			if scenario == "wrong repository" {
-				req.Repo.Root = t.TempDir()
-			}
-			timeout := 2 * time.Second
-			if scenario == "canceled start" {
-				timeout = 50 * time.Millisecond
-			}
-			ctx, cancel := context.WithTimeout(t.Context(), timeout)
-			defer cancel()
-			b := &daytonaLeaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard}}
-			resolved, resolveErr := b.ResolveRunLeaseUnderClaim(ctx, req, before)
-			wantStarts, wantAccess := 0, 0
-			if scenario == "stopped" || scenario == "canceled start" {
-				wantStarts = 1
-			}
-			if scenario == "ready" || scenario == "lagging inventory" || scenario == "stopped" {
-				wantAccess = 1
-				if resolveErr != nil || resolved.LeaseID != leaseID || resolved.Server.CloudID != before.CloudID || !resolved.SSH.AuthSecret || resolved.SSH.Host != "ssh.example.invalid" || resolved.SSH.Port != "2222" || fake.accessTTL != 17*time.Minute {
-					t.Fatalf("run resolution lost exact resource or SSH access contract: %v", resolveErr)
+				if scenario == "checkpoint hold" {
+					if err := core.WithDurableLeaseClaimLock(leaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
+						claim.CheckpointCapture = &core.CheckpointCaptureBinding{ID: "chk_runhold", Revision: claim.Revision, BoundRevision: claim.Revision}
+						return persist()
+					}); err != nil {
+						t.Fatal(err)
+					}
 				}
-			} else if resolveErr == nil {
-				t.Fatal("run resolution accepted changed authority or canceled Start")
-			}
-			if scenario == "canceled start" && !errors.Is(resolveErr, context.DeadlineExceeded) {
-				t.Fatalf("Start lost caller deadline: %v", resolveErr)
-			}
-			if len(fake.started) != wantStarts || len(fake.accessed) != wantAccess || fake.mutated {
-				t.Fatalf("unexpected provider effects: starts=%v access=%v other=%t", fake.started, fake.accessed, fake.mutated)
-			}
-			after, err := core.ReadLeaseClaim(leaseID)
-			if err != nil || !reflect.DeepEqual(before, after) {
-				t.Fatalf("provider run resolution published a claim: %v", err)
-			}
+				before, err := core.ReadLeaseClaim(leaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "replacement resource" {
+					sandbox.SetId("sandbox-replacement")
+				}
+				fake := &runAdmissionDaytonaAPI{fakeDaytonaDoctorAPI: fakeDaytonaDoctorAPI{
+					sandboxes: []apidaytona.Sandbox{sandbox}, getSandboxes: map[string]*apidaytona.Sandbox{sandbox.GetId(): &sandbox},
+				}, blockStart: scenario == "canceled start"}
+				if scenario == "lagging inventory" {
+					fake.sandboxes = nil
+				}
+				oldClient := newDaytonaClient
+				newDaytonaClient = func(core.Config, core.Runtime) (daytonaAPI, error) { return fake, nil }
+				t.Cleanup(func() { newDaytonaClient = oldClient })
+				req := core.ResolveRequest{ID: leaseID, Repo: core.Repo{Root: repoRoot}, Prepare: true}
+				if scenario == "wrong repository" {
+					req.Repo.Root = t.TempDir()
+				}
+				timeout := 2 * time.Second
+				if scenario == "canceled start" {
+					timeout = 50 * time.Millisecond
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), timeout)
+				defer cancel()
+				b := &daytonaLeaseBackend{cfg: cfg, rt: core.Runtime{Stderr: io.Discard}}
+				resolved, resolveErr := b.ResolveRunLeaseUnderClaim(ctx, req, before)
+				wantStarts, wantAccess := 0, 0
+				if scenario == "stopped" || scenario == "canceled start" {
+					wantStarts = 1
+				}
+				if scenario == "ready" || scenario == "lagging inventory" || scenario == "stopped" {
+					wantAccess = 1
+					if resolveErr != nil || resolved.LeaseID != leaseID || resolved.Server.CloudID != before.CloudID || !resolved.SSH.AuthSecret || resolved.SSH.Host != "ssh.example.invalid" || resolved.SSH.Port != "2222" || fake.accessTTL != 17*time.Minute {
+						t.Fatalf("run resolution lost exact resource or SSH access contract: %v", resolveErr)
+					}
+				} else if resolveErr == nil {
+					t.Fatal("run resolution accepted changed authority or canceled Start")
+				}
+				if scenario == "canceled start" && !errors.Is(resolveErr, context.DeadlineExceeded) {
+					t.Fatalf("Start lost caller deadline: %v", resolveErr)
+				}
+				if len(fake.started) != wantStarts || len(fake.accessed) != wantAccess || fake.mutated {
+					t.Fatalf("unexpected provider effects: starts=%v access=%v other=%t", fake.started, fake.accessed, fake.mutated)
+				}
+				after, err := core.ReadLeaseClaim(leaseID)
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatalf("provider run resolution published a claim: %v", err)
+				}
+			})
 		})
 	}
 }

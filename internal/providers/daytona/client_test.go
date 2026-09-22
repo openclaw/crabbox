@@ -8,10 +8,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	apidaytona "github.com/daytonaio/daytona/libs/api-client-go"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 const daytonaControlTestTimeout = 40 * time.Millisecond
@@ -91,32 +93,35 @@ func TestDaytonaControlRequestsUseDefaultOrCallerDeadline(t *testing.T) {
 func TestDaytonaControlClientBoundsStalledResponses(t *testing.T) {
 	for _, phase := range []string{"headers", "body"} {
 		t.Run(phase, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-				if phase == "body" {
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = io.WriteString(w, `{"items":[`)
-					w.(http.Flusher).Flush()
+			synctest.Test(t, func(t *testing.T) {
+				server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					if phase == "body" {
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, `{"items":[`)
+						w.(http.Flusher).Flush()
+					}
+					<-req.Context().Done()
+				}))
+				defer server.Close()
+				cfg := core.Config{}
+				cfg.Daytona.APIKey, cfg.Daytona.APIURL = "daytona-test", server.URL
+				api, err := newDaytonaClient(cfg, core.Runtime{})
+				if err != nil {
+					t.Fatal(err)
 				}
-				<-req.Context().Done()
-			}))
-			defer server.Close()
-			cfg := core.Config{}
-			cfg.Daytona.APIKey, cfg.Daytona.APIURL = "daytona-test", server.URL
-			api, err := newDaytonaClient(cfg, core.Runtime{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			// Exercise the production SDK client with a short test-only budget.
-			api.(*daytonaSDKClient).api.GetConfig().HTTPClient.Timeout = daytonaControlTestTimeout
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-			defer cancel()
-			_, err = api.ListCrabboxSandboxes(ctx)
-			if !errors.Is(err, context.DeadlineExceeded) {
-				t.Fatalf("stalled %s error=%v, want deadline exceeded", phase, err)
-			}
-			if ctx.Err() != nil {
-				t.Fatalf("stalled %s outlasted the control timeout and reached the caller deadline", phase)
-			}
+				// Exercise the production SDK client with a short test-only budget.
+				api.(*daytonaSDKClient).api.GetConfig().HTTPClient.Timeout = daytonaControlTestTimeout
+				api.(*daytonaSDKClient).api.GetConfig().HTTPClient.Transport = server.Client().Transport
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				_, err = api.ListCrabboxSandboxes(ctx)
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("stalled %s error=%v, want deadline exceeded", phase, err)
+				}
+				if ctx.Err() != nil {
+					t.Fatalf("stalled %s outlasted the control timeout and reached the caller deadline", phase)
+				}
+			})
 		})
 	}
 }
