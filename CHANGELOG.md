@@ -14,7 +14,7 @@
 - Share E2B and CubeSandbox's claim-fenced deletion transaction while preserving endpoint-bound ownership checks, provider errors, and not-found recovery. [PR 2474](https://github.com/openclaw/crabbox/pull/2474).
 - Reuse shared claim idle-expiry policy for Local Container cleanup while preserving its twelve-hour grace period and ownership safeguards. [PR 2475](https://github.com/openclaw/crabbox/pull/2475).
 - Reuse the shared sandbox status projection for Cloud Run Sandbox without changing ownership probes, expiry rules, or public labels. [PR 2476](https://github.com/openclaw/crabbox/pull/2476).
-- Share Linode's status-first HTTP response decoding with DigitalOcean while preserving typed errors, redaction, and partial-response diagnostics.
+- Share Linode's status-first HTTP response decoding with DigitalOcean while preserving typed errors, redaction, and partial-response diagnostics. [PR 2479](https://github.com/openclaw/crabbox/pull/2479).
 
 ### Fixes
 
