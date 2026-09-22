@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -533,30 +534,28 @@ func TestClientRedactsAPIKeyFromErrors(t *testing.T) {
 }
 
 func TestUploadFileStopsProducerOnTransportFailure(t *testing.T) {
-	archive := filepath.Join(t.TempDir(), "archive.tgz")
-	if err := os.WriteFile(archive, []byte("archive"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	transportErr := errors.New("transport failed")
-	client := &client{
-		apiKey: "box_key",
-		base:   "https://box.example.test",
-		http: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			return nil, transportErr
-		})},
-	}
-	err := client.UploadFile(context.Background(), "box_1", archive, "/tmp/archive.tgz")
-	if !errors.Is(err, transportErr) {
-		t.Fatalf("UploadFile err=%v, want transport failure", err)
-	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if !uploadFileProducerRunning() {
-			return
+	synctest.Test(t, func(t *testing.T) {
+		archive := filepath.Join(t.TempDir(), "archive.tgz")
+		if err := os.WriteFile(archive, []byte("archive"), 0o600); err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("upload producer goroutine still running after transport failure")
+		transportErr := errors.New("transport failed")
+		client := &client{
+			apiKey: "box_key",
+			base:   "https://box.example.test",
+			http: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, transportErr
+			})},
+		}
+		err := client.UploadFile(context.Background(), "box_1", archive, "/tmp/archive.tgz")
+		if !errors.Is(err, transportErr) {
+			t.Fatalf("UploadFile err=%v, want transport failure", err)
+		}
+		synctest.Wait()
+		if uploadFileProducerRunning() {
+			t.Fatal("upload producer goroutine still running after transport failure")
+		}
+	})
 }
 
 func TestNewAPIUsesBoundedDefaultHTTPClient(t *testing.T) {
@@ -671,36 +670,38 @@ func TestUpstashBoxCreateBoxDeletesFailedProvision(t *testing.T) {
 }
 
 func TestUpstashBoxCreateBoxDeletesCancelledProvision(t *testing.T) {
-	var deleted []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v2/box":
-			_ = json.NewEncoder(w).Encode(boxData{ID: "box_cancelled", Status: "provisioning"})
-		case r.Method == http.MethodDelete && r.URL.Path == "/v2/box":
-			var body struct {
-				IDs []string `json:"ids"`
+	synctest.Test(t, func(t *testing.T) {
+		var deleted []string
+		srv := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v2/box":
+				_ = json.NewEncoder(w).Encode(boxData{ID: "box_cancelled", Status: "provisioning"})
+			case r.Method == http.MethodDelete && r.URL.Path == "/v2/box":
+				var body struct {
+					IDs []string `json:"ids"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				deleted = append(deleted, body.IDs...)
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
 			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatal(err)
-			}
-			deleted = append(deleted, body.IDs...)
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer srv.Close()
+		}))
+		defer srv.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	client := &client{apiKey: "box_key", base: srv.URL, http: srv.Client()}
-	_, err := client.CreateBox(ctx, createRequest{Name: "crabbox-cancelled"})
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("CreateBox err=%v, want deadline exceeded", err)
-	}
-	if !reflect.DeepEqual(deleted, []string{"box_cancelled"}) {
-		t.Fatalf("deleted=%v, want cancelled box cleanup", deleted)
-	}
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		client := &client{apiKey: "box_key", base: srv.URL, http: srv.Client()}
+		_, err := client.CreateBox(ctx, createRequest{Name: "crabbox-cancelled"})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("CreateBox err=%v, want deadline exceeded", err)
+		}
+		if !reflect.DeepEqual(deleted, []string{"box_cancelled"}) {
+			t.Fatalf("deleted=%v, want cancelled box cleanup", deleted)
+		}
+	})
 }
 
 func TestCleanWorkdirAndCommand(t *testing.T) {
@@ -831,30 +832,32 @@ func TestRunCreatesExecsAndDeletesOneShotBox(t *testing.T) {
 }
 
 func TestRunCleanupDeleteUsesBoundedContext(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	withUpstashBoxCleanupTimeout(t, 20*time.Millisecond)
-	fake := &fakeAPI{blockDelete: true}
-	withFakeAPI(t, fake)
-	var stderr bytes.Buffer
-	backend := NewBackend(Provider{}.Spec(), testConfig(), core.Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
-	start := time.Now()
-	result, err := backend.Run(context.Background(), core.RunRequest{
-		Repo:    core.Repo{Name: "repo", Root: t.TempDir()},
-		Command: []string{"echo", "hello"},
-		NoSync:  true,
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		withUpstashBoxCleanupTimeout(t, 20*time.Millisecond)
+		fake := &fakeAPI{blockDelete: true}
+		withFakeAPI(t, fake)
+		var stderr bytes.Buffer
+		backend := NewBackend(Provider{}.Spec(), testConfig(), core.Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
+		start := time.Now()
+		result, err := backend.Run(context.Background(), core.RunRequest{
+			Repo:    core.Repo{Name: "repo", Root: t.TempDir()},
+			Command: []string{"echo", "hello"},
+			NoSync:  true,
+		})
+		if !errors.Is(err, context.DeadlineExceeded) || result.ExitCode != 1 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
+			t.Fatalf("result=%#v err=%v, want failed deletion reported", result, err)
+		}
+		if result.Session == nil || !result.Session.Kept {
+			t.Fatalf("session=%#v, want retained session after cleanup failure", result.Session)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("Run took %s, want bounded cleanup", elapsed)
+		}
+		if claim, exists, err := core.ReadLeaseClaimWithPresence(result.LeaseID); err != nil || !exists || claim.LeaseID != result.LeaseID {
+			t.Fatalf("failed deletion lost claim: exists=%v err=%v", exists, err)
+		}
 	})
-	if !errors.Is(err, context.DeadlineExceeded) || result.ExitCode != 1 || result.Status != core.RunStatusFailed || result.ErrorKind != core.RunErrorProvider {
-		t.Fatalf("result=%#v err=%v, want failed deletion reported", result, err)
-	}
-	if result.Session == nil || !result.Session.Kept {
-		t.Fatalf("session=%#v, want retained session after cleanup failure", result.Session)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
-	}
-	if claim, exists, err := core.ReadLeaseClaimWithPresence(result.LeaseID); err != nil || !exists || claim.LeaseID != result.LeaseID {
-		t.Fatalf("failed deletion lost claim: exists=%v err=%v", exists, err)
-	}
 }
 
 func TestRunKeepsFailuresBeforeCommand(t *testing.T) {
@@ -920,42 +923,44 @@ func TestRunTimingFailurePreservesCommandAndRetention(t *testing.T) {
 }
 
 func TestRunEnvCleanupUsesBoundedContext(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	withUpstashBoxCleanupTimeout(t, 20*time.Millisecond)
-	fake := &fakeAPI{blockEnvCleanup: true}
-	withFakeAPI(t, fake)
-	var stderr bytes.Buffer
-	backend := NewBackend(Provider{}.Spec(), testConfig(), core.Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
-	start := time.Now()
-	result, err := backend.Run(context.Background(), core.RunRequest{
-		Repo:       core.Repo{Name: "repo", Root: t.TempDir()},
-		Command:    []string{"echo", "hello"},
-		Env:        map[string]string{"TOKEN": "secret"},
-		NoSync:     true,
-		Keep:       true,
-		TimingJSON: true,
+	synctest.Test(t, func(t *testing.T) {
+		t.Setenv("XDG_STATE_HOME", t.TempDir())
+		withUpstashBoxCleanupTimeout(t, 20*time.Millisecond)
+		fake := &fakeAPI{blockEnvCleanup: true}
+		withFakeAPI(t, fake)
+		var stderr bytes.Buffer
+		backend := NewBackend(Provider{}.Spec(), testConfig(), core.Runtime{Stdout: io.Discard, Stderr: &stderr}).(*backend)
+		start := time.Now()
+		result, err := backend.Run(context.Background(), core.RunRequest{
+			Repo:       core.Repo{Name: "repo", Root: t.TempDir()},
+			Command:    []string{"echo", "hello"},
+			Env:        map[string]string{"TOKEN": "secret"},
+			NoSync:     true,
+			Keep:       true,
+			TimingJSON: true,
+		})
+		if err == nil || !strings.Contains(err.Error(), "upstash-box env cleanup failed for box_1: context deadline exceeded") {
+			t.Fatalf("err=%v, want bounded env cleanup failure", err)
+		}
+		if result.ExitCode != 5 {
+			t.Fatalf("result=%#v", result)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("Run took %s, want bounded cleanup", elapsed)
+		}
+		lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+		var report struct {
+			ExitCode  int    `json:"exitCode"`
+			RunStatus string `json:"runStatus"`
+			ErrorKind string `json:"errorKind"`
+		}
+		if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
+			t.Fatalf("timing json: %v\nstderr=%s", err, stderr.String())
+		}
+		if report.ExitCode != 5 || report.RunStatus != "failed" || report.ErrorKind != "provider-error" {
+			t.Fatalf("timing outcome exit=%d status=%q kind=%q", report.ExitCode, report.RunStatus, report.ErrorKind)
+		}
 	})
-	if err == nil || !strings.Contains(err.Error(), "upstash-box env cleanup failed for box_1: context deadline exceeded") {
-		t.Fatalf("err=%v, want bounded env cleanup failure", err)
-	}
-	if result.ExitCode != 5 {
-		t.Fatalf("result=%#v", result)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("Run took %s, want bounded cleanup", elapsed)
-	}
-	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
-	var report struct {
-		ExitCode  int    `json:"exitCode"`
-		RunStatus string `json:"runStatus"`
-		ErrorKind string `json:"errorKind"`
-	}
-	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &report); err != nil {
-		t.Fatalf("timing json: %v\nstderr=%s", err, stderr.String())
-	}
-	if report.ExitCode != 5 || report.RunStatus != "failed" || report.ErrorKind != "provider-error" {
-		t.Fatalf("timing outcome exit=%d status=%q kind=%q", report.ExitCode, report.RunStatus, report.ErrorKind)
-	}
 }
 
 func TestRunEnvCleanupFailsOnNonzeroExit(t *testing.T) {
