@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -1597,18 +1598,20 @@ func TestWaitForSuspendedHonorsContextAndTimeout(t *testing.T) {
 }
 
 func TestMachineWaitPreservesTerminalStateAtDeadline(t *testing.T) {
-	failed := readyMachine("")
-	failed.Status = "ERRORED"
-	failed.LastErrorMessage = "late provider failure"
-	api := &fakeAPI{getFn: func(ctx context.Context, _ string) (machine, error) {
-		<-ctx.Done()
-		return failed, nil
-	}}
-	b := testBackendWithAPI(api)
-	_, err := b.waitForRunning(context.Background(), failed.Name, 10*time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "late provider failure") || strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("err=%v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		failed := readyMachine("")
+		failed.Status = "ERRORED"
+		failed.LastErrorMessage = "late provider failure"
+		api := &fakeAPI{getFn: func(ctx context.Context, _ string) (machine, error) {
+			<-ctx.Done()
+			return failed, nil
+		}}
+		b := testBackendWithAPI(api)
+		_, err := b.waitForRunning(context.Background(), failed.Name, 10*time.Millisecond)
+		if err == nil || !strings.Contains(err.Error(), "late provider failure") || strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("err=%v", err)
+		}
+	})
 }
 
 func TestMachineWaitPreservesClientDeadline(t *testing.T) {
@@ -1707,24 +1710,27 @@ func TestDoctorChecksCLIAuthInventoryAndCatalogWithoutMutation(t *testing.T) {
 }
 
 func TestDoctorRunsSlowProviderProbesWithinSharedBudget(t *testing.T) {
-	api := &fakeAPI{
-		machine:     readyMachine("203.0.113.10"),
-		sizes:       []machineSize{testSize()},
-		doctorDelay: 4 * time.Second,
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	started := time.Now()
-	result, err := testBackendWithAPI(api).Doctor(ctx, core.DoctorRequest{})
-	if err != nil {
-		t.Fatalf("doctor failed within shared budget: %v", err)
-	}
-	if elapsed := time.Since(started); elapsed >= 8*time.Second {
-		t.Fatalf("doctor probes ran sequentially: elapsed=%s", elapsed)
-	}
-	if !strings.Contains(result.Message, "leases=1") || !strings.Contains(result.Message, "sizes=1") {
-		t.Fatalf("doctor result=%#v", result)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		api := &fakeAPI{
+			machine:     readyMachine("203.0.113.10"),
+			sizes:       []machineSize{testSize()},
+			doctorDelay: 4 * time.Second,
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		started := time.Now()
+		result, err := testBackendWithAPI(api).Doctor(ctx, core.DoctorRequest{})
+		if err != nil {
+			t.Fatalf("doctor failed within shared budget: %v", err)
+		}
+		if elapsed := time.Since(started); elapsed >= 8*time.Second {
+			t.Fatalf("doctor probes ran sequentially: elapsed=%s", elapsed)
+		}
+		if !strings.Contains(result.Message, "leases=1") || !strings.Contains(result.Message, "sizes=1") {
+			t.Fatalf("doctor result=%#v", result)
+		}
+
+	})
 }
 
 func TestDoctorProbeFailureCancelsSiblingProbes(t *testing.T) {
@@ -2268,28 +2274,30 @@ func TestCreateNativeCheckpointJoinsSnapshotAndRestartFailures(t *testing.T) {
 }
 
 func TestCreateNativeCheckpointRestartsAfterSnapshotTimeout(t *testing.T) {
-	b, api, _, claim, req := checkpointCreateFixture(t)
-	req.Wait = false
-	req.WaitTimeout = 10 * time.Millisecond
-	b.sleep = core.SleepContext
-	api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "CREATING")
-	api.getSequence = []machine{
-		checkpointSource(req, "203.0.113.10"),
-		checkpointSource(req, "203.0.113.10"),
-		func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
-		checkpointSource(req, "203.0.113.10"),
-	}
+	synctest.Test(t, func(t *testing.T) {
+		b, api, _, claim, req := checkpointCreateFixture(t)
+		req.Wait = false
+		req.WaitTimeout = 10 * time.Millisecond
+		b.sleep = core.SleepContext
+		api.imageDetail = checkpointImageSnapshotState(req, claim, 1, "CREATING")
+		api.getSequence = []machine{
+			checkpointSource(req, "203.0.113.10"),
+			checkpointSource(req, "203.0.113.10"),
+			func() machine { item := checkpointSource(req, "203.0.113.10"); item.Status = "STOPPED"; return item }(),
+			checkpointSource(req, "203.0.113.10"),
+		}
 
-	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
-	if err == nil || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("result=%#v err=%v", result, err)
-	}
-	if result.Image.ID != "img-1@v1" || strings.Join(api.actions, ",") != "stop,save,image:CREATING,start" {
-		t.Fatalf("result=%#v actions=%v", result, api.actions)
-	}
-	if len(api.started) != 1 {
-		t.Fatalf("snapshot timeout left source stopped: started=%v", api.started)
-	}
+		result, err := b.createNativeCheckpoint(context.Background(), req, claim)
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("result=%#v err=%v", result, err)
+		}
+		if result.Image.ID != "img-1@v1" || strings.Join(api.actions, ",") != "stop,save,image:CREATING,start" {
+			t.Fatalf("result=%#v actions=%v", result, api.actions)
+		}
+		if len(api.started) != 1 {
+			t.Fatalf("snapshot timeout left source stopped: started=%v", api.started)
+		}
+	})
 }
 
 func TestCreateNativeCheckpointRestartsAfterCallerCancellation(t *testing.T) {
@@ -2327,20 +2335,22 @@ func TestMachine0CheckpointSnapshotTimeoutPrecedence(t *testing.T) {
 }
 
 func TestCreateNativeCheckpointStopTimeoutRestartsWithoutSaving(t *testing.T) {
-	b, api, _, claim, req := checkpointCreateFixture(t)
-	b.cfg.Machine0.CreateTimeout = time.Nanosecond
-	b.sleep = core.SleepContext
-	stopping := checkpointSource(req, "203.0.113.10")
-	stopping.Status = "STOPPING"
-	api.getSequence = []machine{checkpointSource(req, "203.0.113.10"), checkpointSource(req, "203.0.113.10"), stopping, checkpointSource(req, "203.0.113.10")}
+	synctest.Test(t, func(t *testing.T) {
+		b, api, _, claim, req := checkpointCreateFixture(t)
+		b.cfg.Machine0.CreateTimeout = time.Nanosecond
+		b.sleep = core.SleepContext
+		stopping := checkpointSource(req, "203.0.113.10")
+		stopping.Status = "STOPPING"
+		api.getSequence = []machine{checkpointSource(req, "203.0.113.10"), checkpointSource(req, "203.0.113.10"), stopping, checkpointSource(req, "203.0.113.10")}
 
-	result, err := b.createNativeCheckpoint(context.Background(), req, claim)
-	if err == nil || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("result=%#v err=%v", result, err)
-	}
-	if len(api.stopped) != 1 || len(api.started) != 1 || len(api.savedImages) != 0 {
-		t.Fatalf("stopped=%v started=%v saved=%v", api.stopped, api.started, api.savedImages)
-	}
+		result, err := b.createNativeCheckpoint(context.Background(), req, claim)
+		if err == nil || !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("result=%#v err=%v", result, err)
+		}
+		if len(api.stopped) != 1 || len(api.started) != 1 || len(api.savedImages) != 0 {
+			t.Fatalf("stopped=%v started=%v saved=%v", api.stopped, api.started, api.savedImages)
+		}
+	})
 }
 
 func TestCreateNativeCheckpointPreservesAlreadyStoppedSource(t *testing.T) {
@@ -2537,86 +2547,98 @@ func TestImageWaitKeepsObservedVersionOnTimeoutAndError(t *testing.T) {
 	}}}
 
 	t.Run("immediate timeout does not fetch", func(t *testing.T) {
-		b := testBackendWithAPI(&fakeAPI{imageDetail: pending})
-		detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 0, io.Discard)
-		if err == nil || !strings.Contains(err.Error(), "timed out") {
-			t.Fatalf("err=%v", err)
-		}
-		if detail.Image.ID != "" || version.Version != 0 {
-			t.Fatalf("immediate timeout fetched identity: detail=%#v version=%#v", detail, version)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			b := testBackendWithAPI(&fakeAPI{imageDetail: pending})
+			detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 0, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "timed out") {
+				t.Fatalf("err=%v", err)
+			}
+			if detail.Image.ID != "" || version.Version != 0 {
+				t.Fatalf("immediate timeout fetched identity: detail=%#v version=%#v", detail, version)
+			}
+		})
 	})
 
 	t.Run("timeout retains observed identity", func(t *testing.T) {
-		b := testBackendWithAPI(&fakeAPI{imageDetail: pending})
-		b.sleep = core.SleepContext
-		detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 10*time.Millisecond, io.Discard)
-		if err == nil || !strings.Contains(err.Error(), "timed out") {
-			t.Fatalf("err=%v", err)
-		}
-		if detail.Image.ID != "img-1" || version.Version != 2 {
-			t.Fatalf("timeout lost observed identity: detail=%#v version=%#v", detail, version)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			b := testBackendWithAPI(&fakeAPI{imageDetail: pending})
+			b.sleep = core.SleepContext
+			detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 10*time.Millisecond, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "timed out") {
+				t.Fatalf("err=%v", err)
+			}
+			if detail.Image.ID != "img-1" || version.Version != 2 {
+				t.Fatalf("timeout lost observed identity: detail=%#v version=%#v", detail, version)
+			}
+		})
 	})
 
 	t.Run("later get error", func(t *testing.T) {
-		api := &fakeAPI{imageDetails: []machineImageDetail{pending}, imageErrors: []error{nil, errors.New("get failed")}}
-		b := testBackendWithAPI(api)
-		b.sleep = func(context.Context, time.Duration) error { return nil }
-		detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, time.Minute, io.Discard)
-		if err == nil || !strings.Contains(err.Error(), "get failed") {
-			t.Fatalf("err=%v", err)
-		}
-		if detail.Image.ID != "img-1" || version.Version != 2 {
-			t.Fatalf("error lost observed identity: detail=%#v version=%#v", detail, version)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			api := &fakeAPI{imageDetails: []machineImageDetail{pending}, imageErrors: []error{nil, errors.New("get failed")}}
+			b := testBackendWithAPI(api)
+			b.sleep = func(context.Context, time.Duration) error { return nil }
+			detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, time.Minute, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "get failed") {
+				t.Fatalf("err=%v", err)
+			}
+			if detail.Image.ID != "img-1" || version.Version != 2 {
+				t.Fatalf("error lost observed identity: detail=%#v version=%#v", detail, version)
+			}
+		})
 	})
 
 	t.Run("terminal state at deadline", func(t *testing.T) {
-		terminal := pending
-		terminal.Versions = append([]machineImageVersion(nil), pending.Versions...)
-		terminal.Versions[0].SnapshotStatus = "FAILED"
-		api := &fakeAPI{imageFn: func(ctx context.Context, _ string) (machineImageDetail, error) {
-			<-ctx.Done()
-			return terminal, nil
-		}}
-		b := testBackendWithAPI(api)
-		_, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 10*time.Millisecond, io.Discard)
-		if err == nil || !strings.Contains(err.Error(), "terminal state") || strings.Contains(err.Error(), "timed out") || version.Version != 2 {
-			t.Fatalf("version=%#v err=%v", version, err)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			terminal := pending
+			terminal.Versions = append([]machineImageVersion(nil), pending.Versions...)
+			terminal.Versions[0].SnapshotStatus = "FAILED"
+			api := &fakeAPI{imageFn: func(ctx context.Context, _ string) (machineImageDetail, error) {
+				<-ctx.Done()
+				return terminal, nil
+			}}
+			b := testBackendWithAPI(api)
+			_, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 10*time.Millisecond, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "terminal state") || strings.Contains(err.Error(), "timed out") || version.Version != 2 {
+				t.Fatalf("version=%#v err=%v", version, err)
+			}
+		})
 	})
 
 	t.Run("client deadline", func(t *testing.T) {
-		api := &fakeAPI{imageFn: func(context.Context, string) (machineImageDetail, error) {
-			return machineImageDetail{}, context.DeadlineExceeded
-		}}
-		b := testBackendWithAPI(api)
-		_, _, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, time.Minute, io.Discard)
-		if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out waiting") {
-			t.Fatalf("err=%v", err)
-		}
+		synctest.Test(t, func(t *testing.T) {
+			api := &fakeAPI{imageFn: func(context.Context, string) (machineImageDetail, error) {
+				return machineImageDetail{}, context.DeadlineExceeded
+			}}
+			b := testBackendWithAPI(api)
+			_, _, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, time.Minute, io.Discard)
+			if !errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out waiting") {
+				t.Fatalf("err=%v", err)
+			}
+		})
 	})
 
 	t.Run("later response omits version", func(t *testing.T) {
-		api := &fakeAPI{imageDetails: []machineImageDetail{pending, {Image: machineImage{ID: "img-1", Name: "baseline"}}}}
-		b := testBackendWithAPI(api)
-		sleeps := 0
-		b.sleep = func(ctx context.Context, _ time.Duration) error {
-			sleeps++
-			if sleeps == 1 {
-				return nil
+		synctest.Test(t, func(t *testing.T) {
+			api := &fakeAPI{imageDetails: []machineImageDetail{pending, {Image: machineImage{ID: "img-1", Name: "baseline"}}}}
+			b := testBackendWithAPI(api)
+			sleeps := 0
+			b.sleep = func(ctx context.Context, _ time.Duration) error {
+				sleeps++
+				if sleeps == 1 {
+					return nil
+				}
+				<-ctx.Done()
+				return context.Cause(ctx)
 			}
-			<-ctx.Done()
-			return context.Cause(ctx)
-		}
-		detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 10*time.Millisecond, io.Discard)
-		if err == nil || !strings.Contains(err.Error(), "timed out") {
-			t.Fatalf("err=%v", err)
-		}
-		if detail.Image.ID != "img-1" || version.Version != 2 {
-			t.Fatalf("later response lost observed identity: detail=%#v version=%#v", detail, version)
-		}
+			detail, version, err := b.waitForImageVersion(context.Background(), "baseline", 1, expected, true, 10*time.Millisecond, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "timed out") {
+				t.Fatalf("err=%v", err)
+			}
+			if detail.Image.ID != "img-1" || version.Version != 2 {
+				t.Fatalf("later response lost observed identity: detail=%#v version=%#v", detail, version)
+			}
+		})
 	})
 }
 
