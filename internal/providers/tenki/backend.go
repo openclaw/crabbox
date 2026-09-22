@@ -33,13 +33,7 @@ func ApplyTenkiProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 			return core.Exit(2, "provider=tenki supports target=linux only")
 		}
 	}
-	v, ok := values.(core.TenkiConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.Tenki, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "tenki")
-	if err != nil {
+	if matched, err := core.ApplyProviderConfigFlags[core.TenkiConfigFlagValues](cfg, fs, values, &cfg.Tenki, "tenki"); !matched || err != nil {
 		return err
 	}
 	normalizeTenkiProviderConfig(cfg)

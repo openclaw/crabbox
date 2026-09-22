@@ -1153,7 +1153,16 @@ application may follow it. Single-flag rejection, supported type mapping, and
 providers without this rejection policy remain distinct contracts; do not use
 the pair helper to change them.
 
-Pattern for a provider with typed config fields:
+Generated adapters that consume only `InputAccepted` use
+`cli.ApplyProviderConfigFlags[ConfigFlagValues]` to share typed admission,
+application, and accepted-input recording, including partial application before
+an error. Its boolean reports whether the values matched: skip normalization and
+other postprocessing when false. Preserve the adapter's existing guard and
+error/postprocessing order; provider policy stays outside the helper.
+Adapters that consume per-field reports still call
+their generated `Apply` method directly.
+
+Manual pattern for a provider with custom field application:
 
 ```go
 type exampleFlagValues struct {
