@@ -1,0 +1,39 @@
+{
+  "leaseID": "cbx_123456abcdef",
+  "revision": "e73e0acff6b2c16559f85871367fac86",
+  "slug": "fixed-proxmox",
+  "provider": "proxmox-fixed-v1",
+  "cloudID": "417",
+  "cloudNumericID": 417,
+  "cloudImmutableID": "8be39656-32b0-4c47-b68c-0a9e1d3ef901",
+  "providerScope": "endpoint:https://pve.example.test:8006|node:pve1",
+  "targetOS": "linux",
+  "repoRoot": "/fixture/repo",
+  "claimedAt": "2026-09-21T17:53:51Z",
+  "lastUsedAt": "2026-09-21T17:53:52Z",
+  "idleTimeoutSeconds": 1800,
+  "sshHost": "192.0.2.17",
+  "labels": {
+    "crabbox": "true",
+    "fixed_intent_sha256": "d3a2c6f1e8f9a6817d8892811e94548674614602f9233677a90efd05d093d8f2",
+    "lease": "cbx_123456abcdef",
+    "node": "pve1",
+    "provider": "proxmox",
+    "provider_key": "crabbox-cbx-123456abcdef",
+    "slug": "fixed-proxmox",
+    "state": "ready",
+    "template_id": "9400"
+  },
+  "fixedCreateIntent": {
+    "version": 1,
+    "fingerprint": "d3a2c6f1e8f9a6817d8892811e94548674614602f9233677a90efd05d093d8f2",
+    "providerScope": "endpoint:https://pve.example.test:8006|node:pve1",
+    "slug": "fixed-proxmox",
+    "createdAt": "2026-09-21T17:53:51.982198Z",
+    "state": "acquired",
+    "attempt": {
+      "node": "pve1",
+      "vmid": "417"
+    }
+  }
+}

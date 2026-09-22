@@ -23,18 +23,31 @@ func (b *leaseBackend) loadFixedVM(ctx context.Context, claim core.LeaseClaim) (
 	if err != nil {
 		return cfg, client, core.ParallelsVM{}, err
 	}
-	vms, err := client.ListVMsDetailed(ctx)
+	observed, err := core.InspectFixedResource(ctx, parallelsFixedLeaseKind, claim, core.FixedLeaseOperations[core.ParallelsVM]{
+		ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.ParallelsVM], error) {
+			var result core.FixedObservation[core.ParallelsVM]
+			vms, err := client.ListVMsDetailed(ctx)
+			if err != nil {
+				return result, err
+			}
+			for _, vm := range vms {
+				if vm.ID == claim.CloudID {
+					if err := validateParallelsFixedVM(claim, intent, vm, intent.Attempt["name"]); err != nil {
+						return result, err
+					}
+					result.Candidates = append(result.Candidates, vm)
+				}
+			}
+			return result, nil
+		},
+	})
 	if err != nil {
 		return cfg, client, core.ParallelsVM{}, fmt.Errorf("attest Parallels lease %s (claim retained): %w", claim.LeaseID, err)
 	}
-	vm, found := parallelsVMByID(vms, claim.CloudID)
-	if !found {
-		return cfg, client, vm, core.Exit(4, "lease_id_conflict: Parallels lease %s no longer has its bound VM; stop the lease", claim.LeaseID)
+	if len(observed.Candidates) == 0 {
+		return cfg, client, core.ParallelsVM{}, core.Exit(4, "lease_id_conflict: Parallels lease %s no longer has its bound VM; stop the lease", claim.LeaseID)
 	}
-	if err := validateParallelsFixedVM(claim, intent, vm, intent.Attempt["name"]); err != nil {
-		return cfg, client, vm, err
-	}
-	return cfg, client, vm, nil
+	return cfg, client, observed.Candidates[0], nil
 }
 
 func (b *leaseBackend) resolveFixed(ctx context.Context, req core.ResolveRequest, claim core.LeaseClaim) (core.LeaseTarget, error) {

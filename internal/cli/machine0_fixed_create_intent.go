@@ -1,9 +1,6 @@
 package cli
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -62,12 +59,11 @@ func FixedMachine0CreateIntentFingerprint(cfg Config, req FixedMachine0CreateInt
 	if err != nil {
 		return "", err
 	}
-	data, err := json.Marshal(intent)
+	fingerprint, err := FixedIntentFingerprint("crabbox-fixed-machine0-create-intent-v1\x00", intent)
 	if err != nil {
 		return "", fmt.Errorf("encode fixed Machine0 create intent: %w", err)
 	}
-	digest := sha256.Sum256(append([]byte("crabbox-fixed-machine0-create-intent-v1\x00"), data...))
-	return hex.EncodeToString(digest[:]), nil
+	return fingerprint, nil
 }
 
 func fixedMachine0CreateIntentForConfig(cfg Config, req FixedMachine0CreateIntentRequest) (fixedMachine0CreateIntent, error) {

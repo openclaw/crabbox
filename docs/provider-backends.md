@@ -251,13 +251,50 @@ type IdempotentLeaseIDBackend interface {
 }
 ```
 
-Direct AWS, Machine0, local-container, and Proxmox backends implement this capability;
-coordinator-backed leases support it through the coordinator wrapper. External
+The AWS, Azure, DigitalOcean, Daytona, Incus, Machine0, local-container, Parallels,
+Proxmox, and Tenki direct backends implement this capability; coordinator-backed
+leases support it through the coordinator wrapper. External
 backends support it only when their configured protocol explicitly advertises
 idempotent lease IDs. `crabbox warmup --lease-id` rejects other backends before
-provisioning. Built-in direct adapters reuse `core.AcquireFixedLease` for
-durable intent and replay mechanics while keeping resource creation,
-reconciliation, and identity validation provider-owned.
+provisioning. Built-in direct adapters use `core.AcquireFixedResource` and
+`core.FixedLeaseOperations[T]`: `DescribeIntent`, `Plan`, `ObserveExact`,
+`Submit`, `PrepareAccess`, and `DeleteExact`. Plans return native input data;
+core assembles labels and nonces, persists attempts, applies binding evidence,
+and publishes acquired and terminal records. Adapters supply native scope,
+identity, readiness, and exact-deletion proofs. Ordered `FixedIntentFields`
+preserve existing fingerprint field order, names, omission rules, and hash domains.
+`ReadFixedAttempt` is the common compatibility reader; format descriptors select
+legacy envelopes and required identity fields.
+
+Each acquisition declares a `FixedAdmission` policy. Fresh-only admission,
+persisted non-submission witnesses, and safe same-identity resubmission are
+distinct contracts; empty inventory never grants create authority. Core journals
+admission before calling `Submit`. Native prerequisites that must be fenced first
+use `DeferredAdmission` and call `tx.Admit` at the mutation boundary. APIs resolving
+launch inputs during submission also declare `PlanDuringSubmit` and persist each
+payload with `WriteFixedAttempt` before allocation. Only a provider-certified
+definite failure may call `tx.RejectAttempt`; unknown outcomes retain custody.
+Adapters treat the transaction claim as read-only and publish returned evidence
+through `tx.Bind` or `tx.Observe`. Binding cannot retarget a known native identity.
+
+`core.InspectFixedResource` cannot persist or prepare access.
+`core.DeleteFixedResource` keeps claim comparison, native proof, and terminal
+publication under one durable claim lock. Existing shared claim resolvers and
+native cleanup graphs remain reusable; a deletion callback must prove completion,
+not merely request admission. `FixedLeaseKind.AfterTerminal`, when needed, cleans
+local lease artifacts after durable terminal publication while retaining that
+same claim fence. Native absence-only recovery is a separate proof path.
+Cleanup callers can request `FixedReleasePolicy.Started` to distinguish a stale
+claim rejected by the ownership fence from an admitted deletion that failed.
+A reclaimed or renewed candidate is skipped; an already-admitted deletion retains
+its failure and recovery state. A revision change alone never authorizes deletion.
+
+New writes add a versioned journal to the original intent envelope. Legacy records
+without a journal remain readable; their missing evidence never becomes permission
+to submit. Native attempt payloads, hashes, provider markers, and selected receipt
+identity labels retain their existing meaning. External providers keep their
+controller-acknowledged delegated protocol and exact-resource rollback contract;
+their legacy records are not promoted into this engine.
 
 Cleanup is optional:
 

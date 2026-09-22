@@ -30,6 +30,10 @@ const externalSlugReservationTTL = 6 * time.Hour
 func (b *leaseBackend) Spec() core.ProviderSpec { return b.spec }
 
 func (b *leaseBackend) SupportsRequestedLeaseID() bool {
+	// This stays on the delegated protocol: the controller acknowledges raw
+	// identity before readiness and rejection rolls back that exact resource even
+	// with Keep=true. Legacy records have no normalized intent fingerprint, so
+	// they cannot be promoted to the built-in fixed-lease engine's custody model.
 	return b.cfg.External.Capabilities.IdempotentLeaseID
 }
 

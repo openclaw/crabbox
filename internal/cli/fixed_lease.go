@@ -31,9 +31,13 @@ func lockFixedLeaseAcquisition(ctx context.Context, leaseID string) (func(), err
 }
 
 type FixedLeaseBinding struct {
-	ProviderScope string
-	Fingerprint   string
-	Slug          string
+	AllocateSlug        bool
+	RejectExistingLease bool
+	RequestedSlug       string
+	Inventory           []Server
+	ProviderScope       string
+	Fingerprint         string
+	Slug                string
 }
 
 type FixedAcquireOptions struct {
@@ -47,6 +51,7 @@ type FixedAcquireOptions struct {
 	TTL          time.Duration
 	IdleTimeout  time.Duration
 	Now          func() time.Time
+	journal      bool
 }
 
 func AcquireFixedLease(
@@ -99,9 +104,25 @@ func AcquireFixedIntent(
 		if exists && claim.FixedCreateIntent != nil && claim.FixedCreateIntent.CheckpointID != opts.CheckpointID {
 			return Exit(4, "lease_id_conflict: lease %s is bound to checkpoint %s, not checkpoint %s", opts.LeaseID, blank(claim.FixedCreateIntent.CheckpointID, "<none>"), blank(opts.CheckpointID, "<none>"))
 		}
+		if exists && claim.Provider != opts.Kind.ClaimProvider {
+			return Exit(4, "lease_id_conflict: lease %s is bound to provider=%s; it already has another owner", opts.LeaseID, claim.Provider)
+		}
 		binding, err := prepare(ctx, claim, exists)
 		if err != nil {
 			return err
+		}
+		if !exists && binding.AllocateSlug {
+			if binding.RejectExistingLease {
+				for _, server := range binding.Inventory {
+					if server.Labels["lease"] == opts.LeaseID {
+						return Exit(4, "lease_id_conflict: resource exists without its create intent")
+					}
+				}
+			}
+			binding.Slug, err = AllocateDirectLeaseSlug(opts.LeaseID, binding.RequestedSlug, binding.Inventory)
+			if err != nil {
+				return err
+			}
 		}
 		if exists {
 			if claim.FixedCreateIntent == nil ||
@@ -137,6 +158,9 @@ func AcquireFixedIntent(
 				CreatedAt:     current.Format(time.RFC3339Nano),
 				State:         "prepared",
 			}
+			if opts.journal {
+				claim.FixedCreateIntent.Journal = &FixedLeaseJournal{Version: 1, Phase: "prepared", Revision: 1}
+			}
 			if err := persist(); err != nil {
 				return err
 			}
@@ -159,6 +183,9 @@ func AcquireFixedIntent(
 		}
 		claim.LastUsedAt = now().UTC().Format(time.RFC3339)
 		intent.State = "acquired"
+		if intent.Journal != nil && intent.Journal.Phase != "acquired" {
+			intent.Journal = &FixedLeaseJournal{Version: 1, Phase: "acquired", Revision: intent.Journal.Revision + 1}
+		}
 		if err := persist(); err != nil {
 			return err
 		}

@@ -340,6 +340,14 @@ func assertAWSReceiptIdentity(t *testing.T, receipt, acquired core.LeaseClaim) {
 	want.State = "released"
 	want.Attempt = nil
 	want.FailedAttempts = nil
+	// Native intent identity remains immutable; the shared transaction journal
+	// records release separately from the provider's former receipt projection.
+	journal := receipt.FixedCreateIntent.Journal
+	if journal == nil || journal.Version != 1 || journal.Phase != "released" || journal.Revision == 0 ||
+		(acquired.FixedCreateIntent.Journal != nil && journal.Revision <= acquired.FixedCreateIntent.Journal.Revision) {
+		t.Fatal("receipt did not commit the shared terminal journal")
+	}
+	want.Journal = journal
 	if !reflect.DeepEqual(*receipt.FixedCreateIntent, want) {
 		t.Fatal("receipt changed immutable intent fields")
 	}

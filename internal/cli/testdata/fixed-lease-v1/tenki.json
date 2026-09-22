@@ -1,0 +1,53 @@
+{
+  "leaseID": "cbx_abcdef123456",
+  "revision": "72fb9857e3f9844d6703669401c4498c",
+  "slug": "build-linux",
+  "provider": "tenki",
+  "cloudID": "session-1",
+  "cloudImmutableID": "session-1",
+  "providerScope": "endpoint:default|workspace:|project:",
+  "targetOS": "linux",
+  "repoRoot": "/fixture/repo",
+  "claimedAt": "2026-09-21T17:53:47Z",
+  "lastUsedAt": "2026-09-21T17:53:47Z",
+  "idleTimeoutSeconds": 1800,
+  "sshHost": "sandbox",
+  "sshPort": 22,
+  "labels": {
+    "class": "unknown",
+    "crabbox": "true",
+    "created_at": "1790013227",
+    "created_by": "crabbox",
+    "expires_at": "1790015027",
+    "fixed_intent_sha256": "9632f2436f0b063f5b3f68d8c6032093c14e1f6cf6017554af3b66cf4c23032c",
+    "idle_timeout": "1800",
+    "idle_timeout_secs": "1800",
+    "keep": "true",
+    "last_touched_at": "1790013227",
+    "lease": "cbx_abcdef123456",
+    "name": "crabbox-build-linux-c80c2195",
+    "profile": "unknown",
+    "project_id": "project-owned",
+    "provider": "tenki",
+    "provider_key": "unknown",
+    "server_type": "example/image:latest",
+    "slug": "build-linux",
+    "state": "ready",
+    "target": "linux",
+    "tenki_fixed_route": "2ad15b244b3cd92f79cc4b24b440f5f1e337d43c3112e67e961e68a0473a5215",
+    "tenki_session_id": "session-1",
+    "ttl_secs": "3600",
+    "work_root": "/home/tenki/crabbox"
+  },
+  "fixedCreateIntent": {
+    "version": 1,
+    "fingerprint": "9632f2436f0b063f5b3f68d8c6032093c14e1f6cf6017554af3b66cf4c23032c",
+    "providerScope": "endpoint:default|workspace:|project:",
+    "slug": "build-linux",
+    "createdAt": "2026-09-21T17:53:47.782687Z",
+    "state": "acquired",
+    "attempt": {
+      "tenki": "{\"name\":\"crabbox-build-linux-c80c2195\",\"token\":\"06bbed90b4638e15595778e141c6965ec9736279dc942fb085ec4be47cccc097\",\"route\":\"2ad15b244b3cd92f79cc4b24b440f5f1e337d43c3112e67e961e68a0473a5215\",\"sessionId\":\"session-1\",\"image\":\"example/image:latest\",\"cpus\":2,\"memoryMB\":4096,\"diskGB\":20,\"keep\":true}"
+    }
+  }
+}

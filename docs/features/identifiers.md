@@ -57,9 +57,9 @@ private token and generation never appear in public lease records. Fixed-ID
 to own replay, and caller cancellation never releases them.
 
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
-direct AWS, direct Machine0, direct Daytona, direct local-container, direct
-Tenki, direct Parallels, direct Proxmox, delegated Agent Sandbox, and managed
-coordinator leases, that ID is an
+direct AWS, Azure, DigitalOcean, Daytona, Incus, Machine0, local-container,
+Parallels, Proxmox, Tenki, delegated Agent Sandbox, and managed coordinator
+leases, that ID is an
 immutable create identity: an identical semantic replay returns the same
 live lease, while intent drift returns `lease_id_conflict`.
 Managed coordinator replay of the same terminal intent returns
@@ -79,6 +79,24 @@ Agent Sandbox binds each fixed attempt to its Kubernetes resource identities and
 retains terminal receipts through adapter cleanup. See
 [Agent Sandbox fixed lease IDs](../providers/agent-sandbox.md#fixed-lease-ids)
 for scope checks and foreground deletion requirements.
+
+The shared fixed-lease transaction engine records a versioned journal alongside
+the existing normalized intent, native attempt, and terminal receipt fields.
+The ten direct providers listed above use declarative admission and record formats with
+core-owned attempt encoding, binding publication, and terminal retention.
+Existing records remain readable; upgrading a record preserves its fingerprint and native ownership
+evidence. Uncertain submission and deletion retain custody, and a released ID
+cannot be allocated again. Native adapters still attest account scope, resource
+identity, and deletion completion. Only provider-certified definite failures
+permit another attempt; missing inventory does not. Providers that acknowledge
+termination without an intermediate cleanup marker retain their acquired record
+unmodified until acknowledgement. Existing native absence-recovery rules remain
+unchanged.
+
+External providers retain their delegated protocol: controller acknowledgement
+precedes readiness, and rejection rolls back the exact resource even with
+`Keep=true`. Their legacy records lack the original intent fingerprint and are
+not converted into built-in fixed-lease transactions.
 
 Direct Machine0 binds the intent to its deterministic VM name before creation;
 the durable attempt binds the first visible match to its Machine0 resource ID,

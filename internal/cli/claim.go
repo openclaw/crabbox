@@ -78,6 +78,9 @@ type FixedCreateIntent struct {
 	State          string            `json:"state"`
 	Attempt        map[string]string `json:"attempt,omitempty"`
 	FailedAttempts []string          `json:"failedAttempts,omitempty"`
+	// Journal is additive: the original fields remain the downgrade-safe
+	// ownership record. A legacy record without a journal grants no new authority.
+	Journal *FixedLeaseJournal `json:"journal,omitempty"`
 }
 
 const FixedAgentSandboxClaimProvider = "agent-sandbox-fixed-v1"
@@ -2013,6 +2016,11 @@ func decodeLeaseClaim(path string, data []byte) (leaseClaim, error) {
 		return leaseClaim{}, &leaseClaimFileError{
 			code: "invalid_json",
 			err:  Exit(2, "parse claim %s: %v", path, err),
+		}
+	}
+	if claim.FixedCreateIntent != nil && claim.FixedCreateIntent.Journal != nil {
+		if err := validateFixedJournal(claim.FixedCreateIntent); err != nil {
+			return leaseClaim{}, &leaseClaimFileError{code: "invalid_fixed_journal", err: err}
 		}
 	}
 	return claim, nil

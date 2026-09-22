@@ -239,6 +239,27 @@ func (b *azureLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLe
 	if err != nil {
 		return err
 	}
+	if fixedAzureLeaseKind.IsFixedClaim(claim) {
+		err := core.DeleteFixedResource(ctx, fixedAzureLeaseKind, claim, core.FixedLeaseOperations[core.Server]{
+			ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.Server], error) {
+				prepared, err := client.PrepareOwnedServer(ctx, req.Lease.Server)
+				if err != nil {
+					return core.FixedObservation[core.Server]{}, err
+				}
+				if err := validateExactAzureClaim(*tx.Claim, prepared, req.Lease.LeaseID, client.LeaseClaimScope()); err != nil {
+					return core.FixedObservation[core.Server]{}, err
+				}
+				return core.FixedObservation[core.Server]{Candidates: []core.Server{prepared}, Binding: &core.FixedResourceBinding{Labels: prepared.Labels}}, nil
+			},
+			DeleteExact: func(ctx context.Context, _ *core.FixedTransaction, prepared core.Server) error {
+				return client.DeleteOwnedServer(ctx, prepared)
+			},
+		})
+		if err == nil {
+			core.RemoveStoredTestboxKey(req.Lease.LeaseID)
+		}
+		return err
+	}
 	prepared, err := client.PrepareOwnedServer(ctx, req.Lease.Server)
 	if err != nil {
 		return err
