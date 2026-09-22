@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,40 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+func TestPreserveClaimIdentityLabels(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		observed, recorded map[string]string
+		want               map[string]string
+		conflict           string
+	}{
+		{"nil", nil, nil, map[string]string{}, ""},
+		{"omitted", map[string]string{"state": "running"}, map[string]string{"key": "original"}, map[string]string{"key": "original", "state": "running"}, ""},
+		{"empty", map[string]string{"key": ""}, map[string]string{"key": "original"}, map[string]string{"key": "original"}, ""},
+		{"confirmed", map[string]string{"key": "original"}, map[string]string{"key": "original"}, map[string]string{"key": "original"}, ""},
+		{"legacy", map[string]string{"key": "observed", "state": "running"}, nil, map[string]string{"state": "running"}, ""},
+		{"empty recorded", map[string]string{"key": "observed"}, map[string]string{"key": ""}, map[string]string{}, ""},
+		{"conflict", map[string]string{"key": "replacement"}, map[string]string{"key": "original"}, nil, "key"},
+		{"ordered conflict", map[string]string{"key": "replacement", "account": "other"}, map[string]string{"key": "original", "account": "owner"}, nil, "key"},
+		{"later conflict", map[string]string{"account": "other"}, map[string]string{"key": "original", "account": "owner"}, nil, "account"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			observed, recorded := maps.Clone(tc.observed), maps.Clone(tc.recorded)
+			got, conflict := PreserveClaimIdentityLabels(tc.observed, tc.recorded, "key", "account")
+			if conflict != tc.conflict || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("labels=%v conflict=%q, want %v %q", got, conflict, tc.want, tc.conflict)
+			}
+			if conflict == "" {
+				got["state"] = "changed"
+				got["key"] = "changed"
+			}
+			if !reflect.DeepEqual(tc.observed, observed) || !reflect.DeepEqual(tc.recorded, recorded) {
+				t.Fatal("identity projection mutated or aliased an input map")
+			}
+		})
+	}
+}
 
 func TestCloneLabels(t *testing.T) {
 	fromNil := CloneLabels(nil)

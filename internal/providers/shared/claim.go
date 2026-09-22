@@ -13,6 +13,25 @@ import (
 
 var ErrStrictClaimMismatch = errors.New("strict claim identifier mismatch")
 
+// PreserveClaimIdentityLabels clones observations without granting new cleanup
+// authority: protected values must come from the recorded claim. It returns the
+// first conflicting key in caller order; adapters own the resulting diagnostic.
+func PreserveClaimIdentityLabels(observed, recorded map[string]string, keys ...string) (map[string]string, string) {
+	labels := CloneLabels(observed)
+	for _, key := range keys {
+		stored := recorded[key]
+		if current := labels[key]; stored != "" && current != "" && current != stored {
+			return nil, key
+		}
+		if stored != "" {
+			labels[key] = stored
+		} else {
+			delete(labels, key)
+		}
+	}
+	return labels, ""
+}
+
 type ClaimBinding struct {
 	Provider, ProviderScope, LeaseID, Slug, CloudID string
 	RequiredLabels                                  map[string]string

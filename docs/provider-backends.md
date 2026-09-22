@@ -1363,6 +1363,12 @@ E2B-compatible adapters use `shared.EnvdSandboxViews` to project their common
 wire metadata. Provider identity and legacy ID prefixes stay explicit; resource
 ownership validation remains in each adapter.
 
+AWS and Azure endpoint refreshes use `shared.PreserveClaimIdentityLabels` to
+retain cleanup-authority labels from the recorded claim. Observations may confirm
+or omit those values, but conflicting values are rejected and unrecorded values
+are not adopted into legacy claims. Each adapter chooses its protected keys and
+keeps resource identity validation and error diagnostics local.
+
 `Stop` should stop the provider resource, remove local claims, and remove local
 per-resource keys if the backend created them.
 

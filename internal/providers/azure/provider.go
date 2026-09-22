@@ -157,17 +157,9 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 	if existing.CloudImmutableID == "" {
 		server.ImmutableID = ""
 	}
-	labels := make(map[string]string, len(server.Labels))
-	for key, value := range server.Labels {
-		labels[key] = value
-	}
-	if existingValue := existing.Labels["provider_key"]; existingValue != "" {
-		if cloudValue := labels["provider_key"]; cloudValue != "" && cloudValue != existingValue {
-			return core.Server{}, core.Exit(2, "refusing to rewrite Azure lease=%s with mismatched provider_key", existing.LeaseID)
-		}
-		labels["provider_key"] = existingValue
-	} else {
-		delete(labels, "provider_key")
+	labels, conflict := shared.PreserveClaimIdentityLabels(server.Labels, existing.Labels, "provider_key")
+	if conflict != "" {
+		return core.Server{}, core.Exit(2, "refusing to rewrite Azure lease=%s with mismatched provider_key", existing.LeaseID)
 	}
 	server.Labels = labels
 	return server, nil

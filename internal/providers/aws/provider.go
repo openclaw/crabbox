@@ -98,20 +98,9 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 	if existing.CloudID != "" && server.CloudID != "" && existing.CloudID != server.CloudID {
 		return core.Server{}, core.Exit(2, "refusing to rewrite AWS lease=%s with stale instance identity", existing.LeaseID)
 	}
-	labels := make(map[string]string, len(server.Labels)+2)
-	for key, value := range server.Labels {
-		labels[key] = value
-	}
-	for _, key := range []string{"aws_key_pair_id", "aws_account_id"} {
-		existingValue := existing.Labels[key]
-		if cloudValue := labels[key]; existingValue != "" && cloudValue != "" && cloudValue != existingValue {
-			return core.Server{}, core.Exit(2, "refusing to rewrite AWS lease=%s with mismatched %s", existing.LeaseID, key)
-		}
-		if existingValue != "" {
-			labels[key] = existingValue
-		} else {
-			delete(labels, key)
-		}
+	labels, conflict := shared.PreserveClaimIdentityLabels(server.Labels, existing.Labels, "aws_key_pair_id", "aws_account_id")
+	if conflict != "" {
+		return core.Server{}, core.Exit(2, "refusing to rewrite AWS lease=%s with mismatched %s", existing.LeaseID, conflict)
 	}
 	server.Labels = labels
 	return server, nil

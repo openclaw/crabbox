@@ -5,6 +5,7 @@
 ### Changed
 
 - Consolidate built-in fixed-lease admission, attempt codecs, claim binding, recovery policy, and terminal receipts in a shared engine; preserve native identity proofs and existing local records while retaining the external provider’s delegated protocol.
+- Share AWS and Azure endpoint-refresh identity policy while preserving recorded cleanup authority and legacy-claim behavior.
 
 ### Fixes
 
