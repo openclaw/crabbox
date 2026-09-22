@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -61,8 +60,7 @@ func (c *linodeClient) do(ctx context.Context, method, path string, body any, ou
 		return err
 	}
 	defer resp.Body.Close()
-	data, readErr := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	return shared.DecodeStatusFirstJSONResponse(resp, out, "linode "+method+" "+path, func(status int, data []byte, readErr error) error {
 		if len(data) > 400 {
 			data = data[:400]
 		}
@@ -73,18 +71,8 @@ func (c *linodeClient) do(ctx context.Context, method, path string, body any, ou
 			}
 			body += "response body read failed: " + readErr.Error()
 		}
-		return &linodeAPIError{Operation: method + " " + path, Status: resp.StatusCode, Body: body}
-	}
-	if readErr != nil {
-		return fmt.Errorf("linode %s %s response body: %w", method, path, readErr)
-	}
-	if out == nil || len(data) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("linode %s %s decode: %w", method, path, err)
-	}
-	return nil
+		return &linodeAPIError{Operation: method + " " + path, Status: status, Body: body}
+	})
 }
 
 func (c *linodeClient) redactErrorBody(body string) string {

@@ -677,6 +677,13 @@ the adapter. Only a zero-length body skips decoding; nonempty whitespace is
 decoded, and JSON errors remain unwrapped. This separate contract adds no
 response limit and does not apply to streams or alter the bounded decoder.
 
+DigitalOcean and Linode share `shared.DecodeStatusFirstJSONResponse`: read the
+unbounded body, give a non-2xx status precedence over body-read errors, and wrap
+successful-response read/decode failures with the operation. The caller retains
+body closure, and each adapter keeps its typed API error and diagnostic policy.
+Linode still truncates raw error bytes before trimming/redaction and appends
+body-read failures afterward; this is distinct from the redacted-body helper.
+
 DigitalOcean, Lambda, OVH, and Vast use `shared.RedactedResponseBody` for
 status-first API-error diagnostics. It applies the adapter's redaction policy
 before truncating the body and also sanitizes appended body-read errors. The

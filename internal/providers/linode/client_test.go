@@ -271,6 +271,50 @@ func TestLinodeClientErrorRedaction(t *testing.T) {
 	}
 }
 
+func TestLinodeClientStatusPrecedesPartialBodyReadFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, diagnostic string
+		status                 int
+	}{
+		{"redacted partial error", ` {"root_pass":"synthetic-password","token":"synthetic-token"} `, `{"root_pass":"<redacted>","token":"<redacted>"}; `, 400},
+		{"empty error", "", "", 503},
+		{"truncated error", strings.Repeat("x", 401), strings.Repeat("x", 400) + "; ", 429},
+		{"successful status with incomplete body", `{"id":42}`, "", 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.RequestURI() != "/linode/instances/42" || r.Header.Get("Authorization") != "Bearer synthetic-token" {
+					t.Errorf("unexpected request method, path, or authentication")
+				}
+				// The real transport reports unexpected EOF after a deliberately short body.
+				w.Header().Set("Content-Length", strconv.Itoa(len(tc.body)+1))
+				w.Header().Set("Connection", "close")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+			client := &linodeClient{token: "synthetic-token", client: server.Client(), baseURL: server.URL}
+			out := linodeInstance{ID: 99}
+			err := client.do(context.Background(), http.MethodGet, "/linode/instances/42", nil, &out)
+			var api *linodeAPIError
+			if tc.status >= 300 {
+				wantBody := tc.diagnostic + "response body read failed: unexpected EOF"
+				if !errors.As(err, &api) || api.Status != tc.status || api.Operation != "GET /linode/instances/42" || api.Body != wantBody {
+					t.Fatalf("API error=%T %v, want status=%d body=%q", err, err, tc.status, wantBody)
+				}
+				if errors.Is(err, io.ErrUnexpectedEOF) {
+					t.Fatal("body read failure replaced the completed API status with a retryable cause")
+				}
+			} else if !errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &api) || err.Error() != "linode GET /linode/instances/42 response body: unexpected EOF" {
+				t.Fatalf("successful-status read error=%T %v", err, err)
+			}
+			if out.ID != 99 {
+				t.Fatalf("incomplete response was decoded: id=%d", out.ID)
+			}
+		})
+	}
+}
+
 type envelopeRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f envelopeRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
