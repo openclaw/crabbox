@@ -8104,6 +8104,38 @@ func TestCleanupKeepsClaimFromDifferentDockerHostSameContext(t *testing.T) {
 	}
 }
 
+func TestLegacyClaimScopeAdmissionPreservesStrictIdleGrace(t *testing.T) {
+	lastUsed := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	deadline := lastUsed.Add(time.Minute + 12*time.Hour)
+	stamp := lastUsed.Format(time.RFC3339)
+	scope := "runtime:docker/context:fixture/host:unix:///tmp/fixture.sock"
+	for _, tc := range []struct {
+		name, lastUsed, claimScope, currentScope string
+		idle                                     int
+		now                                      time.Time
+		want                                     bool
+	}{
+		{"before boundary", stamp, "", scope, 60, deadline.Add(-time.Nanosecond), false},
+		{"at boundary", stamp, "", scope, 60, deadline, false},
+		{"after boundary", stamp, "", scope, 60, deadline.Add(time.Nanosecond), true},
+		{"timestamp whitespace", " \t" + stamp + "\n", "", scope, 60, deadline.Add(time.Nanosecond), true},
+		{"invalid timestamp", "invalid", "", scope, 60, deadline, false},
+		{"zero timestamp", time.Time{}.Format(time.RFC3339), "", scope, 60, deadline, false},
+		{"disabled timeout", stamp, "", scope, 0, deadline.Add(time.Hour), false},
+		{"negative timeout", stamp, "", scope, -1, deadline.Add(time.Hour), false},
+		{"different scope", stamp, "runtime:docker/context:other", scope, 60, deadline.Add(time.Hour), false},
+		{"matching scope needs no expiry", "invalid", " " + scope + " ", "\t" + scope, 0, deadline, true},
+		{"expired without current scope", stamp, "", "", 60, deadline.Add(time.Nanosecond), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claim := core.LeaseClaim{LastUsedAt: tc.lastUsed, ProviderScope: tc.claimScope, IdleTimeoutSeconds: tc.idle}
+			if got := localContainerClaimMatchesScope(claim, tc.currentScope, tc.now); got != tc.want {
+				t.Fatalf("scope admission=%t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCleanupRemovesStaleLegacyUnscopedClaimWithoutContainer(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())

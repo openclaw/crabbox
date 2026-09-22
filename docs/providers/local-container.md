@@ -409,6 +409,12 @@ state; the original removal failure is not converted into success.
    `crabbox stop --provider docker <lease-or-slug>` removes the stale claim and
    stored SSH key.
 
+The cleanup sweep admits an old claim without a recorded scope only strictly
+after its idle timeout plus twelve hours. It still verifies the captured runtime
+identity and container absence, preserves claims from another scope, and retains
+stored SSH keys when removing orphan claims. Legacy admission and ordinary
+claimed-container cleanup share the same strict expiry rule.
+
 Endpoint discovery has a 30-second budget covering runtime inspections and
 100 ms waits between attempts. Earlier caller cancellation stops discovery;
 terminal container observations still fail immediately. This budget is separate
