@@ -706,15 +706,42 @@ func TestCoderListIncludesButCleanupSkipsUnclaimedStoppedWorkspaces(t *testing.T
 }
 
 func TestShouldCleanupCoderRequiresLocalClaimForStoppedWorkspace(t *testing.T) {
-	server := core.Server{Name: "crabbox-blue", Status: "stopped", Labels: map[string]string{"slug": "blue"}}
-	ok, reason := shouldCleanupCoder(server, core.LeaseClaim{}, false, time.Now())
-	if ok || reason != "missing claim" {
-		t.Fatalf("cleanup=%v reason=%q; stopped unclaimed Coder workspaces must be preserved", ok, reason)
-	}
-	expired := core.LeaseClaim{LeaseID: "cbx_expired", LastUsedAt: time.Now().Add(-48 * time.Hour).Format(time.RFC3339), IdleTimeoutSeconds: int((30 * time.Minute).Seconds())}
-	ok, reason = shouldCleanupCoder(server, expired, true, time.Now())
-	if !ok || reason != "claim expired" {
-		t.Fatalf("cleanup=%v reason=%q; expired local claim should be cleanup-eligible", ok, reason)
+	lastUsed := time.Date(2026, 9, 20, 10, 0, 0, 123, time.UTC)
+	boundary := lastUsed.Add(30*time.Minute + 12*time.Hour)
+	for _, tc := range []struct {
+		name, timestamp, serverKeep, claimKeep string
+		idleSeconds                            int
+		offset                                 time.Duration
+		missing, want                          bool
+		reason                                 string
+	}{
+		{name: "missing claim", missing: true, reason: "missing claim"},
+		{name: "expired", idleSeconds: 1800, offset: time.Nanosecond, want: true, reason: "claim expired"},
+		{name: "equal boundary", idleSeconds: 1800, reason: "claim active"},
+		{name: "before boundary", idleSeconds: 1800, offset: -time.Nanosecond, reason: "claim active"},
+		{name: "whitespace timestamp", timestamp: " \t" + lastUsed.Format(time.RFC3339Nano) + "\n", idleSeconds: 1800, offset: time.Nanosecond, want: true, reason: "claim expired"},
+		{name: "invalid timestamp", timestamp: "invalid", idleSeconds: 1800, offset: time.Hour, reason: "claim active"},
+		{name: "blank timestamp", timestamp: " \t", idleSeconds: 1800, offset: time.Hour, reason: "claim active"},
+		{name: "zero timestamp", timestamp: time.Time{}.Format(time.RFC3339), idleSeconds: 1800, offset: time.Hour, reason: "claim active"},
+		{name: "disabled idle", offset: time.Hour, reason: "claim active"},
+		{name: "negative idle", idleSeconds: -1, offset: time.Hour, reason: "claim active"},
+		{name: "server keep", serverKeep: "TRUE", idleSeconds: 1800, offset: time.Hour, reason: "keep=true"},
+		{name: "claim keep", claimKeep: "TrUe", idleSeconds: 1800, offset: time.Hour, reason: "keep=true"},
+		{name: "keep before missing claim", serverKeep: "true", missing: true, reason: "keep=true"},
+		{name: "absent claim keep ignored", claimKeep: "true", missing: true, reason: "missing claim"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			timestamp := tc.timestamp
+			if timestamp == "" {
+				timestamp = lastUsed.Format(time.RFC3339Nano)
+			}
+			server := core.Server{Name: "crabbox-blue", Status: "stopped", Labels: map[string]string{"slug": "blue", "keep": tc.serverKeep}}
+			claim := core.LeaseClaim{LeaseID: "cbx_expired", LastUsedAt: timestamp, IdleTimeoutSeconds: tc.idleSeconds, Labels: map[string]string{"keep": tc.claimKeep}}
+			ok, reason := shouldCleanupCoder(server, claim, !tc.missing, boundary.Add(tc.offset))
+			if ok != tc.want || reason != tc.reason {
+				t.Fatalf("cleanup=%v reason=%q; want %v %q", ok, reason, tc.want, tc.reason)
+			}
+		})
 	}
 }
 

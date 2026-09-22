@@ -97,7 +97,7 @@ func TestCloudProvisioningPlansKeepExactTypesAndMarketOrder(t *testing.T) {
 			cfg.Provider = provider
 			cfg.ServerType, cfg.ServerTypeExplicit = "exact-type", true
 			cfg.Capacity.Market, cfg.Capacity.Fallback = "spot", "on-demand"
-			cfg.GCPZone = "zone-a"
+			cfg.GCP.Zone = "zone-a"
 			cfg.Capacity.AvailabilityZones = []string{"zone-b", "zone-a"}
 			plan := azureProvisioningPlan
 			want := []string{"spot/exact-type", "on-demand/exact-type"}

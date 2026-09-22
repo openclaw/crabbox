@@ -2541,19 +2541,12 @@ func localContainerClaimMatchesScope(claim core.LeaseClaim, currentScope string,
 	if currentScope != "" && claimScope == currentScope {
 		return true
 	}
-	return claimScope == "" && localContainerClaimExpired(claim, now)
-}
-
-func localContainerClaimExpired(claim core.LeaseClaim, now time.Time) bool {
-	lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-	if err != nil || lastUsed.IsZero() {
+	if claimScope != "" {
 		return false
 	}
-	idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
-	if idle <= 0 {
-		return false
-	}
-	return now.After(lastUsed.Add(idle).Add(12 * time.Hour))
+	claim.LastUsedAt = strings.TrimSpace(claim.LastUsedAt)
+	expired, _ := shared.ClaimIdleExpiredAfterGrace(claim, now, 12*time.Hour)
+	return expired
 }
 
 func (b *backend) docker(ctx context.Context, args []string, stdout, stderr io.Writer) (core.LocalCommandResult, error) {

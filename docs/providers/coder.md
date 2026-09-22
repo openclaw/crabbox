@@ -126,6 +126,12 @@ metadata. `crabbox cleanup --provider coder --dry-run` prints the intended
 stop/delete actions without mutating workspaces. Older local claims that do not
 record a Coder release action default to stop during cleanup.
 
+Cleanup preserves kept claims and requires the current time to be strictly past
+the claim's last-used timestamp plus its positive idle timeout and a twelve-hour
+grace period. Surrounding timestamp whitespace is ignored; invalid or zero
+timestamps and disabled or negative idle timeouts remain ineligible. Coder uses
+the shared claim idle-expiry policy for this decision.
+
 ## SSH
 
 Coder workspaces use OpenSSH proxy mode:

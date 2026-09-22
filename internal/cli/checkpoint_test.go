@@ -3054,7 +3054,7 @@ func TestApplyNativeCheckpointForkConfigForAzureAndGCP(t *testing.T) {
 				return record
 			}(),
 			check: func(t *testing.T, cfg Config) {
-				if cfg.Provider != "gcp" || cfg.GCPZone != "us-central1-a" || cfg.GCPProject != "proj" || cfg.GCPMachineImage == "" || !cfg.gcpProjectExplicit {
+				if cfg.Provider != "gcp" || cfg.GCP.Zone != "us-central1-a" || cfg.GCP.Project != "proj" || cfg.GCP.MachineImage == "" || !cfg.GCP.projectExplicit {
 					t.Fatalf("gcp config not applied: %#v", cfg)
 				}
 			},
@@ -3070,7 +3070,7 @@ func TestApplyNativeCheckpointForkConfigForAzureAndGCP(t *testing.T) {
 				return record
 			}(),
 			check: func(t *testing.T, cfg Config) {
-				if cfg.Provider != "gcp" || cfg.GCPZone != "us-central1-a" || cfg.GCPProject != "proj" || cfg.GCPSnapshot == "" || !cfg.gcpProjectExplicit {
+				if cfg.Provider != "gcp" || cfg.GCP.Zone != "us-central1-a" || cfg.GCP.Project != "proj" || cfg.GCP.Snapshot == "" || !cfg.GCP.projectExplicit {
 					t.Fatalf("gcp snapshot config not applied: %#v", cfg)
 				}
 			},

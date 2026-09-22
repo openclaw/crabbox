@@ -1153,7 +1153,16 @@ application may follow it. Single-flag rejection, supported type mapping, and
 providers without this rejection policy remain distinct contracts; do not use
 the pair helper to change them.
 
-Pattern for a provider with typed config fields:
+Generated adapters that consume only `InputAccepted` use
+`cli.ApplyProviderConfigFlags[ConfigFlagValues]` to share typed admission,
+application, and accepted-input recording, including partial application before
+an error. Its boolean reports whether the values matched: skip normalization and
+other postprocessing when false. Preserve the adapter's existing guard and
+error/postprocessing order; provider policy stays outside the helper.
+Adapters that consume per-field reports still call
+their generated `Apply` method directly.
+
+Manual pattern for a provider with custom field application:
 
 ```go
 type exampleFlagValues struct {
@@ -1208,6 +1217,14 @@ both Azure and Azure Dynamic Sessions; the latter retains its separate
 and native lifecycle policy remain with their existing owners. File keys,
 config-show fields, coordinator wire fields, and fixed-lease fingerprint shapes
 do not follow internal Go field renames.
+
+GCP's values and explicit-input markers live together in `Config.GCP`, owned by
+`config_gcp.go`. That owner handles defaults, file and environment admission,
+OS-image replacement, and coordinator projection without flattening fields back
+into core. Its handwritten bindings preserve policies that differ by source:
+ambient project aliases only fill a missing project, malformed root-size input
+still records intent, and file lists retain their original values. Keep the
+public YAML, config-show, and coordinator keys stable when changing storage.
 
 `internal/atomicfile.WritePrivate` shares private-file staging, file syncing,
 and replacement. Callers retain path admission, directory creation, their

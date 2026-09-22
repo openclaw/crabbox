@@ -32,12 +32,7 @@ func RegisterFreestyleProviderFlags(fs *flag.FlagSet, defaults core.Config) any 
 }
 
 func ApplyFreestyleProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	v, ok := values.(core.FreestyleConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.Freestyle, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, freestyleProvider)
+	_, err := core.ApplyProviderConfigFlags[core.FreestyleConfigFlagValues](cfg, fs, values, &cfg.Freestyle, freestyleProvider)
 	return err
 }
 

@@ -27,12 +27,7 @@ func ApplyE2BProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error
 			return err
 		}
 	}
-	v, ok := values.(core.E2BConfigFlagValues)
-	if !ok {
-		return nil
-	}
-	applied, err := v.Apply(&cfg.E2B, fs)
-	core.RecordProviderFlagInputs(cfg, applied.InputAccepted, e2bProvider)
+	_, err := core.ApplyProviderConfigFlags[core.E2BConfigFlagValues](cfg, fs, values, &cfg.E2B, e2bProvider)
 	return err
 }
 

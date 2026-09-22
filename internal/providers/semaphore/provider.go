@@ -43,14 +43,8 @@ func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 }
 
 func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	if v, ok := values.(core.SemaphoreConfigFlagValues); ok {
-		applied, err := v.Apply(&cfg.Semaphore, fs)
-		core.RecordProviderFlagInputs(cfg, applied.InputAccepted, "semaphore")
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := core.ApplyProviderConfigFlags[core.SemaphoreConfigFlagValues](cfg, fs, values, &cfg.Semaphore, "semaphore")
+	return err
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {

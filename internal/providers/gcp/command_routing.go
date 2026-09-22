@@ -8,11 +8,11 @@ import (
 
 func (Provider) CommandRouting(cfg core.Config, _ core.CommandRoutingRequest) core.CommandRouting {
 	var env []string
-	if strings.TrimSpace(cfg.GCPProject) != "" {
-		env = append(env, "CRABBOX_GCP_PROJECT="+cfg.GCPProject)
+	if strings.TrimSpace(cfg.GCP.Project) != "" {
+		env = append(env, "CRABBOX_GCP_PROJECT="+cfg.GCP.Project)
 	}
-	if strings.TrimSpace(cfg.GCPZone) != "" {
-		env = append(env, "CRABBOX_GCP_ZONE="+cfg.GCPZone)
+	if strings.TrimSpace(cfg.GCP.Zone) != "" {
+		env = append(env, "CRABBOX_GCP_ZONE="+cfg.GCP.Zone)
 	}
 	return core.CommandRouting{Env: env}
 }

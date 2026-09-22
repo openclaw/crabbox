@@ -600,7 +600,7 @@ func TestCommandRoutingCloudScopeUsesEnvironment(t *testing.T) {
 		cfg  Config
 		want []string
 	}{
-		{Config{Provider: "google-cloud", GCPProject: "my-project", GCPZone: "zone-a"}, []string{"CRABBOX_GCP_PROJECT=my-project", "CRABBOX_GCP_ZONE=zone-a"}},
+		{Config{Provider: "google-cloud", GCP: GCPConfig{Project: "my-project", Zone: "zone-a"}}, []string{"CRABBOX_GCP_PROJECT=my-project", "CRABBOX_GCP_ZONE=zone-a"}},
 		{Config{Provider: "azure", Azure: AzureConfig{Subscription: "sub", ResourceGroup: "rg", Location: "west"}}, []string{"CRABBOX_AZURE_SUBSCRIPTION_ID=sub", "CRABBOX_AZURE_RESOURCE_GROUP=rg", "CRABBOX_AZURE_LOCATION=west"}},
 		{Config{Provider: "aws", AWSRegion: "us-east-2"}, []string{"CRABBOX_AWS_REGION=us-east-2"}},
 	}

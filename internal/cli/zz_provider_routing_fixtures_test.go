@@ -10,10 +10,10 @@ import (
 // supply the opaque routing values used by orchestration/claim tests; the real
 // adapter contracts and historical scope formats are tested in providers/all.
 func (testGCPProvider) ClaimScope(cfg Config) string {
-	if cfg.GCPProject == "" {
+	if cfg.GCP.Project == "" {
 		return ""
 	}
-	return "project:" + cfg.GCPProject
+	return "project:" + cfg.GCP.Project
 }
 func (testStaticSSHProvider) CommandRouting(cfg Config, request CommandRoutingRequest) CommandRouting {
 	cfg.Static.Host = firstNonBlank(cfg.Static.Host, request.Target.Host)

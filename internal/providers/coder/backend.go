@@ -550,18 +550,8 @@ func shouldCleanupCoder(server core.Server, claim core.LeaseClaim, hasClaim bool
 		return false, "keep=true"
 	}
 	if hasClaim {
-		lastUsed, err := time.Parse(time.RFC3339, strings.TrimSpace(claim.LastUsedAt))
-		if err != nil || lastUsed.IsZero() {
-			return false, "claim active"
-		}
-		idle := time.Duration(claim.IdleTimeoutSeconds) * time.Second
-		if idle <= 0 {
-			return false, "claim active"
-		}
-		if now.After(lastUsed.Add(idle).Add(12 * time.Hour)) {
-			return true, "claim expired"
-		}
-		return false, "claim active"
+		claim.LastUsedAt = strings.TrimSpace(claim.LastUsedAt)
+		return shared.ClaimIdleExpiredAfterGrace(claim, now, 12*time.Hour)
 	}
 	return false, "missing claim"
 }

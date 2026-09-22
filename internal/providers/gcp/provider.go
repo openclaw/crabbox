@@ -248,14 +248,14 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 	cfg := req.Config
 	switch req.Record.Kind {
 	case core.CheckpointKindGCP:
-		cfg.GCPMachineImage = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
+		cfg.GCP.MachineImage = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
 	case core.CheckpointKindGCPDisk:
-		cfg.GCPSnapshot = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
+		cfg.GCP.Snapshot = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
 	default:
 		return core.Exit(2, "provider=gcp does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	if req.Record.Region != "" {
-		cfg.GCPZone = req.Record.Region
+		cfg.GCP.Zone = req.Record.Region
 	}
 	if req.Record.Project != "" {
 		core.SetGCPProjectExplicit(cfg, req.Record.Project)
