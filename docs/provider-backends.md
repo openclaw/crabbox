@@ -1363,6 +1363,13 @@ E2B-compatible adapters use `shared.EnvdSandboxViews` to project their common
 wire metadata. Provider identity and legacy ID prefixes stay explicit; resource
 ownership validation remains in each adapter.
 
+E2B and CubeSandbox use `shared.DeleteClaimedEnvdSandbox` after resolving and
+checking their exact endpoint-bound claim. The helper holds the unchanged-claim
+fence across the remote read, ownership validation, deletion, and claim removal.
+Each adapter retains its ownership validator, not-found classification, and error
+formatting. Provider-approved absence completes cleanup; other failures retain
+the claim. Reclaim/adoption and endpoint admission remain adapter-owned.
+
 RunPod and Vast use `shared.AdmitResolvedLease` for the common resolved-lease
 admission transaction: authorize activity on the observed claim, then commit
 repository admission only if that exact claim still matches. The returned claim
