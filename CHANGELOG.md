@@ -8,7 +8,7 @@
 
 ### Changed
 
-- Reuse shared claim idle-expiry policy for Coder cleanup while preserving its twelve-hour grace period, timestamp normalization, and ownership safeguards.
+- Reuse shared claim idle-expiry policy for Coder cleanup while preserving its twelve-hour grace period, timestamp normalization, and ownership safeguards. [PR 2490](https://github.com/openclaw/crabbox/pull/2490). Thanks @steipete.
 - Reuse Local Container's shared idle-expiry rule for legacy unscoped orphan claims while preserving strict twelve-hour grace, runtime identity checks, and stored-key retention. [PR 2489](https://github.com/openclaw/crabbox/pull/2489).
 - Share generated flag application and accepted-input bookkeeping across E2B, Freestyle, Semaphore, and Tenki while preserving their validation and normalization order. [PR 2487](https://github.com/openclaw/crabbox/pull/2487).
 - Derive CubeSandbox defaults, file/environment bindings, and flags from one typed declaration while preserving aliases, proxy-port parsing, and endpoint trust policy. [PR 2485](https://github.com/openclaw/crabbox/pull/2485).
