@@ -211,7 +211,7 @@ func TestValidateProviderTargetAllowsAzureWindowsARM64(t *testing.T) {
 	cfg.architectureExplicit = true
 	cfg.ServerType = "Standard_D32pds_v6"
 	cfg.ServerTypeExplicit = true
-	cfg.AzureImage = "Contoso:windows-arm64:server:latest"
+	cfg.Azure.Image = "Contoso:windows-arm64:server:latest"
 	if err := validateProviderTarget(cfg); err != nil {
 		t.Fatalf("err=%v", err)
 	}
@@ -393,7 +393,7 @@ func TestValidateProviderTargetRejectsAzureWindowsARM64WSL2(t *testing.T) {
 	cfg.architectureExplicit = true
 	cfg.ServerType = "Standard_D32pds_v6"
 	cfg.ServerTypeExplicit = true
-	cfg.AzureImage = "Contoso:windows-arm64:server:latest"
+	cfg.Azure.Image = "Contoso:windows-arm64:server:latest"
 	err := validateProviderTarget(cfg)
 	if err == nil || !strings.Contains(err.Error(), "supports windows.mode=normal only") {
 		t.Fatalf("err=%v", err)

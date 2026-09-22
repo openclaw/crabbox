@@ -290,8 +290,8 @@ func TestAzureAcquireValidatesSSHCIDRsBeforeClient(t *testing.T) {
 	validated := false
 	validateAzureSSHCIDRsForAcquire = func(_ context.Context, cfg core.Config) error {
 		validated = true
-		if len(cfg.AzureSSHCIDRs) != 0 {
-			t.Fatalf("AzureSSHCIDRs=%v before validation, want non-explicit empty config", cfg.AzureSSHCIDRs)
+		if len(cfg.Azure.SSHCIDRs) != 0 {
+			t.Fatalf("AzureSSHCIDRs=%v before validation, want non-explicit empty config", cfg.Azure.SSHCIDRs)
 		}
 		return nil
 	}
@@ -307,13 +307,13 @@ func TestAzureAcquireValidatesSSHCIDRsBeforeClient(t *testing.T) {
 	}
 	t.Cleanup(func() { newAzureClient = oldClient })
 
-	backend := NewAzureLeaseBackend(core.ProviderSpec{}, core.Config{Provider: "azure", AzureLocation: "eastus", AzureResourceGroup: "rg"}, core.Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+	backend := NewAzureLeaseBackend(core.ProviderSpec{}, core.Config{Provider: "azure", Azure: core.AzureConfig{Location: "eastus", ResourceGroup: "rg"}}, core.Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
 	_, err := backend.acquireOnce(context.Background(), false, "")
 	if !errors.Is(err, listErr) {
 		t.Fatalf("err=%v, want list failure", err)
 	}
-	if len(clientCfg.AzureSSHCIDRs) != 0 {
-		t.Fatalf("AzureSSHCIDRs=%v, want detected CIDR provenance preserved as non-explicit", clientCfg.AzureSSHCIDRs)
+	if len(clientCfg.Azure.SSHCIDRs) != 0 {
+		t.Fatalf("AzureSSHCIDRs=%v, want detected CIDR provenance preserved as non-explicit", clientCfg.Azure.SSHCIDRs)
 	}
 }
 
@@ -330,7 +330,7 @@ func TestAzureAcquireFailsClosedWhenSSHCIDRDetectionFails(t *testing.T) {
 	}
 	t.Cleanup(func() { newAzureClient = oldClient })
 
-	backend := NewAzureLeaseBackend(core.ProviderSpec{}, core.Config{Provider: "azure", AzureLocation: "eastus", AzureResourceGroup: "rg"}, core.Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
+	backend := NewAzureLeaseBackend(core.ProviderSpec{}, core.Config{Provider: "azure", Azure: core.AzureConfig{Location: "eastus", ResourceGroup: "rg"}}, core.Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
 	_, err := backend.acquireOnce(context.Background(), false, "")
 	if err == nil || err.Error() != "offline" {
 		t.Fatalf("err=%v, want detection failure", err)
@@ -421,11 +421,13 @@ func TestAzureAcquireRollsBackWhenExactClaimCannotPersist(t *testing.T) {
 
 func azureAcquireTestConfig() core.Config {
 	return core.Config{
-		Provider:           "azure",
-		AzureSubscription:  "test-sub",
-		AzureLocation:      "eastus",
-		AzureResourceGroup: "rg",
-		AzureSSHCIDRs:      []string{"198.51.100.7/32"},
+		Provider: "azure",
+		Azure: core.AzureConfig{
+			Subscription:  "test-sub",
+			Location:      "eastus",
+			ResourceGroup: "rg",
+			SSHCIDRs:      []string{"198.51.100.7/32"},
+		},
 	}
 }
 
@@ -1190,16 +1192,16 @@ func TestAzureConfigShowCompletePassiveSection(t *testing.T) {
 		text  string
 	}{
 		{name: "nil", input: core.Config{}, want: map[string]any{"location": "", "resourceGroup": "", "image": "", "osDisk": "", "snapshotSKU": "", "osDiskSKU": "", "network": "", "sshCIDRs": []string(nil)}, text: "azure location= resource_group= os_disk= snapshot_sku=- os_disk_sku=- network=- ssh_cidrs=-\n"},
-		{name: "empty", input: core.Config{AzureSSHCIDRs: []string{}}, want: map[string]any{"location": "", "resourceGroup": "", "image": "", "osDisk": "", "snapshotSKU": "", "osDiskSKU": "", "network": "", "sshCIDRs": []string{}}, text: "azure location= resource_group= os_disk= snapshot_sku=- os_disk_sku=- network=- ssh_cidrs=-\n"},
-		{name: "raw-references-list", input: core.Config{AzureLocation: "raw-location", AzureResourceGroup: "group-reference", AzureImage: "image-reference", AzureOSDisk: "raw-disk", AzureSnapshotSKU: "raw-snapshot-sku", AzureOSDiskSKU: "raw-disk-sku", AzureNetwork: "network-reference", AzureSSHCIDRs: []string{"second", "first", "second", " "}}, want: map[string]any{"location": "raw-location", "resourceGroup": "group-reference", "image": "image-reference", "osDisk": "raw-disk", "snapshotSKU": "raw-snapshot-sku", "osDiskSKU": "raw-disk-sku", "network": "network-reference", "sshCIDRs": []string{"second", "first", "second", " "}}, text: "azure location=raw-location resource_group=group-reference os_disk=raw-disk snapshot_sku=raw-snapshot-sku os_disk_sku=raw-disk-sku network=network-reference ssh_cidrs=second,first,second, \n"},
-		{name: "whitespace-empty-elements", input: core.Config{AzureLocation: " ", AzureResourceGroup: " ", AzureImage: " ", AzureOSDisk: " ", AzureSnapshotSKU: " ", AzureOSDiskSKU: " ", AzureNetwork: " ", AzureSSHCIDRs: []string{"", ""}}, want: map[string]any{"location": " ", "resourceGroup": " ", "image": " ", "osDisk": " ", "snapshotSKU": " ", "osDiskSKU": " ", "network": " ", "sshCIDRs": []string{"", ""}}, text: "azure location=  resource_group=  os_disk=  snapshot_sku=  os_disk_sku=  network=  ssh_cidrs=,\n"},
+		{name: "empty", input: core.Config{Azure: core.AzureConfig{SSHCIDRs: []string{}}}, want: map[string]any{"location": "", "resourceGroup": "", "image": "", "osDisk": "", "snapshotSKU": "", "osDiskSKU": "", "network": "", "sshCIDRs": []string{}}, text: "azure location= resource_group= os_disk= snapshot_sku=- os_disk_sku=- network=- ssh_cidrs=-\n"},
+		{name: "raw-references-list", input: core.Config{Azure: core.AzureConfig{Location: "raw-location", ResourceGroup: "group-reference", Image: "image-reference", OSDisk: "raw-disk", SnapshotSKU: "raw-snapshot-sku", OSDiskSKU: "raw-disk-sku", Network: "network-reference", SSHCIDRs: []string{"second", "first", "second", " "}}}, want: map[string]any{"location": "raw-location", "resourceGroup": "group-reference", "image": "image-reference", "osDisk": "raw-disk", "snapshotSKU": "raw-snapshot-sku", "osDiskSKU": "raw-disk-sku", "network": "network-reference", "sshCIDRs": []string{"second", "first", "second", " "}}, text: "azure location=raw-location resource_group=group-reference os_disk=raw-disk snapshot_sku=raw-snapshot-sku os_disk_sku=raw-disk-sku network=network-reference ssh_cidrs=second,first,second, \n"},
+		{name: "whitespace-empty-elements", input: core.Config{Azure: core.AzureConfig{Location: " ", ResourceGroup: " ", Image: " ", OSDisk: " ", SnapshotSKU: " ", OSDiskSKU: " ", Network: " ", SSHCIDRs: []string{"", ""}}}, want: map[string]any{"location": " ", "resourceGroup": " ", "image": " ", "osDisk": " ", "snapshotSKU": " ", "osDiskSKU": " ", "network": " ", "sshCIDRs": []string{"", ""}}, text: "azure location=  resource_group=  os_disk=  snapshot_sku=  os_disk_sku=  network=  ssh_cidrs=,\n"},
 	} {
 		for _, selected := range []string{"azure", "static"} {
 			t.Run(tc.name+"/"+selected, func(t *testing.T) {
 				cfg := tc.input
 				cfg.Provider = selected
 				before := cfg
-				before.AzureSSHCIDRs = slices.Clone(cfg.AzureSSHCIDRs)
+				before.Azure.SSHCIDRs = slices.Clone(cfg.Azure.SSHCIDRs)
 				section := projector.ConfigShowSection(cfg)
 				if section.JSONKey != "azure" || section.TextLabel != "azure" || !reflect.DeepEqual(section.Providers, []string{"azure"}) {
 					t.Fatalf("section metadata=%#v", section)
@@ -1247,7 +1249,7 @@ func TestAzureResolvedEndpointDirectAndAlias(t *testing.T) {
 		for _, id := range []string{server.CloudID, "example"} {
 			for _, releaseOnly := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%s/release=%t", network, id, releaseOnly), func(t *testing.T) {
-					cfg := core.Config{SSHUser: "alice", SSHPort: "2222", SSHKey: "configured-key", TargetOS: "linux", AzureNetwork: network}
+					cfg := core.Config{SSHUser: "alice", SSHPort: "2222", SSHKey: "configured-key", TargetOS: "linux", Azure: core.AzureConfig{Network: network}}
 					backend := NewAzureLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{}).(*azureLeaseBackend)
 					got, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: id, ReleaseOnly: releaseOnly})
 					if err != nil {

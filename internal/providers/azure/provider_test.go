@@ -15,7 +15,7 @@ func TestAzureFlatInputTracking(t *testing.T) {
 		accepted, bad bool
 	}{{"azure-backend", "vm", true, false}, {"azure-backend", "dynamic-sessions", true, false}, {"azure-backend", "invalid", false, true}, {"azure-os-disk", "managed", true, false}, {"azure-os-disk", "invalid", false, true}, {"azure-snapshot-sku", "Standard_LRS", true, false}, {"azure-snapshot-sku", "invalid", true, true}, {"azure-os-disk-sku", "Standard_LRS", true, false}, {"azure-os-disk-sku", "invalid", true, true}} {
 		t.Run(tc.name+"/"+tc.raw, func(t *testing.T) {
-			cfg := core.Config{Provider: "azure", AzureBackend: "vm"}
+			cfg := core.Config{Provider: "azure", Azure: core.AzureConfig{Backend: "vm"}}
 			fs := flag.NewFlagSet("metadata", flag.ContinueOnError)
 			v := (Provider{}).RegisterFlags(fs, cfg)
 			if err := fs.Parse([]string{"--" + tc.name + "=" + tc.raw}); err != nil {
@@ -25,22 +25,22 @@ func TestAzureFlatInputTracking(t *testing.T) {
 			if (err != nil) != tc.bad {
 				t.Fatalf("unexpected validation outcome: %v", err)
 			}
-			want := core.Config{Provider: "azure", AzureBackend: "vm"}
+			want := core.Config{Provider: "azure", Azure: core.AzureConfig{Backend: "vm"}}
 			if tc.accepted {
 				core.RecordProviderFlagInputs(&want, true, "azure")
 				switch tc.name {
 				case "azure-backend":
-					want.AzureBackend = tc.raw
+					want.Azure.Backend = tc.raw
 					if tc.raw == "dynamic-sessions" {
 						want.Provider = "azure-dynamic-sessions"
 					}
 				case "azure-os-disk":
-					want.AzureOSDisk = tc.raw
-					want.AzureOSDiskExplicit = true
+					want.Azure.OSDisk = tc.raw
+					want.Azure.OSDiskExplicit = true
 				case "azure-snapshot-sku":
-					want.AzureSnapshotSKU = tc.raw
+					want.Azure.SnapshotSKU = tc.raw
 				case "azure-os-disk-sku":
-					want.AzureOSDiskSKU = tc.raw
+					want.Azure.OSDiskSKU = tc.raw
 				}
 			}
 			if !reflect.DeepEqual(cfg, want) {
@@ -48,7 +48,7 @@ func TestAzureFlatInputTracking(t *testing.T) {
 			}
 		})
 	}
-	cfg := core.Config{Provider: "azure", AzureBackend: "vm"}
+	cfg := core.Config{Provider: "azure", Azure: core.AzureConfig{Backend: "vm"}}
 	fs := flag.NewFlagSet("wrong", flag.ContinueOnError)
 	(Provider{}).RegisterFlags(fs, cfg)
 	if err := fs.Parse([]string{"--azure-backend=vm"}); err != nil {
@@ -197,10 +197,10 @@ func TestProviderAppliesAzureOSDiskFlag(t *testing.T) {
 	if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AzureOSDisk != core.AzureOSDiskManaged {
-		t.Fatalf("AzureOSDisk=%q want %q", cfg.AzureOSDisk, core.AzureOSDiskManaged)
+	if cfg.Azure.OSDisk != core.AzureOSDiskManaged {
+		t.Fatalf("AzureOSDisk=%q want %q", cfg.Azure.OSDisk, core.AzureOSDiskManaged)
 	}
-	if !cfg.AzureOSDiskExplicit {
+	if !cfg.Azure.OSDiskExplicit {
 		t.Fatal("AzureOSDiskExplicit=false, want true")
 	}
 }
@@ -220,8 +220,8 @@ func TestProviderAppliesAzureSnapshotStorageFlags(t *testing.T) {
 	if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AzureSnapshotSKU != "Premium_LRS" || cfg.AzureOSDiskSKU != "Premium_LRS" {
-		t.Fatalf("snapshot SKU=%q OS disk SKU=%q", cfg.AzureSnapshotSKU, cfg.AzureOSDiskSKU)
+	if cfg.Azure.SnapshotSKU != "Premium_LRS" || cfg.Azure.OSDiskSKU != "Premium_LRS" {
+		t.Fatalf("snapshot SKU=%q OS disk SKU=%q", cfg.Azure.SnapshotSKU, cfg.Azure.OSDiskSKU)
 	}
 }
 
@@ -229,16 +229,16 @@ func TestProviderExplicitBackendRoutesToDynamicSessions(t *testing.T) {
 	t.Parallel()
 	provider := Provider{}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	values := provider.RegisterFlags(fs, core.Config{AzureBackend: core.AzureBackendVM})
+	values := provider.RegisterFlags(fs, core.Config{Azure: core.AzureConfig{Backend: core.AzureBackendVM}})
 	if err := fs.Parse([]string{"--azure-backend", "dynamic-sessions"}); err != nil {
 		t.Fatal(err)
 	}
-	cfg := core.Config{Provider: "azure", AzureBackend: core.AzureBackendVM}
+	cfg := core.Config{Provider: "azure", Azure: core.AzureConfig{Backend: core.AzureBackendVM}}
 	if err := provider.ApplyFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "azure-dynamic-sessions" || cfg.AzureBackend != core.AzureBackendDynamicSessions {
-		t.Fatalf("provider=%q backend=%q", cfg.Provider, cfg.AzureBackend)
+	if cfg.Provider != "azure-dynamic-sessions" || cfg.Azure.Backend != core.AzureBackendDynamicSessions {
+		t.Fatalf("provider=%q backend=%q", cfg.Provider, cfg.Azure.Backend)
 	}
 }
 
@@ -247,7 +247,7 @@ func TestProviderValidatesConfiguredAzureOSDisk(t *testing.T) {
 	provider := Provider{}
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	values := provider.RegisterFlags(fs, core.Config{})
-	cfg := core.Config{Provider: "azure", AzureOSDisk: "premium"}
+	cfg := core.Config{Provider: "azure", Azure: core.AzureConfig{OSDisk: "premium"}}
 	if err := provider.ApplyFlags(&cfg, fs, values); err == nil {
 		t.Fatal("expected invalid configured Azure OS disk mode to fail")
 	}
@@ -307,7 +307,7 @@ func TestProviderAppliesWindowsSnapshotForkAzureScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AzureSnapshot == "" || cfg.AzureLocation != "westus2" || cfg.AzureResourceGroup != "snapshot-rg" || cfg.AzureSubscription != "sub" {
+	if cfg.Azure.Snapshot == "" || cfg.Azure.Location != "westus2" || cfg.Azure.ResourceGroup != "snapshot-rg" || cfg.Azure.Subscription != "sub" {
 		t.Fatalf("fork config=%+v", cfg)
 	}
 }
@@ -324,8 +324,8 @@ func TestProviderReappliesOSDiskSKUAfterCheckpointProviderRewrite(t *testing.T) 
 	if err := provider.ApplyNativeCheckpointForkFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AzureOSDiskSKU != "Premium_LRS" {
-		t.Fatalf("AzureOSDiskSKU=%q", cfg.AzureOSDiskSKU)
+	if cfg.Azure.OSDiskSKU != "Premium_LRS" {
+		t.Fatalf("AzureOSDiskSKU=%q", cfg.Azure.OSDiskSKU)
 	}
 }
 

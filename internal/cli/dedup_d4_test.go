@@ -63,16 +63,16 @@ func TestDedupD4FileStringAssignments(t *testing.T) {
 		{"AWS.SecurityGroupID", "AWSSGID", "aws"},
 		{"AWS.SubnetID", "AWSSubnetID", "aws"},
 		{"AWS.InstanceProfile", "AWSProfile", "aws"},
-		{"Azure.Backend", "AzureBackend", "azure"},
-		{"Azure.ClientID", "AzureClientID", "azure"},
-		{"Azure.Location", "AzureLocation", "azure"},
-		{"Azure.ResourceGroup", "AzureResourceGroup", "azure"},
-		{"Azure.SnapshotSKU", "AzureSnapshotSKU", "azure"},
-		{"Azure.OSDiskSKU", "AzureOSDiskSKU", "azure"},
-		{"Azure.VNet", "AzureVNet", "azure"},
-		{"Azure.Subnet", "AzureSubnet", "azure"},
-		{"Azure.NSG", "AzureNSG", "azure"},
-		{"Azure.Network", "AzureNetwork", "azure"},
+		{"Azure.Backend", "Azure.Backend", "azure"},
+		{"Azure.ClientID", "Azure.ClientID", "azure"},
+		{"Azure.Location", "Azure.Location", "azure"},
+		{"Azure.ResourceGroup", "Azure.ResourceGroup", "azure"},
+		{"Azure.SnapshotSKU", "Azure.SnapshotSKU", "azure"},
+		{"Azure.OSDiskSKU", "Azure.OSDiskSKU", "azure"},
+		{"Azure.VNet", "Azure.VNet", "azure"},
+		{"Azure.Subnet", "Azure.Subnet", "azure"},
+		{"Azure.NSG", "Azure.NSG", "azure"},
+		{"Azure.Network", "Azure.Network", "azure"},
 		{"GCP.Subnet", "GCP.Subnet", "gcp"},
 		{"GCP.ServiceAccount", "GCP.ServiceAccount", "gcp"},
 		{"Parallels.Template", "Parallels.Template", "parallels"},
@@ -153,7 +153,7 @@ func TestDedupD4FileBoundariesAndAliases(t *testing.T) {
 		if err := applyFileConfigWithTrustAndProviderSource(&cfg, file, trusted, source); err != nil {
 			t.Fatal(err)
 		}
-		if cfg.AzureSubscription != "subscription" || cfg.AzureTenant != "tenant" {
+		if cfg.Azure.Subscription != "subscription" || cfg.Azure.Tenant != "tenant" {
 			t.Fatal("Azure family values changed")
 		}
 		for _, owner := range []configInputOwner{"azure", "azure-dynamic-sessions", "parallels"} {

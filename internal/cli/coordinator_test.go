@@ -1507,20 +1507,22 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 
 	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
 	_, err := client.CreateLease(context.Background(), Config{
-		Provider:            "google",
-		OSImage:             "ubuntu:26.04",
-		osImageExplicit:     true,
-		ServerType:          "t3.small",
-		ServerTypeExplicit:  true,
-		HostID:              "h-000000000001",
-		AWSSnapshot:         "snap-123",
-		AWSSSHCIDRs:         []string{"198.51.100.7/32"},
-		AzureLocation:       "eastus",
-		AzureImage:          "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest",
-		azureImageExplicit:  true,
-		AzureSnapshot:       "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint",
-		AzureOSDisk:         "managed",
-		AzureOSDiskExplicit: true,
+		Provider:           "google",
+		OSImage:            "ubuntu:26.04",
+		osImageExplicit:    true,
+		ServerType:         "t3.small",
+		ServerTypeExplicit: true,
+		HostID:             "h-000000000001",
+		AWSSnapshot:        "snap-123",
+		AWSSSHCIDRs:        []string{"198.51.100.7/32"},
+		Azure: AzureConfig{
+			Location:       "eastus",
+			Image:          "Canonical:0001-com-ubuntu-server-jammy:22_04-lts-gen2:latest",
+			imageExplicit:  true,
+			Snapshot:       "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint",
+			OSDisk:         "managed",
+			OSDiskExplicit: true,
+		},
 		GCP: GCPConfig{
 			Project: "crabbox-project", projectExplicit: true, Zone: "europe-west2-b",
 			Image: "projects/custom/global/images/crabbox", Network: "crabbox-net",
@@ -1760,13 +1762,15 @@ func TestCoordinatorCreateLeaseForwardsOnlyExplicitAzureImage(t *testing.T) {
 
 			client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
 			_, err := client.CreateLease(context.Background(), Config{
-				Provider:           "azure",
-				AzureLocation:      "eastus",
-				AzureImage:         defaultAzureLinuxImage,
-				azureImageExplicit: tc.explicit,
-				SSHFallbackPorts:   []string{"22"},
-				TTL:                time.Hour,
-				IdleTimeout:        30 * time.Minute,
+				Provider: "azure",
+				Azure: AzureConfig{
+					Location:      "eastus",
+					Image:         defaultAzureLinuxImage,
+					imageExplicit: tc.explicit,
+				},
+				SSHFallbackPorts: []string{"22"},
+				TTL:              time.Hour,
+				IdleTimeout:      30 * time.Minute,
 			}, "ssh-ed25519 test", false, "cbx_123", "blue-crab")
 			if err != nil {
 				t.Fatal(err)
@@ -1795,10 +1799,12 @@ func TestCoordinatorCreateLeaseOmitsDefaultAzureOSDisk(t *testing.T) {
 
 	client := CoordinatorClient{BaseURL: server.URL, Client: server.Client()}
 	_, err := client.CreateLease(context.Background(), Config{
-		Provider:         "azure",
-		AzureLocation:    "eastus",
-		AzureImage:       defaultAzureLinuxImage,
-		AzureOSDisk:      AzureOSDiskManaged,
+		Provider: "azure",
+		Azure: AzureConfig{
+			Location: "eastus",
+			Image:    defaultAzureLinuxImage,
+			OSDisk:   AzureOSDiskManaged,
+		},
 		SSHFallbackPorts: []string{"22"},
 		TTL:              time.Hour,
 		IdleTimeout:      30 * time.Minute,

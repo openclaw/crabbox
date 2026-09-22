@@ -32,7 +32,7 @@ func TestAzureDynamicSessionsFlagRouteAndDeferredPoolContract(t *testing.T) {
 	if err := p.RouteConfig(&cfg, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AzureBackend != core.AzureBackendDynamicSessions {
+	if cfg.Azure.Backend != core.AzureBackendDynamicSessions {
 		t.Fatal("Azure backend route changed")
 	}
 	for _, target := range []string{"", core.TargetLinux, "darwin"} {
@@ -317,7 +317,7 @@ func TestAzureDynamicSessionsEndpointAllowsLoopbackHTTPForLocalRunner(t *testing
 func TestAzureDynamicSessionsAccessTokenUsesDynamicsessionsAudience(t *testing.T) {
 	t.Setenv(tokenEnvName, "")
 	runner := &recordingRunner{result: core.LocalCommandResult{Stdout: "token\n"}}
-	cfg := core.Config{AzureTenant: "tenant-1", AzureSubscription: "sub-1"}
+	cfg := core.Config{Azure: core.AzureConfig{Tenant: "tenant-1", Subscription: "sub-1"}}
 	token, err := azureDynamicSessionsAccessToken(context.Background(), cfg, core.Runtime{Exec: runner})
 	if err != nil {
 		t.Fatalf("access token: %v", err)

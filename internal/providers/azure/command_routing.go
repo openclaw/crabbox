@@ -8,14 +8,14 @@ import (
 
 func (Provider) CommandRouting(cfg core.Config, _ core.CommandRoutingRequest) core.CommandRouting {
 	var env []string
-	if strings.TrimSpace(cfg.AzureSubscription) != "" {
-		env = append(env, "CRABBOX_AZURE_SUBSCRIPTION_ID="+cfg.AzureSubscription)
+	if strings.TrimSpace(cfg.Azure.Subscription) != "" {
+		env = append(env, "CRABBOX_AZURE_SUBSCRIPTION_ID="+cfg.Azure.Subscription)
 	}
-	if strings.TrimSpace(cfg.AzureResourceGroup) != "" {
-		env = append(env, "CRABBOX_AZURE_RESOURCE_GROUP="+cfg.AzureResourceGroup)
+	if strings.TrimSpace(cfg.Azure.ResourceGroup) != "" {
+		env = append(env, "CRABBOX_AZURE_RESOURCE_GROUP="+cfg.Azure.ResourceGroup)
 	}
-	if strings.TrimSpace(cfg.AzureLocation) != "" {
-		env = append(env, "CRABBOX_AZURE_LOCATION="+cfg.AzureLocation)
+	if strings.TrimSpace(cfg.Azure.Location) != "" {
+		env = append(env, "CRABBOX_AZURE_LOCATION="+cfg.Azure.Location)
 	}
 	return core.CommandRouting{Env: env}
 }

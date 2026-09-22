@@ -188,9 +188,7 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 	`)
 	classify("non-AWS provider selection", `
 		Location Image AWSLambdaMicroVM
-		AzureSubscription AzureTenant AzureClientID AzureLocation AzureBackend AzureResourceGroup
-		AzureImage AzureSnapshot AzureSnapshotSKU AzureOSDisk AzureOSDiskExplicit AzureOSDiskSKU
-		AzureVNet AzureSubnet AzureNSG AzureSSHCIDRs AzureNetwork AzureDynamicSessions
+		Azure AzureDynamicSessions
 		GCP DigitalOcean Vultr Linode GitHubCodespaces
 		Lambda Nebius OVH Scaleway TencentCloud Incus Proxmox Firecracker XCPNg Parallels
 		Blacksmith KubeVirt SealosDevbox AgentSandbox External Namespace NamespaceInstance

@@ -110,7 +110,7 @@ func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req NativeC
 		ctx,
 		req.Server.CloudID,
 		name,
-		req.Config.AzureSnapshotSKU,
+		req.Config.Azure.SnapshotSKU,
 	)
 	if err != nil {
 		return CoordinatorImage{}, err
@@ -754,19 +754,19 @@ func directAzureCheckpointConfig(record checkpointRecord) (Config, bool) {
 	}
 	setProviderSelection(&cfg, "azure", providerSelectionRecordedRun)
 	if record.Native.Region != "" {
-		cfg.AzureLocation = record.Native.Region
+		cfg.Azure.Location = record.Native.Region
 	}
 	resourceID := record.nativeResourceID()
 	parts := strings.Split(strings.Trim(resourceID, "/"), "/")
 	for index := 0; index+1 < len(parts); index += 1 {
 		switch {
 		case strings.EqualFold(parts[index], "subscriptions"):
-			cfg.AzureSubscription = parts[index+1]
+			cfg.Azure.Subscription = parts[index+1]
 		case strings.EqualFold(parts[index], "resourceGroups"):
-			cfg.AzureResourceGroup = parts[index+1]
+			cfg.Azure.ResourceGroup = parts[index+1]
 		}
 	}
-	return cfg, cfg.AzureLocation != "" && cfg.AzureResourceGroup != ""
+	return cfg, cfg.Azure.Location != "" && cfg.Azure.ResourceGroup != ""
 }
 
 func verifyDirectAzureCheckpoint(ctx context.Context, audit checkpointAudit, cfg Config, providerID string) checkpointAudit {

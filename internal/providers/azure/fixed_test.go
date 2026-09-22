@@ -33,8 +33,8 @@ func fixedAzureTestBackend(t *testing.T, client *fakeAzureClient) *azureLeaseBac
 	validateAzureSSHCIDRsForAcquire = func(context.Context, core.Config) error { return nil }
 	bootstrapManagedWindowsDesktop = func(context.Context, core.Config, *core.SSHTarget, string, io.Writer) error { return nil }
 	cfg := core.BaseConfig()
-	cfg.Provider, cfg.AzureSubscription, cfg.AzureResourceGroup = "azure", "test-sub", "rg"
-	cfg.AzureLocation, cfg.TargetOS = "eastus", core.TargetLinux
+	cfg.Provider, cfg.Azure.Subscription, cfg.Azure.ResourceGroup = "azure", "test-sub", "rg"
+	cfg.Azure.Location, cfg.TargetOS = "eastus", core.TargetLinux
 	return NewAzureLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*azureLeaseBackend)
 }
 

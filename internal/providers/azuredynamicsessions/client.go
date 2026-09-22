@@ -140,10 +140,10 @@ func azureDynamicSessionsAccessToken(ctx context.Context, cfg core.Config, rt co
 		"--query", "accessToken",
 		"-o", "tsv",
 	}
-	if tenant := strings.TrimSpace(cfg.AzureTenant); tenant != "" {
+	if tenant := strings.TrimSpace(cfg.Azure.Tenant); tenant != "" {
 		args = append(args, "--tenant", tenant)
 	}
-	if subscription := strings.TrimSpace(cfg.AzureSubscription); subscription != "" {
+	if subscription := strings.TrimSpace(cfg.Azure.Subscription); subscription != "" {
 		args = append(args, "--subscription", subscription)
 	}
 	result, err := rt.Exec.Run(ctx, core.LocalCommandRequest{Name: "az", Args: args})

@@ -52,15 +52,15 @@ func (Provider) Spec() core.ProviderSpec {
 }
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
-		Backend:     fs.String("azure-backend", defaults.AzureBackend, "Azure backend: vm or dynamic-sessions"),
-		OSDisk:      fs.String("azure-os-disk", defaults.AzureOSDisk, "Azure OS disk mode: managed, ephemeral, ephemeral-preview, or auto"),
-		SnapshotSKU: fs.String("azure-snapshot-sku", defaults.AzureSnapshotSKU, "Azure checkpoint snapshot storage SKU"),
-		OSDiskSKU:   fs.String("azure-os-disk-sku", defaults.AzureOSDiskSKU, "Azure managed OS disk storage SKU"),
+		Backend:     fs.String("azure-backend", defaults.Azure.Backend, "Azure backend: vm or dynamic-sessions"),
+		OSDisk:      fs.String("azure-os-disk", defaults.Azure.OSDisk, "Azure OS disk mode: managed, ephemeral, ephemeral-preview, or auto"),
+		SnapshotSKU: fs.String("azure-snapshot-sku", defaults.Azure.SnapshotSKU, "Azure checkpoint snapshot storage SKU"),
+		OSDiskSKU:   fs.String("azure-os-disk-sku", defaults.Azure.OSDiskSKU, "Azure managed OS disk storage SKU"),
 	}
 }
 
 func (Provider) RouteConfig(cfg *core.Config, fs *flag.FlagSet, values any) error {
-	backend := cfg.AzureBackend
+	backend := cfg.Azure.Backend
 	acceptedBackend := false
 	if fs != nil && core.FlagWasSet(fs, "azure-backend") {
 		flags, _ := values.(flagValues)
@@ -73,7 +73,7 @@ func (Provider) RouteConfig(cfg *core.Config, fs *flag.FlagSet, values any) erro
 	if err != nil {
 		return core.Exit(2, "%s", err)
 	}
-	cfg.AzureBackend = normalized
+	cfg.Azure.Backend = normalized
 	core.RecordProviderFlagInputs(cfg, acceptedBackend, "azure")
 	if normalized == core.AzureBackendDynamicSessions {
 		cfg.Provider = "azure-dynamic-sessions"
@@ -99,38 +99,38 @@ func (p Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) err
 		if err != nil {
 			return err
 		}
-		cfg.AzureOSDisk = mode
+		cfg.Azure.OSDisk = mode
 		core.RecordProviderFlagInputs(cfg, true, "azure")
-		cfg.AzureOSDiskExplicit = true
+		cfg.Azure.OSDiskExplicit = true
 	}
-	if cfg.AzureOSDisk != "" {
-		mode, err := core.NormalizeAzureOSDiskMode(cfg.AzureOSDisk)
+	if cfg.Azure.OSDisk != "" {
+		mode, err := core.NormalizeAzureOSDiskMode(cfg.Azure.OSDisk)
 		if err != nil {
 			return err
 		}
-		cfg.AzureOSDisk = mode
+		cfg.Azure.OSDisk = mode
 	}
 	if core.FlagWasSet(fs, "azure-snapshot-sku") && flags.SnapshotSKU != nil {
-		cfg.AzureSnapshotSKU = *flags.SnapshotSKU
+		cfg.Azure.SnapshotSKU = *flags.SnapshotSKU
 		core.RecordProviderFlagInputs(cfg, true, "azure")
 	}
-	if cfg.AzureSnapshotSKU != "" {
-		sku, err := core.NormalizeAzureSnapshotSKU(cfg.AzureSnapshotSKU)
+	if cfg.Azure.SnapshotSKU != "" {
+		sku, err := core.NormalizeAzureSnapshotSKU(cfg.Azure.SnapshotSKU)
 		if err != nil {
 			return err
 		}
-		cfg.AzureSnapshotSKU = sku
+		cfg.Azure.SnapshotSKU = sku
 	}
 	if core.FlagWasSet(fs, "azure-os-disk-sku") && flags.OSDiskSKU != nil {
-		cfg.AzureOSDiskSKU = *flags.OSDiskSKU
+		cfg.Azure.OSDiskSKU = *flags.OSDiskSKU
 		core.RecordProviderFlagInputs(cfg, true, "azure")
 	}
-	if cfg.AzureOSDiskSKU != "" {
-		sku, err := core.NormalizeAzureDiskSKU(cfg.AzureOSDiskSKU)
+	if cfg.Azure.OSDiskSKU != "" {
+		sku, err := core.NormalizeAzureDiskSKU(cfg.Azure.OSDiskSKU)
 		if err != nil {
 			return err
 		}
-		cfg.AzureOSDiskSKU = sku
+		cfg.Azure.OSDiskSKU = sku
 	}
 	return nil
 }
@@ -327,28 +327,28 @@ func (Provider) ApplyNativeCheckpointForkConfig(req core.NativeCheckpointForkReq
 	cfg := req.Config
 	switch req.Record.Kind {
 	case core.CheckpointKindAzure:
-		cfg.AzureImage = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
+		cfg.Azure.Image = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
 	case core.CheckpointKindAzureOS:
-		cfg.AzureSnapshot = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
+		cfg.Azure.Snapshot = shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)
 	default:
 		return core.Exit(2, "provider=azure does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	if req.Record.Region != "" {
-		cfg.AzureLocation = req.Record.Region
+		cfg.Azure.Location = req.Record.Region
 	}
 	if resourceGroup := azureResourceGroup(shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)); resourceGroup != "" {
-		cfg.AzureResourceGroup = resourceGroup
+		cfg.Azure.ResourceGroup = resourceGroup
 	}
 	if subscription := azureSubscription(shared.FirstNonEmpty(req.Record.Resource, req.Record.ImageID)); subscription != "" {
-		cfg.AzureSubscription = subscription
+		cfg.Azure.Subscription = subscription
 	}
 	if req.AzureOSDiskExplicit {
 		mode, err := core.NormalizeAzureOSDiskMode(req.AzureOSDisk)
 		if err != nil {
 			return err
 		}
-		cfg.AzureOSDisk = mode
-		cfg.AzureOSDiskExplicit = true
+		cfg.Azure.OSDisk = mode
+		cfg.Azure.OSDiskExplicit = true
 	}
 	return nil
 }
@@ -360,7 +360,7 @@ func (Provider) ApplyNativeCheckpointForkFlags(cfg *core.Config, fs *flag.FlagSe
 		if err != nil {
 			return err
 		}
-		cfg.AzureOSDiskSKU = sku
+		cfg.Azure.OSDiskSKU = sku
 	}
 	return nil
 }

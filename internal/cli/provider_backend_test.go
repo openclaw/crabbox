@@ -720,8 +720,8 @@ func TestAzureBackendFlagRoutesToDynamicSessions(t *testing.T) {
 	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "azure-dynamic-sessions" || cfg.AzureBackend != AzureBackendDynamicSessions || cfg.ServerType != "" {
-		t.Fatalf("provider=%q azureBackend=%q serverType=%q", cfg.Provider, cfg.AzureBackend, cfg.ServerType)
+	if cfg.Provider != "azure-dynamic-sessions" || cfg.Azure.Backend != AzureBackendDynamicSessions || cfg.ServerType != "" {
+		t.Fatalf("provider=%q azureBackend=%q serverType=%q", cfg.Provider, cfg.Azure.Backend, cfg.ServerType)
 	}
 }
 
@@ -738,15 +738,15 @@ func TestProviderFlagsRouteAzureBackendWithoutLeaseCreate(t *testing.T) {
 	if err := applyProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "azure-dynamic-sessions" || cfg.AzureBackend != AzureBackendDynamicSessions {
-		t.Fatalf("provider=%q azureBackend=%q", cfg.Provider, cfg.AzureBackend)
+	if cfg.Provider != "azure-dynamic-sessions" || cfg.Azure.Backend != AzureBackendDynamicSessions {
+		t.Fatalf("provider=%q azureBackend=%q", cfg.Provider, cfg.Azure.Backend)
 	}
 }
 
 func TestAzureBackendFlagOverridesDynamicSessionsConfig(t *testing.T) {
 	defaults := baseConfig()
 	defaults.Provider = "azure-dynamic-sessions"
-	defaults.AzureBackend = AzureBackendDynamicSessions
+	defaults.Azure.Backend = AzureBackendDynamicSessions
 	fs := newFlagSet("test", io.Discard)
 	values := registerLeaseCreateFlags(fs, defaults)
 	if err := parseFlags(fs, []string{"--azure-backend", "vm"}); err != nil {
@@ -756,15 +756,15 @@ func TestAzureBackendFlagOverridesDynamicSessionsConfig(t *testing.T) {
 	if err := applyLeaseCreateFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "azure" || cfg.AzureBackend != AzureBackendVM || cfg.ServerType == "" {
-		t.Fatalf("provider=%q azureBackend=%q serverType=%q", cfg.Provider, cfg.AzureBackend, cfg.ServerType)
+	if cfg.Provider != "azure" || cfg.Azure.Backend != AzureBackendVM || cfg.ServerType == "" {
+		t.Fatalf("provider=%q azureBackend=%q serverType=%q", cfg.Provider, cfg.Azure.Backend, cfg.ServerType)
 	}
 }
 
 func TestProviderFlagsOverrideDynamicSessionsConfigWithoutLeaseCreate(t *testing.T) {
 	defaults := baseConfig()
 	defaults.Provider = "azure-dynamic-sessions"
-	defaults.AzureBackend = AzureBackendDynamicSessions
+	defaults.Azure.Backend = AzureBackendDynamicSessions
 	fs := newFlagSet("test", io.Discard)
 	providerFlag := fs.String("provider", defaults.Provider, "")
 	values := registerProviderFlags(fs, defaults)
@@ -776,8 +776,8 @@ func TestProviderFlagsOverrideDynamicSessionsConfigWithoutLeaseCreate(t *testing
 	if err := applyProviderFlags(&cfg, fs, values); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "azure" || cfg.AzureBackend != AzureBackendVM {
-		t.Fatalf("provider=%q azureBackend=%q", cfg.Provider, cfg.AzureBackend)
+	if cfg.Provider != "azure" || cfg.Azure.Backend != AzureBackendVM {
+		t.Fatalf("provider=%q azureBackend=%q", cfg.Provider, cfg.Azure.Backend)
 	}
 }
 
@@ -786,7 +786,7 @@ func TestRouteConfiguredProviderPreservesAuthoritativeProviderFamilyRoute(t *tes
 		t.Run(string(source), func(t *testing.T) {
 			defaults := baseConfig()
 			defaults.Provider = "azure"
-			defaults.AzureBackend = AzureBackendDynamicSessions
+			defaults.Azure.Backend = AzureBackendDynamicSessions
 			fs := newFlagSet("authoritative Azure flags", io.Discard)
 			values := registerProviderFlags(fs, defaults)
 			if err := parseFlags(fs, []string{"--azure-snapshot-sku", "premium_lrs"}); err != nil {
@@ -806,8 +806,8 @@ func TestRouteConfiguredProviderPreservesAuthoritativeProviderFamilyRoute(t *tes
 			if cfg.Provider != "azure" || cfg.providerSelectionSource != source {
 				t.Fatalf("provider=%q source=%q, want authoritative azure/%s", cfg.Provider, cfg.providerSelectionSource, source)
 			}
-			if cfg.AzureSnapshotSKU != "Premium_LRS" {
-				t.Fatalf("snapshot SKU=%q, want non-routing flag applied", cfg.AzureSnapshotSKU)
+			if cfg.Azure.SnapshotSKU != "Premium_LRS" {
+				t.Fatalf("snapshot SKU=%q, want non-routing flag applied", cfg.Azure.SnapshotSKU)
 			}
 		})
 	}
@@ -816,7 +816,7 @@ func TestRouteConfiguredProviderPreservesAuthoritativeProviderFamilyRoute(t *tes
 		t.Run("routed_"+string(source), func(t *testing.T) {
 			cfg := baseConfig()
 			setProviderSelection(&cfg, "azure", source)
-			cfg.AzureBackend = AzureBackendDynamicSessions
+			cfg.Azure.Backend = AzureBackendDynamicSessions
 			if err := routeConfiguredProvider(&cfg); err != nil {
 				t.Fatal(err)
 			}
@@ -848,7 +848,7 @@ func TestRouteConfiguredProviderPreservesAuthoritativeProviderFamilyRoute(t *tes
 func TestApplyProviderRoutingFlagsPreservesAuthoritativeAzureRoute(t *testing.T) {
 	defaults := baseConfig()
 	defaults.Provider = "azure"
-	defaults.AzureBackend = AzureBackendDynamicSessions
+	defaults.Azure.Backend = AzureBackendDynamicSessions
 
 	fs := newFlagSet("authoritative Azure route", io.Discard)
 	values := registerProviderFlags(fs, defaults)

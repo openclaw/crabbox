@@ -270,15 +270,15 @@ func TestAzureImageForConfig(t *testing.T) {
 	if got := azureImageForConfig(windows); got != defaultAzureWindowsImage {
 		t.Fatalf("windows image=%q want %q", got, defaultAzureWindowsImage)
 	}
-	windows.AzureImage = "Contoso:offer:sku:latest"
-	if got := azureImageForConfig(windows); got != windows.AzureImage {
-		t.Fatalf("windows explicit image=%q want %q", got, windows.AzureImage)
+	windows.Azure.Image = "Contoso:offer:sku:latest"
+	if got := azureImageForConfig(windows); got != windows.Azure.Image {
+		t.Fatalf("windows explicit image=%q want %q", got, windows.Azure.Image)
 	}
-	windows.AzureImage = legacyAzureJammyImage
+	windows.Azure.Image = legacyAzureJammyImage
 	if got := azureImageForConfig(windows); got != defaultAzureWindowsImage {
 		t.Fatalf("windows legacy linux default=%q want %q", got, defaultAzureWindowsImage)
 	}
-	windows.AzureImage = azureNobleLinuxImage
+	windows.Azure.Image = azureNobleLinuxImage
 	if got := azureImageForConfig(windows); got != defaultAzureWindowsImage {
 		t.Fatalf("windows portable noble linux default=%q want %q", got, defaultAzureWindowsImage)
 	}
@@ -323,7 +323,7 @@ func TestAzureVMSizeCandidatesForConfigFiltersEphemeralPreview(t *testing.T) {
 	arm.Architecture = ArchitectureARM64
 	arm.architectureExplicit = true
 	arm.Class = "standard"
-	arm.AzureOSDisk = AzureOSDiskEphemeralPreview
+	arm.Azure.OSDisk = AzureOSDiskEphemeralPreview
 	if got := AzureVMSizeCandidatesForConfig(arm); !reflect.DeepEqual(got, []string{"Standard_D32pds_v6", "Standard_D16pds_v6"}) {
 		t.Fatalf("arm preview candidates=%v", got)
 	}
@@ -332,7 +332,7 @@ func TestAzureVMSizeCandidatesForConfigFiltersEphemeralPreview(t *testing.T) {
 	windows.TargetOS = targetWindows
 	windows.WindowsMode = windowsModeNormal
 	windows.Class = "standard"
-	windows.AzureOSDisk = AzureOSDiskEphemeralPreview
+	windows.Azure.OSDisk = AzureOSDiskEphemeralPreview
 	if got := AzureVMSizeCandidatesForConfig(windows); !reflect.DeepEqual(got, []string{"Standard_D8ads_v6", "Standard_D8ds_v6", "Standard_D8ads_v5", "Standard_D8ds_v5", "Standard_D16ads_v6", "Standard_D16ds_v6", "Standard_D16ads_v5", "Standard_D16ds_v5"}) {
 		t.Fatalf("windows preview candidates=%v", got)
 	}
@@ -350,7 +350,7 @@ func TestAzureProvisioningCandidatesSkipsStaleEphemeralPreviewDefault(t *testing
 	cfg.TargetOS = targetWindows
 	cfg.WindowsMode = windowsModeNormal
 	cfg.Class = "standard"
-	cfg.AzureOSDisk = AzureOSDiskEphemeralPreview
+	cfg.Azure.OSDisk = AzureOSDiskEphemeralPreview
 	cfg.ServerType = "Standard_D2ads_v6"
 	cfg.ServerTypeExplicit = false
 	got := azureProvisioningCandidatesForConfig(cfg)
@@ -373,7 +373,7 @@ func TestAzureProvisioningCandidatesSkipsStaleEphemeralPreviewDefault(t *testing
 	}
 
 	cfg.ServerTypeExplicit = false
-	cfg.AzureSnapshot = "snapshot-id"
+	cfg.Azure.Snapshot = "snapshot-id"
 	got = azureProvisioningCandidatesForConfig(cfg)
 	if got[0] != "Standard_D2ads_v6" {
 		t.Fatalf("snapshot-backed first candidate=%q, want stale managed-disk type preserved; all=%v", got[0], got)
@@ -643,14 +643,14 @@ func TestAzureWindowsSnapshotRehydrateDefinesVNCPathWithoutDesktop(t *testing.T)
 
 func TestAzureRegionCandidates(t *testing.T) {
 	t.Parallel()
-	cfg := Config{AzureLocation: "eastus"}
+	cfg := Config{Azure: AzureConfig{Location: "eastus"}}
 	cfg.Capacity.Regions = []string{"westeurope", "eastus"}
 	got := azureRegionCandidates(cfg, "eastus")
 	want := []string{"eastus", "westeurope"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
-	cfg.AzureLocation = "westeurope"
+	cfg.Azure.Location = "westeurope"
 	got = azureRegionCandidates(cfg, "eastus")
 	want = []string{"westeurope", "eastus"}
 	if !reflect.DeepEqual(got, want) {
@@ -855,37 +855,37 @@ func TestAzureUseEphemeralOSDiskModes(t *testing.T) {
 	}{
 		{
 			name: "auto uses managed disk",
-			cfg:  Config{AzureOSDisk: AzureOSDiskAuto, ServerType: "Standard_D2ads_v6"},
+			cfg:  Config{Azure: AzureConfig{OSDisk: AzureOSDiskAuto}, ServerType: "Standard_D2ads_v6"},
 			want: false,
 		},
 		{
 			name: "managed forces managed disk",
-			cfg:  Config{AzureOSDisk: AzureOSDiskManaged, ServerType: "Standard_D2ads_v6"},
+			cfg:  Config{Azure: AzureConfig{OSDisk: AzureOSDiskManaged}, ServerType: "Standard_D2ads_v6"},
 			want: false,
 		},
 		{
 			name: "ephemeral allows supported sku",
-			cfg:  Config{AzureOSDisk: AzureOSDiskEphemeral, ServerType: "Standard_D2ads_v6"},
+			cfg:  Config{Azure: AzureConfig{OSDisk: AzureOSDiskEphemeral}, ServerType: "Standard_D2ads_v6"},
 			want: true,
 		},
 		{
 			name: "ephemeral preview allows supported full caching sku",
-			cfg:  Config{AzureOSDisk: AzureOSDiskEphemeralPreview, ServerType: "Standard_D8ads_v6"},
+			cfg:  Config{Azure: AzureConfig{OSDisk: AzureOSDiskEphemeralPreview}, ServerType: "Standard_D8ads_v6"},
 			want: true,
 		},
 		{
 			name:    "ephemeral preview rejects two core sku",
-			cfg:     Config{AzureOSDisk: AzureOSDiskEphemeralPreview, ServerType: "Standard_D2ads_v6"},
+			cfg:     Config{Azure: AzureConfig{OSDisk: AzureOSDiskEphemeralPreview}, ServerType: "Standard_D2ads_v6"},
 			wantErr: true,
 		},
 		{
 			name:    "ephemeral preview rejects arm sku without local disk",
-			cfg:     Config{AzureOSDisk: AzureOSDiskEphemeralPreview, ServerType: "Standard_D32ps_v6"},
+			cfg:     Config{Azure: AzureConfig{OSDisk: AzureOSDiskEphemeralPreview}, ServerType: "Standard_D32ps_v6"},
 			wantErr: true,
 		},
 		{
 			name:    "ephemeral rejects unsupported sku",
-			cfg:     Config{AzureOSDisk: AzureOSDiskEphemeral, ServerType: "Standard_D2as_v6"},
+			cfg:     Config{Azure: AzureConfig{OSDisk: AzureOSDiskEphemeral}, ServerType: "Standard_D2as_v6"},
 			wantErr: true,
 		},
 	}
@@ -915,8 +915,8 @@ func TestAzureCreateServerWithFallbackRejectsEphemeralPreviewBeforeSharedInfra(t
 	cfg := baseConfig()
 	cfg.Provider = "azure"
 	cfg.TargetOS = targetLinux
-	cfg.AzureLocation = "eastus"
-	cfg.AzureOSDisk = AzureOSDiskEphemeralPreview
+	cfg.Azure.Location = "eastus"
+	cfg.Azure.OSDisk = AzureOSDiskEphemeralPreview
 	cfg.ServerType = "Standard_D32ps_v6"
 	cfg.ServerTypeExplicit = true
 	client := &AzureClient{Location: "eastus"}
@@ -941,7 +941,7 @@ func TestAzureCreateServerWithFallbackRejectsEmptyPolicyOverlay(t *testing.T) {
 	cfg.Architecture = ArchitectureARM64
 	cfg.architectureExplicit = true
 	cfg.Class = "standard"
-	cfg.AzureOSDisk = AzureOSDiskEphemeralPreview
+	cfg.Azure.OSDisk = AzureOSDiskEphemeralPreview
 	cfg.ServerType = "Standard_D2ads_v6"
 	client := &AzureClient{Location: "eastus"}
 	_, _, err := client.createServerWithFallbackInLocation(t.Context(), cfg, "ssh-ed25519 test", "cbx_123456789abc", "empty-overlay", false, nil)
@@ -1341,8 +1341,10 @@ func TestAzureManagedByCrabbox(t *testing.T) {
 func TestAzureCredentialForConfigPrefersClientSecret(t *testing.T) {
 	t.Setenv("AZURE_CLIENT_SECRET", "shh")
 	cfg := Config{
-		AzureTenant:   "00000000-0000-0000-0000-000000000001",
-		AzureClientID: "00000000-0000-0000-0000-000000000002",
+		Azure: AzureConfig{
+			Tenant:   "00000000-0000-0000-0000-000000000001",
+			ClientID: "00000000-0000-0000-0000-000000000002",
+		},
 	}
 	cred, err := azureCredentialForConfig(cfg)
 	if err != nil {
@@ -1356,7 +1358,7 @@ func TestAzureCredentialForConfigPrefersClientSecret(t *testing.T) {
 func TestAzureCredentialForConfigFallsBackToDefault(t *testing.T) {
 	// Make sure env vars don't accidentally yield ClientSecretCredential.
 	t.Setenv("AZURE_CLIENT_SECRET", "")
-	cfg := Config{AzureTenant: "tenant", AzureClientID: "client"}
+	cfg := Config{Azure: AzureConfig{Tenant: "tenant", ClientID: "client"}}
 	cred, err := azureCredentialForConfig(cfg)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1378,8 +1380,8 @@ func TestNewAzureClientAutoResolvesSubscription(t *testing.T) {
 
 	cfg := defaultConfig()
 	cfg.Provider = "azure"
-	cfg.AzureSubscription = ""
-	cfg.AzureLocation = "eastus"
+	cfg.Azure.Subscription = ""
+	cfg.Azure.Location = "eastus"
 
 	_, err := NewAzureClient(t.Context(), cfg)
 	if err == nil {
@@ -1400,8 +1402,8 @@ func TestNewAzureClientDoesNotResolveDefaultSSHCIDRs(t *testing.T) {
 
 	cfg := defaultConfig()
 	cfg.Provider = "azure"
-	cfg.AzureSubscription = "sub"
-	cfg.AzureLocation = "eastus"
+	cfg.Azure.Subscription = "sub"
+	cfg.Azure.Location = "eastus"
 
 	client, err := NewAzureClient(t.Context(), cfg)
 	if err != nil {
@@ -1420,7 +1422,7 @@ func TestAzureSSHCIDRsForConfigUsesExplicitCIDRs(t *testing.T) {
 	}
 	t.Cleanup(func() { detectOutboundIPv4CIDRFunc = prev })
 
-	got, err := azureSSHCIDRsForConfig(t.Context(), Config{AzureSSHCIDRs: []string{"0.0.0.0/0"}})
+	got, err := azureSSHCIDRsForConfig(t.Context(), Config{Azure: AzureConfig{SSHCIDRs: []string{"0.0.0.0/0"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1524,7 +1526,7 @@ func TestAzureSSHCIDRsForRulesRequiresExplicitPrivateNetworkCIDRs(t *testing.T) 
 	}
 	t.Cleanup(func() { detectOutboundIPv4CIDRFunc = prev })
 
-	_, err := azureSSHCIDRsForRules(t.Context(), Config{AzureNetwork: "private"}, nil)
+	_, err := azureSSHCIDRsForRules(t.Context(), Config{Azure: AzureConfig{Network: "private"}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "VPN/VNet source CIDR") {
 		t.Fatalf("err=%v, want explicit private-network CIDR guidance", err)
 	}
@@ -1544,7 +1546,7 @@ func TestAzureSSHCIDRsForRulesUsesExplicitCIDRsWithoutMerging(t *testing.T) {
 			SourceAddressPrefix: to.Ptr("203.0.113.9/32"),
 		},
 	}}
-	got, err := azureSSHCIDRsForRules(t.Context(), Config{AzureSSHCIDRs: []string{"198.51.100.8/32"}}, rules)
+	got, err := azureSSHCIDRsForRules(t.Context(), Config{Azure: AzureConfig{SSHCIDRs: []string{"198.51.100.8/32"}}}, rules)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,5 +5,5 @@ import (
 )
 
 func (Provider) ClaimScope(cfg core.Config) string {
-	return (&core.AzureClient{SubscriptionID: cfg.AzureSubscription, ResourceGroup: cfg.AzureResourceGroup}).LeaseClaimScope()
+	return (&core.AzureClient{SubscriptionID: cfg.Azure.Subscription, ResourceGroup: cfg.Azure.ResourceGroup}).LeaseClaimScope()
 }
