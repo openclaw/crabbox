@@ -680,7 +680,11 @@ func claimCleanupDue(claim core.LeaseClaim, now time.Time) (bool, string) {
 			return true, "unparseable-timestamp"
 		}
 	}
-	deadline := parsed.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)
+	idle, valid := shared.PositiveIdleDuration(claim.IdleTimeoutSeconds)
+	if !valid {
+		return false, "invalid-idle-timeout"
+	}
+	deadline := parsed.Add(idle)
 	if now.Before(deadline) {
 		return false, "idle-timeout-remaining"
 	}
