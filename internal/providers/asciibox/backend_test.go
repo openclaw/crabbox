@@ -1326,6 +1326,8 @@ func (f *fakeAPI) CreateBox(_ context.Context, req createRequest) (boxData, erro
 
 func (f *fakeAPI) Check(context.Context) error { return nil }
 
+func (f *fakeAPI) waitForBoxReady(_ context.Context, box boxData) (boxData, error) { return box, nil }
+
 func (f *fakeAPI) PrepareSSH(_ context.Context, id string) error {
 	f.prepareIDs = append(f.prepareIDs, id)
 	if f.prepareHook != nil {
