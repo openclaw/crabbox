@@ -398,8 +398,15 @@ type fakeAPI struct {
 
 func newFakeAPI(t *testing.T) *fakeAPI {
 	t.Helper()
+	return newFakeAPIWithServer(t, func(_ *testing.T, handler http.Handler) *httptest.Server {
+		return httptest.NewServer(handler)
+	})
+}
+
+func newFakeAPIWithServer(t *testing.T, newServer func(*testing.T, http.Handler) *httptest.Server) *fakeAPI {
+	t.Helper()
 	f := &fakeAPI{sandboxID: "sb-test01", listState: "running"}
-	f.server = httptest.NewServer(http.HandlerFunc(f.handle))
+	f.server = newServer(t, http.HandlerFunc(f.handle))
 	t.Cleanup(f.server.Close)
 	return f
 }
@@ -970,53 +977,55 @@ func TestRunPerformsArchiveSyncViaFileAPI(t *testing.T) {
 }
 
 func TestSyncHonorsConfiguredTimeout(t *testing.T) {
-	f := newFakeAPI(t)
-	f.blockUpload = true
-	f.uploadStarted = make(chan struct{})
-	f.uploadCanceled = make(chan struct{})
-	backend := newAPIBackend(t, f)
-	backend.cfg.Sync.Timeout = 500 * time.Millisecond
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	repoRoot := newGitRepo(t)
-	result := make(chan error, 1)
-	go func() {
-		_, err := backend.Run(ctx, core.RunRequest{
-			Repo: core.Repo{Name: "carbbox", Root: repoRoot}, Command: []string{"true"}, Keep: true,
-		})
-		result <- err
-	}()
+	synctest.Test(t, func(t *testing.T) {
+		f := newFakeAPIWithServer(t, testutil.NewPipeHTTPServer)
+		f.blockUpload = true
+		f.uploadStarted = make(chan struct{})
+		f.uploadCanceled = make(chan struct{})
+		backend := newAPIBackend(t, f)
+		backend.cfg.Sync.Timeout = 500 * time.Millisecond
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		repoRoot := newGitRepo(t)
+		result := make(chan error, 1)
+		go func() {
+			_, err := backend.Run(ctx, core.RunRequest{
+				Repo: core.Repo{Name: "carbbox", Root: repoRoot}, Command: []string{"true"}, Keep: true,
+			})
+			result <- err
+		}()
 
-	select {
-	case <-f.uploadStarted:
-	case <-time.After(5 * time.Second):
-		cancel()
-		t.Fatal("upload did not start")
-	}
-	var err error
-	select {
-	case err = <-result:
-	case <-time.After(5 * time.Second):
-		cancel()
-		t.Fatal("sync timeout did not bound upload")
-	}
-	if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
-		t.Fatalf("Run err=%v, want sync timeout", err)
-	}
-	select {
-	case <-f.uploadCanceled:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed-out upload request context was not canceled")
-	}
-	var sawRemoteCleanup bool
-	for _, exec := range f.allExecs() {
-		if strings.Contains(strings.Join(exec.req.Args, " "), "rm -f") && strings.Contains(strings.Join(exec.req.Args, " "), "crabbox-sync-") {
-			sawRemoteCleanup = true
+		select {
+		case <-f.uploadStarted:
+		case <-time.After(5 * time.Second):
+			cancel()
+			t.Fatal("upload did not start")
 		}
-	}
-	if !sawRemoteCleanup {
-		t.Fatal("timed-out upload did not attempt remote archive cleanup")
-	}
+		var err error
+		select {
+		case err = <-result:
+		case <-time.After(5 * time.Second):
+			cancel()
+			t.Fatal("sync timeout did not bound upload")
+		}
+		if err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
+			t.Fatalf("Run err=%v, want sync timeout", err)
+		}
+		select {
+		case <-f.uploadCanceled:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed-out upload request context was not canceled")
+		}
+		var sawRemoteCleanup bool
+		for _, exec := range f.allExecs() {
+			if strings.Contains(strings.Join(exec.req.Args, " "), "rm -f") && strings.Contains(strings.Join(exec.req.Args, " "), "crabbox-sync-") {
+				sawRemoteCleanup = true
+			}
+		}
+		if !sawRemoteCleanup {
+			t.Fatal("timed-out upload did not attempt remote archive cleanup")
+		}
+	})
 }
 
 func TestSyncDeleteDoesNotTouchLiveWorkspaceBeforeUploadSucceeds(t *testing.T) {
@@ -1766,22 +1775,24 @@ func TestStatusSurfacesAPIError(t *testing.T) {
 }
 
 func TestStatusWaitTimeoutCancelsBlockedAPIRequest(t *testing.T) {
-	f := newFakeAPI(t)
-	f.blockGet = true
-	backend := newAPIBackend(t, f)
-	if err := core.ClaimLeaseForRepoProviderScopePond(leasePrefix+f.sandboxID, "slug", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
-		t.Fatal(err)
-	}
-	started := time.Now()
-	_, err := backend.Status(context.Background(), core.StatusRequest{
-		ID: leasePrefix + f.sandboxID, Wait: true, WaitTimeout: 50 * time.Millisecond,
+	synctest.Test(t, func(t *testing.T) {
+		f := newFakeAPIWithServer(t, testutil.NewPipeHTTPServer)
+		f.blockGet = true
+		backend := newAPIBackend(t, f)
+		if err := core.ClaimLeaseForRepoProviderScopePond(leasePrefix+f.sandboxID, "slug", providerName, testOCClaimScope(f.server.URL), "", "/repo", time.Minute, false); err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now()
+		_, err := backend.Status(context.Background(), core.StatusRequest{
+			ID: leasePrefix + f.sandboxID, Wait: true, WaitTimeout: 50 * time.Millisecond,
+		})
+		if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
+			t.Fatalf("Status err=%v, want wait timeout", err)
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("Status took %s, wait timeout did not bound API request", elapsed)
+		}
 	})
-	if err == nil || !strings.Contains(err.Error(), "timed out waiting") {
-		t.Fatalf("Status err=%v, want wait timeout", err)
-	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("Status took %s, wait timeout did not bound API request", elapsed)
-	}
 }
 
 func newGitRepo(t *testing.T) string {
