@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -201,30 +202,32 @@ func TestExeDevCreateVMRefreshesMissingAdvertisedSSHRoute(t *testing.T) {
 func TestExeDevSSHRouteWaitStopsBetweenInventoryRequests(t *testing.T) {
 	for _, canceled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("canceled=%v", canceled), func(t *testing.T) {
-			ctx, cancel := context.WithCancelCause(t.Context())
-			defer cancel(nil)
-			cause := errors.New("caller stopped route discovery")
-			runner := &exeDevRecordingRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+				cause := errors.New("caller stopped route discovery")
+				runner := &exeDevRecordingRunner{fn: func(core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					if canceled {
+						cancel(cause)
+					}
+					return core.LocalCommandResult{Stdout: `{"vms":[{"vm_name":"fixture-vm"}]}`}, nil
+				}}
+				backend := newExeDevTestBackend(core.Config{}, runner)
+				_, err := backend.waitForExeDevSSHRoute(ctx, "fixture-vm", 100*time.Millisecond)
+				wantCode, wantCause := 5, context.DeadlineExceeded
 				if canceled {
-					cancel(cause)
+					wantCode, wantCause = 2, context.Canceled
+					if !errors.Is(err, cause) {
+						t.Fatalf("error=%v, want caller cancellation cause", err)
+					}
 				}
-				return core.LocalCommandResult{Stdout: `{"vms":[{"vm_name":"fixture-vm"}]}`}, nil
-			}}
-			backend := newExeDevTestBackend(core.Config{}, runner)
-			_, err := backend.waitForExeDevSSHRoute(ctx, "fixture-vm", 100*time.Millisecond)
-			wantCode, wantCause := 5, context.DeadlineExceeded
-			if canceled {
-				wantCode, wantCause = 2, context.Canceled
-				if !errors.Is(err, cause) {
-					t.Fatalf("error=%v, want caller cancellation cause", err)
+				if core.ExitCodeForError(err, 0) != wantCode || !errors.Is(err, wantCause) {
+					t.Fatalf("route wait error=%v, want exit %d and %v", err, wantCode, wantCause)
 				}
-			}
-			if core.ExitCodeForError(err, 0) != wantCode || !errors.Is(err, wantCause) {
-				t.Fatalf("route wait error=%v, want exit %d and %v", err, wantCode, wantCause)
-			}
-			if len(runner.calls) != 1 {
-				t.Fatalf("inventory calls=%d, want no refresh after termination", len(runner.calls))
-			}
+				if len(runner.calls) != 1 {
+					t.Fatalf("inventory calls=%d, want no refresh after termination", len(runner.calls))
+				}
+			})
 		})
 	}
 }
@@ -232,30 +235,32 @@ func TestExeDevSSHRouteWaitStopsBetweenInventoryRequests(t *testing.T) {
 func TestExeDevSSHRouteWaitBoundsInventoryRequest(t *testing.T) {
 	for _, canceled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("canceled=%v", canceled), func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			runner := &exeDevRecordingRunner{fnContext: func(callCtx context.Context, _ core.LocalCommandRequest) (core.LocalCommandResult, error) {
-				if _, ok := callCtx.Deadline(); !ok {
-					t.Fatal("inventory request has no deadline")
-				}
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				runner := &exeDevRecordingRunner{fnContext: func(callCtx context.Context, _ core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					if _, ok := callCtx.Deadline(); !ok {
+						t.Fatal("inventory request has no deadline")
+					}
+					if canceled {
+						cancel()
+					}
+					<-callCtx.Done()
+					return core.LocalCommandResult{ExitCode: 1}, callCtx.Err()
+				}}
+				backend := newExeDevTestBackend(core.Config{}, runner)
+				_, err := backend.waitForExeDevSSHRoute(ctx, "fixture-vm", 10*time.Millisecond)
+				wantCode, wantCause := 5, context.DeadlineExceeded
 				if canceled {
-					cancel()
+					wantCode, wantCause = 2, context.Canceled
 				}
-				<-callCtx.Done()
-				return core.LocalCommandResult{ExitCode: 1}, callCtx.Err()
-			}}
-			backend := newExeDevTestBackend(core.Config{}, runner)
-			_, err := backend.waitForExeDevSSHRoute(ctx, "fixture-vm", 10*time.Millisecond)
-			wantCode, wantCause := 5, context.DeadlineExceeded
-			if canceled {
-				wantCode, wantCause = 2, context.Canceled
-			}
-			if core.ExitCodeForError(err, 0) != wantCode || !errors.Is(err, wantCause) {
-				t.Fatalf("route wait error=%v, want exit %d and %v", err, wantCode, wantCause)
-			}
-			if len(runner.calls) != 1 {
-				t.Fatalf("inventory calls=%d, want one bounded request", len(runner.calls))
-			}
+				if core.ExitCodeForError(err, 0) != wantCode || !errors.Is(err, wantCause) {
+					t.Fatalf("route wait error=%v, want exit %d and %v", err, wantCode, wantCause)
+				}
+				if len(runner.calls) != 1 {
+					t.Fatalf("inventory calls=%d, want one bounded request", len(runner.calls))
+				}
+			})
 		})
 	}
 }
