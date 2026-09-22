@@ -1403,6 +1403,11 @@ keeps resource identity validation and error diagnostics local.
 `Stop` should stop the provider resource, remove local claims, and remove local
 per-resource keys if the backend created them.
 
+Local Container uses `shared.ClaimIdleExpiredAfterGrace` for claimed-container
+idle expiry, retaining its twelve-hour grace and strict expiry boundary. Keep
+labels, terminal states, claimless label timestamps, and fenced deletion remain
+adapter-owned; malformed claim timestamps never fall back to label expiry.
+
 Do not make delegated providers support `crabbox ssh`, `vnc`, `webvnc`,
 `screenshot`, `code`, or Actions runner hydration unless the provider exposes a
 stable connection contract that preserves Crabbox's security boundary.
