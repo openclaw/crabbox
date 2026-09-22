@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -730,6 +731,246 @@ func TestScalewayAcquireEmptyRepoRootStillFencesCompletion(t *testing.T) {
 			cwd, cwdErr := os.Getwd()
 			if err != nil || cwdErr != nil || !exists || claim.RepoRoot != cwd || claim.Labels["state"] != "ready" || claim.Labels["recovery"] != "" || labelsFromTags(fake.server.Tags)["state"] != "ready" || fake.updateCalls != 2 {
 				t.Fatalf("empty-root completion not published: exists=%t state=%q recovery=%q updates=%d err=%v cwdErr=%v", exists, claim.Labels["state"], claim.Labels["recovery"], fake.updateCalls, err, cwdErr)
+			}
+		})
+	}
+}
+
+func TestScalewaySDKOwnershipGuardsBeforeHTTPMutations(t *testing.T) {
+	const serverID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const rootID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	const keyID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	const otherID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+	const base = "/instance/v1/zones/fr-par-1"
+	for _, scenario := range []string{"success", "bootstrap replacement", "callback replacement", "reassigned disk"} {
+		t.Run(scenario, func(t *testing.T) {
+			backend, _ := newTestBackend(t)
+			var mu sync.Mutex
+			var server *instance.Server
+			var volume *instance.Volume
+			var key *iam.SSHKey
+			var requests []string
+			https := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				requests = append(requests, r.Method+" "+r.URL.Path)
+				if r.TLS == nil {
+					t.Error("SDK request was not HTTPS")
+				}
+				reply := func(status int, value any) {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(status)
+					if value != nil {
+						_ = json.NewEncoder(w).Encode(value)
+					}
+				}
+				decode := func(value any) bool {
+					if err := json.NewDecoder(r.Body).Decode(value); err != nil {
+						t.Errorf("decode SDK request: %v", err)
+						reply(http.StatusBadRequest, map[string]string{"type": "invalid_arguments"})
+						return false
+					}
+					return true
+				}
+				if strings.HasPrefix(r.URL.Path, "/marketplace/v2/") {
+					// The adapter's supported explicit image-ID fallback needs no catalogue fixture.
+					reply(http.StatusNotFound, map[string]string{"type": "not_found"})
+					return
+				}
+				switch r.Method + " " + r.URL.Path {
+				case "GET " + base + "/servers":
+					items := []*instance.Server{}
+					if server != nil {
+						items = append(items, server)
+					}
+					reply(http.StatusOK, map[string]any{"servers": items})
+				case "POST /iam/v1alpha1/ssh-keys":
+					var req iam.CreateSSHKeyRequest
+					if !decode(&req) {
+						return
+					}
+					key = &iam.SSHKey{ID: keyID, Name: req.Name, PublicKey: req.PublicKey, ProjectID: req.ProjectID}
+					reply(http.StatusCreated, key)
+				case "POST " + base + "/servers":
+					var req instance.CreateServerRequest
+					if !decode(&req) {
+						return
+					}
+					server = &instance.Server{ID: serverID, Name: req.Name, Tags: req.Tags, Project: testScalewayProjectID, Organization: testScalewayOrganizationID, Zone: scw.Zone("fr-par-1"), State: instance.ServerStateStopped, CommercialType: req.CommercialType,
+						PublicIP: &instance.ServerIP{Address: net.ParseIP("203.0.113.10")}, Volumes: map[string]*instance.VolumeServer{"0": {ID: rootID, Zone: scw.Zone("fr-par-1")}}}
+					volume = &instance.Volume{ID: rootID, Project: testScalewayProjectID, Zone: scw.Zone("fr-par-1"), Server: &instance.ServerSummary{ID: serverID}}
+					reply(http.StatusCreated, map[string]any{"server": server})
+				case "GET " + base + "/servers/" + serverID:
+					if server == nil {
+						reply(http.StatusNotFound, map[string]string{"type": "not_found"})
+						return
+					}
+					reply(http.StatusOK, map[string]any{"server": server})
+				case "PATCH " + base + "/servers/" + serverID:
+					var req instance.UpdateServerRequest
+					if !decode(&req) {
+						return
+					}
+					if server == nil || req.Tags == nil {
+						t.Error("unexpected SDK server update")
+						reply(http.StatusBadRequest, nil)
+						return
+					}
+					server.Tags = *req.Tags
+					reply(http.StatusOK, map[string]any{"server": server})
+				case "PATCH " + base + "/servers/" + serverID + "/user_data/cloud-init":
+					_, _ = io.Copy(io.Discard, r.Body)
+					reply(http.StatusNoContent, nil)
+				case "POST " + base + "/servers/" + serverID + "/action":
+					var req instance.ServerActionRequest
+					if !decode(&req) {
+						return
+					}
+					if server == nil {
+						t.Error("action on absent fixture server")
+						reply(http.StatusNotFound, nil)
+						return
+					}
+					switch req.Action {
+					case instance.ServerActionPoweron:
+						server.State = instance.ServerStateRunning
+					case instance.ServerActionPoweroff:
+						server.State = instance.ServerStateStopped
+					default:
+						t.Errorf("unexpected SDK action %s", req.Action)
+					}
+					reply(http.StatusOK, map[string]any{})
+				case "GET " + base + "/volumes/" + rootID:
+					if volume == nil {
+						reply(http.StatusNotFound, map[string]string{"type": "not_found"})
+						return
+					}
+					reply(http.StatusOK, map[string]any{"volume": volume})
+				case "DELETE " + base + "/servers/" + serverID:
+					server = nil
+					if volume != nil {
+						volume.Server = nil
+					}
+					reply(http.StatusNoContent, nil)
+				case "DELETE " + base + "/volumes/" + rootID:
+					volume = nil
+					reply(http.StatusNoContent, nil)
+				case "DELETE /iam/v1alpha1/ssh-keys/" + keyID:
+					key = nil
+					reply(http.StatusNoContent, nil)
+				default:
+					t.Errorf("unexpected SDK request %s %s", r.Method, r.URL.Path)
+					reply(http.StatusBadRequest, map[string]string{"type": "invalid_arguments"})
+				}
+			}))
+			defer https.Close()
+			httpClient := https.Client()
+			defer httpClient.CloseIdleConnections()
+			client := newTestScalewaySDKClient(t, https.URL, httpClient)
+			backend.cfg.Scaleway.ProjectID = testScalewayProjectID
+			backend.cfg.Scaleway.OrganizationID = testScalewayOrganizationID
+			backend.cfg.Scaleway.Image = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+			backend.cfg.Scaleway.SecurityGroup = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+			backend.newClient = func(core.Config, core.Runtime) (Client, error) { return client, nil }
+			checkpoint := -1
+			var claimPath string
+			var expectedClaim []byte
+			replaceClaim := func() {
+				mu.Lock()
+				id := labelsFromTags(server.Tags)["lease"]
+				checkpoint = len(requests)
+				mu.Unlock()
+				claim, exists, err := core.ReadLeaseClaimWithPresence(id)
+				if err != nil || !exists {
+					t.Fatalf("SDK allocation claim absent: %v", err)
+				}
+				labels := maps.Clone(claim.Labels)
+				labels["concurrent-sdk-owner"] = "replacement"
+				if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(id, claim, labels); err != nil {
+					t.Fatal(err)
+				}
+				state, err := core.CrabboxStateDir()
+				if err != nil {
+					t.Fatal(err)
+				}
+				claimPath = filepath.Join(state, "claims", id+".json")
+				expectedClaim, err = os.ReadFile(claimPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			backend.waitSSH = func(context.Context, *core.SSHTarget, string, time.Duration) error {
+				if scenario == "bootstrap replacement" {
+					replaceClaim()
+				}
+				return nil
+			}
+			lease, err := backend.Acquire(t.Context(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "sdk-ownership", OnAcquired: func(core.LeaseTarget) error {
+				if scenario == "callback replacement" {
+					replaceClaim()
+				}
+				return nil
+			}})
+			if strings.HasSuffix(scenario, "replacement") {
+				if err == nil || checkpoint < 0 {
+					t.Fatalf("expected stale-claim refusal after SDK provisioning, got %v", err)
+				}
+				after, readErr := os.ReadFile(claimPath)
+				if readErr != nil || string(after) != string(expectedClaim) {
+					t.Fatalf("replacement claim changed: %v", readErr)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if len(requests) != checkpoint || server == nil || volume == nil || key == nil {
+					t.Fatalf("stale SDK owner performed requests after replacement: %v", requests[checkpoint:])
+				}
+				t.Logf("actual Scaleway SDK HTTPS: %s; provisioningRequests=%d subsequentRequests=0 resourcesUntouched=true replacementClaimBytesPreserved=true", scenario, checkpoint)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, stateErr := core.CrabboxStateDir()
+			if stateErr != nil {
+				t.Fatal(stateErr)
+			}
+			claimPath = filepath.Join(state, "claims", lease.LeaseID+".json")
+			expectedClaim, err = os.ReadFile(claimPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			checkpoint = len(requests)
+			if scenario == "reassigned disk" {
+				volume.Server = &instance.ServerSummary{ID: otherID}
+			}
+			mu.Unlock()
+			err = backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease})
+			mu.Lock()
+			defer mu.Unlock()
+			mutations := 0
+			for _, request := range requests[checkpoint:] {
+				if !strings.HasPrefix(request, "GET ") {
+					mutations++
+				}
+			}
+			if scenario == "reassigned disk" {
+				if err == nil || core.ExitCodeForError(err, 1) != 4 || mutations != 0 || server == nil || key == nil || volume == nil || volume.Server.ID != otherID {
+					t.Fatalf("reassigned disk was not protected: err=%v requests=%v", err, requests[checkpoint:])
+				}
+				after, readErr := os.ReadFile(claimPath)
+				if readErr != nil || string(after) != string(expectedClaim) {
+					t.Fatalf("refused release changed its recovery claim: %v", readErr)
+				}
+				t.Logf("actual Scaleway SDK HTTPS: reassigned disk; observationRequests=%d destructiveOrUpdateRequests=0 serverDiskKeyUntouched=true claimBytesPreserved=true exit=4", len(requests)-checkpoint)
+			} else {
+				if err != nil || server != nil || volume != nil || key != nil || mutations != 4 {
+					t.Fatalf("SDK positive cleanup failed: err=%v requests=%v", err, requests[checkpoint:])
+				}
+				if _, statErr := os.Stat(claimPath); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("successful SDK cleanup retained claim: %v", statErr)
+				}
+				t.Logf("actual Scaleway SDK HTTPS: positive acquisition/publication/release; cleanupMutations=%d serverDiskKeyAbsent=true", mutations)
 			}
 		})
 	}
