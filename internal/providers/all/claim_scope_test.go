@@ -14,7 +14,7 @@ func TestConfigClaimScopeLegacyParity(t *testing.T) {
 	}{
 		{"azure canonical account", "azure", core.Config{AzureSubscription: " SUB ", AzureResourceGroup: " Group "}, "subscription:sub|resource-group:group"},
 		{"azure incomplete", "azure", core.Config{AzureSubscription: "sub"}, ""},
-		{"gcp legacy whitespace", "google", core.Config{GCPProject: " project "}, "project: project "},
+		{"gcp legacy whitespace", "google", core.Config{GCP: core.GCPConfig{Project: " project "}}, "project: project "},
 		{"gcp empty", "gcp", core.Config{}, ""},
 		{"cube default port", "cubesandbox", core.Config{CubeSandbox: core.CubeSandboxConfig{APIURL: "HTTPS://user:pass@CUBE.EXAMPLE:443/root/?token=secret#fragment"}}, "endpoint:https://cube.example/root"},
 		{"cube nondefault port", "cubesandbox", core.Config{CubeSandbox: core.CubeSandboxConfig{APIURL: "http://CUBE.EXAMPLE:8080/root/"}}, "endpoint:http://cube.example:8080/root"},
@@ -53,7 +53,7 @@ func TestConfigClaimScopeSeparatesRoutes(t *testing.T) {
 	}{
 		{"azure", core.Config{AzureSubscription: "sub", AzureResourceGroup: "rg"}, func(c *core.Config) { c.AzureSubscription = "other" }},
 		{"azure", core.Config{AzureSubscription: "sub", AzureResourceGroup: "rg"}, func(c *core.Config) { c.AzureResourceGroup = "other" }},
-		{"gcp", core.Config{GCPProject: "one"}, func(c *core.Config) { c.GCPProject = "two" }},
+		{"gcp", core.Config{GCP: core.GCPConfig{Project: "one"}}, func(c *core.Config) { c.GCP.Project = "two" }},
 		{"cubesandbox", core.Config{CubeSandbox: core.CubeSandboxConfig{APIURL: "https://one.example"}}, func(c *core.Config) { c.CubeSandbox.APIURL = "https://two.example" }},
 		{"e2b", core.Config{E2B: core.E2BConfig{APIURL: "https://one.example"}}, func(c *core.Config) { c.E2B.APIURL = "https://two.example" }},
 		{"namespace-instance", core.Config{NamespaceInstance: core.NamespaceInstanceConfig{Endpoint: "https://one.example", Region: "us", Keychain: "ci"}}, func(c *core.Config) { c.NamespaceInstance.Keychain = "other" }},

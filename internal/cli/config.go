@@ -101,23 +101,7 @@ type Config struct {
 	AzureSSHCIDRs                 []string
 	AzureNetwork                  string
 	AzureDynamicSessions          AzureDynamicSessionsConfig
-	GCPProject                    string
-	gcpProjectExplicit            bool
-	GCPZone                       string
-	gcpZoneExplicit               bool
-	GCPImage                      string
-	gcpImageExplicit              bool
-	GCPMachineImage               string
-	GCPSnapshot                   string
-	GCPNetwork                    string
-	gcpNetworkExplicit            bool
-	GCPSubnet                     string
-	GCPTags                       []string
-	gcpTagsExplicit               bool
-	GCPSSHCIDRs                   []string
-	GCPRootGB                     int64
-	gcpRootGBExplicit             bool
-	GCPServiceAccount             string
+	GCP                           GCPConfig
 	DigitalOcean                  DigitalOceanConfig
 	digitalOceanImageExplicit     bool
 	Vultr                         VultrConfig
@@ -1213,9 +1197,7 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	if force || cfg.AzureImage == "" || (!cfg.azureImageExplicit && (cfg.AzureImage == base.AzureImage || wasOSDefault)) {
 		cfg.AzureImage = azureImage
 	}
-	if force || cfg.GCPImage == "" || (!cfg.gcpImageExplicit && (cfg.GCPImage == base.GCPImage || wasOSDefault)) {
-		cfg.GCPImage = gcpImage
-	}
+	cfg.GCP.applyOSImageDefault(gcpImage, base.GCP.Image, force, wasOSDefault)
 	if force || cfg.Linode.Image == "" || (!cfg.linodeImageExplicit && (cfg.Linode.Image == base.Linode.Image || wasOSDefault)) {
 		cfg.Linode.Image = linodeImage
 	}
@@ -1584,11 +1566,7 @@ func baseConfig() Config {
 		AzureSubnet:             "crabbox-subnet",
 		AzureNSG:                "crabbox-nsg",
 		AzureDynamicSessions:    defaultAzureDynamicSessionsConfig(),
-		GCPZone:                 "europe-west2-a",
-		GCPImage:                gcpImage,
-		GCPNetwork:              "default",
-		GCPTags:                 []string{"crabbox-ssh"},
-		GCPRootGB:               400,
+		GCP:                     initialGCPConfig(gcpImage),
 		DigitalOcean:            defaultDigitalOceanConfig(),
 		Vultr:                   defaultVultrConfig(),
 		Linode:                  initialLinodeConfig(linodeImage),
@@ -1897,18 +1875,6 @@ type fileAzureConfig struct {
 	NSG            string   `yaml:"nsg,omitempty"`
 	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
 	Network        string   `yaml:"network,omitempty"`
-}
-
-type fileGCPConfig struct {
-	Project        string   `yaml:"project,omitempty"`
-	Zone           string   `yaml:"zone,omitempty"`
-	Image          string   `yaml:"image,omitempty"`
-	Network        string   `yaml:"network,omitempty"`
-	Subnet         string   `yaml:"subnet,omitempty"`
-	Tags           []string `yaml:"tags,omitempty"`
-	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
-	RootGB         int64    `yaml:"rootGB,omitempty"`
-	ServiceAccount string   `yaml:"serviceAccount,omitempty"`
 }
 
 type fileParallelsConfig struct {
@@ -2837,44 +2803,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.GCP != nil {
-		if file.GCP.Project != "" {
-			cfg.GCPProject = file.GCP.Project
-			recordConfigInput(cfg, "gcp", inputSource, true)
-			cfg.gcpProjectExplicit = true
-		}
-		if file.GCP.Zone != "" {
-			cfg.GCPZone = file.GCP.Zone
-			recordConfigInput(cfg, "gcp", inputSource, true)
-			cfg.gcpZoneExplicit = true
-		}
-		if file.GCP.Image != "" {
-			cfg.GCPImage = file.GCP.Image
-			recordConfigInput(cfg, "gcp", inputSource, true)
-			cfg.gcpImageExplicit = true
-		}
-		if file.GCP.Network != "" {
-			cfg.GCPNetwork = file.GCP.Network
-			recordConfigInput(cfg, "gcp", inputSource, true)
-			cfg.gcpNetworkExplicit = true
-		}
-		configInputFileString(cfg, "gcp", inputSource, &cfg.GCPSubnet, file.GCP.Subnet)
-		if len(file.GCP.Tags) > 0 {
-			cfg.GCPTags = file.GCP.Tags
-			recordConfigInput(cfg, "gcp", inputSource, true)
-			cfg.gcpTagsExplicit = true
-		}
-		if len(file.GCP.SSHCIDRs) > 0 {
-			cfg.GCPSSHCIDRs = file.GCP.SSHCIDRs
-			recordConfigInput(cfg, "gcp", inputSource, true)
-		}
-		if file.GCP.RootGB > 0 {
-			cfg.GCPRootGB = file.GCP.RootGB
-			recordConfigInput(cfg, "gcp", inputSource, true)
-			cfg.gcpRootGBExplicit = true
-		}
-		configInputFileString(cfg, "gcp", inputSource, &cfg.GCPServiceAccount, file.GCP.ServiceAccount)
-	}
+	cfg.applyGCPFileConfig(file.GCP, inputSource)
 	{
 		applied, err := cfg.Incus.applyFile(file.Incus)
 		recordConfigInput(cfg, "incus", inputSource, applied.InputAccepted)
@@ -4172,43 +4101,7 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if project := os.Getenv("CRABBOX_GCP_PROJECT"); project != "" {
-		cfg.GCPProject = project
-		recordConfigInput(cfg, "gcp", configInputEnvironment, true)
-		cfg.gcpProjectExplicit = true
-	} else if cfg.GCPProject == "" {
-		if project := os.Getenv("GOOGLE_CLOUD_PROJECT"); project != "" {
-			cfg.GCPProject = project
-			recordConfigInput(cfg, "gcp", configInputEnvironment, true)
-			cfg.gcpProjectExplicit = false
-		} else if project := os.Getenv("GCP_PROJECT_ID"); project != "" {
-			cfg.GCPProject = project
-			recordConfigInput(cfg, "gcp", configInputEnvironment, true)
-			cfg.gcpProjectExplicit = false
-		}
-	}
-	if zone := os.Getenv("CRABBOX_GCP_ZONE"); zone != "" {
-		cfg.GCPZone = zone
-		recordConfigInput(cfg, "gcp", configInputEnvironment, true)
-		cfg.gcpZoneExplicit = true
-	}
-	if image := os.Getenv("CRABBOX_GCP_IMAGE"); image != "" {
-		cfg.GCPImage = image
-		recordConfigInput(cfg, "gcp", configInputEnvironment, true)
-		cfg.gcpImageExplicit = true
-	}
-	if network := os.Getenv("CRABBOX_GCP_NETWORK"); network != "" {
-		cfg.GCPNetwork = network
-		recordConfigInput(cfg, "gcp", configInputEnvironment, true)
-		cfg.gcpNetworkExplicit = true
-	}
-	cfg.GCPSubnet = configInputEnvString(cfg, "gcp", cfg.GCPSubnet, "CRABBOX_GCP_SUBNET")
-	if rootGB := os.Getenv("CRABBOX_GCP_ROOT_GB"); rootGB != "" {
-		cfg.GCPRootGB = int64(configInputEnvInt(cfg, "gcp", int(cfg.GCPRootGB), "CRABBOX_GCP_ROOT_GB"))
-		cfg.gcpRootGBExplicit = true
-		recordConfigInputIntent(cfg, "gcp", configInputEnvironment, true)
-	}
-	cfg.GCPServiceAccount = configInputEnvString(cfg, "gcp", cfg.GCPServiceAccount, "CRABBOX_GCP_SERVICE_ACCOUNT")
+	cfg.applyGCPEnvironmentPrefix()
 	{
 		applied, err := cfg.Incus.applyEnv()
 		recordConfigInput(cfg, "incus", configInputEnvironment, applied.InputAccepted)
@@ -4221,15 +4114,7 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if tags := os.Getenv("CRABBOX_GCP_TAGS"); tags != "" {
-		cfg.GCPTags = splitCommaList(tags)
-		recordConfigInput(cfg, "gcp", configInputEnvironment, true)
-		cfg.gcpTagsExplicit = true
-	}
-	if cidrs := os.Getenv("CRABBOX_GCP_SSH_CIDRS"); cidrs != "" {
-		cfg.GCPSSHCIDRs = splitCommaList(cidrs)
-		recordConfigInput(cfg, "gcp", configInputEnvironment, true)
-	}
+	cfg.applyGCPEnvironmentLists()
 	{
 		applied, err := cfg.DigitalOcean.applyEnv()
 		recordConfigInput(cfg, "digitalocean", configInputEnvironment, applied.InputAccepted)
@@ -5779,9 +5664,4 @@ func TencentCloudTypeWasExplicit(cfg Config) bool {
 
 func SetTencentCloudTypeExplicit(cfg *Config) {
 	cfg.tencentCloudTypeExplicit = true
-}
-
-func SetGCPProjectExplicit(cfg *Config, project string) {
-	cfg.GCPProject = project
-	cfg.gcpProjectExplicit = true
 }

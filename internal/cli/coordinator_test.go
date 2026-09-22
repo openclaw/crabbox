@@ -1521,16 +1521,13 @@ func TestCoordinatorCreateLeaseSendsAWSSSHCIDRs(t *testing.T) {
 		AzureSnapshot:       "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/snapshots/checkpoint",
 		AzureOSDisk:         "managed",
 		AzureOSDiskExplicit: true,
-		GCPProject:          "crabbox-project",
-		gcpProjectExplicit:  true,
-		GCPZone:             "europe-west2-b",
-		GCPImage:            "projects/custom/global/images/crabbox",
-		GCPNetwork:          "crabbox-net",
-		GCPTags:             []string{"crabbox-ci"},
-		GCPSSHCIDRs:         []string{"198.51.100.11/32"},
-		GCPSnapshot:         "projects/crabbox-project/global/snapshots/checkpoint",
-		GCPRootGB:           900,
-		SSHFallbackPorts:    []string{"22", "2022"},
+		GCP: GCPConfig{
+			Project: "crabbox-project", projectExplicit: true, Zone: "europe-west2-b",
+			Image: "projects/custom/global/images/crabbox", Network: "crabbox-net",
+			Tags: []string{"crabbox-ci"}, SSHCIDRs: []string{"198.51.100.11/32"},
+			Snapshot: "projects/crabbox-project/global/snapshots/checkpoint", RootGB: 900,
+		},
+		SSHFallbackPorts: []string{"22", "2022"},
 		Capacity: CapacityConfig{
 			Market:   "spot",
 			Strategy: "most-available",
@@ -1845,8 +1842,8 @@ func TestCoordinatorCreateLeaseOmitsAmbientGCPProject(t *testing.T) {
 	if _, err := client.CreateLease(context.Background(), cfg, "ssh-ed25519 test", false, "cbx_123", "blue-crab"); err != nil {
 		t.Fatal(err)
 	}
-	if cfg.GCPProject != "developer-adc-project" {
-		t.Fatalf("test setup project=%q", cfg.GCPProject)
+	if cfg.GCP.Project != "developer-adc-project" {
+		t.Fatalf("test setup project=%q", cfg.GCP.Project)
 	}
 	if _, ok := body["gcpProject"]; ok {
 		t.Fatalf("ambient ADC project should be omitted so coordinator defaults apply: %#v", body)

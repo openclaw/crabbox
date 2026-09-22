@@ -1578,7 +1578,7 @@ func TestAWSMacOSFallbackResolvesAMIForEachInstanceType(t *testing.T) {
 		name, architecture := awsMacOSAMIQueryForInstanceType(instanceType)
 		wantQueries = append(wantQueries, name+":"+architecture)
 	}
-	if !stringSlicesEqual(imageQueries, wantQueries) {
+	if !slices.Equal(imageQueries, wantQueries) {
 		t.Fatalf("image queries=%v, want %v", imageQueries, wantQueries)
 	}
 	if len(runTypes) != len(awsMacOSInstanceTypeCandidates()) || runTypes[0] != "mac2.metal" || runTypes[len(runTypes)-1] != "mac1.metal" {

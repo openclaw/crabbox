@@ -2435,7 +2435,7 @@ func TestClaimLeaseForRepoConfigScopesProviderClaims(t *testing.T) {
 		t.Fatalf("provider=%q want aws", claim.Provider)
 	}
 
-	cfg = Config{Provider: "gcp", GCPProject: "project-a"}
+	cfg = Config{Provider: "gcp", GCP: GCPConfig{Project: "project-a"}}
 	if err := claimLeaseForRepoConfig("cbx_gcp", "gcp-box", cfg, repo, 0, false); err != nil {
 		t.Fatal(err)
 	}
@@ -2447,7 +2447,7 @@ func TestClaimLeaseForRepoConfigScopesProviderClaims(t *testing.T) {
 		t.Fatalf("gcp claim scope=%#v", claim)
 	}
 
-	cfg = Config{Provider: "google-cloud", GCPProject: "project-a"}
+	cfg = Config{Provider: "google-cloud", GCP: GCPConfig{Project: "project-a"}}
 	if err := claimLeaseForRepoConfig("cbx_gcp_alias", "gcp-alias-box", cfg, repo, 0, false); err != nil {
 		t.Fatal(err)
 	}

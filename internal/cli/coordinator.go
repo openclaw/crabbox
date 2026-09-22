@@ -1199,8 +1199,8 @@ func (c *CoordinatorClient) createLease(ctx context.Context, cfg Config, publicK
 		case "gcp":
 			delete(req, "awsRegion")
 			delete(req, "azureLocation")
-			req["gcpProject"] = cfg.GCPProject
-			req["gcpZone"] = cfg.GCPZone
+			req["gcpProject"] = cfg.GCP.Project
+			req["gcpZone"] = cfg.GCP.Zone
 		}
 		req["checkpointID"] = checkpointClaim.CheckpointID
 		req["checkpointUseClaim"] = checkpointClaim.Token
@@ -1225,58 +1225,6 @@ func (c *CoordinatorClient) RegisterLease(ctx context.Context, leaseID string, i
 	}
 	err := c.do(ctx, http.MethodPut, "/v1/leases/"+url.PathEscape(leaseID)+"/registration", input, &res)
 	return res.Lease, err
-}
-
-func addCoordinatorGCPFields(req map[string]any, cfg Config) {
-	if cfg.Provider != "gcp" {
-		return
-	}
-	base := baseConfig()
-	if cfg.GCPProject != "" && cfg.gcpProjectExplicit {
-		req["gcpProject"] = cfg.GCPProject
-	}
-	if cfg.GCPZone != "" && (cfg.gcpZoneExplicit || cfg.GCPZone != base.GCPZone) {
-		req["gcpZone"] = cfg.GCPZone
-	}
-	if cfg.GCPImage != "" && (cfg.gcpImageExplicit || cfg.GCPImage != base.GCPImage) {
-		req["gcpImage"] = cfg.GCPImage
-	}
-	if cfg.GCPMachineImage != "" {
-		req["gcpMachineImage"] = cfg.GCPMachineImage
-	}
-	if cfg.GCPSnapshot != "" {
-		req["gcpSnapshot"] = cfg.GCPSnapshot
-	}
-	if cfg.GCPNetwork != "" && (cfg.gcpNetworkExplicit || cfg.GCPNetwork != base.GCPNetwork) {
-		req["gcpNetwork"] = cfg.GCPNetwork
-	}
-	if cfg.GCPSubnet != "" {
-		req["gcpSubnet"] = cfg.GCPSubnet
-	}
-	if len(cfg.GCPTags) > 0 && (cfg.gcpTagsExplicit || !stringSlicesEqual(cfg.GCPTags, base.GCPTags)) {
-		req["gcpTags"] = cfg.GCPTags
-	}
-	if len(cfg.GCPSSHCIDRs) > 0 {
-		req["gcpSSHCIDRs"] = cfg.GCPSSHCIDRs
-	}
-	if cfg.GCPRootGB > 0 && (cfg.gcpRootGBExplicit || cfg.GCPRootGB != base.GCPRootGB) {
-		req["gcpRootGB"] = cfg.GCPRootGB
-	}
-	if cfg.GCPServiceAccount != "" {
-		req["gcpServiceAccount"] = cfg.GCPServiceAccount
-	}
-}
-
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func (c *CoordinatorClient) UpdateLeaseTailscale(ctx context.Context, id string, meta TailscaleMetadata) (CoordinatorLease, error) {

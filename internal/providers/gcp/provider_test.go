@@ -195,17 +195,17 @@ func TestGCPConfigShowCompletePassiveSection(t *testing.T) {
 		text  string
 	}{
 		{name: "nil", input: core.Config{}, want: map[string]any{"project": "", "zone": "", "image": "", "network": "", "subnet": "", "tags": []string(nil), "rootGB": int64(0), "sshCIDRs": []string(nil), "serviceAccount": ""}, text: "gcp project=- zone= image= network= subnet=- root_gb=0 ssh_cidrs=-\n"},
-		{name: "empty", input: core.Config{GCPTags: []string{}, GCPSSHCIDRs: []string{}}, want: map[string]any{"project": "", "zone": "", "image": "", "network": "", "subnet": "", "tags": []string{}, "rootGB": int64(0), "sshCIDRs": []string{}, "serviceAccount": ""}, text: "gcp project=- zone= image= network= subnet=- root_gb=0 ssh_cidrs=-\n"},
-		{name: "raw-references-list", input: core.Config{GCPProject: "project-reference", GCPZone: "raw-zone", GCPImage: "image-reference", GCPNetwork: "network-reference", GCPSubnet: "subnet-reference", GCPTags: []string{"last", "first", "last", " "}, GCPRootGB: 9007199254740993, GCPSSHCIDRs: []string{"second", "first", "second", " "}, GCPServiceAccount: "identity-reference"}, want: map[string]any{"project": "project-reference", "zone": "raw-zone", "image": "image-reference", "network": "network-reference", "subnet": "subnet-reference", "tags": []string{"last", "first", "last", " "}, "rootGB": int64(9007199254740993), "sshCIDRs": []string{"second", "first", "second", " "}, "serviceAccount": "identity-reference"}, text: "gcp project=project-reference zone=raw-zone image=image-reference network=network-reference subnet=subnet-reference root_gb=9007199254740993 ssh_cidrs=second,first,second, \n"},
-		{name: "whitespace-empty-elements", input: core.Config{GCPProject: " ", GCPZone: " ", GCPImage: " ", GCPNetwork: " ", GCPSubnet: " ", GCPTags: []string{"", ""}, GCPRootGB: -1, GCPSSHCIDRs: []string{"", ""}, GCPServiceAccount: " "}, want: map[string]any{"project": " ", "zone": " ", "image": " ", "network": " ", "subnet": " ", "tags": []string{"", ""}, "rootGB": int64(-1), "sshCIDRs": []string{"", ""}, "serviceAccount": " "}, text: "gcp project=  zone=  image=  network=  subnet=  root_gb=-1 ssh_cidrs=,\n"},
+		{name: "empty", input: core.Config{GCP: core.GCPConfig{Tags: []string{}, SSHCIDRs: []string{}}}, want: map[string]any{"project": "", "zone": "", "image": "", "network": "", "subnet": "", "tags": []string{}, "rootGB": int64(0), "sshCIDRs": []string{}, "serviceAccount": ""}, text: "gcp project=- zone= image= network= subnet=- root_gb=0 ssh_cidrs=-\n"},
+		{name: "raw-references-list", input: core.Config{GCP: core.GCPConfig{Project: "project-reference", Zone: "raw-zone", Image: "image-reference", Network: "network-reference", Subnet: "subnet-reference", Tags: []string{"last", "first", "last", " "}, RootGB: 9007199254740993, SSHCIDRs: []string{"second", "first", "second", " "}, ServiceAccount: "identity-reference"}}, want: map[string]any{"project": "project-reference", "zone": "raw-zone", "image": "image-reference", "network": "network-reference", "subnet": "subnet-reference", "tags": []string{"last", "first", "last", " "}, "rootGB": int64(9007199254740993), "sshCIDRs": []string{"second", "first", "second", " "}, "serviceAccount": "identity-reference"}, text: "gcp project=project-reference zone=raw-zone image=image-reference network=network-reference subnet=subnet-reference root_gb=9007199254740993 ssh_cidrs=second,first,second, \n"},
+		{name: "whitespace-empty-elements", input: core.Config{GCP: core.GCPConfig{Project: " ", Zone: " ", Image: " ", Network: " ", Subnet: " ", Tags: []string{"", ""}, RootGB: -1, SSHCIDRs: []string{"", ""}, ServiceAccount: " "}}, want: map[string]any{"project": " ", "zone": " ", "image": " ", "network": " ", "subnet": " ", "tags": []string{"", ""}, "rootGB": int64(-1), "sshCIDRs": []string{"", ""}, "serviceAccount": " "}, text: "gcp project=  zone=  image=  network=  subnet=  root_gb=-1 ssh_cidrs=,\n"},
 	} {
 		for _, selected := range []string{"gcp", "static"} {
 			t.Run(tc.name+"/"+selected, func(t *testing.T) {
 				cfg := tc.input
 				cfg.Provider = selected
 				before := cfg
-				before.GCPTags = slices.Clone(cfg.GCPTags)
-				before.GCPSSHCIDRs = slices.Clone(cfg.GCPSSHCIDRs)
+				before.GCP.Tags = slices.Clone(cfg.GCP.Tags)
+				before.GCP.SSHCIDRs = slices.Clone(cfg.GCP.SSHCIDRs)
 				section := projector.ConfigShowSection(cfg)
 				if section.JSONKey != "gcp" || section.TextLabel != "gcp" || !reflect.DeepEqual(section.Providers, []string{"gcp"}) {
 					t.Fatalf("section metadata=%#v", section)

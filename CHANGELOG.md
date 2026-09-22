@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Keep GCP configuration and explicit-input intent under one provider-specific owner while preserving file/environment precedence, OS-image defaults, and coordinator requests.
 - Derive CubeSandbox defaults, file/environment bindings, and flags from one typed declaration while preserving aliases, proxy-port parsing, and endpoint trust policy. [PR 2485](https://github.com/openclaw/crabbox/pull/2485).
 - Consolidate built-in fixed-lease admission, attempt codecs, claim binding, recovery policy, and terminal receipts in a shared engine; preserve native identity proofs and existing local records while retaining the external provider’s delegated protocol.
 - Share RunPod and Vast lease-reuse admission while preserving read-only observations, stale-claim rejection, and recorded idle-timeout policy. [PR 2469](https://github.com/openclaw/crabbox/pull/2469).

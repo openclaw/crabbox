@@ -685,7 +685,7 @@ func TestProviderRegistryCanonicalAndAliases(t *testing.T) {
 func TestLeaseOptionsFromConfigCanonicalizesProviderScope(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Provider = "google-cloud"
-	cfg.GCPProject = "project-a"
+	cfg.GCP.Project = "project-a"
 	if scope := leaseOptionsFromConfig(cfg).ProviderScope; scope != "project:project-a" {
 		t.Fatalf("provider scope=%q", scope)
 	}

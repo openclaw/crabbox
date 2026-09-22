@@ -384,17 +384,17 @@ func TestFlatProviderEnvironmentInputTracking(t *testing.T) {
 			t.Setenv(tc.key, tc.raw)
 			cfg := baseConfig()
 			cfg.AWSRootGB = 5
-			cfg.GCPRootGB = 5
+			cfg.GCP.RootGB = 5
 			if err := applyEnv(&cfg); err != nil {
 				t.Fatal(err)
 			}
-			if cfg.AWSRootGB != 5 || cfg.GCPRootGB != 5 {
+			if cfg.AWSRootGB != 5 || cfg.GCP.RootGB != 5 {
 				t.Fatal("fallback/equal value changed")
 			}
 			owner := configInputOwner("aws")
 			if strings.Contains(tc.key, "GCP") {
 				owner = "gcp"
-				if !cfg.gcpRootGBExplicit {
+				if !cfg.GCP.rootGBExplicit {
 					t.Fatal("existing intent lost")
 				}
 			}
@@ -407,11 +407,11 @@ func TestFlatProviderEnvironmentInputTracking(t *testing.T) {
 		clearConfigEnv(t)
 		t.Setenv("GOOGLE_CLOUD_PROJECT", "fixture")
 		cfg := baseConfig()
-		cfg.GCPProject = "prior"
+		cfg.GCP.Project = "prior"
 		if err := applyEnv(&cfg); err != nil {
 			t.Fatal(err)
 		}
-		if cfg.GCPProject != "prior" || cfg.inputProvenance.summary("gcp").state != "unknown" {
+		if cfg.GCP.Project != "prior" || cfg.inputProvenance.summary("gcp").state != "unknown" {
 			t.Fatal("ignored alias recorded as accepted")
 		}
 	})
@@ -3027,6 +3027,107 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 	if strings.Join(cfg.DockerSandbox.ExtraWorkspaces, ",") != "/tmp/a,/tmp/b" || strings.Join(cfg.DockerSandbox.MCP, ",") != "context7,all" || strings.Join(cfg.DockerSandbox.Kit, ",") != "kit-a,kit-b" {
 		t.Fatalf("env dockerSandbox list config not applied: %#v", cfg.DockerSandbox)
+	}
+}
+
+func TestGCPProjectSourcePrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name, configured, primary, google, legacy, want string
+		priorExplicit, wantExplicit, accepted           bool
+	}{
+		{name: "unchanged", configured: "configured", want: "configured", priorExplicit: true, wantExplicit: true},
+		{name: "configured blocks ambient", configured: "configured", google: "google", legacy: "legacy", want: "configured"},
+		{name: "primary overrides configured", configured: "configured", primary: "primary", google: "google", want: "primary", wantExplicit: true, accepted: true},
+		{name: "google wins legacy", google: "google", legacy: "legacy", want: "google", priorExplicit: true, accepted: true},
+		{name: "legacy fallback", legacy: "legacy", want: "legacy", priorExplicit: true, accepted: true},
+		{name: "primary whitespace remains explicit", primary: "  ", google: "google", want: "  ", wantExplicit: true, accepted: true},
+		{name: "configured whitespace blocks ambient", configured: "  ", google: "google", want: "  "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_GCP_PROJECT", tc.primary)
+			t.Setenv("GOOGLE_CLOUD_PROJECT", tc.google)
+			t.Setenv("GCP_PROJECT_ID", tc.legacy)
+			cfg := baseConfig()
+			cfg.GCP.Project, cfg.GCP.projectExplicit = tc.configured, tc.priorExplicit
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.GCP.Project != tc.want || cfg.GCP.projectExplicit != tc.wantExplicit || (cfg.inputProvenance["gcp"].values != 0) != tc.accepted {
+				t.Fatalf("project=%q explicit=%t input=%+v", cfg.GCP.Project, cfg.GCP.projectExplicit, cfg.inputProvenance["gcp"])
+			}
+		})
+	}
+}
+
+func TestGCPRootGBSeparatesValueAndIntent(t *testing.T) {
+	for _, tc := range []struct {
+		raw      string
+		want     int64
+		accepted bool
+	}{
+		{"", 77, false}, {"77", 77, true}, {"0", 0, true}, {"-1", -1, true},
+		{"bad", 77, false}, {" 80 ", 77, false}, {"999999999999999999999999", 77, false},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_GCP_ROOT_GB", tc.raw)
+			cfg := baseConfig()
+			cfg.GCP.RootGB = 77
+			if err := applyEnv(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			facts := cfg.inputProvenance["gcp"]
+			if cfg.GCP.RootGB != tc.want || cfg.GCP.rootGBExplicit != (tc.raw != "") || (facts.values != 0) != tc.accepted || (facts.intents != 0) != (tc.raw != "") {
+				t.Fatalf("root=%d explicit=%t input=%+v", cfg.GCP.RootGB, cfg.GCP.rootGBExplicit, facts)
+			}
+		})
+	}
+	t.Run("fallback uses native integer width", func(t *testing.T) {
+		clearConfigEnv(t)
+		t.Setenv("CRABBOX_GCP_ROOT_GB", "malformed")
+		cfg := baseConfig()
+		cfg.GCP.RootGB = 1<<40 + 55
+		if err := applyEnv(&cfg); err != nil {
+			t.Fatal(err)
+		}
+		want := int64(1<<40 + 55)
+		if strconv.IntSize == 32 {
+			want = 55
+		}
+		if cfg.GCP.RootGB != want || !cfg.GCP.rootGBExplicit {
+			t.Fatalf("native-width fallback=%d want=%d explicit=%t", cfg.GCP.RootGB, want, cfg.GCP.rootGBExplicit)
+		}
+	})
+}
+
+func TestGCPFileAdmissionPreservesRawListsAndRuntimeValues(t *testing.T) {
+	for _, admitted := range []bool{false, true} {
+		cfg := baseConfig()
+		cfg.GCP.MachineImage, cfg.GCP.Snapshot = "runtime-image", "runtime-snapshot"
+		file := &fileGCPConfig{}
+		if admitted {
+			file = &fileGCPConfig{Project: " project ", Zone: " zone ", Image: " image ", Network: " network ", Subnet: " subnet ", Tags: []string{" tag ", "tag", ""}, SSHCIDRs: []string{" cidr ", ""}, RootGB: 88, ServiceAccount: " account "}
+		}
+		prior := cfg
+		if err := applyFileConfig(&cfg, fileConfig{GCP: file}); err != nil {
+			t.Fatal(err)
+		}
+		if !admitted {
+			if !reflect.DeepEqual(cfg.GCP, prior.GCP) {
+				t.Fatal("empty GCP file changed configuration")
+			}
+			continue
+		}
+		if cfg.GCP.Project != file.Project || cfg.GCP.Zone != file.Zone || cfg.GCP.Image != file.Image || cfg.GCP.Network != file.Network || cfg.GCP.Subnet != file.Subnet || cfg.GCP.RootGB != file.RootGB || cfg.GCP.ServiceAccount != file.ServiceAccount || !reflect.DeepEqual(cfg.GCP.Tags, file.Tags) || !reflect.DeepEqual(cfg.GCP.SSHCIDRs, file.SSHCIDRs) {
+			t.Fatal("GCP file values were normalized or omitted")
+		}
+		if !cfg.GCP.projectExplicit || !cfg.GCP.zoneExplicit || !cfg.GCP.imageExplicit || !cfg.GCP.networkExplicit || !cfg.GCP.tagsExplicit || !cfg.GCP.rootGBExplicit {
+			t.Fatal("accepted GCP file inputs lost explicitness")
+		}
+		if cfg.GCP.MachineImage != "runtime-image" || cfg.GCP.Snapshot != "runtime-snapshot" {
+			t.Fatal("file application changed runtime-only inputs")
+		}
 	}
 }
 
@@ -11629,11 +11730,11 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if cfg.AzureDynamicSessions.Endpoint != "https://env-pool.env.westus.azurecontainerapps.io" || cfg.AzureDynamicSessions.Pool != "env-pool" || cfg.AzureDynamicSessions.Workdir != "/workspace/env" || cfg.AzureDynamicSessions.TimeoutSecs != 90 {
 		t.Fatalf("unexpected azure dynamic sessions env: %#v", cfg.AzureDynamicSessions)
 	}
-	if cfg.GCPProject != "crabbox-project" || cfg.GCPZone != "europe-west2-b" || cfg.GCPNetwork != "crabbox-net" || cfg.GCPSubnet != "crabbox-subnet" || cfg.GCPRootGB != 900 || cfg.GCPServiceAccount != "runner@crabbox-project.iam.gserviceaccount.com" {
-		t.Fatalf("unexpected gcp env: project=%s zone=%s network=%s subnet=%s root=%d service=%s", cfg.GCPProject, cfg.GCPZone, cfg.GCPNetwork, cfg.GCPSubnet, cfg.GCPRootGB, cfg.GCPServiceAccount)
+	if cfg.GCP.Project != "crabbox-project" || cfg.GCP.Zone != "europe-west2-b" || cfg.GCP.Network != "crabbox-net" || cfg.GCP.Subnet != "crabbox-subnet" || cfg.GCP.RootGB != 900 || cfg.GCP.ServiceAccount != "runner@crabbox-project.iam.gserviceaccount.com" {
+		t.Fatalf("unexpected gcp env: project=%s zone=%s network=%s subnet=%s root=%d service=%s", cfg.GCP.Project, cfg.GCP.Zone, cfg.GCP.Network, cfg.GCP.Subnet, cfg.GCP.RootGB, cfg.GCP.ServiceAccount)
 	}
-	if len(cfg.GCPTags) != 2 || cfg.GCPTags[1] != "crabbox-ci" || len(cfg.GCPSSHCIDRs) != 2 || cfg.GCPSSHCIDRs[1] != "203.0.113.12/32" {
-		t.Fatalf("unexpected gcp tags/cidrs: tags=%v cidrs=%v", cfg.GCPTags, cfg.GCPSSHCIDRs)
+	if len(cfg.GCP.Tags) != 2 || cfg.GCP.Tags[1] != "crabbox-ci" || len(cfg.GCP.SSHCIDRs) != 2 || cfg.GCP.SSHCIDRs[1] != "203.0.113.12/32" {
+		t.Fatalf("unexpected gcp tags/cidrs: tags=%v cidrs=%v", cfg.GCP.Tags, cfg.GCP.SSHCIDRs)
 	}
 	if len(cfg.SSHFallbackPorts) != 0 {
 		t.Fatalf("SSHFallbackPorts=%v want disabled fallback", cfg.SSHFallbackPorts)
@@ -13344,7 +13445,7 @@ func TestApplyFileConfigCloudProviderBranches(t *testing.T) {
 	if cfg.AzureDynamicSessions.Pool != "pool" || cfg.AzureDynamicSessions.Workdir != "/workspace/file" || cfg.AzureDynamicSessions.TimeoutSecs != 120 {
 		t.Fatalf("azure dynamic sessions config not applied: %#v", cfg.AzureDynamicSessions)
 	}
-	if cfg.GCPProject != "project" || !cfg.gcpProjectExplicit || cfg.GCPRootGB != 456 || cfg.GCPServiceAccount == "" {
+	if cfg.GCP.Project != "project" || !cfg.GCP.projectExplicit || cfg.GCP.RootGB != 456 || cfg.GCP.ServiceAccount == "" {
 		t.Fatalf("gcp config not applied: %#v", cfg)
 	}
 }

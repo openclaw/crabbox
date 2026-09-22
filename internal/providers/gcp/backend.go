@@ -62,7 +62,7 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 	cfg.SSHKey = keyPath
 	cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=gcp lease=%s slug=%s class=%s preferred_type=%s project=%s zone=%s keep=%v market=%s\n",
-		leaseID, slug, cfg.Class, cfg.ServerType, cfg.GCPProject, cfg.GCPZone, keep, cfg.Capacity.Market)
+		leaseID, slug, cfg.Class, cfg.ServerType, cfg.GCP.Project, cfg.GCP.Zone, keep, cfg.Capacity.Market)
 	server, cfg, err := client.CreateServerWithFallback(ctx, cfg, publicKey, leaseID, slug, keep, func(format string, args ...any) {
 		fmt.Fprintf(b.RT.Stderr, format, args...)
 	})
@@ -81,7 +81,7 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		cleanupClient, cleanupClientErr := newGCPClient(cleanupCtx, cfg)
 		if cleanupClientErr != nil {
 			fmt.Fprintf(b.RT.Stderr, "warning: create gcp cleanup client for %s: %v\n", rollbackCloudID, cleanupClientErr)
-			retErr = shared.JoinAcquireCleanupError(retErr, fmt.Errorf("create gcp cleanup client for %s project=%s zone=%s: %w", rollbackCloudID, cfg.GCPProject, cfg.GCPZone, cleanupClientErr))
+			retErr = shared.JoinAcquireCleanupError(retErr, fmt.Errorf("create gcp cleanup client for %s project=%s zone=%s: %w", rollbackCloudID, cfg.GCP.Project, cfg.GCP.Zone, cleanupClientErr))
 			cleanupClient = rollbackClient
 		}
 		if err := cleanupClient.DeleteServer(cleanupCtx, rollbackCloudID); err != nil {
@@ -98,7 +98,7 @@ func (b *gcpLeaseBackend) acquireOnce(ctx context.Context, keep bool, requestedS
 		return core.LeaseTarget{}, err
 	}
 	rollbackClient = client
-	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s type=%s zone=%s\n", leaseID, server.DisplayID(), cfg.ServerType, cfg.GCPZone)
+	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s server=%s type=%s zone=%s\n", leaseID, server.DisplayID(), cfg.ServerType, cfg.GCP.Zone)
 	server, err = waitForServerIP(ctx, client, server.CloudID)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -194,7 +194,7 @@ func (b *gcpLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (cor
 		return core.DoctorResult{}, err
 	}
 	result := core.InventoryDoctorResult("gcp", len(servers))
-	result.Message += fmt.Sprintf(" project=%s zone=aggregated", b.Cfg.GCPProject)
+	result.Message += fmt.Sprintf(" project=%s zone=aggregated", b.Cfg.GCP.Project)
 	return result, nil
 }
 
@@ -210,7 +210,7 @@ func (b *gcpLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeas
 	cloudID := strings.TrimSpace(req.Lease.Server.CloudID)
 	if zone := strings.TrimSpace(claim.Labels["zone"]); zone != "" {
 		cfg := b.Cfg
-		cfg.GCPZone = zone
+		cfg.GCP.Zone = zone
 		client, err = newGCPClient(ctx, cfg)
 		if err != nil {
 			return err
@@ -249,7 +249,7 @@ func (b *gcpLeaseBackend) Touch(ctx context.Context, req core.TouchRequest) (cor
 	}
 	if zone := req.Lease.Server.Labels["zone"]; zone != "" {
 		cfg := b.Cfg
-		cfg.GCPZone = zone
+		cfg.GCP.Zone = zone
 		client, err = newGCPClient(ctx, cfg)
 		if err != nil {
 			return core.Server{}, err
@@ -299,7 +299,7 @@ func (b *gcpLeaseBackend) Cleanup(ctx context.Context, req core.CleanupRequest) 
 		}
 		cfg := b.Cfg
 		if zone := strings.TrimSpace(claim.Labels["zone"]); zone != "" {
-			cfg.GCPZone = zone
+			cfg.GCP.Zone = zone
 		}
 		client, err := newGCPClient(ctx, cfg)
 		if err != nil {
@@ -431,7 +431,7 @@ func (b *gcpLeaseBackend) pruneStaleClaims(ctx context.Context, liveLeaseIDs map
 		if strings.TrimSpace(claim.CloudID) != "" {
 			cfg := b.Cfg
 			if zone := strings.TrimSpace(claim.Labels["zone"]); zone != "" {
-				cfg.GCPZone = zone
+				cfg.GCP.Zone = zone
 			}
 			client, err := newGCPClient(ctx, cfg)
 			if err != nil {
@@ -461,10 +461,10 @@ func (b *gcpLeaseBackend) pruneStaleClaims(ctx context.Context, liveLeaseIDs map
 }
 
 func gcpClaimScope(cfg core.Config) string {
-	if cfg.GCPProject == "" {
+	if cfg.GCP.Project == "" {
 		return ""
 	}
-	return "project:" + cfg.GCPProject
+	return "project:" + cfg.GCP.Project
 }
 
 var newGCPClient = func(ctx context.Context, cfg core.Config) (gcpClient, error) {

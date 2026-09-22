@@ -47,10 +47,10 @@ func NewGCPClient(ctx context.Context, cfg Config) (*GCPClient, error) {
 }
 
 func newGCPClientWithOptions(ctx context.Context, cfg Config, opts ...option.ClientOption) (*GCPClient, error) {
-	if cfg.GCPProject == "" {
+	if cfg.GCP.Project == "" {
 		return nil, Exit(3, "gcp project is required (set gcp.project, CRABBOX_GCP_PROJECT, GOOGLE_CLOUD_PROJECT, or GCP_PROJECT_ID)")
 	}
-	if cfg.GCPZone == "" {
+	if cfg.GCP.Zone == "" {
 		return nil, Exit(3, "gcp zone is required (set gcp.zone or CRABBOX_GCP_ZONE)")
 	}
 	instances, err := gcpcompute.NewInstancesRESTClient(ctx, opts...)
@@ -62,25 +62,25 @@ func newGCPClientWithOptions(ctx context.Context, cfg Config, opts ...option.Cli
 		_ = instances.Close()
 		return nil, fmt.Errorf("gcp firewalls client: %w", err)
 	}
-	cidrs := cfg.GCPSSHCIDRs
+	cidrs := cfg.GCP.SSHCIDRs
 	if len(cidrs) == 0 {
 		cidrs = []string{"0.0.0.0/0"}
 	}
-	tags := uniqueStrings(cfg.GCPTags)
+	tags := uniqueStrings(cfg.GCP.Tags)
 	if len(tags) == 0 {
 		tags = []string{"crabbox-ssh"}
 	}
 	return &GCPClient{
-		Project:        cfg.GCPProject,
-		Zone:           cfg.GCPZone,
-		Zones:          uniqueStrings(append([]string{cfg.GCPZone}, cfg.Capacity.AvailabilityZones...)),
-		Image:          blank(cfg.GCPImage, defaultGCPLinuxImage),
-		Network:        blank(cfg.GCPNetwork, "default"),
-		Subnet:         cfg.GCPSubnet,
+		Project:        cfg.GCP.Project,
+		Zone:           cfg.GCP.Zone,
+		Zones:          uniqueStrings(append([]string{cfg.GCP.Zone}, cfg.Capacity.AvailabilityZones...)),
+		Image:          blank(cfg.GCP.Image, defaultGCPLinuxImage),
+		Network:        blank(cfg.GCP.Network, "default"),
+		Subnet:         cfg.GCP.Subnet,
 		Tags:           tags,
 		SSHCIDRs:       cidrs,
-		RootGB:         cfg.GCPRootGB,
-		ServiceAccount: cfg.GCPServiceAccount,
+		RootGB:         cfg.GCP.RootGB,
+		ServiceAccount: cfg.GCP.ServiceAccount,
 		SSHPort:        cfg.SSHPort,
 		FallbackPorts:  cfg.SSHFallbackPorts,
 		instances:      instances,
@@ -118,9 +118,9 @@ func (c *GCPClient) CreateServerWithFallback(ctx context.Context, cfg Config, pu
 	}
 	return ProvisionServerCandidates(ctx, cfg, attempts, ServerProvisioner{
 		Create: func(ctx context.Context, next Config) (Server, error) {
-			server, err := c.withZone(next.GCPZone).createServer(ctx, next, publicKey, leaseID, slug, keep)
+			server, err := c.withZone(next.GCP.Zone).createServer(ctx, next, publicKey, leaseID, slug, keep)
 			if err == nil {
-				c.Zone = next.GCPZone
+				c.Zone = next.GCP.Zone
 			}
 			return server, err
 		},
@@ -136,20 +136,20 @@ func gcpProvisioningPlan(cfg Config) ([]ProvisioningCandidate, error) {
 	if err := validateProvisioningCandidates(cfg, candidates); err != nil {
 		return nil, err
 	}
-	zones := uniqueStrings(append([]string{cfg.GCPZone}, cfg.Capacity.AvailabilityZones...))
+	zones := uniqueStrings(append([]string{cfg.GCP.Zone}, cfg.Capacity.AvailabilityZones...))
 	var attempts []ProvisioningCandidate
 	for marketIndex, market := range provisioningMarkets(cfg) {
 		for _, zone := range zones {
 			for i, machineType := range candidates {
 				next := cfg
-				next.GCPZone = zone
+				next.GCP.Zone = zone
 				next.ServerType = machineType
 				next.Capacity.Market = market
 				attempt := ProvisioningCandidate{Config: next, FailureLabel: zone + "/" + machineType}
 				if marketIndex > 0 {
 					attempt.FailureLabel = "on-demand " + attempt.FailureLabel
 					attempt.FallbackMessage = fmt.Sprintf("fallback provisioning zone=%s type=%s market=on-demand after spot rejection\n", zone, machineType)
-				} else if i > 0 || zone != cfg.GCPZone {
+				} else if i > 0 || zone != cfg.GCP.Zone {
 					attempt.FallbackMessage = fmt.Sprintf("fallback provisioning zone=%s type=%s after fallback-eligible provisioning error\n", zone, machineType)
 				}
 				attempts = append(attempts, attempt)

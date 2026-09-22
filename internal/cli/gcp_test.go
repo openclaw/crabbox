@@ -146,9 +146,7 @@ func TestGCPFirewallNameForPolicy(t *testing.T) {
 
 func TestGCPClientDefaultsBlankTags(t *testing.T) {
 	client, err := newGCPClientWithOptions(context.Background(), Config{
-		GCPProject: "project",
-		GCPZone:    "europe-west2-a",
-		GCPTags:    []string{"  "},
+		GCP: GCPConfig{Project: "project", Zone: "europe-west2-a", Tags: []string{"  "}},
 	}, option.WithoutAuthentication(), option.WithEndpoint("http://127.0.0.1"))
 	if err != nil {
 		t.Fatal(err)

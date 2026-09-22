@@ -449,18 +449,18 @@ func (testGCPProvider) NativeCheckpointCapability(req NativeCheckpointRequest) (
 func (testGCPProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
 	switch req.Record.Kind {
 	case checkpointKindGCP:
-		req.Config.GCPMachineImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+		req.Config.GCP.MachineImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
 	case checkpointKindGCPDisk:
-		req.Config.GCPSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+		req.Config.GCP.Snapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
 	default:
 		return Exit(2, "provider=gcp does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	if req.Record.Region != "" {
-		req.Config.GCPZone = req.Record.Region
+		req.Config.GCP.Zone = req.Record.Region
 	}
 	if req.Record.Project != "" {
-		req.Config.GCPProject = req.Record.Project
-		req.Config.gcpProjectExplicit = true
+		req.Config.GCP.Project = req.Record.Project
+		req.Config.GCP.projectExplicit = true
 	}
 	return nil
 }

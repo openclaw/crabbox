@@ -1199,6 +1199,14 @@ Blacksmith does) when the config type is not ready to export cleanly.
 If a provider needs durable config, add typed config fields in `Config` and env
 overrides in `config.go`.
 
+GCP's values and explicit-input markers live together in `Config.GCP`, owned by
+`config_gcp.go`. That owner handles defaults, file and environment admission,
+OS-image replacement, and coordinator projection without flattening fields back
+into core. Its handwritten bindings preserve policies that differ by source:
+ambient project aliases only fill a missing project, malformed root-size input
+still records intent, and file lists retain their original values. Keep the
+public YAML, config-show, and coordinator keys stable when changing storage.
+
 `internal/atomicfile.WritePrivate` shares private-file staging, file syncing,
 and replacement. Callers retain path admission, directory creation, their
 platform-specific atomic replacement, and directory-sync/error policy.
