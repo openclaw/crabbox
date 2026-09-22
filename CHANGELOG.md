@@ -5,7 +5,7 @@
 ### Changed
 
 - Consolidate built-in fixed-lease admission, attempt codecs, claim binding, recovery policy, and terminal receipts in a shared engine; preserve native identity proofs and existing local records while retaining the external provider’s delegated protocol.
-- Share AWS and Azure endpoint-refresh identity policy while preserving recorded cleanup authority and legacy-claim behavior.
+- Share AWS and Azure endpoint-refresh identity policy while preserving recorded cleanup authority and legacy-claim behavior. [PR 2470](https://github.com/openclaw/crabbox/pull/2470).
 
 ### Fixes
 
