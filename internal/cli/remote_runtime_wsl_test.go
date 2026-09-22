@@ -127,14 +127,17 @@ func TestNativeWSLPOSIXControlPortable(t *testing.T) {
 			}
 			script = strings.Replace(script, replacement[0], replacement[1], 1)
 		}
-		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		// PowerShell cold startup is outside the generated launcher's five-second child budget.
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		cmd := exec.CommandContext(ctx, pwsh, "-NoProfile", "-NonInteractive", "-Command", script)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		started := time.Now()
 		err = cmd.Run()
+		contextErr := ctx.Err()
 		cancel()
-		if exitCode(err) != 23 || !bytes.Equal(stdout.Bytes(), []byte{0, 255, 'o', 'w', 'n', 'e', 'd', '\n'}) || stderr.String() != "owned stderr\n" {
-			t.Fatalf("shell=%s exit=%d stdout=%x stderr=%q", shell, exitCode(err), stdout.Bytes(), stderr.String())
+		if contextErr != nil || exitCode(err) != 23 || !bytes.Equal(stdout.Bytes(), []byte{0, 255, 'o', 'w', 'n', 'e', 'd', '\n'}) || stderr.String() != "owned stderr\n" {
+			t.Fatalf("shell=%s elapsed=%s context=%v err=%v exit=%d stdout=%x stderr=%q", shell, time.Since(started), contextErr, err, exitCode(err), stdout.Bytes(), stderr.String())
 		}
 	}
 }
