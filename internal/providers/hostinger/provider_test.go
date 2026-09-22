@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -987,80 +988,82 @@ func TestAcquireRecoversAmbiguousPurchaseByExactHostname(t *testing.T) {
 }
 
 func TestAcquireRetainsPendingClaimForInvisibleAmbiguousPurchase(t *testing.T) {
-	isolateHostingerTestState(t)
-	api := &fakeAPI{purchaseErrBeforeCreate: errors.New("request timed out")}
-	cfg := core.Config{
-		Provider: providerName,
-		Hostinger: core.HostingerConfig{
-			APIToken:       "token",
-			ItemID:         "hostingercom-vps-kvm2-usd-1m",
-			TemplateID:     "2",
-			DataCenterID:   "3",
-			HostnamePrefix: "crabbox",
-			AllowPurchase:  true,
-		},
-	}
-	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
-	backend.client = api
-	backend.skipSSHWait = true
+	synctest.Test(t, func(t *testing.T) {
+		isolateHostingerTestState(t)
+		api := &fakeAPI{purchaseErrBeforeCreate: errors.New("request timed out")}
+		cfg := core.Config{
+			Provider: providerName,
+			Hostinger: core.HostingerConfig{
+				APIToken:       "token",
+				ItemID:         "hostingercom-vps-kvm2-usd-1m",
+				TemplateID:     "2",
+				DataCenterID:   "3",
+				HostnamePrefix: "crabbox",
+				AllowPurchase:  true,
+			},
+		}
+		backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+		backend.client = api
+		backend.skipSSHWait = true
 
-	oldTimeout := hostingerPurchaseRecoveryTimeout
-	hostingerPurchaseRecoveryTimeout = time.Nanosecond
-	t.Cleanup(func() { hostingerPurchaseRecoveryTimeout = oldTimeout })
+		oldTimeout := hostingerPurchaseRecoveryTimeout
+		hostingerPurchaseRecoveryTimeout = time.Nanosecond
+		t.Cleanup(func() { hostingerPurchaseRecoveryTimeout = oldTimeout })
 
-	_, err := backend.Acquire(context.Background(), core.AcquireRequest{
-		Repo:          core.Repo{Root: t.TempDir()},
-		Keep:          true,
-		RequestedSlug: "pending",
+		_, err := backend.Acquire(context.Background(), core.AcquireRequest{
+			Repo:          core.Repo{Root: t.TempDir()},
+			Keep:          true,
+			RequestedSlug: "pending",
+		})
+		if err == nil || !strings.Contains(err.Error(), "recovery claim retained") {
+			t.Fatalf("Acquire err=%v", err)
+		}
+		if api.stopCalls != 0 {
+			t.Fatalf("ambiguous purchase without a vm id attempted stop: %v", api.stopped)
+		}
+
+		claims, listErr := core.ListLeaseClaims()
+		if listErr != nil || len(claims) != 1 {
+			t.Fatalf("claims=%#v err=%v", claims, listErr)
+		}
+		claim := claims[0]
+		hostname := claim.Labels[hostingerRecoveryHostnameLabel]
+		if claim.CloudID != "" ||
+			claim.Labels[hostingerRecoveryLabel] != hostingerRecoveryAmbiguous ||
+			!strings.HasPrefix(hostname, "crabbox-pending-") {
+			t.Fatalf("pending claim=%#v", claim)
+		}
+		keyPath, keyErr := core.TestboxKeyPath(claim.LeaseID)
+		if keyErr != nil {
+			t.Fatal(keyErr)
+		}
+		if _, statErr := os.Stat(keyPath); statErr != nil {
+			t.Fatalf("pending recovery key missing: %v", statErr)
+		}
+
+		api.vms = append(api.vms, hostingerVM{
+			ID:       "vm-late",
+			Hostname: hostname,
+			State:    "running",
+			IPv4:     hostingerIPAddresses{"203.0.113.43"},
+		})
+		lease, resolveErr := backend.Resolve(context.Background(), core.ResolveRequest{ID: claim.LeaseID})
+		if resolveErr != nil {
+			t.Fatal(resolveErr)
+		}
+		if lease.LeaseID != claim.LeaseID || lease.Server.CloudID != "vm-late" {
+			t.Fatalf("lease=%#v", lease)
+		}
+		recovered, ok, resolveClaimErr := core.ResolveLeaseClaimForProvider(claim.LeaseID, providerName)
+		if resolveClaimErr != nil || !ok {
+			t.Fatalf("claim=%#v ok=%v err=%v", recovered, ok, resolveClaimErr)
+		}
+		if recovered.CloudID != "vm-late" ||
+			recovered.Labels[hostingerRecoveryLabel] != "" ||
+			recovered.Labels[hostingerRecoveryHostnameLabel] != "" {
+			t.Fatalf("recovered claim=%#v", recovered)
+		}
 	})
-	if err == nil || !strings.Contains(err.Error(), "recovery claim retained") {
-		t.Fatalf("Acquire err=%v", err)
-	}
-	if api.stopCalls != 0 {
-		t.Fatalf("ambiguous purchase without a vm id attempted stop: %v", api.stopped)
-	}
-
-	claims, listErr := core.ListLeaseClaims()
-	if listErr != nil || len(claims) != 1 {
-		t.Fatalf("claims=%#v err=%v", claims, listErr)
-	}
-	claim := claims[0]
-	hostname := claim.Labels[hostingerRecoveryHostnameLabel]
-	if claim.CloudID != "" ||
-		claim.Labels[hostingerRecoveryLabel] != hostingerRecoveryAmbiguous ||
-		!strings.HasPrefix(hostname, "crabbox-pending-") {
-		t.Fatalf("pending claim=%#v", claim)
-	}
-	keyPath, keyErr := core.TestboxKeyPath(claim.LeaseID)
-	if keyErr != nil {
-		t.Fatal(keyErr)
-	}
-	if _, statErr := os.Stat(keyPath); statErr != nil {
-		t.Fatalf("pending recovery key missing: %v", statErr)
-	}
-
-	api.vms = append(api.vms, hostingerVM{
-		ID:       "vm-late",
-		Hostname: hostname,
-		State:    "running",
-		IPv4:     hostingerIPAddresses{"203.0.113.43"},
-	})
-	lease, resolveErr := backend.Resolve(context.Background(), core.ResolveRequest{ID: claim.LeaseID})
-	if resolveErr != nil {
-		t.Fatal(resolveErr)
-	}
-	if lease.LeaseID != claim.LeaseID || lease.Server.CloudID != "vm-late" {
-		t.Fatalf("lease=%#v", lease)
-	}
-	recovered, ok, resolveClaimErr := core.ResolveLeaseClaimForProvider(claim.LeaseID, providerName)
-	if resolveClaimErr != nil || !ok {
-		t.Fatalf("claim=%#v ok=%v err=%v", recovered, ok, resolveClaimErr)
-	}
-	if recovered.CloudID != "vm-late" ||
-		recovered.Labels[hostingerRecoveryLabel] != "" ||
-		recovered.Labels[hostingerRecoveryHostnameLabel] != "" {
-		t.Fatalf("recovered claim=%#v", recovered)
-	}
 }
 
 func TestAcquireRecoversAfterPendingClaimWriteFailure(t *testing.T) {
@@ -1199,49 +1202,51 @@ func TestRecoveryLookupSkipsCorruptUnrelatedRecords(t *testing.T) {
 }
 
 func TestAcquireRetainsKeyWhenPendingClaimAndRecoveryFail(t *testing.T) {
-	isolateHostingerTestState(t)
-	api := &fakeAPI{purchaseErrBeforeCreate: errors.New("request timed out")}
-	cfg := core.Config{
-		Provider: providerName,
-		Hostinger: core.HostingerConfig{
-			APIToken:       "token",
-			ItemID:         "hostingercom-vps-kvm2-usd-1m",
-			TemplateID:     "2",
-			DataCenterID:   "3",
-			HostnamePrefix: "crabbox",
-			AllowPurchase:  true,
-		},
-	}
-	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
-	backend.client = api
+	synctest.Test(t, func(t *testing.T) {
+		isolateHostingerTestState(t)
+		api := &fakeAPI{purchaseErrBeforeCreate: errors.New("request timed out")}
+		cfg := core.Config{
+			Provider: providerName,
+			Hostinger: core.HostingerConfig{
+				APIToken:       "token",
+				ItemID:         "hostingercom-vps-kvm2-usd-1m",
+				TemplateID:     "2",
+				DataCenterID:   "3",
+				HostnamePrefix: "crabbox",
+				AllowPurchase:  true,
+			},
+		}
+		backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+		backend.client = api
 
-	oldClaim := claimLeaseTargetForRepoConfigIfUnchanged
-	claimLeaseTargetForRepoConfigIfUnchanged = func(string, string, core.Config, core.Server, core.SSHTarget, string, time.Duration, bool, core.LeaseClaim, bool) (core.LeaseClaim, error) {
-		return core.LeaseClaim{}, errors.New("claim storage unavailable")
-	}
-	t.Cleanup(func() { claimLeaseTargetForRepoConfigIfUnchanged = oldClaim })
-	oldTimeout := hostingerPurchaseRecoveryTimeout
-	hostingerPurchaseRecoveryTimeout = time.Nanosecond
-	t.Cleanup(func() { hostingerPurchaseRecoveryTimeout = oldTimeout })
+		oldClaim := claimLeaseTargetForRepoConfigIfUnchanged
+		claimLeaseTargetForRepoConfigIfUnchanged = func(string, string, core.Config, core.Server, core.SSHTarget, string, time.Duration, bool, core.LeaseClaim, bool) (core.LeaseClaim, error) {
+			return core.LeaseClaim{}, errors.New("claim storage unavailable")
+		}
+		t.Cleanup(func() { claimLeaseTargetForRepoConfigIfUnchanged = oldClaim })
+		oldTimeout := hostingerPurchaseRecoveryTimeout
+		hostingerPurchaseRecoveryTimeout = time.Nanosecond
+		t.Cleanup(func() { hostingerPurchaseRecoveryTimeout = oldTimeout })
 
-	_, err := backend.Acquire(context.Background(), core.AcquireRequest{
-		Repo:          core.Repo{Root: t.TempDir()},
-		Keep:          true,
-		RequestedSlug: "pending",
+		_, err := backend.Acquire(context.Background(), core.AcquireRequest{
+			Repo:          core.Repo{Root: t.TempDir()},
+			Keep:          true,
+			RequestedSlug: "pending",
+		})
+		if err == nil || !strings.Contains(err.Error(), "recovery claim failed and key retained") {
+			t.Fatalf("Acquire err=%v", err)
+		}
+		message := err.Error()
+		keyStart := strings.Index(message, " key=")
+		keyEnd := strings.Index(message, ": purchase_error=")
+		if keyStart < 0 || keyEnd <= keyStart {
+			t.Fatalf("Acquire error missing retained key path: %v", err)
+		}
+		keyPath := message[keyStart+len(" key=") : keyEnd]
+		if _, statErr := os.Stat(keyPath); statErr != nil {
+			t.Fatalf("retained recovery key missing: %v", statErr)
+		}
 	})
-	if err == nil || !strings.Contains(err.Error(), "recovery claim failed and key retained") {
-		t.Fatalf("Acquire err=%v", err)
-	}
-	message := err.Error()
-	keyStart := strings.Index(message, " key=")
-	keyEnd := strings.Index(message, ": purchase_error=")
-	if keyStart < 0 || keyEnd <= keyStart {
-		t.Fatalf("Acquire error missing retained key path: %v", err)
-	}
-	keyPath := message[keyStart+len(" key=") : keyEnd]
-	if _, statErr := os.Stat(keyPath); statErr != nil {
-		t.Fatalf("retained recovery key missing: %v", statErr)
-	}
 }
 
 func TestAcquireFailureStopsPaidVPSButRetainsRecoveryState(t *testing.T) {
@@ -2047,54 +2052,56 @@ func TestResolveRejectsAmbiguousHostingerSlug(t *testing.T) {
 }
 
 func TestReleaseRetainsClaimUntilStopConfirmed(t *testing.T) {
-	isolateHostingerTestState(t)
-	leaseID := "cbx_abcdef123456"
-	cfg := core.Config{
-		Provider: providerName,
-		Hostinger: core.HostingerConfig{
-			APIToken: "token",
-		},
-	}
-	server := core.Server{
-		CloudID:  "vm-running",
-		Provider: providerName,
-		Name:     "crabbox-blue-abcdef123456",
-		Labels:   core.DirectLeaseLabels(cfg, leaseID, "blue", providerName, "", true, time.Now()),
-	}
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "blue", cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, true); err != nil {
-		t.Fatal(err)
-	}
-	keyPath, _, keyErr := core.EnsureTestboxKey(leaseID)
-	if keyErr != nil {
-		t.Fatal(keyErr)
-	}
-	api := &fakeAPI{
-		vms:                     []hostingerVM{{ID: "vm-running", Hostname: "crabbox-blue-abcdef123456", State: "running", IPv4: hostingerIPAddresses{"203.0.113.60"}}},
-		stopLeavesRunning:       true,
-		getWaitForContextAtCall: 2,
-	}
-	backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
-	backend.client = api
-	oldTimeout := hostingerStopWaitTimeout
-	hostingerStopWaitTimeout = time.Nanosecond
-	t.Cleanup(func() { hostingerStopWaitTimeout = oldTimeout })
+	synctest.Test(t, func(t *testing.T) {
+		isolateHostingerTestState(t)
+		leaseID := "cbx_abcdef123456"
+		cfg := core.Config{
+			Provider: providerName,
+			Hostinger: core.HostingerConfig{
+				APIToken: "token",
+			},
+		}
+		server := core.Server{
+			CloudID:  "vm-running",
+			Provider: providerName,
+			Name:     "crabbox-blue-abcdef123456",
+			Labels:   core.DirectLeaseLabels(cfg, leaseID, "blue", providerName, "", true, time.Now()),
+		}
+		if err := core.ClaimLeaseTargetForRepoConfig(leaseID, "blue", cfg, server, core.SSHTarget{}, t.TempDir(), time.Hour, true); err != nil {
+			t.Fatal(err)
+		}
+		keyPath, _, keyErr := core.EnsureTestboxKey(leaseID)
+		if keyErr != nil {
+			t.Fatal(keyErr)
+		}
+		api := &fakeAPI{
+			vms:                     []hostingerVM{{ID: "vm-running", Hostname: "crabbox-blue-abcdef123456", State: "running", IPv4: hostingerIPAddresses{"203.0.113.60"}}},
+			stopLeavesRunning:       true,
+			getWaitForContextAtCall: 2,
+		}
+		backend := NewLeaseBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*leaseBackend)
+		backend.client = api
+		oldTimeout := hostingerStopWaitTimeout
+		hostingerStopWaitTimeout = time.Nanosecond
+		t.Cleanup(func() { hostingerStopWaitTimeout = oldTimeout })
 
-	err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
-		Lease: core.LeaseTarget{LeaseID: leaseID, Server: server},
+		err := backend.ReleaseLease(context.Background(), core.ReleaseLeaseRequest{
+			Lease: core.LeaseTarget{LeaseID: leaseID, Server: server},
+		})
+		if err == nil || !strings.Contains(err.Error(), "timed out waiting for hostinger vps vm-running to stop") {
+			t.Fatalf("ReleaseLease err=%v", err)
+		}
+		if api.stopCalls != 1 {
+			t.Fatalf("stopCalls=%d", api.stopCalls)
+		}
+		claim, ok, claimErr := core.ResolveLeaseClaimForProvider(leaseID, providerName)
+		if claimErr != nil || !ok || claim.CloudID != "vm-running" {
+			t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
+		}
+		if _, statErr := os.Stat(keyPath); statErr != nil {
+			t.Fatalf("failed release removed recovery key: %v", statErr)
+		}
 	})
-	if err == nil || !strings.Contains(err.Error(), "timed out waiting for hostinger vps vm-running to stop") {
-		t.Fatalf("ReleaseLease err=%v", err)
-	}
-	if api.stopCalls != 1 {
-		t.Fatalf("stopCalls=%d", api.stopCalls)
-	}
-	claim, ok, claimErr := core.ResolveLeaseClaimForProvider(leaseID, providerName)
-	if claimErr != nil || !ok || claim.CloudID != "vm-running" {
-		t.Fatalf("claim=%#v ok=%v err=%v", claim, ok, claimErr)
-	}
-	if _, statErr := os.Stat(keyPath); statErr != nil {
-		t.Fatalf("failed release removed recovery key: %v", statErr)
-	}
 }
 
 func TestReleaseRejectsChangedClaimBeforeStop(t *testing.T) {
