@@ -142,10 +142,7 @@ export async function requireCurrentGitHubMembership(
   if (loading) {
     return loading;
   }
-  const load = withMembershipDeadline(async (deadline) => {
-    await requireExactGitHubAccount(identity.accessToken, identity.owner, identity.login, deadline);
-    await requireExactGitHubMembership(identity.accessToken, identity.login, policy, deadline);
-  })
+  const load = requireFreshGitHubMembership(identity, env, policy)
     .then(() => {
       const ttlSeconds = membershipCacheSeconds(env);
       if (ttlSeconds > 0) {
