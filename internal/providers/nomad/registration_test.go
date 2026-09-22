@@ -6,17 +6,18 @@ import (
 	"errors"
 	"maps"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	nomadapi "github.com/hashicorp/nomad/api"
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 type registrationHookClient struct {
@@ -122,106 +123,109 @@ func TestNomadRegistrationUncertaintyRetainsRecovery(t *testing.T) {
 }
 
 func TestNomadAcceptedRegistrationHTTPDeadlineRollsBack(t *testing.T) {
-	old := nomadControlRequestTimeout
-	nomadControlRequestTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { nomadControlRequestTimeout = old })
-	t.Setenv("NOMAD_TOKEN", "")
-	b, _, _ := testBackend(t, nil)
-	var mu sync.Mutex
-	var stored *nomadapi.Job
-	var submittedClaim LeaseClaim
-	var requests []string
-	registrationCanceled := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPut && r.URL.Path == "/v1/jobs" {
-			claims, err := listNomadLeaseClaims()
-			if err != nil || len(claims) != 1 {
-				t.Errorf("registration reached HTTP without one durable claim: claims=%d err=%v", len(claims), err)
-				http.Error(w, "missing registration claim", http.StatusInternalServerError)
+	synctest.Test(t, func(t *testing.T) {
+		old := nomadControlRequestTimeout
+		nomadControlRequestTimeout = 200 * time.Millisecond
+		t.Cleanup(func() { nomadControlRequestTimeout = old })
+		t.Setenv("NOMAD_TOKEN", "")
+		b, _, _ := testBackend(t, nil)
+		var mu sync.Mutex
+		var stored *nomadapi.Job
+		var submittedClaim LeaseClaim
+		var requests []string
+		registrationCanceled := make(chan struct{})
+		server := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodPut && r.URL.Path == "/v1/jobs" {
+				claims, err := listNomadLeaseClaims()
+				if err != nil || len(claims) != 1 {
+					t.Errorf("registration reached HTTP without one durable claim: claims=%d err=%v", len(claims), err)
+					http.Error(w, "missing registration claim", http.StatusInternalServerError)
+					return
+				}
+				claim := claims[0]
+				if state, err := registrationState(claim); err != nil || state != registrationSubmitting {
+					t.Errorf("registration reached HTTP before submitting: state=%s err=%v", state, err)
+				}
+				var body struct{ Job *nomadapi.Job }
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Job == nil {
+					t.Errorf("decode submitted job: job=%v err=%v", body.Job, err)
+					http.Error(w, "invalid job", http.StatusBadRequest)
+					return
+				}
+				if stringValue(body.Job.ID) != claim.Labels[claimLabelJobID] {
+					t.Errorf("submitted job does not match durable claim")
+				}
+				mu.Lock()
+				stored, submittedClaim = body.Job, claim
+				requests = append(requests, "PUT")
+				mu.Unlock()
+				// Accept the unchanged job, but withhold the rest of the JSON acknowledgement.
+				_, _ = w.Write([]byte(`{"EvalID":"`))
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+				close(registrationCanceled)
 				return
-			}
-			claim := claims[0]
-			if state, err := registrationState(claim); err != nil || state != registrationSubmitting {
-				t.Errorf("registration reached HTTP before submitting: state=%s err=%v", state, err)
-			}
-			var body struct{ Job *nomadapi.Job }
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Job == nil {
-				t.Errorf("decode submitted job: job=%v err=%v", body.Job, err)
-				http.Error(w, "invalid job", http.StatusBadRequest)
-				return
-			}
-			if stringValue(body.Job.ID) != claim.Labels[claimLabelJobID] {
-				t.Errorf("submitted job does not match durable claim")
 			}
 			mu.Lock()
-			stored, submittedClaim = body.Job, claim
-			requests = append(requests, "PUT")
-			mu.Unlock()
-			// Accept the unchanged job, but withhold the rest of the JSON acknowledgement.
-			_, _ = w.Write([]byte(`{"EvalID":"`))
-			w.(http.Flusher).Flush()
-			<-r.Context().Done()
-			close(registrationCanceled)
-			return
-		}
-		mu.Lock()
-		defer mu.Unlock()
-		requests = append(requests, r.Method)
-		if submittedClaim.LeaseID == "" || r.URL.Path != "/v1/job/"+submittedClaim.Labels[claimLabelJobID] {
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
-			return
-		}
-		switch r.Method {
-		case http.MethodGet:
-			if stored == nil {
+			defer mu.Unlock()
+			requests = append(requests, r.Method)
+			if submittedClaim.LeaseID == "" || r.URL.Path != "/v1/job/"+submittedClaim.Labels[claimLabelJobID] {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 				http.NotFound(w, r)
 				return
 			}
-			if err := json.NewEncoder(w).Encode(stored); err != nil {
-				t.Errorf("write stored job: %v", err)
+			switch r.Method {
+			case http.MethodGet:
+				if stored == nil {
+					http.NotFound(w, r)
+					return
+				}
+				if err := json.NewEncoder(w).Encode(stored); err != nil {
+					t.Errorf("write stored job: %v", err)
+				}
+			case http.MethodDelete:
+				if stored == nil || r.URL.Query().Get("purge") != "true" {
+					t.Errorf("cleanup did not purge the accepted job")
+				}
+				stored = nil
+				_, _ = w.Write([]byte(`{}`))
+			default:
+				t.Errorf("unexpected request method: %s", r.Method)
+				http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
 			}
-		case http.MethodDelete:
-			if stored == nil || r.URL.Query().Get("purge") != "true" {
-				t.Errorf("cleanup did not purge the accepted job")
-			}
-			stored = nil
-			_, _ = w.Write([]byte(`{}`))
-		default:
-			t.Errorf("unexpected request method: %s", r.Method)
-			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+		}))
+		t.Cleanup(func() {
+			server.CloseClientConnections()
+			server.Close()
+		})
+		b.cfg.Nomad.Address = server.URL
+		b.rt.HTTP = server.Client()
+		b.clientFactory = newNomadClient
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err := b.Warmup(ctx, WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "ordinary-repo"}, Keep: true})
+		var displayed core.ExitError
+		if ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) || !core.AsExitError(err, &displayed) || displayed.Code != 1 {
+			t.Fatalf("initiating request deadline/code lost: caller=%v code=%d err=%v", ctx.Err(), displayed.Code, err)
 		}
-	}))
-	t.Cleanup(func() {
-		server.CloseClientConnections()
-		server.Close()
+		select {
+		case <-registrationCanceled:
+		case <-ctx.Done():
+			t.Fatal("registration HTTP request was not canceled")
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if stored != nil || !slices.Equal(requests, []string{"PUT", "GET", "DELETE", "GET"}) {
+			t.Fatalf("accepted registration rollback sequence: stored=%v requests=%v", stored != nil, requests)
+		}
+		if !strings.Contains(displayed.Message, submittedClaim.LeaseID) || !strings.Contains(displayed.Message, submittedClaim.Labels[claimLabelJobID]) || !strings.Contains(displayed.Message, "rolled back") || strings.Contains(displayed.Message, "recover with") {
+			t.Fatalf("rollback diagnostic lost identity or implied retention: %s", displayed.Message)
+		}
+		if claims, err := listNomadLeaseClaims(); err != nil || len(claims) != 0 {
+			t.Fatalf("claim remains after confirmed HTTP rollback: claims=%d err=%v", len(claims), err)
+		}
 	})
-	b.cfg.Nomad.Address = server.URL
-	b.clientFactory = newNomadClient
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := b.Warmup(ctx, WarmupRequest{Repo: Repo{Root: t.TempDir(), Name: "ordinary-repo"}, Keep: true})
-	var displayed core.ExitError
-	if ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) || !core.AsExitError(err, &displayed) || displayed.Code != 1 {
-		t.Fatalf("initiating request deadline/code lost: caller=%v code=%d err=%v", ctx.Err(), displayed.Code, err)
-	}
-	select {
-	case <-registrationCanceled:
-	case <-ctx.Done():
-		t.Fatal("registration HTTP request was not canceled")
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if stored != nil || !slices.Equal(requests, []string{"PUT", "GET", "DELETE", "GET"}) {
-		t.Fatalf("accepted registration rollback sequence: stored=%v requests=%v", stored != nil, requests)
-	}
-	if !strings.Contains(displayed.Message, submittedClaim.LeaseID) || !strings.Contains(displayed.Message, submittedClaim.Labels[claimLabelJobID]) || !strings.Contains(displayed.Message, "rolled back") || strings.Contains(displayed.Message, "recover with") {
-		t.Fatalf("rollback diagnostic lost identity or implied retention: %s", displayed.Message)
-	}
-	if claims, err := listNomadLeaseClaims(); err != nil || len(claims) != 0 {
-		t.Fatalf("claim remains after confirmed HTTP rollback: claims=%d err=%v", len(claims), err)
-	}
 }
 
 func TestNomadRegistrationAcknowledgedBeforeReadiness(t *testing.T) {
