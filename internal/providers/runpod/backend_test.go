@@ -133,7 +133,9 @@ func TestRunpodResolveRejectsClaimChangedDuringObservation(t *testing.T) {
 func TestRunpodTouchCommitsLifecyclePolicy(t *testing.T) {
 	b, lease, original, repo, clock := runpodLifecycleFixture(t)
 	lease, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	admitted, readErr := core.ReadLeaseClaim(lease.LeaseID)
 	snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
 	if readErr != nil || admitted.IdleTimeoutSeconds != 300 || !exists || !set || !reflect.DeepEqual(snapshot, admitted) {
