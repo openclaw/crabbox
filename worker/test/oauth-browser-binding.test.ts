@@ -173,11 +173,22 @@ function fetchCallCount(fetchMock: ReturnType<typeof vi.fn>, expectedURL: string
   }).length;
 }
 
-function runRetryDelayImmediately(): ReturnType<typeof vi.spyOn> {
-  return vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void) => {
+function runRetryDelayImmediately(): ReturnType<typeof vi.fn> {
+  const original = globalThis.setTimeout;
+  const retryDelay = vi.fn<(callback: () => void, delay: number) => number>((callback) => {
     callback();
     return 0;
+  });
+  vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => {
+    // Only collapse the OAuth retry delay; leave verification deadlines intact.
+    if (delay === 200) return retryDelay(() => callback(...args), delay);
+    return original(callback, delay, ...args);
   }) as typeof setTimeout);
+  return retryDelay;
 }
 
 afterEach(() => {

@@ -18,6 +18,7 @@
 
 ### Fixes
 
+- Bound GitHub membership verification to 15 seconds, including stalled response bodies and team pagination, so authentication fails closed without leaving shared checks stuck indefinitely.
 - Delete each new Scaleway lease's allocation-recorded root disk on release, preserve recovery state after cleanup failures, and leave later-attached and legacy untracked disks untouched. [PR 2468](https://github.com/openclaw/crabbox/pull/2468).
 - Preserve caller cancellation causes and timeout classification during Scaleway public-IP readiness without changing its five-minute budget or timeout exit code. [PR 2468](https://github.com/openclaw/crabbox/pull/2468).
 - Preserve reclaimed fixed leases during cleanup by distinguishing ownership-fence rejection from an admitted deletion in the shared engine. [PR 2462](https://github.com/openclaw/crabbox/pull/2462).

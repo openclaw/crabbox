@@ -5,6 +5,7 @@ const defaultMembershipCacheSeconds = 5 * 60;
 const maxMembershipCacheSeconds = 60 * 60;
 const maxGitHubTeamPages = 10;
 const membershipCacheMaxEntries = 1024;
+const membershipVerificationTimeoutMS = 15_000;
 
 interface GitHubTeam {
   slug?: string;
@@ -51,6 +52,58 @@ export type GitHubMembershipEnv = Pick<
 const membershipCache = new Map<string, number>();
 const membershipLoads = new Map<string, Promise<void>>();
 
+class GitHubMembershipDeadline {
+  private readonly controller = new AbortController();
+  private readonly timer: ReturnType<typeof setTimeout>;
+  private readonly expired: Promise<never>;
+
+  constructor() {
+    let expire!: (error: GitHubTransientError) => void;
+    this.expired = new Promise((_, reject) => {
+      expire = reject;
+    });
+    this.timer = setTimeout(() => {
+      const error = new GitHubTransientError("GitHub membership verification timed out.");
+      expire(error);
+      this.controller.abort(error);
+    }, membershipVerificationTimeoutMS);
+  }
+
+  async wait<T>(operation: () => Promise<T>): Promise<T> {
+    this.controller.signal.throwIfAborted();
+    return await Promise.race([operation(), this.expired]);
+  }
+
+  fetch(path: string, accessToken: string): Promise<Response> {
+    return this.wait(() =>
+      fetch(`${githubAPIURL}${path}`, {
+        headers: githubHeaders(accessToken),
+        signal: this.controller.signal,
+      }),
+    );
+  }
+
+  json<T>(response: Response): Promise<T> {
+    return this.wait(() => response.json() as Promise<T>);
+  }
+
+  close(): void {
+    clearTimeout(this.timer);
+    this.controller.abort();
+  }
+}
+
+async function withMembershipDeadline<T>(
+  operation: (deadline: GitHubMembershipDeadline) => Promise<T>,
+): Promise<T> {
+  const deadline = new GitHubMembershipDeadline();
+  try {
+    return await deadline.wait(() => operation(deadline));
+  } finally {
+    deadline.close();
+  }
+}
+
 export async function requireGitHubLoginMembership(
   accessToken: string,
   identity: Pick<GitHubMembershipIdentity, "owner" | "login">,
@@ -68,7 +121,9 @@ export async function requireGitHubLoginMembership(
     throw new GitHubAuthorizationError("GitHub login is not configured with an allowed org.");
   }
   const policy = githubMembershipPolicy({ ...identity, org }, env);
-  return requireExactGitHubMembership(accessToken, identity.login, policy);
+  return withMembershipDeadline((deadline) =>
+    requireExactGitHubMembership(accessToken, identity.login, policy, deadline),
+  );
 }
 
 export async function requireCurrentGitHubMembership(
@@ -87,8 +142,10 @@ export async function requireCurrentGitHubMembership(
   if (loading) {
     return loading;
   }
-  const load = requireExactGitHubAccount(identity.accessToken, identity.owner, identity.login)
-    .then(() => requireExactGitHubMembership(identity.accessToken, identity.login, policy))
+  const load = withMembershipDeadline(async (deadline) => {
+    await requireExactGitHubAccount(identity.accessToken, identity.owner, identity.login, deadline);
+    await requireExactGitHubMembership(identity.accessToken, identity.login, policy, deadline);
+  })
     .then(() => {
       const ttlSeconds = membershipCacheSeconds(env);
       if (ttlSeconds > 0) {
@@ -108,8 +165,10 @@ export async function requireFreshGitHubMembership(
   normalizedPolicy?: GitHubMembershipPolicy,
 ): Promise<void> {
   const policy = normalizedPolicy ?? githubMembershipPolicy(identity, env);
-  await requireExactGitHubAccount(identity.accessToken, identity.owner, identity.login);
-  await requireExactGitHubMembership(identity.accessToken, identity.login, policy);
+  await withMembershipDeadline(async (deadline) => {
+    await requireExactGitHubAccount(identity.accessToken, identity.owner, identity.login, deadline);
+    await requireExactGitHubMembership(identity.accessToken, identity.login, policy, deadline);
+  });
 }
 
 export function githubMembershipPolicy(
@@ -173,6 +232,7 @@ async function requireExactGitHubAccount(
   accessToken: string,
   owner: string,
   login: string,
+  deadline: GitHubMembershipDeadline,
 ): Promise<void> {
   const expectedID = githubAccountID(owner);
   if (expectedID === undefined) {
@@ -180,14 +240,15 @@ async function requireExactGitHubAccount(
       "This GitHub session uses a legacy mutable identity. Log in again.",
     );
   }
-  const response = await fetch(`${githubAPIURL}/user`, { headers: githubHeaders(accessToken) });
+  const response = await deadline.fetch("/user", accessToken);
   if (!response.ok) {
     throw await githubResponseError(
       response,
       `Could not verify GitHub user ${login}: GitHub returned ${response.status}.`,
+      deadline,
     );
   }
-  const user = (await response.json()) as GitHubUser;
+  const user = await deadline.json<GitHubUser>(response);
   if (typeof user.id !== "number" || !Number.isSafeInteger(user.id) || user.id !== expectedID) {
     throw new GitHubAuthorizationError("The GitHub credential no longer matches this session.");
   }
@@ -204,28 +265,30 @@ async function requireExactGitHubMembership(
   accessToken: string,
   login: string,
   policy: GitHubMembershipPolicy,
+  deadline: GitHubMembershipDeadline,
 ): Promise<string> {
   const exactOrg = policy.org;
-  const response = await fetch(
-    `${githubAPIURL}/user/memberships/orgs/${encodeURIComponent(exactOrg)}`,
-    { headers: githubHeaders(accessToken) },
+  const response = await deadline.fetch(
+    `/user/memberships/orgs/${encodeURIComponent(exactOrg)}`,
+    accessToken,
   );
   if (!response.ok) {
     throw await githubResponseError(
       response,
       `GitHub user ${login} is not an active member of ${exactOrg}.`,
+      deadline,
     );
   }
-  const membership = (await response.json()) as {
+  const membership = await deadline.json<{
     state?: string;
     organization?: { login?: string };
-  };
+  }>(response);
   if (membership.state !== "active" || membership.organization?.login?.toLowerCase() !== exactOrg) {
     throw new GitHubAuthorizationError(
       `GitHub user ${login} is not an active member of ${exactOrg}.`,
     );
   }
-  await requireAllowedTeamMembership(accessToken, login, policy);
+  await requireAllowedTeamMembership(accessToken, login, policy, deadline);
   return membership.organization.login || exactOrg;
 }
 
@@ -233,10 +296,11 @@ async function requireAllowedTeamMembership(
   accessToken: string,
   login: string,
   policy: GitHubMembershipPolicy,
+  deadline: GitHubMembershipDeadline,
 ): Promise<void> {
   if (policy.allowedTeams.length === 0) return;
   const allowedKeys = new Set(policy.allowedTeams);
-  for (const team of await userGitHubTeams(accessToken)) {
+  for (const team of await userGitHubTeams(accessToken, deadline)) {
     const teamOrg = team.organization?.login?.toLowerCase() ?? "";
     const teamSlug = team.slug?.toLowerCase() ?? "";
     if (teamOrg && teamSlug && allowedKeys.has(teamKey(teamOrg, teamSlug))) return;
@@ -292,22 +356,24 @@ function invalidAllowedTeamConfig(): GitHubAuthorizationError {
   );
 }
 
-async function userGitHubTeams(accessToken: string): Promise<GitHubTeam[]> {
+async function userGitHubTeams(
+  accessToken: string,
+  deadline: GitHubMembershipDeadline,
+): Promise<GitHubTeam[]> {
   const teams: GitHubTeam[] = [];
   for (let page = 1; page <= maxGitHubTeamPages; page += 1) {
     // oxlint-disable-next-line eslint/no-await-in-loop -- each page determines whether another exists.
-    const response = await fetch(`${githubAPIURL}/user/teams?per_page=100&page=${page}`, {
-      headers: githubHeaders(accessToken),
-    });
+    const response = await deadline.fetch(`/user/teams?per_page=100&page=${page}`, accessToken);
     if (!response.ok) {
       // oxlint-disable-next-line eslint/no-await-in-loop -- classify the current page response before advancing.
       throw await githubResponseError(
         response,
         `Could not verify GitHub team membership: GitHub returned ${response.status}.`,
+        deadline,
       );
     }
     // oxlint-disable-next-line eslint/no-await-in-loop -- parse the current page before continuing.
-    const pageTeams = (await response.json()) as GitHubTeam[];
+    const pageTeams = await deadline.json<GitHubTeam[]>(response);
     teams.push(...pageTeams);
     if (pageTeams.length < 100) return teams;
   }
@@ -366,7 +432,11 @@ function githubHeaders(accessToken: string): Record<string, string> {
   };
 }
 
-async function githubResponseError(response: Response, message: string): Promise<Error> {
+async function githubResponseError(
+  response: Response,
+  message: string,
+  deadline: GitHubMembershipDeadline,
+): Promise<Error> {
   if (response.status === 429 || response.status >= 500) {
     return new GitHubTransientError(message);
   }
@@ -376,7 +446,7 @@ async function githubResponseError(response: Response, message: string): Promise
   const sso = response.headers.get("x-github-sso")?.trim().toLowerCase() ?? "";
   if (/^required(?:;|$)/.test(sso)) return new GitHubCredentialError(message);
 
-  const details = await githubErrorDetails(response);
+  const details = await githubErrorDetails(response, deadline);
   return github403RequiresReauthentication(details)
     ? new GitHubCredentialError(message)
     : new GitHubAuthorizationError(message);
@@ -384,9 +454,10 @@ async function githubResponseError(response: Response, message: string): Promise
 
 async function githubErrorDetails(
   response: Response,
+  deadline: GitHubMembershipDeadline,
 ): Promise<{ message: string; documentationURL: string }> {
   try {
-    const body = (await response.json()) as { message?: unknown; documentation_url?: unknown };
+    const body = await deadline.json<{ message?: unknown; documentation_url?: unknown }>(response);
     return {
       message: typeof body.message === "string" ? body.message.trim().toLowerCase() : "",
       documentationURL:
@@ -394,7 +465,8 @@ async function githubErrorDetails(
           ? body.documentation_url.trim().toLowerCase()
           : "",
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof GitHubTransientError) throw error;
     return { message: "", documentationURL: "" };
   }
 }

@@ -1,8 +1,16 @@
+import { once } from "node:events";
+import { createServer } from "node:http";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { authenticateRequest, issueUserToken } from "../src/auth";
-import { prepareCoordinatorRequest } from "../src/coordinator-entry";
-import { githubMembershipPolicy, requireFreshGitHubMembership } from "../src/github-membership";
+import { prepareCoordinatorRequest, routeCoordinatorRequest } from "../src/coordinator-entry";
+import {
+  GitHubTransientError,
+  githubMembershipPolicy,
+  requireCurrentGitHubMembership,
+  requireFreshGitHubMembership,
+} from "../src/github-membership";
 import type { Env } from "../src/types";
 
 const accessToken = "github-access-token-for-tests";
@@ -86,9 +94,227 @@ function membershipFetch(): ReturnType<typeof vi.fn> {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("GitHub user-token membership", () => {
+  it("bounds a stalled GitHub request to the complete verification deadline", async () => {
+    vi.useFakeTimers();
+    let finishRequest!: (response: Response) => void;
+    const stalled = new Promise<Response>((resolve) => {
+      finishRequest = resolve;
+    });
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockReturnValueOnce(stalled)
+      .mockResolvedValue(membershipResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    let outcome = "pending";
+    const operation = requireFreshGitHubMembership(teamIdentity(), testEnv()).then(
+      () => {
+        outcome = "authorized";
+        return undefined;
+      },
+      (error: unknown) => {
+        outcome = error instanceof GitHubTransientError ? "timeout" : "other";
+        return undefined;
+      },
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(outcome).toBe("timeout");
+    } finally {
+      finishRequest(userResponse());
+      await operation;
+    }
+  });
+
+  it.each([200, 403])(
+    "bounds a stalled %i response body without reclassifying expiry",
+    async (status) => {
+      vi.useFakeTimers();
+      let finishBody!: () => void;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          finishBody = () => {
+            controller.enqueue(new TextEncoder().encode(JSON.stringify({ id: accountID })));
+            controller.close();
+          };
+        },
+      });
+      const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(body, { status }));
+      vi.stubGlobal("fetch", fetchMock);
+      const operation = requireFreshGitHubMembership(teamIdentity(), testEnv());
+      const rejected = operation.catch((error: unknown) => error);
+      try {
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(await rejected).toBeInstanceOf(GitHubTransientError);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        finishBody();
+        await operation.catch(() => {});
+      }
+    },
+  );
+
+  it("aborts the real HTTP transport when GitHub sends headers but stalls its JSON body", async () => {
+    const nativeFetch = fetch;
+    let connectionClosed = false;
+    const server = createServer((_request, response) => {
+      response.on("close", () => {
+        connectionClosed = true;
+      });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write('{"id":');
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("loopback server required");
+    let headersReceived!: () => void;
+    const received = new Promise<void>((resolve) => {
+      headersReceived = resolve;
+    });
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        expect(url.origin).toBe("https://api.github.com");
+        const response = await nativeFetch(`http://127.0.0.1:${address.port}${url.pathname}`, init);
+        headersReceived();
+        return response;
+      }),
+    );
+    const operation = requireFreshGitHubMembership(teamIdentity(), testEnv());
+    const rejected = operation.catch((error: unknown) => error);
+    try {
+      await received;
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(await rejected).toBeInstanceOf(GitHubTransientError);
+      vi.useRealTimers();
+      await vi.waitFor(() => expect(connectionClosed).toBe(true));
+    } finally {
+      vi.useRealTimers();
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it("shares one deadline across team pages rather than restarting the budget", async () => {
+    vi.useFakeTimers();
+    const env = testEnv({ CRABBOX_GITHUB_ALLOWED_TEAMS: "example-org/operators" });
+    const fetchMock = vi.fn<(input: RequestInfo | URL) => Promise<Response>>(async (input) => {
+      if (String(input).endsWith("/user")) return userResponse();
+      if (String(input).includes("/memberships/")) return membershipResponse();
+      return await new Promise((resolve) =>
+        setTimeout(
+          () =>
+            resolve(
+              Response.json(
+                Array.from({ length: 100 }, () => ({
+                  slug: "other",
+                  organization: { login: "example-org" },
+                })),
+              ),
+            ),
+          4_000,
+        ),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const operation = requireFreshGitHubMembership(teamIdentity(), env);
+    const rejected = operation.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(await rejected).toBeInstanceOf(GitHubTransientError);
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input).includes("/user/teams?")),
+    ).toHaveLength(4);
+    await vi.runOnlyPendingTimersAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("releases shared checks after expiry and never caches their late success", async () => {
+    vi.useFakeTimers();
+    const env = testEnv({ CRABBOX_GITHUB_MEMBERSHIP_CACHE_SECONDS: "300" });
+    const identity = { ...teamIdentity(), tokenID: "deadline-shared-membership" };
+    let finishRequest!: (response: Response) => void;
+    const stalled = new Promise<Response>((resolve) => {
+      finishRequest = resolve;
+    });
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockReturnValueOnce(stalled)
+      .mockImplementation(async (input: RequestInfo | URL) =>
+        String(input).endsWith("/user") ? userResponse() : membershipResponse(),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const outcomes = Promise.allSettled([
+      requireCurrentGitHubMembership(identity, env),
+      requireCurrentGitHubMembership(identity, env),
+    ]);
+    await vi.advanceTimersByTimeAsync(15_000);
+    for (const result of await outcomes) {
+      expect(result).toMatchObject({
+        status: "rejected",
+        reason: expect.any(GitHubTransientError),
+      });
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    finishRequest(userResponse());
+    await vi.advanceTimersByTimeAsync(0);
+    await requireCurrentGitHubMembership(identity, env);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await requireCurrentGitHubMembership(identity, env);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rejects create and cancellation requests without reaching the coordinator after auth expiry", async () => {
+    const env = testEnv();
+    const token = await testToken(env);
+    vi.useFakeTimers();
+    let finishRequest!: (response: Response) => void;
+    let requestStarted!: () => void;
+    let membershipChecks = 0;
+    const started = new Promise<void>((resolve) => {
+      requestStarted = resolve;
+    });
+    const stalled = new Promise<Response>((resolve) => {
+      finishRequest = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => stalled),
+    );
+    const downstream = vi.fn<() => Promise<Response>>(async () =>
+      Response.json({ unexpected: true }),
+    );
+    const requests = Promise.all(
+      ["/v1/leases", "/v1/leases/cbx_000000000001/cancel-create"].map((path) =>
+        routeCoordinatorRequest(tokenRequest(token, path, "POST"), env, downstream, {
+          githubMembership(identity, membershipEnv) {
+            const check = requireCurrentGitHubMembership(identity, membershipEnv);
+            if (++membershipChecks === 2) requestStarted();
+            return check;
+          },
+        }),
+      ),
+    );
+    try {
+      await started;
+      await vi.advanceTimersByTimeAsync(15_000);
+      for (const response of await requests) expect(response.status).toBe(401);
+      expect(downstream).not.toHaveBeenCalled();
+    } finally {
+      finishRequest(userResponse());
+      await requests;
+    }
+  });
+
   it("encrypts the GitHub credential inside the signed user token", async () => {
     const token = await testToken(testEnv());
     const encoded = token.slice("cbxu_".length).split(".", 1)[0]!;
