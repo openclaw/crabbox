@@ -23,6 +23,21 @@ func (b absenceTestBackend) VerifyResourceAbsent(ctx context.Context, claim Leas
 }
 func (b absenceTestBackend) ReconcileAbsenceOnOrdinaryStop() bool { return b.ordinary }
 
+func TestStopAbsenceRecoveryRoutesFixedOrdinary(t *testing.T) {
+	isolateTestUserDirs(t)
+	claim := LeaseClaim{LeaseID: "cbx_abcdef123412", Provider: "absence-test", FixedCreateIntent: &FixedCreateIntent{State: "acquired"}}
+	if err := WithDurableLeaseClaimLock(claim.LeaseID, func(c *LeaseClaim, _ bool, persist func() error) error { *c = claim; return persist() }); err != nil {
+		t.Fatal(err)
+	}
+	backend := absenceTestBackend{testDelegatedBackend: testDelegatedBackend{spec: ProviderSpec{Name: claim.Provider}}, ordinary: true, verify: func(context.Context, LeaseClaim) (AbsenceEvidence, error) {
+		t.Fatal("fixed lease reached ordinary absence recovery")
+		return AbsenceEvidence{}, nil
+	}}
+	if handled, verified, err := (App{}).recoverAbsentStopClaim(t.Context(), backend, claim.LeaseID, false); handled || verified || err != nil {
+		t.Fatalf("fixed release not routed to its engine: handled=%t verified=%t err=%v", handled, verified, err)
+	}
+}
+
 func TestStopAbsenceRecovery(t *testing.T) {
 	for _, name := range []string{"absent", "partial inventory", "auth error", "mismatched ID", "mismatched scope", "mismatched revision", "mismatched immutable ID", "fixed", "checkpoint", "checkpoint journal", "coordinator", "adapter", "pending adapter", "ordinary opt in", "ordinary fail closed", "live", "cancelled"} {
 		t.Run(name, func(t *testing.T) {

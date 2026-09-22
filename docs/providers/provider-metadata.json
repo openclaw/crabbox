@@ -77,10 +77,10 @@
     "ssh": "crabbox-managed",
     "sync": "crabbox-sync",
     "gpu": "unknown",
-    "lifecycle": "provider CLI",
+    "lifecycle": "provider CLI; keyed API fixed lease IDs",
     "cleanup": "provider delete",
     "bestFit": "Managed Linux box over SSH, selectable as boat",
-    "caveat": "Requires the Boat (formerly ASCII Box) CLI and account",
+    "caveat": "Requires Boat/Box CLI; fixed IDs allow one keyed recovery within 24h; no account attestation",
     "auth": "API key via ASCII_BOX_API_KEY or CRABBOX_ASCII_BOX_API_KEY; Boat/Box CLI config; direct remote SSH lease",
     "docs": "ascii-box.md"
   },

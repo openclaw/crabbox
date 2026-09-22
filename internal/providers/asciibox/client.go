@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -24,6 +25,7 @@ import (
 type api interface {
 	Check(context.Context) error
 	CreateBox(context.Context, createRequest) (boxData, error)
+	waitForBoxReady(context.Context, boxData) (boxData, error)
 	PrepareSSH(context.Context, string) error
 	GetBox(context.Context, string) (boxData, error)
 	ListBoxes(context.Context, bool) ([]boxData, error)
@@ -38,6 +40,7 @@ type client struct {
 	cliPath             string
 	home                string
 	runner              core.CommandRunner
+	http                *http.Client
 	releasePollInterval time.Duration
 }
 
@@ -45,7 +48,8 @@ type client struct {
 const boxCommandOutputLimit = 8 << 20
 
 type createRequest struct {
-	TTL time.Duration
+	TTL            time.Duration
+	IdempotencyKey string
 }
 
 type boxIdentityError struct{ id string }
@@ -97,7 +101,7 @@ var newAPI = func(cfg core.Config, rt core.Runtime) (api, error) {
 		return nil, core.Exit(2, "provider=%s requires a local command runner", providerName)
 	}
 	cliPath := resolveAsciiBoxCLI(strings.TrimSpace(cfg.AsciiBox.CLIPath))
-	return &client{apiKey: apiKey, apiURL: apiURL, org: asciiBoxOrg(), cliPath: cliPath, home: asciiBoxCLIHome(), runner: rt.Exec}, nil
+	return &client{apiKey: apiKey, apiURL: apiURL, org: asciiBoxOrg(), cliPath: cliPath, home: asciiBoxCLIHome(), runner: rt.Exec, http: rt.HTTP}, nil
 }
 
 func validateAsciiBoxBaseURL(raw string) (string, error) {
@@ -150,6 +154,9 @@ func isAsciiBoxLoopbackHost(hostname string) bool {
 }
 
 func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, error) {
+	if req.IdempotencyKey != "" {
+		return c.createKeyedBox(ctx, req)
+	}
 	args := []string{"new"}
 	if req.TTL > 0 {
 		args = append(args, "--ttl", fmt.Sprintf("%d", int(req.TTL.Round(time.Second).Seconds())))

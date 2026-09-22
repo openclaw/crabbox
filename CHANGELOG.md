@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add replay-safe ASCII Box (Boat) fixed lease IDs with durable keyed creation, one recovery submission within the native 24-hour window, exact-ID adoption, and single-use release tombstones through the shared engine. [Issue 1747](https://github.com/openclaw/crabbox/issues/1747). Thanks @shunkakinoki.
+
 ### Changed
 
 - Consolidate built-in fixed-lease admission, attempt codecs, claim binding, recovery policy, and terminal receipts in a shared engine; preserve native identity proofs and existing local records while retaining the external provider’s delegated protocol.
