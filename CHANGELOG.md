@@ -10,6 +10,7 @@
 
 - Reuse the shared sandbox status projection for Cloud Run Sandbox without changing ownership probes, expiry rules, or public labels. [PR 2476](https://github.com/openclaw/crabbox/pull/2476).
 - Consolidate built-in fixed-lease admission, attempt codecs, claim binding, recovery policy, and terminal receipts in a shared engine; preserve native identity proofs and existing local records while retaining the external provider’s delegated protocol.
+- Move AWS and Hetzner provisioning-failure interpretation behind provider adapters while retaining coordinator-owned cleanup, cancellation, and retry decisions.
 - Share RunPod and Vast lease-reuse admission while preserving read-only observations, stale-claim rejection, and recorded idle-timeout policy. [PR 2469](https://github.com/openclaw/crabbox/pull/2469).
 - Share AWS and Azure endpoint-refresh identity policy while preserving recorded cleanup authority and legacy-claim behavior. [PR 2470](https://github.com/openclaw/crabbox/pull/2470).
 - Share E2B and CubeSandbox's claim-fenced deletion transaction while preserving endpoint-bound ownership checks, provider errors, and not-found recovery. [PR 2474](https://github.com/openclaw/crabbox/pull/2474).
