@@ -80,6 +80,18 @@ func applyConfigEnvironmentField(dst reflect.Value, tags reflect.StructTag) (boo
 		}
 		return accepted, nil
 	case reflect.Int, reflect.Int64:
+		if tags.Get("envInt") == "checked-signed-alias" {
+			raw, accepted := firstNonEmptyEnv(name, alias)
+			if !accepted {
+				return false, nil
+			}
+			value, err := strconv.Atoi(raw)
+			if err != nil {
+				return false, Exit(2, "invalid %s %q", tags.Get("envIntErrorLabel"), raw)
+			}
+			dst.SetInt(int64(value))
+			return true, nil
+		}
 		if tags.Get("envInt") == "fallback" {
 			bits := 64
 			if dst.Kind() == reflect.Int {

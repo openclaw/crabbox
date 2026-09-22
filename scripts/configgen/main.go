@@ -23,6 +23,7 @@ type field struct {
 	flagListAppendRaw                                                                                                                                                            bool
 	fileListPresentNormalized                                                                                                                                                    bool
 	envIntCheckedAlias                                                                                                                                                           bool
+	envIntCheckedSignedAlias                                                                                                                                                     bool
 	envSplitBefore                                                                                                                                                               bool
 	flagDurationRawPositive                                                                                                                                                      bool
 	fileListNonemptyNormalized, envListTrimmedNonempty, flagListCSV                                                                                                              bool
@@ -401,17 +402,32 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			}
 			f.envAliasAfterConfig = true
 		}
+		if tags.Get("envInt") == "checked-signed-alias" {
+			if f.kind != "int" || f.noEnv || !hasAlias || hasAlias2 {
+				return s, fmt.Errorf("%s: envInt checked-signed-alias requires an environment-admitted int with exactly one envAlias", f.name)
+			}
+			if _, ok := tags.Lookup("nonnegative"); ok {
+				return s, fmt.Errorf("%s: checked-signed-alias cannot use nonnegative policy", f.name)
+			}
+			label := tags.Get("envIntErrorLabel")
+			if label == "" || strings.TrimSpace(label) != label || strings.ContainsAny(label, "\r\n") {
+				return s, fmt.Errorf("%s: checked-signed-alias requires a nonempty single-line envIntErrorLabel", f.name)
+			}
+			f.envIntCheckedSignedAlias = true
+		} else if _, ok := tags.Lookup("envIntErrorLabel"); ok {
+			return s, fmt.Errorf("%s: envIntErrorLabel requires checked-signed-alias", f.name)
+		}
 		if value, ok := tags.Lookup("nonnegative"); ok {
 			if (f.kind != "int" && f.kind != "int64") || value != "true" {
 				return s, fmt.Errorf("%s: nonnegative is supported only as true for int fields or int64 fields", f.name)
 			}
 			f.nonnegative = true
 		}
-		if (f.kind == "int" || f.kind == "int64") && !f.nonnegative {
+		if (f.kind == "int" || f.kind == "int64") && !f.nonnegative && !f.envIntCheckedSignedAlias {
 			return s, fmt.Errorf("%s: pilot int fields require nonnegative policy", f.name)
 		}
 		if value, ok := tags.Lookup("fileInt"); ok {
-			if (value != "positive" && value != "present" && value != "nonzero") || (f.kind != "int" && f.kind != "int64") || f.noFile || !f.nonnegative {
+			if (value != "positive" && value != "present" && value != "nonzero") || (f.kind != "int" && f.kind != "int64") || f.noFile || (!f.nonnegative && !(f.envIntCheckedSignedAlias && value == "positive")) {
 				return s, fmt.Errorf("%s: fileInt is supported only as positive, present, or nonzero for file-admitted nonnegative int fields", f.name)
 			}
 			f.fileIntPositive = value == "positive"
@@ -430,7 +446,9 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 			}
 		}
 		if value, ok := tags.Lookup("envInt"); ok {
-			if value == "checked-alias" {
+			if value == "checked-signed-alias" {
+				// Admission and the literal diagnostic label were checked above.
+			} else if value == "checked-alias" {
 				if f.kind != "int" || !f.nonnegative || f.noEnv || !hasAlias || hasAlias2 {
 					return s, fmt.Errorf("%s: envInt checked-alias requires an environment-admitted nonnegative int with exactly one envAlias", f.name)
 				}
@@ -444,7 +462,7 @@ func parseSchema(source []byte, name, provider string) (schema, error) {
 		if f.kind == "int64" && !f.noEnv && !f.envIntFallback {
 			return s, fmt.Errorf("%s: int64 environment fields require envInt fallback", f.name)
 		}
-		if hasAlias && f.kind != "string" && !(f.kind == "bool" && !f.noEnv) && !(f.kind == "int" && !f.noEnv && (f.envIntFallback || f.envIntCheckedAlias)) {
+		if hasAlias && f.kind != "string" && !(f.kind == "bool" && !f.noEnv) && !(f.kind == "int" && !f.noEnv && (f.envIntFallback || f.envIntCheckedAlias || f.envIntCheckedSignedAlias)) {
 			return s, fmt.Errorf("%s: envAlias is supported only for string fields, environment-admitted bool fields, or int fields with envInt fallback or checked-alias", f.name)
 		}
 		if value, ok := tags.Lookup("flagFallback"); ok {

@@ -425,18 +425,6 @@ type ExternalDesktopConfig struct {
 	PasswordEnv string `yaml:"passwordEnv,omitempty" json:"passwordEnv,omitempty"`
 }
 
-type CubeSandboxConfig struct {
-	APIKey        string
-	APIURL        string
-	Domain        string
-	Template      string
-	Workdir       string
-	User          string
-	ProxyNodeIP   string
-	ProxyPortHTTP int
-	ProxyScheme   string
-}
-
 const (
 	AzureBackendVM              = "vm"
 	AzureBackendDynamicSessions = "dynamic-sessions"
@@ -1655,13 +1643,7 @@ func baseConfig() Config {
 		Orgo:              defaultOrgoConfig(),
 		Daytona:           defaultDaytonaConfig(),
 		E2B:               defaultE2BConfig(),
-		CubeSandbox: CubeSandboxConfig{
-			APIURL:        "http://127.0.0.1:3000",
-			Domain:        "cube.app",
-			Template:      "",
-			Workdir:       "crabbox",
-			ProxyPortHTTP: 80,
-		},
+		CubeSandbox:       defaultCubeSandboxConfig(),
 		ExeDev:            defaultExeDevConfig(),
 		Railway:           defaultRailwayConfig(),
 		FastAPICloud:      defaultFastAPICloudConfig(),
@@ -2031,17 +2013,6 @@ type fileExternalConfig struct {
 	Connection   *ExternalConnectionConfig   `yaml:"connection,omitempty"`
 	WorkRoot     string                      `yaml:"workRoot,omitempty"`
 	RoutingFile  string                      `yaml:"routingFile,omitempty"`
-}
-
-type fileCubeSandboxConfig struct {
-	APIURL        string `yaml:"apiUrl,omitempty"`
-	Domain        string `yaml:"domain,omitempty"`
-	Template      string `yaml:"template,omitempty"`
-	Workdir       string `yaml:"workdir,omitempty"`
-	User          string `yaml:"user,omitempty"`
-	ProxyNodeIP   string `yaml:"proxyNodeIp,omitempty"`
-	ProxyPortHTTP int    `yaml:"proxyPortHttp,omitempty"`
-	ProxyScheme   string `yaml:"proxyScheme,omitempty"`
 }
 
 type fileAsciiBoxConfig struct {
@@ -3321,34 +3292,26 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.CubeSandbox != nil {
-		if file.CubeSandbox.APIURL != "" {
-			cfg.CubeSandbox.APIURL = file.CubeSandbox.APIURL
-			recordConfigInput(cfg, "cubesandbox", inputSource, true)
+	{
+		applied, err := cfg.CubeSandbox.applyFile(file.CubeSandbox)
+		recordConfigInput(cfg, "cubesandbox", inputSource, applied.InputAccepted)
+		if applied.APIURL {
 			cfg.credentialProvenance.cubeSandboxAPIURL = credentialSource
 		}
-		if file.CubeSandbox.Domain != "" {
-			cfg.CubeSandbox.Domain = file.CubeSandbox.Domain
-			recordConfigInput(cfg, "cubesandbox", inputSource, true)
+		if applied.Domain {
 			cfg.credentialProvenance.cubeSandboxDomain = credentialSource
 		}
-		configInputFileString(cfg, "cubesandbox", inputSource, &cfg.CubeSandbox.Template, file.CubeSandbox.Template)
-		configInputFileString(cfg, "cubesandbox", inputSource, &cfg.CubeSandbox.Workdir, file.CubeSandbox.Workdir)
-		configInputFileString(cfg, "cubesandbox", inputSource, &cfg.CubeSandbox.User, file.CubeSandbox.User)
-		if file.CubeSandbox.ProxyNodeIP != "" {
-			cfg.CubeSandbox.ProxyNodeIP = file.CubeSandbox.ProxyNodeIP
-			recordConfigInput(cfg, "cubesandbox", inputSource, true)
+		if applied.ProxyNodeIP {
 			cfg.credentialProvenance.cubeSandboxProxyNode = credentialSource
 		}
-		if file.CubeSandbox.ProxyPortHTTP > 0 {
-			cfg.CubeSandbox.ProxyPortHTTP = file.CubeSandbox.ProxyPortHTTP
-			recordConfigInput(cfg, "cubesandbox", inputSource, true)
+		if applied.ProxyPortHTTP {
 			cfg.credentialProvenance.cubeSandboxProxyPort = credentialSource
 		}
-		if file.CubeSandbox.ProxyScheme != "" {
-			cfg.CubeSandbox.ProxyScheme = file.CubeSandbox.ProxyScheme
-			recordConfigInput(cfg, "cubesandbox", inputSource, true)
+		if applied.ProxyScheme {
 			cfg.credentialProvenance.cubeSandboxProxyProto = credentialSource
+		}
+		if err != nil {
+			return err
 		}
 	}
 	{
@@ -4601,41 +4564,27 @@ func applyEnv(cfg *Config) error {
 			return err
 		}
 	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_API_KEY", "CUBE_API_KEY", "E2B_API_KEY"); ok {
-		cfg.CubeSandbox.APIKey = value
-		recordConfigInput(cfg, "cubesandbox", configInputEnvironment, true)
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_API_URL", "CUBE_API_URL", "E2B_API_URL"); ok {
-		cfg.CubeSandbox.APIURL = value
-		recordConfigInput(cfg, "cubesandbox", configInputEnvironment, true)
-		cfg.credentialProvenance.cubeSandboxAPIURL = credentialSourceEnvironment
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_DOMAIN", "CUBE_SANDBOX_DOMAIN"); ok {
-		cfg.CubeSandbox.Domain = value
-		recordConfigInput(cfg, "cubesandbox", configInputEnvironment, true)
-		cfg.credentialProvenance.cubeSandboxDomain = credentialSourceEnvironment
-	}
-	cfg.CubeSandbox.Template = configInputEnvString(cfg, "cubesandbox", cfg.CubeSandbox.Template, "CRABBOX_CUBESANDBOX_TEMPLATE", "CUBE_TEMPLATE_ID")
-	cfg.CubeSandbox.Workdir = configInputEnvString(cfg, "cubesandbox", cfg.CubeSandbox.Workdir, "CRABBOX_CUBESANDBOX_WORKDIR")
-	cfg.CubeSandbox.User = configInputEnvString(cfg, "cubesandbox", cfg.CubeSandbox.User, "CRABBOX_CUBESANDBOX_USER")
-	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_PROXY_NODE_IP", "CUBE_PROXY_NODE_IP"); ok {
-		cfg.CubeSandbox.ProxyNodeIP = value
-		recordConfigInput(cfg, "cubesandbox", configInputEnvironment, true)
-		cfg.credentialProvenance.cubeSandboxProxyNode = credentialSourceEnvironment
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_PROXY_PORT_HTTP", "CUBE_PROXY_PORT_HTTP"); ok {
-		port, err := strconv.Atoi(value)
-		if err != nil {
-			return Exit(2, "invalid cubesandbox proxy HTTP port %q", value)
+	{
+		applied, err := cfg.CubeSandbox.applyEnv()
+		recordConfigInput(cfg, "cubesandbox", configInputEnvironment, applied.InputAccepted)
+		if applied.APIURL {
+			cfg.credentialProvenance.cubeSandboxAPIURL = credentialSourceEnvironment
 		}
-		cfg.CubeSandbox.ProxyPortHTTP = port
-		recordConfigInput(cfg, "cubesandbox", configInputEnvironment, true)
-		cfg.credentialProvenance.cubeSandboxProxyPort = credentialSourceEnvironment
-	}
-	if value, ok := firstNonEmptyEnv("CRABBOX_CUBESANDBOX_PROXY_SCHEME", "CUBE_PROXY_SCHEME"); ok {
-		cfg.CubeSandbox.ProxyScheme = value
-		recordConfigInput(cfg, "cubesandbox", configInputEnvironment, true)
-		cfg.credentialProvenance.cubeSandboxProxyProto = credentialSourceEnvironment
+		if applied.Domain {
+			cfg.credentialProvenance.cubeSandboxDomain = credentialSourceEnvironment
+		}
+		if applied.ProxyNodeIP {
+			cfg.credentialProvenance.cubeSandboxProxyNode = credentialSourceEnvironment
+		}
+		if applied.ProxyPortHTTP {
+			cfg.credentialProvenance.cubeSandboxProxyPort = credentialSourceEnvironment
+		}
+		if applied.ProxyScheme {
+			cfg.credentialProvenance.cubeSandboxProxyProto = credentialSourceEnvironment
+		}
+		if err != nil {
+			return err
+		}
 	}
 	{
 		applied, err := cfg.ExeDev.applyEnv()

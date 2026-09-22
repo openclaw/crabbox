@@ -35,6 +35,18 @@ func (fn cubesandboxRoundTripFunc) RoundTrip(req *http.Request) (*http.Response,
 }
 
 func TestManualConfigInputFlags(t *testing.T) {
+	t.Run("sizing guard precedes value type assertion", func(t *testing.T) {
+		cfg := core.BaseConfig()
+		cfg.Provider = providerName
+		fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
+		fs.String("class", "", "machine class")
+		if err := fs.Set("class", "beast"); err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyCubeSandboxProviderFlags(&cfg, fs, struct{}{}); err == nil {
+			t.Fatal("foreign flag values bypassed explicit sizing rejection")
+		}
+	})
 	cfg := core.BaseConfig()
 	cfg.Provider = "fixture-other"
 	fs := flag.NewFlagSet("fixture", flag.ContinueOnError)
@@ -63,6 +75,18 @@ func TestManualConfigInputFlags(t *testing.T) {
 		if !reflect.DeepEqual(cfg, want) {
 			t.Fatal("accepted/equal flag value was not recorded")
 		}
+	}
+	if err := fs.Set("cubesandbox-template", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Set("cubesandbox-proxy-port-http", "-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyCubeSandboxProviderFlags(&cfg, fs, values); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CubeSandbox.Template != "" || cfg.CubeSandbox.ProxyPortHTTP != -1 {
+		t.Fatal("explicit empty string or signed flag port was rejected")
 	}
 }
 

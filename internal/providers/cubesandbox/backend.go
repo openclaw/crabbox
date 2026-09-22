@@ -14,32 +14,12 @@ import (
 	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
-type cubesandboxFlagValues struct {
-	APIURL        *string
-	Domain        *string
-	Template      *string
-	Workdir       *string
-	User          *string
-	ProxyNodeIP   *string
-	ProxyPortHTTP *int
-	ProxyScheme   *string
-}
-
 const cubesandboxCleanupTimeout = 30 * time.Second
 
 var sandboxViews = shared.EnvdSandboxViews{Provider: providerName, LeasePrefix: "cubesandbox_"}
 
 func RegisterCubeSandboxProviderFlags(fs *flag.FlagSet, defaults core.Config) any {
-	return cubesandboxFlagValues{
-		APIURL:        fs.String("cubesandbox-api-url", defaults.CubeSandbox.APIURL, "CubeSandbox API URL"),
-		Domain:        fs.String("cubesandbox-domain", defaults.CubeSandbox.Domain, "CubeSandbox sandbox domain"),
-		Template:      fs.String("cubesandbox-template", defaults.CubeSandbox.Template, "CubeSandbox sandbox template ID"),
-		Workdir:       fs.String("cubesandbox-workdir", defaults.CubeSandbox.Workdir, "CubeSandbox sandbox working directory"),
-		User:          fs.String("cubesandbox-user", defaults.CubeSandbox.User, "CubeSandbox sandbox user for command and file ownership"),
-		ProxyNodeIP:   fs.String("cubesandbox-proxy-node-ip", defaults.CubeSandbox.ProxyNodeIP, "CubeSandbox CubeProxy node IP or host for data-plane requests"),
-		ProxyPortHTTP: fs.Int("cubesandbox-proxy-port-http", defaults.CubeSandbox.ProxyPortHTTP, "CubeSandbox CubeProxy HTTP/HTTPS port"),
-		ProxyScheme:   fs.String("cubesandbox-proxy-scheme", defaults.CubeSandbox.ProxyScheme, "CubeSandbox CubeProxy scheme (http or https)"),
-	}
+	return core.RegisterCubeSandboxConfigFlags(fs, defaults.CubeSandbox)
 }
 
 func ApplyCubeSandboxProviderFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
@@ -48,43 +28,8 @@ func ApplyCubeSandboxProviderFlags(cfg *core.Config, fs *flag.FlagSet, values an
 			return err
 		}
 	}
-	v, ok := values.(cubesandboxFlagValues)
-	if !ok {
-		return nil
-	}
-	if core.FlagWasSet(fs, "cubesandbox-api-url") {
-		cfg.CubeSandbox.APIURL = *v.APIURL
-		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
-	}
-	if core.FlagWasSet(fs, "cubesandbox-domain") {
-		cfg.CubeSandbox.Domain = *v.Domain
-		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
-	}
-	if core.FlagWasSet(fs, "cubesandbox-template") {
-		cfg.CubeSandbox.Template = *v.Template
-		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
-	}
-	if core.FlagWasSet(fs, "cubesandbox-workdir") {
-		cfg.CubeSandbox.Workdir = *v.Workdir
-		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
-	}
-	if core.FlagWasSet(fs, "cubesandbox-user") {
-		cfg.CubeSandbox.User = *v.User
-		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
-	}
-	if core.FlagWasSet(fs, "cubesandbox-proxy-node-ip") {
-		cfg.CubeSandbox.ProxyNodeIP = *v.ProxyNodeIP
-		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
-	}
-	if core.FlagWasSet(fs, "cubesandbox-proxy-port-http") {
-		cfg.CubeSandbox.ProxyPortHTTP = *v.ProxyPortHTTP
-		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
-	}
-	if core.FlagWasSet(fs, "cubesandbox-proxy-scheme") {
-		cfg.CubeSandbox.ProxyScheme = *v.ProxyScheme
-		core.RecordProviderFlagInputs(cfg, true, "cubesandbox")
-	}
-	return nil
+	_, err := core.ApplyProviderConfigFlags[core.CubeSandboxConfigFlagValues](cfg, fs, values, &cfg.CubeSandbox, providerName)
+	return err
 }
 
 func NewCubeSandboxBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {

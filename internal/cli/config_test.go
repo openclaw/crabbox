@@ -3030,6 +3030,77 @@ func TestDockerSandboxConfigDefaultsFileAndEnv(t *testing.T) {
 	}
 }
 
+func TestCubeSandboxPortEnvironmentContract(t *testing.T) {
+	for _, tc := range []struct {
+		primary, alias string
+		want           int
+		invalid        bool
+	}{
+		{"", "", 81, false}, {"0", "82", 0, false}, {"-1", "82", -1, false},
+		{"", "-2", -2, false}, {"83", "bad", 83, false}, {"+84", "", 84, false},
+		{"bad", "82", 81, true}, {"", "bad", 81, true}, {" 80 ", "82", 81, true},
+		{"999999999999999999999999", "82", 81, true},
+	} {
+		t.Run(tc.primary+"/"+tc.alias, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("CRABBOX_CUBESANDBOX_PROXY_PORT_HTTP", tc.primary)
+			t.Setenv("CUBE_PROXY_PORT_HTTP", tc.alias)
+			t.Setenv("CRABBOX_CUBESANDBOX_API_URL", "http://127.0.0.1:3333")
+			t.Setenv("CRABBOX_CUBESANDBOX_PROXY_SCHEME", "https")
+			cfg := baseConfig()
+			cfg.CubeSandbox.ProxyPortHTTP = 81
+			cfg.CubeSandbox.ProxyScheme = "http"
+			cfg.credentialProvenance.cubeSandboxProxyPort = credentialSourceTrustedFile
+			cfg.credentialProvenance.cubeSandboxProxyProto = credentialSourceTrustedFile
+			err := applyEnv(&cfg)
+			if cfg.CubeSandbox.ProxyPortHTTP != tc.want || cfg.credentialProvenance.cubeSandboxAPIURL != credentialSourceEnvironment {
+				t.Fatalf("port or earlier provenance changed: port=%d provenance=%v", cfg.CubeSandbox.ProxyPortHTTP, cfg.credentialProvenance.cubeSandboxAPIURL)
+			}
+			if tc.invalid {
+				raw := tc.primary
+				if raw == "" {
+					raw = tc.alias
+				}
+				if err == nil || err.Error() != fmt.Sprintf("invalid cubesandbox proxy HTTP port %q", raw) || ExitCodeForError(err, 1) != 2 {
+					t.Fatalf("invalid port diagnostic changed: %v", err)
+				}
+				if cfg.CubeSandbox.ProxyScheme != "http" || cfg.credentialProvenance.cubeSandboxProxyProto != credentialSourceTrustedFile {
+					t.Fatal("later field applied after port failure")
+				}
+			} else if err != nil || cfg.CubeSandbox.ProxyScheme != "https" || cfg.credentialProvenance.cubeSandboxProxyProto != credentialSourceEnvironment {
+				t.Fatalf("later field not applied after accepted/absent port: %v", err)
+			}
+			wantSource := credentialSourceTrustedFile
+			if !tc.invalid && (tc.primary != "" || tc.alias != "") {
+				wantSource = credentialSourceEnvironment
+			}
+			if cfg.credentialProvenance.cubeSandboxProxyPort != wantSource {
+				t.Fatal("port provenance changed")
+			}
+		})
+	}
+}
+
+func TestCubeSandboxFilePositivePortContract(t *testing.T) {
+	for _, trusted := range []bool{false, true} {
+		for _, port := range []int{-1, 0, 81} {
+			cfg := baseConfig()
+			cfg.CubeSandbox.ProxyPortHTTP = 80
+			cfg.credentialProvenance.cubeSandboxProxyPort = credentialSourceEnvironment
+			if err := applyFileConfigWithTrust(&cfg, fileConfig{CubeSandbox: &fileCubeSandboxConfig{ProxyPortHTTP: port}}, trusted); err != nil {
+				t.Fatal(err)
+			}
+			want, source := 80, credentialSourceEnvironment
+			if port > 0 {
+				want, source = port, credentialSourceForFile(trusted)
+			}
+			if cfg.CubeSandbox.ProxyPortHTTP != want || cfg.credentialProvenance.cubeSandboxProxyPort != source {
+				t.Fatalf("file port=%d trusted=%t admission changed", port, trusted)
+			}
+		}
+	}
+}
+
 func TestE2BFileAcceptanceAndSource(t *testing.T) {
 	if _, ok := reflect.TypeOf(fileE2BConfig{}).FieldByName("APIKey"); ok {
 		t.Fatal("API key YAML field introduced")

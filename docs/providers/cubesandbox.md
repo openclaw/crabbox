@@ -97,6 +97,14 @@ from repository-local config because the Cube API selects the envd route, which
 receives the sandbox access token, workspace archive, command, and forwarded
 environment.
 
+All nine configuration bindings share one typed declaration. The API key stays
+environment-only. File strings ignore empty values, and file proxy ports apply
+only when positive. Environment proxy ports retain signed-integer parsing and
+first-nonempty alias precedence; malformed values fail without applying later
+fields. Explicit flags retain their existing empty-string and signed-port
+behavior. Endpoint provenance and repository destination rejection remain core
+policy, separate from these bindings.
+
 Provider flags:
 
 ```text

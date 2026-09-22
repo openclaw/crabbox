@@ -1310,6 +1310,43 @@ func TestCrownestGeneratedConfigIsCurrent(t *testing.T) {
 	}
 }
 
+func TestSchemaCheckedSignedIntegerAlias(t *testing.T) {
+	source := strings.Replace(checkedAliasSample, `nonnegative:"true" envInt:"checked-alias"`, `envInt:"checked-signed-alias" envIntErrorLabel:"proxy HTTP port" fileInt:"positive"`, 1)
+	s, err := parseSchema([]byte(source), "PilotConfig", "pilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := generate(s, "pilot.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	typecheckGenerated(t, source, output)
+	for _, tc := range []struct{ old, replacement string }{
+		{`envAlias:"ALIAS_COUNT"`, ""},
+		{`envAlias:"ALIAS_COUNT"`, `envAlias:"ALIAS_COUNT" envAlias2:"OTHER"`},
+		{`Count int`, `Count int64`},
+		{`Count int`, `Count string`},
+		{`envIntErrorLabel:"proxy HTTP port"`, ""},
+		{`envIntErrorLabel:"proxy HTTP port"`, `envIntErrorLabel:""`},
+		{`envIntErrorLabel:"proxy HTTP port"`, `envIntErrorLabel:" leading"`},
+		{`envIntErrorLabel:"proxy HTTP port"`, `envIntErrorLabel:"bad\nlabel"`},
+		{`envInt:"checked-signed-alias"`, `envInt:"checked-alias" nonnegative:"true"`},
+		{`envInt:"checked-signed-alias"`, `envInt:"checked-signed-alias" nonnegative:"true"`},
+		{`fileInt:"positive"`, `fileInt:"present"`},
+		{`fileInt:"positive"`, `fileInt:"nonzero"`},
+	} {
+		if _, err := parseSchema([]byte(strings.Replace(source, tc.old, tc.replacement, 1)), "PilotConfig", "pilot"); err == nil {
+			t.Fatalf("accepted signed alias mutation %s -> %s", tc.old, tc.replacement)
+		}
+	}
+}
+
+func TestCubeSandboxGeneratedConfigIsCurrent(t *testing.T) {
+	if err := run("../../internal/cli/config_cubesandbox.go", "../../internal/cli/config_cubesandbox_generated.go", "CubeSandboxConfig", "cubesandbox", true); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSchemaDurationContract(t *testing.T) {
 	for _, tc := range []struct{ raw, expression string }{
 		{"180s", "180 * time.Second"}, {"250ms", "250 * time.Millisecond"},
