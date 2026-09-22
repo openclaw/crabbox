@@ -12,8 +12,8 @@ func TestConfigClaimScopeLegacyParity(t *testing.T) {
 		cfg            core.Config
 		want           string
 	}{
-		{"azure canonical account", "azure", core.Config{AzureSubscription: " SUB ", AzureResourceGroup: " Group "}, "subscription:sub|resource-group:group"},
-		{"azure incomplete", "azure", core.Config{AzureSubscription: "sub"}, ""},
+		{"azure canonical account", "azure", core.Config{Azure: core.AzureConfig{Subscription: " SUB ", ResourceGroup: " Group "}}, "subscription:sub|resource-group:group"},
+		{"azure incomplete", "azure", core.Config{Azure: core.AzureConfig{Subscription: "sub"}}, ""},
 		{"gcp legacy whitespace", "google", core.Config{GCPProject: " project "}, "project: project "},
 		{"gcp empty", "gcp", core.Config{}, ""},
 		{"cube default port", "cubesandbox", core.Config{CubeSandbox: core.CubeSandboxConfig{APIURL: "HTTPS://user:pass@CUBE.EXAMPLE:443/root/?token=secret#fragment"}}, "endpoint:https://cube.example/root"},
@@ -51,8 +51,8 @@ func TestConfigClaimScopeSeparatesRoutes(t *testing.T) {
 		cfg      core.Config
 		change   func(*core.Config)
 	}{
-		{"azure", core.Config{AzureSubscription: "sub", AzureResourceGroup: "rg"}, func(c *core.Config) { c.AzureSubscription = "other" }},
-		{"azure", core.Config{AzureSubscription: "sub", AzureResourceGroup: "rg"}, func(c *core.Config) { c.AzureResourceGroup = "other" }},
+		{"azure", core.Config{Azure: core.AzureConfig{Subscription: "sub", ResourceGroup: "rg"}}, func(c *core.Config) { c.Azure.Subscription = "other" }},
+		{"azure", core.Config{Azure: core.AzureConfig{Subscription: "sub", ResourceGroup: "rg"}}, func(c *core.Config) { c.Azure.ResourceGroup = "other" }},
 		{"gcp", core.Config{GCPProject: "one"}, func(c *core.Config) { c.GCPProject = "two" }},
 		{"cubesandbox", core.Config{CubeSandbox: core.CubeSandboxConfig{APIURL: "https://one.example"}}, func(c *core.Config) { c.CubeSandbox.APIURL = "https://two.example" }},
 		{"e2b", core.Config{E2B: core.E2BConfig{APIURL: "https://one.example"}}, func(c *core.Config) { c.E2B.APIURL = "https://two.example" }},
@@ -76,12 +76,12 @@ func TestConfigClaimScopeSeparatesRoutes(t *testing.T) {
 
 func TestAzureProviderClaimScopeRequiresCompleteRoute(t *testing.T) {
 	cfg := core.BaseConfig()
-	cfg.AzureSubscription = " TEST-SUB "
-	cfg.AzureResourceGroup = " Production-RG "
+	cfg.Azure.Subscription = " TEST-SUB "
+	cfg.Azure.ResourceGroup = " Production-RG "
 	if got, want := core.ProviderClaimScope("azure", cfg), "subscription:test-sub|resource-group:production-rg"; got != want {
 		t.Fatalf("core.ProviderClaimScope(azure)=%q, want %q", got, want)
 	}
-	cfg.AzureResourceGroup = ""
+	cfg.Azure.ResourceGroup = ""
 	if got := core.ProviderClaimScope("azure", cfg); got != "" {
 		t.Fatalf("incomplete azure scope=%q, want empty", got)
 	}

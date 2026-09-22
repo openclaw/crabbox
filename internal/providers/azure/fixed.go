@@ -19,10 +19,10 @@ type fixedAzureCreator interface {
 
 func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	cfg := b.Cfg
-	if cfg.AzureOSDisk == core.AzureOSDiskEphemeralPreview {
+	if cfg.Azure.OSDisk == core.AzureOSDiskEphemeralPreview {
 		return core.LeaseTarget{}, core.Exit(2, "direct Azure fixed leases do not support ephemeral-preview OS disks")
 	}
-	if cfg.AzureSnapshot != "" || req.RequestedCheckpointID != "" {
+	if cfg.Azure.Snapshot != "" || req.RequestedCheckpointID != "" {
 		return core.LeaseTarget{}, core.Exit(2, "direct Azure fixed leases require a VM image; checkpoint forks are not supported")
 	}
 	if cfg.Tailscale.Enabled && cfg.Tailscale.AuthKey == "" {
@@ -67,7 +67,7 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 			CIDRs                                                                                                                                                    []string
 			Keep                                                                                                                                                     bool
 			TTL, Idle                                                                                                                                                time.Duration
-		}{core.DirectLeaseLabels(cfg, req.RequestedLeaseID, req.RequestedSlug, "azure", cfg.Capacity.Market, req.Keep, time.Unix(0, 0)), cfg.AzureLocation, cfg.AzureImage, cfg.AzureOSDisk, cfg.AzureOSDiskSKU, cfg.AzureVNet, cfg.AzureSubnet, cfg.AzureNSG, cfg.AzureNetwork, cfg.ServerType, cfg.Architecture, cfg.TargetOS, cfg.WindowsMode, bootstrap, core.NormalizeLeaseSlug(req.RequestedSlug), cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.Pond, cfg.Capacity.Market, cfg.AzureSSHCIDRs, req.Keep, cfg.TTL, cfg.IdleTimeout})
+		}{core.DirectLeaseLabels(cfg, req.RequestedLeaseID, req.RequestedSlug, "azure", cfg.Capacity.Market, req.Keep, time.Unix(0, 0)), cfg.Azure.Location, cfg.Azure.Image, cfg.Azure.OSDisk, cfg.Azure.OSDiskSKU, cfg.Azure.VNet, cfg.Azure.Subnet, cfg.Azure.NSG, cfg.Azure.Network, cfg.ServerType, cfg.Architecture, cfg.TargetOS, cfg.WindowsMode, bootstrap, core.NormalizeLeaseSlug(req.RequestedSlug), cfg.SSHUser, cfg.SSHPort, cfg.WorkRoot, cfg.Pond, cfg.Capacity.Market, cfg.Azure.SSHCIDRs, req.Keep, cfg.TTL, cfg.IdleTimeout})
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}
@@ -121,7 +121,7 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 		if err := validateFixedAzureServer(*claim, server); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		target := core.SSHTargetFromConfig(cfg, core.AzureServerHost(server, cfg.AzureNetwork))
+		target := core.SSHTargetFromConfig(cfg, core.AzureServerHost(server, cfg.Azure.Network))
 		if err := bootstrapManagedWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr); err != nil {
 			return core.LeaseTarget{}, err
 		}
@@ -185,7 +185,7 @@ func (b *azureLeaseBackend) resolveFixed(ctx context.Context, client azureClient
 			return core.LeaseTarget{}, true, err
 		}
 	}
-	lease, err := b.ResolvedLeaseTarget(server, core.SSHTargetFromConfig(b.Cfg, core.AzureServerHost(server, b.Cfg.AzureNetwork)), claim.LeaseID, req.ReleaseOnly)
+	lease, err := b.ResolvedLeaseTarget(server, core.SSHTargetFromConfig(b.Cfg, core.AzureServerHost(server, b.Cfg.Azure.Network)), claim.LeaseID, req.ReleaseOnly)
 	return lease, true, err
 }
 

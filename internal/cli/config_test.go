@@ -61,6 +61,40 @@ func TestStaticFlagInputFacts(t *testing.T) {
 }
 
 func TestAzureDynamicSessionsSharedInputFacts(t *testing.T) {
+	t.Run("environment alias precedence", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, primary, fallback, want string
+			accepted                      bool
+		}{
+			{"no override", "", "", "configured", false},
+			{"fallback", "", "fallback", "fallback", true},
+			{"primary", "primary", "fallback", "primary", true},
+			{"raw whitespace", " primary ", "fallback", " primary ", true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				clearConfigEnv(t)
+				for _, suffix := range []string{"SUBSCRIPTION_ID", "TENANT_ID", "CLIENT_ID"} {
+					t.Setenv("CRABBOX_AZURE_"+suffix, tc.primary)
+					t.Setenv("AZURE_"+suffix, tc.fallback)
+				}
+				cfg := baseConfig()
+				cfg.Azure.Subscription, cfg.Azure.Tenant, cfg.Azure.ClientID = "configured", "configured", "configured"
+				if err := applyEnv(&cfg); err != nil {
+					t.Fatal(err)
+				}
+				if cfg.Azure.Subscription != tc.want || cfg.Azure.Tenant != tc.want || cfg.Azure.ClientID != tc.want {
+					t.Fatalf("subscription=%q tenant=%q client=%q, want %q", cfg.Azure.Subscription, cfg.Azure.Tenant, cfg.Azure.ClientID, tc.want)
+				}
+				var want configInputLedger
+				if tc.accepted {
+					want = want.withInput("azure", configInputEnvironment, configInputValue).withInput("azure-dynamic-sessions", configInputEnvironment, configInputValue)
+				}
+				if !reflect.DeepEqual(cfg.inputProvenance, want) {
+					t.Fatal("alias precedence changed shared input attribution")
+				}
+			})
+		}
+	})
 	for _, tc := range []struct {
 		name   string
 		file   fileAzureConfig
@@ -11206,8 +11240,8 @@ azureDynamicSessions:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "azure-dynamic-sessions" || cfg.AzureBackend != AzureBackendDynamicSessions || cfg.ServerType != "" {
-		t.Fatalf("provider=%q azureBackend=%q serverType=%q", cfg.Provider, cfg.AzureBackend, cfg.ServerType)
+	if cfg.Provider != "azure-dynamic-sessions" || cfg.Azure.Backend != AzureBackendDynamicSessions || cfg.ServerType != "" {
+		t.Fatalf("provider=%q azureBackend=%q serverType=%q", cfg.Provider, cfg.Azure.Backend, cfg.ServerType)
 	}
 }
 
@@ -11223,8 +11257,8 @@ func TestLoadConfigRoutesAzureBackendFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "azure-dynamic-sessions" || cfg.AzureBackend != AzureBackendDynamicSessions {
-		t.Fatalf("provider=%q azureBackend=%q", cfg.Provider, cfg.AzureBackend)
+	if cfg.Provider != "azure-dynamic-sessions" || cfg.Azure.Backend != AzureBackendDynamicSessions {
+		t.Fatalf("provider=%q azureBackend=%q", cfg.Provider, cfg.Azure.Backend)
 	}
 }
 
@@ -11617,13 +11651,13 @@ func TestEnvOverridesConfig(t *testing.T) {
 	if len(cfg.AWSSSHCIDRs) != 2 || cfg.AWSSSHCIDRs[0] != "198.51.100.7/32" || cfg.AWSSSHCIDRs[1] != "203.0.113.8/32" {
 		t.Fatalf("AWSSSHCIDRs=%v", cfg.AWSSSHCIDRs)
 	}
-	if len(cfg.AzureSSHCIDRs) != 2 || cfg.AzureSSHCIDRs[0] != "198.51.100.9/32" || cfg.AzureSSHCIDRs[1] != "203.0.113.10/32" {
-		t.Fatalf("AzureSSHCIDRs=%v", cfg.AzureSSHCIDRs)
+	if len(cfg.Azure.SSHCIDRs) != 2 || cfg.Azure.SSHCIDRs[0] != "198.51.100.9/32" || cfg.Azure.SSHCIDRs[1] != "203.0.113.10/32" {
+		t.Fatalf("AzureSSHCIDRs=%v", cfg.Azure.SSHCIDRs)
 	}
-	if cfg.AzureOSDisk != "managed" {
-		t.Fatalf("AzureOSDisk=%q", cfg.AzureOSDisk)
+	if cfg.Azure.OSDisk != "managed" {
+		t.Fatalf("AzureOSDisk=%q", cfg.Azure.OSDisk)
 	}
-	if !cfg.AzureOSDiskExplicit {
+	if !cfg.Azure.OSDiskExplicit {
 		t.Fatal("AzureOSDiskExplicit=false, want true")
 	}
 	if cfg.AzureDynamicSessions.Endpoint != "https://env-pool.env.westus.azurecontainerapps.io" || cfg.AzureDynamicSessions.Pool != "env-pool" || cfg.AzureDynamicSessions.Workdir != "/workspace/env" || cfg.AzureDynamicSessions.TimeoutSecs != 90 {
@@ -12158,8 +12192,8 @@ localContainer:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Image != "ubuntu-26.04" || cfg.AzureImage != defaultAzureLinuxImage || cfg.Islo.Image != "docker.io/library/ubuntu:26.04" || cfg.LocalContainer.Image != "ubuntu:26.04" {
-		t.Fatalf("explicit images were overwritten: hetzner=%q azure=%q islo=%q local=%q", cfg.Image, cfg.AzureImage, cfg.Islo.Image, cfg.LocalContainer.Image)
+	if cfg.Image != "ubuntu-26.04" || cfg.Azure.Image != defaultAzureLinuxImage || cfg.Islo.Image != "docker.io/library/ubuntu:26.04" || cfg.LocalContainer.Image != "ubuntu:26.04" {
+		t.Fatalf("explicit images were overwritten: hetzner=%q azure=%q islo=%q local=%q", cfg.Image, cfg.Azure.Image, cfg.Islo.Image, cfg.LocalContainer.Image)
 	}
 }
 
@@ -12267,8 +12301,8 @@ os: ubuntu:24.04
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.TargetOS != targetLinux || cfg.Image != "ubuntu-24.04" || cfg.AzureImage != "Canonical:ubuntu-24_04-lts:server:latest" {
-		t.Fatalf("portable os defaults not applied through target alias: target=%q image=%q azure=%q", cfg.TargetOS, cfg.Image, cfg.AzureImage)
+	if cfg.TargetOS != targetLinux || cfg.Image != "ubuntu-24.04" || cfg.Azure.Image != "Canonical:ubuntu-24_04-lts:server:latest" {
+		t.Fatalf("portable os defaults not applied through target alias: target=%q image=%q azure=%q", cfg.TargetOS, cfg.Image, cfg.Azure.Image)
 	}
 }
 
@@ -12480,8 +12514,8 @@ os: ubuntu:24.04
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.OSImage != "ubuntu:26.04" || cfg.Image != "ubuntu-24.04" || cfg.AzureImage != defaultAzureLinuxImage {
-		t.Fatalf("higher precedence os did not override provider defaults: os=%q image=%q azure=%q", cfg.OSImage, cfg.Image, cfg.AzureImage)
+	if cfg.OSImage != "ubuntu:26.04" || cfg.Image != "ubuntu-24.04" || cfg.Azure.Image != defaultAzureLinuxImage {
+		t.Fatalf("higher precedence os did not override provider defaults: os=%q image=%q azure=%q", cfg.OSImage, cfg.Image, cfg.Azure.Image)
 	}
 }
 
@@ -13338,7 +13372,7 @@ func TestApplyFileConfigCloudProviderBranches(t *testing.T) {
 	if cfg.Location != "fsn1" || cfg.ProviderKey != "hetzner-key" || cfg.HostID != "h-mac" || cfg.AWSRootGB != 123 {
 		t.Fatalf("hetzner/aws config not applied: location=%s key=%s host=%s root=%d", cfg.Location, cfg.ProviderKey, cfg.HostID, cfg.AWSRootGB)
 	}
-	if cfg.AzureOSDisk != "ephemeral" || !cfg.AzureOSDiskExplicit || cfg.AzureNetwork != "public" {
+	if cfg.Azure.OSDisk != "ephemeral" || !cfg.Azure.OSDiskExplicit || cfg.Azure.Network != "public" {
 		t.Fatalf("azure config not applied: %#v", cfg)
 	}
 	if cfg.AzureDynamicSessions.Pool != "pool" || cfg.AzureDynamicSessions.Workdir != "/workspace/file" || cfg.AzureDynamicSessions.TimeoutSecs != 120 {

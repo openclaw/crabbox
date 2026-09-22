@@ -82,24 +82,7 @@ type Config struct {
 	AWSSSHCIDRsPinned             bool
 	AWSMacHostID                  string
 	AWSLambdaMicroVM              AWSLambdaMicroVMConfig
-	AzureSubscription             string
-	AzureTenant                   string
-	AzureClientID                 string
-	AzureLocation                 string
-	AzureBackend                  string
-	AzureResourceGroup            string
-	AzureImage                    string
-	azureImageExplicit            bool
-	AzureSnapshot                 string
-	AzureSnapshotSKU              string
-	AzureOSDisk                   string
-	AzureOSDiskExplicit           bool
-	AzureOSDiskSKU                string
-	AzureVNet                     string
-	AzureSubnet                   string
-	AzureNSG                      string
-	AzureSSHCIDRs                 []string
-	AzureNetwork                  string
+	Azure                         AzureConfig
 	AzureDynamicSessions          AzureDynamicSessionsConfig
 	GCPProject                    string
 	gcpProjectExplicit            bool
@@ -423,22 +406,6 @@ type ExternalSSHConnectionConfig struct {
 type ExternalDesktopConfig struct {
 	Username    string `yaml:"username,omitempty" json:"username,omitempty"`
 	PasswordEnv string `yaml:"passwordEnv,omitempty" json:"passwordEnv,omitempty"`
-}
-
-const (
-	AzureBackendVM              = "vm"
-	AzureBackendDynamicSessions = "dynamic-sessions"
-)
-
-func NormalizeAzureBackend(backend string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(backend)) {
-	case "", "vm", "vms", "virtual-machine", "virtual-machines":
-		return AzureBackendVM, nil
-	case "dynamic-sessions", "dynamic-session", "sessions", "azds":
-		return AzureBackendDynamicSessions, nil
-	default:
-		return "", fmt.Errorf("azure backend must be vm or dynamic-sessions")
-	}
 }
 
 type AsciiBoxConfig struct {
@@ -1210,9 +1177,7 @@ func applyOSImageProviderDefaults(cfg *Config, force bool) {
 	if force || cfg.Image == "" || (!cfg.imageExplicit && (cfg.Image == base.Image || wasOSDefault)) {
 		cfg.Image = hetznerImage
 	}
-	if force || cfg.AzureImage == "" || (!cfg.azureImageExplicit && (cfg.AzureImage == base.AzureImage || wasOSDefault)) {
-		cfg.AzureImage = azureImage
-	}
+	cfg.Azure.applyOSImageDefault(azureImage, base.Azure.Image, force, wasOSDefault)
 	if force || cfg.GCPImage == "" || (!cfg.gcpImageExplicit && (cfg.GCPImage == base.GCPImage || wasOSDefault)) {
 		cfg.GCPImage = gcpImage
 	}
@@ -1575,14 +1540,7 @@ func baseConfig() Config {
 		AWSRegion:               "eu-west-1",
 		AWSRootGB:               400,
 		AWSLambdaMicroVM:        defaultAWSLambdaMicroVMConfig(),
-		AzureBackend:            "vm",
-		AzureLocation:           "eastus",
-		AzureResourceGroup:      "crabbox-leases",
-		AzureImage:              azureImage,
-		AzureOSDisk:             AzureOSDiskManaged,
-		AzureVNet:               "crabbox-vnet",
-		AzureSubnet:             "crabbox-subnet",
-		AzureNSG:                "crabbox-nsg",
+		Azure:                   initialAzureConfig(azureImage),
 		AzureDynamicSessions:    defaultAzureDynamicSessionsConfig(),
 		GCPZone:                 "europe-west2-a",
 		GCPImage:                gcpImage,
@@ -1879,24 +1837,6 @@ type fileAWSConfig struct {
 	RootGB          int32    `yaml:"rootGB,omitempty"`
 	SSHCIDRs        []string `yaml:"sshCIDRs,omitempty"`
 	MacHostID       string   `yaml:"macHostId,omitempty"`
-}
-
-type fileAzureConfig struct {
-	SubscriptionID string   `yaml:"subscriptionId,omitempty"`
-	TenantID       string   `yaml:"tenantId,omitempty"`
-	ClientID       string   `yaml:"clientId,omitempty"`
-	Backend        string   `yaml:"backend,omitempty"`
-	Location       string   `yaml:"location,omitempty"`
-	ResourceGroup  string   `yaml:"resourceGroup,omitempty"`
-	Image          string   `yaml:"image,omitempty"`
-	OSDisk         string   `yaml:"osDisk,omitempty"`
-	SnapshotSKU    string   `yaml:"snapshotSKU,omitempty"`
-	OSDiskSKU      string   `yaml:"osDiskSKU,omitempty"`
-	VNet           string   `yaml:"vnet,omitempty"`
-	Subnet         string   `yaml:"subnet,omitempty"`
-	NSG            string   `yaml:"nsg,omitempty"`
-	SSHCIDRs       []string `yaml:"sshCIDRs,omitempty"`
-	Network        string   `yaml:"network,omitempty"`
 }
 
 type fileGCPConfig struct {
@@ -2791,42 +2731,7 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 			return err
 		}
 	}
-	if file.Azure != nil {
-		configInputFileString(cfg, "azure", inputSource, &cfg.AzureBackend, file.Azure.Backend)
-		if file.Azure.SubscriptionID != "" {
-			cfg.AzureSubscription = file.Azure.SubscriptionID
-			recordConfigInput(cfg, "azure", inputSource, true)
-			recordConfigInput(cfg, "azure-dynamic-sessions", inputSource, true)
-		}
-		if file.Azure.TenantID != "" {
-			cfg.AzureTenant = file.Azure.TenantID
-			recordConfigInput(cfg, "azure", inputSource, true)
-			recordConfigInput(cfg, "azure-dynamic-sessions", inputSource, true)
-		}
-		configInputFileString(cfg, "azure", inputSource, &cfg.AzureClientID, file.Azure.ClientID)
-		configInputFileString(cfg, "azure", inputSource, &cfg.AzureLocation, file.Azure.Location)
-		configInputFileString(cfg, "azure", inputSource, &cfg.AzureResourceGroup, file.Azure.ResourceGroup)
-		if file.Azure.Image != "" {
-			cfg.AzureImage = file.Azure.Image
-			recordConfigInput(cfg, "azure", inputSource, true)
-			cfg.azureImageExplicit = true
-		}
-		if file.Azure.OSDisk != "" {
-			cfg.AzureOSDisk = file.Azure.OSDisk
-			recordConfigInput(cfg, "azure", inputSource, true)
-			cfg.AzureOSDiskExplicit = true
-		}
-		configInputFileString(cfg, "azure", inputSource, &cfg.AzureSnapshotSKU, file.Azure.SnapshotSKU)
-		configInputFileString(cfg, "azure", inputSource, &cfg.AzureOSDiskSKU, file.Azure.OSDiskSKU)
-		configInputFileString(cfg, "azure", inputSource, &cfg.AzureVNet, file.Azure.VNet)
-		configInputFileString(cfg, "azure", inputSource, &cfg.AzureSubnet, file.Azure.Subnet)
-		configInputFileString(cfg, "azure", inputSource, &cfg.AzureNSG, file.Azure.NSG)
-		if len(file.Azure.SSHCIDRs) > 0 {
-			cfg.AzureSSHCIDRs = file.Azure.SSHCIDRs
-			recordConfigInput(cfg, "azure", inputSource, true)
-		}
-		configInputFileString(cfg, "azure", inputSource, &cfg.AzureNetwork, file.Azure.Network)
-	}
+	cfg.applyAzureFileConfig(file.Azure, inputSource)
 	{
 		applied, err := cfg.AzureDynamicSessions.applyFile(file.AzureDynamicSessions)
 		recordConfigInput(cfg, "azure-dynamic-sessions", inputSource, applied.InputAccepted)
@@ -4128,40 +4033,7 @@ func applyEnv(cfg *Config) error {
 		cfg.AWSSSHCIDRs = splitCommaList(cidrs)
 		recordConfigInput(cfg, "aws", configInputEnvironment, true)
 	}
-	if value, accepted := firstNonEmptyEnv("CRABBOX_AZURE_SUBSCRIPTION_ID", "AZURE_SUBSCRIPTION_ID"); accepted {
-		cfg.AzureSubscription = value
-		recordConfigInput(cfg, "azure", configInputEnvironment, true)
-		recordConfigInput(cfg, "azure-dynamic-sessions", configInputEnvironment, true)
-	}
-	if value, accepted := firstNonEmptyEnv("CRABBOX_AZURE_TENANT_ID", "AZURE_TENANT_ID"); accepted {
-		cfg.AzureTenant = value
-		recordConfigInput(cfg, "azure", configInputEnvironment, true)
-		recordConfigInput(cfg, "azure-dynamic-sessions", configInputEnvironment, true)
-	}
-	cfg.AzureClientID = configInputEnvString(cfg, "azure", cfg.AzureClientID, "CRABBOX_AZURE_CLIENT_ID", "AZURE_CLIENT_ID")
-	cfg.AzureBackend = configInputEnvString(cfg, "azure", cfg.AzureBackend, "CRABBOX_AZURE_BACKEND")
-	cfg.AzureLocation = configInputEnvString(cfg, "azure", cfg.AzureLocation, "CRABBOX_AZURE_LOCATION")
-	cfg.AzureResourceGroup = configInputEnvString(cfg, "azure", cfg.AzureResourceGroup, "CRABBOX_AZURE_RESOURCE_GROUP")
-	if image := os.Getenv("CRABBOX_AZURE_IMAGE"); image != "" {
-		cfg.AzureImage = image
-		recordConfigInput(cfg, "azure", configInputEnvironment, true)
-		cfg.azureImageExplicit = true
-	}
-	if value := os.Getenv("CRABBOX_AZURE_OS_DISK"); value != "" {
-		cfg.AzureOSDisk = value
-		recordConfigInput(cfg, "azure", configInputEnvironment, true)
-		cfg.AzureOSDiskExplicit = true
-	}
-	cfg.AzureSnapshotSKU = configInputEnvString(cfg, "azure", cfg.AzureSnapshotSKU, "CRABBOX_AZURE_SNAPSHOT_SKU")
-	cfg.AzureOSDiskSKU = configInputEnvString(cfg, "azure", cfg.AzureOSDiskSKU, "CRABBOX_AZURE_OS_DISK_SKU")
-	cfg.AzureVNet = configInputEnvString(cfg, "azure", cfg.AzureVNet, "CRABBOX_AZURE_VNET")
-	cfg.AzureSubnet = configInputEnvString(cfg, "azure", cfg.AzureSubnet, "CRABBOX_AZURE_SUBNET")
-	cfg.AzureNSG = configInputEnvString(cfg, "azure", cfg.AzureNSG, "CRABBOX_AZURE_NSG")
-	if cidrs := os.Getenv("CRABBOX_AZURE_SSH_CIDRS"); cidrs != "" {
-		cfg.AzureSSHCIDRs = splitCommaList(cidrs)
-		recordConfigInput(cfg, "azure", configInputEnvironment, true)
-	}
-	cfg.AzureNetwork = configInputEnvString(cfg, "azure", cfg.AzureNetwork, "CRABBOX_AZURE_NETWORK")
+	cfg.applyAzureEnvironment()
 	{
 		applied, err := cfg.AzureDynamicSessions.applyEnv()
 		recordConfigInput(cfg, "azure-dynamic-sessions", configInputEnvironment, applied.InputAccepted)

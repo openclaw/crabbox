@@ -159,12 +159,12 @@ func (testAzureProvider) Spec() ProviderSpec {
 }
 func (testAzureProvider) RegisterFlags(fs *flag.FlagSet, defaults Config) any {
 	return testAzureFlagValues{
-		Backend:     fs.String("azure-backend", defaults.AzureBackend, ""),
-		SnapshotSKU: fs.String("azure-snapshot-sku", defaults.AzureSnapshotSKU, ""),
+		Backend:     fs.String("azure-backend", defaults.Azure.Backend, ""),
+		SnapshotSKU: fs.String("azure-snapshot-sku", defaults.Azure.SnapshotSKU, ""),
 	}
 }
 func (testAzureProvider) RouteConfig(cfg *Config, fs *flag.FlagSet, values any) error {
-	backend := cfg.AzureBackend
+	backend := cfg.Azure.Backend
 	if fs != nil && flagWasSet(fs, "azure-backend") {
 		flags, _ := values.(testAzureFlagValues)
 		if flags.Backend != nil {
@@ -175,7 +175,7 @@ func (testAzureProvider) RouteConfig(cfg *Config, fs *flag.FlagSet, values any) 
 	if err != nil {
 		return Exit(2, "%s", err)
 	}
-	cfg.AzureBackend = normalized
+	cfg.Azure.Backend = normalized
 	if normalized == AzureBackendDynamicSessions {
 		cfg.Provider = "azure-dynamic-sessions"
 	} else {
@@ -199,7 +199,7 @@ func (p testAzureProvider) ApplyFlags(cfg *Config, fs *flag.FlagSet, values any)
 		if err != nil {
 			return err
 		}
-		cfg.AzureSnapshotSKU = sku
+		cfg.Azure.SnapshotSKU = sku
 	}
 	return nil
 }
@@ -228,22 +228,22 @@ func (testAzureProvider) NativeCheckpointCapability(req NativeCheckpointRequest)
 func (testAzureProvider) ApplyNativeCheckpointForkConfig(req NativeCheckpointForkRequest) error {
 	switch req.Record.Kind {
 	case checkpointKindAzure:
-		req.Config.AzureImage = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+		req.Config.Azure.Image = firstNonBlank(req.Record.Resource, req.Record.ImageID)
 	case checkpointKindAzureOS:
-		req.Config.AzureSnapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
+		req.Config.Azure.Snapshot = firstNonBlank(req.Record.Resource, req.Record.ImageID)
 	default:
 		return Exit(2, "provider=azure does not support checkpoint kind=%s", req.Record.Kind)
 	}
 	if req.Record.Region != "" {
-		req.Config.AzureLocation = req.Record.Region
+		req.Config.Azure.Location = req.Record.Region
 	}
 	if req.AzureOSDiskExplicit {
 		mode, err := NormalizeAzureOSDiskMode(req.AzureOSDisk)
 		if err != nil {
 			return err
 		}
-		req.Config.AzureOSDisk = mode
-		req.Config.AzureOSDiskExplicit = true
+		req.Config.Azure.OSDisk = mode
+		req.Config.Azure.OSDiskExplicit = true
 	}
 	return nil
 }
@@ -261,7 +261,7 @@ func (testAzureDynamicSessionsProvider) Spec() ProviderSpec {
 	}
 }
 func (testAzureDynamicSessionsProvider) RouteConfig(cfg *Config, _ *flag.FlagSet, _ any) error {
-	cfg.AzureBackend = AzureBackendDynamicSessions
+	cfg.Azure.Backend = AzureBackendDynamicSessions
 	return nil
 }
 func (testAzureDynamicSessionsProvider) RegisterFlags(*flag.FlagSet, Config) any {

@@ -1199,6 +1199,16 @@ Blacksmith does) when the config type is not ready to export cleanly.
 If a provider needs durable config, add typed config fields in `Config` and env
 overrides in `config.go`.
 
+Azure stores its shared account, VM, and routing inputs in `Config.Azure`.
+`config_azure.go` owns defaults, file/environment application, OS-image replacement,
+and coordinator projection, including image and OS-disk explicitness. Subscription
+and tenant inputs record provenance for
+both Azure and Azure Dynamic Sessions; the latter retains its separate
+`Config.AzureDynamicSessions` settings. Adapter flag validation, backend routing,
+and native lifecycle policy remain with their existing owners. File keys,
+config-show fields, coordinator wire fields, and fixed-lease fingerprint shapes
+do not follow internal Go field renames.
+
 `internal/atomicfile.WritePrivate` shares private-file staging, file syncing,
 and replacement. Callers retain path admission, directory creation, their
 platform-specific atomic replacement, and directory-sync/error policy.

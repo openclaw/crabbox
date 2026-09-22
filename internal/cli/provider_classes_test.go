@@ -411,8 +411,8 @@ func TestProviderCandidateStoredTypeFallbackParity(t *testing.T) {
 		},
 		{
 			name: "Azure", candidates: azureProvisioningCandidatesForConfig,
-			base:       Config{Provider: "azure", TargetOS: targetLinux, WindowsMode: windowsModeNormal, Architecture: ArchitectureAMD64, architectureExplicit: true, AzureOSDisk: AzureOSDiskManaged},
-			missing:    Config{Provider: "azure", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Architecture: ArchitectureARM64, architectureExplicit: true, AzureOSDisk: AzureOSDiskManaged},
+			base:       Config{Provider: "azure", TargetOS: targetLinux, WindowsMode: windowsModeNormal, Architecture: ArchitectureAMD64, architectureExplicit: true, Azure: AzureConfig{OSDisk: AzureOSDiskManaged}},
+			missing:    Config{Provider: "azure", TargetOS: targetWindows, WindowsMode: windowsModeWSL2, Architecture: ArchitectureARM64, architectureExplicit: true, Azure: AzureConfig{OSDisk: AzureOSDiskManaged}},
 			customWant: []string{storedType, "custom-shape"}, uppercaseWant: []string{storedType, "FAST"}, paddedWant: []string{storedType, " fast "},
 			standardType: "Standard_D32ads_v6", fastType: "Standard_D64ads_v6",
 		},

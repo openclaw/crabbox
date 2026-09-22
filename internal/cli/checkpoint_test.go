@@ -3023,7 +3023,7 @@ func TestApplyNativeCheckpointForkConfigForAzureAndGCP(t *testing.T) {
 				return record
 			}(),
 			check: func(t *testing.T, cfg Config) {
-				if cfg.Provider != "azure" || cfg.AzureLocation != "eastus" || cfg.AzureImage == "" {
+				if cfg.Provider != "azure" || cfg.Azure.Location != "eastus" || cfg.Azure.Image == "" {
 					t.Fatalf("azure config not applied: %#v", cfg)
 				}
 			},
@@ -3038,7 +3038,7 @@ func TestApplyNativeCheckpointForkConfigForAzureAndGCP(t *testing.T) {
 				return record
 			}(),
 			check: func(t *testing.T, cfg Config) {
-				if cfg.Provider != "azure" || cfg.AzureLocation != "eastus" || cfg.AzureSnapshot == "" {
+				if cfg.Provider != "azure" || cfg.Azure.Location != "eastus" || cfg.Azure.Snapshot == "" {
 					t.Fatalf("azure snapshot config not applied: %#v", cfg)
 				}
 			},
@@ -3158,7 +3158,7 @@ func TestApplyNativeCheckpointForkConfigHonorsAzureOSDiskFlagAfterProviderRewrit
 	}
 	cfg := defaultConfig()
 	cfg.Provider = "hetzner"
-	cfg.AzureOSDisk = AzureOSDiskManaged
+	cfg.Azure.OSDisk = AzureOSDiskManaged
 	record := checkpointRecord{Kind: checkpointKindAzureOS, TargetOS: targetLinux}
 	record.Native.ImageID = "checkpoint-azure"
 
@@ -3168,8 +3168,8 @@ func TestApplyNativeCheckpointForkConfigHonorsAzureOSDiskFlagAfterProviderRewrit
 	if cfg.Provider != "azure" {
 		t.Fatalf("Provider=%q", cfg.Provider)
 	}
-	if cfg.AzureOSDisk != AzureOSDiskEphemeral || !cfg.AzureOSDiskExplicit {
-		t.Fatalf("AzureOSDisk=%q explicit=%t", cfg.AzureOSDisk, cfg.AzureOSDiskExplicit)
+	if cfg.Azure.OSDisk != AzureOSDiskEphemeral || !cfg.Azure.OSDiskExplicit {
+		t.Fatalf("AzureOSDisk=%q explicit=%t", cfg.Azure.OSDisk, cfg.Azure.OSDiskExplicit)
 	}
 }
 
@@ -3182,8 +3182,8 @@ func TestApplyNativeCheckpointForkConfigHonorsEmptyAzureOSDiskFlag(t *testing.T)
 	}
 	cfg := defaultConfig()
 	cfg.Provider = "hetzner"
-	cfg.AzureOSDisk = AzureOSDiskEphemeral
-	cfg.AzureOSDiskExplicit = true
+	cfg.Azure.OSDisk = AzureOSDiskEphemeral
+	cfg.Azure.OSDiskExplicit = true
 	record := checkpointRecord{Kind: checkpointKindAzureOS, TargetOS: targetLinux}
 	record.Native.ImageID = "checkpoint-azure"
 
@@ -3193,8 +3193,8 @@ func TestApplyNativeCheckpointForkConfigHonorsEmptyAzureOSDiskFlag(t *testing.T)
 	if cfg.Provider != "azure" {
 		t.Fatalf("Provider=%q", cfg.Provider)
 	}
-	if cfg.AzureOSDisk != AzureOSDiskManaged || !cfg.AzureOSDiskExplicit {
-		t.Fatalf("AzureOSDisk=%q explicit=%t", cfg.AzureOSDisk, cfg.AzureOSDiskExplicit)
+	if cfg.Azure.OSDisk != AzureOSDiskManaged || !cfg.Azure.OSDiskExplicit {
+		t.Fatalf("AzureOSDisk=%q explicit=%t", cfg.Azure.OSDisk, cfg.Azure.OSDiskExplicit)
 	}
 }
 

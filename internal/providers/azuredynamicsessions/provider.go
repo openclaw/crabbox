@@ -27,7 +27,7 @@ func (Provider) Spec() core.ProviderSpec {
 }
 
 func (Provider) RouteConfig(cfg *core.Config, _ *flag.FlagSet, _ any) error {
-	cfg.AzureBackend = core.AzureBackendDynamicSessions
+	cfg.Azure.Backend = core.AzureBackendDynamicSessions
 	return nil
 }
 

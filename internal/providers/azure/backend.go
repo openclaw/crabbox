@@ -74,7 +74,7 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 	cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
 	expected := core.Server{CloudID: core.LeaseProviderName(leaseID, slug), Labels: core.DirectLeaseLabels(cfg, leaseID, slug, "azure", "on-demand", keep, time.Now())}
 	fmt.Fprintf(b.RT.Stderr, "provisioning provider=azure lease=%s slug=%s class=%s preferred_type=%s location=%s rg=%s keep=%v\n",
-		leaseID, slug, cfg.Class, cfg.ServerType, cfg.AzureLocation, cfg.AzureResourceGroup, keep)
+		leaseID, slug, cfg.Class, cfg.ServerType, cfg.Azure.Location, cfg.Azure.ResourceGroup, keep)
 	server, cfg, err := client.CreateServerWithFallback(ctx, cfg, publicKey, leaseID, slug, keep, func(format string, args ...any) {
 		fmt.Fprintf(b.RT.Stderr, format, args...)
 	})
@@ -121,7 +121,7 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 		rollback = false
 		return core.LeaseTarget{}, shared.JoinAcquireCleanupError(fmt.Errorf("azure readiness rejected: %w", err), errors.New("Azure cleanup withheld after readiness identity loss"))
 	}
-	target := core.SSHTargetFromConfig(cfg, core.AzureServerHost(server, cfg.AzureNetwork))
+	target := core.SSHTargetFromConfig(cfg, core.AzureServerHost(server, cfg.Azure.Network))
 	if err := bootstrapManagedWindowsDesktop(ctx, cfg, &target, publicKey, b.RT.Stderr); err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -132,8 +132,8 @@ func (b *azureLeaseBackend) acquireOnce(ctx context.Context, keep bool, requeste
 	if err := core.ClaimLeaseTargetForConfig(leaseID, slug, cfg, server, target, cfg.IdleTimeout); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	b.Cfg.AzureSubscription = cfg.AzureSubscription
-	b.Cfg.AzureResourceGroup = cfg.AzureResourceGroup
+	b.Cfg.Azure.Subscription = cfg.Azure.Subscription
+	b.Cfg.Azure.ResourceGroup = cfg.Azure.ResourceGroup
 	rollback = false
 	return core.LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, nil
 }
@@ -158,7 +158,7 @@ func (b *azureLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest
 			return core.LeaseTarget{}, core.Exit(4, "lease/server not found: %s (vm exists but is not Crabbox-managed)", req.ID)
 		}
 		leaseID := server.Labels["lease"]
-		target := core.SSHTargetFromConfig(b.Cfg, core.AzureServerHost(server, b.Cfg.AzureNetwork))
+		target := core.SSHTargetFromConfig(b.Cfg, core.AzureServerHost(server, b.Cfg.Azure.Network))
 		return b.resolvedAzureLease(server, target, leaseID, req.ReleaseOnly)
 	}
 	servers, err := listOwnedAzureServers(ctx, client)
@@ -168,7 +168,7 @@ func (b *azureLeaseBackend) Resolve(ctx context.Context, req core.ResolveRequest
 	if server, leaseID, err := core.FindServerByAlias(servers, req.ID); err != nil {
 		return core.LeaseTarget{}, err
 	} else if leaseID != "" {
-		target := core.SSHTargetFromConfig(b.Cfg, core.AzureServerHost(server, b.Cfg.AzureNetwork))
+		target := core.SSHTargetFromConfig(b.Cfg, core.AzureServerHost(server, b.Cfg.Azure.Network))
 		return b.resolvedAzureLease(server, target, leaseID, req.ReleaseOnly)
 	}
 	if req.ReleaseOnly {
@@ -223,7 +223,7 @@ func (b *azureLeaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (c
 		return core.DoctorResult{}, err
 	}
 	result := core.InventoryDoctorResult("azure", len(servers))
-	result.Message += fmt.Sprintf(" location=%s default_type=%s", b.Cfg.AzureLocation, b.Cfg.ServerType)
+	result.Message += fmt.Sprintf(" location=%s default_type=%s", b.Cfg.Azure.Location, b.Cfg.ServerType)
 	return result, nil
 }
 

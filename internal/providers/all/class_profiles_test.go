@@ -169,7 +169,7 @@ func TestClassProfileCandidatesMatchRuntimeLoops(t *testing.T) {
 			}
 			cfg.Class = profile.Class
 			cfg.ServerType = ""
-			cfg.AzureOSDisk = core.AzureOSDiskManaged
+			cfg.Azure.OSDisk = core.AzureOSDiskManaged
 			want := profileCandidateTypes(profile)
 			var got []string
 			switch name {
