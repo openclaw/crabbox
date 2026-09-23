@@ -993,6 +993,9 @@ func TestAcquireClaimsBoxAndReturnsSSHTarget(t *testing.T) {
 	if claim.Provider != providerName || claim.ProviderScope != (Provider{}).ClaimScope(testConfig()) || claim.Slug != "proof" {
 		t.Fatalf("claim=%#v", claim)
 	}
+	if claim.Labels["ttl_secs"] != "2700" || lease.Server.Labels["created_at"] != claim.Labels["created_at"] {
+		t.Fatalf("acquisition policy was not seeded once from its request: claim=%v lease=%v", claim.Labels, lease.Server.Labels)
+	}
 }
 
 func TestAcquireUsesBoxSSHEndpoint(t *testing.T) {
@@ -1041,7 +1044,7 @@ func TestLeaseFromBoxScopesHostTrustToLease(t *testing.T) {
 			b := NewBackend(Provider{}.Spec(), cfg, testRuntime()).(*backend)
 			box := testBox()
 			box.SSHEndpoint = endpoint
-			first, err := b.leaseFromBox(context.Background(), cfg, box, "cbx_123456789abc", "first", true, true)
+			first, err := b.leaseFromBox(context.Background(), cfg, box, core.LeaseClaim{LeaseID: "cbx_123456789abc", Slug: "first"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1052,12 +1055,12 @@ func TestLeaseFromBoxScopesHostTrustToLease(t *testing.T) {
 			if err := os.WriteFile(first.SSH.KnownHostsFile, []byte(enrolled), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			again, err := b.leaseFromBox(context.Background(), cfg, box, first.LeaseID, "first", true, true)
+			again, err := b.leaseFromBox(context.Background(), cfg, box, core.LeaseClaim{LeaseID: first.LeaseID, Slug: "first"})
 			if err != nil {
 				t.Fatal(err)
 			}
 			box.ID = "bx_2"
-			second, err := b.leaseFromBox(context.Background(), cfg, box, "cbx_abcdef123456", "second", true, true)
+			second, err := b.leaseFromBox(context.Background(), cfg, box, core.LeaseClaim{LeaseID: "cbx_abcdef123456", Slug: "second"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1094,7 +1097,7 @@ func TestLeaseFromBoxRejectsUnsafeHostTrustPathBeforeReadiness(t *testing.T) {
 		return nil
 	}
 	b := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
-	_, err := b.leaseFromBox(context.Background(), testConfig(), testBox(), "../outside", "unsafe", true, true)
+	_, err := b.leaseFromBox(context.Background(), testConfig(), testBox(), core.LeaseClaim{LeaseID: "../outside", Slug: "unsafe"})
 	if err == nil || waited {
 		t.Fatalf("unsafe lease host trust reached readiness: err=%v waited=%t", err, waited)
 	}
@@ -1196,6 +1199,7 @@ func TestResolveRawBoxIDDoesNotAdopt(t *testing.T) {
 }
 
 func TestStatusMapsBoxAPIFields(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	fake := &fakeAPI{box: testBox()}
 	withFakeAPI(t, fake)
 	backend := NewBackend(Provider{}.Spec(), testConfig(), testRuntime()).(*backend)
@@ -1206,7 +1210,112 @@ func TestStatusMapsBoxAPIFields(t *testing.T) {
 	if view.ID != "ascii_bx_1" || view.ServerID != "bx_1" || view.SSHHost != "203.0.113.10" || view.SSHUser != "user" || !view.Ready {
 		t.Fatalf("view=%#v", view)
 	}
+	created, _ := time.Parse(time.RFC3339Nano, boxCreationTime(fake.box))
+	if view.Labels["created_at"] != core.LeaseLabelTime(created) || view.Labels[boxCreationLabel] != boxCreationTime(fake.box) {
+		t.Fatalf("native creation lost: %v", view.Labels)
+	}
+	for _, key := range []string{"expires_at", "ttl_secs", "idle_timeout_secs", "last_touched_at", "keep"} {
+		if _, ok := view.Labels[key]; ok {
+			t.Fatalf("unclaimed observation invented %s: %v", key, view.Labels)
+		}
+	}
+	if view.ExpiresAt != "" {
+		t.Fatalf("invented native expiry: %q", view.ExpiresAt)
+	}
 }
+
+func TestObservedBoxMetadataPreservesRecordedHistory(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	fake := &fakeAPI{box: testBox()}
+	fake.box.UpdatedAt = "2026-08-30T12:01:00Z"
+	fake.box.ExpiresAt = "2026-08-30T13:00:00Z"
+	withFakeAPI(t, fake)
+	stubSSHWait(t)
+	cfg := testConfig()
+	cfg.TTL, cfg.IdleTimeout = 10*time.Minute, 5*time.Minute
+	b := NewBackend(Provider{}.Spec(), cfg, testRuntime()).(*backend)
+	repo := core.Repo{Root: t.TempDir(), Name: "fixture"}
+	lease, err := b.Acquire(t.Context(), core.AcquireRequest{Repo: repo, RequestedSlug: "history"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.TTL, b.cfg.IdleTimeout = 90*time.Minute, 30*time.Minute
+	lease, err = b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := core.UpdateLeaseClaimEndpointIfUnchanged(lease.LeaseID, original, lease.Server, lease.SSH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core.SetServerLeaseClaimSnapshot(&lease.Server, before, true)
+	for _, key := range []string{"created_at", "ttl_secs", "keep", "last_touched_at", "expires_at"} {
+		if before.Labels[key] != original.Labels[key] {
+			t.Fatalf("reuse reset recorded %s: before=%q after=%q", key, original.Labels[key], before.Labels[key])
+		}
+	}
+	status, err := b.Status(t.Context(), core.StatusRequest{ID: lease.LeaseID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory, err := b.List(t.Context(), core.ListRequest{})
+	if err != nil || len(inventory) != 1 {
+		t.Fatalf("inventory=%v err=%v", inventory, err)
+	}
+	readOnly, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, NoLocalStateMutations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, _ := time.Parse(time.RFC3339Nano, boxCreationTime(fake.box))
+	updated, _ := time.Parse(time.RFC3339Nano, fake.box.UpdatedAt.(string))
+	for _, labels := range []map[string]string{status.Labels, inventory[0].Labels, readOnly.Server.Labels} {
+		if labels["created_at"] != core.LeaseLabelTime(created) || labels["updated_at"] != core.LeaseLabelTime(updated) || labels["expires_at"] != fake.box.ExpiresAt || labels["ttl_secs"] != "600" || labels["idle_timeout_secs"] != "300" || labels["keep"] != "false" {
+			t.Fatalf("observation mixed native facts and reader defaults: %v", labels)
+		}
+	}
+	after, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil || !reflect.DeepEqual(after, before) {
+		t.Fatalf("observation changed recorded history: %v", err)
+	}
+	used, _ := time.Parse(time.RFC3339Nano, before.LastUsedAt)
+	b.rt.Clock = metadataClock(used.Add(time.Minute))
+	touched, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease, State: "working"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err = core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil || after.LastUsedAt != b.now().Format(time.RFC3339) || after.IdleTimeoutSeconds != 300 || after.Labels["created_at"] != original.Labels["created_at"] || after.Labels["ttl_secs"] != "600" || after.Labels["keep"] != "false" {
+		t.Fatalf("touch lost recorded policy or did not persist activity: claim=%#v err=%v", after, err)
+	}
+	lease.Server = touched
+	override := 10 * time.Minute
+	if _, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease, State: "ready", IdleTimeoutOverride: &override}); err != nil {
+		t.Fatal(err)
+	}
+	status, err = b.Status(t.Context(), core.StatusRequest{ID: lease.LeaseID})
+	if err != nil || status.Labels["idle_timeout_secs"] != "600" || status.Labels["created_at"] != core.LeaseLabelTime(created) || status.ExpiresAt != fake.box.ExpiresAt {
+		t.Fatalf("explicit idle replacement changed native facts or was not persisted: view=%#v err=%v", status, err)
+	}
+}
+
+func TestObservedBoxMissingNativeTimes(t *testing.T) {
+	box := testBox()
+	box.CreatedAt, box.UpdatedAt = "invalid", nil
+	view := statusFromBox(testConfig(), box, "ascii_bx_1", "unknown", nil)
+	for _, key := range []string{"created_at", "updated_at", "expires_at", "ttl_secs", "last_touched_at"} {
+		if _, ok := view.Labels[key]; ok {
+			t.Fatalf("invented missing %s: %v", key, view.Labels)
+		}
+	}
+}
+
+type metadataClock time.Time
+
+func (c metadataClock) Now() time.Time { return time.Time(c) }
 
 func TestStatusMapsBoxSSHEndpoint(t *testing.T) {
 	fake := &fakeAPI{box: testBox()}

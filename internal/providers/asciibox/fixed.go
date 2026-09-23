@@ -27,6 +27,7 @@ func (b *backend) acquireFixed(ctx context.Context, cfg core.Config, client api,
 		ttl = time.Hour
 	}
 	ttl = ttl.Round(time.Second)
+	cfg.TTL = ttl
 	lease, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
 		Kind: fixedBoxKind, LeaseID: req.RequestedLeaseID, RepoRoot: req.Repo.Root, Reclaim: req.Reclaim,
 		TargetOS: targetLinux, TTL: ttl, IdleTimeout: cfg.IdleTimeout, Now: b.now,
@@ -42,13 +43,16 @@ func (b *backend) acquireFixed(ctx context.Context, cfg core.Config, client api,
 			return core.FixedLeaseBinding{ProviderScope: scope, Fingerprint: fingerprint, AllocateSlug: true, RequestedSlug: req.RequestedSlug}, err
 		},
 		Plan: func(_ context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
-			return core.FixedAttemptPlan{Values: map[string]string{"idempotency_key": fixedBoxKey(claim)}}, nil
+			return core.FixedAttemptPlan{
+				Values:       map[string]string{"idempotency_key": fixedBoxKey(claim)},
+				DirectLabels: &core.FixedDirectLabels{Config: cfg, Provider: providerName, Keep: req.Keep},
+			}, nil
 		},
 		ObserveExact: fixedBoxObserver(cfg, client),
 		Submit: func(ctx context.Context, tx *core.FixedTransaction) (boxData, error) {
 			box, createErr := client.CreateBox(ctx, createRequest{TTL: ttl, IdempotencyKey: tx.Claim.FixedCreateIntent.Attempt["idempotency_key"]})
 			if concreteBoxID(box.createdID) && box.ID == box.createdID {
-				server := fixedBoxServer(cfg, box, *tx.Claim, req.Keep)
+				server := fixedBoxServer(cfg, box, *tx.Claim)
 				if err := tx.Observe(core.FixedResourceBinding{CloudID: box.ID, ImmutableID: server.ImmutableID, Labels: server.Labels}); err != nil {
 					return boxData{}, err
 				}
@@ -66,11 +70,11 @@ func (b *backend) acquireFixed(ctx context.Context, cfg core.Config, client api,
 			return observed.Candidates[0], nil
 		},
 		PrepareAccess: func(ctx context.Context, tx *core.FixedTransaction, box boxData) (core.LeaseTarget, error) {
-			server := fixedBoxServer(cfg, box, *tx.Claim, req.Keep)
+			server := fixedBoxServer(cfg, box, *tx.Claim)
 			if err := tx.Bind(core.FixedResourceBinding{CloudID: box.ID, ImmutableID: server.ImmutableID, Labels: server.Labels}); err != nil {
 				return core.LeaseTarget{}, err
 			}
-			return b.prepareFixedBox(ctx, cfg, client, *tx.Claim, box, req.Keep)
+			return b.prepareFixedBox(ctx, cfg, client, *tx.Claim, box)
 		},
 	})
 	return core.CompleteFixedAcquisition(lease, err, req)
@@ -138,13 +142,13 @@ func fixedBoxObserver(cfg core.Config, client api) func(context.Context, *core.F
 	}
 }
 
-func fixedBoxServer(cfg core.Config, box boxData, claim core.LeaseClaim, keep bool) core.Server {
-	server := boxToServer(cfg, box, claim.LeaseID, claim.Slug, keep)
+func fixedBoxServer(cfg core.Config, box boxData, claim core.LeaseClaim) core.Server {
+	server := recordedBoxServer(cfg, box, claim)
 	server.ImmutableID = boxCreationTime(box)
 	return server
 }
 
-func (b *backend) prepareFixedBox(ctx context.Context, cfg core.Config, client api, claim core.LeaseClaim, box boxData, keep bool) (core.LeaseTarget, error) {
+func (b *backend) prepareFixedBox(ctx context.Context, cfg core.Config, client api, claim core.LeaseClaim, box boxData) (core.LeaseTarget, error) {
 	ready, err := client.waitForBoxReady(ctx, box)
 	if err != nil {
 		return core.LeaseTarget{}, err
@@ -155,7 +159,7 @@ func (b *backend) prepareFixedBox(ctx context.Context, cfg core.Config, client a
 	if err := client.PrepareSSH(ctx, box.ID); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	lease, err := b.leaseFromBox(ctx, cfg, ready, claim.LeaseID, claim.Slug, keep, true)
+	lease, err := b.leaseFromBox(ctx, cfg, ready, claim)
 	lease.Server.ImmutableID = boxCreationTime(box)
 	return lease, err
 }
@@ -183,18 +187,20 @@ func (b *backend) resolveFixed(ctx context.Context, cfg core.Config, client api,
 			if err != nil {
 				return core.LeaseTarget{}, err
 			}
-			if err := core.BindFixedClaim(claim, core.FixedResourceBinding{CloudID: box.ID, ImmutableID: boxCreationTime(box), Labels: fixedBoxServer(cfg, box, *claim, true).Labels}, persist); err != nil {
+			if err := core.BindFixedClaim(claim, core.FixedResourceBinding{CloudID: box.ID, ImmutableID: boxCreationTime(box), Labels: fixedBoxServer(cfg, box, *claim).Labels}, persist); err != nil {
 				return core.LeaseTarget{}, err
 			}
-			return b.prepareFixedBox(ctx, cfg, client, *claim, box, true)
+			return b.prepareFixedBox(ctx, cfg, client, *claim, box)
 		},
 		func(ctx context.Context, claim core.LeaseClaim) (core.LeaseTarget, error) {
 			if req.ReleaseOnly {
 				// The engine re-attests native evidence inside the deletion fence.
-				return core.LeaseTarget{LeaseID: claim.LeaseID, Server: fixedBoxServer(cfg, boxFromClaim(claim), claim, true)}, nil
+				return core.LeaseTarget{LeaseID: claim.LeaseID, Server: fixedBoxServer(cfg, boxFromClaim(claim), claim)}, nil
 			}
 			box, err := observe(ctx, claim)
-			return core.LeaseTarget{LeaseID: claim.LeaseID, Server: fixedBoxServer(cfg, box, claim, true)}, err
+			server := observedBoxServer(cfg, box, claim.LeaseID, claim.Slug, &claim)
+			server.ImmutableID = boxCreationTime(box)
+			return core.LeaseTarget{LeaseID: claim.LeaseID, Server: server}, err
 		})
 }
 
@@ -240,7 +246,7 @@ func (b *backend) statusFixed(ctx context.Context, cfg core.Config, client api, 
 		if len(observed.Candidates) != 1 {
 			return core.StatusView{}, false, core.FixedUncertainCustody(claim.LeaseID)
 		}
-		view := statusFromBox(cfg, observed.Candidates[0], claim.LeaseID, claim.Slug)
+		view := statusFromBox(cfg, observed.Candidates[0], claim.LeaseID, claim.Slug, &claim)
 		return view, boxStateFailed(view.State), nil
 	}, func() error { return core.Exit(5, "timed out waiting for ascii-box %s", claim.CloudID) })
 }

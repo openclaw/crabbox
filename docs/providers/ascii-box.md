@@ -291,6 +291,28 @@ so users can adopt the current name without invalidating pre-rename local state.
 A future native-CLI/config migration should preserve or explicitly migrate those
 bindings with regression and live lifecycle proof.
 
+## Observed metadata and local lease policy
+
+`status`, `list`, and read-only resolution report the Box's native creation,
+update, and expiry fields. Missing native facts stay unknown; reading a Box does
+not reset its age, substitute the reader's lease defaults, or invent an expiry.
+A matching local claim can supply recorded TTL, idle timeout, retention, and
+Crabbox activity. Native update time is not Crabbox activity, and native Box
+expiry is separate from the local lease's inactivity deadline.
+
+Acquisition records the effective requested TTL and retention once. Ordinary
+reuse preserves those recorded values and the existing idle timeout rather than
+replacing them with new defaults, including for fixed lease IDs. Explicit `run --id ... --idle-timeout ...` or
+`heartbeat --id ... --idle-timeout ...` updates local idle policy. Heartbeat
+persists local activity and any explicit idle replacement, but does not extend
+the Box's native expiry. Claims with deletion recovery pending cannot be touched;
+finish their existing `stop` recovery first.
+
+Older versions could overwrite recorded policy during reuse. The original values
+cannot be reconstructed; observations preserve the history that is actually
+recorded, and reads never manufacture missing history. Native identity and the
+existing deletion-operation evidence remain separate from display metadata.
+
 ## Limitations
 
 - `--class`, `--type`, image, size, and keep-alive options are not exposed

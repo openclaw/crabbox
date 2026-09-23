@@ -170,8 +170,9 @@ func publishBoxClaim(cfg core.Config, leaseID, slug, repoRoot string, box boxDat
 		if exists {
 			return core.Exit(2, "ascii-box lease %s acquired a claim during creation; retaining resource", leaseID)
 		}
-		now := time.Now().UTC().Format(time.RFC3339)
-		server := boxToServer(cfg, box, leaseID, slug, keep)
+		at := time.Now().UTC()
+		now := at.Format(time.RFC3339)
+		server := seedBoxLeaseServer(cfg, box, leaseID, slug, keep, at)
 		*claim = core.LeaseClaim{LeaseID: leaseID, Slug: slug, Provider: providerName, ProviderScope: (Provider{}).ClaimScope(cfg),
 			CloudID: box.ID, RepoRoot: repoRoot, ClaimedAt: now, LastUsedAt: now,
 			IdleTimeoutSeconds: int(cfg.IdleTimeout.Seconds()), Labels: server.Labels}

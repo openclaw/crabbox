@@ -115,6 +115,100 @@ func TestFixedBoxFreshReplayAndConflict(t *testing.T) {
 	}
 }
 
+func TestFixedBoxObservationsAndReusePreservePolicy(t *testing.T) {
+	b, f, req, clock := fixedBoxFixture(t)
+	req.Keep = false
+	req.Options.TTL = 20 * time.Minute
+	b.cfg.IdleTimeout = 5 * time.Minute
+	f.box = testBox()
+	f.box.UpdatedAt = "2026-08-30T12:01:00Z"
+	f.box.ExpiresAt = "2026-08-30T13:00:00Z"
+	lease, err := b.Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || original.Labels["ttl_secs"] != "1200" || original.Labels["keep"] != "false" {
+		t.Fatalf("fixed acquisition policy: %+v, %v", original, err)
+	}
+	b.cfg.TTL, b.cfg.IdleTimeout = 2*time.Hour, 45*time.Minute
+	status, err := b.Status(t.Context(), core.StatusRequest{ID: req.RequestedLeaseID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := b.List(t.Context(), core.ListRequest{})
+	if err != nil || len(list) != 1 {
+		t.Fatalf("inventory: %+v, %v", list, err)
+	}
+	readOnly, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, StatusOnly: true, NoLocalStateMutations: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, _ := time.Parse(time.RFC3339Nano, boxCreationTime(f.box))
+	updated, _ := time.Parse(time.RFC3339Nano, f.box.UpdatedAt.(string))
+	for _, labels := range []map[string]string{status.Labels, list[0].Labels, readOnly.Server.Labels} {
+		if labels["ttl_secs"] != "1200" || labels["idle_timeout_secs"] != "300" || labels["keep"] != "false" || labels["created_at"] != core.LeaseLabelTime(created) || labels["updated_at"] != core.LeaseLabelTime(updated) || labels["expires_at"] != f.box.ExpiresAt {
+			t.Fatalf("fixed observation reset policy or native facts: %v", labels)
+		}
+	}
+	after, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || !reflect.DeepEqual(original, after) {
+		t.Fatalf("fixed observations mutated the claim: %+v, %v", after, err)
+	}
+	clock.at = clock.at.Add(time.Minute)
+	lease, err = b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, Repo: req.Repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"created_at", "ttl_secs", "keep", "expires_at", "idle_timeout_secs"} {
+		if lease.Server.Labels[key] != original.Labels[key] {
+			t.Fatalf("fixed reuse reset %s: %q, want %q", key, lease.Server.Labels[key], original.Labels[key])
+		}
+	}
+	clock.at = clock.at.Add(time.Minute)
+	override := 10 * time.Minute
+	if _, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease, State: "working", IdleTimeoutOverride: &override}); err != nil {
+		t.Fatal(err)
+	}
+	after, err = core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || after.IdleTimeoutSeconds != 600 || after.LastUsedAt != clock.at.Format(time.RFC3339) || after.Labels["ttl_secs"] != "1200" || after.Labels["keep"] != "false" || after.Labels["created_at"] != original.Labels["created_at"] {
+		t.Fatalf("fixed heartbeat lost recorded policy: %+v, %v", after, err)
+	}
+}
+
+func TestFixedBoxTouchRejectsCleanup(t *testing.T) {
+	for _, phase := range []string{"intent", "journal", "operation"} {
+		t.Run(phase, func(t *testing.T) {
+			b, _, req, _ := fixedBoxFixture(t)
+			lease, err := b.Acquire(t.Context(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			held := core.CloneLeaseClaim(before)
+			switch phase {
+			case "intent":
+				held.FixedCreateIntent.State = "deleting"
+			case "journal":
+				held.FixedCreateIntent.Journal.Phase = "deleting"
+			case "operation":
+				held.FixedCreateIntent.Attempt["deletion_operation_id"] = testDeletionID
+			}
+			core.SetServerLeaseClaimSnapshot(&lease.Server, held, true)
+			if _, err := b.Touch(t.Context(), core.TouchRequest{Lease: lease, State: "ready"}); err == nil || (!strings.Contains(err.Error(), "not available for activity") && !strings.Contains(err.Error(), "entered cleanup")) {
+				t.Fatalf("cleanup was not rejected before claim publication: %v", err)
+			}
+			after, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("refused touch mutated claim: %+v, %v", after, err)
+			}
+		})
+	}
+}
+
 func TestFixedBoxLostReplyRecoveryWindow(t *testing.T) {
 	for _, elapsed := range []time.Duration{time.Hour, 24 * time.Hour, 25 * time.Hour, -time.Second} {
 		t.Run(elapsed.String(), func(t *testing.T) {
