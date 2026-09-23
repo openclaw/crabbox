@@ -25,9 +25,18 @@ const parallelsDHCPLeasesPath = "/Library/Preferences/Parallels/parallels_dhcp_l
 const parallelsPasswordEnvName = "CRABBOX_PARALLELS_PASSWORD"
 const parallelsCapacityLockRetryDelay = 100 * time.Millisecond
 
+const (
+	parallelsIPBootGrace        = 2 * time.Minute
+	parallelsIPProbeInterval    = 15 * time.Second
+	parallelsIPProbeTimeout     = 10 * time.Second
+	parallelsIPUnavailableLimit = 3
+)
+
 var errParallelsDHCPLeaseAmbiguous = errors.New("ambiguous Parallels DHCP lease")
 
 var errParallelsDHCPLeaseMissing = errors.New("no Parallels DHCP lease for VM MACs")
+
+var errParallelsGuestToolsUnavailable = errors.New("Parallels guest tools unavailable")
 
 // Acquisition owns clone mode and rollback; resolving an existing VM does not.
 type ParallelsIPWaitPurpose uint8
@@ -681,20 +690,45 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 	if timeout <= 0 {
 		timeout = 15 * time.Minute
 	}
-	deadline := time.Now().Add(timeout)
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	nextProbe := time.Now().Add(parallelsIPBootGrace)
+	unavailableProbes := 0
+	dhcpAddressObserved := false
 	var last ParallelsVM
+	var vmObserved bool
 	var lastDHCPError error
 	useDHCPFallback := c.Cfg.TargetOS == targetMacOS && strings.TrimSpace(c.Cfg.Parallels.BootstrapKey) != ""
+	waitError := func(reason string) error {
+		hint := parallelsIPTimeoutHint(c.Cfg, last, vmObserved, useDHCPFallback, lastDHCPError, purpose)
+		if lastDHCPError != nil {
+			return Exit(5, "%s Parallels VM %s IP; last_state=%s; DHCP fallback: %v; %s", reason, id, blank(last.State, "-"), lastDHCPError, hint)
+		}
+		return Exit(5, "%s Parallels VM %s IP; last_state=%s; %s", reason, id, blank(last.State, "-"), hint)
+	}
 	for {
-		vm, err := c.GetVM(ctx, id)
+		if ctx.Err() != nil {
+			return ParallelsVM{}, context.Cause(ctx)
+		}
+		vm, err := c.GetVM(waitCtx, id)
+		vmObserved = err == nil
+		if ctx.Err() != nil {
+			return ParallelsVM{}, context.Cause(ctx)
+		}
 		if err == nil {
 			last = vm
 			if vm.IP != "" {
+				if waitCtx.Err() != nil {
+					return ParallelsVM{}, waitError("timed out waiting for")
+				}
 				vm.IPSource = "tools"
 				return vm, nil
 			}
 			if useDHCPFallback {
-				data, readErr := c.readDHCPLeases(ctx)
+				data, readErr := c.readDHCPLeases(waitCtx)
+				if ctx.Err() != nil {
+					return ParallelsVM{}, context.Cause(ctx)
+				}
 				if readErr != nil {
 					lastDHCPError = readErr
 				} else if ip, resolveErr := resolveParallelsDHCPLeaseIP(data, vm.MACs, time.Now()); resolveErr != nil {
@@ -702,25 +736,62 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 					if errors.Is(resolveErr, errParallelsDHCPLeaseAmbiguous) {
 						return ParallelsVM{}, resolveErr
 					}
-				} else if probeErr := c.probeHostTCP(ctx, ip, c.Cfg.SSHPort); probeErr != nil {
-					lastDHCPError = probeErr
 				} else {
-					vm.IP = ip
-					vm.IPSource = "dhcp-mac"
-					return vm, nil
+					// A valid address makes SSH, rather than Tools, the remaining
+					// readiness dependency. Keep its full startup budget.
+					dhcpAddressObserved = true
+					probeErr := c.probeHostTCP(waitCtx, ip, c.Cfg.SSHPort)
+					if ctx.Err() != nil {
+						return ParallelsVM{}, context.Cause(ctx)
+					}
+					if probeErr != nil {
+						lastDHCPError = probeErr
+					} else {
+						if waitCtx.Err() != nil {
+							return ParallelsVM{}, waitError("timed out waiting for")
+						}
+						vm.IP = ip
+						vm.IPSource = "dhcp-mac"
+						return vm, nil
+					}
 				}
 			}
 		}
-		if time.Now().After(deadline) {
-			hint := parallelsIPTimeoutHint(c.Cfg, last, err == nil, useDHCPFallback, lastDHCPError, purpose)
-			if lastDHCPError != nil {
-				return ParallelsVM{}, Exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s; DHCP fallback: %v; %s", id, blank(last.State, "-"), lastDHCPError, hint)
+		if waitCtx.Err() != nil {
+			return ParallelsVM{}, waitError("timed out waiting for")
+		}
+		if err != nil || !strings.EqualFold(strings.TrimSpace(vm.State), "running") || dhcpAddressObserved {
+			unavailableProbes = 0
+		} else if !time.Now().Before(nextProbe) {
+			probeCtx, cancelProbe := context.WithTimeout(waitCtx, parallelsIPProbeTimeout)
+			probeErr := c.probeGuestExec(probeCtx, id, c.Cfg)
+			probeContextErr := probeCtx.Err()
+			cancelProbe()
+			nextProbe = time.Now().Add(parallelsIPProbeInterval)
+			if ctx.Err() != nil {
+				return ParallelsVM{}, context.Cause(ctx)
 			}
-			return ParallelsVM{}, Exit(5, "timed out waiting for Parallels VM %s IP; last_state=%s; %s", id, blank(last.State, "-"), hint)
+			if waitCtx.Err() != nil {
+				return ParallelsVM{}, waitError("timed out waiting for")
+			}
+			// Early boot metadata, timeouts and unrelated execution errors do
+			// not prove that Tools remain unavailable.
+			if probeContextErr == nil && ParallelsGuestToolsUnavailable(probeErr) {
+				unavailableProbes++
+			} else {
+				unavailableProbes = 0
+			}
+			if unavailableProbes >= parallelsIPUnavailableLimit {
+				return ParallelsVM{}, fmt.Errorf("%w: %w", errParallelsGuestToolsUnavailable,
+					waitError(fmt.Sprintf("failed after %d consecutive Tools-unavailable probes waiting for", unavailableProbes)))
+			}
 		}
 		select {
-		case <-ctx.Done():
-			return ParallelsVM{}, ctx.Err()
+		case <-waitCtx.Done():
+			if ctx.Err() != nil {
+				return ParallelsVM{}, context.Cause(ctx)
+			}
+			return ParallelsVM{}, waitError("timed out waiting for")
 		case <-time.After(5 * time.Second):
 		}
 	}
@@ -745,6 +816,7 @@ func parallelsIPTimeoutHint(cfg Config, last ParallelsVM, vmObserved, dhcpFallba
 		toolsIP = "none"
 	}
 	parts := []string{"clone_mode=" + mode + " macs=" + macs + " tools_ip=" + toolsIP}
+	parts = append(parts, "--parallels-startup-timeout bounds the overall IP wait; increasing it does not disable Tools fail-fast")
 	if !dhcpFallback && cfg.TargetOS == targetMacOS {
 		parts = append(parts, "for macOS guests without working Parallels Tools, set parallels.bootstrapKey to enable DHCP/SSH discovery")
 	}
@@ -758,7 +830,7 @@ func parallelsIPTimeoutHint(cfg Config, last ParallelsVM, vmObserved, dhcpFallba
 		}
 	}
 	if running && purpose == ParallelsIPWaitAcquisition && mode == "linked" {
-		parts = append(parts, "if the console stays blank, the template may not boot as a linked clone; retry with parallels.cloneMode=full and clear parallels.sourceSnapshot and parallels.sourceSnapshotId (full clones use the source VM's current state and cannot select a source snapshot)")
+		parts = append(parts, "the template snapshot may not boot as a linked clone; retry with parallels.cloneMode=full (--parallels-clone-mode full) and clear parallels.sourceSnapshot and parallels.sourceSnapshotId with --parallels-source-snapshot= --parallels-source-snapshot-id= (full clones use the source VM's current state and cannot select a source snapshot)")
 	}
 	return "hint: " + strings.Join(parts, "; ")
 }
@@ -770,17 +842,11 @@ func (c *ParallelsClient) WaitForGuestExec(ctx context.Context, id string, cfg C
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for {
-		var args []string
-		if cfg.TargetOS == targetWindows {
-			args = strings.Fields(PowershellCommand(`"ok" | Out-Null`))
-		} else {
-			args = []string{"/bin/sh", "-lc", "true"}
-		}
-		result, err := c.prlctl(ctx, nil, append([]string{"exec", id}, args...)...)
+		err := c.probeGuestExec(ctx, id, cfg)
 		if err == nil {
 			return nil
 		}
-		lastErr = commandOutputError("parallels guest exec", result, err)
+		lastErr = err
 		if c.Cfg.TargetOS == targetMacOS && strings.TrimSpace(c.Cfg.Parallels.BootstrapKey) != "" && ParallelsGuestToolsUnavailable(lastErr) {
 			return lastErr
 		}
@@ -795,14 +861,28 @@ func (c *ParallelsClient) WaitForGuestExec(ctx context.Context, id string, cfg C
 	}
 }
 
+func (c *ParallelsClient) probeGuestExec(ctx context.Context, id string, cfg Config) error {
+	var args []string
+	if cfg.TargetOS == targetWindows {
+		args = strings.Fields(PowershellCommand(`"ok" | Out-Null`))
+	} else {
+		args = []string{"/bin/sh", "-lc", "true"}
+	}
+	result, err := c.prlctl(ctx, nil, append([]string{"exec", id}, args...)...)
+	return commandOutputError("parallels guest exec", result, err)
+}
+
 func ParallelsGuestToolsUnavailable(err error) bool {
 	if err == nil {
 		return false
 	}
 	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "prl_err_vm_exec_guest_tool_not_available") ||
+	return errors.Is(err, errParallelsGuestToolsUnavailable) ||
+		strings.Contains(message, "prl_err_vm_exec_guest_tool_not_available") ||
 		strings.Contains(message, "guest tools are not available") ||
-		strings.Contains(message, "guest tools not available")
+		strings.Contains(message, "guest tools not available") ||
+		(strings.Contains(message, "unable to open new session in this virtual machine.") &&
+			strings.Contains(message, "runs the latest version of parallels tools, and is not isolated from the host os"))
 }
 
 func (c *ParallelsClient) WindowsGuestText(ctx context.Context, id, path string) (string, error) {

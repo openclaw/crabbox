@@ -87,8 +87,22 @@ down when they serve as local fleet bases.
 
 Some templates run as full clones but never boot as linked clones: Parallels
 reports the clone as `running`, yet the guest never gets a Tools session or a
-DHCP lease, and the lease fails after `parallels.startupTimeout` waiting for an
-IP. The timeout error names the clone mode and the clone's NIC MACs, and says
+DHCP lease. While waiting for an IP, Crabbox allows a two-minute boot grace
+period, then probes guest execution every 15 seconds with a ten-second limit
+per probe. Three consecutive Tools-unavailable responses fail early with a
+classified guest-tools error (normally after 2m30s), instead of spending the
+default 15-minute `--parallels-startup-timeout`. A successful probe or a different
+error resets the count; early `GuestTools: not_installed` metadata alone never
+triggers this failure. A shorter startup timeout still bounds the entire wait,
+including host queries and probes. Increasing it does not disable Tools fail-fast.
+
+Configured macOS DHCP/SSH discovery runs before each Tools probe. A valid DHCP
+address keeps that fallback waiting for SSH within the startup timeout, even
+when Tools remain unavailable. If neither discovery route finds an address,
+the repeated Tools-unavailable responses can fail early with the fallback
+diagnostic included.
+
+Both failure messages name the clone mode and the clone's NIC MACs, and say
 whether the macOS DHCP fallback found no matching lease for them in the host's
 lease file; a missing record alone does not establish a boot failure. If the
 last VM query fails, the Tools IP is reported as unknown. Failed
@@ -102,11 +116,14 @@ prlctl capture <new-vm-id> --file /tmp/crabbox-clone.png
 
 A persistently black capture can indicate a boot or display problem, but does
 not by itself prove that the guest OS failed to boot. Compare with
-`cloneMode: full` after clearing both `parallels.sourceSnapshot` and
+`--parallels-clone-mode full` after clearing both `parallels.sourceSnapshot` and
 `parallels.sourceSnapshotId`, including template, environment, and command-line
-overrides. Full clones use the source VM's current state; alternatively,
+overrides. Explicit empty flags clear both selectors for a retry:
+`--parallels-source-snapshot= --parallels-source-snapshot-id=`.
+Full clones use the source VM's current state; alternatively,
 investigate the template snapshot. Crabbox keeps `linked` as the default because
-full clones cannot select `parallels.sourceSnapshot`. When resolving an existing VM, the
+full clones cannot select `parallels.sourceSnapshot`; missing Tools on one template
+does not establish an Apple silicon limitation. When resolving an existing VM, the
 clone mode is reported as unknown rather than inferred from current configuration,
 and the capture hint targets that existing VM instead of a new acquisition.
 
