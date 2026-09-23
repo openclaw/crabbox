@@ -141,6 +141,9 @@ func (b *backend) RebindResolvedLeaseTarget(target *core.LeaseTarget, leaseID st
 }
 
 func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if _, ok := shared.MiBToBytes(int64(b.cfg.Firecracker.DiskMiB)); !ok && b.cfg.Firecracker.DiskMiB > 0 {
+		return core.LeaseTarget{}, core.Exit(2, "firecracker.diskMiB exceeds the supported byte range")
+	}
 	return shared.AcquireAttemptsRetry(b.rt, req.Keep, func() (core.LeaseTarget, error) {
 		return b.acquireOnce(ctx, req)
 	})

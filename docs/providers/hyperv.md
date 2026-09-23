@@ -103,7 +103,10 @@ values, are rejected when creating a VM, before native commands or local lease
 state changes. Inherited sizing does not block stopping an existing lease or
 cleaning up its resources; those operations retain their existing checks.
 Zero retains the defaults
-of 4 CPUs and 8192 MB; positive values are passed through unchanged. YAML CPU
+of 4 CPUs and 8192 MB. Positive memory values retain the existing binary
+megabyte conversion, but values that overflow a signed 64-bit byte count are
+rejected before native commands or local lease state changes. Other positive
+sizing values are passed through unchanged. YAML CPU
 and memory values still apply only when positive, so zero or negative YAML
 values leave the previous setting unchanged.
 

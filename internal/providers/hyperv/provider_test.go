@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -596,6 +597,9 @@ func TestCreateVMUsesDifferencingDisk(t *testing.T) {
 		}
 		if strings.Contains(script, "New-VM") && strings.Contains(script, "-VHDPath") && !strings.Contains(script, "-NewVHDPath") {
 			foundNewVM = true
+			if !strings.Contains(script, "-MemoryStartupBytes 8589934592 ") {
+				t.Fatal("default memory byte argument changed")
+			}
 		}
 		if strings.Contains(script, "Start-VM") {
 			foundStart = true
@@ -2273,6 +2277,57 @@ func TestHyperVDecodedSizing(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestHyperVRejectsMiBOverflowBeforeCreation(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("overflowing MiB input requires a 64-bit int")
+	}
+	oldOS := hypervHostOS
+	hypervHostOS = "windows"
+	t.Cleanup(func() { hypervHostOS = oldOS })
+	for _, size := range []int64{8796093022208, 17592186052608} {
+		t.Run(strconv.FormatInt(size, 10), func(t *testing.T) {
+			testutil.IsolateUserDirs(t)
+			runner := &recordingRunner{}
+			b := testBackend(runner)
+			b.cfg.HyperV.Memory = int(size)
+			_, err := b.Acquire(t.Context(), core.AcquireRequest{})
+			if err == nil || !strings.Contains(err.Error(), "hyperv.memory exceeds the supported byte range") {
+				t.Fatalf("overflow admission: %v", err)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatal("overflow dispatched a native command")
+			}
+		})
+	}
+}
+
+func TestHyperVCreateVMRejectsMiBOverflowBeforeNative(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("overflowing MiB input requires a 64-bit int")
+	}
+	testutil.IsolateUserDirs(t)
+	runner := &recordingRunner{}
+	b := testBackend(runner)
+	cfg := b.configForRun()
+	var size int64 = 17592186052608
+	cfg.HyperV.Memory = int(size)
+	err := b.createVM(t.Context(), cfg, "crabbox-overflow")
+	if err == nil {
+		for _, call := range runner.calls {
+			if script := call.Args[len(call.Args)-1]; strings.Contains(script, "New-VM") {
+				t.Logf("incorrect wrapped memory dispatched: %t", strings.Contains(script, "-MemoryStartupBytes 8589934592 "))
+			}
+		}
+		t.Fatal("overflowing memory request succeeded")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatal("overflow dispatched a native command")
+	}
+	if _, err := os.Stat(hypervVHDDir()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("overflow created VHD state: %v", err)
 	}
 }
 

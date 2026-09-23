@@ -83,6 +83,8 @@ requirements:
   conf dir before reporting readiness.
 - Size the host so the requested `firecracker.cpus`, `firecracker.memoryMiB`,
   and `firecracker.diskMiB` are realistic for the guest you plan to boot.
+  Disk sizes that cannot be represented as a signed 64-bit byte count are
+  rejected before creating lease state or copying the root filesystem.
 
 This provider rejects non-Linux targets and Tailscale-managed networking.
 

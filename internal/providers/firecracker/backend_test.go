@@ -85,6 +85,70 @@ func TestFirecrackerOrdinaryFlagStages(t *testing.T) {
 	}
 }
 
+func TestWritableRootFSRejectsMiBOverflowBeforeCopy(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("overflowing MiB input requires a 64-bit int")
+	}
+	for _, size := range []int64{8796093022208, 17592186044417} {
+		t.Run(strconv.FormatInt(size, 10), func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, "source.ext4")
+			if err := os.WriteFile(source, []byte("tiny fixture"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dest := filepath.Join(root, "lease", "rootfs.ext4")
+			if err := prepareWritableRootFS(source, dest, int(size)); err == nil {
+				t.Fatal("overflowing MiB request succeeded")
+			}
+			if _, err := os.Stat(filepath.Dir(dest)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("overflow created destination state: %v", err)
+			}
+		})
+	}
+}
+
+func TestWritableRootFSPreservesCopyAndExpansion(t *testing.T) {
+	for _, mib := range []int{-1, 0, 1} {
+		t.Run(strconv.Itoa(mib), func(t *testing.T) {
+			root := t.TempDir()
+			source, dest := filepath.Join(root, "source"), filepath.Join(root, "copy")
+			data := []byte("tiny fixture")
+			if err := os.WriteFile(source, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := prepareWritableRootFS(source, dest, mib); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(dest)
+			wantSize := len(data)
+			if mib > 0 {
+				wantSize = 1 << 20
+			}
+			if err != nil || len(got) != wantSize || !bytes.HasPrefix(got, data) {
+				t.Fatalf("copy/expansion: size=%d want=%d err=%v", len(got), wantSize, err)
+			}
+		})
+	}
+}
+
+func TestFirecrackerRejectsMiBOverflowBeforeAcquisition(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("overflowing MiB input requires a 64-bit int")
+	}
+	cfg := core.BaseConfig()
+	var size int64 = 8796093022208
+	cfg.Firecracker.DiskMiB = int(size)
+	b := newBackend(Provider{}.Spec(), cfg, core.Runtime{Stderr: io.Discard}).(*backend)
+	b.stateRoot = func() (string, error) {
+		t.Fatal("overflow reached local state preparation")
+		return "", nil
+	}
+	_, err := b.Acquire(t.Context(), core.AcquireRequest{})
+	if err == nil || !strings.Contains(err.Error(), "firecracker.diskMiB exceeds the supported byte range") {
+		t.Fatalf("overflow admission: %v", err)
+	}
+}
+
 func TestManualConfigInputFlags(t *testing.T) {
 	cfg := core.BaseConfig()
 	cfg.Provider = "fixture-other"

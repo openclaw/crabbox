@@ -5,9 +5,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func prepareWritableRootFS(sourcePath, destPath string, requestedMiB int) error {
+	var targetSize int64
+	if requestedMiB > 0 {
+		var ok bool
+		targetSize, ok = shared.MiBToBytes(int64(requestedMiB))
+		if !ok {
+			return fmt.Errorf("firecracker.diskMiB exceeds the supported byte range")
+		}
+	}
 	info, err := os.Stat(sourcePath)
 	if err != nil {
 		return fmt.Errorf("stat firecracker rootfs %s: %w", sourcePath, err)
@@ -22,7 +32,6 @@ func prepareWritableRootFS(sourcePath, destPath string, requestedMiB int) error 
 		return err
 	}
 	if requestedMiB > 0 {
-		targetSize := int64(requestedMiB) * 1024 * 1024
 		if targetSize > info.Size() {
 			if err := os.Truncate(destPath, targetSize); err != nil {
 				return fmt.Errorf("expand firecracker rootfs %s to %d bytes: %w", destPath, targetSize, err)

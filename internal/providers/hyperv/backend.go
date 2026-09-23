@@ -107,6 +107,9 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 	if b.cfg.HyperV.Memory < 0 {
 		return core.LeaseTarget{}, core.Exit(2, "hyperv.memory must be zero or greater")
 	}
+	if _, ok := shared.MiBToBytes(int64(b.cfg.HyperV.Memory)); !ok {
+		return core.LeaseTarget{}, core.Exit(2, "hyperv.memory exceeds the supported byte range")
+	}
 	if hypervHostOS != "windows" {
 		return core.LeaseTarget{}, core.Exit(2, "provider=%s requires a Windows host with Hyper-V enabled", providerName)
 	}
@@ -509,6 +512,10 @@ func (b *backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 // createVM creates and starts a disconnected Hyper-V VM. Acquire configures
 // guest SSH over PowerShell Direct before connecting the network adapter.
 func (b *backend) createVM(ctx context.Context, cfg core.Config, name string) error {
+	memBytes, ok := shared.MiBToBytes(int64(cfg.HyperV.Memory))
+	if !ok {
+		return core.Exit(2, "hyperv.memory exceeds the supported byte range")
+	}
 	vhdDir := hypervVHDDir()
 	if err := os.MkdirAll(vhdDir, 0o755); err != nil {
 		return core.Exit(2, "create VHD directory %s: %v", vhdDir, err)
@@ -527,8 +534,6 @@ func (b *backend) createVM(ctx context.Context, cfg core.Config, name string) er
 	if err != nil {
 		return shared.LocalCommandError("switch validation", result, err)
 	}
-
-	memBytes := int64(cfg.HyperV.Memory) * 1024 * 1024
 
 	// Back each lease with a differencing disk over the template instead of
 	// copying the whole VHDX. Creating the child is near-instant and space-thin
