@@ -402,8 +402,11 @@ for trusted user YAML; credentials remain runtime environment inputs.
    probe provider liveness rather than treating the local claim as proof that a
    sandbox is still running.
 6. One-shot `run` without `--keep` destroys the sandbox after the command.
-7. `cleanup` deletes idle- or TTL-expired claimed sandboxes. Discovery can read
-   a claim and report an in-flight skip without waiting for its active operation.
+7. `cleanup` deletes idle- or TTL-expired claimed sandboxes. Out-of-range persisted
+   idle seconds do not authorize idle expiry (`invalid-idle-timeout`); independent
+   TTL, stale-create, and missing/invalid-timestamp cleanup decisions still apply.
+   Discovery can read a claim and report an in-flight skip without waiting for
+   its active operation.
    Destructive cleanup locks the exact target and rechecks the claim snapshot.
    That comparison and deletion remain serialized with create, archive sync,
    command execution, stop, and reclaim so cleanup cannot remove ownership

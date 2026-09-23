@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -792,6 +793,111 @@ func TestCloudRunSandboxCleanupSkipsInFlightThenDeletesIdle(t *testing.T) {
 			}
 			if owner != "" || len(destroys) != 1 || destroys[0] != [2]string{sandboxID, snapshot.Labels[claimOwnershipLabel]} {
 				t.Fatalf("expired cleanup owner=%q destroys=%v", owner, destroys)
+			}
+		})
+	}
+}
+
+func TestCloudRunSandboxCleanupIdleOverflowPolicy(t *testing.T) {
+	if strconv.IntSize != 64 {
+		t.Skip("persisted overflow fixture requires 64-bit int")
+	}
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	seconds := int64(9223372037)
+	for _, offset := range []time.Duration{-time.Nanosecond, 0, time.Nanosecond} {
+		claim := core.LeaseClaim{IdleTimeoutSeconds: 60, LastUsedAt: now.Add(-time.Minute).Format(time.RFC3339)}
+		due, reason := claimCleanupDue(claim, now.Add(offset))
+		wantDue, wantReason := offset >= 0, "idle-timeout-remaining"
+		if wantDue {
+			wantReason = "idle-timeout-expired"
+		}
+		if due != wantDue || reason != wantReason {
+			t.Errorf("boundary %s cleanup=(%v,%q), want (%v,%q)", offset, due, reason, wantDue, wantReason)
+		}
+	}
+	for _, fallback := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fallback=%t", fallback), func(t *testing.T) {
+			claim := core.LeaseClaim{IdleTimeoutSeconds: int(seconds), LastUsedAt: now.Add(-time.Minute).Format(time.RFC3339), ClaimedAt: now.Add(-time.Minute).Format(time.RFC3339), Labels: map[string]string{}}
+			if fallback {
+				claim.LastUsedAt = " \t "
+			}
+			if due, reason := claimCleanupDue(claim, now); due || reason != "invalid-idle-timeout" {
+				t.Errorf("cleanup=(%v,%q), want retained overflow", due, reason)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name, state, ttl, active, last string
+		due                            bool
+		reason                         string
+	}{
+		{"conflict", "conflict", "", "", "bad", false, "ownership-conflict"},
+		{"in flight", "running", "", now.Add(time.Minute).Format(time.RFC3339), "bad", false, "in-flight-running"},
+		{"stale creating", "creating", "", "", "bad", true, "stale-creating"},
+		{"expired TTL", "", now.Format(time.RFC3339), "", "bad", true, "ttl-expired"},
+		{"invalid TTL", "", "bad", "", "bad", true, "unparseable-ttl"},
+		{"missing timestamp", "", "", "", "", true, "missing-timestamps"},
+		{"invalid timestamp", "", "", "", "bad", true, "unparseable-timestamp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claim := core.LeaseClaim{IdleTimeoutSeconds: int(seconds), LastUsedAt: tc.last, Labels: map[string]string{claimStateLabel: tc.state, claimExpiresAtLabel: tc.ttl, claimActiveUntilLabel: tc.active}}
+			if due, reason := claimCleanupDue(claim, now); due != tc.due || reason != tc.reason {
+				t.Fatalf("cleanup=(%v,%q), want (%v,%q)", due, reason, tc.due, tc.reason)
+			}
+		})
+	}
+}
+
+func TestCloudRunSandboxCleanupRetainsOverflowingIdleClaim(t *testing.T) {
+	if strconv.IntSize != 64 {
+		t.Skip("persisted overflow fixture requires 64-bit int")
+	}
+	for _, fallback := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fallback=%t", fallback), func(t *testing.T) {
+			isolateLeaseHome(t)
+			now := time.Now().UTC()
+			b := NewBackend(Provider{}.Spec(), core.Config{CloudRunSandbox: core.CloudRunSandboxConfig{CLIPath: "/usr/local/gcp/bin/sandbox", Workdir: "/tmp/crabbox"}, IdleTimeout: time.Hour}, core.Runtime{Clock: cloudRunSandboxFixedClock{now: now}, Stdout: io.Discard, Stderr: io.Discard}).(*backend)
+			scope, err := b.claimScope()
+			if err != nil {
+				t.Fatal(err)
+			}
+			const sandboxID = "crabbox-overflow-owned"
+			claim, err := core.ClaimLeaseForRepoProviderScopePondWithLabels(leasePrefix+sandboxID, "overflow-owned", providerName, scope, "", t.TempDir(), time.Hour, map[string]string{claimStateLabel: "ready", claimOwnershipLabel: sandboxID, claimExpiresAtLabel: now.Add(time.Hour).Format(time.RFC3339)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			seconds := int64(9223372037)
+			claim.IdleTimeoutSeconds = int(seconds)
+			claim.ClaimedAt = now.Add(-time.Minute).Format(time.RFC3339)
+			claim.LastUsedAt = claim.ClaimedAt
+			if fallback {
+				claim.LastUsedAt = ""
+			}
+			path := filepath.Join(os.Getenv("XDG_STATE_HOME"), "crabbox", "claims", claim.LeaseID+".json")
+			before, err := json.Marshal(claim)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, before, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			destroys := 0
+			transport := &fakeTransport{mode: "direct", onDestroyOwned: func(id, token string) error { destroys++; return nil }}
+			previous := newTransport
+			newTransport = func(core.Config, core.Runtime) (sandboxTransport, error) { return transport, nil }
+			t.Cleanup(func() { newTransport = previous })
+			if err := b.Cleanup(context.Background(), core.CleanupRequest{}); err != nil {
+				t.Fatal(err)
+			}
+			if destroys != 0 {
+				t.Errorf("cleanup made %d destructive calls for overflowing idle timeout", destroys)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("claim not preserved: %v", err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Error("cleanup changed overflowing claim")
 			}
 		})
 	}

@@ -25,6 +25,7 @@
 ### Fixes
 
 - Reject overflowing Firecracker disk and Hyper-V memory byte conversions before lease state, filesystem copies, or native VM creation, preserving existing sizing defaults and recovery paths. [PR 2495](https://github.com/openclaw/crabbox/pull/2495). Thanks @steipete.
+- Prevent out-of-range persisted idle seconds from authorizing Cloud Run Sandbox idle expiry while preserving independent TTL, stale-create, and invalid-timestamp cleanup policies.
 - Preserve sandbox and Nomad resources with overflowing idle timeouts by sharing checked duration conversion, while retaining provider-specific TTL, deadline, timestamp, and ownership policies. [PR 2494](https://github.com/openclaw/crabbox/pull/2494). Thanks @steipete.
 - Preserve running leases with malformed idle timeouts instead of letting duration overflow trigger cleanup; share the bounded expiry check with Machine0 while retaining provider ownership and lifecycle safeguards. [PR 2492](https://github.com/openclaw/crabbox/pull/2492). Thanks @steipete.
 - Bound GitHub membership verification to 15 seconds, including stalled response bodies and team pagination, so authentication fails closed without leaving shared checks stuck indefinitely. [PR 2481](https://github.com/openclaw/crabbox/pull/2481).
