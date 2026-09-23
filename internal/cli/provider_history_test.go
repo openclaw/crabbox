@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,9 +10,58 @@ import (
 	"time"
 )
 
+const (
+	providerHistoryTestPrimary   = "history-provider-a"
+	providerHistoryTestSecondary = "history-provider-b"
+	providerHistoryTestAlias     = "history-provider-alias"
+)
+
+type providerHistoryTestProvider struct {
+	name    string
+	aliases []string
+}
+
+func (p providerHistoryTestProvider) Spec() ProviderSpec {
+	return ProviderSpec{
+		Name:    p.name,
+		Aliases: append([]string(nil), p.aliases...),
+		Kind:    ProviderKindSSHLease,
+		Targets: []TargetSpec{{OS: targetLinux}},
+	}
+}
+
+func (providerHistoryTestProvider) RegisterFlags(*flag.FlagSet, Config) any { return nil }
+func (providerHistoryTestProvider) ApplyFlags(*Config, *flag.FlagSet, any) error {
+	return nil
+}
+func (providerHistoryTestProvider) Configure(Config, Runtime) (Backend, error) { return nil, nil }
+
+var providerHistoryTestRoster = []providerHistoryTestProvider{
+	{name: providerHistoryTestPrimary, aliases: []string{providerHistoryTestAlias}},
+	{name: providerHistoryTestSecondary},
+	{name: "history-provider-c"},
+	{name: "history-provider-d"},
+	{name: "history-provider-e"},
+	{name: "history-provider-f"},
+	{name: "history-provider-g"},
+	{name: "history-provider-h"},
+	{name: "history-provider-i"},
+	{name: "history-provider-j"},
+}
+
 func setupProviderHistoryTest(t *testing.T) string {
 	t.Helper()
 	clearConfigEnv(t)
+	for _, provider := range providerHistoryTestRoster {
+		RegisterProvider(provider)
+		provider := provider
+		t.Cleanup(func() {
+			delete(providerRegistry, normalizeProviderName(provider.name))
+			for _, alias := range provider.aliases {
+				delete(providerRegistry, normalizeProviderName(alias))
+			}
+		})
+	}
 	root := t.TempDir()
 	t.Chdir(root)
 	home := t.TempDir()
@@ -32,13 +82,13 @@ func TestProviderHistoryMaintainsBoundedMRUOrder(t *testing.T) {
 	second := first.Add(time.Minute)
 	third := second.Add(time.Minute)
 
-	if err := rememberProviderForCurrentWorkspace("boxd", first); err != nil {
+	if err := rememberProviderForCurrentWorkspace(providerHistoryTestPrimary, first); err != nil {
 		t.Fatal(err)
 	}
-	if err := rememberProviderForCurrentWorkspace("aws", second); err != nil {
+	if err := rememberProviderForCurrentWorkspace(providerHistoryTestSecondary, second); err != nil {
 		t.Fatal(err)
 	}
-	if err := rememberProviderForCurrentWorkspace("boxd", third); err != nil {
+	if err := rememberProviderForCurrentWorkspace(providerHistoryTestPrimary, third); err != nil {
 		t.Fatal(err)
 	}
 
@@ -52,10 +102,10 @@ func TestProviderHistoryMaintainsBoundedMRUOrder(t *testing.T) {
 	if len(record.Providers) != 2 {
 		t.Fatalf("providers=%#v", record.Providers)
 	}
-	if record.Providers[0].Provider != "boxd" || !record.Providers[0].LastSelectedAt.Equal(third) {
+	if record.Providers[0].Provider != providerHistoryTestPrimary || !record.Providers[0].LastSelectedAt.Equal(third) {
 		t.Fatalf("first provider=%#v", record.Providers[0])
 	}
-	if record.Providers[1].Provider != "aws" || !record.Providers[1].LastSelectedAt.Equal(second) {
+	if record.Providers[1].Provider != providerHistoryTestSecondary || !record.Providers[1].LastSelectedAt.Equal(second) {
 		t.Fatalf("second provider=%#v", record.Providers[1])
 	}
 }
@@ -93,40 +143,40 @@ func TestProviderHistoryCanonicalizesAliasesAndCapsEntries(t *testing.T) {
 	}
 
 	// Provider aliases are persisted canonically.
-	if err := rememberProviderForCurrentWorkspace("docker", start.Add(24*time.Hour)); err != nil {
+	if err := rememberProviderForCurrentWorkspace(providerHistoryTestAlias, start.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	record, _, err = readProviderHistory()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Providers[0].Provider != "local-container" {
+	if record.Providers[0].Provider != providerHistoryTestPrimary {
 		t.Fatalf("alias persisted as %q", record.Providers[0].Provider)
 	}
 }
 
 func TestRecentProviderFallbackIsLowerPriorityThanConfig(t *testing.T) {
 	setupProviderHistoryTest(t)
-	if err := rememberProviderForCurrentWorkspace("boxd", time.Now().UTC()); err != nil {
+	if err := rememberProviderForCurrentWorkspace(providerHistoryTestPrimary, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
 	cfg := baseConfig()
 	applyRecentProviderFallback(&cfg)
-	if cfg.Provider != "boxd" || cfg.providerSelectionSource != providerSelectionRecentHistory {
+	if cfg.Provider != providerHistoryTestPrimary || cfg.providerSelectionSource != providerSelectionRecentHistory {
 		t.Fatalf("history fallback provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
 	}
 
-	setProviderSelection(&cfg, "aws", providerSelectionUserConfig)
+	setProviderSelection(&cfg, providerHistoryTestSecondary, providerSelectionUserConfig)
 	applyRecentProviderFallback(&cfg)
-	if cfg.Provider != "aws" || cfg.providerSelectionSource != providerSelectionUserConfig {
+	if cfg.Provider != providerHistoryTestSecondary || cfg.providerSelectionSource != providerSelectionUserConfig {
 		t.Fatalf("user config lost to history: provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
 	}
 }
 
 func TestRecentProviderFallbackDisabledInCI(t *testing.T) {
 	setupProviderHistoryTest(t)
-	if err := rememberProviderForCurrentWorkspace("boxd", time.Now().UTC()); err != nil {
+	if err := rememberProviderForCurrentWorkspace(providerHistoryTestPrimary, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CI", "1")
@@ -143,7 +193,7 @@ func TestRecentProviderFallbackDisabledInCI(t *testing.T) {
 func TestRecentProviderDoesNotBlockLeaseIDRouting(t *testing.T) {
 	setupProviderHistoryTest(t)
 	cfg := baseConfig()
-	setProviderSelection(&cfg, "boxd", providerSelectionRecentHistory)
+	setProviderSelection(&cfg, providerHistoryTestPrimary, providerSelectionRecentHistory)
 
 	fs := newFlagSet("history-route-test", &bytes.Buffer{})
 	registerProviderSelectionFlag(fs, cfg, providerHelpAll())
@@ -197,7 +247,7 @@ func TestProviderHistoryClearIsIdempotentWhenStateDoesNotExist(t *testing.T) {
 func TestRememberExplicitProviderRequiresRealFlagIntent(t *testing.T) {
 	setupProviderHistoryTest(t)
 	cfg := baseConfig()
-	setProviderSelection(&cfg, "boxd", providerSelectionFlag)
+	setProviderSelection(&cfg, providerHistoryTestPrimary, providerSelectionFlag)
 	cfg.providerExplicit = false
 	rememberExplicitProviderBestEffort(cfg, &bytes.Buffer{})
 	if _, ok, err := readProviderHistory(); err != nil || ok {
@@ -207,14 +257,14 @@ func TestRememberExplicitProviderRequiresRealFlagIntent(t *testing.T) {
 	cfg.providerExplicit = true
 	rememberExplicitProviderBestEffort(cfg, &bytes.Buffer{})
 	record, ok, err := readProviderHistory()
-	if err != nil || !ok || len(record.Providers) != 1 || record.Providers[0].Provider != "boxd" {
+	if err != nil || !ok || len(record.Providers) != 1 || record.Providers[0].Provider != providerHistoryTestPrimary {
 		t.Fatalf("explicit provider history=%#v ok=%t err=%v", record, ok, err)
 	}
 }
 
 func TestProviderHistoryCommandShowsAndClearsCurrentWorkspace(t *testing.T) {
 	setupProviderHistoryTest(t)
-	if err := rememberProviderForCurrentWorkspace("boxd", time.Now().UTC()); err != nil {
+	if err := rememberProviderForCurrentWorkspace(providerHistoryTestPrimary, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
@@ -223,7 +273,7 @@ func TestProviderHistoryCommandShowsAndClearsCurrentWorkspace(t *testing.T) {
 	if err := app.providerHistory([]string{"--json"}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(stdout.String(), `"provider":"boxd"`) {
+	if !strings.Contains(stdout.String(), `"provider":"`+providerHistoryTestPrimary+`"`) {
 		t.Fatalf("history json=%q", stdout.String())
 	}
 
@@ -241,7 +291,7 @@ func TestProviderHistoryCommandShowsAndClearsCurrentWorkspace(t *testing.T) {
 
 func TestProviderHistoryLoadConfigIntegration(t *testing.T) {
 	setupProviderHistoryTest(t)
-	if err := rememberProviderForCurrentWorkspace("boxd", time.Now().UTC()); err != nil {
+	if err := rememberProviderForCurrentWorkspace(providerHistoryTestPrimary, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -249,30 +299,30 @@ func TestProviderHistoryLoadConfigIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "boxd" || cfg.providerSelectionSource != providerSelectionRecentHistory {
+	if cfg.Provider != providerHistoryTestPrimary || cfg.providerSelectionSource != providerSelectionRecentHistory {
 		t.Fatalf("loadConfig provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
 	}
 
-	t.Setenv("CRABBOX_PROVIDER", "aws")
+	t.Setenv("CRABBOX_PROVIDER", providerHistoryTestSecondary)
 	cfg, err = loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "aws" || cfg.providerSelectionSource != providerSelectionEnvironment {
+	if cfg.Provider != providerHistoryTestSecondary || cfg.providerSelectionSource != providerSelectionEnvironment {
 		t.Fatalf("env provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
 	}
 }
 
 func TestConfigShowReportsRecentProviderHistorySource(t *testing.T) {
 	setupProviderHistoryTest(t)
-	if err := rememberProviderForCurrentWorkspace("boxd", time.Now().UTC()); err != nil {
+	if err := rememberProviderForCurrentWorkspace(providerHistoryTestPrimary, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
 	if err := (App{Stdout: &stdout, Stderr: &stderr}).configShow([]string{"--json"}); err != nil {
 		t.Fatalf("config show: %v stderr=%q", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `"provider":"boxd"`) ||
+	if !strings.Contains(stdout.String(), `"provider":"`+providerHistoryTestPrimary+`"`) ||
 		!strings.Contains(stdout.String(), `"providerSource":"recent_history"`) ||
 		!strings.Contains(stdout.String(), `"providerSelected":true`) {
 		t.Fatalf("config show history provenance=%q", stdout.String())
@@ -281,7 +331,7 @@ func TestConfigShowReportsRecentProviderHistorySource(t *testing.T) {
 
 func TestProviderHistoryFallbackRequiresNoExplicitConfigFile(t *testing.T) {
 	setupProviderHistoryTest(t)
-	if err := rememberProviderForCurrentWorkspace("boxd", time.Now().UTC()); err != nil {
+	if err := rememberProviderForCurrentWorkspace(providerHistoryTestPrimary, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "config.yaml")
