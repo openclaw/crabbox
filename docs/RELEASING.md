@@ -207,6 +207,18 @@ build and is not publishable. Protected native verification exports the exact
 embedded bytes, matches their provenance digest, and independently checks their
 signature, entitlements, hardened runtime, timestamp, and online notarization.
 
+The signer starts with Apple's regional S3 upload route. It retries once through
+S3 acceleration only for the recognized aborted-upload deadline, with an empty
+result, an ordinary failure exit, and the same signed archive bytes. Extra or
+unknown diagnostics, cancellation, returned receipts, and validation failures
+remain fatal. The retry does not re-sign or repack the binary, and accepted
+notarization plus the online ticket check are still required.
+For a build host with confirmed regional upload failures, set
+`CRABBOX_NOTARY_S3_ACCELERATION=1` on the managed packaging invocation to use one
+accelerated upload attempt per binary directly. The default value `0` retains
+the regional-first policy and its one bounded fallback. Both routes are
+[supported by Apple](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow#Ensure-your-build-server-has-network-access).
+
 The signing wrapper never runs candidate code while its managed keychain or
 notary profile is available. It signs the token-free producer outputs, embeds
 the accepted VMD, compiles without release credentials, and stops after static

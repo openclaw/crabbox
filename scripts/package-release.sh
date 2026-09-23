@@ -280,9 +280,10 @@ node "$ROOT/scripts/verify-go-release-binary.mjs" \
   "$TAG_COMMIT" darwin arm64 "$CRABBOX_RELEASE_GO_VERSION"
 
 sign_and_capture_notary_id() {
-  local identifier=$1 arch=$2 binary=$3 output id
-  output=$("$ROOT/scripts/codesign-macos.sh" "$identifier" "$arch" "$binary")
+  local identifier=$1 arch=$2 binary=$3 output id signing_rc=0
+  output=$("$ROOT/scripts/codesign-macos.sh" "$identifier" "$arch" "$binary") || signing_rc=$?
   printf '%s\n' "$output" >&2
+  [[ "$signing_rc" -eq 0 ]] || return "$signing_rc"
   id=$(sed -n 's/^Notarization accepted: //p' <<<"$output")
   [[ "$id" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] || {
     echo "signing helper did not return an exact notarization submission ID" >&2

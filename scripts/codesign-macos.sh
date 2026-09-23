@@ -16,6 +16,14 @@ ARCH=$(crabbox_release_normalize_macos_arch "$2")
 BINARY=$3
 crabbox_release_assert_identifier_arch "$IDENTIFIER" "$ARCH"
 crabbox_release_assert_no_publication_tokens
+case "${CRABBOX_NOTARY_S3_ACCELERATION-0}" in
+  0) notary_s3_modes=(--no-s3-acceleration --s3-acceleration) ;;
+  1) notary_s3_modes=(--s3-acceleration) ;;
+  *)
+    echo "CRABBOX_NOTARY_S3_ACCELERATION must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
 
 [[ "$(uname -s)" == Darwin ]] || {
   echo "official macOS release signing must run on macOS" >&2
@@ -40,7 +48,7 @@ CODESIGN_IDENTITY=${CODESIGN_IDENTITY:-${MAC_RELEASE_CODESIGN_IDENTITY:-}}
   exit 1
 }
 
-for tool in codesign csreq ditto lipo node plutil xcrun; do
+for tool in codesign csreq ditto lipo node plutil shasum xcrun; do
   command -v "$tool" >/dev/null || {
     echo "missing required tool: $tool" >&2
     exit 1
@@ -59,6 +67,7 @@ WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-notary.XXXXXX")
 trap 'rm -rf "$WORK_DIR"' EXIT
 NOTARY_ARCHIVE="$WORK_DIR/$(basename "$BINARY").zip"
 NOTARY_RESULT="$WORK_DIR/notary-result.json"
+NOTARY_ERROR="$WORK_DIR/notary-error.txt"
 
 sign_args=(
   --force \
@@ -122,15 +131,41 @@ NODE
 fi
 
 ditto -c -k --keepParent "$BINARY" "$NOTARY_ARCHIVE"
-if ! xcrun notarytool submit "$NOTARY_ARCHIVE" \
-  --keychain-profile "$NOTARYTOOL_KEYCHAIN_PROFILE" \
-  --keychain "$MAC_RELEASE_CODESIGN_KEYCHAIN" \
-  --no-s3-acceleration \
-  --wait \
-  --output-format json >"$NOTARY_RESULT"; then
-  echo "notarization submission failed" >&2
-  exit 1
-fi
+notary_archive_sha=$(shasum -a 256 "$NOTARY_ARCHIVE")
+notary_archive_sha=${notary_archive_sha%% *}
+notary_upload_deadline='^Error: abortedUpload\(.*error: HTTPClientError\.deadlineExceeded\)$'
+for notary_s3_mode in "${notary_s3_modes[@]}"; do
+  if [[ "$notary_s3_mode" == --s3-acceleration ]]; then
+    retry_archive_sha=$(shasum -a 256 "$NOTARY_ARCHIVE")
+    [[ "${retry_archive_sha%% *}" == "$notary_archive_sha" ]] || {
+      echo "notarization archive changed before upload" >&2
+      exit 1
+    }
+  fi
+  if xcrun notarytool submit "$NOTARY_ARCHIVE" \
+    --keychain-profile "$NOTARYTOOL_KEYCHAIN_PROFILE" \
+    --keychain "$MAC_RELEASE_CODESIGN_KEYCHAIN" \
+    "$notary_s3_mode" \
+    --wait \
+    --output-format json >"$NOTARY_RESULT" 2>"$NOTARY_ERROR"; then
+    cat "$NOTARY_ERROR" >&2
+    break
+  else
+    notary_rc=$?
+  fi
+  cat "$NOTARY_ERROR" >&2
+  notary_error=$(cat "$NOTARY_ERROR")
+  # Only retry an upload deadline without a receipt; never replay polling,
+  # rejection, cancellation, or an ambiguous mixture of diagnostics.
+  if [[ "$notary_s3_mode" != --no-s3-acceleration || "$notary_rc" -ge 128 ||
+    -s "$NOTARY_RESULT" || "$notary_error" == *$'\n'* ]] ||
+    [[ ! "$notary_error" =~ $notary_upload_deadline ]]; then
+    echo "notarization submission failed" >&2
+    exit "$notary_rc"
+  fi
+  echo "regional notarization upload timed out; retrying once with S3 acceleration" >&2
+  sleep 5
+done
 
 NOTARY_STATUS=$(plutil -extract status raw -o - "$NOTARY_RESULT" 2>/dev/null || true)
 NOTARY_ID=$(plutil -extract id raw -o - "$NOTARY_RESULT" 2>/dev/null || true)
@@ -138,8 +173,6 @@ NOTARY_ID=$(plutil -extract id raw -o - "$NOTARY_RESULT" 2>/dev/null || true)
   echo "notarization failed or returned no submission ID: ${NOTARY_STATUS:-unknown status}" >&2
   exit 1
 }
-echo "Notarization accepted: $NOTARY_ID"
-
 NOTARIZATION_READY=0
 for _ in {1..12}; do
   if codesign --verify --strict --check-notarization -R=notarized "$BINARY" >/dev/null 2>&1; then
@@ -153,3 +186,4 @@ done
   exit 1
 }
 codesign --verify --strict --check-notarization -R=notarized --verbose=2 "$BINARY"
+echo "Notarization accepted: $NOTARY_ID"

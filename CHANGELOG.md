@@ -8,6 +8,7 @@
 
 ### Fixes
 
+- Retry a recognized regional notarization upload deadline once through Apple's accelerated S3 route with the same signed archive, preserving receipt, cancellation, validation, and online-ticket checks.
 - Finish E2B and CubeSandbox upload producers before releasing source archives and surface source-read failures, using the same multipart lifetime owner as Blaxel. [PR 2509](https://github.com/openclaw/crabbox/pull/2509). Thanks @steipete.
 - Finish Blaxel multipart producers before retrying or releasing borrowed archives, preserving HTTP error precedence and early-success uploads. [PR 2505](https://github.com/openclaw/crabbox/pull/2505). Thanks @steipete.
 - Reject overflowing Nomad, Agent Sandbox, and Superserve execution timeouts before provider dispatch while preserving disabled deadlines, service defaults, and caller cancellation. [PR 2503](https://github.com/openclaw/crabbox/pull/2503). Thanks @steipete.
