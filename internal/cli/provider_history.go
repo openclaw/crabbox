@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -22,7 +23,7 @@ const (
 )
 
 type providerHistoryEntry struct {
-	Provider        string    `json:"provider"`
+	Provider       string    `json:"provider"`
 	LastSelectedAt time.Time `json:"lastSelectedAt"`
 }
 
@@ -53,7 +54,11 @@ func providerHistoryPath(root string) (string, error) {
 	if !filepath.IsAbs(stateDir) {
 		return "", Exit(2, "provider history state directory must be absolute")
 	}
-	sum := sha256.Sum256([]byte(canonicalRepositoryPath(root)))
+	identity := canonicalRepositoryPath(root)
+	if runtime.GOOS == "windows" {
+		identity = strings.ToLower(identity)
+	}
+	sum := sha256.Sum256([]byte(identity))
 	return filepath.Join(stateDir, "provider-history", hex.EncodeToString(sum[:])+".json"), nil
 }
 
