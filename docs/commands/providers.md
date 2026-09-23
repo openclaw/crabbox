@@ -23,7 +23,47 @@ crabbox providers recommend versioned-workspace
 crabbox providers sizes machine0
 crabbox providers sizes machine0 --all --refresh --json
 crabbox providers sizes machine0 --with-context --class fast --json
+crabbox providers history
+crabbox providers history --json
+crabbox providers history --clear
 ```
+
+## Recent provider history
+
+Crabbox keeps a small private MRU history of providers that were explicitly
+selected with `--provider` and successfully configured for the current
+workspace. This avoids repeating the provider on ordinary local commands while
+preserving normal configuration semantics.
+
+```sh
+crabbox run --provider boxd -- make test
+crabbox run -- make test
+crabbox providers history
+```
+
+The history is local runtime state, not configuration or lease authority. At
+most eight canonical provider names are retained per canonical workspace root.
+When no provider is selected by user config, repo config, environment, or a
+flag, Crabbox may use the most recently selected runnable provider from that
+history. An explicit target filters out history entries whose provider does not
+advertise that target.
+
+History never performs runtime failover: if the selected recent provider later
+fails authentication, validation, capacity, or execution, Crabbox returns that
+failure rather than silently trying another provider. Exact lease/recorded-run
+routing can replace a history-derived provider, so follow-up commands remain
+bound to the provider that owns the lease.
+
+The fallback is disabled in CI, controller subprocesses, and whenever
+`CRABBOX_CONFIG` explicitly selects a config file. Corrupt history is ignored
+during ordinary selection so convenience state cannot brick commands; explicit
+`providers history` inspection surfaces the error.
+
+`crabbox providers history --json` prints the current workspace record.
+`crabbox providers history --clear` removes only that workspace's history.
+The state is stored privately under the Crabbox state directory and contains
+provider names, the canonical workspace root, and selection timestamps; it
+contains no provider credentials.
 
 ## Offline status versus live checks
 
