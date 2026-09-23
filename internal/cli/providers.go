@@ -8,6 +8,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 )
 
 type providerMatrixEntry struct {
@@ -95,6 +96,9 @@ func (a App) providers(ctx context.Context, args []string) error {
 	if len(args) > 0 && args[0] == "sizes" {
 		return a.providerSizes(ctx, args[1:])
 	}
+	if len(args) > 0 && args[0] == "history" {
+		return a.providerHistory(args[1:])
+	}
 	fs := newFlagSet("providers", a.Stderr)
 	jsonOut := fs.Bool("json", false, "print JSON")
 	filterFlags := registerProviderMatrixFilterFlags(fs)
@@ -102,7 +106,7 @@ func (a App) providers(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return Exit(2, "usage: crabbox providers [--json] [--kind KIND] [--category CATEGORY] [--target TARGET] [--feature FEATURE] [--runtime CAPABILITY] [--reachability CAPABILITY] [--workspace CAPABILITY] [--evidence CAPABILITY] [--lifecycle CAPABILITY] OR crabbox providers filters [--json] OR crabbox providers recommend <use-case> [--limit N] [--json]")
+		return Exit(2, "usage: crabbox providers [--json] [--kind KIND] [--category CATEGORY] [--target TARGET] [--feature FEATURE] [--runtime CAPABILITY] [--reachability CAPABILITY] [--workspace CAPABILITY] [--evidence CAPABILITY] [--lifecycle CAPABILITY] OR crabbox providers filters [--json] OR crabbox providers recommend <use-case> [--limit N] [--json] OR crabbox providers history [--json|--clear]")
 	}
 	entries := providerMatrix()
 	filters := filterFlags.filters()
@@ -114,6 +118,66 @@ func (a App) providers(ctx context.Context, args []string) error {
 		return json.NewEncoder(a.Stdout).Encode(entries)
 	}
 	printProviderMatrix(a.Stdout, entries)
+	return nil
+}
+
+type providerHistoryOutput struct {
+	SchemaVersion int                    `json:"schemaVersion"`
+	WorkspaceRoot string                 `json:"workspaceRoot"`
+	Providers     []providerHistoryEntry `json:"providers"`
+}
+
+func (a App) providerHistory(args []string) error {
+	fs := newFlagSet("providers history", a.Stderr)
+	jsonOut := fs.Bool("json", false, "print JSON")
+	clear := fs.Bool("clear", false, "clear provider history for the current workspace")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || (*clear && *jsonOut) {
+		return Exit(2, "usage: crabbox providers history [--json|--clear]")
+	}
+	if *clear {
+		root, removed, err := clearProviderHistoryForCurrentWorkspace()
+		if err != nil {
+			return err
+		}
+		if removed {
+			fmt.Fprintf(a.Stdout, "cleared provider history workspace=%s\n", root)
+		} else {
+			fmt.Fprintf(a.Stdout, "provider history already empty workspace=%s\n", root)
+		}
+		return nil
+	}
+	root, err := providerHistoryWorkspaceRoot()
+	if err != nil {
+		return err
+	}
+	record, ok, err := readProviderHistoryForRoot(root)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		record = providerHistoryRecord{SchemaVersion: providerHistorySchemaVersion, WorkspaceRoot: root, Providers: []providerHistoryEntry{}}
+	}
+	if record.Providers == nil {
+		record.Providers = []providerHistoryEntry{}
+	}
+	if *jsonOut {
+		return json.NewEncoder(a.Stdout).Encode(providerHistoryOutput{
+			SchemaVersion: record.SchemaVersion,
+			WorkspaceRoot: record.WorkspaceRoot,
+			Providers:     record.Providers,
+		})
+	}
+	fmt.Fprintf(a.Stdout, "provider history workspace=%s\n", record.WorkspaceRoot)
+	if len(record.Providers) == 0 {
+		fmt.Fprintln(a.Stdout, "  (empty)")
+		return nil
+	}
+	for i, entry := range record.Providers {
+		fmt.Fprintf(a.Stdout, "  %d. %s last_selected=%s\n", i+1, entry.Provider, entry.LastSelectedAt.UTC().Format(time.RFC3339))
+	}
 	return nil
 }
 
