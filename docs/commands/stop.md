@@ -286,6 +286,17 @@ failures never fall back to releasing an unverified ID. Providers without a
 verified recovery contract reject `--force` and direct the operator to their
 native provider CLI. `cleanup` does not support `--force`.
 
+For direct Azure fixed-ID VMs, use `stop --force --provider azure --id
+<canonical-cbx-id>` when a restart or redeployment has lost the local claim.
+Recovery validates the VM's lease, provider key, create-intent fingerprint,
+attempt nonce, deterministic name, immutable VM ID, and account scope before
+durably restoring the claim and entering normal guarded deletion. Incomplete
+or conflicting identity is rejected; ordinary `stop` does not adopt an unclaimed
+fixed-ID VM. If cleanup is interrupted after the VM is deleted, retry the same
+command: the retained claim supplies the companion-resource identities. A
+completed recovery retains the single-use terminal receipt, and retries are
+idempotent.
+
 For direct Daytona and ASCII Box/Boat claims, `stop --force --provider <provider>
 --id <canonical-cbx-id>` can also forget a resource that the provider has already
 removed. Core requires an exact native not-found and complete, unfiltered

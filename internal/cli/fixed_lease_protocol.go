@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -508,6 +509,29 @@ func ValidateFixedClaim(c LeaseClaim, r FixedClaimRules) error {
 func FixedSHA256(value string) bool {
 	decoded, err := hex.DecodeString(value)
 	return err == nil && len(decoded) == 32 && value == strings.ToLower(value)
+}
+
+// PublishFixedRecoveryClaimIfAbsent durably restores a provider-attested fixed
+// claim before an explicit recovery operation performs any native mutation.
+func PublishFixedRecoveryClaimIfAbsent(ctx context.Context, kind FixedLeaseKind, claim LeaseClaim) (LeaseClaim, error) {
+	if err := ValidateFixedClaim(claim, FixedClaimRules{
+		Kind: kind, States: []string{"acquired"}, RequireIntentScope: true,
+		RequireCanonicalID: true, RequireSlug: true, RequireTimestamp: true,
+		RequireSHA256: true, RequireBound: true, NoCheckpoint: true, NoFailedAttempts: true,
+	}); err != nil {
+		return LeaseClaim{}, err
+	}
+	return transactLeaseClaim(claim.LeaseID, leaseClaimTransaction{
+		context:     ctx,
+		guard:       unchangedLeaseClaimGuard(claim.LeaseID, LeaseClaim{}, false),
+		revision:    claimRevisionAfterMutation,
+		directory:   claimDirectoryDurableNamespace,
+		publication: claimPublish,
+		mutate: func(current *LeaseClaim) error {
+			*current = CloneLeaseClaim(claim)
+			return nil
+		},
+	})
 }
 
 // CompleteFixedAcquisition runs acknowledgement outside the claim fence. A
