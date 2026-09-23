@@ -438,7 +438,10 @@ func (c *httpSuperserveClient) execBuffered(ctx context.Context, sandboxID, toke
 		return execResult{}, err
 	}
 	var result execResult
-	requestCtx, cancel := superserveExecRequestContext(ctx, body.TimeoutSecs)
+	requestCtx, cancel, err := superserveExecRequestContext(ctx, body.TimeoutSecs)
+	if err != nil {
+		return execResult{}, err
+	}
 	defer cancel()
 	if err := c.doDataPlaneJSON(requestCtx, http.MethodPost, target, "/exec", token, body, &result, envSecretValues(body.Env)...); err != nil {
 		return execResult{}, err
@@ -451,7 +454,10 @@ func (c *httpSuperserveClient) execStream(ctx context.Context, sandboxID, token 
 	if err != nil {
 		return execResult{}, err
 	}
-	requestCtx, cancel := superserveExecRequestContext(ctx, body.TimeoutSecs)
+	requestCtx, cancel, err := superserveExecRequestContext(ctx, body.TimeoutSecs)
+	if err != nil {
+		return execResult{}, err
+	}
 	defer cancel()
 	var reader io.Reader
 	buf, err := json.Marshal(body)
@@ -521,11 +527,27 @@ func (c *httpSuperserveClient) doDataPlaneJSON(ctx context.Context, method strin
 	return nil
 }
 
-func superserveExecRequestContext(ctx context.Context, timeoutSecs int) (context.Context, context.CancelFunc) {
-	if timeoutSecs > 0 {
-		return context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second+5*time.Second)
+func superserveExecTimeout(timeoutSecs int) (time.Duration, error) {
+	if timeoutSecs <= 0 {
+		return 0, nil
 	}
-	return context.WithCancel(ctx)
+	if timeout, ok := shared.SecondsWithGrace(int64(timeoutSecs), 5*time.Second); ok {
+		return timeout, nil
+	}
+	return 0, core.Exit(2, "superserve execution timeout exceeds the supported duration range")
+}
+
+func superserveExecRequestContext(ctx context.Context, timeoutSecs int) (context.Context, context.CancelFunc, error) {
+	timeout, err := superserveExecTimeout(timeoutSecs)
+	if err != nil {
+		return nil, nil, err
+	}
+	if timeout == 0 {
+		child, cancel := context.WithCancel(ctx)
+		return child, cancel, nil
+	}
+	child, cancel := context.WithTimeout(ctx, timeout)
+	return child, cancel, nil
 }
 
 type superserveStreamUnsupportedError struct {

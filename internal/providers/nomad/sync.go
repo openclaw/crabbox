@@ -23,7 +23,10 @@ func (b *backend) workspace(client Client, ready allocationReadiness, req RunReq
 
 func (b *backend) uploadArchive(ctx context.Context, client Client, ready allocationReadiness, remoteArchive string, body io.Reader) error {
 	command := "mkdir -p " + shellQuote("/tmp") + " && cat > " + shellQuote(remoteArchive)
-	execCtx, cancel := b.execContext(ctx)
+	execCtx, cancel, err := b.execContext(ctx)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	exitCode, err := b.allocationExec(execCtx, client, ready, []string{"sh", "-lc", command}, body, b.rt.Stdout, b.rt.Stderr)
 	if err != nil {

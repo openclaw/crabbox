@@ -99,6 +99,9 @@ func (b *backend) Run(ctx context.Context, req RunRequest) (RunResult, error) {
 			if !req.SyncOnly && (len(req.Command) == 0 || len(req.Command) == 1 && strings.TrimSpace(req.Command[0]) == "") {
 				return exit(2, "missing command")
 			}
+			if _, err := b.execTimeout(); err != nil {
+				return err
+			}
 			var err error
 			client, err = b.client()
 			return err

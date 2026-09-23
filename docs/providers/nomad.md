@@ -397,3 +397,10 @@ crabbox cleanup --provider nomad --dry-run
   `would deregister`, `would remove`, or `skip` decisions. Cleanup never
   enumerates arbitrary Nomad jobs and never mutates jobs without matching
   Crabbox ownership metadata.
+
+## Execution timeout limits
+
+Positive `execTimeoutSecs` values must fit the local command-duration budget.
+Unrepresentable values fail before run acquisition or reuse and before allocation
+exec or archive-upload dispatch. Zero still adds no command deadline; caller
+cancellation remains active. Inspection and stop do not consume this budget.
