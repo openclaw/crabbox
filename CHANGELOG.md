@@ -24,6 +24,7 @@
 
 ### Fixes
 
+- Recover direct Azure fixed-ID worker cleanup after local claim loss, preserve cancellation, and resume interrupted cleanup from durable resource identities. [PR 2501](https://github.com/openclaw/crabbox/pull/2501). Thanks @galiniliev.
 - Reject overflowing OpenComputer and Blaxel execution budgets before provider dispatch, including response grace, while preserving timeout defaults, payloads, and cancellation. [PR 2497](https://github.com/openclaw/crabbox/pull/2497). Thanks @steipete.
 - Reject overflowing Firecracker disk and Hyper-V memory byte conversions before lease state, filesystem copies, or native VM creation, preserving existing sizing defaults and recovery paths. [PR 2495](https://github.com/openclaw/crabbox/pull/2495). Thanks @steipete.
 - Prevent out-of-range persisted idle seconds from authorizing Cloud Run Sandbox idle expiry while preserving independent TTL, stale-create, and invalid-timestamp cleanup policies. [PR 2496](https://github.com/openclaw/crabbox/pull/2496). Thanks @steipete.

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -512,7 +513,7 @@ func FixedSHA256(value string) bool {
 
 // PublishFixedRecoveryClaimIfAbsent durably restores a provider-attested fixed
 // claim before an explicit recovery operation performs any native mutation.
-func PublishFixedRecoveryClaimIfAbsent(kind FixedLeaseKind, claim LeaseClaim) (LeaseClaim, error) {
+func PublishFixedRecoveryClaimIfAbsent(ctx context.Context, kind FixedLeaseKind, claim LeaseClaim) (LeaseClaim, error) {
 	if err := ValidateFixedClaim(claim, FixedClaimRules{
 		Kind: kind, States: []string{"acquired"}, RequireIntentScope: true,
 		RequireCanonicalID: true, RequireSlug: true, RequireTimestamp: true,
@@ -521,6 +522,7 @@ func PublishFixedRecoveryClaimIfAbsent(kind FixedLeaseKind, claim LeaseClaim) (L
 		return LeaseClaim{}, err
 	}
 	return transactLeaseClaim(claim.LeaseID, leaseClaimTransaction{
+		context:     ctx,
 		guard:       unchangedLeaseClaimGuard(claim.LeaseID, LeaseClaim{}, false),
 		revision:    claimRevisionAfterMutation,
 		directory:   claimDirectoryDurableNamespace,

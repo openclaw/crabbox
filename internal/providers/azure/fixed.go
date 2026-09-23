@@ -218,47 +218,56 @@ func (b *azureLeaseBackend) resolvedAzureLease(server core.Server, target core.S
 func (b *azureLeaseBackend) ReclaimAndStop(ctx context.Context, req core.StopRequest) error {
 	leaseID := strings.TrimSpace(req.ID)
 	if !core.IsCanonicalLeaseID(leaseID) {
-		return core.Exit(2, "provider=azure stop --reclaim requires an exact canonical lease --id")
+		return core.Exit(2, "Azure recovery requires stop --force --provider azure --id <canonical-id>")
 	}
 	client, err := newAzureClient(ctx, b.Cfg)
 	if err != nil {
 		return err
 	}
-	servers, err := client.ListCrabboxServers(ctx)
+	// A prior recovery may have deleted the VM but retained companion cleanup
+	// bindings, or already published its terminal receipt. Resolve that durable
+	// state before requiring a live VM for adoption.
+	lease, handled, err := b.resolveFixed(ctx, client, core.ResolveRequest{ID: leaseID, ReleaseOnly: true})
 	if err != nil {
 		return err
 	}
-	providerKey := core.ProviderKeyForLease(leaseID)
-	server, found, err := core.SelectFixedCandidate(fixedAzureLeaseKind, leaseID, servers, func(candidate core.Server) bool {
-		return candidate.Labels["lease"] == leaseID || candidate.Labels["provider_key"] == providerKey
-	})
-	if err != nil {
-		return err
-	}
-	if !found {
-		return core.Exit(4, "Azure fixed lease %s was not found", leaseID)
-	}
-	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		claim, err = recoveredFixedAzureClaim(client.LeaseClaimScope(), leaseID, server)
+	if !handled {
+		servers, err := client.ListCrabboxServers(ctx)
 		if err != nil {
 			return err
 		}
-		if err := core.ValidateFixedLocalClaimUniqueness(fixedAzureLeaseKind, claim, "azure"); err != nil {
-			return err
-		}
-		claim, err = core.PublishFixedRecoveryClaimIfAbsent(fixedAzureLeaseKind, claim)
+		providerKey := core.ProviderKeyForLease(leaseID)
+		server, found, err := core.SelectFixedCandidate(fixedAzureLeaseKind, leaseID, servers, func(candidate core.Server) bool {
+			return candidate.Labels["lease"] == leaseID || candidate.Labels["provider_key"] == providerKey
+		})
 		if err != nil {
 			return err
 		}
+		if !found {
+			return core.Exit(4, "Azure fixed lease %s was not found", leaseID)
+		}
+		claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			claim, err = recoveredFixedAzureClaim(client.LeaseClaimScope(), leaseID, server)
+			if err != nil {
+				return err
+			}
+			if err := core.ValidateFixedLocalClaimUniqueness(fixedAzureLeaseKind, claim, "azure"); err != nil {
+				return err
+			}
+			claim, err = core.PublishFixedRecoveryClaimIfAbsent(ctx, fixedAzureLeaseKind, claim)
+			if err != nil {
+				return err
+			}
+		}
+		if err := validateExactAzureClaim(claim, server, leaseID, client.LeaseClaimScope()); err != nil {
+			return err
+		}
+		lease = core.LeaseTarget{LeaseID: leaseID, Server: server}
 	}
-	if err := validateExactAzureClaim(claim, server, leaseID, client.LeaseClaimScope()); err != nil {
-		return err
-	}
-	lease := core.LeaseTarget{LeaseID: leaseID, Server: server}
 	if err := b.ReleaseLease(ctx, core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
 		return err
 	}

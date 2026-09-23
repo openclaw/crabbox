@@ -5,7 +5,10 @@ import (
 	"errors"
 	"io"
 	"maps"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/testutil"
@@ -197,6 +200,149 @@ func TestFixedAzureExplicitRecoveryStopsAfterLocalClaimLoss(t *testing.T) {
 	}
 	if _, err := b.Acquire(t.Context(), req); err == nil {
 		t.Fatal("recovered single-use lease was recreated")
+	}
+	client.servers = nil
+	client.listErr = errors.New("terminal replay must not require VM inventory")
+	if err := b.ReclaimAndStop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil {
+		t.Fatalf("terminal recovery retry: %v", err)
+	}
+	after, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || !reflect.DeepEqual(after, terminal) || len(client.deleted) != 1 {
+		t.Fatalf("terminal retry changed receipt or repeated deletion: err=%v deleted=%v", err, client.deleted)
+	}
+	client.claimScope = "subscription:other|resource-group:rg"
+	if err := b.ReclaimAndStop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err == nil || !strings.Contains(err.Error(), "account scope changed") {
+		t.Fatalf("terminal retry accepted another account: %v", err)
+	}
+}
+
+func TestFixedAzureExplicitRecoveryResumesInterruptedCleanup(t *testing.T) {
+	client := &fakeAzureClient{}
+	b := fixedAzureTestBackend(t, client)
+	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123463", RequestedSlug: "restart-retry", Repo: core.Repo{Root: t.TempDir()}}
+	lease, err := b.Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.RemoveLeaseClaimIfUnchanged(req.RequestedLeaseID, claim); err != nil {
+		t.Fatal(err)
+	}
+	cleanupLabels := map[string]string{
+		core.AzureCleanupBindingLabel:         "v1",
+		"_crabbox_azure_cleanup_nic_id":       "original-nic",
+		"_crabbox_azure_cleanup_public_ip_id": "original-ip",
+		"_crabbox_azure_cleanup_disk_id":      "original-disk",
+	}
+	client.prepareFunc = func(server core.Server) core.Server {
+		server.Labels = maps.Clone(server.Labels)
+		maps.Copy(server.Labels, cleanupLabels)
+		return server
+	}
+	interrupted := errors.New("VM deleted; companion cleanup interrupted")
+	client.deleteOwnedFunc = func(server core.Server) error {
+		stored, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+		if err != nil || stored.CloudImmutableID != lease.Server.ImmutableID {
+			t.Fatalf("recovery did not persist VM identity before deletion: %v", err)
+		}
+		for key, value := range cleanupLabels {
+			if stored.Labels[key] != value || server.Labels[key] != value {
+				t.Fatalf("cleanup identity %s was not retained before deletion", key)
+			}
+		}
+		client.servers = nil
+		return interrupted
+	}
+	t.Chdir(req.Repo.Root)
+	t.Setenv("CRABBOX_CONFIG", "")
+	t.Setenv("CRABBOX_PROVIDER", "azure")
+	t.Setenv("CRABBOX_COORDINATOR", "")
+	app := core.App{Stdout: io.Discard, Stderr: io.Discard}
+	args := []string{"stop", "--force", "--provider", "azure", "--id", req.RequestedLeaseID}
+	if err := app.Run(t.Context(), args); !errors.Is(err, interrupted) {
+		t.Fatalf("first recovery: %v, want interrupted companion cleanup", err)
+	}
+	client.prepareFunc = nil // The retry must use persisted identities, not recapture them.
+	client.deleteOwnedFunc = nil
+	if err := app.Run(t.Context(), args); err != nil {
+		t.Fatalf("recovery retry after VM deletion: %v", err)
+	}
+	if len(client.ownedExpected) != 2 || len(client.deleted) != 1 {
+		t.Fatalf("delete attempts=%d completed=%v", len(client.ownedExpected), client.deleted)
+	}
+	for key, value := range cleanupLabels {
+		if client.ownedExpected[1].Labels[key] != value {
+			t.Fatalf("retry lost durable cleanup identity %s", key)
+		}
+	}
+	terminal, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || terminal.FixedCreateIntent == nil || terminal.FixedCreateIntent.State != "released" {
+		t.Fatalf("missing terminal receipt after retry: %+v err=%v", terminal, err)
+	}
+}
+
+func TestFixedAzureExplicitRecoveryCancellationWhileClaimLocked(t *testing.T) {
+	client := &fakeAzureClient{}
+	b := fixedAzureTestBackend(t, client)
+	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123464", RequestedSlug: "restart-cancel", Repo: core.Repo{Root: t.TempDir()}}
+	if _, err := b.Acquire(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.RemoveLeaseClaimIfUnchanged(req.RequestedLeaseID, claim); err != nil {
+		t.Fatal(err)
+	}
+	held, release, lockDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		lockDone <- core.WithDurableLeaseClaimLockContext(t.Context(), req.RequestedLeaseID, func(*core.LeaseClaim, bool, func() error) error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-held:
+	case err := <-lockDone:
+		t.Fatalf("hold claim fence: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- b.ReclaimAndStop(ctx, core.StopRequest{ID: req.RequestedLeaseID}) }()
+	var stopErr error
+	select {
+	case stopErr = <-done:
+		close(release)
+	case <-time.After(2 * time.Second):
+		t.Error("recovery ignored its deadline while waiting for the claim fence")
+		close(release)
+		stopErr = <-done
+	}
+	if err := <-lockDone; err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(stopErr, context.DeadlineExceeded) {
+		t.Fatalf("stop error=%v, want deadline exceeded", stopErr)
+	}
+	if _, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); err != nil || exists {
+		t.Fatalf("canceled recovery published a claim: exists=%v err=%v", exists, err)
+	}
+	if len(client.prepareOwned) != 0 || len(client.ownedExpected) != 0 {
+		t.Fatal("canceled recovery reached provider cleanup")
+	}
+}
+
+func TestFixedAzureExplicitRecoveryDiagnosticNamesForceStop(t *testing.T) {
+	b := fixedAzureTestBackend(t, &fakeAzureClient{})
+	err := b.ReclaimAndStop(t.Context(), core.StopRequest{ID: "restart-recovery"})
+	if err == nil || !strings.Contains(err.Error(), "stop --force --provider azure --id") {
+		t.Fatalf("diagnostic does not identify the supported command: %v", err)
 	}
 }
 
