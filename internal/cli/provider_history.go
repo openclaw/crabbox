@@ -181,7 +181,13 @@ func rememberProviderForCurrentWorkspace(providerName string, when time.Time) er
 	if err != nil {
 		return err
 	}
-	canonical := provider.Spec().Name
+	spec := provider.Spec()
+	switch spec.Kind {
+	case ProviderKindSSHLease, ProviderKindDelegatedRun:
+	default:
+		return nil
+	}
+	canonical := spec.Name
 	path, err := providerHistoryPath(root)
 	if err != nil {
 		return err
@@ -219,7 +225,13 @@ func rememberProviderForCurrentWorkspace(providerName string, when time.Time) er
 		if normalizeProviderName(entry.Provider) == normalizeProviderName(canonical) {
 			continue
 		}
-		if _, err := ProviderFor(entry.Provider); err != nil {
+		existing, err := ProviderFor(entry.Provider)
+		if err != nil {
+			continue
+		}
+		switch existing.Spec().Kind {
+		case ProviderKindSSHLease, ProviderKindDelegatedRun:
+		default:
 			continue
 		}
 		next = append(next, entry)
