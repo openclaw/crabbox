@@ -1128,7 +1128,8 @@ func TestWSLStageLauncherConfirmsOriginalAndCleanupTermination(t *testing.T) {
 					t.Fatal("exact process fixture injection missing")
 				}
 			}
-			wslWindowsOwner = strings.NewReplacer("5000", "200", "10000", "600").Replace(updated)
+			// Only shorten termination waits; cleanup startup and helper-frame delivery need the production budget.
+			wslWindowsOwner = strings.ReplaceAll(updated, "5000", "200")
 			t.Cleanup(func() { wslWindowsOwner = previous })
 			var payload []byte
 			if test.mode == "main-no-read" {
