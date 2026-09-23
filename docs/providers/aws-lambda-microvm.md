@@ -109,7 +109,9 @@ Run results and timing are finalized after automatic termination. A termination
 failure fails an otherwise successful run and retains its recovery session;
 later termination or timing-writer failures do not replace the primary command
 failure. Early setup failures retain their public exit code and session, and
-transport errors are not classified as command exits. The existing successful
+transport errors are not classified as command exits. A stdout or stderr delivery
+error also fails the run locally, preserving its cause even if the remote stream
+would later report success; this does not prove that the remote process stopped. The existing successful
 command-only claim refresh remains outside command timing, and a reused lease's
 operation lock stays held through final cleanup and reporting.
 

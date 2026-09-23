@@ -1240,3 +1240,163 @@ func TestRunSuccessRefreshPreservesPublicClaimError(t *testing.T) {
 		})
 	}
 }
+
+// The response fixture uses the actual runner wire format and client, not a
+// replacement runner API. It also observes the client's response-body custody.
+type outputFailureProbe struct {
+	err    error
+	writes int
+}
+
+func (w *outputFailureProbe) Write(p []byte) (int, error) { w.writes++; return 0, w.err }
+
+type outputResponseProbe struct {
+	io.Reader
+	closed bool
+}
+
+func (r *outputResponseProbe) Close() error { r.closed = true; return nil }
+
+type terminalReadFailure struct{ err error }
+
+func (r terminalReadFailure) Read([]byte) (int, error) { return 0, r.err }
+
+func TestRunnerClientExecReportsOutputWriteFailure(t *testing.T) {
+	for _, stream := range []string{"stdout", "stderr"} {
+		t.Run(stream, func(t *testing.T) {
+			sentinel := errors.New("synthetic output delivery failure")
+			writer := &outputFailureProbe{err: sentinel}
+			data, _ := json.Marshal(runnerEvent{Stream: stream, Data: []byte{0xff, 0x00, 0xfe}})
+			exit := 0
+			terminal, _ := json.Marshal(runnerEvent{ExitCode: &exit})
+			body := &outputResponseProbe{Reader: bytes.NewReader(append(append(data, '\n'), append(terminal, '\n')...))}
+			client := mustNewRunnerClient(t, &fakeControlPlane{}, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: body, Request: req}, nil
+			})}, "eu-west-1")
+			var stdout, stderr io.Writer = io.Discard, io.Discard
+			if stream == "stdout" {
+				stdout = writer
+			} else {
+				stderr = writer
+			}
+			code, err := client.Exec(context.Background(), microVM{ID: "mvm-test", Endpoint: "mvm-test.lambda-microvm.eu-west-1.on.aws"}, "true", "/workspace/crabbox", nil, stdout, stderr)
+			if !body.closed || writer.writes != 1 {
+				t.Fatalf("closed=%v writes=%d", body.closed, writer.writes)
+			}
+			if code != 1 || !errors.Is(err, sentinel) {
+				t.Fatalf("exit=%d error=%v; want exit1 and original output failure", code, err)
+			}
+		})
+	}
+}
+
+func TestRunnerClientExecReadFailureAfterExitPreservesCauseAndCloses(t *testing.T) {
+	for _, sentinel := range []error{errors.New("synthetic transport read failure"), context.Canceled} {
+		t.Run(sentinel.Error(), func(t *testing.T) {
+			exit := 0
+			terminal, _ := json.Marshal(runnerEvent{ExitCode: &exit})
+			body := &outputResponseProbe{Reader: io.MultiReader(bytes.NewReader(append(terminal, '\n')), terminalReadFailure{sentinel})}
+			client := mustNewRunnerClient(t, &fakeControlPlane{}, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: body, Request: req}, nil
+			})}, "eu-west-1")
+			code, err := client.Exec(context.Background(), microVM{ID: "mvm-test", Endpoint: "mvm-test.lambda-microvm.eu-west-1.on.aws"}, "true", "/workspace/crabbox", nil, io.Discard, io.Discard)
+			if code != 1 || !errors.Is(err, sentinel) || !body.closed {
+				t.Fatalf("exit=%d error=%v closed=%v", code, err, body.closed)
+			}
+		})
+	}
+}
+
+type nonComparableOutputCause []error
+
+func (e nonComparableOutputCause) Error() string   { return e[0].Error() }
+func (e nonComparableOutputCause) Unwrap() []error { return []error(e) }
+
+func TestRunWithActualRunnerPreservesOutputFailureThroughCleanup(t *testing.T) {
+	for _, tc := range []struct{ cleanupFails, nonComparable bool }{{false, false}, {true, false}, {false, true}} {
+		t.Run(fmt.Sprintf("cleanup-fails=%t/non-comparable=%t", tc.cleanupFails, tc.nonComparable), func(t *testing.T) {
+			cleanupFails := tc.cleanupFails
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			sentinel := errors.New("synthetic workload output failure")
+			cleanupErr := errors.New("synthetic cleanup failure")
+			control := &fakeControlPlane{}
+			if cleanupFails {
+				control.terminateErr = cleanupErr
+			}
+			var outputCause error = sentinel
+			if tc.nonComparable {
+				outputCause = nonComparableOutputCause{sentinel}
+			}
+			b := testBackend(control, nil, &outputFailureProbe{err: outputCause})
+			var reporting bytes.Buffer
+			b.rt.Stderr = &reporting
+			bodies := []*outputResponseProbe{}
+			commandRequests := 0
+			client := mustNewRunnerClient(t, control, &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				var body []byte
+				switch req.URL.Path {
+				case "/health":
+				case "/v1/exec":
+					var command runnerExecRequest
+					if err := json.NewDecoder(req.Body).Decode(&command); err != nil {
+						t.Fatal(err)
+					}
+					if command.Workdir != "/" {
+						commandRequests++
+						data, _ := json.Marshal(runnerEvent{Stream: "stdout", Data: []byte{0xff, 0x00, 0xfe}})
+						body = append(data, '\n')
+					}
+					exit := 0
+					terminal, _ := json.Marshal(runnerEvent{ExitCode: &exit})
+					body = append(body, append(terminal, '\n')...)
+				default:
+					t.Fatalf("unexpected request %s", req.URL.Path)
+				}
+				tracked := &outputResponseProbe{Reader: bytes.NewReader(body)}
+				bodies = append(bodies, tracked)
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: tracked, Request: req}, nil
+			})}, "eu-west-1")
+			b.newRunner = func(controlPlane, core.Config, core.Runtime) (runnerAPI, error) { return client, nil }
+			result, err := b.Run(t.Context(), core.RunRequest{Repo: core.Repo{Root: testRepo(t), Name: "my-app"}, NoSync: true, Command: []string{"true"}, TimingJSON: true})
+			if !errors.Is(err, sentinel) || result.ExitCode != 1 || result.ErrorKind != core.RunErrorProvider {
+				t.Fatalf("result=%+v error=%v", result, err)
+			}
+			if tc.nonComparable {
+				var writerCause nonComparableOutputCause
+				if !errors.As(err, &writerCause) || len(writerCause) != 1 || writerCause[0] != sentinel || !errors.Is(err, err) {
+					t.Fatal("non-comparable writer cause or safe wrapper identity lost")
+				}
+			}
+			if cleanupFails && !errors.Is(err, cleanupErr) {
+				t.Fatalf("cleanup cause lost: %v", err)
+			}
+			if commandRequests != 1 || !slices.Contains(control.calls, "terminate:mvm-test") || !control.terminateDeadline || control.terminateContextErr != nil {
+				t.Fatalf("commands=%d cleanup=%v", commandRequests, control.calls)
+			}
+			if result.Session == nil || result.Session.Kept != cleanupFails {
+				t.Fatalf("session=%+v", result.Session)
+			}
+			var report core.TimingReport
+			reports := 0
+			for _, line := range strings.Split(reporting.String(), "\n") {
+				if strings.HasPrefix(line, "{") {
+					if err := json.Unmarshal([]byte(line), &report); err != nil {
+						t.Fatal(err)
+					}
+					reports++
+				}
+			}
+			if reports != 1 || report.ExitCode != 1 || report.RunStatus != core.RunStatusFailed || report.ErrorKind != core.RunErrorProvider {
+				t.Fatalf("final timing=%+v count=%d", report, reports)
+			}
+			if _, present, claimErr := resolveLeaseClaim(result.LeaseID); claimErr != nil || present != cleanupFails {
+				t.Fatalf("claim present=%v error=%v", present, claimErr)
+			}
+			for _, body := range bodies {
+				if !body.closed {
+					t.Fatal("response body left open")
+				}
+			}
+		})
+	}
+}

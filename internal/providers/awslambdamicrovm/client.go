@@ -273,9 +273,13 @@ func (c *runnerClient) Exec(ctx context.Context, vm microVM, command, workdir st
 		}
 		switch event.Stream {
 		case "stdout":
-			_, _ = stdout.Write(event.Data)
+			if _, err := stdout.Write(event.Data); err != nil {
+				return 1, fmt.Errorf("%s write stdout: %w", providerName, err)
+			}
 		case "stderr":
-			_, _ = stderr.Write(event.Data)
+			if _, err := stderr.Write(event.Data); err != nil {
+				return 1, fmt.Errorf("%s write stderr: %w", providerName, err)
+			}
 		}
 		if event.Error != "" {
 			return 1, fmt.Errorf("%s runner: %s", providerName, event.Error)

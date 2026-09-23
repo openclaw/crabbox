@@ -15,11 +15,11 @@ type pollTerminationError struct {
 	classification error
 }
 
-func (e pollTerminationError) Error() string { return e.diagnostic.Error() }
-func (e pollTerminationError) Unwrap() []error {
+func (e *pollTerminationError) Error() string { return e.diagnostic.Error() }
+func (e *pollTerminationError) Unwrap() []error {
 	return []error{e.public, e.diagnostic, e.terminal, e.classification}
 }
-func (e pollTerminationError) RunClassificationCause() error { return e.classification }
+func (e *pollTerminationError) RunClassificationCause() error { return e.classification }
 
 // PollTerminationError preserves a nonnil, display-safe diagnostic and its
 // public ExitError while classifying a confirmed context-stop by the context's
@@ -32,7 +32,7 @@ func PollTerminationError(ctx context.Context, terminal, diagnostic error) error
 	if !core.AsExitError(diagnostic, &public) {
 		public = core.ExitError{Code: 1, Message: diagnostic.Error()}
 	}
-	return pollTerminationError{
+	return &pollTerminationError{
 		public: public, terminal: terminal, diagnostic: diagnostic, classification: ctx.Err(),
 	}
 }

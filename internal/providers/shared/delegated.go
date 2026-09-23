@@ -379,14 +379,14 @@ type sandboxRunError struct {
 	cause error
 }
 
-func (e sandboxRunError) Unwrap() []error { return []error{e.ExitError, e.cause} }
+func (e *sandboxRunError) Unwrap() []error { return []error{e.ExitError, e.cause} }
 
-func (e sandboxRunError) RunClassificationCause() error {
+func (e *sandboxRunError) RunClassificationCause() error {
 	return core.PrimaryRunClassificationCause(e.cause)
 }
 
 // ExitErrorWithCause keeps the selected exit code and a display-safe message
 // while retaining the cause for errors.Is/As without printing it again.
 func ExitErrorWithCause(code int, message string, cause error) error {
-	return sandboxRunError{ExitError: core.ExitError{Code: code, Message: message}, cause: cause}
+	return &sandboxRunError{ExitError: core.ExitError{Code: code, Message: message}, cause: cause}
 }

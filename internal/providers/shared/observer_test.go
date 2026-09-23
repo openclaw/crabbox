@@ -459,3 +459,69 @@ func TestPollCompletedObservationWinsLateCancellation(t *testing.T) {
 		})
 	}
 }
+
+func TestErrorOwnersSelfMatchWithNonComparableCause(t *testing.T) {
+	cause := sliceMessageCause{"private", "terminal"}
+	for _, tc := range []struct {
+		name    string
+		build   func(context.Context) error
+		message string
+		code    int
+	}{
+		{"poll terminal", func(ctx context.Context) error {
+			return PollTerminationError(ctx, cause, core.ExitError{Code: 23, Message: "public readiness"})
+		}, "public readiness", 23},
+		{"poll diagnostic", func(ctx context.Context) error { return PollTerminationError(ctx, context.Canceled, cause) }, cause.Error(), 1},
+		{"exit cause", func(context.Context) error { return ExitErrorWithCause(23, "public run", cause) }, "public run", 23},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cancel(cause)
+			wrapped := tc.build(ctx)
+			var typed sliceMessageCause
+			if !errors.As(wrapped, &typed) || len(typed) != 2 {
+				t.Fatal("typed non-comparable cause lost")
+			}
+			var public core.ExitError
+			if !core.AsExitError(wrapped, &public) || public.Code != tc.code || wrapped.Error() != tc.message {
+				t.Fatalf("public contract changed: %#v %q", public, wrapped.Error())
+			}
+			defer func() {
+				if p := recover(); p != nil {
+					t.Errorf("errors.Is(wrapper, wrapper) panicked: %v", p)
+				}
+			}()
+			if !errors.Is(wrapped, wrapped) {
+				t.Fatal("wrapper did not match itself")
+			}
+		})
+	}
+}
+
+func TestErrorOwnersComparableCauseControls(t *testing.T) {
+	cause := errors.New("private cause")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(cause)
+	poll := PollTerminationError(ctx, cause, core.ExitError{Code: 23, Message: "safe"})
+	for _, wrapped := range []error{poll, ExitErrorWithCause(23, "safe", cause)} {
+		if !errors.Is(wrapped, wrapped) || !errors.Is(wrapped, cause) || wrapped.Error() != "safe" {
+			t.Fatal("ordinary wrapper identity/presentation lost")
+		}
+		var public core.ExitError
+		if !errors.As(wrapped, &public) || public.Code != 23 {
+			t.Fatal("public exit lost")
+		}
+	}
+	if !errors.Is(poll, context.Canceled) {
+		t.Fatal("poll cancellation cause lost")
+	}
+	got := core.FinalizeRunResult(core.RunResult{}, poll)
+	want := core.FinalizeRunResult(core.RunResult{}, context.Canceled)
+	if got.Status != want.Status || got.ErrorKind != want.ErrorKind {
+		t.Fatal("poll classification changed")
+	}
+	observed := ObservedProcessEndError("safe observed process")
+	if !errors.Is(observed, observed) {
+		t.Fatal("string-only value wrapper not self-comparable")
+	}
+}

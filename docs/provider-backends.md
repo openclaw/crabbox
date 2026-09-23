@@ -1428,6 +1428,11 @@ and two-second delay. Adapters return complete `StatusView` values and identify
 final observations, retaining their ownership checks, terminal-state behavior,
 and error diagnostics. The helper preserves observed results before checking
 the deadline or cancellation; it does not add a timeout to provider requests.
+Shared polling and delegated exit errors retain pointer identity so `errors.Is`
+can safely match a wrapper to itself even when a retained cause is non-comparable.
+Their public diagnostics, exit codes, cause graphs, and run classification remain
+separate contracts.
+
 Both waiting contracts use the same observation driver. Transport and probe
 errors retain the adapter's existing context-error classification boundary;
 ownership failures are never reclassified by the shared driver.
