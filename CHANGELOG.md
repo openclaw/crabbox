@@ -18,6 +18,7 @@
 - Bound Azure Dynamic Sessions timeouts for existing runner deadlines before authentication, and reject overflowing direct runner deadlines before command side effects, retaining TTL/default precedence. [PR 2512](https://github.com/openclaw/crabbox/pull/2512). Thanks @steipete.
 - Reject oversized Superserve-derived sandbox lifetimes before rounding seconds, preventing duration overflow from bypassing the seven-day cap. [PR 2504](https://github.com/openclaw/crabbox/pull/2504). Thanks @steipete.
 - Reject overflowing OpenSandbox execution and lifetime budgets before requests, preserve valid coverage rules, and retain recovery claims with malformed lifetime seconds. [PR 2511](https://github.com/openclaw/crabbox/pull/2511). Thanks @steipete.
+- Reject overflowing Cloudflare Dynamic Workers execution budgets before dispatch, preserving disabled timeouts and repository security caps. [PR 2507](https://github.com/openclaw/crabbox/pull/2507). Thanks @steipete.
 
 ## 0.65.0 - 2026-09-22
 
@@ -41,8 +42,6 @@
 - Add replay-safe ASCII Box (Boat) fixed lease IDs with durable keyed creation, one recovery submission within the native 24-hour window, exact-ID adoption, and single-use release tombstones through the shared engine. [PR 2472](https://github.com/openclaw/crabbox/pull/2472), [Issue 1747](https://github.com/openclaw/crabbox/issues/1747). Thanks @shunkakinoki.
 
 ### Fixes
-
-- Reject overflowing Cloudflare Dynamic Workers execution budgets before dispatch, preserving disabled timeouts and repository security caps.
 
 - Recover direct Azure fixed-ID worker cleanup after local claim loss, preserve cancellation, and resume interrupted cleanup from durable resource identities. [PR 2501](https://github.com/openclaw/crabbox/pull/2501). Thanks @galiniliev.
 - Reject overflowing CodeSandbox SDK operation budgets before authentication or SDK startup while preserving separate setup and command deadlines. [PR 2500](https://github.com/openclaw/crabbox/pull/2500). Thanks @steipete.

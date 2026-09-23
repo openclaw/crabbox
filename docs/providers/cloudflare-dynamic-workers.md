@@ -92,8 +92,8 @@ config cannot override `loaderUrl` or `token`, and cannot change `egress` from
 `blocked` to `intercept`. Repository-local `cpuMs`, `subrequests`, and
 `timeoutSecs` values can tighten trusted limits but cannot loosen them. Positive
 timeouts must fit the local request budget including its five-second allowance;
-unrepresentable values are rejected. Zero keeps the existing disabled-timeout
-behavior, and positive local header/body budgets retain their 30-second minimum.
+unrepresentable values are rejected. Zero disables local header/body timeouts and
+omits the wire timeout; positive local budgets retain their 30-second minimum.
 
 ## Deploy
 
