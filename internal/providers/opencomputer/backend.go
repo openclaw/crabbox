@@ -95,6 +95,9 @@ func (b *openComputerBackend) Run(ctx context.Context, req core.RunRequest) (cor
 		Provider: providerName, Runtime: b.rt, Workdir: workdir,
 		IdleTimeout: b.cfg.IdleTimeout, TTL: b.cfg.TTL, CleanupTimeout: b.cleanupTimeout(),
 		Preflight: func(context.Context) error {
+			if _, err := openComputerExecRequestTimeout(b.execTimeoutSecs()); err != nil {
+				return err
+			}
 			var err error
 			api, err = newOCAPIClient(b.cfg, b.rt)
 			return err

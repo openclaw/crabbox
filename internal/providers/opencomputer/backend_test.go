@@ -15,6 +15,7 @@ import (
 	osexec "os/exec"
 	"path"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1620,6 +1621,46 @@ func TestSameOCOriginNormalizesDefaultPorts(t *testing.T) {
 	}
 }
 
+func TestExecRejectsOverflowBeforeHTTP(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("large input requires 64-bit int")
+	}
+	for _, seconds := range []int64{9223372037, 9223372010} {
+		t.Run(strconv.FormatInt(seconds, 10), func(t *testing.T) {
+			calls := 0
+			api := &ocAPIClient{baseURL: "https://example.invalid", http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				t.Logf("dispatched context error: %v", req.Context().Err())
+				return nil, errors.New("unexpected dispatch")
+			})}}
+			_, err := api.execRun(t.Context(), "sandbox", execRunRequest{Timeout: int(seconds)})
+			if err == nil || !strings.Contains(err.Error(), "execution timeout exceeds the supported duration range") {
+				t.Fatalf("overflow result: %v", err)
+			}
+			if calls != 0 {
+				t.Fatal("overflow dispatched HTTP")
+			}
+		})
+	}
+}
+
+func TestRunRejectsExecOverflowBeforeCredentials(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("large input requires 64-bit int")
+	}
+	testutil.IsolateUserDirs(t)
+	var seconds int64 = 9223372010
+	cfg := core.BaseConfig()
+	cfg.OpenComputer.ExecTimeoutSecs = int(seconds)
+	b := NewOpenComputerBackend(Provider{}.Spec(), cfg, core.Runtime{Stdout: io.Discard, Stderr: io.Discard}).(*openComputerBackend)
+	for _, id := range []string{"", "existing"} {
+		_, err := b.Run(t.Context(), core.RunRequest{ID: id, Repo: core.Repo{Root: t.TempDir()}, Command: []string{"true"}, NoSync: true})
+		if err == nil || core.ExitCodeForError(err, 1) != 2 || !strings.Contains(err.Error(), "execution timeout exceeds the supported duration range") {
+			t.Fatalf("run id=%q: %v", id, err)
+		}
+	}
+}
+
 func TestControlAndExecRequestsUseOperationDeadlines(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CRABBOX_OPENCOMPUTER_API_KEY", "osb_test")
@@ -1650,18 +1691,22 @@ func TestControlAndExecRequestsUseOperationDeadlines(t *testing.T) {
 	if _, err := api.getSandbox(context.Background(), "sb-test"); err != nil {
 		t.Fatalf("getSandbox err=%v", err)
 	}
-	if _, err := api.execRun(context.Background(), "sb-test", execRunRequest{Timeout: 3600}); err != nil {
-		t.Fatalf("execRun err=%v", err)
+	for _, timeout := range []int{3600, 0, -1} {
+		if _, err := api.execRun(context.Background(), "sb-test", execRunRequest{Timeout: timeout}); err != nil {
+			t.Fatalf("execRun timeout=%d err=%v", timeout, err)
+		}
 	}
-	if len(deadlines) != 2 {
+	if len(deadlines) != 4 {
 		t.Fatalf("deadlines=%v", deadlines)
 	}
 	if deadlines[0] <= 0 || deadlines[0] > defaultOCControlRequestTimeout {
 		t.Fatalf("control deadline=%s want <=%s", deadlines[0], defaultOCControlRequestTimeout)
 	}
 	wantExec := time.Hour + ocExecRequestGrace
-	if deadlines[1] < wantExec-time.Second || deadlines[1] > wantExec {
-		t.Fatalf("exec deadline=%s want about %s", deadlines[1], wantExec)
+	for _, deadline := range deadlines[1:] {
+		if deadline < wantExec-time.Second || deadline > wantExec {
+			t.Fatalf("exec deadline=%s want about %s", deadline, wantExec)
+		}
 	}
 }
 

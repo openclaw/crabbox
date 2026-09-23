@@ -236,14 +236,24 @@ func (c *ocAPIClient) getSandboxWithTags(ctx context.Context, id string) (sandbo
 
 func (c *ocAPIClient) execRun(ctx context.Context, id string, req execRunRequest) (execRunResult, error) {
 	var res execRunResult
-	timeout := defaultOCExecRequestTimeout
-	if req.Timeout > 0 {
-		timeout = time.Duration(req.Timeout) * time.Second
+	timeout, err := openComputerExecRequestTimeout(req.Timeout)
+	if err != nil {
+		return res, err
 	}
-	if err := c.doJSONWithTimeout(ctx, timeout+ocExecRequestGrace, http.MethodPost, "/api/sandboxes/"+url.PathEscape(id)+"/exec/run", req, &res); err != nil {
+	if err := c.doJSONWithTimeout(ctx, timeout, http.MethodPost, "/api/sandboxes/"+url.PathEscape(id)+"/exec/run", req, &res); err != nil {
 		return execRunResult{}, err
 	}
 	return res, nil
+}
+
+func openComputerExecRequestTimeout(seconds int) (time.Duration, error) {
+	if seconds <= 0 {
+		return defaultOCExecRequestTimeout + ocExecRequestGrace, nil
+	}
+	if timeout, ok := shared.SecondsWithGrace(int64(seconds), ocExecRequestGrace); ok {
+		return timeout, nil
+	}
+	return 0, core.Exit(2, "opencomputer execution timeout exceeds the supported duration range")
 }
 
 // uploadFile writes content to remotePath inside the sandbox via

@@ -122,6 +122,10 @@ share the compiled defaults while retaining their raw-empty/trimmed-empty and
 zero-value distinctions. Memory zero remains a service default; exec-timeout zero
 retains its Crabbox fallback. Upload, retry, lifetime, and cleanup policy are
 unchanged.
+Execution timeouts that cannot fit the local duration budget, including the
+one-second process-wait grace, are rejected before run acquisition or reuse.
+The service still receives the configured timeout without that grace;
+inspection and stop do not consume this command budget.
 
 Provider flags:
 

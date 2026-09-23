@@ -127,6 +127,10 @@ strings and explicit `burst: false` retain their existing behavior.
 Workdir and execution-timeout helpers share their compiled defaults. Raw-empty
 API URL resolution, service sizing, request-level timeout fallbacks, and
 missing-sandbox handling remain with their existing client/operation owners.
+Execution timeouts that cannot fit the local duration budget, including the
+30-second response grace, are rejected before run acquisition or reuse. The
+grace does not change the timeout sent to the service; inspection and stop do
+not consume this command budget.
 
 > **Sizing tiers.** When both `cpu` and `memoryMB` are set, they must form an
 > allowed tier (for example `1/1024`, `1/4096`, `2/8192`, `4/16384`). When only

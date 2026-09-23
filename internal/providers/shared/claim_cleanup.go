@@ -1,7 +1,6 @@
 package shared
 
 import (
-	"math"
 	"strings"
 	"time"
 
@@ -11,11 +10,10 @@ import (
 // PositiveIdleDuration converts persisted idle seconds without overflow. Invalid
 // values cannot authorize expiry; callers retain their timing and diagnostic policy.
 func PositiveIdleDuration(seconds int) (time.Duration, bool) {
-	raw := int64(seconds)
-	if raw <= 0 || raw > math.MaxInt64/int64(time.Second) {
+	if seconds <= 0 {
 		return 0, false
 	}
-	return time.Duration(raw) * time.Second, true
+	return SecondsWithGrace(int64(seconds), 0)
 }
 
 // ClaimIdleCleanupDue evaluates only the local claim's idle deadline. Provider

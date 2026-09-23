@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -838,6 +839,74 @@ func TestWaitProcessTreatsStoppedAsTerminal(t *testing.T) {
 	}
 	if len(fake.stopped) != 0 {
 		t.Fatalf("stopped=%#v", fake.stopped)
+	}
+}
+
+func TestExecRejectsOverflowBeforeProcess(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("large input requires 64-bit int")
+	}
+	for _, seconds := range []int64{9223372037, 9223372036} {
+		t.Run(strconv.FormatInt(seconds, 10), func(t *testing.T) {
+			b := &backend{cfg: core.Config{Blaxel: core.BlaxelConfig{ExecTimeoutSecs: int(seconds)}}}
+			calls := 0
+			client := &lifecycleFakeClient{onExec: func(ctx context.Context, _ ExecuteProcessRequest) (Process, error) {
+				calls++
+				t.Logf("dispatched context error: %v", ctx.Err())
+				return Process{}, errors.New("unexpected dispatch")
+			}}
+			_, err := b.execCommand(t.Context(), client, "sandbox", "/work", []string{"true"}, nil, io.Discard, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "execution timeout exceeds the supported duration range") {
+				t.Fatalf("overflow result: %v", err)
+			}
+			if calls != 0 {
+				t.Fatal("overflow dispatched process")
+			}
+		})
+	}
+}
+
+func TestRunRejectsExecOverflowBeforeClient(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("large input requires 64-bit int")
+	}
+	var seconds int64 = 9223372036
+	b, _, _, _, _ := newLifecycleBackend(t)
+	b.cfg.Blaxel.ExecTimeoutSecs = int(seconds)
+	b.clientFactory = func(core.Config, core.Runtime) (Client, error) {
+		t.Fatal("overflow reached provider client")
+		return nil, errors.New("unexpected client")
+	}
+	for _, id := range []string{"", "existing"} {
+		_, err := b.Run(t.Context(), core.RunRequest{ID: id, Repo: testRepo(t), Command: []string{"true"}, NoSync: true})
+		if err == nil || core.ExitCodeForError(err, 1) != 2 || !strings.Contains(err.Error(), "execution timeout exceeds the supported duration range") {
+			t.Fatalf("run id=%q: %v", id, err)
+		}
+	}
+}
+
+func TestExecWaitBudgetKeepsPayloadAndGrace(t *testing.T) {
+	for _, raw := range []int{0, 7} {
+		b, fake, _, _, _ := newLifecycleBackend(t)
+		b.cfg.Blaxel.ExecTimeoutSecs = raw
+		seconds := raw
+		if seconds == 0 {
+			seconds = core.BlaxelConfigDefaultExecTimeoutSecs
+		}
+		observed := errors.New("observed")
+		fake.onExec = func(ctx context.Context, req ExecuteProcessRequest) (Process, error) {
+			deadline, ok := ctx.Deadline()
+			remaining := time.Until(deadline)
+			want := time.Duration(seconds)*time.Second + time.Second
+			if !ok || remaining > want || remaining < want-time.Second || req.TimeoutSecs != seconds {
+				t.Fatalf("budget=%s payload=%d want=%s/%d", remaining, req.TimeoutSecs, want, seconds)
+			}
+			return Process{}, observed
+		}
+		_, err := b.execCommand(t.Context(), fake, "sandbox", "/work", []string{"true"}, nil, io.Discard, io.Discard)
+		if !errors.Is(err, observed) {
+			t.Fatalf("exec error=%v", err)
+		}
 	}
 }
 

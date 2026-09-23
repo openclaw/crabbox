@@ -63,6 +63,9 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			if workdirErr != nil {
 				return workdirErr
 			}
+			if _, err := b.execWaitTimeout(); err != nil {
+				return err
+			}
 			var err error
 			client, err = b.client()
 			return err
@@ -510,7 +513,11 @@ func (b *backend) execCommand(ctx context.Context, client Client, sandboxID, wor
 		return 2, errors.New("missing command")
 	}
 	timeout := b.execTimeoutSecs()
-	waitCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second+time.Second)
+	waitTimeout, err := b.execWaitTimeout()
+	if err != nil {
+		return 2, err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, waitTimeout)
 	defer cancel()
 	process, err := client.ExecuteProcess(waitCtx, sandboxID, ExecuteProcessRequest{
 		Command:     command[0],
@@ -623,6 +630,13 @@ func (b *backend) execTimeoutSecs() int {
 		return b.cfg.Blaxel.ExecTimeoutSecs
 	}
 	return core.BlaxelConfigDefaultExecTimeoutSecs
+}
+
+func (b *backend) execWaitTimeout() (time.Duration, error) {
+	if timeout, ok := shared.SecondsWithGrace(int64(b.execTimeoutSecs()), time.Second); ok {
+		return timeout, nil
+	}
+	return 0, core.Exit(2, "blaxel execution timeout exceeds the supported duration range")
 }
 
 func blaxelWorkdir(cfg core.Config) (string, error) {
