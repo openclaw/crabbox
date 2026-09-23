@@ -28,12 +28,22 @@ overrides that destination through its environment variable or CLI flag.
 ## Precedence
 
 ```text
-flags > env > repo-local crabbox.yaml/.crabbox.yaml > user config > defaults
+flags > env > repo-local crabbox.yaml/.crabbox.yaml > user config > recent local provider history > defaults
 ```
 
-Lowest precedence is applied first: defaults, then user config, then repo
-config, then env vars, then flags. Each layer only overrides fields that are
-explicitly set; unset fields fall through to the layer below.
+Lowest precedence is applied first: defaults, then the optional recent-provider
+fallback, then user config, repo config, env vars, and flags. The history layer
+contains only provider selection; it is used only when no normal configuration
+source selected a provider. Each real configuration layer only overrides fields
+that are explicitly set; unset fields fall through to the layer below.
+
+Recent-provider history is private convenience state, not project policy. Crabbox
+records bounded per-workspace MRU entries after an explicit `--provider`
+selection successfully configures its backend. It does not record implicit
+history selections, perform runtime failover, or override exact lease routing.
+The fallback is disabled in CI, controller subprocesses, and explicit
+`CRABBOX_CONFIG` mode. Inspect or clear it with
+`crabbox providers history [--json|--clear]`.
 
 For the replacement lists `env.allow`, `results.junit`, and
 `run.preflightTools`, omitting the key inherits the lower layer, `[]` clears
@@ -77,6 +87,7 @@ file is group- or world-readable.
 
 State that does not belong in either YAML file:
 
+- recent per-workspace provider history (private bounded routing convenience; see `crabbox providers history`);
 - live lease records (managed records are coordinator-owned; registered records
   are provider-owned and mirrored to the coordinator);
 - per-lease SSH private keys (they live under the user config dir, but not in
