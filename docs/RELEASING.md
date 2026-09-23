@@ -584,9 +584,11 @@ credential from the environment. Then run the downstream verifier in a new
 credential-free shell.
 
 The launcher captures absolute Homebrew, Node, and Go executable paths before
-scrubbing the environment, then preserves only those tool directories plus the
-macOS system paths in the child `PATH`. Tap setup and formula evaluation run
-inside that child with a fresh `HOME` and cache.
+scrubbing the environment, then preserves only those tool directories in their
+original `PATH` order, followed by the macOS system paths. This retains the
+selected tool versions when another selected directory contains a different Go
+or Node executable. Tap setup and formula evaluation run inside that child with
+a fresh `HOME` and cache.
 
 ```sh
 HOMEBREW_TOOLING_COMMIT=$(git rev-parse HEAD)
@@ -659,6 +661,11 @@ succeeds. Cleanup errors retain diagnostics and the temporary path, fail the
 command, and preserve any earlier verification, creation, or readback exit code.
 A cleanup failure does not undo draft creation; inspect the existing record
 read-only before considering any further action.
+
+Release and Homebrew verification use the same directory-only cleanup policy for
+their private temporary trees, including downloaded Go toolchains. Cleanup never
+follows symlinks or changes file permissions, and an earlier verification failure
+keeps its original exit status even if cleanup also fails.
 
 ### 2. Verify the draft natively
 

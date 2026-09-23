@@ -31,8 +31,20 @@ PROTECTED_HOMEBREW_TOOLING=(
 )
 
 cleanup_homebrew_work() {
-  local path=${CRABBOX_HOMEBREW_VERIFY_WORK:-}
-  [[ -z "$path" ]] || rm -rf -- "$path"
+  local primary_status=$? cleanup_status path=${CRABBOX_HOMEBREW_VERIFY_WORK:-}
+  trap - EXIT
+  [[ -n "$path" ]] || return "$primary_status"
+  # Go caches may be read-only; never follow links or chmod linked files.
+  if find -P "$path" -type d -exec chmod u+w {} + && rm -rf -- "$path"; then
+    return "$primary_status"
+  else
+    cleanup_status=$?
+    echo "failed to remove Homebrew verification work directory: $path" >&2
+    if [[ "$primary_status" -ne 0 ]]; then
+      return "$primary_status"
+    fi
+    return "$cleanup_status"
+  fi
 }
 
 usage() {
@@ -487,6 +499,7 @@ main() {
   local release_id=$6
   [[ "$release_id" =~ ^[1-9][0-9]*$ ]] || usage
   local native_arch brew_bin node_bin go_bin work clean_path user_name homebrew_home homebrew_cache tooling_commit
+  local path_directory remaining_path
   validate_release_identity "$tag" "$tag_object" "$source_commit" "$verifier_commit"
   tooling_commit=${CRABBOX_VERIFY_TOOLING_COMMIT:-$verifier_commit}
   assert_no_downstream_credentials
@@ -529,7 +542,23 @@ main() {
     "$tag" "$asset_dir" "$tag_object" "$source_commit" "$verifier_commit" \
     "$release_id" "$work/public-preflight" "$node_bin"
   asset_dir="$work/public-preflight/public-assets"
-  clean_path="${brew_bin%/*}:${node_bin%/*}:${go_bin%/*}:/usr/bin:/bin:/usr/sbin:/sbin"
+  # Preserve the caller's tool precedence: any selected directory may also
+  # contain a different Go or Node version. Drop every unrelated PATH entry.
+  clean_path=
+  remaining_path=$PATH
+  while :; do
+    path_directory=${remaining_path%%:*}
+    if [[ "$path_directory" == /* ]]; then
+      case "${path_directory%/}" in
+        "${brew_bin%/*}" | "${node_bin%/*}" | "${go_bin%/*}")
+          clean_path="${clean_path:+$clean_path:}$path_directory"
+          ;;
+      esac
+    fi
+    [[ "$remaining_path" == *:* ]] || break
+    remaining_path=${remaining_path#*:}
+  done
+  clean_path="${clean_path:+$clean_path:}/usr/bin:/bin:/usr/sbin:/sbin"
   user_name=$(id -un)
 
   # shellcheck disable=SC2016 # Expanded by the credential-free child shell.

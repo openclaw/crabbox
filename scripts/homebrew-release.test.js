@@ -443,10 +443,6 @@ test("Homebrew verifier checks immutable bytes before credential-free native ins
   assert.match(source, /HOME="\$homebrew_home"/);
   assert.match(source, /HOMEBREW_CACHE="\$homebrew_cache"/);
   assert.match(source, /go_bin=\$\(command -v go\)/);
-  assert.match(
-    source,
-    /clean_path="\$\{brew_bin%\/\*\}:\$\{node_bin%\/\*\}:\$\{go_bin%\/\*\}:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin"/,
-  );
   assert.ok(main.indexOf("go_bin=$(command -v go)") < main.indexOf("/usr/bin/env -i"));
   assert.doesNotMatch(source, /^\s*HOME="\$HOME"/m);
   for (const credential of forbiddenCredentials) {
@@ -482,6 +478,65 @@ test("Homebrew verifier cleanup survives main function scope", () => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.existsSync(root), false);
 });
+
+for (const order of [["go", "node", "brew"], ["node", "go", "brew"], ["shared"]]) {
+  test(`Homebrew launcher preserves captured tool selection for ${order.join(" then ")} directories`, (t) => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-homebrew-path-")));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const selected = {};
+    const directories = [];
+    for (const entry of order) {
+      const directory = path.join(root, `${entry} tools`);
+      fs.mkdirSync(directory);
+      directories.push(directory);
+      // A later selected directory may contain older copies of earlier tools.
+      for (const tool of Object.keys(selected)) {
+        writeExecutable(path.join(directory, tool), "#!/bin/sh\necho 'shadowed tool selected' >&2\nexit 91\n");
+      }
+      for (const tool of entry === "shared" ? ["brew", "node", "go"] : [entry]) {
+        selected[tool] = path.join(directory, tool);
+        writeExecutable(selected[tool], tool === "node"
+          ? `#!/bin/sh\nexec ${shellQuote(process.execPath)} "$@"\n`
+          : `#!/bin/sh\nprintf '%s\\n' selected-${tool}\n`);
+      }
+    }
+    const unrelated = path.join(root, "unrelated");
+    const assets = path.join(root, "assets");
+    fs.mkdirSync(unrelated);
+    fs.mkdirSync(assets);
+    writeExecutable(path.join(path.dirname(selected.brew), "uname"), "#!/bin/sh\ncase $1 in -s) echo Darwin;; -m) echo arm64;; *) exit 98;; esac\n");
+    const launcher = path.join(root, "launcher.sh");
+    writeExecutable(launcher, `#!/bin/bash
+source ${shellQuote(verifier)}
+SCRIPT_PATH=${shellQuote(launcher)}
+require_publishable_source() { :; }
+require_protected_homebrew_tooling() { :; }
+freeze_public_release() { mkdir -m 700 "$7/public-assets"; }
+homebrew_phase() {
+  assert_clean_homebrew_environment
+  [[ "$(command -v brew)" == ${shellQuote(selected.brew)} ]] || return 97
+  [[ "$(command -v node)" == ${shellQuote(selected.node)} ]] || return 97
+  [[ "$(command -v go)" == ${shellQuote(selected.go)} ]] || return 97
+  [[ "$(go version)" == selected-go ]] || return 97
+  [[ "$(node --version)" == ${shellQuote(process.version)} ]] || return 97
+  [[ ":$PATH:" != *:${shellQuote(unrelated)}:* ]] || return 97
+  printf 'captured tools preserved\\n'
+}
+if [[ "\${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
+`);
+    const result = spawnSync("/bin/bash", [launcher, "v1.2.3", assets, "a".repeat(40), "b".repeat(40), "c".repeat(40), "123"], {
+      encoding: "utf8", cwd: root,
+      env: {
+        // Trailing slashes, spaces, and unrelated entries must not change the selection.
+        PATH: `${unrelated}:${directories.map((directory) => `${directory}/`).join(":")}:/usr/bin:/bin`,
+        HOME: root, TMPDIR: root, UNRELATED_SECRET: "synthetic-secret-canary",
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /captured tools preserved/);
+    assert.equal(fs.readdirSync(root).some((name) => name.startsWith("crabbox-homebrew-verify.")), false);
+  });
+}
 
 test("run-free public validation and freeze bind the complete immutable asset inventory", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "crabbox-public-proof-"));

@@ -109,7 +109,23 @@ awk 'NF != 2 || $1 !~ /^[[:xdigit:]]{64}$/ || $2 ~ /\// { exit 1 }' "$checksums"
 (cd "$ASSET_DIR" && shasum -a 256 -c checksums.txt)
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/crabbox-release-verify.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+cleanup_release_work() {
+  local primary_status=$? cleanup_status
+  trap - EXIT
+  # Toolchain caches have read-only directories. Repair only this private
+  # tree's directories, without following symlinks or changing linked files.
+  if find -P "$WORK" -type d -exec chmod u+w {} + && rm -rf -- "$WORK"; then
+    return "$primary_status"
+  else
+    cleanup_status=$?
+    echo "failed to remove release verification work directory: $WORK" >&2
+    if [[ "$primary_status" -ne 0 ]]; then
+      return "$primary_status"
+    fi
+    return "$cleanup_status"
+  fi
+}
+trap cleanup_release_work EXIT
 notes="$WORK/release-notes.md"
 tagged_changelog="$WORK/tagged-changelog.md"
 git -C "$ROOT" show "$TAG_COMMIT:CHANGELOG.md" >"$tagged_changelog"

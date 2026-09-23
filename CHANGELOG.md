@@ -2,18 +2,32 @@
 
 ## Unreleased
 
+## 0.66.0 - 2026-09-23
+
+### Highlights
+
+- **Run proxy-aware commands through host egress.** `egress run` manages proxy setup, command execution, and session cleanup; optional HTTP(S) upstream credentials stay on the host.
+- **Safer fixed-lease cleanup and recovery.** Uncertain cleanup preserves claims, Azure records companion cleanup identities before deletion, and Parallels rejects inconsistent identities and invalid terminal receipts.
+- **More reliable NVIDIA Brev connections.** Native OpenSSH resolves certificate-backed routes, while saved host/container targets survive fresh processes, reuse, and stop/start.
+- **Provider observations preserve lease policy.** OVH, Sprites, and Boat retain recorded lifetime and idle settings across status, reuse, and heartbeat operations; unknown observations stay unknown.
+- **Uploads and request budgets fail cleanly.** Multipart producers finish before archives are released, oversized execution budgets fail before dispatch, and Vultr retries release the previous response first.
+
+### Upgrade notes
+
+- `egress run` requires an existing, exclusively owned Linux SSH lease, and the command must opt into its lease-local proxy. Scoped cleanup requires the current Linux helper and pidfd support. [PR 2506](https://github.com/openclaw/crabbox/pull/2506).
+- Keep local claims and journals when upgrading hosts with unfinished fixed-ID cleanup. Inconsistent Parallels identities and invalid terminal receipts now fail instead of being reported as cleaned up. [PR 2515](https://github.com/openclaw/crabbox/pull/2515).
+
 ### Added
 
 - Add `egress run` to own proxy setup, remote execution, and session cleanup for one job, with optional HTTP(S) upstream chaining that keeps credentials on the host and never falls back to direct egress; `egress stop --session` supports scoped cleanup and prevents late startup. [PR 2506](https://github.com/openclaw/crabbox/pull/2506).
 
 ### Fixes
 
-- Recover notarization upload deadlines with one bounded S3 acceleration retry or an explicit accelerated route, and require successful signer exit plus online verification before capturing a receipt. [PR 2518](https://github.com/openclaw/crabbox/pull/2518). Thanks @steipete.
 - Preserve OVH heartbeat policy, including pre-upgrade overrides, across reuse and status reads, recording activity and explicit idle-timeout changes atomically in the local lease claim. [PR 2420](https://github.com/openclaw/crabbox/pull/2420). Thanks @steipete.
 - Retain OVH SSH targets for plain status readiness checks and keep both status modes out of repository admission, while preserving metadata-only observations without a public address. [PR 2420](https://github.com/openclaw/crabbox/pull/2420). Thanks @steipete.
 - Bound OVH IP-readiness lookups and retry waits with an elapsed-time deadline, preserving caller cancellation causes and provider error precedence. [PR 2420](https://github.com/openclaw/crabbox/pull/2420). Thanks @steipete.
-- Resolve NVIDIA Brev SSH routes with native OpenSSH, preserve captured routes across commands, sync, copying, forwarding, and interactive sessions, and retain bounded, redacted certificate-hook diagnostics. [PR 2429](https://github.com/openclaw/crabbox/pull/2429). Thanks @vincentkoc.
-- Preserve NVIDIA Brev leases' host/container target across fresh-process status, reuse, and stop/start, while honoring explicit target changes. [PR 2430](https://github.com/openclaw/crabbox/pull/2430). Thanks @vincentkoc.
+- Resolve NVIDIA Brev SSH routes with native OpenSSH, preserve captured routes across commands, sync, copying, forwarding, and interactive sessions, and retain bounded, redacted certificate-hook diagnostics. [PR 2429](https://github.com/openclaw/crabbox/pull/2429), [PR 2516](https://github.com/openclaw/crabbox/pull/2516). Thanks @vincentkoc.
+- Preserve NVIDIA Brev leases' host/container target across fresh-process status, reuse, and stop/start, while honoring explicit target changes. [PR 2430](https://github.com/openclaw/crabbox/pull/2430), [PR 2517](https://github.com/openclaw/crabbox/pull/2517). Thanks @vincentkoc.
 - Preserve fixed-lease claims after uncertain cleanup, durably bind Azure companion cleanup identities before deletion, honor existing deletion markers on retries, and reject inconsistent Parallels cleanup identities and invalid terminal receipts. [PR 2515](https://github.com/openclaw/crabbox/pull/2515). Thanks @steipete.
 - Finish E2B and CubeSandbox upload producers before releasing source archives and surface source-read failures, using the same multipart lifetime owner as Blaxel. [PR 2509](https://github.com/openclaw/crabbox/pull/2509). Thanks @steipete.
 - Finish Blaxel multipart producers before retrying or releasing borrowed archives, preserving HTTP error precedence and early-success uploads. [PR 2505](https://github.com/openclaw/crabbox/pull/2505). Thanks @steipete.
@@ -26,6 +40,11 @@
 - Reject overflowing OpenSandbox execution and lifetime budgets before requests, preserve valid coverage rules, and retain recovery claims with malformed lifetime seconds. [PR 2511](https://github.com/openclaw/crabbox/pull/2511). Thanks @steipete.
 - Reject overflowing Cloudflare Dynamic Workers execution budgets before dispatch, preserving disabled timeouts and repository security caps. [PR 2507](https://github.com/openclaw/crabbox/pull/2507). Thanks @steipete.
 - Release Vultr rate-limit responses before waiting and retrying, preventing a retry from stalling behind its own connection limit. [PR 2306](https://github.com/openclaw/crabbox/pull/2306). Thanks @steipete.
+
+### Maintenance
+
+- Recover notarization upload deadlines with one bounded S3 acceleration retry or an explicit accelerated route, and require successful signer exit plus online verification before capturing a receipt. [PR 2518](https://github.com/openclaw/crabbox/pull/2518). Thanks @steipete.
+- Preserve selected release-verification tools and clean up read-only temporary Go caches without following symlinks or masking earlier failures. Thanks @steipete.
 
 ## 0.65.0 - 2026-09-22
 
