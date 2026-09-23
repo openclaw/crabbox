@@ -44,7 +44,7 @@
 ### Maintenance
 
 - Recover notarization upload deadlines with one bounded S3 acceleration retry or an explicit accelerated route, and require successful signer exit plus online verification before capturing a receipt. [PR 2518](https://github.com/openclaw/crabbox/pull/2518). Thanks @steipete.
-- Preserve selected release-verification tools and clean up read-only temporary Go caches without following symlinks or masking earlier failures. Thanks @steipete.
+- Preserve selected release-verification tools and clean up read-only temporary Go caches without following symlinks or masking earlier failures. [PR 2520](https://github.com/openclaw/crabbox/pull/2520). Thanks @steipete.
 
 ## 0.65.0 - 2026-09-22
 

@@ -110,6 +110,14 @@ const destination = args[args.indexOf("--directory") + 1];
 fs.mkdirSync(destination);
 console.log("{}");
 `);
+  executable(path.join(root, "scripts", "homebrew-cleanup.sh"), `#!/bin/bash
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+source "$root/scripts/verify-homebrew-release.sh"
+CRABBOX_HOMEBREW_VERIFY_WORK=$(mktemp -d "$root/tmp/crabbox-homebrew-verify.XXXXXX")
+trap cleanup_homebrew_work EXIT
+"$root/scripts/make-cache" "$CRABBOX_HOMEBREW_VERIFY_WORK"
+`);
   const assets = ["darwin_amd64.tar.gz", "darwin_arm64.tar.gz", "linux_amd64.tar.gz", "linux_arm64.tar.gz", "windows_amd64.zip", "windows_arm64.zip"]
     .map((platform) => `crabbox_1.2.3_${platform}`).concat("provenance.json");
   const checksumLines = assets.map((name) => {
@@ -120,11 +128,7 @@ console.log("{}");
   fs.writeFileSync(path.join(root, "assets", "checksums.txt"), checksumLines.join(""));
   const args = kind === "release"
     ? [path.join(root, "scripts", "verify-release.sh"), "v1.2.3", path.join(root, "assets"), "a".repeat(40), "b".repeat(40), "c".repeat(40)]
-    : ["-c", `source "$1/scripts/verify-homebrew-release.sh"
-CRABBOX_HOMEBREW_VERIFY_WORK=$(mktemp -d "$1/tmp/crabbox-homebrew-verify.XXXXXX")
-trap cleanup_homebrew_work EXIT
-"$1/scripts/make-cache" "$CRABBOX_HOMEBREW_VERIFY_WORK"
-`, "homebrew-cleanup-test", root];
+    : [path.join(root, "scripts", "homebrew-cleanup.sh")];
   const result = spawnSync("/bin/bash", args, {
     cwd: root, encoding: "utf8",
     env: {
