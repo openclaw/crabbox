@@ -414,9 +414,6 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 			if err := tx.applyBinding(*observed.Binding); err != nil {
 				return err
 			}
-			if err := tx.Record("deleting"); err != nil {
-				return err
-			}
 		}
 		if len(observed.Candidates) == 0 {
 			if !observed.AbsenceProven {
@@ -430,11 +427,12 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 		}
 		if kind.DeletionState != "" {
 			claim.FixedCreateIntent.State = kind.DeletionState
+			if err := tx.Record("deleting"); err != nil {
+				return err
+			}
 		}
-		// The journal fences replay even when the legacy dialect has no deletion state.
-		if err := tx.Record("deleting"); err != nil {
-			return err
-		}
+		// Dialects without a deletion state leave durable custody unchanged at
+		// admission; adapters may still record native cleanup acknowledgements.
 		// All ownership checks and durable deletion-entry writes have passed;
 		// failures from this point must retain/report the admitted cleanup.
 		markStarted(true)

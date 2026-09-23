@@ -96,11 +96,93 @@ func fixedCleanupKind() FixedLeaseKind {
 	return FixedLeaseKind{ClaimProvider: "fixture-fixed", IntentVersion: 1, Label: "fixture", DeletionState: "deleting"}
 }
 
-func TestFixedCleanupWithoutLegacyDeletionStateFencesReplay(t *testing.T) {
+func TestFixedCleanupWithoutDeletionStatePreservesFailedClaim(t *testing.T) {
+	for _, state := range []string{"prepared", "acquired"} {
+		for _, bindingSource := range []string{"none", "observation", "release"} {
+			t.Run(state+"/"+bindingSource, func(t *testing.T) {
+				isolateTestUserDirs(t)
+				claim := fixedCleanupClaim(t, state)
+				if err := WithDurableLeaseClaimLock(claim.LeaseID, func(c *LeaseClaim, _ bool, persist func() error) error {
+					c.ImageEvidence = &ImageEvidence{ConfiguredReference: "image:v1", RuntimeImageID: "image-1", RepositoryDigests: []string{"image@sha256:fixture"}}
+					c.CheckpointCapture = &CheckpointCaptureBinding{ID: "capture", Revision: "capture-revision"}
+					c.FixedCreateIntent.Journal = &FixedLeaseJournal{Version: 1, Phase: state, Revision: 3}
+					return persist()
+				}); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				claim, err = ReadLeaseClaim(claim.LeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				kind := fixedCleanupKind()
+				kind.DeletionState = ""
+				failure := errors.New("native cleanup uncertain")
+				started := false
+				outcome := ReleaseLeaseOutcome{}
+				policy := &FixedReleasePolicy{Started: &started, Outcome: &outcome}
+				binding := &FixedResourceBinding{CloudID: claim.CloudID, Labels: map[string]string{"observed": "ready"}}
+				if bindingSource == "release" {
+					policy.Binding = binding
+				}
+				ops := FixedLeaseOperations[string]{
+					Release: policy,
+					ObserveExact: func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[string], error) {
+						observed := FixedObservation[string]{Candidates: []string{"resource"}}
+						if bindingSource == "observation" {
+							observed.Binding = binding
+						}
+						return observed, nil
+					},
+					DeleteExact: func(context.Context, *FixedTransaction, string) error {
+						durable, err := ReadLeaseClaim(claim.LeaseID)
+						if err != nil || !reflect.DeepEqual(claim, durable) || !started {
+							t.Fatalf("deletion admission changed durable custody: started=%v err=%v", started, err)
+						}
+						return failure
+					},
+				}
+				if err := DeleteFixedResource(t.Context(), kind, claim, ops); !errors.Is(err, failure) || !started || outcome.Terminal {
+					t.Fatalf("failed cleanup: started=%v terminal=%v err=%v", started, outcome.Terminal, err)
+				}
+				after, err := ReadLeaseClaim(claim.LeaseID)
+				if err != nil || !reflect.DeepEqual(claim, after) {
+					t.Fatalf("failed cleanup changed durable claim or bound evidence: %v", err)
+				}
+				ops.DeleteExact = func(context.Context, *FixedTransaction, string) error { return nil }
+				if err := DeleteFixedResource(t.Context(), kind, claim, ops); err != nil || !outcome.Terminal {
+					t.Fatalf("cleanup retry: terminal=%v err=%v", outcome.Terminal, err)
+				}
+				terminal, err := ReadLeaseClaim(claim.LeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := kind.ValidateTerminalClaim(terminal, claim, claim.LeaseID, nil); err != nil {
+					t.Fatalf("successful retry did not publish a valid receipt: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestFixedCleanupExistingJournalAdmissionFencesReplay(t *testing.T) {
 	isolateTestUserDirs(t)
 	claim := fixedCleanupClaim(t, "acquired")
 	kind := fixedCleanupKind()
 	kind.DeletionState = ""
+	// Previously persisted admission remains authoritative on retry, even
+	// when this dialect no longer writes a deletion marker before completion.
+	if err := WithDurableLeaseClaimLock(claim.LeaseID, func(c *LeaseClaim, _ bool, persist func() error) error {
+		c.FixedCreateIntent.Journal = &FixedLeaseJournal{Version: 1, Phase: "deleting", Revision: 1}
+		return persist()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	claim, err = ReadLeaseClaim(claim.LeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	failure := errors.New("native deletion interrupted")
 	admitted := false
 	ops := FixedLeaseOperations[string]{
@@ -138,8 +220,8 @@ func TestFixedCleanupWithoutLegacyDeletionStateFencesReplay(t *testing.T) {
 		t.Error("native deletion preceded durable admission")
 	}
 	deleting, err := ReadLeaseClaim(claim.LeaseID)
-	if err != nil || deleting.FixedCreateIntent.State != "acquired" {
-		t.Fatalf("legacy state dialect changed: %v", err)
+	if err != nil || !reflect.DeepEqual(claim, deleting) {
+		t.Fatalf("failed cleanup changed durable admission: %v", err)
 	}
 	if _, err := AcquireFixedResource(t.Context(), FixedAcquireOptions{Kind: kind, LeaseID: claim.LeaseID, RepoRoot: claim.RepoRoot}, ops); err == nil {
 		t.Error("replayed a resource after interrupted deletion")
