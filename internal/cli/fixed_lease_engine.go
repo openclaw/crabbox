@@ -334,7 +334,13 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 	}
 	// An earlier durable admission stays started even if this invocation cannot
 	// regain the fence. Never downgrade its failure into a harmless cleanup skip.
-	markStarted(kind.DeletionState != "" && kind.IsFixedClaim(expected) && expected.FixedCreateIntent.State == kind.DeletionState)
+	previouslyStarted := false
+	if kind.IsFixedClaim(expected) {
+		intent := expected.FixedCreateIntent
+		previouslyStarted = (kind.DeletionState != "" && intent.State == kind.DeletionState) ||
+			(intent.Journal != nil && intent.Journal.Phase == "deleting")
+	}
+	markStarted(previouslyStarted)
 	if !kind.IsFixedClaim(expected) || expected.FixedCreateIntent.Version != kind.IntentVersion {
 		return Exit(4, "lease_id_conflict: fixed deletion has no matching ownership dialect")
 	}
@@ -424,9 +430,10 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 		}
 		if kind.DeletionState != "" {
 			claim.FixedCreateIntent.State = kind.DeletionState
-			if err := tx.Record("deleting"); err != nil {
-				return err
-			}
+		}
+		// The journal fences replay even when the legacy dialect has no deletion state.
+		if err := tx.Record("deleting"); err != nil {
+			return err
 		}
 		// All ownership checks and durable deletion-entry writes have passed;
 		// failures from this point must retain/report the admitted cleanup.

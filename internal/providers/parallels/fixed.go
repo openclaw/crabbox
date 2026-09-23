@@ -409,6 +409,9 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 
 func (b *leaseBackend) releaseFixed(ctx context.Context, claim core.LeaseClaim, outcome *core.ReleaseLeaseOutcome) error {
 	if claim.FixedCreateIntent.State == "released" {
+		if err := parallelsFixedLeaseKind.ValidateTerminalClaim(claim, claim, claim.LeaseID, nil); err != nil {
+			return err
+		}
 		outcome.Terminal = true
 		return nil
 	}
@@ -416,11 +419,19 @@ func (b *leaseBackend) releaseFixed(ctx context.Context, claim core.LeaseClaim, 
 	if name == "" {
 		return core.Exit(4, "Parallels lease %s has no recorded creation attempt", claim.LeaseID)
 	}
+	intent := claim.FixedCreateIntent
+	incarnation := parallelsFixedIncarnation(intent)
+	// Absence cannot repair disagreement between the recorded host or VM identities.
+	if claim.ProviderScope != intent.ProviderScope || intent.Attempt["host"] != intent.ProviderScope ||
+		(claim.CloudID != "" && claim.CloudID != incarnation) ||
+		(claim.CloudImmutableID != "" && claim.CloudImmutableID != incarnation) ||
+		(incarnation == "" && (intent.State == "acquired" || intent.State == "deleting")) {
+		return core.Exit(4, "lease_id_conflict: Parallels lease %s has inconsistent recorded host or VM identity; claim retained", claim.LeaseID)
+	}
 	_, client, err := parallelsFixedHostConfig(ctx, b.RT.Exec, b.Cfg, claim.LeaseID, claim.ProviderScope)
 	if err != nil {
 		return err
 	}
-	incarnation := parallelsFixedIncarnation(claim.FixedCreateIntent)
 	// A prepared create's absence is inconclusive: the clone may still be in
 	// flight. Only an attempt that reached the provider may finalize on absence.
 	lookup := func() (*core.ParallelsVM, error) {

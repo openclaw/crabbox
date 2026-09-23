@@ -300,7 +300,10 @@ an empty list or matching display name grants no authority.
 `core.DeleteFixedResource` keeps claim comparison, native proof, and terminal
 publication under one durable claim lock. Existing shared claim resolvers and
 native cleanup graphs remain reusable; a deletion callback must prove completion,
-not merely request admission. `FixedLeaseKind.AfterTerminal`, when needed, cleans
+not merely request admission. Core persists the `deleting` journal phase before
+native deletion even when the legacy format has no deletion state. Interrupted
+cleanup blocks acquisition replay and retains its admitted status on stale retries.
+`FixedLeaseKind.AfterTerminal`, when needed, cleans
 local lease artifacts after durable terminal publication while retaining that
 same claim fence. Native absence-only recovery is a separate proof path.
 Cleanup callers can request `FixedReleasePolicy.Started` to distinguish a stale

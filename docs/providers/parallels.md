@@ -478,7 +478,9 @@ The reconciliation contract:
   attested keeps custody instead of rebinding; a fleet in which no host attests
   the recorded identity fails `lease_id_conflict`.
 - **Absence.** Only a complete inventory listing proves a VM is gone, and only
-  the bound UUID being absent from it. A failed `prlctl list` keeps custody
+  the bound UUID being absent from it. The recorded claim and attempt must agree
+  on the host scope and VM UUID before absence can retire the lease; missing or
+  conflicting incarnation evidence retains custody. A failed `prlctl list` keeps custody
   rather than cloning a second VM; an acquired VM that has been renamed to
   another `crabbox-<lease-id>-<slug>` is found by its UUID and keeps custody
   rather than being reported as deleted; and an acquired lease whose VM has
@@ -509,7 +511,7 @@ The reconciliation contract:
   recorded VM, and keeps a terminal tombstone: the ID, slug, connection scope,
   intent hash, timestamps, and terminal state. Stopping a fixed lease whose VM
   is already gone finalizes that tombstone, and stopping an already terminal
-  lease is an idempotent no-op — both through `crabbox stop`, not only through
+  lease is an idempotent no-op after validating its terminal receipt — both through `crabbox stop`, not only through
   the provider API. Replaying a released ID never creates another VM. Automatic
   cleanup never prunes tombstones, and there is no reuse window — deleting local
   claim state forfeits the protection, so automation must mint a new ID instead.
