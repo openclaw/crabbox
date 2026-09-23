@@ -59,9 +59,12 @@ cause in cleanup metadata because a resource may still exist, warmup includes
 that diagnostic. Use `crabbox inspect --id <lease>` to check the retained
 provisioning and cleanup evidence before recovery.
 
-Warmup requires an explicit provider selection from `--provider`,
+Warmup requires a provider selection. Normal sources are `--provider`,
 `CRABBOX_PROVIDER`, user or repository config, broker config, or an applicable
-recorded lease route. With no selection it exits before provider initialization
+recorded lease route. For ordinary local use, Crabbox can also reuse the most
+recent explicitly selected provider recorded for the current workspace. CI,
+controller subprocesses, and explicit `CRABBOX_CONFIG` mode do not consume
+that history. With no usable selection it exits before provider initialization
 and points to `crabbox providers recommend`.
 
 For ordinary `local-container` warmups without `--lease-id`, the default
