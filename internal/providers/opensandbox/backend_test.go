@@ -3307,23 +3307,54 @@ func (b *openSandboxObservationCloseBody) Close() error {
 }
 
 func TestOpenSandboxRejectsOverflowBeforeFreshOrReuseClient(t *testing.T) {
-	for _, seconds := range []int64{9223372037, 9223372007, 4611686010} {
-		value := int(seconds)
-		if int64(value) != seconds {
-			continue
-		}
-		for _, id := range []string{"", "osbx_existing"} {
+	const executionError = "opensandbox execution timeout exceeds the supported request budget"
+	const combinedError = "opensandbox combined sync/command budget exceeds the supported duration"
+	for _, tc := range []struct {
+		name            string
+		execSeconds     int64
+		lifetimeSeconds int64
+		syncTimeout     time.Duration
+		id              string
+		noSync          bool
+		wantError       string
+	}{
+		{name: "fresh execution conversion", execSeconds: 9223372037, noSync: true, wantError: executionError},
+		{name: "reuse execution conversion", execSeconds: 9223372037, id: "osbx_existing", noSync: true, wantError: executionError},
+		{name: "fresh execution grace", execSeconds: 9223372007, noSync: true, wantError: executionError},
+		{name: "reuse execution grace", execSeconds: 9223372007, id: "osbx_existing", noSync: true, wantError: executionError},
+		{name: "fresh no-sync double budget", execSeconds: 4611686010, noSync: true, wantError: combinedError},
+		{name: "reuse no-sync double budget", execSeconds: 4611686010, id: "osbx_existing", noSync: true, wantError: combinedError},
+		{name: "fresh sync and command sum", syncTimeout: time.Duration(1<<63 - 1), wantError: combinedError},
+		{name: "reuse sync and command sum", syncTimeout: time.Duration(1<<63 - 1), id: "osbx_existing", wantError: combinedError},
+		{name: "fresh lifetime conversion", lifetimeSeconds: 9223372037, wantError: "opensandbox timeoutSecs exceeds the supported lifetime"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if int64(int(tc.execSeconds)) != tc.execSeconds || int64(int(tc.lifetimeSeconds)) != tc.lifetimeSeconds {
+				t.Skip("fixture requires a 64-bit integer")
+			}
 			cfg := testConfig()
-			cfg.OpenSandbox.ExecTimeoutSecs = value
+			if tc.execSeconds != 0 {
+				cfg.OpenSandbox.ExecTimeoutSecs = int(tc.execSeconds)
+			}
+			cfg.OpenSandbox.TimeoutSecs = int(tc.lifetimeSeconds)
+			if tc.syncTimeout != 0 {
+				cfg.Sync.Timeout = tc.syncTimeout
+			}
 			if err := validateOpenSandboxConfig(cfg); err != nil {
 				t.Fatalf("lifecycle validation must stay available: %v", err)
 			}
-			b := &openSandboxBackend{spec: Provider{}.Spec(), cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
-			_, err := b.Run(t.Context(), core.RunRequest{ID: id, NoSync: true, Command: []string{"true"}})
-			if err == nil || !strings.Contains(err.Error(), "budget") {
-				t.Fatalf("seconds=%d id=%q err=%v", seconds, id, err)
+			b := &openSandboxBackend{
+				spec: Provider{}.Spec(), cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard},
+				newClient: func(core.Config, core.Runtime) (openSandboxClient, error) {
+					t.Fatal("overflowing budget reached client construction")
+					return nil, nil
+				},
 			}
-		}
+			_, err := b.Run(t.Context(), core.RunRequest{ID: tc.id, NoSync: tc.noSync, Command: []string{"true"}})
+			if core.ExitCodeForError(err, 1) != 2 || err.Error() != tc.wantError {
+				t.Fatalf("admission error=%v, want exit code 2 and %q", err, tc.wantError)
+			}
+		})
 	}
 	cfg := testConfig()
 	cfg.Sync.Timeout = time.Duration(1<<63 - 1)
