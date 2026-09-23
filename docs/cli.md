@@ -171,7 +171,7 @@ See [pond](commands/pond.md) and the [pond feature](features/pond.md).
 
 ```text
 crabbox providers                             show provider capabilities
-crabbox providers history [--json|--clear]        inspect local provider routing memory
+crabbox providers history [--json|--clear]       inspect local provider routing memory
 crabbox providers describe <provider>         show compiled run flags for one runnable provider
 crabbox preflight-tools [--json]              list accepted preflight names and target support offline
 crabbox usage [--scope user|org|all]          cost and usage estimates
