@@ -10,7 +10,7 @@
 - **Malformed timeouts no longer trigger premature cleanup.** Checked duration conversions preserve leases with overflowing idle limits, while existing TTL and ownership checks continue to apply.
 - **Authentication requests have bounded waits.** GitHub membership checks, OAuth requests, and Cloudflare Access key loading stop stalled requests instead of leaving authentication waiting indefinitely.
 - **Provider startup respects cancellation and deadlines.** Hostinger and Upstash Box readiness waits now include stalled responses and polling backoff; GCP and Scaleway retain the original cancellation and timeout causes.
-- **More reliable provider cleanup and status.** Scaleway removes the root disks recorded for new leases, fixed-lease cleanup preserves reclaimed resources, and Vast status probes use the native SSH endpoint and stored key.
+- **More reliable provider cleanup and status.** Azure resumes fixed-ID worker cleanup after local claim loss, Scaleway removes root disks recorded for new leases, and Vast status probes use the native SSH endpoint and stored key.
 
 ### Upgrade notes
 
@@ -25,6 +25,7 @@
 
 ### Fixes
 
+- Recover direct Azure fixed-ID worker cleanup after local claim loss, preserve cancellation, and resume interrupted cleanup from durable resource identities. [PR 2501](https://github.com/openclaw/crabbox/pull/2501). Thanks @galiniliev.
 - Reject overflowing OpenComputer and Blaxel execution budgets before provider dispatch, including response grace, while preserving timeout defaults, payloads, and cancellation. [PR 2497](https://github.com/openclaw/crabbox/pull/2497). Thanks @steipete.
 - Reject overflowing Firecracker disk and Hyper-V memory byte conversions before lease state, filesystem copies, or native VM creation, preserving existing sizing defaults and recovery paths. [PR 2495](https://github.com/openclaw/crabbox/pull/2495). Thanks @steipete.
 - Prevent out-of-range persisted idle seconds from authorizing Cloud Run Sandbox idle expiry while preserving independent TTL, stale-create, and invalid-timestamp cleanup policies. [PR 2496](https://github.com/openclaw/crabbox/pull/2496). Thanks @steipete.
