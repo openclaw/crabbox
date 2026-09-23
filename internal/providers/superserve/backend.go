@@ -133,6 +133,9 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 			if workdirErr != nil {
 				return workdirErr
 			}
+			if _, err := superserveExecTimeout(b.execTimeoutSecs()); err != nil {
+				return err
+			}
 			var err error
 			api, err = b.client()
 			return err

@@ -1222,3 +1222,52 @@ func TestRunLiteralArgumentsSurviveNativeStdinTransport(t *testing.T) {
 		t.Fatalf("literal semicolon created marker: %v", err)
 	}
 }
+
+func TestExecRejectsOverflow(t *testing.T) {
+	if uint64(^uint(0)>>1) < uint64(9223372037) {
+		t.Skip("64-bit input")
+	}
+	var seconds int64 = 9223372037
+	b := &backend{cfg: core.Config{Nomad: core.NomadConfig{ExecTimeoutSecs: int(seconds)}}}
+	err := b.execShell(t.Context(), &fakeClient{}, allocationReadiness{AllocationID: "alloc", Task: "task"}, "true")
+	if err == nil || !strings.Contains(err.Error(), "nomad execution timeout exceeds the supported duration range") {
+		t.Fatalf("overflow result: %v", err)
+	}
+}
+
+func TestRunRejectsExecOverflowBeforeClient(t *testing.T) {
+	if uint64(^uint(0)>>1) < uint64(9223372037) {
+		t.Skip("64-bit input")
+	}
+	cfg := core.BaseConfig()
+	var seconds int64 = 9223372037
+	cfg.Nomad.ExecTimeoutSecs = int(seconds)
+	b := &backend{spec: Provider{}.Spec(), cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}, clientFactory: func(Config, Runtime) (Client, error) { t.Fatal("overflow reached client"); return nil, nil }}
+	for _, id := range []string{"", "existing"} {
+		_, err := b.Run(t.Context(), core.RunRequest{ID: id, Repo: core.Repo{Root: t.TempDir()}, Command: []string{"true"}, NoSync: true})
+		if err == nil || core.ExitCodeForError(err, 1) != 2 || !strings.Contains(err.Error(), "execution timeout exceeds") {
+			t.Fatalf("run: %v", err)
+		}
+	}
+}
+
+func TestExecContextPreservesDisabledAndParentCancellation(t *testing.T) {
+	for _, seconds := range []int{0, 12} {
+		b := &backend{cfg: core.Config{Nomad: core.NomadConfig{ExecTimeoutSecs: seconds}}}
+		parent, stop := context.WithCancelCause(t.Context())
+		cause := errors.New("parent stopped")
+		child, cancel, err := b.execContext(parent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deadline, hasDeadline := child.Deadline()
+		if (seconds == 0 && hasDeadline) || (seconds > 0 && (!hasDeadline || time.Until(deadline) <= 0 || time.Until(deadline) > 12*time.Second)) {
+			t.Fatal("budget changed")
+		}
+		stop(cause)
+		if context.Cause(child) != cause {
+			t.Fatal("parent cause lost")
+		}
+		cancel()
+	}
+}

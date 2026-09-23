@@ -25,11 +25,27 @@ type nomadExecRequest struct {
 	Stderr       io.Writer
 }
 
-func (b *backend) execContext(ctx context.Context) (context.Context, context.CancelFunc) {
+func (b *backend) execTimeout() (time.Duration, error) {
 	if b.cfg.Nomad.ExecTimeoutSecs <= 0 {
-		return context.WithCancel(ctx)
+		return 0, nil
 	}
-	return context.WithTimeout(ctx, time.Duration(b.cfg.Nomad.ExecTimeoutSecs)*time.Second)
+	if timeout, ok := shared.SecondsWithGrace(int64(b.cfg.Nomad.ExecTimeoutSecs), 0); ok {
+		return timeout, nil
+	}
+	return 0, core.Exit(2, "nomad execution timeout exceeds the supported duration range")
+}
+
+func (b *backend) execContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	timeout, err := b.execTimeout()
+	if err != nil {
+		return nil, nil, err
+	}
+	if timeout == 0 {
+		child, cancel := context.WithCancel(ctx)
+		return child, cancel, nil
+	}
+	child, cancel := context.WithTimeout(ctx, timeout)
+	return child, cancel, nil
 }
 
 func (b *backend) cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -37,7 +53,10 @@ func (b *backend) cleanupContext(ctx context.Context) (context.Context, context.
 }
 
 func (b *backend) execShell(ctx context.Context, client Client, ready allocationReadiness, command string) error {
-	execCtx, cancel := b.execContext(ctx)
+	execCtx, cancel, err := b.execContext(ctx)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	exitCode, err := b.allocationExec(execCtx, client, ready, []string{"sh", "-lc", command}, nil, b.rt.Stdout, b.rt.Stderr)
 	if err != nil {
@@ -58,7 +77,10 @@ func (b *backend) runCommand(ctx context.Context, client Client, ready allocatio
 		printEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
 	script := shared.ShellWorkspaceCommand(workdir, req.Env, intent, "bash", "-lc")
-	execCtx, cancel := b.execContext(ctx)
+	execCtx, cancel, err := b.execContext(ctx)
+	if err != nil {
+		return 2, err
+	}
 	defer cancel()
 	exitCode, err := b.allocationExec(execCtx, client, ready, []string{"sh", "-s"}, strings.NewReader(script), stdout, stderr)
 	if err != nil {

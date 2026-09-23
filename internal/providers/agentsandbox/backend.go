@@ -115,6 +115,9 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (result core.Run
 		return core.RunResult{}, core.Exit(2, "provider=%s is delegated-run only and does not support Tailscale options", providerName)
 	}
 	workdir := path.Clean(b.cfg.AgentSandbox.Workdir)
+	if _, err := b.execTimeout(); err != nil {
+		return core.RunResult{}, err
+	}
 	started := core.ClockNow(b.rt.Clock)
 	client, err := b.client(ctx)
 	if err != nil {

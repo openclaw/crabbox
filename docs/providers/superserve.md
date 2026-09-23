@@ -224,6 +224,14 @@ successful live proof prints `classification=live_superserve_smoke_passed`.
 - IDs must be a Crabbox slug, an `ssbx_...` lease ID, or a raw Superserve
   sandbox ID that has matching Crabbox ownership metadata.
 
+## Execution timeout limits
+
+Positive `execTimeoutSecs` values must fit the local command-duration budget,
+including the five-second transport grace. Unrepresentable values fail before
+run acquisition or reuse and before HTTP exec dispatch. Zero retains the service
+default with caller cancellation; the timeout payload never includes the grace.
+Inspection and stop do not consume this command budget.
+
 ## Related Docs
 
 - [Provider backends](../provider-backends.md)
