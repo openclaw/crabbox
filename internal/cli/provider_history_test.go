@@ -310,4 +310,3 @@ func TestProviderHistoryCommandRejectsClearJSONCombination(t *testing.T) {
 		t.Fatalf("error=%v", err)
 	}
 }
-
