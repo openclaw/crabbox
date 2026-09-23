@@ -268,6 +268,21 @@ func TestProviderSupportsDirectWindowsOSDiskCheckpoints(t *testing.T) {
 	}
 }
 
+func TestProviderSupportsDirectLinuxOSDiskCheckpoints(t *testing.T) {
+	t.Parallel()
+	capability, ok := (Provider{}).NativeCheckpointCapability(core.NativeCheckpointRequest{
+		Config: core.Config{TargetOS: core.TargetLinux},
+		Server: core.Server{CloudID: "crabbox-source"},
+		Target: core.SSHTarget{TargetOS: core.TargetLinux},
+	})
+	if !ok {
+		t.Fatal("expected Linux Azure checkpoint capability")
+	}
+	if capability.Kind != core.CheckpointKindAzureOS || !capability.Direct {
+		t.Fatalf("capability=%+v, want direct Azure OS disk snapshot", capability)
+	}
+}
+
 func TestProviderRejectsWindowsImageCheckpoints(t *testing.T) {
 	t.Parallel()
 	_, ok := (Provider{}).NativeCheckpointCapability(core.NativeCheckpointRequest{
@@ -278,6 +293,19 @@ func TestProviderRejectsWindowsImageCheckpoints(t *testing.T) {
 	})
 	if ok {
 		t.Fatal("Azure Windows leases must not advertise managed image checkpoints")
+	}
+}
+
+func TestProviderRejectsDirectLinuxImageCheckpoints(t *testing.T) {
+	t.Parallel()
+	_, ok := (Provider{}).NativeCheckpointCapability(core.NativeCheckpointRequest{
+		Config:   core.Config{TargetOS: core.TargetLinux},
+		Server:   core.Server{CloudID: "crabbox-source"},
+		Target:   core.SSHTarget{TargetOS: core.TargetLinux},
+		Strategy: core.CheckpointStrategyImage,
+	})
+	if ok {
+		t.Fatal("direct Azure Linux leases must not advertise managed image checkpoints")
 	}
 }
 

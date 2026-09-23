@@ -13,6 +13,7 @@ func TestNativeCheckpointRetirementPreservesBrokeredDiskRoute(t *testing.T) {
 	}{
 		{"brokered Linux disk", "https://coordinator.invalid", core.TargetLinux, core.CheckpointStrategyDiskSnapshot, true},
 		{"unsupported managed image", "https://coordinator.invalid", core.TargetLinux, core.CheckpointStrategyImage, false},
+		{"direct Linux restore cycle", "", core.TargetLinux, core.CheckpointStrategyDiskSnapshot, false},
 		{"direct Windows restore cycle", "", core.TargetWindows, core.CheckpointStrategyDiskSnapshot, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -93,10 +93,10 @@ func azureOSDiskSnapshotName(requested, leaseID, repoName string) (string, error
 
 func (directAzureOSDiskCheckpointDriver) Create(ctx context.Context, req NativeCheckpointCreateRequest) (CoordinatorImage, error) {
 	if NormalizeCheckpointStrategy(req.Strategy) == checkpointStrategyImage {
-		return CoordinatorImage{}, Exit(2, "Azure Windows checkpoints require --strategy disk-snapshot")
+		return CoordinatorImage{}, Exit(2, "direct Azure checkpoints require --strategy disk-snapshot")
 	}
 	if req.NoReboot {
-		return CoordinatorImage{}, Exit(2, "Azure Windows checkpoints require a deallocated source VM for a consistent OS-disk snapshot; rerun with --no-reboot=false")
+		return CoordinatorImage{}, Exit(2, "direct Azure checkpoints require a deallocated source VM for a consistent OS-disk snapshot; rerun with --no-reboot=false")
 	}
 	name, err := azureOSDiskSnapshotName(req.Name, req.LeaseID, req.RepoName)
 	if err != nil {

@@ -305,7 +305,9 @@ func (Provider) NativeCheckpointCapability(req core.NativeCheckpointRequest) (co
 		return core.NativeCheckpointCapability{}, false
 	}
 	targetOS := shared.FirstNonEmpty(req.Target.TargetOS, req.Config.TargetOS)
-	if targetOS == core.TargetWindows && shared.FirstNonEmpty(req.Target.WindowsMode, req.Config.WindowsMode) == core.WindowsModeNormal {
+	directOSDisk := targetOS == core.TargetLinux ||
+		(targetOS == core.TargetWindows && shared.FirstNonEmpty(req.Target.WindowsMode, req.Config.WindowsMode) == core.WindowsModeNormal)
+	if req.Config.Coordinator == "" && directOSDisk {
 		if core.NormalizeCheckpointStrategy(req.Strategy) == core.CheckpointStrategyImage {
 			return core.NativeCheckpointCapability{}, false
 		}
