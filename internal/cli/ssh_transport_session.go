@@ -39,6 +39,16 @@ func newSSHTransportSession(ctx context.Context, target SSHTarget, localForward 
 		_ = os.RemoveAll(dir)
 		return nil, cause
 	}
+	if target.SSHConfigData != nil {
+		// ProxyJump also reads this snapshot; retain it until the session closes.
+		target.SSHConfigFile = filepath.Join(dir, "provider_config")
+		if err := os.WriteFile(target.SSHConfigFile, target.SSHConfigData, 0o600); err != nil {
+			return fail(fmt.Errorf("write provider SSH config snapshot: %w", err))
+		}
+		if err := secureSSHTransportPath(target.SSHConfigFile, false); err != nil {
+			return fail(fmt.Errorf("secure provider SSH config snapshot: %w", err))
+		}
+	}
 	userPercentExpansion := false
 	if strings.Contains(target.User, "%") {
 		userPercentExpansion, err = probeSSHTransportUserPercentExpansion(ctx, target, dir)
@@ -331,7 +341,7 @@ type sshTransportRouteCapabilities struct {
 }
 
 func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, localForward, userPercentExpansion bool) (_ sshTransportConfigRoute, err error) {
-	if !target.SSHConfigProxy {
+	if !target.SSHConfigProxy && target.SSHConfigFile == "" {
 		return sshTransportConfigRoute{}, nil
 	}
 	dir, err := os.MkdirTemp("", "crabbox-ssh-route-*")
@@ -343,8 +353,14 @@ func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, local
 		return sshTransportConfigRoute{}, fmt.Errorf("secure private SSH route directory: %w", err)
 	}
 	seedPath := filepath.Join(dir, "ssh_config")
-	userConfigPath := ""
-	if home, homeErr := os.UserHomeDir(); homeErr == nil {
+	userConfigPath := target.SSHConfigFile
+	if userConfigPath != "" {
+		// Include silently ignores missing files. An explicit provider route must
+		// fail rather than falling back to ambient identities or a literal alias.
+		if _, readErr := os.ReadFile(userConfigPath); readErr != nil {
+			return sshTransportConfigRoute{}, fmt.Errorf("read explicit SSH config: %w", readErr)
+		}
+	} else if home, homeErr := os.UserHomeDir(); homeErr == nil {
 		candidate := filepath.Join(home, ".ssh", "config")
 		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
 			userConfigPath = candidate
@@ -379,11 +395,14 @@ func resolveSSHTransportConfigRoute(ctx context.Context, target SSHTarget, local
 		if cause := context.Cause(ctx); cause != nil {
 			return sshTransportConfigRoute{}, cause
 		}
-		diagnostic := strings.TrimSpace(redactSSHTransportDiagnostic(target, stderr.String()))
+		diagnostic := sshTransportRouteDiagnostic(target, stderr.String())
 		return sshTransportConfigRoute{}, fmt.Errorf("resolve OpenSSH route for %s: %w: %s", target.Host, err, diagnostic)
 	}
 	route := parseSSHTransportConfigRoute(stdout.String(), userConfigPath)
 	route.capabilities = capabilities
+	if target.SSHConfigFile != "" && !route.identitiesOnly {
+		return sshTransportConfigRoute{}, Exit(2, "explicit SSH config did not select a route with IdentitiesOnly yes; refresh provider authentication before retrying: %s", sshTransportRouteDiagnostic(target, stderr.String()))
+	}
 	if target.Key == "" {
 		route.identityFiles, err = resolveSSHTransportAuthenticationPaths(ctx, target, localForward, capabilities, seedPath, route.identityFiles)
 		if err != nil {
@@ -511,7 +530,7 @@ func resolveSSHTransportAuthenticationPaths(
 			if cause := context.Cause(ctx); cause != nil {
 				return nil, cause
 			}
-			diagnostic := strings.TrimSpace(redactSSHTransportDiagnostic(target, stderr.String()))
+			diagnostic := sshTransportRouteDiagnostic(target, stderr.String())
 			return nil, fmt.Errorf("resolve OpenSSH authentication path for %s: %w: %s", target.Host, err, diagnostic)
 		}
 		expanded, ok := parseSSHTransportControlPath(stdout.String())
@@ -521,6 +540,15 @@ func resolveSSHTransportAuthenticationPaths(
 		resolved = append(resolved, expanded)
 	}
 	return resolved, nil
+}
+
+func sshTransportRouteDiagnostic(target SSHTarget, value string) string {
+	// Redact before truncating so a credential crossing the limit cannot leak.
+	detail := strings.TrimSpace(redactSSHTransportDiagnostic(target, value))
+	if len(detail) > 4096 {
+		detail = detail[:4096] + "..."
+	}
+	return detail
 }
 
 func expandSSHTransportHomeToken(value, home string) string {

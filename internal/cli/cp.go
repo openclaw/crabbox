@@ -319,10 +319,11 @@ func writeSSHTransportDiagnostic(writer anyWriter, target SSHTarget, value strin
 }
 
 func redactSSHTransportDiagnostic(target SSHTarget, value string) string {
+	secrets := append([]string(nil), target.DiagnosticSecrets...)
 	if target.AuthSecret {
-		return RedactDiagnosticSecrets(value, target.User)
+		secrets = append(secrets, target.User)
 	}
-	return RedactDiagnosticSecrets(value)
+	return RedactDiagnosticSecrets(value, secrets...)
 }
 
 func newResolvedSSHCopySession(ctx context.Context, target SSHTarget) (*sshTransportSession, string, string, resolvedRsyncCapabilities, error) {

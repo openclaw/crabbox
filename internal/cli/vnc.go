@@ -487,7 +487,7 @@ func startVNCTunnel(ctx context.Context, target SSHTarget, localPort, remoteHost
 }
 
 func vncTunnelInvocation(ctx context.Context, target SSHTarget, localPort, remoteHost, remotePort string) ([]string, *sshTransportSession, error) {
-	if !target.AuthSecret {
+	if !target.AuthSecret && target.SSHConfigFile == "" {
 		return vncTunnelArgs(target, localPort, remoteHost, remotePort), nil, nil
 	}
 	session, err := newSSHTransportSession(ctx, target, true)
@@ -503,6 +503,9 @@ func vncTunnelArgs(target SSHTarget, localPort, remoteHost, remotePort string) [
 	args := append(sshForwardingDenyArgs(),
 		"-o", "BatchMode=yes",
 	)
+	if target.SSHConfigFile != "" {
+		args = append(args, "-F", target.SSHConfigFile, "-o", "RemoteCommand=none", "-o", "RequestTTY=no")
+	}
 	args = append(args, sshHostKeyVerificationArgs(target)...)
 	args = append(args,
 		"-o", "ConnectTimeout="+strconv.Itoa(int(vncTunnelSSHConnectTimeout/time.Second)),

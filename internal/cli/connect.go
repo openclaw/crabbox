@@ -111,8 +111,16 @@ func probeConnectSSHTransport(ctx context.Context, target *SSHTarget, timeout ti
 	return false
 }
 
-func runInteractiveSSHOnce(ctx context.Context, target SSHTarget, stdin io.Reader, stdout, stderr io.Writer) error {
+func runInteractiveSSHOnce(ctx context.Context, target SSHTarget, stdin io.Reader, stdout, stderr io.Writer) (retErr error) {
 	args := append(sshBaseArgs(target), target.User+"@"+target.Host)
+	if target.SSHConfigFile != "" {
+		session, err := newSSHTransportSession(ctx, target, false)
+		if err != nil {
+			return err
+		}
+		defer func() { retErr = errors.Join(retErr, session.Close()) }()
+		args = append(session.commandPrefixWithOptions("10", "3"), "-o", "RequestTTY=auto", session.host())
+	}
 	cmd := sshCommandContext(ctx, target, args...)
 	cmd.Stdin = stdin
 	err := runSSHCommand(cmd, stdout, stderr)

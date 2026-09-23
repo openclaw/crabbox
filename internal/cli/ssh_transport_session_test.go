@@ -1077,3 +1077,232 @@ exit 0
 		t.Fatalf("port=%q touches=%d initial=%#v first=%#v final=%#v current=%#v err=%v", lease.SSH.Port, touches, initial, first, final, current, err)
 	}
 }
+
+func TestSSHTransportExplicitConfigRenewsAndSanitizes(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX OpenSSH fixture")
+	}
+	ssh, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("OpenSSH client required")
+	}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	if err := os.Mkdir(filepath.Join(dir, ".ssh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".ssh", "config"), []byte("Host *\n HostName ambient.invalid\n User ambient\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "provider_config")
+	minted := filepath.Join(dir, "minted")
+	config := fmt.Sprintf(`Match host provider-alias exec "echo renewed >> %s"
+ HostName routed.example.test
+ User alice
+ Port 2222
+ IdentityFile /test/cert-key
+ IdentitiesOnly yes
+ ProxyCommand proxy %%n %%h %%p
+Host provider-alias
+ IdentityFile /test/static-key
+ LocalForward 41001 localhost:3001
+ RemoteForward 41002 localhost:3002
+ DynamicForward 41003
+ RequestTTY force
+ RemoteCommand echo inherited
+ ControlMaster auto
+`, minted)
+	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	target := SSHTarget{Host: "provider-alias", User: "alice", Port: "2222", SSHConfigFile: path, SSHConfigProxy: true, KnownHostsFile: "/dev/null"}
+	assertConfig := func(output []byte) {
+		t.Helper()
+		got := string(output)
+		for _, expected := range []string{"hostname routed.example.test\n", "user alice\n", "port 2222\n", "identitiesonly yes\n", "identityfile /test/cert-key\n", "identityfile /test/static-key\n", "requesttty false\n", "controlmaster false\n", "userknownhostsfile /dev/null\n", "proxycommand proxy provider-alias %h %p\n"} {
+			if !strings.Contains(got, expected) {
+				t.Fatalf("missing %q:\n%s", expected, got)
+			}
+		}
+		for _, forbidden := range []string{"ambient.invalid", "echo inherited", "localforward ", "remoteforward ", "dynamicforward "} {
+			if strings.Contains(got, forbidden) {
+				t.Fatalf("inherited %q:\n%s", forbidden, got)
+			}
+		}
+	}
+	for _, forward := range []bool{false, true} {
+		session, err := newSSHTransportSession(t.Context(), target, forward)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, err := exec.Command(ssh, "-G", "-F", session.configPath, session.host()).CombinedOutput()
+		if err != nil {
+			t.Fatalf("ssh -G: %v: %s", err, output)
+		}
+		assertConfig(output)
+		if err := session.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, owner := range []string{"pond", "vnc"} {
+		t.Run(owner, func(t *testing.T) {
+			invoke := func() ([]string, *sshTransportSession, error) {
+				if owner == "pond" {
+					return pondMeshForwardInvocation(t.Context(), pondMeshForwardGroup{Target: target, Forwards: []pondMeshForward{{LocalPort: 42001, RemotePort: 8080}}})
+				}
+				return vncTunnelInvocation(t.Context(), target, "42001", "127.0.0.1", "8080")
+			}
+			if owner == "vnc" {
+				line := vncTunnelCommandTo(target, "42001", "127.0.0.1", "8080")
+				if !strings.Contains(line, path) || !strings.Contains(line, "alice@provider-alias") {
+					t.Fatalf("printed tunnel lost provider route: %s", line)
+				}
+			}
+			args, session, err := invoke()
+			if err != nil || session == nil {
+				t.Fatalf("private forwarding session missing: %v", err)
+			}
+			t.Cleanup(func() { _ = session.Close() })
+			output, err := exec.Command(ssh, append([]string{"-G"}, args...)...).CombinedOutput()
+			if err != nil {
+				t.Fatalf("ssh -G forwarding: %v: %s", err, output)
+			}
+			var rest []string
+			found := false
+			for _, line := range strings.Split(string(output), "\n") {
+				if strings.HasPrefix(line, "localforward ") && strings.Contains(line, "42001") && strings.Contains(line, "8080") {
+					found = true
+					continue
+				}
+				rest = append(rest, line)
+			}
+			if !found {
+				t.Fatalf("requested listener missing: %s", output)
+			}
+			assertConfig([]byte(strings.Join(rest, "\n")))
+			if err := os.WriteFile(path, []byte(strings.Replace(config, "echo renewed >> "+minted, "false", 1)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if args, session, err := invoke(); err == nil || len(args) != 0 || session != nil {
+				t.Fatalf("failed renewal dispatched forwarding: args=%v session=%v err=%v", args, session, err)
+			}
+			if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	// Exercise ordinary command dispatch with the same private config. The
+	// fixture asks native OpenSSH to show its effective config, never to connect.
+	wrapper := fmt.Sprintf("#!/bin/sh\nfor arg do if [ \"$arg\" = -G ]; then exec %q \"$@\"; fi; done\nexec %q -G \"$@\"\n", ssh, ssh)
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(wrapper), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var stdout, stderr bytes.Buffer
+	p := sshTransportPreparation{command: "printf command-ok"}
+	if _, err := p.runOnce(t.Context(), target, "10", "1", &stdout, &stderr, false); err != nil {
+		t.Fatalf("run: %v: %s", err, stderr.String())
+	}
+	assertConfig(stdout.Bytes())
+	data, err := os.ReadFile(minted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(data), "renewed") < 3 {
+		t.Fatalf("hook not renewed per transport: %s", data)
+	}
+	line := sshCommandLine(target, false)
+	for _, value := range []string{"-F", path, "alice@provider-alias", "RemoteCommand=none", "RequestTTY=auto", "ClearAllForwardings=yes", "ControlMaster=no"} {
+		if !strings.Contains(line, value) {
+			t.Fatalf("printed command missing %q: %s", value, line)
+		}
+	}
+
+	// A failed mandatory hook still makes ssh -G exit zero. No default route
+	// or connection may be dispatched after it stops matching.
+	if err := os.WriteFile(path, []byte(strings.Replace(config, "echo renewed >> "+minted, "false", 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	if _, err := p.runOnce(t.Context(), target, "10", "1", &stdout, &stderr, false); err == nil || !strings.Contains(err.Error(), "IdentitiesOnly") {
+		t.Fatalf("lost route err=%v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("dispatched after lost route: %s", stdout.String())
+	}
+}
+
+func TestSSHTransportCapturedConfigOwnsProxyJumpLifetime(t *testing.T) {
+	ssh, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Skip("OpenSSH client required")
+	}
+	path := filepath.Join(t.TempDir(), "provider_config")
+	config := []byte("Host gpu\n HostName expected.example.test\n User brev\n IdentitiesOnly yes\n IdentityFile none\n ProxyJump jump\nHost jump\n HostName gateway.example.test\n User brev\n IdentitiesOnly yes\n IdentityFile none\n")
+	if err := os.WriteFile(path, []byte("Host *\n HostName replaced.example.test\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := newSSHTransportSession(t.Context(), SSHTarget{Host: "gpu", User: "brev", Port: "22", SSHConfigFile: path, SSHConfigData: config, SSHConfigProxy: true}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ config, host, want string }{
+		{session.configPath, session.host(), "hostname expected.example.test\n"},
+		{filepath.Join(session.dir, "jump_config"), "jump", "hostname gateway.example.test\n"},
+	} {
+		out, err := exec.Command(ssh, "-G", "-F", tc.config, tc.host).CombinedOutput()
+		if err != nil || !strings.Contains(string(out), tc.want) || strings.Contains(string(out), "replaced.example.test") {
+			t.Fatalf("snapshot unavailable during transport: err=%v output=%s", err, out)
+		}
+	}
+	snapshot := filepath.Join(session.dir, "provider_config")
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(snapshot); !os.IsNotExist(err) {
+		t.Fatalf("config snapshot survived session close: %v", err)
+	}
+}
+
+func TestSSHTransportExplicitConfigRequiresReadableFile(t *testing.T) {
+	for _, path := range []string{filepath.Join(t.TempDir(), "absent"), t.TempDir()} {
+		_, err := newSSHTransportSession(t.Context(), SSHTarget{Host: "provider-alias", User: "alice", Port: "22", SSHConfigFile: path, SSHConfigProxy: true}, false)
+		if err == nil || !strings.Contains(err.Error(), "read explicit SSH config") {
+			t.Fatalf("path %s err=%v", path, err)
+		}
+	}
+}
+
+func TestSSHTransportCertificateHookDiagnostic(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("POSIX Match exec fixture")
+	}
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Fatal("real OpenSSH is required:", err)
+	}
+	for _, parseFailure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("parseFailure=%t", parseFailure), func(t *testing.T) {
+			dir := t.TempDir()
+			secret := "synthetic-hook-credential"
+			hook := filepath.Join(dir, "mint")
+			script := "#!/bin/sh\nprintf 'certificate denied: " + secret + "\\n' >&2\nprintf '%s' '" + strings.Repeat("x", 8192) + "' >&2\nexit 1\n"
+			if err := os.WriteFile(hook, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			config := "Match host gpu exec \"" + hook + "\"\n HostName expected.example.test\n IdentitiesOnly yes\n"
+			if parseFailure {
+				config += "InvalidFixtureDirective yes\n"
+			}
+			target := SSHTarget{Host: "gpu", User: "brev", Port: "22", SSHConfigFile: "captured", SSHConfigData: []byte(config), SSHConfigProxy: true}
+			target.DiagnosticSecrets = []string{secret}
+			_, err := newSSHTransportSession(t.Context(), target, false)
+			if err == nil || !strings.Contains(err.Error(), "certificate denied: [redacted]") || strings.Contains(err.Error(), secret) || len(err.Error()) > 4600 {
+				t.Fatalf("hook diagnostic not preserved, bounded, and redacted: %v", err)
+			}
+		})
+	}
+}

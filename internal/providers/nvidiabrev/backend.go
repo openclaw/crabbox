@@ -978,7 +978,7 @@ func (b *nvidiaBrevBackend) resolveSSHTarget(ctx context.Context, client *brevCl
 		return core.SSHTarget{}, err
 	}
 	alias := brevSSHConfigAlias(workspace.Name, cfg.NvidiaBrev.Target)
-	target, err := selectBrevSSHTarget(cfg, string(data), alias)
+	target, err := client.resolveSSHConfig(ctx, cfg, path, alias, data)
 	if err != nil {
 		return core.SSHTarget{}, err
 	}

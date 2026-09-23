@@ -974,7 +974,7 @@ func pondMeshSSHArgsForForwards(target SSHTarget, forwards []pondMeshForward) []
 }
 
 func pondMeshForwardInvocation(ctx context.Context, group pondMeshForwardGroup) ([]string, *sshTransportSession, error) {
-	if !group.Target.AuthSecret {
+	if !group.Target.AuthSecret && group.Target.SSHConfigFile == "" {
 		return pondMeshSSHArgsForForwards(group.Target, group.Forwards), nil, nil
 	}
 	session, err := newSSHTransportSession(ctx, group.Target, true)
