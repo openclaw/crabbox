@@ -225,7 +225,7 @@ func TestExternalDesktopPasswordNeverEntersRunEnvironmentForAnyTarget(t *testing
 			selection.Effective["SCREEN_SHARING_PASSWORD"] = "expanded-secret"
 			cfg := Config{Provider: "external", TargetOS: targetOS}
 			cfg.External.Connection.Desktop.PasswordEnv = "SCREEN_SHARING_PASSWORD"
-			stripExternalDesktopPasswordFromRunEnv(cfg, &selection)
+			selection.remove(externalDesktopChildEnvDenylist(cfg, cfg.TargetOS)...)
 			for name, values := range map[string]map[string]string{"profile": selection.Profile, "inline": selection.Inline, "effective": selection.Effective} {
 				if _, found := values["SCREEN_SHARING_PASSWORD"]; found {
 					t.Fatalf("%s environment retained desktop password: %#v", name, values)
@@ -268,7 +268,7 @@ func TestResolvedTargetPasswordStaysOutOfRunAndCacheEnvironment(t *testing.T) {
 		Effective: allowedEnv(cfg.EnvAllow),
 	}
 	target := SSHTarget{ChildEnvDenylist: []string{"ROUTED_SCREEN_PASSWORD"}}
-	stripTargetCredentialsFromRunEnv(&selection, target)
+	selection.remove(target.ChildEnvDenylist...)
 	for name, values := range map[string]map[string]string{"profile": selection.Profile, "inline": selection.Inline, "effective": selection.Effective} {
 		if _, ok := values["ROUTED_SCREEN_PASSWORD"]; ok {
 			t.Fatalf("%s retained resolved credential: %#v", name, values)

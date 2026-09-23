@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Add `egress run` to own proxy setup, remote execution, and session cleanup for one job, with optional HTTP(S) upstream chaining that keeps credentials on the host and never falls back to direct egress; `egress stop --session` supports scoped cleanup and prevents late startup. [PR 2506](https://github.com/openclaw/crabbox/pull/2506).
+
 ### Fixes
 
 - Reject overflowing Nomad, Agent Sandbox, and Superserve execution timeouts before provider dispatch while preserving disabled deadlines, service defaults, and caller cancellation. [PR 2503](https://github.com/openclaw/crabbox/pull/2503). Thanks @steipete.

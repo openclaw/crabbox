@@ -17,6 +17,7 @@ type App struct {
 	synthesizedFlagInputs bool
 
 	runOutcome             *shardRunOutcome
+	runEnvDenylist         []string
 	workspaceOwnerAcquirer func(context.Context, SSHTarget, string, io.Writer) (*workspaceOwner, error)
 	sshReadinessWaiter     func(context.Context, *SSHTarget, io.Writer, string, time.Duration) error
 }

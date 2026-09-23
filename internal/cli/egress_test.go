@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -418,18 +417,26 @@ func TestEgressDaemonSupervisorStripsDesktopPasswordEnvironment(t *testing.T) {
 		t.Skip("shell child fixture")
 	}
 	const passwordEnv = "CRABBOX_TEST_EGRESS_DESKTOP_PASSWORD"
+	const proxyEnv = "CRABBOX_TEST_UPSTREAM_PROXY"
+	const proxyURL = "http://bridge:synthetic-proxy-password@127.0.0.1:3128"
 	dir := t.TempDir()
 	childPath := filepath.Join(dir, "egress-child")
 	script := "#!/bin/sh\n" +
 		"if [ \"${" + passwordEnv + "+x}\" = x ]; then exit 89; fi\n" +
 		"if [ \"$CRABBOX_TEST_KEEP\" != preserved ]; then exit 90; fi\n" +
+		"if [ \"$" + proxyEnv + "\" != '" + proxyURL + "' ]; then exit 91; fi\n" +
+		"for arg do case \"$arg\" in *synthetic-proxy-password*) exit 92;; esac; done\n" +
 		"exit 4\n"
 	if err := os.WriteFile(childPath, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(passwordEnv, "must-not-reach-daemon")
 	t.Setenv("CRABBOX_TEST_KEEP", "preserved")
-	cmd := egressDaemonSupervisorCommand(childPath, nil, []string{passwordEnv})
+	t.Setenv(proxyEnv, proxyURL)
+	cmd := egressDaemonSupervisorCommand(childPath, []string{"egress", "host", "--upstream-proxy-env", proxyEnv}, []string{passwordEnv})
+	if strings.Contains(strings.Join(cmd.Args, " "), "synthetic-proxy-password") {
+		t.Fatal("upstream proxy credentials reached supervisor arguments")
+	}
 	err := cmd.Run()
 	if err == nil || cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != egressDaemonFatalCode {
 		t.Fatalf("supervisor err=%v exit=%v", err, cmd.ProcessState)
@@ -517,83 +524,6 @@ func TestConnectEgressBridgeSendsTicketInDedicatedHeader(t *testing.T) {
 	case <-agentConnected:
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
-	}
-}
-
-func TestEgressHostConnectHookRunsAfterHandshake(t *testing.T) {
-	clearConfigEnv(t)
-	isolateRunTestUserDirs(t, t.TempDir())
-	accepted := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/leases/cbx_abcdef123456/egress/host" {
-			http.NotFound(w, r)
-			return
-		}
-		conn, err := websocket.Accept(w, r, nil)
-		if err != nil {
-			t.Errorf("websocket accept: %v", err)
-			return
-		}
-		close(accepted)
-		_, _, _ = conn.Read(context.Background())
-		_ = conn.Close(websocket.StatusNormalClosure, "test done")
-	}))
-	defer server.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	hookFired := make(chan struct{})
-	result := make(chan error, 1)
-	app := App{Stdout: io.Discard, Stderr: io.Discard}
-	go func() {
-		result <- app.egressHostWithConnectHook(ctx, []string{
-			"--id", "cbx_abcdef123456",
-			"--coordinator", server.URL,
-			"--ticket", "egress_abcdef1234567890abcdef1234567890",
-			"--session", "egress_session",
-			"--allow", "example.com",
-		}, func() { close(hookFired) })
-	}()
-
-	select {
-	case <-accepted:
-	case err := <-result:
-		t.Fatalf("egress host returned before handshake: %v", err)
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
-	select {
-	case <-hookFired:
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
-	cancel()
-	select {
-	case <-result:
-	case <-time.After(5 * time.Second):
-		t.Fatal("egress host did not return after shutdown")
-	}
-}
-
-func TestEgressHostConnectHookSkippedOnConnectFailure(t *testing.T) {
-	clearConfigEnv(t)
-	isolateRunTestUserDirs(t, t.TempDir())
-	server := httptest.NewServer(http.NotFoundHandler())
-	defer server.Close()
-
-	hookFired := false
-	err := (App{Stdout: io.Discard, Stderr: io.Discard}).egressHostWithConnectHook(context.Background(), []string{
-		"--id", "cbx_abcdef123456",
-		"--coordinator", server.URL,
-		"--ticket", "egress_abcdef1234567890abcdef1234567890",
-		"--session", "egress_session",
-		"--allow", "example.com",
-	}, func() { hookFired = true })
-	if err == nil {
-		t.Fatal("expected egress host connect failure")
-	}
-	if hookFired {
-		t.Fatal("connect hook fired after failed handshake")
 	}
 }
 

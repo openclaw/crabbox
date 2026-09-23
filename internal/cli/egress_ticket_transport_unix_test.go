@@ -66,6 +66,12 @@ func TestEgressStartTicketTransportFailureStopsBeforeHostMint(t *testing.T) {
 	}
 }
 
+func TestEgressRunStartupAdmissionAndCleanup(t *testing.T) {
+	for _, failure := range []string{"run-active", "run-host", "run-host-cleanup"} {
+		t.Run(failure, func(t *testing.T) { testEgressStartTicketTransport(t, failure) })
+	}
+}
+
 func testEgressStartTicketTransport(t *testing.T, failure string) {
 	clearConfigEnv(t)
 	dir := t.TempDir()
@@ -91,6 +97,12 @@ payload = sys.stdin.buffer.read()
 from pathlib import Path
 p = Path(os.environ["CRABBOX_TEST_EGRESS_OBSERVATIONS"])
 remote = sys.argv[-1]
+if "--internal-stop-session" in remote:
+    (p / "cleanup").write_text(remote)
+    if os.environ.get("CRABBOX_TEST_EGRESS_FAILURE") == "run-host-cleanup":
+        sys.stderr.write("synthetic cleanup failure")
+        sys.exit(43)
+    sys.exit(0)
 if "--internal-ticket-stdin" not in remote:
     if "command -v nc" in remote and os.environ.get("CRABBOX_TEST_EGRESS_FAILURE") == "readiness":
         sys.exit(42)
@@ -141,6 +153,11 @@ while not (p / "helper.json").exists():
 				Host: "127.0.0.1", SSHUser: "crabbox", SSHPort: "1",
 				SSHFallbackPorts: []string{"1"}, WorkRoot: "/work/my-app",
 			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/leases/"+leaseID+"/egress/status":
+			connected, disconnected := failure == "run-active", false
+			_ = json.NewEncoder(w).Encode(CoordinatorEgressStatus{
+				LeaseID: leaseID, Active: true, HostConnected: &connected, ClientConnected: &disconnected,
+			})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/egress/ticket":
 			var body struct{ Role, SessionID string }
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -172,10 +189,15 @@ while not (p / "helper.json").exists():
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(dir, "config.yaml"))
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	err = (App{Stdout: io.Discard, Stderr: io.Discard}).egressStart(ctx, []string{
-		"--provider", "aws", "--id", leaseID, "--allow", "example.com", "--network", "public",
+	subcommand := "start"
+	if strings.HasPrefix(failure, "run-") {
+		subcommand = "run"
+	}
+	err = (App{Stdout: io.Discard, Stderr: io.Discard}).egress(ctx, []string{
+		subcommand, "--provider", "aws", "--id", leaseID, "--allow", "example.com", "--network", "public", "--", "true",
 	})
 	wantErr := "synthetic fixture finished"
+	wantClientMints := int32(1)
 	wantHostMints := int32(1)
 	stages := []string{"ssh", "shell", "helper"}
 	if failure == "ssh" {
@@ -183,6 +205,9 @@ while not (p / "helper.json").exists():
 		stages = []string{"ssh"}
 	} else if failure == "readiness" {
 		wantErr, wantHostMints = "remote egress client did not listen", 0
+	} else if failure == "run-active" {
+		wantErr, wantClientMints, wantHostMints = "already has active egress", 0, 0
+		stages = nil
 	}
 	if err == nil || !strings.Contains(err.Error(), wantErr) {
 		t.Fatalf("caller did not finish at the fixture boundary: %v", err)
@@ -190,8 +215,23 @@ while not (p / "helper.json").exists():
 	if strings.Contains(err.Error(), ticket) {
 		t.Fatal("ticket exposed in automatic caller error")
 	}
-	if clientMints.Load() != 1 || hostMints.Load() != wantHostMints {
+	if clientMints.Load() != wantClientMints || hostMints.Load() != wantHostMints {
 		t.Fatalf("ticket requests: client=%d host=%d", clientMints.Load(), hostMints.Load())
+	}
+	cleanup, cleanupErr := os.ReadFile(filepath.Join(dir, "cleanup"))
+	if strings.HasPrefix(failure, "run-host") {
+		if cleanupErr != nil || !strings.Contains(string(cleanup), "'--session' 'egress_") {
+			t.Fatalf("owned session cleanup missing: %q, %v", cleanup, cleanupErr)
+		}
+		if failure == "run-host-cleanup" && !strings.Contains(err.Error(), "synthetic cleanup failure") {
+			t.Fatalf("cleanup failure lost the startup error: %v", err)
+		}
+		var exitErr ExitError
+		if failure == "run-host-cleanup" && (!AsExitError(err, &exitErr) || !strings.Contains(exitErr.Message, "synthetic cleanup failure")) {
+			t.Fatalf("CLI exit diagnostic hid the cleanup failure: %v", err)
+		}
+	} else if !os.IsNotExist(cleanupErr) {
+		t.Fatalf("manual or rejected start unexpectedly cleaned a session: %q, %v", cleanup, cleanupErr)
 	}
 	for _, stage := range stages {
 		var observation struct {
