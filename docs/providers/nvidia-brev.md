@@ -200,6 +200,17 @@ manageable by lease ID or slug. Name-only recovery claims report `failed` until
 the workspace appears and can be cleared by explicit release after the recovery
 grace period.
 
+Ordinary `status` reads inventory and probes an existing generated SSH route without
+refreshing Brev configuration, starting the workspace, or changing the lease claim.
+The config bytes must match the digest recorded when Crabbox prepared this workspace
+in its organization. Missing provenance, a changed config, a missing alias, or failed
+required certificate renewal reports no endpoint and remains unready. Use
+`status --wait --id <lease>` to refresh the route and record its preparation.
+Older claims need this preparation too. Any Brev rewrite, even an unrelated
+workspace refresh, can conservatively make an otherwise healthy route unready
+until it is prepared again. An explicitly selected read-only organization remains
+inventory-only.
+
 ### SSH target selection
 
 `nvidiaBrev.target` controls which Brev SSH config host Crabbox selects:

@@ -2,6 +2,7 @@ package nvidiabrev
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -71,7 +72,7 @@ func (c *brevClient) resolveSSHConfig(ctx context.Context, cfg core.Config, path
 	proxy := values["proxycommand"]
 	if values["identitiesonly"] != "yes" ||
 		((values["hostname"] == "" || values["hostname"] == alias) && (proxy == "" || proxy == "none")) {
-		return core.SSHTarget{}, core.Exit(4, "nvidia-brev SSH route not found for %q; run `brev refresh` and check certificate authentication%s", alias, brevSSHDiagnostic(result.Stderr))
+		return core.SSHTarget{}, fmt.Errorf("%w for %q; run `crabbox status --wait --id <lease>` and check certificate authentication%s", errBrevSSHRouteMissing, alias, brevSSHDiagnostic(result.Stderr))
 	}
 	if !brevSSHNamePattern.MatchString(values["user"]) {
 		return core.SSHTarget{}, core.Exit(2, "invalid nvidia-brev SSH User %q", values["user"])
@@ -109,4 +110,12 @@ func brevSSHConfigAlias(workspaceName, target string) string {
 		return name + "-host"
 	}
 	return name
+}
+
+const brevSSHConfigDigestLabel = "brev_ssh_config_sha256"
+
+var errBrevSSHRouteMissing = core.Exit(4, "nvidia-brev SSH route not found")
+
+func brevSSHConfigDigest(data []byte) string {
+	return fmt.Sprintf("%x", sha256.Sum256(data))
 }

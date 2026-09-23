@@ -81,10 +81,11 @@ func TestNvidiaBrevRetainedTargetAcrossProcesses(t *testing.T) {
 		if got.Server.Labels["brev_target"] != "host" {
 			t.Fatalf("resolve lost target: %#v", got.Server.Labels)
 		}
-		if (!req.StatusOnly || req.ReadyProbe) && got.SSH.User != "ubuntu" {
+		if got.SSH.User != "ubuntu" {
 			t.Fatalf("resolved container instead of host: %#v", got.SSH)
 		}
 		assertTarget("host")
+		lease = got
 	}
 	list, err := backend(core.Config{}).List(t.Context(), core.ListRequest{})
 	if err != nil || len(list) != 1 || list[0].Labels["brev_target"] != "host" {
