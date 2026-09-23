@@ -2,31 +2,36 @@
 
 ## Unreleased
 
-### Added
+### Fixes
 
-- Add replay-safe ASCII Box (Boat) fixed lease IDs with durable keyed creation, one recovery submission within the native 24-hour window, exact-ID adoption, and single-use release tombstones through the shared engine. [Issue 1747](https://github.com/openclaw/crabbox/issues/1747). Thanks @shunkakinoki.
+- Reject overflowing Nomad, Agent Sandbox, and Superserve execution timeouts before provider dispatch while preserving disabled deadlines, service defaults, and caller cancellation. [PR 2503](https://github.com/openclaw/crabbox/pull/2503). Thanks @steipete.
 
-### Changed
+## 0.65.0 - 2026-09-22
 
-- Consolidate Azure configuration under one typed owner while preserving VM and dynamic-session routing, shared input provenance, disk policy, and coordinator request fields. [PR 2491](https://github.com/openclaw/crabbox/pull/2491). Thanks @steipete.
-- Keep GCP configuration and explicit-input intent under one provider-specific owner while preserving file/environment precedence, OS-image defaults, and coordinator requests. [PR 2488](https://github.com/openclaw/crabbox/pull/2488). Thanks @steipete.
-- Reuse shared claim idle-expiry policy for Coder cleanup while preserving its twelve-hour grace period, timestamp normalization, and ownership safeguards. [PR 2490](https://github.com/openclaw/crabbox/pull/2490). Thanks @steipete.
-- Reuse Local Container's shared idle-expiry rule for legacy unscoped orphan claims while preserving strict twelve-hour grace, runtime identity checks, and stored-key retention. [PR 2489](https://github.com/openclaw/crabbox/pull/2489).
-- Share generated flag application and accepted-input bookkeeping across E2B, Freestyle, Semaphore, and Tenki while preserving their validation and normalization order. [PR 2487](https://github.com/openclaw/crabbox/pull/2487).
-- Derive CubeSandbox defaults, file/environment bindings, and flags from one typed declaration while preserving aliases, proxy-port parsing, and endpoint trust policy. [PR 2485](https://github.com/openclaw/crabbox/pull/2485).
-- Consolidate built-in fixed-lease admission, attempt codecs, claim binding, recovery policy, and terminal receipts in a shared engine; preserve native identity proofs and existing local records while retaining the external provider’s delegated protocol.
-- Share RunPod and Vast lease-reuse admission while preserving read-only observations, stale-claim rejection, and recorded idle-timeout policy. [PR 2469](https://github.com/openclaw/crabbox/pull/2469).
-- Share AWS and Azure endpoint-refresh identity policy while preserving recorded cleanup authority and legacy-claim behavior. [PR 2470](https://github.com/openclaw/crabbox/pull/2470).
-- Share E2B and CubeSandbox's claim-fenced deletion transaction while preserving endpoint-bound ownership checks, provider errors, and not-found recovery. [PR 2474](https://github.com/openclaw/crabbox/pull/2474).
-- Reuse shared claim idle-expiry policy for Local Container cleanup while preserving its twelve-hour grace period and ownership safeguards. [PR 2475](https://github.com/openclaw/crabbox/pull/2475).
-- Reuse the shared sandbox status projection for Cloud Run Sandbox without changing ownership probes, expiry rules, or public labels. [PR 2476](https://github.com/openclaw/crabbox/pull/2476).
-- Share Linode's status-first HTTP response decoding with DigitalOcean while preserving typed errors, redaction, and partial-response diagnostics. [PR 2479](https://github.com/openclaw/crabbox/pull/2479).
+### Highlights
+
+- **Recover interrupted Boat sandbox creation.** Fixed lease IDs retain the original creation intent, allow one bounded recovery submission, and bind later retries and cleanup to the exact returned sandbox.
+- **Malformed timeouts no longer trigger premature cleanup.** Checked duration conversions preserve leases with overflowing idle limits, while existing TTL and ownership checks continue to apply.
+- **Authentication requests have bounded waits.** GitHub membership checks, OAuth requests, and Cloudflare Access key loading stop stalled requests instead of leaving authentication waiting indefinitely.
+- **Provider startup respects cancellation and deadlines.** Hostinger and Upstash Box readiness waits now include stalled responses and polling backoff; GCP and Scaleway retain the original cancellation and timeout causes.
+- **More reliable provider cleanup and status.** Azure resumes fixed-ID worker cleanup after local claim loss, Scaleway removes root disks recorded for new leases, and Vast status probes use the native SSH endpoint and stored key.
+
+### Upgrade notes
+
+- Boat fixed lease IDs require persistent local Crabbox state and the original provider account, endpoint, and organization selector. Lost creation replies permit only one recovery submission within the native 24-hour window, further limited by the intent TTL. Preserve unresolved attempts for inspection; successful cleanup permanently retires the lease ID. Use an organization ID for org-billed creation. [PR 2472](https://github.com/openclaw/crabbox/pull/2472).
+- Scaleway release now deletes the allocation-recorded root disk for newly created leases. Later-attached disks and legacy untracked disks remain untouched; failed cleanup retains recovery state for retry. [PR 2468](https://github.com/openclaw/crabbox/pull/2468).
+
+- GitHub membership/OAuth and Cloudflare Access timeout fixes require a coordinator redeploy. Updating the CLI alone does not change deployed authentication behavior. [PR 2481](https://github.com/openclaw/crabbox/pull/2481), [PR 2482](https://github.com/openclaw/crabbox/pull/2482), [PR 2483](https://github.com/openclaw/crabbox/pull/2483).
+
+### Features
+
+- Add replay-safe ASCII Box (Boat) fixed lease IDs with durable keyed creation, one recovery submission within the native 24-hour window, exact-ID adoption, and single-use release tombstones through the shared engine. [PR 2472](https://github.com/openclaw/crabbox/pull/2472), [Issue 1747](https://github.com/openclaw/crabbox/issues/1747). Thanks @shunkakinoki.
 
 ### Fixes
 
 - Recover direct Azure fixed-ID worker cleanup after local claim loss, preserve cancellation, and resume interrupted cleanup from durable resource identities. [PR 2501](https://github.com/openclaw/crabbox/pull/2501). Thanks @galiniliev.
+- Reject overflowing CodeSandbox SDK operation budgets before authentication or SDK startup while preserving separate setup and command deadlines. [PR 2500](https://github.com/openclaw/crabbox/pull/2500). Thanks @steipete.
 - Reject overflowing OpenComputer and Blaxel execution budgets before provider dispatch, including response grace, while preserving timeout defaults, payloads, and cancellation. [PR 2497](https://github.com/openclaw/crabbox/pull/2497). Thanks @steipete.
-- Reject overflowing Nomad, Agent Sandbox, and Superserve execution timeouts before provider dispatch while preserving disabled deadlines, service defaults, and caller cancellation. [PR 2503](https://github.com/openclaw/crabbox/pull/2503). Thanks @steipete.
 - Reject overflowing Firecracker disk and Hyper-V memory byte conversions before lease state, filesystem copies, or native VM creation, preserving existing sizing defaults and recovery paths. [PR 2495](https://github.com/openclaw/crabbox/pull/2495). Thanks @steipete.
 - Prevent out-of-range persisted idle seconds from authorizing Cloud Run Sandbox idle expiry while preserving independent TTL, stale-create, and invalid-timestamp cleanup policies. [PR 2496](https://github.com/openclaw/crabbox/pull/2496). Thanks @steipete.
 - Bound Upstash Box readiness response reads by the five-minute creation wait, preserve caller cancellation causes, and retain detached cleanup after failed creation. [PR 2498](https://github.com/openclaw/crabbox/pull/2498). Thanks @steipete.
@@ -42,6 +47,24 @@
 - Use Vast's native SSH endpoint and stored lease key for plain status readiness checks, avoiding false unready results while keeping observations read-only. [PR 2447](https://github.com/openclaw/crabbox/pull/2447).
 - Preserve GCP IP-readiness cancellation causes and deadline classification while retaining the budget-timeout diagnostic and completed-response precedence. [PR 2467](https://github.com/openclaw/crabbox/pull/2467).
 - Preserve underlying Scaleway SDK/configuration errors for diagnostics while retaining redacted messages and exit code 3. [PR 2466](https://github.com/openclaw/crabbox/pull/2466).
+
+### Maintenance
+
+- Consolidate Azure configuration under one typed owner while preserving VM and dynamic-session routing, shared input provenance, disk policy, and coordinator request fields. [PR 2491](https://github.com/openclaw/crabbox/pull/2491). Thanks @steipete.
+- Keep GCP configuration and explicit-input intent under one provider-specific owner while preserving file/environment precedence, OS-image defaults, and coordinator requests. [PR 2488](https://github.com/openclaw/crabbox/pull/2488). Thanks @steipete.
+- Reuse shared claim idle-expiry policy for Coder cleanup while preserving its twelve-hour grace period, timestamp normalization, and ownership safeguards. [PR 2490](https://github.com/openclaw/crabbox/pull/2490). Thanks @steipete.
+- Reuse Local Container's shared idle-expiry rule for legacy unscoped orphan claims while preserving strict twelve-hour grace, runtime identity checks, and stored-key retention. [PR 2489](https://github.com/openclaw/crabbox/pull/2489).
+- Share generated flag application and accepted-input bookkeeping across E2B, Freestyle, Semaphore, and Tenki while preserving their validation and normalization order. [PR 2487](https://github.com/openclaw/crabbox/pull/2487).
+- Derive CubeSandbox defaults, file/environment bindings, and flags from one typed declaration while preserving aliases, proxy-port parsing, and endpoint trust policy. [PR 2485](https://github.com/openclaw/crabbox/pull/2485).
+- Consolidate built-in fixed-lease admission, attempt codecs, claim binding, recovery policy, and terminal receipts in a shared engine; preserve native identity proofs and existing local records while retaining the external provider’s delegated protocol. [PR 2462](https://github.com/openclaw/crabbox/pull/2462).
+- Share RunPod and Vast lease-reuse admission while preserving read-only observations, stale-claim rejection, and recorded idle-timeout policy. [PR 2469](https://github.com/openclaw/crabbox/pull/2469).
+- Share AWS and Azure endpoint-refresh identity policy while preserving recorded cleanup authority and legacy-claim behavior. [PR 2470](https://github.com/openclaw/crabbox/pull/2470).
+- Share E2B and CubeSandbox's claim-fenced deletion transaction while preserving endpoint-bound ownership checks, provider errors, and not-found recovery. [PR 2474](https://github.com/openclaw/crabbox/pull/2474).
+- Reuse shared claim idle-expiry policy for Local Container cleanup while preserving its twelve-hour grace period and ownership safeguards. [PR 2475](https://github.com/openclaw/crabbox/pull/2475).
+- Reuse the shared sandbox status projection for Cloud Run Sandbox without changing ownership probes, expiry rules, or public labels. [PR 2476](https://github.com/openclaw/crabbox/pull/2476).
+- Share Linode's status-first HTTP response decoding with DigitalOcean while preserving typed errors, redaction, and partial-response diagnostics. [PR 2479](https://github.com/openclaw/crabbox/pull/2479).
+
+- Make provider deadline tests deterministic, preserve incomplete canceled HTTPS responses in GCP fixtures, allow native PowerShell startup headroom, and cover coordinator create recovery after reconstruction within the same deployment. [PR 2473](https://github.com/openclaw/crabbox/pull/2473), [PR 2484](https://github.com/openclaw/crabbox/pull/2484), [PR 2493](https://github.com/openclaw/crabbox/pull/2493), [PR 2471](https://github.com/openclaw/crabbox/pull/2471).
 
 ## 0.64.0 - 2026-09-21
 

@@ -144,7 +144,11 @@ func TestCodeSandboxEffectiveDefaults(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if operationTimeout(cfg.CodeSandbox) != time.Duration(tc.seconds)*time.Second || doctorListLimit(cfg.CodeSandbox) != tc.limit || bridgeCommand(cfg.CodeSandbox) != tc.command || sdkPackage(cfg.CodeSandbox) != tc.sdk || workdir != tc.workdir {
+			timeout, err := operationTimeout(cfg.CodeSandbox)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if timeout != time.Duration(tc.seconds)*time.Second || doctorListLimit(cfg.CodeSandbox) != tc.limit || bridgeCommand(cfg.CodeSandbox) != tc.command || sdkPackage(cfg.CodeSandbox) != tc.sdk || workdir != tc.workdir {
 				t.Fatalf("effective values differ from literal contract for %#v", tc.cfg)
 			}
 			if tc.name != "custom trimmed" && (tc.seconds != defaults.OperationTimeoutSecs || tc.limit != defaults.DoctorListLimit || tc.command != defaults.BridgeCommand || tc.sdk != defaults.SDKPackage || tc.workdir != defaults.Workdir) {
