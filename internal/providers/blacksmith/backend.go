@@ -205,17 +205,17 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 	commandStart := b.rt.Clock.Now()
 	req.Observation.Phase(core.RunPhaseCommand)
 	phaseTracker := core.NewCommandPhaseTracker(commandStart)
-	code := 0
+	var outcome blacksmithRunOutcome
 	var commandEnd time.Time
 	var collected []core.RunArtifact
 	var artifactErr error
 	if err := b.withOwnedTestbox(ctx, claim, func() error {
 		if len(req.ArtifactGlobs) > 0 || len(req.RequiredArtifactGlobs) > 0 {
-			code, commandEnd, collected, artifactErr = b.runArtifactTestbox(ctx, req, leaseID, phaseTracker,
+			outcome, commandEnd, collected, artifactErr = b.runArtifactTestbox(ctx, req, leaseID, phaseTracker,
 				mergeWriters(stdoutCapture, stdoutProof), mergeWriters(stderrCapture, stderrProof), blacksmithCollectionTimeout)
 			return nil
 		}
-		code = b.runTestbox(
+		outcome = b.runTestbox(
 			ctx,
 			leaseID,
 			req.Command,
@@ -231,6 +231,7 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 		return core.RunResult{}, err
 	}
 	// Artifact diagnostics must not reclassify an earlier workload failure.
+	code := outcome.code
 	artifactFailedSuccess := artifactErr != nil && code == 0
 	if artifactErr != nil {
 		fmt.Fprintf(b.rt.Stderr, "blacksmith artifact retrieval failed: %v\n", artifactErr)
@@ -264,6 +265,9 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 		Total:         total,
 		SyncDelegated: true,
 	}
+	if outcome.syncTimedOut {
+		result.Status, result.ErrorKind = core.RunStatusTimedOut, core.RunErrorTimeout
+	}
 	for _, artifact := range collected {
 		fmt.Fprintf(b.rt.Stderr, "artifact kind=%s path=%s bytes=%d\n", artifact.Kind, artifact.Path, artifact.Bytes)
 	}
@@ -284,7 +288,9 @@ func (b *blacksmithBackend) Run(ctx context.Context, req core.RunRequest) (runRe
 	result.Total = total
 	report := delegatedTimingReport(blacksmithTestboxProvider, leaseID, slug, "blacksmith-testbox owns sync", commandDuration, commandPhases, total, code)
 	report = core.TimingReportWithRunResult(report, result, cleanupErr)
-	if code != 0 {
+	if outcome.syncTimedOut {
+		report.BlockedStage, report.RetryLikely = "sync", "true"
+	} else if code != 0 {
 		classificationInput := string(stdoutProof.Bytes()) + "\n" + string(stderrProof.Bytes())
 		failurePhases := commandPhases
 		if artifactFailedSuccess {
@@ -789,11 +795,17 @@ func (b *blacksmithBackend) openFailureStreamCapture(label string) (io.WriteClos
 	return core.NewCappedFailureBundleStream(file), path, cleanup, nil
 }
 
-func (b *blacksmithBackend) runTestbox(ctx context.Context, leaseID string, command []string, debug, shellMode bool, phaseTracker *core.CommandPhaseTracker, stdoutExtra, stderrExtra io.Writer, observation *core.RunObservation) int {
+// Exit 124 alone cannot distinguish the sync guard from a workload failure.
+type blacksmithRunOutcome struct {
+	code         int
+	syncTimedOut bool
+}
+
+func (b *blacksmithBackend) runTestbox(ctx context.Context, leaseID string, command []string, debug, shellMode bool, phaseTracker *core.CommandPhaseTracker, stdoutExtra, stderrExtra io.Writer, observation *core.RunObservation) blacksmithRunOutcome {
 	keyPath, err := core.StoredTestboxKeyPath(leaseID)
 	if err != nil {
 		fmt.Fprintf(b.rt.Stderr, "blacksmith key path failed: %v\n", err)
-		return 2
+		return blacksmithRunOutcome{code: 2}
 	}
 	args := blacksmithRunArgs(b.cfg, leaseID, keyPath, command, debug || b.cfg.Blacksmith.Debug, shellMode)
 	stdoutTarget, stderrTarget := observation.CommandWriters(mergeWriters(b.rt.Stdout, stdoutExtra), mergeWriters(b.rt.Stderr, stderrExtra), core.RunOutputProvider)
@@ -809,12 +821,12 @@ func (b *blacksmithBackend) runTestbox(ctx context.Context, leaseID string, comm
 				"Rerun with CRABBOX_BLACKSMITH_SYNC_TIMEOUT_MS=0 to disable this guard.\n",
 			blacksmithSyncTimeout(os.Getenv),
 		)
-		return 124
+		return blacksmithRunOutcome{code: 124, syncTimedOut: true}
 	}
 	if err != nil {
-		return result.ExitCode
+		return blacksmithRunOutcome{code: result.ExitCode}
 	}
-	return 0
+	return blacksmithRunOutcome{}
 }
 
 func commandPhaseWriter(w io.Writer, tracker *core.CommandPhaseTracker) (io.Writer, *core.PhaseMarkerWriter) {

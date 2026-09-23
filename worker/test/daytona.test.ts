@@ -1178,15 +1178,25 @@ describe("daytona coordinator client", () => {
       throw new Error(`unexpected request ${request.method} ${request.url}`);
     });
 
-    await expect(
-      client.bootstrapSnapshot("crabbox-ready-2x4x10", 2, 4, 10, baseImage),
-    ).resolves.toMatchObject({
-      snapshot: "crabbox-ready-2x4x10",
-      cleanup: "deleted",
-    });
-    expect(client.snapshotWaitMs).toBeGreaterThan(client.maxWaitMs);
-    expect(client.snapshotWaitMs).toBeLessThan(30 * 60_000);
-    expect(snapshotPolls).toBe(3);
+    // The short snapshot budget must not depend on host scheduling under suite load.
+    vi.useFakeTimers();
+    try {
+      const startedAt = Date.now();
+      const result = client
+        .bootstrapSnapshot("crabbox-ready-2x4x10", 2, 4, 10, baseImage)
+        .catch((error: unknown) => error);
+
+      await vi.runAllTimersAsync();
+
+      expect(await result).toMatchObject({
+        snapshot: "crabbox-ready-2x4x10",
+        cleanup: "deleted",
+      });
+      expect(Date.now() - startedAt).toBe(60);
+      expect(snapshotPolls).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([2, 6])(

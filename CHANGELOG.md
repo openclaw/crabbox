@@ -8,11 +8,16 @@
 
 ### Fixes
 
-- Retry a recognized regional notarization upload deadline once through Apple's accelerated S3 route with the same signed archive, preserving receipt, cancellation, validation, and online-ticket checks.
+- Recover notarization upload deadlines with one bounded S3 acceleration retry or an explicit accelerated route, and require successful signer exit plus online verification before capturing a receipt. [PR 2518](https://github.com/openclaw/crabbox/pull/2518). Thanks @steipete.
+- Preserve OVH heartbeat policy, including pre-upgrade overrides, across reuse and status reads, recording activity and explicit idle-timeout changes atomically in the local lease claim. [PR 2420](https://github.com/openclaw/crabbox/pull/2420). Thanks @steipete.
+- Retain OVH SSH targets for plain status readiness checks and keep both status modes out of repository admission, while preserving metadata-only observations without a public address. [PR 2420](https://github.com/openclaw/crabbox/pull/2420). Thanks @steipete.
+- Bound OVH IP-readiness lookups and retry waits with an elapsed-time deadline, preserving caller cancellation causes and provider error precedence. [PR 2420](https://github.com/openclaw/crabbox/pull/2420). Thanks @steipete.
 - Finish E2B and CubeSandbox upload producers before releasing source archives and surface source-read failures, using the same multipart lifetime owner as Blaxel. [PR 2509](https://github.com/openclaw/crabbox/pull/2509). Thanks @steipete.
 - Finish Blaxel multipart producers before retrying or releasing borrowed archives, preserving HTTP error precedence and early-success uploads. [PR 2505](https://github.com/openclaw/crabbox/pull/2505). Thanks @steipete.
 - Reject overflowing Nomad, Agent Sandbox, and Superserve execution timeouts before provider dispatch while preserving disabled deadlines, service defaults, and caller cancellation. [PR 2503](https://github.com/openclaw/crabbox/pull/2503). Thanks @steipete.
+- Report Blacksmith sync guard timeouts consistently in run results, timing data, and failure bundles without reclassifying ordinary exit 124 or an earlier workload failure. [PR 2510](https://github.com/openclaw/crabbox/pull/2510). Thanks @vincentkoc.
 - Reject oversized Superserve-derived sandbox lifetimes before rounding seconds, preventing duration overflow from bypassing the seven-day cap. [PR 2504](https://github.com/openclaw/crabbox/pull/2504). Thanks @steipete.
+- Reject overflowing OpenSandbox execution and lifetime budgets before requests, preserve valid coverage rules, and retain recovery claims with malformed lifetime seconds. [PR 2511](https://github.com/openclaw/crabbox/pull/2511). Thanks @steipete.
 
 ## 0.65.0 - 2026-09-22
 

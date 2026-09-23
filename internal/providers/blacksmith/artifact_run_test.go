@@ -438,10 +438,11 @@ func TestBlacksmithArtifactPreflightsSCPBeforeWorkload(t *testing.T) {
 				return runSyntheticBlacksmithCommand(t, ctx, req)
 			})
 			backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
-			code, ended, artifacts, err := backend.runArtifactTestbox(t.Context(), core.RunRequest{
+			outcome, ended, artifacts, err := backend.runArtifactTestbox(t.Context(), core.RunRequest{
 				Repo: core.Repo{Root: repo}, Command: []string{"printf started > workload-started; printf payload > report"}, ShellMode: true,
 				ArtifactGlobs: []string{"report"}, RequiredArtifactGlobs: []string{"report"},
 			}, "tbx_preflight", nil, nil, nil, time.Second)
+			code := outcome.code
 			_, markerErr := os.Stat(filepath.Join(repo, "workload-started"))
 			if err == nil || !strings.Contains(err.Error(), "scp") || code == 0 || !ended.IsZero() || len(artifacts) != 0 || runs != 0 || !errors.Is(markerErr, os.ErrNotExist) {
 				t.Fatalf("invalid helper reached workload: code=%d ended=%v artifacts=%v runs=%d marker=%v err=%v", code, ended, artifacts, runs, markerErr, err)
@@ -541,7 +542,8 @@ func TestBlacksmithArtifactWorkspaceBinding(t *testing.T) {
 			})
 			backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
 			prepareBlacksmithGuestKey(t, "tbx_workspace")
-			code, ended, result, err := backend.runArtifactTestbox(t.Context(), core.RunRequest{Repo: core.Repo{Root: repo}, Command: []string{command}, ShellMode: true, ArtifactGlobs: []string{"report"}, RequiredArtifactGlobs: []string{"report"}}, "tbx_workspace", nil, nil, nil, time.Second)
+			outcome, ended, result, err := backend.runArtifactTestbox(t.Context(), core.RunRequest{Repo: core.Repo{Root: repo}, Command: []string{command}, ShellMode: true, ArtifactGlobs: []string{"report"}, RequiredArtifactGlobs: []string{"report"}}, "tbx_workspace", nil, nil, nil, time.Second)
+			code := outcome.code
 			if invalid {
 				if code != 7 || err == nil || !ended.IsZero() || len(result) != 0 {
 					t.Fatalf("invalid binding reached workload: code=%d ended=%v result=%+v err=%v", code, ended, result, err)
@@ -734,7 +736,8 @@ func TestBlacksmithArtifactReceiptAdversarial(t *testing.T) {
 			backend := newTestBlacksmithBackend(core.BaseConfig(), runner)
 			backend.rt.Stdout, backend.rt.Stderr = &stdout, &stderr
 			prepareBlacksmithGuestKey(t, "tbx_receipt")
-			code, _, collected, err := backend.runArtifactTestbox(ctx, core.RunRequest{Repo: core.Repo{Root: repo}, Command: []string{"true"}, ArtifactGlobs: []string{"report"}}, "tbx_receipt", nil, nil, nil, time.Second)
+			outcome, _, collected, err := backend.runArtifactTestbox(ctx, core.RunRequest{Repo: core.Repo{Root: repo}, Command: []string{"true"}, ArtifactGlobs: []string{"report"}}, "tbx_receipt", nil, nil, nil, time.Second)
+			code := outcome.code
 			if kind == "valid" {
 				if err != nil || code != 0 || len(collected) != 1 {
 					t.Fatalf("code=%d collected=%+v err=%v", code, collected, err)
@@ -823,7 +826,8 @@ func TestBlacksmithArtifactRunBudgets(t *testing.T) {
 					runReq.ShellMode = true
 				}
 				prepareBlacksmithGuestKey(t, "tbx_budget")
-				got, ended, artifacts, err := backend.runArtifactTestbox(t.Context(), runReq, "tbx_budget", nil, nil, nil, budget)
+				outcome, ended, artifacts, err := backend.runArtifactTestbox(t.Context(), runReq, "tbx_budget", nil, nil, nil, budget)
+				got := outcome.code
 				if kind == "unsupported-timeout" {
 					if got != 7 || !ended.IsZero() {
 						t.Errorf("unsupported timeout reached workload: code=%d ended=%v", got, ended)
@@ -912,7 +916,8 @@ func TestBlacksmithArtifactCollectionTimeoutReceipt(t *testing.T) {
 					req := core.RunRequest{ID: id, Repo: core.Repo{Root: repo}, Command: []string{fmt.Sprintf("exit %d", code)}, ArtifactGlobs: []string{"report"}}
 					var ee core.ExitError
 					if boundary == "helper" {
-						got, ended, collected, err := backend.runArtifactTestbox(t.Context(), req, id, nil, nil, nil, 100*time.Millisecond)
+						outcome, ended, collected, err := backend.runArtifactTestbox(t.Context(), req, id, nil, nil, nil, 100*time.Millisecond)
+						got := outcome.code
 						if got != code || ended.IsZero() || !errors.As(err, &ee) || ee.Code != 7 || ee.Message != "collection exited 124" || len(collected) != 0 {
 							t.Fatalf("code=%d want=%d ended=%v collected=%+v err=%v", got, code, ended, collected, err)
 						}
@@ -1084,7 +1089,8 @@ func TestBlacksmithArtifactRunClaimFence(t *testing.T) {
 			done := make(chan error, 1)
 			go func() {
 				done <- backend.withOwnedTestbox(ctx, claim, func() error {
-					code, _, result, err := backend.runArtifactTestbox(ctx, core.RunRequest{Repo: core.Repo{Root: repo}, Command: []string{"exit 23"}, ArtifactGlobs: []string{"report"}}, id, nil, nil, nil, time.Second)
+					outcome, _, result, err := backend.runArtifactTestbox(ctx, core.RunRequest{Repo: core.Repo{Root: repo}, Command: []string{"exit 23"}, ArtifactGlobs: []string{"report"}}, id, nil, nil, nil, time.Second)
+					code := outcome.code
 					if code != 23 || (mode == "writer" && (err != nil || len(result) != 1)) || (mode == "stop" && (err == nil || len(result) != 0)) {
 						return fmt.Errorf("code=%d artifact count=%d err=%v", code, len(result), err)
 					}

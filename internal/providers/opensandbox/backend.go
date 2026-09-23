@@ -75,7 +75,10 @@ func (b *openSandboxBackend) Warmup(ctx context.Context, req core.WarmupRequest)
 	if err != nil {
 		return b.cleanupClaimedSandboxFailure(ctx, api, leaseID, sandboxID, err)
 	}
-	required := openSandboxRunBudgetForConfig(b.cfg, false, false)
+	required, err := openSandboxRunBudgetForConfig(b.cfg, false, false)
+	if err != nil {
+		return b.cleanupClaimedSandboxFailure(ctx, api, leaseID, sandboxID, err)
+	}
 	if remaining := deadline.Sub(core.ClockNow(b.rt.Clock)); remaining < required {
 		return b.cleanupClaimedSandboxFailure(ctx, api, leaseID, sandboxID, core.Exit(5, "opensandbox sandbox %s has %s remaining after warmup, less than the %s default run budget", sandboxID, remaining.Round(time.Second), required))
 	}
@@ -118,7 +121,11 @@ func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 		if !deadline.After(core.ClockNow(b.rt.Clock)) {
 			return core.Exit(5, "opensandbox sandbox %s exceeded its absolute Crabbox TTL", sandboxID)
 		}
-		if remaining, required := deadline.Sub(core.ClockNow(b.rt.Clock)), b.runLifetimeBudget(req); remaining < required {
+		required, err := b.runLifetimeBudget(req)
+		if err != nil {
+			return err
+		}
+		if remaining := deadline.Sub(core.ClockNow(b.rt.Clock)); remaining < required {
 			return core.Exit(5, "opensandbox sandbox %s has %s remaining before its absolute TTL, less than the %s sync/command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), required)
 		}
 		return nil
@@ -129,6 +136,9 @@ func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 		Preflight: func(context.Context) error {
 			if req.Options.Tailscale.Enabled {
 				return core.Exit(2, "provider=opensandbox is delegated-run only and does not support Tailscale options")
+			}
+			if _, err := b.runLifetimeBudget(req); err != nil {
+				return err
 			}
 			if req.ID == "" {
 				if err := validateOpenSandboxRequestConfig(b.cfg, req); err != nil {
@@ -196,13 +206,17 @@ func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			if !deadline.After(core.ClockNow(b.rt.Clock)) {
 				return core.Exit(5, "opensandbox sandbox %s exceeded its absolute Crabbox TTL while resuming", sandboxID)
 			}
-			if remaining, required := deadline.Sub(core.ClockNow(b.rt.Clock)), b.runLifetimeBudget(req); remaining < required {
+			required, err := b.runLifetimeBudget(req)
+			if err != nil {
+				return err
+			}
+			if remaining := deadline.Sub(core.ClockNow(b.rt.Clock)); remaining < required {
 				return core.Exit(5, "opensandbox sandbox %s has %s remaining after resume before its absolute TTL, less than the %s sync/command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), required)
 			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			_, _, _, err := finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.BaseURL())
+			_, _, _, err = finishResolvedLease(claim, req.Repo.Root, req.Reclaim, b.cfg.IdleTimeout, api.BaseURL())
 			return err
 		},
 		Setup: func(ctx context.Context) error {
@@ -222,8 +236,12 @@ func (b *openSandboxBackend) Run(ctx context.Context, req core.RunRequest) (core
 			if req.EnvSummary || strings.TrimSpace(os.Getenv("CRABBOX_ENV_ALLOW")) != "" {
 				core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 			}
-			if remaining := deadline.Sub(core.ClockNow(b.rt.Clock)); remaining < b.commandLifetime() {
-				return shared.DelegatedSandboxCommand{}, core.Exit(5, "opensandbox sandbox %s has %s remaining before its absolute TTL, less than the %s command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), b.commandLifetime())
+			commandBudget, err := b.commandLifetime()
+			if err != nil {
+				return shared.DelegatedSandboxCommand{}, err
+			}
+			if remaining := deadline.Sub(core.ClockNow(b.rt.Clock)); remaining < commandBudget {
+				return shared.DelegatedSandboxCommand{}, core.Exit(5, "opensandbox sandbox %s has %s remaining before its absolute TTL, less than the %s command budget; create a new sandbox", sandboxID, remaining.Round(time.Second), commandBudget)
 			}
 			text := intent.ShellCommand("bash", "-lc")
 			return shared.DelegatedSandboxCommand{
@@ -483,7 +501,11 @@ func openSandboxRecoveryExpired(claim core.LeaseClaim, now time.Time) (bool, err
 	if claim.IdleTimeoutSeconds <= 0 {
 		return false, core.Exit(5, "opensandbox recovery %s has no sandbox lifetime", claim.LeaseID)
 	}
-	return !now.Before(createdAt.Add(time.Duration(claim.IdleTimeoutSeconds) * time.Second)), nil
+	lifetime, valid := shared.SecondsWithGrace(int64(claim.IdleTimeoutSeconds), 0)
+	if !valid {
+		return false, core.Exit(5, "opensandbox recovery %s has invalid sandbox lifetime", claim.LeaseID)
+	}
+	return !now.Before(createdAt.Add(lifetime)), nil
 }
 
 func openSandboxClaimMatchesEndpoint(claim core.LeaseClaim, baseURL string) bool {
@@ -503,9 +525,17 @@ func (b *openSandboxBackend) createSandbox(ctx context.Context, api openSandboxC
 	if err != nil {
 		return "", "", "", sandboxInfo{}, nil, err
 	}
+	lifetime, err := b.sandboxLifetime()
+	if err != nil {
+		return "", "", "", sandboxInfo{}, nil, err
+	}
+	seconds, err := durationSecondsCeil(lifetime)
+	if err != nil {
+		return "", "", "", sandboxInfo{}, nil, err
+	}
 	sb, err := api.CreateSandbox(ctx, createSandboxOptions{
 		Image:          image,
-		TimeoutSecs:    durationSecondsCeil(b.sandboxLifetime()),
+		TimeoutSecs:    seconds,
 		CPU:            b.cfg.OpenSandbox.CPU,
 		Memory:         b.cfg.OpenSandbox.Memory,
 		SecureAccess:   b.cfg.OpenSandbox.SecureAccess,
@@ -552,6 +582,10 @@ func (b *openSandboxBackend) recordAmbiguousCreate(providerScope string, repo co
 	if strings.TrimSpace(repo.Root) == "" {
 		return "", errors.New("repository root is required")
 	}
+	lifetime, err := b.sandboxLifetime()
+	if err != nil {
+		return "", err
+	}
 	recoveryLeaseID := openSandboxRecoveryLeaseID(providerScope)
 	if err := core.ClaimLeaseForRepoProviderScopePond(
 		recoveryLeaseID,
@@ -560,7 +594,7 @@ func (b *openSandboxBackend) recordAmbiguousCreate(providerScope string, repo co
 		providerScope,
 		"",
 		repo.Root,
-		b.sandboxLifetime(),
+		lifetime,
 		false,
 	); err != nil {
 		return "", err
@@ -838,15 +872,15 @@ func (b *openSandboxBackend) execTimeoutSecs() int {
 	return openSandboxExecTimeoutSecs
 }
 
-func (b *openSandboxBackend) sandboxLifetime() time.Duration {
+func (b *openSandboxBackend) sandboxLifetime() (time.Duration, error) {
 	return openSandboxLifetimeForConfig(b.cfg)
 }
 
-func (b *openSandboxBackend) commandLifetime() time.Duration {
+func (b *openSandboxBackend) commandLifetime() (time.Duration, error) {
 	return openSandboxCommandBudgetForConfig(b.cfg)
 }
 
-func (b *openSandboxBackend) runLifetimeBudget(req core.RunRequest) time.Duration {
+func (b *openSandboxBackend) runLifetimeBudget(req core.RunRequest) (time.Duration, error) {
 	return openSandboxRunBudgetForConfig(b.cfg, req.NoSync, req.SyncOnly)
 }
 
@@ -928,9 +962,16 @@ func (b *openSandboxBackend) statusProbeTimeout() time.Duration {
 	return openSandboxStatusProbe
 }
 
-func durationSecondsCeil(value time.Duration) int {
+func durationSecondsCeil(value time.Duration) (int, error) {
 	if value <= 0 {
-		return 0
+		return 0, nil
 	}
-	return int((value + time.Second - 1) / time.Second)
+	seconds := int64(value / time.Second)
+	if value%time.Second != 0 {
+		seconds++
+	}
+	if int64(int(seconds)) != seconds {
+		return 0, core.Exit(2, "opensandbox lifetime seconds exceed the platform integer range")
+	}
+	return int(seconds), nil
 }

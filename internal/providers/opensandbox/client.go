@@ -238,6 +238,9 @@ func (c *sdkOpenSandboxClient) config() sdk.ConnectionConfig {
 }
 
 func (c *sdkOpenSandboxClient) CreateSandbox(ctx context.Context, opts createSandboxOptions) (sandboxInfo, error) {
+	if _, err := c.readyTimeout(); err != nil {
+		return sandboxInfo{}, err
+	}
 	limits := sdk.ResourceLimits{}
 	if strings.TrimSpace(opts.CPU) != "" {
 		limits["cpu"] = strings.TrimSpace(opts.CPU)
@@ -288,7 +291,10 @@ func (c *sdkOpenSandboxClient) CreateSandbox(ctx context.Context, opts createSan
 		}
 	}
 	sandboxID := info.ID
-	readyCtx, cancel := c.readinessContext(ctx, info.ExpiresAt)
+	readyCtx, cancel, err := c.readinessContext(ctx, info.ExpiresAt)
+	if err != nil {
+		return sandboxInfo{}, c.cleanupCreateFailure(ctx, sandboxID, err)
+	}
 	defer cancel()
 	if info.Status.State != sdk.StateRunning {
 		info, err = c.waitForRunning(readyCtx, info.ID)
@@ -302,7 +308,10 @@ func (c *sdkOpenSandboxClient) CreateSandbox(ctx context.Context, opts createSan
 			return sandboxInfo{}, c.cleanupCreateFailure(ctx, sandboxID, fmt.Errorf("opensandbox refresh sandbox expiration: %w", c.redactProviderError(err)))
 		}
 		if info.Status.State != sdk.StateRunning {
-			refreshedCtx, refreshedCancel := c.readinessContext(readyCtx, info.ExpiresAt)
+			refreshedCtx, refreshedCancel, err := c.readinessContext(readyCtx, info.ExpiresAt)
+			if err != nil {
+				return sandboxInfo{}, c.cleanupCreateFailure(ctx, sandboxID, err)
+			}
 			info, err = c.waitForRunning(refreshedCtx, sandboxID)
 			refreshedCancel()
 			if err != nil {
@@ -310,7 +319,10 @@ func (c *sdkOpenSandboxClient) CreateSandbox(ctx context.Context, opts createSan
 			}
 		}
 	}
-	execdCtx, execdCancel := c.readinessContext(readyCtx, info.ExpiresAt)
+	execdCtx, execdCancel, err := c.readinessContext(readyCtx, info.ExpiresAt)
+	if err != nil {
+		return sandboxInfo{}, c.cleanupCreateFailure(ctx, sandboxID, err)
+	}
 	defer execdCancel()
 	if err := c.waitUntilReady(execdCtx, sandboxID); err != nil {
 		return sandboxInfo{}, c.cleanupCreateFailure(ctx, sandboxID, fmt.Errorf("opensandbox wait until ready: %w", err))
@@ -331,16 +343,25 @@ func (c *sdkOpenSandboxClient) cleanupCreateFailure(ctx context.Context, sandbox
 }
 
 func (c *sdkOpenSandboxClient) ResumeSandbox(ctx context.Context, sandboxID string) error {
+	if _, err := c.readyTimeout(); err != nil {
+		return err
+	}
 	if err := c.lifecycle().ResumeSandbox(ctx, sandboxID); err != nil {
 		return fmt.Errorf("opensandbox resume sandbox: %w", c.redactProviderError(err))
 	}
-	readyCtx, cancel := c.readinessContext(ctx, nil)
+	readyCtx, cancel, err := c.readinessContext(ctx, nil)
+	if err != nil {
+		return err
+	}
 	defer cancel()
 	info, err := c.waitForRunning(readyCtx, sandboxID)
 	if err != nil {
 		return fmt.Errorf("opensandbox wait for resumed sandbox: %w", err)
 	}
-	execdCtx, execdCancel := c.readinessContext(readyCtx, info.ExpiresAt)
+	execdCtx, execdCancel, err := c.readinessContext(readyCtx, info.ExpiresAt)
+	if err != nil {
+		return err
+	}
 	defer execdCancel()
 	if err := c.waitUntilReady(execdCtx, sandboxID); err != nil {
 		return fmt.Errorf("opensandbox wait until resumed sandbox ready: %w", err)
@@ -356,12 +377,16 @@ func (c *sdkOpenSandboxClient) PingSandbox(ctx context.Context, sandboxID string
 	return c.redactProviderError(c.execdForConnection(conn).Ping(ctx), openSandboxExecdSecrets(conn)...)
 }
 
-func (c *sdkOpenSandboxClient) readyTimeout() time.Duration {
+func (c *sdkOpenSandboxClient) readyTimeout() (time.Duration, error) {
 	timeout := openSandboxReadyTimeout
-	if lifetime := openSandboxLifetimeForConfig(c.cfg); lifetime > 0 && lifetime < timeout {
+	lifetime, err := openSandboxLifetimeForConfig(c.cfg)
+	if err != nil {
+		return 0, err
+	}
+	if lifetime > 0 && lifetime < timeout {
 		timeout = lifetime
 	}
-	return timeout
+	return timeout, nil
 }
 
 func (c *sdkOpenSandboxClient) requestTimeout() time.Duration {
@@ -371,15 +396,20 @@ func (c *sdkOpenSandboxClient) requestTimeout() time.Duration {
 	return sdk.DefaultRequestTimeout
 }
 
-func (c *sdkOpenSandboxClient) readinessContext(ctx context.Context, expiresAt *time.Time) (context.Context, context.CancelFunc) {
-	deadline := time.Now().Add(c.readyTimeout())
+func (c *sdkOpenSandboxClient) readinessContext(ctx context.Context, expiresAt *time.Time) (context.Context, context.CancelFunc, error) {
+	timeout, err := c.readyTimeout()
+	if err != nil {
+		return nil, nil, err
+	}
+	deadline := time.Now().Add(timeout)
 	if expiresAt != nil && !expiresAt.IsZero() && expiresAt.Before(deadline) {
 		deadline = *expiresAt
 	}
 	if parentDeadline, ok := ctx.Deadline(); ok && !deadline.Before(parentDeadline) {
-		return ctx, func() {}
+		return ctx, func() {}, nil
 	}
-	return context.WithDeadline(ctx, deadline)
+	bounded, cancel := context.WithDeadline(ctx, deadline)
+	return bounded, cancel, nil
 }
 
 func (c *sdkOpenSandboxClient) waitForRunning(ctx context.Context, sandboxID string) (*sdk.SandboxInfo, error) {
@@ -539,7 +569,11 @@ func (c *sdkOpenSandboxClient) RunCommand(ctx context.Context, sandboxID string,
 		commandClient.rt.Stderr = req.Stderr
 	}
 	c = &commandClient
-	if timeout := c.execRequestTimeout(req.TimeoutSecs); timeout > 0 {
+	timeout, err := c.execRequestTimeout(req.TimeoutSecs)
+	if err != nil {
+		return 2, err
+	}
+	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
@@ -685,14 +719,15 @@ func streamOpenSandboxCommand(ctx context.Context, body io.Reader, handler func(
 	return nil
 }
 
-func (c *sdkOpenSandboxClient) execRequestTimeout(timeoutSecs int) time.Duration {
+func (c *sdkOpenSandboxClient) execRequestTimeout(timeoutSecs int) (time.Duration, error) {
+	budget, err := openSandboxExecutionBudget(timeoutSecs)
+	if err != nil {
+		return 0, err
+	}
 	if c.execTimeoutOverride > 0 {
-		return c.execTimeoutOverride
+		return c.execTimeoutOverride, nil
 	}
-	if timeoutSecs <= 0 {
-		return 0
-	}
-	return time.Duration(timeoutSecs)*time.Second + openSandboxExecGrace
+	return budget, nil
 }
 
 type commandEventResult struct {
