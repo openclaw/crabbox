@@ -37,20 +37,6 @@ func azureDynamicSessionsCleanupCommand(leaseID string) string {
 	return "crabbox stop --provider " + providerName + " " + core.ShellQuote(leaseID)
 }
 
-func durationSecondsCeil(duration time.Duration) int {
-	if duration <= 0 {
-		return 0
-	}
-	return int((duration + time.Second - 1) / time.Second)
-}
-
-func durationMillisecondsCeil(duration time.Duration) int64 {
-	if duration <= 0 {
-		return 0
-	}
-	return int64((duration + time.Millisecond - 1) / time.Millisecond)
-}
-
 func providerError(action string, err error) error {
 	if err == nil {
 		return nil

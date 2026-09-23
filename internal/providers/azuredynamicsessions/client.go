@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -434,17 +435,25 @@ func (s azureDynamicSessionsSession) normalized(fallback string) azureDynamicSes
 	return s
 }
 
-func azureDynamicSessionsTimeout(cfg core.Config) time.Duration {
-	return time.Duration(azureDynamicSessionsTimeoutSeconds(cfg)) * time.Second
+func azureDynamicSessionsTimeoutMilliseconds(cfg core.Config) (int64, error) {
+	seconds := azureDynamicSessionsTimeoutSeconds(cfg)
+	if seconds > math.MaxInt64/1000 {
+		return 0, core.Exit(2, "azure-dynamic-sessions timeout seconds exceed the supported millisecond range")
+	}
+	return seconds * 1000, nil
 }
 
-func azureDynamicSessionsTimeoutSeconds(cfg core.Config) int {
+func azureDynamicSessionsTimeoutSeconds(cfg core.Config) int64 {
 	timeout := cfg.AzureDynamicSessions.TimeoutSecs
 	if timeout <= 0 {
 		if cfg.TTL > 0 {
-			return durationSecondsCeil(cfg.TTL)
+			seconds := int64(cfg.TTL / time.Second)
+			if cfg.TTL%time.Second != 0 {
+				seconds++
+			}
+			return seconds
 		}
-		return core.AzureDynamicSessionsConfigDefaultTimeoutSecs
+		return int64(core.AzureDynamicSessionsConfigDefaultTimeoutSecs)
 	}
-	return timeout
+	return int64(timeout)
 }

@@ -159,7 +159,7 @@ func TestAzureDynamicSessionsDefaultConsumersWithMockedAuth(t *testing.T) {
 		want       int
 	}{{0, 0, 1800}, {-1, 0, 1800}, {0, -time.Second, 1800}, {0, 1500 * time.Millisecond, 2}, {-1, 42 * time.Second, 42}, {7, 42 * time.Second, 7}} {
 		cfg := core.Config{TTL: tc.ttl, AzureDynamicSessions: core.AzureDynamicSessionsConfig{TimeoutSecs: tc.configured}}
-		if got := azureDynamicSessionsTimeoutSeconds(cfg); got != tc.want {
+		if got := azureDynamicSessionsTimeoutSeconds(cfg); got != int64(tc.want) {
 			t.Fatalf("timeout configured=%d ttl=%s got=%d want=%d", tc.configured, tc.ttl, got, tc.want)
 		}
 	}
@@ -935,5 +935,83 @@ func TestRawJSONResponseContract(t *testing.T) {
 			}
 
 		})
+	}
+}
+
+func TestAzureDynamicSessionsTimeoutWireProjectionDoesNotWrap(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("large public integer seconds require a 64-bit int")
+	}
+	largeSeconds := int64(9223372037)
+	for _, tc := range []struct {
+		name    string
+		seconds int64
+		ttl     time.Duration
+		wantMS  int64
+	}{
+		{"ordinary explicit overrides TTL", 7, time.Minute, 7000},
+		{"nonpositive uses rounded TTL", -1, 1500 * time.Millisecond, 2000},
+		{"nonpositive without TTL uses default", 0, 0, 1800000},
+		{"explicit seconds exceed nanosecond range but fit milliseconds", largeSeconds, 0, largeSeconds * 1000},
+		{"TTL near duration ceiling still rounds to seconds", 0, time.Duration(1<<63 - 1), largeSeconds * 1000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := core.Config{TTL: tc.ttl, AzureDynamicSessions: core.AzureDynamicSessionsConfig{TimeoutSecs: int(tc.seconds)}}
+			got, err := azureDynamicSessionsTimeoutMilliseconds(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.wantMS {
+				t.Fatalf("wire timeoutMs=%d want=%d (configured seconds=%d TTL=%s)", got, tc.wantMS, tc.seconds, tc.ttl)
+			}
+		})
+	}
+}
+
+func TestAzureDynamicSessionsWireTimeoutBoundaryAndAdmission(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("large public integer seconds require 64-bit int")
+	}
+	maxSeconds := int64(1<<63-1) / 1000
+	cfg := core.Config{AzureDynamicSessions: core.AzureDynamicSessionsConfig{TimeoutSecs: int(maxSeconds)}}
+	got, err := azureDynamicSessionsTimeoutMilliseconds(cfg)
+	if err != nil || got != maxSeconds*1000 {
+		t.Fatalf("boundary=%d error=%v", got, err)
+	}
+	cfg.AzureDynamicSessions.TimeoutSecs = int(maxSeconds + 1)
+	if _, err := azureDynamicSessionsTimeoutMilliseconds(cfg); core.ExitCodeForError(err, 1) != 2 {
+		t.Fatalf("overflow error=%v", err)
+	}
+	previous := newAzureDynamicSessionsClient
+	newAzureDynamicSessionsClient = func(context.Context, core.Config, core.Runtime) (azureDynamicSessionsAPI, error) {
+		t.Fatal("invalid wire timeout reached authentication")
+		return nil, nil
+	}
+	t.Cleanup(func() { newAzureDynamicSessionsClient = previous })
+	b := testAzureDynamicSessionsBackend()
+	b.cfg = cfg
+	if _, err := b.Run(context.Background(), core.RunRequest{Command: []string{"true"}}); core.ExitCodeForError(err, 1) != 2 {
+		t.Fatalf("run error=%v", err)
+	}
+	if err := b.execShell(context.Background(), nil, "unused", "true", io.Discard); core.ExitCodeForError(err, 1) != 2 {
+		t.Fatalf("setup exec error=%v", err)
+	}
+}
+
+func TestAzureDynamicSessionsOversizedCommandTimeoutDoesNotBlockListAdmission(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("large public integer seconds require 64-bit int")
+	}
+	seconds := int64(1<<63 - 1)
+	b := testAzureDynamicSessionsBackend()
+	b.cfg.AzureDynamicSessions.TimeoutSecs = int(seconds)
+	sentinel := errors.New("control client admission reached")
+	previous := newAzureDynamicSessionsClient
+	newAzureDynamicSessionsClient = func(context.Context, core.Config, core.Runtime) (azureDynamicSessionsAPI, error) {
+		return nil, sentinel
+	}
+	t.Cleanup(func() { newAzureDynamicSessionsClient = previous })
+	if _, err := b.List(context.Background(), core.ListRequest{}); !errors.Is(err, sentinel) {
+		t.Fatalf("list blocked by unrelated command timeout: %v", err)
 	}
 }

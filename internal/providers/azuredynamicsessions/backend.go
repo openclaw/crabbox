@@ -65,6 +65,7 @@ func (b *azureDynamicSessionsBackend) Warmup(ctx context.Context, req core.Warmu
 func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req core.RunRequest) (core.RunResult, error) {
 	workspace, workspaceErr := azureDynamicSessionsWorkspace(b.cfg)
 	var client azureDynamicSessionsAPI
+	var timeoutMS int64
 	var leaseID, slug string
 	var cleanupClaim core.LeaseClaim
 	handle := func() shared.DelegatedSandbox {
@@ -81,6 +82,10 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req core.RunReque
 				return core.Exit(2, "missing command")
 			}
 			var err error
+			timeoutMS, err = azureDynamicSessionsTimeoutMilliseconds(b.cfg)
+			if err != nil {
+				return err
+			}
 			client, err = newAzureDynamicSessionsClient(ctx, b.cfg, b.rt)
 			return err
 		},
@@ -120,7 +125,7 @@ func (b *azureDynamicSessionsBackend) Run(ctx context.Context, req core.RunReque
 				fmt.Fprintf(b.rt.Stderr, "running on %s %s\n", providerName, strings.Join(req.Command, " "))
 				return client.ExecStream(ctx, leaseID, shared.CommandStreamRequest{
 					Command: command, Cwd: workspace, Env: req.Env,
-					TimeoutMS: durationMillisecondsCeil(azureDynamicSessionsTimeout(b.cfg)),
+					TimeoutMS: timeoutMS,
 				}, stdout, stderr)
 			}}, nil
 		},

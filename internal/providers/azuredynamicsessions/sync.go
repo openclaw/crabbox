@@ -30,10 +30,14 @@ func (b *azureDynamicSessionsBackend) workspace(client azureDynamicSessionsAPI, 
 }
 
 func (b *azureDynamicSessionsBackend) execShell(ctx context.Context, client azureDynamicSessionsAPI, sessionID, command string, stdout io.Writer) error {
+	timeoutMS, err := azureDynamicSessionsTimeoutMilliseconds(b.cfg)
+	if err != nil {
+		return err
+	}
 	code, err := client.ExecStream(ctx, sessionID, shared.CommandStreamRequest{
 		Command:   command,
 		Cwd:       "/",
-		TimeoutMS: durationMillisecondsCeil(azureDynamicSessionsTimeout(b.cfg)),
+		TimeoutMS: timeoutMS,
 	}, stdout, b.rt.Stderr)
 	if err != nil {
 		return fmt.Errorf("%s exec %q: %w", providerName, command, err)
