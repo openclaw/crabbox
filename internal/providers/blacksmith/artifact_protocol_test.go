@@ -214,7 +214,8 @@ func TestBlacksmithArtifactProtocolCancellation(t *testing.T) {
 							wantCode = 1 // Preserve the native cancellation result after exit 0.
 						}
 						if boundary == "helper" {
-							code, ended, artifacts, err := backend.runArtifactTestbox(ctx, req, id, nil, nil, nil, time.Second)
+							outcome, ended, artifacts, err := backend.runArtifactTestbox(ctx, req, id, nil, nil, nil, time.Second)
+							code := outcome.code
 							if code != wantCode || ended.IsZero() || len(artifacts) != 0 {
 								t.Errorf("protocol abort lost workload outcome: code=%d ended=%v artifacts=%v", code, ended, artifacts)
 							}
