@@ -258,9 +258,14 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		return core.LeaseTarget{}, err
 	}
 	server.Labels = core.TouchDirectLeaseLabels(server.Labels, cfg, "ready", core.ClockNow(b.RT.Clock).UTC())
-	if err := core.ClaimLeaseTargetForRepoConfig(leaseID, slug, cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim); err != nil {
+	claim, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, slug, cfg, server, ssh, req.Repo.Root, cfg.IdleTimeout, req.Reclaim, core.LeaseClaim{}, false)
+	if err != nil {
 		return core.LeaseTarget{}, err
 	}
+	if claim.LeaseID != "" {
+		server = overlayClaimLabels(server, claim)
+	}
+	core.SetServerLeaseClaimSnapshot(&server, claim, claim.LeaseID != "")
 	committed = true
 	fmt.Fprintf(b.RT.Stderr, "provisioned lease=%s ovh_instance=%s type=%s\n", leaseID, server.DisplayID(), cfg.ServerType)
 	return core.LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}, nil
@@ -327,17 +332,21 @@ func (b *Backend) targetFromInstance(instance Instance, req core.ResolveRequest)
 	} else if req.ReleaseOnly {
 		return core.LeaseTarget{}, core.Exit(2, "refusing to release OVH instance %s without a local Crabbox claim", server.DisplayID())
 	}
-	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe) {
+	core.SetServerLeaseClaimSnapshot(&server, claim, claimExists)
+	if req.ReleaseOnly || (req.StatusOnly && !req.ReadyProbe && server.PublicNet.IPv4.IP == "") {
 		return core.LeaseTarget{Server: server, LeaseID: leaseID}, nil
 	}
 	ssh := core.SSHTargetFromConfig(b.Cfg, server.PublicNet.IPv4.IP)
 	if err := core.UseStoredTestboxKey(&ssh, leaseID); err != nil {
 		return core.LeaseTarget{}, err
 	}
-	if req.Repo.Root != "" {
-		if _, err := core.ClaimLeaseTargetForRepoConfigIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, req.Reclaim, claim, claimExists); err != nil {
+	if req.Repo.Root != "" && !req.NoLocalStateMutations && !req.StatusOnly {
+		updated, err := core.ClaimLeaseTargetForRepoConfigWithIdleTimeoutOverrideIfUnchanged(leaseID, server.Labels["slug"], b.Cfg, server, ssh, req.Repo.Root, b.Cfg.IdleTimeout, shared.LegacyLabelIdleTimeout(claim), req.Reclaim, claim, claimExists)
+		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		server = overlayClaimLabels(server, updated)
+		core.SetServerLeaseClaimSnapshot(&server, updated, true)
 	}
 	return core.LeaseTarget{Server: server, SSH: ssh, LeaseID: leaseID}, nil
 }
@@ -458,57 +467,76 @@ func (b *Backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	return fmt.Sprintf("deleted lease=%s ovh_instance=%s name=%s", lease.LeaseID, lease.Server.DisplayID(), lease.Server.Name)
 }
 
-func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
-	server := req.Lease.Server
+func (b *Backend) AuthorizeStatusTouchClaim(ctx context.Context, lease core.LeaseTarget, claim core.LeaseClaim) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	server := lease.Server
+	if !core.IsCanonicalLeaseID(lease.LeaseID) || lease.LeaseID != claim.LeaseID || lease.LeaseID != server.Labels["lease"] ||
+		server.Provider != providerName || claim.Provider != providerName || claim.ProviderScope != "" ||
+		server.CloudID == "" || server.CloudID != claim.CloudID {
+		return core.Exit(4, "ovh lease=%s claim does not match the canonical lease, provider, or instance", lease.LeaseID)
+	}
 	if err := validateOVHServerOwnership(server); err != nil {
-		return core.Server{}, err
+		return err
 	}
-	client, err := b.clientFactory(b.Cfg, b.RT)
+	if err := validateOVHClaim(claim, server); err != nil {
+		return err
+	}
+	if server.Labels[ovhProjectLabel] != b.Cfg.OVH.ProjectID {
+		return core.Exit(3, "ovh project mismatch for lease=%s", lease.LeaseID)
+	}
+	if claim.Labels["state"] == "cleanup" {
+		return core.Exit(4, "ovh lease=%s cleanup is already in progress", claim.LeaseID)
+	}
+	return core.AuthorizeCheckpointRelease(claim, "")
+}
+
+func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server, error) {
+	if req.IdleTimeoutOverride == nil {
+		if expected, exists, set := core.ServerLeaseClaimSnapshot(req.Lease.Server); exists && set {
+			req.IdleTimeoutOverride = shared.LegacyLabelIdleTimeout(expected)
+		}
+	}
+	var live core.Server
+	updated, err := shared.CommitClaimTouch(ctx, req, shared.ClaimTouchPolicy{
+		Provider: providerName,
+		Authorize: func(ctx context.Context, lease core.LeaseTarget, expected core.LeaseClaim) error {
+			if err := b.AuthorizeStatusTouchClaim(ctx, lease, expected); err != nil {
+				return err
+			}
+			client, err := b.clientFactory(b.Cfg, b.RT)
+			if err != nil {
+				return err
+			}
+			instance, err := client.GetInstance(ctx, b.Cfg.OVH.ProjectID, lease.Server.CloudID)
+			if err != nil {
+				return err
+			}
+			live = overlayExpectedOVHLabels(serverFromInstance(instance, b.Cfg), lease.Server)
+			if err := validateLiveOVHInstance(live, lease.Server); err != nil {
+				return err
+			}
+			return validateOVHClaim(expected, live)
+		},
+		Prepare: func(expected core.LeaseClaim) (map[string]string, time.Time) {
+			cfg := b.Cfg
+			if req.IdleTimeout > 0 {
+				cfg.IdleTimeout = req.IdleTimeout
+			}
+			now := core.ClockNow(b.RT.Clock).UTC()
+			labels := core.TouchDirectLeaseLabelsWithIdleTimeoutOverride(shared.LegacyLabelLifecycleLabels(expected), cfg, req.State, now, req.IdleTimeoutOverride)
+			if b.beforeTouchClaimUpdate != nil {
+				b.beforeTouchClaimUpdate()
+			}
+			return labels, now
+		},
+	})
 	if err != nil {
 		return core.Server{}, err
 	}
-	instance, err := client.GetInstance(ctx, b.Cfg.OVH.ProjectID, server.CloudID)
-	if err != nil {
-		return core.Server{}, err
-	}
-	live := overlayExpectedOVHLabels(serverFromInstance(instance, b.Cfg), server)
-	if err := validateLiveOVHInstance(live, server); err != nil {
-		return core.Server{}, err
-	}
-	labels := shared.CloneLabels(server.Labels)
-	claim, claimExists, err := core.ReadLeaseClaimWithPresence(server.Labels["lease"])
-	if err != nil {
-		return core.Server{}, err
-	}
-	if claimExists {
-		if err := validateOVHClaim(claim, live); err != nil {
-			return core.Server{}, err
-		}
-		if claim.Labels["state"] == "cleanup" {
-			return core.Server{}, core.Exit(4, "ovh lease=%s cleanup is already in progress", claim.LeaseID)
-		}
-		labels = shared.CloneLabels(claim.Labels)
-	}
-	cfg := b.Cfg
-	if req.IdleTimeout > 0 {
-		cfg.IdleTimeout = req.IdleTimeout
-		delete(labels, "idle_timeout")
-		delete(labels, "idle_timeout_secs")
-	}
-	tailscaleLabels := exactTailscaleLabels(labels)
-	labels = core.TouchDirectLeaseLabels(labels, cfg, req.State, core.ClockNow(b.RT.Clock).UTC())
-	for key, value := range tailscaleLabels {
-		labels[key] = value
-	}
-	if claimExists {
-		if b.beforeTouchClaimUpdate != nil {
-			b.beforeTouchClaimUpdate()
-		}
-		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(labels["lease"], claim, labels); err != nil {
-			return core.Server{}, err
-		}
-	}
-	live.Labels = labels
+	live.Labels = updated.Labels
+	core.SetServerLeaseClaimSnapshot(&live, updated, true)
 	return live, nil
 }
 
@@ -541,11 +569,15 @@ func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseT
 		}
 		labels = shared.CloneLabels(claim.Labels)
 		shared.ApplyTailscaleMetadata(labels, meta)
-		if _, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); err != nil {
+		updated, err := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+		if err != nil {
 			return core.Server{}, err
 		}
+		labels = updated.Labels
+		core.SetServerLeaseClaimSnapshot(&live, updated, true)
 	} else {
 		shared.ApplyTailscaleMetadata(labels, meta)
+		core.SetServerLeaseClaimSnapshot(&live, core.LeaseClaim{}, false)
 	}
 	live.Labels = labels
 	return live, nil
@@ -997,38 +1029,54 @@ func claimOnlyServer(claim core.LeaseClaim) core.Server {
 }
 
 func (b *Backend) waitForInstanceIP(ctx context.Context, client API, projectID, instanceID string) (Instance, error) {
-	deadline := core.ClockNow(b.RT.Clock).UTC().Add(5 * time.Minute)
+	timeout := 5 * time.Minute
 	if b.ipWaitTimeout > 0 {
-		deadline = core.ClockNow(b.RT.Clock).UTC().Add(b.ipWaitTimeout)
+		timeout = b.ipWaitTimeout
 	}
 	interval := 3 * time.Second
 	if b.ipWaitInterval > 0 {
 		interval = b.ipWaitInterval
 	}
-	result, err := shared.Poll(context.WithoutCancel(ctx), 0, interval,
-		func(context.Context, time.Duration) error {
-			if err := shared.SleepContext(ctx, interval); err != nil {
-				return ctx.Err()
-			}
-			return nil
-		},
-		func(context.Context) (Instance, error) { return client.GetInstance(ctx, projectID, instanceID) },
+	budgetExpired := errors.New("OVH IP readiness deadline exceeded")
+	waitCtx, cancel := context.WithTimeoutCause(ctx, timeout, budgetExpired)
+	defer cancel()
+	var lastTransient error
+	var observationError error
+	result, err := shared.Poll(waitCtx, 0, interval, shared.SleepContext,
+		func(ctx context.Context) (Instance, error) { return client.GetInstance(ctx, projectID, instanceID) },
 		func(_ context.Context, instance Instance, fetchErr error) (bool, error) {
 			if fetchErr == nil && publicIPv4(instance) != "" {
 				return true, nil
 			}
-			if fetchErr != nil && !isTransientOVHControlPlaneError(fetchErr) {
-				return false, fetchErr
-			}
-			if core.ClockNow(b.RT.Clock).UTC().After(deadline) {
-				if fetchErr != nil {
-					return false, core.Exit(5, "timed out waiting for OVH instance IP after transient error: %v", fetchErr)
+			if fetchErr != nil {
+				// Completed API responses retain their status, even near cancellation.
+				var apiErr *APIError
+				if cause := context.Cause(waitCtx); cause != nil && !errors.As(fetchErr, &apiErr) &&
+					(errors.Is(fetchErr, cause) || errors.Is(fetchErr, waitCtx.Err())) {
+					return false, errors.Join(cause, fetchErr)
 				}
-				return false, core.Exit(5, "timed out waiting for OVH instance IP")
+				if !isTransientOVHControlPlaneError(fetchErr) {
+					observationError = fetchErr
+					return false, fetchErr
+				}
 			}
+			lastTransient = fetchErr
 			return false, nil
 		}, nil)
 	if err != nil {
+		if observationError != nil {
+			return Instance{}, observationError
+		}
+		if errors.Is(err, budgetExpired) {
+			diagnostic := core.Exit(5, "timed out waiting for OVH instance IP")
+			if lastTransient != nil {
+				diagnostic = core.Exit(5, "timed out waiting for OVH instance IP after transient error: %v", lastTransient)
+			}
+			return Instance{}, shared.PollTerminationError(waitCtx, err, diagnostic)
+		}
+		if cause := context.Cause(ctx); cause != nil && errors.Is(err, cause) {
+			return Instance{}, shared.PollTerminationError(ctx, err, cause)
+		}
 		return Instance{}, err
 	}
 	return result.Value, nil
@@ -1147,7 +1195,7 @@ func claimMatchesOVHProject(claim core.LeaseClaim, projectID string) bool {
 func overlayClaimLabels(server core.Server, claim core.LeaseClaim) core.Server {
 	merged := server
 	merged.Labels = shared.CloneLabels(server.Labels)
-	for key, value := range claim.Labels {
+	for key, value := range shared.LegacyLabelLifecycleLabels(claim) {
 		if isOVHLiveIdentityLabel(key) && strings.TrimSpace(merged.Labels[key]) != "" {
 			continue
 		}
@@ -1174,26 +1222,6 @@ func overlayExpectedOVHLabels(live, expected core.Server) core.Server {
 		}
 	}
 	return merged
-}
-
-func exactTailscaleLabels(labels map[string]string) map[string]string {
-	out := map[string]string{}
-	for _, key := range []string{
-		"tailscale",
-		"tailscale_state",
-		"tailscale_hostname",
-		"tailscale_tags",
-		"tailscale_ipv4",
-		"tailscale_fqdn",
-		"tailscale_error",
-		"tailscale_exit_node",
-		"tailscale_exit_node_allow_lan_access",
-	} {
-		if value, ok := labels[key]; ok {
-			out[key] = value
-		}
-	}
-	return out
 }
 
 func serverFromInstance(instance Instance, cfg core.Config) core.Server {

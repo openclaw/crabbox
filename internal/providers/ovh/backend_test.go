@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -33,6 +36,7 @@ type fakeAPI struct {
 	createAcceptedErr    bool
 	getInstanceErr       error
 	getInstanceErrors    []error
+	getInstanceFn        func(context.Context) (Instance, error)
 	deleteInstanceErr    error
 	deleteInstanceErrors []error
 	deleteKeyErr         error
@@ -129,8 +133,11 @@ func (f *fakeAPI) ListInstances(context.Context, string) ([]Instance, error) {
 	return f.instances, nil
 }
 
-func (f *fakeAPI) GetInstance(_ context.Context, _, instanceID string) (Instance, error) {
+func (f *fakeAPI) GetInstance(ctx context.Context, _, instanceID string) (Instance, error) {
 	f.mutatingCalls++
+	if f.getInstanceFn != nil {
+		return f.getInstanceFn(ctx)
+	}
 	if len(f.getInstanceErrors) > 0 {
 		err := f.getInstanceErrors[0]
 		f.getInstanceErrors = f.getInstanceErrors[1:]
@@ -411,6 +418,209 @@ func TestAcquireRetriesTransientInstanceLookupErrors(t *testing.T) {
 	}
 }
 
+func TestWaitForInstanceIPCanceledParentDoesNotObserve(t *testing.T) {
+	cause := errors.New("caller stopped IP lookup")
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(cause)
+	fake := &fakeAPI{}
+	got, err := testBackend(fake).waitForInstanceIP(ctx, fake, "project-test", "instance-test")
+	if fake.mutatingCalls != 0 || !reflect.DeepEqual(got, Instance{}) || !errors.Is(err, cause) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("reads=%d instance=%#v err=%v", fake.mutatingCalls, got, err)
+	}
+}
+
+func TestWaitForInstanceIPBudgetBoundsLookupAndSleep(t *testing.T) {
+	for _, mode := range []string{"sleep", "lookup error", "lookup cause"} {
+		t.Run(mode, func(t *testing.T) {
+			parent, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			fake := &fakeAPI{getInstanceFn: func(ctx context.Context) (Instance, error) {
+				if mode != "sleep" {
+					<-ctx.Done()
+					if mode == "lookup cause" {
+						return Instance{}, context.Cause(ctx)
+					}
+					return Instance{}, ctx.Err()
+				}
+				return Instance{ID: "pending"}, nil
+			}}
+			backend := testBackend(fake)
+			backend.RT.Clock = fixedClock{t: time.Unix(0, 0)}
+			backend.ipWaitTimeout = 250 * time.Millisecond
+			backend.ipWaitInterval = time.Hour
+			got, err := backend.waitForInstanceIP(parent, fake, "project-test", "instance-test")
+			requireIPBudgetTimeout(t, got, err)
+			if strings.Contains(err.Error(), "after transient error") {
+				t.Fatalf("context termination became a transient observation: %v", err)
+			}
+			if parent.Err() != nil || fake.mutatingCalls != 1 {
+				t.Fatalf("used parent deadline or repeated lookup: parent=%v reads=%d", parent.Err(), fake.mutatingCalls)
+			}
+		})
+	}
+}
+
+func TestWaitForInstanceIPBudgetCancelsHTTPClient(t *testing.T) {
+	observed := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
+		close(observed)
+		<-req.Context().Done()
+	}))
+	defer server.Close()
+	client := newTestClient(t, server.URL)
+	backend := testBackend(&fakeAPI{})
+	backend.ipWaitTimeout = time.Second
+	parent, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	got, err := backend.waitForInstanceIP(parent, client, "project-test", "instance-test")
+	requireIPBudgetTimeout(t, got, err)
+	if parent.Err() != nil || strings.Contains(err.Error(), "after transient error") {
+		t.Fatalf("lookup termination was misclassified: parent=%v err=%v", parent.Err(), err)
+	}
+	select {
+	case <-observed:
+	default:
+		t.Fatal("real HTTP lookup was not reached")
+	}
+}
+
+func TestWaitForInstanceIPPreservesCallerCancellationCause(t *testing.T) {
+	for _, fetchError := range []bool{false, true} {
+		t.Run("fetchError="+strconv.FormatBool(fetchError), func(t *testing.T) {
+			cause := errors.New("caller canceled observation")
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			fake := &fakeAPI{getInstanceFn: func(ctx context.Context) (Instance, error) {
+				cancel(cause)
+				if fetchError {
+					return Instance{}, ctx.Err()
+				}
+				return Instance{}, nil
+			}}
+			got, err := testBackend(fake).waitForInstanceIP(ctx, fake, "project-test", "instance-test")
+			if !reflect.DeepEqual(got, Instance{}) || !errors.Is(err, cause) || !errors.Is(err, context.Canceled) || fake.mutatingCalls != 1 {
+				t.Fatalf("reads=%d instance=%#v err=%v", fake.mutatingCalls, got, err)
+			}
+		})
+	}
+}
+
+func TestWaitForInstanceIPPreservesParentDeadlineCause(t *testing.T) {
+	cause := errors.New("parent deadline detail")
+	ctx, cancel := context.WithTimeoutCause(t.Context(), 250*time.Millisecond, cause)
+	defer cancel()
+	fake := &fakeAPI{getInstanceFn: func(ctx context.Context) (Instance, error) {
+		<-ctx.Done()
+		return Instance{}, ctx.Err()
+	}}
+	backend := testBackend(fake)
+	backend.ipWaitTimeout = time.Minute
+	got, err := backend.waitForInstanceIP(ctx, fake, "project-test", "instance-test")
+	var exit core.ExitError
+	if !reflect.DeepEqual(got, Instance{}) || !errors.Is(err, cause) || !errors.Is(err, context.DeadlineExceeded) ||
+		(core.AsExitError(err, &exit) && exit.Code == 5) || strings.Contains(err.Error(), "timed out waiting for OVH") {
+		t.Fatalf("parent deadline became own-budget timeout: instance=%#v err=%v", got, err)
+	}
+}
+
+func TestWaitForInstanceIPCompletedObservationPrecedence(t *testing.T) {
+	clientDeadline := errors.Join(errors.New("client deadline"), context.DeadlineExceeded)
+	permanent := &APIError{Status: 403, Body: "denied"}
+	ready := Instance{ID: "ready", IPAddresses: []IPAddress{{IP: "203.0.113.10", Version: 4, Type: "public"}}}
+	for _, tc := range []struct {
+		name         string
+		wait         bool
+		cancelParent bool
+		instance     Instance
+		err          error
+	}{
+		{name: "independent client deadline", err: clientDeadline},
+		{name: "ready after budget", wait: true, instance: ready},
+		{name: "permanent error after budget", wait: true, err: permanent},
+		{name: "API response with deadline cause", wait: true, err: errors.Join(permanent, context.DeadlineExceeded)},
+		{name: "API response with canceled cause", cancelParent: true, err: errors.Join(permanent, context.Canceled)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			fake := &fakeAPI{getInstanceFn: func(ctx context.Context) (Instance, error) {
+				if tc.cancelParent {
+					cancel()
+				}
+				if tc.wait {
+					<-ctx.Done()
+				}
+				return tc.instance, tc.err
+			}}
+			backend := testBackend(fake)
+			backend.ipWaitTimeout = 250 * time.Millisecond
+			got, err := backend.waitForInstanceIP(parent, fake, "project-test", "instance-test")
+			if err != tc.err || !reflect.DeepEqual(got, tc.instance) {
+				t.Fatalf("observation changed: instance=%#v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestWaitForInstanceIPTimeoutDiagnosticTracksCompletedObservation(t *testing.T) {
+	for _, clearTransient := range []bool{false, true} {
+		t.Run("clearTransient="+strconv.FormatBool(clearTransient), func(t *testing.T) {
+			parent, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			reads := 0
+			fake := &fakeAPI{getInstanceFn: func(ctx context.Context) (Instance, error) {
+				reads++
+				if reads == 1 {
+					return Instance{}, errors.New("temporary lookup detail")
+				}
+				if clearTransient && reads == 2 {
+					return Instance{ID: "pending"}, nil
+				}
+				<-ctx.Done()
+				return Instance{}, ctx.Err()
+			}}
+			backend := testBackend(fake)
+			backend.ipWaitTimeout = 250 * time.Millisecond
+			got, err := backend.waitForInstanceIP(parent, fake, "project-test", "instance-test")
+			requireIPBudgetTimeout(t, got, err)
+			if strings.Contains(err.Error(), "temporary lookup detail") == clearTransient {
+				t.Fatalf("stale or missing transient diagnostic: %v", err)
+			}
+		})
+	}
+}
+
+func TestWaitForInstanceIPDeadlineSelection(t *testing.T) {
+	for _, timeout := range []time.Duration{0, -time.Second, 5 * time.Second} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			fake := &fakeAPI{getInstanceFn: func(ctx context.Context) (Instance, error) {
+				deadline, ok := ctx.Deadline()
+				want := timeout
+				if want <= 0 {
+					want = 5 * time.Minute
+				}
+				if left := time.Until(deadline); !ok || left > want || left < want-time.Second {
+					t.Errorf("deadline present=%t remaining=%v want approximately %v", ok, left, want)
+				}
+				return Instance{IPAddresses: []IPAddress{{IP: "203.0.113.10", Version: 4, Type: "public"}}}, nil
+			}}
+			backend := testBackend(fake)
+			backend.ipWaitTimeout = timeout
+			if _, err := backend.waitForInstanceIP(context.Background(), fake, "project-test", "instance-test"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func requireIPBudgetTimeout(t *testing.T, instance Instance, err error) {
+	t.Helper()
+	var exit core.ExitError
+	if !reflect.DeepEqual(instance, Instance{}) || !core.AsExitError(err, &exit) || exit.Code != 5 || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected own IP-readiness timeout, got instance=%#v err=%v", instance, err)
+	}
+}
+
 func TestAcquireReadyTouchUsesBootstrapCompletionTime(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -551,19 +761,37 @@ func TestListAndStatusOverlayReadyClaimLabels(t *testing.T) {
 	if len(views) != 1 || views[0].Labels["state"] != "ready" {
 		t.Fatalf("views=%#v", views)
 	}
-	status, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true})
+	before, err := core.ReadLeaseClaim(lease.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Server.Labels["state"] != "ready" {
-		t.Fatalf("status=%#v", status.Server.Labels)
+	otherRepo := core.Repo{Root: t.TempDir()}
+	for _, probe := range []bool{false, true} {
+		t.Run("probe="+strconv.FormatBool(probe), func(t *testing.T) {
+			status, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Repo: otherRepo, StatusOnly: true, ReadyProbe: probe})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.Server.Labels["state"] != "ready" {
+				t.Fatalf("state=%q", status.Server.Labels["state"])
+			}
+			if status.SSH.Host != lease.SSH.Host || status.SSH.Port != lease.SSH.Port || status.SSH.User != lease.SSH.User || status.SSH.Key != lease.SSH.Key {
+				t.Fatalf("status target differs from acquired target: host=%q port=%q user=%q keyMatches=%t", status.SSH.Host, status.SSH.Port, status.SSH.User, status.SSH.Key == lease.SSH.Key)
+			}
+			after, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("status observation changed claim: %v", err)
+			}
+		})
 	}
-	waitStatus, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, ReadyProbe: true})
-	if err != nil {
-		t.Fatal(err)
+	fake.instances[0].IPAddresses = nil
+	status, err := backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Repo: otherRepo, StatusOnly: true})
+	if err != nil || status.SSH.Host != "" || status.LeaseID != lease.LeaseID {
+		t.Fatalf("endpoint-absent status: id=%q host=%q err=%v", status.LeaseID, status.SSH.Host, err)
 	}
-	if waitStatus.SSH.Host != "203.0.113.10" || waitStatus.SSH.Key == "" {
-		t.Fatalf("wait status ssh=%#v", waitStatus.SSH)
+	after, err := core.ReadLeaseClaim(lease.LeaseID)
+	if err != nil || !reflect.DeepEqual(after, before) {
+		t.Fatalf("endpoint-absent observation changed claim: %v", err)
 	}
 }
 
@@ -912,27 +1140,283 @@ func TestTouchAppliesIdleTimeoutOverride(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
 	backend := testBackend(fake)
-	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "touch-me"})
+	clock := &mutableClock{t: time.Now().UTC().Truncate(time.Second)}
+	backend.RT.Clock = clock
+	backend.Cfg.IdleTimeout = 5 * time.Minute
+	repo := core.Repo{Root: t.TempDir()}
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: repo, RequestedSlug: "touch-me"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	created := clock.t
+	clock.t = clock.t.Add(10 * time.Minute)
+	override := 2 * time.Hour
 	updated, err := backend.Touch(context.Background(), core.TouchRequest{
-		Lease:       lease,
-		State:       "running",
-		IdleTimeout: 2 * time.Hour,
+		Lease:               lease,
+		State:               "running",
+		IdleTimeout:         time.Minute,
+		IdleTimeoutOverride: &override,
 	})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if updated.Labels["idle_timeout_secs"] != "7200" {
-		t.Fatalf("updated labels=%#v", updated.Labels)
 	}
 	claim, err := core.ReadLeaseClaim(lease.LeaseID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claim.Labels["idle_timeout_secs"] != "7200" || claim.Labels["state"] != "running" {
-		t.Fatalf("claim labels=%#v", claim.Labels)
+	assertPolicy := func(server core.Server, want core.LeaseClaim) {
+		t.Helper()
+		for key, value := range map[string]string{
+			"idle_timeout": "7200", "idle_timeout_secs": "7200", "ttl_secs": "3600",
+			"created_at": core.LeaseLabelTime(created), "expires_at": core.LeaseLabelTime(created.Add(time.Hour)),
+		} {
+			if server.Labels[key] != value || want.Labels[key] != value {
+				t.Errorf("%s: server=%q claim=%q want=%q", key, server.Labels[key], want.Labels[key], value)
+			}
+		}
+		if want.IdleTimeoutSeconds != 7200 {
+			t.Errorf("persisted idle timeout=%d want7200", want.IdleTimeoutSeconds)
+		}
+		snapshot, exists, set := core.ServerLeaseClaimSnapshot(server)
+		if !set || !exists || !reflect.DeepEqual(snapshot, want) {
+			t.Error("returned server lacks the exact committed claim snapshot")
+		}
+	}
+	assertPolicy(updated, claim)
+	if claim.LastUsedAt != clock.t.Format(time.RFC3339) || claim.Labels["last_touched_at"] != core.LeaseLabelTime(clock.t) {
+		t.Error("heartbeat did not commit activity timestamp and labels together")
+	}
+	fresh := testBackend(fake)
+	fresh.Cfg.IdleTimeout = time.Minute
+	fresh.RT.Clock = clock
+	for _, probe := range []bool{false, true} {
+		observed, resolveErr := fresh.Resolve(context.Background(), core.ResolveRequest{
+			ID: lease.LeaseID, Repo: repo, StatusOnly: true, ReadyProbe: probe, NoLocalStateMutations: true,
+		})
+		if resolveErr != nil {
+			t.Fatal(resolveErr)
+		}
+		assertPolicy(observed.Server, claim)
+		if observed.SSH.Host != lease.SSH.Host || observed.SSH.Port != lease.SSH.Port || observed.SSH.User != lease.SSH.User || observed.SSH.Key != lease.SSH.Key {
+			t.Errorf("fresh status probe=%t lost the acquired SSH target", probe)
+		}
+		after, readErr := core.ReadLeaseClaim(lease.LeaseID)
+		if readErr != nil || !reflect.DeepEqual(after, claim) {
+			t.Fatal("read-only observation changed the claim")
+		}
+	}
+	views, err := fresh.List(context.Background(), core.ListRequest{})
+	if err != nil || len(views) != 1 || views[0].Labels["idle_timeout_secs"] != "7200" {
+		t.Fatalf("fresh list lost idle policy: err=%v count=%d", err, len(views))
+	}
+	reused, err := fresh.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		clock.t = clock.t.Add(time.Minute)
+		reused.Server, err = fresh.Touch(context.Background(), core.TouchRequest{Lease: reused, State: "running", IdleTimeout: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		claim, err = core.ReadLeaseClaim(lease.LeaseID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertPolicy(reused.Server, claim)
+		if claim.LastUsedAt != clock.t.Format(time.RFC3339) {
+			t.Error("repeated touch did not commit activity")
+		}
+	}
+}
+
+func TestTouchRejectsUncommittableLifecycle(t *testing.T) {
+	for _, scenario := range []string{"missing snapshot", "stale snapshot", "canceled", "invalid override", "cleanup"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+			backend := testBackend(fake)
+			lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: core.Repo{Root: t.TempDir()}, RequestedSlug: "touch-policy"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			req := core.TouchRequest{Lease: lease, State: "running", IdleTimeout: time.Minute}
+			before, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch scenario {
+			case "missing snapshot":
+				core.SetServerLeaseClaimSnapshot(&req.Lease.Server, core.LeaseClaim{}, false)
+			case "stale snapshot", "cleanup":
+				labels := shared.CloneLabels(before.Labels)
+				labels["profile"] = "updated"
+				if scenario == "cleanup" {
+					labels["state"] = "cleanup"
+				}
+				before, err = core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, before, labels)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "cleanup" {
+					core.SetServerLeaseClaimSnapshot(&req.Lease.Server, before, true)
+				}
+			case "canceled":
+				cancel()
+			case "invalid override":
+				invalid := time.Duration(0)
+				req.IdleTimeoutOverride = &invalid
+			}
+			got, touchErr := backend.Touch(ctx, req)
+			if touchErr == nil || !reflect.DeepEqual(got, core.Server{}) {
+				t.Error("uncommittable touch returned success")
+			}
+			after, readErr := core.ReadLeaseClaim(lease.LeaseID)
+			if readErr != nil || !reflect.DeepEqual(after, before) {
+				t.Error("rejected touch changed the persisted claim")
+			}
+		})
+	}
+}
+
+func TestLegacyHeartbeatPolicySurvivesUpgrade(t *testing.T) {
+	for _, operation := range []string{"observe", "touch", "explicit touch", "reuse", "different repo", "stale touch"} {
+		t.Run(operation, func(t *testing.T) {
+			t.Setenv("XDG_STATE_HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+			backend := testBackend(fake)
+			clock := &mutableClock{t: time.Now().UTC().Truncate(time.Second)}
+			backend.RT.Clock = clock
+			backend.Cfg.IdleTimeout = 5 * time.Minute
+			repo := core.Repo{Root: t.TempDir()}
+			lease, err := backend.Acquire(context.Background(), core.AcquireRequest{Repo: repo, RequestedSlug: "upgrade-policy"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			created := clock.t
+			clock.t = clock.t.Add(10 * time.Minute)
+			claim, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Reproduce v0.63.0 Touch's label-only commit, not a new-format claim.
+			oldLabels := shared.CloneLabels(claim.Labels)
+			delete(oldLabels, "idle_timeout")
+			delete(oldLabels, "idle_timeout_secs")
+			oldConfig := backend.Cfg
+			oldConfig.IdleTimeout = 2 * time.Hour
+			oldLabels = core.TouchDirectLeaseLabels(oldLabels, oldConfig, "running", clock.t)
+			legacy, err := core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, claim, oldLabels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if legacy.IdleTimeoutSeconds != 300 || legacy.Labels["idle_timeout_secs"] != "7200" || legacy.Labels["idle_timeout"] != "7200" {
+				t.Fatal("released writer fixture did not retain its structured/label mismatch")
+			}
+			fresh := testBackend(fake)
+			fresh.Cfg.IdleTimeout = time.Minute
+			fresh.RT.Clock = clock
+			clock.t = created.Add(20 * time.Minute)
+			observed, err := fresh.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true, NoLocalStateMutations: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observed.Server.Labels["idle_timeout_secs"] != "7200" {
+				t.Errorf("upgrade projected idle=%q want7200", observed.Server.Labels["idle_timeout_secs"])
+			}
+			before, err := core.ReadLeaseClaim(lease.LeaseID)
+			if err != nil || !reflect.DeepEqual(before, legacy) {
+				t.Fatal("read-only upgrade observation changed the legacy claim")
+			}
+			wantIdle := 7200
+			switch operation {
+			case "observe":
+				views, listErr := fresh.List(context.Background(), core.ListRequest{})
+				if listErr != nil || len(views) != 1 || views[0].Labels["idle_timeout_secs"] != "7200" {
+					t.Fatalf("list lost legacy policy: err=%v count=%d", listErr, len(views))
+				}
+				_, err = fresh.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Repo: repo, StatusOnly: true, ReadyProbe: true, NoLocalStateMutations: true})
+			case "reuse", "different repo":
+				owner := repo
+				if operation == "different repo" {
+					owner.Root = t.TempDir()
+				}
+				observed, err = fresh.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, Repo: owner})
+			case "touch", "explicit touch", "stale touch":
+				req := core.TouchRequest{Lease: observed, State: "running", IdleTimeout: time.Minute}
+				if operation == "explicit touch" {
+					override := 15 * time.Minute
+					req.IdleTimeoutOverride = &override
+					wantIdle = 900
+				}
+				if operation == "stale touch" {
+					labels := shared.CloneLabels(legacy.Labels)
+					labels["profile"] = "concurrent"
+					before, err = core.UpdateLeaseClaimLabelsIfUnchanged(lease.LeaseID, legacy, labels)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				observed.Server, err = fresh.Touch(context.Background(), req)
+			}
+			after, readErr := core.ReadLeaseClaim(lease.LeaseID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if operation == "different repo" || operation == "stale touch" {
+				if err == nil || !reflect.DeepEqual(after, before) {
+					t.Fatal("rejected upgrade operation changed the claim")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if operation == "observe" {
+				if !reflect.DeepEqual(after, legacy) {
+					t.Fatal("read-only projection migrated the claim")
+				}
+				return
+			}
+			if after.IdleTimeoutSeconds != wantIdle || after.Labels["idle_timeout_secs"] != strconv.Itoa(wantIdle) || after.Labels["idle_timeout"] != strconv.Itoa(wantIdle) {
+				t.Errorf("policy did not converge: structured=%d canonical=%q legacy=%q want=%d", after.IdleTimeoutSeconds, after.Labels["idle_timeout_secs"], after.Labels["idle_timeout"], wantIdle)
+			}
+			if after.Labels["created_at"] != legacy.Labels["created_at"] || after.Labels["ttl_secs"] != legacy.Labels["ttl_secs"] || after.Labels["keep"] != legacy.Labels["keep"] {
+				t.Error("upgrade changed creation, TTL or keep intent")
+			}
+			snapshot, exists, set := core.ServerLeaseClaimSnapshot(observed.Server)
+			if !exists || !set || !reflect.DeepEqual(snapshot, after) {
+				t.Error("upgrade returned a fabricated or stale claim snapshot")
+			}
+			if cleanup, reason := core.ShouldCleanupServer(observed.Server, created.Add(30*time.Minute)); cleanup {
+				t.Errorf("upgrade made lease eligible for early cleanup: %s", reason)
+			}
+		})
+	}
+}
+
+func TestAcquireWithoutRepositoryDoesNotInventClaimSnapshot(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fake := &fakeAPI{flavors: []Flavor{{ID: "flavor-id", Name: "b3-8"}}, images: []Image{{ID: "image-id", Name: "Ubuntu 24.04"}}}
+	backend := testBackend(fake)
+	lease, err := backend.Acquire(context.Background(), core.AcquireRequest{RequestedSlug: "no-repository"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+	if !set || exists {
+		t.Fatal("unclaimed acquisition represented a committed claim")
+	}
+	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running"}); err == nil {
+		t.Fatal("unclaimed acquisition accepted a touch")
+	}
+	if _, found, err := core.ReadLeaseClaimWithPresence(lease.LeaseID); err != nil || found {
+		t.Fatalf("empty-root acquisition or refused touch invented a claim: found=%t err=%v", found, err)
 	}
 }
 
@@ -959,6 +1443,10 @@ func TestTouchPreservesLocalClaimMetadataWithoutLiveLabels(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake.instances[0].Labels = map[string]string{}
+	lease, err = backend.Resolve(context.Background(), core.ResolveRequest{ID: lease.LeaseID, StatusOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	touched, err := backend.Touch(context.Background(), core.TouchRequest{
 		Lease: core.LeaseTarget{Server: lease.Server, LeaseID: lease.LeaseID},
@@ -996,6 +1484,7 @@ func TestTouchRejectsConcurrentClaimUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var raced core.LeaseClaim
 	backend.beforeTouchClaimUpdate = func() {
 		claim, readErr := core.ReadLeaseClaim(lease.LeaseID)
 		if readErr != nil {
@@ -1003,15 +1492,17 @@ func TestTouchRejectsConcurrentClaimUpdate(t *testing.T) {
 		}
 		labels := shared.CloneLabels(claim.Labels)
 		labels["concurrent"] = "preserved"
-		if _, updateErr := core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels); updateErr != nil {
+		var updateErr error
+		raced, updateErr = core.UpdateLeaseClaimLabelsIfUnchanged(claim.LeaseID, claim, labels)
+		if updateErr != nil {
 			t.Fatal(updateErr)
 		}
 	}
 	if _, err := backend.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running"}); err == nil {
 		t.Fatal("Touch succeeded despite concurrent claim update")
 	}
-	if got := mustReadClaimLabels(t, lease.LeaseID)["concurrent"]; got != "preserved" {
-		t.Fatalf("concurrent label=%q", got)
+	if got, readErr := core.ReadLeaseClaim(lease.LeaseID); readErr != nil || raced.LeaseID == "" || !reflect.DeepEqual(got, raced) {
+		t.Fatal("rejected touch changed the competing claim")
 	}
 }
 
@@ -1040,7 +1531,12 @@ func TestUpdateTailscaleMetadataPersistsOVHClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, labels := range []map[string]string{updated.Labels, mustReadClaimLabels(t, lease.LeaseID)} {
+	lease.Server = updated
+	touched, err := backend.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running", IdleTimeout: time.Minute})
+	if err != nil {
+		t.Fatalf("touch after metadata update: %v", err)
+	}
+	for _, labels := range []map[string]string{updated.Labels, touched.Labels, mustReadClaimLabels(t, lease.LeaseID)} {
 		if labels["tailscale"] != "true" ||
 			labels["tailscale_hostname"] != meta.Hostname ||
 			labels["tailscale_fqdn"] != meta.FQDN ||
