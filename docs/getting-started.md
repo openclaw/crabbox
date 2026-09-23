@@ -32,7 +32,8 @@ crabbox doctor
 provider-neutral `git` check should report `ok`; provider-specific tool checks
 begin after you select a provider. Doctor reports `no provider selected`, keeps
 the compatibility metadata as `source=compiled_default selected=false`, and
-skips provider credential readiness without failing the command. Select a provider through config, `CRABBOX_PROVIDER`, or `--provider` before
+skips provider credential readiness without failing the command. Select a
+provider through config, `CRABBOX_PROVIDER`, or `--provider` before
 the first lifecycle command. Ordinary local use remembers a bounded per-workspace
 history of explicit `--provider` selections, so later commands can omit the
 flag when no stronger source selects a provider. That selection is strict:
