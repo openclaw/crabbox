@@ -704,6 +704,141 @@ func TestUpstashBoxCreateBoxDeletesCancelledProvision(t *testing.T) {
 	})
 }
 
+func TestUpstashBoxCreateReadinessBudgetBoundsStalledResponseBody(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var deleted []string
+		pollStarted := false
+		srv := testutil.NewPipeHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/v2/box":
+				_ = json.NewEncoder(w).Encode(boxData{ID: "box_stalled", Status: "provisioning"})
+			case r.Method == http.MethodGet && r.URL.Path == "/v2/box/box_stalled":
+				pollStarted = true
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			case r.Method == http.MethodDelete && r.URL.Path == "/v2/box":
+				var body struct {
+					IDs []string `json:"ids"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+					return
+				}
+				deleted = append(deleted, body.IDs...)
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+			}
+		}))
+		defer srv.Close()
+		// A later caller deadline bounds the broken implementation without
+		// supplying the five-minute readiness deadline under test.
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+		defer cancel()
+		client := &client{apiKey: "box_key", base: srv.URL, http: srv.Client()}
+		started := time.Now()
+		_, err := client.CreateBox(ctx, createRequest{Name: "crabbox-stalled"})
+		if !pollStarted || err == nil {
+			t.Fatalf("pollStarted=%t error=%v", pollStarted, err)
+		}
+		if elapsed := time.Since(started); elapsed > 5*time.Minute+time.Second {
+			t.Errorf("stalled readiness body exceeded five-minute creation budget: elapsed=%s error=%v", elapsed, err)
+		}
+		if !reflect.DeepEqual(deleted, []string{"box_stalled"}) {
+			t.Fatalf("deleted=%v, want exactly one stalled-box rollback", deleted)
+		}
+	})
+}
+
+func TestUpstashBoxReadinessPreservesCompletedResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name, initial, ready string
+		cancelCreate         bool
+		boundary             bool
+		transient            bool
+	}{
+		{name: "completed create after cancellation", initial: "paused", cancelCreate: true},
+		{name: "completed poll at budget boundary", initial: "provisioning", ready: "running", boundary: true},
+		{name: "transient poll failure", initial: "provisioning", ready: "idle", transient: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				polls, deletes := 0, 0
+				started := time.Now()
+				c := &client{base: "https://api.example.test", http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					state := tc.initial
+					switch req.Method {
+					case http.MethodPost:
+						if tc.cancelCreate {
+							cancel()
+						}
+					case http.MethodGet:
+						polls++
+						if tc.transient && polls == 1 {
+							return nil, errors.New("synthetic transient read failure")
+						}
+						if tc.boundary {
+							time.Sleep(5*time.Minute - time.Since(started))
+						}
+						state = tc.ready
+					case http.MethodDelete:
+						deletes++
+					}
+					data, _ := json.Marshal(boxData{ID: "box_completed", Status: state})
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(data)), Header: make(http.Header)}, nil
+				})}}
+				box, err := c.CreateBox(ctx, createRequest{})
+				if err != nil || box.ID != "box_completed" || deletes != 0 {
+					t.Fatalf("box=%+v error=%v deletes=%d", box, err, deletes)
+				}
+				wantPolls := 1
+				if tc.cancelCreate {
+					wantPolls = 0
+				} else if tc.transient {
+					wantPolls = 2
+				}
+				if polls != wantPolls {
+					t.Fatalf("polls=%d want %d", polls, wantPolls)
+				}
+			})
+		})
+	}
+}
+
+func TestUpstashBoxReadinessPreservesCallerCancellationCause(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cause := errors.New("synthetic caller cancellation")
+		ctx, cancel := context.WithCancelCause(context.Background())
+		defer cancel(nil)
+		deletes := 0
+		c := &client{base: "https://api.example.test", http: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.Method {
+			case http.MethodGet:
+				cancel(cause)
+				return nil, req.Context().Err()
+			case http.MethodDelete:
+				deletes++
+				if req.Context().Err() != nil {
+					t.Error("rollback inherited caller cancellation")
+				}
+				deadline, ok := req.Context().Deadline()
+				if !ok || time.Until(deadline) != upstashBoxCleanupTimeout {
+					t.Error("rollback lost its detached cleanup budget")
+				}
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"id":"box_cause","status":"provisioning"}`)), Header: make(http.Header)}, nil
+		})}}
+		_, err := c.CreateBox(ctx, createRequest{})
+		if !errors.Is(err, cause) || !errors.Is(err, context.Canceled) || deletes != 1 {
+			t.Fatalf("error=%v deletes=%d", err, deletes)
+		}
+	})
+}
+
 func TestCleanWorkdirAndCommand(t *testing.T) {
 	if got, err := cleanWorkdir(" /workspace/home/crabbox/ "); err != nil || got != "/workspace/home/crabbox" {
 		t.Fatalf("workdir=%q err=%v", got, err)

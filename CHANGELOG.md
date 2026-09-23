@@ -24,6 +24,8 @@
 
 ### Fixes
 
+- Bound Upstash Box readiness response reads by the five-minute creation wait, preserve caller cancellation causes, and retain detached cleanup after failed creation.
+
 - Reject overflowing Firecracker disk and Hyper-V memory byte conversions before lease state, filesystem copies, or native VM creation, preserving existing sizing defaults and recovery paths. [PR 2495](https://github.com/openclaw/crabbox/pull/2495). Thanks @steipete.
 - Preserve sandbox and Nomad resources with overflowing idle timeouts by sharing checked duration conversion, while retaining provider-specific TTL, deadline, timestamp, and ownership policies. [PR 2494](https://github.com/openclaw/crabbox/pull/2494). Thanks @steipete.
 - Preserve running leases with malformed idle timeouts instead of letting duration overflow trigger cleanup; share the bounded expiry check with Machine0 while retaining provider ownership and lifecycle safeguards. [PR 2492](https://github.com/openclaw/crabbox/pull/2492). Thanks @steipete.
