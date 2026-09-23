@@ -215,6 +215,11 @@ Cancelling during a bootstrap SSH retry interrupts its five-second backoff
 immediately. Acquisition still performs the bounded, ownership-checked rollback
 described above; cancellation does not discard the recovery claim or SSH key.
 
+Acquisition readiness has a ten-minute budget covering both provider reads and
+polling delays. Caller cancellation interrupts readiness reads and backoff while
+preserving its cause. A completed ready or terminal observation still wins over
+concurrent cancellation.
+
 Hostinger may reject an API purchase with HTTP `402` even when `doctor` reports
 an active default payment method. This means the payment or order requires
 interactive checkout, card authentication, or another billing action in hPanel.
@@ -272,6 +277,9 @@ crabbox stop --provider hostinger "<lease-or-slug>"
 ```
 
 Only `hostinger.releaseAction: stop` is supported. Any other value is rejected.
+The two-minute stop budget includes submission and confirmation. Cancellation
+interrupts confirmation reads and backoff without being reported as a timeout;
+completed stopped observations and provider failures retain their own outcomes.
 If stop confirmation times out or fails, the local claim and SSH key remain
 available for recovery. After confirmed stop, Crabbox marks the claim stopped
 and retains the stored per-lease private key so the VPS can be restarted and

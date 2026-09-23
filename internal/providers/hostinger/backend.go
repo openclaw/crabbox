@@ -1221,26 +1221,15 @@ func hostingerAdoptionPending(claim core.LeaseClaim) bool {
 }
 
 func (b *leaseBackend) waitForVM(ctx context.Context, client hostingerAPI, id string) (hostingerVM, error) {
-	deadline := time.Now().Add(10 * time.Minute)
-	contextDoneBeforeFetch := false
-	result, err := shared.Poll(context.WithoutCancel(ctx), 0, 5*time.Second,
-		func(context.Context, time.Duration) error {
-			hostingerSleep(5 * time.Second)
-			return nil
+	lastState := ""
+	return shared.PollReadiness(ctx, shared.ReadinessOptions[hostingerVM]{
+		Timeout: 10 * time.Minute, Interval: 5 * time.Second,
+		IsResponseError: func(err error) bool {
+			var response *hostingerAPIError
+			return errors.As(err, &response)
 		},
-		func(context.Context) (hostingerVM, error) {
-			contextDoneBeforeFetch = false
-			if cause := context.Cause(ctx); cause != nil {
-				contextDoneBeforeFetch = true
-				return hostingerVM{}, cause
-			}
-			return client.GetVM(ctx, id)
-		},
-		func(_ context.Context, vm hostingerVM, fetchErr error) (bool, error) {
+		Check: func(vm hostingerVM, fetchErr error) (bool, error) {
 			if fetchErr != nil {
-				if contextDoneBeforeFetch {
-					return false, fetchErr
-				}
 				return false, core.Exit(1, "hostinger get vps %s failed: %v", id, fetchErr)
 			}
 			if vm.Host() != "" && vm.Ready() {
@@ -1249,46 +1238,60 @@ func (b *leaseBackend) waitForVM(ctx context.Context, client hostingerAPI, id st
 			if vm.Terminal() {
 				return false, core.Exit(5, "hostinger vps %s entered terminal state=%s", id, shared.FirstNonBlankTrimmed(vm.State, vm.Status, "unknown"))
 			}
-			if time.Now().After(deadline) {
-				return false, core.Exit(5, "timed out waiting for hostinger vps %s to expose a public IP; last_state=%s", id, shared.FirstNonBlankTrimmed(vm.State, vm.Status))
-			}
+			lastState = shared.FirstNonBlankTrimmed(vm.State, vm.Status)
 			return false, nil
-		}, nil)
-	if err != nil {
-		return hostingerVM{}, err
-	}
-	return result.Value, nil
+		},
+		Diagnostic: func(stop shared.ReadinessStop) error {
+			if stop.BudgetExpired {
+				return core.Exit(5, "timed out waiting for hostinger vps %s to expose a public IP; last_state=%s", id, lastState)
+			}
+			return core.Exit(1, "hostinger get vps %s failed: %v", id, stop.Err)
+		},
+	}, func(waitCtx context.Context) (hostingerVM, error) { return client.GetVM(waitCtx, id) })
+}
+
+func hostingerInterrupted(ctx context.Context, err error) bool {
+	var response *hostingerAPIError
+	return context.Cause(ctx) != nil && !errors.As(err, &response) &&
+		(errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx)))
 }
 
 func (b *leaseBackend) stopVMAndWait(ctx context.Context, client hostingerAPI, id string) error {
 	stopCtx, cancel := context.WithTimeout(ctx, hostingerStopWaitTimeout)
 	defer cancel()
 	if err := client.StopVM(stopCtx, id); err != nil {
+		if hostingerInterrupted(stopCtx, err) {
+			diagnostic := core.Exit(1, "hostinger stop vps %s failed: %v", id, stopCtx.Err())
+			return shared.PollTerminationError(stopCtx, errors.Join(err, context.Cause(stopCtx)), diagnostic)
+		}
 		return core.Exit(1, "hostinger stop vps %s failed: %v", id, err)
 	}
 	lastState := "unknown"
-	_, err := shared.Poll(context.WithoutCancel(stopCtx), 0, 2*time.Second,
-		func(context.Context, time.Duration) error {
-			hostingerSleep(2 * time.Second)
-			return nil
-		},
-		func(context.Context) (hostingerVM, error) { return client.GetVM(stopCtx, id) },
+	var observationErr error
+	interruptedRead := false
+	_, err := shared.Poll(stopCtx, 0, 2*time.Second, shared.SleepContext,
+		func(ctx context.Context) (hostingerVM, error) { return client.GetVM(ctx, id) },
 		func(_ context.Context, vm hostingerVM, fetchErr error) (bool, error) {
 			if fetchErr != nil {
-				if errors.Is(stopCtx.Err(), context.DeadlineExceeded) {
-					return false, core.Exit(5, "timed out waiting for hostinger vps %s to stop; last_state=%s", id, lastState)
+				if hostingerInterrupted(stopCtx, fetchErr) {
+					interruptedRead = true
+					return false, errors.Join(fetchErr, context.Cause(stopCtx))
 				}
-				return false, core.Exit(1, "hostinger confirm stopped vps %s failed: %v", id, fetchErr)
+				observationErr = core.Exit(1, "hostinger confirm stopped vps %s failed: %v", id, fetchErr)
+				return false, observationErr
 			}
 			lastState = shared.FirstNonBlankTrimmed(vm.State, vm.Status, "unknown")
-			if vm.Stopped() {
-				return true, nil
-			}
-			if stopCtx.Err() != nil {
-				return false, core.Exit(5, "timed out waiting for hostinger vps %s to stop; last_state=%s", id, lastState)
-			}
-			return false, nil
+			return vm.Stopped(), nil
 		}, nil)
+	if err != nil && observationErr == nil && context.Cause(stopCtx) != nil && errors.Is(err, context.Cause(stopCtx)) {
+		diagnostic := core.Exit(1, "hostinger confirm stopped vps %s failed: %v", id, stopCtx.Err())
+		if errors.Is(stopCtx.Err(), context.DeadlineExceeded) {
+			diagnostic = core.Exit(5, "timed out waiting for hostinger vps %s to stop; last_state=%s", id, lastState)
+		} else if !interruptedRead {
+			diagnostic = core.Exit(5, "canceled waiting for hostinger vps %s to stop; last_state=%s", id, lastState)
+		}
+		return shared.PollTerminationError(stopCtx, err, diagnostic)
+	}
 	return err
 }
 
