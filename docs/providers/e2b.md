@@ -26,6 +26,11 @@ when you need direct SSH access to the box.
 E2B is Linux-only. Desktop, browser, code, Actions hydration, and SSH-based run
 options are not available.
 
+Multipart archive uploads finish using their borrowed source before returning.
+HTTP failures remain primary; source failures after an early success response are
+reported with token redaction. Cancellation stops HTTP/pipe work but may wait for
+an in-flight source read; the upload does not close the caller-owned source.
+
 ## Commands
 
 ```sh

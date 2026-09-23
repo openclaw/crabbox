@@ -84,3 +84,14 @@ func TestRedactProviderErrorPreservesErrorChain(t *testing.T) {
 		t.Fatal("redactProviderError() did not preserve the original error chain")
 	}
 }
+
+func TestRedactProviderErrorKeepsNilAndUnchangedIdentity(t *testing.T) {
+	client := &sdkOpenSandboxClient{key: "synthetic-key"}
+	if client.redactProviderError(nil) != nil {
+		t.Fatal("nil handling changed")
+	}
+	original := errors.New("ordinary provider error")
+	if client.redactProviderError(original) != original {
+		t.Fatal("unchanged-message fast path lost identity")
+	}
+}

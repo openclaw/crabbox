@@ -31,3 +31,21 @@ func RedactedResponseBody(data []byte, readErr error, limit int, redact func(str
 	}
 	return body
 }
+
+// ErrorWithMessage replaces only Error's presentation while retaining cause.
+// It does not redact, select an exit code, or override errors.As: a CLI rendering
+// an inner ExitError can still select that inner message. Nil cause returns nil.
+func ErrorWithMessage(message string, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &messageCauseError{message: message, cause: cause}
+}
+
+type messageCauseError struct {
+	message string
+	cause   error
+}
+
+func (e *messageCauseError) Error() string { return e.message }
+func (e *messageCauseError) Unwrap() error { return e.cause }

@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -37,46 +36,29 @@ func UploadEnvdFile(ctx context.Context, upload EnvdUploadFileRequest) error {
 		query.Set("username", upload.User)
 	}
 	endpoint.RawQuery = query.Encode()
-	pr, pw := io.Pipe()
-	writer := multipart.NewWriter(pw)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), nil)
 	if err != nil {
-		_ = pr.CloseWithError(err)
-		_ = pw.CloseWithError(err)
 		return err
 	}
 	upload.SetHeaders(req)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	go func() {
-		part, err := writer.CreateFormFile("file", upload.TargetPath)
+	return WithMultipartFile(ctx, upload.TargetPath, upload.Content, func(body io.ReadCloser, contentType string) error {
+		req.Body = body
+		req.Header.Set("Content-Type", contentType)
+		resp, err := SecureHTTPClient(upload.HTTPClient, req.URL, upload.RedirectError).Do(req)
 		if err != nil {
-			_ = pw.CloseWithError(err)
-			return
+			return err
 		}
-		if _, err := io.Copy(part, upload.Content); err != nil {
-			_ = pw.CloseWithError(err)
-			return
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			body := RedactErrorSecrets(upload.SummarizeError(data), upload.AccessToken)
+			return upload.APIError(resp.StatusCode, resp.Status, body)
 		}
-		if err := writer.Close(); err != nil {
-			_ = pw.CloseWithError(err)
-			return
-		}
-		_ = pw.Close()
-	}()
-	resp, err := SecureHTTPClient(upload.HTTPClient, req.URL, upload.RedirectError).Do(req)
-	if err != nil {
-		_ = pr.CloseWithError(err)
-		_ = pw.CloseWithError(err)
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		body := RedactErrorSecrets(upload.SummarizeError(data), upload.AccessToken)
-		return upload.APIError(resp.StatusCode, resp.Status, body)
-	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return nil
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	}, func(err error) error {
+		return ErrorWithMessage(RedactErrorSecrets(err.Error(), upload.AccessToken), err)
+	})
 }
 
 type EnvdProcessRequest struct {

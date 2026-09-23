@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net"
 	"net/http"
 	"net/url"
@@ -545,40 +544,17 @@ func (c *restClient) uploadMultipartPart(ctx context.Context, sandbox, uploadID 
 	if err != nil {
 		return multipartUploadPart{}, err
 	}
-	pr, pw := io.Pipe()
-	writer := multipart.NewWriter(pw)
-	producerDone := make(chan error, 1)
-	stopCancel := context.AfterFunc(ctx, func() { _ = pr.CloseWithError(ctx.Err()) })
-	defer stopCancel()
-	defer pr.Close()
-	go func() {
-		part, err := writer.CreateFormFile("file", filename)
-		if err == nil {
-			_, err = io.Copy(part, reader)
-		}
-		if closeErr := writer.Close(); err == nil {
-			err = closeErr
-		}
-		_ = pw.CloseWithError(err)
-		producerDone <- err
-	}()
 	values := url.Values{"partNumber": []string{fmt.Sprintf("%d", partNumber)}}
 	var out multipartUploadPart
-	_, err = c.doMultipartAt(ctx, base, http.MethodPut, "/filesystem-multipart/"+url.PathEscape(uploadID)+"/part", values, writer.FormDataContentType(), pr, &out)
-	if err == nil && strings.TrimSpace(out.ETag) == "" {
-		err = errors.New("blaxel multipart upload response omitted etag")
-	}
-	if err != nil {
-		_ = pr.CloseWithError(err)
-	}
-	// A response can precede request-body completion. Keep borrowing the source
-	// until the producer exits, even if cancellation cannot interrupt its Read.
-	producerErr := <-producerDone
+	err = shared.WithMultipartFile(ctx, filename, reader, func(body io.ReadCloser, contentType string) error {
+		_, requestErr := c.doMultipartAt(ctx, base, http.MethodPut, "/filesystem-multipart/"+url.PathEscape(uploadID)+"/part", values, contentType, body, &out)
+		if requestErr == nil && strings.TrimSpace(out.ETag) == "" {
+			requestErr = errors.New("blaxel multipart upload response omitted etag")
+		}
+		return requestErr
+	}, redactError)
 	if err != nil {
 		return multipartUploadPart{}, err
-	}
-	if producerErr != nil {
-		return multipartUploadPart{}, redactError(producerErr)
 	}
 	if out.PartNumber == 0 {
 		out.PartNumber = partNumber
@@ -840,19 +816,11 @@ func (e apiError) Error() string {
 	return fmt.Sprintf("blaxel API request failed status=%d body=%s", e.StatusCode, e.Body)
 }
 
-type redactedError struct {
-	message string
-	cause   error
-}
-
-func (e redactedError) Error() string { return e.message }
-func (e redactedError) Unwrap() error { return e.cause }
-
 func redactError(err error) error {
 	if err == nil {
 		return nil
 	}
-	return redactedError{message: redactString(err.Error()), cause: err}
+	return shared.ErrorWithMessage(redactString(err.Error()), err)
 }
 
 func redactString(value string) string {
