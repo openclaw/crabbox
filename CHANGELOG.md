@@ -8,7 +8,7 @@
 
 ### Fixes
 
-- Finish E2B and CubeSandbox upload producers before releasing source archives and surface source-read failures, using the same multipart lifetime owner as Blaxel. Thanks @steipete.
+- Finish E2B and CubeSandbox upload producers before releasing source archives and surface source-read failures, using the same multipart lifetime owner as Blaxel. [PR 2509](https://github.com/openclaw/crabbox/pull/2509). Thanks @steipete.
 - Finish Blaxel multipart producers before retrying or releasing borrowed archives, preserving HTTP error precedence and early-success uploads. [PR 2505](https://github.com/openclaw/crabbox/pull/2505). Thanks @steipete.
 - Reject overflowing Nomad, Agent Sandbox, and Superserve execution timeouts before provider dispatch while preserving disabled deadlines, service defaults, and caller cancellation. [PR 2503](https://github.com/openclaw/crabbox/pull/2503). Thanks @steipete.
 - Reject oversized Superserve-derived sandbox lifetimes before rounding seconds, preventing duration overflow from bypassing the seven-day cap. [PR 2504](https://github.com/openclaw/crabbox/pull/2504). Thanks @steipete.
