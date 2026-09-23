@@ -144,7 +144,11 @@ crabbox run --provider opensandbox --allow-env API_TOKEN -- printenv API_TOKEN
 2. The local lease is stored as `osbx_<sandbox-id>` with a friendly slug and a
    repo claim. The sandbox expiration is the earliest configured provider
    timeout or Crabbox TTL. Crabbox never renews that absolute deadline; idle
-   timeout remains the sliding local inactivity policy.
+   timeout remains the sliding local inactivity policy. Execution admission rejects
+   unrepresentable command timeouts (including the 30-second allowance), combined
+   sync/command budgets, and configured lifetime seconds. These are local arithmetic
+   limits, not new service caps; status and stop do not require execution coverage.
+   Malformed persisted recovery lifetimes cannot authorize local claim expiry.
 3. By default `run` archive-syncs the working tree: a `git ls-files`-driven
    manifest is packed into a gzipped tar locally, uploaded through the
    OpenSandbox file API, and extracted into the configured workdir.

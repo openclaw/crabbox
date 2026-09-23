@@ -379,7 +379,7 @@ func TestOpenSandboxRunBudgetsIncludeRequiredRemoteOperations(t *testing.T) {
 		{name: "no sync sync only creates workdir", noSync: true, syncOnly: true, want: commandBudget},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := openSandboxRunBudgetForConfig(cfg, tc.noSync, tc.syncOnly); got != tc.want {
+			if got, err := openSandboxRunBudgetForConfig(cfg, tc.noSync, tc.syncOnly); err != nil || got != tc.want {
 				t.Fatalf("budget=%s want %s", got, tc.want)
 			}
 		})
@@ -1987,15 +1987,15 @@ func TestSDKClientCreateWaitsForRunningAndExecdPing(t *testing.T) {
 
 func TestSDKClientReadyTimeoutUsesProviderBudget(t *testing.T) {
 	client := &sdkOpenSandboxClient{cfg: testConfig()}
-	if got := client.readyTimeout(); got != openSandboxReadyTimeout {
+	if got, err := client.readyTimeout(); err != nil || got != openSandboxReadyTimeout {
 		t.Fatalf("ready timeout=%s want %s", got, openSandboxReadyTimeout)
 	}
 	client.cfg.OpenSandbox.TimeoutSecs = 900
-	if got := client.readyTimeout(); got != openSandboxReadyTimeout {
+	if got, err := client.readyTimeout(); err != nil || got != openSandboxReadyTimeout {
 		t.Fatalf("ready timeout=%s want capped %s", got, openSandboxReadyTimeout)
 	}
 	client.cfg.OpenSandbox.TimeoutSecs = 120
-	if got := client.readyTimeout(); got != 2*time.Minute {
+	if got, err := client.readyTimeout(); err != nil || got != 2*time.Minute {
 		t.Fatalf("ready timeout=%s want effective 2m lifetime", got)
 	}
 }
@@ -3304,4 +3304,139 @@ func (b *openSandboxObservationCloseBody) Close() error {
 	err := b.ReadCloser.Close()
 	b.once.Do(b.afterClose)
 	return err
+}
+
+func TestOpenSandboxRejectsOverflowBeforeFreshOrReuseClient(t *testing.T) {
+	for _, seconds := range []int64{9223372037, 9223372007, 4611686010} {
+		value := int(seconds)
+		if int64(value) != seconds {
+			continue
+		}
+		for _, id := range []string{"", "osbx_existing"} {
+			cfg := testConfig()
+			cfg.OpenSandbox.ExecTimeoutSecs = value
+			if err := validateOpenSandboxConfig(cfg); err != nil {
+				t.Fatalf("lifecycle validation must stay available: %v", err)
+			}
+			b := &openSandboxBackend{spec: Provider{}.Spec(), cfg: cfg, rt: core.Runtime{Stdout: io.Discard, Stderr: io.Discard}}
+			_, err := b.Run(t.Context(), core.RunRequest{ID: id, NoSync: true, Command: []string{"true"}})
+			if err == nil || !strings.Contains(err.Error(), "budget") {
+				t.Fatalf("seconds=%d id=%q err=%v", seconds, id, err)
+			}
+		}
+	}
+	cfg := testConfig()
+	cfg.Sync.Timeout = time.Duration(1<<63 - 1)
+	if _, err := openSandboxRunBudgetForConfig(cfg, false, false); err == nil {
+		t.Fatal("overflowing sum admitted")
+	}
+	if got, err := openSandboxRunBudgetForConfig(cfg, false, true); err != nil || got != cfg.Sync.Timeout {
+		t.Fatalf("sync-only=%s err=%v", got, err)
+	}
+}
+
+func TestOpenSandboxCheckedLifetimeAndCeiling(t *testing.T) {
+	cfg := testConfig()
+	cfg.OpenSandbox.TimeoutSecs = 60
+	if got, err := openSandboxLifetimeForConfig(cfg); err != nil || got != time.Minute {
+		t.Fatalf("minimum=%s err=%v", got, err)
+	}
+	cfg.OpenSandbox.TimeoutSecs = 0
+	cfg.TTL = 0
+	if got, err := openSandboxLifetimeForConfig(cfg); err != nil || got != openSandboxMinimumTTL {
+		t.Fatalf("default=%s err=%v", got, err)
+	}
+	for _, raw := range []int64{9223372037, 18446744134} {
+		value := int(raw)
+		if int64(value) != raw {
+			continue
+		}
+		cfg.OpenSandbox.TimeoutSecs = value
+		if _, err := openSandboxLifetimeForConfig(cfg); err == nil {
+			t.Fatal("overflowing lifetime admitted")
+		}
+	}
+	for _, duration := range []time.Duration{time.Second, time.Second + 1, time.Duration(1<<63 - 1)} {
+		want := int64(duration / time.Second)
+		if duration%time.Second != 0 {
+			want++
+		}
+		got, err := durationSecondsCeil(duration)
+		if int64(int(want)) != want {
+			if err == nil {
+				t.Fatal("platform integer overflow admitted")
+			}
+			continue
+		}
+		if err != nil || int64(got) != want {
+			t.Fatalf("ceiling=%d err=%v want=%d", got, err, want)
+		}
+	}
+}
+
+func TestOpenSandboxExecBudgetRejectsBeforeEndpoint(t *testing.T) {
+	client := &sdkOpenSandboxClient{}
+	for _, raw := range []int64{9223372037, 9223372007} {
+		seconds := int(raw)
+		if int64(seconds) != raw {
+			continue
+		}
+		if _, err := client.RunCommand(t.Context(), "unresolved", runCommandRequest{TimeoutSecs: seconds}); err == nil || !strings.Contains(err.Error(), "budget") {
+			t.Fatalf("unsafe exec reached endpoint: %v", err)
+		}
+		client.execTimeoutOverride = time.Second
+		if _, err := client.execRequestTimeout(seconds); err == nil {
+			t.Fatal("override bypassed arithmetic validation")
+		}
+	}
+	client.execTimeoutOverride = 0
+	for _, tc := range []struct {
+		seconds int
+		want    time.Duration
+	}{{0, 0}, {1, 31 * time.Second}, {600, 630 * time.Second}} {
+		if got, err := client.execRequestTimeout(tc.seconds); err != nil || got != tc.want {
+			t.Fatalf("exec=%s err=%v", got, err)
+		}
+	}
+}
+
+func TestOpenSandboxRecoveryOverflowCannotAuthorizeExpiry(t *testing.T) {
+	raw := int64(18446744134)
+	seconds := int(raw)
+	if int64(seconds) != raw {
+		t.Skip("64-bit fixture")
+	}
+	claim := core.LeaseClaim{LeaseID: "synthetic", ClaimedAt: "2026-09-01T00:00:00Z", IdleTimeoutSeconds: seconds}
+	if expired, err := openSandboxRecoveryExpired(claim, time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)); expired || err == nil {
+		t.Fatalf("expired=%t err=%v", expired, err)
+	}
+}
+
+func TestOpenSandboxRepresentableExecutionAndCoverageEdges(t *testing.T) {
+	maximumSeconds := int64(9223372006)
+	if int64(int(maximumSeconds)) != maximumSeconds {
+		t.Skip("64-bit boundary")
+	}
+	budget, err := openSandboxExecutionBudget(int(maximumSeconds))
+	if err != nil || budget != 9223372036*time.Second {
+		t.Fatalf("max exec budget=%s err=%v", budget, err)
+	}
+	if _, err := openSandboxExecutionBudget(int(maximumSeconds + 1)); err == nil {
+		t.Fatal("next execution second accepted")
+	}
+	cfg := testConfig()
+	cfg.OpenSandbox.ExecTimeoutSecs = 1
+	command := 31 * time.Second
+	cfg.Sync.Timeout = time.Duration(1<<63-1) - command
+	if got, err := openSandboxRunBudgetForConfig(cfg, false, false); err != nil || got != time.Duration(1<<63-1) {
+		t.Fatalf("exact sum=%s err=%v", got, err)
+	}
+	cfg.Sync.Timeout++
+	if _, err := openSandboxRunBudgetForConfig(cfg, false, false); err == nil {
+		t.Fatal("sum overflow accepted")
+	}
+	cfg.OpenSandbox.ExecTimeoutSecs = 0
+	if got, err := openSandboxCommandBudgetForConfig(cfg); err != nil || got != 630*time.Second {
+		t.Fatalf("zero default=%s err=%v", got, err)
+	}
 }

@@ -2,10 +2,12 @@ package opensandbox
 
 import (
 	"flag"
+	"math"
 	"os"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func init() {
@@ -63,48 +65,78 @@ func validateOpenSandboxRunConfig(cfg core.Config) error {
 }
 
 func validateOpenSandboxRequestConfig(cfg core.Config, req core.RunRequest) error {
-	required := openSandboxRunBudgetForConfig(cfg, req.NoSync, req.SyncOnly)
-	if lifetime := openSandboxLifetimeForConfig(cfg); lifetime < required {
+	required, err := openSandboxRunBudgetForConfig(cfg, req.NoSync, req.SyncOnly)
+	if err != nil {
+		return err
+	}
+	lifetime, err := openSandboxLifetimeForConfig(cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := durationSecondsCeil(lifetime); err != nil {
+		return err
+	}
+	if lifetime < required {
 		return core.Exit(2, "opensandbox effective lifetime %s must cover sync/command budget %s", lifetime, required)
 	}
 	return nil
 }
 
-func openSandboxCommandBudgetForConfig(cfg core.Config) time.Duration {
-	execTimeout := cfg.OpenSandbox.ExecTimeoutSecs
-	if execTimeout == 0 {
-		execTimeout = openSandboxExecTimeoutSecs
+func openSandboxExecutionBudget(seconds int) (time.Duration, error) {
+	if seconds < 0 {
+		return 0, core.Exit(2, "opensandbox execTimeoutSecs must be non-negative")
 	}
-	return time.Duration(execTimeout)*time.Second + openSandboxExecGrace
+	if seconds == 0 {
+		return 0, nil
+	}
+	if budget, ok := shared.SecondsWithGrace(int64(seconds), openSandboxExecGrace); ok {
+		return budget, nil
+	}
+	return 0, core.Exit(2, "opensandbox execution timeout exceeds the supported request budget")
 }
 
-func openSandboxRunBudgetForConfig(cfg core.Config, noSync, syncOnly bool) time.Duration {
-	commandBudget := openSandboxCommandBudgetForConfig(cfg)
-	// Even --no-sync runs one remote command to create the configured workdir.
+func openSandboxCommandBudgetForConfig(cfg core.Config) (time.Duration, error) {
+	seconds := cfg.OpenSandbox.ExecTimeoutSecs
+	if seconds == 0 {
+		seconds = openSandboxExecTimeoutSecs
+	}
+	return openSandboxExecutionBudget(seconds)
+}
+
+func openSandboxRunBudgetForConfig(cfg core.Config, noSync, syncOnly bool) (time.Duration, error) {
+	commandBudget, err := openSandboxCommandBudgetForConfig(cfg)
+	if err != nil {
+		return 0, err
+	}
+	// Even --no-sync requires a remote command to create the workdir.
 	syncBudget := commandBudget
 	if !noSync && cfg.Sync.Timeout > 0 {
 		syncBudget = cfg.Sync.Timeout
 	}
 	if syncOnly {
-		return syncBudget
+		return syncBudget, nil
 	}
-	return syncBudget + commandBudget
+	if syncBudget > time.Duration(math.MaxInt64)-commandBudget {
+		return 0, core.Exit(2, "opensandbox combined sync/command budget exceeds the supported duration")
+	}
+	return syncBudget + commandBudget, nil
 }
 
-func openSandboxLifetimeForConfig(cfg core.Config) time.Duration {
+func openSandboxLifetimeForConfig(cfg core.Config) (time.Duration, error) {
+	providerLifetime, ok := shared.SecondsWithGrace(int64(cfg.OpenSandbox.TimeoutSecs), 0)
+	if !ok {
+		return 0, core.Exit(2, "opensandbox timeoutSecs exceeds the supported lifetime")
+	}
 	lifetime := time.Duration(0)
-	for _, candidate := range []time.Duration{
-		time.Duration(cfg.OpenSandbox.TimeoutSecs) * time.Second,
-		cfg.TTL,
-	} {
+	for _, candidate := range []time.Duration{providerLifetime, cfg.TTL} {
 		if candidate > 0 && (lifetime == 0 || candidate < lifetime) {
 			lifetime = candidate
 		}
 	}
 	if lifetime == 0 {
-		return openSandboxMinimumTTL
+		return openSandboxMinimumTTL, nil
 	}
-	return lifetime
+	return lifetime, nil
 }
 
 func (p Provider) Configure(cfg core.Config, rt core.Runtime) (core.Backend, error) {
