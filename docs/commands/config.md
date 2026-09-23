@@ -44,7 +44,11 @@ crabbox config show --provider local-container --json
 
 The merge combines, in order: the user config file, then any repo-local
 `crabbox.yaml` or `.crabbox.yaml` found in the current directory (a repo file
-overrides user defaults for that checkout), then environment variables. When
+overrides user defaults for that checkout), then environment variables. If no
+normal source selects a provider, ordinary local CLI use may add the current
+workspace's most recent provider as a lower-priority `recent_history`
+selection. CI, controller subprocesses, and explicit `CRABBOX_CONFIG` mode
+skip that fallback. When
 `CRABBOX_CONFIG` is set, only that file is read (the repo-local files are
 skipped). This changes selection only: an explicit path inside the active
 repository, or a symlink that resolves into it, still has repository trust.
@@ -59,8 +63,12 @@ metadata, the public `provider` value is the empty string and the state is
 actionable provider selection. The public top-level `serverType` / text `type`
 is also empty in that state so provider-specific compatibility defaults are not
 presented as effective; provider-specific configuration sections remain visible.
-Selections in `user_config`, `repo_config`, or
-the `environment` retain the canonical provider name and report selected=true. Passing
+Selections in `user_config`, `repo_config`, `recent_history`, or
+the `environment` retain the canonical provider name and report selected=true.
+`recent_history` is the bounded private per-workspace fallback described by
+[`providers history`](providers.md#recent-provider-history); it is not a
+configuration-input source and never appears in provider/generic input-source
+lists. Passing
 `config show --provider <name>` reports `flag` because that command-scoped
 override wins the merge.
 
