@@ -7,6 +7,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 const (
@@ -30,12 +31,15 @@ func codeSandboxCleanupCommand(leaseID string) string {
 	return "crabbox stop --provider " + providerName + " " + core.ShellQuote(leaseID)
 }
 
-func operationTimeout(cfg core.CodeSandboxConfig) time.Duration {
+func operationTimeout(cfg core.CodeSandboxConfig) (time.Duration, error) {
 	seconds := cfg.OperationTimeoutSecs
 	if seconds <= 0 {
 		seconds = core.CodeSandboxConfigDefaultOperationTimeoutSecs
 	}
-	return time.Duration(seconds) * time.Second
+	if timeout, ok := shared.SecondsWithGrace(int64(seconds), 0); ok {
+		return timeout, nil
+	}
+	return 0, core.Exit(2, "codesandbox operation timeout exceeds the supported duration range")
 }
 
 func bridgeCommand(cfg core.CodeSandboxConfig) string {

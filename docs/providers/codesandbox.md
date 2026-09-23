@@ -206,6 +206,10 @@ diagnostic failures.
 - `doctor` is non-mutating. It only checks env auth and a bounded sandbox list.
 - `operationTimeoutSecs` applies to each SDK bridge call. Increase it for slow
   creates, resumes, or port waits.
+  Values that overflow the local timeout budget are rejected during config
+  validation, before authentication or SDK startup. SDK installation keeps its
+  own operation budget; command requests use the larger of that budget and
+  the command timeout plus ten seconds, starting after installation completes.
 - `run` with an existing `--id` validates the local claim before reusing the
   sandbox. Use `--reclaim` only when intentionally updating a repo claim for a
   Crabbox-owned sandbox.

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/providers/shared/procjson"
 )
 
@@ -71,18 +72,29 @@ func (b *SDKBridge) RoundTrip(ctx context.Context, token string, req BridgeReque
 	if b.rt.Exec == nil {
 		return BridgeResponse{}, core.Exit(2, "codesandbox bridge requires Runtime.Exec")
 	}
+	setupTimeout, err := operationTimeout(b.cfg)
+	if err != nil {
+		return BridgeResponse{}, err
+	}
+	timeout := setupTimeout
+	if req.Operation == "run_command" && req.Timeout > 0 {
+		commandTimeout, ok := shared.SecondsWithGrace(int64(req.Timeout), 10*time.Second)
+		if !ok {
+			return BridgeResponse{}, core.Exit(2, "codesandbox command timeout exceeds the supported duration range")
+		}
+		if commandTimeout > timeout {
+			timeout = commandTimeout
+		}
+	}
 	dir, err := bridgeWorkingDir()
 	if err != nil {
 		return BridgeResponse{}, err
 	}
 	spec := bridgeSDKSpecFor(b.cfg)
-	if err := b.ensureBridgeSDK(ctx, dir, spec); err != nil {
+	if err := b.ensureBridgeSDK(ctx, dir, spec, setupTimeout); err != nil {
 		return BridgeResponse{}, err
 	}
-	timeout := operationTimeout(b.cfg)
-	if commandTimeout := time.Duration(req.Timeout+10) * time.Second; req.Operation == "run_command" && req.Timeout > 0 && commandTimeout > timeout {
-		timeout = commandTimeout
-	}
+	// SDK preparation has its own operation budget; start the request budget afterward.
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	limit := codeSandboxBridgeOutputLimit
@@ -107,7 +119,7 @@ func (b *SDKBridge) RoundTrip(ctx context.Context, token string, req BridgeReque
 	return resp, nil
 }
 
-func (b *SDKBridge) ensureBridgeSDK(ctx context.Context, dir string, spec bridgeSDKSpec) error {
+func (b *SDKBridge) ensureBridgeSDK(ctx context.Context, dir string, spec bridgeSDKSpec, timeout time.Duration) error {
 	if !spec.Install {
 		return nil
 	}
@@ -117,7 +129,7 @@ func (b *SDKBridge) ensureBridgeSDK(ctx context.Context, dir string, spec bridge
 	if err := writeBridgePackageJSON(dir); err != nil {
 		return err
 	}
-	setupCtx, cancel := context.WithTimeout(ctx, operationTimeout(b.cfg))
+	setupCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	result, runErr := b.rt.Exec.Run(setupCtx, core.LocalCommandRequest{
