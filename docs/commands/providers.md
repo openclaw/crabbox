@@ -31,8 +31,9 @@ crabbox providers history --clear
 ## Recent provider history
 
 Crabbox keeps a small private MRU history of providers that were explicitly
-selected with `--provider` and successfully configured for the current
-workspace. This avoids repeating the provider on ordinary local commands while
+selected by a real command-line `--provider` flag and successfully configured
+for the current workspace. Programmatic provider overrides used by inspection
+paths do not update the MRU. This avoids repeating the provider on ordinary local commands while
 preserving normal configuration semantics.
 
 ```sh
