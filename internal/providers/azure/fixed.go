@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"strconv"
+	"strings"
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -211,4 +213,86 @@ func (b *azureLeaseBackend) resolvedAzureLease(server core.Server, target core.S
 		}
 	}
 	return b.ResolvedLeaseTarget(server, target, leaseID, releaseOnly)
+}
+
+func (b *azureLeaseBackend) ReclaimAndStop(ctx context.Context, req core.StopRequest) error {
+	leaseID := strings.TrimSpace(req.ID)
+	if !core.IsCanonicalLeaseID(leaseID) {
+		return core.Exit(2, "provider=azure stop --reclaim requires an exact canonical lease --id")
+	}
+	client, err := newAzureClient(ctx, b.Cfg)
+	if err != nil {
+		return err
+	}
+	servers, err := client.ListCrabboxServers(ctx)
+	if err != nil {
+		return err
+	}
+	providerKey := core.ProviderKeyForLease(leaseID)
+	server, found, err := core.SelectFixedCandidate(fixedAzureLeaseKind, leaseID, servers, func(candidate core.Server) bool {
+		return candidate.Labels["lease"] == leaseID || candidate.Labels["provider_key"] == providerKey
+	})
+	if err != nil {
+		return err
+	}
+	if !found {
+		return core.Exit(4, "Azure fixed lease %s was not found", leaseID)
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		claim, err = recoveredFixedAzureClaim(client.LeaseClaimScope(), leaseID, server)
+		if err != nil {
+			return err
+		}
+		if err := core.ValidateFixedLocalClaimUniqueness(fixedAzureLeaseKind, claim, "azure"); err != nil {
+			return err
+		}
+		claim, err = core.PublishFixedRecoveryClaimIfAbsent(fixedAzureLeaseKind, claim)
+		if err != nil {
+			return err
+		}
+	}
+	if err := validateExactAzureClaim(claim, server, leaseID, client.LeaseClaimScope()); err != nil {
+		return err
+	}
+	lease := core.LeaseTarget{LeaseID: leaseID, Server: server}
+	if err := b.ReleaseLease(ctx, core.ReleaseLeaseRequest{Lease: lease, Force: true}); err != nil {
+		return err
+	}
+	fmt.Fprintln(b.RT.Stderr, b.ReleaseLeaseMessage(lease))
+	return nil
+}
+
+func recoveredFixedAzureClaim(providerScope, leaseID string, server core.Server) (core.LeaseClaim, error) {
+	labels := server.Labels
+	slug := strings.TrimSpace(labels["slug"])
+	fingerprint := strings.TrimSpace(labels["fixed_intent_sha256"])
+	nonce := strings.TrimSpace(labels["fixed_attempt"])
+	createdUnix, err := strconv.ParseInt(strings.TrimSpace(labels["created_at"]), 10, 64)
+	if strings.TrimSpace(providerScope) == "" || !isCrabboxAzureLease(server) ||
+		labels["lease"] != leaseID || labels["provider_key"] != core.ProviderKeyForLease(leaseID) ||
+		slug == "" || !core.FixedSHA256(fingerprint) || nonce == "" || err != nil || createdUnix <= 0 ||
+		server.CloudID != core.LeaseProviderName(leaseID, slug) || server.Name != server.CloudID ||
+		strings.TrimSpace(server.ImmutableID) == "" {
+		return core.LeaseClaim{}, core.Exit(4, "lease_id_conflict: Azure VM does not contain a complete fixed create identity")
+	}
+	created := time.Unix(createdUnix, 0).UTC()
+	claim := core.LeaseClaim{
+		LeaseID: leaseID, Slug: slug, Provider: "azure", ProviderScope: providerScope,
+		CloudID: server.CloudID, CloudImmutableID: server.ImmutableID,
+		ClaimedAt:  created.Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339), Labels: maps.Clone(labels),
+		FixedCreateIntent: &core.FixedCreateIntent{
+			Version: fixedAzureLeaseKind.IntentVersion, Fingerprint: fingerprint,
+			ProviderScope: providerScope, Slug: slug, CreatedAt: created.Format(time.RFC3339Nano),
+			State: "acquired", Attempt: map[string]string{"nonce": nonce, "name": server.CloudID},
+		},
+	}
+	if err := validateFixedAzureServer(claim, server); err != nil {
+		return core.LeaseClaim{}, err
+	}
+	return claim, nil
 }

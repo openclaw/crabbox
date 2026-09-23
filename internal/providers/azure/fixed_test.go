@@ -169,3 +169,56 @@ func TestFixedAzureBindsLeaseMetadata(t *testing.T) {
 		t.Fatal("duplicate create")
 	}
 }
+
+func TestFixedAzureExplicitRecoveryStopsAfterLocalClaimLoss(t *testing.T) {
+	client := &fakeAzureClient{}
+	b := fixedAzureTestBackend(t, client)
+	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123461", RequestedSlug: "restart-recovery", Repo: core.Repo{Root: t.TempDir()}}
+	lease, err := b.Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.RemoveLeaseClaimIfUnchanged(req.RequestedLeaseID, claim); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.ReclaimAndStop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.deleted) != 1 || client.deleted[0] != lease.Server.CloudID {
+		t.Fatalf("deleted=%v, want %s", client.deleted, lease.Server.CloudID)
+	}
+	terminal, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || terminal.FixedCreateIntent == nil || terminal.FixedCreateIntent.State != "released" {
+		t.Fatalf("terminal=%+v err=%v", terminal, err)
+	}
+	if _, err := b.Acquire(t.Context(), req); err == nil {
+		t.Fatal("recovered single-use lease was recreated")
+	}
+}
+
+func TestFixedAzureExplicitRecoveryRejectsIncompleteRemoteIdentity(t *testing.T) {
+	client := &fakeAzureClient{}
+	b := fixedAzureTestBackend(t, client)
+	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123462", RequestedSlug: "restart-reject", Repo: core.Repo{Root: t.TempDir()}}
+	if _, err := b.Acquire(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := core.RemoveLeaseClaimIfUnchanged(req.RequestedLeaseID, claim); err != nil {
+		t.Fatal(err)
+	}
+	delete(client.servers[0].Labels, "fixed_attempt")
+	if err := b.ReclaimAndStop(t.Context(), core.StopRequest{ID: req.RequestedLeaseID}); err == nil {
+		t.Fatal("incomplete remote identity was adopted")
+	}
+	if len(client.deleted) != 0 {
+		t.Fatalf("deleted=%v", client.deleted)
+	}
+}
