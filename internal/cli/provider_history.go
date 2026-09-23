@@ -156,6 +156,7 @@ func applyRecentProviderFallback(cfg *Config) {
 
 func rememberExplicitProviderBestEffort(cfg Config, stderr io.Writer) {
 	if cfg.providerSelectionSource != providerSelectionFlag ||
+		!cfg.providerExplicit ||
 		cfg.synthesizedFlagInputs ||
 		strings.TrimSpace(cfg.Provider) == "" ||
 		!recentProviderFallbackAllowed() {
@@ -242,6 +243,12 @@ func clearProviderHistoryForCurrentWorkspace() (string, bool, error) {
 	}
 	path, err := providerHistoryPath(root)
 	if err != nil {
+		return "", false, err
+	}
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return root, false, nil
+		}
 		return "", false, err
 	}
 	lock := flock.New(path+".lock", flock.SetPermissions(0o600))
