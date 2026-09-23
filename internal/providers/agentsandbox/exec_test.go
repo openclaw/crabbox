@@ -19,14 +19,20 @@ func TestExecContextHonorsZeroAsNoDeadline(t *testing.T) {
 	cfg.AgentSandbox.ExecTimeoutSecs = 0
 	b := backend{cfg: cfg}
 
-	ctx, cancel := b.execContext(context.Background())
+	ctx, cancel, err := b.execContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer cancel()
 	if _, ok := ctx.Deadline(); ok {
 		t.Fatal("zero exec timeout created a deadline")
 	}
 
 	b.cfg.AgentSandbox.ExecTimeoutSecs = 1
-	ctx, cancel = b.execContext(context.Background())
+	ctx, cancel, err = b.execContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer cancel()
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -97,5 +103,64 @@ func TestRunLiteralArgumentsSurviveNativeStdinTransport(t *testing.T) {
 				t.Fatalf("literal created marker: %v", err)
 			}
 		})
+	}
+}
+
+func TestExecRejectsOverflow(t *testing.T) {
+	if uint64(^uint(0)>>1) < uint64(9223372037) {
+		t.Skip("64-bit input")
+	}
+	cfg := testAgentSandboxConfig(t)
+	var seconds int64 = 9223372037
+	cfg.AgentSandbox.ExecTimeoutSecs = int(seconds)
+	fake := readyFakeClient(cfg)
+	b := testBackend(cfg, fake, nil, nil)
+	ready, err := sandboxReadinessOnce(t.Context(), fake, cfg.AgentSandbox.Namespace, "claim-a", fakeClaimIdentity(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = b.execShell(t.Context(), fake, ready, "true")
+	if err == nil || !strings.Contains(err.Error(), "agent-sandbox execution timeout exceeds the supported duration range") {
+		t.Fatalf("overflow result: %v", err)
+	}
+	if len(fake.execInput) != 0 {
+		t.Fatal("overflow dispatched exec")
+	}
+}
+
+func TestRunRejectsExecOverflowBeforeClient(t *testing.T) {
+	if uint64(^uint(0)>>1) < uint64(9223372037) {
+		t.Skip("64-bit input")
+	}
+	cfg := testAgentSandboxConfig(t)
+	var seconds int64 = 9223372037
+	cfg.AgentSandbox.ExecTimeoutSecs = int(seconds)
+	b := testBackend(cfg, nil, nil, nil)
+	b.newClient = func(context.Context, core.Config, core.Runtime) (kubernetesClient, error) {
+		t.Fatal("overflow reached client")
+		return nil, nil
+	}
+	for _, id := range []string{"", "existing"} {
+		_, err := b.Run(t.Context(), core.RunRequest{ID: id, Repo: core.Repo{Root: t.TempDir()}, Command: []string{"true"}, NoSync: true})
+		if err == nil || core.ExitCodeForError(err, 1) != 2 || !strings.Contains(err.Error(), "execution timeout exceeds") {
+			t.Fatalf("run: %v", err)
+		}
+	}
+}
+
+func TestExecContextPreservesParentCancellation(t *testing.T) {
+	for _, seconds := range []int{0, 12} {
+		b := backend{cfg: core.Config{AgentSandbox: core.AgentSandboxConfig{ExecTimeoutSecs: seconds}}}
+		parent, stop := context.WithCancelCause(t.Context())
+		cause := errors.New("parent stopped")
+		child, cancel, err := b.execContext(parent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stop(cause)
+		if context.Cause(child) != cause {
+			t.Fatal("parent cause lost")
+		}
+		cancel()
 	}
 }

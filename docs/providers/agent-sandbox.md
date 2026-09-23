@@ -455,6 +455,13 @@ CRABBOX_LIVE_PROVIDERS=agent-sandbox \
 scripts/live-smoke.sh
 ```
 
+## Execution timeout limits
+
+Positive `execTimeoutSecs` values must fit the local command-duration budget.
+Unrepresentable values fail before run acquisition or reuse and before exec
+dispatch. Zero still adds no provider deadline; caller cancellation remains
+active. Inspection and stop do not consume this command budget.
+
 ## Related Docs
 
 - [Provider backends](../provider-backends.md)
