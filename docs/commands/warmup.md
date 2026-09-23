@@ -90,7 +90,7 @@ it and may append a short suffix if an active lease already uses that slug.
 
 `--lease-id cbx_<12 lowercase hex>` is the automation idempotency contract for
 providers that explicitly support fixed identities. Direct AWS, Azure, DigitalOcean,
-Machine0, Daytona, Incus, Tenki, Parallels, Proxmox, and local-container leases,
+Machine0, Daytona, Incus, Tenki, Parallels, Proxmox, Boat, and local-container leases,
 Agent Sandbox delegated leases, managed coordinator leases, and explicitly capable
 external providers accept it. Replaying the same normalized create intent
 returns or joins the same live lease, including after the creating process loses
@@ -103,6 +103,12 @@ create. Slugs remain display aliases and are never used as the idempotency key.
 Daytona binds the native organization before allocation and preserves that scope
 across credential rotation. See [Daytona fixed operation IDs](../providers/daytona.md#fixed-operation-ids)
 for API-key organization discovery and positive cleanup-witness requirements.
+
+Boat retains the original keyed creation intent and permits one recovery
+submission within the native 24-hour window, further limited by the intent TTL.
+Keep the original account and local state: endpoint and organization scope do
+not distinguish two personal account keys. See
+[Boat fixed lease IDs](../providers/ascii-box.md#fixed-lease-ids).
 
 Concurrent fixed-ID warmup and fork commands sharing a local state directory
 wait for the current acquisition to finish registration and preparation. A
@@ -123,7 +129,7 @@ honors caller cancellation. Fixed-ID leases remain available for explicit recove
 or stop; ordinary creates keep their token-bound cancellation cleanup.
 
 A fixed lease ID is single-use. Direct AWS, Azure, DigitalOcean, Machine0, Daytona,
-Incus, Tenki, Parallels, Proxmox, and local-container
+Incus, Tenki, Parallels, Proxmox, Boat, and local-container
 acquisitions fail closed if their bound resource later disappears. Successful
 stop and missing-resource cleanup replace the live local claim with a compact
 terminal tombstone, so the ID remains rejected after release. Use a new

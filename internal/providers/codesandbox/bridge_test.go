@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -132,6 +134,46 @@ func TestSDKBridgeEffectiveDefaultsUseRecordingRunner(t *testing.T) {
 	}
 }
 
+func TestSDKBridgeRejectsOverflowBeforeDispatch(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("large input requires 64-bit int")
+	}
+	for _, tc := range []struct {
+		name               string
+		operation, command int64
+	}{
+		{"operation conversion", 9223372037, 0},
+		{"command grace", 30, 9223372030},
+		{"command int addition", 30, math.MaxInt64},
+	} {
+		for _, install := range []bool{true, false} {
+			t.Run(tc.name+"/install="+strconv.FormatBool(install), func(t *testing.T) {
+				setBridgeTestCacheDir(t)
+				cfg := newTestConfig().CodeSandbox
+				cfg.OperationTimeoutSecs = int(tc.operation)
+				if !install {
+					cfg.SDKPackage = "file:///synthetic/sdk.mjs"
+				}
+				runner := &recordingBridgeRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+					_, _ = io.WriteString(req.Stdout, `{"ok":true,"command":{"exitCode":0}}`)
+					return core.LocalCommandResult{ExitCode: 0}, nil
+				}}
+				req := BridgeRequest{Operation: "list_sandboxes"}
+				if tc.command > 0 {
+					req.Operation, req.Timeout = "run_command", int(tc.command)
+				}
+				_, err := NewSDKBridge(cfg, core.Runtime{Exec: runner}).RoundTrip(t.Context(), "", req)
+				if err == nil || !strings.Contains(err.Error(), "timeout exceeds the supported duration range") {
+					t.Fatalf("overflow result=%v; dispatched=%d", err, len(runner.calls))
+				}
+				if len(runner.calls) != 0 {
+					t.Fatal("overflow dispatched npm or bridge")
+				}
+			})
+		}
+	}
+}
+
 func TestSDKBridgeRequiresRunnerBeforeSDKSetup(t *testing.T) {
 	var exitErr core.ExitError
 	_, err := NewSDKBridge(newTestConfig().CodeSandbox, core.Runtime{}).RoundTrip(context.Background(), "secret", BridgeRequest{Operation: "list_sandboxes"})
@@ -141,33 +183,59 @@ func TestSDKBridgeRequiresRunnerBeforeSDKSetup(t *testing.T) {
 }
 
 func TestSDKBridgeRunCommandUsesCommandTimeoutAndLargerCaptureLimit(t *testing.T) {
-	setBridgeTestCacheDir(t)
-	secret := "csb-secret-value"
-	runner := &recordingBridgeRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
-		_, _ = io.WriteString(req.Stdout, `{"ok":true,"command":{"exitCode":0}}`)
-		return core.LocalCommandResult{ExitCode: 0}, nil
-	}}
-	cfg := newTestConfig().CodeSandbox
-	cfg.OperationTimeoutSecs = 30
-	bridge := NewSDKBridge(cfg, core.Runtime{Exec: runner})
-	if _, err := bridge.RoundTrip(context.Background(), secret, BridgeRequest{
-		Operation: "run_command",
-		SandboxID: "sb_1",
-		Command:   []string{"sleep", "60"},
-		Timeout:   3600,
-	}); err != nil {
-		t.Fatalf("RoundTrip err=%v", err)
+	for _, operationSeconds := range []int{30, 7200} {
+		t.Run(strconv.Itoa(operationSeconds), func(t *testing.T) {
+			setBridgeTestCacheDir(t)
+			runner := &recordingBridgeRunner{fn: func(req core.LocalCommandRequest) (core.LocalCommandResult, error) {
+				_, _ = io.WriteString(req.Stdout, `{"ok":true,"command":{"exitCode":0}}`)
+				return core.LocalCommandResult{ExitCode: 0}, nil
+			}}
+			cfg := newTestConfig().CodeSandbox
+			cfg.OperationTimeoutSecs = operationSeconds
+			request := BridgeRequest{Operation: "run_command", SandboxID: "sb_1", Command: []string{"sleep", "60"}, Timeout: 3600}
+			started := time.Now()
+			if _, err := NewSDKBridge(cfg, core.Runtime{Exec: runner}).RoundTrip(t.Context(), "", request); err != nil {
+				t.Fatal(err)
+			}
+			finished := time.Now()
+			call := runner.onlyCall(t)
+			if call.MaxCapturedOutputBytes != codeSandboxRunCommandOutputLimit {
+				t.Fatal("command capture limit changed")
+			}
+			var payload BridgeRequest
+			if err := json.NewDecoder(call.Stdin).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(payload, request) {
+				t.Fatalf("payload changed: %#v", payload)
+			}
+			if len(runner.deadlines) != 2 {
+				t.Fatalf("deadlines=%d want 2", len(runner.deadlines))
+			}
+			setup := time.Duration(operationSeconds) * time.Second
+			for i, budget := range []time.Duration{setup, max(setup, 3610*time.Second)} {
+				if runner.deadlines[i].Before(started.Add(budget)) || runner.deadlines[i].After(finished.Add(budget)) {
+					t.Fatalf("phase %d deadline does not use %s", i, budget)
+				}
+			}
+		})
 	}
-	call := runner.onlyCall(t)
-	if call.MaxCapturedOutputBytes != codeSandboxRunCommandOutputLimit {
-		t.Fatalf("run command capture limit=%d, want %d", call.MaxCapturedOutputBytes, codeSandboxRunCommandOutputLimit)
+}
+
+func TestOperationTimeoutAdmissionBounds(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("large input requires 64-bit int")
 	}
-	if len(runner.deadlines) != 2 {
-		t.Fatalf("deadlines=%d want 2", len(runner.deadlines))
+	cfg := newTestConfig()
+	var maxSeconds int64 = math.MaxInt64 / int64(time.Second)
+	cfg.CodeSandbox.OperationTimeoutSecs = int(maxSeconds)
+	if err := validateCodeSandboxConfig(cfg); err != nil {
+		t.Fatalf("maximum rejected: %v", err)
 	}
-	remaining := time.Until(runner.deadlines[1])
-	if remaining < 3500*time.Second {
-		t.Fatalf("run command bridge deadline too short: %s", remaining)
+	cfg.CodeSandbox.OperationTimeoutSecs++
+	err := validateCodeSandboxConfig(cfg)
+	if err == nil || core.ExitCodeForError(err, 1) != 2 || err.Error() != "codesandbox operation timeout exceeds the supported duration range" {
+		t.Fatalf("overflow admission: %v", err)
 	}
 }
 

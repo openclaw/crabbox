@@ -58,7 +58,7 @@ to own replay, and caller cancellation never releases them.
 
 Automation may instead supply the canonical ID with `warmup --lease-id`. For
 direct AWS, Azure, DigitalOcean, Daytona, Incus, Machine0, local-container,
-Parallels, Proxmox, Tenki, delegated Agent Sandbox, and managed coordinator
+Parallels, Proxmox, Tenki, Boat, delegated Agent Sandbox, and managed coordinator
 leases, that ID is an
 immutable create identity: an identical semantic replay returns the same
 live lease, while intent drift returns `lease_id_conflict`.
@@ -75,6 +75,12 @@ Tenki records its exact session and recovery attempt before reuse. See
 [Tenki fixed lease IDs](../providers/tenki.md#fixed-lease-ids-for-orchestration)
 for attestation, retained recovery state, and terminal receipt behavior.
 
+Boat records a keyed creation intent before submission and permits one recovery
+submission within the native 24-hour window, further limited by the intent TTL.
+Keep the original account and local state: its endpoint and organization scope
+cannot distinguish two personal account keys. See
+[Boat fixed lease IDs](../providers/ascii-box.md#fixed-lease-ids).
+
 Agent Sandbox binds each fixed attempt to its Kubernetes resource identities and
 retains terminal receipts through adapter cleanup. See
 [Agent Sandbox fixed lease IDs](../providers/agent-sandbox.md#fixed-lease-ids)
@@ -82,13 +88,15 @@ for scope checks and foreground deletion requirements.
 
 The shared fixed-lease transaction engine records a versioned journal alongside
 the existing normalized intent, native attempt, and terminal receipt fields.
-The ten direct providers listed above use declarative admission and record formats with
+The direct providers listed above use declarative admission and record formats with
 core-owned attempt encoding, binding publication, and terminal retention.
 Existing records remain readable; upgrading a record preserves its fingerprint and native ownership
 evidence. Uncertain submission and deletion retain custody, and a released ID
-cannot be allocated again. Native adapters still attest account scope, resource
-identity, and deletion completion. Only provider-certified definite failures
-permit another attempt; missing inventory does not. Providers that acknowledge
+cannot be allocated again. Native adapters validate their provider-specific scope,
+resource identity, and deletion completion. Only provider-certified definite
+failures permit a new attempt; Boat's one same-key recovery submission follows
+its bounded policy described above. Missing inventory alone never authorizes a
+new allocation. Providers that acknowledge
 termination without an intermediate cleanup marker retain their acquired record
 unmodified until acknowledgement. Existing native absence-recovery rules remain
 unchanged.

@@ -72,6 +72,9 @@ func validateCodeSandboxConfig(cfg core.Config) error {
 	if csb.OperationTimeoutSecs < 0 {
 		return core.Exit(2, "codesandbox operationTimeoutSecs must be non-negative")
 	}
+	if _, err := operationTimeout(csb); err != nil {
+		return err
+	}
 	if privacy := strings.ToLower(strings.TrimSpace(csb.Privacy)); privacy != "" {
 		switch privacy {
 		case "public", "unlisted", "private", "public-hosts":
