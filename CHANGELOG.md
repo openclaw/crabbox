@@ -6,6 +6,7 @@
 
 - Restore complete branch history before coherence checks when reusing shallow Git workspaces, while preserving wrong-branch rejection and index rollback. [PR 2529](https://github.com/openclaw/crabbox/pull/2529). Thanks @steipete.
 - Allow repeated Incus stop with the exact canonical lease ID after confirmed deletion, validating the retained terminal receipt and connection identity while keeping slug lookups live. [PR 2486](https://github.com/openclaw/crabbox/pull/2486). Thanks @vincentkoc.
+- Bound optional AWS and Hetzner price quotes to five seconds so stalled pricing falls back to existing estimates. Analysis: [PR 1630](https://github.com/openclaw/crabbox/pull/1630). Thanks @steipete.
 
 ## 0.66.0 - 2026-09-23
 

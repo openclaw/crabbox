@@ -43,6 +43,7 @@ import {
   sshPublicKeyIdentity,
 } from "./provider-key";
 import { leaseProviderLabels } from "./provider-labels";
+import { withPricingDeadline } from "./provider-pricing";
 import { ProvisioningAttemptHistory } from "./provisioning-attempts";
 import { leaseProviderName } from "./slug";
 import type {
@@ -370,6 +371,7 @@ class QualificationAWSFetchClient implements AWSFetchClient {
   ) {}
 
   async fetch(_input: string, init?: RequestInit): Promise<Response> {
+    init?.signal?.throwIfAborted();
     const request = qualificationRequest(this.service, this.region, init);
     let result;
     try {
@@ -377,6 +379,7 @@ class QualificationAWSFetchClient implements AWSFetchClient {
     } catch {
       // The authority keeps opId receipts and pending intents. A same-op retry is safe
       // after a lost RPC response and never falls back to candidate-held credentials.
+      init?.signal?.throwIfAborted();
       result = await this.binding.execute(request);
     }
     return new Response(result.body, { status: result.status });
@@ -774,6 +777,7 @@ export class EC2SpotClient {
     private readonly env: Env,
     region: string,
     private readonly credentialSnapshot?: ResolvedAWSCredentials,
+    private readonly requestSignal?: AbortSignal,
   ) {
     this.region = requireAWSRegion(region || env.CRABBOX_AWS_REGION || "eu-west-1");
     const expected = awsExpectedIdentityConfig(env);
@@ -1922,14 +1926,18 @@ export class EC2SpotClient {
   }
 
   async hourlySpotPriceUSD(instanceType: string): Promise<number | undefined> {
-    const root = await this.ec2("DescribeSpotPriceHistory", {
-      "InstanceType.1": instanceType,
-      MaxResults: "1",
-      "ProductDescription.1": "Linux/UNIX",
-      StartTime: new Date().toISOString(),
+    return withPricingDeadline(async (signal) => {
+      // Keep the quote's identity check separate from cached lifecycle verification.
+      const client = new EC2SpotClient(this.env, this.region, this.credentialSnapshot, signal);
+      const root = await client.ec2("DescribeSpotPriceHistory", {
+        "InstanceType.1": instanceType,
+        MaxResults: "1",
+        "ProductDescription.1": "Linux/UNIX",
+        StartTime: new Date().toISOString(),
+      });
+      const item = items(record(root["spotPriceHistorySet"])["item"])[0];
+      return positiveFloat(asString(record(item)["spotPrice"]));
     });
-    const item = items(record(root["spotPriceHistorySet"])["item"])[0];
-    return positiveFloat(asString(record(item)["spotPrice"]));
   }
 
   async deleteServer(instanceID: string): Promise<void> {
@@ -3293,6 +3301,7 @@ export class EC2SpotClient {
     const response = await (options.client ?? this.aws).fetch(
       this.endpoint,
       {
+        ...(this.requestSignal ? { signal: this.requestSignal } : {}),
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
         body: body.toString(),
@@ -3361,6 +3370,7 @@ export class EC2SpotClient {
   ): Promise<Record<string, unknown>> {
     const body = new URLSearchParams({ Action: action, Version: stsVersion, ...params });
     const response = await client.fetch(this.stsEndpoint, {
+      ...(this.requestSignal ? { signal: this.requestSignal } : {}),
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded; charset=utf-8" },
       body: body.toString(),

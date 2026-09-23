@@ -87,6 +87,12 @@ hourly USD number; non-positive or non-numeric entries are ignored. Hetzner live
 are quoted in EUR and converted to USD by multiplying with `CRABBOX_EUR_TO_USD`
 (default `1.08`).
 
+Each optional AWS or Hetzner quote has a five-second waiting budget, including
+credentials, identity checks, qualification RPCs, and response-body reads. Timeout
+uses the existing fallback rates; admission, activation, and recovery retain their
+own lifecycle rules. The quote aborts its HTTP requests; already-running credential
+resolution or authority RPCs remain with their existing owners.
+
 ## Budget guardrails
 
 Budgets are enforced on lease creation. Exceeding any active-lease limit or monthly

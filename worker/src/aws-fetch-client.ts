@@ -77,6 +77,7 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
     init?: RequestInit,
     stopRetrying?: StopAWSResponseRetry,
   ): Promise<Response> {
+    init?.signal?.throwIfAborted();
     const observe = currentAWSTransportObserver();
     const observation: AWSTransportObservation = {
       requests: 1,
@@ -93,6 +94,7 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
     let requestStartedAt: number | undefined;
     try {
       const credentials = resolvedAWSCredentials(await this.credentials());
+      init?.signal?.throwIfAborted();
       if (credentials.expirationMs !== undefined && credentials.expirationMs <= Date.now()) {
         throw new Error("AWS credential snapshot expired");
       }
@@ -108,6 +110,12 @@ export class RefreshingAWSFetchClient implements AWSFetchClient {
       const client = observe ? new ObservedAwsClient(options, observation) : new AwsClient(options);
       requestStartedAt = Date.now();
       observation.credentialsMs = Math.max(0, requestStartedAt - startedAt);
+      if (init?.signal) {
+        // Optional quotes own a single attempt, including signing and the body read.
+        const request = await client.sign(input, init);
+        init.signal.throwIfAborted();
+        return await fetch(request, { signal: init.signal });
+      }
       if (!stopRetrying) return await client.fetch(input, init);
       // aws4fetch has no response-policy hook. Preserve its budget, jitter, signing and
       // thrown errors while allowing the operation owner to handle a definitive rejection.
