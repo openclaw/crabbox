@@ -101,7 +101,8 @@ func validateProviderConfig(cfg core.Config) error {
 	if cfg.CloudflareDynamicWorkers.TimeoutSecs < 0 {
 		return core.Exit(2, "%s timeout-secs must be non-negative", providerName)
 	}
-	return nil
+	_, err := responseHeaderTimeout(cfg)
+	return err
 }
 
 func splitCommaList(value string) []string {

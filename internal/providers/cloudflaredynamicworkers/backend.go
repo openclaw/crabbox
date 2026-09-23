@@ -97,7 +97,10 @@ func (b *backend) Run(ctx context.Context, req core.RunRequest) (core.RunResult,
 	if err != nil {
 		return core.RunResult{}, err
 	}
-	loaderReq := b.buildRunRequest(req, leaseID, workerID, cacheMode)
+	loaderReq, err := b.buildRunRequest(req, leaseID, workerID, cacheMode)
+	if err != nil {
+		return core.RunResult{}, err
+	}
 	if req.EnvSummary {
 		core.PrintEnvForwardingSummary(b.rt.Stderr, providerName, "forwarded", req.Options.EnvAllow, req.Env)
 	}
@@ -523,7 +526,10 @@ func (b *backend) resolveRunID(identifier, repoRoot string, reclaim bool) (strin
 	return value, core.NewLeaseSlug(value), core.LeaseClaim{}, false, nil
 }
 
-func (b *backend) buildRunRequest(req core.RunRequest, leaseID, workerID, cacheMode string) runRequest {
+func (b *backend) buildRunRequest(req core.RunRequest, leaseID, workerID, cacheMode string) (runRequest, error) {
+	if _, err := responseHeaderTimeout(b.cfg); err != nil {
+		return runRequest{}, err
+	}
 	cfg := b.cfg.CloudflareDynamicWorkers
 	return runRequest{
 		ID:                 leaseID,
@@ -538,8 +544,8 @@ func (b *backend) buildRunRequest(req core.RunRequest, leaseID, workerID, cacheM
 		Limits:             limits{CPUMs: cfg.CPUMs, Subrequests: cfg.Subrequests},
 		Env:                req.Env,
 		Metadata:           runMetadata(cfg.Metadata, req),
-		TimeoutMS:          durationMillisecondsCeil(time.Duration(cfg.TimeoutSecs) * time.Second),
-	}
+		TimeoutMS:          int64(cfg.TimeoutSecs) * 1000,
+	}, nil
 }
 
 func runMetadata(configured map[string]string, req core.RunRequest) map[string]string {
@@ -683,13 +689,6 @@ func normalizeEgress(value string) string {
 		return "blocked"
 	}
 	return strings.ToLower(strings.TrimSpace(value))
-}
-
-func durationMillisecondsCeil(duration time.Duration) int64 {
-	if duration <= 0 {
-		return 0
-	}
-	return int64((duration + time.Millisecond - 1) / time.Millisecond)
 }
 
 func providerClaims(cfg core.Config) ([]core.LeaseClaim, error) {

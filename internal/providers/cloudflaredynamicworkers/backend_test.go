@@ -1690,10 +1690,13 @@ func TestStableRunIDIncludesForwardedEnv(t *testing.T) {
 func TestBuildRunRequestSendsEffectiveCompatibilityDate(t *testing.T) {
 	backend := newTestBackend("http://127.0.0.1:1", &bytes.Buffer{}, &bytes.Buffer{})
 	backend.cfg.CloudflareDynamicWorkers.CompatibilityDate = ""
-	req := backend.buildRunRequest(core.RunRequest{Script: &core.RunScriptSpec{Source: "stdin", Data: []byte("export default {}")}}, "run_1",
+	req, err := backend.buildRunRequest(core.RunRequest{Script: &core.RunScriptSpec{Source: "stdin", Data: []byte("export default {}")}}, "run_1",
 		"worker_1",
 		"stable",
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if req.CompatibilityDate != defaultCompatibilityDate {
 		t.Fatalf("compatibility date=%q, want %q", req.CompatibilityDate, defaultCompatibilityDate)
 	}
@@ -2401,5 +2404,95 @@ func TestJSONRequestAdoptionConcreteEnvelope(t *testing.T) {
 	}
 	if !errors.Is(err, sentinel) || calls != 1 {
 		t.Fatalf("error=%v calls=%d", err, calls)
+	}
+}
+
+func TestExecutionTimeoutBudgetBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		seconds  int64
+		want     time.Duration
+		rejected bool
+	}{
+		{"disabled", 0, 0, false},
+		{"floor", 1, 30 * time.Second, false},
+		{"default", 30, 35 * time.Second, false},
+		{"ordinary", 60, 65 * time.Second, false},
+		{"maximum", 9223372031, 9223372036 * time.Second, false},
+		{"overhead overflow", 9223372032, 0, true},
+		{"conversion overflow", 9223372037, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seconds := int(tc.seconds)
+			if int64(seconds) != tc.seconds {
+				t.Skip("input does not fit platform int")
+			}
+			cfg := testConfig("https://loader.example.test")
+			fs := newTestFlagSet()
+			values := Provider{}.RegisterFlags(fs, cfg)
+			if err := fs.Parse([]string{"--cloudflare-dynamic-workers-timeout-secs", fmt.Sprint(seconds)}); err != nil {
+				t.Fatal(err)
+			}
+			err := (Provider{}).ApplyFlags(&cfg, fs, values)
+			if (err != nil) != tc.rejected {
+				t.Fatalf("admission error=%v, rejected=%t", err, tc.rejected)
+			}
+			budget, err := responseHeaderTimeout(cfg)
+			if tc.rejected {
+				if err == nil {
+					t.Fatal("invalid direct budget accepted")
+				}
+				return
+			}
+			if err != nil || budget != tc.want {
+				t.Fatalf("budget=%s err=%v want=%s", budget, err, tc.want)
+			}
+			b := &backend{cfg: cfg}
+			req, err := b.buildRunRequest(core.RunRequest{Script: &core.RunScriptSpec{Source: "stdin", Data: []byte("export default {}")}}, "run", "worker", "one-shot")
+			if err != nil || req.TimeoutMS != tc.seconds*1000 {
+				t.Fatalf("wire timeout=%d err=%v", req.TimeoutMS, err)
+			}
+			transport := &recordingDefaultRoundTripper{}
+			api, err := newLoaderAPI(cfg, core.Runtime{HTTP: &http.Client{Transport: transport}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := api.(*client).responseBodyTimeout; got != tc.want {
+				t.Fatalf("injected body budget=%s want=%s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInvalidExecutionTimeoutNeverDispatches(t *testing.T) {
+	raw := int64(9223372032)
+	seconds := int(raw)
+	if int64(seconds) != raw {
+		t.Skip("input does not fit platform int")
+	}
+	cfg := testConfig("https://loader.example.test")
+	cfg.CloudflareDynamicWorkers.TimeoutSecs = seconds
+	transport := &recordingDefaultRoundTripper{}
+	rt := core.Runtime{HTTP: &http.Client{Transport: transport}, Stdout: io.Discard, Stderr: io.Discard}
+	if api, err := newLoaderAPI(cfg, rt); err == nil || api != nil {
+		t.Fatal("injected client accepted invalid timeout")
+	}
+	if api, err := defaultHTTPClient(cfg); err == nil || api != nil {
+		t.Fatal("default client accepted invalid timeout")
+	}
+	b := &backend{spec: Provider{}.Spec(), cfg: cfg, rt: rt}
+	req := core.RunRequest{Script: &core.RunScriptSpec{Source: "stdin", Data: []byte("export default {}")}}
+	if _, err := b.buildRunRequest(req, "run", "worker", "one-shot"); err == nil {
+		t.Fatal("direct request accepted invalid timeout")
+	}
+	if _, err := b.Run(t.Context(), req); err == nil {
+		t.Fatal("run accepted invalid timeout")
+	}
+	if transport.calls != 0 {
+		t.Fatalf("dispatched %d requests", transport.calls)
+	}
+	cfg.CloudflareDynamicWorkers.Token = ""
+	if _, err := newLoaderAPI(cfg, rt); err == nil || !strings.Contains(err.Error(), "requires cloudflareDynamicWorkers.token") {
+		t.Fatalf("credential admission order changed: %v", err)
 	}
 }

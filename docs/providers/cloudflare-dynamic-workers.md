@@ -90,7 +90,10 @@ The token is intentionally not exposed as a command-line flag because command
 arguments can appear in shell history and process listings. Repository-local
 config cannot override `loaderUrl` or `token`, and cannot change `egress` from
 `blocked` to `intercept`. Repository-local `cpuMs`, `subrequests`, and
-`timeoutSecs` values can tighten trusted limits but cannot loosen them.
+`timeoutSecs` values can tighten trusted limits but cannot loosen them. Positive
+timeouts must fit the local request budget including its five-second allowance;
+unrepresentable values are rejected. Zero keeps the existing disabled-timeout
+behavior, and positive local header/body budgets retain their 30-second minimum.
 
 ## Deploy
 

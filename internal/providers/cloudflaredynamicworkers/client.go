@@ -141,6 +141,10 @@ var newLoaderAPI = func(cfg core.Config, rt core.Runtime) (loaderAPI, error) {
 	if token == "" {
 		return nil, core.Exit(2, "%s requires cloudflareDynamicWorkers.token or CRABBOX_CLOUDFLARE_DYNAMIC_WORKERS_TOKEN", providerName)
 	}
+	requestTimeout, err := responseHeaderTimeout(cfg)
+	if err != nil {
+		return nil, err
+	}
 	httpClient := rt.HTTP
 	if httpClient == nil {
 		httpClient, err = defaultHTTPClient(cfg)
@@ -153,7 +157,7 @@ var newLoaderAPI = func(cfg core.Config, rt core.Runtime) (loaderAPI, error) {
 		baseURL:             baseURL,
 		token:               token,
 		http:                httpClient,
-		responseBodyTimeout: responseHeaderTimeout(cfg),
+		responseBodyTimeout: requestTimeout,
 		readRetryDelays:     append([]time.Duration(nil), defaultReadRetryDelays...),
 	}, nil
 }
@@ -278,7 +282,10 @@ func defaultHTTPClient(cfg core.Config) (*http.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	transport.ResponseHeaderTimeout = responseHeaderTimeout(cfg)
+	transport.ResponseHeaderTimeout, err = responseHeaderTimeout(cfg)
+	if err != nil {
+		return nil, err
+	}
 	return &http.Client{Transport: transport}, nil
 }
 
@@ -290,16 +297,19 @@ func noRedirectHTTPClient(httpClient *http.Client) *http.Client {
 	return &cloned
 }
 
-func responseHeaderTimeout(cfg core.Config) time.Duration {
-	runTimeout := time.Duration(cfg.CloudflareDynamicWorkers.TimeoutSecs) * time.Second
-	if runTimeout <= 0 {
-		return 0
+func responseHeaderTimeout(cfg core.Config) (time.Duration, error) {
+	seconds := cfg.CloudflareDynamicWorkers.TimeoutSecs
+	if seconds < 0 {
+		return 0, core.Exit(2, "%s timeout-secs must be non-negative", providerName)
 	}
-	timeout := runTimeout + responseHeaderTimeoutOverhead
-	if timeout < defaultResponseHeaderTimeout {
-		return defaultResponseHeaderTimeout
+	if seconds == 0 {
+		return 0, nil
 	}
-	return timeout
+	timeout, ok := shared.SecondsWithGrace(int64(seconds), responseHeaderTimeoutOverhead)
+	if !ok {
+		return 0, core.Exit(2, "%s timeout-secs exceeds the supported request budget", providerName)
+	}
+	return max(timeout, defaultResponseHeaderTimeout), nil
 }
 
 func (c *client) Readiness(ctx context.Context) (readinessResponse, error) {
