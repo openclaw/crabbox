@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -40,6 +42,7 @@ const (
 	egressDaemonFatalCode   = 4
 	egressTicketStdinArg    = "--internal-ticket-stdin"
 	egressTicketChildArg    = "--internal-ticket-child"
+	egressStopSessionArg    = "--internal-stop-session"
 )
 
 type egressProxyMessage struct {
@@ -77,8 +80,8 @@ func (a App) egress(ctx context.Context, args []string) error {
 		return a.egressHost(ctx, args[1:])
 	case "client":
 		return a.egressClient(ctx, args[1:])
-	case "start":
-		return a.egressStart(ctx, args[1:])
+	case "start", "run":
+		return a.egressStart(ctx, args[1:], args[0] == "run")
 	case "status":
 		return a.egressStatus(ctx, args[1:])
 	case "stop":
@@ -92,21 +95,21 @@ func (a App) egress(ctx context.Context, args []string) error {
 func (a App) printEgressHelp() {
 	fmt.Fprintln(a.Stdout, `Usage:
   crabbox egress start --id <lease-id-or-slug> --profile discord [--daemon]
+  crabbox egress run --id <lease-id-or-slug> --allow <hosts> [--script-stdin] -- <command...>
   crabbox egress host --id <lease-id-or-slug> --profile discord
   crabbox egress client --id <lease-id-or-slug> --listen 127.0.0.1:3128
   crabbox egress status --id <lease-id-or-slug>
-  crabbox egress stop --id <lease-id-or-slug>
+  crabbox egress stop --id <lease-id-or-slug> [--session <session-id>]
 
 Mediated egress lets a lease-local browser/app proxy exit through the machine
 running the egress host agent. The coordinator only mediates paired WebSocket
-bridges; the host agent opens the real outbound TCP connections.`)
+bridges; the host agent opens the real outbound TCP connections.
+
+Use start or host --upstream-proxy-env <name> to chain those connections through
+a trusted HTTP(S) CONNECT proxy named by a local environment variable.`)
 }
 
 func (a App) egressHost(ctx context.Context, args []string) error {
-	return a.egressHostWithConnectHook(ctx, args, nil)
-}
-
-func (a App) egressHostWithConnectHook(ctx context.Context, args []string, onConnected func()) error {
 	defaults := defaultConfig()
 	fs := newFlagSet("egress host", a.Stderr)
 	provider := registerProviderSelectionFlag(fs, defaults, "provider: hetzner or aws")
@@ -116,6 +119,7 @@ func (a App) egressHostWithConnectHook(ctx context.Context, args []string, onCon
 	sessionID := fs.String("session", "", "egress session id")
 	profile := fs.String("profile", "", "egress profile name")
 	allowCSV := fs.String("allow", "", "comma-separated allowed host patterns")
+	upstreamProxyEnv := fs.String("upstream-proxy-env", "", "local environment variable containing a trusted HTTP(S) CONNECT proxy URL")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -127,29 +131,38 @@ func (a App) egressHostWithConnectHook(ctx context.Context, args []string, onCon
 	if len(allow) == 0 {
 		return Exit(2, "egress host requires --profile or --allow; refusing to start an open proxy")
 	}
+	var upstream *egressUpstreamProxy
+	if flagWasSet(fs, "upstream-proxy-env") {
+		var err error
+		upstream, err = egressUpstreamProxyFromEnv(*upstreamProxyEnv)
+		if err != nil {
+			return err
+		}
+	}
 	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, *ticket, flagWasSet(fs, "coordinator"))
 	if err != nil {
 		return err
 	}
-	bridge, err := connectEgressBridge(ctx, coord, leaseID, "host", *ticket, *sessionID, *profile, allow)
+	bridge, err := a.connectEgressHost(ctx, coord, leaseID, *ticket, *sessionID, *profile, allow)
 	if err != nil {
-		if fatalEgressBridgeSetupError(err) {
-			return Exit(egressDaemonFatalCode, "egress lease unavailable: %v", err)
-		}
 		return err
 	}
-	fmt.Fprintf(a.Stdout, "egress host: connected lease=%s session=%s profile=%s allow=%s\n", leaseID, bridge.sessionID, blank(*profile, "-"), strings.Join(allow, ","))
-	if onConnected != nil {
-		onConnected()
-	}
-	err = bridge.serveHost(ctx, allow)
-	if replacedEgressSessionClose(err) {
-		return Exit(egressDaemonFatalCode, "egress session replaced: %v", err)
-	}
-	return err
+	return egressServeError(bridge.serveHost(ctx, allow, upstream))
 }
 
 func (a App) egressClient(ctx context.Context, args []string) error {
+	if len(args) > 0 && args[0] == egressStopSessionArg {
+		fs := newFlagSet("egress client session cleanup", a.Stderr)
+		id := fs.String("id", "", "lease id")
+		session := fs.String("session", "", "egress session id")
+		if err := parseFlags(fs, args[1:]); err != nil {
+			return err
+		}
+		if *id == "" || *session == "" || fs.NArg() != 0 {
+			return Exit(2, "egress client session cleanup requires --id and --session")
+		}
+		return stopLocalEgressClientSession(ctx, *id, *session)
+	}
 	// This positional dispatch token is private, never a registered CLI flag.
 	// Keep "egress client" intact for the existing remote cleanup identity.
 	bootstrap := len(args) > 0 && args[0] == egressTicketStdinArg
@@ -159,12 +172,7 @@ func (a App) egressClient(ctx context.Context, args []string) error {
 	}
 	defaults := defaultConfig()
 	fs := newFlagSet("egress client", a.Stderr)
-	provider := registerProviderSelectionFlag(fs, defaults, "provider: hetzner or aws")
-	id := fs.String("id", "", "lease id or slug")
-	coordinatorURL := fs.String("coordinator", "", "coordinator URL override")
-	ticket := fs.String("ticket", "", "pre-created egress client ticket")
-	sessionID := fs.String("session", "", "egress session id")
-	listen := fs.String("listen", defaultEgressListen, "lease-local proxy listen address")
+	options := registerEgressClientFlags(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -179,35 +187,59 @@ func (a App) egressClient(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		*ticket = value
+		*options.ticket = value
 	}
-	setIDFromFirstArg(fs, id)
-	if *id == "" {
+	setIDFromFirstArg(fs, options.id)
+	if *options.id == "" {
 		return Exit(2, "usage: crabbox egress client --id <lease-id-or-slug> [--listen 127.0.0.1:3128]")
 	}
-	if err := validateEgressListen(*listen); err != nil {
+	if err := validateEgressListen(*options.listen); err != nil {
 		return err
 	}
 	if bootstrap {
-		return a.startEgressClientProcess(args, *ticket)
+		stopPath, unlock, err := lockEgressClientSession(ctx, *options.id, *options.sessionID)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		if _, err := os.Stat(stopPath); err == nil {
+			return Exit(5, "egress client session was stopped")
+		} else if !os.IsNotExist(err) {
+			return Exit(5, "inspect egress client session admission: %v", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return a.startEgressClientProcess(args, *options.ticket)
 	}
-	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *provider, *coordinatorURL, *id, *ticket, flagWasSet(fs, "coordinator"))
+	coord, leaseID, err := a.egressCoordinatorAndLease(ctx, *options.provider, *options.coordinatorURL, *options.id, *options.ticket, flagWasSet(fs, "coordinator"))
 	if err != nil {
 		return err
 	}
-	bridge, err := connectEgressBridge(ctx, coord, leaseID, "client", *ticket, *sessionID, "", nil)
+	bridge, err := connectEgressBridge(ctx, coord, leaseID, "client", *options.ticket, *options.sessionID, "", nil)
 	if err != nil {
 		if fatalEgressBridgeSetupError(err) {
 			return Exit(egressDaemonFatalCode, "egress lease unavailable: %v", err)
 		}
 		return err
 	}
-	fmt.Fprintf(a.Stdout, "egress client: connected lease=%s session=%s listen=%s\n", leaseID, bridge.sessionID, *listen)
-	err = bridge.serveClient(ctx, *listen)
-	if replacedEgressSessionClose(err) {
-		return Exit(egressDaemonFatalCode, "egress session replaced: %v", err)
+	fmt.Fprintf(a.Stdout, "egress client: connected lease=%s session=%s listen=%s\n", leaseID, bridge.sessionID, *options.listen)
+	return egressServeError(bridge.serveClient(ctx, *options.listen))
+}
+
+type egressClientFlags struct {
+	provider, id, coordinatorURL, ticket, sessionID, listen *string
+}
+
+func registerEgressClientFlags(fs *flag.FlagSet, defaults Config) egressClientFlags {
+	return egressClientFlags{
+		provider:       registerProviderSelectionFlag(fs, defaults, "provider: hetzner or aws"),
+		id:             fs.String("id", "", "lease id or slug"),
+		coordinatorURL: fs.String("coordinator", "", "coordinator URL override"),
+		ticket:         fs.String("ticket", "", "pre-created egress client ticket"),
+		sessionID:      fs.String("session", "", "egress session id"),
+		listen:         fs.String("listen", defaultEgressListen, "lease-local proxy listen address"),
 	}
-	return err
 }
 
 func readEgressTicketStdin(r io.Reader) (string, error) {
@@ -301,47 +333,82 @@ func completeEgressClientLaunch(cmd *exec.Cmd, input io.WriteCloser, ticket stri
 	return nil
 }
 
-func (a App) egressStart(ctx context.Context, args []string) error {
+func (a App) egressStart(ctx context.Context, args []string, runMode bool) (err error) {
 	defaults := defaultConfig()
-	fs := newFlagSet("egress start", a.Stderr)
+	name := "egress start"
+	commandApp := a
+	if runMode {
+		name = "egress run"
+		a.Stdout = a.Stderr
+	}
+	fs := newFlagSet(name, a.Stderr)
 	provider := registerProviderSelectionFlag(fs, defaults, "provider: hetzner or aws")
 	id := fs.String("id", "", "lease id or slug")
 	profile := fs.String("profile", "", "egress profile name")
 	allowCSV := fs.String("allow", "", "comma-separated allowed host patterns")
+	upstreamProxyEnv := fs.String("upstream-proxy-env", "", "local environment variable containing a trusted HTTP(S) CONNECT proxy URL")
 	listen := fs.String("listen", defaultEgressListen, "lease-local proxy listen address")
-	coordinatorURL := fs.String("coordinator", "", "coordinator URL override")
-	daemon := fs.Bool("daemon", false, "start the local host bridge in the background")
+	var coordinatorURL string
+	var daemon, scriptStdin, noSync, noHydrate bool
+	if runMode {
+		fs.BoolVar(&scriptStdin, "script-stdin", false, "upload and run a script from stdin, with command arguments after --")
+		fs.BoolVar(&noSync, "no-sync", false, "skip local file transfer")
+		fs.BoolVar(&noHydrate, "no-hydrate", false, "skip configured Actions hydration")
+	} else {
+		fs.StringVar(&coordinatorURL, "coordinator", "", "coordinator URL override")
+		fs.BoolVar(&daemon, "daemon", false, "start the local host bridge in the background")
+	}
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	setIDFromFirstArg(fs, id)
+	if !runMode {
+		setIDFromFirstArg(fs, id)
+	}
 	if *id == "" {
-		return Exit(2, "usage: crabbox egress start --id <lease-id-or-slug> --profile <name>|--allow <hosts>")
+		return Exit(2, "usage: crabbox %s --id <lease-id-or-slug> --profile <name>|--allow <hosts>", name)
+	}
+	if runMode && fs.NArg() == 0 && !scriptStdin {
+		return Exit(2, "egress run requires a command after -- or --script-stdin")
+	}
+	if scriptStdin {
+		script, err := loadRunScript("", true, a.input())
+		if err != nil {
+			return err
+		}
+		commandApp.Stdin = bytes.NewReader(script.Data)
 	}
 	allow := egressAllowlist(*profile, splitCSV(*allowCSV))
 	if len(allow) == 0 {
-		return Exit(2, "egress start requires --profile or --allow; refusing to start an open proxy")
+		return Exit(2, "%s requires --profile or --allow; refusing to start an open proxy", name)
 	}
 	if err := validateEgressListen(*listen); err != nil {
 		return err
+	}
+	var upstream *egressUpstreamProxy
+	if flagWasSet(fs, "upstream-proxy-env") {
+		upstream, err = egressUpstreamProxyFromEnv(*upstreamProxyEnv)
+		if err != nil {
+			return err
+		}
+		commandApp.runEnvDenylist = append(commandApp.runEnvDenylist, *upstreamProxyEnv)
 	}
 	cfg, err := loadLeaseTargetConfig(fs, *provider, targetFlags, networkFlags, leaseTargetConfigOptions{LeaseID: *id, SynthesizedInputs: a.synthesizedFlagInputs})
 	if err != nil {
 		return err
 	}
-	cfg, err = egressStartCoordinatorConfig(cfg, *coordinatorURL)
+	cfg, err = egressStartCoordinatorConfig(cfg, coordinatorURL)
 	if err != nil {
 		return err
 	}
-	recordConfigInput(&cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "coordinator") && strings.TrimSpace(*coordinatorURL) != "")
+	recordConfigInput(&cfg, configInputGeneric, configInputFlag, flagWasSet(fs, "coordinator") && strings.TrimSpace(coordinatorURL) != "")
 	coord, useCoordinator, err := newTargetCoordinatorClient(cfg)
 	if err != nil {
 		return err
 	}
 	if !useCoordinator || !coord.hasConfiguredAuth() {
-		return Exit(2, "egress start requires a configured coordinator login; run crabbox login --url <broker-url> first")
+		return Exit(2, "%s requires a configured coordinator login; run crabbox login --url <broker-url> first", name)
 	}
 	server, target, leaseID, err := a.resolveNetworkLeaseTarget(ctx, cfg, *id, false)
 	if err != nil {
@@ -362,9 +429,33 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 		}
 	}
 	defer releaseDaemonLock()
+	if runMode {
+		current, err := coord.EgressStatus(ctx, leaseID)
+		if err != nil {
+			return err
+		}
+		active := current.Active
+		if current.HostConnected != nil && current.ClientConnected != nil {
+			active = *current.HostConnected || *current.ClientConnected
+		}
+		if active {
+			return Exit(2, "lease already has active egress; use an exclusively owned lease or stop its existing egress first")
+		}
+	}
 	sessionID := newLocalEgressSessionID()
+	fmt.Fprintf(a.Stdout, "egress session: lease=%s session=%s\n", leaseID, sessionID)
 	if err := installRemoteEgressClient(ctx, target); err != nil {
 		return err
+	}
+	if runMode {
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			defer cancel()
+			if cleanupErr := stopRemoteEgressClientSession(cleanupCtx, target, leaseID, sessionID); cleanupErr != nil {
+				// main prints one ExitError; retain every failure in its message.
+				err = Exit(ExitCodeForError(err, 5), "%v", errors.Join(err, cleanupErr))
+			}
+		}()
 	}
 	clientTicket, err := a.prepareEgressClientCutover(ctx, coord, leaseID, sessionID, *profile, allow)
 	if err != nil {
@@ -378,34 +469,79 @@ func (a App) egressStart(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Fprintf(a.Stdout, "egress client: lease=%s listen=%s log=%s\n", leaseID, *listen, egressRemoteLog)
-	hostArgs := []string{
-		"--provider", cfg.Provider,
-		"--id", leaseID,
-		"--coordinator", coord.BaseURL,
-		"--session", sessionID,
+	if daemon {
+		hostArgs := []string{
+			"host", "--provider", cfg.Provider,
+			"--id", leaseID,
+			"--coordinator", coord.BaseURL,
+			"--session", sessionID,
+			"--allow", strings.Join(allow, ","),
+		}
+		if *profile != "" {
+			hostArgs = append(hostArgs, "--profile", *profile)
+		}
+		if *upstreamProxyEnv != "" {
+			hostArgs = append(hostArgs, "--upstream-proxy-env", *upstreamProxyEnv)
+		}
+		return a.startEgressHostDaemonLocked(leaseID, hostArgs, target.ChildEnvDenylist)
 	}
-	if strings.TrimSpace(*profile) != "" {
-		hostArgs = append(hostArgs, "--profile", strings.TrimSpace(*profile))
-	}
-	if len(allow) > 0 {
-		hostArgs = append(hostArgs, "--allow", strings.Join(allow, ","))
-	}
-	if *daemon {
-		// The supervisor re-invokes `crabbox egress <args>`, so it needs the
-		// subcommand token; the in-process foreground call below must not get
-		// it because flag parsing stops at the first non-flag argument.
-		return a.startEgressHostDaemonLocked(leaseID, append([]string{"host"}, hostArgs...), target.ChildEnvDenylist)
-	}
-	hostTicket, err := coord.CreateEgressTicket(ctx, leaseID, "host", sessionID, *profile, allow)
+	bridge, err := a.connectEgressHost(ctx, coord, leaseID, "", sessionID, *profile, allow)
 	if err != nil {
 		return err
 	}
-	hostArgs = append(hostArgs, "--ticket", hostTicket.Ticket)
-	// Hold the daemon lock until the foreground host has joined the session so a
-	// concurrent replacement start cannot interleave with its pending connect.
-	// Release it before the long-running serve loop so egress stop and replacement
-	// starts do not block until the session ends.
-	return a.egressHostWithConnectHook(ctx, hostArgs, releaseDaemonLock)
+	releaseDaemonLock()
+	if !runMode {
+		return egressServeError(bridge.serveHost(ctx, allow, upstream))
+	}
+	runArgs := []string{"--id", leaseID, "--provider", cfg.Provider, "--target", targetLinux, "--network", string(cfg.Network)}
+	if scriptStdin {
+		runArgs = append(runArgs, "--script-stdin")
+	}
+	if noSync {
+		runArgs = append(runArgs, "--no-sync")
+	}
+	if noHydrate {
+		runArgs = append(runArgs, "--no-hydrate")
+	}
+	return commandApp.runWithEgress(ctx, bridge, allow, upstream, append(append(runArgs, "--"), fs.Args()...))
+}
+
+func (a App) connectEgressHost(ctx context.Context, coord *CoordinatorClient, leaseID, ticket, sessionID, profile string, allow []string) (*egressBridge, error) {
+	bridge, err := connectEgressBridge(ctx, coord, leaseID, "host", ticket, sessionID, profile, allow)
+	if err != nil {
+		if fatalEgressBridgeSetupError(err) {
+			return nil, Exit(egressDaemonFatalCode, "egress lease unavailable: %v", err)
+		}
+		return nil, err
+	}
+	fmt.Fprintf(a.Stdout, "egress host: connected lease=%s session=%s profile=%s allow=%s\n", leaseID, bridge.sessionID, blank(profile, "-"), strings.Join(allow, ","))
+	return bridge, nil
+}
+
+func egressServeError(err error) error {
+	if replacedEgressSessionClose(err) {
+		return Exit(egressDaemonFatalCode, "egress session replaced: %v", err)
+	}
+	return err
+}
+
+func (a App) runWithEgress(ctx context.Context, bridge *egressBridge, allow []string, upstream *egressUpstreamProxy, args []string) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	finished := errors.New("egress command finished")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := bridge.serveHost(ctx, allow, upstream); ctx.Err() == nil {
+			cancel(fmt.Errorf("egress bridge ended: %w", egressServeError(err)))
+		}
+	}()
+	err := a.runCommand(ctx, args)
+	cancel(finished)
+	<-done
+	if cause := context.Cause(ctx); cause != finished {
+		err = Exit(ExitCodeForError(err, 1), "%v", errors.Join(err, cause))
+	}
+	return err
 }
 
 func (a App) prepareEgressClientCutover(ctx context.Context, coord *CoordinatorClient, leaseID, sessionID, profile string, allow []string) (CoordinatorEgressTicket, error) {
@@ -466,6 +602,7 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 	fs := newFlagSet("egress stop", a.Stderr)
 	provider := registerProviderSelectionFlag(fs, defaults, "provider: hetzner or aws")
 	id := fs.String("id", "", "lease id or slug")
+	sessionID := fs.String("session", "", "stop only the matching lease-side client session; leave host daemons untouched")
 	targetFlags := registerTargetFlags(fs, defaults)
 	networkFlags := registerNetworkModeFlag(fs, defaults)
 	if err := parseFlags(fs, args); err != nil {
@@ -486,11 +623,31 @@ func (a App) egressStop(ctx context.Context, args []string) error {
 			resolved = true
 		}
 	}
+	if flagWasSet(fs, "session") {
+		if strings.TrimSpace(*sessionID) == "" {
+			return Exit(2, "egress stop --session requires a nonempty session id")
+		}
+		if !resolved {
+			return Exit(2, "egress stop --session requires a reachable lease target")
+		}
+		if target.TargetOS != "" && target.TargetOS != targetLinux {
+			return Exit(2, "egress stop --session only supports Linux lease targets")
+		}
+	}
 	unlock, err := acquireEgressDaemonLocks(ctx, *id, leaseID)
 	if err != nil {
 		return Exit(2, "acquire egress daemon locks: %v", err)
 	}
 	defer unlock()
+	if flagWasSet(fs, "session") {
+		cleanupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := stopRemoteEgressClientSession(cleanupCtx, target, leaseID, *sessionID); err != nil {
+			return err
+		}
+		fmt.Fprintf(a.Stdout, "egress remote client: stopped lease=%s session=%s\n", leaseID, *sessionID)
+		return nil
+	}
 	stoppedLocal := false
 	seen := map[string]bool{}
 	for _, daemonID := range []string{*id, leaseID} {
@@ -552,6 +709,7 @@ type egressBridge struct {
 	writeMu     sync.Mutex
 	mu          sync.Mutex
 	conns       map[string]net.Conn
+	hostPending map[string]context.CancelFunc
 	clientConns map[string]*egressClientConn
 	pending     map[string]chan egressOpenResult
 }
@@ -592,6 +750,7 @@ func connectEgressBridge(ctx context.Context, coord *CoordinatorClient, leaseID,
 		ws:          ws,
 		sessionID:   sessionID,
 		conns:       map[string]net.Conn{},
+		hostPending: map[string]context.CancelFunc{},
 		clientConns: map[string]*egressClientConn{},
 		pending:     map[string]chan egressOpenResult{},
 	}, nil
@@ -629,8 +788,10 @@ func reusableEgressSessionID(ctx context.Context, coord *CoordinatorClient, leas
 	return strings.TrimSpace(status.SessionID), nil
 }
 
-func (b *egressBridge) serveHost(ctx context.Context, allow []string) error {
+func (b *egressBridge) serveHost(ctx context.Context, allow []string, upstream *egressUpstreamProxy) error {
+	ctx, cancel := context.WithCancel(ctx)
 	defer b.close()
+	defer cancel()
 	for {
 		var msg egressProxyMessage
 		if err := b.readMessage(ctx, &msg); err != nil {
@@ -638,7 +799,18 @@ func (b *egressBridge) serveHost(ctx context.Context, allow []string) error {
 		}
 		switch msg.Type {
 		case "open":
-			go b.hostOpen(ctx, msg, allow)
+			b.mu.Lock()
+			_, pending := b.hostPending[msg.ID]
+			_, connected := b.conns[msg.ID]
+			if pending || connected {
+				b.mu.Unlock()
+				_ = b.writeJSON(ctx, egressProxyMessage{Type: "error", ID: msg.ID, Error: "connection already open"})
+				continue
+			}
+			openCtx, cancelOpen := context.WithCancel(ctx)
+			b.hostPending[msg.ID] = cancelOpen
+			b.mu.Unlock()
+			go b.hostOpen(openCtx, ctx, msg, allow, upstream)
 		case "data":
 			b.writeConn(msg)
 		case "close":
@@ -647,24 +819,44 @@ func (b *egressBridge) serveHost(ctx context.Context, allow []string) error {
 	}
 }
 
-func (b *egressBridge) hostOpen(ctx context.Context, msg egressProxyMessage, allow []string) {
+func (b *egressBridge) hostOpen(ctx, bridgeCtx context.Context, msg egressProxyMessage, allow []string, upstream *egressUpstreamProxy) {
+	var conn net.Conn
+	var err error
 	if !egressHostAllowed(msg.Host, allow) {
-		_ = b.writeJSON(ctx, egressProxyMessage{Type: "error", ID: msg.ID, Error: "host not allowed"})
-		return
-	}
-	conn, err := dialPublicEgressHost(ctx, msg.Host, msg.Port)
-	if err != nil {
-		_ = b.writeJSON(ctx, egressProxyMessage{Type: "error", ID: msg.ID, Error: err.Error()})
-		return
+		err = errors.New("host not allowed")
+	} else if upstream != nil {
+		conn, err = upstream.dialPublicHost(ctx, msg.Host, msg.Port)
+	} else {
+		conn, err = dialPublicEgressHost(ctx, msg.Host, msg.Port)
 	}
 	b.mu.Lock()
-	b.conns[msg.ID] = conn
-	b.mu.Unlock()
-	if err := b.writeJSON(ctx, egressProxyMessage{Type: "open_ok", ID: msg.ID}); err != nil {
-		_ = conn.Close()
+	// A close frame can arrive while DNS, TLS, or CONNECT is pending. Never
+	// install the connection after its stream has been canceled.
+	if ctx.Err() != nil {
+		b.mu.Unlock()
+		if conn != nil {
+			_ = conn.Close()
+		}
 		return
 	}
-	go b.relayConnToBridge(ctx, msg.ID, conn)
+	cancelOpen := b.hostPending[msg.ID]
+	delete(b.hostPending, msg.ID)
+	if err == nil {
+		b.conns[msg.ID] = conn
+	}
+	b.mu.Unlock()
+	cancelOpen()
+	if err != nil {
+		_ = b.writeJSON(bridgeCtx, egressProxyMessage{Type: "error", ID: msg.ID, Error: err.Error()})
+		return
+	}
+	stopCancellation := context.AfterFunc(bridgeCtx, func() { _ = conn.Close() })
+	defer stopCancellation()
+	if err := b.writeJSON(bridgeCtx, egressProxyMessage{Type: "open_ok", ID: msg.ID}); err != nil {
+		b.closeConn(msg.ID)
+		return
+	}
+	b.relayConnToBridge(bridgeCtx, msg.ID, conn)
 }
 
 func dialPublicEgressHost(ctx context.Context, host, port string) (net.Conn, error) {
@@ -678,32 +870,42 @@ func dialPublicEgressHostWith(
 	lookup func(context.Context, string, string) ([]netip.Addr, error),
 	dial func(context.Context, string, string) (net.Conn, error),
 ) (net.Conn, error) {
-	portNumber, err := strconv.Atoi(strings.TrimSpace(port))
-	if err != nil || portNumber < 1 || portNumber > 65535 {
-		return nil, errors.New("invalid destination port")
-	}
-
 	dialCtx, cancel := context.WithTimeout(ctx, egressDialTimeout)
 	defer cancel()
-	addresses, err := resolveEgressHost(dialCtx, host, lookup)
+	addresses, port, err := publicEgressDestination(dialCtx, host, port, lookup)
 	if err != nil {
 		return nil, err
 	}
 	var lastErr error
 	for _, address := range addresses {
-		if !publicEgressAddress(address) {
-			continue
-		}
-		conn, dialErr := dial(dialCtx, "tcp", net.JoinHostPort(address.String(), strconv.Itoa(portNumber)))
+		conn, dialErr := dial(dialCtx, "tcp", net.JoinHostPort(address.String(), port))
 		if dialErr == nil {
 			return conn, nil
 		}
 		lastErr = dialErr
 	}
-	if lastErr != nil {
-		return nil, fmt.Errorf("dial allowed destination: %w", lastErr)
+	return nil, fmt.Errorf("dial allowed destination: %w", lastErr)
+}
+
+func publicEgressDestination(ctx context.Context, host, port string, lookup func(context.Context, string, string) ([]netip.Addr, error)) ([]netip.Addr, string, error) {
+	portNumber, err := strconv.Atoi(strings.TrimSpace(port))
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return nil, "", errors.New("invalid destination port")
 	}
-	return nil, errors.New("destination did not resolve to a public address")
+	addresses, err := resolveEgressHost(ctx, host, lookup)
+	if err != nil {
+		return nil, "", err
+	}
+	public := addresses[:0]
+	for _, address := range addresses {
+		if publicEgressAddress(address) {
+			public = append(public, address)
+		}
+	}
+	if len(public) == 0 {
+		return nil, "", errors.New("destination did not resolve to a public address")
+	}
+	return public, strconv.Itoa(portNumber), nil
 }
 
 func resolveEgressHost(
@@ -1164,6 +1366,10 @@ func (b *egressBridge) closeConn(id string) {
 	conn := b.conns[id]
 	client := b.clientConns[id]
 	pending := b.pending[id]
+	if cancel := b.hostPending[id]; cancel != nil {
+		cancel()
+		delete(b.hostPending, id)
+	}
 	delete(b.conns, id)
 	delete(b.clientConns, id)
 	delete(b.pending, id)
@@ -1201,11 +1407,12 @@ func (b *egressBridge) close() {
 	if b == nil {
 		return
 	}
-	if b.ws != nil {
-		_ = b.ws.Close(websocket.StatusNormalClosure, "egress stopped")
-	}
 	b.mu.Lock()
 	var closeConns []net.Conn
+	for id, cancel := range b.hostPending {
+		cancel()
+		delete(b.hostPending, id)
+	}
 	for id, conn := range b.conns {
 		closeConns = append(closeConns, conn)
 		delete(b.conns, id)
@@ -1221,6 +1428,9 @@ func (b *egressBridge) close() {
 	b.mu.Unlock()
 	for _, conn := range closeConns {
 		_ = conn.Close()
+	}
+	if b.ws != nil {
+		_ = b.ws.Close(websocket.StatusNormalClosure, "egress stopped")
 	}
 }
 
@@ -1458,6 +1668,63 @@ func remoteEgressClientCommand(coordinatorURL, leaseID, sessionID, listen string
 
 func remoteStopEgressClientCommand() string {
 	return "pkill -f '[c]rabbox-egress-client egress client' >/dev/null 2>&1 || true"
+}
+
+func remoteStopEgressClientSessionCommand(leaseID, sessionID string) string {
+	args := []string{egressRemoteBinary, "egress", "client", egressStopSessionArg, "--id", leaseID, "--session", sessionID}
+	for i, arg := range args {
+		args[i] = shellQuote(arg)
+	}
+	return strings.Join(args, " ")
+}
+
+func stopRemoteEgressClientSession(ctx context.Context, target SSHTarget, leaseID, sessionID string) error {
+	output, err := runSSHCombinedOutputLimit(ctx, target, remoteStopEgressClientSessionCommand(leaseID, sessionID), 8*1024)
+	if err != nil {
+		return Exit(5, "stop remote egress session %s: %v\n%s", sessionID, err, output)
+	}
+	return nil
+}
+
+// Bootstrap holds the worker's lease lock through child publication. Stop
+// closes admission under that same lock before inspecting any processes.
+func lockEgressClientSession(ctx context.Context, leaseID, sessionID string) (string, func(), error) {
+	lockID := "client-" + leaseID
+	_, pidPath, err := egressDaemonPaths(lockID)
+	if err != nil {
+		return "", nil, err
+	}
+	unlock, err := acquireEgressDaemonLock(ctx, lockID)
+	return fmt.Sprintf("%s.session-%x.stopped", pidPath, sha256.Sum256([]byte(sessionID))), unlock, err
+}
+
+func stopEgressClientSessionAdmission(stopPath string) error {
+	file, err := os.OpenFile(stopPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if os.IsExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("close egress client session admission: %w", err)
+	}
+	return file.Close()
+}
+
+func egressClientSessionArgsMatch(args []string, leaseID, sessionID string) bool {
+	if len(args) < 4 || args[1] != "egress" || args[2] != "client" || args[3] == egressStopSessionArg {
+		return false
+	}
+	if args[3] == egressTicketChildArg || args[3] == egressTicketStdinArg {
+		args = args[4:]
+	} else {
+		args = args[3:]
+	}
+	fs := newFlagSet("egress client process", io.Discard)
+	options := registerEgressClientFlags(fs, Config{})
+	if err := fs.Parse(args); err != nil {
+		return false
+	}
+	setIDFromFirstArg(fs, options.id)
+	return *options.id == leaseID && *options.sessionID == sessionID
 }
 
 func waitRemoteEgressClient(ctx context.Context, target SSHTarget, listen string) error {

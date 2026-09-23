@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -987,5 +988,306 @@ func TestDoSandboxRetryDoesNotRetryOtherErrors(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("expected 1 call for non-retryable error, got %d", calls)
+	}
+}
+
+// A finite local archive with an observable in-flight Read. The test releases
+// that Read itself; it does not require cancellation to interrupt arbitrary I/O.
+type multipartLifetimeReadSeeker struct {
+	file             *os.File
+	entered          chan struct{}
+	release          chan struct{}
+	pauseOnce        sync.Once
+	releaseOnce      sync.Once
+	reading          atomic.Bool
+	seekWhileReading atomic.Bool
+	closeCalls       atomic.Int32
+	readErr          error
+}
+
+func (r *multipartLifetimeReadSeeker) Read(p []byte) (int, error) {
+	r.reading.Store(true)
+	defer r.reading.Store(false)
+	r.pauseOnce.Do(func() { close(r.entered); <-r.release })
+	if r.readErr != nil {
+		return 0, r.readErr
+	}
+	return r.file.Read(p)
+}
+
+func (r *multipartLifetimeReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	if r.reading.Load() {
+		r.seekWhileReading.Store(true)
+		return 0, errors.New("archive reader still borrowed by multipart producer")
+	}
+	return r.file.Seek(offset, whence)
+}
+
+func (r *multipartLifetimeReadSeeker) Close() error { r.closeCalls.Add(1); return r.file.Close() }
+
+func (r *multipartLifetimeReadSeeker) resume() { r.releaseOnce.Do(func() { close(r.release) }) }
+
+func TestUploadFileDoesNotRewindWhilePreviousMultipartReadIsActive(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		archive := filepath.Join(t.TempDir(), "archive.tgz")
+		if err := os.WriteFile(archive, []byte("finite archive payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := os.Open(archive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		source := &multipartLifetimeReadSeeker{file: file, entered: make(chan struct{}), release: make(chan struct{})}
+		defer source.resume()
+		producerTransportDone := make(chan error, 1)
+		var parts atomic.Int32
+		retriedBytes := make(chan string, 1)
+		response := func(code int, body string) *http.Response {
+			return &http.Response{StatusCode: code, Status: fmt.Sprintf("%d %s", code, http.StatusText(code)), Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
+		}
+		httpClient := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodPut && req.Body != nil {
+				_, _ = io.Copy(io.Discard, req.Body)
+				_ = req.Body.Close()
+			}
+			switch {
+			case req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/sandboxes/sbx-owned"):
+				return response(200, `{"metadata":{"name":"sbx-owned","url":"http://127.0.0.1:9443/sandbox/sbx-owned"},"status":"DEPLOYED"}`), nil
+			case req.Method == http.MethodPost && strings.Contains(req.URL.Path, "/filesystem-multipart/initiate/"):
+				return response(200, `{"uploadId":"owned-upload"}`), nil
+			case req.Method == http.MethodPut && strings.HasSuffix(req.URL.Path, "/part"):
+				if parts.Add(1) == 1 {
+					// RoundTripper may return response headers before request-body completion
+					// and close the body asynchronously. Its body owner is explicitly joined.
+					go func() {
+						_, copyErr := io.Copy(io.Discard, req.Body)
+						_ = req.Body.Close()
+						producerTransportDone <- copyErr
+					}()
+					<-source.entered
+					return response(503, "WORKLOAD_UNAVAILABLE"), nil
+				}
+				multipartBody, parseErr := req.MultipartReader()
+				if parseErr != nil {
+					_ = req.Body.Close()
+					return nil, parseErr
+				}
+				filePart, parseErr := multipartBody.NextPart()
+				if parseErr != nil {
+					_ = req.Body.Close()
+					return nil, parseErr
+				}
+				payload, copyErr := io.ReadAll(filePart)
+				if copyErr == nil {
+					_, copyErr = multipartBody.NextPart()
+					if copyErr == io.EOF {
+						copyErr = nil
+					}
+				}
+				_ = req.Body.Close()
+				if copyErr != nil {
+					return nil, copyErr
+				}
+				retriedBytes <- string(payload)
+				return response(200, `{"etag":"synthetic-etag","partNumber":1}`), nil
+			case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/complete"):
+				return response(204, ""), nil
+			default:
+				return nil, fmt.Errorf("unexpected request %s %s", req.Method, req.URL.Path)
+			}
+		})}
+		client := &restClient{base: "http://127.0.0.1:9443", http: httpClient, dataHTTP: httpClient}
+		result := make(chan error, 1)
+		go func() { result <- client.UploadFile(t.Context(), "sbx-owned", "/tmp/archive.tgz", source) }()
+		select {
+		case <-source.entered:
+		case early := <-result:
+			t.Fatalf("upload ended before controlled producer read: %v", early)
+		}
+		synctest.Wait()
+		overlappingSeek := source.seekWhileReading.Load()
+		source.resume()
+		uploadErr := <-result
+		<-producerTransportDone
+		synctest.Wait()
+		if uploadErr != nil {
+			var apiErr apiError
+			if !errors.As(uploadErr, &apiErr) || apiErr.StatusCode != 503 || !strings.Contains(apiErr.Body, "WORKLOAD_UNAVAILABLE") {
+				t.Fatalf("HTTP failure precedence changed: %v", uploadErr)
+			}
+		}
+		if overlappingSeek {
+			t.Fatalf("retry attempted Seek while the previous multipart producer still owned an active Read; original HTTP 503 preserved: %v", uploadErr)
+		}
+		if uploadErr != nil {
+			t.Fatalf("completed producer should permit the existing retry: %v", uploadErr)
+		}
+		if parts.Load() != 2 {
+			t.Fatalf("part attempts=%d, want existing retry", parts.Load())
+		}
+		if got := <-retriedBytes; got != "finite archive payload" {
+			t.Fatalf("retry payload=%q", got)
+		}
+		if source.closeCalls.Load() != 0 {
+			t.Fatal("borrowed source was closed")
+		}
+		if _, err := source.Seek(0, io.SeekStart); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := io.ReadAll(source); err != nil || string(got) != "finite archive payload" {
+			t.Fatalf("caller lost source ownership: %q %v", got, err)
+		}
+	})
+}
+
+func TestMultipartAttemptRetainsBorrowedSourceUntilCompletion(t *testing.T) {
+	t.Setenv("CRABBOX_BLAXEL_API_KEY", "synthetic-source-secret")
+	for _, tc := range []struct {
+		name, response, want                                     string
+		status                                                   int
+		sourceFailure, cancel, transportFailure, responseFailure bool
+	}{
+		{name: "early success finishes upload", status: 200, response: `{"etag":"ok"}`},
+		{name: "producer error after success", status: 200, response: `{"etag":"ok"}`, sourceFailure: true, want: "source"},
+		{name: "HTTP error remains primary", status: 400, response: "rejected", sourceFailure: true, want: "http"},
+		{name: "retryable HTTP error remains primary", status: 503, response: "WORKLOAD_UNAVAILABLE", sourceFailure: true, want: "http"},
+		{name: "decode error remains primary", status: 200, response: "{", sourceFailure: true, want: "decode"},
+		{name: "missing etag remains primary", status: 200, response: "{}", sourceFailure: true, want: "etag"},
+		{name: "transport failure remains primary", transportFailure: true, sourceFailure: true, want: "transport"},
+		{name: "response read failure remains primary", status: 200, response: `{"etag":"ok"}`, responseFailure: true, sourceFailure: true, want: "read"},
+		{name: "cancellation awaits borrowed read", status: 200, response: `{"etag":"ok"}`, cancel: true, want: "cancel"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				archive := filepath.Join(t.TempDir(), "archive")
+				if err := os.WriteFile(archive, []byte("payload"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				file, err := os.Open(archive)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer file.Close()
+				sourceErr := errors.New("synthetic source read failure: synthetic-source-secret")
+				transportErr := errors.New("synthetic transport failure")
+				responseErr := errors.New("synthetic response read failure")
+				source := &multipartLifetimeReadSeeker{file: file, entered: make(chan struct{}), release: make(chan struct{})}
+				if tc.sourceFailure {
+					source.readErr = sourceErr
+				}
+				defer source.resume()
+				bodyDone := make(chan struct{}, 1)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				httpClient := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Method == http.MethodGet {
+						return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"metadata":{"name":"sbx-owned","url":"http://127.0.0.1:9443/sandbox/sbx-owned"}}`)), Header: make(http.Header)}, nil
+					}
+					go func() { _, _ = io.Copy(io.Discard, req.Body); _ = req.Body.Close(); bodyDone <- struct{}{} }()
+					<-source.entered
+					if tc.transportFailure {
+						return nil, transportErr
+					}
+					var body io.ReadCloser = io.NopCloser(strings.NewReader(tc.response))
+					if tc.responseFailure {
+						body = &blaxelResponseBody{Reader: strings.NewReader(tc.response), readErr: responseErr, close: func() error { return nil }}
+					}
+					return &http.Response{StatusCode: tc.status, Body: body, Header: make(http.Header)}, nil
+				})}
+				client := &restClient{base: "http://127.0.0.1:9443", http: httpClient, dataHTTP: httpClient}
+				result := make(chan error, 1)
+				go func() {
+					_, err := client.uploadMultipartPart(ctx, "sbx-owned", "upload", 1, "archive", source)
+					result <- err
+				}()
+				select {
+				case <-source.entered:
+				case err := <-result:
+					t.Fatalf("returned before controlled read: %v", err)
+				}
+				synctest.Wait()
+				if tc.cancel {
+					cancel()
+					synctest.Wait()
+				}
+				returnedEarly := false
+				var uploadErr error
+				select {
+				case uploadErr = <-result:
+					returnedEarly = true
+				default:
+				}
+				bodyStopped := false
+				select {
+				case <-bodyDone:
+					bodyStopped = true
+				default:
+				}
+				wantAbort := tc.want == "http" || tc.want == "decode" || tc.want == "etag" || tc.want == "transport" || tc.want == "read" || tc.cancel
+				if bodyStopped != wantAbort {
+					t.Errorf("pipe stopped=%v want=%v while Read paused", bodyStopped, wantAbort)
+				}
+				source.resume()
+				if !returnedEarly {
+					uploadErr = <-result
+				}
+				if !bodyStopped {
+					<-bodyDone
+				}
+				synctest.Wait()
+				if returnedEarly {
+					t.Errorf("attempt returned before borrowed Read completed: %v", uploadErr)
+				}
+				if source.closeCalls.Load() != 0 {
+					t.Error("attempt closed borrowed source")
+				}
+				if _, err := file.Seek(0, io.SeekStart); err != nil {
+					t.Fatal(err)
+				}
+				if data, err := io.ReadAll(file); err != nil || string(data) != "payload" {
+					t.Fatalf("caller ownership lost: %q %v", data, err)
+				}
+				switch tc.want {
+				case "":
+					if uploadErr != nil {
+						t.Fatal(uploadErr)
+					}
+				case "source":
+					if uploadErr != nil && strings.Contains(uploadErr.Error(), "synthetic-source-secret") {
+						t.Fatal("producer error bypassed existing redaction")
+					}
+					if !errors.Is(uploadErr, sourceErr) {
+						t.Fatalf("error=%v want source failure", uploadErr)
+					}
+				case "http":
+					var apiErr apiError
+					if !errors.As(uploadErr, &apiErr) || apiErr.StatusCode != tc.status || apiErr.Body != tc.response {
+						t.Fatalf("HTTP precedence: %v", uploadErr)
+					}
+				case "decode":
+					var syntaxErr *json.SyntaxError
+					if !errors.As(uploadErr, &syntaxErr) {
+						t.Fatalf("decode precedence: %v", uploadErr)
+					}
+				case "etag":
+					if uploadErr == nil || uploadErr.Error() != "blaxel multipart upload response omitted etag" {
+						t.Fatalf("ETag precedence: %v", uploadErr)
+					}
+				case "transport":
+					if !errors.Is(uploadErr, transportErr) {
+						t.Fatalf("transport precedence: %v", uploadErr)
+					}
+				case "read":
+					if !errors.Is(uploadErr, responseErr) {
+						t.Fatalf("response-read precedence: %v", uploadErr)
+					}
+				case "cancel":
+					if !errors.Is(uploadErr, context.Canceled) {
+						t.Fatalf("cancellation error=%v", uploadErr)
+					}
+				}
+			})
+		})
 	}
 }

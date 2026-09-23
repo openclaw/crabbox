@@ -33,6 +33,8 @@ type Client interface {
 	GetProcessLogs(context.Context, string, string) (ProcessLogs, error)
 	StopProcess(context.Context, string, string) error
 	WriteFile(context.Context, string, WriteFileRequest) error
+	// UploadFile borrows its reader until return and never closes it. Cancellation
+	// stops HTTP/pipe work but may wait for a noncooperative source Read to finish.
 	UploadFile(context.Context, string, string, io.Reader) error
 	GetDirectoryTree(context.Context, string, string) (DirectoryTree, error)
 }
@@ -545,6 +547,10 @@ func (c *restClient) uploadMultipartPart(ctx context.Context, sandbox, uploadID 
 	}
 	pr, pw := io.Pipe()
 	writer := multipart.NewWriter(pw)
+	producerDone := make(chan error, 1)
+	stopCancel := context.AfterFunc(ctx, func() { _ = pr.CloseWithError(ctx.Err()) })
+	defer stopCancel()
+	defer pr.Close()
 	go func() {
 		part, err := writer.CreateFormFile("file", filename)
 		if err == nil {
@@ -554,18 +560,28 @@ func (c *restClient) uploadMultipartPart(ctx context.Context, sandbox, uploadID 
 			err = closeErr
 		}
 		_ = pw.CloseWithError(err)
+		producerDone <- err
 	}()
 	values := url.Values{"partNumber": []string{fmt.Sprintf("%d", partNumber)}}
 	var out multipartUploadPart
 	_, err = c.doMultipartAt(ctx, base, http.MethodPut, "/filesystem-multipart/"+url.PathEscape(uploadID)+"/part", values, writer.FormDataContentType(), pr, &out)
+	if err == nil && strings.TrimSpace(out.ETag) == "" {
+		err = errors.New("blaxel multipart upload response omitted etag")
+	}
+	if err != nil {
+		_ = pr.CloseWithError(err)
+	}
+	// A response can precede request-body completion. Keep borrowing the source
+	// until the producer exits, even if cancellation cannot interrupt its Read.
+	producerErr := <-producerDone
 	if err != nil {
 		return multipartUploadPart{}, err
 	}
+	if producerErr != nil {
+		return multipartUploadPart{}, redactError(producerErr)
+	}
 	if out.PartNumber == 0 {
 		out.PartNumber = partNumber
-	}
-	if strings.TrimSpace(out.ETag) == "" {
-		return multipartUploadPart{}, errors.New("blaxel multipart upload response omitted etag")
 	}
 	return out, nil
 }

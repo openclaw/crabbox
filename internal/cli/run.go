@@ -853,7 +853,8 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	}
 	envSelection.Inline = mergeEnv(envSelection.Inline, expansion.Env)
 	envSelection.Effective = mergeEnv(envSelection.Effective, expansion.Env)
-	stripExternalDesktopPasswordFromRunEnv(cfg, &envSelection)
+	deniedEnv := append(externalDesktopChildEnvDenylist(cfg, cfg.TargetOS), a.runEnvDenylist...)
+	envSelection.remove(deniedEnv...)
 	executionRunID, err := newRunID()
 	if err != nil {
 		return Exit(7, "create run identity: %v", err)
@@ -1483,7 +1484,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		ctx = context.WithValue(ctx, nativeRuntimeLeaseKey{}, leaseID)
 		observation.BindLease(leaseID, ServerSlug(server))
 		applyResolvedServerConfig(&cfg, server)
-		stripTargetCredentialsFromRunEnv(&envSelection, target)
+		envSelection.remove(target.ChildEnvDenylist...)
 		if borrowedPool != nil && strings.TrimSpace(borrowedPool.Entry.WorkRoot) != "" {
 			cfg.WorkRoot = strings.TrimSpace(borrowedPool.Entry.WorkRoot)
 		}

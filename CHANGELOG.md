@@ -2,10 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- Add `egress run` to own proxy setup, remote execution, and session cleanup for one job, with optional HTTP(S) upstream chaining that keeps credentials on the host and never falls back to direct egress; `egress stop --session` supports scoped cleanup and prevents late startup. [PR 2506](https://github.com/openclaw/crabbox/pull/2506).
+
 ### Fixes
 
 - Report Blacksmith sync guard timeouts consistently in run results, timing data, and failure bundles without reclassifying ordinary exit 124 or an earlier workload failure.
+- Finish Blaxel multipart producers before retrying or releasing borrowed archives, preserving HTTP error precedence and early-success uploads. [PR 2505](https://github.com/openclaw/crabbox/pull/2505). Thanks @steipete.
 - Reject overflowing Nomad, Agent Sandbox, and Superserve execution timeouts before provider dispatch while preserving disabled deadlines, service defaults, and caller cancellation. [PR 2503](https://github.com/openclaw/crabbox/pull/2503). Thanks @steipete.
+- Reject oversized Superserve-derived sandbox lifetimes before rounding seconds, preventing duration overflow from bypassing the seven-day cap. [PR 2504](https://github.com/openclaw/crabbox/pull/2504). Thanks @steipete.
 
 ## 0.65.0 - 2026-09-22
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,6 +24,11 @@ import (
 // TestMain keeps re-invoked test binaries alive as daemon children instead of
 // recursively running the suite.
 func TestMain(m *testing.M) {
+	if os.Getenv("CRABBOX_TEST_EGRESS_SESSION_CHILD") == "1" {
+		fmt.Fprintln(os.Stdout, "ready")
+		_, _ = io.Copy(os.Stdout, os.Stdin)
+		os.Exit(0)
+	}
 	if os.Getenv("CRABBOX_TEST_EGRESS_BOOTSTRAP") != "" && len(os.Args) > 1 && os.Args[1] == "egress" {
 		os.Exit(runEgressBootstrapTestProcess())
 	}
