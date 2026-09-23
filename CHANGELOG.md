@@ -24,13 +24,12 @@
 
 ### Fixes
 
-- Reject oversized Superserve-derived sandbox lifetimes before rounding seconds, preventing duration overflow from bypassing the seven-day cap.
-
 - Recover direct Azure fixed-ID worker cleanup after local claim loss, preserve cancellation, and resume interrupted cleanup from durable resource identities. [PR 2501](https://github.com/openclaw/crabbox/pull/2501). Thanks @galiniliev.
 - Reject overflowing OpenComputer and Blaxel execution budgets before provider dispatch, including response grace, while preserving timeout defaults, payloads, and cancellation. [PR 2497](https://github.com/openclaw/crabbox/pull/2497). Thanks @steipete.
 - Reject overflowing Firecracker disk and Hyper-V memory byte conversions before lease state, filesystem copies, or native VM creation, preserving existing sizing defaults and recovery paths. [PR 2495](https://github.com/openclaw/crabbox/pull/2495). Thanks @steipete.
 - Prevent out-of-range persisted idle seconds from authorizing Cloud Run Sandbox idle expiry while preserving independent TTL, stale-create, and invalid-timestamp cleanup policies. [PR 2496](https://github.com/openclaw/crabbox/pull/2496). Thanks @steipete.
 - Bound Upstash Box readiness response reads by the five-minute creation wait, preserve caller cancellation causes, and retain detached cleanup after failed creation. [PR 2498](https://github.com/openclaw/crabbox/pull/2498). Thanks @steipete.
+- Reject oversized Superserve-derived sandbox lifetimes before rounding seconds, preventing duration overflow from bypassing the seven-day cap. [PR 2504](https://github.com/openclaw/crabbox/pull/2504). Thanks @steipete.
 - Preserve sandbox and Nomad resources with overflowing idle timeouts by sharing checked duration conversion, while retaining provider-specific TTL, deadline, timestamp, and ownership policies. [PR 2494](https://github.com/openclaw/crabbox/pull/2494). Thanks @steipete.
 - Preserve running leases with malformed idle timeouts instead of letting duration overflow trigger cleanup; share the bounded expiry check with Machine0 while retaining provider ownership and lifecycle safeguards. [PR 2492](https://github.com/openclaw/crabbox/pull/2492). Thanks @steipete.
 - Preserve Hostinger caller cancellation through acquisition and stop waits, interrupt polling backoff promptly, and bound acquisition reads by the existing ten-minute readiness budget. [PR 2499](https://github.com/openclaw/crabbox/pull/2499). Thanks @steipete.
