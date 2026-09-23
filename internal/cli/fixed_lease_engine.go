@@ -151,6 +151,9 @@ const (
 )
 
 type FixedReleasePolicy struct {
+	// PersistBinding journals supplied cleanup bindings before native deletion,
+	// including for formats without a legacy deletion state.
+	PersistBinding bool
 	// Started distinguishes rejection by the ownership fence from failure after
 	// deletion admission. Cleanup must skip a freshly reclaimed candidate.
 	Started                 *bool
@@ -427,12 +430,15 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 		}
 		if kind.DeletionState != "" {
 			claim.FixedCreateIntent.State = kind.DeletionState
+		}
+		persistBinding := policy != nil && policy.PersistBinding && (observed.Binding != nil || policy.Binding != nil)
+		if kind.DeletionState != "" || persistBinding {
 			if err := tx.Record("deleting"); err != nil {
 				return err
 			}
 		}
-		// Dialects without a deletion state leave durable custody unchanged at
-		// admission; adapters may still record native cleanup acknowledgements.
+		// Otherwise admission leaves durable custody unchanged; adapters may
+		// still record native cleanup acknowledgements.
 		// All ownership checks and durable deletion-entry writes have passed;
 		// failures from this point must retain/report the admitted cleanup.
 		markStarted(true)

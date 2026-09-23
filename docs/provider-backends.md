@@ -302,8 +302,11 @@ publication under one durable claim lock. Existing shared claim resolvers and
 native cleanup graphs remain reusable; a deletion callback must prove completion,
 not merely request admission. Formats with a `FixedLeaseKind.DeletionState`
 persist their cleanup marker and the `deleting` journal phase before native
-deletion. Formats without that state leave the exact durable claim and bound
-evidence unchanged at deletion admission. Adapters may still persist native
+deletion. By default, formats without that state leave the exact durable claim
+and bound evidence unchanged at deletion admission. An adapter whose deletion
+depends on captured recovery identities opts into `FixedReleasePolicy.PersistBinding`:
+core journals supplied observation or release bindings before calling `DeleteExact`,
+retaining them if native cleanup fails. Adapters may still persist native
 cleanup acknowledgements through their existing witness contract. Existing
 deletion markers block acquisition replay and retain their admitted status on
 stale retries.

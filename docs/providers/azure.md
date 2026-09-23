@@ -116,6 +116,10 @@ attempt has not produced an identifiable VM, Crabbox retains the claim and key
 and refuses both replacement and unproven deletion. Inspect the named Azure
 resources and resolve the incomplete attempt before removing recovery state.
 
+Before deleting a fixed VM, Azure cleanup durably records its exact NIC,
+public-IP, and disk identities. A retry can finish companion-resource cleanup
+after the VM disappears, including when the claim was explicitly recovered.
+
 ## Backend selection
 
 `azure.backend` (CLI `--azure-backend`, env `CRABBOX_AZURE_BACKEND`) selects the

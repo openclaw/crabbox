@@ -96,6 +96,71 @@ func fixedCleanupKind() FixedLeaseKind {
 	return FixedLeaseKind{ClaimProvider: "fixture-fixed", IntentVersion: 1, Label: "fixture", DeletionState: "deleting"}
 }
 
+func TestFixedCleanupPersistsRecoveryBindingBeforeDeletion(t *testing.T) {
+	for _, source := range []string{"observation", "release"} {
+		t.Run(source, func(t *testing.T) {
+			isolateTestUserDirs(t)
+			claim := fixedCleanupClaim(t, "acquired")
+			kind := fixedCleanupKind()
+			kind.DeletionState = ""
+			binding := &FixedResourceBinding{Labels: map[string]string{"cleanup_child": "original-child"}}
+			policy := &FixedReleasePolicy{PersistBinding: true}
+			if source == "release" {
+				policy.Binding = binding
+			}
+			interrupted := errors.New("parent deleted; companion cleanup interrupted")
+			ops := FixedLeaseOperations[string]{
+				Release: policy,
+				ObserveExact: func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[string], error) {
+					observed := FixedObservation[string]{Candidates: []string{"resource"}}
+					if source == "observation" {
+						observed.Binding = binding
+					}
+					return observed, nil
+				},
+				DeleteExact: func(context.Context, *FixedTransaction, string) error {
+					durable, err := ReadLeaseClaim(claim.LeaseID)
+					if err != nil || durable.Labels["cleanup_child"] != "original-child" {
+						t.Errorf("cleanup binding was not durable before deletion: %v", err)
+					}
+					return interrupted
+				},
+			}
+			if err := DeleteFixedResource(t.Context(), kind, claim, ops); !errors.Is(err, interrupted) {
+				t.Fatal(err)
+			}
+			retained, err := ReadLeaseClaim(claim.LeaseID)
+			if err != nil || retained.Labels["cleanup_child"] != "original-child" || retained.FixedCreateIntent.Journal == nil || retained.FixedCreateIntent.Journal.Phase != "deleting" {
+				t.Fatalf("failed cleanup lost recovery evidence: %v", err)
+			}
+			if retained.CloudID != claim.CloudID || retained.CloudImmutableID != claim.CloudImmutableID || retained.FixedCreateIntent.State != claim.FixedCreateIntent.State {
+				t.Fatal("cleanup binding changed resource identity or legacy state")
+			}
+			// Once the parent is gone, retry must use the original durable binding.
+			ops.ObserveExact = func(_ context.Context, tx *FixedTransaction, _ FixedObserveMode) (FixedObservation[string], error) {
+				return FixedObservation[string]{Candidates: []string{tx.Claim.Labels["cleanup_child"]}}, nil
+			}
+			ops.Release.Binding = nil
+			ops.DeleteExact = func(_ context.Context, _ *FixedTransaction, child string) error {
+				if child != "original-child" {
+					t.Fatalf("cleanup retry retargeted companion: %q", child)
+				}
+				return nil
+			}
+			if err := DeleteFixedResource(t.Context(), kind, retained, ops); err != nil {
+				t.Fatal(err)
+			}
+			terminal, err := ReadLeaseClaim(claim.LeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := kind.ValidateTerminalClaim(terminal, retained, claim.LeaseID, nil); err != nil {
+				t.Fatalf("retry did not finalize its receipt: %v", err)
+			}
+		})
+	}
+}
+
 func TestFixedCleanupWithoutDeletionStatePreservesFailedClaim(t *testing.T) {
 	for _, state := range []string{"prepared", "acquired"} {
 		for _, bindingSource := range []string{"none", "observation", "release"} {
