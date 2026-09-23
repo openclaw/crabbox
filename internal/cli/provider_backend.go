@@ -1993,8 +1993,11 @@ func loadBackend(cfg Config, rt Runtime) (Backend, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &coordinatorLeaseBackend{spec: provider.Spec(), cfg: cfg, direct: ssh, coord: coord, rt: rt}, nil
+		resolved := &coordinatorLeaseBackend{spec: provider.Spec(), cfg: cfg, direct: ssh, coord: coord, rt: rt}
+		rememberExplicitProviderBestEffort(cfg, rt.Stderr)
+		return resolved, nil
 	}
+	rememberExplicitProviderBestEffort(cfg, rt.Stderr)
 	return backend, nil
 }
 
