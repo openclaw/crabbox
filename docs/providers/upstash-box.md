@@ -124,6 +124,13 @@ Accepted values, validated before the API is called:
    (up to 5 minutes) until the Box reports a ready status (`idle`, `running`,
    `ready`, or `paused`). Crabbox stores a local claim with a normal `cbx_...`
    lease ID and a friendly slug, bound to the exact Box ID and API endpoint.
+
+   The readiness budget starts after the create request returns and bounds both
+   polling delays and response reads. Completed ready observations still win at
+   the deadline; transient polling errors retain the last observed status.
+   Failed or canceled readiness attempts delete the new Box with a separate
+   15-second cleanup budget, preserving the original failure if cleanup also fails.
+
 2. By default `run` archive-syncs the working tree: Git manifest → local
    `tar -czf` → upload into the Box workspace as
    `.crabbox-upstash-box-sync-*.tgz` → in-Box `tar -xzf` into the workdir

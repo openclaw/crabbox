@@ -121,28 +121,49 @@ func (c *client) CreateBox(ctx context.Context, req createRequest) (boxData, err
 	if err := c.doJSON(ctx, http.MethodPost, "/v2/box", nil, body, &box); err != nil {
 		return boxData{}, err
 	}
-	deadline := time.Now().Add(5 * time.Minute)
-	for {
+	check := func() (bool, error) {
 		status := strings.ToLower(strings.TrimSpace(box.Status))
 		if createStatusReady(status) {
-			return box, nil
+			return true, nil
 		}
 		if status == "error" || status == "failed" {
-			return boxData{}, c.cleanupCreatedBox(box.ID, core.Exit(5, "upstash-box creation failed for %s", box.ID))
+			return false, core.Exit(5, "upstash-box creation failed for %s", box.ID)
 		}
-		if time.Now().After(deadline) {
-			return boxData{}, c.cleanupCreatedBox(box.ID, core.Exit(5, "upstash-box creation timed out for %s status=%s", box.ID, core.Blank(box.Status, "unknown")))
-		}
-		select {
-		case <-ctx.Done():
-			return boxData{}, c.cleanupCreatedBox(box.ID, ctx.Err())
-		case <-time.After(2 * time.Second):
-		}
-		next, err := c.GetBox(ctx, box.ID)
-		if err == nil {
-			box = next
-		}
+		return false, nil
 	}
+	// The completed create response wins even if the caller canceled concurrently.
+	if ready, err := check(); ready || err != nil {
+		if err != nil {
+			return boxData{}, c.cleanupCreatedBox(box.ID, err)
+		}
+		return box, nil
+	}
+	initial := true
+	ready, err := shared.PollReadiness(ctx, shared.ReadinessOptions[boxData]{
+		Timeout: 5 * time.Minute, Interval: 2 * time.Second,
+		Check: func(next boxData, fetchErr error) (bool, error) {
+			if fetchErr == nil {
+				box = next
+			}
+			return check()
+		},
+		Diagnostic: func(stop shared.ReadinessStop) error {
+			if stop.BudgetExpired {
+				return core.Exit(5, "upstash-box creation timed out for %s status=%s", box.ID, core.Blank(box.Status, "unknown"))
+			}
+			return stop.Err
+		},
+	}, func(waitCtx context.Context) (boxData, error) {
+		if initial {
+			initial = false
+			return box, nil
+		}
+		return c.GetBox(waitCtx, box.ID)
+	})
+	if err != nil {
+		return boxData{}, c.cleanupCreatedBox(box.ID, err)
+	}
+	return ready, nil
 }
 
 func (c *client) cleanupCreatedBox(boxID string, cause error) error {
