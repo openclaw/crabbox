@@ -908,28 +908,184 @@ func TestResolveVMUsesDirectHostingerGetForVMID(t *testing.T) {
 	}
 }
 
+type cancellationObservationAPI struct {
+	*fakeAPI
+	observe func(context.Context) (hostingerVM, error)
+	stop    func(context.Context) error
+}
+
+func (f cancellationObservationAPI) GetVM(ctx context.Context, _ string) (hostingerVM, error) {
+	return f.observe(ctx)
+}
+
+func (f cancellationObservationAPI) StopVM(ctx context.Context, id string) error {
+	if f.stop != nil {
+		return f.stop(ctx)
+	}
+	return f.fakeAPI.StopVM(ctx, id)
+}
+
+func TestHostingerWaitBudgetsBoundReadsAndSleep(t *testing.T) {
+	for _, operation := range []string{"acquire", "stop"} {
+		for _, sleepCancellation := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/sleep-cancel=%t", operation, sleepCancellation), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					api := cancellationObservationAPI{fakeAPI: &fakeAPI{},
+						stop: func(context.Context) error {
+							if !sleepCancellation {
+								time.Sleep(30 * time.Second)
+							}
+							return nil
+						},
+						observe: func(ctx context.Context) (hostingerVM, error) {
+							if sleepCancellation {
+								go func() { time.Sleep(time.Second); cancel() }()
+								return hostingerVM{ID: "vm-budget", State: "starting"}, nil
+							}
+							<-ctx.Done()
+							return hostingerVM{}, ctx.Err()
+						},
+					}
+					started := time.Now()
+					backend := &leaseBackend{}
+					var err error
+					wantTime := 10 * time.Minute
+					if operation == "stop" {
+						err = backend.stopVMAndWait(ctx, api, "vm-budget")
+						wantTime = hostingerStopWaitTimeout
+					} else {
+						_, err = backend.waitForVM(ctx, api, "vm-budget")
+					}
+					wantCause := context.DeadlineExceeded
+					if sleepCancellation {
+						wantTime, wantCause = time.Second, context.Canceled
+					}
+					if !errors.Is(err, wantCause) || time.Since(started) != wantTime {
+						t.Fatalf("elapsed=%s want=%s error=%v", time.Since(started), wantTime, err)
+					}
+					if !sleepCancellation && core.ExitCodeForError(err, 1) != 5 {
+						t.Fatalf("budget diagnostic lost exit 5: %v", err)
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestHostingerStopSubmissionCancellationPrecedence(t *testing.T) {
+	for _, outcome := range []string{"completed-error", "context-error", "wrapped-cause"} {
+		t.Run(outcome, func(t *testing.T) {
+			interrupted := outcome != "completed-error"
+			cause := errors.New("synthetic stop caller cancellation")
+			wrappedCause := fmt.Errorf("interrupted submission: %w", cause)
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			api := cancellationObservationAPI{fakeAPI: &fakeAPI{}, stop: func(ctx context.Context) error {
+				cancel(cause)
+				if outcome == "wrapped-cause" {
+					return wrappedCause
+				}
+				if interrupted {
+					return ctx.Err()
+				}
+				return errors.New("completed stop rejection")
+			}}
+			err := (&leaseBackend{}).stopVMAndWait(ctx, api, "vm-submit")
+			if err == nil || core.ExitCodeForError(err, 1) != 1 {
+				t.Fatalf("stop submission error=%v", err)
+			}
+			if errors.Is(err, context.Canceled) != interrupted || errors.Is(err, cause) != interrupted {
+				t.Fatalf("interrupted=%t error=%v", interrupted, err)
+			}
+			if outcome == "wrapped-cause" && !errors.Is(err, wrappedCause) {
+				t.Fatal("original wrapped submission error was lost")
+			}
+			if strings.Contains(err.Error(), cause.Error()) {
+				t.Fatal("public submission diagnostic exposed the custom cancellation cause")
+			}
+		})
+	}
+}
+
+func TestHostingerWaitCallerCancellationClassification(t *testing.T) {
+	for _, operation := range []string{"acquire", "stop"} {
+		for _, observation := range []string{"interrupted", "completed-ready", "completed-error", "completed-pending"} {
+			if operation == "acquire" && observation == "completed-pending" {
+				continue
+			}
+			t.Run(operation+"/"+observation, func(t *testing.T) {
+				cause := errors.New("synthetic caller canceled wait")
+				ctx, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				api := cancellationObservationAPI{fakeAPI: &fakeAPI{}, observe: func(ctx context.Context) (hostingerVM, error) {
+					cancel(cause)
+					switch observation {
+					case "interrupted":
+						return hostingerVM{}, ctx.Err()
+					case "completed-error":
+						return hostingerVM{}, errors.New("synthetic completed provider failure")
+					case "completed-pending":
+						return hostingerVM{ID: "vm-cancel", State: "stopping"}, nil
+					default:
+						state := "running"
+						if operation == "stop" {
+							state = "stopped"
+						}
+						return hostingerVM{ID: "vm-cancel", State: state, IPv4: hostingerIPAddresses{"192.0.2.1"}}, nil
+					}
+				}}
+				backend := &leaseBackend{}
+				var err error
+				if operation == "stop" {
+					err = backend.stopVMAndWait(ctx, api, "vm-cancel")
+				} else {
+					_, err = backend.waitForVM(ctx, api, "vm-cancel")
+				}
+				switch observation {
+				case "completed-ready":
+					if err != nil {
+						t.Fatalf("completed ready observation lost to cancellation: %v", err)
+					}
+				case "completed-error":
+					if err == nil || !strings.Contains(err.Error(), "synthetic completed provider failure") || errors.Is(err, context.Canceled) {
+						t.Fatalf("completed provider error lost precedence: %v", err)
+					}
+				default:
+					if !errors.Is(err, context.Canceled) || !errors.Is(err, cause) {
+						t.Errorf("caller cancellation identity lost: %v", err)
+					}
+					if err != nil && strings.Contains(err.Error(), "timed out") {
+						t.Errorf("caller cancellation misclassified as timeout: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestWaitForVMRequiresPublicIPBeforeReady(t *testing.T) {
-	api := &fakeAPI{
-		vms: []hostingerVM{{ID: "vm-new", Hostname: "srv.example.test", State: "running"}},
-	}
-	backend := NewLeaseBackend(Provider{}.Spec(), core.Config{Hostinger: core.HostingerConfig{APIToken: "token"}}, core.Runtime{}).(*leaseBackend)
+	synctest.Test(t, func(t *testing.T) {
+		api := &fakeAPI{
+			getSequence: []hostingerVM{
+				{ID: "vm-new", Hostname: "srv.example.test", State: "running"},
+				{ID: "vm-new", Hostname: "srv.example.test", State: "running", IPv4: hostingerIPAddresses{"203.0.113.77"}},
+			},
+		}
+		backend := NewLeaseBackend(Provider{}.Spec(), core.Config{Hostinger: core.HostingerConfig{APIToken: "token"}}, core.Runtime{}).(*leaseBackend)
 
-	oldSleep := hostingerSleep
-	hostingerSleep = func(time.Duration) {
-		api.vms[0].IPv4 = hostingerIPAddresses{"203.0.113.77"}
-	}
-	t.Cleanup(func() { hostingerSleep = oldSleep })
-
-	vm, err := backend.waitForVM(context.Background(), api, "vm-new")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if api.getCalls < 2 {
-		t.Fatalf("getCalls=%d, want wait for second poll with public IP", api.getCalls)
-	}
-	if vm.Host() != "203.0.113.77" {
-		t.Fatalf("host=%q, want public IP before ready", vm.Host())
-	}
+		vm, err := backend.waitForVM(context.Background(), api, "vm-new")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if api.getCalls < 2 {
+			t.Fatalf("getCalls=%d, want wait for second poll with public IP", api.getCalls)
+		}
+		if vm.Host() != "203.0.113.77" {
+			t.Fatalf("host=%q, want public IP before ready", vm.Host())
+		}
+	})
 }
 
 func TestWaitForVMFailsFastOnTerminalState(t *testing.T) {
@@ -939,10 +1095,6 @@ func TestWaitForVMFailsFastOnTerminalState(t *testing.T) {
 				vms: []hostingerVM{{ID: "vm-terminal", Hostname: "srv.example.test", State: state}},
 			}
 			backend := NewLeaseBackend(Provider{}.Spec(), core.Config{Hostinger: core.HostingerConfig{APIToken: "token"}}, core.Runtime{}).(*leaseBackend)
-			oldSleep := hostingerSleep
-			hostingerSleep = func(time.Duration) { t.Fatal("terminal state should not sleep") }
-			t.Cleanup(func() { hostingerSleep = oldSleep })
-
 			_, err := backend.waitForVM(context.Background(), api, "vm-terminal")
 			if err == nil || !strings.Contains(err.Error(), "terminal state="+state) {
 				t.Fatalf("waitForVM error=%v", err)
