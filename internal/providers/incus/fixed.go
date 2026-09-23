@@ -219,6 +219,12 @@ func (b *backend) releaseDurableWithOutcome(ctx context.Context, client instance
 		return core.Exit(4, "Incus lease %s has no durable ownership claim", leaseID)
 	}
 	if claim.FixedCreateIntent.State == "released" {
+		if err := incusLeaseKind.ValidateTerminalClaim(claim, claim, leaseID, nil); err != nil {
+			return err
+		}
+		if err := verifyConnection(client, claim.ProviderScope); err != nil {
+			return err
+		}
 		outcome.Terminal = true
 		return nil
 	}

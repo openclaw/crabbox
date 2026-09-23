@@ -118,6 +118,18 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (lease c
 		if err != nil {
 			return core.LeaseTarget{}, err
 		}
+		// Terminal slugs may belong to a newer live lease; only replay an exact ID.
+		if exists && incusLeaseKind.IsFixedClaim(claim) && claim.FixedCreateIntent.State == "released" && core.IsCanonicalLeaseID(req.ID) && claim.LeaseID == req.ID {
+			if err := verifyConnection(client, claim.ProviderScope); err != nil {
+				return core.LeaseTarget{}, err
+			}
+			lease, _, err := incusLeaseKind.ResolveTerminal(claim, true)
+			if err != nil {
+				return core.LeaseTarget{}, err
+			}
+			lease.Server.Status = "deleted"
+			return lease, nil
+		}
 		if exists && claim.FixedCreateIntent != nil && (claim.FixedCreateIntent.State == "acquired" || claim.FixedCreateIntent.State == "deleting") {
 			if err := verifyConnection(client, claim.ProviderScope); err != nil {
 				return core.LeaseTarget{}, err
@@ -370,7 +382,7 @@ func (b *backend) releaseLease(ctx context.Context, req core.ReleaseLeaseRequest
 
 func (b *backend) ReleaseLeaseMessage(lease core.LeaseTarget) string {
 	instance := core.Blank(core.Blank(lease.Server.CloudID, lease.Server.Name), "-")
-	if incusDeleteOnRelease(lease, b.configForRun()) {
+	if lease.Server.Status == "deleted" || incusDeleteOnRelease(lease, b.configForRun()) {
 		return fmt.Sprintf("deleted lease=%s instance=%s", lease.LeaseID, instance)
 	}
 	return fmt.Sprintf("stopped lease=%s instance=%s retained=true", lease.LeaseID, instance)

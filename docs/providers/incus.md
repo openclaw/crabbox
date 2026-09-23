@@ -206,6 +206,13 @@ finish preparation. A validated deletion is recorded before removing the instanc
 so a lost delete reply can be reconciled by another stop or cleanup. Do not discard the claim to
 work around an ownership conflict.
 
+After confirmed deletion, repeating `stop` with the exact canonical lease ID
+accepts its validated terminal receipt without looking up or deleting another
+instance. The current endpoint, project, and daemon certificate must still match
+the recorded connection identity. Missing or malformed claims still fail. Use
+the canonical ID for this replay: a friendly slug may now name a different live
+lease.
+
 Release deletes the instance by default. With `incus.deleteOnRelease: false`,
 release stops it and retains the key and claim for later `--id` reuse. Both stop
 policies and automatic cleanup require the exact durable ownership claim;
