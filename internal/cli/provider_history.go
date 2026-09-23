@@ -23,7 +23,7 @@ const (
 
 type providerHistoryEntry struct {
 	Provider        string    `json:"provider"`
-	LastSucceededAt time.Time `json:"lastSucceededAt"`
+	LastSelectedAt time.Time `json:"lastSelectedAt"`
 }
 
 type providerHistoryRecord struct {
@@ -116,7 +116,7 @@ func readProviderHistoryForRoot(root string) (providerHistoryRecord, bool, error
 }
 
 func recentProviderFallbackAllowed() bool {
-	if strings.TrimSpace(os.Getenv("CRABBOX_CONFIG")) != "" {
+	if strings.TrimSpace(os.Getenv("CRABBOX_CONFIG")) != "" || truthyEnv(os.Getenv("CI")) {
 		return false
 	}
 	if strings.TrimSpace(os.Getenv(controllerProviderScopeEnv)) != "" ||
@@ -155,7 +155,10 @@ func applyRecentProviderFallback(cfg *Config) {
 }
 
 func rememberExplicitProviderBestEffort(cfg Config, stderr io.Writer) {
-	if cfg.providerSelectionSource != providerSelectionFlag || strings.TrimSpace(cfg.Provider) == "" {
+	if cfg.providerSelectionSource != providerSelectionFlag ||
+		cfg.synthesizedFlagInputs ||
+		strings.TrimSpace(cfg.Provider) == "" ||
+		!recentProviderFallbackAllowed() {
 		return
 	}
 	if err := rememberProviderForCurrentWorkspace(cfg.Provider, time.Now().UTC()); err != nil && stderr != nil {
@@ -205,7 +208,7 @@ func rememberProviderForCurrentWorkspace(providerName string, when time.Time) er
 		}
 	}
 	next := make([]providerHistoryEntry, 0, providerHistoryLimit)
-	next = append(next, providerHistoryEntry{Provider: canonical, LastSucceededAt: when})
+	next = append(next, providerHistoryEntry{Provider: canonical, LastSelectedAt: when})
 	for _, entry := range record.Providers {
 		if normalizeProviderName(entry.Provider) == normalizeProviderName(canonical) {
 			continue
@@ -241,6 +244,14 @@ func clearProviderHistoryForCurrentWorkspace() (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
+	lock := flock.New(path+".lock", flock.SetPermissions(0o600))
+	if err := lock.Lock(); err != nil {
+		return "", false, fmt.Errorf("lock provider history: %w", err)
+	}
+	defer func() {
+		_ = lock.Unlock()
+		_ = lock.Close()
+	}()
 	if err := os.Remove(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return root, false, nil
