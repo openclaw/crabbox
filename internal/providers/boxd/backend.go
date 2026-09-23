@@ -296,7 +296,7 @@ func (b *backend) prepare(ctx context.Context, c *apiClient, claim core.LeaseCla
 	target := core.SSHTargetFromConfig(b.cfg, vm.PublicIP)
 	target.User, target.Port, target.Key, target.SSHHostKey = "boxd", strconv.Itoa(forward.PublicPort), privateKey, hostKey
 	target.TargetOS, target.NetworkKind, target.ReadyCheck = core.TargetLinux, core.NetworkPublic, boxdReadyCheck
-	target.FallbackPorts = nil
+	target.FallbackPorts = []string{}
 	target.DisableHostKeyChecking = false
 	if err := core.UseLeaseKnownHosts(&target, claim.LeaseID); err != nil {
 		return core.LeaseTarget{}, err
@@ -410,7 +410,7 @@ func (b *backend) Resolve(ctx context.Context, req core.ResolveRequest) (core.Le
 		}
 		target.KnownHostsFile = filepath.Join(filepath.Dir(target.Key), "known_hosts")
 		target.ReadyCheck = boxdReadyCheck
-		target.FallbackPorts = nil
+		target.FallbackPorts = []string{}
 		target.DisableHostKeyChecking = false
 		if err := core.WithLeaseClaimUnchanged(claim.LeaseID, claim, func() error {
 			return b.waitSSH(ctx, &target, b.rt.Stderr, "boxd guest ssh", core.BootstrapWaitTimeout(b.cfg))
