@@ -1,9 +1,14 @@
 package shared
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"net/url"
 	"strings"
 	"testing"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
 
 func TestRedactedResponseBodyPreservesFormattingAndAdapterPolicy(t *testing.T) {
@@ -49,5 +54,95 @@ private-material
 	truncated := RedactErrorSecrets(`{"token":"` + strings.Repeat("secret-prefix", 50))
 	if strings.Contains(truncated, "secret-prefix") || !strings.Contains(truncated, `"token":"[redacted]"`) {
 		t.Fatalf("truncated JSON credential was not redacted: %s", truncated)
+	}
+}
+
+func TestErrorWithMessagePreservesPresentationAndTypedCause(t *testing.T) {
+	if got := ErrorWithMessage("unused", nil); got != nil {
+		t.Fatalf("nil cause=%v", got)
+	}
+	original := &url.Error{Op: "Get", URL: "https://example.invalid/private", Err: context.Canceled}
+	wrapped := ErrorWithMessage("prepared message", original)
+	for _, got := range []string{wrapped.Error(), fmt.Sprint(wrapped), fmt.Sprintf("%+v", wrapped), fmt.Sprintf("%s", wrapped)} {
+		if got != "prepared message" {
+			t.Fatalf("unexpected display=%q", got)
+		}
+	}
+	if got := fmt.Errorf("outer: %w", wrapped).Error(); got != "outer: prepared message" {
+		t.Fatalf("wrapped display=%q", got)
+	}
+	if empty := ErrorWithMessage("", original); empty.Error() != "" || !errors.Is(empty, original) {
+		t.Fatal("empty message fell back to raw cause")
+	}
+	var transport *url.Error
+	if !errors.Is(wrapped, original) || !errors.Is(wrapped, context.Canceled) || !errors.As(wrapped, &transport) || transport != original {
+		t.Fatal("cause identity lost")
+	}
+	var exit core.ExitError
+	if errors.As(wrapped, &exit) {
+		t.Fatal("wrapper invented public exit ownership")
+	}
+}
+
+func TestErrorWithMessageDoesNotOwnInnerExitOrClassification(t *testing.T) {
+	for _, code := range []int{0, -1, 7} {
+		inner := core.ExitError{Code: code, Message: "inner diagnostic"}
+		cause := errors.Join(inner, context.DeadlineExceeded)
+		wrapped := ErrorWithMessage("outer presentation", cause)
+		var selected core.ExitError
+		if !core.AsExitError(wrapped, &selected) || selected != inner {
+			t.Fatalf("inner selection changed: %+v", selected)
+		}
+		// This is the selection used by main; a presentation wrapper is not a safe-display boundary.
+		if selected.Message != "inner diagnostic" || wrapped.Error() != "outer presentation" {
+			t.Fatal("display boundaries conflated")
+		}
+		if !errors.Is(wrapped, cause) || !errors.Is(wrapped, context.DeadlineExceeded) {
+			t.Fatal("joined causes lost")
+		}
+		if got, want := core.FinalizeRunResult(core.RunResult{}, wrapped), core.FinalizeRunResult(core.RunResult{}, cause); got.Status != want.Status || got.ErrorKind != want.ErrorKind {
+			t.Fatalf("classification changed: %+v %+v", got, want)
+		}
+		if core.ExitCodeForError(wrapped, 19) != core.ExitCodeForError(cause, 19) {
+			t.Fatal("selected/fallback code changed")
+		}
+	}
+}
+
+func TestErrorWithMessagePreservesPrimaryClassificationOverride(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	primary := PollTerminationError(ctx, errors.New("poll ended"), core.ExitError{Code: -1, Message: "public poll diagnostic"})
+	cause := errors.Join(primary, context.DeadlineExceeded)
+	wrapped := ErrorWithMessage("outer presentation", cause)
+	if core.PrimaryRunClassificationCause(wrapped) != context.Canceled {
+		t.Fatal("secondary failure replaced primary classification")
+	}
+	got := core.FinalizeRunResult(core.RunResult{}, wrapped)
+	if got.Status != core.RunStatusCanceled || got.ErrorKind != core.RunErrorCanceled {
+		t.Fatalf("classification=%+v", got)
+	}
+	var selected core.ExitError
+	if !errors.As(wrapped, &selected) || selected.Code != -1 || selected.Message != "public poll diagnostic" || !errors.Is(wrapped, context.DeadlineExceeded) {
+		t.Fatal("public owner or secondary error identity changed")
+	}
+}
+
+type sliceMessageCause []string
+
+func (e sliceMessageCause) Error() string { return strings.Join(e, ",") }
+
+func TestErrorWithMessageSupportsNonComparableCause(t *testing.T) {
+	cause := sliceMessageCause{"original", "cause"}
+	wrapped := ErrorWithMessage("prepared message", cause)
+	if !errors.Is(wrapped, wrapped) {
+		t.Fatal("wrapper did not match itself")
+	}
+	var typed sliceMessageCause
+	if !errors.As(wrapped, &typed) || len(typed) != 2 || typed[0] != "original" || typed[1] != "cause" {
+		t.Fatalf("non-comparable typed cause lost: %v", typed)
+	}
+	if wrapped.Error() != "prepared message" {
+		t.Fatal("presentation changed")
 	}
 }

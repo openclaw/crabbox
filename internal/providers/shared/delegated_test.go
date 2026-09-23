@@ -834,3 +834,26 @@ func TestRejectExplicitMachineSizingFlagsContract(t *testing.T) {
 		})
 	}
 }
+
+func TestMessageWrapperPreservesDelegatedExitOwnerAndPrimaryClassification(t *testing.T) {
+	for _, code := range []int{0, -1, 23} {
+		raw := core.ExitError{Code: 7, Message: "raw inner diagnostic"}
+		owned := ExitErrorWithCause(code, "selected public message", errors.Join(raw, context.Canceled))
+		wrapped := ErrorWithMessage("outer presentation", owned)
+		var selected core.ExitError
+		if !core.AsExitError(wrapped, &selected) || selected.Code != code || selected.Message != "selected public message" {
+			t.Fatalf("public owner lost: %+v", selected)
+		}
+		if core.PrimaryRunClassificationCause(wrapped) != core.PrimaryRunClassificationCause(owned) {
+			t.Fatal("primary classification owner changed")
+		}
+		originalResult, originalErr := PinDelegatedRunFailure(core.RunResult{}, owned)
+		result, err := PinDelegatedRunFailure(core.RunResult{}, wrapped)
+		if result.ExitCode != originalResult.ExitCode || result.Status != originalResult.Status || result.ErrorKind != originalResult.ErrorKind {
+			t.Fatalf("pinning changed: %+v %+v", result, originalResult)
+		}
+		if !core.AsExitError(err, &selected) || selected.Message != "outer presentation" || selected.Code != core.ExitCodeForError(originalErr, 1) || !errors.Is(err, raw) {
+			t.Fatalf("finalization presentation/cause changed: %v", err)
+		}
+	}
+}

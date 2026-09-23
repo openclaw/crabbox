@@ -41,14 +41,6 @@ type ambiguousOpenSandboxCreateError struct {
 func (e *ambiguousOpenSandboxCreateError) Error() string { return e.cause.Error() }
 func (e *ambiguousOpenSandboxCreateError) Unwrap() error { return e.cause }
 
-type redactedOpenSandboxError struct {
-	cause   error
-	message string
-}
-
-func (e *redactedOpenSandboxError) Error() string { return e.message }
-func (e *redactedOpenSandboxError) Unwrap() error { return e.cause }
-
 type createSandboxOptions struct {
 	Image          string
 	TimeoutSecs    int
@@ -227,7 +219,7 @@ func (c *sdkOpenSandboxClient) redactProviderError(err error, extraSecrets ...st
 	if message == err.Error() {
 		return err
 	}
-	return &redactedOpenSandboxError{cause: err, message: message}
+	return shared.ErrorWithMessage(message, err)
 }
 
 func (c *sdkOpenSandboxClient) config() sdk.ConnectionConfig {

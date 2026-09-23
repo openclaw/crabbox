@@ -177,6 +177,14 @@ home-relative workspace paths, directory preparation, and archive sync over the
 shared envd API. Adapters retain their user default, archive naming, transport
 credentials, endpoint routing, and command-stream completion policy.
 
+`shared.WithMultipartFile` owns one borrowed-source multipart producer for envd
+and Blaxel: the `file` part, pipe cancellation and producer completion. Adapters
+retain request/response interpretation and producer-error redaction. A valid early
+response does not truncate the upload; a primary exchange failure stays primary.
+The owner never closes the source. Cancellation aborts pipe work, but returning
+may wait for an in-flight noncooperative source read; it is not a universal read
+deadline. This transport owner grants no archive, claim or native-resource custody.
+
 `shared.CleanPOSIXWorkspacePath` provides the common dedicated-directory check.
 Pass any additional protected mount roots explicitly; reserved roots are exact
 matches, so dedicated subdirectories remain valid. Providers with different
@@ -683,6 +691,12 @@ successful-response read/decode failures with the operation. The caller retains
 body closure, and each adapter keeps its typed API error and diagnostic policy.
 Linode still truncates raw error bytes before trimming/redaction and appends
 body-read failures afterward; this is distinct from the redacted-body helper.
+
+`shared.ErrorWithMessage` stores an adapter-prepared message and retains its
+original cause for `errors.Is`/`errors.As`. It performs no redaction and selects no
+exit code. In particular, CLI rendering may select an inner `ExitError` message;
+public code/display selection remains the delegated finalization owner's job,
+not a guarantee of this presentation wrapper.
 
 DigitalOcean, Lambda, OVH, and Vast use `shared.RedactedResponseBody` for
 status-first API-error diagnostics. It applies the adapter's redaction policy

@@ -2,13 +2,24 @@ package shared
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
+	"testing/synctest"
+
+	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestEncodeConnectJSONEnvelope(t *testing.T) {
@@ -159,3 +170,336 @@ func envdTestEndCode(end EnvdProcessEnd, _ io.Writer, _ ...string) (int, error) 
 type envdWireFailureWriter struct{ err error }
 
 func (w envdWireFailureWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// Controlled finite reads make upload completion observable without requiring
+// cancellation to interrupt arbitrary borrowed readers.
+type envdMultipartObservedReader struct {
+	entered, release    chan struct{}
+	once                sync.Once
+	content             io.Reader
+	failure             error
+	returned            atomic.Bool
+	accessedAfterReturn atomic.Bool
+	closeCalls          atomic.Int32
+}
+
+func (r *envdMultipartObservedReader) Close() error { r.closeCalls.Add(1); return nil }
+
+func (r *envdMultipartObservedReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.entered); <-r.release })
+	if r.returned.Load() {
+		r.accessedAfterReturn.Store(true)
+	}
+	if r.failure != nil {
+		return 0, r.failure
+	}
+	return r.content.Read(p)
+}
+
+func TestEnvdMultipartCompletionAndErrorPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name                                                     string
+		status                                                   int
+		sourceFailure, transportFailure, responseFailure, cancel bool
+		want                                                     string
+	}{
+		{name: "early 2xx waits for producer", status: 200},
+		{name: "source failure after early 2xx is returned", status: 200, sourceFailure: true, want: "source"},
+		{name: "HTTP rejection remains primary", status: 403, sourceFailure: true, want: "http"},
+		{name: "transport failure remains primary", transportFailure: true, sourceFailure: true, want: "transport"},
+		{name: "cancellation waits for producer", cancel: true, want: "cancel"},
+		{name: "success response read failure remains ignored", status: 200, responseFailure: true},
+		{name: "error response read failure does not override status", status: 403, responseFailure: true, want: "http"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				sourceErr := errors.New("synthetic source error: synthetic-session-token")
+				transportErr := errors.New("synthetic transport error")
+				responseErr := errors.New("synthetic response read error")
+				httpErr := errors.New("synthetic provider HTTP error")
+				source := &envdMultipartObservedReader{entered: make(chan struct{}), release: make(chan struct{}), content: strings.NewReader("finite payload")}
+				if tc.sourceFailure {
+					source.failure = sourceErr
+				}
+				var releaseOnce sync.Once
+				resume := func() { releaseOnce.Do(func() { close(source.release) }) }
+				defer resume()
+				bodyDone := make(chan struct{}, 1)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				client := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					go func() { _, _ = io.Copy(io.Discard, req.Body); _ = req.Body.Close(); bodyDone <- struct{}{} }()
+					<-source.entered
+					if tc.cancel {
+						<-req.Context().Done()
+						return nil, req.Context().Err()
+					}
+					if tc.transportFailure {
+						return nil, transportErr
+					}
+					var body io.Reader = strings.NewReader("ordinary response")
+					if tc.responseFailure {
+						body = iotest.ErrReader(responseErr)
+					}
+					return &http.Response{StatusCode: tc.status, Status: fmt.Sprintf("%d", tc.status), Header: make(http.Header), Body: io.NopCloser(body)}, nil
+				})}
+				result := make(chan error, 1)
+				go func() {
+					err := UploadEnvdFile(ctx, EnvdUploadFileRequest{Endpoint: "http://127.0.0.1:9443/files", TargetPath: "/tmp/archive.tgz", Content: source, HTTPClient: client, AccessToken: "synthetic-session-token",
+						SetHeaders: func(*http.Request) {}, SummarizeError: func(b []byte) string { return string(b) }, APIError: func(code int, _ string, body string) error {
+							if code != 403 {
+								t.Errorf("API status=%d", code)
+							}
+							if tc.responseFailure && body != "" {
+								t.Errorf("unexpected error response summary=%q", body)
+							}
+							return httpErr
+						}})
+					source.returned.Store(true)
+					result <- err
+				}()
+				select {
+				case <-source.entered:
+				case err := <-result:
+					t.Fatalf("returned before controlled read: %v", err)
+				}
+				if tc.cancel {
+					cancel()
+				}
+				synctest.Wait()
+				returnedEarly := source.returned.Load()
+				resume()
+				got := <-result
+				<-bodyDone
+				synctest.Wait()
+				if source.closeCalls.Load() != 0 {
+					t.Fatal("borrowed source was closed")
+				}
+				if returnedEarly || source.accessedAfterReturn.Load() {
+					t.Fatal("producer retained source after return")
+				}
+				switch tc.want {
+				case "":
+					if got != nil {
+						t.Fatalf("current success error=%v", got)
+					}
+				case "source":
+					if !errors.Is(got, sourceErr) || strings.Contains(got.Error(), "synthetic-session-token") {
+						t.Fatalf("source failure/redaction changed: %v", got)
+					}
+				case "http":
+					if got != httpErr {
+						t.Fatalf("HTTP error replaced: %v", got)
+					}
+				case "transport":
+					if !errors.Is(got, transportErr) {
+						t.Fatalf("transport error replaced: %v", got)
+					}
+				case "cancel":
+					if !errors.Is(got, context.Canceled) {
+						t.Fatalf("cancel error replaced: %v", got)
+					}
+				}
+				t.Logf("observed earlyReturn=%v sourceAccessAfterReturn=%v sourceFailure=%v resultPolicy=%s", returnedEarly, source.accessedAfterReturn.Load(), tc.sourceFailure, tc.want)
+			})
+		})
+	}
+}
+
+func TestMultipartFileExchangePanicJoinsWithoutReplacingPanic(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		source := &envdMultipartObservedReader{entered: make(chan struct{}), release: make(chan struct{}), content: strings.NewReader("payload")}
+		var once sync.Once
+		resume := func() { once.Do(func() { close(source.release) }) }
+		defer resume()
+		bodyDone := make(chan struct{}, 1)
+		recovered := make(chan any, 1)
+		marker := errors.New("exchange panic marker")
+		go func() {
+			defer func() { source.returned.Store(true); recovered <- recover() }()
+			_ = WithMultipartFile(t.Context(), "archive", source, func(body io.ReadCloser, _ string) error {
+				go func() { _, _ = io.Copy(io.Discard, body); _ = body.Close(); bodyDone <- struct{}{} }()
+				<-source.entered
+				panic(marker)
+			}, func(err error) error { return err })
+		}()
+		<-source.entered
+		synctest.Wait()
+		early := false
+		var got any
+		select {
+		case got = <-recovered:
+			early = true
+		default:
+		}
+		resume()
+		if !early {
+			got = <-recovered
+		}
+		<-bodyDone
+		synctest.Wait()
+		if early || got != marker || source.accessedAfterReturn.Load() || source.closeCalls.Load() != 0 {
+			t.Fatalf("panic custody/policy changed: early=%v panic=%v", early, got)
+		}
+	})
+}
+
+func TestMultipartFileProducerPolicyAndFinalization(t *testing.T) {
+	t.Run("mapper required before exchange", func(t *testing.T) {
+		called := false
+		err := WithMultipartFile(t.Context(), "archive", strings.NewReader(""), func(io.ReadCloser, string) error { called = true; return nil }, nil)
+		if err == nil || called {
+			t.Fatal("missing producer error policy admitted")
+		}
+	})
+	t.Run("nil mapping cannot hide or expose failure", func(t *testing.T) {
+		err := WithMultipartFile(t.Context(), "archive", iotest.ErrReader(errors.New("private-source-detail")), func(body io.ReadCloser, _ string) error {
+			_, _ = io.Copy(io.Discard, body)
+			_ = body.Close()
+			return nil
+		}, func(error) error { return nil })
+		if err == nil || strings.Contains(err.Error(), "private-source-detail") {
+			t.Fatalf("unsafe missing mapping result: %v", err)
+		}
+	})
+	t.Run("finalization failure is mapped", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			source := &envdMultipartObservedReader{entered: make(chan struct{}), release: make(chan struct{}), content: strings.NewReader("")}
+			close(source.release)
+			mapped := errors.New("safe finalization error")
+			calls := 0
+			err := WithMultipartFile(t.Context(), "archive", source, func(body io.ReadCloser, _ string) error {
+				_, readErr := body.Read(make([]byte, 4096))
+				if readErr != nil {
+					return readErr
+				}
+				<-source.entered
+				_ = body.Close()
+				return nil
+			}, func(err error) error {
+				calls++
+				if !errors.Is(err, io.ErrClosedPipe) {
+					t.Errorf("finalization error=%v", err)
+				}
+				return mapped
+			})
+			if err != mapped || calls != 1 || source.closeCalls.Load() != 0 {
+				t.Fatalf("finalization policy=%v calls=%d", err, calls)
+			}
+		})
+	})
+}
+
+func TestMultipartFileRetainsSingleFileWireShape(t *testing.T) {
+	payload := "archive\x00payload"
+	mapped := func(err error) error { return err }
+	err := WithMultipartFile(t.Context(), "archive name.tgz", strings.NewReader(payload), func(body io.ReadCloser, contentType string) error {
+		_, params, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			return err
+		}
+		reader := multipart.NewReader(body, params["boundary"])
+		part, err := reader.NextPart()
+		if err != nil {
+			return err
+		}
+		data, err := io.ReadAll(part)
+		if err != nil {
+			return err
+		}
+		if part.FormName() != "file" || part.FileName() != "archive name.tgz" || string(data) != payload {
+			t.Error("multipart file shape changed")
+		}
+		if _, err := reader.NextPart(); err != io.EOF {
+			t.Errorf("unexpected next part: %v", err)
+		}
+		return body.Close()
+	}, mapped)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+type envdCustodyReader struct {
+	file             *os.File
+	entered, release chan struct{}
+	once             sync.Once
+	returned         atomic.Bool
+	readAfterReturn  atomic.Bool
+	readErr          chan error
+}
+
+func (r *envdCustodyReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.entered); <-r.release })
+	if r.returned.Load() {
+		r.readAfterReturn.Store(true)
+	}
+	n, err := r.file.Read(p)
+	if err != nil {
+		select {
+		case r.readErr <- err:
+		default:
+		}
+	}
+	return n, err
+}
+
+func TestUploadEnvdFileReturnsBorrowedReaderBeforeCallerClosesArchive(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		name := filepath.Join(t.TempDir(), "archive.tgz")
+		if err := os.WriteFile(name, []byte("finite archive payload"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		file, err := os.Open(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer file.Close()
+		source := &envdCustodyReader{file: file, entered: make(chan struct{}), release: make(chan struct{}), readErr: make(chan error, 1)}
+		var releaseOnce sync.Once
+		resume := func() { releaseOnce.Do(func() { close(source.release) }) }
+		defer resume()
+		bodyDone := make(chan struct{}, 1)
+		primary := errors.New("synthetic HTTP rejection")
+		client := &http.Client{Transport: testutil.RoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			// A conforming transport may close the request body after returning headers.
+			go func() { _, _ = io.Copy(io.Discard, req.Body); _ = req.Body.Close(); bodyDone <- struct{}{} }()
+			<-source.entered
+			return &http.Response{StatusCode: 403, Status: "403 Forbidden", Header: make(http.Header), Body: io.NopCloser(strings.NewReader("rejected"))}, nil
+		})}
+		result := make(chan error, 1)
+		go func() {
+			err := UploadEnvdFile(context.Background(), EnvdUploadFileRequest{
+				Endpoint: "http://127.0.0.1:9443/files", TargetPath: "/tmp/archive.tgz", Content: source, HTTPClient: client,
+				SetHeaders: func(*http.Request) {}, SummarizeError: func(b []byte) string { return string(b) },
+				APIError: func(int, string, string) error { return primary },
+			})
+			// ArchiveWorkspace owns closing its prepared file after Upload returns an error.
+			source.returned.Store(true)
+			_ = file.Close()
+			result <- err
+		}()
+		select {
+		case <-source.entered:
+		case err := <-result:
+			t.Fatalf("returned before controlled read: %v", err)
+		}
+		synctest.Wait()
+		returnedWhileReadActive := source.returned.Load()
+		resume()
+		got := <-result
+		<-bodyDone
+		synctest.Wait()
+		if got != primary {
+			t.Fatalf("HTTP error precedence changed: %v", got)
+		}
+		if returnedWhileReadActive || source.readAfterReturn.Load() {
+			var readErr error
+			select {
+			case readErr = <-source.readErr:
+			default:
+			}
+			t.Fatalf("upload returned custody while producer still read caller-closed archive: earlyReturn=%v readAfterReturn=%v sourceError=%v; HTTP error preserved", returnedWhileReadActive, source.readAfterReturn.Load(), readErr)
+		}
+	})
+}

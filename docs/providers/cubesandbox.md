@@ -23,6 +23,11 @@ Use an SSH-lease provider such as `aws`, `hetzner`, or `ssh` when the workflow
 requires `crabbox ssh`, VNC, code-server, GitHub Actions runner hydration, or
 host-managed SSH access.
 
+Multipart archive uploads finish using their borrowed source before returning.
+HTTP failures remain primary; source failures after an early success response are
+reported with token redaction. Cancellation stops HTTP/pipe work but may wait for
+an in-flight source read; the upload does not close the caller-owned source.
+
 ## Prerequisites
 
 - A reachable Cube API endpoint, usually `http://<cubeapi-host>:3000`.
