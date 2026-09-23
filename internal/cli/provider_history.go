@@ -150,7 +150,7 @@ func applyRecentProviderFallback(cfg *Config) {
 		default:
 			continue
 		}
-		if IsTargetExplicit(*cfg) && !providerSpecSupportsTarget(spec, normalizeTargetOS(cfg.TargetOS), normalizeWindowsMode(cfg.WindowsMode)) {
+		if IsTargetExplicit(cfg) && !providerSpecSupportsTarget(spec, normalizeTargetOS(cfg.TargetOS), normalizeWindowsMode(cfg.WindowsMode)) {
 			continue
 		}
 		setProviderSelection(cfg, spec.Name, providerSelectionRecentHistory)
