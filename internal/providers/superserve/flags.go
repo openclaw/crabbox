@@ -60,6 +60,9 @@ func superserveSandboxTimeoutSecs(cfg core.Config) (int, error) {
 		if lifetime <= 0 {
 			lifetime = 90 * time.Minute
 		}
+		if lifetime > time.Duration(maxSuperserveSandboxTimeoutSecs)*time.Second {
+			return 0, core.Exit(2, "superserve sandbox lifetime must not exceed %d seconds (7 days)", maxSuperserveSandboxTimeoutSecs)
+		}
 		timeout = int((lifetime + time.Second - 1) / time.Second)
 	}
 	if timeout > maxSuperserveSandboxTimeoutSecs {

@@ -341,3 +341,49 @@ func TestSuperserveBindingDenyListFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestSuperservePublicTTLRejectsCeilingOverflow(t *testing.T) {
+	cfg := testConfig()
+	cfg.Superserve.TimeoutSecs = 0
+	fs := flag.NewFlagSet("superserve-ttl", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.DurationVar(&cfg.TTL, "ttl", cfg.TTL, "maximum lease lifetime")
+	values := RegisterSuperserveProviderFlags(fs, cfg)
+	if err := fs.Parse([]string{"--ttl", "2562047h47m16.854775807s"}); err != nil {
+		t.Fatalf("public duration parsing failed: %v", err)
+	}
+	if err := ApplySuperserveProviderFlags(&cfg, fs, values); err == nil || !strings.Contains(err.Error(), "must not exceed 604800") {
+		seconds, conversionErr := superserveSandboxTimeoutSecs(cfg)
+		t.Fatalf("TTL=%s validation=%v converted seconds=%d conversion error=%v; want seven-day lifetime rejection", cfg.TTL, err, seconds, conversionErr)
+	}
+}
+
+func TestSuperserveDerivedLifetimeBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		lifetime     time.Duration
+		native, want int
+		rejected     bool
+	}{
+		{"exact seven days", 7 * 24 * time.Hour, 0, 604800, false},
+		{"over seven days by nanosecond", 7*24*time.Hour + time.Nanosecond, 0, 0, true},
+		{"fractional round up", 2*time.Minute + time.Nanosecond, 0, 121, false},
+		{"native value precedes oversized TTL", time.Duration(1<<63 - 1), 300, 300, false},
+		{"zero TTL default", 0, 0, 5400, false},
+		{"negative TTL default", -time.Second, 0, 5400, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.TTL = tc.lifetime
+			cfg.Superserve.TimeoutSecs = tc.native
+			got, err := superserveSandboxTimeoutSecs(cfg)
+			if tc.rejected {
+				if err == nil || !strings.Contains(err.Error(), "must not exceed 604800") {
+					t.Fatalf("timeout=%d err=%v; want seven-day rejection", got, err)
+				}
+			} else if err != nil || got != tc.want {
+				t.Fatalf("timeout=%d err=%v, want %d", got, err, tc.want)
+			}
+		})
+	}
+}
