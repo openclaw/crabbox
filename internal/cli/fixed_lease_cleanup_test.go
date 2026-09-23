@@ -97,23 +97,25 @@ func fixedCleanupKind() FixedLeaseKind {
 }
 
 func TestFixedCleanupPersistsRecoveryBindingBeforeDeletion(t *testing.T) {
-	for _, source := range []string{"observation", "release"} {
+	for _, source := range []string{"observation", "observation-no-policy", "release"} {
 		t.Run(source, func(t *testing.T) {
 			isolateTestUserDirs(t)
 			claim := fixedCleanupClaim(t, "acquired")
 			kind := fixedCleanupKind()
 			kind.DeletionState = ""
 			binding := &FixedResourceBinding{Labels: map[string]string{"cleanup_child": "original-child"}}
-			policy := &FixedReleasePolicy{PersistBinding: true}
+			policy := &FixedReleasePolicy{}
 			if source == "release" {
 				policy.Binding = binding
+			} else if source == "observation-no-policy" {
+				policy = nil
 			}
 			interrupted := errors.New("parent deleted; companion cleanup interrupted")
 			ops := FixedLeaseOperations[string]{
 				Release: policy,
 				ObserveExact: func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[string], error) {
 					observed := FixedObservation[string]{Candidates: []string{"resource"}}
-					if source == "observation" {
+					if source != "release" {
 						observed.Binding = binding
 					}
 					return observed, nil
@@ -140,7 +142,9 @@ func TestFixedCleanupPersistsRecoveryBindingBeforeDeletion(t *testing.T) {
 			ops.ObserveExact = func(_ context.Context, tx *FixedTransaction, _ FixedObserveMode) (FixedObservation[string], error) {
 				return FixedObservation[string]{Candidates: []string{tx.Claim.Labels["cleanup_child"]}}, nil
 			}
-			ops.Release.Binding = nil
+			if ops.Release != nil {
+				ops.Release.Binding = nil
+			}
 			ops.DeleteExact = func(_ context.Context, _ *FixedTransaction, child string) error {
 				if child != "original-child" {
 					t.Fatalf("cleanup retry retargeted companion: %q", child)
@@ -161,9 +165,9 @@ func TestFixedCleanupPersistsRecoveryBindingBeforeDeletion(t *testing.T) {
 	}
 }
 
-func TestFixedCleanupWithoutDeletionStatePreservesFailedClaim(t *testing.T) {
+func TestFixedCleanupWithoutDeletionStateRetainsApplicableEvidence(t *testing.T) {
 	for _, state := range []string{"prepared", "acquired"} {
-		for _, bindingSource := range []string{"none", "observation", "release"} {
+		for _, bindingSource := range []string{"none", "observation", "release", "only-unbound"} {
 			t.Run(state+"/"+bindingSource, func(t *testing.T) {
 				isolateTestUserDirs(t)
 				claim := fixedCleanupClaim(t, state)
@@ -190,20 +194,35 @@ func TestFixedCleanupWithoutDeletionStatePreservesFailedClaim(t *testing.T) {
 				if bindingSource == "release" {
 					policy.Binding = binding
 				}
+				binding.OnlyUnbound = bindingSource == "only-unbound"
+				assertEvidence := func(durable LeaseClaim) {
+					t.Helper()
+					want := CloneLeaseClaim(claim)
+					if bindingSource == "observation" || bindingSource == "release" {
+						want.Labels = binding.Labels
+						want.FixedCreateIntent.Journal.Phase = "deleting"
+						want.FixedCreateIntent.Journal.Revision++
+						want.Revision = durable.Revision
+					}
+					if !reflect.DeepEqual(want, durable) {
+						t.Fatalf("cleanup lost custody or binding evidence:\nwant=%+v\ngot=%+v", want, durable)
+					}
+				}
 				ops := FixedLeaseOperations[string]{
 					Release: policy,
 					ObserveExact: func(context.Context, *FixedTransaction, FixedObserveMode) (FixedObservation[string], error) {
 						observed := FixedObservation[string]{Candidates: []string{"resource"}}
-						if bindingSource == "observation" {
+						if bindingSource == "observation" || bindingSource == "only-unbound" {
 							observed.Binding = binding
 						}
 						return observed, nil
 					},
 					DeleteExact: func(context.Context, *FixedTransaction, string) error {
 						durable, err := ReadLeaseClaim(claim.LeaseID)
-						if err != nil || !reflect.DeepEqual(claim, durable) || !started {
-							t.Fatalf("deletion admission changed durable custody: started=%v err=%v", started, err)
+						if err != nil || !started {
+							t.Fatalf("deletion preceded admission: started=%v err=%v", started, err)
 						}
+						assertEvidence(durable)
 						return failure
 					},
 				}
@@ -211,11 +230,12 @@ func TestFixedCleanupWithoutDeletionStatePreservesFailedClaim(t *testing.T) {
 					t.Fatalf("failed cleanup: started=%v terminal=%v err=%v", started, outcome.Terminal, err)
 				}
 				after, err := ReadLeaseClaim(claim.LeaseID)
-				if err != nil || !reflect.DeepEqual(claim, after) {
-					t.Fatalf("failed cleanup changed durable claim or bound evidence: %v", err)
+				if err != nil {
+					t.Fatal(err)
 				}
+				assertEvidence(after)
 				ops.DeleteExact = func(context.Context, *FixedTransaction, string) error { return nil }
-				if err := DeleteFixedResource(t.Context(), kind, claim, ops); err != nil || !outcome.Terminal {
+				if err := DeleteFixedResource(t.Context(), kind, after, ops); err != nil || !outcome.Terminal {
 					t.Fatalf("cleanup retry: terminal=%v err=%v", outcome.Terminal, err)
 				}
 				terminal, err := ReadLeaseClaim(claim.LeaseID)

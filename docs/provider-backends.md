@@ -282,8 +282,11 @@ use `DeferredAdmission` and call `tx.Admit` at the mutation boundary. APIs resol
 launch inputs during submission also declare `PlanDuringSubmit` and persist each
 payload with `WriteFixedAttempt` before allocation. Only a provider-certified
 definite failure may call `tx.RejectAttempt`; unknown outcomes retain custody.
-Adapters treat the transaction claim as read-only and publish returned evidence
-through `tx.Bind` or `tx.Observe`. Binding cannot retarget a known native identity.
+Adapters treat the transaction claim as read-only and return attested binding
+evidence from `ObserveExact`, or publish partial native results through `tx.Bind`
+or `tx.Observe`. Core persists observation bindings before preparing access and
+selects journal phases; adapters do not write them. Binding cannot retarget a
+known native identity.
 
 Providers with expiring idempotency keys can combine `FreshOnly` with
 `FixedAdmission.KeyedRetry`, specifying the native attempt key and retention
@@ -300,19 +303,20 @@ an empty list or matching display name grants no authority.
 `core.DeleteFixedResource` keeps claim comparison, native proof, and terminal
 publication under one durable claim lock. Existing shared claim resolvers and
 native cleanup graphs remain reusable; a deletion callback must prove completion,
-not merely request admission. Formats with a `FixedLeaseKind.DeletionState`
-persist their cleanup marker and the `deleting` journal phase before native
-deletion. By default, formats without that state leave the exact durable claim
-and bound evidence unchanged at deletion admission. An adapter whose deletion
-depends on captured recovery identities opts into `FixedReleasePolicy.PersistBinding`:
-core journals supplied observation or release bindings before calling `DeleteExact`,
-retaining them if native cleanup fails. Adapters may still persist native
-cleanup acknowledgements through their existing witness contract. Existing
+not merely request admission. Core journals supplied observation or release
+bindings before calling `DeleteExact`, retaining them if native cleanup fails.
+This is the default for every adapter, including formats without a legacy
+deletion state. `OnlyUnbound` bindings leave an already-bound claim unchanged;
+without new binding evidence or a legacy deletion marker, admission preserves
+the existing durable claim. Formats with a `FixedLeaseKind.DeletionState` also
+persist that cleanup marker with the `deleting` journal phase. Adapters may still
+persist native cleanup acknowledgements through their existing witness contract. Existing
 deletion markers block acquisition replay and retain their admitted status on
 stale retries.
 `FixedLeaseKind.AfterTerminal`, when needed, cleans
 local lease artifacts after durable terminal publication while retaining that
-same claim fence. Native absence-only recovery is a separate proof path.
+same claim fence. Native absence-only recovery returns `AbsenceProven` through
+the same engine: it publishes a terminal receipt without calling `DeleteExact`.
 Cleanup callers can request `FixedReleasePolicy.Started` to distinguish a stale
 claim rejected by the ownership fence from an admitted deletion that failed.
 A reclaimed or renewed candidate is skipped; an already-admitted deletion retains

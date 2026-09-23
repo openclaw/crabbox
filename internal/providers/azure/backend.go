@@ -241,7 +241,6 @@ func (b *azureLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLe
 	}
 	if fixedAzureLeaseKind.IsFixedClaim(claim) {
 		err := core.DeleteFixedResource(ctx, fixedAzureLeaseKind, claim, core.FixedLeaseOperations[core.Server]{
-			Release: &core.FixedReleasePolicy{PersistBinding: true},
 			ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.Server], error) {
 				prepared, err := client.PrepareOwnedServer(ctx, req.Lease.Server)
 				if err != nil {

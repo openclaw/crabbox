@@ -137,7 +137,11 @@ func (b *tenkiBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		if err := ctx.Err(); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		if err := b.bindFixedSession(tx.Claim, session, func() error { return tx.Record("bound") }); err != nil {
+		binding, err := b.fixedSessionBinding(*tx.Claim, session)
+		if err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if err := tx.Bind(binding); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		return b.prepareFixedLease(ctx, *tx.Claim, session)
@@ -284,20 +288,28 @@ func (b *tenkiBackend) observeFixedSession(ctx context.Context, tx *core.FixedTr
 	return core.FixedObservation[tenkiSession]{Candidates: []tenkiSession{detail}}, nil
 }
 
-func (b *tenkiBackend) bindFixedSession(claim *core.LeaseClaim, session tenkiSession, persist func() error) error {
-	if err := b.validateFixedSession(*claim, session); err != nil {
-		return err
+func (b *tenkiBackend) fixedSessionBinding(claim core.LeaseClaim, session tenkiSession) (core.FixedResourceBinding, error) {
+	if err := b.validateFixedSession(claim, session); err != nil {
+		return core.FixedResourceBinding{}, err
 	}
-	attempt, err := b.fixedAttempt(*claim)
+	attempt, err := b.fixedAttempt(claim)
 	if err != nil {
-		return err
+		return core.FixedResourceBinding{}, err
 	}
 	labels := b.sessionToServer(b.configForRun(), session, claim.LeaseID, claim.Slug, attempt.Keep).Labels
 	labels[tenkiFixedRouteLabel] = attempt.Route
-	return core.BindFixedClaim(claim, core.FixedResourceBinding{OnlyUnbound: true,
+	return core.FixedResourceBinding{OnlyUnbound: true,
 		CloudID: session.ID, ImmutableID: session.ID, AttemptJSONKey: "tenki", AttemptIdentityKey: "sessionId",
 		Labels: labels, FingerprintLabel: tenkiFixedIntentLabel,
-	}, persist)
+	}, nil
+}
+
+func (b *tenkiBackend) bindFixedSession(claim *core.LeaseClaim, session tenkiSession, persist func() error) error {
+	binding, err := b.fixedSessionBinding(*claim, session)
+	if err != nil {
+		return err
+	}
+	return core.BindFixedClaim(claim, binding, persist)
 }
 
 func (b *tenkiBackend) fixedServer(claim core.LeaseClaim, session tenkiSession) core.Server {
@@ -492,18 +504,15 @@ func (b *tenkiBackend) ReleaseLeaseWithOutcome(ctx context.Context, req core.Rel
 		return outcome, core.Exit(4, "lease_id_conflict: fixed Tenki claim changed after resolution; resolve again before release")
 	}
 	err = core.DeleteFixedResource(ctx, tenkiFixedKind, expected, core.FixedLeaseOperations[tenkiSession]{
+		Release: &core.FixedReleasePolicy{CheckpointID: &req.CheckpointID, Outcome: &outcome},
 		ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[tenkiSession], error) {
 			claim := tx.Claim
 			var result core.FixedObservation[tenkiSession]
 			if err := ctx.Err(); err != nil {
 				return result, err
 			}
-			if err := core.AuthorizeCheckpointRelease(*claim, req.CheckpointID); err != nil {
-				return result, err
-			}
 			if claim.FixedCreateIntent.State == "released" {
 				err := tenkiFixedKind.ValidateTerminalClaim(*claim, snapshot, claim.LeaseID, b.validateTerminalClaim)
-				outcome.Terminal = err == nil
 				return core.FixedObservation[tenkiSession]{AbsenceProven: err == nil}, err
 			}
 			session, err := b.resolveFixedSession(ctx, *claim)
@@ -516,14 +525,12 @@ func (b *tenkiBackend) ReleaseLeaseWithOutcome(ctx context.Context, req core.Rel
 			if req.Lease.Server.CloudID != session.ID || req.Lease.Server.ImmutableID != session.ID || req.Lease.Server.Labels["slug"] != claim.Slug {
 				return result, core.Exit(4, "lease_id_conflict: fixed Tenki release target changed")
 			}
-			return core.FixedObservation[tenkiSession]{Candidates: []tenkiSession{session}}, nil
+			binding, err := b.fixedSessionBinding(*claim, session)
+			return core.FixedObservation[tenkiSession]{Candidates: []tenkiSession{session}, Binding: &binding}, err
 		},
 		DeleteExact: func(ctx context.Context, tx *core.FixedTransaction, session tenkiSession) error {
 			claim := tx.Claim
 			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if err := b.bindFixedSession(claim, session, func() error { return tx.Record("deleting") }); err != nil {
 				return err
 			}
 			// Re-attest full detail immediately before native mutation.
@@ -545,7 +552,6 @@ func (b *tenkiBackend) ReleaseLeaseWithOutcome(ctx context.Context, req core.Rel
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			outcome.Terminal = true
 			return nil
 		},
 	}, tenkiNow)

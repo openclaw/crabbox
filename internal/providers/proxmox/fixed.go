@@ -69,17 +69,12 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			if !fixedProxmoxLeaseKind.IsFixedClaim(*claim) || claim.ProviderScope != providerScope {
 				return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: fixed Proxmox claim scope changed")
 			}
-			target := core.SSHTarget{}
-			if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
-				return core.FixedLeaseBinding{}, err
-			}
 		}
-		keyPath, key, err := core.EnsureTestboxKeyForConfig(cfg, leaseID)
+		var err error
+		publicKey, err = core.PrepareFixedSSHKey(&cfg, leaseID, core.FixedKeyPolicy{RequireExisting: exists})
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}
-		cfg.SSHKey, publicKey = keyPath, key
-		cfg.ProviderKey = core.ProviderKeyForLease(leaseID)
 		fingerprint, err = fixedProxmoxFingerprint(cfg, req, providerScope, publicKey)
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
@@ -92,8 +87,8 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		if err != nil {
 			return core.FixedLeaseBinding{}, err
 		}
-		binding.Slug, err = core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
-		return binding, err
+		binding.AllocateSlug, binding.RequestedSlug, binding.Inventory = true, req.RequestedSlug, servers
+		return binding, nil
 	}, ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.Server], error) {
 		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
 		var result core.FixedObservation[core.Server]

@@ -146,7 +146,10 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest) (co
 	}, PrepareAccess: func(ctx context.Context, tx *core.FixedTransaction, item machine) (core.LeaseTarget, error) {
 		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
 		if item.ID != "" {
-			if err := b.bindFixedMachine0(claim, item, req.Keep, func() error { return tx.Record("bound") }); err != nil {
+			if err := validateFixedMachine0Ownership(*claim, item); err != nil {
+				return core.LeaseTarget{}, err
+			}
+			if err := tx.Bind(b.fixedMachine0Binding(*claim, item, req.Keep)); err != nil {
 				return core.LeaseTarget{}, err
 			}
 		}
@@ -155,7 +158,7 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest) (co
 			if err != nil {
 				return machine{}, err
 			}
-			return item, b.bindFixedMachine0(claim, item, req.Keep, func() error { return tx.Record("bound") })
+			return item, tx.Bind(b.fixedMachine0Binding(*claim, item, req.Keep))
 		})
 		if err != nil {
 			return core.LeaseTarget{}, err
@@ -284,10 +287,14 @@ func (b *backend) bindFixedMachine0(claim *core.LeaseClaim, item machine, keep b
 	if err := validateFixedMachine0Ownership(*claim, item); err != nil {
 		return err
 	}
-	return core.BindFixedClaim(claim, core.FixedResourceBinding{OnlyUnbound: true,
+	return core.BindFixedClaim(claim, b.fixedMachine0Binding(*claim, item, keep), persist)
+}
+
+func (b *backend) fixedMachine0Binding(claim core.LeaseClaim, item machine, keep bool) core.FixedResourceBinding {
+	return core.FixedResourceBinding{OnlyUnbound: true,
 		CloudID: item.ID, ImmutableID: item.ID, ProviderScope: machineScope(item.ID),
 		Labels: machineLabels(b.configForRun(), item, claim.LeaseID, claim.Slug, keep, core.ClockNow(b.rt.Clock).UTC()),
-	}, persist)
+	}
 }
 
 func (b *backend) bindFixedMachine0Claim(claim core.LeaseClaim, item machine) (core.LeaseClaim, error) {
@@ -319,16 +326,14 @@ func (b *backend) destroyClaimedMachineWithOutcome(ctx context.Context, expected
 	if snapshot, exists, set := core.ServerLeaseClaimSnapshot(lease.Server); set && (!exists || !reflect.DeepEqual(snapshot, expected)) {
 		return core.Exit(4, "fixed Machine0 lease %s claim changed after resolution; retry", expected.LeaseID)
 	}
+	checkpointID := ""
 	return core.DeleteFixedResource(ctx, fixedMachine0LeaseKind, expected, core.FixedLeaseOperations[machine]{
+		Release: &core.FixedReleasePolicy{CheckpointID: &checkpointID, Outcome: outcome},
 		ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[machine], error) {
 			claim := tx.Claim
 			var result core.FixedObservation[machine]
-			if err := core.AuthorizeCheckpointRelease(*claim, ""); err != nil {
-				return result, err
-			}
 			item, err := b.resolveFixedMachine0(ctx, *claim)
 			if err != nil || claim.FixedCreateIntent.State == fixedMachine0IntentReleased {
-				outcome.Terminal = err == nil
 				result.AbsenceProven = err == nil
 				return result, err
 			}
@@ -339,12 +344,10 @@ func (b *backend) destroyClaimedMachineWithOutcome(ctx context.Context, expected
 			if item.ID == "" {
 				return result, core.Exit(4, "fixed Machine0 lease %s is not visible in the current account; absence is unverified, retain its claim and inspect the original account", claim.LeaseID)
 			}
-			return core.FixedObservation[machine]{Candidates: []machine{item}}, nil
+			binding := b.fixedMachine0Binding(*claim, item, false)
+			return core.FixedObservation[machine]{Candidates: []machine{item}, Binding: &binding}, nil
 		},
 		DeleteExact: func(ctx context.Context, tx *core.FixedTransaction, item machine) error {
-			if err := b.bindFixedMachine0(tx.Claim, item, false, func() error { return tx.Record("bound") }); err != nil {
-				return err
-			}
 			detail, err := b.api.Get(ctx, item.Name)
 			if err != nil {
 				return err
@@ -352,11 +355,7 @@ func (b *backend) destroyClaimedMachineWithOutcome(ctx context.Context, expected
 			if _, err := attestFixedMachine0Detail(*tx.Claim, item, detail); err != nil {
 				return err
 			}
-			if err := b.api.Remove(ctx, item.Name); err != nil {
-				return err
-			}
-			outcome.Terminal = true
-			return nil
+			return b.api.Remove(ctx, item.Name)
 		},
 	}, func() time.Time { return core.ClockNow(b.rt.Clock).UTC() })
 }

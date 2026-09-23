@@ -135,6 +135,8 @@ func (tx *FixedTransaction) Record(phase string) error {
 // proof of non-submission (or safe same-identity resubmission), never inferred
 // from an empty inventory. AbsenceProven applies only to release.
 type FixedObservation[T any] struct {
+	// Binding is attested recovery evidence, published by the engine before
+	// access preparation or deletion. Inspection never publishes it.
 	Binding       *FixedResourceBinding
 	Candidates    []T
 	CanSubmit     bool
@@ -151,9 +153,6 @@ const (
 )
 
 type FixedReleasePolicy struct {
-	// PersistBinding journals supplied cleanup bindings before native deletion,
-	// including for formats without a legacy deletion state.
-	PersistBinding bool
 	// Started distinguishes rejection by the ownership fence from failure after
 	// deletion admission. Cleanup must skip a freshly reclaimed candidate.
 	Started                 *bool
@@ -226,6 +225,11 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 		var resource T
 		if len(observation.Candidates) == 1 {
 			resource = observation.Candidates[0]
+			if observation.Binding != nil {
+				if err := tx.Bind(*observation.Binding); err != nil {
+					return LeaseTarget{}, err
+				}
+			}
 		} else {
 			if !observation.CanSubmit || !ops.Admission.permits(tx) || claim.FixedCreateIntent.State != "prepared" || claim.CloudID != "" || claim.CloudNumericID != 0 || claim.CloudImmutableID != "" {
 				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed %s lease %s has an unresolved or missing resource; retain its claim for recovery", opts.Kind.Label, claim.LeaseID)
@@ -413,32 +417,35 @@ func DeleteFixedResource[T any](ctx context.Context, kind FixedLeaseKind, expect
 			}
 			return nil
 		}
-		if observed.Binding != nil {
-			if err := tx.applyBinding(*observed.Binding); err != nil {
-				return err
-			}
-		}
 		if len(observed.Candidates) == 0 {
 			if !observed.AbsenceProven {
 				return Exit(4, "lease_id_conflict: fixed %s absence is unverified; claim retained", kind.Label)
 			}
 		}
-		if ops.Release != nil && ops.Release.Binding != nil {
-			if err := tx.applyBinding(*ops.Release.Binding); err != nil {
+		bindings := []*FixedResourceBinding{observed.Binding}
+		if policy != nil {
+			bindings = append(bindings, policy.Binding)
+		}
+		persistBinding := false
+		for _, binding := range bindings {
+			if binding == nil || (binding.OnlyUnbound && claim.CloudID != "") {
+				continue
+			}
+			if err := tx.applyBinding(*binding); err != nil {
 				return err
 			}
+			persistBinding = true
 		}
 		if kind.DeletionState != "" {
 			claim.FixedCreateIntent.State = kind.DeletionState
 		}
-		persistBinding := policy != nil && policy.PersistBinding && (observed.Binding != nil || policy.Binding != nil)
 		if kind.DeletionState != "" || persistBinding {
 			if err := tx.Record("deleting"); err != nil {
 				return err
 			}
 		}
-		// Otherwise admission leaves durable custody unchanged; adapters may
-		// still record native cleanup acknowledgements.
+		// OnlyUnbound evidence is a no-op for an already-bound claim. Otherwise
+		// every supplied cleanup binding must survive interruption of DeleteExact.
 		// All ownership checks and durable deletion-entry writes have passed;
 		// failures from this point must retain/report the admitted cleanup.
 		markStarted(true)
@@ -601,18 +608,5 @@ func DeleteClaimedEvidence[T any](ctx context.Context, kind FixedLeaseKind, clai
 			return FixedObservation[T]{Candidates: []T{evidence}}, err
 		},
 		DeleteExact: func(_ context.Context, _ *FixedTransaction, evidence T) error { return deleteExact(evidence) },
-	})
-}
-
-// DeleteFixedClaim handles APIs whose exact deletion operation performs its own
-// native lookup/attestation. Prepare establishes routing and returned-ID custody;
-// deleteExact must attest every native effect before reporting completion.
-func DeleteFixedClaim(ctx context.Context, kind FixedLeaseKind, claim LeaseClaim, policy *FixedReleasePolicy, prepare func(context.Context, *FixedTransaction) error, deleteExact func(context.Context, *FixedTransaction) error) error {
-	return DeleteFixedResource(ctx, kind, claim, FixedLeaseOperations[struct{}]{Release: policy,
-		ObserveExact: func(ctx context.Context, tx *FixedTransaction, _ FixedObserveMode) (FixedObservation[struct{}], error) {
-			err := prepare(ctx, tx)
-			return FixedObservation[struct{}]{Candidates: []struct{}{{}}}, err
-		},
-		DeleteExact: func(ctx context.Context, tx *FixedTransaction, _ struct{}) error { return deleteExact(ctx, tx) },
 	})
 }

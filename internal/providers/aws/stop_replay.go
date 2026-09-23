@@ -110,29 +110,36 @@ func (b *awsLeaseBackend) resolveTerminalRelease(ctx context.Context, req core.R
 
 func (b *awsLeaseBackend) releaseTerminalReceipt(ctx context.Context, req core.ReleaseLeaseRequest, outcome *core.ReleaseLeaseOutcome) error {
 	snapshot, snapshotExists, snapshotSet := core.ServerLeaseClaimSnapshot(req.Lease.Server)
-	return core.WithDurableLeaseClaimLock(req.Lease.LeaseID, func(claim *core.LeaseClaim, exists bool, _ func() error) error {
-		if !exists || !snapshotSet || !snapshotExists || !reflect.DeepEqual(snapshot, *claim) {
-			return core.Exit(4, "lease_id_conflict: fixed AWS lease %s terminal receipt changed or has no resolved durable snapshot", req.Lease.LeaseID)
-		}
-		if err := b.validateTerminalReleaseScope(ctx, *claim, req.Lease.LeaseID); err != nil {
-			return err
-		}
-		if !reflect.DeepEqual(req.Lease, awsTerminalReleaseTarget(*claim)) {
-			return core.Exit(4, "lease_id_conflict: fixed AWS lease %s terminal target differs from its durable receipt", req.Lease.LeaseID)
-		}
-		if err := core.ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
-			return err
-		}
-		// Refresh inventory under the same fence as the durable evidence. Resolve
-		// alone cannot authorize success across a new visible-resource conflict.
-		servers, err := b.listAcrossRegions(ctx)
-		if err != nil {
-			return err
-		}
-		if err := validateAWSTerminalInventory(*claim, servers); err != nil {
-			return err
-		}
-		outcome.Terminal = true
-		return cleanupAWSLeaseSSH(claim.LeaseID)
+	if !snapshotSet || !snapshotExists {
+		return core.Exit(4, "lease_id_conflict: fixed AWS lease %s terminal receipt changed or has no resolved durable snapshot", req.Lease.LeaseID)
+	}
+	kind := fixedAWSLeaseKind
+	kind.AfterTerminal = func(claim core.LeaseClaim) error { return cleanupAWSLeaseSSH(claim.LeaseID) }
+	return core.DeleteFixedResource(ctx, kind, snapshot, core.FixedLeaseOperations[struct{}]{
+		Release: &core.FixedReleasePolicy{Outcome: outcome},
+		ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[struct{}], error) {
+			claim := *tx.Claim
+			var result core.FixedObservation[struct{}]
+			if err := b.validateTerminalReleaseScope(ctx, claim, req.Lease.LeaseID); err != nil {
+				return result, err
+			}
+			if !reflect.DeepEqual(req.Lease, awsTerminalReleaseTarget(claim)) {
+				return result, core.Exit(4, "lease_id_conflict: fixed AWS lease %s terminal target differs from its durable receipt", req.Lease.LeaseID)
+			}
+			if err := core.ValidateLeaseTargetProviderIdentity(req.Lease, req.ExpectedProviderIdentity); err != nil {
+				return result, err
+			}
+			// Resolve alone cannot authorize success across a visible-resource conflict.
+			servers, err := b.listAcrossRegions(ctx)
+			if err != nil {
+				return result, err
+			}
+			err = validateAWSTerminalInventory(claim, servers)
+			result.AbsenceProven = err == nil
+			return result, err
+		},
+		DeleteExact: func(context.Context, *core.FixedTransaction, struct{}) error {
+			return core.Exit(4, "fixed AWS terminal receipt cannot authorize deletion")
+		},
 	})
 }

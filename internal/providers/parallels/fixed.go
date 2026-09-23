@@ -465,6 +465,7 @@ func (b *leaseBackend) releaseFixed(ctx context.Context, claim core.LeaseClaim, 
 		return &vm, nil
 	}
 	err = core.DeleteFixedResource(ctx, parallelsFixedLeaseKind, claim, core.FixedLeaseOperations[core.ParallelsVM]{
+		Release: &core.FixedReleasePolicy{Outcome: outcome},
 		ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[core.ParallelsVM], error) {
 			claim = *tx.Claim
 			vm, err := lookup()
@@ -478,20 +479,15 @@ func (b *leaseBackend) releaseFixed(ctx context.Context, claim core.LeaseClaim, 
 			claim = *tx.Claim
 			current, err := lookup()
 			if err != nil || current == nil {
-				outcome.Terminal = err == nil
 				return err
 			}
 			err = client.Delete(ctx, current.ID)
-			outcome.Terminal = err == nil
 			if err == nil {
 				client.RemoveHostDirIfEmpty(ctx, parallelsFixedCreationDir(claim.FixedCreateIntent))
 			}
 			return err
 		},
 	})
-	if err == nil {
-		outcome.Terminal = true
-	}
 	if err != nil {
 		return err
 	}

@@ -317,6 +317,9 @@ func (tx *FixedTransaction) applyBinding(b FixedResourceBinding) error {
 }
 
 func (tx *FixedTransaction) Bind(b FixedResourceBinding) error {
+	if b.OnlyUnbound && tx.Claim.CloudID != "" {
+		return nil
+	}
 	if err := tx.applyBinding(b); err != nil {
 		return err
 	}

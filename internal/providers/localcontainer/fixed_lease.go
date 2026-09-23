@@ -121,8 +121,8 @@ func (b *backend) acquireFixed(ctx context.Context, req core.AcquireRequest, cfg
 		for _, container := range containers {
 			servers = append(servers, b.serverFromContainer(container, cfg))
 		}
-		binding.Slug, err = core.AllocateDirectLeaseSlug(leaseID, req.RequestedSlug, servers)
-		return binding, err
+		binding.AllocateSlug, binding.RequestedSlug, binding.Inventory = true, req.RequestedSlug, servers
+		return binding, nil
 	}, ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[inspectContainer], error) {
 		claim, intent := tx.Claim, tx.Claim.FixedCreateIntent
 		var result core.FixedObservation[inspectContainer]

@@ -67,13 +67,9 @@ func (b *backend) acquireFixed(ctx context.Context, cfg core.Config, client api,
 			if len(observed.Candidates) != 1 {
 				return boxData{}, core.FixedUncertainCustody(tx.Claim.LeaseID)
 			}
-			return observed.Candidates[0], nil
+			return observed.Candidates[0], tx.Bind(*observed.Binding)
 		},
 		PrepareAccess: func(ctx context.Context, tx *core.FixedTransaction, box boxData) (core.LeaseTarget, error) {
-			server := fixedBoxServer(cfg, box, *tx.Claim)
-			if err := tx.Bind(core.FixedResourceBinding{CloudID: box.ID, ImmutableID: server.ImmutableID, Labels: server.Labels}); err != nil {
-				return core.LeaseTarget{}, err
-			}
 			return b.prepareFixedBox(ctx, cfg, client, *tx.Claim, box)
 		},
 	})
@@ -138,6 +134,7 @@ func fixedBoxObserver(cfg core.Config, client api) func(context.Context, *core.F
 			}
 		}
 		result.Candidates = []boxData{box}
+		result.Binding = &core.FixedResourceBinding{CloudID: box.ID, ImmutableID: boxCreationTime(box), Labels: fixedBoxServer(cfg, box, claim).Labels}
 		return result, nil
 	}
 }

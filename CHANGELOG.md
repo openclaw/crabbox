@@ -16,6 +16,10 @@
 - Preserve non-empty raw workspaces when origin seeding becomes available by using plain manifest sync, and reject malformed Git destinations before transfer. Narrows [PR 2284](https://github.com/openclaw/crabbox/pull/2284). Thanks @vincentkoc.
 - Fail Parallels IP discovery early after repeated post-boot Tools-unavailable probes, preserve DHCP/SSH fallback, and name clone-mode, snapshot-reset, and startup-timeout flags in diagnostics. [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
 
+### Maintenance
+
+- Make fixed-lease cleanup-binding persistence the shared engine default and consolidate recovery transactions, journal writes, and completion handling across direct provider adapters. [PR 2528](https://github.com/openclaw/crabbox/pull/2528).
+
 ## 0.66.0 - 2026-09-23
 
 ### Highlights

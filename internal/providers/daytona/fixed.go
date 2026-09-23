@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"reflect"
 	"strings"
 	"time"
 
@@ -330,89 +329,47 @@ func loadFixedDaytonaSandbox(ctx context.Context, client daytonaAPI, claim core.
 }
 
 func (b *daytonaLeaseBackend) releaseFixed(ctx context.Context, expected core.LeaseClaim, checkpointID string, absenceOnly bool, repoRoot string) error {
-	if !absenceOnly {
-		return b.releaseFixedWithEngine(ctx, expected, checkpointID, repoRoot)
-	}
-	// Absence-only reconciliation keeps its established proof path and never submits deletion.
-	return core.WithDurableLeaseClaimLockContext(ctx, expected.LeaseID, func(claim *core.LeaseClaim, exists bool, persist func() error) error {
-		if !exists || !reflect.DeepEqual(*claim, expected) {
-			return core.Exit(4, "Daytona fixed lease claim changed before release; retry")
-		}
-		if !fixedDaytonaLeaseKind.IsFixedClaim(*claim) || claim.FixedCreateIntent.Version != fixedDaytonaLeaseKind.IntentVersion {
-			return core.Exit(4, "Daytona fixed lease format is not recognized; retain its ownership record for reconciliation")
-		}
-		if claim.FixedCreateIntent.State == "released" {
-			return fixedDaytonaLeaseKind.ValidateTerminalClaim(*claim, expected, claim.LeaseID, nil)
-		}
-		if repoRoot != "" {
-			if claim.RepoRoot == "" {
-				return core.Exit(4, "Daytona fixed lease %s has no current repository owner", claim.LeaseID)
-			}
-			if err := core.CheckLeaseClaimRepositoryOwner(claim.LeaseID, *claim, repoRoot, false); err != nil {
-				return err
-			}
-		}
-		if err := core.AuthorizeCheckpointRelease(*claim, checkpointID); err != nil {
-			return err
-		}
-		if absenceOnly && claim.FixedCreateIntent.State != "acquired" {
-			return core.Exit(4, "Daytona absence reconciliation requires a completed fixed acquisition")
-		}
-		if !neverSubmittedDaytonaClaim(*claim) {
-			apiClient, err := newDaytonaClient(b.cfg, b.rt)
-			if err != nil {
-				return err
-			}
-			client, ok := apiClient.(fixedDaytonaDeletionAPI)
-			if !ok {
-				return core.Exit(4, "Daytona client cannot attest fixed resource deletion")
-			}
-			if claim.CloudID == "" {
-				sandbox, err := loadFixedDaytonaSandbox(ctx, client, *claim)
-				if err != nil {
-					return err
-				}
-				// DELETE can rename/hide this child before returning. A lost create
-				// response must bind the observed UUID before any cleanup request.
-				claim.CloudID, claim.CloudImmutableID = sandbox.GetId(), sandbox.GetId()
-				if err := persist(); err != nil {
-					return err
-				}
-			}
-			if err := deleteFixedDaytonaSandbox(ctx, client, claim, persist, absenceOnly); err != nil {
-				return err
-			}
-		}
-		*claim = fixedDaytonaLeaseKind.TerminalClaim(*claim, time.Now().UTC())
-		return persist()
-	})
-}
-
-func (b *daytonaLeaseBackend) releaseFixedWithEngine(ctx context.Context, expected core.LeaseClaim, checkpointID, repoRoot string) error {
 	var client fixedDaytonaDeletionAPI
-	return core.DeleteFixedClaim(ctx, fixedDaytonaLeaseKind, expected,
-		&core.FixedReleasePolicy{RepoRoot: repoRoot, CheckpointID: &checkpointID, SkipTerminalObservation: true, PristineScopePrefix: "daytona:organization:v1:"},
-		func(ctx context.Context, tx *core.FixedTransaction) error {
+	policy := &core.FixedReleasePolicy{RepoRoot: repoRoot, CheckpointID: &checkpointID, SkipTerminalObservation: true}
+	if !absenceOnly {
+		policy.PristineScopePrefix = "daytona:organization:v1:"
+	}
+	return core.DeleteFixedResource(ctx, fixedDaytonaLeaseKind, expected, core.FixedLeaseOperations[struct{}]{
+		Release: policy,
+		ObserveExact: func(ctx context.Context, tx *core.FixedTransaction, _ core.FixedObserveMode) (core.FixedObservation[struct{}], error) {
+			var result core.FixedObservation[struct{}]
+			if absenceOnly && tx.Claim.FixedCreateIntent.State != "acquired" {
+				return result, core.Exit(4, "Daytona absence reconciliation requires a completed fixed acquisition")
+			}
 			apiClient, err := newDaytonaClient(b.cfg, b.rt)
 			if err != nil {
-				return err
+				return result, err
 			}
 			var ok bool
 			client, ok = apiClient.(fixedDaytonaDeletionAPI)
 			if !ok {
-				return core.Exit(4, "Daytona client cannot attest fixed resource deletion")
+				return result, core.Exit(4, "Daytona client cannot attest fixed resource deletion")
 			}
-			if tx.Claim.CloudID != "" {
-				return nil
+			if tx.Claim.CloudID == "" {
+				sandbox, err := loadFixedDaytonaSandbox(ctx, client, *tx.Claim)
+				if err != nil {
+					return result, err
+				}
+				result.Binding = &core.FixedResourceBinding{CloudID: sandbox.GetId(), ImmutableID: sandbox.GetId()}
 			}
-			sandbox, err := loadFixedDaytonaSandbox(ctx, client, *tx.Claim)
-			if err != nil {
-				return err
+			if absenceOnly {
+				// This native proof never submits DELETE or writes witnesses.
+				err := deleteFixedDaytonaSandbox(ctx, client, tx.Claim, tx.PersistDeletionEvidence, true)
+				result.AbsenceProven = err == nil
+				return result, err
 			}
-			return tx.Bind(core.FixedResourceBinding{CloudID: sandbox.GetId(), ImmutableID: sandbox.GetId()})
-		}, func(ctx context.Context, tx *core.FixedTransaction) error {
+			result.Candidates = []struct{}{{}}
+			return result, nil
+		},
+		DeleteExact: func(ctx context.Context, tx *core.FixedTransaction, _ struct{}) error {
 			return deleteFixedDaytonaSandbox(ctx, client, tx.Claim, tx.PersistDeletionEvidence, false)
-		})
+		},
+	})
 }
 
 func (b *daytonaLeaseBackend) reclaimFixed(ctx context.Context, claim core.LeaseClaim, repoRoot string, reclaim bool) (core.LeaseClaim, error) {
