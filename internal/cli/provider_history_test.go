@@ -14,7 +14,10 @@ func setupProviderHistoryTest(t *testing.T) string {
 	clearConfigEnv(t)
 	root := t.TempDir()
 	t.Chdir(root)
-	t.Setenv("XDG_STATE_HOME", filepath.Join(t.TempDir(), "state"))
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
 	t.Setenv("CI", "")
 	t.Setenv("CRABBOX_CONFIG", "")
 	t.Setenv("CRABBOX_PROVIDER", "")
@@ -177,6 +180,35 @@ func TestCorruptProviderHistoryIsIgnoredByNormalSelectionAndVisibleToInspection(
 	err = (App{Stdout: &stdout, Stderr: &stderr}).providerHistory(nil)
 	if err == nil || !strings.Contains(err.Error(), "decode provider history state") {
 		t.Fatalf("provider history inspection error=%v stdout=%q stderr=%q", err, stdout.String(), stderr.String())
+	}
+}
+
+func TestProviderHistoryClearIsIdempotentWhenStateDoesNotExist(t *testing.T) {
+	setupProviderHistoryTest(t)
+	root, removed, err := clearProviderHistoryForCurrentWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed || root == "" {
+		t.Fatalf("clear empty history root=%q removed=%t", root, removed)
+	}
+}
+
+func TestRememberExplicitProviderRequiresRealFlagIntent(t *testing.T) {
+	setupProviderHistoryTest(t)
+	cfg := baseConfig()
+	setProviderSelection(&cfg, "boxd", providerSelectionFlag)
+	cfg.providerExplicit = false
+	rememberExplicitProviderBestEffort(cfg, &bytes.Buffer{})
+	if _, ok, err := readProviderHistory(); err != nil || ok {
+		t.Fatalf("programmatic flag source wrote history ok=%t err=%v", ok, err)
+	}
+
+	cfg.providerExplicit = true
+	rememberExplicitProviderBestEffort(cfg, &bytes.Buffer{})
+	record, ok, err := readProviderHistory()
+	if err != nil || !ok || len(record.Providers) != 1 || record.Providers[0].Provider != "boxd" {
+		t.Fatalf("explicit provider history=%#v ok=%t err=%v", record, ok, err)
 	}
 }
 
