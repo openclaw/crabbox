@@ -294,6 +294,7 @@ Common Flows:
   crabbox artifacts pull artifacts/blue-lobster --output /tmp/blue-lobster-proof
   crabbox providers
   crabbox providers --json
+  crabbox providers history
   crabbox webvnc --id blue-lobster --open
   crabbox code --id blue-lobster --open
   crabbox egress start --id blue-lobster --profile discord --daemon
