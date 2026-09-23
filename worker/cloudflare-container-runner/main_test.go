@@ -224,3 +224,59 @@ func containsEnv(env []string, value string) bool {
 	}
 	return false
 }
+
+func TestHandleExecRejectsOverflowingDeadlineBeforeSideEffects(t *testing.T) {
+	cwd := filepath.Join(t.TempDir(), "uncreated")
+	body, _ := json.Marshal(execRequest{Command: "printf deadline-proof", Cwd: cwd, TimeoutMS: 9223372036855})
+	rec := httptest.NewRecorder()
+	handleExec(rec, httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status=%d body=%s; want400", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(cwd); !os.IsNotExist(err) {
+		t.Errorf("invalid deadline created cwd: %v", err)
+	}
+	if strings.Contains(rec.Body.String(), `"type":"start"`) {
+		t.Error("invalid deadline opened stream")
+	}
+}
+
+func TestHandleExecDeadlineBoundaryAndDisabledPolicy(t *testing.T) {
+	for _, ms := range []int64{9223372036854, 0, -1} {
+		body, _ := json.Marshal(execRequest{Command: "printf deadline-proof", Cwd: t.TempDir(), TimeoutMS: ms})
+		rec := httptest.NewRecorder()
+		handleExec(rec, httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader(body)))
+		events := parseStreamEvents(t, rec.Body.String())
+		output := ""
+		for _, event := range events {
+			if event.Type == "stdout" {
+				output += event.Data
+			}
+		}
+		if rec.Code != http.StatusOK || output != "deadline-proof" || len(events) == 0 {
+			t.Fatalf("timeout=%d status=%d events=%+v", ms, rec.Code, events)
+		}
+		last := events[len(events)-1]
+		if last.Type != "complete" || last.ExitCode == nil || *last.ExitCode != 0 {
+			t.Fatalf("timeout=%d terminal=%+v", ms, last)
+		}
+	}
+}
+
+func TestHandleExecCanceledRequestPreservesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	body, _ := json.Marshal(execRequest{Command: "printf must-not-run", Cwd: t.TempDir(), TimeoutMS: 1000})
+	rec := httptest.NewRecorder()
+	handleExec(rec, httptest.NewRequest(http.MethodPost, "/v1/exec", bytes.NewReader(body)).WithContext(ctx))
+	events := parseStreamEvents(t, rec.Body.String())
+	last := events[len(events)-1]
+	if rec.Code != 200 || last.Type != "complete" || last.ExitCode == nil || *last.ExitCode != 124 {
+		t.Fatalf("status=%d events=%+v", rec.Code, events)
+	}
+	for _, event := range events {
+		if event.Type == "stdout" {
+			t.Fatal("canceled command ran")
+		}
+	}
+}

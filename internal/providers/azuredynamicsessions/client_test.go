@@ -942,7 +942,7 @@ func TestAzureDynamicSessionsTimeoutWireProjectionDoesNotWrap(t *testing.T) {
 	if strconv.IntSize < 64 {
 		t.Skip("large public integer seconds require a 64-bit int")
 	}
-	largeSeconds := int64(9223372037)
+	largeSeconds := int64(9223372036)
 	for _, tc := range []struct {
 		name    string
 		seconds int64
@@ -952,8 +952,7 @@ func TestAzureDynamicSessionsTimeoutWireProjectionDoesNotWrap(t *testing.T) {
 		{"ordinary explicit overrides TTL", 7, time.Minute, 7000},
 		{"nonpositive uses rounded TTL", -1, 1500 * time.Millisecond, 2000},
 		{"nonpositive without TTL uses default", 0, 0, 1800000},
-		{"explicit seconds exceed nanosecond range but fit milliseconds", largeSeconds, 0, largeSeconds * 1000},
-		{"TTL near duration ceiling still rounds to seconds", 0, time.Duration(1<<63 - 1), largeSeconds * 1000},
+		{"largest whole-second runner deadline", largeSeconds, 0, largeSeconds * 1000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := core.Config{TTL: tc.ttl, AzureDynamicSessions: core.AzureDynamicSessionsConfig{TimeoutSecs: int(tc.seconds)}}
@@ -972,7 +971,7 @@ func TestAzureDynamicSessionsWireTimeoutBoundaryAndAdmission(t *testing.T) {
 	if strconv.IntSize < 64 {
 		t.Skip("large public integer seconds require 64-bit int")
 	}
-	maxSeconds := int64(1<<63-1) / 1000
+	maxSeconds := int64(1<<63-1) / int64(time.Second)
 	cfg := core.Config{AzureDynamicSessions: core.AzureDynamicSessionsConfig{TimeoutSecs: int(maxSeconds)}}
 	got, err := azureDynamicSessionsTimeoutMilliseconds(cfg)
 	if err != nil || got != maxSeconds*1000 {
@@ -1013,5 +1012,12 @@ func TestAzureDynamicSessionsOversizedCommandTimeoutDoesNotBlockListAdmission(t 
 	t.Cleanup(func() { newAzureDynamicSessionsClient = previous })
 	if _, err := b.List(context.Background(), core.ListRequest{}); !errors.Is(err, sentinel) {
 		t.Fatalf("list blocked by unrelated command timeout: %v", err)
+	}
+}
+
+func TestAzureDynamicSessionsMaximumTTLRejectsRoundedDeadline(t *testing.T) {
+	cfg := core.Config{TTL: time.Duration(1<<63 - 1)}
+	if _, err := azureDynamicSessionsTimeoutMilliseconds(cfg); core.ExitCodeForError(err, 1) != 2 {
+		t.Fatalf("rounded TTL error=%v", err)
 	}
 }

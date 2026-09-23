@@ -15,7 +15,7 @@
 - Finish Blaxel multipart producers before retrying or releasing borrowed archives, preserving HTTP error precedence and early-success uploads. [PR 2505](https://github.com/openclaw/crabbox/pull/2505). Thanks @steipete.
 - Reject overflowing Nomad, Agent Sandbox, and Superserve execution timeouts before provider dispatch while preserving disabled deadlines, service defaults, and caller cancellation. [PR 2503](https://github.com/openclaw/crabbox/pull/2503). Thanks @steipete.
 - Report Blacksmith sync guard timeouts consistently in run results, timing data, and failure bundles without reclassifying ordinary exit 124 or an earlier workload failure. [PR 2510](https://github.com/openclaw/crabbox/pull/2510). Thanks @vincentkoc.
-- Preserve Azure Dynamic Sessions command timeout milliseconds without nanosecond overflow and reject unrepresentable wire values before run authentication, retaining TTL/default precedence. [PR 2512](https://github.com/openclaw/crabbox/pull/2512). Thanks @steipete.
+- Bound Azure Dynamic Sessions timeouts for existing runner deadlines before authentication, and reject overflowing direct runner deadlines before command side effects, retaining TTL/default precedence. [PR 2512](https://github.com/openclaw/crabbox/pull/2512). Thanks @steipete.
 - Reject oversized Superserve-derived sandbox lifetimes before rounding seconds, preventing duration overflow from bypassing the seven-day cap. [PR 2504](https://github.com/openclaw/crabbox/pull/2504). Thanks @steipete.
 - Reject overflowing OpenSandbox execution and lifetime budgets before requests, preserve valid coverage rules, and retain recovery claims with malformed lifetime seconds. [PR 2511](https://github.com/openclaw/crabbox/pull/2511). Thanks @steipete.
 

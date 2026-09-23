@@ -437,8 +437,8 @@ func (s azureDynamicSessionsSession) normalized(fallback string) azureDynamicSes
 
 func azureDynamicSessionsTimeoutMilliseconds(cfg core.Config) (int64, error) {
 	seconds := azureDynamicSessionsTimeoutSeconds(cfg)
-	if seconds > math.MaxInt64/1000 {
-		return 0, core.Exit(2, "azure-dynamic-sessions timeout seconds exceed the supported millisecond range")
+	if seconds > math.MaxInt64/int64(time.Second) {
+		return 0, core.Exit(2, "azure-dynamic-sessions timeout seconds exceed the supported runner deadline range")
 	}
 	return seconds * 1000, nil
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -132,6 +133,10 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 	req.Command = strings.TrimSpace(req.Command)
 	if req.Command == "" {
 		http.Error(w, "command is required", http.StatusBadRequest)
+		return
+	}
+	if req.TimeoutMS > math.MaxInt64/int64(time.Millisecond) {
+		http.Error(w, "timeoutMs exceeds supported deadline range", http.StatusBadRequest)
 		return
 	}
 	cwd := cleanAbsolutePath(req.Cwd)
