@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +54,51 @@ func TestProviderHistoryMaintainsBoundedMRUOrder(t *testing.T) {
 	}
 	if record.Providers[1].Provider != "aws" || !record.Providers[1].LastSelectedAt.Equal(second) {
 		t.Fatalf("second provider=%#v", record.Providers[1])
+	}
+}
+
+func TestProviderHistoryCanonicalizesAliasesAndCapsEntries(t *testing.T) {
+	setupProviderHistoryTest(t)
+	names := make([]string, 0, providerHistoryLimit+2)
+	for _, provider := range registeredProviders() {
+		switch provider.Spec().Kind {
+		case ProviderKindSSHLease, ProviderKindDelegatedRun:
+			names = append(names, provider.Spec().Name)
+		}
+		if len(names) == providerHistoryLimit+2 {
+			break
+		}
+	}
+	if len(names) < providerHistoryLimit+1 {
+		t.Fatalf("need at least %d runnable providers, got %d", providerHistoryLimit+1, len(names))
+	}
+	start := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	for i, name := range names {
+		if err := rememberProviderForCurrentWorkspace(name, start.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatalf("remember %s: %v", name, err)
+		}
+	}
+	record, ok, err := readProviderHistory()
+	if err != nil || !ok {
+		t.Fatalf("read history ok=%t err=%v", ok, err)
+	}
+	if len(record.Providers) != providerHistoryLimit {
+		t.Fatalf("history len=%d want=%d", len(record.Providers), providerHistoryLimit)
+	}
+	if record.Providers[0].Provider != names[len(names)-1] {
+		t.Fatalf("MRU provider=%q want=%q", record.Providers[0].Provider, names[len(names)-1])
+	}
+
+	// Provider aliases are persisted canonically.
+	if err := rememberProviderForCurrentWorkspace("docker", start.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	record, _, err = readProviderHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Providers[0].Provider != "local-container" {
+		t.Fatalf("alias persisted as %q", record.Providers[0].Provider)
 	}
 }
 
@@ -187,6 +231,22 @@ func TestProviderHistoryLoadConfigIntegration(t *testing.T) {
 	}
 }
 
+func TestConfigShowReportsRecentProviderHistorySource(t *testing.T) {
+	setupProviderHistoryTest(t)
+	if err := rememberProviderForCurrentWorkspace("boxd", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := (App{Stdout: &stdout, Stderr: &stderr}).configShow([]string{"--json"}); err != nil {
+		t.Fatalf("config show: %v stderr=%q", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"provider":"boxd"`) ||
+		!strings.Contains(stdout.String(), `"providerSource":"recent_history"`) ||
+		!strings.Contains(stdout.String(), `"providerSelected":true`) {
+		t.Fatalf("config show history provenance=%q", stdout.String())
+	}
+}
+
 func TestProviderHistoryFallbackRequiresNoExplicitConfigFile(t *testing.T) {
 	setupProviderHistoryTest(t)
 	if err := rememberProviderForCurrentWorkspace("boxd", time.Now().UTC()); err != nil {
@@ -219,4 +279,3 @@ func TestProviderHistoryCommandRejectsClearJSONCombination(t *testing.T) {
 	}
 }
 
-var _ = context.Background
