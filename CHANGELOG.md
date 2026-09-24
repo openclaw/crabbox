@@ -2,38 +2,23 @@
 
 ## Unreleased
 
-### Fixes
-
-- Keep Boxd lease SSH readiness on the authenticated forwarded port instead of falling back to port 22 while the forward starts. [PR 2519](https://github.com/openclaw/crabbox/pull/2519). Thanks @MichielMAnalytics.
-- Reject unverified Linux developer images with trusted-source builder verification, functional offline smokes, contained scratch, and fail-closed archive publication. [PR 1995](https://github.com/openclaw/crabbox/pull/1995). Thanks @vincentkoc.
-- Accept BOM-prefixed GitHub Runner registrations when seeding verified tool caches and create new registration files privately regardless of the caller's umask. [PR 1995](https://github.com/openclaw/crabbox/pull/1995). Thanks @vincentkoc.
-- Classify definite Boxd create rejections without retaining orphaned claims, preserve gRPC server diagnostics, and allow forced local recovery after authenticated inventory proves an unbound create absent.
-- Print joined CLI error causes alongside exit diagnostics while preserving command exit codes and standalone error output.
-- Restore complete branch history before coherence checks when reusing shallow Git workspaces, while preserving wrong-branch rejection and index rollback. [PR 2529](https://github.com/openclaw/crabbox/pull/2529). Thanks @steipete.
-- Allow repeated Incus stop with the exact canonical lease ID after confirmed deletion, validating the retained terminal receipt and connection identity while keeping slug lookups live. [PR 2486](https://github.com/openclaw/crabbox/pull/2486). Thanks @vincentkoc.
-- Bound optional AWS and Hetzner price quotes to five seconds so stalled pricing falls back to existing estimates. Analysis: [PR 1630](https://github.com/openclaw/crabbox/pull/1630). Thanks @steipete.
-- Probe NVIDIA Brev SSH readiness during ordinary status only when the cached config matches the workspace claim's prepared provenance, preserving host/container targets and rejecting stale organization routes. [PR 2434](https://github.com/openclaw/crabbox/pull/2434). Thanks @vincentkoc.
-- Preserve non-empty raw workspaces when origin seeding becomes available by using plain manifest sync, and reject malformed Git destinations before transfer. Narrows [PR 2284](https://github.com/openclaw/crabbox/pull/2284). Thanks @vincentkoc.
-- Fail Parallels IP discovery early after repeated post-boot Tools-unavailable probes, preserve DHCP/SSH fallback, and name clone-mode, snapshot-reset, and startup-timeout flags in diagnostics. [Issue 2398](https://github.com/openclaw/crabbox/issues/2398). Thanks @saariuslystoned.
-
-### Maintenance
-
-- Make fixed-lease cleanup-binding persistence the shared engine default and consolidate recovery transactions, journal writes, and completion handling across direct provider adapters. [PR 2528](https://github.com/openclaw/crabbox/pull/2528).
-
-## 0.66.0 - 2026-09-23
+## 0.66.0 - 2026-09-24
 
 ### Highlights
 
 - **Run proxy-aware commands through host egress.** `egress run` manages proxy setup, command execution, and session cleanup; optional HTTP(S) upstream credentials stay on the host.
-- **Safer fixed-lease cleanup and recovery.** Uncertain cleanup preserves claims, Azure records companion cleanup identities before deletion, and Parallels rejects inconsistent identities and invalid terminal receipts.
-- **More reliable NVIDIA Brev connections.** Native OpenSSH resolves certificate-backed routes, while saved host/container targets survive fresh processes, reuse, and stop/start.
-- **Provider observations preserve lease policy.** OVH, Sprites, and Boat retain recorded lifetime and idle settings across status, reuse, and heartbeat operations; unknown observations stay unknown.
-- **Uploads and request budgets fail cleanly.** Multipart producers finish before archives are released, oversized execution budgets fail before dispatch, and Vultr retries release the previous response first.
+- **Safer cleanup and recovery.** The shared fixed-lease engine owns cleanup-binding persistence and recovery transactions, preserves uncertain claims, and validates cleanup identities and terminal receipts. Incus accepts repeated stop by exact lease ID after confirmed deletion.
+- **More reliable provider connections and diagnostics.** NVIDIA Brev uses native OpenSSH, retains host/container targets, and probes only provenance-matched status routes. Parallels fails early when guest tools stay unavailable; Boxd waits on the authenticated forwarded port and reports definite create rejections with their server diagnostics.
+- **Preserve workspaces and verify developer images.** Origin seeding leaves non-empty raw workspaces intact, and shallow checkout reuse restores branch ancestry. Linux developer-image acceptance requires trusted builder verification and functional offline smokes before publication.
+- **Provider observations preserve lease policy.** OVH, Sprites, and Boat/ASCII Box retain recorded lifetime and idle settings across status, reuse, and heartbeat operations; unknown observations stay unknown.
+- **Bound optional waits and reject overflowing budgets.** AWS and Hetzner price quotes fall back after five seconds, oversized execution and lifetime budgets fail before dispatch, and readiness waits preserve cancellation. Multipart uploads retain archives until their producers finish, and Vultr retries release the previous response first.
+- **Consolidate internal implementation paths.** Shared WebSocket upgrade checks, slug allocation, provider flag provenance, and tag and metadata helpers reduce duplication while preserving existing behavior.
 
 ### Upgrade notes
 
 - `egress run` requires an existing, exclusively owned Linux SSH lease, and the command must opt into its lease-local proxy. Scoped cleanup requires the current Linux helper and pidfd support. [PR 2506](https://github.com/openclaw/crabbox/pull/2506).
 - Keep local claims and journals when upgrading hosts with unfinished fixed-ID cleanup. Inconsistent Parallels identities and invalid terminal receipts now fail instead of being reported as cleaned up. [PR 2515](https://github.com/openclaw/crabbox/pull/2515).
+- Linux developer-image preparation and publication must use the updated standalone verifier from the same trusted source as the installer and publisher, and require the `linux-builder` profile. Existing valid builder manifests retain their canonical-byte contract; older installed scripts do not gain `--verify` automatically. [PR 2533](https://github.com/openclaw/crabbox/pull/2533).
 
 ### Added
 
@@ -41,14 +26,23 @@
 
 ### Fixes
 
+- Keep Boxd lease SSH readiness on the authenticated forwarded port instead of falling back to port 22 while the forward starts. [PR 2519](https://github.com/openclaw/crabbox/pull/2519), [PR 2530](https://github.com/openclaw/crabbox/pull/2530). Thanks @MichielMAnalytics.
+- Reject unverified Linux developer images with trusted-source builder verification, functional offline smokes, contained scratch, and fail-closed archive publication. [PR 1995](https://github.com/openclaw/crabbox/pull/1995), [PR 2533](https://github.com/openclaw/crabbox/pull/2533). Thanks @vincentkoc.
+- Accept BOM-prefixed GitHub Runner registrations when seeding verified tool caches and create new registration files privately regardless of the caller's umask. [PR 1995](https://github.com/openclaw/crabbox/pull/1995), [PR 2533](https://github.com/openclaw/crabbox/pull/2533). Thanks @vincentkoc.
+- Classify definite Boxd create rejections without retaining orphaned claims, preserve gRPC server diagnostics, and allow forced local recovery after authenticated inventory proves an unbound create absent. [PR 2537](https://github.com/openclaw/crabbox/pull/2537).
+- Print joined CLI error causes alongside exit diagnostics while preserving command exit codes and standalone error output. [PR 2537](https://github.com/openclaw/crabbox/pull/2537).
+- Restore complete branch history before coherence checks when reusing shallow Git workspaces, while preserving wrong-branch rejection and index rollback. [PR 2529](https://github.com/openclaw/crabbox/pull/2529). Thanks @steipete.
+- Allow repeated Incus stop with the exact canonical lease ID after confirmed deletion, validating the retained terminal receipt and connection identity while keeping slug lookups live. [PR 2486](https://github.com/openclaw/crabbox/pull/2486), [PR 2523](https://github.com/openclaw/crabbox/pull/2523). Thanks @vincentkoc.
+- Bound optional AWS and Hetzner price quotes to five seconds so stalled pricing falls back to existing estimates. [PR 2524](https://github.com/openclaw/crabbox/pull/2524). Analysis: [PR 1630](https://github.com/openclaw/crabbox/pull/1630). Thanks @steipete.
+- Probe NVIDIA Brev SSH readiness during ordinary status only when the cached config matches the workspace claim's prepared provenance, preserving host/container targets and rejecting stale organization routes. [PR 2434](https://github.com/openclaw/crabbox/pull/2434), [PR 2527](https://github.com/openclaw/crabbox/pull/2527). Thanks @vincentkoc.
+- Preserve non-empty raw workspaces when origin seeding becomes available by using plain manifest sync, and reject malformed Git destinations before transfer. [PR 2526](https://github.com/openclaw/crabbox/pull/2526). Narrows [PR 2284](https://github.com/openclaw/crabbox/pull/2284). Thanks @vincentkoc.
+- Fail Parallels IP discovery early after repeated post-boot Tools-unavailable probes, preserve DHCP/SSH fallback, and name clone-mode, snapshot-reset, and startup-timeout flags in diagnostics. [Issue 2398](https://github.com/openclaw/crabbox/issues/2398), [PR 2525](https://github.com/openclaw/crabbox/pull/2525). Thanks @saariuslystoned.
 - Preserve OVH heartbeat policy, including pre-upgrade overrides, across reuse and status reads, recording activity and explicit idle-timeout changes atomically in the local lease claim. [PR 2420](https://github.com/openclaw/crabbox/pull/2420). Thanks @steipete.
 - Retain OVH SSH targets for plain status readiness checks and keep both status modes out of repository admission, while preserving metadata-only observations without a public address. [PR 2420](https://github.com/openclaw/crabbox/pull/2420). Thanks @steipete.
 - Bound OVH IP-readiness lookups and retry waits with an elapsed-time deadline, preserving caller cancellation causes and provider error precedence. [PR 2420](https://github.com/openclaw/crabbox/pull/2420). Thanks @steipete.
 - Resolve NVIDIA Brev SSH routes with native OpenSSH, preserve captured routes across commands, sync, copying, forwarding, and interactive sessions, and retain bounded, redacted certificate-hook diagnostics. [PR 2429](https://github.com/openclaw/crabbox/pull/2429), [PR 2516](https://github.com/openclaw/crabbox/pull/2516). Thanks @vincentkoc.
 - Preserve NVIDIA Brev leases' host/container target across fresh-process status, reuse, and stop/start, while honoring explicit target changes. [PR 2430](https://github.com/openclaw/crabbox/pull/2430), [PR 2517](https://github.com/openclaw/crabbox/pull/2517). Thanks @vincentkoc.
 - Preserve fixed-lease claims after uncertain cleanup, durably bind Azure companion cleanup identities before deletion, honor existing deletion markers on retries, and reject inconsistent Parallels cleanup identities and invalid terminal receipts. [PR 2515](https://github.com/openclaw/crabbox/pull/2515). Thanks @steipete.
-- Prevent polling and delegated exit error wrappers from panicking during self-matching with non-comparable causes, preserving diagnostics and classification.
-- Fail AWS Lambda microVM runs when stdout or stderr delivery fails, preserving the output error through cleanup instead of reporting remote success. Thanks @steipete.
 - Fail AWS Lambda microVM runs when stdout or stderr delivery fails, preserving the output error through cleanup instead of reporting remote success. [PR 2513](https://github.com/openclaw/crabbox/pull/2513). Thanks @steipete.
 - Prevent polling and delegated exit error wrappers from panicking during self-matching with non-comparable causes, preserving diagnostics and classification. [PR 2513](https://github.com/openclaw/crabbox/pull/2513). Thanks @steipete.
 - Finish E2B and CubeSandbox upload producers before releasing source archives and surface source-read failures, using the same multipart lifetime owner as Blaxel. [PR 2509](https://github.com/openclaw/crabbox/pull/2509). Thanks @steipete.
@@ -65,6 +59,8 @@
 
 ### Maintenance
 
+- Make fixed-lease cleanup-binding persistence the shared engine default and consolidate recovery transactions, journal writes, and completion handling across direct provider adapters. [PR 2528](https://github.com/openclaw/crabbox/pull/2528).
+- Consolidate WebSocket upgrade predicates, slug allocation, provider flag provenance, and tag sanitization and metadata validation without changing their public behavior. [PR 2531](https://github.com/openclaw/crabbox/pull/2531), [PR 2532](https://github.com/openclaw/crabbox/pull/2532), [PR 2534](https://github.com/openclaw/crabbox/pull/2534), [PR 2538](https://github.com/openclaw/crabbox/pull/2538).
 - Recover notarization upload deadlines with one bounded S3 acceleration retry or an explicit accelerated route, and require successful signer exit plus online verification before capturing a receipt. [PR 2518](https://github.com/openclaw/crabbox/pull/2518). Thanks @steipete.
 - Preserve selected release-verification tools and clean up read-only temporary Go caches without following symlinks or masking earlier failures. [PR 2520](https://github.com/openclaw/crabbox/pull/2520). Thanks @steipete.
 
