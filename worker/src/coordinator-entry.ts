@@ -120,10 +120,12 @@ export async function prepareCoordinatorRequest(
     };
   }
   if (
-    isWebVNCAgentUpgrade(request, url) ||
-    isCodeAgentUpgrade(request, url) ||
-    isEgressAgentUpgrade(request, url) ||
-    isRuntimeAdapterAgentUpgrade(request, url)
+    request.method === "GET" &&
+    request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
+    (/^\/v1\/leases\/[^/]+\/webvnc\/agent$/.test(url.pathname) ||
+      /^\/v1\/leases\/[^/]+\/code\/agent$/.test(url.pathname) ||
+      /^\/v1\/leases\/[^/]+\/egress\/(?:host|client)$/.test(url.pathname) ||
+      /^\/v1\/adapters\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\/agent$/.test(url.pathname))
   ) {
     return { request: requestWithoutTrustedHeaders(request), authenticated: false };
   }
@@ -291,38 +293,6 @@ function requestWithoutCoordinatorAuthContext(request: Request): Request {
     headers.delete(name);
   }
   return new Request(clean, { headers });
-}
-
-function isWebVNCAgentUpgrade(request: Request, url: URL): boolean {
-  return (
-    request.method === "GET" &&
-    request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
-    /^\/v1\/leases\/[^/]+\/webvnc\/agent$/.test(url.pathname)
-  );
-}
-
-function isCodeAgentUpgrade(request: Request, url: URL): boolean {
-  return (
-    request.method === "GET" &&
-    request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
-    /^\/v1\/leases\/[^/]+\/code\/agent$/.test(url.pathname)
-  );
-}
-
-function isEgressAgentUpgrade(request: Request, url: URL): boolean {
-  return (
-    request.method === "GET" &&
-    request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
-    /^\/v1\/leases\/[^/]+\/egress\/(?:host|client)$/.test(url.pathname)
-  );
-}
-
-function isRuntimeAdapterAgentUpgrade(request: Request, url: URL): boolean {
-  return (
-    request.method === "GET" &&
-    request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
-    /^\/v1\/adapters\/[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\/agent$/.test(url.pathname)
-  );
 }
 
 function runtimeAdapterServiceAuth(
