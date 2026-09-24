@@ -155,45 +155,10 @@ func TestProviderHistoryCanonicalizesAliasesAndCapsEntries(t *testing.T) {
 	}
 }
 
-func TestRecentProviderFallbackIsLowerPriorityThanConfig(t *testing.T) {
-	setupProviderHistoryTest(t)
-	if err := rememberProviderForCurrentWorkspace(providerHistoryTestPrimary, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := baseConfig()
-	applyRecentProviderFallback(&cfg)
-	if cfg.Provider != providerHistoryTestPrimary || cfg.providerSelectionSource != providerSelectionRecentHistory {
-		t.Fatalf("history fallback provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
-	}
-
-	setProviderSelection(&cfg, providerHistoryTestSecondary, providerSelectionUserConfig)
-	applyRecentProviderFallback(&cfg)
-	if cfg.Provider != providerHistoryTestSecondary || cfg.providerSelectionSource != providerSelectionUserConfig {
-		t.Fatalf("user config lost to history: provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
-	}
-}
-
-func TestRecentProviderFallbackDisabledInCI(t *testing.T) {
-	setupProviderHistoryTest(t)
-	if err := rememberProviderForCurrentWorkspace(providerHistoryTestPrimary, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CI", "1")
-
-	cfg := baseConfig()
-	beforeProvider := cfg.Provider
-	beforeSource := cfg.providerSelectionSource
-	applyRecentProviderFallback(&cfg)
-	if cfg.Provider != beforeProvider || cfg.providerSelectionSource != beforeSource {
-		t.Fatalf("CI consumed local provider history: provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
-	}
-}
-
 func TestRecentProviderDoesNotBlockLeaseIDRouting(t *testing.T) {
 	setupProviderHistoryTest(t)
 	cfg := baseConfig()
-	setProviderSelection(&cfg, providerHistoryTestPrimary, providerSelectionRecentHistory)
+	setProviderSelection(&cfg, providerHistoryTestPrimary, providerSelectionCompiledDefault)
 
 	fs := newFlagSet("history-route-test", &bytes.Buffer{})
 	registerProviderSelectionFlag(fs, cfg, providerHelpAll())
@@ -205,7 +170,7 @@ func TestRecentProviderDoesNotBlockLeaseIDRouting(t *testing.T) {
 	}
 }
 
-func TestCorruptProviderHistoryIsIgnoredByNormalSelectionAndVisibleToInspection(t *testing.T) {
+func TestCorruptProviderHistoryDoesNotAffectConfigAndIsVisibleToInspection(t *testing.T) {
 	root := setupProviderHistoryTest(t)
 	path, err := providerHistoryPath(root)
 	if err != nil {
@@ -218,10 +183,15 @@ func TestCorruptProviderHistoryIsIgnoredByNormalSelectionAndVisibleToInspection(
 		t.Fatal(err)
 	}
 
-	cfg := baseConfig()
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
 	beforeProvider := cfg.Provider
 	beforeSource := cfg.providerSelectionSource
-	applyRecentProviderFallback(&cfg)
+	if _, err := loadConfig(); err != nil {
+		t.Fatalf("corrupt history affected config load: %v", err)
+	}
 	if cfg.Provider != beforeProvider || cfg.providerSelectionSource != beforeSource {
 		t.Fatalf("corrupt history changed provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
 	}
@@ -289,7 +259,7 @@ func TestProviderHistoryCommandShowsAndClearsCurrentWorkspace(t *testing.T) {
 	}
 }
 
-func TestProviderHistoryLoadConfigIntegration(t *testing.T) {
+func TestProviderHistoryDoesNotSelectProviderDuringConfigLoad(t *testing.T) {
 	setupProviderHistoryTest(t)
 	if err := rememberProviderForCurrentWorkspace(providerHistoryTestPrimary, time.Now().UTC()); err != nil {
 		t.Fatal(err)
@@ -299,8 +269,8 @@ func TestProviderHistoryLoadConfigIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != providerHistoryTestPrimary || cfg.providerSelectionSource != providerSelectionRecentHistory {
-		t.Fatalf("loadConfig provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
+	if cfg.Provider == providerHistoryTestPrimary || cfg.providerSelectionSource == providerSelectionFlag {
+		t.Fatalf("history changed normal provider selection: provider=%q source=%q", cfg.Provider, cfg.providerSelectionSource)
 	}
 
 	t.Setenv("CRABBOX_PROVIDER", providerHistoryTestSecondary)
@@ -313,7 +283,7 @@ func TestProviderHistoryLoadConfigIntegration(t *testing.T) {
 	}
 }
 
-func TestConfigShowReportsRecentProviderHistorySource(t *testing.T) {
+func TestConfigShowDoesNotSelectRecentProviderHistory(t *testing.T) {
 	setupProviderHistoryTest(t)
 	if err := rememberProviderForCurrentWorkspace(providerHistoryTestPrimary, time.Now().UTC()); err != nil {
 		t.Fatal(err)
@@ -322,14 +292,12 @@ func TestConfigShowReportsRecentProviderHistorySource(t *testing.T) {
 	if err := (App{Stdout: &stdout, Stderr: &stderr}).configShow([]string{"--json"}); err != nil {
 		t.Fatalf("config show: %v stderr=%q", err, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `"provider":"`+providerHistoryTestPrimary+`"`) ||
-		!strings.Contains(stdout.String(), `"providerSource":"recent_history"`) ||
-		!strings.Contains(stdout.String(), `"providerSelected":true`) {
+	if strings.Contains(stdout.String(), `"provider":"`+providerHistoryTestPrimary+`"`) {
 		t.Fatalf("config show history provenance=%q", stdout.String())
 	}
 }
 
-func TestProviderHistoryFallbackRequiresNoExplicitConfigFile(t *testing.T) {
+func TestProviderHistoryNeverOverridesExplicitConfigFile(t *testing.T) {
 	setupProviderHistoryTest(t)
 	if err := rememberProviderForCurrentWorkspace(providerHistoryTestPrimary, time.Now().UTC()); err != nil {
 		t.Fatal(err)
@@ -344,7 +312,7 @@ func TestProviderHistoryFallbackRequiresNoExplicitConfigFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.providerSelectionSource == providerSelectionRecentHistory {
+	if cfg.Provider == providerHistoryTestPrimary {
 		t.Fatalf("explicit config unexpectedly consumed provider history: %#v", cfg)
 	}
 }

@@ -33,13 +33,12 @@ provider-neutral `git` check should report `ok`; provider-specific tool checks
 begin after you select a provider. Doctor reports `no provider selected`, keeps
 the compatibility metadata as `source=compiled_default selected=false`, and
 skips provider credential readiness without failing the command. Select a
-provider through config, `CRABBOX_PROVIDER`, or `--provider` before
-the first lifecycle command. Ordinary local use remembers a bounded per-workspace
-history of explicit `--provider` selections, so later commands can omit the
-flag when no stronger source selects a provider. That selection is strict:
-Crabbox does not silently fail over to another remembered provider when auth,
-capacity, or execution fails. Run `crabbox providers recommend` to compare
-options and `crabbox providers history` to inspect local routing memory.
+provider through config, `CRABBOX_PROVIDER`, or `--provider` before each
+lifecycle command unless your normal configuration selects it. Crabbox records
+explicit provider choices in bounded per-workspace history for inspection, but
+does not silently reuse that history to select a provider. Run
+`crabbox providers recommend` to compare options and
+`crabbox providers history` to inspect local routing memory.
 
 If you do not use Homebrew, GitHub Releases ship platform archives for macOS,
 Linux, and Windows, with signed and notarized macOS executables. Download the matching archive from

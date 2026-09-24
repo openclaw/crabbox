@@ -131,34 +131,6 @@ func recentProviderFallbackAllowed() bool {
 	return true
 }
 
-func applyRecentProviderFallback(cfg *Config) {
-	if cfg == nil || providerSelectionIsActionable(*cfg) || !recentProviderFallbackAllowed() {
-		return
-	}
-	record, ok, err := readProviderHistory()
-	if err != nil || !ok {
-		return
-	}
-	for _, entry := range record.Providers {
-		provider, err := ProviderFor(strings.TrimSpace(entry.Provider))
-		if err != nil {
-			continue
-		}
-		spec := provider.Spec()
-		switch spec.Kind {
-		case ProviderKindSSHLease, ProviderKindDelegatedRun:
-		default:
-			continue
-		}
-		if IsTargetExplicit(cfg) && !providerSpecSupportsTarget(spec, normalizeTargetOS(cfg.TargetOS), normalizeWindowsMode(cfg.WindowsMode)) {
-			continue
-		}
-		setProviderSelection(cfg, spec.Name, providerSelectionRecentHistory)
-		cfg.brokerProvider = ""
-		return
-	}
-}
-
 func rememberExplicitProviderBestEffort(cfg Config, stderr io.Writer) {
 	if cfg.providerSelectionSource != providerSelectionFlag ||
 		!cfg.providerExplicit ||

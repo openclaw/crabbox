@@ -242,7 +242,6 @@ const (
 	providerSelectionCompiledDefault providerSelectionSource = "compiled_default"
 	providerSelectionUserConfig      providerSelectionSource = "user_config"
 	providerSelectionRepoConfig      providerSelectionSource = "repo_config"
-	providerSelectionRecentHistory   providerSelectionSource = "recent_history"
 	providerSelectionEnvironment     providerSelectionSource = "environment"
 	providerSelectionFlag            providerSelectionSource = "flag"
 	providerSelectionRecordedRun     providerSelectionSource = "recorded_run"
@@ -261,7 +260,6 @@ func providerSelectionIsActionable(cfg Config) bool {
 	switch cfg.providerSelectionSource {
 	case providerSelectionUserConfig,
 		providerSelectionRepoConfig,
-		providerSelectionRecentHistory,
 		providerSelectionEnvironment,
 		providerSelectionFlag,
 		providerSelectionRecordedRun,
@@ -751,10 +749,6 @@ func loadConfigWithOverrides(coordinator, provider string) (Config, error) {
 		setProviderSelection(&cfg, provider, providerSelectionFlag)
 		cfg.brokerProvider = ""
 	}
-	// Recent provider history is a convenience fallback, never policy. It is
-	// considered only after user/repo/env/explicit selections and stays
-	// non-authoritative so exact lease routing can still replace it.
-	applyRecentProviderFallback(&cfg)
 	if err := normalizeBrokerConfig(&cfg); err != nil {
 		return Config{}, err
 	}

@@ -20,7 +20,6 @@ func TestProviderSelectionIsActionable(t *testing.T) {
 		{name: "compiled default", source: providerSelectionCompiledDefault},
 		{name: "user config", source: providerSelectionUserConfig, want: true},
 		{name: "repo config", source: providerSelectionRepoConfig, want: true},
-		{name: "recent history", source: providerSelectionRecentHistory, want: true},
 		{name: "environment", source: providerSelectionEnvironment, want: true},
 		{name: "flag", source: providerSelectionFlag, want: true},
 		{name: "recorded run", source: providerSelectionRecordedRun, want: true},

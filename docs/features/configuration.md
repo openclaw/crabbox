@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 11312)
+Total output lines: 1293
+
 # Configuration
 
 Read when:
@@ -28,22 +31,13 @@ overrides that destination through its environment variable or CLI flag.
 ## Precedence
 
 ```text
-flags > env > repo-local crabbox.yaml/.crabbox.yaml > user config > recent local provider history > defaults
+flags > env > repo-local crabbox.yaml/.crabbox.yaml > user config > defaults
 ```
 
-Lowest precedence is applied first: defaults, then the optional recent-provider
-fallback, then user config, repo config, env vars, and flags. The history layer
-contains only provider selection; it is used only when no normal configuration
-source selected a provider. Each real configuration layer only overrides fields
-that are explicitly set; unset fields fall through to the layer below.
-
-Recent-provider history is private convenience state, not project policy. Crabbox
-records bounded per-workspace MRU entries after an explicit `--provider`
-selection successfully configures its backend. It does not record implicit
-history selections, perform runtime failover, or override exact lease routing.
-The fallback is disabled in CI, controller subprocesses, and explicit
-`CRABBOX_CONFIG` mode. Inspect or clear it with
-`crabbox providers history [--json|--clear]`.
+Lowest precedence is applied first: defaults, then user config, repo config,
+environment variables, and flags. Each layer only overrides fields that are
+explicitly set; unset fields fall through to the layer below. The separate
+provider history command is for inspection and does not affect routing.
 
 For the replacement lists `env.allow`, `results.junit`, and
 `run.preflightTools`, omitting the key inherits the lower layer, `[]` clears
@@ -87,7 +81,7 @@ file is group- or world-readable.
 
 State that does not belong in either YAML file:
 
-- recent per-workspace provider history (private bounded routing convenience; see `crabbox providers history`);
+- recent per-workspace provider history (private bounded inspection state; see `crabbox providers history`);
 - live lease records (managed records are coordinator-owned; registered records
   are provider-owned and mirrored to the coordinator);
 - per-lease SSH private keys (they live under the user config dir, but not in
@@ -548,178 +542,7 @@ covers Windows x86_64/x64 installer media. Use the Tart provider on Apple
 hardware for macOS VM workflows.
 
 `network`, `networkUuid`, and `host` are optional placement hints. When
-`network` or `networkUuid` is set, Crabbox moves all VIFs on the copied VM to
-that network. Prefer a single-NIC template for Crabbox-managed VMs, or leave
-both unset when the template's existing network topology should be preserved.
-
-The current SR-backed lifecycle uses `VM.copy`, then `VM.provision`, and then
-attaches a FAT16 `CIDATA` config-drive image. Keep `apiUrl` on an
-administrator-only management network or VPN, prefer trusted certificates, and
-limit `insecureTLS` to private lab environments.
-
-Environment overrides:
-
-```text
-CRABBOX_XCP_NG_API_URL
-CRABBOX_XCP_NG_USERNAME
-CRABBOX_XCP_NG_PASSWORD
-CRABBOX_XCP_NG_TEMPLATE
-CRABBOX_XCP_NG_TEMPLATE_UUID
-CRABBOX_XCP_NG_SR
-CRABBOX_XCP_NG_SR_UUID
-CRABBOX_XCP_NG_NETWORK
-CRABBOX_XCP_NG_NETWORK_UUID
-CRABBOX_XCP_NG_GUEST_CIDR
-CRABBOX_XCP_NG_HOST
-CRABBOX_XCP_NG_USER
-CRABBOX_XCP_NG_WORK_ROOT
-CRABBOX_XCP_NG_INSECURE_TLS
-```
-
-Set `CRABBOX_XCP_NG_GUEST_CIDR` to an IPv4 `/24` or narrower range attached
-to the local runner only when guest tools cannot report an address and active
-MAC discovery is required. Crabbox never sweeps all local interfaces.
-
-### Static SSH
-
-```yaml
-provider: ssh
-target: macos
-static:
-  host: mac-studio.local
-  user: alice
-  port: "22"
-  workRoot: /Users/alice/crabbox
-```
-
-`static`, `static-ssh`, and `ssh` all select the bring-your-own-host backend.
-
-### Local container
-
-```yaml
-provider: local-container
-localContainer:
-  runtime: docker
-  image: debian:bookworm
-  user: crabbox
-  workRoot: /work/crabbox
-  cpus: 0
-  memory: ""
-  network: bridge
-  dockerSocket: false
-```
-
-`provider: docker`, `provider: container`, and `provider: local-docker` are
-aliases for `local-container`. The backend uses Docker-compatible CLI commands,
-so Docker Desktop, OrbStack, Colima, Podman, and similar local runtimes work.
-Crabbox detects an installed `docker` or `podman` CLI and uses that runtime; if
-both are present, `docker` is selected unless `localContainer.runtime` is set
-explicitly. Set `dockerSocket: true` only when commands inside the lease must
-use the host Docker-compatible API; Crabbox then mounts the active local Unix
-socket from `DOCKER_HOST` or the Docker context and rejects remote TCP contexts.
-With the socket enabled and no explicit work root, Crabbox chooses a host-visible
-cache work root so nested bind mounts can see the synced checkout.
-
-Use `--desktop --browser` to bootstrap TigerVNC, XFCE, noVNC/websockify,
-desktop input tools, screenshot tools, ffmpeg, and a packaged browser inside
-the container.
-
-### Apple VZ
-
-```yaml
-provider: apple-vm
-appleVM:
-  # Optional for normal Homebrew/release installs.
-  helperPath: /custom/path/crabbox-apple-vm-helper
-  image: https://cloud-images.ubuntu.com/releases/resolute/release-20260731/ubuntu-26.04-server-cloudimg-arm64.img
-  imageSHA256: 3e113fdd41f39e13729375173bb2ae793f87dc6db4294e5251ff2476971788ba
-  user: crabbox
-  workRoot: /work/crabbox
-  cpus: 4
-  memoryMiB: 8192
-  diskGiB: 30
-```
-
-`provider: applevm` is an alias for `apple-vm`. The backend drives a small
-local helper that boots a headless Linux VM with Apple's
-`Virtualization.framework`, then exposes guest SSH through a host-local proxy so
-Crabbox can use the normal SSH sync and run path. The image default follows the
-portable `osImage` selector unless `appleVM.image` is set explicitly. Default
-remote images include pinned SHA-256 checksums; custom remote image URLs must
-set `appleVM.imageSHA256`, while local image paths may omit it. Apple Silicon
-Homebrew bottles and release archives install the helper beside `crabbox`;
-`helperPath` is only needed for a custom or source-built helper. The effective
-architecture defaults to `arm64`, and explicit `amd64` is rejected.
-
-### Multipass
-
-```yaml
-provider: multipass
-multipass:
-  cliPath: multipass
-  image: "26.04"
-  user: crabbox
-  workRoot: /work/crabbox
-  cpus: 4
-  memory: 8G
-  disk: 30G
-  launchTimeout: 20m
-```
-
-`provider: mp` and `provider: canonical-multipass` are aliases for `multipass`.
-The backend drives Canonical's `multipass` CLI on the local workstation, launches
-an Ubuntu VM with cloud-init, discovers the VM IP with `multipass info`, then
-uses the normal Crabbox SSH sync/run path. The Multipass image follows the
-portable `osImage` default unless `multipass.image` is set explicitly.
-
-### Blacksmith Testbox
-
-```yaml
-provider: blacksmith-testbox
-blacksmith:
-  org: example-org
-  workflow: .github/workflows/ci-check-testbox.yml
-  job: test
-  ref: main
-  idleTimeout: 90m
-  debug: false
-```
-
-### Namespace Devbox
-
-```yaml
-provider: namespace-devbox
-namespace:
-  image: builtin:base
-  size: M
-  repository: github.com/example-org/my-app
-  site: ""
-  volumeSizeGB: 100
-  autoStopIdleTimeout: 30m
-  workRoot: /workspaces/crabbox
-  deleteOnRelease: false
-```
-
-### Namespace Compute Instance
-
-```yaml
-provider: namespace-instance
-namespaceInstance:
-  cli: nsc
-  machineType: 4x8
-  duration: 30m
-  region: ""
-  endpoint: ""
-  keychain: ""
-  volumes: []
-  workRoot: /work/crabbox
-  bare: true
-```
-
-The `namespace` section remains specific to `namespace-devbox`.
-`namespaceInstance` configures the separate `nsc`-backed Compute provider.
-For repository-local config, Crabbox ignores `cli`, `endpoint`, `region`,
-`keychain`, and `volumes`; set those through trusted user config, environment
+`network` or …1312 tokens truncated…nment
 variables, or explicit flags.
 
 ### Phala Cloud (confidential TDX)
