@@ -170,126 +170,55 @@ func markCredentialDestinationFlagSources(cfg *Config, fs *flag.FlagSet) {
 		return
 	}
 	provenance := &cfg.credentialProvenance
+	mark := func(present bool, destination *credentialValueSource) {
+		if present {
+			*destination = credentialSourceFlag
+		}
+	}
 	proxmoxFlags := ProxmoxConfigFlagPresence(fs)
-	if proxmoxFlags.APIURL {
-		provenance.proxmoxAPIURL = credentialSourceFlag
-	}
-	if proxmoxFlags.InsecureTLS {
-		provenance.proxmoxInsecureTLS = credentialSourceFlag
-	}
+	mark(proxmoxFlags.APIURL, &provenance.proxmoxAPIURL)
+	mark(proxmoxFlags.InsecureTLS, &provenance.proxmoxInsecureTLS)
 	morphFlags := MorphConfigFlagPresence(fs)
-	if morphFlags.APIURL {
-		provenance.morphAPIURL = credentialSourceFlag
-	}
-	if morphFlags.SSHGatewayHost {
-		provenance.morphSSHGatewayHost = credentialSourceFlag
-	}
+	mark(morphFlags.APIURL, &provenance.morphAPIURL)
+	mark(morphFlags.SSHGatewayHost, &provenance.morphSSHGatewayHost)
 	daytonaFlags := DaytonaConfigFlagPresence(fs)
-	if daytonaFlags.APIURL {
-		provenance.daytonaAPIURL = credentialSourceFlag
-	}
-	if daytonaFlags.SSHGatewayHost {
-		provenance.daytonaSSHGateway = credentialSourceFlag
-	}
+	mark(daytonaFlags.APIURL, &provenance.daytonaAPIURL)
+	mark(daytonaFlags.SSHGatewayHost, &provenance.daytonaSSHGateway)
 	e2bFlags := E2BConfigFlagPresence(fs)
-	if e2bFlags.APIURL {
-		provenance.e2bAPIURL = credentialSourceFlag
-	}
-	if e2bFlags.Domain {
-		provenance.e2bDomain = credentialSourceFlag
-	}
-	if flagWasSet(fs, "cubesandbox-api-url") {
-		provenance.cubeSandboxAPIURL = credentialSourceFlag
-	}
-	if flagWasSet(fs, "cubesandbox-domain") {
-		provenance.cubeSandboxDomain = credentialSourceFlag
-	}
-	if flagWasSet(fs, "cubesandbox-proxy-node-ip") {
-		provenance.cubeSandboxProxyNode = credentialSourceFlag
-	}
-	if flagWasSet(fs, "cubesandbox-proxy-port-http") {
-		provenance.cubeSandboxProxyPort = credentialSourceFlag
-	}
-	if flagWasSet(fs, "cubesandbox-proxy-scheme") {
-		provenance.cubeSandboxProxyProto = credentialSourceFlag
-	}
-	if RailwayConfigFlagPresence(fs).APIURL {
-		provenance.railwayAPIURL = credentialSourceFlag
-	}
-	if FastAPICloudConfigFlagPresence(fs).APIURL {
-		provenance.fastAPICloudAPIURL = credentialSourceFlag
-	}
-	if OrgoConfigFlagPresence(fs).APIBase {
-		provenance.orgoAPIBase = credentialSourceFlag
-	}
-	if UnikraftCloudConfigFlagPresence(fs).APIURL {
-		provenance.unikraftCloudAPIURL = credentialSourceFlag
-	}
-	if RunpodConfigFlagPresence(fs).APIURL {
-		provenance.runpodAPIURL = credentialSourceFlag
-	}
-	if VastConfigFlagPresence(fs).APIURL {
-		provenance.vastAPIURL = credentialSourceFlag
-	}
-	if IsloConfigFlagPresence(fs).BaseURL {
-		provenance.isloBaseURL = credentialSourceFlag
-	}
+	mark(e2bFlags.APIURL, &provenance.e2bAPIURL)
+	mark(e2bFlags.Domain, &provenance.e2bDomain)
+	mark(flagWasSet(fs, "cubesandbox-api-url"), &provenance.cubeSandboxAPIURL)
+	mark(flagWasSet(fs, "cubesandbox-domain"), &provenance.cubeSandboxDomain)
+	mark(flagWasSet(fs, "cubesandbox-proxy-node-ip"), &provenance.cubeSandboxProxyNode)
+	mark(flagWasSet(fs, "cubesandbox-proxy-port-http"), &provenance.cubeSandboxProxyPort)
+	mark(flagWasSet(fs, "cubesandbox-proxy-scheme"), &provenance.cubeSandboxProxyProto)
+	mark(RailwayConfigFlagPresence(fs).APIURL, &provenance.railwayAPIURL)
+	mark(FastAPICloudConfigFlagPresence(fs).APIURL, &provenance.fastAPICloudAPIURL)
+	mark(OrgoConfigFlagPresence(fs).APIBase, &provenance.orgoAPIBase)
+	mark(UnikraftCloudConfigFlagPresence(fs).APIURL, &provenance.unikraftCloudAPIURL)
+	mark(RunpodConfigFlagPresence(fs).APIURL, &provenance.runpodAPIURL)
+	mark(VastConfigFlagPresence(fs).APIURL, &provenance.vastAPIURL)
+	mark(IsloConfigFlagPresence(fs).BaseURL, &provenance.isloBaseURL)
 	tenkiFlags := TenkiConfigFlagPresence(fs)
-	if tenkiFlags.Endpoint {
-		provenance.tenkiEndpoint = credentialSourceFlag
-	}
-	if tenkiFlags.Gateway {
-		provenance.tenkiGateway = credentialSourceFlag
-	}
-	if TensorlakeConfigFlagPresence(fs).APIURL {
-		provenance.tensorlakeAPIURL = credentialSourceFlag
-	}
-	if UpstashBoxConfigFlagPresence(fs).BaseURL {
-		provenance.upstashBoxBaseURL = credentialSourceFlag
-	}
-	if SmolvmConfigFlagPresence(fs).BaseURL {
-		provenance.smolvmBaseURL = credentialSourceFlag
-	}
-	if flagWasSet(fs, "ascii-box-base-url") {
-		provenance.asciiBoxBaseURL = credentialSourceFlag
-	}
-	if CloudflareConfigFlagPresence(fs).APIURL {
-		provenance.cloudflareAPIURL = credentialSourceFlag
-	}
+	mark(tenkiFlags.Endpoint, &provenance.tenkiEndpoint)
+	mark(tenkiFlags.Gateway, &provenance.tenkiGateway)
+	mark(TensorlakeConfigFlagPresence(fs).APIURL, &provenance.tensorlakeAPIURL)
+	mark(UpstashBoxConfigFlagPresence(fs).BaseURL, &provenance.upstashBoxBaseURL)
+	mark(SmolvmConfigFlagPresence(fs).BaseURL, &provenance.smolvmBaseURL)
+	mark(flagWasSet(fs, "ascii-box-base-url"), &provenance.asciiBoxBaseURL)
+	mark(CloudflareConfigFlagPresence(fs).APIURL, &provenance.cloudflareAPIURL)
 	nomadFlags := NomadConfigFlagPresence(fs)
-	if nomadFlags.Address {
-		provenance.nomadAddress = credentialSourceFlag
-	}
-	if nomadFlags.TokenEnv {
-		provenance.nomadTokenEnv = credentialSourceFlag
-	}
-	if SemaphoreConfigFlagPresence(fs).Host {
-		provenance.semaphoreHost = credentialSourceFlag
-	}
-	if SpritesConfigFlagPresence(fs).APIURL {
-		provenance.spritesAPIURL = credentialSourceFlag
-	}
-	if AzureDynamicSessionsConfigFlagPresence(fs).Endpoint {
-		provenance.azSessionsEndpoint = credentialSourceFlag
-	}
-	if flagWasSet(fs, "parallels-host") {
-		provenance.parallelsHost = credentialSourceFlag
-	}
-	if flagWasSet(fs, "parallels-host-key") {
-		provenance.parallelsHostKey = credentialSourceFlag
-	}
-	if StaticConfigFlagPresence(fs).Host {
-		provenance.staticHost = credentialSourceFlag
-	}
-	if ExeDevConfigFlagPresence(fs).ControlHost {
-		provenance.exeDevControlHost = credentialSourceFlag
-	}
-	if flagWasSet(fs, "external-routing-file") {
-		provenance.externalRouting = credentialSourceFlag
-	}
-	if flagWasSet(fs, "external-config-json") {
-		provenance.externalConfig = credentialSourceFlag
-	}
+	mark(nomadFlags.Address, &provenance.nomadAddress)
+	mark(nomadFlags.TokenEnv, &provenance.nomadTokenEnv)
+	mark(SemaphoreConfigFlagPresence(fs).Host, &provenance.semaphoreHost)
+	mark(SpritesConfigFlagPresence(fs).APIURL, &provenance.spritesAPIURL)
+	mark(AzureDynamicSessionsConfigFlagPresence(fs).Endpoint, &provenance.azSessionsEndpoint)
+	mark(flagWasSet(fs, "parallels-host"), &provenance.parallelsHost)
+	mark(flagWasSet(fs, "parallels-host-key"), &provenance.parallelsHostKey)
+	mark(StaticConfigFlagPresence(fs).Host, &provenance.staticHost)
+	mark(ExeDevConfigFlagPresence(fs).ControlHost, &provenance.exeDevControlHost)
+	mark(flagWasSet(fs, "external-routing-file"), &provenance.externalRouting)
+	mark(flagWasSet(fs, "external-config-json"), &provenance.externalConfig)
 }
 
 func validateCoordinatorCredentialDestination(cfg Config) error {

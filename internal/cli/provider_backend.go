@@ -1789,16 +1789,14 @@ func applyProviderFlags(cfg *Config, fs *flag.FlagSet, values providerFlagValues
 		return err
 	}
 	after, err := ProviderFor(cfg.Provider)
-	if err != nil || after.Spec().Name == before {
-		if err == nil {
-			markCredentialDestinationFlagSources(cfg, fs)
-			applyCloudflareDynamicWorkersRepositoryCaps(cfg)
-		}
+	if err != nil {
 		return err
 	}
-	cfg.Provider = after.Spec().Name
-	if err := after.ApplyFlags(cfg, fs, values[after.Spec().Name]); err != nil {
-		return err
+	if after.Spec().Name != before {
+		cfg.Provider = after.Spec().Name
+		if err := after.ApplyFlags(cfg, fs, values[after.Spec().Name]); err != nil {
+			return err
+		}
 	}
 	markCredentialDestinationFlagSources(cfg, fs)
 	applyCloudflareDynamicWorkersRepositoryCaps(cfg)

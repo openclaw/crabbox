@@ -58,23 +58,27 @@ func (p credentialFlagPhaseTestProvider) ApplyFlags(cfg *Config, _ *flag.FlagSet
 	return p.applyErr
 }
 
-func TestFastAPICloudFlagSourceCentralPhase(t *testing.T) {
+func testCredentialFlagSourceCentralPhase(t *testing.T, name, prior, value string, fields func(*Config) (*string, *credentialValueSource)) {
+	t.Helper()
 	original := providerRegistry["aws"]
 	t.Cleanup(func() { providerRegistry["aws"] = original })
 	for _, fail := range []bool{false, true} {
 		cfg := baseConfig()
 		cfg.Provider = "aws"
-		cfg.FastAPICloud.APIURL = "https://example.invalid/prior"
-		cfg.credentialProvenance.fastAPICloudAPIURL = credentialSourceTrustedFile
+		destination, source := fields(&cfg)
+		*destination, *source = prior, credentialSourceTrustedFile
 		seen := credentialSourceUnknown
 		var applyErr error
 		if fail {
 			applyErr = Exit(2, "synthetic invalid configuration")
 		}
-		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.fastAPICloudAPIURL }}
+		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) {
+			_, source := fields(&cfg)
+			seen = *source
+		}}
 		fs := newFlagSet("test", io.Discard)
-		fs.String("fastapi-cloud-url", "", "")
-		if err := fs.Parse([]string{"--fastapi-cloud-url=https://example.invalid/flag"}); err != nil {
+		fs.String(name, "", "")
+		if err := fs.Parse([]string{"--" + name + "=" + value}); err != nil {
 			t.Fatal(err)
 		}
 		err := applyProviderFlags(&cfg, fs, providerFlagValues{})
@@ -85,208 +89,52 @@ func TestFastAPICloudFlagSourceCentralPhase(t *testing.T) {
 		if fail {
 			want = credentialSourceTrustedFile
 		}
-		if seen != credentialSourceTrustedFile || cfg.credentialProvenance.fastAPICloudAPIURL != want || cfg.FastAPICloud.APIURL != "https://example.invalid/prior" {
+		if seen != credentialSourceTrustedFile || *source != want || *destination != prior {
 			t.Fatal("central marker timing or unselected-field behavior changed")
 		}
 	}
+}
+
+func TestFastAPICloudFlagSourceCentralPhase(t *testing.T) {
+	testCredentialFlagSourceCentralPhase(t, "fastapi-cloud-url", "https://example.invalid/prior", "https://example.invalid/flag", func(cfg *Config) (*string, *credentialValueSource) {
+		return &cfg.FastAPICloud.APIURL, &cfg.credentialProvenance.fastAPICloudAPIURL
+	})
 }
 
 func TestRailwayFlagSourceCentralPhase(t *testing.T) {
-	original := providerRegistry["aws"]
-	t.Cleanup(func() { providerRegistry["aws"] = original })
-	for _, fail := range []bool{false, true} {
-		cfg := baseConfig()
-		cfg.Provider = "aws"
-		cfg.Railway.APIURL = "https://example.invalid/prior"
-		cfg.credentialProvenance.railwayAPIURL = credentialSourceTrustedFile
-		seen := credentialSourceUnknown
-		var applyErr error
-		if fail {
-			applyErr = Exit(2, "synthetic invalid configuration")
-		}
-		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.railwayAPIURL }}
-		fs := newFlagSet("test", io.Discard)
-		fs.String("railway-url", "", "")
-		if err := fs.Parse([]string{"--railway-url=https://example.invalid/flag"}); err != nil {
-			t.Fatal(err)
-		}
-		err := applyProviderFlags(&cfg, fs, providerFlagValues{})
-		if (err != nil) != fail {
-			t.Fatalf("central apply error=%v", err)
-		}
-		want := credentialSourceFlag
-		if fail {
-			want = credentialSourceTrustedFile
-		}
-		if seen != credentialSourceTrustedFile || cfg.credentialProvenance.railwayAPIURL != want || cfg.Railway.APIURL != "https://example.invalid/prior" {
-			t.Fatal("central marker timing or unselected-field behavior changed")
-		}
-	}
+	testCredentialFlagSourceCentralPhase(t, "railway-url", "https://example.invalid/prior", "https://example.invalid/flag", func(cfg *Config) (*string, *credentialValueSource) {
+		return &cfg.Railway.APIURL, &cfg.credentialProvenance.railwayAPIURL
+	})
 }
 
 func TestUpstashBoxFlagSourceCentralPhase(t *testing.T) {
-	original := providerRegistry["aws"]
-	t.Cleanup(func() { providerRegistry["aws"] = original })
-	for _, fail := range []bool{false, true} {
-		cfg := baseConfig()
-		cfg.Provider = "aws"
-		cfg.UpstashBox.BaseURL = "https://example.invalid/prior"
-		cfg.credentialProvenance.upstashBoxBaseURL = credentialSourceTrustedFile
-		seen := credentialSourceUnknown
-		var applyErr error
-		if fail {
-			applyErr = Exit(2, "synthetic invalid configuration")
-		}
-		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.upstashBoxBaseURL }}
-		fs := newFlagSet("test", io.Discard)
-		fs.String("upstash-box-base-url", "", "")
-		if err := fs.Parse([]string{"--upstash-box-base-url=https://example.invalid/flag"}); err != nil {
-			t.Fatal(err)
-		}
-		err := applyProviderFlags(&cfg, fs, providerFlagValues{})
-		if (err != nil) != fail {
-			t.Fatalf("central apply error=%v", err)
-		}
-		want := credentialSourceFlag
-		if fail {
-			want = credentialSourceTrustedFile
-		}
-		if seen != credentialSourceTrustedFile || cfg.credentialProvenance.upstashBoxBaseURL != want || cfg.UpstashBox.BaseURL != "https://example.invalid/prior" {
-			t.Fatal("central marker timing or unselected-field behavior changed")
-		}
-	}
+	testCredentialFlagSourceCentralPhase(t, "upstash-box-base-url", "https://example.invalid/prior", "https://example.invalid/flag", func(cfg *Config) (*string, *credentialValueSource) {
+		return &cfg.UpstashBox.BaseURL, &cfg.credentialProvenance.upstashBoxBaseURL
+	})
 }
 
 func TestCloudflareFlagSourceCentralPhase(t *testing.T) {
-	original := providerRegistry["aws"]
-	t.Cleanup(func() { providerRegistry["aws"] = original })
-	for _, fail := range []bool{false, true} {
-		cfg := baseConfig()
-		cfg.Provider = "aws"
-		cfg.Cloudflare.APIURL = "https://example.invalid/prior"
-		cfg.credentialProvenance.cloudflareAPIURL = credentialSourceTrustedFile
-		seen := credentialSourceUnknown
-		var applyErr error
-		if fail {
-			applyErr = Exit(2, "synthetic invalid configuration")
-		}
-		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.cloudflareAPIURL }}
-		fs := newFlagSet("test", io.Discard)
-		fs.String("cloudflare-url", "", "")
-		if err := fs.Parse([]string{"--cloudflare-url=https://example.invalid/flag"}); err != nil {
-			t.Fatal(err)
-		}
-		err := applyProviderFlags(&cfg, fs, providerFlagValues{})
-		if (err != nil) != fail {
-			t.Fatalf("central apply error=%v", err)
-		}
-		want := credentialSourceFlag
-		if fail {
-			want = credentialSourceTrustedFile
-		}
-		if seen != credentialSourceTrustedFile || cfg.credentialProvenance.cloudflareAPIURL != want || cfg.Cloudflare.APIURL != "https://example.invalid/prior" {
-			t.Fatal("central marker timing or unselected-field behavior changed")
-		}
-	}
+	testCredentialFlagSourceCentralPhase(t, "cloudflare-url", "https://example.invalid/prior", "https://example.invalid/flag", func(cfg *Config) (*string, *credentialValueSource) {
+		return &cfg.Cloudflare.APIURL, &cfg.credentialProvenance.cloudflareAPIURL
+	})
 }
 
 func TestAzureDynamicSessionsFlagSourceCentralPhase(t *testing.T) {
-	original := providerRegistry["aws"]
-	t.Cleanup(func() { providerRegistry["aws"] = original })
-	for _, fail := range []bool{false, true} {
-		cfg := baseConfig()
-		cfg.Provider = "aws"
-		cfg.AzureDynamicSessions.Endpoint = "https://example.invalid/prior"
-		cfg.credentialProvenance.azSessionsEndpoint = credentialSourceTrustedFile
-		seen := credentialSourceUnknown
-		var applyErr error
-		if fail {
-			applyErr = Exit(2, "synthetic invalid configuration")
-		}
-		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.azSessionsEndpoint }}
-		fs := newFlagSet("test", io.Discard)
-		fs.String("azure-dynamic-sessions-endpoint", "", "")
-		if err := fs.Parse([]string{"--azure-dynamic-sessions-endpoint=https://example.invalid/flag"}); err != nil {
-			t.Fatal(err)
-		}
-		err := applyProviderFlags(&cfg, fs, providerFlagValues{})
-		if (err != nil) != fail {
-			t.Fatalf("central apply error=%v", err)
-		}
-		want := credentialSourceFlag
-		if fail {
-			want = credentialSourceTrustedFile
-		}
-		if seen != credentialSourceTrustedFile || cfg.credentialProvenance.azSessionsEndpoint != want || cfg.AzureDynamicSessions.Endpoint != "https://example.invalid/prior" {
-			t.Fatal("central marker timing or unselected-field behavior changed")
-		}
-	}
+	testCredentialFlagSourceCentralPhase(t, "azure-dynamic-sessions-endpoint", "https://example.invalid/prior", "https://example.invalid/flag", func(cfg *Config) (*string, *credentialValueSource) {
+		return &cfg.AzureDynamicSessions.Endpoint, &cfg.credentialProvenance.azSessionsEndpoint
+	})
 }
 
 func TestSmolvmFlagSourceCentralPhase(t *testing.T) {
-	original := providerRegistry["aws"]
-	t.Cleanup(func() { providerRegistry["aws"] = original })
-	for _, fail := range []bool{false, true} {
-		cfg := baseConfig()
-		cfg.Provider = "aws"
-		cfg.Smolvm.BaseURL = "https://example.invalid/prior"
-		cfg.credentialProvenance.smolvmBaseURL = credentialSourceTrustedFile
-		seen := credentialSourceUnknown
-		var applyErr error
-		if fail {
-			applyErr = Exit(2, "synthetic invalid configuration")
-		}
-		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.smolvmBaseURL }}
-		fs := newFlagSet("test", io.Discard)
-		fs.String("smolvm-base-url", "", "")
-		if err := fs.Parse([]string{"--smolvm-base-url=https://example.invalid/flag"}); err != nil {
-			t.Fatal(err)
-		}
-		err := applyProviderFlags(&cfg, fs, providerFlagValues{})
-		if (err != nil) != fail {
-			t.Fatalf("central apply error=%v", err)
-		}
-		want := credentialSourceFlag
-		if fail {
-			want = credentialSourceTrustedFile
-		}
-		if seen != credentialSourceTrustedFile || cfg.credentialProvenance.smolvmBaseURL != want || cfg.Smolvm.BaseURL != "https://example.invalid/prior" {
-			t.Fatal("central marker timing or unselected-field behavior changed")
-		}
-	}
+	testCredentialFlagSourceCentralPhase(t, "smolvm-base-url", "https://example.invalid/prior", "https://example.invalid/flag", func(cfg *Config) (*string, *credentialValueSource) {
+		return &cfg.Smolvm.BaseURL, &cfg.credentialProvenance.smolvmBaseURL
+	})
 }
 
 func TestSemaphoreFlagSourceCentralPhase(t *testing.T) {
-	original := providerRegistry["aws"]
-	t.Cleanup(func() { providerRegistry["aws"] = original })
-	for _, fail := range []bool{false, true} {
-		cfg := baseConfig()
-		cfg.Provider = "aws"
-		cfg.Semaphore.Host = "prior.semaphoreci.com"
-		cfg.credentialProvenance.semaphoreHost = credentialSourceTrustedFile
-		seen := credentialSourceUnknown
-		var applyErr error
-		if fail {
-			applyErr = Exit(2, "synthetic invalid configuration")
-		}
-		providerRegistry["aws"] = credentialFlagPhaseTestProvider{Provider: original, applyErr: applyErr, observe: func(cfg Config) { seen = cfg.credentialProvenance.semaphoreHost }}
-		fs := newFlagSet("test", io.Discard)
-		fs.String("semaphore-host", "", "")
-		if err := fs.Parse([]string{"--semaphore-host=flag.semaphoreci.com"}); err != nil {
-			t.Fatal(err)
-		}
-		err := applyProviderFlags(&cfg, fs, providerFlagValues{})
-		if (err != nil) != fail {
-			t.Fatalf("central apply error=%v", err)
-		}
-		want := credentialSourceFlag
-		if fail {
-			want = credentialSourceTrustedFile
-		}
-		if seen != credentialSourceTrustedFile || cfg.credentialProvenance.semaphoreHost != want || cfg.Semaphore.Host != "prior.semaphoreci.com" {
-			t.Fatal("central marker timing or unselected-field behavior changed")
-		}
-	}
+	testCredentialFlagSourceCentralPhase(t, "semaphore-host", "prior.semaphoreci.com", "flag.semaphoreci.com", func(cfg *Config) (*string, *credentialValueSource) {
+		return &cfg.Semaphore.Host, &cfg.credentialProvenance.semaphoreHost
+	})
 }
 
 func TestE2BFlagSourcesCentralPhase(t *testing.T) {
