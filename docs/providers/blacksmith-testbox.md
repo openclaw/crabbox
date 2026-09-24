@@ -200,6 +200,12 @@ termination. Uncertain cleanup retains ownership; a successful workload with
 failed cleanup returns a failure and reports the session as kept. An earlier
 workload failure keeps its own exit code.
 
+Ordinary runs and artifact runs join their local Blacksmith command process
+group before releasing that fence, including when synchronization is canceled.
+This requires a macOS or Linux caller with compatible `ps`; unsupported process
+ownership fails before acquisition. Local cleanup does not establish that a
+remote command completed, and a sync timeout remains a failed run.
+
 Local connection artifacts must be removed successfully before the exact claim
 is deleted; an unsafe or undeletable lease key directory reports cleanup failure
 and retains the claim for retry. Missing lease key directories are already clean.

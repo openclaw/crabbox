@@ -46,8 +46,8 @@ func TestBlacksmithArtifactWriterHelper(t *testing.T) {
 	}
 }
 
-func TestBlacksmithArtifactRefusesControllerOwnedGroup(t *testing.T) {
-	for _, boundary := range []string{"run-options", "artifact-supervisor"} {
+func TestBlacksmithRunRefusesControllerOwnedGroup(t *testing.T) {
+	for _, boundary := range []string{"run-options", "ordinary-run", "artifact-supervisor"} {
 		t.Run(boundary, func(t *testing.T) {
 			isolateBlacksmithOwnership(t)
 			t.Setenv("CRABBOX_CONTROLLER_PROCESS_TREE_OWNED", "1")
@@ -57,8 +57,11 @@ func TestBlacksmithArtifactRefusesControllerOwnedGroup(t *testing.T) {
 				return core.LocalCommandResult{}, errors.New("unexpected native call")
 			}))
 			req := core.RunRequest{Repo: core.Repo{Root: t.TempDir()}, Command: []string{"true"}, ArtifactGlobs: []string{"report"}}
+			if boundary == "ordinary-run" {
+				req.ArtifactGlobs = nil
+			}
 			var err error
-			if boundary == "run-options" {
+			if boundary != "artifact-supervisor" {
 				_, err = backend.Run(t.Context(), req)
 			} else {
 				_, _, _, err = backend.runArtifactTestbox(t.Context(), req, "tbx_unsupported", nil, nil, nil, time.Second)

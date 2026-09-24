@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Join local Blacksmith sync descendants before an ordinary Testbox run returns after cancellation, preserving the lease claim until command cleanup completes.
+
 ## 0.66.0 - 2026-09-24
 
 ### Highlights

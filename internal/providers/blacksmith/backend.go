@@ -87,10 +87,8 @@ func validateBlacksmithRunOptions(spec core.ProviderSpec, req core.RunRequest) e
 	if req.NoSync {
 		return core.Exit(2, "%s delegates sync; --no-sync is not supported", blacksmithTestboxProvider)
 	}
-	if len(req.ArtifactGlobs) > 0 || len(req.RequiredArtifactGlobs) > 0 {
-		if err := core.ValidateLocalCommandProcessGroupJoin(context.Background()); err != nil {
-			return core.Exit(2, "Blacksmith artifact command ownership: %v", err)
-		}
+	if err := core.ValidateLocalCommandProcessGroupJoin(context.Background()); err != nil {
+		return core.Exit(2, "Blacksmith command ownership: %v", err)
 	}
 	return core.RejectDelegatedSyncOptionsForSpec(spec, req)
 }
@@ -919,7 +917,13 @@ func (b *blacksmithBackend) runCommandWithSyncGuard(ctx context.Context, args []
 }
 
 func (b *blacksmithBackend) runCommandWithSyncGuardCapture(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool) (core.LocalCommandResult, bool, error) {
-	return b.runCommandWithSyncGuardFiltered(ctx, args, stdout, stderr, disableOutputCapture, "", nil)
+	// Ordinary runs need the same joined command owner as artifact runs. Pin
+	// the inherited directory so cancellation cannot leave sync children behind.
+	dir, err := os.Getwd()
+	if err != nil {
+		return core.LocalCommandResult{ExitCode: 2}, false, err
+	}
+	return b.runCommandWithSyncGuardFiltered(ctx, args, stdout, stderr, disableOutputCapture, dir, nil)
 }
 
 // Filter before sync observation as well as console, proof, and failure capture.
