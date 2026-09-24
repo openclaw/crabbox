@@ -3612,13 +3612,19 @@ func TestRemoteFinalizeSyncHydratesForRepositoryDepth(t *testing.T) {
 	if out, err := fastImport.CombinedOutput(); err != nil {
 		t.Fatalf("extend hydration history: %v\n%s", err, out)
 	}
+	runGit(t, fixture.origin, "update-ref", "refs/heads/old", fixture.a)
 
 	tests := []struct {
-		name    string
-		shallow bool
+		name        string
+		shallow     bool
+		coherence   bool
+		wrongBranch bool
 	}{
 		{name: "complete", shallow: false},
 		{name: "shallow", shallow: true},
+		{name: "complete-coherence", coherence: true},
+		{name: "shallow-coherence", shallow: true, coherence: true},
+		{name: "shallow-wrong-branch", shallow: true, coherence: true, wrongBranch: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3636,6 +3642,15 @@ func TestRemoteFinalizeSyncHydratesForRepositoryDepth(t *testing.T) {
 			if got := gitOutput(workdir, "rev-parse", "--is-shallow-repository"); got != strconv.FormatBool(tt.shallow) {
 				t.Fatalf("is-shallow-repository=%q, want %t", got, tt.shallow)
 			}
+			plan := gitCoherencePlan{}
+			if tt.coherence {
+				plan = fixture.plan(t, fixture.b)
+				if tt.wrongBranch {
+					plan.Branch = "old"
+				}
+			}
+			originalHead := gitOutput(workdir, "rev-parse", "HEAD")
+			originalIndex := coherenceIndexBytes(t, workdir)
 			for attempt := 1; attempt <= 2; attempt++ {
 				token := fmt.Sprintf("%032x", attempt)
 				stageCoherenceFinalize(t, workdir, token)
@@ -3643,9 +3658,25 @@ func TestRemoteFinalizeSyncHydratesForRepositoryDepth(t *testing.T) {
 					HydrateGit: true,
 					BaseRef:    "main",
 					Token:      token,
+					Coherence:  plan,
 				}))
-				if out, err := cmd.CombinedOutput(); err != nil {
+				out, err := cmd.CombinedOutput()
+				if tt.wrongBranch {
+					if err == nil || !strings.Contains(string(out), "requested commit is not on advertised branch") {
+						t.Fatalf("wrong branch was not rejected: %v\n%s", err, out)
+					}
+					requireGitOutput(t, workdir, originalHead, "rev-parse", "HEAD")
+					if !bytes.Equal(coherenceIndexBytes(t, workdir), originalIndex) {
+						t.Fatal("rejected branch changed the index")
+					}
+					return
+				}
+				if err != nil {
 					t.Fatalf("remote finalize attempt %d: %v\n%s", attempt, err, out)
+				}
+				if tt.coherence {
+					requireGitOutput(t, workdir, fixture.b, "rev-parse", "HEAD")
+					requireGitOutput(t, workdir, plan.Tree, "write-tree")
 				}
 				if got := gitOutput(workdir, "rev-parse", "--is-shallow-repository"); got != "false" {
 					t.Fatalf("attempt %d left %s repository shallow: %q", attempt, tt.name, got)

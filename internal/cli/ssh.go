@@ -2886,11 +2886,19 @@ func remoteGitCoherenceFinalizeScript(plan gitCoherencePlan, allowMassDeletions 
 coherence_committed=; coherence_mutated=; head_changed=; index_changed=
 tmp_ref="refs/crabbox/sync-$expected_token"; advertised_branch=` + shellQuote(plan.Branch) + `; expected_origin=` + shellQuote(plan.RemoteURL) + `
 ` + remoteGitOriginTransportFunctions() + `
+coherence_fetch() {
+  set -- --quiet --no-tags
+  # An existing shallow boundary can hide ancestors of the advertised branch.
+  if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+    set -- "$@" --unshallow
+  fi
+  origin_git fetch "$@" "$expected_origin" "+refs/heads/$advertised_branch:$tmp_ref"
+}
 if ! exact_git_root; then
 	publish_fingerprint=
 elif ! repair_origin; then
 	echo "remote sync finalize failed: Git origin repair failed" >&2; cleanup_finalize_lock; exit 67
-elif transport_error="$meta_dir/sync-fetch-error.$expected_token.$$"; ! origin_git fetch --quiet --no-tags "$expected_origin" "+refs/heads/$advertised_branch:$tmp_ref" 2>"$transport_error"; then
+elif transport_error="$meta_dir/sync-fetch-error.$expected_token.$$"; ! coherence_fetch 2>"$transport_error"; then
 	git update-ref -d "$tmp_ref" >/dev/null 2>&1 || true
 	echo "remote sync finalize failed: Git coherence fetch failed" >&2
 	cat "$transport_error" >&2
