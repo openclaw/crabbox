@@ -692,6 +692,7 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	deadline, _ := waitCtx.Deadline()
 	nextProbe := time.Now().Add(parallelsIPBootGrace)
 	unavailableProbes := 0
 	dhcpAddressObserved := false
@@ -700,15 +701,32 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 	var lastDHCPError error
 	useDHCPFallback := c.Cfg.TargetOS == targetMacOS && strings.TrimSpace(c.Cfg.Parallels.BootstrapKey) != ""
 	waitError := func(reason string) error {
+		if parentDeadline, ok := ctx.Deadline(); ok && !time.Now().Before(parentDeadline) {
+			<-ctx.Done()
+		}
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
 		hint := parallelsIPTimeoutHint(c.Cfg, last, vmObserved, useDHCPFallback, lastDHCPError, purpose)
 		if lastDHCPError != nil {
 			return Exit(5, "%s Parallels VM %s IP; last_state=%s; DHCP fallback: %v; %s", reason, id, blank(last.State, "-"), lastDHCPError, hint)
 		}
 		return Exit(5, "%s Parallels VM %s IP; last_state=%s; %s", reason, id, blank(last.State, "-"), hint)
 	}
+	waitExpired := func() bool {
+		// The poll can wake before the deadline's cancellation callback runs.
+		// Join that notification before admitting work, preserving the parent cause.
+		if !time.Now().Before(deadline) {
+			<-waitCtx.Done()
+		}
+		return waitCtx.Err() != nil
+	}
 	for {
 		if ctx.Err() != nil {
 			return ParallelsVM{}, context.Cause(ctx)
+		}
+		if waitExpired() {
+			return ParallelsVM{}, waitError("timed out waiting for")
 		}
 		vm, err := c.GetVM(waitCtx, id)
 		vmObserved = err == nil
@@ -718,13 +736,16 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 		if err == nil {
 			last = vm
 			if vm.IP != "" {
-				if waitCtx.Err() != nil {
+				if waitExpired() {
 					return ParallelsVM{}, waitError("timed out waiting for")
 				}
 				vm.IPSource = "tools"
 				return vm, nil
 			}
 			if useDHCPFallback {
+				if waitExpired() {
+					return ParallelsVM{}, waitError("timed out waiting for")
+				}
 				data, readErr := c.readDHCPLeases(waitCtx)
 				if ctx.Err() != nil {
 					return ParallelsVM{}, context.Cause(ctx)
@@ -740,6 +761,9 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 					// A valid address makes SSH, rather than Tools, the remaining
 					// readiness dependency. Keep its full startup budget.
 					dhcpAddressObserved = true
+					if waitExpired() {
+						return ParallelsVM{}, waitError("timed out waiting for")
+					}
 					probeErr := c.probeHostTCP(waitCtx, ip, c.Cfg.SSHPort)
 					if ctx.Err() != nil {
 						return ParallelsVM{}, context.Cause(ctx)
@@ -747,7 +771,7 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 					if probeErr != nil {
 						lastDHCPError = probeErr
 					} else {
-						if waitCtx.Err() != nil {
+						if waitExpired() {
 							return ParallelsVM{}, waitError("timed out waiting for")
 						}
 						vm.IP = ip
@@ -757,7 +781,7 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 				}
 			}
 		}
-		if waitCtx.Err() != nil {
+		if waitExpired() {
 			return ParallelsVM{}, waitError("timed out waiting for")
 		}
 		if err != nil || !strings.EqualFold(strings.TrimSpace(vm.State), "running") || dhcpAddressObserved {
@@ -771,7 +795,7 @@ func (c *ParallelsClient) WaitForIP(ctx context.Context, id string, timeout time
 			if ctx.Err() != nil {
 				return ParallelsVM{}, context.Cause(ctx)
 			}
-			if waitCtx.Err() != nil {
+			if waitExpired() {
 				return ParallelsVM{}, waitError("timed out waiting for")
 			}
 			// Early boot metadata, timeouts and unrelated execution errors do

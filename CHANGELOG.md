@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Stop Parallels IP discovery from admitting probes after the startup deadline while preserving the caller's cancellation cause.
+
 ## 0.66.0 - 2026-09-24
 
 ### Highlights
