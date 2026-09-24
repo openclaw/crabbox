@@ -812,6 +812,7 @@ smoke_script() {
 
 smoke() {
   local lease="$1"
+  verify_linux_image_readiness "$lease" || return $?
   smoke_script || return $?
   run_cmd "$CRABBOX_BIN" run --provider aws --target "$target" --id "$lease" --no-sync --shell -- "$smoke_script_value"
 }
@@ -892,7 +893,7 @@ verify_linux_image_readiness() {
   local lease="$1"
   [[ "$target" == "linux" ]] || return 0
   run_cmd "$CRABBOX_BIN" run --provider aws --target linux --id "$lease" --no-sync \
-    --shell -- /usr/local/libexec/crabbox/linux-readiness.generated.sh
+    --script "$ROOT/scripts/linux-readiness.generated.sh" -- --verify linux-builder
 }
 
 windows_reboot_required() {
@@ -981,7 +982,6 @@ source_lease="$(warmup source)"
 stage_linux_readiness_producer "$source_lease"
 run_prep "$source_lease"
 reboot_windows_source_if_needed "$source_lease"
-verify_linux_image_readiness "$source_lease"
 smoke "$source_lease"
 
 image_env=(env)

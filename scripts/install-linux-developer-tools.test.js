@@ -83,7 +83,11 @@ test("linux developer image executes the standalone producer and stops when capa
   );
   writeExecutable(
     path.join(scriptRoot, "linux-readiness.generated.sh"),
-    `#!/usr/bin/env bash\nprintf 'verified\\n' >${JSON.stringify(marker)}\nexit \"\${CRABBOX_FAKE_PRODUCER_EXIT:-0}\"\n`,
+    `#!/usr/bin/env bash
+printf '%s\\n' "$*" >>${JSON.stringify(marker)}
+if [[ "\${1:-}" == --verify ]]; then exit "\${CRABBOX_FAKE_VERIFY_EXIT:-0}"; fi
+exit "\${CRABBOX_FAKE_PRODUCER_EXIT:-0}"
+`,
   );
   const shell = `set -euo pipefail
 source ${JSON.stringify(path.join(scriptRoot, "install.sh"))}
@@ -94,7 +98,7 @@ sync() { return 0; }
 prepare_fast_boot`;
   const successful = spawnSync("bash", ["-c", shell], { cwd: repoRoot, encoding: "utf8" });
   assert.equal(successful.status, 0, successful.stderr || successful.stdout);
-  assert.equal(fs.readFileSync(marker, "utf8"), "verified\n");
+  assert.equal(fs.readFileSync(marker, "utf8"), "\n--verify linux-builder\n");
   assert.equal(fs.readFileSync(cleaned, "utf8"), "cleaned\n");
   fs.unlinkSync(cleaned);
   const failed = spawnSync("bash", ["-c", shell], {
@@ -104,6 +108,13 @@ prepare_fast_boot`;
   });
   assert.equal(failed.status, 73, failed.stderr || failed.stdout);
   assert.equal(fs.existsSync(cleaned), false);
+  const downgraded = spawnSync("bash", ["-c", shell], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { ...process.env, CRABBOX_FAKE_VERIFY_EXIT: "74" },
+  });
+  assert.equal(downgraded.status, 74, downgraded.stderr || downgraded.stdout);
+  assert.equal(fs.existsSync(cleaned), false, "minimal producer success must not reach cleanup");
 });
 
 test("linux developer image cloud-init cleanup preserves current-boot facts", async (t) => {
@@ -1180,3 +1191,36 @@ install_node_runtime || exit $?
   assert.equal(result.status, 41, result.stderr);
   assert.doesNotMatch(result.stdout, /unexpected-install/);
 });
+
+for (const [failure, expected] of [["runtime", 42], ["activate", 43], ["", 0]]) {
+  test(`pnpm conditional installation preserves ${failure || "success"} result`, () => {
+    const result = spawnSync("bash", ["-c", `
+source scripts/install-linux-developer-tools.sh
+install_node_runtime() { echo runtime >&2; [[ "$FAIL" != runtime ]] || return 42; }
+pinned_node_supported() { return 1; }
+corepack() { echo activate >&2; [[ "$FAIL" != activate ]] || return 43; }
+command() { echo verify >&2; builtin command "$@"; }
+pnpm() { :; }
+if install_node_pnpm; then echo complete; else exit $?; fi
+`], { cwd: repoRoot, env: { PATH: process.env.PATH, FAIL: failure }, encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.status, expected, result.stderr);
+    if (failure) assert.doesNotMatch(result.stdout, /complete/);
+    if (failure === "runtime") assert.doesNotMatch(result.stderr, /activate|verify/);
+    if (failure === "activate") assert.doesNotMatch(result.stderr, /verify/);
+  });
+}
+
+for (const missing of ["npm", "corepack"]) {
+  test(`conditional Node runtime rejects missing ${missing} before activation`, () => {
+    const result = spawnSync("bash", ["-c", `
+source scripts/install-linux-developer-tools.sh
+pinned_node_supported() { return 1; }
+apt_install() { :; }
+command() { [[ "$*" != "-v $MISSING" ]] || return 71; builtin command "$@"; }
+corepack() { echo unexpected-enable; }
+if install_node_pnpm; then echo unexpected-success; else exit $?; fi
+`], { cwd: repoRoot, env: { PATH: process.env.PATH, MISSING: missing }, encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.status, 71, result.stderr);
+    assert.doesNotMatch(result.stdout, /unexpected-/);
+  });
+}

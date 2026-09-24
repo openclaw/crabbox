@@ -281,7 +281,7 @@ PY
 
 stage_toolchain_archive() {
   local name="$1" staging="$2" allow_download="${3:-0}"
-  local algorithm expected url
+  local algorithm expected url status
   read -r algorithm expected url <<<"$(toolchain_archive_spec "$name")"
   [[ -n "$expected" ]] || return 1
   # Hash the private copy that will be extracted; never execute a cached tree.
@@ -296,30 +296,48 @@ stage_toolchain_archive() {
     return 1
   fi
   curl -q --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 300 \
-    --output "$staging/$name" "$url" &&
-    verify_toolchain_archive "$algorithm" "$expected" "$staging/$name"
+    --output "$staging/$name" "$url" || {
+      status=$?
+      log "toolchain archive download failed: $name (curl exit $status)"
+      return "$status"
+    }
+  verify_toolchain_archive "$algorithm" "$expected" "$staging/$name"
+}
+
+prepare_public_toolchain_archive_dir() {
+  local parent directory
+  parent="$(dirname "$public_toolchain_archive_dir")"
+  # Validate both owned public boundaries before changing either; never widen
+  # unrelated ancestors or follow an operator-owned replacement.
+  for directory in "$parent" "$public_toolchain_archive_dir"; do
+    if [[ -L "$directory" || ( -e "$directory" && ( ! -d "$directory" || ! -O "$directory" ) ) ]]; then
+      log "invalid public toolchain archive directory: $directory"
+      return 1
+    fi
+  done
+  install -d -m 0755 "$parent" "$public_toolchain_archive_dir"
 }
 
 cache_public_toolchain_archives() (
   set -euo pipefail
   umask 077
   local staging name pending
-  staging="$(mktemp -d)"
+  # Conditional callers disable errexit; never publish after a failed step.
+  prepare_public_toolchain_archive_dir || return $?
+  staging="$(mktemp -d)" || return $?
   # Bind paths now: Bash can unwind function locals before an EXIT trap on failure.
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
-  [[ ! -L "$public_toolchain_archive_dir" ]] || return 1
-  install -d -m 0755 "$public_toolchain_archive_dir"
   if [[ "$#" -eq 0 ]]; then
     set -- node-v24.19.0-linux-x64.tar.xz pnpm-11.22.0.tgz pnpm-12.3.4.tgz exe.linux-x64-12.3.4.tgz
   fi
   for name in "$@"; do
-    stage_toolchain_archive "$name" "$staging" 1
-    pending="$(mktemp "$public_toolchain_archive_dir/.archive.XXXXXX")"
+    stage_toolchain_archive "$name" "$staging" 1 || return $?
+    pending="$(mktemp "$public_toolchain_archive_dir/.archive.XXXXXX")" || return $?
     # shellcheck disable=SC2064
     trap "$(printf 'rm -rf -- %q %q' "$staging" "$pending")" EXIT
-    install -m 0644 "$staging/$name" "$pending"
-    python3 - "$pending" "$public_toolchain_archive_dir/$name" <<'PY'
+    install -m 0644 "$staging/$name" "$pending" || return $?
+    python3 - "$pending" "$public_toolchain_archive_dir/$name" <<'PY' || return $?
 import os
 import sys
 os.replace(sys.argv[1], sys.argv[2])
@@ -329,19 +347,23 @@ PY
 
 check_go_toolchain() (
   set -euo pipefail
-  local distribution="$1" scratch="$2"
-  mkdir -p "$scratch/home" "$scratch/cache" "$scratch/mod" "$scratch/path"
+  local distribution="$1" scratch="$2" version target result
+  mkdir -p "$scratch/home" "$scratch/cache" "$scratch/mod" "$scratch/path" || return $?
   export HOME="$scratch/home" GOROOT="$distribution" GOCACHE="$scratch/cache"
   export GOMODCACHE="$scratch/mod" GOPATH="$scratch/path" GOENV=off GOTOOLCHAIN=local
   export GOPROXY=off GOSUMDB=off GOWORK=off GO111MODULE=off GOFLAGS="" CGO_ENABLED=1 CC=gcc CXX=g++
   unset GOOS GOARCH GOEXPERIMENT
-  [[ "$("$distribution/bin/go" version)" == "go version go$pinned_go_version linux/amd64" ]] || {
+  version="$("$distribution/bin/go" version)" || return $?
+  [[ "$version" == "go version go$pinned_go_version linux/amd64" ]] || {
     log "unexpected Go version or architecture"
     return 1
   }
-  [[ "$("$distribution/bin/go" env GOOS GOARCH)" == $'linux\namd64' ]]
-  cd "$scratch"
-  cat >main.go <<'GO'
+  target="$("$distribution/bin/go" env GOOS GOARCH)" || return $?
+  [[ "$target" == $'linux\namd64' ]] || return 1
+  cd "$scratch" || return $?
+  # Group the heredoc so Bash 3.2 and 5.2 both serialize its failure check safely.
+  {
+    cat >main.go <<'GO'
 package main
 
 // static int answer(void) { return 42; }
@@ -355,10 +377,12 @@ func main() {
 	fmt.Println("go-cgo-ok")
 }
 GO
-  "$distribution/bin/gofmt" main.go >formatted.go
-  mv formatted.go main.go
-  "$distribution/bin/go" test bytes crypto/sha256
-  [[ "$("$distribution/bin/go" run main.go)" == "go-cgo-ok" ]]
+  } || return $?
+  "$distribution/bin/gofmt" main.go >formatted.go || return $?
+  mv formatted.go main.go || return $?
+  "$distribution/bin/go" test bytes crypto/sha256 || return $?
+  result="$("$distribution/bin/go" run main.go)" || return $?
+  [[ "$result" == "go-cgo-ok" ]]
 )
 
 install_pinned_go() (
@@ -366,28 +390,28 @@ install_pinned_go() (
   umask 022
   local staging destination
   destination="$go_toolcache_root/go/$pinned_go_version/x64"
-  public_tool_links check "$go_link_dir" "$destination/bin" go gofmt || return $?
-  staging="$(mktemp -d)"
+  public_tool_links check "$go_link_dir" "$go_toolcache_root/go/$pinned_go_version/x64/bin" go gofmt || return $?
+  staging="$(mktemp -d)" || return $?
   # shellcheck disable=SC2064
   trap "$(printf 'rm -rf -- %q' "$staging")" EXIT
-  install -d -m 0755 "$(dirname "$destination")"
-  rm -f "$destination.complete"
-  stage_toolchain_archive go1.27.0.linux-amd64.tar.gz "$staging"
-  mkdir "$staging/go"
-  tar --no-same-owner -xzf "$staging/go1.27.0.linux-amd64.tar.gz" -C "$staging/go" --strip-components=1
-  check_go_toolchain "$staging/go" "$staging/check"
+  stage_toolchain_archive "go$pinned_go_version.linux-amd64.tar.gz" "$staging" || return $?
+  mkdir "$staging/go" || return $?
+  tar --no-same-owner -xzf "$staging/go$pinned_go_version.linux-amd64.tar.gz" -C "$staging/go" --strip-components=1 || return $?
+  rm -f "$destination.complete" || return $?
+  check_go_toolchain "$staging/go" "$staging/check" || return $?
+  public_tool_links check "$go_link_dir" "$go_toolcache_root/go/$pinned_go_version/x64/bin" go gofmt || return $?
+  install -d -m 0755 "$(dirname "$destination")" "$go_link_dir" || return $?
   # This image-owned slot is always rebuilt from authenticated private bytes.
-  rm -rf "$destination"
-  mv "$staging/go" "$destination"
-  install -d -m 0755 "$go_link_dir"
-  public_tool_links publish "$go_link_dir" "$destination/bin" go gofmt
+  rm -rf "$destination" || return $?
+  mv "$staging/go" "$destination" || return $?
+  public_tool_links publish "$go_link_dir" "$destination/bin" go gofmt || return $?
   touch "$destination.complete"
 )
 
 install_go_toolchain() {
   if linux_x64_supported; then
     public_tool_links check "$go_link_dir" "$go_toolcache_root/go/$pinned_go_version/x64/bin" go gofmt || return $?
-    cache_public_toolchain_archives go1.27.0.linux-amd64.tar.gz
+    cache_public_toolchain_archives "go$pinned_go_version.linux-amd64.tar.gz" || return $?
     install_pinned_go
   fi
 }
@@ -615,8 +639,8 @@ install_node_runtime() {
       apt_install nodejs || return $?
     fi
   fi
-  command -v npm >/dev/null
-  command -v corepack >/dev/null
+  command -v npm >/dev/null || return $?
+  command -v corepack >/dev/null || return $?
   if [[ "$use_pinned_node" == "0" ]]; then
     corepack enable
   fi
@@ -627,7 +651,7 @@ install_node_pnpm() {
   if pinned_node_supported; then
     cache_public_toolchain_archives || return $?
   fi
-  corepack prepare "pnpm@$pnpm_version" --activate
+  corepack prepare "pnpm@$pnpm_version" --activate || return $?
   command -v pnpm >/dev/null
 }
 
@@ -762,6 +786,7 @@ install_bun() {
     [[ ! -L "$directory" ]] || { log "symlinked Bun managed directory: $directory"; return 1; }
     directory="$(dirname "$directory")" || return $?
   done
+  prepare_public_toolchain_archive_dir || return $?
   (
     set -euo pipefail
     umask 077
@@ -772,7 +797,6 @@ install_bun() {
     for variant in linux-x64-baseline linux-x64; do
       name="bun-v$pinned_bun_version-$variant.zip"
       stage_bun_archive "$name" "$staging" 1 || return $?
-      install -d -m 0755 "$public_toolchain_archive_dir" || return $?
       pending="$(mktemp "$public_toolchain_archive_dir/.bun-archive.XXXXXX")" || return $?
       # shellcheck disable=SC2064
       trap "$(printf 'rm -rf -- %q %q' "$staging" "$pending")" EXIT
@@ -995,7 +1019,8 @@ prepare_fast_boot() {
   local readiness_producer
   readiness_producer="$(readiness_producer_path)" || return 1
   install -d -m 1777 /var/cache/crabbox /var/cache/crabbox/pnpm /var/cache/crabbox/npm /var/cache/crabbox/corepack /var/cache/crabbox/docker
-  "$readiness_producer"
+  "$readiness_producer" || return $?
+  "$readiness_producer" --verify linux-builder || return $?
   systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
   systemctl mask apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
   clean_cloud_init_state || return $?
@@ -1108,8 +1133,8 @@ APT
   if [[ "$install_browser" == "1" ]]; then
     install_chrome_or_chromium
   fi
-  install_node_pnpm
-  install_go_toolchain
+  install_node_pnpm || return $?
+  install_go_toolchain || return $?
   install_bun
   install_trufflehog
   install_docker

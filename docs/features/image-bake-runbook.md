@@ -671,6 +671,16 @@ boots independently rerun the declared probes under a sanitized system PATH
 before skipping baseline APT. Use the timing logs to compare provider request,
 network readiness, bootstrap, and end-to-end time before and after each bake.
 
+Linux developer-image acceptance runs the publisher checkout's generated script
+with `--verify linux-builder` on source, candidate, and promoted leases. It
+requires the canonical trusted manifest and working builder probes without
+rewriting evidence. The runtime smoke compiles and executes C, runs npm/pnpm
+offline, writes the baked caches, and exercises Docker run, buildx, and Compose
+with local images and networking disabled. Docker must work as the runtime user
+(or after refreshing its Docker group); root execution cannot satisfy acceptance.
+All probe scratch is disposable and cleanup failures remain failures. This adds
+no toolchain versions or new desktop/browser package requirements.
+
 Linux source, candidate, and promoted smokes require a nonroot user. After
 successful bundled Linux preparation, the wrapper activates the selected pnpm
 release as the lease user: the privileged installer only seeds root's Corepack

@@ -26,6 +26,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageManagers = ["apt", "apt-get", "apt-cache", "dpkg", "dpkg-query"];
 const fixtureRecipes = loadRecipes();
 const minimalUpdateCommand = "apt-get -o Acquire::Languages=none -o Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false -o Acquire::IndexTargets::deb::CNF::DefaultEnabled=false update";
+const frozenBuilderManifest = '{"profile":"linux-builder","recipeDigest":"sha256:7cf72f7c26e07f695206af1838d12ed4585fef852224cb91da23a2d37d722e2e","schema":"crabbox-linux-readiness/v1"}\n';
 
 function quote(value) {
   return `'${String(value).replaceAll("'", "'\"'\"'")}'`;
@@ -69,6 +70,7 @@ if [[ "$probe" == python3 && "\${1:-}" == -c ]]; then
     exec "$CRABBOX_FIXTURE_PYTHON" "$@"
   fi
 fi
+printf '%s\\n' "$probe" >>"$CRABBOX_FIXTURE_ROOT/probes.log"
 if [[ -f "$CRABBOX_FIXTURE_ROOT/disabled-$probe" ]]; then exit 91; fi
 printf '%s fixture\\n' "$probe"`,
     );
@@ -195,7 +197,10 @@ stat() {
     const producer = producerSource(minimal, builder, options);
     return run(producer.slice(producer.indexOf("crabbox_readiness_manifest_path=")), overrides);
   }
-  return { root, bin, state, readiness, manifest, marker, ca, sshd, aptConfig, packageLog, minimal, builder, ownerUID, ownerGID, options, shell, writeManifest, writeMarker, packageCalls, run, runProducer, actualGenerated };
+  function runVerifier(profile, overrides = {}) {
+    return run(`set -- --verify ${quote(profile)}\n${producerSource(minimal, builder, options)}`, overrides);
+  }
+  return { root, bin, state, readiness, manifest, marker, ca, sshd, aptConfig, packageLog, minimal, builder, ownerUID, ownerGID, options, shell, writeManifest, writeMarker, packageCalls, run, runProducer, runVerifier, actualGenerated };
 }
 
 test("strict profile and manifest schemas validate recipes and both generated manifests", async () => {
@@ -240,6 +245,7 @@ test("strict JSON parsing rejects duplicate object keys and trailing documents",
 
 test("recipe digest ignores descriptions but binds all executable capability changes", async () => {
   const { minimal, builder } = await fixtureRecipes;
+  assert.equal(`${canonicalJSON(manifestFor("linux-builder", digest(builder)))}\n`, frozenBuilderManifest);
   const cosmetic = structuredClone(minimal);
   cosmetic.description = "A changed cosmetic description";
   assert.equal(digest(cosmetic), digest(minimal));
@@ -362,6 +368,80 @@ test("valid minimal and builder manifests rerun their complete probes without pa
       assert.deepEqual(await fixture.packageCalls(), []);
     });
   }
+});
+
+test("standalone verifier requires an explicit supported profile without privilege escalation", () => {
+  const producer = resolve(repoRoot, "scripts/linux-readiness.generated.sh");
+  for (const args of [["--verify"], ["--verify", "unknown"], ["--verify", "linux-builder", "extra"]]) {
+    const result = spawnSync(producer, args, { encoding: "utf8" });
+    assert.equal(result.status, 2, result.stderr || result.stdout);
+  }
+});
+
+test("standalone verifier proves the exact profile without rewriting manifest or marker", async (t) => {
+  for (const profile of ["linux-minimal", "linux-builder"]) {
+    await t.test(profile, async (subtest) => {
+      const fixture = await createFixture(subtest);
+      await fixture.writeManifest(profile);
+      await fixture.writeMarker();
+      for (const command of ["sudo", "id"]) await executable(join(fixture.bin, command), "exit 98");
+      const before = await Promise.all([fixture.manifest, fixture.marker].map((path) => stat(path)));
+      const result = fixture.runVerifier(profile);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.match(result.stdout, new RegExp(`readiness verified: ${profile}`));
+      const after = await Promise.all([fixture.manifest, fixture.marker].map((path) => stat(path)));
+      for (const key of ["ino", "mtimeMs", "ctimeMs", "mode", "uid", "gid", "size"]) {
+        assert.deepEqual(after.map((entry) => entry[key]), before.map((entry) => entry[key]), key);
+      }
+      assert.equal(JSON.parse(await readFile(fixture.manifest, "utf8")).profile, profile);
+      assert.equal(await readFile(fixture.marker, "utf8"), "crabbox-devtools-v1\n");
+      assert.deepEqual(await fixture.packageCalls(), []);
+      assert.deepEqual(await readdir(fixture.readiness), ["linux.json"]);
+    });
+  }
+});
+
+test("standalone verifier rejects untrusted or wrong-profile claims before any capability probe", async (t) => {
+  for (const [name, prepare] of [
+    ["missing", async () => ({})],
+    ["minimal", async (fixture) => { await fixture.writeManifest(); return {}; }],
+    ["stale", async (fixture) => { await fixture.writeManifest("linux-builder", "{}\n"); return {}; }],
+    ["noncanonical", async (fixture) => { await fixture.writeManifest("linux-builder", JSON.stringify(manifestFor("linux-builder", digest(fixture.builder)), null, 2)); return {}; }],
+    ["wrong owner", async (fixture) => { await fixture.writeManifest("linux-builder"); return { CRABBOX_STAT_OVERRIDE_PATH: fixture.manifest, CRABBOX_STAT_OWNER: String(Number(fixture.ownerUID) + 1) }; }],
+    ["wrong mode", async (fixture) => { await fixture.writeManifest("linux-builder"); await chmod(fixture.manifest, 0o666); return {}; }],
+    ["writable parent", async (fixture) => { await fixture.writeManifest("linux-builder"); await chmod(fixture.readiness, 0o777); return {}; }],
+    ["symlink", async (fixture) => { await fixture.writeManifest("linux-builder"); await writeFile(`${fixture.manifest}.target`, await readFile(fixture.manifest)); await rm(fixture.manifest); await symlink(`${fixture.manifest}.target`, fixture.manifest); return {}; }],
+  ]) {
+    await t.test(name, async (subtest) => {
+      const fixture = await createFixture(subtest);
+      const environment = await prepare(fixture);
+      await fixture.writeMarker();
+      const before = await readFile(fixture.manifest, "utf8").catch(() => null);
+      const result = fixture.runVerifier("linux-builder", environment);
+      assert.notEqual(result.status, 0, result.stderr || result.stdout);
+      assert.equal(await readFile(fixture.manifest, "utf8").catch(() => null), before);
+      assert.equal(await readFile(fixture.marker, "utf8"), "crabbox-devtools-v1\n");
+      await assert.rejects(readFile(join(fixture.root, "probes.log")), { code: "ENOENT" });
+      assert.deepEqual(await fixture.packageCalls(), []);
+    });
+  }
+});
+
+test("standalone verifier never downgrades a builder claim after a failed probe", async (t) => {
+  const fixture = await createFixture(t);
+  await fixture.writeManifest("linux-builder");
+  await writeFile(join(fixture.root, "disabled-git-lfs"), "1");
+  const before = await stat(fixture.manifest);
+  const result = fixture.runVerifier("linux-builder");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /linux-builder capability proof failed/);
+  const after = await stat(fixture.manifest);
+  for (const key of ["ino", "mtimeMs", "ctimeMs", "mode", "uid", "gid", "size"]) {
+    assert.equal(after[key], before[key], key);
+  }
+  assert.equal(JSON.parse(await readFile(fixture.manifest, "utf8")).profile, "linux-builder");
+  await assert.rejects(readFile(fixture.marker), { code: "ENOENT" });
+  assert.deepEqual(await fixture.packageCalls(), []);
 });
 
 test("bootstrap and producer parse metadata in the C locale without changing probe locales", async (t) => {
@@ -746,33 +826,122 @@ test("actual generated producer proves and cleans a real pip-enabled Python virt
   assert.deepEqual(await fixture.packageCalls(), []);
 });
 
-test("actual generated producer downgrades when venv imports but pip-enabled creation fails", async (t) => {
-  const fixture = await createFixture(t);
+test("actual generated readiness cleans dependency scratch when venv creation or pip proof fails", async (t) => {
   const resolvedPython = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" });
   assert.equal(resolvedPython.status, 0, resolvedPython.stderr);
-  const modules = join(fixture.root, "python-modules");
-  const temporaryRoot = join(fixture.root, "venv-temporary");
-  await mkdir(modules);
+  for (const failure of ["creation", "pip"]) {
+    await t.test(failure, async (subtest) => {
+      const fixture = await createFixture(subtest);
+      const modules = join(fixture.root, "python-modules");
+      const temporaryRoot = join(fixture.root, "venv-temporary");
+      const reachedPip = join(fixture.root, "pip-reached");
+      await mkdir(modules);
+      await mkdir(temporaryRoot);
+      await writeFile(join(modules, "venv.py"), `import os, pathlib, subprocess, sys, tempfile
+class EnvBuilder:
+    def __init__(self, *, with_pip):
+        assert with_pip
+
+    def create(self, directory):
+        assert tempfile.gettempdir() == os.environ["TMPDIR"]
+        assert os.path.dirname(os.path.dirname(directory)) == os.environ["TMPDIR"]
+        assert os.stat(os.environ["TMPDIR"]).st_mode & 0o777 == 0o700
+        os.close(tempfile.mkstemp()[0])
+        subprocess.run([sys.executable, "-c", "import os, tempfile; assert tempfile.gettempdir() == os.environ['TMPDIR']; os.close(tempfile.mkstemp()[0])"], check=True)
+        if os.environ["CRABBOX_FIXTURE_VENV_FAILURE"] == "creation":
+            raise RuntimeError("ensurepip is unavailable")
+        binary = pathlib.Path(directory) / "bin"
+        binary.mkdir(parents=True)
+        (binary / "python").symlink_to(sys.executable)
+`);
+      await writeFile(join(modules, "pip.py"), `import os, pathlib, tempfile
+os.close(tempfile.mkstemp()[0])
+pathlib.Path(os.environ["CRABBOX_FIXTURE_PIP_REACHED"]).touch()
+raise RuntimeError("pip proof failed")
+`);
+      const environment = {
+        CRABBOX_FIXTURE_REAL_VENV: "1",
+        CRABBOX_FIXTURE_PYTHON: resolvedPython.stdout.trim(),
+        CRABBOX_FIXTURE_VENV_FAILURE: failure,
+        CRABBOX_FIXTURE_PIP_REACHED: reachedPip,
+        PYTHONPATH: modules,
+        TMPDIR: temporaryRoot,
+      };
+      const importOnly = spawnSync(resolvedPython.stdout.trim(), ["-c", "import venv"], {
+        encoding: "utf8",
+        env: { ...process.env, ...environment },
+      });
+      assert.equal(importOnly.status, 0, importOnly.stderr);
+      const producer = await readFile(resolve(repoRoot, "scripts/linux-readiness.generated.sh"), "utf8");
+      const source = fixture.actualGenerated(producer.slice(producer.indexOf("crabbox_readiness_manifest_path=")));
+      const result = fixture.run(source, environment);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      assert.equal(JSON.parse(await readFile(fixture.manifest, "utf8")).profile, "linux-minimal");
+      assert.match(await readFile(join(fixture.root, "venv-probes.log"), "utf8"), /EnvBuilder\(with_pip=True\)\.create/u);
+      assert.deepEqual(await readdir(temporaryRoot), [], "failed probes must clean all parent and child scratch");
+      if (failure === "pip") assert.equal(await readFile(reachedPip, "utf8"), "");
+      else await assert.rejects(readFile(reachedPip), { code: "ENOENT" });
+
+      await fixture.writeManifest("linux-builder");
+      const verified = fixture.runVerifier("linux-builder", environment);
+      assert.notEqual(verified.status, 0);
+      assert.match(verified.stderr, /linux-builder capability proof failed/);
+      assert.equal(JSON.parse(await readFile(fixture.manifest, "utf8")).profile, "linux-builder");
+      assert.deepEqual(await readdir(temporaryRoot), [], "verification failure must clean all scratch");
+      assert.deepEqual(await fixture.packageCalls(), []);
+    });
+  }
+});
+
+test("builder probe scratch setup precedes Python and preserves its failure status", async (t) => {
+  const fixture = await createFixture(t);
+  const temporaryRoot = join(fixture.root, "probe-temporary");
   await mkdir(temporaryRoot);
-  await writeFile(join(modules, "venv.py"), `class EnvBuilder:\n    def __init__(self, *, with_pip):\n        self.with_pip = with_pip\n\n    def create(self, directory):\n        raise RuntimeError("ensurepip is unavailable")\n`);
-  const importOnly = spawnSync(resolvedPython.stdout.trim(), ["-c", "import venv"], {
-    encoding: "utf8",
-    env: { ...process.env, PYTHONPATH: modules },
-  });
-  assert.equal(importOnly.status, 0, importOnly.stderr);
-  const producer = await readFile(resolve(repoRoot, "scripts/linux-readiness.generated.sh"), "utf8");
-  const source = fixture.actualGenerated(producer.slice(producer.indexOf("crabbox_readiness_manifest_path=")));
-  const result = fixture.run(source, {
-    CRABBOX_FIXTURE_REAL_VENV: "1",
-    CRABBOX_FIXTURE_PYTHON: resolvedPython.stdout.trim(),
-    PYTHONPATH: modules,
-    TMPDIR: temporaryRoot,
-  });
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.equal(JSON.parse(await readFile(fixture.manifest, "utf8")).profile, "linux-minimal");
-  assert.match(await readFile(join(fixture.root, "venv-probes.log"), "utf8"), /EnvBuilder\(with_pip=True\)\.create/u);
-  assert.deepEqual(await readdir(temporaryRoot), [], "failed venv probes must clean their temporary directories");
-  assert.deepEqual(await fixture.packageCalls(), []);
+  await executable(join(fixture.bin, "mktemp"), "exit 83");
+  const functions = fixture.shell.slice(0, fixture.shell.indexOf("\ncrabbox_readiness_packages="));
+  const result = fixture.run(`${functions}\ncrabbox_builder_additional_readiness_probes`, { TMPDIR: temporaryRoot });
+  assert.equal(result.status, 83, result.stderr);
+  await assert.rejects(readFile(join(fixture.root, "probes.log")), { code: "ENOENT" });
+  assert.deepEqual(await readdir(temporaryRoot), []);
+});
+
+test("builder cleanup failure is visible without replacing the original probe failure", async (t) => {
+  for (const probeFails of [false, true]) {
+    await t.test(`probe failure=${probeFails}`, async (subtest) => {
+      const fixture = await createFixture(subtest);
+      const temporaryRoot = join(fixture.root, "probe-temporary");
+      await mkdir(temporaryRoot);
+      await executable(join(fixture.bin, "rm"), `case "\${*: -1}" in
+  */crabbox-builder-probe.*) exit 72 ;;
+esac
+exec /bin/rm "$@"`);
+      if (probeFails) await writeFile(join(fixture.root, "disabled-cc"), "1");
+      const functions = fixture.shell.slice(0, fixture.shell.indexOf("\ncrabbox_readiness_packages="));
+      const environment = { TMPDIR: temporaryRoot };
+      const result = fixture.run(`${functions}\ncrabbox_builder_additional_readiness_probes`, environment);
+      assert.equal(result.status, probeFails ? 91 : 1, result.stderr);
+      assert.match(result.stderr, /builder probe temporary cleanup failed/);
+      const leftovers = await readdir(temporaryRoot);
+      assert.equal(leftovers.length, 1, "injected cleanup failure must leave only the owned probe directory");
+      assert.match(leftovers[0], /^crabbox-builder-probe\./);
+
+      const produced = fixture.runProducer(environment);
+      assert.equal(produced.status, 0, produced.stderr);
+      assert.match(produced.stderr, /builder probe temporary cleanup failed/);
+      assert.equal(JSON.parse(await readFile(fixture.manifest, "utf8")).profile, "linux-minimal");
+      await fixture.writeManifest("linux-builder", frozenBuilderManifest);
+      const before = await stat(fixture.manifest);
+      const verified = fixture.runVerifier("linux-builder", environment);
+      assert.notEqual(verified.status, 0);
+      assert.match(verified.stderr, /builder probe temporary cleanup failed/);
+      assert.equal(await readFile(fixture.manifest, "utf8"), frozenBuilderManifest);
+      const after = await stat(fixture.manifest);
+      for (const key of ["ino", "mtimeMs", "ctimeMs", "mode", "uid", "gid", "size"]) {
+        assert.equal(after[key], before[key], key);
+      }
+      assert.deepEqual(await fixture.packageCalls(), []);
+    });
+  }
 });
 
 test("standalone producer replaces an existing builder claim when a builder capability disappears", async (t) => {
@@ -796,6 +965,28 @@ test("actual generated Go and Worker bootstrap fragments make identical decision
   const goFragment = JSON.parse(goMatch[1]);
   const workerFragment = JSON.parse(workerMatch[1]);
   assert.equal(goFragment, workerFragment);
+  for (const [name, fragments] of [
+    ["CLI then coordinator", [goFragment, workerFragment]],
+    ["coordinator then CLI", [workerFragment, goFragment]],
+  ]) {
+    await t.test(`frozen v1 image: ${name}`, async (subtest) => {
+      const fixture = await createFixture(subtest);
+      await fixture.writeManifest("linux-builder", frozenBuilderManifest);
+      for (const fragment of fragments) {
+        const before = await stat(fixture.manifest);
+        const result = fixture.run(fixture.actualGenerated(fragment));
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+        assert.match(result.stdout, /skipping apt bootstrap/);
+        assert.equal(await readFile(fixture.manifest, "utf8"), frozenBuilderManifest);
+        assert.equal((await stat(fixture.manifest)).mtimeMs, before.mtimeMs);
+      }
+      const produced = fixture.runProducer();
+      assert.equal(produced.status, 0, produced.stderr);
+      assert.equal(await readFile(fixture.manifest, "utf8"), frozenBuilderManifest,
+        "new producer bytes must remain identical to the original v1 consumer contract");
+      assert.deepEqual(await fixture.packageCalls(), []);
+    });
+  }
   for (const [scenario, prepare, environment] of [
     ["minimal", async (fixture) => fixture.writeManifest(), {}],
     ["builder", async (fixture) => fixture.writeManifest("linux-builder"), {}],

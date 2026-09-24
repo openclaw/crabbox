@@ -82,7 +82,10 @@ generic native-build, Git LFS, package-config, and Python virtual-environment
 capabilities. The Python probe creates a disposable pip-enabled virtual
 environment and runs its pip before cleaning up. Images missing a builder
 capability are truthfully downgraded to `linux-minimal`, while images missing a
-baseline capability cannot be marked.
+baseline capability cannot be marked. Developer-image preparation and publication
+require `linux-builder`: a minimal claim is not accepted as a developer image.
+The publisher uploads its trusted source verifier for source, candidate, and
+promoted leases; verification never repairs or downgrades the manifest.
 
 Later boots verify exact canonical manifest bytes, its trusted non-symlink path,
 root ownership/group, file mode and bounded size, and every declared profile

@@ -313,7 +313,7 @@ test("Bun rejects present corrupt or malformed caches without downloading or rep
   fs.symlinkSync("elsewhere", path.join(root, "archives"));
   const malformedRoot = run(`${setup}\ninstall_bun`);
   assert.notEqual(malformedRoot.status, 0);
-  assert.match(malformedRoot.stderr, /malformed Bun archive cache/);
+  assert.match(malformedRoot.stderr, /invalid public toolchain archive directory/);
 });
 
 test("Bun cache misses use only the pinned download, and offline misses cannot disable proof", (t) => {
@@ -1636,3 +1636,97 @@ test(
     );
   },
 );
+
+for (const [failure, status] of [
+  ["staging", 47],
+  ["download", 22],
+  ["verification", 48],
+  ["pending", 49],
+  ["install", 50],
+  ["rename", 51],
+]) {
+  test(`conditional archive publication preserves ${failure} failure and earlier good bytes`, (t) => {
+    const { root, run } = fixture(t);
+    const payload = Buffer.from("authenticated archive fixture\n");
+    fs.writeFileSync(path.join(root, "payload.tgz"), payload);
+    const digest = createHash("sha256").update(payload).digest("hex");
+    const result = run(`
+public_toolchain_archive_dir="$PWD/public/archives"
+toolchain_archive_spec() { printf 'sha256 ${digest} https://example.invalid/%s\\n' "$1"; }
+mktemp() {
+  if [[ "${failure}" == staging && "$1" == -d ]]; then
+    printf '%s\\n' "$PWD/staging"
+    return ${status}
+  fi
+  if [[ "${failure}" == pending && "$1" == "$public_toolchain_archive_dir/.archive.XXXXXX" &&
+        -f "$public_toolchain_archive_dir/good.tgz" ]]; then return ${status}; fi
+  command mktemp "$@"
+}
+curl() {
+  while [[ "$1" != --output ]]; do shift; done
+  if [[ "${failure}" == download && "$2" == */bad.tgz ]]; then
+    printf partial >"$2"
+    return ${status}
+  fi
+  cp "$PWD/payload.tgz" "$2"
+}
+install() {
+  if [[ "${failure}" == install && "$1" == -m && "\${3:-}" == */bad.tgz ]]; then return ${status}; fi
+  command install "$@"
+}
+python3() {
+  if [[ "${failure}" == verification && "\${2:-}" == sha256 && "\${4:-}" == */bad.tgz ]]; then return ${status}; fi
+  if [[ "${failure}" == rename && "\${3:-}" == "$public_toolchain_archive_dir/bad.tgz" ]]; then return ${status}; fi
+  command python3 "$@"
+}
+if cache_public_toolchain_archives good.tgz bad.tgz unattempted.tgz; then exit 91; else exit "$?"; fi
+`);
+    assert.equal(result.status, status, result.stderr);
+    const archives = path.join(root, "public", "archives");
+    assert.deepEqual(fs.readdirSync(archives), failure === "staging" ? [] : ["good.tgz"]);
+    if (failure !== "staging") {
+      assert.deepEqual(fs.readFileSync(path.join(archives, "good.tgz")), payload);
+    }
+    assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+  });
+}
+
+
+for (const boundary of ["parent", "leaf"]) {
+  for (const kind of ["private", "symlink", "file"]) {
+    test(`public archive permissions handle ${boundary} ${kind} without widening ancestors`, (t) => {
+      const { root, run } = fixture(t);
+      const parent = path.join(root, "public"), archives = path.join(parent, "archives");
+      fs.mkdirSync(archives, { recursive: true });
+      const target = boundary === "parent" ? parent : archives;
+      fs.chmodSync(target, 0o700);
+      if (kind !== "private") {
+        fs.rmSync(target, { recursive: true });
+        if (kind === "symlink") fs.symlinkSync(path.join(root, "home"), target);
+        else fs.writeFileSync(target, "keep");
+      }
+      const before = fs.statSync(root).mode;
+      const result = run(`public_toolchain_archive_dir="$PWD/public/archives"
+if prepare_public_toolchain_archive_dir; then exit 0; else exit "$?"; fi`);
+      assert.equal(result.status, kind === "private" ? 0 : 1, result.stderr);
+      if (kind === "private") for (const dir of [parent, archives]) assert.equal(fs.statSync(dir).mode & 0o777, 0o755);
+      assert.equal(fs.statSync(root).mode, before);
+      assert.deepEqual(fs.readdirSync(path.join(root, "home")), []);
+    });
+  }
+}
+for (const [phase, injection, code] of [
+  ["staging", "mktemp() { return 43; }", 43],
+  ["archive", "stage_toolchain_archive() { return 44; }", 44],
+  ["extraction", "tar() { return 45; }", 45],
+  ["stdlib", "", 47],
+]) {
+  test(`conditional Go installation preserves ${phase} failure without completion`, (t) => {
+    const { root, destination, runGo } = goArchiveFixture(t);
+    const result = runGo(`${defaultGoPreparation}${injection}
+if install_go_toolchain; then exit 91; else exit "$?"; fi`, { FIXTURE_GO_FAILURE: "47" });
+    assert.equal(result.status, code, result.stderr);
+    assert.equal(fs.existsSync(`${destination}.complete`), false);
+    assert.deepEqual(fs.readdirSync(path.join(root, "tmp")), []);
+  });
+}

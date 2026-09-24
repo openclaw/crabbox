@@ -5,6 +5,7 @@
 ### Fixes
 
 - Keep Boxd lease SSH readiness on the authenticated forwarded port instead of falling back to port 22 while the forward starts. [PR 2519](https://github.com/openclaw/crabbox/pull/2519). Thanks @MichielMAnalytics.
+- Reject unverified Linux developer images with trusted-source builder verification, functional offline smokes, contained scratch, and fail-closed archive publication. [PR 1995](https://github.com/openclaw/crabbox/pull/1995). Thanks @vincentkoc.
 - Accept BOM-prefixed GitHub Runner registrations when seeding verified tool caches and create new registration files privately regardless of the caller's umask. [PR 1995](https://github.com/openclaw/crabbox/pull/1995). Thanks @vincentkoc.
 - Restore complete branch history before coherence checks when reusing shallow Git workspaces, while preserving wrong-branch rejection and index rollback. [PR 2529](https://github.com/openclaw/crabbox/pull/2529). Thanks @steipete.
 - Allow repeated Incus stop with the exact canonical lease ID after confirmed deletion, validating the retained terminal receipt and connection identity while keeping slug lookups live. [PR 2486](https://github.com/openclaw/crabbox/pull/2486). Thanks @vincentkoc.
