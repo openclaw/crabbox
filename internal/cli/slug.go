@@ -102,20 +102,17 @@ func LeaseProviderName(leaseID, slug string) string {
 
 func AllocateDirectLeaseSlug(leaseID, requested string, servers []Server) (string, error) {
 	base := NormalizeLeaseSlug(requested)
-	generated := base == ""
+	claimInUse := claimSlugInUse
 	if base == "" {
 		base = NewLeaseSlug(leaseID)
+		claimInUse = claimSlugInUseBestEffort
 	}
 	slug := base
 	for attempt := 0; attempt < 20; attempt++ {
 		inUse := serverSlugInUse(slug, servers)
 		if !inUse {
 			var err error
-			if generated {
-				inUse, err = claimSlugInUseBestEffort(slug, leaseID)
-			} else {
-				inUse, err = claimSlugInUse(slug, leaseID)
-			}
+			inUse, err = claimInUse(slug, leaseID)
 			if err != nil {
 				return "", err
 			}
@@ -129,11 +126,7 @@ func AllocateDirectLeaseSlug(leaseID, requested string, servers []Server) (strin
 	inUse := serverSlugInUse(fallback, servers)
 	if !inUse {
 		var err error
-		if generated {
-			inUse, err = claimSlugInUseBestEffort(fallback, leaseID)
-		} else {
-			inUse, err = claimSlugInUse(fallback, leaseID)
-		}
+		inUse, err = claimInUse(fallback, leaseID)
 		if err != nil {
 			return "", err
 		}
@@ -145,43 +138,7 @@ func AllocateDirectLeaseSlug(leaseID, requested string, servers []Server) (strin
 }
 
 func AllocateClaimLeaseSlug(leaseID, requested string) (string, error) {
-	base := NormalizeLeaseSlug(requested)
-	generated := base == ""
-	if base == "" {
-		base = NewLeaseSlug(leaseID)
-	}
-	slug := base
-	for attempt := 0; attempt < 20; attempt++ {
-		var inUse bool
-		var err error
-		if generated {
-			inUse, err = claimSlugInUseBestEffort(slug, leaseID)
-		} else {
-			inUse, err = claimSlugInUse(slug, leaseID)
-		}
-		if err != nil {
-			return "", err
-		}
-		if !inUse {
-			return slug, nil
-		}
-		slug = SlugWithCollisionSuffix(base, fmt.Sprintf("%s-%d", leaseID, attempt))
-	}
-	fallback := SlugWithCollisionSuffix(base, leaseID)
-	var inUse bool
-	var err error
-	if generated {
-		inUse, err = claimSlugInUseBestEffort(fallback, leaseID)
-	} else {
-		inUse, err = claimSlugInUse(fallback, leaseID)
-	}
-	if err != nil {
-		return "", err
-	}
-	if inUse {
-		return "", Exit(2, "could not allocate a unique lease slug for %s", leaseID)
-	}
-	return fallback, nil
+	return AllocateDirectLeaseSlug(leaseID, requested, nil)
 }
 
 func claimSlugInUse(slug, leaseID string) (bool, error) {
@@ -242,9 +199,6 @@ func serverSlugInUse(slug string, servers []Server) bool {
 }
 
 func ServerSlug(server Server) string {
-	if server.Labels == nil {
-		return ""
-	}
 	return NormalizeLeaseSlug(server.Labels["slug"])
 }
 
