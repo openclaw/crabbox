@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Stop Parallels IP discovery from admitting probes after the startup deadline while preserving the caller's cancellation cause.
+- Stop Parallels IP discovery from admitting probes after the startup deadline while preserving the caller's cancellation cause. [PR 2548](https://github.com/openclaw/crabbox/pull/2548).
 
 ## 0.66.0 - 2026-09-24
 
