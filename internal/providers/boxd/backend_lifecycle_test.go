@@ -276,7 +276,9 @@ func fixtureBackend(t *testing.T) (*backend, *fakeAPI) {
 	b.absenceGrace = 3 * time.Millisecond
 	b.rollbackTimeout = 500 * time.Millisecond
 	b.waitSSH = func(_ context.Context, target *core.SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
-		if target.Host != "192.0.2.1" || target.Port != "32222" || target.User != "boxd" || target.SSHHostKey != f.hostKey || len(target.FallbackPorts) != 0 || target.DisableHostKeyChecking || target.ReadyCheck != boxdReadyCheck {
+		// A nil FallbackPorts is not "none": core's sshPortCandidates reads nil as
+		// "also try 22", and len(nil) == 0 let exactly that slip through.
+		if target.Host != "192.0.2.1" || target.Port != "32222" || target.User != "boxd" || target.SSHHostKey != f.hostKey || target.FallbackPorts == nil || len(target.FallbackPorts) != 0 || target.DisableHostKeyChecking || target.ReadyCheck != boxdReadyCheck {
 			t.Errorf("bad SSH target: %#v", target)
 		}
 		data, err := os.ReadFile(target.KnownHostsFile)

@@ -111,6 +111,9 @@ Its existing Ed25519 host public key is returned through the exec stream's
 stdout. Crabbox requires the stream to complete without a failing exit code,
 validates that key, and writes it to isolated lease `known_hosts` before the
 first SSH connection. There is no trust-on-first-use or fallback SSH port.
+If the TCP forward is still starting, readiness retries the authenticated
+forwarded port; it never probes port 22 on the public host. This also applies
+to reused leases and `status --wait` readiness checks.
 The authenticated VM `public_ip` supplies the SSH host, and the port-forward
 response must name the same immutable VM ID; its arbitrary endpoint URL is
 never used.
