@@ -31,6 +31,16 @@ func TestCIGoNativeEventVerifier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// PowerShell's cold startup is part of this fixture test, not a performance
+	// contract. Use the package budget, reserving 5% for cancellation and cleanup.
+	ctx := t.Context()
+	if deadline, ok := t.Deadline(); ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, deadline.Add(-time.Until(deadline)/20))
+		defer cancel()
+	}
+	// Reuse an isolated home so each case need not rebuild PowerShell's caches.
+	home := t.TempDir()
 	complete := []string{
 		`{"Action":"run","Test":"TestAlpha"}`,
 		`{"Action":"pass","Test":"TestAlpha"}`,
@@ -74,11 +84,9 @@ $ErrorActionPreference = 'Stop'
 $fixture = Get-Content -Raw -LiteralPath $InputPath | ConvertFrom-Json
 & $Verifier -Events $fixture.events -RequiredTests $fixture.requiredTests -Label 'synthetic native test'
 `)
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-			defer cancel()
 			cmd := exec.CommandContext(ctx, pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
 				filepath.Join(dir, "verify.ps1"), verifier, filepath.Join(dir, "events.json"))
-			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "POWERSHELL_TELEMETRY_OPTOUT=1"}
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "POWERSHELL_TELEMETRY_OPTOUT=1"}
 			output, err := cmd.CombinedOutput()
 			if ctx.Err() != nil {
 				t.Fatalf("verifier timed out: %v\n%s", ctx.Err(), output)
