@@ -677,7 +677,9 @@ func TestProxyJumpConfigChainGrowsLinearly(t *testing.T) {
 	for index := range hops {
 		hops[index] = fmt.Sprintf("jump-%d.example.test", index)
 	}
-	dir := t.TempDir()
+	// Measure chain growth without including the host's temporary path length.
+	t.Chdir(t.TempDir())
+	const dir = "."
 	path, err := writeSSHTransportJumpConfig(dir, "", strings.Join(hops, ","), true)
 	if err != nil {
 		t.Fatal(err)

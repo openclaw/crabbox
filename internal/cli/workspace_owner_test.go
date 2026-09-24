@@ -1679,7 +1679,18 @@ func TestWorkspaceOwnerPOSIXTransportIsLoginShellIndependent(t *testing.T) {
 			}
 
 			const finalizeToken = "0123456789abcdef0123456789abcdef"
-			home := filepath.Join(t.TempDir(), "owner's home")
+			// These paths are embedded in the size-bounded transport payload.
+			// Keep their length independent of TMPDIR and the subtest name.
+			root, err := os.MkdirTemp("/tmp", "cbx-owner-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.RemoveAll(root); err != nil {
+					t.Errorf("remove transport fixture: %v", err)
+				}
+			})
+			home := filepath.Join(root, "owner's home")
 			workdir := filepath.Join(home, "work root's checkout")
 			metaDir := filepath.Join(workdir, ".crabbox")
 			ownerRoot := filepath.Join(home, ".crabbox", "workspace-owners")
