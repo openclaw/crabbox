@@ -8,6 +8,7 @@
 - Allow repeated Incus stop with the exact canonical lease ID after confirmed deletion, validating the retained terminal receipt and connection identity while keeping slug lookups live. [PR 2486](https://github.com/openclaw/crabbox/pull/2486). Thanks @vincentkoc.
 - Bound optional AWS and Hetzner price quotes to five seconds so stalled pricing falls back to existing estimates. Analysis: [PR 1630](https://github.com/openclaw/crabbox/pull/1630). Thanks @steipete.
 - Probe NVIDIA Brev SSH readiness during ordinary status only when the cached config matches the workspace claim's prepared provenance, preserving host/container targets and rejecting stale organization routes. [PR 2434](https://github.com/openclaw/crabbox/pull/2434). Thanks @vincentkoc.
+- Preserve non-empty raw workspaces when origin seeding becomes available by using plain manifest sync, and reject malformed Git destinations before transfer. Narrows [PR 2284](https://github.com/openclaw/crabbox/pull/2284). Thanks @vincentkoc.
 
 ## 0.66.0 - 2026-09-23
 

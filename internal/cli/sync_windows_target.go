@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,7 +21,15 @@ func syncWindowsNative(ctx context.Context, target SSHTarget, repo Repo, cfg Con
 	}
 	if coherence.seedEnabled() {
 		if out, err := runSSHCombinedOutputLimit(ctx, target, windowsGitSeed(workdir, coherence), gitSeedDiagnosticLimit); err != nil {
-			warnRemoteGitSeedFailure(stderr, out, err)
+			if exitCode(err) == gitSeedRawWorkspaceExitCode {
+				coherence = gitCoherencePlan{}
+				fmt.Fprintln(stderr, "git origin fallback reason=raw_workspace; using plain manifest sync")
+			} else if exitCode(err) == gitSeedUnsafeWorkspaceExitCode {
+				reportRemoteGitSeedFailure(stderr, out, err, "aborting before file sync")
+				return Exit(6, "remote git seed failed: %v", err)
+			} else {
+				warnRemoteGitSeedFailure(stderr, out, err)
+			}
 		}
 	}
 	if opts.FullResync && coherence.seedEnabled() {
@@ -175,6 +184,24 @@ if (Test-UsableGitWorkspace $workdir) {
   Repair-Origin $workdir
   exit 0
 }
+function Stop-UnsafeSeedDestination {
+  Write-Output 'crabbox-git-seed: unsafe workspace; refusing seed publication'
+  exit ` + strconv.Itoa(gitSeedUnsafeWorkspaceExitCode) + `
+}
+function Assert-EmptySeedDestination {
+  try {
+    $item = Get-Item -LiteralPath $workdir -Force -ErrorAction Stop
+  } catch [System.Management.Automation.ItemNotFoundException] {
+    return
+  } catch { Stop-UnsafeSeedDestination }
+  if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { Stop-UnsafeSeedDestination }
+  try { $entries = @(Get-ChildItem -LiteralPath $workdir -Force -ErrorAction Stop) }
+  catch { Stop-UnsafeSeedDestination }
+  $names = @($entries | ForEach-Object { $_.Name })
+  if ($names -contains '.git' -or ($names -contains 'HEAD' -and ($names -contains 'objects' -or $names -contains 'refs'))) { Stop-UnsafeSeedDestination }
+  if ($entries.Count) { exit ` + strconv.Itoa(gitSeedRawWorkspaceExitCode) + ` }
+}
+Assert-EmptySeedDestination
 $tmp = Join-Path $parent (".seed-" + [System.Guid]::NewGuid().ToString("N"))
 try {
   Write-Output 'crabbox-git-seed phase=clone'
@@ -194,10 +221,13 @@ try {
   Write-Output 'crabbox-git-seed phase=origin'
   Repair-Origin $tmp
   Write-Output 'crabbox-git-seed phase=publish'
+  Assert-EmptySeedDestination
   if (Test-Path -LiteralPath $workdir) {
-    Remove-Item -LiteralPath $workdir -Recurse -Force
+    try { [IO.Directory]::Delete($workdir) }
+    catch { Stop-UnsafeSeedDestination }
   }
-  Move-Item -LiteralPath $tmp -Destination $workdir
+  try { [IO.Directory]::Move($tmp, $workdir) }
+  catch { Stop-UnsafeSeedDestination }
   $tmp = $null
 } finally {
   if ($tmp -and (Test-Path -LiteralPath $tmp)) {

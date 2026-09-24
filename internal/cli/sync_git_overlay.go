@@ -17,6 +17,8 @@ import (
 
 const (
 	gitOriginRuntimeFallbackExitCode = 78
+	gitSeedUnsafeWorkspaceExitCode   = 79
+	gitSeedRawWorkspaceExitCode      = 80
 	gitOverlayFallbackExitCode       = 78
 	gitOverlayFallbackMarker         = "CRABBOX_GIT_OVERLAY_FALLBACK:"
 	gitOverlayMutationMarker         = "CRABBOX_GIT_OVERLAY_WORKSPACE_MUTATED"
@@ -778,6 +780,9 @@ func gitOverlayFallbackResult(output string, err error) (string, bool) {
 }
 
 func gitSeedRuntimeFallbackResult(plan gitCoherencePlan, output string, err error) (string, bool) {
+	if err != nil && exitCode(err) == gitSeedRawWorkspaceExitCode {
+		return "raw_workspace", true
+	}
 	// The runner has not published the private seed when its exact-SHA fetch
 	// fails. Local-only commits and servers that refuse SHA wants use file sync.
 	if plan.Branch == "" && plan.seedEnabled() && err != nil && exitCode(err) == gitOriginRuntimeFallbackExitCode {

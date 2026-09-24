@@ -2212,14 +2212,32 @@ expected_origin=` + shellQuote(plan.RemoteURL) + `
 expected_tree=` + shellQuote(plan.Tree) + `
 ` + remoteGitOriginTransportFunctions() + `
 ` + remoteGitWorkspaceFunctions() + `
+reject_seed_destination() {
+  echo 'crabbox-git-seed: unsafe workspace; refusing seed publication' >&2
+  exit ` + strconv.Itoa(gitSeedUnsafeWorkspaceExitCode) + `
+}
+require_empty_seed_destination() {
+  if [ -e "$workdir" ] || [ -L "$workdir" ]; then
+    [ -d "$workdir" ] && [ ! -L "$workdir" ] || reject_seed_destination
+    [ -r "$workdir" ] && [ -x "$workdir" ] || reject_seed_destination
+    if [ -e "$workdir/.git" ] || [ -L "$workdir/.git" ] ||
+       { [ -e "$workdir/HEAD" ] && { [ -d "$workdir/objects" ] || [ -d "$workdir/refs" ]; }; }; then
+      reject_seed_destination
+    fi
+    # The sentinel also detects entries whose names consist only of newlines.
+    entries="$(ls -A -- "$workdir" && printf .)" || reject_seed_destination
+    [ "$entries" = . ] || exit ` + strconv.Itoa(gitSeedRawWorkspaceExitCode) + `
+  fi
+}
 if [ -d "$workdir" ]; then
-  cd "$workdir"
+  cd "$workdir" || reject_seed_destination
   if usable_git_workspace; then
     printf 'crabbox-git-seed phase=origin\n'
     repair_origin
     exit 0
   fi
 fi
+require_empty_seed_destination
 mkdir -p "$parent"
 tmp="$(mktemp -d "$parent/.seed.XXXXXX")"
 transport_error="$tmp.transport-error"
@@ -2245,7 +2263,9 @@ repair_origin
 ` + seedManifest + `
 printf 'crabbox-git-seed phase=publish\n'
 cd /
-rm -rf -- "$workdir"
+require_empty_seed_destination
+# Never recursively remove files that appeared while the clone was prepared.
+if [ -d "$workdir" ]; then rmdir -- "$workdir" || reject_seed_destination; fi
 mv -- "$tmp" "$workdir"
 rm -f -- "$transport_error"
 trap - EXIT

@@ -24,7 +24,7 @@ func TestGitSeedFailurePhaseAndPreservation(t *testing.T) {
 			if err := os.Mkdir(workdir, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			marker := filepath.Join(workdir, "preserve.txt")
+			marker := filepath.Join(root, "preserve.txt")
 			mustWriteTestFile(t, marker, "existing workspace\n")
 			plan := f.plan(t, f.b)
 			switch phase {
@@ -51,7 +51,10 @@ func TestGitSeedFailurePhaseAndPreservation(t *testing.T) {
 				t.Fatalf("unsafe or incorrect warning: %q", warning.String())
 			}
 			if data, err := os.ReadFile(marker); err != nil || string(data) != "existing workspace\n" {
-				t.Fatalf("failed seed changed existing workspace: data=%q err=%v", data, err)
+				t.Fatalf("failed seed changed sibling file: data=%q err=%v", data, err)
+			}
+			if entries, err := os.ReadDir(workdir); err != nil || len(entries) != 0 {
+				t.Fatalf("failed seed changed empty destination: entries=%v err=%v", entries, err)
 			}
 			leftovers, err := filepath.Glob(filepath.Join(root, ".seed*"))
 			if err != nil || len(leftovers) != 0 {

@@ -160,7 +160,7 @@ func TestDetachedGitSeedRejectsUnverifiedTree(t *testing.T) {
 	plan := gitCoherencePlan{RemoteURL: f.origin, Target: f.b, Tree: gitOutput(f.source, "rev-parse", f.a+"^{tree}")}
 	root := t.TempDir()
 	workdir := filepath.Join(root, "work")
-	marker := filepath.Join(workdir, "preserve.txt")
+	marker := filepath.Join(root, "preserve.txt")
 	mustWriteTestFile(t, marker, "existing workspace\n")
 	out, err := exec.Command("/bin/sh", "-c", remoteGitSeed(workdir, plan)).CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "crabbox-git-seed phase=verify") {
@@ -170,7 +170,10 @@ func TestDetachedGitSeedRejectsUnverifiedTree(t *testing.T) {
 		t.Fatal("verification failure reported as a speculative fetch failure")
 	}
 	if got, err := os.ReadFile(marker); err != nil || string(got) != "existing workspace\n" {
-		t.Fatalf("failed seed changed existing workspace: err=%v", err)
+		t.Fatalf("failed seed changed sibling file: err=%v", err)
+	}
+	if _, err := os.Lstat(workdir); !os.IsNotExist(err) {
+		t.Fatalf("failed seed published destination: %v", err)
 	}
 	if leftovers, err := filepath.Glob(filepath.Join(root, ".seed*")); err != nil || len(leftovers) != 0 {
 		t.Fatalf("failed seed retained staging: paths=%v err=%v", leftovers, err)

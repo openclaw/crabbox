@@ -2474,7 +2474,7 @@ retrySync:
 			if out, err := runIdempotentSSHGitOriginAttempt(ctx, target, remoteGitSeed(workdir, coherence), idempotentSSHRetryDelay); err != nil {
 				if reason, fallback := gitSeedRuntimeFallbackResult(coherence, out, err); fallback {
 					usePlainManifestForOrigin(reason)
-				} else if coherence.Branch == "" {
+				} else if coherence.Branch == "" || exitCode(err) == gitSeedUnsafeWorkspaceExitCode {
 					reportRemoteGitSeedFailure(a.Stderr, out, err, "aborting before file sync")
 					return recordFailure(Exit(6, "remote git seed failed: %v", err))
 				} else {

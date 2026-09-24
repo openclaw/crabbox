@@ -233,18 +233,10 @@ func TestRemoteGitSeedLiteralPaths(t *testing.T) {
 			mustWriteTestFile(t, filepath.Join(selected, "keep"), "original")
 			mustWriteTestFile(t, filepath.Join(root, "sibling", "keep"), "retained")
 			out, err := runWorkspacePathCommand(t, root, remoteGitSeed(selected+suffix, plan), "")
-			if suffix == "/" {
-				if err != nil {
-					t.Errorf("seed directory suffix: %v (%d diagnostic bytes)", err, len(out))
-				}
-				requireGitOutput(t, selected, fixture.b, "rev-parse", "HEAD")
-			} else {
-				t.Logf("dot directory replacement: native error=%v, diagnostic bytes=%d", err, len(out))
-				if err == nil {
-					t.Error("ambiguous dot directory replacement unexpectedly succeeded")
-				}
-				requireWorkspaceFile(t, filepath.Join(selected, "keep"), "original")
+			if reason, fallback := gitSeedRuntimeFallbackResult(plan, string(out), err); !fallback || reason != "raw_workspace" {
+				t.Errorf("raw directory suffix did not fall back: %v (%d diagnostic bytes)", err, len(out))
 			}
+			requireWorkspaceFile(t, filepath.Join(selected, "keep"), "original")
 			requireWorkspaceFile(t, filepath.Join(root, "sibling", "keep"), "retained")
 			for _, dir := range []string{root, selected} {
 				if leftovers, err := filepath.Glob(filepath.Join(dir, ".seed.*")); err != nil || len(leftovers) != 0 {

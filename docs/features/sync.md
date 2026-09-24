@@ -348,6 +348,16 @@ ignores the remote fingerprint and forces a clean transfer.
 
 Git seeding (`sync.gitSeed`, default on) clones or fetches the base tree on the
 runner before rsync, so only your diff travels over the wire.
+Origin seeding only installs a clone into an absent or empty destination. A
+non-empty directory without Git metadata keeps its files and uses plain manifest
+sync, with Git coherence and reusable fingerprints disabled for that transfer.
+This preserves dependencies, build output, and unmanaged files when origin
+access becomes available after an earlier file-only sync. Existing usable Git
+workspaces retain their normal reuse behavior; malformed Git metadata or an
+uncertain destination fails before file transfer. Native Windows retains its
+existing `sync.delete: true` pre-clean behavior; this guard protects seed
+publication and does not change that explicit deletion policy.
+
 Among local origin tracking branches that contain the selected commit, Crabbox
 prefers the explicit `sync.baseRef` (or the inferred repository base when unset),
 then origin's symbolic default branch, then
