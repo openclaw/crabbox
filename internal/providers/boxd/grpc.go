@@ -48,13 +48,34 @@ type forward struct {
 	Protocol   string
 }
 
-type grpcStatusError struct{ Code codes.Code }
+type grpcStatusError struct {
+	Code    codes.Code
+	Message string
+	Details []string
+}
 
 func (e *grpcStatusError) Error() string {
-	if e.Code == codes.Unauthenticated || e.Code == codes.PermissionDenied {
-		return fmt.Sprintf("boxd gRPC API returned %s; check that CRABBOX_BOXD_API_KEY / BOXD_API_KEY is a valid bxd_ key for the configured organization", e.Code)
+	message := fmt.Sprintf("boxd gRPC API returned %s", e.Code)
+	if e.Message != "" {
+		message += ": " + e.Message
 	}
-	return fmt.Sprintf("boxd gRPC API returned %s", e.Code)
+	if len(e.Details) > 0 {
+		message += "; details: " + strings.Join(e.Details, "; ")
+	}
+	if e.Code == codes.Unauthenticated || e.Code == codes.PermissionDenied {
+		message += "; check that CRABBOX_BOXD_API_KEY / BOXD_API_KEY is a valid bxd_ key for the configured organization"
+	}
+	return message
+}
+
+func (e *grpcStatusError) Unwrap() error {
+	switch e.Code {
+	case codes.DeadlineExceeded:
+		return context.DeadlineExceeded
+	case codes.Canceled:
+		return context.Canceled
+	}
+	return nil
 }
 
 // grpcTarget validates the TLS gRPC endpoint as a bare host:port.
@@ -132,22 +153,23 @@ func (c *apiClient) authed(ctx context.Context, timeout time.Duration) (context.
 	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+jwt), cancel, nil
 }
 
-// rpcError sanitizes a transport failure. Vendor status messages are
-// withheld from diagnostics; only the status code is reported. A
-// cancellation can surface as a stream status before the local context
-// registers as expired, so those codes report as the context error.
-func rpcError(ctx context.Context, err error) error {
+// rpcError preserves server diagnostics without echoing authentication material.
+func (c *apiClient) rpcError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	switch status.Code(err) {
-	case codes.DeadlineExceeded:
-		return context.DeadlineExceeded
-	case codes.Canceled:
-		return context.Canceled
-	}
 	if s, ok := status.FromError(err); ok {
-		return &grpcStatusError{Code: s.Code()}
+		secrets := []string{c.auth.key}
+		if md, ok := metadata.FromOutgoingContext(ctx); ok {
+			for _, value := range md.Get("authorization") {
+				secrets = append(secrets, strings.TrimPrefix(value, "Bearer "))
+			}
+		}
+		failure := &grpcStatusError{Code: s.Code(), Message: core.RedactDiagnosticSecrets(s.Message(), secrets...)}
+		for _, detail := range s.Details() {
+			failure.Details = append(failure.Details, core.RedactDiagnosticSecrets(fmt.Sprint(detail), secrets...))
+		}
+		return failure
 	}
 	return core.Exit(5, "boxd gRPC request failed; details withheld")
 }
@@ -160,7 +182,7 @@ func (c *apiClient) whoami(ctx context.Context) (string, error) {
 	defer cancel()
 	resp, err := c.api.Whoami(ctx, &boxdapi.WhoamiRequest{})
 	if err != nil {
-		return "", rpcError(ctx, err)
+		return "", c.rpcError(ctx, err)
 	}
 	if resp.GetUserId() == "" {
 		return "", core.Exit(5, "boxd identity response has no user ID")
@@ -185,7 +207,7 @@ func (c *apiClient) getVM(ctx context.Context, id string) (machine, bool, error)
 		if ctx.Err() == nil && status.Code(err) == codes.NotFound {
 			return machine{}, false, nil
 		}
-		return machine{}, false, rpcError(ctx, err)
+		return machine{}, false, c.rpcError(ctx, err)
 	}
 	if resp.GetVmId() != id {
 		return machine{}, false, core.Exit(5, "boxd returned a machine whose immutable ID does not match the request")
@@ -210,11 +232,36 @@ func (c *apiClient) create(ctx context.Context, name string) (machine, error) {
 	defer cancel()
 	resp, err := c.api.CreateVm(ctx, &boxdapi.CreateVmRequest{Name: name, Org: c.org, Isolated: true})
 	if err != nil {
-		return machine{}, rpcError(ctx, err)
+		return machine{}, c.rpcError(ctx, err)
 	}
 	// The create response proves neither isolation nor sharing/billing
 	// context; independent GetVm reads do, before any guest access.
 	return machine{ID: resp.GetVmId(), Name: resp.GetName(), Status: resp.GetStatus(), PublicIP: resp.GetPublicIp()}, nil
+}
+
+func (c *apiClient) machineNameAbsent(ctx context.Context, name string) (bool, error) {
+	ctx, cancel, err := c.authed(ctx, 30*time.Second)
+	if err != nil {
+		return false, err
+	}
+	defer cancel()
+	// ListVms has no pagination or filters beyond the explicit account context.
+	resp, err := c.api.ListVms(ctx, &boxdapi.ListVmsRequest{Org: c.org})
+	if err != nil {
+		return false, c.rpcError(ctx, err)
+	}
+	if resp == nil {
+		return false, core.Exit(5, "boxd inventory response is missing; retaining claim")
+	}
+	for _, vm := range resp.GetVms() {
+		if vm.GetName() == "" || validateMachineID(vm.GetVmId()) != nil {
+			return false, core.Exit(5, "boxd inventory contains an incomplete machine; retaining claim")
+		}
+		if vm.GetName() == name {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (c *apiClient) action(ctx context.Context, id, action string) error {
@@ -238,7 +285,7 @@ func (c *apiClient) action(ctx context.Context, id, action string) error {
 		return core.Exit(2, "invalid boxd machine action")
 	}
 	if err != nil {
-		return rpcError(ctx, err)
+		return c.rpcError(ctx, err)
 	}
 	return nil
 }
@@ -254,7 +301,7 @@ func (c *apiClient) exposeSSH(ctx context.Context, id string) (forward, error) {
 	defer cancel()
 	resp, err := c.api.ExposePort(ctx, &boxdapi.ExposePortRequest{Vm: id, VmPort: 2222, Protocol: "tcp"})
 	if err != nil {
-		return forward{}, rpcError(ctx, err)
+		return forward{}, c.rpcError(ctx, err)
 	}
 	// The request addresses the immutable ID; the response echoes the machine
 	// it actually landed on, so a name-resolved mismatch fails closed.

@@ -7,6 +7,7 @@
 // contract is unchanged: proto3 ignores unknown fields on decode, and omitted
 // fields are simply never sent. Field numbers were cross-checked against the
 // production endpoint's gRPC server reflection on 2026-09-01.
+// ListVms was cross-checked against the published reference on 2026-09-24.
 //
 // Regenerate with scripts/gen-boxd-proto.sh.
 syntax = "proto3";
@@ -20,6 +21,7 @@ service BoxdApi {
   rpc StartVm(StartVmRequest) returns (StartVmResponse);
   rpc StopVm(StopVmRequest) returns (StopVmResponse);
   rpc GetVm(GetVmRequest) returns (GetVmResponse);
+  rpc ListVms(ListVmsRequest) returns (ListVmsResponse);
   rpc ExposePort(ExposePortRequest) returns (ExposePortResponse);
   rpc Whoami(WhoamiRequest) returns (WhoamiResponse);
   rpc Exec(stream ExecChunk) returns (stream ExecChunk);
@@ -60,6 +62,15 @@ message StopVmResponse {}
 
 message GetVmRequest {
   string vm_id = 1;
+}
+
+message ListVmsRequest {
+  // Empty = personal VMs; otherwise the named organization's inventory.
+  string org = 1;
+}
+
+message ListVmsResponse {
+  repeated GetVmResponse vms = 1;
 }
 
 message GetVmResponse {

@@ -313,6 +313,13 @@ absence; forced recovery requires a claim created with account binding. See
 [Daytona recovery](../providers/daytona.md#recovering-pre-binding-claims) and the
 [ASCII Box account limitation](../providers/ascii-box.md#absence-recovery-scope).
 
+For Boxd claims left by an ambiguous create with no immutable machine ID,
+`stop --force --provider boxd --id <canonical-cbx-id>` forgets only the local
+claim after authenticating its original account and verifying the requested
+name is absent from complete org-scoped inventory across a 30-second grace
+period. A matching name or any uncertain read retains the claim; recovery never
+adopts or deletes a machine by name. See [Boxd recovery](../providers/boxd.md#lifecycle-and-recovery).
+
 `--reclaim` remains the existing provider-specific adoption interface where
 supported. `--force` is the consistent cross-provider recovery interface for
 one exact resource: it reuses verified adoption for supported direct providers

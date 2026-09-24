@@ -55,6 +55,9 @@ type fakeAPI struct {
 	calls                                      []string
 	hostKey                                    string
 	createStatus                               codes.Code
+	listStatus                                 codes.Code
+	listOrg                                    string
+	beforeList                                 func()
 	createMissingID, createUnavailable         bool
 	notIsolated, bootstrapFail                 bool
 	destroyFail, destroyRemains, destroyVanish bool
@@ -121,6 +124,32 @@ func (f *fakeAPI) GetVm(ctx context.Context, req *boxdapi.GetVmRequest) (*boxdap
 		VmId: vm.ID, Name: vm.Name, PublicIp: vm.PublicIP, Status: vm.Status,
 		Isolated: vm.Isolated, Org: vm.SharedOrg, BillingOrg: vm.BillingOrg, BillingOrgId: vm.BillingOrgID,
 	}, nil
+}
+
+func (f *fakeAPI) ListVms(ctx context.Context, req *boxdapi.ListVmsRequest) (*boxdapi.ListVmsResponse, error) {
+	f.record("ListVms")
+	if err := authorized(ctx); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	hook := f.beforeList
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if req.GetOrg() != f.listOrg {
+		return nil, status.Error(codes.PermissionDenied, "wrong inventory organization")
+	}
+	if f.listStatus != codes.OK {
+		return nil, status.Error(f.listStatus, "inventory unavailable")
+	}
+	resp := &boxdapi.ListVmsResponse{}
+	for _, vm := range f.rows {
+		resp.Vms = append(resp.Vms, &boxdapi.GetVmResponse{VmId: vm.ID, Name: vm.Name})
+	}
+	return resp, nil
 }
 
 func (f *fakeAPI) CreateVm(ctx context.Context, req *boxdapi.CreateVmRequest) (*boxdapi.CreateVmResponse, error) {
@@ -726,21 +755,25 @@ func TestReadOnlyStatusDoesNotStartStoppedMachine(t *testing.T) {
 }
 
 func TestCreateRejectionRemovesOnlyPendingClaim(t *testing.T) {
-	for _, code := range []codes.Code{codes.InvalidArgument, codes.Unauthenticated, codes.PermissionDenied, codes.ResourceExhausted, codes.Internal} {
+	for _, code := range []codes.Code{codes.InvalidArgument, codes.Unauthenticated, codes.PermissionDenied, codes.AlreadyExists, codes.ResourceExhausted, codes.FailedPrecondition, codes.NotFound, codes.Unimplemented, codes.OutOfRange, codes.Unavailable, codes.DeadlineExceeded, codes.Internal, codes.Unknown, codes.Canceled, codes.Aborted, codes.DataLoss} {
 		t.Run(code.String(), func(t *testing.T) {
 			b, f := fixtureBackend(t)
 			f.createStatus = code
 			_, err := b.Acquire(context.Background(), core.AcquireRequest{Keep: true})
 			noSecrets(t, err)
-			if code == codes.Internal {
+			switch code {
+			case codes.Unavailable, codes.DeadlineExceeded, codes.Internal, codes.Unknown, codes.Canceled, codes.Aborted, codes.DataLoss:
 				onlyClaim(t)
 				if !strings.Contains(err.Error(), "ambiguous") {
 					t.Fatal("server error lost recovery guidance")
 				}
-			} else {
+			default:
 				assertNoClaims(t)
 				if strings.Contains(err.Error(), "ambiguous") {
 					t.Fatal("definite rejection reported as ambiguous")
+				}
+				if !strings.Contains(err.Error(), "create refused") {
+					t.Fatalf("server diagnostic lost: %v", err)
 				}
 				if (code == codes.Unauthenticated || code == codes.PermissionDenied) && !strings.Contains(err.Error(), "BOXD_API_KEY") {
 					t.Fatal("missing API-key guidance")

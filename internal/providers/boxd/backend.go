@@ -130,7 +130,8 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 		var rejection *grpcStatusError
 		if errors.As(err, &rejection) {
 			switch rejection.Code {
-			case codes.InvalidArgument, codes.Unauthenticated, codes.PermissionDenied, codes.AlreadyExists, codes.ResourceExhausted:
+			case codes.InvalidArgument, codes.Unauthenticated, codes.PermissionDenied, codes.AlreadyExists, codes.ResourceExhausted,
+				codes.FailedPrecondition, codes.NotFound, codes.Unimplemented, codes.OutOfRange:
 				// A definite rejection did not allocate a resource. Remove only
 				// our unchanged pending intent; never retain it as ambiguous.
 				return core.LeaseTarget{}, errors.Join(err, core.RemoveLeaseClaimIfUnchanged(id, claim))
@@ -176,6 +177,16 @@ func (b *backend) Acquire(ctx context.Context, req core.AcquireRequest) (core.Le
 }
 
 func (b *backend) authenticateClaim(ctx context.Context, c *apiClient, claim core.LeaseClaim) error {
+	if err := b.authenticateClaimScope(ctx, c, claim); err != nil {
+		return err
+	}
+	if claim.CloudID == "" || claim.Labels["vm_id"] != claim.CloudID {
+		return core.Exit(4, "boxd claim has no verified immutable machine ID; inspect the boxd console for manual recovery")
+	}
+	return validateMachineID(claim.CloudID)
+}
+
+func (b *backend) authenticateClaimScope(ctx context.Context, c *apiClient, claim core.LeaseClaim) error {
 	user, err := c.whoami(ctx)
 	if err != nil {
 		return err
@@ -183,10 +194,44 @@ func (b *backend) authenticateClaim(ctx context.Context, c *apiClient, claim cor
 	if claim.Provider != providerName || !b.scopeMatches(claim.ProviderScope) || claim.Labels["user_id"] != user || claim.Labels["lease"] != claim.LeaseID {
 		return core.Exit(4, "boxd claim origin, organization, or authenticated account does not match")
 	}
-	if claim.CloudID == "" || claim.Labels["vm_id"] != claim.CloudID {
-		return core.Exit(4, "boxd claim has no verified immutable machine ID; inspect the boxd console for manual recovery")
+	return nil
+}
+
+// VerifyResourceAbsent recovers only an unbound create intent. Core holds the
+// unchanged-claim fence across this proof and local forgetting; names never
+// authorize remote adoption or deletion.
+func (b *backend) VerifyResourceAbsent(ctx context.Context, claim core.LeaseClaim) (core.AbsenceEvidence, error) {
+	if !core.IsCanonicalLeaseID(claim.LeaseID) || claim.CloudID != "" || claim.CloudImmutableID != "" || claim.Labels["vm_id"] != "" ||
+		claim.Labels["recovery"] != "provisioning" || claim.Labels["state"] != "provisioning" ||
+		claim.Labels["machine"] != "crabbox-"+strings.TrimPrefix(claim.LeaseID, "cbx_") {
+		return core.AbsenceEvidence{}, core.Exit(4, "boxd absence recovery requires an unchanged unbound create intent; retaining claim")
 	}
-	return validateMachineID(claim.CloudID)
+	c, err := b.client()
+	if err != nil {
+		return core.AbsenceEvidence{}, err
+	}
+	var absentSince time.Time
+	_, err = shared.Poll(ctx, 0, b.pollInterval, shared.SleepContext, func(ctx context.Context) (bool, error) {
+		if err := b.authenticateClaimScope(ctx, c, claim); err != nil {
+			return false, err
+		}
+		return c.machineNameAbsent(ctx, claim.Labels["machine"])
+	}, func(_ context.Context, absent bool, err error) (bool, error) {
+		if err != nil {
+			return false, err
+		}
+		if !absent {
+			return false, core.Exit(4, "boxd inventory contains the requested machine name; retaining claim for manual recovery")
+		}
+		if absentSince.IsZero() {
+			absentSince = time.Now()
+		}
+		return time.Since(absentSince) >= b.absenceGrace, nil
+	}, nil)
+	if err != nil {
+		return core.AbsenceEvidence{}, err
+	}
+	return core.AbsenceEvidence{Claim: claim, PendingCreateAbsent: true, InventoryComplete: true}, nil
 }
 
 // fenceMachineContext rejects a machine outside this configuration's account

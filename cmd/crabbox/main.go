@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -27,14 +28,34 @@ func main() {
 		err = cli.Run(ctx, args)
 	}
 	if err != nil {
+		printError(os.Stderr, err)
 		var exit cli.ExitError
 		if cli.AsExitError(err, &exit) {
-			if exit.Message != "" {
-				fmt.Fprintln(os.Stderr, exit.Message)
-			}
 			os.Exit(exit.Code)
 		}
-		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+func printError(w io.Writer, err error) {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, cause := range joined.Unwrap() {
+			printError(w, cause)
+		}
+		return
+	}
+	var exit cli.ExitError
+	if cli.AsExitError(err, &exit) {
+		// Keep standalone exit diagnostics unchanged, but visit joins inside
+		// wrappers so their independent causes are not hidden by errors.As.
+		if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+			printError(w, wrapped.Unwrap())
+		} else if exit.Message != "" {
+			fmt.Fprintln(w, exit.Message)
+		}
+		return
+	}
+	if err != nil {
+		fmt.Fprintln(w, err)
 	}
 }

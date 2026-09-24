@@ -39,10 +39,13 @@ func TestStopAbsenceRecoveryRoutesFixedOrdinary(t *testing.T) {
 }
 
 func TestStopAbsenceRecovery(t *testing.T) {
-	for _, name := range []string{"absent", "partial inventory", "auth error", "mismatched ID", "mismatched scope", "mismatched revision", "mismatched immutable ID", "fixed", "checkpoint", "checkpoint journal", "coordinator", "adapter", "pending adapter", "ordinary opt in", "ordinary fail closed", "live", "cancelled"} {
+	for _, name := range []string{"absent", "unbound absent", "partial inventory", "auth error", "mismatched ID", "mismatched scope", "mismatched revision", "mismatched immutable ID", "fixed", "checkpoint", "checkpoint journal", "coordinator", "adapter", "pending adapter", "ordinary opt in", "ordinary fail closed", "live", "cancelled"} {
 		t.Run(name, func(t *testing.T) {
 			isolateTestUserDirs(t)
 			claim := LeaseClaim{LeaseID: "cbx_123456abcdef", Provider: "absence-test", ProviderScope: "account-a", CloudID: "resource-a", CloudImmutableID: "immutable-a", Revision: "revision-a", Labels: map[string]string{"owner": "original"}}
+			if name == "unbound absent" {
+				claim.CloudID, claim.CloudImmutableID = "", ""
+			}
 			excluded := true
 			switch name {
 			case "fixed":
@@ -82,6 +85,8 @@ func TestStopAbsenceRecovery(t *testing.T) {
 				calls++
 				evidence := AbsenceEvidence{Claim: observed, ExactNotFound: true, InventoryComplete: true}
 				switch name {
+				case "unbound absent":
+					evidence.ExactNotFound, evidence.PendingCreateAbsent = false, true
 				case "partial inventory":
 					evidence.InventoryComplete = false
 				case "auth error":
@@ -104,7 +109,7 @@ func TestStopAbsenceRecovery(t *testing.T) {
 			var output bytes.Buffer
 			force := !strings.HasPrefix(name, "ordinary")
 			handled, _, err := (App{Stderr: &output}).recoverAbsentStopClaim(ctx, backend, claim.LeaseID, force)
-			wantForgotten := name == "absent" || name == "ordinary opt in"
+			wantForgotten := name == "absent" || name == "unbound absent" || name == "ordinary opt in"
 			if handled != wantForgotten || wantForgotten && err != nil {
 				t.Fatalf("handled=%t err=%v output=%s", handled, err, output.String())
 			}
@@ -161,5 +166,35 @@ func TestAbsenceRecoveryClaimFence(t *testing.T) {
 		return AbsenceEvidence{}, nil
 	}), claim); err == nil {
 		t.Fatal("stale claim accepted")
+	}
+}
+
+func TestUnboundCreateAbsenceRequiresExplicitEvidence(t *testing.T) {
+	for _, name := range []string{"pending absent", "exact not found only", "partial inventory", "conflicting evidence", "immutable ID", "bound resource"} {
+		t.Run(name, func(t *testing.T) {
+			claim := LeaseClaim{LeaseID: "cbx_123456abcdef", Revision: "revision", Provider: "test", ProviderScope: "scope"}
+			if name == "immutable ID" {
+				claim.CloudImmutableID = "immutable"
+			}
+			if name == "bound resource" {
+				claim.CloudID = "resource"
+			}
+			evidence := AbsenceEvidence{Claim: claim, InventoryComplete: true, PendingCreateAbsent: true}
+			switch name {
+			case "exact not found only":
+				evidence.PendingCreateAbsent = false
+				evidence.ExactNotFound = true
+			case "partial inventory":
+				evidence.InventoryComplete = false
+			case "conflicting evidence":
+				evidence.ExactNotFound = true
+			}
+			isolateTestUserDirs(t)
+			absent, err := VerifyClaimResourceAbsence(t.Context(), AbsenceVerifierFunc(func(context.Context, LeaseClaim) (AbsenceEvidence, error) { return evidence, nil }), claim)
+			want := name == "pending absent"
+			if absent != want || (err == nil) != want {
+				t.Fatalf("absent=%t err=%v", absent, err)
+			}
+		})
 	}
 }

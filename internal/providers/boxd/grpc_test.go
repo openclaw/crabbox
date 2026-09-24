@@ -19,6 +19,7 @@ import (
 
 	core "github.com/openclaw/crabbox/internal/cli"
 	"github.com/openclaw/crabbox/internal/providers/boxd/boxdapi"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/resolver"
@@ -501,5 +502,35 @@ func TestBootstrapScriptUsesOnlyLeaseKey(t *testing.T) {
 	}
 	if _, err := bootstrapCommand("ssh-ed25519 AAAA invalid trailing"); err == nil {
 		t.Fatal("accepted malformed public key")
+	}
+}
+
+func TestGRPCStatusPreservesServerMessageAndDetails(t *testing.T) {
+	server := exchangeServer(t, validExchange(t, nil))
+	c := newTestClient(t, server, startGRPC(t, server, &boxdapi.UnimplementedBoxdApiServer{}))
+	ctx, cancel, err := c.authed(t.Context(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancel()
+	s, err := status.New(codes.FailedPrecondition, "organization billing is not enabled").WithDetails(&errdetails.PreconditionFailure{Violations: []*errdetails.PreconditionFailure_Violation{{Type: "BILLING", Subject: "example-org", Description: "enable billing before creating machines"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.rpcError(ctx, s.Err())
+	for _, want := range []string{"FailedPrecondition", "organization billing is not enabled", "BILLING", "example-org", "enable billing before creating machines"} {
+		if !strings.Contains(got.Error(), want) {
+			t.Errorf("missing %q: %v", want, got)
+		}
+	}
+	noSecrets(t, c.rpcError(ctx, status.Error(codes.FailedPrecondition, "session echo "+testJWT+" key echo "+testAPIKey)))
+	for _, tt := range []struct {
+		code  codes.Code
+		cause error
+	}{{codes.Canceled, context.Canceled}, {codes.DeadlineExceeded, context.DeadlineExceeded}} {
+		got := c.rpcError(ctx, status.Error(tt.code, "server timing diagnostic"))
+		if !errors.Is(got, tt.cause) || !strings.Contains(got.Error(), "server timing diagnostic") {
+			t.Fatalf("cancellation contract lost: %v", got)
+		}
 	}
 }

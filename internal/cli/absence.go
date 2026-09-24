@@ -8,8 +8,9 @@ import (
 )
 
 // AbsenceVerifier only observes the exact bound resource. It must attest the
-// claim's scope/account, an exact structured not-found, and complete unfiltered
-// inventory absence wherever listing is supported. Errors never prove absence.
+// claim's scope/account and complete unfiltered inventory absence wherever
+// listing is supported. Bound resources also require exact structured not-found;
+// unbound creates require explicit pending-intent absence proof.
 type AbsenceVerifier interface {
 	VerifyResourceAbsent(context.Context, LeaseClaim) (AbsenceEvidence, error)
 }
@@ -20,6 +21,9 @@ type AbsenceEvidence struct {
 	Claim             LeaseClaim
 	ExactNotFound     bool
 	InventoryComplete bool
+	// PendingCreateAbsent attests that the original, unbound create intent has
+	// no matching resource in complete inventory in its authenticated scope.
+	PendingCreateAbsent bool
 }
 
 type AbsenceVerifierFunc func(context.Context, LeaseClaim) (AbsenceEvidence, error)
@@ -37,7 +41,7 @@ type OrdinaryStopAbsenceRecovery interface {
 // VerifyClaimResourceAbsence does not change local state. Callers that finalize
 // a claim must use ForgetAbsentLeaseClaim to recheck under its exclusive fence.
 func VerifyClaimResourceAbsence(ctx context.Context, verifier AbsenceVerifier, claim LeaseClaim) (bool, error) {
-	if !IsCanonicalLeaseID(claim.LeaseID) || claim.Revision == "" || claim.Provider == "" || claim.CloudID == "" {
+	if !IsCanonicalLeaseID(claim.LeaseID) || claim.Revision == "" || claim.Provider == "" {
 		return false, Exit(4, "absence recovery requires an exact local claim")
 	}
 	if claim.FixedCreateIntent != nil || claim.CheckpointCapture != nil || claim.CoordinatorRegistrationURL != "" || claim.RuntimeAdapterRegistrationID != "" || claim.RuntimeAdapterPendingRegistrationID != "" {
@@ -59,7 +63,11 @@ func VerifyClaimResourceAbsence(ctx context.Context, verifier AbsenceVerifier, c
 	if reflect.DeepEqual(evidence, AbsenceEvidence{}) {
 		return false, nil
 	}
-	if claim.ProviderScope == "" || !evidence.ExactNotFound || !evidence.InventoryComplete || !reflect.DeepEqual(evidence.Claim, claim) {
+	identityAbsent := evidence.ExactNotFound && !evidence.PendingCreateAbsent
+	if claim.CloudID == "" {
+		identityAbsent = claim.CloudImmutableID == "" && evidence.PendingCreateAbsent && !evidence.ExactNotFound
+	}
+	if claim.ProviderScope == "" || !identityAbsent || !evidence.InventoryComplete || !reflect.DeepEqual(evidence.Claim, claim) {
 		return false, Exit(4, "resource absence evidence is incomplete or does not match the exact claim; retaining claim")
 	}
 	if err := AuthorizeCheckpointRelease(claim, ""); err != nil {

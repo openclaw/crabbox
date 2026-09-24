@@ -402,7 +402,11 @@ Optional `core.AbsenceVerifier` observes the exact claim-bound resource without
 mutating it. Return zero evidence for a present resource, an error for uncertain
 absence, or `AbsenceEvidence` containing the unchanged claim and both proof
 flags after verifying scope, exact structured not-found, and complete unfiltered
-inventory where available. Core owns local forgetting through
+inventory where available. For an unbound create with neither a cloud ID nor an
+immutable ID, set `PendingCreateAbsent` instead of `ExactNotFound` only after
+authenticating the original scope and proving the pending intent absent from
+complete inventory. A matching name cannot authorize adoption or deletion.
+Core owns local forgetting through
 `ForgetAbsentLeaseClaim`, including the exclusive claim fence and exclusions for
 fixed, checkpoint, coordinator, and adapter owners. Targeted `stop --force`
 uses this capability; `OrdinaryStopAbsenceRecovery` additionally opts in an
