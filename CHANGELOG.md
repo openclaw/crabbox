@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Join local Blacksmith sync descendants before an ordinary Testbox run returns after cancellation, preserving the lease claim until command cleanup completes. [PR 2547](https://github.com/openclaw/crabbox/pull/2547).
+- Stop Parallels IP discovery from admitting probes after the startup deadline while preserving the caller's cancellation cause. [PR 2548](https://github.com/openclaw/crabbox/pull/2548).
 
 ## 0.66.0 - 2026-09-24
 

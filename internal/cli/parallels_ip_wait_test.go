@@ -145,6 +145,23 @@ func TestParallelsWaitForIPPreservesCancellationDuringProbe(t *testing.T) {
 	})
 }
 
+func TestParallelsWaitForIPPreservesParentDeadlineCause(t *testing.T) {
+	for _, timeout := range []time.Duration{15 * time.Minute, 170 * time.Second} {
+		t.Run(fmt.Sprintf("startup=%s", timeout), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				runner := &parallelsIPProbeRunner{t: t, started: time.Now(), block: "exec"}
+				cause := errors.New("caller acquisition deadline")
+				ctx, cancel := context.WithDeadlineCause(context.Background(), runner.started.Add(170*time.Second), cause)
+				defer cancel()
+				_, err := NewParallelsClient(Config{TargetOS: targetMacOS}, runner).WaitForIP(ctx, "vm1", timeout, ParallelsIPWaitAcquisition)
+				if !errors.Is(err, cause) || time.Since(runner.started) != 170*time.Second || len(runner.probes) != 2 {
+					t.Fatalf("err=%v elapsed=%s probes=%v", err, time.Since(runner.started), runner.probes)
+				}
+			})
+		})
+	}
+}
+
 type parallelsIPProbeRunner struct {
 	t           *testing.T
 	started     time.Time
