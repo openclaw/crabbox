@@ -272,6 +272,7 @@ for marker paths, Linux egress process-matching scope, and Tailscale limits.
 --static-user <user>        static SSH user (provider=ssh)
 --static-port <port>        static SSH port (provider=ssh)
 --static-work-root <path>   static target work root (provider=ssh)
+--static-stop-command <json-argv>  local argv run after the last local lease on the host (provider=ssh)
 ```
 
 `--force` is a targeted recovery operation, not an ownership bypass. It always

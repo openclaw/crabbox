@@ -88,6 +88,9 @@ type credentialDestinationProvenance struct {
 	parallelsHost         credentialValueSource
 	parallelsHostKey      credentialValueSource
 	staticHost            credentialValueSource
+	staticStartCommand    credentialValueSource
+	staticStopCommand     credentialValueSource
+	staticCommandApproval staticCommandApproval
 	sshKey                credentialValueSource
 	exeDevControlHost     credentialValueSource
 	externalConfig        credentialValueSource
@@ -393,6 +396,9 @@ func validateProviderCredentialDestination(cfg Config) error {
 		if provenance.staticHost == credentialSourceRepository &&
 			repositorySSHDestinationUsesInheritedAuth(cfg.SSHKey, provenance.sshKey, provenance.repositoryRoot) {
 			return repositoryCredentialDestinationError(staticProvider, "static.host", "CRABBOX_STATIC_HOST or --static-host")
+		}
+		if err := validateStaticCommandSources(cfg); err != nil {
+			return err
 		}
 	case "exe-dev":
 		if provenance.exeDevControlHost == credentialSourceRepository {

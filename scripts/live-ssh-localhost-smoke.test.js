@@ -66,6 +66,40 @@ switch (tool) {
     if (command === "run" && fs.readFileSync(repoRoot, "utf8") !== process.cwd()) {
       throw new Error("lease RepoRoot differs from warmup fixture cwd");
     }
+    const power = (name, argv) => {
+      const [file, ...rest] = JSON.parse(argv);
+      const env = { ...process.env, CRABBOX_LEASE_ID: process.env.CRABBOX_STATIC_ID, CRABBOX_STATIC_HOST: process.env.CRABBOX_STATIC_HOST };
+      const result = spawnSync(file, rest, { env, encoding: "utf8" });
+      if (result.status !== 0) throw new Error(name + " failed: " + result.stderr);
+    };
+    const powerClaim = path.join(dir, "power-claim");
+    if (command === "warmup" && process.env.CRABBOX_CONFIG) {
+      process.stderr.write("provider=ssh refuses repository-configured static.startCommand because it runs a local command\\n");
+      process.exit(options.acceptRepositoryPower ? 0 : 2);
+    }
+    if (process.env.CRABBOX_STATIC_START_COMMAND && JSON.parse(process.env.CRABBOX_STATIC_START_COMMAND)[0].startsWith("./") && !options.acceptRelativePower) {
+      process.stderr.write("CRABBOX_STATIC_START_COMMAND executable must be an absolute path\\n");
+      process.exit(2);
+    }
+    if (command === "warmup" && process.env.CRABBOX_STATIC_START_COMMAND) {
+      power("start", process.env.CRABBOX_STATIC_START_COMMAND);
+      fs.writeFileSync(powerClaim, crypto.randomUUID());
+    }
+    if (command === "run" && !args.includes("--id") && process.env.CRABBOX_STATIC_START_COMMAND) {
+      power("start", process.env.CRABBOX_STATIC_START_COMMAND);
+      const revision = crypto.randomUUID();
+      fs.writeFileSync(powerClaim, revision);
+      const workload = spawnSync(args[args.indexOf("--") + 1], args.slice(args.indexOf("--") + 2), { stdio: "inherit" });
+      const current = fs.existsSync(powerClaim) ? fs.readFileSync(powerClaim, "utf8") : "";
+      if (current === revision || options.staleStop || options.staleRemovesClaim) fs.rmSync(powerClaim, { force: true });
+      if (current === revision || options.staleStop) power("stop", process.env.CRABBOX_STATIC_STOP_COMMAND);
+      else process.stderr.write("skipped static.stopCommand host=127.0.0.1: lease claim is absent or changed since this command observed it\\n");
+      process.exit(workload.status ?? 99);
+    }
+    if (command === "stop" && process.env.CRABBOX_STATIC_STOP_COMMAND && (fs.existsSync(powerClaim) || options.repeatPowerStop)) {
+      fs.rmSync(powerClaim, { force: true });
+      power("stop", process.env.CRABBOX_STATIC_STOP_COMMAND);
+    }
     if (command === options.failCommand) {
       process.stdout.write(options.stdout);
       process.stderr.write(options.stderr);
@@ -193,7 +227,8 @@ switch (tool) {
 test("SSH localhost smoke accepts list JSON with diagnostics kept on stderr", (t) => {
   const result = runSmoke(t, { listStderr: diagnostic + "\n" });
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.match(result.stdout, /classification=live_ssh_localhost_smoke_passed .*cp=roundtrip tunnel=ready cleanup=complete/);
+  assert.match(result.stdout, /classification=live_ssh_localhost_smoke_passed .*cp=roundtrip tunnel=ready static_power=passed cleanup=complete/);
+  assert.match(result.stdout, /static_power=passed repository_command=refused relative_executable=refused start=1 stop=1 repeated_stop=inert stale_claim_stop=skipped surviving_claim_stop=1/);
   assert.ok(result.stderr.includes(diagnostic + "\n"));
   assert.match(result.stdout, /failure_bundle=passed exit=23 .*stale=absent neighbors=absent .*explicit_download=passed retained=true remote_archives=0/);
   assert.doesNotMatch(result.stderr, /classification=environment_blocked/);
@@ -201,8 +236,17 @@ test("SSH localhost smoke accepts list JSON with diagnostics kept on stderr", (t
   const payload = JSON.parse(result.stdout.split("\n").find(line => line.startsWith("[")));
   const slug = result.calls.find(args => args[0] === "warmup")[4];
   assert.equal(payload[0].labels.slug, slug);
-  assert.deepEqual(result.calls.map(args => args[0]), ["doctor", "warmup", "status", "run", "run", "run", "status", "cp", "cp", "tunnel", "list", "stop"]);
+  assert.deepEqual(result.calls.map(args => args[0]), ["doctor", "warmup", "status", "run", "run", "run", "status", "cp", "cp", "tunnel", "list", "stop", "warmup", "warmup", "warmup", "stop", "stop", "run", "warmup", "stop"]);
 });
+
+for (const options of [{ acceptRepositoryPower: true }, { acceptRelativePower: true }, { repeatPowerStop: true }, { staleStop: true }, { staleRemovesClaim: true }]) {
+  test(`SSH localhost static power phase rejects ${JSON.stringify(options)}`, (t) => {
+    const result = runSmoke(t, options);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /classification=validation_failed/);
+    assert.doesNotMatch(result.stdout, /static_power=passed|live_ssh_localhost_smoke_passed/);
+  });
+}
 
 test("SSH localhost smoke resolves a relative binary before entering its fixture", (t) => {
   const result = runSmoke(t, { relativeBin: true });

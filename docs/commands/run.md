@@ -1173,6 +1173,8 @@ lease-acting commands):
 --static-user <user>
 --static-port <port>
 --static-work-root <path>
+--static-start-command <json-argv>
+--static-stop-command <json-argv>
 --network auto|tailscale|public
 --tailscale
 --tailscale-tags <comma-separated tags>

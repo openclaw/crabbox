@@ -12,6 +12,7 @@ type targetFlagValues struct {
 	Target      *string
 	WindowsMode *string
 	Static      StaticConfigFlagValues
+	Commands    staticCommandFlagValues
 }
 
 func registerTargetFlags(fs *flag.FlagSet, defaults Config) targetFlagValues {
@@ -19,6 +20,7 @@ func registerTargetFlags(fs *flag.FlagSet, defaults Config) targetFlagValues {
 		Target:      fs.String("target", defaults.TargetOS, "target OS: linux, macos, or windows"),
 		WindowsMode: fs.String("windows-mode", defaults.WindowsMode, "Windows mode: normal or wsl2"),
 		Static:      RegisterStaticConfigFlags(fs, defaults.Static),
+		Commands:    registerStaticCommandFlags(fs),
 	}
 }
 
@@ -49,6 +51,9 @@ func applyTargetFlagOverrides(cfg *Config, fs *flag.FlagSet, values targetFlagVa
 		cfg.credentialProvenance.staticHost = credentialSourceFlag
 	}
 	if err != nil {
+		return err
+	}
+	if err := applyStaticCommandFlags(cfg, fs, values.Commands); err != nil {
 		return err
 	}
 	normalizeTargetConfig(cfg)

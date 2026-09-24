@@ -379,6 +379,8 @@ bootstrap, key migration, or failure cleanup.
 --static-user <user>               static SSH user
 --static-port <port>               static SSH port
 --static-work-root <path>          static target work root
+--static-start-command <json-argv>  local argv run before the SSH readiness wait
+--static-stop-command <json-argv>   local argv run after the last local lease on the host
 --network auto|tailscale|public    network mode for the printed SSH endpoint
 --tailscale                        join new managed Linux leases to the tailnet
 --tailscale-tags <a,b,c>           Tailscale tags for new managed leases

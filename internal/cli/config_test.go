@@ -733,6 +733,8 @@ func clearConfigEnv(t *testing.T) {
 		"CRABBOX_COORDINATOR_AUTO_WEBVNC",
 		"CRABBOX_COORDINATOR_TOKEN",
 		"CRABBOX_COORDINATOR_TOKEN_COMMAND",
+		"CRABBOX_STATIC_START_COMMAND",
+		"CRABBOX_STATIC_STOP_COMMAND",
 		"CRABBOX_WEBVNC_AGENT_BASE_URL",
 		"CRABBOX_COORDINATOR_ADMIN_TOKEN",
 		"CRABBOX_ADMIN_TOKEN",
@@ -4579,11 +4581,11 @@ func TestDigitalOceanDefaultsIgnoreStaticProviderOverlays(t *testing.T) {
 		Provider: "ssh",
 		WorkRoot: "/srv/crabbox",
 		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
-		Static: &fileStaticConfig{
+		Static: &fileStaticSection{fileStaticConfig: fileStaticConfig{
 			User:     "builder",
 			Port:     "2202",
 			WorkRoot: "/srv/static",
-		},
+		}},
 	})
 	normalizeTargetConfig(&cfg)
 	if cfg.SSHUser != "alice" || cfg.SSHPort != "2200" || cfg.WorkRoot != "/srv/static" {
@@ -5279,11 +5281,11 @@ func TestLinodeDefaultsPreserveExplicitGenericWorkRoot(t *testing.T) {
 		Provider: "ssh",
 		WorkRoot: "/srv/crabbox",
 		SSH:      &fileSSHConfig{User: "alice", Port: "2200"},
-		Static: &fileStaticConfig{
+		Static: &fileStaticSection{fileStaticConfig: fileStaticConfig{
 			User:     "builder",
 			Port:     "2202",
 			WorkRoot: "/srv/static",
-		},
+		}},
 	})
 	normalizeTargetConfig(&cfg)
 
@@ -20140,14 +20142,14 @@ func TestBoxdBindingEnvironmentPresence(t *testing.T) {
 
 func TestStaticCompleteFileEnvironmentBindings(t *testing.T) {
 	clearConfigEnv(t)
-	if baseConfig().Static != (StaticConfig{}) {
+	if !reflect.DeepEqual(baseConfig().Static, StaticConfig{}) {
 		t.Fatal("Static must have zero compiled defaults")
 	}
 	prior := StaticConfig{ID: "old-id", Name: "old-name", Host: "old-host", User: "old-user", Port: "old-port", WorkRoot: "old-root"}
 	for _, trusted := range []bool{false, true} {
 		for _, raw := range []string{"", " ", "replacement"} {
 			cfg := Config{Static: prior, SSHUser: "generic-user", SSHPort: "generic-port", SSHKey: "/synthetic/not-read", WorkRoot: "/generic"}
-			input := fileStaticConfig{ID: raw, Name: raw, Host: raw, User: raw, Port: raw, WorkRoot: raw}
+			input := fileStaticSection{fileStaticConfig: fileStaticConfig{ID: raw, Name: raw, Host: raw, User: raw, Port: raw, WorkRoot: raw}}
 			before := input
 			if err := applyFileConfigWithTrust(&cfg, fileConfig{Static: &input}, trusted); err != nil {
 				t.Fatal(err)
@@ -20156,7 +20158,7 @@ func TestStaticCompleteFileEnvironmentBindings(t *testing.T) {
 			if raw != "" {
 				want = StaticConfig{ID: raw, Name: raw, Host: raw, User: raw, Port: raw, WorkRoot: raw}
 			}
-			if cfg.Static != want || input != before {
+			if !reflect.DeepEqual(cfg.Static, want) || !reflect.DeepEqual(input, before) {
 				t.Fatal("file values or immutable DTO changed")
 			}
 			facts := cfg.inputProvenance["ssh"]
@@ -20188,7 +20190,7 @@ func TestStaticCompleteFileEnvironmentBindings(t *testing.T) {
 		if raw != "" {
 			want = StaticConfig{ID: raw, Name: raw, Host: raw, User: raw, Port: raw, WorkRoot: raw}
 		}
-		if cfg.Static != want || (cfg.inputProvenance["ssh"].values != 0) != (raw != "") || cfg.inputProvenance["ssh"].intents != 0 {
+		if !reflect.DeepEqual(cfg.Static, want) || (cfg.inputProvenance["ssh"].values != 0) != (raw != "") || cfg.inputProvenance["ssh"].intents != 0 {
 			t.Fatal("environment values/acceptance changed")
 		}
 		wantSource := credentialSourceUnknown
@@ -20225,7 +20227,7 @@ func TestStaticTargetFlagsEarlyFailureState(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), wantError) {
 				t.Fatalf("error=%v", err)
 			}
-			if cfg.Static != (StaticConfig{ID: "retained-id", Name: "retained-name", Host: raw, User: raw, Port: raw, WorkRoot: raw}) || cfg.credentialProvenance.staticHost != credentialSourceFlag || cfg.inputProvenance["ssh"].values != 1<<(configInputFlag-1) || cfg.inputProvenance["ssh"].intents != 0 {
+			if !reflect.DeepEqual(cfg.Static, StaticConfig{ID: "retained-id", Name: "retained-name", Host: raw, User: raw, Port: raw, WorkRoot: raw}) || cfg.credentialProvenance.staticHost != credentialSourceFlag || cfg.inputProvenance["ssh"].values != 1<<(configInputFlag-1) || cfg.inputProvenance["ssh"].intents != 0 {
 				t.Fatal("static acceptance/source must precede target validation failure")
 			}
 			if !cfg.targetExplicit || !cfg.targetFlagExplicit || cfg.Provider != "other" || cfg.explicitSSHUser != "" || cfg.explicitSSHPort != "" || cfg.explicitWorkRoot != "" {

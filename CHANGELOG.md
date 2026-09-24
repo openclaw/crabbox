@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Static SSH `static.startCommand` and `static.stopCommand` run local argv commands before the SSH readiness wait and after the last local lease on a host is released; repository config needs trusted approval to set them. [PR 2545](https://github.com/openclaw/crabbox/pull/2545).
+
 ## 0.66.0 - 2026-09-24
 
 ### Highlights

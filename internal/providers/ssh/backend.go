@@ -17,6 +17,10 @@ type staticLeaseBackend struct {
 	mu            sync.Mutex
 	acquired      core.LeaseTarget
 	acquiredRoute string
+	// acquiredRevisions holds every claim revision this backend published for
+	// the current acquisition, so release can tell its own heartbeats apart
+	// from a later acquisition of the same lease ID.
+	acquiredRevisions map[string]bool
 }
 
 const staticProvider = "ssh"
@@ -27,6 +31,23 @@ func NewStaticSSHLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.R
 }
 
 func (b *staticLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	host := strings.TrimSpace(b.Cfg.Static.Host)
+	if host == "" {
+		return b.acquire(ctx, req, "")
+	}
+	// Every acquisition takes the host lock, with or without power commands,
+	// so a stop decided under the lock cannot miss a claim being published.
+	unlock, err := lockStaticHostPower(ctx, host)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	defer unlock()
+	return b.acquire(ctx, req, host)
+}
+
+// acquire runs static.startCommand when configured and powerHost is set; the
+// caller holds that host's power lock through claim publication.
+func (b *staticLeaseBackend) acquire(ctx context.Context, req core.AcquireRequest, powerHost string) (_ core.LeaseTarget, err error) {
 	cfg := b.Cfg
 	if req.RequestedSlug != "" {
 		_, _, leaseID, err := core.StaticLease(cfg)
@@ -73,6 +94,18 @@ func (b *staticLeaseBackend) Acquire(ctx context.Context, req core.AcquireReques
 	}
 	fmt.Fprintf(b.RT.Stderr, "using static target lease=%s slug=%s target=%s windows_mode=%s host=%s keep=%v\n", leaseID, core.ServerSlug(server), b.Cfg.TargetOS, b.Cfg.WindowsMode, target.Host, req.Keep)
 	route := architectureEndpoint(target)
+	if powerHost != "" && len(cfg.Static.StartCommand) > 0 {
+		if err := b.startStaticHost(ctx, leaseID, powerHost); err != nil {
+			return core.LeaseTarget{}, err
+		}
+		if !exists {
+			defer func() {
+				if err != nil {
+					b.stopStaticHostIfUnused(context.WithoutCancel(ctx), leaseID, powerHost)
+				}
+			}()
+		}
+	}
 	if err := waitForSSH(ctx, &target, b.RT.Stderr); err != nil {
 		return core.LeaseTarget{}, err
 	}
@@ -244,10 +277,82 @@ func (b *staticLeaseBackend) Doctor(ctx context.Context, req core.DoctorRequest)
 	}, nil
 }
 
-func (b *staticLeaseBackend) ReleaseLease(_ context.Context, req core.ReleaseLeaseRequest) error {
-	core.RemoveLeaseClaim(req.Lease.LeaseID)
-	b.clearAcquiredLease(req.Lease.LeaseID)
+func (b *staticLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	powerHost := b.staticReleasePowerHost(req.Lease)
+	if powerHost != "" {
+		unlock, err := lockStaticHostPower(ctx, powerHost)
+		if err != nil {
+			return fmt.Errorf("lock static host %s for release: %w", powerHost, err)
+		}
+		defer unlock()
+	}
+	if powerHost == "" {
+		core.RemoveLeaseClaim(req.Lease.LeaseID)
+		b.clearAcquiredLease(req.Lease.LeaseID)
+		return nil
+	}
+	switch b.retireStaticPowerClaim(req.Lease, powerHost) {
+	case staticClaimRetired:
+		b.clearAcquiredLease(req.Lease.LeaseID)
+		b.stopStaticHostIfUnused(ctx, req.Lease.LeaseID, powerHost)
+	case staticClaimSuperseded, staticClaimUnobserved:
+		// Without an observed claim this release cannot prove the current claim
+		// is its own; the owning release retires it and decides the stop.
+		b.clearAcquisition(req.Lease)
+	}
 	return nil
+}
+
+type staticClaimOutcome int
+
+const (
+	staticClaimUnobserved staticClaimOutcome = iota
+	staticClaimRetired
+	staticClaimSuperseded
+)
+
+// retireStaticPowerClaim authorizes static.stopCommand only by removing the
+// exact claim the releasing acquisition last published: the lease's carried
+// snapshot, or this backend's newer snapshot from the same acquisition. A
+// claim another acquisition or process republished or touched is left alone.
+func (b *staticLeaseBackend) retireStaticPowerClaim(lease core.LeaseTarget, host string) staticClaimOutcome {
+	carried, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+	if !set || !exists {
+		fmt.Fprintf(b.RT.Stderr, "skipped static.stopCommand host=%s: lease=%s carries no claim snapshot\n", host, lease.LeaseID)
+		return staticClaimUnobserved
+	}
+	observed := []core.LeaseClaim{carried}
+	if latest, ok := b.acquisitionLatestClaim(lease.LeaseID, carried.Revision); ok {
+		observed = append([]core.LeaseClaim{latest}, observed...)
+	}
+	for _, claim := range observed {
+		if claim.LeaseID != lease.LeaseID || claim.Provider != staticProvider || strings.TrimSpace(claim.StaticHost) != host {
+			continue
+		}
+		if err := core.RemoveLeaseClaimIfUnchanged(lease.LeaseID, claim); err == nil {
+			return staticClaimRetired
+		}
+	}
+	fmt.Fprintf(b.RT.Stderr, "skipped static.stopCommand host=%s: lease=%s claim is absent or changed since this command observed it; left it in place\n", host, lease.LeaseID)
+	return staticClaimSuperseded
+}
+
+// staticReleasePowerHost returns the host whose stop command applies to the
+// released lease, or "" when the configured command targets another host.
+func (b *staticLeaseBackend) staticReleasePowerHost(lease core.LeaseTarget) string {
+	if len(b.Cfg.Static.StopCommand) == 0 {
+		return ""
+	}
+	host := strings.TrimSpace(lease.Server.PublicNet.IPv4.IP)
+	if host == "" {
+		host = strings.TrimSpace(lease.SSH.Host)
+	}
+	configured := strings.TrimSpace(b.Cfg.Static.Host)
+	if host == "" || host != configured {
+		fmt.Fprintf(b.RT.Stderr, "warning: skipped static.stopCommand: lease=%s host=%q does not match static.host=%q\n", lease.LeaseID, host, configured)
+		return ""
+	}
+	return host
 }
 
 func (b *staticLeaseBackend) PreservesSSHWorkspaceAfterRelease() bool { return true }
@@ -304,6 +409,14 @@ func (b *staticLeaseBackend) rememberAcquiredLease(lease core.LeaseTarget) {
 	b.acquired = lease
 	_, configured, _, _ := core.StaticLease(b.Cfg)
 	b.acquiredRoute = architectureEndpoint(configured)
+	b.acquiredRevisions = map[string]bool{}
+	b.recordAcquiredRevision(lease.Server)
+}
+
+func (b *staticLeaseBackend) recordAcquiredRevision(server core.Server) {
+	if claim, exists, set := core.ServerLeaseClaimSnapshot(server); set && exists && claim.Revision != "" {
+		b.acquiredRevisions[claim.Revision] = true
+	}
 }
 
 func (b *staticLeaseBackend) refreshAcquiredLeaseServer(leaseID string, server core.Server) {
@@ -311,6 +424,7 @@ func (b *staticLeaseBackend) refreshAcquiredLeaseServer(leaseID string, server c
 	defer b.mu.Unlock()
 	if b.acquired.LeaseID == leaseID {
 		b.acquired.Server = server
+		b.recordAcquiredRevision(server)
 	}
 }
 
@@ -338,11 +452,35 @@ func (b *staticLeaseBackend) acquiredLeaseView() (core.LeaseTarget, bool) {
 	return lease, true
 }
 
+// acquisitionLatestClaim returns the cached claim only when carriedRevision was
+// published by the cached acquisition.
+func (b *staticLeaseBackend) acquisitionLatestClaim(leaseID, carriedRevision string) (core.LeaseClaim, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if carriedRevision == "" || b.acquired.LeaseID != leaseID || !b.acquiredRevisions[carriedRevision] {
+		return core.LeaseClaim{}, false
+	}
+	claim, exists, set := core.ServerLeaseClaimSnapshot(b.acquired.Server)
+	return claim, set && exists
+}
+
+// clearAcquisition drops the cache only when it belongs to lease's acquisition.
+func (b *staticLeaseBackend) clearAcquisition(lease core.LeaseTarget) {
+	carried, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if set && exists && b.acquired.LeaseID == lease.LeaseID && b.acquiredRevisions[carried.Revision] {
+		b.acquired = core.LeaseTarget{}
+		b.acquiredRevisions = nil
+	}
+}
+
 func (b *staticLeaseBackend) clearAcquiredLease(leaseID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.acquired.LeaseID == leaseID {
 		b.acquired = core.LeaseTarget{}
+		b.acquiredRevisions = nil
 	}
 }
 

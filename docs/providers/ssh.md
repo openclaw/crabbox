@@ -8,9 +8,11 @@ Read when:
 
 Static SSH is the provider for machines Crabbox does **not** create. The backend
 resolves a configured SSH target and hands it to core, which owns sync, command
-execution, results, tunnels, and status rendering. Crabbox does not provision,
-stop, or delete the machine, or account for its cost. The host's lifecycle is
-yours; commands can still perform connection cleanup when releasing a lease.
+execution, results, tunnels, and status rendering. Crabbox does not provision
+or delete the machine, or account for its cost. The host's lifecycle is yours;
+commands can still perform connection cleanup when releasing a lease, and
+optional [start and stop commands](#start-and-stop-commands) can bring a host up
+and down around its leases.
 
 The provider id is `ssh`, with aliases `static` and `static-ssh`. It is
 direct-only and is never brokered through the coordinator.
@@ -45,8 +47,8 @@ shared connection cleanup described below. `run` does the same when its release
 policy fires: normally after a fresh one-shot run, but not a kept run or a run
 reusing an ID by default. Remote cleanup is best-effort: failures warn but do
 not block local unclaiming. The static backend itself only removes the local
-claim and cached target; it never stops or deletes the machine. There is no
-static machine `cleanup` action.
+claim and cached target, then runs `static.stopCommand` when one is configured;
+it never deletes the machine. There is no static machine `cleanup` action.
 
 When a run releases its static lease, it also releases the run's remote
 workspace ownership after connection cleanup and local unclaiming. The host
@@ -77,6 +79,57 @@ Tailscale as enabled. Ordinary static `--tailscale` provisioning is unsupported;
 using an existing tailnet address or MagicDNS name does not set that metadata
 or trigger logout by itself. The metadata gate is not a live node-ownership
 check.
+
+### Start and stop commands
+
+Some hosts are not always on: a desktop that sleeps, a WSL2 distro that stops
+when idle, or a machine woken over the network. `static.startCommand` and
+`static.stopCommand` tie that lifecycle to leases:
+
+```yaml
+provider: ssh
+static:
+  host: buildbox.local
+  startCommand: ["/usr/local/bin/host-power", "up"]
+  stopCommand: ["/usr/local/bin/host-power", "down"]
+```
+
+Both are argv arrays run locally without a shell, from the current working
+directory, with a 5 minute timeout. The executable must be an absolute path;
+relative paths such as `./scripts/host-power` and bare names looked up on
+`PATH` are refused from every config source because they can resolve into a
+directory the repository controls. Output streams to stderr. The child
+environment adds `CRABBOX_LEASE_ID` and `CRABBOX_STATIC_HOST`.
+
+- `startCommand` runs during acquisition, before the SSH readiness wait,
+  including when an existing claim is reacquired. It must be safe to run
+  against a host that is already up. A nonzero exit fails acquisition with the
+  command's exit code and the last 4 KiB of its stderr. If acquisition fails
+  after a successful start and no other local claim holds the host,
+  `stopCommand` runs once.
+- `stopCommand` runs only when a release retires the exact claim its own
+  acquisition last published, and no other local claim on this machine holds
+  the same `static.host`. Releasing a lease that has no claim, releasing it
+  twice, or releasing after a later acquisition or another process
+  reacquired or heartbeated the same lease ID never stops the host; such a
+  release also leaves the newer claim in place for its own release to retire.
+  A release that observed no claim at all, such as `stop` on a lease ID with
+  no claim, leaves any claim it finds in place. Parallel leases on one
+  host (distinct `static.id` values) therefore stop it once, after the last
+  release. A failure warns and does not fail the release.
+- Every static acquisition, with or without these commands, holds a per-host
+  lock through claim publication, and release holds it through the stop. A
+  release never stops a host that another local acquisition is bringing up.
+- `stopCommand` uses the configuration loaded by the releasing command. A lease
+  released with configuration whose `static.host` differs from the lease's host
+  skips the stop with a warning. Kept leases stop only when released with
+  `crabbox stop`.
+- Only acquiring a lease (for example `run` or `warmup` without `--id`) runs
+  `startCommand`. Commands that reuse an existing lease, such as `run --id`,
+  `ssh`, `status`, `list`, and `doctor`, treat a stopped host as unreachable.
+
+Claims live on this machine, so leases held by another machine or user do not
+prevent the stop.
 
 ## Targets
 
@@ -293,6 +346,8 @@ workspace descendant containment or require `setsid` on macOS.
 | `workRoot` | Remote checkout/work directory. |
 | `id` | Optional stable lease id (default derived from `host`). |
 | `name` | Optional friendly slug (default derived from `host`). |
+| `startCommand` | Optional local argv run before the SSH readiness wait. See [Start and stop commands](#start-and-stop-commands). |
+| `stopCommand` | Optional local argv run after the last local lease on the host is released. |
 
 The SSH private key comes from the shared `ssh.key` field (or `CRABBOX_SSH_KEY`).
 There is no per-host key field; the static provider connects with your existing
@@ -305,6 +360,12 @@ contained by the repository in the same repository config, or approve the
 destination explicitly with `--static-host` or `CRABBOX_STATIC_HOST`. Absolute,
 missing, and repository-escaping key paths require explicit host approval.
 
+Repository config cannot run local commands on its own. A repository-defined
+`static.startCommand` or `static.stopCommand` is refused unless the same argv
+appears in trusted user config, or the command is set with
+`CRABBOX_STATIC_START_COMMAND`/`CRABBOX_STATIC_STOP_COMMAND` or
+`--static-start-command`/`--static-stop-command`.
+
 ### Flags
 
 ```text
@@ -312,7 +373,12 @@ missing, and repository-escaping key paths require explicit host approval.
 --static-user
 --static-port
 --static-work-root
+--static-start-command '["/usr/local/bin/host-power","up"]'
+--static-stop-command '["/usr/local/bin/host-power","down"]'
 ```
+
+The command flags and environment variables take a JSON argv array; `[]`
+clears a command set by lower-precedence config.
 
 ### Environment
 
@@ -323,6 +389,8 @@ CRABBOX_STATIC_PORT
 CRABBOX_STATIC_WORK_ROOT
 CRABBOX_STATIC_ID
 CRABBOX_STATIC_NAME
+CRABBOX_STATIC_START_COMMAND
+CRABBOX_STATIC_STOP_COMMAND
 CRABBOX_SSH_USER
 CRABBOX_SSH_KEY
 CRABBOX_SSH_PORT
