@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixes
+
+- Restore complete branch history before coherence checks when reusing shallow Git workspaces, while preserving wrong-branch rejection and index rollback. [PR 2529](https://github.com/openclaw/crabbox/pull/2529). Thanks @steipete.
+
 ## 0.66.0 - 2026-09-23
 
 ### Highlights
