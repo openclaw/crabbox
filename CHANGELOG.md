@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Join local Blacksmith sync descendants before an ordinary Testbox run returns after cancellation, preserving the lease claim until command cleanup completes.
+- Join local Blacksmith sync descendants before an ordinary Testbox run returns after cancellation, preserving the lease claim until command cleanup completes. [PR 2547](https://github.com/openclaw/crabbox/pull/2547).
 
 ## 0.66.0 - 2026-09-24
 
