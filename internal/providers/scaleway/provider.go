@@ -298,7 +298,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 		CommercialType:    cfg.ServerType,
 		Image:             scw.StringPtr(imageID),
 		Project:           scw.StringPtr(client.ProjectID()),
-		Tags:              replaceCrabboxTags(nil, tagsFromLabels(labels)),
+		Tags:              shared.ReplaceCrabboxTags(nil, tagsFromLabels(labels)),
 	}
 	if sg := strings.TrimSpace(cfg.Scaleway.SecurityGroup); sg != "" {
 		createReq.SecurityGroup = scw.StringPtr(sg)
@@ -338,7 +338,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	confirmedClaim, err := core.UpdateLeaseClaimLabelsIfUnchangedAfter(leaseID, volumeClaim, confirmedLabels, func() error {
 		_, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{
 			Zone: scw.Zone(client.Zone()), ServerID: created.ID,
-			Tags: ptrTags(replaceCrabboxTags(created.Tags, tagsFromLabels(labels))),
+			Tags: ptrTags(shared.ReplaceCrabboxTags(created.Tags, tagsFromLabels(labels))),
 		}, scw.WithContext(ctx))
 		return err
 	})
@@ -398,7 +398,7 @@ func (b *Backend) acquireOnce(ctx context.Context, req core.AcquireRequest) (tar
 	if _, err := core.ClaimLeaseTargetForRepoConfigScopeIfUnchangedDurableAfterContext(ctx, leaseID, slug, cfg, core.ProviderClaimScope(providerName, cfg), server, ssh, repoRoot, cfg.IdleTimeout, req.Reclaim, allocationClaim, true, func() error {
 		_, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{
 			Zone: scw.Zone(client.Zone()), ServerID: created.ID,
-			Tags: ptrTags(replaceCrabboxTags(created.Tags, tagsFromLabels(readyLabels))),
+			Tags: ptrTags(shared.ReplaceCrabboxTags(created.Tags, tagsFromLabels(readyLabels))),
 		}, scw.WithContext(ctx))
 		return err
 	}); err != nil {
@@ -518,7 +518,7 @@ func (b *Backend) Touch(ctx context.Context, req core.TouchRequest) (core.Server
 	update := func() (core.Server, core.SSHTarget, bool, error) {
 		updateResp, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{
 			Zone: scw.Zone(client.Zone()), ServerID: item.Server.ID,
-			Tags: ptrTags(replaceCrabboxTags(item.Server.Tags, tagsFromLabels(labels))),
+			Tags: ptrTags(shared.ReplaceCrabboxTags(item.Server.Tags, tagsFromLabels(labels))),
 		}, scw.WithContext(ctx))
 		if err != nil {
 			return core.Server{}, core.SSHTarget{}, false, err
@@ -572,7 +572,7 @@ func (b *Backend) UpdateTailscaleMetadata(ctx context.Context, lease core.LeaseT
 	update := func() error {
 		updateResp, err := client.Instance().UpdateServer(&instance.UpdateServerRequest{
 			Zone: scw.Zone(client.Zone()), ServerID: resp.Server.ID,
-			Tags: ptrTags(replaceCrabboxTags(resp.Server.Tags, tagsFromLabels(labels))),
+			Tags: ptrTags(shared.ReplaceCrabboxTags(resp.Server.Tags, tagsFromLabels(labels))),
 		}, scw.WithContext(ctx))
 		if err != nil {
 			return err
@@ -1171,14 +1171,7 @@ func scalewayServerTypeForClass(class string) string {
 }
 
 func validateScalewayLabels(labels map[string]string) error {
-	if labels == nil ||
-		labels[ownershipTagConflictLabel] != "" ||
-		labels["crabbox"] != "true" ||
-		labels["created_by"] != "crabbox" ||
-		labels["provider"] != providerName ||
-		!core.IsCanonicalLeaseID(labels["lease"]) ||
-		labels["slug"] == "" ||
-		labels["target"] != core.TargetLinux {
+	if !shared.ValidLeaseTagLabels(labels, providerName, ownershipTagConflictLabel) {
 		return core.Exit(2, "refusing to operate on non-Crabbox Scaleway Instance")
 	}
 	return nil
@@ -1220,18 +1213,6 @@ func validateScalewayClaimIdentity(claim core.LeaseClaim, server core.Server, cl
 		}
 	}
 	return validateRootVolumeIdentity(claim, server, cleanup)
-}
-
-func replaceCrabboxTags(existing, desired []string) []string {
-	tags := append([]string(nil), desired...)
-	for _, tag := range existing {
-		lower := strings.ToLower(strings.TrimSpace(tag))
-		if lower == tagCrabbox || strings.HasPrefix(lower, tagPrefix) {
-			continue
-		}
-		tags = append(tags, tag)
-	}
-	return shared.NormalizeTags(tags)
 }
 
 func publicIPv4(item *instance.Server) string {

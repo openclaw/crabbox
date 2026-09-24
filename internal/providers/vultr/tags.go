@@ -1,7 +1,6 @@
 package vultr
 
 import (
-	"regexp"
 	"strings"
 	"time"
 
@@ -14,8 +13,6 @@ const (
 	tagPrefix                 = "crabbox:"
 	ownershipTagConflictLabel = "_vultr_ownership_tag_conflict"
 )
-
-var tagSafeRe = regexp.MustCompile(`[^A-Za-z0-9_:\-]`)
 
 var tagSchema = shared.LeaseTagSchema(
 	shared.TagLabelField{Key: "provider_key_id"},
@@ -37,20 +34,7 @@ func tagsFromLabels(labels map[string]string) []string {
 }
 
 func encodeTagKV(key, value string) string {
-	return tagPrefix + sanitizeTagPart(key) + ":" + sanitizeTagPart(value)
-}
-
-func sanitizeTagPart(value string) string {
-	value = strings.TrimSpace(value)
-	value = tagSafeRe.ReplaceAllString(value, "-")
-	value = strings.Trim(value, "-")
-	if value == "" {
-		return "unknown"
-	}
-	if len(value) > 64 {
-		return value[:64]
-	}
-	return value
+	return tagPrefix + shared.SanitizeTagPart(key, 64) + ":" + shared.SanitizeTagPart(value, 64)
 }
 
 func labelsFromTags(tags []string) map[string]string {
@@ -75,14 +59,7 @@ func isOwnedInstance(inst vultrInstance) bool {
 }
 
 func validateInstanceLabels(labels map[string]string) error {
-	if labels == nil ||
-		labels[ownershipTagConflictLabel] != "" ||
-		labels["crabbox"] != "true" ||
-		labels["created_by"] != "crabbox" ||
-		labels["provider"] != providerName ||
-		!core.IsCanonicalLeaseID(labels["lease"]) ||
-		labels["slug"] == "" ||
-		labels["target"] != core.TargetLinux {
+	if !shared.ValidLeaseTagLabels(labels, providerName, ownershipTagConflictLabel) {
 		return core.Exit(2, "refusing to operate on non-Crabbox Vultr instance")
 	}
 	return nil

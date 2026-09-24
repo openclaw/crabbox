@@ -1,9 +1,57 @@
 package shared
 
 import (
+	"maps"
 	"reflect"
+	"strings"
 	"testing"
 )
+
+func TestSanitizeTagPart(t *testing.T) {
+	for _, tt := range []struct {
+		input string
+		limit int
+		want  string
+	}{
+		{" \t--A_z:09--- \n", 64, "A_z:09"},
+		{"héllo /world", 64, "h-llo--world"},
+		{" \t\u2003", 64, "unknown"},
+		{"-?/-", 0, "unknown"},
+		{strings.Repeat("a", 64), 64, strings.Repeat("a", 64)},
+		{strings.Repeat("a", 65), 64, strings.Repeat("a", 64)},
+		{strings.Repeat("a", 65), 0, strings.Repeat("a", 65)},
+	} {
+		if got := SanitizeTagPart(tt.input, tt.limit); got != tt.want {
+			t.Errorf("SanitizeTagPart(%q, %d) = %q, want %q", tt.input, tt.limit, got, tt.want)
+		}
+	}
+}
+
+func TestValidLeaseTagLabelsRequiresEveryIdentityField(t *testing.T) {
+	valid := map[string]string{
+		"crabbox": "true", "created_by": "crabbox", "provider": "example",
+		"lease": "cbx_abcdef123456", "slug": "my-app", "target": "linux",
+	}
+	if !ValidLeaseTagLabels(valid, "example", "conflict") || ValidLeaseTagLabels(nil, "example", "conflict") {
+		t.Fatal("complete labels must pass and nil labels must fail")
+	}
+	for key := range valid {
+		for _, value := range []string{"", "foreign"} {
+			if key == "slug" && value != "" {
+				continue
+			}
+			labels := maps.Clone(valid)
+			labels[key] = value
+			if ValidLeaseTagLabels(labels, "example", "conflict") {
+				t.Errorf("accepted invalid %s=%q", key, value)
+			}
+		}
+	}
+	valid["conflict"] = "provider"
+	if ValidLeaseTagLabels(valid, "example", "conflict") {
+		t.Fatal("accepted conflicting identity")
+	}
+}
 
 func TestTagLabelReducerOwnershipConflictsAreSticky(t *testing.T) {
 	for _, key := range []string{"provider", "lease", "slug", "target"} {

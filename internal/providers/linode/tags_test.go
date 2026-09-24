@@ -6,6 +6,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 )
 
 func TestLinodeLeaseTagsRoundTripOwnershipLabels(t *testing.T) {
@@ -134,7 +135,7 @@ func TestLinodeMissingOwnershipTagChunkFailsClosed(t *testing.T) {
 }
 
 func TestReplaceCrabboxTagsPreservesExternalTags(t *testing.T) {
-	got := replaceCrabboxTags(
+	got := shared.ReplaceCrabboxTags(
 		[]string{"customer:production", "crabbox", "crabbox:state:ready"},
 		[]string{"crabbox", "crabbox:state:running"},
 	)

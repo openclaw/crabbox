@@ -203,7 +203,7 @@ func (b *linodeLeaseBackend) acquireOnce(ctx context.Context, req core.AcquireRe
 	}
 	readyLabels := labelsFromTags(leaseTags(cfg, leaseID, slug, "ready", req.Keep, now))
 	readyLabels[linodeAccountLabel] = accountID
-	if err := client.UpdateLinodeTags(ctx, created.ID, replaceCrabboxTags(created.Tags, tagsFromLabels(readyLabels))); err != nil {
+	if err := client.UpdateLinodeTags(ctx, created.ID, shared.ReplaceCrabboxTags(created.Tags, tagsFromLabels(readyLabels))); err != nil {
 		return core.LeaseTarget{}, err
 	}
 	server.Labels = readyLabels
@@ -651,7 +651,7 @@ func (b *linodeLeaseBackend) updateFencedLinodeMetadata(ctx context.Context, lea
 			shared.ApplyTailscaleMetadata(labels, *meta)
 		}
 		labels[linodeAccountLabel] = accountID
-		if err := client.UpdateLinodeTags(providerCtx, server.ID, replaceCrabboxTags(item.Tags, tagsFromLabels(labels))); err != nil {
+		if err := client.UpdateLinodeTags(providerCtx, server.ID, shared.ReplaceCrabboxTags(item.Tags, tagsFromLabels(labels))); err != nil {
 			return core.Server{}, core.SSHTarget{}, false, err
 		}
 		updated := serverFromLinode(item, b.Cfg)

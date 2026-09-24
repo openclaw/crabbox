@@ -17,6 +17,7 @@ import (
 	"time"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
@@ -1492,7 +1493,7 @@ func TestFencedLinodeTouchReconcilesLiveTimeoutWithClaim(t *testing.T) {
 	labels := normalizedLinodeLabels(api.created[0].Tags)
 	labels["idle_timeout"] = "7200"
 	labels["idle_timeout_secs"] = "7200"
-	api.created[0].Tags = replaceCrabboxTags(api.created[0].Tags, tagsFromLabels(labels))
+	api.created[0].Tags = shared.ReplaceCrabboxTags(api.created[0].Tags, tagsFromLabels(labels))
 	backend.Cfg.IdleTimeout = 3 * time.Hour
 
 	updated, err := backend.Touch(context.Background(), core.TouchRequest{

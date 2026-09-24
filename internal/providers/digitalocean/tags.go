@@ -1,7 +1,6 @@
 package digitalocean
 
 import (
-	"regexp"
 	"strings"
 	"time"
 
@@ -16,8 +15,6 @@ const (
 	tagPrefix                 = "crabbox:"
 	ownershipTagConflictLabel = "_digitalocean_ownership_tag_conflict"
 )
-
-var tagSafeRe = regexp.MustCompile(`[^A-Za-z0-9_:\-]`)
 
 var tagSchema = shared.LeaseTagSchema(append(shared.TailscaleTagFields(),
 	shared.TagLabelField{Key: "fixed_intent_sha256"}, shared.TagLabelField{Key: "fixed_attempt"},
@@ -41,25 +38,12 @@ func tagsFromLabels(labels map[string]string) []string {
 }
 
 func encodeTagKV(key, value string) string {
-	key = sanitizeTagPart(key)
+	key = shared.SanitizeTagPart(key, 64)
 	if tagSchema.Exact(key) {
 		key += "_v1"
 		return tagPrefix + key + ":" + shared.EncodeExactTagValue(value, 255-len(tagPrefix)-len(key)-1)
 	}
-	return tagPrefix + key + ":" + sanitizeTagPart(value)
-}
-
-func sanitizeTagPart(value string) string {
-	value = strings.TrimSpace(value)
-	value = tagSafeRe.ReplaceAllString(value, "-")
-	value = strings.Trim(value, "-")
-	if value == "" {
-		return "unknown"
-	}
-	if len(value) > 64 {
-		return value[:64]
-	}
-	return value
+	return tagPrefix + key + ":" + shared.SanitizeTagPart(value, 64)
 }
 
 func versionedExactTagValueKey(key string) (string, bool) {
@@ -127,14 +111,7 @@ func isOwnedDroplet(d droplet) bool {
 }
 
 func validateDropletLabels(labels map[string]string) error {
-	if labels == nil ||
-		labels[ownershipTagConflictLabel] != "" ||
-		labels["crabbox"] != "true" ||
-		labels["created_by"] != "crabbox" ||
-		labels["provider"] != providerName ||
-		!core.IsCanonicalLeaseID(labels["lease"]) ||
-		labels["slug"] == "" ||
-		labels["target"] != core.TargetLinux {
+	if !shared.ValidLeaseTagLabels(labels, providerName, ownershipTagConflictLabel) {
 		return core.Exit(2, "refusing to operate on non-Crabbox DigitalOcean Droplet")
 	}
 	return nil

@@ -1,10 +1,52 @@
 package shared
 
 import (
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
+
+	core "github.com/openclaw/crabbox/internal/cli"
 )
+
+var tagPartUnsafeRE = regexp.MustCompile(`[^A-Za-z0-9_:\-]`)
+
+// SanitizeTagPart uses the colon-tag alphabet; maxLen <= 0 leaves length unbounded.
+func SanitizeTagPart(value string, maxLen int) string {
+	value = strings.TrimSpace(value)
+	value = tagPartUnsafeRE.ReplaceAllString(value, "-")
+	value = strings.Trim(value, "-")
+	if value == "" {
+		return "unknown"
+	}
+	if maxLen > 0 && len(value) > maxLen {
+		return value[:maxLen]
+	}
+	return value
+}
+
+// ValidLeaseTagLabels checks decoded metadata, not resource or claim ownership.
+func ValidLeaseTagLabels(labels map[string]string, provider, conflictLabel string) bool {
+	return labels[conflictLabel] == "" &&
+		labels["crabbox"] == "true" &&
+		labels["created_by"] == "crabbox" &&
+		labels["provider"] == provider &&
+		core.IsCanonicalLeaseID(labels["lease"]) &&
+		labels["slug"] != "" &&
+		labels["target"] == core.TargetLinux
+}
+
+func ReplaceCrabboxTags(existing, desired []string) []string {
+	tags := append([]string(nil), desired...)
+	for _, tag := range existing {
+		lower := strings.ToLower(strings.TrimSpace(tag))
+		if lower == "crabbox" || strings.HasPrefix(lower, "crabbox:") {
+			continue
+		}
+		tags = append(tags, tag)
+	}
+	return NormalizeTags(tags)
+}
 
 // NormalizeTags returns a sorted, case-sensitive set of trimmed nonempty tags.
 // It does not validate wire formats or interpret ownership metadata.
