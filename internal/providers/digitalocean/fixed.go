@@ -231,9 +231,9 @@ func (b *digitalOceanLeaseBackend) resolveFixed(ctx context.Context, client digi
 		return core.LeaseTarget{}, true, err
 	}
 	if claim.CloudID == "" && req.ReleaseOnly {
-		next := claim
-		next.CloudID, next.CloudNumericID, next.CloudImmutableID = dropletIDString(item.ID), item.ID, dropletIDString(item.ID)
-		claim, err = core.ReplaceLeaseClaimIfUnchangedDurableReturning(claim.LeaseID, claim, next)
+		claim, err = core.CompareAndBindFixedClaim(claim, func(next *core.LeaseClaim, persist func() error) error {
+			return core.BindFixedClaim(next, core.FixedResourceBinding{CloudID: dropletIDString(item.ID), NumericID: item.ID, ImmutableID: dropletIDString(item.ID), ImageEvidence: claim.ImageEvidence}, persist)
+		})
 		if err != nil {
 			return core.LeaseTarget{}, true, err
 		}

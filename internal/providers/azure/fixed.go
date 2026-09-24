@@ -181,9 +181,10 @@ func (b *azureLeaseBackend) resolveFixed(ctx context.Context, client azureClient
 		return core.LeaseTarget{}, true, err
 	}
 	if claim.CloudImmutableID == "" && req.ReleaseOnly {
-		next := claim
-		next.CloudID, next.CloudImmutableID = server.CloudID, server.ImmutableID
-		if _, err := core.ReplaceLeaseClaimIfUnchangedDurableReturning(claim.LeaseID, claim, next); err != nil {
+		_, err := core.CompareAndBindFixedClaim(claim, func(next *core.LeaseClaim, persist func() error) error {
+			return core.BindFixedClaim(next, core.FixedResourceBinding{CloudID: server.CloudID, ImmutableID: server.ImmutableID, ImageEvidence: claim.ImageEvidence}, persist)
+		})
+		if err != nil {
 			return core.LeaseTarget{}, true, err
 		}
 	}
