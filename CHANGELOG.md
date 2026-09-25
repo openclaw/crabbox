@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Verify Actions workspace Git identity before run, sync, cache warm, or editor handoff; refuse foreign or unverifiable markers without touching the workspace.
+- Refuse retained Actions workspaces from a different or unverifiable repository before run, sync, cache warm, or editor handoff, while preserving verified same-repository custom paths. [PR 2564](https://github.com/openclaw/crabbox/pull/2564).
 
 ## 0.68.0 - 2026-09-28
 
