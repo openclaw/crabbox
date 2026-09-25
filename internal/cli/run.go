@@ -5255,7 +5255,9 @@ func confirmedAbsentLocalStateSnapshot(ctx context.Context, backend Backend, exp
 			}
 			retainTerminal = true
 		}
-		if claim.ProviderScope != providerScope {
+		// A retained receipt's scope was checked by its provider, whose claim
+		// scope need not equal the controller scope.
+		if !retainTerminal && claim.ProviderScope != providerScope {
 			return confirmedAbsentLocalState{}, Exit(4, "lease claim provider scope changed before confirmed-absence cleanup")
 		}
 		for _, identity := range []string{expected.LeaseID, expected.AttemptLeaseID} {

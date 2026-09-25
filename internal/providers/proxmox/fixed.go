@@ -466,6 +466,33 @@ func validateFixedProxmoxTerminalClaim(claim core.LeaseClaim) error {
 	return nil
 }
 
+// ValidateConfirmedAbsentTerminalReceipt lets runtime-adapter cleanup finish
+// while the released claim stays as the lease ID's receipt. The request carries
+// the controller scope, which differs from the claim scope, so both are checked
+// against the current configuration. It is local and read-only.
+func (b *leaseBackend) ValidateConfirmedAbsentTerminalReceipt(claim core.LeaseClaim, req core.ConfirmedAbsentLocalCleanupRequest) error {
+	expected := req.ExpectedProviderIdentity
+	controllerScope, err := (Provider{}).ControllerProviderScope(b.Cfg)
+	if err != nil {
+		return err
+	}
+	claimScope := strings.TrimSpace(core.ProviderClaimScope("proxmox", b.Cfg))
+	if expected.LeaseID == "" || expected.AttemptLeaseID == "" || expected.Slug == "" || expected.ResourceID == "" ||
+		req.ProviderScope != controllerScope || claimScope == "" || claim.ProviderScope != claimScope {
+		return core.Exit(4, "Proxmox terminal receipt requires complete matching identity and scope")
+	}
+	if err := core.ValidateProviderIdentityExpectation(expected); err != nil {
+		return err
+	}
+	if err := fixedProxmoxLeaseKind.ValidateTerminalClaim(claim, core.LeaseClaim{}, expected.LeaseID, validateFixedProxmoxTerminalClaim); err != nil {
+		return err
+	}
+	if claim.LeaseID != expected.AttemptLeaseID || claim.Slug != expected.Slug || claim.CloudID != expected.ResourceID {
+		return core.Exit(4, "Proxmox terminal receipt identity changed")
+	}
+	return nil
+}
+
 func (b *leaseBackend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool {
 	retained, err := b.retainLeaseClaimAfterRelease(lease, core.LeaseClaim{})
 	return retained || err != nil

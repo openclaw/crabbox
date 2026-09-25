@@ -494,6 +494,9 @@ closed otherwise. Declarative external adapters additionally require raw
 inventory, plus a standalone
 `{{cloudId}}` argument in every release command, so an adapter never provisions a resource it
 cannot later re-attest and release exactly.
+The direct `proxmox` provider exposes the contract when its configuration is
+complete. Its scope binds the API endpoint, node, token ID and clone settings;
+see [Proxmox runtime adapter](../providers/proxmox.md#runtime-adapter).
 Provider identity discovery itself uses the bounded inspection context and the
 same durable child registry, process-group watchdog, termination, and reap path;
 a hung configured binary cannot block startup or shutdown indefinitely.

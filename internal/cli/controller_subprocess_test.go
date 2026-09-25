@@ -1313,12 +1313,18 @@ type confirmedAbsentReceiptTestBackend struct {
 	confirmedAbsentCleanupTestBackend
 	kind        FixedLeaseKind
 	validations int
+	// claimScopes maps a controller scope to its provider's claim scope.
+	claimScopes map[string]string
 }
 
 func (b *confirmedAbsentReceiptTestBackend) ValidateConfirmedAbsentTerminalReceipt(claim LeaseClaim, req ConfirmedAbsentLocalCleanupRequest) error {
 	b.validations++
 	expected := req.ExpectedProviderIdentity
-	if claim.LeaseID != expected.LeaseID || claim.LeaseID != expected.AttemptLeaseID || claim.Slug != expected.Slug || claim.CloudID != expected.ResourceID || claim.ProviderScope != req.ProviderScope {
+	claimScope := req.ProviderScope
+	if b.claimScopes != nil {
+		claimScope = b.claimScopes[req.ProviderScope]
+	}
+	if claim.LeaseID != expected.LeaseID || claim.LeaseID != expected.AttemptLeaseID || claim.Slug != expected.Slug || claim.CloudID != expected.ResourceID || claimScope == "" || claim.ProviderScope != claimScope {
 		return errors.New("terminal receipt identity mismatch")
 	}
 	return b.kind.ValidateTerminalClaim(claim, LeaseClaim{}, expected.LeaseID, nil)
@@ -1371,6 +1377,57 @@ func TestConfirmedAbsentTerminalReceiptRetainsDurableClaimAcrossDeregistration(t
 	if err != nil || string(after) != string(before) || backend.cleanupCalls != 0 {
 		t.Fatalf("retry changed receipt: %v", err)
 	}
+}
+
+// A provider may derive its controller scope differently from its claim scope.
+// Its receipt validator owns that comparison; ordinary claims keep core's.
+func TestConfirmedAbsentTerminalReceiptScopeIsProviderOwned(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	const leaseID = "cbx_abc123abc123"
+	kind := FixedLeaseKind{ClaimProvider: "test-fixed-v1", IntentVersion: 1, Label: "test", TerminalIdentityLabels: []string{"lease"}}
+	acquired := LeaseClaim{LeaseID: leaseID, Slug: "fixed-receipt", Provider: kind.ClaimProvider, ProviderScope: "claim-scope", CloudID: "resource-uid", CloudImmutableID: "resource-uid", Labels: map[string]string{"lease": leaseID}, FixedCreateIntent: &FixedCreateIntent{Version: 1, Fingerprint: strings.Repeat("b", 64), ProviderScope: "claim-scope", Slug: "fixed-receipt", State: "acquired"}}
+	if err := WithDurableLeaseClaimLock(leaseID, func(claim *LeaseClaim, _ bool, persist func() error) error {
+		*claim = kind.TerminalClaim(acquired, time.Now().UTC())
+		return persist()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := readFixedReceiptForTest(t, leaseID)
+	backend := &confirmedAbsentReceiptTestBackend{kind: kind, claimScopes: map[string]string{"controller-scope": "claim-scope"}}
+	expected := ProviderIdentityExpectation{LeaseID: leaseID, AttemptLeaseID: leaseID, Slug: acquired.Slug, ResourceID: acquired.CloudID}
+	if err := cleanupConfirmedAbsentLocalState(t.Context(), backend, expected, "other-controller-scope"); err == nil {
+		t.Fatal("receipt accepted under an unmapped controller scope")
+	}
+	if err := cleanupConfirmedAbsentLocalState(t.Context(), backend, expected, "controller-scope"); err != nil {
+		t.Fatal(err)
+	}
+	if after := readFixedReceiptForTest(t, leaseID); after != before || backend.cleanupCalls != 0 {
+		t.Fatalf("receipt changed or sidecars ran: %d", backend.cleanupCalls)
+	}
+
+	const plainID = "cbx_abc123abc124"
+	server := Server{Provider: "external", CloudID: "provider/resource", Labels: map[string]string{"provider": "external", "slug": "plain-box"}}
+	if err := ClaimLeaseForRepoProviderScopePondEndpoint(plainID, "plain-box", "external", "claim-scope", "", "/repo", time.Minute, false, server, SSHTarget{}); err != nil {
+		t.Fatal(err)
+	}
+	plain := &confirmedAbsentCleanupTestBackend{}
+	err := cleanupConfirmedAbsentLocalState(t.Context(), plain, ProviderIdentityExpectation{LeaseID: plainID, AttemptLeaseID: plainID, Slug: "plain-box", ResourceID: "provider/resource"}, "controller-scope")
+	if err == nil || !strings.Contains(err.Error(), "provider scope changed") || plain.cleanupCalls != 0 {
+		t.Fatalf("ordinary claim with another scope: err=%v sidecars=%d", err, plain.cleanupCalls)
+	}
+}
+
+func readFixedReceiptForTest(t *testing.T, leaseID string) string {
+	t.Helper()
+	path, err := leaseClaimPath(leaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestConfirmedAbsentTerminalReceiptRequiresLocalCustody(t *testing.T) {
