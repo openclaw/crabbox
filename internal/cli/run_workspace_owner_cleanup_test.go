@@ -460,6 +460,7 @@ func TestRunCommandLeaseCleanupQuiescesWorkspaceOwner(t *testing.T) {
 }
 
 func TestRunCommandRetainedLeaseRetainsFailClosedRenewal(t *testing.T) {
+	t.Setenv("CI", "true")
 	tests := []struct {
 		name           string
 		args           []string

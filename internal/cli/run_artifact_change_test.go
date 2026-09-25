@@ -212,6 +212,7 @@ func TestRunArtifactChangeWithFailureDownloadsE2E(t *testing.T) {
 
 func runArtifactChangeE2E(t *testing.T, failureDownloads bool) {
 	t.Helper()
+	t.Setenv("CI", "true")
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX local SSH fixture")
 	}
@@ -278,7 +279,7 @@ for arg do cmd="$arg"; done
 case "$cmd" in
   *TRANSPORT_BREAK*) exit 255 ;;
   *"__filesystem"*) CRABBOX_ARTIFACT_CHANGE_RUNNER_HELPER=1 exec ` + shellQuote(self) + ` -test.run='^TestArtifactChangeRunnerHelper$' ;;
-  mkdir\ -p*|cd\ *|\(cd\ *|bash\ -lc*|/bin/bash\ -lc*|*"uname -m"*|*"/tmp/crabbox-runtime-"*) exec sh -c "$cmd" ;;
+  mkdir\ -p*|cd\ *|\(cd\ *|bash\ -lc*|/bin/bash\ -lc*|/usr/bin/env\ *|*"uname -m"*|*"/tmp/crabbox-runtime-"*) exec sh -c "$cmd" ;;
 esac
 exit 0
 `

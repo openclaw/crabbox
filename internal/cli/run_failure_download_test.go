@@ -257,6 +257,7 @@ func TestFailureDownloadPreflight(t *testing.T) {
 }
 
 func TestFailureDownloadsE2E(t *testing.T) {
+	t.Setenv("CI", "true")
 	for _, tc := range []struct {
 		name      string
 		code      int
@@ -297,7 +298,7 @@ case "$cmd" in
     result=$?
     if [ "$CRABBOX_TEST_TRANSPORT_LOSS" = 1 ]; then exit 255; fi
     exit "$result" ;;
-  mkdir\ -p*|cd\ *|\(cd\ *|bash\ -lc*|/bin/bash\ -lc*) exec sh -c "$cmd" ;;
+  mkdir\ -p*|cd\ *|\(cd\ *|bash\ -lc*|/bin/bash\ -lc*|/usr/bin/env\ *) exec sh -c "$cmd" ;;
 esac
 exit 0
 `

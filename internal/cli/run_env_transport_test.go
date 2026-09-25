@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,28 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestSSHCommandEnvRejectsLostOwnerWithFreshContext(t *testing.T) {
+	denied := errors.New("ownership renewal denied")
+	owner := &workspaceOwner{renewErr: denied}
+	ctx, cancel := context.WithCancel(contextWithWorkspaceOwner(t.Context(), owner))
+	cancel()
+	ctx = context.WithoutCancel(ctx)
+	for _, target := range []SSHTarget{{TargetOS: targetLinux}, {TargetOS: targetMacOS},
+		{TargetOS: targetWindows, WindowsMode: windowsModeNormal}, {TargetOS: targetWindows, WindowsMode: windowsModeWSL2}} {
+		for _, withInput := range []bool{false, true} {
+			var size *int64
+			if withInput {
+				n := int64(1)
+				size = &n
+			}
+			prepared, err := prepareWorkspaceOwnerRemote(ctx, target, "true", size)
+			if !errors.Is(err, denied) || prepared.command != "" {
+				t.Fatalf("lost ownership prepared a command: target=%s/%s input=%t err=%v", target.TargetOS, target.WindowsMode, withInput, err)
+			}
+		}
+	}
+}
 
 func TestSSHCommandEnvDeliveryAndCleanup(t *testing.T) {
 	if runtime.GOOS == "windows" {

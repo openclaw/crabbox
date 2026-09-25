@@ -5103,6 +5103,7 @@ exit 0
 }
 
 func TestRunCommandSSHArtifactE2E(t *testing.T) {
+	t.Setenv("CI", "true")
 	for _, targetOS := range []string{targetLinux, targetMacOS} {
 		t.Run(targetOS, func(t *testing.T) {
 			clearConfigEnv(t)
@@ -5137,7 +5138,7 @@ for arg do cmd="$arg"; done
 input="$(cat)"
 printf '%s\n%s\n---\n' "$cmd" "$input" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$cmd" in
-  mkdir\ -p*|cd\ *|\(cd\ *|bash\ -lc*|/bin/bash\ -lc*) printf '%s' "$input" | sh -c "$cmd"; exit $? ;;
+  mkdir\ -p*|cd\ *|\(cd\ *|bash\ -lc*|/bin/bash\ -lc*|/usr/bin/env\ *) printf '%s' "$input" | sh -c "$cmd"; exit $? ;;
 esac
 exit 0
 `

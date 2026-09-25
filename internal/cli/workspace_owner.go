@@ -200,6 +200,10 @@ func prepareWorkspaceOwnerRemote(ctx context.Context, target SSHTarget, remote s
 	if owner == nil {
 		return workspaceOwnerRemotePreparation{command: remote}, nil
 	}
+	// A fresh cleanup context must not restore authority after renewal failed.
+	if err := owner.Err(); err != nil {
+		return workspaceOwnerRemotePreparation{}, err
+	}
 	if !isWindowsNativeTarget(target) {
 		nonce, err := randomHex(16)
 		if err != nil {

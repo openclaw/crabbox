@@ -99,7 +99,9 @@ a mode `0600` shell file inside a mode `0700` directory. Native Windows uses a
 PowerShell file in a directory restricted to the SSH account. Quoting, Unicode,
 empty strings, and multiline values are preserved. The file and its directory
 are removed after the command, including failure and cancellation; a failed
-cleanup emits a warning. Preflight and `cache warm` use the same transport.
+cleanup emits a warning. If workspace ownership is lost, cleanup is refused;
+the private file remains until the lease is cleaned up with verified ownership.
+Preflight and `cache warm` use the same transport.
 
 These temporary values remain separate from reusable `--env-helper` profiles
 and are never retained by helper mode. Forwarding summaries report names and
