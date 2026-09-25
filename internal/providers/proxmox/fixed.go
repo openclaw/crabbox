@@ -132,12 +132,9 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		}
 		return result, nil
 	}, Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
-		vmid, err := client.NextVMID(ctx)
+		vmid, err := reserveFixedProxmoxVMID(ctx, client, claim)
 		if err != nil {
 			return core.FixedAttemptPlan{}, fixedProxmoxAuthorizationRejection(err)
-		}
-		if vmid <= 0 {
-			return core.FixedAttemptPlan{}, core.Exit(4, "lease_id_conflict: Proxmox selected invalid VMID %d", vmid)
 		}
 		node := strings.TrimSpace(cfg.Proxmox.Node)
 		return core.FixedAttemptPlan{
@@ -202,6 +199,66 @@ func fixedProxmoxAuthorizationRejection(err error) error {
 		return &core.FixedCreateRejected{Err: err}
 	}
 	return err
+}
+
+func reserveFixedProxmoxVMID(ctx context.Context, client proxmoxClient, claim core.LeaseClaim) (int, error) {
+	const maxVMID = 999999999
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		return 0, err
+	}
+	bound := make(map[int]string)
+	for _, other := range claims {
+		if other.LeaseID == claim.LeaseID || (other.Provider != "proxmox" && other.Provider != core.FixedProxmoxClaimProvider) {
+			continue
+		}
+		if fixedProxmoxLeaseKind.IsFixedClaim(other) && other.FixedCreateIntent.State == "released" {
+			continue
+		}
+		// Include legacy and differently scoped claims conservatively: a node
+		// change does not create a separate cluster VMID namespace.
+		if id, err := strconv.Atoi(other.CloudID); err == nil && id > 0 {
+			bound[id] = other.LeaseID
+		}
+		if other.CloudNumericID > 0 && other.CloudNumericID <= maxVMID {
+			bound[int(other.CloudNumericID)] = other.LeaseID
+		}
+	}
+	vmid, err := client.NextVMID(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if vmid < 100 || vmid > maxVMID {
+		return 0, core.Exit(4, "lease_id_conflict: Proxmox selected invalid VMID %d", vmid)
+	}
+	conflict := bound[vmid]
+	conflictVMID := vmid
+	reservationError := func(err error) (int, error) {
+		if conflict != "" {
+			return 0, fmt.Errorf("cannot reserve a free Proxmox VMID: local claim %s retains VMID %d; inspect its VM and clone task, then recover an absent prepared attempt with crabbox stop --provider proxmox --id %s --force: %w", conflict, conflictVMID, conflict, err)
+		}
+		return 0, fmt.Errorf("cannot reserve a free Proxmox VMID: %w", err)
+	}
+	ids, err := client.ListVMIDsInCluster(ctx)
+	if err != nil {
+		return reservationError(err)
+	}
+	used := make(map[int]bool, len(ids)+len(bound))
+	for _, id := range ids {
+		used[id] = true
+	}
+	for id := range bound {
+		used[id] = true
+	}
+	for candidate := vmid; candidate <= maxVMID; candidate++ {
+		if !used[candidate] {
+			return candidate, nil
+		}
+		if conflict == "" && bound[candidate] != "" {
+			conflict, conflictVMID = bound[candidate], candidate
+		}
+	}
+	return reservationError(fmt.Errorf("no available VMID through %d", maxVMID))
 }
 
 func fixedProxmoxIdentityLabels(cfg core.Config, leaseID, slug, fingerprint, node string) map[string]string {

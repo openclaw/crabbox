@@ -843,6 +843,26 @@ func (c *ProxmoxClient) NextVMID(ctx context.Context) (int, error) {
 	return c.nextID(ctx)
 }
 
+// ListVMIDsInCluster includes templates, unlabelled VMs, and containers: all
+// guest types share the VMID namespace. Filtered inventory cannot prove a gap.
+func (c *ProxmoxClient) ListVMIDsInCluster(ctx context.Context) ([]int, error) {
+	if err := c.requirePropagatedVMAudit(ctx, "/vms"); err != nil {
+		return nil, err
+	}
+	vms, err := c.listClusterVMs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int, 0, len(vms))
+	for _, vm := range vms {
+		if vm.VMID <= 0 {
+			return nil, fmt.Errorf("Proxmox inventory contains an invalid VMID")
+		}
+		ids = append(ids, int(vm.VMID))
+	}
+	return ids, nil
+}
+
 type proxmoxVM struct {
 	VMID     int    `json:"vmid"`
 	Name     string `json:"name"`

@@ -3,6 +3,7 @@ package proxmox
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -206,35 +207,108 @@ func TestProxmoxFixedAcquireChecksLocalVMIDOwnershipBeforeClone(t *testing.T) {
 			clones, deletes, labelWrites := client.fixedCreates, client.deleteCalls, len(client.setLabels)
 			req.RequestedLeaseID, req.RequestedSlug = "cbx_aaaaaaaaaaaa", "replacement"
 			replacement, err := backend.Acquire(context.Background(), req)
+			wantVMID := "418"
 			if owner == "released" {
-				if err != nil || replacement.Server.CloudID != lease.Server.CloudID || client.fixedCreates != clones+1 {
-					t.Fatalf("terminal tombstone blocked VMID reuse: err=%v VMID=%s clones=%d", err, replacement.Server.CloudID, client.fixedCreates)
-				}
-			} else {
-				if err == nil || !strings.Contains(err.Error(), "lease_id_conflict: multiple local Proxmox claims") {
-					t.Fatalf("active local owner was not rejected before clone: %v", err)
-				}
-				if client.fixedCreates != clones || client.deleteCalls != deletes || len(client.setLabels) != labelWrites {
-					t.Fatal("conflicting allocation mutated provider resources")
-				}
-				claim := readFixedProxmoxClaim(t, req.RequestedLeaseID)
-				if claim.CloudID != "" || len(claim.FixedCreateIntent.Attempt) != 0 {
-					t.Fatal("conflicting VMID was published as a clone attempt")
-				}
+				wantVMID = "417"
+			}
+			if err != nil || replacement.Server.CloudID != wantVMID || client.fixedCreates != clones+1 {
+				t.Fatalf("reservation: err=%v VMID=%s want=%s clones=%d", err, replacement.Server.CloudID, wantVMID, client.fixedCreates)
+			}
+			if client.deleteCalls != deletes || len(client.setLabels) != labelWrites+1 {
+				t.Fatal("allocation mutated the previous owner's resource")
 			}
 			if !reflect.DeepEqual(previous, readFixedProxmoxClaim(t, lease.LeaseID)) {
 				t.Fatal("allocation changed the previous owner's claim")
 			}
-			if owner != "released" {
-				// Reconcile the stale local owner after the simulated cluster absence.
-				if err := core.RemoveLeaseClaimIfUnchanged(lease.LeaseID, previous); err != nil {
-					t.Fatal(err)
-				}
-				retried, err := backend.Acquire(context.Background(), req)
-				if err != nil || retried.LeaseID != req.RequestedLeaseID || retried.Server.CloudID != lease.Server.CloudID || client.fixedCreates != clones+1 {
-					t.Fatalf("unsubmitted operation could not retry: err=%v lease=%s VMID=%s clones=%d", err, retried.LeaseID, retried.Server.CloudID, client.fixedCreates)
-				}
+		})
+	}
+}
+
+func TestProxmoxFixedFreshIDSkipsRetainedPreparedVMID(t *testing.T) {
+	backend, client, req := fixedProxmoxFixture(t)
+	client.fixedCreateErr = fmt.Errorf("clone response lost")
+	client.nextVMID = 102
+	if _, err := backend.Acquire(t.Context(), req); err == nil {
+		t.Fatal("expected ambiguous clone failure")
+	}
+	before := readFixedProxmoxClaim(t, req.RequestedLeaseID)
+	if before.CloudID != "102" || before.FixedCreateIntent.State != "prepared" {
+		t.Fatalf("expected retained prepared claim: %+v", before)
+	}
+	client.fixedCreateErr = nil
+	req.RequestedLeaseID, req.RequestedSlug = "cbx_aaaaaaaaaaaa", "replacement"
+	lease, err := backend.Acquire(t.Context(), req)
+	if err != nil || lease.Server.CloudID != "103" || client.fixedCreates != 2 || client.nextCalls != 2 {
+		t.Fatalf("fresh fixed ID: err=%v VMID=%s clones=%d nextid calls=%d", err, lease.Server.CloudID, client.fixedCreates, client.nextCalls)
+	}
+	if !reflect.DeepEqual(before, readFixedProxmoxClaim(t, before.LeaseID)) {
+		t.Fatal("fresh allocation changed retained claim")
+	}
+}
+
+func TestProxmoxFixedReservationRetainsClaimsOnInventoryFailureOrExhaustion(t *testing.T) {
+	for _, scenario := range []string{"inventory failure", "exhausted"} {
+		t.Run(scenario, func(t *testing.T) {
+			backend, client, req := fixedProxmoxFixture(t)
+			client.nextVMID = 999999999
+			client.fixedCreateErr = fmt.Errorf("clone response lost")
+			if _, err := backend.Acquire(t.Context(), req); err == nil {
+				t.Fatal("expected clone failure")
+			}
+			before := readFixedProxmoxClaim(t, req.RequestedLeaseID)
+			client.fixedCreateErr = nil
+			if scenario == "inventory failure" {
+				client.vmidsErr = fmt.Errorf("inventory unavailable")
+			}
+			req.RequestedLeaseID, req.RequestedSlug = "cbx_aaaaaaaaaaaa", "replacement"
+			_, err := backend.Acquire(t.Context(), req)
+			want := "crabbox stop --provider proxmox --id " + before.LeaseID + " --force"
+			if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "999999999") {
+				t.Fatalf("missing actionable recovery: %v", err)
+			}
+			if scenario == "inventory failure" && !strings.Contains(err.Error(), "inventory unavailable") {
+				t.Fatalf("lost inventory error: %v", err)
+			}
+			if client.fixedCreates != 1 || client.deleteCalls != 0 || len(client.setLabels) != 0 || !reflect.DeepEqual(before, readFixedProxmoxClaim(t, before.LeaseID)) {
+				t.Fatal("failed reservation changed previous custody or provider resources")
+			}
+			fresh := readFixedProxmoxClaim(t, req.RequestedLeaseID)
+			if fresh.CloudID != "" || len(fresh.FixedCreateIntent.Attempt) != 0 {
+				t.Fatal("failed reservation published a clone attempt")
 			}
 		})
+	}
+}
+
+func TestProxmoxFixedReservationSkipsAllLocalBindingsAndClusterGuests(t *testing.T) {
+	backend, client, req := fixedProxmoxFixture(t)
+	client.nextVMID = 102
+	for i, claim := range []core.LeaseClaim{
+		{LeaseID: "cbx_aaaaaaaaaaaa", Provider: "proxmox", CloudID: "102"},
+		{LeaseID: "cbx_bbbbbbbbbbbb", Provider: "proxmox", CloudNumericID: 103},
+		{LeaseID: "cbx_cccccccccccc", Provider: "proxmox", CloudID: "104", ProviderScope: "endpoint:https://pve.example.test:8006|node:pve2"},
+	} {
+		err := core.WithDurableLeaseClaimLock(claim.LeaseID, func(current *core.LeaseClaim, _ bool, persist func() error) error {
+			*current = claim
+			return persist()
+		})
+		if err != nil {
+			t.Fatalf("claim %d: %v", i, err)
+		}
+	}
+	before, err := core.ListLeaseClaims()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Untagged guests, templates and containers also occupy the VMID namespace.
+	client.vmids = []int{105, 106, 107}
+	lease, err := backend.Acquire(t.Context(), req)
+	if err != nil || lease.Server.CloudID != "108" || client.fixedCreates != 1 {
+		t.Fatalf("reservation: err=%v VMID=%s clones=%d", err, lease.Server.CloudID, client.fixedCreates)
+	}
+	for _, claim := range before {
+		if !reflect.DeepEqual(claim, readFixedProxmoxClaim(t, claim.LeaseID)) {
+			t.Fatal("reservation changed another local claim")
+		}
 	}
 }

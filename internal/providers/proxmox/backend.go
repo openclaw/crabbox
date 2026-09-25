@@ -23,6 +23,7 @@ type proxmoxClient interface {
 	ListCrabboxServersCluster(context.Context) ([]core.Server, error)
 	CreateServer(context.Context, core.Config, string, string, string, bool) (core.Server, error)
 	NextVMID(context.Context) (int, error)
+	ListVMIDsInCluster(context.Context) ([]int, error)
 	CreateServerWithVMID(context.Context, core.Config, string, string, string, bool, int, map[string]string, func(core.Server) error) (core.Server, error)
 	GetServer(context.Context, string) (core.Server, error)
 	GetServerOnNode(context.Context, string, string) (core.Server, error)

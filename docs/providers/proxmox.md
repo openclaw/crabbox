@@ -384,6 +384,10 @@ For an ordinary acquire, step 2 remains a per-create `/cluster/nextid` lookup.
 For `warmup --lease-id`, Crabbox instead persists the normalized create intent,
 selected VMID, source node, and cluster scope in the fixed lease claim before
 submitting the clone, then passes that exact VMID as the clone API's `newid`.
+Starting at Proxmox's `nextid`, fixed-ID reservation skips VMIDs bound by any
+live local Proxmox claim and verifies the next free VMID against complete cluster
+inventory, including unlabelled VMs, templates, and containers. Released fixed-ID
+receipts no longer reserve a VMID. Other claims are never dropped or adopted.
 An identical replay inspects the persisted VMID and adopts only the VM whose
 lease labels, intent fingerprint, cluster scope, VMID, and native `vmgenid`
 match. Slugs are never replay authority. A changed intent, copied labels,
@@ -453,11 +457,11 @@ VM before recovery. A bound generation can be released with ordinary `stop`;
 an existing VM without a bound generation requires manual inspection and cannot
 be adopted or deleted by name.
 
-For an older prepared claim left by a rejected clone, or an inspected attempt
-whose VM is absent, use:
+After a 403 on an older version, restore permissions and inspect the clone task,
+then clear each retained prepared claim whose VM is absent with its own lease ID:
 
 ```sh
-crabbox stop --force --provider proxmox --id cbx_123456abcdef
+crabbox stop --provider proxmox --id cbx_123456abcdef --force
 ```
 
 Recovery requires the original cluster/node scope, a canonical fixed lease ID,
@@ -469,6 +473,10 @@ propagated `VM.Audit` on `/vms`; missing permissions, unreadable inventory,
 active clones, or any matching VM retain the claim. Recovery never deletes a
 VM. Success removes the stored lease key and leaves a terminal receipt, freeing
 the VMID for a new lease ID while keeping the recovered fixed ID single-use.
+This checked recovery also applies to older claims without rejection evidence.
+Fixed IDs no longer collide with locally bound VMIDs: new requests skip those
+VMIDs. If no alternative can be reserved, the error names the conflicting claim
+and its exact recovery command; unreadable inventory always prevents allocation.
 
 `proxmox apiUrl is required` / `proxmox tokenId/tokenSecret are required` /
 `proxmox node is required` / `proxmox templateId is required`

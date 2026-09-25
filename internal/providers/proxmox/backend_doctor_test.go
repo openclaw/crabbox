@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,8 @@ type fakeProxmoxDoctorClient struct {
 	clusterExistsByID     map[string]bool
 	clusterExistsErr      error
 	activeCloneErr        error
+	vmids                 []int
+	vmidsErr              error
 	setLabels             []map[string]string
 	labelNodes            []string
 	readiness             []core.ProxmoxReadinessCheck
@@ -91,6 +94,15 @@ func (c *fakeProxmoxDoctorClient) CreateServer(_ context.Context, _ core.Config,
 
 func (c *fakeProxmoxDoctorClient) NextVMID(context.Context) (int, error) {
 	return 101, nil
+}
+
+func (c *fakeProxmoxDoctorClient) ListVMIDsInCluster(context.Context) ([]int, error) {
+	ids := append([]int(nil), c.vmids...)
+	for _, server := range append(append([]core.Server(nil), c.servers...), c.clusterServers...) {
+		id, _ := strconv.Atoi(server.CloudID)
+		ids = append(ids, id)
+	}
+	return ids, c.vmidsErr
 }
 
 func (c *fakeProxmoxDoctorClient) CreateServerWithVMID(ctx context.Context, cfg core.Config, publicKey, leaseID, slug string, keep bool, _ int, _ map[string]string, _ func(core.Server) error) (core.Server, error) {

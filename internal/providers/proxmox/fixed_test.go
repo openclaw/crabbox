@@ -6,6 +6,7 @@ import (
 	"io"
 	"maps"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -41,10 +42,10 @@ func (c *fixedProxmoxClient) CreateServerWithVMID(_ context.Context, _ core.Conf
 	}
 	server := core.Server{
 		Provider:    "proxmox",
-		CloudID:     "417",
+		CloudID:     strconv.Itoa(vmid),
 		HostID:      "pve1",
 		ImmutableID: fixedTestGeneration,
-		ID:          417,
+		ID:          int64(vmid),
 		Name:        "crabbox-" + slug,
 		Labels:      maps.Clone(labels),
 	}

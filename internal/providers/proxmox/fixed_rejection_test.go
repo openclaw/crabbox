@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -178,6 +179,94 @@ func TestProxmoxFixedForceRecoveryPreparedClaim(t *testing.T) {
 				t.Fatalf("unsafe recovery changed custody: %v", err)
 			}
 			if client.deleteCalls != 0 || client.fixedCreates != 1 {
+				t.Fatal("recovery mutated provider resources")
+			}
+		})
+	}
+}
+
+func TestProxmoxFixedLegacyPreparedRecoveryThroughHTTPAPI(t *testing.T) {
+	for _, scenario := range []string{"absent", "VMID present", "clone name present", "inventory error", "exact inventory error", "filtered", "active clone"} {
+		t.Run(scenario, func(t *testing.T) {
+			backend, _, req := fixedProxmoxFixture(t)
+			// The saved v1 format has no journal or rejection-evidence fields.
+			data, err := os.ReadFile("../../cli/testdata/fixed-lease-v1/proxmox.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var legacy core.LeaseClaim
+			if err := json.Unmarshal(data, &legacy); err != nil {
+				t.Fatal(err)
+			}
+			legacy.CloudImmutableID, legacy.SSHHost = "", ""
+			legacy.FixedCreateIntent.State = "prepared"
+			delete(legacy.Labels, "state")
+			inventoryReads, exactReads, mutations := 0, 0, 0
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					mutations++
+					http.Error(w, "unexpected mutation", 500)
+					return
+				}
+				var data any
+				switch r.URL.Path {
+				case "/api2/json/access/permissions":
+					path := r.URL.Query().Get("path")
+					grants := map[string]int{"VM.Audit": 1, "Sys.Audit": 1}
+					if scenario == "filtered" {
+						grants["VM.Audit"] = 0
+					}
+					if path == "/vms/417" {
+						exactReads++
+					}
+					data = map[string]any{path: grants}
+				case "/api2/json/nodes/pve1/tasks":
+					data = []any{}
+					if scenario == "active clone" {
+						data = []any{map[string]string{"type": "qmclone", "upid": "UPID:fixture"}}
+					}
+				case "/api2/json/cluster/resources":
+					inventoryReads++
+					if scenario == "inventory error" || scenario == "exact inventory error" && exactReads != 0 {
+						http.Error(w, "inventory unavailable", http.StatusServiceUnavailable)
+						return
+					}
+					data = []any{}
+					if scenario == "VMID present" {
+						data = []any{map[string]any{"vmid": 417, "name": "unrelated", "node": "pve2", "type": "lxc"}}
+					}
+					if scenario == "clone name present" {
+						data = []any{map[string]any{"vmid": 418, "name": core.LeaseProviderName(legacy.LeaseID, legacy.Slug), "node": "pve2", "type": "lxc"}}
+					}
+				default:
+					t.Errorf("unexpected request: %s", r.URL.Path)
+					http.Error(w, "unexpected read", 500)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+			}))
+			t.Cleanup(api.Close)
+			backend.Cfg.Proxmox.APIURL = api.URL
+			legacy.ProviderScope = core.ProviderClaimScope("proxmox", backend.Cfg)
+			legacy.FixedCreateIntent.ProviderScope = legacy.ProviderScope
+			if err := core.WithDurableLeaseClaimLock(req.RequestedLeaseID, func(claim *core.LeaseClaim, _ bool, persist func() error) error {
+				*claim = legacy
+				return persist()
+			}); err != nil {
+				t.Fatal(err)
+			}
+			before := readFixedProxmoxClaim(t, legacy.LeaseID)
+			newClient = func(cfg core.Config) (proxmoxClient, error) { return core.NewProxmoxClient(cfg) }
+			err = backend.ReclaimAndStop(t.Context(), core.StopRequest{ID: legacy.LeaseID})
+			after := readFixedProxmoxClaim(t, legacy.LeaseID)
+			if scenario == "absent" {
+				if err != nil || after.FixedCreateIntent.State != "released" || exactReads == 0 || inventoryReads < 3 {
+					t.Fatalf("legacy absence recovery: err=%v state=%s exact=%d inventories=%d", err, after.FixedCreateIntent.State, exactReads, inventoryReads)
+				}
+			} else if err == nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("unsafe legacy recovery: err=%v", err)
+			}
+			if mutations != 0 {
 				t.Fatal("recovery mutated provider resources")
 			}
 		})
