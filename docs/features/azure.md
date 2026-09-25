@@ -44,7 +44,6 @@ dynamic-sessions`; see the [Provider Reference](../providers/README.md).
 crabbox warmup --provider azure --class beast
 crabbox warmup --provider azure --arch arm64 --class fast
 crabbox warmup --provider azure --class beast --azure-os-disk ephemeral
-crabbox warmup --provider azure --class beast --azure-os-disk ephemeral-preview
 crabbox run --provider azure --class standard -- pnpm test
 crabbox warmup --provider azure --target windows --class standard
 crabbox warmup --provider azure --target windows --desktop --class standard
@@ -130,12 +129,17 @@ SSH, Windows, and loopback-only VNC credentials. A per-fork deny-all network
 security group keeps the copied VM unreachable until credential rotation
 finishes, then Crabbox attaches the normal shared SSH allowlist.
 
-`azure.osDisk: ephemeral-preview` opts into Azure's public-preview
-full-caching mode for ephemeral OS disks. Crabbox sends Compute API
-`2025-04-01` with `diffDiskSettings.enableFullCaching: true`; for known
-Crabbox Azure fallback lists it skips 2-core, 4-core, and no-local-disk SKUs
-that the preview cannot support. `azure.osDisk: auto` is accepted for
-compatibility and resolves to managed.
+`azure.osDisk: ephemeral` selects generally available full caching. Crabbox
+sets `diffDiskSettings.enableFullCaching: true` with Compute API `2026-04-01`.
+Full caching requires at least eight active vCPUs and local storage greater than twice
+the OS disk size plus 1 GiB. Supported families are N/L/M/H, D/DC/E/Eb/EC v5-v7,
+and F v6-v7. Azure validates local storage capacity for the selected image.
+Crabbox filters known unsupported sizes from class fallback lists.
+See [Microsoft's prerequisites](https://learn.microsoft.com/en-us/azure/virtual-machines/ephemeral-os-disks#prerequisites-for-full-caching).
+
+`ephemeral-preview` is removed. Replace it with `ephemeral` in config, flags,
+and environment variables. Existing `ephemeral` settings now request full caching;
+small VMs and Fsv2 no longer qualify. `auto` still resolves to `managed`.
 
 Snapshot performance can be selected explicitly without changing those
 defaults. `azure.snapshotSKU` / `--azure-snapshot-sku` controls the storage SKU

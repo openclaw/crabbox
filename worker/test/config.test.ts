@@ -11,6 +11,7 @@ import {
   awsInstanceTypeCandidatesForClass,
   awsInstanceTypeCandidatesForTargetClass,
   azureARM64VMSizeCandidatesForClass,
+  azureFullCachingSeriesEligible,
   azureWindowsVMSizeCandidatesForClass,
   azureVMSizeCandidatesForArchitectureClass,
   azureVMSizeCandidatesForClass,
@@ -28,6 +29,11 @@ import { gcpProvisioningCandidatesForConfig } from "../src/gcp";
 import { hetznerProvisioningCandidatesForConfig } from "../src/hetzner";
 
 describe("machine class config", () => {
+  it("uses active vCPUs for constrained Azure full-caching sizes", () => {
+    expect(azureFullCachingSeriesEligible("Standard_E8-4ds_v5")).toBe(false);
+    expect(azureFullCachingSeriesEligible("Standard_E16-8ds_v5")).toBe(true);
+  });
+
   const classCandidateSelectors = [
     serverTypeCandidatesForClass,
     (value: string) => awsInstanceTypeCandidatesForArchitectureClass("amd64", value),
@@ -1222,12 +1228,12 @@ describe("lease config", () => {
     expect(config.azureImage).toBe("Canonical:ubuntu-26_04-lts:server-arm64:latest");
   });
 
-  it("filters Azure defaults for ephemeral-preview full caching", () => {
+  it("filters Azure defaults for ephemeral full caching", () => {
     const arm = leaseConfig({
       provider: "azure",
       architecture: "arm64",
       class: "standard",
-      azureOSDisk: "ephemeral-preview",
+      azureOSDisk: "ephemeral",
       sshPublicKey: "ssh-ed25519 test",
     });
     expect(arm.serverType).toBe("Standard_D32pds_v6");
@@ -1235,7 +1241,7 @@ describe("lease config", () => {
       provider: "azure",
       target: "windows",
       class: "standard",
-      azureOSDisk: "ephemeral-preview",
+      azureOSDisk: "ephemeral",
       sshPublicKey: "ssh-ed25519 test",
     });
     expect(windows.serverType).toBe("Standard_D8ads_v6");
@@ -1245,7 +1251,7 @@ describe("lease config", () => {
       class: "standard",
       azureSnapshot:
         "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/snapshots/checkpoint-azure",
-      azureOSDisk: "ephemeral-preview",
+      azureOSDisk: "ephemeral",
       sshPublicKey: "ssh-ed25519 test",
     });
     expect(snapshot.serverType).toBe("Standard_D2ads_v6");
@@ -1455,6 +1461,13 @@ describe("lease config", () => {
   });
 
   it("normalizes Azure OS disk requests", () => {
+    expect(() =>
+      leaseConfig({
+        provider: "azure",
+        azureOSDisk: "ephemeral-preview",
+        sshPublicKey: "ssh-ed25519 test",
+      }),
+    ).toThrow("azureOSDisk=ephemeral-preview has been removed; use ephemeral");
     expect(
       leaseConfig({
         provider: "azure",
@@ -1465,10 +1478,17 @@ describe("lease config", () => {
     expect(
       leaseConfig({
         provider: "azure",
-        azureOSDisk: "ephemeral-preview",
+        azureOSDisk: "ephemeral",
         sshPublicKey: "ssh-ed25519 test",
       }).azureOSDisk,
-    ).toBe("ephemeral-preview");
+    ).toBe("ephemeral");
+    expect(
+      leaseConfig({
+        provider: "azure",
+        azureOSDisk: " EPHEMERAL ",
+        sshPublicKey: "ssh-ed25519 test",
+      }).azureOSDisk,
+    ).toBe("ephemeral");
     expect(
       leaseConfig({
         provider: "azure",
@@ -1482,7 +1502,7 @@ describe("lease config", () => {
         azureOSDisk: "premium",
         sshPublicKey: "ssh-ed25519 test",
       }),
-    ).toThrow("azureOSDisk must be auto, managed, ephemeral, or ephemeral-preview");
+    ).toThrow("azureOSDisk must be auto, managed, or ephemeral");
   });
 
   it("uses Worker Azure OS disk defaults when the request omits one", () => {

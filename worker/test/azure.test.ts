@@ -4681,7 +4681,12 @@ describe("azure provider", () => {
     expect(vmBody?.properties.storageProfile.osDisk.diffDiskSettings).toBeUndefined();
   });
 
-  it("uses full-caching ephemeral OS disks for azureOSDisk=ephemeral-preview", async () => {
+  it.each([
+    ["ephemeral", "Standard_D8ads_v6"],
+    ["ephemeral", "Standard_D8ads_v7"],
+    ["ephemeral", "Standard_F8ads_v6"],
+    ["ephemeral", "Standard_NC8as_T4_v3"],
+  ] as const)("uses full caching for %s on %s", async (azureOSDisk, serverType) => {
     const client = new AzureClient(baseEnv);
     const bodies: unknown[] = [];
     const vmAPIVersions: string[] = [];
@@ -4723,7 +4728,7 @@ describe("azure provider", () => {
             JSON.stringify({
               value: [
                 {
-                  name: "Standard_D8ads_v6",
+                  name: serverType,
                   resourceType: "virtualMachines",
                   capabilities: [{ name: "EphemeralOSDiskSupported", value: "True" }],
                 },
@@ -4748,7 +4753,7 @@ describe("azure provider", () => {
               tags: { crabbox: "true" },
               properties: {
                 provisioningState: "Succeeded",
-                hardwareProfile: { vmSize: "Standard_D8ads_v6" },
+                hardwareProfile: { vmSize: serverType },
               },
             }),
             { status: 200 },
@@ -4760,13 +4765,13 @@ describe("azure provider", () => {
     client.fetcher = fakeFetch;
 
     await client.createServerWithFallback(
-      testLeaseConfig({ azureOSDisk: "ephemeral-preview", serverType: "Standard_D8ads_v6" }),
+      testLeaseConfig({ azureOSDisk, serverType }),
       "cbx_123456789abc",
       "blue-lobster",
       "owner",
     );
 
-    expect(vmAPIVersions).toContain("2025-04-01");
+    expect(vmAPIVersions).toContain("2026-04-01");
     const vmBody = bodies.find(
       (body): body is { properties: { storageProfile: { osDisk: Record<string, unknown> } } } =>
         typeof body === "object" &&
@@ -4782,7 +4787,7 @@ describe("azure provider", () => {
     });
   });
 
-  it("skips stale non-explicit defaults for azureOSDisk=ephemeral-preview fallback", async () => {
+  it("skips stale non-explicit defaults for azureOSDisk=ephemeral fallback", async () => {
     const client = new AzureClient(baseEnv);
     const vmSizes: string[] = [];
     const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -4866,7 +4871,7 @@ describe("azure provider", () => {
     await client.createServerWithFallback(
       testLeaseConfig({
         target: "windows",
-        azureOSDisk: "ephemeral-preview",
+        azureOSDisk: "ephemeral",
         serverType: "Standard_D2ads_v6",
         serverTypeExplicit: false,
       }),
@@ -4878,53 +4883,75 @@ describe("azure provider", () => {
     expect(vmSizes).toEqual(["Standard_D8ads_v6"]);
   });
 
-  it("rejects unsupported azureOSDisk=ephemeral-preview SKUs before allocating network resources", async () => {
+  it("rejects a persisted preview mode before allocating network resources", async () => {
     const client = new AzureClient(baseEnv);
-    const calls: string[] = [];
-    const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const url = new URL(typeof input === "string" ? input : input.toString());
-      calls.push(`${init?.method ?? "GET"} ${url.pathname}`);
-      if (isAzureLoginURL(url.toString())) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), { status: 200 }),
-        );
-      }
-      if (url.pathname.endsWith("/providers/Microsoft.Compute/skus")) {
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              value: [
-                {
-                  name: "Standard_D4ads_v6",
-                  resourceType: "virtualMachines",
-                  capabilities: [{ name: "EphemeralOSDiskSupported", value: "True" }],
-                },
-              ],
-            }),
-            { status: 200 },
-          ),
-        );
-      }
-      return Promise.resolve(new Response("{}", { status: 200 }));
-    }) as typeof fetch;
-    client.fetcher = fakeFetch;
-
+    const fetcher = vi.fn<typeof fetch>();
+    client.fetcher = fetcher;
     await expect(
       client.createServerWithFallback(
-        testLeaseConfig({ azureOSDisk: "ephemeral-preview", serverType: "Standard_D4ads_v6" }),
+        testLeaseConfig({ azureOSDisk: "ephemeral-preview" as LeaseConfig["azureOSDisk"] }),
         "cbx_123456789abc",
-        "bad-preview",
+        "removed-mode",
         "owner",
       ),
-    ).rejects.toThrow(/azureOSDisk=ephemeral-preview requires/);
-    expect(calls.some((call) => call.includes("/providers/Microsoft.Compute/skus"))).toBe(true);
-    expect(calls.some((call) => call.includes("/resourceGroups/crabbox-leases"))).toBe(false);
-    expect(calls.some((call) => call.includes("/virtualNetworks/"))).toBe(false);
-    expect(calls.some((call) => call.includes("/networkSecurityGroups/"))).toBe(false);
-    expect(calls.some((call) => call.includes("/publicIPAddresses/"))).toBe(false);
-    expect(calls.some((call) => call.includes("/networkInterfaces/"))).toBe(false);
-    expect(calls.some((call) => call.includes("/virtualMachines/"))).toBe(false);
+    ).rejects.toThrow("has been removed; use ephemeral");
+    expect(fetcher).not.toHaveBeenCalled();
   });
+
+  it.each(["Standard_D4ads_v6", "Standard_F32s_v2", "Standard_E8-4ds_v5"])(
+    "rejects unsupported ephemeral SKU %s before allocating network resources",
+    async (serverType) => {
+      const client = new AzureClient(baseEnv);
+      const calls: string[] = [];
+      const fakeFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(typeof input === "string" ? input : input.toString());
+        calls.push(`${init?.method ?? "GET"} ${url.pathname}`);
+        if (isAzureLoginURL(url.toString())) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ access_token: "tkn", expires_in: 3600 }), {
+              status: 200,
+            }),
+          );
+        }
+        if (url.pathname.endsWith("/providers/Microsoft.Compute/skus")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                value: [
+                  {
+                    name: "Standard_D4ads_v6",
+                    resourceType: "virtualMachines",
+                    capabilities: [{ name: "EphemeralOSDiskSupported", value: "True" }],
+                  },
+                ],
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+      client.fetcher = fakeFetch;
+
+      await expect(
+        client.createServerWithFallback(
+          testLeaseConfig({ azureOSDisk: "ephemeral", serverType }),
+          "cbx_123456789abc",
+          "bad-preview",
+          "owner",
+        ),
+      ).rejects.toThrow(
+        /azureOSDisk=ephemeral requires.*at least 8 vCPUs.*--azure-os-disk managed/,
+      );
+      expect(calls.some((call) => call.includes("/providers/Microsoft.Compute/skus"))).toBe(true);
+      expect(calls.some((call) => call.includes("/resourceGroups/crabbox-leases"))).toBe(false);
+      expect(calls.some((call) => call.includes("/virtualNetworks/"))).toBe(false);
+      expect(calls.some((call) => call.includes("/networkSecurityGroups/"))).toBe(false);
+      expect(calls.some((call) => call.includes("/publicIPAddresses/"))).toBe(false);
+      expect(calls.some((call) => call.includes("/networkInterfaces/"))).toBe(false);
+      expect(calls.some((call) => call.includes("/virtualMachines/"))).toBe(false);
+    },
+  );
 
   it("rejects azureOSDisk=ephemeral when the selected SKU cannot support it", async () => {
     const client = new AzureClient(baseEnv);
@@ -5055,7 +5082,7 @@ describe("azure provider", () => {
       testLeaseConfig({
         azureSnapshot:
           "/subscriptions/sub/resourceGroups/crabbox-leases/providers/Microsoft.Compute/snapshots/checkpoint-azure",
-        azureOSDisk: "ephemeral-preview",
+        azureOSDisk: "ephemeral",
         capacityMarket: "on-demand",
         serverType: "Standard_D2ads_v6",
         serverTypeExplicit: false,
@@ -6178,6 +6205,7 @@ describe("azure provider", () => {
   });
 
   it("uses a conservative ephemeral full-caching fallback", () => {
+    expect(azureSupportsEphemeralFullCaching("Standard_F32s_v2")).toBe(false);
     expect(azureSupportsEphemeralFullCaching("Standard_D2ads_v6")).toBe(false);
     expect(azureSupportsEphemeralFullCaching("Standard_D4ads_v6")).toBe(false);
     expect(azureSupportsEphemeralFullCaching("Standard_D8ads_v6")).toBe(true);

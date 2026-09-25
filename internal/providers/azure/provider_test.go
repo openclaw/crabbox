@@ -9,6 +9,28 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func TestAzureRejectsRemovedDiskMode(t *testing.T) {
+	for _, source := range []string{"config", "flag"} {
+		t.Run(source, func(t *testing.T) {
+			cfg := core.Config{Provider: "azure", Azure: core.AzureConfig{Backend: "vm"}}
+			if source == "config" {
+				cfg.Azure.OSDisk = "ephemeral-preview"
+			}
+			fs := flag.NewFlagSet("migration", flag.ContinueOnError)
+			values := (Provider{}).RegisterFlags(fs, cfg)
+			if source == "flag" {
+				if err := fs.Parse([]string{"--azure-os-disk=ephemeral-preview"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := (Provider{}).ApplyFlags(&cfg, fs, values)
+			if err == nil || !strings.Contains(err.Error(), "has been removed; use ephemeral") || !strings.Contains(err.Error(), "--azure-os-disk ephemeral") {
+				t.Fatalf("expected actionable migration error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestAzureFlatInputTracking(t *testing.T) {
 	for _, tc := range []struct {
 		name, raw     string

@@ -114,7 +114,7 @@ export interface LeaseConfig {
   exposedPorts: string[];
 }
 
-export type AzureOSDiskMode = "managed" | "ephemeral" | "ephemeral-preview";
+export type AzureOSDiskMode = "managed" | "ephemeral";
 export type Architecture = "amd64" | "arm64";
 
 export interface LeaseConfigDefaults {
@@ -569,6 +569,8 @@ export function awsPromotedAMIConfigKey(region: string, serverType: string): str
   return `${region.trim().toLowerCase()}\0${serverType.trim().toLowerCase()}`;
 }
 
+export class InvalidAzureOSDiskModeError extends Error {}
+
 export function normalizeAzureOSDiskMode(value: string | undefined): AzureOSDiskMode {
   const normalized = (value ?? "").trim().toLowerCase();
   switch (normalized) {
@@ -580,9 +582,11 @@ export function normalizeAzureOSDiskMode(value: string | undefined): AzureOSDisk
     case "ephemeral":
       return "ephemeral";
     case "ephemeral-preview":
-      return "ephemeral-preview";
+      throw new InvalidAzureOSDiskModeError(
+        "azureOSDisk=ephemeral-preview has been removed; use ephemeral (--azure-os-disk ephemeral)",
+      );
     default:
-      throw new Error("azureOSDisk must be auto, managed, ephemeral, or ephemeral-preview");
+      throw new InvalidAzureOSDiskModeError("azureOSDisk must be auto, managed, or ephemeral");
   }
 }
 
@@ -923,7 +927,7 @@ export function azureVMSizeCandidatesForTargetClass(
   } else {
     candidates = providerClassLiteralCandidates(machineClass);
   }
-  if (azureOSDisk === "ephemeral-preview") {
+  if (azureOSDisk === "ephemeral") {
     return azureEphemeralFullCachingCandidates(target, candidates, architecture, windowsMode);
   }
   return candidates;
@@ -1064,18 +1068,28 @@ export function azureSupportsEphemeralOS(vmSize: string): boolean {
 }
 
 export function azureSupportsEphemeralFullCaching(vmSize: string): boolean {
-  if (!azureSupportsEphemeralOS(vmSize)) return false;
+  return azureSupportsEphemeralOS(vmSize) && azureFullCachingSeriesEligible(vmSize);
+}
+
+export function azureFullCachingSeriesEligible(vmSize: string): boolean {
   const cores = azureVMSizeVCPUCount(vmSize);
-  return cores !== undefined && cores > 4;
+  return (
+    cores !== undefined &&
+    cores >= 8 &&
+    /^standard_(?:[nlmh][a-z]*[0-9]+[^ ]*|[de][a-z]*[0-9]+[^ ]*_v[567]|f[a-z]*[0-9]+[^ ]*_v[67])$/.test(
+      vmSize.trim().toLowerCase(),
+    )
+  );
 }
 
 function azureVMSizeVCPUCount(vmSize: string): number | undefined {
   const match = vmSize
     .trim()
     .toLowerCase()
-    .match(/^standard_[a-z]+(\d+)/);
+    .match(/^standard_[a-z]+(\d+)(?:-(\d+))?/);
   if (!match?.[1]) return undefined;
-  return Number.parseInt(match[1], 10);
+  // Constrained sizes put the active vCPU count after the base count.
+  return Number.parseInt(match[2] ?? match[1], 10);
 }
 
 function azureEphemeralFullCachingCandidates(
