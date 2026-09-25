@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -223,5 +224,69 @@ func TestRunAllowlistedEnvNeverInSSHCommands(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunCommandEnvAfterEmptyReplacementList(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX recording SSH fixture")
+	}
+	for _, value := range []string{"", "append-canary ' \" $literal `literal`\nsecond\rline ☃ "} {
+		for _, appendEnv := range []bool{false, true} {
+			t.Run(fmt.Sprintf("empty=%t/append=%t", value == "", appendEnv), func(t *testing.T) {
+				clearConfigEnv(t)
+				dir := t.TempDir()
+				t.Chdir(dir)
+				isolateRunTestUserDirs(t, dir)
+				nativePath := os.Getenv("PATH")
+				payloadPath := filepath.Join(dir, "env-upload")
+				t.Setenv("CRABBOX_FAKE_ENV_UPLOAD", payloadPath)
+				logPath := installRecordingSSH(t, dir, `
+case "$match" in
+  *'cat > '*'/values.sh'*) /bin/cat > "$CRABBOX_FAKE_ENV_UPLOAD"; exit 0 ;;
+esac
+`)
+				t.Setenv("CRABBOX_CONFIG", "")
+				t.Setenv("CRABBOX_FAKE_SSH_PORT", "22")
+				t.Setenv("CRABBOX_FAKE_SSH_PROXY", "1")
+				t.Setenv("BUILD_FLAVOR", value)
+				t.Setenv("CI", "cleared")
+				t.Setenv("NODE_OPTIONS", "cleared")
+				writeReplacementListConfig(t, "crabbox.yaml", "env:\n  allow: [CI, NODE_OPTIONS, BUILD_FLAVOR]\n")
+				writeReplacementListConfig(t, ".crabbox.yaml", "env:\n  allow: []\n")
+				args := []string{"--provider", "run-env-profile-test", "--no-sync", "--no-hydrate"}
+				if appendEnv {
+					args = append(args, "--allow-env", "BUILD_FLAVOR")
+				}
+				args = append(args, "--", "true")
+				var stdout, stderr bytes.Buffer
+				if err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(t.Context(), args); err != nil {
+					t.Fatalf("run error=%v\n%s", err, stderr.String())
+				}
+				if !appendEnv {
+					if _, err := os.Stat(payloadPath); !os.IsNotExist(err) {
+						t.Fatalf("cleared allowlist uploaded an environment: %v", err)
+					}
+					return
+				}
+				// Execute the actual upload in a clean child environment so the local
+				// BUILD_FLAVOR cannot make a missing or corrupted handoff pass.
+				cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", `. "$1"
+test "${BUILD_FLAVOR+x}" = x && test "${CI+x}" != x && test "${NODE_OPTIONS+x}" != x || exit 41
+printf '%s' "$BUILD_FLAVOR"`, "sh", payloadPath)
+				cmd.Env = []string{"PATH=" + nativePath}
+				got, err := cmd.CombinedOutput()
+				if err != nil || string(got) != value {
+					t.Fatalf("appended value did not round trip byte-for-byte: %v", err)
+				}
+				commands, err := os.ReadFile(logPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(commands)+stdout.String()+stderr.String(), "append-canary") {
+					t.Fatal("appended value leaked into argv or diagnostics")
+				}
+			})
+		}
 	}
 }

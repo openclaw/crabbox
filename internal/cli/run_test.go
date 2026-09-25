@@ -5637,7 +5637,12 @@ func TestRunCommandEmptyReplacementLists(t *testing.T) {
 			dir := t.TempDir()
 			t.Chdir(dir)
 			t.Setenv("CRABBOX_CONFIG", "")
-			logPath := installRecordingSSH(t, dir)
+			// Allowlist assertions observe stdin uploads as well as command strings.
+			logPath := installRecordingSSH(t, dir, `
+case "$match" in
+  *'cat > '*'/values.sh'*) /bin/cat >> "$CRABBOX_FAKE_SSH_LOG"; exit 0 ;;
+esac
+`)
 			requestPath := filepath.Join(dir, "filesystem.request")
 			t.Setenv("CRABBOX_FAKE_SSH_FILESYSTEM_PATH", nativePath)
 			t.Setenv("CRABBOX_FAKE_SSH_FILESYSTEM_REQUEST", requestPath)
