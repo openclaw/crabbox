@@ -571,7 +571,14 @@ func shouldCleanupServer(server Server, now time.Time) (bool, string) {
 		return false, "missing labels"
 	}
 	if strings.EqualFold(labels["keep"], "true") {
-		return false, "keep=true"
+		// Retention across runs does not disable the recorded lifetime policy.
+		expiresAt, ok := cleanupExpiry(labels)
+		if !ok {
+			return false, "missing expires_at"
+		}
+		if !now.After(expiresAt) {
+			return false, "not expired"
+		}
 	}
 	state := strings.ToLower(labels["state"])
 	switch state {

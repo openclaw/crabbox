@@ -84,7 +84,8 @@ What cleanup does depends on the selected provider:
 Selection is label-driven. Cleanup reads the `keep`, `state`, `expires_at`, and
 `ttl` labels written when the machine was created. The decision is conservative:
 
-- skip machines labeled `keep=true`;
+- `keep=true` retains machines across runs, but does not bypass recorded expiry;
+  kept machines without valid expiry metadata, or before expiry, are skipped;
 - for `running` or `provisioning` machines, skip until well past expiry — delete
   only once the expiry time plus a 12-hour stale window has elapsed;
 - for `leased`, `ready`, or `active` machines, delete once expired;
@@ -115,12 +116,12 @@ For direct machine providers, each candidate prints one decision line. `--dry-ru
 prints the same lines but makes no provider calls:
 
 ```text
-skip server id=12345 name=crabbox-blue-lobster reason=keep=true
+skip server id=12345 name=crabbox-blue-lobster reason=not expired
 delete server id=67890 name=crabbox-amber-crab
 stop server id=11223 name=crabbox-green-heron
 ```
 
-`skip` lines include a `reason=` (for example `keep=true`, `state=running`,
+`skip` lines include a `reason=` (for example `state=running`,
 `missing expires_at`, `not expired`). Without `--dry-run`, each `delete` line is
 followed by the actual provider delete call; a failed delete returns the provider
 error and stops the sweep. Stop-only providers such as Hostinger print `stop`

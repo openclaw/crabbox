@@ -56,7 +56,7 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 	fs := newFlagSet("warmup", a.Stderr)
 	leaseFlags := registerLeaseCreateFlags(fs, defaults)
 	requestedLeaseID := fs.String("lease-id", "", "fixed lease ID for idempotent external-provider orchestration")
-	keep := fs.Bool("keep", true, "keep server after warmup")
+	keep := fs.Bool("keep", defaults.WarmupKeep, "retain server across runs; recorded idle/TTL expiry still applies (config: warmup.keep)")
 	actionsRunner := fs.Bool("actions-runner", false, "register this box as an ephemeral GitHub Actions runner")
 	reclaim := fs.Bool("reclaim", false, "claim this lease for the current repo")
 	timingJSON := fs.Bool("timing-json", false, "print final timing as JSON")
@@ -72,6 +72,9 @@ func (a App) warmupWithLeaseObserver(ctx context.Context, args []string, observe
 		return err
 	}
 	markSynthesizedFlagInputs(&cfg, a.synthesizedFlagInputs)
+	if !flagWasSet(fs, "keep") {
+		*keep = cfg.WarmupKeep
+	}
 	if err := applyLeaseCreateFlags(&cfg, fs, leaseFlags); err != nil {
 		return err
 	}

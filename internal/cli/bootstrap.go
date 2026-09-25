@@ -878,12 +878,14 @@ func cloudInitGCPExpiryGuardFiles() string {
         exit 0
       fi
       keep="$(label keep | tr '[:upper:]' '[:lower:]')"
-      if [ "$keep" = "true" ]; then
-        exit 0
-      fi
       expires_at="$(label expires_at)"
       state="$(label state | tr '[:upper:]' '[:lower:]')"
       now="$(date -u +%s)"
+      if [ "$keep" = "true" ]; then
+        if ! [[ "$expires_at" =~ ^[1-9][0-9]{0,17}$ ]] || [ "$now" -le "$expires_at" ]; then
+          exit 0
+        fi
+      fi
       delete=false
       case "$state" in
         failed|released|expired)

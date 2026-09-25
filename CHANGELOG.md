@@ -7,6 +7,7 @@
 - Preserve the final Parallels VM-query error in IP timeouts and suppress stale DHCP or clone-mode advice when current inventory is unavailable. [PR 2480](https://github.com/openclaw/crabbox/pull/2480). Thanks @steipete.
 - Preserve Lambda acquisition causes when rollback fails, report recovery-claim write failures, and block automatic fresh-allocation retries after failed cleanup. [PR 2463](https://github.com/openclaw/crabbox/pull/2463). Thanks @steipete.
 - Bound Tencent Cloud IP-readiness reads and retry waits, preserve cancellation and acquisition causes after rollback failure, and prevent cleanup errors from triggering fresh-instance retries. [PR 2464](https://github.com/openclaw/crabbox/pull/2464). Thanks @steipete.
+- Honor recorded idle/TTL expiry for kept direct cloud warmups and add `warmup.keep` configuration without changing the retention default. Fixes [#2536](https://github.com/openclaw/crabbox/issues/2536). Thanks @youssef-tharwat.
 - Join local Blacksmith sync descendants before an ordinary Testbox run returns after cancellation, preserving the lease claim until command cleanup completes. [PR 2547](https://github.com/openclaw/crabbox/pull/2547).
 - Stop Parallels IP discovery from admitting probes after the startup deadline while preserving the caller's cancellation cause. [PR 2548](https://github.com/openclaw/crabbox/pull/2548).
 

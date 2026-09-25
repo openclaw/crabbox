@@ -130,6 +130,7 @@ type Config struct {
 	explicitWorkRoot              string
 	TTL                           time.Duration
 	IdleTimeout                   time.Duration
+	WarmupKeep                    bool
 	Sync                          SyncConfig
 	Run                           RunConfig
 	EnvAllow                      []string
@@ -1552,6 +1553,7 @@ func baseConfig() Config {
 		WorkRoot:                defaultPOSIXWorkRoot,
 		TTL:                     90 * time.Minute,
 		IdleTimeout:             30 * time.Minute,
+		WarmupKeep:              true,
 		Sync: SyncConfig{
 			Source:        "git",
 			Delete:        true,
@@ -1779,6 +1781,7 @@ type fileConfig struct {
 	Shard                    *fileShardConfig                    `yaml:"shard,omitempty"`
 	Cache                    *fileCacheConfig                    `yaml:"cache,omitempty"`
 	Lease                    *fileLeaseConfig                    `yaml:"lease,omitempty"`
+	Warmup                   *fileWarmupConfig                   `yaml:"warmup,omitempty"`
 	Profiles                 map[string]fileProfileConfig        `yaml:"profiles,omitempty"`
 	Presets                  map[string]filePresetConfig         `yaml:"presets,omitempty"`
 	ProofTemplates           map[string]fileProofTemplateConfig  `yaml:"proofTemplates,omitempty"`
@@ -2224,6 +2227,10 @@ type fileProofTemplateConfig struct {
 type fileLeaseConfig struct {
 	TTL         string `yaml:"ttl,omitempty"`
 	IdleTimeout string `yaml:"idleTimeout,omitempty"`
+}
+
+type fileWarmupConfig struct {
+	Keep *bool `yaml:"keep,omitempty"`
 }
 
 type fileJobConfig struct {
@@ -2860,6 +2867,10 @@ func applyFileConfigWithTrustAndProviderSource(cfg *Config, file fileConfig, tru
 	if file.Lease != nil {
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyLeaseDuration(&cfg.TTL, file.Lease.TTL))
 		recordConfigInput(cfg, configInputGeneric, inputSource, applyLeaseDuration(&cfg.IdleTimeout, file.Lease.IdleTimeout))
+	}
+	if file.Warmup != nil && file.Warmup.Keep != nil {
+		cfg.WarmupKeep = *file.Warmup.Keep
+		recordConfigInput(cfg, configInputGeneric, inputSource, true)
 	}
 	if file.Sync != nil {
 		configInputFileString(cfg, configInputGeneric, inputSource, &cfg.Sync.Source, file.Sync.Source)
@@ -4162,6 +4173,10 @@ func applyEnv(cfg *Config) error {
 	}
 	if idleTimeout := os.Getenv("CRABBOX_IDLE_TIMEOUT"); idleTimeout != "" {
 		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, applyLeaseDuration(&cfg.IdleTimeout, idleTimeout))
+	}
+	if keep, ok := getenvBool("CRABBOX_WARMUP_KEEP"); ok {
+		cfg.WarmupKeep = keep
+		recordConfigInput(cfg, configInputGeneric, configInputEnvironment, true)
 	}
 	if market := os.Getenv("CRABBOX_CAPACITY_MARKET"); market != "" {
 		cfg.Capacity.Market = market

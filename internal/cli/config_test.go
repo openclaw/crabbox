@@ -721,6 +721,7 @@ func clearConfigEnv(t *testing.T) {
 	t.Helper()
 	isolateTestUserDirs(t)
 	for _, key := range []string{
+		"CRABBOX_WARMUP_KEEP",
 		"CRABBOX_SYNC_SOURCE",
 		"CRABBOX_SYNC_GIT_SEED_SOURCE",
 		"CRABBOX_ENV_ALLOW",

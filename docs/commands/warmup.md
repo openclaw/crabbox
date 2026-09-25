@@ -79,6 +79,22 @@ attempt so an interrupted operation can be safely replayed.
 - `--idle-timeout <duration>` releases the lease after no touch for that long.
   Default `30m`.
 
+`--keep=true` remains the default so the lease can be reused across runs. Set
+`warmup.keep: false` in user or repository config to change this default;
+`CRABBOX_WARMUP_KEEP` overrides config, and an explicit `--keep` wins over both.
+This setting applies only to `warmup`; it does not change `run --keep`.
+`lease.idleTimeout` (or top-level `idleTimeout`) configures the idle window;
+`CRABBOX_IDLE_TIMEOUT` overrides config and `--idle-timeout` overrides both.
+
+Keep is retention, not an exemption from recorded expiry. Managed coordinator
+leases expire automatically. Direct cloud machines using the shared cleanup
+policy (including GCP) require a scheduled `crabbox cleanup` invocation: a kept
+ready lease is eligible once its recorded expiry passes, subject to the same
+ownership checks as other leases. The expiry is the earlier of TTL and idle
+timeout. Direct machines still marked running or provisioning retain the
+12-hour stale-state grace period; kept machines without valid expiry metadata
+are left alone. See [cleanup](cleanup.md) for provider-specific policies.
+
 Tenki is an exception: kept leases are sticky and ignore TTL, and native idle
 expiry is unsupported. Use `--keep=false` to pass TTL as Tenki's maximum duration,
 which pauses the sandbox when reached. Explicitly stop the lease to destroy it.
@@ -386,7 +402,7 @@ bootstrap, key migration, or failure cleanup.
 --tailscale-auth-key-env <env>     env var holding a direct-provider Tailscale auth key
 --tailscale-exit-node <name|100.x> Tailscale exit node
 --tailscale-exit-node-allow-lan-access
---keep                             keep the box after warmup; default true
+--keep                             retain across runs; recorded expiry still applies; default warmup.keep (true)
 --actions-runner                   register the box as an ephemeral GitHub Actions runner
 --reclaim                          overwrite an existing local claim for this lease
 --timing-json                      print a final JSON timing record on stderr
