@@ -587,9 +587,18 @@ func (a App) hydrateActionsLocally(ctx context.Context, cfg Config, repo Repo, t
 		return actionsHydrationState{}, err
 	}
 	plainManifest := classifyGitOrigin(repo.RemoteURL) != gitOriginRemoteAttemptSafe
-	return a.executeLocalActionsHydration(ctx, cfg, repo, target, plan, waitTimeout, streamOutput, syncBefore, plainManifest, owner)
+	state, err := a.executeLocalActionsHydration(ctx, cfg, repo, target, plan, waitTimeout, streamOutput, syncBefore, plainManifest, owner)
+	if err != nil {
+		return actionsHydrationState{}, err
+	}
+	if err := ensureLocalActionsRunEnv(ctx, targetWithConfigDefaults(target, cfg), leaseID, state); err != nil {
+		return actionsHydrationState{}, err
+	}
+	return state, nil
 }
 
+// Return state without sourcing its environment. The run consumer must verify
+// repository identity first; explicit hydration owns its environment handoff.
 func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo Repo, target SSHTarget, plan localActionsHydrationPlan, waitTimeout time.Duration, streamOutput bool, syncBefore bool, plainManifest bool, owner *workspaceOwner) (actionsHydrationState, error) {
 	target = targetWithConfigDefaults(target, cfg)
 	fmt.Fprint(a.Stderr, plan.warnings)
@@ -639,9 +648,6 @@ func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo 
 		}
 		if plan.expectedJob != "" && state.Job != "" && state.Job != plan.expectedJob {
 			return actionsHydrationState{}, Exit(5, "local Actions hydration marker for %s came from job %q, expected %q", plan.leaseID, state.Job, plan.expectedJob)
-		}
-		if err := ensureLocalActionsRunEnv(ctx, target, plan.leaseID, state); err != nil {
-			return actionsHydrationState{}, err
 		}
 		return state, nil
 	}
@@ -2424,9 +2430,6 @@ func waitForLocalActionsHydration(ctx context.Context, target SSHTarget, leaseID
 			if expectedJob != "" && state.Job != "" && state.Job != expectedJob {
 				return actionsHydrationState{}, Exit(5, "local Actions hydration marker for %s came from job %q, expected %q", leaseID, state.Job, expectedJob)
 			}
-			if err := ensureLocalActionsRunEnv(ctx, target, leaseID, state); err != nil {
-				return actionsHydrationState{}, err
-			}
 			return state, nil
 		}
 		status, statusErr := runActionsHydrationOutput(ctx, target, remoteLocalActionsHydrateStatus(leaseID, pid))
@@ -2434,9 +2437,6 @@ func waitForLocalActionsHydration(ctx context.Context, target SSHTarget, leaseID
 			if state, err := readActionsHydrationState(ctx, target, leaseID); err == nil && state.Workspace != "" {
 				if expectedJob != "" && state.Job != "" && state.Job != expectedJob {
 					return actionsHydrationState{}, Exit(5, "local Actions hydration marker for %s came from job %q, expected %q", leaseID, state.Job, expectedJob)
-				}
-				if err := ensureLocalActionsRunEnv(ctx, target, leaseID, state); err != nil {
-					return actionsHydrationState{}, err
 				}
 				return state, nil
 			}

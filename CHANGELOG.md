@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Verify Actions workspace Git identity before run, sync, cache warm, or editor handoff; refuse foreign or unverifiable markers without touching the workspace.
+
 ## 0.68.0 - 2026-09-28
 
 ### Highlights

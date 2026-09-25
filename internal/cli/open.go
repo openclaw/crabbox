@@ -94,7 +94,10 @@ func (a App) runEditorHandoff(ctx context.Context, editorName string, editor edi
 	if err != nil {
 		return err
 	}
-	_, folder, hydratedByActions := codeWorkspace(ctx, resolved.Lease.SSH, resolved.Config, resolved.Lease.LeaseID, repo)
+	_, folder, hydratedByActions, err := codeWorkspace(ctx, resolved.Lease.SSH, resolved.Config, resolved.Lease.LeaseID, repo)
+	if err != nil {
+		return err
+	}
 	if err := runSSHQuiet(ctx, resolved.Lease.SSH, "test -d "+shellQuote(folder)); err != nil {
 		return Exit(5, "remote folder %q is not ready; sync it first with: crabbox run --id %s --sync-only", folder, resolved.Lease.LeaseID)
 	}
