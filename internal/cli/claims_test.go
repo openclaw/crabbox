@@ -495,6 +495,7 @@ func TestClaimsListJSONProjectionExcludesEveryPrivateSensitiveField(t *testing.T
 	claim := leaseClaim{
 		LeaseID:                             "cbx_sensitive",
 		Revision:                            "sensitive-revision",
+		ActionsWorkspace:                    &ActionsWorkspaceBinding{Origin: "https://git.example.test/sensitive-origin", MarkerFingerprint: "sensitive-marker"},
 		Slug:                                "safe-slug",
 		Provider:                            "external",
 		CloudID:                             "sensitive-cloud-id",
@@ -542,7 +543,7 @@ func TestClaimsListJSONProjectionExcludesEveryPrivateSensitiveField(t *testing.T
 	for _, secret := range []string{
 		"sensitive-revision", "sensitive-cloud-id", "sensitive-provider-scope", "sensitive-static-host",
 		"sensitive-login-token", "sensitive-ssh-host", "sensitive-registration-id", "sensitive-label",
-		"sensitive-fingerprint", "sensitive-attempt", "sensitive-failure",
+		"sensitive-fingerprint", "sensitive-attempt", "sensitive-failure", "sensitive-origin", "sensitive-marker",
 	} {
 		if strings.Contains(stdout, secret) {
 			t.Fatalf("JSON leaked %q: %s", secret, stdout)

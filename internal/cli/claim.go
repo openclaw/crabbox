@@ -22,6 +22,7 @@ type leaseClaim struct {
 	LeaseID           string                    `json:"leaseID"`
 	Revision          string                    `json:"revision,omitempty"`
 	CheckpointCapture *CheckpointCaptureBinding `json:"checkpointCapture,omitempty"`
+	ActionsWorkspace  *ActionsWorkspaceBinding  `json:"actionsWorkspace,omitempty"`
 	Slug              string                    `json:"slug,omitempty"`
 	Provider          string                    `json:"provider,omitempty"`
 	CloudID           string                    `json:"cloudID,omitempty"`
@@ -63,6 +64,11 @@ type CheckpointCaptureBinding struct {
 	ID            string `json:"id"`
 	Revision      string `json:"revision"`
 	BoundRevision string `json:"boundRevision"`
+}
+
+type ActionsWorkspaceBinding struct {
+	Origin            string `json:"origin"`
+	MarkerFingerprint string `json:"markerFingerprint"`
 }
 
 // FixedCreateIntent is the durable, provider-neutral envelope for a
@@ -512,6 +518,9 @@ func transformLeaseClaimForRepo(existing *leaseClaim, leaseID, slug, provider, p
 	if normalizeIdle {
 		existing.Labels = claimLabelsWithIdleTimeout(existing.Labels, idleTimeout)
 	}
+	if reclaim || !sameActionsWorkspaceClaimOwner(original, *existing) {
+		existing.ActionsWorkspace = nil
+	}
 	return nil
 }
 
@@ -922,6 +931,10 @@ func cloneLeaseClaim(claim leaseClaim) leaseClaim {
 		binding := *claim.CheckpointCapture
 		claim.CheckpointCapture = &binding
 	}
+	if claim.ActionsWorkspace != nil {
+		binding := *claim.ActionsWorkspace
+		claim.ActionsWorkspace = &binding
+	}
 	claim.Labels = cloneStringMap(claim.Labels)
 	claim.TailscaleTags = append([]string(nil), claim.TailscaleTags...)
 	claim.CacheVolumes = append([]string(nil), claim.CacheVolumes...)
@@ -967,6 +980,9 @@ func endpointClaimGuard(leaseID string, next func(leaseClaim, bool) error) func(
 // SetLeaseClaimResourceIdentity updates an in-memory claim's exact resource
 // identity. Callers retain their existing publication and identity-admission policy.
 func SetLeaseClaimResourceIdentity(claim *LeaseClaim, cloudID string, numericID int64, immutableID string, evidence *ImageEvidence) {
+	if claim.CloudID != cloudID || claim.CloudNumericID != numericID || claim.CloudImmutableID != immutableID {
+		claim.ActionsWorkspace = nil
+	}
 	if evidence != nil {
 		claim.ImageEvidence = CloneImageEvidence(evidence)
 	} else if claim.CloudID != cloudID || claim.CloudNumericID != numericID || claim.CloudImmutableID != immutableID {
@@ -979,6 +995,7 @@ func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget,
 	if mode == claimEndpointReplace {
 		clearLeaseClaimTailscaleFields(claim)
 		claim.BridgeURL = ""
+		claim.ActionsWorkspace = nil
 	}
 	cloudID, numericID, immutableID := claim.CloudID, claim.CloudNumericID, claim.CloudImmutableID
 	if server.CloudID != "" {
@@ -1014,6 +1031,16 @@ func applyLeaseClaimEndpoint(claim *leaseClaim, server Server, target SSHTarget,
 	} else if mode == claimEndpointReplace || claimEndpointInactiveState(server.Labels["state"]) {
 		claim.SSHPort = 0
 	}
+}
+
+// Hydration consent belongs to one repository and exact lease resource, not to
+// a reusable lease name or a later claimant.
+func sameActionsWorkspaceClaimOwner(a, b leaseClaim) bool {
+	return a.LeaseID == b.LeaseID && a.RepoRoot == b.RepoRoot &&
+		a.Provider == b.Provider && a.ProviderScope == b.ProviderScope &&
+		a.CloudID == b.CloudID && a.CloudNumericID == b.CloudNumericID && a.CloudImmutableID == b.CloudImmutableID &&
+		a.StaticHost == b.StaticHost && a.StaticUser == b.StaticUser && a.StaticPort == b.StaticPort &&
+		a.StaticWorkRoot == b.StaticWorkRoot && a.TargetOS == b.TargetOS && a.WindowsMode == b.WindowsMode
 }
 
 func claimEndpointInactiveState(state string) bool {
@@ -1790,6 +1817,9 @@ func replaceLeaseClaimTransactionContext(ctx context.Context, leaseID string, cu
 		revision: claimRevisionAfterMutation,
 		write:    write,
 		mutate: func(claim *leaseClaim) error {
+			if !sameActionsWorkspaceClaimOwner(*claim, replacement) {
+				replacement.ActionsWorkspace = nil
+			}
 			*claim = cloneLeaseClaim(replacement)
 			return nil
 		},

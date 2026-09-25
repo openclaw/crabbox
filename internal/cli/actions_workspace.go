@@ -2,23 +2,89 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"strings"
 	"time"
 )
 
-func readActionsWorkspace(ctx context.Context, target SSHTarget, leaseID string, repo Repo) (actionsHydrationState, error) {
+func readActionsWorkspace(ctx context.Context, target SSHTarget, leaseID string, cfg Config, repo Repo) (actionsHydrationState, error) {
 	state, err := readActionsWorkspaceState(ctx, target, leaseID)
 	if err != nil {
 		return actionsHydrationState{}, err
 	}
 	if state.Workspace != "" {
-		if err := verifyActionsWorkspace(ctx, target, repo, state); err != nil {
+		if err := verifyRetainedActionsWorkspace(ctx, target, leaseID, cfg, repo, state); err != nil {
 			return actionsHydrationState{}, err
 		}
 	}
 	return state, nil
+}
+
+func actionsWorkspaceMarkerFingerprint(state actionsHydrationState) string {
+	data, _ := json.Marshal(state)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func verifyRetainedActionsWorkspace(ctx context.Context, target SSHTarget, leaseID string, cfg Config, repo Repo, state actionsHydrationState) error {
+	origins := []string{repo.RemoteURL}
+	if cfg.Actions.Repo != "" {
+		selected, err := parseGitHubRepo(cfg.Actions.Repo)
+		if err != nil {
+			return Exit(2, "cannot verify configured Actions repository; expected owner/name or a GitHub repository URL")
+		}
+		origins = append(origins, "https://github.com/"+selected.Slug())
+	}
+	claim, exists, err := ReadLeaseClaimWithPresence(leaseID)
+	if err != nil {
+		return err
+	}
+	verify := func() error {
+		_, err := verifyActionsWorkspaceOrigins(ctx, target, state, origins...)
+		return err
+	}
+	if exists && repo.Root != "" && claim.RepoRoot == repo.Root && claim.ActionsWorkspace != nil &&
+		claim.ActionsWorkspace.MarkerFingerprint == actionsWorkspaceMarkerFingerprint(state) {
+		// Flag-only hydration consent is local claim authority. Neither a remote
+		// marker nor --reclaim can grant it, and concurrent claim replacement revokes it.
+		origins = append(origins, claim.ActionsWorkspace.Origin)
+		return WithLeaseClaimUnchangedShared(ctx, leaseID, claim, verify)
+	}
+	return verify()
+}
+
+func prepareActionsWorkspaceClaim(ctx context.Context, leaseID string, repo Repo) (leaseClaim, bool, error) {
+	claim, exists, err := ReadLeaseClaimWithPresence(leaseID)
+	if err != nil || !exists {
+		return claim, exists, err
+	}
+	if repo.Root == "" || claim.RepoRoot != repo.Root {
+		return leaseClaim{}, false, Exit(2, "Actions hydration lease claim no longer belongs to the invoking repository")
+	}
+	if claim.ActionsWorkspace != nil {
+		replacement := cloneLeaseClaim(claim)
+		replacement.ActionsWorkspace = nil
+		claim, err = ReplaceLeaseClaimIfUnchangedDurableReturningContext(ctx, leaseID, claim, replacement)
+	}
+	return claim, true, err
+}
+
+func bindActionsWorkspaceClaim(ctx context.Context, target SSHTarget, repo Repo, selected GitHubRepo, state actionsHydrationState, claim leaseClaim, exists bool) error {
+	if exists && (repo.Root == "" || claim.RepoRoot != repo.Root) {
+		return Exit(2, "Actions hydration lease claim no longer belongs to the invoking repository")
+	}
+	origin, err := verifyActionsWorkspaceOrigins(ctx, target, state, repo.RemoteURL, "https://github.com/"+selected.Slug())
+	if err != nil || !exists || origin == actionsRepositoryIdentity(repo.RemoteURL) {
+		return err
+	}
+	replacement := cloneLeaseClaim(claim)
+	replacement.ActionsWorkspace = &ActionsWorkspaceBinding{Origin: origin, MarkerFingerprint: actionsWorkspaceMarkerFingerprint(state)}
+	_, err = ReplaceLeaseClaimIfUnchangedDurableReturningContext(ctx, claim.LeaseID, claim, replacement)
+	return err
 }
 
 func readActionsWorkspaceState(ctx context.Context, target SSHTarget, leaseID string) (actionsHydrationState, error) {
@@ -72,9 +138,19 @@ fi
 }
 
 func verifyActionsWorkspace(ctx context.Context, target SSHTarget, repo Repo, state actionsHydrationState) error {
-	expected := actionsRepositoryIdentity(repo.RemoteURL)
-	if expected == "" || state.Workspace == "" {
-		return Exit(2, "cannot verify Actions workspace without an invoking repository origin and workspace; use a different lease or the repository that owns this workspace")
+	_, err := verifyActionsWorkspaceOrigins(ctx, target, state, repo.RemoteURL)
+	return err
+}
+
+func verifyActionsWorkspaceOrigins(ctx context.Context, target SSHTarget, state actionsHydrationState, origins ...string) (string, error) {
+	expected := make(map[string]bool)
+	for _, origin := range origins {
+		if identity := actionsRepositoryIdentity(origin); identity != "" {
+			expected[identity] = true
+		}
+	}
+	if len(expected) == 0 || state.Workspace == "" {
+		return "", Exit(2, "cannot verify Actions workspace without an authorized repository origin and workspace; use the repository that owns this workspace or explicitly rehydrate with actions hydrate --github-runner --repo owner/name")
 	}
 	// A lease marker is not repository identity. Verify before adopting its path,
 	// environment, or metadata; treating a mismatch as absence would let hydration
@@ -83,16 +159,16 @@ func verifyActionsWorkspace(ctx context.Context, target SSHTarget, repo Repo, st
 	defer cancel()
 	origin, err := RunSSHOutputBoundedWithExecutionTimeout(ctx, target, remoteActionsWorkspaceOrigin(target, state.Workspace), 4096, 15*time.Second)
 	if err != nil {
-		return errors.Join(Exit(7, "cannot verify Actions workspace Git root and origin; refusing workspace adoption"), err)
+		return "", errors.Join(Exit(7, "cannot verify Actions workspace Git root and origin; refusing workspace adoption"), err)
 	}
 	actual := actionsRepositoryIdentity(origin)
 	if actual == "" {
-		return Exit(2, "cannot verify Actions workspace origin; refusing workspace adoption")
+		return "", Exit(2, "cannot verify Actions workspace origin; refusing workspace adoption")
 	}
-	if actual != expected {
-		return Exit(2, "Actions workspace repository does not match the invoking repository; use a different lease or the repository that owns this workspace")
+	if !expected[actual] {
+		return "", Exit(2, "Actions workspace repository does not match an authorized repository; use a different lease, the owning repository, or explicitly rehydrate with actions hydrate --github-runner --repo owner/name")
 	}
-	return nil
+	return actual, nil
 }
 
 func remoteActionsWorkspaceOrigin(target SSHTarget, workspace string) string {

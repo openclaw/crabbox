@@ -27,6 +27,21 @@ There are two hydration paths:
 Both paths converge on the same readiness marker, so later `crabbox run`
 commands attach to the hydrated workspace identically.
 
+Before adopting a marker, `run`, `cache warm`, and editor handoffs verify that
+`WORKSPACE` is the exact Git root and its actual `origin` matches the invoking
+repository or the explicitly configured `actions.repo`. Custom workspace paths
+are supported. Missing, unreadable, or mismatched identity fails before sync,
+marker replacement, environment sourcing, or command execution.
+
+For `actions hydrate --github-runner --repo owner/name`, Crabbox records the
+verified target origin and marker identity in the existing local lease claim.
+Later commands from that same checkout can attach without repeating `--repo`.
+Replacement hydration, reclaim, or a changed lease resource clears that consent.
+An older cross-repository marker without this binding is left untouched: rerun
+the explicit GitHub-runner hydration command with `--repo`, or configure the
+intended `actions.repo`. `--reclaim` alone does not authorize a foreign workspace.
+Automatic local hydration still must produce the invoking repository.
+
 ## Supported targets
 
 | Path | Targets |

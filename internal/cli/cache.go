@@ -151,7 +151,7 @@ func (a App) cacheWarm(ctx context.Context, args []string) error {
 	}
 	workdir := remoteJoin(cfg, leaseID, repo.Name)
 	actionsEnvFile := ""
-	state, err := readActionsWorkspace(ctx, target, leaseID, repo)
+	state, err := readActionsWorkspace(ctx, target, leaseID, cfg, repo)
 	if err != nil {
 		return err
 	}

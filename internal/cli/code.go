@@ -177,7 +177,7 @@ func ensureRemoteCodeServer(ctx context.Context, target SSHTarget, workdir strin
 func codeWorkspace(ctx context.Context, target SSHTarget, cfg Config, leaseID string, repo Repo) (string, string, bool, error) {
 	workspace := remoteJoin(cfg, leaseID, repo.Name)
 	hydrated := false
-	state, err := readActionsWorkspace(ctx, target, leaseID, repo)
+	state, err := readActionsWorkspace(ctx, target, leaseID, cfg, repo)
 	if err != nil {
 		return "", "", false, err
 	}
