@@ -365,6 +365,24 @@ WSL2 execution now requires SFTP. Enable and verify it before upgrading.
 Connection loss and malformed protocol responses remain transport errors rather
 than being mislabeled as a missing subsystem.
 
+#### Non-administrator WSL2 accounts
+
+A standard Windows account that owns its WSL distribution can serve as a WSL2
+static target, which keeps build code away from other profiles and elevation.
+No WMI namespace or profile ACL changes are needed: Crabbox identifies the SSH
+default shell without WMI, and accepts the read-only app-capability grant that
+Windows 11 adds to new profiles. Import the distribution as that account, since
+`wsl --install` requires elevation:
+
+```sh
+crabbox run --provider ssh --target windows --windows-mode wsl2 \
+  --static-host win-dev.local --static-user builder \
+  --static-work-root /home/builder/crabbox --no-sync --shell -- 'id -un'
+```
+
+Doctor's `wsl2-sftp` probe does not prepare the private stage, so confirm a new
+account with a one-shot run like the one above.
+
 The staged launcher supports both `cmd.exe` and PowerShell as the Windows
 OpenSSH default shell. Its complete encoded command stays below 8191 bytes.
 Encoding prevents outer-shell expansion; it does not provide secrecy. Workload
@@ -438,7 +456,9 @@ workspace-owner protocol's separate direct-child ownership contract.
 WSL2 staging requires a private Windows HOME owned by the SSH user, SYSTEM, or
 Builtin Administrators. The `.crabbox` parent and `wsl-stage` directory must be
 owned by the SSH user. Access may be granted only to that user, SYSTEM, and
-Builtin Administrators; Crabbox does not change HOME ownership or ACLs. Crabbox
+Builtin Administrators. HOME may also grant app-capability SIDs (`S-1-15-3-*`)
+limited to read, execute, and synchronize rights; the staging directories may not.
+Crabbox does not change HOME ownership or ACLs. Crabbox
 rejects files, reparse points, and existing unsafe ACLs before changing
 permissions or writing a route proof or payload.
 Both safe inherited staging directories are normalized to an explicit SSH-user

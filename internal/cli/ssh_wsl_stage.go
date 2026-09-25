@@ -689,7 +689,12 @@ func prepareWSLStageRootWithin(ctx context.Context, target SSHTarget, connectTim
 	return wslStageShell(fields[2]), nil
 }
 
-const wslStageShellDiscoveryScript = `  $parentPID = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
+// WMI denies Win32_Process to non-administrator NETWORK logons, which include
+// OpenSSH sessions; ProcessBasicInformation needs no privilege for the current process.
+const wslStageShellDiscoveryScript = `  if (!('Cbx.ParentProcess' -as [type])) { Add-Type -Name ParentProcess -Namespace Cbx -MemberDefinition '[DllImport("ntdll.dll")]public static extern int NtQueryInformationProcess(IntPtr h,int c,[Out]IntPtr[] i,int l,IntPtr r);' }
+  $info = [IntPtr[]]::new(6)
+  if ([Cbx.ParentProcess]::NtQueryInformationProcess([IntPtr](-1), 0, $info, $info.Length * [IntPtr]::Size, [IntPtr]::Zero) -ne 0 -or $info[4].ToInt64() -ne $PID) { throw "parent process lookup failed" }
+  $parentPID = $info[5].ToInt64()
   $shell = (Get-Process -Id $parentPID).ProcessName.ToLowerInvariant()
   if ($shell -eq "pwsh") { $shell = "powershell" }
   if ($shell -notin "cmd", "powershell") { throw "unsupported SSH shell" }
@@ -710,7 +715,9 @@ func wslStageRootPreparationCommand(proofs ...string) string {
 try {
 `+wslStageShellDiscoveryScript+`  $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
   $allowed = @($sid.Value, "S-1-5-18", "S-1-5-32-544" | Select-Object -Unique)
-  function Test-StageDirectory($path, $protected = $false, $owners = @($sid.Value)) {
+  # HOME only: Windows 11 profiles grant a capability SID traverse; it may hold only read, execute, and synchronize rights.
+  $capabilityDenied = -bnot (0x201200A9 -bor [int]::MinValue)
+  function Test-StageDirectory($path, $protected = $false, $owners = @($sid.Value), $capabilityRead = $false) {
     $item = Get-Item -LiteralPath $path -Force
     if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "invalid directory" }
     $actual = [IO.Directory]::GetAccessControl($path)
@@ -719,7 +726,8 @@ try {
     if ($null -eq $raw.DiscretionaryAcl) { throw "null DACL" }
     $rules = @($actual.GetAccessRules($true, $true, $sid.GetType()))
     foreach ($rule in $rules) {
-      if ($rule.AccessControlType -eq "Allow" -and $rule.IdentityReference.Value -notin $allowed) { throw "untrusted grant" }
+      if ($rule.AccessControlType -eq "Allow" -and $rule.IdentityReference.Value -notin $allowed -and
+          -not ($capabilityRead -and $rule.IdentityReference.Value -like "S-1-15-3-*" -and ([int]$rule.FileSystemRights -band $capabilityDenied) -eq 0)) { throw "untrusted grant" }
     }
     if ($protected) {
       if (-not $actual.AreAccessRulesProtected -or -not $actual.AreAccessRulesCanonical -or $rules.Count -ne $allowed.Count) { throw "invalid DACL" }
@@ -733,7 +741,7 @@ try {
   }
   $parent = Join-Path $HOME ".crabbox"
   $root = Join-Path $parent "wsl-stage"
-  Test-StageDirectory $HOME $false $allowed
+  Test-StageDirectory $HOME $false $allowed $true
   foreach ($path in @($parent, $root)) {
     if (Test-Path -LiteralPath $path) { Test-StageDirectory $path }
   }
