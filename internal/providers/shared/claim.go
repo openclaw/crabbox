@@ -168,6 +168,10 @@ func ResolveProviderClaimStrict(identifier, provider, providerScope string) (cor
 	if err != nil {
 		return core.LeaseClaim{}, false, err
 	}
+	if !exact && !ok && core.IsCanonicalLeaseID(identifier) {
+		// Absence is neither an identity conflict nor proof of a completed stop.
+		return core.LeaseClaim{}, false, core.Exit(1, "lease %s has no local claim; if an earlier stop verified absence, nothing remains to do; otherwise check the ID, provider, and provider inventory before recovery", identifier)
+	}
 	if (exact || core.IsCanonicalLeaseID(identifier)) && (!exact || !ok || claim.LeaseID != identifier) {
 		return core.LeaseClaim{}, false, ErrStrictClaimMismatch
 	}

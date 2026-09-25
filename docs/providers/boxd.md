@@ -142,6 +142,12 @@ claimed immutable VM by default and requires deletion proof before removing
 its claim: Boxd leaves a readable tombstone (`status: destroyed`) on the
 immutable ID after destruction, which is accepted as definitive; plain
 inventory absence must instead hold across a bounded grace period.
+After the claim is removed, repeating `stop --provider boxd --id <canonical-cbx-id>`
+exits 1 and reports that the lease has no local claim. If the earlier stop
+verified absence, nothing remains to do. Boxd keeps no local terminal receipt,
+so a missing claim alone cannot prove a successful earlier stop; otherwise
+check the ID, provider, and inventory before recovery. See
+[Repeating a stop](../commands/stop.md#repeating-a-stop).
 `boxd.deleteOnRelease: false` instead stops the VM and retains both disk and
 claim; reuse restarts it. That release intent persists across processes
 unless explicitly overridden. Reuse and ordinary heartbeat preserve the
