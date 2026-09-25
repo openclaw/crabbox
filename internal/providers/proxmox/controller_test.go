@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -415,5 +416,103 @@ func TestProxmoxConfirmedAbsentReceiptMatchesScopesAndIdentity(t *testing.T) {
 				t.Fatal("receipt accepted")
 			}
 		})
+	}
+}
+
+// A registered adapter completes the coordinator's delete with the lease's
+// registration generation, which must survive the fixed release receipt.
+func TestProxmoxRegisteredAdapterDeleteCompletesAfterFixedRelease(t *testing.T) {
+	_, client, _ := fixedProxmoxFixture(t)
+	const leaseID, slug, adapterID, workspaceID = "cbx_0123456789ab", "adapter-box", "proxmox-lab", "fleet-box"
+	var mu sync.Mutex
+	var registered string
+	var completions, rejected []string
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			RegistrationID string `json:"runtimeAdapterRegistrationID"`
+			Completion     *struct {
+				AdapterID      string `json:"adapterID"`
+				WorkspaceID    string `json:"workspaceID"`
+				RegistrationID string `json:"registrationID"`
+			} `json:"runtimeAdapterDeleteCompletion"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		defer mu.Unlock()
+		state := "active"
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/leases/"+leaseID+"/registration":
+			registered = body.RegistrationID
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/leases/"+leaseID+"/release" && body.Completion != nil &&
+			body.Completion.AdapterID == adapterID && body.Completion.WorkspaceID == workspaceID:
+			completions = append(completions, body.Completion.RegistrationID)
+			state = "released"
+		default:
+			// The coordinator refuses metadata-only release while a registered delete is pending.
+			rejected = append(rejected, r.Method+" "+r.URL.Path)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"runtime_adapter_delete_pending"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease": map[string]any{
+			"id": leaseID, "provider": "proxmox", "lifecycle": "registered", "state": state,
+			"runtimeAdapterID": adapterID, "runtimeAdapterWorkspaceID": workspaceID, "runtimeAdapterRegistrationID": registered,
+		}})
+	}))
+	defer coordinator.Close()
+	cfg := controllerTestConfig()
+	setControllerTestEnv(t, cfg)
+	for key, value := range map[string]string{
+		"CRABBOX_COORDINATOR": coordinator.URL, "CRABBOX_COORDINATOR_TOKEN": "coordinator-test-token",
+		"CRABBOX_COORDINATOR_MODE": "registered", "CRABBOX_ADAPTER_ID": adapterID, "CRABBOX_ADAPTER_WORKSPACE_ID": workspaceID,
+	} {
+		t.Setenv(key, value)
+	}
+	scope := controllerTestScope(t, cfg)
+	t.Setenv("CRABBOX_ADAPTER_PROVIDER_SCOPE", scope)
+	run := func(args ...string) (string, error) {
+		var stdout, stderr bytes.Buffer
+		err := (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args)
+		return stdout.String(), err
+	}
+	identity, err := run("config", "show", "--json", "--controller-provider-identity", "--provider", "proxmox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var binding struct {
+		URL string `json:"coordinatorRegistrationUrl"`
+	}
+	if err := json.Unmarshal([]byte(identity), &binding); err != nil || binding.URL == "" {
+		t.Fatalf("registration binding=%q err=%v", identity, err)
+	}
+	if _, err := run("warmup", "--keep=true", "--lease-id", leaseID, "--slug", slug, "--provider", "proxmox"); err != nil {
+		t.Fatalf("registered warmup: %v", err)
+	}
+	if registered == "" || readFixedProxmoxClaim(t, leaseID).RuntimeAdapterRegistrationID != registered {
+		t.Fatalf("registration generation=%q claim=%+v", registered, readFixedProxmoxClaim(t, leaseID))
+	}
+	// Release reads provider state only; keep best-effort guest cleanup offline.
+	client.servers[0].PublicNet.IPv4.IP = ""
+	identityArgs := []string{"--id", leaseID,
+		"--expected-provider-lease-id", leaseID, "--expected-provider-attempt-lease-id", leaseID,
+		"--expected-provider-slug", slug, "--expected-provider-resource-id", "417", "--expected-provider-scope", scope}
+	if _, err := run(append(append([]string{"stop"}, identityArgs...), "--provider", "proxmox")...); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	receipt := readFixedProxmoxClaim(t, leaseID)
+	if client.deleteCalls != 1 || receipt.FixedCreateIntent.State != "released" || len(completions) != 0 {
+		t.Fatalf("release deletes=%d completions=%v receipt=%+v", client.deleteCalls, completions, receipt)
+	}
+	cleanup := append(append([]string{"stop", "--confirmed-absent-local-cleanup=true"}, identityArgs...),
+		"--expected-coordinator-registration-url", binding.URL, "--provider", "proxmox")
+	if _, err := run(cleanup...); err != nil {
+		t.Fatalf("confirmed-absence cleanup: %v (rejected=%v)", err, rejected)
+	}
+	if len(completions) != 1 || completions[0] != registered || len(rejected) != 0 {
+		t.Fatalf("delete completion generations=%v registered=%q rejected=%v", completions, registered, rejected)
+	}
+	if after := readFixedProxmoxClaim(t, leaseID); after.RuntimeAdapterRegistrationID != registered || after.FixedCreateIntent.State != "released" {
+		t.Fatalf("receipt lost its registration generation: %+v", after)
 	}
 }
