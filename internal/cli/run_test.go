@@ -1508,6 +1508,9 @@ func TestPOSIXRunTransportHelper(t *testing.T) {
 			}
 			command = exec.Command("/bin/sh", "-c", remote)
 			command.Env = append(os.Environ(), "PATH="+os.Getenv("CRABBOX_POSIX_REMOTE_PATH"))
+			if home := os.Getenv("CRABBOX_POSIX_REMOTE_HOME"); home != "" {
+				command.Env = append(command.Env, "HOME="+home)
+			}
 		}
 	} else if mode == "rsync" {
 		var local []string
@@ -1542,6 +1545,195 @@ func TestPOSIXRunTransportHelper(t *testing.T) {
 		os.Exit(exitCode(err))
 	}
 	os.Exit(0)
+}
+
+func TestRunActionsWorkspaceRealFinalEffects(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX transport fixture; native identity probes have separate required coverage")
+	}
+	ssh, err := exec.LookPath("ssh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsync, err := exec.LookPath("rsync")
+	if err != nil {
+		t.Skip("real rsync unavailable")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"matching-custom", "configured", "bound", "foreign", "foreign-no-sync", "foreign-full-resync", "reassigned", "competing-owner"} {
+		t.Run(kind, func(t *testing.T) {
+			clearConfigEnv(t)
+			root := t.TempDir()
+			isolateRunTestUserDirs(t, root)
+			source, remoteRoot, transport := filepath.Join(root, "source"), filepath.Join(root, "remote"), filepath.Join(root, "transport")
+			workspace := filepath.Join(remoteRoot, "custom workspace")
+			for _, dir := range []string{source, workspace, transport} {
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			origin := filepath.Join(root, "source-origin.git")
+			runGit(t, source, "init", "-q")
+			runGit(t, source, "remote", "add", "origin", origin)
+			runGit(t, source, "config", "user.email", "test@example.com")
+			runGit(t, source, "config", "user.name", "Fixture")
+			writeFile(t, filepath.Join(source, "input.txt"), "local source bytes\n")
+			runGit(t, source, "add", ".")
+			runGit(t, source, "commit", "-qm", "fixture")
+			runGit(t, root, "clone", "-q", source, workspace)
+			remoteOrigin := origin
+			if strings.HasPrefix(kind, "foreign") {
+				remoteOrigin = filepath.Join(root, "foreign-origin.git")
+			} else if kind == "configured" || kind == "bound" {
+				remoteOrigin = "git@github.com:example-org/workflow.git"
+			}
+			runGit(t, workspace, "remote", "set-url", "origin", remoteOrigin)
+			writeFile(t, filepath.Join(workspace, "input.txt"), "retained remote bytes\n")
+			const leaseID = "cbx_workspace_effect"
+			marker := filepath.Join(os.Getenv("HOME"), actionsHydrationStatePath(leaseID))
+			envFile, envEffect := filepath.Join(remoteRoot, "environment.sh"), filepath.Join(remoteRoot, "environment-used")
+			state := actionsHydrationState{Workspace: workspace, EnvFile: envFile, RunID: "123", ReadyAt: "2026-01-01T00:00:00Z"}
+			writeFile(t, marker, "WORKSPACE="+workspace+"\nENV_FILE="+envFile+"\nRUN_ID="+state.RunID+"\nREADY_AT="+state.ReadyAt+"\n")
+			writeFile(t, envFile, "printf used > "+shellQuote(envEffect)+"\n")
+			for _, name := range []string{"ssh", "rsync"} {
+				body := "#!/bin/sh\n" + synchronousHelperRacePrefix() + "exec " + shellQuote(self) + " -test.run='^TestPOSIXRunTransportHelper$' -- " + name + " \"$@\"\n"
+				if err := os.WriteFile(filepath.Join(transport, name), []byte(body), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("CRABBOX_POSIX_TRANSPORT_HELPER", "1")
+			t.Setenv("CRABBOX_POSIX_REAL_SSH", ssh)
+			t.Setenv("CRABBOX_POSIX_REAL_RSYNC", rsync)
+			t.Setenv("CRABBOX_POSIX_REMOTE_PATH", "/usr/bin:/bin:"+os.Getenv("PATH"))
+			t.Setenv("CRABBOX_POSIX_REMOTE_HOME", os.Getenv("HOME"))
+			t.Setenv("CRABBOX_POSIX_REMOTE_ROOT", remoteRoot)
+			t.Setenv("PATH", transport+string(os.PathListSeparator)+os.Getenv("PATH"))
+			config := filepath.Join(root, "config.yaml")
+			configBody := "workRoot: " + strconv.Quote(remoteRoot) + "\n"
+			if kind == "configured" {
+				configBody += "actions:\n  repo: example-org/workflow\n"
+			}
+			writeFile(t, config, configBody)
+			t.Setenv("CRABBOX_CONFIG", config)
+			t.Chdir(source)
+			target := SSHTarget{User: "fixture", Host: "127.0.0.1", Port: startTCPReadinessFixture(t), TargetOS: targetLinux, ReadyCheck: "true"}
+			providerName := runEnvProfileTestProvider{}.Spec().Name
+			runEnvProfileTestAcquireLease = func(AcquireRequest) (LeaseTarget, error) {
+				return LeaseTarget{Server: Server{Provider: providerName}, SSH: target, LeaseID: leaseID}, nil
+			}
+			t.Cleanup(func() { runEnvProfileTestAcquireLease = nil })
+			if kind == "bound" {
+				if err := ClaimLeaseForRepoProvider(leaseID, "", providerName, source, time.Minute, false); err != nil {
+					t.Fatal(err)
+				}
+				claim, exists, err := prepareActionsWorkspaceClaim(t.Context(), leaseID, Repo{Root: source})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := bindActionsWorkspaceClaim(t.Context(), target, Repo{Root: source, RemoteURL: origin}, GitHubRepo{Owner: "example-org", Name: "workflow"}, state, claim, exists); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if kind == "competing-owner" {
+				owner, err := acquireWorkspaceOwner(t.Context(), target, leaseID, io.Discard)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := owner.Close(context.Background()); err != nil {
+						t.Errorf("release fixture owner: %v", err)
+					}
+				})
+			}
+			snapshot := func() map[string]string {
+				t.Helper()
+				files := map[string]string{}
+				err := filepath.WalkDir(remoteRoot, func(path string, entry os.DirEntry, err error) error {
+					if err != nil || entry.IsDir() {
+						return err
+					}
+					data, err := os.ReadFile(path)
+					if err == nil {
+						files[path] = string(data)
+					}
+					return err
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(marker)
+				if err != nil {
+					t.Fatal(err)
+				}
+				files[marker] = string(data)
+				return files
+			}
+			run := func() error {
+				var stdout, stderr bytes.Buffer
+				timeout := 30 * time.Second
+				if kind == "competing-owner" {
+					timeout = time.Second
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), timeout)
+				defer cancel()
+				args := []string{"--provider", providerName, "--id", leaseID, "--no-hydrate"}
+				if kind == "foreign-no-sync" {
+					args = append(args, "--no-sync")
+				} else if kind == "foreign-full-resync" {
+					args = append(args, "--full-resync")
+				}
+				args = append(args, "--", "/bin/sh", "-c", "cat input.txt > workload-effect.txt")
+				err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(ctx, args)
+				if err != nil {
+					t.Logf("run: %v\n%s", err, &stderr)
+				}
+				return err
+			}
+			before := snapshot()
+			err := run()
+			reject := strings.HasPrefix(kind, "foreign") || kind == "competing-owner"
+			if (err != nil) != reject {
+				t.Fatalf("run error=%v, want rejection=%t", err, reject)
+			}
+			if reject {
+				if strings.HasPrefix(kind, "foreign") && !strings.Contains(err.Error(), "does not match an authorized repository") {
+					t.Fatalf("foreign workspace failed for an unrelated reason: %v", err)
+				}
+				if kind == "competing-owner" && !strings.Contains(err.Error(), "workspace owner") {
+					t.Fatalf("competing owner failed for an unrelated reason: %v", err)
+				}
+				if !reflect.DeepEqual(before, snapshot()) {
+					t.Fatal("rejected workspace changed marker, environment, Git, or workload bytes")
+				}
+				return
+			}
+			for _, name := range []string{"input.txt", "workload-effect.txt"} {
+				if data, err := os.ReadFile(filepath.Join(workspace, name)); err != nil || string(data) != "local source bytes\n" {
+					t.Fatalf("real sync/workload effect %s=%q err=%v", name, data, err)
+				}
+			}
+			if _, err := os.Stat(envEffect); err != nil {
+				t.Fatalf("verified environment was not sourced: %v", err)
+			}
+			if data, err := os.ReadFile(marker); err != nil || string(data) != before[marker] {
+				t.Fatal("successful attach changed the retained marker")
+			}
+			if kind == "reassigned" {
+				runGit(t, workspace, "remote", "set-url", "origin", filepath.Join(root, "foreign-origin.git"))
+				writeFile(t, filepath.Join(source, "input.txt"), "must not transfer\n")
+				before = snapshot()
+				if err := run(); err == nil {
+					t.Fatal("workspace reassignment was not rejected on the next invocation")
+				}
+				if !reflect.DeepEqual(before, snapshot()) {
+					t.Fatal("reassigned workspace changed after rejection")
+				}
+			}
+		})
+	}
 }
 
 func TestRunDefaultSyncWithoutBash(t *testing.T) {
@@ -5809,7 +6001,11 @@ exit 0
 
 func isolateRunTestUserDirs(t *testing.T, dir string) {
 	t.Helper()
-	t.Setenv("HOME", filepath.Join(dir, "home"))
+	home := filepath.Join(dir, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg-config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "xdg-state"))
 }
@@ -6186,10 +6382,10 @@ func TestRunCommandRejectsForeignActionsWorkspaceBeforeMutation(t *testing.T) {
 				normalSync:       mode == "normal-sync",
 				adoptedWorkspace: workspace,
 				markerOrigin:     "https://github.com/example-org/another-project.git",
-				actionsRepo:      "example-org/another-project",
+				actionsRepo:      "example-org/workflow",
 			})
 			var exitErr ExitError
-			if !AsExitError(result.err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "does not match the invoking repository") {
+			if !AsExitError(result.err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "does not match an authorized repository") {
 				t.Errorf("error=%v, want repository mismatch\nstderr=%s", result.err, result.stderr)
 			}
 			if result.resetCommand != "" || result.syncTarget != "" || result.hydrationScript != "" {
@@ -6198,6 +6394,18 @@ func TestRunCommandRejectsForeignActionsWorkspaceBeforeMutation(t *testing.T) {
 			assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "owner-release"})
 		})
 	}
+}
+
+func TestRunCommandAcceptsExplicitActionsWorkspaceRepository(t *testing.T) {
+	result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{
+		noSync: true, noHydrate: true, adoptedWorkspace: "/work/custom-project",
+		markerOrigin: "git@github.com:example-org/another-project.git",
+		actionsRepo:  "example-org/another-project",
+	})
+	if result.err != nil {
+		t.Fatalf("explicit repository rejected: %v", result.err)
+	}
+	assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "command", "owner-release"})
 }
 
 func TestRunCommandRejectsUnverifiableActionsWorkspaceBeforeMutation(t *testing.T) {
@@ -6219,16 +6427,19 @@ func TestRunCommandRejectsUnreadableActionsMarkerBeforeMutation(t *testing.T) {
 func TestRunCommandRejectsActionsWorkspaceWithoutInvokingOrigin(t *testing.T) {
 	result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{noSync: true, noHydrate: true, noOrigin: true})
 	var exitErr ExitError
-	if !AsExitError(result.err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "invoking repository origin") {
+	if !AsExitError(result.err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "authorized repository origin") {
 		t.Fatalf("error=%v, want missing invoking repository origin", result.err)
 	}
 	assertRunEvents(t, result.events, []string{"owner-acquire", "owner-release"})
 }
 
 func TestRunCommandVerifiesFreshActionsWorkspaceBeforeCommand(t *testing.T) {
-	result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{hydratedOrigin: "https://github.com/example-org/other.git"})
+	result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{
+		hydratedOrigin: "https://github.com/example-org/other.git",
+		actionsRepo:    "example-org/other",
+	})
 	var exitErr ExitError
-	if !AsExitError(result.err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "does not match the invoking repository") {
+	if !AsExitError(result.err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "does not match an authorized repository") {
 		t.Fatalf("error=%v, want fresh workspace repository mismatch", result.err)
 	}
 	assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "invalidate", "reset", "sync", "clear", "hydrate", "verify-workspace", "owner-release"})

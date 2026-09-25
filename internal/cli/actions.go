@@ -243,6 +243,10 @@ func (a App) actionsHydrate(ctx context.Context, args []string) (err error) {
 }
 
 func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, repo Repo, target SSHTarget, leaseID, slug string, ghRepo GitHubRepo, label, ref string, fields []string, waitTimeout time.Duration, owner *workspaceOwner) (actionsHydrationState, error) {
+	claim, claimExists, err := prepareActionsWorkspaceClaim(ctx, leaseID, repo)
+	if err != nil {
+		return actionsHydrationState{}, err
+	}
 	if err := a.registerGitHubActionsRunnerOwned(ctx, cfg, target, leaseID, slug, ghRepo, "", nil, owner); err != nil {
 		return actionsHydrationState{}, err
 	}
@@ -321,6 +325,9 @@ func (a App) hydrateActionsWithGitHubRunner(ctx context.Context, cfg Config, rep
 		return actionsHydrationState{}, err
 	}
 	if err := waitWorkspaceOwnerNoChild(ctx, owner, owner.callTimeout()); err != nil {
+		return actionsHydrationState{}, err
+	}
+	if err := bindActionsWorkspaceClaim(ctx, target, repo, ghRepo, state, claim, claimExists); err != nil {
 		return actionsHydrationState{}, err
 	}
 	return state, nil
@@ -601,6 +608,9 @@ func (a App) hydrateActionsLocally(ctx context.Context, cfg Config, repo Repo, t
 // repository identity first; explicit hydration owns its environment handoff.
 func (a App) executeLocalActionsHydration(ctx context.Context, cfg Config, repo Repo, target SSHTarget, plan localActionsHydrationPlan, waitTimeout time.Duration, streamOutput bool, syncBefore bool, plainManifest bool, owner *workspaceOwner) (actionsHydrationState, error) {
 	target = targetWithConfigDefaults(target, cfg)
+	if _, _, err := prepareActionsWorkspaceClaim(ctx, plan.leaseID, repo); err != nil {
+		return actionsHydrationState{}, err
+	}
 	fmt.Fprint(a.Stderr, plan.warnings)
 	if streamOutput {
 		fmt.Fprintf(a.Stdout, "local actions hydrate workflow=%s job=%s workspace=%s\n", cfg.Actions.Workflow, plan.jobName, plan.workdir)

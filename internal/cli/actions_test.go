@@ -2295,6 +2295,7 @@ func TestHydrateActionsWithGitHubRunnerInvalidatesPrivateOriginHermetically(t *t
 		t.Skip("shell ssh fixture")
 	}
 	dir := t.TempDir()
+	isolateRunTestUserDirs(t, dir)
 	tools := filepath.Join(dir, "tools")
 	if err := os.MkdirAll(tools, 0o755); err != nil {
 		t.Fatal(err)
@@ -2306,6 +2307,9 @@ remote=""
 for arg do remote="$arg"; done
 printf '%s\n---\n' "$remote" >> "$CRABBOX_FAKE_SSH_LOG"
 case "$remote" in
+  *"exact_git_root || exit 2"*"git remote get-url origin"*)
+    printf '%s\n' 'https://github.com/example/repo.git'
+    ;;
   *"cat"*".crabbox/actions/cbx_gh.env"*)
     if [ -e "$CRABBOX_FAKE_DISPATCHED" ]; then
       printf '%s\n' 'WORKSPACE=/work/cbx_gh/repo'
@@ -2335,10 +2339,39 @@ esac
 	cfg.Actions.Workflow = "hydrate.yml"
 	repo := Repo{Root: dir, Name: "repo", RemoteURL: "ssh://git@example.test/repo.git"}
 	target := SSHTarget{User: "crabbox", Host: "example.test", Port: "22", TargetOS: targetLinux}
+	if err := ClaimLeaseForRepoProvider("cbx_gh", "", "aws", repo.Root, time.Minute, false); err != nil {
+		t.Fatal(err)
+	}
+	inspections := 0
+	owner := &workspaceOwner{
+		key: workspaceOwnerKey("cbx_gh"), token: strings.Repeat("a", 64),
+		transport: workspaceOwnerTransportFunc(func(_ context.Context, req workspaceOwnerRemoteRequest) (string, error) {
+			if req.Action != workspaceOwnerInspect {
+				t.Fatalf("unexpected owner action %s", req.Action)
+			}
+			claim, err := ReadLeaseClaim("cbx_gh")
+			if err != nil || claim.ActionsWorkspace != nil {
+				t.Fatalf("hydration consent published before child join: %v", err)
+			}
+			log, err := os.ReadFile(logPath)
+			if err != nil || strings.Contains(string(log), "exact_git_root || exit 2") {
+				t.Fatalf("origin probed before child join: %v", err)
+			}
+			inspections++
+			if inspections == 1 {
+				return "CHILD", nil
+			}
+			return "OWNED", nil
+		}),
+	}
 	app := App{Stdout: io.Discard, Stderr: io.Discard}
-	if _, err := app.hydrateActionsWithGitHubRunner(context.Background(), cfg, repo, target, "cbx_gh", "", GitHubRepo{Owner: "example", Name: "repo"}, "crabbox-cbx-gh", "main", nil, time.Minute, nil); err != nil {
+	if _, err := app.hydrateActionsWithGitHubRunner(context.Background(), cfg, repo, target, "cbx_gh", "", GitHubRepo{Owner: "example", Name: "repo"}, "crabbox-cbx-gh", "main", nil, time.Minute, owner); err != nil {
 		logData, _ := os.ReadFile(logPath)
 		t.Fatalf("%v\n%s", err, logData)
+	}
+	bound, err := ReadLeaseClaim("cbx_gh")
+	if err != nil || inspections != 2 || bound.ActionsWorkspace == nil || bound.ActionsWorkspace.Origin != "https://github.com/example/repo" {
+		t.Fatalf("verified producer did not bind after child join: inspections=%d err=%v", inspections, err)
 	}
 	logData, err := os.ReadFile(logPath)
 	if err != nil {

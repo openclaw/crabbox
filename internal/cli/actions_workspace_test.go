@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -15,8 +16,8 @@ import (
 
 func TestActionsWorkspaceConsumers(t *testing.T) {
 	for _, consumer := range []string{"code", "cache", "editor"} {
-		for _, state := range []string{"same", "foreign", "unreadable", "absent"} {
-			if consumer == "editor" && (state == "same" || state == "absent") {
+		for _, state := range []string{"same", "configured", "bound", "foreign", "unreadable", "absent"} {
+			if consumer == "editor" && state != "foreign" && state != "unreadable" {
 				continue // Successful editor handoff intentionally waits for the session.
 			}
 			t.Run(consumer+"/"+state, func(t *testing.T) {
@@ -28,13 +29,21 @@ func TestActionsWorkspaceConsumers(t *testing.T) {
 				runGit(t, root, "remote", "add", "origin", origin)
 				t.Chdir(root)
 				config := filepath.Join(t.TempDir(), "config.yaml")
-				if err := os.WriteFile(config, []byte("provider: run-env-profile-test\n"), 0600); err != nil {
+				cfg := defaultConfig()
+				configBody := "provider: run-env-profile-test\n"
+				if state == "configured" {
+					cfg.Actions.Repo = "example-org/workflow"
+					configBody += "actions:\n  repo: example-org/workflow\n"
+				}
+				if err := os.WriteFile(config, []byte(configBody), 0600); err != nil {
 					t.Fatal(err)
 				}
 				t.Setenv("CRABBOX_CONFIG", config)
 				remoteOrigin := origin
 				if state == "foreign" {
 					remoteOrigin = "https://git.example.test/group/other.git"
+				} else if state == "configured" || state == "bound" {
+					remoteOrigin = "https://github.com/example-org/workflow.git"
 				}
 				marker := "WORKSPACE=/work/custom-project\nENV_FILE=/work/foreign.env\nRUN_ID=123\n"
 				if state == "absent" {
@@ -56,6 +65,18 @@ case "$remote" in
   *cache-command*) printf '%s\n' "$remote" > `+shellQuote(log)+` ;;
 esac`)
 				repo := Repo{Root: root, Name: filepath.Base(root), RemoteURL: origin}
+				if state == "bound" {
+					if err := ClaimLeaseForRepoProvider("cbx_env_profile_test", "", "run-env-profile-test", root, time.Minute, false); err != nil {
+						t.Fatal(err)
+					}
+					claim, exists, err := prepareActionsWorkspaceClaim(t.Context(), "cbx_env_profile_test", repo)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := bindActionsWorkspaceClaim(t.Context(), target, repo, GitHubRepo{Owner: "example-org", Name: "workflow"}, parseActionsHydrationState(marker), claim, exists); err != nil {
+						t.Fatal(err)
+					}
+				}
 				var err error
 				var stdout, stderr bytes.Buffer
 				app := App{Stdout: &stdout, Stderr: &stderr}
@@ -63,8 +84,8 @@ esac`)
 				case "code":
 					var workspace, folder string
 					var hydrated bool
-					workspace, folder, hydrated, err = codeWorkspace(t.Context(), target, defaultConfig(), "cbx_env_profile_test", repo)
-					if state == "same" && (workspace != "/work/custom-project" || folder != workspace || !hydrated) {
+					workspace, folder, hydrated, err = codeWorkspace(t.Context(), target, cfg, "cbx_env_profile_test", repo)
+					if (state == "same" || state == "configured" || state == "bound") && (workspace != "/work/custom-project" || folder != workspace || !hydrated) {
 						t.Fatalf("custom workspace lost: %q %q hydrated=%t", workspace, folder, hydrated)
 					}
 					if state == "absent" && (workspace != remoteJoin(defaultConfig(), "cbx_env_profile_test", repo.Name) || hydrated) {
@@ -93,7 +114,7 @@ esac`)
 					if readErr != nil {
 						t.Fatal(readErr)
 					}
-					if state == "same" && (!strings.Contains(string(command), "/work/custom-project") || !strings.Contains(string(command), "/work/foreign.env")) {
+					if state != "absent" && (!strings.Contains(string(command), "/work/custom-project") || !strings.Contains(string(command), "/work/foreign.env")) {
 						t.Fatal("same-repository path or environment was not preserved")
 					}
 					if state == "absent" && strings.Contains(string(command), "/work/foreign.env") {
@@ -153,6 +174,93 @@ func TestActionsRepositoryIdentity(t *testing.T) {
 		if actionsRepositoryIdentity(remote) != "" {
 			t.Error("missing or unverifiable origin accepted")
 		}
+	}
+}
+
+func TestActionsWorkspaceClaimBinding(t *testing.T) {
+	for _, kind := range []string{"selected", "invoking", "unselected", "nested", "changed-claim", "wrong-owner", "absent-claim"} {
+		t.Run(kind, func(t *testing.T) {
+			isolateRunTestUserDirs(t, t.TempDir())
+			target := actionsWorkspaceTestSSH(t, `exec /bin/sh -c "$remote"`)
+			repo := Repo{Root: t.TempDir(), RemoteURL: "https://github.com/example-org/source.git"}
+			workspace := t.TempDir()
+			runGit(t, workspace, "init", "-q")
+			origin := "git@github.com:example-org/workflow.git"
+			if kind == "invoking" {
+				origin = repo.RemoteURL
+			} else if kind == "unselected" {
+				origin = "https://github.com/example-org/foreign.git"
+			}
+			runGit(t, workspace, "remote", "add", "origin", origin)
+			state := actionsHydrationState{Workspace: workspace, RunID: "123", EnvFile: filepath.Join(workspace, "environment")}
+			if kind == "nested" {
+				state.Workspace = filepath.Join(workspace, "nested")
+				if err := os.Mkdir(state.Workspace, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const leaseID = "cbx_binding"
+			if kind != "absent-claim" {
+				if err := ClaimLeaseForRepoProvider(leaseID, "", "aws", repo.Root, time.Minute, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			claim, exists, err := prepareActionsWorkspaceClaim(t.Context(), leaseID, repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == "changed-claim" {
+				if _, err := UpdateLeaseClaimLabelsIfUnchanged(leaseID, claim, map[string]string{"state": "ready"}); err != nil {
+					t.Fatal(err)
+				}
+			} else if kind == "wrong-owner" {
+				repo.Root = t.TempDir()
+			}
+			err = bindActionsWorkspaceClaim(t.Context(), target, repo, GitHubRepo{Owner: "example-org", Name: "workflow"}, state, claim, exists)
+			wantErr := kind == "unselected" || kind == "nested" || kind == "changed-claim" || kind == "wrong-owner"
+			if (err != nil) != wantErr {
+				t.Fatalf("binding error=%v, want error=%t", err, wantErr)
+			}
+			saved, present, err := ReadLeaseClaimWithPresence(leaseID)
+			if err != nil || present != exists {
+				t.Fatalf("claim presence changed: present=%t err=%v", present, err)
+			}
+			if kind != "selected" {
+				if saved.ActionsWorkspace != nil {
+					t.Fatal("unverified or implicit hydration persisted extra authority")
+				}
+				return
+			}
+			want := &ActionsWorkspaceBinding{Origin: "https://github.com/example-org/workflow", MarkerFingerprint: actionsWorkspaceMarkerFingerprint(state)}
+			if !reflect.DeepEqual(saved.ActionsWorkspace, want) {
+				t.Fatalf("binding=%+v, want %+v", saved.ActionsWorkspace, want)
+			}
+			if err := verifyRetainedActionsWorkspace(t.Context(), target, leaseID, defaultConfig(), repo, state); err != nil {
+				t.Fatalf("flag-only hydration did not authorize bare attach: %v", err)
+			}
+			changed := state
+			changed.EnvFile += ".replacement"
+			if err := verifyRetainedActionsWorkspace(t.Context(), target, leaseID, defaultConfig(), repo, changed); err == nil {
+				t.Fatal("changed marker reused prior hydration consent")
+			}
+			runGit(t, workspace, "remote", "set-url", "origin", "https://github.com/example-org/foreign.git")
+			if err := verifyRetainedActionsWorkspace(t.Context(), target, leaseID, defaultConfig(), repo, state); err == nil {
+				t.Fatal("reassigned origin reused prior hydration consent")
+			}
+			runGit(t, workspace, "remote", "set-url", "origin", origin)
+			cleared, exists, err := prepareActionsWorkspaceClaim(t.Context(), leaseID, repo)
+			if err != nil || !exists || cleared.ActionsWorkspace != nil {
+				t.Fatalf("replacement hydration did not revoke consent: %v", err)
+			}
+			if err := verifyRetainedActionsWorkspace(t.Context(), target, leaseID, defaultConfig(), repo, state); err == nil {
+				t.Fatal("legacy unbound foreign marker was accepted")
+			}
+			cfg := defaultConfig()
+			cfg.Actions.Repo = "example-org/workflow"
+			if err := verifyRetainedActionsWorkspace(t.Context(), target, leaseID, cfg, repo, state); err != nil {
+				t.Fatalf("explicit configured repository was rejected: %v", err)
+			}
+		})
 	}
 }
 

@@ -1842,7 +1842,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			if directorySync {
 				return recordFailure(Exit(2, "directory sync cannot modify an Actions-owned workspace; use a fresh raw workspace"))
 			}
-			if err := verifyActionsWorkspace(ctx, target, repo, state); err != nil {
+			if err := verifyRetainedActionsWorkspace(ctx, target, leaseID, cfg, repo, state); err != nil {
 				return recordFailure(err)
 			}
 			workdir = state.Workspace
