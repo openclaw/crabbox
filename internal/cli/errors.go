@@ -2,6 +2,16 @@ package cli
 
 import "errors"
 
+// MissingLeaseClaimError preserves the resolver's error contract while letting
+// CLI stop explain a missing claim without claiming proof of a previous stop.
+type MissingLeaseClaimError struct {
+	LeaseID string
+	Err     error
+}
+
+func (e *MissingLeaseClaimError) Error() string { return e.Err.Error() }
+func (e *MissingLeaseClaimError) Unwrap() error { return e.Err }
+
 type ExitError struct {
 	Code    int
 	Message string

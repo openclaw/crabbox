@@ -5126,6 +5126,10 @@ func (a App) stop(ctx context.Context, args []string) error {
 			fmt.Fprintf(a.Stderr, "warning: could not inspect lease before release: %v\n", err)
 			lease = LeaseTarget{LeaseID: *id, Server: Server{Provider: backend.Spec().Name}}
 		} else {
+			var missing *MissingLeaseClaimError
+			if !*forceRecovery && expectedIdentity.empty() && IsCanonicalLeaseID(*id) && errors.As(err, &missing) && missing.LeaseID == *id {
+				return Exit(1, "lease %s has no local claim; if an earlier stop verified absence, nothing remains to do; otherwise check the ID, provider, and provider inventory before recovery", *id)
+			}
 			return err
 		}
 	}

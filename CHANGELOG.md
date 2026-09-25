@@ -10,6 +10,7 @@
 - Honor recorded idle/TTL expiry for kept direct cloud warmups and add `warmup.keep` configuration without changing the retention default. Fixes [#2536](https://github.com/openclaw/crabbox/issues/2536). Thanks @youssef-tharwat.
 - Honor recorded idle/TTL expiry for kept GCP warmups through the guest expiry guard and add `warmup.keep` configuration, preserving the retention default and manual cleanup protection. Fixes [#2536](https://github.com/openclaw/crabbox/issues/2536). Thanks @youssef-tharwat.
 - Report missing local claims accurately when replaying stop after verified absence, retaining exit 1 without a terminal receipt and preserving genuine identity mismatch errors.
+- Report missing local claims accurately when replaying CLI stop after verified absence, retaining exit 1 without a terminal receipt and preserving provider resolver and genuine identity mismatch errors.
 - Join local Blacksmith sync descendants before an ordinary Testbox run returns after cancellation, preserving the lease claim until command cleanup completes. [PR 2547](https://github.com/openclaw/crabbox/pull/2547).
 - Stop Parallels IP discovery from admitting probes after the startup deadline while preserving the caller's cancellation cause. [PR 2548](https://github.com/openclaw/crabbox/pull/2548).
 

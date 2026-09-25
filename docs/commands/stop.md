@@ -24,14 +24,15 @@ receipt for the exact canonical lease ID, as Incus does. Keep that receipt and
 the original provider configuration; a slug may now identify another live lease.
 
 Providers such as Boxd remove the local claim after verifying that the resource
-is absent. Repeating a canonical-ID stop through the strict claim resolver then
-exits 1 with `lease <id> has no local claim`, rather than an identity-mismatch
-error. If the earlier stop reported verified absence, nothing remains to do.
+is absent. When the strict claim resolver identifies a missing canonical claim,
+ordinary CLI stop exits 1 with `lease <id> has no local claim`, rather than an
+identity-mismatch error. If the earlier stop reported verified absence, nothing remains to do.
 Without a claim or receipt, however, Crabbox cannot distinguish that replay from
 an unknown ID or lost local state and does not infer successful cleanup. Check
 the ID, selected provider, and provider inventory before attempting recovery.
 This missing-claim result performs no provider deletion. An existing claim with
 a conflicting ID, provider, or scope still fails as an identity mismatch.
+Other resolver callers retain their existing strict-mismatch error contract.
 
 ## Repository-scoped cleanup
 

@@ -9,11 +9,13 @@ import (
 	"testing"
 
 	core "github.com/openclaw/crabbox/internal/cli"
+	"github.com/openclaw/crabbox/internal/providers/shared"
 	"github.com/openclaw/crabbox/internal/testutil"
 )
 
 func TestStopCLIReplayAfterVerifiedAbsence(t *testing.T) {
 	testutil.IsolateUserDirs(t)
+	t.Setenv("CRABBOX_PROVIDER", "boxd")
 	t.Setenv("CRABBOX_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
 	t.Chdir(t.TempDir())
 	b, fake := fixtureBackend(t)
@@ -30,6 +32,9 @@ func TestStopCLIReplayAfterVerifiedAbsence(t *testing.T) {
 	assertNoClaims(t)
 	if fake.count("DestroyVm vm-1") != 1 || len(liveRows(fake)) != 0 {
 		t.Fatal("first stop did not confirm deletion")
+	}
+	if _, err := b.Resolve(t.Context(), core.ResolveRequest{ID: lease.LeaseID, ReleaseOnly: true}); !errors.Is(err, shared.ErrStrictClaimMismatch) || err.Error() != shared.ErrStrictClaimMismatch.Error() {
+		t.Fatalf("release-only resolver changed its missing-claim contract: %v", err)
 	}
 	fake.mu.Lock()
 	calls := len(fake.calls)

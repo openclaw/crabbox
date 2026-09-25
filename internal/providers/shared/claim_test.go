@@ -234,7 +234,7 @@ func TestResolveProviderClaimStrict(t *testing.T) {
 	if err := core.ClaimLeaseForRepoProviderScopePondEndpoint(lookalikeID, leaseID, provider, scope, "", t.TempDir(), time.Minute, false, core.Server{Provider: provider, CloudID: "resource-2", Labels: lookalikeLabels}, core.SSHTarget{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := ResolveProviderClaimStrict("cbx_cccccccccccc", provider, scope); ok || err == nil || errors.Is(err, ErrStrictClaimMismatch) || !strings.Contains(err.Error(), "lease cbx_cccccccccccc has no local claim") || core.ExitCodeForError(err, -1) != 1 {
+	if _, ok, err := ResolveProviderClaimStrict("cbx_cccccccccccc", provider, scope); ok || !errors.Is(err, ErrStrictClaimMismatch) {
 		t.Fatalf("missing canonical ok=%v err=%v", ok, err)
 	}
 	if _, ok, err := ResolveProviderClaimStrict("missing", provider, scope); ok || err != nil {
@@ -247,7 +247,7 @@ func TestResolveProviderClaimStrict(t *testing.T) {
 		t.Fatalf("lookalike slug displaced exact claim: claim=%#v ok=%v err=%v", claim, ok, err)
 	}
 	core.RemoveLeaseClaim(leaseID)
-	if _, ok, err := ResolveProviderClaimStrict(leaseID, provider, scope); ok || err == nil || errors.Is(err, ErrStrictClaimMismatch) || !strings.Contains(err.Error(), "lease "+leaseID+" has no local claim") || core.ExitCodeForError(err, -1) != 1 {
+	if _, ok, err := ResolveProviderClaimStrict(leaseID, provider, scope); ok || !errors.Is(err, ErrStrictClaimMismatch) {
 		t.Fatalf("missing canonical ID matched another claim's slug: ok=%v err=%v", ok, err)
 	}
 }
