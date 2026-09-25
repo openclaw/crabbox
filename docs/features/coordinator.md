@@ -304,6 +304,25 @@ missing receipt endpoint makes the new CLI fail visibly. Legacy CLIs may still
 finish without receipts. Roll out the coordinator before distributing a
 receipt-bearing CLI.
 
+Legacy create admission commits the bound attempt, canonical provisioning lease,
+and recovery wake together. Publication likewise commits the active lease,
+attempt's cloud identity, access bookkeeping, and wake in one storage transaction.
+Provider calls remain outside those transactions. Only explicitly retryable
+storage failures receive up to three transaction attempts with jitter, with no
+new attempt started after the 500 ms retry budget. An ambiguous commit triggers
+an uncached, transactional reread of the exact lease, attempt, and wake. Missing,
+changed, or unreadable evidence retains uncertainty; it never authorizes another
+provider allocation. The existing token/owner/org/generation and cancellation
+fences still apply.
+
+The Cloudflare Worker retries an ordinary token-bound `POST /v1/leases` once
+against a fresh Durable Object stub after a thrown runtime-reset error. Unbound
+POSTs, other mutations, and returned HTTP 5xx responses do not receive this
+boundary replay. Request/response fields and status contracts are unchanged.
+This does not enable durable provisioning admission or repair absent ownership
+records. Same-runtime unsettled creates retain the existing protection against
+age-only cleanup; reconstruction uses a fresh runtime generation.
+
 The fixed-ID `PUT` route is fail-closed and does not replace legacy `POST`.
 It atomically reserves a versioned normalized immutable request hash before
 provider work. An identical owner-scoped replay returns an active lease or the

@@ -2,6 +2,7 @@ import ssh2, { type Client as SSHClient, type ClientChannel } from "ssh2";
 
 import { AsyncMutex, KeyedAsyncMutex } from "./async-mutex";
 import { AWSPoolAccess } from "./aws-pool-access";
+import { commitLeaseAdmission, retainLeaseWake } from "./lease-admission";
 import {
   ReadyPoolAccess,
   portablePoolPrefix,
@@ -4261,20 +4262,15 @@ export class FleetCoordinator {
         return json({ error: "cost_limit_exceeded", message: limitError }, { status: 429 });
       }
       const persist = async (storage: CoordinatorStorageView) => {
-        if (fixedLeaseID && checkpointAuthorization) {
-          const admitted = await storage.get<CreateAttemptRecord>(createAttemptKey(leaseID));
-          if (
-            !admitted ||
-            !currentAttempt ||
-            !sameCreateAttempt(admitted, currentAttempt) ||
-            (await storage.get(leaseKey(leaseID))) ||
-            (await storage.get(workspaceLeaseReservationKey(leaseID)))
-          ) {
-            throw new CheckpointError(
-              "lease_id_conflict",
-              "lease identity changed during checkpoint admission",
-            );
-          }
+        const admitted = await storage.get<CreateAttemptRecord>(createAttemptKey(leaseID));
+        if (
+          (currentAttempt
+            ? !admitted || !sameCreateAttempt(admitted, currentAttempt)
+            : admitted && (ordinaryCreate || createAttemptBlocksLeaseID(admitted))) ||
+          (await storage.get(leaseKey(leaseID))) ||
+          (!workspaceID && (await storage.get(workspaceLeaseReservationKey(leaseID))))
+        ) {
+          throw new CheckpointError("lease_id_conflict", "lease identity changed during admission");
         }
         if (currentAttempt) {
           await storage.put(createAttemptKey(leaseID), {
@@ -4302,13 +4298,28 @@ export class FleetCoordinator {
           );
         }
         await storage.put(leaseKey(leaseID), record);
+        await retainLeaseWake(storage, Date.parse(record.expiresAt));
+        return { record, slug };
       };
-      // Admission remains cancellable; only the winning allocation binds its
-      // private attempt, image fence, and lease together.
-      if (fixedLeaseID && checkpointAuthorization) await this.state.storage.transaction(persist);
-      else await persist(this.state.storage);
-      await this.scheduleAlarm();
-      return { record, slug };
+      // Provider preparation stays outside retried transactions. The winning
+      // attempt, canonical lease, checkpoint fence and wake commit together.
+      const committed = await commitLeaseAdmission(this.state, persist, async (storage) => {
+        const lease = await storage.get<LeaseRecord>(leaseKey(leaseID), { noCache: true });
+        const attempt = await storage.get<CreateAttemptRecord>(createAttemptKey(leaseID), {
+          noCache: true,
+        });
+        const wake = await storage.get<number | null>(legacyAlarmKey, { noCache: true });
+        return lease &&
+          sameLeaseRecord(lease, record) &&
+          wake != null &&
+          wake <= Date.parse(record.expiresAt) &&
+          (!currentAttempt ||
+            (attempt?.state === "pending" && createAttemptMatchesLease(attempt, lease)))
+          ? { record: lease, slug }
+          : undefined;
+      });
+      if (!this.state.provisioning) await this.scheduleAlarm();
+      return committed;
     });
     if (reservation instanceof Response) {
       return reservation;
@@ -4729,28 +4740,73 @@ export class FleetCoordinator {
     record.estimatedHourlyUSD = finalCost.hourlyUSD;
     record.maxEstimatedUSD = finalCost.maxUSD;
     const finalization = await this.state.runExclusive(async () => {
-      const latest = await this.getLease(record.id);
-      const currentAttempt = createAttempt
-        ? await this.pendingCreateAttempt(leaseID, createAttempt.token, owner, org)
-        : undefined;
-      if (!latest || latest.state !== "provisioning" || (createAttempt && !currentAttempt)) {
-        return { committed: false as const, current: latest };
-      }
-      const committedRecord = applyLeaseRecordChanges(latest, finalizationBase, record);
-      await this.putLease(committedRecord);
-      if (currentAttempt) {
-        await this.putCreateAttempt({
-          ...currentAttempt,
-          cloudID: committedRecord.cloudID,
-          updatedAt: new Date().toISOString(),
-        });
-      }
-      if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
-        await this.deleteProviderAccess(committedRecord.id);
-      }
-      await this.markAWSIngressReconcilePending(committedRecord);
-      await this.scheduleAlarm();
-      return { committed: true as const, record: committedRecord };
+      type Publication =
+        | { committed: false; current: LeaseRecord | undefined }
+        | { committed: true; record: LeaseRecord };
+      let published: LeaseRecord | undefined;
+      const result = await commitLeaseAdmission<Publication>(
+        this.state,
+        async (storage) => {
+          const latest = await storage.get<LeaseRecord>(leaseKey(record.id));
+          const attempt = await storage.get<CreateAttemptRecord>(createAttemptKey(leaseID));
+          if (
+            !latest ||
+            latest.state !== "provisioning" ||
+            !sameLeaseReleaseIdentity(latest, finalizationBase) ||
+            latest.createAttemptID !== finalizationBase.createAttemptID ||
+            (createAttempt &&
+              (!attempt ||
+                attempt.state !== "pending" ||
+                !createAttemptMatchesLease(attempt, latest)))
+          ) {
+            return { committed: false, current: latest };
+          }
+          const committedRecord = applyLeaseRecordChanges(latest, finalizationBase, record);
+          await storage.put(leaseKey(committedRecord.id), committedRecord);
+          if (createAttempt && attempt) {
+            await storage.put(createAttemptKey(leaseID), {
+              ...attempt,
+              cloudID: committedRecord.cloudID,
+              updatedAt: new Date().toISOString(),
+            });
+          }
+          if (prepared?.provisioning?.publishAccessBeforeProvisioning) {
+            await storage.delete(providerAccessKey(committedRecord.id));
+          }
+          await this.markAWSIngressReconcilePending(committedRecord, storage);
+          await retainLeaseWake(
+            storage,
+            Math.min(Date.now() + 1, Date.parse(committedRecord.expiresAt)),
+          );
+          published = committedRecord;
+          return { committed: true, record: committedRecord };
+        },
+        async (storage) => {
+          const lease = await storage.get<LeaseRecord>(leaseKey(leaseID), { noCache: true });
+          const attempt = await storage.get<CreateAttemptRecord>(createAttemptKey(leaseID), {
+            noCache: true,
+          });
+          const wake = await storage.get<number | null>(legacyAlarmKey, { noCache: true });
+          // A matching active lease alone is insufficient: the attempt must also
+          // attest this cloud ID. Canceled/rebound records never acknowledge success.
+          if (
+            published &&
+            lease?.state === "active" &&
+            sameLeaseRecord(lease, published) &&
+            wake != null &&
+            wake <= Date.parse(lease.expiresAt) &&
+            (!createAttempt ||
+              (attempt?.state === "pending" &&
+                attempt.cloudID === lease.cloudID &&
+                createAttemptMatchesLease(attempt, lease)))
+          ) {
+            return { committed: true, record: lease };
+          }
+          return undefined;
+        },
+      );
+      if (!this.state.provisioning) await this.scheduleAlarm();
+      return result;
     });
     if (!finalization.committed) {
       return this.abortProvisionedLeaseAfterStateChange(
@@ -17532,18 +17588,21 @@ export class FleetCoordinator {
       : undefined;
   }
 
-  private async markAWSIngressReconcilePending(anchor: LeaseRecord): Promise<void> {
+  private async markAWSIngressReconcilePending(
+    anchor: LeaseRecord,
+    storage: CoordinatorStorageView = this.state.storage,
+  ): Promise<void> {
     if (!leaseHasPublishedAWSAccess(anchor) || isRegisteredLease(anchor)) {
       return;
     }
-    const current = await this.state.storage.get<StoredAWSIngressReconcileRecord>(
+    const current = await storage.get<StoredAWSIngressReconcileRecord>(
       awsIngressReconcileRecordKey,
     );
     const targets = awsIngressReconcileTargets(current);
     const key = awsIngressReconcileTargetKey(anchor);
     const previous = targets.find((target) => awsIngressReconcileTargetKey(target.anchor) === key);
     const now = new Date().toISOString();
-    await this.state.storage.put<AWSIngressReconcileRecord>(awsIngressReconcileRecordKey, {
+    await storage.put<AWSIngressReconcileRecord>(awsIngressReconcileRecordKey, {
       targets: [
         ...targets.filter((target) => awsIngressReconcileTargetKey(target.anchor) !== key),
         {

@@ -296,6 +296,8 @@ class MemoryStorage {
   beforePut?: (key: string, value: unknown) => Promise<void>;
   beforeDelete?: (key: string) => Promise<void>;
   transactionPutCounts: number[] = [];
+  beforeCommit?: (keys: Set<string>) => Promise<void>;
+  afterCommit?: (keys: Set<string>) => Promise<void>;
 
   constructor(values = new Map<string, unknown>()) {
     this.values = values;
@@ -422,6 +424,7 @@ class MemoryStorage {
         }
         if (originalAlarm !== this.alarmTime) return { committed: false };
       }
+      await this.beforeCommit?.(writes);
       for (const key of writes) {
         if (transaction.values.has(key)) this.values.set(key, transaction.values.get(key));
         else this.values.delete(key);
@@ -430,6 +433,7 @@ class MemoryStorage {
       this.revision += 1;
       // A same-time write rearms a consumed job, but aborted attempts publish no job.
       if (transaction.alarmWritten) this.alarmCommitted(transaction.alarmTime);
+      await this.afterCommit?.(writes);
       return { committed: true, value: result };
     } finally {
       this.transactionPutCounts.push(putCount);
@@ -53340,5 +53344,256 @@ describe("portable bounded ready-pool access", () => {
         )
       ).status,
     ).toBe(409);
+  });
+});
+
+describe("atomic legacy lease admission", () => {
+  const leaseID = "cbx_ca1100000091";
+  const attemptKey = `create-attempt:${leaseID}`;
+  const leaseKey = `lease:${leaseID}`;
+  const headers = { "x-crabbox-owner": "alice@example.com", "x-crabbox-org": "example-org" };
+  const body = {
+    leaseID,
+    createAttemptID: "cat_91000000000000000000000000000091",
+    provider: "hetzner",
+    sshPublicKey: "ssh-ed25519 x",
+  };
+  const create = (fleet: FleetCoordinator) =>
+    fleet.fetch(request("POST", "/v1/leases", { headers, body }));
+  const canceled = (fleet: FleetCoordinator) =>
+    fleet.fetch(
+      request("POST", `/v1/leases/${leaseID}/cancel-create`, {
+        headers,
+        body: { createAttemptID: body.createAttemptID },
+      }),
+    );
+  const transient = () =>
+    Object.assign(new Error("synthetic transient storage failure"), { retryable: true });
+
+  it.each(["admission", "publication"] as const)(
+    "atomically rolls back every %s write and retries without reallocating",
+    async (phase) => {
+      // Each table entry fails after earlier writes have reached the transaction snapshot.
+      /* oxlint-disable eslint/no-await-in-loop -- exercise fault points sequentially */
+      for (const fault of [attemptKey, leaseKey, legacyAlarmKey, "alarm", "commit"]) {
+        const storage = new MemoryStorage();
+        let creates = 0;
+        let armed = false;
+        let fired = false;
+        const fail = () => {
+          if (armed && !fired) {
+            fired = true;
+            throw transient();
+          }
+        };
+        storage.beforePut = async (key, value) => {
+          const row = value as { canonicalLeaseID?: string; state?: string };
+          if (phase === "admission" && key === attemptKey && row.canonicalLeaseID) armed = true;
+          if (phase === "publication" && key === leaseKey && row.state === "active") armed = true;
+          if (key === fault) fail();
+        };
+        storage.beforeAlarmWrite = async () => {
+          if (fault === "alarm") fail();
+        };
+        storage.beforeCommit = async () => {
+          if (fault === "commit") fail();
+        };
+        const fleet = testFleet(storage, {
+          hetzner: fakeProvider(() => {
+            creates++;
+          }),
+        });
+        const response = await create(fleet);
+        expect(response.status).toBe(201);
+        expect(fired).toBe(true);
+        const lease = storage.value<LeaseRecord>(leaseKey)!;
+        expect(storage.value(attemptKey)).toMatchObject({
+          token: body.createAttemptID,
+          owner: lease.owner,
+          org: lease.org,
+          generation: lease.createAttemptGeneration,
+          canonicalLeaseID: leaseID,
+          cloudID: lease.cloudID,
+        });
+        expect(lease.state).toBe("active");
+        expect(storage.alarm()).toBeDefined();
+        expect((await create(fleet)).status).toBe(200);
+        expect(creates).toBe(1);
+      }
+      /* oxlint-enable eslint/no-await-in-loop */
+    },
+  );
+
+  it.each(["admission", "publication"] as const)(
+    "resolves a lost %s acknowledgement by exact reread",
+    async (phase) => {
+      const storage = new MemoryStorage();
+      let creates = 0;
+      let failures = 0;
+      storage.afterCommit = async (keys) => {
+        if (failures || !keys.has(attemptKey) || !keys.has(leaseKey)) return;
+        if (
+          storage.value<LeaseRecord>(leaseKey)?.state !==
+          (phase === "admission" ? "provisioning" : "active")
+        )
+          return;
+        failures++;
+        throw new Error("synthetic lost commit acknowledgement");
+      };
+      const provider = fakeProvider(() => {
+        creates++;
+      });
+      const response = await create(testFleet(storage, { hetzner: provider }));
+      expect(response.status).toBe(201);
+      expect(failures).toBe(1);
+      const reconstructed = testFleet(storage, { hetzner: provider });
+      expect((await create(reconstructed)).status).toBe(200);
+      expect(creates).toBe(1);
+      expect((await canceled(reconstructed)).status).toBe(200);
+      expect(storage.value<LeaseRecord>(leaseKey)).toMatchObject({
+        state: "released",
+        cloudID: "123",
+        cleanupCompletedAt: expect.any(String),
+      });
+    },
+  );
+
+  it.each(["admission", "publication"] as const)(
+    "retains uncertainty when %s commits but its authoritative reread fails",
+    async (phase) => {
+      const storage = new MemoryStorage();
+      let creates = 0;
+      let failed = false;
+      storage.afterCommit = async (keys) => {
+        if (failed || !keys.has(attemptKey) || !keys.has(leaseKey)) return;
+        if (
+          storage.value<LeaseRecord>(leaseKey)?.state !==
+          (phase === "admission" ? "provisioning" : "active")
+        )
+          return;
+        failed = true;
+        storage.beforeGet = async (key) => {
+          if (key === leaseKey) throw transient();
+        };
+        throw transient();
+      };
+      const provider = fakeProvider(() => {
+        creates++;
+      });
+      expect((await create(testFleet(storage, { hetzner: provider }))).status).toBe(500);
+      storage.beforeGet = undefined;
+      const count = phase === "admission" ? 0 : 1;
+      expect(creates).toBe(count);
+      const reconstructed = testFleet(storage, { hetzner: provider });
+      const replay = await create(reconstructed);
+      expect(replay.status).toBe(200);
+      expect(creates).toBe(count);
+      expect(storage.value(attemptKey)).toMatchObject({ canonicalLeaseID: leaseID });
+      expect(storage.alarm()).toBeDefined();
+      expect((await canceled(reconstructed)).status).toBe(200);
+    },
+  );
+
+  it.each(["owner", "org", "token", "generation", "state"] as const)(
+    "does not acknowledge publication after attempt %s changes during lost acknowledgement",
+    async (field) => {
+      const storage = new MemoryStorage();
+      let creates = 0;
+      storage.afterCommit = async (keys) => {
+        if (!keys.has(attemptKey) || storage.value<LeaseRecord>(leaseKey)?.state !== "active")
+          return;
+        storage.afterCommit = undefined;
+        storage.seed(attemptKey, {
+          ...storage.value<object>(attemptKey),
+          [field]:
+            field === "state"
+              ? "canceled"
+              : field === "org"
+                ? orgKeyForLabel("changed")
+                : "changed",
+        });
+        throw new Error("lost acknowledgement with changed binding");
+      };
+      const response = await create(
+        testFleet(storage, {
+          hetzner: fakeProvider(() => {
+            creates++;
+          }),
+        }),
+      );
+      expect(response.status).toBe(500);
+      expect(creates).toBe(1);
+      expect(storage.value<LeaseRecord>(leaseKey)?.cloudID).toBe("123");
+      expect(storage.value(attemptKey)).toMatchObject({
+        [field]:
+          field === "state" ? "canceled" : field === "org" ? orgKeyForLabel("changed") : "changed",
+      });
+    },
+  );
+
+  it("bounds transient publication retries and retains cleanup authority without false success", async () => {
+    const storage = new MemoryStorage();
+    let writes = 0;
+    let creates = 0;
+    storage.beforePut = async (key, value) => {
+      if (key === leaseKey && (value as LeaseRecord).state === "active") {
+        writes++;
+        throw transient();
+      }
+    };
+    const provider = fakeProvider(() => {
+      creates++;
+    });
+    const response = await create(testFleet(storage, { hetzner: provider }));
+    expect(response.status).toBe(500);
+    expect(writes).toBe(3);
+    expect(creates).toBe(1);
+    expect(storage.value<LeaseRecord>(leaseKey)).toMatchObject({
+      state: "provisioning",
+      createAttemptID: body.createAttemptID,
+      provisioningRequestStartedAt: expect.any(String),
+      provisioningCoordinatorVersion: expect.any(String),
+    });
+    expect(storage.value(attemptKey)).toMatchObject({
+      canonicalLeaseID: leaseID,
+      state: "pending",
+    });
+    storage.beforePut = undefined;
+    expect((await create(testFleet(storage, { hetzner: provider }))).status).toBe(200);
+    expect(creates).toBe(1);
+  });
+
+  it("keeps cancellation authoritative after delayed provisioning", async () => {
+    const storage = new MemoryStorage();
+    const started = deferred<void>();
+    const finish = deferred<void>();
+    let creates = 0;
+    let deletes = 0;
+    const provider = fakeProvider(
+      async () => {
+        creates++;
+        started.resolve();
+        await finish.promise;
+      },
+      {
+        onReleaseLease: () => {
+          deletes++;
+        },
+      },
+    );
+    const fleet = testFleet(storage, { hetzner: provider });
+    const pending = create(fleet);
+    await started.promise;
+    expect((await canceled(fleet)).status).toBe(200);
+    finish.resolve();
+    expect((await pending).status).toBe(409);
+    expect(storage.value(attemptKey)).toMatchObject({ state: "canceled" });
+    expect(storage.value<LeaseRecord>(leaseKey)).toMatchObject({
+      state: "released",
+      cleanupCompletedAt: expect.any(String),
+    });
+    await fleet.alarm();
+    expect(deletes).toBe(1);
+    expect(creates).toBe(1);
   });
 });
