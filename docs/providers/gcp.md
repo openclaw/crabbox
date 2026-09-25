@@ -434,7 +434,9 @@ Three independent safety nets enforce expiry:
   reads live instance labels through the metadata service and Compute API, then
   self-deletes expired leases, including kept warmups, when the attached service
   account can delete the VM. New VMs receive this behavior; existing VMs retain
-  their installed guard and need scheduled `crabbox cleanup` from the updated CLI.
+  their installed guard and must be recreated to receive the updated idle reaper.
+  Manual `crabbox cleanup` continues to skip kept leases; use explicit `stop`
+  to remove an existing kept VM.
 - Cleanup removes stale local GCP claim files whose lease IDs no longer appear in
   provider inventory.
 

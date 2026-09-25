@@ -365,6 +365,23 @@ jobs:
 	}
 }
 
+func TestConfigShowWarmupKeep(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		cfg := baseConfig()
+		cfg.WarmupKeep = keep
+		var output bytes.Buffer
+		if err := writeConfigShowText(&output, cfg); err != nil {
+			t.Fatal(err)
+		}
+		if line := fmt.Sprintf("\nwarmup keep=%t\n", keep); !strings.Contains(output.String(), line) || strings.Count(output.String(), "\nwarmup ") != 1 {
+			t.Fatalf("missing unique warmup summary %q", line)
+		}
+		if got := configShowView(cfg)["warmup"].(map[string]any)["keep"]; got != keep {
+			t.Fatalf("JSON warmup.keep=%v, want %t", got, keep)
+		}
+	}
+}
+
 func TestConfigCommandsReportSelectedPath(t *testing.T) {
 	for _, name := range []string{"default", "absolute", "relative", "missing", "symlink"} {
 		t.Run(name, func(t *testing.T) {

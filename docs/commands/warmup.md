@@ -86,14 +86,19 @@ This setting applies only to `warmup`; it does not change `run --keep`.
 `lease.idleTimeout` (or top-level `idleTimeout`) configures the idle window;
 `CRABBOX_IDLE_TIMEOUT` overrides config and `--idle-timeout` overrides both.
 
-Keep is retention, not an exemption from recorded expiry. Managed coordinator
-leases expire automatically. Direct cloud machines using the shared cleanup
-policy (including GCP) require a scheduled `crabbox cleanup` invocation: a kept
-ready lease is eligible once its recorded expiry passes, subject to the same
-ownership checks as other leases. The expiry is the earlier of TTL and idle
-timeout. Direct machines still marked running or provisioning retain the
-12-hour stale-state grace period; kept machines without valid expiry metadata
-are left alone. See [cleanup](cleanup.md) for provider-specific policies.
+Managed coordinator leases expire automatically regardless of keep. New direct
+GCP VMs also honor recorded expiry through their guest-side expiry guard when
+the attached service account can delete the VM. The expiry is the earlier of
+TTL and idle timeout; GCP guests still marked running or provisioning retain
+the 12-hour stale-state grace period. Kept guests without valid expiry metadata
+are left alone.
+
+Manual `crabbox cleanup` always skips `keep=true` machines, including expired
+ones. It is separate from automatic expiry. For direct providers without an
+automatic idle reaper, use `warmup.keep: false` and schedule cleanup, or stop the
+lease explicitly. Existing GCP guests retain their installed guard; recreate
+them to receive the updated idle reaper. See [cleanup](cleanup.md) and the
+provider documentation for supported lifecycle behavior.
 
 Tenki is an exception: kept leases are sticky and ignore TTL, and native idle
 expiry is unsupported. Use `--keep=false` to pass TTL as Tenki's maximum duration,

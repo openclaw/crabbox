@@ -170,6 +170,26 @@ func TestFixedAWSCreateIntentExcludesSecrets(t *testing.T) {
 	}
 }
 
+func TestFixedAWSCreateIntentWarmupKeepDefaultDoesNotOverrideRequest(t *testing.T) {
+	cfg := BaseConfig()
+	cfg.Provider = "aws"
+	req := FixedAWSCreateIntentRequest{AccountID: "123456789012", SSHPublicKey: "ssh-ed25519 fixture", Keep: true}
+	before, err := FixedAWSCreateIntentFingerprint(cfg, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.WarmupKeep = !cfg.WarmupKeep
+	after, err := FixedAWSCreateIntentFingerprint(cfg, req)
+	if err != nil || after != before {
+		t.Fatalf("command default changed resolved intent: before=%s after=%s err=%v", before, after, err)
+	}
+	req.Keep = false
+	after, err = FixedAWSCreateIntentFingerprint(cfg, req)
+	if err != nil || after == before {
+		t.Fatalf("explicit keep change did not change intent: before=%s after=%s err=%v", before, after, err)
+	}
+}
+
 func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 	included := map[string]bool{}
 	collectFixedAWSConfigFields(reflect.TypeOf(fixedAWSCreateIntent{}), included)
@@ -202,6 +222,7 @@ func TestFixedAWSCreateIntentClassifiesEveryExportedConfigField(t *testing.T) {
 	classify("post-acquisition command, transport, or reporting behavior", `
 		Sync Run EnvAllow Actions Results Shard Profiles Presets ProofTemplates Jobs RecordLocal
 	`)
+	classify("command default resolved into the explicit create request Keep field", `WarmupKeep`)
 
 	configType := reflect.TypeOf(Config{})
 	known := map[string]bool{}

@@ -412,6 +412,8 @@ func TestAWSFixedAcquireReplaysSameLeaseAndRejectsIntentDrift(t *testing.T) {
 	if _, err := first.Touch(context.Background(), core.TouchRequest{Lease: lease, State: "running"}); err != nil {
 		t.Fatal(err)
 	}
+	// The command default is already resolved into req.Keep before acquisition.
+	cfg.WarmupKeep = !cfg.WarmupKeep
 	second := NewAWSLeaseBackend(core.ProviderSpec{}, cfg, core.Runtime{Stderr: io.Discard}).(*awsLeaseBackend)
 	replayed, err := second.Acquire(context.Background(), req)
 	if err != nil {

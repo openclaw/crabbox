@@ -473,14 +473,13 @@ func TestCleanupServersRechecksPreparedServerAndClaimEligibility(t *testing.T) {
 		reason  string
 	}{
 		{
-			name: "refreshed kept server was renewed",
+			name: "refreshed server is kept",
 			prepare: func(server core.Server) core.Server {
 				server.Labels = CloneLabels(server.Labels)
 				server.Labels["keep"] = "true"
-				server.Labels["expires_at"] = clock.now.Add(time.Hour).Format(time.RFC3339Nano)
 				return server
 			},
-			reason: "not expired",
+			reason: "keep=true",
 		},
 		{
 			name: "prepared claim was renewed",

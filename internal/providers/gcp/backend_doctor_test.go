@@ -655,7 +655,7 @@ func TestGCPAcquireRollbackWaitsWithFreshBoundedContextAfterCancellation(t *test
 	}
 }
 
-func TestGCPCleanupKeptIdleLeaseAndStaleClaims(t *testing.T) {
+func TestGCPCleanupRemovesDeletedAndStaleClaims(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	repo := t.TempDir()
 	expiredLeaseID := "cbx_111111111111"
@@ -675,7 +675,6 @@ func TestGCPCleanupKeptIdleLeaseAndStaleClaims(t *testing.T) {
 			"crabbox": "true", "created_by": "crabbox", "provider": "gcp",
 			"provider_key": "crabbox-test", "lease": expiredLeaseID, "slug": "expired-box", "zone": "us-central1-b",
 			"state": "ready", "expires_at": core.LeaseLabelTime(time.Now().Add(-time.Hour)),
-			"keep": "true", "idle_timeout_secs": "1800",
 		},
 	}
 	claimGCPTestServer(t, core.Config{Provider: "gcp", GCP: core.GCPConfig{Project: "project-a", Zone: "us-central1-b"}}, expired)

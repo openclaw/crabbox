@@ -471,8 +471,7 @@ Use `--dry-run` to print what would be deleted without touching anything. The
 sweep is conservative; for each candidate machine `shouldCleanupServer`
 (`internal/cli/pool.go`) decides from the machine's Crabbox labels:
 
-- skip machines with no labels;
-- retain `keep=true` machines until their recorded expiry, leaving those without valid expiry metadata alone;
+- skip machines with no labels, or labeled `keep=true`, even after recorded expiry;
 - `running` / `provisioning`: delete only when stale — past `expires_at` plus a
   12-hour safety window;
 - `leased` / `ready` / `active`: delete once past `expires_at`;
@@ -491,7 +490,8 @@ never runs, the VM would leak. To guard against this, direct GCP leases install
 a self-deleting guard (`cloudInitGCPExpiryGuardFiles` in
 `internal/cli/bootstrap.go`): a systemd timer runs every 2 minutes, reads the
 instance's own labels via the GCP metadata server, and deletes the instance when
-it is clearly expired. It applies the same conservative logic as the CLI sweep:
+it is clearly expired. Unlike the manual CLI sweep, this automatic expiry path
+also reaps kept leases:
 
 - exits unless `crabbox=true` and the provider label is absent or `gcp`;
 - retains `keep=true` machines until their recorded expiry, leaving those without valid expiry metadata alone;

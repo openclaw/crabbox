@@ -72,11 +72,14 @@ func TestWarmupKeepIdleConfigPrecedence(t *testing.T) {
 				t.Fatalf("persisted idle=%d, err=%v, want %s", claim.IdleTimeoutSeconds, err, tc.idle)
 			}
 			server := Server{Labels: claim.Labels}
+			if expires, ok := cleanupExpiry(claim.Labels); !ok || !expires.Equal(created.Add(tc.idle)) {
+				t.Fatalf("recorded expiry=%s valid=%t, want %s", expires, ok, created.Add(tc.idle))
+			}
 			if due, reason := shouldCleanupServer(server, created.Add(tc.idle-time.Second)); due {
 				t.Fatalf("cleanup before idle deadline: %s", reason)
 			}
-			if due, reason := shouldCleanupServer(server, created.Add(tc.idle+time.Second)); !due {
-				t.Fatalf("idle lease exempt from cleanup: %s", reason)
+			if due, reason := shouldCleanupServer(server, created.Add(tc.idle+time.Second)); due == tc.keep {
+				t.Fatalf("manual cleanup=%t (%s), want keep=%t respected", due, reason, tc.keep)
 			}
 		})
 	}
