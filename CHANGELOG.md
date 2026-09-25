@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Refuse retained Actions workspaces from a different or unverifiable repository before run, sync, cache warm, or editor handoff, while preserving verified same-repository custom paths.
+- Refuse retained Actions workspaces from a different or unverifiable repository before run, sync, cache warm, or editor handoff, while preserving verified same-repository custom paths. [PR 2564](https://github.com/openclaw/crabbox/pull/2564).
 - Keep background telemetry from replacing workspace command witnesses and failing successful hydration reads with exit 74. [PR 2563](https://github.com/openclaw/crabbox/pull/2563).
 - Fix WSL2 static targets for non-administrator Windows accounts by removing WMI shell discovery and accepting read-only app-capability grants on HOME while preserving private stage ACLs. [Issue 2543](https://github.com/openclaw/crabbox/issues/2543), [PR 2546](https://github.com/openclaw/crabbox/pull/2546). Thanks @altaywtf.
 - Preserve the final Parallels VM-query error in IP timeouts and suppress stale DHCP or clone-mode advice when current inventory is unavailable. [PR 2480](https://github.com/openclaw/crabbox/pull/2480). Thanks @steipete.
