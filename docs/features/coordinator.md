@@ -57,6 +57,22 @@ the coordinator. The dedicated
 SSM-only workspace API path. See [Architecture](../architecture.md) for the full
 topology.
 
+Legacy create failures use an optional synchronous `provisioningFailureEvidence`
+provider capability. AWS and Hetzner report facts from their own failure markers,
+resource identities, and owned key evidence against the current read-only lease
+snapshot. The coordinator calls it only after the lease reread, generation check,
+and existing cleanup-custody and unresolved-resource guards. This hook is pure:
+it performs no I/O, state writes, or recovery scheduling. Core retains generic
+typed cleanup claims and uncertain outcomes, and owns all state transitions,
+retention decisions, cleanup custody, completion, and retry scheduling.
+Provider-private errors do not acquire another adapter's cleanup authority.
+
+Cancellation after provisioning starts remains uncertain until resource evidence
+resolves it; a missing cloud ID alone never proves that allocation did not happen.
+Core can schedule immediate cleanup for an owned pending key when there is no
+remaining allocation uncertainty or recorded resource. Otherwise cleanup keeps
+the normal five-minute retry delay and the unresolved allocation evidence.
+
 ## Durable Azure provisioning
 
 `CRABBOX_DURABLE_PROVISIONING_ADMISSION=true` opts new eligible creates into the

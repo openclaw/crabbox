@@ -4659,6 +4659,7 @@ export class FleetCoordinator {
           }
           mergeProvisioningFailureMetadata(
             record,
+            provider,
             config,
             error,
             cleanupClaim,
@@ -25904,6 +25905,7 @@ function leaseHasCurrentCleanupOrFinalRelease(lease: LeaseRecord): boolean {
 
 function mergeProvisioningFailureMetadata(
   lease: LeaseRecord,
+  provider: CloudProvider,
   config: LeaseConfig,
   error: unknown,
   cleanupClaim: ProviderProvisioningCleanupClaim | undefined,
@@ -25929,27 +25931,26 @@ function mergeProvisioningFailureMetadata(
     return;
   }
   const retainResource = lease.state === "released" && lease.releaseDeletesServer === false;
-  const awsOutcomeUncertain =
-    config.provider === "aws" && config.awsPrivate && isAWSRunInstancesOutcomeUncertain(message);
-  const providerOutcomeUncertain = providerProvisioningOutcomeUncertain(error);
-  const hetznerResourceMayExist =
-    config.provider === "hetzner" && hetznerProvisioningFailureMayHaveResource(error);
-  const hetznerRetryable =
-    config.provider === "hetzner" && hetznerProvisioningFailureRetryable(error);
-  const failedHetznerServerID =
-    config.provider === "hetzner" ? hetznerProvisioningResourceID(error) : undefined;
-  const providerKeyCleanupID =
-    error instanceof HetznerProvisioningError ? error.providerKeyCleanupID : undefined;
-  const awsPreInstanceCancellation =
-    config.provider === "aws" && error instanceof CreateAttemptCanceledError && !lease.cloudID;
+  // Interpret provider errors only against the current, fenced lease snapshot.
+  const evidence =
+    provider.provisioningFailureEvidence?.({
+      lease,
+      config,
+      error,
+      message,
+    }) ?? {};
+  // Cancellation cannot prove that an already-started provider call allocated nothing.
+  const canceledAfterDispatch =
+    error instanceof CreateAttemptCanceledError && Boolean(lease.provisioningRequestStartedAt);
+  const providerOutcomeUncertain =
+    providerProvisioningOutcomeUncertain(error) ||
+    evidence.allocationUncertain ||
+    canceledAfterDispatch;
   const resourceMayExist = Boolean(
     cleanupClaim ||
-    awsOutcomeUncertain ||
     providerOutcomeUncertain ||
-    hetznerResourceMayExist ||
-    (lease.provisioningResourceMayExist &&
-      !hetznerDefiniteKeyOnlyFailure(lease, error) &&
-      !awsPreInstanceCancellation),
+    evidence.resourceMayExist ||
+    (lease.provisioningResourceMayExist && !evidence.allocationRejected),
   );
 
   lease.updatedAt = failedAt;
@@ -25958,9 +25959,8 @@ function mergeProvisioningFailureMetadata(
   lease.provisioningResourceMayExist = resourceMayExist;
   lease.provisioningFailureRetryable = Boolean(
     !cleanupClaim &&
-    !awsOutcomeUncertain &&
     !providerOutcomeUncertain &&
-    (hetznerRetryable || lease.provisioningFailureRetryable),
+    (evidence.retryable || lease.provisioningFailureRetryable),
   );
 
   if (resourceMayExist && lease.cleanupStartedAt) {
@@ -25972,14 +25972,14 @@ function mergeProvisioningFailureMetadata(
   if (cleanupClaim) {
     retainProvisioningCleanupClaim(lease, cleanupClaim, message, failedAt);
   }
-  if (failedHetznerServerID !== undefined) {
-    lease.cloudID = String(failedHetznerServerID);
-    lease.serverID = failedHetznerServerID;
+  if (evidence.resource) {
+    lease.cloudID = evidence.resource.cloudID;
+    lease.serverID = evidence.resource.serverID;
     if (!retainResource) lease.releaseDeletesServer = true;
   }
-  if (providerKeyCleanupID !== undefined) {
+  if (evidence.providerKeyCleanupID !== undefined) {
     lease.providerKeyCleanupPending = true;
-    lease.providerKeyCleanupID = String(providerKeyCleanupID);
+    lease.providerKeyCleanupID = evidence.providerKeyCleanupID;
     if (!retainResource) lease.releaseDeletesServer = true;
   }
   if (!resourceMayExist || lease.cloudID) {
@@ -26005,26 +26005,19 @@ function mergeProvisioningFailureMetadata(
   }
   if (
     cleanupClaim ||
-    failedHetznerServerID !== undefined ||
-    providerKeyCleanupID !== undefined ||
+    evidence.resource ||
+    evidence.providerKeyCleanupID !== undefined ||
     lease.providerKeyCleanupPending ||
     (lease.cloudID && lease.releaseDeletesServer === true)
   ) {
     const retryDelay =
-      config.provider === "aws" &&
+      evidence.ownedKeyCleanupPending &&
       lease.providerKeyCleanupPending &&
-      leaseUsesCanonicalProviderKey(lease)
+      !resourceMayExist &&
+      !lease.cloudID
         ? 0
         : leaseCleanupRetryDelayMs;
     lease.cleanupRetryAt = new Date(Date.parse(failedAt) + retryDelay).toISOString();
-  }
-  if (awsPreInstanceCancellation && !lease.providerKeyCleanupPending) {
-    clearLeaseCleanupMetadata(lease);
-    delete lease.cleanupStartedAt;
-    delete lease.cleanupClaimExpiresAt;
-    delete lease.failureError;
-    completeLeaseProviderCleanup(lease, failedAt);
-    return;
   }
   if (lease.provisioningResourceMayExist || lease.provisioningFailureRetryable) {
     delete lease.failureError;
@@ -26940,7 +26933,28 @@ function parseProviderLabelTime(value: string | undefined): number {
   return Date.parse(raw);
 }
 
+interface ProviderProvisioningFailureContext {
+  lease: Readonly<LeaseRecord>;
+  config: Readonly<LeaseConfig>;
+  error: unknown;
+  message: string;
+}
+
+interface ProviderProvisioningFailureEvidence {
+  allocationUncertain?: boolean;
+  resourceMayExist?: boolean;
+  retryable?: boolean;
+  allocationRejected?: boolean;
+  resource?: { cloudID: string; serverID: number };
+  providerKeyCleanupID?: string;
+  ownedKeyCleanupPending?: boolean;
+}
+
 interface CloudProvider {
+  // Pure, synchronous interpretation; core retains all state and cleanup custody writes.
+  provisioningFailureEvidence?(
+    context: ProviderProvisioningFailureContext,
+  ): ProviderProvisioningFailureEvidence;
   poolAccess?(): ProviderPoolAccess;
   resumableProvisioning?(): ProviderResumableProvisioning;
   readyPoolImageIdentity?(lease: LeaseRecord): ReadyPoolImageIdentity | undefined;
@@ -27169,6 +27183,24 @@ export class HetznerProvider implements CloudProvider {
   private clientValue?: HetznerClient;
 
   constructor(private readonly env: Env) {}
+
+  provisioningFailureEvidence({
+    lease,
+    config,
+    error,
+  }: ProviderProvisioningFailureContext): ProviderProvisioningFailureEvidence {
+    if (config.provider !== "hetzner") return {};
+    const serverID = hetznerProvisioningResourceID(error);
+    const keyID =
+      error instanceof HetznerProvisioningError ? error.providerKeyCleanupID : undefined;
+    return {
+      resourceMayExist: hetznerProvisioningFailureMayHaveResource(error),
+      retryable: hetznerProvisioningFailureRetryable(error),
+      allocationRejected: hetznerDefiniteKeyOnlyFailure(lease, error),
+      ...(serverID !== undefined ? { resource: { cloudID: String(serverID), serverID } } : {}),
+      ...(keyID !== undefined ? { providerKeyCleanupID: String(keyID) } : {}),
+    };
+  }
 
   private get client(): HetznerClient {
     this.clientValue ??= new HetznerClient(this.env);
@@ -28705,6 +28737,20 @@ export class AWSProvider implements CloudProvider {
     private readonly storage: ProviderStateStorage,
   ) {
     this.region = region;
+  }
+
+  provisioningFailureEvidence({
+    lease,
+    config,
+    message,
+  }: ProviderProvisioningFailureContext): ProviderProvisioningFailureEvidence {
+    if (config.provider !== "aws") return {};
+    return {
+      allocationUncertain: Boolean(config.awsPrivate && isAWSRunInstancesOutcomeUncertain(message)),
+      ownedKeyCleanupPending: Boolean(
+        lease.providerKeyCleanupPending && leaseUsesCanonicalProviderKey(lease),
+      ),
+    };
   }
 
   private get client(): EC2SpotClient {
