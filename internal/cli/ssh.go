@@ -2070,6 +2070,10 @@ func writeRemoteCommandPrefix(b *strings.Builder, workdir string, env map[string
 		if envFile == "" {
 			continue
 		}
+		if isSSHCommandEnvFile(envFile) {
+			fmt.Fprintf(b, `. "$1"/%s && `, shellQuote(envFile))
+			continue
+		}
 		fmt.Fprintf(b, "if [ -f %s ]; then . %s; fi && ", shellQuote(envFile), shellQuote(envFile))
 	}
 	for k, v := range env {

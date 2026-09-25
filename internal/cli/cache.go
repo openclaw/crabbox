@@ -157,9 +157,15 @@ func (a App) cacheWarm(ctx context.Context, args []string) error {
 		fmt.Fprintf(a.Stderr, "using GitHub Actions workspace %s\n", workdir)
 	}
 	remoteEnv := allowedRemoteEnvForTarget(cfg, target)
-	remote := remoteCacheWarmCommand(workdir, remoteEnv, actionsEnvFile, command)
+	commandEnv, err := stageSSHCommandEnv(ctx, target, workdir, remoteEnv, a.Stderr)
+	if err != nil {
+		return err
+	}
+	defer commandEnv.close()
+	envFiles := remoteRunEnvFiles(actionsEnvFile, commandEnv.File)
+	remote := remoteCommandWithEnvFiles(workdir, nil, envFiles, command)
 	if isWindowsNativeTarget(target) {
-		remote = windowsRemoteCommandWithEnvFile(workdir, remoteEnv, actionsEnvFile, command)
+		remote = windowsRemoteCommandWithEnvFiles(workdir, nil, envFiles, command)
 	}
 	code := runSSHStream(ctx, target, remote, a.Stdout, a.Stderr)
 	if code != 0 {
@@ -226,10 +232,6 @@ func remoteCacheStats(enabled map[string]bool) string {
 		return "true"
 	}
 	return b.String()
-}
-
-func remoteCacheWarmCommand(workdir string, env map[string]string, envFile string, command []string) string {
-	return remoteCommandWithEnvFiles(workdir, env, singleEnvFile(envFile), command)
 }
 
 func remoteCachePurge(kind string, enabled map[string]bool) string {

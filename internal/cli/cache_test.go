@@ -85,7 +85,7 @@ func TestRemoteCachePurgeHonorsEnabledKinds(t *testing.T) {
 }
 
 func TestRemoteCacheWarmCommandSourcesHydrationEnvFile(t *testing.T) {
-	got := remoteCacheWarmCommand("/home/runner/work/repo/repo", map[string]string{"CI": "1"}, "/home/runner/.crabbox/actions/cbx.env.sh", []string{"pnpm", "install"})
+	got := remoteCommandWithEnvFiles("/home/runner/work/repo/repo", map[string]string{"CI": "1"}, []string{"/home/runner/.crabbox/actions/cbx.env.sh"}, []string{"pnpm", "install"})
 	for _, want := range []string{
 		"cd '/home/runner/work/repo/repo'",
 		". '/home/runner/.crabbox/actions/cbx.env.sh'",
@@ -112,7 +112,7 @@ func TestAllowedRemoteEnvExcludesExternalDesktopPasswordForAnyTarget(t *testing.
 			if env["SCREEN_SAFE_VALUE"] != "preserved" {
 				t.Fatalf("unrelated remote environment lost: %#v", env)
 			}
-			command := remoteCacheWarmCommand("/work/repo", env, "", []string{"true"})
+			command := remoteCommandWithEnvFiles("/work/repo", env, nil, []string{"true"})
 			if strings.Contains(command, "operator-secret") || strings.Contains(command, "SCREEN_SHARING_PASSWORD") {
 				t.Fatalf("cache command exposed desktop password: %s", command)
 			}

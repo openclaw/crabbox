@@ -91,10 +91,23 @@ and value. If it is not set, nothing is forwarded — Crabbox does not invent
 values. Variables that match the allowlist but are unset locally simply do not
 appear in the forwarded set.
 
-Inline-allowlisted variables (those resolved from the local environment) are
-passed through the provider's remote-command transport. SSH-backed providers
-pass them as part of the SSH command itself, with quoting and escaping handled
-automatically so values containing shell metacharacters pass through safely.
+SSH-backed providers upload allowlisted values over SSH stdin into a private
+per-command file under `.crabbox/env-<random>/` in the workspace. The remote
+session loads that file; neither the SSH command nor the workspace-owner
+launcher contains the values, even encoded. POSIX targets (including WSL2) use
+a mode `0600` shell file inside a mode `0700` directory. Native Windows uses a
+PowerShell file in a directory restricted to the SSH account. Quoting, Unicode,
+empty strings, and multiline values are preserved. The file and its directory
+are removed after the command, including failure and cancellation; a failed
+cleanup emits a warning. Preflight and `cache warm` use the same transport.
+
+These temporary values remain separate from reusable `--env-helper` profiles
+and are never retained by helper mode. Forwarding summaries report names and
+presence, with lengths for secret-shaped names. Crabbox does not add the
+transport contents to timing JSON, proof files, or failure-bundle metadata.
+Workloads can still expose their own environment through output or artifacts;
+inspect those before sharing.
+
 Delegated-run providers may use a provider-specific transport instead; for
 example, Docker Sandbox writes the selected values to a temporary local env file
 and passes only that file path to `sbx exec --env-file` so the values do not

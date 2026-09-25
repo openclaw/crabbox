@@ -1877,7 +1877,14 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 			hydrateTarget.WindowsMode = cfg.WindowsMode
 		}
 		hydrateSupported := supportsLocalActionsHydrateTarget(hydrateTarget) || supportsGitHubActionsRunnerTarget(hydrateTarget)
-		preflightErr := printRemoteCapabilityPreflight(ctx, a.Stderr, cfg, server, currentTarget, leaseID, workdir, remoteRunEnvFiles(actionsEnvFile, profileEnvFile), hydratedByActions, actionsURL, hydrateSupported, envSelection.Inline)
+		preflightEnv := mergeEnv(nil, envSelection.Inline)
+		removeEnvironmentKeys(preflightEnv, reservedRunEnvNames...)
+		commandEnv, err := stageSSHCommandEnv(ctx, currentTarget, workdir, preflightEnv, a.Stderr)
+		if err != nil {
+			return err
+		}
+		defer commandEnv.close()
+		preflightErr := printRemoteCapabilityPreflight(ctx, a.Stderr, cfg, server, currentTarget, leaseID, workdir, remoteRunEnvFiles(actionsEnvFile, profileEnvFile, commandEnv.File), hydratedByActions, actionsURL, hydrateSupported, runExecutionMetadata(leaseID, executionRunID, ServerSlug(server)))
 		preflightPrinted = true
 		if preflightErr != nil {
 			return preflightErr
@@ -2842,8 +2849,14 @@ afterSync:
 		maybePrintEnvForwardingSummary(a.Stderr, cfg.Provider, "forwarded", cfg.EnvAllow, envSelection.Effective)
 	}
 	runEnv := mergeEnv(envSelection.Inline, capabilityEnv)
-	runEnv = mergeEnv(runEnv, runExecutionMetadata(leaseID, executionRunID, ServerSlug(server)))
-	envFiles := remoteRunEnvFiles(actionsEnvFile, profileEnvFile)
+	removeEnvironmentKeys(runEnv, reservedRunEnvNames...)
+	commandEnv, err := stageSSHCommandEnv(ctx, target, workdir, runEnv, a.Stderr)
+	if err != nil {
+		return recordFailure(err)
+	}
+	defer commandEnv.close()
+	runEnv = runExecutionMetadata(leaseID, executionRunID, ServerSlug(server))
+	envFiles := remoteRunEnvFiles(actionsEnvFile, profileEnvFile, commandEnv.File)
 	useShell := shouldUseShellWithLiteralArgs(command, expansion.LiteralArgs)
 	remote := remoteCommandWithEnvFiles(workdir, runEnv, envFiles, command)
 	if script != nil {

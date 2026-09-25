@@ -436,7 +436,19 @@ func windowsRemoteShellCommandWithEnvFiles(workdir string, env map[string]string
 func writeWindowsRemotePrefix(b *bytes.Buffer, workdir string, env map[string]string, envFiles []string) {
 	b.WriteString(`$ErrorActionPreference = "Stop"` + "\n")
 	b.WriteString(`Set-Location -LiteralPath ` + psQuote(workdir) + "\n")
-	if len(envFiles) > 0 {
+	var profileFiles, commandFiles []string
+	for _, path := range envFiles {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		if isSSHCommandEnvFile(path) {
+			commandFiles = append(commandFiles, path)
+		} else {
+			profileFiles = append(profileFiles, path)
+		}
+	}
+	if len(profileFiles) > 0 {
 		b.WriteString(`function Import-CrabboxEnvFile($Path) {
   if ($Path -match '^/([A-Za-z])/(.*)$') {
     $Path = ($matches[1].ToUpperInvariant() + ':\' + $matches[2].Replace('/', '\'))
@@ -460,14 +472,10 @@ function Add-CrabboxPath($Path) {
 }
 `)
 	}
-	for _, envFile := range envFiles {
-		envFile = strings.TrimSpace(envFile)
-		if envFile == "" {
-			continue
-		}
+	for _, envFile := range profileFiles {
 		b.WriteString(`Import-CrabboxEnvFile ` + psQuote(envFile) + "\n")
 	}
-	if len(envFiles) > 0 {
+	if len(profileFiles) > 0 {
 		b.WriteString(`Add-CrabboxPath $env:PNPM_HOME
 if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TOOL_CACHE)) {
   $nodeRoot = Join-Path $env:RUNNER_TOOL_CACHE 'node'
@@ -477,6 +485,9 @@ if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TOOL_CACHE)) {
   }
 }
 `)
+	}
+	for _, envFile := range commandFiles {
+		b.WriteString(`. (Join-Path (Get-Location) ` + psQuote(envFile) + ")\n")
 	}
 	for key, value := range env {
 		if !ValidShellEnvName(key) {
