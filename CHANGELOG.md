@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep background telemetry from replacing workspace command witnesses and failing successful hydration reads with exit 74.
 - Fix WSL2 static targets for non-administrator Windows accounts by removing WMI shell discovery and accepting read-only app-capability grants on HOME while preserving private stage ACLs. [Issue 2543](https://github.com/openclaw/crabbox/issues/2543), [PR 2546](https://github.com/openclaw/crabbox/pull/2546). Thanks @altaywtf.
 - Preserve the final Parallels VM-query error in IP timeouts and suppress stale DHCP or clone-mode advice when current inventory is unavailable. [PR 2480](https://github.com/openclaw/crabbox/pull/2480). Thanks @steipete.
 - Preserve Lambda acquisition causes when rollback fails, report recovery-claim write failures, and block automatic fresh-allocation retries after failed cleanup. [PR 2463](https://github.com/openclaw/crabbox/pull/2463). Thanks @steipete.

@@ -47,7 +47,9 @@ func collectLeaseTelemetry(ctx context.Context, target SSHTarget) (*LeaseTelemet
 	if target.TargetOS != "" && target.TargetOS != targetLinux {
 		return nil, nil
 	}
-	output, err := runSSHOutput(ctx, target, remoteLeaseTelemetryScript())
+	// Telemetry only observes the lease; sharing a command witness can replace
+	// an exited workload's identity before its owner finishes cleanup.
+	output, err := runSSHOutput(contextWithoutWorkspaceOwner(ctx), target, remoteLeaseTelemetryScript())
 	if err != nil {
 		return nil, err
 	}
