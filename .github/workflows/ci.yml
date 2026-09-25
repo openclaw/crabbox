@@ -336,6 +336,8 @@ jobs:
         shell: pwsh
         run: |
           $required = @(
+            'TestRemoteActionsWorkspaceOriginNativeWindows',
+            'TestReadActionsWorkspaceStateNativeWindows',
             'TestWindowsNativeStdinRuntime',
             'TestPackageManagerPreflightWindowsEnvironment',
             'TestWindowsNativeStdinCancellation',
