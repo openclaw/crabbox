@@ -26,6 +26,10 @@
 - Stop Parallels IP discovery from admitting probes after the startup deadline while preserving the caller's cancellation cause. [PR 2548](https://github.com/openclaw/crabbox/pull/2548).
 - Allow Azure fixed-lease `stop --force` to finish retained claims after external cleanup, verifying VM and companion absence with read-only checks and preserving interrupted recovery for retry. [PR 2572](https://github.com/openclaw/crabbox/pull/2572). Thanks @galiniliev.
 
+### Upgrade notes
+
+- Azure `ephemeral` OS disks now use GA full caching through the SDK and coordinator; replace removed `ephemeral-preview` values in flags, config, and environment with `ephemeral`, choose a supported VM family with at least 8 active vCPUs (Fsv2 no longer qualifies), or use `--azure-os-disk managed`. [PR 2565](https://github.com/openclaw/crabbox/pull/2565). Thanks @jwmoss.
+
 ## 0.66.0 - 2026-09-24
 
 ### Highlights

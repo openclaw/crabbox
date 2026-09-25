@@ -347,18 +347,18 @@ azure:
   backend: vm           # vm | dynamic-sessions
   location: eastus
   resourceGroup: crabbox-leases
-  osDisk: managed       # managed | ephemeral | ephemeral-preview | auto
+  osDisk: managed       # managed | ephemeral | auto
   vnet: crabbox-vnet
   subnet: crabbox-subnet
   nsg: crabbox-nsg
 ```
 
 Azure uses managed `StandardSSD_LRS` OS disks by default so leases can support
-native disk-snapshot checkpoints. `ephemeral` opts into local OS disks for
-stateless leases and disables native Azure checkpoint/fork support.
-`ephemeral-preview` opts into Azure's public-preview full-caching ephemeral OS
-disk mode and skips known unsupported Crabbox Azure SKUs. `auto` is accepted for
-compatibility and resolves to managed.
+native disk-snapshot checkpoints. `ephemeral` enables GA full caching for
+stateless leases and disables native Azure checkpoint/fork support. It requires
+at least eight vCPUs, a supported VM family, and sufficient local storage.
+See [Azure disk requirements](azure.md#os-disk-mode). `ephemeral-preview` is
+removed; replace it with `ephemeral`. `auto` resolves to `managed`.
 
 ### Azure Dynamic Sessions
 

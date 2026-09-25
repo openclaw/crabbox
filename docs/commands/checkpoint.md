@@ -186,7 +186,7 @@ the checkpoint for inspection.
 - Azure cannot create a managed image from an active VM, so the Azure native
   path uses a managed OS-disk snapshot. That snapshot requires a managed OS disk
   (the default); creation refuses leases started with
-  `--azure-os-disk ephemeral` or `--azure-os-disk ephemeral-preview`, where
+  `--azure-os-disk ephemeral`, where
   Azure reports success but does not capture live disk state.
 - Direct Azure Windows disk snapshots support `windows.mode=normal` leases and
   require `--no-reboot=false`. Crabbox

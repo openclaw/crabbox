@@ -23,9 +23,6 @@ type fixedAzureCreator interface {
 
 func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	cfg := b.Cfg
-	if cfg.Azure.OSDisk == core.AzureOSDiskEphemeralPreview {
-		return core.LeaseTarget{}, core.Exit(2, "direct Azure fixed leases do not support ephemeral-preview OS disks")
-	}
 	if cfg.Azure.Snapshot != "" || req.RequestedCheckpointID != "" {
 		return core.LeaseTarget{}, core.Exit(2, "direct Azure fixed leases require a VM image; checkpoint forks are not supported")
 	}

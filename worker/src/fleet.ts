@@ -166,6 +166,7 @@ import {
   awsPromotedAMIConfigKey,
   azureLocationFor,
   leaseConfig,
+  InvalidAzureOSDiskModeError,
   normalizeArchitecture,
   parseTarget,
   validCIDRs,
@@ -3823,6 +3824,9 @@ export class FleetCoordinator {
     try {
       config = leaseConfig(input, defaults);
     } catch (error) {
+      if (error instanceof InvalidAzureOSDiskModeError) {
+        return json({ error: "invalid_azure_os_disk", message: error.message }, { status: 400 });
+      }
       if (error instanceof InvalidAWSRegionError) {
         return json({ error: "invalid_region", message: error.message }, { status: 400 });
       }

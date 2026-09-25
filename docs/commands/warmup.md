@@ -305,9 +305,11 @@ sync/run/actions contract. Azure Windows does not provision browser/code.
 Azure leases use managed `StandardSSD_LRS` OS disks by default so native
 disk-snapshot checkpoints can be created and forked. Use
 `--azure-os-disk ephemeral` only for stateless leases that don't need native
-Azure checkpoint/fork support. Use `--azure-os-disk ephemeral-preview` for
-Azure's public-preview full-caching ephemeral OS disk mode; `--azure-os-disk
-auto` resolves to managed.
+Azure checkpoint/fork support. This mode enables GA full caching and requires
+at least eight vCPUs plus sufficient local storage on a supported VM family.
+See [Azure disk requirements](../features/azure.md#os-disk-mode).
+`ephemeral-preview` is removed; use `ephemeral`. `--azure-os-disk auto` resolves
+to managed.
 
 `--azure-backend dynamic-sessions` keeps `--provider azure` as the family
 selector while routing to the `azure-dynamic-sessions` delegated backend.
@@ -412,7 +414,7 @@ bootstrap, key migration, or failure cleanup.
 --reclaim                          overwrite an existing local claim for this lease
 --timing-json                      print a final JSON timing record on stderr
 --azure-backend vm|dynamic-sessions
---azure-os-disk managed|ephemeral|ephemeral-preview|auto
+--azure-os-disk managed|ephemeral|auto
 ```
 
 Provider-specific flags (for example `--azure-backend`, `--e2b-template`,

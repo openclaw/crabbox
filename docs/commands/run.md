@@ -1132,10 +1132,11 @@ config rather than argv.
 
 Azure one-shot leases use managed `StandardSSD_LRS` OS disks by default so they
 can become native checkpoint sources. Use `--azure-os-disk ephemeral` only for
-stateless leases that do not need native Azure checkpoint/fork support;
-`--azure-os-disk ephemeral-preview` opts into Azure's public-preview
-full-caching ephemeral OS disk mode. `--azure-os-disk auto` is accepted for
-compatibility and resolves to managed.
+stateless leases that do not need native Azure checkpoint/fork support. This
+mode enables GA full caching and requires at least eight vCPUs, a supported VM
+family, and sufficient local storage. See [Azure disk requirements](../features/azure.md#os-disk-mode).
+`ephemeral-preview` is removed; use `ephemeral`. `--azure-os-disk auto` resolves
+to managed.
 
 ## Flags
 
