@@ -6,6 +6,7 @@
 - Fix WSL2 static targets for non-administrator Windows accounts by removing WMI shell discovery and accepting read-only app-capability grants on HOME while preserving private stage ACLs. [Issue 2543](https://github.com/openclaw/crabbox/issues/2543), [PR 2546](https://github.com/openclaw/crabbox/pull/2546). Thanks @altaywtf.
 - Preserve the final Parallels VM-query error in IP timeouts and suppress stale DHCP or clone-mode advice when current inventory is unavailable. [PR 2480](https://github.com/openclaw/crabbox/pull/2480). Thanks @steipete.
 - Preserve Lambda acquisition causes when rollback fails, report recovery-claim write failures, and block automatic fresh-allocation retries after failed cleanup. [PR 2463](https://github.com/openclaw/crabbox/pull/2463). Thanks @steipete.
+- Bound Tencent Cloud IP-readiness reads and retry waits, preserve cancellation and acquisition causes after rollback failure, and prevent cleanup errors from triggering fresh-instance retries. [PR 2464](https://github.com/openclaw/crabbox/pull/2464). Thanks @steipete.
 - Join local Blacksmith sync descendants before an ordinary Testbox run returns after cancellation, preserving the lease claim until command cleanup completes. [PR 2547](https://github.com/openclaw/crabbox/pull/2547).
 - Stop Parallels IP discovery from admitting probes after the startup deadline while preserving the caller's cancellation cause. [PR 2548](https://github.com/openclaw/crabbox/pull/2548).
 
@@ -167,8 +168,6 @@
 - Add opt-in direct-host Parallels capacity limits through `parallels.maxVMs` and `CRABBOX_PARALLELS_MAX_VMS`, preserve fleet-entry precedence, and let explicit YAML zero clear inherited limits. [PR 2392](https://github.com/openclaw/crabbox/pull/2392), [Issue 2386](https://github.com/openclaw/crabbox/issues/2386). Thanks @saariuslystoned.
 
 ### Fixes
-
-- Bound Tencent Cloud IP-readiness reads and retry waits, preserve cancellation and acquisition causes after rollback failure, and prevent cleanup errors from triggering fresh-instance retries. [PR 2464](https://github.com/openclaw/crabbox/pull/2464).
 
 - Retain DigitalOcean managed SSH keys and recovery credentials when acquisition rollback cannot delete the Droplet, allowing cleanup to be retried safely. [PR 2459](https://github.com/openclaw/crabbox/pull/2459).
 - Preserve DigitalOcean acquisition cancellation causes and timeout exit codes, including failed rollback, and suppress automatic fresh-allocation retries after cleanup failure. [PR 2460](https://github.com/openclaw/crabbox/pull/2460).
