@@ -102,7 +102,10 @@ func (a App) webCode(ctx context.Context, args []string) error {
 		return err
 	}
 	a.touchLeaseTargetBestEffort(ctx, cfg, LeaseTarget{Server: server, SSH: target, LeaseID: leaseID}, "")
-	workspace, folder, hydratedByActions := codeWorkspace(ctx, target, cfg, leaseID, repo)
+	workspace, folder, hydratedByActions, err := codeWorkspace(ctx, target, cfg, leaseID, repo)
+	if err != nil {
+		return err
+	}
 	if hydratedByActions {
 		fmt.Fprintf(a.Stderr, "using GitHub Actions workspace %s\n", workspace)
 	}
@@ -171,14 +174,18 @@ func ensureRemoteCodeServer(ctx context.Context, target SSHTarget, workdir strin
 	return Exit(5, "timed out waiting for code-server on 127.0.0.1:%s", managedCodePort)
 }
 
-func codeWorkspace(ctx context.Context, target SSHTarget, cfg Config, leaseID string, repo Repo) (string, string, bool) {
+func codeWorkspace(ctx context.Context, target SSHTarget, cfg Config, leaseID string, repo Repo) (string, string, bool, error) {
 	workspace := remoteJoin(cfg, leaseID, repo.Name)
 	hydrated := false
-	if state, err := readActionsHydrationState(ctx, target, leaseID); err == nil && state.Workspace != "" {
+	state, err := readActionsWorkspace(ctx, target, leaseID, repo)
+	if err != nil {
+		return "", "", false, err
+	}
+	if state.Workspace != "" {
 		workspace = state.Workspace
 		hydrated = true
 	}
-	return workspace, mappedRemoteCodeFolder(workspace, repo), hydrated
+	return workspace, mappedRemoteCodeFolder(workspace, repo), hydrated, nil
 }
 
 func mappedRemoteCodeFolder(workspace string, repo Repo) string {

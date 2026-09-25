@@ -5848,6 +5848,8 @@ func TestFullResyncSeedsPruneManifestFromGit(t *testing.T) {
 
 type fullResyncActionsTestOptions struct {
 	noHydrate        bool
+	noSync           bool
+	normalSync       bool
 	syncOnly         bool
 	failInvalidation bool
 	failBinding      bool
@@ -5855,6 +5857,13 @@ type fullResyncActionsTestOptions struct {
 	adoptedWorkspace string
 	workflow         string
 	mutateWorkflow   bool
+	markerOrigin     string
+	identityExit     string
+	hydratedOrigin   string
+	markerExit       string
+	actionsRepo      string
+	noOrigin         bool
+	explicitHydrate  bool
 }
 
 type fullResyncActionsTestResult struct {
@@ -5905,9 +5914,13 @@ jobs:
 		{"init", "-q"},
 		{"config", "user.email", "test@example.com"},
 		{"config", "user.name", "Crabbox Test"},
+		{"remote", "add", "origin", "https://github.com/example-org/crabbox.git"},
 		{"add", "."},
 		{"commit", "-qm", "fixture"},
 	} {
+		if opts.noOrigin && args[0] == "remote" {
+			continue
+		}
 		cmd := exec.Command("git", args...)
 		cmd.Dir = repoRoot
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -5945,6 +5958,21 @@ $current"
   esac
 done
 if [ -n "$decoded_view" ]; then remote=$decoded_view; fi
+case "$remote" in
+  *'CRABBOX_LOCAL_ACTIONS_NODE_PATH'*)
+    printf 'env-handoff\n' >> "$CRABBOX_FAKE_EVENTS"
+    exit 0
+    ;;
+  *'exact_git_root || exit 2'*'git remote get-url origin'*)
+    printf 'verify-workspace\n' >> "$CRABBOX_FAKE_EVENTS"
+    if [ -f "$CRABBOX_FAKE_HYDRATED" ] && [ -n "$CRABBOX_FAKE_HYDRATED_ORIGIN" ]; then
+      printf '%s\n' "$CRABBOX_FAKE_HYDRATED_ORIGIN"
+    else
+      printf '%s\n' "$CRABBOX_FAKE_MARKER_ORIGIN"
+    fi
+    exit "${CRABBOX_FAKE_IDENTITY_EXIT:-0}"
+    ;;
+esac
 # Match the dedicated probe, not metadata programs which also contain pwd -P.
 # The decoded witness quotes its registrar's command assignment once.
 if [ "$current" = 'pwd -P' ] || printf '%s\n' "$current" | grep -Fqx -- ` + shellQuote(`owner_command='\''pwd -P'\''`) + `; then
@@ -6007,6 +6035,9 @@ EOF
     exit 0
     ;;
   *"cat "*".crabbox/actions/cbx_env_profile_test.env"*)
+    if [ -n "$CRABBOX_FAKE_MARKER_EXIT" ]; then
+      exit "$CRABBOX_FAKE_MARKER_EXIT"
+    fi
     if [ -e "$CRABBOX_FAKE_HYDRATED" ]; then
       printf 'WORKSPACE=%s\n' "$CRABBOX_FAKE_CANONICAL_WORKSPACE"
       printf '%s\n' \
@@ -6039,7 +6070,7 @@ exit 0
 	if err := os.WriteFile(rsyncPath, []byte(rsyncScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	config := "actions:\n  workflow: .github/workflows/hydrate.yml\nsync:\n  fingerprint: false\n  gitSeed: false\n"
+	config := fmt.Sprintf("actions:\n  workflow: .github/workflows/hydrate.yml\n  repo: %q\nsync:\n  fingerprint: false\n  gitSeed: false\n", opts.actionsRepo)
 	if opts.workRoot != "" {
 		config += fmt.Sprintf("workRoot: %q\n", opts.workRoot)
 	}
@@ -6071,6 +6102,10 @@ exit 0
 	}
 	t.Setenv("CRABBOX_FAKE_CANONICAL_WORKSPACE", canonicalWorkspace)
 	t.Setenv("CRABBOX_FAKE_ADOPTED_WORKSPACE", adoptedWorkspace)
+	t.Setenv("CRABBOX_FAKE_MARKER_ORIGIN", blank(opts.markerOrigin, "https://github.com/example-org/crabbox.git"))
+	t.Setenv("CRABBOX_FAKE_IDENTITY_EXIT", blank(opts.identityExit, "0"))
+	t.Setenv("CRABBOX_FAKE_HYDRATED_ORIGIN", opts.hydratedOrigin)
+	t.Setenv("CRABBOX_FAKE_MARKER_EXIT", opts.markerExit)
 	if opts.failBinding {
 		t.Setenv("CRABBOX_FAKE_BINDING_FAIL", "1")
 	}
@@ -6083,7 +6118,11 @@ exit 0
 	args := []string{
 		"--provider", "run-env-profile-test",
 		"--id", "cbx_env_profile_test",
-		"--full-resync",
+	}
+	if opts.noSync {
+		args = append(args, "--no-sync")
+	} else if !opts.normalSync {
+		args = append(args, "--full-resync")
 	}
 	if opts.noHydrate {
 		args = append(args, "--no-hydrate")
@@ -6094,7 +6133,24 @@ exit 0
 		args = append(args, "--", "pnpm", "test")
 	}
 	var stdout, stderr bytes.Buffer
-	err := (App{Stdout: &stdout, Stderr: &stderr}).runCommand(context.Background(), args)
+	app := App{Stdout: &stdout, Stderr: &stderr}
+	var err error
+	if opts.explicitHydrate {
+		cfg, configErr := loadConfig()
+		if configErr != nil {
+			t.Fatal(configErr)
+		}
+		repo, repoErr := findRepo()
+		if repoErr != nil {
+			t.Fatal(repoErr)
+		}
+		const leaseID = "cbx_env_profile_test"
+		target := SSHTarget{User: "crabbox", Host: "127.0.0.1", Port: "22", TargetOS: targetLinux}
+		fields := actionsHydrateFields(leaseID, githubActionsLeaseLabel(leaseID), cfg.Actions.Job, 0, cfg.Actions.Fields)
+		_, err = app.hydrateActionsLocally(context.Background(), cfg, repo, target, leaseID, cfg.Actions.Job, fields, time.Minute, false, false, nil)
+	} else {
+		err = app.runCommand(context.Background(), args)
+	}
 	eventsData, readErr := os.ReadFile(eventsPath)
 	if readErr != nil && !os.IsNotExist(readErr) {
 		t.Fatal(readErr)
@@ -6117,6 +6173,89 @@ exit 0
 	}
 }
 
+func TestRunCommandRejectsForeignActionsWorkspaceBeforeMutation(t *testing.T) {
+	for _, mode := range []string{"no-sync", "normal-sync", "full-resync"} {
+		t.Run(mode, func(t *testing.T) {
+			workspace := "/work/another-project"
+			if mode == "full-resync" {
+				workspace = remoteJoin(defaultConfig(), "cbx_env_profile_test", "crabbox")
+			}
+			result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{
+				noSync:           mode == "no-sync",
+				noHydrate:        mode == "no-sync",
+				normalSync:       mode == "normal-sync",
+				adoptedWorkspace: workspace,
+				markerOrigin:     "https://github.com/example-org/another-project.git",
+				actionsRepo:      "example-org/another-project",
+			})
+			var exitErr ExitError
+			if !AsExitError(result.err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "does not match the invoking repository") {
+				t.Errorf("error=%v, want repository mismatch\nstderr=%s", result.err, result.stderr)
+			}
+			if result.resetCommand != "" || result.syncTarget != "" || result.hydrationScript != "" {
+				t.Error("foreign Actions workspace was mutated")
+			}
+			assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "owner-release"})
+		})
+	}
+}
+
+func TestRunCommandRejectsUnverifiableActionsWorkspaceBeforeMutation(t *testing.T) {
+	result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{identityExit: "2"})
+	if result.err == nil {
+		t.Fatal("failed Git identity probe was ignored")
+	}
+	assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "owner-release"})
+}
+
+func TestRunCommandRejectsUnreadableActionsMarkerBeforeMutation(t *testing.T) {
+	result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{markerExit: "42"})
+	if result.err == nil {
+		t.Fatal("failed marker read was treated as absence")
+	}
+	assertRunEvents(t, result.events, []string{"owner-acquire", "owner-release"})
+}
+
+func TestRunCommandRejectsActionsWorkspaceWithoutInvokingOrigin(t *testing.T) {
+	result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{noSync: true, noHydrate: true, noOrigin: true})
+	var exitErr ExitError
+	if !AsExitError(result.err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "invoking repository origin") {
+		t.Fatalf("error=%v, want missing invoking repository origin", result.err)
+	}
+	assertRunEvents(t, result.events, []string{"owner-acquire", "owner-release"})
+}
+
+func TestRunCommandVerifiesFreshActionsWorkspaceBeforeCommand(t *testing.T) {
+	result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{hydratedOrigin: "https://github.com/example-org/other.git"})
+	var exitErr ExitError
+	if !AsExitError(result.err, &exitErr) || exitErr.Code != 2 || !strings.Contains(exitErr.Message, "does not match the invoking repository") {
+		t.Fatalf("error=%v, want fresh workspace repository mismatch", result.err)
+	}
+	assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "invalidate", "reset", "sync", "clear", "hydrate", "verify-workspace", "owner-release"})
+}
+
+func TestExplicitLocalActionsHydrationPreservesEnvironmentHandoff(t *testing.T) {
+	result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{explicitHydrate: true, noOrigin: true})
+	if result.err != nil {
+		t.Fatalf("explicit hydration failed: %v\n%s", result.err, result.stderr)
+	}
+	assertRunEvents(t, result.events, []string{"clear", "hydrate", "env-handoff"})
+}
+
+func TestRunCommandPreservesSameRepositoryCustomActionsWorkspace(t *testing.T) {
+	result := runFullResyncActionsTest(t, fullResyncActionsTestOptions{
+		noSync: true, noHydrate: true, adoptedWorkspace: "/work/custom-project",
+		markerOrigin: "git@github.com:example-org/crabbox.git",
+	})
+	if result.err != nil {
+		t.Fatalf("same-repository custom workspace rejected: %v", result.err)
+	}
+	assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "command", "owner-release"})
+	if !strings.Contains(result.stderr, "workdir=/work/custom-project") {
+		t.Fatalf("custom workspace not retained:\n%s", result.stderr)
+	}
+}
+
 func assertRunEvents(t *testing.T, got, want []string) {
 	t.Helper()
 	if strings.Join(got, ",") != strings.Join(want, ",") {
@@ -6129,7 +6268,7 @@ func TestRunCommandFullResyncRehydratesAdoptedActionsWorkspaceInOrderUnderOwner(
 	if result.err != nil {
 		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", result.err, result.stdout, result.stderr)
 	}
-	assertRunEvents(t, result.events, []string{"owner-acquire", "invalidate", "reset", "sync", "clear", "hydrate", "command", "owner-release"})
+	assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "invalidate", "reset", "sync", "clear", "hydrate", "verify-workspace", "env-handoff", "command", "owner-release"})
 	canonicalWorkspace := remoteJoin(defaultConfig(), "cbx_env_profile_test", "crabbox")
 	for name, value := range map[string]string{
 		"reset command":    result.resetCommand,
@@ -6173,7 +6312,7 @@ func TestRunCommandFullResyncBindsRelativeActionsWorkspaceBeforeMutation(t *test
 					t.Error("workspace mutation occurred after refused preparation")
 				}
 				if tt.failBinding {
-					assertRunEvents(t, result.events, []string{"owner-acquire", "bind-workspace", "owner-release"})
+					assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "bind-workspace", "owner-release"})
 				} else {
 					var effects []string
 					for _, event := range result.events {
@@ -6181,14 +6320,14 @@ func TestRunCommandFullResyncBindsRelativeActionsWorkspaceBeforeMutation(t *test
 							effects = append(effects, event)
 						}
 					}
-					assertRunEvents(t, effects, []string{"owner-acquire", "owner-release"})
+					assertRunEvents(t, effects, []string{"owner-acquire", "verify-workspace", "owner-release"})
 				}
 				return
 			}
 			if result.err != nil {
 				t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", result.err, result.stdout, result.stderr)
 			}
-			assertRunEvents(t, result.events, []string{"owner-acquire", "bind-workspace", "invalidate", "reset", "sync", "clear", "hydrate", "command", "owner-release"})
+			assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "bind-workspace", "invalidate", "reset", "sync", "clear", "hydrate", "verify-workspace", "env-handoff", "command", "owner-release"})
 			for name, value := range map[string]string{
 				"reset command":    result.resetCommand,
 				"sync target":      result.syncTarget,
@@ -6218,7 +6357,7 @@ func TestRunCommandFullResyncRejectsUnsupportedWorkflowBeforeRemoteMutation(t *t
 			if result.resetCommand != "" || result.syncTarget != "" || result.hydrationScript != "" {
 				t.Error("unsupported workflow reached workspace mutation")
 			}
-			assertRunEvents(t, result.events, []string{"owner-acquire", "owner-release"})
+			assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "owner-release"})
 		})
 	}
 }
@@ -6242,7 +6381,7 @@ func TestRunCommandFullResyncRejectsNonCanonicalAdoptedActionsWorkspace(t *testi
 	if !strings.Contains(exitErr.Message, "local hydration uses") {
 		t.Fatalf("message=%q", exitErr.Message)
 	}
-	assertRunEvents(t, result.events, []string{"owner-acquire", "owner-release"})
+	assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "owner-release"})
 }
 
 func TestRunCommandFullResyncNoHydrateFailsBeforeResetOrCommand(t *testing.T) {
@@ -6254,7 +6393,7 @@ func TestRunCommandFullResyncNoHydrateFailsBeforeResetOrCommand(t *testing.T) {
 	if !strings.Contains(exitErr.Message, "cannot rehydrate") {
 		t.Fatalf("message=%q", exitErr.Message)
 	}
-	assertRunEvents(t, result.events, []string{"owner-acquire", "owner-release"})
+	assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "owner-release"})
 }
 
 func TestRunCommandFullResyncInvalidationFailureStopsBeforeResetOrCommand(t *testing.T) {
@@ -6266,7 +6405,7 @@ func TestRunCommandFullResyncInvalidationFailureStopsBeforeResetOrCommand(t *tes
 	if !strings.Contains(exitErr.Message, "invalidate GitHub Actions hydration marker") {
 		t.Fatalf("message=%q", exitErr.Message)
 	}
-	assertRunEvents(t, result.events, []string{"owner-acquire", "invalidate", "owner-release"})
+	assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "invalidate", "owner-release"})
 }
 
 func TestRunCommandFullResyncSyncOnlyInvalidatesWithoutRehydrate(t *testing.T) {
@@ -6275,7 +6414,7 @@ func TestRunCommandFullResyncSyncOnlyInvalidatesWithoutRehydrate(t *testing.T) {
 	if result.err != nil {
 		t.Fatalf("run error=%v\nstdout=%s\nstderr=%s", result.err, result.stdout, result.stderr)
 	}
-	assertRunEvents(t, result.events, []string{"owner-acquire", "invalidate", "reset", "sync", "owner-release"})
+	assertRunEvents(t, result.events, []string{"owner-acquire", "verify-workspace", "invalidate", "reset", "sync", "owner-release"})
 	if !strings.Contains(result.resetCommand, adoptedWorkspace) || !strings.Contains(result.syncTarget, adoptedWorkspace) {
 		t.Fatalf("sync-only did not preserve adopted workspace reset/sync:\nreset=%s\nsync=%s", result.resetCommand, result.syncTarget)
 	}

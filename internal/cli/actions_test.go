@@ -1964,6 +1964,9 @@ exit 0
 	if !strings.Contains(logText, "timeout --signal=TERM") || strings.Contains(logText, "nohup") {
 		t.Fatalf("config-derived WSL2 target used the wrong hydration path:\n%s", logText)
 	}
+	if strings.Contains(logText, "CRABBOX_LOCAL_ACTIONS_NODE_PATH") {
+		t.Fatal("hydration producer sourced the environment before consumer verification")
+	}
 	if probes, err := os.ReadFile(probeLog); err != nil || len(probes) == 0 {
 		t.Fatalf("WSL2 fixture did not observe the Bash prerequisite: %q %v", probes, err)
 	}

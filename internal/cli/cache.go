@@ -151,7 +151,11 @@ func (a App) cacheWarm(ctx context.Context, args []string) error {
 	}
 	workdir := remoteJoin(cfg, leaseID, repo.Name)
 	actionsEnvFile := ""
-	if state, err := readActionsHydrationState(ctx, target, leaseID); err == nil && state.Workspace != "" {
+	state, err := readActionsWorkspace(ctx, target, leaseID, repo)
+	if err != nil {
+		return err
+	}
+	if state.Workspace != "" {
 		workdir = state.Workspace
 		actionsEnvFile = state.EnvFile
 		fmt.Fprintf(a.Stderr, "using GitHub Actions workspace %s\n", workdir)

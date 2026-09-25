@@ -268,6 +268,7 @@ func fakeEditorSSH(t *testing.T, folderExit int) {
 	dir := t.TempDir()
 	script := `#!/bin/sh
 case "$*" in
+  *'cat "$HOME"/'*'.crabbox/actions/'*) exit 0 ;;
   *"test -d "*) exit "$CRABBOX_FAKE_FOLDER_EXIT" ;;
   *) exit 1 ;;
 esac

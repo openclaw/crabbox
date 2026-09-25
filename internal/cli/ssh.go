@@ -2109,13 +2109,17 @@ func remoteResetWorkdir(workdir string) string {
 	return remotePortableShellInvocation(script, nil)
 }
 
-func remoteGitWorkspaceFunctions() string {
+func remoteExactGitRootFunction() string {
 	return `exact_git_root() {
   git_root="$(git rev-parse --show-toplevel 2>/dev/null)" || return 1
   git_root="$(cd -P -- "$git_root" 2>/dev/null && pwd -P)" || return 1
   [ "$git_root" = "$(pwd -P)" ]
 }
-usable_git_workspace() (
+`
+}
+
+func remoteGitWorkspaceFunctions() string {
+	return remoteExactGitRootFunction() + `usable_git_workspace() (
   exact_git_root || exit 1
   git rev-parse --verify HEAD^{commit} >/dev/null 2>&1 || exit 1
   workspace_index="$(git rev-parse --git-path index 2>/dev/null)" || exit 1

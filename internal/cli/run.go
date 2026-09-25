@@ -1821,7 +1821,7 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 	if !freshPR.Empty() {
 		workdir = remoteJoin(cfg, leaseID, freshPR.WorkdirName())
 	} else {
-		state, stateErr := readActionsHydrationState(ctx, target, leaseID)
+		state, stateErr := readActionsWorkspaceState(ctx, target, leaseID)
 		if stateErr != nil && (directorySync || localGitSeed) {
 			source := "directory sync"
 			if localGitSeed {
@@ -1832,12 +1832,18 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		if stateErr != nil && borrowedPool != nil && readyPoolRunNeedsTrustedRemote(*readyPoolReturn) {
 			return recordFailure(Exit(7, "verify ready-pool Actions hydration marker: %v", stateErr))
 		}
-		if stateErr == nil && state.Workspace != "" {
+		if stateErr != nil {
+			return recordFailure(stateErr)
+		}
+		if state.Workspace != "" {
 			if localGitSeed {
 				return recordFailure(Exit(2, "local Git seeding cannot modify an Actions-owned workspace; use a fresh raw workspace"))
 			}
 			if directorySync {
 				return recordFailure(Exit(2, "directory sync cannot modify an Actions-owned workspace; use a fresh raw workspace"))
+			}
+			if err := verifyActionsWorkspace(ctx, target, repo, state); err != nil {
+				return recordFailure(err)
 			}
 			workdir = state.Workspace
 			actionsEnvFile = state.EnvFile
@@ -1966,6 +1972,12 @@ func (a App) runCommandWithBenchmarkRecord(ctx context.Context, args []string, b
 		}
 		if err == nil {
 			state, err = a.executeLocalActionsHydration(ctx, cfg, repo, currentTarget, *plan, 20*time.Minute, false, false, plainManifest, lifecycleOwner)
+		}
+		if err == nil {
+			err = verifyActionsWorkspace(ctx, hydrateTarget, repo, state)
+		}
+		if err == nil {
+			err = ensureLocalActionsRunEnv(ctx, hydrateTarget, leaseID, state)
 		}
 		if err != nil {
 			recorder.Event("actions.hydrate.failed", "hydrate", err.Error())
