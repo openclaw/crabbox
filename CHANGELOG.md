@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Verify retained Actions workspace identity before run, sync, cache warm, or editor handoff; preserve custom paths and explicit cross-repository hydration with claim-bound consent. [PR 2564](https://github.com/openclaw/crabbox/pull/2564).
 - Keep background telemetry from replacing workspace command witnesses and failing successful hydration reads with exit 74. [PR 2563](https://github.com/openclaw/crabbox/pull/2563).
 - Remove Proxmox fixed-ID prepared claims after definite pre-allocation authorization rejections and add checked `stop --force` recovery for absent, unbound attempts. [Fixes #2559](https://github.com/openclaw/crabbox/issues/2559). Thanks @ahkohd.
 - Fix WSL2 static targets for non-administrator Windows accounts by removing WMI shell discovery and accepting read-only app-capability grants on HOME while preserving private stage ACLs. [Issue 2543](https://github.com/openclaw/crabbox/issues/2543), [PR 2546](https://github.com/openclaw/crabbox/pull/2546). Thanks @altaywtf.
