@@ -223,12 +223,19 @@ token-derived identifiers are stored in fixed claims.
 Fixed claims use a distinct provider marker so older clients cannot treat them
 as ordinary Daytona claims and erase terminal replay protection. Failed or
 uncertain cleanup retains the claim. An unqualified 404 is not deletion proof:
-the provider's resource-access layer can also use that response for failed access.
+the provider's resource-access layer can also use that response for a different
+organization. Daytona grants every valid organization API key sandbox read
+access, including keys with no permissions; sandbox read access cannot be
+withheld within the organization. See [Daytona permissions and scopes](https://www.daytona.io/docs/en/api-keys/#permissions--scopes).
+Fresh organization attestation therefore distinguishes the access boundary
+before cleanup accepts the native exact-UUID absence receipt.
 Fixed cleanup durably binds the native UUID, verifies it through
 `GET /sandbox/{id}`, and records an identity-validated deletion acknowledgment
 before reconciling removal. The exact lookup reads the database rather than the
 ordinary cursor-list search index. Cleanup requires the endpoint to expose
-failed-deletion records until destruction completes.
+failed-deletion records until destruction completes, as the current Daytona API
+does for `error` and `build_failed` states even when their desired state is
+`destroyed`.
 
 Once cleanup durably records its entry before DELETE, replay and execution are
 blocked even if the DELETE response is lost and the sandbox still appears ready;

@@ -433,6 +433,9 @@ func deleteFixedDaytonaSandbox(ctx context.Context, client fixedDaytonaDeletionA
 	if err != nil || scope != claim.ProviderScope || selected != "" && selected != intent.Attempt["organization"] {
 		return core.Exit(4, "Daytona deletion endpoint or organization changed")
 	}
+	// Daytona grants sandbox reads to every valid key in an organization, even
+	// with no scopes (www.daytona.io/docs/en/api-keys). Attest that boundary before 404
+	// can retire custody; sandbox-specific read denial is not a provider state.
 	if err := client.attestDeletionOrganization(ctx, intent.Attempt["organization"]); err != nil {
 		return err
 	}
