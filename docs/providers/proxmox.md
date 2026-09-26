@@ -388,6 +388,10 @@ Starting at Proxmox's `nextid`, fixed-ID reservation skips VMIDs bound by any
 live local Proxmox claim and verifies the next free VMID against complete cluster
 inventory, including unlabelled VMs, templates, and containers. Released fixed-ID
 receipts no longer reserve a VMID. Other claims are never dropped or adopted.
+Local fixed acquisitions serialize VMID selection through durable claim
+publication, so concurrent callers cannot reserve the same free ID. The fence
+ends before cloning or waiting for the guest; other hosts still rely on Proxmox
+to reject a conflicting clone request.
 An identical replay inspects the persisted VMID and adopts only the VM whose
 lease labels, intent fingerprint, cluster scope, VMID, and native `vmgenid`
 match. Slugs are never replay authority. A changed intent, copied labels,

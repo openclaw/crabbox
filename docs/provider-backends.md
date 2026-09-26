@@ -288,6 +288,13 @@ or `tx.Observe`. Core persists observation bindings before preparing access and
 selects journal phases; adapters do not write them. Binding cannot retarget a
 known native identity.
 
+For a native ID namespace shared by multiple local fixed acquisitions, set
+`FixedLeaseOperations.PlanReservationKey` to the same stable key for every
+caller sharing that namespace. Core serializes planning, uniqueness checks,
+and durable attempt publication across processes, then releases the reservation
+fence before submission. This requires a pre-submission plan; it cannot be used
+with `PlanDuringSubmit`.
+
 Providers with expiring idempotency keys can combine `FreshOnly` with
 `FixedAdmission.KeyedRetry`, specifying the native attempt key and retention
 window. Core journals the key, first submission time, and submission count before

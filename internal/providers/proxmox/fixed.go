@@ -68,7 +68,7 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		Kind: fixedProxmoxLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID,
 		RepoRoot: req.Repo.Root, Reclaim: req.Reclaim, TargetOS: cfg.TargetOS,
 		WindowsMode: cfg.WindowsMode, TTL: cfg.TTL, IdleTimeout: cfg.IdleTimeout,
-	}, core.FixedLeaseOperations[core.Server]{Admission: &core.FixedAdmission{}, DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
+	}, core.FixedLeaseOperations[core.Server]{Admission: &core.FixedAdmission{}, PlanReservationKey: "proxmox-vmid", DescribeIntent: func(ctx context.Context, claim *core.LeaseClaim, exists bool) (core.FixedLeaseBinding, error) {
 		if exists {
 			if !fixedProxmoxLeaseKind.IsFixedClaim(*claim) || claim.ProviderScope != providerScope {
 				return core.FixedLeaseBinding{}, core.Exit(4, "lease_id_conflict: fixed Proxmox claim scope changed")

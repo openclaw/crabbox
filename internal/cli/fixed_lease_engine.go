@@ -209,6 +209,9 @@ type FixedReleasePolicy struct {
 // assembly, admission, publication, and compatibility through data descriptors.
 type FixedLeaseOperations[T any] struct {
 	Release *FixedReleasePolicy
+	// PlanReservationKey identifies a shared local native-ID namespace. Core
+	// fences selection through durable publication, then unlocks before Submit.
+	PlanReservationKey string
 	// Some APIs resolve prerequisite IDs inside submission. Each resolved
 	// attempt must still be journaled before admitting the target allocation.
 	PlanDuringSubmit bool
@@ -229,6 +232,9 @@ type FixedLeaseOperations[T any] struct {
 func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, ops FixedLeaseOperations[T]) (LeaseTarget, error) {
 	if ops.Admission == nil || ops.DescribeIntent == nil || (ops.Plan == nil && !ops.PlanDuringSubmit) || ops.ObserveExact == nil || ops.Submit == nil || ops.PrepareAccess == nil {
 		return LeaseTarget{}, fmt.Errorf("fixed lease engine requires all acquisition operations")
+	}
+	if ops.PlanReservationKey != "" && (ops.Plan == nil || ops.PlanDuringSubmit) {
+		return LeaseTarget{}, fmt.Errorf("fixed identity reservation requires a pre-submission plan")
 	}
 	if ops.Admission.KeyedRetry != nil && (ops.DeferredAdmission || ops.PlanDuringSubmit || !ops.Admission.FreshOnly || ops.Admission.RepeatSameIdentity || ops.Admission.PendingKey != "" || ops.Admission.KeyedRetry.AttemptKey == "" || ops.Admission.KeyedRetry.Window <= 0) {
 		return LeaseTarget{}, fmt.Errorf("keyed recovery requires fresh-only admission and a pre-submission plan")
@@ -275,23 +281,25 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 			if !observation.CanSubmit || !ops.Admission.permits(tx) || claim.FixedCreateIntent.State != "prepared" || claim.CloudID != "" || claim.CloudNumericID != 0 || claim.CloudImmutableID != "" {
 				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed %s lease %s has an unresolved or missing resource; retain its claim for recovery", opts.Kind.Label, claim.LeaseID)
 			}
-			if ops.Plan != nil && len(claim.FixedCreateIntent.Attempt) == 0 {
-				plan, err := ops.Plan(ctx, CloneLeaseClaim(*claim))
-				if err != nil {
-					return LeaseTarget{}, tx.settleCreateRejection(opts.Kind, err)
+			if err := withFixedPlanReservation(ctx, ops.PlanReservationKey, func() error {
+				if ops.Plan != nil && len(claim.FixedCreateIntent.Attempt) == 0 {
+					plan, err := ops.Plan(ctx, CloneLeaseClaim(*claim))
+					if err != nil {
+						return err
+					}
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					if err := tx.plan(plan); err != nil {
+						return err
+					}
 				}
-				if err := ctx.Err(); err != nil {
-					return LeaseTarget{}, err
+				if len(claim.FixedCreateIntent.Attempt) == 0 && !ops.PlanDuringSubmit {
+					return Exit(4, "lease_id_conflict: fixed lease submission has no native attempt")
 				}
-				if err := tx.plan(plan); err != nil {
-					return LeaseTarget{}, err
-				}
-			}
-			if len(claim.FixedCreateIntent.Attempt) == 0 && !ops.PlanDuringSubmit {
-				return LeaseTarget{}, Exit(4, "lease_id_conflict: fixed lease submission has no native attempt")
-			}
-			if err := tx.Record("prepared"); err != nil {
-				return LeaseTarget{}, err
+				return tx.Record("prepared")
+			}); err != nil {
+				return LeaseTarget{}, tx.settleCreateRejection(opts.Kind, err)
 			}
 			if !ops.DeferredAdmission {
 				if err := tx.Admit(); err != nil {
@@ -337,6 +345,20 @@ func AcquireFixedResource[T any](ctx context.Context, opts FixedAcquireOptions, 
 		}
 		return lease, nil
 	}, ctx)
+}
+
+func withFixedPlanReservation(ctx context.Context, key string, action func() error) error {
+	if key == "" {
+		return action()
+	}
+	dir, err := CrabboxStateDir()
+	if err != nil {
+		return err
+	}
+	// Use the private claim-lock directory and the same cancellable process and
+	// file fences as claims, with a name that cannot collide with a claim JSON.
+	path := filepath.Join(dir, "claims", fmt.Sprintf("fixed-reservation-%x", sha256.Sum256([]byte(key))))
+	return withLeaseClaimLockContext(ctx, path, false, action)
 }
 
 func fixedObservationConflict[T any](kind FixedLeaseKind, leaseID string, observation FixedObservation[T]) error {
