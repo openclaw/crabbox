@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -84,10 +85,15 @@ func (c *daytonaSDKClient) getSandboxForCleanup(ctx context.Context, id string) 
 	}
 	var missing struct {
 		Message    string `json:"message"`
-		StatusCode *int   `json:"statusCode"`
+		StatusCode int    `json:"statusCode"`
+		Error      string `json:"error"`
+		Path       string `json:"path"`
 	}
+	mediaType, _, mediaErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	duplicate, decodeErr := core.JSONHasDuplicateKeys(json.NewDecoder(bytes.NewReader(body.Body())))
-	if decodeErr != nil || duplicate || json.Unmarshal(body.Body(), &missing) != nil || missing.Message == "" || missing.StatusCode != nil && *missing.StatusCode != http.StatusNotFound {
+	if decodeErr != nil || duplicate || json.Unmarshal(body.Body(), &missing) != nil || missing.Message == "" ||
+		mediaErr != nil || mediaType != "application/json" || missing.StatusCode != http.StatusNotFound ||
+		missing.Error != "Not Found" || missing.Path != response.Request.URL.RequestURI() {
 		return nil, core.Exit(4, "Daytona not-found response is malformed; retaining claim")
 	}
 	return nil, nil

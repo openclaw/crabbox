@@ -611,7 +611,7 @@ func TestDaytonaFixedNativeDeletionRetiresOnlyAcquiredLease(t *testing.T) {
 
 func TestDaytonaFixedCleanupExactLookup(t *testing.T) {
 	for _, absenceOnly := range []bool{false, true} {
-		for _, scenario := range []string{"absent", "destroyed", "pending", "error", "build failed", "different UUID", "wrong nonce", "wrong organization", "changed account", "null success", "forbidden", "unavailable", "HTML not found", "empty not found", "duplicate not found", "conflicting not found"} {
+		for _, scenario := range []string{"absent", "destroyed", "pending", "error", "build failed", "different UUID", "wrong nonce", "wrong organization", "changed account", "null success", "forbidden", "unavailable", "HTML not found", "empty not found", "duplicate not found", "conflicting not found", "JSON proxy not found", "wrong path", "wrong content type"} {
 			t.Run(fmt.Sprintf("absence-only=%t/%s", absenceOnly, scenario), func(t *testing.T) {
 				f, b, req := newFixedDaytonaFixture(t)
 				lease, err := b.Acquire(t.Context(), req)
@@ -654,10 +654,20 @@ func TestDaytonaFixedCleanupExactLookup(t *testing.T) {
 					}
 					w.Header().Set("Content-Type", "application/json")
 					switch scenario {
-					case "absent", "HTML not found", "empty not found", "duplicate not found", "conflicting not found":
+					case "absent", "HTML not found", "empty not found", "duplicate not found", "conflicting not found", "JSON proxy not found", "wrong path", "wrong content type":
+						receipt := daytonaNotFoundBody(r)
+						if scenario == "wrong path" {
+							receipt["path"] = "/sandbox/different"
+						}
+						if scenario == "wrong content type" {
+							w.Header().Set("Content-Type", "text/plain")
+						}
 						w.WriteHeader(http.StatusNotFound)
-						body := `{"message":"sandbox not found","statusCode":404}`
+						encoded, _ := json.Marshal(receipt)
+						body := string(encoded)
 						switch scenario {
+						case "JSON proxy not found":
+							body = `{"message":"no upstream","statusCode":404}`
 						case "HTML not found":
 							body = "<html>proxy not found</html>"
 						case "empty not found":

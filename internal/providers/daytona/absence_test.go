@@ -62,7 +62,7 @@ func TestDaytonaAbsenceRecoveryHTTP(t *testing.T) {
 					} else if name == "duplicate not found" {
 						fmt.Fprint(w, `{"message":"Not found","statusCode":403,"statusCode":404}`)
 					} else {
-						fmt.Fprint(w, `{"message":"Sandbox not found","statusCode":404}`)
+						_ = json.NewEncoder(w).Encode(daytonaNotFoundBody(r))
 					}
 				case "/sandbox":
 					page := lists.Add(1)

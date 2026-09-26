@@ -51,6 +51,10 @@ type daytonaLifecycleFixture struct {
 	currentKeyIdentity    func(map[string]any)
 }
 
+func daytonaNotFoundBody(r *http.Request) map[string]any {
+	return map[string]any{"path": r.URL.RequestURI(), "statusCode": http.StatusNotFound, "error": "Not Found", "message": "Sandbox not found"}
+}
+
 func newDaytonaLifecycleFixture(t *testing.T) (*daytonaLifecycleFixture, *daytonaLeaseBackend, core.Repo) {
 	t.Helper()
 	return newDaytonaLifecycleFixtureWithServer(t, func(_ *testing.T, handler http.Handler) *httptest.Server {
@@ -182,7 +186,7 @@ func newDaytonaLifecycleFixtureWithServer(t *testing.T, newServer func(*testing.
 		case r.Method == "GET" && r.URL.Path == "/sandbox/sandbox-test":
 			if f.identityOrganization != "" && (f.sandbox == nil || f.sandbox.GetState() == api.SANDBOXSTATE_DESTROYED) {
 				w.WriteHeader(http.StatusNotFound)
-				_, _ = io.WriteString(w, `{"message":"resource access could not be established"}`)
+				_ = json.NewEncoder(w).Encode(daytonaNotFoundBody(r))
 				return
 			}
 			_ = json.NewEncoder(w).Encode(f.sandbox)
@@ -237,6 +241,12 @@ func newDaytonaLifecycleFixtureWithServer(t *testing.T, newServer func(*testing.
 			f.autoStop = filepath.Base(r.URL.Path)
 			_ = json.NewEncoder(w).Encode(f.sandbox)
 		case strings.HasSuffix(r.URL.Path, "/last-activity"):
+			var activity map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&activity); err != nil || activity == nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"message":"Invalid JSON in request body"}`)
+				return
+			}
 			f.activity++
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/files/upload"), strings.HasSuffix(r.URL.Path, "/files/bulk-upload"):

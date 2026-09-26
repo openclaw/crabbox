@@ -23,6 +23,13 @@ func (a *observingDaytonaContextAPI) GetSandbox(ctx context.Context, id string) 
 	return a.fixedDaytonaDeletionAPI.GetSandbox(ctx, id)
 }
 
+func (a *observingDaytonaContextAPI) getSandboxForCleanup(ctx context.Context, id string) (*api.Sandbox, error) {
+	if err := a.beforeGet(ctx); err != nil {
+		return nil, err
+	}
+	return a.fixedDaytonaDeletionAPI.getSandboxForCleanup(ctx, id)
+}
+
 func observeDaytonaDeletionContext(t *testing.T, beforeGet func(context.Context) error) {
 	t.Helper()
 	original := newDaytonaClient

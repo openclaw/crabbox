@@ -478,7 +478,7 @@ func (c *daytonaSDKClient) ReplaceLabels(ctx context.Context, id string, labels 
 }
 
 func (c *daytonaSDKClient) UpdateLastActivity(ctx context.Context, id string) error {
-	req := c.api.SandboxAPI.UpdateLastActivity(c.ctx(ctx), id)
+	req := c.api.SandboxAPI.UpdateLastActivity(c.ctx(ctx), id).UpdateLastActivity(daytona.UpdateLastActivity{})
 	if c.orgID != "" {
 		req = req.XDaytonaOrganizationID(c.orgID)
 	}
