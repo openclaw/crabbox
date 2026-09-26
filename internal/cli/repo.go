@@ -904,16 +904,21 @@ func syncFingerprintPaths(ctx context.Context, h hash.Hash, root string, paths [
 }
 
 func syncFingerprintPathsWithDigests(ctx context.Context, h hash.Hash, root string, paths []string, requirePresent, digests bool) error {
+	_, err := syncFingerprintPathsAndSize(ctx, h, root, paths, requirePresent, digests)
+	return err
+}
+
+func syncFingerprintPathsAndSize(ctx context.Context, h hash.Hash, root string, paths []string, requirePresent, digests bool) (size int64, result error) {
 	for _, rel := range paths {
 		if err := ctx.Err(); err != nil {
-			return err
+			return size, err
 		}
 		fmt.Fprintf(h, "path=%s\n", rel)
 		full := filepath.Join(root, filepath.FromSlash(rel))
 		info, err := os.Lstat(full)
 		if err != nil {
 			if requirePresent {
-				return err
+				return size, err
 			}
 			fmt.Fprintf(h, "missing\n")
 			continue
@@ -922,10 +927,11 @@ func syncFingerprintPathsWithDigests(ctx context.Context, h hash.Hash, root stri
 		if info.IsDir() {
 			continue
 		}
+		size += info.Size()
 		if info.Mode()&os.ModeSymlink != 0 {
 			target, err := os.Readlink(full)
 			if err != nil {
-				return err
+				return size, err
 			}
 			fmt.Fprintf(h, "symlink=%s\n", target)
 			h.Write([]byte{0})
@@ -933,16 +939,16 @@ func syncFingerprintPathsWithDigests(ctx context.Context, h hash.Hash, root stri
 		}
 		if digests {
 			if err := writeSyncFileDigest(ctx, h, full, info); err != nil {
-				return err
+				return size, err
 			}
 		} else {
 			if _, err := copyObservedSourceFileBytes(ctx, h, full, info); err != nil {
-				return err
+				return size, err
 			}
 		}
 		h.Write([]byte{0})
 	}
-	return ctx.Err()
+	return size, ctx.Err()
 }
 
 type SyncManifest struct {

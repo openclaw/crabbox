@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -20,97 +19,136 @@ func prepareLocalGitSeedSnapshot(ctx context.Context, repo Repo, cfg Config, _ S
 }
 
 func prepareLocalGitSeedSnapshotWithHook(ctx context.Context, repo Repo, cfg Config, hook sourceSnapshotHook) (gitOverlaySnapshot, error) {
-	ctx = withSyncDigests(ctx)
-	policy := gitSnapshotPolicy{
-		target: repo.Head,
-		checkout: func(root string) (gitOverlayCheckoutState, error) {
-			return captureGitCheckoutStateWithStateReader(root, nil, func(root string, args ...string) ([]byte, error) {
-				return localGitSnapshotBytes(ctx, root, nil, args...)
-			}, func(root string) (gitOverlayCheckoutState, error) {
-				return readLocalGitSeedCheckoutState(ctx, root)
-			})
-		},
-		manifest: func(root string, excludes SyncExcludeRules, includes []string) (SyncManifest, error) {
-			return localGitSnapshotManifest(ctx, root, excludes, includes)
-		},
-		validate: func(repo Repo, manifest SyncManifest, checkout gitOverlayCheckoutState) error {
-			return validateLocalGitSeedManifestAtState(ctx, repo, manifest, checkout)
-		},
-		files: func(manifest SyncManifest) []string { return manifest.Files },
-		fingerprint: func(ctx context.Context, repo Repo, manifest SyncManifest, excludes SyncExcludeRules, checkout gitOverlayCheckoutState) (string, error) {
-			return localGitSeedSnapshotFingerprint(ctx, repo, cfg, manifest, excludes, checkout)
-		},
+	for attempt := 1; attempt <= gitOverlaySnapshotMaxAttempts; attempt++ {
+		snapshot, err := prepareLocalGitSeedSnapshotAttempt(withSyncDigests(ctx), repo, cfg, attempt, hook)
+		if err == nil {
+			return snapshot, nil
+		}
+		if ctx.Err() != nil {
+			err = errors.Join(err, ctx.Err())
+		}
+		cleanupErr := snapshot.cleanup()
+		if cleanupErr != nil {
+			return snapshot, errors.Join(err, cleanupErr)
+		}
+		if !errors.Is(err, errSourceSnapshotDrift) || ctx.Err() != nil {
+			return gitOverlaySnapshot{}, err
+		}
 	}
-	return prepareGitSnapshotWithCleanup(ctx, repo, cfg, syncIncludes(cfg), policy, hook, func(snapshot *gitOverlaySnapshot) error {
-		return snapshot.cleanup()
-	})
+	return gitOverlaySnapshot{}, errSourceSnapshotDrift
 }
 
-func readLocalGitSeedCheckoutState(ctx context.Context, root string) (gitOverlayCheckoutState, error) {
-	head, err := localGitSeedSourceOutput(ctx, root, "rev-parse", "--verify", "--end-of-options", "HEAD^{commit}")
-	if err != nil && (ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-		return gitOverlayCheckoutState{}, errors.Join(err, ctx.Err())
+func prepareLocalGitSeedSnapshotAttempt(ctx context.Context, repo Repo, cfg Config, attempt int, hook sourceSnapshotHook) (snapshot gitOverlaySnapshot, err error) {
+	if err := ctx.Err(); err != nil {
+		return snapshot, err
 	}
-	if err != nil || !validGitObjectID(head) {
-		return gitOverlayCheckoutState{}, fmt.Errorf("invalid_head")
-	}
-	index, err := localGitSnapshotBytes(ctx, root, nil, "ls-files", "-v", "--stage", "-z")
+	inputs, err := captureLocalGitSnapshotInputs(ctx, repo.Root)
 	if err != nil {
-		return gitOverlayCheckoutState{}, err
+		return snapshot, err
 	}
-	// Hash the index's semantic entries without write-tree, which writes both
-	// cache-tree extensions and new tree objects into the source repository.
-	return gitOverlayCheckoutState{Head: head, IndexFingerprint: fmt.Sprintf("%x", sha256.Sum256(index))}, nil
-}
-
-func validateLocalGitSeedManifestAtState(ctx context.Context, repo Repo, manifest SyncManifest, checkout gitOverlayCheckoutState) error {
-	if repo.Root == "" || repo.Head == "" {
-		return fmt.Errorf("missing_repo_identity")
+	if inputs.head != repo.Head {
+		return snapshot, fmt.Errorf("head_changed")
 	}
-	if checkout.Head != repo.Head {
-		return fmt.Errorf("head_changed")
-	}
-	tracked, err := localGitSnapshotTracked(ctx, repo.Root)
+	excludes, err := syncExcludes(repo.Root, cfg)
 	if err != nil {
-		return err
+		return snapshot, err
 	}
-	for _, entry := range tracked {
-		if entry.stage != 0 {
-			return fmt.Errorf("unmerged_index")
+	managed, excludes, err := prepareSyncManifestRoot(repo.Root, excludes)
+	if err != nil {
+		return snapshot, err
+	}
+	manifest, err := inputs.manifest(ctx, repo.Root, excludes, syncIncludes(cfg))
+	if err != nil {
+		return snapshot, err
+	}
+	if err := validateLocalGitSnapshotTree(ctx, repo.Root, inputs.head); err != nil {
+		return snapshot, err
+	}
+	if hook != nil {
+		hook("manifest_built", attempt, "")
+	}
+	snapshot, err = newGitOverlaySnapshot()
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.Manifest, snapshot.Excludes, snapshot.Checkout = manifest, excludes, inputs.checkout()
+	if hook != nil {
+		hook("snapshot_created", attempt, snapshot.Root)
+	}
+	if err := copySourceSnapshotOwned(ctx, repo.Root, &snapshot.sourceSnapshot, manifest.Files, attempt, hook); err != nil {
+		return snapshot, err
+	}
+	if hook != nil {
+		hook("snapshot_copied", attempt, snapshot.Root)
+	}
+	frozenRepo := repo
+	frozenRepo.Root = snapshot.Root
+	snapshot.Fingerprint, err = localGitSeedSnapshotFingerprint(ctx, frozenRepo, cfg, manifest, excludes, snapshot.Checkout)
+	if err != nil {
+		return snapshot, err
+	}
+	if hook != nil {
+		hook("snapshot_fingerprinted", attempt, snapshot.Root)
+	}
+	live, err := localGitSeedSnapshotFingerprint(ctx, repo, cfg, manifest, excludes, snapshot.Checkout)
+	if err != nil {
+		if os.IsNotExist(err) {
+			err = errors.Join(errSourceSnapshotDrift, err)
 		}
-		if entry.assumeUnchanged {
-			return fmt.Errorf("assume_unchanged_index")
-		}
-		if entry.mode == "160000" {
-			return fmt.Errorf("gitlink")
-		}
+		return snapshot, err
 	}
-	sparse, err := localGitSnapshotSparseEnabled(ctx, repo.Root)
-	if err != nil {
-		return err
+	if hook != nil {
+		hook("live_fingerprinted", attempt, snapshot.Root)
 	}
-	hidden, err := gitCheckoutHiddenOmissionForTracked(repo.Root, tracked, sparse, nil, localGitSnapshotSparseRules(ctx))
-	if err != nil {
-		return err
-	}
-	if hidden != "" {
-		return fmt.Errorf("sparse_hidden_path")
-	}
-	tree, err := localGitSnapshotBytes(ctx, repo.Root, nil, "ls-tree", "-r", "-z", "--full-tree", checkout.Head)
-	if err != nil {
-		return fmt.Errorf("head_tree: %w", err)
-	}
-	for _, entry := range bytes.Split(tree, []byte{0}) {
-		if bytes.HasPrefix(entry, []byte("160000 ")) {
-			return fmt.Errorf("gitlink")
-		}
-	}
+	// Verify path confinement again; unchanged file bytes do not establish that
+	// an ancestor still belongs to this checkout rather than a symlink target.
 	for _, rel := range manifest.Files {
+		if err := ctx.Err(); err != nil {
+			return snapshot, err
+		}
 		if err := validateGitOverlayPath(repo.Root, rel); err != nil {
-			return err
+			return snapshot, fmt.Errorf("%w: %v", errSourceSnapshotDrift, err)
 		}
 	}
-	return nil
+	// Dirty mmap pages can change without advancing either timestamp. Acceptance
+	// requires current bytes, independently of the digests retained during copy.
+	acceptanceCtx := context.WithValue(ctx, syncDigestContextKey{}, (*syncDigestCache)(nil))
+	accepted, acceptedBytes, err := localGitSeedSnapshotFingerprintAndSize(acceptanceCtx, repo, cfg, manifest, excludes, snapshot.Checkout)
+	if err != nil {
+		if os.IsNotExist(err) {
+			err = errors.Join(errSourceSnapshotDrift, err)
+		}
+		return snapshot, err
+	}
+	if hook != nil {
+		hook("before_acceptance_inputs", attempt, snapshot.Root)
+	}
+	// One closing input capture replaces repeated manifest construction and
+	// double-sampled checkout calls. No captured input may change across the
+	// copy and uncached read; new files and deletions cannot hide behind sizes.
+	finalExcludes, err := syncExcludes(repo.Root, cfg)
+	if err != nil {
+		return snapshot, err
+	}
+	final, err := captureLocalGitSnapshotInputs(ctx, repo.Root)
+	if err != nil {
+		return snapshot, err
+	}
+	finalManaged, finalExcludes, err := prepareSyncManifestRoot(repo.Root, finalExcludes)
+	if err != nil {
+		return snapshot, err
+	}
+	if !inputs.same(final) || !sameSyncExcludeRules(excludes, finalExcludes) ||
+		managed.source != finalManaged.source || managed.namespace != finalManaged.namespace ||
+		live != snapshot.Fingerprint || accepted != snapshot.Fingerprint || acceptedBytes != manifest.Bytes {
+		return snapshot, errSourceSnapshotDrift
+	}
+	// Sparse state can hide paths outside the selected manifest as well. The
+	// immutable captured index is reused, but missing-path checks remain live.
+	if _, err := final.validate(ctx, repo.Root); err != nil {
+		return snapshot, err
+	}
+	return snapshot, ctx.Err()
 }
 
 func localGitSnapshotBytes(ctx context.Context, root string, input []byte, args ...string) ([]byte, error) {
@@ -125,14 +163,6 @@ func localGitSnapshotBytes(ctx context.Context, root string, input []byte, args 
 		return nil, fmt.Errorf("local Git snapshot %s failed: %w", args[0], err)
 	}
 	return out.Bytes(), nil
-}
-
-func localGitSnapshotTracked(ctx context.Context, root string) ([]gitTrackedPath, error) {
-	tagged, err := localGitSnapshotBytes(ctx, root, nil, "ls-files", "-v", "--stage", "-z")
-	if err != nil {
-		return nil, err
-	}
-	return parseGitTrackedPaths(tagged)
 }
 
 func localGitSnapshotSparseEnabled(ctx context.Context, root string) (bool, error) {
@@ -156,48 +186,6 @@ func localGitSnapshotSparseRules(ctx context.Context) func(string, []gitTrackedP
 		}
 		return nulPathSet(out), nil
 	}
-}
-
-func localGitSnapshotManifest(ctx context.Context, root string, excludes SyncExcludeRules, includes []string) (SyncManifest, error) {
-	ignoreFile, err := localGitSnapshotGlobalIgnore(ctx, root)
-	if err != nil {
-		return SyncManifest{}, err
-	}
-	return syncManifestFilteredRulesWithSource(root, excludes, includes, syncManifestSource{
-		fileList: func(root string) ([]byte, error) {
-			return localGitSnapshotBytes(ctx, root, nil, "-c", "core.excludesFile="+ignoreFile, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
-		},
-		scope: func(root string, excludes SyncExcludeRules, includes []string) (syncManifestScope, error) {
-			tracked, err := localGitSnapshotTracked(ctx, root)
-			if err != nil {
-				return syncManifestScope{}, err
-			}
-			sparse, err := localGitSnapshotSparseEnabled(ctx, root)
-			if err != nil {
-				return syncManifestScope{}, err
-			}
-			return validatedSyncManifestScopeWithTracked(root, excludes, includes, tracked, sparse, localGitSnapshotSparseRules(ctx))
-		},
-		deleted: func(root string, excludes SyncExcludeRules, includes []string, trackedRegular map[string]struct{}) ([]string, map[string]struct{}, map[string]struct{}, error) {
-			worktree, err := localGitSnapshotBytes(ctx, root, nil, "ls-files", "--deleted", "-z")
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			raw, err := localGitSnapshotBytes(ctx, root, nil, "diff", "--cached", "--raw", "--format=", "-z", "--diff-filter=D", "--no-renames", "--no-ext-diff", "--no-textconv")
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			cached, err := parseGitCachedDeletions(raw)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			return projectSyncDeletedPaths(excludes, includes, trackedRegular, worktree, cached)
-		},
-		changed: func(_ string, _ SyncExcludeRules, _ []string, _ map[string]struct{}, manifest SyncManifest) ([]string, error) {
-			// Full byte transport needs no filter-sensitive worktree diff.
-			return append(slices.Clone(manifest.Files), manifest.Deleted...), nil
-		},
-	})
 }
 
 // Read only the ignore-file setting with ordinary config discovery. Disabling
@@ -226,6 +214,11 @@ func localGitSnapshotGlobalIgnore(ctx context.Context, root string) (string, err
 }
 
 func localGitSeedSnapshotFingerprint(ctx context.Context, repo Repo, cfg Config, manifest SyncManifest, excludes SyncExcludeRules, checkout gitOverlayCheckoutState) (string, error) {
+	fingerprint, _, err := localGitSeedSnapshotFingerprintAndSize(ctx, repo, cfg, manifest, excludes, checkout)
+	return fingerprint, err
+}
+
+func localGitSeedSnapshotFingerprintAndSize(ctx context.Context, repo Repo, cfg Config, manifest SyncManifest, excludes SyncExcludeRules, checkout gitOverlayCheckoutState) (string, int64, error) {
 	h := sha256.New()
 	fmt.Fprintf(h, "v2-local-git-snapshot\nhead=%s\nindex=%s\n", checkout.Head, checkout.IndexFingerprint)
 	fmt.Fprintf(h, "delete=%t\nchecksum=%t\n", cfg.Sync.Delete, cfg.Sync.Checksum)
@@ -237,8 +230,9 @@ func localGitSeedSnapshotFingerprint(ctx context.Context, repo Repo, cfg Config,
 		fmt.Fprintf(h, "exclude=%d:%q\n", exclude.origin, exclude.pattern)
 	}
 	fmt.Fprintf(h, "managedSubtree=%q\n", excludes.managedSubtree)
-	if err := syncFingerprintPathsWithDigests(ctx, h, repo.Root, manifest.Files, true, true); err != nil {
-		return "", err
+	size, err := syncFingerprintPathsAndSize(ctx, h, repo.Root, manifest.Files, true, true)
+	if err != nil {
+		return "", 0, err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil)), size, nil
 }

@@ -14,6 +14,9 @@ import shlex
 import tempfile
 import time
 import fcntl
+import signal
+import statistics
+import hashlib
 
 
 def git(root, *args):
@@ -48,6 +51,42 @@ def generate(root, size):
         "-c", "commit.gpgsign=false", "commit", "-qm", "benchmark fixture")
 
 
+def run_bounded(command, timeout, **kwargs):
+    """Kill the complete measurement process group at its deadline; keep output."""
+    started = time.monotonic()
+    process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, start_new_session=True, **kwargs)
+    timed_out = False
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate()
+    return {"returncode": 124 if timed_out else process.returncode,
+            "timedOut": timed_out, "timeoutSeconds": timeout,
+            "wallSeconds": time.monotonic() - started,
+            "stdout": stdout, "stderr": stderr}
+
+
+def phase_metrics(output):
+    phases = {}
+    for line in output.splitlines():
+        if not line.startswith("BenchmarkSyncEfficiency/"):
+            continue
+        fields = line.split()
+        if len(fields) < 4 or fields[3] != "ns/op":
+            continue
+        name = fields[0].split("/")[1].rsplit("-", 1)[0]
+        phases[name] = {"seconds": float(fields[2]) / 1e9}
+        for i in range(4, len(fields) - 1, 2):
+            phases[name][fields[i + 1]] = float(fields[i])
+    return phases
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path, help="disposable fixture, never a working checkout")
@@ -55,12 +94,17 @@ def main():
     parser.add_argument("--generate-from", type=Path, help="archive HEAD of a realistic repository into a new fixture")
     parser.add_argument("--changes", type=int, choices=[0, 1, 100], default=0)
     parser.add_argument("--test-binary", type=Path)
+    parser.add_argument("--baseline-test-binary", type=Path, help="run three interleaved baseline/candidate pairs")
+    parser.add_argument("--timeout", type=float, default=480, help="hard per-sample seconds")
+    parser.add_argument("--scenario-timeout", type=float, default=1800, help="hard aggregate sample budget in seconds")
     parser.add_argument("--phase", default="manifest|fingerprint|plan")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--crabbox", type=Path, help="also time a full run against an already prepared target")
     parser.add_argument("--config", type=Path, help="explicit trusted config for the SSH target")
     parser.add_argument("--run-arg", action="append", default=[], help="repeat with --run-arg=--flag or --run-arg=value")
     args = parser.parse_args()
+    if args.timeout <= 0 or args.scenario_timeout <= 0:
+        parser.error("timeouts must be positive")
     root = args.root.resolve()
     if args.generate:
         generate(root, args.generate)
@@ -94,18 +138,47 @@ def main():
         path.write_bytes(b"changed " + content[8:])
     if args.test_binary:
         env = dict(os.environ, CRABBOX_BENCH_REPO=str(root), GOMAXPROCS="4")
-        command = [str(args.test_binary.resolve()), "-test.run=^$", "-test.bench=^BenchmarkSyncEfficiency/(" + args.phase + ")$",
-                   "-test.benchtime=1x", "-test.count=1", "-test.timeout=8m"]
-        with tempfile.TemporaryDirectory(prefix="crabbox-bench-staging-") as staging:
-            env["TMPDIR"] = staging
-            result = subprocess.run(command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=500)
-        record = {"root": str(root), "changes": args.changes, "command": command,
-                  "returncode": result.returncode, "output": result.stdout}
-        print(result.stdout, end="")
+        sequence = [("B", args.test_binary)]
+        if args.baseline_test_binary:
+            sequence = [(label, binary) for _ in range(3) for label, binary in
+                        [("A", args.baseline_test_binary), ("B", args.test_binary)]]
+        record = {"root": str(root), "changes": args.changes, "samples": [],
+                  "scenarioTimeoutSeconds": args.scenario_timeout, "binaries": {}}
+        for label, binary in sequence:
+            if label not in record["binaries"]:
+                with binary.open("rb") as executable:
+                    digest = hashlib.file_digest(executable, "sha256").hexdigest()
+                record["binaries"][label] = {"path": str(binary.resolve()), "sha256": digest}
+        deadline = time.monotonic() + args.scenario_timeout
+        for index, (label, binary) in enumerate(sequence):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                record["scenarioTimedOut"] = True
+                break
+            command = [str(binary.resolve()), "-test.run=^$", "-test.bench=^BenchmarkSyncEfficiency/(" + args.phase + ")$",
+                       "-test.benchtime=1x", "-test.count=1", "-test.timeout=8m"]
+            print(f"sample {index + 1}/{len(sequence)} {label}, timeout={min(args.timeout, remaining):.1f}s", flush=True)
+            with tempfile.TemporaryDirectory(prefix="crabbox-bench-staging-") as staging:
+                env["TMPDIR"] = staging
+                result = run_bounded(command, min(args.timeout, remaining), env=env)
+            result.update({"label": label, "command": command, "phases": phase_metrics(result["stdout"])})
+            record["samples"].append(result)
+            print(f"sample {label} exit={result['returncode']} wall={result['wallSeconds']:.3f}s", flush=True)
+            if args.output:
+                args.output.write_text(json.dumps(record, indent=2) + "\n")
+        if args.baseline_test_binary and len(record["samples"]) == 6 and all(s["returncode"] == 0 for s in record["samples"]):
+            record["summary"] = {}
+            for phase in record["samples"][0]["phases"]:
+                a = [s["phases"][phase]["seconds"] for s in record["samples"] if s["label"] == "A"]
+                b = [s["phases"][phase]["seconds"] for s in record["samples"] if s["label"] == "B"]
+                record["summary"][phase] = {"medianA": statistics.median(a), "medianB": statistics.median(b),
+                                            "pairDeltaSeconds": [y - x for x, y in zip(a, b)],
+                                            "pairDeltaPercent": [100 * (y - x) / x for x, y in zip(a, b)]}
+            print(json.dumps(record["summary"]), flush=True)
         if args.output:
             args.output.write_text(json.dumps(record, indent=2) + "\n")
-        if result.returncode:
-            raise SystemExit(result.returncode)
+        if any(s["returncode"] for s in record["samples"]) or record.get("scenarioTimedOut"):
+            raise SystemExit(1)
     if args.crabbox:
         env = dict(os.environ)
         if args.config:
@@ -123,22 +196,21 @@ def main():
                 wrapper.chmod(0o700)
             env["PATH"] = tools + os.pathsep + env["PATH"]
             command = [str(args.crabbox.resolve()), "run", "--no-hydrate", "--keep", "--timing-json", *args.run_arg, "--", "true"]
-            started = time.monotonic()
-            result = subprocess.run(command, cwd=root, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=480)
-            elapsed = time.monotonic() - started
+            result = run_bounded(command, args.timeout, cwd=root, env=env)
+            elapsed = result["wallSeconds"]
             events = calls.read_text().splitlines()
         timings = []
-        for line in result.stderr.splitlines():
+        for line in result["stderr"].splitlines():
             if line.startswith('{"provider":'):
                 timings.append(json.loads(line))
         record = {"root": str(root), "changes": args.changes, "command": command, "wallSeconds": elapsed,
                   "processes": {name: events.count(name) for name in ["git", "ssh", "rsync"]},
-                  "returncode": result.returncode, "timing": timings,
-                  "stdout": result.stdout, "stderr": result.stderr}
+                  "returncode": result["returncode"], "timedOut": result["timedOut"], "timeoutSeconds": args.timeout, "timing": timings,
+                  "stdout": result["stdout"], "stderr": result["stderr"]}
         print(json.dumps({key: value for key, value in record.items() if key not in ["stdout", "stderr"]}))
         if args.output:
             args.output.write_text(json.dumps(record, indent=2) + "\n")
-        raise SystemExit(result.returncode)
+        raise SystemExit(result["returncode"])
 
 
 if __name__ == "__main__":

@@ -6,8 +6,137 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
+
+func TestLocalGitSeedSnapshotBuildsManifestOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX command-count wrapper")
+	}
+	repo, cfg := newLocalGitSnapshotFixture(t)
+	log := filepath.Join(t.TempDir(), "git-calls")
+	git := gitOverlayGitExecutable
+	wrapper := filepath.Join(t.TempDir(), "git")
+	writeExecutable(t, wrapper, "#!/bin/sh\nprintf x >> "+shellQuote(log)+"\nexec "+shellQuote(git)+" \"$@\"\n")
+	gitOverlayGitExecutable = wrapper
+	t.Cleanup(func() { gitOverlayGitExecutable = git })
+	builds := 0
+	snapshot, err := prepareLocalGitSeedSnapshotWithHook(context.Background(), repo, cfg, func(phase string, _ int, _ string) {
+		if phase == "manifest_built" {
+			builds++
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := snapshot.cleanup(); err != nil {
+			t.Error(err)
+		}
+	})
+	calls, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if builds != 1 || len(calls) != 17 {
+		t.Fatalf("manifest builds=%d Git calls=%d, want 1 and 17", builds, len(calls))
+	}
+}
+
+func TestLocalGitSeedSnapshotRechecksAcceptedBytes(t *testing.T) {
+	repo, cfg := newLocalGitSnapshotFixture(t)
+	builds := 0
+	snapshot, err := prepareLocalGitSeedSnapshotWithHook(context.Background(), repo, cfg, func(phase string, attempt int, _ string) {
+		if phase != "manifest_built" {
+			return
+		}
+		builds++
+		if attempt == 1 {
+			mustWriteTestFile(t, filepath.Join(repo.Root, "clean.txt"), strings.Repeat("grown payload", 100))
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = snapshot.cleanup() })
+	_, actual := changedPathSetBytes(snapshot.Root, snapshot.Manifest.Files)
+	if builds != 2 || snapshot.Manifest.Bytes != actual || snapshot.Manifest.ChangedBytes != actual || snapshot.Manifest.OverlayBytes != actual {
+		t.Fatalf("builds=%d byte accounting=%d/%d/%d actual=%d", builds, snapshot.Manifest.Bytes, snapshot.Manifest.ChangedBytes, snapshot.Manifest.OverlayBytes, actual)
+	}
+}
+
+func TestLocalGitSeedSnapshotRechecksManifestInputs(t *testing.T) {
+	for _, mutation := range []string{"new file", "delete", "staged deletion", "index flag", "exclusion", "ignore membership", "head"} {
+		t.Run(mutation, func(t *testing.T) {
+			repo, cfg := newLocalGitSnapshotFixture(t)
+			changed, builds := false, 0
+			snapshot, err := prepareLocalGitSeedSnapshotWithHook(context.Background(), repo, cfg, func(phase string, _ int, _ string) {
+				if phase == "manifest_built" {
+					builds++
+				}
+				if phase != "before_acceptance_inputs" || changed {
+					return
+				}
+				changed = true
+				switch mutation {
+				case "new file":
+					mustWriteTestFile(t, filepath.Join(repo.Root, "new.txt"), "new")
+				case "delete":
+					if err := os.Remove(filepath.Join(repo.Root, "clean.txt")); err != nil {
+						t.Fatal(err)
+					}
+				case "staged deletion":
+					runGit(t, repo.Root, "rm", "-q", "clean.txt")
+				case "index flag":
+					runGit(t, repo.Root, "update-index", "--assume-unchanged", "clean.txt")
+				case "exclusion":
+					mustWriteTestFile(t, filepath.Join(repo.Root, ".crabboxignore"), "clean.txt\n")
+				case "ignore membership":
+					mustWriteTestFile(t, filepath.Join(repo.Root, "new.txt"), "new")
+					mustWriteTestFile(t, filepath.Join(repo.Root, ".git", "info", "exclude"), "new.txt\n")
+				case "head":
+					runGit(t, repo.Root, "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "next")
+				}
+			})
+			t.Cleanup(func() {
+				if err := snapshot.cleanup(); err != nil {
+					t.Error(err)
+				}
+			})
+			if mutation == "index flag" || mutation == "head" {
+				if err == nil || !strings.Contains(err.Error(), map[string]string{"index flag": "assume_unchanged_index", "head": "head_changed"}[mutation]) {
+					t.Fatalf("unsupported metadata accepted: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mutation != "ignore membership" && builds != 2 {
+				t.Fatalf("changed inputs did not retry: builds=%d", builds)
+			}
+			switch mutation {
+			case "new file":
+				if !slices.Contains(snapshot.Manifest.Files, "new.txt") {
+					t.Fatal("new file omitted")
+				}
+			case "delete", "staged deletion":
+				if !slices.Contains(snapshot.Manifest.Deleted, "clean.txt") {
+					t.Fatal("deletion omitted")
+				}
+			case "exclusion":
+				if slices.Contains(snapshot.Manifest.Files, "clean.txt") {
+					t.Fatal("excluded file retained")
+				}
+			case "ignore membership":
+				if slices.Contains(snapshot.Manifest.Files, "new.txt") {
+					t.Fatal("ignored file retained")
+				}
+			}
+		})
+	}
+}
 
 func newLocalGitSnapshotFixture(t *testing.T) (Repo, Config) {
 	t.Helper()
@@ -141,10 +270,11 @@ func TestLocalGitSeedSnapshotFingerprintFullFilesAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkout, err := readLocalGitSeedCheckoutState(context.Background(), repo.Root)
+	inputs, err := captureLocalGitSnapshotInputs(context.Background(), repo.Root)
 	if err != nil {
 		t.Fatal(err)
 	}
+	checkout := inputs.checkout()
 	baseline, err := localGitSeedSnapshotFingerprint(context.Background(), repo, cfg, manifest, excludes, checkout)
 	if err != nil {
 		t.Fatal(err)

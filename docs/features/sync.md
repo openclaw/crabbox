@@ -452,6 +452,21 @@ Cancellation and retries still validate the complete manifest, index, exclusions
 and source state. Snapshot parent checks cover the current write's ancestry and
 recheck all retained directories before accepting the snapshot.
 
+Local seeding constructs the manifest once per snapshot attempt and passes it
+through copying and fingerprint verification. It captures the manifest's Git
+inputs before preparation and again after the final uncached content read;
+different inputs cause a clean retry, never reuse of a stale file list. Both
+captures check the repository root, global-ignore setting, sparse setting,
+cached/untracked file list, worktree deletions, staged deletion preimages, index
+entries/flags/stages and HEAD. The index and HEAD close each capture. Complete
+history transfer also requires one immutable HEAD-tree check for gitlinks.
+This is 17 Git invocations for an ordinary checkout instead of 50; sparse
+checkouts additionally query their rules at initial and final validation.
+File membership is re-enumerated, but manifest projection, exclusion processing
+and size accounting are not repeated. Selected paths are checked again for
+symlink ancestors before final content acceptance. Managed-state boundaries,
+ordered excludes and sparse hidden-path checks still apply.
+
 Local-seed and overlay fingerprint formats are versioned to incorporate file
 digests; the first sync after upgrading refreshes their remote fingerprint.
 Ordinary origin/file sync retains its existing fingerprint format and transfer

@@ -9,6 +9,7 @@ HEAD into a separate fixture without modifying the source checkout.
 
 ```sh
 bench=$(mktemp -d)
+export GOCACHE="$bench/go-cache"
 go test -c -o "$bench/sync.test" ./internal/cli
 python3 scripts/benchmark-sync.py "$bench/medium" --generate medium
 python3 scripts/benchmark-sync.py "$bench/medium" --changes 0 \
@@ -34,8 +35,25 @@ regions. Each scenario restores the first 100 fixture paths to their committed
 contents, then makes zero, one, or 100 same-size edits. A fixture marker and lock
 prevent accidental mutation of an ordinary checkout or simultaneous scenario
 edits. Temporary snapshots are removed even after a bounded benchmark failure.
-Run before/after binaries serially on the same fixture, and repeat pairs when
-comparing wall times on a shared host. The local phase timeout is eight minutes.
+Use the same benchmark source/instrumentation with each implementation. On a
+shared host, always compare three interleaved pairs rather than single runs:
+
+```sh
+python3 scripts/benchmark-sync.py "$bench/medium" --changes 0 \
+  --baseline-test-binary "$bench/baseline.test" --test-binary "$bench/sync.test" \
+  --phase snapshot-local --timeout 240 --scenario-timeout 1500 \
+  --output "$bench/paired-clean.json"
+```
+
+This runs A B A B A B, records each executable's digest, reports the median of
+each implementation and all three paired deltas, and writes partial results
+after every sample. Repeat for `--changes 1` and `--changes 100`. Each sample has
+a hard process-group timeout (480 seconds by default), and the entire sequence
+has a separate sample budget (1,800 seconds by default). Timeouts retain captured
+output and are reported explicitly; incomplete sequences have no median summary.
+Generation and scenario mutation are outside this budget. Snapshot staging is
+private to each sample and removed afterward. Avoid other local builds, tests
+and fixture generation during a measurement sequence.
 
 ## Full runs over SSH
 

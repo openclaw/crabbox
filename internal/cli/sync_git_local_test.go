@@ -123,7 +123,11 @@ func TestLocalGitSeedPreservesGlobalIgnorePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := localGitSnapshotManifest(context.Background(), root, excludes, nil)
+	inputs, err := captureLocalGitSnapshotInputs(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := inputs.manifest(context.Background(), root, excludes, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
