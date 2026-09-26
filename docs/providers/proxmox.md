@@ -450,6 +450,11 @@ failure during inventory/planning before submission, removes the pending intent
 and generated lease key. It does not reserve the VMID or consume the fixed ID.
 The original API error preserves the missing permission and path.
 
+Clone rejection requires a native Proxmox JSON error envelope with null data
+and the Proxmox server header. Proxy-generated, malformed, or rewritten 401/403
+responses retain the claim because the upstream clone may already have started.
+Replies carrying task data also retain custody, regardless of HTTP status.
+
 A 401/403 from task polling or VM identity reads after clone acceptance is
 ambiguous: the VM may already exist. Crabbox retains the prepared claim and
 refuses another clone. Restore read permissions and inspect the clone task and

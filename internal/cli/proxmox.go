@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -45,6 +46,8 @@ type ProxmoxError struct {
 	Path       string
 	StatusCode int
 	Body       string
+	// NativeAuthRejection excludes gateway errors and replies carrying task data.
+	NativeAuthRejection bool
 }
 
 func (e *ProxmoxError) Error() string {
@@ -134,7 +137,7 @@ func (c *ProxmoxClient) doEnvelope(ctx context.Context, method, path string, for
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &ProxmoxError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: summarizeJSON([]byte(c.redactErrorBody(string(data))))}
+		return &ProxmoxError{Method: method, Path: path, StatusCode: resp.StatusCode, Body: summarizeJSON([]byte(c.redactErrorBody(string(data)))), NativeAuthRejection: proxmoxNativeAuthRejection(resp, data)}
 	}
 	if out == nil {
 		return nil
@@ -152,6 +155,23 @@ func (c *ProxmoxClient) doEnvelope(ctx context.Context, method, path string, for
 		return fmt.Errorf("proxmox %s %s: missing required data in response", method, path)
 	}
 	return json.Unmarshal(envelope.Data, out)
+}
+
+func proxmoxNativeAuthRejection(resp *http.Response, data []byte) bool {
+	if resp.StatusCode != http.StatusUnauthorized && resp.StatusCode != http.StatusForbidden {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" || !strings.HasPrefix(resp.Header.Get("Server"), "pve-api-daemon/") {
+		return false
+	}
+	var envelope struct {
+		Data    json.RawMessage `json:"data"`
+		Message string          `json:"message"`
+	}
+	// Native JSON authorization failures return null data and an error message.
+	// An HTTP status alone cannot disprove allocation behind a reverse proxy.
+	return json.Unmarshal(data, &envelope) == nil && bytes.Equal(bytes.TrimSpace(envelope.Data), []byte("null")) && strings.TrimSpace(envelope.Message) != ""
 }
 
 func (c *ProxmoxClient) redactErrorBody(body string) string {

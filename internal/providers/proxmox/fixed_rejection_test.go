@@ -51,7 +51,10 @@ func TestProxmoxFixedAuthorizationFailureThroughHTTPAPI(t *testing.T) {
 						return
 					}
 					if deny {
-						http.Error(w, "Permission check failed (/sdn/zones/localnetwork/vmbr0, SDN.Use)", code)
+						w.Header().Set("Server", "pve-api-daemon/3.0")
+						w.Header().Set("Content-Type", "application/json;charset=UTF-8")
+						w.WriteHeader(code)
+						_ = json.NewEncoder(w).Encode(map[string]any{"data": nil, "message": "Permission check failed (/sdn/zones/localnetwork/vmbr0, SDN.Use)"})
 						return
 					}
 					_ = json.NewEncoder(w).Encode(map[string]any{"data": data})

@@ -160,7 +160,7 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		if err != nil {
 			var apiErr *core.ProxmoxError
 			clonePath := fmt.Sprintf("/nodes/%s/qemu/%d/clone", url.PathEscape(cfg.Proxmox.Node), cfg.Proxmox.TemplateID)
-			if errors.As(err, &apiErr) && apiErr.Method == http.MethodPost && apiErr.Path == clonePath &&
+			if errors.As(err, &apiErr) && apiErr.NativeAuthRejection && apiErr.Method == http.MethodPost && apiErr.Path == clonePath &&
 				(apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
 				return core.Server{}, &core.FixedCreateRejected{Err: err}
 			}
