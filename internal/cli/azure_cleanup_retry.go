@@ -111,6 +111,9 @@ func azureCleanupResourcesEmpty(resources azureVMDeleteResources) bool {
 }
 
 func (c *AzureClient) revalidateAzureDeleteResources(ctx context.Context, expected Server, resources azureVMDeleteResources, validateVM func(Server, Server) error) (azureVMDeleteResources, error) {
+	if resources.orphan {
+		return c.azureOrphanDeleteResources(ctx, expected)
+	}
 	name := strings.TrimSpace(expected.CloudID)
 	labels := expected.Labels
 	if resources.nic != "" {

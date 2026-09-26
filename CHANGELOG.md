@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Recover exactly tagged, unattached Azure fixed-lease companions when the VM and original cleanup binding are missing, retaining the claim until deletion completes.
 - Skip live local Proxmox VMID bindings during fixed-ID reservation, verify alternatives against cluster inventory, and document checked recovery for older prepared claims. [Issue 2559](https://github.com/openclaw/crabbox/issues/2559). Thanks @ahkohd.
 - Keep background telemetry from replacing workspace command witnesses and failing successful hydration reads with exit 74. [PR 2563](https://github.com/openclaw/crabbox/pull/2563).
 - Remove Proxmox fixed-ID prepared claims after definite pre-allocation authorization rejections and add checked `stop --force` recovery for absent, unbound attempts. [Fixes #2559](https://github.com/openclaw/crabbox/issues/2559). Thanks @ahkohd.

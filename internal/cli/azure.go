@@ -51,6 +51,7 @@ const (
 	azureSnapshotQuarantineNSGSuffix  = "-q-nsg"
 	AzureCleanupBindingLabel          = "_crabbox_azure_cleanup_binding"
 	azureCleanupBindingVersion        = "v1"
+	azureOrphanCleanupBindingVersion  = "orphan-v1"
 	azureCleanupNICIdentityLabel      = "_crabbox_azure_cleanup_nic_id"
 	azureCleanupPublicIPIdentityLabel = "_crabbox_azure_cleanup_public_ip_id"
 	azureCleanupDiskIdentityLabel     = "_crabbox_azure_cleanup_disk_id"
@@ -1876,19 +1877,19 @@ func (c *AzureClient) DeleteServer(ctx context.Context, name string) error {
 // be deleted. Callers requiring crash-resumable cleanup persist the returned
 // labels in the exact lease claim; acquisition rollback holds them in process.
 func (c *AzureClient) PrepareOwnedServer(ctx context.Context, expected Server) (Server, error) {
-	return c.prepareAzureDeleteServer(ctx, expected, func(expected, live Server) error {
+	return c.prepareAzureDeleteServer(ctx, expected, true, func(expected, live Server) error {
 		return ValidateAzureOwnedVM(expected, live)
 	})
 }
 
 // PrepareCleanupServer is the expiry-aware variant used by automatic cleanup.
 func (c *AzureClient) PrepareCleanupServer(ctx context.Context, expected Server, now time.Time) (Server, error) {
-	return c.prepareAzureDeleteServer(ctx, expected, func(expected, live Server) error {
+	return c.prepareAzureDeleteServer(ctx, expected, false, func(expected, live Server) error {
 		return validateAzureCleanupVM(expected, live, now)
 	})
 }
 
-func (c *AzureClient) prepareAzureDeleteServer(ctx context.Context, expected Server, validateVM func(Server, Server) error) (Server, error) {
+func (c *AzureClient) prepareAzureDeleteServer(ctx context.Context, expected Server, recoverOrphans bool, validateVM func(Server, Server) error) (Server, error) {
 	name := strings.TrimSpace(expected.CloudID)
 	if name == "" {
 		return Server{}, errors.New("azure delete candidate has no cloud id")
@@ -1896,12 +1897,23 @@ func (c *AzureClient) prepareAzureDeleteServer(ctx context.Context, expected Ser
 	vmResponse, err := c.vmc.Get(ctx, c.ResourceGroup, name, nil)
 	if err != nil {
 		if isAzureNotFoundError(err) {
+			if recoverOrphans && expected.Labels[AzureCleanupBindingLabel] == "" {
+				resources, err := c.azureOrphanDeleteResources(ctx, expected)
+				if err != nil {
+					return Server{}, err
+				}
+				expected.Labels = azureDeleteResourcesToLabels(expected.Labels, resources)
+				return expected, nil
+			}
 			if _, bindingErr := azureDeleteResourcesFromLabels(expected); bindingErr != nil {
 				return Server{}, fmt.Errorf("Azure VM %s is absent and its durable cleanup binding is unavailable: %w", name, bindingErr)
 			}
 			return expected, nil
 		}
 		return Server{}, fmt.Errorf("re-read Azure delete VM %s: %w", name, err)
+	}
+	if strings.TrimSpace(expected.Labels[AzureCleanupBindingLabel]) == azureOrphanCleanupBindingVersion {
+		return Server{}, fmt.Errorf("Azure orphan recovery refused: VM %s exists", name)
 	}
 	live := azureVMToServer(vmResponse.VirtualMachine, "", "")
 	if err := validateVM(expected, live); err != nil {
@@ -2093,6 +2105,7 @@ type azureVMDeleteResources struct {
 	// Cleanup retries keep Azure-generated identities so deterministic names
 	// cannot redirect a later delete to replacement resources.
 	vm            bool
+	orphan        bool
 	vmID          string
 	nic           string
 	nicID         string
@@ -2105,9 +2118,10 @@ type azureVMDeleteResources struct {
 }
 
 // HasAzureCleanupBinding reports whether a local claim contains a complete,
-// versioned companion-resource snapshot captured before Azure VM deletion.
+// versioned companion-resource snapshot for Azure deletion or orphan recovery.
 func HasAzureCleanupBinding(labels map[string]string) bool {
-	return strings.TrimSpace(labels[AzureCleanupBindingLabel]) == azureCleanupBindingVersion
+	version := strings.TrimSpace(labels[AzureCleanupBindingLabel])
+	return version == azureCleanupBindingVersion || version == azureOrphanCleanupBindingVersion
 }
 
 func azureDeleteResourcesToLabels(labels map[string]string, resources azureVMDeleteResources) map[string]string {
@@ -2116,6 +2130,9 @@ func azureDeleteResourcesToLabels(labels map[string]string, resources azureVMDel
 		out = make(map[string]string)
 	}
 	out[AzureCleanupBindingLabel] = azureCleanupBindingVersion
+	if resources.orphan {
+		out[AzureCleanupBindingLabel] = azureOrphanCleanupBindingVersion
+	}
 	out[azureCleanupNICIdentityLabel] = strings.TrimSpace(resources.nicID)
 	out[azureCleanupPublicIPIdentityLabel] = strings.TrimSpace(resources.publicIPID)
 	if resources.diskID != "" {
@@ -2147,7 +2164,17 @@ func azureDeleteResourcesFromLabels(expected Server) (azureVMDeleteResources, er
 		publicIP:   name + "-pip",
 		publicIPID: strings.TrimSpace(expected.Labels[azureCleanupPublicIPIdentityLabel]),
 	}
-	if resources.vmID == "" || resources.nicID == "" || resources.publicIPID == "" {
+	resources.orphan = strings.TrimSpace(expected.Labels[AzureCleanupBindingLabel]) == azureOrphanCleanupBindingVersion
+	if resources.orphan {
+		resources.vm = false
+		if resources.nicID == "" {
+			resources.nic = ""
+		}
+		if resources.publicIPID == "" {
+			resources.publicIP = ""
+		}
+	}
+	if resources.vmID == "" || (!resources.orphan && (resources.nicID == "" || resources.publicIPID == "")) {
 		return azureVMDeleteResources{}, errors.New("durable Azure cleanup binding is incomplete")
 	}
 	if resources.diskID = strings.TrimSpace(expected.Labels[azureCleanupDiskIdentityLabel]); resources.diskID != "" {
@@ -2463,8 +2490,15 @@ func (c *AzureClient) deleteVMResourcesOnce(ctx context.Context, name string, re
 			retry = retry || isAzureRetryableDeleteError(err)
 		}
 	}
+	// An orphan public IP may still belong to its detached NIC. Complete NIC
+	// deletion before releasing that IP; retain the binding on any failure.
+	if resources.orphan && resources.nic != "" {
+		if err := c.deleteNIC(ctx, resources.nic); err != nil {
+			return []error{err}, isAzureRetryableDeleteError(err)
+		}
+	}
 	dependentDeletes := make([]func() error, 0, 3)
-	if resources.nic != "" {
+	if resources.nic != "" && !resources.orphan {
 		dependentDeletes = append(dependentDeletes, func() error { return c.deleteNIC(ctx, resources.nic) })
 	}
 	if resources.publicIP != "" {

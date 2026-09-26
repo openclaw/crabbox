@@ -3,6 +3,7 @@ package azure
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"reflect"
@@ -217,70 +218,83 @@ func TestFixedAzureExplicitRecoveryStopsAfterLocalClaimLoss(t *testing.T) {
 }
 
 func TestFixedAzureExplicitRecoveryResumesInterruptedCleanup(t *testing.T) {
-	client := &fakeAzureClient{}
-	b := fixedAzureTestBackend(t, client)
-	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123463", RequestedSlug: "restart-retry", Repo: core.Repo{Root: t.TempDir()}}
-	lease, err := b.Acquire(t.Context(), req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := core.RemoveLeaseClaimIfUnchanged(req.RequestedLeaseID, claim); err != nil {
-		t.Fatal(err)
-	}
-	cleanupLabels := map[string]string{
-		core.AzureCleanupBindingLabel:         "v1",
-		"_crabbox_azure_cleanup_nic_id":       "original-nic",
-		"_crabbox_azure_cleanup_public_ip_id": "original-ip",
-		"_crabbox_azure_cleanup_disk_id":      "original-disk",
-	}
-	client.prepareFunc = func(server core.Server) core.Server {
-		server.Labels = maps.Clone(server.Labels)
-		maps.Copy(server.Labels, cleanupLabels)
-		return server
-	}
-	interrupted := errors.New("VM deleted; companion cleanup interrupted")
-	client.deleteOwnedFunc = func(server core.Server) error {
-		stored, err := core.ReadLeaseClaim(req.RequestedLeaseID)
-		if err != nil || stored.CloudImmutableID != lease.Server.ImmutableID {
-			t.Fatalf("recovery did not persist VM identity before deletion: %v", err)
-		}
-		for key, value := range cleanupLabels {
-			if stored.Labels[key] != value || server.Labels[key] != value {
-				t.Fatalf("cleanup identity %s was not retained before deletion", key)
+	for _, missingVM := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing_vm_%t", missingVM), func(t *testing.T) {
+			client := &fakeAzureClient{}
+			b := fixedAzureTestBackend(t, client)
+			req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123463", RequestedSlug: "restart-retry", Repo: core.Repo{Root: t.TempDir()}}
+			lease, err := b.Acquire(t.Context(), req)
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-		client.servers = nil
-		return interrupted
-	}
-	t.Chdir(req.Repo.Root)
-	t.Setenv("CRABBOX_CONFIG", "")
-	t.Setenv("CRABBOX_PROVIDER", "azure")
-	t.Setenv("CRABBOX_COORDINATOR", "")
-	app := core.App{Stdout: io.Discard, Stderr: io.Discard}
-	args := []string{"stop", "--force", "--provider", "azure", "--id", req.RequestedLeaseID}
-	if err := app.Run(t.Context(), args); !errors.Is(err, interrupted) {
-		t.Fatalf("first recovery: %v, want interrupted companion cleanup", err)
-	}
-	client.prepareFunc = nil // The retry must use persisted identities, not recapture them.
-	client.deleteOwnedFunc = nil
-	if err := app.Run(t.Context(), args); err != nil {
-		t.Fatalf("recovery retry after VM deletion: %v", err)
-	}
-	if len(client.ownedExpected) != 2 || len(client.deleted) != 1 {
-		t.Fatalf("delete attempts=%d completed=%v", len(client.ownedExpected), client.deleted)
-	}
-	for key, value := range cleanupLabels {
-		if client.ownedExpected[1].Labels[key] != value {
-			t.Fatalf("retry lost durable cleanup identity %s", key)
-		}
-	}
-	terminal, err := core.ReadLeaseClaim(req.RequestedLeaseID)
-	if err != nil || terminal.FixedCreateIntent == nil || terminal.FixedCreateIntent.State != "released" {
-		t.Fatalf("missing terminal receipt after retry: %+v err=%v", terminal, err)
+			claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if missingVM {
+				client.servers = nil
+			} else if err := core.RemoveLeaseClaimIfUnchanged(req.RequestedLeaseID, claim); err != nil {
+				t.Fatal(err)
+			}
+			cleanupLabels := map[string]string{
+				core.AzureCleanupBindingLabel:         "v1",
+				"_crabbox_azure_cleanup_nic_id":       "original-nic",
+				"_crabbox_azure_cleanup_public_ip_id": "original-ip",
+				"_crabbox_azure_cleanup_disk_id":      "original-disk",
+			}
+			if missingVM {
+				cleanupLabels[core.AzureCleanupBindingLabel] = "orphan-v1"
+			}
+			client.prepareFunc = func(server core.Server) core.Server {
+				server.Labels = maps.Clone(server.Labels)
+				maps.Copy(server.Labels, cleanupLabels)
+				return server
+			}
+			interrupted := errors.New("VM deleted; companion cleanup interrupted")
+			client.deleteOwnedFunc = func(server core.Server) error {
+				stored, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+				if err != nil || stored.CloudImmutableID != lease.Server.ImmutableID {
+					t.Fatalf("recovery did not persist VM identity before deletion: %v", err)
+				}
+				for key, value := range cleanupLabels {
+					if stored.Labels[key] != value || server.Labels[key] != value {
+						t.Fatalf("cleanup identity %s was not retained before deletion", key)
+					}
+				}
+				client.servers = nil
+				return interrupted
+			}
+			t.Chdir(req.Repo.Root)
+			t.Setenv("CRABBOX_CONFIG", "")
+			t.Setenv("CRABBOX_PROVIDER", "azure")
+			t.Setenv("CRABBOX_COORDINATOR", "")
+			app := core.App{Stdout: io.Discard, Stderr: io.Discard}
+			args := []string{"stop", "--force", "--provider", "azure", "--id", req.RequestedLeaseID}
+			if err := app.Run(t.Context(), args); !errors.Is(err, interrupted) {
+				t.Fatalf("first recovery: %v, want interrupted companion cleanup", err)
+			}
+			retained, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || retained.FixedCreateIntent == nil || retained.FixedCreateIntent.State == "released" {
+				t.Fatalf("partial cleanup lost nonterminal claim: %+v err=%v", retained, err)
+			}
+			client.prepareFunc = nil // The retry must use persisted identities, not recapture them.
+			client.deleteOwnedFunc = nil
+			if err := app.Run(t.Context(), args); err != nil {
+				t.Fatalf("recovery retry after VM deletion: %v", err)
+			}
+			if len(client.ownedExpected) != 2 || len(client.deleted) != 1 {
+				t.Fatalf("delete attempts=%d completed=%v", len(client.ownedExpected), client.deleted)
+			}
+			for key, value := range cleanupLabels {
+				if client.ownedExpected[1].Labels[key] != value {
+					t.Fatalf("retry lost durable cleanup identity %s", key)
+				}
+			}
+			terminal, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+			if err != nil || terminal.FixedCreateIntent == nil || terminal.FixedCreateIntent.State != "released" {
+				t.Fatalf("missing terminal receipt after retry: %+v err=%v", terminal, err)
+			}
+		})
 	}
 }
 
