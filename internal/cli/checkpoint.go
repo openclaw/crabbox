@@ -2823,7 +2823,7 @@ func restoreCheckpointArchive(ctx context.Context, target SSHTarget, localPath, 
 func remoteCheckpointArchiveCommand(workdir string) string {
 	script := "set -eu\n" +
 		"test -d " + shellQuote(workdir) + "\n" +
-		"tar -C " + shellQuote(workdir) + " --exclude './.crabbox/env' --exclude './.crabbox/scripts' -czf - ."
+		"tar -C " + shellQuote(workdir) + " --exclude './.crabbox/env' --exclude './.crabbox/env-*' --exclude './.crabbox/scripts' -czf - ."
 	return "bash -lc " + shellQuote(script)
 }
 

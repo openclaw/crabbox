@@ -207,8 +207,10 @@ longer needed, and do not create them from ad-hoc debugging sessions that hold
 temporary credentials.
 
 **Archives may contain secrets too.** They capture workdir contents including
-build outputs, caches, and generated files. Crabbox excludes `.crabbox/env` and
-`.crabbox/scripts` but does not scan arbitrary files for credentials.
+build outputs, caches, and generated files. Crabbox excludes `.crabbox/env`,
+temporary command environments under `.crabbox/env-*`, and `.crabbox/scripts`,
+including files left after interrupted cleanup. It does not scan arbitrary files
+for credentials.
 
 **Ownership depends on how the checkpoint was created.** Newly created brokered
 native AWS, Azure, and GCP checkpoints have authoritative, owner/org-scoped

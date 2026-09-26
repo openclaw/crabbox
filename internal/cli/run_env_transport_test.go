@@ -3,6 +3,7 @@ package cli
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -46,6 +47,7 @@ func TestSSHCommandEnvDeliveryAndCleanup(t *testing.T) {
 		t.Run(outcome, func(t *testing.T) {
 			isolateTestUserDirs(t)
 			dir := t.TempDir()
+			workdir := t.TempDir()
 			logPath := filepath.Join(dir, "ssh.argv")
 			t.Setenv("CRABBOX_ENV_ARGV_LOG", logPath)
 			t.Setenv("CRABBOX_ENV_UPLOAD_FAIL", outcome)
@@ -70,7 +72,7 @@ exit "$code"
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			var diagnostics bytes.Buffer
-			prepared, err := stageSSHCommandEnv(ctx, target, dir, values, &diagnostics)
+			prepared, err := stageSSHCommandEnv(ctx, target, workdir, values, &diagnostics)
 			if outcome == "upload-failure" {
 				if err == nil || strings.Contains(err.Error(), canary) {
 					t.Fatalf("upload failure was not safely reported: %v", err)
@@ -79,13 +81,38 @@ exit "$code"
 				if err != nil {
 					t.Fatal(err)
 				}
-				info, err := os.Stat(filepath.Join(dir, prepared.File))
+				if outcome == "success" {
+					// A failed cleanup or interrupted client can leave this file on
+					// a kept lease. Checkpoint archives must still exclude its values.
+					mustWriteTestFile(t, filepath.Join(workdir, "result.txt"), "public checkpoint result")
+					archive, err := exec.CommandContext(t.Context(), "/bin/sh", "-c", remoteCheckpointArchiveCommand(workdir)).Output()
+					if err != nil {
+						t.Fatal(err)
+					}
+					gz, err := gzip.NewReader(bytes.NewReader(archive))
+					if err != nil {
+						t.Fatal(err)
+					}
+					gz.Multistream(false) // BSD tar may pad the compressed output.
+					defer gz.Close()
+					contents, err := io.ReadAll(gz)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if bytes.Contains(contents, []byte(canary)) {
+						t.Error("checkpoint archive contains the staged command environment")
+					}
+					if !bytes.Contains(contents, []byte("public checkpoint result")) {
+						t.Error("checkpoint archive omitted the ordinary workdir contents")
+					}
+				}
+				info, err := os.Stat(filepath.Join(workdir, prepared.File))
 				if err != nil || info.Mode().Perm() != 0o600 {
 					t.Fatalf("private env file permissions: %v, %v", info, err)
 				}
 				profile := filepath.Join(dir, "actions.env")
 				mustWriteTestFile(t, profile, "cd /\n")
-				command := remoteCommandWithEnvFiles(dir, nil, []string{profile, prepared.File}, []string{"/bin/sh", "-c", `test "${TEST_EMPTY+set}" = set && printf '%s' "$TEST_VALUE"`})
+				command := remoteCommandWithEnvFiles(workdir, nil, []string{profile, prepared.File}, []string{"/bin/sh", "-c", `test "${TEST_EMPTY+set}" = set && printf '%s' "$TEST_VALUE"`})
 				owner := &workspaceOwner{key: "fixture", token: "fixture"}
 				for _, text := range []string{command, owner.wrapPOSIXCommand(command, false)} {
 					if strings.Contains(text, canary) || strings.Contains(text, base64.StdEncoding.EncodeToString([]byte(canary))) {
@@ -97,7 +124,7 @@ exit "$code"
 					t.Fatalf("remote environment round trip failed: %v", err)
 				}
 				if outcome == "failure" {
-					if code, _ := runSSHStreamResult(ctx, target, remoteCommandWithEnvFiles(dir, nil, []string{prepared.File}, []string{"false"}), io.Discard, &diagnostics); code == 0 {
+					if code, _ := runSSHStreamResult(ctx, target, remoteCommandWithEnvFiles(workdir, nil, []string{prepared.File}, []string{"false"}), io.Discard, &diagnostics); code == 0 {
 						t.Fatal("workload failure lost")
 					}
 				}
@@ -106,7 +133,7 @@ exit "$code"
 				}
 				prepared.close()
 			}
-			if _, err := os.Stat(filepath.Join(dir, shellDir(prepared.File))); !os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(workdir, shellDir(prepared.File))); !os.IsNotExist(err) {
 				t.Fatalf("private env directory survived cleanup: %v", err)
 			}
 			argv, err := os.ReadFile(logPath)
