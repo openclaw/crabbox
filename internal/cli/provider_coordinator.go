@@ -1237,7 +1237,7 @@ func (b *coordinatorLeaseBackend) releaseLeaseUnderClaimFence(ctx context.Contex
 			fmt.Fprintf(b.rt.Stderr, "warning: coordinator accepted release for %s; remote cleanup remains pending and local claim/SSH artifacts were preserved\n", req.Lease.LeaseID)
 			return false, nil
 		}
-		return false, coordinatorReleaseObservationError(req.Lease.LeaseID, "returned an unexpected non-final state")
+		return false, coordinatorReleaseObservationError(req.Lease.LeaseID, b.cfg.Provider, "returned an unexpected non-final state")
 	}
 	released, err = observeCoordinatorReleaseCompletion(ctx, observationCoord, released, req.Lease.LeaseID, expectedProvider)
 	if err != nil {

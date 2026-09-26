@@ -256,6 +256,10 @@ inspection through claim acquisition, guest cleanup, release requests, and clean
 observation; an earlier caller deadline wins. Phase limits cannot restart this
 budget. Pending or failed provider cleanup still returns an error and preserves
 the local claim and SSH artifacts for a later retry.
+The error includes an exact `status --json` command to check cleanup progress.
+When the coordinator reports `cleanupRetryAt`, it also confirms that cleanup
+will retry automatically. Repeat `stop` after `cleanupStatus` becomes `complete`
+to remove the retained local artifacts.
 
 After confirmed coordinator-backed deletion, SSH masters created with canonical
 lease credentials are explicitly closed and observed to exit before local

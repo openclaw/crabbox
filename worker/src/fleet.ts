@@ -99,6 +99,7 @@ import {
 import { InvalidAWSRegionError, sanitizeAWSRegion } from "./aws-region";
 import {
   AzureClient,
+  AzureProvisioningRejectedError,
   azureRegionCandidates,
   azureSnapshotNotFound,
   type AzureDeferredCleanupRequest,
@@ -27342,6 +27343,15 @@ function withProvisioningPhases(
 }
 
 export class AzureProvider implements CloudProvider {
+  provisioningFailureEvidence({
+    error,
+    lease,
+  }: ProviderProvisioningFailureContext): ProviderProvisioningFailureEvidence {
+    return {
+      allocationRejected: !lease.cloudID && error instanceof AzureProvisioningRejectedError,
+    };
+  }
+
   private clientValue?: AzureClient;
 
   resumableProvisioning(): ProviderResumableProvisioning {

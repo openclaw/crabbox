@@ -20,7 +20,7 @@ import {
   ProviderResourceUnresolvedError,
   providerProvisioningCleanupClaim,
 } from "./provider-provisioning";
-import { ProvisioningAttemptHistory } from "./provisioning-attempts";
+import { ProvisioningAttemptHistory, ProvisioningAttemptsError } from "./provisioning-attempts";
 import { leaseProviderName } from "./slug";
 import type {
   Env,
@@ -410,13 +410,52 @@ interface AzureARMOptions {
 }
 
 export class AzureHTTPError extends Error {
+  readonly code?: string;
+  readonly detail?: string;
   constructor(
     readonly method: string,
     readonly path: string,
     readonly status: number,
     readonly body: string,
   ) {
-    super(`azure ${method} ${path}: http ${status}: ${body}`);
+    super(`azure ${method} ${path}: http ${status}: ${summarizeAzureErrorBody(body)}`);
+    try {
+      const error = (JSON.parse(body) as { error?: { code?: unknown; message?: unknown } }).error;
+      if (typeof error?.code === "string") this.code = error.code;
+      if (typeof error?.message === "string") this.detail = error.message;
+    } catch {
+      // Only structured ARM responses can establish rejection evidence.
+    }
+  }
+}
+
+export function azureDefiniteAllocationRejection(
+  status: number,
+  code: string | undefined,
+  message = "",
+): boolean {
+  if (![400, 403, 409].includes(status)) return false;
+  return (
+    [
+      "SkuNotAvailable",
+      "AllocationFailed",
+      "OverconstrainedAllocationRequest",
+      "ZonalAllocationFailed",
+      "InvalidParameter",
+      "QuotaExceeded",
+      "InvalidTemplate",
+    ].includes(code ?? "") ||
+    (code === "OperationNotAllowed" && /\bquota\b/i.test(message))
+  );
+}
+
+// Every attempted VM was definitively rejected and its owned fragments were deleted.
+export class AzureProvisioningRejectedError extends ProvisioningAttemptsError {
+  constructor(error: Error) {
+    super(error.message, error instanceof ProvisioningAttemptsError ? error.attempts : [], {
+      cause: error,
+    });
+    this.name = "AzureProvisioningRejectedError";
   }
 }
 
@@ -706,6 +745,7 @@ export class AzureClient {
     const locations = azureRegionCandidates(config, this.env, this.defaultLocation);
     const multiRegion = locations.length > 1;
     const history = new ProvisioningAttemptHistory();
+    let allRejected = true;
     for (const location of locations) {
       const client = this.clientForLocation(location, multiRegion);
       try {
@@ -725,6 +765,7 @@ export class AzureClient {
         return { ...result, server, ...history.result(result.attempts) };
       } catch (error) {
         if (providerProvisioningCleanupClaim(error)) throw error;
+        allRejected &&= error instanceof AzureProvisioningRejectedError;
         const message = error instanceof Error ? error.message : String(error);
         history.recordFailure(
           error,
@@ -740,7 +781,8 @@ export class AzureClient {
         if (!isRetryableProvisioningError(message)) break;
       }
     }
-    throw history.error();
+    const failure = history.error();
+    throw allRejected ? new AzureProvisioningRejectedError(failure) : failure;
   }
 
   private clientForLocation(location: string, multiRegion: boolean): AzureClient {
@@ -783,6 +825,7 @@ export class AzureClient {
   }> {
     const candidates = azureProvisioningCandidatesForConfig(config);
     const history = new ProvisioningAttemptHistory();
+    let allRejected = true;
     let infra: AzureSharedInfraNames | undefined;
     for (let index = 0; index < candidates.length; index += 1) {
       const vmSize = candidates[index] ?? config.serverType;
@@ -810,6 +853,7 @@ export class AzureClient {
         return { server, serverType: vmSize, market: config.capacityMarket, ...history.result() };
       } catch (error) {
         if (providerProvisioningCleanupClaim(error)) throw error;
+        allRejected &&= error instanceof AzureProvisioningRejectedError;
         const message = error instanceof Error ? error.message : String(error);
         history.record(
           {
@@ -854,6 +898,7 @@ export class AzureClient {
           return { server, serverType: vmSize, market: "on-demand", ...history.result() };
         } catch (error) {
           if (providerProvisioningCleanupClaim(error)) throw error;
+          allRejected &&= error instanceof AzureProvisioningRejectedError;
           const message = error instanceof Error ? error.message : String(error);
           history.record(
             {
@@ -869,7 +914,8 @@ export class AzureClient {
         }
       }
     }
-    throw history.error();
+    const failure = history.error();
+    throw allRejected ? new AzureProvisioningRejectedError(failure) : failure;
   }
 
   async deleteServer(name: string): Promise<void> {
@@ -2590,6 +2636,14 @@ export class AzureClient {
             cleanupError,
           );
         }
+        if (
+          error instanceof AzureHTTPError &&
+          error.method === "PUT" &&
+          error.path === vmPath(this.resourceGroup, name) &&
+          azureDefiniteAllocationRejection(error.status, error.code, error.detail)
+        ) {
+          throw new AzureProvisioningRejectedError(error);
+        }
       }
       throw error;
     }
@@ -3062,7 +3116,7 @@ export class AzureClient {
     if (body !== undefined) init.body = JSON.stringify(body);
     const response = await this.fetcher(url, init);
     if (!response.ok && response.status !== 201 && response.status !== 202) {
-      const failure = new AzureHTTPError(method, path, response.status, await safeBody(response));
+      const failure = new AzureHTTPError(method, path, response.status, await response.text());
       if (opts?.headers?.["if-none-match"] === "*" && response.status === 412) {
         Object.defineProperty(failure, "checkpointResourceMayExist", { value: false });
       }

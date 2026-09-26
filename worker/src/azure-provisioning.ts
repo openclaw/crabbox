@@ -1,5 +1,6 @@
 import {
   AzureClient,
+  azureDefiniteAllocationRejection,
   azureOwnedDeleteClaimKey,
   azureCrabboxSSHRulesMatch,
   azureAttemptNameSeed,
@@ -707,13 +708,11 @@ export class AzureResumableProvisioning implements ProviderResumableProvisioning
         }
         if (result.operationURL) journal.operationURL = result.operationURL;
         if (
-          [400, 403, 409].includes(result.status) &&
-          [
-            "SkuNotAvailable",
-            "AllocationFailed",
-            "OverconstrainedAllocationRequest",
-            "ZonalAllocationFailed",
-          ].includes(result.errorCode ?? "")
+          azureDefiniteAllocationRejection(
+            result.status,
+            result.errorCode,
+            String(asObject(asObject(result.resource)["error"])["message"] ?? ""),
+          )
         ) {
           journal.rejected = true;
           journal.allocationRejected = journal.stage;

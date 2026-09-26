@@ -549,6 +549,22 @@ func TestCoordinatorReleaseObservesPendingCreation(t *testing.T) {
 	}
 }
 
+func TestCoordinatorReleaseReportsScheduledCleanup(t *testing.T) {
+	const leaseID = "cbx_abcdef123456"
+	_, err := observeCoordinatorReleaseCompletion(context.Background(), nil, CoordinatorLease{
+		ID: leaseID, Provider: "azure", State: "released", CleanupStatus: "failed",
+		CleanupRetryAt: "2026-09-26T21:00:00Z",
+	}, leaseID, "azure")
+	if err == nil {
+		t.Fatal("expected pending cleanup error")
+	}
+	for _, hint := range []string{"coordinator will retry", "crabbox status --provider azure --id " + leaseID, "local claim and SSH artifacts were preserved"} {
+		if !strings.Contains(err.Error(), hint) {
+			t.Errorf("error %q missing %q", err, hint)
+		}
+	}
+}
+
 func TestCoordinatorReleasePreservesArtifactsWithoutConfirmedDestroy(t *testing.T) {
 	configureCoordinatorReleaseTestTiming(t, 20*time.Millisecond, 2*time.Millisecond)
 	deleting := true

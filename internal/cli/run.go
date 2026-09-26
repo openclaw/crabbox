@@ -4464,32 +4464,36 @@ func observeCoordinatorReleaseCompletion(
 			return lease, nil
 		}
 		if coordinatorReleaseCleanupFailed(lease) {
-			return lease, coordinatorReleaseObservationError(leaseID, "reported a cleanup failure or scheduled retry")
+			state := "reported a cleanup failure or scheduled retry"
+			if lease.CleanupRetryAt != "" {
+				state += "; the coordinator will retry cleanup automatically"
+			}
+			return lease, coordinatorReleaseObservationError(leaseID, expectedProvider, state)
 		}
 		if !coordinatorReleaseCleanupPending(lease) {
-			return lease, coordinatorReleaseObservationError(leaseID, "returned an unexpected non-final state")
+			return lease, coordinatorReleaseObservationError(leaseID, expectedProvider, "returned an unexpected non-final state")
 		}
 		if timeout <= 0 {
-			return lease, coordinatorReleaseObservationError(leaseID, "is still pending")
+			return lease, coordinatorReleaseObservationError(leaseID, expectedProvider, "is still pending")
 		}
 		if err := sleepContext(observeCtx, coordinatorReleaseObservationCadence(observation)); err != nil {
 			if cause := context.Cause(ctx); cause != nil {
-				return lease, errors.Join(cause, coordinatorReleaseObservationError(leaseID, "observation was canceled"))
+				return lease, errors.Join(cause, coordinatorReleaseObservationError(leaseID, expectedProvider, "observation was canceled"))
 			}
-			return lease, coordinatorReleaseObservationError(leaseID, fmt.Sprintf("is still pending after %s", timeout))
+			return lease, coordinatorReleaseObservationError(leaseID, expectedProvider, fmt.Sprintf("is still pending after %s", timeout))
 		}
 		observed, err := coord.GetLease(observeCtx, leaseID)
 		if err != nil {
 			if cause := context.Cause(ctx); cause != nil {
-				return lease, errors.Join(cause, coordinatorReleaseObservationError(leaseID, "observation was canceled"))
+				return lease, errors.Join(cause, coordinatorReleaseObservationError(leaseID, expectedProvider, "observation was canceled"))
 			}
 			if errors.Is(observeCtx.Err(), context.DeadlineExceeded) {
-				return lease, coordinatorReleaseObservationError(leaseID, fmt.Sprintf("is still pending after %s", timeout))
+				return lease, coordinatorReleaseObservationError(leaseID, expectedProvider, fmt.Sprintf("is still pending after %s", timeout))
 			}
 			if isCoordinatorNotFoundError(err) {
-				return lease, coordinatorReleaseObservationError(leaseID, "could not be confirmed because the accepted lease record is no longer available")
+				return lease, coordinatorReleaseObservationError(leaseID, expectedProvider, "could not be confirmed because the accepted lease record is no longer available")
 			}
-			return lease, errors.Join(coordinatorReleaseObservationError(leaseID, "could not be observed"), err)
+			return lease, errors.Join(coordinatorReleaseObservationError(leaseID, expectedProvider, "could not be observed"), err)
 		}
 		if err := validateCoordinatorProviderIdentity(expectedProvider, leaseID, observed.Provider, false); err != nil {
 			return lease, err
@@ -4517,8 +4521,8 @@ func coordinatorReleaseCleanupPending(lease CoordinatorLease) bool {
 		(lease.CleanupStatus == "pending" || lease.CleanupStatus == "" && lease.CleanupStartedAt != "")
 }
 
-func coordinatorReleaseObservationError(leaseID, state string) error {
-	return Exit(5, "coordinator accepted release for %s, but remote cleanup %s; local claim and SSH artifacts were preserved; retry crabbox stop after coordinator cleanup advances", leaseID, state)
+func coordinatorReleaseObservationError(leaseID, expectedProvider, state string) error {
+	return Exit(5, "coordinator accepted release for %s, but remote cleanup %s; local claim and SSH artifacts were preserved; check crabbox status --provider %s --id %s --json, then retry crabbox stop after coordinator cleanup advances", leaseID, state, expectedProvider, leaseID)
 }
 
 func coordinatorProviderReleaseConfirmed(lease CoordinatorLease) bool {

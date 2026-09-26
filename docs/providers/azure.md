@@ -68,6 +68,34 @@ Azure supports both execution modes:
   holds an operator-owned Azure service principal. The CLI still does SSH, sync,
   and command execution directly to the runner host.
 
+### Rejected VM creates and pending cleanup
+
+The coordinator creates the lease public IP and NIC before submitting the VM.
+The resource group, VNet and NSG are shared infrastructure and remain in place.
+Snapshot-based creation can also create an OS disk before the VM request; ordinary
+managed-image creation asks Azure to create that disk with the VM.
+
+Structured ARM rejections such as `SkuNotAvailable`, `InvalidParameter`,
+`QuotaExceeded`, quota-related `OperationNotAllowed`, and `InvalidTemplate` prove
+the VM request was rejected. The coordinator still verifies and deletes its exact
+owned companion resources before reporting no remaining allocation. Failed cleanup
+retains the attempt's name, scope and durable immutable resource identities for
+retry; timeouts, lost replies and server errors do not establish rejection.
+
+Older legacy attempts can retain uncertainty after successful rollback. Once the
+provider call has settled, interrupted-provisioning recovery waits five minutes,
+then requires 30 minutes of empty provider inventory, checking on five-minute
+retries. `keep=true` does not block this recovery after explicit deletion or
+failed provisioning. Inventory failures or conflicting ownership keep cleanup
+unresolved. New definite rejections preserve successful rollback evidence across
+SKU, market and region fallback and avoid this absence-confirmation delay.
+
+Use `crabbox status --provider azure --id <lease> --json` to inspect
+`cleanupStatus`, `cleanupRetryAt`, and `provisioningResourceMayExist`. After
+`cleanupStatus=complete`, repeat `crabbox stop --provider azure --id <lease>` to
+finish local claim and SSH-artifact cleanup. A released state alone is not
+confirmation that cleanup finished.
+
 ## Commands
 
 ```sh

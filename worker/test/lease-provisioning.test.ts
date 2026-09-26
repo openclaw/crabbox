@@ -50,6 +50,7 @@ class AzureFixture {
   asyncDelete = false;
   readonly operations = new Map<string, string>();
   rejectFirstVM = false;
+  vmRejection?: { status: number; code: string; message?: string };
   galleryVersions: unknown[] = [];
   private sequence = 0;
   remove(path: string): void {
@@ -123,6 +124,10 @@ class AzureFixture {
       this.resources.set(path, { ...existing, ...body });
     } else {
       const vm = /\/virtualMachines\/[^/]+$/.test(path);
+      if (vm && this.vmRejection) {
+        const { status, ...error } = this.vmRejection;
+        return Response.json({ error }, { status });
+      }
       if (vm && this.rejectFirstVM) {
         this.rejectFirstVM = false;
         return Response.json({ error: { code: "SkuNotAvailable" } }, { status: 400 });
@@ -261,6 +266,147 @@ async function step(
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe("Azure definite VM rejections", () => {
+  const rejections = [
+    { status: 409, code: "SkuNotAvailable" },
+    { status: 400, code: "InvalidParameter" },
+    { status: 403, code: "QuotaExceeded" },
+    { status: 409, code: "OperationNotAllowed", message: "exceeding regional vCPU quota" },
+    { status: 400, code: "InvalidTemplate" },
+  ];
+
+  it.each([
+    ...rejections.map((rejection) => ({ ...rejection, unresolved: false, cleanupFailure: false })),
+    { status: 500, code: "SkuNotAvailable", unresolved: true, cleanupFailure: false },
+    { status: 409, code: "SkuNotAvailable", unresolved: true, cleanupFailure: false, mixed: true },
+    {
+      status: 409,
+      code: "OperationNotAllowed",
+      message: "operation currently unavailable",
+      unresolved: true,
+      cleanupFailure: false,
+    },
+    { status: 409, code: "SkuNotAvailable", unresolved: true, cleanupFailure: true },
+  ])(
+    "records legacy $code/$status cleanup facts (unresolved=$unresolved, cleanupFailure=$cleanupFailure)",
+    async ({ unresolved, cleanupFailure, mixed, ...rejection }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      const storage = new ProvisioningTestStorage();
+      const azure = new AzureFixture();
+      azure.vmRejection = rejection;
+      if (cleanupFailure) azure.deleteFailures = ["AuthorizationFailed"];
+      vi.stubGlobal("fetch", azure.fetch);
+      const currentEnv = { ...env, CRABBOX_DURABLE_PROVISIONING_ADMISSION: "false" };
+      const provider = new AzureProvider(currentEnv, undefined, storage);
+      const coordinator = new FleetCoordinator(new ProvisioningTestRuntime(storage), currentEnv, {
+        azure: provider,
+      });
+      let expired = false;
+      azure.beforeMutation = async (path) => {
+        if (/\/virtualMachines\/[^/]+$/.test(path) && mixed) {
+          azure.vmRejection = { ...rejection, status: expired ? rejection.status : 500 };
+        }
+        if (!expired && /\/virtualMachines\/[^/]+$/.test(path)) {
+          expired = true;
+          vi.setSystemTime(Date.now() + 6 * 60_000);
+          await coordinator.alarm();
+          const lease = (await storage.get<LeaseRecord>(`lease:${id}`))!;
+          // Model expiry's persisted uncertainty while the legacy provider call is still running.
+          await storage.put(`lease:${id}`, {
+            ...lease,
+            state: "failed",
+            provisioningResourceMayExist: true,
+          });
+        }
+      };
+      const create = request("POST", "/v1/leases", {
+        ...input(),
+        target: "linux",
+        keep: true,
+        ttlSeconds: 900,
+        idleTimeoutSeconds: 300,
+        capacity: { market: "on-demand", fallback: "none", regions: ["eastus", "westus"] },
+      });
+      create.headers.delete("prefer");
+      await coordinator.fetch(create);
+      const failed = await storage.get<LeaseRecord>(`lease:${id}`);
+      expect(failed?.failureError ?? failed?.cleanupError).toContain(rejection.code);
+      expect(azure.mutations.filter((entry) => entry.method === "DELETE").length).toBeGreaterThan(
+        0,
+      );
+      expect(
+        [...azure.resources.keys()].filter((path) =>
+          /\/(networkInterfaces|publicIPAddresses|virtualMachines|disks)\//.test(path),
+        ),
+      ).toHaveLength(cleanupFailure ? 2 : 0);
+      expect(failed).toMatchObject({ state: "failed", provisioningResourceMayExist: unresolved });
+      expect(failed?.cleanupCompletedAt).toBeUndefined();
+      expect(Boolean(failed?.cloudID)).toBe(cleanupFailure);
+      expect(Boolean(failed?.cleanupRetryAt)).toBe(cleanupFailure);
+      expect(Boolean(await storage.get(azureOwnedDeleteClaimKey(scope, failed!.cloudID, id)))).toBe(
+        cleanupFailure,
+      );
+      if (unresolved) return;
+      const release = await coordinator.fetch(
+        request("POST", `/v1/leases/${id}/release`, { delete: true }),
+      );
+      expect(await release.json()).toMatchObject({
+        lease: {
+          state: "released",
+          cleanupStatus: "complete",
+          cleanupCompletedAt: expect.any(String),
+        },
+      });
+    },
+  );
+
+  it.each([
+    { status: 500, code: "SkuNotAvailable" },
+    { status: 409, code: "OperationNotAllowed", message: "operation unavailable" },
+  ])("retains durable ambiguous $code/$status and its fragments", async (rejection) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const storage = new ProvisioningTestStorage();
+    const azure = new AzureFixture();
+    azure.vmRejection = rejection;
+    await fleet(storage, azure).coordinator.fetch(request("POST", "/v1/leases", input()));
+    for (let n = 0; n < 35; n++) await step(storage, azure);
+    expect(
+      (await storage.get<LeaseProvisioningOperation>(provisioningOperationKey(id)))?.step.phase,
+    ).toBe("blocked");
+    expect(azure.mutations.filter((entry) => entry.method === "DELETE")).toEqual([]);
+    expect(
+      [...azure.resources.keys()].filter((path) =>
+        /\/(networkInterfaces|publicIPAddresses)\//.test(path),
+      ),
+    ).toHaveLength(2);
+  });
+
+  it.each(rejections)("settles durable $code after exact fragment cleanup", async (rejection) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const storage = new ProvisioningTestStorage();
+    const azure = new AzureFixture();
+    azure.vmRejection = rejection;
+    await fleet(storage, azure).coordinator.fetch(
+      request("POST", "/v1/leases", {
+        ...input(),
+        keep: true,
+        capacity: { market: "on-demand", fallback: "none" },
+      }),
+    );
+    for (let n = 0; n < 60; n++) await step(storage, azure);
+    expect(await storage.get<LeaseRecord>(`lease:${id}`)).toMatchObject({
+      provisioningResourceMayExist: false,
+      cleanupCompletedAt: expect.any(String),
+    });
+    expect(
+      azure.mutations
+        .filter((entry) => entry.method === "DELETE")
+        .map((entry) => entry.path.split("/").at(-2)),
+    ).toEqual(["networkInterfaces", "publicIPAddresses"]);
+  });
 });
 
 async function ready(storage: ProvisioningTestStorage, azure: AzureFixture) {
