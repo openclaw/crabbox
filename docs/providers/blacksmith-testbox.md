@@ -206,6 +206,12 @@ This requires a macOS or Linux caller with compatible `ps`; unsupported process
 ownership fails before acquisition. Local cleanup does not establish that a
 remote command completed, and a sync timeout remains a failed run.
 
+Run-scoped SSH launchers disable native `ControlMaster` and `ControlPersist`
+before Blacksmith's SSH options are applied, so sync connections cannot detach
+and outlive a successful, failed, or canceled run. Artifact SCP transfers use
+the same policy. Existing native control sockets and unrelated sessions remain
+untouched; a kept Testbox opens fresh connections on its next run.
+
 Local connection artifacts must be removed successfully before the exact claim
 is deleted; an unsafe or undeletable lease key directory reports cleanup failure
 and retains the claim for retry. Missing lease key directories are already clean.

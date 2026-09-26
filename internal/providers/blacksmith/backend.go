@@ -867,15 +867,27 @@ func (b *blacksmithBackend) runCommandCapture(ctx context.Context, args []string
 	return b.runCommandCaptureInDir(ctx, args, stdout, stderr, disableOutputCapture, "")
 }
 
-func (b *blacksmithBackend) runCommandCaptureInDir(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool, dir string) (core.LocalCommandResult, error) {
+func (b *blacksmithBackend) runCommandCaptureInDir(ctx context.Context, args []string, stdout, stderr io.Writer, disableOutputCapture bool, dir string) (result core.LocalCommandResult, err error) {
 	if b.route != nil {
 		args = append(append([]string(nil), args...), "--api-url", b.route.API, "--org", b.route.Org)
 	}
 	request := core.LocalCommandRequest{Name: "blacksmith", Args: args, Dir: dir, Stdout: stdout, Stderr: stderr, DisableOutputCapture: disableOutputCapture}
 	if dir != "" {
+		env, cleanup, prepareErr := blacksmithSSHCommandEnvironment()
+		if prepareErr != nil {
+			return core.LocalCommandResult{ExitCode: 2}, prepareErr
+		}
+		defer func() {
+			if cleanupErr := cleanup(); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("remove native Blacksmith SSH launcher: %w", cleanupErr))
+				if result.ExitCode == 0 {
+					result.ExitCode = 1
+				}
+			}
+		}()
 		// Artifact supervision must also bound local pipe draining on cancel.
 		request.CancelGracePeriod = time.Second
-		request.Env = append(os.Environ(), "BLACKSMITH_DISABLE_AUTO_UPDATE=1")
+		request.Env = env
 		request.RequireProcessGroupJoin = true
 		output := stderr
 		if output == nil {
@@ -893,7 +905,7 @@ func (b *blacksmithBackend) runCommandCaptureInDir(ctx context.Context, args []s
 	if !disableOutputCapture {
 		request.MaxCapturedOutputBytes = blacksmithCommandCaptureBytes
 	}
-	result, err := b.rt.Exec.Run(ctx, request)
+	result, err = b.rt.Exec.Run(ctx, request)
 	if err != nil {
 		return result, blacksmithCommandError{ExitError: core.ExitError{Code: result.ExitCode, Message: fmt.Sprintf("blacksmith failed: %v", err)}, cause: err}
 	}

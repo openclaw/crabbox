@@ -398,7 +398,7 @@ func TestBlacksmithArtifactPreflightsSCPBeforeWorkload(t *testing.T) {
 			childPATH := os.Getenv("PATH")
 			prepareBlacksmithGuestKey(t, "tbx_preflight")
 			parentBin := t.TempDir()
-			for _, name := range []string{"blacksmith", "ps"} {
+			for _, name := range []string{"blacksmith", "ps", "ssh"} {
 				path, err := exec.LookPath(name)
 				if err != nil {
 					t.Fatal(err)

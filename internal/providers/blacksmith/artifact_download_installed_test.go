@@ -98,7 +98,8 @@ func TestBlacksmithDownloadInstalledHelperExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantLimit := min(uint64(core.DelegatedRunArtifactDefaultMaxBytes), before.Max)
-	if proof.Script != f.scp || proof.Cwd != physicalRepo || !slices.Equal(proof.Args, []string{"one argument with spaces", "*", "", filepath.Join(stage, "archive.tgz")}) || proof.Soft != wantLimit || proof.Hard != wantLimit {
+	wantArgs := []string{"-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no", "one argument with spaces", "*", "", filepath.Join(stage, "archive.tgz")}
+	if proof.Script != f.scp || proof.Cwd != physicalRepo || !slices.Equal(proof.Args, wantArgs) || proof.Soft != wantLimit || proof.Hard != wantLimit {
 		t.Fatalf("installed execution identity/argv/cwd/limits changed: %+v; installed=%s limit=%d", proof, f.scp, wantLimit)
 	}
 	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &after); err != nil || before != after {
@@ -114,7 +115,7 @@ func TestBlacksmithInstalledHelperChild(t *testing.T) {
 		return
 	}
 	index := slices.Index(os.Args, "--")
-	if index < 0 || len(os.Args[index+1:]) != 5 {
+	if index < 0 || len(os.Args[index+1:]) != 11 {
 		t.Fatal("unexpected fixture arguments")
 	}
 	args := os.Args[index+1:]
@@ -133,7 +134,7 @@ func TestBlacksmithInstalledHelperChild(t *testing.T) {
 	}{args[0], cwd, args[1:], limit.Cur, limit.Max}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(args[4], []byte(installedHelperPayload), 0o600); err != nil {
+	if err := os.WriteFile(args[len(args)-1], []byte(installedHelperPayload), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }

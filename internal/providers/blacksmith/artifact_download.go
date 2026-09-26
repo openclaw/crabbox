@@ -82,7 +82,7 @@ func (b *blacksmithBackend) downloadArtifact(ctx context.Context, repoRoot, leas
 	if err != nil {
 		return nil, err
 	}
-	_, writeErr := dispatcher.WriteString("#!/bin/sh\nexec " + core.ShellQuote(scp) + " \"$@\"\n")
+	_, writeErr := dispatcher.WriteString(blacksmithNonPersistentSSHLauncher(scp))
 	if err := errors.Join(writeErr, dispatcher.Close()); err != nil {
 		return nil, err
 	}
