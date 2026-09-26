@@ -2678,7 +2678,7 @@ export class AzureClient {
         name: `${name}-osdisk`,
         createOption: "FromImage",
       };
-      if (await this.useEphemeralOSDisk(config, location)) {
+      if (await this.validateOSDiskMode(config, location)) {
         osDisk["caching"] = "ReadOnly";
         osDisk["diffDiskSettings"] = { option: "Local", enableFullCaching: true };
       } else {
@@ -2698,7 +2698,9 @@ export class AzureClient {
     await this.arm(
       "PUT",
       vmPath(this.resourceGroup, name),
-      azureComputeAPIVersionForOSDisk(config.azureSnapshot ? "managed" : config.azureOSDisk),
+      !config.azureSnapshot && config.azureOSDisk === "ephemeral"
+        ? COMPUTE_FULL_CACHING_API_VERSION
+        : API_VERSIONS.compute,
       {
         location,
         tags,
@@ -3099,13 +3101,9 @@ export class AzureClient {
     return this.ephemeralOSSupport.get(vmSize) ?? azureSupportsEphemeralOS(vmSize);
   }
 
-  private async useEphemeralOSDisk(config: LeaseConfig, location: string): Promise<boolean> {
-    return await this.validateOSDiskMode(config, location);
-  }
-
   private async validateOSDiskMode(config: LeaseConfig, location: string): Promise<boolean> {
     const mode = normalizeAzureOSDiskMode(config.azureOSDisk);
-    if (!azureOSDiskIsEphemeral(mode)) return false;
+    if (mode !== "ephemeral") return false;
     const supported = await this.supportsEphemeralOS(config.serverType, location);
     if (!supported) {
       throw new Error(
@@ -4684,10 +4682,6 @@ export function azureLROPollIntervalMS(retryAfter: string | null): number {
   return Math.max(seconds * 1000, MIN_LRO_POLL_INTERVAL_MS);
 }
 
-function azureOSDiskIsEphemeral(mode: string): boolean {
-  return mode === "ephemeral";
-}
-
 export function azureProvisioningCandidatesForConfig(
   config: Pick<
     LeaseConfig,
@@ -4715,7 +4709,7 @@ export function azureProvisioningCandidatesForConfig(
   if (candidates.length === 0 && isCanonicalProviderClass(config.class)) {
     const storedType = concreteStoredServerType(config.serverType, config.class);
     if (!storedType) return [];
-    return azureOSDiskIsEphemeral(azureOSDisk) && !azureSupportsEphemeralFullCaching(storedType)
+    return azureOSDisk === "ephemeral" && !azureSupportsEphemeralFullCaching(storedType)
       ? []
       : [storedType];
   }
@@ -4723,16 +4717,12 @@ export function azureProvisioningCandidatesForConfig(
   if (!storedType || storedType === candidates[0]) {
     return candidates;
   }
-  if (azureOSDiskIsEphemeral(azureOSDisk)) {
+  if (azureOSDisk === "ephemeral") {
     return azureSupportsEphemeralFullCaching(storedType)
       ? uniqueProviderMachineCandidates([storedType, ...candidates])
       : candidates;
   }
   return uniqueProviderMachineCandidates([storedType, ...candidates]);
-}
-
-function azureComputeAPIVersionForOSDisk(mode: string): string {
-  return azureOSDiskIsEphemeral(mode) ? COMPUTE_FULL_CACHING_API_VERSION : API_VERSIONS.compute;
 }
 
 function azureSKUCapabilityTrue(

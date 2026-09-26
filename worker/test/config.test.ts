@@ -1461,48 +1461,25 @@ describe("lease config", () => {
   });
 
   it("normalizes Azure OS disk requests", () => {
-    expect(() =>
-      leaseConfig({
-        provider: "azure",
-        azureOSDisk: "ephemeral-preview",
-        sshPublicKey: "ssh-ed25519 test",
-      }),
-    ).toThrow("azureOSDisk=ephemeral-preview has been removed; use ephemeral");
-    expect(
-      leaseConfig({
-        provider: "azure",
-        azureOSDisk: "MANAGED",
-        sshPublicKey: "ssh-ed25519 test",
-      }).azureOSDisk,
-    ).toBe("managed");
-    expect(
-      leaseConfig({
-        provider: "azure",
-        azureOSDisk: "ephemeral",
-        sshPublicKey: "ssh-ed25519 test",
-      }).azureOSDisk,
-    ).toBe("ephemeral");
-    expect(
-      leaseConfig({
-        provider: "azure",
-        azureOSDisk: " EPHEMERAL ",
-        sshPublicKey: "ssh-ed25519 test",
-      }).azureOSDisk,
-    ).toBe("ephemeral");
-    expect(
-      leaseConfig({
-        provider: "azure",
-        azureOSDisk: "auto",
-        sshPublicKey: "ssh-ed25519 test",
-      }).azureOSDisk,
-    ).toBe("managed");
-    expect(() =>
-      leaseConfig({
-        provider: "azure",
-        azureOSDisk: "premium",
-        sshPublicKey: "ssh-ed25519 test",
-      }),
-    ).toThrow("azureOSDisk must be auto, managed, or ephemeral");
+    for (const [azureOSDisk, expected] of [
+      ["MANAGED", "managed"],
+      ["ephemeral", "ephemeral"],
+      [" EPHEMERAL ", "ephemeral"],
+      ["auto", "managed"],
+    ]) {
+      expect(
+        leaseConfig({ provider: "azure", azureOSDisk, sshPublicKey: "ssh-ed25519 test" })
+          .azureOSDisk,
+      ).toBe(expected);
+    }
+    for (const [azureOSDisk, message] of [
+      ["ephemeral-preview", "azureOSDisk=ephemeral-preview has been removed; use ephemeral"],
+      ["premium", "azureOSDisk must be auto, managed, or ephemeral"],
+    ]) {
+      expect(() =>
+        leaseConfig({ provider: "azure", azureOSDisk, sshPublicKey: "ssh-ed25519 test" }),
+      ).toThrow(message);
+    }
   });
 
   it("uses Worker Azure OS disk defaults when the request omits one", () => {
