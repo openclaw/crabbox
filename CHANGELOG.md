@@ -16,6 +16,7 @@
 - Keep allowlisted SSH environment values out of command lines and workspace-owner launchers by uploading private, temporary env files over stdin, including preflight, Windows/WSL2, and cache warm; refuse remote cleanup after workspace ownership renewal fails. Fixes #2535 (https://github.com/openclaw/crabbox/issues/2535). Thanks @youssef-tharwat for the report.
 - Join local Blacksmith sync descendants before an ordinary Testbox run returns after cancellation, preserving the lease claim until command cleanup completes. [PR 2547](https://github.com/openclaw/crabbox/pull/2547).
 - Stop Parallels IP discovery from admitting probes after the startup deadline while preserving the caller's cancellation cause. [PR 2548](https://github.com/openclaw/crabbox/pull/2548).
+- Allow Azure fixed-lease `stop --force` to finish retained claims after external cleanup, verifying VM and companion absence with read-only checks and preserving interrupted recovery for retry. [PR 2572](https://github.com/openclaw/crabbox/pull/2572). Thanks @galiniliev.
 
 ## 0.66.0 - 2026-09-24
 

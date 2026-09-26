@@ -318,12 +318,17 @@ If the fixed Azure claim still exists but the VM and its original cleanup
 binding are missing, the same command can finish the claim after external
 cleanup. It verifies that the VM, NIC, public IP, managed OS disk, and quarantine
 security group are all absent in the configured account. Any remaining resource
-(including an untagged disk), failed read, or reappearing VM blocks recovery and
-retains the claim. Inspect and clean up remaining resources in Azure before
-retrying. This recovery only reads Azure; it never deletes orphan companions.
-It uses the existing claim format and terminal receipt, so interrupted attempts
-can be retried without a claim migration. Automatic cleanup does not initiate
-this recovery.
+found by a check (including an untagged disk), failed read, or VM observed to
+reappear blocks recovery and retains the claim. Inspect and clean up remaining
+resources in Azure before retrying. This recovery only reads Azure; it never
+deletes orphan companions. It uses the existing claim format and terminal
+receipt, so interrupted attempts can be retried without a claim migration.
+Automatic cleanup does not initiate this recovery.
+
+These are point-in-time checks, not a lock on other Azure writers. A resource
+recreated after its absence check may still exist when the local claim becomes
+terminal; terminal retries do not inspect Azure again. Inspect and clean up any
+recreated resources directly in Azure.
 
 For direct Daytona and ASCII Box/Boat claims, `stop --force --provider <provider>
 --id <canonical-cbx-id>` can also forget a resource that the provider has already
