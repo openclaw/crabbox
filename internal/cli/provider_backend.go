@@ -516,6 +516,12 @@ type ReleaseLeaseConnectionCleanupPolicy interface {
 // ReleaseLeaseWorkspacePolicy keeps run-owned authority available for a guarded
 // close after successful lease release. The captured SSH route must still reach
 // the workspace; retaining disk on a stopped host is not sufficient.
+// ReleaseLeaseWorkspaceCloser requests closing run-owned workspace authority
+// while the captured route is reachable, before provider release.
+type ReleaseLeaseWorkspaceCloser interface {
+	RequiresSSHWorkspaceCloseBeforeRelease() bool
+}
+
 type ReleaseLeaseWorkspacePolicy interface {
 	PreservesSSHWorkspaceAfterRelease() bool
 }

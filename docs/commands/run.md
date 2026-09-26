@@ -1173,6 +1173,8 @@ lease-acting commands):
 --static-user <user>
 --static-port <port>
 --static-work-root <path>
+--static-start-command <json-argv>
+--static-stop-command <json-argv>
 --network auto|tailscale|public
 --tailscale
 --tailscale-tags <comma-separated tags>
@@ -1262,3 +1264,7 @@ succeeds, a fencing or return failure fails the run. Failed cleanup retains the
 receipt for `pool return --receipt-file <path> --result drain`. AWS v1 removes the
 grant key and observes a reboot before returning a scrubbed machine to ready.
 A longer job must return and borrow again; uninterrupted renewal is deferred.
+
+Static power hooks require a trusted `static.power.dedicated: true` contract.
+Use a distinct `static.id` for concurrent acquisitions; same-ID acquisition and
+prepared reuse are refused while custody remains. See [Power hooks](../providers/ssh.md#power-hooks).

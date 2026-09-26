@@ -3,6 +3,7 @@ package ssh
 import (
 	"context"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,10 @@ type staticLeaseBackend struct {
 	mu            sync.Mutex
 	acquired      core.LeaseTarget
 	acquiredRoute string
+	// acquiredRevisions holds every claim revision this backend published for
+	// the current acquisition, so release can tell its own heartbeats apart
+	// from a later acquisition of the same lease ID.
+	acquiredRevisions map[string]bool
 }
 
 const staticProvider = "ssh"
@@ -27,6 +32,25 @@ func NewStaticSSHLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.R
 }
 
 func (b *staticLeaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
+	if b.hasPowerHooks() {
+		return b.acquirePowered(ctx, req)
+	}
+	host := strings.TrimSpace(b.Cfg.Static.Host)
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
+	}
+	unlock, err := lockStaticHostPower(ctx, host)
+	if err != nil {
+		return core.LeaseTarget{}, err
+	}
+	defer unlock()
+	if err := b.rejectPowerCustody(ctx); err != nil {
+		return core.LeaseTarget{}, err
+	}
+	return b.acquire(ctx, req)
+}
+
+func (b *staticLeaseBackend) acquire(ctx context.Context, req core.AcquireRequest) (_ core.LeaseTarget, err error) {
 	cfg := b.Cfg
 	if req.RequestedSlug != "" {
 		_, _, leaseID, err := core.StaticLease(cfg)
@@ -48,6 +72,9 @@ func (b *staticLeaseBackend) Acquire(ctx context.Context, req core.AcquireReques
 		return core.LeaseTarget{}, err
 	}
 	if exists {
+		if expected.Labels["static_power_token"] != "" {
+			return core.LeaseTarget{}, core.Exit(4, "static lease retains power custody; restore its dedicated-host configuration and stop it first")
+		}
 		if err := core.VerifyLeaseClaimUnchanged(leaseID, expected); err != nil {
 			return core.LeaseTarget{}, err
 		}
@@ -101,6 +128,9 @@ func (b *staticLeaseBackend) Resolve(ctx context.Context, req core.ResolveReques
 	lease, err := b.resolveOffline(req)
 	if err != nil {
 		return core.LeaseTarget{}, err
+	}
+	if req.Prepare && (b.hasPowerHooks() || lease.Server.Labels["static_power_token"] != "") {
+		return core.LeaseTarget{}, core.Exit(4, "powered static lease %s cannot be reused concurrently; stop it first and acquire a distinct static.id for each run", lease.LeaseID)
 	}
 	if !req.Prepare {
 		b.reportHistoricalArchitecture(lease.Server)
@@ -244,11 +274,35 @@ func (b *staticLeaseBackend) Doctor(ctx context.Context, req core.DoctorRequest)
 	}, nil
 }
 
-func (b *staticLeaseBackend) ReleaseLease(_ context.Context, req core.ReleaseLeaseRequest) error {
-	core.RemoveLeaseClaim(req.Lease.LeaseID)
+func (b *staticLeaseBackend) ReleaseLease(ctx context.Context, req core.ReleaseLeaseRequest) error {
+	if b.hasPowerHooks() {
+		return b.releasePowered(ctx, req)
+	}
+	if err := b.rejectPowerCustody(ctx); err != nil {
+		return err
+	}
+	if req.Lease.Server.Labels["static_power_token"] != "" {
+		return core.Exit(4, "static lease retains power custody; restore its dedicated-host configuration")
+	}
+	claim, exists, err := core.ReadLeaseClaimWithPresence(req.Lease.LeaseID)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if claim.Labels["static_power_token"] != "" {
+			return core.Exit(4, "static lease retains power custody; restore its dedicated-host configuration")
+		}
+		if err := core.RemoveLeaseClaimIfUnchanged(req.Lease.LeaseID, claim); err != nil {
+			return err
+		}
+	}
 	b.clearAcquiredLease(req.Lease.LeaseID)
 	return nil
 }
+
+func (b *staticLeaseBackend) ReleaseLeaseConnectionCleanupSafe() bool { return !b.hasPowerHooks() }
+
+func (b *staticLeaseBackend) RequiresSSHWorkspaceCloseBeforeRelease() bool { return b.hasPowerHooks() }
 
 func (b *staticLeaseBackend) PreservesSSHWorkspaceAfterRelease() bool { return true }
 
@@ -304,6 +358,14 @@ func (b *staticLeaseBackend) rememberAcquiredLease(lease core.LeaseTarget) {
 	b.acquired = lease
 	_, configured, _, _ := core.StaticLease(b.Cfg)
 	b.acquiredRoute = architectureEndpoint(configured)
+	b.acquiredRevisions = map[string]bool{}
+	b.recordAcquiredRevision(lease.Server)
+}
+
+func (b *staticLeaseBackend) recordAcquiredRevision(server core.Server) {
+	if claim, exists, set := core.ServerLeaseClaimSnapshot(server); set && exists && claim.Revision != "" {
+		b.acquiredRevisions[claim.Revision] = true
+	}
 }
 
 func (b *staticLeaseBackend) refreshAcquiredLeaseServer(leaseID string, server core.Server) {
@@ -311,6 +373,7 @@ func (b *staticLeaseBackend) refreshAcquiredLeaseServer(leaseID string, server c
 	defer b.mu.Unlock()
 	if b.acquired.LeaseID == leaseID {
 		b.acquired.Server = server
+		b.recordAcquiredRevision(server)
 	}
 }
 
@@ -338,11 +401,35 @@ func (b *staticLeaseBackend) acquiredLeaseView() (core.LeaseTarget, bool) {
 	return lease, true
 }
 
+// acquisitionLatestClaim returns the cached claim only when carriedRevision was
+// published by the cached acquisition.
+func (b *staticLeaseBackend) acquisitionLatestClaim(leaseID, carriedRevision string) (core.LeaseClaim, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if carriedRevision == "" || b.acquired.LeaseID != leaseID || !b.acquiredRevisions[carriedRevision] {
+		return core.LeaseClaim{}, false
+	}
+	claim, exists, set := core.ServerLeaseClaimSnapshot(b.acquired.Server)
+	return claim, set && exists
+}
+
+// clearAcquisition drops the cache only when it belongs to lease's acquisition.
+func (b *staticLeaseBackend) clearAcquisition(lease core.LeaseTarget) {
+	carried, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if set && exists && b.acquired.LeaseID == lease.LeaseID && b.acquiredRevisions[carried.Revision] {
+		b.acquired = core.LeaseTarget{}
+		b.acquiredRevisions = nil
+	}
+}
+
 func (b *staticLeaseBackend) clearAcquiredLease(leaseID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.acquired.LeaseID == leaseID {
 		b.acquired = core.LeaseTarget{}
+		b.acquiredRevisions = nil
 	}
 }
 
@@ -413,6 +500,9 @@ func staticLeaseFromClaim(cfg core.Config, claim core.LeaseClaim) (core.Server, 
 	}
 	if server.Labels["architecture_route"] == architectureEndpoint(target) && claim.SSHPort > 0 {
 		target.Port = strconv.Itoa(claim.SSHPort)
+	}
+	if claim.Labels["static_power_token"] != "" {
+		configurePoweredTarget(&target)
 	}
 	historicalArchitecture(&server, target)
 	if state := strings.TrimSpace(server.Labels["state"]); state != "" {

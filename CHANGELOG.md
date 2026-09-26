@@ -23,6 +23,10 @@
 - Stop Parallels IP discovery from admitting probes after the startup deadline while preserving the caller's cancellation cause. [PR 2548](https://github.com/openclaw/crabbox/pull/2548).
 - Allow Azure fixed-lease `stop --force` to finish retained claims after external cleanup, verifying VM and companion absence with read-only checks and preserving interrupted recovery for retry. [PR 2572](https://github.com/openclaw/crabbox/pull/2572). Thanks @galiniliev.
 
+### Added
+
+- Power dedicated static SSH hosts on and off around durable host lease references, with retryable shutdown and joined hook cancellation. [Issue 2544](https://github.com/openclaw/crabbox/issues/2544). Thanks @altaywtf.
+
 ## 0.66.0 - 2026-09-24
 
 ### Highlights

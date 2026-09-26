@@ -1136,6 +1136,27 @@ ssh:
 The default SSH user is `crabbox`, the default port is `2222`, and the default
 fallback port is `22`.
 
+Static SSH power hooks live under `static:`, separate from shared SSH credentials:
+
+```yaml
+static:
+  host: 127.0.0.1
+  user: root
+  port: "2222"
+  power:
+    dedicated: true
+    hostID: lab-container
+  startCommand: ["/usr/local/bin/docker", "start", "lab-ssh"]
+  stopCommand: ["/usr/local/bin/docker", "stop", "lab-ssh"]
+```
+
+`static.power.dedicated: true` is mandatory for hooks and declares exclusive
+host power control by one controller/state directory. `static.power.hostID` is
+optional. Use trusted user config, an IP literal, explicit user/port, and absolute
+hook executable paths. Local durable host references gate first start and final
+stop; a failed stop retains custody for retry. See [Power hooks](../providers/ssh.md#power-hooks)
+for trust, concurrency, cancellation, rollback, and recovery semantics.
+
 ### Tailscale
 
 ```yaml

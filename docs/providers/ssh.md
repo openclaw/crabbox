@@ -8,9 +8,11 @@ Read when:
 
 Static SSH is the provider for machines Crabbox does **not** create. The backend
 resolves a configured SSH target and hands it to core, which owns sync, command
-execution, results, tunnels, and status rendering. Crabbox does not provision,
-stop, or delete the machine, or account for its cost. The host's lifecycle is
-yours; commands can still perform connection cleanup when releasing a lease.
+execution, results, tunnels, and status rendering. Crabbox does not provision
+or delete the machine, or account for its cost. The host's lifecycle is yours;
+commands can still perform connection cleanup when releasing a lease, and
+optional [power hooks](#power-hooks) can bring a host up
+and down around its leases.
 
 The provider id is `ssh`, with aliases `static` and `static-ssh`. It is
 direct-only and is never brokered through the coordinator.
@@ -40,21 +42,20 @@ configured target and returns it as a lease-like object so the rest of the
 warm-box workflow (`run`, `ssh`, `status`, tunnels) behaves the same as for
 provisioned providers.
 
-`stop` (also spelled `release`) removes the local claim after attempting the
-shared connection cleanup described below. `run` does the same when its release
-policy fires: normally after a fresh one-shot run, but not a kept run or a run
-reusing an ID by default. Remote cleanup is best-effort: failures warn but do
-not block local unclaiming. The static backend itself only removes the local
-claim and cached target; it never stops or deletes the machine. There is no
-static machine `cleanup` action.
+`stop` (also spelled `release`) attempts shared connection cleanup and removes
+the local claim. `run` does the same when its release policy fires: normally
+after a fresh one-shot run, but not a kept run or ordinary unpowered ID reuse.
+Without power hooks, remote connection cleanup is best-effort and the host stays
+available. With power hooks, the last reference runs shutdown before custody is
+cleared; failure blocks release and remains retryable. There is no static
+machine `cleanup` action, and the provider never deletes the host.
 
-When a run releases its static lease, it also releases the run's remote
-workspace ownership after connection cleanup and local unclaiming. The host
-and workspace remain available for immediate reuse. This final release still
-checks the owner token and child state; an unreachable host, changed owner,
-or live/ambiguous child fails closed rather than deleting another run's
-authority. Explicit `stop` does not invent an owner token or remove unrelated
-workspace-owner records.
+Runs also close their remote workspace ownership with owner-token and child-state
+checks. Powered runs do this **before** release so SSH is still available;
+ordinary static runs close it afterward. An unreachable host, changed owner,
+or live/ambiguous child fails closed rather than deleting another run's authority.
+Explicit `stop` does not invent an owner token or remove unrelated workspace-owner
+records.
 
 ### Connection cleanup
 
@@ -77,6 +78,113 @@ Tailscale as enabled. Ordinary static `--tailscale` provisioning is unsupported;
 using an existing tailnet address or MagicDNS name does not set that metadata
 or trigger logout by itself. The metadata gate is not a live node-ownership
 check.
+
+### Power hooks
+
+A dedicated lab host can be powered on for work and stopped after its last
+lease. Put the complete contract in **trusted user configuration** (or an
+explicit `CRABBOX_CONFIG` file outside the repository):
+
+```yaml
+provider: ssh
+static:
+  host: 127.0.0.1
+  user: root
+  port: "2222"
+  power:
+    dedicated: true
+    hostID: lab-container # optional stable operator label
+  startCommand: ["/usr/local/bin/docker", "start", "lab-ssh"]
+  stopCommand: ["/usr/local/bin/docker", "stop", "lab-ssh"]
+```
+
+Use the actual absolute Docker executable path on your controller. The container
+must already exist, expose SSH on the configured port, and authorize your SSH
+key. Crabbox does not create or delete it. The `power.dedicated: true` declaration
+is required whenever either hook is configured: **this controller and its local
+state directory exclusively own the entire host's power lifecycle**. Other
+users, other state directories, other controllers, and unrelated workloads must
+not share it. References cannot protect work outside that contract.
+
+Identity is the canonical IP literal plus the resolved SSH user and port, with
+optional `power.hostID`. Use one canonical IP for the whole host, even when it
+has multiple interfaces. Hostname and SSH aliases are refused; configure their
+canonical IP instead. Different users, ports, host IDs, or hook argv cannot
+inherit an existing host record. Do not change that contract while references
+remain. SSH fallback ports and ambient SSH configuration are disabled for powered targets;
+provide credentials explicitly through `ssh.key`.
+
+Both hooks are local argv arrays, without an implicit shell. Their first element
+must be an absolute executable path; repository-relative and bare PATH names are
+refused. They run from the current working directory, inherit the controller's
+environment, and receive `CRABBOX_LEASE_ID` and `CRABBOX_STATIC_HOST`. Scripts,
+script arguments, and executables must be operator-controlled. Output goes to
+stderr; failures retain the last 4 KiB of stderr and the hook's exit code.
+Environment overrides `CRABBOX_STATIC_START_COMMAND` and
+`CRABBOX_STATIC_STOP_COMMAND`, and flags `--static-start-command` and
+`--static-stop-command`, accept JSON argv arrays (`[]` clears a command).
+Repository commands need identical trusted approval; repositories cannot grant
+the dedicated contract or change its SSH destination. Clearing hooks cannot
+abandon existing host custody.
+
+A durable per-host reference set under the host lock controls power. The first
+lease runs start before SSH readiness; overlapping leases with distinct
+`static.id` values share that start. Releasing either lease first leaves the
+host on. Only the final release runs stop. Same-ID acquisitions and prepared
+reuse (`run --id`) are refused while custody exists, so use a distinct
+`CRABBOX_STATIC_ID` per concurrent run. Keep the same hook contract for every
+lease. A kept run remains referenced until explicitly stopped. `status`, `list`,
+and `doctor` do not start the host.
+
+Shutdown records `pending-stop` **before** running the hook and keeps the claim
+and reference on failure or cancellation. Restore the hook's dependency and
+retry with the original config:
+
+```sh
+crabbox stop --provider ssh --id static_example
+# Forced recovery requires an explicit acknowledgement and an exact retained ID:
+crabbox stop --provider ssh --id static_example --force --static-power-acknowledge-stop
+```
+
+Force never discards custody or adopts an unknown host. It can recover an
+interruption between host reservation and claim publication. Stale claim
+snapshots, changed host contracts, and missing authority fail closed. Successful
+shutdown is recorded before custody is cleared. Preserve the local claims and
+`ssh-power` state directory until recovery completes.
+
+If start succeeds but readiness or acquisition fails, Crabbox rolls back its
+reference and runs stop only if no other lease remains. A failed rollback keeps
+retryable pending-stop custody. An ordinary nonzero start exit grants no
+power-on custody; hooks must report success only after their operation succeeds.
+An interrupted start is uncertain and retains pending-stop for explicit retry.
+Use idempotent start/stop hooks, including after a controller crash.
+
+Hooks have a five-minute timeout and run in an owned process group on macOS or
+Linux. Cancellation/timeout signals the whole group and joins descendants before
+releasing the host lock, preserving the typed cancellation cause. The normal
+cleanup grace is five seconds; if termination cannot be confirmed, cleanup is
+reported pending and the lock remains held until the group is gone. Hooks must
+not daemonize or escape their group. Windows controllers cannot run power hooks.
+Run-owned workspace authority is closed while SSH is reachable before shutdown.
+
+For wake-on-LAN, use the host's fixed LAN IP and an operator-controlled shutdown
+helper (for example one that calls the hypervisor or an authenticated power API):
+
+```yaml
+static:
+  host: 192.0.2.40
+  user: builder
+  port: "22"
+  power:
+    dedicated: true
+    hostID: lab-builder
+  startCommand: ["/opt/homebrew/bin/wakeonlan", "02:00:00:00:00:40"]
+  stopCommand: ["/usr/local/libexec/lab-power", "stop", "lab-builder"]
+```
+
+Wake-on-LAN returns before SSH is ready; Crabbox's normal readiness wait follows
+successful start. A VM can use absolute-path `virsh start/shutdown` commands
+instead. A start-only contract is supported but leaves shutdown to the operator.
 
 ## Targets
 
@@ -293,6 +401,10 @@ workspace descendant containment or require `setsid` on macOS.
 | `workRoot` | Remote checkout/work directory. |
 | `id` | Optional stable lease id (default derived from `host`). |
 | `name` | Optional friendly slug (default derived from `host`). |
+| `startCommand` | Optional local argv run before the SSH readiness wait. See [Power hooks](#power-hooks). |
+| `stopCommand` | Optional local argv run before final custody retirement; failures remain retryable. |
+| `power.dedicated` | Required `true` for hooks; one controller exclusively owns the whole host. |
+| `power.hostID` | Optional stable host label, bound together with canonical IP/user/port. |
 
 The SSH private key comes from the shared `ssh.key` field (or `CRABBOX_SSH_KEY`).
 There is no per-host key field; the static provider connects with your existing
@@ -305,6 +417,12 @@ contained by the repository in the same repository config, or approve the
 destination explicitly with `--static-host` or `CRABBOX_STATIC_HOST`. Absolute,
 missing, and repository-escaping key paths require explicit host approval.
 
+Repository config cannot run local commands on its own. A repository-defined
+`static.startCommand` or `static.stopCommand` is refused unless the same argv
+appears in trusted user config, or the command is set with
+`CRABBOX_STATIC_START_COMMAND`/`CRABBOX_STATIC_STOP_COMMAND` or
+`--static-start-command`/`--static-stop-command`.
+
 ### Flags
 
 ```text
@@ -312,7 +430,12 @@ missing, and repository-escaping key paths require explicit host approval.
 --static-user
 --static-port
 --static-work-root
+--static-start-command '["/usr/local/bin/host-power","up"]'
+--static-stop-command '["/usr/local/bin/host-power","down"]'
 ```
+
+The command flags and environment variables take a JSON argv array; `[]`
+clears a command set by lower-precedence config.
 
 ### Environment
 
@@ -323,6 +446,8 @@ CRABBOX_STATIC_PORT
 CRABBOX_STATIC_WORK_ROOT
 CRABBOX_STATIC_ID
 CRABBOX_STATIC_NAME
+CRABBOX_STATIC_START_COMMAND
+CRABBOX_STATIC_STOP_COMMAND
 CRABBOX_SSH_USER
 CRABBOX_SSH_KEY
 CRABBOX_SSH_PORT

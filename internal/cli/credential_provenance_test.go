@@ -1954,7 +1954,7 @@ func TestConfigMergeTracksSSHDestinationSources(t *testing.T) {
 		if err := applyFileConfigWithTrust(&cfg, fileConfig{SSH: &fileSSHConfig{Key: "/trusted/id_ed25519"}}, true); err != nil {
 			t.Fatal(err)
 		}
-		if err := applyFileConfigWithTrust(&cfg, fileConfig{Static: &fileStaticConfig{Host: "repo.example.test"}}, false); err != nil {
+		if err := applyFileConfigWithTrust(&cfg, fileConfig{Static: &fileStaticSection{fileStaticConfig: fileStaticConfig{Host: "repo.example.test"}}}, false); err != nil {
 			t.Fatal(err)
 		}
 		if err := validateProviderCredentialDestination(cfg); err == nil {
@@ -1976,7 +1976,7 @@ func TestConfigMergeTracksSSHDestinationSources(t *testing.T) {
 		cfg.Provider = staticProvider
 		cfg.credentialProvenance.repositoryRoot = repositoryRoot
 		if err := applyFileConfigWithTrust(&cfg, fileConfig{
-			Static: &fileStaticConfig{Host: "repo.example.test"},
+			Static: &fileStaticSection{fileStaticConfig: fileStaticConfig{Host: "repo.example.test"}},
 			SSH:    &fileSSHConfig{Key: key},
 		}, false); err != nil {
 			t.Fatal(err)

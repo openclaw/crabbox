@@ -1776,7 +1776,7 @@ type fileConfig struct {
 	HyperV                   *fileHyperVConfig                   `yaml:"hyperv,omitempty"`
 	WindowsSandbox           *fileWindowsSandboxConfig           `yaml:"windowsSandbox,omitempty"`
 	Tailscale                *fileTailscaleConfig                `yaml:"tailscale,omitempty"`
-	Static                   *fileStaticConfig                   `yaml:"static,omitempty"`
+	Static                   *fileStaticSection                  `yaml:"static,omitempty"`
 	Results                  *fileResultsConfig                  `yaml:"results,omitempty"`
 	Shard                    *fileShardConfig                    `yaml:"shard,omitempty"`
 	Cache                    *fileCacheConfig                    `yaml:"cache,omitempty"`

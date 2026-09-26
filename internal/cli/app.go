@@ -362,6 +362,8 @@ Environment:
   CRABBOX_BROWSER              Provision or require browser capability
   CRABBOX_CODE                 Provision or require web code capability
   CRABBOX_STATIC_HOST          Static SSH host for provider=ssh
+  CRABBOX_STATIC_START_COMMAND JSON argv run locally before a static lease
+  CRABBOX_STATIC_STOP_COMMAND  JSON argv run locally after the last static lease
   CRABBOX_OWNER                Usage owner override
   CRABBOX_ORG                  Usage org override
   CRABBOX_CONFIG               Optional config path
