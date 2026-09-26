@@ -413,17 +413,6 @@ func (b *staticLeaseBackend) acquisitionLatestClaim(leaseID, carriedRevision str
 	return claim, set && exists
 }
 
-// clearAcquisition drops the cache only when it belongs to lease's acquisition.
-func (b *staticLeaseBackend) clearAcquisition(lease core.LeaseTarget) {
-	carried, exists, set := core.ServerLeaseClaimSnapshot(lease.Server)
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if set && exists && b.acquired.LeaseID == lease.LeaseID && b.acquiredRevisions[carried.Revision] {
-		b.acquired = core.LeaseTarget{}
-		b.acquiredRevisions = nil
-	}
-}
-
 func (b *staticLeaseBackend) clearAcquiredLease(leaseID string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
