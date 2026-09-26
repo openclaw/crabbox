@@ -1216,6 +1216,8 @@ func TestAzureConfigShowCompletePassiveSection(t *testing.T) {
 		{name: "raw-references-list", input: core.Config{Azure: core.AzureConfig{Location: "raw-location", ResourceGroup: "group-reference", Image: "image-reference", OSDisk: "raw-disk", SnapshotSKU: "raw-snapshot-sku", OSDiskSKU: "raw-disk-sku", Network: "network-reference", SSHCIDRs: []string{"second", "first", "second", " "}}}, want: map[string]any{"location": "raw-location", "resourceGroup": "group-reference", "image": "image-reference", "osDisk": "raw-disk", "snapshotSKU": "raw-snapshot-sku", "osDiskSKU": "raw-disk-sku", "network": "network-reference", "sshCIDRs": []string{"second", "first", "second", " "}}, text: "azure location=raw-location resource_group=group-reference os_disk=raw-disk snapshot_sku=raw-snapshot-sku os_disk_sku=raw-disk-sku network=network-reference ssh_cidrs=second,first,second, \n"},
 		{name: "whitespace-empty-elements", input: core.Config{Azure: core.AzureConfig{Location: " ", ResourceGroup: " ", Image: " ", OSDisk: " ", SnapshotSKU: " ", OSDiskSKU: " ", Network: " ", SSHCIDRs: []string{"", ""}}}, want: map[string]any{"location": " ", "resourceGroup": " ", "image": " ", "osDisk": " ", "snapshotSKU": " ", "osDiskSKU": " ", "network": " ", "sshCIDRs": []string{"", ""}}, text: "azure location=  resource_group=  os_disk=  snapshot_sku=  os_disk_sku=  network=  ssh_cidrs=,\n"},
 	} {
+		tc.want["userAssignedIdentityResourceId"] = ""
+		tc.text = strings.TrimSuffix(tc.text, "\n") + " user_assigned_identity_resource_id=-\n"
 		for _, selected := range []string{"azure", "static"} {
 			t.Run(tc.name+"/"+selected, func(t *testing.T) {
 				cfg := tc.input
@@ -1226,7 +1228,7 @@ func TestAzureConfigShowCompletePassiveSection(t *testing.T) {
 				if section.JSONKey != "azure" || section.TextLabel != "azure" || !reflect.DeepEqual(section.Providers, []string{"azure"}) {
 					t.Fatalf("section metadata=%#v", section)
 				}
-				wantOrder := []string{"location", "resourceGroup", "image", "osDisk", "snapshotSKU", "osDiskSKU", "network", "sshCIDRs"}
+				wantOrder := []string{"location", "resourceGroup", "image", "osDisk", "snapshotSKU", "osDiskSKU", "network", "sshCIDRs", "userAssignedIdentityResourceId"}
 				if len(section.Fields) != len(wantOrder) {
 					t.Fatalf("field count=%d want %d", len(section.Fields), len(wantOrder))
 				}

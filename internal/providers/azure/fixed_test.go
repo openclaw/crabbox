@@ -116,7 +116,10 @@ func TestFixedAzureReadinessRecoveryAndIdentity(t *testing.T) {
 }
 
 func TestFixedAzureRequiredIdentityGatesReadinessAndAdoption(t *testing.T) {
-	const id = "/subscriptions/sub/resourceGroups/identities/providers/Microsoft.ManagedIdentity/userAssignedIdentities/worker"
+	id := "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/" + strings.Repeat("r", 90) + "/providers/Microsoft.ManagedIdentity/userAssignedIdentities/" + strings.Repeat("i", 128)
+	if len(id) <= 256 {
+		t.Fatal("fixture does not exceed the Azure tag value limit")
+	}
 	client := &fakeAzureClient{}
 	client.createFunc = func(server core.Server) core.Server {
 		server.AzureUserAssignedIdentityIDs = []string{id}
@@ -135,12 +138,25 @@ func TestFixedAzureRequiredIdentityGatesReadinessAndAdoption(t *testing.T) {
 	if len(client.createLeaseIDs) != 1 || len(client.deleted) != 0 {
 		t.Fatal("readiness failure resubmitted or destroyed an uncertain fixed VM")
 	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || claim.FixedCreateIntent.Attempt[fixedAzureUserAssignedIdentityAttempt] != id {
+		t.Fatalf("private fixed claim lost the full identity: %+v %v", claim, err)
+	}
+	for _, value := range client.servers[0].Labels {
+		if value == id {
+			t.Fatal("full identity resource ID was copied to Azure resource tags")
+		}
+	}
 	client.waitFunc = nil
 	if _, err := b.Acquire(t.Context(), req); err != nil {
 		t.Fatal(err)
 	}
 	if len(client.createLeaseIDs) != 1 {
 		t.Fatal("replay created a replacement VM")
+	}
+	claim, err = core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil || claim.FixedCreateIntent.Attempt[fixedAzureUserAssignedIdentityAttempt] != id {
+		t.Fatalf("replayed claim lost the private identity: %+v %v", claim, err)
 	}
 	b.Cfg.Azure.UserAssignedIdentityResourceID = id + "-replacement"
 	if _, err := b.Acquire(t.Context(), req); err == nil {

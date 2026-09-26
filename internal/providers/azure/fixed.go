@@ -13,7 +13,7 @@ import (
 
 var fixedAzureLeaseKind = core.FixedLeaseKind{ClaimProvider: "azure", IntentVersion: 1, Label: "Azure"}
 
-const fixedAzureUserAssignedIdentityLabel = "azure_user_assigned_identity_resource_id"
+const fixedAzureUserAssignedIdentityAttempt = "user_assigned_identity_resource_id"
 
 func (*azureLeaseBackend) SupportsRequestedLeaseID() bool { return true }
 
@@ -99,18 +99,17 @@ func (b *azureLeaseBackend) acquireFixed(ctx context.Context, req core.AcquireRe
 		server, err := client.GetServer(ctx, name)
 		return core.FixedLookupObservation(fixedAzureLeaseKind, *claim, server, err, isAzureCleanupNotFound, validateFixedAzureServer)
 	}, Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
-		labels := map[string]string{}
+		values := map[string]string{"name": core.LeaseProviderName(claim.LeaseID, claim.Slug)}
 		if cfg.Azure.UserAssignedIdentityResourceID != "" {
-			labels[fixedAzureUserAssignedIdentityLabel] = cfg.Azure.UserAssignedIdentityResourceID
+			values[fixedAzureUserAssignedIdentityAttempt] = cfg.Azure.UserAssignedIdentityResourceID
 		}
-		return core.FixedAttemptPlan{Values: map[string]string{"name": core.LeaseProviderName(claim.LeaseID, claim.Slug)},
+		return core.FixedAttemptPlan{Values: values,
 			NonceKey: "nonce", FingerprintLabel: "fixed_intent_sha256", NonceLabel: "fixed_attempt",
-			Labels:       labels,
 			DirectLabels: &core.FixedDirectLabels{Config: cfg, Provider: "azure", Market: cfg.Capacity.Market, Keep: req.Keep},
 		}, nil
 	}, Submit: func(ctx context.Context, tx *core.FixedTransaction) (core.Server, error) {
 		claim := tx.Claim
-		server, err := creator.CreateFixedServer(ctx, cfg, publicKey, claim.LeaseID, claim.Slug, maps.Clone(claim.Labels))
+		server, err := creator.CreateFixedServer(ctx, cfg, publicKey, claim.LeaseID, claim.Slug, tx.CreateLabels())
 		if err != nil {
 			return core.Server{}, fmt.Errorf("Azure fixed create unresolved; replay or stop lease %s: %w", claim.LeaseID, err)
 		}
@@ -184,7 +183,7 @@ func (b *azureLeaseBackend) resolveFixed(ctx context.Context, client azureClient
 			if err == nil && !req.ReleaseOnly {
 				err = core.ValidateAzureVMUserAssignedIdentity(server, b.Cfg.Azure.UserAssignedIdentityResourceID)
 				if err == nil {
-					err = core.ValidateAzureVMUserAssignedIdentity(server, claim.Labels[fixedAzureUserAssignedIdentityLabel])
+					err = core.ValidateAzureVMUserAssignedIdentity(server, claim.FixedCreateIntent.Attempt[fixedAzureUserAssignedIdentityAttempt])
 				}
 			}
 		}
@@ -235,7 +234,7 @@ func (b *azureLeaseBackend) resolvedAzureLease(server core.Server, target core.S
 			return core.LeaseTarget{}, err
 		}
 		if !releaseOnly {
-			if err := core.ValidateAzureVMUserAssignedIdentity(server, claim.Labels[fixedAzureUserAssignedIdentityLabel]); err != nil {
+			if err := core.ValidateAzureVMUserAssignedIdentity(server, claim.FixedCreateIntent.Attempt[fixedAzureUserAssignedIdentityAttempt]); err != nil {
 				return core.LeaseTarget{}, err
 			}
 		}
