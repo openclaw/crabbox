@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	core "github.com/openclaw/crabbox/internal/cli"
@@ -27,19 +28,24 @@ type proxmoxControllerScope struct {
 	WorkRoot   string `json:"workRoot"`
 }
 
-// ControllerProviderScope binds adapter workspaces to one Proxmox API route,
-// source node, token principal and clone profile. It hashes only non-secret
-// settings. A new token secret for the same token ID keeps the scope; another
-// token ID, route, node or clone setting changes it, so existing workspaces
-// are refused until the original configuration is restored. A configuration
-// without a token secret has no identity, so the adapter will not start.
+// ControllerProviderScope binds workspaces to a route, principal and clone
+// profile, excluding the token secret so secret rotation preserves access.
 func (Provider) ControllerProviderScope(cfg core.Config) (string, error) {
 	if cfg.TargetOS != "" && cfg.TargetOS != core.TargetLinux {
 		return "", core.Exit(2, "provider=proxmox supports target=linux only")
 	}
 	cfg = withProxmoxGuestAccess(cfg)
+	// Match the client's suffix handling without collapsing escaped proxy paths.
+	apiURL := strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(cfg.Proxmox.APIURL), "/"), "/api2/json")
+	endpoint, err := url.Parse(apiURL)
+	if err != nil || endpoint.Hostname() == "" ||
+		(endpoint.Scheme != "http" && endpoint.Scheme != "https") ||
+		endpoint.User != nil || endpoint.RawQuery != "" || endpoint.ForceQuery || strings.Contains(apiURL, "#") {
+		return "", core.Exit(3, "proxmox apiUrl must be an absolute HTTP(S) URL without userinfo, query or fragment")
+	}
+	endpoint.Host = strings.ToLower(endpoint.Host)
 	scope := proxmoxControllerScope{
-		Endpoint:   normalizedProxmoxClaimEndpoint(cfg.Proxmox.APIURL),
+		Endpoint:   endpoint.String(),
 		Node:       strings.TrimSpace(cfg.Proxmox.Node),
 		TokenID:    strings.TrimSpace(cfg.Proxmox.TokenID),
 		TemplateID: cfg.Proxmox.TemplateID,
@@ -51,14 +57,11 @@ func (Provider) ControllerProviderScope(cfg core.Config) (string, error) {
 		WorkRoot:   strings.TrimSpace(cfg.WorkRoot),
 	}
 	switch {
-	case scope.Endpoint == "":
-		return "", core.Exit(3, "proxmox apiUrl is required (set proxmox.apiUrl or CRABBOX_PROXMOX_API_URL)")
 	case scope.Node == "":
 		return "", core.Exit(3, "proxmox node is required (set proxmox.node or CRABBOX_PROXMOX_NODE)")
 	case scope.TokenID == "":
 		return "", core.Exit(3, "proxmox tokenId is required (set proxmox.tokenId or CRABBOX_PROXMOX_TOKEN_ID)")
 	case strings.TrimSpace(cfg.Proxmox.TokenSecret) == "":
-		// Presence only: the secret never enters the persisted scope.
 		return "", core.Exit(3, "proxmox tokenSecret is required (set proxmox.tokenSecret or CRABBOX_PROXMOX_TOKEN_SECRET)")
 	case scope.TemplateID <= 0:
 		return "", core.Exit(3, "proxmox templateId is required (set proxmox.templateId or CRABBOX_PROXMOX_TEMPLATE_ID)")
@@ -73,10 +76,6 @@ func (Provider) ControllerProviderScope(cfg core.Config) (string, error) {
 	return proxmoxControllerScopePrefix + hex.EncodeToString(sum[:]), nil
 }
 
-// SupportsControllerFixedLeaseID reports the fixed-ID contract for exactly the
-// configurations that fixed acquisition accepts: complete API credentials and
-// a Linux template on one source node and cluster route. Acquisition still
-// verifies inventory access.
 func (p Provider) SupportsControllerFixedLeaseID(cfg core.Config) bool {
 	_, err := p.ControllerProviderScope(cfg)
 	return err == nil

@@ -450,9 +450,10 @@ VMs through raw Proxmox operations while cleanup runs.
 `crabbox adapter serve --provider proxmox` uses the same direct provider and
 fixed lease IDs. At startup the adapter reads the provider's controller identity
 and refuses to listen unless the configuration is complete: API URL, node,
-token ID, token secret, a positive `templateId` and `target=linux`.
+token ID, token secret, a positive `templateId` and `target=linux`. The API URL
+must be an absolute HTTP(S) URL without userinfo, a query or a fragment.
 
-The identity includes an opaque, non-secret scope. It is a SHA-256 digest of the
+The identity includes a versioned, opaque scope (`proxmox-v1:sha256:...`). It is a SHA-256 digest of the
 normalized API endpoint, node, token ID, template, storage, pool, bridge, clone
 mode, guest user and work root. The token secret must be present, but it is
 never part of the scope.
@@ -465,12 +466,14 @@ This means:
 - You can replace the token secret for the same token ID without affecting
   existing workspaces.
 - Changing the token ID, API endpoint, node or clone settings changes the scope.
-  Release or drain the adapter's workspaces first, or restore the original
-  configuration to manage them. Crabbox does not migrate workspaces between
+  Drain the adapter's workspaces to confirmed cleanup under the old configuration
+  before changing these settings. If settings have already changed, restore the
+  original configuration to drain them. Crabbox does not migrate workspaces between
   Proxmox principals or clone profiles.
 - TLS verification, TTL and idle timeout do not change the scope.
 
-Fixed-ID replay and exact cleanup keep the rules in [Lifecycle](#lifecycle),
+The scope is routing protection, not ownership proof: fixed-ID replay and exact
+cleanup still verify the exact claim, VMID and native `vmgenid` under the rules in [Lifecycle](#lifecycle),
 including the checks that need propagated `VM.Audit` on `/vms`. Proxmox can
 reuse a VMID after a VM is deleted. If another workspace receives the same VMID
 before the adapter confirms absence of the old one, the adapter keeps the old

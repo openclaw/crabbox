@@ -43,7 +43,6 @@ func NewLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) c
 	return &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true}}
 }
 
-// withProxmoxGuestAccess applies the provider's guest user and work-root settings.
 func withProxmoxGuestAccess(cfg core.Config) core.Config {
 	if cfg.Proxmox.User != "" {
 		cfg.SSHUser = cfg.Proxmox.User

@@ -121,9 +121,26 @@ func TestProxmoxControllerScopeBindsRoutePrincipalAndCloneProfile(t *testing.T) 
 	}
 }
 
+func TestProxmoxControllerScopePreservesEscapedEndpointRoute(t *testing.T) {
+	cfg := controllerTestConfig()
+	cfg.Proxmox.APIURL += "/proxy%2Fcluster"
+	escaped := controllerTestScope(t, cfg)
+	cfg.Proxmox.APIURL = strings.ReplaceAll(cfg.Proxmox.APIURL, "%2F", "/")
+	if controllerTestScope(t, cfg) == escaped {
+		t.Fatal("different HTTP request paths share a controller scope")
+	}
+}
+
 func TestProxmoxControllerScopeRejectsIncompleteConfig(t *testing.T) {
 	for name, mutate := range map[string]func(*core.Config){
 		"endpoint":           func(cfg *core.Config) { cfg.Proxmox.APIURL = " " },
+		"relative endpoint":  func(cfg *core.Config) { cfg.Proxmox.APIURL = "pve.example.test:8006" },
+		"unsupported scheme": func(cfg *core.Config) { cfg.Proxmox.APIURL = "ftp://pve.example.test" },
+		"missing host":       func(cfg *core.Config) { cfg.Proxmox.APIURL = "https:///api2/json" },
+		"endpoint userinfo":  func(cfg *core.Config) { cfg.Proxmox.APIURL = "https://user:fixture@pve.example.test" },
+		"endpoint query":     func(cfg *core.Config) { cfg.Proxmox.APIURL += "?route=other" },
+		"endpoint fragment":  func(cfg *core.Config) { cfg.Proxmox.APIURL += "#other" },
+		"empty fragment":     func(cfg *core.Config) { cfg.Proxmox.APIURL += "#" },
 		"node":               func(cfg *core.Config) { cfg.Proxmox.Node = "" },
 		"token ID":           func(cfg *core.Config) { cfg.Proxmox.TokenID = "" },
 		"token secret":       func(cfg *core.Config) { cfg.Proxmox.TokenSecret = "" },
@@ -165,7 +182,22 @@ func setControllerTestEnv(t *testing.T, cfg core.Config) {
 	}
 }
 
-// The runtime adapter resolves this identity before it listens.
+func runControllerTestCommand(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	err := (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args)
+	output := stdout.String() + stderr.String()
+	if err != nil {
+		output += err.Error()
+	}
+	for _, secret := range []string{controllerTestSecret, "rotated-principal-secret", "rotated-original-secret"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("%s exposed a token secret", args[0])
+		}
+	}
+	return stdout.String(), err
+}
+
 func TestProxmoxAdapterProviderIdentityCommand(t *testing.T) {
 	cfg := controllerTestConfig()
 	setControllerTestEnv(t, cfg)
@@ -205,16 +237,12 @@ func TestProxmoxAdapterIdentityRequiresTokenSecret(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &identity); err != nil {
 		t.Fatal(err)
 	}
-	// adapter serve refuses to listen without both values.
 	if identity.ProviderScope != "" || identity.IdempotentLeaseID {
 		t.Fatalf("identity advertised without a token secret: %+v", identity)
 	}
 }
 
-// An existing adapter workspace keeps the scope recorded at creation. After
-// the configured token principal changes, every child command the adapter runs
-// for it must stop before a Proxmox client exists or any request is sent.
-func TestProxmoxAdapterRejectsChangedPrincipalBeforeProxmoxIO(t *testing.T) {
+func TestProxmoxAdapterRejectsChangedScopeBeforeProxmoxIO(t *testing.T) {
 	_, fake, _ := fixedProxmoxFixture(t)
 	var requests atomic.Int64
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -236,17 +264,8 @@ func TestProxmoxAdapterRejectsChangedPrincipalBeforeProxmoxIO(t *testing.T) {
 	}
 	useClient(func(core.Config) (proxmoxClient, error) { return fake, nil })
 	const leaseID, slug = "cbx_0123456789ab", "adapter-box"
-	run := func(args ...string) error {
-		var stdout, stderr bytes.Buffer
-		err := (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args)
-		for _, secret := range []string{controllerTestSecret, "rotated-principal-secret", "rotated-original-secret"} {
-			if strings.Contains(stdout.String()+stderr.String(), secret) {
-				t.Fatalf("%s exposed a token secret", args[0])
-			}
-		}
-		return err
-	}
-	if err := run("warmup", "--keep=true", "--lease-id", leaseID, "--slug", slug); err != nil {
+
+	if _, err := runControllerTestCommand(t, "warmup", "--keep=true", "--lease-id", leaseID, "--slug", slug); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 	if clients == 0 || fake.fixedCreates != 1 {
@@ -258,7 +277,6 @@ func TestProxmoxAdapterRejectsChangedPrincipalBeforeProxmoxIO(t *testing.T) {
 
 	// Any client created from here on sends real HTTP to the recording API.
 	useClient(func(cfg core.Config) (proxmoxClient, error) { return core.NewProxmoxClient(cfg) })
-	t.Setenv("CRABBOX_PROXMOX_TOKEN_ID", "other@pve!rotated")
 	t.Setenv("CRABBOX_PROXMOX_TOKEN_SECRET", "rotated-principal-secret")
 	clients = 0
 	// Arguments match execControllerWorkspaceRunner for an unregistered adapter.
@@ -266,19 +284,32 @@ func TestProxmoxAdapterRejectsChangedPrincipalBeforeProxmoxIO(t *testing.T) {
 		"--expected-provider-lease-id", leaseID, "--expected-provider-attempt-lease-id", leaseID,
 		"--expected-provider-slug", slug, "--expected-provider-resource-id", "417", "--expected-provider-scope", persisted}
 	stop := append(append([]string{"stop"}, expected...), "--provider", "proxmox")
-	for name, args := range map[string][]string{
+	commands := map[string][]string{
 		"inspect":         {"inspect", "--id", leaseID, "--json", "--provider", "proxmox"},
 		"inventory":       {"list", "--json", "--refresh", "--all", "--provider", "proxmox"},
 		"replay":          {"warmup", "--keep=true", "--lease-id", leaseID, "--slug", slug, "--provider", "proxmox"},
 		"stop":            stop,
 		"absence cleanup": append(append([]string{"stop", "--confirmed-absent-local-cleanup=true"}, expected...), "--expected-coordinator-registration-url", "", "--provider", "proxmox"),
+	}
+	for field, value := range map[string]string{
+		"TOKEN_ID": "other@pve!rotated", "API_URL": api.URL + "/other", "NODE": "pve2",
+		"TEMPLATE_ID": "9401", "STORAGE": "ceph", "POOL": "other", "BRIDGE": "vmbr1",
+		"FULL_CLONE": "false", "USER": "runner", "WORK_ROOT": "/srv/work",
 	} {
-		if err := run(args...); err == nil || !strings.Contains(err.Error(), "scope changed") {
-			t.Fatalf("%s with a changed principal: %v", name, err)
-		}
+		t.Run(field, func(t *testing.T) {
+			t.Setenv("CRABBOX_PROXMOX_"+field, value)
+			for name, args := range commands {
+				t.Run(name, func(t *testing.T) {
+					if _, err := runControllerTestCommand(t, args...); err == nil || !strings.Contains(err.Error(), "scope changed") ||
+						!strings.Contains(err.Error(), "restore the original configuration") || !strings.Contains(err.Error(), "drain") {
+						t.Fatalf("changed scope: %v", err)
+					}
+				})
+			}
+		})
 	}
 	if clients != 0 || requests.Load() != 0 || fake.deleteCalls != 0 || fake.fixedCreates != 1 {
-		t.Fatalf("changed principal reached Proxmox: clients=%d requests=%d deletes=%d clones=%d", clients, requests.Load(), fake.deleteCalls, fake.fixedCreates)
+		t.Fatalf("changed scope reached Proxmox: clients=%d requests=%d deletes=%d clones=%d", clients, requests.Load(), fake.deleteCalls, fake.fixedCreates)
 	}
 	if after := readFixedProxmoxClaim(t, leaseID); !reflect.DeepEqual(before, after) {
 		t.Fatal("rejected operations changed the workspace claim")
@@ -286,9 +317,8 @@ func TestProxmoxAdapterRejectsChangedPrincipalBeforeProxmoxIO(t *testing.T) {
 
 	// The original token ID manages the workspace again, even with a new secret.
 	useClient(func(core.Config) (proxmoxClient, error) { return fake, nil })
-	t.Setenv("CRABBOX_PROXMOX_TOKEN_ID", cfg.Proxmox.TokenID)
 	t.Setenv("CRABBOX_PROXMOX_TOKEN_SECRET", "rotated-original-secret")
-	if err := run(stop...); err != nil {
+	if _, err := runControllerTestCommand(t, stop...); err != nil {
 		t.Fatalf("stop with the original principal: %v", err)
 	}
 	if clients == 0 || fake.deleteCalls != 1 || readFixedProxmoxClaim(t, leaseID).FixedCreateIntent.State != "released" {
@@ -296,7 +326,6 @@ func TestProxmoxAdapterRejectsChangedPrincipalBeforeProxmoxIO(t *testing.T) {
 	}
 }
 
-// These are the fixed child commands that adapter serve runs for one workspace.
 func TestProxmoxAdapterFixedLifecycleUnderPersistedScope(t *testing.T) {
 	_, client, _ := fixedProxmoxFixture(t)
 	cfg := controllerTestConfig()
@@ -304,16 +333,12 @@ func TestProxmoxAdapterFixedLifecycleUnderPersistedScope(t *testing.T) {
 	scope := controllerTestScope(t, cfg)
 	t.Setenv("CRABBOX_ADAPTER_PROVIDER_SCOPE", scope)
 	const leaseID, slug = "cbx_0123456789ab", "adapter-box"
-	run := func(args ...string) error {
-		var stdout, stderr bytes.Buffer
-		err := (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args)
-		if strings.Contains(stdout.String()+stderr.String(), controllerTestSecret) {
-			t.Fatalf("%s exposed the token secret", args[0])
-		}
-		return err
-	}
+
 	for attempt := range 2 {
-		if err := run("warmup", "--keep=true", "--lease-id", leaseID, "--slug", slug); err != nil {
+		if attempt == 1 {
+			t.Setenv("CRABBOX_PROXMOX_TOKEN_SECRET", "rotated-original-secret")
+		}
+		if _, err := runControllerTestCommand(t, "warmup", "--keep=true", "--lease-id", leaseID, "--slug", slug); err != nil {
 			t.Fatalf("warmup attempt %d: %v", attempt+1, err)
 		}
 	}
@@ -329,30 +354,33 @@ func TestProxmoxAdapterFixedLifecycleUnderPersistedScope(t *testing.T) {
 			"--expected-provider-slug", slug, "--expected-provider-resource-id", resourceID, "--expected-provider-scope", scope,
 			"--expected-coordinator-registration-url", "", "--provider", "proxmox"}
 	}
-	if err := run(absenceCleanup("417")...); err == nil || !strings.Contains(err.Error(), "invalid terminal tombstone") || readFixedProxmoxClaim(t, leaseID).FixedCreateIntent.State != "acquired" {
+	if _, err := runControllerTestCommand(t, absenceCleanup("417")...); err == nil || !strings.Contains(err.Error(), "invalid terminal tombstone") || readFixedProxmoxClaim(t, leaseID).FixedCreateIntent.State != "acquired" {
 		t.Fatalf("absence cleanup settled a live workspace: %v", err)
 	}
 	// Release reads provider state only; keep best-effort guest cleanup offline.
 	client.servers[0].PublicNet.IPv4.IP = ""
 	wrongResource := append([]string(nil), stop...)
 	wrongResource[10] = "418"
-	if err := run(wrongResource...); err == nil || !strings.Contains(err.Error(), "resource ID mismatch") || client.deleteCalls != 0 {
+	if _, err := runControllerTestCommand(t, wrongResource...); err == nil || !strings.Contains(err.Error(), "resource ID mismatch") || client.deleteCalls != 0 {
 		t.Fatalf("stop accepted another resource identity: err=%v deletes=%d", err, client.deleteCalls)
 	}
-	if err := run(stop...); err != nil {
+	client.servers[0].ImmutableID = replacementGeneration
+	if _, err := runControllerTestCommand(t, stop...); err == nil || !strings.Contains(err.Error(), "vmgenid") || client.deleteCalls != 0 {
+		t.Fatalf("stop accepted a reused VMID: err=%v deletes=%d", err, client.deleteCalls)
+	}
+	client.servers[0].ImmutableID = fixedTestGeneration
+	if _, err := runControllerTestCommand(t, stop...); err != nil {
 		t.Fatalf("exact stop: %v", err)
 	}
 	claim := readFixedProxmoxClaim(t, leaseID)
 	if client.deleteCalls != 1 || claim.FixedCreateIntent.State != "released" {
 		t.Fatalf("deletes=%d claim=%+v", client.deleteCalls, claim)
 	}
-	// After the adapter confirms absence it finishes cleanup and keeps the
-	// released claim as the lease ID's receipt, including on retry.
-	if err := run(absenceCleanup("418")...); err == nil || !strings.Contains(err.Error(), "receipt identity changed") {
+	if _, err := runControllerTestCommand(t, absenceCleanup("418")...); err == nil || !strings.Contains(err.Error(), "receipt identity changed") {
 		t.Fatalf("absence cleanup accepted another resource identity: %v", err)
 	}
 	for attempt := range 2 {
-		if err := run(absenceCleanup("417")...); err != nil {
+		if _, err := runControllerTestCommand(t, absenceCleanup("417")...); err != nil {
 			t.Fatalf("absence cleanup attempt %d: %v", attempt+1, err)
 		}
 	}
@@ -367,7 +395,7 @@ func TestProxmoxConfirmedAbsentReceiptMatchesScopesAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backend.releaseFixed(t.Context(), core.ReleaseLeaseRequest{Lease: lease}, false); err != nil {
+	if err := backend.releaseFixed(t.Context(), core.ReleaseLeaseRequest{Lease: lease}, false, false); err != nil {
 		t.Fatal(err)
 	}
 	receipt := readFixedProxmoxClaim(t, req.RequestedLeaseID)
@@ -419,8 +447,6 @@ func TestProxmoxConfirmedAbsentReceiptMatchesScopesAndIdentity(t *testing.T) {
 	}
 }
 
-// A registered adapter completes the coordinator's delete with the lease's
-// registration generation, which must survive the fixed release receipt.
 func TestProxmoxRegisteredAdapterDeleteCompletesAfterFixedRelease(t *testing.T) {
 	_, client, _ := fixedProxmoxFixture(t)
 	const leaseID, slug, adapterID, workspaceID = "cbx_0123456789ab", "adapter-box", "proxmox-lab", "fleet-box"
@@ -471,12 +497,8 @@ func TestProxmoxRegisteredAdapterDeleteCompletesAfterFixedRelease(t *testing.T) 
 	}
 	scope := controllerTestScope(t, cfg)
 	t.Setenv("CRABBOX_ADAPTER_PROVIDER_SCOPE", scope)
-	run := func(args ...string) (string, error) {
-		var stdout, stderr bytes.Buffer
-		err := (core.App{Stdout: &stdout, Stderr: &stderr}).Run(t.Context(), args)
-		return stdout.String(), err
-	}
-	identity, err := run("config", "show", "--json", "--controller-provider-identity", "--provider", "proxmox")
+
+	identity, err := runControllerTestCommand(t, "config", "show", "--json", "--controller-provider-identity", "--provider", "proxmox")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +508,7 @@ func TestProxmoxRegisteredAdapterDeleteCompletesAfterFixedRelease(t *testing.T) 
 	if err := json.Unmarshal([]byte(identity), &binding); err != nil || binding.URL == "" {
 		t.Fatalf("registration binding=%q err=%v", identity, err)
 	}
-	if _, err := run("warmup", "--keep=true", "--lease-id", leaseID, "--slug", slug, "--provider", "proxmox"); err != nil {
+	if _, err := runControllerTestCommand(t, "warmup", "--keep=true", "--lease-id", leaseID, "--slug", slug, "--provider", "proxmox"); err != nil {
 		t.Fatalf("registered warmup: %v", err)
 	}
 	if registered == "" || readFixedProxmoxClaim(t, leaseID).RuntimeAdapterRegistrationID != registered {
@@ -497,7 +519,7 @@ func TestProxmoxRegisteredAdapterDeleteCompletesAfterFixedRelease(t *testing.T) 
 	identityArgs := []string{"--id", leaseID,
 		"--expected-provider-lease-id", leaseID, "--expected-provider-attempt-lease-id", leaseID,
 		"--expected-provider-slug", slug, "--expected-provider-resource-id", "417", "--expected-provider-scope", scope}
-	if _, err := run(append(append([]string{"stop"}, identityArgs...), "--provider", "proxmox")...); err != nil {
+	if _, err := runControllerTestCommand(t, append(append([]string{"stop"}, identityArgs...), "--provider", "proxmox")...); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	receipt := readFixedProxmoxClaim(t, leaseID)
@@ -506,7 +528,7 @@ func TestProxmoxRegisteredAdapterDeleteCompletesAfterFixedRelease(t *testing.T) 
 	}
 	cleanup := append(append([]string{"stop", "--confirmed-absent-local-cleanup=true"}, identityArgs...),
 		"--expected-coordinator-registration-url", binding.URL, "--provider", "proxmox")
-	if _, err := run(cleanup...); err != nil {
+	if _, err := runControllerTestCommand(t, cleanup...); err != nil {
 		t.Fatalf("confirmed-absence cleanup: %v (rejected=%v)", err, rejected)
 	}
 	if len(completions) != 1 || completions[0] != registered || len(rejected) != 0 {

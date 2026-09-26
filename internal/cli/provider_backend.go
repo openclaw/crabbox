@@ -1927,7 +1927,7 @@ func validateControllerProviderScope(cfg Config) error {
 		return err
 	}
 	if actual != expected {
-		return Exit(2, "provider=%s controller routing scope changed; refusing lifecycle operation", provider)
+		return Exit(2, "provider=%s controller routing scope changed; refusing lifecycle operation; restore the original configuration and drain existing workspaces before changing it", provider)
 	}
 	return nil
 }

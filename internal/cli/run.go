@@ -5026,7 +5026,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 			return err
 		}
 		if actualScope != *expectedProviderScope {
-			return Exit(4, "provider configuration scope changed before lifecycle operation")
+			return Exit(4, "provider configuration scope changed before lifecycle operation; restore the original configuration and drain existing workspaces before changing it")
 		}
 	}
 	if *confirmedAbsentLocalCleanup {

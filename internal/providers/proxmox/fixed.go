@@ -466,10 +466,7 @@ func validateFixedProxmoxTerminalClaim(claim core.LeaseClaim) error {
 	return nil
 }
 
-// ValidateConfirmedAbsentTerminalReceipt lets runtime-adapter cleanup finish
-// while the released claim stays as the lease ID's receipt. The request carries
-// the controller scope, which differs from the claim scope, so both are checked
-// against the current configuration. It is local and read-only.
+// Controller and direct-claim scopes differ; validate both before retaining a receipt.
 func (b *leaseBackend) ValidateConfirmedAbsentTerminalReceipt(claim core.LeaseClaim, req core.ConfirmedAbsentLocalCleanupRequest) error {
 	expected := req.ExpectedProviderIdentity
 	controllerScope, err := (Provider{}).ControllerProviderScope(b.Cfg)
