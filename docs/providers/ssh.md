@@ -57,6 +57,11 @@ or live/ambiguous child fails closed rather than deleting another run's authorit
 Explicit `stop` does not invent an owner token or remove unrelated workspace-owner
 records.
 
+POSIX workspace locks support both util-linux and BusyBox `flock`. BusyBox uses
+bounded nonblocking retries on the same lock file because it lacks `flock -w`;
+util-linux keeps its native timed wait. Minimal Alpine hosts also need `procps`
+for the process identity checks used by workspace ownership.
+
 ### Connection cleanup
 
 Commands attempt to write an Actions stop marker for the lease ID at

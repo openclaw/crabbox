@@ -43,7 +43,7 @@ func workspaceOwnerDenySignals(t *testing.T) string {
 	if err != nil {
 		t.Fatal("POSIX owner lock tool unavailable")
 	}
-	script := "#!/bin/sh\nexec " + shellQuote(lock) + args + ` /bin/sh -c 'kill() { return 1; }; '"$7"` + "\n"
+	script := "#!/bin/sh\nif [ \"$1\" = -h ]; then printf ' -w, --timeout\\n'; exit 0; fi\nexec " + shellQuote(lock) + args + ` /bin/sh -c 'kill() { return 1; }; '"$7"` + "\n"
 	writeExecutable(t, filepath.Join(dir, "flock"), script)
 	return dir + string(os.PathListSeparator) + os.Getenv("PATH")
 }

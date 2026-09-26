@@ -648,18 +648,33 @@ const workspaceOwnerPOSIXProcess = `owner_process_status() {
 
 // The directory gate is deliberately never stolen on a timeout: a suspended
 // writer can resume after its deadline. Ambiguous gates require lease cleanup.
+// BusyBox retries lock the same inode and execute the body once, independently
+// of the body's exit code. Keep generated scripts small for Windows SSH limits.
+// The portable mkdir gate also requires a creation receipt: some implementations
+// return success after an EEXIST race.
 func workspaceOwnerPOSIXGate(timeout string) string {
 	return `run_owner_gate() {
   if command -v flock >/dev/null 2>&1; then
-    flock -x -w ` + timeout + ` "$gate" /bin/sh -c "$1"
+    case "$(flock -h 2>&1)" in
+      *' -w'*) flock -x -w ` + timeout + ` "$gate" /bin/sh -c "$1"; return ;;
+    esac
+    (
+      exec 9>"$gate" || exit 74
+      left=` + timeout + `
+      while :; do
+        flock -x -n 9 && exec /bin/sh -c "$1"
+        rc=$?
+        [ "$rc" -eq 1 ] || exit "$rc"
+        [ "$left" -gt 0 ] || exit 1
+        sleep 1; left=$((left - 1))
+      done
+    )
   elif command -v lockf >/dev/null 2>&1; then
     lockf -k -t ` + timeout + ` "$gate" /bin/sh -c "$1"
   else
     /bin/sh -c '
       gate_dir="$1.portable"
       remaining="$2"
-      # Some mkdir implementations return success after an EEXIST race.
-      # Require the verbose creation receipt as well as a successful exit.
       while ! { created=$(mkdir -m 700 -v "$gate_dir" 2>/dev/null) && [ -n "$created" ]; }; do
         # A successful contender may already have removed the gate.
         [ ! -f "$gate_dir" ] && [ ! -L "$gate_dir" ] || exit 74
