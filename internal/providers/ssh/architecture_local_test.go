@@ -17,8 +17,7 @@ func TestStaticSSHArchitectureLocalMacProbe(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("requires local macOS system queries")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := t.Context()
 	output, err := exec.CommandContext(ctx, "/bin/sh", "-c", macArchitectureProbe).Output()
 	if err != nil {
 		t.Fatalf("local macOS probe: %v (context: %v)", err, ctx.Err())
@@ -49,8 +48,7 @@ func TestStaticSSHArchitectureLocalPOSIXProbe(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("requires local POSIX system queries")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	ctx := t.Context()
 	output, err := exec.CommandContext(ctx, "/bin/sh", "-c", posixArchitectureProbe).Output()
 	if err != nil {
 		t.Fatalf("local POSIX probe: %v (context: %v)", err, ctx.Err())
@@ -74,8 +72,9 @@ func TestStaticSSHArchitectureLocalWindowsPowerShell51Probe(t *testing.T) {
 		t.Fatal("SystemRoot must identify the Windows installation")
 	}
 	powershell := filepath.Join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-	ctx, cancel := context.WithTimeout(context.Background(), architectureProbeTimeout)
-	defer cancel()
+	// This smoke checks native evidence, not cold compiler/startup latency.
+	// Production deadlines are asserted by TestStaticSSHArchitectureBudgetOwnership.
+	ctx := t.Context()
 	// Identify the same interpreter that evaluates the unchanged production script, with one cold start.
 	command := `[Console]::WriteLine($PSVersionTable.PSEdition + '|' + $PSVersionTable.PSVersion.ToString())` + "\n" + windowsArchitectureProbe
 	started := time.Now()

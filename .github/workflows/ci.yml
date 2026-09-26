@@ -247,9 +247,12 @@ jobs:
 
       - name: Test static SSH architecture in Windows PowerShell 5.1
         shell: pwsh
+        env:
+          GOFLAGS: -mod=readonly -trimpath -p=1
+          GOMAXPROCS: 2
         run: |
           $name = 'TestStaticSSHArchitectureLocalWindowsPowerShell51Probe'
-          $events = @(go test ./internal/providers/ssh -run '^TestStaticSSHArchitectureLocalWindowsPowerShell51Probe$' -count=1 -timeout=1m -json)
+          $events = @(go test -race ./internal/providers/ssh -run '^TestStaticSSHArchitectureLocalWindowsPowerShell51Probe$' -count=20 -timeout=8m -json)
           $code = $LASTEXITCODE
           $events | ForEach-Object { Write-Host $_ }
           if ($code -ne 0) { exit $code }
