@@ -47,9 +47,10 @@ func (Provider) Spec() core.ProviderSpec {
 func (Provider) RegisterFlags(fs *flag.FlagSet, _ core.Config) any {
 	return fs.Bool("static-power-acknowledge-stop", false, "acknowledge retrying the dedicated static host stop hook during forced recovery")
 }
-func (Provider) ApplyFlags(cfg *core.Config, _ *flag.FlagSet, values any) error {
-	if ack, ok := values.(*bool); ok {
+func (Provider) ApplyFlags(cfg *core.Config, fs *flag.FlagSet, values any) error {
+	if ack, ok := values.(*bool); ok && ack != nil && core.FlagWasSet(fs, "static-power-acknowledge-stop") {
 		cfg.Static.PowerAcknowledgeStop = *ack
+		core.RecordProviderFlagInputs(cfg, true, staticProvider)
 	}
 	return nil
 }
