@@ -192,6 +192,11 @@ allocator must have permission to assign the identity at its resource scope.
 Release-only lookup and deletion remain available if the attachment is later
 removed.
 
+To enable an identity for an existing fixed lease, stop that lease and allocate
+a replacement with a new lease ID. Fixed create inputs cannot change in place,
+and a stopped fixed lease ID remains terminal. Claims created without this
+setting can still be resolved and released.
+
 Direct-mode config can be supplied entirely via environment:
 
 ```text

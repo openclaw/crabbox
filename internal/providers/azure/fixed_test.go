@@ -182,6 +182,36 @@ func TestFixedAzureRequiredIdentityGatesReadinessAndAdoption(t *testing.T) {
 	}
 }
 
+func TestFixedAzureExistingUnassignedLeaseCanBeReleasedAfterIdentityOptIn(t *testing.T) {
+	client := &fakeAzureClient{}
+	b := fixedAzureTestBackend(t, client)
+	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123481", RequestedSlug: "old-claim", Repo: core.Repo{Root: t.TempDir()}}
+	if _, err := b.Acquire(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := core.ReadLeaseClaim(req.RequestedLeaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := claim.FixedCreateIntent.Attempt[fixedAzureUserAssignedIdentityAttempt]; exists {
+		t.Fatal("unassigned claim does not match the old attempt format")
+	}
+	b.Cfg.Azure.UserAssignedIdentityResourceID = "/subscriptions/sub/resourceGroups/identities/providers/Microsoft.ManagedIdentity/userAssignedIdentities/worker"
+	if _, err := b.Acquire(t.Context(), req); err == nil {
+		t.Fatal("existing unassigned VM was reused after enabling identity")
+	}
+	if len(client.createLeaseIDs) != 1 {
+		t.Fatal("identity change allocated a second VM under the old lease ID")
+	}
+	lease, err := b.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID, ReleaseOnly: true})
+	if err != nil {
+		t.Fatalf("old claim could not be resolved for release: %v", err)
+	}
+	if err := b.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: lease}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFixedAzureAmbiguousCreateNeverResubmits(t *testing.T) {
 	client := &fakeAzureClient{createErr: errors.New("reply lost")}
 	b := fixedAzureTestBackend(t, client)
