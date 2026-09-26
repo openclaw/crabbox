@@ -6,6 +6,13 @@ import (
 	core "github.com/openclaw/crabbox/internal/cli"
 )
 
+func (Provider) NormalizeConfigForShow(cfg core.Config) core.Config {
+	if mode, err := core.NormalizeAzureOSDiskMode(cfg.Azure.OSDisk); err == nil {
+		cfg.Azure.OSDisk = mode
+	}
+	return cfg
+}
+
 // ConfigShowSection reports the established fields without cloud discovery.
 func (Provider) ConfigShowSection(cfg core.Config) core.ProviderConfigShowSection {
 	return core.ProviderConfigShowSection{

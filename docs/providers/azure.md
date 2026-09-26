@@ -74,7 +74,6 @@ Azure supports both execution modes:
 crabbox warmup --provider azure --class beast
 crabbox warmup --provider azure --arch arm64 --class fast
 crabbox warmup --provider azure --class beast --azure-os-disk ephemeral
-crabbox warmup --provider azure --class beast --azure-os-disk ephemeral-preview
 crabbox run --provider azure --class standard -- pnpm test
 crabbox run --provider azure --azure-backend dynamic-sessions -- pnpm test
 crabbox warmup --provider azure --target windows --class standard
@@ -89,9 +88,8 @@ crabbox cleanup --provider azure
 `--type` is exact (for example `--type Standard_D32ads_v6`). Use `--class` when
 you want SKU fallback. Azure leases use managed OS disks by default, so native
 checkpoint/fork works without extra flags. Pass `--azure-os-disk ephemeral` only
-for stateless leases that do not need native checkpoint/fork. Pass
-`--azure-os-disk ephemeral-preview` to opt into Azure's public-preview
-full-caching mode for ephemeral OS disks.
+for stateless leases that do not need native checkpoint/fork. This mode enables
+generally available full caching and requires at least eight vCPUs.
 
 ## Fixed operation IDs
 
@@ -107,8 +105,8 @@ SKU unless `--type` is explicit). They do not perform SKU, market, or region
 fallback, and do not roll back an ambiguous allocation. VM creation is
 create-only. Replay observes the original attempt and never submits a second
 allocation. This supports VM-image leases, including native Windows and WSL2;
-snapshot forks and `ephemeral-preview` disks are not supported on this direct
-fixed-ID path. Ordinary direct leases retain their existing fallback behavior.
+snapshot forks are not supported on this direct fixed-ID path. Full-caching
+ephemeral disks support fixed IDs through create-only SDK requests. Ordinary direct leases retain their existing fallback behavior.
 
 Use `stop --provider azure <lease-id>` for owned cleanup. Successful deletion
 retains a terminal tombstone; the ID cannot create another VM. If a failed
@@ -169,18 +167,26 @@ not supported because those VM sizes do not support nested virtualization.
 VM public IP, `private` uses the NIC private IP from the vnet. Use `private` when
 connecting through a VPN to the Azure virtual network.
 
-`azure.osDisk` accepts `managed`, `ephemeral`, `ephemeral-preview`, or `auto`:
+`azure.osDisk` accepts `managed`, `ephemeral`, or `auto`:
 
 - `managed` (default) provisions a managed `StandardSSD_LRS` OS disk so Azure
   native disk-snapshot checkpoints work.
-- `ephemeral` opts into a local OS disk. It requires a SKU with ephemeral OS disk
-  support, fails during provisioning when the selected SKU cannot support it, and
-  disables native Azure checkpoint/fork.
-- `ephemeral-preview` enables Azure ephemeral OS disk full caching with Compute
-  API `2025-04-01`. It is public preview, has the same checkpoint/fork limits as
-  `ephemeral`, and skips known unsupported 2-core, 4-core, and no-local-disk
-  Azure SKUs from Crabbox fallback lists.
+- `ephemeral` enables GA full caching with Compute API `2026-04-01`.
+  It requires ephemeral OS support, at least eight active vCPUs, and local storage
+  greater than twice the OS disk size plus 1 GiB. Supported families are
+  N/L/M/H, D/DC/E/Eb/EC v5-v7, and F v6-v7. Azure validates image capacity.
+  Crabbox filters known unsupported class fallbacks. Native checkpoint/fork
+  remains unavailable.
 - `auto` is accepted for compatibility and resolves to `managed`.
+
+`ephemeral-preview` is removed; replace it with `ephemeral`. Existing `ephemeral`
+settings now enable full caching, so smaller VMs and Fsv2 no longer qualify.
+Constrained sizes use the active count (`Standard_E8-4ds_v5` has four vCPUs).
+Choose an eligible `--type` or use `--azure-os-disk managed` to retain smaller VMs.
+Older CLIs sending `ephemeral-preview` to an updated coordinator receive an
+explicit HTTP 400 replacement error before allocation. Update
+`CRABBOX_AZURE_OS_DISK` on the coordinator too if it still names the removed mode.
+See [Microsoft's full caching prerequisites](https://learn.microsoft.com/en-us/azure/virtual-machines/ephemeral-os-disks#prerequisites-for-full-caching).
 
 ### Environment variables
 
@@ -196,7 +202,7 @@ CRABBOX_AZURE_LOCATION
 CRABBOX_AZURE_RESOURCE_GROUP
 CRABBOX_AZURE_IMAGE
 CRABBOX_AZURE_WINDOWS_ARM64_IMAGE
-CRABBOX_AZURE_OS_DISK            # managed | ephemeral | ephemeral-preview | auto
+CRABBOX_AZURE_OS_DISK            # managed | ephemeral | auto
 CRABBOX_AZURE_VNET
 CRABBOX_AZURE_SUBNET
 CRABBOX_AZURE_NSG

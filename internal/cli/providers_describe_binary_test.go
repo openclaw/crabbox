@@ -16,6 +16,56 @@ import (
 	"testing"
 )
 
+func TestAzureConfigShowBuiltBinaryMigration(t *testing.T) {
+	binary, err := builtCLITestBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{"config", "env"} {
+		for _, mode := range []string{"auto", "ephemeral", "ephemeral-preview"} {
+			t.Run(source+"/"+mode, func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, "config.yaml")
+				env := []string{"CRABBOX_CONFIG=" + path, "XDG_CONFIG_HOME=" + root, "XDG_STATE_HOME=" + root}
+				content := "provider: azure\nazure:\n  subscriptionId: test-sub\n"
+				if source == "config" {
+					content += "  osDisk: " + mode + "\n"
+				} else {
+					env = append(env, "CRABBOX_AZURE_OS_DISK="+mode)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				stdout, stderr, code := runDescribeTestBinary(binary, root, env, "config", "show", "--json")
+				if mode == "ephemeral-preview" {
+					if code != 2 || !strings.Contains(string(stderr), "has been removed; use ephemeral") {
+						t.Fatalf("exit=%d stderr=%s", code, stderr)
+					}
+					return
+				}
+				if code != 0 {
+					t.Fatalf("exit=%d stderr=%s", code, stderr)
+				}
+				var view struct {
+					Azure struct {
+						OSDisk string `json:"osDisk"`
+					} `json:"azure"`
+				}
+				if err := json.Unmarshal(stdout, &view); err != nil {
+					t.Fatal(err)
+				}
+				want := mode
+				if mode == "auto" {
+					want = "managed"
+				}
+				if view.Azure.OSDisk != want {
+					t.Fatalf("shown mode=%q, want %q", view.Azure.OSDisk, want)
+				}
+			})
+		}
+	}
+}
+
 func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	binary, err := builtCLITestBinary()
@@ -182,8 +232,8 @@ func TestProvidersDescribeBuiltBinaryContract(t *testing.T) {
 		t.Fatalf("run --help exit=%d stdout=%q stderr=%q", helpCode, helpStdout, helpStderr)
 	}
 	digest := sha256.Sum256(helpStderr)
-	const baselineSHA256 = "18e3b89baf0e43026031af29501f92a2ca1e40b7b85a3c6af8de3b137813b872"
-	const baselineBytes = 62606
+	const baselineSHA256 = "9b81408acddee3a41deb80b0b1289465a89cfb96a79d04d6cafda324872419e6"
+	const baselineBytes = 62602
 	if got := hex.EncodeToString(digest[:]); got != baselineSHA256 || len(helpStderr) != baselineBytes {
 		t.Fatalf("run --help changed: sha256=%s bytes=%d, want sha256=%s bytes=%d", got, len(helpStderr), baselineSHA256, baselineBytes)
 	}

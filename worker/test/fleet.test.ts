@@ -8269,6 +8269,37 @@ describe("fleet lease identity and idle", () => {
     },
   );
 
+  it.each(["request", "default"])(
+    "rejects removed Azure disk %s before allocation",
+    async (source) => {
+      const storage = new MemoryStorage();
+      const providerFetch = vi.fn<typeof fetch>();
+      vi.stubGlobal("fetch", providerFetch);
+      const fleet = testFleet(
+        storage,
+        {},
+        source === "default" ? { CRABBOX_AZURE_OS_DISK: "ephemeral-preview" } : {},
+      );
+      const response = await fleet.fetch(
+        request("POST", "/v1/leases", {
+          body: {
+            provider: "azure",
+            sshPublicKey: "ssh-ed25519 disk-migration-test",
+            ...(source === "request" ? { azureOSDisk: "ephemeral-preview" } : {}),
+          },
+        }),
+      );
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({
+        error: "invalid_azure_os_disk",
+        message: expect.stringContaining("has been removed; use ephemeral"),
+      });
+      expect(providerFetch).not.toHaveBeenCalled();
+      expect((await storage.list()).size).toBe(0);
+      expect(storage.alarm()).toBeUndefined();
+    },
+  );
+
   it("allows brokered Azure location selection without admin auth", async () => {
     const storage = new MemoryStorage();
     const providerFetch = vi.fn<typeof fetch>();

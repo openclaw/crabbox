@@ -1,5 +1,7 @@
 import { azureWindowsBootstrapPowerShell, cloudInit } from "./bootstrap";
 import {
+  azureFullCachingSeriesEligible,
+  normalizeAzureOSDiskMode,
   azureSupportsEphemeralFullCaching,
   azureSupportsEphemeralOS,
   azureVMSizeCandidatesForTargetClass,
@@ -39,7 +41,7 @@ const API_VERSIONS = {
   compute: "2024-07-01",
   disks: "2024-03-02",
 };
-const COMPUTE_FULL_CACHING_PREVIEW_API_VERSION = "2025-04-01";
+const COMPUTE_FULL_CACHING_API_VERSION = "2026-04-01";
 const DELETE_RETRY_ATTEMPTS = 13;
 const DELETE_RETRY_DELAY_MS = 15_000;
 const MIN_LRO_POLL_INTERVAL_MS = 15_000;
@@ -2676,18 +2678,13 @@ export class AzureClient {
         name: `${name}-osdisk`,
         createOption: "FromImage",
       };
-      if (await this.useEphemeralOSDisk(config, location)) {
+      if (await this.validateOSDiskMode(config, location)) {
         osDisk["caching"] = "ReadOnly";
-        const diffDiskSettings: Record<string, unknown> = { option: "Local" };
-        if (azureOSDiskUsesFullCaching(config.azureOSDisk)) {
-          diffDiskSettings["enableFullCaching"] = true;
-          osDisk["managedDisk"] = { storageAccountType: "StandardSSD_LRS" };
-        }
-        osDisk["diffDiskSettings"] = diffDiskSettings;
+        osDisk["diffDiskSettings"] = { option: "Local", enableFullCaching: true };
       } else {
         osDisk["caching"] = "ReadWrite";
-        osDisk["managedDisk"] = { storageAccountType: "StandardSSD_LRS" };
       }
+      osDisk["managedDisk"] = { storageAccountType: "StandardSSD_LRS" };
       storageProfile["imageReference"] = image;
       storageProfile["osDisk"] = osDisk;
       vmProperties["osProfile"] = this.osProfile(config, name, leaseID, customData);
@@ -2701,7 +2698,9 @@ export class AzureClient {
     await this.arm(
       "PUT",
       vmPath(this.resourceGroup, name),
-      azureComputeAPIVersionForOSDisk(config.azureSnapshot ? "managed" : config.azureOSDisk),
+      !config.azureSnapshot && config.azureOSDisk === "ephemeral"
+        ? COMPUTE_FULL_CACHING_API_VERSION
+        : API_VERSIONS.compute,
       {
         location,
         tags,
@@ -3102,22 +3101,18 @@ export class AzureClient {
     return this.ephemeralOSSupport.get(vmSize) ?? azureSupportsEphemeralOS(vmSize);
   }
 
-  private async useEphemeralOSDisk(config: LeaseConfig, location: string): Promise<boolean> {
-    return await this.validateOSDiskMode(config, location);
-  }
-
   private async validateOSDiskMode(config: LeaseConfig, location: string): Promise<boolean> {
-    const mode = config.azureOSDisk;
-    if (!azureOSDiskIsEphemeral(mode)) return false;
+    const mode = normalizeAzureOSDiskMode(config.azureOSDisk);
+    if (mode !== "ephemeral") return false;
     const supported = await this.supportsEphemeralOS(config.serverType, location);
     if (!supported) {
       throw new Error(
-        `azureOSDisk=${mode} requires an Azure VM size with ephemeral OS disk support; ${config.serverType} is not supported`,
+        `azureOSDisk=${mode} requires ephemeral OS disk support and at least 8 vCPUs; ${config.serverType} is not supported; choose a supported --type or use --azure-os-disk managed`,
       );
     }
-    if (azureOSDiskUsesFullCaching(mode) && !azureSupportsEphemeralFullCaching(config.serverType)) {
+    if (!azureFullCachingSeriesEligible(config.serverType)) {
       throw new Error(
-        `azureOSDisk=ephemeral-preview requires a full-caching preview Azure VM size; ${config.serverType} is not supported because preview full caching requires more than 4 vCPUs and local storage larger than 2x the OS disk plus 1 GiB`,
+        `azureOSDisk=${mode} requires at least 8 vCPUs and a supported Azure VM series (N/L/M/H, D/DC/E/Eb/EC v5-v7, or F v6-v7); ${config.serverType} is not supported; choose a supported --type or use --azure-os-disk managed`,
       );
     }
     return supported;
@@ -4687,14 +4682,6 @@ export function azureLROPollIntervalMS(retryAfter: string | null): number {
   return Math.max(seconds * 1000, MIN_LRO_POLL_INTERVAL_MS);
 }
 
-function azureOSDiskIsEphemeral(mode: string): boolean {
-  return mode === "ephemeral" || mode === "ephemeral-preview";
-}
-
-function azureOSDiskUsesFullCaching(mode: string): boolean {
-  return mode === "ephemeral-preview";
-}
-
 export function azureProvisioningCandidatesForConfig(
   config: Pick<
     LeaseConfig,
@@ -4722,7 +4709,7 @@ export function azureProvisioningCandidatesForConfig(
   if (candidates.length === 0 && isCanonicalProviderClass(config.class)) {
     const storedType = concreteStoredServerType(config.serverType, config.class);
     if (!storedType) return [];
-    return azureOSDiskUsesFullCaching(azureOSDisk) && !azureSupportsEphemeralFullCaching(storedType)
+    return azureOSDisk === "ephemeral" && !azureSupportsEphemeralFullCaching(storedType)
       ? []
       : [storedType];
   }
@@ -4730,18 +4717,12 @@ export function azureProvisioningCandidatesForConfig(
   if (!storedType || storedType === candidates[0]) {
     return candidates;
   }
-  if (azureOSDiskUsesFullCaching(azureOSDisk)) {
+  if (azureOSDisk === "ephemeral") {
     return azureSupportsEphemeralFullCaching(storedType)
       ? uniqueProviderMachineCandidates([storedType, ...candidates])
       : candidates;
   }
   return uniqueProviderMachineCandidates([storedType, ...candidates]);
-}
-
-function azureComputeAPIVersionForOSDisk(mode: string): string {
-  return azureOSDiskUsesFullCaching(mode)
-    ? COMPUTE_FULL_CACHING_PREVIEW_API_VERSION
-    : API_VERSIONS.compute;
 }
 
 function azureSKUCapabilityTrue(

@@ -87,6 +87,29 @@ func TestFixedAzureLifecycle(t *testing.T) {
 	}
 }
 
+func TestFixedAzureEphemeralReplay(t *testing.T) {
+	client := &fakeAzureClient{}
+	b := fixedAzureTestBackend(t, client)
+	b.Cfg.Azure.OSDisk = core.AzureOSDiskEphemeral
+	b.Cfg.ServerType = "Standard_D8ads_v6"
+	req := core.AcquireRequest{RequestedLeaseID: "cbx_abcdef123456", Repo: core.Repo{Root: t.TempDir()}, Keep: true}
+	first, err := b.Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := b.Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Server.ImmutableID != replay.Server.ImmutableID || len(client.createLeaseIDs) != 1 {
+		t.Fatal("ephemeral replay allocated another VM")
+	}
+	b.Cfg.Azure.OSDisk = core.AzureOSDiskManaged
+	if _, err := b.Acquire(t.Context(), req); err == nil {
+		t.Fatal("changed OS disk intent accepted")
+	}
+}
+
 func TestFixedAzureReadinessRecoveryAndIdentity(t *testing.T) {
 	client := &fakeAzureClient{waitErr: errors.New("reply lost")}
 	b := fixedAzureTestBackend(t, client)
