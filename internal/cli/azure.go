@@ -273,7 +273,7 @@ func AzureVMSizeCandidatesForProfiles(cfg Config, profiles []ProviderClassProfil
 	if cfg.Azure.Snapshot != "" {
 		mode = AzureOSDiskManaged
 	}
-	if err != nil || !azureOSDiskIsEphemeral(mode) {
+	if err != nil || mode != AzureOSDiskEphemeral {
 		return candidates
 	}
 	return azureEphemeralFullCachingCandidates(cfg, candidates, profiles)
@@ -420,24 +420,12 @@ func NormalizeAzureDiskSKU(value string) (string, error) {
 	return "", Exit(2, "azure.osDiskSKU is not a supported managed disk storage SKU")
 }
 
-func azureOSDiskIsEphemeral(mode string) bool {
-	return mode == AzureOSDiskEphemeral
-}
-
-func (c *AzureClient) useEphemeralOSDisk(ctx context.Context, cfg Config) (bool, error) {
-	mode, err := c.validatedAzureOSDiskMode(ctx, cfg)
-	if err != nil {
-		return false, err
-	}
-	return azureOSDiskIsEphemeral(mode), nil
-}
-
 func (c *AzureClient) validatedAzureOSDiskMode(ctx context.Context, cfg Config) (string, error) {
 	mode, err := NormalizeAzureOSDiskMode(cfg.Azure.OSDisk)
 	if err != nil {
 		return "", err
 	}
-	if !azureOSDiskIsEphemeral(mode) {
+	if mode != AzureOSDiskEphemeral {
 		return mode, nil
 	}
 	supported := c.supportsEphemeralOS(ctx, cfg.ServerType)
@@ -852,7 +840,7 @@ func azureCanPrependNonExplicitServerType(cfg Config) bool {
 	if err != nil {
 		return true
 	}
-	if azureOSDiskIsEphemeral(mode) {
+	if mode == AzureOSDiskEphemeral {
 		return azureSupportsEphemeralFullCaching(cfg.ServerType)
 	}
 	return true
@@ -988,7 +976,7 @@ func (c *AzureClient) createServerStepsWithLabels(ctx context.Context, cfg Confi
 		if err != nil {
 			return Server{}, err
 		}
-		if azureOSDiskIsEphemeral(osDiskMode) {
+		if osDiskMode == AzureOSDiskEphemeral {
 			osDisk.Caching = to.Ptr(armcompute.CachingTypesReadOnly)
 			osDisk.DiffDiskSettings = &armcompute.DiffDiskSettings{
 				Option:            to.Ptr(armcompute.DiffDiskOptionsLocal),

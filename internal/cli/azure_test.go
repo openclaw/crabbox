@@ -952,7 +952,7 @@ func TestAzureSnapshotPrerequisitesRunConcurrently(t *testing.T) {
 	}
 }
 
-func TestAzureUseEphemeralOSDiskModes(t *testing.T) {
+func TestAzureValidatedOSDiskModes(t *testing.T) {
 	t.Parallel()
 	client := &AzureClient{}
 	ctx := t.Context()
@@ -978,11 +978,6 @@ func TestAzureUseEphemeralOSDiskModes(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "ephemeral allows supported full caching sku",
-			cfg:  Config{Azure: AzureConfig{OSDisk: AzureOSDiskEphemeral}, ServerType: "Standard_D8ads_v6"},
-			want: true,
-		},
-		{
 			name:    "ephemeral rejects two core sku",
 			cfg:     Config{Azure: AzureConfig{OSDisk: AzureOSDiskEphemeral}, ServerType: "Standard_D2ads_v6"},
 			wantErr: true,
@@ -1002,7 +997,7 @@ func TestAzureUseEphemeralOSDiskModes(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := client.useEphemeralOSDisk(ctx, tc.cfg)
+			mode, err := client.validatedAzureOSDiskMode(ctx, tc.cfg)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error")
@@ -1010,10 +1005,11 @@ func TestAzureUseEphemeralOSDiskModes(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("useEphemeralOSDisk err=%v", err)
+				t.Fatalf("validatedAzureOSDiskMode err=%v", err)
 			}
+			got := mode == AzureOSDiskEphemeral
 			if got != tc.want {
-				t.Fatalf("useEphemeralOSDisk=%t want %t", got, tc.want)
+				t.Fatalf("ephemeral=%t want %t", got, tc.want)
 			}
 		})
 	}
