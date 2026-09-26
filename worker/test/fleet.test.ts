@@ -97,6 +97,7 @@ import type {
   RunRecord,
 } from "../src/types";
 import { gcpBillingBody, gcpBillingError, gcpBillingMessage } from "./fixtures/gcp-billing-error";
+import { withProviderHTTP } from "./fixtures/provider-http";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -22080,7 +22081,6 @@ describe("fleet lease identity and idle", () => {
         },
         { provider: "aws" },
       );
-      // Identical provider facts must not prescribe identical recovery scheduling.
       const evidence = Object.freeze({ ownedKeyCleanupPending: true });
       const classify = vi.spyOn(provider, "provisioningFailureEvidence").mockReturnValue(evidence);
       const fleet = testFleet(storage, { aws: provider });
@@ -22101,86 +22101,53 @@ describe("fleet lease identity and idle", () => {
   );
 
   it.each([
-    {
-      name: "public uncertainty marker",
-      private: false,
-      cloudID: "",
-      owned: true,
-      canonical: true,
-      uncertain: false,
-      ownedPending: true,
-    },
-    {
-      name: "private uncertainty marker",
-      private: true,
-      cloudID: "",
-      owned: true,
-      canonical: true,
-      uncertain: true,
-      ownedPending: true,
-    },
+    { name: "public uncertainty marker" },
+    { name: "private uncertainty marker", private: true, uncertain: true },
     {
       name: "owned key without pending cleanup",
-      private: false,
-      cloudID: "",
-      owned: true,
-      canonical: true,
-      pending: false,
-      uncertain: false,
+      lease: { providerKeyCleanupPending: false },
       ownedPending: false,
     },
-    {
-      name: "observed allocation",
-      private: false,
-      cloudID: "i-0123456789abcdef0",
-      owned: true,
-      canonical: true,
-      uncertain: false,
-      ownedPending: true,
-    },
+    { name: "observed allocation", lease: { cloudID: "i-0123456789abcdef0" } },
     {
       name: "unowned canonical key",
-      private: false,
-      cloudID: "",
-      owned: false,
-      canonical: true,
-      uncertain: false,
+      lease: { providerKeyCleanupOwned: false },
       ownedPending: false,
     },
     {
       name: "shared key",
-      private: false,
-      cloudID: "",
-      owned: true,
-      canonical: false,
-      uncertain: false,
+      lease: { providerKey: "shared-fixture-key" },
       ownedPending: false,
+    },
+    {
+      name: "foreign Hetzner key failure",
+      error: new HetznerProvisioningError("foreign provider failure", false, false, undefined, 7),
     },
   ])("classifies AWS provisioning failure evidence: $name", (test) => {
     const lease = Object.freeze(
       testLease({
         provider: "aws",
-        cloudID: test.cloudID,
+        cloudID: "",
         serverID: 0,
-        providerKey: test.canonical
-          ? providerKeyForLease("cbx_000000000000")
-          : "shared-fixture-key",
-        providerKeyCleanupOwned: test.owned,
-        providerKeyCleanupPending: test.pending ?? true,
+        providerKey: providerKeyForLease("cbx_000000000000"),
+        providerKeyCleanupOwned: true,
+        providerKeyCleanupPending: true,
+        ...test.lease,
       }),
     );
     const evidence = AWSProvider.prototype.provisioningFailureEvidence({
       lease,
       config: {
         ...leaseConfig({ provider: "aws", sshPublicKey: "ssh-ed25519 fixture" }),
-        awsPrivate: test.private,
+        awsPrivate: test.private ?? false,
       },
-      error: new Error("synthetic allocation failure"),
-      message: "crabbox_aws_run_instances_outcome_uncertain: response interrupted",
+      error: test.error ?? new Error("synthetic allocation failure"),
+      message:
+        test.error?.message ?? "crabbox_aws_run_instances_outcome_uncertain: response interrupted",
     });
     expect(evidence).toEqual({
-      allocationUncertain: test.uncertain,
-      ownedKeyCleanupPending: test.ownedPending,
+      allocationUncertain: test.uncertain ?? false,
+      ownedKeyCleanupPending: test.ownedPending ?? true,
     });
   });
 
@@ -22211,17 +22178,6 @@ describe("fleet lease identity and idle", () => {
     expect(evidence.providerKeyCleanupID).toBe(
       test.keyID === undefined ? undefined : String(test.keyID),
     );
-  });
-
-  it("does not promote a foreign adapter's private key failure into AWS cleanup evidence", () => {
-    const evidence = AWSProvider.prototype.provisioningFailureEvidence({
-      lease: testLease({ provider: "aws" }),
-      config: leaseConfig({ provider: "aws", sshPublicKey: "ssh-ed25519 fixture" }),
-      error: new HetznerProvisioningError("foreign provider failure", false, false, undefined, 7),
-      message: "foreign provider failure",
-    });
-    expect(evidence.providerKeyCleanupID).toBeUndefined();
-    expect(evidence.resource).toBeUndefined();
   });
 
   it("limits SSH host-key injection to authoritative provider paths", () => {
@@ -22473,109 +22429,93 @@ describe("fleet lease identity and idle", () => {
       };
       const requests: string[] = [];
       const unexpected: string[] = [];
-      const server = createServer(async (incoming, response) => {
-        const path = new URL(incoming.url!, "http://localhost").pathname;
-        const route = `${incoming.method} ${path}`;
-        requests.push(route);
-        let payload = "";
-        for await (const chunk of incoming) payload += chunk;
-        let code = 200;
-        let result: unknown;
-        if (route === "GET /v1/ssh_keys") result = { ssh_keys: [] };
-        else if (route === "GET /v1/server_types") result = { server_types: [] };
-        else if (route === "POST /v1/ssh_keys") {
-          result = { ssh_key: { ...JSON.parse(payload), id: 7 } };
-        } else if (route === "POST /v1/servers") {
-          code = status;
-          result = { error: { code: status === 412 ? "precondition_failed" : "server_error" } };
-        } else if (route === "DELETE /v1/ssh_keys/7") {
-          code = keyDeleteFails ? 503 : 200;
-          result = keyDeleteFails ? { error: { code: "server_error" } } : {};
-        } else {
-          unexpected.push(route);
-          code = 500;
-          result = { error: { code: "unexpected_fixture_request" } };
-        }
-        response.writeHead(code, { "content-type": "application/json" });
-        response.end(JSON.stringify(result));
-      });
-      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-      const address = server.address();
-      if (!address || typeof address === "string") throw new Error("missing test HTTP address");
-      const nativeFetch = globalThis.fetch;
-      vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
-        const wire = input instanceof Request ? input : new Request(input, init);
-        const url = new URL(wire.url);
-        expect(url.origin).toBe("https://api.hetzner.cloud");
-        return nativeFetch(
-          new Request(`http://127.0.0.1:${address.port}${url.pathname}${url.search}`, wire),
-        );
-      });
-      try {
-        const env = { HETZNER_TOKEN: "test-token" } as Env;
-        const provider = new HetznerProvider(env);
-        const classify = vi.spyOn(provider, "provisioningFailureEvidence");
-        const fleet = testFleet(storage, { hetzner: provider }, env);
-        const first = await fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }));
-        expect(first.status).toBe(500);
-        const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
-        expect(failed).toMatchObject({
-          state: "failed",
-          serverID: 0,
-          cloudID: "",
-          provisioningResourceMayExist: status === 503,
-          provisioningFailureRetryable: status === 503,
-        });
-        expect(classify).toHaveBeenCalledTimes(1);
-        expect(classify.mock.calls[0]![0].error).toBeInstanceOf(HetznerProvisioningError);
-        const keyPending = status === 503 || keyDeleteFails;
-        const timestamp = expect.any(String);
-        const definiteFailure = expect.stringContaining("http 412");
-        expect(failed.providerKeyCleanupPending === true).toBe(keyPending);
-        expect(failed.providerKeyCleanupID).toBe(keyPending ? "7" : undefined);
-        expect(Date.parse(failed.cleanupRetryAt!) > Date.parse(failed.cleanupFailedAt!)).toBe(
-          keyPending,
-        );
-        expect(failed.failureError).toEqual(status === 412 ? definiteFailure : undefined);
-        expect(failed.provisioningRequestStartedAt).toEqual(status === 503 ? timestamp : undefined);
-        const replays: Array<{ status: number; body: unknown }> = [];
-        if (status === 412) {
-          const replay = await fleet.fetch(
+      await withProviderHTTP(
+        ["https://api.hetzner.cloud"],
+        async (incoming, response) => {
+          const path = new URL(incoming.url!, "http://localhost").pathname;
+          const route = `${incoming.method} ${path}`;
+          requests.push(route);
+          let payload = "";
+          for await (const chunk of incoming) payload += chunk;
+          let code = 200;
+          let result: unknown;
+          if (route === "GET /v1/ssh_keys") result = { ssh_keys: [] };
+          else if (route === "GET /v1/server_types") result = { server_types: [] };
+          else if (route === "POST /v1/ssh_keys") {
+            result = { ssh_key: { ...JSON.parse(payload), id: 7 } };
+          } else if (route === "POST /v1/servers") {
+            code = status;
+            result = { error: { code: status === 412 ? "precondition_failed" : "server_error" } };
+          } else if (route === "DELETE /v1/ssh_keys/7") {
+            code = keyDeleteFails ? 503 : 200;
+            result = keyDeleteFails ? { error: { code: "server_error" } } : {};
+          } else {
+            unexpected.push(route);
+            code = 500;
+            result = { error: { code: "unexpected_fixture_request" } };
+          }
+          response.writeHead(code, { "content-type": "application/json" });
+          response.end(JSON.stringify(result));
+        },
+        async () => {
+          const env = { HETZNER_TOKEN: "test-token" } as Env;
+          const provider = new HetznerProvider(env);
+          const classify = vi.spyOn(provider, "provisioningFailureEvidence");
+          const fleet = testFleet(storage, { hetzner: provider }, env);
+          const first = await fleet.fetch(
             request("PUT", `/v1/leases/${leaseID}`, { headers, body }),
           );
-          replays.push({ status: replay.status, body: await replay.json() });
-        }
-        expect(replays).toEqual(
-          status === 412
-            ? [
-                {
-                  status: 409,
-                  body: {
-                    error: "fixed_lease_terminal",
-                    message: "lease id is bound to a terminal result for this create intent",
-                  },
-                },
-              ]
-            : [],
-        );
-        const drift = await fleet.fetch(
-          request("PUT", `/v1/leases/${leaseID}`, {
-            headers,
-            body: { ...body, serverType: "cx43" },
-          }),
-        );
-        expect(drift.status).toBe(409);
-        await expect(drift.json()).resolves.toMatchObject({ error: "lease_id_conflict" });
-        expect(requests.filter((route) => route === "POST /v1/servers")).toHaveLength(1);
-        expect(requests.filter((route) => route === "DELETE /v1/ssh_keys/7")).toHaveLength(
-          status === 412 ? 1 : 0,
-        );
-        expect(unexpected).toEqual([]);
-      } finally {
-        await new Promise<void>((resolve, reject) =>
-          server.close((error) => (error ? reject(error) : resolve())),
-        );
-      }
+          expect(first.status).toBe(500);
+          const failed = storage.value<LeaseRecord>(`lease:${leaseID}`)!;
+          expect(failed).toMatchObject({
+            state: "failed",
+            serverID: 0,
+            cloudID: "",
+            provisioningResourceMayExist: status === 503,
+            provisioningFailureRetryable: status === 503,
+          });
+          expect(classify).toHaveBeenCalledTimes(1);
+          expect(classify.mock.calls[0]![0].error).toBeInstanceOf(HetznerProvisioningError);
+          const keyPending = status === 503 || keyDeleteFails;
+          const timestamp = expect.any(String);
+          const definiteFailure = expect.stringContaining("http 412");
+          expect(failed.providerKeyCleanupPending === true).toBe(keyPending);
+          expect(failed.providerKeyCleanupID).toBe(keyPending ? "7" : undefined);
+          expect(Date.parse(failed.cleanupRetryAt!) > Date.parse(failed.cleanupFailedAt!)).toBe(
+            keyPending,
+          );
+          expect(failed.failureError).toEqual(status === 412 ? definiteFailure : undefined);
+          expect(failed.provisioningRequestStartedAt).toEqual(
+            status === 503 ? timestamp : undefined,
+          );
+          const replay =
+            status === 412
+              ? await fleet.fetch(request("PUT", `/v1/leases/${leaseID}`, { headers, body }))
+              : undefined;
+          expect(replay?.status).toBe(status === 412 ? 409 : undefined);
+          expect(await replay?.json()).toEqual(
+            status === 412
+              ? {
+                  error: "fixed_lease_terminal",
+                  message: "lease id is bound to a terminal result for this create intent",
+                }
+              : undefined,
+          );
+          const drift = await fleet.fetch(
+            request("PUT", `/v1/leases/${leaseID}`, {
+              headers,
+              body: { ...body, serverType: "cx43" },
+            }),
+          );
+          expect(drift.status).toBe(409);
+          await expect(drift.json()).resolves.toMatchObject({ error: "lease_id_conflict" });
+          expect(requests.filter((route) => route === "POST /v1/servers")).toHaveLength(1);
+          expect(requests.filter((route) => route === "DELETE /v1/ssh_keys/7")).toHaveLength(
+            status === 412 ? 1 : 0,
+          );
+          expect(unexpected).toEqual([]);
+        },
+      );
     },
   );
 

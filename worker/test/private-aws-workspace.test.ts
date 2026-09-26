@@ -1,5 +1,3 @@
-import { createServer } from "node:http";
-
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { LeaseConfig } from "../src/config";
@@ -14,6 +12,7 @@ import type {
 import { AWSProvider, FleetCoordinator } from "../src/fleet";
 import { providerLabelValue } from "../src/provider-labels";
 import type { Env, LeaseRecord, ProviderMachine } from "../src/types";
+import { withProviderHTTP } from "./fixtures/provider-http";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -151,105 +150,93 @@ describe("private AWS workspaces", () => {
       const actions: string[] = [];
       const launchedTypes: string[] = [];
       const unexpected: string[] = [];
-      const server = createServer(async (incoming, response) => {
-        let payload = "";
-        for await (const chunk of incoming) payload += chunk;
-        const params = new URLSearchParams(payload);
-        const action = params.get("Action") ?? incoming.headers["x-amz-target"]?.toString() ?? "";
-        actions.push(action);
-        let code = 200;
-        let result: string;
-        if (action.endsWith("GetServiceQuota")) result = JSON.stringify({ Quota: { Value: 999 } });
-        else if (action === "GetCallerIdentity")
-          result = `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>123456789012</Account><Arn>arn:aws:sts::123456789012:assumed-role/crabbox-controller/test</Arn><UserId>test</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>`;
-        else if (action === "DescribeImages")
-          result = `<DescribeImagesResponse><imagesSet><item><imageId>ami-abcdef12</imageId></item></imagesSet></DescribeImagesResponse>`;
-        else if (action === "DescribeInstances")
-          result = "<DescribeInstancesResponse><reservationSet/></DescribeInstancesResponse>";
-        else if (action === "DescribeSecurityGroups")
-          result = `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-abc123</groupId><ipPermissions/><ipPermissionsEgress><item><ipProtocol>tcp</ipProtocol><fromPort>443</fromPort><toPort>443</toPort><ipRanges><item><cidrIp>0.0.0.0/0</cidrIp></item></ipRanges></item></ipPermissionsEgress></item></securityGroupInfo></DescribeSecurityGroupsResponse>`;
-        else if (action === "DescribeInstanceTypes")
-          result = `<DescribeInstanceTypesResponse><instanceTypeSet>${["t3a.small", "t3.small"].map((name) => `<item><instanceType>${name}</instanceType><vCpuInfo><defaultVCpus>2</defaultVCpus></vCpuInfo></item>`).join("")}</instanceTypeSet></DescribeInstanceTypesResponse>`;
-        else if (action === "RunInstances") {
-          launchedTypes.push(params.get("InstanceType") ?? "");
-          code = launchStatus;
-          result =
-            launchStatus === 200
-              ? "<RunInstancesResponse><instancesSet/></RunInstancesResponse>"
-              : "<Response><Errors><Error><Code>InvalidParameterValue</Code><Message>synthetic launch rejection</Message></Error></Errors></Response>";
-        } else {
-          unexpected.push(action);
-          code = 400;
-          result =
-            "<Response><Errors><Error><Code>UnexpectedFixtureRequest</Code></Error></Errors></Response>";
-        }
-        response.writeHead(code, {
-          "content-type": action.endsWith("GetServiceQuota") ? "application/json" : "text/xml",
-        });
-        response.end(result);
-      });
-      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-      const address = server.address();
-      if (!address || typeof address === "string") throw new Error("missing test HTTP address");
-      const nativeFetch = globalThis.fetch;
-      vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
-        const wire = input instanceof Request ? input : new Request(input, init);
-        const url = new URL(wire.url);
-        expect([
+      await withProviderHTTP(
+        [
           "https://sts.us-west-2.amazonaws.com",
           "https://ec2.us-west-2.amazonaws.com",
           "https://servicequotas.us-west-2.amazonaws.com",
-        ]).toContain(url.origin);
-        return nativeFetch(
-          new Request(`http://127.0.0.1:${address.port}${url.pathname}${url.search}`, wire),
-        );
-      });
-      try {
-        const env = {
-          ...privateAWSEnv(),
-          AWS_ACCESS_KEY_ID: "test",
-          AWS_SECRET_ACCESS_KEY: "test-secret",
-        };
-        const provider = new AWSProvider(env, "us-west-2", runtime.storage);
-        const classify = vi.spyOn(provider, "provisioningFailureEvidence");
-        const fleet = new FleetCoordinator(runtime, env, { aws: provider });
-        expect((await fleet.fetch(workspaceRequest("node server.js"))).status).toBe(202);
-        await fleet.alarm();
-        expect(unexpected).toEqual([]);
-        expect(launchedTypes).toEqual(
-          launchStatus === 200 ? ["t3a.small"] : ["t3a.small", "t3.small"],
-        );
-        expect(actions).not.toContain("TerminateInstances");
-        expect(classify).toHaveBeenCalledTimes(1);
-        const leases = await runtime.storage.list<LeaseRecord>({ prefix: "lease:" });
-        expect(leases.size).toBe(1);
-        const lease = [...leases.values()][0]!;
-        expect(lease).toMatchObject({
-          state: "failed",
-          cloudID: "",
-          providerScope: "aws:account:123456789012",
-          provisioningResourceMayExist: launchStatus === 200,
-          provisioningFailureRetryable: false,
-        });
-        const timestamp = expect.any(String);
-        const definiteFailure = expect.stringContaining("InvalidParameterValue");
-        expect(lease.cleanupError).toContain(
-          launchStatus === 200
-            ? "crabbox_aws_run_instances_outcome_uncertain"
-            : "InvalidParameterValue",
-        );
-        expect(lease.provisioningRequestStartedAt).toEqual(
-          launchStatus === 200 ? timestamp : undefined,
-        );
-        expect(lease.provisioningRequestSettledAt).toEqual(
-          launchStatus === 200 ? timestamp : undefined,
-        );
-        expect(lease.failureError).toEqual(launchStatus === 200 ? undefined : definiteFailure);
-      } finally {
-        await new Promise<void>((resolve, reject) =>
-          server.close((error) => (error ? reject(error) : resolve())),
-        );
-      }
+        ],
+        async (incoming, response) => {
+          let payload = "";
+          for await (const chunk of incoming) payload += chunk;
+          const params = new URLSearchParams(payload);
+          const action = params.get("Action") ?? incoming.headers["x-amz-target"]?.toString() ?? "";
+          actions.push(action);
+          let code = 200;
+          let result: string;
+          if (action.endsWith("GetServiceQuota"))
+            result = JSON.stringify({ Quota: { Value: 999 } });
+          else if (action === "GetCallerIdentity")
+            result = `<GetCallerIdentityResponse><GetCallerIdentityResult><Account>123456789012</Account><Arn>arn:aws:sts::123456789012:assumed-role/crabbox-controller/test</Arn><UserId>test</UserId></GetCallerIdentityResult></GetCallerIdentityResponse>`;
+          else if (action === "DescribeImages")
+            result = `<DescribeImagesResponse><imagesSet><item><imageId>ami-abcdef12</imageId></item></imagesSet></DescribeImagesResponse>`;
+          else if (action === "DescribeInstances")
+            result = "<DescribeInstancesResponse><reservationSet/></DescribeInstancesResponse>";
+          else if (action === "DescribeSecurityGroups")
+            result = `<DescribeSecurityGroupsResponse><securityGroupInfo><item><groupId>sg-abc123</groupId><ipPermissions/><ipPermissionsEgress><item><ipProtocol>tcp</ipProtocol><fromPort>443</fromPort><toPort>443</toPort><ipRanges><item><cidrIp>0.0.0.0/0</cidrIp></item></ipRanges></item></ipPermissionsEgress></item></securityGroupInfo></DescribeSecurityGroupsResponse>`;
+          else if (action === "DescribeInstanceTypes")
+            result = `<DescribeInstanceTypesResponse><instanceTypeSet>${["t3a.small", "t3.small"].map((name) => `<item><instanceType>${name}</instanceType><vCpuInfo><defaultVCpus>2</defaultVCpus></vCpuInfo></item>`).join("")}</instanceTypeSet></DescribeInstanceTypesResponse>`;
+          else if (action === "RunInstances") {
+            launchedTypes.push(params.get("InstanceType") ?? "");
+            code = launchStatus;
+            result =
+              launchStatus === 200
+                ? "<RunInstancesResponse><instancesSet/></RunInstancesResponse>"
+                : "<Response><Errors><Error><Code>InvalidParameterValue</Code><Message>synthetic launch rejection</Message></Error></Errors></Response>";
+          } else {
+            unexpected.push(action);
+            code = 400;
+            result =
+              "<Response><Errors><Error><Code>UnexpectedFixtureRequest</Code></Error></Errors></Response>";
+          }
+          response.writeHead(code, {
+            "content-type": action.endsWith("GetServiceQuota") ? "application/json" : "text/xml",
+          });
+          response.end(result);
+        },
+        async () => {
+          const env = {
+            ...privateAWSEnv(),
+            AWS_ACCESS_KEY_ID: "test",
+            AWS_SECRET_ACCESS_KEY: "test-secret",
+          };
+          const provider = new AWSProvider(env, "us-west-2", runtime.storage);
+          const classify = vi.spyOn(provider, "provisioningFailureEvidence");
+          const fleet = new FleetCoordinator(runtime, env, { aws: provider });
+          expect((await fleet.fetch(workspaceRequest("node server.js"))).status).toBe(202);
+          await fleet.alarm();
+          expect(unexpected).toEqual([]);
+          expect(launchedTypes).toEqual(
+            launchStatus === 200 ? ["t3a.small"] : ["t3a.small", "t3.small"],
+          );
+          expect(actions).not.toContain("TerminateInstances");
+          expect(classify).toHaveBeenCalledTimes(1);
+          const leases = await runtime.storage.list<LeaseRecord>({ prefix: "lease:" });
+          expect(leases.size).toBe(1);
+          const lease = [...leases.values()][0]!;
+          expect(lease).toMatchObject({
+            state: "failed",
+            cloudID: "",
+            providerScope: "aws:account:123456789012",
+            provisioningResourceMayExist: launchStatus === 200,
+            provisioningFailureRetryable: false,
+          });
+          const timestamp = expect.any(String);
+          const definiteFailure = expect.stringContaining("InvalidParameterValue");
+          expect(lease.cleanupError).toContain(
+            launchStatus === 200
+              ? "crabbox_aws_run_instances_outcome_uncertain"
+              : "InvalidParameterValue",
+          );
+          expect(lease.provisioningRequestStartedAt).toEqual(
+            launchStatus === 200 ? timestamp : undefined,
+          );
+          expect(lease.provisioningRequestSettledAt).toEqual(
+            launchStatus === 200 ? timestamp : undefined,
+          );
+          expect(lease.failureError).toEqual(launchStatus === 200 ? undefined : definiteFailure);
+        },
+      );
     },
   );
 

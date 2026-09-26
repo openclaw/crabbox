@@ -25931,14 +25931,7 @@ function mergeProvisioningFailureMetadata(
     return;
   }
   const retainResource = lease.state === "released" && lease.releaseDeletesServer === false;
-  // Interpret provider errors only against the current, fenced lease snapshot.
-  const evidence =
-    provider.provisioningFailureEvidence?.({
-      lease,
-      config,
-      error,
-      message,
-    }) ?? {};
+  const evidence = provider.provisioningFailureEvidence?.({ lease, config, error, message }) ?? {};
   // Cancellation cannot prove that an already-started provider call allocated nothing.
   const canceledAfterDispatch =
     error instanceof CreateAttemptCanceledError && Boolean(lease.provisioningRequestStartedAt);
@@ -26951,7 +26944,7 @@ interface ProviderProvisioningFailureEvidence {
 }
 
 interface CloudProvider {
-  // Pure, synchronous interpretation; core retains all state and cleanup custody writes.
+  // No I/O or state mutation.
   provisioningFailureEvidence?(
     context: ProviderProvisioningFailureContext,
   ): ProviderProvisioningFailureEvidence;
