@@ -38,14 +38,19 @@ type proxmoxClient interface {
 }
 
 func NewLeaseBackend(spec core.ProviderSpec, cfg core.Config, rt core.Runtime) core.Backend {
+	cfg = withProxmoxGuestAccess(cfg)
 	cfg.Provider = "proxmox"
+	return &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true}}
+}
+
+func withProxmoxGuestAccess(cfg core.Config) core.Config {
 	if cfg.Proxmox.User != "" {
 		cfg.SSHUser = cfg.Proxmox.User
 	}
 	if cfg.Proxmox.WorkRoot != "" {
 		cfg.WorkRoot = cfg.Proxmox.WorkRoot
 	}
-	return &leaseBackend{DirectSSHBackend: shared.DirectSSHBackend{SpecValue: spec, Cfg: cfg, RT: rt, StoredLeaseKeys: true}}
+	return cfg
 }
 
 func (b *leaseBackend) SupportsRequestedLeaseID() bool { return true }

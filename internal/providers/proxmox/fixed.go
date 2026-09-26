@@ -466,6 +466,30 @@ func validateFixedProxmoxTerminalClaim(claim core.LeaseClaim) error {
 	return nil
 }
 
+// Controller and direct-claim scopes differ; validate both before retaining a receipt.
+func (b *leaseBackend) ValidateConfirmedAbsentTerminalReceipt(claim core.LeaseClaim, req core.ConfirmedAbsentLocalCleanupRequest) error {
+	expected := req.ExpectedProviderIdentity
+	controllerScope, err := (Provider{}).ControllerProviderScope(b.Cfg)
+	if err != nil {
+		return err
+	}
+	claimScope := strings.TrimSpace(core.ProviderClaimScope("proxmox", b.Cfg))
+	if expected.LeaseID == "" || expected.AttemptLeaseID == "" || expected.Slug == "" || expected.ResourceID == "" ||
+		req.ProviderScope != controllerScope || claimScope == "" || claim.ProviderScope != claimScope {
+		return core.Exit(4, "Proxmox terminal receipt requires complete matching identity and scope")
+	}
+	if err := core.ValidateProviderIdentityExpectation(expected); err != nil {
+		return err
+	}
+	if err := fixedProxmoxLeaseKind.ValidateTerminalClaim(claim, core.LeaseClaim{}, expected.LeaseID, validateFixedProxmoxTerminalClaim); err != nil {
+		return err
+	}
+	if claim.LeaseID != expected.AttemptLeaseID || claim.Slug != expected.Slug || claim.CloudID != expected.ResourceID {
+		return core.Exit(4, "Proxmox terminal receipt identity changed")
+	}
+	return nil
+}
+
 func (b *leaseBackend) RetainLeaseClaimAfterRelease(lease core.LeaseTarget) bool {
 	retained, err := b.retainLeaseClaimAfterRelease(lease, core.LeaseClaim{})
 	return retained || err != nil

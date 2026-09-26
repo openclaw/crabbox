@@ -1245,7 +1245,9 @@ type ConfirmedAbsentLocalStateCleaner interface {
 // that must survive confirmed-absence cleanup. Validation is local and read-only:
 // it must reject a missing fixed receipt and check terminal shape, configured
 // scope and every expected identity,
-// without provider calls or claim mutations. Core holds the claim fence across
+// without provider calls or claim mutations. The request carries the controller
+// scope; the retainer owns its comparison with the receipt's claim scope, which
+// a provider may derive differently. Core holds the claim fence across
 // coordinator deregistration and revalidates the unchanged receipt afterward.
 type ConfirmedAbsentTerminalReceiptRetainer interface {
 	Backend
@@ -1925,7 +1927,7 @@ func validateControllerProviderScope(cfg Config) error {
 		return err
 	}
 	if actual != expected {
-		return Exit(2, "provider=%s controller routing scope changed; refusing lifecycle operation", provider)
+		return Exit(2, "provider=%s controller routing scope changed; refusing lifecycle operation; restore the original configuration and drain existing workspaces before changing it", provider)
 	}
 	return nil
 }

@@ -5026,7 +5026,7 @@ func (a App) stop(ctx context.Context, args []string) error {
 			return err
 		}
 		if actualScope != *expectedProviderScope {
-			return Exit(4, "provider configuration scope changed before lifecycle operation")
+			return Exit(4, "provider configuration scope changed before lifecycle operation; restore the original configuration and drain existing workspaces before changing it")
 		}
 	}
 	if *confirmedAbsentLocalCleanup {
@@ -5255,7 +5255,9 @@ func confirmedAbsentLocalStateSnapshot(ctx context.Context, backend Backend, exp
 			}
 			retainTerminal = true
 		}
-		if claim.ProviderScope != providerScope {
+		// A retained receipt's scope was checked by its provider, whose claim
+		// scope need not equal the controller scope.
+		if !retainTerminal && claim.ProviderScope != providerScope {
 			return confirmedAbsentLocalState{}, Exit(4, "lease claim provider scope changed before confirmed-absence cleanup")
 		}
 		for _, identity := range []string{expected.LeaseID, expected.AttemptLeaseID} {
