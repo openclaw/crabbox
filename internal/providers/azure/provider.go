@@ -53,7 +53,7 @@ func (Provider) Spec() core.ProviderSpec {
 func (Provider) RegisterFlags(fs *flag.FlagSet, defaults core.Config) any {
 	return flagValues{
 		Backend:     fs.String("azure-backend", defaults.Azure.Backend, "Azure backend: vm or dynamic-sessions"),
-		OSDisk:      fs.String("azure-os-disk", defaults.Azure.OSDisk, "Azure OS disk mode: managed, ephemeral, ephemeral-preview, or auto"),
+		OSDisk:      fs.String("azure-os-disk", defaults.Azure.OSDisk, "Azure OS disk mode: managed, ephemeral (full caching), or auto"),
 		SnapshotSKU: fs.String("azure-snapshot-sku", defaults.Azure.SnapshotSKU, "Azure checkpoint snapshot storage SKU"),
 		OSDiskSKU:   fs.String("azure-os-disk-sku", defaults.Azure.OSDiskSKU, "Azure managed OS disk storage SKU"),
 	}

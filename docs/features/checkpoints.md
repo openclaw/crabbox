@@ -185,7 +185,7 @@ for new Azure leases. Crabbox refuses native checkpoint creation from Azure
 ephemeral-OS-disk leases (Azure reports success but does not capture live disk
 state). Azure disk-snapshot forks boot from a specialized OS disk and may inherit
 the source machine identity — treat them as exact clones. Use
-`--azure-os-disk ephemeral` or `--azure-os-disk ephemeral-preview` only for
+`--azure-os-disk ephemeral` only for
 stateless leases that do not need native checkpoints.
 
 **Parallels notes.** A forkable Parallels snapshot must be taken from a

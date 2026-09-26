@@ -114,7 +114,7 @@ export interface LeaseConfig {
   exposedPorts: string[];
 }
 
-export type AzureOSDiskMode = "managed" | "ephemeral" | "ephemeral-preview";
+export type AzureOSDiskMode = "managed" | "ephemeral";
 export type Architecture = "amd64" | "arm64";
 
 export interface LeaseConfigDefaults {
@@ -580,9 +580,9 @@ export function normalizeAzureOSDiskMode(value: string | undefined): AzureOSDisk
     case "ephemeral":
       return "ephemeral";
     case "ephemeral-preview":
-      return "ephemeral-preview";
+      throw new Error("azureOSDisk=ephemeral-preview has been removed; use ephemeral");
     default:
-      throw new Error("azureOSDisk must be auto, managed, ephemeral, or ephemeral-preview");
+      throw new Error("azureOSDisk must be auto, managed, or ephemeral");
   }
 }
 
@@ -923,7 +923,7 @@ export function azureVMSizeCandidatesForTargetClass(
   } else {
     candidates = providerClassLiteralCandidates(machineClass);
   }
-  if (azureOSDisk === "ephemeral-preview") {
+  if (azureOSDisk === "ephemeral") {
     return azureEphemeralFullCachingCandidates(target, candidates, architecture, windowsMode);
   }
   return candidates;
@@ -1064,9 +1064,18 @@ export function azureSupportsEphemeralOS(vmSize: string): boolean {
 }
 
 export function azureSupportsEphemeralFullCaching(vmSize: string): boolean {
-  if (!azureSupportsEphemeralOS(vmSize)) return false;
+  return azureSupportsEphemeralOS(vmSize) && azureFullCachingSeriesEligible(vmSize);
+}
+
+export function azureFullCachingSeriesEligible(vmSize: string): boolean {
   const cores = azureVMSizeVCPUCount(vmSize);
-  return cores !== undefined && cores > 4;
+  return (
+    cores !== undefined &&
+    cores >= 8 &&
+    /^standard_(?:[nlmh][a-z]*[0-9]+[^ ]*|[de][a-z]*[0-9]+[^ ]*_v[567]|f[a-z]*[0-9]+[^ ]*_v[67])$/.test(
+      vmSize.trim().toLowerCase(),
+    )
+  );
 }
 
 function azureVMSizeVCPUCount(vmSize: string): number | undefined {
