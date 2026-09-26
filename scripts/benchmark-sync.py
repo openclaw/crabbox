@@ -46,6 +46,8 @@ def generate(root, size):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"ignored build output\n" * 512)
     git(root, "init", "-q")
+    git(root, "config", "gc.auto", "0")
+    git(root, "config", "maintenance.auto", "false")
     git(root, "add", ".")
     git(root, "-c", "user.name=Sync Benchmark", "-c", "user.email=benchmark@example.com",
         "-c", "commit.gpgsign=false", "commit", "-qm", "benchmark fixture")
@@ -115,6 +117,8 @@ def main():
         with tarfile.open(fileobj=io.BytesIO(archive)) as source:
             source.extractall(root, filter="data")
         git(root, "init", "-q")
+        git(root, "config", "gc.auto", "0")
+        git(root, "config", "maintenance.auto", "false")
         git(root, "add", ".")
         git(root, "-c", "user.name=Sync Benchmark", "-c", "user.email=benchmark@example.com",
             "-c", "commit.gpgsign=false", "commit", "-qm", "benchmark fixture")
@@ -128,6 +132,8 @@ def main():
         paths = [root / name.decode() for name in git(root, "ls-files", "-z").split(b"\0")
                  if name.startswith(b"docs/") and name.endswith(b".md") and
                  (root / name.decode()).is_file() and not (root / name.decode()).is_symlink()][:100]
+    if len(paths) < args.changes:
+        parser.error(f"requested {args.changes} changes but fixture has only {len(paths)} eligible files")
     # Each requested scenario starts from exactly the committed content.
     for path in paths[:100]:
         content = git(root, "show", "HEAD:" + path.relative_to(root).as_posix())
@@ -135,7 +141,9 @@ def main():
             path.write_bytes(content)
     for path in paths[:args.changes]:
         content = path.read_bytes()
-        path.write_bytes(b"changed " + content[8:])
+        if not content:
+            parser.error(f"cannot make a same-size content edit to empty file {path.relative_to(root)}")
+        path.write_bytes(bytes([content[0] ^ 1]) + content[1:])
     if args.test_binary:
         env = dict(os.environ, CRABBOX_BENCH_REPO=str(root), GOMAXPROCS="4")
         sequence = [("B", args.test_binary)]
